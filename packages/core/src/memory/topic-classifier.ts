@@ -154,6 +154,7 @@ export async function classifyTopic(
   opts: TopicClassifierOptions,
 ): Promise<TopicClassification> {
   let usage: TokenUsage | null = null
+  let servedModel = opts.model
   try {
     const response = await collectStream(
       opts.provider.stream({
@@ -172,6 +173,7 @@ export async function classifyTopic(
     )
 
     usage = response.usage
+    servedModel = response.model || opts.model
 
     const text = response.content
       .filter((b) => b.type === 'text')
@@ -181,7 +183,7 @@ export async function classifyTopic(
     const cleaned = text.replace(/^```(?:json)?\s*|\s*```$/g, '').trim()
     // Be forgiving if the model emits a leading sentence: grab the first {...} block.
     const jsonMatch = cleaned.match(/\{[\s\S]*\}/)
-    if (!jsonMatch) return { ...FALLBACK, usage, model: opts.model }
+    if (!jsonMatch) return { ...FALLBACK, usage, model: servedModel }
 
     const parsed = JSON.parse(jsonMatch[0]) as {
       topic_label?: unknown
@@ -214,9 +216,9 @@ export async function classifyTopic(
       if (related_topics.length === 0) related_topics = undefined
     }
 
-    return { topic_label, state, confidence, related_topics, usage, model: opts.model }
+    return { topic_label, state, confidence, related_topics, usage, model: servedModel }
   } catch {
     // Call itself threw — no usage to attribute, caller records nothing.
-    return { ...FALLBACK, usage, model: usage ? opts.model : undefined }
+    return { ...FALLBACK, usage, model: usage ? servedModel : undefined }
   }
 }

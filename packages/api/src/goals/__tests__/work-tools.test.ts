@@ -24,8 +24,8 @@ const mockSetAwaiting = vi.mocked(setGoalAwaitingEventSystem)
 
 beforeEach(() => vi.clearAllMocks())
 
-const ctx = { workspaceId: 'w1', userId: 'u1' } as never
-const GOAL = { id: 'g1', outcome: 'Email the Q3 report to Acme', confirmedAt: new Date() }
+const ctx = { workspaceId: 'w1', userId: 'u1', assistantId: 'a1' } as never
+const GOAL = { id: 'g1', workspaceId: 'w1', outcome: 'Email the Q3 report to Acme', confirmedAt: new Date() }
 
 function makeTools(verify?: GoalVerifier, gatherEvidence?: GoalWorkToolsDeps['gatherEvidence']) {
   return createGoalWorkTools({
@@ -53,6 +53,8 @@ describe('[COMP:goals/work-tools] markGoalComplete (§12 agentic termination)', 
       outcome: GOAL.outcome,
       because: 'Sent the report PDF to billing@acme.com',
       userId: 'u1',
+      workspaceId: 'w1',
+      assistantId: 'a1',
     })
     expect(mockStamp).toHaveBeenCalledWith('g1', 'Sent the report PDF to billing@acme.com')
   })
@@ -71,13 +73,14 @@ describe('[COMP:goals/work-tools] markGoalComplete (§12 agentic termination)', 
     expect(mockStamp).not.toHaveBeenCalled()
   })
 
-  it('refuses to stamp when no verifier is wired (fail-safe; bails before loading)', async () => {
+  it('refuses to stamp when no verifier is wired (fail-safe)', async () => {
+    mockGet.mockResolvedValue(GOAL as never)
     const { markGoalComplete } = makeTools(undefined)
 
     const r = await markGoalComplete.execute({ goal_id: 'g1', because: 'done' }, ctx)
 
     expect(r.isError).toBe(true)
-    expect(mockGet).not.toHaveBeenCalled()
+    expect(mockGet).toHaveBeenCalledWith('g1')
     expect(mockStamp).not.toHaveBeenCalled()
   })
 
@@ -103,6 +106,8 @@ describe('[COMP:goals/work-tools] markGoalComplete (§12 agentic termination)', 
       because: 'Sent the report PDF to billing@acme.com',
       evidence: 'Host task "Email the Q3 report to Acme": status=done; due=none.',
       userId: 'u1',
+      workspaceId: 'w1',
+      assistantId: 'a1',
     })
     expect(mockStamp).toHaveBeenCalledWith('g1', 'Sent the report PDF to billing@acme.com')
   })
@@ -122,8 +127,22 @@ describe('[COMP:goals/work-tools] markGoalComplete (§12 agentic termination)', 
       because: 'did the work',
       evidence: undefined,
       userId: 'u1',
+      workspaceId: 'w1',
+      assistantId: 'a1',
     })
     expect(mockStamp).toHaveBeenCalled()
+  })
+
+  it('does not verify or stamp a goal owned by another workspace', async () => {
+    mockGet.mockResolvedValue({ ...GOAL, workspaceId: 'w2' } as never)
+    const verify: GoalVerifier = vi.fn().mockResolvedValue({ verified: true })
+    const { markGoalComplete } = makeTools(verify)
+
+    const result = await markGoalComplete.execute({ goal_id: 'g1', because: 'done' }, ctx)
+
+    expect(result.isError).toBe(true)
+    expect(verify).not.toHaveBeenCalled()
+    expect(mockStamp).not.toHaveBeenCalled()
   })
 })
 

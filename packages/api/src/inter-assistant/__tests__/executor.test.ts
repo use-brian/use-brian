@@ -1348,6 +1348,60 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
       expect(systemPrompt).toContain(PAGE_ID)
     })
 
+    it('routes and meters the anchored doc child through the callee workspace runtime', async () => {
+      asWorkspaceCallee()
+      yieldsText('edited')
+      const customProvider = { stream: vi.fn() }
+      const resolveWorkspaceCustomLlm = vi.fn().mockResolvedValue({
+        provider: customProvider,
+        selector: 'custom:doc-profile',
+        profileId: 'doc-profile',
+        modelTier: 'standard',
+        providerKeySource: 'user',
+        inputTokenLimit: 32000,
+        maxTokens: 4000,
+      })
+      const recordUsage = vi.fn().mockResolvedValue(undefined)
+      const callee = createCalleeExecutor({
+        provider: { stream: vi.fn(() => { throw new Error('platform must not run') }) } as never,
+        resolveWorkspaceCustomLlm,
+        tools: new Map(),
+        memoryStore: memoryStore() as never,
+        capabilityStore: { listActive: vi.fn().mockResolvedValue([]) } as never,
+        savedViewStore: savedViewStoreWith({ id: PAGE_ID, workspaceId: 'ws-1', clearance: 'internal' }),
+        usageStore: { recordUsage } as never,
+      })
+
+      await callee({ ...baseParams, pageAnchorId: PAGE_ID })
+
+      expect(resolveWorkspaceCustomLlm).toHaveBeenCalledWith({
+        workspaceId: 'ws-1',
+        requestedTier: 'standard',
+        allowDefault: true,
+        allowAnyDefault: true,
+      })
+      const injected = mockInjectDoc.mock.calls[0][0]
+      expect(injected).toMatchObject({
+        provider: customProvider,
+        backgroundModel: 'custom:doc-profile',
+        fallbackModel: 'custom:doc-profile',
+      })
+      await injected.onEditUsage?.({
+        model: 'custom:served-doc-model',
+        usage: { inputTokens: 11, outputTokens: 7 },
+        attempt: 'background',
+      })
+      expect(recordUsage).toHaveBeenCalledWith(expect.objectContaining({
+        workspaceId: 'ws-1',
+        sessionId: 'sess-1',
+        model: 'custom:served-doc-model',
+        modelTier: 'standard',
+        providerKeySource: 'user',
+        actualCostUsd: 0,
+        source: 'overhead:doc-edit',
+      }))
+    })
+
     it('reads the anchor inside the agent-clearance wrap (teamspace agent access)', async () => {
       // The RLS-scoped getById must observe `app.agent_clearance` context =
       // the CALLEE assistant's clearance ('internal' in the fixture), so a

@@ -74,6 +74,8 @@ function build(overrides: Partial<SynthesizeDeps> = {}) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     provider: {} as any,
     model: 'gemini-flash',
+    modelTier: 'standard',
+    providerKeySource: 'platform',
     sourceTool: toolStub('searchRecording', false),
     buildDocTools: () =>
       new Map([
@@ -207,8 +209,33 @@ describe('[COMP:api/synthesize] structural-synthesis runner', () => {
       triggerKey: 'structural_synthesis',
       sessionId: null,
       model: 'gemini-flash',
+      modelTier: 'standard',
+      providerKeySource: 'platform',
       actualCostUsd: 0.01,
     })
+  })
+
+  it('records custom synthesis at zero platform COGS and forwards endpoint limits', async () => {
+    const { deps, recordUsage } = build({
+      model: 'custom:profile-1',
+      modelTier: 'max',
+      providerKeySource: 'user',
+      inputTokenLimit: 12000,
+      maxTokens: 2000,
+    })
+
+    await synthesizeFromSource(SOURCE, BLUEPRINT, TARGET, deps)
+
+    expect(queryLoopMock).toHaveBeenCalledWith(expect.objectContaining({
+      inputTokenLimit: 12000,
+      maxTokens: 2000,
+    }))
+    expect(recordUsage).toHaveBeenCalledWith(expect.objectContaining({
+      model: 'gemini-flash',
+      modelTier: 'max',
+      providerKeySource: 'user',
+      actualCostUsd: 0,
+    }))
   })
 
   it('propagates a non-abort loop error', async () => {

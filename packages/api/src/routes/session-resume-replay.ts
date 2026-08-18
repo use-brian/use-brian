@@ -27,6 +27,7 @@
 
 import {
   queryLoop,
+  calculateCost,
   ensureToolResultPairing,
   SensitivityAccumulator,
   type LLMProvider,
@@ -34,6 +35,7 @@ import {
   type ToolContext,
   type Message,
   type AnalyticsLogger,
+  type UsageStore,
 } from '@use-brian/core'
 import {
   findSessionById,
@@ -44,12 +46,15 @@ import {
 } from '../db/sessions.js'
 import { findAssistantById } from '../db/users.js'
 import type { SessionResumeReplay, ResumeReplayParams } from './chat.js'
-import { tierForModel } from '../model-resolution.js'
+import { MODEL_MAP, chatTierBudget, tierForModel } from '../model-resolution.js'
 
 export type SessionResumeReplayDeps = {
   provider: LLMProvider
   /** Resolve the workspace default custom endpoint for the resumed user turn. */
-  resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
+  resolveWorkspaceCustomLlm: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver | null
+  resolveWorkspaceByoGeminiKey: ((workspaceId: string) => Promise<string | null>) | null
+  buildWorkspaceProvider: ((apiKey: string) => LLMProvider) | null
+  usageStore?: UsageStore
   /** Boot-time tool registry — the suspended tool is resolved from here. */
   tools: Map<string, Tool>
   /** Base L1 system prompt. The assistant's L2 is appended per-session. */
@@ -74,6 +79,33 @@ export type SessionResumeReplayDeps = {
 }
 
 type AssistantRow = NonNullable<Awaited<ReturnType<typeof findAssistantById>>>
+
+export function resolveDurableResumePolicy(
+  params: Pick<ResumeReplayParams, 'selectedTier' | 'selectedMeteredModel'>,
+  fallbackModel: string,
+): {
+  logicalModel: string
+  logicalTier: string
+  budget: { maxTurns: number; maxToolCalls: number } | null
+} {
+  if (params.selectedMeteredModel) {
+    // Explicit metered turns require their accepted tool-round profile and
+    // platform surcharge contract. That policy is intentionally not replayed
+    // from a lightweight checkpoint: fail closed rather than silently serving
+    // a Pro/default continuation without its confirmation or debit.
+    throw new Error(`Durable replay does not support explicit metered model ${params.selectedMeteredModel}.`)
+  }
+  const logicalTier = params.selectedTier ?? tierForModel(fallbackModel)
+  const logicalModel = logicalTier in MODEL_MAP ? MODEL_MAP[logicalTier]! : fallbackModel
+  return {
+    logicalModel,
+    logicalTier,
+    budget: chatTierBudget({
+      model: logicalModel,
+      researchMode: logicalTier === 'research',
+    }),
+  }
+}
 
 /** Build the `ToolContext` shared by the suspended-tool run and the queryLoop turn. */
 function buildContext(session: Session, assistant: AssistantRow): ToolContext {
@@ -227,6 +259,41 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
     if (!assistant) return 'completed'
 
     const context = buildContext(session, assistant)
+    const policy = resolveDurableResumePolicy(params, model)
+    const customLlm = assistant.workspaceId && params.selectedCustomModel && deps.resolveWorkspaceCustomLlm && !params.selectedLegacyByo
+      ? await deps.resolveWorkspaceCustomLlm({
+          workspaceId: assistant.workspaceId,
+          requestedModel: params.selectedCustomModel,
+          requestedTier: policy.logicalTier,
+        })
+      : null
+    if (params.selectedCustomModel && !customLlm) {
+      throw new Error('The custom model selected for this suspended turn is no longer available.')
+    }
+    let continuationProvider = customLlm?.provider ?? deps.provider
+    let providerKeySource: 'user' | 'platform' = customLlm ? 'user' : 'platform'
+    if (params.selectedLegacyByo) {
+      if (!assistant.workspaceId || !deps.resolveWorkspaceByoGeminiKey || !deps.buildWorkspaceProvider) {
+        throw new Error('The legacy BYO Gemini runtime for this suspended turn is unavailable.')
+      }
+      const key = await deps.resolveWorkspaceByoGeminiKey(assistant.workspaceId)
+      if (!key) throw new Error('The legacy BYO Gemini key for this suspended turn is unavailable.')
+      continuationProvider = deps.buildWorkspaceProvider(key)
+      providerKeySource = 'user'
+    }
+    const runtimeContext = customLlm
+      ? {
+          ...context,
+          workerRuntime: {
+            provider: customLlm.provider,
+            model: customLlm.selector,
+            modelTier: customLlm.modelTier,
+            providerKeySource: customLlm.providerKeySource,
+            inputTokenLimit: customLlm.inputTokenLimit,
+            maxTokens: customLlm.maxTokens,
+          },
+        }
+      : context
 
     // Phase 3 of askQuestion suspend-resume — rehydrate the worker
     // manager from `worker_runs` BEFORE the continuation turn runs.
@@ -248,7 +315,7 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
       try {
         const { respawned, notificationsReady } = await deps.workerManager.rehydrate(
           sessionId,
-          { ...context, workerManager: undefined },
+          { ...runtimeContext, workerManager: undefined },
           deps.tools,
         )
         if (respawned > 0 || notificationsReady > 0) {
@@ -297,16 +364,9 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
       ? `${deps.systemPrompt}\n\n${assistant.systemPrompt}`
       : deps.systemPrompt
 
-    const customLlm = assistant.workspaceId && deps.resolveWorkspaceCustomLlm
-      ? await deps.resolveWorkspaceCustomLlm({
-          workspaceId: assistant.workspaceId,
-          requestedTier: tierForModel(model),
-        })
-      : null
-
     for await (const event of queryLoop({
-      provider: customLlm?.provider ?? deps.provider,
-      model: customLlm?.selector ?? model,
+      provider: continuationProvider,
+      model: customLlm?.selector ?? policy.logicalModel,
       maxTokens: customLlm?.maxTokens,
       inputTokenLimit: customLlm?.inputTokenLimit,
       systemPrompt,
@@ -316,14 +376,15 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
       // pre-populated notifications + any respawned running workers.
       // Absent when worker persistence isn't wired (legacy path).
       context: deps.workerManager
-        ? { ...context, workerManager: deps.workerManager }
-        : context,
+        ? { ...runtimeContext, workerManager: deps.workerManager }
+        : runtimeContext,
       channelType: session.channelType,
       resumeContext: {
         approvalId: params.approvalId,
         suspendedToolName,
         loopStepIndex: params.loopStepIndex,
       },
+      ...(policy.budget ?? {}),
     })) {
       if (event.type === 'turn_complete') {
         await addSessionMessage({
@@ -331,6 +392,27 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
           role: 'assistant',
           content: event.response.content,
         })
+        if (deps.usageStore && event.totalUsage) {
+          const usage = event.totalUsage
+          void deps.usageStore.recordUsage({
+            userId: session.userId,
+            assistantId: assistant.id,
+            workspaceId: assistant.workspaceId ?? undefined,
+            sessionId,
+            model: event.response.model,
+            modelTier: policy.logicalTier,
+            inputTokens: usage.inputTokens,
+            outputTokens: usage.outputTokens,
+            cacheReadTokens: usage.cacheReadTokens,
+            cacheWriteTokens: usage.cacheWriteTokens,
+            actualCostUsd: providerKeySource === 'user'
+              ? 0
+              : calculateCost(event.response.model, usage),
+            source: 'included',
+            triggerKey: 'session_resume',
+            providerKeySource,
+          }).catch((err) => console.error('[session-resume] usage tracking failed:', err))
+        }
       } else if (event.type === 'error') {
         // Surface the failure so the poll worker marks the job failed
         // with a loud log rather than silently dropping the resume.

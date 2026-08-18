@@ -130,6 +130,7 @@ async function disambiguateWithLLM(
   fallbackTier: ResolveTier,
 ): Promise<ResolveResult> {
   let usage: TokenUsage | null = null
+  let servedModel = llm.model
   try {
     const response = await collectStream(
       llm.provider.stream({
@@ -141,6 +142,7 @@ async function disambiguateWithLLM(
       }),
     )
     usage = response.usage
+    servedModel = response.model || llm.model
 
     const text = response.content
       .filter((b) => b.type === 'text')
@@ -150,19 +152,19 @@ async function disambiguateWithLLM(
     const cleaned = text.replace(/^```(?:json)?\s*|\s*```$/g, '').trim()
     const jsonMatch = cleaned.match(/\{[\s\S]*\}/)
     if (!jsonMatch) {
-      return { status: 'ambiguous', tier: fallbackTier, candidates, usage, model: llm.model }
+      return { status: 'ambiguous', tier: fallbackTier, candidates, usage, model: servedModel }
     }
 
     const parsed = JSON.parse(jsonMatch[0]) as { id?: unknown }
     const id = typeof parsed.id === 'string' ? parsed.id : ''
 
     if (id === 'ambiguous' || !id) {
-      return { status: 'ambiguous', tier: fallbackTier, candidates, usage, model: llm.model }
+      return { status: 'ambiguous', tier: fallbackTier, candidates, usage, model: servedModel }
     }
 
     const picked = candidates.find((c) => c.id === id)
     if (!picked) {
-      return { status: 'ambiguous', tier: fallbackTier, candidates, usage, model: llm.model }
+      return { status: 'ambiguous', tier: fallbackTier, candidates, usage, model: servedModel }
     }
 
     return {
@@ -172,10 +174,10 @@ async function disambiguateWithLLM(
       score: 1,
       flagged: true,
       usage,
-      model: llm.model,
+      model: servedModel,
     }
   } catch {
-    return { status: 'ambiguous', tier: fallbackTier, candidates, usage: usage ?? undefined, model: llm.model }
+    return { status: 'ambiguous', tier: fallbackTier, candidates, usage: usage ?? undefined, model: servedModel }
   }
 }
 

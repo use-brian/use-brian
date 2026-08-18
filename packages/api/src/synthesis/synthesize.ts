@@ -138,9 +138,22 @@ export type SynthesisResult = {
   truncated: boolean
 }
 
+export type SynthesisLlmRuntime = {
+  provider: LLMProvider
+  model: string
+  modelTier: string
+  providerKeySource: 'user' | 'platform'
+  inputTokenLimit: number
+  maxTokens: number
+}
+
 export type SynthesizeDeps = {
   provider: LLMProvider
   model: string
+  modelTier: string
+  providerKeySource: 'user' | 'platform'
+  inputTokenLimit?: number
+  maxTokens?: number
   /** The source-retrieval tool (searchRecording), pre-bound to the source + actor. */
   sourceTool: Tool
   /**
@@ -323,14 +336,18 @@ function recordCogs(
       // loop's synthetic context sessionId is for in-process correlation only.
       sessionId: null,
       model,
+      modelTier: deps.modelTier,
       inputTokens: usage.inputTokens,
       outputTokens: usage.outputTokens,
       cacheReadTokens: usage.cacheReadTokens,
       cacheWriteTokens: usage.cacheWriteTokens,
-      actualCostUsd: deps.computeCostUsd ? deps.computeCostUsd(model, usage) : 0,
+      actualCostUsd: deps.providerKeySource === 'user'
+        ? 0
+        : deps.computeCostUsd ? deps.computeCostUsd(model, usage) : 0,
       // `overhead:*` keeps this OUT of the user credit derivation; synthesis COGS
       // folds into the recording surcharge. See structural-synthesis.md.
       source: 'overhead:synthesis',
+      providerKeySource: deps.providerKeySource,
       triggerKey: 'structural_synthesis',
       // ONLY for `recording`, where `sourceId` is genuinely an Episode id.
       // For `brain` it is a draft subject and for `research` a workflow/step
@@ -467,6 +484,8 @@ export async function synthesizeFromSource(
     for await (const event of queryLoop({
       provider: deps.provider,
       model: deps.model,
+      maxTokens: deps.maxTokens,
+      inputTokenLimit: deps.inputTokenLimit,
       systemPrompt: buildSystemPrompt(
         blueprint,
         source,
@@ -499,7 +518,7 @@ export async function synthesizeFromSource(
       } else if (event.type === 'tool_start') {
         toolCallCount += 1
       } else if (event.type === 'turn_complete') {
-        recordCogs(deps, source, event.totalUsage, event.response.model)
+        recordCogs(deps, source, event.totalUsage, event.response.model || deps.model)
       } else if (event.type === 'error') {
         throw event.error
       }

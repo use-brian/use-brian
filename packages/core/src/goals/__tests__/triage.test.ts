@@ -86,14 +86,14 @@ describe('[COMP:goals/triage-judge] parseTriageVerdict', () => {
 
 describe('[COMP:goals/triage-judge] createTaskTriageJudge', () => {
   it('returns the brief for an assistable task', async () => {
-    const judge = createTaskTriageJudge({ provider: mockProvider(PASS), model: 'mock' })
+    const judge = createTaskTriageJudge({ provider: mockProvider(PASS), model: 'mock', modelTier: 'standard', resolveLlm: null })
     const v = await judge({ title: 'Compare CRM vendors', capabilities: ['Web research'] })
     expect(v?.outcome).toContain('vendor comparison')
   })
 
   it('grounds the prompt in the task and the capability list', async () => {
     const seen = { prompts: [] as string[] }
-    const judge = createTaskTriageJudge({ provider: mockProvider(PASS, seen), model: 'mock' })
+    const judge = createTaskTriageJudge({ provider: mockProvider(PASS, seen), model: 'mock', modelTier: 'standard', resolveLlm: null })
     await judge({
       title: 'Compare CRM vendors',
       description: 'Focus on pricing for a 5-seat team',
@@ -107,23 +107,31 @@ describe('[COMP:goals/triage-judge] createTaskTriageJudge', () => {
 
   it('says so when no capabilities are connected', async () => {
     const seen = { prompts: [] as string[] }
-    const judge = createTaskTriageJudge({ provider: mockProvider(PASS, seen), model: 'mock' })
+    const judge = createTaskTriageJudge({ provider: mockProvider(PASS, seen), model: 'mock', modelTier: 'standard', resolveLlm: null })
     await judge({ title: 'T', capabilities: [] })
     expect(seen.prompts[0]).toContain('(none connected)')
   })
 
   it('fails closed (null, no throw) when the model errors', async () => {
-    const judge = createTaskTriageJudge({ provider: throwingProvider(), model: 'mock' })
+    const judge = createTaskTriageJudge({ provider: throwingProvider(), model: 'mock', modelTier: 'standard', resolveLlm: null })
     await expect(judge({ title: 'T', capabilities: [] })).resolves.toBeNull()
   })
 
   it('reports usage to the COGS sink with the acting user', async () => {
     const onUsage = vi.fn()
-    const judge = createTaskTriageJudge({ provider: mockProvider(PASS), model: 'mock', onUsage })
+    const judge = createTaskTriageJudge({ provider: mockProvider(PASS), model: 'mock', modelTier: 'standard', resolveLlm: null, onUsage })
     await judge({ title: 'T', capabilities: [], userId: 'u1' })
     // The mock stream yields no usage chunk, so the sink may not fire — this
     // asserts only that a missing usage never throws. (Boot-level metering is
     // covered by the recordGoalOverheadUsage seam it shares with clarity.)
-    expect(onUsage.mock.calls.every((c) => c[1] === 'u1')).toBe(true)
+    expect(onUsage.mock.calls.every((c) => c[1].userId === 'u1')).toBe(true)
+  })
+
+  it('uses the workspace runtime instead of a throwing platform provider', async () => {
+    const resolveLlm = vi.fn().mockResolvedValue({ provider: mockProvider(PASS), model: 'custom:model', modelTier: 'standard', providerKeySource: 'user', inputTokenLimit: 8192, maxTokens: 1024 })
+    const judge = createTaskTriageJudge({ provider: throwingProvider(), model: 'platform', modelTier: 'standard', resolveLlm })
+    const result = await judge({ title: 'Compare CRM vendors', capabilities: ['Web research'], workspaceId: 'w1' })
+    expect(resolveLlm).toHaveBeenCalledWith('w1')
+    expect(result?.outcome).toContain('vendor comparison')
   })
 })

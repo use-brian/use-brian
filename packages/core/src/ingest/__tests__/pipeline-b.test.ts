@@ -53,7 +53,7 @@ import type { PlatformEngagementMetrics } from '../types.js'
 
 // ── Mock provider (sequenced responses across multiple stream() calls) ──
 
-function sequencedProvider(responses: string[], requests?: ProviderRequest[]): LLMProvider {
+function sequencedProvider(responses: string[], requests?: ProviderRequest[], servedModel?: string): LLMProvider {
   let i = 0
   return {
     name: 'mock',
@@ -66,6 +66,7 @@ function sequencedProvider(responses: string[], requests?: ProviderRequest[]): L
       requests?.push(request)
       const text = responses[Math.min(i, responses.length - 1)] ?? ''
       i++
+      if (servedModel) yield { type: 'message_start', model: servedModel } as StreamChunk
       yield { type: 'text_delta', text } as StreamChunk
       yield {
         type: 'message_end',
@@ -92,7 +93,7 @@ function throwingProvider(): LLMProvider {
 
 // Sequenced provider that also records each request it was called with — lets a
 // test inspect the assembled extraction prompt (spotlight markers, system rule).
-function capturingProvider(responses: string[]): {
+function capturingProvider(responses: string[], servedModel?: string): {
   provider: LLMProvider
   requests: ProviderRequest[]
 } {
@@ -108,6 +109,7 @@ function capturingProvider(responses: string[]): {
       requests.push(req)
       const text = responses[Math.min(i, responses.length - 1)] ?? ''
       i++
+      if (servedModel) yield { type: 'message_start', model: servedModel } as StreamChunk
       yield { type: 'text_delta', text } as StreamChunk
       yield {
         type: 'message_end',
@@ -2138,6 +2140,30 @@ describe('[COMP:brain/pipeline-b] extraction usage attribution', () => {
     expect(requests[0]?.maxTokens).toBe(64)
   })
 
+  it('prices extraction and sensitivity from the actual serving model', async () => {
+    const usage = usageSpy()
+    const provider = sequencedProvider([
+      JSON.stringify({ summary: 'A note.', entities: [], edges: [], memories: [], tags: [] }),
+      JSON.stringify({ inferred_sensitivity: 'internal', brief_reason: 'routine' }),
+    ], undefined, 'qwen3.5-flash')
+
+    await processEpisode(baseEpisode(), 'note', makeDeps({
+      provider,
+      model: 'gemini-3.1-flash-lite',
+      classifierModel: 'gemini-3.1-flash-lite',
+      modelTier: 'standard',
+      providerKeySource: 'platform',
+      usage: usage.store,
+    }))
+
+    expect(usage.recordUsage.mock.calls.map(([row]) => row)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ model: 'qwen3.5-flash', modelTier: 'standard' }),
+        expect.objectContaining({ model: 'qwen3.5-flash', triggerKey: 'sensitivity_classifier' }),
+      ]),
+    )
+  })
+
   it('still records when the model output fails to parse — the tokens were spent', async () => {
     const usage = usageSpy()
     const provider = sequencedProvider(['this is not json'])
@@ -3065,6 +3091,33 @@ describe('[COMP:tasks/task-readiness] Pipeline B — grounded automatic task qua
     expect(assessments[11]?.objective).toBe(candidateTitle(11))
     expect(assessments.every((a) => a.classification === 'ready' && a.evidenceVerified)).toBe(true)
     expect(assessments.every((a) => typeof a.description === 'string')).toBe(true)
+  })
+
+  it('records task readiness against the actual serving model and custom limits', async () => {
+    const recordUsage = vi.fn().mockResolvedValue(undefined)
+    const { provider, requests } = capturingProvider([readinessSlice(2, 0)], 'qwen3.5-flash')
+
+    await judgeTaskReadinessBatch(
+      baseEpisode({ sourceKind: 'slack_thread' }),
+      sourceFor(2),
+      candidatesFor(2),
+      makeDeps({
+        provider,
+        model: 'gemini-3.1-flash-lite',
+        modelTier: 'standard',
+        providerKeySource: 'platform',
+        inputTokenLimit: 12000,
+        maxTokens: 2000,
+        usage: { recordUsage } as unknown as import('../../billing/cost-tracker.js').UsageStore,
+      }),
+    )
+
+    expect(requests[0]).toMatchObject({ inputTokenLimit: 12000, maxTokens: 2000 })
+    expect(recordUsage).toHaveBeenCalledWith(expect.objectContaining({
+      model: 'qwen3.5-flash',
+      modelTier: 'standard',
+      triggerKey: 'pipeline_b_task_readiness',
+    }))
   })
 
   it('confines a failed judge slice to its own candidates', async () => {

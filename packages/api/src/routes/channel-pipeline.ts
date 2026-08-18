@@ -62,7 +62,7 @@ import {
   getGroupChatContext, buildGroupChatContextPrompt, getSessionTopicLabels,
   markDowngradeNoticeSent, clearDowngradeNotice,
 } from '../db/sessions.js'
-import { resolveModel, wouldBudgetDowngradeAffectModel, chatTierBudget, BACKGROUND_MODEL, tierForModel } from '../model-resolution.js'
+import { resolveChatModelSelection, wouldBudgetDowngradeAffectModel, chatTierBudget, BACKGROUND_MODEL, backgroundModelFor } from '../model-resolution.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
 import type { SkillStore } from '../db/skill-store.js'
@@ -81,6 +81,7 @@ import { billingPartyForAssistant } from '../billing-party.js'
 import { promotePastedText, shouldPromotePaste } from '../files/paste-promotion.js'
 import type { ArtifactPromoter } from '../files/artifact-promote.js'
 import { appendInboundChatArchive, appendOutboundChatArchive, persistInboundChatArchive } from '../chat-archive/live-writer.js'
+import type { ProviderAvailability } from '@use-brian/shared/model-registry'
 
 /**
  * Per-turn memory index cap — see chat.ts for the rationale and
@@ -416,6 +417,8 @@ export type ChannelPipelineParams = {
 
   // ── Stores & services ──
   provider: LLMProvider
+  /** Live application-provider availability and preference. */
+  configuredProviders?: ProviderAvailability
   /** OSS workspace custom endpoint default for user-facing channel turns. */
   resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
   systemPrompt: string
@@ -788,11 +791,16 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
       console.warn(`[${channelType}] adaptive-research classifier failed:`, err)
     }
   }
-  const model = resolveModel(effectiveModelAlias, workspacePlan, budgetStatus)
+  const { logicalModel, logicalTier, servingModel: model } = resolveChatModelSelection(
+    effectiveModelAlias,
+    workspacePlan,
+    budgetStatus,
+    params.configuredProviders,
+  )
   const customLlmRuntime = assistant.workspaceId && params.resolveWorkspaceCustomLlm
     ? await params.resolveWorkspaceCustomLlm({
         workspaceId: assistant.workspaceId,
-        requestedTier: tierForModel(model),
+        requestedTier: logicalTier,
         allowDefault: true,
       })
     : null
@@ -832,7 +840,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   const turnProvider = customLlmRuntime?.provider ?? provider
   // Tier budget (chat-route parity) — research mode gets 100/100. Other
   // tiers inherit the queryLoop defaults via `null`.
-  const tierBudget = chatTierBudget({ model, researchMode: adaptiveResearchActive })
+  const tierBudget = chatTierBudget({ model: logicalModel, researchMode: adaptiveResearchActive })
 
   // v2 (brain_extraction_v2_enabled): per-turn regex pattern extraction
   // retired. Channel-side facts (Slack / Telegram / WhatsApp) now land
@@ -991,7 +999,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     sessionMessages: dbMessages,
     timezone: userTimezone,
     session,
-    tier: modelToCompactionTier(model),
+    tier: modelToCompactionTier(logicalModel),
     channelClass: 'messaging',
     profile: 'multi-topic',
     provider: backgroundProvider,
@@ -1871,7 +1879,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
               usageStore.recordUsage({
                 userId: billingUserId, actorUserId: userId, assistantId: assistant.id, sessionId: session.id,
                 model: event.response.model,
-                modelTier: customLlmRuntime?.modelTier ?? tierForModel(model),
+                modelTier: logicalTier,
                 inputTokens: usage.inputTokens,
                 outputTokens: usage.outputTokens,
                 cacheReadTokens: usage.cacheReadTokens,

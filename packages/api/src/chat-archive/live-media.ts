@@ -9,7 +9,12 @@
  */
 
 import type { CanonicalIngestMessageV2 } from '@use-brian/shared'
-import type { MessageStoreClient, UploadMediaInput } from './message-store-client.js'
+import type {
+  MediaUploadTarget,
+  MediaUploadTargetInput,
+  MessageStoreClient,
+  UploadMediaInput,
+} from './message-store-client.js'
 
 export type ChatArchiveMediaKind = 'image' | 'video' | 'voice' | 'file'
 
@@ -49,6 +54,16 @@ export function archiveMediaRef(
 
 export type ChatArchiveLiveMedia = {
   storeBuffer(input: Omit<UploadMediaInput, 'bytes'> & { bytes: Buffer }): Promise<StagedArchiveMedia>
+  /**
+   * Pre-sign an upload so a connector can send bytes to the store directly.
+   *
+   * The alternative is for the connector to upload elsewhere and for this
+   * process to fetch the object back and forward it, which keeps a second copy
+   * of every attachment in workspace storage — on-premise, on the operator's
+   * own disk, with nothing consuming it. Handing out a per-asset signature
+   * avoids that without the connector ever holding the archive's secret.
+   */
+  uploadTarget(input: MediaUploadTargetInput): MediaUploadTarget
 }
 
 export function createChatArchiveLiveMedia(client: MessageStoreClient): ChatArchiveLiveMedia {
@@ -66,6 +81,9 @@ export function createChatArchiveLiveMedia(client: MessageStoreClient): ChatArch
         mime: input.mime,
         sizeBytes: uploaded.size_bytes,
       }
+    },
+    uploadTarget(input) {
+      return client.mediaUploadTarget(input)
     },
   }
 }

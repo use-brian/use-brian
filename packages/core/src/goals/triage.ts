@@ -16,6 +16,7 @@
  */
 import type { LLMProvider, TokenUsage } from '../providers/types.js'
 import { collectStream } from '../providers/accumulator.js'
+import type { GoalLlmRuntime, GoalLlmUsageContext } from './clarity.js'
 
 /** A passing verdict: the drafted goal conditions. */
 export type TaskTriageBrief = {
@@ -38,6 +39,8 @@ export type TaskTriageInput = {
   capabilities: string[]
   /** Task creator, for COGS attribution only; the judgment ignores it. */
   userId?: string
+  workspaceId?: string
+  assistantId?: string
 }
 
 /** `null` = do not draft (cannot honestly help, or the judge failed). */
@@ -64,11 +67,14 @@ const clip = (s: string, max: number) => (s.length > max ? `${s.slice(0, max)}â€
 export function createTaskTriageJudge(deps: {
   provider: LLMProvider
   model: string
+  modelTier: string
   /** Optional COGS sink â€” boot records this under a goal-overhead source. */
-  onUsage?: (usage: TokenUsage, userId?: string) => void
+  onUsage?: (usage: TokenUsage, context: GoalLlmUsageContext) => void
+  resolveLlm: ((workspaceId: string) => Promise<GoalLlmRuntime | null>) | null
 }): TaskTriageJudge {
-  return async ({ title, description, capabilities, userId }) => {
+  return async ({ title, description, capabilities, userId, workspaceId, assistantId }) => {
     try {
+      const runtime = workspaceId && deps.resolveLlm ? await deps.resolveLlm(workspaceId) : null
       const lines = [
         `TASK: ${clip(title.trim(), 300)}`,
         description?.trim() ? `DETAILS: ${clip(description.trim(), 1200)}` : null,
@@ -76,15 +82,23 @@ export function createTaskTriageJudge(deps: {
         ...(capabilities.length > 0 ? capabilities.map((c) => `- ${c}`) : ['- (none connected)']),
       ].filter((l): l is string => l !== null)
       const response = await collectStream(
-        deps.provider.stream({
-          model: deps.model,
+        (runtime?.provider ?? deps.provider).stream({
+          model: runtime?.model ?? deps.model,
           systemPrompt: TRIAGE_SYSTEM_PROMPT,
           messages: [{ role: 'user', content: lines.join('\n') }],
-          maxTokens: 700,
+          maxTokens: Math.min(700, runtime?.maxTokens ?? 700),
+          inputTokenLimit: runtime?.inputTokenLimit,
           temperature: 0.1,
         }),
       )
-      if (response.usage) deps.onUsage?.(response.usage, userId)
+      if (response.usage) deps.onUsage?.(response.usage, {
+        userId,
+        workspaceId,
+        assistantId,
+        model: response.model || runtime?.model || deps.model,
+        modelTier: runtime?.modelTier ?? deps.modelTier,
+        providerKeySource: runtime?.providerKeySource ?? 'platform',
+      })
       const text = response.content.map((b) => (b.type === 'text' ? b.text : '')).join('')
       return parseTriageVerdict(text)
     } catch (err) {

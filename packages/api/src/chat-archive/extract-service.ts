@@ -25,7 +25,7 @@ import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { promisify } from 'node:util'
 import type { RecordingTranscriber } from '@use-brian/core'
-import { parseFileContent } from '@use-brian/core'
+import { detectDocumentFormat, parseFileContent } from '@use-brian/core'
 import { extractRecordingAudio, probeRecordingDuration } from '../recordings/ffmpeg.js'
 
 const execFileAsync = promisify(execFile)
@@ -33,21 +33,49 @@ const execFileAsync = promisify(execFile)
 const MAX_VIDEO_FRAMES = 120
 const MAX_MEDIA_DURATION_MS = 180 * 60 * 1000
 
-const PARSEABLE_DOCUMENT_MIMES = new Set([
-  'application/json',
-  'application/xml',
-  'application/yaml',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-])
+/**
+ * Bytes we are willing to read as plain text when nothing else identifies them.
+ *
+ * A NUL byte is the classic binary tell, and a run of C0 control characters
+ * means the same thing. Sampling the head is enough: a text file that opens
+ * with 8KB of clean text and turns binary later is not a case worth serving.
+ */
+const TEXT_SNIFF_BYTES = 8192
 
-const LEGACY_OR_UNKNOWN_MIMES = new Set([
-  'application/msword',
-  'application/vnd.ms-excel',
-  'application/vnd.ms-powerpoint',
-  'application/octet-stream',
-])
+function looksLikeText(buffer: Buffer): boolean {
+  const head = buffer.subarray(0, TEXT_SNIFF_BYTES)
+  if (head.length === 0) return false
+  let suspicious = 0
+  for (const byte of head) {
+    if (byte === 0) return false
+    // Tab, LF, CR and FF are ordinary in text; the rest of C0 is not.
+    if (byte < 0x20 && byte !== 0x09 && byte !== 0x0a && byte !== 0x0c && byte !== 0x0d) suspicious++
+  }
+  if (suspicious / head.length > 0.01) return false
+  // Reject lone surrogates / invalid sequences rather than indexing U+FFFD soup.
+  return !new TextDecoder('utf-8', { fatal: false }).decode(head).includes('\uFFFD')
+}
+
+/**
+ * Is this `parseFileContent` output a failure notice rather than the document?
+ *
+ * The parser never throws for an unreadable file; it returns a short bracketed
+ * sentence meant for a human reading a chat — "[Document: x.doc. Could not parse
+ * this document.]" or "[File: x, type: y. Content type not supported for text
+ * extraction.]". That text is non-empty, so indexing it verbatim would embed the
+ * apology and rank it against real queries: an archive full of "could not parse"
+ * segments matching every question about a document. Exactly the failure the
+ * media-stub segments had, where placeholder text displaced real content.
+ *
+ * Matched on both shape and phrase. `TestUnparseableDocument` drives the real
+ * parser rather than a stub, so rewording these notices upstream fails loudly
+ * here instead of silently filling the index again.
+ */
+function isParserFailureNotice(text: string): boolean {
+  const trimmed = text.trim()
+  if (!trimmed.startsWith('[') || !trimmed.endsWith(']') || trimmed.includes('\n')) return false
+  return /could not parse|not supported for text extraction/i.test(trimmed)
+}
 
 export type ExtractModality = 'ocr' | 'transcript' | 'document' | 'video_frames'
 
@@ -315,22 +343,66 @@ export function createExtractService(deps: ExtractServiceDeps): ExtractService {
     return texts
   }
 
+  /**
+   * Decide what a document IS before deciding whether we can read it.
+   *
+   * This used to gate on the declared MIME against a hand-written allowlist,
+   * which failed twice over: it rejected formats `parseFileContent` can already
+   * read (ODF, RTF, EPUB, the legacy Office binaries), and it treated
+   * `application/octet-stream` as proof of unreadability — when in practice it
+   * is what a provider sends whenever it cannot be bothered to classify. WeChat
+   * labels every document that way, so real `.docx` files were parked as
+   * unsupported without a parser ever seeing them.
+   *
+   * So identify by evidence, strongest first: the bytes themselves, then the
+   * filename extension, then the declared MIME (see `detectDocumentFormat`).
+   * `unsupported` is reserved for the case where all three come up empty — it
+   * is a terminal verdict in the store, excluded from the extraction claim
+   * query, so it must mean "no reader exists" and never "nobody looked".
+   */
   async function extractDocument(request: ExtractRequest): Promise<ExtractResult> {
-    if (LEGACY_OR_UNKNOWN_MIMES.has(request.mime)) return { texts: [], unsupported: true }
+    const filename = request.filename ?? ''
 
-    if (request.mime === 'application/pdf') {
-      if (!deps.distill) throw new Error('chat archive PDF distillation prerequisite missing')
-      const text = await deps.distill({ buffer: request.buffer, mime: request.mime })
-      return { texts: text.trim() ? [{ text, metadata: { modality: 'document' } }] : [] }
-    }
+    // XML and YAML are text on the wire and have no registry entry; passing
+    // them through the parser would only round-trip them.
     if (request.mime === 'application/xml' || request.mime === 'application/yaml') {
       return { texts: [{ text: request.buffer.toString('utf8'), metadata: { modality: 'document' } }] }
     }
-    if (!request.mime.startsWith('text/') && !PARSEABLE_DOCUMENT_MIMES.has(request.mime)) {
-      return { texts: [], unsupported: true }
+
+    const format = await detectDocumentFormat(request.buffer, request.mime, filename)
+
+    // PDFs go to the vision distiller rather than the text parser:
+    // `parseFileContent` deliberately hands PDFs back as base64 so callers can
+    // render scanned pages, which is not text we can index.
+    if (format === 'pdf') {
+      if (!deps.distill) throw new Error('chat archive PDF distillation prerequisite missing')
+      const text = await deps.distill({ buffer: request.buffer, mime: 'application/pdf' })
+      return { texts: text.trim() ? [{ text, metadata: { modality: 'document' } }] : [] }
     }
-    const parsed = await parseFileContent(request.buffer, request.mime, request.filename ?? '')
-    return { texts: parsed.text.trim() ? [{ text: parsed.text, metadata: { modality: 'document' } }] : [] }
+
+    // A registry hit, or a text-ish MIME, means `parseFileContent` has a lane.
+    if (format !== undefined || request.mime.startsWith('text/') || request.mime === 'application/json') {
+      const parsed = await parseFileContent(request.buffer, request.mime, filename)
+      // A reader exists but could not read this one — a corrupt file, an
+      // encrypted one, or a format the library only partly supports. Report it
+      // as unsupported rather than indexing the notice: the text is not the
+      // document, and the verdict leaves the asset re-queueable if the parser
+      // later gains the ability.
+      if (isParserFailureNotice(parsed.text)) return { texts: [], unsupported: true }
+      return { texts: parsed.text.trim() ? [{ text: parsed.text, metadata: { modality: 'document' } }] : [] }
+    }
+
+    // Nothing identified it, but it reads as text — e.g. .txt/.md/.log under a
+    // generic MIME, the same blind spot that lost the Office formats. Decode it
+    // here rather than calling `parseFileContent`, which has no lane for this
+    // and would hand back its "type not supported" placeholder: non-empty
+    // filler that would be embedded and ranked as if it were the document.
+    if (looksLikeText(request.buffer)) {
+      const text = request.buffer.toString('utf8')
+      return { texts: text.trim() ? [{ text, metadata: { modality: 'document' } }] : [] }
+    }
+
+    return { texts: [], unsupported: true }
   }
 
   return {

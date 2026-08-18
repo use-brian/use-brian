@@ -91,9 +91,10 @@ import {
   truncateMessagesFrom,
 } from '../db/sessions.js'
 import { billingPartyForAssistant } from '../billing-party.js'
-import { resolveModel, ensureServableModel, tierForModel } from '../model-resolution.js'
+import { resolveChatModelSelection } from '../model-resolution.js'
 import { checkUsageBudget, type CreditBudgetGate } from './route-helpers.js'
 import { query } from '../db/client.js'
+import type { ProviderAvailability } from '@use-brian/shared/model-registry'
 
 /** Everything the pipeline needs — a structural subset of
  *  `PublicApiRouteOptions`, so `public-api.ts` passes its options
@@ -102,7 +103,7 @@ export type PublicTurnDeps = {
   provider: LLMProvider
   /** OSS workspace custom endpoint default for the main response only. */
   resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
-  configuredProviders?: ReadonlySet<string>
+  configuredProviders?: ProviderAvailability
   tools: Map<string, Tool>
   systemPrompt: string
   memoryStore: MemoryStore
@@ -767,16 +768,16 @@ export async function executePublicTurn(
   // settable independently of the owner's own bot: `api_model_alias`
   // (migration 416). Before that these turns rode `telegram_model_alias`,
   // which meant capping a public chat link also downgraded Telegram.
-  const model = deps.configuredProviders
-    ? ensureServableModel(
-        resolveModel(assistant.apiModelAlias, workspacePlan, budgetStatus),
-        deps.configuredProviders,
-      )
-    : resolveModel(assistant.apiModelAlias, workspacePlan, budgetStatus)
+  const { logicalModel, logicalTier, servingModel: model } = resolveChatModelSelection(
+    assistant.apiModelAlias,
+    workspacePlan,
+    budgetStatus,
+    deps.configuredProviders,
+  )
   const customLlmRuntime = assistant.workspaceId && deps.resolveWorkspaceCustomLlm
     ? await deps.resolveWorkspaceCustomLlm({
         workspaceId: assistant.workspaceId,
-        requestedTier: tierForModel(model),
+        requestedTier: logicalTier,
         allowDefault: true,
       })
     : null
@@ -1182,7 +1183,7 @@ export async function executePublicTurn(
     sessionMessages: dbMessages,
     timezone: owner.timezone ?? 'UTC',
     session,
-    tier: modelToCompactionTier(model),
+    tier: modelToCompactionTier(logicalModel),
     channelClass: 'web',
     profile: 'linear',
     provider: backgroundLlmRuntime?.provider ?? deps.provider,
@@ -1400,7 +1401,7 @@ export async function executePublicTurn(
       assistantId: assistant.id,
       sessionId: session.id,
       model: responseModel,
-      modelTier: customLlmRuntime?.modelTier ?? tierForModel(model),
+      modelTier: logicalTier,
       inputTokens: totalUsage.inputTokens,
       outputTokens: totalUsage.outputTokens,
       cacheReadTokens: totalUsage.cacheReadTokens,

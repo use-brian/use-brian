@@ -67,6 +67,9 @@ export type WorkerRunsStore = {
     description: string
     prompt: string
     researchMode: boolean
+    /** Logical requested model. Together with researchMode this preserves the
+     * requested tier while allowing the routing provider to choose a new live
+     * serving alias after restart. Explicit custom selectors remain literal. */
     model: string
   }): Promise<void>
   recordTurn(params: {
@@ -868,10 +871,16 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
           researchMode = row.researchMode
           researchModel = row.researchMode ? row.model : null
           try {
+            const rowContext = context.workerRuntime
+              ? {
+                  ...context,
+                  workerRuntime: { ...context.workerRuntime, model: row.model },
+                }
+              : context
             runWorker(
               row.workerId,
               row.prompt,
-              context,
+              rowContext,
               requestTools,
               row.description,
               row.history,

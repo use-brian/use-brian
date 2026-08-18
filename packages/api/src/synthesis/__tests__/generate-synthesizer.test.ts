@@ -41,6 +41,7 @@ function deps(over: Partial<GenerateSynthesizerDeps> = {}): GenerateSynthesizerD
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     provider: {} as any,
     model: 'gemini-flash',
+    resolveLlm: null,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     savedViewStore: {} as any,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -96,6 +97,30 @@ describe('[COMP:api/generate-synthesizer] createGenerateSynthesizer', () => {
     })
     const engineDeps = synthesizeMock.mock.calls[0][3]
     expect(engineDeps.sourceTool).toEqual({ name: 'searchSource' })
+  })
+
+  it('uses the execution-time workspace runtime without touching platform provider', async () => {
+    const platformProvider = { stream: vi.fn(() => { throw new Error('platform must not run') }) }
+    const customProvider = { stream: vi.fn() }
+    const resolveLlm = vi.fn().mockResolvedValue({
+      provider: customProvider,
+      model: 'custom:profile-1',
+      modelTier: 'pro',
+      providerKeySource: 'user',
+      inputTokenLimit: 12345,
+      maxTokens: 2345,
+    })
+    await createGenerateSynthesizer(deps({ provider: platformProvider as never, resolveLlm }))(ARGS)
+    expect(resolveLlm).toHaveBeenCalledWith('ws-1')
+    expect(synthesizeMock.mock.calls[0][3]).toMatchObject({
+      provider: customProvider,
+      model: 'custom:profile-1',
+      modelTier: 'pro',
+      providerKeySource: 'user',
+      inputTokenLimit: 12345,
+      maxTokens: 2345,
+    })
+    expect(platformProvider.stream).not.toHaveBeenCalled()
   })
 
   it('excludes renderPage from the doc tools (the page-first brief must not be orphaned)', async () => {

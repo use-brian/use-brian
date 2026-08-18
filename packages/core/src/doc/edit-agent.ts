@@ -287,7 +287,7 @@ async function runAttempt(
         // like a finished summary ("the page is now completed"), and it must
         // not be allowed to mean that.
         if (isBudgetCutoff(event.terminalStop)) cutoff = event.terminalStop
-        await options.onUsage?.({ model, usage: event.totalUsage, attempt })
+        await options.onUsage?.({ model: event.response.model, usage: event.totalUsage, attempt })
       } else if (event.type === 'error') {
         lastError = event.error.message
       }

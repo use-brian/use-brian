@@ -42,12 +42,14 @@ import { createFindingsSourceTool } from './findings-source-tool.js'
 import { synthesizeFromSource, type SynthesisBlueprint } from './synthesize.js'
 import { extractionToBlueprintBody } from './blueprint-from-template.js'
 import { createRecordPageProjector } from './synthesize.js'
+import type { SynthesisLlmRuntime } from './synthesize.js'
 import type { BlueprintRecordStore } from '../db/blueprint-records-store.js'
 import type { PageTemplateStore } from '../db/page-templates-store.js'
 
 export type ResearchSynthesizerDeps = {
   provider: LLMProvider
   model: string
+  resolveLlm: ((workspaceId: string) => Promise<SynthesisLlmRuntime | null>) | null
   savedViewStore: SavedViewStore
   docPageStore: DocPageStore
   crmStore: CrmStore
@@ -194,6 +196,7 @@ export function createResearchSynthesizer(deps: ResearchSynthesizerDeps): Resear
     //    happened upstream — the executor resolved/created the anchor). The
     //    anchorKey is a stable per-(workflow page) handle for the engine's
     //    find-or-create guard; with an explicit pageId it is the converge key only.
+    const runtime = deps.resolveLlm ? await deps.resolveLlm(args.workspaceId) : null
     return synthesizeFromSource(
       {
         kind: 'research',
@@ -214,8 +217,12 @@ export function createResearchSynthesizer(deps: ResearchSynthesizerDeps): Resear
         recordSubject: args.sourceRef ?? `page ${args.pageId}`,
       },
       {
-        provider: deps.provider,
-        model: deps.model,
+        provider: runtime?.provider ?? deps.provider,
+        model: runtime?.model ?? deps.model,
+        modelTier: runtime?.modelTier ?? 'standard',
+        providerKeySource: runtime?.providerKeySource ?? 'platform',
+        inputTokenLimit: runtime?.inputTokenLimit,
+        maxTokens: runtime?.maxTokens,
         sourceTool,
         buildDocTools,
         brainWriteTools,

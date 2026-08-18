@@ -39,6 +39,7 @@ function makeApp(opts: {
       goalStore: goalStore as never,
       workspaceStore: workspaceStore as never,
       assessClarity: opts.assessClarity,
+      resolveAssistantId: async () => 'a1',
     }),
     opts.userId ? { userId: opts.userId } : undefined,
   )
@@ -185,7 +186,7 @@ describe('[COMP:api/goals-route] POST /api/goals/:id/confirm â€” clarity gate (Â
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ ok: false, needsClarification: true, question: 'What does done look like?' })
     // Assesses the goal's current outcome; never arms.
-    expect(assessClarity).toHaveBeenCalledWith({ outcome: 'grow the business', userId: 'u1' })
+    expect(assessClarity).toHaveBeenCalledWith({ outcome: 'grow the business', userId: 'u1', workspaceId: 'w1', assistantId: 'a1' })
     expect(mockUpdateGoalSystem).not.toHaveBeenCalled()
   })
 
@@ -199,7 +200,7 @@ describe('[COMP:api/goals-route] POST /api/goals/:id/confirm â€” clarity gate (Â
 
     expect(res.status).toBe(200)
     expect(res.body.ok).toBe(true)
-    expect(assessClarity).toHaveBeenCalledWith({ outcome: 'Close the Acme deal', userId: 'u1' })
+    expect(assessClarity).toHaveBeenCalledWith({ outcome: 'Close the Acme deal', userId: 'u1', workspaceId: 'w1', assistantId: 'a1' })
     expect(mockUpdateGoalSystem).toHaveBeenCalledWith('g1', { confirm: true, outcome: 'Close the Acme deal' })
   })
 
@@ -224,6 +225,8 @@ describe('[COMP:api/goals-route] POST /api/goals/:id/confirm â€” clarity gate (Â
       verification: 'At least three vendors compared.',
       approach: 'old plan',
       userId: 'u1',
+      workspaceId: 'w1',
+      assistantId: 'a1',
     })
     expect(mockUpdateGoalSystem).toHaveBeenCalledWith('g1', {
       confirm: true,

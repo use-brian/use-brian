@@ -305,7 +305,7 @@ export async function compactConversation(options: CompactionOptions): Promise<C
     tokensBefore,
     tokensAfter,
     usage: response.usage,
-    model: options.model,
+    model: response.model || options.model,
     episodes,
   }
 }
@@ -567,6 +567,7 @@ export async function extractMemoriesBeforeCompaction(
   const existingSet = new Set(options.existingMemories.map((m) => m.toLowerCase()))
   let llmFacts: ExtractedFact[] = []
   let usage: TokenUsage | null = null
+  let servedModel: string | null = null
 
   try {
     const prompt = EXTRACTION_PROMPT.replace(
@@ -587,6 +588,7 @@ export async function extractMemoriesBeforeCompaction(
         maxTokens: 1_000,
       }),
     )
+    servedModel = response.model || options.model
 
     usage = response.usage
 
@@ -625,5 +627,5 @@ export async function extractMemoriesBeforeCompaction(
     merged.push(fact)
   }
 
-  return { facts: merged, usage, model: usage ? options.model : null }
+  return { facts: merged, usage, model: usage ? servedModel ?? options.model : null }
 }

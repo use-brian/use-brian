@@ -100,6 +100,15 @@ export type UploadMediaInput = {
   bytes: Buffer
 }
 
+/** What a caller needs to hand an uploader that holds the bytes but not the secret. */
+export type MediaUploadTargetInput = Omit<UploadMediaInput, 'bytes'> & { sha256: string }
+
+/** A one-asset, pre-signed destination for an uploader outside this process. */
+export type MediaUploadTarget = {
+  url: string
+  headers: Record<string, string>
+}
+
 export type UploadedMedia = {
   asset_id: string
   sha256: string
@@ -203,6 +212,43 @@ export class MessageStoreClient {
       'X-UB-Signature': signRequest('POST', requestUri, this.secret),
     }, input.bytes)
     return (await response.json()) as UploadedMedia
+  }
+
+  /**
+   * Pre-sign a `/media` upload so a process that holds the bytes — but must
+   * never hold this secret — can send them straight to the store.
+   *
+   * Safe to hand out because the signature covers the whole request URI, and
+   * every authorization-relevant field lives there: owner, workspace, instance,
+   * provider message id, and the content digest. So it authorizes storing
+   * exactly these bytes, for exactly this owner, against exactly this message —
+   * it cannot be replayed to write different content or to write into anyone
+   * else's archive. The store re-hashes the body as it writes and rejects a
+   * mismatch, so a tampered payload cannot land at the signed address either.
+   *
+   * The digest must therefore be known before the upload starts, which is why
+   * the caller hashes first and asks for a target second.
+   */
+  mediaUploadTarget(input: MediaUploadTargetInput): MediaUploadTarget {
+    const params = new URLSearchParams({
+      workspace_id: input.workspaceId,
+      instance_id: input.instanceId,
+      owner_user_id: input.ownerUserId,
+      source: input.source,
+      provider_message_id: input.providerMessageId,
+      kind: input.kind,
+      filename: input.filename,
+      mime: input.mime,
+      sha256: input.sha256.toLowerCase(),
+    })
+    const requestUri = `/media?${params.toString()}`
+    return {
+      url: `${this.baseUrl}${requestUri}`,
+      headers: {
+        'Content-Type': input.mime || 'application/octet-stream',
+        'X-UB-Signature': signRequest('POST', requestUri, this.secret),
+      },
+    }
   }
 
   /**

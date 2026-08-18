@@ -52,7 +52,7 @@ export type RoutingProviderOptions = {
   /**
    * Ports for `wrapDocumentAdaptation`. Wired here rather than at each call
    * site because this is the only place that knows the CONCRETE model — and
-   * therefore its `capabilities.nativePdf` — for both the primary and its
+   * therefore its media capabilities — for both the primary and its
    * fallback. Omitted ⇒ non-native providers receive an honest "no
    * distillation backend" note instead of a malformed PDF part.
    */
@@ -103,7 +103,7 @@ export function createRoutingProvider(
   }
 
   /**
-   * Applied per CONCRETE row, not per provider key: `nativePdf` is a model
+   * Applied per CONCRETE row, not per provider key: media support is a model
    * capability, and the primary and its fallback can differ. Wrapping inside
    * `withFallback` (rather than around it) is what makes an Anthropic
    * fallback firing mid-PDF-turn receive the distillate instead of dropping
@@ -113,6 +113,7 @@ export function createRoutingProvider(
   function withDocumentAdaptation(row: ModelRegistryRow, base: LLMProvider): LLMProvider {
     return wrapDocumentAdaptation(base, {
       nativePdf: row.capabilities.nativePdf,
+      vision: row.capabilities.vision,
       ...(options?.documentAdaptation?.distill ? { distill: options.documentAdaptation.distill } : {}),
       ...(options?.documentAdaptation?.cache ? { cache: options.documentAdaptation.cache } : {}),
     })
