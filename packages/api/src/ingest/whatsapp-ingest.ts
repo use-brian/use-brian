@@ -143,6 +143,14 @@ export type WhatsappIngestorDeps = {
   provider: LLMProvider
   /** Extraction model id — Standard tier per model-routing.md. */
   model: string
+  resolveLlm?: (workspaceId: string) => Promise<{
+    provider: LLMProvider
+    model: string
+    modelTier?: string
+    providerKeySource?: 'user' | 'platform'
+    inputTokenLimit: number
+    maxTokens: number
+  } | null>
   crm: CrmStore
   entities: EntityStore
   entityLinks: EntityLinksStore
@@ -435,16 +443,21 @@ export function createWhatsappIngestor(
       createdByAssistantId: episode.createdByAssistantId,
     }
 
+    const runtime = await deps.resolveLlm?.(ctx.workspaceId)
     await runExtraction(pipelineEpisode, content, {
-      provider: deps.provider,
-      model: deps.model,
+      provider: runtime?.provider ?? deps.provider,
+      model: runtime?.model ?? deps.model,
+      modelTier: runtime?.modelTier,
+      providerKeySource: runtime?.providerKeySource,
+      inputTokenLimit: runtime?.inputTokenLimit,
+      maxTokens: runtime?.maxTokens,
       crm: deps.crm,
       entities: deps.entities,
       entityLinks: deps.entityLinks,
       memories: deps.memories,
       tasks: deps.tasks,
       episodes: deps.episodes,
-      classifierModel: deps.classifierModel,
+      classifierModel: runtime?.model ?? deps.classifierModel,
       analytics: deps.analytics,
       isUserBlockedForAssistant: deps.isUserBlockedForAssistant,
       usage: deps.usageStore,

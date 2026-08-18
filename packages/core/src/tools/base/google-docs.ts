@@ -8,6 +8,7 @@
 
 import { z } from 'zod'
 import { buildTool, type Tool } from '../types.js'
+import { googleFailure } from './_google-error.js'
 import type { AuthorizedFile } from './google-drive.js'
 
 export type GoogleDocsApi = {
@@ -40,7 +41,7 @@ export function createGoogleDocsTools(api: GoogleDocsApi, authorizedFiles: Autho
         const data = await api.getContent(input.documentId)
         return { data }
       } catch (err) {
-        return { data: `Docs error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return googleFailure(err, { tool: 'googleDocsGetContent', product: 'Docs', target: `document \`${input.documentId}\``, discoveryTool: 'googleDriveListFiles' })
       }
     },
   })
@@ -69,7 +70,7 @@ export function createGoogleDocsTools(api: GoogleDocsApi, authorizedFiles: Autho
         const data = await api.appendText(input.documentId, input.text)
         return { data: data ?? 'Text appended successfully.' }
       } catch (err) {
-        return { data: `Docs error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return googleFailure(err, { tool: 'googleDocsAppendText', product: 'Docs', target: `document \`${input.documentId}\``, discoveryTool: 'googleDriveListFiles' })
       }
     },
   })
@@ -99,7 +100,7 @@ export function createGoogleDocsTools(api: GoogleDocsApi, authorizedFiles: Autho
         const data = await api.replaceText(input.documentId, input.findText, input.replaceText)
         return { data }
       } catch (err) {
-        return { data: `Docs error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return googleFailure(err, { tool: 'googleDocsReplaceText', product: 'Docs', target: `document \`${input.documentId}\``, discoveryTool: 'googleDriveListFiles' })
       }
     },
   })
@@ -129,7 +130,7 @@ export function createGoogleDocsTools(api: GoogleDocsApi, authorizedFiles: Autho
         const data = await api.create(input.title)
         return { data }
       } catch (err) {
-        return { data: `Docs error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return googleFailure(err, { tool: 'googleDocsCreate', product: 'Docs' })
       }
     },
   })

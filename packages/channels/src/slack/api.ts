@@ -1,6 +1,70 @@
 /**
  * Lightweight Slack Web API client using fetch.
+ *
+ * Every non-`ok` response is thrown as a `SlackApiError` (see ./errors.ts)
+ * that keeps Slack's error code, its `response_metadata.messages` validator
+ * detail, the `missing_scope` needed/provided pair, and the rate-limit
+ * `Retry-After` — so a tool catching it can render a diagnosis instead of the
+ * bare code.
  */
+
+import { SlackApiError, type SlackErrorTarget } from './errors.js'
+
+type SlackFailureBody = {
+  ok: boolean
+  error?: string
+  needed?: string
+  provided?: string
+  response_metadata?: { messages?: unknown }
+}
+
+/** Pick the call arguments worth echoing back in a failure message. */
+function targetOf(params?: Record<string, unknown>): SlackErrorTarget {
+  const target: SlackErrorTarget = {}
+  const channel = params?.channel ?? params?.channel_id
+  if (typeof channel === 'string') target.channel = channel
+  if (typeof params?.user === 'string') target.user = params.user
+  const ts = params?.ts ?? params?.thread_ts ?? params?.timestamp
+  if (typeof ts === 'string') target.ts = ts
+  return target
+}
+
+/**
+ * Parse a Slack Web API response and throw a structured `SlackApiError` on
+ * failure. Slack signals failure with `{ ok: false, error }` at HTTP 200; a
+ * non-2xx status (429 rate limit, 5xx) may carry the same JSON body or none.
+ */
+async function readSlackResponse<T>(
+  method: string,
+  res: Response,
+  params?: Record<string, unknown>,
+): Promise<T> {
+  let data: (SlackFailureBody & T) | undefined
+  try {
+    data = await res.json() as SlackFailureBody & T
+  } catch {
+    data = undefined
+  }
+  if (data?.ok) return data
+  // Defensive reads: test doubles (and some fetch polyfills) hand back a
+  // partial Response without `headers` / `ok` / `status`.
+  const httpFailed = typeof res.status === 'number' && (res.status < 200 || res.status >= 300)
+  const retryAfterHeader = typeof res.headers?.get === 'function' ? res.headers.get('retry-after') : null
+  const retryAfterSec = retryAfterHeader && /^\d+$/.test(retryAfterHeader)
+    ? Number(retryAfterHeader)
+    : undefined
+  const messages = data?.response_metadata?.messages
+  throw new SlackApiError({
+    method,
+    code: data?.error ?? (httpFailed ? `http_${res.status}` : 'unknown_error'),
+    detail: Array.isArray(messages) ? messages.filter((m): m is string => typeof m === 'string') : undefined,
+    needed: typeof data?.needed === 'string' ? data.needed : undefined,
+    provided: typeof data?.provided === 'string' ? data.provided : undefined,
+    retryAfterSec,
+    httpStatus: httpFailed ? res.status : undefined,
+    target: targetOf(params),
+  })
+}
 
 export type SlackOutboundAudit = {
   kind: 'post_message' | 'update_message'
@@ -48,34 +112,46 @@ export function createSlackApi(options: SlackApiOptions) {
       },
       body: params ? JSON.stringify(params) : undefined,
     })
-
-    const data = await res.json() as { ok: boolean; error?: string } & T
-    if (!data.ok) {
-      throw new Error(`Slack API ${method}: ${data.error ?? 'unknown error'}`)
-    }
-    return data
+    return readSlackResponse<T>(method, res, params)
   }
 
   /**
-   * Form-encoded variant — `files.getUploadURLExternal` is one of the Slack
-   * methods that rejects a JSON body (`invalid_arguments`); it requires
-   * `application/x-www-form-urlencoded`.
+   * Form-encoded variant. Only SOME Slack Web API methods accept a JSON
+   * body (the docs mark them "Accepts: application/json" — mostly the
+   * chat.* write family); every method accepts
+   * `application/x-www-form-urlencoded`. A JSON body sent to a form-only
+   * method is silently IGNORED, which fails in two shapes:
+   *
+   *  - a required argument goes missing → `invalid_arguments` on every
+   *    call, no matter how correct the value was (prod 2026-08-17:
+   *    `conversations.info` with a valid `C…` id failed 100% of the time,
+   *    blinding the workflow delivery-target verifier for days), and
+   *  - an optional argument silently reverts to its default → the call
+   *    "succeeds" wrong (`conversations.list` dropped
+   *    `types=public_channel,private_channel`, so private channels never
+   *    appeared and the bot was asked for invites to channels it was
+   *    already a member of).
+   *
+   * Rule: GET-family read methods (`conversations.info` / `.list` /
+   * `.history`, `users.list`) and `files.getUploadURLExternal` go through
+   * here; JSON `call` is only for methods proven to accept it.
+   * `undefined`/`null` params are dropped; the rest are stringified.
    */
-  async function callForm<T>(method: string, params: Record<string, string>): Promise<T> {
+  async function callForm<T>(method: string, params: Record<string, unknown>): Promise<T> {
+    const form = new URLSearchParams()
+    for (const [key, value] of Object.entries(params)) {
+      if (value === undefined || value === null) continue
+      form.set(key, String(value))
+    }
     const res = await fetch(`${base}/${method}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
         Authorization: `Bearer ${options.botToken}`,
       },
-      body: new URLSearchParams(params).toString(),
+      body: form.toString(),
     })
-
-    const data = await res.json() as { ok: boolean; error?: string } & T
-    if (!data.ok) {
-      throw new Error(`Slack API ${method}: ${data.error ?? 'unknown error'}`)
-    }
-    return data
+    return readSlackResponse<T>(method, res, params)
   }
 
   async function safeAudit(event: SlackOutboundAudit): Promise<void> {
@@ -187,7 +263,9 @@ export function createSlackApi(options: SlackApiOptions) {
      * scope beyond what a posting bot already holds.
      */
     conversationsInfo: (channel: string) =>
-      call<{ channel: { id: string; name?: string; is_archived?: boolean; is_member?: boolean } }>(
+      // Form-encoded: `conversations.info` ignores a JSON body, which loses
+      // the required `channel` arg → unconditional `invalid_arguments`.
+      callForm<{ channel: { id: string; name?: string; is_archived?: boolean; is_member?: boolean } }>(
         'conversations.info',
         { channel },
       ),
@@ -211,7 +289,10 @@ export function createSlackApi(options: SlackApiOptions) {
       const channels: Array<{ id: string; name: string; isPrivate: boolean; isMember: boolean; isArchived: boolean }> = []
       let cursor: string | undefined
       for (let page = 0; page < 10; page++) {
-        const res = await call<{
+        // Form-encoded: with a JSON body Slack silently dropped every one of
+        // these args — `types` fell back to public_channel only (private
+        // channels invisible), and `cursor` was ignored.
+        const res = await callForm<{
           channels?: Array<{ id: string; name?: string; is_private?: boolean; is_member?: boolean; is_archived?: boolean }>
           response_metadata?: { next_cursor?: string }
         }>('conversations.list', {
@@ -254,7 +335,9 @@ export function createSlackApi(options: SlackApiOptions) {
       const members: Array<{ id: string; handle: string; displayName: string; realName: string }> = []
       let cursor: string | undefined
       for (let page = 0; page < 10; page++) {
-        const res = await call<{
+        // Form-encoded: `users.list` is GET-family — a JSON body loses
+        // `limit`/`cursor` (pagination silently pinned to the first page).
+        const res = await callForm<{
           members?: Array<{
             id: string
             name?: string
@@ -279,9 +362,10 @@ export function createSlackApi(options: SlackApiOptions) {
       return { members }
     },
 
-    /** Fetch recent messages from a channel. Requires channels:history scope. */
+    /** Fetch recent messages from a channel. Requires channels:history scope.
+     *  Form-encoded: GET-family — a JSON body loses the required `channel`. */
     conversationsHistory: (channel: string, opts?: { limit?: number; latest?: string }) =>
-      call<{ messages: Array<{ type: string; user?: string; bot_id?: string; text?: string; ts: string; subtype?: string }> }>(
+      callForm<{ messages: Array<{ type: string; user?: string; bot_id?: string; text?: string; ts: string; subtype?: string }> }>(
         'conversations.history',
         { channel, limit: opts?.limit ?? 20, latest: opts?.latest },
       ),
@@ -307,7 +391,13 @@ export function createSlackApi(options: SlackApiOptions) {
         body: data,
       })
       if (!res.ok) {
-        throw new Error(`Slack file upload: HTTP ${res.status}`)
+        // Structured like every other Slack failure so describeSlackError's
+        // `http_*` branch renders it (transient upload-host error, retry once).
+        throw new SlackApiError({
+          method: 'files.uploadToExternalURL',
+          code: `http_${res.status}`,
+          httpStatus: res.status,
+        })
       }
     },
 

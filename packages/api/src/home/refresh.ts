@@ -62,6 +62,7 @@ export async function runHomeRefresh(params: {
   /** The workspace primary assistant id (attribution), or null. */
   assistantId: string | null
   provider: Provider
+  model?: string
   homeDockStore: HomeDockStore
   signals: HomeSignals
 }): Promise<void> {
@@ -71,7 +72,7 @@ export async function runHomeRefresh(params: {
   try {
     for await (const _event of queryLoop({
       provider: params.provider,
-      model: 'gemini-flash',
+      model: params.model ?? 'gemini-flash',
       systemPrompt: SYSTEM_PROMPT,
       messages: [{ role: 'user', content: buildUserMessage(params.signals) }],
       tools: new Map([['setHomeDock', setHomeDock]]),

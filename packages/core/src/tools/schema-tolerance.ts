@@ -173,3 +173,46 @@ export function tolerantObject<T extends z.ZodTypeAny>(
     return v
   }, schema)
 }
+
+// ── tolerantIsoTimestamp ─────────────────────────────────────────────────────
+
+const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/
+
+/**
+ * The two shapes a point-in-time param accepts, named in every rejection so
+ * the model can fix the field instead of guessing at a second wrong format.
+ */
+const ISO_TIMESTAMP_SHAPES =
+  'pass either a bare date "YYYY-MM-DD" (read as midnight UTC) or a full ISO 8601 timestamp WITH a zone, e.g. "2026-08-17T09:30:00Z" or "2026-08-17T09:30:00+08:00"'
+
+/**
+ * Accepts a full ISO 8601 timestamp (`Z` or a numeric offset) unchanged, OR a
+ * bare `YYYY-MM-DD` date, which is widened to `YYYY-MM-DDT00:00:00Z`.
+ *
+ * Bi-temporal `as_of` params are the case: a model asked "what did we know on
+ * the 14th" naturally emits `as_of: "2026-08-14"`, and a strict
+ * `z.string().datetime({ offset: true })` rejected it with zod's bare
+ * "Invalid datetime" — which names neither the accepted shape nor the fix, so
+ * the retry is a guess. Widening a date to midnight UTC is the reading the
+ * user meant; a zone-less *datetime* (`2026-08-14T09:30:00`) is NOT widened,
+ * because inventing a zone would silently shift the answer by up to a day.
+ *
+ * Anything else fails with a message naming both accepted shapes.
+ */
+export function tolerantIsoTimestamp(): z.ZodType<string, z.ZodTypeDef, string> {
+  const full = z.string().datetime({ offset: true })
+  return z
+    .string({ invalid_type_error: `must be a timestamp string — ${ISO_TIMESTAMP_SHAPES}` })
+    .transform((raw, ctx) => {
+      const trimmed = raw.trim()
+      const widened = DATE_ONLY_RE.test(trimmed) ? `${trimmed}T00:00:00Z` : trimmed
+      if (!full.safeParse(widened).success) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `"${raw}" is not a timestamp this tool can read — ${ISO_TIMESTAMP_SHAPES}. Fix this field or omit it (omitting means "now"); the same value will fail again.`,
+        })
+        return z.NEVER
+      }
+      return widened
+    })
+}

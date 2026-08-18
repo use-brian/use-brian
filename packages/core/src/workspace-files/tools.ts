@@ -24,6 +24,8 @@ import type { CachedFile } from '../files/types.js'
 import { promoteCachedFile } from './promote.js'
 import type { AccessContext } from '../security/access-context.js'
 import { createSendFileTool } from './send-file.js'
+import { createRenderPdfTool, type RenderPdfDocPageReader } from './render-pdf.js'
+import type { PdfRenderer } from '../doc/convert/to-pdf.js'
 import {
   ctxFor,
   errorMessage,
@@ -36,10 +38,11 @@ import {
 } from './tool-helpers.js'
 
 /**
- * Nine chat tools for the workspace filesystem primitive
+ * Ten chat tools for the workspace filesystem primitive
  * (company-brain §10, Q3 Phase A): fileWrite, fileAppend, fileRead,
  * fileSearch, fileSetMeta, fileDelete, saveFileToBrain, saveFileBytes,
- * plus the outbound sendFile (built in `send-file.ts`). See
+ * plus the outbound sendFile (built in `send-file.ts`) and the PDF
+ * producer renderPdf (built in `render-pdf.ts`). See
  * docs/architecture/features/files.md.
  *
  * `saveFileBytes` is the byte-preserving sibling of `fileWrite`: the caller
@@ -103,6 +106,14 @@ export type FileToolOptions = {
    * "Connector-style governance".
    */
   resolvePolicy?: ResolveFileToolPolicy
+  /**
+   * Doc page reader for `renderPdf({ pageId })` — wired at boot to the doc
+   * page store's `getVersionedPage`. Absent → the tool still renders
+   * Markdown but refuses `pageId` honestly.
+   */
+  readDocPage?: RenderPdfDocPageReader
+  /** PDF render seam for `renderPdf` (tests inject a fake; production = LibreOffice). */
+  pdfRenderer?: PdfRenderer
 }
 
 const SENSITIVITY_VALUES = [...FILE_SENSITIVITIES] as [FileSensitivity, ...FileSensitivity[]]
@@ -218,6 +229,7 @@ export function createFileTools(
   saveFileToBrain: Tool
   saveFileBytes: Tool
   sendFile: Tool
+  renderPdf: Tool
 } {
   // Per-tool policy plumbing — no-ops when boot didn't wire a resolver.
   const confirm = (toolName: string) =>
@@ -695,5 +707,17 @@ export function createFileTools(
   // file tools through one constructor.
   const sendFile = createSendFileTool(api, { resolvePolicy: opts?.resolvePolicy })
 
-  return { fileWrite, fileAppend, fileRead, fileSearch, fileSetMeta, fileDelete, saveFileToBrain, saveFileBytes, sendFile }
+  // renderPdf — Markdown / doc page → real PDF workspace file. Built in
+  // `render-pdf.ts` ([COMP:files/render-pdf]); same constructor so boot
+  // registers every file tool in one place.
+  const renderPdf = createRenderPdfTool(api, {
+    resolvePolicy: opts?.resolvePolicy,
+    readDocPage: opts?.readDocPage,
+    renderer: opts?.pdfRenderer,
+    entityLinks: opts?.entityLinks,
+    onFileCreated: (evt, ctx) =>
+      opts?.onEvent?.({ type: 'file_created', fileId: evt.fileId, path: evt.path, sizeBytes: evt.sizeBytes }, ctx),
+  })
+
+  return { fileWrite, fileAppend, fileRead, fileSearch, fileSetMeta, fileDelete, saveFileToBrain, saveFileBytes, sendFile, renderPdf }
 }

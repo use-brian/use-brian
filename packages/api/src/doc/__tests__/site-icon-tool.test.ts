@@ -80,10 +80,19 @@ describe('[COMP:api/site-icon-tool] fetchSiteIcon tool', () => {
     expect(params.mime).toBe('image/png')
   })
 
-  it('surfaces a store failure as an actionable error', async () => {
+  // Failure copy (docs/architecture/engine/tool-executor.md → "Failure copy"):
+  // a store refusal must say the icon was fetched but NOT stored, carry the
+  // files vocabulary's own diagnosis (never a bare `error.kind`), and name the
+  // emoji fallback plus the retry verdict.
+  it('reports a store failure in the files vocabulary with the emoji fallback', async () => {
     const writeBytes = vi.fn().mockResolvedValue({
       ok: false,
-      error: { kind: 'quota_exceeded' },
+      error: {
+        kind: 'quota_exceeded',
+        currentBytes: 1_000,
+        limitBytes: 1_024,
+        attemptedBytes: 512,
+      },
     })
     const tool = createFetchSiteIconTool({
       filesApi: filesApiWith(writeBytes),
@@ -93,10 +102,18 @@ describe('[COMP:api/site-icon-tool] fetchSiteIcon tool', () => {
 
     const result = await tool.execute({ url: 'example.com' }, context)
     expect(result.isError).toBe(true)
-    expect(String(result.data)).toContain('quota_exceeded')
+    const data = String(result.data)
+    // WHAT: fetched, not stored, no page touched.
+    expect(data).toMatch(/no icon token was produced and no page was changed/i)
+    // WHY: the shared workspace-files wording, not the raw kind.
+    expect(data).toMatch(/Workspace storage quota exceeded/i)
+    expect(data).toContain('1024')
+    // NEXT STEP + verdict.
+    expect(data).toContain('patchPage')
+    expect(data).toMatch(/hits the same storage failure/i)
   })
 
-  it('surfaces a fetch failure without touching the files store', async () => {
+  it('names the url, the cause, and the retry verdict on a fetch failure', async () => {
     const writeBytes = vi.fn()
     const failingFetch: BytesFetchFn = async () => {
       throw new Error('down')
@@ -110,5 +127,37 @@ describe('[COMP:api/site-icon-tool] fetchSiteIcon tool', () => {
     const result = await tool.execute({ url: 'https://example.com' }, context)
     expect(result.isError).toBe(true)
     expect(writeBytes).not.toHaveBeenCalled()
+    const data = String(result.data)
+    expect(data).toContain('https://example.com')
+    expect(data).toMatch(/no page was changed/i)
+    expect(data).toMatch(/never answered|redirected in a loop/i)
+    expect(data).toMatch(/direct image URL/i)
+  })
+
+  it('tells the model a domain with no icon can never succeed, and offers the emoji path', async () => {
+    // A site that answers 200 with something that is neither an image nor
+    // HTML carrying an icon declaration — the `no_icon_found` branch.
+    const noIconFetch: BytesFetchFn = async () => ({
+      ok: true,
+      status: 200,
+      headers: {
+        get: (k: string) => (k.toLowerCase() === 'content-type' ? 'text/plain' : null),
+      },
+      arrayBuffer: async () => new ArrayBuffer(0),
+    })
+    const writeBytes = vi.fn()
+    const tool = createFetchSiteIconTool({
+      filesApi: filesApiWith(writeBytes),
+      workspaceId: WS,
+      fetchFn: noIconFetch,
+    })
+
+    const result = await tool.execute({ url: 'example.com' }, context)
+    expect(result.isError).toBe(true)
+    expect(writeBytes).not.toHaveBeenCalled()
+    const data = String(result.data)
+    expect(data).toContain('example.com')
+    expect(data).toMatch(/keep finding nothing/i)
+    expect(data).toContain('setIcon')
   })
 })

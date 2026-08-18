@@ -5,6 +5,24 @@ import type { WorkerManager } from './worker.js'
 /**
  * Create the three worker tools backed by a WorkerManager.
  */
+/**
+ * Worker ids are per-request and in-memory: `spawn()` mints `worker_<n>` from
+ * a counter that `reset()` zeroes at the end of every request, and the map
+ * itself is cleared with it. So an id from an earlier turn does not resolve —
+ * and there is deliberately NO listing tool to re-resolve it from, because the
+ * only valid source is a `spawnWorker` result inside the SAME turn. Say that,
+ * rather than sending the model hunting for a discovery tool that does not
+ * exist (the exact loop this copy standard is closing).
+ */
+function workerNotFound(workerId: string): string {
+  return (
+    `Worker ${workerId} does not exist in this turn. ` +
+    'Worker ids are per-turn and in-memory (they are minted by spawnWorker and discarded when the request ends), so an id from an earlier turn, another session, or another server instance never resolves here. ' +
+    'There is no tool that lists workers: the only valid workerId is one spawnWorker returned to you in THIS turn. ' +
+    'If you still need the research, call spawnWorker with a self-contained prompt. Do NOT retry this exact id.'
+  )
+}
+
 export function createWorkerTools(manager: WorkerManager): {
   spawnWorker: Tool
   sendWorkerMessage: Tool
@@ -38,7 +56,7 @@ export function createWorkerTools(manager: WorkerManager): {
         const cap = manager.maxConcurrent ?? 'unbounded'
         const active = manager.activeCount
         return {
-          data: `Worker pool at capacity (${active}/${cap} running). Do not call spawnWorker again this turn — emit your remaining tool calls if any, otherwise end the turn so Phase 4b can drain completed workers. You can spawn more in the next turn after some workers finish.`,
+          data: `No worker was spawned: the pool is at capacity (${active}/${cap} running). Nothing about your prompt is wrong — there is simply no free slot. Do not call spawnWorker again this turn: emit your remaining tool calls if any, otherwise end the turn so Phase 4b can drain completed workers. Retrying this exact call in the NEXT turn, once some workers have finished, will succeed.`,
           isError: true,
         }
       }
@@ -57,10 +75,17 @@ export function createWorkerTools(manager: WorkerManager): {
     async execute(input) {
       const status = manager.getStatus(input.workerId)
       if (!status) {
-        return { data: `Worker ${input.workerId} not found`, isError: true }
+        return { data: workerNotFound(input.workerId), isError: true }
       }
       if (status !== 'completed') {
-        return { data: `Worker ${input.workerId} is ${status}, cannot send message`, isError: true }
+        return {
+          data:
+            `Worker ${input.workerId} is ${status}, so there is nothing to follow up on yet — sendWorkerMessage only reads a COMPLETED worker's result. ` +
+            (status === 'running'
+              ? 'Do NOT poll it: a finished worker delivers its result to you automatically, so end the turn and read what arrives instead of calling this again.'
+              : `A ${status} worker never produces a result — spawn a fresh worker with spawnWorker if you still need this research, and do not retry this id.`),
+          isError: true,
+        }
       }
       // For now, return the existing result — full re-query with context is a future enhancement
       const result = manager.getResult(input.workerId)
@@ -78,7 +103,14 @@ export function createWorkerTools(manager: WorkerManager): {
     async execute(input) {
       const stopped = manager.stop(input.workerId)
       if (!stopped) {
-        return { data: `Worker ${input.workerId} not running or not found`, isError: true }
+        const status = manager.getStatus(input.workerId)
+        if (!status) return { data: workerNotFound(input.workerId), isError: true }
+        return {
+          data:
+            `Worker ${input.workerId} is already ${status}, so there was nothing to stop — stopWorker only aborts a RUNNING worker. ` +
+            'Nothing changed. Do NOT retry this id; if the worker completed, its result reaches you on its own.',
+          isError: true,
+        }
       }
       return { data: `Worker ${input.workerId} stopped.` }
     },

@@ -15,6 +15,7 @@
  */
 
 import { createHmac, timingSafeEqual } from 'node:crypto'
+import { ConnectorApiError } from '@use-brian/core'
 
 export const SHOPIFY_API_VERSION = '2026-04'
 
@@ -269,7 +270,13 @@ export function createShopifyTokenManager(params: {
   return {
     async getAuth(): Promise<ShopifyAuth> {
       const current = await params.store.getTokens()
-      if (!current) throw new Error('Shopify not connected')
+      if (!current) {
+        throw new ConnectorApiError({
+          provider: 'Shopify',
+          kind: 'not_connected',
+          message: 'Shopify not connected — no store tokens are stored for this connector.',
+        })
+      }
 
       if (!isManagedShopifyTokens(current)) {
         return { accessToken: current.accessToken, shopDomain: current.shopDomain }
@@ -390,23 +397,41 @@ export async function shopifyGraphql<T = unknown>(
       body: JSON.stringify({ query, variables: variables ?? {} }),
     })
 
+    // Structured failures (core `ConnectorApiError`), rendered by the tools
+    // through `connectorError()`. Shopify answers a dead / uninstalled token
+    // with 401 OR 403, so both are `auth`; the message keeps `(status)` +
+    // `invalid or expired` for the health classifier.
     if (res.status === 401 || res.status === 403) {
       const err = await res.text()
       console.warn(`[shopify] ${auth.shopDomain} → ${res.status}: ${err.slice(0, 200)}`)
-      throw new Error(
-        `Shopify auth error (${res.status}): the access token is invalid or expired. Reconnect Shopify in Studio → Connectors.`,
-      )
+      throw new ConnectorApiError({
+        provider: 'Shopify',
+        status: res.status,
+        kind: 'auth',
+        message: 'the access token is invalid or expired (the app was uninstalled, or the token was rotated). Reconnect Shopify in Studio → Connectors.',
+      })
     }
     if (!res.ok) {
       const err = await res.text()
-      throw new Error(`Shopify API error (${res.status}): ${err.slice(0, 300)}`)
+      const retryAfter = res.headers?.get?.('retry-after')
+      throw new ConnectorApiError({
+        provider: 'Shopify',
+        status: res.status,
+        message: err.slice(0, 300),
+        retryAfterSec: retryAfter && /^\d+$/.test(retryAfter) ? Number(retryAfter) : undefined,
+      })
     }
 
     const payload = (await res.json()) as GraphqlResponse
 
     if (isThrottled(payload)) {
       if (attempt >= 2) {
-        throw new Error('Shopify API error: THROTTLED (query-cost budget exhausted; retry later)')
+        throw new ConnectorApiError({
+          provider: 'Shopify',
+          code: 'THROTTLED',
+          kind: 'rate_limit',
+          message: 'THROTTLED — the store\'s GraphQL query-cost budget is exhausted; it refills within seconds.',
+        })
       }
       await sleep(throttleBackoffMs(payload))
       continue
@@ -414,7 +439,16 @@ export async function shopifyGraphql<T = unknown>(
 
     if (payload.errors?.length) {
       const messages = payload.errors.map((e) => e.message ?? 'unknown error').join('; ')
-      throw new Error(`Shopify API error: ${messages.slice(0, 300)}`)
+      // `Access denied for X field. Required access: read_y` is a missing
+      // access scope on the installed app — a permission problem the model
+      // cannot argue past; everything else is a query the store rejected.
+      const scope = /access denied|required access|not approved to access|permission/i.test(messages)
+      throw new ConnectorApiError({
+        provider: 'Shopify',
+        kind: scope ? 'forbidden' : 'validation',
+        code: scope ? 'ACCESS_DENIED' : 'GRAPHQL_ERROR',
+        message: messages.slice(0, 300),
+      })
     }
 
     return (payload.data ?? {}) as T
@@ -439,7 +473,16 @@ function expectNoUserErrors(data: unknown, mutationKey: string, errorsKey = 'use
     const detail = userErrors
       .map((e) => `${(e.field ?? []).join('.') || 'input'}: ${e.message ?? 'invalid'}`)
       .join('; ')
-    throw new Error(`Shopify API error: ${detail.slice(0, 300)}`)
+    // Field path first: `userErrors` is Shopify's own "which argument was
+    // wrong" answer, and the write did NOT happen (the mutation returned no
+    // change) — the tool's `mutating` frame adds "nothing was changed".
+    throw new ConnectorApiError({
+      provider: 'Shopify',
+      kind: 'validation',
+      code: `${mutationKey}.${errorsKey}`,
+      field: (userErrors[0]?.field ?? []).join('.') || undefined,
+      message: detail.slice(0, 300),
+    })
   }
 }
 
@@ -1283,7 +1326,12 @@ async function uploadStagedBytes(params: {
   const res = await fetch(params.target.url, { method: 'POST', body: form })
   if (!res.ok) {
     const err = await res.text().catch(() => '')
-    throw new Error(`Shopify upload error (${res.status}): ${err.slice(0, 300) || 'the staged upload was rejected'}`)
+    throw new ConnectorApiError({
+      provider: 'Shopify',
+      status: res.status,
+      code: 'STAGED_UPLOAD_REJECTED',
+      message: `the staged upload host rejected the file bytes: ${err.slice(0, 300) || 'no detail'}`,
+    })
   }
 }
 

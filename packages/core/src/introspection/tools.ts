@@ -44,6 +44,13 @@ import type {
   IntrospectionTranscriptMessage,
 } from './types.js'
 
+/**
+ * Shared no-workspace failure for the five introspection tools — names the
+ * cause and the retry verdict instead of the bare requirement.
+ */
+const INTROSPECTION_NO_WORKSPACE =
+  'Introspection tools are workspace-scoped and this chat is not bound to a workspace, so there is no apparatus to inspect here. This is not a permission or setup failure, and retrying will not help — tell the user to run this from a workspace chat.'
+
 /** Default row cap. */
 const DEFAULT_LIMIT = 20
 /** Hard ceiling — never let a model over-fetch and blow the context budget. */
@@ -108,7 +115,7 @@ export function createIntrospectionTools(deps: IntrospectionDeps): Tool[] {
     isConcurrencySafe: true,
     async execute(input, context) {
       if (!context.workspaceId) {
-        return { data: 'Introspection tools require workspace context.', isError: true }
+        return { data: INTROSPECTION_NO_WORKSPACE, isError: true }
       }
       const limit = clampLimit(input.limit)
       // The store method is RLS-gated on the caller's userId + returns the
@@ -138,7 +145,7 @@ export function createIntrospectionTools(deps: IntrospectionDeps): Tool[] {
     isConcurrencySafe: true,
     async execute(input, context) {
       if (!context.workspaceId) {
-        return { data: 'Introspection tools require workspace context.', isError: true }
+        return { data: INTROSPECTION_NO_WORKSPACE, isError: true }
       }
       const limit = clampLimit(input.limit)
       const { jobs } = await deps.scheduledJobs.search({
@@ -169,7 +176,7 @@ export function createIntrospectionTools(deps: IntrospectionDeps): Tool[] {
     isConcurrencySafe: true,
     async execute(input, context) {
       if (!context.workspaceId) {
-        return { data: 'Introspection tools require workspace context.', isError: true }
+        return { data: INTROSPECTION_NO_WORKSPACE, isError: true }
       }
       const limit = clampLimit(input.limit)
       const runs = await deps.workerRuns.listRecentForWorkspace(context.workspaceId, limit)
@@ -205,7 +212,7 @@ export function createIntrospectionTools(deps: IntrospectionDeps): Tool[] {
     isConcurrencySafe: true,
     async execute(input, context) {
       if (!context.workspaceId) {
-        return { data: 'Introspection tools require workspace context.', isError: true }
+        return { data: INTROSPECTION_NO_WORKSPACE, isError: true }
       }
       const limit = clampLimit(input.limit)
       const sessions = await deps.sessionHistory.listSessionsForWorkspaceSystem(
@@ -251,7 +258,7 @@ export function createIntrospectionTools(deps: IntrospectionDeps): Tool[] {
     isConcurrencySafe: true,
     async execute(input, context) {
       if (!context.workspaceId) {
-        return { data: 'Introspection tools require workspace context.', isError: true }
+        return { data: INTROSPECTION_NO_WORKSPACE, isError: true }
       }
       const limit = clampTranscriptLimit(input.limit)
       const messages = await deps.sessionHistory.getSessionTranscriptForWorkspaceSystem(

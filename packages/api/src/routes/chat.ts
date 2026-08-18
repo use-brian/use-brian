@@ -4,12 +4,12 @@ import { z } from 'zod'
 import { getDefaultAssistant, getUserAssistant, getWorkspacePrimaryAssistant, getUserProfilesByIds, updateUserLastSeenTz, resolveAssistantAccess } from '../db/users.js'
 import { charterNeedsIntake, createSaveCharterTool, CHARTER_INTAKE_ADDENDUM } from '../intake/charter-intake.js'
 import { resolvePresenceTimezone } from '../auth/client-timezone.js'
-import { findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, toStampedMessages, getSessionMessages, updateSessionStatus, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels, isSharedChatSession, isMultiParticipantSession, coalesceConsecutiveUserMessages, startTurnLease, touchTurnLease, releaseTurnLease, requestTurnCancel, reclaimStaleTurn, TURN_HEARTBEAT_INTERVAL_MS, type SessionMessage } from '../db/sessions.js'
+import { findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, toStampedMessages, getSessionMessages, updateSessionStatus, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels, isSharedChatSession, isMultiParticipantSession, coalesceConsecutiveUserMessages, startTurnLease, touchTurnLease, releaseTurnLease, requestTurnCancel, reclaimStaleTurn, isTurnLeaseLive, TURN_HEARTBEAT_INTERVAL_MS, type SessionMessage } from '../db/sessions.js'
 import { query } from '../db/client.js'
 import { buildPinnedContextBlock } from '../resolve-session-pins.js'
 import { getSelfEntityId } from '../db/memories.js'
 import { getRecording, type Recording } from '../db/recordings-store.js'
-import { queryLoop, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, probePdfPageCount, estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH, filterToolsByCapabilities, modelToCompactionTier, buildWorkspaceFilesContext, buildUploadPolicyBlock, SensitivityAccumulator, CompartmentAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSupervisorSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, parsePresentedDocumentInput, buildTool, type PresentedDocumentInput, type MediaBackend } from '@use-brian/core'
+import { queryLoop, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, probePdfPageCount, estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH, filterToolsByCapabilities, modelToCompactionTier, buildWorkspaceFilesContext, buildUploadPolicyBlock, SensitivityAccumulator, CompartmentAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSupervisorSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, parsePresentedDocumentInput, latestWorkflowProposalReceipt, buildTool, type PresentedDocumentInput, type MediaBackend } from '@use-brian/core'
 import { deliverTurnInput, registerTurnInbox } from '../turn-inbox.js'
 import { insertClaimProvenance, getClaimsForLatestAssistantMessage } from '../db/claim-provenance-store.js'
 import type { SessionStateStore, SessionStateRecord, PlanStore, AmbientSurface } from '@use-brian/core'
@@ -51,7 +51,7 @@ import { recordExternalCostFromMeta } from '../billing-external.js'
 // no-op/false/null/unset defaults in chatRoutes(). See oss §12.5.
 import type { Message, LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, FileStore, ContentBlock, CacheStore, McpSettingsStore, ConfirmationDecision, ConfirmationResolver, TopicClassification, ClassifierRecentTurn, EpisodicStore, CapabilityStore, RetrievalStore, TranscribeResult, TokenUsage, WorkerResult, EngineHooks } from '@use-brian/core'
 
-import { resolveModel, ensureServableModel, backgroundLatencyBudgetMs, backgroundModelFor, isStandardTier, chatTierBudget, planNudgeCap, tierForModel } from '../model-resolution.js'
+import { resolveModel, ensureServableModel, backgroundLatencyBudgetMs, backgroundModelFor, isStandardTier, chatTierBudget, planNudgeCap, tierForModel, isExplicitMeteredModelSelection } from '../model-resolution.js'
 import { registryRow } from '@use-brian/shared/model-registry'
 import type { ConnectorStore } from '../db/connector-store.js'
 import { getToolDisplayName, stripFollowUps, stripCommentThreadReplyTag, resolveCharter, charterMission } from '@use-brian/shared'
@@ -294,6 +294,8 @@ type WebChatOptions = {
    * LLM_PROVIDER_KEY_ENCRYPTION_KEY is unconfigured — chat uses `provider`.
    */
   llmProviderSettingsStore?: import('../db/workspace-llm-provider-settings.js').WorkspaceLlmProviderSettingsStore
+  /** Lookup that also detects an encrypted legacy row when decryption is unavailable. */
+  resolveWorkspaceByoGeminiKey?: (workspaceId: string) => Promise<string | null>
   /**
    * Factory that builds a per-request LLM provider from a raw API key, applying
    * the same wrapping middleware as the platform `provider`. Supplied by the API
@@ -403,7 +405,7 @@ type WebChatOptions = {
    * deployment with no Google credential (Qwen-only) then serves chat by
    * default instead of erroring. See `ensureServableModel`.
    */
-  configuredProviders?: ReadonlySet<string>
+  configuredProviders?: import('@use-brian/shared/model-registry').ProviderAvailability
   estimateMeteredTurn?: (modelAlias: string, toolRounds: number) => { modelAlias: string; toolRounds: number; minCredits: number; maxCredits: number } | null
   checkMeteredSpendCap?: (workspaceId: string) => Promise<{ allowed: boolean; usedCredits: number; capCredits: number }>
   chargeMeteredSurcharge?: (params: { workspaceId: string; requestId: string; modelAlias: string; profileId?: string | null; toolRounds?: number | null; modelCostUsd: number; chargedByUserId?: string | null }) => Promise<{ charged: boolean; credits: number }>
@@ -625,6 +627,67 @@ type WebChatOptions = {
    * "Recall-outcome tagging".
    */
   memoryRecallEventsStore?: import('../db/memory-recall-events-store.js').MemoryRecallEventsStore
+}
+
+export async function resolveWorkspaceTurnLlm(params: {
+  workspaceId: string
+  requestedModel?: string
+  requestedTier: string
+  platformProvider: LLMProvider
+  resolveWorkspaceCustomLlm: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver | null
+  resolveLegacyByoKey: (() => Promise<string | null>) | null
+  buildLegacyByoProvider: ((apiKey: string) => LLMProvider) | null
+}): Promise<{
+  customRuntime: import('../custom-llm-runtime.js').ResolvedWorkspaceCustomLlm | null
+  provider: LLMProvider
+  providerKeySource: 'user' | 'platform'
+  usedLegacyByoKey: boolean
+}> {
+  const customRuntime = params.resolveWorkspaceCustomLlm
+    ? await params.resolveWorkspaceCustomLlm({
+        workspaceId: params.workspaceId,
+        requestedModel: params.requestedModel,
+        requestedTier: params.requestedTier,
+        allowDefault: true,
+      })
+    : null
+  if (customRuntime) {
+    return {
+      customRuntime,
+      provider: customRuntime.provider,
+      providerKeySource: 'user',
+      usedLegacyByoKey: false,
+    }
+  }
+  if (params.requestedModel) {
+    return {
+      customRuntime: null,
+      provider: params.platformProvider,
+      providerKeySource: 'platform',
+      usedLegacyByoKey: false,
+    }
+  }
+
+  // Legacy Gemini settings are consulted only when no workspace custom
+  // endpoint applies. A stale encrypted legacy row must not block a valid
+  // custom selection, while legacy decrypt failures remain fail-closed here.
+  if (params.resolveLegacyByoKey && params.buildLegacyByoProvider) {
+    const byoKey = await params.resolveLegacyByoKey()
+    if (byoKey) {
+      return {
+        customRuntime: null,
+        provider: params.buildLegacyByoProvider(byoKey),
+        providerKeySource: 'user',
+        usedLegacyByoKey: true,
+      }
+    }
+  }
+  return {
+    customRuntime: null,
+    provider: params.platformProvider,
+    providerKeySource: 'platform',
+    usedLegacyByoKey: false,
+  }
 }
 
 /**
@@ -1124,26 +1187,64 @@ export function createUpdateViewedSkillTool(args: {
       return lines
     },
     async execute(input, ctx) {
+      // Failure copy contract (docs/architecture/engine/tool-executor.md →
+      // "Failure copy"): every refusal below names the skill, why the write did
+      // not happen, where a correct rowId/revision comes from (the
+      // "Currently viewing — workspace skill" block is the ONLY source — there
+      // is no skill-listing tool on this surface), and whether a retry can work.
+      const openSkill = args.skillName ? JSON.stringify(args.skillName) : `skill ${input.skillRowId}`
+      const VIEWING_BLOCK = 'the "Currently viewing — workspace skill" block in this conversation'
       if (!ctx.workspaceId || (args.workspaceId && ctx.workspaceId !== args.workspaceId)) {
-        return { data: 'The open skill is not in this assistant workspace.', isError: true }
+        return {
+          data:
+            `${openSkill} was NOT updated: this conversation is not running in the workspace that owns the open skill, so the update was refused before it touched anything. ` +
+            'Ask the user to reopen the skill in the Brain skill editor of that workspace and repeat the change there. ' +
+            'Retrying updateViewedSkill from this conversation will be refused the same way.',
+          isError: true,
+        }
       }
       if (args.skillRowId && input.skillRowId !== args.skillRowId) {
-        return { data: 'The requested skill does not match the skill open in the editor.', isError: true }
+        return {
+          data:
+            `Nothing was saved: skillRowId ${input.skillRowId} is not the skill open in the editor (${args.skillRowId}). ` +
+            'This tool can only edit the ONE skill the user currently has open - it cannot reach any other skill, and there is no tool here that lists skills. ' +
+            `Re-issue with the exact row id from ${VIEWING_BLOCK}. If the user meant a different skill, tell them to open that one first. Do NOT retry this row id.`,
+          isError: true,
+        }
       }
       if (args.expectedRevision && input.expectedRevision !== args.expectedRevision) {
-        return { data: 'The requested revision does not match the skill open in the editor.', isError: true }
+        return {
+          data:
+            `${openSkill} was NOT updated: the expectedRevision you sent (${input.expectedRevision.slice(0, 12)}…) is not the revision of the skill open in the editor. ` +
+            'The revision is the guard that stops an approved edit from overwriting a newer version, so a mismatch is refused rather than applied. ' +
+            `Copy the revision verbatim from ${VIEWING_BLOCK} and re-issue with it. Do NOT retry this revision - it will be refused every time.`,
+          isError: true,
+        }
       }
       const current = await args.workspaceSkillStore.getByIdSystem(input.skillRowId)
       if (!current || current.workspaceId !== ctx.workspaceId || current.state === 'archived') {
-        return { data: 'The open skill is no longer available.', isError: true }
+        return {
+          data:
+            `${openSkill} was NOT updated: workspace skill ${input.skillRowId} is no longer editable - it has been deleted, archived, or moved to another workspace since the editor opened it. Nothing was saved. ` +
+            'Tell the user the skill is gone from this workspace; an archived skill has to be restored in the Brain skill editor before it can be changed. ' +
+            'Do NOT retry this row id.',
+          isError: true,
+        }
       }
       const assistantClearance = args.assistantClearance ?? ctx.assistantClearance ?? ctx.clearance ?? 'public'
       if (!isSkillOfferable(current, { assistantClearance })) {
-        return { data: 'This assistant does not have clearance to update the open skill.', isError: true }
+        return {
+          data:
+            `${JSON.stringify(current.name)} was NOT updated: the skill is classified ${current.sensitivity} and this assistant's clearance is ${assistantClearance}, so it may not write it. Nothing was saved. ` +
+            'No wording of this call gets past a clearance gate. Tell the user the skill is above this assistant\'s clearance, and that either the skill\'s sensitivity or the assistant\'s clearance has to be changed in Studio.',
+          isError: true,
+        }
       }
       if (workspaceSkillRevision(current) !== input.expectedRevision) {
         return {
-          data: 'The skill changed while this update was awaiting approval. Review the latest version and try again.',
+          data:
+            `${JSON.stringify(current.name)} was NOT updated: someone else edited the skill while this change waited for the user's approval, so the approved revision no longer matches what is saved and the write was refused rather than clobbering their edit. Nothing was saved. ` +
+            'Read the skill again, show the user what changed, and propose the update against the current text. Re-sending the same expectedRevision will keep failing.',
           isError: true,
         }
       }
@@ -1161,7 +1262,12 @@ export function createUpdateViewedSkillTool(args: {
         },
       )
       if (!updated) {
-        return { data: 'The skill changed before the approved update could be saved. Review the latest version and try again.', isError: true }
+        return {
+          data:
+            `${JSON.stringify(current.name)} was NOT updated: another editor saved the skill in the moment between the revision check and this write, so the approved change was dropped instead of being applied on top of theirs. Nothing was saved. ` +
+            'Read the skill again, confirm the user\'s change still makes sense against the new text, and propose it once more. Retrying this exact call will fail the same way.',
+          isError: true,
+        }
       }
       return { data: `Saved the approved changes to ${JSON.stringify(updated.name)}.` }
     },
@@ -1334,6 +1440,46 @@ export function turnInputAdmission(params: {
   return 'queue'
 }
 
+/**
+ * Ordinary-session guard against taking a slot a LIVE turn still holds
+ * (migration 424 lease). Pure so the invariant is testable; the route resolves
+ * `leaseLive` with `isTurnLeaseLive` only when it matters (`status='running'`
+ * and the client did not say `midTurn`).
+ *
+ *   - `proceed` — no turn is running, or the client is mid-turn (that path
+ *                 queues into the running turn), or this is a room (rooms
+ *                 claim atomically and reclaim stale leases themselves).
+ *   - `reclaim` — the row says running but the lease is stale: the holder is
+ *                 dead. Reclaim it (recording `stalled_reclaimed`) and run.
+ *   - `reject`  — the row says running AND the lease is fresh: a turn is
+ *                 provably alive and this client just cannot see its stream
+ *                 (proxy idle cut, reload, second tab). Blind-claiming here is
+ *                 what killed page builds mid-work on 2026-08-18: the new
+ *                 `startTurnLease` mints a token, the live turn's next
+ *                 heartbeat reads `held:false`, and it aborts itself as an
+ *                 "orphan". Refuse the send instead; the live turn keeps
+ *                 working and the user is told why.
+ *
+ * `turnInputAdmission` (above) still keys queue-vs-run on the client flag, per
+ * mid-turn-input.md: a client cannot be wrong about its OWN stream. This guard
+ * covers the one direction that spec conceded - "two tabs on one session" -
+ * now that the lease makes "a live turn exists" provable rather than a stale
+ * status column.
+ */
+export type LiveTurnAdmission = 'proceed' | 'reclaim' | 'reject'
+export function liveTurnAdmission(params: {
+  status: string
+  clientMidTurn: boolean
+  isRoom: boolean
+  /** `isTurnLeaseLive` for this session - only consulted when it can matter. */
+  leaseLive: boolean
+}): LiveTurnAdmission {
+  if (params.status !== 'running') return 'proceed'
+  if (params.clientMidTurn) return 'proceed'
+  if (params.isRoom) return 'proceed'
+  return params.leaseLive ? 'reject' : 'reclaim'
+}
+
 export type RoomTurnAdmission = 'run' | 'wait' | 'fold'
 export function roomTurnAdmission(params: {
   status: string
@@ -1362,6 +1508,13 @@ export function roomTurnAdmission(params: {
  *                      still writing, and freeing the slot early would let a
  *                      second turn claim a session the first is mid-reply on.
  */
+/**
+ * SSE keepalive cadence for the chat stream. Well inside the 100s idle cut of
+ * proxies like Cloudflare, and cheap: one comment line, no event, ignored by
+ * every SSE parser (`packages/chat-ui/src/sse.ts` yields only `data:` lines).
+ */
+export const SSE_KEEPALIVE_INTERVAL_MS = 15_000
+
 export type TurnStopOutcome = 'not_running' | 'aborted' | 'reclaimed' | 'cancel_requested'
 export function turnStopOutcome(params: {
   status: string
@@ -1555,6 +1708,7 @@ async function generateTitle(provider: LLMProvider, messages: Message[], model: 
 
   let rawTitle = ''
   let usage: TokenUsage | null = null
+  let servedModel = model
   for await (const chunk of provider.stream({
     model,
     systemPrompt:
@@ -1564,6 +1718,7 @@ async function generateTitle(provider: LLMProvider, messages: Message[], model: 
     temperature: 0.2,
   })) {
     if (chunk.type === 'text_delta') rawTitle += chunk.text
+    if (chunk.type === 'message_start') servedModel = chunk.model
     if (chunk.type === 'message_end') usage = chunk.usage
   }
 
@@ -1575,13 +1730,13 @@ async function generateTitle(provider: LLMProvider, messages: Message[], model: 
     const firstUserText = filteredMessages.find((m) => m.role === 'user')?.text ?? ''
     const fallback = sanitizeTitle(firstUserText)
     if (fallback.split(/\s+/).length >= 2) {
-      return { title: fallback.charAt(0).toUpperCase() + fallback.slice(1), usage, model }
+      return { title: fallback.charAt(0).toUpperCase() + fallback.slice(1), usage, model: servedModel }
     }
   }
   return {
     title: cleaned.length > 0 ? cleaned : null,
     usage,
-    model,
+    model: servedModel,
   }
 }
 
@@ -1620,6 +1775,10 @@ export type ResumeReplayParams = {
   suspendedToolInput: unknown
   /** Resume worker position marker — useful for analytics + assertions. */
   loopStepIndex: number
+  selectedCustomModel?: string
+  selectedTier?: string
+  selectedLegacyByo?: boolean
+  selectedMeteredModel?: string
   approvalStatus: ResumeReplayApprovalStatus
   rejectReason: string | null
   /**
@@ -1732,6 +1891,10 @@ export async function runSessionResume(
       suspendedToolName: point.suspendedToolName,
       suspendedToolInput: point.suspendedToolInput,
       loopStepIndex: point.loopStepIndex,
+      ...(point.selectedCustomModel ? { selectedCustomModel: point.selectedCustomModel } : {}),
+      ...(point.selectedTier ? { selectedTier: point.selectedTier } : {}),
+      ...(point.selectedLegacyByo !== undefined ? { selectedLegacyByo: point.selectedLegacyByo } : {}),
+      ...(point.selectedMeteredModel ? { selectedMeteredModel: point.selectedMeteredModel } : {}),
       approvalStatus: approval.status,
       rejectReason: approval.rejectReason,
       answerText: approval.answerText,
@@ -2020,6 +2183,7 @@ export function chatRoutes(options: WebChatOptions): Router {
     let turnLeaseToken: string | null = null
     let leaseSessionId: string | null = null
     let leaseHeartbeat: ReturnType<typeof setInterval> | null = null
+    let sseKeepalive: ReturnType<typeof setInterval> | null = null
     // The token this turn registered in `activeTurnAborts`, kept SEPARATE from
     // `turnLeaseToken` because the success and catch paths null that one once
     // they have released the lock — leaving the `finally` unable to identify
@@ -2162,30 +2326,8 @@ export function chatRoutes(options: WebChatOptions): Router {
       // platform key, which would silently charge them.
       let turnProvider: LLMProvider = options.provider
       let usedByoKey = false
+      let usedLegacyByoKey = false
       let customLlmRuntime: import('../custom-llm-runtime.js').ResolvedWorkspaceCustomLlm | null = null
-      if (
-        assistant.workspaceId &&
-        options.llmProviderSettingsStore &&
-        options.buildWorkspaceProvider
-      ) {
-        try {
-          const byoKey = await options.llmProviderSettingsStore.getPlaintextKeySystem({
-            workspaceId: assistant.workspaceId,
-            provider: 'gemini',
-          })
-          if (byoKey) {
-            turnProvider = options.buildWorkspaceProvider(byoKey)
-            usedByoKey = true
-          }
-        } catch (err) {
-          // A decrypt/store failure must not silently downgrade a BYO workspace
-          // to platform billing — but it also must not crash the turn. Log
-          // (without the key) and keep the platform provider; billing stays as
-          // platform, which is the safe (non-undercharging) default.
-          console.error('[chat] BYO LLM key resolution failed:', (err as Error).message)
-        }
-      }
-
       // Resolve workspace-attributable auxiliary work independently from the
       // final response tier. Background work is logically Standard; if that
       // tier has no custom default, one configured custom endpoint still stays
@@ -2546,6 +2688,50 @@ export function chatRoutes(options: WebChatOptions): Router {
       ) => {
         sendEvent(event, data)
         publishRoomActivity(event, roomData)
+      }
+
+      // ── Live-turn guard (migration 424 lease) ─────────────────────
+      // Before an ordinary send may take the slot, prove nobody alive holds
+      // it. A fresh heartbeat means a turn is working right now and this
+      // client merely lost its stream; blind-claiming would mint a new lease
+      // and that turn would abort itself as an "orphan" at its next tick
+      // (2026-08-18: page builds killed 30-90s in). A stale lease is a dead
+      // holder - reclaim it so the end reason is recorded, then run.
+      {
+        const clientMidTurn = requestedMidTurn === true
+        const needsLeaseCheck =
+          session.status === 'running' && !clientMidTurn && !isRoomSession
+        const liveAdmission = liveTurnAdmission({
+          status: session.status,
+          clientMidTurn,
+          isRoom: isRoomSession,
+          leaseLive: needsLeaseCheck ? await isTurnLeaseLive(session.id) : false,
+        })
+        if (liveAdmission === 'reject') {
+          sendEvent('error', {
+            code: 'turn_in_flight',
+            error:
+              'Your assistant is still working on the previous message in this chat. ' +
+              'Wait for it to finish (or press Stop), then send again.',
+          })
+          res.end()
+          options.analytics?.logEvent({
+            userId: user.id, assistantId: assistant.id, sessionId: session.id,
+            eventName: 'turn_in_flight_rejected', channelType: 'web',
+            metadata: { via: sanitize('live_lease') },
+          })
+          return
+        }
+        if (liveAdmission === 'reclaim' && await reclaimStaleTurn(session.id)) {
+          console.warn(
+            `[chat] reclaimed stale turn lease on session ${session.id} at admission; running this message now`,
+          )
+          options.analytics?.logEvent({
+            userId: user.id, assistantId: assistant.id, sessionId: session.id,
+            eventName: 'turn_lease_reclaimed', channelType: 'web',
+            metadata: { via: sanitize('admission') },
+          })
+        }
       }
 
       // ── Mid-turn input (queue / steer) ────────────────────────────
@@ -3441,6 +3627,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       const dbMessages = await getSessionMessages(session.id, {
         fromSequence: session.compactBoundarySequence,
       })
+      const workflowProposalReceipt = latestWorkflowProposalReceipt(dbMessages)
 
       // Speaker attribution for a workspace-shared chat (chat-app.md →
       // "Attribution reaches the model"). One batched profile lookup over the
@@ -4224,6 +4411,34 @@ export function chatRoutes(options: WebChatOptions): Router {
                 `confirm first. The isolated editor receives this anchor again from the server and owns ` +
                 `the block operations.`,
               )
+            }
+
+            // ── Page-tree visibility ("where this page sits") ─────────
+            // The outline above shows the OPEN page only. Users also point
+            // at pages by POSITION - "the meeting notes at the parent
+            // level", "the sub-page" - so append a titles-only map of the
+            // page's ancestors / siblings / sub-pages with their ids and
+            // the instruction to READ the referenced page (`exportPage`)
+            // instead of asking the user to paste it. Titles + ids only;
+            // never neighbour content (doc-context cost). Its own try so a
+            // tree read failure can never take the outline down with it.
+            // See doc.md → "Page-tree visibility".
+            try {
+              const [{ getPageTreeNeighborhood }, { formatPageTreeContext }] =
+                await Promise.all([
+                  import('../db/saved-views-store.js'),
+                  import('@use-brian/core'),
+                ])
+              const hood = await getPageTreeNeighborhood(user.id, requestedDocViewId)
+              const treeBlock = hood
+                ? formatPageTreeContext(
+                    { id: requestedDocViewId, title: current.title },
+                    hood,
+                  )
+                : ''
+              if (treeBlock) userVisibleContextParts.push(treeBlock)
+            } catch (err) {
+              console.error('[chat] doc page-tree injection failed:', err)
             }
           }
         } catch (err) {
@@ -5071,9 +5286,9 @@ export function chatRoutes(options: WebChatOptions): Router {
       // text-only pick silently serves via the tier default instead).
       // Research mode wins over a metered pick (it forces its own model).
       let meteredTurn: { alias: string; profileId: string | null; toolRounds: number; thinking: boolean | null } | null = null
-      if (requestedModel && !researchMode) {
-        const meteredRow = registryRow(requestedModel)
-        if (meteredRow?.class === 'metered' && meteredRow.status === 'active') {
+      if (isExplicitMeteredModelSelection(requestedModel) && !researchMode) {
+        const meteredRow = registryRow(requestedModel!)
+        if (meteredRow?.class === 'metered') {
           if (options.meteredModelsAvailable && !options.meteredModelsAvailable.has(meteredRow.alias)) {
             res.status(400).json({ error: 'model_unavailable', message: 'This model is not available on this deployment.' })
             return
@@ -5135,25 +5350,40 @@ export function chatRoutes(options: WebChatOptions): Router {
         ? requestedModel
         : undefined
       const policyRequestedModel = explicitCustomSelector ? undefined : requestedModel
-      const resolvedModel = meteredTurn
+      const logicalModel = meteredTurn
         ? meteredTurn.alias
         : researchMode && budgetStatus !== 'downgraded'
           ? resolveModel('research', 'max_5x', budgetStatus)
           : resolveModel(policyRequestedModel, userPlan, budgetStatus)
+      const logicalTier = tierForModel(logicalModel)
       // Substitute a configured model when the default (Gemini) has no key —
       // lets a Qwen-only deployment serve chat by default. No-op when Gemini
       // is configured, or when the caller doesn't pass configuredProviders.
       const model = options.configuredProviders
-        ? ensureServableModel(resolvedModel, options.configuredProviders)
-        : resolvedModel
+        ? ensureServableModel(logicalModel, options.configuredProviders)
+        : logicalModel
 
-      if (assistant.workspaceId && options.resolveWorkspaceCustomLlm && !meteredTurn) {
-        customLlmRuntime = await options.resolveWorkspaceCustomLlm({
+      if (assistant.workspaceId && !meteredTurn) {
+        const resolvedTurnLlm = await resolveWorkspaceTurnLlm({
           workspaceId: assistant.workspaceId,
           requestedModel: explicitCustomSelector,
-          requestedTier: tierForModel(model),
-          allowDefault: true,
+          requestedTier: logicalTier,
+          platformProvider: options.provider,
+          resolveWorkspaceCustomLlm: options.resolveWorkspaceCustomLlm ?? null,
+          resolveLegacyByoKey: options.buildWorkspaceProvider && (options.resolveWorkspaceByoGeminiKey || options.llmProviderSettingsStore)
+            ? () => options.resolveWorkspaceByoGeminiKey
+                ? options.resolveWorkspaceByoGeminiKey(assistant.workspaceId!)
+                : options.llmProviderSettingsStore!.getPlaintextKeySystem({
+                    workspaceId: assistant.workspaceId!,
+                    provider: 'gemini',
+                  })
+            : null,
+          buildLegacyByoProvider: options.buildWorkspaceProvider ?? null,
         })
+        customLlmRuntime = resolvedTurnLlm.customRuntime
+        turnProvider = resolvedTurnLlm.provider
+        usedByoKey = resolvedTurnLlm.providerKeySource === 'user'
+        usedLegacyByoKey = resolvedTurnLlm.usedLegacyByoKey
         if (explicitCustomSelector && !customLlmRuntime) {
           res.status(400).json({
             error: 'custom_model_unavailable',
@@ -5200,7 +5430,11 @@ export function chatRoutes(options: WebChatOptions): Router {
       // run on boot-time Flash, which treats "Search for X" prompts as one-shot
       // and skips urlReader entirely — defeating the deep-research wedge.
       if (researchMode) {
-        options.workerManager?.setResearchModel(model)
+        // Persist the logical Research model, not today's serving alias. The
+        // routing provider reapplies the live application preference on spawn
+        // and durable rehydrate. Explicit custom selectors still ride
+        // workerRuntime and remain pinned authoritatively.
+        options.workerManager?.setResearchModel(logicalModel)
         // Cap concurrent workers at 5 for the research session. Lowered
         // from 10 after sustained 4GB OOM crashes — 10 concurrent worker
         // queryLoops at HIGH thinking + their statelessHistory growth +
@@ -5223,7 +5457,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // Research mode forces coordinator regardless of the classifier — the
       // user explicitly asked for deep research, so we skip the splitter
       // call (saves a Gemini round-trip) and seed coordinator immediately.
-      const isProMode = !isStandardTier(model)
+      const isProMode = !isStandardTier(logicalModel)
       let preflightContext = ''
       // App assistants (doc + feed) never enter coordinator mode — it
       // strips their authoring tools. So a doc research turn (researchMode
@@ -5990,6 +6224,19 @@ export function chatRoutes(options: WebChatOptions): Router {
       // progress: a turn suspended on a tool confirmation is alive and must
       // keep its lease. Liveness is not progress. Whether the user is seeing
       // anything happen is a separate question, answered in the client.
+      // ── SSE keepalive ──
+      // A long tool call (a delegated page build on a slow provider ran 60-77s
+      // per model call) writes NOTHING to the stream while it runs, and an
+      // HTTP proxy in front of us (Cloudflare closes an idle response after
+      // 100s) then drops the client's connection while the turn is alive. The
+      // client sees a dead stream, the user re-sends, and the live-turn guard
+      // above has to refuse them. A comment line every 15s keeps the response
+      // non-idle; SSE parsers ignore lines starting with ':' (ours does).
+      sseKeepalive = setInterval(() => {
+        if (clientGone || res.writableEnded) return
+        res.write(': keepalive\n\n')
+      }, SSE_KEEPALIVE_INTERVAL_MS)
+
       if (turnLeaseToken) {
         const heldToken = turnLeaseToken
         abortRegistryToken = heldToken
@@ -6058,6 +6305,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             assistantKind: assistant.kind,
             preferredChannel,
             userTimezone: user.timezone ?? undefined,
+            workflowProposalReceipt,
             docViewId:
               typeof requestedDocViewId === 'string' && requestedDocViewId
                 ? requestedDocViewId
@@ -6177,6 +6425,10 @@ export function chatRoutes(options: WebChatOptions): Router {
                   approvalId: event.approvalId,
                   suspendedToolName: event.toolName,
                   suspendedToolInput: event.toolInput,
+                  selectedCustomModel: customLlmRuntime?.selector,
+                  selectedTier: logicalTier,
+                  selectedLegacyByo: usedLegacyByoKey,
+                  selectedMeteredModel: meteredTurn?.alias,
                   // `mcp_call` is the loop step being executed; replay
                   // re-enters that same step and the dispatcher's fast
                   // path picks up the resolved approval.
@@ -6227,7 +6479,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           // user confirmed the estimate at exactly this depth.
           ...(meteredTurn
             ? { maxTurns: meteredTurn.toolRounds, maxToolCalls: meteredTurn.toolRounds }
-            : chatTierBudget({ model, researchMode }) ?? {}),
+            : chatTierBudget({ model: logicalModel, researchMode }) ?? {}),
           // Execution-plan completeness gate: when the session has an active
           // plan with open steps, a tool-less turn keeps working them instead
           // of stalling half-done; budget exhaustion fires one model-generated
@@ -6670,6 +6922,10 @@ export function chatRoutes(options: WebChatOptions): Router {
                   approvalId: event.approvalId,
                   suspendedToolName: event.toolName,
                   suspendedToolInput: event.toolInput,
+                  selectedCustomModel: customLlmRuntime?.selector,
+                  selectedTier: logicalTier,
+                  selectedLegacyByo: usedLegacyByoKey,
+                  selectedMeteredModel: meteredTurn?.alias,
                   loopStepIndex: event.loopStepIndex,
                 })
               } catch (err) {
@@ -6706,7 +6962,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                 assistantId: assistant.id,
                 sessionId: session.id,
                 model: event.response.model,
-                modelTier: customLlmRuntime?.modelTier ?? tierForModel(model),
+                modelTier: logicalTier,
                 inputTokens: usage.inputTokens,
                 outputTokens: usage.outputTokens,
                 cacheReadTokens: usage.cacheReadTokens,
@@ -7523,6 +7779,10 @@ export function chatRoutes(options: WebChatOptions): Router {
       if (leaseHeartbeat) {
         clearInterval(leaseHeartbeat)
         leaseHeartbeat = null
+      }
+      if (sseKeepalive) {
+        clearInterval(sseKeepalive)
+        sseKeepalive = null
       }
       // RELEASE THE LOCK. This is the exit path the pre-424 code did not have,
       // and its absence is the whole 2026-08-08 incident: `status` was cleared

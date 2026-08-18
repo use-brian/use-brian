@@ -1,5 +1,4 @@
 import { describe, it, expect, vi } from 'vitest'
-import { generateKeyPairSync } from 'node:crypto'
 import { createEngineBaseTools } from '../base/ask-engines.js'
 import { createBaseTools } from '../base/index.js'
 import { decodeExternalCostMeta } from '../../billing/external-cost.js'
@@ -41,9 +40,9 @@ describe('[COMP:tools/ask-engines] in-process engine tools', () => {
     it('registers only the tools whose credential exists', () => {
       const names = createEngineBaseTools({
         ENGINES_PERPLEXITY_API_KEY: 'k',
-        ENGINES_GSC_KEY_JSON: '{"client_email":"a@b.example","private_key":"x"}',
+        ENGINES_ANTHROPIC_API_KEY: 'k',
       }).map((t) => t.name)
-      expect(names).toEqual(['askPerplexity', 'searchConsoleQuery'])
+      expect(names).toEqual(['askPerplexity', 'askClaude'])
     })
 
     it('joins the base toolset when the credential is present', () => {
@@ -108,6 +107,74 @@ describe('[COMP:tools/ask-engines] in-process engine tools', () => {
       expect(decodeExternalCostMeta(result.meta)).toBeUndefined()
     })
 
+    it('an all-failed run reports a reason per question and ONE retry verdict', async () => {
+      const fetchMock = vi.fn().mockResolvedValue(fakeResponse('down', 500))
+      const [tool] = createEngineBaseTools(
+        { ENGINES_PERPLEXITY_API_KEY: 'k' },
+        fetchMock as unknown as typeof fetch,
+      )
+      const result = await tool.execute({ questions: ['who sells widgets', 'who sells gadgets'] }, ctx)
+
+      expect(result.isError).toBe(true)
+      const data = String(result.data)
+      // Not the raw payload: a readable account, message first.
+      expect(typeof result.data).toBe('string')
+      expect(data).toContain('askPerplexity')
+      expect(data).toContain('who sells widgets')
+      expect(data).toContain('who sells gadgets')
+      expect(data).toContain('upstream_error status=500')
+      expect(data).toMatch(/Nothing was billed/i)
+      expect(data).toMatch(/transient upstream failures/i)
+      expect(data).toMatch(/Retry once/i)
+      // The structured payload is still there, after the message.
+      expect(data).toContain('"engine":"perplexity"')
+    })
+
+    it('a credentials failure is a do-not-retry verdict, not a retry', async () => {
+      const fetchMock = vi.fn().mockResolvedValue(fakeResponse('bad key', 401))
+      const [tool] = createEngineBaseTools(
+        { ENGINES_PERPLEXITY_API_KEY: 'k' },
+        fetchMock as unknown as typeof fetch,
+      )
+      const result = await tool.execute({ question: 'who sells widgets' }, ctx)
+
+      expect(result.isError).toBe(true)
+      const data = String(result.data)
+      expect(data).toMatch(/credentials\/configuration problem/i)
+      expect(data).toMatch(/Do NOT retry/)
+      expect(data).toMatch(/tell the user/i)
+      expect(data).not.toMatch(/Retry once/i)
+    })
+
+    it('a quota refusal says retrying now fails the same way', async () => {
+      const fetchMock = vi.fn().mockResolvedValue(fakeResponse('slow down', 429))
+      const [tool] = createEngineBaseTools(
+        { ENGINES_PERPLEXITY_API_KEY: 'k' },
+        fetchMock as unknown as typeof fetch,
+      )
+      const result = await tool.execute({ question: 'who sells widgets' }, ctx)
+
+      expect(result.isError).toBe(true)
+      expect(String(result.data)).toMatch(/out of quota or rate-limited/i)
+      expect(String(result.data)).toMatch(/fails the same way/i)
+    })
+
+    it('a PARTIAL run keeps the structured payload untouched', async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(fakeResponse('down', 500))
+        .mockResolvedValueOnce(perplexityOk())
+      const [tool] = createEngineBaseTools(
+        { ENGINES_PERPLEXITY_API_KEY: 'k' },
+        fetchMock as unknown as typeof fetch,
+      )
+      const result = await tool.execute({ questions: ['q1', 'q2'] }, ctx)
+
+      expect(result.isError).toBeFalsy()
+      expect(typeof result.data).toBe('object')
+      expect(result.data).toMatchObject({ engine: 'perplexity' })
+    })
+
     it('carries no daily ceiling — that guard belongs to the HTTP surface', async () => {
       const fetchMock = vi.fn().mockResolvedValue(perplexityOk())
       const [tool] = createEngineBaseTools(
@@ -135,52 +202,6 @@ describe('[COMP:tools/ask-engines] in-process engine tools', () => {
       expect(result.isError).toBe(true)
       expect(result.data).toContain('question')
       expect(decodeExternalCostMeta(result.meta)).toBeUndefined()
-      expect(fetchMock).not.toHaveBeenCalled()
-    })
-  })
-
-  describe('searchConsoleQuery', () => {
-    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 })
-    const saJson = JSON.stringify({
-      client_email: 'watch@project.iam.gserviceaccount.com',
-      private_key: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
-      token_uri: 'https://oauth2.googleapis.com/token',
-    })
-
-    it('records a $0 audit row rather than no row at all', async () => {
-      const fetchMock = vi
-        .fn()
-        .mockResolvedValueOnce(fakeResponse({ access_token: 'ya29.tok', expires_in: 3600 }))
-        .mockResolvedValueOnce(fakeResponse({ rows: [{ keys: ['q'], clicks: 1 }] }))
-      const [tool] = createEngineBaseTools(
-        { ENGINES_GSC_KEY_JSON: saJson, ENGINES_GSC_SITE: 'sc-domain:example.com' },
-        fetchMock as unknown as typeof fetch,
-      )
-      const result = await tool.execute(
-        { startDate: '2026-08-01', endDate: '2026-08-07' },
-        ctx,
-      )
-
-      expect(result.isError).toBeFalsy()
-      expect(decodeExternalCostMeta(result.meta)).toEqual({
-        kind: 'flat',
-        model: 'engine:gsc',
-        flatCostUsd: 0,
-      })
-    })
-
-    it('surfaces a missing property as a tool error, not a crash', async () => {
-      const fetchMock = vi.fn()
-      const [tool] = createEngineBaseTools(
-        { ENGINES_GSC_KEY_JSON: saJson },
-        fetchMock as unknown as typeof fetch,
-      )
-      const result = await tool.execute(
-        { startDate: '2026-08-01', endDate: '2026-08-07' },
-        ctx,
-      )
-      expect(result.isError).toBe(true)
-      expect(String(result.data)).toContain('siteUrl')
       expect(fetchMock).not.toHaveBeenCalled()
     })
   })

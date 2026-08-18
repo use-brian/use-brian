@@ -34,6 +34,10 @@ vi.mock('../../db/sessions.js', () => ({
   addSessionMessage: vi.fn().mockResolvedValue({ id: 'msg-1' }),
   getSessionMessages: vi.fn().mockResolvedValue([]),
   toStampedMessages: vi.fn((m: unknown) => m),
+  // Delivery-conversation lookup for the session-state bridge. Empty by
+  // default so every consult that carries a deliverTarget stays block-free
+  // unless a test seeds it.
+  listSessionsByChannelForWorkspaceSystem: vi.fn().mockResolvedValue([]),
 }))
 vi.mock('../../billing-party.js', () => ({
   billingPartyForAssistant: vi.fn(),
@@ -90,7 +94,11 @@ import {
   RESULT_PATH,
 } from '@use-brian/core'
 import { findAssistantById, findUserById } from '../../db/users.js'
-import { findOrCreateSession, addSessionMessage } from '../../db/sessions.js'
+import {
+  findOrCreateSession,
+  addSessionMessage,
+  listSessionsByChannelForWorkspaceSystem,
+} from '../../db/sessions.js'
 import { billingPartyForAssistant } from '../../billing-party.js'
 import { runProactiveCompaction } from '../../routes/proactive-compaction.js'
 import { injectDocTools } from '../../doc/inject.js'
@@ -109,6 +117,7 @@ const mockFindAssistant = vi.mocked(findAssistantById)
 const mockFindUser = vi.mocked(findUserById)
 const mockSession = vi.mocked(findOrCreateSession)
 const mockAddMessage = vi.mocked(addSessionMessage)
+const mockListConversationSessions = vi.mocked(listSessionsByChannelForWorkspaceSystem)
 const mockBilling = vi.mocked(billingPartyForAssistant)
 const mockRunProactiveCompaction = vi.mocked(runProactiveCompaction)
 
@@ -1348,6 +1357,60 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
       expect(systemPrompt).toContain(PAGE_ID)
     })
 
+    it('routes and meters the anchored doc child through the callee workspace runtime', async () => {
+      asWorkspaceCallee()
+      yieldsText('edited')
+      const customProvider = { stream: vi.fn() }
+      const resolveWorkspaceCustomLlm = vi.fn().mockResolvedValue({
+        provider: customProvider,
+        selector: 'custom:doc-profile',
+        profileId: 'doc-profile',
+        modelTier: 'standard',
+        providerKeySource: 'user',
+        inputTokenLimit: 32000,
+        maxTokens: 4000,
+      })
+      const recordUsage = vi.fn().mockResolvedValue(undefined)
+      const callee = createCalleeExecutor({
+        provider: { stream: vi.fn(() => { throw new Error('platform must not run') }) } as never,
+        resolveWorkspaceCustomLlm,
+        tools: new Map(),
+        memoryStore: memoryStore() as never,
+        capabilityStore: { listActive: vi.fn().mockResolvedValue([]) } as never,
+        savedViewStore: savedViewStoreWith({ id: PAGE_ID, workspaceId: 'ws-1', clearance: 'internal' }),
+        usageStore: { recordUsage } as never,
+      })
+
+      await callee({ ...baseParams, pageAnchorId: PAGE_ID })
+
+      expect(resolveWorkspaceCustomLlm).toHaveBeenCalledWith({
+        workspaceId: 'ws-1',
+        requestedTier: 'standard',
+        allowDefault: true,
+        allowAnyDefault: true,
+      })
+      const injected = mockInjectDoc.mock.calls[0][0]
+      expect(injected).toMatchObject({
+        provider: customProvider,
+        backgroundModel: 'custom:doc-profile',
+        fallbackModel: 'custom:doc-profile',
+      })
+      await injected.onEditUsage?.({
+        model: 'custom:served-doc-model',
+        usage: { inputTokens: 11, outputTokens: 7 },
+        attempt: 'background',
+      })
+      expect(recordUsage).toHaveBeenCalledWith(expect.objectContaining({
+        workspaceId: 'ws-1',
+        sessionId: 'sess-1',
+        model: 'custom:served-doc-model',
+        modelTier: 'standard',
+        providerKeySource: 'user',
+        actualCostUsd: 0,
+        source: 'overhead:doc-edit',
+      }))
+    })
+
     it('reads the anchor inside the agent-clearance wrap (teamspace agent access)', async () => {
       // The RLS-scoped getById must observe `app.agent_clearance` context =
       // the CALLEE assistant's clearance ('internal' in the fixture), so a
@@ -2008,6 +2071,125 @@ describe('[COMP:api/inter-assistant-executor] workflow research fan-out + memory
 // governed runner, never a model-driven click loop; (2) with Barrier 2 + the
 // paid gate satisfied, a goal-shaped context executes a read-only skill end
 // to end, and with the flag off it refuses honestly.
+/**
+ * Session-state bridge (context-engine/session-state.md → "Delivery-
+ * conversation bridging"). A consult that DELIVERS into a user channel reads
+ * that conversation's `# Open commitments` rows — resolved by
+ * `(channelType, channelId)` across the callee workspace's assistants, so a
+ * step targeting `'primary'` still sees what another assistant tracked in
+ * the same Telegram topic (the 2026-08-18 daily health report). Read-only.
+ */
+describe('[COMP:api/inter-assistant-executor] delivery-conversation commitments bridge', () => {
+  const wsCallee = { id: 'callee-1', ownerUserId: 'owner-1', workspaceId: 'ws-1', clearance: 'internal', name: 'Brian' }
+  const deliverTarget = { channelType: 'telegram' as const, channelId: '-100123:topic:2' }
+
+  function stateStore(rowsBySession: Record<string, Array<Record<string, unknown>>>) {
+    return {
+      upsert: vi.fn(),
+      resolve: vi.fn(),
+      listOpenBySession: vi.fn(async (id: string) => rowsBySession[id] ?? []),
+      listRecentBySession: vi.fn(async (id: string) => rowsBySession[id] ?? []),
+      purgeResolvedOlderThan: vi.fn(),
+    }
+  }
+  function row(key: string, summary: string, detail: string | null = null) {
+    const t = new Date()
+    return {
+      id: `id-${key}`, sessionId: 'trainer-sess', userId: 'owner-1', assistantId: 'trainer-1',
+      key, status: 'open', summary, detail, source: 'tool', createdAt: t, updatedAt: t, resolvedAt: null,
+    }
+  }
+  function calleeWith(store: ReturnType<typeof stateStore> | undefined) {
+    return createCalleeExecutor({
+      provider: {} as never,
+      tools: new Map(),
+      // Workspace-scoped callee + workflowId → the executor also reads
+      // prior-run workflow memories; give it the method (empty).
+      memoryStore: { ...memoryStore(), getWorkspaceMemoriesByCategory: vi.fn().mockResolvedValue([]) } as never,
+      capabilityStore: { listActive: vi.fn().mockResolvedValue([]) } as never,
+      sessionStateStore: store as never,
+    })
+  }
+  const systemPromptOf = () => (mockQueryLoop.mock.calls[0][0] as { systemPrompt: string }).systemPrompt
+
+  beforeEach(() => {
+    mockFindAssistant.mockImplementation(async (id: string) =>
+      (id === 'callee-1' ? wsCallee : id === 'caller-1' ? callerAssistant : null) as never,
+    )
+    mockListConversationSessions.mockResolvedValue([])
+    yieldsText('report')
+  })
+
+  it('injects the delivery conversation\'s open commitments (bodies included) into the callee prompt', async () => {
+    mockListConversationSessions.mockResolvedValueOnce([
+      { id: 'trainer-sess', assistantId: 'trainer-1', assistantName: 'Health Personal Trainer' },
+    ])
+    const store = stateStore({
+      'trainer-sess': [
+        row('diet:2026-08-17', 'Meals + workout log', 'Breakfast: oats 60g. Gym: squat 5x5 @ 80kg.'),
+        row('session:health', 'Health tracking session'),
+      ],
+    })
+    await calleeWith(store)({ ...baseParams, callerChannelType: 'workflow', workflowId: 'wf-1', deliverTarget })
+
+    // Resolved by the deliver target across the CALLEE workspace, not by the
+    // callee assistant id — the topic belongs to another assistant.
+    expect(mockListConversationSessions).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceId: 'ws-1', channelType: 'telegram', channelId: '-100123:topic:2' }),
+    )
+    expect(store.listRecentBySession).toHaveBeenCalledWith('trainer-sess', expect.any(Number))
+    const sp = systemPromptOf()
+    expect(sp).toContain('# Open commitments (delivery conversation)')
+    expect(sp).toContain('`diet:2026-08-17`')
+    expect(sp).toContain('squat 5x5 @ 80kg')
+    // Lands before the # Context footer, beside memory context.
+    expect(sp.indexOf('# Open commitments (delivery conversation)')).toBeLessThan(sp.indexOf('# Context'))
+    // Read-only: no commitment write tools reach the callee surface.
+    const tools = mockQueryLoop.mock.calls[0][0].tools as Map<string, unknown>
+    expect(tools.has('trackCommitment')).toBe(false)
+    expect(tools.has('resolveCommitment')).toBe(false)
+  })
+
+  it('adds nothing for a consult with no deliverTarget (ordinary askAssistant / intermediate step)', async () => {
+    const store = stateStore({ 'trainer-sess': [row('diet:2026-08-17', 'Meals')] })
+    mockListConversationSessions.mockResolvedValue([
+      { id: 'trainer-sess', assistantId: 'trainer-1', assistantName: 'Trainer' },
+    ])
+    await calleeWith(store)({ ...baseParams, callerChannelType: 'workflow', workflowId: 'wf-1' })
+    expect(mockListConversationSessions).not.toHaveBeenCalled()
+    expect(store.listRecentBySession).not.toHaveBeenCalled()
+    expect(systemPromptOf()).not.toContain('# Open commitments (delivery conversation)')
+  })
+
+  it('adds nothing when the executor has no sessionStateStore, or the conversation has no rows', async () => {
+    mockListConversationSessions.mockResolvedValue([
+      { id: 'trainer-sess', assistantId: 'trainer-1', assistantName: 'Trainer' },
+    ])
+    await calleeWith(undefined)({ ...baseParams, callerChannelType: 'workflow', deliverTarget })
+    expect(mockListConversationSessions).not.toHaveBeenCalled()
+    expect(systemPromptOf()).not.toContain('# Open commitments (delivery conversation)')
+
+    mockQueryLoop.mockClear()
+    yieldsText('report')
+    const empty = stateStore({ 'trainer-sess': [] })
+    await calleeWith(empty)({ ...baseParams, callerChannelType: 'workflow', deliverTarget })
+    expect(empty.listRecentBySession).toHaveBeenCalledWith('trainer-sess', expect.any(Number))
+    expect(systemPromptOf()).not.toContain('# Open commitments (delivery conversation)')
+  })
+
+  it('a lookup failure is logged and skipped, never fails the consult', async () => {
+    mockListConversationSessions.mockRejectedValueOnce(new Error('relation "sessions" is on fire'))
+    const store = stateStore({})
+    const text = await calleeWith(store)({ ...baseParams, callerChannelType: 'workflow', deliverTarget })
+    expect(text).toBe('report')
+    expect(systemPromptOf()).not.toContain('# Open commitments (delivery conversation)')
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('delivery-conversation commitments fetch failed'),
+      expect.any(Error),
+    )
+  })
+})
+
 describe('[COMP:sandbox/browser-tools] browser surface on the goal path (workflow-origin consult)', () => {
   function browserExecutor(baseTools: Map<string, unknown>) {
     return createCalleeExecutor({

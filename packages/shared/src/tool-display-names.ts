@@ -157,6 +157,12 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   wordpressUpdatePageText: 'Update WordPress page text',
   wordpressReplacePageImage: 'Replace WordPress page image',
 
+  // Google Search Console (read-only)
+  searchConsoleListSites: 'View Search Console properties',
+  searchConsoleQuery: 'Query Search Console performance',
+  searchConsoleInspectUrl: 'Inspect URL in Search Console',
+  searchConsoleListSitemaps: 'List Search Console sitemaps',
+
   // Assistant Email (AgentMail) — the assistant's own mailbox
   agentmailSendMessage: 'Send email as the assistant',
   agentmailSearchThreads: 'Search the assistant\'s mailbox',
@@ -191,6 +197,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   saveFileToBrain: 'Save uploaded file to brain',
   saveFileBytes: 'Save file bytes to brain',
   sendFile: 'Send a file to the chat',
+  renderPdf: 'Create a PDF file',
 
   createOfficeArtifact: 'Create an Office artifact',
   getOfficeArtifact: 'Read an Office artifact',

@@ -140,6 +140,79 @@ function changedFields(input: BrainEntryUpdateInput): Array<[string, unknown]> {
   )
 }
 
+/**
+ * The one discovery pointer for this surface. `findEditableBrainEntries` is
+ * the ONLY way to obtain a `(primitive, rowId, revision)` triple the update
+ * path will accept when no entry is open — the model cannot mint one, and a
+ * rowId remembered from an earlier turn is routinely dead (below).
+ */
+const BRAIN_DISCOVERY =
+  'findEditableBrainEntries with words from the entry title or content'
+
+/**
+ * Why a rowId that looked right can miss: brain rows are BI-TEMPORAL. An edit
+ * does not update in place, it supersedes the row and mints a NEW id (that is
+ * why a successful update returns `previousRowId` AND `liveRowId`). So an id
+ * carried over from an earlier turn points at a retired version, and a blind
+ * retry with it can never succeed.
+ */
+const BRAIN_SUPERSESSION =
+  'Brain rows are bi-temporal: any earlier edit SUPERSEDED that row and minted a new id (an update returns the new one as `liveRowId`), so an id remembered from a previous turn is already retired.'
+
+/** Failure copy for a non-2xx from the mutator: what ran, why, next step, verdict. */
+function mutationFailure(
+  input: BrainEntryUpdateInput,
+  result: { status: number; body: Record<string, unknown> },
+): { data: string; isError: true } {
+  const routeSaid =
+    typeof result.body.error === 'string' && result.body.error.trim()
+      ? ` The Brain entry API said: ${result.body.error.trim()}`
+      : ''
+  const fields = changedFields(input).map(([field]) => field)
+  const what =
+    `Updating ${fields.length ? fields.join(', ') : 'no fields'} on ${input.primitive} ${input.rowId} failed (HTTP ${result.status}).${routeSaid} ` +
+    'Nothing was saved — the entry is exactly as it was.'
+
+  if (result.status === 404) {
+    return {
+      data:
+        `${what} No editable Brain entry answers to that primitive + rowId. ${BRAIN_SUPERSESSION} ` +
+        `It may also have been deleted, or sit above this assistant's clearance. ` +
+        `Call ${BRAIN_DISCOVERY} to re-resolve BOTH the current rowId and its revision, then re-issue with the pair from that result. Do NOT retry this exact rowId.`,
+      isError: true,
+    }
+  }
+  if (result.status === 409) {
+    return {
+      data:
+        `${what} The entry was edited by someone else after this proposal was prepared, so the \`expectedUpdatedAt\` revision you sent is stale and the write was refused rather than silently overwriting their change. ` +
+        `Call ${BRAIN_DISCOVERY} (or reopen the entry) to read the CURRENT revision, show the user what changed, and re-issue with the new revision. Retrying with revision ${input.expectedUpdatedAt} will keep failing.`,
+      isError: true,
+    }
+  }
+  if (result.status === 401 || result.status === 403) {
+    return {
+      data:
+        `${what} This is an authorization refusal, not a bad argument: the speaker is not a member of the entry's workspace, or the entry's sensitivity is above this assistant's clearance. ` +
+        'No wording of this call can get past it — tell the user which entry could not be edited and that access has to be granted in Studio. Do not retry.',
+      isError: true,
+    }
+  }
+  if (result.status >= 500) {
+    return {
+      data:
+        `${what} That is a server-side failure, not a problem with the arguments. Retry this exact call once after a short wait; if it fails again, tell the user the Brain entry could not be saved rather than looping.`,
+      isError: true,
+    }
+  }
+  return {
+    data:
+      `${what} The request itself was rejected — fix the field the message above names (or drop it) and re-issue. ` +
+      `Re-sending the same value will be rejected the same way; if the message names no field you can fix, ask the user what the value should be.`,
+    isError: true,
+  }
+}
+
 export function parseBrainEditChannelId(
   channelId: string,
 ): { primitive: EditableBrainPrimitive; rowId: string } | null {
@@ -194,7 +267,13 @@ export function createBrainEntryEditTools(args: {
     isConcurrencySafe: true,
     async execute(input, context) {
       if (!context.workspaceId) {
-        return { data: 'Brain entry discovery requires workspace context.', isError: true }
+        return {
+          data:
+            'Brain entries live in a workspace and this conversation is not bound to one, so there was nothing to search and no entry was returned. ' +
+            'Ask the user to open this assistant inside a workspace (or switch to a workspace-scoped chat) and repeat the request there. ' +
+            'Re-running findEditableBrainEntries on this surface will fail the same way — do not fall back to creating a replacement entry or a Document page.',
+          isError: true,
+        }
       }
       const entries = await args.mutator.findEditableEntries(
         context.workspaceId,
@@ -300,7 +379,13 @@ export function createBrainEntryEditTools(args: {
     },
     async execute(input, context) {
       if (!context.workspaceId) {
-        return { data: 'Brain entry updates require workspace context.', isError: true }
+        return {
+          data:
+            `Updating ${input.primitive} ${input.rowId} was refused: Brain entries live in a workspace and this conversation is not bound to one, so nothing was saved. ` +
+            'Ask the user to open this assistant inside a workspace (or switch to a workspace-scoped chat) and repeat the edit there. ' +
+            'Retrying updateBrainEntry on this surface will fail the same way.',
+          isError: true,
+        }
       }
       const discoveredRevision = discoveredTargets.get(
         targetKey(input.primitive, input.rowId),
@@ -311,8 +396,10 @@ export function createBrainEntryEditTools(args: {
       ) {
         return {
           data: discoveryWasAmbiguous
-            ? 'Brain Review discovery returned multiple matches. Ask the user to choose one before proposing a change. No entry was changed.'
-            : 'The requested target was not returned by Brain Review discovery in this turn. No entry was changed.',
+            ? `Updating ${input.primitive} ${input.rowId} was refused: this turn's findEditableBrainEntries returned MORE THAN ONE plausible entry, and picking one for the user is not this tool's call. Nothing was saved. ` +
+              'Show the user the matches and ask which entry they mean, then re-issue with that one. Re-sending the same rowId without asking will be refused the same way.'
+            : `Updating ${input.primitive} ${input.rowId} was refused: that primitive + rowId + revision triple was not returned by findEditableBrainEntries in THIS turn, and an unscoped chat may only edit a target this turn's own discovery produced (the model cannot supply an id from memory). Nothing was saved. ` +
+              `Call ${BRAIN_DISCOVERY} now, then re-issue with the exact rowId and revision from that result. Retrying this call unchanged will be refused the same way.`,
           isError: true,
         }
       }
@@ -323,7 +410,10 @@ export function createBrainEntryEditTools(args: {
           input.expectedUpdatedAt !== revision(args.scopedEntry))
       ) {
         return {
-          data: 'The requested target does not match the Brain entry open in this conversation.',
+          data:
+            `Updating ${input.primitive} ${input.rowId} was refused: this conversation is scoped to ONE open Brain entry (${args.scopedEntry.primitive} ${args.scopedEntry.id}, revision ${revision(args.scopedEntry)}) and can edit no other, so nothing was saved. ` +
+            `Re-issue with that exact primitive, rowId, and expectedUpdatedAt — they are in the "Currently viewing: Brain entry" block. ` +
+            'If the user meant a different entry, tell them it has to be opened first; this call cannot reach it however it is retried.',
           isError: true,
         }
       }
@@ -337,13 +427,7 @@ export function createBrainEntryEditTools(args: {
         changes: rawChanges as Record<string, unknown>,
       })
       if (result.status < 200 || result.status >= 300) {
-        return {
-          data:
-            typeof result.body.error === 'string'
-              ? result.body.error
-              : `Brain entry update failed (${result.status}).`,
-          isError: true,
-        }
+        return mutationFailure(input, result)
       }
       const memory = result.body.memory
       const liveRowId =

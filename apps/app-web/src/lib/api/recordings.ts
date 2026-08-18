@@ -27,8 +27,25 @@ export type RecordingEstimate = {
 export type LiveRecordingPage = {
   pageId: string;
   title: string;
-  notesBlockId: string;
-  transcriptAfterId: string;
+  /** The capture session — keys the server-side transcript windows + assembly. */
+  sessionId: string;
+  /** Stable anchor above the rolling notes region. */
+  notesHeadingId: string;
+  /** The `live:`-prefixed caption block closing the notes region. */
+  markerBlockId: string;
+};
+
+export type LiveTranscriptLine = {
+  speaker: string | null;
+  text: string;
+};
+
+export type LiveTranscriptWindowRow = {
+  chunkId: string;
+  offsetMs: number;
+  durationMs: number;
+  missedBefore: number;
+  lines: LiveTranscriptLine[];
 };
 
 /** Prepare the collaborative page before opening the microphone. */
@@ -59,13 +76,14 @@ export async function streamLiveRecordingWindow(params: {
   startMs: number;
   endMs: number;
   missedWindows?: number;
-}): Promise<{ transcriptAfterId: string; transcript?: string; notes?: string; duplicate?: boolean }> {
+}): Promise<{ ok: boolean; transcript?: string; lines?: LiveTranscriptLine[]; notes?: string; duplicate?: boolean }> {
   const body = new FormData();
   body.set("workspaceId", params.workspaceId);
   body.set("assistantId", params.assistantId);
   body.set("pageId", params.page.pageId);
-  body.set("notesBlockId", params.page.notesBlockId);
-  body.set("transcriptAfterId", params.page.transcriptAfterId);
+  body.set("sessionId", params.page.sessionId);
+  body.set("notesHeadingId", params.page.notesHeadingId);
+  body.set("markerBlockId", params.page.markerBlockId);
   body.set("chunkId", params.chunkId);
   body.set("offsetMs", String(params.startMs));
   body.set("durationMs", String(params.endMs - params.startMs));
@@ -77,6 +95,68 @@ export async function streamLiveRecordingWindow(params: {
   });
   if (!res.ok) throw await asError(res, "Could not process this live transcript window");
   return res.json();
+}
+
+/** The live transcript pane's read: one page's provisional windows, capture order. */
+export async function listLiveTranscriptWindows(
+  workspaceId: string,
+  pageId: string,
+): Promise<LiveTranscriptWindowRow[]> {
+  const res = await authFetch(
+    `${API_URL}/api/recordings/live/windows?workspaceId=${encodeURIComponent(workspaceId)}&pageId=${encodeURIComponent(pageId)}`,
+  );
+  if (!res.ok) throw await asError(res, "Could not load the live transcript");
+  const body = (await res.json()) as { windows: LiveTranscriptWindowRow[] };
+  return body.windows;
+}
+
+/**
+ * Link a recording to a page the moment its id exists — the live meeting
+ * page must carry its recording even when the upload or processing later
+ * fails, so the page can state that status honestly instead of losing the
+ * recording entirely. Callers treat failure as non-fatal.
+ */
+export async function linkLiveRecordingPage(pageId: string, recordingId: string): Promise<void> {
+  const res = await authFetch(`${API_URL}/api/recordings/live/link`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pageId, recordingId }),
+  });
+  if (!res.ok) throw await asError(res, "Could not link the recording to the page");
+}
+
+/**
+ * Assemble the server-persisted live windows into a usable recording — the
+ * fallback when the lossless full upload cannot complete (offline stop,
+ * failed storage PUT). Returns the new recording id; the normal
+ * estimate → confirm → process flow continues on it.
+ */
+export async function finalizeLiveRecording(params: {
+  workspaceId: string;
+  assistantId: string;
+  sessionId: string;
+  pageId?: string;
+}): Promise<{ recordingId: string; windowCount: number; coverageMs: number }> {
+  const res = await authFetch(`${API_URL}/api/recordings/live/finalize`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) throw await asError(res, "Could not assemble the live recording");
+  return res.json();
+}
+
+/** Bind diarized speaker labels to display names on the final transcript. */
+export async function updateRecordingParticipants(
+  recordingId: string,
+  participants: Array<{ speaker: string; name?: string }>,
+): Promise<void> {
+  const res = await authFetch(`${API_URL}/api/recordings/${recordingId}/participants`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ participants }),
+  });
+  if (!res.ok) throw await asError(res, "Could not save the speaker names");
 }
 
 /**

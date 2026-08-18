@@ -67,7 +67,7 @@ export type PublicApiRouteOptions = {
   resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
   /** Provider names configured at boot — substitutes a servable model when the
    *  resolved default (Gemini) has no key. See `ensureServableModel`. */
-  configuredProviders?: ReadonlySet<string>
+  configuredProviders?: import('@use-brian/shared/model-registry').ProviderAvailability
   /**
    * Base tool map. MCP-discovered tools (mcp_search/mcp_call, granted
    * connectors) and KB tools are added per-request via `applyMcpInjection`

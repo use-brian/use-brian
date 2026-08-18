@@ -39,8 +39,12 @@ export type {
   SessionStateStatus,
   SessionStateSource,
 } from './session-state-types.js'
-export { buildSessionStateBlock } from './session-state-context.js'
-export type { BuildSessionStateBlockOptions } from './session-state-context.js'
+export { buildSessionStateBlock, buildDeliveryConversationStateBlock } from './session-state-context.js'
+export type {
+  BuildSessionStateBlockOptions,
+  BuildDeliveryConversationStateBlockOptions,
+  DeliveryConversationSession,
+} from './session-state-context.js'
 export { createSessionStateTools } from './session-state-tools.js'
 export type {
   PlanStore,

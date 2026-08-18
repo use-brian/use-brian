@@ -53,6 +53,8 @@ import {
   createGoalClarityAssessor,
   createGoalVerifier,
   createTaskTriageJudge,
+  type GoalLlmRuntime,
+  type GoalLlmUsageContext,
   type TaskRecord,
   collectStream,
   createInterAssistantTools,
@@ -146,7 +148,7 @@ import {
 import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTORS, OFFICIAL_CONNECTOR_TOOLS } from '@use-brian/shared'
 
 // ── OPEN package imports (@use-brian/api) ──────────────────────────
-import { findAssistantById, isUserBlockedForAssistant, listAccessibleAssistants } from './db/users.js'
+import { findAssistantById, getWorkspacePrimaryAssistant, isUserBlockedForAssistant, listAccessibleAssistants } from './db/users.js'
 import { getTaskByIdSystem } from './db/tasks.js'
 import { createBrowserSkillsStore } from './db/browser-skills-store.js'
 import { createDbConnectorActionStore } from './db/connector-actions-store.js'
@@ -187,7 +189,7 @@ import {
   modelRates,
   registryRow,
 } from '@use-brian/shared/model-registry'
-import { BACKGROUND_MODEL, ensureServableModel } from './model-resolution.js'
+import { BACKGROUND_MODEL, backgroundModelFor, ensureServableModel, providerVisionModelFor } from './model-resolution.js'
 import { EXTRACTION_MODEL } from './build-episode-ingestors.js'
 import { createMailboxSyncWorker } from './mailbox/sync-worker.js'
 import { setGlobalMailboxArchiveDeps } from './mailbox/archive-search-tool.js'
@@ -281,8 +283,6 @@ import { createConnectorInstanceStore } from './db/connector-instance-store.js'
 import { createConnectorAppCredentialStore } from './db/connector-app-credential-store.js'
 import { createIngestSinkStore } from './db/ingest-sink-store.js'
 import { createIngestOutboxStore } from './db/ingest-outbox-store.js'
-import { createChatArchiveEnrichmentStore } from './db/chat-archive-enrichment-store.js'
-import { createChatArchiveMediaStore } from './db/chat-archive-media-store.js'
 import { createExternalSinkFanout } from './ingest/external-sink-fanout.js'
 import { createExternalSinkRelay } from './ingest/external-sink-relay.js'
 import {
@@ -291,9 +291,10 @@ import {
   setGlobalLiveChatArchiveWriter,
 } from './chat-archive/live-writer.js'
 import { createChatArchiveEnrichmentWorker } from './chat-archive/enrichment-worker.js'
-import { chatArchiveMediaRoutes } from './chat-archive/media-routes.js'
-import { createChatArchiveMediaService, type ChatArchiveMediaService } from './chat-archive/media-service.js'
-import { createChatArchiveMediaWorker, type ChatArchiveMediaWorker } from './chat-archive/media-worker.js'
+import { chatArchiveExtractRoutes } from './chat-archive/extract-routes.js'
+import { createExtractService } from './chat-archive/extract-service.js'
+import { createMessageStoreClient, type MessageStoreClient } from './chat-archive/message-store-client.js'
+import { createChatArchiveLiveMedia } from './chat-archive/live-media.js'
 import { createWorkspaceToolPolicyStore } from './db/workspace-tool-policy-store.js'
 import { createSyncCredentialProvider } from './knowledge/sync-credentials.js'
 import { createDbAssistantConnectorStore } from './db/assistant-connector-store.js'
@@ -660,6 +661,8 @@ export interface OpenApiEnv {
   DASHSCOPE_VISION_MODEL?: string
   DASHSCOPE_ASR_MODEL?: string
   DASHSCOPE_LONG_MODEL?: string
+  /** Long-recording async transcription model; separate from short-audio ASR. */
+  DASHSCOPE_FILETRANS_MODEL?: string
   // Optional connector / channel config (closed-secret gated; open passes none).
   GOOGLE_CLIENT_ID?: string
   /**
@@ -692,6 +695,12 @@ export interface OpenApiEnv {
   WECHAT_CONNECTOR_SECRET?: string
   /** Local-only chat archive sidecar. Both values are required together. */
   BRIAN_MESSAGE_STORE_URL?: string
+  /**
+   * Set when the archive runs on another host in the deployment rather than
+   * beside the platform. Extraction is loopback-only by default because it
+   * accepts raw personal attachments.
+   */
+  BRIAN_MESSAGE_STORE_ALLOW_REMOTE?: string
   BRIAN_MESSAGE_STORE_HMAC_SECRET?: string
   LLM_PROVIDER_KEY_ENCRYPTION_KEY?: string
   // Blob storage. GCS wins when set; LOCAL_FILES_DIR enables durable
@@ -901,6 +910,12 @@ export interface OpenApiPorts {
   pendingClassificationStore?: PendingClassificationStore
   /** Google-Drive knowledge-file store; absent → gdrive files unavailable to chat/workflow. */
   gdriveFilesStore?: GDriveFilesStore
+  /** Hosted override for knowledge-sync credential resolution. The open
+   * composition uses the connector-instance/grant-backed provider. */
+  buildSyncCredentials?: (deps: {
+    connectorInstanceStore: ReturnType<typeof createConnectorInstanceStore>
+    connectorGrantStore: ReturnType<typeof import('./db/connector-grant-store.js').createConnectorGrantStore>
+  }) => SyncCredentials
   // ── Closed first-party tool factories — open default: omitted ──
   /** Capability-gated triage/sentiment/analytics-query tools (platform-only). */
   buildClosedTools?: () => Tool[]
@@ -1032,8 +1047,18 @@ export interface ChannelHostHooks {
 export interface BootContext {
   app: Express
   provider: LLMProvider
-  /** Boot-resolved servable model for background synthesis lanes. */
+  /** Workspace-owned text/tool runtime resolver for closed route consumers. */
+  resolveWorkspaceCustomLlm: import('./custom-llm-runtime.js').WorkspaceCustomLlmResolver
+  /** Standard/background custom runtime, resolved at execution time. */
+  resolveBackgroundRuntime: import('./custom-llm-runtime.js').BackgroundRuntimeResolver
+  /** Application-provider background model when no workspace runtime exists. */
   backgroundModel: string
+  /** Application-provider Standard extraction model for closed ingest consumers. */
+  extractionModel: string
+  /** Live application background selector for hot provider preference changes. */
+  resolveBackgroundModel: () => string
+  /** Mutable application provider catalog/preference for closed channel routes. */
+  configuredProviders: import('@use-brian/shared/model-registry').ProviderAvailability
   /** Collaborative page bridge shared by server-side page writers. */
   docGateway: ReturnType<typeof createDocGateway>
   /** Version-CAS fallback when the collaborative gateway is unavailable. */
@@ -1186,6 +1211,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const app = express()
   const port = parseInt(env.PORT || new URL(env.API_URL).port || '4000')
 
+  // The archive runs against its own database, so every interaction with it is
+  // an HTTP contract. Null when it is not deployed: chat history is simply
+  // absent rather than the platform failing to boot.
+  const messageStoreClient: MessageStoreClient | null = createMessageStoreClient(env)
+  const chatArchiveLiveMedia = messageStoreClient ? createChatArchiveLiveMedia(messageStoreClient) : undefined
+
   // ── Middleware: raw-body capture + JSON ──
   // 15mb ceiling: the WhatsApp connector forwards inbound media inline as
   // base64 (`/internal/whatsapp/inbound`) up to a 10MB raw cap, which inflates
@@ -1321,7 +1352,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // DashScope (Qwen-VL for images and page-rendered PDFs, qwen-long
   // file-upload for office docs, Qwen-ASR for audio). See media/backend.ts.
   //
-  // Preference is google → dashscope → the chat provider itself. That last
+  // Application preference orders Google vs DashScope; auto keeps Google first.
+  // The final rung is the chat provider itself. That last
   // rung is not cosmetic: this chain used to FALL THROUGH to a DashScope
   // backend with `apiKey: ''` whenever neither a Google credential nor a
   // DashScope key existed, so a Codex-only deployment (ChatGPT subscription
@@ -1329,26 +1361,45 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // working non-native document path at all. The provider-backed rung is
   // resolved after the provider stack is built (see `resolveMediaBackend`
   // below) because it needs the routing provider that does not exist yet.
-  const keyedMediaBackend: MediaBackend | undefined = vertexTx
+  const googleMediaBackend: MediaBackend | undefined = vertexTx
     ? { kind: 'google', transport: vertexTx }
     : env.GEMINI_API_KEY
       ? { kind: 'google', transport: aiStudioTransport(env.GEMINI_API_KEY) }
-      : env.DASHSCOPE_API_KEY
-        ? {
-            kind: 'dashscope',
-            apiKey: env.DASHSCOPE_API_KEY,
-            baseUrl: dashscopeBaseUrl,
-            ...(env.DASHSCOPE_VISION_MODEL ? { visionModel: env.DASHSCOPE_VISION_MODEL } : {}),
-            ...(env.DASHSCOPE_ASR_MODEL ? { asrModel: env.DASHSCOPE_ASR_MODEL } : {}),
-            ...(env.DASHSCOPE_LONG_MODEL ? { longModel: env.DASHSCOPE_LONG_MODEL } : {}),
-          }
-        : undefined
-  // Placeholder identity until the provider stack resolves the final rung.
-  // Everything between here and `resolveMediaBackend` only stores the value.
-  let mediaBackend: MediaBackend = keyedMediaBackend ?? {
+      : undefined
+  const dashscopeMediaBackend: MediaBackend | undefined = env.DASHSCOPE_API_KEY
+    ? {
+        kind: 'dashscope',
+        apiKey: env.DASHSCOPE_API_KEY,
+        baseUrl: dashscopeBaseUrl,
+        ...(env.DASHSCOPE_VISION_MODEL ? { visionModel: env.DASHSCOPE_VISION_MODEL } : {}),
+        ...(env.DASHSCOPE_ASR_MODEL ? { asrModel: env.DASHSCOPE_ASR_MODEL } : {}),
+        ...(env.DASHSCOPE_LONG_MODEL ? { longModel: env.DASHSCOPE_LONG_MODEL } : {}),
+      }
+    : undefined
+  const unavailableMediaBackend: MediaBackend = {
     kind: 'dashscope',
     apiKey: '',
     baseUrl: dashscopeBaseUrl,
+  }
+  let providerMediaBackend: MediaBackend | undefined
+  // Read MutableProviderAvailability on every operation so a hot preference
+  // change reorders Codex/Google/DashScope without restarting the API.
+  const selectKeyedMediaBackend = (): MediaBackend | undefined => {
+    const preferred = configuredProviders.preferredProvider
+    return preferred === 'dashscope-intl' || preferred === 'openai-compat:dashscope-intl'
+      ? dashscopeMediaBackend ?? googleMediaBackend
+      : googleMediaBackend ?? dashscopeMediaBackend
+  }
+  const selectMediaBackend = (mime: string): MediaBackend => {
+    const preferred = configuredProviders.preferredProvider
+    if (
+      preferred === 'openai-codex' &&
+      (mime === 'application/pdf' || mime.startsWith('image/'))
+    ) {
+      const model = providerVisionModelFor(configuredProviders, preferred)
+      if (model) return { kind: 'provider', provider, model }
+    }
+    return selectKeyedMediaBackend() ?? providerMediaBackend ?? unavailableMediaBackend
   }
 
   const memoryStore = createDbMemoryStore()
@@ -1503,7 +1554,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   if (env.DASHSCOPE_API_KEY) {
     const dashscopeProviderId = `openai-compat:${DASHSCOPE_INTL_LABEL}`
     providerInstances[dashscopeProviderId] = wrapProvider(
-      createOpenAICompatProvider({ apiKey: env.DASHSCOPE_API_KEY, baseURL: dashscopeBaseUrl, label: DASHSCOPE_INTL_LABEL }),
+      createOpenAICompatProvider({
+        apiKey: env.DASHSCOPE_API_KEY,
+        baseURL: dashscopeBaseUrl,
+        label: DASHSCOPE_INTL_LABEL,
+        // Curated DashScope chat rows are text-only. Inline images are
+        // distilled through the separate Qwen-VL media backend at dispatch.
+        supportsVision: false,
+      }),
     )
     configuredProviders.setStaticProvider(dashscopeProviderId, true)
   }
@@ -1535,12 +1593,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // splitting, classification, digests, themes, skill review. Logged because
   // this lane spends real money and shapes what the brain extracts, so which
   // model serves it should never be implicit.
-  const backgroundModel = configuredProviders.size > 0
-    ? ensureServableModel(BACKGROUND_MODEL, configuredProviders)
-    : BACKGROUND_MODEL
-  if (backgroundModel !== BACKGROUND_MODEL) {
-    console.log(`[provider] background lane: ${backgroundModel} (${BACKGROUND_MODEL} not servable)`)
-  }
+  // Keep the injected identity logical. The routing provider resolves the live
+  // serving background model per operation, so hot preference changes cannot
+  // leave long-lived workers pinned to the boot-time provider.
+  const backgroundModel = BACKGROUND_MODEL
   // Pipeline B's extraction model is chat-class, not background-class, but it
   // is hardcoded the same way and dies the same way without a Google key.
   const extractionModel = configuredProviders.size > 0
@@ -1549,6 +1605,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   if (extractionModel !== EXTRACTION_MODEL) {
     console.log(`[provider] extraction: ${extractionModel} (${EXTRACTION_MODEL} not servable)`)
   }
+  // Always construct synthesis lanes. A custom-only deployment resolves its
+  // workspace runtime at execution time; without either runtime, the provider
+  // call fails honestly instead of the feature disappearing at boot.
+  const synthesisModel = BACKGROUND_MODEL
   // A PDF bound for a model whose registry row says `nativePdf: false` is
   // swapped for its distillate HERE, at the provider boundary — so web chat,
   // every channel adapter, the outage fallback firing mid-turn, and replayed
@@ -1558,14 +1618,18 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // rung is resolved AFTER this provider exists (it needs `provider` itself).
   const documentDistill: DocumentDistillPort = {
     get configKey() {
+      const backend = selectMediaBackend('application/pdf')
       return distillConfigKey({
-        renderWidth: mediaBackend.kind === 'dashscope' ? DASHSCOPE_RENDER_WIDTH : PROVIDER_RENDER_WIDTH,
-        chunkPages: mediaBackend.kind === 'dashscope' ? DASHSCOPE_CHUNK_PAGES : PROVIDER_CHUNK_PAGES,
-        model: mediaBackend.kind === 'provider' ? mediaBackend.model : mediaBackend.kind,
+        renderWidth: backend.kind === 'dashscope' ? DASHSCOPE_RENDER_WIDTH : PROVIDER_RENDER_WIDTH,
+        chunkPages: backend.kind === 'dashscope' ? DASHSCOPE_CHUNK_PAGES : PROVIDER_CHUNK_PAGES,
+        model: backend.kind === 'provider' ? backend.model : backend.kind,
       })
     },
     distill: async ({ buffer, mime }) => {
-      const result = await distillFileToText({ buffer, mime }, { backend: mediaBackend })
+      const result = await distillFileToText(
+        { buffer, mime },
+        { backend: selectMediaBackend(mime) },
+      )
       return { text: result.text, model: result.model, usage: result.usage }
     },
   }
@@ -1580,8 +1644,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
    * provider-backed rung is resolved after this point.
    */
   const mediaBackendIsFreeRated = (): boolean => {
-    if (mediaBackend.kind !== 'provider') return false
-    const rates = modelRates(mediaBackend.model)
+    const backend = selectMediaBackend('application/pdf')
+    if (backend.kind !== 'provider') return false
+    const rates = modelRates(backend.model)
     return !!rates && rates.brackets.every((b) => b.inPerMTok === 0 && b.outPerMTok === 0)
   }
 
@@ -1592,7 +1657,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // empty until OAuth completes, so boot-selected background/extraction
     // model ids must be able to move onto the newly available provider
     // without requiring a Brian restart.
-    resolveModel: (model) => ensureServableModel(model, configuredProviders),
+    resolveModel: (model) => registryRow(model)?.class === 'background'
+      ? backgroundModelFor(configuredProviders)
+      : ensureServableModel(model, configuredProviders),
     analytics: {
       onFallback({ primaryModel, fallbackModel, errorKind, errorStatus }) {
         analytics.logEvent({
@@ -1617,11 +1684,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // works and a ChatGPT subscription pays nothing per token. Before this, the
   // chain fell through to `{ kind: 'dashscope', apiKey: '' }` and every
   // distill attempt 401'd on a Codex-only box.
-  if (!keyedMediaBackend && configuredProviders.size > 0) {
+  if (!googleMediaBackend && !dashscopeMediaBackend && configuredProviders.size > 0) {
     const mediaModel = ensureServableModel(BACKGROUND_MODEL, configuredProviders)
     const mediaModelRow = registryRow(mediaModel)
     if (mediaModelRow?.capabilities.vision) {
-      mediaBackend = { kind: 'provider', provider, model: mediaModel }
+      providerMediaBackend = { kind: 'provider', provider, model: mediaModel }
       console.log(`[media] backend: chat provider (${mediaModel}) — no Google or DashScope credential`)
     } else {
       console.warn(
@@ -1634,7 +1701,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const voiceTranscription = {
     enabled: env.VOICE_TRANSCRIPTION_ENABLED ?? false,
     apiKey: env.GEMINI_API_KEY ?? '',
-    backend: mediaBackend,
+    get backend() { return selectKeyedMediaBackend() ?? unavailableMediaBackend },
     model: env.VOICE_TRANSCRIPTION_MODEL,
   }
   const docGateway = createDocGateway()
@@ -1701,6 +1768,20 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const llmProviderSettingsStore = llmProviderEncryptionKey
     ? createDbWorkspaceLlmProviderSettingsStore(llmProviderEncryptionKey)
     : null
+  const resolveWorkspaceByoGeminiKey = async (workspaceId: string): Promise<string | null> => {
+    if (llmProviderSettingsStore) {
+      return llmProviderSettingsStore.getPlaintextKeySystem({ workspaceId, provider: 'gemini' })
+    }
+    const existing = await query<{ present: boolean }>(
+      `SELECT true AS present FROM workspace_llm_provider_settings
+        WHERE workspace_id = $1 AND provider = 'gemini' LIMIT 1`,
+      [workspaceId],
+    )
+    if (existing.rows[0]?.present) {
+      throw new Error('Workspace Gemini key exists but LLM_PROVIDER_KEY_ENCRYPTION_KEY is unavailable')
+    }
+    return null
+  }
   const customLlmNetworkPolicy = isSelfHostedOssEnv() ? 'private-network' : 'public-only'
   const customLlmEndpointStore = createDbWorkspaceCustomLlmEndpointStore(llmProviderEncryptionKey ?? undefined)
   const resolveWorkspaceCustomLlm = createWorkspaceCustomLlmResolver(customLlmEndpointStore, {
@@ -1830,10 +1911,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // ── KB sync-credential resolver ──
   // One open resolver serves the sync worker, knowledge routes, Home apps, and
   // repo writer in both editions. Hosted supplies no override or duplicate.
-  const syncCredentials: SyncCredentials = createSyncCredentialProvider(
-    connectorInstanceStore,
-    connectorGrantStore,
-  )
+  const syncCredentials: SyncCredentials = ports.buildSyncCredentials
+    ? ports.buildSyncCredentials({ connectorInstanceStore, connectorGrantStore })
+    : createSyncCredentialProvider(connectorInstanceStore, connectorGrantStore)
 
   const workspaceDirectoryStore: WorkspaceDirectoryStore = {
     async listMembers(userId, workspaceId) {
@@ -1930,7 +2010,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
     workerManager = createWorkerManager({
       provider,
-      model: 'gemini-flash',
+      // Keep the persisted worker model logical. Routing resolves the live
+      // background provider at execution/rehydration time.
+      model: BACKGROUND_MODEL,
       tools: new Map([...tools].filter(([_, t]) => t.isReadOnly)),
       // Record worker LLM COGS — the WorkerManager metering gap. COGS-only
       // (source 'included', no userMessageId → not credit-bearing), mirroring
@@ -1969,6 +2051,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       jobStore,
       workflowStore,
       provider,
+      resolveLlm: async (workspaceId) => {
+        const runtime = await resolveBackgroundRuntime(workspaceId)
+        return runtime ? { provider: runtime.provider, model: runtime.selector } : null
+      },
       resolveDeliveryTarget: createDeliveryTargetResolver(integrationStore ?? undefined),
       deliverToChannel: createWorkflowChannelDelivery({
         integrationStore: integrationStore ?? undefined,
@@ -2017,8 +2103,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // than connector API tools: the archive remains available when a live
     // WhatsApp / WeChat connection is offline, and every call owner-binds from
     // ToolContext. The same instances are bridged into native agent surfaces.
-    for (const tool of createChatArchiveTools({ embedder: sharedEmbedder })) {
-      tools.set(tool.name, tool)
+    // Raw query text crosses the wire, never a vector: the store embeds the
+    // query with the same client that embedded the stored segments, so both
+    // sides of every cosine comparison come from one implementation.
+    if (messageStoreClient) {
+      for (const tool of createChatArchiveTools({ client: messageStoreClient })) {
+        tools.set(tool.name, tool)
+      }
     }
 
     // Bug report tool — the create sink is a port; open default returns a
@@ -2206,23 +2297,37 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     allTools.set(tool.name, tool)
   }
 
+  const extractionRow = registryRow(EXTRACTION_MODEL)
+  const resolveWorkspaceExtractionLlm = async (
+    workspaceId: string,
+  ): Promise<NonNullable<ChatEpisodeInput['llm']> & { inputTokenLimit: number; maxTokens: number }> => {
+    const runtime = await resolveBackgroundRuntime(workspaceId)
+    return runtime
+      ? {
+          provider: runtime.provider,
+          model: runtime.selector,
+          modelTier: 'standard',
+          providerKeySource: 'user',
+          inputTokenLimit: runtime.inputTokenLimit,
+          maxTokens: runtime.maxTokens,
+        }
+      : {
+          provider,
+          // Keep this logical so routing reapplies the current application
+          // preference for every Pipeline B operation.
+          model: EXTRACTION_MODEL,
+          modelTier: 'standard',
+          providerKeySource: 'platform',
+          inputTokenLimit: extractionRow?.contextWindow ?? 1_000_000,
+          maxTokens: extractionRow?.maxOutput ?? 65_536,
+        }
+  }
+
   // ── Episode ingestors — built by the platform factory over boot's stores
   //    (open default: no-op chat ingest, undefined brain ingest). ──
   const builtIngestors = ports.buildEpisodeIngestors?.({
     provider, crmStore, entitiesStore, entityLinksStore, memoryStore, taskStore, episodesStore, analytics,
-    resolveWorkspaceLlm: async (workspaceId) => {
-      const runtime = await resolveBackgroundRuntime(workspaceId)
-      return runtime
-        ? {
-            provider: runtime.provider,
-            model: runtime.selector,
-            modelTier: 'standard',
-            providerKeySource: 'user' as const,
-            inputTokenLimit: runtime.inputTokenLimit,
-            maxTokens: runtime.maxTokens,
-          }
-        : null
-    },
+    resolveWorkspaceLlm: resolveWorkspaceExtractionLlm,
     usageStore,
     backgroundModel,
     extractionModel,
@@ -2231,9 +2336,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const chatEpisodeIngestor: ChatEpisodeIngestor =
     builtIngestors?.chatEpisodeIngestor ?? (async () => {})
   const brainEpisodeIngestor: BrainEpisodeIngestor | undefined = builtIngestors?.brainEpisodeIngestor
-  const chatArchiveEnrichmentWorker = brainEpisodeIngestor
+  // The message store owns the enrichment ledger — it builds and leases the
+  // windows — so this worker pulls work rather than discovering it. That leaves
+  // one owner of "which messages have been enriched", and a consumer that dies
+  // mid-window strands nothing: the lease expires and the window is reclaimable.
+  const chatArchiveEnrichmentWorker = brainEpisodeIngestor && messageStoreClient
     ? createChatArchiveEnrichmentWorker({
-        store: createChatArchiveEnrichmentStore(),
+        client: messageStoreClient,
         ingest: brainEpisodeIngestor,
         resolveAssistantId: resolvePrimaryAssistantForWorkspace,
       })
@@ -2242,13 +2351,23 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   // Structural-synthesis P4 — the RESEARCH fill. A research-tier `assistant_call`
   // step with a `blueprintId` + page anchor fills the blueprint into the anchored
-  // page from the research gather. Built only when a model key is present (no key
-  // → no synthesis; the step degrades to free-form authoring). Same stores as the
-  // recording/generate synthesizers.
-  const researchSynthesize = env.GEMINI_API_KEY
-    ? createResearchSynthesizer({
+  // page from the research gather. Built when the resolved application model has
+  // tool capability (Google via AI Studio/Vertex, DashScope, or Codex). Same
+  // stores as the recording/generate synthesizers.
+  const researchSynthesize = createResearchSynthesizer({
         provider,
-        model: 'gemini-flash',
+        model: synthesisModel,
+        resolveLlm: async (workspaceId) => {
+          const runtime = await resolveBackgroundRuntime(workspaceId)
+          return runtime ? {
+            provider: runtime.provider,
+            model: runtime.selector,
+            modelTier: runtime.modelTier,
+            providerKeySource: runtime.providerKeySource,
+            inputTokenLimit: runtime.inputTokenLimit,
+            maxTokens: runtime.maxTokens,
+          } : null
+        },
         savedViewStore,
         docPageStore: createDbDocPageStore(),
         crmStore,
@@ -2261,17 +2380,26 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         blueprintRecordStore,
         computeCostUsd: (model, usage) => calculateCost(model, usage),
       })
-    : undefined
 
   // Structural-synthesis GENERATE fill (brain → blueprint) + the in-chat /
   // in-workflow tool that wraps it. Built HERE (before the executor + chat route
-  // consume it) with the embedder for brain vector search. Undefined without a
-  // Gemini key. The standalone Blueprints-UI route meters its own credit
+  // consume it) with the provider-neutral embedder for brain vector search.
+  // The standalone Blueprints-UI route meters its own credit
   // (synthesis_surcharge); the tool rides the chat turn's per-message credit.
-  const generateSynthesize: GenerateSynthesizeFn | undefined = env.GEMINI_API_KEY
-    ? createGenerateSynthesizer({
+  const generateSynthesize: GenerateSynthesizeFn = createGenerateSynthesizer({
         provider,
-        model: 'gemini-flash',
+        model: synthesisModel,
+        resolveLlm: async (workspaceId) => {
+          const runtime = await resolveBackgroundRuntime(workspaceId)
+          return runtime ? {
+            provider: runtime.provider,
+            model: runtime.selector,
+            modelTier: runtime.modelTier,
+            providerKeySource: runtime.providerKeySource,
+            inputTokenLimit: runtime.inputTokenLimit,
+            maxTokens: runtime.maxTokens,
+          } : null
+        },
         savedViewStore,
         docPageStore: createDbDocPageStore(),
         crmStore,
@@ -2285,10 +2413,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         blueprintRecordStore,
         computeCostUsd: (model, usage) => calculateCost(model, usage),
       })
-    : undefined
-  const generateBlueprintTool: Tool | undefined = generateSynthesize
-    ? createGenerateBlueprintTool({ generateSynthesize, pageTemplateStore })
-    : undefined
+  const generateBlueprintTool: Tool = createGenerateBlueprintTool({ generateSynthesize, pageTemplateStore })
 
   // The blueprint output-contract direct surface: save/read records in-context
   // (no model run), define contracts from chat, discover what exists — plus
@@ -2339,14 +2464,16 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   let filesApi: ReturnType<typeof createFilesApi> | null = null
   let filesResolver: FilesClientResolver | null = null
   let chunkedFileUploads: ChunkedFileUploadService | null = null
-  let chatArchiveMediaService: ChatArchiveMediaService | null = null
-  let chatArchiveMediaWorker: ChatArchiveMediaWorker | null = null
 
   const calleeExecutor = createCalleeExecutor({
     provider,
     resolveWorkspaceCustomLlm,
     tools: allTools,
     memoryStore,
+    // Session-state bridge: a consult that delivers into a user channel reads
+    // that conversation's `# Open commitments` (read-only). See
+    // context-engine/session-state.md → "Delivery-conversation bridging".
+    sessionStateStore,
     // Lazy getter: `filesApi` is assigned further down (the workspace-
     // filesystem block) — a direct reference here would freeze `null`.
     // The executor reads `options.filesApi` per call, post-boot.
@@ -2976,6 +3103,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       entityMerge: { repo: createEntityMergeStore() },
       provider,
       reclassifierModel: 'gemini-flash',
+      resolveLlm: async (workspaceId) => {
+        const runtime = await resolveBackgroundRuntime(workspaceId)
+        return runtime ? { provider: runtime.provider, model: runtime.selector } : null
+      },
     })) {
       allTools.set(healingTool.name, healingTool)
     }
@@ -3076,15 +3207,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   allTools.set('setGoal', goalTools.setGoal)
   allTools.set('listGoals', goalTools.listGoals)
 
-  // COGS for the goal clarity + verify Flash calls. Both assessors only know
-  // the confirming/verifying user, so resolve that user's primary assistant for
-  // attribution (recordUsage INSERTs over `assistants WHERE id = $assistantId`,
-  // so the row only persists against a real assistant). Falls back to `userId`
-  // as the attribution id if none resolves. Overhead source (excluded from
-  // billing aggregates); best-effort + fire-and-forget, never blocks the
-  // confirm/verify flow, and a no-op when usageStore/userId is absent (OSS).
-  const resolveGoalOverheadAssistant = async (userId: string): Promise<string> => {
+  // Goal classifier/verifier COGS preserves the runtime identity. Workspace
+  // custom calls are user-keyed and therefore record zero platform spend.
+  const resolveGoalOverheadAssistant = async (userId: string, workspaceId?: string): Promise<string> => {
     try {
+      if (workspaceId) {
+        const primary = await getWorkspacePrimaryAssistant(userId, workspaceId)
+        if (primary) return primary.id
+      }
       const assistants = await listAccessibleAssistants(userId)
       return assistants.find((a) => a.kind === 'primary')?.id ?? assistants[0]?.id ?? userId
     } catch {
@@ -3092,41 +3222,73 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     }
   }
   const recordGoalOverheadUsage =
-    (source: 'overhead:goal-clarity' | 'overhead:goal-verify' | 'overhead:goal-triage', model = 'gemini-flash') =>
-    (usage: TokenUsage, userId?: string): void => {
-      if (!usageStore || !userId) return
+    (source: 'overhead:goal-clarity' | 'overhead:goal-verify' | 'overhead:goal-triage') =>
+    (usage: TokenUsage, context: GoalLlmUsageContext): void => {
+      if (!usageStore || !context.userId) return
       const store = usageStore
-      void resolveGoalOverheadAssistant(userId)
+      const userId = context.userId
+      void (context.assistantId
+        ? Promise.resolve(context.assistantId)
+        : resolveGoalOverheadAssistant(userId, context.workspaceId))
         .then((assistantId) =>
           store.recordUsage({
             userId,
             assistantId,
             sessionId: null,
-            model,
+            model: context.model,
+            modelTier: context.modelTier,
             inputTokens: usage.inputTokens,
             outputTokens: usage.outputTokens,
             cacheReadTokens: usage.cacheReadTokens,
             cacheWriteTokens: usage.cacheWriteTokens,
-            actualCostUsd: calculateCost(model, usage),
+            actualCostUsd: context.providerKeySource === 'user'
+              ? 0
+              : calculateCost(context.model, usage),
             source,
+            providerKeySource: context.providerKeySource,
           }),
         )
         .catch((err) => console.error(`[${source}] usage tracking failed:`, err))
     }
+
+  const resolveGoalLlm = async (workspaceId: string): Promise<GoalLlmRuntime | null> => {
+    const runtime = await resolveBackgroundRuntime(workspaceId)
+    if (runtime) {
+      return {
+        provider: runtime.provider,
+        model: runtime.selector,
+        modelTier: runtime.modelTier,
+        providerKeySource: runtime.providerKeySource,
+        inputTokenLimit: runtime.inputTokenLimit,
+        maxTokens: runtime.maxTokens,
+      }
+    }
+    if (configuredProviders.size === 0) return null
+    return {
+      provider,
+      model: backgroundModelFor(configuredProviders),
+      modelTier: 'standard',
+      providerKeySource: 'platform',
+    }
+  }
 
   // Confirmation clarity gate (§12) — assesses whether a goal's definition of
   // done is clear enough to work autonomously; an unclear goal is blocked at
   // confirm with a clarifying question. Cheap Flash classifier; fail-open.
   const goalClarityAssessor = createGoalClarityAssessor({
     provider,
-    model: 'gemini-flash',
+    model: BACKGROUND_MODEL,
+    modelTier: 'standard',
+    resolveLlm: resolveGoalLlm,
     onUsage: recordGoalOverheadUsage('overhead:goal-clarity'),
   })
   // Agentic completion verifier (§12 Phase 3) — adversarially judges a
   // markGoalComplete claim against the goal's outcome before it closes.
   const goalVerifier = createGoalVerifier({
     provider,
-    model: 'gemini-flash',
+    model: BACKGROUND_MODEL,
+    modelTier: 'standard',
+    resolveLlm: resolveGoalLlm,
     onUsage: recordGoalOverheadUsage('overhead:goal-verify'),
   })
 
@@ -3134,15 +3296,16 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // background-tier call per top-level task create: can the assistant honestly
   // help, given what this workspace actually has connected? On pass, mint the
   // draft goal with the generated brief; on fail/error, no draft (fail-closed).
-  // Wired only when a provider is configured, so keyless OSS never logs judge
-  // errors — tasks simply stay goal-free.
-  const TRIAGE_MODEL = backgroundModel
-  if (configuredProviders.size > 0) {
-    const taskTriageJudge = createTaskTriageJudge({
-      provider,
-      model: TRIAGE_MODEL,
-      onUsage: recordGoalOverheadUsage('overhead:goal-triage', TRIAGE_MODEL),
-    })
+  // Construct even on custom-only deployments. With neither an application
+  // provider nor a workspace custom endpoint, the judge fails closed per-call.
+  const TRIAGE_MODEL = BACKGROUND_MODEL
+  const taskTriageJudge = createTaskTriageJudge({
+    provider,
+    model: TRIAGE_MODEL,
+    modelTier: 'standard',
+    resolveLlm: resolveGoalLlm,
+    onUsage: recordGoalOverheadUsage('overhead:goal-triage'),
+  })
     // What the assistant can actually do here: the static core surface plus
     // the workspace's live connector grants (clearance-filtered). Grounds the
     // judge so a drafted approach never names an unconnected capability
@@ -3171,11 +3334,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         return CORE_CAPABILITY_LINES
       }
     }
-    judgeTaskForGoal = (task, userId) => {
+  judgeTaskForGoal = (task, userId) => {
       void (async () => {
         const capabilities = await summariseWorkspaceCapabilities(userId, task.workspaceId)
         const attrs = Object.keys(task.attributes ?? {}).length > 0 ? JSON.stringify(task.attributes) : null
-        const brief = await taskTriageJudge({ title: task.title, description: attrs, capabilities, userId })
+        const assistantId = (await getWorkspacePrimaryAssistant(userId, task.workspaceId))?.id
+        const brief = await taskTriageJudge({ title: task.title, description: attrs, capabilities, userId, workspaceId: task.workspaceId, assistantId })
         if (!brief) return
         await goalStore.create({
           workspaceId: task.workspaceId,
@@ -3188,7 +3352,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           brief: { verification: brief.verification, approach: brief.approach, judgeReason: brief.judgeReason },
         })
       })().catch((err) => console.error('[goals] task triage draft failed:', err))
-    }
   }
 
   // Task-autopilot spin-up tools (confirm a draft goal; work a task to done) +
@@ -3388,6 +3551,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       entityLinks: entityLinksStore,
       readCachedFile: (id, ctx) => fileStore.get(id, ctx),
       resolvePolicy: resolveFilesToolPolicy,
+      // renderPdf({ pageId }): read the live merged doc page (RLS by userId)
+      // and hand its Block[] to the PDF spoke. Same reader the doc tools use.
+      readDocPage: async (userId, pageId) => {
+        const current = await docPageStore.getVersionedPage(userId, pageId)
+        return current ? { title: current.title, page: current.page } : null
+      },
       onEvent: (evt, ctx) => {
         const base = { userId: ctx.userId, assistantId: ctx.assistantId, sessionId: ctx.sessionId, channelType: ctx.channelType }
         if (evt.type === 'file_created') {
@@ -3411,6 +3580,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     allTools.set('fileDelete', fileTools.fileDelete)
     allTools.set('saveFileToBrain', fileTools.saveFileToBrain)
     allTools.set('sendFile', fileTools.sendFile)
+    allTools.set('renderPdf', fileTools.renderPdf)
     brainFileTools = {
       fileWrite: fileTools.fileWrite,
       fileAppend: fileTools.fileAppend,
@@ -3429,7 +3599,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         filesApi,
         ingest: brainEpisodeIngestor,
         distill: async ({ buffer, mime }) =>
-          (await distillFileToText({ buffer, mime }, { backend: mediaBackend })).text,
+          (await distillFileToText({ buffer, mime }, { backend: selectMediaBackend(mime) })).text,
       })
     }
   }
@@ -3467,8 +3637,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // The watched exploration's LLM (browserExplore → provider runBrowserUse)
   // threads from HERE — no model id lives in the sandbox tree (§4.14). The
   // browser-grounding leg rides a cheap tier: Haiku when the Anthropic key
-  // exists, else the platform Gemini key on Flash. Without either config the
-  // provider refuses the lane honestly instead of argparse-dying in the VM.
+  // exists, else Gemini Flash, else DashScope through its OpenAI-compatible
+  // endpoint. Qwen chat rows are text-only, so that last path uses the DOM /
+  // accessibility state without screenshot vision.
   const browserUseLlm = env.ANTHROPIC_API_KEY
     ? {
         apiKeyEnvName: 'ANTHROPIC_API_KEY' as const,
@@ -3483,7 +3654,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           // so no alias resolution) — Flash 3, the cheap-leg tier.
           model: env.BROWSER_USE_MODEL || 'gemini-3-flash-preview',
         }
-      : undefined
+      : env.DASHSCOPE_API_KEY
+        ? {
+            apiKeyEnvName: 'OPENAI_API_KEY' as const,
+            apiKey: env.DASHSCOPE_API_KEY,
+            baseUrl: dashscopeBaseUrl,
+            model: env.BROWSER_USE_MODEL || 'qwen3.5-flash',
+            useVision: false,
+          }
+        : undefined
   const sandboxProvider: SandboxProvider | null = env.E2B_API_KEY
     ? createE2bCloudProvider(
         createE2bRuntime({ apiKey: env.E2B_API_KEY, defaultTemplateId: env.E2B_TEMPLATE_ID }),
@@ -3988,9 +4167,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     resolveAppSoul,
     engineHooks: ports.engineHooks,
     llmProviderSettingsStore: llmProviderSettingsStore ?? undefined,
-    buildWorkspaceProvider: llmProviderSettingsStore
-      ? (apiKey: string) => wrapProvider(createGeminiProvider(apiKey))
-      : undefined,
+    resolveWorkspaceByoGeminiKey,
+    buildWorkspaceProvider: (apiKey: string) => wrapProvider(createGeminiProvider(apiKey)),
     resolveWorkspaceCustomLlm,
     systemPrompt: webChatSystemPrompt,
     tools: allTools,
@@ -4211,7 +4389,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       askShopifyAssistant({ workspaceId, storeScope, task, callerSessionId: `home-app:${appId}` }),
   }))
 
-  // AI Engines MCP — read-only observation of external answer engines + GSC,
+  // AI Engines MCP — read-only observation of external answer engines,
   // registered in a workspace as a custom connector. Dark by default: the
   // route exists only when ENGINES_MCP_SECRET plus at least one engine
   // credential are set (docs/architecture/integrations/engines-mcp.md).
@@ -4448,6 +4626,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       backgroundModel,
       voiceTranscription,
       usageStore,
+      // Window-audio persistence + the assembled-windows finalize fallback.
+      filesResolver,
     }))
   }
 
@@ -4663,6 +4843,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     listWorkspaceAssistants: async (userId, workspaceId) =>
       (await listAccessibleAssistants(userId, workspaceId)).map((a) => ({ id: a.id, name: a.name })),
     draftProvider: provider,
+    resolveWorkspaceCustomLlm,
     getDraftContext: getSkillDraftContext,
     fileStore,
     voiceTranscription,
@@ -4933,6 +5114,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       createCompletionWorkflow,
       kickoffGoal: goalDriver.kickoffGoal,
       assessClarity: goalClarityAssessor,
+      resolveAssistantId: async (userId, workspaceId) =>
+        (await getWorkspacePrimaryAssistant(userId, workspaceId))?.id,
     }),
   )
 
@@ -5068,6 +5251,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     workspaceDirectory: workspaceDirectoryStore,
     softDeleteStore: createSoftDeleteStore(),
     provider,
+    resolveBackgroundRuntime,
+    get backgroundModel() { return backgroundModelFor(configuredProviders) },
     docPageStore: createDbDocPageStore(),
     jobStore,
     docEntityStore,
@@ -5127,7 +5312,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   app.use('/api', requireAuth(env.JWT_SECRET), docEntitiesRoutes({ docEntityStore, workspaceStore }))
 
-  app.use('/api', requireAuth(env.JWT_SECRET), docThemesRoutes({ docThemesStore, workspaceStore, provider, backgroundModel }))
+  app.use('/api', requireAuth(env.JWT_SECRET), docThemesRoutes({
+    docThemesStore,
+    workspaceStore,
+    provider,
+    backgroundModel,
+    resolveBackgroundRuntime,
+  }))
 
   const commentThreadStore = createDbCommentThreadStore()
   const docNotificationsStore = createDbDocNotificationsStore()
@@ -5420,9 +5611,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         },
         async construct(brief, evidence, claims, template) {
           const brandVoice = await resolveBrandVoice(job.initiatedByUserId, job.workspaceId)
-          if (brief.family === 'document') return generateDocumentFromTemplate({ provider, model: backgroundModel, artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: template.id, outcome: brief.outcome, audience: brief.audience, additionalContext: brief.additionalContext, template, brandVoice })
-          if (brief.family === 'presentation') return generatePresentationFromTemplate({ provider, model: backgroundModel, artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: template.id, outcome: brief.outcome, audience: brief.audience, additionalContext: brief.additionalContext, evidence, claims, template, brandVoice })
-          return generateSpreadsheetFromTemplate({ provider, model: backgroundModel, artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: template.id, outcome: brief.outcome, audience: brief.audience, additionalContext: brief.additionalContext, template, brandVoice })
+          const runtime = await resolveBackgroundRuntime(job.workspaceId)
+          const generationProvider = runtime?.provider ?? provider
+          const generationModel = runtime?.selector ?? BACKGROUND_MODEL
+          if (brief.family === 'document') return generateDocumentFromTemplate({ provider: generationProvider, model: generationModel, artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: template.id, outcome: brief.outcome, audience: brief.audience, additionalContext: brief.additionalContext, template, brandVoice })
+          if (brief.family === 'presentation') return generatePresentationFromTemplate({ provider: generationProvider, model: generationModel, artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: template.id, outcome: brief.outcome, audience: brief.audience, additionalContext: brief.additionalContext, evidence, claims, template, brandVoice })
+          return generateSpreadsheetFromTemplate({ provider: generationProvider, model: generationModel, artifactId: job.artifactId, workspaceId: job.workspaceId, templateVersionId: template.id, outcome: brief.outcome, audience: brief.audience, additionalContext: brief.additionalContext, template, brandVoice })
         },
         async processMedia(snapshot) { return snapshot },
         async resolveResource(resourceId) {
@@ -5463,6 +5657,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     getSnapshot: officeLiveStore.get,
     async revise({ snapshot, targetIds, instruction, currentVersion, versionDrifted, job }) {
       const brandVoice = await resolveBrandVoice(job.initiatedByUserId, job.workspaceId)
+      const runtime = await resolveBackgroundRuntime(job.workspaceId)
       const role = (job.authorityProjection as { role?: unknown }).role === 'comment' ? 'comment' as const : 'edit' as const
       const assistantId = job.assistantId ?? APP_LEVEL_ASSISTANT_ID
       return runOfficeEdit({
@@ -5479,8 +5674,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         evidencePacket: [],
         snapshot,
       }, ({ instruction: nextInstruction, targetIds: nextTargetIds, snapshot: nextSnapshot }) => generateAssistantOfficeCommands({
-        provider,
-        model: backgroundModel,
+        provider: runtime?.provider ?? provider,
+        model: runtime?.selector ?? BACKGROUND_MODEL,
         snapshot: nextSnapshot,
         baseVersion: currentVersion,
         assistantId,
@@ -5769,7 +5964,16 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     refresh: async (userId, workspaceId) => {
       const signals = await assembleHomeSignals(userId, workspaceId, { workflowStore, savedViewStore })
       const assistantId = await resolvePrimaryAssistantForWorkspace(workspaceId)
-      await runHomeRefresh({ userId, workspaceId, assistantId, provider, homeDockStore, signals })
+      const runtime = await resolveBackgroundRuntime(workspaceId)
+      await runHomeRefresh({
+        userId,
+        workspaceId,
+        assistantId,
+        provider: runtime?.provider ?? provider,
+        model: runtime?.selector ?? BACKGROUND_MODEL,
+        homeDockStore,
+        signals,
+      })
     },
   }))
 
@@ -6032,6 +6236,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const sessionResumeReplay = createSessionResumeReplay({
     provider,
     resolveWorkspaceCustomLlm,
+    resolveWorkspaceByoGeminiKey,
+    buildWorkspaceProvider: (apiKey) => wrapProvider(createGeminiProvider(apiKey)),
+    usageStore,
     tools: allTools,
     systemPrompt: webChatSystemPrompt,
     analytics,
@@ -6092,7 +6299,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // Flash 3 chat alias, which is 2x the input rate and 2x the output rate for
   // invisible background summarization. `backgroundModel` is the boot-resolved
   // id (falls back when Flash Lite isn't servable for the configured provider).
-  const CONSOLIDATION_MODEL = backgroundModel
+  const CONSOLIDATION_MODEL = BACKGROUND_MODEL
   const consolidationCallModel = async (
     prompt: string,
     ctx: { assistantId: string; userId: string | null; workspaceId: string | null; phase: string },
@@ -6109,15 +6316,16 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     }))
     const attributionUserId = ctx.userId ?? (workspaceId ? await ownerForWorkspace(workspaceId) : null)
     if (response.usage && attributionUserId && usageStore) {
+      const servedModel = response.model || callModel
       const cost = customRuntime?.providerKeySource === 'user'
         ? 0
-        : calculateCost(callModel, response.usage)
+        : calculateCost(servedModel, response.usage)
       usageStore.recordUsage({
         userId: attributionUserId,
         assistantId: ctx.assistantId,
         workspaceId: workspaceId ?? undefined,
         sessionId: null,
-        model: response.model || callModel,
+        model: servedModel,
         modelTier: 'standard',
         inputTokens: response.usage.inputTokens,
         outputTokens: response.usage.outputTokens,
@@ -6175,7 +6383,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           tasks: taskStore,
           candidates: brainCandidateStore,
           provider,
-          model: 'gemini-flash',
+          model: BACKGROUND_MODEL,
           resolveLlm: async (workspaceId: string) => {
             const runtime = await resolveBackgroundRuntime(workspaceId)
             return runtime
@@ -6187,8 +6395,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
                 }
               : {
                   provider,
-                  model: 'gemini-flash',
-                  modelTier: 'pro',
+                  model: BACKGROUND_MODEL,
+                  modelTier: 'standard',
                   providerKeySource: 'platform' as const,
                 }
           },
@@ -6256,7 +6464,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }
 
   // ── Skill-review worker ──
-  const SKILL_REVIEW_MODEL = backgroundModel
+  const SKILL_REVIEW_MODEL = BACKGROUND_MODEL
   const skillReviewLLM = createGeminiSkillReviewLLM(
     async ({ systemPrompt, prompt, maxTokens, attribution }) => {
       const workspaceId = await workspaceForAssistant(attribution.assistantId)
@@ -6270,14 +6478,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         maxTokens,
       }))
       if (response.usage && usageStore) {
+        const servedModel = response.model || callModel
         const cost = customRuntime?.providerKeySource === 'user'
           ? 0
-          : calculateCost(callModel, response.usage)
+          : calculateCost(servedModel, response.usage)
         usageStore.recordUsage({
           userId: attribution.userId,
           assistantId: attribution.assistantId,
           sessionId: null,
-          model: response.model || callModel,
+          model: servedModel,
           modelTier: 'standard',
           inputTokens: response.usage.inputTokens,
           outputTokens: response.usage.outputTokens,
@@ -6344,7 +6553,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       const workspaceId = await workspaceForAssistant(attribution.assistantId)
       const customRuntime = await resolveBackgroundRuntime(workspaceId)
       const callProvider = customRuntime?.provider ?? provider
-      const callModel = customRuntime?.selector ?? backgroundModel
+      const callModel = customRuntime?.selector ?? BACKGROUND_MODEL
       const response = await collectStream(callProvider.stream({
         model: callModel,
         messages: [{ role: 'user', content: prompt }],
@@ -6352,14 +6561,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         maxTokens,
       }))
       if (response.usage && usageStore) {
+        const servedModel = response.model || callModel
         const cost = customRuntime?.providerKeySource === 'user'
           ? 0
-          : calculateCost(callModel, response.usage)
+          : calculateCost(servedModel, response.usage)
         usageStore.recordUsage({
           userId: attribution.userId,
           assistantId: attribution.assistantId,
           sessionId: null,
-          model: response.model || callModel,
+          model: servedModel,
           modelTier: 'standard',
           inputTokens: response.usage.inputTokens,
           outputTokens: response.usage.outputTokens,
@@ -6540,7 +6750,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         // explicit POST /ingest path, which distilled PDFs/images back when it
         // ran inline. Silent promotion stays store-only (worker gates on mode).
         distill: async ({ buffer, mime }) =>
-          (await distillFileToText({ buffer, mime }, { backend: mediaBackend })).text,
+          (await distillFileToText({ buffer, mime }, { backend: selectMediaBackend(mime) })).text,
         ...(brainEpisodeIngestor ? { brainIngest: brainEpisodeIngestor } : {}),
       })
     : null
@@ -6556,7 +6766,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         filesApi,
         connectorInstanceStore,
         distill: async ({ buffer, mime }) =>
-          (await distillFileToText({ buffer, mime }, { backend: mediaBackend })).text,
+          (await distillFileToText({ buffer, mime }, { backend: selectMediaBackend(mime) })).text,
         ...(brainEpisodeIngestor ? { brainIngest: brainEpisodeIngestor } : {}),
       })
     : null
@@ -6582,14 +6792,20 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // Structural synthesis uses the already-resolved extraction model rather than
   // assuming Gemini. This keeps the hosted callback reusable in OSS and allows
   // Qwen-only deployments when their configured model supports tool calls.
-  const synthesisModelRow = registryRow(extractionModel)
-  const synthesisModel = synthesisModelRow?.capabilities.tools && configuredProviders.has(synthesisModelRow.provider)
-    ? extractionModel
-    : undefined
-  const recordingSynthesize: RecordingSynthesizeFn | undefined = synthesisModel
-    ? createRecordingSynthesizer({
+  const recordingSynthesize: RecordingSynthesizeFn = createRecordingSynthesizer({
         provider,
         model: synthesisModel,
+        resolveLlm: async (workspaceId) => {
+          const runtime = await resolveBackgroundRuntime(workspaceId)
+          return runtime ? {
+            provider: runtime.provider,
+            model: runtime.selector,
+            modelTier: runtime.modelTier,
+            providerKeySource: runtime.providerKeySource,
+            inputTokenLimit: runtime.inputTokenLimit,
+            maxTokens: runtime.maxTokens,
+          } : null
+        },
         savedViewStore,
         docPageStore: createDbDocPageStore(),
         crmStore,
@@ -6603,14 +6819,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         blueprintRecordStore,
         computeCostUsd: (model, usage) => calculateCost(model, usage),
       })
-    : undefined
 
   // Always construct the drain when storage exists. If ffmpeg/ffprobe or a
   // transcriber is unavailable, the claimed job is retried then parked FAILED
   // with that explicit prerequisite error instead of remaining pending forever.
-  const recordingTranscribers: RecordingTranscriber[] = []
+  const googleRecordingTranscribers: RecordingTranscriber[] = []
+  const dashscopeRecordingTranscribers: RecordingTranscriber[] = []
   if (vertexTx && env.GCS_FILES_BUCKET && filesBlobClient) {
-    recordingTranscribers.push(geminiTranscriber({
+    googleRecordingTranscribers.push(geminiTranscriber({
       transport: vertexTx,
       uploadAudio: async ({ buffer, mime }) => {
         const key = `recording-transcription/${randomUUID()}`
@@ -6625,36 +6841,56 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       },
     }))
   } else if (env.GEMINI_API_KEY) {
-    recordingTranscribers.push(geminiTranscriber({ apiKey: env.GEMINI_API_KEY }))
+    googleRecordingTranscribers.push(geminiTranscriber({ apiKey: env.GEMINI_API_KEY }))
   }
   if (env.DASHSCOPE_API_KEY) {
-    recordingTranscribers.push(qwenAsrTranscriber({ apiKey: env.DASHSCOPE_API_KEY }))
-    recordingTranscribers.push(qwenFiletransTranscriber({ apiKey: env.DASHSCOPE_API_KEY }))
-  }
-  const recordingTranscriber = recordingTranscribers.length === 0
-    ? undefined
-    : recordingTranscribers.length === 1
-      ? recordingTranscribers[0]
-      : withTranscriberFallback(recordingTranscribers[0], ...recordingTranscribers.slice(1))
-
-  if (filesResolver && env.BRIAN_MESSAGE_STORE_HMAC_SECRET) {
-    const mediaStore = createChatArchiveMediaStore()
-    chatArchiveMediaService = createChatArchiveMediaService({ store: mediaStore, filesResolver })
-    chatArchiveMediaWorker = createChatArchiveMediaWorker({
-      store: mediaStore,
-      filesResolver,
-      transcriber: recordingTranscriber,
-      resolveTranscriptionLanguage: async (workspaceId) =>
-        (await getWorkspaceTranscriptionPrefs(workspaceId)).languageCode,
-      distill: async ({ buffer, mime, prompt }) =>
-        (await distillFileToText({ buffer, mime }, { backend: mediaBackend, prompt })).text,
-    })
-    app.use('/internal/chat-archive', chatArchiveMediaRoutes({
-      service: chatArchiveMediaService,
-      hmacSecret: env.BRIAN_MESSAGE_STORE_HMAC_SECRET,
-      baseUrl: `http://127.0.0.1:${port}`,
+    dashscopeRecordingTranscribers.push(qwenAsrTranscriber({
+      apiKey: env.DASHSCOPE_API_KEY,
+      baseUrl: dashscopeBaseUrl,
+      ...(env.DASHSCOPE_ASR_MODEL ? { model: env.DASHSCOPE_ASR_MODEL } : {}),
     }))
-    if (runWorkers) chatArchiveMediaWorker.start()
+    dashscopeRecordingTranscribers.push(qwenFiletransTranscriber({
+      apiKey: env.DASHSCOPE_API_KEY,
+      baseUrl: dashscopeBaseUrl,
+      ...(env.DASHSCOPE_FILETRANS_MODEL ? { model: env.DASHSCOPE_FILETRANS_MODEL } : {}),
+    }))
+  }
+  const selectRecordingTranscriber = (): RecordingTranscriber | undefined => {
+    const preferred = configuredProviders.preferredProvider
+    const transcribers = preferred === 'dashscope-intl' || preferred === 'openai-compat:dashscope-intl'
+      ? [...dashscopeRecordingTranscribers, ...googleRecordingTranscribers]
+      : [...googleRecordingTranscribers, ...dashscopeRecordingTranscribers]
+    return transcribers.length === 0
+      ? undefined
+      : transcribers.length === 1
+        ? transcribers[0]
+        : withTranscriberFallback(transcribers[0], ...transcribers.slice(1))
+  }
+  const recordingTranscriber: RecordingTranscriber | undefined =
+    googleRecordingTranscribers.length + dashscopeRecordingTranscribers.length === 0
+      ? undefined
+      : {
+          get name() { return selectRecordingTranscriber()!.name },
+          transcribe: (request) => selectRecordingTranscriber()!.transcribe(request),
+        }
+
+  // Extraction is a toolchain — ffmpeg, a SILK decoder, a cloud ASR fallback
+  // chain, Office/PDF parsing, a vision model — so it stays here. Only the
+  // control moved: the store owns the bytes and the queue and calls this as a
+  // stateless function, which is why there is no worker and no job table left.
+  if (env.BRIAN_MESSAGE_STORE_HMAC_SECRET) {
+    app.use('/internal', chatArchiveExtractRoutes({
+      service: createExtractService({
+        transcriber: recordingTranscriber,
+        distill: async ({ buffer, mime, prompt }) =>
+          (await distillFileToText(
+            { buffer, mime },
+            { backend: selectMediaBackend(mime), prompt },
+          )).text,
+      }),
+      secret: env.BRIAN_MESSAGE_STORE_HMAC_SECRET,
+      allowRemote: env.BRIAN_MESSAGE_STORE_ALLOW_REMOTE === 'true',
+    }))
   }
 
   const recordingProcessWorker = filesResolver && filesBlobClient && filesApi
@@ -6795,6 +7031,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     brain: {
       provider,
       model: extractionModel,
+      resolveLlm: resolveWorkspaceExtractionLlm,
       crm: crmStore,
       entities: entitiesStore,
       entityLinks: entityLinksStore,
@@ -6930,7 +7167,16 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const ctx: BootContext = {
     app,
     provider,
-    backgroundModel,
+    resolveWorkspaceCustomLlm,
+    resolveBackgroundRuntime,
+    get backgroundModel() { return backgroundModelFor(configuredProviders) },
+    get extractionModel() {
+      return configuredProviders.size > 0
+        ? ensureServableModel(EXTRACTION_MODEL, configuredProviders)
+        : EXTRACTION_MODEL
+    },
+    resolveBackgroundModel: () => backgroundModelFor(configuredProviders),
+    configuredProviders,
     docGateway,
     docPageStore,
     allTools,
@@ -7058,6 +7304,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         connectorSecret: env.WA_CONNECTOR_SECRET,
         integrationStore,
         provider,
+        model: EXTRACTION_MODEL,
+        resolveLlm: resolveWorkspaceExtractionLlm,
         crm: crmStore,
         entities: entitiesStore,
         entityLinks: entityLinksStore,
@@ -7155,9 +7403,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         ingestor: whatsapp.ingestor,
         bot: whatsapp.bot,
         filesResolver: filesResolver ?? undefined,
-        archiveMedia: chatArchiveMediaService ?? undefined,
-        archiveMediaHmacSecret: env.BRIAN_MESSAGE_STORE_HMAC_SECRET,
-        archiveMediaBaseUrl: `http://127.0.0.1:${port}`,
         archiveIncoming: (input) => appendInboundChatArchive({
           source: 'whatsapp',
           workspaceId: input.workspaceId,
@@ -7169,6 +7414,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           message: input.message,
         }),
         passUnknownToFallback: ports.whatsappOfficialFallback,
+        archiveMedia: chatArchiveLiveMedia,
       }))
     }
 
@@ -7183,7 +7429,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     if (integrationStore) {
       app.use('/webhook/telegram', telegramByoRoutes({
         backgroundModel,
-        provider, resolveWorkspaceCustomLlm, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
+        provider, configuredProviders, resolveWorkspaceCustomLlm, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
         memoryStore, usageStore, checkCreditBudget: ports.checkCreditBudget,
         appUrl: env.APP_URL, apiUrl: env.API_URL, integrationStore,
         linkedAccountStore, ownerPairing: {
@@ -7204,7 +7450,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         backgroundModel,
         ingestChannelMediaRef: channelHosts.slackIngestChannelMediaRef,
         artifactPromoter,
-        provider, resolveWorkspaceCustomLlm, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
+        provider, configuredProviders, resolveWorkspaceCustomLlm, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
         memoryStore, usageStore, checkCreditBudget: ports.checkCreditBudget,
         integrationStore, channelUserStore, linkedAccountStore, linkCodeStore,
         workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
@@ -7230,7 +7476,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       // docs/architecture/channels/msteams.md.
       app.use('/webhook/msteams', msteamsRoutes({
         backgroundModel,
-        provider, resolveWorkspaceCustomLlm, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
+        provider, configuredProviders, resolveWorkspaceCustomLlm, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
         memoryStore, usageStore, checkCreditBudget: ports.checkCreditBudget,
         integrationStore, channelUserStore,
         workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
@@ -7245,7 +7491,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         backgroundModel,
           ingestChannelMediaRef: channelHosts.discordIngestChannelMediaRef,
           artifactPromoter,
-          connectorSecret: env.DISCORD_CONNECTOR_SECRET, provider, resolveWorkspaceCustomLlm, systemPrompt: LAYER_1_SYSTEM_PROMPT,
+          connectorSecret: env.DISCORD_CONNECTOR_SECRET, provider, configuredProviders, resolveWorkspaceCustomLlm, systemPrompt: LAYER_1_SYSTEM_PROMPT,
           tools: allTools, capabilityStore, memoryStore, usageStore,
           checkCreditBudget: ports.checkCreditBudget, integrationStore, channelUserStore,
           workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
@@ -7257,14 +7503,19 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         app.use('/internal/wechat', wechatRoutes({
           backgroundModel,
           artifactPromoter,
-          connectorSecret: env.WECHAT_CONNECTOR_SECRET, provider, resolveWorkspaceCustomLlm, systemPrompt: LAYER_1_SYSTEM_PROMPT,
+          connectorSecret: env.WECHAT_CONNECTOR_SECRET, provider, configuredProviders, resolveWorkspaceCustomLlm, systemPrompt: LAYER_1_SYSTEM_PROMPT,
           tools: allTools, capabilityStore, memoryStore, usageStore,
           checkCreditBudget: ports.checkCreditBudget, integrationStore, channelUserStore,
           workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
           connectorInstanceStore, knowledgeStore, gdriveFilesStore, workspaceFilesStore, analytics,
           skillStore, episodicStore, sessionStateStore, fileStore,
-          archiveMedia: chatArchiveMediaService ?? undefined,
-        }))
+          // Without this the route's staging block is unreachable and every
+          // inbound attachment archives as `availability: 'missing'` — the
+          // message row lands, the bytes are lost, and nothing says so. iLink
+          // CDN media is short-lived and AES-encrypted, so it cannot be
+          // re-fetched later; this is the only moment those bytes exist.
+          archiveMedia: chatArchiveLiveMedia,
+          }))
       }
     }
   }
@@ -7304,7 +7555,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     mailboxSyncWorker.stop()
     externalSinkRelay.stop()
     chatArchiveEnrichmentWorker?.stop()
-    chatArchiveMediaWorker?.stop()
     stuckSessionSweeper.stop()
     fileIngestWorker?.stop()
     gdriveEnrichmentWorker?.stop()

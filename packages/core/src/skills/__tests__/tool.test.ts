@@ -89,11 +89,26 @@ describe('[COMP:skills/tool] createUseSkillTool', () => {
     expect(instructions).not.toContain('fillBlueprintFromBrain')
   })
 
-  it('returns an error result naming the missing skill for an unknown id', async () => {
-    const tool = createUseSkillTool({ getAvailableSkills: () => [skillContent()] })
+  // Message-first text, not an `{ error }` object: name the missed id, ship the
+  // discovery pointer as the ids that exist RIGHT NOW, forbid the blind retry.
+  // docs/architecture/engine/tool-executor.md → "Failure copy".
+  it('returns an error result naming the missing skill and the available ids', async () => {
+    const tool = createUseSkillTool({
+      getAvailableSkills: () => [skillContent({ id: 'research-helper' })],
+    })
     const res = await tool.execute({ skill: 'ghost-skill' }, ctx)
     expect(res.isError).toBe(true)
-    expect((res.data as { error: string }).error).toContain('ghost-skill')
+    expect(typeof res.data).toBe('string')
+    expect(res.data as string).toContain('ghost-skill')
+    expect(res.data as string).toContain('Ids available right now: research-helper')
+    expect(res.data as string).toContain('Do NOT retry this exact id.')
+  })
+
+  it('says so plainly when the assistant has no skills at all', async () => {
+    const tool = createUseSkillTool({ getAvailableSkills: () => [] })
+    const res = await tool.execute({ skill: 'anything' }, ctx)
+    expect(res.isError).toBe(true)
+    expect(res.data as string).toContain('no skills available at all')
   })
 
   it('re-reads the available skills on each call', async () => {

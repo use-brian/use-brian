@@ -1,4 +1,4 @@
-export { createWechatAdapter, type WechatAdapterOptions } from './adapter.js'
+export { createWechatAdapter, describeWechatPayload, type WechatAdapterOptions } from './adapter.js'
 export { markdownToWechat } from './markdown.js'
 export {
   createIlinkClient,

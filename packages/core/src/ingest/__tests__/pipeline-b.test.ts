@@ -53,7 +53,7 @@ import type { PlatformEngagementMetrics } from '../types.js'
 
 // ── Mock provider (sequenced responses across multiple stream() calls) ──
 
-function sequencedProvider(responses: string[], requests?: ProviderRequest[]): LLMProvider {
+function sequencedProvider(responses: string[], requests?: ProviderRequest[], servedModel?: string): LLMProvider {
   let i = 0
   return {
     name: 'mock',
@@ -66,6 +66,7 @@ function sequencedProvider(responses: string[], requests?: ProviderRequest[]): L
       requests?.push(request)
       const text = responses[Math.min(i, responses.length - 1)] ?? ''
       i++
+      if (servedModel) yield { type: 'message_start', model: servedModel } as StreamChunk
       yield { type: 'text_delta', text } as StreamChunk
       yield {
         type: 'message_end',
@@ -92,7 +93,7 @@ function throwingProvider(): LLMProvider {
 
 // Sequenced provider that also records each request it was called with — lets a
 // test inspect the assembled extraction prompt (spotlight markers, system rule).
-function capturingProvider(responses: string[]): {
+function capturingProvider(responses: string[], servedModel?: string): {
   provider: LLMProvider
   requests: ProviderRequest[]
 } {
@@ -108,6 +109,7 @@ function capturingProvider(responses: string[]): {
       requests.push(req)
       const text = responses[Math.min(i, responses.length - 1)] ?? ''
       i++
+      if (servedModel) yield { type: 'message_start', model: servedModel } as StreamChunk
       yield { type: 'text_delta', text } as StreamChunk
       yield {
         type: 'message_end',
@@ -1263,9 +1265,14 @@ describe('[COMP:brain/pipeline-b] processEpisode', () => {
     // identical column, the fingerprint of end-of-input. Misdiagnosis cost:
     // the 2026-07-16 response was to raise the token cap, which was never the
     // cause (failing calls used 194-2646 of 8192 tokens).
+    //
+    // The payload here stops before ANY nested value closes, so there is no
+    // salvage point and the window is genuinely unrecoverable. Output that
+    // stops after one or more complete records is now recovered instead —
+    // see 'salvages the complete records when the model stops mid-object'.
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const truncated =
-      '{"summary":"s","entities":[],"edges":[],"memories":[{"scope":"user","summary":"saved","detail":"d"'
+      '{"summary":"s","entities":[{"kind":"person","display_name":"Priya'
     const episodes = spyEpisodes()
     const deps = makeDeps({
       provider: sequencedProvider([truncated, truncated]),
@@ -1326,6 +1333,65 @@ describe('[COMP:brain/pipeline-b] processEpisode', () => {
     expect(result.extracted).toBe(true)
     expect(memories.created.map((m) => m.summary)).toContain('saved')
     expect(episodes.statusCalls).toEqual([{ id: 'ep-1', next: 'archived' }])
+  })
+
+  it('salvages the complete records when the model stops mid-object', async () => {
+    // Regression: on a provider without constrained decoding the model stops
+    // naturally (stopReason 'end_turn', far below the output cap) leaving the
+    // JSON unclosed. scanBalancedJsonObject demanded a fully balanced object,
+    // so the ENTIRE window was discarded — measured at ~92% of enrichment
+    // windows on qwen3.7-plus, every one of them an episode that stored
+    // nothing while its window was still marked complete.
+    const memories = spyMemories()
+    const episodes = spyEpisodes()
+    const cutOffMidObject =
+      '{"summary":"s","entities":[],"edges":[],"memories":['
+      + '{"scope":"user","summary":"saved","detail":"d","tags":[],"why_not_entity":"n/a","why_not_task":"n/a"},'
+      + '{"scope":"user","summary":"lost","detail":"partial'
+    const classification = JSON.stringify({
+      inferred_sensitivity: 'internal',
+      brief_reason: 'ok',
+    })
+    const deps = makeDeps({
+      provider: sequencedProvider([cutOffMidObject, classification]),
+      memories: memories.store,
+      episodes: episodes.port,
+    })
+
+    const result = await processEpisode(baseEpisode(), 'something', deps)
+
+    expect(result.extracted).toBe(true)
+    // The complete record survives; the half-written one is dropped rather
+    // than taking the whole payload down with it.
+    expect(memories.created.map((m) => m.summary)).toContain('saved')
+    expect(memories.created.map((m) => m.summary)).not.toContain('lost')
+  })
+
+  it('does not close containers opened after the salvage point', async () => {
+    // The open-container stack at EOF is NOT the stack at the cut point: the
+    // model may have opened further containers after the last complete value.
+    // Closing those would append brackets for structures the truncated text
+    // never began, producing valid-looking JSON with invented nesting.
+    const memories = spyMemories()
+    const episodes = spyEpisodes()
+    const reopened =
+      '{"summary":"s","entities":[],"edges":[],"memories":['
+      + '{"scope":"user","summary":"saved","detail":"d","tags":[],"why_not_entity":"n/a","why_not_task":"n/a"}'
+      + '],"tasks":[{"title":"half'
+    const classification = JSON.stringify({
+      inferred_sensitivity: 'internal',
+      brief_reason: 'ok',
+    })
+    const deps = makeDeps({
+      provider: sequencedProvider([reopened, classification]),
+      memories: memories.store,
+      episodes: episodes.port,
+    })
+
+    const result = await processEpisode(baseEpisode(), 'something', deps)
+
+    expect(result.extracted).toBe(true)
+    expect(memories.created.map((m) => m.summary)).toContain('saved')
   })
 
   it('recovers when the LLM emits a trailing comma in an array', async () => {
@@ -2072,6 +2138,30 @@ describe('[COMP:brain/pipeline-b] extraction usage attribution', () => {
       })
     }
     expect(requests[0]?.maxTokens).toBe(64)
+  })
+
+  it('prices extraction and sensitivity from the actual serving model', async () => {
+    const usage = usageSpy()
+    const provider = sequencedProvider([
+      JSON.stringify({ summary: 'A note.', entities: [], edges: [], memories: [], tags: [] }),
+      JSON.stringify({ inferred_sensitivity: 'internal', brief_reason: 'routine' }),
+    ], undefined, 'qwen3.5-flash')
+
+    await processEpisode(baseEpisode(), 'note', makeDeps({
+      provider,
+      model: 'gemini-3.1-flash-lite',
+      classifierModel: 'gemini-3.1-flash-lite',
+      modelTier: 'standard',
+      providerKeySource: 'platform',
+      usage: usage.store,
+    }))
+
+    expect(usage.recordUsage.mock.calls.map(([row]) => row)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ model: 'qwen3.5-flash', modelTier: 'standard' }),
+        expect.objectContaining({ model: 'qwen3.5-flash', triggerKey: 'sensitivity_classifier' }),
+      ]),
+    )
   })
 
   it('still records when the model output fails to parse — the tokens were spent', async () => {
@@ -3001,6 +3091,33 @@ describe('[COMP:tasks/task-readiness] Pipeline B — grounded automatic task qua
     expect(assessments[11]?.objective).toBe(candidateTitle(11))
     expect(assessments.every((a) => a.classification === 'ready' && a.evidenceVerified)).toBe(true)
     expect(assessments.every((a) => typeof a.description === 'string')).toBe(true)
+  })
+
+  it('records task readiness against the actual serving model and custom limits', async () => {
+    const recordUsage = vi.fn().mockResolvedValue(undefined)
+    const { provider, requests } = capturingProvider([readinessSlice(2, 0)], 'qwen3.5-flash')
+
+    await judgeTaskReadinessBatch(
+      baseEpisode({ sourceKind: 'slack_thread' }),
+      sourceFor(2),
+      candidatesFor(2),
+      makeDeps({
+        provider,
+        model: 'gemini-3.1-flash-lite',
+        modelTier: 'standard',
+        providerKeySource: 'platform',
+        inputTokenLimit: 12000,
+        maxTokens: 2000,
+        usage: { recordUsage } as unknown as import('../../billing/cost-tracker.js').UsageStore,
+      }),
+    )
+
+    expect(requests[0]).toMatchObject({ inputTokenLimit: 12000, maxTokens: 2000 })
+    expect(recordUsage).toHaveBeenCalledWith(expect.objectContaining({
+      model: 'qwen3.5-flash',
+      modelTier: 'standard',
+      triggerKey: 'pipeline_b_task_readiness',
+    }))
   })
 
   it('confines a failed judge slice to its own candidates', async () => {

@@ -108,6 +108,7 @@ describe("[COMP:app-web/studio-channels] AgentMail Channel UX", () => {
               { id: "assistant_2", name: "Accounts" } as never,
             ]}
             myClearance="confidential"
+            canRename={false}
             onUpdated={vi.fn()}
             onRoutingChanged={vi.fn()}
             onDeleted={vi.fn()}

@@ -34,6 +34,9 @@ export function TranscriptPane({
   focusMs = null,
   focusNonce = 0,
   fetchPage,
+  participants = [],
+  onRenameSpeaker,
+  emptyCopy,
 }: {
   recordingId: string;
   className?: string;
@@ -55,6 +58,19 @@ export function TranscriptPane({
     hasMore: boolean;
     toIndex: number;
   }>;
+  /**
+   * `recordings.participants` — binds a diarized label ("Speaker 1") to a
+   * display name. Lines keep their stable labels underneath; this is a
+   * render-time mapping so renaming never rewrites the transcript.
+   */
+  participants?: Array<{ speaker: string; name?: string }>;
+  /**
+   * Present on the authed brief surface only: click a speaker label to name
+   * them. The public shared page passes nothing and labels render inertly.
+   */
+  onRenameSpeaker?: (speaker: string) => void;
+  /** Status-honest override for the zero-segments state. */
+  emptyCopy?: string;
 }) {
   const t = useT();
   const { seekTo, currentMs } = useRecordingPlayer();
@@ -122,11 +138,43 @@ export function TranscriptPane({
     );
   }
   if (!loading && segments.length === 0) {
-    return <p className="text-sm text-muted-foreground">{t.recordings.detailNoTranscript}</p>;
+    return (
+      <p className="text-sm text-muted-foreground">
+        {emptyCopy ?? t.recordings.detailNoTranscript}
+      </p>
+    );
   }
+
+  // Distinct diarized labels in loaded order — the rename chips' roster.
+  const speakers = onRenameSpeaker
+    ? [...new Set(segments.map((s) => s.speaker).filter((s): s is string => !!s))]
+    : [];
 
   return (
     <div className={className}>
+      {speakers.length > 0 ? (
+        // Naming lives OUTSIDE the seek buttons (a control inside a control is
+        // invalid markup): one chip per diarized label, showing the bound name
+        // when there is one. Renaming is a render-time mapping — the transcript
+        // keeps its stable labels underneath.
+        <div className="mb-2 flex flex-wrap items-center gap-1.5">
+          <span className="text-xs text-muted-foreground">{t.recordings.speakersLabel}</span>
+          {speakers.map((speaker) => {
+            const bound = participants.find((p) => p.speaker === speaker)?.name;
+            return (
+              <button
+                key={speaker}
+                type="button"
+                title={t.recordings.speakerRenameHint}
+                onClick={() => onRenameSpeaker?.(speaker)}
+                className="rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground hover:bg-muted"
+              >
+                {bound ? `${speaker} = ${bound}` : speaker}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
       <div className="mb-2 flex items-baseline justify-between gap-2">
         <span className="text-xs text-muted-foreground">{t.recordings.detailSeekHint}</span>
         {!follow ? (
@@ -174,7 +222,11 @@ export function TranscriptPane({
                   {formatStamp(s.start_ms)}
                 </span>
                 <span>
-                  {s.speaker ? <b className="mr-1">{s.speaker}:</b> : null}
+                  {s.speaker ? (
+                    <b className="mr-1">
+                      {(participants.find((p) => p.speaker === s.speaker)?.name ?? s.speaker) + ":"}
+                    </b>
+                  ) : null}
                   {s.segment_text}
                 </span>
               </button>

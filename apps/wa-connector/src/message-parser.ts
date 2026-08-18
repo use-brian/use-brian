@@ -436,7 +436,16 @@ export type WhatsAppIncomingMessage = {
   mediaRef?: {
     /** Local chat-archive staging asset, completed by the API on inbound. */
     assetId?: string
-    gcsKey: string
+    /**
+     * Set when the bytes went straight into the archive under a per-asset
+     * signature the API minted. There is no workspace object in that case, so
+     * `gcsKey` is absent and the API has nothing to read back.
+     */
+    archiveAssetId?: string
+    /** Digest of the uploaded bytes; the archive's signature commits to it. */
+    sha256?: string
+    /** Workspace storage key. Absent on the archive-direct path. */
+    gcsKey?: string
     /** BYO storage URI (bytes live in the workspace's own bucket); echoed from the mint. */
     storageUri?: string
     mimeType: string

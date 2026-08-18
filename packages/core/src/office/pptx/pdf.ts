@@ -1,14 +1,19 @@
-/** Canonical Presentation PDF release through isolated LibreOffice. [COMP:office/presentation-pdf] */
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
-import { constants } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { pathToFileURL } from 'node:url'
-import { spawn } from 'node:child_process'
-import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs'
+/** Canonical Presentation PDF release through isolated LibreOffice. [COMP:office/presentation-pdf]
+ *
+ * Spawn/temp-root/timeout/concurrency mechanics live in the shared
+ * `files/libreoffice.ts` runner; this module owns the Presentation contract:
+ * canonical PPTX in, slide-count gate out.
+ */
 import type { PresentationSnapshot } from '@use-brian/office-model'
 import type { OfficeResourceResolver } from '../package.js'
 import { exportOfficePresentation } from './index.js'
+import {
+  LibreOfficeError,
+  convertToPdfWithLibreOffice,
+  libreOfficeFailureCode,
+  renderedPdfPageCount,
+  type LibreOfficeRun,
+} from '../../files/libreoffice.js'
 
 export type PresentationPdfIssueCode = 'converter_unavailable' | 'timeout' | 'invalid_pdf' | 'page_count_mismatch'
 export type PresentationPdfIssue = { severity: 'error'; code: PresentationPdfIssueCode; message: string }
@@ -27,60 +32,22 @@ class PresentationPdfFailure extends Error {
   constructor(readonly code: PresentationPdfIssueCode) { super(code) }
 }
 
-async function libreOfficeBinary(): Promise<string> {
-  const configured = process.env.LIBREOFFICE_BIN?.trim()
-  if (configured) return configured
-  const candidates = ['/Applications/LibreOffice.app/Contents/MacOS/soffice', '/usr/bin/libreoffice', '/usr/local/bin/libreoffice']
-  for (const candidate of candidates) {
-    try { await access(candidate, constants.X_OK); return candidate } catch { /* continue */ }
-  }
-  return 'soffice'
-}
-
+/** PPTX bytes → PDF bytes through the shared isolated LibreOffice runner. */
 export async function convertPresentationPptxToPdf(
   input: Uint8Array,
-  run: (params: { binary: string; inputPath: string; outputDirectory: string; profileDirectory: string }) => Promise<void> = runLibreOffice,
+  run?: LibreOfficeRun,
 ): Promise<Uint8Array> {
-  const root = await mkdtemp(join(tmpdir(), 'brian-presentation-pdf-'))
   try {
-    const inputDirectory = join(root, 'input')
-    const outputDirectory = join(root, 'output')
-    const profileDirectory = join(root, 'profile')
-    await Promise.all([mkdir(inputDirectory), mkdir(outputDirectory), mkdir(profileDirectory)])
-    const inputPath = join(inputDirectory, 'presentation.pptx')
-    await writeFile(inputPath, input)
-    await run({ binary: await libreOfficeBinary(), inputPath, outputDirectory, profileDirectory })
-    try {
-      return new Uint8Array(await readFile(join(outputDirectory, 'presentation.pdf')))
-    } catch {
-      throw new PresentationPdfFailure('invalid_pdf')
-    }
-  } finally {
-    await rm(root, { recursive: true, force: true })
+    return await convertToPdfWithLibreOffice(input, { inputName: 'presentation.pptx', run, tempPrefix: 'brian-presentation-pdf-' })
+  } catch (error) {
+    if (error instanceof LibreOfficeError) throw new PresentationPdfFailure(error.code)
+    throw error
   }
-}
-
-async function runLibreOffice(params: { binary: string; inputPath: string; outputDirectory: string; profileDirectory: string }): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(params.binary, [`-env:UserInstallation=${pathToFileURL(params.profileDirectory).href}`, '--headless', '--convert-to', 'pdf', '--outdir', params.outputDirectory, params.inputPath], { stdio: 'ignore' })
-    let settled = false
-    const finish = (failure?: PresentationPdfFailure) => {
-      if (settled) return
-      settled = true
-      clearTimeout(timeout)
-      failure ? reject(failure) : resolve()
-    }
-    const timeout = setTimeout(() => { child.kill('SIGKILL'); finish(new PresentationPdfFailure('timeout')) }, 60_000)
-    child.once('error', () => finish(new PresentationPdfFailure('converter_unavailable')))
-    child.once('exit', (code) => finish(code === 0 ? undefined : new PresentationPdfFailure('converter_unavailable')))
-  })
 }
 
 async function pdfPageCount(bytes: Uint8Array): Promise<number> {
   try {
-    const task = getDocument({ data: bytes.slice() })
-    const document = await task.promise
-    try { return document.numPages } finally { await document.destroy() }
+    return await renderedPdfPageCount(bytes)
   } catch {
     throw new PresentationPdfFailure('invalid_pdf')
   }
@@ -114,11 +81,7 @@ export async function exportOfficePresentationPdf(
     }
     return { bytes, mime: 'application/pdf', receipt: { ...base, actualPageCount } }
   } catch (error) {
-    const code: PresentationPdfIssueCode = error instanceof PresentationPdfFailure
-      ? error.code
-      : error instanceof Error && (error.message === 'timeout' || error.message === 'converter_unavailable' || error.message === 'invalid_pdf')
-        ? error.message
-        : 'converter_unavailable'
+    const code: PresentationPdfIssueCode = error instanceof PresentationPdfFailure ? error.code : libreOfficeFailureCode(error)
     return { mime: 'application/pdf', receipt: { ...base, issues: [{ severity: 'error', code, message: MESSAGES[code] }] } }
   }
 }

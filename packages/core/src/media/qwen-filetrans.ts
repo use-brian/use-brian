@@ -68,7 +68,9 @@ function isPrivateSourceUrl(raw: string): boolean {
 }
 
 export function qwenFiletransTranscriber(opts: QwenFiletransOptions): RecordingTranscriber {
-  const base = (opts.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, '')
+  const base = (opts.baseUrl ?? DEFAULT_BASE_URL)
+    .replace(/\/+$/, '')
+    .replace(/\/compatible-mode\/v1$/, '')
   const model = opts.model ?? DEFAULT_MODEL
   const name = `dashscope:${model}`
   const pollInterval = opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS

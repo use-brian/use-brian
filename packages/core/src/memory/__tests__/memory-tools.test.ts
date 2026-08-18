@@ -407,7 +407,12 @@ describe('[COMP:memory/tools] saveMemory', () => {
       ctx,
     )
     expect(result.isError).toBe(true)
-    expect(String(result.data)).toContain('not part of a team')
+    const data = String(result.data)
+    // Names the missing surface (a workspace) and the remedy, rather than the
+    // old bare "not part of a team".
+    expect(data).toContain('not bound to a workspace')
+    expect(data).toContain("scope: \"user\"")
+    expect(data).toContain('will keep failing')
     expect(store.rows).toHaveLength(0)
   })
 
@@ -610,6 +615,40 @@ describe('[COMP:memory/tools] getMemory', () => {
     const { getMemory } = createMemoryTools(store)
     const result = await getMemory.execute({ id: 'mem_missing' }, ctx)
     expect(result.isError).toBe(true)
+    const data = String(result.data)
+    // The `taskNotFoundMessage` shape, adapted to memory's bi-temporal
+    // supersession: name the id, say an edit mints a NEW id, name the
+    // discovery path, forbid the blind retry.
+    expect(data).toContain('mem_missing')
+    expect(data).toContain('mints a NEW id')
+    expect(data).toContain('`search` with scope `memory`')
+    expect(data).toContain('memory index')
+    expect(data).toContain('Do NOT retry this exact id')
+  })
+
+  it('warns that saveMemory\'s own echoed id is the PRE-edit one', async () => {
+    // `MemoryStore.update` supersedes: the old row is tombstoned and a new
+    // uuid is minted. saveMemory's success line echoes the id the caller
+    // PASSED, not the new one — so the generic "reuse the id from that
+    // result" advice would send the model straight back to a dead id. The
+    // copy has to say so explicitly.
+    const store = makeFakeStore()
+    const { getMemory } = createMemoryTools(store)
+    const result = await getMemory.execute({ id: 'mem_stale' }, ctx)
+    expect(String(result.data)).toContain('the id echoed back by a previous saveMemory update is the pre-edit one')
+    expect(String(result.data)).not.toContain('reuse the id from that result')
+  })
+
+  it('errors with the same not-found shape when an update targets a dead id', async () => {
+    const store = makeFakeStore()
+    const { saveMemory } = createMemoryTools(store)
+    const result = await saveMemory.execute({ id: 'mem_dead', detail: 'x' }, ctx)
+    expect(result.isError).toBe(true)
+    const data = String(result.data)
+    expect(data).toContain('mem_dead')
+    expect(data).toContain('mints a NEW id')
+    expect(data).toContain('Do NOT retry this exact id')
+    expect(store.rows).toHaveLength(0)
   })
 
   it('searches by query keyword', async () => {
@@ -763,7 +802,13 @@ describe('[COMP:memory/tools] deleteMemory', () => {
     const { deleteMemory } = createMemoryTools(store)
     const result = await deleteMemory.execute({ ids: ['mem_missing'] }, ctx)
     expect(result.isError).toBe(true)
-    expect(String(result.data)).toContain('Not found')
+    const data = String(result.data)
+    // Names the ids, explains supersession (an edit mints a NEW id), names the
+    // discovery tool, forbids the blind retry.
+    expect(data).toContain('mem_missing')
+    expect(data).toContain('mints a NEW id')
+    expect(data).toContain('`search` with scope `memory`')
+    expect(data).toContain('Do NOT retry these exact ids')
   })
 
   it('deletes found ids and reports missing ones when the batch is mixed', async () => {
@@ -1041,7 +1086,12 @@ describe('[COMP:crm/notes-via-memory] saveMemory CRM-note anchoring', () => {
     )
 
     expect(result.isError).toBe(true)
-    expect(String(result.data)).toContain('entity wiring missing')
+    const data = String(result.data)
+    // Names the missing dependency and the remedy the model CAN act on
+    // (retry without entityId), plus "nothing was saved".
+    expect(data).toContain('no entity store')
+    expect(data).toContain('Nothing was saved')
+    expect(data).toContain('without `entityId`')
     expect(store.rows).toHaveLength(0)
   })
 

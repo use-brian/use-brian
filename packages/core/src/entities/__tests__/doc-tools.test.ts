@@ -497,7 +497,10 @@ describe('[COMP:entities/doc-tools] addProperty', () => {
       ctx,
     )
     expect(result.isError).toBe(true)
-    expect(String(result.data)).toMatch(/already exists/i)
+    // Names the collision, says the schema is untouched, and forbids the retry.
+    expect(String(result.data)).toMatch(/ALREADY a property on entity type "Recipe"/)
+    expect(String(result.data)).toMatch(/Nothing was changed/)
+    expect(String(result.data)).toMatch(/Do NOT retry this exact property name/)
   })
 
   it('returns an error when the entity type is missing', async () => {
@@ -512,7 +515,12 @@ describe('[COMP:entities/doc-tools] addProperty', () => {
       ctx,
     )
     expect(result.isError).toBe(true)
-    expect(String(result.data)).toMatch(/not found/i)
+    // A miss names the id, says the property was NOT added, points at the
+    // discovery tool, and forbids the blind retry.
+    expect(String(result.data)).toContain(USER_TYPE_ID_2)
+    expect(String(result.data)).toMatch(/was NOT added/)
+    expect(String(result.data)).toMatch(/Call listEntityTypes/)
+    expect(String(result.data)).toMatch(/Do NOT retry this exact id/)
   })
 })
 
@@ -563,7 +571,10 @@ describe('[COMP:entities/doc-tools] removeProperty', () => {
       ctx,
     )
     expect(result.isError).toBe(true)
-    expect(String(result.data)).toMatch(/does not exist/i)
+    // The remedy is the actual property list, not "does not exist".
+    expect(String(result.data)).toMatch(/has no property called "nonexistent"/)
+    expect(String(result.data)).toMatch(/Its properties are: "title", "prep_time"/)
+    expect(String(result.data)).toMatch(/Do NOT retry this exact name/)
   })
 })
 
@@ -635,7 +646,11 @@ describe('[COMP:entities/doc-tools] renameProperty', () => {
       ctx,
     )
     expect(result.isError).toBe(true)
-    expect(String(result.data)).toMatch(/does not exist/i)
+    expect(String(result.data)).toMatch(/has no property called "nonexistent"/)
+    expect(String(result.data)).toMatch(/Its properties are: "title", "prep_time"/)
+    // The rename migrates row data, so the failure has to say that did not run.
+    expect(String(result.data)).toMatch(/no row data was migrated/)
+    expect(String(result.data)).toMatch(/Do NOT retry this exact oldName/)
     expect(deps.store.calls.renameProperty).toHaveLength(0)
   })
 
@@ -653,7 +668,10 @@ describe('[COMP:entities/doc-tools] renameProperty', () => {
       ctx,
     )
     expect(result.isError).toBe(true)
-    expect(String(result.data)).toMatch(/already exists/i)
+    expect(String(result.data)).toMatch(/already has a property called "title"/)
+    expect(String(result.data)).toMatch(/no row data was migrated/)
+    expect(String(result.data)).toMatch(/removeProperty the old one instead/)
+    expect(String(result.data)).toMatch(/Do NOT retry this exact newName/)
     expect(deps.store.calls.renameProperty).toHaveLength(0)
   })
 
@@ -687,7 +705,9 @@ describe('[COMP:entities/doc-tools] renameProperty', () => {
       ctx,
     )
     expect(result.isError).toBe(true)
-    expect(String(result.data)).toMatch(/not found/i)
+    expect(String(result.data)).toContain(USER_TYPE_ID_2)
+    expect(String(result.data)).toMatch(/Call listEntityTypes/)
+    expect(String(result.data)).toMatch(/Do NOT retry this exact id/)
   })
 })
 
@@ -797,7 +817,10 @@ describe('[COMP:entities/doc-tools] updateEntity', () => {
       ctx,
     )
     expect(result.isError).toBe(true)
-    expect(String(result.data)).toMatch(/not found/i)
+    expect(String(result.data)).toContain(ENTITY_ID)
+    expect(String(result.data)).toMatch(/No cells were written/)
+    expect(String(result.data)).toMatch(/Call queryEntities/)
+    expect(String(result.data)).toMatch(/Do NOT retry this exact id/)
   })
 })
 

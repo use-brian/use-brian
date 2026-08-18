@@ -138,9 +138,22 @@ export type SynthesisResult = {
   truncated: boolean
 }
 
+export type SynthesisLlmRuntime = {
+  provider: LLMProvider
+  model: string
+  modelTier: string
+  providerKeySource: 'user' | 'platform'
+  inputTokenLimit: number
+  maxTokens: number
+}
+
 export type SynthesizeDeps = {
   provider: LLMProvider
   model: string
+  modelTier: string
+  providerKeySource: 'user' | 'platform'
+  inputTokenLimit?: number
+  maxTokens?: number
   /** The source-retrieval tool (searchRecording), pre-bound to the source + actor. */
   sourceTool: Tool
   /**
@@ -323,14 +336,18 @@ function recordCogs(
       // loop's synthetic context sessionId is for in-process correlation only.
       sessionId: null,
       model,
+      modelTier: deps.modelTier,
       inputTokens: usage.inputTokens,
       outputTokens: usage.outputTokens,
       cacheReadTokens: usage.cacheReadTokens,
       cacheWriteTokens: usage.cacheWriteTokens,
-      actualCostUsd: deps.computeCostUsd ? deps.computeCostUsd(model, usage) : 0,
+      actualCostUsd: deps.providerKeySource === 'user'
+        ? 0
+        : deps.computeCostUsd ? deps.computeCostUsd(model, usage) : 0,
       // `overhead:*` keeps this OUT of the user credit derivation; synthesis COGS
       // folds into the recording surcharge. See structural-synthesis.md.
       source: 'overhead:synthesis',
+      providerKeySource: deps.providerKeySource,
       triggerKey: 'structural_synthesis',
       // ONLY for `recording`, where `sourceId` is genuinely an Episode id.
       // For `brain` it is a draft subject and for `research` a workflow/step
@@ -467,6 +484,8 @@ export async function synthesizeFromSource(
     for await (const event of queryLoop({
       provider: deps.provider,
       model: deps.model,
+      maxTokens: deps.maxTokens,
+      inputTokenLimit: deps.inputTokenLimit,
       systemPrompt: buildSystemPrompt(
         blueprint,
         source,
@@ -499,7 +518,7 @@ export async function synthesizeFromSource(
       } else if (event.type === 'tool_start') {
         toolCallCount += 1
       } else if (event.type === 'turn_complete') {
-        recordCogs(deps, source, event.totalUsage, event.response.model)
+        recordCogs(deps, source, event.totalUsage, event.response.model || deps.model)
       } else if (event.type === 'error') {
         throw event.error
       }
@@ -593,15 +612,31 @@ function buildWriteFieldTool(
       const field =
         spec.fields.find((f) => f.key === needle) ??
         spec.fields.find((f) => f.key === needle.toLowerCase())
+      // Message-first failure copy (docs/architecture/engine/tool-executor.md →
+      // "Failure copy"). The record is the deliverable of a bounded run, so a
+      // rejected write has to say plainly that the field is NOT on the record,
+      // name the keys that exist, and close the retry loop — a fill that keeps
+      // re-sending a key the contract does not have burns its whole budget.
       if (!field) {
         return {
-          data: { error: `No field "${input.key}". Valid keys: ${spec.fields.map((f) => f.key).join(', ')}` },
+          data:
+            `writeField did not save "${input.key}": this blueprint's contract has no such field, and the record ` +
+            'cannot be widened beyond its contract. Nothing was written for that key. Valid keys: ' +
+            `${spec.fields.map((f) => `${f.key} (${f.type}${f.required ? ', required' : ''})`).join(', ')}. ` +
+            'Re-send the value under the closest key above, or drop it. Do NOT retry this exact key.',
           isError: true,
         }
       }
       const validated = validateFieldValue(field, input.value)
       if (!validated.ok) {
-        return { data: { error: validated.error }, isError: true }
+        return {
+          data:
+            `writeField did not save field "${field.key}": ${validated.error.replace(/\.$/, '')}. Nothing was written for that key, and ` +
+            `the field is still ${written.has(field.key) ? 'set to its previous value' : 'empty'}. ` +
+            `Re-send "${field.key}" shaped as a ${field.type}${field.type === 'enum' && field.options ? ` (one of: ${field.options.join(', ')})` : ''}. ` +
+            'The same value will be rejected the same way.',
+          isError: true,
+        }
       }
       written.set(field.key, validated.value)
       // Resolve the moments this text cites into typed pointers. Keyed even when

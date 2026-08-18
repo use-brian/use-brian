@@ -144,7 +144,15 @@ describe('[COMP:skills/manage-tool] patch_skill / update_umbrella routing', () =
       CTX_STUB,
     )
     expect(out.isError).toBe(true)
-    expect((out.data as { error: string }).error).toMatch(/not found/i)
+    // Message-first refusal: what did not happen on which row, why, the tool
+    // that re-resolves the id, and the retry verdict.
+    // docs/architecture/engine/tool-executor.md → "Failure copy".
+    const miss = (out.data as { error: string }).error
+    expect(miss).toMatch(/not found/i)
+    expect(miss).toContain('skill_manage did not patch skill 00000000-0000-0000-0000-000000000000')
+    expect(miss).toContain('Nothing was changed.')
+    expect(miss).toContain('skills_list')
+    expect(miss).toContain('Do NOT retry this exact id.')
   })
 
   it('rejects when the skill is pinned', async () => {
@@ -159,7 +167,10 @@ describe('[COMP:skills/manage-tool] patch_skill / update_umbrella routing', () =
       CTX_STUB,
     )
     expect(out.isError).toBe(true)
-    expect((out.data as { error: string }).error).toMatch(/pinned/)
+    const pinned = (out.data as { error: string }).error
+    expect(pinned).toMatch(/pinned/)
+    expect(pinned).toContain('Nothing was changed.')
+    expect(pinned).toMatch(/keep failing for as long as the skill is pinned/)
   })
 
   it('rejects when the skill is archived', async () => {
@@ -174,7 +185,10 @@ describe('[COMP:skills/manage-tool] patch_skill / update_umbrella routing', () =
       CTX_STUB,
     )
     expect(out.isError).toBe(true)
-    expect((out.data as { error: string }).error).toMatch(/archived/)
+    const archived = (out.data as { error: string }).error
+    expect(archived).toMatch(/archived/)
+    expect(archived).toContain('Nothing was changed.')
+    expect(archived).toMatch(/create_umbrella/)
   })
 
   it('rejects a builtin skill', async () => {
@@ -191,7 +205,10 @@ describe('[COMP:skills/manage-tool] patch_skill / update_umbrella routing', () =
       CTX_STUB,
     )
     expect(out.isError).toBe(true)
-    expect((out.data as { error: string }).error).toMatch(/built-in/i)
+    const builtin = (out.data as { error: string }).error
+    expect(builtin).toMatch(/built-in/i)
+    expect(builtin).toContain('Nothing was changed.')
+    expect(builtin).toContain('Do NOT retry this id.')
   })
 
   it('routes auto-generated → direct write', async () => {
@@ -502,7 +519,13 @@ describe('[COMP:skills/manage-tool] create_umbrella routing', () => {
       CTX_STUB,
     )
     expect(out.isError).toBe(true)
-    expect((out.data as { error: string }).error).toMatch(/Umbrella name rejected/)
+    const rejected = (out.data as { error: string }).error
+    // The validator's own reason is the load-bearing half; the frame around it
+    // names the action, says nothing was staged, and closes the retry loop.
+    expect(rejected).toMatch(/name was rejected by the class-level naming rule/)
+    expect(rejected).toMatch(/one-off repair/)
+    expect(rejected).toContain('Nothing was staged for approval.')
+    expect(rejected).toMatch(/re-sending this exact name will be rejected the same way/i)
     expect(deps.createStagedSkillCreation).not.toHaveBeenCalled()
   })
 

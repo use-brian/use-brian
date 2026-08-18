@@ -168,6 +168,22 @@ describe('[COMP:recordings/open-routes] OSS recordings routes', () => {
     expect(deps.readTranscript).not.toHaveBeenCalled()
   })
 
+  it('saves validated speaker-name bindings and rejects malformed ones', async () => {
+    const { app, deps } = makeApp()
+    const ok = await request(app)
+      .patch('/api/recordings/rec-1/participants')
+      .send({ participants: [{ speaker: 'Speaker 1', name: '  Alice  ' }, { speaker: 'Speaker 2' }] })
+    expect(ok.status).toBe(200)
+    expect(deps.updateRecording).toHaveBeenCalledWith('rec-1', {
+      participants: [{ speaker: 'Speaker 1', name: 'Alice' }, { speaker: 'Speaker 2' }],
+    })
+
+    const bad = await request(app)
+      .patch('/api/recordings/rec-1/participants')
+      .send({ participants: [{ name: 'no label' }] })
+    expect(bad.status).toBe(400)
+  })
+
   it('lists recording tasks through the same caller viewpoint', async () => {
     const tasks = [{
       id: 'task-1',

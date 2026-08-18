@@ -15,6 +15,7 @@
 
 import { z } from 'zod'
 import { buildTool, type Tool } from '../tools/types.js'
+import { toolFailure } from '../tools/tool-failure.js'
 import type { CrmStore } from '../crm/types.js'
 import type { TaskStore } from '../tasks/types.js'
 import type { WorkflowRunStore } from '../workflow/types.js'
@@ -80,6 +81,54 @@ function eventCtx(context: { userId: string; assistantId: string; sessionId: str
     assistantId: context.assistantId,
     sessionId: context.sessionId,
     channelType: context.channelType,
+  }
+}
+
+/**
+ * The (entity, viewType) catalogue `bindingConfigSchema` accepts, written
+ * once so `renderView` and `saveView` reject against the SAME list the model
+ * has to choose from.
+ */
+const VALID_BINDINGS =
+  'Valid bindings: tasks/table; tasks/board (REQUIRES groupBy:"status"); tasks/calendar (REQUIRES dateBy:"due"); ' +
+  'contacts/table; companies/table; deals/table; deals/board (REQUIRES groupBy:"stage"); ' +
+  'workflow_runs/table (REQUIRES filters.workflowId). ' +
+  'contacts, companies and workflow_runs are TABLE-ONLY — there is no board or calendar for them.'
+
+/**
+ * Message-first rendering of a binding rejection.
+ *
+ * These three sites used to return the object
+ * `{ ok: false, errors: [...], hint: "..." }`, which the executor serializes
+ * as JSON (multi-key failure objects are kept verbatim) — so the model had to
+ * parse JSON to read prose that was already prose, and the `ok: false` key
+ * carried nothing `isError` had not already said. The failure is now TEXT:
+ * the diagnosis first (which tool, what did not happen, why), then the
+ * load-bearing tail (the per-variant issues, the catalogue of valid shapes),
+ * then the retry verdict.
+ *
+ * See docs/architecture/engine/tool-executor.md → "Failure copy".
+ */
+function bindingRejection(params: {
+  tool: string
+  /** What did NOT happen because the binding was rejected. */
+  effect: string
+  /** Per-variant validation issues, already formatted `path: message`. */
+  errors: string[]
+  /** The shapes this argument is allowed to take. */
+  guidance: string
+}): { data: string; isError: true } {
+  const detail =
+    params.errors.length > 0
+      ? `\nRejected because:\n${params.errors.map((e) => `  - ${e}`).join('\n')}`
+      : ''
+  return {
+    data:
+      `${params.tool} did not run: the \`binding\` argument is not a shape this tool accepts, so ${params.effect}.` +
+      detail +
+      `\n${params.guidance}` +
+      `\nRewrite \`binding\` as one of those shapes and call ${params.tool} again. Re-sending this exact binding will be rejected the same way.`,
+    isError: true,
   }
 }
 
@@ -214,18 +263,12 @@ export function createRenderViewTool(deps: ViewToolDeps): Tool {
 
       const parsed = bindingConfigSchema.safeParse(input.binding)
       if (!parsed.success) {
-        return {
-          data: {
-            ok: false,
-            errors: formatBindingError(parsed.error, input.binding),
-            hint:
-              'Locked decisions: contacts/companies/workflow_runs are TABLE-ONLY. ' +
-              'tasks/board requires groupBy:"status"; deals/board requires groupBy:"stage"; ' +
-              'tasks/calendar requires dateBy:"due". ' +
-              'workflow_runs/table requires filters.workflowId.',
-          },
-          isError: true,
-        }
+        return bindingRejection({
+          tool: 'renderView',
+          effect: 'nothing was rendered and no page was created',
+          errors: formatBindingError(parsed.error, input.binding),
+          guidance: VALID_BINDINGS,
+        })
       }
 
       try {
@@ -329,12 +372,12 @@ export function createRenderViewTool(deps: ViewToolDeps): Tool {
             // than silently dropping the user's request. The model will
             // tell the user it couldn't render.
             console.warn('[renderView] draft creation failed:', err)
-            return {
-              data: `Failed to create draft: ${
-                err instanceof Error ? err.message : String(err)
-              }`,
-              isError: true,
-            }
+            return toolFailure(err, {
+              tool: 'renderView',
+              action: 'saving the rendered view as a draft page',
+              mutating: true,
+              next: 'The view itself rendered fine; the draft page could not be created. Tell the user the page was not created rather than linking to one.',
+            })
           }
         }
 
@@ -356,11 +399,11 @@ export function createRenderViewTool(deps: ViewToolDeps): Tool {
           },
         }
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err)
-        return {
-          data: `Failed to render view: ${message}`,
-          isError: true,
-        }
+        return toolFailure(err, {
+          tool: 'renderView',
+          target: 'the requested view binding',
+          next: 'No page was created.',
+        })
       }
     },
   })
@@ -486,19 +529,19 @@ export function createRenderChartTool(deps: ViewToolDeps): Tool {
 
       const parsed = aggregateBindingSchema.safeParse(input.binding)
       if (!parsed.success) {
-        return {
-          data: {
-            ok: false,
-            errors: parsed.error.issues.map((i) => {
-              const path = i.path.length > 0 ? i.path.join('.') : '<root>'
-              return `${path}: ${i.message}`
-            }),
-            hint:
-              'Required: entity (tasks|deals|contacts|companies), op (count_by|sum_by|avg_by|series_by_date), ' +
-              'groupBy (field name). sum_by/avg_by also require measure. series_by_date uses bucket (day|week|month).',
-          },
-          isError: true,
-        }
+        return bindingRejection({
+          tool: 'renderChart',
+          effect: 'no chart was rendered and no page was created',
+          errors: parsed.error.issues.map((i) => {
+            const path = i.path.length > 0 ? i.path.join('.') : '<root>'
+            return `${path}: ${i.message}`
+          }),
+          guidance:
+            'An AggregateBinding REQUIRES: entity (tasks|deals|contacts|companies), ' +
+            'op (count_by|sum_by|avg_by|series_by_date), and groupBy (a field name on that entity). ' +
+            'sum_by and avg_by also require `measure`; series_by_date also takes `bucket` (day|week|month). ' +
+            'workflow_runs cannot be aggregated.',
+        })
       }
 
       const binding: AggregateBinding = parsed.data
@@ -638,11 +681,11 @@ export function createRenderChartTool(deps: ViewToolDeps): Tool {
           },
         }
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err)
-        return {
-          data: `Failed to render chart: ${message}`,
-          isError: true,
-        }
+        return toolFailure(err, {
+          tool: 'renderChart',
+          target: 'the requested chart binding',
+          next: 'No chart was rendered and no page was created.',
+        })
       }
     },
   })
@@ -677,13 +720,12 @@ export function createSaveViewTool(deps: ViewToolDeps): Tool {
 
       const parsed = bindingConfigSchema.safeParse(input.binding)
       if (!parsed.success) {
-        return {
-          data: {
-            ok: false,
-            errors: formatBindingError(parsed.error, input.binding),
-          },
-          isError: true,
-        }
+        return bindingRejection({
+          tool: 'saveView',
+          effect: `the view "${input.name}" was NOT saved`,
+          errors: formatBindingError(parsed.error, input.binding),
+          guidance: VALID_BINDINGS,
+        })
       }
 
       try {
@@ -714,8 +756,11 @@ export function createSaveViewTool(deps: ViewToolDeps): Tool {
           },
         }
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err)
-        return { data: `Failed to save view: ${message}`, isError: true }
+        return toolFailure(err, {
+          tool: 'saveView',
+          target: `view "${input.name}"`,
+          mutating: true,
+        })
       }
     },
   })

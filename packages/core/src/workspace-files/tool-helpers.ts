@@ -134,7 +134,7 @@ export function errorMessage(err: FilesError): string {
     case 'not_found':
       return UUID_RE.test(err.reference.trim())
         ? `No workspace file matches ${err.reference}. If that id came from an <attached_file id="…"> tag it is an UPLOADED attachment, not a stored file — uploads must be saved into the workspace files first, and the save returns the durable path you then pass here. Save it, then retry with the returned path. If you have no tool to save uploaded files, tell the user plainly that this assistant cannot keep or attach files and that Workspace files must be turned on for it in Studio → the assistant → Capabilities — never claim a file was attached when it was not, and never substitute a text note for the file.`
-        : `File ${err.reference} not found in this workspace.`
+        : `No workspace file at path ${err.reference}. Paths are exact — a leading slash, a folder segment, or the extension being off by one character all miss the same way, and a file that was moved or renamed no longer answers to its old path. Call fileSearch (by name, title, tag, or parent_path) to get the file's current id and path, then retry with what it returns. Do NOT retry this exact path.`
     case 'conflict':
       return `A file already exists at ${err.path}. Pass an existing id (or delete first) to overwrite.`
   }

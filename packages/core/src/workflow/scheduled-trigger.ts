@@ -109,7 +109,12 @@ export async function syncWorkflowScheduleTrigger(
   },
 ): Promise<{ jobId: string; nextRunAt: Date } | { error: string }> {
   const primaryAssistantId = await deps.resolvePrimary(params.workspaceId)
-  if (!primaryAssistantId) return { error: 'Workspace has no primary assistant.' }
+  if (!primaryAssistantId) {
+    return {
+      error:
+        'This workspace has no primary assistant, so there is no assistant to run the schedule as. A workspace owner must designate one (Studio → Assistants) — no retry or argument change can fix this; tell the user.',
+    }
+  }
 
   const nextRunAt = computeNextRun(params.schedule, params.timezone)
   const instructions = JSON.stringify({
@@ -248,7 +253,10 @@ export function createScheduleWorkflowTool(deps: ScheduleWorkflowToolDeps): Tool
         return { data: `Workflow ${input.workflowId} not found in workspace.`, isError: true }
       }
       if (!workflow.enabled) {
-        return { data: `Workflow "${workflow.name}" is disabled.`, isError: true }
+        return {
+          data: `Workflow "${workflow.name}" is disabled, so a schedule would never fire. Someone turned it off deliberately — ask the user before re-enabling (updateWorkflow with { workflowId: "${workflow.id}", enabled: true }), then schedule again.`,
+          isError: true,
+        }
       }
 
       const timezone = input.timezone ?? context.userTimezone ?? 'UTC'

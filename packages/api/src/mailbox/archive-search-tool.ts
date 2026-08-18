@@ -153,8 +153,10 @@ export function createSearchEmailArchiveTool(opts: CreateArchiveSearchToolOption
         // makes a permanent condition, not a transient one.
         return { data: coverage.note ? { hits, coverage: coverage.note } : hits }
       } catch (err) {
+        // A thrown search is a FAILURE, never an empty result: the model must
+        // not report "no matching email" on the strength of it.
         return {
-          data: `searchEmailArchive failed: ${err instanceof Error ? err.message : String(err)}`,
+          data: `searchEmailArchive could not run the search (${err instanceof Error ? err.message : String(err)}). This is a failure of the archive lookup, NOT an empty result — do not tell the user nothing matched. Nothing about the query is wrong; retry once after a short wait, and if it persists tell the user the email archive is unavailable right now (the live mailbox tools, e.g. imapSearchMessages, may still work).`,
           isError: true,
         }
       }

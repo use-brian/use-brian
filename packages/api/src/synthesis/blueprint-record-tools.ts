@@ -28,7 +28,9 @@ import {
   extractionSpecToBlocks,
   fieldKeyFromHeading,
   markdownToBlocks,
+  notFoundFailure,
   recordCompleteness,
+  toolFailure,
   validateFieldValue,
   BLUEPRINT_CAPTURE_KINDS,
   ENTITY_REF_KINDS,
@@ -101,6 +103,60 @@ function resolveBlueprint(
   )
 }
 
+/**
+ * Message-first failure copy for the blueprint surface
+ * (docs/architecture/engine/tool-executor.md → "Failure copy").
+ *
+ * Every rejection here used to be `{ error: "<one clause>" }` — `No record
+ * <id>.`, `No blueprint matching "x".`, `Rejected: …` — which said WHAT was
+ * wrong and nothing else: not whether anything was written, not which call
+ * resolves a real id, not whether the identical retry could ever work. The
+ * helpers below carry all four, and every site returns TEXT rather than an
+ * object so the model never parses JSON to read a sentence.
+ */
+function noWorkspace(tool: string, subject: string): { data: string; isError: true } {
+  return {
+    data:
+      `${tool} did not run: this session is not bound to a workspace, and ${subject} are workspace-scoped — ` +
+      'outside a workspace there is no library to read or write. ' +
+      'This surface is reachable from a workspace chat, or from a workflow step whose assistant is bound to one. ' +
+      'Ask the user to run it there. Retrying in this session will fail identically.',
+    isError: true,
+  }
+}
+
+/**
+ * The blueprint resolver misses (`getBlueprintRecord`, `saveBlueprintRecord`,
+ * `projectBlueprintRecordPage`, `fillBlueprintFromBrain`). Ships the list of
+ * blueprints that DO exist — the discovery pointer that ends the guessing —
+ * and says plainly when the workspace has none.
+ */
+function blueprintNotFound(params: {
+  tool: string
+  /** What did not happen, e.g. `read a record`, `save the record`. */
+  effect: string
+  needle: string
+  blueprints: CustomPageTemplateSummary[]
+  /** Set on the write paths so the model never reports a save that did not happen. */
+  mutating?: boolean
+}): { data: string; isError: true } {
+  const names = params.blueprints.map((t) => t.name)
+  const shown = names.slice(0, 8).join(', ')
+  const more = names.length > 8 ? `, …and ${names.length - 8} more` : ''
+  return {
+    data:
+      `${params.tool} could not ${params.effect}: no blueprint in this workspace matches "${params.needle}" ` +
+      '— a blueprint is a page template carrying an extraction contract, and resolution is exact id, then exact ' +
+      'name, then a name substring.' +
+      (params.mutating ? ' Nothing was saved.' : '') +
+      (names.length > 0
+        ? ` Blueprints in this workspace right now: ${shown}${more}. Pass one of those names (or its id) exactly; listBlueprints returns each one's field contract.`
+        : ' This workspace has no blueprints yet, so no name will resolve — define one with createBlueprint (ask the user first) or record the work another way.') +
+      ' Do NOT retry this exact name.',
+    isError: true,
+  }
+}
+
 function recordSummary(record: BlueprintRecord): Record<string, unknown> {
   return {
     recordId: record.id,
@@ -126,7 +182,7 @@ export function createBlueprintRecordTools(deps: BlueprintRecordToolDeps): Tool[
     isConcurrencySafe: true,
     async execute(_input, context) {
       if (!context.workspaceId) {
-        return { data: { error: 'Blueprints need a workspace context.' }, isError: true }
+        return noWorkspace('listBlueprints', 'blueprints')
       }
       const blueprints = await listWorkspaceBlueprints(deps, context.userId, context.workspaceId)
       return {
@@ -163,26 +219,40 @@ export function createBlueprintRecordTools(deps: BlueprintRecordToolDeps): Tool[
     isConcurrencySafe: true,
     async execute(input, context) {
       if (!context.workspaceId) {
-        return { data: { error: 'Blueprint records need a workspace context.' }, isError: true }
+        return noWorkspace('getBlueprintRecord', 'blueprint records')
       }
       if (input.recordId) {
         const rec = await deps.blueprintRecordStore.getById(context.userId, input.recordId)
         if (!rec || rec.workspaceId !== context.workspaceId) {
-          return { data: { error: `No record ${input.recordId}.` }, isError: true }
+          return notFoundFailure({
+            kind: 'Blueprint record',
+            id: `\`${input.recordId}\``,
+            discoveryTool: 'getBlueprintRecord with `blueprint` (name or id) + `subject`, or listBlueprints first',
+            extra: 'A record that belongs to another workspace reads as missing here.',
+            idSource: 'a saveBlueprintRecord, getBlueprintRecord or fillBlueprintFromBrain result',
+          })
         }
         return { data: recordSummary(rec) }
       }
       if (!input.blueprint) {
-        return { data: { error: 'Pass `blueprint` (name or id) or `recordId`.' }, isError: true }
+        return {
+          data:
+            'getBlueprintRecord did not run: the call carried neither `recordId` nor `blueprint`, and a record can ' +
+            'only be addressed one of those two ways. Nothing was read. Pass `recordId` for one specific record, or ' +
+            '`blueprint` (name or id) plus an optional `subject` for the latest record under that contract; ' +
+            'listBlueprints shows which blueprints exist. The same empty call will fail identically.',
+          isError: true,
+        }
       }
       const blueprints = await listWorkspaceBlueprints(deps, context.userId, context.workspaceId)
       const match = resolveBlueprint(blueprints, input.blueprint)
       if (!match) {
-        const names = blueprints.map((t) => t.name).slice(0, 8).join(', ')
-        return {
-          data: { error: `No blueprint matching "${input.blueprint}". Available: ${names || '(none)'}` },
-          isError: true,
-        }
+        return blueprintNotFound({
+          tool: 'getBlueprintRecord',
+          effect: 'read a record',
+          needle: input.blueprint,
+          blueprints,
+        })
       }
       const rec = input.subject
         ? await deps.blueprintRecordStore.getLatestBySubject(
@@ -195,11 +265,16 @@ export function createBlueprintRecordTools(deps: BlueprintRecordToolDeps): Tool[
           null)
       if (!rec) {
         return {
-          data: {
-            error: input.subject
-              ? `No "${match.name}" record for "${input.subject}".`
-              : `No "${match.name}" records yet.`,
-          },
+          data: input.subject
+            ? `getBlueprintRecord found no "${match.name}" record for subject "${input.subject}" in this workspace. ` +
+              'The blueprint exists; nothing has been saved under that subject yet. Subjects match on the exact ' +
+              'trimmed string, so a differently-worded subject is a different record. ' +
+              'Call getBlueprintRecord again without `subject` to see this blueprint\'s most recent record, or ' +
+              'produce one with saveBlueprintRecord / fillBlueprintFromBrain. Do NOT retry this exact subject.'
+            : `getBlueprintRecord found no "${match.name}" records at all in this workspace. The blueprint exists, ` +
+              'but nothing has ever been saved under it. Save work under it with saveBlueprintRecord, or synthesize ' +
+              'one from the brain with fillBlueprintFromBrain, before reading. Retrying this read will keep coming ' +
+              'back empty.',
           isError: true,
         }
       }
@@ -223,16 +298,18 @@ export function createBlueprintRecordTools(deps: BlueprintRecordToolDeps): Tool[
     }),
     async execute(input, context) {
       if (!context.workspaceId) {
-        return { data: { error: 'Blueprint records need a workspace context.' }, isError: true }
+        return noWorkspace('saveBlueprintRecord', 'blueprint records')
       }
       const blueprints = await listWorkspaceBlueprints(deps, context.userId, context.workspaceId)
       const match = resolveBlueprint(blueprints, input.blueprint)
       if (!match?.extraction) {
-        const names = blueprints.map((t) => t.name).slice(0, 8).join(', ')
-        return {
-          data: { error: `No blueprint matching "${input.blueprint}". Available: ${names || '(none)'}` },
-          isError: true,
-        }
+        return blueprintNotFound({
+          tool: 'saveBlueprintRecord',
+          effect: 'save the record',
+          needle: input.blueprint,
+          blueprints,
+          mutating: true,
+        })
       }
       const spec = match.extraction
 
@@ -253,10 +330,25 @@ export function createBlueprintRecordTools(deps: BlueprintRecordToolDeps): Tool[
         validated[key] = result.value
       }
       if (errors.length > 0) {
-        return { data: { error: `Rejected: ${errors.join('; ')}` }, isError: true }
+        return {
+          data:
+            `saveBlueprintRecord did not save the "${match.name}" record for "${input.subject.trim()}": ` +
+            `${errors.length} field value(s) failed the blueprint's contract, and a record is written whole or not ` +
+            'at all. Nothing was saved.\nRejected:\n' +
+            errors.map((e) => `  - ${e}`).join('\n') +
+            `\nField keys on this blueprint: ${spec.fields.map((f) => `${f.key} (${f.type}${f.required ? ', required' : ''})`).join(', ')}.` +
+            '\nCorrect those values and call again. Re-sending the same values will be rejected the same way.',
+          isError: true,
+        }
       }
       if (Object.keys(validated).length === 0) {
-        return { data: { error: 'Provide at least one field value.' }, isError: true }
+        return {
+          data:
+            `saveBlueprintRecord did not save a "${match.name}" record: \`fields\` was empty, so there was nothing ` +
+            'to write. Nothing was saved. Pass at least one value keyed by this blueprint\'s field keys ' +
+            `(${spec.fields.map((f) => f.key).join(', ')}). An empty \`fields\` is always rejected.`,
+          isError: true,
+        }
       }
 
       const subject = input.subject.trim()
@@ -345,7 +437,7 @@ export function createBlueprintRecordTools(deps: BlueprintRecordToolDeps): Tool[
     requiresConfirmation: true,
     async execute(input, context) {
       if (!context.workspaceId) {
-        return { data: { error: 'Creating a blueprint needs a workspace context.' }, isError: true }
+        return noWorkspace('createBlueprint', 'blueprints')
       }
       // Auto-key omitted keys from headings, then validate the whole contract
       // through the SAME schema the store/editor use — one validation surface.
@@ -361,8 +453,22 @@ export function createBlueprintRecordTools(deps: BlueprintRecordToolDeps): Tool[
       }
       const parsed = extractionSpecSchema.safeParse(rawSpec)
       if (!parsed.success) {
-        const issue = parsed.error.issues[0]
-        return { data: { error: `Invalid contract: ${issue?.message ?? 'validation failed'}` }, isError: true }
+        const issues = parsed.error.issues.slice(0, 8).map((i) => {
+          const path = i.path.length > 0 ? i.path.join('.') : '<contract>'
+          return `  - ${path}: ${i.message}`
+        })
+        const more = parsed.error.issues.length > 8 ? `\n  …and ${parsed.error.issues.length - 8} more` : ''
+        return {
+          data:
+            `createBlueprint did not create "${input.name.trim()}": the field contract failed validation, so no ` +
+            'blueprint was created.\nRejected:\n' +
+            issues.join('\n') +
+            more +
+            `\nField types: ${EXTRACTION_FIELD_TYPES.join(', ')}. An enum field also needs \`options\`; an ` +
+            `entityRef field also needs \`entityKind\` (${ENTITY_REF_KINDS.join(', ')}).` +
+            '\nFix the named field(s) and call again. The same contract will be rejected the same way.',
+          isError: true,
+        }
       }
       const spec: ExtractionSpec = parsed.data
       try {
@@ -383,8 +489,13 @@ export function createBlueprintRecordTools(deps: BlueprintRecordToolDeps): Tool[
           },
         }
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        return { data: { error: `Failed to create the blueprint: ${msg}` }, isError: true }
+        return toolFailure(err, {
+          tool: 'createBlueprint',
+          action: 'createBlueprint',
+          target: `the blueprint "${input.name.trim()}"`,
+          mutating: true,
+          next: 'A name that collides with an existing blueprint is the common cause — call listBlueprints and pick a distinct one.',
+        })
       }
     },
   })
@@ -425,7 +536,7 @@ export function createBlueprintRecordTools(deps: BlueprintRecordToolDeps): Tool[
         }),
         async execute(input, context) {
           if (!context.workspaceId) {
-            return { data: { error: 'Blueprint records need a workspace context.' }, isError: true }
+            return noWorkspace('projectBlueprintRecordPage', 'blueprint records and pages')
           }
           // Resolve the record.
           let record: BlueprintRecord | null = null
@@ -436,7 +547,13 @@ export function createBlueprintRecordTools(deps: BlueprintRecordToolDeps): Tool[
             const blueprints = await listWorkspaceBlueprints(deps, context.userId, context.workspaceId)
             const match = resolveBlueprint(blueprints, input.blueprint)
             if (!match) {
-              return { data: { error: `No blueprint matching "${input.blueprint}".` }, isError: true }
+              return blueprintNotFound({
+                tool: 'projectBlueprintRecordPage',
+                effect: 'resolve the record to project',
+                needle: input.blueprint,
+                blueprints,
+                mutating: true,
+              })
             }
             record = await deps.blueprintRecordStore.getLatestBySubject(
               context.userId,
@@ -446,12 +563,25 @@ export function createBlueprintRecordTools(deps: BlueprintRecordToolDeps): Tool[
             )
           } else {
             return {
-              data: { error: 'Pass recordId, or blueprint + subject.' },
+              data:
+                'projectBlueprintRecordPage did not run: the call named no record. No page was created or changed. ' +
+                'Pass `recordId`, or `blueprint` (name or id) together with `subject` — `blueprint` alone does not ' +
+                'identify a record. The same call will fail identically.',
               isError: true,
             }
           }
           if (!record) {
-            return { data: { error: 'Record not found — save it first with saveBlueprintRecord.' }, isError: true }
+            const target = input.recordId
+              ? `recordId \`${input.recordId}\``
+              : `blueprint "${input.blueprint}" + subject "${input.subject}"`
+            return {
+              data:
+                `projectBlueprintRecordPage found no blueprint record for ${target} in this workspace. ` +
+                'No page was created or changed. A page is a projection OF a record, so the record has to exist ' +
+                'first: save it with saveBlueprintRecord (or synthesize it with fillBlueprintFromBrain), then ' +
+                'project that record. Do NOT retry this exact target.',
+              isError: true,
+            }
           }
 
           // Find-or-create the page on the record's own anchor key (the same
@@ -495,7 +625,15 @@ export function createBlueprintRecordTools(deps: BlueprintRecordToolDeps): Tool[
             }
           }
           if (!pageId) {
-            return { data: { error: 'Could not create the projection page.' }, isError: true }
+            return {
+              data:
+                `projectBlueprintRecordPage could not create the page for record ${record.id} ` +
+                `("${record.subject}"): the page create failed and no page exists on that record's anchor key. ` +
+                'Nothing was projected; the record itself is intact and still holds the data. ' +
+                'This is a write failure rather than anything wrong with the arguments — retry once, and if it ' +
+                'fails again tell the user instead of looping.',
+              isError: true,
+            }
           }
 
           const blocks = input.draftMarkdown
@@ -504,7 +642,12 @@ export function createBlueprintRecordTools(deps: BlueprintRecordToolDeps): Tool[
           const projected = await projectPage({ userId: context.userId, pageId, blocks })
           if (!projected) {
             return {
-              data: { error: 'The page is being edited right now — try again.' },
+              data:
+                `projectBlueprintRecordPage did not write the projection for record ${record.id} ` +
+                `("${record.subject}"): page ${pageId} is being edited concurrently and its version moved under the ` +
+                'write twice in a row, so the projection was skipped rather than overwriting somebody\'s edit. ' +
+                'Nothing was projected; the record still holds the data and the next projection re-renders it. ' +
+                'Retry once in a moment; if it keeps conflicting, tell the user that page is open for editing.',
               isError: true,
             }
           }

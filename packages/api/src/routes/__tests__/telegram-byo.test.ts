@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import request from 'supertest'
 import { createTestApp } from './helpers.js'
+import { TelegramApiError } from '@use-brian/channels'
 
 /**
  * [COMP:api/telegram-byo-route]
@@ -29,6 +30,16 @@ const leaveChatCalls: string[] = []
 // Capture createTelegramApi().setWebhook calls so the legacy-URL self-heal
 // path can be asserted without touching api.telegram.org.
 const setWebhookCalls: Array<{ url: string; secret: string }> = []
+
+// Overridable so a test can fail the DOWNLOAD leg the way Telegram actually
+// does (a 5xx from its own file service) and assert the turn blames Telegram
+// rather than the transcriber. Reset in beforeEach.
+const DEFAULT_DOWNLOAD_VOICE = async () => ({
+  buffer: Buffer.from('voice'),
+  mime: 'audio/ogg; codecs=opus',
+})
+let downloadVoiceImpl: () => Promise<{ buffer: Buffer; mime: string }> = DEFAULT_DOWNLOAD_VOICE
+
 const { mergeShadowUser } = vi.hoisted(() => ({
   mergeShadowUser: vi.fn(async () => ({ merged: false })),
 }))
@@ -77,7 +88,7 @@ vi.mock('@use-brian/channels', async () => {
         // api.telegram.org which fails fast in unit tests but adds noise.
         // `downloadMedia` echoes the file_id into the buffer so tests can
         // assert each photo of a media group flowed through independently.
-        downloadVoice: vi.fn(async () => ({ buffer: Buffer.from('voice'), mime: 'audio/ogg; codecs=opus' })),
+        downloadVoice: vi.fn(() => downloadVoiceImpl()),
         downloadMedia: vi.fn(async (fileId: string) => ({
           buffer: Buffer.from(`bytes-of-${fileId}`),
           mime: 'image/jpeg',
@@ -322,6 +333,7 @@ beforeEach(() => {
   teamRoleCalls.length = 0
   teamRoleResponse = null
   setWebhookCalls.length = 0
+  downloadVoiceImpl = DEFAULT_DOWNLOAD_VOICE
   mergeShadowUser.mockClear()
 })
 
@@ -581,6 +593,43 @@ describe('[COMP:api/telegram-byo-route] voice note without a transcript', () => 
 
     expect(pipelineCalls).toHaveLength(1)
     expect(pipelineCalls[0].messageText).toMatch(/voice note received/i)
+  })
+
+  it('blames Telegram, with its status code, when the download leg 5xxs', async () => {
+    // The 2026-08-17 regression: `getFile` returned 504, the shared catch ran
+    // the error through `describeTranscriptionFailure`, its /timeout|abort/i
+    // branch matched "Gateway Timeout", and the assistant told the user their
+    // voice note was too long for the transcriber — about audio the
+    // transcriber had never been handed.
+    downloadVoiceImpl = async () => {
+      throw new TelegramApiError('getFile', 'Gateway Timeout', 504)
+    }
+    await postUpdate(appWith({ enabled: true, apiKey: 'k' }), buildVoiceUpdate())
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    expect(pipelineCalls).toHaveLength(1)
+    const text = pipelineCalls[0].messageText
+    // Still arrives AS a voice note — an empty turn reads as "user sent nothing".
+    expect(text).toMatch(/voice note received/i)
+    // Names the real culprit and its code.
+    expect(text).toContain('504')
+    expect(text).toMatch(/Telegram/)
+    // And never re-describes a Telegram fault in the transcriber's vocabulary.
+    expect(text).not.toMatch(/transcription (timed out|failed)/i)
+  })
+
+  it('keeps the caption when the download leg fails', async () => {
+    downloadVoiceImpl = async () => {
+      throw new TelegramApiError('downloadFile', 'Bad Gateway', 502)
+    }
+    await postUpdate(appWith({ enabled: true, apiKey: 'k' }), buildVoiceUpdate('listen to this'))
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    expect(pipelineCalls).toHaveLength(1)
+    expect(pipelineCalls[0].messageText).toContain('listen to this')
+    expect(pipelineCalls[0].messageText).toContain('502')
   })
 })
 

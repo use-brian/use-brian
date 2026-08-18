@@ -12,7 +12,7 @@ vi.mock('../client.js', () => ({
   queryWithRLS: vi.fn(),
 }))
 
-import { createDbSavedViewStore } from '../saved-views-store.js'
+import { createDbSavedViewStore, getPageTreeNeighborhood } from '../saved-views-store.js'
 import { query, queryWithRLS } from '../client.js'
 
 const mockQuery = vi.mocked(query)
@@ -610,5 +610,71 @@ describe('[COMP:api/saved-views-store] page-lifecycle emit (writtenBy → isSyst
     const fired = await s.commitCreatedEvent(USER_ID, VIEW_ID)
     expect(fired).toBe(false)
     expect(onPageLifecycle).not.toHaveBeenCalled()
+  })
+})
+
+describe('[COMP:doc/page-tree-store] getPageTreeNeighborhood', () => {
+  const PAGE = '00000000-0000-0000-0000-00000000aa01'
+
+  it('reads the neighbourhood in ONE RLS-scoped round trip and orders ancestors root → parent', async () => {
+    mockQueryWithRLS.mockResolvedValueOnce({
+      rows: [
+        { rel: 'self', id: PAGE, name: '', icon: null, state: null, ord: 0, total: '0' },
+        // Ancestors come back parent-first (depth 1 = parent); the store flips to root-first.
+        { rel: 'ancestor', id: 'parent', name: 'Meeting notes 2026-08-17', icon: '📝', state: 'saved', ord: 1, total: '0' },
+        { rel: 'ancestor', id: 'root', name: 'Clients', icon: null, state: 'saved', ord: 2, total: '0' },
+        // Siblings / children arrive with the window count in `total` (bigint → string).
+        { rel: 'sibling', id: 'sib-b', name: 'B', icon: null, state: 'draft', ord: 2, total: '15' },
+        { rel: 'sibling', id: 'sib-a', name: 'A', icon: null, state: 'saved', ord: 1, total: '15' },
+        { rel: 'child', id: 'kid', name: 'Action items', icon: '✅', state: 'saved', ord: 0, total: '1' },
+        { rel: 'teamspace', id: 'ts', name: 'General', icon: null, state: null, ord: 0, total: '0' },
+      ],
+      rowCount: 7,
+    } as never)
+    const hood = await getPageTreeNeighborhood(USER_ID, PAGE)
+    expect(mockQueryWithRLS).toHaveBeenCalledTimes(1)
+    const [uid, sql, params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
+    expect(uid).toBe(USER_ID)
+    // Depth-capped recursive ancestor walk + capped sibling/child lists.
+    expect(sql).toContain('WITH RECURSIVE')
+    expect(sql).toContain('a.depth < 32')
+    expect(sql).toContain('count(*) OVER ()')
+    // Root-page siblings are scoped to the same teamspace, never every root in the workspace.
+    expect(sql).toContain('v.teamspace_id IS NOT DISTINCT FROM s.teamspace_id')
+    expect(params).toEqual([PAGE, 12])
+    expect(hood).toEqual({
+      teamspace: { id: 'ts', name: 'General' },
+      ancestors: [
+        { id: 'root', title: 'Clients', icon: null, state: 'saved' },
+        { id: 'parent', title: 'Meeting notes 2026-08-17', icon: '📝', state: 'saved' },
+      ],
+      siblings: [
+        { id: 'sib-a', title: 'A', icon: null, state: 'saved' },
+        { id: 'sib-b', title: 'B', icon: null, state: 'draft' },
+      ],
+      siblingTotal: 15,
+      children: [{ id: 'kid', title: 'Action items', icon: '✅', state: 'saved' }],
+      childTotal: 1,
+    })
+  })
+
+  it('returns null when the page itself is missing or RLS-hidden (no self row)', async () => {
+    mockQueryWithRLS.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    expect(await getPageTreeNeighborhood(USER_ID, PAGE)).toBeNull()
+  })
+
+  it('a private root page with no neighbours reads as an empty map with teamspace=null', async () => {
+    mockQueryWithRLS.mockResolvedValueOnce({
+      rows: [{ rel: 'self', id: PAGE, name: '', icon: null, state: null, ord: 0, total: '0' }],
+      rowCount: 1,
+    } as never)
+    expect(await getPageTreeNeighborhood(USER_ID, PAGE)).toEqual({
+      teamspace: null,
+      ancestors: [],
+      siblings: [],
+      siblingTotal: 0,
+      children: [],
+      childTotal: 0,
+    })
   })
 })

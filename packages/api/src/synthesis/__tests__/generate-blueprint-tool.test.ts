@@ -47,11 +47,20 @@ describe('[COMP:api/generate-blueprint-tool] fillBlueprintFromBrain tool', () =>
     )
   })
 
+  // Failures are message-first TEXT (docs/architecture/engine/tool-executor.md
+  // → "Failure copy"): what did not happen, why, the fillable blueprints that
+  // DO exist, and the retry verdict. A fill is confirmation-gated and spends a
+  // model run, so "no run was spent" is part of the account.
   it('errors (never crashes) with the available list when nothing matches', async () => {
     const { tool, generateSynthesize } = makeTool()
     const res = await tool.execute({ blueprint: 'nonexistent', subject: 'x' }, ctx)
     expect(res.isError).toBe(true)
-    expect(String((res.data as { error: string }).error)).toContain('HKTV Shops Brief')
+    const text = res.data as string
+    expect(typeof text).toBe('string')
+    expect(text).toContain('no blueprint in this workspace matches "nonexistent"')
+    expect(text).toContain('HKTV Shops Brief')
+    expect(text).toContain('No model run was spent')
+    expect(text).toContain('Do NOT retry this exact name.')
     expect(generateSynthesize).not.toHaveBeenCalled()
   })
 
@@ -62,10 +71,15 @@ describe('[COMP:api/generate-blueprint-tool] fillBlueprintFromBrain tool', () =>
     expect(generateSynthesize).not.toHaveBeenCalled()
   })
 
-  it('requires a workspace context', async () => {
+  it('requires a workspace context, and says which surface has one', async () => {
     const { tool } = makeTool()
     const res = await tool.execute({ blueprint: 'hktv', subject: 'x' }, { userId: 'u', assistantId: 'a' } as never)
     expect(res.isError).toBe(true)
-    expect(String((res.data as { error: string }).error).toLowerCase()).toContain('workspace')
+    const text = res.data as string
+    expect(text.toLowerCase()).toContain('workspace')
+    // The gate names the surface that is missing and the remedy — never a bare
+    // "not available in this context".
+    expect(text).toContain('Run it from a workspace chat')
+    expect(text).toContain('nothing was written')
   })
 })

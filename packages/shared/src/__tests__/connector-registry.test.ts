@@ -34,6 +34,30 @@ describe('[COMP:shared/connector-registry] Official connector registry', () => {
     })
   })
 
+  it('registers Google Search Console as a BYO-key official connector routed through its paste form', () => {
+    const gsc = OFFICIAL_CONNECTORS.find((connector) => connector.id === 'gsc')
+    expect(ConnectorEntrySchema.parse(gsc)).toMatchObject({
+      id: 'gsc',
+      name: 'Google Search Console',
+      category: 'official',
+      auth_type: 'api_key',
+      oauth_required: true,
+      enabled: true,
+    })
+    // One instance per service account (which may see many properties).
+    expect(gsc?.single_instance).toBeFalsy()
+    expect(MULTI_INSTANCE_CONNECTOR_IDS.has('gsc')).toBe(true)
+    // Four read-only tools, no OAuth scopes (it is not an OAuth connector).
+    expect(OFFICIAL_CONNECTOR_TOOLS.gsc?.map((tool) => tool.name)).toEqual([
+      'searchConsoleListSites',
+      'searchConsoleQuery',
+      'searchConsoleInspectUrl',
+      'searchConsoleListSitemaps',
+    ])
+    expect(OFFICIAL_CONNECTOR_TOOLS.gsc?.every((tool) => tool.classification === 'read' && tool.defaultPolicy === 'allow')).toBe(true)
+    expect(OFFICIAL_OAUTH_SCOPES.gsc).toBeUndefined()
+  })
+
   it('registers Office as a first-party governed primitive', () => {
     expect(OFFICIAL_CONNECTORS.find((connector) => connector.id === 'office')).toMatchObject({
       auth_type: 'none',

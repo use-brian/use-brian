@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { createSchedulingTools } from '../tools.js'
 import type { JobStore, ScheduledJob } from '../types.js'
 import type { StructuredSchedule } from '../schedule.js'
@@ -242,6 +242,31 @@ describe('[COMP:scheduling/tools] createScheduledJob', () => {
     const data = result.data as { id: string; nextRun: string }
     expect(data.id).toBe('job_1')
     expect(data.nextRun).toBeDefined()
+  })
+
+  it('uses the workspace runtime for workflow auto-title', async () => {
+    const store = makeFakeJobStore()
+    const workflowStore = makeFakeWorkflowStore()
+    const platformProvider = { stream: vi.fn(async function* () { throw new Error('platform must not run') }) }
+    const customProvider = {
+      stream: vi.fn(async function* () { yield { type: 'text_delta' as const, text: 'Custom reminder title' } }),
+    }
+    const resolveLlm = vi.fn().mockResolvedValue({ provider: customProvider, model: 'custom:model' })
+    const { createScheduledJob } = createSchedulingTools({
+      jobStore: store,
+      workflowStore,
+      provider: platformProvider as never,
+      resolveLlm,
+    })
+    await createScheduledJob.execute({
+      schedule: { type: 'daily', time: '09:00' },
+      timezone: 'UTC',
+      instructions: 'Send daily weather',
+    }, ctx)
+    expect(resolveLlm).toHaveBeenCalledWith('w1')
+    expect(platformProvider.stream).not.toHaveBeenCalled()
+    expect(customProvider.stream).toHaveBeenCalledWith(expect.objectContaining({ model: 'custom:model' }))
+    expect(workflowStore.rows[0]?.name).toBe('Custom reminder title')
   })
 
   it('builds the reminder workflow on the Pro tier by default', async () => {
@@ -1132,11 +1157,44 @@ describe('[COMP:scheduling/tools] workspace visibility + cross-member management
 
     const updated = await updateScheduledJob.execute({ jobId: reminder.id, enabled: false }, ctx)
     expect(updated.isError).toBe(true)
-    expect(updated.data).toContain('not found')
+    // The copy must NOT confirm the job exists (existence leak) while still
+    // carrying the id, the discovery pointer, and the retry verdict.
+    expect(String(updated.data)).toContain(reminder.id)
+    expect(String(updated.data)).toContain('not available to this assistant')
+    expect(String(updated.data)).toContain('does not distinguish the two on purpose')
+    expect(String(updated.data)).toContain('searchScheduledJobs')
+    expect(String(updated.data)).toContain('Do NOT retry this exact id')
 
     const deleted = await deleteScheduledJob.execute({ jobId: reminder.id }, ctx)
     expect(deleted.isError).toBe(true)
     expect(store.rows.find((r) => r.id === reminder.id)).toBeDefined()
+  })
+
+  it('says exactly the same thing for "no such job" as for "not yours" (byte-identical)', async () => {
+    // The discovery pointer and the retry verdict are additions the failure-copy
+    // standard requires; the no-existence-leak property is the constraint they
+    // must not break. The only way to hold both is ONE sentence used at every
+    // miss — so this asserts equality, not just the absence of a keyword.
+    const { store, wfStore } = seed()
+    const teammates = await store.create({
+      assistantId: 'a1', userId: 'u2',
+      schedule: { type: 'daily', time: '08:00' }, timezone: 'UTC',
+      instructions: 'take the pill', channelType: 'telegram', channelId: 'c9',
+      nextRunAt: new Date(Date.now() + 60_000),
+    })
+    const { deleteScheduledJob } = createSchedulingTools({ jobStore: store, workflowStore: wfStore })
+
+    const notYours = await deleteScheduledJob.execute({ jobId: teammates.id }, ctx)
+    const noSuchJob = await deleteScheduledJob.execute({ jobId: teammates.id.replace(/.$/, 'z') }, ctx)
+
+    expect(notYours.isError).toBe(true)
+    expect(noSuchJob.isError).toBe(true)
+    // Same sentence modulo the id, which each one legitimately names.
+    expect(String(notYours.data).replace(teammates.id, '<id>')).toBe(
+      String(noSuchJob.data).replace(teammates.id.replace(/.$/, 'z'), '<id>'),
+    )
+    expect(String(notYours.data)).toContain('searchScheduledJobs')
+    expect(String(notYours.data)).toContain('Do NOT retry this exact id')
   })
 
   it('a trigger whose workflow lives in ANOTHER workspace is not manageable', async () => {

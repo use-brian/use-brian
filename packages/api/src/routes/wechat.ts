@@ -33,8 +33,10 @@ import { Router } from 'express'
 import {
   createWechatAdapter,
   createIlinkClient,
+  describeWechatPayload,
   downloadWechatMediaItem,
   findWechatMediaItem,
+  WeixinItemType,
   type WeixinMessage,
 } from '@use-brian/channels'
 import type { IncomingMessage } from '@use-brian/channels'
@@ -53,8 +55,9 @@ import { getToolDisplayName, formatConfirmationInput } from '@use-brian/shared'
 import { processChannelMessage } from './channel-pipeline.js'
 import { cacheInboundImageTag } from './channel-file-cache.js'
 import { billingPartyForAssistant } from '../billing-party.js'
-import type { ChatArchiveMediaService } from '../chat-archive/media-service.js'
-import { archiveMediaRef } from '../chat-archive/media-service.js'
+import type { ChatArchiveLiveMedia } from '../chat-archive/live-media.js'
+import { archiveMediaRef } from '../chat-archive/live-media.js'
+import { resolveChatArchiveInstanceId } from '../chat-archive/live-writer.js'
 
 export type WechatRouteOptions = {
   /** Servable background-lane model, resolved at boot; forwarded to the
@@ -63,6 +66,7 @@ export type WechatRouteOptions = {
   /** Shared secret the connector presents on every call (WECHAT_CONNECTOR_SECRET). */
   connectorSecret: string
   provider: LLMProvider
+  configuredProviders?: import('@use-brian/shared/model-registry').ProviderAvailability
   resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
   systemPrompt: string
   tools: Map<string, Tool>
@@ -91,7 +95,7 @@ export type WechatRouteOptions = {
   episodicStore?: import('@use-brian/core').EpisodicStore
   sessionStateStore?: import('@use-brian/core').SessionStateStore
   capabilityStore: import('@use-brian/core').CapabilityStore
-  archiveMedia?: ChatArchiveMediaService
+  archiveMedia?: ChatArchiveLiveMedia
 }
 
 // Natural-language → decision mapping for WeChat text-based confirmation
@@ -363,6 +367,15 @@ export function wechatRoutes(options: WechatRouteOptions): Router {
     // server STT already arrived as text via the adapter.
     const userContentBlocks: ContentBlock[] = []
     const mediaItem = raw ? findWechatMediaItem(raw.item_list) : null
+    // An attachment WITH a caption survives `parseIncoming` on its text alone,
+    // so the connector's drop-path log never fires and the message archives as
+    // text-only — the attachment gone with no trace. Report the rejection here
+    // (structure only, no content) so both shapes are visible.
+    if (!mediaItem && raw?.item_list?.some((i) => i.type != null && i.type !== WeixinItemType.TEXT)) {
+      console.warn(
+        `[wechat] inbound carried a non-text item that is not downloadable — no bytes archived: ${describeWechatPayload(raw)}`,
+      )
+    }
     if (mediaItem) {
       const fallbackKind = mediaItem.video_item ? 'video'
         : mediaItem.voice_item ? 'voice'
@@ -394,22 +407,35 @@ export function wechatRoutes(options: WechatRouteOptions): Router {
           && incoming.messageId
         ) {
           try {
-            const instanceId = await options.archiveMedia.resolveBinding({
-              workspaceId: assistant.workspaceId,
-              ownerUserId: ownerId,
-              source: 'wechat',
-              instanceId: params.archiveConnectorInstanceId,
-            })
+            // `channel_integrations.connector_instance_id` is routinely null —
+            // a QR-paired WeChat bot never sets it — while the append path
+            // mints the archive instance lazily on first message. Requiring
+            // the integration's copy here made every attachment fail with
+            // `availability: 'failed'` on a channel whose text messages
+            // archived perfectly. Fall back to the SAME memoized resolver the
+            // append uses, so the asset and its message row cannot land under
+            // different instance ids.
+            const archiveInstanceId = params.archiveConnectorInstanceId
+              ?? await resolveChatArchiveInstanceId({
+                source: 'wechat',
+                ownerUserId: ownerId,
+                workspaceId: assistant.workspaceId,
+                assistantId: routing.assistantId,
+                assistantName: assistant.name ?? '',
+                conversationId: peerId,
+              })
+            if (!archiveInstanceId) {
+              throw new Error('wechat archive instance could not be resolved')
+            }
             const asset = await options.archiveMedia.storeBuffer({
               workspaceId: assistant.workspaceId,
-              instanceId,
+              instanceId: archiveInstanceId,
               ownerUserId: ownerId,
               source: 'wechat',
               providerMessageId: incoming.messageId,
               kind: archiveKind,
               filename: media.name,
               mime: media.mime,
-              sizeBytes: media.data.length,
               bytes: media.data,
             })
             const ref = archiveMediaRef(asset)
@@ -470,12 +496,18 @@ export function wechatRoutes(options: WechatRouteOptions): Router {
         } else if (media.kind === 'voice') {
           userContentBlocks.push({
             type: 'text',
-            text: '[The user sent a voice message. It is stored and being transcribed for chat-history search.]',
+            text: '[The user sent a voice message. You cannot hear it directly. It is archived and '
+              + 'transcribed asynchronously — use searchChatHistory to retrieve the transcript. '
+              + 'If the search returns nothing, transcription has not finished yet; say so rather '
+              + 'than saying the content is unavailable.]',
           })
         } else if (media.kind === 'video') {
           userContentBlocks.push({
             type: 'text',
-            text: '[The user sent a video. It is stored and being processed for chat-history search.]',
+            text: '[The user sent a video. You cannot watch it directly. It is archived and its '
+              + 'frames and audio are described asynchronously — use searchChatHistory to retrieve '
+              + 'those descriptions. If the search returns nothing, processing has not finished yet; '
+              + 'say so rather than saying the content is unavailable.]',
           })
         }
       } catch (err) {
@@ -541,6 +573,7 @@ export function wechatRoutes(options: WechatRouteOptions): Router {
       adaptiveResearchEnabled: true,
       abortController,
       provider: options.provider,
+      configuredProviders: options.configuredProviders,
       resolveWorkspaceCustomLlm: options.resolveWorkspaceCustomLlm,
       systemPrompt: options.systemPrompt,
       tools: options.tools,

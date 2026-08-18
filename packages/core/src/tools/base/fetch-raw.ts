@@ -13,6 +13,7 @@
  */
 
 import type { FetchProvider, FetchResult } from './fetch-stack.js'
+import { FetchProviderError } from './_fetch-error.js'
 import { isXHost } from './fetch-xai.js'
 
 const USER_AGENT = 'Mozilla/5.0 (compatible; use-brian/1.0)'
@@ -39,7 +40,7 @@ export const rawFetchProvider: FetchProvider = {
     })
 
     if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`)
+      throw new FetchProviderError({ provider: 'raw', url, status: res.status })
     }
 
     const contentType = (res.headers.get('content-type') ?? '').toLowerCase()

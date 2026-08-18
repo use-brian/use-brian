@@ -288,7 +288,10 @@ export function useDockRecorder(opts: {
   /** Session id accessor for the voice-clip cache upload (best-effort). */
   getSessionId?: () => string | undefined;
   /** Long-lane hand-off: the recording ingestion flow (`useRecordingUpload.run`). */
-  onMeetingCapture: (file: File, livePageId?: string) => Promise<unknown>;
+  onMeetingCapture: (
+    file: File,
+    live?: { pageId: string; sessionId?: string },
+  ) => Promise<unknown>;
   /** Pre-flight confirm + destination creation; null means the user cancelled. */
   prepareLivePage?: () => Promise<LiveRecordingPage | null>;
   /** Sequential provisional-window upload. */
@@ -401,8 +404,14 @@ export function useDockRecorder(opts: {
    * (voice turn sent / recording queued) releases it.
    */
   const handOff = useCallback(
-    async (blob: Blob, mime: string, durationMs: number, recoveredLivePageId?: string): Promise<boolean> => {
-      const livePageId = recoveredLivePageId ?? livePageRef.current?.pageId;
+    async (
+      blob: Blob,
+      mime: string,
+      durationMs: number,
+      recoveredLive?: { pageId?: string; sessionId?: string },
+    ): Promise<boolean> => {
+      const livePageId = recoveredLive?.pageId ?? livePageRef.current?.pageId;
+      const liveSessionId = recoveredLive?.sessionId ?? livePageRef.current?.sessionId;
       const lane: CaptureLane = livePageId && durationMs >= 2_000 ? "recording" : stopLane(durationMs);
       if (lane === "discard") return true;
       const name = captureFileName(captureNamePrefix, new Date(), mime);
@@ -419,7 +428,10 @@ export function useDockRecorder(opts: {
       // BOTH cancel and failure — either way the audio must survive, and the
       // "kept" notice tells the user so (the generic failure copy would read
       // as "your recording might be lost").
-      const queued = await onMeetingCapture(file, livePageId);
+      const queued = await onMeetingCapture(
+        file,
+        livePageId ? { pageId: livePageId, ...(liveSessionId ? { sessionId: liveSessionId } : {}) } : undefined,
+      );
       if (!queued) setNotice("kept");
       return Boolean(queued);
     },
@@ -501,7 +513,12 @@ export function useDockRecorder(opts: {
               workspaceId,
               assistantId,
               startedAt: Date.now(),
-              ...(livePageRef.current ? { livePageId: livePageRef.current.pageId } : {}),
+              ...(livePageRef.current
+                ? {
+                    livePageId: livePageRef.current.pageId,
+                    liveSessionId: livePageRef.current.sessionId,
+                  }
+                : {}),
             });
           }
           return;
@@ -825,7 +842,9 @@ export function useDockRecorder(opts: {
           assembleSpooledBlob(meta, chunks),
           meta.mime,
           meta.elapsedMs,
-          meta.livePageId,
+          meta.livePageId || meta.liveSessionId
+            ? { pageId: meta.livePageId, sessionId: meta.liveSessionId }
+            : undefined,
         );
         // Same retention contract as a live stop: a cancelled confirm or a
         // failed upload keeps the session so Save can be retried.

@@ -35,9 +35,15 @@ function makeFakeManager(options?: { cap?: number | null }): FakeManager {
     },
     get maxConcurrent(): number | null { return cap },
     get activeCount(): number { return active() },
+    // Mirrors the real manager: only a RUNNING worker can be stopped
+    // (worker.ts `stop()` returns false for a settled one). The fake used to
+    // return true for any known id, which hid the difference between "no such
+    // worker" and "already finished" — the exact distinction the tool's
+    // failure copy now has to make.
     stop(workerId: string): boolean {
+      const status = statuses.get(workerId)
+      if (status !== 'running') return false
       stopped.push(workerId)
-      if (!statuses.has(workerId)) return false
       statuses.set(workerId, 'stopped')
       return true
     },
@@ -142,7 +148,10 @@ describe('[COMP:workers/tools] spawnWorker', () => {
     expect(r3.isError).toBe(true)
     expect(String(r3.data)).toContain('at capacity')
     expect(String(r3.data)).toContain('2/2')
-    expect(String(r3.data)).toContain('next turn')
+    // Retry verdict: this is the one first-party failure where the SAME
+    // arguments do eventually succeed, so the copy must say when.
+    expect(String(r3.data)).toContain('No worker was spawned')
+    expect(String(r3.data)).toContain('NEXT turn')
     // The rejected spawn must NOT count toward `spawned` — only the 2 that succeeded did.
     expect(manager.spawned).toHaveLength(2)
   })
@@ -157,6 +166,15 @@ describe('[COMP:workers/tools] sendWorkerMessage', () => {
       ctx,
     )
     expect(result.isError).toBe(true)
+    const data = String(result.data)
+    // Worker ids are per-turn and in-memory, and there is NO listing tool —
+    // so the copy must name the id, say where the only valid id comes from,
+    // and close the search rather than sending the model hunting.
+    expect(data).toContain('worker_missing')
+    expect(data).toContain('per-turn and in-memory')
+    expect(data).toContain('no tool that lists workers')
+    expect(data).toContain('spawnWorker')
+    expect(data).toContain('Do NOT retry this exact id')
   })
 
   it('returns an error when worker is still running', async () => {
@@ -168,7 +186,11 @@ describe('[COMP:workers/tools] sendWorkerMessage', () => {
       ctx,
     )
     expect(result.isError).toBe(true)
-    expect(String(result.data)).toContain('running')
+    const data = String(result.data)
+    expect(data).toContain('running')
+    // A running worker delivers its own result — the model must be told to
+    // stop, not to poll (the one shape that turns a wait into a loop).
+    expect(data).toContain('Do NOT poll it')
   })
 
   it('returns the cached result when worker is completed', async () => {
@@ -200,5 +222,24 @@ describe('[COMP:workers/tools] stopWorker', () => {
     const { stopWorker } = createWorkerTools(manager)
     const result = await stopWorker.execute({ workerId: 'worker_ghost' }, ctx)
     expect(result.isError).toBe(true)
+    const data = String(result.data)
+    expect(data).toContain('worker_ghost')
+    expect(data).toContain('no tool that lists workers')
+    expect(data).toContain('Do NOT retry this exact id')
+  })
+
+  it('distinguishes an already-settled worker from one that never existed', async () => {
+    const manager = makeFakeManager()
+    const { spawnWorker, stopWorker } = createWorkerTools(manager)
+    await spawnWorker.execute({ description: 'Research X', prompt: 'Research X' }, ctx)
+    manager.__setCompleted('worker_1', 'done')
+
+    const result = await stopWorker.execute({ workerId: 'worker_1' }, ctx)
+    expect(result.isError).toBe(true)
+    const data = String(result.data)
+    // The id DID resolve, so the not-found sentence would be a lie.
+    expect(data).toContain('already completed')
+    expect(data).toContain('Nothing changed')
+    expect(data).not.toContain('does not exist in this turn')
   })
 })

@@ -100,6 +100,21 @@ function CommentCard({ thread }: { thread: PublicComment }) {
   );
 }
 
+/**
+ * Body of a published page that has no blocks (and no recording): the shell
+ * (breadcrumb, CTA, title) still renders styled, and this muted line stands in
+ * for the blank body so an empty share never reads as a broken page. Exported
+ * for the SSR unit test.
+ */
+export function SharedPageEmptyBody() {
+  const t = useT().sharedPage;
+  return (
+    <p data-testid="shared-page-empty" className="text-sm text-muted-foreground">
+      {t.emptyBody}
+    </p>
+  );
+}
+
 /** Pre-measure height estimate for a card (seeds the first paint only; real
  *  heights are measured from the DOM right after). Tuned to the editor-style
  *  rows the card now renders: card padding (~24px) + per-message header + a
@@ -506,6 +521,7 @@ export function PublicPageView({ source, initial }: { source: PublicSource; init
             {recording ? (
               <PublicRecordingChrome source={source} recording={recording} title={page.title} />
             ) : null}
+            {page.blocks.length === 0 && !recording ? <SharedPageEmptyBody /> : null}
             <ReadOnlyPageBlocks
               blocks={page.blocks}
               payload={page.payload}

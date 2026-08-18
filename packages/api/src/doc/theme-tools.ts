@@ -21,7 +21,7 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool, type LLMProvider } from '@use-brian/core'
+import { buildTool, toolFailure, type Tool, type LLMProvider } from '@use-brian/core'
 import { seedAppearance, type CustomThemePayload } from '@use-brian/shared'
 
 import type { DocThemeStore } from '../db/doc-themes-store.js'
@@ -65,8 +65,15 @@ export function createRefineActiveThemeTool(deps: RefineActiveThemeDeps): Tool {
     async execute(input, context) {
       const theme = await deps.store.getById(context.userId, deps.themeId)
       if (!theme) {
+        // `deps.themeId` is the doc client's applied-theme preference, not
+        // something the model passed — so there is no argument to correct and
+        // no sibling tool that lists themes. The remedy is entirely user-side.
         return {
-          data: "There's no custom theme applied right now. Create one from the Theme menu first, then I can refine it.",
+          data:
+            `The theme was not changed: custom theme ${deps.themeId} — the one this browser has applied — no longer exists for this user, so there is nothing to refine. ` +
+            'It was deleted (or the applied-theme setting is stale from another account). ' +
+            'There is no tool that can list or pick a theme; ask the user to open the doc Theme menu and apply or create a custom theme, then repeat the instruction. ' +
+            'Retrying refineActiveTheme now will fail the same way.',
           isError: true,
         }
       }
@@ -83,12 +90,18 @@ export function createRefineActiveThemeTool(deps: RefineActiveThemeDeps): Tool {
         if (err instanceof ThemeGenerationError) {
           return {
             data:
-              "I couldn't turn that into a theme change. Try describing it differently — " +
-              "e.g. 'warmer', 'more contrast', or 'swap the accent to green'.",
+              `Theme "${theme.name}" was NOT changed: the generator could not turn the instruction ${JSON.stringify(input.instruction)} into a valid palette (${err.message}). ` +
+              'Nothing was saved. Re-issue with a concrete visual adjustment - a temperature, a contrast level, or a named colour for the accent (for example "warmer", "more contrast", "swap the accent to green", "darker and more minimal"). ' +
+              'Sending the same instruction again will fail the same way.',
             isError: true,
           }
         }
-        throw err
+        return toolFailure(err, {
+          tool: 'refineActiveTheme',
+          action: `Refining custom theme "${theme.name}" from the instruction ${JSON.stringify(input.instruction)}`,
+          mutating: true,
+          next: 'The user\'s applied theme is unchanged - do not tell them it was updated.',
+        })
       }
 
       const updated = await deps.store.updateGenerated(context.userId, deps.themeId, {
@@ -97,7 +110,13 @@ export function createRefineActiveThemeTool(deps: RefineActiveThemeDeps): Tool {
         description: refined.description,
       })
       if (!updated) {
-        return { data: 'Could not update the theme — it may have been deleted.', isError: true }
+        return {
+          data:
+            `Theme "${theme.name}" (${deps.themeId}) was NOT changed: the refined palette was generated, but the theme row disappeared before it could be written — it was deleted while this ran. ` +
+            'Nothing was saved and the user still sees the old theme. Tell them the theme is gone and that a new one can be created from the doc Theme menu. ' +
+            'Retrying refineActiveTheme against this theme will fail the same way.',
+          isError: true,
+        }
       }
 
       deps.onRefined?.(updated.id, updated.tokens, seedAppearance(updated.seed))

@@ -61,7 +61,7 @@ export type ComposeRecoveryMessageResult = {
   text: string
   usage: TokenUsage | null
   /** Pinned to `gemini-flash` so callers can attribute overhead correctly. */
-  model: 'gemini-flash'
+  model: string
 }
 
 /** Always-Flash so a Pro outage doesn't take the recovery path with it. */
@@ -175,7 +175,7 @@ export async function composeRecoveryMessage(
       .join('')
       .trim()
     if (text.length === 0) return null
-    return { text, usage: response.usage, model: RECOVERY_MODEL }
+    return { text, usage: response.usage, model: response.model || RECOVERY_MODEL }
   } catch (err) {
     // Best-effort path — never let a Flash hiccup bubble out as a
     // second crash. Caller falls back to the generic "Something went

@@ -21,6 +21,7 @@ import type {
   CalendarEventColorOptions,
 } from '@use-brian/core'
 import { renderEmailBody } from '@use-brian/channels'
+import { GoogleApiError, parseGoogleErrorBody, type GoogleApiProduct } from '@use-brian/core'
 
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token'
 const CALENDAR_API = 'https://www.googleapis.com/calendar/v3'
@@ -34,6 +35,39 @@ const DRIVE_API = 'https://www.googleapis.com/drive/v3'
 const DOCS_API = 'https://docs.googleapis.com/v1'
 const SHEETS_API = 'https://sheets.googleapis.com/v4'
 const SLIDES_API = 'https://slides.googleapis.com/v1'
+
+// ── Errors ────────────────────────────────────────────────────
+
+/**
+ * Turn a non-2xx Google response into a structured `GoogleApiError` (core's
+ * `_google-error.ts`): the envelope is parsed once here — `error.message`,
+ * `error.errors[0].reason`, `error.status` — capped, and rendered by status
+ * in the tools through `describeGoogleError`. Every `if (!res.ok)` in this
+ * file goes through this so no caller ever throws the raw body again.
+ * Usage: `if (!res.ok) throw await googleApiError(res, 'Tasks')`.
+ */
+export async function googleApiError(
+  res: Response,
+  api: GoogleApiProduct,
+  operation?: string,
+): Promise<GoogleApiError> {
+  let raw = ''
+  try {
+    if (typeof res.text === 'function') raw = await res.text()
+    else if (typeof res.json === 'function') raw = JSON.stringify(await res.json())
+  } catch {
+    raw = ''
+  }
+  const parsed = parseGoogleErrorBody(raw)
+  return new GoogleApiError({
+    api,
+    status: res.status,
+    message: parsed.message,
+    reason: parsed.reason,
+    googleStatus: parsed.googleStatus,
+    operation,
+  })
+}
 
 // ── Token refresh ─────────────────────────────────────────────
 
@@ -160,10 +194,10 @@ export async function refreshGoogleAccessToken(
     }),
   })
 
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Google token refresh failed (${res.status}): ${err}`)
-  }
+  // `invalid_grant` here means the refresh token itself is dead (revoked,
+  // expired, password changed) — inject.ts `isTokenRevoked` and the health
+  // classifier both key on that reason staying in the message.
+  if (!res.ok) throw await googleApiError(res, 'Google', 'token refresh')
 
   const data = await res.json() as { access_token: string }
   return data.access_token
@@ -224,11 +258,8 @@ export type CalendarListEntry = {
 
 export type CalendarSendUpdates = 'all' | 'externalOnly' | 'none'
 
-async function calendarJson<T>(res: Response, context = 'Calendar API'): Promise<T> {
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`${context} error (${res.status}): ${err}`)
-  }
+async function calendarJson<T>(res: Response, operation?: string): Promise<T> {
+  if (!res.ok) throw await googleApiError(res, 'Calendar', operation)
   return await res.json() as T
 }
 
@@ -953,10 +984,7 @@ async function deleteCalendarEventById(
     `${CALENDAR_API}/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}?sendUpdates=${sendUpdates}`,
     { method: 'DELETE', headers: calendarHeaders(accessToken) },
   )
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Calendar API error (${res.status}): ${err}`)
-  }
+  if (!res.ok) throw await googleApiError(res, 'Calendar')
 }
 
 export async function deleteCalendarEvent(
@@ -1029,10 +1057,7 @@ export async function listGmailMessages(
     headers: { Authorization: `Bearer ${accessToken}` },
   })
 
-  if (!listRes.ok) {
-    const err = await listRes.text()
-    throw new Error(`Gmail API error (${listRes.status}): ${err}`)
-  }
+  if (!listRes.ok) throw await googleApiError(listRes, 'Gmail')
 
   const listData = await listRes.json() as { messages?: Array<{ id: string; threadId: string }> }
   if (!listData.messages?.length) return []
@@ -1070,10 +1095,7 @@ export async function getGmailMessage(
     { headers: { Authorization: `Bearer ${accessToken}` } },
   )
 
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Gmail API error (${res.status}): ${err}`)
-  }
+  if (!res.ok) throw await googleApiError(res, 'Gmail')
 
   const msg = await res.json() as GmailMessage
   const headers = msg.payload?.headers ?? []
@@ -1241,10 +1263,7 @@ export async function sendGmailMessage(
       body: raw,
     })
 
-    if (!res.ok) {
-      const err = await res.text()
-      throw new Error(`Gmail API error (${res.status}): ${err}`)
-    }
+    if (!res.ok) throw await googleApiError(res, 'Gmail')
 
     return await res.json() as { id: string; threadId: string }
   }
@@ -1282,10 +1301,7 @@ export async function sendGmailMessage(
     body: JSON.stringify({ raw: encoded }),
   })
 
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Gmail API error (${res.status}): ${err}`)
-  }
+  if (!res.ok) throw await googleApiError(res, 'Gmail')
 
   return await res.json() as { id: string; threadId: string }
 }
@@ -1322,10 +1338,7 @@ export async function listTaskLists(
     headers: { Authorization: `Bearer ${accessToken}` },
   })
 
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Tasks API error (${res.status}): ${err}`)
-  }
+  if (!res.ok) throw await googleApiError(res, 'Tasks')
 
   const data = await res.json() as { items?: TaskList[] }
   return data.items ?? []
@@ -1353,10 +1366,7 @@ export async function listGoogleTasks(
     { headers: { Authorization: `Bearer ${accessToken}` } },
   )
 
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Tasks API error (${res.status}): ${err}`)
-  }
+  if (!res.ok) throw await googleApiError(res, 'Tasks')
 
   const data = await res.json() as { items?: GoogleTask[] }
   return data.items ?? []
@@ -1372,10 +1382,7 @@ export async function getGoogleTask(
     { headers: { Authorization: `Bearer ${accessToken}` } },
   )
 
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Tasks API error (${res.status}): ${err}`)
-  }
+  if (!res.ok) throw await googleApiError(res, 'Tasks')
 
   return await res.json() as GoogleTask
 }
@@ -1407,10 +1414,7 @@ export async function createGoogleTask(
     },
   )
 
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Tasks API error (${res.status}): ${err}`)
-  }
+  if (!res.ok) throw await googleApiError(res, 'Tasks')
 
   return await res.json() as GoogleTask
 }
@@ -1444,10 +1448,7 @@ export async function updateGoogleTask(
     },
   )
 
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Tasks API error (${res.status}): ${err}`)
-  }
+  if (!res.ok) throw await googleApiError(res, 'Tasks')
 
   return await res.json() as GoogleTask
 }
@@ -1465,10 +1466,7 @@ export async function deleteGoogleTask(
     },
   )
 
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Tasks API error (${res.status}): ${err}`)
-  }
+  if (!res.ok) throw await googleApiError(res, 'Tasks')
 }
 
 // ── Drive ─────────────────────────────────────────────────────
@@ -1542,10 +1540,7 @@ export async function listDriveFilesPage(
     headers: { Authorization: `Bearer ${accessToken}` },
   })
 
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Drive API error (${res.status}): ${err}`)
-  }
+  if (!res.ok) throw await googleApiError(res, 'Drive')
 
   const data = await res.json() as { files?: DriveFile[]; nextPageToken?: string }
   return {
@@ -1578,10 +1573,7 @@ export async function getDriveFile(
     headers: { Authorization: `Bearer ${accessToken}` },
   })
 
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Drive API error (${res.status}): ${err}`)
-  }
+  if (!res.ok) throw await googleApiError(res, 'Drive')
 
   return await res.json() as DriveFile
 }
@@ -1612,10 +1604,7 @@ export async function getDriveFileContentWithMetadata(
       `${DRIVE_API}/files/${encodeURIComponent(fileId)}/export?mimeType=${encodeURIComponent(mime)}`,
       { headers: { Authorization: `Bearer ${accessToken}` } },
     )
-    if (!res.ok) {
-      const err = await res.text()
-      throw new Error(`Drive export error (${res.status}): ${err}`)
-    }
+    if (!res.ok) throw await googleApiError(res, 'Drive', 'export')
     return { file: meta, content: await res.text() }
   }
 
@@ -1624,10 +1613,7 @@ export async function getDriveFileContentWithMetadata(
     `${DRIVE_API}/files/${encodeURIComponent(fileId)}?alt=media&supportsAllDrives=true`,
     { headers: { Authorization: `Bearer ${accessToken}` } },
   )
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Drive download error (${res.status}): ${err}`)
-  }
+  if (!res.ok) throw await googleApiError(res, 'Drive', 'download')
   return { file: meta, content: await res.text() }
 }
 
@@ -1649,10 +1635,7 @@ export async function getDriveFileBytesWithMetadata(
       `${DRIVE_API}/files/${encodeURIComponent(fileId)}/export?mimeType=${encodeURIComponent(mimeType)}`,
       { headers: { Authorization: `Bearer ${accessToken}` } },
     )
-    if (!res.ok) {
-      const err = await res.text()
-      throw new Error(`Drive export error (${res.status}): ${err}`)
-    }
+    if (!res.ok) throw await googleApiError(res, 'Drive', 'export')
     return { file: meta, bytes: new Uint8Array(await res.arrayBuffer()), mimeType }
   }
 
@@ -1660,10 +1643,7 @@ export async function getDriveFileBytesWithMetadata(
     `${DRIVE_API}/files/${encodeURIComponent(fileId)}?alt=media&supportsAllDrives=true`,
     { headers: { Authorization: `Bearer ${accessToken}` } },
   )
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Drive download error (${res.status}): ${err}`)
-  }
+  if (!res.ok) throw await googleApiError(res, 'Drive', 'download')
   return { file: meta, bytes: new Uint8Array(await res.arrayBuffer()), mimeType: meta.mimeType }
 }
 
@@ -1705,10 +1685,7 @@ export async function createDriveFile(
     },
   )
 
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Drive create error (${res.status}): ${err}`)
-  }
+  if (!res.ok) throw await googleApiError(res, 'Drive', 'create')
 
   return await res.json() as DriveFile
 }
@@ -1737,10 +1714,7 @@ export async function updateDriveFileContent(
         body: JSON.stringify(body),
       },
     )
-    if (!res.ok) {
-      const err = await res.text()
-      throw new Error(`Drive update error (${res.status}): ${err}`)
-    }
+    if (!res.ok) throw await googleApiError(res, 'Drive', 'update')
     return await res.json() as DriveFile
   }
 
@@ -1773,10 +1747,7 @@ export async function updateDriveFileContent(
     },
   )
 
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Drive update error (${res.status}): ${err}`)
-  }
+  if (!res.ok) throw await googleApiError(res, 'Drive', 'update')
 
   return await res.json() as DriveFile
 }
@@ -1792,10 +1763,7 @@ export async function getDocContent(
     { headers: { Authorization: `Bearer ${accessToken}` } },
   )
 
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Docs API error (${res.status}): ${err}`)
-  }
+  if (!res.ok) throw await googleApiError(res, 'Docs')
 
   const doc = await res.json() as {
     documentId: string
@@ -1824,10 +1792,7 @@ export async function appendToDoc(
     `${DOCS_API}/documents/${encodeURIComponent(documentId)}`,
     { headers: { Authorization: `Bearer ${accessToken}` } },
   )
-  if (!docRes.ok) {
-    const err = await docRes.text()
-    throw new Error(`Docs API error (${docRes.status}): ${err}`)
-  }
+  if (!docRes.ok) throw await googleApiError(docRes, 'Docs')
   const doc = await docRes.json() as { body?: { content?: Array<{ endIndex?: number }> } }
   const lastBlock = doc.body?.content?.at(-1)
   const endIndex = (lastBlock?.endIndex ?? 2) - 1 // Insert before final newline
@@ -1846,10 +1811,7 @@ export async function appendToDoc(
     },
   )
 
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Docs API error (${res.status}): ${err}`)
-  }
+  if (!res.ok) throw await googleApiError(res, 'Docs')
 }
 
 export async function replaceInDoc(
@@ -1877,10 +1839,7 @@ export async function replaceInDoc(
     },
   )
 
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Docs API error (${res.status}): ${err}`)
-  }
+  if (!res.ok) throw await googleApiError(res, 'Docs')
 
   const data = await res.json() as { replies?: Array<{ replaceAllText?: { occurrencesChanged?: number } }> }
   return { occurrencesChanged: data.replies?.[0]?.replaceAllText?.occurrencesChanged ?? 0 }
@@ -1899,10 +1858,7 @@ export async function createDocument(
     body: JSON.stringify({ title }),
   })
 
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Docs API error (${res.status}): ${err}`)
-  }
+  if (!res.ok) throw await googleApiError(res, 'Docs')
 
   const data = await res.json() as { documentId: string; title: string }
   return {
@@ -1929,10 +1885,7 @@ export async function getSpreadsheetInfo(
     { headers: { Authorization: `Bearer ${accessToken}` } },
   )
 
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Sheets API error (${res.status}): ${err}`)
-  }
+  if (!res.ok) throw await googleApiError(res, 'Sheets')
 
   const data = await res.json() as {
     spreadsheetId: string
@@ -1962,10 +1915,7 @@ export async function readSheetRange(
     { headers: { Authorization: `Bearer ${accessToken}` } },
   )
 
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Sheets API error (${res.status}): ${err}`)
-  }
+  if (!res.ok) throw await googleApiError(res, 'Sheets')
 
   const data = await res.json() as { range: string; values?: string[][] }
   return { range: data.range, values: data.values ?? [] }
@@ -1989,10 +1939,7 @@ export async function writeSheetRange(
     },
   )
 
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Sheets API error (${res.status}): ${err}`)
-  }
+  if (!res.ok) throw await googleApiError(res, 'Sheets')
 
   const data = await res.json() as { updatedCells?: number }
   return { updatedCells: data.updatedCells ?? 0 }
@@ -2016,10 +1963,7 @@ export async function appendSheetRows(
     },
   )
 
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Sheets API error (${res.status}): ${err}`)
-  }
+  if (!res.ok) throw await googleApiError(res, 'Sheets')
 
   const data = await res.json() as { updates?: { updatedCells?: number } }
   return { updatedCells: data.updates?.updatedCells ?? 0 }
@@ -2255,10 +2199,7 @@ export async function formatSpreadsheet(
     },
   )
 
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Sheets API error (${res.status}): ${err}`)
-  }
+  if (!res.ok) throw await googleApiError(res, 'Sheets')
 
   return { sheetId: sheet.sheetId, sheetTitle: sheet.title, applied }
 }
@@ -2288,10 +2229,7 @@ export async function batchUpdateSpreadsheet(
     },
   )
 
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Sheets API error (${res.status}): ${err}`)
-  }
+  if (!res.ok) throw await googleApiError(res, 'Sheets')
 
   const data = await res.json() as { replies?: unknown[] }
   return { requestCount: requests.length, replies: data.replies ?? [] }
@@ -2310,10 +2248,7 @@ export async function createSpreadsheet(
     body: JSON.stringify({ properties: { title } }),
   })
 
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Sheets API error (${res.status}): ${err}`)
-  }
+  if (!res.ok) throw await googleApiError(res, 'Sheets')
 
   const data = await res.json() as {
     spreadsheetId: string
@@ -2421,8 +2356,7 @@ function slidesHeaders(accessToken: string, extra: Record<string, string> = {}):
 }
 
 async function slidesError(res: Response, op: string): Promise<never> {
-  const body = await res.text()
-  throw new Error(`Slides API ${op} error (${res.status}): ${body}`)
+  throw await googleApiError(res, 'Slides', op)
 }
 
 async function fetchPresentation(accessToken: string, presentationId: string): Promise<Presentation> {
@@ -2566,10 +2500,7 @@ export async function createPresentation(
     body: JSON.stringify({ title }),
   })
 
-  if (!res.ok) {
-    const err = await res.text()
-    throw new Error(`Slides API error (${res.status}): ${err}`)
-  }
+  if (!res.ok) throw await googleApiError(res, 'Slides')
 
   const data = await res.json() as { presentationId: string; title: string }
   return {

@@ -68,7 +68,30 @@ describe('[COMP:workspace/transcription-prefs] configureTranscriptionPreference'
     const { configureTranscriptionPreference: tool } = createTranscriptionPrefTools(store)
     const res = await tool.execute({ languageCode: 'yue' }, context('ws-1'))
     expect(res.isError).toBe(true)
-    expect(res.data).toContain('owner or admin')
+    const data = String(res.data)
+    // The store's diagnosis leads; the tool owns the next step + verdict,
+    // because only it knows the READ is ungated while the write is not.
+    expect(data).toContain('owner or admin')
+    expect(data).toContain('Nothing was changed')
+    expect(data).toContain('with NO arguments')
+    expect(data).toContain('will keep failing')
+  })
+
+  it('translates a not_found workspace into a do-not-retry, not a role problem', async () => {
+    const store = makeStore({
+      set: vi.fn(async () => ({
+        ok: false as const,
+        reason: 'not_found' as const,
+        message: 'Workspace not found.',
+      })),
+    })
+    const { configureTranscriptionPreference: tool } = createTranscriptionPrefTools(store)
+    const res = await tool.execute({ chineseScript: 'traditional' }, context('ws-1'))
+    expect(res.isError).toBe(true)
+    const data = String(res.data)
+    expect(data).toContain('no longer exists')
+    expect(data).toContain('do NOT retry')
+    expect(data).not.toContain('owner or admin')
   })
 
   it('errors without a workspace binding', async () => {
@@ -76,6 +99,10 @@ describe('[COMP:workspace/transcription-prefs] configureTranscriptionPreference'
     const { configureTranscriptionPreference: tool } = createTranscriptionPrefTools(store)
     const res = await tool.execute({ chineseScript: 'traditional' }, context())
     expect(res.isError).toBe(true)
+    const data = String(res.data)
+    expect(data).toContain('workspaces.transcription_prefs')
+    expect(data).toContain('Studio')
+    expect(data).toContain('will keep failing')
     expect(store.set).not.toHaveBeenCalled()
   })
 })

@@ -38,6 +38,7 @@ import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
 import { isAutonomousToolContext } from '../tools/capability-gate.js'
 import type { AccessContext } from '../security/access-context.js'
 import { createRateLimiter } from '../security/rate-limiter.js'
+import { notFoundFailure, toolFailure } from '../tools/tool-failure.js'
 import {
   promoteMemoryToEntity,
   type MemoryToEntityPromotionPorts,
@@ -100,6 +101,7 @@ export interface HealingToolsDeps {
   provider: LLMProvider
   /** Model id used by the reclassifier LLM call (Flash-class is fine). */
   reclassifierModel: string
+  resolveLlm?: (workspaceId: string) => Promise<{ provider: LLMProvider; model: string } | null>
   /**
    * Rate limit for `healMemories` — defaults to 5 invocations per user
    * per 24h per Q10. Tests can override.
@@ -107,12 +109,36 @@ export interface HealingToolsDeps {
   healRateLimiter?: { check(userId: string): boolean }
 }
 
-function requireWorkspace(workspaceId: string | null | undefined): string {
+/**
+ * The workspace gate for every healing tool.
+ *
+ * RETURNED, never thrown. A throw is caught by the generic frame below, which
+ * can only re-state the sentence it was handed — the model used to see
+ * "brain healing tool invoked without a workspace context" and had no way to
+ * know which surface is missing or what the user should do about it. Returning
+ * the failure keeps the copy where the context lives.
+ */
+function workspaceGate(
+  workspaceId: string | null | undefined,
+  tool: string,
+): { data: string; isError: true } | null {
   if (!workspaceId) {
-    throw new Error('brain healing tool invoked without a workspace context')
+    return {
+      data:
+        `\`${tool}\` did not run: this chat is not bound to a workspace, and brain healing only ever operates on one workspace's own records — there is no brain to heal here. Nothing was changed. ` +
+        'Ask the user to run this from a workspace chat (or from the web app) and carry on answering the rest of their message. ' +
+        'No argument change will help in this session; do not retry.',
+      isError: true,
+    }
   }
-  return workspaceId
+  return null
 }
+
+/**
+ * The tool that lists open candidates, named in every terminal-state
+ * rejection so the model stops re-poking the row it just learned is closed.
+ */
+const CANDIDATE_LIST_TOOL = 'listBrainCandidates({ pending_only: true })'
 
 /**
  * The caller's access context for a dedupe run (corrections.md §D.9
@@ -131,40 +157,43 @@ function dedupeAccess(context: ToolContext, workspaceId: string): AccessContext 
   }
 }
 
-/** Map a scoped-merge failure to a plain-language, user-facing message. */
-function mergeErrorMessage(err: EntityMergeError): string {
+/**
+ * Map a scoped-merge failure to user-facing copy that names the ids it was
+ * about, the next step, and whether the same call can ever work.
+ */
+function mergeErrorMessage(err: EntityMergeError, survivorId: string, mergedId: string): string {
   switch (err.code) {
     case 'self_merge':
-      return 'survivor_id and merged_id must be two different records.'
+      return `mergeEntities did not run: survivor_id and merged_id are both ${survivorId}, and a record cannot be merged into itself. Nothing was changed. Pass the TWO different ids the user named — call searchBrain / getEntity (or listContacts / listCompanies / listDeals) to resolve the second one. Retrying with these arguments will keep failing.`
     case 'entity_not_found':
-      return 'One or both records no longer exist in this workspace.'
+      return `mergeEntities did not run: at least one of survivor_id ${survivorId} / merged_id ${mergedId} no longer exists in this workspace. Nothing was changed. A merge supersedes the record it folds in, so an id from before an earlier merge is dead — call searchBrain / getEntity to re-resolve BOTH ids, then retry with the current pair. Do NOT retry this exact pair.`
     case 'entity_inactive':
-      return 'One of the records was already merged away or deleted — nothing to merge.'
+      return `mergeEntities did not run: one of survivor_id ${survivorId} / merged_id ${mergedId} was already merged away or deleted, so there is nothing left to fold in. Nothing was changed. Re-resolve both ids with searchBrain / getEntity — the surviving record may already contain what the user wanted merged. Do NOT retry this exact pair.`
     case 'cross_workspace_rejected':
-      return 'Both records must be in the same workspace.'
+      return `mergeEntities did not run: survivor_id ${survivorId} and merged_id ${mergedId} belong to different workspaces, and identity is never merged across that boundary. Nothing was changed. Re-resolve both ids inside this workspace with searchBrain / getEntity. Retrying this pair will keep failing.`
     case 'conflict_requires_resolution':
-      return 'Some fields differ between the two records. Re-run with on_conflict="keep_survivor" or on_conflict="keep_merged" to choose which values win.'
+      return `mergeEntities did not merge ${mergedId} into ${survivorId}: some fields hold different values on the two records, and the default mode refuses to silently drop one. Nothing was changed. Re-run the SAME two ids with on_conflict="keep_survivor" or on_conflict="keep_merged" (ask the user which if it matters). Retrying unchanged will keep failing.`
   }
 }
 
-/** Map an undo-merge failure to a plain-language, user-facing message. */
-function undoErrorMessage(err: UndoMergeError): string {
+/**
+ * Map an undo-merge failure to user-facing copy. Every branch names the merge
+ * id, and the four unrecoverable ones say so outright — this is the recovery
+ * path, so a model that keeps retrying it strands the user.
+ */
+function undoErrorMessage(err: UndoMergeError, mergeId: string): string {
   switch (err.code) {
     case 'merge_not_found':
-      return 'No merge with that id exists in this workspace (it may already have been undone).'
+      return `undoEntityMerge found no merge with id ${mergeId} in this workspace — it may already have been undone, or the id may not be a merge id at all. Nothing was changed. merge_id comes from the mergeEntities result (its \`mergeId\` field) or the merge audit, never from an entity id. If the user says the merge is already reversed, check the records with getEntity rather than calling this again. Do NOT retry this exact id.`
     case 'snapshot_unavailable':
-      return 'That merge is too old to reverse automatically — it predates undo support. Rebuild the record by hand.'
+      return `undoEntityMerge cannot reverse merge ${mergeId}: it predates undo support, so no pre-merge snapshot was captured and there is nothing to restore. Nothing was changed. This can never succeed for this merge — tell the user the record has to be rebuilt by hand (createEntity / the CRM save tools) and offer to do it. Do NOT retry.`
     case 'merge_too_old':
-      return 'That merge is outside the 7-day undo window and can no longer be reversed automatically.'
+      return `undoEntityMerge cannot reverse merge ${mergeId}: it is outside the 7-day undo window. Nothing was changed. The window does not reopen, so this will never succeed — tell the user the automatic undo has expired and offer to rebuild the record by hand. Do NOT retry.`
     case 'survivor_superseded':
-      return 'The surviving record was merged again since — undo the later merge first, then retry.'
+      return `undoEntityMerge cannot reverse merge ${mergeId} yet: the surviving record has since been merged again, and the later merge has to come off first. Nothing was changed. Undo the LATER merge (its merge_id is in the merge audit / that merge's result), then call this again with ${mergeId}. Retrying ${mergeId} before that will keep failing.`
     case 'cascade_target_missing':
-      return 'A record involved in the merge was hard-deleted, so the merge cannot be cleanly reversed.'
+      return `undoEntityMerge cannot cleanly reverse merge ${mergeId}: a record involved in it was hard-deleted, so restoring the pre-merge state is no longer possible. Nothing was changed. This will never succeed — tell the user what is missing and offer to rebuild the record by hand. Do NOT retry.`
   }
-}
-
-function errorData(err: unknown): { data: string; isError: true } {
-  return { data: err instanceof Error ? err.message : String(err), isError: true }
 }
 
 function defaultHealRateLimiter() {
@@ -223,9 +252,11 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
     isReadOnly: true,
 
     async execute(input, context) {
+      const gate = workspaceGate(context.workspaceId, 'listBrainCandidates')
+      if (gate) return gate
       try {
         const ctx = {
-          workspaceId: requireWorkspace(context.workspaceId),
+          workspaceId: context.workspaceId!,
           userId: context.userId,
           assistantId: context.assistantId,
           assistantKind: context.assistantKind ?? 'primary',
@@ -236,7 +267,11 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
           : await deps.candidates.listRecent(ctx, { limit })
         return { data: { candidates: rows.map(candidateToReply) } }
       } catch (err) {
-        return errorData(err)
+        return toolFailure(err, {
+          tool: 'listBrainCandidates',
+          target: input.pending_only ? 'the pending-candidate list' : 'the recent-candidate list',
+          next: 'If it persists, tell the user the brain-cleanup history could not be read rather than guessing at what changed.',
+        })
       }
     },
   })
@@ -263,13 +298,22 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
         )
         if (!result) {
           return {
-            data: 'Candidate not found or already in a terminal state.',
+            data:
+              `dismissBrainCandidate did nothing to candidate ${input.candidate_id}: no pending candidate has that id in this workspace. ` +
+              'Either the id is wrong, or the candidate is already in a TERMINAL state (applied, dismissed, or undone) and a dismissal no longer applies to it. ' +
+              `Do NOT retry this exact id — call ${CANDIDATE_LIST_TOOL} to see which candidates are still open, and dismiss one of those. ` +
+              'If the user was pointing at a suggestion that is already dealt with, say so instead of calling again.',
             isError: true,
           }
         }
         return { data: { dismissed: true, candidateId: result.id } }
       } catch (err) {
-        return errorData(err)
+        return toolFailure(err, {
+          tool: 'dismissBrainCandidate',
+          target: `candidate ${input.candidate_id}`,
+          mutating: true,
+          next: `Candidate ids come from ${CANDIDATE_LIST_TOOL}; re-resolve there if this one is stale.`,
+        })
       }
     },
   })
@@ -293,17 +337,42 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
     isReadOnly: false,
 
     async execute(input, context) {
+      const gate = workspaceGate(context.workspaceId, 'acceptBrainCandidate')
+      if (gate) return gate
       try {
         const ctx = {
-          workspaceId: requireWorkspace(context.workspaceId),
+          workspaceId: context.workspaceId!,
           userId: context.userId,
           assistantId: context.assistantId,
           assistantKind: context.assistantKind ?? 'primary',
         }
         const candidate = await deps.candidates.getById(ctx, input.candidate_id)
-        if (!candidate) return { data: 'Candidate not found.', isError: true }
-        if (candidate.appliedAt) return { data: 'Candidate already applied.', isError: true }
-        if (candidate.dismissedAt) return { data: 'Candidate already dismissed.', isError: true }
+        if (!candidate) {
+          return notFoundFailure({
+            kind: 'Brain candidate',
+            id: input.candidate_id,
+            discoveryTool: CANDIDATE_LIST_TOOL,
+            extra: 'Nothing was applied.',
+            idSource: 'a listBrainCandidates result (its `id` field), never a memory id or an entity id',
+          })
+        }
+        if (candidate.appliedAt) {
+          return {
+            data:
+              `Candidate ${input.candidate_id} was ALREADY applied (at ${candidate.appliedAt.toISOString()}), so nothing changed and nothing needed to — the suggestion is in the brain. ` +
+              'Tell the user it is already done. ' +
+              `Do NOT retry this id: an applied candidate is terminal. Call ${CANDIDATE_LIST_TOOL} if you need one that is still open, or undoReclassification if the user wants this one reversed.`,
+            isError: true,
+          }
+        }
+        if (candidate.dismissedAt) {
+          return {
+            data:
+              `Candidate ${input.candidate_id} was ALREADY dismissed (at ${candidate.dismissedAt.toISOString()}), so it cannot be accepted — a dismissal is terminal. Nothing was changed. ` +
+              `Do NOT retry this id. Call ${CANDIDATE_LIST_TOOL} for the suggestions still open; if the user really wants this change, make it directly with the ordinary save tools instead.`,
+            isError: true,
+          }
+        }
 
         if (candidate.suggestedAction === 'extract') {
           // Extract proposes brand-new primitives (contact / entity) split
@@ -312,24 +381,27 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
           // "auto-applied" message.
           return {
             data:
-              'Extract candidates propose new entities split out of a memory. ' +
-              'One-click accept is not wired yet — review the proposed targets via ' +
-              'listBrainCandidates and create them with saveContact / createEntity, ' +
-              'then dismiss the candidate.',
+              `acceptBrainCandidate cannot apply candidate ${input.candidate_id}: it is an EXTRACT candidate, which proposes brand-new records split out of a memory, and the one-click accept path for that kind is not built yet. Nothing was changed. ` +
+              `Do the same thing by hand instead: read the proposed target on this candidate (it is in the ${CANDIDATE_LIST_TOOL} row), create the record with saveContact / saveCompany / createEntity, then dismissBrainCandidate to clear the suggestion. ` +
+              'Retrying accept on this candidate will keep failing — no argument changes that.',
             isError: true,
           }
         }
         if (candidate.suggestedAction !== 'attribute') {
           return {
             data:
-              `Only attribute candidates are user-applied via this tool — got ${candidate.suggestedAction}. ` +
-              'drop / task / edge candidates are auto-applied by the reclassifier.',
+              `acceptBrainCandidate cannot apply candidate ${input.candidate_id}: it is a \`${candidate.suggestedAction}\` candidate, and this tool only applies \`attribute\` ones. Nothing was changed. ` +
+              'drop / task / edge candidates are applied automatically by the reclassifier, so there is nothing for the user to accept — they are already in effect. ' +
+              `Tell the user that, and use undoReclassification if they want it reversed. Do NOT retry accept on this id; call ${CANDIDATE_LIST_TOOL} for candidates that are actually awaiting a yes/no.`,
             isError: true,
           }
         }
         if (!candidate.targetId || !candidate.suggestedKey) {
           return {
-            data: 'Attribute candidate missing target entity or key.',
+            data:
+              `acceptBrainCandidate cannot apply candidate ${input.candidate_id}: the row is incomplete — it has no ${!candidate.targetId ? 'target entity' : 'attribute key'}, so there is nothing to promote the memory onto. Nothing was changed. ` +
+              'This is a defect in the stored candidate, not in your arguments; no retry can fix it. ' +
+              `Dismiss it with dismissBrainCandidate and, if the underlying fact is right, write it directly with the ordinary save tools. Call ${CANDIDATE_LIST_TOOL} for the other open suggestions.`,
             isError: true,
           }
         }
@@ -337,8 +409,9 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
         if (!deps.promotion) {
           return {
             data:
-              'Attribute promotion not yet wired. The healing-tool surface is up; the ' +
-              'promoteMemoryToEntity port adapter ships in a follow-up.',
+              `acceptBrainCandidate cannot apply candidate ${input.candidate_id}: attribute promotion is not wired in this deployment, so the surface exists but the write path behind it does not. Nothing was changed. ` +
+              'No argument change or retry will make this work here. ' +
+              `Apply the fact by hand instead — write it with the ordinary save tools — then dismissBrainCandidate to clear the suggestion. On a self-hosted install, tell the user the promotion port has to be wired on the API (see \`createBrainHealingTools\`).`,
             isError: true,
           }
         }
@@ -364,7 +437,14 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
           },
         }
       } catch (err) {
-        return errorData(err)
+        return toolFailure(err, {
+          tool: 'acceptBrainCandidate',
+          target: `candidate ${input.candidate_id}`,
+          mutating: true,
+          next:
+            'Promotion is gated on the memory\'s original author, so if the message names authorship or clearance, this user cannot accept this candidate and you should say so rather than retrying. ' +
+            `Otherwise re-resolve the candidate with ${CANDIDATE_LIST_TOOL}.`,
+        })
       }
     },
   })
@@ -394,17 +474,43 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
     resolveConfirmation: async (context) => isAutonomousToolContext(context),
 
     async execute(input, context) {
+      const gate = workspaceGate(context.workspaceId, 'undoReclassification')
+      if (gate) return gate
       try {
         const ctx = {
-          workspaceId: requireWorkspace(context.workspaceId),
+          workspaceId: context.workspaceId!,
           userId: context.userId,
           assistantId: context.assistantId,
           assistantKind: context.assistantKind ?? 'primary',
         }
         const candidate = await deps.candidates.getById(ctx, input.candidate_id)
-        if (!candidate) return { data: 'Candidate not found.', isError: true }
-        if (!candidate.appliedAt) return { data: 'Candidate is not in applied state.', isError: true }
-        if (candidate.undoneAt) return { data: 'Candidate already undone.', isError: true }
+        if (!candidate) {
+          return notFoundFailure({
+            kind: 'Brain candidate',
+            id: input.candidate_id,
+            discoveryTool: 'listBrainCandidates',
+            extra: 'Nothing was reversed.',
+            idSource: 'a listBrainCandidates result (its `id` field), never the id of the memory / task / link the change touched',
+          })
+        }
+        if (!candidate.appliedAt) {
+          return {
+            data:
+              `undoReclassification has nothing to reverse for candidate ${input.candidate_id}: it was never applied${candidate.dismissedAt ? ' (it was dismissed instead)' : ' (it is still awaiting a yes/no)'}, so the brain never changed. Nothing was changed now either. ` +
+              'Tell the user there is nothing to roll back. ' +
+              `Do NOT retry this id: an un-applied candidate is not undoable. If they want to clear the suggestion, call dismissBrainCandidate; call ${CANDIDATE_LIST_TOOL} to see what is open.`,
+            isError: true,
+          }
+        }
+        if (candidate.undoneAt) {
+          return {
+            data:
+              `Candidate ${input.candidate_id} was ALREADY undone (at ${candidate.undoneAt.toISOString()}), so nothing changed and nothing needed to — the reclassification is already rolled back. ` +
+              'Tell the user it is already reversed. ' +
+              'Do NOT retry this id; an undone candidate is terminal. If something still looks wrong, read the current state with searchBrain / getEntity rather than undoing again.',
+            isError: true,
+          }
+        }
 
         switch (candidate.suggestedAction) {
           case 'drop': {
@@ -416,7 +522,15 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
               ctx.assistantId,
               context.sessionId,
             )
-            if (!recreated) return { data: 'Drop snapshot missing — cannot reconstruct memory.', isError: true }
+            if (!recreated) {
+              return {
+                data:
+                  `undoReclassification could not reverse candidate ${input.candidate_id}: the row records that a memory was dropped, but its pre-drop snapshot is missing or malformed, so there is nothing to restore from. Nothing was changed. ` +
+                  'This is a defect in the stored candidate — no argument change or retry will produce the snapshot. ' +
+                  'Ask the user what the memory said and save it again with the ordinary memory tool, then tell them the automatic undo was not possible.',
+                isError: true,
+              }
+            }
             await deps.candidates.markUndone(candidate.id, context.userId)
             return {
               data: { undone: true, action: 'drop', recreatedMemoryId: recreated.id },
@@ -424,7 +538,13 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
           }
           case 'task': {
             if (!candidate.targetId) {
-              return { data: 'Task candidate missing targetId.', isError: true }
+              return {
+                data:
+                  `undoReclassification could not reverse candidate ${input.candidate_id}: the row says a task was created from a memory but does not record WHICH task (no target id), so there is nothing to archive. Nothing was changed. ` +
+                  'This is a defect in the stored candidate; no retry can fix it. ' +
+                  'Call listTasks to find the task the user means and archive it with the task tools, then say the automatic undo was not possible.',
+                isError: true,
+              }
             }
             // Archive the auto-created task. v1 uses status='archived'
             // rather than a hard delete so the task history is preserved
@@ -433,7 +553,13 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
               status: 'archived',
             })
             if (!archived) {
-              return { data: 'Auto-created task not found — may have been further modified.', isError: true }
+              return {
+                data:
+                  `undoReclassification could not archive task ${candidate.targetId} while reversing candidate ${input.candidate_id}: no task with that id is visible in this workspace. Nothing was changed. ` +
+                  'The task was probably edited since (every task update mints a NEW id, superseding the old one), or it was already archived or deleted. ' +
+                  'Call listTasks to find its current row and archive that one with the task tools. Do NOT retry this candidate id — it will keep pointing at the same dead task id.',
+                isError: true,
+              }
             }
             const recreated = await recreateMemoryFromSnapshot(
               deps.memories,
@@ -455,7 +581,13 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
           }
           case 'edge': {
             if (!candidate.targetId) {
-              return { data: 'Edge candidate missing targetId.', isError: true }
+              return {
+                data:
+                  `undoReclassification could not reverse candidate ${input.candidate_id}: the row says an entity link was created but does not record WHICH link (no target id), so there is nothing to retract. Nothing was changed. ` +
+                  'This is a defect in the stored candidate; no retry can fix it. ' +
+                  'Call getEntity on the entity the user means to see its current edges, and retract the wrong one from there.',
+                isError: true,
+              }
             }
             const retracted = await deps.entityLinks.retract(
               context.userId,
@@ -463,7 +595,13 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
               'undoReclassification — auto-applied edge reversed',
             )
             if (!retracted) {
-              return { data: 'Entity link not found or already closed.', isError: true }
+              return {
+                data:
+                  `undoReclassification could not retract entity link ${candidate.targetId} while reversing candidate ${input.candidate_id}: that link is not open in this workspace — it is already closed, or it no longer exists. Nothing was changed. ` +
+                  'If it is already closed, the reversal the user wanted has effectively happened: say so. ' +
+                  'Do NOT retry this candidate id. Call getEntity on the entity to see which edges are actually live.',
+                isError: true,
+              }
             }
             await deps.candidates.markUndone(candidate.id, context.userId)
             return {
@@ -473,9 +611,9 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
           case 'attribute': {
             return {
               data:
-                'Attribute promotions cannot be undone via this tool. The prior-version ' +
-                'chain is itself reversible — use the existing entity-correction surface to ' +
-                'supersede again with the prior attribute set.',
+                `undoReclassification does not reverse candidate ${input.candidate_id}: it is an \`attribute\` promotion, and those roll back through the entity's prior-version chain rather than through this tool. Nothing was changed. ` +
+                'Do it the supported way: read the entity with getEntity, then write the PRIOR attribute value back with the ordinary save tool — that supersedes the promotion. ' +
+                'Retrying here will keep failing; no argument changes that.',
               isError: true,
             }
           }
@@ -485,14 +623,20 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
             // Kept for switch exhaustiveness.
             return {
               data:
-                'Extract candidates are never auto-applied — there is nothing to undo. ' +
-                'Use dismissBrainCandidate to clear a pending extract suggestion.',
+                `undoReclassification has nothing to reverse for candidate ${input.candidate_id}: extract candidates are never auto-applied, so the brain never changed from this one. Nothing was changed now either. ` +
+                'Tell the user there is nothing to roll back. ' +
+                'Do NOT retry this id — use dismissBrainCandidate if they simply want the suggestion cleared.',
               isError: true,
             }
           }
         }
       } catch (err) {
-        return errorData(err)
+        return toolFailure(err, {
+          tool: 'undoReclassification',
+          target: `candidate ${input.candidate_id}`,
+          mutating: true,
+          next: 'The rollback is not atomic across steps — read the affected memory / task / link back with searchBrain, listTasks or getEntity before telling the user what state it is in.',
+        })
       }
     },
   })
@@ -527,16 +671,23 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
     resolveConfirmation: async (context) => isAutonomousToolContext(context),
 
     async execute(input, context) {
+      // Gate on the workspace BEFORE the limiter: a call that can never run
+      // must not spend one of the user's five daily runs.
+      const gate = workspaceGate(context.workspaceId, 'healMemories')
+      if (gate) return gate
       const allowed = healLimiter.check(context.userId)
       if (!allowed) {
         return {
-          data: 'Rate limit exceeded — `healMemories` is capped at 5 invocations per user per day.',
+          data:
+            '`healMemories` did not run: this user has already used all 5 of the daily on-demand cleanup runs (the cap exists because each run is a batch of LLM calls over their memories). Nothing was changed. ' +
+            'The allowance refills 24h after the earliest of those runs. ' +
+            'Tell the user that plainly and offer the alternatives that are not capped — reviewing pending suggestions with listBrainCandidates, or fixing a specific record directly. Do NOT retry today; no argument change lifts the cap.',
           isError: true,
         }
       }
       try {
         const ctx = {
-          workspaceId: requireWorkspace(context.workspaceId),
+          workspaceId: context.workspaceId!,
           userId: context.userId,
           assistantId: context.assistantId,
           assistantKind: context.assistantKind ?? 'primary',
@@ -587,6 +738,7 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
 
         const entityRows = await deps.entities.listForWorkspace(ctx, { limit: 200 })
 
+        const runtime = await deps.resolveLlm?.(ctx.workspaceId)
         const result: ReclassificationResult = await runReclassification({
           memories: filtered,
           entities: entityRows,
@@ -597,8 +749,8 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
           taskStore: deps.tasks,
           entityLinks: deps.entityLinks,
           candidates: deps.candidates,
-          provider: deps.provider,
-          model: deps.reclassifierModel,
+          provider: runtime?.provider ?? deps.provider,
+          model: runtime?.model ?? deps.reclassifierModel,
         } satisfies ReclassificationDeps)
 
         return {
@@ -613,7 +765,14 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
           },
         }
       } catch (err) {
-        return errorData(err)
+        return toolFailure(err, {
+          tool: 'healMemories',
+          target: 'this workspace\'s recent memories',
+          mutating: true,
+          next:
+            'The run is a batch, so some reclassifications may already have applied before it failed — call listBrainCandidates to see what actually landed before telling the user anything about the outcome. ' +
+            'This call consumed one of the 5 daily runs either way, so do not loop on it.',
+        })
       }
     },
   })
@@ -771,17 +930,20 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
     },
 
     async execute(input, context) {
+      const gate = workspaceGate(context.workspaceId, 'dedupeEntities')
+      if (gate) return gate
       try {
-        const workspaceId = requireWorkspace(context.workspaceId)
+        const workspaceId = context.workspaceId!
         if (!deps.entityMerge) {
           return {
             data:
-              'dedupeEntities is unavailable — merge ports not wired in this ' +
-              'environment. Have an operator run the cleanup SQL or wire ' +
-              'EntityMergeRepository on createBrainHealingTools.',
+              'dedupeEntities did not run: the entity-merge ports are not wired in this deployment, so the tool is registered but has no write path behind it. Nothing was changed. ' +
+              'No argument change or retry will make it work here. ' +
+              'Tell the user duplicate cleanup is not available on this install and offer what is: point at the duplicates you can see with searchBrain / getEntity so they can decide, and note that a self-hosted install needs `EntityMergeRepository` wired on `createBrainHealingTools`.',
             isError: true,
           }
         }
+        const runtime = input.cluster_by_llm ? await deps.resolveLlm?.(workspaceId) : null
         const result: EntityDedupeResult = await runEntityDedupe({
           entities: deps.entities,
           merge: deps.entityMerge,
@@ -794,7 +956,10 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
           kind: input.kind,
           clusterByLlm: input.cluster_by_llm,
           llmClusterer: input.cluster_by_llm
-            ? { provider: deps.provider, model: deps.reclassifierModel }
+            ? {
+                provider: runtime?.provider ?? deps.provider,
+                model: runtime?.model ?? deps.reclassifierModel,
+              }
             : undefined,
         })
         const totalPairsMerged =
@@ -816,7 +981,14 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
           },
         }
       } catch (err) {
-        return errorData(err)
+        return toolFailure(err, {
+          tool: 'dedupeEntities',
+          target: input.kind ? `every visible ${input.kind} record in this workspace` : 'every visible record in this workspace',
+          mutating: true,
+          next:
+            'The sweep merges cluster by cluster, so some merges may already have applied before it failed — read the current state with searchBrain / getEntity before telling the user what was combined. ' +
+            'A merge is reversible for 7 days with undoEntityMerge. Do NOT re-run the sweep to "make sure"; that risks merging further.',
+        })
       }
     },
   })
@@ -892,18 +1064,27 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
     },
 
     async execute(input, context) {
+      const gate = workspaceGate(context.workspaceId, 'mergeEntities')
+      if (gate) return gate
       try {
-        const workspaceId = requireWorkspace(context.workspaceId)
+        const workspaceId = context.workspaceId!
         if (!deps.entityMerge) {
           return {
             data:
-              'mergeEntities is unavailable — merge ports not wired in this ' +
-              'environment. Wire EntityMergeRepository on createBrainHealingTools.',
+              'mergeEntities did not run: the entity-merge ports are not wired in this deployment, so the tool is registered but has no write path behind it. Nothing was changed. ' +
+              'No argument change or retry will make it work here. ' +
+              'Tell the user records cannot be combined on this install (a self-hosted install needs `EntityMergeRepository` wired on `createBrainHealingTools`), and offer to note the duplication in a memory instead.',
             isError: true,
           }
         }
         if (input.survivor_id === input.merged_id) {
-          return { data: 'survivor_id and merged_id must be two different records.', isError: true }
+          return {
+            data:
+              `mergeEntities did not run: survivor_id and merged_id are both ${input.survivor_id}, and a record cannot be merged into itself. Nothing was changed. ` +
+              'Resolve the SECOND record the user named — call searchBrain / getEntity (or listContacts / listCompanies / listDeals) and pass its id as merged_id. ' +
+              'Retrying with the same id twice will keep failing.',
+            isError: true,
+          }
         }
 
         // Visibility guard (corrections.md §D.9): only records the caller
@@ -916,10 +1097,22 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
           deps.entities.getById(access, input.merged_id),
         ])
         if (!survivor) {
-          return { data: `survivor_id ${input.survivor_id} was not found or is not visible to you.`, isError: true }
+          return {
+            data:
+              `mergeEntities did not run: survivor_id ${input.survivor_id} is not a record you can see in this workspace — it does not exist, was itself merged away (a merge supersedes the folded-in id), or sits above this assistant's clearance. Nothing was changed. ` +
+              'Re-resolve BOTH ids with searchBrain / getEntity (or listContacts / listCompanies / listDeals) and retry with the current pair. ' +
+              'Do NOT retry this exact id.',
+            isError: true,
+          }
         }
         if (!merged) {
-          return { data: `merged_id ${input.merged_id} was not found or is not visible to you.`, isError: true }
+          return {
+            data:
+              `mergeEntities did not run: merged_id ${input.merged_id} is not a record you can see in this workspace — it does not exist, was itself merged away (a merge supersedes the folded-in id), or sits above this assistant's clearance. Nothing was changed. ` +
+              `The survivor ${input.survivor_id} resolved fine, so only this id is wrong: re-resolve it with searchBrain / getEntity (or listContacts / listCompanies / listDeals). ` +
+              'Do NOT retry this exact id.',
+            isError: true,
+          }
         }
 
         const onConflict = input.on_conflict ?? 'ask'
@@ -942,9 +1135,9 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
               .join('; ')
             return {
               data:
-                `These fields differ between ${survivor.displayName} and ${merged.displayName}: ${fields}. ` +
-                `Re-run with on_conflict="keep_survivor" (keep ${survivor.displayName}'s values) or ` +
-                `on_conflict="keep_merged" (keep ${merged.displayName}'s values).`,
+                `mergeEntities did not merge ${merged.displayName} (${merged.id}) into ${survivor.displayName} (${survivor.id}): these fields hold different values on the two records, and the default mode refuses to silently drop one — ${fields}. Nothing was changed. ` +
+                `Re-run the SAME two ids with on_conflict="keep_survivor" (keep ${survivor.displayName}'s values) or on_conflict="keep_merged" (keep ${merged.displayName}'s values); ask the user which if the difference matters. ` +
+                'Retrying unchanged will keep failing.',
               isError: true,
             }
           }
@@ -977,9 +1170,14 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
         }
       } catch (err) {
         if (err instanceof EntityMergeError) {
-          return { data: mergeErrorMessage(err), isError: true }
+          return { data: mergeErrorMessage(err, input.survivor_id, input.merged_id), isError: true }
         }
-        return errorData(err)
+        return toolFailure(err, {
+          tool: 'mergeEntities',
+          target: `survivor ${input.survivor_id} + merged ${input.merged_id}`,
+          mutating: true,
+          next: 'Read both records back with getEntity before telling the user anything about the outcome; if the merge did land, it is reversible for 7 days with undoEntityMerge.',
+        })
       }
     },
   })
@@ -1015,13 +1213,16 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
     resolveConfirmation: async (context) => isAutonomousToolContext(context),
 
     async execute(input, context) {
+      const gate = workspaceGate(context.workspaceId, 'undoEntityMerge')
+      if (gate) return gate
       try {
-        const workspaceId = requireWorkspace(context.workspaceId)
+        const workspaceId = context.workspaceId!
         if (!deps.entityMerge) {
           return {
             data:
-              'undoEntityMerge is unavailable — merge ports not wired in this ' +
-              'environment. Wire EntityMergeRepository on createBrainHealingTools.',
+              'undoEntityMerge did not run: the entity-merge ports are not wired in this deployment, so the tool is registered but has no write path behind it. Nothing was changed. ' +
+              'No argument change or retry will make it work here. ' +
+              'Tell the user the automatic undo is not available on this install (a self-hosted install needs `EntityMergeRepository` wired on `createBrainHealingTools`) and offer to rebuild the separated record by hand.',
             isError: true,
           }
         }
@@ -1043,9 +1244,14 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
         }
       } catch (err) {
         if (err instanceof UndoMergeError) {
-          return { data: undoErrorMessage(err), isError: true }
+          return { data: undoErrorMessage(err, input.merge_id), isError: true }
         }
-        return errorData(err)
+        return toolFailure(err, {
+          tool: 'undoEntityMerge',
+          target: `merge ${input.merge_id}`,
+          mutating: true,
+          next: 'Read both records back with getEntity before telling the user whether they were separated; the 7-day undo window keeps running while you retry, so do not loop.',
+        })
       }
     },
   })
@@ -1083,32 +1289,36 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
     isReadOnly: false,
 
     async execute(input, context) {
+      // Pre-flight: ensure the workspace context is set; the underlying
+      // store call is RLS-gated so we don't need to thread workspaceId
+      // through, but a missing workspace context means this assistant
+      // has no brain to teach.
+      const gate = workspaceGate(context.workspaceId, 'noteAlias')
+      if (gate) return gate
       try {
-        // Pre-flight: ensure the workspace context is set; the underlying
-        // store call is RLS-gated so we don't need to thread workspaceId
-        // through, but a missing workspace context means this assistant
-        // has no brain to teach.
-        requireWorkspace(context.workspaceId)
         const result = await deps.entities.addAlias(
           context.userId,
           input.entity_id,
           input.alias,
         )
         if (result.kind === 'not_found') {
-          return {
-            data: 'Entity not found (or not visible to you).',
-            isError: true,
-          }
+          return notFoundFailure({
+            kind: 'Entity',
+            id: input.entity_id,
+            discoveryTool: 'searchBrain / getEntity',
+            extra: `The alias "${input.alias}" was NOT registered. The record may also be above this assistant's clearance, which reads the same as missing.`,
+            idSource: 'a searchBrain / getEntity / listContacts result, never a display name',
+          })
         }
         if (result.kind === 'conflict') {
+          // D5: prose first, structured tail after — a multi-key object would
+          // reach the model as raw JSON it has to parse to read a sentence.
           return {
-            data: {
-              conflict: true,
-              conflictingEntityId: result.conflictingEntityId,
-              message:
-                `The alias is already bound to entity ${result.conflictingEntityId}. ` +
-                `Merge the two entities first (dedupeEntities) or pick a different alias.`,
-            },
+            data:
+              `noteAlias did not register "${input.alias}" on entity ${input.entity_id}: that alias is already bound to a DIFFERENT live entity, ${result.conflictingEntityId}, and one alias cannot resolve to two records. Nothing was changed. ` +
+              `Decide which case this is: if the two records are the same thing, merge them first (mergeEntities with survivor_id ${input.entity_id} and merged_id ${result.conflictingEntityId}, or the other way round) and the alias question disappears; if they are genuinely different, pick a more specific alias. ` +
+              'Retrying this exact alias unchanged will keep failing. ' +
+              `(conflicting_entity_id: ${result.conflictingEntityId})`,
             isError: true,
           }
         }
@@ -1120,7 +1330,12 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
           },
         }
       } catch (err) {
-        return errorData(err)
+        return toolFailure(err, {
+          tool: 'noteAlias',
+          target: `alias "${input.alias}" on entity ${input.entity_id}`,
+          mutating: true,
+          next: 'Entity ids come from searchBrain / getEntity and are superseded by a merge — re-resolve there if this one is stale.',
+        })
       }
     },
   })
@@ -1147,18 +1362,22 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
     resolveConfirmation: async (context) => isAutonomousToolContext(context),
 
     async execute(input, context) {
+      const gate = workspaceGate(context.workspaceId, 'splitAlias')
+      if (gate) return gate
       try {
-        requireWorkspace(context.workspaceId)
         const updated = await deps.entities.removeAlias(
           context.userId,
           input.entity_id,
           input.alias,
         )
         if (!updated) {
-          return {
-            data: 'Entity not found (or not visible to you).',
-            isError: true,
-          }
+          return notFoundFailure({
+            kind: 'Entity',
+            id: input.entity_id,
+            discoveryTool: 'searchBrain / getEntity',
+            extra: `The alias "${input.alias}" was NOT removed. The record may also be above this assistant's clearance, which reads the same as missing. (Removing an alias the entity never had is a no-op, not this error — this error means the ENTITY did not resolve.)`,
+            idSource: 'a searchBrain / getEntity / listContacts result, never a display name',
+          })
         }
         return {
           data: {
@@ -1168,7 +1387,12 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
           },
         }
       } catch (err) {
-        return errorData(err)
+        return toolFailure(err, {
+          tool: 'splitAlias',
+          target: `alias "${input.alias}" on entity ${input.entity_id}`,
+          mutating: true,
+          next: 'Entity ids come from searchBrain / getEntity and are superseded by a merge — re-resolve there if this one is stale.',
+        })
       }
     },
   })

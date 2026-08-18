@@ -209,7 +209,12 @@ describe('[COMP:files/send-file] sendFile', () => {
     const tool = createSendFileTool(statOnlyApi(null))
     const result = await tool.execute({ file: '/nope.md' }, makeContext())
     expect(result.isError).toBe(true)
-    expect(String(result.data)).toContain('not found')
+    const data = String(result.data)
+    // The PATH branch of `errorMessage` now carries the discovery pointer +
+    // retry verdict the UUID branch already had.
+    expect(data).toContain('/nope.md')
+    expect(data).toContain('fileSearch')
+    expect(data).toContain('Do NOT retry this exact path')
   })
 
   it('dedups by fileId and enforces the per-turn cap', async () => {

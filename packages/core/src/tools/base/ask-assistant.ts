@@ -13,6 +13,7 @@
 
 import { z } from 'zod'
 import { buildTool, type Tool } from '../types.js'
+import { toolFailure } from '../tool-failure.js'
 import { INITIAL_BUDGET, type ConsultRequest, type ConsultTransport } from '../../a2a/index.js'
 
 // ── Dependency types ───────────────────────────────────────────
@@ -44,6 +45,35 @@ export type InterAssistantDeps = {
 
   /** A2A transport — applies cycle/depth/budget gates and runs the destination's query loop. */
   consultTransport: ConsultTransport
+}
+
+/**
+ * The target id does not resolve to a connected assistant. One message for
+ * both pre-checks (`isFollowing` and the connections-list lookup): they are
+ * the same cause seen twice, and giving them two wordings made the model
+ * treat the second as a new problem and retry the same id.
+ *
+ * Distinct from `consultFailedMessage` below, which is the OTHER cause: a
+ * real, reachable assistant whose run failed. Those two used to read
+ * identically ("Cross-assistant query failed: …"), so the model could not
+ * tell "you asked the wrong assistant" from "that assistant broke".
+ */
+function unknownTargetMessage(targetAssistantId: string): string {
+  return (
+    `Not connected to assistant \`${targetAssistantId}\`, so nothing was asked. ` +
+    'Only assistants connected to you are reachable, and connections are workspace-internal — an id from a memory, an earlier conversation, or another workspace will never resolve. ' +
+    'Call `listConnectedAssistants` and use an `assistantId` from that result. ' +
+    `Do NOT retry \`${targetAssistantId}\`; if nothing in that list matches the question, answer it yourself instead of delegating.`
+  )
+}
+
+/** The callee was reachable and its run reported a failure. */
+function consultFailedMessage(targetAssistantId: string, reported: string): string {
+  return (
+    `Assistant \`${targetAssistantId}\` received the question and its run failed: ${reported}. ` +
+    'The connection is fine — this is the other assistant\'s own failure, and asking it the same question again will most likely fail the same way. ' +
+    'Answer with your own tools and knowledge if you can, and tell the user which assistant failed and what it reported. Do not silently drop the request.'
+  )
 }
 
 export function createInterAssistantTools(deps: InterAssistantDeps): Tool[] {
@@ -90,7 +120,11 @@ export function createInterAssistantTools(deps: InterAssistantDeps): Tool[] {
 
         return { data: results }
       } catch (err) {
-        return { data: `Failed to list following: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return toolFailure(err, {
+          tool: 'listConnectedAssistants',
+          next:
+            'The list is unknown, not empty — do not tell the user this assistant has no connections, and do not guess an id for `askAssistant`.',
+        })
       }
     },
   })
@@ -124,20 +158,14 @@ If unsure whether to call this, do not call it. Answer with your own tools first
         // 1. Verify following (accepted) — fast pre-check before transport.
         const following = await deps.isFollowing(context.assistantId, input.targetAssistantId)
         if (!following) {
-          return {
-            data: 'Not connected to this assistant. Only assistants in your own workspace are reachable.',
-            isError: true,
-          }
+          return { data: unknownTargetMessage(input.targetAssistantId), isError: true }
         }
 
         // 2. Resolve target's workspaceId (needed for ConsultRequest.target).
         const followingList = await deps.getFollowing(context.assistantId)
         const target = followingList.find((f) => f.followingAssistantId === input.targetAssistantId)
         if (!target) {
-          return {
-            data: 'Target assistant not in your connections list.',
-            isError: true,
-          }
+          return { data: unknownTargetMessage(input.targetAssistantId), isError: true }
         }
 
         // 3. Build the A2A ConsultRequest. Free-mode (no capabilityId).
@@ -186,7 +214,7 @@ If unsure whether to call this, do not call it. Answer with your own tools first
               ?.filter((p): p is { kind: 'text'; text: string } => p.kind === 'text')
               .map((p) => p.text)
               .join(' ') ?? 'unknown error'
-            return { data: `Cross-assistant query failed: ${errMsg}`, isError: true }
+            return { data: consultFailedMessage(input.targetAssistantId, errMsg), isError: true }
           }
           case 'input_required':
           case 'auth_required':
@@ -197,12 +225,28 @@ If unsure whether to call this, do not call it. Answer with your own tools first
             // transport's send() (which awaits terminal). Surface verbatim
             // so anomalies are visible.
             return {
-              data: `Cross-assistant query ended in unexpected state '${task.status.state}'.`,
+              data:
+                `Asking assistant \`${input.targetAssistantId}\` ended in the unexpected state '${task.status.state}' with no answer. ` +
+                'The transport awaits a terminal state, so this is an anomaly in the other assistant\'s run rather than anything your question caused. ' +
+                'Retry once; if it lands in a non-terminal state again, answer with your own tools and tell the user that assistant did not respond.',
               isError: true,
             }
         }
       } catch (err) {
-        return { data: `Cross-assistant query failed: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        // The ask itself broke (transport, timeout, the callee's loop
+        // throwing) — a different cause from an id that never resolved, and
+        // it must not read like one.
+        const message = err instanceof Error ? err.message : String(err)
+        const timedOut = /timeout|timed out|abort/i.test(message)
+        return {
+          data:
+            `The ask to assistant \`${input.targetAssistantId}\` ${timedOut ? 'timed out before it answered' : 'failed in transit'}: ${message}. ` +
+            'The connection itself resolved, so this is not a wrong target id — `listConnectedAssistants` will keep returning the same assistant. ' +
+            (timedOut
+              ? 'Do not repeat a long-running ask: tell the user that assistant did not answer in time, and answer with your own tools if you can.'
+              : 'Retry once; if it fails again, answer with your own tools and tell the user which assistant could not be reached.'),
+          isError: true,
+        }
       }
     },
   })

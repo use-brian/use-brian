@@ -1,5 +1,4 @@
 import { describe, it, expect, vi } from 'vitest'
-import { generateKeyPairSync } from 'node:crypto'
 import { createEngineTools, type EnginesEnv } from '../tools.js'
 import { authorizeEnginesRequest, enginesMcpEnabled } from '../server.js'
 
@@ -60,7 +59,12 @@ describe('[COMP:api/engines-mcp] AI Engines MCP', () => {
       expect(enginesMcpEnabled({ ENGINES_OPENAI_API_KEY: 'k' })).toBe(false)
       expect(enginesMcpEnabled({ ENGINES_MCP_SECRET: 's', ENGINES_OPENAI_API_KEY: 'k' })).toBe(true)
       expect(enginesMcpEnabled({ ENGINES_MCP_SECRET: 's', ENGINES_ANTHROPIC_API_KEY: 'k' })).toBe(true)
-      expect(enginesMcpEnabled({ ENGINES_MCP_SECRET: 's', ENGINES_GSC_KEY_JSON: '{}' })).toBe(true)
+      expect(enginesMcpEnabled({ ENGINES_MCP_SECRET: 's', ENGINES_GEMINI_API_KEY: 'k' })).toBe(true)
+      expect(enginesMcpEnabled({ ENGINES_MCP_SECRET: 's', ENGINES_PERPLEXITY_API_KEY: 'k' })).toBe(true)
+      // The four ask engines are the ONLY gate (Search Console moved to the
+      // per-workspace `gsc` connector, docs/architecture/integrations/search-console.md):
+      // the secret plus a non-credential engines key does not open the route.
+      expect(enginesMcpEnabled({ ENGINES_MCP_SECRET: 's', ENGINES_DAILY_CALL_CAP: '5' })).toBe(false)
     })
 
     it('registers only the tools whose credential exists', () => {
@@ -68,9 +72,8 @@ describe('[COMP:api/engines-mcp] AI Engines MCP', () => {
       const names = createEngineTools({
         ENGINES_PERPLEXITY_API_KEY: 'pplx-k',
         ENGINES_ANTHROPIC_API_KEY: 'ant-k',
-        ENGINES_GSC_KEY_JSON: '{"client_email":"a@b","private_key":"x"}',
       }).map((t) => t.name)
-      expect(names).toEqual(['askPerplexity', 'askClaude', 'searchConsoleQuery'])
+      expect(names).toEqual(['askPerplexity', 'askClaude'])
     })
   })
 
@@ -287,58 +290,6 @@ describe('[COMP:api/engines-mcp] AI Engines MCP', () => {
       expect(payload.results[0].answers[0].citations).toEqual([
         { url: 'https://usebrian.ai/', title: 'Use Brian' },
       ])
-    })
-  })
-
-  describe('searchConsoleQuery', () => {
-    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 })
-    const saJson = JSON.stringify({
-      client_email: 'geo-watch@project.iam.gserviceaccount.com',
-      private_key: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
-      token_uri: 'https://oauth2.googleapis.com/token',
-    })
-
-    function gscEnv(): EnginesEnv {
-      return { ENGINES_GSC_KEY_JSON: saJson, ENGINES_GSC_SITE: 'sc-domain:usebrian.ai' }
-    }
-
-    it('exchanges a service-account JWT for a token, queries, and caches the token', async () => {
-      const fetchMock = vi
-        .fn()
-        .mockResolvedValueOnce(fakeResponse({ access_token: 'ya29.tok', expires_in: 3600 }))
-        .mockResolvedValueOnce(fakeResponse({ rows: [{ keys: ['ai company brain'], clicks: 3 }] }))
-        .mockResolvedValueOnce(fakeResponse({ rows: [] }))
-      const [tool] = createEngineTools(gscEnv(), fetchMock as unknown as typeof fetch)
-
-      const result = await tool.handler({ startDate: '2026-08-01', endDate: '2026-08-07' })
-      expect(result.isError).toBeFalsy()
-      expect(textOf(result)).toContain('ai company brain')
-
-      const [tokenUrl, tokenInit] = fetchMock.mock.calls[0] as [string, RequestInit]
-      expect(tokenUrl).toBe('https://oauth2.googleapis.com/token')
-      expect(String(tokenInit.body)).toContain('grant_type=')
-      expect(String(tokenInit.body)).toContain('assertion=')
-
-      const [queryUrl, queryInit] = fetchMock.mock.calls[1] as [string, RequestInit]
-      expect(queryUrl).toContain('/sites/sc-domain%3Ausebrian.ai/searchAnalytics/query')
-      expect((queryInit.headers as Record<string, string>).Authorization).toBe('Bearer ya29.tok')
-      const body = JSON.parse(String(queryInit.body)) as Record<string, unknown>
-      expect(body.dimensions).toEqual(['query'])
-      expect(body.rowLimit).toBe(100)
-
-      await tool.handler({ startDate: '2026-08-01', endDate: '2026-08-07' })
-      expect(fetchMock).toHaveBeenCalledTimes(3)
-    })
-
-    it('fails with a tool error when no site is given or configured', async () => {
-      const fetchMock = vi.fn()
-      const [tool] = createEngineTools(
-        { ENGINES_GSC_KEY_JSON: saJson },
-        fetchMock as unknown as typeof fetch,
-      )
-      const result = await tool.handler({ startDate: '2026-08-01', endDate: '2026-08-07' })
-      expect(result.isError).toBe(true)
-      expect(fetchMock).not.toHaveBeenCalled()
     })
   })
 })

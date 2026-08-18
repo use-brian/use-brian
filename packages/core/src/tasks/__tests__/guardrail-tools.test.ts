@@ -89,6 +89,15 @@ describe('[COMP:tasks/guardrail-tools] rejectTask', () => {
     const { rejectTask } = createTaskGuardrailTools(store)
     const res = await rejectTask.execute({ id: TASK_ID, reason: 'noise' }, ctx)
     expect(res.isError).toBe(true)
+    const data = String(res.data)
+    // The `taskNotFoundMessage` shape: name the id, explain supersession
+    // (every task update mints a new id), name the discovery tool, forbid the
+    // blind retry — and say the tombstone was NOT written.
+    expect(data).toContain(TASK_ID)
+    expect(data).toContain('NEW id')
+    expect(data).toContain('listTasks')
+    expect(data).toContain('no tombstone was written')
+    expect(data).toContain('Do NOT retry this exact id')
   })
 
   it('requires a workspace', async () => {
@@ -98,6 +107,12 @@ describe('[COMP:tasks/guardrail-tools] rejectTask', () => {
       { ...(ctx as any), workspaceId: null },
     )
     expect(res.isError).toBe(true)
+    const data = String(res.data)
+    // A gate names the missing surface AND the remedy — never just "not
+    // available in this context".
+    expect(data).toContain('not bound to one')
+    expect(data).toContain('Studio')
+    expect(data).toContain('will keep failing')
   })
 
   it('rejects a reason too short to teach anything', () => {
@@ -195,6 +210,13 @@ describe('[COMP:tasks/guardrail-tools] listTaskRules / deleteTaskRule', () => {
     const { deleteTaskRule } = createTaskGuardrailTools(store)
     const res = await deleteTaskRule.execute({ id: RULE_ID }, ctx)
     expect(res.isError).toBe(true)
+    const data = String(res.data)
+    // Rule ids are STABLE (no supersession), so the copy must not blame an
+    // edit — it points at listTaskRules and closes the retry.
+    expect(data).toContain(RULE_ID)
+    expect(data).toContain('listTaskRules')
+    expect(data).toContain('never superseded')
+    expect(data).toContain('Do NOT retry this exact id')
   })
 })
 

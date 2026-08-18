@@ -41,8 +41,14 @@ describe('[COMP:files/tools] not_found routes an upload id to the save step', ()
 
   it('leaves a PATH miss alone — that is a genuine miss, not an upload', () => {
     const msg = errorMessage({ kind: 'not_found', reference: '/notes/q3.md' } as never)
-    expect(msg).toBe('File /notes/q3.md not found in this workspace.')
+    // Still the plain-miss branch (no upload-promotion advice)…
     expect(msg).not.toContain('<attached_file')
+    expect(msg).not.toContain('UPLOADED attachment')
+    // …but it now carries the same discovery pointer + retry verdict the UUID
+    // branch has, so a mistyped path redirects instead of dead-ending.
+    expect(msg).toContain('/notes/q3.md')
+    expect(msg).toContain('fileSearch')
+    expect(msg).toContain('Do NOT retry this exact path')
   })
 
   it('accepts an uppercase UUID (ids are not case-normalized upstream)', () => {

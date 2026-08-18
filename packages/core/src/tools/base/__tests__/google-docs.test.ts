@@ -3,7 +3,7 @@
  * Component tag: [COMP:tools/google-docs].
  *
  * Verifies createGoogleDocsTools: the four-tool surface + flags, the
- * read tool's data passthrough + `Docs error:` mapping, the write tools'
+ * read tool's data passthrough + failure-copy rendering (`describeGoogleError`), the write tools'
  * authorized-file confirmation bypass (resolveConfirmation → false only
  * when the doc id is in authorizedFiles), the always-prompt create, and
  * appendText's "Text appended successfully." fallback.
@@ -11,6 +11,7 @@
 
 import { describe, it, expect, vi } from 'vitest'
 import { createGoogleDocsTools, type GoogleDocsApi } from '../google-docs.js'
+import { GoogleApiError } from '../_google-error.js'
 import type { AuthorizedFile } from '../google-drive.js'
 import type { Tool, ToolContext } from '../../types.js'
 
@@ -76,12 +77,28 @@ describe('[COMP:tools/google-docs] createGoogleDocsTools', () => {
     expect(res.isError).toBeFalsy()
   })
 
-  it('getContent maps a thrown error to an isError result with the Docs prefix', async () => {
+  it('getContent renders a Google 404 as a diagnosis that names the id, the discovery tool, and the verdict', async () => {
+    const api = stubApi({
+      getContent: vi.fn().mockRejectedValue(
+        new GoogleApiError({ api: 'Docs', status: 404, message: 'Requested entity was not found.', reason: 'notFound' }),
+      ),
+    })
+    const tools = createGoogleDocsTools(api)
+    const res = await byName(tools, 'googleDocsGetContent').execute({ documentId: 'd-x' }, ctx)
+    expect(res.isError).toBe(true)
+    expect(res.data).toContain('Google Docs could not find document `d-x`')
+    expect(res.data).toContain('Docs API error (404)')
+    expect(res.data).toContain('Call `googleDriveListFiles`')
+    expect(res.data).toContain('Retrying this exact id will keep failing')
+  })
+
+  it('getContent frames a plain (non-Google) throw with the tool and a no-retry verdict', async () => {
     const api = stubApi({ getContent: vi.fn().mockRejectedValue(new Error('not found')) })
     const tools = createGoogleDocsTools(api)
     const res = await byName(tools, 'googleDocsGetContent').execute({ documentId: 'd-x' }, ctx)
     expect(res.isError).toBe(true)
-    expect(res.data).toBe('Docs error: not found')
+    expect(res.data).toContain('Google Docs `googleDocsGetContent` on document `d-x` failed: not found')
+    expect(res.data).toContain('Retrying the same arguments will not help')
   })
 
   it('appendText prompts for an un-authorized doc and skips for an authorized one', async () => {

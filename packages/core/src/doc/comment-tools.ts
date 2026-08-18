@@ -74,13 +74,46 @@ const getCommentThreadInputSchema = z.object({
     .describe('Optional; the thread is resolved by its id, so this is not required.'),
 })
 
+/**
+ * Comment thread ids never come from a tool — the page's thread-discovery
+ * index is injected into the doc system prompt (`comment-discovery.ts`), and
+ * `getCommentThread` reads ONE thread you already have an id for. So a miss
+ * points at the index in context, not at a listing tool that does not exist.
+ *
+ * Threads are not superseded: `postComment` appends to the same row and
+ * `resolveComment` only flips `resolved_at`, so a thread id is stable for the
+ * life of the thread. A miss therefore means the id was never right, the
+ * thread was deleted with its block, or it is on a page above this
+ * assistant's clearance — never "it moved".
+ */
+function threadNotFound(threadId: string): string {
+  return (
+    `Comment thread ${threadId} not found, or not readable by this assistant. ` +
+    'Thread ids are stable (replying to or resolving a thread never mints a new id), so this id was either never valid, or the thread was deleted along with the block it was anchored to, or it lives on a page this assistant may not read. ' +
+    "Thread ids come from the page's thread index in your context (and from a postComment result) — there is no tool that lists threads, so re-read that index rather than guessing. " +
+    'Do NOT retry this exact id.'
+  )
+}
+
+/**
+ * Server-side wiring gap, not a caller mistake: the comment tools were built
+ * without a `commentThreadStore`. Nothing the model can pass fixes it, so the
+ * copy says so outright and names the fallback — otherwise the model retries
+ * with a reworded body, which is the loop this standard exists to stop.
+ */
 const NO_STORE = {
-  data: 'Comments are not available in this context.',
+  data:
+    'Doc comments are not wired on this server — this build of the comment tools has no comment store, so no thread can be read or written. ' +
+    'Nothing was posted. This is a server configuration gap, not something your arguments can fix: do NOT retry this call with different wording. ' +
+    'Put the point you were going to comment on into your reply to the user instead, and say plainly that you could not leave it as a comment on the page.',
   isError: true as const,
 }
 
 const NO_WORKSPACE = {
-  data: 'Doc comments require a workspace-scoped assistant.',
+  data:
+    'Doc comments require a workspace-scoped assistant, and this one is not bound to a workspace — a comment thread is stored against the workspace that owns the page, so there is nowhere to write it. ' +
+    'Nothing was posted. Ask the user to move this assistant into a workspace in Studio, or work on the page from a workspace-scoped chat. ' +
+    'Retrying from this session will keep failing, whatever the arguments.',
   isError: true as const,
 }
 
@@ -106,7 +139,7 @@ export function createPostCommentTool(deps: CommentToolDeps): Tool {
       if (input.threadId && input.threadId !== 'new') {
         const existing = await store.getThread(context.userId, input.threadId)
         if (!existing) {
-          return { data: `Thread not found: ${input.threadId}.`, isError: true }
+          return { data: threadNotFound(input.threadId), isError: true }
         }
         await store.addComment({
           userId: context.userId,
@@ -189,7 +222,7 @@ export function createResolveCommentTool(deps: CommentToolDeps): Tool {
         resolved: true,
       })
       if (!updated) {
-        return { data: `Thread not found: ${input.threadId}.`, isError: true }
+        return { data: threadNotFound(input.threadId), isError: true }
       }
       return { data: { kind: 'thread_resolved' as const, threadId: input.threadId } }
     },
@@ -215,7 +248,7 @@ export function createGetCommentThreadTool(deps: CommentToolDeps): Tool {
 
       const thread = await store.getThread(context.userId, input.threadId)
       if (!thread) {
-        return { data: `Thread not found or not accessible: ${input.threadId}.`, isError: true }
+        return { data: threadNotFound(input.threadId), isError: true }
       }
       const messages = (await store.listThreadComments(context.userId, input.threadId)) ?? []
 

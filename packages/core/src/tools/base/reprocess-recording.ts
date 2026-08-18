@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { buildTool } from '../types.js'
+import { toolFailure } from '../tool-failure.js'
 
 /**
  * `reprocessRecording` — re-run the recording pipeline (transcribe → segment →
@@ -73,25 +74,79 @@ export function createReprocessRecordingTool(deps: ReprocessRecordingDeps) {
 
     async execute(input, context) {
       if (!context.workspaceId) {
-        return { data: 'This assistant is not in a workspace, so there is no brain to ingest into.', isError: true }
-      }
-
-      const rec = await deps.getRecording(context.userId, input.recordingId)
-      if (!rec || rec.sourceKind !== 'recording') {
-        return { data: 'No recording with that id is visible in this workspace.', isError: true }
-      }
-      if (rec.workspaceId !== context.workspaceId) {
-        return { data: 'That recording belongs to a different workspace, so it cannot be processed here.', isError: true }
-      }
-      const sref = (rec.sourceRef ?? {}) as { gcsKey?: string; fileName?: string }
-      if (!sref.gcsKey) {
         return {
-          data: 'That recording has no stored audio (the upload never completed), so there is nothing to process. The user must upload the file again.',
+          data:
+            'This chat is not bound to a workspace, so there is no company brain to ingest into — brain rows are workspace-scoped and there is no permission boundary to evaluate. ' +
+            'No argument change or retry will help in this session. Nothing was processed. Tell the user to ask from a workspace chat.',
           isError: true,
         }
       }
 
-      const alreadyProcessed = await deps.hasProcessed(rec.id)
+      let rec: Awaited<ReturnType<ReprocessRecordingDeps['getRecording']>>
+      try {
+        rec = await deps.getRecording(context.userId, input.recordingId)
+      } catch (err) {
+        return toolFailure(err, {
+          tool: 'reprocessRecording',
+          action: 'The recording lookup',
+          target: `recording \`${input.recordingId}\``,
+          next: 'Nothing was processed and no credits were spent.',
+        })
+      }
+      // Two distinct causes, two distinct messages: an id that resolves to
+      // nothing is a discovery problem, an id that resolves to the wrong KIND
+      // of thing is a routing problem. Collapsing them made the model retry
+      // the same id against the same tool.
+      if (!rec) {
+        return {
+          data:
+            `No recording with id \`${input.recordingId}\` is visible in this workspace. ` +
+            'Either the id is wrong or the recording is above your clearance. ' +
+            'Ids for stored media come from `fileSearch` (search the workspace files) or from the `<attached_file id="…">` tag on the message that carried it. ' +
+            'Do NOT retry this exact id — re-resolve it with `fileSearch` first, or ask the user which recording they mean.',
+          isError: true,
+        }
+      }
+      if (rec.sourceKind !== 'recording') {
+        return {
+          data:
+            `\`${input.recordingId}\` exists but is a "${rec.sourceKind}", not a recording. ` +
+            '`reprocessRecording` only accepts recordings (audio/video episodes with stored bytes); ' +
+            'stored documents and other files go through `ingestFile` instead. ' +
+            'Retrying this exact id here will fail the same way — call `ingestFile` with it, or find the real recording with `fileSearch`.',
+          isError: true,
+        }
+      }
+      if (rec.workspaceId !== context.workspaceId) {
+        return {
+          data:
+            `Recording \`${input.recordingId}\` belongs to a different workspace, so it cannot be processed here — recordings are processed into the brain of their own workspace. ` +
+            'Do NOT retry this id; ask the user to run this from the workspace that owns the recording.',
+          isError: true,
+        }
+      }
+      const sref = (rec.sourceRef ?? {}) as { gcsKey?: string; fileName?: string }
+      if (!sref.gcsKey) {
+        return {
+          data:
+            `Recording \`${input.recordingId}\` has no stored audio (the upload never completed), so there is nothing to transcribe. ` +
+            'No retry of this id can succeed until the bytes exist. Tell the user to upload the file again.',
+          isError: true,
+        }
+      }
+
+      let alreadyProcessed: boolean
+      try {
+        alreadyProcessed = await deps.hasProcessed(rec.id)
+      } catch (err) {
+        return toolFailure(err, {
+          tool: 'reprocessRecording',
+          action: 'The previous-run check',
+          target: `recording \`${rec.id}\``,
+          next:
+            'Nothing was processed. This check is what stops a silent duplicate re-transcription, so do not skip it by passing confirm: true.',
+        })
+      }
       // The consent gate applies to first processing too: an upload is a
       // reversible storage action, never implied permission to transcribe.
       if (input.confirm !== true) {
@@ -117,12 +172,24 @@ export function createReprocessRecordingTool(deps: ReprocessRecordingDeps) {
         }
       }
 
-      const { enqueued } = await deps.enqueue({
-        recordingId: rec.id,
-        workspaceId: rec.workspaceId,
-        actingUserId: context.userId,
-        blueprintSlug: input.blueprintSlug?.trim() || null,
-      })
+      let enqueued: boolean
+      try {
+        ;({ enqueued } = await deps.enqueue({
+          recordingId: rec.id,
+          workspaceId: rec.workspaceId,
+          actingUserId: context.userId,
+          blueprintSlug: input.blueprintSlug?.trim() || null,
+        }))
+      } catch (err) {
+        return toolFailure(err, {
+          tool: 'reprocessRecording',
+          action: 'Queueing the recording for processing',
+          target: `recording \`${rec.id}\``,
+          mutating: true,
+          next:
+            'Processing did NOT start and no credits were spent. The user has already consented, so the same call can be repeated once the cause is fixed — do not ask them again.',
+        })
+      }
       if (!enqueued) {
         return { data: 'That recording is already being processed — no new run was started.' }
       }

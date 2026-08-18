@@ -12,7 +12,7 @@
 
 import { z } from 'zod'
 import { buildTool, type Tool, type ToolContext } from '../types.js'
-import { type Json, asRows, str, num, bool, obj, projectList } from './_connector-result.js'
+import { type Json, asRows, str, num, bool, obj, projectList, connectorError } from './_connector-result.js'
 import {
   SHOPIFYQL_CATALOG,
   SHOPIFYQL_SCHEMAS,
@@ -505,7 +505,7 @@ export function createShopifyTools(
           plan: str(obj(s, 'plan'), 'displayName'),
         } }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifyGetShop', err })
       }
     },
   })
@@ -531,7 +531,7 @@ export function createShopifyTools(
         const data = await api.listProducts({ ...input, first })
         return { data: projectConnection(data, first, productRow) }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifyListProducts', err })
       }
     },
   })
@@ -554,7 +554,7 @@ export function createShopifyTools(
     async execute(input) {
       try {
         const p = ((await api.getProduct(input.productId)) ?? {}) as Json
-        if (!p.id) return { data: 'Shopify error: product not found', isError: true }
+        if (!p.id) return { data: `Shopify has no product \`${input.productId}\` in this store. Either the id is wrong (pass the numeric id or the \`gid://shopify/Product/…\` GID) or the product was deleted. Call \`shopifyListProducts\` (with a title \`query\`) to get a current id; retrying this exact id will keep failing.`, isError: true }
         return { data: {
           ...productRow(p),
           description: str(p, 'description'),
@@ -571,7 +571,7 @@ export function createShopifyTools(
           variants: connRows((p.variants ?? {}) as Json).map(variantRow),
         } }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifyGetProduct', target: `product \`${input.productId}\``, discoveryTool: 'shopifyListProducts', err })
       }
     },
   })
@@ -598,7 +598,7 @@ export function createShopifyTools(
         const data = await api.listOrders({ ...input, first })
         return { data: projectConnection(data, first, orderRow) }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifyListOrders', err })
       }
     },
   })
@@ -619,7 +619,7 @@ export function createShopifyTools(
     async execute(input) {
       try {
         const o = ((await api.getOrder(input.orderId)) ?? {}) as Json
-        if (!o.id) return { data: 'Shopify error: order not found', isError: true }
+        if (!o.id) return { data: `Shopify has no order \`${input.orderId}\` in this store. Either the id is wrong (pass the numeric id or the \`gid://shopify/Order/…\` GID — an order NAME like \`#1001\` is not an id) or the order was deleted. Call \`shopifyListOrders\` (\`query: "name:#1001"\`) to get a current id; retrying this exact id will keep failing.`, isError: true }
         return { data: {
           ...orderRow(o),
           email: str(o, 'email'),
@@ -649,7 +649,7 @@ export function createShopifyTools(
           risk: str(obj(o, 'risk'), 'recommendation'),
         } }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifyGetOrder', target: `order \`${input.orderId}\``, discoveryTool: 'shopifyListOrders', err })
       }
     },
   })
@@ -675,7 +675,7 @@ export function createShopifyTools(
         const data = await api.searchCustomers({ ...input, first })
         return { data: projectConnection(data, first, customerRow) }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifySearchCustomers', err })
       }
     },
   })
@@ -695,7 +695,7 @@ export function createShopifyTools(
     async execute(input) {
       try {
         const c = ((await api.getCustomer(input.customerId)) ?? {}) as Json
-        if (!c.id) return { data: 'Shopify error: customer not found', isError: true }
+        if (!c.id) return { data: `Shopify has no customer \`${input.customerId}\` in this store. Either the id is wrong (pass the numeric id or the \`gid://shopify/Customer/…\` GID) or the customer was deleted. Call \`shopifySearchCustomers\` (by email or name) to get a current id; retrying this exact id will keep failing.`, isError: true }
         const lastOrder = obj(c, 'lastOrder')
         return { data: {
           ...customerRow(c),
@@ -709,7 +709,7 @@ export function createShopifyTools(
             : undefined,
         } }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifyGetCustomer', target: `customer \`${input.customerId}\``, discoveryTool: 'shopifySearchCustomers', err })
       }
     },
   })
@@ -753,7 +753,7 @@ export function createShopifyTools(
           total_count: num(data, 'totalCount'),
         } }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifyPreviewCustomerSegment', err })
       }
     },
   })
@@ -780,7 +780,7 @@ export function createShopifyTools(
         const filters: string[] = []
         if (input.productId) {
           const pid = numericId(input.productId)
-          if (!pid) return { data: 'Shopify error: productId must be a numeric id or GID', isError: true }
+          if (!pid) return { data: `\`productId\` \`${input.productId}\` is not a Shopify product id — pass the numeric id (e.g. \`8123456789\`) or the GID (\`gid://shopify/Product/8123456789\`), never a handle or title. Call \`shopifyListProducts\` with a title \`query\` to get the id; the same value will fail the same way.`, isError: true }
           filters.push(`product_id:${pid}`)
         }
         if (input.sku) filters.push(`sku:${input.sku}`)
@@ -795,7 +795,7 @@ export function createShopifyTools(
         })
         return { data: projectConnection(data, first, inventoryLevelRow) }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifyGetInventoryLevels', target: input.productId ? `product \`${input.productId}\`` : undefined, discoveryTool: 'shopifyListProducts', err })
       }
     },
   })
@@ -840,7 +840,7 @@ export function createShopifyTools(
           updated_at: str(p, 'updatedAt'),
         } }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifyUpdateProduct', target: `product \`${input.productId}\``, discoveryTool: 'shopifyListProducts', mutating: true, err })
       }
     },
   })
@@ -880,7 +880,7 @@ export function createShopifyTools(
           total: money(d, 'totalPriceSet'),
         } }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifyCreateDraftOrder', target: input.customerId ? `customer \`${input.customerId}\`` : undefined, discoveryTool: 'shopifySearchCustomers', mutating: true, err })
       }
     },
   })
@@ -908,7 +908,7 @@ export function createShopifyTools(
           tags_added: input.tags,
         } }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifyAddTags', mutating: true, err })
       }
     },
   })
@@ -929,7 +929,7 @@ export function createShopifyTools(
         const first = Math.min(input.first ?? 10, 50)
         return { data: projectConnection(await api.listCollections({ ...input, first }), first, collectionRow) }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifyListCollections', err })
       }
     },
   })
@@ -950,7 +950,7 @@ export function createShopifyTools(
         const first = Math.min(input.first ?? 10, 50)
         return { data: projectConnection(await api.listDraftOrders({ ...input, first }), first, draftOrderRow) }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifyListDraftOrders', err })
       }
     },
   })
@@ -973,7 +973,7 @@ export function createShopifyTools(
         const first = Math.min(input.first ?? 10, 50)
         return { data: projectConnection(await api.listDiscounts({ ...input, first }), first, discountRow) }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifyListDiscounts', err })
       }
     },
   })
@@ -994,7 +994,7 @@ export function createShopifyTools(
         const first = Math.min(input.first ?? 10, 50)
         return { data: projectConnection(await api.listAbandonedCheckouts({ ...input, first }), first, checkoutRow) }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifyListAbandonedCheckouts', err })
       }
     },
   })
@@ -1011,7 +1011,7 @@ export function createShopifyTools(
     async execute(input) {
       try {
         const account = (await api.getPayoutsSummary({ first: Math.min(input.first ?? 10, 25) })) as Json | null
-        if (!account) return { data: 'Shopify error: this store does not use Shopify Payments', isError: true }
+        if (!account) return { data: 'This store does not use Shopify Payments, so there is no payouts / disputes ledger to read (a third-party gateway holds that data). This is a permanent property of the store, not a transient failure or a bad argument — do not retry; tell the user and point them at their payment provider\'s dashboard.', isError: true }
         return { data: {
           balance: asRows(account.balance).map((b) => plainMoney(b)),
           payout_interval: str(obj(account, 'payoutSchedule'), 'interval'),
@@ -1023,7 +1023,7 @@ export function createShopifyTools(
           })),
         } }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifyGetPayoutsSummary', err })
       }
     },
   })
@@ -1040,10 +1040,10 @@ export function createShopifyTools(
     async execute(input) {
       try {
         const account = (await api.listDisputes({ first: Math.min(input.first ?? 10, 25) })) as Json | null
-        if (!account) return { data: 'Shopify error: this store does not use Shopify Payments', isError: true }
+        if (!account) return { data: 'This store does not use Shopify Payments, so there is no payouts / disputes ledger to read (a third-party gateway holds that data). This is a permanent property of the store, not a transient failure or a bad argument — do not retry; tell the user and point them at their payment provider\'s dashboard.', isError: true }
         return { data: connRows(obj(account, 'disputes')).map(disputeRow) }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifyListDisputes', err })
       }
     },
   })
@@ -1073,7 +1073,7 @@ export function createShopifyTools(
           updated_at: str(n, 'updatedAt'),
         })) }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifyListContent', err })
       }
     },
   })
@@ -1129,7 +1129,7 @@ export function createShopifyTools(
           ...(truncated ? { note: 'More than 500 orders matched - figures cover the first 500. Narrow the date range for exact numbers.' } : {}),
         } }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifySalesReport', err })
       }
     },
   })
@@ -1190,7 +1190,7 @@ export function createShopifyTools(
           shopifyql: table.shopifyql,
         } }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifyStorefrontFunnel', err })
       }
     },
   })
@@ -1234,7 +1234,7 @@ export function createShopifyTools(
           ? ` There is no "${schema}" schema - order and product reporting lives in "sales".`
           : ''
         return { data:
-          `Shopify error: "${schema}" is not a supported schema.${hint} Supported: ${SHOPIFYQL_SCHEMAS.join(', ')}.`,
+          `shopifyAnalyticsQuery did not run: "${schema}" is not a ShopifyQL schema this store exposes.${hint} Supported schemas: ${SHOPIFYQL_SCHEMAS.join(', ')}. Rewrite the query against one of those; the same schema name will fail the same way.`,
           isError: true }
       }
       try {
@@ -1248,7 +1248,16 @@ export function createShopifyTools(
       } catch (err) {
         analyticsRejections++
         const message = err instanceof Error ? err.message : String(err)
-        return { data: `Shopify error: ${message}${fieldHelp(schema, message)}`, isError: true }
+        // The generic frame (what / verdict) plus the field catalog: a bare
+        // "Column Not Found" names the wrong column but never a right one, so
+        // fieldHelp is what turns the rejection into a bounded next step.
+        const failure = connectorError({
+          provider: 'Shopify',
+          tool: 'shopifyAnalyticsQuery',
+          target: schema ? `ShopifyQL schema \`${schema}\`` : 'the ShopifyQL query',
+          err,
+        })
+        return { data: `${failure.data}${fieldHelp(schema, message)}`, isError: true }
       }
     },
   })
@@ -1283,7 +1292,7 @@ export function createShopifyTools(
         const p = obj(data, 'product')
         return { data: { id: str(p, 'id'), title: str(p, 'title'), handle: str(p, 'handle'), status: str(p, 'status') } }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifyCreateProduct', mutating: true, err })
       }
     },
   })
@@ -1353,7 +1362,7 @@ export function createShopifyTools(
           note: 'Shopify processes product images asynchronously - it may take a few seconds to appear.',
         } }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifyAddProductImage', target: `product \`${input.productId}\``, discoveryTool: 'shopifyListProducts', mutating: true, err })
       }
     },
   })
@@ -1388,7 +1397,7 @@ export function createShopifyTools(
         }))
         return { data: { variants } }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifySetProductPrice', target: `product \`${input.productId}\``, discoveryTool: 'shopifyListProducts', mutating: true, err })
       }
     },
   })
@@ -1427,7 +1436,7 @@ export function createShopifyTools(
             : `Published, but the product status is ${status ?? 'not ACTIVE'} so it is NOT visible to customers yet. Set the status to ACTIVE with shopifyUpdateProduct to make it live.`,
         } }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifyPublishProduct', target: `product \`${input.productId}\``, discoveryTool: 'shopifyListProducts', mutating: true, err })
       }
     },
   })
@@ -1466,7 +1475,7 @@ export function createShopifyTools(
           note: 'Written to the product. These render on the storefront only if the theme template reads them.',
         } }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifySetProductMetafields', target: `product \`${input.productId}\``, discoveryTool: 'shopifyListProducts', mutating: true, err })
       }
     },
   })
@@ -1498,7 +1507,7 @@ export function createShopifyTools(
         }))
         return { data: { options } }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifySetProductOptions', target: `product \`${input.productId}\``, discoveryTool: 'shopifyListProducts', mutating: true, err })
       }
     },
   })
@@ -1523,7 +1532,7 @@ export function createShopifyTools(
         const themes = await api.listThemes()
         return { data: { themes } }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifyListThemes', err })
       }
     },
   })
@@ -1550,7 +1559,7 @@ export function createShopifyTools(
           templates: data.templates ?? [],
         } }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifyListProductTemplates', target: input.themeId ? `theme \`${input.themeId}\`` : undefined, discoveryTool: 'shopifyListThemes', err })
       }
     },
   })
@@ -1579,7 +1588,7 @@ export function createShopifyTools(
           template: str(data, 'content'),
         } }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifyReadProductTemplate', target: input.themeId ? `theme \`${input.themeId}\`` : undefined, discoveryTool: 'shopifyListThemes', err })
       }
     },
   })
@@ -1612,7 +1621,7 @@ export function createShopifyTools(
           note: 'Created. The page does not change until a product is pointed at it with shopifySetProductTemplate.',
         } }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifyCreateProductTemplate', target: input.themeId ? `theme \`${input.themeId}\`` : undefined, discoveryTool: 'shopifyListThemes', mutating: true, err })
       }
     },
   })
@@ -1637,7 +1646,7 @@ export function createShopifyTools(
         const p = obj(data, 'product')
         return { data: { id: str(p, 'id'), template_suffix: str(p, 'templateSuffix') ?? '(theme default)' } }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifySetProductTemplate', target: `product \`${input.productId}\``, discoveryTool: 'shopifyListProducts', mutating: true, err })
       }
     },
   })
@@ -1660,7 +1669,7 @@ export function createShopifyTools(
         const d = obj(data, 'draftOrder')
         return { data: { id: str(d, 'id'), name: str(d, 'name'), invoice_url: str(d, 'invoiceUrl'), invoice_sent_at: str(d, 'invoiceSentAt') } }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifySendDraftOrderInvoice', target: `draft order \`${input.draftOrderId}\``, discoveryTool: 'shopifyListDraftOrders', mutating: true, err })
       }
     },
   })
@@ -1685,7 +1694,7 @@ export function createShopifyTools(
         const c = obj(data, 'customer')
         return { data: { id: str(c, 'id'), name: str(c, 'displayName'), note: str(c, 'note'), tags: c?.tags } }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifyUpdateCustomer', target: `customer \`${input.customerId}\``, discoveryTool: 'shopifySearchCustomers', mutating: true, err })
       }
     },
   })
@@ -1710,7 +1719,7 @@ export function createShopifyTools(
         await api.setInventoryQuantity(input)
         return { data: { variant_id: input.variantId, available: input.quantity } }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifySetInventory', target: `variant \`${input.variantId}\``, discoveryTool: 'shopifyGetProduct', mutating: true, err })
       }
     },
   })
@@ -1741,7 +1750,7 @@ export function createShopifyTools(
           tracking: asRows(f?.trackingInfo).map((t) => ({ number: str(t, 'number'), company: str(t, 'company'), url: str(t, 'url') })),
         } }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifyCreateFulfillment', target: `order \`${input.orderId}\``, discoveryTool: 'shopifyListOrders', mutating: true, err })
       }
     },
   })
@@ -1803,7 +1812,7 @@ export function createShopifyTools(
           usage_limit: num(d, 'usageLimit'),
         } }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifyCreateDiscountCode', mutating: true, err })
       }
     },
   })
@@ -1834,7 +1843,7 @@ export function createShopifyTools(
           admin_url: str(data, 'adminUrl'),
         } }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifyCreateCustomerSegment', mutating: true, err })
       }
     },
   })
@@ -1861,7 +1870,7 @@ export function createShopifyTools(
         const n = obj(data, 'page') ?? obj(data, 'article')
         return { data: { id: str(n, 'id'), title: str(n, 'title'), handle: str(n, 'handle'), published: input.publish ?? false } }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifyCreateContent', mutating: true, err })
       }
     },
   })
@@ -1894,7 +1903,7 @@ export function createShopifyTools(
           customer_notified: input.notifyCustomer ?? true,
         } }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifyCancelOrder', target: `order \`${input.orderId}\``, discoveryTool: 'shopifyListOrders', mutating: true, err })
       }
     },
   })
@@ -1928,7 +1937,7 @@ export function createShopifyTools(
           order_id: input.orderId,
         } }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifyRefundOrder', target: `order \`${input.orderId}\``, discoveryTool: 'shopifyListOrders', mutating: true, err })
       }
     },
   })
@@ -1959,7 +1968,7 @@ export function createShopifyTools(
           order_name: str(o, 'name'),
         } }
       } catch (err) {
-        return { data: `Shopify error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Shopify', tool: 'shopifyCompleteDraftOrder', target: `draft order \`${input.draftOrderId}\``, discoveryTool: 'shopifyListDraftOrders', mutating: true, err })
       }
     },
   })

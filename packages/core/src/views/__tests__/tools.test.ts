@@ -170,16 +170,26 @@ describe('[COMP:views/tools] renderView', () => {
     expect(res.isError).toBe(true)
   })
 
-  it('rejects an invalid binding shape', async () => {
+  // The rejection is TEXT, message first (docs/architecture/engine/tool-executor.md
+  // → "Failure copy"): a multi-key `{ ok, errors, hint }` object made the model
+  // parse JSON to read prose. It must still name the tool, say nothing was
+  // rendered, carry the per-variant issues, list the valid shapes, and forbid
+  // the identical retry.
+  it('rejects an invalid binding shape as message-first text', async () => {
     const tool = createRenderViewTool(deps())
     const res = await tool.execute(
       { binding: { entity: 'companies', viewType: 'board' } },
       ctx(),
     )
     expect(res.isError).toBe(true)
-    const data = res.data as { ok?: boolean; errors?: string[] }
-    expect(data.ok).toBe(false)
-    expect(data.errors).toBeDefined()
+    const data = res.data as string
+    expect(typeof data).toBe('string')
+    expect(data).toContain('renderView did not run')
+    expect(data).toContain('nothing was rendered')
+    // The load-bearing tail survives the object → text move.
+    expect(data).toContain('Valid bindings:')
+    expect(data).toContain('companies/table')
+    expect(data).toMatch(/re-sending this exact binding will be rejected the same way/i)
   })
 
   it('returns an A2UI ViewPayload for tasks/table', async () => {
@@ -390,7 +400,7 @@ describe('[COMP:views/render-chart-tool] renderChart', () => {
     expect(res.isError).toBe(true)
   })
 
-  it('rejects an invalid aggregation binding shape', async () => {
+  it('rejects an invalid aggregation binding shape as message-first text', async () => {
     const tool = createRenderChartTool(deps())
     const res = await tool.execute(
       {
@@ -400,9 +410,14 @@ describe('[COMP:views/render-chart-tool] renderChart', () => {
       ctx(),
     )
     expect(res.isError).toBe(true)
-    const data = res.data as { ok?: boolean; errors?: string[] }
-    expect(data.ok).toBe(false)
-    expect(data.errors).toBeDefined()
+    const data = res.data as string
+    expect(typeof data).toBe('string')
+    expect(data).toContain('renderChart did not run')
+    expect(data).toContain('no chart was rendered')
+    expect(data).toContain('Rejected because:')
+    // The old `hint` key's content is still there, as prose.
+    expect(data).toContain('count_by|sum_by|avg_by|series_by_date')
+    expect(data).toMatch(/re-sending this exact binding will be rejected the same way/i)
   })
 
   it('returns a chart_bar widget payload for kind=bar', async () => {
@@ -588,6 +603,14 @@ describe('[COMP:views/tools] saveView', () => {
     )
     expect(res.isError).toBe(true)
     expect(d.savedViewStore.create).not.toHaveBeenCalled()
+    // Message-first: name the tool, say the named view was not saved, keep the
+    // valid-shape catalogue, forbid the identical retry.
+    const data = res.data as string
+    expect(typeof data).toBe('string')
+    expect(data).toContain('saveView did not run')
+    expect(data).toContain('"X" was NOT saved')
+    expect(data).toContain('workflow_runs/table')
+    expect(data).toMatch(/re-sending this exact binding will be rejected the same way/i)
   })
 
   it('emits onEvent on save', async () => {

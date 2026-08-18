@@ -176,6 +176,13 @@ describe('[COMP:engine/query-loop] Isolated terminal finalization', () => {
     expect(streamedText(events)).toBe(EXPLANATION)
     expect(sessionCalls).toHaveLength(2)
     expect(streamCalls).toHaveLength(1)
+    // The abnormal exit is stamped on the event, not only inside the
+    // finalizer's prose: a consumer folding this loop into a receipt (the doc
+    // edit-agent) tells a budget cutoff from a natural finish structurally.
+    const complete = events.find((event) => event.type === 'turn_complete')
+    expect(complete?.type === 'turn_complete' && complete.terminalStop).toEqual({ code: 'tool_budget_exhausted' })
+    // And the finalizer is told what the code means: it must not claim completion.
+    expect(streamCalls[0].systemPrompt).toContain('did NOT finish')
 
     const request = streamCalls[0]
     expect(request.tools).toBeUndefined()

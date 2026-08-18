@@ -1,10 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
-import { generateKeyPairSync } from 'node:crypto'
 import {
   createEngineAskers,
-  createGscQuerier,
   EngineInputError,
-  EngineBudgetError,
   type EnginesEnv,
 } from '../ask-engines.js'
 
@@ -145,68 +142,6 @@ describe('[COMP:core/ask-engines] engine ask framework', () => {
       await expect(
         asker.run({ questions: Array.from({ length: 26 }, (_, i) => `q${i}`) }),
       ).rejects.toBeInstanceOf(EngineInputError)
-    })
-  })
-
-  describe('searchConsoleQuery', () => {
-    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 })
-    const saJson = JSON.stringify({
-      client_email: 'watch@project.iam.gserviceaccount.com',
-      private_key: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
-      token_uri: 'https://oauth2.googleapis.com/token',
-    })
-
-    it('is absent without a service-account credential', () => {
-      expect(createGscQuerier({})).toBeNull()
-    })
-
-    it('signs a service-account JWT, queries the configured property, and caches the token', async () => {
-      const fetchMock = vi
-        .fn()
-        .mockResolvedValueOnce(fakeResponse({ access_token: 'ya29.tok', expires_in: 3600 }))
-        .mockResolvedValueOnce(fakeResponse({ rows: [{ keys: ['ai company brain'], clicks: 3 }] }))
-        .mockResolvedValueOnce(fakeResponse({ rows: [] }))
-      const gsc = createGscQuerier(
-        { ENGINES_GSC_KEY_JSON: saJson, ENGINES_GSC_SITE: 'sc-domain:example.com' },
-        fetchMock as unknown as typeof fetch,
-      )!
-
-      const data = await gsc.query({ startDate: '2026-08-01', endDate: '2026-08-07' })
-      expect(data).toEqual({ rows: [{ keys: ['ai company brain'], clicks: 3 }] })
-
-      const [queryUrl] = fetchMock.mock.calls[1] as [string]
-      expect(queryUrl).toContain('/sites/sc-domain%3Aexample.com/searchAnalytics/query')
-
-      await gsc.query({ startDate: '2026-08-01', endDate: '2026-08-07' })
-      expect(fetchMock).toHaveBeenCalledTimes(3)
-    })
-
-    it('resolves the property BEFORE taking budget, so a siteless call costs nothing', async () => {
-      const fetchMock = vi.fn()
-      const takeBudget = vi.fn(() => null)
-      const gsc = createGscQuerier(
-        { ENGINES_GSC_KEY_JSON: saJson },
-        fetchMock as unknown as typeof fetch,
-      )!
-
-      await expect(
-        gsc.query({ startDate: '2026-08-01', endDate: '2026-08-07' }, takeBudget),
-      ).rejects.toBeInstanceOf(EngineInputError)
-      expect(takeBudget).not.toHaveBeenCalled()
-      expect(fetchMock).not.toHaveBeenCalled()
-    })
-
-    it('surfaces a budget refusal as its own error carrying the sentence the hook gave', async () => {
-      const fetchMock = vi.fn()
-      const gsc = createGscQuerier(
-        { ENGINES_GSC_KEY_JSON: saJson, ENGINES_GSC_SITE: 'sc-domain:example.com' },
-        fetchMock as unknown as typeof fetch,
-      )!
-
-      await expect(
-        gsc.query({ startDate: '2026-08-01', endDate: '2026-08-07' }, () => 'ceiling reached'),
-      ).rejects.toThrow(new EngineBudgetError('ceiling reached'))
-      expect(fetchMock).not.toHaveBeenCalled()
     })
   })
 })

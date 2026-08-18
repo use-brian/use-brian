@@ -49,6 +49,7 @@ import {
 import {
   deleteView,
   downloadPageExport,
+  type PageExportFormat,
   fetchPageMarkdown,
   getView,
   importDocument,
@@ -290,8 +291,8 @@ export function PageHeader({
     }
   }
 
-  // Download the page as .md / .docx (blob via authFetch — see the SDK note).
-  async function handleExport(fmt: "md" | "docx") {
+  // Download the page as .md / .docx / .pdf (blob via authFetch — see the SDK note).
+  async function handleExport(fmt: PageExportFormat) {
     setError(null);
     try {
       await downloadPageExport(view.id, fmt, view.name);
@@ -459,6 +460,9 @@ export function PageHeader({
               </DropdownMenuItem>
               <DropdownMenuItem onClick={() => void handleExport("docx")}>
                 {t.exportWord}
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => void handleExport("pdf")}>
+                {t.exportPdf}
               </DropdownMenuItem>
               <DropdownMenuItem onClick={() => importInputRef.current?.click()}>
                 {t.importFile}

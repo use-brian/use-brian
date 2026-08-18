@@ -1,6 +1,13 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createSlackAdapter } from '../slack/adapter.js'
 import { createSlackApi } from '../slack/api.js'
+import {
+  describeSlackError,
+  isSlackApiError,
+  looksLikeSlackConversationId,
+  looksLikeSlackMemberId,
+  SlackApiError,
+} from '../slack/errors.js'
 import { verifySlackSignature } from '../slack/verify.js'
 import { createHmac } from 'node:crypto'
 
@@ -439,5 +446,263 @@ describe('[COMP:channels/slack] conversationsList', () => {
       json: async () => ({ ok: false, error: 'missing_scope' }),
     } as unknown as Response)
     await expect(createSlackApi({ botToken: 'xoxb-test' }).conversationsList()).rejects.toThrow('missing_scope')
+  })
+})
+
+describe('[COMP:channels/slack] read-method form encoding', () => {
+  // Slack's GET-family read methods IGNORE a JSON body: a required arg goes
+  // missing (`conversations.info` → unconditional `invalid_arguments`, prod
+  // 2026-08-17) and an optional arg silently reverts to its default
+  // (`conversations.list` lost `types`, hiding private channels). These tests
+  // pin the content type so the regression cannot come back quietly.
+  type Recorded = { url: string; contentType?: string; body?: string }
+  let calls: Recorded[]
+
+  beforeEach(() => {
+    calls = []
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: { headers?: Record<string, string>; body?: unknown }) => {
+      calls.push({
+        url,
+        contentType: init?.headers?.['Content-Type'],
+        body: typeof init?.body === 'string' ? init.body : undefined,
+      })
+      return {
+        json: async () => ({
+          ok: true,
+          channel: { id: 'C0TESTFORM1', name: 'test' },
+          channels: [],
+          members: [],
+          messages: [],
+        }),
+      } as unknown as Response
+    }))
+  })
+
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('conversations.info sends the channel form-encoded, never as JSON', async () => {
+    await createSlackApi({ botToken: 'xoxb-test' }).conversationsInfo('C0TESTFORM1')
+    expect(calls).toHaveLength(1)
+    expect(calls[0].contentType).toBe('application/x-www-form-urlencoded')
+    expect(calls[0].body).toBe('channel=C0TESTFORM1')
+  })
+
+  it('conversations.list sends types/limit form-encoded and drops undefined cursor', async () => {
+    await createSlackApi({ botToken: 'xoxb-test' }).conversationsList()
+    expect(calls[0].contentType).toBe('application/x-www-form-urlencoded')
+    const params = new URLSearchParams(calls[0].body)
+    expect(params.get('types')).toBe('public_channel,private_channel')
+    expect(params.get('exclude_archived')).toBe('true')
+    expect(params.get('limit')).toBe('200')
+    expect(params.has('cursor')).toBe(false)
+  })
+
+  it('users.list and conversations.history are form-encoded too', async () => {
+    const api = createSlackApi({ botToken: 'xoxb-test' })
+    await api.usersList()
+    await api.conversationsHistory('C0TESTFORM1', { limit: 5 })
+    expect(calls.map((c) => c.contentType)).toEqual([
+      'application/x-www-form-urlencoded',
+      'application/x-www-form-urlencoded',
+    ])
+    const history = new URLSearchParams(calls[1].body)
+    expect(history.get('channel')).toBe('C0TESTFORM1')
+    expect(history.get('limit')).toBe('5')
+    expect(history.has('latest')).toBe(false)
+  })
+})
+
+describe('[COMP:channels/slack-errors] SlackApiError + describeSlackError', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  function slackFailure(body: Record<string, unknown>, init?: ResponseInit) {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(body), { status: 200, ...init })))
+  }
+
+  it('keeps the code, the validator detail, and the call target on the thrown error', async () => {
+    slackFailure({
+      ok: false,
+      error: 'invalid_arguments',
+      response_metadata: { messages: ['[ERROR] invalid `channel` value'] },
+    })
+    const api = createSlackApi({ botToken: 'xoxb-test' })
+    const err = await api.conversationsInfo('#general').catch((e: unknown) => e)
+    expect(isSlackApiError(err)).toBe(true)
+    if (!isSlackApiError(err)) return
+    expect(err.method).toBe('conversations.info')
+    expect(err.code).toBe('invalid_arguments')
+    expect(err.detail).toEqual(['[ERROR] invalid `channel` value'])
+    expect(err.target).toEqual({ channel: '#general' })
+    // The legacy `Slack API <method>: <code>` prefix survives for log/grep parity.
+    expect(err.message).toMatch(/^Slack API conversations\.info: invalid_arguments/)
+  })
+
+  it('invalid_arguments with a non-id channel names the value and points at listSlackChannels', async () => {
+    slackFailure({ ok: false, error: 'invalid_arguments' })
+    const err = await createSlackApi({ botToken: 'x' }).conversationsInfo('#general').catch((e: unknown) => e)
+    const text = describeSlackError(err)
+    expect(text).toContain('`#general` is not a Slack conversation id')
+    expect(text).toContain('`listSlackChannels`')
+    expect(text).toContain('invalid_arguments')
+  })
+
+  it('missing_scope carries needed/provided and says a retry cannot help', async () => {
+    slackFailure({ ok: false, error: 'missing_scope', needed: 'channels:read', provided: 'chat:write,users:read' })
+    const err = await createSlackApi({ botToken: 'x' }).conversationsList().catch((e: unknown) => e)
+    const text = describeSlackError(err)
+    expect(text).toContain('`channels:read`')
+    expect(text).toContain('token has: chat:write,users:read')
+    expect(text).toMatch(/retrying will not help/i)
+  })
+
+  it('ratelimited reads Retry-After and says how long to wait', async () => {
+    slackFailure({ ok: false, error: 'ratelimited' }, { status: 429, headers: { 'retry-after': '7' } })
+    const err = await createSlackApi({ botToken: 'x' }).conversationsList().catch((e: unknown) => e)
+    expect(isSlackApiError(err) && err.retryAfterSec).toBe(7)
+    expect(describeSlackError(err)).toMatch(/wait 7s, then retry the same call once/)
+  })
+
+  it('auth-class codes are diagnosed as a dead token with a reconnect remedy', async () => {
+    slackFailure({ ok: false, error: 'token_revoked' })
+    const err = await createSlackApi({ botToken: 'x' }).conversationsList().catch((e: unknown) => e)
+    const text = describeSlackError(err)
+    expect(text).toContain('token_revoked')
+    expect(text).toMatch(/Reconnect Slack/)
+    expect(text).toMatch(/retrying the same call will not help/)
+  })
+
+  it('a non-JSON transport failure becomes an http_<status> code instead of a JSON parse throw', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('<html>bad gateway</html>', { status: 502 })))
+    const err = await createSlackApi({ botToken: 'x' }).conversationsList().catch((e: unknown) => e)
+    expect(isSlackApiError(err) && err.code).toBe('http_502')
+    expect(describeSlackError(err)).toMatch(/HTTP 502/)
+  })
+
+  it('an unknown code still gets the what/where and a pointer to the method reference', async () => {
+    slackFailure({ ok: false, error: 'some_new_code' })
+    const err = await createSlackApi({ botToken: 'x' }).conversationsInfo('C123').catch((e: unknown) => e)
+    const text = describeSlackError(err)
+    expect(text).toContain('`some_new_code`')
+    expect(text).toContain('conversations.info')
+    expect(text).toContain('https://docs.slack.dev/reference/methods/conversations.info')
+  })
+
+  it('passes non-Slack errors through as their message', () => {
+    expect(describeSlackError(new Error('fetch failed'))).toBe('fetch failed')
+  })
+
+  // ── Message / shape / file / reaction codes ────────────────────────────
+  // These reach the model from the run-time senders (workflow delivery, A2A
+  // relay, confirmation prompts, reactions), where the only thing it can act
+  // on is the sentence. Each must name the target, diagnose, give the next
+  // step, and state whether the same input can ever succeed.
+  const err = (code: string, target?: { channel?: string; ts?: string }, method = 'chat.update') =>
+    new SlackApiError({ method, code, target })
+
+  it('message_not_found names the ts + channel and forbids the blind retry', () => {
+    const text = describeSlackError(err('message_not_found', { channel: 'C0BB4AK5BHB', ts: '1751970000.111111' }))
+    expect(text).toContain('`1751970000.111111`')
+    expect(text).toContain('`C0BB4AK5BHB`')
+    expect(text).toMatch(/per-channel message id/i)
+    expect(text).toContain('Retrying this exact (channel, ts) pair will keep failing.')
+  })
+
+  it('invalid_ts_latest names the offending argument and the ts format', () => {
+    const text = describeSlackError(err('invalid_ts_latest', { channel: 'C1' }, 'conversations.history'))
+    expect(text).toContain('`latest`')
+    expect(text).toContain('1751970000.111111')
+    expect(text).toMatch(/same value will fail the same way/i)
+  })
+
+  it('invalid_ts_oldest names the oldest argument instead', () => {
+    expect(describeSlackError(err('invalid_ts_oldest', {}, 'conversations.history'))).toContain('`oldest`')
+  })
+
+  it('cant_update_message explains bot-authored-only and says to post a new message', () => {
+    const text = describeSlackError(err('cant_update_message', { channel: 'C1', ts: '1751970000.111111' }))
+    expect(text).toMatch(/SAME bot token/)
+    expect(text).toMatch(/Post a new message/i)
+    expect(text).toMatch(/Retrying the edit will keep failing/i)
+  })
+
+  it('edit_window_closed is permanent — post a new message instead', () => {
+    const text = describeSlackError(err('edit_window_closed', { channel: 'C1', ts: '1751970000.111111' }))
+    expect(text).toMatch(/can never be edited again/i)
+    expect(text).toMatch(/Post a NEW message/)
+    expect(text).toMatch(/no retry of this edit can ever succeed/i)
+  })
+
+  it('no_text says nothing was posted and names the field to fill', () => {
+    const text = describeSlackError(err('no_text', { channel: 'C1' }, 'chat.postMessage'))
+    expect(text).toMatch(/no message text/i)
+    expect(text).toMatch(/nothing was posted to `C1`/)
+    expect(text).toContain('`text`')
+    expect(text).toMatch(/will fail the same way/i)
+  })
+
+  it('invalid_blocks carries Slack detail and offers plain text as the fallback', () => {
+    const text = describeSlackError(new SlackApiError({
+      method: 'chat.postMessage',
+      code: 'invalid_blocks',
+      detail: ['[ERROR] missing required field: type'],
+      target: { channel: 'C1' },
+    }))
+    expect(text).toContain('missing required field: type')
+    expect(text).toContain('plain `text`')
+    expect(text).toMatch(/nothing was posted/i)
+  })
+
+  it('invalid_cursor says to restart pagination with no cursor', () => {
+    const text = describeSlackError(err('invalid_cursor', {}, 'conversations.list'))
+    expect(text).toMatch(/with NO cursor/)
+    expect(text).toContain('next_cursor')
+    expect(text).toMatch(/Retrying with this cursor will keep failing/i)
+  })
+
+  it('file_not_found points at re-running the upload rather than reusing the id', () => {
+    const text = describeSlackError(err('file_not_found', { channel: 'C1' }, 'files.completeUploadExternal'))
+    expect(text).toMatch(/attachment was not delivered/i)
+    expect(text).toMatch(/Re-run the upload/i)
+    expect(text).toMatch(/Retrying with this id will keep failing/i)
+  })
+
+  it('file_uploads_disabled blames the workspace admin setting and says to tell the user', () => {
+    const text = describeSlackError(err('file_uploads_disabled', { channel: 'C1' }, 'files.getUploadURLExternal'))
+    expect(text).toMatch(/NOT delivered/)
+    expect(text).toMatch(/workspace admin setting/i)
+    expect(text).toMatch(/Tell the user/i)
+  })
+
+  it('thread_not_found explains thread_ts must be the parent message ts', () => {
+    const text = describeSlackError(err('thread_not_found', { channel: 'C1', ts: '1751960000.000100' }, 'chat.postMessage'))
+    expect(text).toContain('`1751960000.000100`')
+    expect(text).toMatch(/PARENT message/)
+    expect(text).toMatch(/post at top level/i)
+    expect(text).toMatch(/nothing was posted/i)
+  })
+
+  it('already_reacted is a no-op: nothing to do, do not retry', () => {
+    const text = describeSlackError(err('already_reacted', { channel: 'C1', ts: '1751970000.111111' }, 'reactions.add'))
+    expect(text).toMatch(/already added that reaction/i)
+    expect(text).toMatch(/nothing to do/i)
+    expect(text).toMatch(/do not retry/i)
+  })
+
+  it('no_reaction is a no-op: the end state is already true', () => {
+    const text = describeSlackError(err('no_reaction', { channel: 'C1', ts: '1751970000.111111' }, 'reactions.remove'))
+    expect(text).toMatch(/no such reaction/i)
+    expect(text).toMatch(/already true/i)
+    expect(text).toMatch(/do not retry/i)
+  })
+
+  it('id shape helpers accept real ids and reject names / UUIDs', () => {
+    expect(looksLikeSlackConversationId('C0123ABCD')).toBe(true)
+    expect(looksLikeSlackConversationId('G0123ABCD')).toBe(true)
+    expect(looksLikeSlackConversationId('D0123ABCD')).toBe(true)
+    expect(looksLikeSlackConversationId('#general')).toBe(false)
+    expect(looksLikeSlackConversationId('general')).toBe(false)
+    expect(looksLikeSlackConversationId('3f2a9c1e-7b4d-4e8a-9c2b-1d5e6f7a8b9c')).toBe(false)
+    expect(looksLikeSlackMemberId('U0123ABCD')).toBe(true)
+    expect(looksLikeSlackMemberId('@alice')).toBe(false)
   })
 })

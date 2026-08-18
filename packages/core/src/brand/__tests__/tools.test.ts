@@ -141,13 +141,36 @@ describe('[COMP:brand/tools] getBrand', () => {
     const { getBrand } = createBrandTools(fakeStore(null))
     const res = await getBrand.execute({}, CONTEXT)
     expect(res.isError).toBe(true)
-    expect(String(res.data)).toContain('do not invent brand values')
+    // Failure-copy standard: diagnosis + the "do not invent" instruction +
+    // an explicit retry verdict, so an empty brand ends the search instead of
+    // becoming a guess. See docs/architecture/engine/tool-executor.md.
+    expect(String(res.data)).toContain('no brand record at all yet')
+    expect(String(res.data)).toContain('Do NOT invent')
+    expect(String(res.data)).toContain('do not retry this call')
   })
 
   it('errors honestly with no workspace', async () => {
     const { getBrand } = createBrandTools(fakeStore())
     const res = await getBrand.execute({}, NO_WORKSPACE_CONTEXT)
     expect(res.isError).toBe(true)
+    const data = String(res.data)
+    expect(data).toContain('not bound to a workspace')
+    expect(data).toContain('Do not invent brand values')
+    expect(data).toContain('Studio')
+    expect(data).toContain('will keep failing')
+  })
+
+  it('sends a bad slug to the default-brand read instead of leaving it stranded', async () => {
+    const { getBrand } = createBrandTools(fakeStore(null))
+    const res = await getBrand.execute({ slug: 'nope' }, CONTEXT)
+    expect(res.isError).toBe(true)
+    const data = String(res.data)
+    // Slugs are stable, so the copy must not blame supersession; it names the
+    // discovery path (getBrand with no slug) and closes the retry.
+    expect(data).toContain('"nope"')
+    expect(data).toContain('Brand slugs are stable')
+    expect(data).toContain('getBrand with no `slug`')
+    expect(data).toContain('Do NOT retry this exact slug')
   })
 })
 
@@ -219,6 +242,10 @@ describe('[COMP:brand/tools] updateBrandDraft writes the draft and only the draf
     const { updateBrandDraft } = createBrandTools(store)
     const res = await updateBrandDraft.execute({ changes: {} }, CONTEXT)
     expect(res.isError).toBe(true)
+    const data = String(res.data)
+    expect(data).toContain('nothing to save')
+    expect(data).toContain('getBrand')
+    expect(data).toContain('will keep failing')
     expect(store.saveDraft).not.toHaveBeenCalled()
   })
 
@@ -227,6 +254,10 @@ describe('[COMP:brand/tools] updateBrandDraft writes the draft and only the draf
     const { updateBrandDraft } = createBrandTools(store)
     const res = await updateBrandDraft.execute({ changes: { messaging: { oneLine: 'x' } } }, CONTEXT)
     expect(res.isError).toBe(true)
+    const data = String(res.data)
+    expect(data).toContain('no brand record yet')
+    expect(data).toContain('Nothing was saved')
+    expect(data).toContain('Do not retry')
     expect(store.saveDraft).not.toHaveBeenCalled()
   })
 

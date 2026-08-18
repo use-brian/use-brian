@@ -33,6 +33,8 @@ import {
   createWhatsAppAdapter,
   createWhatsAppCloudAdapter,
   createMsTeamsAdapter,
+  describeSlackError,
+  isSlackApiError,
 } from '@use-brian/channels'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 import { findOrCreateSession, addSessionMessage } from '../db/sessions.js'
@@ -49,6 +51,30 @@ export type WorkflowChannelDeliveryOptions = {
   waConnectorSecret?: string
   /** Injectable clock for customer-service-window checks. */
   now?: () => number
+}
+
+/**
+ * Frame a Slack push failure for the model. The raw throw is
+ * `Slack API chat.postMessage: channel_not_found` — a bare code that names
+ * neither what did not happen nor what to do about it, and which the executor
+ * copies verbatim into the step run's `__delivery.error` (the model's ONLY
+ * account of the delivery). `describeSlackError` supplies the diagnosis, the
+ * next step and the retry verdict; this adds what the code cannot know — that
+ * this was a WORKFLOW DELIVERY, to which channel/thread, and that the message
+ * did not reach anyone. See docs/architecture/engine/tool-executor.md →
+ * "Failure copy".
+ */
+function slackDeliveryFailure(err: unknown, channelId: string, threadRef?: string): string {
+  const where = threadRef
+    ? `Slack channel \`${channelId}\` (as a reply in thread \`${threadRef}\`)`
+    : `Slack channel \`${channelId}\``
+  // Non-Slack throws (network, adapter bug) never reached Slack at all —
+  // describeSlackError passes them through as their bare message, so the
+  // retry verdict has to be supplied here.
+  const verdict = isSlackApiError(err)
+    ? ''
+    : ' Slack never answered this call (a network or adapter failure, not a Slack rejection), so retry once; if it fails again, tell the user Slack delivery is not getting through.'
+  return `Slack delivery FAILED — this step's output was NOT posted to ${where}. ${describeSlackError(err)}${verdict} The text is saved in the assistant's Slack session history so it is not lost, but nobody was notified: do not tell the user it was sent.`
 }
 
 export function createWorkflowChannelDelivery(
@@ -208,15 +234,22 @@ export function createWorkflowChannelDelivery(
       if (!integ) return { status: 'skipped', channelType, reason: 'no_integration' }
       // `threadRef` (an earlier delivery's Slack ts) posts into that thread;
       // the returned ts anchors later `deliver.thread` steps.
-      const slackTs = await createSlackAdapter({
-        botToken: (integ.credentials as { bot_token: string }).bot_token,
-        botUserId: integ.botUserId ?? undefined,
-      }).sendMessage(
-        channelId,
-        { text: deliverable, format: 'markdown' },
-        threadRef ? { threadTs: threadRef } : undefined,
-      )
-      return { status: 'delivered', channelType, channelId, messageId: slackTs || undefined }
+      try {
+        const slackTs = await createSlackAdapter({
+          botToken: (integ.credentials as { bot_token: string }).bot_token,
+          botUserId: integ.botUserId ?? undefined,
+        }).sendMessage(
+          channelId,
+          { text: deliverable, format: 'markdown' },
+          threadRef ? { threadTs: threadRef } : undefined,
+        )
+        return { status: 'delivered', channelType, channelId, messageId: slackTs || undefined }
+      } catch (err) {
+        // Return the typed `failed` outcome rather than throwing: the executor
+        // would otherwise stamp the raw `Slack API <method>: <code>` message
+        // into `__delivery.error`. Same control flow, model-actionable copy.
+        return { status: 'failed', channelType, error: slackDeliveryFailure(err, channelId, threadRef) }
+      }
     }
 
     if (channelType === 'msteams') {

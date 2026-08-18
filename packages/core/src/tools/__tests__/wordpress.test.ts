@@ -104,6 +104,33 @@ describe('[COMP:tools/wordpress] WordPress managed-content tools', () => {
       expectedRevision: '0123456789abcdef', expectedAttachmentId: null,
     }, {} as never)
     expect(result).toMatchObject({ isError: true })
-    expect(String(result.data)).toContain('workspace file access is unavailable')
+    expect(String(result.data)).toContain('the workspace file reader (`readFileBytes`) is not wired here')
+    expect(String(result.data)).toContain('retrying will not help')
+  })
+
+  it('renders invalid_credentials with (401) + "invalid or expired" so the health classifier flips, and other codes with their next step', async () => {
+    const wpErr = (code: string, message: string, status?: number) =>
+      Object.assign(new Error(message), { name: 'WordPressConnectorError', code, status })
+    const auth = await createWordPressTools(mockApi({
+      getManagedPage: vi.fn().mockRejectedValue(wpErr('invalid_credentials', 'The WordPress username or Application Password is invalid', 401)),
+    }))[0]!.execute({ page: 'home' }, {} as never)
+    expect(auth.isError).toBe(true)
+    expect(String(auth.data)).toContain('(401)')
+    expect(String(auth.data)).toContain('invalid or expired')
+    expect(String(auth.data)).toContain('Reconnect WordPress (Studio → Connectors)')
+    expect(String(auth.data)).toContain('invalid_credentials')
+
+    const slot = await createWordPressTools(mockApi({
+      updatePageText: vi.fn().mockRejectedValue(wpErr('managed_slot_not_found', "That location is not in the page's managed-content catalog", 404)),
+    }))[1]!.execute({ page: 'home', slot: 'nope', text: 'x', expectedRevision: '0123456789abcdef' }, {} as never)
+    expect(String(slot.data)).toContain('slot `nope` of page `home`')
+    expect(String(slot.data)).toContain('Call `wordpressGetManagedPage`')
+    expect(String(slot.data)).toContain('retrying this exact slot will keep failing')
+
+    const conflict = await createWordPressTools(mockApi({
+      updatePageText: vi.fn().mockRejectedValue(wpErr('revision_conflict', 'The page changed after it was read. Read it again before updating', 409)),
+    }))[1]!.execute({ page: 'home', slot: 'hero', text: 'x', expectedRevision: '0123456789abcdef' }, {} as never)
+    expect(String(conflict.data)).toContain('Nothing was changed')
+    expect(String(conflict.data)).toContain('retry once with those')
   })
 })

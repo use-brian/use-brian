@@ -12,6 +12,7 @@ describe("[COMP:app-web/views-sdk] export SDK helpers", () => {
       /\/api\/views\/page-1\/export\?format=md$/,
     );
     expect(exportUrl("page-1", "docx")).toMatch(/format=docx$/);
+    expect(exportUrl("page-1", "pdf")).toMatch(/format=pdf$/);
   });
 
   it("encodes a page id with unsafe characters", () => {
@@ -21,6 +22,7 @@ describe("[COMP:app-web/views-sdk] export SDK helpers", () => {
   it("derives a safe download filename from a title", () => {
     expect(exportFilename("Q3 Report", "md")).toBe("Q3 Report.md");
     expect(exportFilename("Q3 Report", "docx")).toBe("Q3 Report.docx");
+    expect(exportFilename("Q3 Report", "pdf")).toBe("Q3 Report.pdf");
   });
 
   it("strips path-hostile characters and falls back to 'document'", () => {

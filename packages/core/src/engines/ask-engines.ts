@@ -2,7 +2,7 @@
  * AI answer engines — the shared ask framework.
  *
  * Read-only observation of external AI answer engines (OpenAI, Gemini,
- * Perplexity, Claude) plus Google Search Console. Every ask sends a BARE
+ * Perplexity, Claude). Every ask sends a BARE
  * question (no system prompt, no memory, no workspace context — the
  * measurement is only valid when the answer is not ours) and returns the
  * engine's answers + citations as data.
@@ -11,8 +11,8 @@
  * neither forks it:
  *
  *   - `packages/core/src/tools/base/ask-engines.ts` — in-process base tools
- *     (`askOpenAI` / `askGemini` / `askPerplexity` / `askClaude` /
- *     `searchConsoleQuery`), env-gated like `xSearch`, whose upstream calls
+ *     (`askOpenAI` / `askGemini` / `askPerplexity` / `askClaude`),
+ *     env-gated like `xSearch`, whose upstream calls
  *     are METERED through `ToolResult.meta` external-cost.
  *   - `use-brian/packages/api/src/engines-mcp/tools.ts` — the HTTP MCP
  *     surface at `POST /api/engines/mcp` for external agents / self-host
@@ -40,8 +40,6 @@
  * Spec: docs/architecture/integrations/engines-mcp.md. [COMP:core/ask-engines]
  */
 
-import { createSign } from 'node:crypto'
-import { readFileSync } from 'node:fs'
 import { z } from 'zod'
 
 /** Per-call output-token cap — callers score answers, they never need unbounded prose. */
@@ -65,9 +63,6 @@ export type EnginesEnv = Partial<
     | 'ENGINES_PERPLEXITY_MODEL'
     | 'ENGINES_ANTHROPIC_API_KEY'
     | 'ENGINES_ANTHROPIC_MODEL'
-    | 'ENGINES_GSC_KEY_FILE'
-    | 'ENGINES_GSC_KEY_JSON'
-    | 'ENGINES_GSC_SITE'
     | 'ENGINES_DAILY_CALL_CAP',
     string
   >
@@ -206,28 +201,6 @@ export const ASK_INPUT_SHAPE = {
         'Use to observe answers for a market other than the server region.',
     ),
 } as const
-
-/** Shared input shape for `searchConsoleQuery` — same single-source rule. */
-export const GSC_INPUT_SHAPE = {
-  startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe('Inclusive start date, YYYY-MM-DD.'),
-  endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe('Inclusive end date, YYYY-MM-DD.'),
-  dimensions: z
-    .array(z.enum(['query', 'page', 'country', 'device', 'date']))
-    .max(3)
-    .optional()
-    .describe('Group results by these dimensions (default: ["query"]).'),
-  rowLimit: z.number().int().min(1).max(500).optional().describe('Max rows (default 100).'),
-  siteUrl: z
-    .string()
-    .max(200)
-    .optional()
-    .describe('Property to query (e.g. "sc-domain:example.com"). Defaults to the configured site.'),
-} as const
-
-export const GSC_TOOL_DESCRIPTION =
-  'Query Google Search Console search analytics (impressions, clicks, CTR, position) for a ' +
-  'verified property the configured service account can read. Read-only ground truth for how ' +
-  'the site performs in Google search.'
 
 /** Bounded-concurrency map that preserves input order. */
 async function mapPool<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
@@ -579,119 +552,4 @@ export function createEngineAskers(
   }
 
   return askers
-}
-
-// ── searchConsoleQuery — GSC Search Analytics via service-account JWT ────
-// The JWT lives HERE and nowhere else: both surfaces call this querier, so
-// there is one signer, one token cache, one scope.
-
-export type GscQueryArgs = {
-  startDate: string
-  endDate: string
-  dimensions?: string[]
-  rowLimit?: number
-  siteUrl?: string
-}
-
-export type GscQuerier = {
-  name: 'searchConsoleQuery'
-  description: string
-  /**
-   * Run one Search Analytics query. Throws `EngineInputError` when no
-   * property was given or configured, `EngineBudgetError` when the optional
-   * hook refuses (neither spends anything — the property is resolved BEFORE
-   * budget is taken), and a coded `Error` on any upstream failure.
-   */
-  query(args: GscQueryArgs, takeBudget?: TakeBudget): Promise<unknown>
-}
-
-/** Build the GSC querier, or null when no service-account credential is set. */
-export function createGscQuerier(
-  env: EnginesEnv,
-  fetchImpl: typeof fetch = fetch,
-): GscQuerier | null {
-  if (!env.ENGINES_GSC_KEY_FILE && !env.ENGINES_GSC_KEY_JSON) return null
-
-  // Lazy-loaded + cached: the JSON key is read on first use (a bad path
-  // surfaces as a tool error, never a boot failure), and the OAuth token is
-  // reused until shortly before expiry.
-  let cachedKey: { client_email: string; private_key: string; token_uri?: string } | null = null
-  let cachedToken: { token: string; expiresAt: number } | null = null
-
-  function loadKey(): { client_email: string; private_key: string; token_uri?: string } {
-    if (cachedKey) return cachedKey
-    let raw: string
-    if (env.ENGINES_GSC_KEY_JSON) {
-      raw = env.ENGINES_GSC_KEY_JSON.trim().startsWith('{')
-        ? env.ENGINES_GSC_KEY_JSON
-        : Buffer.from(env.ENGINES_GSC_KEY_JSON, 'base64').toString('utf8')
-    } else {
-      raw = readFileSync(env.ENGINES_GSC_KEY_FILE!, 'utf8')
-    }
-    const parsed = JSON.parse(raw) as { client_email?: string; private_key?: string; token_uri?: string }
-    if (!parsed.client_email || !parsed.private_key) {
-      throw new Error('service-account JSON missing client_email/private_key')
-    }
-    cachedKey = {
-      client_email: parsed.client_email,
-      private_key: parsed.private_key,
-      token_uri: parsed.token_uri,
-    }
-    return cachedKey
-  }
-
-  async function accessToken(): Promise<string> {
-    if (cachedToken && cachedToken.expiresAt > Date.now() + 60_000) return cachedToken.token
-    const key = loadKey()
-    const tokenUri = key.token_uri || 'https://oauth2.googleapis.com/token'
-    const now = Math.floor(Date.now() / 1000)
-    const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString('base64url')
-    const unsigned = `${b64({ alg: 'RS256', typ: 'JWT' })}.${b64({
-      iss: key.client_email,
-      scope: 'https://www.googleapis.com/auth/webmasters.readonly',
-      aud: tokenUri,
-      iat: now,
-      exp: now + 3600,
-    })}`
-    const signature = createSign('RSA-SHA256').update(unsigned).sign(key.private_key, 'base64url')
-    const res = await fetchImpl(tokenUri, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-        assertion: `${unsigned}.${signature}`,
-      }).toString(),
-      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
-    })
-    if (!res.ok) throw new Error(`upstream_error status=${res.status}`)
-    const data = (await res.json()) as { access_token?: string; expires_in?: number }
-    if (!data.access_token) throw new Error('upstream_error status=no_token')
-    cachedToken = { token: data.access_token, expiresAt: Date.now() + (data.expires_in ?? 3600) * 1000 }
-    return cachedToken.token
-  }
-
-  return {
-    name: 'searchConsoleQuery',
-    description: GSC_TOOL_DESCRIPTION,
-    async query(args, takeBudget) {
-      const siteUrl = String(args.siteUrl ?? env.ENGINES_GSC_SITE ?? '').trim()
-      if (!siteUrl) {
-        throw new EngineInputError('No `siteUrl` given and no default site is configured.')
-      }
-      const capMsg = takeBudget?.() ?? null
-      if (capMsg) throw new EngineBudgetError(capMsg)
-      const token = await accessToken()
-      return postJson(
-        fetchImpl,
-        `https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(siteUrl)}/searchAnalytics/query`,
-        { Authorization: `Bearer ${token}` },
-        {
-          startDate: args.startDate,
-          endDate: args.endDate,
-          dimensions: args.dimensions ?? ['query'],
-          rowLimit: args.rowLimit ?? 100,
-        },
-      )
-    },
-  }
 }

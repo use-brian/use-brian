@@ -107,6 +107,60 @@ function mediaHints(item: WeixinMessageItem | null): Pick<IncomingMessage, 'medi
   }
 }
 
+const WEIXIN_ITEM_TYPE_NAMES: Record<number, string> = Object.fromEntries(
+  Object.entries(WeixinItemType).map(([name, value]) => [value, name]),
+)
+
+/**
+ * Privacy-safe structural description of an inbound iLink payload, for the
+ * one log line on the drop path.
+ *
+ * `parseIncoming` returns null at five separate gates, so an attachment that
+ * never reaches the archive leaves no evidence of WHICH gate discarded it —
+ * or whether it arrived at all. That ambiguity cost a live debugging round
+ * trip on 2026-08-17 when a sent image simply vanished.
+ *
+ * This deliberately reports only structure: item types and which download
+ * fields are populated. No message text, no sender id, no CDN query
+ * parameters (`encrypt_query_param` is a download capability, and the AES key
+ * travels beside it). Those rules come from docs/architecture.md → Security
+ * and privacy: never log message bodies, raw provider payloads, or tokens.
+ */
+export function describeWechatPayload(payload: unknown): string {
+  const msg = extractWeixinMessage(payload)
+  if (!msg) return 'unparseable payload (no from_user_id)'
+  const reasons: string[] = []
+  if (msg.message_type !== WeixinMessageType.USER) {
+    reasons.push(`message_type=${msg.message_type ?? 'unset'} (not USER — bot echo)`)
+  }
+  if (msg.message_state != null && msg.message_state !== WeixinMessageState.FINISH) {
+    reasons.push(`message_state=${msg.message_state} (not FINISH — streaming intermediate)`)
+  }
+  if (msg.group_id) reasons.push('group_id present (DMs only)')
+  const items = msg.item_list ?? []
+  if (!items.length) reasons.push('item_list empty')
+  const shape = items.map(describeWeixinItem).join(', ') || 'none'
+  return `${reasons.length ? reasons.join('; ') + '; ' : ''}items=[${shape}]`
+}
+
+function describeWeixinItem(item: WeixinMessageItem): string {
+  const name = WEIXIN_ITEM_TYPE_NAMES[item.type ?? -1] ?? `type${item.type ?? '?'}`
+  const media =
+    item.image_item?.media ?? item.video_item?.media
+    ?? item.file_item?.media ?? item.voice_item?.media
+  if (!media) {
+    // A TEXT item legitimately carries no media; anything else missing one is
+    // exactly the case findWechatMediaItem rejects.
+    return item.type === WeixinItemType.TEXT ? name : `${name}(no media object)`
+  }
+  // Presence only — never the values. findWechatMediaItem requires at least one.
+  const fields = [
+    media.encrypt_query_param ? 'encrypt_query_param' : null,
+    media.full_url ? 'full_url' : null,
+  ].filter(Boolean)
+  return fields.length ? `${name}(${fields.join('+')})` : `${name}(NOT DOWNLOADABLE)`
+}
+
 function extractWeixinMessage(payload: unknown): WeixinMessage | null {
   const maybe = payload as WeixinMessage
   if (maybe && typeof maybe === 'object' && typeof maybe.from_user_id === 'string' && maybe.from_user_id) {

@@ -138,7 +138,16 @@ describe('[COMP:api/blueprint-record-tools] direct record surface', () => {
       CTX,
     )
     expect(bad.isError).toBe(true)
-    expect(String((bad.data as { error: string }).error)).toContain('unknown field "nope"')
+    // Message-first TEXT, not `{ error }` JSON: the subject that failed, the
+    // fact that nothing was written, every rejected value, the valid keys, and
+    // the retry verdict. docs/architecture/engine/tool-executor.md → "Failure copy".
+    const text = bad.data as string
+    expect(typeof text).toBe('string')
+    expect(text).toContain('saveBlueprintRecord did not save the "Discovery Brief" record for "Acme"')
+    expect(text).toContain('Nothing was saved.')
+    expect(text).toContain('unknown field "nope"')
+    expect(text).toContain('Field keys on this blueprint:')
+    expect(text).toMatch(/rejected the same way/i)
     expect(blueprintRecordStore.ensure).not.toHaveBeenCalled()
     expect(blueprintRecordStore.mergeFields).not.toHaveBeenCalled()
   })
@@ -266,6 +275,34 @@ describe('[COMP:api/blueprint-record-tools] direct record surface', () => {
       CTX,
     )
     expect(res.isError).toBe(true)
-    expect(String((res.data as { error: string }).error)).toContain('saveBlueprintRecord')
+    const text = res.data as string
+    expect(typeof text).toBe('string')
+    // Names the target it could not resolve, says no page was touched, points
+    // at the tool that mints the record, and forbids the identical retry.
+    expect(text).toContain('blueprint "Discovery Brief" + subject "Nobody"')
+    expect(text).toContain('No page was created or changed.')
+    expect(text).toContain('saveBlueprintRecord')
+    expect(text).toContain('Do NOT retry this exact target.')
+  })
+
+  it('names the blueprints that exist when the requested one does not', async () => {
+    const h = buildWithProjection()
+    const res = await h.byName.get('getBlueprintRecord')!.execute({ blueprint: 'Ghost Brief' }, CTX)
+    expect(res.isError).toBe(true)
+    const text = res.data as string
+    expect(text).toContain('no blueprint in this workspace matches "Ghost Brief"')
+    expect(text).toContain('Blueprints in this workspace right now: Discovery Brief')
+    expect(text).toContain('Do NOT retry this exact name.')
+  })
+
+  it('gives a record-id miss the discovery pointer instead of "No record <id>."', async () => {
+    const h = buildWithProjection()
+    h.blueprintRecordStore.getById.mockResolvedValueOnce(null)
+    const res = await h.byName.get('getBlueprintRecord')!.execute({ recordId: 'r-404' }, CTX)
+    expect(res.isError).toBe(true)
+    const text = res.data as string
+    expect(text).toContain('Blueprint record `r-404` not found in this workspace.')
+    expect(text).toContain('listBlueprints')
+    expect(text).toContain('Do NOT retry this exact id.')
   })
 })

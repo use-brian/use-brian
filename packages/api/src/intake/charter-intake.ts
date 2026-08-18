@@ -21,7 +21,7 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool } from '@use-brian/core'
+import { buildTool, toolFailure, type Tool } from '@use-brian/core'
 import {
   CHARTER_FIELD_LIMITS,
   charterIsEmpty,
@@ -108,12 +108,31 @@ export function createSaveCharterTool(params: { assistantId: string }): Tool {
     isConcurrencySafe: false,
     isReadOnly: false,
     async execute(input) {
-      const current = await query<{ charter: unknown; system_prompt: string | null; bio: string | null }>(
-        `SELECT charter, system_prompt, bio FROM assistants WHERE id = $1`,
-        [params.assistantId],
-      )
+      let current: { rows: Array<{ charter: unknown; system_prompt: string | null; bio: string | null }> }
+      try {
+        current = await query<{ charter: unknown; system_prompt: string | null; bio: string | null }>(
+          `SELECT charter, system_prompt, bio FROM assistants WHERE id = $1`,
+          [params.assistantId],
+        )
+      } catch (err) {
+        // The read that the merge is built on. It failed, so nothing was
+        // written — say so, rather than leaving the model to guess whether
+        // the owner's approved charter landed.
+        return toolFailure(err, {
+          tool: 'saveCharter',
+          action: "Reading this assistant's current charter before merging the approved fields",
+          target: `assistant ${params.assistantId}`,
+          next: 'Nothing was saved — the assistant still has the charter it had before. Do not re-run the interview; the owner\'s answers are still valid.',
+        })
+      }
       if (current.rows.length === 0) {
-        return { data: 'Assistant not found', isError: true }
+        return {
+          data:
+            `The charter was NOT saved: assistant ${params.assistantId} — the assistant this conversation is running as — no longer exists, so there is no row to write the mission and success rubric onto. ` +
+            'It was deleted while the setup interview was in progress. This id is bound to the conversation, not something you passed, so there is nothing to correct and no id to look up: ' +
+            'tell the user the assistant is gone and that the charter has to be set on a live assistant in Studio. Retrying saveCharter will fail the same way.',
+          isError: true,
+        }
       }
       const merged = resolveCharter({
         charter: current.rows[0].charter,
@@ -127,12 +146,28 @@ export function createSaveCharterTool(params: { assistantId: string }): Tool {
       const instructions = input.instructions?.trim()
       if (instructions) merged.instructions = instructions
       if (charterIsEmpty(merged)) {
-        return { data: 'Charter cannot be saved empty', isError: true }
+        return {
+          data:
+            `The charter was NOT saved for assistant ${params.assistantId}: every field is blank once trimmed, so this would have wiped the assistant's identity instead of setting it. ` +
+            '`mission` and `success` must each carry real text (whitespace alone passes the length check but trims away). ' +
+            "Re-issue saveCharter with the mission and success the owner actually approved, in their words. Sending blank or whitespace-only fields again will be refused the same way.",
+          isError: true,
+        }
       }
-      await query(
-        `UPDATE assistants SET charter = $1::jsonb, updated_at = now() WHERE id = $2`,
-        [JSON.stringify(merged), params.assistantId],
-      )
+      try {
+        await query(
+          `UPDATE assistants SET charter = $1::jsonb, updated_at = now() WHERE id = $2`,
+          [JSON.stringify(merged), params.assistantId],
+        )
+      } catch (err) {
+        return toolFailure(err, {
+          tool: 'saveCharter',
+          action: 'Saving the charter the owner approved',
+          target: `assistant ${params.assistantId}`,
+          mutating: true,
+          next: 'Do not tell the user the setup is complete. Report that the charter could not be saved and that they can set mission and success in Studio under this assistant\'s Settings.',
+        })
+      }
       return {
         data: 'Charter saved. The setup interview is complete - the owner can refine every field any time in Studio under this assistant\'s Settings.',
       }

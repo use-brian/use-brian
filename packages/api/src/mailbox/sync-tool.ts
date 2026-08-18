@@ -122,7 +122,11 @@ export function createSyncMailboxNowTool(opts: CreateSyncMailboxNowToolOptions):
               : `Pulled ${n} new message${n === 1 ? '' : 's'} from ${target.email} into the searchable archive.`,
         }
       } catch (err) {
-        return { data: `syncMailboxNow failed: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        // A thrown sync is a FAILURE, never "already up to date".
+        return {
+          data: `syncMailboxNow could not pull new mail for ${target.email} (${err instanceof Error ? err.message : String(err)}). This is a failure of the sync, NOT "no new mail" — the archive may be behind. Nothing about the arguments is wrong; retry once after a short wait, and if it persists tell the user the mailbox sync is failing (a rejected login means the app password must be reconnected in Studio → Connectors).`,
+          isError: true,
+        }
       }
     },
   })

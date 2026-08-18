@@ -10,6 +10,8 @@
  */
 
 import { z } from 'zod'
+import { policyBlockedToolResult } from '../engine/decline-copy.js'
+import { describeMcpToolError } from './errors.js'
 import { buildTool, type Tool } from '../tools/types.js'
 import { classifyTool, defaultPolicy } from './classifier.js'
 import { mcpResultToToolResult } from './tool-result.js'
@@ -105,7 +107,7 @@ export function createMcpGateway(params: {
       const effectivePolicy = setting?.policy ?? policy
 
       if (effectivePolicy === 'block') {
-        return { data: `ERROR: "${mcpTool.name}" is blocked by settings. Capability unavailable.`, isError: true }
+        return { data: policyBlockedToolResult(mcpTool.name), isError: true }
       }
 
       if (effectivePolicy === 'ask') {
@@ -130,7 +132,7 @@ export function createMcpGateway(params: {
         return mcpResultToToolResult(result)
       } catch (err) {
         return {
-          data: `MCP tool ${mcpTool.name} failed: ${err instanceof Error ? err.message : String(err)}`,
+          data: describeMcpToolError(server.name, mcpTool.name, err),
           isError: true,
         }
       }

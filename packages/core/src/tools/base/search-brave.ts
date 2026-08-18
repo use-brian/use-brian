@@ -10,6 +10,7 @@
  */
 
 import type { SearchProvider, SearchResult } from './search-stack.js'
+import { SearchProviderError } from './_fetch-error.js'
 import { clampResultCount, stripHtmlTags } from './search-stack.js'
 
 const BRAVE_ENDPOINT = 'https://api.search.brave.com/res/v1/web/search'
@@ -48,7 +49,7 @@ export const braveProvider: SearchProvider = {
       signal,
     })
 
-    if (!res.ok) throw new Error(`Brave HTTP ${res.status}`)
+    if (!res.ok) throw new SearchProviderError({ provider: 'Brave', status: res.status })
 
     const data = (await res.json()) as BraveResponse
     const raw = data.web?.results ?? []

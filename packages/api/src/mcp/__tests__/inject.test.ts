@@ -114,8 +114,9 @@ import {
   INJECTED_BUILTIN_TOOLS_BY_CONNECTOR,
   _getMcpDiscoveryCacheSize,
 } from '../inject.js'
-import { createGmailTools, createGoogleDriveTools, createGoogleMapsTools } from '@use-brian/core'
+import { createGmailTools, createGoogleDriveTools, createGoogleMapsTools, createSearchConsoleTools } from '@use-brian/core'
 import { OFFICIAL_CONNECTOR_TOOLS } from '@use-brian/shared/builtin-connectors'
+import { packSearchConsoleCredentials } from '../../gsc/client.js'
 import { buildUnavailableCapabilitiesPrompt } from '../../routes/route-helpers.js'
 import { packMsGraphTokens } from '../../msgraph/token.js'
 import { packGoogleRefreshCredential } from '../../google/client.js'
@@ -911,12 +912,24 @@ describe('[COMP:api/mcp-inject] INJECTED_BUILTIN_TOOLS_BY_CONNECTOR', () => {
   it('maps each built-in connector to a non-empty, duplicate-free tool list', () => {
     const connectors = Object.keys(INJECTED_BUILTIN_TOOLS_BY_CONNECTOR)
     expect(connectors).toEqual(
-      expect.arrayContaining(['gcal', 'gmail', 'gdrive', 'github', 'notion', 'fathom', 'wordpress', 'msgraph']),
+      expect.arrayContaining(['gcal', 'gmail', 'gdrive', 'github', 'notion', 'fathom', 'wordpress', 'gsc', 'msgraph']),
     )
     for (const [connector, toolNames] of Object.entries(INJECTED_BUILTIN_TOOLS_BY_CONNECTOR)) {
       expect(toolNames.length, connector).toBeGreaterThan(0)
       expect(new Set(toolNames).size, `${connector} has duplicate tool names`).toBe(toolNames.length)
     }
+  })
+
+  // Google Search Console: the injected table, the governed table and the
+  // builder must agree on the same four names, in the same order — asserted
+  // here rather than by eye (docs/architecture/integrations/search-console.md).
+  it('advertises exactly the Search Console tools the builder returns, in both tables', () => {
+    const built = createSearchConsoleTools({
+      listSites: async () => ({}), query: async () => ({}), inspectUrl: async () => ({}), listSitemaps: async () => ({}), defaultSite: async () => null,
+    }).map((t) => t.name)
+    expect(built).toEqual(['searchConsoleListSites', 'searchConsoleQuery', 'searchConsoleInspectUrl', 'searchConsoleListSitemaps'])
+    expect([...INJECTED_BUILTIN_TOOLS_BY_CONNECTOR.gsc]).toEqual(built)
+    expect((OFFICIAL_CONNECTOR_TOOLS.gsc ?? []).map((t) => t.name)).toEqual(built)
   })
 
   // Regression: both static tables are hand-maintained, and the Drift Sweep
@@ -1072,6 +1085,72 @@ describe('[COMP:api/mcp-inject] multi-instance built-ins', () => {
     expect(variant).toBeTruthy()
     expect((tools.get(variant!) as { description: string }).description).toMatch(/^\[Docs site\]/)
     expect(names.filter((name) => name.startsWith('wordpressGetManagedPage')).length).toBe(2)
+  })
+})
+
+describe('[COMP:api/mcp-inject] Google Search Console built-in', () => {
+  const PEM = '-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7\n-----END PRIVATE KEY-----\n'
+  const envelope = (defaultSite: string | null) => packSearchConsoleCredentials({
+    clientEmail: 'sa@example.iam.gserviceaccount.com', privateKey: PEM, tokenUri: 'https://oauth2.googleapis.com/token', defaultSite,
+  })
+
+  it('injects canonical tools for the primary service account and labelled variants for an extra one', async () => {
+    const tools = new Map()
+    const connectorStore = {
+      list: vi.fn().mockResolvedValue([
+        { id: 'ci-gsc1', connectorId: 'gsc', name: 'sc-domain:example.com', connected: true, url: null, custom: false, createdAt: new Date('2026-01-01T00:00:00Z') },
+        { id: 'ci-gsc2', connectorId: 'gsc', name: 'Agency account', connected: true, url: null, custom: false, createdAt: new Date('2026-02-01T00:00:00Z') },
+      ]),
+      getCredentials: vi.fn().mockResolvedValue({ client_id: 'gsc_service_account', client_secret: envelope('sc-domain:example.com') }),
+    }
+    const connectorInstanceStore = {
+      getCredentialsSystem: vi.fn().mockResolvedValue({ client_id: 'gsc_service_account', client_secret: envelope(null) }),
+      markHealth: vi.fn(),
+    }
+    const { unavailable } = await injectMcpTools({
+      userId: 'u-1',
+      assistantId: 'a-1',
+      tools,
+      connectorStore: connectorStore as never,
+      settingsStore: settingsStoreStub() as never,
+      connectorInstanceStore: connectorInstanceStore as never,
+      keepBuiltinsDirect: true,
+    })
+    const names = [...tools.keys()]
+    for (const name of INJECTED_BUILTIN_TOOLS_BY_CONNECTOR.gsc) expect(names).toContain(name)
+    const variant = names.find((name) => name.startsWith('searchConsoleQuery__'))
+    expect(variant).toBeTruthy()
+    expect((tools.get(variant!) as { description: string }).description).toMatch(/^\[Agency account\]/)
+    expect(names.filter((name) => name.startsWith('searchConsoleListSites')).length).toBe(2)
+    expect(unavailable.some((u) => u.startsWith('Google Search Console: not connected'))).toBe(false)
+  })
+
+  it('advertises the not-connected notice, and an expired notice for an unreadable envelope', async () => {
+    const disconnected = await injectMcpTools({
+      userId: 'u-1', assistantId: 'a-1', tools: new Map(),
+      connectorStore: {
+        list: vi.fn().mockResolvedValue([
+          { id: 'ci-gsc1', connectorId: 'gsc', name: 'x', connected: false, url: null, custom: false, createdAt: new Date('2026-01-01T00:00:00Z') },
+        ]),
+      } as never,
+      settingsStore: settingsStoreStub() as never,
+    })
+    expect(disconnected.unavailable.some((u) => u.startsWith('Google Search Console: not connected'))).toBe(true)
+
+    const tools = new Map()
+    const { unavailable: expired } = await injectMcpTools({
+      userId: 'u-1', assistantId: 'a-1', tools,
+      connectorStore: {
+        list: vi.fn().mockResolvedValue([
+          { id: 'ci-gsc1', connectorId: 'gsc', name: 'x', connected: true, url: null, custom: false, createdAt: new Date('2026-01-01T00:00:00Z') },
+        ]),
+        getCredentials: vi.fn().mockResolvedValue({ client_id: 'gsc_service_account', client_secret: 'not-an-envelope' }),
+      } as never,
+      settingsStore: settingsStoreStub() as never,
+      keepBuiltinsDirect: true,
+    })
+    expect([...tools.keys()].some((n) => n.startsWith('searchConsole'))).toBe(false)
+    expect(expired.some((u) => /Google Search Console/.test(u) && /expired|reconnect/i.test(u))).toBe(true)
   })
 })
 

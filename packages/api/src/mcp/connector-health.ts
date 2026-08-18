@@ -207,6 +207,8 @@ function providerDisplayName(provider: string): string {
       return 'Company email (IMAP)'
     case 'msgraph':
       return 'Microsoft Teams'
+    case 'gsc':
+      return 'Google Search Console'
     default:
       return provider
   }

@@ -43,6 +43,8 @@ export {
   type GoalClarityVerdict,
   type AssessGoalClarityInput,
   type GoalClarityAssessor,
+  type GoalLlmRuntime,
+  type GoalLlmUsageContext,
   createGoalClarityAssessor,
   parseClarityVerdict,
 } from './clarity.js'

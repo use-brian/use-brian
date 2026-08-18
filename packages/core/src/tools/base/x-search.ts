@@ -105,7 +105,7 @@ export const xSearchTool = buildTool({
     const apiKey = process.env.XAI_API_KEY
     if (!apiKey) {
       return {
-        data: 'xSearch unavailable: XAI_API_KEY is not configured on this deployment.',
+        data: 'xSearch cannot run on this deployment: XAI_API_KEY is not configured, so there is no Grok credential to search X with. Nothing about the query is wrong and retrying will not help — answer from webSearch instead (or tell the user X search is not enabled here).',
         isError: true,
       }
     }
@@ -178,8 +178,21 @@ export const xSearchTool = buildTool({
         },
       }
     } catch (err) {
+      // The xAI client keeps the response body as `cause`, never in the
+      // message (a Grok error page is noise to the model); the message
+      // carries the status and its meaning, and the verdict follows it.
       const message = err instanceof Error ? err.message : String(err)
-      return { data: `xSearch failed: ${message}`, isError: true }
+      const status = /HTTP (\d{3})/.exec(message)?.[1]
+      const verdict = status === '401' || status === '403'
+        ? 'The xAI key was rejected — a deployment configuration problem, not the query; do not retry, answer from webSearch and tell the user X search is unavailable.'
+        : status === '429' || (status && status >= '500')
+          ? 'This is transient (rate limit / xAI server error): retry once after a short wait; if it persists, answer from webSearch.'
+          : status === '400' || status === '422'
+            ? 'xAI rejected the request shape — check the filters (handles without @, YYYY-MM-DD dates); the same input will fail the same way.'
+            : /abort|timed? ?out/i.test(message)
+              ? 'The search timed out; retry once with a narrower query.'
+              : 'Retrying the same query is unlikely to help; answer from webSearch or ask the user.'
+      return { data: `xSearch could not search X for \`${input.query}\`: ${message}. ${verdict}`, isError: true }
     }
   },
 })

@@ -24,7 +24,7 @@
 
 import { timingSafeEqual } from 'node:crypto'
 import { Router } from 'express'
-import { createDiscordAdapter, respondToInteraction } from '@use-brian/channels'
+import { createDiscordAdapter, DiscordApiError, respondToInteraction } from '@use-brian/channels'
 import type { IncomingMessage, OutgoingAction } from '@use-brian/channels'
 import { findAssistantById } from '../db/users.js'
 import { withChatLock } from '../db/chat-lock.js'
@@ -49,6 +49,7 @@ export type DiscordRouteOptions = {
   /** Shared secret the connector presents on every call (DISCORD_CONNECTOR_SECRET). */
   connectorSecret: string
   provider: LLMProvider
+  configuredProviders?: import('@use-brian/shared/model-registry').ProviderAvailability
   resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
   systemPrompt: string
   tools: Map<string, Tool>
@@ -152,6 +153,110 @@ function connectorSecretMatches(provided: unknown, expected: string): boolean {
   const a = Buffer.from(provided)
   const b = Buffer.from(expected)
   return a.length === b.length && timingSafeEqual(a, b)
+}
+
+/**
+ * Translate a Discord REST rejection into the failure copy a tool result owes
+ * the model — a plain-language diagnosis plus the retry verdict — the way
+ * `describeSlackError` does for Slack. Discord answers with an HTTP status
+ * plus its own numeric `code`, and the two that matter most are indistinguishable
+ * from each other by status alone (a 404 is "message gone" OR "emoji not a
+ * thing"), so the numeric code leads where we have it.
+ *
+ * Deliberately narrow: this is the reaction path's vocabulary. If another
+ * Discord tool needs one, widen it here rather than growing a second copy.
+ */
+function describeDiscordReactionError(err: unknown): string {
+  if (!(err instanceof DiscordApiError)) {
+    const message = err instanceof Error ? err.message : String(err)
+    return `Discord did not accept the reaction${message ? `: ${message}` : ''}. Fix what that names before retrying; the same call will otherwise fail the same way.`
+  }
+  switch (err.code) {
+    case 10008:
+      return 'Discord has no such message (Unknown Message, code 10008) — it was deleted, or the message id does not belong to that channel. Retrying this exact id will keep failing.'
+    case 10014:
+      return 'Discord does not recognise that emoji (Unknown Emoji, code 10014). Use a single standard unicode emoji; a custom server emoji has to be passed as `name:id`, not as `:name:`. Re-check the emoji before retrying — this one will keep failing.'
+    case 50001:
+      return "The bot cannot access that channel (Missing Access, code 50001) — it is not in the channel, or the channel is invisible to it. Someone with permission must add the bot to the channel; retrying will not help."
+    case 50013:
+      return 'The bot lacks the Add Reactions permission in that channel (Missing Permissions, code 50013) — reacting to an older message also needs Read Message History. A server admin must grant those to the bot role; retrying will not help until they do.'
+    case 30010:
+      return 'That message already carries Discord\'s maximum number of distinct reactions (code 30010), so no further emoji can be added. Retrying will keep failing; react with an emoji already on the message, or reply in text.'
+    default:
+      break
+  }
+  if (err.httpStatus === 429) {
+    return 'Discord rate-limited the request (HTTP 429). This is transient: wait a moment and retry once. Do not loop.'
+  }
+  if (err.httpStatus === 403) {
+    return 'Discord refused the request as forbidden (HTTP 403) — the bot role is missing Add Reactions (and, for older messages, Read Message History) in that channel. A server admin must grant them; retrying will not help until they do.'
+  }
+  if (err.httpStatus === 404) {
+    return 'Discord found nothing to react to (HTTP 404) — the message was deleted, the channel id is wrong, or the emoji is not one Discord knows. Re-check the message id and the emoji; retrying unchanged will keep failing.'
+  }
+  if (err.httpStatus >= 500) {
+    return `Discord's API failed server-side (HTTP ${err.httpStatus}). Nothing about the request is wrong: retry once after a short wait, and if it persists tell the user Discord is having trouble.`
+  }
+  return `Discord rejected the request (HTTP ${err.httpStatus}${err.code != null ? `, code ${err.code}` : ''}): ${err.message}. Fix what that names before retrying; the same call will otherwise fail the same way.`
+}
+
+/**
+ * The Discord-only `reactToMessage` tool, exported as a factory (the
+ * `createUpdateViewedSkillTool` pattern in `chat.ts`) so its failure copy is
+ * unit-testable without driving a whole inbound turn.
+ *
+ * Failure-copy contract (docs/architecture/engine/tool-executor.md →
+ * "Failure copy"): a reaction that did not land must never read like one that
+ * did, so every failure names the message id + channel, says the message is
+ * still unreacted, and carries Discord's diagnosis + retry verdict through
+ * `describeDiscordReactionError` rather than a bare status.
+ */
+export function createDiscordReactToMessageTool(args: {
+  adapter: { reactToMessage?: (channelId: string, messageId: string, emoji: string) => Promise<void> }
+  channelId: string
+  messageId?: string
+}): Tool {
+  const { adapter, channelId, messageId } = args
+  return buildTool({
+    name: 'reactToMessage',
+    description:
+      "React to the user's Discord message with a single unicode emoji (e.g. 👍, ❤️, 🔥, 👀). Use for quick acknowledgements when a full text reply isn't needed, or alongside a text response.",
+    inputSchema: z.object({
+      emoji: z.string().describe('A single unicode emoji, e.g. "👍", "❤️", "🔥", "👀"'),
+    }),
+    isConcurrencySafe: true,
+    isReadOnly: false,
+    async execute(input) {
+      if (!messageId) {
+        return {
+          data:
+            `No reaction was added: this turn did not arrive with a Discord message id, so there is no message for ${input.emoji} to attach to. ` +
+            'Acknowledge in text instead — reactToMessage cannot work on this turn however it is called.',
+          isError: true,
+        }
+      }
+      const target = `message ${messageId} in Discord channel ${channelId}`
+      if (!adapter.reactToMessage) {
+        return {
+          data:
+            `No reaction was added to ${target}: the Discord adapter serving this workspace exposes no reaction capability, so ${input.emoji} was never sent. ` +
+            'Acknowledge in text instead and do not tell the user you reacted. Retrying will fail the same way.',
+          isError: true,
+        }
+      }
+      try {
+        await adapter.reactToMessage(channelId, messageId, input.emoji)
+        return { data: `Reacted with ${input.emoji}` }
+      } catch (err) {
+        return {
+          data:
+            `Adding the ${input.emoji} reaction to ${target} failed, so the message is still unreacted. ${describeDiscordReactionError(err)} ` +
+            'Do not tell the user you reacted to their message; if the acknowledgement matters, say it in text.',
+          isError: true,
+        }
+      }
+    },
+  })
 }
 
 export function discordRoutes(options: DiscordRouteOptions): Router {
@@ -493,24 +598,10 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
 
     // ── reactToMessage tool ──
     const extraTools = new Map(options.tools)
-    const reactToMessage = buildTool({
-      name: 'reactToMessage',
-      description:
-        "React to the user's Discord message with a single unicode emoji (e.g. 👍, ❤️, 🔥, 👀). Use for quick acknowledgements when a full text reply isn't needed, or alongside a text response.",
-      inputSchema: z.object({
-        emoji: z.string().describe('A single unicode emoji, e.g. "👍", "❤️", "🔥", "👀"'),
-      }),
-      isConcurrencySafe: true,
-      isReadOnly: false,
-      async execute(input) {
-        if (!incoming.messageId) return { data: 'No message to react to', isError: true }
-        try {
-          await adapter.reactToMessage?.(channelId, incoming.messageId, input.emoji)
-          return { data: `Reacted with ${input.emoji}` }
-        } catch {
-          return { data: `Failed to react with ${input.emoji}`, isError: true }
-        }
-      },
+    const reactToMessage = createDiscordReactToMessageTool({
+      adapter,
+      channelId,
+      messageId: incoming.messageId,
     })
     extraTools.set('reactToMessage', reactToMessage)
 
@@ -571,6 +662,7 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
       adaptiveResearchEnabled: true,
       abortController,
       provider: options.provider,
+      configuredProviders: options.configuredProviders,
       resolveWorkspaceCustomLlm: options.resolveWorkspaceCustomLlm,
       systemPrompt: options.systemPrompt,
       tools: extraTools,

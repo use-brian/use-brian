@@ -268,13 +268,36 @@ describe('[COMP:tools/crm-contacts] saveContact / getContact / listContacts / up
     const tools = createCrmTools(store)
     const res = await tools.saveContact.execute({ name: 'Sam', company_id: otherCompanyId }, ctx)
     expect(res.isError).toBe(true)
-    expect(res.data as string).toContain('same workspace')
+    expect(res.data as string).toContain('does not reference a')
+    expect(res.data as string).toContain('Retrying the same id will fail the same way')
   })
 
   it('saveContact email schema rejects invalid email', async () => {
     const tools = createCrmTools(makeFakeStore())
     const parsed = tools.saveContact.inputSchema.safeParse({ name: 'Sam', email: 'not-an-email' })
     expect(parsed.success).toBe(false)
+  })
+
+  it('a non-UUID CRM id is rejected with the actionable uuidId message, not a bare zod line', () => {
+    // The production miss is a NAME or a domain where an id belongs. Zod's
+    // "Invalid uuid" names neither what a valid value looks like nor where to
+    // get one, so the retry is a guess.
+    const tools = createCrmTools(makeFakeStore())
+    const parsed = tools.getContact.inputSchema.safeParse({ id: 'Sam Wong' })
+    expect(parsed.success).toBe(false)
+    const message = parsed.success ? '' : parsed.error.issues[0]!.message
+    expect(message).toContain('must be a UUID')
+    expect(message).toContain('not a name, domain, or slug')
+    expect(message).toContain('prior list/get call')
+  })
+
+  it('the same actionable message covers the relation id fields, not just the primary id', () => {
+    const tools = createCrmTools(makeFakeStore())
+    const parsed = tools.saveContact.inputSchema.safeParse({ name: 'Sam', company_id: 'acme.example' })
+    expect(parsed.success).toBe(false)
+    const message = parsed.success ? '' : parsed.error.issues[0]!.message
+    expect(message).toContain('must be a UUID')
+    expect(message).toContain('prior list/get call')
   })
 
   it('saveContact rejects no-reply@ via classifier (system mailbox negative rule)', async () => {
@@ -287,10 +310,15 @@ describe('[COMP:tools/crm-contacts] saveContact / getContact / listContacts / up
       ctx,
     )
     expect(res.isError).toBe(true)
-    const body = JSON.parse(res.data as string)
-    expect(body.ok).toBe(false)
-    expect(body.reason).toBe('reclassified')
-    expect(body.blocking_rule_id).toBe('not-person-system-mailbox')
+    // D5: the rejection is TEXT with the prose first — the model used to have
+    // to JSON.parse a blob to read the sentence telling it what to do next.
+    const body = res.data as string
+    expect(body.startsWith('The save was rejected before anything was written:')).toBe(true)
+    expect(body).toContain('Nothing was saved')
+    expect(body).toContain('Do NOT retry this tool with these arguments')
+    // The structured tail survives, after the prose.
+    expect(body).toContain('blocking_rule_id: not-person-system-mailbox')
+    expect(body.indexOf('Nothing was saved')).toBeLessThan(body.indexOf('blocking_rule_id'))
   })
 
   it('saveCompany rejects personal email domain via classifier', async () => {
@@ -303,9 +331,11 @@ describe('[COMP:tools/crm-contacts] saveContact / getContact / listContacts / up
       ctx,
     )
     expect(res.isError).toBe(true)
-    const body = JSON.parse(res.data as string)
-    expect(body.ok).toBe(false)
-    expect(body.blocking_rule_id).toBe('not-company-personal-domain')
+    const body = res.data as string
+    expect(body.startsWith('The save was rejected before anything was written:')).toBe(true)
+    expect(body).toContain('Nothing was saved')
+    expect(body).toContain('Do NOT retry this tool with these arguments')
+    expect(body).toContain('blocking_rule_id: not-company-personal-domain')
   })
 
   it('saveContact passes through cleanly when classifier agrees', async () => {
@@ -611,7 +641,8 @@ describe('[COMP:tools/crm-deals] saveDeal / getDeal / listDeals / updateDeal / a
     const tools = createCrmTools(store)
     const res = await tools.saveDeal.execute({ contact_id: store.data.contacts[0].id }, ctx)
     expect(res.isError).toBe(true)
-    expect(res.data as string).toContain('same workspace')
+    expect(res.data as string).toContain('does not reference a')
+    expect(res.data as string).toContain('Retrying the same id will fail the same way')
   })
 })
 

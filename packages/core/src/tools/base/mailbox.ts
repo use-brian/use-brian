@@ -30,6 +30,7 @@ import { buildTool, type Tool } from '../types.js'
 import type { FilesApi } from '../../workspace-files/api.js'
 import { MAX_EXTERNAL_DOCUMENT_BYTES } from '../../workspace-files/attachments.js'
 import { ctxFor, errorMessage, idOrPathShape, workspaceGate } from '../../workspace-files/tool-helpers.js'
+import { mailboxFailure } from './_mailbox-error.js'
 
 /** Default lookback window for searches with no explicit `since` (D12 #4). */
 export const MAILBOX_DEFAULT_WINDOW_DAYS = 90
@@ -257,9 +258,6 @@ function truncateSnippet(s: string | undefined): string | undefined {
   return s.length > MAILBOX_SNIPPET_CHARS ? `${s.slice(0, MAILBOX_SNIPPET_CHARS)}…` : s
 }
 
-function mailboxError(err: unknown): { data: string; isError: true } {
-  return { data: `Email account error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
-}
 
 /** A connected company mailbox, primary (first-connected) first. */
 export type MailboxAccountRef = {
@@ -457,7 +455,7 @@ export function createMailboxTools(
         }))
         return { data: { threads, ...(note ? { note } : {}) } }
       } catch (err) {
-        return mailboxError(err)
+        return mailboxFailure(err, { tool: 'imapSearchMessages', email: resolved.email, target: input.folder ? `folder \`${input.folder}\`` : undefined })
       }
     },
   })
@@ -488,7 +486,7 @@ export function createMailboxTools(
         const data = await resolved.api.getMessage(input.messageId)
         return { data }
       } catch (err) {
-        return mailboxError(err)
+        return mailboxFailure(err, { tool: 'imapGetMessage', email: resolved.email, target: `message \`${input.messageId}\`` })
       }
     },
   })
@@ -683,7 +681,7 @@ export function createMailboxTools(
           },
         }
       } catch (err) {
-        return mailboxError(err)
+        return mailboxFailure(err, { tool: 'imapSendMessage', email: resolved.email, target: `the message to ${input.to.join(', ')}`, send: true })
       }
     },
   })
@@ -772,7 +770,7 @@ export function createMailboxTools(
               },
             }
           } catch (err) {
-            return mailboxError(err)
+            return mailboxFailure(err, { tool: 'imapSaveAttachment', email: resolved.email, target: `attachment part \`${input.partId}\` of message \`${input.messageId}\`` })
           }
         },
       })

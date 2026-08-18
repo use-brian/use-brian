@@ -56,6 +56,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import {
   SensitivityAccumulator,
   extractEffectContract,
+  formatToolError,
   validateLocalRecording,
   isSensitivity,
   minSensitivity,
@@ -1144,7 +1145,20 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       if ('error' in ctx) return text(ctx.error, true)
       const recordingId = String(args.recordingId ?? '')
       if (!recordingId) return text('recordingId is required', true)
-      if (!ctx.workspaceId) return text('No workspace is bound to this call.', true)
+      if (!ctx.workspaceId) {
+        // Canonical workspace-gate copy (same account as the agent-surface
+        // tools): this never clears on a retry — it is a property of the
+        // credential, not of the arguments.
+        return text(
+          '`searchRecording` cannot run: the brain credential this call authenticated with (brain key / OAuth ' +
+            'grant / Home-app bridge token) is not bound to a workspace, so there is no workspace ' +
+            'to search the recording in. This is a provisioning problem with the credential, not a problem ' +
+            'with the arguments — no argument change helps and retrying this call will fail ' +
+            'identically. Remedy: a workspace admin must re-issue or re-scope the key against the ' +
+            'workspace in Studio → Programmatic access. Report that to the user instead of retrying.',
+          true,
+        )
+      }
       const actor = {
         workspaceId: ctx.workspaceId,
         userId: ctx.userId,
@@ -1198,7 +1212,20 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       if ('error' in ctx) return text(ctx.error, true)
       const fileId = String(args.fileId ?? '')
       if (!fileId) return text('fileId is required', true)
-      if (!ctx.workspaceId) return text('No workspace is bound to this call.', true)
+      if (!ctx.workspaceId) {
+        // Canonical workspace-gate copy (same account as the agent-surface
+        // tools): this never clears on a retry — it is a property of the
+        // credential, not of the arguments.
+        return text(
+          '`searchFileContent` cannot run: the brain credential this call authenticated with (brain key / OAuth ' +
+            'grant / Home-app bridge token) is not bound to a workspace, so there is no workspace ' +
+            'to search the document in. This is a provisioning problem with the credential, not a problem ' +
+            'with the arguments — no argument change helps and retrying this call will fail ' +
+            'identically. Remedy: a workspace admin must re-issue or re-scope the key against the ' +
+            'workspace in Studio → Programmatic access. Report that to the user instead of retrying.',
+          true,
+        )
+      }
       const actor = {
         workspaceId: ctx.workspaceId,
         userId: ctx.userId,
@@ -1985,10 +2012,22 @@ export function bridgeCoreTool(
       try {
         parsed = coreTool.inputSchema.parse(args)
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        return text(`Invalid input: ${msg}`, true)
+        // Same renderer as the chat executor: `path: message` lines, union
+        // branches bounded — never `ZodError.message`, which is the full
+        // issues JSON (a `patchPage` op-union failure once serialized to
+        // ~245k chars). External agents pay for every token of this too.
+        return text(`Invalid input for \`${overrides?.nameOverride ?? coreTool.name}\`. ${formatToolError(err)}`, true)
       }
-      const result = await coreTool.execute(parsed, ctx)
+      let result: Awaited<ReturnType<Tool['execute']>>
+      try {
+        result = await coreTool.execute(parsed, ctx)
+      } catch (err) {
+        // A thrown error (a ZodError from a tool's own re-parse, a provider
+        // client throw) would otherwise reach the MCP SDK's catch-all, which
+        // returns `err.message` raw. Route it through the same chokepoint so
+        // the external agent sees the compact, actionable rendering.
+        return text(formatToolError(err), true)
+      }
       const body =
         typeof result.data === 'string' ? result.data : JSON.stringify(result.data, null, 2)
       if (notifySignal && !result.isError) {

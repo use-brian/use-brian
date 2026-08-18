@@ -184,6 +184,28 @@ export function formatToolError(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
+/**
+ * Serialize a tool's `data` for the model. Success payloads are JSON as
+ * before. A FAILURE whose `data` is the one-key object `{ error: "…" }` (or
+ * `{ message: "…" }`) is unwrapped to the bare string: ~55 first-party sites
+ * return that shape, and `{"error":"Retrieval requires a workspace-scoped
+ * session."}` makes the model parse JSON to read prose that was already
+ * prose. Multi-key failure objects (a `stale_page` with `expectedVersion` +
+ * `outline`, a `views` binding rejection with `errors[]` + `hint`) are kept
+ * as JSON — their extra keys are load-bearing.
+ */
+export function renderToolResultData(data: unknown, isError: boolean): string {
+  if (typeof data === 'string') return data
+  if (isError && data && typeof data === 'object' && !Array.isArray(data)) {
+    const keys = Object.keys(data as Record<string, unknown>)
+    if (keys.length === 1 && (keys[0] === 'error' || keys[0] === 'message')) {
+      const only = (data as Record<string, unknown>)[keys[0]]
+      if (typeof only === 'string') return only
+    }
+  }
+  return JSON.stringify(data)
+}
+
 // ── Streaming Tool Executor ────────────────────────────────────
 
 export function createToolExecutor(options: ToolExecutorOptions) {
@@ -754,7 +776,7 @@ export function createToolExecutor(options: ToolExecutorOptions) {
       clearTimeout(timer)
       options.onToolEnd?.(t.id, t.name, result)
 
-      let content = typeof result.data === 'string' ? result.data : JSON.stringify(result.data)
+      let content = renderToolResultData(result.data, result.isError === true)
 
       // Layer 3: per-tool char cap — truncate oversized non-cacheable results
       if (toolDef.maxResultSizeChars && content.length > toolDef.maxResultSizeChars) {

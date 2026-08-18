@@ -211,6 +211,30 @@ describe('[COMP:api/whatsapp-ingest] createWhatsappIngestor', () => {
     expect(runExtraction).toHaveBeenCalledTimes(1)
   })
 
+  it('routes realtime extraction through the workspace runtime', async () => {
+    const { deps, runExtraction } = makeDeps({ rules: [groupRule('realtime')] })
+    const customProvider = { stream: vi.fn() }
+    const resolveLlm = vi.fn().mockResolvedValue({
+      provider: customProvider,
+      model: 'custom:profile-1',
+      modelTier: 'standard',
+      providerKeySource: 'user',
+      inputTokenLimit: 32000,
+      maxTokens: 4000,
+    })
+    await createWhatsappIngestor({ ...deps, resolveLlm }).ingest(baseInput())
+    expect(resolveLlm).toHaveBeenCalledWith('w_1')
+    const call = runExtraction.mock.calls[0] as unknown as [unknown, unknown, Record<string, unknown>]
+    expect(call[2]).toMatchObject({
+      provider: customProvider,
+      model: 'custom:profile-1',
+      providerKeySource: 'user',
+      inputTokenLimit: 32000,
+      maxTokens: 4000,
+      classifierModel: 'custom:profile-1',
+    })
+  })
+
   it('forwards the task store into extraction so commitments become tickets', async () => {
     // Pipeline B writes extracted tasks via deps.tasks; if the ingestor does
     // not thread it through, every task item is dropped with a console.warn.

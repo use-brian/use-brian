@@ -88,8 +88,6 @@ export function enginesMcpEnabled(env: EnginesEnv = process.env as EnginesEnv): 
       (env.ENGINES_OPENAI_API_KEY ||
         env.ENGINES_GEMINI_API_KEY ||
         env.ENGINES_PERPLEXITY_API_KEY ||
-        env.ENGINES_ANTHROPIC_API_KEY ||
-        env.ENGINES_GSC_KEY_FILE ||
-        env.ENGINES_GSC_KEY_JSON),
+        env.ENGINES_ANTHROPIC_API_KEY),
   )
 }

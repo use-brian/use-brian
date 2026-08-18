@@ -42,6 +42,7 @@ import { buildTool, type Tool } from '../tools/types.js'
 import { isAutonomousToolContext } from '../tools/capability-gate.js'
 import { isBuiltInEntityTypeId } from './doc-built-ins.js'
 import { uuidId } from '../tools/schema-tolerance.js'
+import { toolFailure } from '../tools/tool-failure.js'
 import {
   cellValueSchema,
   entityFilterSchema,
@@ -280,14 +281,32 @@ function errorResult(message: string): { data: string; isError: true } {
   return { data: message, isError: true }
 }
 
-function builtInRejection(toolName: string): { data: string; isError: true } {
+function builtInRejection(toolName: string, id: string): { data: string; isError: true } {
   return errorResult(
-    `${toolName} only handles user-defined entity types. The given id targets a built-in primitive — use its typed tool instead: tasks → saveTask/updateTask/closeTask, contacts/companies/deals → crmCreate*/crmUpdate*, workflow runs → runWorkflow. Built-in schemas are fixed; properties cannot be added or removed.`,
+    `${toolName} did not run: \`${id}\` is a BUILT-IN primitive, and this tool only handles user-defined entity types. Nothing was changed. ` +
+      'Use the typed tool that owns that table instead: tasks → saveTask / updateTask / closeTask / listTasks, contacts / companies / deals → saveContact / saveCompany / saveDeal (and their list / update siblings), workflow runs → runWorkflow. ' +
+      'Built-in schemas are fixed, so properties can never be added, renamed, or removed on one. ' +
+      `Retrying with \`${id}\` will keep failing — call listEntityTypes if you meant a user-defined type with a similar name (those carry UUID ids, not \`builtin:*\`).`,
   )
 }
 
-function describeError(err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
+/**
+ * The "not found" shape for a doc entity type / row. Both misses carry the
+ * same three facts: which id missed, that a bare name is not an id, and the
+ * discovery tool that mints a current one.
+ */
+function docNotFound(
+  kind: 'Entity type' | 'Entity',
+  id: string,
+  workspaceId: string,
+  opts: { tool: string; discoveryTool: string; extra?: string },
+): { data: string; isError: true } {
+  return errorResult(
+    `${opts.tool} did not run: ${kind.toLowerCase()} \`${id}\` does not exist in workspace ${workspaceId}. Nothing was changed. ` +
+      `It may have been deleted, or the value may be a NAME rather than an id — this field takes the UUID from a ${opts.discoveryTool} result, never the display name the user says. ` +
+      (opts.extra ? `${opts.extra} ` : '') +
+      `Call ${opts.discoveryTool} to get a current id, then retry with that. Do NOT retry this exact id.`,
+  )
 }
 
 // ── listEntityTypes ──────────────────────────────────────────────────
@@ -326,7 +345,10 @@ export function createListEntityTypesTool(
       const workspaceId = context?.workspaceId ?? input.workspaceId
       if (!workspaceId) {
         return {
-          data: 'listEntityTypes requires a workspace-bound context.',
+          data:
+            'listEntityTypes did not run: this chat is not bound to a workspace, and entity types are defined per workspace — there is no schema list to read here. ' +
+            'Ask the user to run this from a workspace chat (or from the web app) and carry on answering the rest of their message. ' +
+            'Passing a workspaceId argument will not help: the id is taken from the session, not from you. Do not retry.',
           isError: true,
         }
       }
@@ -336,7 +358,11 @@ export function createListEntityTypesTool(
         const types: EntityType[] = [...builtIns, ...userDefined]
         return { data: { types } }
       } catch (err) {
-        return errorResult(`Failed to list entity types: ${describeError(err)}`)
+        return toolFailure(err, {
+          tool: 'listEntityTypes',
+          target: `workspace ${workspaceId}`,
+          next: 'If it persists, tell the user you cannot see which databases exist rather than guessing at a type id.',
+        })
       }
     },
   })
@@ -382,9 +408,12 @@ export function createCreateEntityTypeTool(
         })
         return { data: { entityType } }
       } catch (err) {
-        return errorResult(
-          `Failed to create entity type: ${describeError(err)}`,
-        )
+        return toolFailure(err, {
+          tool: 'createEntityType',
+          target: `entity type "${input.name}"`,
+          mutating: true,
+          next: 'A name collision or a bad property definition is the usual cause — call listEntityTypes to see whether this type already exists (extend it with addProperty instead of re-creating it).',
+        })
       }
     },
   })
@@ -422,7 +451,7 @@ export function createAddPropertyTool(
 
     async execute(input) {
       if (isBuiltInEntityTypeId(input.entityTypeId)) {
-        return builtInRejection('addProperty')
+        return builtInRejection('addProperty', input.entityTypeId)
       }
       try {
         const current = await deps.store.getEntityType(
@@ -430,16 +459,23 @@ export function createAddPropertyTool(
           input.entityTypeId,
         )
         if (!current) {
-          return errorResult(
-            `Entity type ${input.entityTypeId} not found in workspace ${input.workspaceId}.`,
-          )
+          return docNotFound('Entity type', input.entityTypeId, input.workspaceId, {
+            tool: 'addProperty',
+            discoveryTool: 'listEntityTypes',
+            extra: `The property "${input.property.name}" was NOT added.`,
+          })
         }
         const collision = current.properties.find(
           p => p.name === input.property.name,
         )
         if (collision) {
           return errorResult(
-            `Property "${input.property.name}" already exists on entity type "${current.name}". Use a different name or remove the existing property first.`,
+            `addProperty did not run: "${input.property.name}" is ALREADY a property on entity type "${current.name}" (as \`${collision.config.kind}\`). Nothing was changed. ` +
+              (collision.config.kind === input.property.config.kind
+                ? 'It already has the kind you asked for, so the schema is in the state the user wanted — say so and move on to writing rows with createEntity. '
+                : `You asked for \`${input.property.config.kind}\`; changing an existing property's kind is not something this tool does. `) +
+              'To use a different name, call addProperty again with that name; to replace this one, removeProperty first. ' +
+              'Do NOT retry this exact property name — it will collide the same way.',
           )
         }
         const updated = await deps.store.updateEntityType(
@@ -449,7 +485,12 @@ export function createAddPropertyTool(
         )
         return { data: { entityType: updated } }
       } catch (err) {
-        return errorResult(`Failed to add property: ${describeError(err)}`)
+        return toolFailure(err, {
+          tool: 'addProperty',
+          target: `property "${input.property.name}" on entity type ${input.entityTypeId}`,
+          mutating: true,
+          next: 'Call listEntityTypes to re-read the type\'s current property list before trying again — another writer may have changed it.',
+        })
       }
     },
   })
@@ -488,7 +529,7 @@ export function createRemovePropertyTool(
 
     async execute(input) {
       if (isBuiltInEntityTypeId(input.entityTypeId)) {
-        return builtInRejection('removeProperty')
+        return builtInRejection('removeProperty', input.entityTypeId)
       }
       try {
         const current = await deps.store.getEntityType(
@@ -496,16 +537,21 @@ export function createRemovePropertyTool(
           input.entityTypeId,
         )
         if (!current) {
-          return errorResult(
-            `Entity type ${input.entityTypeId} not found in workspace ${input.workspaceId}.`,
-          )
+          return docNotFound('Entity type', input.entityTypeId, input.workspaceId, {
+            tool: 'removeProperty',
+            discoveryTool: 'listEntityTypes',
+            extra: `The property "${input.propertyName}" was NOT removed.`,
+          })
         }
         const remaining = current.properties.filter(
           p => p.name !== input.propertyName,
         )
         if (remaining.length === current.properties.length) {
           return errorResult(
-            `Property "${input.propertyName}" does not exist on entity type "${current.name}".`,
+            `removeProperty did not run: entity type "${current.name}" has no property called "${input.propertyName}". Nothing was changed. ` +
+              `Its properties are: ${current.properties.map(p => `"${p.name}"`).join(', ') || '(none)'}. ` +
+              'Property names are exact and case-sensitive — pick one from that list, or tell the user the column they named does not exist. ' +
+              'Do NOT retry this exact name.',
           )
         }
         const updated = await deps.store.updateEntityType(
@@ -515,7 +561,12 @@ export function createRemovePropertyTool(
         )
         return { data: { entityType: updated } }
       } catch (err) {
-        return errorResult(`Failed to remove property: ${describeError(err)}`)
+        return toolFailure(err, {
+          tool: 'removeProperty',
+          target: `property "${input.propertyName}" on entity type ${input.entityTypeId}`,
+          mutating: true,
+          next: 'Call listEntityTypes to re-read the type\'s current property list before trying again.',
+        })
       }
     },
   })
@@ -568,11 +619,13 @@ export function createRenamePropertyTool(
 
     async execute(input) {
       if (isBuiltInEntityTypeId(input.entityTypeId)) {
-        return builtInRejection('renameProperty')
+        return builtInRejection('renameProperty', input.entityTypeId)
       }
       if (input.oldName === input.newName) {
         return errorResult(
-          `Property "${input.oldName}" is already named that — nothing to rename.`,
+          `renameProperty did not run: oldName and newName are both "${input.oldName}", so there is nothing to change. Nothing was changed. ` +
+            'Pass the CURRENT name as oldName and the name the user wants as newName. ' +
+            'Retrying with the same value in both fields will keep failing.',
         )
       }
       try {
@@ -581,16 +634,23 @@ export function createRenamePropertyTool(
           input.entityTypeId,
         )
         if (!current) {
-          return errorResult(
-            `Entity type ${input.entityTypeId} not found in workspace ${input.workspaceId}.`,
-          )
+          return docNotFound('Entity type', input.entityTypeId, input.workspaceId, {
+            tool: 'renameProperty',
+            discoveryTool: 'listEntityTypes',
+            extra: `Nothing was renamed and no row data was migrated.`,
+          })
         }
         const existing = current.properties.find(
           p => p.name === input.oldName,
         )
         if (!existing) {
           return errorResult(
-            `Property "${input.oldName}" does not exist on entity type "${current.name}".`,
+            `renameProperty did not run: entity type "${current.name}" has no property called "${input.oldName}", so there is nothing to rename. Nothing was changed and no row data was migrated. ` +
+              `Its properties are: ${current.properties.map(p => `"${p.name}"`).join(', ') || '(none)'}. ` +
+              (current.properties.some(p => p.name === input.newName)
+                ? `Note "${input.newName}" already exists — the rename may have been done already, in which case say so rather than calling again. `
+                : 'Property names are exact and case-sensitive — pick oldName from that list. ') +
+              'Do NOT retry this exact oldName.',
           )
         }
         const collision = current.properties.find(
@@ -598,7 +658,10 @@ export function createRenamePropertyTool(
         )
         if (collision) {
           return errorResult(
-            `Property "${input.newName}" already exists on entity type "${current.name}". Choose a different name.`,
+            `renameProperty did not run: entity type "${current.name}" already has a property called "${input.newName}", and two properties cannot share a name. Nothing was changed and no row data was migrated. ` +
+              `Its properties are: ${current.properties.map(p => `"${p.name}"`).join(', ')}. ` +
+              `Pick a newName that is not in that list, or — if "${input.newName}" is meant to REPLACE "${input.oldName}" — removeProperty the old one instead (its cell values stay in storage). ` +
+              'Do NOT retry this exact newName.',
           )
         }
         const updated = await deps.store.renameProperty(
@@ -609,7 +672,12 @@ export function createRenamePropertyTool(
         )
         return { data: { entityType: updated } }
       } catch (err) {
-        return errorResult(`Failed to rename property: ${describeError(err)}`)
+        return toolFailure(err, {
+          tool: 'renameProperty',
+          target: `"${input.oldName}" → "${input.newName}" on entity type ${input.entityTypeId}`,
+          mutating: true,
+          next: 'The schema edit and the row-data migration run in ONE transaction, so a failure leaves both halves unapplied — call listEntityTypes to confirm the current names before trying again.',
+        })
       }
     },
   })
@@ -646,7 +714,7 @@ export function createCreateEntityTool(
 
     async execute(input) {
       if (isBuiltInEntityTypeId(input.entityTypeId)) {
-        return builtInRejection('createEntity')
+        return builtInRejection('createEntity', input.entityTypeId)
       }
       try {
         const entity = await deps.store.createEntity({
@@ -659,7 +727,14 @@ export function createCreateEntityTool(
         })
         return { data: { entity } }
       } catch (err) {
-        return errorResult(`Failed to create entity: ${describeError(err)}`)
+        return toolFailure(err, {
+          tool: 'createEntity',
+          target: `a new row of entity type ${input.entityTypeId}`,
+          mutating: true,
+          next:
+            'The usual causes are an entityTypeId that is a NAME rather than the UUID from listEntityTypes, or a `data` key that is not a declared property (or a value that does not match its property kind). ' +
+            'Call listEntityTypes to re-read the schema, fix the named field, and retry.',
+        })
       }
     },
   })
@@ -694,7 +769,7 @@ export function createUpdateEntityTool(
 
     async execute(input) {
       if (isBuiltInEntityTypeId(input.entityId)) {
-        return builtInRejection('updateEntity')
+        return builtInRejection('updateEntity', input.entityId)
       }
       try {
         const current = await deps.store.getEntity(
@@ -702,9 +777,11 @@ export function createUpdateEntityTool(
           input.entityId,
         )
         if (!current) {
-          return errorResult(
-            `Entity ${input.entityId} not found in workspace ${input.workspaceId}.`,
-          )
+          return docNotFound('Entity', input.entityId, input.workspaceId, {
+            tool: 'updateEntity',
+            discoveryTool: 'queryEntities (on the row\'s entity type)',
+            extra: 'No cells were written. The row may also have been soft-deleted, which reads the same as missing.',
+          })
         }
         const mergedData: Record<string, CellValue> = {
           ...current.data,
@@ -717,7 +794,12 @@ export function createUpdateEntityTool(
         )
         return { data: { entity } }
       } catch (err) {
-        return errorResult(`Failed to update entity: ${describeError(err)}`)
+        return toolFailure(err, {
+          tool: 'updateEntity',
+          target: `entity row ${input.entityId}`,
+          mutating: true,
+          next: 'Every key in `patch` must be a declared property of this row\'s type — call listEntityTypes for the schema and queryEntities to re-read the row, then fix the named key and retry.',
+        })
       }
     },
   })
@@ -752,13 +834,18 @@ export function createDeleteEntityTool(
 
     async execute(input) {
       if (isBuiltInEntityTypeId(input.entityId)) {
-        return builtInRejection('deleteEntity')
+        return builtInRejection('deleteEntity', input.entityId)
       }
       try {
         await deps.store.deleteEntity(input.workspaceId, input.entityId)
         return { data: { deleted: true } }
       } catch (err) {
-        return errorResult(`Failed to delete entity: ${describeError(err)}`)
+        return toolFailure(err, {
+          tool: 'deleteEntity',
+          target: `entity row ${input.entityId}`,
+          mutating: true,
+          next: 'Row ids come from a queryEntities result, never from a title — re-resolve there. A row that is already deleted reads as a successful no-op, so this failure is something else.',
+        })
       }
     },
   })
@@ -794,7 +881,7 @@ export function createQueryEntitiesTool(
 
     async execute(input) {
       if (isBuiltInEntityTypeId(input.entityTypeId)) {
-        return builtInRejection('queryEntities')
+        return builtInRejection('queryEntities', input.entityTypeId)
       }
       try {
         const result = await deps.store.queryEntities(
@@ -814,7 +901,13 @@ export function createQueryEntitiesTool(
           },
         }
       } catch (err) {
-        return errorResult(`Failed to query entities: ${describeError(err)}`)
+        return toolFailure(err, {
+          tool: 'queryEntities',
+          target: `rows of entity type ${input.entityTypeId}`,
+          next:
+            'Every `filters[].field` and `sort[].field` must be a declared property NAME on this type, and `cursor` must come from a prior call on the same query — call listEntityTypes to re-read the schema, fix the named field, and retry. ' +
+            'Do not fall back to a broader search and present the result as if it were this type\'s rows.',
+        })
       }
     },
   })

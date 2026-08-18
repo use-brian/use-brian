@@ -178,6 +178,102 @@ describe('[COMP:api/assistant-mcp] auth gate', () => {
     expect(res.status).toBe(404)
   })
 
+  // ── The HTTP body is the ONLY account an external agent gets. A bare error
+  //    slug names the condition and stops there, which leaves retrying as the
+  //    agent's only move; every refusal now carries the remedy that was
+  //    previously written down in a code comment nobody outside can read.
+
+  it('every 401 carries the SAME message — the remedy, without telling a prober which check failed', async () => {
+    const { store, plaintext } = await fakeApiKey({ assistantId: ASSISTANT })
+    const app = makeApp(store)
+    const noHeader = await request(app).post(`/api/v1/assistants/${ASSISTANT}/mcp`).send({})
+    const badToken = await request(app)
+      .post(`/api/v1/assistants/${ASSISTANT}/mcp`)
+      .set('Authorization', `Bearer sk_brain_${randomUUID()}_secretsecret`)
+      .send({})
+    const badSecret = await request(app)
+      .post(`/api/v1/assistants/${ASSISTANT}/mcp`)
+      .set('Authorization', `Bearer ${plaintext}xx`)
+      .send({})
+    for (const res of [noHeader, badToken, badSecret]) {
+      expect(res.status).toBe(401)
+      expect(res.body.error).toBe('invalid_api_key')
+      expect(res.body.message).toContain('Authorization: Bearer sk_live_')
+      expect(res.body.message).toContain('scope `agent`')
+      expect(res.body.message).toContain('fail identically')
+    }
+    // Uniform: an identical body across all three is what keeps it unprobeable.
+    expect(noHeader.body.message).toBe(badToken.body.message)
+    expect(badToken.body.message).toBe(badSecret.body.message)
+  })
+
+  it('the revoked-key 403 says revocation is permanent and points at minting a new key', async () => {
+    const { store, plaintext } = await fakeApiKey({ assistantId: ASSISTANT, status: 'revoked' })
+    const res = await request(makeApp(store))
+      .post(`/api/v1/assistants/${ASSISTANT}/mcp`)
+      .set('Authorization', `Bearer ${plaintext}`)
+      .send({})
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe('key_revoked')
+    expect(res.body.message).toContain('revoked')
+    expect(res.body.message).toContain('mint a NEW key')
+    expect(res.body.message).toContain('Do not retry with this key')
+  })
+
+  it('the chat-scope 403 names the scope it needs and that scope cannot be raised in place', async () => {
+    const { store, plaintext } = await fakeApiKey({ assistantId: ASSISTANT, scope: 'chat' })
+    const res = await request(makeApp(store))
+      .post(`/api/v1/assistants/${ASSISTANT}/mcp`)
+      .set('Authorization', `Bearer ${plaintext}`)
+      .send({})
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe('key_scope_chat_only')
+    expect(res.body.message).toContain('scope `agent`')
+    expect(res.body.message).toContain('fixed at mint time')
+    expect(res.body.message).toContain('mint one with scope `agent`')
+  })
+
+  it('a deleted assistant reports assistant_not_found and names the id', async () => {
+    const { store, plaintext } = await fakeApiKey({ assistantId: ASSISTANT })
+    findAssistantById.mockResolvedValueOnce(null)
+    const res = await request(makeApp(store))
+      .post(`/api/v1/assistants/${ASSISTANT}/mcp`)
+      .set('Authorization', `Bearer ${plaintext}`)
+      .send({})
+    expect(res.status).toBe(404)
+    expect(res.body.error).toBe('assistant_not_found')
+    expect(res.body.message).toContain(ASSISTANT)
+    expect(res.body.message).toContain('no longer exists')
+  })
+
+  it('an assistant with no resolvable principal gets its OWN code — not assistant_not_found', async () => {
+    // These were conflated, so an unprovisioned (but perfectly real) assistant
+    // sent the integrator hunting for a wrong id. The id is fine; the
+    // PROVISIONING is not, and only one of those two is worth re-checking.
+    const { store, plaintext } = await fakeApiKey({ assistantId: ASSISTANT })
+    findAssistantById.mockResolvedValueOnce({
+      id: ASSISTANT,
+      name: 'Orphan',
+      ownerUserId: null,
+      workspaceId: null,
+      clearance: 'internal',
+      compartments: null,
+      defaultCompartments: [],
+      kind: 'standard',
+      appType: null,
+    })
+    const res = await request(makeApp(store))
+      .post(`/api/v1/assistants/${ASSISTANT}/mcp`)
+      .set('Authorization', `Bearer ${plaintext}`)
+      .send({})
+    expect(res.status).toBe(404)
+    expect(res.body.error).toBe('assistant_principal_unresolved')
+    expect(res.body.error).not.toBe('assistant_not_found')
+    expect(res.body.message).toContain('exists')
+    expect(res.body.message).toContain('not attached to a workspace')
+    expect(res.body.message).toContain('do not go looking for a different one')
+  })
+
   it('resolves the keyed assistant authority before serving (capabilities looked up on its id)', async () => {
     const { store, plaintext } = await fakeApiKey({ assistantId: ASSISTANT })
     findAssistantById.mockResolvedValueOnce({
@@ -201,9 +297,12 @@ describe('[COMP:api/assistant-mcp] auth gate', () => {
     expect(capabilityStore.listActive).toHaveBeenCalledWith(ASSISTANT)
   })
 
-  it('GET is 405 (tools-only server, POST-only transport)', async () => {
+  it('GET is 405 (tools-only server, POST-only transport) and says to POST instead', async () => {
     const { store } = await fakeApiKey({ assistantId: ASSISTANT })
     const res = await request(makeApp(store)).get(`/api/v1/assistants/${ASSISTANT}/mcp`)
     expect(res.status).toBe(405)
+    expect(res.body.error).toBe('method_not_allowed')
+    expect(res.body.message).toContain('POST-only')
+    expect(res.body.message).toContain('GET will never succeed here')
   })
 })

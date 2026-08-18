@@ -22,6 +22,7 @@
 
 import { z } from 'zod'
 import { buildTool, type Tool } from '../types.js'
+import { connectorError, type ConnectorApiError } from './_connector-result.js'
 
 export type AgentmailInboxRef = {
   /** The inbox's email address. */
@@ -106,6 +107,21 @@ const recipientList = z
   .max(20)
   .describe('Recipient email addresses.')
 
+/**
+ * AgentMail-specific copy: its key is a deployment/inbox configuration, not a
+ * per-user OAuth grant, so a 401/403 is "the configured API key was
+ * rejected" (an operator fixes it; the model cannot), and the client's own
+ * "reply did not match the expected shape" sentence already carries the
+ * verdict — pass it through rather than re-framing it as a request error.
+ */
+function agentmailTranslate(err: ConnectorApiError): string | undefined {
+  if (err.status === 401 || err.status === 403) {
+    return `AgentMail rejected the configured API key (HTTP status ${err.status}), so this assistant's email inbox cannot be used right now. Nothing about the message is wrong and retrying will not help — the workspace operator has to fix the AgentMail key / reconnect the inbox (Studio → Connectors); tell the user.`
+  }
+  if (/did not match the expected shape/.test(err.detail)) return err.detail
+  return undefined
+}
+
 export function createAgentmailTools(api: AgentmailToolApi): Tool[] {
   const sendMessage = buildTool({
     name: 'agentmailSendMessage',
@@ -165,7 +181,7 @@ export function createAgentmailTools(api: AgentmailToolApi): Tool[] {
           },
         }
       } catch (err) {
-        return { data: `Assistant email error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'AgentMail', tool: 'agentmailSendMessage', target: `the message to ${Array.isArray(input.to) ? input.to.join(', ') : input.to}`, mutating: true, translate: agentmailTranslate, err })
       }
     },
   })
@@ -205,7 +221,7 @@ export function createAgentmailTools(api: AgentmailToolApi): Tool[] {
         })
         return { data: { inbox: inbox.address, threads } }
       } catch (err) {
-        return { data: `Assistant email error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'AgentMail', tool: 'agentmailSearchThreads', translate: agentmailTranslate, err })
       }
     },
   })
@@ -275,7 +291,7 @@ export function createAgentmailTools(api: AgentmailToolApi): Tool[] {
           },
         }
       } catch (err) {
-        return { data: `Assistant email error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'AgentMail', tool: 'agentmailCreateDraft', target: `the draft to ${Array.isArray(input.to) ? input.to.join(', ') : input.to}`, mutating: true, translate: agentmailTranslate, err })
       }
     },
   })

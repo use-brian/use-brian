@@ -17,9 +17,9 @@ import { describe, it, expect, vi } from 'vitest'
 import { classifyResearchIntent, detectOperateSiteIntent } from '../research-classifier.js'
 import type { LLMProvider, StreamChunk } from '../../providers/types.js'
 
-function makeProvider(rawText: string): LLMProvider {
+function makeProvider(rawText: string, responseModel = 'gemini-3.1-flash-lite'): LLMProvider {
   async function* stream(): AsyncIterable<StreamChunk> {
-    yield { type: 'message_start', model: 'gemini-3.1-flash-lite' }
+    yield { type: 'message_start', model: responseModel }
     yield { type: 'text_delta', text: rawText }
     yield {
       type: 'message_end',
@@ -213,7 +213,7 @@ describe('[COMP:workers/research-classifier] background-lane model injection', (
     // A Google-free deploy passes a servable id here. If this ever regresses
     // to the module constant the routing provider throws "not configured" and
     // the whole lane dies silently in a background job.
-    const provider = makeProvider('{"research":true,"reason":"deep topic"}')
+    const provider = makeProvider('{"research":true,"reason":"deep topic"}', 'qwen3.5-flash')
     return classifyResearchIntent({ provider, message: LONG, model: 'qwen3.5-flash' }).then((r) => {
       expect(provider.stream).toHaveBeenCalledWith(
         expect.objectContaining({ model: 'qwen3.5-flash' }),

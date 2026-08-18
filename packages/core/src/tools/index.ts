@@ -17,6 +17,45 @@ export type {
   GoogleMapsToolName,
   GoogleMapsErrorCode,
 } from './base/google-maps.js'
+export {
+  describeToolFailure,
+  isTransientToolError,
+  notFoundFailure,
+  notFoundMessage,
+  toolFailure,
+} from './tool-failure.js'
+export type { NotFoundContext, ToolFailureContext } from './tool-failure.js'
+export {
+  MAILBOX_DISABLED_MARKERS,
+  MAILBOX_UNREACHABLE_CODES,
+  classifyMailboxAuthFailure,
+  classifyMailboxFailure,
+  describeMailboxError,
+  isMailboxAuthError,
+  mailboxErrorCode,
+  mailboxErrorText,
+  mailboxFailure,
+} from './base/_mailbox-error.js'
+export type { MailboxFailureContext, MailboxFailureKind } from './base/_mailbox-error.js'
+export {
+  CONNECTOR_ERROR_MESSAGE_CAP,
+  ConnectorApiError,
+  capConnectorMessage,
+  coerceConnectorError,
+  connectorError,
+  describeConnectorError,
+  isConnectorApiError,
+} from './base/_connector-result.js'
+export type { ConnectorApiErrorInit, ConnectorErrorContext, ConnectorFailureKind } from './base/_connector-result.js'
+export {
+  GoogleApiError,
+  GOOGLE_ERROR_MESSAGE_CAP,
+  describeGoogleError,
+  googleFailure,
+  isGoogleApiError,
+  parseGoogleErrorBody,
+} from './base/_google-error.js'
+export type { GoogleApiProduct, GoogleApiErrorInit, GoogleFailureContext } from './base/_google-error.js'
 export { createGoogleCalendarTools } from './base/google-calendar.js'
 export type {
   GoogleCalendarApi,
@@ -63,6 +102,14 @@ export { createShopifyTools } from './base/shopify.js'
 export type { ShopifyApi } from './base/shopify.js'
 export { createWordPressTools, WORDPRESS_IMAGE_MIME_TYPES, WORDPRESS_MAX_IMAGE_BYTES } from './base/wordpress.js'
 export type { WordPressApi, WordPressFileBytesReader } from './base/wordpress.js'
+export {
+  createSearchConsoleTools,
+  SEARCH_CONSOLE_DIMENSIONS,
+  SEARCH_CONSOLE_FILTER_OPERATORS,
+  SEARCH_CONSOLE_SEARCH_TYPES,
+  SEARCH_CONSOLE_TOOL_NAMES,
+} from './base/gsc.js'
+export type { SearchConsoleToolsApi, SearchConsoleQueryBody } from './base/gsc.js'
 export { createAgentmailTools } from './base/agentmail.js'
 export type { AgentmailToolApi, AgentmailInboxRef, AgentmailThreadSummary } from './base/agentmail.js'
 export {

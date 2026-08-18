@@ -169,9 +169,10 @@ describe('[COMP:notion/client] Notion API client', () => {
     await expect(searchNotion(TOKEN, {})).rejects.toThrow('Notion API error (404)')
   })
 
-  it('throws reconnect message on 401', async () => {
+  it('throws a structured auth error on 401 (message keeps (401) + "invalid or expired" for the health classifier)', async () => {
     mockFetch.mockResolvedValue(jsonResponse({ message: 'Unauthorized' }, 401))
 
-    await expect(searchNotion(TOKEN, {})).rejects.toThrow('reconnect Notion')
+    await expect(searchNotion(TOKEN, {})).rejects.toMatchObject({ name: 'ConnectorApiError', kind: 'auth', status: 401 })
+    await expect(searchNotion(TOKEN, {})).rejects.toThrow(/\(401\).*invalid or expired/)
   })
 })

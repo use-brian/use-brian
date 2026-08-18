@@ -27,6 +27,16 @@ export type WhatsappByonRuntimeDeps = {
   connectorSecret: string
   integrationStore: ChannelIntegrationStore
   provider: LLMProvider
+  /** Logical/application extraction lane used when no workspace runtime applies. */
+  model: string
+  resolveLlm?: (workspaceId: string) => Promise<{
+    provider: LLMProvider
+    model: string
+    modelTier?: string
+    providerKeySource?: 'user' | 'platform'
+    inputTokenLimit: number
+    maxTokens: number
+  } | null>
   crm: CrmStore
   entities: EntityStore
   entityLinks: EntityLinksStore
@@ -77,7 +87,8 @@ export function createWhatsappByonRuntime(deps: WhatsappByonRuntimeDeps) {
 
   const ingestor = createWhatsappIngestor({
     provider: deps.provider,
-    model: 'gemini-flash',
+    model: deps.model,
+    resolveLlm: deps.resolveLlm,
     crm: deps.crm,
     entities: deps.entities,
     entityLinks: deps.entityLinks,
