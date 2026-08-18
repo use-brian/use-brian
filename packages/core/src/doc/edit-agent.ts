@@ -14,7 +14,7 @@
 
 import { z } from 'zod'
 import { queryLoop, type TerminalStopReason } from '../engine/query-loop.js'
-import { isStalledError, resolveStallIdleMs } from '../engine/stall-watchdog.js'
+import { DEFAULT_STALL_IDLE_MS, isStalledError } from '../engine/stall-watchdog.js'
 import { NO_TOOL_TIMEOUT } from '../engine/tool-executor.js'
 import type { LLMProvider, TokenUsage } from '../providers/types.js'
 import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
@@ -115,7 +115,7 @@ export type RunDocEditAgentOptions = {
   }) => void | Promise<void>
   maxTurns?: number
   maxToolCalls?: number
-  /** Stall watchdog idle window for the child loop. Default: `resolveStallIdleMs()`. */
+  /** Stall watchdog idle window for the child loop. Default: `DEFAULT_STALL_IDLE_MS`. */
   stallIdleMs?: number
 }
 
@@ -141,8 +141,9 @@ type AttemptResult = {
  * a cutoff is reported as `partial` rather than swallowed. Widened again
  * 2026-08-19 (16/24 -> 24/40) with the wall-clock gone: cost is bounded by
  * these two numbers, liveness by the stall watchdog, and a slow-but-honest
- * provider that iterates per section gets the room. Self-host override:
- * `DOC_EDIT_MAX_TURNS` / `DOC_EDIT_MAX_TOOL_CALLS` env.
+ * provider that iterates per section gets the room. A page that outgrows
+ * them ends `partial` and continues in the next turn - the budget is a cost
+ * cap, not a knob.
  */
 export const DOC_EDIT_MAX_TURNS = 24
 export const DOC_EDIT_MAX_TOOL_CALLS = 40
@@ -153,35 +154,17 @@ export const DOC_EDIT_MAX_TOOL_CALLS = 40
  * trips and clipped every multi-section page ("stopped prior to completing")
  * while catching nothing a progress clock would not have caught. The gateway
  * declares `NO_TOOL_TIMEOUT` and the child loop runs under the stall
- * watchdog (`stallIdleMs`): no provider chunk, tool activity or loop event
- * for the idle window = stalled, reported as `partial` / `failed` with the
- * reason. Cost stays bounded by the two budgets above.
+ * watchdog (`DEFAULT_STALL_IDLE_MS`, derived from the provider idle windows):
+ * no provider chunk, tool activity or loop event for the idle window =
+ * stalled, reported as `partial` / `failed` with the reason. Cost stays
+ * bounded by the two budgets above.
  */
-export const docEditStallIdleMs = (): number => resolveStallIdleMs()
 /**
  * Children one gateway instance may start per parent turn. The second is
  * admitted only after a `failed` (no-mutation) receipt - see
  * `createDelegateDocEditTool`.
  */
 export const DOC_EDIT_MAX_DELEGATIONS_PER_TURN = 2
-
-function envInt(raw: string | undefined, fallback: number, lo: number, hi: number): number {
-  if (raw === undefined || raw.trim() === '') return fallback
-  const parsed = Number(raw)
-  if (!Number.isFinite(parsed)) return fallback
-  return Math.min(hi, Math.max(lo, Math.round(parsed)))
-}
-
-/** The child cost budget, with the self-host env overrides applied. */
-export function resolveDocEditBudget(env: NodeJS.ProcessEnv = process.env): {
-  maxTurns: number
-  maxToolCalls: number
-} {
-  return {
-    maxTurns: envInt(env.DOC_EDIT_MAX_TURNS, DOC_EDIT_MAX_TURNS, 2, 200),
-    maxToolCalls: envInt(env.DOC_EDIT_MAX_TOOL_CALLS, DOC_EDIT_MAX_TOOL_CALLS, 2, 400),
-  }
-}
 
 /** Budget cutoffs - the codes that mean "the editor did not get to finish". */
 export function isBudgetCutoff(stop: TerminalStopReason | undefined): boolean {
@@ -251,7 +234,6 @@ async function runAttempt(
   attempt: DocEditAttemptUsage['attempt'],
 ): Promise<AttemptResult> {
   const pageContext = await options.loadPageContext(options.instruction)
-  const budget = resolveDocEditBudget()
   const mutationTools = new Set<string>()
   const pageIds = new Set<string>()
   let latestText = ''
@@ -284,10 +266,10 @@ async function runAttempt(
       tools: new Map(options.tools),
       context: isolateDocEditToolContext(options.context),
       stateless: true,
-      maxTurns: options.maxTurns ?? budget.maxTurns,
-      maxToolCalls: options.maxToolCalls ?? budget.maxToolCalls,
-      // Liveness, not wall-clock: see docEditStallIdleMs.
-      stallIdleMs: options.stallIdleMs ?? docEditStallIdleMs(),
+      maxTurns: options.maxTurns ?? DOC_EDIT_MAX_TURNS,
+      maxToolCalls: options.maxToolCalls ?? DOC_EDIT_MAX_TOOL_CALLS,
+      // Liveness, not wall-clock: see DEFAULT_STALL_IDLE_MS.
+      stallIdleMs: options.stallIdleMs ?? DEFAULT_STALL_IDLE_MS,
       channelType: 'web',
     })) {
       if (event.type === 'assistant_turn') {
@@ -477,7 +459,7 @@ export function createDelegateDocEditTool(
     isConcurrencySafe: false,
     requiresConfirmation: false,
     // No wall-clock: the child is progress-bounded (stall watchdog) and
-    // cost-bounded (turns / tool calls). See docEditStallIdleMs.
+    // cost-bounded (turns / tool calls). See DEFAULT_STALL_IDLE_MS.
     timeoutMs: NO_TOOL_TIMEOUT,
     maxResultSizeChars: 4_000,
     async execute(input, context) {

@@ -4,7 +4,6 @@ import {
   createStallWatchdog,
   DEFAULT_STALL_IDLE_MS,
   isStalledError,
-  resolveStallIdleMs,
   StalledError,
   withStallSignal,
 } from '../stall-watchdog.js'
@@ -12,6 +11,7 @@ import { queryLoop, type QueryEvent } from '../query-loop.js'
 import { NO_TOOL_TIMEOUT } from '../tool-executor.js'
 import { buildTool, type ToolContext } from '../../tools/types.js'
 import type { LLMProvider, ProviderRequest, StreamChunk } from '../../providers/types.js'
+import { DEFAULT_FIRST_CHUNK_MS, DEFAULT_STREAM_IDLE_MS } from '../../providers/wrappers.js'
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -89,13 +89,14 @@ describe('[COMP:engine/stall-watchdog] progress-based liveness primitive', () =>
     dog.dispose()
   })
 
-  it('resolveStallIdleMs: default 3 minutes; env override clamped to a sane floor', () => {
-    expect(resolveStallIdleMs(undefined)).toBe(DEFAULT_STALL_IDLE_MS)
-    expect(resolveStallIdleMs('')).toBe(DEFAULT_STALL_IDLE_MS)
-    expect(resolveStallIdleMs('soon')).toBe(DEFAULT_STALL_IDLE_MS)
-    expect(resolveStallIdleMs('-5')).toBe(DEFAULT_STALL_IDLE_MS)
-    expect(resolveStallIdleMs('600000')).toBe(600_000)
-    expect(resolveStallIdleMs('1')).toBe(15_000)
+  it('the idle window is derived from the provider idle wrapper (two first-chunk windows), not configured', () => {
+    // The watchdog must never pre-empt the layer that can retry a hung
+    // stream: cold prefill window + its warm retry = the widest legitimate
+    // silence, and no env knob exists to shorten or lengthen it.
+    expect(DEFAULT_STALL_IDLE_MS).toBe(DEFAULT_FIRST_CHUNK_MS * 2)
+    expect(DEFAULT_STALL_IDLE_MS).toBe(180_000)
+    expect(DEFAULT_STALL_IDLE_MS).toBeGreaterThan(DEFAULT_STREAM_IDLE_MS)
+    expect(process.env.AGENT_STALL_IDLE_MS).toBeUndefined()
   })
 })
 

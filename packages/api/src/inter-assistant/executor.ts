@@ -49,7 +49,7 @@ import {
   createConfirmationResolver,
   resolveResearchBudget,
   ASSISTANT_CALL_DEFAULT_BUDGET,
-  resolveStallIdleMs,
+  DEFAULT_STALL_IDLE_MS,
   isStalledError,
   runPreflight,
   buildPreflightPrompt,
@@ -1358,7 +1358,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           abortController.abort()
         }, wallClockMs)
       : undefined
-    const stallIdleMs = resolveStallIdleMs()
+    const stallIdleMs = DEFAULT_STALL_IDLE_MS
     const confirmationResolver = deferredConfirmations ? createConfirmationResolver() : undefined
     const registeredToolCallIds: string[] = []
 

@@ -13,7 +13,6 @@ import {
   createDelegateDocEditTool,
   DOC_EDIT_MAX_TOOL_CALLS,
   DOC_EDIT_MAX_TURNS,
-  resolveDocEditBudget,
   isolateDocEditToolContext,
   runDocEditAgent,
   toolsForDocEditIntent,
@@ -265,14 +264,9 @@ describe('[COMP:doc/edit-agent] context-clean Doc editor', () => {
     expect(result.error).toMatch(/stalled/)
   })
 
-  it('cost budgets are env-tunable for a self-host and default to 24 turns / 40 tool calls', () => {
-    expect(resolveDocEditBudget({})).toEqual({ maxTurns: DOC_EDIT_MAX_TURNS, maxToolCalls: DOC_EDIT_MAX_TOOL_CALLS })
+  it('cost budgets are 24 turns / 40 tool calls - a cap, not a knob (no env)', () => {
     expect(DOC_EDIT_MAX_TURNS).toBe(24)
     expect(DOC_EDIT_MAX_TOOL_CALLS).toBe(40)
-    expect(resolveDocEditBudget({ DOC_EDIT_MAX_TURNS: '40', DOC_EDIT_MAX_TOOL_CALLS: '80' }))
-      .toEqual({ maxTurns: 40, maxToolCalls: 80 })
-    expect(resolveDocEditBudget({ DOC_EDIT_MAX_TURNS: 'lots' })).toMatchObject({ maxTurns: DOC_EDIT_MAX_TURNS })
-    expect(resolveDocEditBudget({ DOC_EDIT_MAX_TURNS: '0' })).toMatchObject({ maxTurns: 2 })
   })
 
   it('returns an error receipt when neither attempt mutates', async () => {

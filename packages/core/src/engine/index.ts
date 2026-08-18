@@ -21,7 +21,6 @@ export {
   createStallWatchdog,
   withStallSignal,
   isStalledError,
-  resolveStallIdleMs,
   StalledError,
   DEFAULT_STALL_IDLE_MS,
 } from './stall-watchdog.js'

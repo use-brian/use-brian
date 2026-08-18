@@ -28,6 +28,8 @@
  * [COMP:engine/stall-watchdog]
  */
 
+import { DEFAULT_FIRST_CHUNK_MS } from '../providers/wrappers.js'
+
 /** The upward-facing face of a watchdog: what tools and child loops touch. */
 export type ProgressClock = {
   /** Record progress. `kind` is a short label kept for the stall report. */
@@ -77,25 +79,21 @@ export function isStalledError(err: unknown): err is StalledError {
 }
 
 /**
- * Default idle window: 3 minutes with no provider chunk, no tool activity and
- * no loop event. Deliberately wider than the provider idle wrapper's windows
- * (30s inter-chunk / 90s prefill, `wrapIdleTimeout`), so a stream stall is
- * still caught first by the layer that can retry it; the watchdog is the
- * layer beneath - tools that ignore their abort signal, sessions on an
- * unwrapped provider, anything between phases. Env override:
- * `AGENT_STALL_IDLE_MS` (both editions read it in one place, here).
+ * The idle window is DERIVED, not configured. The provider idle wrapper
+ * (`wrapIdleTimeout`) is the layer that defines "silence" - no deliverable
+ * chunk for `DEFAULT_STREAM_IDLE_MS` between chunks, `DEFAULT_FIRST_CHUNK_MS`
+ * through prefill / reasoning - and it gets one transient retry. The watchdog
+ * sits beneath it and must never pre-empt it, so its window is the widest
+ * silence that layer can legitimately produce: two consecutive first-chunk
+ * windows (the cold prefill plus its warm retry) = 3 minutes with no provider
+ * chunk, no tool activity, and no loop event. That is not a speed guess about
+ * any model - a live provider emits reasoning deltas while it thinks - it is
+ * "the layer that can retry has already given up". Nothing to tune: a slow
+ * provider is slow *between* chunks it still emits, never silent past this.
  */
-export const DEFAULT_STALL_IDLE_MS = 180_000
-const MIN_STALL_IDLE_MS = 15_000
+export const DEFAULT_STALL_IDLE_MS = DEFAULT_FIRST_CHUNK_MS * 2
 /** Node's timer ceiling; a larger delay fires immediately. */
 const MAX_TIMER_MS = 2_147_483_647
-
-export function resolveStallIdleMs(raw: string | undefined = process.env.AGENT_STALL_IDLE_MS): number {
-  if (raw === undefined || raw.trim() === '') return DEFAULT_STALL_IDLE_MS
-  const parsed = Number(raw)
-  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_STALL_IDLE_MS
-  return Math.min(MAX_TIMER_MS, Math.max(MIN_STALL_IDLE_MS, Math.round(parsed)))
-}
 
 export type CreateStallWatchdogOptions = {
   idleMs: number

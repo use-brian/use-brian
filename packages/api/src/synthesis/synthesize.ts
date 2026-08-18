@@ -42,7 +42,7 @@ import {
   type TokenUsage,
   type Tool,
   type UsageStore,
-  resolveStallIdleMs,
+  DEFAULT_STALL_IDLE_MS,
   isStalledError,
   type ResearchBudget,
 } from '@use-brian/core'
@@ -519,7 +519,7 @@ export async function synthesizeFromSource(
       maxTurns: budget.maxTurns,
       maxToolCalls: budget.maxToolCalls,
       // Liveness, not wall-clock: no progress for the idle window = stalled.
-      stallIdleMs: resolveStallIdleMs(),
+      stallIdleMs: DEFAULT_STALL_IDLE_MS,
     })) {
       if (event.type === 'text_delta') {
         summary += event.text

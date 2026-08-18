@@ -57,6 +57,16 @@ export function wrapContextBudget(): StreamWrapper {
 // ── Idle timeout ───────────────────────────────────────────────
 
 /**
+ * The provider layer's definition of "silence": no deliverable chunk for
+ * this long between chunks is a hung stream. The stall watchdog
+ * (`engine/stall-watchdog.ts`) derives its own window from these so the two
+ * layers cannot drift apart.
+ */
+export const DEFAULT_STREAM_IDLE_MS = 30_000
+/** Prefill / reasoning window before the FIRST deliverable chunk. */
+export const DEFAULT_FIRST_CHUNK_MS = 90_000
+
+/**
  * Aborts the stream if no chunks arrive within the idle window.
  * Guards against hung LLM connections that SDK timeout won't catch.
  *
@@ -615,7 +625,10 @@ export function defaultWrappers(options?: {
     wrapRepairToolCallArgs(),
     wrapTextLoopPrevention(),
     wrapLog({ verbose: options?.verbose }),
-    wrapIdleTimeout(options?.idleTimeoutMs ?? 30_000, options?.firstChunkTimeoutMs ?? 90_000),
+    wrapIdleTimeout(
+      options?.idleTimeoutMs ?? DEFAULT_STREAM_IDLE_MS,
+      options?.firstChunkTimeoutMs ?? DEFAULT_FIRST_CHUNK_MS,
+    ),
   ]
 }
 
