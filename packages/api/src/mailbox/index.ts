@@ -51,6 +51,8 @@ export type {
   MailboxBackfillScope,
   MailboxBackfillState,
 } from './sync-worker.js'
+export { createMailboxIdleWatcher, readMailboxIdleStatus } from './idle-watcher.js'
+export type { MailboxIdleWatcher, MailboxIdleWatcherDeps, MailboxIdleStatus, IdleClientLike } from './idle-watcher.js'
 export { probeMailboxFolders } from './probe.js'
 export type { MailboxProbeResult } from './probe.js'
 export {

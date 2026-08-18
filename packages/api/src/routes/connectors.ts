@@ -126,6 +126,7 @@ import { probeMailboxFolders } from '../mailbox/probe.js'
 import { readMailboxSyncState, type MailboxBackfillScope, type MailboxSyncState } from '../mailbox/sync-worker.js'
 import { getGlobalMailboxSyncDeps } from '../mailbox/sync-tool.js'
 import { normalizeSendAsAliases, readSendAsAliases } from '../mailbox/send-as.js'
+import { readMailboxIdleStatus } from '../mailbox/idle-watcher.js'
 import { countEmailArchiveMessages } from '../db/email-archive-store.js'
 import type { MailboxAccountSettings } from '../mailbox/types.js'
 import { CHAT_ARCHIVE_SEARCH_TOOL } from '../chat-archive/tool-catalog.js'
@@ -997,8 +998,14 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     // §Phase 2 → "On-demand sync"). Never blocks the connect response; the
     // poller catches up if the seam is unarmed or the sync fails.
     const kickSync = (instanceId: string): void => {
-      void getGlobalMailboxSyncDeps()?.syncInstanceById(instanceId).catch((err) => {
+      const seam = getGlobalMailboxSyncDeps()
+      void seam?.syncInstanceById(instanceId).catch((err) => {
         console.warn('[connectors] imap sync-on-connect failed (poller will catch up):', err instanceof Error ? err.message : String(err))
+      })
+      // IDLE watcher up right away where the watcher runs in this process
+      // (mailbox-imap.md → "IDLE watcher"); elsewhere its reconcile catches up.
+      void seam?.watchInstance?.(instanceId).catch((err) => {
+        console.warn('[connectors] imap watch-on-connect failed (reconcile will catch up):', err instanceof Error ? err.message : String(err))
       })
     }
     try {
@@ -1113,6 +1120,8 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
         lastFailedSyncAt: state.lastFailedSyncAt ?? null,
         ingestionEnabled: resolved.instance.ingestionEnabled,
         sendAsAliases: readSendAsAliases(resolved.instance.config),
+        // Live (IDLE) posture - so a dead socket can never look like "no mail".
+        idle: readMailboxIdleStatus(resolved.instance.config),
       })
     } catch (err) {
       console.error('[connectors] imap sync-status failed:', err)

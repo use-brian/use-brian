@@ -33,7 +33,45 @@ export type ImapSyncStatus = {
   ingestionEnabled: boolean;
   /** Configured send-as aliases (bare lowercase); absent on older servers. */
   sendAsAliases?: string[];
+  /** IDLE watcher posture (mailbox-imap.md → "IDLE watcher"); null = never watched / older server. */
+  idle?: {
+    status: "connected" | "unsupported" | "reconnecting" | "off";
+    since: string;
+    lastEventAt?: string | null;
+    lastError?: string | null;
+  } | null;
 };
+
+/** Pure "Live: …" line - the IDLE posture in one sentence, so a dead socket can
+ *  never look like "no mail". Exported for tests. */
+export function formatImapLiveLine(
+  idle: ImapSyncStatus["idle"],
+  copy: {
+    liveConnected: string;
+    liveConnectedWaiting: string;
+    liveUnsupported: string;
+    liveReconnecting: string;
+    liveOff: string;
+  },
+  formatTime: (iso: string) => string = (iso) =>
+    new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+): string | null {
+  if (!idle) return null;
+  switch (idle.status) {
+    case "connected":
+      return idle.lastEventAt
+        ? copy.liveConnected.replace("{time}", formatTime(idle.lastEventAt))
+        : copy.liveConnectedWaiting;
+    case "unsupported":
+      return copy.liveUnsupported;
+    case "reconnecting":
+      return copy.liveReconnecting;
+    case "off":
+      return copy.liveOff;
+    default:
+      return null;
+  }
+}
 
 /** Client-side shape check before the round-trip; the server re-validates. */
 export function looksLikeEmailAddress(value: string): boolean {
@@ -180,11 +218,23 @@ export function ImapSyncPanel({ instanceId }: { instanceId?: string } = {}) {
   const aliases = status.sendAsAliases ?? [];
   const backfillStalled = status.backfill?.status === "stalled";
   const syncLine = formatImapSyncLine(status, tm);
+  const liveLine = formatImapLiveLine(status.idle, tm);
 
   return (
     <div className="space-y-2 border border-border rounded-lg p-3">
       <div className="text-[13px] font-medium">{tm.syncStatusTitle}</div>
       <p className="text-xs text-muted-foreground">{syncLine}</p>
+      {/* The IDLE watcher's posture in one line ("Live: connected, last new
+          mail at 09:41"). Absent until a watcher has ever reported. */}
+      {liveLine && (
+        <p
+          className={
+            status.idle?.status === "reconnecting" ? "text-xs text-destructive" : "text-xs text-muted-foreground"
+          }
+        >
+          {liveLine}
+        </p>
+      )}
       {/* A parked backfill reports the server's own words. The generic
           "it will retry automatically" line is reserved for the transient
           case, because once parked it will NOT retry until re-armed - saying

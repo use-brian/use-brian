@@ -293,11 +293,16 @@ describe('[COMP:api/mailbox-connect-routes] send-as aliases (PATCH /imap/send-as
     expect(setConfigSystem).toHaveBeenCalledWith(second.id, { sendAsAliases: ['sales@usebrian.example'] })
   })
 
-  it('sync-status reads the configured aliases back for the panel', async () => {
-    const { app } = makeApp({ instances: [MAILBOX], creds: CREDS })
+  it('sync-status reads the configured aliases + the IDLE posture back for the panel', async () => {
+    const idle = { status: 'connected', since: '2026-08-19T09:00:00.000Z', lastEventAt: '2026-08-19T09:41:00.000Z', lastError: null }
+    const { app } = makeApp({ instances: [{ ...MAILBOX, config: { ...MAILBOX.config, mailboxIdle: idle } }], creds: CREDS })
     const res = await request(app).get('/api/connectors/imap/sync-status')
     expect(res.status).toBe(200)
     expect(res.body.sendAsAliases).toEqual(['bd@usebrian.example'])
+    expect(res.body.idle).toEqual(idle)
+    // Never watched → null, not a fabricated "off".
+    const { app: bare } = makeApp({ instances: [MAILBOX], creds: CREDS })
+    expect((await request(bare).get('/api/connectors/imap/sync-status')).body.idle).toBeNull()
   })
 })
 
@@ -324,6 +329,18 @@ describe('[COMP:api/mailbox-connect-routes] sync-on-connect', () => {
     })
     expect(res.status).toBe(200)
     expect(syncInstanceById).toHaveBeenCalledWith('inst_existing')
+  })
+
+  it('brings the IDLE watcher up for the new instance when the seam arms watchInstance (workers / OSS process)', async () => {
+    const syncInstanceById = vi.fn(async () => ({ synced: true as const, newMessages: 0 }))
+    const watchInstance = vi.fn(async () => {})
+    setGlobalMailboxSyncDeps({ syncInstanceById, watchInstance })
+    const { app } = makeApp()
+    const res = await request(app).post('/api/connectors/imap/connect').send({
+      email: 'maya@harborlane.example', appPassword: 'pw',
+    })
+    expect(res.status).toBe(200)
+    expect(watchInstance).toHaveBeenCalledWith('inst_new')
   })
 
   it('connect still succeeds when the sync seam is unarmed', async () => {

@@ -25,6 +25,14 @@ import type { MailboxSyncSummary } from './sync-worker.js'
 export type MailboxSyncNowDeps = {
   /** Sync one instance now; never throws (returns a reasoned summary). */
   syncInstanceById: (instanceId: string) => Promise<MailboxSyncSummary>
+  /**
+   * Bring the IDLE watcher up for one instance now (mailbox-imap.md → "IDLE
+   * watcher"). Armed only in the process that runs the watcher (workers /
+   * OSS single process); absent elsewhere, and the watcher's own reconcile
+   * picks a new instance up on its next pass. The connect route calls it
+   * beside sync-on-connect.
+   */
+  watchInstance?: (instanceId: string) => Promise<void>
 }
 
 let globalMailboxSyncDeps: MailboxSyncNowDeps | null = null

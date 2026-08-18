@@ -195,6 +195,7 @@ import { EXTRACTION_MODEL } from './build-episode-ingestors.js'
 import { createMailboxSyncWorker } from './mailbox/sync-worker.js'
 import { setGlobalMailboxArchiveDeps } from './mailbox/archive-search-tool.js'
 import { setGlobalMailboxSyncDeps } from './mailbox/sync-tool.js'
+import { createMailboxIdleWatcher } from './mailbox/idle-watcher.js'
 import { createChatArchiveTools } from './chat-archive/chat-tools.js'
 import { resolveIngestPlaceholders } from './ingest/placeholder-resolver.js'
 import { createMeteredProfileStore } from './db/metered-profile-store.js'
@@ -7055,11 +7056,26 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     onEvent: createIngestWorkflowTrigger(workflowEventDispatcher),
   })
   if (runWorkers) mailboxSyncWorker.start()
+  // IDLE watcher (mailbox-imap.md → "IDLE watcher"): one dedicated IMAP
+  // connection per connected mailbox that turns the server's `exists` push
+  // into `syncInstanceById` within seconds - a wake-up for the SAME sync the
+  // tick runs, never a second ingest path (D6). Runs where the sync worker
+  // runs (workers service hosted; the one process on OSS).
+  const mailboxIdleWatcher = createMailboxIdleWatcher({
+    connectorInstanceStore,
+    syncInstanceById: (id) => mailboxSyncWorker.syncInstanceById(id),
+  })
+  if (runWorkers) mailboxIdleWatcher.start()
   // Arm the on-demand sync seam in EVERY process (not just the workers
   // service): the connect route's sync-on-connect and the `syncMailboxNow`
   // tool both run in the API process, and single-instance sync needs no
   // running poll timer. See mailbox-imap.md §Phase 2 → "On-demand sync".
-  setGlobalMailboxSyncDeps({ syncInstanceById: (id) => mailboxSyncWorker.syncInstanceById(id) })
+  // `watchInstance` is armed only where the watcher runs; elsewhere the
+  // watcher's reconcile pass picks a freshly connected mailbox up itself.
+  setGlobalMailboxSyncDeps({
+    syncInstanceById: (id) => mailboxSyncWorker.syncInstanceById(id),
+    ...(runWorkers ? { watchInstance: (id) => mailboxIdleWatcher.watchInstance(id) } : {}),
+  })
 
   // ── External-sink relay (ingest outbox → ub.ingest.append.v1) ──
   // Drains ingest_outbox to each attached external sink; the sink cursor
@@ -7560,6 +7576,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     runQueueWorker.stop()
     knowledgeSyncWorker.stop()
     mailboxSyncWorker.stop()
+    // Log out every IDLE socket - a SIGTERM must not leave a mailbox connection
+    // dangling until the server's own timeout notices.
+    await mailboxIdleWatcher.stop().catch(() => {})
     externalSinkRelay.stop()
     chatArchiveEnrichmentWorker?.stop()
     stuckSessionSweeper.stop()
