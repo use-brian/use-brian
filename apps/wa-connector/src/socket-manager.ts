@@ -24,6 +24,12 @@ import {
   useMultiFileAuthState,
 } from '@whiskeysockets/baileys'
 import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { createHash, randomUUID } from 'node:crypto'
+import { createReadStream, createWriteStream } from 'node:fs'
+import { rm } from 'node:fs/promises'
+import { pipeline } from 'node:stream/promises'
+import { Transform } from 'node:stream'
 import pino from 'pino'
 
 /**
@@ -355,52 +361,144 @@ export function createSocketManager(options: SocketManagerOptions): SocketManage
     msg: WAMessage,
     mediaInfo: { mimeType: string; fileName?: string; fileLength?: number },
   ): Promise<NonNullable<WhatsAppIncomingMessage['mediaRef']>> {
-    const res = await fetch(`${apiUrl}/internal/whatsapp/media-upload-url`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Connector-Secret': connectorSecret },
-      body: JSON.stringify({
-        channelId,
-        providerMessageId: msg.key.id,
-        kind: mediaInfo.mimeType.startsWith('image/') ? 'image'
-          : mediaInfo.mimeType.startsWith('video/') ? 'video'
-            : mediaInfo.mimeType.startsWith('audio/') ? 'voice' : 'file',
-        mime: mediaInfo.mimeType,
-        fileName: mediaInfo.fileName ?? null,
-        sizeBytes: mediaInfo.fileLength ?? 0,
-      }),
-    })
-    if (!res.ok) {
-      const detail = (await res.text().catch(() => '')).slice(0, 300)
-      throw new Error(`media-upload-url failed: ${res.status} ${res.statusText}${detail ? `: ${detail}` : ''}`)
-    }
-    const { assetId, alreadyStored, gcsKey, uploadUrl, storageUri, sizeBytes } = (await res.json()) as {
-      assetId?: string; alreadyStored?: boolean; gcsKey: string; uploadUrl: string
-      storageUri?: string; sizeBytes?: number
+    const kind = mediaInfo.mimeType.startsWith('image/') ? 'image'
+      : mediaInfo.mimeType.startsWith('video/') ? 'video'
+        : mediaInfo.mimeType.startsWith('audio/') ? 'voice' : 'file'
+
+    const mint = async (sha256?: string) => {
+      const res = await fetch(`${apiUrl}/internal/whatsapp/media-upload-url`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Connector-Secret': connectorSecret },
+        body: JSON.stringify({
+          channelId,
+          providerMessageId: msg.key.id,
+          kind,
+          mime: mediaInfo.mimeType,
+          fileName: mediaInfo.fileName ?? null,
+          sizeBytes: mediaInfo.fileLength ?? 0,
+          ...(sha256 ? { sha256 } : {}),
+        }),
+      })
+      if (!res.ok) {
+        const detail = (await res.text().catch(() => '')).slice(0, 300)
+        throw new Error(`media-upload-url failed: ${res.status} ${res.statusText}${detail ? `: ${detail}` : ''}`)
+      }
+      return (await res.json()) as {
+        target?: 'archive' | 'workspace'
+        headers?: Record<string, string>
+        assetId?: string; alreadyStored?: boolean; gcsKey?: string; uploadUrl?: string
+        storageUri?: string; sizeBytes?: number
+      }
     }
 
-    if (!alreadyStored) {
+    // Ask before downloading. A destination that already holds these bytes ends
+    // the job here, without pulling the attachment off WhatsApp's CDN again.
+    const first = await mint()
+    if (first.alreadyStored) {
+      return {
+        ...(first.assetId ? { assetId: first.assetId } : {}),
+        ...(first.gcsKey ? { gcsKey: first.gcsKey } : {}),
+        ...(first.storageUri ? { storageUri: first.storageUri } : {}),
+        mimeType: mediaInfo.mimeType,
+        ...(mediaInfo.fileName ? { fileName: mediaInfo.fileName } : {}),
+        ...(first.sizeBytes || mediaInfo.fileLength
+          ? { sizeBytes: first.sizeBytes || mediaInfo.fileLength }
+          : {}),
+      }
+    }
+
+    // Workspace storage takes an unsigned PUT, so the bytes can go straight
+    // from WhatsApp to the destination without ever landing on our disk.
+    if (first.target !== 'archive') {
+      if (!first.uploadUrl) throw new Error('media-upload-url returned no uploadUrl')
       const stream = (await downloadMediaMessage(msg, 'stream', {})) as unknown as import('node:stream').Readable
       const headers: Record<string, string> = { 'Content-Type': mediaInfo.mimeType }
       if (mediaInfo.fileLength) headers['Content-Length'] = String(mediaInfo.fileLength)
-      const put = await fetch(uploadUrl, {
+      const put = await fetch(first.uploadUrl, {
         method: 'PUT',
         headers,
         body: stream as unknown as ReadableStream,
         duplex: 'half', // Node streaming request body requires half-duplex.
       } as RequestInit & { duplex: 'half' })
       if (!put.ok) throw new Error(`media PUT failed: ${put.status} ${put.statusText}`)
+      return {
+        ...(first.assetId ? { assetId: first.assetId } : {}),
+        ...(first.gcsKey ? { gcsKey: first.gcsKey } : {}),
+        // Echo the BYO storage URI back with the bytes so the API stamps the exact
+        // bucket the bytes were PUT to (race-free vs. recomputing at /inbound).
+        ...(first.storageUri ? { storageUri: first.storageUri } : {}),
+        mimeType: mediaInfo.mimeType,
+        ...(mediaInfo.fileName ? { fileName: mediaInfo.fileName } : {}),
+        ...(first.sizeBytes || mediaInfo.fileLength
+          ? { sizeBytes: first.sizeBytes || mediaInfo.fileLength }
+          : {}),
+      }
     }
 
-    return {
-      ...(assetId ? { assetId } : {}),
-      gcsKey,
-      // Echo the BYO storage URI back with the bytes so the API stamps the exact
-      // bucket the bytes were PUT to (race-free vs. recomputing at /inbound).
-      ...(storageUri ? { storageUri } : {}),
-      mimeType: mediaInfo.mimeType,
-      ...(mediaInfo.fileName ? { fileName: mediaInfo.fileName } : {}),
-      ...(sizeBytes || mediaInfo.fileLength ? { sizeBytes: sizeBytes || mediaInfo.fileLength } : {}),
+    // The archive signs an upload over a request URI containing the content
+    // digest, so the digest must exist before a destination can be issued.
+    // Spool to disk on the way through: memory stays flat whatever the size,
+    // at the cost of one transient copy. Only this path pays for it.
+    const spooled = await spoolMediaToDisk(msg, kind)
+    try {
+      const signed = await mint(spooled.sha256)
+      if (!signed.uploadUrl) throw new Error('archive upload target returned no uploadUrl')
+      const put = await fetch(signed.uploadUrl, {
+        method: 'POST', // the archive's /media is single-shot POST, not PUT
+        headers: {
+          'Content-Type': mediaInfo.mimeType,
+          'Content-Length': String(spooled.sizeBytes),
+          ...(signed.headers ?? {}),
+        },
+        body: createReadStream(spooled.path) as unknown as ReadableStream,
+        duplex: 'half',
+      } as RequestInit & { duplex: 'half' })
+      if (!put.ok) throw new Error(`archive upload failed: ${put.status} ${put.statusText}`)
+      const stored = (await put.json().catch(() => ({}))) as { asset_id?: string }
+      if (!stored.asset_id) throw new Error('archive upload returned no asset id')
+      return {
+        archiveAssetId: stored.asset_id,
+        sha256: spooled.sha256,
+        mimeType: mediaInfo.mimeType,
+        ...(mediaInfo.fileName ? { fileName: mediaInfo.fileName } : {}),
+        sizeBytes: spooled.sizeBytes,
+      }
+    } finally {
+      await rm(spooled.path, { force: true }).catch(() => {})
     }
+  }
+
+  /**
+   * Download an attachment to a temp file, returning its digest and size.
+   *
+   * Memory stays flat regardless of attachment size: bytes go from the WhatsApp
+   * stream through the hash and onto disk, never accumulating in a buffer.
+   */
+  async function spoolMediaToDisk(
+    msg: WAMessage,
+    kind: string,
+  ): Promise<{ path: string; sha256: string; sizeBytes: number }> {
+    const stream = (await downloadMediaMessage(msg, 'stream', {})) as unknown as import('node:stream').Readable
+    const path = join(tmpdir(), `wa-${kind}-${randomUUID()}`)
+    const hash = createHash('sha256')
+    let sizeBytes = 0
+    // Hash inside the pipeline rather than on a 'data' listener: attaching one
+    // switches the stream to flowing mode immediately, which can drop chunks
+    // before the pipeline is wired up.
+    const meter = new Transform({
+      transform(chunk: Buffer, _enc, done) {
+        hash.update(chunk)
+        sizeBytes += chunk.length
+        done(null, chunk)
+      },
+    })
+    try {
+      await pipeline(stream, meter, createWriteStream(path))
+    } catch (err) {
+      await rm(path, { force: true }).catch(() => {})
+      throw err
+    }
+    return { path, sha256: hash.digest('hex'), sizeBytes }
   }
 
   // ── Notify the API a channel was logged out ──
