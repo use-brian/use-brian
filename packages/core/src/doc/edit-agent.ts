@@ -145,6 +145,12 @@ export const DOC_EDIT_MAX_TOOL_CALLS = 24
  * `partial`.
  */
 export const DOC_EDIT_TIMEOUT_MS = 300_000
+/**
+ * Children one gateway instance may start per parent turn. The second is
+ * admitted only after a `failed` (no-mutation) receipt - see
+ * `createDelegateDocEditTool`.
+ */
+export const DOC_EDIT_MAX_DELEGATIONS_PER_TURN = 2
 
 /** Budget cutoffs - the codes that mean "the editor did not get to finish". */
 export function isBudgetCutoff(stop: TerminalStopReason | undefined): boolean {
@@ -409,13 +415,20 @@ export type CreateDelegateDocEditToolOptions = Omit<
 export function createDelegateDocEditTool(
   options: CreateDelegateDocEditToolOptions,
 ): Tool<typeof delegateDocEditInputSchema> {
-  // One gateway instance is minted per parent turn. Consuming it once prevents
-  // a looping supervisor from spawning multiple expensive child transcripts.
-  let consumed = false
+  // One gateway instance is minted per parent turn. It runs at most
+  // DOC_EDIT_MAX_DELEGATIONS_PER_TURN children, and a second child is admitted
+  // ONLY after a `failed` receipt (no mutation landed): the common cause is a
+  // brief that pointed at evidence the isolated editor cannot fetch (a meeting
+  // note, a transcript), so the supervisor must be able to gather it and
+  // re-brief in the same turn. A `completed` or `partial` receipt closes the
+  // gateway - a looping supervisor must not spawn further child transcripts,
+  // and a half-edited page must not be re-run from the top.
+  let delegations = 0
+  let lastStatus: DocEditReceipt['status'] | null = null
   return buildTool<typeof delegateDocEditInputSchema>({
     name: DOC_EDIT_GATEWAY_TOOL,
     description:
-      'Apply a requested Doc page, entity, or comment change through a fresh isolated editor. Choose edit only when runtime context supplies an existing open page id; an edit can never create a page. Choose create only when the user explicitly asks for a new page. Submit one self-contained brief after gathering needed evidence. The editor cannot see this conversation or tool results unless you include their relevant facts and source URLs. Questions that do not require a Doc mutation should be answered directly. The receipt status is completed, partial, or failed: partial means the editor applied some changes and was cut off before finishing - relay that honestly (what landed, what did not) and offer to continue in the next turn; never describe a partial result as done.',
+      'Apply a requested Doc page, entity, or comment change through a fresh isolated editor. Choose edit only when runtime context supplies an existing open page id; an edit can never create a page. Choose create only when the user explicitly asks for a new page. Submit one self-contained brief after gathering needed evidence. The editor has no search, brain, memory, recording, connector, or web tools and cannot see this conversation: every fact it needs must be pasted into the brief (the text itself, plus source page ids or URLs), never referenced. Questions that do not require a Doc mutation should be answered directly. The receipt status is completed, partial, or failed: partial means the editor applied some changes and was cut off before finishing - relay that honestly (what landed, what did not) and offer to continue in the next turn; never describe a partial result as done. A failed receipt whose summary starts with missing_evidence: names what the brief lacked; gather exactly that and call this tool once more with it pasted in (one retry is allowed after a no-change failure).',
     inputSchema: delegateDocEditInputSchema,
     isReadOnly: false,
     isConcurrencySafe: false,
@@ -423,11 +436,14 @@ export function createDelegateDocEditTool(
     timeoutMs: DOC_EDIT_TIMEOUT_MS,
     maxResultSizeChars: 4_000,
     async execute(input, context) {
-      if (consumed) {
+      const retryOpen = lastStatus === 'failed' && delegations < DOC_EDIT_MAX_DELEGATIONS_PER_TURN
+      if (delegations > 0 && !retryOpen) {
         return {
           data: {
             status: 'failed',
-            summary: 'This turn already delegated one Doc edit. Continue in a new user turn if another edit is needed.',
+            summary: lastStatus === 'failed'
+              ? 'This turn already retried the Doc edit once and it still applied no change. Tell the user what evidence was missing and continue in a new user turn.'
+              : 'This turn already delegated one Doc edit. Continue in a new user turn if another edit is needed.',
             mutationTools: [],
             pageIds: [],
             fallbackUsed: false,
@@ -464,7 +480,7 @@ export function createDelegateDocEditTool(
           }
         }
       }
-      consumed = true
+      delegations += 1
       const tools = toolsForDocEditIntent(options.tools, input.intent)
       const receipt = await runDocEditAgent({
         ...options,
@@ -472,8 +488,17 @@ export function createDelegateDocEditTool(
         tools,
         context,
       })
+      lastStatus = receipt.status
+      const canRetry = receipt.status === 'failed' && delegations < DOC_EDIT_MAX_DELEGATIONS_PER_TURN
       return {
-        data: receipt,
+        data: canRetry
+          ? {
+              ...receipt,
+              summary:
+                `${receipt.summary} ` +
+                'One retry is available this turn: gather the missing evidence with the tools in this conversation, paste it into the brief, and call delegateDocEdit again. Do not re-send the same brief.',
+            }
+          : receipt,
         isError: receipt.status === 'failed',
       }
     },

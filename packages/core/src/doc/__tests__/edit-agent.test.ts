@@ -290,6 +290,80 @@ describe('[COMP:doc/edit-agent] context-clean Doc editor', () => {
     expect(requests).toHaveLength(2)
   })
 
+  it('admits ONE re-delegation after a no-mutation failure, then closes the gateway', async () => {
+    // 2026-08-19: the parent briefed "check today's meeting note" instead of
+    // pasting the note; the isolated editor has no evidence tools, so it made
+    // no change. The supervisor must be able to gather the evidence and
+    // re-brief in the same turn - once.
+    const requests: ProviderRequest[] = []
+    const provider = providerFrom((_request, call) => (
+      call === 0
+        ? textTurn('missing_evidence: the text of today\'s meeting note - paste it into the brief.')
+        : call === 1
+          ? toolTurn('patchPage', { pageId: 'page-1' })
+          : textTurn('Done.')
+    ), requests)
+    const tool = createDelegateDocEditTool({
+      provider,
+      model: 'cheap',
+      systemPrompt: 'isolated editor protocol',
+      tools: new Map([['patchPage', patchTool([])]]),
+      targetPageId: 'page-1',
+      loadPageContext: async () => 'pageId=page-1 version=1',
+    })
+
+    const first = await tool.execute({
+      intent: 'edit',
+      pageId: 'page-1',
+      instruction: 'Check today\'s meeting note and draft follow-ups.',
+    }, parentContext)
+    expect(first.isError).toBe(true)
+    expect(first.data).toMatchObject({ status: 'failed', mutationTools: [] })
+    expect((first.data as { summary: string }).summary).toMatch(/missing_evidence:/)
+    expect((first.data as { summary: string }).summary).toMatch(/One retry is available this turn/)
+
+    const second = await tool.execute({
+      intent: 'edit',
+      pageId: 'page-1',
+      instruction: 'Meeting note text: "Alice owns the pricing deck by Friday." Draft follow-ups.',
+    }, parentContext)
+    expect(second.isError).toBe(false)
+    expect(second.data).toMatchObject({ status: 'completed', mutationTools: ['patchPage'] })
+
+    const third = await tool.execute({
+      intent: 'edit',
+      pageId: 'page-1',
+      instruction: 'And again.',
+    }, parentContext)
+    expect(third.isError).toBe(true)
+    expect(third.data).toMatchObject({ error: 'doc_edit_already_delegated' })
+  })
+
+  it('closes the gateway after two no-mutation failures and says so', async () => {
+    const requests: ProviderRequest[] = []
+    const provider = providerFrom(() => textTurn('missing_evidence: still nothing to work from.'), requests)
+    const tool = createDelegateDocEditTool({
+      provider,
+      model: 'cheap',
+      systemPrompt: 'isolated editor protocol',
+      tools: new Map([['patchPage', patchTool([])]]),
+      targetPageId: 'page-1',
+      loadPageContext: async () => 'pageId=page-1 version=1',
+    })
+    const brief = { intent: 'edit' as const, pageId: 'page-1', instruction: 'Do the thing.' }
+    const first = await tool.execute(brief, parentContext)
+    expect(first.data).toMatchObject({ status: 'failed' })
+    expect((first.data as { summary: string }).summary).toMatch(/One retry is available/)
+    const second = await tool.execute(brief, parentContext)
+    expect(second.data).toMatchObject({ status: 'failed' })
+    expect((second.data as { summary: string }).summary).not.toMatch(/One retry is available/)
+    const third = await tool.execute(brief, parentContext)
+    expect(third.data).toMatchObject({ error: 'doc_edit_already_delegated' })
+    expect((third.data as { summary: string }).summary).toMatch(/already retried/)
+    // Two admitted delegations, no third child run.
+    expect(requests).toHaveLength(2)
+  })
+
   it('fails an edit before the child runs when no existing page target is bound', async () => {
     const requests: ProviderRequest[] = []
     const provider = providerFrom(() => textTurn('must not run'), requests)

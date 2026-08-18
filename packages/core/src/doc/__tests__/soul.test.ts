@@ -18,7 +18,9 @@ describe('[COMP:doc/soul] doc skill block', () => {
     expect(supervisor).toContain('delegateDocEdit')
     expect(supervisor).toContain('`intent: "edit"`')
     expect(supervisor).toContain('An edit never creates a replacement page')
-    expect(supervisor).toMatch(/exactly once/i)
+    // One delegation per turn, plus one retry after a no-change failure.
+    expect(supervisor).toMatch(/call `delegateDocEdit` once with/i)
+    expect(supervisor).toMatch(/one retry is allowed after a no-change failure/i)
     expect(supervisor).not.toContain('renderPage')
     expect(supervisor).not.toContain('patchPage')
     expect(supervisor).not.toContain('## Data-block')
@@ -104,6 +106,47 @@ describe('[COMP:doc/soul] doc skill block', () => {
   it('never instructs the model to call renderView (retired on doc)', () => {
     expect(buildDocSkillBlock({ mode: 'page', teamName: 'Acme' })).not.toContain('renderView')
     expect(buildDocSkillBlock({ mode: 'research', teamName: 'Acme' })).not.toContain('renderView')
+  })
+
+  it('child prompt names only tools in the child allowlist - no search / brain / web (2026-08-19 "could not access the meeting-note evidence")', () => {
+    // The isolated editor receives ONLY the Doc tools captured by
+    // `injectDocTools` (`childTools`). Naming an evidence tool here sends it
+    // hunting for one that does not exist and failing the edit.
+    const CHILD_TOOLS = new Set([
+      'renderPage', 'patchPage', 'getBlock', 'queryDataBlock', 'getCurrentPage',
+      'getSection', 'getBlockRange', 'createSubPage', 'exportPage', 'importToPage',
+      'listEntityTypes', 'createEntityType', 'addProperty', 'removeProperty',
+      'renameProperty', 'createEntity', 'updateEntity', 'deleteEntity',
+      'queryEntities', 'postComment', 'resolveComment', 'getCommentThread',
+    ])
+    for (const mode of ['page', 'research'] as const) {
+      const out = buildDocEditAgentPrompt({ mode })
+      expect(out).not.toMatch(/`(search|recentEpisodes|getEntity|searchBrain|searchRecording|findPage|webSearch|mcp_search|mcp_call)`/)
+      expect(out).not.toMatch(/web search is allowed/i)
+      // Every backticked call-shaped identifier (`name(` or a lone `camelCase`
+      // tool word) that is a known tool must be in the child allowlist.
+      const called = [...out.matchAll(/`([a-z][A-Za-z]+)\(/g)].map((m) => m[1])
+      for (const name of called) expect(CHILD_TOOLS.has(name), `child prompt calls ${name}`).toBe(true)
+    }
+  })
+
+  it('child prompt states the evidence boundary and the missing_evidence contract', () => {
+    for (const mode of ['page', 'research'] as const) {
+      const out = buildDocEditAgentPrompt({ mode })
+      expect(out).toMatch(/NO search, brain, memory, recording, email, connector, or web tools/)
+      expect(out).toMatch(/missing_evidence:/)
+      // The child never asks the end user a clarifying question.
+      expect(out).not.toMatch(/ask ONE clarifying question/)
+    }
+  })
+
+  it('supervisor block says the editor has no evidence tools and the brief must carry the evidence', () => {
+    for (const mode of ['page', 'research'] as const) {
+      const out = buildDocSupervisorSkillBlock({ mode })
+      expect(out).toMatch(/editor has NO evidence tools/)
+      expect(out).toMatch(/paste the relevant text itself/)
+      expect(out).toMatch(/missing_evidence/)
+    }
   })
 
   it('never names connector-specific tools (Tool-awareness rule)', () => {
