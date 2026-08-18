@@ -4473,6 +4473,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       backgroundModel,
       voiceTranscription,
       usageStore,
+      // Window-audio persistence + the assembled-windows finalize fallback.
+      filesResolver,
     }))
   }
 

@@ -2509,10 +2509,11 @@ export function FloatingChat({
       ),
     prepareLivePage: liveRecording.prepare,
     streamLiveWindow: liveRecording.streamWindow,
-    onMeetingCapture: (file: File, livePageId?: string) =>
+    onMeetingCapture: (file: File, live?: { pageId: string; sessionId?: string }) =>
       rec.run(file, {
         kind: "meeting",
-        ...(livePageId ? { existingPageId: livePageId } : {}),
+        ...(live ? { existingPageId: live.pageId } : {}),
+        ...(live?.sessionId ? { liveSessionId: live.sessionId } : {}),
       }),
   });
 

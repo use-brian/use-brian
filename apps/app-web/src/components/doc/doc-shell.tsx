@@ -90,7 +90,9 @@ import { CollabPageEditor } from "./collab-page-editor";
 import { RecordingPlayerProvider } from "@/lib/recordings/recording-player-context";
 import { RecordingChrome } from "@/components/recordings/recording-chrome";
 import { RecordingLinkControl } from "@/components/recordings/recording-link-control";
+import { LiveTranscriptPane } from "@/components/recordings/live-transcript-pane";
 import { recordingIdFromAnchorKey } from "@/lib/recordings/anchor";
+import { hasLiveMarkerBlock } from "@use-brian/shared";
 import { commentGutterWidth } from "./comment-rail";
 import { useCollabProvider } from "@/lib/collab/use-collab-provider";
 import { usePublishPresenceActivity } from "@/lib/collab/use-presence";
@@ -1427,18 +1429,32 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
                     ? (() => {
                         const anchorRec = recordingIdFromAnchorKey(pageView.anchorKey);
                         const recId = anchorRec ?? pageView.linkedRecordingId;
+                        // The `live:` marker block is how a page says "a live
+                        // capture streams (or streamed) here" — the transcript
+                        // renders in the dedicated pane, never as doc blocks.
+                        const liveMarker = hasLiveMarkerBlock(pageView.page?.blocks);
+                        const livePane = liveMarker ? (
+                          <LiveTranscriptPane
+                            workspaceId={workspaceId}
+                            pageId={pageView.id}
+                          />
+                        ) : null;
                         if (!recId) {
-                          if (!recordingLinkOpen) return null;
                           return (
-                            <RecordingLinkControl
-                              viewId={pageView.id}
-                              workspaceId={workspaceId}
-                              onLinked={(meta) => {
-                                setRecordingLinkOpen(false);
-                                setActiveView(meta);
-                              }}
-                              onDismiss={() => setRecordingLinkOpen(false)}
-                            />
+                            <>
+                              {livePane}
+                              {recordingLinkOpen ? (
+                                <RecordingLinkControl
+                                  viewId={pageView.id}
+                                  workspaceId={workspaceId}
+                                  onLinked={(meta) => {
+                                    setRecordingLinkOpen(false);
+                                    setActiveView(meta);
+                                  }}
+                                  onDismiss={() => setRecordingLinkOpen(false)}
+                                />
+                              ) : null}
+                            </>
                           );
                         }
                         return (
@@ -1446,6 +1462,11 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
                             recordingId={recId}
                             workspaceId={workspaceId}
                             title={pageView.name ?? ""}
+                            // While the recording is not processed yet, the
+                            // chrome keeps the provisional live transcript
+                            // beside its status card; the final transcript
+                            // replaces it on `processed`.
+                            livePane={livePane}
                             // Unlink only a MANUAL link — an anchor-derived
                             // recording is the brief's identity, nothing to
                             // re-link it to.

@@ -436,6 +436,9 @@ export const zh: Dictionary = {
     siteNotFoundTitle: "找不到頁面",
     siteNotFoundBody: "此頁面不存在，或已停止發佈。",
     poweredByCta: "免費試用 Use Brian",
+    // Empty published page: the shell (breadcrumb, CTA, title) still renders;
+    // this line replaces the blank body so the share never reads as broken.
+    emptyBody: "此頁面尚無內容。",
     commentsHeading: "留言",
     commentDrawerTitle: "留言",
     commentDrawerClose: "關閉",
@@ -7965,6 +7968,31 @@ export const zh: Dictionary = {
     chatQueuedChip: "录音已排队：{name}",
     chatStagedChip: "已附加錄音：{name}",
     linkError: "无法加载录音。",
+    uploadFailed:
+      "音频无法上传到存储,尚未开始处理。请检查网络连接。录音已保存在此设备上,可从录音器再次保存。",
+    estimateFailed:
+      "音频已上传,但无法读取时长。请从录音器再次保存重试。",
+    processFailed:
+      "音频已上传,但无法加入处理队列。请重试。",
+    liveTranscriptTitle: "实时逐字稿",
+    liveTranscriptProvisional: "处理完成前为临时版本",
+    liveTranscriptLoading: "正在加载实时逐字稿...",
+    liveTranscriptGap: "此处有{count}个实时逐字稿窗口不可用。",
+    transcriptPending: "录音处理完成后,逐字稿会显示在这里。",
+    statusProcessingTitle: "正在处理此录音",
+    statusProcessingBody:
+      "转录正在后台运行。完成后,播放器、逐字稿和行动项会显示在这里。",
+    statusFailedTitle: "处理失败",
+    statusFailedBody: "无法处理此录音。请打开录音重试。",
+    statusFailedBodyDetail: "无法处理此录音: {detail}",
+    statusAwaitingUploadTitle: "正在等待音频",
+    statusAwaitingUploadBody:
+      "录音的音频尚未完成上传。如果录音保存在你的设备上,请从录音器再次保存。",
+    speakersLabel: "说话人:",
+    speakerRenameHint: "点击为此说话人命名",
+    speakerRenameTitle: "为此说话人命名",
+    speakerRenameBody: "{speaker} 是谁? 名字会显示在逐字稿上。留空可清除。",
+    speakerRenameAction: "保存名字",
   },
   recorder: {
     start: "录音",
@@ -7986,6 +8014,8 @@ export const zh: Dictionary = {
       "要最终处理此实时会议页面吗? 完整录音会被处理并关联到这里,不会创建第二份简报,也不会收取录音积分。",
     liveLinkFailed:
       "录音已排队,但无法关联到会议页面。你可以从录音面板手动关联。",
+    liveAssembledNote:
+      "完整录音上传未能完成,因此本录音由实时传送的窗口拼接而成。30秒接缝处可能有细小缺口。",
     voiceMessage: "语音消息",
     meetingRecording: "会议录音",
     micAndComputerAudio: "麦克风 + 电脑音频",

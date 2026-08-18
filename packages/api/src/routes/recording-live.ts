@@ -1,6 +1,16 @@
 /**
- * Live recording page routes: destination creation plus sequential audio-window
- * transcription and rolling meeting-note updates. [COMP:recordings/live-page-route]
+ * Live recording page routes: destination creation, sequential audio-window
+ * transcription with rolling STRUCTURED meeting notes, the live-transcript
+ * read for the dedicated page pane, recording↔page linking, and the
+ * assembled-windows finalize fallback for a failed full upload.
+ * [COMP:recordings/live-page-route]
+ *
+ * The transcript deliberately does NOT live in doc blocks: windows land in
+ * `live_transcript_windows` (migration 444) and render in the live transcript
+ * pane, a purpose-built chrome surface. The page carries only the rolling
+ * Meeting notes region (structured blocks between the notes heading and the
+ * live marker) plus the marker itself — the well-known `live:` block-id
+ * prefix is how the doc shell knows a page has a live capture surface.
  */
 
 import { randomUUID } from 'node:crypto'
@@ -8,10 +18,13 @@ import { Router, type NextFunction, type Request, type Response } from 'express'
 import multer from 'multer'
 import {
   applyOps,
+  blocksToMarkdown,
   buildUndoEntry,
   calculateCost,
   collectStream,
+  markdownToBlocks,
   transcribeAudio,
+  type Block,
   type DocGateway,
   type DocPageStore,
   type LLMProvider,
@@ -22,6 +35,20 @@ import {
   type TokenUsage,
   type UsageStore,
 } from '@use-brian/core'
+import { LIVE_MARKER_ID_PREFIX } from '@use-brian/shared'
+import {
+  clearLiveWindowAudio,
+  hasLiveWindow,
+  insertLiveWindow,
+  listLiveWindowsByPage,
+  listLiveWindowsBySession,
+  type LiveTranscriptLine,
+} from '../db/live-transcript-store.js'
+import { createEpisode } from '../db/episodes-store.js'
+import { createRecording, getRecording } from '../db/recordings-store.js'
+import type { FilesClientResolver } from '../files/files-api.js'
+import { buildStorageKey, buildStorageUri } from '../files/gcs-client.js'
+import { concatAudioWindows } from '../recordings/ffmpeg.js'
 
 const LIVE_WINDOW_MAX_BYTES = 2 * 1024 * 1024
 const LIVE_NOTES_MAX_CHARS = 6_000
@@ -40,7 +67,7 @@ export type LiveNotesResult = {
 
 export type RecordingLiveRouteDeps = {
   getRole: (userId: string, workspaceId: string) => Promise<string | null>
-  savedViewStore: Pick<SavedViewStore, 'createDraft' | 'getById' | 'getPage' | 'updatePage'>
+  savedViewStore: Pick<SavedViewStore, 'createDraft' | 'getById' | 'getPage' | 'updatePage' | 'update'>
   docGateway?: DocGateway
   docPageStore?: Pick<DocPageStore, 'getVersionedPage' | 'applyPatch'>
   provider: LLMProvider
@@ -52,15 +79,28 @@ export type RecordingLiveRouteDeps = {
     model?: string
   }
   usageStore?: UsageStore
+  /** Storage for window-audio persistence + finalize. Absent → finalize 503s and window audio is not kept. */
+  filesResolver?: FilesClientResolver
   transcribeWindow?: (input: { buffer: Buffer; mime: string }) => Promise<LiveTranscriptionResult>
   reviseNotes?: (input: { previousNotes: string; transcript: string }) => Promise<LiveNotesResult>
+  // Injectable seams for tests; default to the real store/helpers.
+  liveWindows?: {
+    insert: typeof insertLiveWindow
+    has: typeof hasLiveWindow
+    listByPage: typeof listLiveWindowsByPage
+    listBySession: typeof listLiveWindowsBySession
+    clearAudio: typeof clearLiveWindowAudio
+  }
+  getRecording?: typeof getRecording
+  createEpisode?: typeof createEpisode
+  createRecording?: typeof createRecording
+  concatWindows?: typeof concatAudioWindows
 }
 
 type LivePageBlocks = {
   notesHeadingId: string
   notesBlockId: string
-  transcriptHeadingId: string
-  transcriptAnchorId: string
+  markerBlockId: string
   page: Page
 }
 
@@ -71,37 +111,72 @@ function userIdOf(req: unknown): string | undefined {
 function livePageBlocks(): LivePageBlocks {
   const notesHeadingId = randomUUID()
   const notesBlockId = randomUUID()
-  const transcriptHeadingId = randomUUID()
-  const transcriptAnchorId = randomUUID()
+  const markerBlockId = `${LIVE_MARKER_ID_PREFIX}${randomUUID()}`
   return {
     notesHeadingId,
     notesBlockId,
-    transcriptHeadingId,
-    transcriptAnchorId,
+    markerBlockId,
     page: {
       blocks: [
         { id: notesHeadingId, kind: 'heading', level: 2, text: 'Meeting notes' },
         { id: notesBlockId, kind: 'text', variant: 'muted', text: 'Listening for the first update...' },
-        { id: transcriptHeadingId, kind: 'heading', level: 2, text: 'Live transcript' },
         {
-          id: transcriptAnchorId,
+          id: markerBlockId,
           kind: 'text',
           variant: 'caption',
-          text: 'Live transcript and notes are provisional until the recording finishes processing.',
+          text: 'Notes are provisional while this meeting records. The live transcript streams to the Live transcript panel below and becomes the final, citable transcript when the recording finishes processing.',
         },
       ],
     },
   }
 }
 
-function transcriptStamp(offsetMs: number): string {
-  const total = Math.max(0, Math.floor(offsetMs / 1000))
-  const hours = Math.floor(total / 3600)
-  const minutes = Math.floor((total % 3600) / 60)
-  const seconds = total % 60
-  return hours > 0
-    ? `[${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}]`
-    : `[${minutes}:${String(seconds).padStart(2, '0')}]`
+/**
+ * Parse a window transcript into per-line speaker attributions. Only the
+ * "Speaker N:" shape the prompt asks for is treated as a label — anything
+ * else stays inside the text, so a sentence starting "Note:" never becomes
+ * a phantom speaker. Labels are consistent within one window only; the user
+ * can bind real names on the FINAL transcript's participants.
+ */
+export function parseTranscriptLines(text: string): LiveTranscriptLine[] {
+  const lines: LiveTranscriptLine[] = []
+  for (const raw of text.split('\n')) {
+    const line = raw.trim().replace(/^\*+|\*+$/g, '')
+    if (!line) continue
+    const match = /^(speaker\s*(\d+))\s*[:：]\s*(.*)$/i.exec(line)
+    if (match && match[3]) {
+      lines.push({ speaker: `Speaker ${match[2]}`, text: match[3].trim() })
+    } else {
+      lines.push({ speaker: null, text: line })
+    }
+  }
+  return lines
+}
+
+/**
+ * Rewrite the rolling notes REGION — every block strictly between the notes
+ * heading and the live marker — with the freshly structured note blocks.
+ * Null when either anchor is missing or out of order (the caller 409s: the
+ * page was edited out from under the live session).
+ */
+export function notesRegionOps(
+  page: Page,
+  notesHeadingId: string,
+  markerBlockId: string,
+  noteBlocks: Block[],
+): Op[] | null {
+  const headingIndex = page.blocks.findIndex((block) => block.id === notesHeadingId)
+  const markerIndex = page.blocks.findIndex((block) => block.id === markerBlockId)
+  if (headingIndex < 0 || markerIndex < 0 || markerIndex < headingIndex) return null
+  const ops: Op[] = page.blocks
+    .slice(headingIndex + 1, markerIndex)
+    .map((block) => ({ op: 'delete', blockId: block.id }))
+  let after: string = notesHeadingId
+  for (const block of noteBlocks) {
+    ops.push({ op: 'add', after, block })
+    after = block.id
+  }
+  return ops
 }
 
 async function applyPageOps(
@@ -161,7 +236,10 @@ async function defaultReviseNotes(
   const response = await collectStream(deps.provider.stream({
     model: deps.backgroundModel,
     systemPrompt:
-      'Maintain concise rolling meeting notes. Preserve important decisions, action items, owners, risks, and unresolved questions. Return only the complete revised notes in plain text. Do not add a heading or commentary.',
+      'Maintain concise rolling meeting notes in Markdown. Structure them with short "### " section headings ' +
+      '(for example: Summary, Decisions, Action items, Risks, Open questions) and "- " bullet lines under each; ' +
+      'keep only sections that have real content. Preserve important decisions, action items with owners, risks, ' +
+      'and unresolved questions. Return ONLY the complete revised notes as Markdown - no document title, no commentary.',
     messages: [{
       role: 'user',
       content:
@@ -214,12 +292,31 @@ async function recordUsage(
   }
 }
 
+/** Notes markdown → page blocks; a parse that yields nothing degrades to one text block. */
+function notesBlocksOf(markdown: string): Block[] {
+  try {
+    const blocks = markdownToBlocks(markdown)
+    if (blocks.length > 0) return blocks
+  } catch {
+    // Fall through to the plain-text degrade.
+  }
+  return [{ id: randomUUID(), kind: 'text', text: markdown }]
+}
+
 export function recordingLiveRoutes(deps: RecordingLiveRouteDeps): Router {
   const router = Router()
   const upload = multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: LIVE_WINDOW_MAX_BYTES, files: 1 },
   })
+  const windows = deps.liveWindows ?? {
+    insert: insertLiveWindow,
+    has: hasLiveWindow,
+    listByPage: listLiveWindowsByPage,
+    listBySession: listLiveWindowsBySession,
+    clearAudio: clearLiveWindowAudio,
+  }
+  const readRecording = deps.getRecording ?? getRecording
 
   router.post('/live/start', async (req, res) => {
     const userId = userIdOf(req)
@@ -243,6 +340,7 @@ export function recordingLiveRoutes(deps: RecordingLiveRouteDeps): Router {
 
     try {
       const seeded = livePageBlocks()
+      const sessionId = randomUUID()
       let resolvedPageId: string
       let resolvedTitle: string
       if (destination === 'existing') {
@@ -286,8 +384,9 @@ export function recordingLiveRoutes(deps: RecordingLiveRouteDeps): Router {
       res.status(201).json({
         pageId: resolvedPageId,
         title: resolvedTitle,
-        notesBlockId: seeded.notesBlockId,
-        transcriptAfterId: seeded.transcriptAnchorId,
+        sessionId,
+        notesHeadingId: seeded.notesHeadingId,
+        markerBlockId: seeded.markerBlockId,
       })
     } catch (error) {
       console.error('[recording-live] start failed:', error)
@@ -305,11 +404,12 @@ export function recordingLiveRoutes(deps: RecordingLiveRouteDeps): Router {
     if (!req.file.mimetype.startsWith('audio/') && !req.file.mimetype.startsWith('video/')) {
       return void res.status(400).json({ error: 'Only audio/video live windows are supported' })
     }
-    const { workspaceId, pageId, assistantId, notesBlockId, transcriptAfterId, chunkId } = req.body as Record<string, string | undefined>
+    const { workspaceId, pageId, assistantId, sessionId, notesHeadingId, markerBlockId, chunkId } =
+      req.body as Record<string, string | undefined>
     const offsetMs = Number(req.body.offsetMs)
     const durationMs = Number(req.body.durationMs)
     const missedWindows = Number(req.body.missedWindows ?? 0)
-    if (!workspaceId || !pageId || !assistantId || !notesBlockId || !transcriptAfterId || !chunkId) {
+    if (!workspaceId || !pageId || !assistantId || !sessionId || !notesHeadingId || !markerBlockId || !chunkId) {
       return void res.status(400).json({ error: 'Live window metadata is incomplete' })
     }
     if (!Number.isFinite(offsetMs) || offsetMs < 0 || !Number.isFinite(durationMs) || durationMs <= 0 || durationMs > 60_000) {
@@ -325,18 +425,46 @@ export function recordingLiveRoutes(deps: RecordingLiveRouteDeps): Router {
     if (!view || view.workspaceId !== workspaceId) {
       return void res.status(404).json({ error: 'Destination page not found' })
     }
+    if (await windows.has(chunkId)) {
+      return void res.json({ ok: true, duplicate: true })
+    }
     const current = await deps.savedViewStore.getPage(userId, pageId)
     if (!current) return void res.status(409).json({ error: 'Destination page is unavailable' })
-    if (current.blocks.some((block) => block.id === chunkId)) {
-      return void res.json({ duplicate: true, transcriptAfterId: chunkId })
-    }
-    const notesBlock = current.blocks.find((block) => block.id === notesBlockId)
-    if (!notesBlock || notesBlock.kind !== 'text' || !current.blocks.some((block) => block.id === transcriptAfterId)) {
+    const notesHeading = current.blocks.find((block) => block.id === notesHeadingId)
+    const marker = current.blocks.find((block) => block.id === markerBlockId)
+    if (!notesHeading || !marker) {
       return void res.status(409).json({ error: 'Live page anchors are no longer available' })
     }
 
+    // 1. Persist the window bytes FIRST (best-effort): even when transcription
+    //    fails, the audio must survive for the finalize fallback — the window
+    //    may end up being the only copy of this stretch of the meeting that
+    //    ever reached a server.
+    let audioKey: string | null = null
+    if (deps.filesResolver) {
+      try {
+        const resolved = await deps.filesResolver.forWorkspace(workspaceId)
+        const key = buildStorageKey(
+          workspaceId,
+          `recordings/live/${sessionId}/${String(Math.floor(offsetMs)).padStart(10, '0')}`,
+        )
+        await resolved.gcs.writeBlob(key, req.file.buffer, {
+          workspaceId,
+          createdByUserId: userId,
+          mime: req.file.mimetype,
+        })
+        audioKey = key
+      } catch (error) {
+        console.error('[recording-live] window audio persist failed:', error)
+      }
+    }
+
+    // 2. Transcribe. A failure still records the (audio-bearing) window row,
+    //    so finalize keeps its bytes; the client counts the miss and the pane
+    //    shows the gap.
+    let transcription: LiveTranscriptionResult
     try {
-      const transcription = deps.transcribeWindow
+      transcription = deps.transcribeWindow
         ? await deps.transcribeWindow({ buffer: req.file.buffer, mime: req.file.mimetype })
         : await transcribeAudio(
             { buffer: req.file.buffer, mime: req.file.mimetype },
@@ -344,60 +472,224 @@ export function recordingLiveRoutes(deps: RecordingLiveRouteDeps): Router {
               apiKey: deps.voiceTranscription.apiKey,
               backend: deps.voiceTranscription.backend,
               model: deps.voiceTranscription.model,
-              prompt: 'Transcribe this meeting-audio window verbatim. Return only speech text, with no timestamps or commentary.',
+              prompt:
+                'Transcribe this meeting-audio window verbatim. When more than one speaker is audible, ' +
+                "prefix each line with a consistent label like 'Speaker 1:' or 'Speaker 2:' (numbers are " +
+                'local to this clip). Return only the transcript lines - no timestamps, no commentary.',
             },
           )
-      const transcript = transcription.text.trim()
-      const notes = await (deps.reviseNotes ?? ((input) => defaultReviseNotes(deps, input)))({
-        previousNotes: notesBlock.text === 'Listening for the first update...' ? '' : notesBlock.text,
-        transcript,
-      })
-      const gapBlockId = `${chunkId}-gap`
-      await applyPageOps(deps, userId, pageId, [
-        { op: 'edit', blockId: notesBlockId, patch: { text: notes.text, variant: 'body' } },
-        ...(missedWindows > 0
-          ? [{
-              op: 'add' as const,
-              after: transcriptAfterId,
-              block: {
-                id: gapBlockId,
-                kind: 'text' as const,
-                variant: 'caption' as const,
-                text: `[${missedWindows} live transcript window${missedWindows === 1 ? '' : 's'} unavailable]`,
-              },
-            }]
-          : []),
-        {
-          op: 'add',
-          after: missedWindows > 0 ? gapBlockId : transcriptAfterId,
-          block: { id: chunkId, kind: 'text', text: `${transcriptStamp(offsetMs)} ${transcript}` },
-        },
-      ])
-      await Promise.all([
-        recordUsage(deps, {
-          userId,
-          workspaceId,
-          assistantId,
-          model: transcription.model,
-          usage: transcription.usage,
-          source: 'overhead:transcription',
-          triggerKey: 'live_recording_transcription',
-          audioSeconds: durationMs / 1000,
-        }),
-        recordUsage(deps, {
-          userId,
-          workspaceId,
-          assistantId,
-          model: notes.model,
-          usage: notes.usage,
-          source: 'overhead:synthesis',
-          triggerKey: 'live_meeting_notes',
-        }),
-      ])
-      res.json({ transcript, notes: notes.text, transcriptAfterId: chunkId })
     } catch (error) {
-      console.error('[recording-live] window failed:', error)
-      res.status(503).json({ error: 'This live transcript window could not be processed' })
+      console.error('[recording-live] window transcription failed:', error)
+      if (audioKey) {
+        await windows
+          .insert({
+            chunkId, sessionId, workspaceId, pageId,
+            offsetMs, durationMs, missedBefore: missedWindows,
+            lines: [], audioKey,
+          })
+          .catch(() => {})
+      }
+      return void res.status(503).json({ error: 'This live transcript window could not be processed' })
+    }
+
+    const transcript = transcription.text.trim()
+    const lines = parseTranscriptLines(transcript)
+
+    // 3. The transcript row is the durability boundary for the live view.
+    try {
+      await windows.insert({
+        chunkId, sessionId, workspaceId, pageId,
+        offsetMs, durationMs, missedBefore: missedWindows,
+        lines, audioKey,
+      })
+    } catch (error) {
+      console.error('[recording-live] window insert failed:', error)
+      return void res.status(503).json({ error: 'This live transcript window could not be processed' })
+    }
+
+    void recordUsage(deps, {
+      userId, workspaceId, assistantId,
+      model: transcription.model,
+      usage: transcription.usage,
+      source: 'overhead:transcription',
+      triggerKey: 'live_recording_transcription',
+      audioSeconds: durationMs / 1000,
+    })
+
+    // 4. Rolling notes: failure here is isolated — the transcript window
+    //    already landed, and the next window's revision self-heals the notes.
+    let notesText: string | undefined
+    try {
+      const previousNotes = notesRegionText(current, notesHeadingId, markerBlockId)
+      const notes = await (deps.reviseNotes ?? ((input) => defaultReviseNotes(deps, input)))({
+        previousNotes,
+        transcript: lines.map((line) => (line.speaker ? `${line.speaker}: ${line.text}` : line.text)).join('\n') || transcript,
+      })
+      const ops = notesRegionOps(current, notesHeadingId, markerBlockId, notesBlocksOf(notes.text))
+      if (ops) await applyPageOps(deps, userId, pageId, ops)
+      notesText = notes.text
+      void recordUsage(deps, {
+        userId, workspaceId, assistantId,
+        model: notes.model,
+        usage: notes.usage,
+        source: 'overhead:synthesis',
+        triggerKey: 'live_meeting_notes',
+      })
+    } catch (error) {
+      console.error('[recording-live] notes revision failed:', error)
+    }
+
+    res.json({ ok: true, transcript, lines, ...(notesText !== undefined ? { notes: notesText } : {}) })
+  })
+
+  // The live transcript pane's read: one page's windows, capture order.
+  router.get('/live/windows', async (req, res) => {
+    const userId = userIdOf(req)
+    if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
+    const { workspaceId, pageId } = req.query as Record<string, string | undefined>
+    if (!workspaceId || !pageId) {
+      return void res.status(400).json({ error: 'workspaceId and pageId are required' })
+    }
+    if (!(await deps.getRole(userId, workspaceId))) {
+      return void res.status(403).json({ error: 'Not a member of this workspace' })
+    }
+    const view = await deps.savedViewStore.getById(userId, pageId)
+    if (!view || view.workspaceId !== workspaceId) {
+      return void res.status(404).json({ error: 'Page not found' })
+    }
+    const rows = await windows.listByPage(workspaceId, pageId)
+    res.json({
+      windows: rows.map((row) => ({
+        chunkId: row.chunkId,
+        offsetMs: row.offsetMs,
+        durationMs: row.durationMs,
+        missedBefore: row.missedBefore,
+        lines: row.lines,
+      })),
+    })
+  })
+
+  // Link a recording to a page the moment its id exists (upload-url mint) —
+  // so a live meeting page carries its recording even when the upload or
+  // processing later fails, and the chrome can state that status honestly.
+  router.post('/live/link', async (req, res) => {
+    const userId = userIdOf(req)
+    if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
+    const { pageId, recordingId } = (req.body ?? {}) as { pageId?: string; recordingId?: string }
+    if (!pageId || !recordingId) {
+      return void res.status(400).json({ error: 'pageId and recordingId are required' })
+    }
+    const view = await deps.savedViewStore.getById(userId, pageId)
+    if (!view) return void res.status(404).json({ error: 'Page not found' })
+    const recording = await readRecording(userId, recordingId)
+    if (!recording || recording.workspaceId !== view.workspaceId) {
+      return void res.status(400).json({ error: 'That recording is not in this page’s workspace' })
+    }
+    const updated = await deps.savedViewStore.update(userId, pageId, { linkedRecordingId: recordingId })
+    if (!updated) return void res.status(404).json({ error: 'Page not found' })
+    res.json({ ok: true })
+  })
+
+  // Finalize fallback: assemble the persisted live windows into a usable
+  // recording when the lossless full upload cannot complete (offline stop,
+  // failed PUT, dead client). The result is honest about its provenance —
+  // re-encoded 30s windows with sub-second seams — and the normal
+  // estimate → confirm → process flow still runs on it.
+  router.post('/live/finalize', async (req, res) => {
+    const userId = userIdOf(req)
+    if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
+    if (!deps.filesResolver) {
+      return void res.status(503).json({ error: 'Storage is not available for live assembly' })
+    }
+    const { workspaceId, assistantId, sessionId, pageId } = (req.body ?? {}) as {
+      workspaceId?: string
+      assistantId?: string
+      sessionId?: string
+      pageId?: string
+    }
+    if (!workspaceId || !assistantId || !sessionId) {
+      return void res.status(400).json({ error: 'workspaceId, assistantId, and sessionId are required' })
+    }
+    if (!(await deps.getRole(userId, workspaceId))) {
+      return void res.status(403).json({ error: 'Not a member of this workspace' })
+    }
+    try {
+      const rows = (await windows.listBySession(workspaceId, sessionId)).filter((row) => row.audioKey)
+      if (rows.length === 0) {
+        return void res.status(409).json({ error: 'no_stored_windows' })
+      }
+      const resolved = await deps.filesResolver.forWorkspace(workspaceId)
+      const buffers: Buffer[] = []
+      for (const row of rows) {
+        const blob = await resolved.gcs.readBlob(row.audioKey!)
+        if (blob) buffers.push(blob.bytes)
+      }
+      if (buffers.length === 0) {
+        return void res.status(409).json({ error: 'no_stored_windows' })
+      }
+      const assembled = await (deps.concatWindows ?? concatAudioWindows)(buffers)
+
+      const fileId = randomUUID()
+      const key = buildStorageKey(workspaceId, `recordings/${fileId}`)
+      const storageUri = buildStorageUri(resolved.bucket, workspaceId, `recordings/${fileId}`, resolved.uriScheme)
+      const fileName = `Assembled meeting recording ${new Date().toISOString().slice(0, 10)}.m4a`
+      await resolved.gcs.writeBlob(key, assembled.buffer, {
+        workspaceId,
+        createdByUserId: userId,
+        mime: assembled.mime,
+      })
+      const episode = await (deps.createEpisode ?? createEpisode)(userId, {
+        sourceKind: 'recording',
+        sourceRef: { fileId, gcsKey: key, storageUri, fileName, mime: assembled.mime, status: 'awaiting_upload' },
+        occurredAt: new Date(),
+        workspaceId,
+        userId: null,
+        assistantId,
+        createdByUserId: userId,
+        sensitivity: 'internal',
+      })
+      await (deps.createRecording ?? createRecording)({
+        id: episode.id,
+        workspaceId,
+        mime: assembled.mime,
+        gcsKey: key,
+        storageUri,
+        fileName,
+        title: fileName,
+        kind: 'meeting',
+        userId: null,
+        assistantId,
+        sensitivity: 'internal',
+        createdByUserId: userId,
+      })
+
+      // Best-effort: link the meeting page, then reclaim the window objects.
+      if (pageId) {
+        try {
+          const view = await deps.savedViewStore.getById(userId, pageId)
+          if (view && view.workspaceId === workspaceId) {
+            await deps.savedViewStore.update(userId, pageId, { linkedRecordingId: episode.id })
+          }
+        } catch (error) {
+          console.error('[recording-live] finalize page link failed:', error)
+        }
+      }
+      void (async () => {
+        for (const row of rows) {
+          await resolved.gcs.deleteBlob(row.audioKey!).catch(() => {})
+        }
+        await windows.clearAudio(workspaceId, sessionId).catch(() => {})
+      })()
+
+      const last = rows[rows.length - 1]
+      res.status(201).json({
+        recordingId: episode.id,
+        windowCount: rows.length,
+        coverageMs: last.offsetMs + last.durationMs,
+      })
+    } catch (error) {
+      console.error('[recording-live] finalize failed:', error)
+      res.status(503).json({ error: 'Could not assemble the live recording' })
     }
   })
 
@@ -411,4 +703,15 @@ export function recordingLiveRoutes(deps: RecordingLiveRouteDeps): Router {
   })
 
   return router
+}
+
+/** The current notes region as Markdown (the revision prompt's "previous notes"). */
+function notesRegionText(page: Page, notesHeadingId: string, markerBlockId: string): string {
+  const headingIndex = page.blocks.findIndex((block) => block.id === notesHeadingId)
+  const markerIndex = page.blocks.findIndex((block) => block.id === markerBlockId)
+  if (headingIndex < 0 || markerIndex < 0 || markerIndex <= headingIndex) return ''
+  const region = page.blocks
+    .slice(headingIndex + 1, markerIndex)
+    .filter((block) => (block as { text?: unknown }).text !== 'Listening for the first update...')
+  return blocksToMarkdown(region).trim()
 }

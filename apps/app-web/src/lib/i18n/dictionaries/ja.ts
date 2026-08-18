@@ -440,6 +440,9 @@ export const ja: Dictionary = {
     siteNotFoundTitle: "ページが見つかりません",
     siteNotFoundBody: "このページは存在しないか、公開が終了しています。",
     poweredByCta: "Use Brian を無料で試す",
+    // Empty published page: the shell (breadcrumb, CTA, title) still renders;
+    // this line replaces the blank body so the share never reads as broken.
+    emptyBody: "このページにはまだ内容がありません。",
     commentsHeading: "コメント",
     commentDrawerTitle: "コメント",
     commentDrawerClose: "閉じる",
@@ -8027,6 +8030,31 @@ export const ja: Dictionary = {
     chatQueuedChip: "録音をキューに追加: {name}",
     chatStagedChip: "録音を添付: {name}",
     linkError: "録音を読み込めませんでした。",
+    uploadFailed:
+      "音声をストレージに送信できず、処理は開始されていません。接続を確認してください。録音はこの端末に保存されており、レコーダーから再度保存できます。",
+    estimateFailed:
+      "音声はアップロードされましたが、長さを読み取れませんでした。レコーダーから再度保存してやり直してください。",
+    processFailed:
+      "音声はアップロード済みですが、処理のキューに追加できませんでした。もう一度お試しください。",
+    liveTranscriptTitle: "ライブ文字起こし",
+    liveTranscriptProvisional: "処理完了までは暫定版です",
+    liveTranscriptLoading: "ライブ文字起こしを読み込んでいます...",
+    liveTranscriptGap: "ここで{count}件のライブ文字起こしウィンドウを取得できませんでした。",
+    transcriptPending: "録音の処理が完了すると、ここに文字起こしが表示されます。",
+    statusProcessingTitle: "録音を処理しています",
+    statusProcessingBody:
+      "バックグラウンドで文字起こしを実行中です。完了すると、プレーヤー、文字起こし、アクションアイテムがここに表示されます。",
+    statusFailedTitle: "処理に失敗しました",
+    statusFailedBody: "この録音を処理できませんでした。録音を開いて再試行してください。",
+    statusFailedBodyDetail: "この録音を処理できませんでした: {detail}",
+    statusAwaitingUploadTitle: "音声を待っています",
+    statusAwaitingUploadBody:
+      "録音の音声アップロードが完了していません。録音が端末に保存されている場合は、レコーダーから再度保存してください。",
+    speakersLabel: "話者:",
+    speakerRenameHint: "クリックしてこの話者に名前を付ける",
+    speakerRenameTitle: "この話者に名前を付ける",
+    speakerRenameBody: "{speaker} は誰ですか? 名前は文字起こしに表示されます。空欄にすると解除されます。",
+    speakerRenameAction: "名前を保存",
   },
   recorder: {
     start: "録音",
@@ -8048,6 +8076,8 @@ export const ja: Dictionary = {
       "このライブ会議ページを確定しますか? 録音全体を処理してこのページにリンクし、別のブリーフは作成しません。録音クレジットは請求されません。",
     liveLinkFailed:
       "録音はキューに追加されましたが、会議ページにリンクできませんでした。録音ボードから手動でリンクできます。",
+    liveAssembledNote:
+      "完全な録音のアップロードが完了しなかったため、ライブ配信のウィンドウからこの録音を組み立てました。30秒の継ぎ目に小さな欠落が生じる場合があります。",
     voiceMessage: "ボイスメッセージ",
     meetingRecording: "会議の録音",
     micAndComputerAudio: "マイク + コンピューター音声",

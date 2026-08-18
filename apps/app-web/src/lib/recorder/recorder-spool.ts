@@ -29,6 +29,12 @@ export type SpoolSessionMeta = {
   assistantId: string;
   /** Chosen provisional page, retained so recovery finalizes to the same page. */
   livePageId?: string;
+  /**
+   * Live capture session — keys the server-persisted transcript windows, so
+   * recovery can fall back to server-side assembly when the lossless upload
+   * cannot complete.
+   */
+  liveSessionId?: string;
   /** Epoch ms of capture start — the recovery banner's "from 2:14 PM". */
   startedAt: number;
   /** Capture mime (the assembled Blob's type). */

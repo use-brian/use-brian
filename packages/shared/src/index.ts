@@ -8,6 +8,7 @@
 export * from './transcript-format.js'
 export * from './transcript-citations.js'
 export * from './recording-anchor.js'
+export * from './live-recording.js'
 export * from './connector-registry.js'
 export * from './builtin-connectors.js'
 export * from './browser-extension-build.js'

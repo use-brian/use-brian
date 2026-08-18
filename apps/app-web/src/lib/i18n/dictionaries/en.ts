@@ -502,6 +502,9 @@ export const en = {
     siteNotFoundTitle: "Page not found",
     siteNotFoundBody: "This page doesn't exist or is no longer published.",
     poweredByCta: "Try Use Brian free",
+    // Empty published page: the shell (breadcrumb, CTA, title) still renders;
+    // this line replaces the blank body so the share never reads as broken.
+    emptyBody: "This page has no content yet.",
     commentsHeading: "Comments",
     commentDrawerTitle: "Comment",
     commentDrawerClose: "Close",
@@ -8245,6 +8248,31 @@ export const en = {
     chatQueuedChip: "Recording queued: {name}",
     chatStagedChip: "Recording attached: {name}",
     linkError: "We could not load your recordings.",
+    uploadFailed:
+      "The audio could not reach storage, so nothing was processed. Check your connection - the capture is kept on this device and can be saved again from the recorder.",
+    estimateFailed:
+      "The audio uploaded, but its length could not be read. Save it again from the recorder to retry.",
+    processFailed:
+      "The audio is uploaded, but it could not be queued for processing. Try again.",
+    liveTranscriptTitle: "Live transcript",
+    liveTranscriptProvisional: "provisional until processing completes",
+    liveTranscriptLoading: "Loading the live transcript...",
+    liveTranscriptGap: "{count} live transcript window(s) were unavailable here.",
+    transcriptPending: "The transcript will appear here once the recording finishes processing.",
+    statusProcessingTitle: "Processing this recording",
+    statusProcessingBody:
+      "Transcription is running in the background. The player, transcript, and action items appear here when it finishes.",
+    statusFailedTitle: "Processing failed",
+    statusFailedBody: "This recording could not be processed. Open the recording to retry.",
+    statusFailedBodyDetail: "This recording could not be processed: {detail}",
+    statusAwaitingUploadTitle: "Waiting for the audio",
+    statusAwaitingUploadBody:
+      "The recording's audio has not finished uploading. If the capture was kept on your device, save it again from the recorder.",
+    speakersLabel: "Speakers:",
+    speakerRenameHint: "Click to name this speaker",
+    speakerRenameTitle: "Name this speaker",
+    speakerRenameBody: "Who is {speaker}? The name shows on the transcript. Leave empty to clear it.",
+    speakerRenameAction: "Save name",
   },
   // Dock live recording (docs/architecture/media/live-capture.md): the
   // record button + live strip + crash-recovery banner on the chat dock.
@@ -8268,6 +8296,8 @@ export const en = {
       "Finalize this live meeting page? The full recording will be processed and linked here; no second brief will be created. No recording credits will be charged.",
     liveLinkFailed:
       "The recording is queued, but it could not be linked to the meeting page. You can link it from the recording board.",
+    liveAssembledNote:
+      "The lossless upload could not complete, so this recording was assembled from the live stream's windows. Small gaps at 30-second seams are possible.",
     voiceMessage: "Voice message",
     meetingRecording: "Meeting recording",
     micAndComputerAudio: "Mic + computer audio",

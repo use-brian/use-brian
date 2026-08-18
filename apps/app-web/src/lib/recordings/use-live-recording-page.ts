@@ -18,6 +18,7 @@ import {
   streamLiveRecordingWindow,
   type LiveRecordingPage,
 } from "@/lib/api/recordings";
+import { dispatchLiveTranscriptWindow } from "@/lib/recordings/live-transcript-events";
 import { docPagePath } from "@/lib/doc-page-url";
 import type { SearchableSelectItem } from "@/components/ui/searchable-select";
 
@@ -81,25 +82,44 @@ export function useLiveRecordingPage(workspaceId: string, assistantId: string) {
     });
     currentRef.current = page;
     failedWindowsRef.current = 0;
+    // The sidebar lists only refetch on their own mutation handlers plus this
+    // bus — a page created server-side by /live/start is otherwise invisible
+    // until the user navigates away and back (the mount-only-fetch trap,
+    // realtime-sync.md). Same event the chat-created-draft path fires.
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("doc:draft-created"));
+    }
     router.push(docPagePath(workspaceId, page.pageId));
     return page;
   }, [router, t, workspaceId]);
 
-  const streamWindow = useCallback(async (window: LiveWindow): Promise<void> => {
+  const streamWindow = useCallback(async (win: LiveWindow): Promise<void> => {
     const page = currentRef.current;
     if (!page) return;
+    const missedBefore = failedWindowsRef.current;
     try {
-      if (window.blob.size === 0) throw new Error("empty live window")
+      if (win.blob.size === 0) throw new Error("empty live window")
+      const chunkId = crypto.randomUUID();
       const result = await streamLiveRecordingWindow({
         workspaceId,
         assistantId,
         page,
-        chunkId: crypto.randomUUID(),
-        missedWindows: failedWindowsRef.current,
-        ...window,
+        chunkId,
+        missedWindows: missedBefore,
+        ...win,
       });
-      currentRef.current = { ...page, transcriptAfterId: result.transcriptAfterId };
       failedWindowsRef.current = 0;
+      // Same-tab pane append (other tabs converge via the pane's poll).
+      if (!result.duplicate) {
+        dispatchLiveTranscriptWindow({
+          pageId: page.pageId,
+          chunkId,
+          offsetMs: win.startMs,
+          durationMs: win.endMs - win.startMs,
+          missedBefore,
+          lines: result.lines ?? (result.transcript ? [{ speaker: null, text: result.transcript }] : []),
+        });
+      }
     } catch {
       // Window failures are isolated. The durable local recording continues,
       // and the next independently-decodable window still gets a chance.
