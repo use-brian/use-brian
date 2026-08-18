@@ -10,6 +10,7 @@ import type {
 import { buildTool, type Tool, type ToolContext } from '../../tools/types.js'
 import {
   createDelegateDocEditTool,
+  DOC_EDIT_TIMEOUT_MS,
   isolateDocEditToolContext,
   runDocEditAgent,
   toolsForDocEditIntent,
@@ -176,6 +177,50 @@ describe('[COMP:doc/edit-agent] context-clean Doc editor', () => {
     ])
   })
 
+  it('reports PARTIAL, not completed, when the child is cut off by its turn budget after mutating', async () => {
+    // 2026-08-18: a five-section page build spent every child turn patching one
+    // section at a time, hit `max_turns`, and the isolated finalizer wrote
+    // "The page is now completed" - which the old receipt relayed as
+    // `completed` because one mutation had landed. The cutoff is structural
+    // (`terminalStop` on `turn_complete`), so the finalizer's prose can no
+    // longer stand in for a finished edit.
+    const requests: ProviderRequest[] = []
+    const seenContexts: ToolContext[] = []
+    const provider = providerFrom((request) => (
+      request.tools && request.tools.length > 0
+        ? toolTurn('patchPage', { pageId: 'page-1' })
+        : textTurn('{"message":"The page is now completed as a polished proposal."}')
+    ), requests)
+
+    const result = await runDocEditAgent({
+      provider,
+      model: 'cheap',
+      fallbackModel: 'standard',
+      systemPrompt: 'isolated editor protocol',
+      instruction: 'Write the full proposal onto the page.',
+      tools: new Map([['patchPage', patchTool(seenContexts)]]),
+      context: parentContext,
+      loadPageContext: async () => 'pageId=page-1 version=1',
+      maxTurns: 3,
+    })
+
+    expect(result.status).toBe('partial')
+    expect(result.error).toBe('max_turns')
+    expect(result.mutationTools).toEqual(['patchPage'])
+    // Three budgeted turns of patching landed - the work is not thrown away.
+    expect(seenContexts).toHaveLength(3)
+    // The summary leads with the cutoff so the parent cannot relay it as done,
+    // and still carries the finalizer's words for context.
+    expect(result.summary.startsWith('STOPPED EARLY - the page is NOT finished')).toBe(true)
+    expect(result.summary).toContain('ran out of editing turns')
+    expect(result.summary).toContain('The page is now completed as a polished proposal.')
+    // A partial is not a failure: no Standard fallback re-run (that would
+    // start over on a half-edited page), and the gateway must not flag it as
+    // an error.
+    expect(result.fallbackUsed).toBe(false)
+    expect(requests.every((request) => request.model === 'cheap')).toBe(true)
+  })
+
   it('returns an error receipt when neither attempt mutates', async () => {
     const requests: ProviderRequest[] = []
     const provider = providerFrom((request) => (
@@ -218,7 +263,7 @@ describe('[COMP:doc/edit-agent] context-clean Doc editor', () => {
     })
 
     expect(tool.name).toBe('delegateDocEdit')
-    expect(tool.timeoutMs).toBe(180_000)
+    expect(tool.timeoutMs).toBe(DOC_EDIT_TIMEOUT_MS)
     expect(tool.inputSchema.safeParse({
       intent: 'edit',
       pageId: 'page-1',
