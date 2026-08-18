@@ -460,4 +460,5 @@ export type BrowserUseLlmConfig = {
   apiKey: string
   model: string
   baseUrl?: string
+  useVision?: boolean
 }

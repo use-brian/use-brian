@@ -41,6 +41,7 @@ function deps(over: Partial<RecordingSynthesizerDeps> = {}): RecordingSynthesize
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     provider: {} as any,
     model: 'gemini-flash',
+    resolveLlm: null,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     savedViewStore: {} as any,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -93,6 +94,32 @@ describe('[COMP:api/recording-synthesizer] createRecordingSynthesizer', () => {
     expect(docTools.has('renderPage')).toBe(false)
     expect(docTools.has('patchPage')).toBe(true)
     expect(docTools.has('getCurrentPage')).toBe(true)
+  })
+
+  it('uses the execution-time workspace runtime for recording synthesis', async () => {
+    const customProvider = { stream: vi.fn() }
+    const resolveLlm = vi.fn().mockResolvedValue({
+      provider: customProvider,
+      model: 'custom:profile-1',
+      modelTier: 'standard',
+      providerKeySource: 'user',
+      inputTokenLimit: 12000,
+      maxTokens: 2000,
+    })
+    await createRecordingSynthesizer(deps({
+      provider: { stream: vi.fn(() => { throw new Error('platform must not run') }) } as never,
+      resolveLlm,
+      resolveWorkspaceBlueprint: vi.fn().mockResolvedValue({ body: 'WS BODY' }),
+    }))(ARGS)
+    expect(resolveLlm).toHaveBeenCalledWith('ws-1')
+    expect(synthesizeMock.mock.calls[0][3]).toMatchObject({
+      provider: customProvider,
+      model: 'custom:profile-1',
+      modelTier: 'standard',
+      providerKeySource: 'user',
+      inputTokenLimit: 12000,
+      maxTokens: 2000,
+    })
   })
 
   it('returns null without running synthesis when the blueprint is unresolved', async () => {

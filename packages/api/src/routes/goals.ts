@@ -50,6 +50,7 @@ export type GoalsRouteOptions = {
    *  `{ ok: false, needsClarification, question }` for a goal too vague to
    *  verify, instead of arming it. Absent (OSS / no provider) → gate skipped. */
   assessClarity?: GoalClarityAssessor
+  resolveAssistantId?: (userId: string, workspaceId: string) => Promise<string | undefined>
 }
 
 // Derived from the core registries (single source of truth — no hand-listed
@@ -191,11 +192,14 @@ export function goalsRoutes(opts: GoalsRouteOptions): Router {
     // agent couldn't work; surface the clarifying question for the user.
     if (opts.assessClarity) {
       const effectiveBrief = brief ?? existing.brief ?? undefined
+      const assistantId = await opts.resolveAssistantId?.(userId, existing.workspaceId)
       const verdict = await opts.assessClarity({
         outcome: outcome ?? existing.outcome,
         verification: effectiveBrief?.verification,
         approach: effectiveBrief?.approach,
         userId,
+        workspaceId: existing.workspaceId,
+        assistantId,
       })
       if (!verdict.clear) {
         res.json({ ok: false, needsClarification: true, question: verdict.clarifyingQuestion ?? null })

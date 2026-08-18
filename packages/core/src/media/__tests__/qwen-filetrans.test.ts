@@ -119,6 +119,35 @@ describe('[COMP:media/transcriber-qwen] qwenFiletransTranscriber', () => {
     expect(res.utterances[0].text).toBe('ok')
   })
 
+  it('normalizes a compatible-mode base URL and honors the filetrans model override', async () => {
+    const { fetchFn, calls } = scriptedFetch([
+      () => mockResponse({ output: { task_id: 'regional-task' } }),
+      () => mockResponse({
+        output: {
+          task_status: 'SUCCEEDED',
+          result: { transcription_url: 'https://results.example.com/regional.json' },
+        },
+      }),
+      () => mockResponse({
+        transcripts: [{ sentences: [{ begin_time: 0, end_time: HOUR_MS, text: 'ok' }] }],
+      }),
+    ])
+    const transcriber = qwenFiletransTranscriber({
+      apiKey: 'key',
+      baseUrl: 'https://dashscope.example/compatible-mode/v1/',
+      model: 'regional-filetrans',
+      pollIntervalMs: 0,
+      fetchFn,
+    })
+
+    await transcriber.transcribe(REQ)
+
+    expect(transcriber.name).toBe('dashscope:regional-filetrans')
+    expect(calls[0].url).toBe('https://dashscope.example/api/v1/services/audio/asr/transcription')
+    expect(JSON.parse(calls[0].init!.body as string).model).toBe('regional-filetrans')
+    expect(calls[1].url).toBe('https://dashscope.example/api/v1/tasks/regional-task')
+  })
+
   it('throws before any network call when sourceUrl is missing (ladder falls through)', async () => {
     const { fetchFn } = scriptedFetch([() => mockResponse({})])
     const t = qwenFiletransTranscriber({ apiKey: 'k', pollIntervalMs: 0, fetchFn })

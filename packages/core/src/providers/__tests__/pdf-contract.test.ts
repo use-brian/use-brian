@@ -182,6 +182,7 @@ describe('[COMP:providers/pdf-contract] every registered provider handles a PDF 
     }
     const wrapped = wrapDocumentAdaptation(inner, {
       nativePdf: false,
+      vision: true,
       distill: { configKey: 'k', distill: async () => ({ text: 'transcribed', model: 'm' }) },
     })
 

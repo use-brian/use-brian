@@ -46,6 +46,7 @@ export type DocThemesRouteOptions = {
   provider?: LLMProvider
   /** Servable background-lane model, resolved at boot. */
   backgroundModel?: string
+  resolveBackgroundRuntime?: import('../custom-llm-runtime.js').BackgroundRuntimeResolver
 }
 
 /**
@@ -147,7 +148,12 @@ export function docThemesRoutes(opts: DocThemesRouteOptions): Router {
     } else {
       prompt = (parsed.data as { prompt: string }).prompt
       try {
-        generated = await generateCustomTheme({ provider: opts.provider!, prompt, model: opts.backgroundModel })
+        const runtime = await opts.resolveBackgroundRuntime?.(workspaceId)
+        generated = await generateCustomTheme({
+          provider: runtime?.provider ?? opts.provider!,
+          prompt,
+          model: runtime?.selector ?? opts.backgroundModel,
+        })
       } catch (err) {
         if (err instanceof ThemeGenerationError) {
           return res.status(422).json({ error: err.message })
@@ -215,9 +221,10 @@ export function docThemesRoutes(opts: DocThemesRouteOptions): Router {
 
     let refined
     try {
+      const runtime = await opts.resolveBackgroundRuntime?.(theme.workspaceId)
       refined = await refineCustomTheme({
-        provider: opts.provider,
-        model: opts.backgroundModel,
+        provider: runtime?.provider ?? opts.provider,
+        model: runtime?.selector ?? opts.backgroundModel,
         currentSeed: theme.seed,
         instruction: parsed.data.instruction,
       })

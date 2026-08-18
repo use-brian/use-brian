@@ -357,6 +357,8 @@ describeIf('[COMP:api/synthesize] structural-synthesis engine (integration)', ()
     return {
       provider: mockProvider('PLACEHOLDER'), // replaced per-test once pageId is known
       model: 'mock-model',
+      modelTier: 'standard',
+      providerKeySource: 'platform',
       sourceTool,
       buildDocTools,
       brainWriteTools,

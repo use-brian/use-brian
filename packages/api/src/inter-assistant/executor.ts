@@ -565,6 +565,15 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       }
     }
 
+    const backgroundLlmRuntime = calleeAssistant.workspaceId && options.resolveWorkspaceCustomLlm
+      ? await options.resolveWorkspaceCustomLlm({
+          workspaceId: calleeAssistant.workspaceId,
+          requestedTier: 'standard',
+          allowDefault: true,
+          allowAnyDefault: true,
+        })
+      : null
+
     // Page-anchored consult: inject the doc tools so the callee runs
     // doc-anchored, like an interactive doc chat turn. Injected in the same
     // slot as feed tools — BEFORE the confirmation strip + mode filter +
@@ -589,9 +598,30 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         },
         docSurface: true,
         pageId: params.pageAnchorId,
-        provider: options.provider,
-        backgroundModel: BACKGROUND_MODEL,
-        fallbackModel: MODEL_MAP.standard,
+        provider: backgroundLlmRuntime?.provider ?? options.provider,
+        backgroundModel: backgroundLlmRuntime?.selector ?? BACKGROUND_MODEL,
+        // A selected custom endpoint is authoritative for both attempts. The
+        // child must never fall back from custom to the platform Standard lane.
+        fallbackModel: backgroundLlmRuntime?.selector ?? MODEL_MAP.standard,
+        onEditUsage: async ({ model: servedModel, usage }) => {
+          if (!options.usageStore) return
+          await options.usageStore.recordUsage({
+            userId: calleeActorUserId,
+            assistantId: calleeAssistant.id,
+            workspaceId: calleeAssistant.workspaceId ?? undefined,
+            sessionId: session.id,
+            model: servedModel,
+            modelTier: 'standard',
+            inputTokens: usage.inputTokens,
+            outputTokens: usage.outputTokens,
+            cacheReadTokens: usage.cacheReadTokens,
+            cacheWriteTokens: usage.cacheWriteTokens,
+            actualCostUsd: backgroundLlmRuntime ? 0 : calculateCost(servedModel, usage),
+            source: 'overhead:doc-edit',
+            triggerKey: 'doc_edit_worker',
+            providerKeySource: backgroundLlmRuntime ? 'user' : 'platform',
+          })
+        },
         savedViewStore: options.savedViewStore,
       })
     }
@@ -1185,15 +1215,6 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     }
 
     const fullSystemPrompt = `${systemPrompt}${docAnchorBlock}${priorRunMemoryBlock}${workflowGuardBlock}${recordCreationGuardBlock}${automatedToolPolicyBlock}${unavailableBlock}${skillPromptFragment}${blueprintPromptFragment}\n\n# Context\nCurrent date and time: ${currentDateTime}\nTimezone: ${calleeOwner.timezone}\n\n${memoryContext}`
-    const backgroundLlmRuntime = calleeAssistant.workspaceId && options.resolveWorkspaceCustomLlm
-      ? await options.resolveWorkspaceCustomLlm({
-          workspaceId: calleeAssistant.workspaceId,
-          requestedTier: 'standard',
-          allowDefault: true,
-          allowAnyDefault: true,
-        })
-      : null
-
     // 6. Build messages and run the query loop.
     //
     // Persist the user turn first, then build the message list. A durable

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { createSchedulingTools } from '../tools.js'
 import type { JobStore, ScheduledJob } from '../types.js'
 import type { StructuredSchedule } from '../schedule.js'
@@ -242,6 +242,31 @@ describe('[COMP:scheduling/tools] createScheduledJob', () => {
     const data = result.data as { id: string; nextRun: string }
     expect(data.id).toBe('job_1')
     expect(data.nextRun).toBeDefined()
+  })
+
+  it('uses the workspace runtime for workflow auto-title', async () => {
+    const store = makeFakeJobStore()
+    const workflowStore = makeFakeWorkflowStore()
+    const platformProvider = { stream: vi.fn(async function* () { throw new Error('platform must not run') }) }
+    const customProvider = {
+      stream: vi.fn(async function* () { yield { type: 'text_delta' as const, text: 'Custom reminder title' } }),
+    }
+    const resolveLlm = vi.fn().mockResolvedValue({ provider: customProvider, model: 'custom:model' })
+    const { createScheduledJob } = createSchedulingTools({
+      jobStore: store,
+      workflowStore,
+      provider: platformProvider as never,
+      resolveLlm,
+    })
+    await createScheduledJob.execute({
+      schedule: { type: 'daily', time: '09:00' },
+      timezone: 'UTC',
+      instructions: 'Send daily weather',
+    }, ctx)
+    expect(resolveLlm).toHaveBeenCalledWith('w1')
+    expect(platformProvider.stream).not.toHaveBeenCalled()
+    expect(customProvider.stream).toHaveBeenCalledWith(expect.objectContaining({ model: 'custom:model' }))
+    expect(workflowStore.rows[0]?.name).toBe('Custom reminder title')
   })
 
   it('builds the reminder workflow on the Pro tier by default', async () => {

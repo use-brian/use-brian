@@ -74,6 +74,9 @@ export type SensitivityClassifierOptions = {
   provider: LLMProvider
   /** Flash-class model id (e.g. 'gemini-flash'). */
   model: string
+  inputTokenLimit?: number
+  maxTokens?: number
+  onUsage?: (model: string, usage: TokenUsage) => void | Promise<void>
   /**
    * Optional analytics logger. When present and drift is detected, the
    * classifier emits `sensitivity_drift_flagged`. Absent in tests / one-off
@@ -165,12 +168,14 @@ export async function classifySensitivity(
         model,
         systemPrompt: SYSTEM_PROMPT,
         messages: [{ role: 'user', content: buildPrompt(input) }],
-        maxTokens: 500,
+        maxTokens: Math.min(opts.maxTokens ?? 500, 500),
+        inputTokenLimit: opts.inputTokenLimit,
         temperature: 0.1,
       }),
     )
 
     usage = response.usage
+    await opts.onUsage?.(response.model || model, response.usage)
 
     const text = response.content
       .filter((b) => b.type === 'text')
@@ -223,7 +228,7 @@ export async function classifySensitivity(
       briefReason,
       drifted,
       usage,
-      model,
+      model: response.model || model,
     }
   } catch (err) {
     console.warn(

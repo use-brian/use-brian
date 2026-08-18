@@ -90,6 +90,7 @@ type DraftAppOptions = {
   voiceTranscription?: PreflightOptions
   communityRegistry?: import('@use-brian/core').SkillContent[]
   nativeInstall?: boolean
+  resolveWorkspaceCustomLlm?: import('../../custom-llm-runtime.js').WorkspaceCustomLlmResolver
 }
 
 function draftApp(opts: DraftAppOptions = {}) {
@@ -99,6 +100,7 @@ function draftApp(opts: DraftAppOptions = {}) {
       skillStore: skillStore as never,
       workspaceStore: workspaceStore as never,
       draftProvider: opts.provider,
+      resolveWorkspaceCustomLlm: opts.resolveWorkspaceCustomLlm,
       getDraftContext,
       draftRateLimiter: (opts.limiter ?? { check: () => true }) as never,
       researchRateLimiter: (opts.researchLimiter ?? { check: () => true }) as never,
@@ -213,6 +215,25 @@ describe('[COMP:api/skills-route] POST /draft', () => {
     const last = capture.messages![capture.messages!.length - 1]
     expect(textOf(last)).toContain('## Current draft')
     expect(textOf(last)).toContain('2. draft')
+  })
+
+  it('uses the workspace runtime without calling a throwing platform provider', async () => {
+    const platformProvider = mockProvider(VALID_DRAFT)
+    platformProvider.stream = vi.fn(async function* () { throw new Error('platform must not run') })
+    const customProvider = mockProvider(VALID_DRAFT)
+    const customStream = vi.spyOn(customProvider, 'stream')
+    const resolveWorkspaceCustomLlm = vi.fn().mockResolvedValue({
+      provider: customProvider,
+      selector: 'custom:profile-1',
+      modelTier: 'pro',
+    })
+    const res = await request(draftApp({ provider: platformProvider, resolveWorkspaceCustomLlm }))
+      .post('/api/skills/draft')
+      .send(turnBody({ model: 'pro' }))
+    expect(res.status).toBe(200)
+    expect(resolveWorkspaceCustomLlm).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: 'w-1', requestedTier: 'pro' }))
+    expect(platformProvider.stream).not.toHaveBeenCalled()
+    expect(customStream).toHaveBeenCalledWith(expect.objectContaining({ model: 'custom:profile-1' }))
   })
 
   it('plan-gates the model tier like /api/chat: free plan downgrades a max request, paid plans honour it', async () => {

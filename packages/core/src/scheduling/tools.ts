@@ -89,6 +89,8 @@ export type SchedulingToolDeps = {
   provider?: LLMProvider
   /** Servable background-lane model for the auto-titler; omitted = its default. */
   backgroundModel?: string
+  /** Workspace-owned text runtime for the auto-title call. */
+  resolveLlm?: (workspaceId: string) => Promise<{ provider: LLMProvider; model: string } | null>
   /**
    * Optional — resolves a job's stored `(channelType, channelId)` into a
    * human-readable delivery target the tools echo back as `deliveryTarget`,
@@ -366,15 +368,16 @@ export function createSchedulingTools(deps: SchedulingToolDeps): {
         const ac = new AbortController()
         const timer = setTimeout(() => ac.abort(), AUTO_TITLE_TIMEOUT_MS)
         try {
+          const runtime = await deps.resolveLlm?.(context.workspaceId)
           const result = await generateWorkflowTitle(
-            deps.provider,
+            runtime?.provider ?? deps.provider,
             {
               instructions: input.instructions,
               schedule,
               timezone,
             },
             ac.signal,
-            deps.backgroundModel,
+            runtime?.model ?? deps.backgroundModel,
           )
           if (result.title) {
             const written = await workflowStore.updateAutoName(

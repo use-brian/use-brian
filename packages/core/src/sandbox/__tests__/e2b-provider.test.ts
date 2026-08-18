@@ -419,6 +419,45 @@ describe('[COMP:sandbox/e2b-cloud] runBrowserUse — the 0.13 python driver lane
     }
   })
 
+  it('forwards OpenAI-compatible config and no-vision only to the driver exec', async () => {
+    const { runtime, commands, files } = fakeRuntime((cmd) =>
+      cmd === cli.getCdpUrl()
+        ? { stdout: 'http://127.0.0.1:9222\n', stderr: '', exitCode: 0 }
+        : undefined,
+    )
+    const provider = createE2bCloudProvider(runtime, {
+      browserUse: {
+        apiKeyEnvName: 'OPENAI_API_KEY',
+        apiKey: 'dashscope-test-key',
+        model: 'qwen-test-model',
+        baseUrl: 'https://dashscope.example/compatible-mode/v1',
+        useVision: false,
+      },
+    })
+    const { sandboxId } = await provider.create({ workspaceId: 'w', taskId: 't' })
+
+    await provider.runBrowserUse(sandboxId, { goal: 'browse without screenshots' })
+
+    const exec = commands.find((c) => c.cmd.includes('.bu/driver.py'))
+    expect(exec?.envs).toMatchObject({
+      OPENAI_API_KEY: 'dashscope-test-key',
+      OPENAI_BASE_URL: 'https://dashscope.example/compatible-mode/v1',
+      BU_MODEL: 'qwen-test-model',
+      BU_USE_VISION: 'false',
+    })
+    for (const command of commands) {
+      if (command === exec) continue
+      expect(command.envs?.OPENAI_API_KEY).toBeUndefined()
+      expect(command.envs?.OPENAI_BASE_URL).toBeUndefined()
+      expect(command.envs?.BU_MODEL).toBeUndefined()
+      expect(command.envs?.BU_USE_VISION).toBeUndefined()
+    }
+
+    const driver = new TextDecoder().decode(files.get(`${SCRATCH_DIR}/.bu/driver.py`))
+    expect(driver).toContain("os.environ.get('BU_USE_VISION') == 'false'")
+    expect(driver).toContain("agent_kwargs['use_vision'] = False")
+  })
+
   it('refuses honestly when no exploration LLM is configured (no argparse death in the VM)', async () => {
     const { runtime } = fakeRuntime()
     const provider = createE2bCloudProvider(runtime)

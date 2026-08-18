@@ -30,6 +30,7 @@ import type { BuTraceStep } from '../../types.js'
  *   BU_OUT_PATH    where the driver writes the agent's final answer text
  *   BU_MAX_STEPS   step budget for the agentic loop
  *   BU_MODEL       model id (threaded from boot — never hardcoded in-tree)
+ *   BU_USE_VISION  optional; exactly "false" disables Agent vision
  *   plus exactly one of ANTHROPIC_API_KEY / GOOGLE_API_KEY / OPENAI_API_KEY,
  *   which selects the chat-model class.
  */
@@ -98,11 +99,14 @@ async def _main():
     max_steps = int(os.environ.get('BU_MAX_STEPS', '40'))
     llm = _make_llm(os.environ['BU_MODEL'])
     browser = _make_browser(os.environ['BU_CDP_URL'])
+    agent_kwargs = {'task': goal, 'llm': llm}
+    if os.environ.get('BU_USE_VISION') == 'false':
+        agent_kwargs['use_vision'] = False
 
     try:
-        agent = Agent(task=goal, llm=llm, browser=browser)
+        agent = Agent(browser=browser, **agent_kwargs)
     except TypeError:
-        agent = Agent(task=goal, llm=llm, browser_session=browser)
+        agent = Agent(browser_session=browser, **agent_kwargs)
     history = await agent.run(max_steps=max_steps)
 
     # Save the run history VERBATIM - the host-side mapper owns the schema.

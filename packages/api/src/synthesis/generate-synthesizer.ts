@@ -42,6 +42,7 @@ import {
   createRecordPageProjector,
   synthesizeFromSource,
   type SynthesisBlueprint,
+  type SynthesisLlmRuntime,
 } from './synthesize.js'
 import { extractionToBlueprintBody } from './blueprint-from-template.js'
 import { blueprintSubjectAnchorKey } from './blueprint-record-tools.js'
@@ -51,6 +52,7 @@ import type { BlueprintRecordStore } from '../db/blueprint-records-store.js'
 export type GenerateSynthesizerDeps = {
   provider: LLMProvider
   model: string
+  resolveLlm: ((workspaceId: string) => Promise<SynthesisLlmRuntime | null>) | null
   savedViewStore: SavedViewStore
   docPageStore: DocPageStore
   crmStore: CrmStore
@@ -233,6 +235,7 @@ export function createGenerateSynthesizer(deps: GenerateSynthesizerDeps): Genera
 
     // 4. Run. Page-first + idempotent on the (workspace, blueprint, subject)
     //    anchor — the same key a MAINTAIN schedule reuses to keep ONE page current.
+    const runtime = deps.resolveLlm ? await deps.resolveLlm(args.workspaceId) : null
     return synthesizeFromSource(
       {
         kind: 'brain',
@@ -253,8 +256,12 @@ export function createGenerateSynthesizer(deps: GenerateSynthesizerDeps): Genera
         recordSubject: args.subject,
       },
       {
-        provider: deps.provider,
-        model: deps.model,
+        provider: runtime?.provider ?? deps.provider,
+        model: runtime?.model ?? deps.model,
+        modelTier: runtime?.modelTier ?? 'standard',
+        providerKeySource: runtime?.providerKeySource ?? 'platform',
+        inputTokenLimit: runtime?.inputTokenLimit,
+        maxTokens: runtime?.maxTokens,
         sourceTool,
         buildDocTools,
         brainWriteTools,

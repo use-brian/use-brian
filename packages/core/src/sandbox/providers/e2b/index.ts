@@ -519,6 +519,7 @@ export function createE2bCloudProvider(
           BU_MAX_STEPS: String(req.maxSteps ?? 40),
           BU_MODEL: bu.model,
           ...(bu.baseUrl ? { OPENAI_BASE_URL: bu.baseUrl } : {}),
+          ...(bu.useVision === false ? { BU_USE_VISION: 'false' } : {}),
           // Per-run key injection — the documented no-ambient-secrets
           // exception (see E2bCloudProviderConfig.browserUse).
           [bu.apiKeyEnvName]: bu.apiKey,

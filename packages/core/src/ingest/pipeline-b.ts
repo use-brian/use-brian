@@ -974,7 +974,11 @@ async function judgeTaskReadinessSlice(
         systemPrompt: TASK_READINESS_SYSTEM_PROMPT,
         messages: [{ role: 'user', content: buildTaskReadinessPrompt(content, tasks, taskPolicy) }],
         maxTokens:
-          TASK_READINESS_THINKING_TOKENS + tasks.length * TASK_READINESS_TOKENS_PER_CANDIDATE,
+          Math.min(
+            deps.maxTokens ?? TASK_READINESS_THINKING_TOKENS + tasks.length * TASK_READINESS_TOKENS_PER_CANDIDATE,
+            TASK_READINESS_THINKING_TOKENS + tasks.length * TASK_READINESS_TOKENS_PER_CANDIDATE,
+          ),
+        inputTokenLimit: deps.inputTokenLimit,
         temperature: 0,
         responseFormat: 'json',
         responseSchema: TASK_READINESS_RESPONSE_SCHEMA,
@@ -982,6 +986,7 @@ async function judgeTaskReadinessSlice(
       }),
     )
     await recordExtractionUsage(deps, episode, response.usage, {
+      model: response.model || deps.model,
       source: 'overhead:classifier',
       triggerKey: 'pipeline_b_task_readiness',
     })
@@ -1545,7 +1550,9 @@ export async function processEpisode(
         extractionUsage = response.usage
         // Attribute the spend the moment usage is known — failed-parse
         // attempts still consumed these tokens.
-        await recordExtractionUsage(deps, episode, response.usage)
+        await recordExtractionUsage(deps, episode, response.usage, {
+          model: response.model || deps.model,
+        })
         // `'incomplete'` counts as truncation: the stream ended without the
         // provider ever saying why, so the JSON may simply stop mid-object —
         // the same failure the cap produces, just unannounced. Classifying it
@@ -1937,6 +1944,15 @@ export async function processEpisode(
       sensitivity = await classifySensitivity({
         provider: deps.provider,
         model: classifierModel,
+        inputTokenLimit: deps.inputTokenLimit,
+        maxTokens: deps.maxTokens,
+        // Record immediately after collection so malformed classifier JSON
+        // cannot discard tokens or the actual serving-model identity.
+        onUsage: (model, usage) => recordExtractionUsage(deps, episode, usage, {
+          model,
+          source: 'overhead:classifier',
+          triggerKey: 'sensitivity_classifier',
+        }),
         analytics: deps.analytics,
         input: {
           episodeId: episode.id,
@@ -1947,19 +1963,6 @@ export async function processEpisode(
           summary: payload.summary,
           memories: memoriesWritten.map((m) => ({ summary: m.summary })),
         },
-      })
-      // Meter it. This call was invisible to the ledger until migration 365's
-      // audit; it fires once per ingested episode, so it is the highest-count
-      // LLM call in the system. Best-effort, exactly like extraction — a
-      // metering failure must never break ingestion.
-      // `classifySensitivity` returns NULL when it throws internally, so this
-      // must be null-safe: metering is instrumentation and may never be the
-      // thing that breaks an ingest. `recordExtractionUsage` already no-ops on
-      // a null usage, so the guard only has to survive the property read.
-      await recordExtractionUsage(deps, episode, sensitivity?.usage ?? null, {
-        model: sensitivity?.model ?? classifierModel,
-        source: 'overhead:classifier',
-        triggerKey: 'sensitivity_classifier',
       })
     }
   }
