@@ -247,15 +247,57 @@ describe('[COMP:api/whatsapp-byon-route] internal routing', () => {
     )
   })
 
-  it('falls back to workspace storage when no digest is offered', async () => {
-    // Without a digest no archive signature can be produced, so the older
-    // upload-then-read-back path must still work rather than failing the send.
+  it('names the archive before a digest exists, without issuing a URL yet', async () => {
+    // The connector's first call asks only where the bytes belong; it cannot
+    // know the digest until it has read the attachment. Answering with a
+    // workspace URL here would silently send it down the read-back path and
+    // keep the duplicate copy — which is exactly what happened in testing.
+    const uploadTarget = vi.fn()
+    const signedWriteUrl = vi.fn()
+    const app = express()
+    app.use(express.json())
+    app.use('/internal/whatsapp', whatsappByonRoutes({
+      connectorSecret: 'secret',
+      integrationStore: {
+        getByChannelForWebhook: vi.fn(async () => ({ connectorInstanceId: 'instance-1' })),
+      } as never,
+      ingestor: {} as never,
+      bot: {} as never,
+      archiveMedia: { storeBuffer: vi.fn(), uploadTarget } as never,
+      filesResolver: {
+        forWorkspace: vi.fn(async () => ({
+          gcs: { signedWriteUrl }, bucket: '/data/files', uriScheme: 'file' as const,
+        })),
+      } as never,
+      getChannel: vi.fn(async () => ({ workspaceId: 'ws-1' })) as never,
+      getWorkspaceOwnerUserId: vi.fn(async () => 'owner-1'),
+    }))
+
+    const response = await request(app)
+      .post('/internal/whatsapp/media-upload-url')
+      .set('X-Connector-Secret', 'secret')
+      .send({ channelId: 'byon-channel', providerMessageId: 'm1', kind: 'video', mime: 'video/mp4' })
+
+    expect(response.status).toBe(200)
+    expect(response.body.target).toBe('archive')
+    expect(response.body.uploadUrl).toBeUndefined()
+    expect(uploadTarget).not.toHaveBeenCalled()
+    // No workspace object is minted, so nothing is left behind if the connector
+    // never comes back with a digest.
+    expect(signedWriteUrl).not.toHaveBeenCalled()
+  })
+
+  it('falls back to workspace storage when the archive owner cannot be resolved', async () => {
+    // Without an owner there is nothing to scope a signature to, so the older
+    // upload-then-read-back path must still carry the attachment.
     const signedWriteUrl = vi.fn(async () => 'http://localhost:4000/api/local-files?signed=1')
     const app = express()
     app.use(express.json())
     app.use('/internal/whatsapp', whatsappByonRoutes({
       connectorSecret: 'secret',
-      integrationStore: {} as never,
+      integrationStore: {
+        getByChannelForWebhook: vi.fn(async () => ({ connectorInstanceId: 'instance-1' })),
+      } as never,
       ingestor: {} as never,
       bot: {} as never,
       archiveMedia: { storeBuffer: vi.fn(), uploadTarget: vi.fn() } as never,
@@ -265,12 +307,13 @@ describe('[COMP:api/whatsapp-byon-route] internal routing', () => {
         })),
       } as never,
       getChannel: vi.fn(async () => ({ workspaceId: 'ws-1' })) as never,
+      getWorkspaceOwnerUserId: vi.fn(async () => null),
     }))
 
     const response = await request(app)
       .post('/internal/whatsapp/media-upload-url')
       .set('X-Connector-Secret', 'secret')
-      .send({ channelId: 'byon-channel', mime: 'video/mp4' })
+      .send({ channelId: 'byon-channel', providerMessageId: 'm1', mime: 'video/mp4' })
 
     expect(response.status).toBe(200)
     expect(response.body.target).toBe('workspace')

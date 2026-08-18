@@ -192,7 +192,7 @@ export function whatsappByonRoutes(opts: WhatsappByonRoutesOptions): Router {
     // operator's disk with nothing to consume it. The archive is on-premise
     // only, so hosted keeps the workspace path below untouched: it has no
     // archive to send bytes to.
-    if (opts.archiveMedia && parsed.data.sha256 && parsed.data.providerMessageId) {
+    if (opts.archiveMedia && parsed.data.providerMessageId) {
       try {
         const integration = await opts.integrationStore.getByChannelForWebhook(parsed.data.channelId, 'whatsapp')
         const ownerUserId = await (opts.getWorkspaceOwnerUserId ?? resolveWorkspaceOwnerUserId)(channel.workspaceId)
@@ -214,6 +214,15 @@ export function whatsappByonRoutes(opts: WhatsappByonRoutesOptions): Router {
               conversationId: parsed.data.channelId,
             })
           if (instanceId) {
+            // Two-step by necessity. The signature commits to the digest, and
+            // the connector cannot know it until it has read the attachment —
+            // so the first call only says where the bytes belong. Answering
+            // with a workspace URL here instead would send it down the old
+            // path and quietly keep the duplicate copy.
+            if (!parsed.data.sha256) {
+              res.json({ target: 'archive' })
+              return
+            }
             const target = opts.archiveMedia.uploadTarget({
               workspaceId: channel.workspaceId,
               instanceId,
@@ -223,7 +232,7 @@ export function whatsappByonRoutes(opts: WhatsappByonRoutesOptions): Router {
               kind,
               filename: parsed.data.fileName ?? '',
               mime,
-              sha256: parsed.data.sha256,
+              sha256: parsed.data.sha256!,
             })
             res.json({ target: 'archive', uploadUrl: target.url, headers: target.headers })
             return
