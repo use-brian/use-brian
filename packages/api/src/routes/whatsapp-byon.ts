@@ -133,16 +133,24 @@ export function whatsappByonRoutes(opts: WhatsappByonRoutesOptions): Router {
    * once extraction produces frame text. Synthesizing from the provider message
    * id keeps it identifiable in the meantime.
    */
+  function synthesizeFilename(
+    given: string | undefined | null,
+    kind: string,
+    providerMessageId: string,
+    mime: string,
+  ): string {
+    if (given && given.trim()) return given.trim()
+    const subtype = mime.split('/')[1]?.split(';')[0]?.trim()
+    const extension = subtype && /^[a-z0-9]{1,8}$/i.test(subtype) ? `.${subtype}` : ''
+    return `${kind}-${providerMessageId}${extension}`
+  }
+
   function archiveFilename(
     input: { mediaFileName?: string; mediaRef?: { fileName?: string }; messageId: string },
     kind: string,
     mime: string,
   ): string {
-    const given = input.mediaFileName ?? input.mediaRef?.fileName
-    if (given && given.trim()) return given.trim()
-    const subtype = mime.split('/')[1]?.split(';')[0]?.trim()
-    const extension = subtype && /^[a-z0-9]{1,8}$/i.test(subtype) ? `.${subtype}` : ''
-    return `${kind}-${input.messageId}${extension}`
+    return synthesizeFilename(input.mediaFileName ?? input.mediaRef?.fileName, kind, input.messageId, mime)
   }
 
   router.post('/media-upload-url', async (req, res, next) => {
@@ -230,7 +238,16 @@ export function whatsappByonRoutes(opts: WhatsappByonRoutesOptions): Router {
               source: 'whatsapp',
               providerMessageId: parsed.data.providerMessageId,
               kind,
-              filename: parsed.data.fileName ?? '',
+              // Named here because the connector's upload is what creates the
+              // asset row. Leaving it blank strips the extension the extractor
+              // uses to identify a format when the MIME is generic — the very
+              // signal that rescues documents sent as application/octet-stream.
+              filename: synthesizeFilename(
+                parsed.data.fileName,
+                kind,
+                parsed.data.providerMessageId!,
+                mime,
+              ),
               mime,
               sha256: parsed.data.sha256!,
             })

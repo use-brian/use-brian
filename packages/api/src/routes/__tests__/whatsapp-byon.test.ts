@@ -245,6 +245,12 @@ describe('[COMP:api/whatsapp-byon-route] internal routing', () => {
     expect(uploadTarget).toHaveBeenCalledWith(
       expect.objectContaining({ ownerUserId: 'owner-1', sha256: 'c'.repeat(64), kind: 'video' }),
     )
+    // The connector's upload is what creates the asset row, so the name has to
+    // be decided here. Baileys sends none for video; leaving it blank would
+    // strip the extension the extractor falls back on when a MIME is generic.
+    expect(uploadTarget).toHaveBeenCalledWith(
+      expect.objectContaining({ filename: 'video-m1.mp4' }),
+    )
   })
 
   it('names the archive before a digest exists, without issuing a URL yet', async () => {
