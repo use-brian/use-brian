@@ -87,7 +87,7 @@ export function SearchableSelect({
         <Combobox.Value>
           {(current: SearchableSelectItem | null) =>
             current ? (
-              <span className="flex min-w-0 flex-1 items-center gap-1.5">
+              <span className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
                 <span className="truncate">{current.label}</span>
                 {current.badge && (
                   <span className="shrink-0 rounded-full border border-border bg-muted px-1.5 py-px text-[10px] font-medium leading-4 text-muted-foreground">
@@ -110,11 +110,14 @@ export function SearchableSelect({
       <Combobox.Portal>
         <Combobox.Positioner
           sideOffset={4}
-          className={cn("isolate z-50 w-(--anchor-width)", popupClassName)}
+          className={cn(
+            "isolate z-50 w-(--anchor-width) min-w-[min(18rem,var(--available-width))]",
+            popupClassName,
+          )}
         >
           <Combobox.Popup
             className={cn(
-              "relative isolate z-50 max-h-[min(18rem,var(--available-height))] w-(--anchor-width) origin-(--transform-origin) overflow-hidden rounded-lg bg-popover text-popover-foreground shadow-md ring-1 ring-foreground/10",
+              "relative isolate z-50 max-h-[min(18rem,var(--available-height))] w-(--anchor-width) min-w-[min(18rem,var(--available-width))] origin-(--transform-origin) overflow-hidden rounded-lg bg-popover text-popover-foreground shadow-md ring-1 ring-foreground/10",
               "data-[side=bottom]:slide-in-from-top-2 data-[side=top]:slide-in-from-bottom-2",
               "data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
               popupClassName,
@@ -146,7 +149,18 @@ export function SearchableSelect({
                     "data-disabled:pointer-events-none data-disabled:opacity-50",
                   )}
                 >
-                  <span className="flex min-w-0 flex-1 items-center gap-1.5">
+                  {/* The LABEL is the primary information and shrinks last: it
+                      sizes to its content (capped at 65% of the row when a hint
+                      shares the line) while the hint takes the remainder and
+                      truncates. A `shrink-0` hint instead crushes the label to
+                      nothing and pushes the `shrink-0` badge out of its own
+                      box, so label and hint render on top of each other. */}
+                  <span
+                    className={cn(
+                      "flex min-w-0 items-center gap-1.5 overflow-hidden",
+                      item.hint ? "max-w-[65%] shrink-0" : "flex-1",
+                    )}
+                  >
                     <span className="truncate">{item.label}</span>
                     {item.badge && (
                       <span className="shrink-0 rounded-full border border-border bg-muted px-1.5 py-px text-[10px] font-medium leading-4 text-muted-foreground">
@@ -155,7 +169,12 @@ export function SearchableSelect({
                     )}
                   </span>
                   {item.hint && (
-                    <span className="shrink-0 text-[11px] text-muted-foreground">{item.hint}</span>
+                    <span
+                      title={item.hint}
+                      className="min-w-0 flex-1 truncate text-right text-[11px] text-muted-foreground"
+                    >
+                      {item.hint}
+                    </span>
                   )}
                   <Combobox.ItemIndicator
                     render={
