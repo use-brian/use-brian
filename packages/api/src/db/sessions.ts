@@ -612,6 +612,35 @@ export async function reclaimStaleTurn(
 }
 
 /**
+ * Is a turn PROVABLY alive on this session right now? True only when the row
+ * is `running`, holds a lease token, and that lease was heartbeaten within
+ * `staleAfterMs`. This is the admission-time proof of life the ordinary chat
+ * path needs before it may take the slot: a client's `midTurn` flag says
+ * whether ITS stream is open, not whether the turn is; a client whose stream
+ * was cut (proxy idle timeout, reload, second tab) sends an ordinary turn
+ * while the previous one is still working, and blind-claiming the slot then
+ * mints a new lease and the live turn aborts itself as an "orphan" at its next
+ * heartbeat (2026-08-18: page builds killed 30-90s in, three times in one
+ * session). A pre-migration-424 row (NULL heartbeat) is never "live" here, so
+ * legacy rows keep the old behaviour; a stale lease is not live either - the
+ * caller reclaims it (`reclaimStaleTurn`) and proceeds.
+ */
+export async function isTurnLeaseLive(
+  sessionId: string,
+  staleAfterMs: number = TURN_LEASE_STALE_AFTER_MS,
+): Promise<boolean> {
+  const result = await query(
+    `SELECT 1 FROM sessions
+      WHERE id = $1
+        AND status = 'running'
+        AND turn_lease_token IS NOT NULL
+        AND turn_heartbeat_at >= now() - ($2 || ' milliseconds')::interval`,
+    [sessionId, String(staleAfterMs)],
+  )
+  return (result.rowCount ?? 0) > 0
+}
+
+/**
  * Reset every session whose `status='running'` lease has gone stale to
  * `status='timeout'`. Returns the rows that were touched so callers can emit
  * per-session telemetry / bus events.

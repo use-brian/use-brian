@@ -78,6 +78,10 @@ export * from './find-page.js'
 // Auto-title — shared title generator + thresholds (migration 218).
 export * from './auto-title.js'
 
+// Page-tree visibility - the titles-only "where this page sits" map (ancestors /
+// siblings / sub-pages + ids) injected beside the active-page outline.
+export * from './page-tree-context.js'
+
 // Doc comments (chat-as-threads): store contract + comment tools.
 export * from './comment-types.js'
 export * from './comment-tools.js'

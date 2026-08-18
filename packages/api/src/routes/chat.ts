@@ -4,7 +4,7 @@ import { z } from 'zod'
 import { getDefaultAssistant, getUserAssistant, getWorkspacePrimaryAssistant, getUserProfilesByIds, updateUserLastSeenTz, resolveAssistantAccess } from '../db/users.js'
 import { charterNeedsIntake, createSaveCharterTool, CHARTER_INTAKE_ADDENDUM } from '../intake/charter-intake.js'
 import { resolvePresenceTimezone } from '../auth/client-timezone.js'
-import { findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, toStampedMessages, getSessionMessages, updateSessionStatus, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels, isSharedChatSession, isMultiParticipantSession, coalesceConsecutiveUserMessages, startTurnLease, touchTurnLease, releaseTurnLease, requestTurnCancel, reclaimStaleTurn, TURN_HEARTBEAT_INTERVAL_MS, type SessionMessage } from '../db/sessions.js'
+import { findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, toStampedMessages, getSessionMessages, updateSessionStatus, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels, isSharedChatSession, isMultiParticipantSession, coalesceConsecutiveUserMessages, startTurnLease, touchTurnLease, releaseTurnLease, requestTurnCancel, reclaimStaleTurn, isTurnLeaseLive, TURN_HEARTBEAT_INTERVAL_MS, type SessionMessage } from '../db/sessions.js'
 import { query } from '../db/client.js'
 import { buildPinnedContextBlock } from '../resolve-session-pins.js'
 import { getSelfEntityId } from '../db/memories.js'
@@ -1377,6 +1377,46 @@ export function turnInputAdmission(params: {
   return 'queue'
 }
 
+/**
+ * Ordinary-session guard against taking a slot a LIVE turn still holds
+ * (migration 424 lease). Pure so the invariant is testable; the route resolves
+ * `leaseLive` with `isTurnLeaseLive` only when it matters (`status='running'`
+ * and the client did not say `midTurn`).
+ *
+ *   - `proceed` — no turn is running, or the client is mid-turn (that path
+ *                 queues into the running turn), or this is a room (rooms
+ *                 claim atomically and reclaim stale leases themselves).
+ *   - `reclaim` — the row says running but the lease is stale: the holder is
+ *                 dead. Reclaim it (recording `stalled_reclaimed`) and run.
+ *   - `reject`  — the row says running AND the lease is fresh: a turn is
+ *                 provably alive and this client just cannot see its stream
+ *                 (proxy idle cut, reload, second tab). Blind-claiming here is
+ *                 what killed page builds mid-work on 2026-08-18: the new
+ *                 `startTurnLease` mints a token, the live turn's next
+ *                 heartbeat reads `held:false`, and it aborts itself as an
+ *                 "orphan". Refuse the send instead; the live turn keeps
+ *                 working and the user is told why.
+ *
+ * `turnInputAdmission` (above) still keys queue-vs-run on the client flag, per
+ * mid-turn-input.md: a client cannot be wrong about its OWN stream. This guard
+ * covers the one direction that spec conceded - "two tabs on one session" -
+ * now that the lease makes "a live turn exists" provable rather than a stale
+ * status column.
+ */
+export type LiveTurnAdmission = 'proceed' | 'reclaim' | 'reject'
+export function liveTurnAdmission(params: {
+  status: string
+  clientMidTurn: boolean
+  isRoom: boolean
+  /** `isTurnLeaseLive` for this session - only consulted when it can matter. */
+  leaseLive: boolean
+}): LiveTurnAdmission {
+  if (params.status !== 'running') return 'proceed'
+  if (params.clientMidTurn) return 'proceed'
+  if (params.isRoom) return 'proceed'
+  return params.leaseLive ? 'reject' : 'reclaim'
+}
+
 export type RoomTurnAdmission = 'run' | 'wait' | 'fold'
 export function roomTurnAdmission(params: {
   status: string
@@ -1405,6 +1445,13 @@ export function roomTurnAdmission(params: {
  *                      still writing, and freeing the slot early would let a
  *                      second turn claim a session the first is mid-reply on.
  */
+/**
+ * SSE keepalive cadence for the chat stream. Well inside the 100s idle cut of
+ * proxies like Cloudflare, and cheap: one comment line, no event, ignored by
+ * every SSE parser (`packages/chat-ui/src/sse.ts` yields only `data:` lines).
+ */
+export const SSE_KEEPALIVE_INTERVAL_MS = 15_000
+
 export type TurnStopOutcome = 'not_running' | 'aborted' | 'reclaimed' | 'cancel_requested'
 export function turnStopOutcome(params: {
   status: string
@@ -2063,6 +2110,7 @@ export function chatRoutes(options: WebChatOptions): Router {
     let turnLeaseToken: string | null = null
     let leaseSessionId: string | null = null
     let leaseHeartbeat: ReturnType<typeof setInterval> | null = null
+    let sseKeepalive: ReturnType<typeof setInterval> | null = null
     // The token this turn registered in `activeTurnAborts`, kept SEPARATE from
     // `turnLeaseToken` because the success and catch paths null that one once
     // they have released the lock — leaving the `finally` unable to identify
@@ -2589,6 +2637,50 @@ export function chatRoutes(options: WebChatOptions): Router {
       ) => {
         sendEvent(event, data)
         publishRoomActivity(event, roomData)
+      }
+
+      // ── Live-turn guard (migration 424 lease) ─────────────────────
+      // Before an ordinary send may take the slot, prove nobody alive holds
+      // it. A fresh heartbeat means a turn is working right now and this
+      // client merely lost its stream; blind-claiming would mint a new lease
+      // and that turn would abort itself as an "orphan" at its next tick
+      // (2026-08-18: page builds killed 30-90s in). A stale lease is a dead
+      // holder - reclaim it so the end reason is recorded, then run.
+      {
+        const clientMidTurn = requestedMidTurn === true
+        const needsLeaseCheck =
+          session.status === 'running' && !clientMidTurn && !isRoomSession
+        const liveAdmission = liveTurnAdmission({
+          status: session.status,
+          clientMidTurn,
+          isRoom: isRoomSession,
+          leaseLive: needsLeaseCheck ? await isTurnLeaseLive(session.id) : false,
+        })
+        if (liveAdmission === 'reject') {
+          sendEvent('error', {
+            code: 'turn_in_flight',
+            error:
+              'Your assistant is still working on the previous message in this chat. ' +
+              'Wait for it to finish (or press Stop), then send again.',
+          })
+          res.end()
+          options.analytics?.logEvent({
+            userId: user.id, assistantId: assistant.id, sessionId: session.id,
+            eventName: 'turn_in_flight_rejected', channelType: 'web',
+            metadata: { via: sanitize('live_lease') },
+          })
+          return
+        }
+        if (liveAdmission === 'reclaim' && await reclaimStaleTurn(session.id)) {
+          console.warn(
+            `[chat] reclaimed stale turn lease on session ${session.id} at admission; running this message now`,
+          )
+          options.analytics?.logEvent({
+            userId: user.id, assistantId: assistant.id, sessionId: session.id,
+            eventName: 'turn_lease_reclaimed', channelType: 'web',
+            metadata: { via: sanitize('admission') },
+          })
+        }
       }
 
       // ── Mid-turn input (queue / steer) ────────────────────────────
@@ -4268,6 +4360,34 @@ export function chatRoutes(options: WebChatOptions): Router {
                 `confirm first. The isolated editor receives this anchor again from the server and owns ` +
                 `the block operations.`,
               )
+            }
+
+            // ── Page-tree visibility ("where this page sits") ─────────
+            // The outline above shows the OPEN page only. Users also point
+            // at pages by POSITION - "the meeting notes at the parent
+            // level", "the sub-page" - so append a titles-only map of the
+            // page's ancestors / siblings / sub-pages with their ids and
+            // the instruction to READ the referenced page (`exportPage`)
+            // instead of asking the user to paste it. Titles + ids only;
+            // never neighbour content (doc-context cost). Its own try so a
+            // tree read failure can never take the outline down with it.
+            // See doc.md → "Page-tree visibility".
+            try {
+              const [{ getPageTreeNeighborhood }, { formatPageTreeContext }] =
+                await Promise.all([
+                  import('../db/saved-views-store.js'),
+                  import('@use-brian/core'),
+                ])
+              const hood = await getPageTreeNeighborhood(user.id, requestedDocViewId)
+              const treeBlock = hood
+                ? formatPageTreeContext(
+                    { id: requestedDocViewId, title: current.title },
+                    hood,
+                  )
+                : ''
+              if (treeBlock) userVisibleContextParts.push(treeBlock)
+            } catch (err) {
+              console.error('[chat] doc page-tree injection failed:', err)
             }
           }
         } catch (err) {
@@ -6034,6 +6154,19 @@ export function chatRoutes(options: WebChatOptions): Router {
       // progress: a turn suspended on a tool confirmation is alive and must
       // keep its lease. Liveness is not progress. Whether the user is seeing
       // anything happen is a separate question, answered in the client.
+      // ── SSE keepalive ──
+      // A long tool call (a delegated page build on a slow provider ran 60-77s
+      // per model call) writes NOTHING to the stream while it runs, and an
+      // HTTP proxy in front of us (Cloudflare closes an idle response after
+      // 100s) then drops the client's connection while the turn is alive. The
+      // client sees a dead stream, the user re-sends, and the live-turn guard
+      // above has to refuse them. A comment line every 15s keeps the response
+      // non-idle; SSE parsers ignore lines starting with ':' (ours does).
+      sseKeepalive = setInterval(() => {
+        if (clientGone || res.writableEnded) return
+        res.write(': keepalive\n\n')
+      }, SSE_KEEPALIVE_INTERVAL_MS)
+
       if (turnLeaseToken) {
         const heldToken = turnLeaseToken
         abortRegistryToken = heldToken
@@ -7568,6 +7701,10 @@ export function chatRoutes(options: WebChatOptions): Router {
       if (leaseHeartbeat) {
         clearInterval(leaseHeartbeat)
         leaseHeartbeat = null
+      }
+      if (sseKeepalive) {
+        clearInterval(sseKeepalive)
+        sseKeepalive = null
       }
       // RELEASE THE LOCK. This is the exit path the pre-424 code did not have,
       // and its absence is the whole 2026-08-08 incident: `status` was cleared

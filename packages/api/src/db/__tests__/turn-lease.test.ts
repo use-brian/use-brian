@@ -37,6 +37,7 @@ import {
   releaseTurnLease,
   requestTurnCancel,
   reclaimStaleTurn,
+  isTurnLeaseLive,
   sweepStuckSessions,
   TURN_HEARTBEAT_INTERVAL_MS,
   TURN_LEASE_STALE_AFTER_MS,
@@ -192,5 +193,25 @@ describe('[COMP:api/turn-lease] ownership guards', () => {
 
     await expect(requestTurnCancel('s-1')).resolves.toBe(false)
     expect(sqlOf()).toContain("status = 'running'")
+  })
+})
+
+describe('[COMP:api/turn-lease] admission-time proof of life', () => {
+  it('isTurnLeaseLive is true only for running + token + FRESH heartbeat (never last_active_at)', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ '?column?': 1 }], rowCount: 1 } as never)
+    expect(await isTurnLeaseLive('s1')).toBe(true)
+    const sql = sqlOf()
+    expect(sql).toContain("status = 'running'")
+    expect(sql).toContain('turn_lease_token IS NOT NULL')
+    expect(sql).toContain('turn_heartbeat_at >= now()')
+    // A pre-424 row (NULL heartbeat) must NOT read as live - no COALESCE onto
+    // last_active_at here, unlike the reclaim predicates.
+    expect(sql).not.toContain('last_active_at')
+    expect(mockQuery.mock.calls[0]?.[1]).toEqual(['s1', String(TURN_LEASE_STALE_AFTER_MS)])
+  })
+
+  it('a stale or absent lease is not live, so the caller reclaims and proceeds', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    expect(await isTurnLeaseLive('s1')).toBe(false)
   })
 })

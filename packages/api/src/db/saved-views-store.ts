@@ -28,10 +28,13 @@ import type {
   SavedViewListRow,
   SavedViewStore,
   SavedViewUpdateFields,
+  PageTreeNeighbor,
+  PageTreeNeighborhood,
   ViewEntity,
   ViewState,
   ViewType,
 } from '@use-brian/core'
+import { PAGE_TREE_LIST_CAP } from '@use-brian/core'
 import { applyRLSGucs, getAppPool, query, queryWithRLS, rollbackAndRelease } from './client.js'
 
 // ── SQL projections ───────────────────────────────────────────────────
@@ -1020,6 +1023,109 @@ export async function getPageRecordingPointerSystem(
     [id],
   )
   return result.rows[0] ?? null
+}
+
+type PageTreeNeighborRow = {
+  rel: 'self' | 'teamspace' | 'ancestor' | 'sibling' | 'child'
+  id: string
+  name: string
+  icon: string | null
+  state: ViewState | null
+  /** ancestor: distance from the page (1 = parent); sibling/child: `position`. */
+  ord: number
+  /** sibling/child: the FULL count of that set (window count, pre-LIMIT). */
+  total: string | number
+}
+
+/**
+ * The page's neighbourhood in the nested page tree, for the doc chat's
+ * `# Where this page sits` block (doc.md → "Page-tree visibility"): the
+ * ancestor chain (root → parent, depth-capped), the siblings under the same
+ * parent, the direct sub-pages, and the teamspace it lives in. ONE round trip,
+ * RLS-scoped through `queryWithRLS` - workspace membership + per-page
+ * clearance already decide what the caller may see, so a hidden ancestor
+ * simply ends the walk early and a hidden sibling is absent, never leaked.
+ *
+ * Siblings of a ROOT page are the other root pages of the SAME teamspace
+ * (`nest_parent_id IS NULL` alone would mix every teamspace's roots); nested
+ * pages share their parent regardless of teamspace. Both lists are fetched to
+ * `PAGE_TREE_LIST_CAP` (the renderer's cut) plus the true total via a window
+ * count, so "…and N more" is exact. Ancestor depth is capped at 32 as a
+ * belt-and-braces stop on a corrupt (cyclic) tree - the reparent cycle guard
+ * makes one unreachable through the product.
+ *
+ * Returns `null` when the page is invisible to the caller (missing or RLS-hidden) -
+ * detected by the absence of the `self` row in the same result set.
+ */
+export async function getPageTreeNeighborhood(
+  userId: string,
+  pageId: string,
+): Promise<PageTreeNeighborhood | null> {
+  const result = await queryWithRLS<PageTreeNeighborRow>(
+    userId,
+    `WITH RECURSIVE self AS (
+       SELECT id, workspace_id, nest_parent_id, teamspace_id
+         FROM saved_views WHERE id = $1
+     ), anc AS (
+       SELECT p.id, p.name, p.icon, p.state, p.nest_parent_id, 1 AS depth
+         FROM saved_views p JOIN self s ON p.id = s.nest_parent_id
+       UNION ALL
+       SELECT p.id, p.name, p.icon, p.state, p.nest_parent_id, a.depth + 1
+         FROM saved_views p JOIN anc a ON p.id = a.nest_parent_id
+        WHERE a.depth < 32
+     ), sib AS (
+       SELECT v.id, v.name, v.icon, v.state, v.position, count(*) OVER () AS total
+         FROM saved_views v JOIN self s ON v.workspace_id = s.workspace_id
+        WHERE v.id <> s.id
+          AND v.nest_parent_id IS NOT DISTINCT FROM s.nest_parent_id
+          AND (s.nest_parent_id IS NOT NULL OR v.teamspace_id IS NOT DISTINCT FROM s.teamspace_id)
+        ORDER BY v.position ASC, v.updated_at DESC
+        LIMIT $2
+     ), kid AS (
+       SELECT v.id, v.name, v.icon, v.state, v.position, count(*) OVER () AS total
+         FROM saved_views v
+        WHERE v.nest_parent_id = $1
+        ORDER BY v.position ASC, v.updated_at DESC
+        LIMIT $2
+     )
+     SELECT 'self'::text AS rel, id, ''::text AS name, NULL::text AS icon, NULL::text AS state, 0 AS ord, 0::bigint AS total FROM self
+     UNION ALL
+     SELECT 'ancestor'::text, id, name, icon, state, depth, 0::bigint FROM anc
+     UNION ALL
+     SELECT 'sibling'::text, id, name, icon, state, position, total FROM sib
+     UNION ALL
+     SELECT 'child'::text, id, name, icon, state, position, total FROM kid
+     UNION ALL
+     SELECT 'teamspace'::text, t.id, t.name, t.icon, NULL::text, 0, 0::bigint
+       FROM teamspaces t JOIN self s ON t.id = s.teamspace_id`,
+    [pageId, PAGE_TREE_LIST_CAP],
+  )
+
+  // No `self` row = the page is missing or RLS-hidden from this caller.
+  if (!result.rows.some((r) => r.rel === 'self')) return null
+
+  const toNeighbor = (r: PageTreeNeighborRow): PageTreeNeighbor => ({
+    id: r.id,
+    title: r.name,
+    icon: r.icon,
+    state: r.state,
+  })
+  const ancestors = result.rows
+    .filter((r) => r.rel === 'ancestor')
+    .sort((a, b) => b.ord - a.ord) // deepest first = root first
+    .map(toNeighbor)
+  const sibRows = result.rows.filter((r) => r.rel === 'sibling').sort((a, b) => a.ord - b.ord)
+  const kidRows = result.rows.filter((r) => r.rel === 'child').sort((a, b) => a.ord - b.ord)
+  const teamspaceRow = result.rows.find((r) => r.rel === 'teamspace')
+
+  return {
+    teamspace: teamspaceRow ? { id: teamspaceRow.id, name: teamspaceRow.name } : null,
+    ancestors,
+    siblings: sibRows.map(toNeighbor),
+    siblingTotal: sibRows.length > 0 ? Number(sibRows[0].total) : 0,
+    children: kidRows.map(toNeighbor),
+    childTotal: kidRows.length > 0 ? Number(kidRows[0].total) : 0,
+  }
 }
 
 /** How a `child_page` target is reachable from a shared page (doc.md "Subtree
