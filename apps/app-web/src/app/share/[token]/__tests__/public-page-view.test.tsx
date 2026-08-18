@@ -19,7 +19,7 @@ import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
 import type { PublicComment } from "@/lib/api/public-share";
-import { commentThreadIdAt, MobileCommentDrawer } from "../public-page-view";
+import { commentThreadIdAt, MobileCommentDrawer, SharedPageEmptyBody } from "../public-page-view";
 
 const dict = en as unknown as Dictionary;
 
@@ -89,5 +89,15 @@ describe("[COMP:app-web/share-dialog] MobileCommentDrawer", () => {
     // The wrapper is xl:hidden (rail covers wide screens) and aria-hidden.
     expect(html).toContain("xl:hidden");
     expect(html).toContain('aria-hidden="true"');
+  });
+});
+
+describe("[COMP:app-web/share-dialog] SharedPageEmptyBody", () => {
+  it("renders the localized empty-page line inside the styled shell", () => {
+    const html = wrap(<SharedPageEmptyBody />);
+    expect(html).toContain('data-testid="shared-page-empty"');
+    expect(html).toContain(en.sharedPage.emptyBody);
+    // Muted, not an error state: an empty published page is a valid page.
+    expect(html).toContain("text-muted-foreground");
   });
 });
