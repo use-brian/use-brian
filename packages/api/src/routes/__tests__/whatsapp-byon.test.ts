@@ -173,6 +173,110 @@ describe('[COMP:api/whatsapp-byon-route] internal routing', () => {
     },
   }
 
+  it('records an attachment the connector already uploaded to the archive', async () => {
+    // On-premise the connector uploads straight to the store under a signature
+    // this process minted, so the bytes are stored before /inbound is called.
+    // Re-fetching or re-uploading them would be pure waste.
+    const { app, captured, storeBuffer, readBlob } = streamedApp()
+
+    const response = await request(app)
+      .post('/internal/whatsapp/inbound')
+      .set('X-Connector-Secret', 'secret')
+      .send({
+        ...payload,
+        text: '<media:video>',
+        mediaMimeType: 'video/mp4',
+        mediaRef: {
+          archiveAssetId: '4a1e6bd8-0000-4000-8000-000000000009',
+          sha256: 'b'.repeat(64),
+          mimeType: 'video/mp4',
+          sizeBytes: 9,
+        },
+      })
+
+    expect(response.status).toBe(200)
+    expect(readBlob).not.toHaveBeenCalled()
+    expect(storeBuffer).not.toHaveBeenCalled()
+    expect(captured[0]!.archiveMediaRef).toMatchObject({
+      assetId: '4a1e6bd8-0000-4000-8000-000000000009',
+      sha256: 'b'.repeat(64),
+    })
+    expect(captured[0]).toMatchObject({ archiveMediaType: 'video' })
+  })
+
+  it('mints a signed archive upload target once the digest is known', async () => {
+    const uploadTarget = vi.fn(() => ({
+      url: 'http://store.test/media?sha256=' + 'c'.repeat(64),
+      headers: { 'X-UB-Signature': 'sha256=abc' },
+    }))
+    const app = express()
+    app.use(express.json())
+    app.use('/internal/whatsapp', whatsappByonRoutes({
+      connectorSecret: 'secret',
+      integrationStore: {
+        getByChannelForWebhook: vi.fn(async () => ({ connectorInstanceId: 'instance-1' })),
+      } as never,
+      ingestor: {} as never,
+      bot: {} as never,
+      archiveMedia: { storeBuffer: vi.fn(), uploadTarget } as never,
+      filesResolver: { forWorkspace: vi.fn() } as never,
+      getChannel: vi.fn(async () => ({ workspaceId: 'ws-1' })) as never,
+      getWorkspaceOwnerUserId: vi.fn(async () => 'owner-1'),
+    }))
+
+    const response = await request(app)
+      .post('/internal/whatsapp/media-upload-url')
+      .set('X-Connector-Secret', 'secret')
+      .send({
+        channelId: 'byon-channel',
+        providerMessageId: 'm1',
+        kind: 'video',
+        mime: 'video/mp4',
+        sha256: 'c'.repeat(64),
+      })
+
+    expect(response.status).toBe(200)
+    expect(response.body.target).toBe('archive')
+    expect(response.body.headers['X-UB-Signature']).toBe('sha256=abc')
+    // No workspace object is minted at all on this path.
+    expect(response.body.gcsKey).toBeUndefined()
+    // The signature commits to the owner and the digest, which is what makes it
+    // safe to hand to a process that must not hold the archive's secret.
+    expect(uploadTarget).toHaveBeenCalledWith(
+      expect.objectContaining({ ownerUserId: 'owner-1', sha256: 'c'.repeat(64), kind: 'video' }),
+    )
+  })
+
+  it('falls back to workspace storage when no digest is offered', async () => {
+    // Without a digest no archive signature can be produced, so the older
+    // upload-then-read-back path must still work rather than failing the send.
+    const signedWriteUrl = vi.fn(async () => 'http://localhost:4000/api/local-files?signed=1')
+    const app = express()
+    app.use(express.json())
+    app.use('/internal/whatsapp', whatsappByonRoutes({
+      connectorSecret: 'secret',
+      integrationStore: {} as never,
+      ingestor: {} as never,
+      bot: {} as never,
+      archiveMedia: { storeBuffer: vi.fn(), uploadTarget: vi.fn() } as never,
+      filesResolver: {
+        forWorkspace: vi.fn(async () => ({
+          gcs: { signedWriteUrl }, bucket: '/data/files', uriScheme: 'file' as const,
+        })),
+      } as never,
+      getChannel: vi.fn(async () => ({ workspaceId: 'ws-1' })) as never,
+    }))
+
+    const response = await request(app)
+      .post('/internal/whatsapp/media-upload-url')
+      .set('X-Connector-Secret', 'secret')
+      .send({ channelId: 'byon-channel', mime: 'video/mp4' })
+
+    expect(response.status).toBe(200)
+    expect(response.body.target).toBe('workspace')
+    expect(response.body.gcsKey).toMatch(/^ws-1\/channel-media\//)
+  })
+
   it('archives a streamed attachment by reading the uploaded bytes back', async () => {
     const { app, captured, storeBuffer } = streamedApp()
 
