@@ -404,48 +404,45 @@ export type InsertResult =
   | { ok: false; reason: "adjacent" | "branch" | "width" };
 
 /**
- * Drop a step onto an existing edge: splice it OUT of its current wiring —
- * every predecessor (fan-out entry, branch arm, implicit fall-through,
- * trigger-fan-out entry; all made explicit) is bypassed to the step's own
- * successors, a moved start step handing its seat to them — then IN between
- * the edge's endpoints (`from → step → to`; a trigger edge swaps its entry
- * of the start set). Branch steps are refused (no unambiguous arm for the edge's
- * old target), edges adjacent to the step are no-ops, and a bypass that
- * would widen a predecessor past MAX_FAN_OUT_WIDTH refuses whole. No cycle
- * can result: the step is fully detached before reinsertion, so the new
- * edges only ride the pre-existing `from → to` path.
+ * The splice-OUT half shared by `insertStepIntoEdge` (which reinserts the
+ * step elsewhere) and `removeStep` (which drops it): detach `stepId` from its
+ * wiring without touching the step itself.
+ *
+ * Every predecessor — fan-out entry, branch arm, implicit fall-through,
+ * trigger-fan-out entry; all made explicit — is bypassed to the step's own
+ * successors, so a `A → step → C` path collapses to `A → C`. Making
+ * fall-throughs explicit is what keeps the result stable when the caller then
+ * changes the steps array (removal shifts every later index, and an implicit
+ * edge is index-derived).
+ *
+ * The returned `starts` may be EMPTY (the step was the sole entry and has no
+ * successors); each caller applies its own fallback, because they differ —
+ * `insertStepIntoEdge` gives the seat back to the step it is about to rewire,
+ * `removeStep` cannot and hands it to the first survivor.
  */
-export function insertStepIntoEdge(
+function bypassStep(
   def: WorkflowDefinition,
   stepId: string,
-  edge: CanvasEdge,
-): InsertResult {
-  if (edge.from === stepId || edge.to === stepId) {
-    return { ok: false, reason: "adjacent" };
-  }
-  const moving = def.steps.find((s) => s.id === stepId);
-  if (!moving) return { ok: false, reason: "adjacent" };
-  if (moving.type === "branch") return { ok: false, reason: "branch" };
+): { steps: WorkflowStep[]; starts: string[]; successors: string[] } | null {
+  const target = def.steps.find((s) => s.id === stepId);
+  if (!target) return null;
 
   const orderedIds = def.steps.map((s) => s.id);
   const known = new Set(orderedIds);
-  const succ = staticSuccessors(moving, orderedIds).filter(
+  const successors = staticSuccessors(target, orderedIds).filter(
     (id) => known.has(id) && id !== stepId,
   );
 
-  // Splice out: bypass every edge into the moving step to its successors,
-  // and point the moving step at the drop edge's target.
-  let steps = def.steps.map((step): WorkflowStep => {
-    if (step.id === stepId) {
-      return step.type === "branch" ? step : { ...step, nextStepId: edge.to };
-    }
+  const steps = def.steps.map((step): WorkflowStep => {
+    // The detached step is left exactly as it was — the caller owns it.
+    if (step.id === stepId) return step;
     if (step.type === "branch") {
       let next = step;
       if (next.nextStepIdIfTrue === stepId) {
-        next = { ...next, nextStepIdIfTrue: succ[0] ?? null };
+        next = { ...next, nextStepIdIfTrue: successors[0] ?? null };
       }
       if (next.nextStepIdIfFalse === stepId) {
-        next = { ...next, nextStepIdIfFalse: succ[0] ?? null };
+        next = { ...next, nextStepIdIfFalse: successors[0] ?? null };
       }
       return next;
     }
@@ -453,7 +450,7 @@ export function insertStepIntoEdge(
     if (!effective.includes(stepId)) return step;
     const bypassed: string[] = [];
     for (const id of effective) {
-      for (const r of id === stepId ? succ : [id]) {
+      for (const r of id === stepId ? successors : [id]) {
         if (r !== step.id && !bypassed.includes(r)) bypassed.push(r);
       }
     }
@@ -468,20 +465,74 @@ export function insertStepIntoEdge(
     };
   });
 
-  // Splice the moving step out of the start set (its seat passes to its
-  // successors), keeping at least one entry step.
-  let nextStarts = startIds(def);
-  if (nextStarts.includes(stepId)) {
+  // The start seat passes to the step's successors.
+  let starts = startIds(def);
+  if (starts.includes(stepId)) {
     const replaced: string[] = [];
-    for (const id of nextStarts) {
-      for (const r of id === stepId ? succ : [id]) {
+    for (const id of starts) {
+      for (const r of id === stepId ? successors : [id]) {
         if (!replaced.includes(r)) replaced.push(r);
       }
     }
-    nextStarts = replaced.length === 0 ? [stepId] : replaced;
+    starts = replaced;
   }
 
-  // Splice in on the drop edge.
+  return { steps, starts, successors };
+}
+
+/** Every fan-out (and the start set) must stay within the schema's width cap. */
+function withinFanOutCap(steps: WorkflowStep[], starts: string[]): boolean {
+  if (starts.length > MAX_FAN_OUT_WIDTH) return false;
+  for (const step of steps) {
+    if (step.type === "branch") continue;
+    if (
+      Array.isArray(step.nextStepId) &&
+      step.nextStepId.length > MAX_FAN_OUT_WIDTH
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Drop a step onto an existing edge: splice it OUT of its current wiring
+ * (`bypassStep`) — then IN between the edge's endpoints (`from → step → to`;
+ * a trigger edge swaps its entry of the start set). Branch steps are refused
+ * (no unambiguous arm for the edge's old target), edges adjacent to the step
+ * are no-ops, and a bypass that would widen a predecessor past
+ * MAX_FAN_OUT_WIDTH refuses whole. No cycle can result: the step is fully
+ * detached before reinsertion, so the new edges only ride the pre-existing
+ * `from → to` path.
+ */
+export function insertStepIntoEdge(
+  def: WorkflowDefinition,
+  stepId: string,
+  edge: CanvasEdge,
+): InsertResult {
+  if (edge.from === stepId || edge.to === stepId) {
+    return { ok: false, reason: "adjacent" };
+  }
+  const moving = def.steps.find((s) => s.id === stepId);
+  if (!moving) return { ok: false, reason: "adjacent" };
+  if (moving.type === "branch") return { ok: false, reason: "branch" };
+
+  const detached = bypassStep(def, stepId);
+  if (!detached) return { ok: false, reason: "adjacent" };
+
+  const orderedIds = def.steps.map((s) => s.id);
+  // Point the detached step at the drop edge's target.
+  let steps = detached.steps.map((step): WorkflowStep =>
+    step.id === stepId && step.type !== "branch"
+      ? { ...step, nextStepId: edge.to }
+      : step,
+  );
+  // A sole entry step with no successors keeps its seat — it is about to be
+  // rewired back into the graph, not removed.
+  let nextStarts =
+    detached.starts.length === 0 ? [stepId] : detached.starts;
+
+  // Splice the step in on the drop edge.
   if (edge.source === "trigger") {
     // Replace that trigger edge's entry; other entry steps keep their seat.
     const replaced = nextStarts.map((id) => (id === edge.to ? stepId : id));
@@ -504,15 +555,8 @@ export function insertStepIntoEdge(
     });
   }
 
-  if (nextStarts.length > MAX_FAN_OUT_WIDTH) return { ok: false, reason: "width" };
-  for (const step of steps) {
-    if (step.type === "branch") continue;
-    if (
-      Array.isArray(step.nextStepId) &&
-      step.nextStepId.length > MAX_FAN_OUT_WIDTH
-    ) {
-      return { ok: false, reason: "width" };
-    }
+  if (!withinFanOutCap(steps, nextStarts)) {
+    return { ok: false, reason: "width" };
   }
   return {
     ok: true,
@@ -522,6 +566,89 @@ export function insertStepIntoEdge(
       startStepId: nextStarts.length === 1 ? nextStarts[0] : nextStarts,
     },
   };
+}
+
+export type RemoveStepResult =
+  | { ok: true; definition: WorkflowDefinition }
+  | { ok: false; reason: "last" | "width" };
+
+/**
+ * Remove a step and HEAL the graph around it. Every predecessor is bridged to
+ * the step's own successors (`bypassStep`, shared with the drop-on-wire
+ * rearrange), so `A → step → C` becomes `A → C`.
+ *
+ * Healing is not a nicety — it is what keeps the definition saveable. Core's
+ * schema hard-rejects any reference to a step that no longer exists
+ * (`nextStepId`, branch arms, `startStepId`, `layout` keys, `page.fromStep`,
+ * `deliver.thread.fromStep`), and the board cannot show the user a stale
+ * pointer to repair by hand: `canvasEdges` skips edges whose target is
+ * unknown, so an unhealed removal renders as a clean flow that fails Save
+ * naming a step nobody can see. See docs/architecture/features/workflow.md
+ * → "Web builder UI" → step removal.
+ *
+ * Refuses `"last"` for the only step (a workflow always keeps one) and
+ * `"width"` when a bridge would push a predecessor's fan-out — or the start
+ * set — past MAX_FAN_OUT_WIDTH. Refusing is honest; silently dropping the
+ * overflow edges would lose wiring the user authored.
+ *
+ * Bridging can never create a cycle: a new `A → C` edge replaces an
+ * `A → step → C` path that already existed.
+ */
+export function removeStep(
+  def: WorkflowDefinition,
+  stepId: string,
+): RemoveStepResult {
+  if (def.steps.length <= 1) return { ok: false, reason: "last" };
+  const detached = bypassStep(def, stepId);
+  if (!detached) return { ok: false, reason: "last" };
+
+  const steps = detached.steps
+    .filter((s) => s.id !== stepId)
+    .map((step) => clearStepReferencesTo(step, stepId));
+
+  // The removed step cannot keep a start seat, so an emptied start set falls
+  // back to the first survivor rather than to the step itself.
+  const starts =
+    detached.starts.length === 0 ? [steps[0].id] : detached.starts;
+
+  if (!withinFanOutCap(steps, starts)) return { ok: false, reason: "width" };
+
+  return {
+    ok: true,
+    definition: pruneLayout({
+      ...def,
+      steps,
+      startStepId: starts.length === 1 ? starts[0] : starts,
+    }),
+  };
+}
+
+/**
+ * Drop the non-wiring step-id references a removed step leaves behind. These
+ * are separate from `nextStepId` and each one is schema-fatal on its own:
+ * `page.fromStep` (edit the page an earlier step created) and
+ * `deliver.thread.fromStep` (reply under an earlier step's message).
+ *
+ * `thread` is read defensively: the app-web `deliver` type does not declare
+ * it (the builder cannot author a thread reply), but a workflow authored in
+ * chat can carry one and this editor round-trips the field, so the reference
+ * is reachable here even though the type says otherwise.
+ */
+function clearStepReferencesTo(step: WorkflowStep, removedId: string): WorkflowStep {
+  if (step.type !== "assistant_call") return step;
+  let next = step;
+  if (next.page && "fromStep" in next.page && next.page.fromStep === removedId) {
+    const { page: _dropped, ...rest } = next;
+    next = rest;
+  }
+  const deliver = next.deliver as
+    | { thread?: { fromStep?: string } }
+    | undefined;
+  if (deliver?.thread?.fromStep === removedId) {
+    const { thread: _dropped, ...restDeliver } = deliver;
+    next = { ...next, deliver: restDeliver as typeof next.deliver };
+  }
+  return next;
 }
 
 // ── Join legibility ─────────────────────────────────────────────────────

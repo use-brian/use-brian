@@ -67,6 +67,7 @@ import {
   portAnchor,
   redundantTriggerEdgeKeys,
   removeEdge,
+  removeStep,
   resolvePositions,
   unreachableStepIds,
   type CanvasEdge,
@@ -100,6 +101,14 @@ type Props = {
   live?: LiveRunView | null;
   onSelectStep?: (stepId: string) => void;
   onSelectTrigger?: () => void;
+  /**
+   * A step was deleted from the board. Receives the already-HEALED definition
+   * (`removeStep` bridges the step's predecessors to its successors) plus the
+   * removed step's id, so the page can offer Undo. Separate from
+   * `onDefinitionChange` precisely because a removal is the one canvas edit the
+   * page needs to recognize as such. Absent -> no delete affordance.
+   */
+  onRemoveStep?: (definition: WorkflowDefinition, removedStepId: string) => void;
   /**
    * Receives the rewired/repositioned definition on every canvas edit (node
    * drop, wire connect, edge removal). Absent → the board is read-only.
@@ -399,6 +408,7 @@ export function WorkflowBoard({
   live,
   onSelectStep,
   onSelectTrigger,
+  onRemoveStep,
   onDefinitionChange,
   editable,
 }: Props) {
@@ -622,6 +632,32 @@ export function WorkflowBoard({
     if (!onDefinitionChange) return;
     onDefinitionChange(removeEdge(definition, edge));
     setSelectedEdgeKey(null);
+  };
+
+  // ── Step removal ────────────────────────────────────────────────────
+
+  /**
+   * Delete a step from the board. The graph edit lives in `removeStep`, which
+   * heals the wiring around the step -- an unhealed removal leaves a reference
+   * the board cannot render and Save refuses. Refusals surface through the same
+   * transient notice as the wire refusals.
+   */
+  const canRemoveStep = canEdit && !!onRemoveStep;
+
+  const removeStepByKey = (stepId: string) => {
+    if (!canRemoveStep || !onRemoveStep) return;
+    const result = removeStep(definition, stepId);
+    if (!result.ok) {
+      const b = t.workflowPage.board;
+      setNotice(
+        result.reason === "last"
+          ? b.removeStepRefusedLast
+          : format(b.removeStepRefusedWidth, { n: String(MAX_FAN_OUT_WIDTH) }),
+      );
+      return;
+    }
+    setSelectedEdgeKey(null);
+    onRemoveStep(result.definition, stepId);
   };
 
   // ── Render ──────────────────────────────────────────────────────────
@@ -929,7 +965,7 @@ export function WorkflowBoard({
           const isJoin = joinCount >= 2;
           const parked = !liveState && parkedJoins.has(node.key);
           return (
-            <div key={node.key}>
+            <div key={node.key} className="group">
               <div
                 data-node-key={node.key}
                 role="button"
@@ -948,6 +984,16 @@ export function WorkflowBoard({
                     e.preventDefault();
                     if (node.key === TRIGGER_KEY) onSelectTrigger?.();
                     else onSelectStep?.(node.key);
+                    return;
+                  }
+                  // Delete the focused step. Backspace is preventDefault'd so
+                  // it cannot navigate the history instead. Never the trigger,
+                  // and never mid-drag.
+                  if (e.key === "Delete" || e.key === "Backspace") {
+                    if (node.key === TRIGGER_KEY) return;
+                    if (!canRemoveStep || nodeDrag || wireDrag) return;
+                    e.preventDefault();
+                    removeStepByKey(node.key);
                   }
                 }}
                 className={cn(
@@ -1026,6 +1072,51 @@ export function WorkflowBoard({
                   </span>
                 )}
               </div>
+
+              {/* Delete control -- a sibling, never nested inside the node's
+                  role="button". Revealed on hover, on keyboard focus anywhere
+                  in the node group, and while the node is selected, so it is
+                  reachable without a pointer. Top-LEFT because the live-state
+                  and parked-join badges own the top-right corner. */}
+              {canRemoveStep && node.kind !== "trigger" && (
+                <button
+                  type="button"
+                  tabIndex={-1}
+                  title={t.workflowPage.board.removeStep}
+                  aria-label={t.workflowPage.board.removeStep}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    removeStepByKey(node.key);
+                  }}
+                  className={cn(
+                    "absolute z-30 flex h-5 w-5 items-center justify-center rounded-full",
+                    "border border-red-500/60 bg-card text-red-600 dark:text-red-400 shadow-sm",
+                    "hover:bg-red-500 hover:text-white transition",
+                    // Hidden means non-interactive too: an opacity-0 button
+                    // still takes clicks, which would leave an invisible
+                    // delete target on every node corner.
+                    "opacity-0 pointer-events-none",
+                    "group-hover:opacity-100 group-hover:pointer-events-auto",
+                    "group-focus-within:opacity-100 group-focus-within:pointer-events-auto",
+                    selected && "opacity-100 pointer-events-auto",
+                  )}
+                  style={{ left: pos.x - 8, top: pos.y - 8 }}
+                >
+                  <svg
+                    width={10}
+                    height={10}
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth={2.5}
+                    strokeLinecap="round"
+                    aria-hidden
+                  >
+                    <path d="M6 6l12 12M18 6L6 18" />
+                  </svg>
+                </button>
+              )}
 
               {/* Semantics chips under the node: orphan nudge + join contract. */}
               {(orphan || isJoin) && (

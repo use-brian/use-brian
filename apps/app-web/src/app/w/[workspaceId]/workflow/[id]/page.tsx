@@ -63,7 +63,10 @@ import {
 import type { CustomPageTemplateSummary } from "@use-brian/doc-model";
 import { listWorkspaceSkills, type WorkspaceSkillSummary } from "@/lib/api/skills";
 import { WorkflowBoard } from "@/components/workflow/workflow-board";
-import { pruneLayout } from "@/lib/workflow-canvas";
+import {
+  MAX_FAN_OUT_WIDTH,
+  removeStep as removeStepFromDefinition,
+} from "@/lib/workflow-canvas";
 import { buildToolCatalog } from "@/lib/workflow-tools";
 import { StepEditor } from "@/components/workflow/step-editor";
 import { TriggerEditor } from "@/components/workflow/trigger-editor";
@@ -112,6 +115,16 @@ export default function WorkflowDetailPage({
   // research-mode step that will likely fail on snippet/marketplace discovery).
   const [warnings, setWarnings] = useState<WorkflowIssue[]>([]);
   const [runMessage, setRunMessage] = useState<string | null>(null);
+  /**
+   * Snapshot armed by the most recent step removal, offered as Undo. Cleared
+   * by ANY other edit and by a successful save: restoring a stale snapshot
+   * would silently discard whatever the user did in between, so Undo is only
+   * ever offered for a removal that is still the last thing that happened.
+   */
+  const [undoRemove, setUndoRemove] = useState<{
+    definition: WorkflowFull["definition"];
+    selectedKey: string | null;
+  } | null>(null);
   const [refetchTick, setRefetchTick] = useState(0);
 
   // Recent runs + live-run overlay. The hook owns the runs list (poll-based:
@@ -322,6 +335,7 @@ export default function WorkflowDetailPage({
     setDraft((d) => (d ? { ...d, ...patch } : d));
 
   const updateStep = (idx: number, next: WorkflowStep) => {
+    setUndoRemove(null);
     setDraft((d) => {
       if (!d) return d;
       const steps = d.definition.steps.slice();
@@ -332,10 +346,13 @@ export default function WorkflowDetailPage({
 
   // Canvas edits (node drop, wire connect, edge removal) hand back a whole
   // rewired definition — same draft, same dirty check, same Save path.
-  const updateDefinition = (definition: WorkflowFull["definition"]) =>
+  const updateDefinition = (definition: WorkflowFull["definition"]) => {
+    setUndoRemove(null);
     setDraft((d) => (d ? { ...d, definition } : d));
+  };
 
   const moveStep = (idx: number, dir: -1 | 1) => {
+    setUndoRemove(null);
     setDraft((d) => {
       if (!d) return d;
       const steps = d.definition.steps.slice();
@@ -347,37 +364,59 @@ export default function WorkflowDetailPage({
     });
   };
 
-  const removeStep = (idx: number) => {
-    const steps = draft.definition.steps;
-    if (steps.length <= 1) return;
-    const newSteps = steps.filter((_, i) => i !== idx);
-    // Keep surviving entry steps (startStepId may be a trigger fan-out
-    // array); all gone → the first remaining step becomes the entry.
-    const oldStarts = Array.isArray(draft.definition.startStepId)
-      ? draft.definition.startStepId
-      : [draft.definition.startStepId];
-    const survivors = oldStarts.filter((id) => newSteps.some((s) => s.id === id));
-    const startStepId =
-      survivors.length === 0
-        ? newSteps[0].id
-        : survivors.length === 1
-          ? survivors[0]
-          : survivors;
-    // Keep canvas positions for surviving nodes; the schema rejects layout
-    // entries for steps that no longer exist.
-    setDraft({
-      ...draft,
-      definition: pruneLayout({
-        ...draft.definition,
-        startStepId,
-        steps: newSteps,
-      }),
-    });
+  /**
+   * Remove a step. The graph edit lives in `removeStep` (workflow-canvas),
+   * which HEALS the wiring around the step: every predecessor is bridged to
+   * the step's successors and the non-wiring references (`page.fromStep`,
+   * `deliver.thread.fromStep`) are cleared. Skipping that heal leaves a
+   * reference the schema refuses on Save and the board cannot render for the
+   * user to repair, so the draft becomes a dead end.
+   */
+  const removeStepById = (stepId: string) => {
+    const result = removeStepFromDefinition(draft.definition, stepId);
+    if (!result.ok) {
+      setError(
+        result.reason === "last"
+          ? t.workflowPage.board.removeStepRefusedLast
+          : t.workflowPage.board.removeStepRefusedWidth.replace(
+              "{n}",
+              String(MAX_FAN_OUT_WIDTH),
+            ),
+      );
+      return;
+    }
+    commitStepRemoval(result.definition, stepId);
+  };
+
+  /**
+   * Adopt a healed definition and arm Undo. Removal is draft-only (nothing
+   * persists until Save), so it is gated by a reversible Undo rather than a
+   * confirmation dialog.
+   */
+  const commitStepRemoval = (
+    definition: WorkflowFull["definition"],
+    removedStepId: string,
+  ) => {
+    setError(null);
+    setUndoRemove({ definition: draft.definition, selectedKey });
+    setDraft({ ...draft, definition });
     // Keep a surviving step focused so the editor panel doesn't go blank.
-    setSelectedKey(newSteps[Math.min(idx, newSteps.length - 1)].id);
+    const idx = draft.definition.steps.findIndex((s) => s.id === removedStepId);
+    const survivors = definition.steps;
+    setSelectedKey(
+      survivors[Math.min(Math.max(idx, 0), survivors.length - 1)]?.id ?? null,
+    );
+  };
+
+  const undoStepRemoval = () => {
+    if (!undoRemove) return;
+    setDraft((d) => (d ? { ...d, definition: undoRemove.definition } : d));
+    setSelectedKey(undoRemove.selectedKey);
+    setUndoRemove(null);
   };
 
   const addStep = () => {
+    setUndoRemove(null);
     // Step ids aren't renumbered on removal, so `step_<count+1>` can
     // collide — walk forward until the id is free.
     const taken = new Set(draft.definition.steps.map((s) => s.id));
@@ -487,6 +526,7 @@ export default function WorkflowDetailPage({
     }
     setWorkflow(result.workflow);
     setDraft(result.workflow);
+    setUndoRemove(null);
     setWarnings(result.warnings ?? []);
     requestWorkflowRefresh(result.workflow.workspaceId);
     refresh();
@@ -763,6 +803,18 @@ export default function WorkflowDetailPage({
           <div className="text-xs text-green-700 dark:text-green-400">{runMessage}</div>
         )}
         {error && <div className="text-xs text-red-600 dark:text-red-400">{error}</div>}
+        {undoRemove && (
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <span>{t.workflowPage.builder.stepRemoved}</span>
+            <button
+              type="button"
+              onClick={undoStepRemoval}
+              className="font-medium text-foreground underline hover:no-underline"
+            >
+              {t.workflowPage.builder.undoRemoveStep}
+            </button>
+          </div>
+        )}
         {warnings.length > 0 && (
           <div className="text-xs rounded-md border border-amber-300/60 bg-amber-500/10 text-amber-700 dark:text-amber-400 px-2 py-1.5">
             <p className="font-medium">{t.workflowPage.builder.advisoryTitle}</p>
@@ -801,6 +853,7 @@ export default function WorkflowDetailPage({
         live={liveView}
         onSelectStep={selectStep}
         onSelectTrigger={selectTrigger}
+        onRemoveStep={commitStepRemoval}
         onDefinitionChange={updateDefinition}
         editable={!draft.managedBy}
       />
@@ -901,7 +954,7 @@ export default function WorkflowDetailPage({
                 onChange={(next) => updateStep(selectedStepIdx, next)}
                 onMoveUp={() => moveStep(selectedStepIdx, -1)}
                 onMoveDown={() => moveStep(selectedStepIdx, 1)}
-                onRemove={() => removeStep(selectedStepIdx)}
+                onRemove={() => removeStepById(selectedStep.id)}
                 disabled={saving}
               />
             </div>
