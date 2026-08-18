@@ -204,6 +204,7 @@ function makeWorker(over: Partial<MailboxSyncWorkerDeps> & { client: ImapClientL
     backfillChunk: over.backfillChunk,
     deltaChunk: over.deltaChunk,
     ...(over.keepWarm ? { keepWarm: over.keepWarm } : {}),
+    ...(over.onEvent ? { onEvent: over.onEvent } : {}),
   })
   return { worker, configs, insertMessage, deleteFolder, healthCalls, instanceId: instance.id }
 }
@@ -1003,6 +1004,180 @@ describe('[COMP:api/mailbox-sync-worker] delta brain wiring', () => {
     await worker.tick()
     expect(insertMessage).toHaveBeenCalledTimes(1)
     expect(runExtraction).not.toHaveBeenCalled()
+  })
+})
+
+// ── Event trigger wiring (mailbox-imap.md → "Event trigger", plan §4 / §10 rows 1-4, 9) ──
+
+describe('[COMP:api/mailbox-sync-worker] event trigger (onEvent port)', () => {
+  function rfc822Rich(uid: number, over: {
+    from: string
+    to?: string
+    cc?: string
+    deliveredTo?: string
+    subject?: string
+    listUnsubscribe?: boolean
+  }): Buffer {
+    const lines = [
+      `From: ${over.from}`,
+      `To: ${over.to ?? 'Maya <maya@harborlane.example>'}`,
+      ...(over.cc ? [`Cc: ${over.cc}`] : []),
+      ...(over.deliveredTo ? [`Delivered-To: ${over.deliveredTo}`] : []),
+      `Subject: ${over.subject ?? `mail ${uid}`}`,
+      `Message-ID: <m${uid}@acme.com>`,
+      'Date: Mon, 03 Aug 2026 10:00:00 +0000',
+      ...(over.listUnsubscribe ? ['List-Unsubscribe: <https://acme.com/u>'] : []),
+      'Content-Type: text/plain; charset=utf-8',
+    ]
+    return Buffer.from(`${lines.join('\r\n')}\r\n\r\nBody of message ${uid}.\r\n`, 'utf8')
+  }
+
+  /** One cursor-establishing tick, then the given message lands as NEW mail. */
+  async function deliver(params: {
+    source: Buffer
+    ingestionEnabled?: boolean
+    config?: Record<string, unknown>
+  }) {
+    const folders: Record<string, FakeFolderState> = {
+      INBOX: { uidvalidity: '7', uids: [1], sources: { 1: rfc822(1) } },
+    }
+    const client = makeFakeImap(folders)
+    const { deps } = makeBrainDeps()
+    const onEvent = vi.fn(async () => {})
+    const { worker } = makeWorker({
+      client,
+      instance: instanceRow({ ingestionEnabled: params.ingestionEnabled ?? true, config: params.config ?? {} }),
+      brain: deps,
+      onEvent,
+    })
+    await worker.tick()
+    folders.INBOX.uids = [1, 2]
+    folders.INBOX.sources[2] = params.source
+    await worker.tick()
+    return { onEvent }
+  }
+
+  it('fires onEvent for a rule-matched NEW message with the addressable payload (row 1)', async () => {
+    const { onEvent } = await deliver({
+      source: rfc822Rich(2, {
+        from: 'Ken Lau <Ken@Client.HK>',
+        to: 'BD <BD@usebrian.ai>, ops@usebrian.ai',
+        cc: 'Casey <casey@client.example>',
+        deliveredTo: 'contact@usebrian.ai',
+        subject: 'Partnership',
+      }),
+    })
+    expect(onEvent).toHaveBeenCalledTimes(1)
+    const [event, ctx] = onEvent.mock.calls[0] as unknown as [
+      { source: string; normalized: Record<string, unknown> },
+      { workspace_id: string; connector_instance_id: string },
+    ]
+    expect(event.source).toBe('imap')
+    expect(ctx).toEqual({ workspace_id: 'ws-1', connector_instance_id: 'inst-1' })
+    expect(event.normalized).toMatchObject({
+      message_id: 'INBOX:2',
+      rfc_message_id: '<m2@acme.com>',
+      sender: 'ken@client.hk',
+      actor_id: 'ken@client.hk',
+      subject: 'Partnership',
+      to: ['bd@usebrian.ai', 'ops@usebrian.ai'],
+      cc: ['casey@client.example'],
+      account_email: 'maya@harborlane.example',
+      folder: 'INBOX',
+      channel_id: 'INBOX',
+      is_bulk: false,
+      is_bot: false,
+    })
+    // Recipient set = To ∪ Cc ∪ Delivered-To, bare + lowercased — what a
+    // `match.mentions: ['bd@usebrian.ai']` subscription matches on (D2).
+    expect(event.normalized.mentions).toEqual([
+      'bd@usebrian.ai', 'ops@usebrian.ai', 'casey@client.example', 'contact@usebrian.ai',
+    ])
+    expect(typeof event.normalized.text).toBe('string')
+  })
+
+  it('a message addressed only to another address still fires; the workflow match (mentions) owns selectivity (row 2)', async () => {
+    const { onEvent } = await deliver({
+      source: rfc822Rich(2, { from: 'a@b.example', to: 'contact@usebrian.ai' }),
+    })
+    expect(onEvent).toHaveBeenCalledTimes(1)
+    const payload = (onEvent.mock.calls[0] as unknown as [{ normalized: Record<string, unknown> }])[0].normalized
+    expect(payload.mentions).toEqual(['contact@usebrian.ai'])
+    expect(payload.mentions).not.toContain('bd@usebrian.ai')
+  })
+
+  it('bulk / no-reply senders are bot events (row 3) — the engine still fires (drop rules included), the dispatcher default drops them', async () => {
+    const bulk = await deliver({
+      source: rfc822Rich(2, { from: 'TechCrunch <digest@techcrunch.example>', listUnsubscribe: true }),
+    })
+    expect(bulk.onEvent).toHaveBeenCalledTimes(1)
+    expect((bulk.onEvent.mock.calls[0] as unknown as [{ normalized: Record<string, unknown> }])[0].normalized)
+      .toMatchObject({ is_bulk: true, is_bot: true })
+
+    const noreply = await deliver({
+      source: rfc822Rich(2, { from: 'no-reply@bank.example' }),
+    })
+    expect(noreply.onEvent).toHaveBeenCalledTimes(1)
+    expect((noreply.onEvent.mock.calls[0] as unknown as [{ normalized: Record<string, unknown> }])[0].normalized)
+      .toMatchObject({ is_bulk: false, is_bot: true })
+  })
+
+  it('the mailbox\'s own sent copy — from the account or a configured send-as alias — is a bot event (row 4)', async () => {
+    const self = await deliver({
+      source: rfc822Rich(2, { from: 'Maya <maya@harborlane.example>', to: 'ken@client.hk' }),
+    })
+    expect((self.onEvent.mock.calls[0] as unknown as [{ normalized: Record<string, unknown> }])[0].normalized)
+      .toMatchObject({ sender: 'maya@harborlane.example', is_bot: true })
+
+    const alias = await deliver({
+      source: rfc822Rich(2, { from: 'BD <BD@harborlane.example>', to: 'ken@client.hk' }),
+      config: { sendAsAliases: ['bd@harborlane.example'] },
+    })
+    expect((alias.onEvent.mock.calls[0] as unknown as [{ normalized: Record<string, unknown> }])[0].normalized)
+      .toMatchObject({ sender: 'bd@harborlane.example', is_bot: true })
+
+    // The same alias sender WITHOUT the alias configured is an ordinary
+    // correspondent — the guard reads the config, it does not guess.
+    const stranger = await deliver({
+      source: rfc822Rich(2, { from: 'BD <bd@harborlane.example>', to: 'ken@client.hk' }),
+    })
+    expect((stranger.onEvent.mock.calls[0] as unknown as [{ normalized: Record<string, unknown> }])[0].normalized)
+      .toMatchObject({ is_bot: false })
+  })
+
+  it('ingestion OFF → no event at all; the archive insert is unaffected (row 9, D1)', async () => {
+    const folders: Record<string, FakeFolderState> = {
+      INBOX: { uidvalidity: '7', uids: [1], sources: { 1: rfc822(1) } },
+    }
+    const client = makeFakeImap(folders)
+    const { deps } = makeBrainDeps()
+    const onEvent = vi.fn(async () => {})
+    const { worker, insertMessage } = makeWorker({
+      client,
+      instance: instanceRow({ ingestionEnabled: false }),
+      brain: deps,
+      onEvent,
+    })
+    await worker.tick()
+    folders.INBOX.uids = [1, 2]
+    folders.INBOX.sources[2] = rfc822Rich(2, { from: 'ken@client.hk', to: 'bd@usebrian.ai' })
+    await worker.tick()
+    expect(insertMessage).toHaveBeenCalledTimes(1)
+    expect(onEvent).not.toHaveBeenCalled()
+  })
+
+  it('no onEvent wired → the router still routes to the brain (the pre-wire posture)', async () => {
+    const folders: Record<string, FakeFolderState> = {
+      INBOX: { uidvalidity: '7', uids: [1], sources: { 1: rfc822(1) } },
+    }
+    const client = makeFakeImap(folders)
+    const { deps, runExtraction } = makeBrainDeps()
+    const { worker } = makeWorker({ client, instance: instanceRow({ ingestionEnabled: true }), brain: deps })
+    await worker.tick()
+    folders.INBOX.uids = [1, 2]
+    folders.INBOX.sources[2] = rfc822Rich(2, { from: 'ken@client.hk' })
+    await worker.tick()
+    expect(runExtraction).toHaveBeenCalledTimes(1)
   })
 })
 

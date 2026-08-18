@@ -18,6 +18,15 @@
  *      (`backfillLow`), resumable across restarts. Backfill is archive-ONLY
  *      — historical mail never reaches the brain by default (D6).
  *
+ * When the instance has `ingestion_enabled`, every rule-matched NEW message
+ * ALSO fires the ingest engine's `onEvent` port (mailbox-imap.md → "Event
+ * trigger"): boot wires the shared workflow event dispatcher there, so an
+ * `event`-triggered workflow subscribed to the imap connector instance runs
+ * with an addressable payload (`message_id`, recipients as `mentions`, the
+ * folder as `channel_id`) and can read + reply in-thread. Self / alias /
+ * bulk / machine senders carry `is_bot: true` so the assistant's own replies
+ * (APPENDed to Sent, re-synced next tick) never re-fire (D3).
+ *
  * Sync state is an OPAQUE per-provider cursor on `connector_instance.config`
  * (D13): `config.mailboxSync = { folders: { [path]: { uidvalidity, lastUid,
  * backfillLow? } }, backfill? }`. Nothing above the seam is IMAP-shaped.
@@ -42,11 +51,13 @@ import {
   processEpisode,
   universalFilters,
   emailFilterImplementations,
+  isMachineSenderAddress,
   type AnalyticsLogger,
   type CrmStore,
   type EntityLinksStore,
   type EntityStore,
   type IngestEngine,
+  type IngestEngineDeps,
   type IngestRule,
   type LLMProvider,
   type MailboxIngestMessage,
@@ -77,6 +88,7 @@ import {
   type SocketKeepWarm,
 } from './imap-session.js'
 import { htmlToText, messageRef, parseReferencesHeader } from './mailbox-api.js'
+import { bareEmailAddress, readSendAsAliases } from './send-as.js'
 import type { MailboxAccountSettings } from './types.js'
 
 // ── Sync-state (the opaque cursor, D13) ─────────────────────────
@@ -227,11 +239,16 @@ export async function parseSyncedMessage(params: {
   const from =
     parsed.from?.text ??
     (env.from?.[0] ? `${env.from[0].name ?? ''} <${env.from[0].address ?? ''}>`.trim() : '')
+  // One entry PER ADDRESS. mailparser hands back one AddressObject per header
+  // whose `.text` joins every recipient with commas, so mapping `.text` gave a
+  // single "A <a@x>, b@y" string for a two-recipient To — the archive `to`
+  // column is a list, and the event trigger's recipient set (`mentions`) must
+  // be able to match one alias among several recipients.
   const toList = parsed.to
-    ? (Array.isArray(parsed.to) ? parsed.to : [parsed.to]).map((a) => a.text)
+    ? addressTexts(Array.isArray(parsed.to) ? parsed.to : [parsed.to])
     : (env.to ?? []).map((a) => a.address ?? '').filter(Boolean)
   const ccList = parsed.cc
-    ? (Array.isArray(parsed.cc) ? parsed.cc : [parsed.cc]).map((a) => a.text)
+    ? addressTexts(Array.isArray(parsed.cc) ? parsed.cc : [parsed.cc])
     : []
   const bodyText =
     parsed.text ?? (typeof parsed.html === 'string' ? htmlToText(parsed.html) : '')
@@ -245,9 +262,24 @@ export async function parseSyncedMessage(params: {
     size: a.size ?? 0,
   }))
   const headerLines = parsed.headerLines ?? []
+  // Delivered-To / X-Original-To: the address the server delivered INTO. For a
+  // Workspace alias delivered into the primary this may be the only header that
+  // names the alias when `To` carries a list address. Recipient-set input for
+  // the event trigger only (mailbox-imap.md → "Event trigger").
+  const deliveredTo = [
+    ...headerAddressList(parsed.headers, 'delivered-to'),
+    ...headerAddressList(parsed.headers, 'x-original-to'),
+  ]
+  // mailparser folds every `List-*` header into one structured `list` entry
+  // (`headers.get('list') = { unsubscribe: {...} }`), so `has('list-unsubscribe')`
+  // is always false — the raw header lines are the reliable check (found
+  // 2026-08-19 while wiring the event trigger's `is_bot` guard; before this
+  // only `Precedence: bulk` newsletters were detected on the parse path).
+  const listHeader = parsed.headers?.get('list') as { unsubscribe?: unknown } | undefined
   const isBulk =
     parsed.headers?.has('list-unsubscribe') === true ||
-    headerLines.some((h) => /^precedence:\s*(bulk|list)/i.test(h.line ?? ''))
+    Boolean(listHeader && typeof listHeader === 'object' && listHeader.unsubscribe) ||
+    headerLines.some((h) => /^(list-unsubscribe:|precedence:\s*(bulk|list))/i.test(h.line ?? ''))
   const providerMessageId = messageRef(folder, msg.uid)
   const rfcMessageId = parsed.messageId ?? env.messageId ?? null
   const sentAtDate = sentAt ? new Date(sentAt) : null
@@ -276,6 +308,7 @@ export async function parseSyncedMessage(params: {
       from,
       to: toList,
       cc: ccList,
+      ...(deliveredTo.length ? { delivered_to: deliveredTo } : {}),
       subject,
       text: bodyText,
       timestamp: sentAtValid ? sentAtValid.toISOString() : null,
@@ -284,6 +317,48 @@ export async function parseSyncedMessage(params: {
       attachments,
     },
   }
+}
+
+/** Flatten mailparser AddressObjects to one `Name <addr>` / `addr` string per address (groups expanded). */
+function addressTexts(objects: ReadonlyArray<{ text: string; value: ReadonlyArray<{ address?: string; name?: string; group?: ReadonlyArray<{ address?: string; name?: string }> }> }>): string[] {
+  const out: string[] = []
+  const push = (v: { address?: string; name?: string }): void => {
+    if (!v.address) return
+    out.push(v.name ? `${v.name} <${v.address}>` : v.address)
+  }
+  for (const obj of objects) {
+    for (const v of obj.value ?? []) {
+      if (v.group) for (const member of v.group) push(member)
+      else push(v)
+    }
+    if ((obj.value ?? []).length === 0 && obj.text) out.push(obj.text)
+  }
+  return out
+}
+
+/**
+ * Read one address-bearing header off the mailparser header map. mailparser
+ * decodes address headers it knows (`to`/`cc`) into structured objects but
+ * leaves `Delivered-To` / `X-Original-To` as raw strings (or a string array
+ * when repeated), so both shapes are accepted; unparseable values are dropped.
+ */
+function headerAddressList(headers: Map<string, unknown> | undefined, name: string): string[] {
+  const raw = headers?.get(name)
+  const values: unknown[] = Array.isArray(raw) ? raw : raw === undefined ? [] : [raw]
+  const out: string[] = []
+  for (const v of values) {
+    const text = typeof v === 'string'
+      ? v
+      : v && typeof v === 'object' && typeof (v as { text?: unknown }).text === 'string'
+        ? (v as { text: string }).text
+        : null
+    if (!text) continue
+    for (const part of text.split(',')) {
+      const bare = bareEmailAddress(part)
+      if (bare && bare.includes('@') && !out.includes(bare)) out.push(bare)
+    }
+  }
+  return out
 }
 
 // ── Brain router (rules engine → episode / digest batch / drop) ─────
@@ -325,6 +400,15 @@ export type MailboxBrainRouterDeps = {
   /** Test seam — defaults to `appendBatchEvent`. */
   appendBatchEvent?: typeof appendBatchEvent
   now?: () => Date
+  /**
+   * The ingest engine's event port (mailbox-imap.md → "Event trigger"). Boot
+   * passes the shared workflow event dispatcher adapter
+   * (`createIngestWorkflowTrigger(dispatcher)`, the same seam every connector
+   * poller uses); the engine fires it once per rule-matched message -
+   * including `drop` matches - and a workflow's own `match` owns selectivity.
+   * Absent = brain routing only, no workflow events (the pre-wire posture).
+   */
+  onEvent?: IngestEngineDeps['onEvent']
 }
 
 export type MailboxBrainContext = {
@@ -332,6 +416,13 @@ export type MailboxBrainContext = {
   connectorInstanceId: string
   userId: string
   assistantId: string | null
+  /**
+   * The mailbox's configured send-as aliases (`config.sendAsAliases`). Mail
+   * FROM the account or one of these is the assistant's / owner's own outbound
+   * copy and is flagged `is_bot` for the event trigger (D3). Optional so the
+   * archive-only callers and tests need not supply it.
+   */
+  sendAsAliases?: ReadonlyArray<string>
 }
 
 function toEngineRule(row: IngestRuleRow): IngestRule {
@@ -353,6 +444,7 @@ function toEngineRule(row: IngestRuleRow): IngestRule {
 export function buildMailboxIngestEngine(
   rules: IngestRuleRow[],
   resolvePlaceholders: PlaceholderResolver,
+  onEvent?: IngestEngineDeps['onEvent'],
 ): IngestEngine {
   const engineRules = rules.filter((r) => r.routingMode !== 'reply').map(toEngineRule)
   return createIngestEngine({
@@ -363,7 +455,66 @@ export function buildMailboxIngestEngine(
     batches: { appendEvent: async () => {} },
     pipelineB: { process: async () => ({ episodeId: null }) },
     resolvePlaceholders,
+    // Workflow event port - the router below owns the actual realtime /
+    // scheduled work off the decision; the engine's stub pipelineB never runs
+    // extraction, but its `onEvent` fires for every matched rule.
+    ...(onEvent ? { onEvent } : {}),
   })
+}
+
+/**
+ * The event-trigger payload for one synced message - what an `event`
+ * workflow subscribed to this mailbox receives as `{{input.event.*}}`
+ * (mailbox-imap.md → "Event trigger"). Every field the run needs to READ and
+ * REPLY is here: `message_id` (`folder:uid`, the id `imapGetMessage` /
+ * `imapSendMessage.inReplyTo` take), the recipients as `mentions` (so
+ * `match.mentions: ['bd@…']` scopes a workflow to one alias - D2, no new
+ * `EventMatch` field), the folder as `channel_id` (`match.inChannels:
+ * ['INBOX']`), and the structural self-loop guard `is_bot` (D3): the sender is
+ * the account or a configured send-as alias (the assistant's own reply,
+ * APPENDed to Sent and re-synced), a bulk sender, or a machine local-part -
+ * the dispatcher's default `fromBots: false` then never fires it.
+ */
+export function mailboxEventPayload(
+  message: MailboxIngestMessage,
+  sendAsAliases: ReadonlyArray<string> = [],
+): Record<string, unknown> {
+  const sender = bareEmailAddress(message.from ?? '')
+  const bare = (list: ReadonlyArray<string> | undefined): string[] => {
+    const out: string[] = []
+    for (const v of list ?? []) {
+      const b = bareEmailAddress(v)
+      if (b && !out.includes(b)) out.push(b)
+    }
+    return out
+  }
+  const to = bare(message.to)
+  const cc = bare(message.cc)
+  const deliveredTo = bare(message.delivered_to)
+  const mentions = [...new Set([...to, ...cc, ...deliveredTo])]
+  const own = new Set([bareEmailAddress(message.account_email), ...sendAsAliases.map(bareEmailAddress)])
+  const isBot =
+    (sender !== '' && own.has(sender)) ||
+    message.is_bulk === true ||
+    isMachineSenderAddress(sender)
+  return {
+    sender,
+    actor_id: sender,
+    subject: (message.subject ?? '').trim(),
+    text: (message.text ?? '').trim(),
+    is_bulk: message.is_bulk === true,
+    message_id: message.provider_message_id,
+    rfc_message_id: message.rfc_message_id ?? null,
+    to,
+    cc,
+    account_email: bareEmailAddress(message.account_email),
+    folder: message.folder,
+    channel_id: message.folder,
+    timestamp: message.timestamp ?? null,
+    mentions,
+    is_bot: isBot,
+    user_flags: [],
+  }
 }
 
 const MAILBOX_SOURCE_KIND: SourceKind = 'email_thread'
@@ -467,20 +618,12 @@ export function createMailboxBrainRouter(deps: MailboxBrainRouterDeps): MailboxB
       }
       if (rules.length === 0) return null
 
-      const engine = buildMailboxIngestEngine(rules, deps.resolvePlaceholders)
+      const engine = buildMailboxIngestEngine(rules, deps.resolvePlaceholders, deps.onEvent)
       const sender = message.from ? message.from.toLowerCase() : ''
       const decision = await engine.ingest(
         {
           source: 'imap',
-          normalized: {
-            sender: extractBareAddress(sender),
-            actor_id: extractBareAddress(sender),
-            subject,
-            text,
-            is_bulk: message.is_bulk === true,
-            mentions: [],
-            user_flags: [],
-          },
+          normalized: mailboxEventPayload(message, ctx.sendAsAliases ?? []),
         },
         { workspace_id: ctx.workspaceId, connector_instance_id: ctx.connectorInstanceId },
       )
@@ -504,7 +647,7 @@ export function createMailboxBrainRouter(deps: MailboxBrainRouterDeps): MailboxB
           event: {
             source: 'imap',
             normalized: {
-              sender: extractBareAddress(sender),
+              sender: bareEmailAddress(sender),
               subject,
               text: mailboxEpisodeText(message),
               timestamp: message.timestamp ?? null,
@@ -525,11 +668,6 @@ export function createMailboxBrainRouter(deps: MailboxBrainRouterDeps): MailboxB
       return runRealtime(message, ctx, ruleSensitivity)
     },
   }
-}
-
-function extractBareAddress(mailbox: string): string {
-  const angled = mailbox.match(/<([^<>\s]+@[^<>\s]+)>/)
-  return (angled ? angled[1] : mailbox).trim().toLowerCase()
 }
 
 // ── The worker ──────────────────────────────────────────────────
@@ -563,6 +701,14 @@ export type MailboxSyncWorkerDeps = {
    */
   keepWarm?: (client: ImapClientLike) => SocketKeepWarm
   now?: () => Date
+  /**
+   * Workflow event port, threaded into the brain router's ingest engine
+   * (see `MailboxBrainRouterDeps.onEvent`). Boot passes
+   * `createIngestWorkflowTrigger(workflowEventDispatcher)`. Only reachable
+   * when `brain` is wired AND the instance has `ingestion_enabled` (D1: the
+   * card's Ingestion toggle is also the "may trigger workflows" switch).
+   */
+  onEvent?: IngestEngineDeps['onEvent']
 }
 
 /** Outcome of an on-demand single-instance sync (`syncInstanceById`). */
@@ -661,7 +807,9 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
   const backfillChunk = deps.backfillChunk ?? DEFAULT_BACKFILL_CHUNK
   const keepWarm = deps.keepWarm ?? ((client: ImapClientLike) => createSocketKeepWarm(client))
   const now = deps.now ?? (() => new Date())
-  const router = deps.brain ? createMailboxBrainRouter(deps.brain) : null
+  const router = deps.brain
+    ? createMailboxBrainRouter(deps.onEvent ? { ...deps.brain, onEvent: deps.onEvent } : deps.brain)
+    : null
 
   let timer: ReturnType<typeof setInterval> | null = null
   let running = false
@@ -780,6 +928,7 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
                   connectorInstanceId: inst.id,
                   userId: ownerUserId,
                   assistantId,
+                  sendAsAliases: readSendAsAliases(inst.config),
                 })
               } catch (err) {
                 console.error('[mailbox-sync] brain route failed (archive kept):', err)

@@ -26,10 +26,20 @@ export {
   createMailboxSyncWorker,
   createMailboxBrainRouter,
   buildMailboxIngestEngine,
+  mailboxEventPayload,
   parseSyncedMessage,
   readMailboxSyncState,
   backfillFloorDate,
 } from './sync-worker.js'
+export {
+  MAX_SEND_AS_ALIASES,
+  SEND_AS_ALIASES_CONFIG_KEY,
+  bareEmailAddress,
+  normalizeSendAsAliases,
+  readSendAsAliases,
+  senderIdentities,
+} from './send-as.js'
+export type { NormalizeSendAsResult } from './send-as.js'
 export type {
   MailboxSyncWorker,
   MailboxSyncWorkerDeps,

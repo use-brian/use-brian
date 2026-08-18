@@ -76,6 +76,7 @@ import {
   advanceWorkflowRun,
   stepSuccessors,
   createWorkflowEventDispatcher,
+  createIngestWorkflowTrigger,
   type WorkflowEventDispatcher,
   createRunQueueWorker,
   createTaskTools,
@@ -7046,6 +7047,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       ingestCharge: ports.ingestCharge,
       scheduledBatching: ports.mailboxScheduledBatching,
     },
+    // Workflow event port - the SAME shared dispatcher every connector poller
+    // feeds (`createIngestWorkflowTrigger`), so an `event` workflow subscribed
+    // to an imap instance fires on rule-matched new mail once ingestion is on
+    // (mailbox-imap.md → "Event trigger"). Before this wire an imap event
+    // subscription saved fine and never fired.
+    onEvent: createIngestWorkflowTrigger(workflowEventDispatcher),
   })
   if (runWorkers) mailboxSyncWorker.start()
   // Arm the on-demand sync seam in EVERY process (not just the workers
