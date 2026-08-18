@@ -61,7 +61,7 @@ export function isActiveWorkflowRunStatus(status: string): boolean {
  */
 const INSTANCE_TOOL_SEP = '__'
 
-export function canonicalGrantToolName(toolName: string): string {
+function canonicalGrantToolName(toolName: string): string {
   const i = toolName.indexOf(INSTANCE_TOOL_SEP)
   return i === -1 ? toolName : toolName.slice(0, i)
 }

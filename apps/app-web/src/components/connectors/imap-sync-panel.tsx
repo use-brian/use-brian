@@ -4,7 +4,9 @@
  * Connected-card panel for the Company Email (imap) connector: archive sync
  * status ("Syncing 8,200 of 14,200" / "Up to date") + the backfill consent
  * flow (D9 — cheap STATUS preflight, then scope choices with Later as a
- * first-class option; live tools work with zero backfill).
+ * first-class option; live tools work with zero backfill) + the send-as
+ * alias list (mailbox-imap.md → "Send-as aliases": the addresses this
+ * mailbox may reply AS; `PATCH /imap/send-as`, read back on sync-status).
  *
  * [COMP:web/imap-sync-panel]
  */
@@ -29,7 +31,14 @@ export type ImapSyncStatus = {
   lastError: string | null;
   lastFailedSyncAt?: string | null;
   ingestionEnabled: boolean;
+  /** Configured send-as aliases (bare lowercase); absent on older servers. */
+  sendAsAliases?: string[];
 };
+
+/** Client-side shape check before the round-trip; the server re-validates. */
+export function looksLikeEmailAddress(value: string): boolean {
+  return /^[^\s@<>,;"]+@[^\s@<>,;"]+\.[^\s@<>,;"]+$/.test(value.trim());
+}
 
 /** Pure status-line formatter — "Syncing N of M" while a backfill runs,
  *  "History sync paused" once it has parked, else "Up to date" with the
@@ -68,6 +77,9 @@ export function ImapSyncPanel({ instanceId }: { instanceId?: string } = {}) {
   const [probing, setProbing] = useState(false);
   const [arming, setArming] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [aliasDraft, setAliasDraft] = useState("");
+  const [aliasSaving, setAliasSaving] = useState(false);
+  const [aliasError, setAliasError] = useState<string | null>(null);
 
   const loadStatus = useCallback(async () => {
     try {
@@ -123,9 +135,49 @@ export function ImapSyncPanel({ instanceId }: { instanceId?: string } = {}) {
     setArming(false);
   }
 
+  async function saveAliases(next: string[]) {
+    setAliasSaving(true);
+    setAliasError(null);
+    try {
+      const res = await authFetch(`${API_URL}/api/connectors/imap/send-as`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instanceId, sendAsAliases: next }),
+      });
+      if (res.ok) {
+        const body = (await res.json()) as { sendAsAliases?: string[] };
+        setStatus((prev) => (prev ? { ...prev, sendAsAliases: body.sendAsAliases ?? next } : prev));
+        setAliasDraft("");
+      } else if (res.status === 400) {
+        setAliasError(tm.sendAsInvalid);
+      } else {
+        setAliasError(tm.sendAsFailed);
+      }
+    } catch {
+      setAliasError(tm.sendAsFailed);
+    }
+    setAliasSaving(false);
+  }
+
+  function addAlias() {
+    const value = aliasDraft.trim().toLowerCase();
+    if (!value) return;
+    if (!looksLikeEmailAddress(value)) {
+      setAliasError(tm.sendAsInvalid);
+      return;
+    }
+    const current = status?.sendAsAliases ?? [];
+    if (current.includes(value)) {
+      setAliasDraft("");
+      return;
+    }
+    void saveAliases([...current, value]);
+  }
+
   if (!status) return null;
 
   const backfillRunning = status.backfill?.status === "running";
+  const aliases = status.sendAsAliases ?? [];
   const backfillStalled = status.backfill?.status === "stalled";
   const syncLine = formatImapSyncLine(status, tm);
 
@@ -195,6 +247,66 @@ export function ImapSyncPanel({ instanceId }: { instanceId?: string } = {}) {
         </div>
       )}
       {error && <p className="text-xs text-destructive">{error}</p>}
+
+      {/* Send-as aliases: the identities this mailbox may reply AS. Replies
+          resolve to the alias the original was addressed to, so this list is
+          what makes "reply from bd@" work without the model picking a sender. */}
+      <div className="pt-2 border-t border-border space-y-2" data-testid="imap-send-as">
+        <div className="text-[13px] font-medium">{tm.sendAsTitle}</div>
+        <p className="text-[11px] text-muted-foreground">{tm.sendAsHelp}</p>
+        {aliases.length === 0 ? (
+          <p className="text-xs text-muted-foreground">
+            {tm.sendAsEmpty.replace("{email}", status.email)}
+          </p>
+        ) : (
+          <ul className="flex flex-wrap gap-1.5">
+            {aliases.map((alias) => (
+              <li
+                key={alias}
+                className="inline-flex items-center gap-1 text-xs border border-border rounded-full pl-2.5 pr-1 py-0.5"
+              >
+                <span>{alias}</span>
+                <button
+                  type="button"
+                  aria-label={tm.sendAsRemove.replace("{addr}", alias)}
+                  disabled={aliasSaving}
+                  onClick={() => void saveAliases(aliases.filter((a) => a !== alias))}
+                  className="rounded-full px-1 text-muted-foreground hover:text-foreground hover:bg-muted disabled:opacity-50"
+                >
+                  ×
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        <form
+          className="flex gap-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            addAlias();
+          }}
+        >
+          <input
+            type="email"
+            value={aliasDraft}
+            onChange={(e) => {
+              setAliasDraft(e.target.value);
+              if (aliasError) setAliasError(null);
+            }}
+            placeholder={tm.sendAsPlaceholder}
+            disabled={aliasSaving}
+            className="flex-1 min-w-0 text-xs bg-background border border-border rounded-lg px-2.5 py-1 disabled:opacity-50"
+          />
+          <button
+            type="submit"
+            disabled={aliasSaving || !aliasDraft.trim()}
+            className="text-xs font-medium border border-border px-3 py-1 rounded-lg text-muted-foreground hover:bg-muted disabled:opacity-50 transition-colors"
+          >
+            {tm.sendAsAdd}
+          </button>
+        </form>
+        {aliasError && <p className="text-xs text-destructive">{aliasError}</p>}
+      </div>
     </div>
   );
 }

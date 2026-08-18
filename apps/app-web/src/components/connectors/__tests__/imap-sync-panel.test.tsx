@@ -16,7 +16,7 @@ vi.mock("@/lib/auth-fetch", () => ({
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
-import { ImapSyncPanel, formatImapSyncLine } from "../imap-sync-panel";
+import { ImapSyncPanel, formatImapSyncLine, looksLikeEmailAddress } from "../imap-sync-panel";
 
 const dict = en as unknown as Dictionary;
 const tm = en.settings.connectors.imap;
@@ -70,5 +70,30 @@ describe("[COMP:web/imap-sync-panel] render posture", () => {
       </I18nProvider>,
     );
     expect(html).toBe("");
+  });
+});
+
+describe("[COMP:web/imap-sync-panel] send-as aliases", () => {
+  it("looksLikeEmailAddress gates the Add button's round-trip (server re-validates)", () => {
+    expect(looksLikeEmailAddress("bd@usebrian.example")).toBe(true);
+    expect(looksLikeEmailAddress("  BD@UseBrian.example ")).toBe(true);
+    expect(looksLikeEmailAddress("bd@")).toBe(false);
+    expect(looksLikeEmailAddress("BD <bd@usebrian.example>")).toBe(false);
+    expect(looksLikeEmailAddress("not an address")).toBe(false);
+  });
+
+  it("copy is dictionary-backed in every locale, without an em dash, and names the account in the empty state", async () => {
+    const { ja } = await import("@/lib/i18n/dictionaries/ja");
+    const { zh } = await import("@/lib/i18n/dictionaries/zh");
+    for (const d of [en, ja, zh]) {
+      const c = d.settings.connectors.imap;
+      for (const key of ["sendAsTitle", "sendAsHelp", "sendAsPlaceholder", "sendAsAdd", "sendAsRemove", "sendAsEmpty", "sendAsInvalid", "sendAsFailed"] as const) {
+        expect(typeof c[key]).toBe("string");
+        expect(c[key]).not.toContain("\u2014");
+      }
+      expect(c.sendAsEmpty).toContain("{email}");
+      expect(c.sendAsRemove).toContain("{addr}");
+    }
+    expect(tm.sendAsHelp).toMatch(/Send mail as/);
   });
 });

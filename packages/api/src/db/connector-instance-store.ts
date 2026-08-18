@@ -208,6 +208,14 @@ export type ConnectorInstanceStore = {
   /** System-level twin of `getAuthCredentials` — used at tool-injection time. */
   getAuthCredentialsSystem(id: string): Promise<ConnectorCredentials | null>
 
+  /**
+   * One instance's public row by id with no acting user — for the config a
+   * bound tool set reads at call time (the mailbox send-as aliases) and for
+   * background workers that hold an instance id but no session. Never returns
+   * credentials.
+   */
+  getSystem(id: string): Promise<ConnectorInstance | null>
+
   /** Find a team's team-native instance by provider. Used by KB sync worker. */
   findByWorkspaceProviderSystem(workspaceId: string, provider: string): Promise<ConnectorInstance | null>
 
@@ -557,6 +565,14 @@ export function createConnectorInstanceStore(encryptionKey: Buffer | null): Conn
       const row = result.rows[0]
       if (!row?.credentials || !encryptionKey) return null
       return normalizeStoredCredentials(decryptCredentials(row.credentials, encryptionKey))
+    },
+
+    async getSystem(id) {
+      const result = await query<PublicRow>(
+        `SELECT ${PUBLIC_COLS} FROM connector_instance WHERE id = $1`,
+        [id],
+      )
+      return result.rows[0] ?? null
     },
 
     async findByWorkspaceProviderSystem(workspaceId, provider) {

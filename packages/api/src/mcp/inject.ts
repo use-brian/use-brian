@@ -24,6 +24,7 @@ import type { Tool, McpSettingsStore, McpServerConfig, KnowledgeStoreInterface, 
 import { getGlobalEmailInboxProvider, type EmailInboxProvider } from '../agentmail/provider.js'
 import { renderEmailBody } from '@use-brian/channels'
 import { createMailboxApi } from '../mailbox/mailbox-api.js'
+import { readSendAsAliases } from '../mailbox/send-as.js'
 import { createSearchEmailArchiveTool, getGlobalMailboxArchiveDeps } from '../mailbox/archive-search-tool.js'
 import { createSyncMailboxNowTool, getGlobalMailboxSyncDeps } from '../mailbox/sync-tool.js'
 import type { MailboxAccountSettings } from '../mailbox/types.js'
@@ -4519,23 +4520,30 @@ async function injectMailboxTools(params: {
       // typecheck and silently skip the auth-failure report.
       getAttachment: (id, partId) => guard(() => raw.getAttachment(id, partId)),
       sendMessage: (p) => guard(() => raw.sendMessage(p)),
+      // The confirmation preview's From line resolves through the same seam
+      // (a reply-from-origin lookup logs in like any other IMAP call).
+      ...(raw.resolveSender ? { resolveSender: (p) => guard(() => raw.resolveSender!(p)) } : {}),
     }
   }
 
   // Audit-wrapped send (the Gmail pattern): classifier preflight decides
   // BEFORE the network call; executed/failed both audit. v1
   // `audienceClearance='public'` for all recipients, like gmail. `from` is the
-  // sending mailbox (the resolved account), not null — the multi-account audit.
+  // sending identity — the RESOLVED sender when the seam reports one (a
+  // send-as alias picked by reply-from-origin or passed explicitly), else the
+  // bound account; the pre-send `denied` audit can only know the account or
+  // the explicit `from`, since resolution happens inside the send.
   const withAudit = (raw: MailboxApi, fromEmail: string): MailboxApi => ({
     searchMessages: (p) => raw.searchMessages(p),
     getMessage: (id) => raw.getMessage(id),
     // Reads are unaudited (the `getMessage` precedent) — `connector_actions`
     // records egress, and an attachment save stays inside the workspace.
     getAttachment: (id, partId) => raw.getAttachment(id, partId),
+    ...(raw.resolveSender ? { resolveSender: (p) => raw.resolveSender!(p) } : {}),
     sendMessage: async (p) => {
       const auditPayload = {
         to: p.to,
-        from: fromEmail,
+        from: p.from?.trim() || fromEmail,
         subject: p.subject,
         has_body: Boolean(p.body),
         body_length: p.body?.length ?? 0,
@@ -4571,7 +4579,12 @@ async function injectMailboxTools(params: {
           try {
             await connectorActionAudit.emit(
               { userId, assistantId },
-              { connectorId: 'imap', actionKind: 'send_email', audienceClearance: 'public', status: 'executed', externalId: result.messageId, payload: auditPayload, preflight },
+              {
+                connectorId: 'imap', actionKind: 'send_email', audienceClearance: 'public', status: 'executed', externalId: result.messageId,
+                // Record the identity the mail actually carried (mailbox-imap.md → "Send-as aliases").
+                payload: { ...auditPayload, from: result.from ?? auditPayload.from },
+                preflight,
+              },
             )
           } catch (auditErr) {
             console.warn('[mcp-inject] imap connector_action audit emit failed (best-effort, suppressed):', auditErr instanceof Error ? auditErr.message : String(auditErr))
@@ -4622,7 +4635,17 @@ async function injectMailboxTools(params: {
         const { type: _t, ...settings } = creds
         return settings
       }
-      const rawApi = createMailboxApi({ cacheKey: boundId, getSettings })
+      // Send-as aliases ride the instance config (`config.sendAsAliases`), read
+      // per call like the credentials so a panel edit applies to the next send.
+      const getSendAsAliases = async (): Promise<string[]> => {
+        try {
+          const row = await store.getSystem(boundId)
+          return readSendAsAliases(row?.config)
+        } catch {
+          return []
+        }
+      }
+      const rawApi = createMailboxApi({ cacheKey: boundId, getSettings, getSendAsAliases })
       bound.push({ instanceId: boundId, email, api: withHealth(withAudit(rawApi, email), boundId) })
     }
     if (bound.length === 0) {
