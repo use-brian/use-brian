@@ -42,6 +42,7 @@ import {
   buildSplitSystemPrompt,
   formatPrivateRuntimeContext,
   formatUserVisibleContext,
+  speakerIdentityFromUser,
 } from './_prompt-builder.js'
 import { getEvolution as getWorkspaceMemoryEvolution } from '../db/workspace-memory-evolution-store.js'
 import { getBrainEvolution } from '../db/workspace-brain-evolution-store.js'
@@ -1220,6 +1221,20 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     currentDateTime,
     timezone: userTimezone,
     anchorTimezone,
+    // Who is speaking, stated as application fact. `isIdentified` means the
+    // route positively resolved the sender (linked account, email-matched
+    // channel user, or the owner on an owner-only path); anonymous shadow
+    // senders and external guests get no line and keep the group-context
+    // labels as their only attribution. Without this the model has to guess
+    // "me" among the roster it knows from team memory — 2026-08-19, Slack:
+    // "how many open tasks do I have?" was answered from a TEAMMATE's
+    // assignee id, and the "2 open" / "21 total" numbers that followed were
+    // all that teammate's. See layer-1-system-prompt.md → "Speaker identity".
+    // `actorChannelId` (Slack `U…`, Telegram handle/id, WhatsApp number) rides
+    // along so "what is my Slack id" is answered as fact, not guessed.
+    speakerIdentity: isIdentified && !externalGuest
+      ? speakerIdentityFromUser(channelUser, { type: channelType, id: actorChannelId ?? null })
+      : null,
     memoryContext,
     workspaceFilesContext,
     brandContext,

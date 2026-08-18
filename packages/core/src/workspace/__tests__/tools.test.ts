@@ -47,6 +47,20 @@ describe('[COMP:workspace/tools] listWorkspaceMembers', () => {
     expect(result.data).toEqual(ROSTER)
   })
 
+  it('passes the caller\'s isCurrentUser flag through so "my tasks" resolves without a name guess', async () => {
+    // The store marks the caller's own row (2026-08-19: without it, a Slack
+    // "how many open tasks do I have?" listed a teammate's tasks).
+    const roster: WorkspaceMemberInfo[] = [
+      ROSTER[0],
+      { ...ROSTER[1], isCurrentUser: true },
+    ]
+    const { listWorkspaceMembers } = createWorkspaceTools(makeFakeStore({ workspace_1: roster }))
+    const result = await listWorkspaceMembers.execute({}, ctx)
+    const rows = result.data as WorkspaceMemberInfo[]
+    expect(rows.filter((r) => r.isCurrentUser).map((r) => r.memberId)).toEqual([ROSTER[1].memberId])
+    expect(listWorkspaceMembers.description).toContain('isCurrentUser')
+  })
+
   it('exposes member ids so the model can resolve assignee_id', async () => {
     const { listWorkspaceMembers } = createWorkspaceTools(makeFakeStore({ workspace_1: ROSTER }))
     const result = await listWorkspaceMembers.execute({}, ctx)

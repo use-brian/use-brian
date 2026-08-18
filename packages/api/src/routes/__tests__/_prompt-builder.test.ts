@@ -6,6 +6,7 @@ import {
   formatPrivateRuntimeContext,
   resolveLayer1Prompt,
   maybeAppendFollowupChips,
+  speakerIdentityFromUser,
 } from '../_prompt-builder.js'
 import type { Message } from '@use-brian/core'
 
@@ -217,6 +218,56 @@ describe('[COMP:prompt/builder] User Context — presence vs anchor (travel)', (
     const hkIdx = out.indexOf('Asia/Hong_Kong')
     expect(tokyoIdx).toBeGreaterThan(0)
     expect(hkIdx).toBeGreaterThan(tokyoIdx)
+  })
+})
+
+describe('[COMP:prompt/builder] speakerIdentityFromUser', () => {
+  it('leads with the trimmed name and keeps the email', () => {
+    expect(speakerIdentityFromUser({ name: '  Hinson Wong ', email: 'hinson@example.com' }))
+      .toEqual({ name: 'Hinson Wong', email: 'hinson@example.com' })
+  })
+
+  it('falls back to the email as the name for a nameless account', () => {
+    // Slack-only shadow users and some OAuth sign-ups have `name: null`;
+    // the email is still enough to match the roster row.
+    expect(speakerIdentityFromUser({ name: null, email: 'jack@example.com' }))
+      .toEqual({ name: 'jack@example.com' })
+    expect(speakerIdentityFromUser({ name: '   ', email: 'jack@example.com' }))
+      .toEqual({ name: 'jack@example.com' })
+  })
+
+  it('returns null when nothing is known, so the builder skips the line', () => {
+    expect(speakerIdentityFromUser(null)).toBeNull()
+    expect(speakerIdentityFromUser(undefined)).toBeNull()
+    expect(speakerIdentityFromUser({ name: null, email: null })).toBeNull()
+    expect(speakerIdentityFromUser({ name: ' ', email: ' ' })).toBeNull()
+    expect(buildFullSystemPrompt({ ...baseArgs, speakerIdentity: speakerIdentityFromUser(null) }))
+      .not.toContain('You are talking with:')
+  })
+
+  it('carries the channel-native sender id and renders it as a second sentence', () => {
+    const identity = speakerIdentityFromUser(
+      { name: 'Hinson Wong', email: 'hinson@example.com' },
+      { type: 'slack', id: 'U0AQT24KHEV' },
+    )
+    expect(identity).toEqual({
+      name: 'Hinson Wong', email: 'hinson@example.com', channel: { type: 'slack', id: 'U0AQT24KHEV' },
+    })
+    const out = buildFullSystemPrompt({ ...baseArgs, speakerIdentity: identity })
+    expect(out).toContain(
+      'You are talking with: Hinson Wong (hinson@example.com), the authenticated sender of the newest message. Their slack user id is U0AQT24KHEV.\nCurrent date and time:',
+    )
+    // A missing / blank channel id adds nothing (web turns, unresolved actors).
+    expect(speakerIdentityFromUser({ name: 'Hinson' }, { type: 'slack', id: null })).toEqual({ name: 'Hinson', email: null })
+    expect(speakerIdentityFromUser({ name: 'Hinson' }, { type: 'slack', id: '  ' })).toEqual({ name: 'Hinson', email: null })
+  })
+
+  it('renders through the builder exactly like the hand-built shape', () => {
+    const out = buildFullSystemPrompt({
+      ...baseArgs,
+      speakerIdentity: speakerIdentityFromUser({ name: 'Hinson', email: 'hinson@example.com' }),
+    })
+    expect(out).toContain('You are talking with: Hinson (hinson@example.com), the authenticated sender')
   })
 })
 

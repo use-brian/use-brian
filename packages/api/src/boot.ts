@@ -86,8 +86,6 @@ import {
   type GoalRecord,
   createWorkspaceTools,
   createTranscriptionPrefTools,
-  type WorkspaceDirectoryStore,
-  type WorkspaceMemberInfo,
   createCrmTools,
   createMemoryTools,
   createRetrievalTools,
@@ -253,6 +251,7 @@ import { invitationRoutes } from './routes/invitations.js'
 import { createWorkspaceInvitationStore } from './db/workspace-invitation-store.js'
 import { createWorkspaceStore, getWorkspaceInboxRetentionDays, getWorkspaceMembershipWithClearanceSystem, getWorkspacePlan, getWorkspaceTranscriptionPrefs, setWorkspaceTranscriptionPrefs } from './db/workspace-store.js'
 import { createWorkspaceAuditStore } from './db/workspace-audit-store.js'
+import { createWorkspaceDirectoryStore } from './db/workspace-directory-store.js'
 import { createConnectionStore } from './db/connection-store.js'
 import {
   getPendingRecordingConfirmation,
@@ -1916,35 +1915,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     ? ports.buildSyncCredentials({ connectorInstanceStore, connectorGrantStore })
     : createSyncCredentialProvider(connectorInstanceStore, connectorGrantStore)
 
-  const workspaceDirectoryStore: WorkspaceDirectoryStore = {
-    async listMembers(userId, workspaceId) {
-      const membership = await workspaceStore.getMembership(userId, workspaceId)
-      if (!membership) return []
-      const members = await workspaceStore.listMembers(userId, workspaceId)
-      return members.map((m) => ({
-        memberId: m.id, name: m.userName ?? null, email: m.email ?? null,
-        avatarUrl: m.avatarUrl ?? null, role: m.role,
-      }))
-    },
-    async get(workspaceId, memberId) {
-      const map = await workspaceDirectoryStore.batchGet(workspaceId, [memberId])
-      return map.get(memberId) ?? null
-    },
-    async batchGet(workspaceId, memberIds) {
-      if (memberIds.length === 0) return new Map()
-      const members = await workspaceStore.listMembers('', workspaceId)
-      const requested = new Set(memberIds)
-      const out = new Map<string, WorkspaceMemberInfo>()
-      for (const m of members) {
-        if (!requested.has(m.id)) continue
-        out.set(m.id, {
-          memberId: m.id, name: m.userName ?? null, email: m.email ?? null,
-          avatarUrl: m.avatarUrl ?? null, role: m.role,
-        })
-      }
-      return out
-    },
-  }
+  const workspaceDirectoryStore = createWorkspaceDirectoryStore(workspaceStore)
 
   const workspaceAuditStore = createWorkspaceAuditStore()
   const connectionStore = createConnectionStore()
