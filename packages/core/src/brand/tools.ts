@@ -66,11 +66,30 @@ function workspaceGate(
 ): { data: string; isError: true } | null {
   if (!workspaceId) {
     return {
-      data: 'This assistant is not bound to a workspace, so it has no brand record.',
+      data:
+        'This assistant is not bound to a workspace, so there is no brand record to read or edit — a brand belongs to a workspace, not to a user or an assistant. Nothing was changed. ' +
+        'Do not invent brand values to fill the gap: tell the user the brand is unavailable in this chat, and ask them to move this assistant into a workspace in Studio or continue from a workspace-scoped chat. ' +
+        'Retrying from this session will keep failing, whatever the arguments.',
       isError: true,
     }
   }
   return null
+}
+
+/**
+ * A brand slug miss. Slugs are stable (a brand is edited in place through
+ * draft + approve, never superseded into a new row), so a miss means the slug
+ * is wrong or the brand lives in another workspace — not that it moved.
+ * `getBrand` with no `slug` is the discovery path: there is no list-brands
+ * tool, and the workspace default is what almost every call wants anyway.
+ */
+function brandSlugNotFound(slug: string): string {
+  return (
+    `No brand with slug "${slug}" in this workspace. ` +
+    'Brand slugs are stable, so this one is either misspelled or belongs to a different workspace — it did not move. ' +
+    'Call getBrand with no `slug` to read the workspace default brand (which is what almost every call wants) and take the exact slug from its response. ' +
+    'Do NOT retry this exact slug.'
+  )
 }
 
 const slugShape = z
@@ -136,8 +155,9 @@ export function createBrandTools(
       if (!brand) {
         return {
           data: input.slug
-            ? `No brand "${input.slug}" in this workspace.`
-            : 'This workspace has no brand record yet. A workspace owner creates one in Studio; do not invent brand values.',
+            ? brandSlugNotFound(input.slug)
+            : 'This workspace has no brand record at all yet — not an unapproved draft, not an empty shell. A workspace owner creates the first one in Studio. ' +
+              'Do NOT invent colors, fonts, claims, or licences to fill the gap, and do not retry this call: say plainly that the workspace has no brand recorded yet and ask the user for whatever specific value you need.',
           isError: true,
         }
       }
@@ -154,7 +174,9 @@ export function createBrandTools(
         return { data: renderBrand(brand, 'draft', brand.draft) }
       }
       return {
-        data: `Brand "${brand.slug}" exists but has no record body yet.`,
+        data:
+          `Brand "${brand.slug}" exists but carries no record body yet — neither an approved version nor a draft, so there is nothing to read. ` +
+          'Retrying will keep returning nothing. Do NOT invent brand values: tell the user this brand is registered but empty, and that a workspace owner fills it in (and approves it) in Studio.',
         isError: true,
       }
     },
@@ -207,7 +229,9 @@ export function createBrandTools(
       )
       if (groups.length === 0) {
         return {
-          data: `No field groups supplied. Pass at least one of: ${BRAND_RECORD_GROUPS.join(', ')}.`,
+          data:
+            `No field groups were supplied in \`changes\`, so there was nothing to save. Pass at least one of: ${BRAND_RECORD_GROUPS.join(', ')}. ` +
+            'Each group you pass REPLACES that group whole, so call getBrand first and send the complete group back with your edit included. An empty `changes` will keep failing.',
           isError: true,
         }
       }
@@ -220,8 +244,9 @@ export function createBrandTools(
       if (!brand) {
         return {
           data: input.slug
-            ? `No brand "${input.slug}" in this workspace.`
-            : 'This workspace has no brand record yet. A workspace owner creates one in Studio before it can be edited.',
+            ? `${brandSlugNotFound(input.slug)} Nothing was saved.`
+            : 'This workspace has no brand record yet, so there is no draft to update — a workspace owner creates the first one in Studio before it can be edited. Nothing was saved. ' +
+              'Do not retry: tell the user the workspace has no brand recorded yet and that an owner needs to create it first.',
           isError: true,
         }
       }
@@ -243,7 +268,10 @@ export function createBrandTools(
           .map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`)
           .join('; ')
         return {
-          data: `The change would leave the brand record invalid and was not saved. ${issues}`,
+          data:
+            `The change would leave the brand record invalid, so nothing was saved: ${issues}. ` +
+            'The patch is validated after merging onto the current record, so a group that looks fine on its own can still fail here. ' +
+            'Call getBrand, fix the named field(s) in the complete group, and send that whole group back — retrying this same patch will fail identically.',
           isError: true,
         }
       }
@@ -259,7 +287,12 @@ export function createBrandTools(
         'system',
       )
       if (!saved) {
-        return { data: `Could not update the "${brand.slug}" brand draft.`, isError: true }
+        return {
+          data:
+            `The "${brand.slug}" brand draft was not saved: the store accepted the request but wrote no draft row, which normally means this user lacks permission to propose brand changes in this workspace, or the brand was deleted between the read and the write. Nothing was changed. ` +
+            'Do NOT retry the same patch. Call getBrand to see whether the brand still exists, and tell the user their brand change did not go through and may need a workspace owner or admin.',
+          isError: true,
+        }
       }
       opts?.onEvent?.(
         { type: 'brand_draft_updated', brandId: saved.id, slug: saved.slug, groups },

@@ -75,7 +75,7 @@ Your summary should include:
 IMPORTANT: Be specific. "User wants to visit Tokyo" is not enough.
 "User is planning 5-day Tokyo trip March 10-15, vegetarian, budget ¥15,000/day food, Day 1-2 complete, Day 3 in progress" preserves continuity.
 
-Note: Search results from this conversation are cached server-side. If the user references previous results, use retrieveCachedResults instead of re-searching.
+Note: Pages fetched with urlReader in this conversation are cached server-side (latest per tool, 24h) — retrieveCachedResults({ toolName: "urlReader" }) returns the most recent one. Other tool results (webSearch, listings, lookups) are NOT cached; re-run those tools instead of calling retrieveCachedResults for them.
 
 Do NOT call any tools. Respond with text only.`
 
@@ -305,7 +305,7 @@ export async function compactConversation(options: CompactionOptions): Promise<C
     tokensBefore,
     tokensAfter,
     usage: response.usage,
-    model: options.model,
+    model: response.model || options.model,
     episodes,
   }
 }
@@ -567,6 +567,7 @@ export async function extractMemoriesBeforeCompaction(
   const existingSet = new Set(options.existingMemories.map((m) => m.toLowerCase()))
   let llmFacts: ExtractedFact[] = []
   let usage: TokenUsage | null = null
+  let servedModel: string | null = null
 
   try {
     const prompt = EXTRACTION_PROMPT.replace(
@@ -587,6 +588,7 @@ export async function extractMemoriesBeforeCompaction(
         maxTokens: 1_000,
       }),
     )
+    servedModel = response.model || options.model
 
     usage = response.usage
 
@@ -625,5 +627,5 @@ export async function extractMemoriesBeforeCompaction(
     merged.push(fact)
   }
 
-  return { facts: merged, usage, model: usage ? options.model : null }
+  return { facts: merged, usage, model: usage ? servedModel ?? options.model : null }
 }

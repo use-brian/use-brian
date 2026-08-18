@@ -155,7 +155,7 @@ function makeApp(opts: {
   role?: 'owner' | 'admin' | 'member' | null
   stores?: Partial<Stores>
   /** Auto-title endpoint deps (migration 218). Omit → endpoint returns 503. */
-  autoTitle?: { provider?: unknown; docPageStore?: unknown }
+  autoTitle?: { provider?: unknown; docPageStore?: unknown; resolveBackgroundRuntime?: unknown; backgroundModel?: string }
   /** Custom page templates store (migration 281). Omit → routes return 503. */
   pageTemplateStore?: unknown
   /** Blueprint records store (migration 307). Omit → records routes return 503. */
@@ -192,6 +192,10 @@ function makeApp(opts: {
       ...(opts.autoTitle?.docPageStore
         ? { docPageStore: opts.autoTitle.docPageStore as never }
         : {}),
+      ...(opts.autoTitle?.resolveBackgroundRuntime
+        ? { resolveBackgroundRuntime: opts.autoTitle.resolveBackgroundRuntime as never }
+        : {}),
+      ...(opts.autoTitle?.backgroundModel ? { backgroundModel: opts.autoTitle.backgroundModel } : {}),
       ...(opts.pageTemplateStore
         ? { pageTemplateStore: opts.pageTemplateStore as never }
         : {}),
@@ -1731,6 +1735,31 @@ describe('[COMP:api/doc-auto-title] POST /saved-views/:id/auto-title', () => {
       'Quarterly Revenue Review',
       '📈',
     )
+  })
+
+  it('uses the page workspace runtime and does not call the platform provider', async () => {
+    const docPageStore = placeholderPageStore(
+      'Quarterly revenue review and planning notes for the enterprise segment. '.repeat(10),
+    )
+    const platformProvider = titleProvider('Platform title')
+    const customProvider = titleProvider('Custom title')
+    const platformStream = vi.spyOn(platformProvider, 'stream')
+    const customStream = vi.spyOn(customProvider, 'stream')
+    const resolveBackgroundRuntime = vi.fn().mockResolvedValue({
+      provider: customProvider,
+      selector: 'custom:profile-1',
+    })
+    const { app, stores } = makeApp({
+      userId: USER_ID,
+      autoTitle: { provider: platformProvider, docPageStore, resolveBackgroundRuntime },
+    })
+    stores.savedViewStore.getById.mockResolvedValueOnce(savedViewFixture({ id: 'sv-1', workspaceId: WORKSPACE_ID }))
+    stores.savedViewStore.setAutoTitle.mockResolvedValueOnce({ name: 'Custom title', icon: null })
+    const res = await request(app).post('/api/saved-views/sv-1/auto-title').send({})
+    expect(res.status).toBe(200)
+    expect(resolveBackgroundRuntime).toHaveBeenCalledWith(WORKSPACE_ID)
+    expect(platformStream).not.toHaveBeenCalled()
+    expect(customStream).toHaveBeenCalledWith(expect.objectContaining({ model: 'custom:profile-1' }))
   })
 
   it('returns applied:false for a too-thin page (below the threshold)', async () => {

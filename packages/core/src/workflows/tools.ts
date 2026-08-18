@@ -25,13 +25,14 @@
 
 import { z } from 'zod'
 import { buildTool, type Tool } from '../tools/types.js'
+import { toolFailure } from '../tools/tool-failure.js'
 import type {
   EntityKind,
   EntityLinksStore,
   EntityStore,
 } from '../entities/types.js'
 import { EDGE_TYPES, LINK_KINDS } from '../entities/types.js'
-import { applyExplicitLinks, explicitLinksField, formatLinksSummary } from '../entities/explicit-links.js'
+import { applyExplicitLinks, explicitLinksField } from '../entities/explicit-links.js'
 
 /**
  * `attributes` JSONB fields routinely arrive as JSON strings rather
@@ -106,13 +107,27 @@ export type WorkflowBrainToolsDeps = {
   entityKindClassifier?: import('../classification/types.js').Classifier<EntityKind>
 }
 
-/** Guard — workflow runs always carry a workspace; the type allows null. */
-function requireWorkspace(workspaceId: string | null | undefined): string {
-  if (!workspaceId) {
-    throw new Error('workflow brain tool invoked without a workspace context')
+/**
+ * Guard — workflow runs always carry a workspace; the type allows null.
+ *
+ * It RETURNS a failure result rather than throwing: a throw here landed in the
+ * tool's own catch and was rendered as `createEntity failed: workflow brain
+ * tool invoked without a workspace context`, which reads to the model like the
+ * write was rejected on its arguments and invites a retry of the same call.
+ */
+function missingWorkspaceFailure(tool: string): { data: string; isError: true } {
+  return {
+    data:
+      `\`${tool}\` did not run: this workflow run carries no workspace, and brain rows are workspace-scoped — there is nothing to write into. ` +
+      'Nothing was saved or changed. This is a fault in how the run was started, not in the arguments: no retry and no argument change can fix it. ' +
+      'Stop calling brain-write tools in this run and report the failure in the run output.',
+    isError: true,
   }
-  return workspaceId
 }
+
+/** Echoed on every link/entity failure so the model can tell WHICH id it must re-resolve. */
+const BRAIN_ID_HINT =
+  'Both ids must be existing brain row UUIDs — re-resolve them with `getEntity` or `search` (list/get results expose the `entity_id` field; a CRM row id is NOT it).'
 
 export function createWorkflowBrainTools(deps: WorkflowBrainToolsDeps): Tool[] {
   const createEntityTool = buildTool({
@@ -184,20 +199,35 @@ export function createWorkflowBrainTools(deps: WorkflowBrainToolsDeps): Tool[] {
         }
       }
 
+      const workspaceId = context.workspaceId
+      if (!workspaceId) return missingWorkspaceFailure('createEntity')
+
+      let entity: Awaited<ReturnType<EntityStore['create']>>
       try {
-        const entity = await deps.entities.create({
+        entity = await deps.entities.create({
           kind: input.kind as EntityKind,
           displayName: input.name,
           attributes: input.attributes ?? {},
-          workspaceId: requireWorkspace(context.workspaceId),
+          workspaceId,
           createdByUserId: context.userId,
           userId: context.userId,
           assistantId: context.assistantId,
           source: 'user',
         })
+      } catch (err) {
+        return toolFailure(err, {
+          tool: 'createEntity',
+          action: 'Creating the entity',
+          target: `kind "${input.kind}", name "${input.name}"`,
+          mutating: true,
+          next: 'No entity row exists, so no id from this call can be used as a link target.',
+        })
+      }
+
+      try {
         const linksSummary = await applyExplicitLinks({
           entityLinks: deps.entityLinks,
-          workspaceId: requireWorkspace(context.workspaceId),
+          workspaceId,
           userId: context.userId,
           assistantId: context.assistantId,
           sourceKind: 'entity',
@@ -205,6 +235,16 @@ export function createWorkflowBrainTools(deps: WorkflowBrainToolsDeps): Tool[] {
           source: 'user',
           links: input.links,
         })
+        // `applyExplicitLinks` is fire-and-forget: a rejected edge is counted,
+        // logged, and swallowed. `linksFailed: 2` alone told the model a number
+        // and nothing it could act on, so the edges silently stayed missing.
+        const note =
+          linksSummary.failed > 0
+            ? `${linksSummary.failed} of ${input.links?.length ?? 0} link(s) were rejected and NOT written. ` +
+              `Targets passed: ${(input.links ?? []).map((l) => `\`${l.targetEntityId}\``).join(', ')}. ` +
+              `${BRAIN_ID_HINT} Verify each target, then write the missing edges with \`createEdge\` using \`${entity.id}\` as the source. ` +
+              'Do not re-run createEntity — the entity itself was written.'
+            : undefined
         return {
           data: {
             id: entity.id,
@@ -212,13 +252,21 @@ export function createWorkflowBrainTools(deps: WorkflowBrainToolsDeps): Tool[] {
             displayName: entity.displayName,
             linksCreated: linksSummary.created,
             linksFailed: linksSummary.failed,
+            ...(note ? { note } : {}),
           },
         }
       } catch (err) {
-        return {
-          data: `createEntity failed: ${err instanceof Error ? err.message : String(err)}`,
-          isError: true,
-        }
+        // The entity row IS written at this point — only the edges failed.
+        // Saying "nothing was saved" here would send the model back to
+        // re-create a row that already exists.
+        return toolFailure(err, {
+          tool: 'createEntity',
+          action: 'Wiring the `links` edges',
+          target: `entity \`${entity.id}\` ("${entity.displayName}")`,
+          next:
+            `The entity WAS created as \`${entity.id}\` — do NOT create it again. Only the edges failed. ${BRAIN_ID_HINT} ` +
+            'Re-check each link target, then wire the missing edges with `createEdge` using that entity id as the source.',
+        })
       }
     },
   })
@@ -252,6 +300,9 @@ export function createWorkflowBrainTools(deps: WorkflowBrainToolsDeps): Tool[] {
     isReadOnly: false,
 
     async execute(input, context) {
+      const workspaceId = context.workspaceId
+      if (!workspaceId) return missingWorkspaceFailure('createEdge')
+
       try {
         const edge = await deps.entityLinks.create({
           sourceKind: input.source_kind,
@@ -260,17 +311,20 @@ export function createWorkflowBrainTools(deps: WorkflowBrainToolsDeps): Tool[] {
           targetId: input.target_id,
           edgeType: input.edge_type,
           attributes: input.attributes ?? {},
-          workspaceId: requireWorkspace(context.workspaceId),
+          workspaceId,
           userId: context.userId,
           assistantId: context.assistantId,
           source: 'user',
         })
         return { data: { id: edge.id, edgeType: edge.edgeType } }
       } catch (err) {
-        return {
-          data: `createEdge failed: ${err instanceof Error ? err.message : String(err)}`,
-          isError: true,
-        }
+        return toolFailure(err, {
+          tool: 'createEdge',
+          action: 'Creating the edge',
+          target: `${input.source_kind} \`${input.source_id}\` --${input.edge_type}--> ${input.target_kind} \`${input.target_id}\``,
+          mutating: true,
+          next: `${BRAIN_ID_HINT} A foreign-key rejection means one of those two rows does not exist — find which, then retry with the corrected id.`,
+        })
       }
     },
   })
@@ -291,18 +345,25 @@ export function createWorkflowBrainTools(deps: WorkflowBrainToolsDeps): Tool[] {
     isReadOnly: false,
 
     async execute(input, context) {
+      const workspaceId = context.workspaceId
+      if (!workspaceId) return missingWorkspaceFailure('supersedeMemory')
+
       try {
         const superseded = await deps.memories.supersedeByTags({
-          workspaceId: requireWorkspace(context.workspaceId),
+          workspaceId,
           tags: input.tags,
           now: new Date(),
         })
         return { data: { superseded } }
       } catch (err) {
-        return {
-          data: `supersedeMemory failed: ${err instanceof Error ? err.message : String(err)}`,
-          isError: true,
-        }
+        return toolFailure(err, {
+          tool: 'supersedeMemory',
+          action: 'Superseding memories by tag',
+          target: `tags [${input.tags.join(', ')}]`,
+          mutating: true,
+          next:
+            'No memory was closed out, so any commitment these tags cover is still active — do not report it as retired.',
+        })
       }
     },
   })

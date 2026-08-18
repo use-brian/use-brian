@@ -238,6 +238,36 @@ export function openRecordingsRoutes(deps: RouteDeps): Router {
     res.json({ recordingId: recording.id, tasks })
   })
 
+  // Bind diarized speaker labels to human names ("Speaker 1" → "Alice").
+  // The transcript keeps its stable per-speaker labels; this mapping is
+  // display metadata a member can fill in at any time after the meeting.
+  router.patch('/:recordingId/participants', async (req, res) => {
+    const userId = userIdOf(req)
+    if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
+    const recording = await (deps.getRecording ?? getRecording)(userId, req.params.recordingId)
+    if (!recording) return void res.status(404).json({ error: 'Recording not found' })
+    const { participants } = (req.body ?? {}) as { participants?: unknown }
+    if (!Array.isArray(participants) || participants.length > 64) {
+      return void res.status(400).json({ error: 'participants must be an array' })
+    }
+    const cleaned: Array<{ speaker: string; name?: string }> = []
+    for (const entry of participants) {
+      const row = entry as { speaker?: unknown; name?: unknown }
+      if (typeof row.speaker !== 'string' || !row.speaker.trim() || row.speaker.length > 64) {
+        return void res.status(400).json({ error: 'Each participant needs a speaker label' })
+      }
+      if (row.name !== undefined && (typeof row.name !== 'string' || row.name.length > 120)) {
+        return void res.status(400).json({ error: 'Participant names must be short strings' })
+      }
+      cleaned.push({
+        speaker: row.speaker.trim(),
+        ...(typeof row.name === 'string' && row.name.trim() ? { name: row.name.trim() } : {}),
+      })
+    }
+    await (deps.updateRecording ?? updateRecording)(recording.id, { participants: cleaned })
+    res.json({ ok: true, participants: cleaned })
+  })
+
   // Keep the bare parameter route after every GET suffix so it cannot shadow
   // media, transcript, tasks, or future static read endpoints.
   router.get('/:recordingId', async (req, res) => {

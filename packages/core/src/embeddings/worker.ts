@@ -96,10 +96,13 @@ export const EMBEDDED_PRIMITIVES = [
   // full-mailbox corpus — subject-prefixed embed text via the
   // PRIMITIVE_CONFIGS entry. See docs/architecture/integrations/mailbox-imap.md.
   'email_segment',
-  // Provider-neutral WhatsApp / WeChat archive segments. The local sidecar
-  // appends these rows; the platform's shared worker owns their embeddings.
+  // Deliberately absent: chat archive segments. `brian-message-store` runs
+  // against its own database and embeds its own corpus, because it also
+  // executes search — keeping both sides of every cosine comparison behind one
+  // embedder makes vector compatibility structural rather than a convention two
+  // codebases have to keep agreeing on. Re-adding it here would have this
+  // worker query a table that no longer exists in the platform's database.
   // See docs/architecture/integrations/chat-message-store.md.
-  'chat_segment',
 ] as const
 
 export type EmbeddingPrimitive = typeof EMBEDDED_PRIMITIVES[number]

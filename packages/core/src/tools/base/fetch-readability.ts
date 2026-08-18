@@ -17,6 +17,7 @@
  */
 
 import type { FetchProvider, FetchResult } from './fetch-stack.js'
+import { FetchProviderError } from './_fetch-error.js'
 import { isXHost } from './fetch-xai.js'
 
 const READABILITY_MAX_HTML_CHARS = 1_000_000
@@ -79,7 +80,7 @@ export const readabilityProvider: FetchProvider = {
     })
 
     if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`)
+      throw new FetchProviderError({ provider: 'readability', url, status: res.status })
     }
 
     const contentType = (res.headers.get('content-type') ?? '').toLowerCase()

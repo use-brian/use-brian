@@ -27,7 +27,10 @@ const { sendMessage, createTelegramAdapter, createWhatsAppCloudAdapter } = vi.ho
     createWhatsAppCloudAdapter: vi.fn(() => ({ sendMessage: send })),
   }
 })
-vi.mock('@use-brian/channels', () => ({
+// Adapters are mocked; `describeSlackError` / `SlackApiError` are NOT — the
+// Slack failure copy under test is the real translator's output.
+vi.mock('@use-brian/channels', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@use-brian/channels')>()),
   createSlackAdapter: vi.fn(() => ({ sendMessage })),
   createTelegramAdapter,
   createWhatsAppAdapter: vi.fn(() => ({ sendMessage })),
@@ -38,6 +41,7 @@ import { createWorkflowChannelDelivery } from '../channel-delivery.js'
 import {
   createTelegramAdapter as mockedCreateTelegramAdapter,
   createWhatsAppCloudAdapter as mockedCreateWhatsAppCloudAdapter,
+  SlackApiError,
 } from '@use-brian/channels'
 import type { ChannelIntegrationStore } from '../../db/channel-integrations.js'
 
@@ -101,6 +105,60 @@ describe('[COMP:workflow/channel-delivery] thread-reply pass-through', () => {
       undefined,
     )
     expect(outcome).toMatchObject({ status: 'delivered', messageId: '1751970000.111111' })
+  })
+
+  it('slack: a push failure returns a typed failure whose text says the delivery did NOT happen', async () => {
+    // Raw throw is `Slack API chat.postMessage: channel_not_found` — a bare
+    // code the executor copies verbatim into `__delivery.error`, which is the
+    // model's only account of the delivery.
+    sendMessage.mockRejectedValueOnce(new SlackApiError({
+      method: 'chat.postMessage',
+      code: 'channel_not_found',
+      target: { channel: 'C123' },
+    }))
+    const deliver = createWorkflowChannelDelivery({ integrationStore })
+
+    const outcome = await deliver({ ...baseParams(), channelType: 'slack' })
+
+    expect(outcome.status).toBe('failed')
+    const error = (outcome as { error: string }).error
+    expect(error).toContain('Slack delivery FAILED')
+    expect(error).toContain('NOT posted to Slack channel `C123`')
+    // describeSlackError's diagnosis + discovery pointer + invite remedy.
+    expect(error).toMatch(/no conversation .* that this bot can see/)
+    expect(error).toContain('`listSlackChannels`')
+    expect(error).toMatch(/do not tell the user it was sent/)
+  })
+
+  it('slack: a thread reply failure names the thread it was replying under', async () => {
+    sendMessage.mockRejectedValueOnce(new SlackApiError({
+      method: 'chat.postMessage',
+      code: 'thread_not_found',
+      target: { channel: 'C123', ts: '1751960000.000100' },
+    }))
+    const deliver = createWorkflowChannelDelivery({ integrationStore })
+
+    const outcome = await deliver({
+      ...baseParams(),
+      channelType: 'slack',
+      threadRef: '1751960000.000100',
+    })
+
+    const error = (outcome as { error: string }).error
+    expect(error).toContain('as a reply in thread `1751960000.000100`')
+    expect(error).toMatch(/PARENT message/)
+  })
+
+  it('slack: a non-Slack throw supplies its own retry verdict', async () => {
+    sendMessage.mockRejectedValueOnce(new Error('fetch failed'))
+    const deliver = createWorkflowChannelDelivery({ integrationStore })
+
+    const outcome = await deliver({ ...baseParams(), channelType: 'slack' })
+
+    const error = (outcome as { error: string }).error
+    expect(error).toContain('fetch failed')
+    expect(error).toMatch(/Slack never answered this call/)
+    expect(error).toMatch(/retry once/)
   })
 
   it('telegram: passes threadRef through as the reply anchor', async () => {

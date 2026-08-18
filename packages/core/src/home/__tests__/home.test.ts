@@ -254,6 +254,12 @@ describe('[COMP:home/tools] setHomeDock', () => {
 
     const res = await setHomeDock.execute({ note: 'hi' }, { ...ctx(), workspaceId: null })
     expect(res.isError).toBe(true)
+    const data = String(res.data)
+    // The gate names WHERE the dock lives, says nothing was saved, and shuts
+    // the retry down — a reworded note can never make this succeed.
+    expect(data).toContain('stored per (user, workspace)')
+    expect(data).toContain('Nothing was saved')
+    expect(data).toContain('Do NOT retry this call')
     expect(put).not.toHaveBeenCalled()
   })
 })

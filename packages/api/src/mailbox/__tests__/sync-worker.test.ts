@@ -793,6 +793,36 @@ const BRAIN_CTX = {
 }
 
 describe('[COMP:api/mailbox-sync-worker] rules routing (mixed batch)', () => {
+  it('routes realtime extraction through the workspace runtime', async () => {
+    const customProvider = { stream: vi.fn() }
+    const resolveLlm = vi.fn().mockResolvedValue({
+      provider: customProvider,
+      model: 'custom:profile-1',
+      modelTier: 'standard',
+      providerKeySource: 'user',
+      inputTokenLimit: 32000,
+      maxTokens: 4000,
+    })
+    const { deps, runExtraction } = makeBrainDeps({ resolveLlm })
+    await createMailboxBrainRouter(deps).route({
+      account_email: 'maya@harborlane.example',
+      folder: 'INBOX',
+      provider_message_id: 'INBOX:1',
+      from: 'Casey <casey@client.example>',
+      subject: 'Deal terms',
+      text: 'Can we revise clause 4?',
+    }, BRAIN_CTX)
+    expect(resolveLlm).toHaveBeenCalledWith('ws-1')
+    expect(runExtraction.mock.calls[0][2]).toMatchObject({
+      provider: customProvider,
+      model: 'custom:profile-1',
+      providerKeySource: 'user',
+      inputTokenLimit: 32000,
+      maxTokens: 4000,
+      classifierModel: 'custom:profile-1',
+    })
+  })
+
   it('pairs the task store with admission on realtime extraction', async () => {
     const { deps, runExtraction, taskAdmission } = makeBrainDeps()
     const router = createMailboxBrainRouter(deps)

@@ -32,9 +32,29 @@ export type AssessGoalClarityInput = {
   approach?: string | null
   /** Confirming user, for COGS attribution only; the assessment ignores it. */
   userId?: string
+  workspaceId?: string
+  assistantId?: string
 }
 
 export type GoalClarityAssessor = (input: AssessGoalClarityInput) => Promise<GoalClarityVerdict>
+
+export type GoalLlmRuntime = {
+  provider: LLMProvider
+  model: string
+  modelTier: string
+  providerKeySource: 'user' | 'platform'
+  inputTokenLimit?: number
+  maxTokens?: number
+}
+
+export type GoalLlmUsageContext = {
+  userId?: string
+  workspaceId?: string
+  assistantId?: string
+  model: string
+  modelTier: string
+  providerKeySource: 'user' | 'platform'
+}
 
 const CLARITY_SYSTEM_PROMPT = [
   'You review GOAL configurations for an autonomous assistant. A confirmed goal is worked autonomously, iteration after iteration, until it is "done".',
@@ -54,11 +74,14 @@ const CLARITY_SYSTEM_PROMPT = [
 export function createGoalClarityAssessor(deps: {
   provider: LLMProvider
   model: string
+  modelTier: string
   /** Optional COGS sink — boot records this under an `overhead:goal-clarity` source. */
-  onUsage?: (usage: TokenUsage, userId?: string) => void
+  onUsage?: (usage: TokenUsage, context: GoalLlmUsageContext) => void
+  resolveLlm: ((workspaceId: string) => Promise<GoalLlmRuntime | null>) | null
 }): GoalClarityAssessor {
-  return async ({ outcome, verification, approach, userId }) => {
+  return async ({ outcome, verification, approach, userId, workspaceId, assistantId }) => {
     try {
+      const runtime = workspaceId && deps.resolveLlm ? await deps.resolveLlm(workspaceId) : null
       const content = [
         `GOAL OUTCOME: ${outcome}`,
         verification?.trim() ? `VERIFICATION: ${verification.trim()}` : null,
@@ -67,15 +90,23 @@ export function createGoalClarityAssessor(deps: {
         .filter((l): l is string => l !== null)
         .join('\n')
       const response = await collectStream(
-        deps.provider.stream({
-          model: deps.model,
+        (runtime?.provider ?? deps.provider).stream({
+          model: runtime?.model ?? deps.model,
           systemPrompt: CLARITY_SYSTEM_PROMPT,
           messages: [{ role: 'user', content }],
-          maxTokens: 400,
+          maxTokens: Math.min(400, runtime?.maxTokens ?? 400),
+          inputTokenLimit: runtime?.inputTokenLimit,
           temperature: 0.1,
         }),
       )
-      if (response.usage) deps.onUsage?.(response.usage, userId)
+      if (response.usage) deps.onUsage?.(response.usage, {
+        userId,
+        workspaceId,
+        assistantId,
+        model: response.model || runtime?.model || deps.model,
+        modelTier: runtime?.modelTier ?? deps.modelTier,
+        providerKeySource: runtime?.providerKeySource ?? 'platform',
+      })
       const text = response.content.map((b) => (b.type === 'text' ? b.text : '')).join('')
       return parseClarityVerdict(text)
     } catch (err) {

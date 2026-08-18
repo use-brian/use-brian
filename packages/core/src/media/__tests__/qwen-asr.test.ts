@@ -38,6 +38,32 @@ describe('[COMP:media/transcriber-qwen] qwenAsrTranscriber', () => {
     expect(result.usages[0].costUsd).toBeCloseTo((2 / 3600) * QWEN_ASR_USD_PER_AUDIO_HOUR)
   })
 
+  it('normalizes a compatible-mode base URL and honors the model override', async () => {
+    const fetchFn = vi.fn(async () => response({
+      choices: [{ message: { content: 'transcript' } }],
+    })) as unknown as typeof fetch
+    const transcriber = qwenAsrTranscriber({
+      apiKey: 'key',
+      baseUrl: 'https://dashscope.example/compatible-mode/v1/',
+      model: 'regional-asr',
+      fetchFn,
+    })
+
+    await transcriber.transcribe({
+      buffer: Buffer.from('audio'),
+      mime: 'audio/mp4',
+      durationMs: 1000,
+    })
+
+    expect(transcriber.name).toBe('dashscope:regional-asr')
+    expect(fetchFn).toHaveBeenCalledWith(
+      'https://dashscope.example/compatible-mode/v1/chat/completions',
+      expect.objectContaining({
+        body: expect.stringContaining('"model":"regional-asr"'),
+      }),
+    )
+  })
+
   it('fails before the network when the audio exceeds five minutes', async () => {
     const fetchFn = vi.fn() as unknown as typeof fetch
     const transcriber = qwenAsrTranscriber({ apiKey: 'key', fetchFn })

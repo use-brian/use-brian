@@ -18,6 +18,7 @@
  */
 
 import type { FetchProvider, FetchResult } from './fetch-stack.js'
+import { FetchProviderError } from './_fetch-error.js'
 
 const JINA_ENDPOINT = 'https://r.jina.ai/'
 
@@ -92,9 +93,15 @@ export const jinaProvider: FetchProvider = {
 
     if (!res.ok) {
       // Jina 5xx usually means "target site blocked us" — raw fetch will
-      // fail the same way, but the caller may want a cleaner error. 4xx
-      // means Jina itself is sick — surface and fall through.
-      throw new Error(`Jina HTTP ${res.status}`)
+      // fail the same way. 4xx means Jina itself is sick (key, quota) —
+      // a provider failure, not a fact about the page.
+      throw new FetchProviderError({
+        provider: 'jina',
+        url,
+        status: res.status,
+        kind: res.status < 500 ? 'provider' : undefined,
+        detail: res.status < 500 ? 'the Jina reader service refused the request (key / quota), not the target site' : 'the target site refused Jina',
+      })
     }
 
     const content = (await res.text()).trim()

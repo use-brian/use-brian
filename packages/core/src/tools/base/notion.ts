@@ -10,7 +10,7 @@
 
 import { z } from 'zod'
 import { buildTool, type Tool } from '../types.js'
-import { type Json, str, obj, asRows, projectList } from './_connector-result.js'
+import { type Json, str, obj, asRows, projectList, connectorError, type ConnectorApiError } from './_connector-result.js'
 
 // ── Notion result projections ──────────────────────────────────
 // Notion objects are the heaviest connector payloads: every property is a
@@ -129,6 +129,23 @@ export type NotionApi = {
   appendBlocks(pageId: string, content: string): Promise<unknown>
 }
 
+/**
+ * Notion-specific copy on top of the generic rendering: a `validation_error`
+ * on a database write / query almost always means a property name or type
+ * that does not match the schema — `notionGetDatabase` returns the exact
+ * property names and select options, so point there instead of leaving the
+ * model to guess a rename.
+ */
+function notionTranslate(err: ConnectorApiError): string | undefined {
+  if (err.code === 'validation_error') {
+    return `Notion rejected the request (Notion API error (${err.status ?? 400}), validation_error): ${err.detail} The property path in that message is the one to fix — call \`notionGetDatabase\` for the exact property names, types and select options of the target database, then retry with a matching payload. Nothing was written; the same payload will fail the same way.`
+  }
+  if (err.code === 'restricted_resource' || err.code === 'object_not_found') {
+    return `Notion cannot see that ${err.code === 'restricted_resource' ? 'resource' : 'object'} (Notion API error (${err.status ?? 404}), ${err.code}): ${err.detail} Either the id is wrong or the page / database has not been shared with the Use Brian integration — ask the user to open it in Notion → "…" → Connections → add the integration, then retry; or call \`notionSearch\` for an id the integration can already see. Retrying the same id unchanged will keep failing.`
+  }
+  return undefined
+}
+
 export function createNotionTools(api: NotionApi): Tool[] {
   const search = buildTool({
     name: 'notionSearch',
@@ -153,7 +170,7 @@ export function createNotionTools(api: NotionApi): Tool[] {
         })
         return { data: projectList(asRows(((data ?? {}) as Json).results), input.pageSize ?? 10, searchRow) }
       } catch (err) {
-        return { data: `Notion error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Notion', tool: 'notionSearch', target: `search \`${input.query ?? ''}\``, translate: notionTranslate, err })
       }
     },
   })
@@ -188,7 +205,7 @@ export function createNotionTools(api: NotionApi): Tool[] {
           content: p.content ?? p.blocks ?? p.children,
         } }
       } catch (err) {
-        return { data: `Notion error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Notion', tool: 'notionGetPage', target: `page \`${input.pageId}\``, discoveryTool: 'notionSearch', translate: notionTranslate, err })
       }
     },
   })
@@ -214,7 +231,7 @@ export function createNotionTools(api: NotionApi): Tool[] {
         for (const key of Object.keys(props)) schema[key] = str(props[key] as Json, 'type')
         return { data: { id: str(d, 'id'), url: str(d, 'url'), title: plainText(d.title), properties: schema } }
       } catch (err) {
-        return { data: `Notion error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Notion', tool: 'notionGetDatabase', target: `database \`${input.databaseId}\``, discoveryTool: 'notionSearch', translate: notionTranslate, err })
       }
     },
   })
@@ -246,7 +263,7 @@ export function createNotionTools(api: NotionApi): Tool[] {
         })
         return { data: projectList(asRows(((data ?? {}) as Json).results), input.pageSize ?? 100, dbRow) }
       } catch (err) {
-        return { data: `Notion error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Notion', tool: 'notionQueryDatabase', target: `database \`${input.databaseId}\``, discoveryTool: 'notionGetDatabase', translate: notionTranslate, err })
       }
     },
   })
@@ -281,7 +298,7 @@ export function createNotionTools(api: NotionApi): Tool[] {
         const p = (data ?? {}) as Json
         return { data: { id: str(p, 'id'), url: str(p, 'url') } }
       } catch (err) {
-        return { data: `Notion error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Notion', tool: 'notionCreatePage', target: `parent \`${input.parentId}\``, discoveryTool: 'notionSearch', mutating: true, translate: notionTranslate, err })
       }
     },
   })
@@ -310,7 +327,7 @@ export function createNotionTools(api: NotionApi): Tool[] {
         const p = (data ?? {}) as Json
         return { data: { id: str(p, 'id'), url: str(p, 'url'), archived: p.archived } }
       } catch (err) {
-        return { data: `Notion error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Notion', tool: 'notionUpdatePage', target: `page \`${input.pageId}\``, discoveryTool: 'notionSearch', mutating: true, translate: notionTranslate, err })
       }
     },
   })
@@ -335,7 +352,7 @@ export function createNotionTools(api: NotionApi): Tool[] {
         const r = (data ?? {}) as Json
         return { data: { ok: true, appended: asRows(r.results).length || undefined } }
       } catch (err) {
-        return { data: `Notion error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'Notion', tool: 'notionAppendBlocks', target: `page \`${input.pageId}\``, discoveryTool: 'notionSearch', mutating: true, translate: notionTranslate, err })
       }
     },
   })

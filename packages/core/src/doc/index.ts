@@ -48,6 +48,7 @@ export * from './markdown.js'
 export * from './to-markdown.js'
 export * from './rich-text.js'
 export * from './convert/to-docx.js'
+export * from './convert/to-pdf.js'
 
 // Page templates — Notion-style starter layouts shared by the editor slash
 // menu and the brain-MCP template tools. See doc-templates.md.
@@ -76,6 +77,10 @@ export * from './find-page.js'
 
 // Auto-title — shared title generator + thresholds (migration 218).
 export * from './auto-title.js'
+
+// Page-tree visibility - the titles-only "where this page sits" map (ancestors /
+// siblings / sub-pages + ids) injected beside the active-page outline.
+export * from './page-tree-context.js'
 
 // Doc comments (chat-as-threads): store contract + comment tools.
 export * from './comment-types.js'

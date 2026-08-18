@@ -8,6 +8,7 @@
 
 import { z } from 'zod'
 import { buildTool, type Tool } from '../types.js'
+import { googleFailure } from './_google-error.js'
 import { type Json, str, asRows, projectList } from './_connector-result.js'
 
 // Google Tasks list endpoints return `{ items: [...] }` with each task
@@ -72,7 +73,7 @@ export function createGoogleTasksTools(api: GoogleTasksApi): Tool[] {
         const data = await api.listTaskLists({ maxResults: input.maxResults })
         return { data: projectList(asRows(((data ?? {}) as Json).items), input.maxResults ?? 100, taskListRow) }
       } catch (err) {
-        return { data: `Tasks error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return googleFailure(err, { tool: 'googleTasksListTaskLists', product: 'Tasks' })
       }
     },
   })
@@ -104,7 +105,7 @@ export function createGoogleTasksTools(api: GoogleTasksApi): Tool[] {
         })
         return { data: projectList(asRows(((data ?? {}) as Json).items), input.maxResults ?? 100, taskRow) }
       } catch (err) {
-        return { data: `Tasks error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return googleFailure(err, { tool: 'googleTasksListTasks', product: 'Tasks', target: `task list \`${input.taskListId}\``, discoveryTool: 'googleTasksListTaskLists' })
       }
     },
   })
@@ -125,7 +126,7 @@ export function createGoogleTasksTools(api: GoogleTasksApi): Tool[] {
         const data = await api.getTask(input.taskListId, input.taskId)
         return { data: taskRow((data ?? {}) as Json) }
       } catch (err) {
-        return { data: `Tasks error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return googleFailure(err, { tool: 'googleTasksGetTask', product: 'Tasks', target: `task \`${input.taskId}\` in list \`${input.taskListId}\``, discoveryTool: 'googleTasksListTasks' })
       }
     },
   })
@@ -159,7 +160,7 @@ export function createGoogleTasksTools(api: GoogleTasksApi): Tool[] {
         })
         return { data: taskRow((data ?? {}) as Json) }
       } catch (err) {
-        return { data: `Tasks error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return googleFailure(err, { tool: 'googleTasksCreateTask', product: 'Tasks', target: `task list \`${input.taskListId}\``, discoveryTool: 'googleTasksListTaskLists' })
       }
     },
   })
@@ -193,7 +194,7 @@ export function createGoogleTasksTools(api: GoogleTasksApi): Tool[] {
         const data = await api.updateTask(taskListId, taskId, updates)
         return { data: taskRow((data ?? {}) as Json) }
       } catch (err) {
-        return { data: `Tasks error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return googleFailure(err, { tool: 'googleTasksUpdateTask', product: 'Tasks', target: `task \`${input.taskId}\` in list \`${input.taskListId}\``, discoveryTool: 'googleTasksListTasks' })
       }
     },
   })
@@ -219,7 +220,7 @@ export function createGoogleTasksTools(api: GoogleTasksApi): Tool[] {
         await api.deleteTask(input.taskListId, input.taskId)
         return { data: `Task ${input.taskId} deleted successfully.` }
       } catch (err) {
-        return { data: `Tasks error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return googleFailure(err, { tool: 'googleTasksDeleteTask', product: 'Tasks', target: `task \`${input.taskId}\` in list \`${input.taskListId}\``, discoveryTool: 'googleTasksListTasks' })
       }
     },
   })

@@ -16,6 +16,7 @@ import { describe, expect, it } from 'vitest'
 import { renderToString } from 'react-dom/server'
 import {
   ChatComposer,
+  fitTextareaHeight,
   resolveEnterIntent,
   splitHighlightSegments,
 } from '../ChatComposer'
@@ -184,5 +185,44 @@ describe('[COMP:chat-ui/chat-composer] mention-chip mirror', () => {
     // Both layers must carry the host's typography or they cannot align.
     expect(chipped.match(/text-sm/g)?.length).toBe(2)
     expect(chipped).toContain('composer-highlight-input')
+  })
+})
+
+describe('[COMP:chat-ui/chat-composer] auto-grow fit', () => {
+  /** A layout stub: `scrollHeight` is content + padding (never borders);
+   *  `offsetHeight - clientHeight` is the vertical border. */
+  function stub(opts: { scrollHeight: number; border: number; minHeight?: number }) {
+    const style: Record<string, string> = {}
+    const el = {
+      style,
+      get scrollHeight() {
+        return opts.scrollHeight
+      },
+      // Under border-box the box can never shrink below its min-height, and
+      // offsetHeight includes the border while clientHeight excludes it.
+      get offsetHeight() {
+        return Math.max(opts.minHeight ?? 0, parseFloat(style.height ?? '0') || 0) + opts.border
+      },
+      get clientHeight() {
+        return Math.max(opts.minHeight ?? 0, parseFloat(style.height ?? '0') || 0)
+      },
+    }
+    return el as unknown as HTMLTextAreaElement
+  }
+
+  it('sizes a borderless textarea to its scrollHeight', () => {
+    const el = stub({ scrollHeight: 39, border: 0 })
+    fitTextareaHeight(el)
+    expect(el.style.height).toBe('39px')
+  })
+
+  it('adds the vertical border back so a bordered box never overflows by its own border', () => {
+    // The dock composer: 1px border top + bottom, min-h 36px, one line of
+    // text-sm/leading-relaxed + py-2 = ~39px of content. Sizing to bare
+    // scrollHeight (39px, border-box) leaves 37px for content and paints a
+    // scrollbar on an empty single-line box.
+    const el = stub({ scrollHeight: 39, border: 2, minHeight: 36 })
+    fitTextareaHeight(el)
+    expect(el.style.height).toBe('41px')
   })
 })

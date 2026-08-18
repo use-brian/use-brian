@@ -26,6 +26,7 @@
  */
 
 import type { FetchProvider, FetchResult } from './fetch-stack.js'
+import { FetchProviderError } from './_fetch-error.js'
 import { isXHost, parseStatusUrl } from './fetch-xai.js'
 
 const API_BASE = 'https://api.x.com/2/tweets'
@@ -105,7 +106,13 @@ export const xApiFetchProvider: FetchProvider = {
     if (!res.ok) {
       // Throw so the stack falls through to the xAI provider (rate limit,
       // monthly cap exhaustion, revoked token, or a tier without read access).
-      throw new Error(`X API HTTP ${res.status}`)
+      throw new FetchProviderError({
+        provider: 'x-api',
+        url,
+        status: res.status,
+        kind: 'provider',
+        detail: res.status === 429 ? 'X API rate limit / monthly cap' : res.status === 401 || res.status === 403 ? 'the X API token is rejected or the tier has no read access' : undefined,
+      })
     }
 
     const body = (await res.json()) as XResponse
@@ -113,7 +120,7 @@ export const xApiFetchProvider: FetchProvider = {
     if (!tweet) {
       // Deleted / protected / not-found — let the xAI fallback try.
       const detail = body.errors?.[0]?.detail ?? body.errors?.[0]?.title
-      throw new Error(`X API returned no post${detail ? `: ${detail}` : ''}`)
+      throw new FetchProviderError({ provider: 'x-api', url, kind: 'not_found', detail: `X API returned no post${detail ? ` (${detail})` : ''} — deleted, protected, or not found` })
     }
 
     const content = renderTweet(tweet, body.includes, parsed.handle)

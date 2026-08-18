@@ -26,7 +26,7 @@
 
 import { Router } from 'express'
 import type { Request } from 'express'
-import { createSlackAdapter, verifySlackSignature } from '@use-brian/channels'
+import { createSlackAdapter, describeSlackError, verifySlackSignature } from '@use-brian/channels'
 import type { IncomingMessage, SlackAdapterConfig } from '@use-brian/channels'
 import { findAssistantById, findUserById } from '../db/users.js'
 import { query } from '../db/client.js'
@@ -107,6 +107,7 @@ type SlackRouteOptions = {
    * channel pipeline so its background calls work without a Google key. */
   backgroundModel?: string
   provider: LLMProvider
+  configuredProviders?: import('@use-brian/shared/model-registry').ProviderAvailability
   resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
   systemPrompt: string
   tools: Map<string, Tool>
@@ -998,6 +999,7 @@ type ProcessMessageParams = {
   botToken: string
   ingestChannelMediaRef?: SlackRouteOptions['ingestChannelMediaRef']
   provider: LLMProvider
+  configuredProviders?: import('@use-brian/shared/model-registry').ProviderAvailability
   resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
   systemPrompt: string
   tools: Map<string, Tool>
@@ -1034,6 +1036,66 @@ type ProcessMessageParams = {
   episodicStore?: import('@use-brian/core').EpisodicStore
   sessionStateStore?: import('@use-brian/core').SessionStateStore
   capabilityStore: import('@use-brian/core').CapabilityStore
+}
+
+/**
+ * The Slack-only `reactToMessage` tool, exported as a factory (the
+ * `createUpdateViewedSkillTool` pattern in `chat.ts`) so its failure copy is
+ * unit-testable without driving a whole webhook turn.
+ *
+ * Failure-copy contract (docs/architecture/engine/tool-executor.md →
+ * "Failure copy"): a reaction that did not land must never read like one that
+ * did — the model would tell the user it acknowledged them and the point would
+ * be silently dropped. So every failure names the message ts + channel, says
+ * outright the message is still unreacted, and carries Slack's diagnosis in
+ * Slack's own vocabulary via `describeSlackError` rather than a bare
+ * `channel_not_found`-style code.
+ */
+export function createSlackReactToMessageTool(args: {
+  adapter: { reactToMessage?: (channelId: string, messageId: string, emoji: string) => Promise<void> }
+  channelId: string
+  messageId?: string
+}): Tool {
+  const { adapter, channelId, messageId } = args
+  return buildTool({
+    name: 'reactToMessage',
+    description: 'React to the user\'s Slack message with an emoji. Use this for quick acknowledgements (thumbsup, eyes, heart, fire, etc.) when a full text reply isn\'t needed, or to add an emoji reaction alongside your text response. The emoji name should be a standard Slack emoji name without colons.',
+    inputSchema: z.object({
+      emoji: z.string().describe('Slack emoji name without colons, e.g. "thumbsup", "heart", "fire", "eyes", "100"'),
+    }),
+    isConcurrencySafe: true,
+    isReadOnly: false,
+    async execute(input) {
+      if (!messageId) {
+        return {
+          data:
+            `No reaction was added: this turn did not arrive with a Slack message timestamp, so there is no message for :${input.emoji}: to attach to. ` +
+            'Acknowledge in text instead — reactToMessage cannot work on this turn however it is called.',
+          isError: true,
+        }
+      }
+      const target = `message ${messageId} in Slack channel ${channelId}`
+      if (!adapter.reactToMessage) {
+        return {
+          data:
+            `No reaction was added to ${target}: the Slack adapter serving this workspace exposes no reaction capability, so :${input.emoji}: was never sent. ` +
+            'Acknowledge in text instead and do not tell the user you reacted. Retrying will fail the same way.',
+          isError: true,
+        }
+      }
+      try {
+        await adapter.reactToMessage(channelId, messageId, input.emoji)
+        return { data: `Reacted with :${input.emoji}:` }
+      } catch (err) {
+        return {
+          data:
+            `Adding the :${input.emoji}: reaction to ${target} failed, so the message is still unreacted. ${describeSlackError(err)} ` +
+            'Do not tell the user you reacted to their message; if the acknowledgement matters, say it in text.',
+          isError: true,
+        }
+      }
+    },
+  })
 }
 
 async function processMessage(params: ProcessMessageParams): Promise<void> {
@@ -1186,23 +1248,10 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
 
   // ── Slack-specific: reactToMessage tool ──
   const extraTools = new Map(params.tools)
-  const reactToMessage = buildTool({
-    name: 'reactToMessage',
-    description: 'React to the user\'s Slack message with an emoji. Use this for quick acknowledgements (thumbsup, eyes, heart, fire, etc.) when a full text reply isn\'t needed, or to add an emoji reaction alongside your text response. The emoji name should be a standard Slack emoji name without colons.',
-    inputSchema: z.object({
-      emoji: z.string().describe('Slack emoji name without colons, e.g. "thumbsup", "heart", "fire", "eyes", "100"'),
-    }),
-    isConcurrencySafe: true,
-    isReadOnly: false,
-    async execute(input) {
-      if (!incoming.messageId) return { data: 'No message to react to', isError: true }
-      try {
-        await adapter.reactToMessage?.(incoming.channelId, incoming.messageId, input.emoji)
-        return { data: `Reacted with :${input.emoji}:` }
-      } catch {
-        return { data: `Failed to react with :${input.emoji}:`, isError: true }
-      }
-    },
+  const reactToMessage = createSlackReactToMessageTool({
+    adapter,
+    channelId: incoming.channelId,
+    messageId: incoming.messageId,
   })
   extraTools.set('reactToMessage', reactToMessage)
 
@@ -1258,6 +1307,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     adaptiveResearchEnabled: true,
     abortController,
     provider: params.provider,
+    configuredProviders: params.configuredProviders,
     resolveWorkspaceCustomLlm: params.resolveWorkspaceCustomLlm,
     systemPrompt: params.systemPrompt,
     tools: extraTools,

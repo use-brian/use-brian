@@ -12,19 +12,23 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-vi.mock('@use-brian/channels', () => ({
+// The adapters are mocked; the Slack ERROR translator is not — the point of
+// these tests is that a real `SlackApiError` renders as model-actionable copy.
+vi.mock('@use-brian/channels', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@use-brian/channels')>()),
   createSlackAdapter: vi.fn(),
   createTelegramAdapter: vi.fn(),
   createWhatsAppAdapter: vi.fn(),
 }))
 
-import { createTelegramAdapter } from '@use-brian/channels'
+import { createSlackAdapter, createTelegramAdapter, SlackApiError } from '@use-brian/channels'
 import type { ToolConfirmationRequest } from '@use-brian/core'
 
 import { resolveTelegramBotToken, sendConfirmationPrompt } from '../confirmation-prompt.js'
 import type { ChannelIntegrationStore } from '../../db/channel-integrations.js'
 
 const mockCreateTelegramAdapter = vi.mocked(createTelegramAdapter)
+const mockCreateSlackAdapter = vi.mocked(createSlackAdapter)
 
 /** The slice of the channel adapter's `sendMessage` this module exercises. */
 type SendMessage = (
@@ -165,14 +169,14 @@ describe('[COMP:scheduling/confirmation-prompt] sendConfirmationPrompt', () => {
     expect(mockCreateTelegramAdapter).not.toHaveBeenCalled()
   })
 
-  it('is a no-op for a web target (persist-only)', async () => {
+  it('is a no-op for a web target (persist-only) and reports it delivered', async () => {
     await expect(
       sendConfirmationPrompt(
         { assistantId: 'a_1', channelType: 'web', channelId: 'c_1' },
         req,
         { defaultTelegramBotToken: 'shared-tok' },
       ),
-    ).resolves.toBeUndefined()
+    ).resolves.toEqual({ delivered: true, channelType: 'web' })
     expect(mockCreateTelegramAdapter).not.toHaveBeenCalled()
   })
 
@@ -184,14 +188,72 @@ describe('[COMP:scheduling/confirmation-prompt] sendConfirmationPrompt', () => {
       }),
     } as never)
 
-    await expect(
-      sendConfirmationPrompt(
-        { assistantId: 'a_1', channelType: 'telegram', channelId: 'c_1' },
-        req,
-        { defaultTelegramBotToken: 'shared-tok' },
-      ),
-    ).resolves.toBeUndefined()
+    const result = await sendConfirmationPrompt(
+      { assistantId: 'a_1', channelType: 'telegram', channelId: 'c_1' },
+      req,
+      { defaultTelegramBotToken: 'shared-tok' },
+    )
+
+    expect(result.delivered).toBe(false)
+    // WHAT did not happen + the consequence, not just the raw provider text.
+    expect(result.reason).toContain('was NOT delivered to telegram `c_1`')
+    expect(result.reason).toContain('telegram 500')
+    expect(result.reason).toMatch(/time out unanswered/)
     expect(errSpy).toHaveBeenCalled()
     errSpy.mockRestore()
+  })
+
+  it('a Slack push failure is translated, not passed through as the bare code', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    mockCreateSlackAdapter.mockReturnValue({
+      sendMessage: vi.fn(async () => {
+        throw new SlackApiError({
+          method: 'chat.postMessage',
+          code: 'channel_not_found',
+          target: { channel: 'C0BB4AK5BHB' },
+        })
+      }),
+    } as never)
+
+    const result = await sendConfirmationPrompt(
+      { assistantId: 'a_1', channelType: 'slack', channelId: 'C0BB4AK5BHB' },
+      req,
+      { integrationStore: fakeIntegrationStore('xoxb-tok') },
+    )
+
+    expect(result.delivered).toBe(false)
+    expect(result.reason).toContain('confirmation prompt for `gmailSendMessage` was NOT delivered to slack `C0BB4AK5BHB`')
+    // describeSlackError's diagnosis + discovery pointer, not `channel_not_found` alone.
+    expect(result.reason).toMatch(/no conversation .* that this bot can see/)
+    expect(result.reason).toContain('`listSlackChannels`')
+    expect(result.reason).toMatch(/time out unanswered/)
+    errSpy.mockRestore()
+  })
+
+  it('a Slack target with no connected workspace names the missing surface and the remedy', async () => {
+    const result = await sendConfirmationPrompt(
+      { assistantId: 'a_1', channelType: 'slack', channelId: 'C0BB4AK5BHB' },
+      req,
+      { integrationStore: fakeIntegrationStore(null) },
+    )
+
+    expect(result).toMatchObject({ delivered: false, channelType: 'slack' })
+    expect(result.reason).toMatch(/no connected Slack workspace/)
+    expect(result.reason).toMatch(/Studio → Channels → Slack/)
+    expect(result.reason).toMatch(/time out unanswered/)
+    expect(mockCreateSlackAdapter).not.toHaveBeenCalled()
+  })
+
+  it('a telegram target with no resolvable bot says the user was never asked', async () => {
+    const result = await sendConfirmationPrompt(
+      { assistantId: 'a_1', channelType: 'telegram', channelId: 'c_1' },
+      req,
+      {},
+    )
+
+    expect(result).toMatchObject({ delivered: false, channelType: 'telegram' })
+    expect(result.reason).toMatch(/no connected Telegram bot/)
+    expect(result.reason).toMatch(/the user was never asked/)
+    expect(mockCreateTelegramAdapter).not.toHaveBeenCalled()
   })
 })

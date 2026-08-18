@@ -8,6 +8,8 @@ import {
 } from '../custom-llm-runtime.js'
 import type { WorkspaceCustomLlmEndpointStore } from '../db/workspace-custom-llm-endpoints.js'
 import type { LLMProvider, ProviderRequest } from '@use-brian/core'
+import { MutableProviderAvailability } from '@use-brian/shared/model-registry'
+import { resolveChatModelSelection } from '../model-resolution.js'
 
 function toolSse(): Response {
   const events = [
@@ -166,6 +168,52 @@ describe('[COMP:api/custom-llm-endpoints] custom endpoint runtime', () => {
     })
     expect(resolved).toMatchObject({ selector: customLlmAlias(profileId), maxTokens: 32768, modelTier: 'max' })
     expect(store.getTierRouteSystem).toHaveBeenCalledWith({ workspaceId: runtime.workspaceId, tier: 'max' })
+  })
+
+  it('uses each logical tier default even when DashScope serves every application alias', async () => {
+    const workspaceId = '00000000-0000-4000-8000-000000000010'
+    const mixed = new MutableProviderAvailability()
+    mixed.setStaticProvider('gemini', true)
+    mixed.setStaticProvider('openai-compat:dashscope-intl', true)
+    mixed.setPreferredProvider('dashscope-intl')
+    const profileIdForTier = (tier: string) =>
+      `00000000-0000-4000-8000-00000000000${tier === 'standard' ? 1 : tier === 'pro' ? 2 : tier === 'max' ? 3 : 4}`
+    const getTierRouteSystem = vi.fn().mockImplementation(async ({ tier }: { tier: string }) => ({
+      workspaceId,
+      tier,
+      profileId: profileIdForTier(tier),
+      modelAlias: null,
+      updatedAt: new Date(),
+    }))
+    const getRuntimeSystem = vi.fn().mockImplementation(async ({ profileId }: { profileId: string }) => ({
+      id: profileId,
+      endpointId: '00000000-0000-4000-8000-000000000099',
+      workspaceId,
+      name: 'Custom model',
+      endpointName: 'Gateway',
+      baseUrl: 'https://model.example/v1',
+      apiKey: null,
+      modelId: 'custom-model',
+      contextWindow: 32768,
+      maxOutputTokens: 4096,
+      supportsTools: true,
+      verifiedAt: new Date(),
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    }))
+    const resolver = createWorkspaceCustomLlmResolver({
+      getRuntimeSystem,
+      getTierRouteSystem,
+    } as unknown as WorkspaceCustomLlmEndpointStore)
+
+    for (const tier of ['standard', 'pro', 'max', 'research'] as const) {
+      const selection = resolveChatModelSelection(tier, 'max_5x', 'ok', mixed)
+      expect(selection.servingModel).toBe('qwen3.7-plus')
+      const runtime = await resolver({ workspaceId, requestedTier: selection.logicalTier })
+      expect(runtime?.modelTier).toBe(tier)
+    }
+    expect(getTierRouteSystem.mock.calls.map(([arg]) => arg.tier))
+      .toEqual(['standard', 'pro', 'max', 'research'])
   })
 
   it('retries once without streamed usage for older compatible endpoints', async () => {

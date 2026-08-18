@@ -36,6 +36,7 @@ import {
   createRecordPageProjector,
   synthesizeFromSource,
   type SynthesisBlueprint,
+  type SynthesisLlmRuntime,
 } from './synthesize.js'
 import { extractionToBlueprintBody } from './blueprint-from-template.js'
 import type { BlueprintRecordStore } from '../db/blueprint-records-store.js'
@@ -44,6 +45,7 @@ import type { PageTemplateStore } from '../db/page-templates-store.js'
 export type RecordingSynthesizerDeps = {
   provider: LLMProvider
   model: string
+  resolveLlm: ((workspaceId: string) => Promise<SynthesisLlmRuntime | null>) | null
   savedViewStore: SavedViewStore
   docPageStore: DocPageStore
   crmStore: CrmStore
@@ -292,6 +294,7 @@ export function createRecordingSynthesizer(deps: RecordingSynthesizerDeps): Reco
     }
 
     // 4. Run. Page-first + idempotent on the recording's stable anchor key.
+    const runtime = deps.resolveLlm ? await deps.resolveLlm(args.workspaceId) : null
     return synthesizeFromSource(
       {
         kind: 'recording',
@@ -313,8 +316,12 @@ export function createRecordingSynthesizer(deps: RecordingSynthesizerDeps): Reco
         parentPageId: args.parentPageId ?? null,
       },
       {
-        provider: deps.provider,
-        model: deps.model,
+        provider: runtime?.provider ?? deps.provider,
+        model: runtime?.model ?? deps.model,
+        modelTier: runtime?.modelTier ?? 'standard',
+        providerKeySource: runtime?.providerKeySource ?? 'platform',
+        inputTokenLimit: runtime?.inputTokenLimit,
+        maxTokens: runtime?.maxTokens,
         sourceTool,
         buildDocTools,
         brainWriteTools,

@@ -19,6 +19,7 @@
  */
 
 import { sanitizeDeep } from '../../security/sanitize.js'
+import { FetchProviderError, FetchStackExhaustedError, type FetchAttempt } from './_fetch-error.js'
 import { readFetchCache, writeFetchCache } from './fetch-cache.js'
 import type { CacheStore } from '../../compaction/cache-tool.js'
 import type { ExternalCost } from '../../billing/external-cost.js'
@@ -78,7 +79,9 @@ export function createFetchStack(
       return sanitizeDeep(truncate({ ...cached, source: 'cache' }, options.maxChars)) as FetchResult
     }
 
-    let lastError: Error | undefined
+    // Every extractor's outcome is kept so the failure names them all — the
+    // last error alone (`HTTP 403`) cannot tell a login wall from a dead link.
+    const attempts: FetchAttempt[] = []
     for (const provider of options.providers) {
       if (signal?.aborted) {
         throw new Error('Fetch aborted')
@@ -87,6 +90,9 @@ export function createFetchStack(
 
       try {
         const result = await provider.fetch(url, signal)
+        if (!result || result.content.trim().length === 0) {
+          attempts.push({ provider: provider.name, error: new FetchProviderError({ provider: provider.name, url, kind: 'empty', detail: 'no readable content' }) })
+        }
         if (result && result.content.trim().length > 0) {
           const truncated = truncate(result, options.maxChars)
           // Strip externalCost before caching — a cache hit should not
@@ -103,13 +109,12 @@ export function createFetchStack(
           return sanitizeDeep(truncated) as FetchResult
         }
       } catch (err) {
-        lastError = err instanceof Error ? err : new Error(String(err))
-        // Fall through to the next provider. Errors are recorded so the
-        // caller can surface the last one if the stack is exhausted.
+        attempts.push({ provider: provider.name, error: err })
+        // Fall through to the next provider; the record is rendered below.
       }
     }
 
-    throw lastError ?? new Error(`No fetch provider could read ${url}`)
+    throw new FetchStackExhaustedError(url, attempts)
   }
 }
 

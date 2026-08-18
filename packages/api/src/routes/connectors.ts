@@ -84,6 +84,13 @@ import {
   packWordPressCredentials,
   WordPressConnectorError,
 } from '../wordpress/client.js'
+import {
+  GSC_CREDENTIAL_TYPE,
+  getSearchConsoleIdentity,
+  packSearchConsoleCredentials,
+  parseServiceAccountKey as parseGscServiceAccountKey,
+  SearchConsoleConnectorError,
+} from '../gsc/client.js'
 import type { ConnectorAppCredentialStore } from '../db/connector-app-credential-store.js'
 import { ConnectorAppCredentialAuthError } from '../db/connector-app-credential-store.js'
 import { getConnectorAppConfigStatus, resolveConnectorAppConfig } from '../connectors/app-credentials.js'
@@ -215,6 +222,8 @@ type ConnectorRouteOptions = {
   shopifyVerifyToken?: typeof getShopIdentity
   /** Verify-before-store seam for the fixed Use Brian WordPress Bridge site probe. */
   wordpressVerifyConnection?: typeof getWordPressSiteIdentity
+  /** Verify-before-store seam for the Search Console service-account probe (token + sites.list). */
+  gscVerifyConnection?: typeof getSearchConsoleIdentity
   /**
    * Enables the workspace-owned OAuth *app* credential endpoints
    * (`GET/PUT/DELETE /:provider/app-credentials`) and the server-side
@@ -2294,6 +2303,13 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
       /** WordPress Application Password tuple. Stored only after bridge verification. */
       wordpressCredentials?: { siteUrl?: string; username?: string; applicationPassword?: string }
       /**
+       * Google Search Console service-account key (the pasted JSON key file)
+       * plus an optional default property. Stored only after the key has
+       * minted a token and listed at least one property
+       * (docs/architecture/integrations/search-console.md).
+       */
+      gscCredentials?: { keyJson?: string; defaultSite?: string }
+      /**
        * Microsoft Graph's rotating tuple (docs/architecture/integrations/msgraph.md).
        * Graph replaces the refresh token on every use, so access + refresh +
        * expiry must persist together, plus the Entra tenant the grant is in.
@@ -2315,6 +2331,9 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     // Non-secret config stamped alongside the credentials (webhook → instance
     // routing resolves Shopify instances by config.shopDomain).
     let configPatch: Record<string, unknown> | null = null
+    // Search Console echoes what it verified so the connect form can show the
+    // service-account email and the property list without a second call.
+    let gscEcho: { clientEmail: string; defaultSite: string | null; sites: Array<{ siteUrl: string; permissionLevel: string }> } | null = null
 
     if (provider === 'shopify') {
       const t = body.shopifyTokens
@@ -2414,6 +2433,45 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
         res.status(400).json({ error: code })
         return
       }
+    } else if (provider === 'gsc') {
+      const candidate = body.gscCredentials
+      const key = parseGscServiceAccountKey(candidate?.keyJson ?? '')
+      if (!key) {
+        res.status(400).json({ error: 'invalid_key_json' })
+        return
+      }
+      const requestedSite = candidate?.defaultSite?.trim() || null
+      let identity: Awaited<ReturnType<typeof getSearchConsoleIdentity>>
+      try {
+        identity = await (opts.gscVerifyConnection ?? getSearchConsoleIdentity)(key)
+      } catch (err) {
+        const code = err instanceof SearchConsoleConnectorError ? err.code : 'verification_failed'
+        console.warn(`[connectors] gsc verification failed for ${key.clientEmail}:`, code)
+        res.status(400).json({ error: code })
+        return
+      }
+      // A key that sees zero properties is a key whose owner has not yet added
+      // the service-account email to a property. Telling them that email now
+      // IS the onboarding, so it rides in the rejection.
+      if (identity.sites.length === 0) {
+        res.status(400).json({ error: 'no_properties', clientEmail: identity.clientEmail })
+        return
+      }
+      const siteUrls = identity.sites.map((s) => s.siteUrl)
+      if (requestedSite && !siteUrls.includes(requestedSite)) {
+        res.status(400).json({ error: 'unknown_property', sites: identity.sites })
+        return
+      }
+      const defaultSite = requestedSite ?? (identity.sites.length === 1 ? identity.sites[0].siteUrl : null)
+      credentials = {
+        type: 'oauth',
+        client_id: GSC_CREDENTIAL_TYPE,
+        client_secret: packSearchConsoleCredentials({ ...key, defaultSite }),
+      }
+      email = identity.clientEmail
+      label = label ?? defaultSite ?? identity.clientEmail
+      configPatch = { clientEmail: identity.clientEmail, defaultSite, siteCount: identity.sites.length }
+      gscEcho = { clientEmail: identity.clientEmail, defaultSite, sites: identity.sites }
     } else if (provider === 'msgraph') {
       const t = body.msgraphTokens
       if (
@@ -2468,7 +2526,7 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
         instanceId: body.instanceId,
       })
       if (!result.ok) { res.status(result.status).json({ error: result.error }); return }
-      res.json({ ok: true, connectorInstanceId: result.connectorInstanceId })
+      res.json({ ok: true, connectorInstanceId: result.connectorInstanceId, ...(gscEcho ?? {}) })
     } catch (err) {
       // The store throws when CHANNEL_CREDENTIAL_KEY is unset — surface it as a
       // 503 so the launcher-misconfiguration case is distinguishable from a bug.

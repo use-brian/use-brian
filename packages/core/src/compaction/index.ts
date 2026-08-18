@@ -22,5 +22,5 @@ export type {
   PreCompactionExtractionOptions,
   PreCompactionExtractionResult,
 } from './compact.js'
-export { createCacheTool } from './cache-tool.js'
+export { createCacheTool, CACHE_WRITING_TOOLS } from './cache-tool.js'
 export type { CacheStore } from './cache-tool.js'

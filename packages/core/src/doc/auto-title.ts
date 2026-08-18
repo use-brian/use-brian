@@ -166,6 +166,7 @@ export async function generatePageTitle(
 
   let rawTitle = ''
   let usage: TokenUsage | null = null
+  let servedModel = model
   for await (const chunk of provider.stream({
     model: model,
     systemPrompt: PAGE_TITLE_SYSTEM_PROMPT,
@@ -174,6 +175,7 @@ export async function generatePageTitle(
     temperature: 0.2,
   })) {
     if (chunk.type === 'text_delta') rawTitle += chunk.text
+    if (chunk.type === 'message_start') servedModel = chunk.model
     if (chunk.type === 'message_end') usage = chunk.usage
   }
 
@@ -185,7 +187,7 @@ export async function generatePageTitle(
   const cleaned = sanitizeTitle(rest)
   const cleanedWords = cleaned.split(/\s+/).filter(Boolean).length
   // A solid multi-word title — use it.
-  if (cleanedWords >= 3) return { title: cleaned, icon, usage, model: model }
+  if (cleanedWords >= 3) return { title: cleaned, icon, usage, model: servedModel }
 
   // Thin model output (0–2 words) — prefer deriving a fuller title from the
   // document opening; sanitizeTitle caps the length at a word boundary.
@@ -195,7 +197,7 @@ export async function generatePageTitle(
       title: fallback.charAt(0).toUpperCase() + fallback.slice(1),
       icon,
       usage,
-      model: model,
+      model: servedModel,
     }
   }
 
@@ -203,6 +205,6 @@ export async function generatePageTitle(
   // empty) isn't worth committing — leave the placeholder. A page title should
   // be descriptive, so we're stricter here than the session-title generator.
   // No title → no icon (don't decorate a page we're leaving untitled).
-  if (cleanedWords >= 2) return { title: cleaned, icon, usage, model: model }
-  return { title: null, icon: null, usage, model: model }
+  if (cleanedWords >= 2) return { title: cleaned, icon, usage, model: servedModel }
+  return { title: null, icon: null, usage, model: servedModel }
 }

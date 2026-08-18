@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { z } from 'zod'
-import { createWorkflowTools, TRIGGER_INPUT_DESCRIPTION, type WorkflowToolEvent } from '../tools.js'
-import { WORKFLOW_TRIGGER_KINDS, WORKFLOW_EVENT_SOURCE_TYPES } from '../schemas.js'
+import { createWorkflowTools, latestWorkflowProposalReceipt, TRIGGER_INPUT_DESCRIPTION, type WorkflowToolEvent } from '../tools.js'
+import { WORKFLOW_TRIGGER_KINDS, WORKFLOW_EVENT_SOURCE_TYPES, STEP_TYPE_VALUES } from '../schemas.js'
 import { TASK_LIFECYCLE_ACTIONS } from '../task-event-trigger.js'
 import type {
   WorkflowDefinition,
@@ -15,6 +15,7 @@ import { buildTool, type Tool, type ToolContext } from '../../tools/types.js'
 import type { ConsultRequest, ConsultResponse, ConsultTransport } from '../../a2a/types.js'
 import type { JobStore, ScheduledJob } from '../../scheduling/types.js'
 import type { DeliverToChannel } from '../executor.js'
+import { loadBuiltinSkills } from '../../skills/loader.js'
 
 const WORKSPACE_ID = '00000000-0000-0000-0000-000000000001'
 const PRIMARY_ASSISTANT_ID = '00000000-0000-0000-0000-000000000002'
@@ -299,6 +300,8 @@ function makeAllTools(opts?: {
     | { ok: false; reason: string }
   >
   listAuthorableSkills?: (userId: string, workspaceId: string) => Promise<Array<{ slug: string; name: string }>>
+  resolveViewWorkspace?: (args: { userId: string; viewId: string }) => Promise<string | null>
+  allowLegacyDirectWrites?: boolean
 }) {
   const events: WorkflowToolEvent[] = []
   const stores = fakeStores()
@@ -321,12 +324,13 @@ function makeAllTools(opts?: {
     jobStore,
     resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
     deliverToChannel: opts?.deliverToChannel,
-    resolveViewWorkspace: async () => WORKSPACE_ID,
+    resolveViewWorkspace: opts?.resolveViewWorkspace ?? (async () => WORKSPACE_ID),
     validateDeliveryTarget: opts?.validateDeliveryTarget,
     preflightConnectorTool: opts?.preflightConnectorTool,
     listSlackChannels: opts?.listSlackChannels,
     listSlackMembers: opts?.listSlackMembers,
     listAuthorableSkills: opts?.listAuthorableSkills,
+    allowLegacyDirectWrites: opts?.allowLegacyDirectWrites ?? true,
   })
   return { tools, stores, events, jobStore }
 }
@@ -463,6 +467,40 @@ describe('[COMP:workflow/tools] inline schedule trigger', () => {
     )
     expect(r.isError).toBe(true)
     expect(JSON.stringify(r.data)).toContain('no assistant_call step')
+  })
+
+  it('a dropped targetViewId is surfaced as targetViewWarning on the success payload (create + update)', async () => {
+    const PAGE_ELSEWHERE = '11111111-2222-4333-8444-555555555555'
+    // The page link is non-fatal (a bad page id must never fail an otherwise
+    // valid schedule), but silently dropping it made a partial success read
+    // as a total one: `targetViewId: null` and the model told the user the
+    // schedule would maintain their page.
+    const { tools } = makeAllTools({ resolveViewWorkspace: async () => 'other-workspace' })
+    const created = await tools.createWorkflow.execute(
+      {
+        name: 'Page keeper',
+        definition: ASSISTANT_DEF,
+        trigger: { kind: 'schedule', schedule: { type: 'daily', time: '07:00' } },
+        targetViewId: PAGE_ELSEWHERE,
+      },
+      makeContext(),
+    )
+    expect(created.isError).toBeFalsy()
+    const data = created.data as Record<string, unknown>
+    expect(data.targetViewId).toBeNull()
+    expect(String(data.targetViewWarning)).toContain(PAGE_ELSEWHERE)
+    expect(String(data.targetViewWarning)).toContain('NOT linked')
+
+    const up = await tools.updateWorkflow.execute(
+      {
+        workflowId: data.id as string,
+        trigger: { kind: 'schedule', schedule: { type: 'daily', time: '08:00' } },
+        targetViewId: PAGE_ELSEWHERE,
+      },
+      makeContext(),
+    )
+    expect(up.isError).toBeFalsy()
+    expect(String((up.data as Record<string, unknown>).targetViewWarning)).toContain(PAGE_ELSEWHERE)
   })
 
   it('updateWorkflow attaches a schedule trigger (workflow-trigger row) and clears it on manual', async () => {
@@ -731,6 +769,86 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
     expect(data.warnings).toEqual([])
   })
 
+  it('applies the exact proposed create/update payload through an opaque receipt', async () => {
+    const { tools, stores } = makeAllTools({ allowLegacyDirectWrites: false })
+    const definition: WorkflowDefinition = {
+      startStepId: 's1',
+      steps: [{ id: 's1', type: 'assistant_call', target: { assistantId: 'primary' }, prompt: 'Create the block.' }],
+    }
+    const proposed = await tools.proposeWorkflow.execute(
+      { name: 'Calendar block', definition, targetViewId: null },
+      makeContext(),
+    )
+    const proposal = proposed.data as { proposalReceipt: string; proposedAction: string; confirmationHint: string }
+
+    expect(proposal.proposedAction).toBe('create')
+    expect(proposal.confirmationHint).toContain('call createWorkflow with {}')
+    expect(proposal.confirmationHint).toContain('listAssistants')
+    expect(tools.createWorkflow.inputSchema.safeParse({}).success).toBe(true)
+    expect(tools.createWorkflow.inputSchema.safeParse({ name: 'Calendar block', definition }).success).toBe(false)
+    const raw = await tools.createWorkflow.execute({ name: 'Calendar block', definition }, makeContext())
+    expect(raw.isError).toBe(true)
+    expect(raw.data).toContain('proposalReceipt is required')
+
+    const recoveredReceipt = latestWorkflowProposalReceipt([
+      { content: [{ type: 'tool_result', toolUseId: 'proposal-1', name: 'proposeWorkflow', content: JSON.stringify(proposed.data) }] },
+    ])
+    expect(recoveredReceipt).toBe(proposal.proposalReceipt)
+    const serializedProposal = JSON.stringify(proposed.data)
+    const truncatedProposal = serializedProposal.slice(0, serializedProposal.indexOf('"proposedAction"'))
+    expect(latestWorkflowProposalReceipt([
+      { content: [{ type: 'tool_result', toolUseId: 'proposal-truncated', name: 'proposeWorkflow', content: truncatedProposal }] },
+    ])).toBe(proposal.proposalReceipt)
+    const confirmationContext = makeContext({ workflowProposalReceipt: recoveredReceipt })
+    const created = await tools.createWorkflow.execute({}, confirmationContext)
+    expect(created.isError).toBeFalsy()
+    expect(confirmationContext.workflowProposalReceipt).toBeUndefined()
+    const workflowId = (created.data as { id: string }).id
+    expect(stores.workflows.get(workflowId)?.definition.steps[0]).toMatchObject({
+      target: { assistantId: 'primary' },
+      prompt: 'Create the block.',
+    })
+
+    const editedDefinition: WorkflowDefinition = {
+      startStepId: 's1',
+      steps: [{ id: 's1', type: 'assistant_call', target: { assistantId: 'primary' }, prompt: 'Create the approved block.' }],
+    }
+    const proposedEdit = await tools.proposeWorkflow.execute(
+      { workflowId, name: 'Calendar block', definition: editedDefinition },
+      makeContext(),
+    )
+    const editProposal = proposedEdit.data as { proposalReceipt: string; proposedAction: string }
+    expect(editProposal.proposedAction).toBe('update')
+    const updateContext = makeContext({
+      workflowProposalReceipt: latestWorkflowProposalReceipt([
+        { content: [{ type: 'tool_result', toolUseId: 'proposal-2', name: 'proposeWorkflow', content: JSON.stringify(proposedEdit.data) }] },
+      ]),
+    })
+    const updated = await tools.updateWorkflow.execute({}, updateContext)
+    expect(updated.isError).toBeFalsy()
+    expect(stores.workflows.get(workflowId)?.definition.steps[0]).toMatchObject({
+      target: { assistantId: 'primary' },
+      prompt: 'Create the approved block.',
+    })
+
+    const changedReceipt = `${proposal.proposalReceipt.slice(0, -1)}x`
+    const changed = await tools.createWorkflow.execute({}, makeContext({ workflowProposalReceipt: changedReceipt }))
+    expect(changed.isError).toBe(true)
+    expect(changed.data).toContain('receipt changed after validation')
+
+    expect(latestWorkflowProposalReceipt([
+      { content: [{ type: 'tool_result', toolUseId: 'proposal-1', name: 'proposeWorkflow', content: JSON.stringify(proposed.data) }] },
+      { content: [{ type: 'tool_result', toolUseId: 'create-1', name: 'createWorkflow', content: JSON.stringify(created.data) }] },
+    ])).toBeUndefined()
+
+    expect(tools.createWorkflow.description).toContain('call it immediately with {}')
+    expect(tools.updateWorkflow.description).toContain('runtime recovers the exact validated receipt')
+
+    const builder = loadBuiltinSkills().find((skill) => skill.id === 'workflow-builder')
+    expect(builder?.content).toMatch(/Treat approval as continuation, not a restart/)
+    expect(builder?.content).toMatch(/call the matching write tool with no arguments/)
+  })
+
   it('proposeWorkflow surfaces the researchMode advisory (parity with the REST path)', async () => {
     const { tools } = makeAllTools()
     const r = await tools.proposeWorkflow.execute(
@@ -789,6 +907,79 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
     }, makeContext())
     const warnings = (r.data as Record<string, unknown>).warnings as string[]
     expect(warnings.some((w) => w.includes('`web`') && w.includes('not'))).toBe(true)
+  })
+
+  it('proposeWorkflow warns when steps compose messaging output but nothing delivers (deliver-less standup class)', async () => {
+    const { tools } = makeAllTools()
+    // The 2026-08-11 shape: Slack mention ids + a channel id live in prompt
+    // prose, no step has `deliver`, no trigger.delivery — runs go nowhere.
+    const r = await tools.proposeWorkflow.execute({
+      name: 'Standup',
+      definition: {
+        startStepId: 'mention',
+        steps: [
+          {
+            id: 'mention',
+            type: 'assistant_call',
+            target: { assistantId: 'primary' },
+            prompt: 'Output exactly: <@U0TESTAA111>',
+            nextStepId: 'thread',
+          },
+          {
+            id: 'thread',
+            type: 'assistant_call',
+            target: { assistantId: 'primary' },
+            prompt: 'Your response IS the Slack message, verbatim. Post the digest for C0TESTBB222.',
+          },
+        ],
+      },
+    }, makeContext())
+    expect(r.isError).toBeFalsy()
+    const warnings = (r.data as { warnings: string[] }).warnings
+    const hit = warnings.find((w) => w.includes('`deliver` binding'))
+    expect(hit).toBeTruthy()
+    // Both composing steps are named so the model knows where to bind.
+    expect(hit).toContain('"mention"')
+    expect(hit).toContain('"thread"')
+  })
+
+  it('the missing-deliver warning stays quiet when any step delivers or nothing is messaging-shaped', async () => {
+    const { tools } = makeAllTools()
+    // One step delivers → the workflow has a send path; no warning.
+    const delivering = await tools.proposeWorkflow.execute({
+      name: 'Standup',
+      definition: {
+        startStepId: 's',
+        steps: [
+          {
+            id: 's',
+            type: 'assistant_call',
+            target: { assistantId: 'primary' },
+            prompt: 'Output exactly: <@U0TESTAA111>',
+            deliver: { channelType: 'telegram', channelId: '123456' },
+          },
+        ],
+      },
+    }, makeContext())
+    // No messaging signal in any prompt → quiet even with no deliver.
+    const plain = await tools.proposeWorkflow.execute({
+      name: 'Notes',
+      definition: {
+        startStepId: 's',
+        steps: [
+          {
+            id: 's',
+            type: 'assistant_call',
+            target: { assistantId: 'primary' },
+            prompt: 'Summarize yesterday\'s Slack messages into a page draft.',
+          },
+        ],
+      },
+    }, makeContext())
+    for (const r of [delivering, plain]) {
+      const warnings = (r.data as { warnings: string[] }).warnings
+      expect(warnings.some((w) => w.includes('`deliver` binding'))).toBe(false)
+    }
   })
 
   it('proposeWorkflow warns when a blueprint-bound step\'s tools allow-list strips saveBlueprintRecord', async () => {
@@ -1079,6 +1270,7 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
       async execute() { return { data: 'nope', isError: true } },
     })
     const tools = createWorkflowTools({
+      allowLegacyDirectWrites: true,
       workflowStore: stores.workflowStore,
       runStore: stores.runStore,
       executorDeps: {
@@ -1326,6 +1518,7 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
     const stores = fakeStores()
     const longText = 'x'.repeat(2000)
     const tools = createWorkflowTools({
+      allowLegacyDirectWrites: true,
       workflowStore: stores.workflowStore,
       runStore: stores.runStore,
       executorDeps: {
@@ -1367,6 +1560,7 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
       },
     }
     const tools = createWorkflowTools({
+      allowLegacyDirectWrites: true,
       workflowStore: stores.workflowStore,
       runStore: stores.runStore,
       executorDeps: {
@@ -1565,6 +1759,147 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
     expect(r.isError).toBe(true)
   })
 
+  it('updateWorkflow blocks a replacement that strips every deliver binding unless confirmed', async () => {
+    const { tools, stores } = makeAllTools()
+    // Delivering workflow (the pre-2026-08-11 Dev Standup shape).
+    const DELIVERING_DEF: WorkflowDefinition = {
+      startStepId: 'post',
+      steps: [
+        {
+          id: 'post',
+          type: 'assistant_call',
+          target: { assistantId: 'primary' },
+          prompt: 'Compose the morning digest.',
+          deliver: { channelType: 'slack', channelId: 'C0TESTCC333' },
+        },
+      ],
+    }
+    const created = await tools.createWorkflow.execute(
+      { name: 'standup', definition: DELIVERING_DEF },
+      makeContext(),
+    )
+    const wf = created.data as { id: string }
+
+    // A full rewrite that silently drops the deliver — the incident shape.
+    const strippedDef: WorkflowDefinition = {
+      startStepId: 'post',
+      steps: [
+        {
+          id: 'post',
+          type: 'assistant_call',
+          target: { assistantId: 'primary' },
+          prompt: 'Compose the morning digest and post it to C0TESTCC333.',
+        },
+      ],
+    }
+    const blocked = await tools.updateWorkflow.execute(
+      { workflowId: wf.id, definition: strippedDef },
+      makeContext(),
+    )
+    expect(blocked.isError).toBe(true)
+    const errors = (blocked.data as { errors: string[] }).errors
+    expect(errors.some((e) => e.includes('confirmDeliveryRemoval') && e.includes('slack'))).toBe(true)
+    // Nothing was written.
+    expect(stores.workflows.get(wf.id)?.definition.steps[0]).toHaveProperty('deliver')
+
+    // The explicit confirmation flag lets an intentional removal through.
+    const confirmed = await tools.updateWorkflow.execute(
+      { workflowId: wf.id, definition: strippedDef, confirmDeliveryRemoval: true },
+      makeContext(),
+    )
+    expect(confirmed.isError).toBeFalsy()
+    expect(stores.workflows.get(wf.id)?.definition.steps[0]).not.toHaveProperty('deliver')
+  })
+
+  it('the deliver-strip guard also holds on the receipt path, and confirmDeliveryRemoval travels in the receipt', async () => {
+    // Receipt-only mode (production): updateWorkflow takes no arguments, so
+    // the confirmation flag has to ride proposeWorkflow's receipt.
+    const { tools, stores } = makeAllTools({ allowLegacyDirectWrites: false })
+    const DELIVERING_DEF: WorkflowDefinition = {
+      startStepId: 'post',
+      steps: [
+        { id: 'post', type: 'assistant_call', target: { assistantId: 'primary' }, prompt: 'Compose the digest.', deliver: { channelType: 'slack', channelId: 'C0TESTCC333' } },
+      ],
+    }
+    const strippedDef: WorkflowDefinition = {
+      startStepId: 'post',
+      steps: [{ id: 'post', type: 'assistant_call', target: { assistantId: 'primary' }, prompt: 'Compose the digest and post it.' }],
+    }
+    const ctx = makeContext()
+    const proposed = await tools.proposeWorkflow.execute({ name: 'standup', definition: DELIVERING_DEF }, ctx)
+    expect(proposed.isError).toBeFalsy()
+    const created = await tools.createWorkflow.execute({}, ctx)
+    expect(created.isError).toBeFalsy()
+    const wf = created.data as { id: string }
+
+    // Unconfirmed strip: proposal is fine, the write is blocked with the receipt remedy.
+    const strip = await tools.proposeWorkflow.execute({ workflowId: wf.id, name: 'standup', definition: strippedDef }, ctx)
+    expect(strip.isError).toBeFalsy()
+    const blocked = await tools.updateWorkflow.execute({}, ctx)
+    expect(blocked.isError).toBe(true)
+    const errors = (blocked.data as { errors: string[] }).errors
+    expect(errors.some((e) => e.includes('proposeWorkflow') && e.includes('confirmDeliveryRemoval: true'))).toBe(true)
+    expect(stores.workflows.get(wf.id)?.definition.steps[0]).toHaveProperty('deliver')
+
+    // Confirmed strip: the flag rides the receipt into updateWorkflow.
+    const confirmedProposal = await tools.proposeWorkflow.execute(
+      { workflowId: wf.id, name: 'standup', definition: strippedDef, confirmDeliveryRemoval: true },
+      ctx,
+    )
+    expect(confirmedProposal.isError).toBeFalsy()
+    const applied = await tools.updateWorkflow.execute({}, ctx)
+    expect(applied.isError).toBeFalsy()
+    expect(stores.workflows.get(wf.id)?.definition.steps[0]).not.toHaveProperty('deliver')
+  })
+
+  it('updateWorkflow does not block when at least one deliver binding survives the edit', async () => {
+    const { tools } = makeAllTools()
+    const TWO_DELIVER_DEF: WorkflowDefinition = {
+      startStepId: 'a',
+      steps: [
+        {
+          id: 'a',
+          type: 'assistant_call',
+          target: { assistantId: 'primary' },
+          prompt: 'Post the main message.',
+          deliver: { channelType: 'slack', channelId: 'C0TESTCC333' },
+          nextStepId: 'b',
+        },
+        {
+          id: 'b',
+          type: 'assistant_call',
+          target: { assistantId: 'primary' },
+          prompt: 'Post the follow-up.',
+          deliver: { channelType: 'slack', channelId: 'C0TESTCC333' },
+        },
+      ],
+    }
+    const created = await tools.createWorkflow.execute(
+      { name: 'two', definition: TWO_DELIVER_DEF },
+      makeContext(),
+    )
+    const wf = created.data as { id: string }
+    // Dropping ONE deliver (keeping the other) is an ordinary edit.
+    const oneKept: WorkflowDefinition = {
+      startStepId: 'a',
+      steps: [
+        TWO_DELIVER_DEF.steps[0],
+        {
+          id: 'b',
+          type: 'assistant_call',
+          target: { assistantId: 'primary' },
+          prompt: 'Store the follow-up for later.',
+          storeOutputAs: 'followUp',
+        },
+      ],
+    }
+    const r = await tools.updateWorkflow.execute(
+      { workflowId: wf.id, definition: oneKept },
+      makeContext(),
+    )
+    expect(r.isError).toBeFalsy()
+  })
+
   it('updateWorkflow rejects an empty patch', async () => {
     const { tools } = makeAllTools()
     const created = await tools.createWorkflow.execute(
@@ -1713,6 +2048,7 @@ describe('[COMP:workflow/tools] page anchor authoring checks', () => {
     )
     const wf = created.data as { id: string }
     const toolsWithJobs = createWorkflowTools({
+      allowLegacyDirectWrites: true,
       workflowStore: stores.workflowStore,
       runStore: stores.runStore,
       executorDeps: {
@@ -2296,5 +2632,105 @@ describe('[COMP:workflow/tools] skill attachment authoring checks', () => {
     expect(r.isError).toBe(true)
     const errors = (r.data as { errors: string[] }).errors
     expect(errors.some((e) => e.includes('steps.0.enforcedSkills') && e.includes('ghost'))).toBe(true)
+  })
+})
+
+describe('[COMP:workflow/tools] authoring failures carry the vocabulary and a followable remedy', () => {
+  // A definition that fails the schema on `steps[].type` — the one class of
+  // rejection the model cannot fix without the closed set of valid types.
+  const BAD_TYPE_DEF = {
+    startStepId: 's1',
+    steps: [{ id: 's1', type: 'llm_call', prompt: 'do the thing' }],
+  }
+
+  it('createWorkflow ships stepTypes alongside the validation errors, exactly as proposeWorkflow does', async () => {
+    const { tools } = makeAllTools()
+    const r = await tools.createWorkflow.execute(
+      { name: 'x', definition: BAD_TYPE_DEF as never },
+      makeContext(),
+    )
+    expect(r.isError).toBe(true)
+    const data = r.data as { errors: string[]; stepTypes?: readonly string[] }
+    expect(data.errors.length).toBeGreaterThan(0)
+    expect(data.stepTypes).toEqual(STEP_TYPE_VALUES)
+    // Same payload shape the read-only sibling already returned.
+    const proposed = await tools.proposeWorkflow.execute(
+      { name: 'x', definition: BAD_TYPE_DEF as never },
+      makeContext(),
+    )
+    expect((proposed.data as { stepTypes?: readonly string[] }).stepTypes).toEqual(data.stepTypes)
+  })
+
+  it('updateWorkflow ships stepTypes alongside the validation errors', async () => {
+    const { tools } = makeAllTools()
+    const created = await tools.createWorkflow.execute(
+      { name: 'briefing', definition: SIMPLE_DEF },
+      makeContext(),
+    )
+    const wf = created.data as { id: string }
+    const r = await tools.updateWorkflow.execute(
+      { workflowId: wf.id, definition: BAD_TYPE_DEF as never },
+      makeContext(),
+    )
+    expect(r.isError).toBe(true)
+    const data = r.data as { errors: string[]; stepTypes?: readonly string[] }
+    expect(data.errors.length).toBeGreaterThan(0)
+    expect(data.stepTypes).toEqual(STEP_TYPE_VALUES)
+  })
+
+  it('the workspace gate tells a KEYED agent to get the key re-scoped, never to "switch to a chat"', async () => {
+    // An external MCP agent has no chat to switch to — the old remedy was an
+    // instruction it could not follow, so the only move left was to retry.
+    const { tools } = makeAllTools()
+    for (const channelType of ['programmatic', 'assistant_mcp', 'api']) {
+      const r = await tools.listWorkflows.execute(
+        {},
+        makeContext({ workspaceId: null, channelType }),
+      )
+      expect(r.isError, channelType).toBe(true)
+      const text = String(r.data)
+      expect(text, channelType).toContain('re-issue or re-scope the key')
+      expect(text, channelType).not.toContain('workspace-scoped chat')
+      expect(text, channelType).toContain('fail identically')
+    }
+  })
+
+  it('the workspace gate tells a CHAT user to open a workspace-scoped chat', async () => {
+    const { tools } = makeAllTools()
+    for (const channelType of ['web', 'telegram', 'slack']) {
+      const r = await tools.listWorkflows.execute(
+        {},
+        makeContext({ workspaceId: null, channelType }),
+      )
+      expect(r.isError, channelType).toBe(true)
+      const text = String(r.data)
+      expect(text, channelType).toContain('workspace-scoped chat')
+      expect(text, channelType).not.toContain('re-scope the key')
+    }
+  })
+
+  it('an unrecognised surface gets the neutral both-ways remedy rather than a guess', async () => {
+    const { tools } = makeAllTools()
+    const r = await tools.listWorkflows.execute(
+      {},
+      makeContext({ workspaceId: null, channelType: 'cron' }),
+    )
+    expect(r.isError).toBe(true)
+    const text = String(r.data)
+    expect(text).toContain('workspace-scoped chat')
+    expect(text).toContain('re-issue or re-scope that credential')
+  })
+
+  it('every branch still says nothing happened and that a bare retry is pointless', async () => {
+    const { tools } = makeAllTools()
+    for (const channelType of ['programmatic', 'web', 'cron']) {
+      const r = await tools.listWorkflows.execute(
+        {},
+        makeContext({ workspaceId: null, channelType }),
+      )
+      const text = String(r.data)
+      expect(text, channelType).toContain('Nothing was read or changed')
+      expect(text, channelType).toContain('Retrying this call unchanged will fail identically')
+    }
   })
 })

@@ -35,6 +35,7 @@ export {
 } from './tools.js'
 
 export { createSendFileTool } from './send-file.js'
+export { createRenderPdfTool, normalizePdfPath, MAX_RENDER_PDF_MARKDOWN_CHARS, type RenderPdfDocPageReader, type RenderPdfToolOptions } from './render-pdf.js'
 
 export type { FileToolPolicy, ResolveFileToolPolicy } from './tool-helpers.js'
 

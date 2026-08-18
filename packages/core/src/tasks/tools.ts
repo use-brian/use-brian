@@ -432,7 +432,7 @@ export function createTaskTools(
         input.id,
       )
       if (!task || task.workspaceId !== context.workspaceId) {
-        return { data: `Task ${input.id} not found in workspace.`, isError: true }
+        return { data: taskNotFoundMessage(input.id), isError: true }
       }
       return { data: fullRow(task) }
     },
@@ -511,7 +511,7 @@ export function createTaskTools(
         return { data: 'parent_id must reference a task in the same workspace.', isError: true }
       }
       if (msg.includes('invalid input syntax for type uuid')) {
-        return { data: `Task ${id} not found in workspace.`, isError: true }
+        return { data: `Task id "${id}" is not a UUID, so it cannot match any task. Ids come from listTasks / getTask / a prior save result — never a title. ${taskNotFoundMessage(id)}`, isError: true }
       }
       throw err
     }

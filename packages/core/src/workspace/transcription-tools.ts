@@ -59,7 +59,9 @@ export function createTranscriptionPrefTools(store: WorkspaceTranscriptionPrefsP
     async execute(input, context) {
       if (!context.workspaceId) {
         return {
-          data: 'This assistant is not bound to a workspace, so there is no transcription preference to configure here.',
+          data:
+            'This assistant is not bound to a workspace, so there is no transcription preference to read or change — the preference lives on the workspace row (`workspaces.transcription_prefs`), not on the user or the assistant. Nothing was changed. ' +
+            'Ask the user to move this assistant into a workspace in Studio, or run this from a workspace-scoped chat. Retrying from this session will keep failing, whatever the arguments.',
           isError: true,
         }
       }
@@ -91,7 +93,14 @@ export function createTranscriptionPrefTools(store: WorkspaceTranscriptionPrefsP
 
       const result = await store.set(context.userId, context.workspaceId, patch)
       if (!result.ok) {
-        return { data: result.message, isError: true }
+        // The store hands back a diagnosis + a reason code; the tool owns the
+        // next step and the retry verdict, because only it knows that reading
+        // the preference is ungated while writing it is not.
+        const next =
+          result.reason === 'not_admin'
+            ? 'Tell the user the change needs a workspace owner or admin to make it (they can also change it by asking from their own chat). Call this tool with NO arguments if you still want to report the current preference. Retrying the same write as this user will keep failing.'
+            : 'The workspace row backing this session no longer exists, so no preference can be stored against it. This is not something your arguments can fix — tell the user, and do NOT retry.'
+        return { data: `${result.message} Nothing was changed. ${next}`, isError: true }
       }
       return {
         data: {

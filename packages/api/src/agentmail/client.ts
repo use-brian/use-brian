@@ -306,7 +306,19 @@ export function createAgentmailClient(params: { apiKey: string; fetchImpl?: Fetc
     // DELETE endpoints return no meaningful body.
     if (res.status === 204) return schema.parse({}) as z.output<S>
     const json = (await res.json().catch(() => ({}))) as unknown
-    return schema.parse(json)
+    // The request SUCCEEDED (2xx) — only our reading of the reply failed. Say
+    // so: a schema miss on a send/draft call must not read as "the email was
+    // not sent", and the ZodError JSON must not reach the model verbatim.
+    const parsed = schema.safeParse(json)
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0]
+      const where = issue?.path?.length ? issue.path.join('.') : '(root)'
+      throw new AgentmailApiError(
+        `AgentMail answered ${method} ${path} with HTTP ${res.status} but the reply did not match the expected shape (${where}: ${issue?.message ?? 'invalid'}). The action may or may not have completed on AgentMail's side — verify before repeating a send; this is a client/API contract mismatch, not something a different argument fixes.`,
+        res.status,
+      )
+    }
+    return parsed.data as z.output<S>
   }
 
   const enc = encodeURIComponent

@@ -32,6 +32,7 @@
 
 import { z } from 'zod'
 import { buildTool, type Tool } from '../tools/types.js'
+import { toolFailure } from '../tools/tool-failure.js'
 import { extractPointers, type SkillFilePointerKind } from './loader.js'
 import { validateClassLevelName } from './class-name-validator.js'
 
@@ -335,14 +336,9 @@ export function createSkillManageTool(deps: SkillManageDeps): Tool {
       // produces a structured error result instead of an unhandled throw.
       const parsed = INPUT_SCHEMA.safeParse(input)
       if (!parsed.success) {
-        return {
-          data: {
-            error: `Invalid skill_manage input: ${parsed.error.issues
-              .map((i) => i.message)
-              .join('; ')}`,
-          },
-          isError: true,
-        }
+        // Shared first-party failure frame: the zod issues as `path: message`
+        // lines, plus "nothing was saved" and the retry verdict.
+        return toolFailure(parsed.error, { tool: 'skill_manage', mutating: true })
       }
       try {
         const result = await executeAction(parsed.data, deps)
@@ -350,14 +346,85 @@ export function createSkillManageTool(deps: SkillManageDeps): Tool {
           'error' in result && typeof (result as { error?: unknown }).error === 'string'
         return { data: result, isError: isError ? true : undefined }
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err)
-        return {
-          data: { error: message },
-          isError: true,
-        }
+        return toolFailure(err, {
+          tool: 'skill_manage',
+          action: `\`skill_manage\` (action \`${parsed.data.action}\`)`,
+          mutating: true,
+        })
       }
     },
   })
+}
+
+/**
+ * Message-first copy for the write gates the four actions share
+ * (docs/architecture/engine/tool-executor.md → "Failure copy").
+ *
+ * These used to be a bare diagnosis (`Skill <id> is pinned; auto-curation is
+ * disabled for pinned skills.`) — true, but silent on whether anything was
+ * written, what to do instead, and whether the identical call could ever
+ * work, so the curator re-issued it. One frame now carries all four:
+ * WHAT did not happen on WHICH row · WHY · NEXT · RETRY VERDICT.
+ */
+function writeRefused(params: {
+  /** What the action was doing, e.g. `patch`, `add a support file to`. */
+  verb: string
+  rowId: string
+  why: string
+  next: string
+  verdict: string
+}): { error: string } {
+  return {
+    error: `skill_manage did not ${params.verb} skill ${params.rowId}: ${params.why}. Nothing was changed. ${params.next} ${params.verdict}`,
+  }
+}
+
+/**
+ * The four skill-state gates, identical for `patch_skill` /
+ * `update_umbrella` / `add_support_file` — one place so the two call sites
+ * cannot drift apart on the remedy they name.
+ */
+function skillStateRefusal(
+  verb: string,
+  rowId: string,
+  gate: 'not_found' | 'pinned' | 'archived' | 'builtin',
+): { error: string } {
+  switch (gate) {
+    case 'not_found':
+      return writeRefused({
+        verb,
+        rowId,
+        why:
+          'that skill row id was not found in this workspace (a row id is the `workspace_skills` id, ' +
+          'not the slug the listing shows, and it never crosses workspaces)',
+        next: 'Call skills_list to re-resolve the id against this workspace\'s current library, then act on that row.',
+        verdict: 'Do NOT retry this exact id.',
+      })
+    case 'pinned':
+      return writeRefused({
+        verb,
+        rowId,
+        why: 'the skill is pinned, and pinning switches auto-curation off for that skill deliberately',
+        next: 'Pick another target (skills_list shows what is curatable), or leave this lesson for the workspace owner to fold in by hand.',
+        verdict: 'Retrying will keep failing for as long as the skill is pinned.',
+      })
+    case 'archived':
+      return writeRefused({
+        verb,
+        rowId,
+        why: 'the skill is archived, and an archived skill is out of play until a workspace member restores it',
+        next: 'Act on an active skill instead, or propose a new class-level one with create_umbrella.',
+        verdict: 'Retrying will keep failing while it is archived.',
+      })
+    case 'builtin':
+      return writeRefused({
+        verb,
+        rowId,
+        why: 'it is a built-in skill that ships on disk, so no runtime write can reach it',
+        next: 'Put the lesson in a workspace skill instead — patch an auto-generated one, or propose a new class-level one with create_umbrella.',
+        verdict: 'Do NOT retry this id.',
+      })
+  }
 }
 
 // ── Action dispatch ───────────────────────────────────────────────
@@ -394,13 +461,13 @@ async function runPatch(
 ): Promise<SkillManageResult> {
   const skill = await deps.workspaceSkillStore.getSkillForWorkspace(deps.workspaceId, rowId)
   if (!skill) {
-    return { error: `Skill ${rowId} not found in this workspace.` }
+    return skillStateRefusal('patch', rowId, 'not_found')
   }
   if (skill.pinned) {
-    return { error: `Skill ${rowId} is pinned; auto-curation is disabled for pinned skills.` }
+    return skillStateRefusal('patch', rowId, 'pinned')
   }
   if (skill.state === 'archived') {
-    return { error: `Skill ${rowId} is archived; restore it before patching.` }
+    return skillStateRefusal('patch', rowId, 'archived')
   }
 
   // ── Routing-by-authorship ──
@@ -408,13 +475,19 @@ async function runPatch(
   // Built-in skills live on disk and can never be patched at runtime — the
   // store should never return source='builtin' rows, but we guard anyway.
   if (skill.source === 'builtin') {
-    return { error: `Skill ${rowId} is a built-in skill; cannot be patched at runtime.` }
+    return skillStateRefusal('patch', rowId, 'builtin')
   }
 
   // Optional pointer validation — only if newContent was provided.
   if (patch.newContent !== undefined) {
     const validation = await validatePointersAgainstSkill(skill.rowId, patch.newContent, deps)
-    if (!validation.ok) return { error: validation.reason }
+    if (!validation.ok) {
+      return {
+        error:
+          `skill_manage did not patch skill ${rowId}: ${validation.reason} Nothing was changed. ` +
+          'The same body will be rejected the same way.',
+      }
+    }
   }
 
   if (skill.source === 'auto-generated') {
@@ -422,9 +495,15 @@ async function runPatch(
       // Defensive: source/write_origin can drift if a manual UPDATE bypasses
       // the application stamping. The invariant is that the curator
       // only ever touches background_review-origin rows.
-      return {
-        error: `Skill ${rowId} has source='auto-generated' but write_origin='${skill.writeOrigin}'; cannot patch.`,
-      }
+      return writeRefused({
+        verb: 'patch',
+        rowId,
+        why:
+          `its row carries source='auto-generated' with write_origin='${skill.writeOrigin}', and the curator may only ` +
+          "write rows whose write_origin is 'background_review'",
+        next: 'Pick a different target skill; this row needs a human to correct its provenance before anything writes to it.',
+        verdict: 'Retrying will keep failing until that row is fixed.',
+      })
     }
     await deps.workspaceSkillStore.applyPatch({
       rowId: skill.rowId,
@@ -471,16 +550,16 @@ async function runAddSupportFile(
 ): Promise<SkillManageResult> {
   const skill = await deps.workspaceSkillStore.getSkillForWorkspace(deps.workspaceId, rowId)
   if (!skill) {
-    return { error: `Skill ${rowId} not found in this workspace.` }
+    return skillStateRefusal('add a support file to', rowId, 'not_found')
   }
   if (skill.pinned) {
-    return { error: `Skill ${rowId} is pinned; auto-curation is disabled for pinned skills.` }
+    return skillStateRefusal('add a support file to', rowId, 'pinned')
   }
   if (skill.state === 'archived') {
-    return { error: `Skill ${rowId} is archived; restore it before adding files.` }
+    return skillStateRefusal('add a support file to', rowId, 'archived')
   }
   if (skill.source === 'builtin') {
-    return { error: `Skill ${rowId} is a built-in skill; cannot accept support files at runtime.` }
+    return skillStateRefusal('add a support file to', rowId, 'builtin')
   }
 
   // Validate dangling pointers inside the file content itself. Only this
@@ -495,15 +574,25 @@ async function runAddSupportFile(
   )
   if (dangling.length > 0) {
     return {
-      error: `File content references missing support file(s): ${dangling.map((d) => `${d.kind}:${d.name}`).join(', ')}.`,
+      error:
+        `skill_manage did not add "${file.kind}:${file.name}" to skill ${rowId}: the file content references ` +
+        `missing support file(s) — ${dangling.map((d) => `${d.kind}:${d.name}`).join(', ')}. Nothing was saved. ` +
+        'Add each of those with its own add_support_file call first, or delete the {{kind:name}} pointer from this ' +
+        'content. Re-sending this exact content will be rejected the same way.',
     }
   }
 
   if (skill.source === 'auto-generated') {
     if (skill.writeOrigin !== 'background_review') {
-      return {
-        error: `Skill ${rowId} has source='auto-generated' but write_origin='${skill.writeOrigin}'; cannot add file.`,
-      }
+      return writeRefused({
+        verb: 'add a support file to',
+        rowId,
+        why:
+          `its row carries source='auto-generated' with write_origin='${skill.writeOrigin}', and the curator may only ` +
+          "write rows whose write_origin is 'background_review'",
+        next: 'Pick a different target skill; this row needs a human to correct its provenance before anything writes to it.',
+        verdict: 'Retrying will keep failing until that row is fixed.',
+      })
     }
     await deps.fileStore.upsert({
       workspaceSkillId: skill.rowId,
@@ -566,7 +655,12 @@ async function runCreateUmbrella(
   // the single LLM re-prompt is plan-shape-only, in `skill-review-llm.ts`).
   const nameCheck = validateClassLevelName(umbrella.name)
   if (!nameCheck.ok) {
-    return { error: `Umbrella name rejected: ${nameCheck.reason}` }
+    return {
+      error:
+        `skill_manage did not create the umbrella "${umbrella.name}": the name was rejected by the class-level ` +
+        `naming rule — ${nameCheck.reason} Nothing was staged for approval. Re-send create_umbrella with a name ` +
+        'that describes the CLASS of task. Re-sending this exact name will be rejected the same way.',
+    }
   }
 
   // Validate dangling pointers in body against the proposed support files —
@@ -579,14 +673,23 @@ async function runCreateUmbrella(
   )
   if (dangling.length > 0) {
     return {
-      error: `Umbrella body references support file(s) not in the proposal: ${dangling.map((d) => `${d.kind}:${d.name}`).join(', ')}.`,
+      error:
+        `skill_manage did not create the umbrella "${umbrella.name}": its body references support file(s) not in ` +
+        `the proposal — ${dangling.map((d) => `${d.kind}:${d.name}`).join(', ')}. Nothing was staged for approval. ` +
+        'A new umbrella can only point at files it ships with, so add each of those to this call\'s `supportFiles` ' +
+        'or drop the {{kind:name}} pointer from the body. Re-sending this exact proposal will be rejected the same way.',
     }
   }
 
   // Slugify name → match the existing slug convention from routes/skills.ts.
   const slug = slugify(umbrella.name)
   if (!slug) {
-    return { error: 'Umbrella name must contain at least one alphanumeric character.' }
+    return {
+      error:
+        `skill_manage did not create the umbrella "${umbrella.name}": the name has no alphanumeric character, so it ` +
+        'slugifies to nothing and could never be addressed. Nothing was staged for approval. Re-send create_umbrella ' +
+        'with a name containing letters or digits. Re-sending this exact name will be rejected the same way.',
+    }
   }
 
   // Dedupe on the proposed slug: the same umbrella re-derived from an

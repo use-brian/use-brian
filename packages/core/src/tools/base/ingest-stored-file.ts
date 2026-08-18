@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { buildTool } from '../types.js'
 import { actorFromContext } from '../../retrieval/tools.js'
 import type { RetrievalActor } from '../../retrieval/types.js'
+import { toolFailure } from '../tool-failure.js'
 
 /**
  * `ingestFile` — deterministic (re-)ingestion of a file ALREADY stored in
@@ -71,10 +72,29 @@ export function createIngestStoredFileTool(deps: IngestStoredFileDeps) {
     async execute(input, context) {
       const actor = actorFromContext(context)
       if ('error' in actor) {
-        return { data: 'This assistant is not in a workspace, so there is no brain to ingest into.', isError: true }
+        // Same sentence the retrieval gate uses (`retrieval/tools.ts` →
+        // `actorFromContext`), adapted for the write direction — one wording
+        // for "this chat has no workspace", so the model does not read two
+        // different sentences as two different problems.
+        return {
+          data:
+            'This chat is not bound to a workspace, so there is no company brain to ingest into — brain rows are workspace-scoped and there is no permission boundary to evaluate. ' +
+            'No argument change or retry will help in this session. Nothing was ingested. Tell the user to ask from a workspace chat.',
+          isError: true,
+        }
       }
 
-      const file = await deps.getFile(actor, input.fileId)
+      let file: Awaited<ReturnType<IngestStoredFileDeps['getFile']>>
+      try {
+        file = await deps.getFile(actor, input.fileId)
+      } catch (err) {
+        return toolFailure(err, {
+          tool: 'ingestFile',
+          action: 'The stored-file lookup',
+          target: `file \`${input.fileId}\``,
+          next: 'Nothing was ingested and no credits were spent.',
+        })
+      }
       if (!file) {
         // Same dead-end shape as the workspace-files `not_found` (see
         // `workspace-files/tool-helpers.ts` → errorMessage). This tool is NOT
@@ -114,13 +134,25 @@ export function createIngestStoredFileTool(deps: IngestStoredFileDeps) {
         }
       }
 
-      const { enqueued } = await deps.enqueue({
-        fileId: file.id,
-        workspaceId: actor.workspaceId,
-        actingUserId: actor.userId,
-        assistantId: actor.assistantId,
-        sourceLabel: file.sourceEpisodeId ? 'reingest' : 'upload',
-      })
+      let enqueued: boolean
+      try {
+        ;({ enqueued } = await deps.enqueue({
+          fileId: file.id,
+          workspaceId: actor.workspaceId,
+          actingUserId: actor.userId,
+          assistantId: actor.assistantId,
+          sourceLabel: file.sourceEpisodeId ? 'reingest' : 'upload',
+        }))
+      } catch (err) {
+        return toolFailure(err, {
+          tool: 'ingestFile',
+          action: 'Queueing the file for brain ingestion',
+          target: `file \`${file.id}\` ("${file.name}")`,
+          mutating: true,
+          next:
+            'Ingestion did NOT start and no credits were spent. The user has already consented, so the same call can be repeated once the cause is fixed — do not ask them again.',
+        })
+      }
       if (!enqueued) {
         return { data: `"${file.name}" is already being ingested — no new run was started.` }
       }

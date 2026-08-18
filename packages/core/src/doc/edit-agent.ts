@@ -13,7 +13,7 @@
  */
 
 import { z } from 'zod'
-import { queryLoop } from '../engine/query-loop.js'
+import { queryLoop, type TerminalStopReason } from '../engine/query-loop.js'
 import type { LLMProvider, TokenUsage } from '../providers/types.js'
 import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
 
@@ -72,11 +72,23 @@ export type DocEditAttemptUsage = {
 }
 
 export type DocEditReceipt = {
-  status: 'completed' | 'failed'
+  /**
+   * `completed` = the child finished on its own with at least one mutation
+   * applied. `partial` = mutations landed but the child was CUT OFF before it
+   * finished (its turn / tool budget, an abort, or a provider error): the page
+   * is in a half-done state and the parent must say so - never relay a partial
+   * as done. `failed` = no mutation was applied.
+   */
+  status: 'completed' | 'partial' | 'failed'
   summary: string
   mutationTools: string[]
   pageIds: string[]
   fallbackUsed: boolean
+  /**
+   * For `partial`: why the child stopped early - a `TerminalStopReason` code
+   * (`max_turns`, `tool_budget_exhausted`, `tool_failure_limit`) or the error /
+   * abort message. For `failed`: the failure.
+   */
   error?: string
 }
 
@@ -108,6 +120,39 @@ type AttemptResult = {
   mutationTools: string[]
   pageIds: string[]
   error?: string
+  /** Set when the child's loop ended on a budget limit rather than by itself. */
+  cutoff?: TerminalStopReason
+}
+
+/**
+ * Child budgets. Each child turn is one model round trip, and a model that
+ * authors section by section spends one turn per section, so the old
+ * `maxTurns: 8` was exhausted by a five-section page (skeleton + one section
+ * per turn) - the 2026-08-18 "page build always stops in the middle" report:
+ * the loop hit `max_turns`, the isolated finalizer wrote "The page is now
+ * completed", and the receipt said `completed` because one mutation had
+ * landed. The budget is now wide enough for a long deliverable, the prompt
+ * tells the editor to batch (see `EDIT_AGENT_HEADER`), and a cutoff is
+ * reported as `partial` rather than swallowed. The gateway tool's own
+ * `timeoutMs` still bounds wall-clock.
+ */
+export const DOC_EDIT_MAX_TURNS = 16
+export const DOC_EDIT_MAX_TOOL_CALLS = 24
+/**
+ * Wall-clock bound for one delegated edit. A slow provider (60-77s per call
+ * was measured on a self-host) times out here rather than running the parent
+ * turn forever; the child's applied mutations survive and are reported as
+ * `partial`.
+ */
+export const DOC_EDIT_TIMEOUT_MS = 300_000
+
+/** Budget cutoffs - the codes that mean "the editor did not get to finish". */
+export function isBudgetCutoff(stop: TerminalStopReason | undefined): boolean {
+  return (
+    stop?.code === 'max_turns'
+    || stop?.code === 'tool_budget_exhausted'
+    || stop?.code === 'tool_failure_limit'
+  )
 }
 
 /**
@@ -170,6 +215,7 @@ async function runAttempt(
   const pageIds = new Set<string>()
   let latestText = ''
   let lastError: string | undefined
+  let cutoff: TerminalStopReason | undefined
 
   try {
     for await (const event of queryLoop({
@@ -196,8 +242,8 @@ async function runAttempt(
       tools: new Map(options.tools),
       context: isolateDocEditToolContext(options.context),
       stateless: true,
-      maxTurns: options.maxTurns ?? 8,
-      maxToolCalls: options.maxToolCalls ?? 16,
+      maxTurns: options.maxTurns ?? DOC_EDIT_MAX_TURNS,
+      maxToolCalls: options.maxToolCalls ?? DOC_EDIT_MAX_TOOL_CALLS,
       channelType: 'web',
     })) {
       if (event.type === 'assistant_turn') {
@@ -237,7 +283,11 @@ async function runAttempt(
       } else if (event.type === 'turn_complete') {
         const text = textFromContent(event.response.content)
         if (text) latestText = text
-        await options.onUsage?.({ model, usage: event.totalUsage, attempt })
+        // A budget exit is structural: the finalizer's text above may read
+        // like a finished summary ("the page is now completed"), and it must
+        // not be allowed to mean that.
+        if (isBudgetCutoff(event.terminalStop)) cutoff = event.terminalStop
+        await options.onUsage?.({ model: event.response.model, usage: event.totalUsage, attempt })
       } else if (event.type === 'error') {
         lastError = event.error.message
       }
@@ -252,6 +302,51 @@ async function runAttempt(
     mutationTools: successful,
     pageIds: [...pageIds],
     error: lastError,
+    cutoff,
+  }
+}
+
+/**
+ * The receipt for an attempt that applied at least one mutation. Complete only
+ * when the child finished by itself; a budget cutoff, an abort, or a provider
+ * error after the first mutation is `partial`, and the summary says so in the
+ * first sentence so the parent cannot relay it as done.
+ */
+function receiptForAppliedAttempt(
+  attempt: AttemptResult,
+  fallbackUsed: boolean,
+): DocEditReceipt {
+  const stopped = attempt.cutoff ? attempt.cutoff.code : attempt.error
+  if (!stopped) {
+    return {
+      status: 'completed',
+      summary: attempt.summary,
+      mutationTools: attempt.mutationTools,
+      pageIds: attempt.pageIds,
+      fallbackUsed,
+    }
+  }
+  const cutoff = attempt.cutoff
+  const why = !cutoff
+    ? `it was interrupted (${attempt.error})`
+    : cutoff.code === 'max_turns'
+      ? 'it ran out of editing turns'
+      : cutoff.code === 'tool_budget_exhausted'
+        ? 'it ran out of tool calls'
+        : cutoff.code === 'tool_failure_limit'
+          ? `it stopped after repeated ${cutoff.tool} failures`
+          : `it stopped early (${cutoff.code})`
+  return {
+    status: 'partial',
+    summary:
+      `STOPPED EARLY - the page is NOT finished: the editor applied ${attempt.mutationTools.length} ` +
+      `mutation(s) (${attempt.mutationTools.join(', ')}) and then ${why}. Some sections may be ` +
+      `empty or unfinished. Tell the user exactly that, describe what did land, and offer to ` +
+      `continue in the next turn. Editor's last words: ${attempt.summary}`,
+    mutationTools: attempt.mutationTools,
+    pageIds: attempt.pageIds,
+    fallbackUsed,
+    error: stopped,
   }
 }
 
@@ -259,15 +354,7 @@ export async function runDocEditAgent(
   options: RunDocEditAgentOptions,
 ): Promise<DocEditReceipt> {
   const first = await runAttempt(options, options.model, 'background')
-  if (first.mutationTools.length > 0) {
-    return {
-      status: 'completed',
-      summary: first.summary,
-      mutationTools: first.mutationTools,
-      pageIds: first.pageIds,
-      fallbackUsed: false,
-    }
-  }
+  if (first.mutationTools.length > 0) return receiptForAppliedAttempt(first, false)
 
   const canFallback = Boolean(
     options.fallbackModel && options.fallbackModel !== options.model,
@@ -278,15 +365,7 @@ export async function runDocEditAgent(
       options.fallbackModel!,
       'standard_fallback',
     )
-    if (fallback.mutationTools.length > 0) {
-      return {
-        status: 'completed',
-        summary: fallback.summary,
-        mutationTools: fallback.mutationTools,
-        pageIds: fallback.pageIds,
-        fallbackUsed: true,
-      }
-    }
+    if (fallback.mutationTools.length > 0) return receiptForAppliedAttempt(fallback, true)
     return {
       status: 'failed',
       summary: fallback.summary,
@@ -336,12 +415,12 @@ export function createDelegateDocEditTool(
   return buildTool<typeof delegateDocEditInputSchema>({
     name: DOC_EDIT_GATEWAY_TOOL,
     description:
-      'Apply a requested Doc page, entity, or comment change through a fresh isolated editor. Choose edit only when runtime context supplies an existing open page id; an edit can never create a page. Choose create only when the user explicitly asks for a new page. Submit one self-contained brief after gathering needed evidence. The editor cannot see this conversation or tool results unless you include their relevant facts and source URLs. Questions that do not require a Doc mutation should be answered directly.',
+      'Apply a requested Doc page, entity, or comment change through a fresh isolated editor. Choose edit only when runtime context supplies an existing open page id; an edit can never create a page. Choose create only when the user explicitly asks for a new page. Submit one self-contained brief after gathering needed evidence. The editor cannot see this conversation or tool results unless you include their relevant facts and source URLs. Questions that do not require a Doc mutation should be answered directly. The receipt status is completed, partial, or failed: partial means the editor applied some changes and was cut off before finishing - relay that honestly (what landed, what did not) and offer to continue in the next turn; never describe a partial result as done.',
     inputSchema: delegateDocEditInputSchema,
     isReadOnly: false,
     isConcurrencySafe: false,
     requiresConfirmation: false,
-    timeoutMs: 180_000,
+    timeoutMs: DOC_EDIT_TIMEOUT_MS,
     maxResultSizeChars: 4_000,
     async execute(input, context) {
       if (consumed) {

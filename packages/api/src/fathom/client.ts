@@ -11,6 +11,8 @@
  * See docs/architecture/integrations/fathom.md.
  */
 
+import { ConnectorApiError } from '@use-brian/core'
+
 const FATHOM_API_BASE = 'https://api.fathom.ai/external/v1'
 const FATHOM_TOKEN_URL = `${FATHOM_API_BASE}/oauth2/token`
 const REFRESH_LEEWAY_MS = 60_000  // Refresh if access token expires within 60s
@@ -68,12 +70,28 @@ async function tokenEndpointCall(form: Record<string, string>): Promise<FathomTo
 
   if (!res.ok) {
     const err = await res.text()
-    throw new Error(`Fathom token endpoint failed (${res.status}): ${err}`)
+    // `invalid_grant` = the refresh token is dead (rotated away or revoked):
+    // reconnect is the only remedy. Keep the literal for the health classifier.
+    const dead = /invalid_grant/.test(err)
+    throw new ConnectorApiError({
+      provider: 'Fathom',
+      status: res.status,
+      code: dead ? 'invalid_grant' : 'token_refresh_failed',
+      kind: dead ? 'auth' : undefined,
+      message: dead
+        ? `invalid_grant — the stored Fathom refresh token has expired or been revoked; reconnect Fathom in Studio → Connectors. ${err.slice(0, 200)}`
+        : `token refresh failed: ${err.slice(0, 300)}`,
+    })
   }
 
   const data = (await res.json()) as FathomTokenResponse
   if (!data.access_token || !data.refresh_token) {
-    throw new Error('Fathom token endpoint returned an incomplete payload')
+    throw new ConnectorApiError({
+      provider: 'Fathom',
+      kind: 'transient',
+      code: 'incomplete_token_payload',
+      message: 'the token endpoint returned an incomplete payload (no access or refresh token); nothing about the request is wrong.',
+    })
   }
 
   const expiresInMs = Math.max(0, (data.expires_in ?? 3600) * 1000)
@@ -110,7 +128,9 @@ export function createFathomTokenManager(params: {
   return {
     async getAccessToken(): Promise<string> {
       const current = await params.store.getTokens()
-      if (!current) throw new Error('Fathom not connected')
+      if (!current) {
+        throw new ConnectorApiError({ provider: 'Fathom', kind: 'not_connected', message: 'Fathom not connected — no tokens are stored for this connector.' })
+      }
 
       const expiresAtMs = Date.parse(current.expiresAt)
       if (Number.isFinite(expiresAtMs) && expiresAtMs - Date.now() > REFRESH_LEEWAY_MS) {
@@ -173,10 +193,32 @@ async function fathomFetch<T>(accessToken: string, path: string, init?: RequestI
   if (!res.ok) {
     const err = await res.text()
     console.warn(`[fathom] ${init?.method ?? 'GET'} ${path} → ${res.status}: ${err.slice(0, 200)}`)
+    // Structured (core `ConnectorApiError`), rendered by the tools through
+    // `connectorError()`; the body is capped there. The 401 keeps `(401)` +
+    // `invalid or expired` for the health classifier.
     if (res.status === 401) {
-      throw new Error('Fathom token is invalid or expired. Please reconnect Fathom in Settings ▸ Connectors.')
+      throw new ConnectorApiError({
+        provider: 'Fathom',
+        status: 401,
+        kind: 'auth',
+        message: 'the Fathom token is invalid or expired. Reconnect Fathom in Studio → Connectors.',
+      })
     }
-    throw new Error(`Fathom API error (${res.status}): ${err}`)
+    let message = err
+    try {
+      const parsed = JSON.parse(err) as { message?: unknown; error?: unknown; detail?: unknown }
+      const m = [parsed.message, parsed.error, parsed.detail].find((v) => typeof v === 'string' && v)
+      if (typeof m === 'string') message = m
+    } catch {
+      // non-JSON body — the raw text is the message
+    }
+    const retryAfter = res.headers?.get?.('retry-after')
+    throw new ConnectorApiError({
+      provider: 'Fathom',
+      status: res.status,
+      message,
+      retryAfterSec: retryAfter && /^\d+$/.test(retryAfter) ? Number(retryAfter) : undefined,
+    })
   }
 
   return res.json() as Promise<T>

@@ -1,5 +1,5 @@
 export { queryLoop } from './query-loop.js'
-export type { QueryEvent, QueryLoopOptions } from './query-loop.js'
+export type { QueryEvent, QueryLoopOptions, TerminalStopReason } from './query-loop.js'
 export {
   matchesDisputedFigure,
   buildDisputeContextNote,
@@ -16,7 +16,7 @@ export type {
   TurnInboxPeek,
   TurnInboxPort,
 } from './turn-inbox.js'
-export { createToolExecutor } from './tool-executor.js'
+export { createToolExecutor, formatToolError } from './tool-executor.js'
 export type { ToolExecutor, ToolExecutorOptions } from './tool-executor.js'
 export { createLoopDetector, DEFAULT_HARD_LIMIT } from './loop-detector.js'
 export type { LoopDetector, LoopAction } from './loop-detector.js'

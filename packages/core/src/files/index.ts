@@ -47,3 +47,18 @@ export {
 } from './tabular-profile.js'
 export { createReadFileTool } from './tool.js'
 export { docxToBlocks } from './docx-convert.js'
+export {
+  LibreOfficeError,
+  LIBREOFFICE_FAILURE_MESSAGES,
+  LIBREOFFICE_TIMEOUT_MS,
+  convertToPdfWithLibreOffice,
+  isLibreOfficeConfigured,
+  libreOfficeBinary,
+  libreOfficeFailureCode,
+  libreOfficeMaxConcurrency,
+  renderedPdfPageCount,
+  runLibreOffice,
+  type LibreOfficeFailureCode,
+  type LibreOfficeRun,
+  type LibreOfficeRunParams,
+} from './libreoffice.js'

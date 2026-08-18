@@ -63,6 +63,7 @@
 import { z } from 'zod'
 import { stripFollowUps } from '@use-brian/shared'
 import { buildTool, type Tool } from '../tools/types.js'
+import { formatToolError } from '../engine/tool-executor.js'
 import type { CrmStore } from '../crm/types.js'
 import type { TaskStore } from '../tasks/types.js'
 import type { WorkflowRunStore } from '../workflow/types.js'
@@ -113,6 +114,15 @@ import type {
 // regardless of which write path a given deploy uses. The matching
 // prompt-level prevention (gating the addendum to chip-capable clients)
 // lives in `packages/api/src/routes/chat.ts`.
+
+/**
+ * Page-id miss with the recovery path attached: the diagnosis alone
+ * ("deleted or no access") left the model with nothing to do but retry the
+ * same dead id. Point at the discovery tools and forbid the blind retry.
+ */
+function pageNotFound(pageId: string): string {
+  return `Page not found: ${pageId}. It may have been deleted, superseded, or above this assistant's clearance. Retrying this exact id will keep failing — call findPage with the page title (or listPages) to get a current pageId.`
+}
 
 /** Strip the chip tag from a block's `text` field if present. Accepts a
  *  full `Block` or an `edit` op's `Partial<Block>` patch (only text-bearing
@@ -718,7 +728,7 @@ export function createPatchPageTool(deps: DocToolDeps): Tool {
       )
       if (!current) {
         return {
-          data: `Page not found: ${input.pageId}. It may have been deleted or you may not have access.`,
+          data: pageNotFound(input.pageId),
           isError: true,
         }
       }
@@ -1131,14 +1141,17 @@ export function createGetBlockTool(deps: DocToolDeps): Tool {
       )
       if (!page) {
         return {
-          data: `Page not found: ${input.pageId}. It may have been deleted or you may not have access.`,
+          data: pageNotFound(input.pageId),
           isError: true,
         }
       }
       const block = page.blocks.find(b => b.id === input.blockId)
       if (!block) {
         return {
-          data: `Block "${input.blockId}" not found on page ${input.pageId}. The page may have been edited since you last saw the outline — refetch via getCurrentPage.`,
+          data:
+            `No block "${input.blockId}" on page ${input.pageId} (the page has ${page.blocks.length} block(s)). ` +
+            'Block ids change when a block is replaced rather than edited, so an id from an outline you saw earlier can be stale — the page may have been edited by a human or by patchPage since. ' +
+            'Call getCurrentPage to re-read the outline and take the block id from there. Do NOT retry this exact block id.',
           isError: true,
         }
       }
@@ -1148,8 +1161,15 @@ export function createGetBlockTool(deps: DocToolDeps): Tool {
       // in the JSONB column at read time, surfaces cleanly to the model).
       const parsed = blockSchema.safeParse(block)
       if (!parsed.success) {
+        // `parsed.error.message` is a JSON dump of the whole issue array;
+        // formatToolError renders the compact `path: message` lines instead.
+        // This is a STORED-DATA fault, not a bad argument — the block exists
+        // and does not satisfy the wire format — so the remedy is to read the
+        // page another way, never to re-send the same id.
         return {
-          data: `Block "${input.blockId}" failed schema validation: ${parsed.error.message}`,
+          data:
+            `Block "${input.blockId}" on page ${input.pageId} is stored in a shape that does not match the doc wire format, so it cannot be returned. ${formatToolError(parsed.error)} ` +
+            'Nothing is wrong with your arguments and retrying this exact id will keep failing — read the block\'s text through getCurrentPage or getSection instead, and tell the user this block looks corrupted if you still cannot use it.',
           isError: true,
         }
       }
@@ -1203,7 +1223,7 @@ export function createQueryDataBlockTool(deps: DocToolDeps): Tool {
       )
       if (!page) {
         return {
-          data: `Page not found: ${input.pageId}. It may have been deleted or you may not have access.`,
+          data: pageNotFound(input.pageId),
           isError: true,
         }
       }
@@ -1319,7 +1339,7 @@ export function createGetCurrentPageTool(deps: DocToolDeps): Tool {
       )
       if (!current) {
         return {
-          data: `Page not found: ${input.pageId}. It may have been deleted or you may not have access.`,
+          data: pageNotFound(input.pageId),
           isError: true,
         }
       }
@@ -1383,7 +1403,7 @@ export function createGetSectionTool(deps: DocToolDeps): Tool {
       )
       if (!current) {
         return {
-          data: `Page not found: ${input.pageId}. It may have been deleted or you may not have access.`,
+          data: pageNotFound(input.pageId),
           isError: true,
         }
       }
@@ -1448,7 +1468,7 @@ export function createGetBlockRangeTool(deps: DocToolDeps): Tool {
       )
       if (!current) {
         return {
-          data: `Page not found: ${input.pageId}. It may have been deleted or you may not have access.`,
+          data: pageNotFound(input.pageId),
           isError: true,
         }
       }
@@ -1527,7 +1547,7 @@ export function createExportPageTool(deps: DocToolDeps): Tool {
       const current = await deps.docPageStore.getVersionedPage(context.userId, pageId)
       if (!current) {
         return {
-          data: `Page not found: ${pageId}. It may have been deleted or you may not have access.`,
+          data: pageNotFound(pageId),
           isError: true,
         }
       }

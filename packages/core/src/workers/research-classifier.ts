@@ -203,7 +203,7 @@ export async function classifyResearchIntent(
 
     const jsonMatch = text.match(/\{[\s\S]*\}/)
     if (!jsonMatch) {
-      return { research: false, operateSite: false, reason: null, usage: response.usage, model: model }
+      return { research: false, operateSite: false, reason: null, usage: response.usage, model: response.model || model }
     }
 
     const parsed = JSON.parse(jsonMatch[0]) as {
@@ -217,7 +217,7 @@ export async function classifyResearchIntent(
         operateSite: parsed.operate_site === true,
         reason: parsed.operate_site === true ? 'operate_site_classifier' : null,
         usage: response.usage,
-        model: model,
+        model: response.model || model,
       }
     }
     return {
@@ -225,7 +225,7 @@ export async function classifyResearchIntent(
       operateSite: false,
       reason: typeof parsed.reason === 'string' ? parsed.reason : null,
       usage: response.usage,
-      model: model,
+      model: response.model || model,
     }
   } catch {
     // Any failure → safe default, no research. Usage is lost because the

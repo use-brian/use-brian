@@ -32,7 +32,7 @@ export {
  * See docs/architecture/integrations/xai.md.
  *
  * The engine observation tools (`askOpenAI` / `askGemini` / `askPerplexity` /
- * `askClaude` / `searchConsoleQuery`) follow the same fail-closed rule, one
+ * `askClaude`) follow the same fail-closed rule, one
  * `ENGINES_*` credential at a time. `enginesEnv` is threaded rather than read
  * globally only so tests can pin it; production passes nothing and gets
  * `process.env`, exactly as `xSearch` does. See

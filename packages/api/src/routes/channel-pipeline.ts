@@ -25,6 +25,7 @@ import {
   modelToCompactionTier, SensitivityAccumulator, CompartmentAccumulator,
   buildWorkspaceFilesContext, buildUploadPolicyBlock, AttachmentCollector,
   EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote,
+  latestWorkflowProposalReceipt,
 } from '@use-brian/core'
 import type { FilesApi, OutboundAttachment } from '@use-brian/core'
 import { resolveBrandContext } from '../brand/prompt-context.js'
@@ -61,7 +62,7 @@ import {
   getGroupChatContext, buildGroupChatContextPrompt, getSessionTopicLabels,
   markDowngradeNoticeSent, clearDowngradeNotice,
 } from '../db/sessions.js'
-import { resolveModel, wouldBudgetDowngradeAffectModel, chatTierBudget, BACKGROUND_MODEL, tierForModel } from '../model-resolution.js'
+import { resolveChatModelSelection, wouldBudgetDowngradeAffectModel, chatTierBudget, BACKGROUND_MODEL, backgroundModelFor } from '../model-resolution.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
 import type { SkillStore } from '../db/skill-store.js'
@@ -79,7 +80,8 @@ import {
 import { billingPartyForAssistant } from '../billing-party.js'
 import { promotePastedText, shouldPromotePaste } from '../files/paste-promotion.js'
 import type { ArtifactPromoter } from '../files/artifact-promote.js'
-import { appendOutboundChatArchive, persistInboundChatArchive } from '../chat-archive/live-writer.js'
+import { appendInboundChatArchive, appendOutboundChatArchive, persistInboundChatArchive } from '../chat-archive/live-writer.js'
+import type { ProviderAvailability } from '@use-brian/shared/model-registry'
 
 /**
  * Per-turn memory index cap — see chat.ts for the rationale and
@@ -415,6 +417,8 @@ export type ChannelPipelineParams = {
 
   // ── Stores & services ──
   provider: LLMProvider
+  /** Live application-provider availability and preference. */
+  configuredProviders?: ProviderAvailability
   /** OSS workspace custom endpoint default for user-facing channel turns. */
   resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
   systemPrompt: string
@@ -787,22 +791,56 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
       console.warn(`[${channelType}] adaptive-research classifier failed:`, err)
     }
   }
-  const model = resolveModel(effectiveModelAlias, workspacePlan, budgetStatus)
+  const { logicalModel, logicalTier, servingModel: model } = resolveChatModelSelection(
+    effectiveModelAlias,
+    workspacePlan,
+    budgetStatus,
+    params.configuredProviders,
+  )
   const customLlmRuntime = assistant.workspaceId && params.resolveWorkspaceCustomLlm
     ? await params.resolveWorkspaceCustomLlm({
         workspaceId: assistant.workspaceId,
-        requestedTier: tierForModel(model),
+        requestedTier: logicalTier,
         allowDefault: true,
       })
     : null
   if (customLlmRuntime?.routeKind === 'custom' && userContentBlocks.some((block) => block.type === 'image')) {
+    // Archive BEFORE refusing. This return used to happen first, so an image
+    // sent to a workspace on a custom endpoint left no message row and no
+    // bytes — the user saw only "Something went wrong" and the content was
+    // gone for good. Provider media is not re-fetchable (WeChat's iLink CDN
+    // copy is short-lived and AES-encrypted), so a MODEL capability limit
+    // must never decide whether the archive keeps the message: an assistant
+    // that cannot look at an attachment is a different thing from a record
+    // that no longer exists. Same rule the store applies to embedding and
+    // extraction failures — see brian-message-store docs/architecture.md
+    // → "Failure behavior".
+    if (params.archiveIncoming && !params.archiveInboundAlreadyPersisted) {
+      try {
+        await appendInboundChatArchive({
+          source: channelType,
+          ownerUserId: ownerId,
+          workspaceId: assistant.workspaceId,
+          connectorInstanceId: params.archiveConnectorInstanceId,
+          assistantId: assistant.id,
+          assistantName: assistant.name,
+          conversationId: channelId,
+          message: params.archiveIncoming,
+        })
+      } catch (err) {
+        // Losing the archive row is bad, but failing the whole turn here
+        // would replace one silent loss with a worse one: the user would
+        // not even get the explanation below.
+        console.warn(`[${channelType}] archive-on-refusal failed:`, err)
+      }
+    }
     await hooks.sendError(new Error('Custom model endpoints currently support text and tools only. Remove the inline image or use the web app to choose a built-in model.'))
     return
   }
   const turnProvider = customLlmRuntime?.provider ?? provider
   // Tier budget (chat-route parity) — research mode gets 100/100. Other
   // tiers inherit the queryLoop defaults via `null`.
-  const tierBudget = chatTierBudget({ model, researchMode: adaptiveResearchActive })
+  const tierBudget = chatTierBudget({ model: logicalModel, researchMode: adaptiveResearchActive })
 
   // v2 (brain_extraction_v2_enabled): per-turn regex pattern extraction
   // retired. Channel-side facts (Slack / Telegram / WhatsApp) now land
@@ -952,6 +990,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   const dbMessages = await getSessionMessages(session.id, {
     fromSequence: session.compactBoundarySequence,
   })
+  const workflowProposalReceipt = latestWorkflowProposalReceipt(dbMessages)
 
   // ── Proactive compaction (messaging: 0.5× threshold + multi-topic profile) ──
   // runProactiveCompaction owns stamping + tool-result pairing + summary
@@ -960,7 +999,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     sessionMessages: dbMessages,
     timezone: userTimezone,
     session,
-    tier: modelToCompactionTier(model),
+    tier: modelToCompactionTier(logicalModel),
     channelClass: 'messaging',
     profile: 'multi-topic',
     provider: backgroundProvider,
@@ -1622,6 +1661,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         assistantKind: assistant.kind,
         preferredChannel,
         userTimezone,
+        workflowProposalReceipt,
         abortSignal: abortController.signal,
         sessionStateStore,
         requestTools: allTools,
@@ -1839,7 +1879,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
               usageStore.recordUsage({
                 userId: billingUserId, actorUserId: userId, assistantId: assistant.id, sessionId: session.id,
                 model: event.response.model,
-                modelTier: customLlmRuntime?.modelTier ?? tierForModel(model),
+                modelTier: logicalTier,
                 inputTokens: usage.inputTokens,
                 outputTokens: usage.outputTokens,
                 cacheReadTokens: usage.cacheReadTokens,

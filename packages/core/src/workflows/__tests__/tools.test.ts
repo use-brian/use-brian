@@ -139,7 +139,7 @@ describe('[COMP:workflows/brain-tools] createWorkflowBrainTools', () => {
     expect(result.data).toEqual({ superseded: 3 })
   })
 
-  it('returns isError when the store throws (fail-soft)', async () => {
+  it('returns isError when the store throws (fail-soft), naming the entity it tried to create', async () => {
     const deps = makeDeps()
     deps.entities.create.mockRejectedValueOnce(new Error('kind=person is CRM-specialized'))
     const result = await build(deps).get('createEntity')!.execute(
@@ -147,17 +147,122 @@ describe('[COMP:workflows/brain-tools] createWorkflowBrainTools', () => {
       ctx,
     )
     expect(result.isError).toBe(true)
-    expect(String(result.data)).toContain('CRM-specialized')
+    const data = String(result.data)
+    expect(data).toContain('CRM-specialized')
+    expect(data).toContain('"Alice"')
+    expect(data).toMatch(/Nothing was saved or changed/)
   })
 
-  it('returns isError when invoked without a workspace context', async () => {
+  it('a rejected link is reported with the target id and the brain-id source, not just a count', async () => {
     const deps = makeDeps()
-    const noWorkspace = { ...ctx, workspaceId: null }
-    const result = await build(deps).get('supersedeMemory')!.execute(
-      { tags: ['commitment:open'] },
-      noWorkspace,
+    // applyExplicitLinks is fire-and-forget: it counts + logs, never throws.
+    deps.entityLinks.create.mockRejectedValueOnce(new Error('violates foreign key constraint'))
+    const result = await build(deps).get('createEntity')!.execute(
+      {
+        kind: 'product',
+        name: 'Pretext',
+        links: [{ targetEntityId: '11111111-1111-4111-8111-111111111111', edgeType: 'depends_on' }],
+      },
+      ctx,
+    )
+    // The entity WAS written — this is a partial success, not a failure.
+    expect(result.isError).toBeFalsy()
+    const payload = result.data as { id: string; linksFailed: number; note?: string }
+    expect(payload.id).toBe('e-1')
+    expect(payload.linksFailed).toBe(1)
+    expect(payload.note).toContain('11111111-1111-4111-8111-111111111111')
+    expect(payload.note).toContain('existing brain row UUIDs')
+    expect(payload.note).toContain('getEntity')
+    expect(payload.note).toContain('createEdge')
+    expect(payload.note).toMatch(/Do not re-run createEntity/i)
+  })
+
+  it('a clean links run carries no note', async () => {
+    const deps = makeDeps()
+    const result = await build(deps).get('createEntity')!.execute(
+      {
+        kind: 'product',
+        name: 'Pretext',
+        links: [{ targetEntityId: '11111111-1111-4111-8111-111111111111', edgeType: 'depends_on' }],
+      },
+      ctx,
+    )
+    expect((result.data as { note?: string }).note).toBeUndefined()
+  })
+
+  it('an entity-create failure names the entity and says nothing was written', async () => {
+    const deps = makeDeps()
+    deps.entities.create.mockRejectedValueOnce(new Error('violates unique constraint'))
+    const result = await build(deps).get('createEntity')!.execute(
+      { kind: 'product', name: 'Pretext' },
+      ctx,
     )
     expect(result.isError).toBe(true)
+    const data = String(result.data)
+    expect(data).toContain('"Pretext"')
+    expect(data).toMatch(/Nothing was saved or changed/)
+    expect(data).toMatch(/no id from this call can be used as a link target/i)
+  })
+
+  it('createEdge echoes both ids and the edge type, and names how to re-resolve them', async () => {
+    const deps = makeDeps()
+    deps.entityLinks.create.mockRejectedValueOnce(new Error('violates foreign key constraint'))
+    const result = await build(deps).get('createEdge')!.execute(
+      {
+        source_kind: 'entity',
+        source_id: 'src-uuid',
+        edge_type: 'works_at',
+        target_kind: 'entity',
+        target_id: 'tgt-uuid',
+      },
+      ctx,
+    )
+    expect(result.isError).toBe(true)
+    const data = String(result.data)
+    expect(data).toContain('src-uuid')
+    expect(data).toContain('tgt-uuid')
+    expect(data).toContain('works_at')
+    expect(data).toContain('existing brain row UUIDs')
+    expect(data).toContain('getEntity')
+    expect(data).toMatch(/Nothing was saved or changed/)
+  })
+
+  it('supersedeMemory echoes the tags and refuses to let the model report a retirement', async () => {
+    const deps = makeDeps()
+    deps.memories.supersedeByTags.mockRejectedValueOnce(new Error('deadlock detected'))
+    const result = await build(deps).get('supersedeMemory')!.execute(
+      { tags: ['commitment:goal'] },
+      ctx,
+    )
+    expect(result.isError).toBe(true)
+    const data = String(result.data)
+    expect(data).toContain('commitment:goal')
+    expect(data).toMatch(/still active/i)
+    expect(data).toMatch(/retry once/i)   // deadlock is transient
+  })
+
+  it('returns (not throws) a diagnosis when invoked without a workspace context', async () => {
+    const deps = makeDeps()
+    const noWorkspace = { ...ctx, workspaceId: null }
+    for (const name of ['createEntity', 'createEdge', 'supersedeMemory']) {
+      const result = await build(deps).get(name)!.execute(
+        name === 'createEntity'
+          ? { kind: 'product', name: 'P' }
+          : name === 'createEdge'
+            ? { source_kind: 'entity', source_id: 'a', edge_type: 'works_at', target_kind: 'entity', target_id: 'b' }
+            : { tags: ['commitment:open'] },
+        noWorkspace,
+      )
+      expect(result.isError).toBe(true)
+      const data = String(result.data)
+      expect(data).toContain(name)
+      expect(data).toMatch(/no workspace/i)
+      expect(data).toMatch(/no retry and no argument change can fix it/i)
+      // The old shape leaked the internal throw through the generic catch.
+      expect(data).not.toMatch(/workflow brain tool invoked without a workspace context/)
+    }
     expect(deps.memories.supersedeByTags).not.toHaveBeenCalled()
+    expect(deps.entities.create).not.toHaveBeenCalled()
+    expect(deps.entityLinks.create).not.toHaveBeenCalled()
   })
 })

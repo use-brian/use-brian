@@ -67,7 +67,7 @@ import type { WorkspaceSkillEnablementStore } from '../db/workspace-skill-enable
 const allowAllBudget = async (): Promise<{ status: 'ok' | 'downgraded' | 'blocked' }> => ({
   status: 'ok',
 })
-import { resolveModel } from '../model-resolution.js'
+import { resolveModel, tierForModel } from '../model-resolution.js'
 import {
   generateSkillDraft,
   SkillDraftError,
@@ -138,6 +138,8 @@ type SkillRouteOptions = {
   /** LLM provider for POST /draft. Absent → the draft endpoint returns 503
    *  (mirrors `doc-themes`'s provider gating). */
   draftProvider?: LLMProvider
+  /** Workspace-owned text runtime, resolved after membership at call time. */
+  resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
   /** Workspace grounding for the draft agent (`skills/draft-context.ts`) —
    *  injected so tests stub the RLS reads. */
   getDraftContext?: (userId: string, workspaceId: string) => Promise<SkillDraftContext>
@@ -245,6 +247,7 @@ export function skillRoutes({
   workspaceSkillEnablementStore,
   listWorkspaceAssistants,
   draftProvider,
+  resolveWorkspaceCustomLlm,
   getDraftContext,
   draftRateLimiter,
   researchRateLimiter,
@@ -1034,6 +1037,12 @@ export function skillRoutes({
       res.status(429).json({ error: 'This workspace has no active plan. Pick a plan to keep going, or self-host the open-source version.' }); return
     }
     const resolvedModel = resolveModel(model, plan, budget.status)
+    const customRuntime = resolveWorkspaceCustomLlm
+      ? await resolveWorkspaceCustomLlm({
+          workspaceId,
+          requestedTier: tierForModel(resolvedModel),
+        })
+      : null
 
     // Template resolution: builtin → community registry → user-published.
     let template: SkillDraftTemplate | undefined
@@ -1124,8 +1133,8 @@ export function skillRoutes({
     try {
       const context = await getDraftContext(userId, workspaceId)
       const result = await generateSkillDraft({
-        provider: draftProvider,
-        model: resolvedModel,
+        provider: customRuntime?.provider ?? draftProvider,
+        model: customRuntime?.selector ?? resolvedModel,
         transcript: messages,
         template,
         currentDraft,
@@ -1464,6 +1473,9 @@ export function skillRoutes({
     }
 
     try {
+      const customRuntime = resolveWorkspaceCustomLlm
+        ? await resolveWorkspaceCustomLlm({ workspaceId, requestedTier: 'standard' })
+        : null
       const all = await workspaceSkillStore.listForWorkspace(workspaceId, { actingUserId: userId })
       const candidates = selectCategorizableSkills(
         all.filter((s) => s.state !== 'archived'),
@@ -1481,10 +1493,10 @@ export function skillRoutes({
       }
 
       const suggestions = await suggestSkillCategories({
-        provider: draftProvider,
+        provider: customRuntime?.provider ?? draftProvider,
         // Bucketing a name + description is the cheapest kind of judgement;
         // it never needs more than the plan's floor tier.
-        model: resolveModel('standard', plan, budget.status),
+        model: customRuntime?.selector ?? resolveModel('standard', plan, budget.status),
         skills: candidates,
       })
       res.json({ suggestions, considered: candidates.length })

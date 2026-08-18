@@ -12,6 +12,7 @@
  */
 
 import type { SearchProvider, SearchResult } from './search-stack.js'
+import { SearchProviderError } from './_fetch-error.js'
 import { stripHtmlTags } from './search-stack.js'
 
 const DDG_ENDPOINT = 'https://html.duckduckgo.com/html/'
@@ -35,9 +36,18 @@ export const duckDuckGoProvider: SearchProvider = {
       signal,
     })
 
-    if (!res.ok) throw new Error(`DuckDuckGo HTTP ${res.status}`)
+    if (!res.ok) {
+      // DDG answers a bot / rate-limit challenge with 202 or 403 (and an
+      // "anomaly" page) — that is a challenge, not a bad query and not a
+      // missing key (there is none).
+      const challenge = res.status === 202 || res.status === 403
+      throw new SearchProviderError({ provider: 'DuckDuckGo', status: res.status, kind: challenge ? 'challenge' : undefined })
+    }
 
     const html = await res.text()
+    if (/anomaly|bot-detection|challenge/i.test(html) && !html.includes('class="result__body"')) {
+      throw new SearchProviderError({ provider: 'DuckDuckGo', kind: 'challenge', detail: 'HTTP 200 challenge page (bot detection) instead of results — transient; another provider or a later retry works' })
+    }
     return parseDuckDuckGoResults(html, maxResults)
   },
 }

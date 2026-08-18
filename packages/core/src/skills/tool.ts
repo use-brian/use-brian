@@ -73,10 +73,21 @@ export function createUseSkillTool(params: UseSkillToolParams) {
       if (!skill) {
         // Lookup failure must NOT record an invocation — the skill was
         // never picked, just badly addressed.
+        //
+        // Message-first failure copy (docs/architecture/engine/tool-executor.md
+        // → "Failure copy"): the miss names the id, then ships the discovery
+        // pointer as the ids that exist RIGHT NOW rather than telling the
+        // model to re-read a listing it has evidently already misread.
+        const ids = skills.map((s) => s.id)
+        const shown = ids.slice(0, 20).join(', ')
+        const more = ids.length > 20 ? `, …and ${ids.length - 20} more` : ''
         return {
-          data: {
-            error: `Skill "${input.skill}" not found. Check the Available Skills listing for valid IDs.`,
-          },
+          data:
+            `useSkill activated nothing: no skill with the id "${input.skill}" is available to this assistant. ` +
+            (ids.length > 0
+              ? `Ids available right now: ${shown}${more}. Copy one VERBATIM — the id is not the skill's display name. `
+              : 'This assistant has no skills available at all right now, so no id will resolve — carry on without one. ') +
+            'Do NOT retry this exact id.',
           isError: true,
         }
       }

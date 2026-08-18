@@ -8,6 +8,7 @@
 
 import { z } from 'zod'
 import { buildTool, type Tool } from '../types.js'
+import { googleFailure } from './_google-error.js'
 import { type Json, str, asRows } from './_connector-result.js'
 
 export type CalendarRecurrenceScope = 'instance' | 'series' | 'following'
@@ -343,10 +344,8 @@ const recurrenceSchema = z.preprocess((value) => {
   'Recurring-series rules as RFC 5545 content lines. Usually pass one RRULE, e.g. ["RRULE:FREQ=WEEKLY;BYDAY=TU"]. Do not include DTSTART or DTEND.',
 )
 
-const calendarError = (err: unknown) => ({
-  data: `Calendar error: ${err instanceof Error ? err.message : String(err)}`,
-  isError: true as const,
-})
+/** Calendar-id target for failure copy (`primary` when the model left it out). */
+const onCalendar = (calendarId?: string) => `calendar \`${calendarId ?? 'primary'}\``
 
 async function validateEventMark(
   api: GoogleCalendarApi,
@@ -387,7 +386,9 @@ export function createGoogleCalendarTools(api: GoogleCalendarApi, userTimezone?:
     isReadOnly: true,
     timeoutMs: 10_000,
     async execute() {
-      try { return { data: await api.listCalendars() } } catch (err) { return calendarError(err) }
+      try { return { data: await api.listCalendars() } } catch (err) {
+        return googleFailure(err, { tool: 'googleCalendarListCalendars', product: 'Calendar' })
+      }
     },
   })
 
@@ -403,7 +404,9 @@ export function createGoogleCalendarTools(api: GoogleCalendarApi, userTimezone?:
     isReadOnly: true,
     timeoutMs: 10_000,
     async execute(input) {
-      try { return { data: await api.listEventColors(input.calendarId) } } catch (err) { return calendarError(err) }
+      try { return { data: await api.listEventColors(input.calendarId) } } catch (err) {
+        return googleFailure(err, { tool: 'googleCalendarListEventColors', product: 'Calendar', target: onCalendar(input.calendarId), discoveryTool: 'googleCalendarListCalendars' })
+      }
     },
   })
 
@@ -433,7 +436,9 @@ export function createGoogleCalendarTools(api: GoogleCalendarApi, userTimezone?:
           timeZone: userTimezone,
         })
         return { data: enrichEventsWithLocalTime(data, userTimezone ?? 'UTC') }
-      } catch (err) { return calendarError(err) }
+      } catch (err) {
+        return googleFailure(err, { tool: 'googleCalendarListEvents', product: 'Calendar', target: onCalendar(input.calendarId), discoveryTool: 'googleCalendarListCalendars' })
+      }
     },
   })
 
@@ -451,7 +456,9 @@ export function createGoogleCalendarTools(api: GoogleCalendarApi, userTimezone?:
       try {
         const data = await api.getEvent(input.eventId, input.calendarId)
         return { data: enrichEventWithLocalTime(data, userTimezone ?? 'UTC') }
-      } catch (err) { return calendarError(err) }
+      } catch (err) {
+        return googleFailure(err, { tool: 'googleCalendarGetEvent', product: 'Calendar', target: `event \`${input.eventId}\` on ${onCalendar(input.calendarId)}`, discoveryTool: 'googleCalendarListEvents' })
+      }
     },
   })
 
@@ -476,7 +483,9 @@ export function createGoogleCalendarTools(api: GoogleCalendarApi, userTimezone?:
           timeZone: userTimezone,
           durationMinutes: input.durationMinutes,
         }) }
-      } catch (err) { return calendarError(err) }
+      } catch (err) {
+        return googleFailure(err, { tool: 'googleCalendarQueryFreeBusy', product: 'Calendar', target: `calendars ${(input.calendarIds ?? ['primary']).map((c) => `\`${c}\``).join(', ')}`, discoveryTool: 'googleCalendarListCalendars' })
+      }
     },
   })
 
@@ -520,7 +529,9 @@ export function createGoogleCalendarTools(api: GoogleCalendarApi, userTimezone?:
         if (input.recurrence?.length && !input.allDay) event.timeZone = userTimezone ?? 'UTC'
         const data = await api.createEvent(event)
         return { data: enrichEventWithLocalTime(data, userTimezone ?? 'UTC') }
-      } catch (err) { return calendarError(err) }
+      } catch (err) {
+        return googleFailure(err, { tool: 'googleCalendarCreateEvent', product: 'Calendar', target: onCalendar(input.calendarId), discoveryTool: 'googleCalendarListCalendars' })
+      }
     },
   })
 
@@ -589,7 +600,9 @@ export function createGoogleCalendarTools(api: GoogleCalendarApi, userTimezone?:
         }
         const data = await api.updateEvent(eventId, payload)
         return { data: enrichEventWithLocalTime(data, userTimezone ?? 'UTC') }
-      } catch (err) { return calendarError(err) }
+      } catch (err) {
+        return googleFailure(err, { tool: 'googleCalendarUpdateEvent', product: 'Calendar', target: `event \`${input.eventId}\` on ${onCalendar(input.calendarId)}`, discoveryTool: 'googleCalendarListEvents' })
+      }
     },
   })
 
@@ -613,7 +626,9 @@ export function createGoogleCalendarTools(api: GoogleCalendarApi, userTimezone?:
       try {
         await api.deleteEvent(input.eventId, input.calendarId, input.recurringScope)
         return { data: `Event ${input.eventId} deleted successfully (${input.recurringScope ?? 'instance'} scope).` }
-      } catch (err) { return calendarError(err) }
+      } catch (err) {
+        return googleFailure(err, { tool: 'googleCalendarDeleteEvent', product: 'Calendar', target: `event \`${input.eventId}\` on ${onCalendar(input.calendarId)}`, discoveryTool: 'googleCalendarListEvents' })
+      }
     },
   })
 

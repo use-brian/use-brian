@@ -10,7 +10,7 @@
 
 import { z } from 'zod'
 import { buildTool, type Tool } from '../types.js'
-import { type Json, asRows, str, num, bool, obj, projectList, mapField } from './_connector-result.js'
+import { type Json, asRows, str, num, bool, obj, projectList, mapField, connectorError } from './_connector-result.js'
 
 // ── Result projections ─────────────────────────────────────────
 // GitHub REST objects carry ~100 fields each (URL spam, nested `owner`,
@@ -155,7 +155,7 @@ export function createGitHubTools(api: GitHubApi): Tool[] {
         const data = await api.searchRepositories(input)
         return { data: projectRepoSearch(data, input.perPage ?? 10) }
       } catch (err) {
-        return { data: `GitHub error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'GitHub', tool: 'githubSearchRepositories', target: `repository search \`${input.query}\``, err })
       }
     },
   })
@@ -183,7 +183,7 @@ export function createGitHubTools(api: GitHubApi): Tool[] {
           topics: r.topics,
         } }
       } catch (err) {
-        return { data: `GitHub error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'GitHub', tool: 'githubGetRepository', target: `repo \`${input.owner}/${input.repo}\``, discoveryTool: 'githubSearchRepositories', err })
       }
     },
   })
@@ -212,7 +212,7 @@ export function createGitHubTools(api: GitHubApi): Tool[] {
         const data = await api.listIssues(owner, repo, params)
         return { data: projectList(asRows(data), input.perPage ?? 20, issueRow) }
       } catch (err) {
-        return { data: `GitHub error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'GitHub', tool: 'githubListIssues', target: `repo \`${input.owner}/${input.repo}\``, discoveryTool: 'githubSearchRepositories', err })
       }
     },
   })
@@ -235,7 +235,7 @@ export function createGitHubTools(api: GitHubApi): Tool[] {
         const i = (data ?? {}) as Json
         return { data: { ...issueRow(i), body: str(i, 'body'), created_at: str(i, 'created_at') } }
       } catch (err) {
-        return { data: `GitHub error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'GitHub', tool: 'githubGetIssue', target: `repo \`${input.owner}/${input.repo}\` issue #${input.issueNumber}`, discoveryTool: 'githubListIssues', err })
       }
     },
   })
@@ -264,7 +264,7 @@ export function createGitHubTools(api: GitHubApi): Tool[] {
         const data = await api.listPullRequests(owner, repo, params)
         return { data: projectList(asRows(data), input.perPage ?? 20, prRow) }
       } catch (err) {
-        return { data: `GitHub error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'GitHub', tool: 'githubListPullRequests', target: `repo \`${input.owner}/${input.repo}\``, discoveryTool: 'githubSearchRepositories', err })
       }
     },
   })
@@ -295,7 +295,7 @@ export function createGitHubTools(api: GitHubApi): Tool[] {
           changed_files: num(p, 'changed_files'),
         } }
       } catch (err) {
-        return { data: `GitHub error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'GitHub', tool: 'githubGetPullRequest', target: `repo \`${input.owner}/${input.repo}\` pull request #${input.pullNumber}`, discoveryTool: 'githubListPullRequests', err })
       }
     },
   })
@@ -325,7 +325,7 @@ export function createGitHubTools(api: GitHubApi): Tool[] {
         const c = (data ?? {}) as Json
         return { data: { number: num(c, 'number'), title: str(c, 'title'), state: str(c, 'state'), url: str(c, 'html_url') } }
       } catch (err) {
-        return { data: `GitHub error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'GitHub', tool: 'githubCreateIssue', target: `repo \`${input.owner}/${input.repo}\``, discoveryTool: 'githubSearchRepositories', mutating: true, err })
       }
     },
   })
@@ -352,7 +352,7 @@ export function createGitHubTools(api: GitHubApi): Tool[] {
         const c = (data ?? {}) as Json
         return { data: { id: num(c, 'id'), url: str(c, 'html_url') } }
       } catch (err) {
-        return { data: `GitHub error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'GitHub', tool: 'githubCreateIssueComment', target: `repo \`${input.owner}/${input.repo}\` issue #${input.issueNumber}`, discoveryTool: 'githubListIssues', mutating: true, err })
       }
     },
   })
@@ -378,7 +378,7 @@ export function createGitHubTools(api: GitHubApi): Tool[] {
         const data = await api.getFileContents(input.owner, input.repo, input.path, input.ref)
         return { data: projectFileContents(data) }
       } catch (err) {
-        return { data: `GitHub error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'GitHub', tool: 'githubGetFileContents', target: `repo \`${input.owner}/${input.repo}\` path \`${input.path}\``, discoveryTool: 'githubGetRepository', err })
       }
     },
   })
@@ -414,7 +414,7 @@ export function createGitHubTools(api: GitHubApi): Tool[] {
         const c = (data ?? {}) as Json
         return { data: { path: str(obj(c, 'content'), 'path'), commit: str(obj(c, 'commit'), 'sha') } }
       } catch (err) {
-        return { data: `GitHub error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return connectorError({ provider: 'GitHub', tool: 'githubWriteFile', target: `repo \`${input.owner}/${input.repo}\` path \`${input.path}\`${input.branch ? ` on branch \`${input.branch}\`` : ''}`, discoveryTool: 'githubGetFileContents', mutating: true, err })
       }
     },
   })

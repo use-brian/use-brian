@@ -42,6 +42,8 @@ import {
   startRecordingUpload,
   estimateRecording,
   processRecording,
+  linkLiveRecordingPage,
+  finalizeLiveRecording,
   RecordingApiError,
   type RecordingQueued,
 } from "@/lib/api/recordings";
@@ -155,10 +157,18 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
      */
     async (
       file: File,
-      opts?: { kind?: "memo" | "meeting"; existingPageId?: string },
+      opts?: { kind?: "memo" | "meeting"; existingPageId?: string; liveSessionId?: string },
     ): Promise<RecordingQueued | null> => {
       setResult(null);
       setMessage("");
+      // Which boundary failed decides the copy: a storage-upload failure and a
+      // queue failure call for different user action, and the old single
+      // generic message ("We could not process that recording") hid which of
+      // four steps actually broke.
+      let stage: "upload" | "estimate" | "process" = "upload";
+      // Set when the lossless upload failed but the live session's
+      // server-persisted windows were assembled instead.
+      let assembled = false;
       try {
         setStatus("uploading");
         // Blueprint roster + workspace default ride the upload in parallel so
@@ -172,14 +182,40 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
         // draft parent would drag the brief into the prune sweep with it. A
         // failed fetch degrades to root-only, never blocks the upload.
         const pagesPromise = listViews({ workspaceId, state: "saved" }).catch(() => []);
-        const { recordingId } = await startRecordingUpload({
-          workspaceId,
-          assistantId,
-          file,
-          ...(opts?.kind ? { kind: opts.kind } : {}),
-        });
+        let recordingId: string;
+        try {
+          ({ recordingId } = await startRecordingUpload({
+            workspaceId,
+            assistantId,
+            file,
+            ...(opts?.kind ? { kind: opts.kind } : {}),
+          }));
+          // A live meeting page is linked the moment the recording id exists —
+          // not after processing succeeds — so a later failure leaves the page
+          // carrying its recording (and its honest status) instead of nothing.
+          if (opts?.existingPageId) {
+            await linkLiveRecordingPage(opts.existingPageId, recordingId).catch(() => {});
+          }
+        } catch (uploadError) {
+          // The lossless upload could not complete. A live session's ~30s
+          // windows already reached the server for transcription, so assemble
+          // those into a usable (re-encoded, small-seam) recording rather
+          // than losing the meeting — the spool still keeps the lossless copy
+          // for a later retry.
+          if (!opts?.liveSessionId) throw uploadError;
+          const fallback = await finalizeLiveRecording({
+            workspaceId,
+            assistantId,
+            sessionId: opts.liveSessionId,
+            ...(opts.existingPageId ? { pageId: opts.existingPageId } : {}),
+          }).catch(() => null);
+          if (!fallback) throw uploadError;
+          recordingId = fallback.recordingId;
+          assembled = true;
+        }
 
         // Server-authoritative duration + surcharge → confirm before any model call.
+        stage = "estimate";
         const est = await estimateRecording(recordingId);
         const [roster, workspaceDefault, pages] = await Promise.all([
           rosterPromise,
@@ -211,11 +247,12 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
           title: t.recordings.confirmTitle,
           description:
             pinnedPage
-              ? (est.surchargeCredits > 0
+              ? ((est.surchargeCredits > 0
                   ? t.recorder.liveFinalizeBody
                       .replace("{minutes}", String(minutes))
                       .replace("{credits}", String(est.surchargeCredits))
-                  : t.recorder.liveFinalizeFree)
+                  : t.recorder.liveFinalizeFree) +
+                  (assembled ? ` ${t.recorder.liveAssembledNote}` : ""))
               : est.surchargeCredits > 0
               ? t.recordings.confirmBody
                   .replace("{minutes}", String(minutes))
@@ -256,6 +293,7 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
             : recordingBlueprintToSlug(chosen);
         // The root sentinel is a UI value, not a page id — send null so the
         // server files at the workspace root.
+        stage = "process";
         const res = await processRecording(
           recordingId,
           slug,
@@ -283,12 +321,20 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
       } catch (e) {
         setStatus("error");
         const code = e instanceof RecordingApiError ? e.code : undefined;
+        const detail =
+          e instanceof RecordingApiError && e.message && e.status !== 0 ? e.message : null;
         setMessage(
           code === "too_long"
             ? t.recordings.tooLong
             : code === "could_not_read_duration"
               ? t.recordings.cannotReadDuration
-              : t.recordings.failed,
+              : stage === "upload"
+                ? t.recordings.uploadFailed
+                : stage === "estimate"
+                  ? t.recordings.estimateFailed
+                  : detail
+                    ? `${t.recordings.processFailed} (${detail})`
+                    : t.recordings.processFailed,
         );
         return null;
       }

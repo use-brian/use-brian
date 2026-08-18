@@ -1,11 +1,5 @@
 /** Selected-sheet spreadsheet PDF release through isolated LibreOffice. [COMP:office/spreadsheet-pdf] */
-import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
-import { constants } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { basename, join } from 'node:path'
-import { pathToFileURL } from 'node:url'
-import { spawn } from 'node:child_process'
-import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs'
+import { convertToPdfWithLibreOffice, renderedPdfPageCount } from '../../files/libreoffice.js'
 import { addressesInRange, parseCellAddress, recalculateSpreadsheet, spreadsheetCellDisplayValue, type SpreadsheetSnapshot } from '@use-brian/office-model'
 import { exportOfficeSpreadsheet } from './index.js'
 import type { OfficeResourceResolver } from '../package.js'
@@ -79,50 +73,14 @@ export function preflightSpreadsheetPdf(snapshot: SpreadsheetSnapshot, request: 
   return { snapshot: calculated.snapshot, receipt: { sheetId: sheet.id, sheetName: sheet.name, printArea: request.printArea, expectedPageCount: request.expectedPageCount, renderer: 'libreoffice', issues } }
 }
 
-async function libreOfficeBinary(): Promise<string> {
-  const configured = process.env.LIBREOFFICE_BIN?.trim()
-  if (configured) return configured
-  const candidates = [
-    'soffice',
-    '/Applications/LibreOffice.app/Contents/MacOS/soffice',
-    '/usr/bin/libreoffice',
-    '/usr/local/bin/libreoffice',
-  ]
-  for (const candidate of candidates.slice(1)) {
-    try { await access(candidate, constants.X_OK); return candidate } catch { /* keep looking */ }
-  }
-  return candidates[0]
-}
-
+/** XLSX bytes → PDF bytes through the shared isolated LibreOffice runner
+ *  (`files/libreoffice.ts`); failures are typed `LibreOfficeError`s. */
 async function convertToPdf(input: Uint8Array): Promise<Uint8Array> {
-  const root = await mkdtemp(join(tmpdir(), 'brian-spreadsheet-pdf-'))
-  const inputDirectory = join(root, 'input')
-  const outputDirectory = join(root, 'output')
-  const profileDirectory = join(root, 'profile')
-  const { mkdir } = await import('node:fs/promises')
-  await Promise.all([mkdir(inputDirectory), mkdir(outputDirectory), mkdir(profileDirectory)])
-  const inputPath = join(inputDirectory, 'workbook.xlsx')
-  await writeFile(inputPath, input)
-  try {
-    const binary = await libreOfficeBinary()
-    await new Promise<void>((resolve, reject) => {
-      const child = spawn(binary, [`-env:UserInstallation=${pathToFileURL(profileDirectory).href}`, '--headless', '--convert-to', 'pdf', '--outdir', outputDirectory, inputPath], { stdio: ['ignore', 'pipe', 'pipe'] })
-      let stderr = ''
-      child.stderr.on('data', (chunk) => { stderr += String(chunk) })
-      const timeout = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('Spreadsheet PDF rendering timed out.')) }, 60_000)
-      child.once('error', (error) => { clearTimeout(timeout); reject(error) })
-      child.once('exit', (code) => { clearTimeout(timeout); code === 0 ? resolve() : reject(new Error(stderr.trim() || `LibreOffice exited with code ${code}`)) })
-    })
-    return new Uint8Array(await readFile(join(outputDirectory, `${basename(inputPath, '.xlsx')}.pdf`)))
-  } finally {
-    await rm(root, { recursive: true, force: true })
-  }
+  return convertToPdfWithLibreOffice(input, { inputName: 'workbook.xlsx', tempPrefix: 'brian-spreadsheet-pdf-' })
 }
 
 async function pdfPageCount(bytes: Uint8Array): Promise<number> {
-  const task = getDocument({ data: bytes.slice() })
-  const document = await task.promise
-  try { return document.numPages } finally { await document.destroy() }
+  return renderedPdfPageCount(bytes)
 }
 
 export async function exportOfficeSpreadsheetPdf(snapshot: SpreadsheetSnapshot, request: SpreadsheetPdfRequest, resolveResource: OfficeResourceResolver = async () => null): Promise<{ bytes?: Uint8Array; mime: 'application/pdf'; receipt: SpreadsheetPdfReceipt }> {

@@ -204,8 +204,13 @@ describe('[COMP:tools/google-tasks] Google Tasks tools', () => {
     const result = await tool.execute({ taskListId: '@default' }, ctx)
 
     expect(result.isError).toBe(true)
-    expect(result.data).toContain('Tasks error:')
-    expect(result.data).toContain('Unauthorized')
+    // Rendered by describeGoogleError: the diagnosis, the reconnect remedy,
+    // and the machine-readable markers the health classifier keys on.
+    expect(result.data).toContain('Google Tasks rejected this connector\'s credential')
+    expect(result.data).toContain('(401)')
+    expect(result.data).toContain('invalid or expired')
+    expect(result.data).toContain('Reconnect Google Tasks')
+    expect(result.data).toContain('task list `@default`')
   })
 
   it('handles non-Error throws gracefully', async () => {

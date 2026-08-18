@@ -92,3 +92,44 @@ export function alreadyDeclinedToolResult(toolName: string): string {
     'Stop retrying and ask the user how they want to proceed.'
   )
 }
+
+/**
+ * A tool whose effective policy is 'block' (assistant/workspace settings) —
+ * a deliberate human decision, NOT a connection failure. Distinct from the
+ * decline family above: the block does not lapse next turn, but the remedy
+ * is still a human one (Studio → Connectors), never a reconnect.
+ */
+export function policyBlockedToolResult(toolName: string): string {
+  return (
+    `ERROR: "${toolName}" is set to the 'block' policy in this assistant's connector settings, so it was NOT executed. ` +
+    'This is a deliberate settings decision, not a connection or authorization failure — the connector itself is connected. ' +
+    'Only a human can change it (Studio → Connectors → the tool\'s policy); retrying will fail the same way. ' +
+    'Tell the user which tool is blocked and continue with what you can do without it.'
+  )
+}
+
+/**
+ * The user chose "Always Deny" on this tool's confirmation prompt. The
+ * decision is persisted (unlike a plain decline) and only the user can
+ * reverse it.
+ */
+export function alwaysDeniedToolResult(toolName: string): string {
+  return (
+    `ERROR: the user chose Always Deny for "${toolName}", so it was NOT executed and will stay blocked until they reverse that choice (Studio → Connectors). ` +
+    'This is the user\'s own persisted decision, not a connection or setup problem — do NOT tell them to reconnect, and do NOT retry the tool. ' +
+    'If the task needs it, tell the user it is blocked by their Always Deny and continue with what you can do without it.'
+  )
+}
+
+/**
+ * Fast-reject for a tool already added to the per-turn block set (a policy
+ * block, an Always Deny, or a declined prompt earlier in this same turn).
+ * The set is rebuilt every turn, so the true scope is "this turn".
+ */
+export function blockedThisTurnToolResult(toolName: string): string {
+  return (
+    `ERROR: "${toolName}" was already blocked earlier in this same turn (a policy block, an Always Deny, or a declined prompt), so it will not be retried right now. ` +
+    `${STILL_CONNECTED} ` +
+    'Stop retrying it this turn and either finish with the other tools or ask the user how to proceed.'
+  )
+}

@@ -184,7 +184,8 @@ export function createPlanTools(
     async execute(input, context) {
       if (input.status === 'blocked' && !input.note?.trim()) {
         return {
-          data: 'Cannot mark a step blocked without a note explaining why. Re-call updatePlanStep with a note, or pick another status.',
+          data: 'Cannot mark a step blocked without a note explaining why. Nothing was recorded. Re-call updatePlanStep with a note, or pick another status.',
+          isError: true,
         }
       }
 
@@ -198,7 +199,7 @@ export function createPlanTools(
           status: input.status,
           hit: false,
         })
-        return { data: 'No active plan in this session. Call setPlan first.' }
+        return { data: 'No active plan in this session, so there is no step to update. Nothing was recorded. Call setPlan first, then updatePlanStep.', isError: true }
       }
 
       const row = await store.updateStepStatus({
@@ -214,7 +215,10 @@ export function createPlanTools(
           status: input.status,
           hit: false,
         })
-        return { data: `No plan step with key "${input.key}".` }
+        return {
+          data: `No plan step with key "${input.key}" in the active plan. Nothing was recorded. The valid keys are the ones you passed to setPlan — re-read them there and retry with an exact key.`,
+          isError: true,
+        }
       }
 
       opts?.onEvent?.({
@@ -241,7 +245,8 @@ export function createPlanTools(
       const attemptId = await store
         .activeAttemptId(context.sessionId)
         .catch(() => null)
-      if (!attemptId) return { data: 'No active plan to abandon.' }
+      // Informational no-op, not an error — same reasoning as resolveCommitment.
+      if (!attemptId) return { data: 'No active plan to abandon — nothing to clean up. Do not retry.' }
       await store.setAttemptState({
         sessionId: context.sessionId,
         attemptId,

@@ -510,6 +510,25 @@ describe('[COMP:wa-connector/media-routing] inbound media relay routing', () => 
     return call ? JSON.parse((call[1] as { body: string }).body) : undefined
   }
 
+  /**
+   * Wait until the relay call actually lands.
+   *
+   * The media path now spools the attachment to a temp file before uploading,
+   * and real filesystem work resolves on the threadpool rather than on a fixed
+   * number of microtask turns — so draining N immediates and asserting is a
+   * race. Poll for the call instead, bounded so a genuine failure still fails
+   * fast rather than hanging the suite.
+   */
+  async function waitForInboundBody(fetchMock: ReturnType<typeof vi.fn>, timeoutMs = 2000) {
+    const deadline = Date.now() + timeoutMs
+    for (;;) {
+      const body = inboundBody(fetchMock)
+      if (body) return body
+      if (Date.now() > deadline) return undefined
+      await new Promise((r) => setTimeout(r, 5))
+    }
+  }
+
   /** fetch mock that mints an upload URL, accepts the PUT, and ACKs /inbound. */
   function streamingFetchMock() {
     return vi.fn(async (url: unknown, init?: { method?: string }) => {
@@ -524,6 +543,59 @@ describe('[COMP:wa-connector/media-routing] inbound media relay routing', () => 
     })
   }
 
+  it('uploads straight to the archive when the API issues a signed target', async () => {
+    // On-premise the API mints a per-asset signature instead of a workspace
+    // URL, so the bytes go to the archive directly and never leave a second
+    // copy behind. The digest is inside the signature, so the connector must
+    // hash before it can be issued one — hence the two mint calls.
+    const { downloadMediaMessage } = await import('@whiskeysockets/baileys')
+    const { Readable } = await import('node:stream')
+    vi.mocked(downloadMediaMessage).mockResolvedValue(Readable.from([Buffer.from('vid')]) as never)
+    const mints: unknown[] = []
+    const fetchMock = vi.fn(async (url: unknown, init?: { method?: string; body?: string }) => {
+      if (String(url).endsWith('/internal/whatsapp/media-upload-url')) {
+        const body = JSON.parse(init!.body!)
+        mints.push(body)
+        if (!body.sha256) return { ok: true, json: async () => ({ target: 'archive' }) }
+        return {
+          ok: true,
+          json: async () => ({
+            target: 'archive',
+            uploadUrl: 'http://store.test/media?sha256=' + body.sha256,
+            headers: { 'X-UB-Signature': 'sha256=deadbeef' },
+          }),
+        }
+      }
+      if (String(url).startsWith('http://store.test/')) {
+        return { ok: true, json: async () => ({ asset_id: '4a1e6bd8-0000-4000-8000-000000000009' }) }
+      }
+      return { ok: true }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await connected()
+
+    await emitMedia({ videoMessage: { mimetype: 'video/mp4', fileLength: 9_000_000 } })
+
+    const body = await waitForInboundBody(fetchMock)
+    expect(body).toBeDefined()
+    // No workspace object exists, so no gcsKey — that is what stops the second copy.
+    expect(body.mediaRef.gcsKey).toBeUndefined()
+    expect(body.mediaRef.archiveAssetId).toBe('4a1e6bd8-0000-4000-8000-000000000009')
+    // sha256 of "vid", computed while spooling.
+    expect(body.mediaRef.sha256).toMatch(/^[a-f0-9]{64}$/)
+    expect(body.mediaBase64).toBeUndefined()
+
+    // First mint asks where to go; only the second carries the digest.
+    expect(mints).toHaveLength(2)
+    expect((mints[0] as { sha256?: string }).sha256).toBeUndefined()
+    expect((mints[1] as { sha256?: string }).sha256).toBe((body.mediaRef as { sha256: string }).sha256)
+
+    const upload = fetchMock.mock.calls.find((c) => String(c[0]).startsWith('http://store.test/'))
+    expect((upload![1] as { method: string }).method).toBe('POST')
+    expect((upload![1] as { headers: Record<string, string> }).headers['X-UB-Signature']).toBe('sha256=deadbeef')
+    vi.unstubAllGlobals()
+  })
+
   it('streams a sub-cap VIDEO to GCS and relays a mediaRef (never mediaBase64)', async () => {
     const { downloadMediaMessage } = await import('@whiskeysockets/baileys')
     const { Readable } = await import('node:stream')
@@ -534,7 +606,7 @@ describe('[COMP:wa-connector/media-routing] inbound media relay routing', () => 
 
     await emitMedia({ videoMessage: { mimetype: 'video/mp4', fileLength: 9_000_000 } })
 
-    const body = inboundBody(fetchMock)
+    const body = await waitForInboundBody(fetchMock)
     expect(body).toBeDefined()
     expect(body.mediaRef).toMatchObject({ gcsKey: 'channel-media/k.bin', mimeType: 'video/mp4' })
     expect(body.mediaBase64).toBeUndefined()
@@ -612,7 +684,7 @@ describe('[COMP:wa-connector/media-routing] inbound media relay routing', () => 
 
     await emitMedia({ audioMessage: { mimetype: 'audio/ogg; codecs=opus', ptt: true, fileLength: 80_000 } })
 
-    const body = inboundBody(fetchMock)
+    const body = await waitForInboundBody(fetchMock)
     expect(body).toBeDefined()
     expect(body.mediaBase64).toBe(Buffer.from('voice-bytes').toString('base64'))
     expect(body.mediaRef).toBeUndefined()
@@ -629,7 +701,7 @@ describe('[COMP:wa-connector/media-routing] inbound media relay routing', () => 
 
     await emitMedia({ audioMessage: { mimetype: 'audio/mpeg', fileLength: 3_000_000 } })
 
-    const body = inboundBody(fetchMock)
+    const body = await waitForInboundBody(fetchMock)
     expect(body).toBeDefined()
     expect(body.mediaRef).toMatchObject({ mimeType: 'audio/mpeg' })
     expect(body.mediaBase64).toBeUndefined()

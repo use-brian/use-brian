@@ -612,6 +612,35 @@ export async function reclaimStaleTurn(
 }
 
 /**
+ * Is a turn PROVABLY alive on this session right now? True only when the row
+ * is `running`, holds a lease token, and that lease was heartbeaten within
+ * `staleAfterMs`. This is the admission-time proof of life the ordinary chat
+ * path needs before it may take the slot: a client's `midTurn` flag says
+ * whether ITS stream is open, not whether the turn is; a client whose stream
+ * was cut (proxy idle timeout, reload, second tab) sends an ordinary turn
+ * while the previous one is still working, and blind-claiming the slot then
+ * mints a new lease and the live turn aborts itself as an "orphan" at its next
+ * heartbeat (2026-08-18: page builds killed 30-90s in, three times in one
+ * session). A pre-migration-424 row (NULL heartbeat) is never "live" here, so
+ * legacy rows keep the old behaviour; a stale lease is not live either - the
+ * caller reclaims it (`reclaimStaleTurn`) and proceeds.
+ */
+export async function isTurnLeaseLive(
+  sessionId: string,
+  staleAfterMs: number = TURN_LEASE_STALE_AFTER_MS,
+): Promise<boolean> {
+  const result = await query(
+    `SELECT 1 FROM sessions
+      WHERE id = $1
+        AND status = 'running'
+        AND turn_lease_token IS NOT NULL
+        AND turn_heartbeat_at >= now() - ($2 || ' milliseconds')::interval`,
+    [sessionId, String(staleAfterMs)],
+  )
+  return (result.rowCount ?? 0) > 0
+}
+
+/**
  * Reset every session whose `status='running'` lease has gone stale to
  * `status='timeout'`. Returns the rows that were touched so callers can emit
  * per-session telemetry / bus events.
@@ -1451,6 +1480,44 @@ export async function listSessionsForWorkspaceSystem(
      ORDER BY s.last_active_at DESC
      LIMIT $${paramIdx}`,
     values,
+  )
+  return result.rows
+}
+
+/**
+ * The sessions that make up ONE conversation on a user channel — every
+ * session whose `(channel_type, channel_id)` equals the given target and
+ * whose assistant belongs to `workspaceId` (same `assistants.workspace_id`
+ * join / §6-a boundary as `listSessionsForWorkspaceSystem`; a teammate's
+ * personal assistant bound to the same chat is never returned). A multi-bot
+ * chat yields one row per assistant, newest-active first.
+ *
+ * Used by the callee executor to bridge the session-state tier into a
+ * scheduled run that DELIVERS into this conversation (workflow
+ * `assistant_call` steps + scheduled-job reminders). System-level and
+ * read-only. See docs/architecture/context-engine/session-state.md →
+ * "Delivery-conversation bridging".
+ */
+export async function listSessionsByChannelForWorkspaceSystem(params: {
+  workspaceId: string
+  channelType: string
+  channelId: string
+  /** Defaults to 10; clamped to [1, 25]. */
+  limit?: number
+}): Promise<Array<{ id: string; assistantId: string; assistantName: string }>> {
+  const limit = Math.max(1, Math.min(params.limit ?? 10, 25))
+  const result = await query<{ id: string; assistantId: string; assistantName: string }>(
+    `SELECT s.id,
+            s.assistant_id AS "assistantId",
+            a.name         AS "assistantName"
+     FROM sessions s
+     JOIN assistants a ON a.id = s.assistant_id
+     WHERE a.workspace_id = $1
+       AND s.channel_type = $2
+       AND s.channel_id = $3
+     ORDER BY s.last_active_at DESC
+     LIMIT $4`,
+    [params.workspaceId, params.channelType, params.channelId, limit],
   )
   return result.rows
 }

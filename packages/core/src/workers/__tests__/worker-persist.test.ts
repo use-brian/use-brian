@@ -25,7 +25,7 @@ import type {
   ProviderRequest,
 } from '../../providers/types.js'
 
-function makeFakeProvider(responseText: string): LLMProvider {
+function makeFakeProvider(responseText: string, seenModels?: string[]): LLMProvider {
   function* chunks(): Generator<StreamChunk> {
     yield { type: 'message_start', model: 'gemini-flash' }
     yield { type: 'text_delta', text: responseText }
@@ -38,8 +38,12 @@ function makeFakeProvider(responseText: string): LLMProvider {
   return {
     name: 'fake',
     models: ['gemini-flash'],
-    async *stream(_req: ProviderRequest) { yield* chunks() },
-    createSession(_o: SessionOptions): ProviderSession {
+    async *stream(req: ProviderRequest) {
+      seenModels?.push(req.model)
+      yield* chunks()
+    },
+    createSession(o: SessionOptions): ProviderSession {
+      seenModels?.push(o.model)
       return {
         send(_messages: Message[]): AsyncIterable<StreamChunk> {
           return (async function* () { yield* chunks() })()
@@ -165,6 +169,27 @@ describe('[COMP:core/worker-manager-persist] setPersistence + spawn lifecycle', 
 
     expect(store.spawns).toHaveLength(0)
   })
+
+  it('persists the logical research model rather than a serving-provider alias', async () => {
+    const store = makeStore()
+    const manager = createWorkerManager({
+      provider: makeFakeProvider('done'),
+      model: 'gemini-3.1-flash-lite',
+      tools: new Map(),
+    })
+    manager.setPersistence({ store, sessionId: 's1', workspaceId: 'ws1' })
+    manager.setResearchMode(true)
+    manager.setResearchModel('gemini-3-pro-research')
+
+    manager.spawn('research this', { ...ctx, workspaceId: 'ws1' })
+    await manager.waitForNext()
+    await new Promise((resolve) => setImmediate(resolve))
+
+    expect(store.spawns[0]).toMatchObject({
+      researchMode: true,
+      model: 'gemini-3-pro-research',
+    })
+  })
 })
 
 describe('[COMP:core/worker-manager-persist] rehydrate', () => {
@@ -258,6 +283,48 @@ describe('[COMP:core/worker-manager-persist] rehydrate', () => {
     expect(store.completions).toHaveLength(1)
     expect(store.completions[0].runId).toBe('cccccccc-cccc-cccc-cccc-cccccccccccc')
     expect(store.completions[0].workerId).toBe('worker_7')
+  })
+
+  it('keeps each running row on its persisted model during runtime rehydration', async () => {
+    const store = makeStore()
+    for (const [index, model] of ['custom:standard-profile', 'custom:research-profile'].entries()) {
+      store.loadResult.push({
+        runId: `${index + 1}`.repeat(8) + '-1111-4111-8111-111111111111',
+        workerId: `worker_${index + 1}`,
+        status: 'running',
+        description: `worker ${index + 1}`,
+        prompt: `prompt ${index + 1}`,
+        researchMode: index === 1,
+        model,
+        turnCount: 1,
+        result: null,
+        history: [{ role: 'user', content: `prompt ${index + 1}` }],
+      })
+    }
+    const seenModels: string[] = []
+    const runtimeProvider = makeFakeProvider('done', seenModels)
+    const manager = createWorkerManager({ provider: runtimeProvider, model: 'boot-model', tools: new Map() })
+    manager.setPersistence({ store, sessionId: 's1', workspaceId: 'ws1' })
+
+    await manager.rehydrate('s1', {
+      ...ctx,
+      workerRuntime: {
+        provider: runtimeProvider,
+        model: 'custom:one-pro-runtime-for-all',
+        modelTier: 'pro',
+        providerKeySource: 'user',
+        inputTokenLimit: 32000,
+        maxTokens: 4000,
+      },
+    })
+    await manager.waitForNext()
+    await new Promise((resolve) => setImmediate(resolve))
+
+    expect(seenModels).toEqual(expect.arrayContaining([
+      'custom:standard-profile',
+      'custom:research-profile',
+    ]))
+    expect(seenModels).not.toContain('custom:one-pro-runtime-for-all')
   })
 
   it('bumps the workerCounter past existing rows so subsequent spawns do not collide', async () => {

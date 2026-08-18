@@ -8,6 +8,7 @@
 
 import { z } from 'zod'
 import { buildTool, type Tool } from '../types.js'
+import { googleFailure } from './_google-error.js'
 import type { AuthorizedFile } from './google-drive.js'
 
 export type GoogleSheetsApi = {
@@ -87,7 +88,7 @@ export function createGoogleSheetsTools(api: GoogleSheetsApi, authorizedFiles: A
         const data = await api.getSpreadsheetInfo(input.spreadsheetId)
         return { data }
       } catch (err) {
-        return { data: `Sheets error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return googleFailure(err, { tool: 'googleSheetsGetInfo', product: 'Sheets', target: `spreadsheet \`${input.spreadsheetId}\``, discoveryTool: 'googleDriveListFiles' })
       }
     },
   })
@@ -111,7 +112,7 @@ export function createGoogleSheetsTools(api: GoogleSheetsApi, authorizedFiles: A
         const data = await api.readRange(input.spreadsheetId, input.range)
         return { data }
       } catch (err) {
-        return { data: `Sheets error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return googleFailure(err, { tool: 'googleSheetsReadRange', product: 'Sheets', target: `spreadsheet \`${input.spreadsheetId}\` range \`${input.range}\``, discoveryTool: 'googleDriveListFiles' })
       }
     },
   })
@@ -142,7 +143,7 @@ export function createGoogleSheetsTools(api: GoogleSheetsApi, authorizedFiles: A
         const data = await api.writeRange(input.spreadsheetId, input.range, input.values)
         return { data }
       } catch (err) {
-        return { data: `Sheets error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return googleFailure(err, { tool: 'googleSheetsWriteRange', product: 'Sheets', target: `spreadsheet \`${input.spreadsheetId}\` range \`${input.range}\``, discoveryTool: 'googleDriveListFiles' })
       }
     },
   })
@@ -173,7 +174,7 @@ export function createGoogleSheetsTools(api: GoogleSheetsApi, authorizedFiles: A
         const data = await api.appendRows(input.spreadsheetId, input.range, input.values)
         return { data }
       } catch (err) {
-        return { data: `Sheets error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return googleFailure(err, { tool: 'googleSheetsAppendRows', product: 'Sheets', target: `spreadsheet \`${input.spreadsheetId}\` range \`${input.range}\``, discoveryTool: 'googleDriveListFiles' })
       }
     },
   })
@@ -207,7 +208,7 @@ export function createGoogleSheetsTools(api: GoogleSheetsApi, authorizedFiles: A
         const data = await api.create(input.title)
         return { data }
       } catch (err) {
-        return { data: `Sheets error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return googleFailure(err, { tool: 'googleSheetsCreate', product: 'Sheets' })
       }
     },
   })
@@ -339,7 +340,7 @@ export function createGoogleSheetsTools(api: GoogleSheetsApi, authorizedFiles: A
         })
         return { data }
       } catch (err) {
-        return { data: `Sheets error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
+        return googleFailure(err, { tool: 'googleSheetsFormat', product: 'Sheets', target: `spreadsheet \`${input.spreadsheetId}\``, discoveryTool: 'googleDriveListFiles' })
       }
     },
   })
@@ -421,18 +422,15 @@ export function createGoogleSheetsTools(api: GoogleSheetsApi, authorizedFiles: A
         if (destructive.length > 0 && !input.allowDestructive) {
           return {
             data:
-              `Sheets error: request contains destructive ops (${destructive.join(', ')}). ` +
-              'Set `allowDestructive: true` to proceed; these changes cannot be undone.',
+              `googleSheetsBatchUpdate did NOT run: the request for spreadsheet \`${input.spreadsheetId}\` contains destructive ops (${destructive.join(', ')}) and \`allowDestructive\` was not set. ` +
+              'Nothing was changed. If the user really wants these irreversible edits, confirm with them and retry the same requests with `allowDestructive: true`; otherwise drop the destructive ops.',
             isError: true,
           }
         }
         const data = await api.batchUpdate(input.spreadsheetId, input.requests)
         return { data }
       } catch (err) {
-        return {
-          data: `Sheets error: ${err instanceof Error ? err.message : String(err)}`,
-          isError: true,
-        }
+        return googleFailure(err, { tool: 'googleSheetsBatchUpdate', product: 'Sheets', target: `spreadsheet \`${input.spreadsheetId}\``, discoveryTool: 'googleDriveListFiles' })
       }
     },
   })

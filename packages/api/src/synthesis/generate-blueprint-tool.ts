@@ -49,7 +49,17 @@ export function createGenerateBlueprintTool(deps: {
     async execute(input, context) {
       const workspaceId = context.workspaceId
       if (!workspaceId) {
-        return { data: { error: 'Generating from a blueprint needs a workspace context.' }, isError: true }
+        // Message-first failure copy — docs/architecture/engine/tool-executor.md
+        // → "Failure copy": name the missing surface and the remedy, never
+        // "not available in this context".
+        return {
+          data:
+            'fillBlueprintFromBrain did not run: this session is not bound to a workspace, and both halves of a fill ' +
+            '(the blueprint contract and the brain it gathers from) are workspace-scoped. No model run was spent and ' +
+            'nothing was written. Run it from a workspace chat, or from a workflow step whose assistant is bound to ' +
+            'a workspace. Retrying in this session will fail identically.',
+          isError: true,
+        }
       }
       // Resolve among the workspace's RUNNABLE blueprints (page templates that
       // carry an extraction spec). Exact id, then exact name, then a contains
@@ -63,9 +73,18 @@ export function createGenerateBlueprintTool(deps: {
         blueprints.find((t) => t.name.trim().toLowerCase() === needle) ??
         blueprints.find((t) => t.name.trim().toLowerCase().includes(needle))
       if (!match) {
-        const names = blueprints.map((t) => t.name).slice(0, 8).join(', ')
+        const names = blueprints.map((t) => t.name)
+        const shown = names.slice(0, 8).join(', ')
+        const more = names.length > 8 ? `, …and ${names.length - 8} more` : ''
         return {
-          data: { error: `No blueprint matching "${input.blueprint}". Available: ${names || '(none)'}` },
+          data:
+            `fillBlueprintFromBrain did not run: no blueprint in this workspace matches "${input.blueprint}" ` +
+            '— only a page template carrying an extraction contract can be filled, and resolution is exact id, then ' +
+            'exact name, then a name substring. No model run was spent and nothing was written.' +
+            (names.length > 0
+              ? ` Blueprints that can be filled right now: ${shown}${more}. Pass one of those names (or its id) exactly; listBlueprints returns each one's field contract.`
+              : ' This workspace has no blueprint carrying an extraction contract, so no name will resolve — define one with createBlueprint (ask the user first) before filling.') +
+            ' Do NOT retry this exact name.',
           isError: true,
         }
       }
@@ -83,7 +102,16 @@ export function createGenerateBlueprintTool(deps: {
         renderPage: input.renderPage ?? false,
       })
       if (!result) {
-        return { data: { error: `Blueprint "${match.name}" could not be resolved.` }, isError: true }
+        return {
+          data:
+            `fillBlueprintFromBrain could not fill blueprint "${match.name}" (id ${match.id}): the blueprint resolved ` +
+            'in this workspace\'s listing, but the synthesizer could not load its body — its stored contract is ' +
+            'missing or unreadable. No model run was spent and nothing was written. That is a problem with the ' +
+            'stored blueprint, not with the arguments: pick a different blueprint (listBlueprints shows them), or ' +
+            'tell the user this one needs re-saving in Brain > Blueprints. Retrying this blueprint will fail the ' +
+            'same way.',
+          isError: true,
+        }
       }
       return {
         data: {

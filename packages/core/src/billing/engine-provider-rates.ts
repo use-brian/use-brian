@@ -29,9 +29,6 @@
  * - claude ($0.120/call): the `web_search` server tool at ~$10/1k searches
  *   with `max_uses: 3` ($0.030) + 2,048 output tokens on Sonnet ($15/M =
  *   $0.031) + the search results that land back in input ($3/M).
- * - searchConsoleQuery is FREE (Google Search Console API has no per-call
- *   charge) and is listed as $0 so a dashboard iterating this map does not
- *   drop it.
  *
  * When a rate changes (vendor repricing, a model-default swap, a change to
  * `MAX_ANSWER_TOKENS`), update the value and the `Last verified` date.
@@ -41,7 +38,6 @@ export const ENGINE_PROVIDER_COST_PER_1K: Record<string, number> = {
   gemini: 45.0,
   perplexity: 5.0,
   claude: 120.0,
-  gsc: 0.0,
 }
 
 /** Per-call USD cost for the given engine. Returns 0 for unknown engines. */

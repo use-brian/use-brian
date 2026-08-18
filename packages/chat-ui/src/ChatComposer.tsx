@@ -203,6 +203,23 @@ export function resolveEnterIntent(params: {
 }
 
 /**
+ * Snap a textarea's height to its content. Reset to 0 first so `scrollHeight`
+ * reports the true content height free of the previous measurement. Under
+ * `box-sizing: border-box` (Tailwind preflight) `height` includes the borders
+ * but `scrollHeight` never does, so a bordered textarea sized to bare
+ * `scrollHeight` lands short by its border widths, overflows by that much, and
+ * `overflow-y-auto` paints a scrollbar on an empty single-line box. Add the
+ * vertical border back (`offsetHeight - clientHeight`, which is border +
+ * horizontal-scrollbar height and independent of the current height) so the
+ * content area is exactly its content.
+ */
+export function fitTextareaHeight(el: HTMLTextAreaElement): void {
+  el.style.height = '0px'
+  const chrome = Math.max(0, el.offsetHeight - el.clientHeight)
+  el.style.height = `${el.scrollHeight + chrome}px`
+}
+
+/**
  * Headless composer. Owns no business logic — the host wires it to a state
  * value and an `onSend` callback that triggers `useMessageStream.start(...)`.
  */
@@ -221,8 +238,7 @@ export function ChatComposer(props: ChatComposerProps) {
   useLayoutEffect(() => {
     const el = textareaRef.current
     if (!el) return
-    el.style.height = '0px'
-    el.style.height = `${el.scrollHeight}px`
+    fitTextareaHeight(el)
   }, [props.value])
 
   // Re-fit on WIDTH changes — a re-wrap (panel opens, sidebar toggles, viewport
@@ -236,8 +252,7 @@ export function ChatComposer(props: ChatComposerProps) {
       const w = el.clientWidth
       if (Math.abs(w - lastWidth) < 0.5) return
       lastWidth = w
-      el.style.height = '0px'
-      el.style.height = `${el.scrollHeight}px`
+      fitTextareaHeight(el)
     })
     ro.observe(el)
     return () => ro.disconnect()

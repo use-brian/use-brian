@@ -116,6 +116,22 @@ describe('[COMP:api/skill-categorize] POST /api/skills/categorize', () => {
     expect(workspaceSkillStore.update).not.toHaveBeenCalled()
   })
 
+  it('uses the workspace runtime without calling the platform provider', async () => {
+    const draftProvider = providerReturning('[]')
+    const customProvider = providerReturning('[{"i":1,"category":"communication"}]')
+    const resolveWorkspaceCustomLlm = vi.fn().mockResolvedValue({
+      provider: customProvider,
+      selector: 'custom:profile-1',
+    })
+    const res = await request(categorizeApp({ draftProvider, resolveWorkspaceCustomLlm }))
+      .post('/api/skills/categorize')
+      .send({ workspaceId: 'w-1' })
+    expect(res.status).toBe(200)
+    expect(resolveWorkspaceCustomLlm).toHaveBeenCalledWith({ workspaceId: 'w-1', requestedTier: 'standard' })
+    expect(draftProvider.stream).not.toHaveBeenCalled()
+    expect(customProvider.stream).toHaveBeenCalledWith(expect.objectContaining({ model: 'custom:profile-1' }))
+  })
+
   // Only the `custom` sink is in scope — a deliberate category is not
   // re-decided in bulk.
   it('leaves already-grouped and archived skills out of the batch', async () => {

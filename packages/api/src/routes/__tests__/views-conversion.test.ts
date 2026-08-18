@@ -15,7 +15,7 @@ vi.mock('../../db/client.js', () => ({
 }))
 
 import { viewsRoutes } from '../views.js'
-import type { Page, SavedView } from '@use-brian/core'
+import { PdfRenderError, type Page, type SavedView } from '@use-brian/core'
 
 const WS = '00000000-0000-0000-0000-000000000010'
 const UID = '00000000-0000-0000-0000-000000000020'
@@ -54,6 +54,7 @@ function makeApp(opts: {
   savedViewStore?: Record<string, unknown>
   docPageStore?: Record<string, unknown>
   ingestDocument?: ReturnType<typeof vi.fn>
+  pdfRenderer?: Record<string, unknown>
 }): express.Express {
   const role = 'role' in opts ? opts.role ?? null : 'member'
   const base = {
@@ -66,6 +67,7 @@ function makeApp(opts: {
     softDeleteStore: {},
     ...(opts.docPageStore ? { docPageStore: opts.docPageStore } : {}),
     ...(opts.ingestDocument ? { ingestDocument: opts.ingestDocument } : {}),
+    ...(opts.pdfRenderer ? { pdfRenderer: opts.pdfRenderer } : {}),
   }
   const app = express()
   app.use(express.json())
@@ -109,8 +111,43 @@ describe('[COMP:api/views-export] GET /views/:id/export', () => {
   it('rejects an unknown format', async () => {
     const getById = vi.fn().mockResolvedValue(fakeView())
     const app = makeApp({ savedViewStore: { getById } })
-    const res = await request(app).get('/api/views/sv-1/export?format=pdf')
+    const res = await request(app).get('/api/views/sv-1/export?format=xlsx')
     expect(res.status).toBe(400)
+  })
+
+  it('exports a PDF through the injected renderer (Block[] in, application/pdf out)', async () => {
+    const getById = vi.fn().mockResolvedValue(fakeView())
+    const fromPage = vi.fn().mockResolvedValue({ bytes: new Uint8Array([0x25, 0x50, 0x44, 0x46]), pageCount: 3, mime: 'application/pdf' })
+    const app = makeApp({ savedViewStore: { getById }, pdfRenderer: { fromPage, fromMarkdown: vi.fn() } })
+    const res = await request(app).get('/api/views/sv-1/export?format=pdf').buffer(true).parse((r, cb) => {
+      const chunks: Buffer[] = []
+      r.on('data', (c: Buffer) => chunks.push(c))
+      r.on('end', () => cb(null, Buffer.concat(chunks)))
+    })
+    expect(res.status).toBe(200)
+    expect(res.headers['content-type']).toContain('application/pdf')
+    expect(res.headers['content-disposition']).toContain('My Doc.pdf')
+    expect(res.headers['x-pdf-page-count']).toBe('3')
+    expect(Array.from(res.body as Buffer)).toEqual([0x25, 0x50, 0x44, 0x46])
+    // The renderer receives the page blocks + title, never Markdown text.
+    expect(fromPage).toHaveBeenCalledTimes(1)
+    expect(fromPage.mock.calls[0][0]).toEqual(SAMPLE_PAGE)
+    expect(fromPage.mock.calls[0][1]).toEqual({ title: 'My Doc' })
+  })
+
+  it('answers 503 pdf_unavailable (never a blank file) when the deployment has no renderer', async () => {
+    const getById = vi.fn().mockResolvedValue(fakeView())
+    const fromPage = vi.fn().mockRejectedValue(new PdfRenderError('converter_unavailable', { cause: 'spawn soffice ENOENT' }))
+    const app = makeApp({ savedViewStore: { getById }, pdfRenderer: { fromPage, fromMarkdown: vi.fn() } })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const res = await request(app).get('/api/views/sv-1/export?format=pdf')
+      expect(res.status).toBe(503)
+      expect(res.body).toMatchObject({ code: 'pdf_unavailable' })
+      expect(String(res.body.error)).not.toContain('ENOENT')
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   it('prefers the live merged page from docPageStore', async () => {

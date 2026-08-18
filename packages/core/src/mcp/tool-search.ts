@@ -31,7 +31,8 @@ import { buildTool, type Tool } from '../tools/types.js'
 import { classifyTool, defaultPolicy } from './classifier.js'
 import { mcpResultToToolResult } from './tool-result.js'
 import { jsonSchemaFromZod } from '../engine/query-loop.js'
-import { declinedToolResult, timedOutToolResult } from '../engine/decline-copy.js'
+import { declinedToolResult, timedOutToolResult, blockedThisTurnToolResult, policyBlockedToolResult, alwaysDeniedToolResult } from '../engine/decline-copy.js'
+import { describeMcpToolError } from './errors.js'
 import type { EngineHooks, PreToolUseDirective } from '../engine/hooks.js'
 import type { McpSettingsStore, McpServerConfig, McpToolInfo } from './types.js'
 
@@ -482,7 +483,7 @@ export function createMcpSearchTools(params: {
       // to re-evaluate policy (deny-first).
       if (blockedTools.has(toolKey)) {
         return {
-          data: `ERROR: "${tool}" is blocked for this session. Capability unavailable.`,
+          data: blockedThisTurnToolResult(tool),
           isError: true,
         }
       }
@@ -707,7 +708,7 @@ async function dispatchRemote(params: {
   if (effectivePolicy === 'block') {
     blockedTools.add(toolKey)
     return {
-      data: `ERROR: "${tool}" is blocked by policy. Capability unavailable.`,
+      data: policyBlockedToolResult(tool),
       isError: true,
     }
   }
@@ -760,7 +761,7 @@ async function dispatchRemote(params: {
             policy: 'block', classification,
           }).catch((err) => console.debug('Failed to persist always_deny:', err))
           return {
-            data: `ERROR: user permanently blocked "${tool}". Capability unavailable.`,
+            data: alwaysDeniedToolResult(tool),
             isError: true,
           }
         }
@@ -783,7 +784,7 @@ async function dispatchRemote(params: {
         // Timeout — treat as deny for this session
         blockedTools.add(toolKey)
         return {
-          data: `Tool confirmation timed out for "${tool}". Execution skipped. Respond to the user with what you can do instead.`,
+          data: timedOutToolResult(tool),
           isError: true,
         }
       }
@@ -878,7 +879,7 @@ async function dispatchRemote(params: {
     return mcpResultToToolResult(result)
   } catch (err) {
     return {
-      data: `MCP tool ${tool} failed: ${err instanceof Error ? err.message : String(err)}`,
+      data: describeMcpToolError(server, tool, err),
       isError: true,
     }
   }

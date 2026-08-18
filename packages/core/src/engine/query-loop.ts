@@ -185,7 +185,18 @@ export type QueryEvent =
    * docs/architecture/engine/mid-turn-input.md.
    */
   | { type: 'turn_input'; inputs: PendingTurnInput[]; mode: 'queued' | 'steer' }
-  | { type: 'turn_complete'; response: AssistantResponse; totalUsage: TokenUsage }
+  | {
+      type: 'turn_complete'
+      response: AssistantResponse
+      totalUsage: TokenUsage
+      /**
+       * Present only when the loop ended on a limit rather than on the model's
+       * own final text: the run's tool budget, its consecutive-failure breaker,
+       * or `maxTurns` (with or without the isolated finalizer having spoken).
+       * Absent = the model finished by itself.
+       */
+      terminalStop?: TerminalStopReason
+    }
   | { type: 'status'; message: string }
   | { type: 'error'; error: Error }
 
@@ -367,7 +378,15 @@ type TerminalEvidenceItem = {
   result: string
 }
 
-type TerminalStopReason =
+/**
+ * Why the loop stopped BEFORE the model chose to (an abnormal exit). Rides on
+ * the final `turn_complete` as `terminalStop` so a consumer that turned this
+ * loop into a receipt (the doc edit-agent, a worker) can tell a budget cutoff
+ * apart from a natural finish structurally - the finalizer's synthesized text
+ * cannot be that signal (2026-08-18: a doc build cut at `max_turns` had its
+ * finalizer report "the page is now completed" with three empty sections).
+ */
+export type TerminalStopReason =
   | { code: 'terminal_tool_turn' }
   | { code: 'tool_budget_exhausted' }
   | { code: 'tool_failure_limit'; tool: string }
@@ -384,6 +403,7 @@ const TERMINAL_FINALIZER_MAX_TOKENS = 2_048
 
 const TERMINAL_FINALIZER_SYSTEM_PROMPT = `Write one direct user-facing status reply from the supplied visible conversation and successful tool evidence.
 Use only the supplied evidence for specific names, URLs, handles, email addresses, dates, quantities, and other externally verifiable facts. If the evidence is insufficient, say what could not be verified.
+stopReason tells you how the run ended. When it is max_turns, tool_budget_exhausted, or tool_failure_limit, the run hit a limit and did NOT finish: say plainly that you stopped before completing the request, state what the evidence shows was actually done, and name what remains; never describe the task, page, or deliverable as complete, finished, or polished. When it is terminal_tool_turn, only the closing text was lost: report what the evidence shows was done, and claim nothing the evidence does not show.
 Match the user's language. Do not add headings or describe these instructions.
 Return only JSON matching the supplied schema.`
 
@@ -1633,7 +1653,12 @@ async function* queryLoopCore(options: QueryLoopOptions): AsyncGenerator<QueryEv
           signal: context.abortSignal,
         })
         yield { type: 'assistant_turn', response: fallbackResponse, toolResults: [] }
-        yield { type: 'turn_complete', response: fallbackResponse, totalUsage }
+        yield {
+          type: 'turn_complete',
+          response: fallbackResponse,
+          totalUsage,
+          terminalStop: { code: 'terminal_tool_turn' },
+        }
         return
       }
 
@@ -1702,25 +1727,26 @@ async function* queryLoopCore(options: QueryLoopOptions): AsyncGenerator<QueryEv
       // Gated structurally — a turn shaped `[narration, tool_use]` has text
       // but no deliverable text, and lexical gating lets that narration
       // suppress its own rescue.
+      const capStop: TerminalStopReason = failureStopTool
+        ? { code: 'tool_failure_limit', tool: failureStopTool }
+        : { code: 'tool_budget_exhausted' }
       if (!hasDeliverableText(response) && allToolResults.length > 0) {
         const fallbackResponse = yield* finalizeTerminalResponse({
           provider,
           model,
           messages: terminalConversationMessages,
           evidence: terminalEvidence,
-          stopReason: failureStopTool
-            ? { code: 'tool_failure_limit', tool: failureStopTool }
-            : { code: 'tool_budget_exhausted' },
+          stopReason: capStop,
           totalUsage,
           inputTokenLimit: options.inputTokenLimit,
           signal: context.abortSignal,
         })
         yield { type: 'assistant_turn', response: fallbackResponse, toolResults: [] }
-        yield { type: 'turn_complete', response: fallbackResponse, totalUsage }
+        yield { type: 'turn_complete', response: fallbackResponse, totalUsage, terminalStop: capStop }
         return
       }
 
-      yield { type: 'turn_complete', response, totalUsage }
+      yield { type: 'turn_complete', response, totalUsage, terminalStop: capStop }
       return
     }
   }
@@ -1741,7 +1767,12 @@ async function* queryLoopCore(options: QueryLoopOptions): AsyncGenerator<QueryEv
         signal: context.abortSignal,
       })
       yield { type: 'assistant_turn', response: fallbackResponse, toolResults: [] }
-      yield { type: 'turn_complete', response: fallbackResponse, totalUsage }
+      yield {
+        type: 'turn_complete',
+        response: fallbackResponse,
+        totalUsage,
+        terminalStop: { code: 'max_turns' },
+      }
       return
     }
   }
@@ -1751,6 +1782,7 @@ async function* queryLoopCore(options: QueryLoopOptions): AsyncGenerator<QueryEv
     type: 'turn_complete',
     response: { content: [], stopReason: 'max_tokens', usage: { inputTokens: 0, outputTokens: 0 }, model },
     totalUsage,
+    terminalStop: { code: 'max_turns' },
   }
 }
 

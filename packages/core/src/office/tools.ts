@@ -35,6 +35,30 @@ function link(origin: string | undefined, workspaceId: string, artifactId: strin
 }
 
 /**
+ * The "no artifact came back" miss, in the one shape both reads and revisions
+ * use (docs/architecture/engine/tool-executor.md → "Failure copy").
+ *
+ * `Office artifact not found or unavailable.` was true and useless: it never
+ * said which id, never explained that ineligibility and absence are
+ * deliberately indistinguishable here (the tool returns no existence signal to
+ * an ineligible caller), never named where a real id comes from, and never
+ * told the model to stop. There is no list tool to point at — an Office id
+ * reaches a session from a createOfficeArtifact result, an editor URL, or the
+ * user — so the discovery pointer names those instead.
+ */
+function artifactUnreachable(tool: string, verb: string, artifactId: string): string {
+  return (
+    `${tool} could not ${verb} Office artifact ${artifactId}: no artifact with that id is reachable for this caller. ` +
+    'Either nothing has that id, or it exists and this session is not eligible to see it — the two are deliberately ' +
+    `indistinguishable, because an existence signal would leak the artifact. ${
+      verb === 'revise' ? 'Nothing was changed and no job was queued. ' : ''
+    }` +
+    'Artifact ids come from a createOfficeArtifact result, the /office/<artifactId> editor URL, or the user — ask for ' +
+    'the link if you do not have one. Do NOT retry this exact id.'
+  )
+}
+
+/**
  * Effective allow/ask/block for an Office tool. Boot wires the same L1 (app
  * sentinel) + L2 (per-assistant) strictest-wins resolution over
  * `mcp_tool_settings` (serverName='office') that the files and computer
@@ -100,8 +124,23 @@ export function createOfficeTools(params: {
     async execute(input, context) {
       const blocked = await blockGate('createOfficeArtifact', context)
       if (blocked) return blocked
-      if (!context.workspaceId) return { data: 'Office artifacts require a workspace.', isError: true }
-      if (!canEnableOfficeCreation(input.family)) return { data: 'Office creation is unavailable because the model/editor/render/export/reparse capability barrier is incomplete.', isError: true }
+      if (!context.workspaceId) {
+        return {
+          data: 'createOfficeArtifact did not run: this chat is not bound to a workspace, and Office artifacts are stored per workspace (`office_artifacts` rows carry the workspace id), so there is nowhere to create one. Nothing was created. No argument change or retry helps in this session — ask the user to open a workspace-scoped chat and request the artifact there.',
+          isError: true,
+        }
+      }
+      if (!canEnableOfficeCreation(input.family)) {
+        return {
+          data:
+            `createOfficeArtifact did not create the ${input.family}: this build does not have the complete ` +
+            `${input.family} capability barrier (model, editor, render, export, reparse) yet, and creation stays off ` +
+            'until every side of it ships. Nothing was created. This is a build-state limit, not a problem with the ' +
+            `arguments — no ${input.family} can be created through this tool in this deployment, so do not retry with ` +
+            'different arguments. Tell the user the format is not available yet and offer to capture the work another way.',
+          isError: true,
+        }
+      }
       const result = await params.port.create({ userId: context.userId, assistantId: context.assistantId, workspaceId: context.workspaceId, ...input })
       return { data: { ...result, status: 'queued', editorUrl: link(params.appOrigin, context.workspaceId, result.artifactId) } }
     },
@@ -119,7 +158,7 @@ export function createOfficeTools(params: {
       const blocked = await blockGate('getOfficeArtifact', context)
       if (blocked) return blocked
       const artifact = await params.port.get({ userId: context.userId, artifactId: input.artifactId, targetOffset: input.targetOffset })
-      if (!artifact) return { data: 'Office artifact not found or unavailable.', isError: true }
+      if (!artifact) return { data: artifactUnreachable('getOfficeArtifact', 'read', input.artifactId), isError: true }
       return { data: { ...artifact, editorUrl: context.workspaceId ? link(params.appOrigin, context.workspaceId, artifact.artifactId) : undefined } }
     },
   })
@@ -142,8 +181,19 @@ export function createOfficeTools(params: {
       const blocked = await blockGate('reviseOfficeArtifact', context)
       if (blocked) return blocked
       const result = await params.port.revise({ userId: context.userId, assistantId: context.assistantId, ...input })
-      if (result === 'version_conflict') return { data: { code: 'version_conflict', message: 'The artifact changed. Re-read the current version before revising.' }, isError: true }
-      if (!result) return { data: 'Office artifact not found or unavailable for revision.', isError: true }
+      if (result === 'version_conflict') {
+        return {
+          data:
+            `reviseOfficeArtifact did not start a revision of artifact ${input.artifactId}: it has moved past the ` +
+            `version you passed (expectedVersion ${input.expectedVersion}) — a collaborator edited it, or an earlier ` +
+            'revision job landed, between your read and this call (version_conflict). Nothing was changed and no job ' +
+            `was queued. Call getOfficeArtifact on ${input.artifactId} to read its current version and target ids, ` +
+            `then re-issue this instruction against those. Re-sending expectedVersion ${input.expectedVersion} will ` +
+            'conflict again.',
+          isError: true,
+        }
+      }
+      if (!result) return { data: artifactUnreachable('reviseOfficeArtifact', 'revise', input.artifactId), isError: true }
       return { data: result }
     },
   })

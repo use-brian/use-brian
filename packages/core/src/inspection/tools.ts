@@ -20,6 +20,10 @@ import { z } from 'zod'
 import { buildTool, type Tool } from '../tools/types.js'
 import type { InspectionStore } from './types.js'
 
+/** Shared no-workspace failure for the inspection tools (see introspection). */
+const INSPECTION_NO_WORKSPACE =
+  'Inspection tools are workspace-scoped and this chat is not bound to a workspace, so there is nothing to inspect here. This is not a permission or setup failure, and retrying will not help — tell the user to run this from a workspace chat.'
+
 export function createInspectionTools(store: InspectionStore): {
   inspectMemoryProvenance: Tool
   inspectRecallHistory: Tool
@@ -45,7 +49,7 @@ export function createInspectionTools(store: InspectionStore): {
     isConcurrencySafe: true,
     async execute(input, context) {
       if (!context.workspaceId) {
-        return { data: 'Inspection tools require workspace context.', isError: true }
+        return { data: INSPECTION_NO_WORKSPACE, isError: true }
       }
       const result = await store.getMemoryProvenance({
         assistantId: context.assistantId,
@@ -89,7 +93,7 @@ export function createInspectionTools(store: InspectionStore): {
     isConcurrencySafe: true,
     async execute(input, context) {
       if (!context.workspaceId) {
-        return { data: 'Inspection tools require workspace context.', isError: true }
+        return { data: INSPECTION_NO_WORKSPACE, isError: true }
       }
       const events = await store.getRecallHistory({
         workspaceId: context.workspaceId,
@@ -126,7 +130,7 @@ export function createInspectionTools(store: InspectionStore): {
     isConcurrencySafe: true,
     async execute(input, context) {
       if (!context.workspaceId) {
-        return { data: 'Inspection tools require workspace context.', isError: true }
+        return { data: INSPECTION_NO_WORKSPACE, isError: true }
       }
       const walk = await store.getRowProvenance({
         workspaceId: context.workspaceId,
@@ -181,7 +185,7 @@ export function createInspectionTools(store: InspectionStore): {
     isConcurrencySafe: true,
     async execute(input, context) {
       if (!context.workspaceId) {
-        return { data: 'Inspection tools require workspace context.', isError: true }
+        return { data: INSPECTION_NO_WORKSPACE, isError: true }
       }
       const events = await store.getRecentActivity({
         assistantId: context.assistantId,
@@ -221,7 +225,7 @@ export function createInspectionTools(store: InspectionStore): {
     isConcurrencySafe: true,
     async execute(input, context) {
       if (!context.workspaceId) {
-        return { data: 'Inspection tools require workspace context.', isError: true }
+        return { data: INSPECTION_NO_WORKSPACE, isError: true }
       }
       const events = await store.getRecentMistakes({
         assistantId: context.assistantId,

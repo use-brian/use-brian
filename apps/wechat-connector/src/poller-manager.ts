@@ -21,6 +21,7 @@ import {
   createIlinkClient,
   createWechatAdapter,
   createDedupBuffer,
+  describeWechatPayload,
   ILINK_STALE_TOKEN_ERRCODE,
 } from '@use-brian/channels'
 
@@ -183,7 +184,23 @@ export function createPollerManager(options: PollerManagerOptions): PollerManage
           const dedupId = adapter.deduplicateId(raw)
           if (dedupId && dedup.isDuplicate(dedupId)) continue
           const incoming = adapter.parseIncoming(raw)
-          if (!incoming) continue
+          if (!incoming) {
+            // `parseIncoming` discards at five gates and says nothing. Without
+            // this line an attachment that never reaches the archive is
+            // indistinguishable from one iLink never delivered — and silence
+            // on a media path reads as "no message was sent", which is the
+            // one conclusion that is never safe to draw. `describeWechatPayload`
+            // reports structure only; it carries no message content.
+            console.warn(
+              `[wechat-poller] ${channelId}: inbound dropped by adapter (${dedupId ?? 'no dedup id'}): ${describeWechatPayload(raw)}`,
+            )
+            continue
+          }
+          if (incoming.mediaType) {
+            console.log(
+              `[wechat-poller] ${channelId}: inbound carries ${incoming.mediaType} (${incoming.mediaName ?? 'unnamed'}) — forwarding for archive staging`,
+            )
+          }
           await forwardToApi(channelId, incoming)
         }
       } catch (err) {

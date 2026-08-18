@@ -231,6 +231,15 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'wordpressUpdatePageText', description: 'Replace one registered text slot on a managed page', classification: 'write', defaultPolicy: 'ask' },
     { name: 'wordpressReplacePageImage', description: 'Upload an image and replace one registered image slot on a managed page', classification: 'write', defaultPolicy: 'ask' },
   ],
+  // Google Search Console — read-only over a BYO service-account key. No
+  // write tool exists (scope stays webmasters.readonly); see
+  // docs/architecture/integrations/search-console.md.
+  gsc: [
+    { name: 'searchConsoleListSites', description: 'List the Search Console properties the service account can read', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'searchConsoleQuery', description: 'Query search performance (clicks, impressions, CTR, position) by dimension over a date range', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'searchConsoleInspectUrl', description: 'Inspect one URL\'s Google index status, canonical and crawl state', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'searchConsoleListSitemaps', description: 'List submitted sitemaps with their status and error counts', classification: 'read', defaultPolicy: 'allow' },
+  ],
   // Microsoft Teams (Graph) — READ-ONLY, permanently (decision D1). Graph
   // publishes no application permission for sending, so every Graph write is
   // attributed to a human rather than to the assistant; sending stays on the
@@ -295,6 +304,11 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'saveFileToBrain', description: 'Save an uploaded attachment to the workspace as a file, preserving the original', classification: 'write', defaultPolicy: 'allow' },
     { name: 'saveFileBytes', description: 'Save a file from raw bytes (base64) to the workspace, preserving the original', classification: 'write', defaultPolicy: 'ask' },
     { name: 'sendFile',    description: 'Attach a workspace file to the reply as a downloadable document', classification: 'read',       defaultPolicy: 'allow' },
+    // renderPdf defaults to allow like saveFileToBrain: the user explicitly
+    // asked for a PDF, the tool writes only inside the workspace (a taken path
+    // is a conflict, never an overwrite), and egress stays gated by sendFile.
+    // Mirrors requiresConfirmation:false in core/src/workspace-files/render-pdf.ts.
+    { name: 'renderPdf',   description: 'Render Markdown or a doc page into a real PDF file in the workspace', classification: 'write', defaultPolicy: 'allow' },
     { name: 'fileDelete',  description: 'Permanently delete a workspace file',                           classification: 'destructive', defaultPolicy: 'ask' },
   ],
   // Brand — the positioning record (docs/architecture/features/brand.md).
@@ -610,6 +624,7 @@ export const BOOT_INJECTED_BUILTIN_TOOLS: Record<string, readonly string[]> = {
     'fileSetMeta',
     'saveFileToBrain',
     'sendFile',
+    'renderPdf',
     'fileDelete',
   ],
   office: [

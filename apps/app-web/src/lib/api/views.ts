@@ -1521,14 +1521,17 @@ export type ImportResult = {
   blockCount: number;
 };
 
+/** Page export formats served by `GET /api/views/:id/export` (doc-conversion.md). */
+export type PageExportFormat = "md" | "docx" | "pdf";
+
 /** Export endpoint URL for a page + format. Pure — unit-tested. */
-export function exportUrl(pageId: string, format: "md" | "docx"): string {
+export function exportUrl(pageId: string, format: PageExportFormat): string {
   return `${API_URL}/api/views/${encodeURIComponent(pageId)}/export?format=${format}`;
 }
 
 /** Download filename from a page title + format (path-hostile chars stripped).
  *  Pure — unit-tested. */
-export function exportFilename(title: string, format: "md" | "docx"): string {
+export function exportFilename(title: string, format: PageExportFormat): string {
   const base =
     (title || "document").replace(/[\\/?%*:|"<>]/g, "").trim().slice(0, 100) ||
     "document";
@@ -1542,14 +1545,25 @@ export async function fetchPageMarkdown(pageId: string): Promise<string> {
   return res.text();
 }
 
-/** Download a page as a `.md` / `.docx` file (the Export menu). */
+/** Download a page as a `.md` / `.docx` / `.pdf` file (the Export menu).
+ *  A PDF export can legitimately fail on a deployment with no renderer
+ *  (503 `pdf_unavailable`); the server's own message is surfaced then. */
 export async function downloadPageExport(
   pageId: string,
-  format: "md" | "docx",
+  format: PageExportFormat,
   title: string,
 ): Promise<void> {
   const res = await authFetch(exportUrl(pageId, format));
-  if (!res.ok) throw new Error(`Export failed (${res.status})`);
+  if (!res.ok) {
+    let detail = "";
+    try {
+      const body = (await res.json()) as { error?: string };
+      if (body?.error) detail = `: ${body.error}`;
+    } catch {
+      /* non-JSON error body */
+    }
+    throw new Error(`Export failed (${res.status})${detail}`);
+  }
   const blob = await res.blob();
   const url = URL.createObjectURL(blob);
   try {

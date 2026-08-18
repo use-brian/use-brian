@@ -11,6 +11,7 @@
 
 import { z } from 'zod'
 import { buildTool, type Tool } from '../types.js'
+import { toolFailure } from '../tool-failure.js'
 
 export const WORKSPACE_CHAT_HANDOFF_MAX_CHARS = 8_000
 
@@ -77,20 +78,35 @@ export function createWorkspaceChatHandoffTool(
       if (context.channelType !== 'web' || !context.workspaceId) {
         return {
           data:
-            'This action is available only from a private web conversation inside a workspace.',
+            `\`shareCurrentWorkToWorkspace\` did not run: it creates a room from a private web conversation inside a workspace, and this turn is ` +
+            `${context.workspaceId ? `on the "${context.channelType}" channel` : 'not bound to a workspace'}. ` +
+            'Nothing was shared. No argument change or retry will help in this session — tell the user to ask again from the web app inside the workspace, ' +
+            'or paste the handoff into the workspace chat yourself.',
           isError: true,
         }
       }
 
-      const created = await port.create({
-        sourceSessionId: context.sessionId,
-        userId: context.userId,
-        assistantId: context.assistantId,
-        workspaceId: context.workspaceId,
-        appId: context.appId,
-        title: input.title,
-        handoff: input.handoff,
-      })
+      let created: { sessionId: string }
+      try {
+        created = await port.create({
+          sourceSessionId: context.sessionId,
+          userId: context.userId,
+          assistantId: context.assistantId,
+          workspaceId: context.workspaceId,
+          appId: context.appId,
+          title: input.title,
+          handoff: input.handoff,
+        })
+      } catch (err) {
+        return toolFailure(err, {
+          tool: 'shareCurrentWorkToWorkspace',
+          action: 'Creating the workspace room and posting the handoff',
+          target: `"${input.title}"`,
+          mutating: true,
+          next:
+            'NO room was created and NO teammate has seen the handoff — do not tell the user the work was shared or offer a link. The private conversation is untouched.',
+        })
+      }
       const openPath =
         `/w/${encodeURIComponent(context.workspaceId)}/chat` +
         `?v=workspace&s=${encodeURIComponent(created.sessionId)}`

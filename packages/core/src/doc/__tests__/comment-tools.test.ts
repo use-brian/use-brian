@@ -117,6 +117,36 @@ describe('[COMP:doc/comment-tools] postComment', () => {
     const tool = createPostCommentTool({ commentThreadStore: fakeStore() })
     const res = await tool.execute({ pageId: PAGE, body: 'x' }, ctx({ workspaceId: null }))
     expect(res.isError).toBe(true)
+    const data = String(res.data)
+    expect(data).toContain('not bound to a workspace')
+    expect(data).toContain('Nothing was posted')
+    expect(data).toContain('will keep failing')
+  })
+
+  it('names the wiring gap (and the fallback) when no comment store is present', async () => {
+    const tool = createPostCommentTool({ commentThreadStore: undefined as never })
+    const res = await tool.execute({ pageId: PAGE, body: 'x' }, ctx())
+    expect(res.isError).toBe(true)
+    const data = String(res.data)
+    // Never "Comments are not available in this context": name the missing
+    // dependency, say arguments cannot fix it, and give the fallback.
+    expect(data).toContain('not wired on this server')
+    expect(data).toContain('do NOT retry')
+    expect(data).toContain('into your reply to the user instead')
+  })
+
+  it('points a thread miss at the in-context index, not at a listing tool', async () => {
+    const store = fakeStore({ getThread: vi.fn().mockResolvedValue(null) })
+    const tool = createPostCommentTool({ commentThreadStore: store })
+    const res = await tool.execute({ pageId: PAGE, threadId: 'missing', body: 'x' }, ctx())
+    expect(res.isError).toBe(true)
+    const data = String(res.data)
+    expect(data).toContain('missing')
+    expect(data).toContain('Thread ids are stable')
+    expect(data).toContain("thread index in your context")
+    expect(data).toContain('no tool that lists threads')
+    expect(data).toContain('Do NOT retry this exact id')
+    expect(store.addComment).not.toHaveBeenCalled()
   })
 })
 
@@ -136,6 +166,10 @@ describe('[COMP:doc/comment-tools] resolveComment', () => {
     const tool = createResolveCommentTool({ commentThreadStore: store })
     const res = await tool.execute({ threadId: 'missing' }, ctx())
     expect(res.isError).toBe(true)
+    const data = String(res.data)
+    expect(data).toContain('missing')
+    expect(data).toContain('no tool that lists threads')
+    expect(data).toContain('Do NOT retry this exact id')
   })
 })
 
@@ -168,6 +202,10 @@ describe('[COMP:doc/comment-tools] getCommentThread', () => {
     const tool = createGetCommentThreadTool({ commentThreadStore: store })
     const res = await tool.execute({ threadId: 'missing' }, ctx())
     expect(res.isError).toBe(true)
+    const data = String(res.data)
+    expect(data).toContain('missing')
+    expect(data).toContain("thread index in your context")
+    expect(data).toContain('Do NOT retry this exact id')
     expect(store.listThreadComments).not.toHaveBeenCalled()
   })
 

@@ -137,16 +137,31 @@ describe('[COMP:api/brain-entry-edit] Brain entry assistant tools', () => {
     })
     const attempted = await updateBrainEntry.execute(updateInput, context)
     expect(attempted.isError).toBe(true)
-    expect(String(attempted.data)).toMatch(/multiple matches/)
+    const ambiguous = String(attempted.data)
+    // WHAT: the refused target, and that nothing was written.
+    expect(ambiguous).toContain(entry.id)
+    expect(ambiguous).toMatch(/Nothing was saved/i)
+    // WHY + NEXT STEP + verdict.
+    expect(ambiguous).toMatch(/MORE THAN ONE plausible entry/i)
+    expect(ambiguous).toMatch(/ask which entry they mean/i)
+    expect(ambiguous).toMatch(/refused the same way/i)
     expect(port.mutate).not.toHaveBeenCalled()
   })
 
-  it('refuses an arbitrary unscoped target that discovery did not return', async () => {
+  // D6: a provenance refusal must name the discovery tool that mints an
+  // acceptable (rowId, revision) pair, not just state the rule.
+  it('refuses an arbitrary unscoped target and points at findEditableBrainEntries', async () => {
     const port = mutator()
     const { updateBrainEntry } = createBrainEntryEditTools({ mutator: port })
     const result = await updateBrainEntry.execute(updateInput, context)
     expect(result.isError).toBe(true)
-    expect(String(result.data)).toMatch(/not returned by Brain Review discovery/)
+    const data = String(result.data)
+    expect(data).toContain(entry.id)
+    expect(data).toMatch(/not returned by findEditableBrainEntries in THIS turn/i)
+    expect(data).toMatch(/Nothing was saved/i)
+    expect(data).toContain('findEditableBrainEntries')
+    expect(data).toMatch(/rowId and revision from that result/i)
+    expect(data).toMatch(/refused the same way/i)
     expect(port.mutate).not.toHaveBeenCalled()
   })
 
@@ -226,7 +241,116 @@ describe('[COMP:api/brain-entry-edit] Brain entry assistant tools', () => {
       context,
     )
     expect(result.isError).toBe(true)
-    expect(String(result.data)).toMatch(/does not match/)
+    const data = String(result.data)
+    // Names the open entry the session IS scoped to, so the model can re-issue
+    // against it instead of guessing which half of the triple was wrong.
+    expect(data).toContain(entry.id)
+    expect(data).toContain(entry.updatedAt.toISOString())
+    expect(data).toMatch(/scoped to ONE open Brain entry/i)
+    expect(data).toMatch(/nothing was saved/i)
+    expect(data).toMatch(/cannot reach it however it is retried/i)
+    expect(port.mutate).not.toHaveBeenCalled()
+  })
+
+  // The mutator's non-2xx used to be forwarded raw (`Row not found`), which
+  // told the model nothing about supersession or where a live id comes from.
+  it('translates a 404 from the mutator into the supersession + discovery pointer', async () => {
+    const port = mutator({
+      mutate: vi.fn().mockResolvedValue({ status: 404, body: { error: 'Row not found' } }),
+    })
+    const { updateBrainEntry } = createBrainEntryEditTools({
+      mutator: port,
+      scopedEntry: entry,
+    })
+    const result = await updateBrainEntry.execute(updateInput, context)
+    expect(result.isError).toBe(true)
+    const data = String(result.data)
+    // WHAT: the operation, the fields, the target.
+    expect(data).toContain('detail')
+    expect(data).toContain(entry.id)
+    expect(data).toMatch(/Nothing was saved/i)
+    // WHY: bi-temporal supersession leads, because it is the likeliest cause.
+    expect(data).toMatch(/bi-temporal/i)
+    expect(data).toMatch(/liveRowId/)
+    // NEXT STEP + verdict.
+    expect(data).toContain('findEditableBrainEntries')
+    expect(data).toMatch(/Do NOT retry this exact rowId/i)
+    // The route's own wording is kept as the diagnosis, not dropped.
+    expect(data).toContain('Row not found')
+  })
+
+  it('translates a 409 into a stale-revision repair, naming the revision that failed', async () => {
+    const port = mutator({
+      mutate: vi.fn().mockResolvedValue({
+        status: 409,
+        body: { error: 'The entry changed while this edit was awaiting approval.', code: 'stale_entry' },
+      }),
+    })
+    const { updateBrainEntry } = createBrainEntryEditTools({
+      mutator: port,
+      scopedEntry: entry,
+    })
+    const result = await updateBrainEntry.execute(updateInput, context)
+    expect(result.isError).toBe(true)
+    const data = String(result.data)
+    expect(data).toContain(updateInput.expectedUpdatedAt)
+    expect(data).toMatch(/stale/i)
+    expect(data).toMatch(/rather than silently overwriting/i)
+    expect(data).toMatch(/will keep failing/i)
+  })
+
+  it('marks a 5xx transient (retry once) rather than a bad argument', async () => {
+    const port = mutator({
+      mutate: vi.fn().mockResolvedValue({ status: 500, body: { error: 'Failed to adjust memory' } }),
+    })
+    const { updateBrainEntry } = createBrainEntryEditTools({
+      mutator: port,
+      scopedEntry: entry,
+    })
+    const result = await updateBrainEntry.execute(updateInput, context)
+    expect(result.isError).toBe(true)
+    const data = String(result.data)
+    expect(data).toMatch(/server-side failure, not a problem with the arguments/i)
+    expect(data).toMatch(/Retry this exact call once/i)
+    expect(data).toMatch(/rather than looping/i)
+  })
+
+  it('marks a 403 unretryable and tells the model to report it', async () => {
+    const port = mutator({
+      mutate: vi.fn().mockResolvedValue({ status: 403, body: { error: 'Not a member of this workspace' } }),
+    })
+    const { updateBrainEntry } = createBrainEntryEditTools({
+      mutator: port,
+      scopedEntry: entry,
+    })
+    const result = await updateBrainEntry.execute(updateInput, context)
+    expect(result.isError).toBe(true)
+    const data = String(result.data)
+    expect(data).toMatch(/authorization refusal, not a bad argument/i)
+    expect(data).toMatch(/Do not retry/i)
+    expect(data).toMatch(/tell the user/i)
+  })
+
+  // Both gates used to read "requires workspace context" — a phrase that names
+  // no surface and no remedy.
+  it('names the missing workspace binding and the remedy on both tools', async () => {
+    const port = mutator()
+    const { findEditableBrainEntries, updateBrainEntry } =
+      createBrainEntryEditTools({ mutator: port })
+    const noWorkspace = { ...context, workspaceId: undefined } as ToolContext
+
+    const found = await findEditableBrainEntries.execute({ query: 'essay' }, noWorkspace)
+    expect(found.isError).toBe(true)
+    expect(String(found.data)).toMatch(/not bound to one/i)
+    expect(String(found.data)).toMatch(/workspace-scoped chat/i)
+    expect(String(found.data)).toMatch(/do not fall back to creating a replacement entry/i)
+    expect(port.findEditableEntries).not.toHaveBeenCalled()
+
+    const updated = await updateBrainEntry.execute(updateInput, noWorkspace)
+    expect(updated.isError).toBe(true)
+    expect(String(updated.data)).toContain(entry.id)
+    expect(String(updated.data)).toMatch(/nothing was saved/i)
+    expect(String(updated.data)).toMatch(/fail the same way/i)
     expect(port.mutate).not.toHaveBeenCalled()
   })
 

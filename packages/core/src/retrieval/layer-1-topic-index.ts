@@ -214,6 +214,7 @@ export async function classifyTopicTags(
   opts: ClassifyTopicTagsOptions,
 ): Promise<TopicAnalysis> {
   let usage: TokenUsage | null = null
+  let servedModel = opts.model
   try {
     const response = await collectStream(
       opts.provider.stream({
@@ -230,6 +231,7 @@ export async function classifyTopicTags(
     )
 
     usage = response.usage
+    servedModel = response.model || opts.model
 
     const text = response.content
       .filter((b) => b.type === 'text')
@@ -238,7 +240,7 @@ export async function classifyTopicTags(
 
     const cleaned = text.replace(/^```(?:json)?\s*|\s*```$/g, '').trim()
     const jsonMatch = cleaned.match(/\{[\s\S]*\}/)
-    if (!jsonMatch) return { ...FALLBACK_ANALYSIS, usage, model: opts.model }
+    if (!jsonMatch) return { ...FALLBACK_ANALYSIS, usage, model: servedModel }
 
     const parsed = JSON.parse(jsonMatch[0]) as {
       inferred_topic_tags?: unknown
@@ -272,10 +274,10 @@ export async function classifyTopicTags(
       inferred_intent_shift: shift,
       confidence,
       usage,
-      model: opts.model,
+      model: servedModel,
     }
   } catch {
-    return { ...FALLBACK_ANALYSIS, usage, model: usage ? opts.model : undefined }
+    return { ...FALLBACK_ANALYSIS, usage, model: usage ? servedModel : undefined }
   }
 }
 

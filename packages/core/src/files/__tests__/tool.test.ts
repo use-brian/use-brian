@@ -63,7 +63,15 @@ describe('[COMP:files/tool] readFileContent', () => {
     const tool = createReadFileTool(makeFakeFileStore())
     const result = await tool.execute({ fileId: 'file_missing' }, ctx)
     expect(result.isError).toBe(true)
-    expect(String(result.data)).toContain('not found')
+    const data = String(result.data)
+    // Names the id, explains why a valid-looking id can miss (expiry), names
+    // where a valid id comes from (there is no listing tool over the upload
+    // cache), and forbids the blind retry.
+    expect(data).toContain('file_missing')
+    expect(data).toContain('expired')
+    expect(data).toContain('<attached_file id="…">')
+    expect(data).toContain('no tool that lists cached uploads')
+    expect(data).toContain('Do NOT retry this exact id')
   })
 
   it('is read-only and concurrency-safe', () => {

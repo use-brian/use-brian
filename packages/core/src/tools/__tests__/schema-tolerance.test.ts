@@ -16,6 +16,7 @@ import {
   uuidId,
   tolerantObject,
   tolerantEnumArray,
+  tolerantIsoTimestamp,
 } from '../schema-tolerance.js'
 
 describe('[COMP:engine/tool-input-tolerance] schema tolerance helpers', () => {
@@ -134,6 +135,52 @@ describe('[COMP:engine/tool-input-tolerance] schema tolerance helpers', () => {
       // the query rather than reporting the bad input.
       expect(status.safeParse('').success).toBe(false)
       expect(status.safeParse(' , , ').success).toBe(false)
+    })
+  })
+
+  describe('tolerantIsoTimestamp', () => {
+    const asOf = tolerantIsoTimestamp()
+
+    it('widens a bare YYYY-MM-DD date to midnight UTC', () => {
+      // "what did we know on the 14th" — the model emits the bare date, and the
+      // strict shape used to reject it with zod's bare "Invalid datetime".
+      expect(asOf.parse('2026-08-14')).toBe('2026-08-14T00:00:00Z')
+      expect(asOf.parse('  2026-08-14  ')).toBe('2026-08-14T00:00:00Z')
+    })
+
+    it('passes a full ISO timestamp through unchanged, Z or numeric offset', () => {
+      expect(asOf.parse('2026-08-17T09:30:00Z')).toBe('2026-08-17T09:30:00Z')
+      expect(asOf.parse('2026-08-17T09:30:00.500Z')).toBe('2026-08-17T09:30:00.500Z')
+      expect(asOf.parse('2026-08-17T09:30:00+08:00')).toBe('2026-08-17T09:30:00+08:00')
+    })
+
+    it('does NOT invent a zone for a zone-less datetime', () => {
+      // Widening a bare DATE to midnight UTC is the reading the user meant;
+      // guessing a zone for a wall-clock time would silently shift the answer.
+      expect(asOf.safeParse('2026-08-17T09:30:00').success).toBe(false)
+    })
+
+    it('rejects everything else with a message naming BOTH accepted shapes', () => {
+      const bad = asOf.safeParse('last Tuesday')
+      expect(bad.success).toBe(false)
+      const message = bad.success ? '' : bad.error.issues[0]!.message
+      expect(message).toContain('"last Tuesday"')
+      expect(message).toContain('YYYY-MM-DD')
+      expect(message).toContain('ISO 8601')
+      expect(message).toContain('omitting means "now"')
+    })
+
+    it('rejects a non-string with the same shape guidance', () => {
+      const bad = asOf.safeParse(20260814)
+      expect(bad.success).toBe(false)
+      const message = bad.success ? '' : bad.error.issues[0]!.message
+      expect(message).toContain('must be a timestamp string')
+      expect(message).toContain('YYYY-MM-DD')
+    })
+
+    it('rejects a real-looking but impossible date rather than rolling it over', () => {
+      expect(asOf.safeParse('2026-13-01').success).toBe(false)
+      expect(asOf.safeParse('2026-02-30').success).toBe(false)
     })
   })
 })
