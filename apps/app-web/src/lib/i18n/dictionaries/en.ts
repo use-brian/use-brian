@@ -3083,6 +3083,10 @@ export const en = {
       triggerWireRedundant:
         "This entry wire changes nothing: the step already waits on another path from the trigger, so it runs after that path either way.",
       removeConnection: "Remove connection",
+      removeStep: "Remove step",
+      removeStepRefusedLast: "A workflow needs at least one step",
+      removeStepRefusedWidth:
+        "Removing this step would connect a step to more than {n} parallel steps",
       wireRefusedCycle: "That connection would create a loop",
       wireRefusedDuplicate: "Those steps are already connected",
       wireRefusedSelf: "A step can't connect to itself",
@@ -3255,6 +3259,9 @@ export const en = {
       storeOutputAsLabel: "Save output as (optional)",
       storeOutputAsHint: "Later steps can reference this via {{vars.NAME}}.",
       removeStepBtn: "Remove",
+      removeStepLastHint: "A workflow needs at least one step",
+      stepRemoved: "Step removed",
+      undoRemoveStep: "Undo",
       moveStepUp: "Move up",
       moveStepDown: "Move down",
       stepRawJsonLabel: "Raw JSON",

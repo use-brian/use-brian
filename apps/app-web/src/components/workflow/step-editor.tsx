@@ -193,7 +193,7 @@ export function StepEditor({
             <ArrowIcon dir="down" />
           </IconButton>
           <IconButton
-            label={b.removeStepBtn}
+            label={total === 1 ? b.removeStepLastHint : b.removeStepBtn}
             onClick={onRemove}
             disabled={disabled || total === 1}
             danger

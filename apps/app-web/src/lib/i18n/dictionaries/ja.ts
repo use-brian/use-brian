@@ -2880,6 +2880,10 @@ export const ja: Dictionary = {
       triggerWireRedundant:
         "この開始ワイヤーは動作に影響しません。このステップはすでにトリガーからの別の経路を待つため、どちらにしてもその経路の後に実行されます。",
       removeConnection: "接続を削除",
+      removeStep: "ステップを削除",
+      removeStepRefusedLast: "ワークフローには少なくとも1つのステップが必要です",
+      removeStepRefusedWidth:
+        "このステップを削除すると、1つのステップが{n}件を超える並列ステップにつながります",
       wireRefusedCycle: "この接続はループを作るため追加できません",
       wireRefusedDuplicate: "このステップ同士はすでに接続されています",
       wireRefusedSelf: "ステップを自分自身に接続することはできません",
@@ -3055,6 +3059,9 @@ export const ja: Dictionary = {
       storeOutputAsLabel: "出力を変数として保存（任意）",
       storeOutputAsHint: "後続のステップで {{vars.NAME}} として参照できます。",
       removeStepBtn: "削除",
+      removeStepLastHint: "ワークフローには少なくとも1つのステップが必要です",
+      stepRemoved: "ステップを削除しました",
+      undoRemoveStep: "取り消す",
       moveStepUp: "上へ",
       moveStepDown: "下へ",
       stepRawJsonLabel: "Raw JSON",
