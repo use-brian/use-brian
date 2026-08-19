@@ -532,7 +532,12 @@ export async function connectCustomChannel(
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(input),
+      // The route's schema is strict: omit empty optionals rather than sending null.
+      body: JSON.stringify({
+        displayName: input.displayName,
+        ...(input.kind && input.kind.trim() ? { kind: input.kind.trim() } : {}),
+        ...(input.defaultAssistantId ? { defaultAssistantId: input.defaultAssistantId } : {}),
+      }),
     },
   );
   if (!res.ok) {

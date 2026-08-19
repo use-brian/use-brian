@@ -1319,6 +1319,25 @@ describe('[COMP:api/channels-route] custom channels', () => {
     expect(customChannelStore.putState).toHaveBeenCalledWith('chan-cu', expect.objectContaining({ status: 'connecting' }))
   })
 
+  it('POST /custom accepts kind: null / "" from an empty form field as "no kind"', async () => {
+    vi.mocked(findOrCreateChannelForWorkspaceConnect).mockResolvedValue({ channelId: 'chan-cu2', reused: false })
+    vi.mocked(getChannelForUser).mockResolvedValue(
+      makeChannel({ id: 'chan-cu2', channelType: 'custom', displayName: 'Wechat', enabledCapabilities: ['chat'] }),
+    )
+    const upsert = vi.fn()
+    const integrationStore = { upsert, listForWorkspace: vi.fn().mockResolvedValue([]) } as unknown as ChannelIntegrationStore
+    for (const kind of [null, '', '  ']) {
+      upsert.mockClear()
+      const res = await request(buildApp({ integrationStore, customChannelStore: makeCustomStore() }))
+        .post('/api/workspaces/ws-1/channels/custom')
+        .send({ displayName: 'Wechat', kind, defaultAssistantId: ASSISTANT_UUID })
+      expect(res.status).toBe(201)
+      expect(res.body.kind).toBe(null)
+      const creds = upsert.mock.calls[0][0].credentials as { kind?: string }
+      expect(creds.kind).toBeUndefined()
+    }
+  })
+
   it('POST /custom 400s on a missing displayName and 503s without the store', async () => {
     const integrationStore = { upsert: vi.fn() } as unknown as ChannelIntegrationStore
     const bad = await request(buildApp({ integrationStore, customChannelStore: makeCustomStore() }))

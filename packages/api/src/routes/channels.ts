@@ -231,7 +231,11 @@ const wechatPairStartSchema = z.object({
 const connectCustomSchema = z.object({
   displayName: z.string().min(1).max(200),
   // Free label (`wechat-desktop`, `sms-gateway`) for display + per-kind guide.
-  kind: z.string().min(1).max(64).regex(/^[a-z0-9][a-z0-9._-]*$/i).optional(),
+  // An empty form field arrives as null or "" - both mean "no kind".
+  kind: z.preprocess(
+    (v) => (v === null || (typeof v === 'string' && v.trim() === '') ? undefined : v),
+    z.string().min(1).max(64).regex(/^[a-z0-9][a-z0-9._-]*$/i).optional(),
+  ),
   defaultAssistantId: z.string().uuid().nullish(),
 }).strict()
 
