@@ -514,6 +514,7 @@ const INTERACTIVE_CHAT_CHANNELS = new Set([
   'discord',
   'msteams',
   'wechat',
+  'custom',
   'imessage',
 ])
 
@@ -997,7 +998,10 @@ async function dependencyIssues(
         // Teams targets have no channel-enumeration API to preflight against
         // (the listTeamsChannels equivalent is a P5 follow-up), so they skip
         // reachability validation — the send simply attempts at run time.
-        step.deliver.channelType !== 'msteams'
+        step.deliver.channelType !== 'msteams' &&
+        // Custom (bridge-driven) channels likewise: the bridge owns the peer
+        // directory, so there is nothing API-side to preflight against.
+        step.deliver.channelType !== 'custom'
       ) {
         targets.push({
           stepId: step.id,

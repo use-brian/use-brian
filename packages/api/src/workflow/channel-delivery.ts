@@ -33,10 +33,12 @@ import {
   createWhatsAppAdapter,
   createWhatsAppCloudAdapter,
   createMsTeamsAdapter,
+  createCustomAdapter,
   describeSlackError,
   isSlackApiError,
 } from '@use-brian/channels'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
+import type { CustomChannelStore } from '../db/custom-channel-store.js'
 import { findOrCreateSession, addSessionMessage } from '../db/sessions.js'
 import { query } from './../db/client.js'
 import { whatsappCloudUserAllowed } from '../whatsapp/cloud-access.js'
@@ -51,6 +53,12 @@ export type WorkflowChannelDeliveryOptions = {
   waConnectorSecret?: string
   /** Injectable clock for customer-service-window checks. */
   now?: () => number
+  /**
+   * Custom (bridge-driven) channel outbox. A custom delivery enqueues a
+   * `message` item on the workspace channel for the bridge to pull
+   * (docs/architecture/channels/custom-channel.md).
+   */
+  customChannelStore?: Pick<CustomChannelStore, 'enqueue'>
 }
 
 /**
@@ -271,6 +279,35 @@ export function createWorkflowChannelDelivery(
         botId: integ.botUserId ?? undefined,
       }).sendMessage(channelId, { text: deliverable, format: 'markdown' })
       return { status: 'delivered', channelType, channelId, messageId: msgId || undefined }
+    }
+
+    if (channelType === 'custom') {
+      if (!options.integrationStore || !options.customChannelStore) {
+        return { status: 'skipped', channelType, reason: 'no_integration' }
+      }
+      // The workspace channel is the delivery "account"; `channelId` here is
+      // the peer (conversation) id on the bridged platform. Resolve the
+      // channel through the assistant's routing (exact integration when the
+      // step pinned one), then enqueue for the bridge.
+      const integ = channelIntegrationId
+        ? await options.integrationStore.getCredentialsForAssistantIntegrationSystem(
+            workspaceId,
+            assistantId,
+            channelIntegrationId,
+            'custom',
+            channelId,
+          )
+        : await options.integrationStore.getCredentialsForAssistantSystem(assistantId, 'custom')
+      if (!integ) return { status: 'skipped', channelType, reason: 'no_integration' }
+      const workspaceChannelId = integ.channelId
+      const enqueue = options.customChannelStore
+      const outboxId = await createCustomAdapter({
+        enqueue: (item) => enqueue.enqueue(workspaceChannelId, { type: item.type, peerId: item.peerId, payload: item.payload }),
+      }).sendMessage(channelId, {
+        text: deliverable,
+        format: 'markdown',
+      })
+      return { status: 'delivered', channelType, channelId, messageId: outboxId || undefined }
     }
 
     if (channelType === 'whatsapp') {

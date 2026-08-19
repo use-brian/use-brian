@@ -19,7 +19,15 @@ import { authFetch } from "@/lib/auth-fetch";
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
-export type ChannelType = "telegram" | "slack" | "whatsapp" | "discord" | "email" | "msteams" | "wechat";
+export type ChannelType =
+  | "telegram"
+  | "slack"
+  | "whatsapp"
+  | "discord"
+  | "email"
+  | "msteams"
+  | "wechat"
+  | "custom";
 export type ChannelClearance = "public" | "internal" | "confidential";
 export type ChannelCapability = "chat" | "broadcast" | "ingest";
 type ChannelStatus = "active" | "revoked" | "invalid";
@@ -476,6 +484,138 @@ export async function submitWechatVerifyCode(
   if (!res.ok) {
     const data = (await res.json().catch(() => ({}))) as { error?: string };
     throw new Error(data.error ?? `Code submit failed (${res.status})`);
+  }
+}
+
+// ── Custom channels — operator-run bridge ───────────────────────
+// docs/architecture/channels/custom-channel.md → "Workspace-facing routes".
+
+type CustomChannelStatus =
+  | "connecting"
+  | "needs_action"
+  | "connected"
+  | "disconnected"
+  | "error";
+
+type CustomChannelAction =
+  | { kind: "qr"; imageDataUrl?: string; url?: string; text?: string; expiresAt?: string }
+  | { kind: "input"; prompt: string; inputKind: "numeric" | "text"; requestId: string }
+  | { kind: "confirm_on_device"; message: string };
+
+/** The last state the bridge published, plus the API's liveness view of it. */
+export type CustomChannelState = {
+  status: CustomChannelStatus;
+  message?: string | null;
+  accountLabel?: string | null;
+  action?: CustomChannelAction | null;
+  bridgeVersion?: string | null;
+  lastSeenAt: string | null;
+  /** Derived server-side from `lastSeenAt` (90 s). A stale bridge is offline whatever it last said. */
+  online: boolean;
+  outboxDepth: number;
+};
+
+/** What a bridge needs to boot: the token is returned ONCE, only its hash is stored. */
+export type ConnectCustomChannelResult = { channel: Channel; bridgeToken: string };
+
+/** Path (relative to the API origin) a bridge for this channel talks to. */
+export function customChannelBridgePath(channelId: string): string {
+  return `/bridge/v1/channels/${encodeURIComponent(channelId)}`;
+}
+
+export async function connectCustomChannel(
+  workspaceId: string,
+  input: { displayName: string; kind?: string | null; defaultAssistantId?: string | null },
+): Promise<ConnectCustomChannelResult> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/channels/custom`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string; detail?: string };
+    throw new Error(data.detail ?? data.error ?? `Custom channel create failed (${res.status})`);
+  }
+  return (await res.json()) as ConnectCustomChannelResult;
+}
+
+export async function rotateCustomChannelToken(
+  workspaceId: string,
+  channelId: string,
+): Promise<{ bridgeToken: string }> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/channels/${encodeURIComponent(channelId)}/custom/rotate-token`,
+    { method: "POST" },
+  );
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(data.error ?? `Token rotate failed (${res.status})`);
+  }
+  return (await res.json()) as { bridgeToken: string };
+}
+
+/**
+ * Bridge state for the Studio card. A bridge that has never reported leaves
+ * the route with nothing to say — an empty / null body is normalized to
+ * `connecting` + offline so the card renders the "not reported yet" line.
+ */
+export async function getCustomChannelState(
+  workspaceId: string,
+  channelId: string,
+): Promise<CustomChannelState> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/channels/${encodeURIComponent(channelId)}/custom/state`,
+  );
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(data.error ?? `Bridge state failed (${res.status})`);
+  }
+  const raw = (await res.json().catch(() => null)) as Partial<CustomChannelState> | null;
+  return {
+    status: raw?.status ?? "connecting",
+    message: raw?.message ?? null,
+    accountLabel: raw?.accountLabel ?? null,
+    action: raw?.action ?? null,
+    bridgeVersion: raw?.bridgeVersion ?? null,
+    lastSeenAt: raw?.lastSeenAt ?? null,
+    online: raw?.online ?? false,
+    outboxDepth: typeof raw?.outboxDepth === "number" ? raw.outboxDepth : 0,
+  };
+}
+
+export async function submitCustomChannelInput(
+  workspaceId: string,
+  channelId: string,
+  input: { requestId: string; value: string },
+): Promise<void> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/channels/${encodeURIComponent(channelId)}/custom/input`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(data.error ?? `Input submit failed (${res.status})`);
+  }
+}
+
+export async function disconnectCustomChannel(
+  workspaceId: string,
+  channelId: string,
+): Promise<void> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/channels/${encodeURIComponent(channelId)}/custom/disconnect`,
+    { method: "POST" },
+  );
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(data.error ?? `Bridge disconnect failed (${res.status})`);
   }
 }
 

@@ -36,7 +36,7 @@ import { getPool, query, queryWithRLS } from './client.js'
 
 // ── Types ──────────────────────────────────────────────────────
 
-export type ChannelType = 'telegram' | 'slack' | 'whatsapp' | 'discord' | 'email' | 'msteams' | 'wechat'
+export type ChannelType = 'telegram' | 'slack' | 'whatsapp' | 'discord' | 'email' | 'msteams' | 'wechat' | 'custom'
 export type ChannelClearance = 'public' | 'internal' | 'confidential'
 export type ChannelCapability = 'chat' | 'broadcast' | 'ingest'
 export type ChannelStatus = 'active' | 'revoked' | 'invalid'
@@ -97,6 +97,10 @@ export const CHANNEL_CAPABILITIES: Record<ChannelType, ChannelCapability[]> = {
   // WeChat iLink bots are DMs-only chat — no groups, no broadcast surface,
   // no ingest substrate (docs/architecture/channels/wechat.md).
   wechat: ['chat'],
+  // Custom (bridge-driven) channels are chat only: the bridge protocol v1
+  // models no broadcast surface and no ingest substrate
+  // (docs/architecture/channels/custom-channel.md).
+  custom: ['chat'],
 }
 
 /**
