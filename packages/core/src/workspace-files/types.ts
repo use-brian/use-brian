@@ -168,12 +168,11 @@ export type WorkspaceFileSupersedePatch = {
   sizeBytes: number
   mime?: string
   /**
-   * Optional successor path. The SV(2) convention is path-stable
-   * (omit and the successor inherits the prior row's path); however
-   * mig 119's `UNIQUE (workspace_id, path)` is not yet partial on
-   * `valid_to IS NULL`, so path-stable supersession trips the
-   * constraint. Pass an alternate path to work around this until a
-   * follow-up migration relaxes the constraint.
+   * Optional successor path. The SV(2) convention is path-stable — omit
+   * and the successor inherits the prior row's path, which mig 445 made
+   * possible by scoping the `(workspace_id, path)` uniqueness to the
+   * current version (`WHERE valid_to IS NULL`). Pass a path only for a
+   * genuine rename.
    */
   path?: string
   parentPath?: string
@@ -189,9 +188,10 @@ export type WorkspaceFileSupersedePatch = {
 
 export type WorkspaceFilesStore = {
   /**
-   * Insert a row. Throws on UNIQUE(workspace_id, path) collision — the
-   * caller decides whether to surface as overwrite (delete + create) or
-   * a clear error.
+   * Insert a row. Throws pg `23505` on a collision with the CURRENT row
+   * at that path (`uq_workspace_files_current_path`, mig 445) — the caller
+   * decides whether to surface as overwrite (delete + create) or a clear
+   * error. Historical versions at the same path never collide.
    */
   create(userId: string, input: WorkspaceFileCreateInput): Promise<WorkspaceFile>
 
@@ -264,10 +264,10 @@ export type WorkspaceFilesStore = {
    * null if the source id has no current row.
    *
    * Called by the WU-6 staged_write approval flow when an iteration
-   * lands. The legacy UNIQUE(workspace_id, path) constraint on mig 119
-   * blocks path-stable supersession; a follow-up migration must make
-   * the constraint partial (`WHERE valid_to IS NULL`) before the SV(2)
-   * convention works end-to-end.
+   * lands. Path-stable per the SV(2) convention: the close and the insert
+   * share one transaction, and mig 445 scoped the `(workspace_id, path)`
+   * uniqueness to the current version, so the successor can claim the
+   * path the predecessor just released.
    */
   supersede(
     userId: string,
