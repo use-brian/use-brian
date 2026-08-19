@@ -83,6 +83,10 @@ import {
   pageIdFromPathname,
 } from "@/lib/doc-page-url";
 import { DOC_COMMENTS_CHANGED_EVENT } from "@/lib/comment-events";
+import {
+  SlashCommandMenuList,
+  useSlashCommands,
+} from "@/components/chat-app/slash-command-autocomplete";
 import { isHostedEdition } from "@/lib/edition";
 import { modelTierPlanGateApplies } from "@/lib/plan-gate";
 import {
@@ -490,6 +494,16 @@ export function FloatingChat({
   const searchParams = useSearchParams();
   const [expanded, setExpanded] = useState(false);
   const [input, setInput] = useState("");
+  /** Anchors the slash-command popup and scopes its outside-click dismissal
+   *  to the composer area. */
+  const slashContainerRef = useRef<HTMLDivElement | null>(null);
+  const slashCommands = useSlashCommands({
+    enabled: true,
+    workspaceId,
+    value: input,
+    onChange: setInput,
+    containerRef: slashContainerRef,
+  });
   const [pendingSurfaceSeed, setPendingSurfaceSeed] =
     useState<SurfaceChatSeed | null>(null);
   const surfaceSeedAttemptRef = useRef<SurfaceChatSeed | null>(null);
@@ -3137,7 +3151,16 @@ export function FloatingChat({
         </div>
 
         {/* Composer */}
-        <div className="shrink-0 border-t border-border bg-card/40 px-3 py-2.5">
+        <div
+          ref={slashContainerRef}
+          className="relative shrink-0 border-t border-border bg-card/40 px-3 py-2.5"
+        >
+          {/* Slash-command menu — offers invocable skills while the draft is a
+              half-typed `/command`; the server seam resolves the real thing. */}
+          <SlashCommandMenuList
+            commands={slashCommands}
+            className="bottom-full left-3 mb-1"
+          />
           {/* Live-browser chip — a persistent window into the assistant's
               cloud browser (watch / take over), probed off the task API so it
               never depends on the model relaying a link. */}
@@ -3171,6 +3194,7 @@ export function FloatingChat({
           <ChatComposer
             value={input}
             onChange={setInput}
+            onKeyDown={slashCommands.handleKeyDown}
             // While a turn streams, Send QUEUES: the message is handed to the
             // running turn, which takes it at its next safe boundary.
             // Cmd/Ctrl+Enter steers instead — take it as soon as possible.

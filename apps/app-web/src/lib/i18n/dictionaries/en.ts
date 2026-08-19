@@ -511,6 +511,10 @@ export const en = {
     commentDrawerTitle: "Comment",
     commentDrawerClose: "Close",
     comments: {
+      selectionAction: "Comment",
+      selectionAria: "Comment on the selected text",
+      composerAria: "New comment",
+      cancel: "Cancel",
       heading: "Comments",
       namePlaceholder: "Your name",
       placeholder: "Add a comment",
@@ -5533,6 +5537,8 @@ export const en = {
     postFailed: "Could not post your message. Try again.",
     stopTurnFailed: "Could not stop the turn. Try again.",
     mentionInsertAria: "Mention {name}",
+    slashMenuLabel: "Commands",
+    slashInsertAria: "Run /{slug}",
     // Editing a sent message: the repair for a post that addresses nobody.
     editMessage: "Edit",
     editSave: "Save",

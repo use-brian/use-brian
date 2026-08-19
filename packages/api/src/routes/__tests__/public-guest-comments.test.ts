@@ -100,6 +100,21 @@ describe('[COMP:doc/public-share-route] Guest comment routes (shared mount)', ()
     )
   })
 
+  it('a range comment persists anchorBlockId + quote (trimmed, bounded); a quote with no block is dropped', async () => {
+    const app = appFor('/public/published/:pageId', async () => target('comment'))
+    const res = await request(app)
+      .post(`/api/public/published/${PAGE}/comment-threads`)
+      .send({ guestName: 'Ada', body: 'why?', anchorBlockId: ' blk-7 ', quote: '  the second claim ' })
+    expect(res.status).toBe(201)
+    expect(createGuestThread).toHaveBeenCalledWith(
+      expect.objectContaining({ anchorBlockId: 'blk-7', quote: 'the second claim' }),
+    )
+    // Page-level comment: no anchor, and an orphan quote does not sneak through.
+    createGuestThread.mockClear()
+    await request(app).post(`/api/public/published/${PAGE}/comment-threads`).send({ body: 'hi', quote: 'loose' })
+    expect(createGuestThread).toHaveBeenCalledWith(expect.objectContaining({ anchorBlockId: null, quote: null }))
+  })
+
   it('reuses a presented guest token instead of minting a new one', async () => {
     const app = appFor('/public/published/:pageId', async () => target('comment'))
     const res = await request(app)

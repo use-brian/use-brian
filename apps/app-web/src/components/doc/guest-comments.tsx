@@ -16,7 +16,7 @@
  * [COMP:app-web/share-dialog]
  */
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useT } from "@/lib/i18n/client";
 import {
   listGuestComments,
@@ -34,23 +34,78 @@ export function guestIdentityKey(source: PublicSource, rootPageId?: string): str
   return `published:${rootPageId ?? source.pageId}`;
 }
 
-export function GuestComments({ source, identityKey }: { source: PublicSource; identityKey: string }) {
-  const t = useT().sharedPage.comments;
+/** Window event fired when a guest's session token is minted, so every
+ *  composer on the page (the page-level section + the selection composer)
+ *  learns the identity at once — they share one name and one token. */
+const GUEST_TOKEN_EVENT = "doc:share-guest-token";
+
+/**
+ * The guest's identity for one share: the session token (null until their
+ * first comment mints it) + the display name they typed. Persisted in
+ * sessionStorage under the share identity key; `adopt(token)` stores a freshly
+ * minted token and broadcasts it to every other mounted instance.
+ */
+export function useGuestIdentity(identityKey: string): {
+  guestToken: string | null;
+  adopt: (token: string) => void;
+  name: string;
+  setName: (name: string) => void;
+} {
   const storageKey = `doc:share-guest:${identityKey}`;
   const [guestToken, setGuestToken] = useState<string | null>(null);
   const [name, setName] = useState("");
+
+  useEffect(() => {
+    const read = () => {
+      const saved = typeof window !== "undefined" ? window.sessionStorage.getItem(storageKey) : null;
+      setGuestToken(saved);
+    };
+    read();
+    const onMinted = (e: Event) => {
+      const key = (e as CustomEvent<{ storageKey: string }>).detail?.storageKey;
+      if (key === storageKey) read();
+    };
+    window.addEventListener(GUEST_TOKEN_EVENT, onMinted);
+    return () => window.removeEventListener(GUEST_TOKEN_EVENT, onMinted);
+  }, [storageKey]);
+
+  const adopt = useCallback(
+    (token: string) => {
+      window.sessionStorage.setItem(storageKey, token);
+      setGuestToken(token);
+      window.dispatchEvent(new CustomEvent(GUEST_TOKEN_EVENT, { detail: { storageKey } }));
+    },
+    [storageKey],
+  );
+
+  return { guestToken, adopt, name, setName };
+}
+
+export function GuestComments({
+  source,
+  identityKey,
+  onPosted,
+}: {
+  source: PublicSource;
+  identityKey: string;
+  /** Fired after a comment lands — the page view re-fetches so the new thread
+   *  shows in the rail (a guest's threads are in the public payload). */
+  onPosted?: () => void;
+}) {
+  const t = useT().sharedPage.comments;
+  const { guestToken, adopt, name, setName } = useGuestIdentity(identityKey);
   const [draft, setDraft] = useState("");
   const [threads, setThreads] = useState<GuestThreadView[]>([]);
   const [posting, setPosting] = useState(false);
 
   // `source` is the route's prop (stable per navigation), so it is a safe dep.
+  // Re-lists whenever the token changes — including when the SELECTION
+  // composer mints it (the shared identity broadcasts), so a range comment
+  // posted up in the text shows in this list too.
   useEffect(() => {
-    const saved = typeof window !== "undefined" ? window.sessionStorage.getItem(storageKey) : null;
-    if (saved) {
-      setGuestToken(saved);
-      listGuestComments(source, saved).then(setThreads).catch(() => {});
-    }
-  }, [storageKey, source]);
+    if (!guestToken) return;
+    listGuestComments(source, guestToken).then(setThreads).catch(() => {});
+  }, [guestToken, source]);
 
   async function post() {
     const body = draft.trim();
@@ -64,12 +119,10 @@ export function GuestComments({ source, identityKey }: { source: PublicSource; i
         body,
       });
       if (result) {
-        if (!guestToken) {
-          setGuestToken(result.guestSessionToken);
-          window.sessionStorage.setItem(storageKey, result.guestSessionToken);
-        }
+        if (!guestToken) adopt(result.guestSessionToken);
         setDraft("");
         setThreads(await listGuestComments(source, result.guestSessionToken));
+        onPosted?.();
       }
     } finally {
       setPosting(false);

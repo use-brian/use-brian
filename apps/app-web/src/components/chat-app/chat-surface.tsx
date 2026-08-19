@@ -195,6 +195,10 @@ import {
   useAssistantMentions,
 } from "@/components/chat-app/mention-autocomplete";
 import {
+  SlashCommandMenuList,
+  useSlashCommands,
+} from "@/components/chat-app/slash-command-autocomplete";
+import {
   canEditUserMessage,
   resolveEditDispatch,
 } from "@/components/chat-app/message-edit";
@@ -406,6 +410,18 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     assistants,
     value: input,
     onChange: setInput,
+  });
+  /** Slash-command discovery — a draft that is a half-typed `/command` offers
+   *  the invocable skills; the send stays an ordinary message and the server
+   *  seam does the real resolution. Anchored to the same composer box as the
+   *  mention popup (the two queries are mutually exclusive: one starts with
+   *  `/`, the other contains `@`). */
+  const slashCommands = useSlashCommands({
+    enabled: true,
+    workspaceId,
+    value: input,
+    onChange: setInput,
+    containerRef: mentions.containerRef,
   });
   /** The same autocomplete inside the inline message editor — one instance is
    *  enough because only one message is editable at a time. */
@@ -2973,10 +2989,17 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         mentions={mentions}
         className="bottom-full left-2 mb-1"
       />
+      {/* Slash-command menu — same anchor box, mutually exclusive query. */}
+      <SlashCommandMenuList
+        commands={slashCommands}
+        className="bottom-full left-2 mb-1"
+      />
       <ChatComposer
         value={input}
         onChange={setInput}
         onKeyDown={(event) => {
+          slashCommands.handleKeyDown(event);
+          if (event.defaultPrevented) return;
           mentions.handleKeyDown(event);
           if (event.defaultPrevented) return;
           // Escape drops the quote before it drops anything else — the

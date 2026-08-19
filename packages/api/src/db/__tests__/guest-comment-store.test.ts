@@ -13,7 +13,8 @@ vi.mock('../sessions.js', () => ({
 }))
 vi.mock('../comment-thread-store.js', () => ({ COMMENT_THREAD_CHANNEL_TYPE: 'doc_thread' }))
 
-const { createGuestThread, addGuestComment, SENTINEL_GUEST_USER_ID } = await import('../guest-comment-store.js')
+const { createGuestThread, addGuestComment, guestAuthorNameForSession, guestSenderProfile, SENTINEL_GUEST_USER_ID } =
+  await import('../guest-comment-store.js')
 
 describe('[COMP:doc/guest-comment] Guest comment store', () => {
   beforeEach(() => {
@@ -68,5 +69,22 @@ describe('[COMP:doc/guest-comment] Guest comment store', () => {
     expect(addSessionMessage).toHaveBeenCalledWith(
       expect.objectContaining({ senderUserId: SENTINEL_GUEST_USER_ID, sessionId: 'sess-1' }),
     )
+  })
+
+  it('attributes a sentinel-authored row to the thread\'s guest name, and leaves other senders alone', () => {
+    expect(guestSenderProfile(SENTINEL_GUEST_USER_ID, 'Ada Guest')).toEqual({ name: 'Ada Guest', avatarUrl: null })
+    expect(guestSenderProfile(SENTINEL_GUEST_USER_ID, '  ')).toEqual({ name: 'Guest', avatarUrl: null })
+    expect(guestSenderProfile(SENTINEL_GUEST_USER_ID, null)).toEqual({ name: 'Guest', avatarUrl: null })
+    expect(guestSenderProfile('user-member', 'Ada Guest')).toBeNull()
+    expect(guestSenderProfile(null, 'Ada Guest')).toBeNull()
+  })
+
+  it('reads the guest name off the thread row by session (null for a member thread)', async () => {
+    query.mockResolvedValueOnce({ rows: [{ name: 'Ada Guest' }] })
+    expect(await guestAuthorNameForSession('sess-1')).toBe('Ada Guest')
+    expect(query.mock.calls[0][0]).toMatch(/external_author_name/)
+    expect(query.mock.calls[0][1]).toEqual(['sess-1'])
+    query.mockResolvedValueOnce({ rows: [] })
+    expect(await guestAuthorNameForSession('sess-2')).toBeNull()
   })
 })

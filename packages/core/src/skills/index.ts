@@ -42,6 +42,8 @@ export type {
   ParsedImport,
 } from './import-format.js'
 export { formatSkillListing } from './listing.js'
+export { parseSlashCommand, buildSlashCommandBlock } from './slash-command.js'
+export type { SlashCommandInvocation } from './slash-command.js'
 export { createUseSkillTool } from './tool.js'
 export type { UseSkillToolParams } from './tool.js'
 export {
