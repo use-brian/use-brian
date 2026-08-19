@@ -294,9 +294,9 @@ describeIf('[COMP:corrections/row-history] unified getRowHistory dispatch', () =
       // WU-4.5 authorship enforcement requires this on every insert.
       createdByUserId: userId,
     })
-    // Path-stable supersession trips mig 119's UNIQUE constraint until a
-    // follow-up partial-index migration lands; pass an alternate path
-    // per WorkspaceFileSupersedePatch docs.
+    // Rename variant — the history chain is what this test asserts, so the
+    // successor moves paths. (Path-stable supersession is exercised in
+    // workspace-files-supersession.integration.test.ts.)
     const f2 = await files.supersedeWorkspaceFile(userId, workspaceId, f1.id, {
       editorUserId: userId,
       storageUri: 'gs://bucket/draft.md-v2',

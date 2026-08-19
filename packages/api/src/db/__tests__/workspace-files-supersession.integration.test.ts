@@ -7,14 +7,14 @@ import { randomUUID } from 'node:crypto'
  * WU-2.4 (workspace_files store update). Schema is mig 119 + mig 128;
  * supersession SQL lives in `workspace-files.ts`.
  *
- * Constraint blocker: `workspace_files` carries `UNIQUE (workspace_id,
- * path)` from mig 119 (not relaxed in mig 128). The SV(2) path-stable
- * supersession the spec calls for therefore cannot run end-to-end yet
- * — those variants are marked `it.todo()` until a follow-up migration
- * makes the constraint partial on `valid_to IS NULL`. The variants
- * here use a `path` override on the supersede patch so the successor
- * lands on a fresh path; that still exercises the full transactional
- * SQL (UPDATE old + INSERT new + chain wiring).
+ * Path uniqueness: mig 445 replaced mig 119's unscoped `UNIQUE
+ * (workspace_id, path)` with the partial `uq_workspace_files_current_path
+ * ... WHERE valid_to IS NULL`, so the key belongs to the CURRENT version
+ * only. That is what makes path-stable supersession and re-upload after a
+ * Brain delete possible; both are covered below alongside the still-live
+ * guarantee that two current rows cannot share a path. The older variants
+ * keep their `path` override on the patch — a rename is a real supersession
+ * shape and still exercises the same transactional SQL.
  *
  * Skips silently when the DB is unavailable or mig 128 hasn't applied.
  */
@@ -116,10 +116,10 @@ describeIf('[COMP:files/supersession] workspace_files supersession (integration)
   it('supersede closes the old window and inserts a successor', async () => {
     const v1 = await seedFile('/drafts/x.md', { tags: ['draft'], sizeBytes: 10 })
 
-    // Use a path override to dodge the mig-119 UNIQUE(workspace_id, path)
-    // constraint until the follow-up migration relaxes it. This still
-    // exercises the full supersession SQL — UPDATE old + INSERT new in
-    // one transaction, chain wiring, and the universal-column carry-over.
+    // Rename variant: the successor lands on a fresh path. Exercises the full
+    // supersession SQL — UPDATE old + INSERT new in one transaction, chain
+    // wiring, and the universal-column carry-over. The path-STABLE variant
+    // (mig 445) is covered separately below.
     const v2 = await store.supersede(userId, workspaceId, v1.id, {
       editorUserId: userId,
       storageUri: `gs://test/${workspaceId}/${randomUUID()}`,
@@ -144,6 +144,47 @@ describeIf('[COMP:files/supersession] workspace_files supersession (integration)
     )
     expect(old.rows[0].valid_to).not.toBeNull()
     expect(old.rows[0].superseded_by).toBe(v2!.id)
+  })
+
+  it('a soft-deleted file releases its path, so the same file can be uploaded again', async () => {
+    const v1 = await seedFile('/uploads/report.pdf')
+
+    // Exactly what DELETE /api/brain-inbox/:ws/workspace_file/:id writes.
+    await pool!.query(`UPDATE workspace_files SET valid_to = now() WHERE id = $1`, [v1.id])
+
+    // Before mig 445 this threw 23505: the row was gone from every
+    // current-version read (so the upload pre-checks waved it through) yet
+    // still owned the path, and the user could never re-upload the file they
+    // had just deleted.
+    const v2 = await seedFile('/uploads/report.pdf')
+    expect(v2.id).not.toBe(v1.id)
+    expect(v2.validTo).toBeNull()
+
+    const current = await store.getByPath(
+      { workspaceId, userId, assistantId: userId, assistantKind: 'standard' },
+      '/uploads/report.pdf',
+    )
+    expect(current?.id).toBe(v2.id)
+  })
+
+  it('two CURRENT rows still cannot share a path', async () => {
+    await seedFile('/uploads/dup.pdf')
+    await expect(seedFile('/uploads/dup.pdf')).rejects.toMatchObject({ code: '23505' })
+  })
+
+  it('supersession can keep the path (the successor claims it in the same transaction)', async () => {
+    const v1 = await seedFile('/drafts/stable.md', { sizeBytes: 10 })
+
+    const v2 = await store.supersede(userId, workspaceId, v1.id, {
+      editorUserId: userId,
+      storageUri: `gs://test/${workspaceId}/${randomUUID()}`,
+      sizeBytes: 20,
+    })
+
+    expect(v2).not.toBeNull()
+    expect(v2!.path).toBe('/drafts/stable.md')
+    expect(v2!.id).not.toBe(v1.id)
+    expect(v2!.validTo).toBeNull()
   })
 
   it('reads of superseded rows return null by default', async () => {
@@ -233,7 +274,29 @@ describeIf('[COMP:files/supersession] workspace_files supersession (integration)
     expect(current?.validTo).toBeNull()
   })
 
-  it.todo('path-stable supersession (SV(2) convention) — blocked by UNIQUE(workspace_id, path) on mig 119; needs follow-up migration to make the constraint partial on valid_to IS NULL')
+  it('a path-stable chain keeps three versions at one path, only the last current', async () => {
+    const v1 = await seedFile('/drafts/stable-chain.md', { sizeBytes: 1 })
+    const v2 = await store.supersede(userId, workspaceId, v1.id, {
+      editorUserId: userId,
+      storageUri: `gs://test/${workspaceId}/${randomUUID()}`,
+      sizeBytes: 2,
+    })
+    const v3 = await store.supersede(userId, workspaceId, v2!.id, {
+      editorUserId: userId,
+      storageUri: `gs://test/${workspaceId}/${randomUUID()}`,
+      sizeBytes: 3,
+    })
 
-  it.todo('path-stable transitive chain — blocked by the same UNIQUE constraint as the path-reuse single-step case')
+    const rows = await pool!.query<{ id: string; path: string; valid_to: Date | null }>(
+      `SELECT id, path, valid_to FROM workspace_files
+        WHERE workspace_id = $1 AND path = '/drafts/stable-chain.md'
+        ORDER BY valid_from`,
+      [workspaceId],
+    )
+    expect(rows.rows.map((r) => r.id)).toEqual([v1.id, v2!.id, v3!.id])
+    // Three rows share the path; exactly one is current, which is the whole
+    // point of scoping the unique index to `valid_to IS NULL`.
+    expect(rows.rows.filter((r) => r.valid_to === null)).toHaveLength(1)
+    expect(rows.rows[2].valid_to).toBeNull()
+  })
 })

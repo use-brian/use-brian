@@ -72,7 +72,12 @@ function makeFakeStore(): WorkspaceFilesStore & { rows: Map<string, WorkspaceFil
     async create(_userId, input: WorkspaceFileCreateInput) {
       for (const r of rows.values()) {
         if (r.workspaceId === input.workspaceId && r.path === input.path) {
-          const dupe = new Error('duplicate key value violates unique constraint "workspace_files_workspace_id_path_key"')
+          // Shaped like the real pg error — `code` is what the API classifies
+          // on, so a fake that omits it would test a violation that can't happen.
+          const dupe = Object.assign(
+            new Error('duplicate key value violates unique constraint "uq_workspace_files_current_path"'),
+            { code: '23505' },
+          )
           throw dupe
         }
       }
@@ -258,6 +263,31 @@ describe('[COMP:files/api] createFilesApi.write', () => {
     await expect(api.write(ctx, { path: '/r.md', content: 'data' })).rejects.toThrow('simulated DB failure')
     expect(gcs.blobs.size).toBe(0)
     expect(originalCreate).toBeDefined()
+  })
+
+  it('maps an insert-time unique violation to conflict, not a bare throw', async () => {
+    // The `getByPath` gate is a CURRENT-version, access-scoped read; the DB
+    // constraint is neither. A row the caller cannot see — one that left the
+    // current window between the check and the insert, or one above their
+    // clearance — passes the gate and still collides at INSERT. That has to
+    // answer `conflict` (which the surface can explain) rather than a 500.
+    const gcs = makeFakeGcs()
+    const store = makeFakeStore()
+    store.create = vi.fn(async () => {
+      throw Object.assign(
+        new Error('duplicate key value violates unique constraint "uq_workspace_files_current_path"'),
+        { code: '23505' },
+      )
+    }) as typeof store.create
+
+    const api = createFilesApi({ gcs, store, auditStore: makeFakeAudit(), bucket: 'b' })
+    const result = await api.write(ctx, { path: '/hidden.md', content: 'data' })
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.error.kind).toBe('conflict')
+    }
+    // Blob rollback still runs — the bytes must not outlive the failed insert.
+    expect(gcs.blobs.size).toBe(0)
   })
 })
 
