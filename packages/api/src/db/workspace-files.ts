@@ -376,6 +376,33 @@ export async function deleteWorkspaceFile(
   return result.rows.length > 0
 }
 
+/**
+ * Close the derived `file_segments` of a file that just left the current
+ * bi-temporal window (soft delete).
+ *
+ * Every retrieval predicate reads the SEGMENT's own window — `visibilityPredicate`
+ * in `retrieval-store.ts` filters `fs.valid_to` / `fs.retracted_at` and never
+ * joins the parent `workspace_files` row. Closing only the file therefore drops
+ * it off the Brain list while leaving its extracted text fully searchable and
+ * readable: `searchFileContent`, `readFileSegmentRange` and the brain
+ * `file_segment` arm all keep answering from a file the user deleted. The
+ * hard-delete path never had this problem (mig 297's FK is
+ * `ON DELETE CASCADE`); only the soft path needs the explicit close.
+ *
+ * System-level (no RLS) — the caller has already proven workspace ownership.
+ * Mirrors the same cascade `supersedeWorkspaceFile` runs in-transaction and
+ * `retractWorkspaceFilesByStorageBucket` runs for the staleness sweep.
+ */
+export async function closeWorkspaceFileSegmentsSystem(fileId: string): Promise<number> {
+  const result = await query(
+    `UPDATE file_segments
+        SET valid_to = now()
+      WHERE file_id = $1 AND valid_to IS NULL`,
+    [fileId],
+  )
+  return result.rowCount ?? 0
+}
+
 export async function retractWorkspaceFilesByStorageBucket(
   workspaceId: string,
   bucket: string,
@@ -589,13 +616,12 @@ export async function sumWorkspaceFilesSizeBytes(
  * write lands without the other. RLS is engaged for the duration of
  * the transaction.
  *
- * NOTE: The legacy `UNIQUE (workspace_id, path)` constraint from mig
- * 119 blocks path-stable supersession — the old row still owns the
- * path until physically removed, so an INSERT with the same path
- * violates the constraint. A follow-up migration must relax this to
- * `UNIQUE (workspace_id, path) WHERE valid_to IS NULL`. Until then,
- * supersession only works when the patch changes the path or the
- * legacy row is independently moved aside.
+ * Path-stable supersession works because the `(workspace_id, path)`
+ * uniqueness is scoped to the current version — mig 445 replaced mig
+ * 119's unscoped `workspace_files_workspace_id_path_key` with the
+ * partial `uq_workspace_files_current_path ... WHERE valid_to IS NULL`.
+ * The close and the insert run in one transaction, so the old row has
+ * already left the current window when the successor claims the path.
  */
 export async function supersedeWorkspaceFile(
   userId: string,

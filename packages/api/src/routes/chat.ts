@@ -56,6 +56,7 @@ import { registryRow } from '@use-brian/shared/model-registry'
 import type { ConnectorStore } from '../db/connector-store.js'
 import { getToolDisplayName, stripFollowUps, stripCommentThreadReplyTag, resolveCharter, charterMission } from '@use-brian/shared'
 import { listActivePlaybookRules } from '../db/playbook-store.js'
+import { CUSTOM_MODEL_IMAGE_REJECTION } from './_channel-error-text.js'
 import { resolveUser, buildBrowserEscalationPrompt, buildUnavailableCapabilitiesPrompt, injectSkills, isSkillOfferable, checkUsageBudget, applyMcpInjection, type CreditBudgetGate } from './route-helpers.js'
 import { createDocRunClient } from '../doc/run-presence-client.js'
 import type { AssistantRunChannel } from '@use-brian/doc-model'
@@ -1607,6 +1608,86 @@ const roomTurnAddressers = new Map<string, string>()
  * `sessions.ts` cannot import this module without closing an ESM cycle.
  */
 export { mayAssistantAnswerInRoom }
+
+/**
+ * A refusal raised AFTER the SSE headers are on the wire.
+ *
+ * The chat route flushes `text/event-stream` headers within a few lines of
+ * entry, so from that point on `res.status(...).json(...)` is not a response,
+ * it is a throw: Express calls `setHeader` on an already-committed response
+ * and Node raises `ERR_HTTP_HEADERS_SENT`. The outer catch then does what it
+ * does with any unknown crash and sends `Something went wrong`, which is the
+ * exact opposite of what a capability refusal owes the user. That is how a
+ * workspace on a text-only custom endpoint saw a generic red banner instead
+ * of "this endpoint takes text and tools only" when it attached a screenshot
+ * (2026-08-19, twice in fifteen minutes, once in a workspace room).
+ *
+ * So a post-flush refusal THROWS this instead of answering with a status.
+ * It deliberately reuses the outer catch rather than adding a second exit:
+ * that path already pairs `turn_started` with `turn_completed`, releases the
+ * turn lease, flips the session back to idle, and ends the response. A
+ * hand-rolled `sendEvent` + `return` beside it would be another one of the
+ * "two paths you happened to think of" that left a room locked for half an
+ * hour on 2026-08-08. The catch only has to render this one differently.
+ *
+ * `code` is the machine-readable reason the client may branch on; `message`
+ * is the sentence the user reads; `detail` carries any extra fields the
+ * pre-SSE JSON body used to include (an estimate, the credits at the cap).
+ */
+export class ChatTurnRefusal extends Error {
+  readonly code: string
+  readonly detail: Record<string, unknown>
+  constructor(code: string, message: string, detail: Record<string, unknown> = {}) {
+    super(message)
+    this.name = 'ChatTurnRefusal'
+    this.code = code
+    this.detail = detail
+  }
+}
+
+/**
+ * The `error` SSE payload for whatever reached the outer catch.
+ *
+ * A refusal keeps its own sentence and code; anything else stays the generic
+ * banner, because an unknown crash has nothing safe to say. Pure, so the
+ * distinction is testable without standing up the streaming handler.
+ */
+export function chatTurnErrorEvent(err: unknown): Record<string, unknown> {
+  if (err instanceof ChatTurnRefusal) {
+    return { code: err.code, error: err.message, ...err.detail }
+  }
+  return { error: 'Something went wrong' }
+}
+
+/**
+ * Refusal for an inline image on a workspace custom endpoint.
+ *
+ * The recovery step differs by how the endpoint was reached, and only one of
+ * the two is ever real:
+ *
+ *   - an explicit `custom:<id>` pick is this turn's own choice, so choosing a
+ *     built-in model for the next message undoes it;
+ *   - a TIER ROUTE captures the tier the model picker resolves to, so every
+ *     built-in in the menu lands back on the same endpoint. Telling that user
+ *     to "choose a built-in model" sends them around a loop with no exit. The
+ *     route is workspace configuration, so the exits are Settings, or sending
+ *     without the image.
+ *
+ * The refusal itself is the spec (byo-llm-key.md, "Strict fallback and
+ * attachments"): a text-only endpoint must never silently forward image bytes,
+ * and must never quietly fall back to a platform provider the workspace admin
+ * did not choose.
+ */
+export function customModelMediaRefusal(explicitCustomSelection: boolean): ChatTurnRefusal {
+  return new ChatTurnRefusal(
+    'custom_model_media_unsupported',
+    explicitCustomSelection
+      ? 'Custom model endpoints currently support text and tools only. Remove the image, or choose a built-in model for this message.'
+      // The tier-route case is the one every channel also hits, so it reuses
+      // the single shared sentence rather than growing a second wording.
+      : CUSTOM_MODEL_IMAGE_REJECTION,
+  )
+}
 
 /** Atomically claim a room session's turn slot. True = we own the turn. */
 async function claimRoomTurn(sessionId: string): Promise<boolean> {
@@ -5290,18 +5371,22 @@ export function chatRoutes(options: WebChatOptions): Router {
         const meteredRow = registryRow(requestedModel!)
         if (meteredRow?.class === 'metered') {
           if (options.meteredModelsAvailable && !options.meteredModelsAvailable.has(meteredRow.alias)) {
-            res.status(400).json({ error: 'model_unavailable', message: 'This model is not available on this deployment.' })
-            return
+            throw new ChatTurnRefusal('model_unavailable', 'This model is not available on this deployment.')
           }
           if (budgetStatus !== 'ok') {
-            res.status(402).json({ error: 'metered_at_cap', message: 'Metered models need available credits. Add an extra usage pack or upgrade the plan.' })
-            return
+            throw new ChatTurnRefusal(
+              'metered_at_cap',
+              'Metered models need available credits. Add an extra usage pack or upgrade the plan.',
+            )
           }
           if (assistant.workspaceId && options.checkMeteredSpendCap) {
             const cap = await options.checkMeteredSpendCap(assistant.workspaceId)
             if (!cap.allowed) {
-              res.status(402).json({ error: 'metered_spend_cap_reached', usedCredits: cap.usedCredits, capCredits: cap.capCredits })
-              return
+              throw new ChatTurnRefusal(
+                'metered_spend_cap_reached',
+                'This workspace has reached its metered spend cap. Raise the cap or wait for it to reset.',
+                { usedCredits: cap.usedCredits, capCredits: cap.capCredits },
+              )
             }
           }
           // Resolve the budget: saved profile wins (validated against this
@@ -5312,8 +5397,10 @@ export function chatRoutes(options: WebChatOptions): Router {
           if (meteredProfileId && options.meteredProfileStore && assistant.workspaceId) {
             const profile = await options.meteredProfileStore.get(assistant.workspaceId, meteredProfileId)
             if (!profile || profile.modelAlias !== meteredRow.alias) {
-              res.status(400).json({ error: 'metered_profile_invalid' })
-              return
+              throw new ChatTurnRefusal(
+                'metered_profile_invalid',
+                'That saved budget profile does not apply to this model. Pick another profile or set the tool rounds directly.',
+              )
             }
             profileId = profile.id
             toolRounds = profile.toolRounds
@@ -5325,11 +5412,11 @@ export function chatRoutes(options: WebChatOptions): Router {
             // Pre-flight invariant: estimate at the CHOSEN budget → confirm →
             // run. The client shows the estimate in a confirm dialog and
             // resends with meteredAccepted.
-            res.status(400).json({
-              error: 'metered_confirm_required',
-              estimate: options.estimateMeteredTurn?.(meteredRow.alias, toolRounds) ?? null,
-            })
-            return
+            throw new ChatTurnRefusal(
+              'metered_confirm_required',
+              'This model bills per turn and needs a confirmation before it runs.',
+              { estimate: options.estimateMeteredTurn?.(meteredRow.alias, toolRounds) ?? null },
+            )
           }
           const hasImageInput = userContentBlocks.some((b) => b.type === 'image')
           if (hasImageInput && !meteredRow.capabilities.vision) {
@@ -5385,19 +5472,14 @@ export function chatRoutes(options: WebChatOptions): Router {
         usedByoKey = resolvedTurnLlm.providerKeySource === 'user'
         usedLegacyByoKey = resolvedTurnLlm.usedLegacyByoKey
         if (explicitCustomSelector && !customLlmRuntime) {
-          res.status(400).json({
-            error: 'custom_model_unavailable',
-            message: 'This custom model endpoint is unavailable in this workspace.',
-          })
-          return
+          throw new ChatTurnRefusal(
+            'custom_model_unavailable',
+            'This custom model endpoint is unavailable in this workspace.',
+          )
         }
         if (customLlmRuntime) {
           if (customLlmRuntime.routeKind === 'custom' && userContentBlocks.some((block) => block.type === 'image')) {
-            res.status(400).json({
-              error: 'custom_model_media_unsupported',
-              message: 'Custom model endpoints currently support text and tools only. Remove the inline image or choose a built-in model.',
-            })
-            return
+            throw customModelMediaRefusal(Boolean(explicitCustomSelector))
           }
           // A selected custom endpoint is authoritative. It supersedes both
           // the platform provider and a workspace Gemini key, and never falls
@@ -7716,7 +7798,13 @@ export function chatRoutes(options: WebChatOptions): Router {
       sendEvent('done', {})
       res.end()
     } catch (err) {
-      console.error('Chat error:', err)
+      // A `ChatTurnRefusal` is not a crash — it is this route declining the
+      // turn after the SSE headers went out, and it arrives here only
+      // because the catch owns the cleanup (see the class doc). It carries
+      // its own sentence; the whole point is that the user reads THAT and
+      // not the generic banner, so it must not be flattened into one.
+      const refusal = err instanceof ChatTurnRefusal ? err : null
+      if (!refusal) console.error('Chat error:', err)
       // When the inner catch already delivered a context-aware recovery
       // message, surface a clean `done` so the client treats the turn
       // as complete (it is — the user already saw the recovery text).
@@ -7725,7 +7813,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       if (recoveryDelivered) {
         sendEvent('done', {})
       } else {
-        sendEvent('error', { error: 'Something went wrong' })
+        sendEvent('error', chatTurnErrorEvent(err))
       }
       // If a turn_started was broadcast for a draft session before the
       // crash, pair it with turn_completed so collaborators don't see the
@@ -7755,7 +7843,21 @@ export function chatRoutes(options: WebChatOptions): Router {
       // Only log if we have at least user context — earlier failures (e.g.
       // user lookup crash) go to console only since analytics_events requires
       // a non-null user_id.
-      if (userIdForError) {
+      //
+      // A refusal gets its OWN event name. Filing "this endpoint cannot read
+      // images" under `chat_route_error` would bury the real crashes in error
+      // triage while making a working deployment look broken, and the count
+      // that actually matters for a refusal is how often users hit the dead
+      // end — which is a `reason`, not a stack.
+      if (userIdForError && refusal) {
+        options.analytics?.logEvent({
+          userId: userIdForError,
+          assistantId: assistantIdForError ?? undefined,
+          sessionId: sessionIdForError ?? undefined,
+          eventName: 'chat_turn_refused', channelType: 'web',
+          metadata: { reason: sanitize(refusal.code) },
+        })
+      } else if (userIdForError) {
         options.analytics?.logEvent({
           userId: userIdForError,
           assistantId: assistantIdForError ?? undefined,

@@ -48,6 +48,7 @@ import {
   abandonGoalsForHostTaskSystem,
   GOAL_TERMINAL_STATUSES,
 } from '../db/goals.js'
+import { closeWorkspaceFileSegmentsSystem } from '../db/workspace-files.js'
 import { rejectTask as rejectTaskWithReason } from '../db/task-admission-store.js'
 import {
   reclassifyEntityKind,
@@ -1295,6 +1296,17 @@ export function brainInboxRoutes({
           WHERE id = $1 AND valid_to IS NULL`,
         [rowId],
       )
+
+      // Derived-content cascade (files only): `file_segments` carry their OWN
+      // bi-temporal window and every retrieval predicate reads the segment's
+      // `valid_to`, never the parent file's. Closing `workspace_files` alone
+      // drops the file off the Brain list while leaving its extracted text
+      // fully searchable — so "I deleted that file" and "Brian still quotes it"
+      // were both true at once. See docs/architecture/features/files.md →
+      // "Deleting a file".
+      if (primitiveParam === 'workspace_file') {
+        await closeWorkspaceFileSegmentsSystem(rowId)
+      }
 
       // Host-lifecycle cascade (tasks only): `goals.host_id` is not a FK, so
       // nothing in the DB retires the goals bound to a task the user just
