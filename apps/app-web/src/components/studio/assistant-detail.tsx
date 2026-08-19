@@ -309,7 +309,13 @@ export function AssistantDetail({
         {tab === "brain" && (
           <BrainTab assistantId={id} workspaceId={assistant.workspaceId ?? null} />
         )}
-        {tab === "tools" && <ConnectorsTab assistantId={id} workspaceId={assistant.workspaceId ?? null} />}
+        {tab === "tools" && (
+          <ConnectorsTab
+            assistantId={id}
+            assistantClearance={assistant.clearance}
+            workspaceId={assistant.workspaceId ?? null}
+          />
+        )}
         {tab === "api" && (
           <ApiKeysTab
             assistantId={id}
@@ -1292,7 +1298,16 @@ function sortSkillsForDisplay<T extends SkillItem>(items: T[]): T[] {
   });
 }
 
-function ConnectorsTab({ assistantId, workspaceId }: { assistantId: string; workspaceId: string | null }) {
+function ConnectorsTab({
+  assistantId,
+  assistantClearance,
+  workspaceId,
+}: {
+  assistantId: string;
+  /** Threaded to the browser-identities panel: enablement alone is not a grant. */
+  assistantClearance?: Sensitivity;
+  workspaceId: string | null;
+}) {
   const t = useT();
   const params = useParams<{ workspaceId: string }>();
   const routeWs = params?.workspaceId ?? "";
@@ -1542,7 +1557,11 @@ function ConnectorsTab({ assistantId, workspaceId }: { assistantId: string; work
       </div>
 
       {subTab === "browser-identities" ? (
-        <BrowserIdentitiesPanel assistantId={assistantId} workspaceId={workspaceId} />
+        <BrowserIdentitiesPanel
+          assistantId={assistantId}
+          assistantClearance={assistantClearance}
+          workspaceId={workspaceId}
+        />
       ) : subTab === "skills" ? (
         <div className="space-y-3">
           <div className="flex items-start justify-between gap-4">

@@ -171,6 +171,7 @@ export function createBuFallbackTool(opts: CreateBuFallbackToolOptions): { brows
       // public price-check was refused for want of a profile).
       let profile: BrowserProfile | null = null
       if (opts.profiles) {
+        const actorClearance = await opts.profiles.assistantClearance(context)
         const resolution = await resolveProfileForCall({
           store: opts.profiles.store,
           vault: opts.profiles.vault,
@@ -178,7 +179,7 @@ export function createBuFallbackTool(opts: CreateBuFallbackToolOptions): { brows
             userId: context.userId,
             workspaceId: context.workspaceId,
             assistantId: context.assistantId,
-            assistantClearance: await opts.profiles.assistantClearance(context),
+            assistantClearance: actorClearance,
           },
           site,
           profileName: input.profile,
@@ -186,7 +187,7 @@ export function createBuFallbackTool(opts: CreateBuFallbackToolOptions): { brows
         if (resolution.kind === 'ok') {
           profile = resolution.profile
         } else if (resolution.kind !== 'none') {
-          return { data: `ERROR: ${describeProfileResolution(resolution)}`, isError: true }
+          return { data: `ERROR: ${describeProfileResolution(resolution, actorClearance)}`, isError: true }
         }
       }
       if (profile && profile.defaultBackend === 'local') {

@@ -7595,6 +7595,8 @@ export const zh: Dictionary = {
       browserIdentitiesSaving: "儲存中...",
       browserIdentitiesSaved: "已儲存",
       browserIdentitiesUpdateFailed: "無法更新這個瀏覽器身分。",
+      browserIdentitiesClearanceBlocked: "只啟用還不夠。這個設定檔的機密等級 ({profile}) 高於這位助理的權限等級 ({assistant})，所以助理仍然無法使用。",
+      browserIdentitiesClearanceRemedy: "請提高這位助理的權限等級，或在瀏覽器 > 瀏覽器設定檔 > 進階設定中將「誰可以使用」設為「已授權的隊友」。",
       connectorsDesc: "為此助理啟用或停用服務。個別工具的權限可比 app 預設更嚴格，但不能更寬鬆。",
       setUpInSettings: "在設定中設定",
       setUpInWorkspace: "在工作空間中設定",

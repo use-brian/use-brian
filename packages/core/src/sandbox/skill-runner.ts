@@ -28,7 +28,9 @@ import {
   extractEffectContract,
 } from './effect-contract.js'
 import {
+  blockedProfilesFor,
   canUseProfile,
+  describeProfileDenials,
   describeProfileResolution,
   resolveProfileForCall,
   routingNoteFor,
@@ -350,6 +352,7 @@ export function createSkillRunnerTools(opts: CreateSkillRunnerToolsOptions): {
           isError: true,
         }
       }
+      const actorClearance = await opts.profiles.assistantClearance(context)
       const resolution = await resolveProfileForCall({
         store: opts.profiles.store,
         vault: opts.profiles.vault,
@@ -357,13 +360,13 @@ export function createSkillRunnerTools(opts: CreateSkillRunnerToolsOptions): {
           userId: context.userId,
           workspaceId: context.workspaceId,
           assistantId: context.assistantId,
-          assistantClearance: await opts.profiles.assistantClearance(context),
+          assistantClearance: actorClearance,
         },
         site: skill.site,
         profileName: input.profile,
       })
       if (resolution.kind !== 'ok') {
-        return { data: `ERROR: ${describeProfileResolution(resolution)}`, isError: true }
+        return { data: `ERROR: ${describeProfileResolution(resolution, actorClearance)}`, isError: true }
       }
       const profile = resolution.profile
       const rehearsal = input.rehearsal === true
@@ -682,6 +685,21 @@ export function createSkillRunnerTools(opts: CreateSkillRunnerToolsOptions): {
       }
       const profiles = allProfiles.filter((profile) => canUseProfile(profile, actor).ok)
       if (profiles.length === 0) {
+        // A denial is not an absence. Filtering on `.ok` and discarding the
+        // reason made an enabled-but-under-clearance profile indistinguishable
+        // from having none, so the only remedy this tool could offer was the
+        // enablement the user had already done — five identical rounds of it
+        // on 2026-08-19. Report WHICH profile is blocked and WHY.
+        const blocked = blockedProfilesFor(allProfiles, actor)
+        if (blocked.length > 0) {
+          return {
+            data:
+              'No browser profile is usable by this assistant. ' +
+              `${describeProfileDenials(blocked, clearance)} ` +
+              'Relay this to the user. Do NOT ask them to enable a profile again: the gate above is what is blocking it, and re-enabling changes nothing. ' +
+              'Public sites still need no profile (browserNavigate / browserExplore run identity-less) unless this deployment browses only through My Browser.',
+          }
+        }
         // The 2026-07-15 refusal echoed this line verbatim — it must never
         // read as "browsing is unavailable". Profiles only add saved logins.
         return {
