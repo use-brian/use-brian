@@ -35,6 +35,7 @@ import { listActivePlaybookRules } from '../db/playbook-store.js'
 import { runProactiveCompaction } from './proactive-compaction.js'
 import { notifyBrainWriteIfMatch } from '../brain-stream/notify.js'
 import { recordOverheadUsage } from './_overhead-usage.js'
+import { recordExternalCostFromMeta } from '../billing-external.js'
 import { composeRecoveryMessage } from './_recovery-message.js'
 import { CUSTOM_MODEL_IMAGE_REJECTION } from './_channel-error-text.js'
 import { resolveReplyText } from './_reply-context.js'
@@ -52,7 +53,7 @@ import type {
   ContentBlock, LLMProvider, Tool, MemoryStore, UsageStore,
   AnalyticsLogger, McpSettingsStore, KnowledgeStoreInterface, GDriveFilesStore,
   ConfirmationResolver, Message, TopicClassification, ClassifierRecentTurn,
-  EpisodicStore, CapabilityStore, TokenUsage,
+  EpisodicStore, CapabilityStore, TokenUsage, ToolResultMeta,
   SessionStateStore, SessionStateRecord,
 } from '@use-brian/core'
 
@@ -281,13 +282,27 @@ export type ChannelPipelineParams = {
   // ── Identity ──
   /** The user whose session this is (channel user or owner). */
   userId: string
-  /** The assistant owner (pays for usage). */
-  ownerId: string
+  /**
+   * The assistant's PERSONAL owner — `assistants.owner_user_id`, which the
+   * ownership XOR flip (migration 089) made **NULL for every workspace-owned
+   * assistant**. Every caller passes `assistant.ownerUserId` straight through,
+   * so this is null on the majority of production assistants and the type must
+   * say so: it was declared `string` for months while carrying null, which is
+   * how the overhead rows below ended up violating `usage_tracking.user_id`'s
+   * NOT NULL constraint on every official-Telegram turn.
+   *
+   * It is NOT the paying party. Anything that bills, or that writes a row with
+   * a user column, must use `billingUserId` (resolved once below via
+   * `billingPartyForAssistant`, which consults `workspaces.owner_user_id`).
+   * `ownerId` survives only as the personal-owner input to that resolution.
+   */
+  ownerId: string | null
   /** The assistant record. */
   assistant: {
     id: string
     name: string
-    ownerUserId: string
+    /** NULL for workspace-owned assistants — see `ownerId` above. */
+    ownerUserId: string | null
     workspaceId: string | null
     /** Layer 2 custom instructions set by the assistant owner. */
     systemPrompt: string | null
@@ -649,6 +664,116 @@ export function buildNonMemberSenderBlock(args: {
   )
 }
 
+/**
+ * Everything the pipeline owes the rest of the system for one `tool_result`
+ * event: the realtime brain repaint, the `tool_executed` analytics row, and the
+ * external-API cost row.
+ *
+ * The last two did not exist here at all. `tool_executed` was emitted ONLY by
+ * `routes/chat.ts` (with `channelType` hardcoded to `'web'`) and by the callee
+ * executor, so every messaging channel wrote NOTHING per tool call while
+ * genuinely running tools: between 2026-08-12 and 2026-08-19, Telegram logged
+ * 123 turns and 0 tool events and Slack 52 turns and 0, against 142 persisted
+ * session messages carrying `tool_use` blocks on those same Telegram sessions.
+ * Nothing surfaced it, because a missing row looks exactly like a tool that was
+ * never called — so the admin per-tool rollups, the sentiment stores, and the
+ * product-sentiment tool all reported "channels never use tools" as fact.
+ *
+ * The same blindness cost real money. `recordExternalCostFromMeta` is the ONE
+ * seam that turns `ToolResult.meta.externalCost_*` into a billable row, and the
+ * channel lane never called it: an identical `webSearch` billed the workspace
+ * from web chat and nothing at all from Telegram.
+ *
+ * Two identities, deliberately different, mirroring the split the main turn
+ * already makes at `turn_complete`:
+ *
+ *  - **analytics → `userId`** (the channel user). These are activity events;
+ *    per-user monitoring must see the person who actually typed.
+ *  - **usage → `billingUserId`** (the workspace / personal owner). Spend
+ *    follows the payer, never the possibly-shadow chatter.
+ *
+ * `channelType` is always the pipeline's real channel. Hardcoding `'web'` is
+ * what made the chat route's rows unusable for answering "which channel uses
+ * which tool" in the first place.
+ *
+ * Metadata mirrors the chat + executor shape exactly - `tool_name`, `success`,
+ * a conditional short `error_message`, then the tool's own `ToolResultMeta` -
+ * so an admin rollup can treat a channel row and a web row identically. Never
+ * tool input or output content. `in_worker` is deliberately absent: that key
+ * marks the chat route's sub-agent lane, and this pipeline has no worker lane.
+ *
+ * Synchronous and total: analytics logging and cost metering are both
+ * fire-and-forget by construction, so a metering failure can never fail the
+ * user's turn.
+ *
+ * [COMP:api/channel-tool-observability]
+ */
+export function recordChannelToolResults(input: {
+  results: ContentBlock[]
+  metaByToolUseId?: Record<string, ToolResultMeta>
+  analytics: AnalyticsLogger | undefined
+  usageStore: UsageStore | undefined
+  /** Channel user — the analytics actor. */
+  userId: string
+  /** Resolved billing party — pays for external API spend. */
+  billingUserId: string
+  assistantId: string
+  sessionId: string
+  workspaceId: string | null
+  /**
+   * Folds the tool's external spend into the SAME credit unit as the turn that
+   * spent it: the credit derivation groups by `COALESCE(user_message_id, id)`,
+   * so a stamped row adds COGS visibility without adding a credit. The chat
+   * route stamps it too - this is parity, not a new policy.
+   */
+  userMessageId: string
+  userPlan: string
+  channelType: string
+}): void {
+  for (const block of input.results) {
+    if (block.type !== 'tool_result') continue
+    // Realtime parity with the web chat lane (realtime-sync): a brain write
+    // from a Telegram / Slack / WhatsApp turn must repaint an open brain page
+    // the same way a web-chat write does. Same fire-and-forget map lookup
+    // chat.ts uses.
+    notifyBrainWriteIfMatch(input.workspaceId, block.name, block.isError ?? false)
+
+    const toolMeta = input.metaByToolUseId?.[block.toolUseId]
+    const extraMeta: Record<string, ReturnType<typeof sanitizeAnalytics> | number | boolean> = {}
+    if (toolMeta) {
+      for (const [k, v] of Object.entries(toolMeta)) {
+        extraMeta[k] = typeof v === 'string' ? sanitizeAnalytics(v) : v
+      }
+    }
+    input.analytics?.logEvent({
+      userId: input.userId,
+      assistantId: input.assistantId,
+      sessionId: input.sessionId,
+      eventName: 'tool_executed',
+      channelType: input.channelType,
+      metadata: {
+        tool_name: sanitizeAnalytics(block.name),
+        success: !(block.isError ?? false),
+        ...(block.isError
+          ? { error_message: sanitizeAnalytics(block.content.replace(/\s+/g, ' ').trim().slice(0, 200)) }
+          : {}),
+        ...extraMeta,
+      },
+    })
+    void recordExternalCostFromMeta({
+      toolMeta,
+      usageStore: input.usageStore,
+      userId: input.billingUserId,
+      assistantId: input.assistantId,
+      sessionId: input.sessionId,
+      userMessageId: input.userMessageId,
+      userPlan: input.userPlan,
+      channelType: input.channelType,
+      analytics: input.analytics,
+    })
+  }
+}
+
 export async function processChannelMessage(params: ChannelPipelineParams): Promise<void> {
   const {
     userId, ownerId, assistant, isIdentified,
@@ -697,9 +822,18 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // ── Budget gate — billing party pays ──
   // Post-089: billingPartyForAssistant is the single source of truth
   // for the paying user (team owner for team assistants, personal owner
-  // otherwise). `ownerId` is retained for non-billing concerns (memory
-  // attribution, session ownership). See
-  // docs/architecture/integrations/mcp.md.
+  // otherwise). See docs/architecture/integrations/mcp.md.
+  //
+  // This is also the ONLY non-null user id this pipeline has. `ownerId` is
+  // `assistants.owner_user_id`, NULL on every workspace-owned assistant since
+  // the 089 ownership XOR flip, so a row written with `userId: ownerId` dies on
+  // `usage_tracking.user_id`'s NOT NULL constraint for the majority of
+  // production assistants — which is exactly what every `overhead:classifier`
+  // row on official Telegram did until this was resolved here. Nothing below
+  // may write a user column from `ownerId`; use `billingUserId`. It cannot be
+  // null: `billingPartyForAssistant` throws when an assistant has neither a
+  // workspace nor a personal owner, and it throws HERE, before the first
+  // overhead call, rather than at a silent per-row catch.
   const billingUserId = await billingPartyForAssistant({
     id: assistant.id,
     ownerUserId: assistant.workspaceId ? null : ownerId,
@@ -850,7 +984,9 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
       try {
         await appendInboundChatArchive({
           source: channelType,
-          ownerUserId: ownerId,
+          // See the persist-inbound archive below — `ownerId` is NULL for a
+          // workspace-owned assistant against a field typed `string`.
+          ownerUserId: billingUserId,
           workspaceId: assistant.workspaceId,
           connectorInstanceId: params.archiveConnectorInstanceId,
           assistantId: assistant.id,
@@ -956,7 +1092,13 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   const userMessageRow = params.archiveIncoming && !params.archiveInboundAlreadyPersisted
     ? await persistInboundChatArchive({
         source: channelType,
-        ownerUserId: ownerId,
+        // `billingUserId`, not `ownerId`: the archive's `LiveArchiveContext`
+        // declares `ownerUserId: string`, and on a workspace-owned assistant
+        // `ownerId` is NULL. It survives that today (the binding resolves off
+        // `workspaceId`, and `connector_instance.created_by` / the outbox's
+        // `owner_user_id` are both nullable) — but it was writing a null into a
+        // field typed non-null, and the workspace owner is the correct value.
+        ownerUserId: billingUserId,
         workspaceId: assistant.workspaceId,
         connectorInstanceId: params.archiveConnectorInstanceId,
         assistantId: assistant.id,
@@ -977,12 +1119,13 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     content: userContentBlocks,
   })
 
-  // Attribute classifier tokens as overhead against the owner (the
-  // billing entity — channel users don't pay for auxiliary LLM calls).
-  // See docs/architecture/channels/channel-user-identity.md → "Billing split".
+  // Attribute classifier tokens as overhead against the billing party (channel
+  // users don't pay for auxiliary LLM calls). See
+  // docs/architecture/channels/channel-user-identity.md → "Billing split".
+  // `billingUserId`, never `ownerId` — see the resolution above.
   await recordOverheadUsage({
     usageStore,
-    userId: ownerId,
+    userId: billingUserId,
     actorUserId: userId,
     assistantId: assistant.id,
     sessionId: session.id,
@@ -998,7 +1141,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   if (voiceTranscriptionUsage) {
     await recordOverheadUsage({
       usageStore,
-      userId: ownerId,
+      userId: billingUserId,
       actorUserId: userId,
       assistantId: assistant.id,
       sessionId: session.id,
@@ -1042,7 +1185,12 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     systemPrompt,
     assistantId: assistant.id,
     userId,
-    ownerId,
+    // `ProactiveCompactionParams.ownerId` is a usage-attribution field and
+    // nothing else — its only two readers are the `overhead:extraction` and
+    // `overhead:compaction` rows in proactive-compaction.ts, both
+    // `userId: ownerId`. Handing it the raw `ownerId` gave those rows the same
+    // NOT NULL violation the classifier row had; they just fire less often.
+    ownerId: billingUserId,
     channelType,
     memoryStore,
     episodicStore,
@@ -1381,8 +1529,13 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   }
 
   // ── MCP tools ──
+  // `getConnectorUserId` returns the workspace owner when a workspace is bound
+  // and its `baseUserId` argument otherwise — the same two branches
+  // `billingPartyForAssistant` took above, so passing `billingUserId` resolves
+  // identically to the old `ownerId` on every non-null case and stays non-null
+  // on the workspace-owned case where `ownerId` is NULL.
   const connectorUserId = connectorToolsAllowed
-    ? await getConnectorUserId(ownerId, assistant.workspaceId)
+    ? await getConnectorUserId(billingUserId, assistant.workspaceId)
     : userId
   let unavailableCapabilities: string[] = []
   if (connectorToolsAllowed && connectorStore && mcpSettingsStore) {
@@ -1604,7 +1757,9 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     if (lastFlushedAssistantRowId && params.archiveIncoming) {
       await appendOutboundChatArchive({
         source: channelType,
-        ownerUserId: ownerId,
+        // See the inbound archive above — `ownerId` is NULL for a
+        // workspace-owned assistant against a field typed `string`.
+        ownerUserId: billingUserId,
         workspaceId: assistant.workspaceId,
         connectorInstanceId: params.archiveConnectorInstanceId,
         assistantId: assistant.id,
@@ -1810,18 +1965,20 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
           await hooks.onToolInput?.(event.id, event.name, event.input)
           break
         case 'tool_result':
-          // Realtime parity with the web chat lane (realtime-sync): a brain
-          // write from a Telegram / Slack / WhatsApp turn must repaint an
-          // open brain page the same way a web-chat write does. Same
-          // fire-and-forget map lookup chat.ts uses.
-          for (const block of event.results) {
-            if (block.type !== 'tool_result') continue
-            notifyBrainWriteIfMatch(
-              assistant.workspaceId,
-              block.name,
-              block.isError ?? false,
-            )
-          }
+          recordChannelToolResults({
+            results: event.results,
+            metaByToolUseId: event.metaByToolUseId,
+            analytics,
+            usageStore,
+            userId,
+            billingUserId,
+            assistantId: assistant.id,
+            sessionId: session.id,
+            workspaceId: assistant.workspaceId,
+            userMessageId: userMessageRow.id,
+            userPlan: workspacePlan,
+            channelType,
+          })
           await hooks.onToolResult?.(event.results)
           break
         case 'tool_confirmation_required':
@@ -2036,9 +2193,15 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
               error: result.errorMessage ? sanitizeAnalytics(result.errorMessage) : undefined,
             },
           })
+          // Same billing split as every other overhead row on this path: the
+          // workspace pays, the channel user is recorded as the actor. This
+          // pair used to pass the bare `userId`, which billed a (possibly
+          // shadow) channel user for an auxiliary call they never asked for
+          // and split one turn's overhead across two payers.
           return recordOverheadUsage({
             usageStore,
-            userId,
+            userId: billingUserId,
+            actorUserId: userId,
             assistantId: assistant.id,
             sessionId: session.id,
             userMessageId: userMessageRow.id,
@@ -2080,7 +2243,8 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
       })
         .then((result) => recordOverheadUsage({
           usageStore,
-          userId,
+          userId: billingUserId,
+          actorUserId: userId,
           assistantId: assistant.id,
           sessionId: session.id,
           userMessageId: userMessageRow.id,
@@ -2118,11 +2282,11 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     })
     if (recovered) {
       // Cost attribution for the Flash call. The synthesiser is paid
-      // for by the assistant owner (same as every other overhead row),
+      // for by the billing party (same as every other overhead row),
       // not by whichever channel user happened to trigger the bail.
       await recordOverheadUsage({
         usageStore,
-        userId: ownerId,
+        userId: billingUserId,
         actorUserId: userId,
         assistantId: assistant.id,
         sessionId: session.id,

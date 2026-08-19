@@ -7356,6 +7356,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             adaptiveResearchEnabled: true,
             abortController,
             provider,
+            configuredProviders,
             resolveWorkspaceCustomLlm,
             systemPrompt: LAYER_1_SYSTEM_PROMPT,
             tools: allTools,
@@ -7455,7 +7456,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       }))
       app.use('/webhook/whatsapp', whatsappCloudRoutes({
         backgroundModel,
-        provider, resolveWorkspaceCustomLlm, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
+        provider, configuredProviders, resolveWorkspaceCustomLlm, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
         memoryStore, usageStore, checkCreditBudget: ports.checkCreditBudget,
         integrationStore, channelUserStore,
         workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
