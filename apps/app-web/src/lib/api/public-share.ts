@@ -58,7 +58,8 @@ export type PublicPage = {
   icon: string | null;
   fullWidth: boolean;
   indexable: boolean;
-  /** The link's role — drives whether the guest comment composer shows. */
+  /** The resolved visitor role (link grant / published grant / site anchor)
+   *  — anything above `view` mounts the guest comment composer. */
   role: "view" | "comment" | "edit" | "full";
   blocks: PublicBlock[];
   payload: ViewPayload;
@@ -341,24 +342,35 @@ export async function getPublishedPage(
   }
 }
 
-/** Token-route URL with path suffix + query params (handles `?`/`&` joining). */
-const pub = (token: string, suffix = "", params: Record<string, string | undefined> = {}) => {
-  const qs = Object.entries(params)
+/** Base URL of the source's guest-comment endpoints (`<base>/comment-threads`,
+ *  `<base>/comments`), one per public address family; link + site views scope
+ *  to the viewed sub-page with `?page=`, a published view never scopes (its
+ *  address IS the page). */
+function guestCommentUrl(source: PublicSource, suffix: string, params: Record<string, string | undefined> = {}): string {
+  const base =
+    source.kind === "link"
+      ? `${API_URL}/api/public/pages/${encodeURIComponent(source.token)}`
+      : source.kind === "site"
+        ? `${API_URL}/api/public/sites/${encodeURIComponent(source.host)}`
+        : `${API_URL}/api/public/published/${encodeURIComponent(source.pageId)}`;
+  const all: Record<string, string | undefined> = { ...params };
+  if (source.kind !== "published") all.page = source.pageId;
+  const qs = Object.entries(all)
     .filter((e): e is [string, string] => Boolean(e[1]))
     .map(([k, v]) => `${k}=${encodeURIComponent(v)}`)
     .join("&");
-  return `${API_URL}/api/public/pages/${encodeURIComponent(token)}${suffix}${qs ? `?${qs}` : ""}`;
-};
+  return `${base}${suffix}${qs ? `?${qs}` : ""}`;
+}
 
-/** Post a new guest comment thread (on the root, or a sub-page via `pageId`).
- *  Returns the (possibly newly minted) guest token. */
+/** Post a new guest comment thread on the viewed page. Returns the (possibly
+ *  newly minted) guest session token; null when the source no longer allows
+ *  commenting (role dropped to view / unpublished / revoked). */
 export async function postGuestComment(
-  token: string,
+  source: PublicSource,
   args: { guestName: string; guestSessionToken?: string; body: string },
-  pageId?: string,
 ): Promise<{ threadId: string; guestSessionToken: string } | null> {
   try {
-    const res = await fetch(pub(token, "/comment-threads", { page: pageId }), {
+    const res = await fetch(guestCommentUrl(source, "/comment-threads"), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(args),
@@ -370,17 +382,15 @@ export async function postGuestComment(
   }
 }
 
-/** List the guest's own comment threads (scoped by their token). */
+/** List the guest's own comment threads on the viewed page (scoped by their token). */
 export async function listGuestComments(
-  token: string,
+  source: PublicSource,
   guestSessionToken: string,
-  pageId?: string,
 ): Promise<GuestThreadView[]> {
   try {
-    const res = await fetch(
-      pub(token, "/comments", { guestSessionToken, page: pageId }),
-      { cache: "no-store" },
-    );
+    const res = await fetch(guestCommentUrl(source, "/comments", { guestSessionToken }), {
+      cache: "no-store",
+    });
     if (!res.ok) return [];
     const body = (await res.json()) as { threads: GuestThreadView[] };
     return body.threads ?? [];

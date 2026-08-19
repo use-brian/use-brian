@@ -64,6 +64,13 @@ export type CreateLinkGrantInput = {
 
 export type IdentityPrincipalType = 'user' | 'group' | 'workspace'
 
+/** What an anonymous visitor may do on a published page. `edit` is deliberately
+ *  not offered on the public surface (doc.md "Page sharing" → "Phasing"). */
+export type PublishRole = 'view' | 'comment'
+export const PUBLISH_ROLES: readonly PublishRole[] = ['view', 'comment']
+
+export type PublishState = { published: boolean; indexable: boolean; role: PublishRole }
+
 /** A non-link (identity) grant hydrated with a display label for the Share tab. */
 export type DetailedGrant = PageGrant & {
   principalRef: string | null
@@ -90,10 +97,19 @@ export type PageGrantStore = {
    *  (subtree cascade — see doc.md "Subtree share"). Same root gates as
    *  `resolveLinkToken`; the target only has to sit under the root. */
   resolveLinkPage(rawToken: string, pageId: string): Promise<ResolvedLink | null>
-  /** Owner-side: is this page published to the web, and is it indexable? */
-  getPublishState(userId: string, pageId: string): Promise<{ published: boolean; indexable: boolean }>
-  /** Publish (idempotent): ensure exactly one active `published` grant for the page. */
-  publishPage(input: { userId: string; pageId: string; indexable: boolean }): Promise<void>
+  /** Owner-side: is this page published to the web, is it indexable, and
+   *  what may an anonymous visitor do (`view` | `comment`)? */
+  getPublishState(userId: string, pageId: string): Promise<PublishState>
+  /** Publish (idempotent): ensure exactly one active `published` grant for the
+   *  page. `role` (`view` | `comment`) sets what a visitor may do; omitted =
+   *  keep the existing role (a fresh publish defaults to `view`). Returns the
+   *  resulting state. */
+  publishPage(input: {
+    userId: string
+    pageId: string
+    indexable: boolean
+    role?: PublishRole
+  }): Promise<PublishState>
   /** Unpublish: revoke the page's active `published` grant(s). */
   unpublishPage(userId: string, pageId: string): Promise<boolean>
   /** Anonymous: resolve a page published to the web by its id (no token). The
@@ -101,6 +117,13 @@ export type PageGrantStore = {
    *  `published` grant on the page or an ancestor that is itself still
    *  `clearance='public'`, + the workspace switch (subtree cascade). */
   resolvePublishedPage(pageId: string): Promise<ResolvedLink | null>
+}
+
+/** Collapse a stored grant role to the public-surface vocabulary: anything
+ *  above `view` reads as `comment` (edit is not enforced on the public
+ *  surface, so a stray `edit`/`full` published row must not promise it). */
+export function publishRoleOf(role: string | null | undefined): PublishRole {
+  return role === 'comment' || role === 'edit' || role === 'full' ? 'comment' : 'view'
 }
 
 const GRANT_SELECT = `
@@ -347,37 +370,46 @@ export function createDbPageGrantStore(): PageGrantStore {
     },
 
     async getPublishState(userId, pageId) {
-      const r = await queryWithRLS<{ indexable: boolean }>(
+      const r = await queryWithRLS<{ indexable: boolean; role: GrantRole }>(
         userId,
-        `SELECT indexable FROM page_grants
+        `SELECT indexable, role FROM page_grants
           WHERE page_id = $1 AND principal_type = 'published' AND revoked_at IS NULL
           ORDER BY created_at DESC LIMIT 1`,
         [pageId],
       )
-      return { published: r.rows.length > 0, indexable: r.rows[0]?.indexable ?? false }
+      return {
+        published: r.rows.length > 0,
+        indexable: r.rows[0]?.indexable ?? false,
+        role: publishRoleOf(r.rows[0]?.role),
+      }
     },
 
-    async publishPage({ userId, pageId, indexable }) {
+    async publishPage({ userId, pageId, indexable, role }) {
       // One active published grant per page: update in place if present, else
       // insert. principal_ref = pageId (the page is its own principal). The
-      // route declassifies the page to `clearance='public'` first.
-      const upd = await queryWithRLS<{ id: string }>(
+      // route declassifies the page to `clearance='public'` first. `role`
+      // is COALESCEd so an indexing-only re-publish keeps the visitor role.
+      const upd = await queryWithRLS<{ id: string; role: GrantRole; indexable: boolean }>(
         userId,
-        `UPDATE page_grants SET indexable = $2
+        `UPDATE page_grants SET indexable = $2, role = COALESCE($3, role)
            WHERE page_id = $1 AND principal_type = 'published' AND revoked_at IS NULL
-           RETURNING id`,
-        [pageId, indexable],
+           RETURNING id, role, indexable`,
+        [pageId, indexable, role ?? null],
       )
-      if (upd.rows[0]) return
-      await queryWithRLS(
+      if (upd.rows[0]) {
+        return { published: true, indexable: upd.rows[0].indexable, role: publishRoleOf(upd.rows[0].role) }
+      }
+      const ins = await queryWithRLS<{ role: GrantRole; indexable: boolean }>(
         userId,
         // $1 (uuid page_id) and $2 (text principal_ref) are separate params —
         // reusing one placeholder across two column types makes pg fail to
         // deduce the type ("inconsistent types deduced for parameter").
         `INSERT INTO page_grants (page_id, principal_type, principal_ref, role, indexable, created_by)
-         VALUES ($1, 'published', $2, 'view', $3, $4)`,
-        [pageId, pageId, indexable, userId],
+         VALUES ($1, 'published', $2, $3, $4, $5)
+         RETURNING role, indexable`,
+        [pageId, pageId, role ?? 'view', indexable, userId],
       )
+      return { published: true, indexable: ins.rows[0]?.indexable ?? indexable, role: publishRoleOf(ins.rows[0]?.role) }
     },
 
     async unpublishPage(userId, pageId) {
@@ -401,7 +433,9 @@ export function createDbPageGrantStore(): PageGrantStore {
       // under it, regardless of each descendant's clearance (doc.md "Subtree
       // share"). Unpublishing the ancestor / raising the published root's
       // clearance / flipping the workspace switch all cut the whole subtree
-      // immediately; no descendant clearance is ever mutated.
+      // immediately; no descendant clearance is ever mutated. The visitor
+      // role cascades the same way: `comment` on any live granted ancestor
+      // (or the target itself) lets a visitor comment on this page.
       const result = await query<ResolvedLink>(
         `WITH RECURSIVE chain AS (
            SELECT id, nest_parent_id FROM saved_views WHERE id = $1
@@ -414,7 +448,8 @@ export function createDbPageGrantStore(): PageGrantStore {
                 t.name         AS title,
                 t.icon         AS icon,
                 t.full_width   AS "fullWidth",
-                'view'::text   AS role,
+                CASE WHEN bool_or(pg.role IN ('comment', 'edit', 'full'))
+                     THEN 'comment' ELSE 'view' END AS role,
                 COALESCE(bool_or(pg.indexable), false) AS indexable
            FROM saved_views t
            JOIN workspaces  w ON w.id = t.workspace_id

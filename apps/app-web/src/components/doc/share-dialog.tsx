@@ -8,8 +8,9 @@
  *               role (Full access / Can edit / Can comment / Can view); a
  *               "General access" row sets the workspace default. view/comment
  *               grants are server-enforced read-only on the live doc.
- *   - Publish — the anonymous "anyone with the link" web link (view/comment;
- *               page must be public; optional search indexing).
+ *   - Publish — publish-to-web at one universal URL (page must be public;
+ *               optional search indexing; "Allow comments" lets visitors leave
+ *               guest comments with just a display name, no account).
  *
  * Roles use the on-brand `DropdownMenu` (no native select); confirms use
  * confirmDialog. No em dashes in copy.
@@ -18,7 +19,7 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
-import { Check, ChevronDown, Globe, HelpCircle, Link2, Search, Users } from "lucide-react";
+import { Check, ChevronDown, Globe, HelpCircle, Link2, MessageSquare, Search, Users } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -411,7 +412,7 @@ export function ShareDialog({
   const [copiedPage, setCopiedPage] = useState(false);
 
   // Publish tab — one universal URL (the page published to the web)
-  const [publish, setPublish] = useState<PublishState>({ published: false, indexable: false });
+  const [publish, setPublish] = useState<PublishState>({ published: false, indexable: false, role: "view" });
   const [busy, setBusy] = useState(false);
   const [copiedPublish, setCopiedPublish] = useState(false);
 
@@ -559,7 +560,7 @@ export function ShareDialog({
     setBusy(true);
     try {
       await unpublishPage(pageId);
-      setPublish({ published: false, indexable: false });
+      setPublish({ published: false, indexable: false, role: "view" });
       onPublishChanged?.();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -573,6 +574,21 @@ export function ShareDialog({
     setPublish((p) => ({ ...p, indexable }));
     try {
       const next = await publishPage(pageId, indexable);
+      setPublish(next);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  /** "Allow comments": flips the published grant's visitor role between
+   *  `view` and `comment`. The server fans the change out to live viewers, so
+   *  the guest composer appears/disappears on open share tabs without a reload. */
+  async function setAllowComments(allow: boolean) {
+    setError(null);
+    const role = allow ? "comment" : "view";
+    setPublish((p) => ({ ...p, role }));
+    try {
+      const next = await publishPage(pageId, publish.indexable, role);
       setPublish(next);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -819,6 +835,23 @@ export function ShareDialog({
                       <Link2 className="size-4" aria-hidden />
                     )}
                   </button>
+                </div>
+
+                {/* Allow comments: visitors leave guest comments with just a
+                    display name (no account). Off = read-only. */}
+                <div className="rounded-md px-1 py-1.5">
+                  <label className="flex items-center justify-between gap-3 text-sm">
+                    <span className="inline-flex items-center gap-2">
+                      <MessageSquare className="size-4 text-muted-foreground" aria-hidden />
+                      {t.allowComments}
+                    </span>
+                    <Switch
+                      checked={publish.role === "comment"}
+                      onCheckedChange={(v) => void setAllowComments(v)}
+                      aria-label={t.allowComments}
+                    />
+                  </label>
+                  <p className="mt-1 pl-6 text-xs text-muted-foreground">{t.allowCommentsHint}</p>
                 </div>
 
                 {/* Search engine indexing */}

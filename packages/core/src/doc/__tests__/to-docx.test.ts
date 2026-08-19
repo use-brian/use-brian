@@ -1,3 +1,4 @@
+import JSZip from 'jszip'
 import { describe, it, expect } from 'vitest'
 import { blocksToDocx } from '../convert/to-docx.js'
 import type { Block, RichTextContent } from '../page-types.js'
@@ -44,5 +45,27 @@ describe('[COMP:doc/to-docx] Block → .docx', () => {
     const block: Block = { kind: 'data', id: 'a', binding: { type: 'tasks' } as never }
     const buf = await blocksToDocx([block], { resolveData: () => [['Task'], ['Ship']] })
     expect(isDocxZip(buf)).toBe(true)
+  })
+
+  it('emits absolute (dxa) table widths, never the percent-string form older LibreOffice reads as 2%', async () => {
+    const block: Block = {
+      kind: 'table',
+      id: 'tb',
+      hasHeaderRow: true,
+      rows: [
+        [rt('Milestone'), rt('Dates'), rt('Fee')],
+        [rt('1. Survey design and ecosystem outreach'), rt('1-14 Sep 2026'), rt('US$6,000')],
+      ],
+    }
+    const buf = await blocksToDocx([block])
+    const xml = await (await JSZip.loadAsync(buf)).file('word/document.xml')!.async('string')
+    expect(xml).not.toContain('w:type="pct"')
+    expect(xml).toContain('<w:tblW w:type="dxa"')
+    const grid = [...xml.matchAll(/<w:gridCol w:w="(\d+)"\/>/g)].map((m) => Number(m[1]))
+    expect(grid).toHaveLength(3)
+    // The grid fills the A4 content width exactly, and the prose column
+    // outweighs the short fee column.
+    expect(grid.reduce((a, b) => a + b, 0)).toBe(9026)
+    expect(Math.max(...grid)).toBeGreaterThan(Math.min(...grid))
   })
 })

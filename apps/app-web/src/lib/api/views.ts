@@ -780,7 +780,11 @@ export type IdentityGrant = PageGrant & { principalRef: string | null; principal
 export type ShareMember = { userId: string; name: string | null; email: string | null; avatarUrl: string | null };
 export type WorkspaceGroup = { id: string; workspaceId: string; name: string; memberCount: number; createdAt: string };
 
-export type PublishState = { published: boolean; indexable: boolean };
+/** What an anonymous visitor may do on the published page: read it, or also
+ *  leave guest comments (a display name, no account). `edit` is not offered on
+ *  the public surface. */
+export type PublishRole = "view" | "comment";
+export type PublishState = { published: boolean; indexable: boolean; role: PublishRole };
 
 /** Link grants (Anyone with link), identity grants (people/groups/general), and publish state. */
 export async function listShareGrants(
@@ -790,12 +794,18 @@ export async function listShareGrants(
   return json<{ grants: PageGrant[]; identityGrants: IdentityGrant[]; publish: PublishState }>(res);
 }
 
-/** Publish the page to one universal web URL (`/share/p/<viewId>`). Idempotent. */
-export async function publishPage(viewId: string, indexable: boolean): Promise<PublishState> {
+/** Publish the page to one universal web URL (`/share/p/<viewId>`). Idempotent.
+ *  `role` omitted = keep the current visitor role (an indexing-only re-publish
+ *  never resets it); a first publish defaults to `view`. */
+export async function publishPage(
+  viewId: string,
+  indexable: boolean,
+  role?: PublishRole,
+): Promise<PublishState> {
   const res = await authFetch(`${API_URL}/api/views/${viewId}/publish`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ indexable }),
+    body: JSON.stringify(role ? { indexable, role } : { indexable }),
   });
   return json<PublishState>(res);
 }

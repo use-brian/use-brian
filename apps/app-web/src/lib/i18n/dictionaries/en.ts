@@ -896,6 +896,8 @@ export const en = {
       everyoneAt: "Everyone at {workspace}",
       learnAboutSharing: "Learn about sharing",
       copyLink: "Copy link",
+      allowComments: "Allow comments",
+      allowCommentsHint: "Anyone with the link can leave a comment using just a display name, no account needed. Comments show on the public page until you resolve them.",
       searchIndexing: "Search engine indexing",
       publishHint: "Publish this page to the web at one shareable URL that anyone can open, no account needed. Pages nested inside it are published with it.",
       publishCta: "Publish to web",

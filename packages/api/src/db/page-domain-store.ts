@@ -17,6 +17,7 @@
  */
 
 import { getAppPool, query, queryWithRLS, rollbackAndRelease } from './client.js'
+import type { PublishRole } from './page-grant-store.js'
 
 export type PageDomainStatus = 'pending_dns' | 'live' | 'error'
 export type PageDomainProvider = 'manual' | 'vercel' | 'platform'
@@ -46,7 +47,9 @@ export type SiteTarget = {
   title: string
   icon: string | null
   fullWidth: boolean
-  role: 'view'
+  /** What an anonymous visitor may do — the ANCHOR's published grant role
+   *  (`comment` cascades to every page served under it). */
+  role: PublishRole
   indexable: boolean
   /** The ANCHOR page gating this target (the domain's default page or an
    *  aliased mini-root); absent when the target IS its own anchor. */
@@ -207,7 +210,7 @@ const RESOLVE_TARGET_SQL = `
     SELECT page_id FROM page_slugs WHERE domain_id = $1 AND is_current
   ),
   anchor AS (
-    SELECT c.id, c.depth, pg.indexable, r.workspace_id
+    SELECT c.id, c.depth, pg.indexable, pg.role, r.workspace_id
       FROM chain c
       JOIN exposed e ON e.page_id = c.id
       JOIN page_grants pg ON pg.page_id = c.id
@@ -224,7 +227,7 @@ const RESOLVE_TARGET_SQL = `
          t.name         AS title,
          t.icon         AS icon,
          t.full_width   AS "fullWidth",
-         'view'::text   AS role,
+         CASE WHEN a.role IN ('comment', 'edit', 'full') THEN 'comment' ELSE 'view' END AS role,
          a.indexable    AS indexable,
          a.id           AS "rootPageId"
     FROM anchor a

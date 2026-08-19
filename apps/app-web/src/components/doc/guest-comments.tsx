@@ -1,39 +1,56 @@
 "use client";
 
 /**
- * Guest comment composer for the public /share route (Phase 2).
+ * Guest comment composer for the public share surfaces (Phase 2).
  *
- * Shown only when the link role allows commenting. A guest enters a display
- * name on their first comment; the server mints a guest_session_token which we
- * persist in sessionStorage (per-token, not localStorage — avoids cross-tab
- * leaks) and reuse for replies + listing. A guest sees only their OWN comments
- * (the server scopes by token); member/AI replies are not shown in Phase 2.
+ * Shown only when the resolved visitor role allows commenting - a token link
+ * minted at `comment`, a page published with "Allow comments" (the universal
+ * `/share/p/<id>` URL), or a custom-domain site whose anchor is. A guest
+ * enters a display name on their first comment; the server mints a
+ * guest_session_token which we persist in sessionStorage (keyed per share
+ * IDENTITY, not per page, so one name carries across the shared subtree; not
+ * localStorage - avoids cross-tab leaks) and reuse for replies + listing. A
+ * guest sees only their OWN comments (the server scopes by token); member/AI
+ * replies are not shown in Phase 2.
  *
  * [COMP:app-web/share-dialog]
  */
 
 import { useEffect, useState } from "react";
 import { useT } from "@/lib/i18n/client";
-import { listGuestComments, postGuestComment, type GuestThreadView } from "@/lib/api/public-share";
+import {
+  listGuestComments,
+  postGuestComment,
+  type GuestThreadView,
+  type PublicSource,
+} from "@/lib/api/public-share";
 
-export function GuestComments({ token, pageId }: { token: string; pageId?: string }) {
+/** The share identity a guest's name + token are stored under: the token for
+ *  a link, the hostname for a site, and the published ROOT for the universal
+ *  URL (so navigating the published subtree keeps the guest's identity). */
+export function guestIdentityKey(source: PublicSource, rootPageId?: string): string {
+  if (source.kind === "link") return `link:${source.token}`;
+  if (source.kind === "site") return `site:${source.host}`;
+  return `published:${rootPageId ?? source.pageId}`;
+}
+
+export function GuestComments({ source, identityKey }: { source: PublicSource; identityKey: string }) {
   const t = useT().sharedPage.comments;
-  // The guest identity is per-LINK (one name across the whole shared subtree);
-  // the viewed page only scopes which threads list/anchor (subtree cascade).
-  const storageKey = `doc:share-guest:${token}`;
+  const storageKey = `doc:share-guest:${identityKey}`;
   const [guestToken, setGuestToken] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [draft, setDraft] = useState("");
   const [threads, setThreads] = useState<GuestThreadView[]>([]);
   const [posting, setPosting] = useState(false);
 
+  // `source` is the route's prop (stable per navigation), so it is a safe dep.
   useEffect(() => {
     const saved = typeof window !== "undefined" ? window.sessionStorage.getItem(storageKey) : null;
     if (saved) {
       setGuestToken(saved);
-      listGuestComments(token, saved, pageId).then(setThreads).catch(() => {});
+      listGuestComments(source, saved).then(setThreads).catch(() => {});
     }
-  }, [token, storageKey, pageId]);
+  }, [storageKey, source]);
 
   async function post() {
     const body = draft.trim();
@@ -41,22 +58,18 @@ export function GuestComments({ token, pageId }: { token: string; pageId?: strin
     if (!guestToken && !name.trim()) return;
     setPosting(true);
     try {
-      const result = await postGuestComment(
-        token,
-        {
-          guestName: name.trim() || "Guest",
-          guestSessionToken: guestToken ?? undefined,
-          body,
-        },
-        pageId,
-      );
+      const result = await postGuestComment(source, {
+        guestName: name.trim() || "Guest",
+        guestSessionToken: guestToken ?? undefined,
+        body,
+      });
       if (result) {
         if (!guestToken) {
           setGuestToken(result.guestSessionToken);
           window.sessionStorage.setItem(storageKey, result.guestSessionToken);
         }
         setDraft("");
-        setThreads(await listGuestComments(token, result.guestSessionToken, pageId));
+        setThreads(await listGuestComments(source, result.guestSessionToken));
       }
     } finally {
       setPosting(false);

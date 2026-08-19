@@ -39,7 +39,7 @@ import {
 import { ReadOnlyPageBlocks } from "@/components/doc/read-only-page-blocks";
 import { RecordingPlayerProvider } from "@/lib/recordings/recording-player-context";
 import { PublicRecordingChrome } from "@/components/recordings/public-recording-chrome";
-import { GuestComments } from "@/components/doc/guest-comments";
+import { GuestComments, guestIdentityKey } from "@/components/doc/guest-comments";
 import { useCommentThreadHover } from "@/components/doc/comment-hover";
 import {
   ThreadGutter,
@@ -529,8 +529,15 @@ export function PublicPageView({ source, initial }: { source: PublicSource; init
               comments={comments}
               paths={page.paths}
             />
-            {source.kind === "link" && page.role !== "view" ? (
-              <GuestComments token={source.token} pageId={source.pageId} />
+            {/* Guest comments: any public family whose resolved role allows
+                it (a `comment` link, "Allow comments" on the published URL,
+                a site under such an anchor). The identity key follows the
+                share, not the page, so one guest name spans the subtree. */}
+            {page.role !== "view" ? (
+              <GuestComments
+                source={source}
+                identityKey={guestIdentityKey(source, page.breadcrumb?.[0]?.pageId)}
+              />
             ) : null}
           </div>
 
