@@ -19,6 +19,7 @@ function profile(
     workspaceId: "workspace-1",
     ownerUserId: "user-1",
     name: `Profile ${id}`,
+    scope: "workspace",
     clearance: "confidential",
     enabledAssistantIds: [],
     assistantRoutingNotes: {},
@@ -122,6 +123,19 @@ describe("[COMP:app-web/browser-identities] assistant browser identity selection
     // Undefined is the parent still loading, never a fabricated denial.
     const top = profile("top", { clearance: "confidential", enabledAssistantIds: ["assistant-1"] });
     expect(render([top])).not.toContain("Enabling is not enough");
+  });
+
+  it("never warns on an owner-scoped profile: it has no rung to fail", () => {
+    // D1 (migration 451): clearance does not gate a private profile, so a
+    // warning here would describe a state that cannot occur.
+    const priv = profile("mine", {
+      name: "hinson-work",
+      scope: "owner",
+      clearance: "confidential",
+      enabledAssistantIds: ["assistant-1"],
+    });
+    expect(render([priv], {}, "internal")).not.toContain("Enabling is not enough");
+    expect(clearanceCovers("internal", "confidential", "owner")).toBe(true);
   });
 
   it("clearanceCovers mirrors the runtime ladder", () => {

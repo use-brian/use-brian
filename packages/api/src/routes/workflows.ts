@@ -289,7 +289,9 @@ async function dependencyIssues(
         !step.deliver ||
         !('channelId' in step.deliver) ||
         step.deliver.channelType === 'web' ||
-        step.deliver.channelType === 'msteams'
+        step.deliver.channelType === 'msteams' ||
+        // Custom (bridge-driven) channels: the bridge owns the peer directory.
+        step.deliver.channelType === 'custom'
       ) continue
       // The integration is attached to the delivering assistant — the step's
       // concrete target, or the workspace primary for the 'primary' sentinel.

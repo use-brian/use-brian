@@ -49,6 +49,14 @@ const DECISIONS: Record<string, ConfirmationDecision> = {
 export type WhatsAppCloudRouteOptions = {
   backgroundModel?: string
   provider: LLMProvider
+  /**
+   * Forwarded to the pipeline so `resolveChatModelSelection` can run its
+   * serving-model substitution (`ensureServableModel`). Omitting it does not
+   * error - the substitution is simply skipped and the turn can select a model
+   * this deployment has no credential for. Same silent-degrade shape as a
+   * missing `resolveWorkspaceCustomLlm`; graded by `channel-custom-llm-wiring`.
+   */
+  configuredProviders?: import('@use-brian/shared/model-registry').ProviderAvailability
   resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
   systemPrompt: string
   tools: Map<string, Tool>
@@ -353,6 +361,7 @@ export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router 
       adaptiveResearchEnabled: true,
       abortController,
       provider: options.provider,
+      configuredProviders: options.configuredProviders,
       resolveWorkspaceCustomLlm: options.resolveWorkspaceCustomLlm,
       systemPrompt: options.systemPrompt,
       tools: options.tools,

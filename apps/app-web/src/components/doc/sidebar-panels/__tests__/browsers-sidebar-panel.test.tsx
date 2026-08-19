@@ -52,6 +52,7 @@ function profile(overrides: Partial<BrowserProfile>): BrowserProfile {
     workspaceId: "ws-1",
     ownerUserId: "user-1",
     name: "Personal",
+    scope: "owner",
     clearance: "confidential",
     enabledAssistantIds: [],
     defaultBackend: "cloud",

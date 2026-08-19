@@ -57,6 +57,7 @@ export function createDeliveryTargetResolver(
 
     if (channelType === 'slack') return { label: `Slack · channel ${channelId}` }
     if (channelType === 'whatsapp') return { label: 'WhatsApp' }
+    if (channelType === 'custom') return { label: `Custom channel · chat ${channelId}` }
     return { label: channelType }
   }
 }

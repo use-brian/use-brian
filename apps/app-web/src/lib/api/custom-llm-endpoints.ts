@@ -14,6 +14,12 @@ export type CustomLlmProfile = {
   contextWindow: number;
   maxOutputTokens: number;
   supportsTools: boolean;
+  /**
+   * Probe-verified image support. False means an image turn on this profile is
+   * answered by a built-in model instead (announced), so the settings row says
+   * "Text only" and re-saving the profile re-runs the probe.
+   */
+  supportsVision: boolean;
   verifiedAt: string;
   createdAt: string;
   updatedAt: string;

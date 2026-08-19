@@ -11,7 +11,7 @@ import type { ExternalSinkFanout } from '../ingest/external-sink-fanout.js'
 import { normalizeInboundChatMessage, normalizeOutboundChatMessage } from './normalize.js'
 
 type Queryable = Pick<pg.ClientBase, 'query'>
-type ChannelSource = 'whatsapp' | 'telegram' | 'slack' | 'discord' | 'email' | 'msteams' | 'wechat'
+type ChannelSource = 'whatsapp' | 'telegram' | 'slack' | 'discord' | 'email' | 'msteams' | 'wechat' | 'custom'
 
 export type LiveArchiveContext = {
   source: ChannelSource
@@ -23,6 +23,15 @@ export type LiveArchiveContext = {
   assistantName: string
   conversationId: string
 }
+
+/**
+ * What binding resolution actually needs. Deliberately narrower than
+ * `LiveArchiveContext`: the assistant fields identify who *answers*, and an
+ * archived conversation need not have an answerer at all.
+ */
+type ArchiveBindingContext = Pick<
+  LiveArchiveContext, 'source' | 'ownerUserId' | 'workspaceId' | 'connectorInstanceId'
+>
 
 export type LiveChatArchiveWriter = {
   /**
@@ -39,6 +48,24 @@ export type LiveChatArchiveWriter = {
    */
   resolveInstanceId(input: LiveArchiveContext): Promise<string | null>
   appendInbound(input: LiveArchiveContext & { message: IncomingMessage }): Promise<void>
+  /**
+   * Archive an inbound message on a conversation no assistant answers.
+   *
+   * Channel routes decide who *replies*; they are not a statement about what
+   * belongs in the archive. An account carries conversations the assistant was
+   * never added to, and dropping them left the archive holding backfilled
+   * history for conversations that then silently stopped receiving live
+   * messages — the same chat, half recorded.
+   *
+   * Takes a workspace rather than an owner because the caller has a channel,
+   * not an assistant, and the owner is derivable from it.
+   */
+  appendUnroutedInbound(input: {
+    source: ChannelSource
+    workspaceId: string
+    conversationId: string
+    message: IncomingMessage
+  }): Promise<void>
   persistInbound<T>(
     input: LiveArchiveContext & { message: IncomingMessage },
     persist: (client?: Queryable) => Promise<T>,
@@ -73,7 +100,7 @@ export function createLiveChatArchiveWriter(deps: {
   const pool = deps.pool ?? getPool()
   const bindings = new Map<string, Promise<{ instanceId: string; workspaceId: string } | null>>()
 
-  async function resolveBinding(input: LiveArchiveContext): Promise<{ instanceId: string; workspaceId: string } | null> {
+  async function resolveBinding(input: ArchiveBindingContext): Promise<{ instanceId: string; workspaceId: string } | null> {
     let workspaceId = input.workspaceId
     if (!workspaceId) {
       const workspace = await pool.query<{ id: string }>(
@@ -158,6 +185,34 @@ export function createLiveChatArchiveWriter(deps: {
       return binding?.instanceId ?? null
     },
 
+    async appendUnroutedInbound(input) {
+      // The workspace owner is the archive's compartment key. Reading it here
+      // rather than taking it from the caller keeps unrouted messages in the
+      // same compartment as routed ones on the same channel — two owners for
+      // one conversation would split it across the row-level security boundary
+      // and make half of it invisible to search.
+      const owner = await pool.query<{ owner_user_id: string }>(
+        `SELECT owner_user_id FROM workspaces WHERE id = $1 LIMIT 1`,
+        [input.workspaceId],
+      )
+      const ownerUserId = owner.rows[0]?.owner_user_id
+      if (!ownerUserId) return
+      const binding = await resolveBinding({
+        source: input.source,
+        ownerUserId,
+        workspaceId: input.workspaceId,
+      })
+      if (!binding) return
+      await deps.fanout.fanout({
+        connectorInstanceId: binding.instanceId,
+        workspaceId: binding.workspaceId,
+        ownerUserId,
+        source: input.source,
+        messages: [normalizeInboundChatMessage({ source: input.source, message: input.message })],
+        sourceCursor: { provider_message_id: input.message.messageId ?? null },
+      })
+    },
+
     async appendInbound(input) {
       const binding = await resolveBinding(input)
       if (!binding) return
@@ -237,6 +292,23 @@ export async function persistInboundChatArchive<T>(
   persist: (client?: Queryable) => Promise<T>,
 ): Promise<T> {
   return globalWriter ? globalWriter.persistInbound(input, persist) : persist()
+}
+
+/**
+ * Archive an inbound message that no assistant will answer.
+ *
+ * A no-op when the archive is not configured, which is the common case — this
+ * sits on the inbound path of every channel, so it must never be the reason a
+ * message is dropped.
+ */
+export async function archiveUnroutedInbound(input: {
+  source: ChannelSource
+  workspaceId: string
+  conversationId: string
+  message: IncomingMessage
+}): Promise<void> {
+  if (!globalWriter) return
+  await globalWriter.appendUnroutedInbound(input)
 }
 
 export async function resolveChatArchiveInstanceId(

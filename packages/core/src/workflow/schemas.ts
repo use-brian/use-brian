@@ -176,7 +176,7 @@ const assistantCallStepSchema = z.object({
    */
   deliver: z.union([
     z.object({
-      channelType: z.enum(['web', 'telegram', 'slack', 'whatsapp', 'msteams']),
+      channelType: z.enum(['web', 'telegram', 'slack', 'whatsapp', 'msteams', 'custom']),
       channelId: z.string().min(1).max(256),
       channelIntegrationId: z.string().uuid().optional(),
       thread: z.object({ fromStep: stepIdSchema }).strict().optional(),
@@ -221,6 +221,8 @@ const assistantCallStepSchema = z.object({
 // ── tool_call ───────────────────────────────────────────────────────────
 
 const approvalSchema = z.object({
+  // Approval pings have no custom-channel renderer yet (approvals are out of
+  // the custom-channel v1 scope); the enum stays narrower than deliver's.
   deliveryChannel: z.enum(['web', 'telegram', 'slack', 'whatsapp', 'msteams']).optional(),
   expiresAfterHours: z.number().int().min(1).max(24 * 30).optional(),
 })

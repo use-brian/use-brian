@@ -128,8 +128,10 @@ describe('[COMP:tools/capability-gate] isAutonomousToolContext (Tier-C write-gat
   })
 
   it('the interactive allowlist is exactly the live-human channels', () => {
+    // `custom` is a bridge-driven channel relaying a live human's chat
+    // (docs/architecture/channels/custom-channel.md).
     expect([...INTERACTIVE_CHANNEL_TYPES].sort()).toEqual(
-      ['discord', 'slack', 'telegram', 'web', 'whatsapp'],
+      ['custom', 'discord', 'slack', 'telegram', 'web', 'whatsapp'],
     )
   })
 })

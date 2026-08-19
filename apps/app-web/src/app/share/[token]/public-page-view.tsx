@@ -9,7 +9,11 @@
  *
  * Comments render in a right margin rail (Notion-style, xl+): each thread card
  * is vertically aligned to its anchored text (the `data-comment-thread` span in
- * `read-only-page-blocks.tsx`), always visible, no click. Below `xl` the rail
+ * `read-only-page-blocks.tsx`), always visible, no click. When the visitor's
+ * role allows commenting, `GuestSelectionComment` adds the in-app "select text
+ * → Comment" flow: a floating pill on selection, a local draft highlight, and a
+ * composer that posts a range-anchored guest thread; the page re-fetches and
+ * the new thread lands in the rail beside its highlighted run. Below `xl` the rail
  * can't fit, so it's hidden and tapping a highlighted comment in the text opens
  * a bottom-sheet drawer (Notion mobile style) showing that one thread —
  * `MobileCommentDrawer`, which slides up from the bottom edge.
@@ -40,6 +44,7 @@ import { ReadOnlyPageBlocks } from "@/components/doc/read-only-page-blocks";
 import { RecordingPlayerProvider } from "@/lib/recordings/recording-player-context";
 import { PublicRecordingChrome } from "@/components/recordings/public-recording-chrome";
 import { GuestComments, guestIdentityKey } from "@/components/doc/guest-comments";
+import { GuestSelectionComment } from "@/components/doc/guest-selection-comment";
 import { useCommentThreadHover } from "@/components/doc/comment-hover";
 import {
   ThreadGutter,
@@ -398,6 +403,15 @@ export function PublicPageView({ source, initial }: { source: PublicSource; init
   // (and vice-versa) — same controller as the editor (see comment-hover.ts).
   useCommentThreadHover();
 
+  // On-demand re-fetch (a guest just posted a comment → pull the page so the
+  // new thread's highlight + rail card appear now, not on the next SSE tick).
+  const refetchPage = useCallback(async () => {
+    const next = await fetchPublicPageFor(source);
+    if (next) setPage(next);
+    else setUnavailable(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [streamKey]);
+
   useEffect(() => {
     let cancelled = false;
     const refetch = async () => {
@@ -498,7 +512,9 @@ export function PublicPageView({ source, initial }: { source: PublicSource; init
           extra width is gutter for the (now `w-96`) rail. Generous bottom padding
           so the last block isn't flush to the viewport edge (matches the editor). */}
       <main className="mx-auto w-full max-w-7xl px-6 pt-10 pb-40">
-        <div ref={wrapRef} className="relative">
+        {/* `isolate` makes this the stacking context the guest draft swatches
+            paint into at `z-[-1]` — behind the text, above the page background. */}
+        <div ref={wrapRef} className="relative isolate">
           {/* At `xl+` with comments the reading column hugs the left so the
               margin rail can sit in the right gutter; otherwise (no comments, or
               below `xl` where the rail is hidden in favour of the tap-to-open
@@ -537,9 +553,21 @@ export function PublicPageView({ source, initial }: { source: PublicSource; init
               <GuestComments
                 source={source}
                 identityKey={guestIdentityKey(source, page.breadcrumb?.[0]?.pageId)}
+                onPosted={() => void refetchPage()}
               />
             ) : null}
           </div>
+
+          {/* Select-to-comment for guests (same gate as the page-level composer):
+              the pill, draft swatches and composer position inside this wrapper. */}
+          {page.role !== "view" ? (
+            <GuestSelectionComment
+              source={source}
+              identityKey={guestIdentityKey(source, page.breadcrumb?.[0]?.pageId)}
+              containerRef={wrapRef}
+              onPosted={() => void refetchPage()}
+            />
+          ) : null}
 
           {comments.length > 0 ? (
             // `xl+`: the always-on margin rail. Below `xl`: no gutter, so the

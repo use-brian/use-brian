@@ -335,6 +335,8 @@ import { createDiscordConnectorClient } from './discord/connector-client.js'
 import { createWhatsappConnectorClient } from './whatsapp/connector-client.js'
 import { createWechatConnectorClient } from './wechat/connector-client.js'
 import { wechatRoutes } from './routes/wechat.js'
+import { customChannelBridgeRoutes } from './routes/custom-channel-bridge.js'
+import { createCustomChannelStore } from './db/custom-channel-store.js'
 import { createWhatsappByonRuntime } from './whatsapp/byon-runtime.js'
 import { createIngestRulesStore } from './db/ingest-rules-store.js'
 import { createIngestRuleEditorStore } from './db/ingest-rules-editor-store.js'
@@ -1754,6 +1756,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const communitySkillRegistry = loadSkillRegistry()
 
   const integrationStore = credKey ? createDbChannelIntegrationStore(credKey) : null
+  // Custom (bridge-driven) channel state + outbox (migration 450). Internal
+  // path, no RLS — reachable only through the bridge token or member routes.
+  const customChannelStore = createCustomChannelStore()
   const apiKeyStore = createDbApiKeyStore()
   const brainKeyStore = createDbBrainKeyStore()
   const llmProviderEncryptionKey = (() => {
@@ -2033,6 +2038,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         defaultTelegramBotToken: env.TELEGRAM_BOT_TOKEN,
         waConnectorUrl: env.WA_CONNECTOR_URL,
         waConnectorSecret: env.WA_CONNECTOR_SECRET,
+        customChannelStore,
       }),
       resolveViewWorkspace: async ({ userId, viewId }) =>
         (await savedViewStore.getById(userId, viewId))?.workspaceId ?? null,
@@ -2677,6 +2683,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       defaultTelegramBotToken: env.TELEGRAM_BOT_TOKEN,
       waConnectorUrl: env.WA_CONNECTOR_URL,
       waConnectorSecret: env.WA_CONNECTOR_SECRET,
+      customChannelStore,
     }),
     // Connector-health surfacing (migration 294): the workspace's dead
     // connectors, so a finished run names them + notifies the owner.
@@ -3009,6 +3016,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       defaultTelegramBotToken: env.TELEGRAM_BOT_TOKEN,
       waConnectorUrl: env.WA_CONNECTOR_URL,
       waConnectorSecret: env.WA_CONNECTOR_SECRET,
+      customChannelStore,
     }),
     resolveViewWorkspace: async ({ userId, viewId }) =>
       (await savedViewStore.getById(userId, viewId))?.workspaceId ?? null,
@@ -3091,6 +3099,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const { renderView, saveView } = createViewTools({
     taskStore, crmStore, workflowRunStore,
     workspaceDirectory: workspaceDirectoryStore, savedViewStore,
+    // Absolute page links for out-app renders (Slack/Telegram/API) — same
+    // origin resolution as the computer-use take-over link above.
+    pageUrl: (workspaceId, viewId) =>
+      `${(env.AUTHED_APP_URL ?? env.APP_URL).replace(/\/$/, '')}/w/${workspaceId}/p/${viewId}`,
   })
   allTools.set('renderView', renderView)
   allTools.set('saveView', saveView)
@@ -7281,6 +7293,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       discordConnector,
       whatsappConnector,
       wechatConnector,
+      customChannelStore,
       // Fallback bot for naming sessions-derived telegram delivery destinations.
       telegramBotToken: env.TELEGRAM_BOT_TOKEN,
       ownerPairing: {
@@ -7356,6 +7369,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             adaptiveResearchEnabled: true,
             abortController,
             provider,
+            configuredProviders,
             resolveWorkspaceCustomLlm,
             systemPrompt: LAYER_1_SYSTEM_PROMPT,
             tools: allTools,
@@ -7455,7 +7469,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       }))
       app.use('/webhook/whatsapp', whatsappCloudRoutes({
         backgroundModel,
-        provider, resolveWorkspaceCustomLlm, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
+        provider, configuredProviders, resolveWorkspaceCustomLlm, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
         memoryStore, usageStore, checkCreditBudget: ports.checkCreditBudget,
         integrationStore, channelUserStore,
         workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
@@ -7509,6 +7523,21 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           archiveMedia: chatArchiveLiveMedia,
           }))
       }
+      // Custom (bridge-driven) channels. Unconditional: auth is the per-channel
+      // bridge token, not an env secret. Mounted OUTSIDE /api on purpose so no
+      // bare `app.use('/api', requireAuth(…))` guard can 401 the bridge.
+      // See docs/architecture/channels/custom-channel.md.
+      app.use('/bridge/v1/channels', customChannelBridgeRoutes({
+        backgroundModel,
+        artifactPromoter,
+        provider, configuredProviders, resolveWorkspaceCustomLlm, systemPrompt: LAYER_1_SYSTEM_PROMPT,
+        tools: allTools, capabilityStore, memoryStore, usageStore,
+        checkCreditBudget: ports.checkCreditBudget, integrationStore, customChannelStore, channelUserStore,
+        workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
+        connectorInstanceStore, knowledgeStore, gdriveFilesStore, workspaceFilesStore, analytics,
+        skillStore, episodicStore, sessionStateStore, fileStore,
+        archiveMedia: chatArchiveLiveMedia,
+      }))
     }
   }
 

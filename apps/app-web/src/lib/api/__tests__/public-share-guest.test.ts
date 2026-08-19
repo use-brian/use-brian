@@ -57,6 +57,20 @@ describe("[COMP:app-web/share-dialog] guest comment endpoints per public family"
     expect(url).toMatch(/\/api\/public\/sites\/docs\.example\/comment-threads\?page=child-2$/);
   });
 
+  it("range comment: carries anchorBlockId + quote so the thread anchors to the selected text", async () => {
+    await postGuestComment(
+      { kind: "published", pageId: "page-1" },
+      { guestName: "Ada", body: "why?", anchorBlockId: "blk-7", quote: "the second claim" },
+    );
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(String(init.body))).toEqual({
+      guestName: "Ada",
+      body: "why?",
+      anchorBlockId: "blk-7",
+      quote: "the second claim",
+    });
+  });
+
   it("listing carries the guest token (and the page scope for link/site)", async () => {
     await listGuestComments({ kind: "published", pageId: "page-1" }, "guest-1");
     expect((fetchMock.mock.calls[0] as [string])[0]).toMatch(

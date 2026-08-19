@@ -37,6 +37,7 @@ import type {
   ViewPayload,
 } from './a2ui.js'
 import { bindingConfigSchema } from './schemas.js'
+import { renderPayloadText } from './text-render.js'
 import type { BindingConfig, SavedViewStore } from './types.js'
 
 export type ViewToolEvent =
@@ -62,6 +63,16 @@ export type ViewToolDeps = {
    */
   workspaceDirectory: WorkspaceDirectoryStore
   savedViewStore: SavedViewStore
+  /**
+   * Absolute page URL builder (`https://app…/w/<workspaceId>/p/<viewId>`).
+   * Wired from boot (AUTHED_APP_URL ?? APP_URL, same resolution as the
+   * computer-use take-over link). When a page is created or appended on a
+   * channel outside VIEW_MOUNT_CHANNELS, the tool result carries this URL
+   * and instructs the model to include it — out-app the page is reachable
+   * NOWHERE else. Absent (tests, minimal boots) → a relative `/w/…/p/…`
+   * path is returned instead.
+   */
+  pageUrl?: (workspaceId: string, viewId: string) => string
   onEvent?: (event: ViewToolEvent, ctx: ViewToolEventContext) => void
 }
 
@@ -195,23 +206,55 @@ function formatBindingError(error: z.ZodError, input: unknown): string[] {
  * Channel types whose sessions have no user in the loop — workflow
  * `assistant_call` consults (A2A callees) and legacy cron turns.
  *
- * Precedence in `renderView` / `renderChart` (the same three rungs, in
+ * Precedence in `renderView` / `renderChart` (the same four rungs, in
  * order):
  *   1. `context.docViewId` set → APPEND to that page. A doc anchor is a
  *      deliberate target — interactive doc chat and page-anchored workflow
- *      steps alike land their block on the anchored page.
+ *      steps alike land their block on the anchored page. Out-app, the
+ *      result also carries the page URL (see VIEW_MOUNT_CHANNELS).
  *   2. else headless → payload-only, NO draft. The caller wants the data;
  *      a draft nobody can save would just accumulate in the doc sidebar.
  *      (Incident: hourly workflow triggers whose callee rendered
  *      `workflow_runs/table` every run, re-creating a
  *      "workflow_runs/table — draft" page each hour, 2026-06-10.)
- *   3. else → create a draft (interactive chat from a non-doc surface).
+ *   3. else interactive but OUTSIDE VIEW_MOUNT_CHANNELS (Slack, Telegram,
+ *      …, API turns) → payload + a paste-ready `textRendering`, NO draft
+ *      unless the model passed `createPage: true` on the user's explicit
+ *      ask. When it did, the draft is minted (reusing an identical-binding
+ *      draft when one exists) and the result carries the absolute page
+ *      URL the reply MUST include. (Incident: four invisible
+ *      "deals/board — draft" / "tasks/table — draft" pages minted from
+ *      Slack asks like "what pipeline do we have", while the assistant
+ *      claimed the board was "embedded in this chat above", 2026-08-19.)
+ *   4. else (web app chat) → create a draft. The floating-chat client
+ *      consumes the `view_payload` SSE event and auto-navigates to the
+ *      new draft — in-app, the page IS the display surface.
  *
  * An anchored-but-unreachable page in a headless session falls 1 → 2
  * (payload-only), never into draft creation. See
  * docs/architecture/features/views.md → "Draft / saved lifecycle".
  */
 const HEADLESS_CHANNEL_TYPES = new Set(['assistant-call', 'cron'])
+
+/**
+ * The channels whose CLIENT mounts the draft page — today only the web
+ * app chat (`floating-chat.tsx` listens for `view_payload` and navigates
+ * to the created draft; "we never inline-render the widget in chat").
+ * Everywhere else — messaging adapters, the public/API turn routes,
+ * workflow deliver turns — nothing can render an A2UI payload or open
+ * the Pages sidebar, so a silently-minted draft is an invisible page the
+ * user never asked for. Deliberately an ALLOWLIST: a future channel
+ * defaults to the honest rung 3 above, not to silent slop.
+ */
+const VIEW_MOUNT_CHANNELS = new Set(['web'])
+
+/**
+ * Model-facing follow-up attached to out-app results that carry a page
+ * URL. Kept as one constant so renderView / renderChart / saveView give
+ * the model the same instruction.
+ */
+const OUT_APP_LINK_NOTE =
+  'This chat cannot display the interactive view. Your reply MUST include the `url` above (it is the only way the user can reach this page) and should present the data itself using `textRendering` when one is provided.'
 
 /**
  * `renderView` is **not capability-gated** — every workspace member
@@ -225,7 +268,10 @@ export function createRenderViewTool(deps: ViewToolDeps): Tool {
     description:
       'Render a Table, Board, or Calendar of the workspace\'s primitives — tasks / contacts / companies / deals / workflow runs. ' +
       'Use this when the user asks to "show me", "list", "kanban", a calendar/schedule of dated tasks, or any visual request — instead of writing a Markdown table. ' +
-      'Result mounts inline in chat. When the session is anchored to a doc page, the table/board/calendar is appended to that page as a block; otherwise interactive chat persists it as a new draft page in the workspace\'s Pages sidebar (page URL: /w/<workspaceId>/p/<viewId>), and unanchored scheduled/automated sessions get the data only (no page is created). ' +
+      'What the user sees depends on the channel. Web app chat: the result is saved as a draft page in the Pages sidebar and the app opens it — that page is how the view is displayed. ' +
+      'Anchored doc sessions: the table/board/calendar is appended to the anchored page as a block. ' +
+      'Every other channel (Slack, Telegram, WhatsApp, Discord, API) CANNOT display an interactive view: the result instead includes a ready-to-paste `textRendering` you must use to present the data in your reply, and NO page is created unless you pass createPage:true; when a page is created or appended out-app the result carries a `url` your reply must include. ' +
+      'Unanchored scheduled/automated sessions get the data only (no page is created). ' +
       '\n\n' +
       'ONLY these exact (entity, viewType) combinations are valid. Pick one VERBATIM; the tool rejects anything else: ' +
       '\n  • tasks/table — optional filters.{status[],assigneeId,tag,dueBefore,dueAfter}' +
@@ -251,6 +297,12 @@ export function createRenderViewTool(deps: ViewToolDeps): Tool {
           '{"entity":"deals","viewType":"board","groupBy":"stage"} | ' +
           '{"entity":"workflow_runs","viewType":"table","filters":{"workflowId":"<uuid>"}}',
         ),
+        createPage: z
+          .boolean()
+          .optional()
+          .describe(
+            'Only consulted OUTSIDE the web app chat (messaging channels, API turns). Set true ONLY when the user explicitly asked for a page they can open later ("create a board page", "save this as a page I can check"). A plain "show me…" ask must leave this unset — the data is returned with a textRendering and no page is created. In the web app chat this field is ignored (the draft page is how the view is displayed).',
+          ),
       })
       .describe('Wraps the BindingConfig under `binding` so future tool args can extend without breaking.'),
     isConcurrencySafe: false,
@@ -299,8 +351,9 @@ export function createRenderViewTool(deps: ViewToolDeps): Tool {
         const blockId = newBlockId()
         const newBlock: Block = { kind: 'data', id: blockId, binding }
         const activeViewId = context.docViewId ?? null
+        const outApp = !VIEW_MOUNT_CHANNELS.has(context.channelType)
         let viewId: string | undefined
-        let action: 'appended' | 'created' = 'created'
+        let action: 'appended' | 'created' | 'reused' = 'created'
 
         if (activeViewId) {
           // Append path — fetch current page, push, write back.
@@ -348,6 +401,48 @@ export function createRenderViewTool(deps: ViewToolDeps): Tool {
           }
         }
 
+        // Rung 3 — interactive but out-app (Slack, Telegram, API, …) with
+        // no explicit page ask: the user wanted the data in THIS chat, so
+        // return it as paste-ready text and mint nothing. A silently-minted
+        // draft here is a page nobody can see (the 2026-08-19 Slack slop).
+        if (!viewId && outApp && input.createPage !== true) {
+          deps.onEvent?.({
+            type: 'view_rendered',
+            viewId: '',
+            entity: binding.entity,
+            viewType: binding.viewType,
+          }, eventCtx(context))
+          const textRendering = renderPayloadText(payload)
+          return {
+            data: {
+              kind: 'view_payload' as const,
+              payload,
+              entity: binding.entity,
+              viewType: binding.viewType,
+              action: 'rendered' as const,
+              ...(textRendering ? { textRendering } : {}),
+              note:
+                'No page was created. This chat cannot display interactive views. Present the data in your reply using textRendering (paste it, lightly adapted to the channel). Only if the user explicitly asks for a page they can open later, call renderView again with createPage: true.',
+            },
+          }
+        }
+
+        // Out-app explicit page ask: an identical-binding draft already in
+        // the sidebar IS the page the user means — data blocks are live
+        // bindings, so a same-binding draft renders identically. Reuse it
+        // instead of minting the duplicate rows the incident left behind.
+        if (!viewId && outApp && deps.savedViewStore.findDraftByBinding) {
+          const existing = await deps.savedViewStore.findDraftByBinding(
+            context.userId,
+            context.workspaceId!,
+            binding,
+          )
+          if (existing) {
+            viewId = existing.id
+            action = 'reused'
+          }
+        }
+
         if (!viewId) {
           const draftName = `${binding.entity}/${binding.viewType} — draft`
           const seedPage = dataPage(binding, blockId)
@@ -388,6 +483,23 @@ export function createRenderViewTool(deps: ViewToolDeps): Tool {
           viewType: binding.viewType,
         }, eventCtx(context))
 
+        // Out-app, a page the user cannot navigate to is a page that does
+        // not exist: whenever one was created/appended/reused, the result
+        // carries the absolute URL and the reply must include it.
+        const outAppExtras =
+          outApp && viewId
+            ? {
+                url:
+                  deps.pageUrl?.(context.workspaceId!, viewId) ??
+                  `/w/${context.workspaceId}/p/${viewId}`,
+                ...(() => {
+                  const textRendering = renderPayloadText(payload)
+                  return textRendering ? { textRendering } : {}
+                })(),
+                note: OUT_APP_LINK_NOTE,
+              }
+            : {}
+
         return {
           data: {
             kind: 'view_payload' as const,
@@ -396,6 +508,7 @@ export function createRenderViewTool(deps: ViewToolDeps): Tool {
             viewType: binding.viewType,
             action,
             ...(viewId ? { viewId } : {}),
+            ...outAppExtras,
           },
         }
       } catch (err) {
@@ -506,9 +619,17 @@ export function createRenderChartTool(deps: ViewToolDeps): Tool {
       'series_by_date REQUIRES a date-typed groupBy field (e.g. groupBy:"closeDate" on deals, ' +
       '"due" on tasks, "updatedAt" on any entity). ' +
       '\n\n' +
-      'The result mounts inline in chat AND persists as a draft page in the workspace\'s Pages sidebar (page URL: /w/<workspaceId>/p/<viewId>).',
+      'What the user sees depends on the channel. Web app chat: the chart persists as a draft page in the Pages sidebar and the app opens it. ' +
+      'Anchored doc sessions: the chart block is appended to the anchored page. ' +
+      'Every other channel (Slack, Telegram, WhatsApp, Discord, API) CANNOT display a chart: the result includes a `textRendering` (label: value lines) to present in your reply, NO page is created unless you pass createPage:true, and any created/appended page comes back with a `url` your reply must include.',
     inputSchema: z.object({
       kind: chartKindSchema.describe('Picks the chart widget shape.'),
+      createPage: z
+        .boolean()
+        .optional()
+        .describe(
+          'Only consulted OUTSIDE the web app chat. Set true ONLY when the user explicitly asked for a page they can open later. A plain "how many…" / "chart of…" ask must leave this unset. Ignored in the web app chat.',
+        ),
       title: z.string().min(0).max(256).optional().describe(
         'Optional title rendered above the chart. Defaults to the groupBy field name for KPIs.',
       ),
@@ -579,6 +700,23 @@ export function createRenderChartTool(deps: ViewToolDeps): Tool {
         // Previously renderChart always minted a separate draft even with
         // an active doc anchor; appending is the deliberate alignment.
         const activeViewId = context.docViewId ?? null
+        const outApp = !VIEW_MOUNT_CHANNELS.has(context.channelType)
+        // Same out-app contract as renderView: a page the user cannot
+        // navigate to does not exist, so appends/creates outside the web
+        // app carry the absolute URL + the link instruction.
+        const outAppExtrasFor = (viewId: string) =>
+          outApp
+            ? {
+                url:
+                  deps.pageUrl?.(context.workspaceId!, viewId) ??
+                  `/w/${context.workspaceId}/p/${viewId}`,
+                ...(() => {
+                  const textRendering = renderPayloadText(payload)
+                  return textRendering ? { textRendering } : {}
+                })(),
+                note: OUT_APP_LINK_NOTE,
+              }
+            : {}
         if (activeViewId) {
           const existing = await deps.savedViewStore.getPage(context.userId, activeViewId)
           if (existing) {
@@ -603,6 +741,7 @@ export function createRenderChartTool(deps: ViewToolDeps): Tool {
                   chartKind: input.kind,
                   action: 'appended' as const,
                   viewId: activeViewId,
+                  ...outAppExtrasFor(activeViewId),
                 },
               }
             }
@@ -627,6 +766,31 @@ export function createRenderChartTool(deps: ViewToolDeps): Tool {
               entity: binding.entity,
               viewType: 'chart',
               chartKind: input.kind,
+            },
+          }
+        }
+
+        // Rung 3 — interactive but out-app with no explicit page ask:
+        // the answer belongs in THIS chat. Mirrors renderView; see
+        // VIEW_MOUNT_CHANNELS.
+        if (outApp && input.createPage !== true) {
+          deps.onEvent?.({
+            type: 'chart_rendered',
+            viewId: '',
+            entity: binding.entity,
+            chartKind: input.kind,
+          }, eventCtx(context))
+          const textRendering = renderPayloadText(payload)
+          return {
+            data: {
+              kind: 'view_payload' as const,
+              payload,
+              entity: binding.entity,
+              viewType: 'chart',
+              chartKind: input.kind,
+              ...(textRendering ? { textRendering } : {}),
+              note:
+                'No page was created. This chat cannot display charts. Present the numbers in your reply using textRendering. Only if the user explicitly asks for a page they can open later, call renderChart again with createPage: true.',
             },
           }
         }
@@ -678,6 +842,7 @@ export function createRenderChartTool(deps: ViewToolDeps): Tool {
             viewType: 'chart',
             chartKind: input.kind,
             ...(viewId ? { viewId } : {}),
+            ...(viewId ? outAppExtrasFor(viewId) : {}),
           },
         }
       } catch (err) {
@@ -752,7 +917,11 @@ export function createSaveViewTool(deps: ViewToolDeps): Tool {
             name: created.name,
             entity: created.entity,
             viewType: created.viewType,
-            url: `/w/${created.workspaceId}/p/${created.id}`,
+            // Absolute when boot wired `pageUrl` — out-app a relative path
+            // is not clickable, and the reply must link the saved page.
+            url:
+              deps.pageUrl?.(created.workspaceId, created.id) ??
+              `/w/${created.workspaceId}/p/${created.id}`,
           },
         }
       } catch (err) {

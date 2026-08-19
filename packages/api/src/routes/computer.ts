@@ -63,6 +63,8 @@ const InputEventSchema = z.union([
 ])
 
 const ClearanceSchema = z.enum(['public', 'internal', 'confidential'])
+/** WHOSE turns may use the profile, independent of the rung (migration 451). */
+const ScopeSchema = z.enum(['owner', 'workspace'])
 const BackendSchema = z.enum(['local', 'cloud'])
 const AssistantRoutingNotesSchema = z
   .record(
@@ -191,6 +193,7 @@ export function createInMemoryLocalComputerTaskStore(now: () => number = Date.no
 const CreateProfileSchema = z.object({
   workspaceId: z.string().min(1).max(64),
   name: z.string().min(1).max(120),
+  scope: ScopeSchema.optional(),
   clearance: ClearanceSchema.optional(),
   defaultBackend: BackendSchema.optional(),
   localControlMode: z.enum(['task_tabs', 'full_browser']).optional(),
@@ -199,6 +202,7 @@ const CreateProfileSchema = z.object({
 
 const UpdateProfileSchema = z.object({
   name: z.string().min(1).max(120).optional(),
+  scope: ScopeSchema.optional(),
   clearance: ClearanceSchema.optional(),
   defaultBackend: BackendSchema.optional(),
   localControlMode: z.enum(['task_tabs', 'full_browser']).optional(),
@@ -695,6 +699,7 @@ export function computerRoutes(deps: {
         workspaceId: body.data.workspaceId,
         ownerUserId: req.userId as string,
         name: body.data.name,
+        scope: body.data.scope,
         clearance: body.data.clearance,
         defaultBackend: body.data.defaultBackend,
         localControlMode: body.data.localControlMode,

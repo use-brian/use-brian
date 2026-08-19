@@ -312,7 +312,7 @@ export type CalleeQueryParams = {
    * A2A; confirmations are stripped (the approval was already granted).
    */
   deliverTarget?: {
-    channelType: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams'
+    channelType: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams' | 'custom'
     channelId: string
     channelIntegrationId?: string
   }

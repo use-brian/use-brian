@@ -38,7 +38,7 @@ const profileRow = {
   modelId: 'local-balanced',
   contextWindow: 32768,
   maxOutputTokens: 4096,
-  supportsTools: true,
+  supportsTools: true, supportsVision: false,
   verifiedAt: new Date(),
   createdAt: new Date(),
   updatedAt: new Date(),
@@ -73,7 +73,7 @@ describe('[COMP:api/custom-llm-endpoints] custom connection/profile store', () =
         modelId: profileRow.modelId,
         contextWindow: 32768,
         maxOutputTokens: 4096,
-        supportsTools: true,
+        supportsTools: true, supportsVision: false,
         verifiedAt: new Date(),
       },
     })
@@ -91,7 +91,7 @@ describe('[COMP:api/custom-llm-endpoints] custom connection/profile store', () =
       input: {
         name: endpointRow.name, baseUrl: endpointRow.baseUrl, apiKey: null,
         modelId: profileRow.modelId, contextWindow: 32768, maxOutputTokens: 4096,
-        supportsTools: true, verifiedAt: new Date(),
+        supportsTools: true, supportsVision: false, verifiedAt: new Date(),
       },
     })
     expect((clientQuery.mock.calls[1]![1] as unknown[])[4]).toBeNull()
@@ -104,7 +104,7 @@ describe('[COMP:api/custom-llm-endpoints] custom connection/profile store', () =
       input: {
         name: endpointRow.name, baseUrl: endpointRow.baseUrl, apiKey: 'secret',
         modelId: profileRow.modelId, contextWindow: 32768, maxOutputTokens: 4096,
-        supportsTools: true, verifiedAt: new Date(),
+        supportsTools: true, supportsVision: false, verifiedAt: new Date(),
       },
     })).rejects.toBeInstanceOf(CustomLlmEncryptionKeyRequiredError)
     expect(mockGetAppPool).not.toHaveBeenCalled()
@@ -142,7 +142,7 @@ describe('[COMP:api/custom-llm-endpoints] custom connection/profile store', () =
         modelId: updated.modelId,
         contextWindow: updated.contextWindow,
         maxOutputTokens: updated.maxOutputTokens,
-        supportsTools: true,
+        supportsTools: true, supportsVision: false,
         verifiedAt,
       },
     })).resolves.toEqual(updated)
@@ -156,6 +156,10 @@ describe('[COMP:api/custom-llm-endpoints] custom connection/profile store', () =
       'terra-high',
       1_048_576,
       65_536,
+      // Vision rides the same verified-profile write as the tool flag, so an
+      // edit that re-probes a sightless endpoint records it as sightless
+      // rather than leaving a stale `true` behind.
+      false,
       verifiedAt,
     ])
   })
@@ -171,7 +175,7 @@ describe('[COMP:api/custom-llm-endpoints] custom connection/profile store', () =
       input: {
         name: endpointRow.name, baseUrl: endpointRow.baseUrl, apiKey: 'system-only',
         modelId: profileRow.modelId, contextWindow: 32768, maxOutputTokens: 4096,
-        supportsTools: true, verifiedAt: new Date(),
+        supportsTools: true, supportsVision: false, verifiedAt: new Date(),
       },
     })
     const realEncrypted = (clientQuery.mock.calls[1]![1] as unknown[])[4] as Buffer

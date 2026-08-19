@@ -28,3 +28,4 @@ packages/api/eval-results/
 # A committed zip is a second copy of source that sits right beside it and
 # goes stale without a diff to show for it.
 home-apps/*.zip
+.gstack/

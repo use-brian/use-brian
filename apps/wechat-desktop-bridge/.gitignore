@@ -1,0 +1,4 @@
+# Operator secrets for the compose stack live beside the compose file; never commit them.
+agent-wechat-token
+.env
+dist/

@@ -30,6 +30,7 @@ describe('[COMP:sandbox/profiles] DB browser profile store', () => {
     workspace_id: 'ws-1',
     owner_user_id: 'user-1',
     name: 'Work',
+    scope: 'workspace' as const,
     clearance: 'internal' as const,
     enabled_assistant_ids: ['assistant-1'],
     assistant_routing_notes: { 'assistant-1': 'Use the company account.' },
@@ -49,6 +50,7 @@ describe('[COMP:sandbox/profiles] DB browser profile store', () => {
       workspaceId: 'ws-1',
       ownerUserId: 'user-1',
       name: 'Work',
+      scope: 'workspace',
       clearance: 'internal',
       enabledAssistantIds: ['assistant-1'],
       assistantRoutingNotes: { 'assistant-1': 'Use the company account.' },
@@ -67,6 +69,7 @@ describe('[COMP:sandbox/profiles] DB browser profile store', () => {
       workspaceId: 'ws-1',
       ownerUserId: 'user-1',
       name: 'Work',
+      scope: 'workspace',
       clearance: 'internal',
       enabledAssistantIds: ['assistant-1'],
       assistantRoutingNotes: { 'assistant-1': 'Use the company account.' },
@@ -76,11 +79,17 @@ describe('[COMP:sandbox/profiles] DB browser profile store', () => {
     })
 
     const [createSql, createParams] = mockQuery.mock.calls[0] as [string, unknown[]]
-    expect(createSql).toMatch(/enabled_assistant_ids,[\s\S]*assistant_routing_notes,[\s\S]*local_control_mode/)
+    expect(createSql).toMatch(/scope,[\s\S]*clearance,[\s\S]*enabled_assistant_ids,[\s\S]*assistant_routing_notes,[\s\S]*local_control_mode/)
+    // Column count must match placeholder count: the closed sibling store
+    // shipped 10 columns against 9 placeholders, silently dropping proxy_url.
+    const columnCount = createSql.match(/\(([^)]*)\)\s*VALUES/)![1].split(',').length
+    const placeholderCount = createSql.match(/VALUES \(([^)]*)\)/)![1].split(',').length
+    expect(placeholderCount).toBe(columnCount)
     expect(createParams).toEqual([
       'ws-1',
       'user-1',
       'Work',
+      'workspace',
       'internal',
       ['assistant-1'],
       { 'assistant-1': 'Use the company account.' },
@@ -91,6 +100,7 @@ describe('[COMP:sandbox/profiles] DB browser profile store', () => {
 
     await store.update('profile-1', {
       name: 'Renamed',
+      scope: 'owner',
       clearance: 'public',
       enabledAssistantIds: [],
       assistantRoutingNotes: {},
@@ -101,6 +111,7 @@ describe('[COMP:sandbox/profiles] DB browser profile store', () => {
     const [updateSql, updateParams] = mockQuery.mock.calls[1] as [string, unknown[]]
     for (const column of [
       'name',
+      'scope',
       'clearance',
       'default_backend',
       'local_control_mode',
@@ -114,6 +125,7 @@ describe('[COMP:sandbox/profiles] DB browser profile store', () => {
     expect(updateParams).toEqual([
       'profile-1',
       'Renamed',
+      'owner',
       'public',
       'cloud',
       'task_tabs',

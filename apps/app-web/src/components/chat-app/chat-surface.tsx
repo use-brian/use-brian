@@ -195,6 +195,10 @@ import {
   useAssistantMentions,
 } from "@/components/chat-app/mention-autocomplete";
 import {
+  SlashCommandMenuList,
+  useSlashCommands,
+} from "@/components/chat-app/slash-command-autocomplete";
+import {
   canEditUserMessage,
   resolveEditDispatch,
 } from "@/components/chat-app/message-edit";
@@ -334,6 +338,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
    * session switch — it explains one event, it is not a status line.
    */
   const [turnEndNotice, setTurnEndNotice] = useState<string | null>(null);
+  // A server `notice` about how THIS turn was served (e.g. the workspace's
+  // model endpoint cannot read images, so a built-in model answered). Not an
+  // error - the answer is right there - but it must be visible, because an
+  // unannounced substitution is exactly what byo-llm-key.md forbids.
+  const [turnNotice, setTurnNotice] = useState<string | null>(null);
   /** The user message open in the inline editor, and its working text. */
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
@@ -401,6 +410,18 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     assistants,
     value: input,
     onChange: setInput,
+  });
+  /** Slash-command discovery — a draft that is a half-typed `/command` offers
+   *  the invocable skills; the send stays an ordinary message and the server
+   *  seam does the real resolution. Anchored to the same composer box as the
+   *  mention popup (the two queries are mutually exclusive: one starts with
+   *  `/`, the other contains `@`). */
+  const slashCommands = useSlashCommands({
+    enabled: true,
+    workspaceId,
+    value: input,
+    onChange: setInput,
+    containerRef: mentions.containerRef,
   });
   /** The same autocomplete inside the inline message editor — one instance is
    *  enough because only one message is editable at a time. */
@@ -1035,6 +1056,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   // rooms must not carry it across.
   useEffect(() => {
     setTurnEndNotice(null);
+    setTurnNotice(null);
   }, [activeSessionId]);
 
   useEffect(() => {
@@ -1785,6 +1807,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     setQueuedNotice(false);
     // The previous turn's ending is explained; this send moves past it.
     setTurnEndNotice(null);
+    setTurnNotice(null);
     responseGroupAbortRef.current = false;
     let sourceMessageId: string | null = null;
     const responseAssistantIds = targets.map((assistant) => assistant.id);
@@ -2186,6 +2209,19 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
               sessionId: sessionIdRef.current ?? "",
               status: "pending",
             });
+            break;
+          }
+          case "notice": {
+            const code = typeof payload.code === "string" ? payload.code : "";
+            if (code === "custom_model_image_fallback") {
+              setTurnNotice(tChat.noticeCustomModelImageFallback);
+            } else if (code === "budget_downgraded") {
+              setTurnNotice(tChat.noticeBudgetDowngraded);
+            } else if (typeof payload.message === "string") {
+              // Server-authored English is better than silence for a code
+              // this build has never heard of.
+              setTurnNotice(payload.message);
+            }
             break;
           }
           case "error": {
@@ -2953,10 +2989,17 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         mentions={mentions}
         className="bottom-full left-2 mb-1"
       />
+      {/* Slash-command menu — same anchor box, mutually exclusive query. */}
+      <SlashCommandMenuList
+        commands={slashCommands}
+        className="bottom-full left-2 mb-1"
+      />
       <ChatComposer
         value={input}
         onChange={setInput}
         onKeyDown={(event) => {
+          slashCommands.handleKeyDown(event);
+          if (event.defaultPrevented) return;
           mentions.handleKeyDown(event);
           if (event.defaultPrevented) return;
           // Escape drops the quote before it drops anything else — the
@@ -3651,6 +3694,16 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 onAnswered={() => setPendingQuestion(null)}
                 onCancelled={() => setPendingQuestion(null)}
               />
+            )}
+            {/* How this turn was served, when it was not served the way the
+                workspace normally serves turns. Never an error. */}
+            {turnNotice && (
+              <p
+                role="status"
+                className="rounded-lg border border-border/70 bg-muted/30 px-3 py-2 text-xs text-muted-foreground"
+              >
+                {turnNotice}
+              </p>
             )}
             {/* Quiet queue notice (T5) — a mention landed mid-turn; the
                 follow-up turn is armed. Never an error. */}

@@ -824,6 +824,9 @@ function CollabEditorInner({
       id: th.id,
       anchorKind: th.anchorKind,
       anchorBlockId: th.anchorBlockId,
+      // A markless range thread (a guest's, from the public page) re-anchors
+      // by its quote — see comment-decorations.ts source (c).
+      quote: th.quote,
     }));
     syncCommentThreads(editor.view, decoThreads);
   }, [editor, threads]);

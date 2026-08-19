@@ -635,3 +635,151 @@ describe('[COMP:views/tools] saveView', () => {
     )
   })
 })
+
+describe('[COMP:views/tools] renderView out-app channels (Slack / Telegram / API)', () => {
+  // The 2026-08-19 incident: Slack asks like "what pipeline do we have"
+  // minted invisible "deals/board — draft" sidebar pages while the model
+  // claimed the board was "embedded in this chat above". Out-app channels
+  // cannot mount the draft, so a page requires the explicit createPage
+  // flag, and any page that does exist must come back with its URL.
+
+  it('returns textRendering + note and mints NO draft on a plain slack ask', async () => {
+    const d = deps()
+    const tool = createRenderViewTool(d)
+    const res = await tool.execute(
+      { binding: { entity: 'deals', viewType: 'board', groupBy: 'stage' } },
+      ctx({ channelType: 'slack' }),
+    )
+    expect(res.isError).toBeUndefined()
+    const data = res.data as { action: string; viewId?: string; textRendering?: string; note?: string; url?: string }
+    expect(data.action).toBe('rendered')
+    expect(data.viewId).toBeUndefined()
+    expect(data.url).toBeUndefined()
+    expect(typeof data.textRendering).toBe('string')
+    expect(data.note).toMatch(/No page was created/)
+    expect(data.note).toMatch(/createPage/)
+    expect(d.savedViewStore.createDraft).not.toHaveBeenCalled()
+  })
+
+  it('telegram and api turns get the same no-page default', async () => {
+    for (const channelType of ['telegram', 'api']) {
+      const d = deps()
+      const tool = createRenderViewTool(d)
+      const res = await tool.execute(
+        { binding: { entity: 'tasks', viewType: 'table' } },
+        ctx({ channelType }),
+      )
+      expect((res.data as { action: string }).action).toBe('rendered')
+      expect(d.savedViewStore.createDraft).not.toHaveBeenCalled()
+    }
+  })
+
+  it('mints a draft + absolute url when createPage:true', async () => {
+    const d = {
+      ...deps(),
+      pageUrl: (ws: string, id: string) => `https://app.test/w/${ws}/p/${id}`,
+    }
+    const tool = createRenderViewTool(d)
+    const res = await tool.execute(
+      { binding: { entity: 'deals', viewType: 'board', groupBy: 'stage' }, createPage: true },
+      ctx({ channelType: 'slack' }),
+    )
+    expect(res.isError).toBeUndefined()
+    const data = res.data as { action: string; viewId?: string; url?: string; note?: string }
+    expect(data.action).toBe('created')
+    expect(data.viewId).toBe('sv-new')
+    expect(data.url).toBe(`https://app.test/w/${WORKSPACE_ID}/p/sv-new`)
+    expect(data.note).toMatch(/MUST include/)
+    expect(d.savedViewStore.createDraft).toHaveBeenCalled()
+  })
+
+  it('falls back to a relative /w/ url when no pageUrl dep is wired', async () => {
+    const tool = createRenderViewTool(deps())
+    const res = await tool.execute(
+      { binding: { entity: 'tasks', viewType: 'table' }, createPage: true },
+      ctx({ channelType: 'slack' }),
+    )
+    const data = res.data as { url?: string }
+    expect(data.url).toBe(`/w/${WORKSPACE_ID}/p/sv-new`)
+  })
+
+  it('reuses an identical-binding draft instead of minting a duplicate', async () => {
+    const d = deps()
+    d.savedViewStore.findDraftByBinding = vi
+      .fn()
+      .mockResolvedValue({ id: 'sv-old', name: 'deals/board — draft' })
+    const tool = createRenderViewTool(d)
+    const res = await tool.execute(
+      { binding: { entity: 'deals', viewType: 'board', groupBy: 'stage' }, createPage: true },
+      ctx({ channelType: 'slack' }),
+    )
+    const data = res.data as { action: string; viewId?: string; url?: string }
+    expect(data.action).toBe('reused')
+    expect(data.viewId).toBe('sv-old')
+    expect(data.url).toBe(`/w/${WORKSPACE_ID}/p/sv-old`)
+    expect(d.savedViewStore.createDraft).not.toHaveBeenCalled()
+  })
+
+  it('web chat never consults findDraftByBinding and still mints per call', async () => {
+    const d = deps()
+    d.savedViewStore.findDraftByBinding = vi.fn()
+    const tool = createRenderViewTool(d)
+    const res = await tool.execute(
+      { binding: { entity: 'tasks', viewType: 'table' } },
+      ctx(),
+    )
+    expect((res.data as { viewId?: string }).viewId).toBe('sv-new')
+    expect(d.savedViewStore.findDraftByBinding).not.toHaveBeenCalled()
+    // In-app results carry no out-app note/url — the client navigates.
+    expect((res.data as { url?: string }).url).toBeUndefined()
+  })
+
+  it('includes the url on an out-app doc-anchored append', async () => {
+    const d = {
+      ...deps(),
+      pageUrl: (ws: string, id: string) => `https://app.test/w/${ws}/p/${id}`,
+    }
+    ;(d.savedViewStore.getPage as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({ blocks: [] })
+    const tool = createRenderViewTool(d)
+    const res = await tool.execute(
+      { binding: { entity: 'tasks', viewType: 'table' } },
+      ctx({ channelType: 'slack', docViewId: 'anchor-1' }),
+    )
+    const data = res.data as { action: string; url?: string }
+    expect(data.action).toBe('appended')
+    expect(data.url).toBe(`https://app.test/w/${WORKSPACE_ID}/p/anchor-1`)
+  })
+})
+
+describe('[COMP:views/render-chart-tool] renderChart out-app channels', () => {
+  it('returns textRendering + note and mints NO draft on a plain slack ask', async () => {
+    const d = deps()
+    const tool = createRenderChartTool(d)
+    const res = await tool.execute(
+      { kind: 'bar', binding: { entity: 'tasks', op: 'count_by', groupBy: 'status' } },
+      ctx({ channelType: 'slack' }),
+    )
+    expect(res.isError).toBeUndefined()
+    const data = res.data as { viewId?: string; textRendering?: string; note?: string }
+    expect(data.viewId).toBeUndefined()
+    expect(data.note).toMatch(/No page was created/)
+    expect(d.savedViewStore.createDraft).not.toHaveBeenCalled()
+  })
+
+  it('mints a draft + absolute url when createPage:true', async () => {
+    const d = {
+      ...deps(),
+      pageUrl: (ws: string, id: string) => `https://app.test/w/${ws}/p/${id}`,
+    }
+    const tool = createRenderChartTool(d)
+    const res = await tool.execute(
+      { kind: 'kpi', binding: { entity: 'deals', op: 'count_by', groupBy: 'stage' }, createPage: true },
+      ctx({ channelType: 'slack' }),
+    )
+    const data = res.data as { viewId?: string; url?: string; note?: string }
+    expect(data.viewId).toBe('sv-new')
+    expect(data.url).toBe(`https://app.test/w/${WORKSPACE_ID}/p/sv-new`)
+    expect(data.note).toMatch(/MUST include/)
+    expect(d.savedViewStore.createDraft).toHaveBeenCalled()
+  })
+})
