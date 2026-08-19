@@ -169,6 +169,10 @@ export const consultRequestSchema = z.object({
   message: a2aMessageSchema,
   contextId: z.string().min(1).optional(),
   allowedTools: z.array(z.string().min(1)).optional(),
+  externalClientPrincipal: z.object({
+    apiKeyId: z.string().uuid(),
+    externalUserId: z.string().min(1).max(256),
+  }).strict().optional(),
   depth: ResearchDepthConfigSchema.optional(),
   // Always a concrete saved_views id on the wire (the workflow executor
   // resolves create/fromStep variants before the consult).

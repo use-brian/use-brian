@@ -117,6 +117,25 @@ export type WorkflowToolDeps = {
     workspaceId: string,
   ) => Promise<Array<{ slug: string; name: string }>>
   /**
+   * Safe API-key metadata for chat authoring of an external-client workflow.
+   * The API implementation is RLS-gated and never returns plaintext or hash.
+   */
+  listAuthorableClientApiKeys?: (
+    userId: string,
+    assistantId: string,
+  ) => Promise<Array<{
+    id: string
+    assistantId: string
+    name: string
+    scope: 'chat' | 'agent'
+    audience: 'external' | 'internal'
+    anonymousContext: 'thin' | 'full'
+    toolPolicy: 'assistant' | 'public_research'
+    status: 'active' | 'revoked'
+    createdAt: string
+    lastUsedAt: string | null
+  }>>
+  /**
    * The workflow's ACTUAL firing rows (any creator, any channel) — backs the
    * `triggerJobs` field on `getWorkflow` so drift between the
    * `workflows.trigger` column and reality is visible (the 2026-06-10
@@ -352,6 +371,38 @@ const triggerInputSchemaRef = z
       `The ONLY kinds: ${WORKFLOW_TRIGGER_KINDS.join(' | ')}; anything else does not exist. All kinds are authorable here; only webhook slug/secret provisioning happens in the web builder.`,
   )
 
+const clientBoundaryInputSchema = z
+  .object({
+    assistantId: z
+      .string()
+      .uuid()
+      .describe('Concrete assistant UUID whose current external chat API-key configuration should be inherited.'),
+    apiKeyName: z
+      .string()
+      .min(1)
+      .max(120)
+      .optional()
+      .describe('API-key label. Omit when the assistant has exactly one compatible key; required to disambiguate several.'),
+    resolve: z.discriminatedUnion('kind', [
+      z.object({
+        kind: z.literal('static'),
+        externalUserId: z.string().min(1).max(256),
+      }).strict(),
+      z.object({
+        kind: z.literal('event_sender_map'),
+        clients: z.array(z.object({
+          sender: z.string().email().max(320),
+          externalUserId: z.string().min(1).max(256),
+        }).strict()).min(1).max(500),
+      }).strict(),
+    ]),
+  })
+  .strict()
+  .describe(
+    'Authoring-only lookup for "inherit this assistant public API-key client boundary". ' +
+      'Pass the assistant id and client resolver; omit definition.principal. The server selects an active external chat key from safe metadata and stamps its row id into the proposal receipt. The assistant never receives the key secret or hash.',
+  )
+
 const PROPOSAL_RECEIPT_PREFIX = 'wf1'
 const PROPOSAL_RECEIPT_MAX_CHARS = 500_000
 const PROPOSAL_RECEIPT_MAX_JSON_BYTES = 1_000_000
@@ -561,6 +612,12 @@ function pageAnchorSummary(page: NonNullable<Extract<WorkflowDefinition['steps']
 
 function summarize(def: WorkflowDefinition): string {
   const lines: string[] = []
+  if (def.principal) {
+    lines.push(
+      `Runs inherit external-client isolation from assistant ${def.principal.assistantId}; ` +
+      'assistant steps are read-only and any IMAP reply is held for explicit approval.',
+    )
+  }
   // A trigger fan-out's parallelism is the summary's most important fact —
   // the user must see that several entry steps start at once.
   const starts = Array.isArray(def.startStepId) ? def.startStepId : [def.startStepId]
@@ -580,6 +637,7 @@ function summarize(def: WorkflowDefinition): string {
         break
       case 'tool_call':
         detail = `tool_call → ${step.toolName}`
+        if (step.approval?.required) detail += ' (approval required every run)'
         break
       case 'wait':
         detail = step.until
@@ -1613,6 +1671,29 @@ async function recurringCapError(deps: WorkflowToolDeps, userId: string, trigger
   return null
 }
 
+function reviewedClientReplyTriggerError(
+  definition: WorkflowDefinition,
+  trigger: WorkflowTrigger,
+): string | null {
+  const hasReviewedReply = definition.principal
+    && definition.steps.some((step) => step.type === 'tool_call')
+  if (!hasReviewedReply) return null
+  if (
+    trigger.kind !== 'event'
+    || trigger.event.sources.length === 0
+    || trigger.event.sources.some((subscription) =>
+      subscription.source.type !== 'connector'
+      || subscription.source.provider !== 'imap',
+    )
+  ) {
+    return (
+      'An external-client reviewed reply must be triggered exclusively by one or more IMAP connector event sources. ' +
+      'Manual, scheduled, webhook, channel, and mixed-source runs cannot construct a source-bound email reply.'
+    )
+  }
+  return null
+}
+
 export function createWorkflowTools(deps: WorkflowToolDeps): {
   proposeWorkflow: Tool
   createWorkflow: Tool
@@ -1636,6 +1717,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       `Parallel fan-out: set a step's nextStepId to an ARRAY of step ids (max 5, distinct) to start those steps IN PARALLEL when it completes. A downstream step that several branches point at is the implicit JOIN — it runs once, after every branch that can still reach it settles, and can read every branch's {{vars.<name>}}. The graph must stay acyclic, and a wait step may not sit on a parallel branch that some sibling branch never rejoins (pausing needs the only live cursor — put waits before the fan-out or after the join). startStepId accepts the same shape: an ARRAY of step ids (max 5, distinct) starts every listed step IN PARALLEL the moment the trigger fires — a trigger-level fan-out with the same join and wait rules. ` +
       `Use \`storeOutputAs\` on a step to make its output available as \`{{vars.<name>}}\` in later steps. Use \`{{input.<name>}}\` to reference the trigger payload. ` +
       `A later step's prompt must NEVER assert what an earlier step supposedly did (e.g. "...which was emailed to the reviewer") — the earlier step may have failed or refused, and the assertion would be recorded as fact. Thread the earlier step's REAL output via storeOutputAs + {{vars.<name>}} and phrase the prompt conditionally on it. ` +
+      `\n\nExternal-client email replies: when the user says to inherit a Studio assistant's public API-key client boundary, pass \`clientBoundary\` with that concrete assistant UUID and a static or administrator-authored sender-to-externalUserId map, and OMIT \`definition.principal\`; the server resolves only safe key metadata and never exposes the secret. The model step stays read-only and draft-only. To require human review before replying, store that draft and add exactly one \`imapSendMessage\` tool_call with \`to: ["{{input.event.sender}}"]\`, a subject containing \`{{input.event.subject}}\`, \`body: "{{vars.<draft>}}"\`, \`inReplyTo: "{{input.event.message_id}}"\`, no Cc/Bcc/attachments/explicit From, and \`approval: { required: true }\`. This always pauses in Approvals even if connector policy is Allow; never promise automatic sending. ` +
       `\n\nPage editing: when a step should edit or produce a doc page, set the step's \`page\` field — NEVER just mention a page id in the prompt (the callee gets no page tools that way and the step fails on every run). ` +
       `Variants: \`page: {"id": "<page uuid>"}\` edits an existing page; \`page: {"create": true, "title": "...", "nestUnder": "<page uuid>"}\` creates a saved page each run and anchors the step to it (title may use {{vars}}/{{input}}); \`page: {"fromStep": "<stepId>"}\` edits the page an earlier create-step made this run. ` +
       `The callee then runs with the doc tools (getCurrentPage / patchPage / renderPage) against that page.` +
@@ -1657,6 +1739,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
         })
         .passthrough()
         .describe('Workflow DAG. See proposeWorkflow tool docs for the schema.'),
+      clientBoundary: clientBoundaryInputSchema.optional(),
       trigger: triggerInputSchema.optional(),
       workflowId: idShape.optional().describe('Existing workflow id from getWorkflow. Include for an edit; omit for a new workflow.'),
       enabled: z.boolean().optional().describe('Edited enabled state. Only meaningful with workflowId.'),
@@ -1672,7 +1755,85 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       const gate = workspaceGate(context.workspaceId, context.channelType)
       if (gate) return gate
 
-      const parsed = WorkflowDefinitionSchema.safeParse(input.definition)
+      let definitionInput: Record<string, unknown> = { ...input.definition }
+      let selectedClientBoundary: Awaited<ReturnType<NonNullable<WorkflowToolDeps['listAuthorableClientApiKeys']>>>[number] | null = null
+      if (input.clientBoundary) {
+        if ('principal' in definitionInput) {
+          return {
+            data: {
+              ok: false,
+              errors: ['Pass either clientBoundary or definition.principal, never both. Chat authoring should use clientBoundary.'],
+            },
+            isError: true,
+          }
+        }
+        if (!deps.listAuthorableClientApiKeys) {
+          return {
+            data: {
+              ok: false,
+              errors: ['API-key configuration lookup is unavailable in this deployment, so the client boundary cannot be inherited safely.'],
+            },
+            isError: true,
+          }
+        }
+        let configurations: Awaited<ReturnType<NonNullable<WorkflowToolDeps['listAuthorableClientApiKeys']>>>
+        try {
+          configurations = await deps.listAuthorableClientApiKeys(context.userId, input.clientBoundary.assistantId)
+        } catch {
+          return {
+            data: {
+              ok: false,
+              errors: ['The API-key configurations could not be read for that assistant. Check the assistant id and your access, then try again.'],
+            },
+            isError: true,
+          }
+        }
+        const compatible = configurations.filter((key) =>
+          key.assistantId === input.clientBoundary!.assistantId
+          && key.status === 'active'
+          && key.audience === 'external'
+          && key.scope === 'chat',
+        )
+        const named = input.clientBoundary.apiKeyName?.trim().toLowerCase()
+        const matches = named
+          ? compatible.filter((key) => key.name.trim().toLowerCase() === named)
+          : compatible
+        const safeConfigurations = configurations.map((key) => ({
+          id: key.id,
+          assistantId: key.assistantId,
+          name: key.name,
+          status: key.status,
+          audience: key.audience,
+          scope: key.scope,
+          anonymousContext: key.anonymousContext,
+          toolPolicy: key.toolPolicy,
+          createdAt: key.createdAt,
+          lastUsedAt: key.lastUsedAt,
+        }))
+        if (matches.length !== 1) {
+          const reason = matches.length === 0
+            ? named
+              ? `No active external chat API key has label "${input.clientBoundary.apiKeyName}" for that assistant.`
+              : 'That assistant has no active external chat API key to inherit.'
+            : 'That assistant has several active external chat API keys. Ask the user which API-key label to inherit, then re-propose with apiKeyName.'
+          return {
+            data: { ok: false, errors: [reason], apiKeyConfigurations: safeConfigurations },
+            isError: true,
+          }
+        }
+        selectedClientBoundary = matches[0]
+        definitionInput = {
+          ...definitionInput,
+          principal: {
+            kind: 'api_external_client',
+            apiKeyId: selectedClientBoundary.id,
+            assistantId: selectedClientBoundary.assistantId,
+            resolve: input.clientBoundary.resolve,
+          },
+        }
+      }
+
+      const parsed = WorkflowDefinitionSchema.safeParse(definitionInput)
       if (!parsed.success) {
         return {
           data: {
@@ -1709,10 +1870,23 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       if (!input.workflowId && input.enabled !== undefined) {
         return { data: { ok: false, errors: ['enabled is only valid when editing an existing workflow.'] }, isError: true }
       }
+      let existingWorkflow: WorkflowRecord | null = null
       if (input.workflowId) {
         const existing = await deps.workflowStore.getById(context.userId, input.workflowId)
         if (!existing || existing.workspaceId !== context.workspaceId) {
           return { data: workflowNotFound(input.workflowId), isError: true }
+        }
+        existingWorkflow = existing
+      }
+
+      const replyTriggerError = reviewedClientReplyTriggerError(
+        definition,
+        trigger ?? existingWorkflow?.trigger ?? { kind: 'manual' },
+      )
+      if (replyTriggerError) {
+        return {
+          data: { ok: false, errors: [replyTriggerError], stepTypes: STEP_TYPE_VALUES },
+          isError: true,
         }
       }
 
@@ -1783,6 +1957,18 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
           proposedName: input.name,
           proposedDescription: input.description ?? null,
           proposedTrigger: trigger ?? null,
+          selectedClientBoundary: selectedClientBoundary
+            ? {
+                id: selectedClientBoundary.id,
+                assistantId: selectedClientBoundary.assistantId,
+                name: selectedClientBoundary.name,
+                status: selectedClientBoundary.status,
+                audience: selectedClientBoundary.audience,
+                scope: selectedClientBoundary.scope,
+                anonymousContext: selectedClientBoundary.anonymousContext,
+                toolPolicy: selectedClientBoundary.toolPolicy,
+              }
+            : null,
           summary: summarize(definition),
           warnings: [
             ...warningsFor(definition, {

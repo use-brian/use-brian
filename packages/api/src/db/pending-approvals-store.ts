@@ -86,6 +86,8 @@ export type CreateApprovalParams = {
   workspaceId: string
   workflowRunId: string
   workflowStepRunId: string
+  /** Assistant whose scoped registry must execute the frozen tool on resume. */
+  originatingAssistantId: string
   toolName: string
   arguments: Record<string, unknown>
   approverUserId: string
@@ -653,9 +655,9 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
         `INSERT INTO pending_approvals (
            workspace_id, workflow_run_id, workflow_step_run_id, tool_name,
            arguments, approver_user_id, delivery_channel_type,
-           delivery_channel_id, expires_at
+           delivery_channel_id, expires_at, originating_assistant_id
          )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          RETURNING ${COLS}`,
         [
           params.workspaceId,
@@ -667,6 +669,7 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
           params.deliveryChannelType,
           params.deliveryChannelId ?? null,
           params.expiresAt ?? null,
+          params.originatingAssistantId,
         ],
       )
       const approval = rowToApproval(result.rows[0] as Record<string, unknown>)

@@ -63,6 +63,7 @@ describe('[COMP:api/pending-approvals-store] create', () => {
       workspaceId: 'ws-1',
       workflowRunId: 'run-1',
       workflowStepRunId: 'step-1',
+      originatingAssistantId: 'assistant-1',
       toolName: 'sendEmail',
       arguments: { to: 'a@b.c' },
       approverUserId: 'u-1',
@@ -74,6 +75,7 @@ describe('[COMP:api/pending-approvals-store] create', () => {
     expect(sql).toContain('INSERT INTO pending_approvals')
     // arguments is JSON-encoded at the wire layer.
     expect(params?.[4]).toBe(JSON.stringify({ to: 'a@b.c' }))
+    expect(params?.[9]).toBe('assistant-1')
   })
 })
 

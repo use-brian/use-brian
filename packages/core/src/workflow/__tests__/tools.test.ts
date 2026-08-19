@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { z } from 'zod'
-import { createWorkflowTools, latestWorkflowProposalReceipt, TRIGGER_INPUT_DESCRIPTION, type WorkflowToolEvent } from '../tools.js'
+import { createWorkflowTools, latestWorkflowProposalReceipt, TRIGGER_INPUT_DESCRIPTION, type WorkflowToolDeps, type WorkflowToolEvent } from '../tools.js'
 import { WORKFLOW_TRIGGER_KINDS, WORKFLOW_EVENT_SOURCE_TYPES, STEP_TYPE_VALUES } from '../schemas.js'
 import { TASK_LIFECYCLE_ACTIONS } from '../task-event-trigger.js'
 import type {
@@ -300,6 +300,7 @@ function makeAllTools(opts?: {
     | { ok: false; reason: string }
   >
   listAuthorableSkills?: (userId: string, workspaceId: string) => Promise<Array<{ slug: string; name: string }>>
+  listAuthorableClientApiKeys?: WorkflowToolDeps['listAuthorableClientApiKeys']
   resolveViewWorkspace?: (args: { userId: string; viewId: string }) => Promise<string | null>
   allowLegacyDirectWrites?: boolean
 }) {
@@ -330,6 +331,7 @@ function makeAllTools(opts?: {
     listSlackChannels: opts?.listSlackChannels,
     listSlackMembers: opts?.listSlackMembers,
     listAuthorableSkills: opts?.listAuthorableSkills,
+    listAuthorableClientApiKeys: opts?.listAuthorableClientApiKeys,
     allowLegacyDirectWrites: opts?.allowLegacyDirectWrites ?? true,
   })
   return { tools, stores, events, jobStore }
@@ -767,6 +769,140 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
     expect(data.proposedName).toBe('X')
     expect(data.summary).toContain('echo')
     expect(data.warnings).toEqual([])
+  })
+
+  it('[COMP:api/client-principal-runtime] resolves safe API-key metadata into a receipt-backed reviewed reply', async () => {
+    const keyId = '00000000-0000-4000-8000-000000000020'
+    const listAuthorableClientApiKeys = vi.fn(async () => [{
+      id: keyId,
+      assistantId: PRIMARY_ASSISTANT_ID,
+      name: 'Studio public clients',
+      scope: 'chat' as const,
+      audience: 'external' as const,
+      anonymousContext: 'thin' as const,
+      toolPolicy: 'public_research' as const,
+      status: 'active' as const,
+      createdAt: '2026-08-20T00:00:00.000Z',
+      lastUsedAt: null,
+    }])
+    const { tools, stores } = makeAllTools({
+      allowLegacyDirectWrites: false,
+      listAuthorableClientApiKeys,
+    })
+    const proposed = await tools.proposeWorkflow.execute({
+      name: 'Review client replies',
+      clientBoundary: {
+        assistantId: PRIMARY_ASSISTANT_ID,
+        resolve: {
+          kind: 'event_sender_map',
+          clients: [{ sender: 'buyer@customer.example', externalUserId: 'client-17' }],
+        },
+      },
+      definition: {
+        startStepId: 'draft',
+        steps: [
+          {
+            id: 'draft',
+            type: 'assistant_call',
+            target: { assistantId: PRIMARY_ASSISTANT_ID },
+            prompt: 'Draft a reply to {{input.event.text}}.',
+            storeOutputAs: 'draft',
+            nextStepId: 'review',
+          },
+          {
+            id: 'review',
+            type: 'tool_call',
+            toolName: 'imapSendMessage',
+            arguments: {
+              to: ['{{input.event.sender}}'],
+              subject: 'Re: {{input.event.subject}}',
+              body: '{{vars.draft}}',
+              inReplyTo: '{{input.event.message_id}}',
+            },
+            approval: { required: true },
+          },
+        ],
+      },
+      trigger: {
+        kind: 'event',
+        event: {
+          sources: [{
+            source: { type: 'connector', connectorInstanceId: 'imap-account-1', provider: 'imap' },
+            match: { mentions: ['sales@company.example'], inChannels: ['INBOX'] },
+          }],
+        },
+      },
+    }, makeContext())
+
+    expect(proposed.isError).toBeFalsy()
+    expect(listAuthorableClientApiKeys).toHaveBeenCalledWith(USER_ID, PRIMARY_ASSISTANT_ID)
+    expect((proposed.data as { selectedClientBoundary: unknown }).selectedClientBoundary).toMatchObject({
+      id: keyId,
+      name: 'Studio public clients',
+      toolPolicy: 'public_research',
+    })
+    expect(JSON.stringify(proposed.data)).not.toContain('plaintext')
+    expect(JSON.stringify(proposed.data)).not.toContain('keyHash')
+
+    const receipt = (proposed.data as { proposalReceipt: string }).proposalReceipt
+    const created = await tools.createWorkflow.execute({}, makeContext({ workflowProposalReceipt: receipt }))
+    expect(created.isError).toBeFalsy()
+    const workflowId = (created.data as { id: string }).id
+    expect(stores.workflows.get(workflowId)?.definition.principal).toEqual({
+      kind: 'api_external_client',
+      apiKeyId: keyId,
+      assistantId: PRIMARY_ASSISTANT_ID,
+      resolve: {
+        kind: 'event_sender_map',
+        clients: [{ sender: 'buyer@customer.example', externalUserId: 'client-17' }],
+      },
+    })
+  })
+
+  it('[COMP:api/client-principal-runtime] exposes only safe metadata when several compatible keys need a label', async () => {
+    const row = (id: string, name: string) => ({
+      id,
+      assistantId: PRIMARY_ASSISTANT_ID,
+      name,
+      scope: 'chat' as const,
+      audience: 'external' as const,
+      anonymousContext: 'thin' as const,
+      toolPolicy: 'public_research' as const,
+      status: 'active' as const,
+      createdAt: '2026-08-20T00:00:00.000Z',
+      lastUsedAt: null,
+    })
+    const { tools } = makeAllTools({
+      listAuthorableClientApiKeys: async () => [
+        row('00000000-0000-4000-8000-000000000020', 'Current'),
+        row('00000000-0000-4000-8000-000000000021', 'Canary'),
+      ],
+    })
+    const result = await tools.proposeWorkflow.execute({
+      name: 'Client draft',
+      clientBoundary: {
+        assistantId: PRIMARY_ASSISTANT_ID,
+        resolve: { kind: 'static', externalUserId: 'client-17' },
+      },
+      definition: {
+        startStepId: 'draft',
+        steps: [{
+          id: 'draft',
+          type: 'assistant_call',
+          target: { assistantId: PRIMARY_ASSISTANT_ID },
+          prompt: 'Draft the response.',
+        }],
+      },
+    }, makeContext())
+
+    expect(result.isError).toBe(true)
+    const serialized = JSON.stringify(result.data)
+    expect(serialized).toContain('several active external chat API keys')
+    expect(serialized).toContain('Current')
+    expect(serialized).toContain('Canary')
+    expect(serialized).not.toContain('prefix')
+    expect(serialized).not.toContain('secret')
+    expect(serialized).not.toContain('hash')
   })
 
   it('applies the exact proposed create/update payload through an opaque receipt', async () => {

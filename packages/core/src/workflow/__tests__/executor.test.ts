@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest'
 import { z } from 'zod'
-import { advanceWorkflowRun, type ExecutorDeps, type WorkflowAuditEvent } from '../executor.js'
+import {
+  advanceWorkflowRun,
+  resolveExternalClientWorkflowPrincipal,
+  type ExecutorDeps,
+  type WorkflowAuditEvent,
+} from '../executor.js'
 import type {
   WorkflowDefinition,
   WorkflowRecord,
@@ -18,6 +23,7 @@ import type { ConsultRequest, ConsultResponse, ConsultTransport, Task } from '..
 const WORKSPACE_ID = '00000000-0000-0000-0000-000000000001'
 const PRIMARY_ASSISTANT_ID = '00000000-0000-0000-0000-000000000002'
 const USER_ID = '00000000-0000-0000-0000-000000000003'
+const CLIENT_ASSISTANT_ID = '00000000-0000-0000-0000-000000000004'
 
 function makeFakeStores() {
   const workflows = new Map<string, WorkflowRecord>()
@@ -295,6 +301,245 @@ async function seedWorkflowAndRun(
 // ── Tests ────────────────────────────────────────────────────────────────
 
 describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
+  it('[COMP:api/client-principal-runtime] resolves a mapped sender, freezes it, and threads it to the consult', async () => {
+    const stores = makeFakeStores()
+    const requests: ConsultRequest[] = []
+    const deps: ExecutorDeps = {
+      workflowStore: stores.workflowStore,
+      runStore: stores.runStore,
+      consultTransport: {
+        async send(request) {
+          requests.push(request)
+          return makeConsultTransport({ responseText: 'Internal draft' }).send(request)
+        },
+      },
+      resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
+      buildToolRegistry: async () => new Map(),
+    }
+    const definition: WorkflowDefinition = {
+      startStepId: 'draft',
+      principal: {
+        kind: 'api_external_client',
+        apiKeyId: '00000000-0000-4000-8000-000000000010',
+        assistantId: PRIMARY_ASSISTANT_ID,
+        resolve: {
+          kind: 'event_sender_map',
+          clients: [{ sender: 'client-a@customer.example', externalUserId: 'client-17' }],
+        },
+      },
+      steps: [{
+        id: 'draft',
+        type: 'assistant_call',
+        target: { assistantId: 'primary' },
+        prompt: 'Draft a reply to {{input.event.text}}',
+      }],
+    }
+    const { run } = await seedWorkflowAndRun(deps, definition, 'event', {
+      event: { sender: 'CLIENT-A@customer.example', text: 'Can I change my plan?' },
+    })
+
+    const outcome = await advanceWorkflowRun(deps, run.id)
+
+    expect(outcome.kind).toBe('completed')
+    expect(requests).toHaveLength(1)
+    expect(requests[0].externalClientPrincipal).toEqual({
+      apiKeyId: '00000000-0000-4000-8000-000000000010',
+      externalUserId: 'client-17',
+    })
+    expect(stores.runs.get(run.id)?.vars.__externalClientPrincipal).toEqual(
+      requests[0].externalClientPrincipal,
+    )
+  })
+
+  it('[COMP:api/client-principal-runtime] fails an unmapped sender before registry or consult construction', async () => {
+    let registryBuilt = false
+    let consulted = false
+    const deps = makeDeps({
+      buildToolRegistry: async () => {
+        registryBuilt = true
+        return new Map()
+      },
+      consultTransport: {
+        async send() {
+          consulted = true
+          throw new Error('must not consult')
+        },
+      },
+    })
+    const definition: WorkflowDefinition = {
+      startStepId: 'draft',
+      principal: {
+        kind: 'api_external_client',
+        apiKeyId: '00000000-0000-4000-8000-000000000010',
+        assistantId: PRIMARY_ASSISTANT_ID,
+        resolve: {
+          kind: 'event_sender_map',
+          clients: [{ sender: 'client-a@customer.example', externalUserId: 'client-17' }],
+        },
+      },
+      steps: [{
+        id: 'draft',
+        type: 'assistant_call',
+        target: { assistantId: 'primary' },
+        prompt: 'Draft a reply',
+      }],
+    }
+    const { run } = await seedWorkflowAndRun(deps, definition, 'event', {
+      event: { sender: 'unknown@customer.example' },
+    })
+
+    const outcome = await advanceWorkflowRun(deps, run.id)
+
+    expect(outcome.kind).toBe('failed')
+    if (outcome.kind === 'failed') {
+      expect(outcome.error.reason).toBe('client_principal_unresolved')
+    }
+    expect(registryBuilt).toBe(false)
+    expect(consulted).toBe(false)
+  })
+
+  it('[COMP:api/client-principal-runtime] keeps the frozen client after the definition changes', () => {
+    const frozen = {
+      apiKeyId: '00000000-0000-4000-8000-000000000010',
+      externalUserId: 'client-17',
+    }
+    const resolved = resolveExternalClientWorkflowPrincipal(
+      {
+        startStepId: 'draft',
+        principal: {
+          kind: 'api_external_client',
+          apiKeyId: '00000000-0000-4000-8000-000000000099',
+          assistantId: PRIMARY_ASSISTANT_ID,
+          resolve: { kind: 'static', externalUserId: 'client-99' },
+        },
+        steps: [{
+          id: 'draft',
+          type: 'assistant_call',
+          target: { assistantId: PRIMARY_ASSISTANT_ID },
+          prompt: 'draft',
+        }],
+      },
+      { input: {}, vars: { __externalClientPrincipal: frozen } },
+    )
+    expect(resolved).toEqual(frozen)
+  })
+
+  it('[COMP:api/client-principal-runtime] drafts as the client but freezes the reply for member approval', async () => {
+    const stores = makeFakeStores()
+    let sent = false
+    let registryAssistantId: string | null = null
+    let approval: Parameters<NonNullable<ExecutorDeps['requestApproval']>>[0] | null = null
+    const sendTool = buildTool({
+      name: 'imapSendMessage',
+      description: 'send email',
+      inputSchema: z.object({
+        to: z.array(z.string()),
+        subject: z.string(),
+        body: z.string(),
+        inReplyTo: z.string(),
+      }),
+      requiresConfirmation: false,
+      async execute() {
+        sent = true
+        return { data: { ok: true } }
+      },
+    })
+    const deps: ExecutorDeps = {
+      workflowStore: stores.workflowStore,
+      runStore: stores.runStore,
+      consultTransport: makeConsultTransport({ responseText: 'Client-isolated draft' }),
+      resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
+      buildToolRegistry: async ({ assistantId }) => {
+        registryAssistantId = assistantId
+        return new Map([['imapSendMessage', sendTool]])
+      },
+      requestApproval: async (params) => { approval = params },
+    }
+    const definition: WorkflowDefinition = {
+      startStepId: 'draft',
+      principal: {
+        kind: 'api_external_client',
+        apiKeyId: '00000000-0000-4000-8000-000000000010',
+        assistantId: CLIENT_ASSISTANT_ID,
+        resolve: {
+          kind: 'event_sender_map',
+          clients: [{ sender: 'buyer@customer.example', externalUserId: 'client-17' }],
+        },
+      },
+      steps: [
+        {
+          id: 'draft',
+          type: 'assistant_call',
+          target: { assistantId: CLIENT_ASSISTANT_ID },
+          prompt: 'Draft a reply to {{input.event.text}}.',
+          storeOutputAs: 'draft',
+          nextStepId: 'review',
+        },
+        {
+          id: 'review',
+          type: 'tool_call',
+          toolName: 'imapSendMessage',
+          arguments: {
+            to: ['{{input.event.sender}}'],
+            subject: 'Re: {{input.event.subject}}',
+            body: '{{vars.draft}}',
+            inReplyTo: '{{input.event.message_id}}',
+          },
+          approval: { required: true },
+        },
+      ],
+    }
+    const workflow = await stores.workflowStore.create({
+      userId: USER_ID,
+      workspaceId: WORKSPACE_ID,
+      name: 'review client replies',
+      definition,
+      trigger: {
+        kind: 'event',
+        event: {
+          sources: [{
+            source: { type: 'connector', provider: 'imap', connectorInstanceId: 'imap-account-1' },
+          }],
+        },
+      },
+    })
+    const run = await stores.runStore.createRun({
+      workflowId: workflow.id,
+      workspaceId: WORKSPACE_ID,
+      triggeredBy: null,
+      triggerKind: 'event',
+      input: {
+        trigger: {
+          sourceType: 'connector',
+          provider: 'imap',
+          connectorInstanceId: 'imap-account-1',
+        },
+        event: {
+          sender: 'buyer@customer.example',
+          subject: 'Pricing question',
+          text: 'Can you explain the annual plan?',
+          message_id: 'INBOX:17',
+        },
+      },
+    })
+
+    const outcome = await advanceWorkflowRun(deps, run.id)
+
+    expect(outcome).toMatchObject({ kind: 'paused', reason: 'approval' })
+    expect(registryAssistantId).toBe(CLIENT_ASSISTANT_ID)
+    expect(sent).toBe(false)
+    expect(approval).toMatchObject({
+      assistantId: CLIENT_ASSISTANT_ID,
+      toolName: 'imapSendMessage',
+      arguments: {
+        to: ['buyer@customer.example'],
+        subject: 'Re: Pricing question',
+        body: 'Client-isolated draft',
+        inReplyTo: 'INBOX:17',
+      },
+    })
+  })
+
   it('runs a linear assistant_call → tool_call to completion', async () => {
     let capturedToolInput: unknown = null
     const stores = makeFakeStores()
