@@ -3,7 +3,7 @@ import { Router } from 'express'
 import type { ChatArchiveLiveMedia } from '../chat-archive/live-media.js'
 import { archiveMediaRef, mediaByteLimit } from '../chat-archive/live-media.js'
 import type { StagedArchiveMedia } from '../chat-archive/live-media.js'
-import { resolveChatArchiveInstanceId } from '../chat-archive/live-writer.js'
+import { resolveChatArchiveInstanceId, appendOutboundChatArchive } from '../chat-archive/live-writer.js'
 import { z } from 'zod'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 import type { WhatsappIngestor } from '../ingest/whatsapp-ingest.js'
@@ -26,6 +26,8 @@ const inboundSchema = z.object({
   text: z.string().default(''),
   timestamp: z.number(),
   isGroup: z.boolean(),
+  // The owner sent this from their own phone (Baileys key.fromMe).
+  fromMe: z.boolean().optional(),
   mediaBase64: z.string().optional(),
   mediaMimeType: z.string().optional(),
   mediaFileName: z.string().optional(),
@@ -423,6 +425,40 @@ export function whatsappByonRoutes(opts: WhatsappByonRoutesOptions): Router {
     }
 
     if (!input.text.trim() && !input.mediaBase64 && !input.mediaRef) {
+      res.json({ ok: true })
+      return
+    }
+
+    // The owner's OWN message, typed from the connected phone (Baileys
+    // key.fromMe). Archive it as OUTBOUND and never run a turn — the assistant
+    // must not answer the user's own outgoing messages, and the archive is a
+    // record of the account's history, not only what it received. Mirrors the
+    // custom channel's isSelf path (docs/architecture/channels/custom-channel.md).
+    if (input.fromMe) {
+      try {
+        const channel = await (opts.getChannel ?? getChannelForWebhook)(input.channelId)
+        const ownerUserId = channel
+          ? await (opts.getWorkspaceOwnerUserId ?? resolveWorkspaceOwnerUserId)(channel.workspaceId)
+          : null
+        if (channel && ownerUserId) {
+          const integration = await opts.integrationStore.getByChannelForWebhook(input.channelId, 'whatsapp')
+          await appendOutboundChatArchive({
+            source: 'whatsapp',
+            ownerUserId,
+            workspaceId: channel.workspaceId,
+            connectorInstanceId: integration?.connectorInstanceId,
+            assistantId: input.senderPnJid ?? input.senderJid,
+            assistantName: input.senderName ?? input.senderPnJid ?? input.senderJid,
+            conversationId: input.chatJid,
+            sessionMessageId: `wa-self:${input.messageId}`,
+            providerMessageId: input.messageId,
+            text: /^<media:[^>]+>$/.test(input.text.trim()) ? '' : input.text,
+            replyToProviderId: null,
+          })
+        }
+      } catch (err) {
+        console.error('[whatsapp] self-message outbound archive failed:', err)
+      }
       res.json({ ok: true })
       return
     }

@@ -64,6 +64,29 @@ describe('[COMP:api/whatsapp-byon-route] internal routing', () => {
     expect(handle).toHaveBeenCalledOnce()
   })
 
+  it('archives the owner\'s own (fromMe) message as outbound and never runs a turn', async () => {
+    const handle = vi.fn(async () => {})
+    const app = express()
+    app.use(express.json())
+    app.use('/internal/whatsapp', whatsappByonRoutes({
+      connectorSecret: 'secret',
+      integrationStore: { getByChannelForWebhook: vi.fn(async () => null), setStatusByChannelSystem: vi.fn() } as never,
+      ingestor: { isIngestChannel: vi.fn(async () => true), ingest: vi.fn() } as never,
+      bot: { resolveHandler: vi.fn(async () => ({ kind: 'bot' as const, handle })) },
+      archiveIncoming: vi.fn(async () => {}),
+      getChannel: vi.fn(async () => ({ workspaceId: 'ws-1' })) as never,
+      getWorkspaceOwnerUserId: vi.fn(async () => 'owner-1'),
+    }))
+    app.post('/internal/whatsapp/inbound', (_req, res) => res.status(418).json({ official: true }))
+    const response = await request(app)
+      .post('/internal/whatsapp/inbound')
+      .set('X-Connector-Secret', 'secret')
+      .send({ ...payload, messageId: 'self-1', fromMe: true, text: 'note to self' })
+    expect(response.status).toBe(200)
+    // The assistant must never answer the user's own outgoing message.
+    expect(handle).not.toHaveBeenCalled()
+  })
+
   it('passes an unknown channel to the closed official fallback', async () => {
     const response = await request(appFor(false, null, true))
       .post('/internal/whatsapp/inbound')
