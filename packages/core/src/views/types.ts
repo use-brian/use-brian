@@ -675,6 +675,22 @@ export type SavedViewStore = {
   ): Promise<string | null>
 
   /**
+   * Newest still-pruneable draft whose `binding` structurally equals the
+   * given one AND whose page is still the untouched single-data-block
+   * seed a chat render mints. Backs `renderView`'s out-app explicit-page
+   * path: asking for the same board twice from Slack must return the
+   * SAME page URL, not mint a sibling (2026-08-19 duplicate
+   * "deals/board — draft" incident). A draft the user has edited (extra
+   * blocks) or saved no longer matches — their artifact is theirs.
+   * Optional: fakes without it simply always mint.
+   */
+  findDraftByBinding?(
+    userId: string,
+    workspaceId: string,
+    binding: BindingConfig,
+  ): Promise<{ id: string; name: string } | null>
+
+  /**
    * Auto-title commit (doc pages, migration 218). Set `name = title` +
    * flip `name_origin` `'placeholder'` → `'auto'` in ONE guarded UPDATE,
    * but ONLY while the row is still on its untouched placeholder name.

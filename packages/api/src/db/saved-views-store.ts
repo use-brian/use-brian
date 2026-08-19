@@ -625,6 +625,27 @@ export function createDbSavedViewStore(
       return true
     },
 
+    async findDraftByBinding(userId, workspaceId, binding) {
+      // Out-app renderView reuse (see SavedViewStore.findDraftByBinding).
+      // jsonb `=` is structural (key order independent), so the exact
+      // binding a repeat call re-sends matches the stored one. The page
+      // predicate keeps the match to untouched chat-minted seeds: one
+      // block, kind 'data' — an edited or saved page never matches.
+      const result = await queryWithRLS<{ id: string; name: string }>(
+        userId,
+        `SELECT id, name FROM saved_views
+          WHERE workspace_id = $1
+            AND state = 'draft'
+            AND binding = $2::jsonb
+            AND jsonb_array_length(page->'blocks') = 1
+            AND page->'blocks'->0->>'kind' = 'data'
+          ORDER BY created_at DESC
+          LIMIT 1`,
+        [workspaceId, JSON.stringify(binding)],
+      )
+      return result.rows[0] ?? null
+    },
+
     async findIdByAnchorKey(userId, workspaceId, anchorKey) {
       // Find-or-create lookup for workflow `page.reuse === 'per-workflow'`
       // (migration 279). RLS-scoped by `userId` (a workspace member); the

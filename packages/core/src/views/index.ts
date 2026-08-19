@@ -159,3 +159,9 @@ export {
   type ViewToolEvent,
   type ViewToolEventContext,
 } from './tools.js'
+
+export {
+  renderPayloadText,
+  cellText,
+  type RenderPayloadTextOptions,
+} from './text-render.js'

@@ -3099,6 +3099,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const { renderView, saveView } = createViewTools({
     taskStore, crmStore, workflowRunStore,
     workspaceDirectory: workspaceDirectoryStore, savedViewStore,
+    // Absolute page links for out-app renders (Slack/Telegram/API) — same
+    // origin resolution as the computer-use take-over link above.
+    pageUrl: (workspaceId, viewId) =>
+      `${(env.AUTHED_APP_URL ?? env.APP_URL).replace(/\/$/, '')}/w/${workspaceId}/p/${viewId}`,
   })
   allTools.set('renderView', renderView)
   allTools.set('saveView', saveView)
