@@ -7,7 +7,9 @@
  */
 import { describe, it, expect } from 'vitest'
 import {
+  blockedProfilesFor,
   canUseProfile,
+  describeProfileDenial,
   createInMemoryBrowserProfileStore,
   createInMemorySessionVault,
   describeProfileResolution,
@@ -178,5 +180,80 @@ describe('[COMP:sandbox/profiles] Profile at call time (R2-10)', () => {
     const s = store()
     const res = await resolveProfileForCall({ store: s, actor: OWNER })
     expect(res).toEqual({ kind: 'none' })
+  })
+
+  /**
+   * 2026-08-19: an `internal` assistant was ENABLED for a `confidential`
+   * profile. `canUseProfile` refused on clearance, but every surface filtered
+   * on `.ok` and dropped the reason, so the only remedy on offer was the
+   * enablement the user had already done. They did it four more times.
+   */
+  it('a denial is not an absence: an enabled-but-under-clearance profile is named with its reason', async () => {
+    const s = store()
+    await s.create({
+      workspaceId: 'ws-1',
+      ownerUserId: 'owner-1',
+      name: 'hinson-work',
+      clearance: 'confidential',
+      enabledAssistantIds: ['asst-1'],
+    })
+    const actor: ProfileActor = { ...OWNER, assistantClearance: 'internal' }
+    const res = await resolveProfileForCall({ store: s, actor })
+    expect(res.kind).toBe('none')
+    if (res.kind !== 'none') return
+    expect(res.blocked).toEqual([
+      { name: 'hinson-work', reason: 'clearance', clearance: 'confidential' },
+    ])
+
+    const text = describeProfileResolution(res, actor.assistantClearance)
+    // Names the profile, both sides of the mismatch, and BOTH real remedies.
+    expect(text).toContain('hinson-work')
+    expect(text).toMatch(/confidential/)
+    expect(text).toMatch(/internal/)
+    expect(text).toMatch(/raise this assistant's clearance/i)
+    expect(text).toMatch(/lower the profile's rung/i)
+    // And never the remedy that cannot work.
+    expect(text).not.toMatch(/create one in Browsers/i)
+  })
+
+  it('blockedProfilesFor reports every gated profile with the gate’s own reason', async () => {
+    const s = store()
+    await s.create({
+      workspaceId: 'ws-1', ownerUserId: 'owner-1', name: 'not-enabled',
+      clearance: 'public', enabledAssistantIds: [],
+    })
+    await s.create({
+      workspaceId: 'ws-1', ownerUserId: 'owner-1', name: 'too-high',
+      clearance: 'confidential', enabledAssistantIds: ['asst-1'],
+    })
+    const actor: ProfileActor = { ...OWNER, assistantClearance: 'internal' }
+    const all = await s.list({ workspaceId: 'ws-1' })
+    expect(blockedProfilesFor(all, actor)).toEqual([
+      { name: 'not-enabled', reason: 'not_enabled', clearance: 'public' },
+      { name: 'too-high', reason: 'clearance', clearance: 'confidential' },
+    ])
+  })
+
+  it('the clearance denial says enabling again will not help; the not-enabled one still points at the toggle', () => {
+    const clearance = describeProfileDenial(
+      { name: 'p', reason: 'clearance', clearance: 'confidential' },
+      'internal',
+    )
+    expect(clearance).toMatch(/enabling it again will not help/i)
+
+    const notEnabled = describeProfileDenial(
+      { name: 'p', reason: 'not_enabled', clearance: 'public' },
+      'internal',
+    )
+    expect(notEnabled).toMatch(/Assistant > Tools > Browser identities/)
+    expect(notEnabled).not.toMatch(/will not help/i)
+  })
+
+  it('a workspace with genuinely zero profiles still returns a bare none', async () => {
+    const s = store()
+    const res = await resolveProfileForCall({ store: s, actor: OWNER })
+    expect(res).toEqual({ kind: 'none' })
+    if (res.kind === 'ok') throw new Error('unreachable: an empty store cannot resolve')
+    expect(describeProfileResolution(res, 'internal')).toMatch(/create one in Browsers/i)
   })
 })

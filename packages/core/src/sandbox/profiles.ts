@@ -110,12 +110,28 @@ export function routingNoteFor(profile: BrowserProfile, assistantId: string): st
   return note || null
 }
 
+/**
+ * A workspace profile the actor cannot use, with the reason WHY. A denial is
+ * not an absence: reporting "no profile" for a profile that exists and is
+ * enabled sends the user to re-do the one thing they already did (2026-08-19
+ * — an `internal` assistant enabled for a `confidential` profile was told
+ * four times to enable it). Existence + metadata are workspace-visible
+ * governance data at every rung (spec §2), so naming a blocked profile to a
+ * member's own turn leaks nothing; only session USE stays gated.
+ */
+export type BlockedProfile = {
+  name: string
+  reason: ProfileDenialReason
+  /** The profile's rung, so the remedy can name both sides of the mismatch. */
+  clearance: Sensitivity
+}
+
 export type ProfileResolution =
   | { kind: 'ok'; profile: BrowserProfile }
   | { kind: 'must_name'; candidates: string[]; guidance?: Record<string, string> }
   | { kind: 'not_found'; name: string }
   | { kind: 'denied'; profile: BrowserProfile; reason: ProfileDenialReason }
-  | { kind: 'none' }
+  | { kind: 'none'; blocked?: BlockedProfile[] }
 
 /**
  * Call-time profile choice (R2-10): a block/browse is site-scoped and
@@ -170,11 +186,44 @@ export async function resolveProfileForCall(params: {
       ...(Object.keys(guidance).length > 0 ? { guidance } : {}),
     }
   }
-  return { kind: 'none' }
+  // Zero usable profiles is NOT the same as zero profiles. Carry the denials
+  // so the caller can tell "you have none" from "you have one you cannot use".
+  const blocked = blockedProfilesFor(all, actor)
+  return blocked.length > 0 ? { kind: 'none', blocked } : { kind: 'none' }
+}
+
+/** Every workspace profile the actor is gated out of, with the gate's reason. */
+export function blockedProfilesFor(
+  profiles: BrowserProfile[],
+  actor: ProfileActor,
+): BlockedProfile[] {
+  return profiles.flatMap((profile) => {
+    const gate = canUseProfile(profile, actor)
+    return gate.ok ? [] : [{ name: profile.name, reason: gate.reason, clearance: profile.clearance }]
+  })
+}
+
+/**
+ * One phrasing of a denial, shared by every surface that reports one, so the
+ * tool result, the discovery listing, and the navigate error cannot drift into
+ * three different remedies for one cause.
+ */
+export function describeProfileDenial(blocked: BlockedProfile, actorClearance: Sensitivity): string {
+  switch (blocked.reason) {
+    case 'not_enabled':
+      return `"${blocked.name}" is not enabled for this assistant. Its owner can enable it under Assistant > Tools > Browser identities.`
+    case 'clearance':
+      return `"${blocked.name}" IS enabled for this assistant, but the profile's clearance rung (${blocked.clearance}) is above this assistant's clearance (${actorClearance}), so enabling it again will not help. Either raise this assistant's clearance to ${blocked.clearance} in Studio > Assistants, or lower the profile's rung to ${actorClearance} or below under Browsers > Browser profiles > Advanced > Clearance.`
+    case 'owner_only':
+      return `"${blocked.name}" sits at the top (confidential) rung, which only its owner's own turns may use. Its owner can lower the rung under Browsers > Browser profiles > Advanced > Clearance to share it.`
+  }
 }
 
 /** Human-readable tool error for a non-`ok` resolution (shared by the browse tools). */
-export function describeProfileResolution(res: Exclude<ProfileResolution, { kind: 'ok' }>): string {
+export function describeProfileResolution(
+  res: Exclude<ProfileResolution, { kind: 'ok' }>,
+  actorClearance: Sensitivity = 'public',
+): string {
   switch (res.kind) {
     case 'must_name':
       return `Several browser profiles match. Name one with the "profile" parameter: ${res.candidates
@@ -200,6 +249,13 @@ export function describeProfileResolution(res: Exclude<ProfileResolution, { kind
       // and explore proceed identity-less on 'none' (R2-10). Keep the
       // requirement honest but never let it read as "browsing is blocked"
       // (the 2026-07-15 refusal was the model echoing exactly that belief).
+      // A profile that EXISTS but is gated is reported as such: the generic
+      // "create one, then enable it" line is a wrong remedy for a denial.
+      if (res.blocked?.length) {
+        return `No browser profile is USABLE by this assistant, but ${res.blocked.length === 1 ? 'one exists' : `${res.blocked.length} exist`} in this workspace: ${res.blocked
+          .map((blocked) => describeProfileDenial(blocked, actorClearance))
+          .join(' ')} Report this to the user verbatim rather than asking them to enable it again. Public pages still need no profile.`
+      }
       return 'No browser profile is available to this assistant. Running a saved browser skill requires one (skills replay signed-in flows). The user can create one in Browsers > Browser profiles, then make it available under Assistant > Tools > Browser identities. Public pages need no profile: browse them directly with browserNavigate or browserExplore instead.'
   }
 }

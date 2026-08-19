@@ -10,6 +10,8 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useT } from "@/lib/i18n/client";
+import { format } from "@/lib/i18n/format";
+import { type Sensitivity } from "@/components/sensitivity-badge";
 import {
   listBrowserProfiles,
   updateBrowserProfile,
@@ -18,6 +20,31 @@ import {
 
 export function manageableBrowserProfiles(profiles: BrowserProfile[]): BrowserProfile[] {
   return profiles.filter((profile) => profile.canManage === true);
+}
+
+/** Mirrors the `public < internal < confidential` ladder the runtime gates on. */
+const CLEARANCE_RANK: Record<Sensitivity, number> = {
+  public: 1,
+  internal: 2,
+  confidential: 3,
+};
+
+/**
+ * The runtime gate this toggle is a UI for (`canUseProfile`, core
+ * `sandbox/profiles.ts`): enablement alone does not grant use, the assistant's
+ * clearance must also cover the profile's rung. A toggle that reports "granted"
+ * for a grant the gate refuses is the bug this exists to prevent - on
+ * 2026-08-19 an `internal` assistant was enabled for a `confidential` profile
+ * four times, and every surface said it had worked.
+ */
+export function clearanceCovers(
+  assistantClearance: Sensitivity | null | undefined,
+  profileClearance: Sensitivity,
+): boolean {
+  // Unknown clearance never fabricates a warning: the runtime gate is the
+  // authority and a missing value here is a loading state, not a denial.
+  if (!assistantClearance) return true;
+  return CLEARANCE_RANK[profileClearance] <= CLEARANCE_RANK[assistantClearance];
 }
 
 function ProfileIcon({ backend }: { backend: BrowserProfile["defaultBackend"] }) {
@@ -36,6 +63,8 @@ function ProfileIcon({ backend }: { backend: BrowserProfile["defaultBackend"] })
 type BrowserIdentityListProps = {
   profiles: BrowserProfile[];
   assistantId: string;
+  /** The acting assistant's rung; undefined while the parent is still loading. */
+  assistantClearance?: Sensitivity;
   drafts: Record<string, string>;
   savingId: string | null;
   savedId: string | null;
@@ -49,6 +78,7 @@ type BrowserIdentityListProps = {
 export function BrowserIdentityList({
   profiles,
   assistantId,
+  assistantClearance,
   drafts,
   savingId,
   savedId,
@@ -66,6 +96,9 @@ export function BrowserIdentityList({
         const draft = drafts[profile.id] ?? savedNote;
         const noteChanged = draft.trim() !== savedNote.trim();
         const saving = savingId === profile.id;
+        // Enabled but out of clearance is the silent failure: the toggle reads
+        // ON, the runtime refuses, and every remedy on offer is "enable it".
+        const outOfClearance = !clearanceCovers(assistantClearance, profile.clearance);
         return (
           <section key={profile.id} className="rounded-xl border border-border bg-card px-4 py-3">
             <div className="flex items-center gap-3">
@@ -103,6 +136,18 @@ export function BrowserIdentityList({
                 />
               </button>
             </div>
+
+            {outOfClearance ? (
+              <p className="mt-2 rounded-lg bg-destructive/10 px-3 py-2 text-xs leading-relaxed text-destructive">
+                {format(t.assistant.toolsTab.browserIdentitiesClearanceBlocked, {
+                  profile: t.manage.sensitivity[profile.clearance],
+                  assistant: assistantClearance
+                    ? t.manage.sensitivity[assistantClearance]
+                    : "",
+                })}{" "}
+                {t.assistant.toolsTab.browserIdentitiesClearanceRemedy}
+              </p>
+            ) : null}
 
             {available ? (
               <div className="mt-3 border-t border-border pt-3">
@@ -156,9 +201,11 @@ export function BrowserIdentityList({
 
 export function BrowserIdentitiesPanel({
   assistantId,
+  assistantClearance,
   workspaceId,
 }: {
   assistantId: string;
+  assistantClearance?: Sensitivity;
   workspaceId: string | null;
 }) {
   const t = useT();
@@ -304,6 +351,7 @@ export function BrowserIdentitiesPanel({
         <BrowserIdentityList
           profiles={state.profiles}
           assistantId={assistantId}
+          assistantClearance={assistantClearance}
           drafts={drafts}
           savingId={savingId}
           savedId={savedId}

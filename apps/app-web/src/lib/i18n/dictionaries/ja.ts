@@ -7656,6 +7656,8 @@ export const ja: Dictionary = {
       browserIdentitiesSaving: "保存中...",
       browserIdentitiesSaved: "保存しました",
       browserIdentitiesUpdateFailed: "このブラウザー ID を更新できませんでした。",
+      browserIdentitiesClearanceBlocked: "有効化だけでは足りません。このプロファイルの機密レベル ({profile}) がこのアシスタントの権限レベル ({assistant}) を上回っているため、まだ使用できません。",
+      browserIdentitiesClearanceRemedy: "このアシスタントの権限レベルを上げるか、ブラウザープロファイル > 詳細設定でプロファイルの機密レベルを下げてください。",
       connectorsDesc: "このアシスタント向けにサービスを有効・無効にします。ツールごとの権限は、アプリ既定より厳しくはできますが、緩くはできません。",
       setUpInSettings: "設定で構成",
       setUpInWorkspace: "チーム設定で構成",

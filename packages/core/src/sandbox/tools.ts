@@ -31,8 +31,10 @@ import {
   registrableSiteOf,
 } from './orchestrator.js'
 import {
+  describeProfileDenial,
   describeProfileResolution,
   resolveProfileForCall,
+  type BlockedProfile,
   type BrowserBackendKind,
   type BrowserProfile,
   type BrowserProfileStore,
@@ -655,7 +657,10 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
       // name, a named miss / gate denial is an honest error. No profile
       // config (OSS) or no profiles → identity-less browse.
       let profile: BrowserProfile | null = null
+      let blockedProfiles: BlockedProfile[] = []
+      let actorClearance: Sensitivity = 'public'
       if (opts.profiles) {
+        actorClearance = await opts.profiles.assistantClearance(context)
         const resolution = await resolveProfileForCall({
           store: opts.profiles.store,
           vault: opts.profiles.vault,
@@ -663,7 +668,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
             userId: context.userId,
             workspaceId: context.workspaceId ?? '',
             assistantId: context.assistantId,
-            assistantClearance: await opts.profiles.assistantClearance(context),
+            assistantClearance: actorClearance,
           },
           site: registrableSiteOf(input.url),
           profileName: input.profile ?? gate.state.profileName,
@@ -671,12 +676,28 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
         if (resolution.kind === 'ok') {
           profile = resolution.profile
         } else if (resolution.kind !== 'none') {
-          return { data: `ERROR: ${describeProfileResolution(resolution)}`, isError: true }
+          return { data: `ERROR: ${describeProfileResolution(resolution, actorClearance)}`, isError: true }
+        } else {
+          blockedProfiles = resolution.blocked ?? []
         }
       }
       gate.state.profileId = profile?.id ?? null
       gate.state.profileName = profile?.name ?? null
       const backend = resolveBackend(gate.state, profile)
+      // On a local-only deployment (no cloud sandbox) "no profile" is not a
+      // soft degrade to identity-less browsing — the local provider hard-fails
+      // `profile_required`, whose remedy ("choose or create a profile") is
+      // wrong when a profile exists and the GATE is what refused it. Answer
+      // with the gate's own reason before the provider can flatten it.
+      if (backend === 'local' && !profile && blockedProfiles.length > 0) {
+        return {
+          data:
+            `ERROR: This deployment browses through My Browser, which needs a browser profile, and every profile in this workspace is gated for this assistant. ` +
+            `${blockedProfiles.map((blocked) => describeProfileDenial(blocked, actorClearance)).join(' ')} ` +
+            'Report this to the user verbatim; re-enabling the profile will not change it.',
+          isError: true,
+        }
+      }
       gate.state.backend = backend
       const fused = backendFuseGate(gate.state, backend)
       if (fused) return fused
