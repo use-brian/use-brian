@@ -489,6 +489,7 @@ export function whatsappByonRoutes(opts: WhatsappByonRoutesOptions): Router {
             connectorInstanceId: integration?.connectorInstanceId,
             message: {
               userId: input.senderPnJid ?? input.senderJid,
+              senderDisplay: input.senderName,
               channelId: input.chatJid,
               messageId: input.messageId,
               text: /^<media:[^>]+>$/.test(input.text.trim()) ? '' : input.text,
