@@ -2369,6 +2369,8 @@ export const en = {
         customProfilesBlurb: "Create several verified models from one endpoint connection without entering its URL or bearer key again.",
         noCustomProfiles: "No custom profiles yet. Connect an endpoint to create the first profile.",
         assignedTo: "Assigned to {tiers}",
+        readsImages: "Reads images",
+        textOnly: "Text only. Save this profile again to re-check image support.",
         customCreateTitle: "New custom profile",
         customEditTitle: "Edit custom profile",
         customEditBlurb: "Saving tests the model again. Existing tier assignments stay connected.",

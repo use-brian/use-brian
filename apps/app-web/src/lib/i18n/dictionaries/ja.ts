@@ -2181,6 +2181,8 @@ export const ja: Dictionary = {
         customProfilesBlurb: "URL や Bearer キーを再入力せず、1 つのエンドポイント接続から複数の検証済みモデルを作成できます。",
         noCustomProfiles: "カスタムプロファイルはまだありません。エンドポイントを接続すると最初のプロファイルが作成されます。",
         assignedTo: "{tiers} に割り当て済み",
+        readsImages: "画像を読み取れます",
+        textOnly: "テキストのみ。画像対応を再確認するには、このプロファイルを保存し直してください。",
         customCreateTitle: "新しいカスタムプロファイル",
         customEditTitle: "カスタムプロファイルを編集",
         customEditBlurb: "保存時にモデルを再テストします。既存のティア割り当ては維持されます。",

@@ -2165,6 +2165,8 @@ export const zh: Dictionary = {
         customProfilesBlurb: "無需再次輸入 URL 或 Bearer 金鑰,即可從同一個端點連線建立多個已驗證模型。",
         noCustomProfiles: "尚無自訂設定檔。請連接端點以建立第一個設定檔。",
         assignedTo: "已指派給 {tiers}",
+        readsImages: "可讀取圖片",
+        textOnly: "僅限文字。再次儲存此設定檔可重新檢測圖片支援。",
         customCreateTitle: "新增自訂設定檔",
         customEditTitle: "編輯自訂設定檔",
         customEditBlurb: "儲存時會重新測試模型。現有級別指派會保持不變。",
