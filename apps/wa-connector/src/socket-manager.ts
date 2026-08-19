@@ -883,6 +883,10 @@ export function createSocketManager(options: SocketManagerOptions): SocketManage
       channelId,
       chatJid: remoteJid,
       senderJid,
+      // A human message typed from the connected companion number. AI
+      // self-echoes are already suppressed above, so this only ever tags the
+      // owner's own outgoing messages.
+      ...(msg.key?.fromMe ? { fromMe: true } : {}),
       ...(senderPnJid && { senderPnJid }),
       senderName: msg.pushName ?? undefined,
       text,

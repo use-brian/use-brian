@@ -233,6 +233,7 @@ export function createDiscordAdapter(options: DiscordAdapterOptions): ChannelAda
 
     return {
       userId: msg.author.id,
+      senderDisplay: msg.author.global_name ?? msg.author.username,
       channelId: msg.channel_id,
       messageId: msg.id,
       text,
@@ -266,6 +267,7 @@ export function createDiscordAdapter(options: DiscordAdapterOptions): ChannelAda
 
     return {
       userId: user.id,
+      senderDisplay: user.global_name ?? user.username,
       channelId: interaction.channel_id,
       messageId: interaction.id,
       text,

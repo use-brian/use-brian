@@ -111,15 +111,17 @@ describe('[COMP:app/wechat-desktop-bridge] monitor', () => {
     expect(bridge.inbound.map((i) => i.message.text)).toEqual(['hello 1', 'hello 2', 'hello 3'])
   })
 
-  it('skips official accounts and the file helper', async () => {
+  it('skips official accounts but forwards File Transfer (filehelper)', async () => {
     state.cursors['gh_official1'] = 0
     state.cursors['filehelper'] = 0
     agent.chats = [chat({ id: 'gh_official1', lastMsgLocalId: 5 }), chat({ id: 'filehelper', lastMsgLocalId: 5 })]
     agent.messages.set('gh_official1', [msg({ localId: 5, chatId: 'gh_official1' })])
-    agent.messages.set('filehelper', [msg({ localId: 5, chatId: 'filehelper' })])
+    agent.messages.set('filehelper', [msg({ localId: 5, chatId: 'filehelper', content: 'note to self' })])
     await makeMonitor().tick()
-    expect(bridge.inbound).toHaveLength(0)
+    // gh_ skipped, filehelper forwarded
+    expect(bridge.inbound.map((i) => i.message.text)).toEqual(['note to self'])
     expect(isSkippedChat({ id: 'gh_abc', username: 'gh_abc' })).toBe(true)
+    expect(isSkippedChat({ id: 'filehelper', username: 'filehelper' })).toBe(false)
     expect(isSkippedChat({ id: 'wxid_example1', username: 'wxid_example1' })).toBe(false)
   })
 

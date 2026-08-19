@@ -35,6 +35,17 @@ describe('[COMP:api/chat-archive-live-capture] normalizer', () => {
     })
   })
 
+  it('stores the sender display name so the agent can search by name', () => {
+    const withName = normalizeInboundChatMessage({
+      source: 'whatsapp',
+      message: incoming({ userId: '15551230000@s.whatsapp.net', senderDisplay: 'Alice Chen' }),
+    })
+    expect(withName.sender_display).toBe('Alice Chen')
+    // absent name -> null (unchanged for channels that supply none)
+    const noName = normalizeInboundChatMessage({ source: 'whatsapp', message: incoming() })
+    expect(noName.sender_display).toBeNull()
+  })
+
   it('derives a stable id when a channel supplies none', () => {
     const message = incoming()
     const first = normalizeInboundChatMessage({ source: 'email', message })

@@ -68,7 +68,7 @@ export function normalizeInboundChatMessage(input: {
     provider_message_id: message.messageId || derivedMessageId(source, message),
     conversation_id: message.channelId,
     sender_id: message.userId,
-    sender_display: null,
+    sender_display: message.senderDisplay ?? null,
     sent_at: sentAt(message.timestamp),
     direction: 'inbound',
     kind: mediaKind(message),

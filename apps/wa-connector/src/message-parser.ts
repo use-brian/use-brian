@@ -402,6 +402,10 @@ export function extractEditedMessage(
 
 export type WhatsAppIncomingMessage = {
   messageId: string
+  /** True when the owner sent this from their own phone (Baileys key.fromMe).
+   * The connector already suppresses AI self-echoes, so a forwarded fromMe is
+   * always a human owner message; the API archives it as outbound, no turn. */
+  fromMe?: boolean
   channelId: string
   chatJid: string
   senderJid: string

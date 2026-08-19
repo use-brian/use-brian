@@ -78,6 +78,7 @@ export function createCustomAdapter(options: CustomAdapterOptions): ChannelAdapt
       if (!msg.text && !(msg.media && msg.media.length > 0)) return null
       return {
         userId: msg.senderId,
+        ...(msg.senderName ? { senderDisplay: msg.senderName } : {}),
         channelId: msg.peerId,
         messageId: msg.messageId,
         text: msg.text ?? '',

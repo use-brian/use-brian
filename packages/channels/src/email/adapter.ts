@@ -24,7 +24,7 @@
  */
 
 import type { ChannelAdapter, IncomingFile, IncomingMessage, OutgoingMessage } from '../types.js'
-import { parseEmailAddress } from './address.js'
+import { parseEmailAddress, parseEmailDisplayName } from './address.js'
 import { renderEmailBody } from './markdown.js'
 
 /**
@@ -127,6 +127,7 @@ export function createEmailAdapter(options: EmailAdapterOptions): ChannelAdapter
       const ts = msg.timestamp ? Date.parse(msg.timestamp) : NaN
       return {
         userId: sender,
+        senderDisplay: parseEmailDisplayName(msg.from) ?? undefined,
         channelId: msg.thread_id,
         messageId: msg.message_id,
         text,
