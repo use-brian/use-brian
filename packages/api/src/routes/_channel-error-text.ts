@@ -30,9 +30,27 @@
  * choose a built-in model", the wording this constant carried until
  * 2026-08-19, therefore sent the user somewhere that refuses the same image
  * for the same reason. Name the setting that actually lifts the restriction.
+ *
+ * Since the same day this sentence is also RARE: a tier-routed turn whose
+ * endpoint cannot read images is served by a built-in model instead (see
+ * `CUSTOM_MODEL_IMAGE_FALLBACK_NOTICE`). It survives for the one case with
+ * nowhere to fall back to - a deployment whose only configured model is the
+ * endpoint itself - so it must not promise a built-in that does not exist.
  */
 export const CUSTOM_MODEL_IMAGE_REJECTION =
-  'This workspace routes its models to a custom endpoint, which supports text and tools only. Send the message without the image, or point this tier at a built-in model in Settings > Models.'
+  'This workspace routes its models to an endpoint that cannot read images, and no built-in model is configured to answer instead. Send the message without the image, or point this tier at a model that reads images in Settings > Models.'
+
+/**
+ * Said when the fallback DID happen: the endpoint could not read the image,
+ * so a built-in model answered this one turn.
+ *
+ * It exists because byo-llm-key.md forbids a SILENT fallback, not a fallback:
+ * moving a turn to a provider the workspace admin did not choose is only
+ * acceptable while the person reading the answer can see that it happened.
+ * Delete this sentence and the fallback becomes the thing the spec forbids.
+ */
+export const CUSTOM_MODEL_IMAGE_FALLBACK_NOTICE =
+  'This workspace routes its models to an endpoint that cannot read images, so a built-in Brian model answered this message.'
 
 export function channelUserErrorText(
   err: Error,

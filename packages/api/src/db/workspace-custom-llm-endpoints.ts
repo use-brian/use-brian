@@ -20,6 +20,13 @@ export type WorkspaceCustomLlmProfile = {
   contextWindow: number
   maxOutputTokens: number
   supportsTools: boolean
+  /**
+   * Probe-verified: this endpoint accepted an inline `image_url` part and read
+   * it back correctly. False is the safe answer, not an unknown one - a turn
+   * carrying an image is served by a built-in model instead of forwarding the
+   * bytes to an endpoint that may reject or silently ignore them.
+   */
+  supportsVision: boolean
   verifiedAt: Date
   createdAt: Date
   updatedAt: Date
@@ -67,6 +74,7 @@ export type VerifiedCustomLlmProfileInput = {
   contextWindow: number
   maxOutputTokens: number
   supportsTools: true
+  supportsVision: boolean
   verifiedAt: Date
 }
 
@@ -113,6 +121,7 @@ const PROFILE_COLS = `
   context_window AS "contextWindow",
   max_output_tokens AS "maxOutputTokens",
   supports_tools AS "supportsTools",
+  supports_vision AS "supportsVision",
   verified_at AS "verifiedAt",
   created_at AS "createdAt",
   updated_at AS "updatedAt"
@@ -127,6 +136,7 @@ const RUNTIME_PROFILE_COLS = `
   p.context_window AS "contextWindow",
   p.max_output_tokens AS "maxOutputTokens",
   p.supports_tools AS "supportsTools",
+  p.supports_vision AS "supportsVision",
   p.verified_at AS "verifiedAt",
   p.created_at AS "createdAt",
   p.updated_at AS "updatedAt",
@@ -257,10 +267,10 @@ export function createDbWorkspaceCustomLlmEndpointStore(
         const profileResult = await client.query<WorkspaceCustomLlmProfile>(
           `INSERT INTO workspace_custom_llm_profiles
              (id, endpoint_id, workspace_id, name, model_id, context_window,
-              max_output_tokens, supports_tools, verified_at)
-           VALUES ($1, $1, $2, $3, $4, $5, $6, true, $7)
+              max_output_tokens, supports_tools, supports_vision, verified_at)
+           VALUES ($1, $1, $2, $3, $4, $5, $6, true, $7, $8)
            RETURNING ${PROFILE_COLS}`,
-          [id, workspaceId, input.name, input.modelId, input.contextWindow, input.maxOutputTokens, input.verifiedAt],
+          [id, workspaceId, input.name, input.modelId, input.contextWindow, input.maxOutputTokens, input.supportsVision, input.verifiedAt],
         )
         await client.query('COMMIT')
         return { ...endpointResult.rows[0]!, profiles: [profileResult.rows[0]!] }
@@ -274,12 +284,12 @@ export function createDbWorkspaceCustomLlmEndpointStore(
         actingUserId,
         `INSERT INTO workspace_custom_llm_profiles
            (endpoint_id, workspace_id, name, model_id, context_window,
-            max_output_tokens, supports_tools, verified_at)
-         SELECT e.id, e.workspace_id, $3, $4, $5, $6, true, $7
+            max_output_tokens, supports_tools, supports_vision, verified_at)
+         SELECT e.id, e.workspace_id, $3, $4, $5, $6, true, $7, $8
            FROM workspace_custom_llm_endpoints e
           WHERE e.workspace_id = $1 AND e.id = $2
          RETURNING ${PROFILE_COLS}`,
-        [workspaceId, endpointId, input.name, input.modelId, input.contextWindow, input.maxOutputTokens, input.verifiedAt],
+        [workspaceId, endpointId, input.name, input.modelId, input.contextWindow, input.maxOutputTokens, input.supportsVision, input.verifiedAt],
       )
       return result.rows[0] ?? null
     },
@@ -293,11 +303,12 @@ export function createDbWorkspaceCustomLlmEndpointStore(
                 context_window = $6,
                 max_output_tokens = $7,
                 supports_tools = true,
-                verified_at = $8,
+                supports_vision = $8,
+                verified_at = $9,
                 updated_at = now()
           WHERE workspace_id = $1 AND endpoint_id = $2 AND id = $3
           RETURNING ${PROFILE_COLS}`,
-        [workspaceId, endpointId, profileId, input.name, input.modelId, input.contextWindow, input.maxOutputTokens, input.verifiedAt],
+        [workspaceId, endpointId, profileId, input.name, input.modelId, input.contextWindow, input.maxOutputTokens, input.supportsVision, input.verifiedAt],
       )
       return result.rows[0] ?? null
     },

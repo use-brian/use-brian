@@ -4,7 +4,9 @@ import {
   customLlmAlias,
   customLlmEndpointIdFromAlias,
   normalizeCustomLlmBaseUrl,
+  decideImageTurnRoute,
   probeCustomLlmEndpoint,
+  probeCustomLlmVision,
 } from '../custom-llm-runtime.js'
 import type { WorkspaceCustomLlmEndpointStore } from '../db/workspace-custom-llm-endpoints.js'
 import type { LLMProvider, ProviderRequest } from '@use-brian/core'
@@ -15,6 +17,16 @@ function toolSse(): Response {
   const events = [
     { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_1', function: { name: 'connectionCheck', arguments: '{"ok":' } }] } }] },
     { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: 'true}' } }] } }] },
+    { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
+    '[DONE]',
+  ]
+  return new Response(events.map((event) => `data: ${typeof event === 'string' ? event : JSON.stringify(event)}\n\n`).join(''))
+}
+
+function visionSse(color: string): Response {
+  const events = [
+    { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_v', function: { name: 'describeImage', arguments: `{"color":"` } }] } }] },
+    { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: `${color}"}` } }] } }] },
     { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
     '[DONE]',
   ]
@@ -342,5 +354,132 @@ describe('[COMP:api/custom-llm-endpoints] custom endpoint runtime', () => {
       requestedTier: 'standard',
       allowManagedRoutes: false,
     })).resolves.toBeNull()
+  })
+})
+
+describe('[COMP:api/custom-llm-endpoints] endpoint vision probe', () => {
+  const connection = { baseUrl: 'http://model.example/v1', modelId: 'local-model', apiKey: null }
+
+  // The probe asks a question the prompt cannot answer: the image is a solid
+  // red square and nothing in the text says so. Naming the color is therefore
+  // evidence the bytes arrived AND were read.
+  it('reports vision when the endpoint names the color of the probe image', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(visionSse('red'))
+    expect(await probeCustomLlmVision(connection, { fetchFn, timeoutMs: 1000 })).toBe(true)
+    const [, init] = fetchFn.mock.calls[0] as [string, RequestInit]
+    expect(JSON.stringify(JSON.parse(init.body as string).messages)).toContain('image_url')
+  })
+
+  // A gateway in front of a text-only model can accept the image_url part and
+  // drop it. That answers without an error, which is worse than a rejection,
+  // so a wrong answer has to count as "no vision" exactly like a refusal.
+  it('treats an accepted-but-unread image as no vision', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(visionSse('blue'))
+    expect(await probeCustomLlmVision(connection, { fetchFn, timeoutMs: 1000 })).toBe(false)
+  })
+
+  it('never throws when the endpoint refuses the image', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response('nope', { status: 400 }))
+    expect(await probeCustomLlmVision(connection, { fetchFn, timeoutMs: 1000 })).toBe(false)
+  })
+
+  // Vision is an extra, never a gate: an endpoint that streams and calls tools
+  // is a usable Brian model whether or not it can see.
+  it('still verifies a text-only endpoint, recording it as sightless', async () => {
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(toolSse())
+      .mockResolvedValueOnce(new Response('no image support', { status: 400 }))
+    const result = await probeCustomLlmEndpoint(connection, { fetchFn, timeoutMs: 1000 })
+    expect(result).toMatchObject({ supportsTools: true, supportsVision: false })
+  })
+
+  it('carries a probed vision profile through to image_url parts on the wire', async () => {
+    const profileId = '00000000-0000-4000-8000-000000000003'
+    const runtime = {
+      id: profileId,
+      endpointId: profileId,
+      workspaceId: '00000000-0000-4000-8000-000000000010',
+      name: 'Seeing',
+      endpointName: 'Gateway',
+      baseUrl: 'http://model.example/v1',
+      apiKey: null,
+      modelId: 'vision-local',
+      contextWindow: 32768,
+      maxOutputTokens: 4096,
+      supportsTools: true,
+      supportsVision: true,
+      verifiedAt: new Date(),
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    }
+    const store = {
+      getRuntimeSystem: vi.fn().mockResolvedValue(runtime),
+      getTierRuntimeSystem: vi.fn(),
+      getTierRouteSystem: vi.fn(),
+    } as unknown as WorkspaceCustomLlmEndpointStore
+    const fetchFn = vi.fn().mockResolvedValue(textSse())
+    const resolved = await createWorkspaceCustomLlmResolver(store, { fetchFn })({
+      workspaceId: runtime.workspaceId,
+      requestedModel: customLlmAlias(profileId),
+    })
+    expect(resolved).toMatchObject({ routeKind: 'custom', supportsVision: true })
+    if (!resolved) throw new Error('expected a resolved custom provider')
+    for await (const _chunk of resolved.provider.stream({
+      model: resolved.selector,
+      systemPrompt: '',
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image', mimeType: 'image/png', data: 'iVBORw0KGgo=' },
+          { type: 'text', text: 'What is in this screenshot?' },
+        ],
+      }],
+    })) {
+      // Drain so the request body can be inspected.
+    }
+    const [, init] = fetchFn.mock.calls[0] as [string, RequestInit]
+    const messages = JSON.stringify(JSON.parse(init.body as string).messages)
+    expect(messages).toContain('image_url')
+    expect(messages).not.toContain('text-only model cannot inspect it')
+  })
+})
+
+describe('[COMP:api/custom-llm-endpoints] image turn routing policy', () => {
+  const sightless = { supportsVision: false }
+  const seeing = { supportsVision: true }
+  const base = { turnHasImage: true, explicitCustomSelection: false, builtInServable: true }
+
+  it('serves on the route whenever the route can see, or the turn has no image', () => {
+    expect(decideImageTurnRoute({ ...base, route: seeing })).toBe('serve_on_route')
+    expect(decideImageTurnRoute({ ...base, route: sightless, turnHasImage: false })).toBe('serve_on_route')
+    expect(decideImageTurnRoute({ ...base, route: null })).toBe('serve_on_route')
+  })
+
+  // The 2026-08-19 incident: every tier in the workspace routed to a
+  // text-only endpoint, so refusing sent the user to a model picker where
+  // every entry lands back on the same endpoint. There was a built-in model
+  // available the whole time.
+  it('falls back to a built-in model for a tier-routed workspace', () => {
+    expect(decideImageTurnRoute({ ...base, route: sightless })).toBe('fall_back_to_builtin')
+  })
+
+  // Answering on a model the user just declined for this message is a worse
+  // answer than saying why the one they picked cannot be used.
+  it('refuses when the user picked this endpoint for this very message', () => {
+    expect(decideImageTurnRoute({ ...base, route: sightless, explicitCustomSelection: true }))
+      .toBe('refuse')
+  })
+
+  // A self-host whose only configured model IS the endpoint. Falling back
+  // would hand the turn to a provider that is not there.
+  it('refuses when there is no built-in model to fall back to', () => {
+    expect(decideImageTurnRoute({ ...base, route: sightless, builtInServable: false }))
+      .toBe('refuse')
+  })
+
+  it('never refuses a sighted route, whatever else is true', () => {
+    expect(decideImageTurnRoute({
+      route: seeing, turnHasImage: true, explicitCustomSelection: true, builtInServable: false,
+    })).toBe('serve_on_route')
   })
 })

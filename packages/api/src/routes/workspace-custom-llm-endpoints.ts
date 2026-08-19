@@ -41,7 +41,7 @@ type Options = {
   endpointStore: WorkspaceCustomLlmEndpointStore
   workspaceStore: WorkspaceStore
   networkPolicy?: CustomLlmNetworkPolicy
-  probe?: (input: CustomLlmConnectionInput) => Promise<{ supportsTools: true; verifiedAt: Date }>
+  probe?: (input: CustomLlmConnectionInput) => Promise<{ supportsTools: true; supportsVision: boolean; verifiedAt: Date }>
 }
 
 function isUniqueViolation(err: unknown): boolean {

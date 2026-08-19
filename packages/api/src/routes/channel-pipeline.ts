@@ -36,7 +36,8 @@ import { runProactiveCompaction } from './proactive-compaction.js'
 import { notifyBrainWriteIfMatch } from '../brain-stream/notify.js'
 import { recordOverheadUsage } from './_overhead-usage.js'
 import { composeRecoveryMessage } from './_recovery-message.js'
-import { CUSTOM_MODEL_IMAGE_REJECTION } from './_channel-error-text.js'
+import { CUSTOM_MODEL_IMAGE_FALLBACK_NOTICE, CUSTOM_MODEL_IMAGE_REJECTION } from './_channel-error-text.js'
+import { decideImageTurnRoute } from '../custom-llm-runtime.js'
 import { resolveReplyText } from './_reply-context.js'
 import {
   attachUserVisibleContext,
@@ -83,6 +84,7 @@ import { billingPartyForAssistant } from '../billing-party.js'
 import { promotePastedText, shouldPromotePaste } from '../files/paste-promotion.js'
 import type { ArtifactPromoter } from '../files/artifact-promote.js'
 import { appendInboundChatArchive, appendOutboundChatArchive, persistInboundChatArchive } from '../chat-archive/live-writer.js'
+import { isRegistryModelAvailable, registryRow } from '@use-brian/shared/model-registry'
 import type { ProviderAvailability } from '@use-brian/shared/model-registry'
 
 /**
@@ -828,14 +830,36 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     budgetStatus,
     params.configuredProviders,
   )
-  const customLlmRuntime = assistant.workspaceId && params.resolveWorkspaceCustomLlm
+  const resolvedCustomLlm = assistant.workspaceId && params.resolveWorkspaceCustomLlm
     ? await params.resolveWorkspaceCustomLlm({
         workspaceId: assistant.workspaceId,
         requestedTier: logicalTier,
         allowDefault: true,
       })
     : null
-  if (customLlmRuntime?.routeKind === 'custom' && userContentBlocks.some((block) => block.type === 'image')) {
+  // The same policy object the chat route uses, deliberately: one rule about
+  // images and a route that cannot read them, decided in one place. A channel
+  // user has even less recourse than a web one (no model picker at all), and
+  // a channel turn never carries an explicit `custom:<id>`, so the refusal
+  // here is only ever the nothing-to-fall-back-to case.
+  const imageRoute = decideImageTurnRoute({
+    route: resolvedCustomLlm,
+    turnHasImage: userContentBlocks.some((block) => block.type === 'image'),
+    explicitCustomSelection: false,
+    builtInServable: !params.configuredProviders
+      || (() => {
+        const row = registryRow(model)
+        return row ? isRegistryModelAvailable(row, params.configuredProviders) : false
+      })(),
+  })
+  // Announced, never silent - see CUSTOM_MODEL_IMAGE_FALLBACK_NOTICE. The
+  // ordinary path archives the inbound message a few lines below, so the
+  // fallback needs no archive of its own.
+  let imageFallbackNotice: string | null = imageRoute === 'fall_back_to_builtin'
+    ? CUSTOM_MODEL_IMAGE_FALLBACK_NOTICE
+    : null
+  const customLlmRuntime = imageRoute === 'serve_on_route' ? resolvedCustomLlm : null
+  if (imageRoute === 'refuse') {
     // Archive BEFORE refusing. This return used to happen first, so an image
     // sent to a workspace on a custom endpoint left no message row and no
     // bytes — the user saw only "Something went wrong" and the content was
@@ -1587,7 +1611,12 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // path that never flushed) also skips. Errors during the stamp are
   // logged but don't propagate — the user already saw the message.
   const sendResponseAndStampChannelId = async (text: string, documents?: OutgoingDocument[]): Promise<void> => {
-    const result = await hooks.sendResponse(text, documents)
+    // A channel has no `notice` lane, so an announced fallback has to travel
+    // in the message itself - once, on the first thing the user sees, then
+    // cleared so a multi-part reply does not repeat it.
+    const noticed = imageFallbackNotice ? `${imageFallbackNotice}\n\n${text}` : text
+    imageFallbackNotice = null
+    const result = await hooks.sendResponse(noticed, documents)
     const channelMessageId = result && typeof result === 'object'
       ? result.channelMessageId
       : undefined

@@ -219,6 +219,8 @@ export const ja: Dictionary = {
     },
     noticeBudgetDowngraded:
       "今月のクレジット枠を使い切ったため、リセットまでスタンダードモデルで動作しています。",
+    noticeCustomModelImageFallback:
+      "このワークスペースのモデルエンドポイントは画像を読み取れないため、このメッセージには Brian の標準モデルが回答しました。",
     noticeDismiss: "閉じる",
     pendingQuestion: {
       heading: "確認させてください",

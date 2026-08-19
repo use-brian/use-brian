@@ -215,6 +215,7 @@ export const zh: Dictionary = {
       downloadFailed: "下載失敗，點一下重試。",
     },
     noticeBudgetDowngraded: "本月額度已用罄，重置前將以標準模型運作。",
+    noticeCustomModelImageFallback: "此工作區的模型端點無法讀取圖片，因此本則訊息由 Brian 內建模型回答。",
     noticeDismiss: "關閉",
     pendingQuestion: {
       heading: "需要您的補充",

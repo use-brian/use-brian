@@ -261,6 +261,8 @@ export const en = {
     // Inline system notices (e.g. budget downgrade).
     noticeBudgetDowngraded:
       "You've used this month's credit allowance. Running on the standard model until it resets.",
+    noticeCustomModelImageFallback:
+      "This workspace's model endpoint can't read images, so a built-in Brian model answered this message.",
     noticeDismiss: "Dismiss",
     // askQuestion suspend-resume — inline answer surface shown when the
     // assistant pauses to ask a clarifying question. See
