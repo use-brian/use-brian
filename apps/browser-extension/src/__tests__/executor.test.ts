@@ -182,53 +182,187 @@ describe('[COMP:ext/agent] CDP attachment lifecycle', () => {
   })
 })
 
+/**
+ * Native `<select>` handling. The 2026-08-12 version of this suite asserted
+ * that clicking an option ref SENT `Home, ArrowDown x N, Enter` — and the
+ * mocked CDP boundary is exactly where that approach fails: the native popup
+ * those keys were meant to drive is not part of the page (an OS menu on
+ * macOS), so the value never moved and the executor still returned success.
+ * On 2026-08-19 an assistant filling a marathon entry form clicked option
+ * "18" three times, got "Clicked" each time, watched the dropdown stay on
+ * "Select", and told the user "clicking them does not change the selected
+ * value". These tests pin the DOM-selection contract instead: the option is
+ * marked selected on its owning select, `input` + `change` are dispatched,
+ * the value is VERIFIED, and no popup is ever opened.
+ */
 describe('[COMP:ext/agent] Native dropdown option clicks', () => {
-  it('selects an option through its owning select when the option has no box model', async () => {
-    const executor = new TabExecutor()
-    await executor.attach(42)
+  /** A CDP stub whose `Runtime.callFunctionOn` evaluates the executor's page
+   * function against a tiny fake `<option>` / `<select>` model, so the test
+   * proves what the injected code DOES rather than which strings it sends. */
+  function installSelectPage(opts: {
+    optionBackendNodeId?: number
+    disabled?: boolean
+    multiple?: boolean
+    /** Force `selectedIndex` to stay put after the assignment (a page that reverts). */
+    stuck?: boolean
+  } = {}) {
+    const optionId = opts.optionBackendNodeId ?? 7
+    const events: string[] = []
+    let selected = false
+    let selectedIndex = 0
+    class HTMLSelectElement {
+      multiple = opts.multiple ?? false
+      disabled = false
+      focused = false
+      get selectedIndex() { return selectedIndex }
+      focus() { this.focused = true }
+      dispatchEvent(event: { type: string }) { events.push(event.type); return true }
+    }
+    class HTMLOptionElement {
+      index = 3
+      label = '18'
+      text = '18'
+      value = '18'
+      disabled = opts.disabled ?? false
+      parentElement = { tagName: 'SELECT', disabled: false }
+      select = new HTMLSelectElement()
+      get selected() { return selected }
+      set selected(value: boolean) { selected = value; if (!opts.stuck && value && !this.select.multiple) selectedIndex = this.index }
+      closest(sel: string) { return sel === 'select' ? this.select : null }
+    }
+    const option = new HTMLOptionElement()
+    const select = option.select
+    ;(globalThis as unknown as { Event: unknown }).Event = class { constructor(public type: string, public init?: unknown) {} }
+    ;(globalThis as unknown as { HTMLSelectElement: unknown }).HTMLSelectElement = HTMLSelectElement
+    ;(globalThis as unknown as { HTMLOptionElement: unknown }).HTMLOptionElement = HTMLOptionElement
     dbg.sendCommand.mockImplementation(async (_target, method, params) => {
       if (method === 'Accessibility.getFullAXTree') {
         return {
           nodes: [
-            {
-              nodeId: 'station-option',
-              backendDOMNodeId: 7,
-              role: { value: 'option' },
-              name: { value: 'Olympic' },
-              ignored: false,
-            },
+            { nodeId: 'day', backendDOMNodeId: 6, role: { value: 'combobox' }, name: { value: 'Day' }, ignored: false },
+            { nodeId: 'day-18', backendDOMNodeId: optionId, role: { value: 'option' }, name: { value: '18' }, ignored: false },
           ],
         }
       }
-      if (method === 'DOM.scrollIntoViewIfNeeded' && params?.backendNodeId === 7) {
-        throw new Error('Could not compute box model.')
+      if (method === 'DOM.resolveNode') {
+        if (params?.backendNodeId === optionId) return { object: { objectId: 'option-object' } }
+        if (params?.backendNodeId === 6) return { object: { objectId: 'select-object' } }
+        return {}
       }
-      if (method === 'DOM.getBoxModel' && params?.backendNodeId === 7) {
-        throw new Error('Could not compute box model.')
+      if (method === 'Runtime.callFunctionOn') {
+        const self = params?.objectId === 'option-object' ? option : params?.objectId === 'select-object' ? select : null
+        // eslint-disable-next-line @typescript-eslint/no-implied-eval
+        const fn = new Function(`return (${String(params?.functionDeclaration)})`)() as (this: unknown) => unknown
+        return { result: { value: fn.call(self) } }
       }
-      if (method === 'DOM.resolveNode') return { object: { objectId: 'option-object' } }
-      if (method === 'Runtime.callFunctionOn' && params?.returnByValue === true) {
-        // Disabled line-heading options are excluded, so Olympic is the third selectable item.
-        return { result: { value: { disabled: false, enabledIndex: 2, multiple: false } } }
+      if (method === 'DOM.getBoxModel') throw new Error('Could not compute box model.')
+      return {}
+    })
+    return { events, select, option, get selectedIndex() { return selectedIndex } }
+  }
+
+  it('selects an option through the DOM, dispatches input+change, and verifies the value', async () => {
+    const page = installSelectPage()
+    const executor = new TabExecutor()
+    await executor.attach(42)
+    const snapshot = await executor.snapshot()
+    const optionRef = snapshot.nodes.find((n) => n.role === 'option')!.ref
+
+    await expect(executor.click(optionRef)).resolves.toBeUndefined()
+
+    expect(page.selectedIndex).toBe(3)
+    expect(page.events).toEqual(['input', 'change'])
+    expect(page.select.focused).toBe(true)
+    // No popup walk: no mouse events, no key events.
+    const inputCalls = dbg.sendCommand.mock.calls.filter((c) => String(c[1]).startsWith('Input.'))
+    expect(inputCalls).toHaveLength(0)
+  })
+
+  it('fails loudly when the page did not take the selection', async () => {
+    installSelectPage({ stuck: true })
+    const executor = new TabExecutor()
+    await executor.attach(42)
+    const snapshot = await executor.snapshot()
+    const optionRef = snapshot.nodes.find((n) => n.role === 'option')!.ref
+
+    const err = (await executor.click(optionRef).catch((e: unknown) => e)) as ExecutorError
+    expect(err).toBeInstanceOf(ExecutorError)
+    expect(err.message).toMatch(/did not change its dropdown/)
+    expect(err.message).toContain('"18"')
+    expect(err.message).toMatch(/fresh browserSnapshot/)
+  })
+
+  it('refuses a disabled option instead of pretending', async () => {
+    installSelectPage({ disabled: true })
+    const executor = new TabExecutor()
+    await executor.attach(42)
+    const snapshot = await executor.snapshot()
+    const optionRef = snapshot.nodes.find((n) => n.role === 'option')!.ref
+    const err = (await executor.click(optionRef).catch((e: unknown) => e)) as ExecutorError
+    expect(err.message).toBe(`Ref ${optionRef} is a disabled native dropdown option.`)
+  })
+
+  it('toggles an option of a multi-select', async () => {
+    const page = installSelectPage({ multiple: true })
+    const executor = new TabExecutor()
+    await executor.attach(42)
+    const snapshot = await executor.snapshot()
+    const optionRef = snapshot.nodes.find((n) => n.role === 'option')!.ref
+    await expect(executor.click(optionRef)).resolves.toBeUndefined()
+    expect(page.option.selected).toBe(true)
+    expect(page.events).toEqual(['input', 'change'])
+  })
+
+  it('focuses a native select on click instead of opening the popup', async () => {
+    installSelectPage()
+    const executor = new TabExecutor()
+    await executor.attach(42)
+    const snapshot = await executor.snapshot()
+    const selectRef = snapshot.nodes.find((n) => n.role === 'combobox')!.ref
+
+    await expect(executor.click(selectRef)).resolves.toBeUndefined()
+
+    const focus = dbg.sendCommand.mock.calls.filter((c) => c[1] === 'DOM.focus')
+    expect(focus).toHaveLength(1)
+    expect(focus[0]?.[2]).toMatchObject({ backendNodeId: 6 })
+    expect(dbg.sendCommand.mock.calls.filter((c) => c[1] === 'Input.dispatchMouseEvent')).toHaveLength(0)
+  })
+
+  it('refuses to type into a native select and names the remedy', async () => {
+    installSelectPage()
+    const executor = new TabExecutor()
+    await executor.attach(42)
+    const snapshot = await executor.snapshot()
+    const selectRef = snapshot.nodes.find((n) => n.role === 'combobox')!.ref
+
+    const err = (await executor.type(selectRef, '18').catch((e: unknown) => e)) as ExecutorError
+    expect(err).toBeInstanceOf(ExecutorError)
+    expect(err.message).toMatch(/is a dropdown/)
+    expect(err.message).toMatch(/browserClick on one of its option refs/)
+    expect(dbg.sendCommand.mock.calls.filter((c) => c[1] === 'Input.insertText')).toHaveLength(0)
+  })
+
+  it('still clicks a rendered ARIA combobox for real', async () => {
+    // A `[role=combobox]` <div> is not a <select>: the DOM-class probe says
+    // null and the ordinary click path (box model + mouse events) runs.
+    const executor = new TabExecutor()
+    await executor.attach(42)
+    dbg.sendCommand.mockImplementation(async (_target, method, params) => {
+      if (method === 'Accessibility.getFullAXTree') {
+        return { nodes: [{ nodeId: 'cb', backendDOMNodeId: 11, role: { value: 'combobox' }, name: { value: 'City' }, ignored: false }] }
       }
-      if (method === 'Runtime.callFunctionOn') return { result: { objectId: 'select-object' } }
-      if (method === 'DOM.describeNode') return { node: { backendNodeId: 8 } }
-      if (method === 'DOM.getBoxModel' && params?.backendNodeId === 8) {
+      if (method === 'DOM.resolveNode') return { object: { objectId: 'div-object' } }
+      if (method === 'Runtime.callFunctionOn') return { result: { value: null } }
+      if (method === 'DOM.getBoxModel' && params?.backendNodeId === 11) {
         return { model: { content: [0, 0, 100, 0, 100, 20, 0, 20] } }
       }
       return {}
     })
-
     const snapshot = await executor.snapshot()
     await expect(executor.click(snapshot.nodes[0]!.ref)).resolves.toBeUndefined()
-
-    const mouse = dbg.sendCommand.mock.calls.filter((call) => call[1] === 'Input.dispatchMouseEvent')
+    const mouse = dbg.sendCommand.mock.calls.filter((c) => c[1] === 'Input.dispatchMouseEvent')
     expect(mouse).toHaveLength(3)
     expect(mouse[1]?.[2]).toMatchObject({ type: 'mousePressed', x: 50, y: 10 })
-    const keys = dbg.sendCommand.mock.calls
-      .filter((call) => call[1] === 'Input.dispatchKeyEvent' && call[2]?.type === 'keyDown')
-      .map((call) => call[2]?.key)
-    expect(keys).toEqual(['Home', 'ArrowDown', 'ArrowDown', 'Enter'])
   })
 
   it('keeps an unresolved box-model failure actionable without claiming the page control is hidden', async () => {
@@ -254,35 +388,6 @@ describe('[COMP:ext/agent] Native dropdown option clicks', () => {
     )
     expect(err.message).not.toMatch(/box model/i)
     expect(err.message).not.toMatch(/not visible/i)
-  })
-
-  it('does not leak a box-model failure from the owning native select', async () => {
-    const executor = new TabExecutor()
-    await executor.attach(42)
-    dbg.sendCommand.mockImplementation(async (_target, method, params) => {
-      if (method === 'Accessibility.getFullAXTree') {
-        return {
-          nodes: [{
-            nodeId: 'station-option', backendDOMNodeId: 7, role: { value: 'option' },
-            name: { value: 'Olympic' }, ignored: false,
-          }],
-        }
-      }
-      if (method === 'DOM.getBoxModel') throw new Error('Could not compute box model.')
-      if (method === 'DOM.resolveNode') return { object: { objectId: 'option-object' } }
-      if (method === 'Runtime.callFunctionOn' && params?.returnByValue === true) {
-        return { result: { value: { disabled: false, enabledIndex: 0, multiple: false } } }
-      }
-      if (method === 'Runtime.callFunctionOn') return { result: { objectId: 'select-object' } }
-      if (method === 'DOM.describeNode') return { node: { backendNodeId: 8 } }
-      return {}
-    })
-
-    const snapshot = await executor.snapshot()
-    const err = (await executor.click(snapshot.nodes[0]!.ref).catch((error: unknown) => error)) as ExecutorError
-
-    expect(err.message).toMatch(/dropdown.*no usable rendered target/i)
-    expect(err.message).not.toMatch(/box model|not visible/i)
   })
 })
 

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import request from 'supertest'
 import { createTestApp } from './helpers.js'
 import { TelegramApiError } from '@use-brian/channels'
+import { CUSTOM_MODEL_IMAGE_REJECTION } from '../_channel-error-text.js'
 
 /**
  * [COMP:api/telegram-byo-route]
@@ -354,9 +355,10 @@ describe('[COMP:api/telegram-byo-route] safe error delivery', () => {
   }
 
   it('explains that a custom text-only model cannot inspect an inbound image', async () => {
-    pipelineError = new Error(
-      'Custom model endpoints currently support text and tools only. Remove the inline image or use the web app to choose a built-in model.',
-    )
+    // The one shared copy of this sentence — matched by identity in
+    // `channelUserErrorText`, so a literal here would drift out of the
+    // whitelist the moment the copy is corrected (it was, on 2026-08-19).
+    pipelineError = new Error(CUSTOM_MODEL_IMAGE_REJECTION)
 
     await postUpdate(makeApp(), {
       update_id: 700,

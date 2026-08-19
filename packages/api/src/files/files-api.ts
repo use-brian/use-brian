@@ -166,6 +166,11 @@ function ok<T>(value: T): FilesResult<T> {
   return { ok: true, value }
 }
 
+/** Postgres `unique_violation`. Same test the chunked-upload completer uses. */
+function isUniqueViolation(e: unknown): boolean {
+  return Boolean(e && typeof e === 'object' && 'code' in e && (e as { code?: string }).code === '23505')
+}
+
 export type CreateFilesApiDeps = {
   store: WorkspaceFilesStore
   auditStore: WorkspaceAuditStore
@@ -310,6 +315,16 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
           `[files-api] write rollback failed for key=${storageKey} after DB insert failure:`,
           rollbackErr,
         )
+      }
+      // The `getByPath` gate above is a CURRENT-version, access-scoped read;
+      // the DB constraint is neither. A row the caller cannot see — one that
+      // left the current window between the check and the insert, or one
+      // above their clearance / outside their visibility axes — passes the
+      // gate and still collides. Answer the same `conflict` the gate answers
+      // rather than throwing to a bare 500, so the surface can say which
+      // path is taken instead of "Failed to store file".
+      if (isUniqueViolation(dbErr)) {
+        return err({ kind: 'conflict', path })
       }
       throw dbErr
     }

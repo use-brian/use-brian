@@ -773,7 +773,26 @@ describe('[COMP:api/brain-inbox-explain] Source descriptor', () => {
     expect(mockRejectTask).not.toHaveBeenCalled()
   })
 
-  it('DELETE of a non-task primitive runs no goal cascade', async () => {
+  it('DELETE of a workspace_file closes its derived file_segments (deleted content must stop being retrievable)', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ workspace_id: WS }] } as never) // ownership
+    mockQuery.mockResolvedValueOnce({ rows: [] } as never) // soft delete
+    mockQuery.mockResolvedValueOnce({ rowCount: 3 } as never) // segment cascade
+    mockQuery.mockResolvedValueOnce({ rows: [] } as never) // brain_verifications audit
+
+    const res = await request(makeApp()).delete(`/api/brain-inbox/${WS}/workspace_file/${ROW}`)
+
+    expect(res.status).toBe(200)
+    // Retrieval reads the SEGMENT's own bi-temporal window, never the parent
+    // file's — closing workspace_files alone leaves the deleted file's text
+    // searchable through searchFileContent and the brain file_segment arm.
+    const cascade = mockQuery.mock.calls.find((c) => /UPDATE file_segments/.test(String(c[0])))
+    expect(cascade).toBeDefined()
+    expect(String(cascade?.[0])).toMatch(/valid_to = now\(\)/)
+    expect(String(cascade?.[0])).toMatch(/valid_to IS NULL/)
+    expect(cascade?.[1]).toEqual([ROW])
+  })
+
+  it('DELETE of a non-task primitive runs no goal cascade, and a non-file primitive no segment cascade', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [{ workspace_id: WS }] } as never) // ownership
     mockQuery.mockResolvedValueOnce({ rows: [] } as never) // soft delete
     mockQuery.mockResolvedValueOnce({ rows: [] } as never) // memory_verifications audit
@@ -783,6 +802,7 @@ describe('[COMP:api/brain-inbox-explain] Source descriptor', () => {
     expect(res.status).toBe(200)
     for (const call of mockQuery.mock.calls) {
       expect(String(call[0])).not.toMatch(/UPDATE goals/)
+      expect(String(call[0])).not.toMatch(/UPDATE file_segments/)
     }
   })
 
