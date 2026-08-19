@@ -969,3 +969,150 @@ describe('[COMP:workflow/schemas] trigger fan-out (array startStepId)', () => {
     }
   })
 })
+
+describe('[COMP:api/client-principal-runtime] external-client definition boundary', () => {
+  const apiKeyId = '00000000-0000-4000-8000-000000000010'
+  const draftStep = {
+    id: 'draft',
+    type: 'assistant_call' as const,
+    target: { assistantId: '00000000-0000-4000-8000-000000000011' },
+    prompt: 'Draft a reply to {{input.event.text}}',
+    storeOutputAs: 'draft',
+  }
+
+  it('accepts a static client and an administrator-authored sender map', () => {
+    const staticResult = WorkflowDefinitionSchema.safeParse({
+      startStepId: 'draft',
+      principal: {
+        kind: 'api_external_client',
+        apiKeyId,
+        assistantId: '00000000-0000-4000-8000-000000000011',
+        resolve: { kind: 'static', externalUserId: 'client-17' },
+      },
+      steps: [draftStep],
+    })
+    expect(staticResult.success).toBe(true)
+
+    const mapResult = WorkflowDefinitionSchema.safeParse({
+      startStepId: 'draft',
+      principal: {
+        kind: 'api_external_client',
+        apiKeyId,
+        assistantId: '00000000-0000-4000-8000-000000000011',
+        resolve: {
+          kind: 'event_sender_map',
+          clients: [
+            { sender: 'client-a@customer.example', externalUserId: 'client-17' },
+            { sender: 'client-b@customer.example', externalUserId: 'client-42' },
+          ],
+        },
+      },
+      steps: [draftStep],
+    })
+    expect(mapResult.success).toBe(true)
+  })
+
+  it('rejects duplicate sender routes case-insensitively', () => {
+    const result = WorkflowDefinitionSchema.safeParse({
+      startStepId: 'draft',
+      principal: {
+        kind: 'api_external_client',
+        apiKeyId,
+        assistantId: '00000000-0000-4000-8000-000000000011',
+        resolve: {
+          kind: 'event_sender_map',
+          clients: [
+            { sender: 'Client-A@customer.example', externalUserId: 'client-17' },
+            { sender: 'client-a@customer.example', externalUserId: 'client-42' },
+          ],
+        },
+      },
+      steps: [draftStep],
+    })
+    expect(result.success).toBe(false)
+  })
+
+  it('accepts one frozen, always-reviewed IMAP reply after a reachable client draft', () => {
+    const result = WorkflowDefinitionSchema.safeParse({
+      startStepId: 'draft',
+      principal: {
+        kind: 'api_external_client',
+        apiKeyId,
+        assistantId: '00000000-0000-4000-8000-000000000011',
+        resolve: { kind: 'static', externalUserId: 'client-17' },
+      },
+      steps: [
+        { ...draftStep, nextStepId: 'review' },
+        {
+          id: 'review',
+          type: 'tool_call',
+          toolName: 'imapSendMessage__sales_1a2b3c4d',
+          arguments: {
+            to: ['{{input.event.sender}}'],
+            subject: 'Re: {{input.event.subject}}',
+            body: '{{vars.draft}}',
+            inReplyTo: '{{input.event.message_id}}',
+            account: 'contact@company.example',
+          },
+          approval: { required: true },
+        },
+      ],
+    })
+    expect(result.success).toBe(true)
+  })
+
+  it.each([
+    { name: 'auto send', patch: { approval: undefined } },
+    { name: 'recipient override', patch: { arguments: { to: ['other@customer.example'], subject: '{{input.event.subject}}', body: '{{vars.draft}}', inReplyTo: '{{input.event.message_id}}' } } },
+    { name: 'unthreaded', patch: { arguments: { to: ['{{input.event.sender}}'], subject: '{{input.event.subject}}', body: '{{vars.draft}}' } } },
+    { name: 'copied recipient', patch: { arguments: { to: ['{{input.event.sender}}'], cc: ['audit@company.example'], subject: '{{input.event.subject}}', body: '{{vars.draft}}', inReplyTo: '{{input.event.message_id}}' } } },
+    { name: 'unproduced body', patch: { arguments: { to: ['{{input.event.sender}}'], subject: '{{input.event.subject}}', body: '{{vars.missing}}', inReplyTo: '{{input.event.message_id}}' } } },
+  ])('rejects reviewed reply escape: $name', ({ patch }) => {
+    const result = WorkflowDefinitionSchema.safeParse({
+      startStepId: 'draft',
+      principal: {
+        kind: 'api_external_client',
+        apiKeyId,
+        assistantId: '00000000-0000-4000-8000-000000000011',
+        resolve: { kind: 'static', externalUserId: 'client-17' },
+      },
+      steps: [
+        { ...draftStep, nextStepId: 'review' },
+        {
+          id: 'review',
+          type: 'tool_call',
+          toolName: 'imapSendMessage',
+          arguments: {
+            to: ['{{input.event.sender}}'],
+            subject: '{{input.event.subject}}',
+            body: '{{vars.draft}}',
+            inReplyTo: '{{input.event.message_id}}',
+          },
+          approval: { required: true },
+          ...patch,
+        },
+      ],
+    })
+    expect(result.success).toBe(false)
+  })
+
+  it.each([
+    { ...draftStep, deliver: { channelType: 'slack', channelId: 'C123' } },
+    { ...draftStep, session: 'persistent' },
+    { ...draftStep, researchMode: true },
+    { id: 'draft', type: 'tool_call', toolName: 'imapSendMessage', arguments: {} },
+    { id: 'draft', type: 'wait', until: { duration: { minutes: 1 } } },
+  ])('rejects draft-lane egress or widened context: $type', (step) => {
+    const result = WorkflowDefinitionSchema.safeParse({
+      startStepId: 'draft',
+      principal: {
+        kind: 'api_external_client',
+        apiKeyId,
+        assistantId: '00000000-0000-4000-8000-000000000011',
+        resolve: { kind: 'static', externalUserId: 'client-17' },
+      },
+      steps: [step],
+    })
+    expect(result.success).toBe(false)
+  })
+})

@@ -23,6 +23,11 @@ export type IncomingFile = {
 
 export type IncomingMessage = {
   userId: string
+  /** Human-readable sender name when the platform provides one (WhatsApp
+   * pushName, WeChat sender name, Telegram/Slack display name). Stored as
+   * the archive's `sender_display` so the agent can search by name, not
+   * only by the opaque userId. */
+  senderDisplay?: string
   channelId: string
   messageId?: string
   text: string

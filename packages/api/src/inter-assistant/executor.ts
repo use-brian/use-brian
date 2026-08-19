@@ -55,6 +55,7 @@ import {
   buildPreflightPrompt,
   EvidenceAccumulator,
   DOC_MUTATION_TOOLS,
+  unionCompartments,
 } from '@use-brian/core'
 import type { SavedViewStore, EngineHooks } from '@use-brian/core'
 import type { ResearchSynthesizeFn } from '../synthesis/research-synthesizer.js'
@@ -85,6 +86,12 @@ import type { DeferredConfirmationStore } from '../db/deferred-confirmation-stor
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 import type { ChatEpisodeIngestor } from '../ingest-port.js'
 import type { InjectExtraTools, ResolveAppSoul } from '../tool-injection-port.js'
+import type { ApiKeyStore } from '../db/api-key-store.js'
+import {
+  applyPublicResearchToolCeiling,
+  resolveApiKeyClientPrincipal,
+  type ResolvedApiKeyClientPrincipal,
+} from '../routes/client-principal-runtime.js'
 
 export type CalleeExecutorOptions = {
   provider: LLMProvider
@@ -143,6 +150,8 @@ export type CalleeExecutorOptions = {
   engineHooks?: EngineHooks
   /** Capability-grants store — used to filter privileged tools for the callee. */
   capabilityStore: CapabilityStore
+  /** Live API-key lookup for principal-bound workflow consults. */
+  apiKeyStore?: Pick<ApiKeyStore, 'getByIdSystem'>
   /**
    * Persistent-session compaction deps (Phase 2 scheduling <-> workflow
    * unification). Used only for durable `sessionKey` sessions — a workflow
@@ -272,6 +281,11 @@ export type CalleeQueryParams = {
    * extra filtering.
    */
   allowedTools?: string[]
+  /** Frozen workflow client authority; revalidated against the live key. */
+  externalClientPrincipal?: {
+    apiKeyId: string
+    externalUserId: string
+  }
   /**
    * Brain skill allow-list for this consult. When non-empty (a workflow
    * `assistant_call` step's `skills` field), the callee is offered the
@@ -386,13 +400,63 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       )
     }
 
-    const calleeActorUserId = await billingPartyForAssistant({
+    const calleeOwnerUserId = await billingPartyForAssistant({
       id: calleeAssistant.id,
       ownerUserId: calleeAssistant.ownerUserId ?? null,
       workspaceId: calleeAssistant.workspaceId ?? null,
     })
-    const calleeOwner = await findUserById(calleeActorUserId)
+    const calleeOwner = await findUserById(calleeOwnerUserId)
     if (!calleeOwner) throw new Error('Callee owner not found')
+
+    let externalClient: ResolvedApiKeyClientPrincipal | null = null
+    if (params.externalClientPrincipal) {
+      if (params.callerChannelType !== 'workflow') {
+        throw Object.assign(
+          new Error('External-client authority is valid only on workflow consults.'),
+          { reason: 'client_principal_invalid_origin' },
+        )
+      }
+      if (
+        params.sessionKey
+        || params.deliverTarget
+        || params.pageAnchorId
+        || params.skills?.length
+        || params.enforcedSkills?.length
+        || params.depth
+        || params.blueprintId
+      ) {
+        throw Object.assign(
+          new Error('External-client workflow consult requested a forbidden persistent, delivery, page, skill, research, or blueprint surface.'),
+          { reason: 'client_principal_surface_forbidden' },
+        )
+      }
+      if (!options.apiKeyStore) {
+        throw Object.assign(
+          new Error('External-client workflow execution is not configured on this server.'),
+          { reason: 'client_principal_unavailable' },
+        )
+      }
+      externalClient = await resolveApiKeyClientPrincipal({
+        apiKeyStore: options.apiKeyStore,
+        apiKeyId: params.externalClientPrincipal.apiKeyId,
+        externalUserId: params.externalClientPrincipal.externalUserId,
+        assistant: {
+          id: calleeAssistant.id,
+          workspaceId: calleeAssistant.workspaceId ?? null,
+          kind: calleeAssistant.kind,
+          clearance: calleeAssistant.clearance,
+        },
+      })
+    }
+    const calleeActorUserId = externalClient?.user.id ?? calleeOwnerUserId
+    const externalReadCeilings = externalClient
+      ? await resolveReadCeilingsSystem(
+          calleeActorUserId,
+          calleeAssistant.workspaceId ?? null,
+          calleeAssistant.clearance,
+          calleeAssistant.compartments,
+        )
+      : null
 
     const callerAssistant = await findAssistantById(params.callerAssistantId)
     const callerName = callerAssistant?.name ?? 'Unknown assistant'
@@ -496,12 +560,23 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     // 3. Build tool set: clone base tools + capability filter + MCP injection.
     const calleeCapabilities = new Set(await options.capabilityStore.listActive(params.calleeAssistantId))
     const calleeTools = filterToolsByCapabilities(new Map(options.tools), calleeCapabilities)
+    // Same immutable ceiling as the keyed HTTP path. A public-research key
+    // receives no research tools in a background draft because there is no
+    // authenticated per-turn consent bit; memory tools are added below.
+    const limitedPublicResearch = externalClient
+      ? applyPublicResearchToolCeiling({
+          tools: calleeTools,
+          toolPolicy: externalClient.key.toolPolicy,
+          internalScope: false,
+          allowPublicResearch: false,
+        })
+      : false
     /** Capabilities MCP injection could not provide — see the assignment below. */
     let unavailableCapabilities: string[] = []
     /** Pinned custom/CLI names retained behind the restricted MCP gateway. */
     let restrictedSearchToolNames: string[] = []
 
-    if (options.connectorStore && options.mcpSettingsStore) {
+    if (!limitedPublicResearch && options.connectorStore && options.mcpSettingsStore) {
       try {
         const connectorUserId = await getConnectorUserId(
           calleeActorUserId,
@@ -520,7 +595,12 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           // silently zero GitHub access. Keeping built-ins direct only when the
           // caller pins tools preserves the token saving on every unpinned callee,
           // which reaches connectors through `mcp_search` exactly as before.
-          keepBuiltinsDirect: (params.allowedTools?.length ?? 0) > 0,
+          // Principal-bound drafts expose every connector under its real tool
+          // metadata so the read-only filter below can remove writes. Keeping
+          // them behind mcp_call would hide the inner tool's effect class.
+          keepBuiltinsDirect:
+            !!externalClient || (params.allowedTools?.length ?? 0) > 0,
+          keepDynamicToolsDirect: !!externalClient,
           restrictSearchToToolNames: params.allowedTools,
           connectorStore: options.connectorStore,
           settingsStore: options.mcpSettingsStore,
@@ -534,6 +614,13 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           assistantConnectorGrantsStore: options.assistantConnectorGrantsStore,
           assistantTeamId: calleeAssistant.workspaceId ?? null,
           engineHooks: options.engineHooks,
+          actorIdentity: externalClient
+            ? {
+                channel: 'api',
+                id: externalClient.externalUserId,
+                userId: externalClient.user.id,
+              }
+            : undefined,
           // KB write tools are chat-only (D2): the A2A callee path strips
           // confirmation UX, so this surface never exposes them.
           allowKnowledgeWrites: false,
@@ -568,7 +655,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     // impl gates on the callee's own kind/appType + context. Injected before the
     // confirmation strip + mode filter so the tools flow through the same
     // governance as the rest.
-    if (options.injectExtraTools) {
+    if (!externalClient && options.injectExtraTools) {
       try {
         await options.injectExtraTools({
           tools: calleeTools,
@@ -697,8 +784,8 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       // read on the workspace partition, so a personal (no-workspace) callee
       // would only error in `actorFromContext`. Reads are clearance +
       // compartment projected via the ceilings set on the ToolContext below.
-      if (options.retrievalStore && calleeAssistant.workspaceId) {
-        retrievalReadCeilings = await resolveReadCeilingsSystem(
+      if (!externalClient && options.retrievalStore && calleeAssistant.workspaceId) {
+        retrievalReadCeilings = externalReadCeilings ?? await resolveReadCeilingsSystem(
           calleeActorUserId,
           calleeAssistant.workspaceId,
           calleeAssistant.clearance,
@@ -724,13 +811,13 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
 
     // Generate mode as a consult tool — fill a blueprint from the brain. Added
     // for any workspace-scoped consult; the leaf filter below still applies.
-    if (options.generateBlueprintTool && calleeAssistant.workspaceId) {
+    if (!externalClient && options.generateBlueprintTool && calleeAssistant.workspaceId) {
       modeTools.set(options.generateBlueprintTool.name, options.generateBlueprintTool)
     }
 
     // Blueprint record surface — chat-parity record tools for workspace-scoped
     // consults (a workflow step saving its typed output uses these).
-    if (options.blueprintRecordTools && calleeAssistant.workspaceId) {
+    if (!externalClient && options.blueprintRecordTools && calleeAssistant.workspaceId) {
       for (const tool of options.blueprintRecordTools) {
         modeTools.set(tool.name, tool)
       }
@@ -849,6 +936,27 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       : pageAwareAllowedTools
     const finalTools = filterToolsByAllowList(modeTools, effectiveAllowedTools)
 
+    // A principal-bound workflow is an internal drafting lane, so the model
+    // receives no write or outbound tool at all. Connector tools stay direct
+    // above specifically so their canonical isReadOnly metadata remains
+    // inspectable here; the generic MCP gateways are removed because mcp_call
+    // can conceal a write behind one outer tool definition. The client write
+    // stamp remains on ToolContext as defense in depth if a future read tool
+    // is misclassified, but this lane does not intentionally expose writes.
+    const clientDraftBlockedTools: string[] = []
+    if (externalClient) {
+      for (const [name, tool] of finalTools) {
+        if (!tool.isReadOnly) {
+          clientDraftBlockedTools.push(name)
+          finalTools.delete(name)
+        }
+      }
+      for (const gateway of ['mcp_search', 'mcp_call']) {
+        if (finalTools.delete(gateway)) clientDraftBlockedTools.push(gateway)
+      }
+      clientDraftBlockedTools.sort()
+    }
+
     // 4c. Leaf invariant — a delegated callee is a terminal node in the
     // consult tree: strip the inter-assistant delegation tools so it can never
     // initiate a *further* consult. Multi-hop composition is expressed through
@@ -924,7 +1032,10 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       const dropped = params.allowedTools.filter((t) => droppedAskTools.includes(t))
       const forbidden = params.allowedTools.filter((t) => orchestrationTools.has(t))
       const unknown = params.allowedTools.filter(
-        (t) => !droppedAskTools.includes(t) && !orchestrationTools.has(t),
+        (t) =>
+          !droppedAskTools.includes(t)
+          && !orchestrationTools.has(t)
+          && !clientDraftBlockedTools.includes(t),
       )
       const parts: string[] = []
       if (dropped.length) {
@@ -934,6 +1045,10 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       }
       if (forbidden.length) {
         parts.push(`${forbidden.join(', ')}: orchestration tools are not available inside a terminal assistant_call`)
+      }
+      const draftWrites = params.allowedTools.filter((t) => clientDraftBlockedTools.includes(t))
+      if (draftWrites.length) {
+        parts.push(`${draftWrites.join(', ')}: the external-client draft lane exposes read-only tools only`)
       }
       if (unknown.length) {
         parts.push(
@@ -1064,6 +1179,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     // Memory context: personal always; workspace memory whenever the callee
     // is workspace-scoped (consults are same-workspace, full workspace trust).
     const includeWorkspaceMemories =
+      !externalClient &&
       calleeAssistant.workspaceId !== null &&
       calleeAssistant.workspaceId !== undefined
 
@@ -1072,7 +1188,9 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       userId: calleeActorUserId,
       assistantId: params.calleeAssistantId,
       assistantKind: calleeAssistant.kind,
-      clearance: calleeAssistant.clearance,
+      clearance: externalReadCeilings?.clearance ?? calleeAssistant.clearance,
+      compartments: externalReadCeilings?.compartments,
+      clientSelfMemory: externalClient?.clientSelfMemory,
     }
     const [soul, identityMemories, memoryIndex] = await Promise.all([
       options.memoryStore.getSoul(params.calleeAssistantId, calleeActorUserId, 'Use Brian'),
@@ -1187,6 +1305,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     // string when the workspace has no blueprints or the tools are absent).
     let blueprintPromptFragment = ''
     if (
+      !externalClient &&
       options.buildBlueprintPromptFragment &&
       options.blueprintRecordTools &&
       calleeAssistant.workspaceId &&
@@ -1263,7 +1382,10 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       }
     }
 
-    const fullSystemPrompt = `${systemPrompt}${docAnchorBlock}${priorRunMemoryBlock}${workflowGuardBlock}${recordCreationGuardBlock}${automatedToolPolicyBlock}${unavailableBlock}${skillPromptFragment}${blueprintPromptFragment}${deliveryConversationBlock}\n\n# Context\nCurrent date and time: ${currentDateTime}\nTimezone: ${calleeOwner.timezone}\n\n${memoryContext}`
+    const externalClientGuardBlock = externalClient
+      ? `\n\n## External client boundary\nThis automated draft is running as one isolated external client. Use only the inbound request and the client-scoped context and tools available in this turn. Do not infer or request another client identity, do not claim access to workspace-wide context, and do not attempt to deliver or send the result. The final text is an internal draft for workspace review.`
+      : ''
+    const fullSystemPrompt = `${systemPrompt}${externalClientGuardBlock}${docAnchorBlock}${priorRunMemoryBlock}${workflowGuardBlock}${recordCreationGuardBlock}${automatedToolPolicyBlock}${unavailableBlock}${skillPromptFragment}${blueprintPromptFragment}${deliveryConversationBlock}\n\n# Context\nCurrent date and time: ${currentDateTime}\nTimezone: ${calleeOwner.timezone}\n\n${memoryContext}`
     // 6. Build messages and run the query loop.
     //
     // Persist the user turn first, then build the message list. A durable
@@ -1606,7 +1728,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           // workspace-scoped actor, so `retrievalReadCeilings` being set forces
           // the bind too.
           workspaceId:
-            params.pageAnchorId || includeWorkspaceMemories || retrievalReadCeilings
+            params.pageAnchorId || includeWorkspaceMemories || retrievalReadCeilings || externalClient
               ? (calleeAssistant.workspaceId ?? undefined)
               : undefined,
           workerRuntime: customLlmRuntime
@@ -1624,8 +1746,19 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           // assistant)` clearance + compartment grant. Set only when retrieval
           // tools were injected; absent otherwise (passthrough, unchanged for
           // callees without brain reads).
-          clearance: retrievalReadCeilings?.clearance,
-          compartments: retrievalReadCeilings?.compartments,
+          clearance: externalReadCeilings?.clearance ?? retrievalReadCeilings?.clearance,
+          compartments: externalReadCeilings?.compartments ?? retrievalReadCeilings?.compartments,
+          clientSelfMemory: externalClient?.clientSelfMemory,
+          memoryWriteSensitivityFloor: externalClient ? 'internal' : undefined,
+          memoryWriteCompartments: externalClient?.writeCompartments,
+          assistantClearance: externalClient ? calleeAssistant.clearance : undefined,
+          assistantCompartments: externalClient ? calleeAssistant.compartments : undefined,
+          assistantDefaultCompartments: externalClient
+            ? unionCompartments(
+                calleeAssistant.defaultCompartments,
+                externalClient.writeCompartments,
+              )
+            : undefined,
           // Doc anchor: renderView/renderChart append to this page instead
           // of minting drafts; patchPage/getCurrentPage target it.
           docViewId: params.pageAnchorId ?? null,
@@ -1709,7 +1842,8 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
             const calleeChannelType =
               params.callerChannelType === 'workflow' ? 'workflow' : 'assistant-call'
             options.analytics?.logEvent({
-              userId: calleeActorUserId,
+              userId: calleeOwnerUserId,
+              actorUserId: externalClient ? calleeActorUserId : undefined,
               assistantId: params.calleeAssistantId,
               sessionId: session.id,
               eventName: 'tool_executed',
@@ -1740,7 +1874,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
             void recordExternalCostFromMeta({
               toolMeta,
               usageStore: options.usageStore,
-              userId: calleeActorUserId,
+              userId: calleeOwnerUserId,
               assistantId: params.calleeAssistantId,
               sessionId: session.id,
               triggerKey:
@@ -1820,8 +1954,9 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           // `userMessageId` keep the row OUT of the user-facing credit
           // derivation — an internal turn stays analytics-only, the rule in
           // docs/architecture/platform/cost-and-pricing.md → "derived ledger".
-          // Attributed to the callee's billing party (its workspace owner), the
-          // same identity that owns the session. Fire-and-forget: a metering
+          // Attributed to the callee's billing party (its workspace owner).
+          // The session may belong to an isolated external shadow, but that
+          // shadow is never the payer. Fire-and-forget: a metering
           // failure must never fail the consult. See
           // docs/architecture/channels/inter-assistant.md → "Cost Model".
           const usage = event.totalUsage
@@ -1832,7 +1967,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
                 : 'a2a_consult'
             options.usageStore
               .recordUsage({
-                userId: calleeActorUserId,
+                userId: calleeOwnerUserId,
                 assistantId: params.calleeAssistantId,
                 sessionId: session.id,
                 model: event.response.model,

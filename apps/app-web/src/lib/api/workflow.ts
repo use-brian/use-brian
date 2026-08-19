@@ -232,6 +232,7 @@ export type ToolCallStep = {
   toolName: string;
   arguments: Record<string, unknown>;
   approval?: {
+    required?: boolean;
     deliveryChannel?: "web" | "telegram" | "slack" | "whatsapp";
     expiresAfterHours?: number;
   };
@@ -263,6 +264,18 @@ export type WorkflowStep = AssistantCallStep | ToolCallStep | WaitStep | BranchS
 /** Canvas position of one node on the builder board (board-space px). */
 export type WorkflowNodePosition = { x: number; y: number };
 
+type ExternalClientWorkflowPrincipal = {
+  kind: "api_external_client";
+  apiKeyId: string;
+  assistantId: string;
+  resolve:
+    | { kind: "static"; externalUserId: string }
+    | {
+        kind: "event_sender_map";
+        clients: Array<{ sender: string; externalUserId: string }>;
+      };
+};
+
 export type WorkflowDefinition = {
   /**
    * Scalar = one entry step; ARRAY = trigger fan-out — every listed step
@@ -270,6 +283,8 @@ export type WorkflowDefinition = {
    */
   startStepId: string | string[];
   steps: WorkflowStep[];
+  /** Optional run-wide external-client authority (read-only model lane). */
+  principal?: ExternalClientWorkflowPrincipal;
   /**
    * Builder-canvas layout: node positions keyed by step id plus the reserved
    * `__trigger` key. Written by the drag-to-wire board; steps without an

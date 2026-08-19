@@ -202,6 +202,8 @@ export type ToolCallStep = WorkflowStepCommon & {
    * omitted = use workflow-level default; missing both = web-UI-only delivery.
    */
   approval?: {
+    /** Force a detached approval even when the effective tool policy is allow. */
+    required?: boolean
     deliveryChannel?: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams'
     /**
      * Hours before the approval auto-expires (status='expired').
@@ -298,6 +300,32 @@ export const WORKFLOW_STEP_TYPES = [
  */
 export type WorkflowNodePosition = { x: number; y: number }
 
+/**
+ * Run-wide external-client authority inherited from an API key. The
+ * definition stores the key row id, never its plaintext secret. Sender-map
+ * resolution is configuration, not authentication; the principal-bound model
+ * lane is therefore read-only, with egress only through a separately frozen
+ * reviewed-reply approval.
+ */
+type ExternalClientWorkflowPrincipal = {
+  kind: 'api_external_client'
+  apiKeyId: string
+  /** Assistant the selected key is bound to; revalidated from the live row. */
+  assistantId: string
+  resolve:
+    | { kind: 'static'; externalUserId: string }
+    | {
+        kind: 'event_sender_map'
+        clients: Array<{ sender: string; externalUserId: string }>
+      }
+}
+
+/** Frozen engine-owned form carried from a run into every assistant consult. */
+export type ResolvedExternalClientWorkflowPrincipal = {
+  apiKeyId: string
+  externalUserId: string
+}
+
 export type WorkflowDefinition = {
   /**
    * Scalar = one entry step; ARRAY = trigger fan-out — every listed step
@@ -306,6 +334,8 @@ export type WorkflowDefinition = {
    */
   startStepId: string | string[]
   steps: WorkflowStep[]
+  /** Optional run-wide external-client authority. */
+  principal?: ExternalClientWorkflowPrincipal
   /**
    * Optional builder-canvas layout: node positions keyed by step id (plus
    * the reserved `__trigger` key for the trigger node). Written by the

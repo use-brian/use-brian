@@ -2470,6 +2470,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     knowledgeStore,
     gdriveFilesStore,
     capabilityStore,
+    apiKeyStore,
     episodicStore,
     analytics,
     usageStore,
@@ -2522,6 +2523,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         callerSessionId: '',
         sessionKey: request.contextId,
         allowedTools: request.allowedTools,
+        externalClientPrincipal: request.externalClientPrincipal,
         skills: request.skills,
         enforcedSkills: request.enforcedSkills,
         depth: request.depth,
@@ -2998,6 +3000,19 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       const skills = await workspaceSkillStore.listForWorkspace(workspaceId, { actingUserId: userId })
       return skills.filter((s) => s.state !== 'archived').map((s) => ({ slug: s.slug, name: s.name }))
     },
+    listAuthorableClientApiKeys: async (userId, assistantId) =>
+      (await apiKeyStore.listForUser(userId, assistantId)).map((key) => ({
+        id: key.id,
+        assistantId: key.assistantId,
+        name: key.name,
+        scope: key.scope,
+        audience: key.audience,
+        anonymousContext: key.anonymousContext,
+        toolPolicy: key.toolPolicy,
+        status: key.status,
+        createdAt: key.createdAt.toISOString(),
+        lastUsedAt: key.lastUsedAt?.toISOString() ?? null,
+      })),
     listTriggerJobs: (workflowId) => jobStore.listFiringJobsForWorkflowSystem(workflowId),
     isKnownTool: (name) => allTools.has(name),
     resolveKnownWorkflowTools: async ({ userId, workspaceId, assistantId, toolNames }) => {

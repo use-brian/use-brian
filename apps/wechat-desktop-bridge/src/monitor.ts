@@ -14,7 +14,6 @@ const CHAT_LIST_LIMIT = 200
 const MESSAGE_FETCH_LIMIT = 50
 const MEDIA_RETRY_ATTEMPTS = 15
 const MEDIA_RETRY_INTERVAL_MS = 1000
-const FILE_HELPER = 'filehelper'
 
 export type MonitorDeps = {
   agent: AgentWechatClient
@@ -41,10 +40,15 @@ function chatIdOf(chat: Pick<AgentWechatChat, 'id' | 'username'>): string {
   return chat.id || chat.username
 }
 
-/** Official accounts (`gh_…`) and the file-transfer helper are never forwarded. */
+/**
+ * Official accounts (`gh_…`) are never forwarded (subscription/marketing spam).
+ * File Transfer (`filehelper`) IS forwarded: it is the owner's own notes/files
+ * scratchpad and belongs in a personal-account mirror (archived as outbound via
+ * the isSelf path).
+ */
 export function isSkippedChat(chat: Pick<AgentWechatChat, 'id' | 'username'>): boolean {
   const ids = [chat.id, chat.username].filter(Boolean) as string[]
-  return ids.some((id) => id.startsWith('gh_') || id === FILE_HELPER)
+  return ids.some((id) => id.startsWith('gh_'))
 }
 
 export function createMonitor(deps: MonitorDeps): Monitor {

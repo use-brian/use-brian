@@ -200,6 +200,15 @@ export type ConsultRequest = {
    */
   allowedTools?: string[]
   /**
+   * Frozen run-wide external-client authority. Only the workflow executor
+   * sets it; the callee revalidates the live API key and reconstructs the
+   * isolated shadow context before any model call.
+   */
+  externalClientPrincipal?: {
+    apiKeyId: string
+    externalUserId: string
+  }
+  /**
    * Optional allow-list of brain skill slugs to offer the callee. Set by a
    * workflow `assistant_call` step carrying a `skills` field. When non-empty
    * the callee executor injects the `useSkill` tool over exactly these skills
