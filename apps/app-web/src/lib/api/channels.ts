@@ -578,7 +578,14 @@ export async function getCustomChannelState(
     const data = (await res.json().catch(() => ({}))) as { error?: string };
     throw new Error(data.error ?? `Bridge state failed (${res.status})`);
   }
-  const raw = (await res.json().catch(() => null)) as Partial<CustomChannelState> | null;
+  // The route replies { state: {...} } (or { state: null } before the bridge
+  // first reports). Unwrap it; tolerate a bare object too.
+  const body = (await res.json().catch(() => null)) as
+    | { state?: Partial<CustomChannelState> | null }
+    | Partial<CustomChannelState>
+    | null;
+  const raw: Partial<CustomChannelState> | null =
+    (body && "state" in body ? body.state : (body as Partial<CustomChannelState> | null)) ?? null;
   return {
     status: raw?.status ?? "connecting",
     message: raw?.message ?? null,
