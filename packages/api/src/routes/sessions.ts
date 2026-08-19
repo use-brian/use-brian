@@ -5,7 +5,12 @@ import { mayAssistantAnswerInRoom } from './_room-binding.js'
 import { query } from '../db/client.js'
 import { resolveUser } from './route-helpers.js'
 import { getWorkspaceRoleSystem, getWorkspaceMembershipWithClearanceSystem } from '../db/workspace-store.js'
-import { canRead } from '@use-brian/core'
+import { canRead, type Sensitivity } from '@use-brian/core'
+import {
+  recordRoomMentionsForMessage,
+  reconcileRoomMentionsForEdit,
+  fetchRoomMentionRosters,
+} from '../room-mentions.js'
 import {
   type GetSessionPresence,
   type PublishSessionEvent,
@@ -106,6 +111,21 @@ export type SessionRouteOptions = {
     senderName: string | null
     text: string
     effectiveClearance: string | null
+  }) => void
+  /**
+   * Room human `@mention` badge signal (docs/plans/room-human-mentions.md
+   * T-H8): called fire-and-forget after `recordRoomMentionsForMessage` /
+   * `reconcileRoomMentionsForEdit` actually change a recipient's unread
+   * state — a fresh notification (added) or a retraction that removed an
+   * unread row — so the live Inbox badge can repair without a mount-effect
+   * refetch. Absent = no live fan-out (unit tests; hosts that haven't wired
+   * the emitter). Follows the same call-after-persist, fire-and-forget shape
+   * as `onRoomPost` above. Owned by E-inbox; this route only calls it.
+   */
+  onRoomMentionRecorded?: (input: {
+    workspaceId: string
+    sessionId: string
+    recipientUserIds: string[]
   }) => void
   /**
    * Room typing beacon (`POST /:id/typing`) — updates the viewer's presence
@@ -772,29 +792,65 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         },
       })
 
-      // Ambient brain capture (P2) — fire-and-forget so a slow or failing
-      // ingest path can never delay the post's 201. The hook resolves the
-      // room's workspace itself when we can't cheaply provide it here.
-      if (opts.onRoomPost) {
-        const wsRow = await query<{ workspaceId: string | null }>(
-          `SELECT workspace_id AS "workspaceId" FROM assistants WHERE id = $1`,
-          [session.assistantId],
-        ).catch(() => null)
-        const workspaceId = wsRow?.rows[0]?.workspaceId
-        if (workspaceId) {
-          try {
-            opts.onRoomPost({
-              sessionId: session.id,
-              workspaceId,
-              assistantId: session.assistantId,
-              senderUserId: user.id,
-              senderName: user.name ?? null,
-              text,
-              effectiveClearance: session.effectiveClearance,
-            })
-          } catch (err) {
-            console.error('[sessions] room post capture hook failed:', err)
+      // Resolve the room's workspace once — feeds both the ambient-capture
+      // hook below and room-mention recording (docs/plans/room-human-mentions.md
+      // T-H1/T-H2), which the onRoomPost lookup used to compute for itself
+      // alone.
+      const wsRow = await query<{ workspaceId: string | null }>(
+        `SELECT workspace_id AS "workspaceId" FROM assistants WHERE id = $1`,
+        [session.assistantId],
+      ).catch(() => null)
+      const workspaceId = wsRow?.rows[0]?.workspaceId ?? null
+
+      // Room human @mentions — a silent post still writes an Inbox row for
+      // any mentioned teammate (D-H1). No turn runs on this path (D-H2);
+      // this only persists a durable notification. A recording failure must
+      // not fail the post — the row is already committed — so it's isolated
+      // and logged like onRoomPost below (a swallowed failure here silently
+      // drops the notification rather than double-posting on retry).
+      let unreachableMentions: { id: string; name: string }[] = []
+      if (workspaceId) {
+        try {
+          const mentions = await recordRoomMentionsForMessage({
+            workspaceId,
+            sessionId: session.id,
+            sessionMessageId: stored.id,
+            text,
+            actorUserId: user.id,
+            sessionClearance: (session.effectiveClearance as Sensitivity | null) ?? null,
+          })
+          unreachableMentions = mentions.unreachable
+          if (mentions.recipientUserIds.length > 0 && opts.onRoomMentionRecorded) {
+            try {
+              opts.onRoomMentionRecorded({
+                workspaceId,
+                sessionId: session.id,
+                recipientUserIds: mentions.recipientUserIds,
+              })
+            } catch (err) {
+              console.error('[sessions] onRoomMentionRecorded hook failed:', err)
+            }
           }
+        } catch (err) {
+          console.error('[sessions] room mention recording failed:', err)
+        }
+      }
+
+      // Ambient brain capture (P2) — fire-and-forget so a slow or failing
+      // ingest path can never delay the post's 201.
+      if (opts.onRoomPost && workspaceId) {
+        try {
+          opts.onRoomPost({
+            sessionId: session.id,
+            workspaceId,
+            assistantId: session.assistantId,
+            senderUserId: user.id,
+            senderName: user.name ?? null,
+            text,
+            effectiveClearance: session.effectiveClearance,
+          })
+        } catch (err) {
+          console.error('[sessions] room post capture hook failed:', err)
         }
       }
 
@@ -802,6 +858,9 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         id: stored.id,
         sequenceNum: stored.sequenceNum,
         timestamp: stored.createdAt,
+        // D-H4: names matched in the text that could not be reached because
+        // they fail the room's clearance. Empty on every ordinary post.
+        unreachableMentions,
       })
     } catch (err) {
       console.error('Room post error:', err)
@@ -884,6 +943,13 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         res.status(409).json({ error: 'This message cannot be edited' })
         return
       }
+      // The pre-edit text, for the room-mention diff-reconcile below
+      // (D-H6) — must be captured BEFORE the update overwrites the row.
+      // `isPlainText` above already proved every block is `{type:'text'}`.
+      const oldText = blocks!
+        .map((block) => (block as { type: 'text'; text?: unknown }).text)
+        .filter((t): t is string => typeof t === 'string')
+        .join('\n')
 
       const updated = await updateSessionMessageText({
         messageId: existing.id,
@@ -905,14 +971,108 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         },
       })
 
+      // Room human @mentions — diff-reconcile (D-H6): a name newly present
+      // is notified, an unchanged name is not re-notified (its preview is
+      // refreshed), a removed name is retracted (only while unread). See
+      // room-mentions.ts for why this needs oldText/newText rather than a
+      // stored "previous mention set". Isolated + logged, same rationale as
+      // the silent-post path above: the edit already committed.
+      let unreachableMentions: { id: string; name: string }[] = []
+      try {
+        const wsRow = await query<{ workspaceId: string | null }>(
+          `SELECT workspace_id AS "workspaceId" FROM assistants WHERE id = $1`,
+          [session.assistantId],
+        )
+        const workspaceId = wsRow.rows[0]?.workspaceId ?? null
+        if (workspaceId) {
+          const reconciled = await reconcileRoomMentionsForEdit({
+            workspaceId,
+            sessionId: session.id,
+            sessionMessageId: updated.id,
+            oldText,
+            newText: text,
+            actorUserId: user.id,
+            sessionClearance: (session.effectiveClearance as Sensitivity | null) ?? null,
+          })
+          unreachableMentions = reconciled.unreachable
+          const changedRecipientIds = [...reconciled.added, ...reconciled.removed]
+          if (changedRecipientIds.length > 0 && opts.onRoomMentionRecorded) {
+            try {
+              opts.onRoomMentionRecorded({
+                workspaceId,
+                sessionId: session.id,
+                recipientUserIds: changedRecipientIds,
+              })
+            } catch (err) {
+              console.error('[sessions] onRoomMentionRecorded hook failed:', err)
+            }
+          }
+        }
+      } catch (err) {
+        console.error('[sessions] room mention reconcile failed:', err)
+      }
+
       res.json({
         id: updated.id,
         sequenceNum: updated.sequenceNum,
         timestamp: updated.createdAt,
+        unreachableMentions,
       })
     } catch (err) {
       console.error('Room message edit error:', err)
       res.status(500).json({ error: 'Failed to edit message' })
+    }
+  })
+
+  /**
+   * GET /api/sessions/:id/mentionable — the room's `@mention` roster
+   * (docs/plans/room-human-mentions.md T-H4). Returns the workspace's
+   * assistants plus ONLY the workspace members who pass this room's
+   * `effective_clearance` — one already-filtered list. The client never
+   * sees clearance values or does clearance logic (D-H4); the filter here
+   * and the recorder's enforcement in `room-mentions.ts` are independent —
+   * this is a convenience, not the boundary.
+   */
+  router.get('/:id/mentionable', async (req, res) => {
+    try {
+      const jwtUserId = (req as { userId?: string }).userId
+      const user = await resolveUser(jwtUserId)
+      if (!user) { res.status(401).json({ error: 'Unauthorized' }); return }
+
+      const session = await findSessionById(req.params.id)
+      if (!session) {
+        res.status(404).json({ error: 'Session not found' })
+        return
+      }
+      const denied = await gateSessionRead(user.id, session)
+      if (denied) {
+        res.status(denied.status).json({ error: denied.error })
+        return
+      }
+
+      const wsRow = await query<{ workspaceId: string | null }>(
+        `SELECT workspace_id AS "workspaceId" FROM assistants WHERE id = $1`,
+        [session.assistantId],
+      )
+      const workspaceId = wsRow.rows[0]?.workspaceId ?? null
+      if (!workspaceId) {
+        res.json({ assistants: [], members: [] })
+        return
+      }
+
+      const { assistants, members } = await fetchRoomMentionRosters(workspaceId)
+      const sessionClearance = (session.effectiveClearance as Sensitivity | null) ?? null
+      const reachableMembers = members
+        .filter((m) => !sessionClearance || canRead(m.clearance, sessionClearance))
+        .map((m) => ({ id: m.id, name: m.name }))
+
+      res.json({
+        assistants: assistants.map((a) => ({ id: a.id, name: a.name })),
+        members: reachableMembers,
+      })
+    } catch (err) {
+      console.error('Mentionable roster error:', err)
+      res.status(500).json({ error: 'Failed to load mentionable roster' })
     }
   })
 

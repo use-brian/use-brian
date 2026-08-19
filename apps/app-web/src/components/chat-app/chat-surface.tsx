@@ -164,11 +164,13 @@ import {
   parsePresentedDocumentPayload,
   postRoomMessage,
   editRoomMessage,
+  fetchMentionableRoster,
   stopTurn,
   postSessionTyping,
   type MessageAttachmentRef,
   type DocSession,
   type WorkspaceSession,
+  type UnreachableMention,
 } from "@/lib/api/sessions";
 import { getUserInfo } from "@/lib/user";
 import { markRoomSeen } from "@/lib/chat-seen";
@@ -187,8 +189,9 @@ import { ChatContextPins } from "@/components/chat-app/chat-context-pins";
 import { resolveRequestedFreshAssistant } from "@/components/chat-app/assistant-deeplink";
 import {
   isAssistantPickerLive,
-  resolveMentionedAssistants,
+  partitionRoomMentions,
   resolveWorkBenchAssistant,
+  type RoomMentionTarget,
 } from "@/components/chat-app/multi-assistant-response";
 import {
   MentionAutocompleteList,
@@ -299,6 +302,19 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   } | null>(null);
   const [researchExhausted, setResearchExhausted] = useState(false);
   const [assistants, setAssistants] = useState<WorkspaceAssistantSummary[]>([]);
+  /** The room's clearance-filtered `@mention` roster (T-H4) — assistants plus
+   *  ONLY the members who can read THIS room. Null until fetched (a fresh
+   *  Workspace pane with no session yet, or the fetch hasn't landed); the
+   *  merged roster below falls back to assistants-only until it does. Never
+   *  read for clearance logic here — the endpoint already filtered it. */
+  const [mentionRoster, setMentionRoster] = useState<{
+    assistants: { id: string; name: string }[];
+    members: { id: string; name: string }[];
+  } | null>(null);
+  /** D-H4 — members named in the last send/edit who could not be reached
+   *  because they fail this room's clearance. Cleared at the top of every
+   *  `send()` so it never survives past the message that produced it. */
+  const [unreachableNote, setUnreachableNote] = useState<UnreachableMention[]>([]);
   const primaryAssistant = useMemo(
     () => assistants.find((a) => a.kind === "primary") ?? assistants[0] ?? null,
     [assistants],
@@ -399,15 +415,48 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
    *  Workspace hero about to create one. Drives the post-vs-ask composer. */
   const paneIsRoom = activeSessionId ? !!activeShared : view === "workspace";
 
-  /** `@` autocomplete (T12/T9 — assistants only, the WHOLE workspace
-   *  roster): typing `@` (or a partial after it) at the end of the input
-   *  offers every assistant that can answer here; picking one inserts the
-   *  full mention, and that assistant answers the turn. Escape or a click
-   *  outside collapses it, and a confirmed mention is painted as a chip
-   *  rather than left looking like prose. */
+  /**
+   * `@` autocomplete's roster (T9/T-H4/T-H5): the WHOLE workspace assistant
+   * list, merged with this room's clearance-passing members when the pane is
+   * a room and `mentionRoster` has landed. Assistants are ordered FIRST so an
+   * exact name tie resolves to the assistant (D-H3), matching the server's
+   * `resolveRoomMentions`. A fresh Workspace pane (no session yet, so no room
+   * to scope member clearance against) and a personal chat both fall back to
+   * assistants-only — exactly today's roster.
+   */
+  const mentionTargets: (RoomMentionTarget & { iconSeed?: number | null })[] = useMemo(() => {
+    if (paneIsRoom && mentionRoster) {
+      return [
+        ...mentionRoster.assistants.map((a) => ({
+          id: a.id,
+          name: a.name,
+          mentionKind: "assistant" as const,
+          iconSeed: assistants.find((x) => x.id === a.id)?.iconSeed ?? null,
+        })),
+        ...mentionRoster.members.map((m) => ({
+          id: m.id,
+          name: m.name,
+          mentionKind: "member" as const,
+        })),
+      ];
+    }
+    return assistants.map((a) => ({
+      id: a.id,
+      name: a.name,
+      mentionKind: "assistant" as const,
+      iconSeed: a.iconSeed,
+    }));
+  }, [paneIsRoom, mentionRoster, assistants]);
+
+  /** `@` autocomplete (T9/T-H4/T-H5): typing `@` (or a partial after it) at
+   *  the end of the input offers every assistant that can answer here, plus
+   *  (in a room) every teammate who can read it; picking an assistant
+   *  addresses the turn, picking a teammate just notifies them (D-H2).
+   *  Escape or a click outside collapses it, and a confirmed mention is
+   *  painted as a chip rather than left looking like prose. */
   const mentions = useAssistantMentions({
     enabled: paneIsRoom,
-    assistants,
+    assistants: mentionTargets,
     value: input,
     onChange: setInput,
   });
@@ -427,7 +476,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
    *  enough because only one message is editable at a time. */
   const editMentions = useAssistantMentions({
     enabled: paneIsRoom,
-    assistants,
+    assistants: mentionTargets,
     value: editingText,
     onChange: setEditingText,
   });
@@ -698,6 +747,29 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       cancelled = true;
     };
   }, [workspaceId]);
+
+  // The room's clearance-filtered `@mention` roster (T-H4). Keyed on the open
+  // session, not on every keystroke — `mentionable` is a roster snapshot, not
+  // a live search. A fresh Workspace pane has no session yet (no room to
+  // scope member clearance against), so it is left null and `mentionTargets`
+  // above falls back to assistants-only until the first send mints a room.
+  useEffect(() => {
+    if (!paneIsRoom || !activeSessionId) {
+      setMentionRoster(null);
+      return;
+    }
+    let cancelled = false;
+    fetchMentionableRoster(activeSessionId)
+      .then((roster) => {
+        if (!cancelled) setMentionRoster(roster);
+      })
+      .catch(() => {
+        if (!cancelled) setMentionRoster(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [paneIsRoom, activeSessionId]);
 
   // First-party installers can open a fresh standard chat with one assistant
   // preselected. Existing sessions ignore this hint because their persisted
@@ -1685,9 +1757,16 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     // previously completed response group. An EDIT is the opposite case:
     // adding the `@Name` that was forgotten is the whole reason to edit, so
     // the new text is read fresh.
+    // Resolved over the MERGED roster in one pass (T-H5/D-H2), then narrowed
+    // to `WorkspaceAssistantSummary` rows: an overlapping name (an assistant
+    // "Jane" and a member "Jane Doe") must resolve identically here and on
+    // the server's `resolveRoomMentions`, which only a single pass over the
+    // full roster can guarantee — see `partitionRoomMentions`'s doc comment.
     const mentioned =
       isRoom && (!override?.truncateFromMessageId || override.resolveMentions)
-        ? resolveMentionedAssistants(trimmed, assistants)
+        ? partitionRoomMentions(trimmed, mentionTargets)
+            .assistants.map((entry) => assistants.find((a) => a.id === entry.id))
+            .filter((a): a is WorkspaceAssistantSummary => !!a)
         : [];
     // Replying to an assistant asks THAT assistant, not the room's bound one.
     // A room can hold several, and quoting B's answer to ask a follow-up
@@ -1719,6 +1798,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       override?.forceAddress === true;
     setAskArmed(false);
     mentions.reset();
+    // D-H4 — never survives past the message that produced it.
+    setUnreachableNote([]);
 
     // First send in a fresh Workspace pane: create the shared thread FIRST
     // (the explicit-create API — the thread is listable by teammates from
@@ -1765,11 +1846,15 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       setError(null);
       markRoomSeen(workspaceId, targetId);
       try {
-        await postRoomMessage(
+        const posted = await postRoomMessage(
           targetId,
           trimmed,
           reply ? { text: reply.text } : undefined,
         );
+        // D-H4 — the message still posted; this is a heads-up, not an error.
+        if (posted.unreachableMentions.length > 0) {
+          setUnreachableNote(posted.unreachableMentions);
+        }
       } catch {
         setError(t.postFailed);
       }
@@ -2178,6 +2263,22 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             setQueuedNotice(true);
             break;
           }
+          case "mention_unreachable": {
+            // D-H4 — members named in the text who fail this room's
+            // clearance. The turn/post already happened; this only tells the
+            // sender who was not notified, never an error.
+            const list = Array.isArray(payload.unreachable)
+              ? (payload.unreachable as unknown[]).filter(
+                  (row): row is UnreachableMention =>
+                    !!row &&
+                    typeof row === "object" &&
+                    typeof (row as UnreachableMention).id === "string" &&
+                    typeof (row as UnreachableMention).name === "string",
+                )
+              : [];
+            if (list.length > 0) setUnreachableNote(list);
+            break;
+          }
           case "posted": {
             // The server decided this message was a post, not an address
             // (T3 re-validation). The optimistic bubble already stands.
@@ -2427,11 +2528,14 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         cancelEdit();
         return;
       }
+      // D-H4 — a stale note from a previous send/edit must not survive an
+      // edit that turns out to name nobody unreachable.
+      setUnreachableNote([]);
       const isRoom = activeSessionId ? !!activeShared : view === "workspace";
       const dispatch = resolveEditDispatch({
         isRoom,
         newText: next,
-        roster: assistants,
+        roster: mentionTargets,
         answered: messages[index + 1]?.role === "assistant",
       });
       cancelEdit();
@@ -2458,7 +2562,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         ),
       );
       try {
-        await editRoomMessage(sessionId, messageId, next);
+        const edited = await editRoomMessage(sessionId, messageId, next);
+        // D-H4 — the edit still saved; this is a heads-up, not an error.
+        if (edited.unreachableMentions.length > 0) {
+          setUnreachableNote(edited.unreachableMentions);
+        }
       } catch {
         setError(t.editFailed);
         // The optimistic rewrite has to go back — the room still holds the
@@ -2469,11 +2577,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     [
       activeSessionId,
       activeShared,
-      assistants,
       cancelEdit,
       chat,
       editingText,
       loadTranscript,
+      mentionTargets,
       send,
       stream,
       t,
@@ -2982,9 +3090,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         "focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/35 [&_:focus-visible]:shadow-none",
       )}
     >
-      {/* Mention autocomplete — the workspace assistant roster; human mentions
-          are out of scope. Rendered above the box so it never shifts the
-          composer. */}
+      {/* Mention autocomplete — the merged roster (T-H4/T-H5): the workspace
+          assistants plus this room's clearance-passing members. Rendered
+          above the box so it never shifts the composer. */}
       <MentionAutocompleteList
         mentions={mentions}
         className="bottom-full left-2 mb-1"
@@ -3709,6 +3817,20 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 follow-up turn is armed. Never an error. */}
             {queuedNotice && (
               <p className="px-1 text-xs text-muted-foreground">{t.queuedNotice}</p>
+            )}
+            {/* D-H4 — a named member who fails this room's clearance. The
+                message still posted/saved; this only tells the sender who
+                was not notified. Never an error: no preview text reached
+                anyone 403'd on the room, which is exactly the point. */}
+            {unreachableNote.length > 0 && (
+              <p
+                role="status"
+                className="rounded-lg border border-border/70 bg-muted/30 px-3 py-2 text-xs text-muted-foreground"
+              >
+                {format(t.mentionUnreachableNote, {
+                  names: unreachableNote.map((m) => m.name).join(", "),
+                })}
+              </p>
             )}
             {/* Why the last turn ended, when it ended for a reason nobody in
                 this tab asked for. Not an error: the room is unblocked and

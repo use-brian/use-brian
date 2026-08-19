@@ -53,6 +53,10 @@
     "./brand/theme-seed": {
       "types": "./dist/brand/theme-seed.d.ts",
       "default": "./dist/brand/theme-seed.js"
+    },
+    "./mention-matching": {
+      "types": "./dist/mention-matching.d.ts",
+      "default": "./dist/mention-matching.js"
     }
   },
   "scripts": {

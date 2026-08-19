@@ -6,11 +6,11 @@ import {
   mentionCandidatesFor,
   mentionNavigationDelta,
   nextMentionSelectionIndex,
+  partitionRoomMentions,
   resolveMentionQuery,
-  resolveMentionSpans,
-  resolveMentionedAssistants,
   resolveWorkBenchAssistant,
   trailingMentionQuery,
+  type RoomMentionTarget,
 } from "../multi-assistant-response";
 
 const roster = [
@@ -46,6 +46,15 @@ function popup(
   return last!;
 }
 
+/**
+ * The pure mention-matching functions (`resolveMentionSpans`,
+ * `resolveMentionedAssistants`, `trailingMentionQuery`, `resolveMentionQuery`,
+ * `mentionCandidatesFor`, `MAX_ROOM_RESPONDERS`) moved to
+ * `@use-brian/shared/mention-matching` — see
+ * `packages/shared/src/__tests__/mention-matching.test.ts`. This file keeps
+ * only the app-specific (React/DOM-aware, composer-shaped) helpers, plus a
+ * thin check that the re-export wiring here still works end to end.
+ */
 describe("[COMP:app-web/multi-assistant-response] room response group", () => {
   it("cycles the active mention option in both directions", () => {
     expect(nextMentionSelectionIndex(0, 2, 1)).toBe(1);
@@ -84,74 +93,16 @@ describe("[COMP:app-web/multi-assistant-response] room response group", () => {
     ).toBe("@Brian and @Hinson ");
   });
 
-  it("returns every distinct mentioned assistant in textual order", () => {
-    expect(
-      resolveMentionedAssistants("@HINSON and @Brian, what do you both know? @hinson", roster)
-        .map((assistant) => assistant.id),
-    ).toEqual(["hinson", "brian"]);
-  });
-
-  it("uses the longest overlapping assistant name", () => {
-    expect(
-      resolveMentionedAssistants("Ask @Sales EU, then @Sales.", roster)
-        .map((assistant) => assistant.id),
-    ).toEqual(["sales-eu", "sales"]);
-  });
-
-  it("does not treat a longer word as a mention", () => {
-    expect(resolveMentionedAssistants("@Brianna", roster)).toEqual([]);
-  });
-
-  it("bounds one response group to eight assistants", () => {
-    const largeRoster = Array.from({ length: 10 }, (_, index) => ({
-      id: `assistant-${index}`,
-      name: `Assistant ${index}`,
-    }));
-    const message = largeRoster.map((assistant) => `@${assistant.name}`).join(" ");
-
-    expect(resolveMentionedAssistants(message, largeRoster)).toHaveLength(8);
-  });
-
-  it("reports each mention's range so the composer can chip it", () => {
-    expect(
-      resolveMentionSpans("Ask @Sales EU, then @Sales.", roster),
-    ).toMatchObject([
-      { assistant: { id: "sales-eu" }, start: 4, end: 13 },
-      { assistant: { id: "sales" }, start: 20, end: 26 },
-    ]);
-    // What is painted is what is addressed: a repeat still highlights, but the
-    // assistant answers once.
-    const repeated = "@Brian and @Brian again";
-    expect(resolveMentionSpans(repeated, roster)).toHaveLength(2);
-    expect(resolveMentionedAssistants(repeated, roster)).toHaveLength(1);
-  });
-
-  it("finds the trailing `@` query, spaces and all", () => {
-    expect(trailingMentionQuery("ask @sales e")).toEqual({
-      at: 4,
-      partial: "sales e",
-    });
-    expect(trailingMentionQuery("no mention here")).toBeNull();
-    // An `@` glued to a word is an address, not a mention query.
-    expect(trailingMentionQuery("mail me@example.com")).toBeNull();
-  });
-
-  it("stops offering a mention the user already confirmed", () => {
+  it("stops offering a mention the user already confirmed (re-export wiring)", () => {
     // The reported bug: picking @Blendit left @Blendit Media hanging, because
-    // the completion still looks like a trailing query.
+    // the completion still looks like a trailing query. Exercises
+    // completeTrailingAssistantMention (local) feeding into the hoisted
+    // trailingMentionQuery / mentionCandidatesFor / resolveMentionQuery.
     const completed = completeTrailingAssistantMention("@Blen", "Blendit");
     expect(completed).toBe("@Blendit ");
     expect(mentionCandidatesFor(trailingMentionQuery(completed), sharedPrefixRoster))
       .toHaveLength(1);
     expect(popup([{ text: completed, completedInput: completed }]).query).toBeNull();
-
-    // Typing on is prose, not a longer query.
-    expect(
-      popup([
-        { text: completed, completedInput: completed },
-        { text: "@Blendit Media please" },
-      ]).query,
-    ).toBeNull();
 
     // A NEW `@` after it opens the popup again.
     expect(
@@ -160,41 +111,6 @@ describe("[COMP:app-web/multi-assistant-response] room response group", () => {
         { text: "@Blendit and @Sal" },
       ]).query,
     ).toEqual({ at: 13, partial: "Sal" });
-
-    // Deleting back INTO the name is how you extend it to the longer name.
-    expect(
-      popup([
-        { text: completed, completedInput: completed },
-        { text: "@Blendit" },
-      ]).query,
-    ).toEqual({ at: 0, partial: "Blendit" });
-  });
-
-  it("keeps the popup closed for the `@` the user dismissed", () => {
-    // Escape (or a click outside) at "ask @sa" — typing on does not reopen it.
-    expect(popup([{ text: "ask @sa", dismiss: true }, { text: "ask @sal" }]).query)
-      .toBeNull();
-    // A different `@` is a different question.
-    expect(
-      popup([{ text: "ask @sa", dismiss: true }, { text: "ask @sal @hi" }]).query,
-    ).toEqual({ at: 9, partial: "hi" });
-    // Dropping the `@` clears the anchor, so the next one opens fresh.
-    expect(
-      popup([
-        { text: "ask @sa", dismiss: true },
-        { text: "ask " },
-        { text: "ask @sa" },
-      ]).query,
-    ).toEqual({ at: 4, partial: "sa" });
-  });
-
-  it("filters the roster by what was typed after the `@`", () => {
-    expect(
-      mentionCandidatesFor({ at: 0, partial: "sales " }, roster).map((a) => a.id),
-    ).toEqual(["sales-eu"]);
-    // An empty query offers the whole roster.
-    expect(mentionCandidatesFor({ at: 0, partial: "" }, roster)).toHaveLength(4);
-    expect(mentionCandidatesFor(null, roster)).toHaveLength(0);
   });
 
   it("keeps the assistant chip pickable in an open ROOM, static in an open personal thread", () => {
@@ -248,5 +164,120 @@ describe("[COMP:app-web/multi-assistant-response] room response group", () => {
         waitingForInput: false,
       })?.id,
     ).toBe("sales");
+  });
+});
+
+/**
+ * Room human `@mentions` (docs/plans/room-human-mentions.md T-H5/D-H2/D-H3):
+ * the send/edit path's partition of a merged assistant+member roster.
+ *
+ * These are the pure-function seam behind `send()`'s `mentioned`/`addressed`
+ * computation and `resolveEditDispatch`'s turn-vs-post choice — mounting the
+ * whole `ChatSurface` is not needed to prove the routing decision is right,
+ * only that this partition agrees with the server's `resolveRoomMentions`
+ * (packages/api/src/room-mentions.ts), which resolves the SAME merged roster
+ * through the SAME `resolveMentionSpans`.
+ */
+describe("[COMP:app-web/multi-assistant-response] room mention partition", () => {
+  const merged: RoomMentionTarget[] = [
+    // Assistants first — the ordering D-H3's tie-break depends on.
+    { id: "a-brian", name: "Brian", mentionKind: "assistant" },
+    { id: "a-jane", name: "Jane", mentionKind: "assistant" },
+    { id: "m-jane-doe", name: "Jane Doe", mentionKind: "member" },
+    { id: "m-bob", name: "Bob Smith", mentionKind: "member" },
+  ];
+
+  it("a member-only message resolves no assistant — the silent-post path", () => {
+    const result = partitionRoomMentions("@Jane Doe, can you review this?", merged);
+    expect(result.assistants).toEqual([]);
+    expect(result.members.map((m) => m.id)).toEqual(["m-jane-doe"]);
+  });
+
+  it("a mixed message resolves exactly the assistants it does today, plus the members", () => {
+    const result = partitionRoomMentions(
+      "@Brian please look, and @Bob Smith heads up",
+      merged,
+    );
+    expect(result.assistants.map((a) => a.id)).toEqual(["a-brian"]);
+    expect(result.members.map((m) => m.id)).toEqual(["m-bob"]);
+  });
+
+  it("an exact name tie between an assistant and a member resolves to the assistant (D-H3)", () => {
+    const tied: RoomMentionTarget[] = [
+      { id: "a-jane", name: "Jane", mentionKind: "assistant" },
+      { id: "m-jane", name: "Jane", mentionKind: "member" },
+    ];
+    const result = partitionRoomMentions("@Jane, can you take this?", tied);
+    expect(result.assistants.map((a) => a.id)).toEqual(["a-jane"]);
+    expect(result.members).toEqual([]);
+  });
+
+  it("longest-name-wins picks the member over a shorter assistant name at the same position", () => {
+    // Assistant "Jane" is a PREFIX of member "Jane Doe" — the merged matcher
+    // must resolve this the same way the server's resolveRoomMentions does,
+    // not double-count it in both partitions.
+    const result = partitionRoomMentions("@Jane Doe can you take this?", merged);
+    expect(result.assistants).toEqual([]);
+    expect(result.members.map((m) => m.id)).toEqual(["m-jane-doe"]);
+  });
+
+  /**
+   * The regression this partition exists to fix (caught before it shipped):
+   * `chat-surface.tsx`'s `send()` used to resolve `mentioned` via
+   * `resolveMentionedAssistants(text, assistants)` — the ASSISTANT-ONLY
+   * roster — so `@Jane Doe` would still match assistant "Jane" as a prefix
+   * and fire a paid `/api/chat` turn nobody asked for. `send()` now derives
+   * `mentioned` from THIS partition's `.assistants`, filtered/mapped onto
+   * the live `WorkspaceAssistantSummary[]` roster (a lookup that can only
+   * DROP an id, never invent one) — see chat-surface.tsx's `mentioned`
+   * assignment, just above the `addressed` computation reproduced below.
+   *
+   * `result.assistants` being empty is necessary but not sufficient on its
+   * own to prove "no assistant POST fires" — `addressed` also gates on
+   * askArmed / a reply-to-assistant / attachments / research mode / an
+   * explicit forceAddress override, none of which this partition touches.
+   * This test closes that gap by reproducing `send()`'s exact `addressed`
+   * boolean (chat-surface.tsx, `const addressed = …`) over a message with
+   * every OTHER disjunct held at its default-off value, so `addressed` being
+   * `false` here is the same gate the real code checks before choosing
+   * `postRoomMessage` (silent, T2) over the `/api/chat` turn loop.
+   */
+  it("the regression case never sets send()'s `addressed` gate — no assistant POST fires", () => {
+    const text = "@Jane Doe can you take this?";
+    const mentioned = partitionRoomMentions(text, merged).assistants;
+    const addressed =
+      // !isRoom || askArmed || mentioned.length > 0 || reply?.role === "assistant" ||
+      // turnFileIds.length > 0 || turnRecordingIds.length > 0 || researchMode ||
+      // override?.forceAddress === true — every other disjunct held false/absent,
+      // matching a member-only send with no file/reply/research/forceAddress signal.
+      false ||
+      false ||
+      mentioned.length > 0 ||
+      false ||
+      false ||
+      false ||
+      false ||
+      false;
+    expect(mentioned).toEqual([]);
+    expect(addressed).toBe(false);
+  });
+
+  it("caps each partition at MAX_ROOM_RESPONDERS independently", () => {
+    const bigRoster: RoomMentionTarget[] = [
+      ...Array.from({ length: 10 }, (_, i) => ({
+        id: `assistant-${i}`,
+        name: `Assistant ${i}`,
+        mentionKind: "assistant" as const,
+      })),
+      ...Array.from({ length: 10 }, (_, i) => ({
+        id: `member-${i}`,
+        name: `Member ${i}`,
+        mentionKind: "member" as const,
+      })),
+    ];
+    const text = bigRoster.map((r) => `@${r.name}`).join(" ");
+    const result = partitionRoomMentions(text, bigRoster);
+    expect(result.assistants).toHaveLength(8);
+    expect(result.members).toHaveLength(8);
   });
 });

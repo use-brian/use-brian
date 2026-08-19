@@ -572,6 +572,11 @@ export const en = {
     inboxPendingSubtitle: "Your assistant replied",
     inboxMentionByActor: "{actor} mentioned you",
     inboxMentionAnon: "You were mentioned",
+    // Room mentions (migration 448) — same wording, plus the room's name so
+    // the row reads as coming from a room rather than a page.
+    inboxMentionByActorInRoom: "{actor} mentioned you in {room}",
+    inboxMentionAnonInRoom: "You were mentioned in {room}",
+    inboxRoomFallback: "a room",
     inboxEmptyTitle: "You're all caught up",
     inboxEmptyHint:
       "Replies from your assistant and mentions from your team show up here.",
@@ -5539,6 +5544,11 @@ export const en = {
     mentionInsertAria: "Mention {name}",
     slashMenuLabel: "Commands",
     slashInsertAria: "Run /{slug}",
+    // Room human @mentions (docs/plans/room-human-mentions.md, T-H4/T-H5/T-H9/D-H4):
+    // the merged assistant + teammate roster in the room composer.
+    mentionInsertMemberAria: "Notify {name}",
+    mentionMemberBadge: "Member",
+    mentionUnreachableNote: "{names} can't access this room, so they were not notified.",
     // Editing a sent message: the repair for a post that addresses nobody.
     editMessage: "Edit",
     editSave: "Save",

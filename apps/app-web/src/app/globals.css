@@ -2225,6 +2225,17 @@ html[data-vt-back="true"]::view-transition-new(root) {
   background: color-mix(in srgb, var(--primary) 15%, transparent);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 15%, transparent);
 }
+/* A room mention that addresses a TEAMMATE rather than an assistant
+   (docs/plans/room-human-mentions.md T-H9/D-H2) — appended alongside
+   `.composer-mention-chip` by `@use-brian/chat-ui`'s optional per-range
+   `className` hook, never in place of it, so the shape is identical and
+   only the tint differs. Neutral/muted instead of the primary tint: this
+   chip means "will notify a teammate", never "will run a paid assistant
+   turn", and the two must read differently before the user hits send. */
+.composer-mention-chip-member {
+  background: color-mix(in srgb, var(--muted-foreground) 20%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--muted-foreground) 20%, transparent);
+}
 
 /* Chat activity header — the "what the assistant is doing" status label
    (chat-activity.tsx). A brighter band sweeps left→right through muted

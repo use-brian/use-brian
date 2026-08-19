@@ -118,6 +118,7 @@ import { parseSectionDropId, sectionDropId } from "@/lib/sidebar-sections";
 import { surfaceShortcutLabel } from "@/lib/surface-shortcuts";
 import { fetchInboxBadgeCount } from "@/lib/api/inbox";
 import { INBOX_CHANGED_EVENT } from "@/lib/inbox-events";
+import { INBOX_REFRESH_EVENT } from "@/lib/inbox-refresh-events";
 import { DOC_COMMENTS_CHANGED_EVENT } from "@/lib/comment-events";
 import { WorkspaceSwitcher } from "@/components/workspace-switcher";
 import { DocSidebarRow } from "./doc-sidebar-row";
@@ -266,8 +267,13 @@ export function DocSidebar(props: Props) {
 
   // ── Inbox unread badge (pending assistant replies + unread mentions) ──
   // Refetched on mount, on window focus, when the Inbox marks items read
-  // (`doc:inbox-changed`), and when the AI posts/resolves a comment
-  // (`doc:comments-changed` — that changes the pending-reply count).
+  // (`doc:inbox-changed`), when the AI posts/resolves a comment
+  // (`doc:comments-changed` — that changes the pending-reply count), and on
+  // `INBOX_REFRESH_EVENT` (T-H8) — the server-driven signal for a room
+  // `@mention` recorded from ANY tab, device, or teammate. This component
+  // lives inside the never-unmounting `/w/[workspaceId]` layout, so without
+  // that last listener a mention recorded while the user was on another
+  // surface would not show up until a hard reload.
   const [inboxCount, setInboxCount] = useState(0);
   useEffect(() => {
     let cancelled = false;
@@ -278,11 +284,13 @@ export function DocSidebar(props: Props) {
     };
     refresh();
     window.addEventListener(INBOX_CHANGED_EVENT, refresh);
+    window.addEventListener(INBOX_REFRESH_EVENT, refresh);
     window.addEventListener(DOC_COMMENTS_CHANGED_EVENT, refresh);
     window.addEventListener("focus", refresh);
     return () => {
       cancelled = true;
       window.removeEventListener(INBOX_CHANGED_EVENT, refresh);
+      window.removeEventListener(INBOX_REFRESH_EVENT, refresh);
       window.removeEventListener(DOC_COMMENTS_CHANGED_EVENT, refresh);
       window.removeEventListener("focus", refresh);
     };
