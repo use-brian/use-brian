@@ -58,7 +58,7 @@ import { cacheInboundImageTag } from './channel-file-cache.js'
 import { billingPartyForAssistant } from '../billing-party.js'
 import type { ChatArchiveLiveMedia } from '../chat-archive/live-media.js'
 import { archiveMediaRef } from '../chat-archive/live-media.js'
-import { resolveChatArchiveInstanceId } from '../chat-archive/live-writer.js'
+import { resolveChatArchiveInstanceId, archiveUnroutedInbound } from '../chat-archive/live-writer.js'
 
 export type WechatRouteOptions = {
   /** Servable background-lane model, resolved at boot; forwarded to the
@@ -266,7 +266,22 @@ export function wechatRoutes(options: WechatRouteOptions): Router {
       // 3. Resolve the answering assistant (per-peer routing, else default).
       const routing = await resolveRoutingForSurface(channelId, peerId)
       if (!routing) {
-        console.error(`[wechat] channel ${channelId} has no assistant routing — ignoring inbound`)
+        // No assistant answers this peer, but the message is still this
+        // account's history. Routing decides who replies; it says nothing
+        // about what belongs in a record of the account — and without this the
+        // archive held backfilled history for conversations that then silently
+        // stopped receiving live messages: the same chat, half recorded.
+        //
+        // A failure here must not change the outcome. The message is already
+        // going unanswered; losing it from the archive too is strictly worse
+        // than a logged error.
+        await archiveUnroutedInbound({
+          source: 'wechat',
+          workspaceId: channel.workspaceId,
+          conversationId: peerId,
+          message: incoming,
+        }).catch((err) => console.error('[wechat] unrouted archive append failed:', err))
+        console.log(`[wechat] no assistant routing for ${peerId} on channel ${channelId} — archived, not answered`)
         return
       }
       const assistant = await findAssistantById(routing.assistantId)
