@@ -2067,6 +2067,13 @@ export function FloatingChat({
                   code,
                   message: t.noticeBudgetDowngraded,
                 });
+              } else if (code === "custom_model_image_fallback") {
+                // Server-authored English rides in `payload.message`; prefer
+                // the translated copy for a code we know.
+                setNotice({
+                  code,
+                  message: t.noticeCustomModelImageFallback,
+                });
               } else if (typeof payload.message === "string") {
                 setNotice({ code, message: payload.message });
               }

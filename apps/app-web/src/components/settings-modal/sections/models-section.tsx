@@ -491,6 +491,7 @@ export function ModelsSection() {
                           <div className="truncate text-[13px] font-medium">{customProfileLabel(endpoint, profile)}</div>
                           <div className="truncate text-[11.5px] text-muted-foreground">
                             {profile.modelId}
+                            {` · ${profile.supportsVision ? t.readsImages : t.textOnly}`}
                             {assigned.length > 0 ? ` · ${t.assignedTo.replace("{tiers}", assigned.join(", "))}` : ""}
                           </div>
                         </div>

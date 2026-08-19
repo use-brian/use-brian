@@ -95,6 +95,7 @@ export type CustomLlmConnectionInput = {
 function providerFor(
   profile: CustomLlmConnectionInput & { profileId: string },
   fetchFn: typeof fetch = fetch,
+  supportsVision = false,
 ): LLMProvider {
   const recordedModel = customLlmAlias(profile.profileId)
   const usageCompatibleFetch: typeof fetch = async (input, init) => {
@@ -120,7 +121,11 @@ function providerFor(
     includeStreamUsage: true,
     enableThinkingField: false,
     supportsJsonMode: false,
-    supportsVision: false,
+    // Vision is a PROBED fact per profile, not a property of "custom
+    // endpoints" as a class. An unprobed profile stays text-only: the
+    // compat layer then degrades an image block to an honest note instead
+    // of posting bytes an endpoint may reject or silently drop.
+    supportsVision,
     includeErrorDetail: false,
   })
 }
@@ -137,7 +142,7 @@ export async function probeCustomLlmEndpoint(
     timeoutMs?: number
     networkPolicy?: CustomLlmNetworkPolicy
   },
-): Promise<{ supportsTools: true; verifiedAt: Date }> {
+): Promise<{ supportsTools: true; supportsVision: boolean; verifiedAt: Date }> {
   const networkPolicy = options?.networkPolicy ?? 'private-network'
   const baseUrl = normalizeCustomLlmBaseUrl(input.baseUrl, networkPolicy)
   const controller = new AbortController()
@@ -204,7 +209,102 @@ export async function probeCustomLlmEndpoint(
   } catch (err) {
     throw new CustomLlmProbeError('endpoint_invalid_response', 'The endpoint returned invalid tool-call arguments', 422, { cause: err })
   }
-  return { supportsTools: true, verifiedAt: new Date() }
+  return {
+    supportsTools: true,
+    supportsVision: await probeCustomLlmVision(input, options),
+    verifiedAt: new Date(),
+  }
+}
+
+/**
+ * A solid #FF0000 8x8 PNG (100 base64 chars). Every pixel is the same color,
+ * so a model that receives the bytes at all can name it, and a model that
+ * cannot has nothing in the prompt to guess from - the question is
+ * unanswerable from the text alone, which is exactly what makes the answer
+ * evidence.
+ */
+const VISION_PROBE_PNG_BASE64 =
+  'iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR42mP4z8CAFTEMLQkAKP8/wc53yE8AAAAASUVORK5CYII='
+
+const VISION_PROBE_ACCEPTED = /red|crimson|scarlet|maroon/i
+
+/**
+ * Does this endpoint actually READ an inline image?
+ *
+ * Accepting an `image_url` part without a 400 is not enough. An
+ * OpenAI-compatible gateway in front of a text-only model can take the part
+ * and drop it, and that failure is worse than a rejection: the turn succeeds,
+ * the model answers confidently about an image it never saw, and nothing in
+ * the response says so. So the probe asks a question only sight can answer
+ * and checks the answer.
+ *
+ * It never throws. A refusal, a timeout, an unreachable host, a wrong color
+ * all mean the same thing to the caller - treat this profile as text-only -
+ * and none of them is a reason to fail a connection that already proved it
+ * can stream and call tools.
+ */
+export async function probeCustomLlmVision(
+  input: CustomLlmConnectionInput,
+  options?: {
+    fetchFn?: typeof fetch
+    timeoutMs?: number
+    networkPolicy?: CustomLlmNetworkPolicy
+  },
+): Promise<boolean> {
+  const networkPolicy = options?.networkPolicy ?? 'private-network'
+  let baseUrl: string
+  try {
+    baseUrl = normalizeCustomLlmBaseUrl(input.baseUrl, networkPolicy)
+  } catch {
+    return false
+  }
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), options?.timeoutMs ?? 30_000)
+  const provider = providerFor(
+    { ...input, baseUrl, profileId: '00000000-0000-4000-8000-000000000000' },
+    options?.fetchFn ?? (networkPolicy === 'public-only' ? createPublicCustomLlmFetch() : fetch),
+    true,
+  )
+  let toolName = ''
+  let toolInput = ''
+  try {
+    for await (const chunk of provider.stream({
+      model: 'custom-probe',
+      systemPrompt: 'You are verifying image support. Call describeImage exactly once with the dominant color of the attached image. Do not answer with text.',
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image', mimeType: 'image/png', data: VISION_PROBE_PNG_BASE64 },
+          { type: 'text', text: 'Call describeImage with the dominant color of this image, as one lowercase English word.' },
+        ],
+      }],
+      tools: [{
+        name: 'describeImage',
+        description: 'Report what the attached image looks like.',
+        parameters: {
+          type: 'object',
+          properties: { color: { type: 'string', description: 'Dominant color, one lowercase English word.' } },
+          required: ['color'],
+        },
+      }],
+      maxTokens: 128,
+      signal: controller.signal,
+    })) {
+      if (chunk.type === 'tool_use_start') toolName = chunk.name
+      if (chunk.type === 'tool_use_delta') toolInput += chunk.input
+    }
+  } catch {
+    return false
+  } finally {
+    clearTimeout(timeout)
+  }
+  if (toolName !== 'describeImage') return false
+  try {
+    const parsed = JSON.parse(toolInput) as { color?: unknown }
+    return typeof parsed.color === 'string' && VISION_PROBE_ACCEPTED.test(parsed.color)
+  } catch {
+    return false
+  }
 }
 
 export type ResolvedWorkspaceCustomLlm = {
@@ -216,6 +316,16 @@ export type ResolvedWorkspaceCustomLlm = {
   maxTokens: number
   providerKeySource: 'user' | 'platform'
   routeKind: 'custom' | 'managed'
+  /**
+   * Can the model behind this route read an inline image?
+   *
+   * For a managed route it is the registry's answer about a Brian model. For
+   * a custom endpoint it is what the connection probe measured, and it
+   * defaults to false: an image turn on a text-only endpoint is served by a
+   * built-in model rather than forwarding bytes the endpoint would reject or
+   * quietly discard.
+   */
+  supportsVision: boolean
   /** Per-run connection for the isolated browser-use process. Never serialize. */
   browserUse?: {
     apiKeyEnvName: 'OPENAI_API_KEY'
@@ -223,6 +333,38 @@ export type ResolvedWorkspaceCustomLlm = {
     model: string
     baseUrl: string
   }
+}
+
+/**
+ * What to do with a turn that carries an inline image.
+ *
+ * One policy, two call sites (the chat route and the channel pipeline), for
+ * the reason forked surfaces keep teaching this codebase: the two used to
+ * hold the same rule as two copies of one `if`, and the copies drifted the
+ * moment the rule gained a third outcome. A channel turn cannot carry an
+ * explicit `custom:<id>`, so it simply never produces that branch.
+ *
+ *   serve_on_route       - the route can see; nothing to decide.
+ *   fall_back_to_builtin - the route is sightless but a built-in model can
+ *                          answer. The caller MUST announce it (byo-llm-key.md
+ *                          forbids a silent fallback, not a fallback).
+ *   refuse               - either the user picked this endpoint for this very
+ *                          message, or there is no built-in to fall back to.
+ */
+export type ImageTurnRouteDecision = 'serve_on_route' | 'fall_back_to_builtin' | 'refuse'
+
+export function decideImageTurnRoute(params: {
+  /** The resolved workspace route, or null when none applies. */
+  route: { supportsVision: boolean } | null
+  turnHasImage: boolean
+  /** The request named `custom:<id>` itself, rather than resolving a tier. */
+  explicitCustomSelection: boolean
+  /** A built-in model is configured AND servable on this deployment. */
+  builtInServable: boolean
+}): ImageTurnRouteDecision {
+  if (!params.route || !params.turnHasImage || params.route.supportsVision) return 'serve_on_route'
+  if (params.explicitCustomSelection || !params.builtInServable) return 'refuse'
+  return 'fall_back_to_builtin'
 }
 
 export type WorkspaceCustomLlmResolver = (params: {
@@ -322,6 +464,7 @@ export function createWorkspaceCustomLlmResolver(
         maxTokens: row.maxOutput,
         providerKeySource: 'platform',
         routeKind: 'managed',
+        supportsVision: row.capabilities.vision,
       }
     }
 
@@ -334,7 +477,7 @@ export function createWorkspaceCustomLlmResolver(
       baseUrl: selectedProfile.baseUrl,
       apiKey: selectedProfile.apiKey,
       modelId: selectedProfile.modelId,
-    }, fetchFn))
+    }, fetchFn, selectedProfile.supportsVision))
     const limitedProvider: LLMProvider = {
       ...provider,
       stream: (request) => provider.stream({
@@ -357,6 +500,7 @@ export function createWorkspaceCustomLlmResolver(
       maxTokens: selectedProfile.maxOutputTokens,
       providerKeySource: 'user',
       routeKind: 'custom',
+      supportsVision: selectedProfile.supportsVision,
       browserUse: {
         apiKeyEnvName: 'OPENAI_API_KEY',
         apiKey: selectedProfile.apiKey?.trim() || 'not-required',

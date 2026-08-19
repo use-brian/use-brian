@@ -261,6 +261,8 @@ export const en = {
     // Inline system notices (e.g. budget downgrade).
     noticeBudgetDowngraded:
       "You've used this month's credit allowance. Running on the standard model until it resets.",
+    noticeCustomModelImageFallback:
+      "This workspace's model endpoint can't read images, so a built-in Brian model answered this message.",
     noticeDismiss: "Dismiss",
     // askQuestion suspend-resume — inline answer surface shown when the
     // assistant pauses to ask a clarifying question. See
@@ -2367,6 +2369,8 @@ export const en = {
         customProfilesBlurb: "Create several verified models from one endpoint connection without entering its URL or bearer key again.",
         noCustomProfiles: "No custom profiles yet. Connect an endpoint to create the first profile.",
         assignedTo: "Assigned to {tiers}",
+        readsImages: "Reads images",
+        textOnly: "Text only. Save this profile again to re-check image support.",
         customCreateTitle: "New custom profile",
         customEditTitle: "Edit custom profile",
         customEditBlurb: "Saving tests the model again. Existing tier assignments stay connected.",

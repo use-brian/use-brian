@@ -215,6 +215,7 @@ export const zh: Dictionary = {
       downloadFailed: "下載失敗，點一下重試。",
     },
     noticeBudgetDowngraded: "本月額度已用罄，重置前將以標準模型運作。",
+    noticeCustomModelImageFallback: "此工作區的模型端點無法讀取圖片，因此本則訊息由 Brian 內建模型回答。",
     noticeDismiss: "關閉",
     pendingQuestion: {
       heading: "需要您的補充",
@@ -2164,6 +2165,8 @@ export const zh: Dictionary = {
         customProfilesBlurb: "無需再次輸入 URL 或 Bearer 金鑰,即可從同一個端點連線建立多個已驗證模型。",
         noCustomProfiles: "尚無自訂設定檔。請連接端點以建立第一個設定檔。",
         assignedTo: "已指派給 {tiers}",
+        readsImages: "可讀取圖片",
+        textOnly: "僅限文字。再次儲存此設定檔可重新檢測圖片支援。",
         customCreateTitle: "新增自訂設定檔",
         customEditTitle: "編輯自訂設定檔",
         customEditBlurb: "儲存時會重新測試模型。現有級別指派會保持不變。",

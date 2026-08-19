@@ -55,7 +55,14 @@ describe('[COMP:api/route-helpers] recordOverheadUsage', () => {
     }))
   })
 
-  it('attributes classifier and voice overhead to the channel actor while billing the owner', () => {
+  it('attributes classifier and voice overhead to the channel actor while billing the resolved party', () => {
+    // This assertion used to demand `userId: ownerId`, which is how the bug
+    // survived a green suite: `ownerId` is `assistants.owner_user_id`, NULL for
+    // every workspace-owned assistant since migration 089, so the row it
+    // described died on `usage_tracking.user_id`'s NOT NULL constraint on every
+    // official-Telegram turn. The billing party is `billingUserId`, resolved
+    // through `billingPartyForAssistant` the way the main turn already did.
+    // See [COMP:api/channel-billing-identity].
     const source = readFileSync(new URL('../channel-pipeline.ts', import.meta.url), 'utf8')
 
     for (const usageSource of ['overhead:classifier', 'overhead:transcription']) {
@@ -66,8 +73,9 @@ describe('[COMP:api/route-helpers] recordOverheadUsage', () => {
       expect(callIndex).toBeGreaterThan(-1)
 
       const call = source.slice(callIndex, markerIndex)
-      expect(call).toContain('userId: ownerId')
+      expect(call).toContain('userId: billingUserId')
       expect(call).toContain('actorUserId: userId')
+      expect(call).not.toContain('userId: ownerId')
     }
   })
 

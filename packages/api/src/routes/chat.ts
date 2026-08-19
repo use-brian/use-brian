@@ -52,11 +52,12 @@ import { recordExternalCostFromMeta } from '../billing-external.js'
 import type { Message, LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, FileStore, ContentBlock, CacheStore, McpSettingsStore, ConfirmationDecision, ConfirmationResolver, TopicClassification, ClassifierRecentTurn, EpisodicStore, CapabilityStore, RetrievalStore, TranscribeResult, TokenUsage, WorkerResult, EngineHooks } from '@use-brian/core'
 
 import { resolveModel, ensureServableModel, backgroundLatencyBudgetMs, backgroundModelFor, isStandardTier, chatTierBudget, planNudgeCap, tierForModel, isExplicitMeteredModelSelection } from '../model-resolution.js'
-import { registryRow } from '@use-brian/shared/model-registry'
+import { isRegistryModelAvailable, registryRow } from '@use-brian/shared/model-registry'
 import type { ConnectorStore } from '../db/connector-store.js'
 import { getToolDisplayName, stripFollowUps, stripCommentThreadReplyTag, resolveCharter, charterMission } from '@use-brian/shared'
 import { listActivePlaybookRules } from '../db/playbook-store.js'
-import { CUSTOM_MODEL_IMAGE_REJECTION } from './_channel-error-text.js'
+import { CUSTOM_MODEL_IMAGE_FALLBACK_NOTICE, CUSTOM_MODEL_IMAGE_REJECTION } from './_channel-error-text.js'
+import { decideImageTurnRoute } from '../custom-llm-runtime.js'
 import { resolveUser, buildBrowserEscalationPrompt, buildUnavailableCapabilitiesPrompt, injectSkills, isSkillOfferable, checkUsageBudget, applyMcpInjection, type CreditBudgetGate } from './route-helpers.js'
 import { createDocRunClient } from '../doc/run-presence-client.js'
 import type { AssistantRunChannel } from '@use-brian/doc-model'
@@ -1660,29 +1661,27 @@ export function chatTurnErrorEvent(err: unknown): Record<string, unknown> {
 }
 
 /**
- * Refusal for an inline image on a workspace custom endpoint.
+ * Refusal for an inline image the resolved route cannot read.
  *
- * The recovery step differs by how the endpoint was reached, and only one of
- * the two is ever real:
+ * Only two turns still reach it, because a tier-routed workspace with a
+ * servable built-in model falls back instead (byo-llm-key.md, "Fallback and
+ * attachments"), and vision is a per-profile probed fact rather than a claim
+ * about custom endpoints as a class:
  *
  *   - an explicit `custom:<id>` pick is this turn's own choice, so choosing a
- *     built-in model for the next message undoes it;
- *   - a TIER ROUTE captures the tier the model picker resolves to, so every
- *     built-in in the menu lands back on the same endpoint. Telling that user
- *     to "choose a built-in model" sends them around a loop with no exit. The
- *     route is workspace configuration, so the exits are Settings, or sending
+ *     built-in model for the next message undoes it. Answering on a model the
+ *     user just declined would be the wrong repair;
+ *   - a TIER ROUTE on a deployment with no servable built-in model. There is
+ *     nothing to fall back to, and "choose a built-in model" would name a
+ *     recovery step that workspace does not have: the tier captures every
+ *     entry in the picker. Its exits are the tier's configuration, or sending
  *     without the image.
- *
- * The refusal itself is the spec (byo-llm-key.md, "Strict fallback and
- * attachments"): a text-only endpoint must never silently forward image bytes,
- * and must never quietly fall back to a platform provider the workspace admin
- * did not choose.
  */
 export function customModelMediaRefusal(explicitCustomSelection: boolean): ChatTurnRefusal {
   return new ChatTurnRefusal(
     'custom_model_media_unsupported',
     explicitCustomSelection
-      ? 'Custom model endpoints currently support text and tools only. Remove the image, or choose a built-in model for this message.'
+      ? 'This custom model endpoint cannot read images. Remove the image, or choose a built-in model for this message.'
       // The tier-route case is the one every channel also hits, so it reuses
       // the single shared sentence rather than growing a second wording.
       : CUSTOM_MODEL_IMAGE_REJECTION,
@@ -5451,41 +5450,103 @@ export function chatRoutes(options: WebChatOptions): Router {
         : logicalModel
 
       if (assistant.workspaceId && !meteredTurn) {
+        const legacyByoKeyResolver = options.buildWorkspaceProvider && (options.resolveWorkspaceByoGeminiKey || options.llmProviderSettingsStore)
+          ? () => options.resolveWorkspaceByoGeminiKey
+              ? options.resolveWorkspaceByoGeminiKey(assistant.workspaceId!)
+              : options.llmProviderSettingsStore!.getPlaintextKeySystem({
+                  workspaceId: assistant.workspaceId!,
+                  provider: 'gemini',
+                })
+          : null
         const resolvedTurnLlm = await resolveWorkspaceTurnLlm({
           workspaceId: assistant.workspaceId,
           requestedModel: explicitCustomSelector,
           requestedTier: logicalTier,
           platformProvider: options.provider,
           resolveWorkspaceCustomLlm: options.resolveWorkspaceCustomLlm ?? null,
-          resolveLegacyByoKey: options.buildWorkspaceProvider && (options.resolveWorkspaceByoGeminiKey || options.llmProviderSettingsStore)
-            ? () => options.resolveWorkspaceByoGeminiKey
-                ? options.resolveWorkspaceByoGeminiKey(assistant.workspaceId!)
-                : options.llmProviderSettingsStore!.getPlaintextKeySystem({
-                    workspaceId: assistant.workspaceId!,
-                    provider: 'gemini',
-                  })
-            : null,
+          resolveLegacyByoKey: legacyByoKeyResolver,
           buildLegacyByoProvider: options.buildWorkspaceProvider ?? null,
         })
-        customLlmRuntime = resolvedTurnLlm.customRuntime
-        turnProvider = resolvedTurnLlm.provider
-        usedByoKey = resolvedTurnLlm.providerKeySource === 'user'
-        usedLegacyByoKey = resolvedTurnLlm.usedLegacyByoKey
-        if (explicitCustomSelector && !customLlmRuntime) {
+        if (explicitCustomSelector && !resolvedTurnLlm.customRuntime) {
           throw new ChatTurnRefusal(
             'custom_model_unavailable',
             'This custom model endpoint is unavailable in this workspace.',
           )
         }
-        if (customLlmRuntime) {
-          if (customLlmRuntime.routeKind === 'custom' && userContentBlocks.some((block) => block.type === 'image')) {
-            throw customModelMediaRefusal(Boolean(explicitCustomSelector))
+        // Whether the route can READ an image is decided BEFORE any of its
+        // fields are adopted. Resolving first and un-resolving afterwards
+        // would leave `turnProvider`, `usedByoKey` and the recorded
+        // `custom:<id>` selector pointing at an endpoint this turn never
+        // reached, so the usage row would name the wrong model.
+        //
+        // A deployment whose only working model IS the custom endpoint (an
+        // OSS self-host with no platform key) has nothing to fall back to.
+        // Refusing there is honest; handing the turn to an unconfigured
+        // provider would trade a clear sentence for a mid-stream crash.
+        const imageRoute = decideImageTurnRoute({
+          route: resolvedTurnLlm.customRuntime,
+          turnHasImage: userContentBlocks.some((block) => block.type === 'image'),
+          explicitCustomSelection: Boolean(explicitCustomSelector),
+          builtInServable: !options.configuredProviders
+            || (() => {
+              const row = registryRow(model)
+              return row ? isRegistryModelAvailable(row, options.configuredProviders) : false
+            })(),
+        })
+        if (imageRoute === 'refuse') {
+          // An explicit `custom:<id>` pick is a choice this turn made, so the
+          // turn is the right thing to refuse: the next message can choose a
+          // built-in model and leave the rest of the workspace alone.
+          // Substituting a model the user just declined would be worse.
+          throw customModelMediaRefusal(Boolean(explicitCustomSelector))
+        }
+        if (imageRoute === 'fall_back_to_builtin') {
+          // A TIER ROUTE is workspace configuration, not this message's
+          // choice, and it captures every built-in in the picker - so
+          // refusing here dead-ends a user whose only exit is a setting they
+          // may not own. The turn falls back to the flow this workspace
+          // would have had with no custom route at all, which is also how it
+          // picks up a legacy workspace Gemini key when one is configured.
+          //
+          // The fallback is ANNOUNCED, never silent. byo-llm-key.md forbids a
+          // silent one because it would move workspace content to a provider
+          // the admin did not choose; the notice is what keeps that promise
+          // while still answering the question that was asked.
+          const fallbackTurnLlm = await resolveWorkspaceTurnLlm({
+            workspaceId: assistant.workspaceId,
+            requestedTier: logicalTier,
+            platformProvider: options.provider,
+            resolveWorkspaceCustomLlm: null,
+            resolveLegacyByoKey: legacyByoKeyResolver,
+            buildLegacyByoProvider: options.buildWorkspaceProvider ?? null,
+          })
+          customLlmRuntime = null
+          turnProvider = fallbackTurnLlm.provider
+          usedByoKey = fallbackTurnLlm.providerKeySource === 'user'
+          usedLegacyByoKey = fallbackTurnLlm.usedLegacyByoKey
+          sendEvent('notice', {
+            code: 'custom_model_image_fallback',
+            message: CUSTOM_MODEL_IMAGE_FALLBACK_NOTICE,
+          })
+          options.analytics?.logEvent({
+            userId: user.id, assistantId: assistant.id, sessionId: session.id,
+            eventName: 'custom_model_image_fallback', channelType: 'web',
+            metadata: { model_tier: sanitize(logicalTier) },
+          })
+        } else {
+          customLlmRuntime = resolvedTurnLlm.customRuntime
+          turnProvider = resolvedTurnLlm.provider
+          usedByoKey = resolvedTurnLlm.providerKeySource === 'user'
+          usedLegacyByoKey = resolvedTurnLlm.usedLegacyByoKey
+          if (customLlmRuntime) {
+            // A selected custom endpoint is authoritative for everything it
+            // can serve. It supersedes both the platform provider and a
+            // workspace Gemini key, and never falls back to either if its
+            // request FAILS - the image case above is a capability the route
+            // does not have, decided before any request, not a failed one.
+            turnProvider = customLlmRuntime.provider
+            usedByoKey = customLlmRuntime.providerKeySource === 'user'
           }
-          // A selected custom endpoint is authoritative. It supersedes both
-          // the platform provider and a workspace Gemini key, and never falls
-          // back to either if its request fails.
-          turnProvider = customLlmRuntime.provider
-          usedByoKey = customLlmRuntime.providerKeySource === 'user'
         }
       }
 
