@@ -105,6 +105,59 @@ describe('[COMP:api/chat-archive-live-capture] live writer', () => {
     }), expect.anything())
   })
 
+  it('archives a conversation no assistant answers', async () => {
+    // Channel routing decides who replies. An account carries conversations the
+    // assistant was never added to, and dropping them left the archive holding
+    // backfilled history for chats that then silently stopped receiving live
+    // messages.
+    const { writer, pool, fanout } = harness()
+    pool.query
+      .mockResolvedValueOnce({ rows: [{ owner_user_id: context.ownerUserId }], rowCount: 1 } as never)
+      .mockResolvedValueOnce({ rows: [{ id: 'instance-1' }], rowCount: 1 } as never)
+
+    await writer.appendUnroutedInbound({
+      source: 'wechat',
+      workspaceId: context.workspaceId,
+      conversationId: 'filehelper',
+      message: {
+        userId: 'wx-peer', channelId: 'filehelper', messageId: 'wx-1',
+        text: 'no assistant here', isGroupChat: false, timestamp: 1_700_000_000, raw: {},
+      } as never,
+    })
+
+    expect(pool.query).toHaveBeenCalledWith(
+      expect.stringContaining('SELECT owner_user_id FROM workspaces'),
+      [context.workspaceId],
+    )
+    expect(fanout.fanout).toHaveBeenCalledWith(expect.objectContaining({
+      connectorInstanceId: 'instance-1',
+      ownerUserId: context.ownerUserId,
+      source: 'wechat',
+      messages: [expect.objectContaining({ provider_message_id: 'wx-1' })],
+    }))
+  })
+
+  it('drops an unrouted message rather than guessing an owner', async () => {
+    // The owner is the archive's compartment key under row-level security.
+    // Writing one conversation under two owners would split it across that
+    // boundary and make half of it invisible to search, so no owner means no
+    // append — not a fallback.
+    const { writer, pool, fanout } = harness()
+    pool.query.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+
+    await writer.appendUnroutedInbound({
+      source: 'wechat',
+      workspaceId: '44444444-4444-4444-8444-444444444444',
+      conversationId: 'filehelper',
+      message: {
+        userId: 'wx-peer', channelId: 'filehelper', messageId: 'wx-2',
+        text: 'orphan workspace', isGroupChat: false, timestamp: 1, raw: {},
+      } as never,
+    })
+
+    expect(fanout.fanout).not.toHaveBeenCalled()
+  })
+
   it('keeps session chat available when archive setup fails before BEGIN', async () => {
     const { writer, sinks, pool } = harness()
     sinks.ensureManagedLocalChatArchive.mockRejectedValueOnce(new Error('archive unavailable'))

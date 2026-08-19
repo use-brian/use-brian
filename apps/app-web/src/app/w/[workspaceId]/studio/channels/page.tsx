@@ -80,6 +80,12 @@ import {
   startWechatPairing,
   getWechatPairingStatus,
   submitWechatVerifyCode,
+  connectCustomChannel,
+  rotateCustomChannelToken,
+  getCustomChannelState,
+  submitCustomChannelInput,
+  disconnectCustomChannel,
+  customChannelBridgePath,
   listChannelAssistants,
   attachChannelAssistant,
   detachChannelAssistant,
@@ -91,6 +97,7 @@ import {
   type ChannelConfigPatch,
   type ChannelIntegrationConfig,
   type ChannelModelAlias,
+  type CustomChannelState,
   type RequireMentionOverride,
   type UserAccessMode,
 } from "@/lib/api/channels";
@@ -145,6 +152,7 @@ const PLATFORM_GLYPH: Partial<Record<Channel["channelType"], string>> = {
   email: "@",
   msteams: "T",
   wechat: "微",
+  custom: "∞",
 };
 
 function TelegramGlyph() {
@@ -958,9 +966,16 @@ export function ChannelDetail({
         </label>
       )}
 
+      {/* Custom bridge — live state card (polls while the panel is open),
+          the action surface, token rotation and bridge disconnect. */}
+      {channel.channelType === "custom" && (
+        <CustomBridgeSection workspaceId={workspaceId} channel={channel} />
+      )}
+
       {(channel.channelType === "slack" ||
         channel.channelType === "telegram" ||
         channel.channelType === "discord" ||
+        channel.channelType === "custom" ||
         (channel.channelType === "whatsapp" && channel.integrationProvider === "cloud_api")) &&
         channel.integrationId && (
           <ChannelConfigSection
@@ -1081,8 +1096,12 @@ export function ChannelDetail({
           {/* Surface routing is for multi-conversation channels (Slack channels,
               Telegram chats/topics). A WhatsApp number has one conversation
               stream, so it just gets the default assistant — same for a WeChat
-              bot (operators don't know contacts' iLink ids). */}
-          {channel.channelType !== "whatsapp" && channel.channelType !== "wechat" && (
+              bot (operators don't know contacts' iLink ids) and a custom bridge
+              (peer ids are whatever the bridge reports; operators don't know
+              them up front). */}
+          {channel.channelType !== "whatsapp" &&
+            channel.channelType !== "wechat" &&
+            channel.channelType !== "custom" && (
             <SurfaceInput
               channel={channel}
               value={attachSurface}
@@ -1328,6 +1347,10 @@ export function ChannelConfigSection({
   // enforced connector-side (not from this config) and there is no ack-reaction
   // on the Discord inbound path, so both are hidden for Discord channels.
   const isDiscord = channel.channelType === "discord";
+  // A custom bridge: group mention gating (the bridge reports `isMentioned`)
+  // + access control by bridge-reported sender id. No ack reaction — the
+  // protocol has no reaction item.
+  const isCustom = channel.channelType === "custom";
   const [config, setConfig] = useState<ChannelIntegrationConfig>(
     channel.config ?? {},
   );
@@ -1431,9 +1454,11 @@ export function ChannelConfigSection({
               ? cfg.accessAllDescSlack
               : isDiscord
                 ? cfg.accessAllDescDiscord
-                : isWhatsAppCloud
-                  ? cfg.accessAllDescWhatsApp
-                  : cfg.accessAllDescTelegram}
+                : isCustom
+                  ? cfg.accessAllDescCustom
+                  : isWhatsAppCloud
+                    ? cfg.accessAllDescWhatsApp
+                    : cfg.accessAllDescTelegram}
       </p>
       {accessMode !== "allow_all" && (
         <div className="flex flex-col gap-1.5 pt-1">
@@ -1493,9 +1518,11 @@ export function ChannelConfigSection({
                   ? cfg.userIdPlaceholderSlack
                   : isDiscord
                     ? cfg.userIdPlaceholderDiscord
-                    : isWhatsAppCloud
-                      ? cfg.userIdPlaceholderWhatsApp
-                      : cfg.userIdPlaceholderTelegram
+                    : isCustom
+                      ? cfg.userIdPlaceholderCustom
+                      : isWhatsAppCloud
+                        ? cfg.userIdPlaceholderWhatsApp
+                        : cfg.userIdPlaceholderTelegram
               }
               className="min-w-0 flex-1 rounded-md border border-border bg-background px-2 py-1.5 text-sm font-mono"
             />
@@ -1512,9 +1539,11 @@ export function ChannelConfigSection({
               ? cfg.userIdHintSlack
               : isDiscord
                 ? cfg.userIdHintDiscord
-                : isWhatsAppCloud
-                  ? cfg.userIdHintWhatsApp
-                  : cfg.userIdHintTelegram}
+                : isCustom
+                  ? cfg.userIdHintCustom
+                  : isWhatsAppCloud
+                    ? cfg.userIdHintWhatsApp
+                    : cfg.userIdHintTelegram}
           </p>
         </div>
       )}
@@ -1672,15 +1701,16 @@ export function ChannelConfigSection({
       {!isDiscord && !isWhatsAppCloud && (
         <ConfigToggle
           label={cfg.requireMention}
-          hint={cfg.requireMentionHintSlack}
+          hint={isCustom ? cfg.requireMentionHintCustom : cfg.requireMentionHintSlack}
           checked={config.requireMention ?? true}
           disabled={saving}
           onChange={(v) => void save({ requireMention: v })}
         />
       )}
 
-      {/* Acknowledgment reaction — not wired on the Discord inbound path. */}
-      {!isDiscord && !isWhatsAppCloud && ackReactionControl}
+      {/* Acknowledgment reaction — not wired on the Discord inbound path, and
+          the custom bridge protocol has no reaction item. */}
+      {!isDiscord && !isWhatsAppCloud && !isCustom && ackReactionControl}
 
       {accessControl}
 
@@ -1924,7 +1954,7 @@ export function AddChannelForm({
   const t = useT();
   const add = t.studioPage.channels.add;
   const [platform, setPlatform] = useState<
-    "slack" | "telegram" | "discord" | "whatsapp" | "email" | "msteams" | "wechat"
+    "slack" | "telegram" | "discord" | "whatsapp" | "email" | "msteams" | "wechat" | "custom"
   >("slack");
 
   // WhatsApp pairs via QR (no token submit). After the connect stream reports
@@ -1960,6 +1990,7 @@ export function AddChannelForm({
     | { kind: "discord"; botUsername: string; inviteUrl: string; connectorError: string | null }
     | { kind: "email"; address: string }
     | { kind: "msteams"; webhookUrl: string }
+    | { kind: "custom"; channelId: string; kindLabel: string | null; bridgeToken: string }
   >(null);
   const [copied, setCopied] = useState(false);
   const [inviteCopied, setInviteCopied] = useState(false);
@@ -1973,6 +2004,8 @@ export function AddChannelForm({
   const [msTenantId, setMsTenantId] = useState("");
   const [emailUsername, setEmailUsername] = useState("");
   const [emailDomainId, setEmailDomainId] = useState<string>("__default__");
+  const [customName, setCustomName] = useState("");
+  const [customKind, setCustomKind] = useState("");
   const verifiedDomains = useMemo(
     () => emailDomains.filter((d) => d.status === "verified"),
     [emailDomains],
@@ -2065,6 +2098,22 @@ export function AddChannelForm({
         setMsAppId("");
         setMsAppPassword("");
         setMsTenantId("");
+      } else if (platform === "custom") {
+        const kind = customKind.trim();
+        const result = await connectCustomChannel(workspaceId, {
+          displayName: customName.trim(),
+          kind: kind || null,
+          defaultAssistantId: defaultAssistantId || null,
+        });
+        await onCreated(result.channel);
+        setSuccess({
+          kind: "custom",
+          channelId: result.channel.id,
+          kindLabel: kind || null,
+          bridgeToken: result.bridgeToken,
+        });
+        setCustomName("");
+        setCustomKind("");
       } else if (platform === "email") {
         const result = await createEmailInbox({
           workspaceId,
@@ -2114,9 +2163,11 @@ export function AddChannelForm({
           : platform === "email"
             ? /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/.test(emailUsername.trim().toLowerCase()) &&
               defaultAssistantId.length > 0
-            : dcBotToken.length > 0);
+            : platform === "custom"
+              ? customName.trim().length > 0
+              : dcBotToken.length > 0);
 
-  function pickPlatform(p: "slack" | "telegram" | "discord" | "whatsapp" | "email" | "msteams" | "wechat"): void {
+  function pickPlatform(p: "slack" | "telegram" | "discord" | "whatsapp" | "email" | "msteams" | "wechat" | "custom"): void {
     setPlatform(p);
     setSuccess(null);
     setError(null);
@@ -2190,8 +2241,9 @@ export function AddChannelForm({
             "msteams",
             "whatsapp",
             "wechat",
+            "custom",
             ...(emailConfigured ? ["email"] : []),
-          ] as Array<"slack" | "telegram" | "discord" | "whatsapp" | "email" | "msteams" | "wechat">
+          ] as Array<"slack" | "telegram" | "discord" | "whatsapp" | "email" | "msteams" | "wechat" | "custom">
         ).map((p) => (
           <button
             key={p}
@@ -2228,6 +2280,35 @@ export function AddChannelForm({
             if (channel) void onCreated(channel);
           }}
         />
+      ) : platform === "custom" ? (
+        <div className="flex flex-col gap-3">
+          <p className="text-xs text-muted-foreground">{add.custom.hint}</p>
+          <label className="flex flex-col gap-1">
+            <span className="text-xs font-medium">{add.custom.nameLabel}</span>
+            <input
+              type="text"
+              value={customName}
+              onChange={(e) => setCustomName(e.target.value)}
+              placeholder={add.custom.namePlaceholder}
+              maxLength={200}
+              disabled={submitting || !!success}
+              className="text-sm rounded-md border border-border bg-background px-2 py-1.5 disabled:opacity-50"
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-xs font-medium">{add.custom.kindLabel}</span>
+            <input
+              type="text"
+              value={customKind}
+              onChange={(e) => setCustomKind(e.target.value)}
+              placeholder={add.custom.kindPlaceholder}
+              maxLength={64}
+              disabled={submitting || !!success}
+              className={FIELD_INPUT}
+            />
+            <span className="text-xs text-muted-foreground">{add.custom.kindHint}</span>
+          </label>
+        </div>
       ) : platform === "slack" ? (
         <div className="flex flex-col gap-3">
           <p className="text-xs text-muted-foreground">{add.slackHint}</p>
@@ -2635,6 +2716,27 @@ export function AddChannelForm({
           </div>
         </div>
       )}
+      {success?.kind === "custom" && (
+        <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 flex flex-col gap-3">
+          <p className="text-sm font-medium text-emerald-600 dark:text-emerald-400">
+            {add.custom.created}
+          </p>
+          <BridgeTokenReveal
+            bridgeToken={success.bridgeToken}
+            channelId={success.channelId}
+            kind={success.kindLabel}
+          />
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="text-xs font-medium rounded-md border border-border px-2 py-1 hover:bg-muted"
+            >
+              {add.done}
+            </button>
+          </div>
+        </div>
+      )}
       {success?.kind === "msteams" && (
         <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 flex flex-col gap-2">
           <p className="text-sm font-medium text-emerald-600 dark:text-emerald-400">
@@ -3003,6 +3105,419 @@ function WhatsappConnectTab({
 }
 
 /** WeChat QR pairing phases — inline in the Add-a-channel form. */
+/** Copy-to-clipboard button with a 2 s "Copied!" flip. */
+function CopyValueButton({
+  value,
+  label,
+  copiedLabel,
+}: {
+  value: string;
+  label: string;
+  copiedLabel: string;
+}) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        void navigator.clipboard.writeText(value).then(() => {
+          setCopied(true);
+          setTimeout(() => setCopied(false), 2000);
+        });
+      }}
+      className="shrink-0 text-xs font-medium rounded-md border border-border px-2 py-1 hover:bg-muted"
+    >
+      {copied ? copiedLabel : label}
+    </button>
+  );
+}
+
+/**
+ * One-time reveal of a custom channel's bridge token, plus the two other
+ * facts a bridge needs to boot (channel id, API base URL) and the per-kind
+ * quickstart. Shared by the add-channel success state and the rotate-token
+ * flow — the token is returned once by the API and never shown again, so
+ * the copy affordance and the "copy it now" line live here, in one place.
+ * docs/architecture/channels/custom-channel.md → "Studio UI".
+ */
+export function BridgeTokenReveal({
+  bridgeToken,
+  channelId,
+  kind,
+  title,
+}: {
+  bridgeToken: string;
+  channelId: string;
+  kind: string | null;
+  title?: string;
+}) {
+  const t = useT();
+  const c = t.studioPage.channels.add.custom;
+  const row =
+    "flex items-center gap-2 rounded-md border border-border bg-background px-2 py-1.5";
+  const code = "min-w-0 flex-1 text-xs font-mono break-all";
+  const steps =
+    kind === "wechat-desktop"
+      ? [
+          c.kinds.wechatDesktop.step1,
+          c.kinds.wechatDesktop.step2,
+          c.kinds.wechatDesktop.step3,
+          c.kinds.wechatDesktop.step4,
+          c.kinds.wechatDesktop.step5,
+        ]
+      : null;
+  return (
+    <div className="flex flex-col gap-3">
+      {title && <p className="text-sm font-medium">{title}</p>}
+      <div className="flex flex-col gap-1">
+        <span className="text-xs font-medium">{c.tokenLabel}</span>
+        <div className={row}>
+          <input
+            type="text"
+            readOnly
+            value={bridgeToken}
+            aria-label={c.tokenLabel}
+            onFocus={(e) => e.currentTarget.select()}
+            className="min-w-0 flex-1 bg-transparent text-xs font-mono outline-none"
+          />
+          <CopyValueButton value={bridgeToken} label={c.copyToken} copiedLabel={c.copied} />
+        </div>
+        <span className="text-xs font-medium text-amber-600 dark:text-amber-400">
+          {c.tokenOnce}
+        </span>
+      </div>
+      <div className="flex flex-col gap-1">
+        <span className="text-xs font-medium">{c.channelIdLabel}</span>
+        <div className={row}>
+          <code className={code}>{channelId}</code>
+          <CopyValueButton value={channelId} label={c.copyChannelId} copiedLabel={c.copied} />
+        </div>
+      </div>
+      <div className="flex flex-col gap-1">
+        <span className="text-xs font-medium">{c.apiUrlLabel}</span>
+        <div className={row}>
+          <code className={code}>{DISPLAY_API_URL}</code>
+          <CopyValueButton value={DISPLAY_API_URL} label={c.copyApiUrl} copiedLabel={c.copied} />
+        </div>
+      </div>
+      <div className="flex flex-col gap-1">
+        <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+          {steps ? c.kinds.wechatDesktop.title : c.quickstartTitle}
+        </span>
+        {steps ? (
+          <ol className="flex flex-col gap-0.5 text-xs text-muted-foreground list-decimal pl-4">
+            {steps.map((step, i) => (
+              <li key={i}>{step}</li>
+            ))}
+          </ol>
+        ) : (
+          <p className="text-xs text-muted-foreground">
+            {format(c.genericQuickstart, { path: customChannelBridgePath(channelId) })}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Tone of the bridge status chip (mirrors `pillCls`). */
+function customStatusTone(status: CustomChannelState["status"]): "on" | "off" | "attention" {
+  if (status === "connected") return "on";
+  if (status === "needs_action" || status === "error") return "attention";
+  return "off";
+}
+
+/**
+ * Custom bridge state card — what the bridge last published (`PUT /state`)
+ * plus the API's liveness view of it. Polls `GET …/custom/state` every 2 s
+ * while the detail panel is mounted. The latch is reset on the way IN (React
+ * Strict Mode runs effect → cleanup → effect on mount; a cleanup-only latch
+ * would leave `stopRef` true and the loop would exit on its first check — the
+ * graded `strict-mode-unmount-latch` rule). Renders the action surface: a QR
+ * (`imageDataUrl` wins, else `url`/`text` rendered as a QR by the client), an
+ * input field that answers through `POST …/custom/input`, or a
+ * confirm-on-device note. "Bridge offline" shows whenever `online` is false,
+ * whatever status the bridge last published — a stale `connected` is not
+ * connected. docs/architecture/channels/custom-channel.md → "Studio UI".
+ */
+export function CustomBridgeSection({
+  workspaceId,
+  channel,
+}: {
+  workspaceId: string;
+  channel: Channel;
+}) {
+  const t = useT();
+  const c = t.studioPage.channels.custom;
+  const channelId = channel.id;
+  const [state, setState] = useState<CustomChannelState | null>(null);
+  const [loadError, setLoadError] = useState(false);
+  const [inputValue, setInputValue] = useState("");
+  const [inputSending, setInputSending] = useState(false);
+  const [inputError, setInputError] = useState(false);
+  const [newToken, setNewToken] = useState<string | null>(null);
+  const [rotating, setRotating] = useState(false);
+  const [rotateError, setRotateError] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
+  const [disconnectError, setDisconnectError] = useState(false);
+  const stopRef = useRef(false);
+
+  useEffect(() => {
+    // Clear the latch on the way IN — see the component comment.
+    stopRef.current = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    async function tick(): Promise<void> {
+      if (stopRef.current) return;
+      try {
+        const next = await getCustomChannelState(workspaceId, channelId);
+        if (stopRef.current) return;
+        setState(next);
+        setLoadError(false);
+      } catch {
+        if (stopRef.current) return;
+        setLoadError(true);
+      }
+      if (stopRef.current) return;
+      timer = setTimeout(() => void tick(), 2000);
+    }
+    void tick();
+    return () => {
+      stopRef.current = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [workspaceId, channelId]);
+
+  // A fresh action request should not inherit a half-typed answer to the
+  // previous one.
+  const requestId = state?.action?.kind === "input" ? state.action.requestId : null;
+  useEffect(() => {
+    setInputValue("");
+    setInputError(false);
+  }, [requestId]);
+
+  async function submitInput(): Promise<void> {
+    if (!requestId || !inputValue.trim() || inputSending) return;
+    setInputSending(true);
+    setInputError(false);
+    try {
+      await submitCustomChannelInput(workspaceId, channelId, {
+        requestId,
+        value: inputValue.trim(),
+      });
+      setInputValue("");
+    } catch {
+      setInputError(true);
+    } finally {
+      setInputSending(false);
+    }
+  }
+
+  async function rotate(): Promise<void> {
+    const ok = await confirmDialog({
+      title: c.rotateConfirmTitle,
+      description: c.rotateConfirmBody,
+      confirmLabel: c.rotateConfirmCta,
+      cancelLabel: c.cancel,
+      variant: "destructive",
+    });
+    if (!ok) return;
+    setRotating(true);
+    setRotateError(false);
+    try {
+      const result = await rotateCustomChannelToken(workspaceId, channelId);
+      setNewToken(result.bridgeToken);
+    } catch {
+      setRotateError(true);
+    } finally {
+      setRotating(false);
+    }
+  }
+
+  async function disconnect(): Promise<void> {
+    const ok = await confirmDialog({
+      title: c.disconnectConfirmTitle,
+      description: c.disconnectConfirmBody,
+      confirmLabel: c.disconnectConfirmCta,
+      cancelLabel: c.cancel,
+      variant: "destructive",
+    });
+    if (!ok) return;
+    setDisconnecting(true);
+    setDisconnectError(false);
+    try {
+      await disconnectCustomChannel(workspaceId, channelId);
+    } catch {
+      setDisconnectError(true);
+    } finally {
+      setDisconnecting(false);
+    }
+  }
+
+  const status = state?.status ?? "connecting";
+  const online = state?.online ?? false;
+  const action = state?.action ?? null;
+  const qrValue =
+    action?.kind === "qr" && !action.imageDataUrl ? (action.url ?? action.text ?? null) : null;
+
+  return (
+    <div className="flex flex-col gap-3 rounded-lg border border-border px-4 py-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+          {c.stateTitle}
+        </span>
+        <span className={pillCls(customStatusTone(status))}>{c.status[status]}</span>
+        <span className={pillCls(online ? "on" : "attention")}>
+          {online ? c.online : c.offline}
+        </span>
+        {state?.bridgeVersion && (
+          <span
+            className="text-[11px] font-mono text-muted-foreground"
+            title={c.bridgeVersion}
+          >
+            {state.bridgeVersion}
+          </span>
+        )}
+      </div>
+
+      {loadError && <p className="text-xs text-destructive">{c.stateError}</p>}
+
+      {state && !state.lastSeenAt && (
+        <p className="text-xs text-muted-foreground">{c.neverSeen}</p>
+      )}
+
+      {state?.accountLabel && (
+        <p className="text-sm">
+          <span className="text-muted-foreground">{c.accountLabel}: </span>
+          <span className="font-medium">{state.accountLabel}</span>
+        </p>
+      )}
+
+      {state?.message && <p className="text-sm">{state.message}</p>}
+
+      {action?.kind === "qr" && (
+        <div className="flex flex-col items-center gap-2 self-center py-2">
+          <div className="rounded-lg bg-white p-3">
+            {action.imageDataUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={action.imageDataUrl}
+                alt={c.qrHint}
+                width={208}
+                height={208}
+                className="block h-52 w-52"
+              />
+            ) : qrValue ? (
+              <QRCodeSVG value={qrValue} size={208} />
+            ) : null}
+          </div>
+          {!action.imageDataUrl && !action.url && action.text && (
+            <code className="text-xs font-mono break-all">{action.text}</code>
+          )}
+          {!state?.message && (
+            <p className="max-w-xs text-center text-xs text-muted-foreground">{c.qrHint}</p>
+          )}
+          {action.expiresAt && (
+            <p className="text-[11px] text-muted-foreground">
+              {format(c.qrExpires, { time: new Date(action.expiresAt).toLocaleTimeString() })}
+            </p>
+          )}
+        </div>
+      )}
+
+      {action?.kind === "input" && (
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            void submitInput();
+          }}
+          className="flex flex-col gap-2"
+        >
+          <label className="text-sm">{action.prompt}</label>
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              inputMode={action.inputKind === "numeric" ? "numeric" : "text"}
+              value={inputValue}
+              onChange={(e) => setInputValue(e.target.value)}
+              placeholder={c.inputPlaceholder}
+              aria-label={action.prompt}
+              disabled={inputSending}
+              className="min-w-0 flex-1 rounded-md border border-border bg-background px-2 py-1.5 text-sm font-mono"
+            />
+            <button
+              type="submit"
+              disabled={!inputValue.trim() || inputSending}
+              className="rounded-md bg-action px-3 py-1.5 text-sm font-medium text-action-foreground disabled:opacity-50"
+            >
+              {inputSending ? c.inputSending : c.inputSubmit}
+            </button>
+          </div>
+          {inputError && <p className="text-xs text-destructive">{c.inputError}</p>}
+        </form>
+      )}
+
+      {action?.kind === "confirm_on_device" && (
+        <p className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-sm">
+          {action.message}
+        </p>
+      )}
+
+      {state && state.outboxDepth > 0 && (
+        <p className="text-xs text-muted-foreground">
+          {format(c.outboxDepth, { n: state.outboxDepth })}
+        </p>
+      )}
+
+      {state?.lastSeenAt && (
+        <p className="text-[11px] text-muted-foreground">
+          {c.lastSeen}: {new Date(state.lastSeenAt).toLocaleString()}
+        </p>
+      )}
+
+      {newToken && (
+        <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 flex flex-col gap-2">
+          <BridgeTokenReveal
+            bridgeToken={newToken}
+            channelId={channelId}
+            kind={null}
+            title={c.newTokenTitle}
+          />
+          <button
+            type="button"
+            onClick={() => setNewToken(null)}
+            className="self-start text-xs font-medium rounded-md border border-border px-2 py-1 hover:bg-muted"
+          >
+            {c.dismiss}
+          </button>
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-center gap-2 border-t border-border pt-2">
+        <button
+          type="button"
+          onClick={() => void rotate()}
+          disabled={rotating}
+          className="text-xs font-medium rounded-md border border-border px-2 py-1 hover:bg-muted disabled:opacity-50"
+        >
+          {c.rotateToken}
+        </button>
+        <button
+          type="button"
+          onClick={() => void disconnect()}
+          disabled={disconnecting || status === "disconnected"}
+          className="text-xs font-medium rounded-md border border-border px-2 py-1 text-destructive/80 hover:bg-muted hover:text-destructive disabled:opacity-50"
+        >
+          {c.disconnect}
+        </button>
+        {rotateError && <span className="text-xs text-destructive">{c.rotateError}</span>}
+        {disconnectError && (
+          <span className="text-xs text-destructive">{c.disconnectError}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 type WechatConnectPhase =
   | { kind: "idle" }
   | { kind: "loading" }

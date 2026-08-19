@@ -1405,7 +1405,7 @@ export async function getPreferredChannel(
     `SELECT channel_type as "channelType", channel_id as "channelId"
      FROM sessions
      WHERE assistant_id = $1 AND user_id = $2
-       AND channel_type IN ('telegram', 'slack', 'whatsapp')
+       AND channel_type IN ('telegram', 'slack', 'whatsapp', 'custom')
        AND channel_id NOT IN ('notifications', 'default')
        AND (channel_type != 'whatsapp' OR channel_id LIKE '%@%')
      ORDER BY last_active_at DESC

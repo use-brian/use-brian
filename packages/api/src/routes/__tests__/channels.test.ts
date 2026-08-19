@@ -76,6 +76,8 @@ import type { WorkspaceStore } from '../../db/workspace-store.js'
 import type { ChannelIntegrationStore } from '../../db/channel-integrations.js'
 import type { DiscordConnectorClient } from '../../discord/connector-client.js'
 import type { LinkCodeStore } from '../../db/link-codes.js'
+import type { CustomChannelStore } from '../../db/custom-channel-store.js'
+import { hashBridgeToken } from '../../db/custom-channel-token.js'
 
 function makeChannel(over: Partial<Channel> = {}): Channel {
   return {
@@ -105,6 +107,7 @@ function buildApp(
       requiredOnConnect?: boolean
       linkCodeStore: LinkCodeStore
     }
+    customChannelStore?: CustomChannelStore
   } = {},
 ) {
   const role = opts.role === undefined ? 'admin' : opts.role
@@ -119,6 +122,7 @@ function buildApp(
       discordConnector: opts.discordConnector,
       telegramBotToken: opts.telegramBotToken,
       ownerPairing: opts.ownerPairing,
+      customChannelStore: opts.customChannelStore,
     }),
     userId ? { userId } : undefined,
   )
@@ -1264,5 +1268,169 @@ describe('[COMP:api/channel-destinations-route] GET channel-destinations', () =>
       '/api/workspaces/ws-1/channel-destinations',
     )
     expect(res.status).toBe(401)
+  })
+})
+
+// ── Custom (bridge-driven) channels ──────────────────────────────
+// docs/architecture/channels/custom-channel.md → "Workspace-facing routes".
+
+function makeCustomStore(): CustomChannelStore {
+  return {
+    putState: vi.fn().mockResolvedValue(undefined),
+    getState: vi.fn().mockResolvedValue(null),
+    touchSeen: vi.fn().mockResolvedValue(undefined),
+    enqueue: vi.fn().mockResolvedValue('item-1'),
+    claim: vi.fn().mockResolvedValue([]),
+    ack: vi.fn().mockResolvedValue(0),
+    expireStale: vi.fn().mockResolvedValue([]),
+  }
+}
+
+describe('[COMP:api/channels-route] custom channels', () => {
+  it('POST /custom 201s, returns a ubc_ token ONCE, and stores only its hash', async () => {
+    vi.mocked(findOrCreateChannelForWorkspaceConnect).mockResolvedValue({ channelId: 'chan-cu', reused: false })
+    vi.mocked(getChannelForUser).mockResolvedValue(
+      makeChannel({ id: 'chan-cu', channelType: 'custom', displayName: 'My WeChat desktop', enabledCapabilities: ['chat'] }),
+    )
+    const upsert = vi.fn()
+    const integrationStore = { upsert, listForWorkspace: vi.fn().mockResolvedValue([]) } as unknown as ChannelIntegrationStore
+    const customChannelStore = makeCustomStore()
+    const res = await request(buildApp({ integrationStore, customChannelStore }))
+      .post('/api/workspaces/ws-1/channels/custom')
+      .send({ displayName: 'My WeChat desktop', kind: 'wechat-desktop', defaultAssistantId: ASSISTANT_UUID })
+    expect(res.status).toBe(201)
+    expect(res.body.channel.id).toBe('chan-cu')
+    expect(res.body.bridgeToken).toMatch(/^ubc_[A-Za-z0-9_-]{43}$/)
+    expect(res.body.kind).toBe('wechat-desktop')
+
+    expect(findOrCreateChannelForWorkspaceConnect).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: 'ws-1',
+      channelType: 'custom',
+      displayName: 'My WeChat desktop',
+      defaultAssistantId: ASSISTANT_UUID,
+      externalIdentity: { botUserId: expect.stringMatching(/^custom:[0-9a-f-]{36}$/) },
+    }))
+    expect(upsert).toHaveBeenCalledTimes(1)
+    const creds = upsert.mock.calls[0][0].credentials as { bridge_token_hash: string; kind?: string }
+    expect(creds.kind).toBe('wechat-desktop')
+    expect(creds.bridge_token_hash).toBe(hashBridgeToken(res.body.bridgeToken))
+    expect(JSON.stringify(upsert.mock.calls[0][0])).not.toContain(res.body.bridgeToken)
+    // Seeds the state row so Studio has something to render before the bridge calls in.
+    expect(customChannelStore.putState).toHaveBeenCalledWith('chan-cu', expect.objectContaining({ status: 'connecting' }))
+  })
+
+  it('POST /custom accepts kind: null / "" from an empty form field as "no kind"', async () => {
+    vi.mocked(findOrCreateChannelForWorkspaceConnect).mockResolvedValue({ channelId: 'chan-cu2', reused: false })
+    vi.mocked(getChannelForUser).mockResolvedValue(
+      makeChannel({ id: 'chan-cu2', channelType: 'custom', displayName: 'Wechat', enabledCapabilities: ['chat'] }),
+    )
+    const upsert = vi.fn()
+    const integrationStore = { upsert, listForWorkspace: vi.fn().mockResolvedValue([]) } as unknown as ChannelIntegrationStore
+    for (const kind of [null, '', '  ']) {
+      upsert.mockClear()
+      const res = await request(buildApp({ integrationStore, customChannelStore: makeCustomStore() }))
+        .post('/api/workspaces/ws-1/channels/custom')
+        .send({ displayName: 'Wechat', kind, defaultAssistantId: ASSISTANT_UUID })
+      expect(res.status).toBe(201)
+      expect(res.body.kind).toBe(null)
+      const creds = upsert.mock.calls[0][0].credentials as { kind?: string }
+      expect(creds.kind).toBeUndefined()
+    }
+  })
+
+  it('POST /custom 400s on a missing displayName and 503s without the store', async () => {
+    const integrationStore = { upsert: vi.fn() } as unknown as ChannelIntegrationStore
+    const bad = await request(buildApp({ integrationStore, customChannelStore: makeCustomStore() }))
+      .post('/api/workspaces/ws-1/channels/custom')
+      .send({})
+    expect(bad.status).toBe(400)
+    const noStore = await request(buildApp({ integrationStore }))
+      .post('/api/workspaces/ws-1/channels/custom')
+      .send({ displayName: 'x' })
+    expect(noStore.status).toBe(503)
+  })
+
+  it('POST /:id/custom/rotate-token mints a new token; the old hash is replaced', async () => {
+    vi.mocked(getChannelForUser).mockResolvedValue(makeChannel({ id: 'chan-cu', channelType: 'custom' }))
+    const oldHash = hashBridgeToken('ubc_old')
+    const upsert = vi.fn()
+    const integrationStore = {
+      upsert,
+      listForWorkspace: vi.fn().mockResolvedValue([
+        makeIntegration({ id: 'int-cu', channelId: 'chan-cu', channelType: 'custom', teamName: 'wechat-desktop', botUserId: 'custom:abc' }),
+      ]),
+      getForUserWithCredentials: vi.fn().mockResolvedValue({
+        id: 'int-cu', credentials: { bridge_token_hash: oldHash, kind: 'wechat-desktop' },
+      }),
+    } as unknown as ChannelIntegrationStore
+    const res = await request(buildApp({ integrationStore, customChannelStore: makeCustomStore() }))
+      .post('/api/workspaces/ws-1/channels/chan-cu/custom/rotate-token')
+      .send({})
+    expect(res.status).toBe(200)
+    expect(res.body.bridgeToken).toMatch(/^ubc_/)
+    const creds = upsert.mock.calls[0][0].credentials as { bridge_token_hash: string; kind?: string }
+    expect(creds.bridge_token_hash).toBe(hashBridgeToken(res.body.bridgeToken))
+    expect(creds.bridge_token_hash).not.toBe(oldHash)
+    expect(creds.kind).toBe('wechat-desktop')
+    expect(upsert.mock.calls[0][0]).toMatchObject({ channelId: 'chan-cu', channelType: 'custom', botUserId: 'custom:abc' })
+  })
+
+  it('rotate-token 400s for a non-custom channel', async () => {
+    vi.mocked(getChannelForUser).mockResolvedValue(makeChannel({ id: 'chan-1', channelType: 'slack' }))
+    const integrationStore = { upsert: vi.fn(), listForWorkspace: vi.fn().mockResolvedValue([]) } as unknown as ChannelIntegrationStore
+    const res = await request(buildApp({ integrationStore, customChannelStore: makeCustomStore() }))
+      .post('/api/workspaces/ws-1/channels/chan-1/custom/rotate-token')
+      .send({})
+    expect(res.status).toBe(400)
+  })
+
+  it('GET /:id/custom/state returns the published state, or a connecting placeholder', async () => {
+    vi.mocked(getChannelForUser).mockResolvedValue(makeChannel({ id: 'chan-cu', channelType: 'custom' }))
+    const customChannelStore = makeCustomStore()
+    vi.mocked(customChannelStore.getState).mockResolvedValueOnce({
+      channelId: 'chan-cu', status: 'needs_action', action: { kind: 'qr', text: 'hello' },
+      lastSeenAt: '2026-08-19T10:00:00.000Z', updatedAt: '2026-08-19T10:00:00.000Z', online: true, outboxDepth: 2,
+    })
+    const app = buildApp({ customChannelStore })
+    const res = await request(app).get('/api/workspaces/ws-1/channels/chan-cu/custom/state')
+    expect(res.status).toBe(200)
+    expect(res.body.state).toMatchObject({ status: 'needs_action', action: { kind: 'qr', text: 'hello' }, online: true, outboxDepth: 2 })
+    const empty = await request(app).get('/api/workspaces/ws-1/channels/chan-cu/custom/state')
+    expect(empty.body.state).toMatchObject({ channelId: 'chan-cu', status: 'connecting', online: false, outboxDepth: 0 })
+  })
+
+  it('POST /:id/custom/input enqueues an input item carrying the requestId', async () => {
+    vi.mocked(getChannelForUser).mockResolvedValue(makeChannel({ id: 'chan-cu', channelType: 'custom' }))
+    const customChannelStore = makeCustomStore()
+    const res = await request(buildApp({ customChannelStore }))
+      .post('/api/workspaces/ws-1/channels/chan-cu/custom/input')
+      .send({ requestId: 'req-7', value: '123456' })
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ ok: true, itemId: 'item-1' })
+    expect(customChannelStore.enqueue).toHaveBeenCalledWith('chan-cu', {
+      type: 'input', peerId: null, payload: { requestId: 'req-7', value: '123456' },
+    })
+  })
+
+  it('POST /:id/custom/disconnect enqueues a disconnect item and marks the state disconnected', async () => {
+    vi.mocked(getChannelForUser).mockResolvedValue(makeChannel({ id: 'chan-cu', channelType: 'custom' }))
+    const customChannelStore = makeCustomStore()
+    const res = await request(buildApp({ customChannelStore }))
+      .post('/api/workspaces/ws-1/channels/chan-cu/custom/disconnect')
+      .send({})
+    expect(res.status).toBe(200)
+    expect(customChannelStore.enqueue).toHaveBeenCalledWith('chan-cu', { type: 'disconnect', peerId: null, payload: {} })
+    expect(customChannelStore.putState).toHaveBeenCalledWith('chan-cu', expect.objectContaining({ status: 'disconnected' }))
+  })
+
+  it('DELETE a custom channel enqueues disconnect before the cascade', async () => {
+    vi.mocked(getChannelForUser).mockResolvedValue(makeChannel({ id: 'chan-cu', channelType: 'custom' }))
+    vi.mocked(deleteChannel).mockResolvedValue(true)
+    const customChannelStore = makeCustomStore()
+    const res = await request(buildApp({ customChannelStore }))
+      .delete('/api/workspaces/ws-1/channels/chan-cu')
+    expect(res.status).toBe(204)
+    expect(customChannelStore.enqueue).toHaveBeenCalledWith('chan-cu', { type: 'disconnect', peerId: null, payload: {} })
+    expect(deleteChannel).toHaveBeenCalledWith('user-1', 'chan-cu')
   })
 })

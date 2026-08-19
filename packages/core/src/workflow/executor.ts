@@ -176,7 +176,7 @@ export type DeliverToChannel = (params: {
   assistantId: string
   /** Billing / delivery-session owner. */
   userId: string
-  channelType: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams'
+  channelType: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams' | 'custom'
   channelId: string
   channelIntegrationId?: string
   text: string

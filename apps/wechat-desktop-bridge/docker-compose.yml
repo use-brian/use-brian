@@ -1,0 +1,53 @@
+# WeChat desktop bridge: one stack per WeChat account, one custom channel per
+# stack. See README.md for box setup and docs/architecture/channels/wechat-desktop.md.
+#
+# Before `docker compose up -d`:
+#   openssl rand -hex 32 > agent-wechat-token && chmod 600 agent-wechat-token
+#   cp .env.example .env   # fill in from Studio -> Channels -> Custom (wechat-desktop)
+#
+# Upstream image: ghcr.io/thisnick/agent-wechat (third-party; the WeChat Linux
+# client automation lives entirely there, not in this bridge). Pin it by digest
+# for a reproducible deploy; mirror it to a registry you control before relying
+# on it in production.
+
+services:
+  agent-wechat:
+    image: ghcr.io/thisnick/agent-wechat:latest
+    security_opt:
+      - seccomp=unconfined
+    cap_add:
+      - SYS_PTRACE
+    volumes:
+      - agent-wechat-data:/data
+      - agent-wechat-home:/home/wechat
+      - ./agent-wechat-token:/data/auth-token:ro
+    # No host port: :6174 is reachable only on the compose network.
+    restart: unless-stopped
+
+  bridge:
+    build:
+      context: .
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    env_file: .env
+    environment:
+      AGENT_WECHAT_URL: http://agent-wechat:6174
+      BRIDGE_STATE_FILE: /data/bridge-state.json
+      BRIDGE_PORT: "8086"
+    depends_on:
+      - agent-wechat
+    volumes:
+      - bridge-data:/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8086/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
+volumes:
+  agent-wechat-data:
+  agent-wechat-home:
+  bridge-data:

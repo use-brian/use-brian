@@ -243,7 +243,7 @@ export type ConsultRequest = {
    * "Deferred confirmations".
    */
   deliver?: {
-    channelType: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams'
+    channelType: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams' | 'custom'
     channelId: string
     channelIntegrationId?: string
   }
