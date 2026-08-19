@@ -29,6 +29,8 @@ import {
   validateSessionPinPayload,
 } from '../db/session-pins-store.js'
 import { resolveSessionPinLabels } from '../resolve-session-pins.js'
+import { guestAuthorNameForSession, guestSenderProfile } from '../db/guest-comment-store.js'
+import { COMMENT_THREAD_CHANNEL_TYPE } from '../db/comment-thread-store.js'
 
 /** A session whose read-access we gate (the subset of fields the gate reads). */
 type GatedSession = {
@@ -676,14 +678,24 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
           .map((m) => m.senderUserId)
           .filter((id): id is string => Boolean(id)),
       )
-      res.json(messages.map((m) => ({
+      // A doc comment thread opened by a GUEST on the public page: its rows are
+      // authored by the shared sentinel user, so the profile lookup would name
+      // every guest "Canvas Guest". Attribute those rows to the thread's
+      // `external_author_name` instead (one system read, comment threads only).
+      const guestName =
+        session.channelType === COMMENT_THREAD_CHANNEL_TYPE
+          ? await guestAuthorNameForSession(session.id)
+          : null
+      res.json(messages.map((m) => {
+        const guest = guestSenderProfile(m.senderUserId, guestName)
+        return {
         id: m.id,
         role: m.role,
         content: m.content,
         timestamp: m.createdAt,
         senderUserId: m.senderUserId,
-        senderName: m.senderUserId ? profiles.get(m.senderUserId)?.name ?? null : null,
-        senderAvatarUrl: m.senderUserId ? profiles.get(m.senderUserId)?.avatarUrl ?? null : null,
+        senderName: guest ? guest.name : m.senderUserId ? profiles.get(m.senderUserId)?.name ?? null : null,
+        senderAvatarUrl: guest ? null : m.senderUserId ? profiles.get(m.senderUserId)?.avatarUrl ?? null : null,
         // The answering assistant per reply (multi-assistant rooms, T9) —
         // the client resolves the avatar from its roster. Null on human rows
         // and pre-390 history (rendered as the session's bound assistant).
@@ -695,7 +707,8 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         // link: it renders as the quoted block above the bubble, which is why
         // a reply survives a reload. Null on every ordinary row.
         replyToText: m.replyToText,
-      })))
+        }
+      }))
     } catch (err) {
       console.error('Messages load error:', err)
       res.status(500).json({ error: 'Failed to load messages' })

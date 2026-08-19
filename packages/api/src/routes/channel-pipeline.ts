@@ -26,6 +26,7 @@ import {
   buildWorkspaceFilesContext, buildUploadPolicyBlock, AttachmentCollector,
   EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote,
   latestWorkflowProposalReceipt,
+  parseSlashCommand, buildSlashCommandBlock,
 } from '@use-brian/core'
 import type { FilesApi, OutboundAttachment } from '@use-brian/core'
 import { resolveBrandContext } from '../brand/prompt-context.js'
@@ -346,7 +347,7 @@ export type ChannelPipelineParams = {
   checkCreditBudget?: CreditBudgetGate
 
   // ── Channel context ──
-  channelType: 'whatsapp' | 'telegram' | 'slack' | 'discord' | 'email' | 'msteams' | 'wechat'
+  channelType: 'whatsapp' | 'telegram' | 'slack' | 'discord' | 'email' | 'msteams' | 'wechat' | 'custom'
   channelId: string
   /**
    * The acting user's channel-native id captured from the inbound webhook —
@@ -1632,7 +1633,14 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
 
   // ── Skills ──
   if (skillStore && !externalGuest) {
+    // Slash command (`/goal register …` as the whole message) — same seam as
+    // the web chat route: the name is threaded as an enforced skill slug, the
+    // governance gates apply inside injectSkills, and an unresolved name
+    // enforces nothing so the message stays plain text. This is what makes
+    // `/goal` work identically from Telegram / Slack / any adapter.
+    const slashCommand = parseSlashCommand(messageText)
     const skillResult = await injectSkills({
+      enforceSlugs: slashCommand ? [slashCommand.name] : undefined,
       skillStore,
       connectorUserId,
       assistantId: assistant.id,
@@ -1648,6 +1656,10 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
       workspaceId: assistant.workspaceId ?? undefined,
     })
     fullSystemPrompt += skillResult.promptFragment
+    if (slashCommand && skillResult.enforcedPromptFragment) {
+      fullSystemPrompt += skillResult.enforcedPromptFragment
+      privateRuntimeContextParts.push(buildSlashCommandBlock(slashCommand))
+    }
   }
   fullSystemPrompt += buildUnavailableCapabilitiesPrompt(unavailableCapabilities, allTools)
   fullSystemPrompt += buildBrowserEscalationPrompt(allTools)

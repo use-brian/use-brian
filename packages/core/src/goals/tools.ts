@@ -85,7 +85,16 @@ export function createGoalTools(store: GoalStore, opts?: GoalToolOptions): { set
         createdByUserId: context.userId,
       })
       opts?.onEvent?.({ type: 'goal_created', goalId: goal.id }, eventCtx(context))
-      return { data: `Set goal [${goal.id}]: ${goal.outcome}` }
+      // The next-step nudge is load-bearing: a goal without a workflow
+      // is a MONITOR — it watches done_when and never acts. "Help me start it"
+      // historically stranded here because nothing named the arming tool.
+      return {
+        data:
+          `Set goal [${goal.id}]: ${goal.outcome}` +
+          (input.workflow_id
+            ? ' It is armed — the driver starts iterating its workflow now.'
+            : ' It only MONITORS done_when until armed: call workTask with this goal id to have me work it autonomously, or leave it as a monitor.'),
+      }
     },
   })
 

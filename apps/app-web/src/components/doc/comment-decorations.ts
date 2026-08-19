@@ -13,6 +13,15 @@
  *       person commenting on an atom block — chart / image / data / … — that
  *       has no inner text to carry a mark). Neither stores a mark; the
  *       highlight is purely this decoration.
+ *   (c) quote anchors  — a `human_range` thread with NO `comment` mark in the
+ *       doc but an `anchorBlockId` + `quote`: a GUEST's range comment from the
+ *       public share page (a guest can't write the Yjs doc, so the thread
+ *       persists only the block + the selected text). The highlight is
+ *       rebuilt by finding the quote inside that block's text and painting
+ *       exactly that run (`comment-quote-anchor.ts` — the same rule the
+ *       public renderer uses); a quote that no longer occurs falls back to
+ *       the block's whole text, like (b). Members therefore see a guest's
+ *       comment on the words the guest selected.
  *
  * Plus one gutter badge widget per anchored block (counts aggregated across
  * both sources), clickable to open the thread.
@@ -37,13 +46,60 @@ import { Extension } from "@tiptap/core";
 import { Plugin, PluginKey } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import type { MarkType, Node as PMNode } from "@tiptap/pm/model";
+import { findQuoteRange } from "@/lib/comment-quote-anchor";
 
 /** Minimal thread shape the plugin needs (subset of the SDK's CommentThread). */
 export type DecorationThread = {
   id: string;
   anchorKind: "human_range" | "ai_block" | "human_block";
   anchorBlockId: string | null;
+  /** The selected text a markless `human_range` thread (a guest's) re-anchors
+   *  by — see source (c) above. Ignored when the thread's mark is in the doc. */
+  quote?: string | null;
 };
+
+/** Thread ids that have at least one `comment` mark run in `doc` — those
+ *  threads paint from their mark and never need a quote anchor. */
+function markedThreadIds(doc: PMNode): Set<string> {
+  const ids = new Set<string>();
+  doc.descendants((node) => {
+    if (!node.isText) return true;
+    const mark = node.marks.find((m) => m.type.name === "comment");
+    const threadId = mark?.attrs?.threadId as string | undefined;
+    if (threadId) ids.add(threadId);
+    return true;
+  });
+  return ids;
+}
+
+/**
+ * Map a `[start, end)` offset range in `block.textContent` to absolute doc
+ * positions, walking the block's text leaves (inline atoms occupy a position
+ * but contribute no text, so offsets and positions diverge — hence the walk).
+ * `blockPos` is the block node's own position. Returns null if the range is
+ * empty or falls outside the block's text. Exported for the unit test.
+ */
+export function textOffsetsToPositions(
+  block: PMNode,
+  blockPos: number,
+  start: number,
+  end: number,
+): { from: number; to: number } | null {
+  if (end <= start) return null;
+  let from: number | null = null;
+  let to: number | null = null;
+  let acc = 0;
+  block.descendants((child, relPos) => {
+    if (!child.isText) return true;
+    const text = child.text ?? "";
+    const abs = blockPos + 1 + relPos;
+    if (from === null && start >= acc && start < acc + text.length) from = abs + (start - acc);
+    if (to === null && end > acc && end <= acc + text.length) to = abs + (end - acc);
+    acc += text.length;
+    return from === null || to === null;
+  });
+  return from !== null && to !== null && to > from ? { from, to } : null;
+}
 
 /** Anchor kinds that pin a thread to a WHOLE block (highlight derived from
  *  `anchorBlockId`, no stored `comment` mark) rather than a text range. */
@@ -82,9 +138,16 @@ export function buildDecorations(
   // blockId → threadId for every WHOLE-block-anchored thread (ai_block +
   // human_block). Both render the same client-side tint from the blockId.
   const blockAnchored = new Map<string, string>();
+  // blockId → the markless `human_range` threads anchored there by quote (c).
+  const quoteAnchored = new Map<string, Array<{ id: string; quote: string | null }>>();
+  const marked = markedThreadIds(doc);
   for (const t of threads) {
     if (isBlockAnchored(t.anchorKind) && t.anchorBlockId) {
       blockAnchored.set(t.anchorBlockId, t.id);
+    } else if (t.anchorKind === "human_range" && t.anchorBlockId && !marked.has(t.id)) {
+      const list = quoteAnchored.get(t.anchorBlockId) ?? [];
+      list.push({ id: t.id, quote: t.quote ?? null });
+      quoteAnchored.set(t.anchorBlockId, list);
     }
   }
 
@@ -141,6 +204,45 @@ export function buildDecorations(
           firstThreadId: threadId,
         });
       seenThreads.add(threadId);
+    }
+
+    // (c) Quote anchor — a markless human_range thread (a guest's): paint the
+    // quote's run inside the block, or the block's whole text when the quote
+    // is gone; badge like a block anchor.
+    if (blockId && quoteAnchored.has(blockId)) {
+      for (const th of quoteAnchored.get(blockId)!) {
+        // One paint per thread: the OUTERMOST node carrying the blockId owns it
+        // (a nested paragraph that repeats its list item's id must not re-paint).
+        if (seenThreads.has(th.id)) continue;
+        const r = findQuoteRange(node.textContent, th.quote);
+        const range = r ? textOffsetsToPositions(node, pos, r.start, r.end) : null;
+        if (range) {
+          decos.push(
+            Decoration.inline(range.from, range.to, {
+              class: "doc-comment-hl",
+              "data-thread-id": th.id,
+            }),
+          );
+        } else if (node.textContent.length > 0) {
+          decos.push(
+            Decoration.inline(pos + 1, pos + node.nodeSize - 1, {
+              class: "doc-comment-hl",
+              "data-thread-id": th.id,
+            }),
+          );
+        } else {
+          decos.push(
+            Decoration.node(pos, pos + node.nodeSize, {
+              class: "doc-comment-block-hl",
+              "data-thread-id": th.id,
+            }),
+          );
+        }
+        const b = badge.get(blockId);
+        if (b) b.threadIds.add(th.id);
+        else badge.set(blockId, { pos, threadIds: new Set([th.id]), firstThreadId: th.id });
+        seenThreads.add(th.id);
+      }
     }
 
     // (a) human comment marks → inline highlight over each run.

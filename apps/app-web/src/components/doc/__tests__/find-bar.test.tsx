@@ -175,6 +175,23 @@ describe("[COMP:app-web/doc-find] Find bar", () => {
     expect(host.querySelectorAll(".doc-find-match")).toHaveLength(0);
   });
 
+  it("frames the BAR on focus, not the bare input (composite-field convention)", async () => {
+    // globals.css paints a `:focus-visible` halo on every focusable element,
+    // and `outline-none` alone does not stop it (it is a box-shadow). Left
+    // alone, the input inside the pill grew its own sharp-cornered ring. The
+    // pill owns the ring while the input has focus; the nav/close buttons are
+    // NOT suppressed, so keyboard focus on them stays visible.
+    const host = await mount();
+    await pressFindChord();
+    const pill = bar(host)!;
+    expect(pill.className).toContain("has-[input:focus-visible]:ring-2");
+    expect(input(host).className).toContain("focus-visible:shadow-none");
+    for (const b of pill.querySelectorAll("button")) {
+      expect(b.className).not.toContain("shadow-none");
+    }
+    expect(pill.className).not.toContain("[&_:focus-visible]:shadow-none");
+  });
+
   it("closes on Escape and clears every highlight", async () => {
     const host = await mount();
     await pressFindChord();

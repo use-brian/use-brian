@@ -28,10 +28,14 @@ const cell = (text: string) => ({
 const source: PublicSource = { kind: "link", token: "tok" };
 const emptyPayload = { a2ui: "0.8", root: { type: "container", children: [] } } as unknown as ViewPayload;
 
-const comment = (threadId: string, anchorBlockId: string | null): PublicComment => ({
+const comment = (
+  threadId: string,
+  anchorBlockId: string | null,
+  quote: string | null = null,
+): PublicComment => ({
   threadId,
   anchorBlockId,
-  quote: null,
+  quote,
   messages: [{ author: "Ana", avatar: null, body: "hi", createdAt: "2026-06-11T00:00:00Z" }],
 });
 
@@ -133,20 +137,20 @@ describe("[COMP:app-web/share-dialog] ReadOnlyPageBlocks toggle body", () => {
 });
 
 describe("[COMP:app-web/share-dialog] commentAnchorsByBlock", () => {
-  it("maps anchorBlockId → threadId and skips unanchored threads", () => {
+  it("maps anchorBlockId → its threads (with quotes) and skips unanchored threads", () => {
     const map = commentAnchorsByBlock([
-      comment("t1", "b1"),
+      comment("t1", "b1", "a claim"),
       comment("t2", null), // page-level / unanchored → no entry
       comment("t3", "b2"),
     ]);
-    expect(map.get("b1")).toBe("t1");
-    expect(map.get("b2")).toBe("t3");
+    expect(map.get("b1")).toEqual([{ threadId: "t1", quote: "a claim" }]);
+    expect(map.get("b2")).toEqual([{ threadId: "t3", quote: null }]);
     expect(map.size).toBe(2);
   });
 
-  it("keeps the first thread when several anchor the same block", () => {
+  it("keeps every thread that anchors the same block, in order", () => {
     const map = commentAnchorsByBlock([comment("first", "b1"), comment("second", "b1")]);
-    expect(map.get("b1")).toBe("first");
+    expect(map.get("b1")?.map((a) => a.threadId)).toEqual(["first", "second"]);
   });
 });
 
@@ -191,6 +195,109 @@ describe("[COMP:app-web/share-dialog] ReadOnlyPageBlocks comment highlights", ()
     );
     expect(html).not.toContain("data-comment-thread");
     expect(html).not.toContain("doc-comment-hl");
+  });
+
+  it("paints ONLY the quoted run of a paragraph when the thread carries a quote (guest range comment)", () => {
+    const blocks: PublicBlock[] = [
+      { kind: "text", id: "p1", text: "The first claim. The second claim." },
+    ];
+    const html = renderToString(
+      <ReadOnlyPageBlocks
+        blocks={blocks}
+        payload={emptyPayload}
+        source={source}
+        comments={[comment("th-q", "p1", "second claim")]}
+      />,
+    );
+    // The swatch wraps exactly "second claim" — the text before it sits outside.
+    expect(html).toMatch(/The first claim\. The <\/span>(<span>)?<span data-comment-thread="th-q"[^>]*>second claim<\/span>/);
+    expect(html).not.toMatch(/data-comment-thread="th-q"[^>]*>The first/);
+  });
+
+  it("falls back to the whole paragraph when the quote no longer occurs in the text", () => {
+    const blocks: PublicBlock[] = [{ kind: "text", id: "p1", text: "Rewritten since." }];
+    const html = renderToString(
+      <ReadOnlyPageBlocks
+        blocks={blocks}
+        payload={emptyPayload}
+        source={source}
+        comments={[comment("th-gone", "p1", "original words")]}
+      />,
+    );
+    expect(html).toMatch(/<span data-comment-thread="th-gone"[^>]*>.*Rewritten since\./);
+  });
+
+  it("anchors a markless thread inside a rich-text list item by its quote (guest comment on a bullet)", () => {
+    const blocks: PublicBlock[] = [
+      { kind: "bulleted_list_item", id: "li1", richText: cell("alpha beta gamma") },
+    ];
+    const html = renderToString(
+      <ReadOnlyPageBlocks
+        blocks={blocks}
+        payload={emptyPayload}
+        source={source}
+        comments={[comment("th-li", "li1", "beta")]}
+      />,
+    );
+    expect(html).toContain('data-block-id="li1"');
+    expect(html).toMatch(/alpha <\/span>(<span>)?<span data-comment-thread="th-li"[^>]*>beta<\/span>/);
+    expect(html).not.toMatch(/data-comment-thread="th-li"[^>]*>alpha/);
+    // Placed inline → no whole-block tint on the <li>.
+    expect(html).not.toContain("doc-comment-block-hl");
+  });
+
+  it("tints a rich-text block whose markless thread's quote is gone", () => {
+    const blocks: PublicBlock[] = [{ kind: "quote", id: "q1", richText: cell("kept text") }];
+    const html = renderToString(
+      <ReadOnlyPageBlocks
+        blocks={blocks}
+        payload={emptyPayload}
+        source={source}
+        comments={[comment("th-tint", "q1", "vanished")]}
+      />,
+    );
+    expect(html).toMatch(/<blockquote[^>]*data-comment-thread="th-tint"[^>]*doc-comment-block-hl/);
+  });
+
+  it("leaves a rich-text block alone when the thread's own comment mark is already in it", () => {
+    const marked = {
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          content: [
+            { type: "text", text: "pre " },
+            { type: "text", text: "marked", marks: [{ type: "comment", attrs: { threadId: "th-m" } }] },
+          ],
+        },
+      ],
+    };
+    const blocks: PublicBlock[] = [{ kind: "callout", id: "c1", richText: marked }];
+    const html = renderToString(
+      <ReadOnlyPageBlocks
+        blocks={blocks}
+        payload={emptyPayload}
+        source={source}
+        comments={[comment("th-m", "c1", "pre")]}
+      />,
+    );
+    // Exactly one anchor for the thread — the mark's — not a second one over "pre".
+    expect(html.match(/data-comment-thread="th-m"/g)?.length).toBe(1);
+    expect(html).toMatch(/data-comment-thread="th-m"[^>]*>marked</);
+  });
+
+  it("tags every block root with data-block-id for the guest selection lookup", () => {
+    const blocks: PublicBlock[] = [
+      { kind: "heading", id: "h1", level: 2, text: "Sources" },
+      { kind: "text", id: "p1", text: "A claim." },
+      { kind: "bulleted_list_item", id: "li1", richText: cell("one") },
+    ];
+    const html = renderToString(
+      <ReadOnlyPageBlocks blocks={blocks} payload={emptyPayload} source={source} comments={[]} />,
+    );
+    expect(html).toContain('data-block-id="h1"');
+    expect(html).toContain('data-block-id="p1"');
+    expect(html).toContain('data-block-id="li1"');
   });
 
   it("gives a commented atom block a whole-block tint wrapper", () => {

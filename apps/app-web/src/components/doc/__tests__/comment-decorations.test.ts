@@ -4,6 +4,7 @@ import {
   buildDecorations,
   findStaleCommentMarkRanges,
   resolvedMarkThreadIds,
+  textOffsetsToPositions,
   type DecorationThread,
 } from "../comment-decorations";
 
@@ -193,6 +194,73 @@ function twoMarkedDoc() {
   ]);
   return { doc, markType: schema.marks.comment };
 }
+
+// A markless `human_range` thread — a GUEST's range comment from the public
+// share page (anchorBlockId + quote, no `comment` mark in the doc).
+function guestThread(quote: string | null, id = "thr-guest"): DecorationThread {
+  return { id, anchorKind: "human_range", anchorBlockId: "blk-ai", quote };
+}
+
+/** The `(from, to)` of each inline highlight decoration. */
+function inlineRanges(set: ReturnType<typeof buildDecorations>): Array<[number, number]> {
+  return set
+    .find()
+    .filter((d) => (d as unknown as { type?: { attrs?: { class?: string } } }).type?.attrs?.class === "doc-comment-hl")
+    .map((d) => [d.from, d.to] as [number, number]);
+}
+
+describe("[COMP:app-web/comment-decorations] quote-anchored (markless human_range) threads", () => {
+  it("paints exactly the quote's run inside the anchored block + one badge", () => {
+    // "ai target" sits at positions 1..10 in plainDoc(); "target" = offsets 3..9.
+    const set = buildDecorations(plainDoc(), [guestThread("target")]);
+    expect(inlineRanges(set)).toEqual([[4, 10]]);
+    expect(badgeWidgetCount(set)).toBe(1);
+  });
+
+  it("falls back to the block's whole text when the quote no longer occurs", () => {
+    const set = buildDecorations(plainDoc(), [guestThread("vanished words")]);
+    expect(inlineRanges(set)).toEqual([[1, 10]]);
+    expect(badgeWidgetCount(set)).toBe(1);
+  });
+
+  it("defers to the doc's comment mark when the thread HAS one (no second highlight)", () => {
+    // markedDoc carries thr-h's mark over "hello"; a quote on the same thread is ignored.
+    const set = buildDecorations(markedDoc(), [
+      { id: "thr-h", anchorKind: "human_range", anchorBlockId: "blk-h", quote: "hello" },
+    ]);
+    expect(inlineRanges(set)).toEqual([[1, 6]]);
+    expect(badgeWidgetCount(set)).toBe(1);
+  });
+
+  it("ignores a markless range thread whose anchor block is gone", () => {
+    const set = buildDecorations(plainDoc(), [
+      { id: "x", anchorKind: "human_range", anchorBlockId: "blk-missing", quote: "ai" },
+    ]);
+    expect(set.find()).toHaveLength(0);
+  });
+
+  it("paints two guest threads on one block at their own quotes under one badge", () => {
+    const set = buildDecorations(plainDoc(), [guestThread("ai", "g1"), guestThread("target", "g2")]);
+    expect(inlineRanges(set)).toEqual([
+      [1, 3],
+      [4, 10],
+    ]);
+    expect(badgeWidgetCount(set)).toBe(1);
+  });
+});
+
+describe("[COMP:app-web/comment-decorations] textOffsetsToPositions", () => {
+  it("maps text offsets to doc positions across text leaves, and rejects empty / out-of-range", () => {
+    const doc = twoThreadsOneBlockDoc(); // "first" + " plain " + "second" in one paragraph at pos 0
+    const para = doc.child(0);
+    // "plain" = offsets 6..11 → inside the second text leaf (which starts at pos 6).
+    expect(textOffsetsToPositions(para, 0, 6, 11)).toEqual({ from: 7, to: 12 });
+    // A range spanning leaves: "t plain s" = offsets 4..13.
+    expect(textOffsetsToPositions(para, 0, 4, 13)).toEqual({ from: 5, to: 14 });
+    expect(textOffsetsToPositions(para, 0, 3, 3)).toBeNull();
+    expect(textOffsetsToPositions(para, 0, 0, 999)).toBeNull();
+  });
+});
 
 describe("[COMP:app-web/comment-decorations] findStaleCommentMarkRanges", () => {
   it("returns the range of each comment-mark run whose threadId is stale", () => {

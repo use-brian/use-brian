@@ -149,6 +149,17 @@ export type WechatCredentials = {
   get_updates_buf?: string
 }
 
+/**
+ * Custom (bridge-driven) channel credentials. The bridge token is never stored;
+ * only its SHA-256 hex hash is, and the bridge route compares constant-time.
+ * `kind` is a free display label (`wechat-desktop`, `sms-gateway`) used to
+ * pick a per-kind connect guide. See docs/architecture/channels/custom-channel.md.
+ */
+export type CustomChannelCredentials = {
+  bridge_token_hash: string
+  kind?: string
+}
+
 /** Credential maps for every BYO channel we support. */
 export type ChannelCredentials =
   | SlackCredentials
@@ -161,6 +172,7 @@ export type ChannelCredentials =
   | TwitterCredentials
   | EmailCredentials
   | WechatCredentials
+  | CustomChannelCredentials
 
 /**
  * Access control mode for who can interact with the bot.

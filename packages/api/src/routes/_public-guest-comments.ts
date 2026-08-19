@@ -4,7 +4,9 @@
  * cannot drift on the auth gate:
  *
  *   POST <base>/comment-threads          — open a thread (mints the guest's
- *                                           `guest_session_token` on first post)
+ *                                           `guest_session_token` on first post);
+ *                                           `anchorBlockId` + `quote` make it a
+ *                                           RANGE comment on selected text
  *   POST <base>/comment-threads/:id/messages — reply in one of the guest's OWN threads
  *   GET  <base>/comments?guestSessionToken=  — list the guest's OWN threads
  *
@@ -63,6 +65,16 @@ export function mountGuestCommentRoutes(
       typeof b.guestName === 'string' && b.guestName.trim() ? b.guestName.trim().slice(0, 80) : 'Guest'
     const guestSessionToken =
       typeof b.guestSessionToken === 'string' && b.guestSessionToken ? b.guestSessionToken : randomUUID()
+    // A RANGE comment (the guest selected text on the public page) carries the
+    // block it starts in + the selected text. The guest cannot write the doc,
+    // so the quote IS the anchor: both renderers find it inside the block and
+    // highlight exactly that run (a vanished quote falls back to the block).
+    // Bounded like every other guest field; a quote with no block is dropped
+    // (nothing could place it), a block with no quote tints the whole block.
+    const anchorBlockId =
+      typeof b.anchorBlockId === 'string' && b.anchorBlockId.trim() ? b.anchorBlockId.trim().slice(0, 128) : null
+    const quote =
+      anchorBlockId && typeof b.quote === 'string' && b.quote.trim() ? b.quote.trim().slice(0, 280) : null
     try {
       const { threadId } = await createGuestThread({
         pageId: target.pageId,
@@ -70,8 +82,8 @@ export function mountGuestCommentRoutes(
         guestName,
         guestEmail: typeof b.guestEmail === 'string' ? b.guestEmail.slice(0, 320) : null,
         guestSessionToken,
-        anchorBlockId: typeof b.anchorBlockId === 'string' ? b.anchorBlockId : null,
-        quote: typeof b.quote === 'string' ? b.quote.slice(0, 280) : null,
+        anchorBlockId,
+        quote,
         body: text.slice(0, 10000),
       })
       res.status(201).json({ threadId, guestSessionToken })

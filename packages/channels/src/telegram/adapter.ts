@@ -534,6 +534,7 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
 
     return {
       userId: String(msg.from?.id ?? msg.chat.id),
+      senderDisplay: msg.from?.first_name ?? msg.from?.username,
       channelId,
       messageId: String(msg.message_id),
       text: cleanText,

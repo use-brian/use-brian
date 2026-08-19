@@ -364,10 +364,19 @@ function guestCommentUrl(source: PublicSource, suffix: string, params: Record<st
 
 /** Post a new guest comment thread on the viewed page. Returns the (possibly
  *  newly minted) guest session token; null when the source no longer allows
- *  commenting (role dropped to view / unpublished / revoked). */
+ *  commenting (role dropped to view / unpublished / revoked). `anchorBlockId` +
+ *  `quote` make it a RANGE comment on the selected text (omit both for a
+ *  page-level comment): the guest can't write the doc, so the quote is the
+ *  anchor — both renderers find it inside the block and highlight exactly it. */
 export async function postGuestComment(
   source: PublicSource,
-  args: { guestName: string; guestSessionToken?: string; body: string },
+  args: {
+    guestName: string;
+    guestSessionToken?: string;
+    body: string;
+    anchorBlockId?: string;
+    quote?: string;
+  },
 ): Promise<{ threadId: string; guestSessionToken: string } | null> {
   try {
     const res = await fetch(guestCommentUrl(source, "/comment-threads"), {

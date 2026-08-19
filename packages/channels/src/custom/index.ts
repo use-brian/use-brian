@@ -1,0 +1,22 @@
+export { createCustomAdapter, type CustomAdapterOptions, type CustomOutboxEnqueue } from './adapter.js'
+export {
+  CUSTOM_CHANNEL_PROTOCOL_VERSION,
+  BRIDGE_INBOUND_TEXT_MAX_BYTES,
+  BRIDGE_INBOUND_MEDIA_MAX_ITEMS,
+  BRIDGE_INBOUND_MEDIA_MAX_BYTES,
+  bridgeInboundOversize,
+  base64DecodedLength,
+  type BridgeStatus,
+  type BridgeAction,
+  type BridgeState,
+  type BridgeInbound,
+  type BridgeInboundMessage,
+  type BridgeInboundMedia,
+  type BridgeInboundMediaKind,
+  type BridgeHello,
+  type OutboxItem,
+  type OutboxDocument,
+  type OutboxMessagePayload,
+  type OutboxAck,
+  type OutboxAckResult,
+} from './protocol.js'

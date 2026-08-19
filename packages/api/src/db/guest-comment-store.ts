@@ -200,3 +200,33 @@ export async function listGuestComments(
     comments: bySession.get(t.sessionId) ?? [],
   }))
 }
+
+/**
+ * The guest display name of a comment-thread SESSION, or null when the session
+ * is a member's thread (no `external_author_name`). Used by the authed
+ * `/sessions/:id/messages` read so a guest's rows show the name they typed
+ * rather than the shared sentinel user's ("Canvas Guest") — the public page
+ * already does this through `listPublicThreadsForPage`; this is the member
+ * side catching up. System-side: the caller has already gated the session.
+ */
+export async function guestAuthorNameForSession(sessionId: string): Promise<string | null> {
+  const r = await query<{ name: string | null }>(
+    `SELECT external_author_name AS name FROM comment_threads WHERE session_id = $1 LIMIT 1`,
+    [sessionId],
+  )
+  return r.rows[0]?.name ?? null
+}
+
+/**
+ * Attribution for one message row in a thread that has a guest author: a row
+ * sent by the sentinel user IS the guest — name it by the thread's
+ * `external_author_name` (never a photo; guests have none). Any other sender
+ * (a member reply, the assistant) is left to the normal profile lookup. Pure.
+ */
+export function guestSenderProfile(
+  senderUserId: string | null,
+  guestName: string | null,
+): { name: string; avatarUrl: null } | null {
+  if (senderUserId !== SENTINEL_GUEST_USER_ID) return null
+  return { name: guestName?.trim() || 'Guest', avatarUrl: null }
+}

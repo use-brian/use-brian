@@ -16,7 +16,7 @@
  * Component tag: [COMP:api/channels-route].
  */
 
-import { randomBytes } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { Router } from 'express'
 import type { Response } from 'express'
 import { z } from 'zod'
@@ -37,6 +37,8 @@ import type { LinkCodeStore } from '../db/link-codes.js'
 import type { DiscordConnectorClient } from '../discord/connector-client.js'
 import type { WhatsappConnectorClient } from '../whatsapp/connector-client.js'
 import type { WechatConnectorClient } from '../wechat/connector-client.js'
+import type { CustomChannelStore } from '../db/custom-channel-store.js'
+import { mintBridgeToken, hashBridgeToken } from '../db/custom-channel-token.js'
 import type {
   ChannelIntegration,
   ChannelIntegrationStore,
@@ -140,6 +142,13 @@ export type ChannelsRouteOptions = {
    */
   wechatConnector?: WechatConnectorClient
   /**
+   * Custom (bridge-driven) channel state + outbox store. Required for the
+   * custom channel endpoints (POST `.../channels/custom`, rotate-token,
+   * state, input, disconnect); they return 503 if missing. See
+   * docs/architecture/channels/custom-channel.md.
+   */
+  customChannelStore?: CustomChannelStore
+  /**
    * Hosted default Telegram bot token (`env.TELEGRAM_BOT_TOKEN`). Fallback bot
    * for resolving display names of sessions-derived telegram delivery
    * destinations when the workspace has no BYO bot (or its bot isn't in the
@@ -217,6 +226,22 @@ const connectWhatsAppCloudSchema = z.object({
 
 const wechatPairStartSchema = z.object({
   defaultAssistantId: z.string().uuid().nullish(),
+}).strict()
+
+const connectCustomSchema = z.object({
+  displayName: z.string().min(1).max(200),
+  // Free label (`wechat-desktop`, `sms-gateway`) for display + per-kind guide.
+  // An empty form field arrives as null or "" - both mean "no kind".
+  kind: z.preprocess(
+    (v) => (v === null || (typeof v === 'string' && v.trim() === '') ? undefined : v),
+    z.string().min(1).max(64).regex(/^[a-z0-9][a-z0-9._-]*$/i).optional(),
+  ),
+  defaultAssistantId: z.string().uuid().nullish(),
+}).strict()
+
+const customInputSchema = z.object({
+  requestId: z.string().min(1).max(200),
+  value: z.string().max(4000),
 }).strict()
 
 const wechatVerifyCodeSchema = z.object({
@@ -522,7 +547,7 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
        FROM sessions s
        JOIN assistants a ON a.id = s.assistant_id
        WHERE a.workspace_id = $1
-         AND s.channel_type IN ('telegram', 'slack', 'whatsapp')
+         AND s.channel_type IN ('telegram', 'slack', 'whatsapp', 'custom')
          AND s.channel_id <> 'notifications'
        ORDER BY s.channel_type, s.channel_id, s.last_active_at DESC
        LIMIT 200`,
@@ -1359,6 +1384,225 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
     })
   })
 
+  // ── Custom — bridge-driven channel ─────────────────────────────
+  //
+  // A custom channel's platform is driven by an operator-run bridge process
+  // that talks to `/bridge/v1/channels/:channelId` with a bearer token. This
+  // surface mints the channel + integration (the token is returned ONCE; only
+  // its SHA-256 hash is stored in the encrypted credentials), rotates the
+  // token, reads the bridge's published state, answers an `input` action,
+  // and disconnects. See docs/architecture/channels/custom-channel.md.
+
+  // POST /workspaces/:workspaceId/channels/custom — create + mint the token.
+  router.post('/workspaces/:workspaceId/channels/custom', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const { workspaceId } = req.params
+
+    const role = await opts.workspaceStore.getRole(userId, workspaceId)
+    if (!role) { res.status(403).json({ error: 'Not a member of this workspace' }); return }
+    if (!opts.integrationStore || !opts.customChannelStore) {
+      res.status(503).json({ error: 'Custom channels are not configured on this server' })
+      return
+    }
+
+    const parsed = connectCustomSchema.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Invalid input', detail: parsed.error.message })
+      return
+    }
+
+    // Each create is a fresh channel: the bot identity is a minted UUID, so
+    // the re-install lookup never matches an existing row.
+    const botUserId = `custom:${randomUUID()}`
+    let provisioned
+    try {
+      provisioned = await findOrCreateChannelForWorkspaceConnect({
+        workspaceId,
+        channelType: 'custom',
+        displayName: parsed.data.displayName,
+        externalIdentity: { botUserId },
+        defaultAssistantId: parsed.data.defaultAssistantId ?? null,
+      })
+    } catch (err) {
+      const msg = (err as Error).message
+      console.error('[channels] custom channel provisioning failed:', err)
+      if (msg.toLowerCase().includes('workspace')) {
+        res.status(400).json({ error: 'defaultAssistantId must belong to this workspace' })
+        return
+      }
+      res.status(500).json({ error: 'Failed to provision channel' })
+      return
+    }
+
+    const bridgeToken = mintBridgeToken()
+    try {
+      await opts.integrationStore.upsert({
+        channelId: provisioned.channelId,
+        channelType: 'custom',
+        teamId: null,
+        teamName: parsed.data.kind ?? null,
+        botUserId,
+        botUsername: null,
+        credentials: {
+          bridge_token_hash: hashBridgeToken(bridgeToken),
+          ...(parsed.data.kind ? { kind: parsed.data.kind } : {}),
+        },
+        actingUserId: userId,
+      })
+    } catch (err) {
+      console.error('[channels] custom integration upsert failed:', err)
+      res.status(500).json({ error: 'Failed to save integration' })
+      return
+    }
+
+    // Seed the state row so Studio shows "connecting / bridge offline"
+    // instead of nothing until the bridge first calls in.
+    await opts.customChannelStore.putState(provisioned.channelId, {
+      status: 'connecting',
+      message: 'Waiting for the bridge to connect.',
+    }).catch((err) => console.error('[channels] custom state seed failed:', err))
+
+    const channel = await getChannelForUser(userId, provisioned.channelId)
+    res.status(201).json({
+      channel: channel ? serializeChannel(channel) : null,
+      bridgeToken,
+      kind: parsed.data.kind ?? null,
+    })
+  })
+
+  // POST /workspaces/:workspaceId/channels/:channelId/custom/rotate-token
+  router.post('/workspaces/:workspaceId/channels/:channelId/custom/rotate-token', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const { workspaceId, channelId } = req.params
+
+    const role = await opts.workspaceStore.getRole(userId, workspaceId)
+    if (!role) { res.status(403).json({ error: 'Not a member of this workspace' }); return }
+    if (!opts.integrationStore) {
+      res.status(503).json({ error: 'Custom channels are not configured on this server' })
+      return
+    }
+
+    const channel = await loadChannel(userId, workspaceId, channelId, res)
+    if (!channel) return
+    if (channel.channelType !== 'custom') { res.status(400).json({ error: 'Not a custom channel' }); return }
+
+    const integrations = await loadIntegrations(userId, workspaceId)
+    const existing = integrations.get(channelId)
+    if (!existing) { res.status(404).json({ error: 'Channel integration not found' }); return }
+    const current = await opts.integrationStore.getForUserWithCredentials(userId, existing.id)
+    const currentCreds = (current?.credentials ?? {}) as { kind?: string }
+
+    const bridgeToken = mintBridgeToken()
+    try {
+      await opts.integrationStore.upsert({
+        channelId,
+        channelType: 'custom',
+        teamId: existing.teamId,
+        teamName: existing.teamName,
+        botUserId: existing.botUserId,
+        botUsername: existing.botUsername,
+        credentials: {
+          bridge_token_hash: hashBridgeToken(bridgeToken),
+          ...(currentCreds.kind ? { kind: currentCreds.kind } : {}),
+        },
+        actingUserId: userId,
+      })
+    } catch (err) {
+      console.error('[channels] custom token rotation failed:', err)
+      res.status(500).json({ error: 'Failed to rotate token' })
+      return
+    }
+    res.json({ bridgeToken })
+  })
+
+  // GET /workspaces/:workspaceId/channels/:channelId/custom/state
+  router.get('/workspaces/:workspaceId/channels/:channelId/custom/state', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const { workspaceId, channelId } = req.params
+
+    const role = await opts.workspaceStore.getRole(userId, workspaceId)
+    if (!role) { res.status(403).json({ error: 'Not a member of this workspace' }); return }
+    if (!opts.customChannelStore) {
+      res.status(503).json({ error: 'Custom channels are not configured on this server' })
+      return
+    }
+
+    const channel = await loadChannel(userId, workspaceId, channelId, res)
+    if (!channel) return
+    if (channel.channelType !== 'custom') { res.status(400).json({ error: 'Not a custom channel' }); return }
+
+    const state = await opts.customChannelStore.getState(channelId)
+    res.json({
+      state: state ?? {
+        channelId,
+        status: 'connecting',
+        lastSeenAt: null,
+        updatedAt: null,
+        online: false,
+        outboxDepth: 0,
+      },
+    })
+  })
+
+  // POST /workspaces/:workspaceId/channels/:channelId/custom/input
+  router.post('/workspaces/:workspaceId/channels/:channelId/custom/input', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const { workspaceId, channelId } = req.params
+
+    const role = await opts.workspaceStore.getRole(userId, workspaceId)
+    if (!role) { res.status(403).json({ error: 'Not a member of this workspace' }); return }
+    if (!opts.customChannelStore) {
+      res.status(503).json({ error: 'Custom channels are not configured on this server' })
+      return
+    }
+
+    const parsed = customInputSchema.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Invalid input', detail: parsed.error.message })
+      return
+    }
+
+    const channel = await loadChannel(userId, workspaceId, channelId, res)
+    if (!channel) return
+    if (channel.channelType !== 'custom') { res.status(400).json({ error: 'Not a custom channel' }); return }
+
+    const id = await opts.customChannelStore.enqueue(channelId, {
+      type: 'input',
+      peerId: null,
+      payload: { requestId: parsed.data.requestId, value: parsed.data.value },
+    })
+    res.json({ ok: true, itemId: id })
+  })
+
+  // POST /workspaces/:workspaceId/channels/:channelId/custom/disconnect
+  router.post('/workspaces/:workspaceId/channels/:channelId/custom/disconnect', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const { workspaceId, channelId } = req.params
+
+    const role = await opts.workspaceStore.getRole(userId, workspaceId)
+    if (!role) { res.status(403).json({ error: 'Not a member of this workspace' }); return }
+    if (!opts.customChannelStore) {
+      res.status(503).json({ error: 'Custom channels are not configured on this server' })
+      return
+    }
+
+    const channel = await loadChannel(userId, workspaceId, channelId, res)
+    if (!channel) return
+    if (channel.channelType !== 'custom') { res.status(400).json({ error: 'Not a custom channel' }); return }
+
+    await opts.customChannelStore.enqueue(channelId, { type: 'disconnect', peerId: null, payload: {} })
+    await opts.customChannelStore.putState(channelId, {
+      status: 'disconnected',
+      message: 'Disconnect requested from Studio.',
+    })
+    res.json({ ok: true })
+  })
+
   // ── WeChat — BYON iLink bot, QR pairing ─────────────────────────
   //
   // Unlike the token-paste platforms, WeChat binds a bot identity by QR scan:
@@ -1619,6 +1863,15 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
 
     if (channel.channelType === 'whatsapp' && !isWhatsAppCloud) {
       await query('DELETE FROM wa_auth_state WHERE channel_id = $1', [channelId])
+    }
+
+    // A custom channel's bridge learns about the delete from a `disconnect`
+    // outbox item — enqueue it BEFORE the cascade (the outbox row goes with
+    // the channel, so the bridge must already be holding it or see a 404 on
+    // its next poll; both stop it). Best-effort, never fails the delete.
+    if (channel.channelType === 'custom' && opts.customChannelStore) {
+      await opts.customChannelStore.enqueue(channelId, { type: 'disconnect', peerId: null, payload: {} })
+        .catch((err) => console.error('[channels] custom disconnect enqueue failed:', err))
     }
 
     await deleteChannel(userId, channelId)

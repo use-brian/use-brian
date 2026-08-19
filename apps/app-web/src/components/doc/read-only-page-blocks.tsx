@@ -28,6 +28,11 @@ import { scanStamps } from "@use-brian/shared";
 import type { PublicBlock, PublicComment } from "@/lib/api/public-share";
 import { publicMediaUrlFor, type PublicSource } from "@/lib/api/public-share";
 import { useRecordingPlayer } from "@/lib/recordings/recording-player-context";
+import {
+  anchorThreadsInRichText,
+  type BlockAnchor,
+  type QuoteTipNode,
+} from "@/lib/comment-quote-anchor";
 
 const noop = () => {};
 
@@ -178,6 +183,9 @@ function renderToggle(
   /** Structured `children` blocks (the toggle child model) — rendered in the
    *  body after any legacy richText body nodes. */
   childBlocks?: ReactNode,
+  /** Root attributes for a toggle BLOCK (`data-block-id` + an unplaced-thread
+   *  tint); nested inline toggles pass none. */
+  rootProps?: RootProps,
 ): ReactNode {
   const nodes = content ?? [];
   const head = nodes[0];
@@ -190,7 +198,7 @@ function renderToggle(
   const body = nodes.slice(1);
   const hasBody = body.length > 0 || !!childBlocks;
   return (
-    <details key={key} className="doc-toggle">
+    <details key={key} {...rootProps} className={cx("doc-toggle", rootProps?.className)}>
       <summary>
         <span className="doc-toggle-summary">{summary}</span>
       </summary>
@@ -238,11 +246,55 @@ function renderNode(node: TipNode, key: string): ReactNode {
   }
 }
 
-/** Render opaque rich-text JSON (a Tiptap doc) to React. */
-function RichText({ value }: { value: unknown }) {
+/** Render opaque rich-text JSON (a Tiptap doc) to React. `anchors` are the
+ *  threads anchored to the owning block: those without an inline `comment`
+ *  mark get one injected over their quote (`anchorThreadsInRichText`), so a
+ *  guest's range comment highlights exactly what they selected. Threads whose
+ *  quote is gone are the caller's whole-block fallback (`anchorRich`). */
+function RichText({ value, anchors }: { value: unknown; anchors?: BlockAnchor[] }) {
   const doc = value as TipNode | undefined;
   if (!doc) return null;
-  return <>{renderNodes(doc.content, "rt")}</>;
+  const nodes = anchors && anchors.length > 0 ? anchorRich(doc, anchors).nodes : doc.content;
+  return <>{renderNodes(nodes, "rt")}</>;
+}
+
+/** Anchor `anchors` into a rich-text doc: the marked/quote-placed nodes plus the
+ *  threads that found no home (→ whole-block tint). Pure. */
+function anchorRich(
+  value: unknown,
+  anchors: BlockAnchor[],
+): { nodes: TipNode[]; unplaced: BlockAnchor[] } {
+  const doc = value as TipNode | undefined;
+  const r = anchorThreadsInRichText(doc?.content as QuoteTipNode[] | undefined, anchors);
+  return { nodes: r.nodes as TipNode[], unplaced: r.unplaced };
+}
+
+/** `className` join that drops falsy parts. */
+function cx(...parts: Array<string | undefined | false>): string | undefined {
+  const s = parts.filter(Boolean).join(" ");
+  return s || undefined;
+}
+
+/** Attributes every block root carries: `data-block-id` (what the public
+ *  guest-comment selection resolves a selection to — `guest-comment-selection.ts`)
+ *  plus, when a thread anchored here could not be placed inline (no mark, quote
+ *  gone — or a textless block), the whole-block tint + rail anchor. */
+type RootProps = {
+  "data-block-id"?: string;
+  "data-comment-thread"?: string;
+  "data-thread-id"?: string;
+  className?: string;
+};
+function rootProps(block: PublicBlock, unplaced: ReadonlyArray<BlockAnchor> = []): RootProps {
+  const out: RootProps = {};
+  if (block.id) out["data-block-id"] = block.id;
+  const tint = unplaced[0]?.threadId;
+  if (tint) {
+    out["data-comment-thread"] = tint;
+    out["data-thread-id"] = tint;
+    out.className = "doc-comment-block-hl";
+  }
+  return out;
 }
 
 // ── Nested list rendering (Block[] path) ──────────────────────────────
@@ -278,19 +330,27 @@ function foldListTree(run: PublicBlock[]): ListNode[] {
   return roots;
 }
 
-function renderListNodes(nodes: ListNode[], keyPrefix: string): ReactNode[] {
+function renderListNodes(
+  nodes: ListNode[],
+  keyPrefix: string,
+  anchors: AnchorMap = EMPTY_ANCHORS,
+): ReactNode[] {
   const out: ReactNode[] = [];
   let i = 0;
   while (i < nodes.length) {
     const kind = nodes[i].block.kind;
     const group: ListNode[] = [];
     while (i < nodes.length && nodes[i].block.kind === kind) group.push(nodes[i++]);
-    const items = group.map((n, j) => (
-      <li key={n.block.id || `${keyPrefix}-${j}`}>
-        <RichText value={n.block.richText} />
-        {n.children.length > 0 ? renderListNodes(n.children, `${keyPrefix}-${j}`) : null}
-      </li>
-    ));
+    const items = group.map((n, j) => {
+      const a = anchors.get(n.block.id) ?? [];
+      const rich = a.length > 0 ? anchorRich(n.block.richText, a) : null;
+      return (
+        <li key={n.block.id || `${keyPrefix}-${j}`} {...rootProps(n.block, rich?.unplaced)}>
+          {rich ? renderNodes(rich.nodes, "rt") : <RichText value={n.block.richText} />}
+          {n.children.length > 0 ? renderListNodes(n.children, `${keyPrefix}-${j}`, anchors) : null}
+        </li>
+      );
+    });
     out.push(
       kind === "numbered_list_item" ? (
         <ol key={`${keyPrefix}-ol-${i}`}>{items}</ol>
@@ -302,24 +362,25 @@ function renderListNodes(nodes: ListNode[], keyPrefix: string): ReactNode[] {
   return out;
 }
 
-// ── Comment anchors (block-id based) ──────────────────────────────────
+// ── Comment anchors (block-id + quote based) ──────────────────────────
 //
 // A comment's inline `comment` mark survives serialization only for rich-text
 // blocks (callout / quote / list / to_do / toggle / table cells) — there the
 // mark rides inside the block's opaque Tiptap `richText`, so `renderInline`
 // emits the `.doc-comment-hl` swatch + `data-comment-thread` rail anchor for it.
-// A `heading` / `text` block, though, serializes to a FLAT `text` string
-// (block-mapping `inlineText` drops every inline mark), so its comment mark is
-// gone by the time the public render runs — the highlight + rail anchor would
-// silently vanish, and the rail card then parks at the top, detached from its
-// line. Rebuild the anchor from the thread's `anchorBlockId` instead: that points
-// at the block id (`block.id` ↔ the PM node's `blockId`), which is intact. A
-// text-bearing block gets the inline swatch over its text; a commented atom
-// (chart / image / … — no inline text to mark) gets a whole-block tint, mirroring
-// the editor's `buildDecorations` (comment-decorations.ts) so both surfaces match.
+// Two cases arrive with NO mark to paint: a `heading` / `text` block serializes
+// to a FLAT `text` string (block-mapping `inlineText` drops every inline mark),
+// and a GUEST's range comment from the public page never had one (a guest can't
+// write the Yjs doc — the thread persists only `anchorBlockId` + `quote`).
+// Both re-anchor the same way (`comment-quote-anchor.ts`): find the thread's
+// `quote` inside the block's text and paint exactly that range; a quote that no
+// longer occurs falls back to the whole block — an inline swatch over a
+// text-bearing block's text, a whole-block tint for a commented atom (chart /
+// image / … — no inline text to mark), mirroring the editor's
+// `buildDecorations` (comment-decorations.ts) so both surfaces match.
 
-/** Rich-text block kinds — their comment mark survives in `richText`, so
- *  `renderInline` already emits the anchor; never double-anchor them here. */
+/** Rich-text block kinds — `richText` carries marks, and quote anchors are
+ *  injected into it (`RichText anchors=`); never double-anchor them outside. */
 const RICH_TEXT_KINDS = new Set([
   "callout",
   "quote",
@@ -329,36 +390,48 @@ const RICH_TEXT_KINDS = new Set([
   "toggle",
   "table",
 ]);
-/** Plain-text block kinds — flattened to `text`, so they get an inline swatch
- *  rebuilt from `anchorBlockId` (handled in `BlockView`, not the atom wrapper). */
+/** Plain-text block kinds — flattened to `text`, anchored by quote over that
+ *  string (handled in `BlockView`, not the atom wrapper). */
 const PLAIN_TEXT_KINDS = new Set(["heading", "text"]);
 
-/** blockId → threadId for every block-anchored comment thread. First thread
- *  wins if several anchor one block: the rail aligns one card per thread, and a
- *  plain-text block carries only one inline anchor span, so any extra threads on
- *  the same block fall back to the top-stacked position (rare; acceptable). Pure
- *  + exported for unit testing. */
+/** blockId → the threads anchored there, in thread order. */
+export type AnchorMap = Map<string, BlockAnchor[]>;
+const EMPTY_ANCHORS: AnchorMap = new Map();
+
+/** blockId → every thread anchored to that block (document order of the
+ *  threads list). Each thread keeps its `quote` so the renderer can place it
+ *  precisely; several threads may anchor one block (each on its own quote).
+ *  Pure + exported for unit testing. */
 export function commentAnchorsByBlock(
-  comments: ReadonlyArray<{ threadId: string; anchorBlockId: string | null }>,
-): Map<string, string> {
-  const map = new Map<string, string>();
+  comments: ReadonlyArray<{ threadId: string; anchorBlockId: string | null; quote?: string | null }>,
+): AnchorMap {
+  const map: AnchorMap = new Map();
   for (const c of comments) {
-    if (c.anchorBlockId && !map.has(c.anchorBlockId)) map.set(c.anchorBlockId, c.threadId);
+    if (!c.anchorBlockId) continue;
+    const list = map.get(c.anchorBlockId) ?? [];
+    list.push({ threadId: c.threadId, quote: c.quote ?? null });
+    map.set(c.anchorBlockId, list);
   }
   return map;
 }
 
-/** A plain-text block's text, wrapped in the comment swatch + rail anchor when a
- *  thread is anchored to the block. `data-comment-thread` is what the share rail
- *  aligns each card to; `data-thread-id` wires the linked hover (comment-hover.ts).
- *  Mirrors the editor's inline highlight over a text-bearing block. */
-function commentedText(text: string, threadId: string | undefined): ReactNode {
-  if (!threadId || !text) return <TimecodeText text={text} />;
-  return (
-    <span data-comment-thread={threadId} data-thread-id={threadId} className="doc-comment-hl">
-      <TimecodeText text={text} />
-    </span>
-  );
+/** A plain-text block's text with its anchored threads painted: a thread whose
+ *  quote occurs in the text gets the swatch over exactly that run; one whose
+ *  quote is absent (or null) wraps the whole text. `data-comment-thread` is
+ *  what the share rail aligns each card to; `data-thread-id` wires the linked
+ *  hover (comment-hover.ts). */
+function commentedText(text: string, anchors: ReadonlyArray<BlockAnchor> | undefined): ReactNode {
+  if (!anchors || anchors.length === 0 || !text) return <TimecodeText text={text} />;
+  const { nodes, unplaced } = anchorThreadsInRichText([{ type: "text", text }], anchors);
+  let el: ReactNode = <>{renderNodes(nodes as TipNode[], "pt")}</>;
+  for (const a of unplaced) {
+    el = (
+      <span data-comment-thread={a.threadId} data-thread-id={a.threadId} className="doc-comment-hl">
+        {el}
+      </span>
+    );
+  }
+  return el;
 }
 
 // ── Block dispatch ────────────────────────────────────────────────────
@@ -376,6 +449,7 @@ function renderChildBlocks(
   source: PublicSource,
   mounted: boolean,
   paths?: Record<string, string>,
+  anchors: AnchorMap = EMPTY_ANCHORS,
 ): ReactNode {
   const children = (block as { children?: PublicBlock[] }).children;
   if (!Array.isArray(children) || children.length === 0) return null;
@@ -393,13 +467,21 @@ function renderChildBlocks(
         run.push(children[i]);
         i++;
       }
-      out.push(...renderListNodes(foldListTree(run), `${block.id}-cl-${i}`));
+      out.push(...renderListNodes(foldListTree(run), `${block.id}-cl-${i}`, anchors));
       continue;
     }
     const child = children[i];
     out.push(
       <Fragment key={child.id || `${block.id}-c${i}`}>
-        <BlockView block={child} widget={undefined} source={source} mounted={mounted} paths={paths} />
+        <BlockView
+          block={child}
+          widget={undefined}
+          source={source}
+          mounted={mounted}
+          paths={paths}
+          anchors={anchors.get(child.id)}
+          anchorMap={anchors}
+        />
       </Fragment>,
     );
     i++;
@@ -412,7 +494,8 @@ function BlockView({
   widget,
   source,
   mounted,
-  commentThreadId,
+  anchors,
+  anchorMap = EMPTY_ANCHORS,
   paths,
 }: {
   block: PublicBlock;
@@ -421,44 +504,64 @@ function BlockView({
   mounted: boolean;
   /** Custom-domain (site) sources only: canonical site path per page id. */
   paths?: Record<string, string>;
-  /** Thread anchored to this block (heading / text only — atoms are wrapped by
-   *  the caller). When set, the block's text carries the comment swatch + anchor. */
-  commentThreadId?: string;
+  /** Threads anchored to THIS block (text-bearing kinds paint them inline over
+   *  the quote / whole text; atoms are tinted by the caller). */
+  anchors?: BlockAnchor[];
+  /** The whole page's anchor map — for the block's structured `children`. */
+  anchorMap?: AnchorMap;
 }) {
+  const a = anchors ?? [];
+  const root = rootProps(block);
   switch (block.kind) {
     case "heading": {
       const lvl = Math.min(Math.max(Number(block.level ?? 2), 1), 4);
       const Tag = `h${lvl}` as "h1" | "h2" | "h3" | "h4";
-      return <Tag>{commentedText(String(block.text ?? ""), commentThreadId)}</Tag>;
+      return <Tag {...root}>{commentedText(String(block.text ?? ""), a)}</Tag>;
     }
     case "text": {
-      const variant = block.variant === "muted" ? "text-muted-foreground" : "";
-      return <p className={variant}>{commentedText(String(block.text ?? ""), commentThreadId)}</p>;
+      const variant = block.variant === "muted" ? "text-muted-foreground" : undefined;
+      return (
+        <p {...root} className={cx(variant, root.className)}>
+          {commentedText(String(block.text ?? ""), a)}
+        </p>
+      );
     }
     case "divider":
-      return <hr className="my-4 border-border" />;
-    case "code":
+      return <hr {...root} className={cx("my-4 border-border", root.className)} />;
+    case "code": {
+      // No inline run to paint inside a code block → an anchored thread tints it.
+      const r = rootProps(block, a);
       return (
-        <pre className="overflow-x-auto rounded-md bg-muted p-3 text-sm">
+        <pre {...r} className={cx("overflow-x-auto rounded-md bg-muted p-3 text-sm", r.className)}>
           <code>{String(block.code ?? "")}</code>
         </pre>
       );
-    case "quote":
+    }
+    case "quote": {
+      const rich = anchorRich(block.richText, a);
+      const r = rootProps(block, rich.unplaced);
       return (
-        <blockquote className="border-l-2 border-border pl-3 text-muted-foreground">
-          <RichText value={block.richText} />
+        <blockquote {...r} className={cx("border-l-2 border-border pl-3 text-muted-foreground", r.className)}>
+          {renderNodes(rich.nodes, "rt")}
         </blockquote>
       );
-    case "callout":
+    }
+    case "callout": {
+      const rich = anchorRich(block.richText, a);
+      const r = rootProps(block, rich.unplaced);
       return (
-        <div className="flex gap-3 rounded-md border border-border bg-muted/40 px-3 py-2">
+        <div
+          {...r}
+          className={cx("flex gap-3 rounded-md border border-border bg-muted/40 px-3 py-2", r.className)}
+        >
           <div className="flex-shrink-0 pt-[2px] text-lg leading-none">{String(block.icon ?? "💡")}</div>
           <div className="min-w-0 flex-1">
-            <RichText value={block.richText} />
-            {renderChildBlocks(block, source, mounted, paths)}
+            {renderNodes(rich.nodes, "rt")}
+            {renderChildBlocks(block, source, mounted, paths, anchorMap)}
           </div>
         </div>
       );
+    }
     // bulleted_list_item / numbered_list_item are grouped into real <ul>/<ol>
     // by ReadOnlyPageBlocks (so numbers sequence + nesting markers cycle).
     case "to_do": {
@@ -472,8 +575,14 @@ function BlockView({
       // `.doc-todo-check`, globals.css), mirroring the span Tiptap's TaskItem
       // node view renders, so a published to-do renders the same control as the
       // editor it was authored in.
+      const rich = anchorRich(block.richText, a);
+      const r = rootProps(block, rich.unplaced);
       return (
-        <label className="flex items-start gap-2" style={indent ? { marginLeft: indent * 24 } : undefined}>
+        <label
+          {...r}
+          className={cx("flex items-start gap-2", r.className)}
+          style={indent ? { marginLeft: indent * 24 } : undefined}
+        >
           <span className="doc-todo-check grid h-7 flex-none place-items-center">
             <input type="checkbox" checked={Boolean(block.checked)} readOnly disabled />
             <span />
@@ -483,14 +592,19 @@ function BlockView({
               block.checked ? " text-muted-foreground line-through" : ""
             }`}
           >
-            <RichText value={block.richText} />
+            {renderNodes(rich.nodes, "rt")}
           </div>
         </label>
       );
     }
     case "toggle": {
-      const doc = block.richText as TipNode | undefined;
-      return renderToggle(doc?.content, block.id, renderChildBlocks(block, source, mounted, paths));
+      const rich = anchorRich(block.richText, a);
+      return renderToggle(
+        rich.nodes,
+        block.id,
+        renderChildBlocks(block, source, mounted, paths, anchorMap),
+        rootProps(block, rich.unplaced),
+      );
     }
     case "table": {
       // Native simple table — cells are rich text (mentions already scrubbed
@@ -499,19 +613,32 @@ function BlockView({
       if (rows.length === 0) return null;
       const hasHeaderRow = block.hasHeaderRow === true;
       const hasHeaderColumn = block.hasHeaderColumn === true;
+      // Anchor threads cell by cell in reading order: a thread placed (or
+      // already marked) in an earlier cell is not re-tried in later ones; what
+      // no cell can place tints the whole table.
+      let pending: BlockAnchor[] = a;
+      const cells = rows.map((row) =>
+        (Array.isArray(row) ? row : []).map((cellValue) => {
+          if (pending.length === 0) return { value: cellValue, nodes: null as TipNode[] | null };
+          const rich = anchorRich(cellValue, pending);
+          pending = rich.unplaced;
+          return { value: cellValue, nodes: rich.nodes };
+        }),
+      );
+      const rp = rootProps(block, pending);
       return (
-        <div className="doc-public-table-wrap my-2 overflow-x-auto">
+        <div {...rp} className={cx("doc-public-table-wrap my-2 overflow-x-auto", rp.className)}>
           <table className="doc-public-table">
             <tbody>
-              {rows.map((row, r) => (
+              {cells.map((row, r) => (
                 <tr key={r}>
-                  {(Array.isArray(row) ? row : []).map((cellValue, c) => {
+                  {row.map((cell, c) => {
                     const isHeader =
                       (hasHeaderRow && r === 0) || (hasHeaderColumn && c === 0);
                     const Cell = isHeader ? "th" : "td";
                     return (
                       <Cell key={c}>
-                        <RichText value={cellValue} />
+                        {cell.nodes ? renderNodes(cell.nodes, "rt") : <RichText value={cell.value} />}
                       </Cell>
                     );
                   })}
@@ -527,7 +654,7 @@ function BlockView({
       if (!ref) return null;
       const alt = typeof block.alt === "string" ? block.alt : (ref.name ?? "");
       return (
-        <figure className="my-2">
+        <figure {...root} className={cx("my-2", root.className)}>
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src={publicMediaUrlFor(source, block.id)} alt={alt} className="max-w-full rounded-md" loading="lazy" />
           {typeof block.caption === "string" && block.caption ? (
@@ -541,10 +668,14 @@ function BlockView({
       if (!ref) return null;
       return (
         <a
+          {...root}
           href={publicMediaUrlFor(source, block.id)}
           target="_blank"
           rel="noopener noreferrer"
-          className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm hover:bg-muted"
+          className={cx(
+            "inline-flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm hover:bg-muted",
+            root.className,
+          )}
         >
           {ref.name ?? "Download file"}
         </a>
@@ -556,10 +687,11 @@ function BlockView({
       if (!url) return null;
       return (
         <a
+          {...root}
           href={safeHref(url)}
           target="_blank"
           rel="noopener noreferrer nofollow"
-          className="block rounded-md border border-border px-3 py-2 hover:bg-muted"
+          className={cx("block rounded-md border border-border px-3 py-2 hover:bg-muted", root.className)}
         >
           <div className="font-medium">{meta?.title ?? url}</div>
           {meta?.description ? <div className="text-sm text-muted-foreground">{meta.description}</div> : null}
@@ -586,8 +718,12 @@ function BlockView({
             : `/share/p/${encodeURIComponent(childId)}`;
       return (
         <a
+          {...root}
           href={href}
-          className="flex items-center gap-2 rounded-md py-1 font-medium underline-offset-4 hover:underline"
+          className={cx(
+            "flex items-center gap-2 rounded-md py-1 font-medium underline-offset-4 hover:underline",
+            root.className,
+          )}
         >
           {emoji ? (
             <span className="text-lg leading-none" aria-hidden>{emoji}</span>
@@ -603,7 +739,11 @@ function BlockView({
     case "diagram":
       // Client-only: chart/diagram widgets touch `window` at render, so we
       // skip them during SSR and paint after mount.
-      return mounted && widget ? <div className="my-2">{renderWidget(widget, noop)}</div> : null;
+      return mounted && widget ? (
+        <div {...root} className={cx("my-2", root.className)}>
+          {renderWidget(widget, noop)}
+        </div>
+      ) : null;
     // video / audio URLs are blanked server-side. Nothing to render.
     default:
       return null;
@@ -652,27 +792,32 @@ export function ReadOnlyPageBlocks({
         run.push(blocks[i]);
         i++;
       }
-      out.push(...renderListNodes(foldListTree(run), `list-${i}`));
+      out.push(...renderListNodes(foldListTree(run), `list-${i}`, anchors));
     } else {
       const block = blocks[i];
       const key = block.id || String(i);
-      const threadId = anchors.get(block.id);
+      const blockAnchors = anchors.get(block.id);
+      const threadId = blockAnchors?.[0]?.threadId;
       const blockEl = (
         <BlockView
           block={block}
           widget={children[i]}
           source={source}
           mounted={mounted}
-          commentThreadId={threadId}
+          anchors={blockAnchors}
+          anchorMap={anchors}
           paths={paths}
         />
       );
       // An anchored atom (chart / image / file / … — no inline text to carry the
-      // swatch, and not a rich-text block whose mark `renderInline` already
-      // anchored) gets a whole-block tint + rail anchor, mirroring the editor's
-      // textless-block `doc-comment-block-hl`.
+      // swatch; text-bearing kinds paint their own inline swatch / tint inside
+      // `BlockView`) gets a whole-block tint + rail anchor, mirroring the
+      // editor's textless-block `doc-comment-block-hl`.
       const atomAnchor =
-        !!threadId && !RICH_TEXT_KINDS.has(block.kind) && !PLAIN_TEXT_KINDS.has(block.kind);
+        !!threadId &&
+        !RICH_TEXT_KINDS.has(block.kind) &&
+        !PLAIN_TEXT_KINDS.has(block.kind) &&
+        block.kind !== "code";
       out.push(
         atomAnchor ? (
           <div

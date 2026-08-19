@@ -155,6 +155,7 @@ export function createMsTeamsAdapter(options: MsTeamsAdapterOptions): ChannelAda
 
       return {
         userId: fromId,
+        senderDisplay: activity.from?.name,
         channelId: conversationId,
         messageId: activity.id,
         text,
