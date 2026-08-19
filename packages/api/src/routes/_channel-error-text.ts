@@ -23,8 +23,16 @@
  * Spec: docs/architecture/platform/byo-llm-key.md → "Strict fallback and
  * attachments".
  */
+/**
+ * A channel turn never carries an explicit `custom:<id>` selection, so it
+ * reaches a custom endpoint through the workspace's TIER ROUTE - and a tier
+ * route captures every built-in model in the picker too. "Use the web app to
+ * choose a built-in model", the wording this constant carried until
+ * 2026-08-19, therefore sent the user somewhere that refuses the same image
+ * for the same reason. Name the setting that actually lifts the restriction.
+ */
 export const CUSTOM_MODEL_IMAGE_REJECTION =
-  'Custom model endpoints currently support text and tools only. Remove the inline image or use the web app to choose a built-in model.'
+  'This workspace routes its models to a custom endpoint, which supports text and tools only. Send the message without the image, or point this tier at a built-in model in Settings > Models.'
 
 export function channelUserErrorText(
   err: Error,
