@@ -107,6 +107,12 @@ describe("[COMP:app-web/browser-identities] assistant browser identity selection
     expect(html).toContain("confidential");
     expect(html).toContain("internal");
     expect(html).toContain("Raise this assistant&#x27;s clearance");
+    // The remedy must name the control the user will actually see. The profile
+    // pane labels the rung in plain language ("Who can use it": Only me /
+    // Cleared teammates), never "confidential" / "internal", so a remedy
+    // phrased in tier words sends them hunting on the destination screen.
+    expect(html).toContain("Who can use it");
+    expect(html).toContain("Cleared teammates");
   });
 
   it("stays silent when the clearance covers the rung, and while the clearance is unknown", () => {

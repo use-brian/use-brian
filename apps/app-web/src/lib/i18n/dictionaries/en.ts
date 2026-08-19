@@ -7879,7 +7879,7 @@ export const en = {
       browserIdentitiesSaved: "Saved",
       browserIdentitiesUpdateFailed: "Couldn't update this browser identity.",
       browserIdentitiesClearanceBlocked: "Enabling is not enough. This profile's clearance ({profile}) is above this assistant's clearance ({assistant}), so the assistant still cannot use it.",
-      browserIdentitiesClearanceRemedy: "Raise this assistant's clearance, or lower the profile's rung under Browser profiles > Advanced.",
+      browserIdentitiesClearanceRemedy: "Raise this assistant's clearance, or set \"Who can use it\" to \"Cleared teammates\" under Browsers > Browser profiles > Advanced settings.",
       connectorsDesc: "Enable or disable services for this assistant. Per-tool permissions can be stricter than the app default but not looser.",
       setUpInSettings: "Set up in Settings",
       setUpInWorkspace: "Set up in Team",
