@@ -7,6 +7,9 @@
  *                                             directive (slug history / canon)
  *   GET /public/sites/:host/media/:blockId  — signed media (`?page=` scopes)
  *   GET /public/sites/:host/stream          — SSE change/tick (`?page=`)
+ *   POST /public/sites/:host/comment-threads, GET …/comments — guest comments
+ *                                             when the anchor is published with
+ *                                             the `comment` visitor role (`?page=`)
  *
  * The hostname is the address, never the gate: every request re-derives the
  * publish state of the DOMAIN ROOT (live `published` grant + root still
@@ -34,6 +37,7 @@ import {
 import { listPublicThreadsForPage } from '../db/comment-thread-store.js'
 import { subscribeToPageShareChanges } from '../page-share-fanout.js'
 import { getLinkBreadcrumb } from '../db/page-grant-store.js'
+import { mountGuestCommentRoutes } from './_public-guest-comments.js'
 
 export type PublicSiteRouteOptions = PublicRenderDeps & {
   pageDomainStore: PageDomainStore
@@ -245,6 +249,16 @@ export function publicSiteRoutes(opts: PublicSiteRouteOptions): Router {
       unsubscribeRoot?.()
       res.end()
     })
+  })
+
+  // Guest comments (`?page=` scopes to a sub-page like media/stream). The
+  // anchor's published role cascades, so every page served under a
+  // comment-published anchor accepts guest comments.
+  mountGuestCommentRoutes(router, '/public/sites/:host', async (req) => {
+    const host = normalizeHostParam(req.params.host)
+    const pageParam = typeof req.query.page === 'string' && req.query.page ? req.query.page : null
+    const resolved = await pageDomainStore.resolveSitePage(host, pageParam)
+    return resolved ? resolved.target : null
   })
 
   return router

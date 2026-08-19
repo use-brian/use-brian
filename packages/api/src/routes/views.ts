@@ -93,7 +93,7 @@ import type { PageTemplateStore } from '../db/page-templates-store.js'
 import type { BlueprintRecordStore } from '../db/blueprint-records-store.js'
 import { createRecordPageProjector } from '../synthesis/synthesize.js'
 import { getWorkspaceMembershipWithClearanceSystem } from '../db/workspace-store.js'
-import type { PageGrantStore } from '../db/page-grant-store.js'
+import { PUBLISH_ROLES, type PageGrantStore, type PublishRole } from '../db/page-grant-store.js'
 import type { WorkspaceGroupStore } from '../db/workspace-group-store.js'
 import { publishPageShareChange } from '../page-share-fanout.js'
 import { renderPublicPage } from './_public-render.js'
@@ -962,7 +962,18 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
     const userId = (req as { userId?: string }).userId
     if (!userId) return unauthorized(res)
     if (!opts.pageGrantStore) return res.status(503).json({ error: 'Sharing is not configured' })
-    const indexable = Boolean((req.body ?? {}).indexable)
+    const body = (req.body ?? {}) as Record<string, unknown>
+    const indexable = Boolean(body.indexable)
+    // Visitor role: `view` | `comment`. Omitted = keep the current role (an
+    // indexing-only re-publish must not reset it). `edit` is refused: the
+    // public surface has no CRDT write path (doc.md "Page sharing" → Phasing).
+    let role: PublishRole | undefined
+    if (body.role !== undefined) {
+      if (!PUBLISH_ROLES.includes(body.role as PublishRole)) {
+        return res.status(400).json({ error: `role must be one of: ${PUBLISH_ROLES.join(', ')}` })
+      }
+      role = body.role as PublishRole
+    }
     const view = await opts.savedViewStore.getById(userId, req.params.id)
     if (!view) return notFound(res, 'View not found')
     if (!(await canManageShare(userId, view))) {
@@ -971,10 +982,16 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
     if (view.clearance !== 'public') {
       await opts.savedViewStore.update(userId, view.id, { clearance: 'public' })
     }
-    await opts.pageGrantStore.publishPage({ userId, pageId: view.id, indexable })
-    opts.analytics?.logEvent({ userId, eventName: 'page_published', metadata: { indexable } })
+    const state = await opts.pageGrantStore.publishPage({ userId, pageId: view.id, indexable, role })
+    opts.analytics?.logEvent({
+      userId,
+      eventName: 'page_published',
+      metadata: { indexable, comments: state.role === 'comment' },
+    })
+    // Fans out to live public viewers, so toggling comments on/off shows or
+    // hides the guest composer without a reload.
     publishPageShareChange(view.id)
-    res.json({ published: true, indexable })
+    res.json(state)
   })
 
   // POST /views/:id/unpublish — revoke the page's published web URL.

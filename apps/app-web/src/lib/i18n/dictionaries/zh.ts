@@ -792,6 +792,8 @@ export const zh: Dictionary = {
       everyoneAt: "{workspace} 的所有成員",
       learnAboutSharing: "瞭解共用方式",
       copyLink: "複製連結",
+      allowComments: "允許留言",
+      allowCommentsHint: "知道連結的人只要輸入顯示名稱即可留言，無需帳號。留言在你標記為已解決之前會顯示在公開頁面上。",
       searchIndexing: "搜尋引擎索引",
       publishHint: "將此頁面發布到網路，產生一個任何人都能開啟的共用網址，無需帳號。巢狀在裡面的子頁面會一併發布。",
       publishCta: "發布到網路",

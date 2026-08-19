@@ -803,6 +803,8 @@ export const ja: Dictionary = {
       everyoneAt: "{workspace}のメンバー全員",
       learnAboutSharing: "共有について",
       copyLink: "リンクをコピー",
+      allowComments: "コメントを許可",
+      allowCommentsHint: "リンクを知っている人は、アカウントなしで表示名を入力するだけでコメントできます。コメントは解決するまで公開ページに表示されます。",
       searchIndexing: "検索エンジンのインデックス",
       publishHint: "このページをウェブに公開し、アカウントなしで誰でも開ける共有URLを発行します。中に入れ子になったページも一緒に公開されます。",
       publishCta: "ウェブに公開",

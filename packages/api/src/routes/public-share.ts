@@ -6,6 +6,11 @@
  *   GET /public/pages/:token              — live page (blocks + public-tier
  *                                            data), identity/media neutralized
  *   GET /public/pages/:token/media/:blockId — token-gated signed media URL
+ *   GET /public/published/:pageId[/…]     — the same family for a page
+ *                                            published at its universal URL
+ *   POST …/comment-threads, GET …/comments — guest comments, when the resolved
+ *                                            role is `comment` (see
+ *                                            `_public-guest-comments.ts`)
  *
  * Access is by an unguessable link token only (no login, no cookies). The
  * link-token resolver gates on a live grant + the GRANTED page being currently
@@ -26,7 +31,6 @@ import { getPageSystem } from '../db/saved-views-store.js'
 import type { PageGrantStore } from '../db/page-grant-store.js'
 import { buildStorageKey } from '../files/gcs-client.js'
 import type { GcsFilesClient } from '../files/gcs-client.js'
-import { randomUUID } from 'node:crypto'
 import { renderPublicPage, type PublicRenderDeps } from './_public-render.js'
 import {
   publicRecordingSummaryFor,
@@ -34,7 +38,7 @@ import {
   sendPublicRecordingTranscript,
   type ResolveRecordingReadClient,
 } from './_public-recording.js'
-import { addGuestComment, createGuestThread, listGuestComments } from '../db/guest-comment-store.js'
+import { mountGuestCommentRoutes } from './_public-guest-comments.js'
 import { listPublicThreadsForPage } from '../db/comment-thread-store.js'
 import { subscribeToPageShareChanges } from '../page-share-fanout.js'
 import { getLinkBreadcrumb, getPublicBreadcrumb, type ResolvedLink } from '../db/page-grant-store.js'
@@ -221,87 +225,11 @@ export function publicShareRoutes(opts: PublicShareRouteOptions): Router {
   // ── Guest comments (Phase 2) — `comment` (or higher) link roles ──────
   // The route is the auth gate: resolveLinkToken validates the live grant +
   // role + page-still-public; writes go system-side under the sentinel user.
-  const roleAllowsComment = (role: string) => role === 'comment' || role === 'edit' || role === 'full'
-
-  // POST a new guest thread (mints a guest_session_token on first comment).
-  // `?page=` anchors the thread to the sub-page being viewed.
-  router.post('/public/pages/:token/comment-threads', async (req, res) => {
-    const link = await resolveTokenTarget(req.params.token, req.query.page)
-    if (!link || !roleAllowsComment(link.role)) {
-      res.status(404).json({ error: 'Not found' })
-      return
-    }
-    const b = (req.body ?? {}) as Record<string, unknown>
-    const text = typeof b.body === 'string' ? b.body.trim() : ''
-    if (!text) {
-      res.status(400).json({ error: 'body is required' })
-      return
-    }
-    const guestName =
-      typeof b.guestName === 'string' && b.guestName.trim() ? b.guestName.trim().slice(0, 80) : 'Guest'
-    const guestSessionToken =
-      typeof b.guestSessionToken === 'string' && b.guestSessionToken ? b.guestSessionToken : randomUUID()
-    try {
-      const { threadId } = await createGuestThread({
-        pageId: link.pageId,
-        workspaceId: link.workspaceId,
-        guestName,
-        guestEmail: typeof b.guestEmail === 'string' ? b.guestEmail.slice(0, 320) : null,
-        guestSessionToken,
-        anchorBlockId: typeof b.anchorBlockId === 'string' ? b.anchorBlockId : null,
-        quote: typeof b.quote === 'string' ? b.quote.slice(0, 280) : null,
-        body: text.slice(0, 10000),
-      })
-      res.status(201).json({ threadId, guestSessionToken })
-    } catch (err) {
-      console.error('[public-share] guest thread failed:', err)
-      res.status(500).json({ error: 'Failed to post comment' })
-    }
-  })
-
-  // Append a reply to one of the guest's OWN threads (token-scoped).
-  router.post('/public/pages/:token/comment-threads/:id/messages', async (req, res) => {
-    const link = await resolveTokenTarget(req.params.token, req.query.page)
-    if (!link || !roleAllowsComment(link.role)) {
-      res.status(404).json({ error: 'Not found' })
-      return
-    }
-    const b = (req.body ?? {}) as Record<string, unknown>
-    const text = typeof b.body === 'string' ? b.body.trim() : ''
-    const guestSessionToken = typeof b.guestSessionToken === 'string' ? b.guestSessionToken : ''
-    if (!text || !guestSessionToken) {
-      res.status(400).json({ error: 'guestSessionToken and body are required' })
-      return
-    }
-    const ok = await addGuestComment({
-      threadId: req.params.id,
-      pageId: link.pageId,
-      guestSessionToken,
-      body: text.slice(0, 10000),
-    })
-    if (!ok) {
-      res.status(403).json({ error: 'Cannot comment on this thread' })
-      return
-    }
-    res.status(201).json({ ok: true })
-  })
-
-  // List the guest's OWN threads (scoped by guest_session_token).
-  router.get('/public/pages/:token/comments', async (req, res) => {
-    const link = await resolveTokenTarget(req.params.token, req.query.page)
-    if (!link || !roleAllowsComment(link.role)) {
-      res.status(404).json({ error: 'Not found' })
-      return
-    }
-    const guestSessionToken =
-      typeof req.query.guestSessionToken === 'string' ? req.query.guestSessionToken : ''
-    if (!guestSessionToken) {
-      res.json({ threads: [] })
-      return
-    }
-    const threads = await listGuestComments(link.pageId, guestSessionToken)
-    res.json({ threads })
-  })
+  // Guest comments (Phase 2) on a `comment` link — same handlers as the
+  // published + site families (`_public-guest-comments.ts`).
+  mountGuestCommentRoutes(router, '/public/pages/:token', (req) =>
+    resolveTokenTarget(req.params.token, req.query.page),
+  )
 
   // GET /public/pages/:token/stream — SSE (Phase 3). Pushes a `change` signal
   // on grant changes (e.g. a revoke → the page reacts live) plus a periodic
@@ -458,6 +386,14 @@ export function publicShareRoutes(opts: PublicShareRouteOptions): Router {
       res.end()
     })
   })
+
+  // Guest comments on a page published with the `comment` visitor role (the
+  // Publish tab's "Allow comments"). The resolver cascades the role from the
+  // published ancestor, so a sub-page of a comment-published root accepts
+  // guest comments too.
+  mountGuestCommentRoutes(router, '/public/published/:pageId', (req) =>
+    pageGrantStore.resolvePublishedPage(req.params.pageId),
+  )
 
   return router
 }

@@ -1346,6 +1346,57 @@ describe('[COMP:api/views-routes] view-page metadata', () => {
     expect(res.body.published).toBe(false)
   })
 
+  // Publish-to-web visitor role ("Allow comments"). The route validates the
+  // role vocabulary and forwards it; omitting it must NOT reset an existing
+  // `comment` role (the indexing toggle re-publishes with indexable only).
+  it('POST /views/:id/publish forwards role=comment and echoes the resulting state', async () => {
+    const pageGrantStore = {
+      publishPage: vi
+        .fn()
+        .mockResolvedValue({ published: true, indexable: false, role: 'comment' }),
+    }
+    const { app, stores } = makeApp({ userId: USER_ID, pageGrantStore })
+    stores.savedViewStore.getById.mockResolvedValueOnce(savedViewFixture({ clearance: 'public' }))
+    const res = await request(app)
+      .post('/api/views/sv-page-1/publish')
+      .send({ indexable: false, role: 'comment' })
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ published: true, indexable: false, role: 'comment' })
+    expect(pageGrantStore.publishPage).toHaveBeenCalledWith({
+      userId: USER_ID,
+      pageId: 'sv-page-1',
+      indexable: false,
+      role: 'comment',
+    })
+  })
+
+  it('POST /views/:id/publish without role leaves role undefined (keeps the stored one)', async () => {
+    const pageGrantStore = {
+      publishPage: vi
+        .fn()
+        .mockResolvedValue({ published: true, indexable: true, role: 'comment' }),
+    }
+    const { app, stores } = makeApp({ userId: USER_ID, pageGrantStore })
+    stores.savedViewStore.getById.mockResolvedValueOnce(savedViewFixture({ clearance: 'public' }))
+    const res = await request(app).post('/api/views/sv-page-1/publish').send({ indexable: true })
+    expect(res.status).toBe(200)
+    expect(res.body.role).toBe('comment')
+    expect(pageGrantStore.publishPage).toHaveBeenCalledWith(
+      expect.objectContaining({ indexable: true, role: undefined }),
+    )
+  })
+
+  it('POST /views/:id/publish rejects role=edit (no public write path) with 400', async () => {
+    const pageGrantStore = { publishPage: vi.fn() }
+    const { app, stores } = makeApp({ userId: USER_ID, pageGrantStore })
+    stores.savedViewStore.getById.mockResolvedValueOnce(savedViewFixture({ clearance: 'public' }))
+    const res = await request(app)
+      .post('/api/views/sv-page-1/publish')
+      .send({ indexable: false, role: 'edit' })
+    expect(res.status).toBe(400)
+    expect(pageGrantStore.publishPage).not.toHaveBeenCalled()
+  })
+
   it('GET /views/:id returns 404 when missing', async () => {
     const { app, stores } = makeApp({ userId: USER_ID })
     stores.savedViewStore.getById.mockResolvedValueOnce(null)

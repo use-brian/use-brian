@@ -30,6 +30,7 @@ import {
   Paragraph,
   Table,
   TableCell,
+  TableLayoutType,
   TableRow,
   TextRun,
   WidthType,
@@ -96,10 +97,40 @@ function plainRuns(text: string): TextRun[] {
 
 // ── Tables ───────────────────────────────────────────────────────────
 
-function gridTable(rows: (TextRun | ExternalHyperlink)[][][], hasHeaderRow: boolean): Table {
-  const width = rows.reduce((m, r) => Math.max(m, r.length), 0)
+/** A4 page (11906 twips) minus the docx default 1440-twip side margins. */
+const CONTENT_WIDTH_DXA = 9026
+
+type GridCell = { runs: (TextRun | ExternalHyperlink)[]; text: string }
+
+/**
+ * Full-width column layout in absolute twips, weighted by each column's
+ * longest cell so date/fee columns don't get a prose column's share.
+ * Widths must be DXA, never `WidthType.PERCENTAGE`: the docx library
+ * serializes percentages as the string form (`w:tblW w:w="100%"`), which
+ * older LibreOffice builds parse as 100 *fiftieths* of a percent: a
+ * 2%-wide table whose columns collapse to one character each.
+ */
+function columnWidthsDxa(rows: GridCell[][], count: number): number[] {
+  const minCol = Math.min(720, Math.floor(CONTENT_WIDTH_DXA / count))
+  const weights = Array.from({ length: count }, (_u, c) =>
+    Math.min(48, Math.max(4, rows.reduce((m, r) => Math.max(m, r[c]?.text.length ?? 0), 0))),
+  )
+  const totalWeight = weights.reduce((a, b) => a + b, 0)
+  const widths = weights.map((w) => Math.max(minCol, Math.floor((CONTENT_WIDTH_DXA * w) / totalWeight)))
+  // Rounding/clamping drift lands on the widest column so the grid sums
+  // exactly to the table width.
+  const drift = CONTENT_WIDTH_DXA - widths.reduce((a, b) => a + b, 0)
+  widths[widths.indexOf(Math.max(...widths))] += drift
+  return widths
+}
+
+function gridTable(rows: GridCell[][], hasHeaderRow: boolean): Table {
+  const width = Math.max(1, rows.reduce((m, r) => Math.max(m, r.length), 0))
+  const colWidths = columnWidthsDxa(rows, width)
   return new Table({
-    width: { size: 100, type: WidthType.PERCENTAGE },
+    width: { size: CONTENT_WIDTH_DXA, type: WidthType.DXA },
+    columnWidths: colWidths,
+    layout: TableLayoutType.FIXED,
     rows: rows.map(
       (cells, r) =>
         new TableRow({
@@ -108,7 +139,8 @@ function gridTable(rows: (TextRun | ExternalHyperlink)[][][], hasHeaderRow: bool
             { length: width },
             (_u, c) =>
               new TableCell({
-                children: [new Paragraph({ children: cells[c] ?? [new TextRun('')] })],
+                width: { size: colWidths[c]!, type: WidthType.DXA },
+                children: [new Paragraph({ children: cells[c]?.runs ?? [new TextRun('')] })],
               }),
           ),
         }),
@@ -116,16 +148,23 @@ function gridTable(rows: (TextRun | ExternalHyperlink)[][][], hasHeaderRow: bool
   })
 }
 
+/** Rich cell → runs plus the plain text used for column-width weighting. */
+function richCell(rt: RichTextContent | undefined): GridCell {
+  const segs = extractInlineSegments(rt)
+  if (segs.length === 0) return { runs: [new TextRun('')], text: '' }
+  return { runs: segs.map(runFromSegment), text: segs.map((s) => s.text).join('') }
+}
+
 function tableBlockToDocx(block: TableBlock): Table {
   // `hasHeaderColumn` is not separately expressible in docx's row-header model
   // (documented limit); the header ROW is honored via `tableHeader`.
-  const rows = block.rows.map((row) => row.map((cell) => richRuns(cell)))
+  const rows = block.rows.map((row) => row.map((cell) => richCell(cell)))
   return gridTable(rows, !!block.hasHeaderRow)
 }
 
 /** Plain-text grid (from a resolved data block) → a docx table. */
 function textGridToDocx(grid: string[][]): Table {
-  const rows = grid.map((row) => row.map((cell) => [new TextRun(cell)]))
+  const rows = grid.map((row) => row.map((cell) => ({ runs: [new TextRun(cell)], text: cell })))
   return gridTable(rows, true)
 }
 

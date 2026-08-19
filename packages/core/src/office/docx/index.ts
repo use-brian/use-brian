@@ -30,6 +30,7 @@ import {
 } from 'docx'
 import {
   assertOfficeArtifactSnapshot,
+  officeTableColumnCount,
   preflightOfficeCandidate,
   type DocumentFlowNode,
   type DocumentSnapshot,
@@ -135,11 +136,21 @@ function docxCellMargins(value: OfficeTableCellMargins | undefined): { marginUni
   } : undefined
 }
 
-function tableFromNode(node: Extract<DocumentFlowNode, { kind: 'table' }>): Table {
+/** Even split of the section content width, summing exactly to `totalDxa`. */
+function evenColumnsDxa(count: number, totalDxa: number): number[] {
+  const base = Math.floor(totalDxa / count)
+  return Array.from({ length: count }, (_u, index) => (index === 0 ? totalDxa - base * (count - 1) : base))
+}
+
+function tableFromNode(node: Extract<DocumentFlowNode, { kind: 'table' }>, contentWidthDxa: number): Table {
   const widthPt = node.widthPt ?? node.columnWidthsPt?.reduce((sum, width) => sum + width, 0)
+  // Widths must stay absolute (DXA): the docx library serializes
+  // `WidthType.PERCENTAGE` as the string form (`w:w="100%"`), which older
+  // LibreOffice builds parse as fiftieths of a percent, a 2%-wide table.
   return new Table({
-    width: widthPt ? { size: Math.round(widthPt * 20), type: WidthType.DXA } : { size: 100, type: WidthType.PERCENTAGE },
-    columnWidths: node.columnWidthsPt?.map((width) => Math.round(width * 20)),
+    width: { size: widthPt ? Math.round(widthPt * 20) : contentWidthDxa, type: WidthType.DXA },
+    columnWidths: node.columnWidthsPt?.map((width) => Math.round(width * 20))
+      ?? evenColumnsDxa(officeTableColumnCount(node), widthPt ? Math.round(widthPt * 20) : contentWidthDxa),
     layout: node.layout === 'autofit' ? TableLayoutType.AUTOFIT : node.layout === 'fixed' || node.columnWidthsPt ? TableLayoutType.FIXED : undefined,
     alignment: paragraphAlignment(node.alignment),
     indent: node.indentPt === undefined ? undefined : { size: Math.round(node.indentPt * 20), type: WidthType.DXA },
@@ -161,14 +172,18 @@ function tableFromNode(node: Extract<DocumentFlowNode, { kind: 'table' }>): Tabl
   })
 }
 
-function chartFromNode(node: Extract<DocumentFlowNode, { kind: 'chart' }>): Array<Paragraph | Table> {
+function chartFromNode(node: Extract<DocumentFlowNode, { kind: 'chart' }>, contentWidthDxa: number): Array<Paragraph | Table> {
   const rows = [
     new TableRow({ tableHeader: true, children: [new TableCell({ children: [new Paragraph('Category')] }), ...node.series.map((series) => new TableCell({ children: [new Paragraph(series.name)] }))] }),
     ...node.categories.map((category, index) => new TableRow({ children: [new TableCell({ children: [new Paragraph(category)] }), ...node.series.map((series) => new TableCell({ children: [new Paragraph(String(series.values[index] ?? ''))] }))] })),
   ]
   return [
     new Paragraph({ heading: HeadingLevel.HEADING_3, children: [new TextRun(node.title)] }),
-    new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows }),
+    new Table({
+      width: { size: contentWidthDxa, type: WidthType.DXA },
+      columnWidths: evenColumnsDxa(node.series.length + 1, contentWidthDxa),
+      rows,
+    }),
   ]
 }
 
@@ -178,15 +193,15 @@ function imageType(mime: string): 'png' | 'jpg' | null {
   return null
 }
 
-async function nodeChildren(node: DocumentFlowNode, resolveResource: OfficeResourceResolver): Promise<Array<Paragraph | Table>> {
+async function nodeChildren(node: DocumentFlowNode, resolveResource: OfficeResourceResolver, contentWidthDxa: number): Promise<Array<Paragraph | Table>> {
   if (node.kind === 'paragraph') {
     const alignment = node.alignment === 'start' ? AlignmentType.LEFT : node.alignment === 'end' ? AlignmentType.RIGHT : node.alignment === 'center' ? AlignmentType.CENTER : AlignmentType.JUSTIFIED
     return [new Paragraph({ alignment, spacing: paragraphSpacing(node), children: richChildren(node.runs) })]
   }
   if (node.kind === 'heading') return [new Paragraph({ heading: headingLevels[node.level as keyof typeof headingLevels], alignment: paragraphAlignment(node.alignment), spacing: paragraphSpacing(node), children: richChildren(node.runs) })]
   if (node.kind === 'list') return node.items.map((item, index) => new Paragraph({ children: [new TextRun(`${node.ordered ? `${index + 1}.` : '•'}\t`), ...richChildren(item.runs)] }))
-  if (node.kind === 'table') return [tableFromNode(node)]
-  if (node.kind === 'chart') return chartFromNode(node)
+  if (node.kind === 'table') return [tableFromNode(node, contentWidthDxa)]
+  if (node.kind === 'chart') return chartFromNode(node, contentWidthDxa)
   if (node.kind === 'pageBreak' || node.kind === 'sectionBreak') return [new Paragraph({ children: [new PageBreak()] })]
   if (node.kind === 'image') {
     const payload = await resolveResource(node.resourceId)
@@ -238,7 +253,8 @@ export async function exportOfficeDocument(
   const sections = []
   for (const section of snapshot.sections) {
     const children: Array<Paragraph | Table> = []
-    for (const node of section.nodes) children.push(...await nodeChildren(node, resolveResource))
+    const contentWidthDxa = Math.max(1, Math.round((section.page.widthPt - section.page.marginLeftPt - section.page.marginRightPt) * 20))
+    for (const node of section.nodes) children.push(...await nodeChildren(node, resolveResource, contentWidthDxa))
     const headerChildren: Array<TextRun | ExternalHyperlink | ImageRun> = []
     if (section.headerImage) {
       headerChildren.push(await headerImageRun(section.headerImage, resolveResource))
