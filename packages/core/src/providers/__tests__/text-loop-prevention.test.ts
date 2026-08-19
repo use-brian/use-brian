@@ -251,6 +251,72 @@ describe('[COMP:providers/text-loop] Text loop prevention', () => {
     expect(text).toBe(answer)
   })
 
+  it('passes a fenced ASCII progress table through untouched (prod 2026-08-19)', async () => {
+    // Session ac542985: a Slack pipeline-progress answer rendered one stage
+    // track per deal row inside a ```text fence. The 4-gram `● Lead ─ ○` hit
+    // the 3× threshold on the third row and — text already downstream — every
+    // resend truncated at the identical character, leaving an unclosed fence.
+    const answer = [
+      '*PIPELINE PROGRESS*',
+      '',
+      '```text',
+      'HKSTP         ● Lead ─ ○ Qualified ─ ○ Proposal ─ ○ Negotiation ─ ○ Won',
+      'Bagel Factory ● Lead ─ ○ Qualified ─ ○ Proposal ─ ○ Negotiation ─ ○ Won',
+      'OASA          ● Lead ─ ○ Qualified ─ ○ Proposal ─ ○ Negotiation ─ ○ Won',
+      '```',
+      '',
+      'All three deals are at the Lead stage.',
+    ].join('\n')
+
+    // Character-by-character, the way a real provider streams it.
+    const stream = composeWrappers(
+      mockStream(textChunks([...answer])),
+      wrapTextLoopPrevention(),
+    )
+
+    const response = await collectStream(stream({
+      model: 'test',
+      messages: [],
+      systemPrompt: 'test',
+    }))
+
+    const text = response.content
+      .filter((b) => b.type === 'text')
+      .map((b) => b.type === 'text' ? b.text : '')
+      .join('')
+
+    expect(text).toBe(answer)
+  })
+
+  it('still detects a prose loop even when the answer also carries a fence', async () => {
+    // The fence exclusion must not blind the detector to loops in the prose
+    // around it — only tokens inside the fence stop counting.
+    const fenced = 'Status:\n\n```text\nHKSTP ● Lead ─ ○ Won\n```\n\nNow the summary of it all. '
+    const looping = 'the same phrase again ' // trips the 4-gram threshold
+    const answer = fenced + looping.repeat(4)
+
+    const stream = composeWrappers(
+      mockStream(textChunks([...answer])),
+      wrapTextLoopPrevention(),
+    )
+
+    const response = await collectStream(stream({
+      model: 'test',
+      messages: [],
+      systemPrompt: 'test',
+    }))
+
+    const text = response.content
+      .filter((b) => b.type === 'text')
+      .map((b) => b.type === 'text' ? b.text : '')
+      .join('')
+
+    // Truncated: the emitted prefix survives, the loop tail does not.
+    expect(text.startsWith('Status:')).toBe(true)
+    expect(text.length).toBeLessThan(answer.length)
+    expect(response.stopReason).toBe('end_turn')
+  })
+
   it('truncates rather than duplicating once text is downstream', async () => {
     // The protocol has no retraction, so a loop detected after emission must
     // close the message, never re-stream. Prod 2026-07-19 shipped attempt-1 +

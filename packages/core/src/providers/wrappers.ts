@@ -264,6 +264,11 @@ function detectSingleTokenRepeat(buffer: string, minRepeat = 10): boolean {
   // Check if the last N characters are the same character repeated
   if (buffer.length < minRepeat) return false
   const tail = buffer.slice(-minRepeat)
+  // Alignment padding, not degeneration: column-padded tables and deep
+  // indentation legitimately run 10+ identical whitespace chars, and a chunk
+  // boundary can land anywhere inside the run (found via prod 2026-08-19,
+  // session ac542985 — `OASA          ●` pads with exactly 10 spaces).
+  if (tail[0] === ' ' || tail[0] === '\t') return false
   return tail.split('').every((c) => c === tail[0])
 }
 
@@ -296,6 +301,55 @@ const WINDOW_SIZE = 100 // words
  */
 const TABLE_SCAFFOLD_TOKEN = /^[|:-]+$/
 
+/**
+ * Fenced code blocks (``` ... ```) are excluded from n-gram counting entirely.
+ * A fence is the model explicitly marking preformatted layout, and preformatted
+ * layout repeats by construction: ASCII tables, aligned ledgers, progress
+ * tracks, directory trees. Widening TABLE_SCAFFOLD_TOKEN cannot cover this
+ * class — the repeating tokens are content words, not separators.
+ *
+ * Prod 2026-08-19 (session ac542985): a Slack pipeline-progress answer rendered
+ * one stage track per deal row inside a ```text fence —
+ * `HKSTP ● Lead ─ ○ Qualified ─ ○ Proposal ─ ○ Negotiation ─ ○ Won` — so the
+ * 4-gram `● Lead ─ ○` hit the 3× threshold on the third row. Text was already
+ * downstream, so the stream truncated mid-row (unclosed fence rendering as
+ * literal backticks), and because detection is content-deterministic every
+ * "resend the complete version" attempt cut at the identical character. Note
+ * dropping `●`/`─`/`○` as scaffold would not have saved it: the stage labels
+ * themselves (`Lead Qualified Proposal Negotiation Won`) recur once per row.
+ *
+ * Degenerate/single-char detection and the block-restart detector still cover
+ * fenced content, and `maxOutputTokens` remains the cost backstop for a
+ * genuine multi-token loop inside a fence — a bounded miss, traded against a
+ * deterministic, unrecoverable truncation of legitimate structured answers.
+ *
+ * An unclosed fence extends to the end of the buffer. Known edge: the 64 KB
+ * sliding-window trim could in principle drop an opening fence and invert
+ * parity, but a single text run cannot reach 64 KB under the 4096/8192
+ * output-token caps.
+ */
+function endsInsideFence(text: string): boolean {
+  const spans = fencedSpans(text)
+  return spans.length > 0 && spans[spans.length - 1].end === text.length
+}
+
+function fencedSpans(text: string): Array<{ start: number; end: number }> {
+  const spans: Array<{ start: number; end: number }> = []
+  let from = 0
+  for (;;) {
+    const open = text.indexOf('```', from)
+    if (open === -1) break
+    const close = text.indexOf('```', open + 3)
+    if (close === -1) {
+      spans.push({ start: open, end: text.length })
+      break
+    }
+    spans.push({ start: open, end: close + 3 })
+    from = close + 3
+  }
+  return spans
+}
+
 type Token = { text: string; end: number }
 
 /**
@@ -305,12 +359,18 @@ type Token = { text: string; end: number }
  * earlier identical word and trim to the wrong place.
  */
 function tokenize(text: string): Token[] {
+  const fences = fencedSpans(text)
+  let f = 0
   const tokens: Token[] = []
   const re = /\S+/g
   let m: RegExpExecArray | null
   while ((m = re.exec(text)) !== null) {
+    const end = m.index + m[0].length
+    // Tokens and spans are both in ascending order — one merge pass.
+    while (f < fences.length && fences[f].end <= m.index) f++
+    if (f < fences.length && m.index < fences[f].end && end > fences[f].start) continue
     if (TABLE_SCAFFOLD_TOKEN.test(m[0])) continue
-    tokens.push({ text: m[0], end: m.index + m[0].length })
+    tokens.push({ text: m[0], end })
   }
   return tokens
 }
@@ -552,8 +612,12 @@ async function* streamWithDetection(
         textBuffer = textBuffer.slice(-TEXT_BUFFER_WINDOW)
       }
 
-      // Check for degenerate tokens (control char spam, single-char repeat)
-      if (detectDegenerateTokens(textBuffer) || detectSingleTokenRepeat(textBuffer)) {
+      // Check for degenerate tokens (control char spam, single-char repeat).
+      // Single-char repeats are layout inside a fence (`==========` dividers,
+      // `──────` borders), so that half stays off there; control-char spam is
+      // never legitimate anywhere.
+      if (detectDegenerateTokens(textBuffer)
+        || (!endsInsideFence(textBuffer) && detectSingleTokenRepeat(textBuffer))) {
         const clean = textBuffer.replace(/[\x08\u200B\u200C\u200D\uFEFF]+$/, '').trimEnd()
         const lastUsage = await drainForUsage(stream)
         return { type: 'degenerate', cleanText: clean, emittedText, lastUsage }
