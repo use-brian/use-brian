@@ -21,6 +21,7 @@ import type { Dictionary } from "@/lib/i18n/dictionaries";
 import {
   MentionAutocompleteList,
   useAssistantMentions,
+  type MentionAssistant,
 } from "../mention-autocomplete";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
@@ -31,11 +32,24 @@ const assistants = [
   { id: "blendit-media", name: "Blendit Media" },
 ];
 
-function Harness() {
+/**
+ * Room human `@mentions` (docs/plans/room-human-mentions.md T-H4/T-H5/T-H9):
+ * assistants first (D-H3's tie-break relies on roster order), a member with
+ * a multi-word display name to exercise the space-mid-token case, and an
+ * assistant/member pair that collides on a shorter name for the tie test.
+ */
+const mergedRoster: MentionAssistant[] = [
+  { id: "blendit", name: "Blendit", mentionKind: "assistant" },
+  { id: "blendit-media", name: "Blendit Media", mentionKind: "assistant" },
+  { id: "jane-doe", name: "Jane Doe", mentionKind: "member" },
+];
+
+function Harness(props: { roster?: MentionAssistant[] }) {
+  const roster = props.roster ?? assistants;
   const [value, setValue] = useState("");
   const mentions = useAssistantMentions({
     enabled: true,
-    assistants,
+    assistants: roster,
     value,
     onChange: setValue,
   });
@@ -50,6 +64,16 @@ function Harness() {
           onKeyDown={mentions.handleKeyDown}
         />
       </div>
+      {/* T-H9 — every resolved mention is a highlightRanges entry; a member's
+       *  entry carries the extra `composer-mention-chip-member` class that
+       *  `@use-brian/chat-ui`'s ChatComposer appends alongside the base chip
+       *  class, so this DOM harness can assert on the SAME data the real
+       *  composer paints from without re-implementing the mirror. */}
+      <span data-testid="highlight-ranges">
+        {mentions.highlightRanges
+          .map((r) => `${r.start}-${r.end}:${r.className ?? "base"}`)
+          .join(",")}
+      </span>
       <button type="button" data-testid="outside">
         elsewhere
       </button>
@@ -60,14 +84,14 @@ function Harness() {
 let root: Root | null = null;
 let container: HTMLElement | null = null;
 
-async function mount() {
+async function mount(roster?: MentionAssistant[]) {
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
   await act(async () => {
     root!.render(
       <I18nProvider locale="en" dict={en as unknown as Dictionary}>
-        <Harness />
+        <Harness roster={roster} />
       </I18nProvider>,
     );
   });
@@ -229,5 +253,78 @@ describe("[COMP:app-web/mention-autocomplete] confirming with the keyboard", () 
     await press("Enter", true);
     expect(inputValue()).toBe("@Blend");
     expect(options()).toHaveLength(2);
+  });
+});
+
+/**
+ * Room human `@mentions` (docs/plans/room-human-mentions.md T-H4/T-H5/T-H9)
+ * — the merged assistant + member roster. What the send path does with the
+ * resolved mentions (member-only = silent post, mixed = today's assistant
+ * POSTs, an exact tie resolves to the assistant) is proven at the pure
+ * `partitionRoomMentions` seam in `multi-assistant-response.test.ts`, since
+ * that decision lives in `send()`/`resolveEditDispatch`, not in this popup.
+ * This suite covers what only a DOM harness can: the popup offering both
+ * kinds, a multi-word member name surviving a space mid-token, and the two
+ * kinds painting distinguishably.
+ */
+describe("[COMP:app-web/mention-autocomplete] room human mentions (merged roster)", () => {
+  it("offers both assistants and members from the merged roster", async () => {
+    await mount(mergedRoster);
+    await type("@");
+    expect(options()).toHaveLength(3);
+    const texts = options().map((option) => option.textContent ?? "");
+    expect(texts.some((text) => text.includes("Blendit Media"))).toBe(true);
+    expect(texts.some((text) => text.includes("Jane Doe"))).toBe(true);
+  });
+
+  it("keeps offering a member's multi-word name through the space mid-token", async () => {
+    // Names can contain spaces (the same rule that already applies to
+    // assistants) — typing the space in "@Jane " must not close the popup
+    // or break the token.
+    await mount(mergedRoster);
+    await type("@Jane ");
+    expect(options()).toHaveLength(1);
+    expect(options()[0].textContent).toContain("Jane Doe");
+  });
+
+  it("inserts a member mention the same way as an assistant mention", async () => {
+    await mount(mergedRoster);
+    await type("@Jane");
+    await press("Enter");
+    expect(inputValue()).toBe("@Jane Doe ");
+    expect(options()).toHaveLength(0);
+  });
+
+  it("paints an assistant mention with the base chip and a member mention with an extra class (T-H9)", async () => {
+    // Both are real highlightRanges entries (the SAME painting pipeline —
+    // @use-brian/chat-ui's ChatComposer always keeps the base
+    // composer-mention-chip class and appends this one) — the two must be
+    // distinguishable before send, because one costs a turn and the other
+    // does not.
+    await mount(mergedRoster);
+    await type("@Blendit hello @Jane Doe");
+    expect(
+      container!.querySelector('[data-testid="highlight-ranges"]')!.textContent,
+    ).toBe("0-8:base,15-24:composer-mention-chip-member");
+  });
+
+  it("an exact name tie between an assistant and a member offers the assistant's popup entry first (D-H3)", async () => {
+    const tied: MentionAssistant[] = [
+      { id: "a-jane", name: "Jane", mentionKind: "assistant" },
+      { id: "m-jane", name: "Jane", mentionKind: "member" },
+    ];
+    await mount(tied);
+    await type("@Jane");
+    // Both are legitimate autocomplete offers (the popup is a convenience,
+    // not the authority — the actual tie-break on a FULLY typed name is
+    // resolveMentionSpans' stable sort, covered in
+    // multi-assistant-response.test.ts). What this DOM harness can prove is
+    // ordering: the assistant entry renders first, matching the roster order
+    // `mentionTargets` builds it in (assistants first). The two rows are
+    // otherwise identically named, so the aria-label — which encodes kind
+    // ("Mention" vs "Notify") — is the only way to tell them apart here.
+    expect(options()).toHaveLength(2);
+    expect(options()[0].getAttribute("aria-label")).toBe("Mention Jane");
+    expect(options()[1].getAttribute("aria-label")).toBe("Notify Jane");
   });
 });

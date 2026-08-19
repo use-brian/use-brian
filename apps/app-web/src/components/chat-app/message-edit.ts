@@ -13,7 +13,7 @@
  * [COMP:app-web/message-edit]
  */
 
-import { resolveMentionedAssistants } from "./multi-assistant-response";
+import { resolveMentionSpans } from "@use-brian/shared/mention-matching";
 
 type EditableMessage = {
   id: string;
@@ -80,7 +80,9 @@ export function canEditUserMessage(params: {
  *   post that stays silent is a typo fix, not a question; re-sending it would
  *   duplicate the post, and answering it would put words in the room.
  */
-export function resolveEditDispatch<T extends { id: string; name: string }>(params: {
+export function resolveEditDispatch<
+  T extends { id: string; name: string; mentionKind?: "assistant" | "member" },
+>(params: {
   isRoom: boolean;
   newText: string;
   roster: T[];
@@ -88,8 +90,16 @@ export function resolveEditDispatch<T extends { id: string; name: string }>(para
   answered: boolean;
 }): "turn" | "post" {
   if (!params.isRoom) return "turn";
-  if (resolveMentionedAssistants(params.newText, params.roster).length > 0) {
-    return "turn";
-  }
+  // A roster entry with no `mentionKind` (every assistant-only caller, and
+  // every existing test fixture) is treated as an assistant — unchanged
+  // behavior. The room composer's merged roster (T-H5) tags members
+  // explicitly, so only an ASSISTANT span routes this edit to a turn: adding
+  // `@Jane Doe` on its own must stay a silent in-place edit (D-H2) even when
+  // an assistant named "Jane" also exists and the merged matcher's
+  // longest-name-wins picked the member.
+  const addressesAssistant = resolveMentionSpans(params.newText, params.roster).some(
+    (span) => (span.assistant.mentionKind ?? "assistant") === "assistant",
+  );
+  if (addressesAssistant) return "turn";
   return params.answered ? "turn" : "post";
 }

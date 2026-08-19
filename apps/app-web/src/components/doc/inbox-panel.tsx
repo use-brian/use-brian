@@ -13,12 +13,19 @@
  *   1. **Replies from your assistant** — open comment threads you started
  *      whose latest comment is the AI's (derived server-side; clears when you
  *      reply or resolve). Each row opens the page so you can act on the thread.
- *   2. **Mentions** — when a teammate @-tagged you in a page body or a comment.
+ *   2. **Mentions** — when a teammate @-tagged you in a page body or a
+ *      comment (`kind: 'mention'`), OR tagged you with `@Jane Doe` in a
+ *      workspace chat room (`kind: 'room_mention'`, migration 448 —
+ *      docs/plans/room-human-mentions.md). Both share one unread-only list,
+ *      newest first; a room row names the room instead of a page and opens
+ *      the room instead of a page (T-H7 — positioned at latest; scroll-to-
+ *      message is explicitly deferred).
  *
- * **Opening a row clears it.** Clicking hands the page id back to the shell
- * (`onOpenPage`) for a soft in-shell navigation, and in the same gesture files
- * the read: a mention is marked read, a pending reply gets a dismissal (it has
- * no `read_at` of its own — see migration 426). The row is removed from local
+ * **Opening a row clears it.** Clicking hands the target back to the shell
+ * (`onOpenPage` for a page mention, `onOpenRoom` for a room mention) for a
+ * soft in-shell navigation, and in the same gesture files the read: a
+ * mention is marked read, a pending reply gets a dismissal (it has no
+ * `read_at` of its own — see migration 426). The row is removed from local
  * state immediately so the panel doesn't flash stale content on its way out,
  * then `doc:inbox-changed` refreshes the sidebar badge.
  *
@@ -30,11 +37,17 @@
  * Old items age out server-side via the workspace retention window; the panel
  * needs no logic for it, it simply receives fewer rows.
  *
+ * Live refresh (T-H8): this component only refetches when it OPENS (see the
+ * effect below) — while it's closed, a room mention recorded from another
+ * tab, device, or teammate is caught by the sidebar badge listening for
+ * `INBOX_REFRESH_EVENT` (`doc-sidebar.tsx`), and the next open reads current
+ * truth. No listener is needed here for the closed state.
+ *
  * Spec: `docs/architecture/features/doc-inbox.md`.
  */
 
 import * as React from "react";
-import { AtSign, Bot, Inbox as InboxIcon, X } from "lucide-react";
+import { AtSign, Bot, Inbox as InboxIcon, MessageSquare, X } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import {
   dismissInboxReply,
@@ -56,6 +69,9 @@ type Props = {
   onClose: () => void;
   /** Open a page in the shell (soft nav) — the panel closes itself after. */
   onOpenPage: (pageId: string) => void;
+  /** Open a room (soft nav to the Chat surface, positioned at latest — T-H7)
+   *  — the panel closes itself after, same as `onOpenPage`. */
+  onOpenRoom: (sessionId: string) => void;
 };
 
 export function InboxPanel({
@@ -64,6 +80,7 @@ export function InboxPanel({
   sidebarCollapsed,
   onClose,
   onOpenPage,
+  onOpenRoom,
 }: Props) {
   const t = useT().docPage;
   const [pending, setPending] = React.useState<InboxPendingReply[]>([]);
@@ -106,6 +123,11 @@ export function InboxPanel({
     onClose();
   };
 
+  const openRoom = (sessionId: string) => {
+    onOpenRoom(sessionId);
+    onClose();
+  };
+
   // Opening a pending reply clears it. The optimistic local drop matters
   // because the panel is closing: without it the row is still on screen for the
   // slide-out, and it would be back on the next open if the request is slow.
@@ -120,13 +142,18 @@ export function InboxPanel({
   };
 
   // Same gesture for a mention, except the read state already exists — marking
-  // it read IS the dismissal, and the list is unread-only.
+  // it read IS the dismissal, and the list is unread-only. A room mention
+  // opens the room (T-H7) instead of a page.
   const openMention = (m: InboxMention) => {
     setMentions((rows) => rows.filter((r) => r.id !== m.id));
     void markInboxRead(workspaceId, [m.id]).then(() => {
       window.dispatchEvent(new Event(INBOX_CHANGED_EVENT));
     });
-    openPage(m.pageId);
+    if (m.kind === "room_mention") {
+      openRoom(m.sessionId);
+    } else {
+      openPage(m.pageId);
+    }
   };
 
   const isEmpty = pending.length === 0 && mentions.length === 0;
@@ -230,40 +257,67 @@ export function InboxPanel({
                 <section className="flex flex-col gap-2">
                   <SectionHeading>{t.inboxMentionsHeading}</SectionHeading>
                   <ul className="flex flex-col gap-1">
-                    {mentions.map((m) => (
-                      <li key={m.id}>
-                        <button
-                          type="button"
-                          onClick={() => openMention(m)}
-                          // No unread tint any more: the list is unread-only,
-                          // so tinting every row would say nothing.
-                          className="flex w-full items-start gap-3 rounded-lg border border-transparent px-2.5 py-2 text-left hover:border-border hover:bg-accent"
-                        >
-                          {m.actorName ? (
-                            <span className="mt-0.5">
-                              <Avatar id={m.actorUserId} name={m.actorName} size={28} />
-                            </span>
-                          ) : (
-                            <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
-                              <AtSign className="size-4" />
-                            </span>
-                          )}
-                          <span className="min-w-0 flex-1">
-                            <span className="block truncate text-[14px] text-foreground">
-                              {m.actorName
-                                ? t.inboxMentionByActor.replace("{actor}", m.actorName)
-                                : t.inboxMentionAnon}
-                              <span className="text-muted-foreground"> · {m.pageTitle || t.inboxTitle}</span>
-                            </span>
-                            {m.preview ? (
-                              <span className="block truncate text-[13px] text-muted-foreground">
-                                <PreviewMarkdown text={m.preview} />
+                    {mentions.map((m) => {
+                      const isRoom = m.kind === "room_mention";
+                      // A room mention reads "{actor} mentioned you in
+                      // {room}" instead of "{actor} mentioned you · {page}" —
+                      // the wording itself is what makes the row read as
+                      // coming from a room rather than a page (no icon
+                      // dependency, so it stays legible to a screen reader).
+                      const label = isRoom
+                        ? m.actorName
+                          ? t.inboxMentionByActorInRoom
+                              .replace("{actor}", m.actorName)
+                              .replace("{room}", m.roomTitle || t.inboxRoomFallback)
+                          : t.inboxMentionAnonInRoom.replace(
+                              "{room}",
+                              m.roomTitle || t.inboxRoomFallback,
+                            )
+                        : m.actorName
+                          ? t.inboxMentionByActor.replace("{actor}", m.actorName)
+                          : t.inboxMentionAnon;
+                      return (
+                        <li key={m.id}>
+                          <button
+                            type="button"
+                            onClick={() => openMention(m)}
+                            // No unread tint any more: the list is unread-only,
+                            // so tinting every row would say nothing.
+                            className="flex w-full items-start gap-3 rounded-lg border border-transparent px-2.5 py-2 text-left hover:border-border hover:bg-accent"
+                          >
+                            {m.actorName ? (
+                              <span className="mt-0.5">
+                                <Avatar id={m.actorUserId} name={m.actorName} size={28} />
                               </span>
-                            ) : null}
-                          </span>
-                        </button>
-                      </li>
-                    ))}
+                            ) : (
+                              <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
+                                {isRoom ? (
+                                  <MessageSquare className="size-4" />
+                                ) : (
+                                  <AtSign className="size-4" />
+                                )}
+                              </span>
+                            )}
+                            <span className="min-w-0 flex-1">
+                              <span className="block truncate text-[14px] text-foreground">
+                                {label}
+                                {!isRoom ? (
+                                  <span className="text-muted-foreground">
+                                    {" "}
+                                    · {m.pageTitle || t.inboxTitle}
+                                  </span>
+                                ) : null}
+                              </span>
+                              {m.preview ? (
+                                <span className="block truncate text-[13px] text-muted-foreground">
+                                  <PreviewMarkdown text={m.preview} />
+                                </span>
+                              ) : null}
+                            </span>
+                          </button>
+                        </li>
+                      );
+                    })}
                   </ul>
                 </section>
               ) : null}
