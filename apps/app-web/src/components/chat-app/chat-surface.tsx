@@ -2967,7 +2967,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           }
         }}
         highlightRanges={mentions.highlightRanges}
-        inputWrapClassName="order-1 col-span-2 min-w-0"
+        inputWrapClassName="order-1 col-span-3 min-w-0"
         // While a turn streams, Send QUEUES into the running turn and
         // Cmd/Ctrl+Enter steers. Rooms keep the ordinary path — a room message
         // is a durable post, not a queued one.
@@ -3025,11 +3025,15 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           </>
         }
         // An explicit two-row grid keeps the footer stable at every width:
-        // textarea spans row one, while the shrinkable controls and fixed Send
-        // share row two. The old wrapping flex row could strand Send alone on a
-        // third line when the assistant / Ask labels reached their min-content
-        // widths.
-        rowClassName="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-1 px-2 pb-2"
+        // textarea spans row one, while the shrinkable controls and the fixed
+        // buttons share row two. The old wrapping flex row could strand Send
+        // alone on a third line when the assistant / Ask labels reached their
+        // min-content widths. Row two has THREE tracks, not two: on a personal
+        // chat mid-turn the muted queue-Send and Stop render side by side, and
+        // a two-track grid pushed Stop onto a row of its own. The horizontal
+        // gap lives on the buttons (`ml-1`) rather than the grid, so the empty
+        // third track costs no width when Stop is absent.
+        rowClassName="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-y-1 px-2 pb-2"
         // Layout (grid placement) lives on `inputWrapClassName` above so the
         // mention-chip mirror shares this box exactly; only the typography and
         // padding the two layers must agree on stay here.
@@ -3207,7 +3211,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         // muted, because it queues into a turn rather than starting one. In a
         // room (no queueing) it still gives way to Stop.
         sendButtonClassName={cn(
-          "order-3 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg",
+          "order-3 ml-1 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg",
           "transition-colors focus-visible:shadow-none",
           "disabled:opacity-40 disabled:pointer-events-none",
           canQueueMidTurn
@@ -3223,7 +3227,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
               aria-label={tChat.abort}
               title={tChat.abort}
               className={cn(
-                "order-3 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg",
+                "order-3 ml-1 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg",
                 "bg-muted text-foreground/80 transition-colors hover:bg-muted/80 hover:text-destructive",
                 "focus-visible:shadow-none",
               )}
