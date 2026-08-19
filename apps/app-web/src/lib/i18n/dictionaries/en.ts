@@ -1365,6 +1365,16 @@ export const en = {
       link: "Link",
       linkPlaceholder: "https://…",
     },
+    // Find on page (⌘F / Ctrl+F): the in-document search bar.
+    find: {
+      label: "Find on page",
+      placeholder: "Find on page",
+      count: "{index} of {total}",
+      noResults: "No results",
+      previous: "Previous match",
+      next: "Next match",
+      close: "Close find",
+    },
     // Phase 3 — View toolbar (above-table controls for the active view).
     viewToolbar: {
       // Search input — fuzzy substring filter over visible rows.
@@ -1630,6 +1640,23 @@ export const en = {
       disconnectWhatsappTitle: "Disconnect WhatsApp?",
       disconnectWhatsappConfirm:
         "Your assistant will stop replying to this WhatsApp number, and groups you added the bot to will stop being read.",
+      // Slack linking - the fix for a Slack profile email that is not the
+      // email of the account you actually use. See
+      // docs/architecture/channels/channel-user-identity.md -> "Slack".
+      slack: "Slack",
+      slackConnected: "Connected",
+      slackConnectedAs: "Connected as {id}",
+      slackDesc:
+        "Brian matches you in Slack by your Slack profile email. If that is not the email you sign in with here, connect it so Brian treats your Slack messages as this account.",
+      connectSlackHint:
+        "Send this code as a direct message to the Brian app in your Slack workspace (or @mention Brian with the code in a channel). If this Slack account is linked elsewhere, connecting moves it here.",
+      slackLinked: "Slack connected.",
+      slackUnlinked: "Slack disconnected.",
+      slackUnavailable:
+        "Slack linking isn't available right now. Please try again later.",
+      disconnectSlackTitle: "Disconnect Slack?",
+      disconnectSlackConfirm:
+        "Brian will go back to matching this Slack account by its profile email.",
       connectError: "Something went wrong. Please try again.",
     },
     privacy: {
@@ -1987,6 +2014,19 @@ export const en = {
         scopeAll: "Everything",
         scopeLater: "Later",
         backfillFailed: "Could not reach the mailbox. Try again in a moment.",
+        sendAsTitle: "Send-as aliases",
+        sendAsHelp: "Other addresses this mailbox may reply from, such as an alias delivered into this inbox. A reply goes out from the address the original was sent to when that address is listed here. Your mail provider must also allow sending as the alias (in Gmail: Settings, Accounts, then \"Send mail as\").",
+        sendAsPlaceholder: "alias@company.com",
+        sendAsAdd: "Add",
+        sendAsRemove: "Remove {addr}",
+        sendAsEmpty: "No aliases yet. Replies always go out from {email}.",
+        sendAsInvalid: "That is not an email address.",
+        sendAsFailed: "Could not save the aliases. Try again in a moment.",
+        liveConnected: "Live: connected. Last new mail at {time}.",
+        liveConnectedWaiting: "Live: connected, waiting for new mail.",
+        liveUnsupported: "Live: not supported by this mail server. New mail is picked up on the next sync (a few minutes).",
+        liveReconnecting: "Live: reconnecting to the mail server...",
+        liveOff: "Live: off. New mail is picked up on the next sync (a few minutes).",
       },
       gcalNotifyTitle: "Send email notifications",
       gcalNotifyDesc: "Notify attendees when events are created, updated, or deleted",
@@ -3043,6 +3083,10 @@ export const en = {
       triggerWireRedundant:
         "This entry wire changes nothing: the step already waits on another path from the trigger, so it runs after that path either way.",
       removeConnection: "Remove connection",
+      removeStep: "Remove step",
+      removeStepRefusedLast: "A workflow needs at least one step",
+      removeStepRefusedWidth:
+        "Removing this step would connect a step to more than {n} parallel steps",
       wireRefusedCycle: "That connection would create a loop",
       wireRefusedDuplicate: "Those steps are already connected",
       wireRefusedSelf: "A step can't connect to itself",
@@ -3215,6 +3259,9 @@ export const en = {
       storeOutputAsLabel: "Save output as (optional)",
       storeOutputAsHint: "Later steps can reference this via {{vars.NAME}}.",
       removeStepBtn: "Remove",
+      removeStepLastHint: "A workflow needs at least one step",
+      stepRemoved: "Step removed",
+      undoRemoveStep: "Undo",
       moveStepUp: "Move up",
       moveStepDown: "Move down",
       stepRawJsonLabel: "Raw JSON",
@@ -3253,7 +3300,7 @@ export const en = {
       stepMaxTurnsHint: "1-60. Leave empty to use the default budget.",
       stepTimeoutLabel: "Timeout (seconds)",
       stepTimeoutHint:
-        "Wall-clock limit for this step, 1-900 seconds. Leave empty for the default (90s; deep research 300s). When the limit is hit the run ends as timed out, keeping any partial output.",
+        "Optional hard wall-clock limit for this step, 1-900 seconds. Leave empty for none: the step is then bounded by its turn and tool-call budget and stops only if it stalls (no progress for a few minutes). When a limit is hit the run ends as timed out, keeping any partial output.",
       // ── Delivery destination picker ──────────────────────────────────
       deliverDestinationLabel: "Destination",
       deliverDestinationPlaceholder: "Pick a recent chat…",
@@ -8253,7 +8300,7 @@ export const en = {
     estimateFailed:
       "The audio uploaded, but its length could not be read. Save it again from the recorder to retry.",
     processFailed:
-      "The audio is uploaded, but it could not be queued for processing. Try again.",
+      "The audio is uploaded, but it could not be queued for processing. Save it again from the recorder to retry.",
     liveTranscriptTitle: "Live transcript",
     liveTranscriptProvisional: "provisional until processing completes",
     liveTranscriptLoading: "Loading the live transcript...",

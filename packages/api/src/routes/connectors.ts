@@ -125,6 +125,8 @@ import { verifyMailboxConnection } from '../mailbox/verify.js'
 import { probeMailboxFolders } from '../mailbox/probe.js'
 import { readMailboxSyncState, type MailboxBackfillScope, type MailboxSyncState } from '../mailbox/sync-worker.js'
 import { getGlobalMailboxSyncDeps } from '../mailbox/sync-tool.js'
+import { normalizeSendAsAliases, readSendAsAliases } from '../mailbox/send-as.js'
+import { readMailboxIdleStatus } from '../mailbox/idle-watcher.js'
 import { countEmailArchiveMessages } from '../db/email-archive-store.js'
 import type { MailboxAccountSettings } from '../mailbox/types.js'
 import { CHAT_ARCHIVE_SEARCH_TOOL } from '../chat-archive/tool-catalog.js'
@@ -996,8 +998,14 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     // §Phase 2 → "On-demand sync"). Never blocks the connect response; the
     // poller catches up if the seam is unarmed or the sync fails.
     const kickSync = (instanceId: string): void => {
-      void getGlobalMailboxSyncDeps()?.syncInstanceById(instanceId).catch((err) => {
+      const seam = getGlobalMailboxSyncDeps()
+      void seam?.syncInstanceById(instanceId).catch((err) => {
         console.warn('[connectors] imap sync-on-connect failed (poller will catch up):', err instanceof Error ? err.message : String(err))
+      })
+      // IDLE watcher up right away where the watcher runs in this process
+      // (mailbox-imap.md → "IDLE watcher"); elsewhere its reconcile catches up.
+      void seam?.watchInstance?.(instanceId).catch((err) => {
+        console.warn('[connectors] imap watch-on-connect failed (reconcile will catch up):', err instanceof Error ? err.message : String(err))
       })
     }
     try {
@@ -1111,6 +1119,9 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
         lastError: state.lastError ?? null,
         lastFailedSyncAt: state.lastFailedSyncAt ?? null,
         ingestionEnabled: resolved.instance.ingestionEnabled,
+        sendAsAliases: readSendAsAliases(resolved.instance.config),
+        // Live (IDLE) posture - so a dead socket can never look like "no mail".
+        idle: readMailboxIdleStatus(resolved.instance.config),
       })
     } catch (err) {
       console.error('[connectors] imap sync-status failed:', err)
@@ -1120,6 +1131,30 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
 
   // D9 pre-flight: cheap per-folder STATUS counts (~1s), never the expensive
   // work. The consent dialog quotes these before any backfill is armed.
+  // Send-as aliases (mailbox-imap.md → "Send-as aliases"): the addresses this
+  // mailbox may reply AS (`bd@` on a `contact@` account). Bare lowercased,
+  // deduped, max 16, the account implicit; a single bad entry rejects the
+  // whole write so a typo cannot silently vanish. Read back on sync-status.
+  router.patch('/imap/send-as', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    try {
+      const body = (req.body ?? {}) as { instanceId?: unknown; sendAsAliases?: unknown }
+      const resolved = await resolveImapInstance(userId, readInstanceId(body.instanceId))
+      if (!resolved) { res.status(404).json({ error: 'No connected mailbox' }); return }
+      const normalized = normalizeSendAsAliases(body.sendAsAliases, resolved.settings.email)
+      if (!normalized.ok) {
+        res.status(400).json({ error: normalized.error, ...(normalized.invalid ? { invalid: normalized.invalid } : {}) })
+        return
+      }
+      await connectorInstanceStore.setConfigSystem(resolved.instance.id, { sendAsAliases: normalized.aliases })
+      res.json({ ok: true, instanceId: resolved.instance.id, sendAsAliases: normalized.aliases })
+    } catch (err) {
+      console.error('[connectors] imap send-as update failed:', err)
+      res.status(500).json({ error: 'Failed to update send-as aliases' })
+    }
+  })
+
   router.post('/imap/backfill/preflight', async (req, res) => {
     const userId = req.userId
     if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }

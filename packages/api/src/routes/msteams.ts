@@ -41,6 +41,7 @@ import type {
 import type { ConnectorStore } from '../db/connector-store.js'
 import { getToolDisplayName, humanizeToolName, describeToolInput, formatConfirmationInput } from '@use-brian/shared'
 import { processChannelMessage } from './channel-pipeline.js'
+import { channelUserErrorText } from './_channel-error-text.js'
 import { cacheInboundImageTag } from './channel-file-cache.js'
 import { billingPartyForAssistant } from '../billing-party.js'
 
@@ -535,7 +536,7 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
         async sendError(err) {
           statusMessageId = undefined
           await adapter.sendMessage(channelId, {
-            text: err.message.includes('usage limit') ? err.message : 'Something went wrong. Please try again.',
+            text: channelUserErrorText(err),
           })
         },
         async onCleanup() {

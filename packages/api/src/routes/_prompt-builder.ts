@@ -72,6 +72,45 @@ export type ReplyContextInput = {
   fromAssistant: boolean
 }
 
+export type SpeakerIdentity = {
+  name: string
+  email?: string | null
+  /**
+   * The sender's channel-native identity, when the turn arrived over a
+   * messaging channel: `{ type: 'slack', id: 'U0123…' }`, a Telegram
+   * handle / numeric id, a WhatsApp number. Rendered as a second sentence
+   * ("Their slack user id is U0123….") so the model can answer "what is my
+   * Slack id" and cross-check a provider roster (`listSlackMembers`) as
+   * fact instead of guessing. Omitted on web/API turns.
+   */
+  channel?: { type: string; id: string } | null
+}
+
+/**
+ * Derive the `# User Context` speaker line input from a user row.
+ *
+ * `name` leads; a nameless account (Slack-only shadow users, some OAuth
+ * sign-ups) falls back to its email so the model can still match the
+ * speaker against the roster `listWorkspaceMembers` returns. Returns
+ * `null` when neither is known — the builder then skips the line rather
+ * than naming nobody. One derivation for every route that passes
+ * `speakerIdentity`; hand-rolled copies drift (2026-08-19: Slack had none
+ * at all, and "how many open tasks do I have?" was answered with a
+ * teammate's tasks after the model guessed among the roster).
+ */
+export function speakerIdentityFromUser(
+  user: { name?: string | null; email?: string | null } | null | undefined,
+  channel?: { type: string; id?: string | null } | null,
+): SpeakerIdentity | null {
+  const name = user?.name?.trim()
+  const email = user?.email?.trim() || null
+  const channelId = channel?.id?.trim()
+  const channelPart = channelId ? { channel: { type: channel!.type, id: channelId } } : {}
+  if (name) return { name, email, ...channelPart }
+  if (email) return { name: email, ...channelPart }
+  return null
+}
+
 export type BuildPromptParams = {
   basePrompt: string
   /**
@@ -148,16 +187,19 @@ export type BuildPromptParams = {
    * guessing among workspace members it knows from team memory.
    *
    * Only routes that positively know the speaker pass this: the web
-   * chat route (authenticated member). `channel-pipeline.ts` does not —
-   * messaging groups withhold speaker identity by design. In a
-   * workspace-shared room each request is authenticated as whoever sent
-   * the newest message, so the line stays correct per turn there;
+   * chat route (authenticated member) and `channel-pipeline.ts` for an
+   * `isIdentified`, non-guest sender (a linked account or an email-matched
+   * channel user — see `channel-user-identity.md`). Anonymous shadow
+   * senders and external guests get no line: the group-context labels
+   * ("Current user" / "Another user") stay the only attribution there.
+   * In a workspace-shared room each request is authenticated as whoever
+   * sent the newest message, so the line stays correct per turn;
    * per-turn sender labels cover earlier turns. Application-derived, so
    * it stays in private runtime context. `null` / empty name skips the
    * line. See `docs/architecture/context-engine/layer-1-system-prompt.md`
    * → "Speaker identity".
    */
-  speakerIdentity?: { name: string; email?: string | null } | null
+  speakerIdentity?: SpeakerIdentity | null
   memoryContext: string
   /**
    * `# Workspace Files` index — the L1 ambient awareness block for the
@@ -438,10 +480,13 @@ function collectPromptSections(
   //    instead of "2:40 AM in Tokyo" because the time string carried
   //    the anchor offset but the model swapped in the trip city).
   const speakerName = p.speakerIdentity?.name?.trim()
+  const speakerChannel = p.speakerIdentity?.channel
   const speakerLine = speakerName
     ? `You are talking with: ${speakerName}${
         p.speakerIdentity?.email ? ` (${p.speakerIdentity.email})` : ''
-      }, the authenticated sender of the newest message.\n`
+      }, the authenticated sender of the newest message.${
+        speakerChannel?.id ? ` Their ${speakerChannel.type} user id is ${speakerChannel.id}.` : ''
+      }\n`
     : ''
   const travelling =
     p.anchorTimezone && p.anchorTimezone.length > 0 && p.anchorTimezone !== p.timezone

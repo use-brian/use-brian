@@ -91,6 +91,56 @@ export type ToolExecutorOptions = {
   permissionGrantEvaluator?: PermissionGrantEvaluator
 }
 
+/**
+ * Sentinel for `Tool.timeoutMs`: no per-tool wall-clock. Reserved for tools
+ * that are themselves progress-bounded (a nested loop under a stall watchdog,
+ * or a long tool that touches `context.progress`); the enclosing loop's
+ * liveness clock is their bound. See docs/architecture/engine/query-loop.md
+ * -> "Liveness, not wall-clock".
+ */
+export const NO_TOOL_TIMEOUT = Number.POSITIVE_INFINITY
+/** Node's timer ceiling; a larger delay fires immediately. */
+const MAX_TIMER_MS = 2_147_483_647
+
+/**
+ * Resolve to the tool's result, or reject as soon as `signal` aborts - even
+ * if the tool never returns. The abandoned promise keeps running detached
+ * (its late result is discarded and logged); the loop it belonged to is
+ * already over.
+ */
+function raceAbandon<T>(work: Promise<T>, signal: AbortSignal, toolName: string): Promise<T> {
+  if (signal.aborted) {
+    work.catch(() => {})
+    return Promise.reject(abandonError(signal, toolName))
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      work.then(
+        () => console.warn(`[tool-executor] late result from abandoned tool "${toolName}" discarded`),
+        () => {},
+      )
+      reject(abandonError(signal, toolName))
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    work.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort)
+        resolve(value)
+      },
+      (err) => {
+        signal.removeEventListener('abort', onAbort)
+        reject(err)
+      },
+    )
+  })
+}
+
+function abandonError(signal: AbortSignal, toolName: string): Error {
+  const reason = signal.reason
+  if (reason instanceof Error) return reason
+  return new Error(`Tool "${toolName}" abandoned: the run was aborted before it returned`)
+}
+
 // ── Error formatting ───────────────────────────────────────────
 
 /** One zod issue, duck-typed (see `formatToolError` on why not `instanceof`). */
@@ -569,11 +619,14 @@ export function createToolExecutor(options: ToolExecutorOptions) {
       })
       wake() // let the query loop yield the confirmation event
 
+      // Waiting on a human is not a stall: hold the loop's liveness clock
+      // for the wait (bounded separately by confirmationTimeoutMs).
+      options.context.progress?.pause()
       try {
         const { decision, comment } = await options.confirmationResolver.waitForDecision(
           t.id,
           options.confirmationTimeoutMs ?? 300_000,
-        )
+        ).finally(() => options.context.progress?.resume())
 
         if (decision === 'deny' || decision === 'always_deny') {
           deniedTools.add(t.name)
@@ -624,10 +677,20 @@ export function createToolExecutor(options: ToolExecutorOptions) {
     t.status = 'executing'
     wake() // notify getRemainingResults that tool transitioned from 'queued'
     options.onToolStart?.(t.id, t.name)
+    options.context.progress?.touch(`tool_start:${t.name}`)
 
+    // Per-tool wall-clock. `NO_TOOL_TIMEOUT` (non-finite) arms no timer: the
+    // tool carries its own progress-based liveness (a child loop under a stall
+    // watchdog) and the enclosing loop's watchdog is its bound. The timer
+    // only ever ABORTS THE SIGNAL - it does not abandon the call - so a slow
+    // tool that ignores the signal still returns its real result and the
+    // model never sees a "timed out" for work that actually landed (a race
+    // here would turn a slow send into a duplicate send).
     const toolTimeout = toolDef.timeoutMs ?? 30_000
     const timeoutController = new AbortController()
-    const timer = setTimeout(() => timeoutController.abort(), toolTimeout)
+    const timer = Number.isFinite(toolTimeout) && toolTimeout > 0
+      ? setTimeout(() => timeoutController.abort(), Math.min(toolTimeout, MAX_TIMER_MS))
+      : undefined
 
     // Merge abort signals: parent context + sibling abort + per-tool timeout
     const mergedSignal = AbortSignal.any([
@@ -635,6 +698,13 @@ export function createToolExecutor(options: ToolExecutorOptions) {
       siblingAbort.signal,
       timeoutController.signal,
     ])
+    // The abandonment signal is narrower: parent / watchdog / sibling abort
+    // only. When THAT fires the loop is over (a user Stop, a client
+    // disconnect, or the stall watchdog), so a tool that ignores its abort
+    // signal must not keep the loop pinned - its promise is abandoned and an
+    // error result is recorded. The per-tool timer is deliberately excluded
+    // (see above).
+    const abandonSignal = AbortSignal.any([options.context.abortSignal, siblingAbort.signal])
 
     try {
       const validated = toolDef.inputSchema.parse(t.input)
@@ -653,7 +723,7 @@ export function createToolExecutor(options: ToolExecutorOptions) {
       const requested = (validated as { sensitivity?: unknown } | null)?.sensitivity
       const clearance = options.context.assistantClearance ?? options.context.clearance
       if (clearance !== undefined && isSensitivity(requested) && !canRead(clearance, requested)) {
-        clearTimeout(timer)
+        if (timer) clearTimeout(timer)
         t.result = {
           type: 'tool_result',
           toolUseId: t.id,
@@ -677,7 +747,7 @@ export function createToolExecutor(options: ToolExecutorOptions) {
         requestedCompartments.every((c): c is string => typeof c === 'string') &&
         !subsetCompartments(options.context.assistantCompartments, requestedCompartments)
       ) {
-        clearTimeout(timer)
+        if (timer) clearTimeout(timer)
         t.result = {
           type: 'tool_result',
           toolUseId: t.id,
@@ -705,7 +775,7 @@ export function createToolExecutor(options: ToolExecutorOptions) {
       if (evidence?.shouldGate(t.name)) {
         const unverified = evidence.findUnverified(JSON.stringify(validated))
         if (unverified.length > 0) {
-          clearTimeout(timer)
+          if (timer) clearTimeout(timer)
           const listing = unverified
             .map((u) => `${u.value} (${u.kind})`)
             .join(', ')
@@ -750,9 +820,12 @@ export function createToolExecutor(options: ToolExecutorOptions) {
         t.status = 'pending_confirmation'
         wake()
         tryStartQueued()
+        // A human wait is not a stall - hold the liveness clock for it.
+        options.context.progress?.pause()
         try {
           return await wait()
         } finally {
+          options.context.progress?.resume()
           if (!canExecute(t.isConcurrencySafe)) {
             t.status = 'awaiting_slot'
             while (!canExecute(t.isConcurrencySafe)) {
@@ -764,17 +837,22 @@ export function createToolExecutor(options: ToolExecutorOptions) {
         }
       }
 
-      const result = await toolDef.execute(validated, {
-        ...options.context,
-        abortSignal: mergedSignal,
-        confirmationResolver: options.confirmationResolver,
-        notifyConfirmationRequired,
-        confirmationTimeoutMs: options.confirmationTimeoutMs,
-        parkForConfirmation,
-      })
+      const result = await raceAbandon(
+        toolDef.execute(validated, {
+          ...options.context,
+          abortSignal: mergedSignal,
+          confirmationResolver: options.confirmationResolver,
+          notifyConfirmationRequired,
+          confirmationTimeoutMs: options.confirmationTimeoutMs,
+          parkForConfirmation,
+        }),
+        abandonSignal,
+        t.name,
+      )
 
-      clearTimeout(timer)
+      if (timer) clearTimeout(timer)
       options.onToolEnd?.(t.id, t.name, result)
+      options.context.progress?.touch(`tool_end:${t.name}`)
 
       let content = renderToolResultData(result.data, result.isError === true)
 
@@ -820,7 +898,7 @@ export function createToolExecutor(options: ToolExecutorOptions) {
       // signal a soft failure via result.isError without throwing).
       options.loopDetector.recordOutcome(t.name, result.isError === true)
     } catch (err) {
-      clearTimeout(timer)
+      if (timer) clearTimeout(timer)
       // Same cap as the success path — a thrown error is tool-produced,
       // unbounded content too. The pathological case is a `ZodError` (from
       // the `inputSchema.parse` above or a tool's own internal validation):

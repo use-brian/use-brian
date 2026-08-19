@@ -47,19 +47,47 @@ export function isActiveWorkflowRunStatus(status: string): boolean {
   return ACTIVE_WORKFLOW_RUN_STATUSES.has(status)
 }
 
+/**
+ * Multi-instance tool variants carry a per-instance suffix after `__`
+ * (`imapSendMessage__bd_1a2b3c4d`, `githubCreateIssue__acme_…` - the
+ * convention `packages/api/src/mcp/inject.ts::instanceToolSuffix` mints and
+ * `baseToolName` reverses; `__` never appears in a canonical name). Policies
+ * and write grants resolve against the canonical base name, and a workflow
+ * grant must too: a founder who writes `{ action_kind: 'imapSendMessage',
+ * grant: 'allow' }` expects it to cover the second mailbox's suffixed send
+ * tool as well, not to be silently ignored for it (mailbox-imap.md →
+ * "Multiple mailboxes"). Kept as a local mirror rather than an import: core
+ * cannot depend on the api package.
+ */
+const INSTANCE_TOOL_SEP = '__'
+
+function canonicalGrantToolName(toolName: string): string {
+  const i = toolName.indexOf(INSTANCE_TOOL_SEP)
+  return i === -1 ? toolName : toolName.slice(0, i)
+}
+
 // Spec: action_kind matches the MCP tool name OR `connector_id:action_kind`.
-// Namespaced form wins when both are present.
+// Namespaced form wins when both are present; the exact (suffixed) name wins
+// over the canonical base name, so a grant CAN still target one instance's
+// variant specifically when it names it.
 export function matchPermissionGrant(
   grants: readonly WorkflowPermissionGrant[],
   toolName: string,
   connectorId?: string,
 ): WorkflowPermissionGrant | null {
-  if (connectorId) {
-    const namespaced = `${connectorId}:${toolName}`
-    const hit = grants.find((g) => g.action_kind === namespaced)
+  const candidates = [toolName]
+  const canonical = canonicalGrantToolName(toolName)
+  if (canonical !== toolName) candidates.push(canonical)
+  for (const name of candidates) {
+    if (connectorId) {
+      const namespaced = `${connectorId}:${name}`
+      const hit = grants.find((g) => g.action_kind === namespaced)
+      if (hit) return hit
+    }
+    const hit = grants.find((g) => g.action_kind === name)
     if (hit) return hit
   }
-  return grants.find((g) => g.action_kind === toolName) ?? null
+  return null
 }
 
 export type ActiveWorkflowRun = {

@@ -445,7 +445,7 @@ export function createTaskTools(
       'List tasks in the current workspace, filtered by any combination of assignee / status / due range / tag / parent. Returns a compact projection (id, title, status, assignee, due, tags, parent, updated_at). For `external_ref` or `created_at`, use `getTask`. ' +
       'Default excludes archived tasks (set `include_archived: true` to include them). Default limit is 25 (max 100). Status accepts a single value or an array (e.g. `["todo", "in_progress"]`).',
     inputSchema: z.object({
-      assignee_id: idShape.optional(),
+      assignee_id: idShape.optional().describe('workspace_members id — from `listWorkspaceMembers`. For "my tasks" use the row flagged `isCurrentUser: true`; never guess a member id from a name.'),
       // Tolerant because this is the param models serialise loosely — a
       // stringified or comma-joined list reads as neither branch of the union
       // and failed 35 times in production. See `tolerantEnumArray`.

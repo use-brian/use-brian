@@ -16,7 +16,7 @@ vi.mock("@/lib/auth-fetch", () => ({
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
-import { ImapSyncPanel, formatImapSyncLine } from "../imap-sync-panel";
+import { ImapSyncPanel, formatImapLiveLine, formatImapSyncLine, looksLikeEmailAddress } from "../imap-sync-panel";
 
 const dict = en as unknown as Dictionary;
 const tm = en.settings.connectors.imap;
@@ -70,5 +70,57 @@ describe("[COMP:web/imap-sync-panel] render posture", () => {
       </I18nProvider>,
     );
     expect(html).toBe("");
+  });
+});
+
+describe("[COMP:web/imap-sync-panel] send-as aliases", () => {
+  it("looksLikeEmailAddress gates the Add button's round-trip (server re-validates)", () => {
+    expect(looksLikeEmailAddress("bd@usebrian.example")).toBe(true);
+    expect(looksLikeEmailAddress("  BD@UseBrian.example ")).toBe(true);
+    expect(looksLikeEmailAddress("bd@")).toBe(false);
+    expect(looksLikeEmailAddress("BD <bd@usebrian.example>")).toBe(false);
+    expect(looksLikeEmailAddress("not an address")).toBe(false);
+  });
+
+  it("copy is dictionary-backed in every locale, without an em dash, and names the account in the empty state", async () => {
+    const { ja } = await import("@/lib/i18n/dictionaries/ja");
+    const { zh } = await import("@/lib/i18n/dictionaries/zh");
+    for (const d of [en, ja, zh]) {
+      const c = d.settings.connectors.imap;
+      for (const key of ["sendAsTitle", "sendAsHelp", "sendAsPlaceholder", "sendAsAdd", "sendAsRemove", "sendAsEmpty", "sendAsInvalid", "sendAsFailed"] as const) {
+        expect(typeof c[key]).toBe("string");
+        expect(c[key]).not.toContain("\u2014");
+      }
+      expect(c.sendAsEmpty).toContain("{email}");
+      expect(c.sendAsRemove).toContain("{addr}");
+    }
+    expect(tm.sendAsHelp).toMatch(/Send mail as/);
+  });
+});
+
+describe("[COMP:web/imap-sync-panel] live (IDLE) line", () => {
+  const fmt = (iso: string) => `T(${iso})`;
+  it("says connected + last event, waiting, unsupported, reconnecting, off - and nothing when never watched", () => {
+    expect(formatImapLiveLine(null, tm, fmt)).toBeNull();
+    expect(formatImapLiveLine(undefined, tm, fmt)).toBeNull();
+    expect(formatImapLiveLine({ status: "connected", since: "s", lastEventAt: "2026-08-19T09:41:00Z" }, tm, fmt))
+      .toBe("Live: connected. Last new mail at T(2026-08-19T09:41:00Z).");
+    expect(formatImapLiveLine({ status: "connected", since: "s", lastEventAt: null }, tm, fmt)).toBe(tm.liveConnectedWaiting);
+    expect(formatImapLiveLine({ status: "unsupported", since: "s" }, tm, fmt)).toBe(tm.liveUnsupported);
+    expect(formatImapLiveLine({ status: "reconnecting", since: "s", lastError: "closed" }, tm, fmt)).toBe(tm.liveReconnecting);
+    expect(formatImapLiveLine({ status: "off", since: "s" }, tm, fmt)).toBe(tm.liveOff);
+  });
+
+  it("copy exists in every locale without an em dash", async () => {
+    const { ja } = await import("@/lib/i18n/dictionaries/ja");
+    const { zh } = await import("@/lib/i18n/dictionaries/zh");
+    for (const d of [en, ja, zh]) {
+      const c = d.settings.connectors.imap;
+      for (const key of ["liveConnected", "liveConnectedWaiting", "liveUnsupported", "liveReconnecting", "liveOff"] as const) {
+        expect(typeof c[key]).toBe("string");
+        expect(c[key]).not.toContain("\u2014");
+      }
+      expect(c.liveConnected).toContain("{time}");
+    }
   });
 });

@@ -1214,6 +1214,15 @@ export const ja: Dictionary = {
       link: "リンク",
       linkPlaceholder: "https://…",
     },
+    find: {
+      label: "ページ内検索",
+      placeholder: "ページ内を検索",
+      count: "{total} 件中 {index} 件目",
+      noResults: "見つかりません",
+      previous: "前の一致",
+      next: "次の一致",
+      close: "検索を閉じる",
+    },
     viewToolbar: {
       searchPlaceholder: "検索…",
       searchAria: "行を検索",
@@ -1454,6 +1463,20 @@ export const ja: Dictionary = {
       disconnectWhatsappTitle: "WhatsApp の連携を解除しますか？",
       disconnectWhatsappConfirm:
         "アシスタントはこの WhatsApp 番号への返信を停止し、ボットを追加したグループの読み取りも停止します。",
+      slack: "Slack",
+      slackConnected: "連携済み",
+      slackConnectedAs: "{id} として連携済み",
+      slackDesc:
+        "Brian は Slack プロフィールのメールアドレスであなたを識別します。ここでサインインしているメールと異なる場合は連携すると、Slack のメッセージがこのアカウントとして扱われます。",
+      connectSlackHint:
+        "Slack ワークスペースで Brian アプリにこのコードをダイレクトメッセージで送信してください（チャンネルで Brian をメンションしてコードを送っても構いません）。この Slack アカウントが別のアカウントに連携されている場合は、こちらに移動します。",
+      slackLinked: "Slack を連携しました。",
+      slackUnlinked: "Slack の連携を解除しました。",
+      slackUnavailable:
+        "現在 Slack の連携はご利用いただけません。しばらくしてからお試しください。",
+      disconnectSlackTitle: "Slack の連携を解除しますか？",
+      disconnectSlackConfirm:
+        "Brian はこの Slack アカウントをプロフィールのメールアドレスで識別する動作に戻ります。",
       connectError: "問題が発生しました。もう一度お試しください。",
     },
     privacy: {
@@ -1807,6 +1830,19 @@ export const ja: Dictionary = {
         scopeAll: "すべて",
         scopeLater: "後で",
         backfillFailed: "メールボックスに接続できませんでした。しばらくしてからもう一度お試しください。",
+        sendAsTitle: "送信元エイリアス",
+        sendAsHelp: "このメールボックスが返信に使えるほかのアドレス（この受信箱に配信されるエイリアスなど）です。ここに登録されているアドレス宛てのメールには、そのアドレスから返信します。メールプロバイダ側でもエイリアスからの送信を許可する必要があります（Gmail の場合: 設定、アカウント、「他のメールアドレスを追加」）。",
+        sendAsPlaceholder: "alias@company.com",
+        sendAsAdd: "追加",
+        sendAsRemove: "{addr} を削除",
+        sendAsEmpty: "エイリアスはまだありません。返信は常に {email} から送信されます。",
+        sendAsInvalid: "メールアドレスの形式ではありません。",
+        sendAsFailed: "エイリアスを保存できませんでした。しばらくしてからもう一度お試しください。",
+        liveConnected: "ライブ: 接続中。最後の新着メールは {time} でした。",
+        liveConnectedWaiting: "ライブ: 接続中。新着メールを待っています。",
+        liveUnsupported: "ライブ: このメールサーバーは対応していません。新着メールは次回の同期（数分後）で取り込まれます。",
+        liveReconnecting: "ライブ: メールサーバーに再接続しています...",
+        liveOff: "ライブ: オフ。新着メールは次回の同期（数分後）で取り込まれます。",
       },
       gcalNotifyTitle: "メール通知を送信",
       gcalNotifyDesc: "予定の作成・更新・削除時に出席者へ通知します",
@@ -2844,6 +2880,10 @@ export const ja: Dictionary = {
       triggerWireRedundant:
         "この開始ワイヤーは動作に影響しません。このステップはすでにトリガーからの別の経路を待つため、どちらにしてもその経路の後に実行されます。",
       removeConnection: "接続を削除",
+      removeStep: "ステップを削除",
+      removeStepRefusedLast: "ワークフローには少なくとも1つのステップが必要です",
+      removeStepRefusedWidth:
+        "このステップを削除すると、1つのステップが{n}件を超える並列ステップにつながります",
       wireRefusedCycle: "この接続はループを作るため追加できません",
       wireRefusedDuplicate: "このステップ同士はすでに接続されています",
       wireRefusedSelf: "ステップを自分自身に接続することはできません",
@@ -3019,6 +3059,9 @@ export const ja: Dictionary = {
       storeOutputAsLabel: "出力を変数として保存（任意）",
       storeOutputAsHint: "後続のステップで {{vars.NAME}} として参照できます。",
       removeStepBtn: "削除",
+      removeStepLastHint: "ワークフローには少なくとも1つのステップが必要です",
+      stepRemoved: "ステップを削除しました",
+      undoRemoveStep: "取り消す",
       moveStepUp: "上へ",
       moveStepDown: "下へ",
       stepRawJsonLabel: "Raw JSON",
@@ -3057,7 +3100,7 @@ export const ja: Dictionary = {
       stepMaxTurnsHint: "1〜60。空欄なら既定の予算を使用します。",
       stepTimeoutLabel: "タイムアウト(秒)",
       stepTimeoutHint:
-        "このステップの実行時間の上限(1〜900秒)。空欄なら既定値(90秒、ディープリサーチは300秒)。上限に達すると実行はタイムアウトとして終了し、途中までの出力は保持されます。",
+        "このステップの実行時間の上限(任意、1〜900秒)。空欄なら上限なし: ステップはターン数とツール呼び出し数の予算で制限され、進捗が数分間止まった場合のみ停止します。上限に達すると実行はタイムアウトとして終了し、途中までの出力は保持されます。",
       // ── 送信先ピッカー ───────────────────────────────────────────
       deliverDestinationLabel: "送信先",
       deliverDestinationPlaceholder: "最近のチャットから選択…",
@@ -8035,7 +8078,7 @@ export const ja: Dictionary = {
     estimateFailed:
       "音声はアップロードされましたが、長さを読み取れませんでした。レコーダーから再度保存してやり直してください。",
     processFailed:
-      "音声はアップロード済みですが、処理のキューに追加できませんでした。もう一度お試しください。",
+      "音声はアップロード済みですが、処理のキューに追加できませんでした。レコーダーから再度保存してやり直してください。",
     liveTranscriptTitle: "ライブ文字起こし",
     liveTranscriptProvisional: "処理完了までは暫定版です",
     liveTranscriptLoading: "ライブ文字起こしを読み込んでいます...",

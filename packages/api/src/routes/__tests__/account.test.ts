@@ -184,6 +184,49 @@ describe('[COMP:api/account-route] Account routes', () => {
     expect(res.status).toBe(503)
   })
 
+  // ── POST /slack/link-code ────────────────────────────────────
+  // Same first-owned-assistant rule as Telegram; no deep-link payload —
+  // the code is pasted to the Brian app in Slack. Redemption + link-first
+  // routing live in slack.ts (`resolveSlackSender`).
+
+  it('mints a Slack link code for the first-owned assistant', async () => {
+    const linkCodeStore = {
+      create: vi.fn().mockResolvedValue({
+        code: 'SLK123',
+        expiresAt: new Date('2026-06-10T00:05:00Z'),
+      }),
+      findValidCode: vi.fn(),
+      claim: vi.fn(),
+      getByUserAndAssistant: vi.fn(),
+    }
+    const app = createTestApp(
+      '/api/account',
+      accountRoutes({ linkCodeStore: linkCodeStore as never }),
+      { userId: 'u_1' },
+    )
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'a_first' }], rowCount: 1 } as never)
+
+    const res = await request(app).post('/api/account/slack/link-code')
+    expect(res.status).toBe(200)
+    expect(res.body.code).toBe('SLK123')
+    expect(linkCodeStore.create).toHaveBeenCalledWith({ userId: 'u_1', assistantId: 'a_first' })
+  })
+
+  it('returns 409 no_assistant for Slack when the user owns no assistant', async () => {
+    const linkCodeStore = { create: vi.fn(), findValidCode: vi.fn(), claim: vi.fn(), getByUserAndAssistant: vi.fn() }
+    const app = createTestApp('/api/account', accountRoutes({ linkCodeStore: linkCodeStore as never }), { userId: 'u_1' })
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    const res = await request(app).post('/api/account/slack/link-code')
+    expect(res.status).toBe(409)
+    expect(linkCodeStore.create).not.toHaveBeenCalled()
+  })
+
+  it('returns 503 for Slack when no link code store configured', async () => {
+    const app = createTestApp('/api/account', accountRoutes(), { userId: 'u_1' })
+    const res = await request(app).post('/api/account/slack/link-code')
+    expect(res.status).toBe(503)
+  })
+
   // ── POST /whatsapp/link-code ─────────────────────────────────
   // Settings -> Account -> Connected accounts, WhatsApp row. Same shape as the
   // Telegram route, but the official number is resolved BEFORE minting so a

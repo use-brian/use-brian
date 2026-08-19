@@ -57,6 +57,43 @@ describe('[COMP:brain/ingest-workflow-trigger] ingestEventToDispatchEvent', () =
     expect(d.isBot).toBe(false)
   })
 
+  it('maps the mailbox (imap) shape - recipients ride mentions, folder is the channel, the whole record is the payload', () => {
+    // The payload the mailbox sync worker emits (mailbox-imap.md → "Event
+    // trigger"): every key must survive into `payload` so a run can address
+    // the message ({{input.event.message_id}} / .to / .sender).
+    const normalized = {
+      sender: 'ken@client.hk',
+      actor_id: 'ken@client.hk',
+      subject: 'Partnership',
+      text: 'Can we talk?',
+      is_bulk: false,
+      message_id: 'INBOX:42',
+      rfc_message_id: '<abc@client.hk>',
+      to: ['bd@usebrian.ai'],
+      cc: [],
+      account_email: 'contact@usebrian.ai',
+      folder: 'INBOX',
+      channel_id: 'INBOX',
+      timestamp: '2026-08-19T09:00:00.000Z',
+      mentions: ['bd@usebrian.ai', 'contact@usebrian.ai'],
+      is_bot: false,
+      user_flags: [],
+    }
+    const out = ingestEventToDispatchEvent({ source: 'imap', normalized }, CTX)
+    expect(out).toMatchObject({
+      source: { type: 'connector', connectorInstanceId: 'ci1', provider: 'imap' },
+      text: 'Can we talk?',
+      actorId: 'ken@client.hk',
+      channelId: 'INBOX',
+      mentions: ['bd@usebrian.ai', 'contact@usebrian.ai'],
+      isBot: false,
+    })
+    expect(out.payload).toBe(normalized)
+    expect(out.payload).toMatchObject({ message_id: 'INBOX:42', to: ['bd@usebrian.ai'] })
+    // The self-loop guard: the mailbox's own sent copy is a bot event.
+    expect(ingestEventToDispatchEvent({ source: 'imap', normalized: { ...normalized, is_bot: true } }, CTX).isBot).toBe(true)
+  })
+
   it('detects a bot from the flat bot_id key', () => {
     const event: IngestEvent = { source: 'slack', normalized: { text: 'x', bot_id: 'B1' } }
     expect(ingestEventToDispatchEvent(event, CTX).isBot).toBe(true)

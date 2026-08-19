@@ -16,7 +16,15 @@ export type {
   TurnInboxPeek,
   TurnInboxPort,
 } from './turn-inbox.js'
-export { createToolExecutor, formatToolError } from './tool-executor.js'
+export { createToolExecutor, formatToolError, NO_TOOL_TIMEOUT } from './tool-executor.js'
+export {
+  createStallWatchdog,
+  withStallSignal,
+  isStalledError,
+  StalledError,
+  DEFAULT_STALL_IDLE_MS,
+} from './stall-watchdog.js'
+export type { ProgressClock, StallWatchdog, StallInfo } from './stall-watchdog.js'
 export type { ToolExecutor, ToolExecutorOptions } from './tool-executor.js'
 export { createLoopDetector, DEFAULT_HARD_LIMIT } from './loop-detector.js'
 export type { LoopDetector, LoopAction } from './loop-detector.js'

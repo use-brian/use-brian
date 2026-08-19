@@ -26,10 +26,20 @@ export {
   createMailboxSyncWorker,
   createMailboxBrainRouter,
   buildMailboxIngestEngine,
+  mailboxEventPayload,
   parseSyncedMessage,
   readMailboxSyncState,
   backfillFloorDate,
 } from './sync-worker.js'
+export {
+  MAX_SEND_AS_ALIASES,
+  SEND_AS_ALIASES_CONFIG_KEY,
+  bareEmailAddress,
+  normalizeSendAsAliases,
+  readSendAsAliases,
+  senderIdentities,
+} from './send-as.js'
+export type { NormalizeSendAsResult } from './send-as.js'
 export type {
   MailboxSyncWorker,
   MailboxSyncWorkerDeps,
@@ -41,6 +51,8 @@ export type {
   MailboxBackfillScope,
   MailboxBackfillState,
 } from './sync-worker.js'
+export { createMailboxIdleWatcher, readMailboxIdleStatus } from './idle-watcher.js'
+export type { MailboxIdleWatcher, MailboxIdleWatcherDeps, MailboxIdleStatus, IdleClientLike } from './idle-watcher.js'
 export { probeMailboxFolders } from './probe.js'
 export type { MailboxProbeResult } from './probe.js'
 export {

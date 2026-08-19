@@ -73,6 +73,21 @@ export type StagedRecording = {
   surchargeCredits: number;
 };
 
+/**
+ * What `run` resolved to. A `null` return used to stand for BOTH "the user
+ * closed the cost confirm" and "the upload / estimate / queue call failed",
+ * so the dock recorder could only ever say "kept on this device" - true, but
+ * it read as a deferral after a failure, and the step-aware reason rendered
+ * into the expanded composer, a slot a collapsed meeting capture never shows.
+ * The outcome names the branch and carries the same localized `message` the
+ * hook sets inline, so the recorder's own notice (which renders in every
+ * dock mode) can say what happened.
+ */
+export type RecordingRunOutcome =
+  | { outcome: "queued"; recording: RecordingQueued; message: string }
+  | { outcome: "cancelled" }
+  | { outcome: "failed"; message: string };
+
 export function useRecordingUpload(workspaceId: string, assistantId: string) {
   const t = useT();
   const [status, setStatus] = useState<RecordingUploadStatus>("idle");
@@ -151,14 +166,15 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
      * @param opts.kind Recording kind for the transcriber-ladder routing.
      *   The dock live recorder passes 'meeting'; omitted → the server's
      *   'memo' column default.
-     * @returns The queued recording (`recordingId`) on success, or `null` if the
-     *   user cancelled the cost confirm or the upload failed. The chat dock reads
-     *   this to reference the recording in its turn; state-only callers ignore it.
+     * @returns `queued` with the recording (`recordingId`) on success,
+     *   `cancelled` when the user closed the cost confirm, `failed` with the
+     *   step-aware reason otherwise. The dock recorder forks its retention +
+     *   notice on this; state-only callers ignore it.
      */
     async (
       file: File,
       opts?: { kind?: "memo" | "meeting"; existingPageId?: string; liveSessionId?: string },
-    ): Promise<RecordingQueued | null> => {
+    ): Promise<RecordingRunOutcome> => {
       setResult(null);
       setMessage("");
       // Which boundary failed decides the copy: a storage-upload failure and a
@@ -279,7 +295,7 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
         });
         if (!ok) {
           setStatus("idle");
-          return null;
+          return { outcome: "cancelled" };
         }
 
         setStatus("processing");
@@ -316,14 +332,15 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
         // The 202 means QUEUED — the worker transcribes in the background.
         // Claiming "transcribed and filed" here was the 2026-07-10 honesty
         // bug: the message showed before (or instead of) the actual work.
-        setMessage(liveLinkFailed ? t.recorder.liveLinkFailed : t.recordings.queued);
-        return res;
+        const message = liveLinkFailed ? t.recorder.liveLinkFailed : t.recordings.queued;
+        setMessage(message);
+        return { outcome: "queued", recording: res, message };
       } catch (e) {
         setStatus("error");
         const code = e instanceof RecordingApiError ? e.code : undefined;
         const detail =
           e instanceof RecordingApiError && e.message && e.status !== 0 ? e.message : null;
-        setMessage(
+        const message =
           code === "too_long"
             ? t.recordings.tooLong
             : code === "could_not_read_duration"
@@ -334,13 +351,25 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
                   ? t.recordings.estimateFailed
                   : detail
                     ? `${t.recordings.processFailed} (${detail})`
-                    : t.recordings.processFailed,
-        );
-        return null;
+                    : t.recordings.processFailed;
+        setMessage(message);
+        return { outcome: "failed", message };
       }
     },
     [workspaceId, assistantId, t, installStarter],
   );
 
-  return { stage, run, status, message, result };
+  /**
+   * Clear the inline status. A caller that reports the outcome on a surface
+   * of its own (the dock recorder's notice, which renders collapsed and
+   * expanded alike) calls this after `run` so the composer's inline line does
+   * not say the same thing a second time.
+   */
+  const dismiss = useCallback(() => {
+    setStatus("idle");
+    setMessage("");
+    setResult(null);
+  }, []);
+
+  return { stage, run, dismiss, status, message, result };
 }

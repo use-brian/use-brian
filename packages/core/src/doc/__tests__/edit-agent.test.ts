@@ -8,9 +8,11 @@ import type {
   StreamChunk,
 } from '../../providers/types.js'
 import { buildTool, type Tool, type ToolContext } from '../../tools/types.js'
+import { NO_TOOL_TIMEOUT } from '../../engine/tool-executor.js'
 import {
   createDelegateDocEditTool,
-  DOC_EDIT_TIMEOUT_MS,
+  DOC_EDIT_MAX_TOOL_CALLS,
+  DOC_EDIT_MAX_TURNS,
   isolateDocEditToolContext,
   runDocEditAgent,
   toolsForDocEditIntent,
@@ -221,6 +223,52 @@ describe('[COMP:doc/edit-agent] context-clean Doc editor', () => {
     expect(requests.every((request) => request.model === 'cheap')).toBe(true)
   })
 
+  it('reports PARTIAL with a stall reason when the child stops making progress after mutating (no wall-clock)', async () => {
+    const requests: ProviderRequest[] = []
+    const provider: LLMProvider = {
+      name: 'fake',
+      models: ['cheap'],
+      async *stream(request) {
+        requests.push(request)
+        if (requests.length === 1) {
+          yield* toolTurn('patchPage', { pageId: 'page-1' })
+          return
+        }
+        // Second call: the provider goes silent for good (honouring abort,
+        // as a real fetch does).
+        yield { type: 'message_start', model: 'cheap' }
+        await new Promise<never>((_, reject) => {
+          request.signal?.addEventListener('abort', () => reject(request.signal!.reason), { once: true })
+        })
+      },
+      createSession(): ProviderSession {
+        return { async *send() { throw new Error('stateless only') } }
+      },
+    }
+    const started = Date.now()
+    const result = await runDocEditAgent({
+      provider,
+      model: 'cheap',
+      systemPrompt: 'isolated editor protocol',
+      instruction: 'Rewrite the intro.',
+      tools: new Map([['patchPage', patchTool([])]]),
+      context: parentContext,
+      loadPageContext: async () => 'pageId=page-1 version=1',
+      stallIdleMs: 60,
+    })
+    expect(Date.now() - started).toBeLessThan(5_000)
+    expect(result.status).toBe('partial')
+    expect(result.mutationTools).toEqual(['patchPage'])
+    expect(result.summary).toMatch(/STOPPED EARLY/)
+    expect(result.summary).toMatch(/it stalled - stalled: no progress/)
+    expect(result.error).toMatch(/stalled/)
+  })
+
+  it('cost budgets are 24 turns / 40 tool calls - a cap, not a knob (no env)', () => {
+    expect(DOC_EDIT_MAX_TURNS).toBe(24)
+    expect(DOC_EDIT_MAX_TOOL_CALLS).toBe(40)
+  })
+
   it('returns an error receipt when neither attempt mutates', async () => {
     const requests: ProviderRequest[] = []
     const provider = providerFrom((request) => (
@@ -263,7 +311,9 @@ describe('[COMP:doc/edit-agent] context-clean Doc editor', () => {
     })
 
     expect(tool.name).toBe('delegateDocEdit')
-    expect(tool.timeoutMs).toBe(DOC_EDIT_TIMEOUT_MS)
+    // No wall-clock on the gateway: the child is progress-bounded.
+    expect(tool.timeoutMs).toBe(NO_TOOL_TIMEOUT)
+    expect(Number.isFinite(tool.timeoutMs)).toBe(false)
     expect(tool.inputSchema.safeParse({
       intent: 'edit',
       pageId: 'page-1',
@@ -287,6 +337,80 @@ describe('[COMP:doc/edit-agent] context-clean Doc editor', () => {
     }, parentContext)
     expect(duplicate.isError).toBe(true)
     expect(duplicate.data).toMatchObject({ error: 'doc_edit_already_delegated' })
+    expect(requests).toHaveLength(2)
+  })
+
+  it('admits ONE re-delegation after a no-mutation failure, then closes the gateway', async () => {
+    // 2026-08-19: the parent briefed "check today's meeting note" instead of
+    // pasting the note; the isolated editor has no evidence tools, so it made
+    // no change. The supervisor must be able to gather the evidence and
+    // re-brief in the same turn - once.
+    const requests: ProviderRequest[] = []
+    const provider = providerFrom((_request, call) => (
+      call === 0
+        ? textTurn('missing_evidence: the text of today\'s meeting note - paste it into the brief.')
+        : call === 1
+          ? toolTurn('patchPage', { pageId: 'page-1' })
+          : textTurn('Done.')
+    ), requests)
+    const tool = createDelegateDocEditTool({
+      provider,
+      model: 'cheap',
+      systemPrompt: 'isolated editor protocol',
+      tools: new Map([['patchPage', patchTool([])]]),
+      targetPageId: 'page-1',
+      loadPageContext: async () => 'pageId=page-1 version=1',
+    })
+
+    const first = await tool.execute({
+      intent: 'edit',
+      pageId: 'page-1',
+      instruction: 'Check today\'s meeting note and draft follow-ups.',
+    }, parentContext)
+    expect(first.isError).toBe(true)
+    expect(first.data).toMatchObject({ status: 'failed', mutationTools: [] })
+    expect((first.data as { summary: string }).summary).toMatch(/missing_evidence:/)
+    expect((first.data as { summary: string }).summary).toMatch(/One retry is available this turn/)
+
+    const second = await tool.execute({
+      intent: 'edit',
+      pageId: 'page-1',
+      instruction: 'Meeting note text: "Alice owns the pricing deck by Friday." Draft follow-ups.',
+    }, parentContext)
+    expect(second.isError).toBe(false)
+    expect(second.data).toMatchObject({ status: 'completed', mutationTools: ['patchPage'] })
+
+    const third = await tool.execute({
+      intent: 'edit',
+      pageId: 'page-1',
+      instruction: 'And again.',
+    }, parentContext)
+    expect(third.isError).toBe(true)
+    expect(third.data).toMatchObject({ error: 'doc_edit_already_delegated' })
+  })
+
+  it('closes the gateway after two no-mutation failures and says so', async () => {
+    const requests: ProviderRequest[] = []
+    const provider = providerFrom(() => textTurn('missing_evidence: still nothing to work from.'), requests)
+    const tool = createDelegateDocEditTool({
+      provider,
+      model: 'cheap',
+      systemPrompt: 'isolated editor protocol',
+      tools: new Map([['patchPage', patchTool([])]]),
+      targetPageId: 'page-1',
+      loadPageContext: async () => 'pageId=page-1 version=1',
+    })
+    const brief = { intent: 'edit' as const, pageId: 'page-1', instruction: 'Do the thing.' }
+    const first = await tool.execute(brief, parentContext)
+    expect(first.data).toMatchObject({ status: 'failed' })
+    expect((first.data as { summary: string }).summary).toMatch(/One retry is available/)
+    const second = await tool.execute(brief, parentContext)
+    expect(second.data).toMatchObject({ status: 'failed' })
+    expect((second.data as { summary: string }).summary).not.toMatch(/One retry is available/)
+    const third = await tool.execute(brief, parentContext)
+    expect(third.data).toMatchObject({ error: 'doc_edit_already_delegated' })
+    expect((third.data as { summary: string }).summary).toMatch(/already retried/)
+    // Two admitted delegations, no third child run.
     expect(requests).toHaveLength(2)
   })
 

@@ -30,6 +30,13 @@ export type MailboxIngestMessage = {
   from: string
   to?: ReadonlyArray<string>
   cc?: ReadonlyArray<string>
+  /**
+   * `Delivered-To` / `X-Original-To` header values - the address the server
+   * actually delivered into, which for a Workspace alias may name the alias
+   * when `To` names a list. Feeds the event trigger's recipient set only
+   * (mailbox-imap.md → "Event trigger"); never an Episode actor.
+   */
+  delivered_to?: ReadonlyArray<string>
   subject?: string | null
   /** Plain-text body (text/plain part, stripped-HTML fallback). */
   text?: string | null

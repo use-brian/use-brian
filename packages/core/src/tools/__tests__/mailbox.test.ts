@@ -241,6 +241,50 @@ describe('[COMP:tools/mailbox-imap] Company mailbox tools', () => {
     ])
   })
 
+  it('advertises reply-from-origin + the explicit `from` allowlist in the description and schema', () => {
+    const send = toolByName(toolsFor(makeApi()), 'imapSendMessage')
+    expect(send.description).toMatch(/from the address the original was sent to/i)
+    expect(send.description).toMatch(/pass `from` only to pick a specific configured alias/i)
+    const shape = (send.inputSchema as unknown as { shape: Record<string, unknown> }).shape
+    expect(shape).toHaveProperty('from')
+  })
+
+  it('passes an explicit from to the seam and reports the RESOLVED sender the seam used', async () => {
+    const api = makeApi({ sendMessage: vi.fn(async () => ({ messageId: '<m2@corp.com>', from: 'bd@corp.com' })) })
+    const send = toolByName(toolsFor(api), 'imapSendMessage')
+    const result = await send.execute(
+      { to: ['x@y.z'], subject: 'Re: Deal', body: 'On it.', inReplyTo: 'INBOX:7', from: 'bd@corp.com' },
+      CTX,
+    )
+    expect(result.isError).toBeFalsy()
+    expect(api.sendMessage).toHaveBeenCalledWith(expect.objectContaining({ from: 'bd@corp.com', inReplyTo: 'INBOX:7' }))
+    expect(result.data).toEqual({ messageId: '<m2@corp.com>', from: 'bd@corp.com' })
+    // A seam that reports no `from` (older impl) → the bound account.
+    const legacy = makeApi()
+    const r2 = await toolByName(toolsFor(legacy), 'imapSendMessage').execute({ to: ['x@y.z'], subject: 's', body: 'b' }, CTX)
+    expect(r2.data).toEqual({ messageId: '<m1@corp.com>', from: EMAIL })
+    expect((legacy.sendMessage as ReturnType<typeof vi.fn>).mock.calls[0][0]).not.toHaveProperty('from')
+  })
+
+  it('the confirmation From line shows the sender the send WOULD use (reply-from-origin alias), via resolveSender', async () => {
+    const resolveSender = vi.fn(async (p: { from?: string; inReplyTo?: string }) => {
+      if (p.from && p.from !== 'bd@corp.com') throw new Error(`"${p.from}" is not an address this email account can send as. Allowed senders: ${EMAIL}, bd@corp.com.`)
+      return { from: p.from ?? (p.inReplyTo ? 'bd@corp.com' : EMAIL), allowed: [EMAIL, 'bd@corp.com'] }
+    })
+    const api = makeApi({ resolveSender })
+    const send = toolByName(toolsFor(api), 'imapSendMessage')
+    // Reply → the alias the original was addressed to.
+    expect(await send.describeConfirmation!({ to: ['ken@client.hk'], subject: 'Re', body: 'b', inReplyTo: 'INBOX:7' }, CTX))
+      .toEqual(['• From: bd@corp.com', '• To: ken@client.hk', '• Subject: Re', '• Body: b'])
+    // Explicit disallowed → called out; the send will be refused at execute.
+    const bad = await send.describeConfirmation!({ to: ['ken@client.hk'], subject: 'Re', body: 'b', from: 'nope@else.example' }, CTX)
+    expect(bad![0]).toMatch(/^• From: nope@else\.example \(not an allowed sender: send will be refused/)
+    // No reply, no explicit from → the account, and resolveSender is not even consulted.
+    resolveSender.mockClear()
+    expect((await send.describeConfirmation!({ to: ['ken@client.hk'], subject: 'Hi', body: 'b' }, CTX))![0]).toBe(`• From: ${EMAIL}`)
+    expect(resolveSender).not.toHaveBeenCalled()
+  })
+
   it('forwards cc and bcc to the seam, omitting empty ones', async () => {
     const api = makeApi()
     const send = toolByName(toolsFor(api), 'imapSendMessage')

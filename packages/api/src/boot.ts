@@ -76,6 +76,7 @@ import {
   advanceWorkflowRun,
   stepSuccessors,
   createWorkflowEventDispatcher,
+  createIngestWorkflowTrigger,
   type WorkflowEventDispatcher,
   createRunQueueWorker,
   createTaskTools,
@@ -85,8 +86,6 @@ import {
   type GoalRecord,
   createWorkspaceTools,
   createTranscriptionPrefTools,
-  type WorkspaceDirectoryStore,
-  type WorkspaceMemberInfo,
   createCrmTools,
   createMemoryTools,
   createRetrievalTools,
@@ -130,7 +129,6 @@ import {
   createE2bRuntime,
   createSkillRunnerTools,
   createBuFallbackTool,
-  RESEARCH_BUDGET_CEILING,
   type BlockApprovalsPort,
   type BrowserSkillGrantStore,
   type ComputerToolPolicy,
@@ -194,6 +192,7 @@ import { EXTRACTION_MODEL } from './build-episode-ingestors.js'
 import { createMailboxSyncWorker } from './mailbox/sync-worker.js'
 import { setGlobalMailboxArchiveDeps } from './mailbox/archive-search-tool.js'
 import { setGlobalMailboxSyncDeps } from './mailbox/sync-tool.js'
+import { createMailboxIdleWatcher } from './mailbox/idle-watcher.js'
 import { createChatArchiveTools } from './chat-archive/chat-tools.js'
 import { resolveIngestPlaceholders } from './ingest/placeholder-resolver.js'
 import { createMeteredProfileStore } from './db/metered-profile-store.js'
@@ -252,6 +251,7 @@ import { invitationRoutes } from './routes/invitations.js'
 import { createWorkspaceInvitationStore } from './db/workspace-invitation-store.js'
 import { createWorkspaceStore, getWorkspaceInboxRetentionDays, getWorkspaceMembershipWithClearanceSystem, getWorkspacePlan, getWorkspaceTranscriptionPrefs, setWorkspaceTranscriptionPrefs } from './db/workspace-store.js'
 import { createWorkspaceAuditStore } from './db/workspace-audit-store.js'
+import { createWorkspaceDirectoryStore } from './db/workspace-directory-store.js'
 import { createConnectionStore } from './db/connection-store.js'
 import {
   getPendingRecordingConfirmation,
@@ -1915,35 +1915,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     ? ports.buildSyncCredentials({ connectorInstanceStore, connectorGrantStore })
     : createSyncCredentialProvider(connectorInstanceStore, connectorGrantStore)
 
-  const workspaceDirectoryStore: WorkspaceDirectoryStore = {
-    async listMembers(userId, workspaceId) {
-      const membership = await workspaceStore.getMembership(userId, workspaceId)
-      if (!membership) return []
-      const members = await workspaceStore.listMembers(userId, workspaceId)
-      return members.map((m) => ({
-        memberId: m.id, name: m.userName ?? null, email: m.email ?? null,
-        avatarUrl: m.avatarUrl ?? null, role: m.role,
-      }))
-    },
-    async get(workspaceId, memberId) {
-      const map = await workspaceDirectoryStore.batchGet(workspaceId, [memberId])
-      return map.get(memberId) ?? null
-    },
-    async batchGet(workspaceId, memberIds) {
-      if (memberIds.length === 0) return new Map()
-      const members = await workspaceStore.listMembers('', workspaceId)
-      const requested = new Set(memberIds)
-      const out = new Map<string, WorkspaceMemberInfo>()
-      for (const m of members) {
-        if (!requested.has(m.id)) continue
-        out.set(m.id, {
-          memberId: m.id, name: m.userName ?? null, email: m.email ?? null,
-          avatarUrl: m.avatarUrl ?? null, role: m.role,
-        })
-      }
-      return out
-    },
-  }
+  const workspaceDirectoryStore = createWorkspaceDirectoryStore(workspaceStore)
 
   const workspaceAuditStore = createWorkspaceAuditStore()
   const connectionStore = createConnectionStore()
@@ -2966,15 +2938,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       assistantId,
       name: isVerify ? 'Work a goal to done' : 'Complete a task',
       instructions,
-      // Goal iterations get the wall-clock CEILING (not the 90s reminder
-      // default): an autonomous iteration doing real work — a browser-skill
-      // run in the cloud sandbox, a research pass, file writes — routinely
-      // outlives 90s, and clipping it mid-tool made the goal loop burn
-      // iterations on timeouts. Cost stays bounded by the unchanged turn /
-      // tool-call caps + the driver's own spend guards (maxSpend,
-      // workspaceBudgetOk); only the wall-clock allowance widens. See
+      // No wall-clock on a goal iteration (2026-08-19). It used to pin the
+      // 900s ceiling because the 90s reminder default clipped real work (a
+      // browser-skill run in the cloud sandbox, a research pass, file writes)
+      // and made the goal loop burn iterations on timeouts; the default is
+      // now no wall-clock at all - the step is progress-bounded by the stall
+      // watchdog and cost-bounded by the unchanged turn / tool-call caps + the
+      // driver's own spend guards (maxSpend, workspaceBudgetOk). See
       // docs/architecture/engine/computer-use.md → "Working a task's goal".
-      depth: { timeoutMs: RESEARCH_BUDGET_CEILING.timeoutMs },
     })
   }
 
@@ -7046,13 +7017,34 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       ingestCharge: ports.ingestCharge,
       scheduledBatching: ports.mailboxScheduledBatching,
     },
+    // Workflow event port - the SAME shared dispatcher every connector poller
+    // feeds (`createIngestWorkflowTrigger`), so an `event` workflow subscribed
+    // to an imap instance fires on rule-matched new mail once ingestion is on
+    // (mailbox-imap.md → "Event trigger"). Before this wire an imap event
+    // subscription saved fine and never fired.
+    onEvent: createIngestWorkflowTrigger(workflowEventDispatcher),
   })
   if (runWorkers) mailboxSyncWorker.start()
+  // IDLE watcher (mailbox-imap.md → "IDLE watcher"): one dedicated IMAP
+  // connection per connected mailbox that turns the server's `exists` push
+  // into `syncInstanceById` within seconds - a wake-up for the SAME sync the
+  // tick runs, never a second ingest path (D6). Runs where the sync worker
+  // runs (workers service hosted; the one process on OSS).
+  const mailboxIdleWatcher = createMailboxIdleWatcher({
+    connectorInstanceStore,
+    syncInstanceById: (id) => mailboxSyncWorker.syncInstanceById(id),
+  })
+  if (runWorkers) mailboxIdleWatcher.start()
   // Arm the on-demand sync seam in EVERY process (not just the workers
   // service): the connect route's sync-on-connect and the `syncMailboxNow`
   // tool both run in the API process, and single-instance sync needs no
   // running poll timer. See mailbox-imap.md §Phase 2 → "On-demand sync".
-  setGlobalMailboxSyncDeps({ syncInstanceById: (id) => mailboxSyncWorker.syncInstanceById(id) })
+  // `watchInstance` is armed only where the watcher runs; elsewhere the
+  // watcher's reconcile pass picks a freshly connected mailbox up itself.
+  setGlobalMailboxSyncDeps({
+    syncInstanceById: (id) => mailboxSyncWorker.syncInstanceById(id),
+    ...(runWorkers ? { watchInstance: (id) => mailboxIdleWatcher.watchInstance(id) } : {}),
+  })
 
   // ── External-sink relay (ingest outbox → ub.ingest.append.v1) ──
   // Drains ingest_outbox to each attached external sink; the sink cursor
@@ -7553,6 +7545,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     runQueueWorker.stop()
     knowledgeSyncWorker.stop()
     mailboxSyncWorker.stop()
+    // Log out every IDLE socket - a SIGTERM must not leave a mailbox connection
+    // dangling until the server's own timeout notices.
+    await mailboxIdleWatcher.stop().catch(() => {})
     externalSinkRelay.stop()
     chatArchiveEnrichmentWorker?.stop()
     stuckSessionSweeper.stop()

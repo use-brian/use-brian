@@ -49,6 +49,8 @@ import {
   createConfirmationResolver,
   resolveResearchBudget,
   ASSISTANT_CALL_DEFAULT_BUDGET,
+  DEFAULT_STALL_IDLE_MS,
+  isStalledError,
   runPreflight,
   buildPreflightPrompt,
   EvidenceAccumulator,
@@ -290,9 +292,10 @@ export type CalleeQueryParams = {
   enforcedSkills?: string[]
   /**
    * Research-depth override for this consult's agentic loop. Resolved against
-   * `ASSISTANT_CALL_DEFAULT_BUDGET`; raises the turn / tool-call / wall-clock
-   * caps for a deep-research step (or a scheduled job authored with `depth`).
-   * Absent → the historical 5-turn / 30s default.
+   * `ASSISTANT_CALL_DEFAULT_BUDGET`; raises the turn / tool-call caps for a
+   * deep-research step (or a scheduled job authored with `depth`) and may arm
+   * an explicit wall-clock (`timeoutMs`). Absent → the 5-turn default, no
+   * wall-clock; liveness is the stall watchdog's.
    */
   depth?: ResearchDepthConfig
   /**
@@ -1318,9 +1321,10 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     }
 
     // Research-depth budget — a step's `depth` (or a scheduled job's, via its
-    // one-step workflow) raises the turn / tool-call / wall-clock caps above
-    // the modest default. Absent → ASSISTANT_CALL_DEFAULT_BUDGET (5 turns,
-    // 90s default wall-clock, `ASSISTANT_CALL_TIMEOUT_MS`-configurable).
+    // one-step workflow) raises the turn / tool-call caps above the modest
+    // default and may arm an explicit wall-clock. Absent →
+    // ASSISTANT_CALL_DEFAULT_BUDGET (5 turns, no wall-clock unless
+    // `ASSISTANT_CALL_TIMEOUT_MS` sets one).
     const budget = resolveResearchBudget(params.depth, ASSISTANT_CALL_DEFAULT_BUDGET)
     // Raw live-stream accumulation — kept ONLY as the wall-clock-timeout
     // partialOutput (operator-facing, never delivered). The returned consult
@@ -1334,19 +1338,27 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     // produced visible text — the source of the returned consult text.
     const turnTexts: string[] = []
     const abortController = new AbortController()
-    // A scheduled-origin step may suspend up to 5 min on a tool confirmation;
-    // an ordinary A2A consult must not hang. Give the former headroom past
-    // the 5-min confirmation timeout.
-    const wallClockMs = deferredConfirmations ? 360_000 : budget.timeoutMs
-    // Distinguishes *our* wall-clock abort from any other AbortError, so the
-    // caller (workflow executor) can classify the run as `timeout` rather than
-    // the generic `dispatch_threw`. See docs/architecture/features/workflow.md
-    // → "Step timeouts".
+    // Liveness, not wall-clock (2026-08-19). The step is bounded by cost
+    // (`budget.maxTurns` / `maxToolCalls`) and by the query loop's stall
+    // watchdog (`stallIdleMs`: no provider chunk / tool activity / loop event
+    // for the idle window aborts it, and a tool parked on a human
+    // confirmation pauses the clock, so a scheduled-origin step waiting on
+    // its 5-min confirmation is not a stall). A wall-clock is armed ONLY when
+    // the author set `depth.timeoutMs` (or the operator set
+    // `ASSISTANT_CALL_TIMEOUT_MS`) - `budget.timeoutMs` is `null` otherwise.
+    // Both exits are re-tagged `reason: 'timeout'` so the workflow executor
+    // classifies the run as `timeout` (not the generic `dispatch_threw`); see
+    // docs/architecture/features/workflow.md → "Step timeouts".
+    const wallClockMs = budget.timeoutMs
     let timedOut = false
-    const timeout = setTimeout(() => {
-      timedOut = true
-      abortController.abort()
-    }, wallClockMs)
+    let stalledError: Error | null = null
+    const timeout = wallClockMs !== null
+      ? setTimeout(() => {
+          timedOut = true
+          abortController.abort()
+        }, wallClockMs)
+      : undefined
+    const stallIdleMs = DEFAULT_STALL_IDLE_MS
     const confirmationResolver = deferredConfirmations ? createConfirmationResolver() : undefined
     const registeredToolCallIds: string[] = []
 
@@ -1628,11 +1640,17 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         },
         maxTurns: budget.maxTurns,
         maxToolCalls: budget.maxToolCalls,
+        stallIdleMs,
         confirmationResolver,
         confirmationTimeoutMs: deferredConfirmations ? 300_000 : undefined,
       })) {
         if (event.type === 'text_delta') {
           responseText += event.text
+        } else if (event.type === 'error' && isStalledError(event.error)) {
+          // The stall watchdog fired: typed below as a timeout-class exit
+          // (progress timeout), carrying the partial text.
+          stalledError = event.error
+          throw event.error
         } else if (event.type === 'assistant_turn') {
           // Finalised turn content — a leak-suppressed turn has its text
           // blocks stripped and contributes nothing; a retried turn
@@ -1848,14 +1866,23 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       if (timedOut) {
         throw Object.assign(
           new Error(
-            `assistant_call step exceeded its ${wallClockMs}ms wall-clock budget and was aborted`,
+            `assistant_call step exceeded its explicit ${wallClockMs}ms wall-clock budget and was aborted`,
+          ),
+          { reason: 'timeout', partialOutput: responseText.trim() || undefined },
+        )
+      }
+      if (stalledError || isStalledError(err)) {
+        const stall = (stalledError ?? err) as Error
+        throw Object.assign(
+          new Error(
+            `assistant_call step ${stall.message} (idle window ${Math.round(stallIdleMs / 1000)}s) and was aborted`,
           ),
           { reason: 'timeout', partialOutput: responseText.trim() || undefined },
         )
       }
       throw err
     } finally {
-      clearTimeout(timeout)
+      if (timeout) clearTimeout(timeout)
       for (const id of registeredToolCallIds) {
         unregisterSchedulerResolver(id)
       }

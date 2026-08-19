@@ -35,6 +35,7 @@ function makeApp(over: {
   const listForUser = vi.fn(async () =>
     over.instances ?? (over.existing ? [over.existing] : []))
   const getAuthCredentialsSystem = vi.fn(async () => over.creds ?? null)
+  const setConfigSystem = vi.fn(async () => {})
   const getMembershipWithClearance = vi.fn(async () => over.membership ?? null)
   const verify = vi.fn(async () =>
     over.verifyOk === false
@@ -46,7 +47,7 @@ function makeApp(over: {
   const router = connectorRoutes({
     connectorStore: {} as ConnectorStore,
     connectorInstanceStore: {
-      createUserInstance, update, listForUser, getAuthCredentialsSystem,
+      createUserInstance, update, listForUser, getAuthCredentialsSystem, setConfigSystem,
     } as unknown as ConnectorInstanceStore,
     imapMailbox: {
       verify: verify as never,
@@ -56,7 +57,7 @@ function makeApp(over: {
     },
   })
   const app = createTestApp('/api/connectors', router, { userId: USER })
-  return { app, createUserInstance, update, listForUser, verify, resolvePreset, getMembershipWithClearance }
+  return { app, createUserInstance, update, listForUser, verify, resolvePreset, getMembershipWithClearance, setConfigSystem }
 }
 
 describe('[COMP:api/mailbox-connect-routes] POST /imap/resolve', () => {
@@ -242,6 +243,69 @@ describe('[COMP:api/mailbox-connect-routes] transferred (workspace-owned) mailbo
   })
 })
 
+describe('[COMP:api/mailbox-connect-routes] send-as aliases (PATCH /imap/send-as + sync-status read-back)', () => {
+  const MAILBOX = {
+    id: 'inst_1',
+    provider: 'imap',
+    scope: 'user',
+    connected: true,
+    connectedEmail: 'contact@usebrian.example',
+    createdAt: new Date('2026-01-01T00:00:00Z'),
+    config: { sendAsAliases: ['bd@usebrian.example'] },
+    ingestionEnabled: true,
+  }
+  const CREDS = {
+    type: 'imap', email: 'contact@usebrian.example', appPassword: 'pw',
+    imapHost: 'imap.gmail.com', imapPort: 993, smtpHost: 'smtp.gmail.com', smtpPort: 465,
+  }
+
+  it('writes a normalized, deduped, account-free list to config.sendAsAliases and echoes it', async () => {
+    const { app, setConfigSystem } = makeApp({ instances: [MAILBOX], creds: CREDS })
+    const res = await request(app)
+      .patch('/api/connectors/imap/send-as')
+      .send({ sendAsAliases: ['BD <BD@usebrian.example>', 'ops@usebrian.example', 'contact@usebrian.example', 'bd@usebrian.example'] })
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ ok: true, instanceId: 'inst_1', sendAsAliases: ['bd@usebrian.example', 'ops@usebrian.example'] })
+    expect(setConfigSystem).toHaveBeenCalledWith('inst_1', { sendAsAliases: ['bd@usebrian.example', 'ops@usebrian.example'] })
+  })
+
+  it('rejects the whole write when an entry is not an address (nothing stored)', async () => {
+    const { app, setConfigSystem } = makeApp({ instances: [MAILBOX], creds: CREDS })
+    const res = await request(app)
+      .patch('/api/connectors/imap/send-as')
+      .send({ sendAsAliases: ['bd@usebrian.example', 'not an address'] })
+    expect(res.status).toBe(400)
+    expect(res.body.invalid).toEqual(['not an address'])
+    expect(setConfigSystem).not.toHaveBeenCalled()
+    const shape = await request(app).patch('/api/connectors/imap/send-as').send({ sendAsAliases: 'bd@usebrian.example' })
+    expect(shape.status).toBe(400)
+  })
+
+  it('404s without a connected mailbox; targets a specific instance with instanceId', async () => {
+    const { app } = makeApp()
+    expect((await request(app).patch('/api/connectors/imap/send-as').send({ sendAsAliases: [] })).status).toBe(404)
+    const second = { ...MAILBOX, id: '11111111-1111-4111-8111-111111111111', connectedEmail: 'other@usebrian.example', createdAt: new Date('2026-02-01T00:00:00Z') }
+    const { app: two, setConfigSystem } = makeApp({ instances: [MAILBOX, second], creds: CREDS })
+    const res = await request(two)
+      .patch('/api/connectors/imap/send-as')
+      .send({ instanceId: second.id, sendAsAliases: ['sales@usebrian.example'] })
+    expect(res.status).toBe(200)
+    expect(setConfigSystem).toHaveBeenCalledWith(second.id, { sendAsAliases: ['sales@usebrian.example'] })
+  })
+
+  it('sync-status reads the configured aliases + the IDLE posture back for the panel', async () => {
+    const idle = { status: 'connected', since: '2026-08-19T09:00:00.000Z', lastEventAt: '2026-08-19T09:41:00.000Z', lastError: null }
+    const { app } = makeApp({ instances: [{ ...MAILBOX, config: { ...MAILBOX.config, mailboxIdle: idle } }], creds: CREDS })
+    const res = await request(app).get('/api/connectors/imap/sync-status')
+    expect(res.status).toBe(200)
+    expect(res.body.sendAsAliases).toEqual(['bd@usebrian.example'])
+    expect(res.body.idle).toEqual(idle)
+    // Never watched → null, not a fabricated "off".
+    const { app: bare } = makeApp({ instances: [MAILBOX], creds: CREDS })
+    expect((await request(bare).get('/api/connectors/imap/sync-status')).body.idle).toBeNull()
+  })
+})
+
 describe('[COMP:api/mailbox-connect-routes] sync-on-connect', () => {
   afterEach(() => setGlobalMailboxSyncDeps(null))
 
@@ -265,6 +329,18 @@ describe('[COMP:api/mailbox-connect-routes] sync-on-connect', () => {
     })
     expect(res.status).toBe(200)
     expect(syncInstanceById).toHaveBeenCalledWith('inst_existing')
+  })
+
+  it('brings the IDLE watcher up for the new instance when the seam arms watchInstance (workers / OSS process)', async () => {
+    const syncInstanceById = vi.fn(async () => ({ synced: true as const, newMessages: 0 }))
+    const watchInstance = vi.fn(async () => {})
+    setGlobalMailboxSyncDeps({ syncInstanceById, watchInstance })
+    const { app } = makeApp()
+    const res = await request(app).post('/api/connectors/imap/connect').send({
+      email: 'maya@harborlane.example', appPassword: 'pw',
+    })
+    expect(res.status).toBe(200)
+    expect(watchInstance).toHaveBeenCalledWith('inst_new')
   })
 
   it('connect still succeeds when the sync seam is unarmed', async () => {

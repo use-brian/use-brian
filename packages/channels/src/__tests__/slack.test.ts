@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { createSlackAdapter } from '../slack/adapter.js'
+import { createSlackAdapter, isHumanTextEdit } from '../slack/adapter.js'
 import { createSlackApi } from '../slack/api.js'
 import {
   describeSlackError,
@@ -165,6 +165,70 @@ describe('[COMP:channels/slack] createSlackAdapter parseIncoming', () => {
       event: { type: 'reaction_added', user: 'U_USER' },
     }
     expect(adapter.parseIncoming(event)).toBeNull()
+  })
+
+  // ── message_changed: only a HUMAN text edit is an edit ─────────
+  // Slack also emits `message_changed` for link unfurls (preview card
+  // attached seconds after posting), thread metadata and pins. Those
+  // used to parse as `isEdit: true`, which re-ran the message as a fresh
+  // turn AND made the route abort whatever unrelated turn was in flight
+  // (2026-08-18 "Something went wrong" on a "yes" confirmation).
+  const changed = (
+    message: Record<string, unknown>,
+    previous?: Record<string, unknown>,
+  ) => ({
+    type: 'event_callback',
+    event: {
+      type: 'message',
+      subtype: 'message_changed',
+      channel: 'D123',
+      ts: '1680000099.000900', // the change event's own ts
+      message: { user: 'U_USER', ts: '1680000000.000100', ...message },
+      ...(previous ? { previous_message: { user: 'U_USER', ts: '1680000000.000100', ...previous } } : {}),
+    },
+  })
+
+  it('parses a message_changed with an `edited` stamp and new text as isEdit', () => {
+    const result = adapter.parseIncoming(changed(
+      { text: 'hello bot v2', edited: { user: 'U_USER', ts: '1680000099.000900' } },
+      { text: 'hello bot' },
+    ))
+    expect(result).toMatchObject({
+      userId: 'U_USER',
+      channelId: 'D123',
+      messageId: '1680000000.000100', // the ORIGINAL message ts, not the change event's
+      text: 'hello bot v2',
+      isEdit: true,
+    })
+  })
+
+  it('ignores a link-unfurl message_changed (no `edited` stamp, text unchanged)', () => {
+    const result = adapter.parseIncoming(changed(
+      { text: 'see <https://app.example/x>', attachments: [{ title: 'preview' }] },
+      { text: 'see <https://app.example/x>' },
+    ))
+    expect(result).toBeNull()
+  })
+
+  it('ignores an unfurl that arrives AFTER a real edit (stamp present, text unchanged)', () => {
+    const result = adapter.parseIncoming(changed(
+      { text: 'edited <https://app.example/x>', edited: { user: 'U_USER', ts: '1680000050.000500' }, attachments: [{}] },
+      { text: 'edited <https://app.example/x>' },
+    ))
+    expect(result).toBeNull()
+  })
+
+  it('falls back to the `edited` stamp when Slack omits previous_message', () => {
+    expect(adapter.parseIncoming(changed({ text: 'v2', edited: { user: 'U_USER' } }))).toMatchObject({ isEdit: true })
+    expect(adapter.parseIncoming(changed({ text: 'v2' }))).toBeNull()
+  })
+
+  it('isHumanTextEdit: stamp AND changed text, never one alone', () => {
+    expect(isHumanTextEdit({ text: 'b', edited: {} }, { text: 'a' })).toBe(true)
+    expect(isHumanTextEdit({ text: 'a', edited: {} }, { text: 'a' })).toBe(false)
+    expect(isHumanTextEdit({ text: 'b' }, { text: 'a' })).toBe(false)
+    expect(isHumanTextEdit({ text: 'b', edited: {} }, undefined)).toBe(true)
+    expect(isHumanTextEdit({ text: 'b' }, undefined)).toBe(false)
   })
 })
 

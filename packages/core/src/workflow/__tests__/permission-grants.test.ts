@@ -44,6 +44,29 @@ describe('[COMP:brain/workflow-permission-grant-evaluator] matchPermissionGrant'
     expect(matchPermissionGrant(grants, 'writeFile', 'github')).toEqual(grants[1])
   })
 
+  it('a grant on the canonical name covers an instance-suffixed variant (imapSendMessage__bd_1a2b3c4d)', () => {
+    // Multi-instance tools carry `__<slug>_<id8>`; policies and write grants
+    // resolve against the canonical base name and so must workflow grants
+    // (mailbox-imap.md → "Multiple mailboxes"; plan §4.4 / §10 row 13).
+    const grants = [{ action_kind: 'imapSendMessage', grant: 'allow' as const }]
+    expect(matchPermissionGrant(grants, 'imapSendMessage__bd_1a2b3c4d')).toEqual(grants[0])
+    expect(matchPermissionGrant(grants, 'imapSendMessage__bd_1a2b3c4d', 'imap')).toEqual(grants[0])
+    // Namespaced canonical also resolves for the variant.
+    const ns = [{ action_kind: 'imap:imapSendMessage', grant: 'ask' as const }]
+    expect(matchPermissionGrant(ns, 'imapSendMessage__bd_1a2b3c4d', 'imap')).toEqual(ns[0])
+  })
+
+  it('an exact suffixed grant still wins over the canonical one (a grant CAN target one instance)', () => {
+    const grants = [
+      { action_kind: 'imapSendMessage', grant: 'allow' as const },
+      { action_kind: 'imapSendMessage__bd_1a2b3c4d', grant: 'block' as const },
+    ]
+    expect(matchPermissionGrant(grants, 'imapSendMessage__bd_1a2b3c4d')).toEqual(grants[1])
+    expect(matchPermissionGrant(grants, 'imapSendMessage')).toEqual(grants[0])
+    // A different variant does not inherit the block.
+    expect(matchPermissionGrant(grants, 'imapSendMessage__ops_9f8e7d6c')).toEqual(grants[0])
+  })
+
   it('falls back to bare tool name when no namespaced grant is present', () => {
     const grants: WorkflowPermissionGrant[] = [{ action_kind: 'writeFile', grant: 'ask' }]
     expect(matchPermissionGrant(grants, 'writeFile', 'github')).toEqual(grants[0])

@@ -24,10 +24,12 @@ import {
   listLinkedAccounts,
   unlinkAccount,
   createTelegramLinkCode,
+  createSlackLinkCode,
   createWhatsappLinkCode,
   MAX_AVATAR_BYTES,
   type LinkedAccount,
   type TelegramLinkCode,
+  type SlackLinkCode,
   type WhatsappLinkCode,
 } from "@/lib/api/account";
 import {
@@ -487,7 +489,229 @@ function ConnectedAccountsSection() {
         </p>
       )}
 
+      <SlackLinkRow />
       <WhatsappLinkRow />
+    </div>
+  );
+}
+
+/**
+ * Slack link - the sibling of the Telegram row above, open in both editions.
+ *
+ * Brian matches a Slack sender by the Slack PROFILE email. When that is not
+ * the email of the account the person actually uses (a company Slack address
+ * vs a Gmail sign-in), every Slack turn runs as a different real user who is
+ * not a member of the workspace, and workflows/tasks read as empty. Connect
+ * mints a 6-char code (`POST /api/account/slack/link-code`, bound
+ * server-side to the first-owned assistant); the user sends it to the Brian
+ * app in Slack (DM, or @mention + code in a channel), the Slack handler
+ * redeems it (`slack.ts` -> "5a-link"), and `resolveSlackSender` routes that
+ * Slack id to THIS account before the email path. The row polls the
+ * linked-accounts list until the `slack` identity appears. There is no deep
+ * link (Slack has no per-app message URL that carries text).
+ *
+ * See docs/architecture/channels/channel-user-identity.md -> "Slack".
+ * Component tag: [COMP:app-web/slack-link].
+ */
+type SlackLinkState =
+  | { kind: "loading" }
+  | { kind: "unlinked" }
+  | { kind: "linked"; account: LinkedAccount }
+  | { kind: "connecting"; code: SlackLinkCode };
+
+function slackStateFromAccounts(accounts: LinkedAccount[]): SlackLinkState {
+  const row = accounts.find((a) => a.provider === "slack");
+  return row ? { kind: "linked", account: row } : { kind: "unlinked" };
+}
+
+export function SlackLinkRow({
+  initialAccounts,
+}: {
+  /**
+   * Seed the row synchronously from an already-loaded linked-accounts list
+   * (SSR / test contract - effects never run under `renderToString`). When
+   * absent the row loads the list itself on mount.
+   */
+  initialAccounts?: LinkedAccount[];
+} = {}) {
+  const t = useT();
+  const [state, setState] = useState<SlackLinkState>(() =>
+    initialAccounts ? slackStateFromAccounts(initialAccounts) : { kind: "loading" },
+  );
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<Status>(null);
+  const [secondsLeft, setSecondsLeft] = useState(0);
+
+  useEffect(() => {
+    if (initialAccounts) return;
+    let cancelled = false;
+    void listLinkedAccounts().then((accounts) => {
+      if (cancelled) return;
+      setState(slackStateFromAccounts(accounts));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [initialAccounts]);
+
+  // While a code is pending: 1s countdown tick + 3s poll for the bot-side
+  // redemption (same cadence as the Telegram / WhatsApp rows).
+  useEffect(() => {
+    if (state.kind !== "connecting") return;
+    const expiresAt = state.code.expiresAt;
+    setSecondsLeft(linkCodeSecondsLeft(expiresAt));
+    const tick = setInterval(() => {
+      setSecondsLeft(linkCodeSecondsLeft(expiresAt));
+    }, 1000);
+    const poll = setInterval(() => {
+      if (linkCodeSecondsLeft(expiresAt) <= 0) return;
+      void listLinkedAccounts().then((accounts) => {
+        const row = accounts.find((a) => a.provider === "slack");
+        if (row) {
+          setState({ kind: "linked", account: row });
+          setNotice({ kind: "success", text: t.settings.account.slackLinked });
+        }
+      });
+    }, 3000);
+    return () => {
+      clearInterval(tick);
+      clearInterval(poll);
+    };
+  }, [state, t]);
+
+  async function onConnect() {
+    setBusy(true);
+    setNotice(null);
+    try {
+      const code = await createSlackLinkCode();
+      if (!code) {
+        setNotice({ kind: "error", text: t.settings.account.slackUnavailable });
+        return;
+      }
+      setState({ kind: "connecting", code });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onDisconnect() {
+    if (state.kind !== "linked") return;
+    const ok = await confirmDialog({
+      title: t.settings.account.disconnectSlackTitle,
+      description: t.settings.account.disconnectSlackConfirm,
+      confirmLabel: t.settings.account.disconnect,
+      cancelLabel: t.settings.common.cancel,
+      variant: "destructive",
+    });
+    if (!ok) return;
+    setBusy(true);
+    setNotice(null);
+    try {
+      const removed = await unlinkAccount(state.account.id);
+      if (!removed) {
+        setNotice({ kind: "error", text: t.settings.account.connectError });
+        return;
+      }
+      setState({ kind: "unlinked" });
+      setNotice({ kind: "success", text: t.settings.account.slackUnlinked });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const expired = state.kind === "connecting" && secondsLeft <= 0;
+
+  return (
+    <div className="space-y-4 pt-2">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-sm font-medium">{t.settings.account.slack}</div>
+          <div className="text-xs text-muted-foreground truncate">
+            {state.kind === "loading" && t.settings.common.loading}
+            {state.kind === "unlinked" && t.settings.account.notConnected}
+            {state.kind === "connecting" && t.settings.account.notConnected}
+            {state.kind === "linked" &&
+              format(t.settings.account.slackConnectedAs, {
+                id: state.account.providerId,
+              })}
+          </div>
+        </div>
+        {state.kind === "unlinked" && (
+          <button
+            type="button"
+            onClick={() => void onConnect()}
+            disabled={busy}
+            className="text-sm font-medium px-4 py-2 rounded-lg bg-action text-action-foreground hover:bg-action/90 disabled:opacity-50"
+          >
+            {busy ? "…" : t.settings.account.connect}
+          </button>
+        )}
+        {state.kind === "linked" && (
+          <button
+            type="button"
+            onClick={() => void onDisconnect()}
+            disabled={busy}
+            className="text-sm font-medium border border-border px-4 py-2 rounded-lg hover:bg-muted transition-colors disabled:opacity-50"
+          >
+            {busy ? "…" : t.settings.account.disconnect}
+          </button>
+        )}
+      </div>
+
+      {state.kind === "unlinked" && (
+        <p className="text-[12px] text-muted-foreground">
+          {t.settings.account.slackDesc}
+        </p>
+      )}
+
+      {state.kind === "connecting" && (
+        <div className="rounded-lg border border-border bg-muted/30 p-4 space-y-3">
+          <div className="text-2xl font-mono tracking-[0.3em] text-center select-all">
+            {state.code.code}
+          </div>
+          <p className="text-[12px] text-muted-foreground">
+            {t.settings.account.connectSlackHint}
+          </p>
+          <div className="flex items-center gap-3">
+            {expired && (
+              <button
+                type="button"
+                onClick={() => void onConnect()}
+                disabled={busy}
+                className="text-sm font-medium px-4 py-2 rounded-lg bg-action text-action-foreground hover:bg-action/90 disabled:opacity-50"
+              >
+                {busy ? "…" : t.settings.account.generateNewCode}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setState({ kind: "unlinked" })}
+              className="text-sm text-muted-foreground hover:text-foreground"
+            >
+              {t.settings.common.cancel}
+            </button>
+          </div>
+          <p className="text-[11px] text-muted-foreground">
+            {expired
+              ? t.settings.account.codeExpired
+              : format(t.settings.account.codeExpiresIn, {
+                  time: formatCountdown(secondsLeft),
+                })}
+          </p>
+        </div>
+      )}
+
+      {notice && (
+        <p
+          className={
+            notice.kind === "success"
+              ? "text-[12px] text-primary"
+              : "text-[12px] text-red-400"
+          }
+        >
+          {notice.text}
+        </p>
+      )}
     </div>
   );
 }

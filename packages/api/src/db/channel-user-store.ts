@@ -16,6 +16,7 @@
 import { query, getPool } from './client.js'
 import { findUserByEmail, findOrCreateUser, type User } from './users.js'
 import { mergeShadowUser } from './linked-accounts.js'
+import { getWorkspaceRoleSystem } from './workspace-store.js'
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -361,12 +362,7 @@ export async function resolveChannelUser(
   }
 
   // 4. Ensure assistant_members row (so the user appears in the assistant's member list)
-  await query(
-    `INSERT INTO assistant_members (assistant_id, user_id, role)
-     VALUES ($1, $2, 'member')
-     ON CONFLICT (assistant_id, user_id) DO NOTHING`,
-    [assistantId, user.id],
-  )
+  await ensureAssistantMember(assistantId, user.id)
 
   // 5. Cache
   await store.cache({
@@ -379,6 +375,58 @@ export async function resolveChannelUser(
   })
 
   return { user, isIdentified }
+}
+
+/**
+ * Decide whether a claimed identity link (`linked_identities`) should be
+ * honoured as the sender's real identity on THIS assistant. Channel-agnostic:
+ * Telegram BYO (`telegramLinkBindsHere` alias) and Slack (`resolveSlackSender`)
+ * apply the identical rule.
+ *
+ * `linked_identities (provider, provider_id)` is globally unique, so a sender
+ * linked to assistant A must not be served under their real identity on
+ * assistant B (cross-tenant memory/persona leak). A link binds here when ANY of:
+ *   - it routes to this exact assistant (`assistantId` match), or
+ *   - the linked user is the assistant's billing-party owner, or
+ *   - the linked user is a member of this assistant's workspace.
+ * Membership is the same gate RLS applies downstream, so honouring the link
+ * cannot widen what the sender can read. History + rationale for the third
+ * branch: `routes/telegram-byo.ts` → `telegramLinkBindsHere`.
+ */
+export async function channelLinkBindsHere(
+  linked: { userId: string; assistantId: string | null } | null | undefined,
+  assistantId: string,
+  ownerId: string,
+  workspaceId: string | null,
+  roleLookup: (
+    userId: string,
+    workspaceId: string,
+  ) => Promise<'owner' | 'admin' | 'member' | null> = getWorkspaceRoleSystem,
+): Promise<boolean> {
+  if (!linked?.userId) return false
+  if (linked.assistantId === assistantId || linked.userId === ownerId) return true
+  if (workspaceId) {
+    const role = await roleLookup(linked.userId, workspaceId)
+    if (role !== null) return true
+  }
+  return false
+}
+
+/**
+ * Ensure an `assistant_members` row for (assistant, user) — the sender shows
+ * up in the assistant's member list. Idempotent. Shared by the email path
+ * above and by the link-first path in the channel routes (a linked sender
+ * skips `resolveChannelUser` entirely, so it must call this itself).
+ * NOTE: assistant membership is NOT workspace membership — see
+ * docs/architecture/channels/channel-user-identity.md → "Non-member senders".
+ */
+export async function ensureAssistantMember(assistantId: string, userId: string): Promise<void> {
+  await query(
+    `INSERT INTO assistant_members (assistant_id, user_id, role)
+     VALUES ($1, $2, 'member')
+     ON CONFLICT (assistant_id, user_id) DO NOTHING`,
+    [assistantId, userId],
+  )
 }
 
 // ── Shadow dedup helpers ─────────────────────────────────────

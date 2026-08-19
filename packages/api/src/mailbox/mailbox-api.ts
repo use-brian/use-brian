@@ -32,6 +32,7 @@ import {
   type MailboxSessionCache,
 } from './imap-session.js'
 import { composeMailboxMessage, sendComposedMessage } from './smtp.js'
+import { bareEmailAddress, senderIdentities } from './send-as.js'
 import type { MailboxAccountSettings } from './types.js'
 
 const SNIPPET_SOURCE_BYTES = 16 * 1024
@@ -332,13 +333,115 @@ export type CreateMailboxApiOptions = {
   saveSentCopy?: boolean
   /** SMTP submission override (test seam). Defaults to the real transport. */
   sendComposed?: typeof sendComposedMessage
+  /**
+   * The mailbox's configured send-as aliases (`config.sendAsAliases`, read by
+   * the injector from the instance row). Resolved per call like `getSettings`
+   * so a panel edit applies to the next send. Absent = the account is the only
+   * sender identity (today's behaviour).
+   */
+  getSendAsAliases?: () => Promise<string[]>
+}
+
+/** What a reply needs from the replied-to message: threading ids + who it was addressed to. */
+type ReplyTarget = {
+  messageId: string | null
+  references: string[]
+  /** Bare lowercased `To ∪ Cc` of the original, in envelope order. */
+  recipients: string[]
+}
+
+/**
+ * Sender resolution (mailbox-imap.md → "Send-as aliases", D4):
+ *   1. explicit `from` → must be the account or a configured alias, else an
+ *      honest bounded refusal listing what IS allowed (the model cannot invent
+ *      a sender);
+ *   2. else a reply → the first configured ALIAS found among the original's
+ *      To/Cc ("reply from the address it was written to");
+ *   3. else the account.
+ * Exported for tests; `resolveSender` and `sendMessage` share it so the
+ * confirmation preview can never disagree with the send.
+ */
+export function resolveSenderAddress(params: {
+  accountEmail: string
+  aliases: ReadonlyArray<string>
+  from?: string
+  replyRecipients?: ReadonlyArray<string>
+}): { from: string; allowed: string[] } {
+  const allowed = senderIdentities(params.accountEmail, params.aliases)
+  const account = allowed[0]
+  if (params.from !== undefined && params.from.trim() !== '') {
+    const wanted = bareEmailAddress(params.from)
+    if (!allowed.includes(wanted)) {
+      throw new Error(
+        `"${params.from.trim()}" is not an address this email account can send as. ` +
+        `Allowed senders: ${allowed.join(', ')}. Omit \`from\` to reply from the address the original was sent to.`,
+      )
+    }
+    return { from: wanted, allowed }
+  }
+  const aliases = allowed.slice(1)
+  for (const recipient of params.replyRecipients ?? []) {
+    const bare = bareEmailAddress(recipient)
+    if (aliases.includes(bare)) return { from: bare, allowed }
+  }
+  return { from: account, allowed }
 }
 
 export function createMailboxApi(opts: CreateMailboxApiOptions): MailboxApi {
   const sessions = opts.sessions ?? defaultMailboxSessionCache
   const sendComposed = opts.sendComposed ?? sendComposedMessage
+  const getSendAsAliases = opts.getSendAsAliases ?? (async () => [])
+
+  // Fetch the replied-to message's envelope: the RFC ids live on the server,
+  // not in the model's input, and its To/Cc decide the reply-from-origin
+  // sender. One fetch serves both.
+  async function fetchReplyTarget(settings: MailboxAccountSettings, inReplyTo: string): Promise<ReplyTarget> {
+    const ref = parseMessageRef(inReplyTo)
+    if (!ref) {
+      throw new Error(
+        `Invalid inReplyTo "${inReplyTo}" — expected the folder:uid shape from imapSearchMessages.`,
+      )
+    }
+    return sessions.withClient(opts.cacheKey, settings, async (client) => {
+      const lock = await client.getMailboxLock(ref.folder)
+      try {
+        const msg = await client.fetchOne(
+          String(ref.uid),
+          { envelope: true, headers: ['references'] },
+          { uid: true },
+        )
+        if (!msg) throw new Error(`Message ${inReplyTo} not found — cannot thread the reply.`)
+        const targetId = msg.envelope?.messageId ?? null
+        const recipients = [...(msg.envelope?.to ?? []), ...(msg.envelope?.cc ?? [])]
+          .map((a) => bareEmailAddress(a.address ?? ''))
+          .filter(Boolean)
+        return {
+          messageId: targetId,
+          references: targetId ? [...parseReferencesHeader(msg.headers), targetId] : [],
+          recipients,
+        }
+      } finally {
+        lock.release()
+      }
+    })
+  }
 
   return {
+    async resolveSender(params) {
+      const settings = await opts.getSettings()
+      const aliases = await getSendAsAliases()
+      // An explicit `from` never needs the envelope; only reply-from-origin
+      // does, and only when there is at least one alias to pick.
+      const needsEnvelope = !(params.from && params.from.trim()) && Boolean(params.inReplyTo) && aliases.length > 0
+      const target = needsEnvelope ? await fetchReplyTarget(settings, params.inReplyTo!) : null
+      return resolveSenderAddress({
+        accountEmail: settings.email,
+        aliases,
+        ...(params.from ? { from: params.from } : {}),
+        ...(target ? { replyRecipients: target.recipients } : {}),
+      })
+    },
+
     async searchMessages(params) {
       const settings = await opts.getSettings()
       return sessions.withClient(opts.cacheKey, settings, async (client) => {
@@ -491,40 +594,35 @@ export function createMailboxApi(opts: CreateMailboxApiOptions): MailboxApi {
 
     async sendMessage(params) {
       const settings = await opts.getSettings()
+      const aliases = await getSendAsAliases()
 
-      // Resolve threading headers from the replied-to message (RFC ids live
-      // on the server, not in the model's input).
+      // Resolve threading headers + the reply-from-origin recipients from the
+      // replied-to message (RFC ids live on the server, not in the model's
+      // input). Refuse an explicit disallowed `from` BEFORE any network work.
+      const explicitFrom = params.from?.trim() ? params.from.trim() : undefined
+      if (explicitFrom) resolveSenderAddress({ accountEmail: settings.email, aliases, from: explicitFrom })
       let inReplyToHeader: string | undefined
       let references: string[] | undefined
+      let replyRecipients: string[] | undefined
       if (params.inReplyTo) {
-        const ref = parseMessageRef(params.inReplyTo)
-        if (!ref) {
-          throw new Error(
-            `Invalid inReplyTo "${params.inReplyTo}" — expected the folder:uid shape from imapSearchMessages.`,
-          )
+        const target = await fetchReplyTarget(settings, params.inReplyTo)
+        if (target.messageId) {
+          inReplyToHeader = target.messageId
+          references = target.references
         }
-        await sessions.withClient(opts.cacheKey, settings, async (client) => {
-          const lock = await client.getMailboxLock(ref.folder)
-          try {
-            const msg = await client.fetchOne(
-              String(ref.uid),
-              { envelope: true, headers: ['references'] },
-              { uid: true },
-            )
-            if (!msg) throw new Error(`Message ${params.inReplyTo} not found — cannot thread the reply.`)
-            const targetId = msg.envelope?.messageId ?? null
-            if (targetId) {
-              inReplyToHeader = targetId
-              references = [...parseReferencesHeader(msg.headers), targetId]
-            }
-          } finally {
-            lock.release()
-          }
-        })
+        replyRecipients = target.recipients
       }
+      // Header From AND envelope MAIL FROM both carry the resolved sender (D5)
+      // — bounces route to the alias, which lands in the same mailbox.
+      const { from } = resolveSenderAddress({
+        accountEmail: settings.email,
+        aliases,
+        ...(explicitFrom ? { from: explicitFrom } : {}),
+        ...(replyRecipients ? { replyRecipients } : {}),
+      })
 
       const composed = await composeMailboxMessage({
-        from: settings.email,
+        from,
         to: params.to,
         ...(params.cc?.length ? { cc: params.cc } : {}),
         ...(params.bcc?.length ? { bcc: params.bcc } : {}),
@@ -556,7 +654,7 @@ export function createMailboxApi(opts: CreateMailboxApiOptions): MailboxApi {
         }
       }
 
-      return { messageId: composed.messageId }
+      return { messageId: composed.messageId, from }
     },
   }
 }

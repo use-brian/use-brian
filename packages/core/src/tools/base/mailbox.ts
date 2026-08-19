@@ -170,7 +170,28 @@ export type MailboxApi = {
     attachments?: MailboxOutgoingAttachment[]
     /** Provider id (`folder:uid`) of the message being replied to — sets In-Reply-To/References. */
     inReplyTo?: string
-  }): Promise<{ messageId: string | null }>
+    /**
+     * Explicit sender: the account address or one of its configured send-as
+     * aliases (mailbox-imap.md → "Send-as aliases"). The API layer REFUSES any
+     * other value with the allowed list; omitted, a reply resolves to the
+     * alias the original was addressed to, else the account (D4).
+     */
+    from?: string
+  }): Promise<{
+    messageId: string | null
+    /** The sender the message actually went out as (header From = envelope MAIL FROM, D5). */
+    from?: string
+  }>
+  /**
+   * Resolve the sender a `sendMessage` with these inputs WOULD use, without
+   * sending — the confirmation preview and the approval card show the real
+   * From (an alias picked from the replied-to envelope, or the account).
+   * Throws the same allowlist refusal `sendMessage` would for an explicit
+   * `from` outside the account + aliases. Optional: a seam that cannot
+   * resolve (tests, a provider without aliases) leaves the tool showing the
+   * bound account address.
+   */
+  resolveSender?(params: { from?: string; inReplyTo?: string }): Promise<{ from: string; allowed: string[] }>
 }
 
 /** A stitched conversation thread, newest thread first. */
@@ -499,6 +520,7 @@ export function createMailboxTools(
       'This is the ONLY tool that sends as that bound address: if it is unavailable, say so — never silently substitute another email identity for it (or it for them). ' +
       'Call this tool directly — the user will see an Approve/Deny prompt. ' +
       'To reply on an existing thread, pass the original message\'s id as `inReplyTo` so the reply threads correctly. ' +
+      'A reply goes out from the address the original was sent to when that is one of the account\'s configured send-as aliases (otherwise from the account itself); pass `from` only to pick a specific configured alias - any other address is refused. ' +
       'Copy additional people with `cc` (visible to every recipient) or `bcc` (hidden from the others); put an internal colleague you are looping in on `cc` unless the user asks to keep them hidden. ' +
       'Workspace files can be attached as real email attachments: pass their ids or absolute paths in `attachments`. ' +
       'Only brain-saved files can be attached; confidential files are refused. Limits: 10 attachments, 18 MB total. ' +
@@ -528,6 +550,13 @@ export function createMailboxTools(
         .string()
         .optional()
         .describe('Message id (`folder:uid`) of the message being replied to — threads the reply via In-Reply-To/References.'),
+      from: z
+        .string()
+        .optional()
+        .describe(
+          'Sender address: one of this account\'s configured send-as aliases (or the account itself). ' +
+          'Omit to reply from the address the original was sent to (falls back to the account). Any other address is refused.',
+        ),
       ...accountInputShape,
     }),
     isConcurrencySafe: false,
@@ -544,6 +573,8 @@ export function createMailboxTools(
         subject?: unknown
         body?: unknown
         attachments?: unknown
+        inReplyTo?: unknown
+        from?: unknown
       }
       const resolved = resolveForInput(draft)
       if (!resolved.ok) return null
@@ -552,8 +583,31 @@ export function createMailboxTools(
       const to = recipients(draft.to)
       const cc = recipients(draft.cc)
       const bcc = recipients(draft.bcc)
+      // The From line shows the sender the send WOULD use — an alias picked from
+      // the replied-to envelope, an explicit alias, or the account — so the
+      // approver consents to the identity, not just the recipients. An
+      // explicit `from` outside the allowlist is called out here and refused
+      // at execute; a seam without `resolveSender` shows the account.
+      let fromLine = `• From: ${resolved.email}`
+      const explicitFrom = typeof draft.from === 'string' && draft.from.trim() ? draft.from.trim() : undefined
+      const replyTo = typeof draft.inReplyTo === 'string' && draft.inReplyTo.trim() ? draft.inReplyTo.trim() : undefined
+      if (resolved.api.resolveSender && (explicitFrom || replyTo)) {
+        try {
+          const sender = await resolved.api.resolveSender({
+            ...(explicitFrom ? { from: explicitFrom } : {}),
+            ...(replyTo ? { inReplyTo: replyTo } : {}),
+          })
+          fromLine = `• From: ${sender.from}`
+        } catch (err) {
+          fromLine = explicitFrom
+            ? `• From: ${explicitFrom} (not an allowed sender: send will be refused - ${err instanceof Error ? err.message : String(err)})`
+            : `• From: ${resolved.email}`
+        }
+      } else if (explicitFrom) {
+        fromLine = `• From: ${explicitFrom}`
+      }
       const lines = [
-        `• From: ${resolved.email}`,
+        fromLine,
         ...(to.length > 0 ? [`• To: ${to.join(', ')}`] : []),
       ]
       if (cc.length > 0) lines.push(`• Cc: ${cc.join(', ')}`)
@@ -672,11 +726,14 @@ export function createMailboxTools(
           body: input.body,
           ...(attachments?.length ? { attachments } : {}),
           ...(input.inReplyTo ? { inReplyTo: input.inReplyTo } : {}),
+          ...(input.from?.trim() ? { from: input.from.trim() } : {}),
         })
         return {
           data: {
             messageId: data.messageId,
-            from: resolved.email,
+            // The identity the mail actually carried: an alias when the seam
+            // resolved one (reply-from-origin / explicit), else the account.
+            from: data.from ?? resolved.email,
             ...(attachments?.length ? { attached: attachments.map((file) => file.filename) } : {}),
           },
         }

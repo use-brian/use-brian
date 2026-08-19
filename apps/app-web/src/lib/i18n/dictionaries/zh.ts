@@ -1202,6 +1202,15 @@ export const zh: Dictionary = {
       link: "連結",
       linkPlaceholder: "https://…",
     },
+    find: {
+      label: "頁面內尋找",
+      placeholder: "在頁面中尋找",
+      count: "第 {index} 個，共 {total} 個",
+      noResults: "沒有結果",
+      previous: "上一個相符項目",
+      next: "下一個相符項目",
+      close: "關閉尋找",
+    },
     viewToolbar: {
       searchPlaceholder: "搜尋…",
       searchAria: "搜尋資料列",
@@ -1440,6 +1449,18 @@ export const zh: Dictionary = {
       disconnectWhatsappTitle: "要解除 WhatsApp 連結嗎？",
       disconnectWhatsappConfirm:
         "助理將停止回覆此 WhatsApp 號碼，你加入機器人的群組也會停止被讀取。",
+      slack: "Slack",
+      slackConnected: "已連結",
+      slackConnectedAs: "已連結為 {id}",
+      slackDesc:
+        "Brian 會以你的 Slack 個人檔案電郵來辨識你。如果那不是你在此登入的電郵，請連結，讓 Brian 把你的 Slack 訊息視為此帳號。",
+      connectSlackHint:
+        "在 Slack 工作區私訊 Brian 應用程式傳送此代碼（或在頻道 @提及 Brian 並附上代碼）。如果此 Slack 帳號已連結到其他帳號，連結後會移到這裡。",
+      slackLinked: "已連結 Slack。",
+      slackUnlinked: "已解除 Slack 連結。",
+      slackUnavailable: "目前無法使用 Slack 連結，請稍後再試。",
+      disconnectSlackTitle: "要解除 Slack 連結嗎？",
+      disconnectSlackConfirm: "Brian 會改回以個人檔案電郵來辨識此 Slack 帳號。",
       connectError: "發生問題，請再試一次。",
     },
     privacy: {
@@ -1793,6 +1814,19 @@ export const zh: Dictionary = {
         scopeAll: "全部",
         scopeLater: "稍後",
         backfillFailed: "無法連上信箱。請稍後再試一次。",
+        sendAsTitle: "寄件別名",
+        sendAsHelp: "此信箱可用來回覆的其他地址，例如投遞到這個收件匣的別名。當原始郵件是寄給這裡列出的地址時，回覆會以該地址寄出。你的郵件服務商也必須允許以別名寄信（Gmail：設定、帳戶、「以這個地址寄送郵件」）。",
+        sendAsPlaceholder: "alias@company.com",
+        sendAsAdd: "新增",
+        sendAsRemove: "移除 {addr}",
+        sendAsEmpty: "尚未設定別名。回覆一律以 {email} 寄出。",
+        sendAsInvalid: "這不是電子郵件地址。",
+        sendAsFailed: "無法儲存別名，請稍後再試一次。",
+        liveConnected: "即時：已連線。最近一封新郵件在 {time}。",
+        liveConnectedWaiting: "即時：已連線，等待新郵件。",
+        liveUnsupported: "即時：此郵件伺服器不支援。新郵件會在下次同步（幾分鐘內）取回。",
+        liveReconnecting: "即時：正在重新連線到郵件伺服器...",
+        liveOff: "即時：關閉。新郵件會在下次同步（幾分鐘內）取回。",
       },
       gcalNotifyTitle: "傳送電子郵件通知",
       gcalNotifyDesc: "在活動建立、更新或刪除時通知與會者",
@@ -2820,6 +2854,9 @@ export const zh: Dictionary = {
       triggerWireRedundant:
         "此起始連線不影響執行: 此步驟已在等待來自觸發器的另一條路徑, 無論如何都會在該路徑之後執行。",
       removeConnection: "移除連接",
+      removeStep: "移除步驟",
+      removeStepRefusedLast: "工作流程至少需要一個步驟",
+      removeStepRefusedWidth: "移除此步驟會讓某個步驟連接超過 {n} 個並行步驟",
       wireRefusedCycle: "此連接會形成迴圈, 無法建立",
       wireRefusedDuplicate: "這些步驟已經連接",
       wireRefusedSelf: "步驟不能連接到自己",
@@ -2995,6 +3032,9 @@ export const zh: Dictionary = {
       storeOutputAsLabel: "將輸出儲存為（選填）",
       storeOutputAsHint: "後續步驟可透過 {{vars.NAME}} 參照此值。",
       removeStepBtn: "移除",
+      removeStepLastHint: "工作流程至少需要一個步驟",
+      stepRemoved: "已移除步驟",
+      undoRemoveStep: "復原",
       moveStepUp: "上移",
       moveStepDown: "下移",
       stepRawJsonLabel: "原始 JSON",
@@ -3033,7 +3073,7 @@ export const zh: Dictionary = {
       stepMaxTurnsHint: "1-60。留空則沿用預設預算。",
       stepTimeoutLabel: "逾時(秒)",
       stepTimeoutHint:
-        "此步驟的執行時間上限(1-900秒)。留空則使用預設值(90秒, 深度研究為300秒)。達到上限時執行會以逾時結束, 並保留已產出的部分結果。",
+        "此步驟的執行時間上限(選填, 1-900秒)。留空則不設上限: 步驟改由回合數與工具呼叫數的預算限制, 只有在停滯(數分鐘沒有進展)時才會停止。達到上限時執行會以逾時結束, 並保留已產出的部分結果。",
       // ── 傳送目的地選擇器 ─────────────────────────────────────
       deliverDestinationLabel: "傳送目的地",
       deliverDestinationPlaceholder: "選擇近期聊天…",
@@ -7973,7 +8013,7 @@ export const zh: Dictionary = {
     estimateFailed:
       "音频已上传,但无法读取时长。请从录音器再次保存重试。",
     processFailed:
-      "音频已上传,但无法加入处理队列。请重试。",
+      "音频已上传,但无法加入处理队列。请从录音器再次保存重试。",
     liveTranscriptTitle: "实时逐字稿",
     liveTranscriptProvisional: "处理完成前为临时版本",
     liveTranscriptLoading: "正在加载实时逐字稿...",

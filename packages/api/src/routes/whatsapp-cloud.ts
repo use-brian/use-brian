@@ -35,6 +35,7 @@ import { withChatLock } from '../db/chat-lock.js'
 import { billingPartyForAssistant } from '../billing-party.js'
 import { cacheInboundImageTag } from './channel-file-cache.js'
 import { processChannelMessage } from './channel-pipeline.js'
+import { channelUserErrorText } from './_channel-error-text.js'
 import { whatsappCloudUserAllowed } from '../whatsapp/cloud-access.js'
 export { whatsappCloudUserAllowed } from '../whatsapp/cloud-access.js'
 
@@ -394,7 +395,7 @@ export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router 
         },
         async sendError(err) {
           await adapter.sendMessage(incoming.channelId, {
-            text: err.message.includes('usage limit') ? err.message : 'Something went wrong. Please try again.',
+            text: channelUserErrorText(err),
           })
         },
       },

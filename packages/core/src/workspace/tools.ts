@@ -22,8 +22,9 @@ export function createWorkspaceTools(store: WorkspaceDirectoryStore): {
     requiresCapability: 'tasks',
     description:
       'List the people in the current workspace — each with their member id, name, email, and role. ' +
-      'Use this to resolve a person named in chat into the `assignee_id` that `saveTask` and `updateTask` expect: `assignee_id` is a workspace member id (the `memberId` field returned here), not a user id. ' +
-      'Returns every member; match on name or email yourself before assigning. Takes no arguments.',
+      'Use this to resolve a person named in chat into the `assignee_id` that `saveTask`, `updateTask` and `listTasks` expect: `assignee_id` is a workspace member id (the `memberId` field returned here), not a user id. ' +
+      'The row of the person you are talking with carries `isCurrentUser: true` — use that row\'s `memberId` whenever they say "me", "my tasks", or "assign it to me"; never guess it from a name. ' +
+      'Returns every member; match on name or email yourself for anyone else. Takes no arguments.',
     inputSchema: z.object({}),
     isConcurrencySafe: true,
     isReadOnly: true,

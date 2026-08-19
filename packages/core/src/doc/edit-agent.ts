@@ -14,6 +14,8 @@
 
 import { z } from 'zod'
 import { queryLoop, type TerminalStopReason } from '../engine/query-loop.js'
+import { DEFAULT_STALL_IDLE_MS, isStalledError } from '../engine/stall-watchdog.js'
+import { NO_TOOL_TIMEOUT } from '../engine/tool-executor.js'
 import type { LLMProvider, TokenUsage } from '../providers/types.js'
 import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
 
@@ -113,6 +115,8 @@ export type RunDocEditAgentOptions = {
   }) => void | Promise<void>
   maxTurns?: number
   maxToolCalls?: number
+  /** Stall watchdog idle window for the child loop. Default: `DEFAULT_STALL_IDLE_MS`. */
+  stallIdleMs?: number
 }
 
 type AttemptResult = {
@@ -122,29 +126,45 @@ type AttemptResult = {
   error?: string
   /** Set when the child's loop ended on a budget limit rather than by itself. */
   cutoff?: TerminalStopReason
+  /** Set when the child's stall watchdog fired (no progress for the idle window). */
+  stalled?: boolean
 }
 
 /**
- * Child budgets. Each child turn is one model round trip, and a model that
- * authors section by section spends one turn per section, so the old
+ * Child COST budgets. Each child turn is one model round trip, and a model
+ * that authors section by section spends one turn per section, so the old
  * `maxTurns: 8` was exhausted by a five-section page (skeleton + one section
  * per turn) - the 2026-08-18 "page build always stops in the middle" report:
  * the loop hit `max_turns`, the isolated finalizer wrote "The page is now
  * completed", and the receipt said `completed` because one mutation had
- * landed. The budget is now wide enough for a long deliverable, the prompt
- * tells the editor to batch (see `EDIT_AGENT_HEADER`), and a cutoff is
- * reported as `partial` rather than swallowed. The gateway tool's own
- * `timeoutMs` still bounds wall-clock.
+ * landed. The prompt tells the editor to batch (see `EDIT_AGENT_HEADER`) and
+ * a cutoff is reported as `partial` rather than swallowed. Widened again
+ * 2026-08-19 (16/24 -> 24/40) with the wall-clock gone: cost is bounded by
+ * these two numbers, liveness by the stall watchdog, and a slow-but-honest
+ * provider that iterates per section gets the room. A page that outgrows
+ * them ends `partial` and continues in the next turn - the budget is a cost
+ * cap, not a knob.
  */
-export const DOC_EDIT_MAX_TURNS = 16
-export const DOC_EDIT_MAX_TOOL_CALLS = 24
+export const DOC_EDIT_MAX_TURNS = 24
+export const DOC_EDIT_MAX_TOOL_CALLS = 40
 /**
- * Wall-clock bound for one delegated edit. A slow provider (60-77s per call
- * was measured on a self-host) times out here rather than running the parent
- * turn forever; the child's applied mutations survive and are reported as
- * `partial`.
+ * There is NO wall-clock bound on a delegated edit (2026-08-19). The old
+ * `DOC_EDIT_TIMEOUT_MS = 300s` assumed a Flash-Lite-speed child; on a
+ * self-host whose background model ran 10-77s per call it bought 4-8 round
+ * trips and clipped every multi-section page ("stopped prior to completing")
+ * while catching nothing a progress clock would not have caught. The gateway
+ * declares `NO_TOOL_TIMEOUT` and the child loop runs under the stall
+ * watchdog (`DEFAULT_STALL_IDLE_MS`, derived from the provider idle windows):
+ * no provider chunk, tool activity or loop event for the idle window =
+ * stalled, reported as `partial` / `failed` with the reason. Cost stays
+ * bounded by the two budgets above.
  */
-export const DOC_EDIT_TIMEOUT_MS = 300_000
+/**
+ * Children one gateway instance may start per parent turn. The second is
+ * admitted only after a `failed` (no-mutation) receipt - see
+ * `createDelegateDocEditTool`.
+ */
+export const DOC_EDIT_MAX_DELEGATIONS_PER_TURN = 2
 
 /** Budget cutoffs - the codes that mean "the editor did not get to finish". */
 export function isBudgetCutoff(stop: TerminalStopReason | undefined): boolean {
@@ -175,6 +195,9 @@ export function isolateDocEditToolContext(parent: ToolContext): ToolContext {
     userMessageText: parent.userMessageText,
     userTimezone: parent.userTimezone,
     abortSignal: parent.abortSignal,
+    // The parent loop's liveness clock: the child's watchdog reports into it,
+    // so a slow-but-alive edit keeps the parent turn alive too.
+    progress: parent.progress,
     sensitivity: parent.sensitivity,
     compartmentAccumulator: parent.compartmentAccumulator,
     evidence: parent.evidence,
@@ -216,6 +239,7 @@ async function runAttempt(
   let latestText = ''
   let lastError: string | undefined
   let cutoff: TerminalStopReason | undefined
+  let stalled = false
 
   try {
     for await (const event of queryLoop({
@@ -244,6 +268,8 @@ async function runAttempt(
       stateless: true,
       maxTurns: options.maxTurns ?? DOC_EDIT_MAX_TURNS,
       maxToolCalls: options.maxToolCalls ?? DOC_EDIT_MAX_TOOL_CALLS,
+      // Liveness, not wall-clock: see DEFAULT_STALL_IDLE_MS.
+      stallIdleMs: options.stallIdleMs ?? DEFAULT_STALL_IDLE_MS,
       channelType: 'web',
     })) {
       if (event.type === 'assistant_turn') {
@@ -290,10 +316,12 @@ async function runAttempt(
         await options.onUsage?.({ model: event.response.model, usage: event.totalUsage, attempt })
       } else if (event.type === 'error') {
         lastError = event.error.message
+        if (isStalledError(event.error)) stalled = true
       }
     }
   } catch (error) {
     lastError = error instanceof Error ? error.message : String(error)
+    if (isStalledError(error)) stalled = true
   }
 
   const successful = [...mutationTools]
@@ -303,6 +331,7 @@ async function runAttempt(
     pageIds: [...pageIds],
     error: lastError,
     cutoff,
+    stalled,
   }
 }
 
@@ -328,7 +357,9 @@ function receiptForAppliedAttempt(
   }
   const cutoff = attempt.cutoff
   const why = !cutoff
-    ? `it was interrupted (${attempt.error})`
+    ? attempt.stalled
+      ? `it stalled - ${attempt.error} - so the editor was stopped; the page is left as it was at that point`
+      : `it was interrupted (${attempt.error})`
     : cutoff.code === 'max_turns'
       ? 'it ran out of editing turns'
       : cutoff.code === 'tool_budget_exhausted'
@@ -409,25 +440,37 @@ export type CreateDelegateDocEditToolOptions = Omit<
 export function createDelegateDocEditTool(
   options: CreateDelegateDocEditToolOptions,
 ): Tool<typeof delegateDocEditInputSchema> {
-  // One gateway instance is minted per parent turn. Consuming it once prevents
-  // a looping supervisor from spawning multiple expensive child transcripts.
-  let consumed = false
+  // One gateway instance is minted per parent turn. It runs at most
+  // DOC_EDIT_MAX_DELEGATIONS_PER_TURN children, and a second child is admitted
+  // ONLY after a `failed` receipt (no mutation landed): the common cause is a
+  // brief that pointed at evidence the isolated editor cannot fetch (a meeting
+  // note, a transcript), so the supervisor must be able to gather it and
+  // re-brief in the same turn. A `completed` or `partial` receipt closes the
+  // gateway - a looping supervisor must not spawn further child transcripts,
+  // and a half-edited page must not be re-run from the top.
+  let delegations = 0
+  let lastStatus: DocEditReceipt['status'] | null = null
   return buildTool<typeof delegateDocEditInputSchema>({
     name: DOC_EDIT_GATEWAY_TOOL,
     description:
-      'Apply a requested Doc page, entity, or comment change through a fresh isolated editor. Choose edit only when runtime context supplies an existing open page id; an edit can never create a page. Choose create only when the user explicitly asks for a new page. Submit one self-contained brief after gathering needed evidence. The editor cannot see this conversation or tool results unless you include their relevant facts and source URLs. Questions that do not require a Doc mutation should be answered directly. The receipt status is completed, partial, or failed: partial means the editor applied some changes and was cut off before finishing - relay that honestly (what landed, what did not) and offer to continue in the next turn; never describe a partial result as done.',
+      'Apply a requested Doc page, entity, or comment change through a fresh isolated editor. Choose edit only when runtime context supplies an existing open page id; an edit can never create a page. Choose create only when the user explicitly asks for a new page. Submit one self-contained brief after gathering needed evidence. The editor has no search, brain, memory, recording, connector, or web tools and cannot see this conversation: every fact it needs must be pasted into the brief (the text itself, plus source page ids or URLs), never referenced. Questions that do not require a Doc mutation should be answered directly. The receipt status is completed, partial, or failed: partial means the editor applied some changes and was cut off before finishing - relay that honestly (what landed, what did not) and offer to continue in the next turn; never describe a partial result as done. A failed receipt whose summary starts with missing_evidence: names what the brief lacked; gather exactly that and call this tool once more with it pasted in (one retry is allowed after a no-change failure).',
     inputSchema: delegateDocEditInputSchema,
     isReadOnly: false,
     isConcurrencySafe: false,
     requiresConfirmation: false,
-    timeoutMs: DOC_EDIT_TIMEOUT_MS,
+    // No wall-clock: the child is progress-bounded (stall watchdog) and
+    // cost-bounded (turns / tool calls). See DEFAULT_STALL_IDLE_MS.
+    timeoutMs: NO_TOOL_TIMEOUT,
     maxResultSizeChars: 4_000,
     async execute(input, context) {
-      if (consumed) {
+      const retryOpen = lastStatus === 'failed' && delegations < DOC_EDIT_MAX_DELEGATIONS_PER_TURN
+      if (delegations > 0 && !retryOpen) {
         return {
           data: {
             status: 'failed',
-            summary: 'This turn already delegated one Doc edit. Continue in a new user turn if another edit is needed.',
+            summary: lastStatus === 'failed'
+              ? 'This turn already retried the Doc edit once and it still applied no change. Tell the user what evidence was missing and continue in a new user turn.'
+              : 'This turn already delegated one Doc edit. Continue in a new user turn if another edit is needed.',
             mutationTools: [],
             pageIds: [],
             fallbackUsed: false,
@@ -464,7 +507,7 @@ export function createDelegateDocEditTool(
           }
         }
       }
-      consumed = true
+      delegations += 1
       const tools = toolsForDocEditIntent(options.tools, input.intent)
       const receipt = await runDocEditAgent({
         ...options,
@@ -472,8 +515,17 @@ export function createDelegateDocEditTool(
         tools,
         context,
       })
+      lastStatus = receipt.status
+      const canRetry = receipt.status === 'failed' && delegations < DOC_EDIT_MAX_DELEGATIONS_PER_TURN
       return {
-        data: receipt,
+        data: canRetry
+          ? {
+              ...receipt,
+              summary:
+                `${receipt.summary} ` +
+                'One retry is available this turn: gather the missing evidence with the tools in this conversation, paste it into the brief, and call delegateDocEdit again. Do not re-send the same brief.',
+            }
+          : receipt,
         isError: receipt.status === 'failed',
       }
     },

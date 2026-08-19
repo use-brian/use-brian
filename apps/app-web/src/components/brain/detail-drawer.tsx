@@ -326,13 +326,15 @@ function propertyIcon(key: string): React.ReactNode {
 
 /** Map a brain-list row kind to the inbox primitive used by the
  *  primitive-detail fetch. Returns null for kinds that don't have a
- *  primitive-shape detail surface (knowledge, sessions). Entity kinds
- *  (person/company/project/deal/product/other) map to the 'entity'
- *  primitive — entities live in the `entities` table and share the
- *  brain-inbox verify/adjust/delete shell with other primitives. */
-function brainKindToInboxPrimitive(
+ *  primitive-shape detail surface (knowledge, sessions). Every canonical
+ *  entity kind maps to the 'entity' primitive — derive that branch from
+ *  `ENTITY_KINDS` so a newly supported kind cannot leave the drawer's
+ *  primitive state loading forever.
+ *  Spec: corrections.md → "Entity-kind loading invariant". */
+export function brainKindToInboxPrimitive(
   kind: BrainRow["kind"],
 ): InboxPrimitive | null {
+  if (ENTITY_KINDS.has(kind as EntityKind)) return "entity";
   switch (kind) {
     case "memories":
       return "memory";
@@ -346,13 +348,6 @@ function brainKindToInboxPrimitive(
       return "company";
     case "deals":
       return "deal";
-    case "person":
-    case "company":
-    case "project":
-    case "deal":
-    case "product":
-    case "other":
-      return "entity";
     default:
       return null;
   }

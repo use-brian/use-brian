@@ -2395,6 +2395,11 @@ describe('[COMP:workflow/tools] trigger capability surface (closed-world, derive
     // Event triggers are declared authorable here, webhook provisioning is not.
     expect(TRIGGER_INPUT_DESCRIPTION).toMatch(/authorable here/)
     expect(TRIGGER_INPUT_DESCRIPTION).toMatch(/web builder/)
+    // The mailbox source contract: recipients ride `mentions`, and the run gets
+    // the id the mailbox read/reply tools take (mailbox-imap.md → "Event trigger").
+    expect(TRIGGER_INPUT_DESCRIPTION).toMatch(/provider: "imap"/)
+    expect(TRIGGER_INPUT_DESCRIPTION).toMatch(/\{\{input\.event\.message_id\}\}/)
+    expect(TRIGGER_INPUT_DESCRIPTION).toMatch(/inReplyTo/)
   })
 
   it('createWorkflow accepts and persists an event trigger with a task source (chat-authorable, no web builder needed)', async () => {

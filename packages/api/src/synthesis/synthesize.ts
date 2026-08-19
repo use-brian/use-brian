@@ -42,6 +42,9 @@ import {
   type TokenUsage,
   type Tool,
   type UsageStore,
+  DEFAULT_STALL_IDLE_MS,
+  isStalledError,
+  type ResearchBudget,
 } from '@use-brian/core'
 import { extractCitations, type CitationIndex } from '@use-brian/shared'
 import type {
@@ -194,13 +197,16 @@ export type SynthesizeDeps = {
 }
 
 /** Enough turns/tool-calls for a multi-section brief over a long transcript. */
-const SYNTHESIS_BUDGET_FALLBACK = { maxTurns: 30, maxToolCalls: 40, timeoutMs: 180_000 }
+// No default wall-clock (2026-08-19): a fill is bounded by cost (turns / tool
+// calls) and by the query loop's stall watchdog. The 3-minute default aborted
+// a recording sweep mid-transcript (2026-07-13, a 96-min meeting) and the
+// 15-minute one it was widened to was another guess about model speed. An
+// explicit `deps.budget.timeoutMs` still arms one.
+const SYNTHESIS_BUDGET_FALLBACK: ResearchBudget = { maxTurns: 30, maxToolCalls: 40, timeoutMs: null }
 // A recording sweep is the expensive source: reading an hour-plus transcript
 // end to end (the coverage discipline in `buildSystemPrompt`) costs one tool
-// call per window plus the drafting turns, and the 3-minute default wall clock
-// aborted mid-sweep — the brief then reflected only the opening minutes
-// (2026-07-13, a 96-min meeting). Sized for ~500 segments at 40/window.
-const RECORDING_SYNTHESIS_BUDGET = { maxTurns: 60, maxToolCalls: 80, timeoutMs: 900_000 }
+// call per window plus the drafting turns. Sized for ~500 segments at 40/window.
+const RECORDING_SYNTHESIS_BUDGET: ResearchBudget = { maxTurns: 60, maxToolCalls: 80, timeoutMs: null }
 
 function titleFromSlug(slug: string): string {
   return slug.replace(/[-_]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
@@ -475,7 +481,7 @@ export async function synthesizeFromSource(
   )
   const sessionId = randomUUID()
   const abort = new AbortController()
-  const timer = setTimeout(() => abort.abort(), budget.timeoutMs)
+  const timer = budget.timeoutMs !== null ? setTimeout(() => abort.abort(), budget.timeoutMs) : undefined
   let truncated = false
   let summary = ''
   let toolCallCount = 0
@@ -512,6 +518,8 @@ export async function synthesizeFromSource(
       },
       maxTurns: budget.maxTurns,
       maxToolCalls: budget.maxToolCalls,
+      // Liveness, not wall-clock: no progress for the idle window = stalled.
+      stallIdleMs: DEFAULT_STALL_IDLE_MS,
     })) {
       if (event.type === 'text_delta') {
         summary += event.text
@@ -524,15 +532,16 @@ export async function synthesizeFromSource(
       }
     }
   } catch (err) {
-    // A wall-clock timeout surfaces as an AbortError; the record/page-first
-    // artifact survives, so return it as a partial rather than throwing.
-    if (abort.signal.aborted) {
+    // An explicit wall-clock timeout surfaces as an AbortError and a stall as
+    // a StalledError; the record/page-first artifact survives either, so
+    // return it as a partial rather than throwing.
+    if (abort.signal.aborted || isStalledError(err)) {
       truncated = true
     } else {
       throw err
     }
   } finally {
-    clearTimeout(timer)
+    if (timer) clearTimeout(timer)
   }
 
   // 4. Record path: finalize completeness, then project the page from the

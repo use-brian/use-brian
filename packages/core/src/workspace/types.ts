@@ -21,6 +21,16 @@ export type WorkspaceMemberInfo = {
   /** Avatar URL from the joined user row; null/undefined if absent. */
   avatarUrl?: string | null
   role: 'owner' | 'admin' | 'member'
+  /**
+   * `true` on exactly the row that belongs to the caller of `listMembers`
+   * (the person currently talking to the assistant); absent elsewhere. Lets
+   * the model turn "me" / "my tasks" / "assign it to me" into an
+   * `assignee_id` deterministically instead of name-matching itself against
+   * the roster — a nameless member (`name: null`) has nothing to match on,
+   * and a guess picks a teammate (2026-08-19, Slack). Set only by
+   * `listMembers`; `get` / `batchGet` have no caller to mark.
+   */
+  isCurrentUser?: true
 }
 
 export type WorkspaceDirectoryStore = {
@@ -28,6 +38,7 @@ export type WorkspaceDirectoryStore = {
    * List every member of `workspaceId` — but only when `userId` is itself
    * a member of it. A non-member caller gets an empty array (defence in
    * depth; a workspace assistant's caller is always a member in practice).
+   * The caller's own row carries `isCurrentUser: true`.
    */
   listMembers(userId: string, workspaceId: string): Promise<WorkspaceMemberInfo[]>
   /**

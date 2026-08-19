@@ -1,4 +1,4 @@
-export { createSlackAdapter } from './adapter.js'
+export { createSlackAdapter, isHumanTextEdit } from './adapter.js'
 export type { SlackAdapterOptions, SlackAdapterConfig, SlackOutboundAudit } from './adapter.js'
 export { createSlackApi } from './api.js'
 export {

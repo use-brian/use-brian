@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { MAILBOX_ATTACHMENT_MAX_BYTES } from '@use-brian/core'
 import {
   createMailboxApi,
+  resolveSenderAddress,
   parseMessageRef,
   parseReferencesHeader,
   htmlToText,
@@ -139,6 +140,7 @@ function makeApi(
     sendComposed?: ReturnType<typeof vi.fn>
     saveSentCopy?: boolean
     settings?: MailboxAccountSettings
+    sendAsAliases?: string[]
   } = {},
 ) {
   const sessions = createMailboxSessionCache({ createClient: () => client })
@@ -148,6 +150,7 @@ function makeApi(
     sessions,
     sendComposed: (over.sendComposed ?? vi.fn(async () => {})) as never,
     ...(over.saveSentCopy !== undefined ? { saveSentCopy: over.saveSentCopy } : {}),
+    ...(over.sendAsAliases ? { getSendAsAliases: async () => over.sendAsAliases! } : {}),
   })
 }
 
@@ -534,6 +537,80 @@ describe('[COMP:api/mailbox-imap-client] sendMessage', () => {
     expect(raw).toMatch(/^Cc: lead@corp\.com/im)
     expect(raw).not.toMatch(/^Bcc:/im)  // blind: envelope only, never a header
     expect(composed.envelope.to).toEqual(['ada@acme.com', 'lead@corp.com', 'audit@corp.com'])
+  })
+})
+
+describe('[COMP:api/mailbox-imap-client] send-as aliases (mailbox-imap.md → "Send-as aliases", D4/D5)', () => {
+  const ALIASES = ['bd@corp.com', 'ops@corp.com']
+
+  it('resolveSenderAddress: explicit from must be the account or an alias; reply picks the first alias in the envelope; else account', () => {
+    expect(resolveSenderAddress({ accountEmail: 'me@corp.com', aliases: ALIASES, from: 'BD@corp.com' }))
+      .toEqual({ from: 'bd@corp.com', allowed: ['me@corp.com', 'bd@corp.com', 'ops@corp.com'] })
+    expect(resolveSenderAddress({ accountEmail: 'me@corp.com', aliases: ALIASES, from: 'Me <me@corp.com>' }).from)
+      .toBe('me@corp.com')
+    expect(() => resolveSenderAddress({ accountEmail: 'me@corp.com', aliases: ALIASES, from: 'someone@else.example' }))
+      .toThrow(/not an address this email account can send as.*Allowed senders: me@corp\.com, bd@corp\.com, ops@corp\.com/)
+    // Reply-from-origin: envelope order decides among aliases; the account itself is not "an alias".
+    expect(resolveSenderAddress({ accountEmail: 'me@corp.com', aliases: ALIASES, replyRecipients: ['me@corp.com', 'ops@corp.com', 'bd@corp.com'] }).from)
+      .toBe('ops@corp.com')
+    expect(resolveSenderAddress({ accountEmail: 'me@corp.com', aliases: ALIASES, replyRecipients: ['x@y.z'] }).from)
+      .toBe('me@corp.com')
+    expect(resolveSenderAddress({ accountEmail: 'me@corp.com', aliases: [], replyRecipients: ['bd@corp.com'] }).from)
+      .toBe('me@corp.com')
+  })
+
+  it('a reply to mail addressed to an alias goes out AS that alias - header From and envelope MAIL FROM (row 5)', async () => {
+    const target = msg(7, { messageId: '<root@x>', to: [{ address: 'BD@corp.com' }], cc: [{ address: 'ada@acme.com' }] })
+    const { client } = makeFakeClient({ INBOX: { uids: [7], messages: { 7: target } } })
+    const sendComposed = vi.fn(async (..._args: unknown[]) => {})
+    const api = makeApi(client, { sendComposed, sendAsAliases: ALIASES })
+    const result = await api.sendMessage({ to: ['ada@acme.com'], subject: 'Re: msg 7', body: 'Sure.', inReplyTo: 'INBOX:7' })
+    expect(result.from).toBe('bd@corp.com')
+    const composed = sendComposed.mock.calls[0][1] as { raw: Buffer; envelope: { from: string } }
+    expect(composed.raw.toString('utf8')).toMatch(/^From: bd@corp\.com/im)
+    expect(composed.envelope.from).toBe('bd@corp.com')
+    expect(composed.raw.toString('utf8')).toMatch(/In-Reply-To: <root@x>/)
+    // The SMTP login is still the account (auth.user) - the settings object is untouched.
+    expect((sendComposed.mock.calls[0][0] as MailboxAccountSettings).email).toBe('me@corp.com')
+  })
+
+  it('a reply to mail addressed to the account (no alias in To/Cc) and any fresh send go out from the account', async () => {
+    const target = msg(7, { messageId: '<root@x>' }) // to: me@corp.com
+    const { client } = makeFakeClient({ INBOX: { uids: [7], messages: { 7: target } } })
+    const sendComposed = vi.fn(async (..._args: unknown[]) => {})
+    const api = makeApi(client, { sendComposed, sendAsAliases: ALIASES })
+    const reply = await api.sendMessage({ to: ['ada@acme.com'], subject: 'Re', body: 'b', inReplyTo: 'INBOX:7' })
+    expect(reply.from).toBe('me@corp.com')
+    const fresh = await api.sendMessage({ to: ['ada@acme.com'], subject: 'Hi', body: 'b' })
+    expect(fresh.from).toBe('me@corp.com')
+    expect((sendComposed.mock.calls[1][1] as { envelope: { from: string } }).envelope.from).toBe('me@corp.com')
+  })
+
+  it('an explicit from outside the allowlist is refused with the list, BEFORE any network work (row 6)', async () => {
+    const { client, fetchOnes } = makeFakeClient({ INBOX: { uids: [], messages: {} } })
+    const sendComposed = vi.fn(async () => {})
+    const api = makeApi(client, { sendComposed, sendAsAliases: ALIASES })
+    await expect(api.sendMessage({ to: ['x@y.z'], subject: 's', body: 'b', from: 'someone@else.example', inReplyTo: 'INBOX:7' }))
+      .rejects.toThrow(/Allowed senders: me@corp\.com, bd@corp\.com, ops@corp\.com/)
+    expect(sendComposed).not.toHaveBeenCalled()
+    expect(fetchOnes).toHaveLength(0)
+    // Explicit ALLOWED alias needs no reply context.
+    const ok = await api.sendMessage({ to: ['x@y.z'], subject: 's', body: 'b', from: 'ops@corp.com' })
+    expect(ok.from).toBe('ops@corp.com')
+  })
+
+  it('resolveSender previews the same decision the send makes (the From line the approver sees)', async () => {
+    const target = msg(7, { messageId: '<root@x>', to: [{ address: 'bd@corp.com' }] })
+    const { client, fetchOnes } = makeFakeClient({ INBOX: { uids: [7], messages: { 7: target } } })
+    const api = makeApi(client, { sendAsAliases: ALIASES })
+    expect(await api.resolveSender!({ inReplyTo: 'INBOX:7' })).toEqual({ from: 'bd@corp.com', allowed: ['me@corp.com', 'bd@corp.com', 'ops@corp.com'] })
+    expect((await api.resolveSender!({ from: 'ops@corp.com' })).from).toBe('ops@corp.com')
+    await expect(api.resolveSender!({ from: 'nope@else.example' })).rejects.toThrow(/Allowed senders/)
+    // With no aliases configured a reply never fetches the envelope just to pick the account.
+    const plain = makeApi(client)
+    const before = fetchOnes.length
+    expect((await plain.resolveSender!({ inReplyTo: 'INBOX:7' })).from).toBe('me@corp.com')
+    expect(fetchOnes.length).toBe(before)
   })
 })
 
