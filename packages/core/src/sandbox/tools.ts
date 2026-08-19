@@ -1036,7 +1036,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     name: 'browserClick',
     requiresCapability: 'computer',
     description:
-      'Click an element by its ref from the latest snapshot, and get back a fresh snapshot of the page after the click. Set intent:"submit" when the click sends, posts, buys, deletes, or otherwise commits an outward action — such clicks require user approval before they run. Ordinary clicks (opening a thread, focusing a field) need no approval.',
+      'Click an element by its ref from the latest snapshot, and get back a fresh snapshot of the page after the click. To choose a value in a dropdown (a combobox followed by option refs), click the option ref, then read the new dropdown value in the returned snapshot. Set intent:"submit" when the click sends, posts, buys, deletes, or otherwise commits an outward action — such clicks require user approval before they run. Ordinary clicks (opening a thread, focusing a field) need no approval.',
     inputSchema: z.object({
       ref: z.string().min(1).describe('Element ref from the latest browserSnapshot, e.g. "@e12"'),
       intent: z

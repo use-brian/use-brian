@@ -104,6 +104,13 @@ const TAKEOVER_KEYS: Record<
   PageDown: { key: 'PageDown', code: 'PageDown', windowsVirtualKeyCode: 34 },
 }
 
+/**
+ * AX roles under which a ref may be a native `<select>` or one of its
+ * `<option>`s. Membership only gates the DOM-class check in
+ * `nativeSelectKind`; it never decides on its own.
+ */
+const NATIVE_SELECT_ROLES = new Set(['combobox', 'popupbutton', 'menulistpopup', 'option', 'listboxoption', 'menuitem'])
+
 async function sendCdp<T = unknown>(tabId: number, method: string, params?: Record<string, unknown>): Promise<T> {
   return (await chrome.debugger.sendCommand({ tabId }, method, params)) as T
 }
@@ -378,83 +385,112 @@ export class TabExecutor {
     }
   }
 
-  /** Native option popups have no page-layout box of their own in Chromium. */
-  private async clickNativeOption(tabId: number, backendNodeId: number, ref: string): Promise<void> {
+  /**
+   * Native `<select>` / `<option>` detection by DOM class, not by AX role: the
+   * `combobox` role is shared with ARIA widgets that need a real click, and an
+   * `option` role can belong to a custom listbox whose rows have real boxes.
+   */
+  private async nativeSelectKind(tabId: number, backendNodeId: number): Promise<'select' | 'option' | null> {
+    const objectGroup = 'use-brian-native-select-kind'
+    try {
+      const resolved = await this.cdp<{ object?: { objectId?: string } }>(tabId, 'DOM.resolveNode', {
+        backendNodeId,
+        objectGroup,
+      })
+      const objectId = resolved.object?.objectId
+      if (!objectId) return null
+      const result = await this.cdp<{ result?: { value?: unknown } }>(tabId, 'Runtime.callFunctionOn', {
+        objectId,
+        objectGroup,
+        returnByValue: true,
+        functionDeclaration: `function () {
+          if (this instanceof HTMLSelectElement) return 'select';
+          if (this instanceof HTMLOptionElement && this.closest('select')) return 'option';
+          return null;
+        }`,
+      })
+      const kind = result.result?.value
+      return kind === 'select' || kind === 'option' ? kind : null
+    } catch (err) {
+      if (isDetachedError(err)) throw err
+      return null
+    } finally {
+      await this.cdp(tabId, 'Runtime.releaseObjectGroup', { objectGroup }).catch(() => undefined)
+    }
+  }
+
+  /**
+   * Choose a native `<option>` through the DOM, the way Playwright's
+   * `selectOption` and Puppeteer's `page.select` do: mark it selected on the
+   * owning `<select>`, dispatch `input` + `change` so the page's listeners run,
+   * then VERIFY the control's value moved and fail loudly if it did not.
+   *
+   * Never through the popup. The native menu a `<select>` opens is not part of
+   * the page: on macOS it is an OS menu that `Input.dispatchKeyEvent` cannot
+   * reach at all, and on every platform it is not in the accessibility tree
+   * this executor snapshots. The previous keyboard walk (click the select,
+   * Home, ArrowDown x N, Enter) therefore left the value untouched, left the
+   * popup open on the user's screen, and still returned success - which is
+   * how an assistant came to tell a user "clicking them does not change the
+   * selected value" (2026-08-19). A verified DOM selection cannot fail
+   * silently.
+   */
+  private async selectNativeOption(tabId: number, backendNodeId: number, ref: string): Promise<void> {
+    const objectGroup = 'use-brian-native-option'
     const resolved = await this.cdp<{ object?: { objectId?: string } }>(tabId, 'DOM.resolveNode', {
       backendNodeId,
-      objectGroup: 'use-brian-native-option',
+      objectGroup,
     })
     const optionObjectId = resolved.object?.objectId
     if (!optionObjectId) {
       throw new ExecutorError(`Ref ${ref} is no longer attached to the page. Take a fresh browserSnapshot.`, 'stale_ref')
     }
     try {
-      const infoResult = await this.cdp<{ result?: { value?: unknown } }>(tabId, 'Runtime.callFunctionOn', {
+      const outcome = await this.cdp<{ result?: { value?: unknown } }>(tabId, 'Runtime.callFunctionOn', {
         objectId: optionObjectId,
+        objectGroup,
         returnByValue: true,
         functionDeclaration: `function () {
           const select = this.closest('select');
-          if (!select) return null;
-          const enabled = Array.from(select.options).filter((option) =>
-            !option.disabled && !(option.parentElement?.tagName === 'OPTGROUP' && option.parentElement.disabled)
-          );
-          return {
-            disabled: this.disabled || (this.parentElement?.tagName === 'OPTGROUP' && this.parentElement.disabled),
-            enabledIndex: enabled.indexOf(this),
-            multiple: select.multiple
-          };
+          if (!select) return { outcome: 'no_select' };
+          const group = this.parentElement;
+          const disabled = this.disabled || select.disabled ||
+            (group && group.tagName === 'OPTGROUP' && group.disabled);
+          if (disabled) return { outcome: 'disabled' };
+          const label = this.label || this.text || this.value;
+          if (select.multiple) {
+            const before = this.selected;
+            this.selected = !before;
+            select.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+            return { outcome: this.selected === !before ? 'selected' : 'unchanged', label, multiple: true, selected: this.selected };
+          }
+          if (typeof select.focus === 'function') select.focus();
+          this.selected = true;
+          select.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+          select.dispatchEvent(new Event('change', { bubbles: true }));
+          return { outcome: select.selectedIndex === this.index ? 'selected' : 'unchanged', label, multiple: false };
         }`,
       })
-      const info = infoResult.result?.value as {
-        disabled?: boolean
-        enabledIndex?: number
-        multiple?: boolean
-      } | null | undefined
-      if (!info || info.disabled || !Number.isInteger(info.enabledIndex) || info.enabledIndex! < 0) {
-        throw new ExecutorError(`Ref ${ref} is a disabled native dropdown option.`, 'backend_error')
+      const info = outcome.result?.value as
+        | { outcome?: string; label?: string; multiple?: boolean; selected?: boolean }
+        | null
+        | undefined
+      switch (info?.outcome) {
+        case 'selected':
+          return
+        case 'disabled':
+          throw new ExecutorError(`Ref ${ref} is a disabled native dropdown option.`, 'backend_error')
+        case 'no_select':
+          throw new ExecutorError(`Ref ${ref} has no selectable dropdown. Take a fresh browserSnapshot.`, 'stale_ref')
+        default:
+          throw new ExecutorError(
+            `Choosing option ${ref}${info?.label ? ` ("${info.label}")` : ''} did not change its dropdown. Take a fresh browserSnapshot and check the dropdown's current value before retrying.`,
+            'backend_error',
+          )
       }
-      if (info.multiple) {
-        throw new ExecutorError(`Ref ${ref} belongs to a multi-select control, which cannot be chosen with browserClick.`, 'backend_error')
-      }
-
-      const selectResult = await this.cdp<{ result?: { objectId?: string } }>(tabId, 'Runtime.callFunctionOn', {
-        objectId: optionObjectId,
-        functionDeclaration: `function () { return this.closest('select'); }`,
-      })
-      const selectObjectId = selectResult.result?.objectId
-      if (!selectObjectId) {
-        throw new ExecutorError(`Ref ${ref} has no selectable dropdown. Take a fresh browserSnapshot.`, 'stale_ref')
-      }
-      const described = await this.cdp<{ node?: { backendNodeId?: number } }>(tabId, 'DOM.describeNode', {
-        objectId: selectObjectId,
-      })
-      const selectBackendNodeId = described.node?.backendNodeId
-      if (typeof selectBackendNodeId !== 'number') {
-        throw new ExecutorError(`Ref ${ref} has no selectable dropdown. Take a fresh browserSnapshot.`, 'stale_ref')
-      }
-
-      const quad = await this.targetBox(tabId, selectBackendNodeId)
-      if (!quad) {
-        throw new ExecutorError(
-          `The dropdown for ref ${ref} has no usable rendered target. Take a fresh browserSnapshot and use the ref for the visible control.`,
-          'backend_error',
-        )
-      }
-      const x = (quad[0] + quad[4]) / 2
-      const y = (quad[1] + quad[5]) / 2
-      const base = { x, y, button: 'left', clickCount: 1 } as const
-      await this.cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y })
-      await this.cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', ...base })
-      await this.cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', ...base })
-      await this.pressKey(tabId, 'Home')
-      for (let index = 0; index < info.enabledIndex!; index += 1) {
-        await this.pressKey(tabId, 'ArrowDown')
-      }
-      await this.pressKey(tabId, 'Enter')
     } finally {
-      await this.cdp(tabId, 'Runtime.releaseObjectGroup', {
-        objectGroup: 'use-brian-native-option',
-      }).catch(() => undefined)
+      await this.cdp(tabId, 'Runtime.releaseObjectGroup', { objectGroup }).catch(() => undefined)
     }
   }
 
@@ -480,11 +516,22 @@ export class TabExecutor {
     const tabId = this.mustTab()
     const backendNodeId = this.resolveRef(ref)
     const role = this.lastSnapshot?.nodes.find((node) => node.ref === ref)?.role
-    let quad = await this.targetBox(tabId, backendNodeId)
-    if (!quad && (role === 'option' || role === 'listboxoption')) {
-      await this.clickNativeOption(tabId, backendNodeId, ref)
-      return
+    if (role && NATIVE_SELECT_ROLES.has(role)) {
+      const kind = await this.nativeSelectKind(tabId, backendNodeId)
+      if (kind === 'option') {
+        await this.selectNativeOption(tabId, backendNodeId, ref)
+        return
+      }
+      if (kind === 'select') {
+        // A real click would open the native popup, which nothing here can
+        // drive or even see, and which stays open on the user's screen. The
+        // options are already in the snapshot: focus the control and let the
+        // caller click an option ref.
+        await this.cdp(tabId, 'DOM.focus', { backendNodeId })
+        return
+      }
     }
+    let quad = await this.targetBox(tabId, backendNodeId)
     if (!quad) {
       const associated = await this.resolveAssociatedTarget(tabId, backendNodeId, 'click')
       if (associated != null) quad = await this.targetBox(tabId, associated)
@@ -506,6 +553,15 @@ export class TabExecutor {
   async type(ref: string, text: string): Promise<void> {
     const tabId = this.mustTab()
     const backendNodeId = this.resolveRef(ref)
+    const role = this.lastSnapshot?.nodes.find((node) => node.ref === ref)?.role
+    if (role && NATIVE_SELECT_ROLES.has(role) && (await this.nativeSelectKind(tabId, backendNodeId)) === 'select') {
+      // `Input.insertText` into a `<select>` changes nothing and reports
+      // nothing; the earlier "Typed N characters" success was a lie.
+      throw new ExecutorError(
+        `Ref ${ref} is a dropdown, and typing has no effect on it. Choose a value with browserClick on one of its option refs (listed after the dropdown in the snapshot).`,
+        'backend_error',
+      )
+    }
     try {
       await this.cdp(tabId, 'DOM.focus', { backendNodeId })
     } catch (err) {
