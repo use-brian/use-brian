@@ -30,7 +30,7 @@ import {
 import {
   blockedProfilesFor,
   canUseProfile,
-  describeProfileDenial,
+  describeProfileDenials,
   describeProfileResolution,
   resolveProfileForCall,
   routingNoteFor,
@@ -694,9 +694,9 @@ export function createSkillRunnerTools(opts: CreateSkillRunnerToolsOptions): {
         if (blocked.length > 0) {
           return {
             data:
-              `No browser profile is usable by this assistant, but ${blocked.length === 1 ? 'one exists' : `${blocked.length} exist`} in this workspace. ` +
-              `${blocked.map((entry) => describeProfileDenial(entry, clearance)).join(' ')} ` +
-              'Tell the user exactly this. Do NOT ask them to enable the profile again: the gate above is what is blocking it, and re-enabling changes nothing. ' +
+              'No browser profile is usable by this assistant. ' +
+              `${describeProfileDenials(blocked, clearance)} ` +
+              'Relay this to the user. Do NOT ask them to enable a profile again: the gate above is what is blocking it, and re-enabling changes nothing. ' +
               'Public sites still need no profile (browserNavigate / browserExplore run identity-less) unless this deployment browses only through My Browser.',
           }
         }

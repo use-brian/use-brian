@@ -10,6 +10,7 @@ import {
   blockedProfilesFor,
   canUseProfile,
   describeProfileDenial,
+  describeProfileDenials,
   createInMemoryBrowserProfileStore,
   createInMemorySessionVault,
   describeProfileResolution,
@@ -206,14 +207,56 @@ describe('[COMP:sandbox/profiles] Profile at call time (R2-10)', () => {
     ])
 
     const text = describeProfileResolution(res, actor.assistantClearance)
-    // Names the profile, both sides of the mismatch, and BOTH real remedies.
-    expect(text).toContain('hinson-work')
-    expect(text).toMatch(/confidential/)
+    // The obstacle is named; the PROFILE is not. An assistant's clearance
+    // exists so it sees less than its user, so a rung it cannot cover is a
+    // rung whose profile names it must not learn.
+    expect(text).not.toContain('hinson-work')
     expect(text).toMatch(/internal/)
     expect(text).toMatch(/raise this assistant's clearance/i)
-    expect(text).toMatch(/lower the profile's rung/i)
+    expect(text).toMatch(/who can use it/i)
     // And never the remedy that cannot work.
+    expect(text).toMatch(/will NOT help/i)
     expect(text).not.toMatch(/create one in Browsers/i)
+  })
+
+  /**
+   * The disclosure test is `canRead`, never the denial reason.
+   * `canUseProfile` returns `not_enabled` BEFORE it evaluates clearance, so a
+   * `confidential` profile that is merely un-toggled reports `not_enabled` -
+   * naming it on that basis would leak exactly what the rung withholds.
+   */
+  it('withholds the name of an un-toggled profile that is ALSO above clearance', () => {
+    const text = describeProfileDenial(
+      { name: 'acme-diligence-login', reason: 'not_enabled', clearance: 'confidential' },
+      'internal',
+    )
+    expect(text).not.toContain('acme-diligence-login')
+    expect(text).toMatch(/name is deliberately withheld/i)
+  })
+
+  it('names a profile the assistant IS cleared for, so the ordinary toggle case stays actionable', () => {
+    const text = describeProfileDenial(
+      { name: 'team-shared', reason: 'not_enabled', clearance: 'internal' },
+      'internal',
+    )
+    expect(text).toContain('team-shared')
+    expect(text).toMatch(/Assistant > Tools > Browser identities/)
+  })
+
+  it('collapses several unnameable profiles into one obstacle, disclosing no count', () => {
+    const text = describeProfileDenials(
+      [
+        { name: 'zenith-vault', reason: 'clearance', clearance: 'confidential' },
+        { name: 'quorum-books', reason: 'not_enabled', clearance: 'confidential' },
+        { name: 'lodestar-admin', reason: 'owner_only', clearance: 'confidential' },
+      ],
+      'internal',
+    )
+    for (const name of ['zenith-vault', 'quorum-books', 'lodestar-admin']) {
+      expect(text).not.toContain(name)
+    }
+    // One sentence run, not three identical paragraphs that also count them.
+    expect(text.match(/deliberately withheld/gi)).toHaveLength(1)
   })
 
   it('blockedProfilesFor reports every gated profile with the gate’s own reason', async () => {
@@ -239,14 +282,16 @@ describe('[COMP:sandbox/profiles] Profile at call time (R2-10)', () => {
       { name: 'p', reason: 'clearance', clearance: 'confidential' },
       'internal',
     )
-    expect(clearance).toMatch(/enabling it again will not help/i)
+    expect(clearance).toMatch(/will NOT help/i)
+    expect(clearance).not.toContain('"p"')
 
     const notEnabled = describeProfileDenial(
       { name: 'p', reason: 'not_enabled', clearance: 'public' },
       'internal',
     )
+    expect(notEnabled).toContain('"p"')
     expect(notEnabled).toMatch(/Assistant > Tools > Browser identities/)
-    expect(notEnabled).not.toMatch(/will not help/i)
+    expect(notEnabled).not.toMatch(/will NOT help/i)
   })
 
   it('a workspace with genuinely zero profiles still returns a bare none', async () => {

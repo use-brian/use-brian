@@ -31,7 +31,7 @@ import {
   registrableSiteOf,
 } from './orchestrator.js'
 import {
-  describeProfileDenial,
+  describeProfileDenials,
   describeProfileResolution,
   resolveProfileForCall,
   type BlockedProfile,
@@ -692,9 +692,9 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
       if (backend === 'local' && !profile && blockedProfiles.length > 0) {
         return {
           data:
-            `ERROR: This deployment browses through My Browser, which needs a browser profile, and every profile in this workspace is gated for this assistant. ` +
-            `${blockedProfiles.map((blocked) => describeProfileDenial(blocked, actorClearance)).join(' ')} ` +
-            'Report this to the user verbatim; re-enabling the profile will not change it.',
+            'ERROR: This deployment browses through My Browser, which needs a browser profile, and no profile in this workspace is usable by this assistant. ' +
+            `${describeProfileDenials(blockedProfiles, actorClearance)} ` +
+            'Relay this to the user; re-enabling a profile will not change it.',
           isError: true,
         }
       }
