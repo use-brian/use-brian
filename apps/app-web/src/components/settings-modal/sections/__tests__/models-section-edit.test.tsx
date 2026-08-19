@@ -69,6 +69,7 @@ const profile = {
   contextWindow: 32768,
   maxOutputTokens: 4096,
   supportsTools: true,
+  supportsVision: false,
   verifiedAt: "2026-08-12T00:00:00.000Z",
   createdAt: "2026-08-12T00:00:00.000Z",
   updatedAt: "2026-08-12T00:00:00.000Z",
@@ -110,6 +111,39 @@ beforeEach(() => {
 });
 
 describe("[COMP:app-web/models-settings] custom profile editing", () => {
+  // A profile verified before the vision probe existed reads `false`, and the
+  // only way a workspace admin can learn that (or fix it) is if the row says
+  // so: image turns on this endpoint are answered by a built-in model, and
+  // re-saving the profile is what re-runs the probe.
+  it("says whether the endpoint reads images, and how to re-check", async () => {
+    const render = async () => {
+      const container = document.createElement("div");
+      const root = createRoot(container);
+      await act(async () => {
+        root.render(
+          <I18nProvider locale="en" dict={en as unknown as Dictionary}>
+            <ModelsSection />
+          </I18nProvider>,
+        );
+      });
+      await act(async () => {
+        click(container, (button) => button.textContent === en.chrome.settingsModal.models.viewProviders);
+      });
+      return container;
+    };
+
+    const sightless = await render();
+    expect(sightless.textContent).toContain(en.chrome.settingsModal.models.textOnly);
+    expect(sightless.textContent).not.toContain(en.chrome.settingsModal.models.readsImages);
+
+    getCustomLlmConfiguration.mockResolvedValue({
+      endpoints: [{ ...endpoint, profiles: [{ ...profile, supportsVision: true }] }],
+      tierDefaults: [],
+    });
+    const seeing = await render();
+    expect(seeing.textContent).toContain(en.chrome.settingsModal.models.readsImages);
+  });
+
   it("opens the profile editor and saves a reverified context-window update in place", async () => {
     const container = document.createElement("div");
     const root = createRoot(container);
