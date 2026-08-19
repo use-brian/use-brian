@@ -23,6 +23,7 @@ function profile(overrides: Partial<BrowserProfile> = {}): BrowserProfile {
     workspaceId: "ws-1",
     ownerUserId: "u1",
     name: "IG",
+    scope: "owner",
     clearance: "confidential",
     enabledAssistantIds: [],
     defaultBackend: "cloud",

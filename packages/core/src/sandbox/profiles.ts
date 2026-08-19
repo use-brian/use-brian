@@ -18,11 +18,24 @@ import type { SessionVault } from './types.js'
 export type BrowserBackendKind = 'local' | 'cloud'
 export type LocalBrowserControlMode = 'task_tabs' | 'full_browser'
 
+/**
+ * WHOSE turns may use a profile, independent of WHAT clearance a workspace
+ * turn needs (migration 451). `clearance` used to carry both, with its top
+ * value doubling as "owner-only" — so "only me" could not be said without also
+ * demanding a top-cleared assistant, and a private profile was unusable by its
+ * owner's own `internal` assistant. See
+ * docs/plans/browser-profile-scope-and-clearance.md §1.
+ */
+export type BrowserProfileScope = 'owner' | 'workspace'
+
 export type BrowserProfile = {
   id: string
   workspaceId: string
   ownerUserId: string
   name: string
+  /** Private to the owner, or offered to the workspace at `clearance`. */
+  scope: BrowserProfileScope
+  /** The rung a WORKSPACE turn must cover. Ignored while `scope` is 'owner'. */
   clearance: Sensitivity
   /** Assistants explicitly enabled for this identity (R2-4). */
   enabledAssistantIds: string[]
@@ -42,6 +55,7 @@ export type CreateBrowserProfileParams = {
   workspaceId: string
   ownerUserId: string
   name: string
+  scope?: BrowserProfileScope
   clearance?: Sensitivity
   defaultBackend?: BrowserBackendKind
   localControlMode?: LocalBrowserControlMode
@@ -54,6 +68,7 @@ export type UpdateBrowserProfileParams = Partial<
   Pick<
     BrowserProfile,
     | 'name'
+    | 'scope'
     | 'clearance'
     | 'defaultBackend'
     | 'localControlMode'
@@ -81,12 +96,18 @@ export type ProfileActor = {
   assistantClearance: Sensitivity
 }
 
-export type ProfileDenialReason = 'not_enabled' | 'clearance' | 'owner_only'
+export type ProfileDenialReason = 'not_enabled' | 'not_owner' | 'clearance'
 
 /**
- * The profile gate (R2-4): explicit enablement + clearance coverage, with the
- * top rung owner-only — a `confidential` profile is usable only when the
- * acting user IS the owner, whatever the assistant's clearance says.
+ * The profile gate (R2-4, migration 451): explicit enablement, then ONE of two
+ * questions depending on scope.
+ *
+ * An `owner`-scoped profile asks only whose turn this is — clearance does not
+ * gate it, because per-assistant enablement is already a deliberate grant its
+ * owner made, and the ladder exists to protect workspace data from OTHER
+ * people, not the owner from themselves (plan §1, D1). This is the decision
+ * that makes "only me" expressible without also demanding a top-cleared
+ * assistant, which is what refused `Hinson Secretary` on 2026-08-19.
  */
 export function canUseProfile(
   profile: BrowserProfile,
@@ -95,13 +116,25 @@ export function canUseProfile(
   if (!profile.enabledAssistantIds.includes(actor.assistantId)) {
     return { ok: false, reason: 'not_enabled' }
   }
+  if (profile.scope === 'owner') {
+    return profile.ownerUserId === actor.userId ? { ok: true } : { ok: false, reason: 'not_owner' }
+  }
   if (!canRead(actor.assistantClearance, profile.clearance)) {
     return { ok: false, reason: 'clearance' }
   }
-  if (profile.clearance === 'confidential' && profile.ownerUserId !== actor.userId) {
-    return { ok: false, reason: 'owner_only' }
-  }
   return { ok: true }
+}
+
+/**
+ * Whether this actor may be TOLD the profile's name (see
+ * `describeProfileDenial`). Reachability, never the denial reason: enablement
+ * is checked first and short-circuits, so a profile the actor cannot reach at
+ * all can still report `not_enabled`.
+ */
+export function profileIsNameableTo(profile: BrowserProfile, actor: ProfileActor): boolean {
+  return profile.scope === 'owner'
+    ? profile.ownerUserId === actor.userId
+    : canRead(actor.assistantClearance, profile.clearance)
 }
 
 /** The acting assistant's note only; whitespace-only guidance is absent. */
@@ -124,6 +157,12 @@ export type BlockedProfile = {
   reason: ProfileDenialReason
   /** The profile's rung, so the remedy can name both sides of the mismatch. */
   clearance: Sensitivity
+  /**
+   * Whether the actor may be told `name`. Decided by `profileIsNameableTo`
+   * at construction, where the actor is in hand — never re-derived from
+   * `reason`, which cannot answer it (enablement short-circuits first).
+   */
+  nameable: boolean
 }
 
 export type ProfileResolution =
@@ -199,7 +238,16 @@ export function blockedProfilesFor(
 ): BlockedProfile[] {
   return profiles.flatMap((profile) => {
     const gate = canUseProfile(profile, actor)
-    return gate.ok ? [] : [{ name: profile.name, reason: gate.reason, clearance: profile.clearance }]
+    return gate.ok
+      ? []
+      : [
+          {
+            name: profile.name,
+            reason: gate.reason,
+            clearance: profile.clearance,
+            nameable: profileIsNameableTo(profile, actor),
+          },
+        ]
   })
 }
 
@@ -223,19 +271,21 @@ export function blockedProfilesFor(
  * otherwise report the SHAPE of the obstacle and nothing that identifies it.
  */
 export function describeProfileDenial(blocked: BlockedProfile, actorClearance: Sensitivity): string {
-  if (!canRead(actorClearance, blocked.clearance)) {
-    return `A browser profile exists in this workspace whose clearance is above this assistant's (${actorClearance}), so this assistant can neither see nor use it — its name is deliberately withheld. Enabling it under Assistant > Tools > Browser identities will NOT help: the clearance rung is the obstacle, not the toggle. The user can raise this assistant's clearance, or lower that profile's "Who can use it" setting (Browsers > Browser profiles > Advanced settings) to a level ${actorClearance} covers.`
+  if (!blocked.nameable) {
+    return blocked.reason === 'not_owner'
+      ? 'A browser profile in this workspace is private to another member, so this assistant can neither see nor use it and its name is withheld. Its owner would have to share it with the workspace under Browsers > Browser profiles > Advanced settings.'
+      : `A browser profile exists in this workspace whose clearance is above this assistant's (${actorClearance}), so this assistant can neither see nor use it and its name is withheld. Enabling it under Assistant > Tools > Browser identities will NOT help: the clearance rung is the obstacle, not the toggle. The user can raise this assistant's clearance, or lower that profile's required clearance under Browsers > Browser profiles > Advanced settings.`
   }
   switch (blocked.reason) {
     case 'not_enabled':
       return `"${blocked.name}" is not enabled for this assistant. Its owner can enable it under Assistant > Tools > Browser identities.`
-    case 'owner_only':
-      return `"${blocked.name}" sits at the top (confidential) rung, which only its owner's own turns may use. Its owner can lower its "Who can use it" setting under Browsers > Browser profiles > Advanced settings to share it.`
+    case 'not_owner':
+      // Nameable + not_owner cannot both hold: `profileIsNameableTo` requires
+      // ownership on the owner-scoped branch. Kept total so a future ordering
+      // change degrades to a true sentence rather than a wrong one.
+      return `"${blocked.name}" is private to its owner, so only their own turns may use it.`
     case 'clearance':
-      // Unreachable: `canUseProfile` returns `clearance` only when `canRead`
-      // failed, which the guard above already answered. Kept total rather than
-      // thrown, so a future reason-ordering change degrades to the safe text.
-      return `A browser profile in this workspace is not usable by this assistant at its current clearance (${actorClearance}).`
+      return `"${blocked.name}" requires a clearance this assistant does not have (${actorClearance}). Enabling it again will not help: raise this assistant's clearance, or lower the profile's required clearance under Browsers > Browser profiles > Advanced settings.`
   }
 }
 
@@ -268,13 +318,15 @@ export function describeProfileResolution(
     case 'not_found':
       return `No browser profile named "${res.name}" exists in this workspace. Ask the user to create it in Browsers > Browser profiles, or omit the parameter to use an available profile.`
     case 'denied':
+      // Reached only when the model NAMED a profile, so echoing the name back
+      // discloses nothing it did not already supply.
       switch (res.reason) {
         case 'not_enabled':
           return `This assistant is not enabled for the browser profile "${res.profile.name}". Its owner can make it available under Assistant > Tools > Browser identities.`
         case 'clearance':
-          return `This assistant's clearance does not cover the browser profile "${res.profile.name}".`
-        case 'owner_only':
-          return `The browser profile "${res.profile.name}" is owner-only (top clearance rung) and belongs to another user.`
+          return `The browser profile "${res.profile.name}" requires a clearance this assistant does not have (${actorClearance}). Enabling it again will not help: raise this assistant's clearance, or lower the profile's required clearance under Browsers > Browser profiles > Advanced settings.`
+        case 'not_owner':
+          return `The browser profile "${res.profile.name}" is private to its owner ("Who can use it" is set to "Only me"), so only their own turns may use it.`
       }
       break
     case 'none':
@@ -367,6 +419,7 @@ export function createInMemoryBrowserProfileStore(): BrowserProfileStore & {
         workspaceId: params.workspaceId,
         ownerUserId: params.ownerUserId,
         name: params.name,
+        scope: params.scope ?? 'owner',
         clearance: params.clearance ?? 'confidential',
         enabledAssistantIds: params.enabledAssistantIds ?? [],
         assistantRoutingNotes: params.assistantRoutingNotes ?? {},
@@ -385,6 +438,7 @@ export function createInMemoryBrowserProfileStore(): BrowserProfileStore & {
       const next: BrowserProfile = {
         ...existing,
         ...('name' in patch && patch.name !== undefined ? { name: patch.name } : {}),
+        ...('scope' in patch && patch.scope !== undefined ? { scope: patch.scope } : {}),
         ...('clearance' in patch && patch.clearance !== undefined ? { clearance: patch.clearance } : {}),
         ...('defaultBackend' in patch && patch.defaultBackend !== undefined
           ? { defaultBackend: patch.defaultBackend }

@@ -66,6 +66,8 @@ type VaultedSession = {
 };
 
 export type BrowserProfileClearance = "public" | "internal" | "confidential";
+/** WHOSE turns may use the profile, independent of the rung (migration 451). */
+export type BrowserProfileScope = "owner" | "workspace";
 export type BrowserBackend = "local" | "cloud";
 export type LocalBrowserControlMode = "task_tabs" | "full_browser";
 
@@ -108,6 +110,7 @@ export type BrowserProfile = {
   workspaceId: string;
   ownerUserId: string;
   name: string;
+  scope: BrowserProfileScope;
   clearance: BrowserProfileClearance;
   enabledAssistantIds: string[];
   assistantRoutingNotes?: Record<string, string>;
@@ -320,6 +323,7 @@ export async function listBrowserProfiles(
 export async function createBrowserProfile(params: {
   workspaceId: string;
   name: string;
+  scope?: BrowserProfileScope;
   clearance?: BrowserProfileClearance;
   defaultBackend?: BrowserBackend;
   localControlMode?: LocalBrowserControlMode;
@@ -457,6 +461,7 @@ export async function updateBrowserProfile(
     Pick<
       BrowserProfile,
       | "name"
+      | "scope"
       | "clearance"
       | "defaultBackend"
       | "localControlMode"

@@ -31,16 +31,21 @@ const CLEARANCE_RANK: Record<Sensitivity, number> = {
 
 /**
  * The runtime gate this toggle is a UI for (`canUseProfile`, core
- * `sandbox/profiles.ts`): enablement alone does not grant use, the assistant's
- * clearance must also cover the profile's rung. A toggle that reports "granted"
- * for a grant the gate refuses is the bug this exists to prevent - on
- * 2026-08-19 an `internal` assistant was enabled for a `confidential` profile
- * four times, and every surface said it had worked.
+ * `sandbox/profiles.ts`): enablement alone does not grant use. A toggle that
+ * reports "granted" for a grant the gate refuses is the bug this exists to
+ * prevent - on 2026-08-19 an `internal` assistant was enabled for a
+ * `confidential` profile four times, and every surface said it had worked.
+ *
+ * Since migration 451 the rung only gates WORKSPACE-scoped profiles. An
+ * owner-scoped profile has no clearance to fail, so warning about one would be
+ * a false alarm about a state that cannot occur.
  */
 export function clearanceCovers(
   assistantClearance: Sensitivity | null | undefined,
   profileClearance: Sensitivity,
+  scope: BrowserProfile["scope"] = "workspace",
 ): boolean {
+  if (scope === "owner") return true;
   // Unknown clearance never fabricates a warning: the runtime gate is the
   // authority and a missing value here is a loading state, not a denial.
   if (!assistantClearance) return true;
@@ -98,7 +103,11 @@ export function BrowserIdentityList({
         const saving = savingId === profile.id;
         // Enabled but out of clearance is the silent failure: the toggle reads
         // ON, the runtime refuses, and every remedy on offer is "enable it".
-        const outOfClearance = !clearanceCovers(assistantClearance, profile.clearance);
+        const outOfClearance = !clearanceCovers(
+          assistantClearance,
+          profile.clearance,
+          profile.scope,
+        );
         return (
           <section key={profile.id} className="rounded-xl border border-border bg-card px-4 py-3">
             <div className="flex items-center gap-3">

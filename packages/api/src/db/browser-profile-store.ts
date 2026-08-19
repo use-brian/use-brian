@@ -16,6 +16,7 @@ type Row = {
   workspace_id: string
   owner_user_id: string
   name: string
+  scope: 'owner' | 'workspace'
   clearance: 'public' | 'internal' | 'confidential'
   enabled_assistant_ids: string[]
   assistant_routing_notes: Record<string, string>
@@ -32,6 +33,7 @@ function toProfile(row: Row): BrowserProfile {
     workspaceId: row.workspace_id,
     ownerUserId: row.owner_user_id,
     name: row.name,
+    scope: row.scope,
     clearance: row.clearance,
     enabledAssistantIds: row.enabled_assistant_ids ?? [],
     assistantRoutingNotes: row.assistant_routing_notes ?? {},
@@ -69,14 +71,15 @@ export function createBrowserProfileStore(): BrowserProfileStore {
     async create(params: CreateBrowserProfileParams) {
       const res = await query<Row>(
         `INSERT INTO browser_profiles
-           (workspace_id, owner_user_id, name, clearance, enabled_assistant_ids,
+           (workspace_id, owner_user_id, name, scope, clearance, enabled_assistant_ids,
             assistant_routing_notes, default_backend, local_control_mode, proxy_url)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          RETURNING *`,
         [
           params.workspaceId,
           params.ownerUserId,
           params.name,
+          params.scope ?? 'owner',
           params.clearance ?? 'confidential',
           params.enabledAssistantIds ?? [],
           params.assistantRoutingNotes ?? {},
@@ -96,6 +99,7 @@ export function createBrowserProfileStore(): BrowserProfileStore {
         sets.push(`${sql} = $${params.length}`)
       }
       if (patch.name !== undefined) push('name', patch.name)
+      if (patch.scope !== undefined) push('scope', patch.scope)
       if (patch.clearance !== undefined) push('clearance', patch.clearance)
       if (patch.defaultBackend !== undefined) push('default_backend', patch.defaultBackend)
       if (patch.localControlMode !== undefined) push('local_control_mode', patch.localControlMode)

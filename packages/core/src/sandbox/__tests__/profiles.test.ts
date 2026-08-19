@@ -9,6 +9,7 @@ import { describe, it, expect } from 'vitest'
 import {
   blockedProfilesFor,
   canUseProfile,
+  profileIsNameableTo,
   describeProfileDenial,
   describeProfileDenials,
   createInMemoryBrowserProfileStore,
@@ -48,6 +49,7 @@ describe('[COMP:sandbox/profiles] Profile clearance + enablement gate (R2-4)', (
       workspaceId: 'ws-1',
       ownerUserId: 'owner-1',
       name: 'Team CRM',
+      scope: 'workspace',
       clearance: 'internal',
       enabledAssistantIds: ['asst-1'],
     })
@@ -58,19 +60,21 @@ describe('[COMP:sandbox/profiles] Profile clearance + enablement gate (R2-4)', (
     expect(canUseProfile(p, { ...OWNER, assistantClearance: 'internal' })).toEqual({ ok: true })
   })
 
-  it('top rung (confidential) is OWNER-ONLY: a cleared teammate’s assistant is still refused', async () => {
+  it('owner SCOPE is owner-only: a fully-cleared teammate’s assistant is still refused', async () => {
     const s = store()
     const p = await s.create({
       workspaceId: 'ws-1',
       ownerUserId: 'owner-1',
       name: 'Personal',
-      clearance: 'confidential',
+      scope: 'owner',
       enabledAssistantIds: ['asst-1'],
     })
     // Same assistant, acting for a DIFFERENT user: denied despite clearance.
+    // Pre-451 this guarantee rode on the `confidential` rung; it now says what
+    // it means, so it holds whatever the rung happens to be.
     expect(canUseProfile(p, { ...OWNER, userId: 'teammate-2' })).toEqual({
       ok: false,
-      reason: 'owner_only',
+      reason: 'not_owner',
     })
     // The owner themself passes.
     expect(canUseProfile(p, OWNER)).toEqual({ ok: true })
@@ -174,7 +178,7 @@ describe('[COMP:sandbox/profiles] Profile at call time (R2-10)', () => {
       profileName: 'Personal',
     })
     expect(denied.kind).toBe('denied')
-    if (denied.kind === 'denied') expect(denied.reason).toBe('owner_only')
+    if (denied.kind === 'denied') expect(denied.reason).toBe('not_owner')
   })
 
   it('no enabled profile at all → none (identity-less browse is the caller’s decision)', async () => {
@@ -189,12 +193,13 @@ describe('[COMP:sandbox/profiles] Profile at call time (R2-10)', () => {
    * on `.ok` and dropped the reason, so the only remedy on offer was the
    * enablement the user had already done. They did it four more times.
    */
-  it('a denial is not an absence: an enabled-but-under-clearance profile is named with its reason', async () => {
+  it('a denial is not an absence: an enabled-but-under-clearance SHARED profile is reported with its reason', async () => {
     const s = store()
     await s.create({
       workspaceId: 'ws-1',
       ownerUserId: 'owner-1',
       name: 'hinson-work',
+      scope: 'workspace',
       clearance: 'confidential',
       enabledAssistantIds: ['asst-1'],
     })
@@ -203,7 +208,7 @@ describe('[COMP:sandbox/profiles] Profile at call time (R2-10)', () => {
     expect(res.kind).toBe('none')
     if (res.kind !== 'none') return
     expect(res.blocked).toEqual([
-      { name: 'hinson-work', reason: 'clearance', clearance: 'confidential' },
+      { name: 'hinson-work', reason: 'clearance', clearance: 'confidential', nameable: false },
     ])
 
     const text = describeProfileResolution(res, actor.assistantClearance)
@@ -213,30 +218,80 @@ describe('[COMP:sandbox/profiles] Profile at call time (R2-10)', () => {
     expect(text).not.toContain('hinson-work')
     expect(text).toMatch(/internal/)
     expect(text).toMatch(/raise this assistant's clearance/i)
-    expect(text).toMatch(/who can use it/i)
+    expect(text).toMatch(/required clearance/i)
     // And never the remedy that cannot work.
     expect(text).toMatch(/will NOT help/i)
     expect(text).not.toMatch(/create one in Browsers/i)
   })
 
   /**
-   * The disclosure test is `canRead`, never the denial reason.
+   * D1 (plan §1): the incident state itself. An `internal` assistant, enabled
+   * for its OWNER's private profile, may use it - clearance does not gate an
+   * owner-scoped profile, because enablement is already the owner's grant.
+   * Before migration 451 this exact configuration was unrepresentable: asking
+   * for "only me" forced the `confidential` rung and refused the assistant.
+   */
+  it('an owner-scoped profile is usable by the owner’s enabled assistant at ANY clearance', async () => {
+    const s = store()
+    const p = await s.create({
+      workspaceId: 'ws-1',
+      ownerUserId: 'owner-1',
+      name: 'hinson-work',
+      scope: 'owner',
+      clearance: 'confidential',
+      enabledAssistantIds: ['asst-1'],
+    })
+    for (const assistantClearance of ['public', 'internal', 'confidential'] as const) {
+      expect(canUseProfile(p, { ...OWNER, assistantClearance })).toEqual({ ok: true })
+    }
+    // ...but only for its owner's turns.
+    expect(canUseProfile(p, { ...OWNER, userId: 'teammate-2' })).toEqual({
+      ok: false,
+      reason: 'not_owner',
+    })
+  })
+
+  it('a workspace-scoped profile still gates on clearance, and enablement is still first', async () => {
+    const s = store()
+    const shared = await s.create({
+      workspaceId: 'ws-1', ownerUserId: 'owner-1', name: 'shared',
+      scope: 'workspace', clearance: 'confidential', enabledAssistantIds: ['asst-1'],
+    })
+    expect(canUseProfile(shared, { ...OWNER, assistantClearance: 'internal' })).toEqual({
+      ok: false,
+      reason: 'clearance',
+    })
+    // Enablement short-circuits before scope or clearance are consulted, which
+    // is precisely why nameability may never be derived from the reason.
+    const unToggled = await s.create({
+      workspaceId: 'ws-1', ownerUserId: 'owner-1', name: 'un-toggled',
+      scope: 'workspace', clearance: 'confidential', enabledAssistantIds: [],
+    })
+    expect(canUseProfile(unToggled, { ...OWNER, assistantClearance: 'internal' })).toEqual({
+      ok: false,
+      reason: 'not_enabled',
+    })
+    expect(profileIsNameableTo(unToggled, { ...OWNER, assistantClearance: 'internal' })).toBe(false)
+  })
+
+  /**
+   * The disclosure test is reachability, never the denial reason.
    * `canUseProfile` returns `not_enabled` BEFORE it evaluates clearance, so a
    * `confidential` profile that is merely un-toggled reports `not_enabled` -
    * naming it on that basis would leak exactly what the rung withholds.
    */
   it('withholds the name of an un-toggled profile that is ALSO above clearance', () => {
     const text = describeProfileDenial(
-      { name: 'acme-diligence-login', reason: 'not_enabled', clearance: 'confidential' },
+      { name: 'acme-diligence-login', reason: 'not_enabled', clearance: 'confidential', nameable: false },
       'internal',
     )
     expect(text).not.toContain('acme-diligence-login')
-    expect(text).toMatch(/name is deliberately withheld/i)
+    expect(text).toMatch(/name is withheld/i)
   })
 
   it('names a profile the assistant IS cleared for, so the ordinary toggle case stays actionable', () => {
     const text = describeProfileDenial(
-      { name: 'team-shared', reason: 'not_enabled', clearance: 'internal' },
+      { name: 'team-shared', reason: 'not_enabled', clearance: 'internal', nameable: true },
       'internal',
     )
     expect(text).toContain('team-shared')
@@ -246,9 +301,9 @@ describe('[COMP:sandbox/profiles] Profile at call time (R2-10)', () => {
   it('collapses several unnameable profiles into one obstacle, disclosing no count', () => {
     const text = describeProfileDenials(
       [
-        { name: 'zenith-vault', reason: 'clearance', clearance: 'confidential' },
-        { name: 'quorum-books', reason: 'not_enabled', clearance: 'confidential' },
-        { name: 'lodestar-admin', reason: 'owner_only', clearance: 'confidential' },
+        { name: 'zenith-vault', reason: 'clearance', clearance: 'confidential', nameable: false },
+        { name: 'quorum-books', reason: 'not_enabled', clearance: 'confidential', nameable: false },
+        { name: 'lodestar-admin', reason: 'clearance', clearance: 'confidential', nameable: false },
       ],
       'internal',
     )
@@ -256,37 +311,37 @@ describe('[COMP:sandbox/profiles] Profile at call time (R2-10)', () => {
       expect(text).not.toContain(name)
     }
     // One sentence run, not three identical paragraphs that also count them.
-    expect(text.match(/deliberately withheld/gi)).toHaveLength(1)
+    expect(text.match(/name is withheld/gi)).toHaveLength(1)
   })
 
   it('blockedProfilesFor reports every gated profile with the gate’s own reason', async () => {
     const s = store()
     await s.create({
       workspaceId: 'ws-1', ownerUserId: 'owner-1', name: 'not-enabled',
-      clearance: 'public', enabledAssistantIds: [],
+      scope: 'workspace', clearance: 'public', enabledAssistantIds: [],
     })
     await s.create({
       workspaceId: 'ws-1', ownerUserId: 'owner-1', name: 'too-high',
-      clearance: 'confidential', enabledAssistantIds: ['asst-1'],
+      scope: 'workspace', clearance: 'confidential', enabledAssistantIds: ['asst-1'],
     })
     const actor: ProfileActor = { ...OWNER, assistantClearance: 'internal' }
     const all = await s.list({ workspaceId: 'ws-1' })
     expect(blockedProfilesFor(all, actor)).toEqual([
-      { name: 'not-enabled', reason: 'not_enabled', clearance: 'public' },
-      { name: 'too-high', reason: 'clearance', clearance: 'confidential' },
+      { name: 'not-enabled', reason: 'not_enabled', clearance: 'public', nameable: true },
+      { name: 'too-high', reason: 'clearance', clearance: 'confidential', nameable: false },
     ])
   })
 
   it('the clearance denial says enabling again will not help; the not-enabled one still points at the toggle', () => {
     const clearance = describeProfileDenial(
-      { name: 'p', reason: 'clearance', clearance: 'confidential' },
+      { name: 'p', reason: 'clearance', clearance: 'confidential', nameable: false },
       'internal',
     )
     expect(clearance).toMatch(/will NOT help/i)
     expect(clearance).not.toContain('"p"')
 
     const notEnabled = describeProfileDenial(
-      { name: 'p', reason: 'not_enabled', clearance: 'public' },
+      { name: 'p', reason: 'not_enabled', clearance: 'public', nameable: true },
       'internal',
     )
     expect(notEnabled).toContain('"p"')

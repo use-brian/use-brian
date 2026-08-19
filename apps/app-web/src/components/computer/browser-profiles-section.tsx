@@ -34,6 +34,7 @@ import {
   type BrowserBackend,
   type BrowserProfile,
   type BrowserProfileClearance,
+  type BrowserProfileScope,
   type LocalBrowserControlMode,
 } from "@/lib/api/computer";
 
@@ -106,6 +107,7 @@ export function selectedBrowserProfile(
 }
 
 const CLEARANCES: BrowserProfileClearance[] = ["confidential", "internal", "public"];
+const SCOPES: BrowserProfileScope[] = ["owner", "workspace"];
 const BACKENDS: BrowserBackend[] = ["cloud", "local"];
 const LOCAL_CONTROL_MODES: LocalBrowserControlMode[] = ["task_tabs", "full_browser"];
 
@@ -420,6 +422,11 @@ export function BrowserProfilesSection({
     },
     [reload, t],
   );
+
+  const scopeLabel = (scope: BrowserProfileScope): string =>
+    scope === "owner"
+      ? t.computer.profiles.scopeOwner
+      : t.computer.profiles.scopeWorkspace;
 
   const clearanceLabel = (clearance: BrowserProfileClearance): string =>
     clearance === "confidential"
@@ -876,7 +883,40 @@ export function BrowserProfilesSection({
                       {t.computer.profiles.advancedTitle}
                     </summary>
                     <div className="pb-1 pl-1">
-                  {/* Clearance rung (top rung = owner-only; lower = shared) */}
+                  {/* Two independent axes (migration 451): WHOSE turns may use
+                      it, and - only when shared - WHAT clearance they need.
+                      One control used to carry both, so "only me" silently
+                      demanded a top-cleared assistant. */}
+                  <div className="mt-3">
+                    <p className="text-[11px] font-medium text-muted-foreground">
+                      {t.computer.profiles.scopeLabel}
+                    </p>
+                    <div className="mt-1 flex gap-1">
+                      {SCOPES.map((scope) => (
+                        <button
+                          key={scope}
+                          type="button"
+                          onClick={() => void mutate(profile.id, { scope })}
+                          className={
+                            profile.scope === scope
+                              ? "rounded-md bg-primary/10 px-2 py-1 text-[11px] font-medium text-primary"
+                              : "rounded-md border border-border px-2 py-1 text-[11px] text-muted-foreground hover:bg-accent"
+                          }
+                        >
+                          {scopeLabel(scope)}
+                        </button>
+                      ))}
+                    </div>
+                    <p className="mt-1 text-[11px] text-muted-foreground">
+                      {profile.scope === "owner"
+                        ? t.computer.profiles.scopeHintOwner
+                        : t.computer.profiles.scopeHintWorkspace}
+                    </p>
+                  </div>
+
+                  {/* A private profile has no rung to satisfy, so offering one
+                      would be a control that does nothing. */}
+                  {profile.scope === "workspace" ? (
                   <div className="mt-3">
                     <p className="text-[11px] font-medium text-muted-foreground">
                       {t.computer.profiles.clearanceLabel}
@@ -901,6 +941,7 @@ export function BrowserProfilesSection({
                       {t.computer.profiles.clearanceHint}
                     </p>
                   </div>
+                  ) : null}
 
                   {/* Proxy URL (D7): routes the CLOUD browser's traffic
                       through the user's own proxy, so its egress resembles
