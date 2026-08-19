@@ -36,6 +36,7 @@ import { runProactiveCompaction } from './proactive-compaction.js'
 import { notifyBrainWriteIfMatch } from '../brain-stream/notify.js'
 import { recordOverheadUsage } from './_overhead-usage.js'
 import { composeRecoveryMessage } from './_recovery-message.js'
+import { CUSTOM_MODEL_IMAGE_REJECTION } from './_channel-error-text.js'
 import { resolveReplyText } from './_reply-context.js'
 import {
   attachUserVisibleContext,
@@ -73,7 +74,7 @@ import { createDbKnowledgeStore } from '../db/knowledge-store.js'
 import { createSyncCredentialProvider } from '../knowledge/sync-credentials.js'
 import { buildBrowserEscalationPrompt, buildUnavailableCapabilitiesPrompt, injectSkills, checkUsageBudget } from './route-helpers.js'
 import type { CreditBudgetGate } from './route-helpers.js'
-import { getConnectorUserId, getWorkspacePurpose, getWorkspacePlan, resolveReadCeilingsSystem } from '../db/workspace-store.js'
+import { getConnectorUserId, getWorkspacePurpose, getWorkspacePlan, getWorkspaceRoleSystem, resolveReadCeilingsSystem } from '../db/workspace-store.js'
 import {
   buildChannelSessionKey,
   listPendingRecordingConfirmationsForSession,
@@ -619,6 +620,35 @@ export function connectorToolsAllowedForChannelTurn(
 
 // ── Pipeline ─────────────────────────────────────────────────────
 
+/**
+ * Private-runtime block for a sender who is not a member of the assistant's
+ * workspace. Model-facing (system channel), never delivered verbatim; keeps
+ * the wording plain because the model paraphrases it to the user.
+ * Exported for `[COMP:api/channel-pipeline/non-member-sender]`.
+ */
+export function buildNonMemberSenderBlock(args: {
+  channelType: string
+  senderEmail: string | null
+  senderName: string | null
+}): string {
+  const who = args.senderEmail
+    ? `${args.senderName ? `${args.senderName} <${args.senderEmail}>` : args.senderEmail}`
+    : (args.senderName ?? 'this sender')
+  const identity = args.senderEmail
+    ? `Their ${args.channelType} account resolves to the Use Brian account ${args.senderEmail}, and that account is not a member of this workspace.`
+    : `Their ${args.channelType} account could not be matched to a member of this workspace.`
+  return (
+    '# Sender is not a workspace member\n\n' +
+    `You are answering ${who}, who is NOT a member of this assistant's workspace. ` +
+    'Every workspace-scoped read (workflows, tasks, pages, brain, contacts, deals, connectors) will come back empty or "not found" for them. ' +
+    'That is an access boundary, not a missing record: do NOT report "no workflows", "no tasks", "not found" or "not visible in this workspace" as fact, do not ask them to open a different workspace, and do not retry lookups. ' +
+    `If they ask about workspace data or ask you to act on it, tell them plainly: ${identity} ` +
+    'Give both remedies: (1) a workspace admin invites that email to the workspace, or (2) they link this ' +
+    `${args.channelType} account to the Use Brian account they normally use, from Settings -> Account -> Connected accounts, then re-send the message. ` +
+    'Everything they say in this chat is still answerable from what they provide here.'
+  )
+}
+
 export async function processChannelMessage(params: ChannelPipelineParams): Promise<void> {
   const {
     userId, ownerId, assistant, isIdentified,
@@ -835,7 +865,9 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         console.warn(`[${channelType}] archive-on-refusal failed:`, err)
       }
     }
-    await hooks.sendError(new Error('Custom model endpoints currently support text and tools only. Remove the inline image or use the web app to choose a built-in model.'))
+    // The exact string is load-bearing: channelUserErrorText whitelists it
+    // by identity so every channel's sendError surfaces it verbatim.
+    await hooks.sendError(new Error(CUSTOM_MODEL_IMAGE_REJECTION))
     return
   }
   const turnProvider = customLlmRuntime?.provider ?? provider
@@ -1260,6 +1292,31 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         ? ' You may use the connected tools available in this turn.'
         : ' Connected tools are not available in this turn.'),
     )
+  }
+  // ── Non-member sender boundary ──
+  // The sender resolved to a REAL platform user (or a shadow) that is not a
+  // member of this assistant's workspace: an `assistant_members` row but no
+  // `workspace_members` row. Every workspace-scoped read (workflows, tasks,
+  // pages, brain, CRM) then returns empty or "not found" under RLS, and
+  // without this block the model reports that as fact ("no workflows in
+  // this workspace yet") and cannot even name the workspace. The classic
+  // cause is an identity mismatch: the channel-revealed email (a company
+  // Slack address) is not the email of the account the person actually
+  // uses. The fact must travel with the turn so the reply names the cause
+  // and the remedy instead of the symptom. One PK lookup per channel turn.
+  // See docs/architecture/channels/channel-user-identity.md → "Non-member
+  // senders".
+  if (assistant.workspaceId && !externalGuest) {
+    const senderRole = await getWorkspaceRoleSystem(userId, assistant.workspaceId)
+    if (senderRole === null) {
+      privateRuntimeContextParts.push(
+        buildNonMemberSenderBlock({
+          channelType,
+          senderEmail: channelUser?.email ?? null,
+          senderName: channelUser?.name ?? null,
+        }),
+      )
+    }
   }
   const userVisibleContext = splitPrompt.userVisibleContext
 

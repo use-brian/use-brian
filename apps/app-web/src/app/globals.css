@@ -2498,6 +2498,23 @@ html[data-vt-back="true"]::view-transition-new(root) {
   outline-offset: 1px;
 }
 
+/* Find on page (⌘F / Ctrl+F) — painted by find-in-page.ts as view-only
+   decorations. Deliberately BLUE, not the comment highlight's warm yellow:
+   a search hit and a commented span are different claims about the same
+   text and must never be confused for one another. The active hit is the
+   strong swatch (the one the counter is pointing at), the rest are faint.
+   See docs/architecture/features/doc.md → "Find on page". */
+.doc-find-match {
+  background: color-mix(in srgb, var(--primary) 22%, transparent);
+  border-radius: 2px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+.doc-find-match-active {
+  background: color-mix(in srgb, var(--primary) 45%, transparent);
+  box-shadow: 0 0 0 1px var(--primary);
+}
+
 /* Doc comments (chat-as-threads) — highlight + gutter badge.
    Painted by comment-decorations.ts. `.doc-comment-mark` is the static
    fallback for the read-only/copy-paste path; the live highlight is the

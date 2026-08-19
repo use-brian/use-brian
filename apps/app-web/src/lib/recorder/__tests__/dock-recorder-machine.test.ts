@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   COMPUTER_AUDIO_PREFERENCE_KEY,
+  handOffVerdict,
   readComputerAudioPreference,
   recorderTransition,
   shouldCaptureComputerAudio,
@@ -109,6 +110,33 @@ describe("[COMP:app-web/dock-recorder] Recorder transition machine", () => {
     expect(recorderTransition(IDLE, { type: "release", heldMs: 100 }).effect).toBeNull();
     expect(recorderTransition({ kind: "finishing" }, { type: "press" }).effect).toBeNull();
     expect(recorderTransition({ kind: "finishing" }, { type: "finished" }).phase.kind).toBe("idle");
+  });
+});
+
+describe("[COMP:app-web/dock-recorder] Long-lane hand-off verdict", () => {
+  it("a queued 202 releases the spool and confirms with the flow's own line", () => {
+    expect(handOffVerdict({ outcome: "queued", message: "Recording uploaded." })).toEqual({
+      notice: { kind: "queued", text: "Recording uploaded." },
+      safeToDrop: true,
+    });
+  });
+
+  it("a closed cost-confirm is a deferral: retained + the informational kept notice", () => {
+    expect(handOffVerdict({ outcome: "cancelled" })).toEqual({
+      notice: { kind: "kept" },
+      safeToDrop: false,
+    });
+  });
+
+  it("a failed step is retained AND names the step — never the bare kept notice", () => {
+    const verdict = handOffVerdict({
+      outcome: "failed",
+      message: "The audio could not reach storage, so nothing was processed.",
+    });
+    expect(verdict.safeToDrop).toBe(false);
+    expect(verdict.notice.kind).toBe("handOffFailed");
+    expect(verdict.notice.kind !== "kept").toBe(true);
+    expect(verdict.notice).toMatchObject({ text: expect.stringContaining("could not reach storage") });
   });
 });
 

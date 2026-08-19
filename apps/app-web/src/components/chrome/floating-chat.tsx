@@ -2509,12 +2509,19 @@ export function FloatingChat({
       ),
     prepareLivePage: liveRecording.prepare,
     streamLiveWindow: liveRecording.streamWindow,
-    onMeetingCapture: (file: File, live?: { pageId: string; sessionId?: string }) =>
-      rec.run(file, {
+    onMeetingCapture: async (file: File, live?: { pageId: string; sessionId?: string }) => {
+      const outcome = await rec.run(file, {
         kind: "meeting",
         ...(live ? { existingPageId: live.pageId } : {}),
         ...(live?.sessionId ? { liveSessionId: live.sessionId } : {}),
-      }),
+      });
+      // The recorder's own notice reports this outcome (queued / kept /
+      // step-aware failure) on BOTH render sites, collapsed included — the
+      // upload hook's inline line below the composer only ever shows
+      // expanded, so it would either be invisible or say it twice.
+      rec.dismiss();
+      return outcome;
+    },
   });
 
   // Feed replaces this dock's CHAT chrome, not its universal recorder. Publish

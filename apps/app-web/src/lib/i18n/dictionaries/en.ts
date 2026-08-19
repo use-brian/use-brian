@@ -1365,6 +1365,16 @@ export const en = {
       link: "Link",
       linkPlaceholder: "https://…",
     },
+    // Find on page (⌘F / Ctrl+F): the in-document search bar.
+    find: {
+      label: "Find on page",
+      placeholder: "Find on page",
+      count: "{index} of {total}",
+      noResults: "No results",
+      previous: "Previous match",
+      next: "Next match",
+      close: "Close find",
+    },
     // Phase 3 — View toolbar (above-table controls for the active view).
     viewToolbar: {
       // Search input — fuzzy substring filter over visible rows.
@@ -1630,6 +1640,23 @@ export const en = {
       disconnectWhatsappTitle: "Disconnect WhatsApp?",
       disconnectWhatsappConfirm:
         "Your assistant will stop replying to this WhatsApp number, and groups you added the bot to will stop being read.",
+      // Slack linking - the fix for a Slack profile email that is not the
+      // email of the account you actually use. See
+      // docs/architecture/channels/channel-user-identity.md -> "Slack".
+      slack: "Slack",
+      slackConnected: "Connected",
+      slackConnectedAs: "Connected as {id}",
+      slackDesc:
+        "Brian matches you in Slack by your Slack profile email. If that is not the email you sign in with here, connect it so Brian treats your Slack messages as this account.",
+      connectSlackHint:
+        "Send this code as a direct message to the Brian app in your Slack workspace (or @mention Brian with the code in a channel). If this Slack account is linked elsewhere, connecting moves it here.",
+      slackLinked: "Slack connected.",
+      slackUnlinked: "Slack disconnected.",
+      slackUnavailable:
+        "Slack linking isn't available right now. Please try again later.",
+      disconnectSlackTitle: "Disconnect Slack?",
+      disconnectSlackConfirm:
+        "Brian will go back to matching this Slack account by its profile email.",
       connectError: "Something went wrong. Please try again.",
     },
     privacy: {
@@ -8266,7 +8293,7 @@ export const en = {
     estimateFailed:
       "The audio uploaded, but its length could not be read. Save it again from the recorder to retry.",
     processFailed:
-      "The audio is uploaded, but it could not be queued for processing. Try again.",
+      "The audio is uploaded, but it could not be queued for processing. Save it again from the recorder to retry.",
     liveTranscriptTitle: "Live transcript",
     liveTranscriptProvisional: "provisional until processing completes",
     liveTranscriptLoading: "Loading the live transcript...",

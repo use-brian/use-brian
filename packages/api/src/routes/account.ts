@@ -81,6 +81,8 @@ const upload = multer({
  *   DELETE /api/account/linked-accounts/:id — unlink a provider account
  *   POST   /api/account/telegram/link-code   — mint a 6-char Telegram link code
  *                                              (first-owned assistant, Settings flow)
+ *   POST   /api/account/slack/link-code      — mint a 6-char Slack link code (same rule;
+ *                                              pasted to the Brian app in Slack)
  *   DELETE /api/account/memories             — wipe memories + user_souls for the calling user
  *   DELETE /api/account                      — tear down the user's entire footprint
  *   PATCH  /api/account/profile              — update display name
@@ -183,6 +185,53 @@ export function accountRoutes(options: AccountRouteOptions = {}): Router {
       res.json({ code: code.code, expiresAt: code.expiresAt, botUsername })
     } catch (err) {
       console.error('[account] telegram link-code failed:', err)
+      res.status(500).json({ error: 'Failed to generate linking code' })
+    }
+  })
+
+  // ── POST /api/account/slack/link-code ───────────────────────────
+  // Settings → Account → Connected accounts "Connect" flow for Slack. Same
+  // shape as the Telegram route above: mint a 6-char code bound to the
+  // user's FIRST-OWNED assistant. The user sends the code to the Brian app
+  // in Slack (a DM, or an @mention in a channel — the adapter strips the
+  // mention) and the Slack message handler redeems it (slack.ts →
+  // "5a-link"), upserting the `slack` identity; from then on
+  // `resolveSlackSender` routes that Slack id to THIS account before the
+  // profile-email path. This is the remedy for a Slack profile email that
+  // is not the email of the account the person actually uses (the
+  // 2026-08-18 non-member incident). Open in both editions: the Slack
+  // route and the claim path are OSS. See
+  // docs/architecture/channels/channel-user-identity.md → "Slack".
+
+  router.post('/slack/link-code', async (req, res) => {
+    const userId = req.userId
+    if (!userId) {
+      res.status(401).json({ error: 'Missing or invalid Authorization header' })
+      return
+    }
+    if (!options.linkCodeStore) {
+      res.status(503).json({ error: 'Slack linking not configured' })
+      return
+    }
+
+    try {
+      const assistantRow = await query<{ id: string }>(
+        `SELECT id FROM assistants
+         WHERE owner_user_id = $1
+         ORDER BY created_at ASC
+         LIMIT 1`,
+        [userId],
+      )
+      const assistantId = assistantRow.rows[0]?.id
+      if (!assistantId) {
+        res.status(409).json({ error: 'no_assistant' })
+        return
+      }
+
+      const code = await options.linkCodeStore.create({ userId, assistantId })
+      res.json({ code: code.code, expiresAt: code.expiresAt })
+    } catch (err) {
+      console.error('[account] slack link-code failed:', err)
       res.status(500).json({ error: 'Failed to generate linking code' })
     }
   })

@@ -223,24 +223,65 @@ export function recorderTransition(
 // ── The hook ─────────────────────────────────────────────────────────────
 
 /**
- * The transient notice under the recorder UI. Two are informational
- * ("micHint" = first-use press-again; "kept" = the capture is safe on this
- * device and will surface as recovery — shown when a long-lane hand-off
- * did not complete, whether an offline/failed upload or a cancelled
- * cost-confirm), the rest are errors. "kept" exists because the generic
- * failure copy reads as "your recording might be lost", which is exactly
- * the wrong thing to tell someone who just finished a 2-hour sales call
- * on hotel wifi.
+ * The transient notice under the recorder UI. Informational kinds:
+ * "micHint" = first-use press-again; "kept" = the capture is safe on this
+ * device and will surface as recovery, shown when the user closed the
+ * cost-confirm (a deferral, not a failure); "autoStopped" / "pauseStopped"
+ * = the auto-stop guards; "queued" = the long-lane hand-off completed and
+ * the recording is transcribing in the background. The rest are errors —
+ * including "handOffFailed", the long lane's upload / estimate / queue
+ * step breaking. Both hand-off kinds carry `text`: the step-aware,
+ * already-localized line `useRecordingUpload.run` composed, so the notice
+ * says WHICH boundary broke (or that the 202 landed) on every dock surface,
+ * collapsed included. Before this a failed hand-off and a cancelled confirm
+ * both showed "kept", and the reason rendered only in the expanded
+ * composer — a slot a collapsed meeting capture never shows. "kept" stays
+ * deliberately not error-styled because it is not one; a failure IS, but
+ * its copy still names the on-device copy so it never reads as loss.
  */
-type RecorderNotice =
-  | "micHint"
-  | "kept"
-  | "autoStopped"
-  | "pauseStopped"
-  | "denied"
-  | "systemAudioFailed"
-  | "failed"
-  | "voiceFailed";
+export type RecorderNotice =
+  | {
+      kind:
+        | "micHint"
+        | "kept"
+        | "autoStopped"
+        | "pauseStopped"
+        | "denied"
+        | "systemAudioFailed"
+        | "failed"
+        | "voiceFailed";
+    }
+  | { kind: "queued"; text: string }
+  | { kind: "handOffFailed"; text: string };
+
+/**
+ * What the long-lane hand-off (`useRecordingUpload.run`) resolved to. The
+ * three branches decide BOTH the notice and spool retention: only `queued`
+ * releases the spool copy (`handOffVerdict`).
+ */
+export type MeetingCaptureOutcome =
+  | { outcome: "queued"; message: string }
+  | { outcome: "cancelled" }
+  | { outcome: "failed"; message: string };
+
+/**
+ * Pure fork of a long-lane hand-off result into (notice, spool verdict).
+ * Exported for the node tests — the imperative shell around it (upload,
+ * confirm dialog, spool) is what app-web's vitest cannot run.
+ */
+export function handOffVerdict(result: MeetingCaptureOutcome): {
+  notice: RecorderNotice;
+  safeToDrop: boolean;
+} {
+  switch (result.outcome) {
+    case "queued":
+      return { notice: { kind: "queued", text: result.message }, safeToDrop: true };
+    case "cancelled":
+      return { notice: { kind: "kept" }, safeToDrop: false };
+    case "failed":
+      return { notice: { kind: "handOffFailed", text: result.message }, safeToDrop: false };
+  }
+}
 
 export type DockRecorderApi = {
   phase: RecorderPhase;
@@ -287,11 +328,16 @@ export function useDockRecorder(opts: {
   sendVoiceClip: (fileId: string) => Promise<boolean>;
   /** Session id accessor for the voice-clip cache upload (best-effort). */
   getSessionId?: () => string | undefined;
-  /** Long-lane hand-off: the recording ingestion flow (`useRecordingUpload.run`). */
+  /**
+   * Long-lane hand-off: the recording ingestion flow (`useRecordingUpload.run`).
+   * The outcome forks retention + the notice (`handOffVerdict`); a caller
+   * that also reports inline should dismiss its own line, since the
+   * recorder's notice now carries the same text on every dock surface.
+   */
   onMeetingCapture: (
     file: File,
     live?: { pageId: string; sessionId?: string },
-  ) => Promise<unknown>;
+  ) => Promise<MeetingCaptureOutcome>;
   /** Pre-flight confirm + destination creation; null means the user cancelled. */
   prepareLivePage?: () => Promise<LiveRecordingPage | null>;
   /** Sequential provisional-window upload. */
@@ -419,21 +465,23 @@ export function useDockRecorder(opts: {
         const file = new File([blob], name, { type: mime });
         const fileId = await uploadVoiceClip(file, getSessionId?.());
         const sent = fileId ? await sendVoiceClip(fileId) : false;
-        if (!sent) setNotice("voiceFailed");
+        if (!sent) setNotice({ kind: "voiceFailed" });
         return sent;
       }
       const patched = await patchRecordingBlob(blob, durationMs);
       const file = new File([patched], name, { type: mime });
-      // `useRecordingUpload.run` resolves the queued recording, or null on
-      // BOTH cancel and failure — either way the audio must survive, and the
-      // "kept" notice tells the user so (the generic failure copy would read
-      // as "your recording might be lost").
-      const queued = await onMeetingCapture(
-        file,
-        livePageId ? { pageId: livePageId, ...(liveSessionId ? { sessionId: liveSessionId } : {}) } : undefined,
+      // `useRecordingUpload.run` names its branch: queued (202 landed),
+      // cancelled (the user closed the cost confirm — a deferral, "kept"),
+      // or failed (upload / estimate / queue broke — the notice carries the
+      // step-aware reason). Either non-queued branch retains the audio.
+      const { notice: verdict, safeToDrop } = handOffVerdict(
+        await onMeetingCapture(
+          file,
+          livePageId ? { pageId: livePageId, ...(liveSessionId ? { sessionId: liveSessionId } : {}) } : undefined,
+        ),
       );
-      if (!queued) setNotice("kept");
-      return Boolean(queued);
+      setNotice(verdict);
+      return safeToDrop;
     },
     [captureNamePrefix, sendVoiceClip, getSessionId, onMeetingCapture],
   );
@@ -479,7 +527,7 @@ export function useDockRecorder(opts: {
                   const kind = phaseRef.current.kind;
                   if (kind === "latched") dispatchRef.current({ type: "stop" });
                   else if (kind === "holding" || kind === "arming") {
-                    setNotice("failed");
+                    setNotice({ kind: "failed" });
                     dispatchRef.current({ type: "discard" });
                   }
                 },
@@ -494,13 +542,14 @@ export function useDockRecorder(opts: {
               engineRef.current = armedEngine;
               dispatchRef.current({ type: "armed" });
             } catch (err) {
-              setNotice(
-                err instanceof SystemAudioCaptureError
-                  ? "systemAudioFailed"
-                  : err instanceof DOMException && err.name === "NotAllowedError"
-                    ? "denied"
-                    : "failed",
-              );
+              setNotice({
+                kind:
+                  err instanceof SystemAudioCaptureError
+                    ? "systemAudioFailed"
+                    : err instanceof DOMException && err.name === "NotAllowedError"
+                      ? "denied"
+                      : "failed",
+              });
               dispatchRef.current({ type: "arm-failed" });
             }
           })();
@@ -530,7 +579,7 @@ export function useDockRecorder(opts: {
           return;
         case "cancel-with-hint":
           armAttemptRef.current += 1;
-          setNotice("micHint");
+          setNotice({ kind: "micHint" });
           engine?.cancel();
           engineRef.current = null;
           return;
@@ -566,7 +615,7 @@ export function useDockRecorder(opts: {
                 safeToDrop = await handOff(capture.blob, capture.mime, capture.durationMs);
               }
             } catch {
-              setNotice("failed");
+              setNotice({ kind: "failed" });
               engineRef.current = null;
             } finally {
               // The spool is the ONLY copy of a live capture — drop it only
@@ -584,7 +633,7 @@ export function useDockRecorder(opts: {
                   // A rescued clip upgrades the failure story: "could not
                   // send" becomes "kept on this device".
                   void rescueCapture(capture).then((ok) => {
-                    if (ok) setNotice("kept");
+                    if (ok) setNotice({ kind: "kept" });
                   });
                 }
                 setTimeout(() => void refreshRecovery(), LIVE_SESSION_GRACE_MS + 5_000);
@@ -645,7 +694,7 @@ export function useDockRecorder(opts: {
         pausedSinceRef.current ??= Date.now();
         if (Date.now() - pausedSinceRef.current >= PAUSE_AUTO_STOP_MS) {
           skipHandOffRef.current = true;
-          setNotice("pauseStopped");
+          setNotice({ kind: "pauseStopped" });
           dispatchRef.current({ type: "stop" });
         }
         return;
@@ -654,7 +703,7 @@ export function useDockRecorder(opts: {
       if (shouldAutoStop(engine.elapsedMs())) {
         skipHandOffRef.current = true;
         rollOverRef.current = true;
-        setNotice("autoStopped");
+        setNotice({ kind: "autoStopped" });
         dispatchRef.current({ type: "stop" });
       }
     }, 30_000);
@@ -850,7 +899,7 @@ export function useDockRecorder(opts: {
         // failed upload keeps the session so Save can be retried.
         if (safeToDrop) await spool().deleteSession(sessionId);
       } catch {
-        setNotice("failed");
+        setNotice({ kind: "failed" });
       }
       void refreshRecovery();
     },

@@ -1214,6 +1214,15 @@ export const ja: Dictionary = {
       link: "リンク",
       linkPlaceholder: "https://…",
     },
+    find: {
+      label: "ページ内検索",
+      placeholder: "ページ内を検索",
+      count: "{total} 件中 {index} 件目",
+      noResults: "見つかりません",
+      previous: "前の一致",
+      next: "次の一致",
+      close: "検索を閉じる",
+    },
     viewToolbar: {
       searchPlaceholder: "検索…",
       searchAria: "行を検索",
@@ -1454,6 +1463,20 @@ export const ja: Dictionary = {
       disconnectWhatsappTitle: "WhatsApp の連携を解除しますか？",
       disconnectWhatsappConfirm:
         "アシスタントはこの WhatsApp 番号への返信を停止し、ボットを追加したグループの読み取りも停止します。",
+      slack: "Slack",
+      slackConnected: "連携済み",
+      slackConnectedAs: "{id} として連携済み",
+      slackDesc:
+        "Brian は Slack プロフィールのメールアドレスであなたを識別します。ここでサインインしているメールと異なる場合は連携すると、Slack のメッセージがこのアカウントとして扱われます。",
+      connectSlackHint:
+        "Slack ワークスペースで Brian アプリにこのコードをダイレクトメッセージで送信してください（チャンネルで Brian をメンションしてコードを送っても構いません）。この Slack アカウントが別のアカウントに連携されている場合は、こちらに移動します。",
+      slackLinked: "Slack を連携しました。",
+      slackUnlinked: "Slack の連携を解除しました。",
+      slackUnavailable:
+        "現在 Slack の連携はご利用いただけません。しばらくしてからお試しください。",
+      disconnectSlackTitle: "Slack の連携を解除しますか？",
+      disconnectSlackConfirm:
+        "Brian はこの Slack アカウントをプロフィールのメールアドレスで識別する動作に戻ります。",
       connectError: "問題が発生しました。もう一度お試しください。",
     },
     privacy: {
@@ -8048,7 +8071,7 @@ export const ja: Dictionary = {
     estimateFailed:
       "音声はアップロードされましたが、長さを読み取れませんでした。レコーダーから再度保存してやり直してください。",
     processFailed:
-      "音声はアップロード済みですが、処理のキューに追加できませんでした。もう一度お試しください。",
+      "音声はアップロード済みですが、処理のキューに追加できませんでした。レコーダーから再度保存してやり直してください。",
     liveTranscriptTitle: "ライブ文字起こし",
     liveTranscriptProvisional: "処理完了までは暫定版です",
     liveTranscriptLoading: "ライブ文字起こしを読み込んでいます...",

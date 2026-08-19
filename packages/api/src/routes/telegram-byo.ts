@@ -32,7 +32,7 @@ import type { IncomingMessage, TelegramAdapterConfig, RequireMentionConfig, Chat
 import { findAssistantById, findUserById } from '../db/users.js'
 import { getWorkspaceRoleSystem } from '../db/workspace-store.js'
 import { query } from '../db/client.js'
-import { resolveChannelUser, fetchTelegramProfile, type ChannelUserStore } from '../db/channel-user-store.js'
+import { channelLinkBindsHere, resolveChannelUser, fetchTelegramProfile, type ChannelUserStore } from '../db/channel-user-store.js'
 import {
   resolveAnyRoutingForChannel,
   resolveTelegramRoutingForSurface,
@@ -50,6 +50,7 @@ import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
 import { getToolDisplayName, humanizeToolName, describeToolInput, formatConfirmationInput } from '@use-brian/shared'
 import { processChannelMessage } from './channel-pipeline.js'
+import { channelUserErrorText } from './_channel-error-text.js'
 import { cacheInboundImage } from './channel-file-cache.js'
 import { billingPartyForAssistant } from '../billing-party.js'
 import { buildFileContentBlocks } from './route-helpers.js'
@@ -187,7 +188,10 @@ export function shouldUseUniversalTelegramIntake(
 
 /**
  * Decide whether a verified Telegram identity link should be honored as the
- * sender's real identity on THIS BYO bot.
+ * sender's real identity on THIS BYO bot. The rule is channel-agnostic and
+ * lives in `db/channel-user-store.ts` → `channelLinkBindsHere` (Slack uses
+ * the same one); this alias keeps the Telegram name that the tests and
+ * `channel-user-identity.md` → "BYO Telegram bots" refer to.
  *
  * `linked_identities (provider, provider_id)` is globally unique, so a TG user
  * linked to assistant A must not be served under their real identity on
@@ -209,24 +213,7 @@ export function shouldUseUniversalTelegramIntake(
  * read: a stranger linked to another tenant who is not a member of this
  * workspace still stays a shadow.
  */
-export async function telegramLinkBindsHere(
-  linked: { userId: string; assistantId: string | null } | null | undefined,
-  assistantId: string,
-  ownerId: string,
-  workspaceId: string | null,
-  roleLookup: (
-    userId: string,
-    workspaceId: string,
-  ) => Promise<'owner' | 'admin' | 'member' | null> = getWorkspaceRoleSystem,
-): Promise<boolean> {
-  if (!linked?.userId) return false
-  if (linked.assistantId === assistantId || linked.userId === ownerId) return true
-  if (workspaceId) {
-    const role = await roleLookup(linked.userId, workspaceId)
-    if (role !== null) return true
-  }
-  return false
-}
+export const telegramLinkBindsHere = channelLinkBindsHere
 
 export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
   const router = Router()
@@ -1736,17 +1723,13 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
           await adapter.deleteMessage?.(incoming.channelId, statusMessageId).catch(() => {})
           statusMessageId = null
         }
-        // Custom endpoints are deliberately text/tool-only until a vision
-        // capability probe exists. The pipeline's rejection is server-authored
-        // and actionable, so preserve it; masking it as a generic outage made
-        // the 2026-08-12 SDR screenshot album look like an unexplained crash.
-        // Arbitrary provider/runtime wording remains hidden.
-        const isCustomModelImageRejection = err.message ===
-          'Custom model endpoints currently support text and tools only. Remove the inline image or use the web app to choose a built-in model.'
+        // Server-authored messages (usage limit, custom-model image refusal)
+        // surface verbatim; arbitrary provider/runtime wording stays hidden.
+        // The whitelist lives in _channel-error-text.ts — shared, because a
+        // route-local copy here left every other channel masking the image
+        // refusal until the 2026-08-19 Slack repeat.
         await adapter.sendMessage(incoming.channelId, {
-          text: err.message.includes('usage limit') || isCustomModelImageRejection
-            ? err.message
-            : 'Something went wrong. Please try again.',
+          text: channelUserErrorText(err),
         })
       },
     },

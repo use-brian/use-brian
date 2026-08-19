@@ -55,9 +55,41 @@ type SlackEvent = {
       thread_ts?: string
       bot_id?: string
       files?: Array<{ url_private: string; mimetype: string; name: string }>
+      // Set by Slack ONLY when a human edited the message. Absent on the
+      // other message_changed emitters (link unfurl attaching a preview
+      // card, thread metadata, pins) - see parseIncoming.
+      edited?: { user?: string; ts?: string }
+    }
+    // Present on message_changed subtype - the message as it was before
+    // this change. Text-identical to `message` when the change was not a
+    // text edit (unfurl, reply_count, etc.).
+    previous_message?: {
+      text?: string
+      user?: string
+      ts?: string
     }
   }
   challenge?: string
+}
+
+/**
+ * True only when a `message_changed` event represents a human editing the
+ * message text. Slack stamps `message.edited` on user edits; the other
+ * `message_changed` emitters (link-unfurl attachments, thread metadata,
+ * pins) leave it absent. An unfurl arriving AFTER a real edit still carries
+ * the earlier `edited` stamp, so the text is also compared against
+ * `previous_message` - unchanged text is not an edit whatever the stamp
+ * says. When Slack omits `previous_message` the stamp alone decides.
+ */
+export function isHumanTextEdit(
+  msg: { text?: string; edited?: unknown },
+  previous?: { text?: string },
+): boolean {
+  if (!msg.edited) return false
+  if (previous && typeof previous.text === 'string') {
+    return (msg.text ?? '') !== previous.text
+  }
+  return true
 }
 
 // ── Adapter ────────────────────────────────────────────────────
@@ -141,10 +173,22 @@ export function createSlackAdapter(options: SlackAdapterOptions): ChannelAdapter
       const event = (webhookPayload as SlackEvent).event
       if (!event || event.type !== 'message') return null
 
-      // Handle message_changed (user edits) — unwrap the nested message
+      // Handle message_changed - unwrap the nested message, but only when
+      // a HUMAN actually edited the text. Slack emits `message_changed` for
+      // several non-edit reasons too: a link unfurl attaching its preview
+      // card (the common one - every message carrying a URL gets one a
+      // second or two after it is posted), thread reply-count metadata,
+      // pins. Those carry the same `message.text` as `previous_message`
+      // and no `message.edited` stamp. Treating them as edits re-processed
+      // the message as a fresh turn (duplicate reply) and - because the
+      // route aborts the running loop on an edit - killed whatever
+      // unrelated turn was in flight in the channel (2026-08-18: a "yes"
+      // confirmation died with "Something went wrong" because the user's
+      // NEXT message contained an app link that unfurled).
       if (event.subtype === 'message_changed' && event.message) {
         const msg = event.message
         if (!msg.user || msg.bot_id) return null
+        if (!isHumanTextEdit(msg, event.previous_message)) return null
 
         const isDM = isDirectMessage(event.channel ?? '')
         const text = msg.text ?? ''

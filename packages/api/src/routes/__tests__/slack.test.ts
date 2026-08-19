@@ -71,7 +71,7 @@ vi.mock('../../billing/credit-gate.js', () => ({
   creditGateStatus: vi.fn(() => 'ok'),
 }))
 
-import { slackRoutes } from '../slack.js'
+import { slackRoutes, shouldAbortForEdit, resolveSlackSender } from '../slack.js'
 import { verifySlackSignature } from '@use-brian/channels'
 import { getChannelForWebhook, resolveAssistantForSurface, resolveRoutingForSurface } from '../../db/channels-store.js'
 
@@ -394,5 +394,114 @@ describe('[COMP:api/slack-route] Slack webhook route', () => {
       await flushMicrotasks()
       expect(ingest).not.toHaveBeenCalled()
     })
+  })
+})
+
+// ── Edit-to-retry targets the message being answered, never the channel ──
+//
+// `activeAbortControllers` is keyed by channel, so an `isEdit` inbound used
+// to abort WHATEVER turn was running there. On 2026-08-18 a link-unfurl
+// `message_changed` on the user's next message killed an in-flight "yes"
+// confirmation ("Something went wrong. Please try again."). The adapter now
+// drops non-edit `message_changed` events, and the route only aborts when
+// the edited message IS the one the loop is answering.
+describe('[COMP:api/slack-route] shouldAbortForEdit', () => {
+  const running = (messageId?: string) => ({ controller: new AbortController(), messageId })
+
+  it('aborts when the edited message is the one being answered', () => {
+    expect(shouldAbortForEdit(running('1.100'), '1.100')).toBe(true)
+  })
+
+  it('does NOT abort an unrelated running turn', () => {
+    expect(shouldAbortForEdit(running('1.100'), '1.200')).toBe(false)
+  })
+
+  it('never aborts on an unknown id on either side', () => {
+    expect(shouldAbortForEdit(running(undefined), '1.100')).toBe(false)
+    expect(shouldAbortForEdit(running('1.100'), undefined)).toBe(false)
+    expect(shouldAbortForEdit(running(undefined), undefined)).toBe(false)
+  })
+})
+
+// ── Link-first sender resolution ────────────────────────────────
+//
+// The 2026-08-18 Ken incident: a Slack profile email that is NOT the email
+// of the account the person actually uses routed every Slack turn to a
+// non-member of the workspace, so workflows/tasks read as empty. The
+// designed remedy (link code -> linked_identities) was written but never
+// READ on the inbound path. These pin the order: link first (scoped by the
+// bindsHere rule), then the profile-email path, then the owner fallback.
+describe('[COMP:api/slack-route] resolveSlackSender', () => {
+  const base = {
+    slackUserId: 'U_KEN',
+    assistantId: 'asst_1',
+    ownerId: 'owner_1',
+    workspaceId: 'ws_1',
+    fetchProfile: vi.fn(async () => ({ email: 'ken@company.example', displayName: 'Ken' })),
+  }
+  const emailPathUser = { user: { id: 'u_company_email' } as never, isIdentified: true }
+
+  it('honours a link that binds here and skips the email path', async () => {
+    const resolveByEmail = vi.fn(async () => emailPathUser)
+    const ensureMember = vi.fn(async () => undefined)
+    const out = await resolveSlackSender({
+      ...base,
+      linkedAccountStore: { findByProvider: vi.fn(async () => ({ userId: 'u_gmail', assistantId: null })) } as never,
+      channelUserStore: {} as never,
+      deps: {
+        linkBindsHere: vi.fn(async () => true),
+        findUser: vi.fn(async (id: string) => ({ id })),
+        ensureMember,
+        resolveByEmail: resolveByEmail as never,
+      },
+    })
+    expect(out).toEqual({ userId: 'u_gmail', isIdentified: true, viaLink: true })
+    expect(ensureMember).toHaveBeenCalledWith('asst_1', 'u_gmail')
+    expect(resolveByEmail).not.toHaveBeenCalled()
+  })
+
+  it('falls through to the email path when the link does not bind here', async () => {
+    const resolveByEmail = vi.fn(async () => emailPathUser)
+    const out = await resolveSlackSender({
+      ...base,
+      linkedAccountStore: { findByProvider: vi.fn(async () => ({ userId: 'u_other_tenant', assistantId: 'asst_other' })) } as never,
+      channelUserStore: {} as never,
+      deps: {
+        linkBindsHere: vi.fn(async () => false),
+        findUser: vi.fn(async (id: string) => ({ id })),
+        ensureMember: vi.fn(async () => undefined),
+        resolveByEmail: resolveByEmail as never,
+      },
+    })
+    expect(out).toEqual({ userId: 'u_company_email', isIdentified: true, viaLink: false })
+    expect(resolveByEmail).toHaveBeenCalledTimes(1)
+  })
+
+  it('uses the email path when no link exists', async () => {
+    const resolveByEmail = vi.fn(async () => emailPathUser)
+    const out = await resolveSlackSender({
+      ...base,
+      linkedAccountStore: { findByProvider: vi.fn(async () => null) } as never,
+      channelUserStore: {} as never,
+      deps: { resolveByEmail: resolveByEmail as never, ensureMember: vi.fn(async () => undefined) },
+    })
+    expect(out.userId).toBe('u_company_email')
+    expect(out.viaLink).toBe(false)
+  })
+
+  it('a failing link lookup degrades to the email path, never to a dropped turn', async () => {
+    const resolveByEmail = vi.fn(async () => emailPathUser)
+    const out = await resolveSlackSender({
+      ...base,
+      linkedAccountStore: { findByProvider: vi.fn(async () => { throw new Error('db down') }) } as never,
+      channelUserStore: {} as never,
+      deps: { resolveByEmail: resolveByEmail as never },
+    })
+    expect(out.userId).toBe('u_company_email')
+  })
+
+  it('falls back to the owner when neither store is wired (prior behaviour)', async () => {
+    const out = await resolveSlackSender({ ...base })
+    expect(out).toEqual({ userId: 'owner_1', isIdentified: true, viaLink: false })
   })
 })

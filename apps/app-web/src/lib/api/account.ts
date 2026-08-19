@@ -54,13 +54,15 @@ export async function removeAvatar(): Promise<boolean> {
   return res.ok;
 }
 
-// ── Connected accounts (Telegram linking) ─────────────────────
+// ── Connected accounts (Telegram / Slack / WhatsApp linking) ──
 // Settings → Account → Connected accounts. Wire contracts:
 // - `GET    /api/account/linked-accounts` lists linked provider identities.
 // - `DELETE /api/account/linked-accounts/:id` unlinks one.
 // - `POST   /api/account/telegram/link-code` mints a 6-char code bound to
 //   the user's first-owned assistant and returns the official bot's
 //   @username for the t.me deep link (null when unresolvable).
+// - `POST   /api/account/slack/link-code` mints the same code shape for
+//   Slack (no deep link; pasted to the Brian app in Slack).
 // See docs/architecture/platform/auth.md → "Linked accounts".
 
 export type LinkedAccount = {
@@ -106,6 +108,30 @@ export async function createTelegramLinkCode(): Promise<TelegramLinkCode | null>
     });
     if (!res.ok) return null;
     return (await res.json()) as TelegramLinkCode;
+  } catch {
+    return null;
+  }
+}
+
+export type SlackLinkCode = {
+  code: string;
+  expiresAt: string;
+};
+
+/**
+ * Mint a Slack link code (`POST /api/account/slack/link-code`). The user
+ * sends it to the Brian app in Slack; the Slack message handler redeems it and
+ * from then on that Slack id routes to this account BEFORE the profile-email
+ * match. Resolves `null` on failure (503 no store, 409 no assistant).
+ * See docs/architecture/channels/channel-user-identity.md -> "Slack".
+ */
+export async function createSlackLinkCode(): Promise<SlackLinkCode | null> {
+  try {
+    const res = await authFetch(`${API_URL}/api/account/slack/link-code`, {
+      method: "POST",
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as SlackLinkCode;
   } catch {
     return null;
   }

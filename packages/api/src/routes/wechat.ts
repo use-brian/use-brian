@@ -53,6 +53,7 @@ import { upsertWechatContextToken, getWechatContextToken } from '../db/wechat-co
 import type { ConnectorStore } from '../db/connector-store.js'
 import { getToolDisplayName, formatConfirmationInput } from '@use-brian/shared'
 import { processChannelMessage } from './channel-pipeline.js'
+import { channelUserErrorText } from './_channel-error-text.js'
 import { cacheInboundImageTag } from './channel-file-cache.js'
 import { billingPartyForAssistant } from '../billing-party.js'
 import type { ChatArchiveLiveMedia } from '../chat-archive/live-media.js'
@@ -641,9 +642,7 @@ export function wechatRoutes(options: WechatRouteOptions): Router {
         async sendError(err) {
           await cancelTyping()
           await adapter.sendMessage(peerId, {
-            text: err.message.includes('usage limit')
-              ? err.message
-              : 'Something went wrong. Please try again.',
+            text: channelUserErrorText(err),
           })
         },
         async onCleanup() {

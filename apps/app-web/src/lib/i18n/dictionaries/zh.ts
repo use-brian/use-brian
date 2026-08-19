@@ -1202,6 +1202,15 @@ export const zh: Dictionary = {
       link: "連結",
       linkPlaceholder: "https://…",
     },
+    find: {
+      label: "頁面內尋找",
+      placeholder: "在頁面中尋找",
+      count: "第 {index} 個，共 {total} 個",
+      noResults: "沒有結果",
+      previous: "上一個相符項目",
+      next: "下一個相符項目",
+      close: "關閉尋找",
+    },
     viewToolbar: {
       searchPlaceholder: "搜尋…",
       searchAria: "搜尋資料列",
@@ -1440,6 +1449,18 @@ export const zh: Dictionary = {
       disconnectWhatsappTitle: "要解除 WhatsApp 連結嗎？",
       disconnectWhatsappConfirm:
         "助理將停止回覆此 WhatsApp 號碼，你加入機器人的群組也會停止被讀取。",
+      slack: "Slack",
+      slackConnected: "已連結",
+      slackConnectedAs: "已連結為 {id}",
+      slackDesc:
+        "Brian 會以你的 Slack 個人檔案電郵來辨識你。如果那不是你在此登入的電郵，請連結，讓 Brian 把你的 Slack 訊息視為此帳號。",
+      connectSlackHint:
+        "在 Slack 工作區私訊 Brian 應用程式傳送此代碼（或在頻道 @提及 Brian 並附上代碼）。如果此 Slack 帳號已連結到其他帳號，連結後會移到這裡。",
+      slackLinked: "已連結 Slack。",
+      slackUnlinked: "已解除 Slack 連結。",
+      slackUnavailable: "目前無法使用 Slack 連結，請稍後再試。",
+      disconnectSlackTitle: "要解除 Slack 連結嗎？",
+      disconnectSlackConfirm: "Brian 會改回以個人檔案電郵來辨識此 Slack 帳號。",
       connectError: "發生問題，請再試一次。",
     },
     privacy: {
@@ -7986,7 +8007,7 @@ export const zh: Dictionary = {
     estimateFailed:
       "音频已上传,但无法读取时长。请从录音器再次保存重试。",
     processFailed:
-      "音频已上传,但无法加入处理队列。请重试。",
+      "音频已上传,但无法加入处理队列。请从录音器再次保存重试。",
     liveTranscriptTitle: "实时逐字稿",
     liveTranscriptProvisional: "处理完成前为临时版本",
     liveTranscriptLoading: "正在加载实时逐字稿...",

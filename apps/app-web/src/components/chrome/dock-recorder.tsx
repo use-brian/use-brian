@@ -321,34 +321,42 @@ export function DockRecorderStrip({ rec, className }: { rec: DockRecorderApi; cl
 
 /**
  * Transient notices: first-use mic hint, the "kept on this device"
- * reassurance (a long capture whose upload failed or whose cost-confirm
- * was cancelled — informational, NOT error-styled: the audio is safe and
- * will surface as recovery), and capture/send errors.
+ * reassurance (a long capture whose cost-confirm was closed — informational,
+ * NOT error-styled: the audio is safe and will surface as recovery), the
+ * "queued" confirmation, and capture/send/hand-off errors. The two hand-off
+ * kinds render the step-aware text the upload flow composed, so a failed
+ * upload says "could not reach storage" here — in the collapsed pill too,
+ * which is where a meeting capture usually ends — instead of a bare "kept"
+ * that reads as a deferral.
  */
 export function DockRecorderNotice({ rec, className }: { rec: DockRecorderApi; className?: string }) {
   const t = useT().recorder;
-  if (!rec.notice) return null;
+  const notice = rec.notice;
+  if (!notice) return null;
   const informational =
-    rec.notice === "micHint" ||
-    rec.notice === "kept" ||
-    rec.notice === "autoStopped" ||
-    rec.notice === "pauseStopped";
+    notice.kind === "micHint" ||
+    notice.kind === "kept" ||
+    notice.kind === "queued" ||
+    notice.kind === "autoStopped" ||
+    notice.kind === "pauseStopped";
   const text =
-    rec.notice === "micHint"
-      ? t.micHint
-      : rec.notice === "kept"
-        ? t.keptOnDevice
-        : rec.notice === "autoStopped"
-          ? t.autoStopped
-          : rec.notice === "pauseStopped"
-            ? t.pauseStopped
-            : rec.notice === "denied"
-              ? t.micDenied
-              : rec.notice === "systemAudioFailed"
-                ? t.systemAudioFailed
-                : rec.notice === "voiceFailed"
-                  ? t.voiceFailed
-                  : t.captureFailed;
+    notice.kind === "queued" || notice.kind === "handOffFailed"
+      ? notice.text
+      : notice.kind === "micHint"
+        ? t.micHint
+        : notice.kind === "kept"
+          ? t.keptOnDevice
+          : notice.kind === "autoStopped"
+            ? t.autoStopped
+            : notice.kind === "pauseStopped"
+              ? t.pauseStopped
+              : notice.kind === "denied"
+                ? t.micDenied
+                : notice.kind === "systemAudioFailed"
+                  ? t.systemAudioFailed
+                  : notice.kind === "voiceFailed"
+                    ? t.voiceFailed
+                    : t.captureFailed;
   return (
     <div
       role="status"

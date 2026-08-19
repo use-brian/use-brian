@@ -76,6 +76,8 @@ import {
 import { browserDocExtensions } from "./doc-schema";
 import { useRecordingPlayer } from "@/lib/recordings/recording-player-context";
 import { FloatingToolbar } from "./floating-toolbar";
+import { DocFindBar } from "./find-bar";
+import { docFindExtension } from "./find-in-page";
 import { DocDragHandle } from "./drag-handle";
 import { findBlockPos, ensureBlockId } from "./block-actions";
 import { blockIdFromHash } from "@/lib/doc-page-url";
@@ -703,6 +705,9 @@ function CollabEditorInner({
         }),
         ...editingExtensions,
         commentExtension,
+        // ⌘F / Ctrl+F highlights — view-only decorations fed by a meta-only
+        // transaction, so a search never enters the document (find-in-page.ts).
+        docFindExtension(),
         Collaboration.configure({ document: doc, field: FRAGMENT_FIELD }),
         CollaborationCursor.configure({
           provider,
@@ -1234,6 +1239,10 @@ function CollabEditorInner({
           onComment={canComment ? onComment : undefined}
         />
       ) : null}
+      {/* Find on page (⌘F / Ctrl+F). Not gated on `canEdit` — searching is a
+          read, so a viewer without edit rights gets it too. Renders nothing
+          until the chord fires. */}
+      <DocFindBar editor={editor} />
       {/* Top-level block reorder (drag) + the block-action menu (click).
           PM-transaction moves sync through Yjs — see drag-handle.tsx.
           Read-only viewers don't get the handle. */}

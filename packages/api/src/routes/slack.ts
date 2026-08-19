@@ -31,7 +31,7 @@ import type { IncomingMessage, SlackAdapterConfig } from '@use-brian/channels'
 import { findAssistantById, findUserById } from '../db/users.js'
 import { query } from '../db/client.js'
 import { withChatLock } from '../db/chat-lock.js'
-import { resolveChannelUser, fetchSlackProfile, type ChannelUserStore } from '../db/channel-user-store.js'
+import { resolveChannelUser, fetchSlackProfile, ensureAssistantMember, channelLinkBindsHere, type ChannelUserStore } from '../db/channel-user-store.js'
 import type { LinkCodeStore } from '../db/link-codes.js'
 import type { LinkedAccountStore } from '../db/linked-accounts.js'
 import { mergeShadowUser } from '../db/linked-accounts.js'
@@ -44,6 +44,7 @@ import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import { getToolDisplayName, humanizeToolName, describeToolInput, formatConfirmationInput } from '@use-brian/shared'
 import { processChannelMessage } from './channel-pipeline.js'
+import { channelUserErrorText } from './_channel-error-text.js'
 import { billingPartyForAssistant } from '../billing-party.js'
 import { tryResolveSchedulerConfirmation } from '../scheduling/confirmation-registry.js'
 import type { DeferredConfirmationStore } from '../db/deferred-confirmation-store.js'
@@ -208,12 +209,122 @@ const DECISION_MAP: Record<string, ConfirmationDecision> = {
   never: 'always_deny', 'always deny': 'always_deny',
 }
 
+/** The in-flight query loop for one Slack channel: its abort handle and the
+ *  `ts` of the inbound message it is answering (see `activeAbortControllers`). */
+export type ActiveSlackTurn = { controller: AbortController; messageId?: string }
+
+/**
+ * Edit-to-retry only cancels the running loop when the edited message IS
+ * the one that loop is answering. Both ids must be known for that claim
+ * to hold - an unknown id on either side is "some other message", never
+ * "probably the same one", because the cost of a wrong abort is a dead
+ * turn for an unrelated request.
+ */
+export function shouldAbortForEdit(
+  active: ActiveSlackTurn,
+  editedMessageId: string | undefined,
+): boolean {
+  return !!active.messageId && !!editedMessageId && active.messageId === editedMessageId
+}
+
+export type SlackSenderResolution = {
+  userId: string
+  isIdentified: boolean
+  /** true when a link-code binding decided the identity (email path skipped). */
+  viaLink: boolean
+}
+
+/**
+ * Resolve the Slack sender to a platform user — LINK FIRST, then email.
+ *
+ * `linked_identities (provider='slack')` is written when a user pastes a
+ * link code (step 5a-link below) — an OAuth-authenticated web session
+ * asserting "this Slack `U…` is me", the strongest proof on the healing
+ * ladder. Until 2026-08-19 the inbound path never read it: it went straight
+ * to `resolveChannelUser`, which matches the Slack PROFILE email. That is
+ * wrong whenever the profile email is not the email of the account the
+ * person actually uses (a company Slack address vs a Gmail sign-in): the
+ * sender is routed as a different real user who is not a member of the
+ * workspace, every workspace-scoped read comes back empty under RLS, and
+ * the assistant reports "no workflows / not found" as fact. Ken's Slack
+ * on 2026-08-18 ran that way for weeks. Telegram BYO consulted the link
+ * first all along (`telegram-byo.ts` Step 1); this mirrors it through the
+ * shared `channelLinkBindsHere` rule — the link is honoured only when it routes
+ * to this assistant, or the linked user is the billing-party owner, or the
+ * linked user is a member of this assistant's workspace. Membership is the
+ * same gate RLS applies downstream, so honouring the link cannot widen
+ * what the sender can read.
+ *
+ * Any failure falls back to the owner (prior behaviour) and logs; the
+ * turn still runs.
+ * See docs/architecture/channels/channel-user-identity.md → "Slack".
+ */
+export async function resolveSlackSender(params: {
+  slackUserId: string
+  assistantId: string
+  ownerId: string
+  workspaceId: string | null
+  linkedAccountStore?: Pick<LinkedAccountStore, 'findByProvider'>
+  channelUserStore?: ChannelUserStore
+  fetchProfile: () => Promise<{ email: string | null; displayName: string | null }>
+  /** Test seams — default to the real lookups. */
+  deps?: {
+    linkBindsHere?: typeof channelLinkBindsHere
+    findUser?: (id: string) => Promise<{ id: string } | null>
+    ensureMember?: (assistantId: string, userId: string) => Promise<void>
+    resolveByEmail?: typeof resolveChannelUser
+  }
+}): Promise<SlackSenderResolution> {
+  const { slackUserId, assistantId, ownerId, workspaceId } = params
+  const linkBindsHere = params.deps?.linkBindsHere ?? channelLinkBindsHere
+  const findUser = params.deps?.findUser ?? findUserById
+  const ensureMember = params.deps?.ensureMember ?? ensureAssistantMember
+  const resolveByEmail = params.deps?.resolveByEmail ?? resolveChannelUser
+
+  // Step 1: an explicit link wins over the provider-revealed email.
+  if (params.linkedAccountStore) {
+    try {
+      const linked = await params.linkedAccountStore.findByProvider('slack', slackUserId)
+      if (linked?.userId && await linkBindsHere(linked, assistantId, ownerId, workspaceId)) {
+        const found = await findUser(linked.userId)
+        if (found) {
+          await ensureMember(assistantId, found.id)
+          return { userId: found.id, isIdentified: true, viaLink: true }
+        }
+      }
+    } catch (err) {
+      console.error('[slack] linked-identity lookup failed, falling back to email resolution:', err)
+    }
+  }
+
+  // Step 2: provider email → existing user, else shadow (unchanged path).
+  if (params.channelUserStore) {
+    try {
+      const resolved = await resolveByEmail(
+        params.channelUserStore,
+        'slack',
+        slackUserId,
+        assistantId,
+        params.fetchProfile,
+      )
+      return { userId: resolved.user.id, isIdentified: resolved.isIdentified, viaLink: false }
+    } catch (err) {
+      console.error('[slack] channel user resolution failed, falling back to owner:', err)
+    }
+  }
+
+  return { userId: ownerId, isIdentified: true, viaLink: false }
+}
+
 export function slackRoutes(options: SlackRouteOptions): Router {
   const router = Router()
 
   // Active abort controllers — keyed by channelId, so "stop" messages
-  // can cancel the in-flight query loop.
-  const activeAbortControllers = new Map<string, AbortController>()
+  // can cancel the in-flight query loop. `messageId` is the Slack `ts` of
+  // the message that turn is answering, so an edit-to-retry can tell
+  // "the user edited THE message being answered" from "the user edited
+  // some other message while an unrelated turn is running".
+  const activeAbortControllers = new Map<string, ActiveSlackTurn>()
 
   // Pending Slack confirmations — keyed by channelId
   type SlackPendingConf = { resolver: ConfirmationResolver; toolCallId: string }
@@ -332,6 +443,7 @@ export function slackRoutes(options: SlackRouteOptions): Router {
         botToken: slackCreds.bot_token,
         channelsRowId: channelId,
         channelUserStore: options.channelUserStore,
+        linkedAccountStore: options.linkedAccountStore,
       }).catch((err) =>
         console.error('[slack] reaction feedback dispatch failed:', err),
       )
@@ -521,20 +633,25 @@ export function slackRoutes(options: SlackRouteOptions): Router {
     // Bypass the chat lock — abort the running loop immediately.
     const ABORT_KEYWORDS = ['stop', 'cancel', 'abort', 'nevermind', 'never mind']
     const normalizedText = incoming.text.trim().toLowerCase()
-    const activeController = activeAbortControllers.get(incoming.channelId)
-    if (activeController) {
+    const activeTurn = activeAbortControllers.get(incoming.channelId)
+    if (activeTurn) {
       if (ABORT_KEYWORDS.includes(normalizedText)) {
         // Explicit abort — cancel and acknowledge
-        activeController.abort()
+        activeTurn.controller.abort()
         activeAbortControllers.delete(incoming.channelId)
         await adapter.sendMessage(incoming.channelId, { text: 'Stopped.' }, threadTs ? { threadTs } : undefined)
         return
       }
-      if (incoming.isEdit) {
-        // Edit-to-retry — abort the current loop so the edited message
-        // can be reprocessed. The edit falls through to normal processing
-        // via the chat lock (which serializes after the abort completes).
-        activeController.abort()
+      if (incoming.isEdit && shouldAbortForEdit(activeTurn, incoming.messageId)) {
+        // Edit-to-retry - the user edited THE message the running loop is
+        // answering, so abort it and let the edited text be reprocessed.
+        // The edit falls through to normal processing via the chat lock
+        // (which serializes after the abort completes). An edit to any
+        // OTHER message must not touch the running turn: it just queues
+        // behind the lock like a new message. (2026-08-18: a Slack
+        // link-unfurl `message_changed` on the user's NEXT message aborted
+        // an in-flight "yes" confirmation with "Something went wrong".)
+        activeTurn.controller.abort()
         activeAbortControllers.delete(incoming.channelId)
       }
     }
@@ -614,23 +731,23 @@ export function slackRoutes(options: SlackRouteOptions): Router {
     }
 
     // 5b. Resolve channel user identity — maps Slack user → platform user.
-    //     See docs/architecture/channels/channel-user-identity.md.
+    //     Link first (a claimed link code binds this Slack id to the account
+    //     the person actually uses), then the profile-email path.
+    //     See docs/architecture/channels/channel-user-identity.md → "Slack".
     let channelUserId = ownerId
     let isIdentified = true
-    if (options.channelUserStore && incoming.userId) {
-      try {
-        const resolved = await resolveChannelUser(
-          options.channelUserStore,
-          'slack',
-          incoming.userId,
-          resolvedAssistantId,
-          () => fetchSlackProfile(incoming.userId, slackCreds.bot_token),
-        )
-        channelUserId = resolved.user.id
-        isIdentified = resolved.isIdentified
-      } catch (err) {
-        console.error('[slack] channel user resolution failed, falling back to owner:', err)
-      }
+    if (incoming.userId) {
+      const sender = await resolveSlackSender({
+        slackUserId: incoming.userId,
+        assistantId: resolvedAssistantId,
+        ownerId,
+        workspaceId: assistant.workspaceId ?? null,
+        linkedAccountStore: options.linkedAccountStore,
+        channelUserStore: options.channelUserStore,
+        fetchProfile: () => fetchSlackProfile(incoming.userId, slackCreds.bot_token),
+      })
+      channelUserId = sender.userId
+      isIdentified = sender.isIdentified
     }
 
     // 6. Sequentialize per Slack channel via Postgres advisory lock.
@@ -918,8 +1035,9 @@ async function dispatchSlackReactionFeedback(params: {
   botToken: string
   channelsRowId: string
   channelUserStore: ChannelUserStore
+  linkedAccountStore?: LinkedAccountStore
 }): Promise<void> {
-  const { body, botToken, channelsRowId, channelUserStore } = params
+  const { body, botToken, channelsRowId, channelUserStore, linkedAccountStore } = params
   if (!body || typeof body !== 'object') return
   const b = body as Record<string, unknown>
   if (b.type !== 'event_callback') return
@@ -966,19 +1084,18 @@ async function dispatchSlackReactionFeedback(params: {
         ownerUserId: assistant.ownerUserId ?? null,
         workspaceId: assistant.workspaceId ?? null,
       })
-      try {
-        const resolved = await resolveChannelUser(
-          channelUserStore,
-          'slack',
-          reactingSlackUserId,
-          assistantId,
-          () => fetchSlackProfile(reactingSlackUserId, botToken),
-        )
-        return resolved.user.id
-      } catch (err) {
-        console.warn('[slack-reaction] channel user resolution failed, using owner:', err)
-        return ownerId
-      }
+      // Same link-first resolver as the message path, so a reaction from a
+      // linked sender is attributed to the account they actually use.
+      const sender = await resolveSlackSender({
+        slackUserId: reactingSlackUserId,
+        assistantId,
+        ownerId,
+        workspaceId: assistant.workspaceId ?? null,
+        linkedAccountStore,
+        channelUserStore,
+        fetchProfile: () => fetchSlackProfile(reactingSlackUserId, botToken),
+      })
+      return sender.userId
     },
   })
 }
@@ -1032,7 +1149,7 @@ type ProcessMessageParams = {
   analytics?: AnalyticsLogger
   skillStore?: import('../db/skill-store.js').SkillStore
   pendingSlackConfirmations: Map<string, { resolver: ConfirmationResolver; toolCallId: string }>
-  activeAbortControllers: Map<string, AbortController>
+  activeAbortControllers: Map<string, ActiveSlackTurn>
   episodicStore?: import('@use-brian/core').EpisodicStore
   sessionStateStore?: import('@use-brian/core').SessionStateStore
   capabilityStore: import('@use-brian/core').CapabilityStore
@@ -1283,7 +1400,10 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
 
   // ── Abort controller ──
   const abortController = new AbortController()
-  params.activeAbortControllers.set(incoming.channelId, abortController)
+  params.activeAbortControllers.set(incoming.channelId, {
+    controller: abortController,
+    messageId: incoming.messageId,
+  })
 
   await processChannelMessage({
     backgroundModel: params.backgroundModel,
@@ -1411,14 +1531,24 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
         return null
       },
       async sendError(err) {
+        // A loop THIS route aborted (a "stop" keyword, or an edit-to-retry
+        // of the message being answered) surfaces from the pipeline as an
+        // AbortError `error` event. That is the requested outcome, not a
+        // failure: "Stopped." was already sent, or the edited message is
+        // about to be reprocessed. Saying "Something went wrong" on top
+        // misreports a deliberate cancel as a fault.
+        if (abortController.signal.aborted) return
         await adapter.sendMessage(incoming.channelId, {
-          text: err.message.includes('usage limit')
-            ? err.message
-            : 'Something went wrong. Please try again.',
+          text: channelUserErrorText(err),
         }, threadOpts)
       },
       async onCleanup() {
-        params.activeAbortControllers.delete(incoming.channelId)
+        // Only clear our own entry - a successor turn (e.g. the edit that
+        // aborted this one) may already have registered under this channel.
+        const current = params.activeAbortControllers.get(incoming.channelId)
+        if (current?.controller === abortController) {
+          params.activeAbortControllers.delete(incoming.channelId)
+        }
         await adapter.clearStatus?.(incoming.channelId, { messageId: incoming.messageId })
       },
     },
