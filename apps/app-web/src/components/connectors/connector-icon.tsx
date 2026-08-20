@@ -112,6 +112,34 @@ function FilesIcon() {
   );
 }
 
+function LocalDirectoryIcon() {
+  // Local Directory Storage - a blue folder with a small local-disk badge.
+  // The folder distinguishes it from remote object-storage providers; the
+  // disk makes the server-local byte boundary visible even at 18px.
+  return (
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden
+      data-connector-icon="local-directory"
+    >
+      <path
+        d="M3 7.5A2.5 2.5 0 0 1 5.5 5H9l2 2h7.5A2.5 2.5 0 0 1 21 9.5V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7.5Z"
+        fill="#DBEAFE"
+        stroke="#3B82F6"
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+      />
+      <path d="M3 10h18" stroke="#3B82F6" strokeWidth="1.5" />
+      <rect x="10" y="13" width="8.5" height="4.8" rx="1.2" fill="#2563EB" />
+      <circle cx="12.2" cy="15.4" r="0.65" fill="#fff" />
+      <path d="M14.4 15.4h2.2" stroke="#fff" strokeWidth="1.1" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 function BrandIcon() {
   // Brand — a palette-and-swatch glyph. Strokes only, no fill, so it inherits
   // the surrounding text color in both dark and light themes.
@@ -362,6 +390,7 @@ export function ConnectorIcon({
     case "gsc": return <SearchConsoleIcon />;
     case "whatsapp": return <WhatsAppIcon />;
     case "files": return <FilesIcon />;
+    case "local": return <LocalDirectoryIcon />;
     case "computer": return <ComputerIcon />;
     case "brand": return <BrandIcon />;
     case "gcs": return <GcsIcon />;

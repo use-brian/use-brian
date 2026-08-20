@@ -488,7 +488,7 @@ function DirectorySection({
       <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3">
         {title}
       </h3>
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         {entries.map((entry) => (
           <DirectoryCard
             key={entry.id}
@@ -586,9 +586,9 @@ function DirectoryCard({
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
-              <span className="text-sm font-medium truncate">{entry.name}</span>
+              <span className="text-sm font-medium leading-5 break-words">{entry.name}</span>
             </div>
-            <p className="text-[11px] text-muted-foreground mt-0.5 line-clamp-2">
+            <p className="text-[11px] text-muted-foreground mt-0.5 leading-4 break-words">
               {entry.description}
             </p>
             {entry.author && (
@@ -640,7 +640,7 @@ function SkillSection({ title, skills }: { title: string; skills: SkillCatalogEn
   return (
     <div>
       <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3">{title}</h3>
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         {skills.map((skill) => (
           <div key={skill.id} className="flex items-start gap-3 border border-border rounded-xl p-4 hover:bg-muted/20 transition-colors">
             <div className="w-9 h-9 rounded-lg bg-muted flex items-center justify-center shrink-0 mt-0.5">
@@ -651,15 +651,15 @@ function SkillSection({ title, skills }: { title: string; skills: SkillCatalogEn
             <div className="flex-1 min-w-0">
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium truncate">{skill.name}</span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm font-medium leading-5 break-words">{skill.name}</span>
                     {skill.category !== "custom" && (
                       <span className={`text-[9px] font-medium px-1.5 py-0.5 rounded-full border ${SKILL_CATEGORY_COLORS[skill.category] ?? SKILL_CATEGORY_COLORS.custom}`}>
                         {skill.category}
                       </span>
                     )}
                   </div>
-                  <p className="text-[11px] text-muted-foreground mt-0.5 line-clamp-2">{skill.description}</p>
+                  <p className="text-[11px] text-muted-foreground mt-0.5 leading-4 break-words">{skill.description}</p>
                   {skill.requiresConnectors.length > 0 && (
                     <p className="text-[10px] text-muted-foreground/60 mt-1">{t.browseDirectory.requiresPrefix} {skill.requiresConnectors.join(", ")}</p>
                   )}

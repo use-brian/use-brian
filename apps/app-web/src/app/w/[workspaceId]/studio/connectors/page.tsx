@@ -53,7 +53,6 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
 import { Check, Download, FolderOpen, Pencil, Upload, X } from "lucide-react";
 import { authFetch } from "@/lib/auth-fetch";
 import { BrowseDirectory } from "./browse-directory";
@@ -1104,9 +1103,8 @@ function ConnectorAuthSection(props: {
 function ConnectorsList() {
   const t = useT();
   const tc = t.settings.connectors;
-  const { active } = useWorkspaces();
-  const params = useParams<{ workspaceId: string }>();
-  const workspaceId = params?.workspaceId ?? "";
+  const { activeId, active } = useWorkspaces();
+  const workspaceId = activeId ?? "";
   const [connectors, setConnectors] = useState<Connector[]>([]);
   const [loading, setLoading] = useState(true);
   const [connecting, setConnecting] = useState<string | null>(null);
@@ -3020,6 +3018,10 @@ function ConnectorsList() {
 
   async function handleSaveLocal(c: Connector) {
     if (!localDirPath.trim()) return;
+    if (!workspaceId) {
+      setLocalDirError(tc.local.errGeneric);
+      return;
+    }
     const rid = rowId(c);
     setConnecting(rid);
     setLocalDirError(null);
@@ -4955,7 +4957,7 @@ function ConnectorsList() {
                       </button>
                       <button
                         onClick={() => handleSaveLocal(sel)}
-                        disabled={!localDirPath.trim() || connecting === rid}
+                        disabled={!workspaceId || !localDirPath.trim() || connecting === rid}
                         className="text-xs font-medium bg-action text-action-foreground px-3 py-1 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors"
                       >
                         {connecting === rid ? tc.local.connectingBtn : tc.local.connectBtn}
