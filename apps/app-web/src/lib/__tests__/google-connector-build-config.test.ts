@@ -23,6 +23,13 @@ describe("[COMP:app-web/connector-oauth-callbacks] Google connector deployment c
     expect(callback).toContain('process.env.GOOGLE_CLIENT_SECRET ?? ""');
   });
 
+  it("keeps the runtime Next config independent of source-only helpers", () => {
+    const nextConfig = read("../../../next.config.ts");
+
+    expect(nextConfig).toContain("function resolveOssGitCommitSha()");
+    expect(nextConfig).not.toContain('from "./build-info.config"');
+  });
+
   it("uses the configured OSS public origin behind a loopback reverse proxy", () => {
     const callback = read("../../app/api/auth/callback/google-connector/route.ts");
 
