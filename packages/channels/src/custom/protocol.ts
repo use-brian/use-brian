@@ -43,6 +43,16 @@ export type BridgeState = {
   action?: BridgeAction
   /** Bridge build / version string for the Studio card. */
   bridgeVersion?: string
+  /**
+   * What this bridge can actually put on the wire. Additive (v1.1): an older
+   * bridge that never reports it is treated as text-only, so `sendFile`
+   * refuses honestly instead of the adapter enqueueing documents the bridge
+   * would silently drop. Declare `documents: true` ONLY when the bridge's
+   * outbox worker performs a real file send for `payload.documents`.
+   */
+  capabilities?: {
+    documents?: boolean
+  }
 }
 
 // ── Inbound (POST /inbound) ────────────────────────────────────

@@ -71,7 +71,7 @@ async function main(): Promise<void> {
     console.error(`fatal: ${errorMessage(err)}`)
     shutdown(3)
   }
-  await bridge.putState({ status: 'connecting', message: 'Waiting for the agent-wechat container.', bridgeVersion }).catch(
+  await bridge.putState({ status: 'connecting', message: 'Waiting for the agent-wechat container.', bridgeVersion, capabilities: { documents: true } }).catch(
     (err) => (err instanceof FatalConfigError ? fatal(err) : log.warn(`state publish failed: ${errorMessage(err)}`)),
   )
   let backoff = 1000

@@ -77,6 +77,23 @@ export type WhatsappByonRoutesOptions = {
   }) => Promise<void>
   getChannel?: typeof getChannelForWebhook
   getWorkspaceOwnerUserId?: (workspaceId: string) => Promise<string | null>
+  /**
+   * Upserts the owner's synced contact directory into the archive
+   * (`MessageStoreClient.upsertContacts`). Names resolve at query time, so a
+   * directory that arrives after messages did still names the old rows.
+   */
+  archiveContacts?: (input: {
+    workspaceId: string
+    instanceId: string
+    ownerUserId: string
+    source: string
+    contacts: Array<{
+      contactId: string
+      savedName?: string | null
+      pushName?: string | null
+      verifiedName?: string | null
+    }>
+  }) => Promise<{ upserted: number }>
   /** Let a later closed router handle the shared official number. */
   passUnknownToFallback?: boolean
 }
@@ -154,6 +171,86 @@ export function whatsappByonRoutes(opts: WhatsappByonRoutesOptions): Router {
   ): string {
     return synthesizeFilename(input.mediaFileName ?? input.mediaRef?.fileName, kind, input.messageId, mime)
   }
+
+  /**
+   * The owner's WhatsApp contact directory, relayed by the connector.
+   *
+   * Baileys receives the primary phone's contact sync (`contacts.upsert` /
+   * `contacts.update` and the pairing-time history set): `name` is the name
+   * the OWNER saved in their address book, `notify` is the pushName the
+   * contact set for themselves. Without this sync a sender is a bare number —
+   * "記錄入面冇顯示聯絡人名" (2026-08-20) — even though the owner's phone
+   * knows exactly who it is.
+   */
+  router.post('/contacts', async (req, res, next) => {
+    if (!secretMatches(req.headers['x-connector-secret'], opts.connectorSecret)) {
+      res.status(401).end()
+      return
+    }
+    const parsed = z.object({
+      channelId: z.string().min(1),
+      contacts: z.array(z.object({
+        contactId: z.string().min(1).max(256),
+        savedName: z.string().max(500).nullish(),
+        pushName: z.string().max(500).nullish(),
+        verifiedName: z.string().max(500).nullish(),
+      })).min(1).max(500),
+    }).safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: 'channelId and contacts required' })
+      return
+    }
+    if (!opts.archiveContacts) {
+      // No archive on this deployment: nothing to store, and that is fine.
+      res.status(202).json({ ok: true, skipped: true })
+      return
+    }
+    const channel = await (opts.getChannel ?? getChannelForWebhook)(parsed.data.channelId)
+    if (!channel) {
+      if (opts.passUnknownToFallback) next()
+      else res.status(404).json({ error: 'channel not resolvable' })
+      return
+    }
+    try {
+      const integration = await opts.integrationStore.getByChannelForWebhook(parsed.data.channelId, 'whatsapp')
+      const ownerUserId = await (opts.getWorkspaceOwnerUserId ?? resolveWorkspaceOwnerUserId)(channel.workspaceId)
+      if (!ownerUserId) {
+        res.status(404).json({ error: 'workspace owner not resolvable' })
+        return
+      }
+      // Same lazily-minted instance the append path uses, so the directory
+      // joins the same rows those appends created.
+      const instanceId = integration?.connectorInstanceId
+        ?? await resolveChatArchiveInstanceId({
+          source: 'whatsapp',
+          ownerUserId,
+          workspaceId: channel.workspaceId,
+          assistantId: '',
+          assistantName: '',
+          conversationId: parsed.data.channelId,
+        })
+      if (!instanceId) {
+        res.status(202).json({ ok: true, skipped: true })
+        return
+      }
+      const kept = parsed.data.contacts.filter((c) => c.savedName || c.pushName || c.verifiedName)
+      if (kept.length === 0) {
+        res.json({ ok: true, upserted: 0 })
+        return
+      }
+      const result = await opts.archiveContacts({
+        workspaceId: channel.workspaceId,
+        instanceId,
+        ownerUserId,
+        source: 'whatsapp',
+        contacts: kept,
+      })
+      res.json({ ok: true, upserted: result.upserted })
+    } catch (err) {
+      console.error('[whatsapp-byon] contact directory upsert failed:', err)
+      res.status(502).json({ error: 'archive unavailable' })
+    }
+  })
 
   router.post('/media-upload-url', async (req, res, next) => {
     if (!secretMatches(req.headers['x-connector-secret'], opts.connectorSecret)) {

@@ -177,12 +177,8 @@ export class SupportCapsuleBuilder {
       messages: string
       analytics: string
       failedWorkflows: string
-      archiveMessages: string
-      archiveUnembedded: string
       archiveOutboxPending: string
       archiveOutboxDead: string
-      archiveEnrichmentFailed: string
-      archiveBackfillsFailed: string
     }>(
       `SELECT
          (SELECT count(*)::text FROM sessions s
@@ -196,10 +192,6 @@ export class SupportCapsuleBuilder {
           WHERE e.user_id = $2 AND e.created_at BETWEEN $3 AND $4) AS analytics,
          (SELECT count(*)::text FROM workflow_runs
           WHERE workspace_id = $1 AND status IN ('failed', 'timeout')) AS "failedWorkflows",
-         (SELECT count(*)::text FROM chat_archive_messages
-          WHERE workspace_id = $1) AS "archiveMessages",
-         (SELECT count(*)::text FROM chat_archive_segments
-          WHERE workspace_id = $1 AND embedding IS NULL) AS "archiveUnembedded",
          (SELECT count(*)::text FROM ingest_outbox o
           JOIN ingest_external_sink s ON s.id = o.sink_id
           WHERE o.workspace_id = $1
@@ -209,11 +201,7 @@ export class SupportCapsuleBuilder {
           JOIN ingest_external_sink s ON s.id = o.sink_id
           WHERE o.workspace_id = $1
             AND s.managed_by = 'local_chat_archive'
-            AND o.status = 'dead') AS "archiveOutboxDead",
-         (SELECT count(*)::text FROM chat_archive_enrichment_windows
-          WHERE workspace_id = $1 AND status IN ('failed', 'dead')) AS "archiveEnrichmentFailed",
-         (SELECT count(*)::text FROM chat_archive_backfill_runs
-          WHERE workspace_id = $1 AND status = 'failed') AS "archiveBackfillsFailed"`,
+            AND o.status = 'dead') AS "archiveOutboxDead"`,
       [capture.workspaceId, capture.userId, capture.startedAt, capture.expiresAt],
     )
 
@@ -292,12 +280,15 @@ export class SupportCapsuleBuilder {
           messages: Number.parseInt(healthResult.rows[0]?.messages ?? '0', 10),
           analytics: Number.parseInt(healthResult.rows[0]?.analytics ?? '0', 10),
           failedWorkflows: Number.parseInt(healthResult.rows[0]?.failedWorkflows ?? '0', 10),
-          archiveMessages: Number.parseInt(healthResult.rows[0]?.archiveMessages ?? '0', 10),
-          archiveUnembedded: Number.parseInt(healthResult.rows[0]?.archiveUnembedded ?? '0', 10),
+          // Archive row/segment/enrichment/backfill counts moved into
+          // `brian-message-store`'s own database with migration 438 — the
+          // platform can no longer SQL them, and the dropped-table subselects
+          // that used to sit here threw `relation does not exist` at runtime,
+          // killing the WHOLE stats query (sessions/messages counts included).
+          // The capsule keeps what the platform can still see: the relay
+          // outbox to the archive, and whether a sidecar is configured at all.
           archiveOutboxPending: Number.parseInt(healthResult.rows[0]?.archiveOutboxPending ?? '0', 10),
           archiveOutboxDead: Number.parseInt(healthResult.rows[0]?.archiveOutboxDead ?? '0', 10),
-          archiveEnrichmentFailed: Number.parseInt(healthResult.rows[0]?.archiveEnrichmentFailed ?? '0', 10),
-          archiveBackfillsFailed: Number.parseInt(healthResult.rows[0]?.archiveBackfillsFailed ?? '0', 10),
         },
       },
       captureEvents: events.map((event) => ({

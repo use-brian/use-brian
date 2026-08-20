@@ -12,7 +12,7 @@ function fakeClient(overrides: Partial<MessageStoreClient> = {}): MessageStoreCl
 
 const context = { userId: 'alice', workspaceId: 'w1', assistantId: 'a1' } as never
 
-describe('chat archive tools', () => {
+describe('[COMP:tools/chat-archive] chat archive tools', () => {
   it('exposes search and its channel resolver', () => {
     const names = createChatArchiveTools({ client: fakeClient() }).map((tool) => tool.name)
     // Without a resolver a model can only narrow a search using a handle lifted

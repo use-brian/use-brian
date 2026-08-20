@@ -194,6 +194,7 @@ import { setGlobalMailboxArchiveDeps } from './mailbox/archive-search-tool.js'
 import { setGlobalMailboxSyncDeps } from './mailbox/sync-tool.js'
 import { createMailboxIdleWatcher } from './mailbox/idle-watcher.js'
 import { createChatArchiveTools } from './chat-archive/chat-tools.js'
+import { createSaveChatMediaTool } from './chat-archive/save-media-tool.js'
 import { resolveIngestPlaceholders } from './ingest/placeholder-resolver.js'
 import { createMeteredProfileStore } from './db/metered-profile-store.js'
 import { createWorkspaceModelDefaultsStore } from './db/workspace-model-defaults-store.js'
@@ -3579,6 +3580,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     allTools.set('saveFileToBrain', fileTools.saveFileToBrain)
     allTools.set('sendFile', fileTools.sendFile)
     allTools.set('renderPdf', fileTools.renderPdf)
+    // Archive media retrieval needs BOTH seams: the store (bytes) and the
+    // file layer (where sendFile and the web Files view can reach them) —
+    // which is why it registers here and not with the read-only archive
+    // tools at their earlier block.
+    if (messageStoreClient) {
+      allTools.set('saveChatMedia', createSaveChatMediaTool({ client: messageStoreClient, filesApi }))
+    }
     brainFileTools = {
       fileWrite: fileTools.fileWrite,
       fileAppend: fileTools.fileAppend,
@@ -7365,6 +7373,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             incomingChannelMessageId: input.messageId,
             archiveIncoming: {
               userId: input.senderPnJid ?? input.senderJid,
+              senderDisplay: input.senderName,
               channelId: input.chatJid,
               messageId: input.messageId,
               text: /^<media:[^>]+>$/.test(input.text.trim()) ? '' : input.text,
@@ -7436,6 +7445,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         }),
         passUnknownToFallback: ports.whatsappOfficialFallback,
         archiveMedia: chatArchiveLiveMedia,
+        archiveContacts: messageStoreClient
+          ? (input) => messageStoreClient.upsertContacts(input)
+          : undefined,
       }))
     }
 

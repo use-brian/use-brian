@@ -413,6 +413,13 @@ export type ChannelPipelineParams = {
   archiveInboundAlreadyPersisted?: boolean
   /** Exact connector backing this route, when known. */
   archiveConnectorInstanceId?: string | null
+  /**
+   * Per-channel-instance document capability (custom bridges declare it in
+   * their state report). Threaded onto ToolContext so the `sendFile` gate can
+   * admit a bridge that proved it delivers files — see
+   * `ToolContext.channelDocumentsSupported`.
+   */
+  channelDocumentsSupported?: boolean
 
   // ── Model ──
   /** The model alias string from the assistant record. */
@@ -1936,6 +1943,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         workerManager,
         activeCapabilities,
         outboundAttachments: attachmentCollector,
+        channelDocumentsSupported: params.channelDocumentsSupported,
         sensitivity: sensitivityAccumulator,
         compartmentAccumulator,
         evidence: replyEvidence,
