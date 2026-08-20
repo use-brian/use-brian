@@ -33,6 +33,10 @@ import { tmpdir } from 'node:os'
  */
 type ContactSyncEntry = {
   id?: string | null
+  /** Phone-number JID twin when `id` is WhatsApp's privacy-preserving LID. */
+  phoneNumber?: string | null
+  /** LID twin when `id` is the phone-number JID. */
+  lid?: string | null
   name?: string | null
   notify?: string | null
   verifiedName?: string | null
@@ -369,24 +373,42 @@ export function createSocketManager(options: SocketManagerOptions): SocketManage
    * Relay contact sync entries for the archive's name directory.
    *
    * Only user JIDs with at least one name survive the filter — groups,
-   * broadcasts, and nameless entries carry nothing worth storing. Batched at
-   * 200 per request because pairing-time sync can deliver the whole address
-   * book at once. Best-effort: a failed relay costs display names, never
-   * messages, and the next sync event retries naturally.
+   * broadcasts, and nameless entries carry nothing worth storing. Baileys v7
+   * can identify one contact by both a privacy LID and a phone-number JID;
+   * store both aliases because archived messages prefer the phone-number twin
+   * when it is available. Batched at 200 per request because pairing-time sync
+   * can deliver the whole address book at once. Best-effort: a failed relay
+   * costs display names, never messages, and the next sync event retries
+   * naturally.
    */
   async function forwardContacts(channelId: string, entries: ContactSyncEntry[]): Promise<void> {
-    const contacts = entries
-      .filter((c): c is ContactSyncEntry & { id: string } => {
-        if (!c.id) return false
-        if (c.id.endsWith('@g.us') || c.id.endsWith('@broadcast') || c.id.endsWith('@status')) return false
-        return Boolean(c.name || c.notify || c.verifiedName)
-      })
-      .map((c) => ({
-        contactId: c.id,
-        ...(c.name ? { savedName: c.name } : {}),
-        ...(c.notify ? { pushName: c.notify } : {}),
-        ...(c.verifiedName ? { verifiedName: c.verifiedName } : {}),
-      }))
+    const contactsById = new Map<string, {
+      contactId: string
+      savedName?: string
+      pushName?: string
+      verifiedName?: string
+    }>()
+    for (const c of entries) {
+      if (!c.name && !c.notify && !c.verifiedName) continue
+      const ids = new Set(
+        [c.id, c.phoneNumber, c.lid]
+          .filter((id): id is string => Boolean(id))
+          .map((id) => jidNormalizedUser(id)),
+      )
+      for (const contactId of ids) {
+        if (contactId.endsWith('@g.us') || contactId.endsWith('@broadcast') || contactId.endsWith('@status')) continue
+        const previous = contactsById.get(contactId)
+        contactsById.set(contactId, {
+          contactId,
+          ...(c.name || previous?.savedName ? { savedName: c.name ?? previous?.savedName } : {}),
+          ...(c.notify || previous?.pushName ? { pushName: c.notify ?? previous?.pushName } : {}),
+          ...(c.verifiedName || previous?.verifiedName
+            ? { verifiedName: c.verifiedName ?? previous?.verifiedName }
+            : {}),
+        })
+      }
+    }
+    const contacts = [...contactsById.values()]
     if (contacts.length === 0) return
     for (let i = 0; i < contacts.length; i += 200) {
       const batch = contacts.slice(i, i + 200)
