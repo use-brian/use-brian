@@ -65,6 +65,65 @@ describe('[COMP:files/artifact-tools] searchFileContent tool', () => {
     expect(mockRange).toHaveBeenCalledWith(expect.anything(), { fileId: FILE_ID, fromIndex: 2, toIndex: 4 })
   })
 
+  it('routes a stored file with zero indexed segments to consent-gated ingestFile', async () => {
+    mockSearch.mockResolvedValue([])
+    mockRange.mockResolvedValue([])
+    const getFile = vi.fn(async () => ({
+      id: FILE_ID,
+      name: 'quarterly-report.pdf',
+      mime: 'application/pdf',
+    }))
+    const tool = createSearchFileContentTool({ getFile })
+
+    const res = await tool.execute({ fileId: FILE_ID, query: 'investors' }, ctx)
+
+    expect(res.isError).toBe(true)
+    expect(String(res.data)).toContain('zero indexed segments')
+    expect(String(res.data)).toContain('ingestFile')
+    expect(String(res.data)).toContain(FILE_ID)
+    expect(String(res.data)).toContain('confirmation')
+    expect(mockRange).toHaveBeenCalledWith(expect.anything(), {
+      fileId: FILE_ID,
+      fromIndex: 0,
+      toIndex: 0,
+    })
+    expect(getFile).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: 'ws-1' }), FILE_ID)
+  })
+
+  it('keeps an indexed no-match as an empty result instead of proposing re-ingest', async () => {
+    mockSearch.mockResolvedValue([])
+    mockRange.mockResolvedValue([HIT])
+    const getFile = vi.fn()
+    const tool = createSearchFileContentTool({ getFile })
+
+    const res = await tool.execute({ fileId: FILE_ID, query: 'not present' }, ctx)
+
+    expect(res.isError).toBeFalsy()
+    expect(res.data).toEqual([])
+    expect(getFile).not.toHaveBeenCalled()
+  })
+
+  it('probes segment zero when an empty sequential window starts later in the file', async () => {
+    mockRange.mockResolvedValueOnce([]).mockResolvedValueOnce([HIT])
+    const getFile = vi.fn()
+    const tool = createSearchFileContentTool({ getFile })
+
+    const res = await tool.execute({ fileId: FILE_ID, query: '', fromIndex: 50 }, ctx)
+
+    expect(res.data).toEqual([])
+    expect(mockRange).toHaveBeenNthCalledWith(1, expect.anything(), {
+      fileId: FILE_ID,
+      fromIndex: 50,
+      toIndex: 59,
+    })
+    expect(mockRange).toHaveBeenNthCalledWith(2, expect.anything(), {
+      fileId: FILE_ID,
+      fromIndex: 0,
+      toIndex: 0,
+    })
+    expect(getFile).not.toHaveBeenCalled()
+  })
+
   it('errors cleanly without a workspace-scoped session', async () => {
     const tool = createSearchFileContentTool()
     const res = await tool.execute(

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { extractPdfText } from '../pdf-text.js'
 import { distillFileToText } from '../distill.js'
+import { pdfPageCompletionMarker } from '../pdf-distill.js'
 import { minimalPdf } from './pdf-fixture.js'
 
 describe('[COMP:files/pdf-text] extractPdfText', () => {
@@ -31,7 +32,12 @@ describe('[COMP:files/distill] PDF local-text fallback', () => {
   it('keeps the vision distillation when the adapter succeeds (no fallback)', async () => {
     const fetchFn = vi.fn(async () =>
       new Response(
-        JSON.stringify({ choices: [{ message: { content: '# Native extract' }, finish_reason: 'stop' }] }),
+        JSON.stringify({
+          choices: [{
+            message: { content: `# Native extract\n\n${pdfPageCompletionMarker(1)}` },
+            finish_reason: 'stop',
+          }],
+        }),
         { status: 200 },
       ),
     )

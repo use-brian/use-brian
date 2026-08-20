@@ -1613,10 +1613,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // workspace runtime at execution time; without either runtime, the provider
   // call fails honestly instead of the feature disappearing at boot.
   const synthesisModel = BACKGROUND_MODEL
-  // A PDF bound for a model whose registry row says `nativePdf: false` is
-  // swapped for its distillate HERE, at the provider boundary — so web chat,
-  // every channel adapter, the outage fallback firing mid-turn, and replayed
-  // history all inherit it with no per-route wiring. Ports keep core DB-free.
+  // Every PDF is swapped for a page-complete validated distillate HERE, at the
+  // provider boundary — so web chat, every channel adapter, the outage
+  // fallback firing mid-turn, and replayed history all inherit it with no
+  // per-route wiring. `nativePdf` is only an emergency path when this port is
+  // absent. Ports keep core DB-free.
   //
   // `mediaBackend` is read lazily inside `distill` because the provider-backed
   // rung is resolved AFTER this provider exists (it needs `provider` itself).
@@ -1634,7 +1635,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         { buffer, mime },
         { backend: selectMediaBackend(mime) },
       )
-      return { text: result.text, model: result.model, usage: result.usage }
+      return {
+        text: result.text,
+        model: result.model,
+        usage: result.usage,
+        ...(result.pageCount !== undefined ? { pageCount: result.pageCount } : {}),
+        ...(result.truncated !== undefined ? { truncated: result.truncated } : {}),
+      }
     },
   }
   const distillateCache: DistillateCachePort = {
@@ -2058,7 +2065,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // ToolContext per call, so read ceilings hold on every path.
     tools.set(
       'searchFileContent',
-      createSearchFileContentTool({ embedder: sharedEmbedder }),
+      createSearchFileContentTool({
+        embedder: sharedEmbedder,
+        getFile: async (actor, fileId) => {
+          const file = await workspaceFilesStore.getById(actor, fileId)
+          return file ? { id: file.id, name: file.name, mime: file.mime } : null
+        },
+      }),
     )
 
     // The recording surface for chat, registered at the same seam and for the

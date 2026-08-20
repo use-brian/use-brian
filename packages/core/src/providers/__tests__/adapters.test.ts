@@ -7,6 +7,7 @@ import { createVertexEmbedder, createDashScopeEmbedder, VERTEX_EMBEDDING_MODEL_I
 import { GEMINI_EMBEDDING_MODEL_ID } from '../../embeddings/embedder.js'
 import { stripUnsignedToolUses, modelRequiresToolSignatures } from '../../engine/tool-pairing.js'
 import { minimalPdf } from '../../files/__tests__/pdf-fixture.js'
+import { pdfPageCompletionMarker } from '../../files/pdf-distill.js'
 import type { Message } from '../types.js'
 
 describe('[COMP:providers/google-transport] Google transport', () => {
@@ -171,7 +172,7 @@ describe('[COMP:media/backend] Multimodal backend per adapter', () => {
       if (String(url).endsWith('/files')) throw new Error('a PDF must not hit the Files API')
       chatBodies.push(JSON.parse(init!.body as string))
       return new Response(JSON.stringify({
-        choices: [{ message: { content: '## Page 1\n\nQuarterly report\n\n[Figure: bar chart of revenue]' }, finish_reason: 'stop' }],
+        choices: [{ message: { content: `## Page 1\n\nQuarterly report\n\n[Figure: bar chart of revenue]\n\n${pdfPageCompletionMarker(1)}` }, finish_reason: 'stop' }],
         usage: { prompt_tokens: 20, completion_tokens: 8 },
       }), { status: 200 })
     })
@@ -203,8 +204,18 @@ describe('[COMP:media/backend] Multimodal backend per adapter', () => {
       if (String(url).endsWith('/files')) throw new Error('a PDF must not hit the Files API')
       const body = JSON.parse(init!.body as string) as { messages: [{ content: unknown[] }] }
       seenPageCounts.push(body.messages[0].content.length - 1) // minus the prompt part
+      const prompt = (body.messages[0].content[0] as { text: string }).text
+      const pageNumbers = [...prompt.matchAll(/<!-- PDF_PAGE_(\d+)_COMPLETE -->/g)]
+        .map((match) => Number(match[1]))
       return new Response(JSON.stringify({
-        choices: [{ message: { content: 'transcribed' }, finish_reason: 'stop' }],
+        choices: [{
+          message: {
+            content: pageNumbers
+              .map((pageNumber) => `## Page ${pageNumber}\n\ntranscribed\n\n${pdfPageCompletionMarker(pageNumber)}`)
+              .join('\n\n'),
+          },
+          finish_reason: 'stop',
+        }],
       }), { status: 200 })
     })
 
@@ -270,7 +281,10 @@ describe('[COMP:media/backend] Multimodal backend per adapter', () => {
           blocks: request.messages[0]!.content as Array<{ type: string; mimeType?: string }>,
         })
         return (async function* () {
-          yield { type: 'text_delta' as const, text: '## Page 1\n\nInvoice total 42.00' }
+          yield {
+            type: 'text_delta' as const,
+            text: `## Page 1\n\nInvoice total 42.00\n\n${pdfPageCompletionMarker(1)}`,
+          }
           yield {
             type: 'message_end' as const,
             stopReason: 'end_turn' as const,

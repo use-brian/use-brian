@@ -21,11 +21,11 @@
  *
  * ## The one real asymmetry: PDFs
  *
- * Gemini ingests `application/pdf` natively as `inlineData`. Nothing else
- * does. Every other backend renders ALL pages to bounded JPEGs and reads them
- * through a vision model (`files/pdf-distill.ts`), which is the same treatment
- * a scan needs anyway — see that module for why there is no text-layer
- * shortcut. Non-PDF office documents on DashScope still ride the `qwen-long`
+ * Gemini ingests `application/pdf` natively as `inlineData`, but that output is
+ * accepted only when every probed page returns its completion marker. An
+ * incomplete native read and every other backend render ALL pages to bounded
+ * JPEGs and read them through a vision model (`files/pdf-distill.ts`), which
+ * is the same treatment a scan needs anyway. Non-PDF office documents on DashScope still ride the `qwen-long`
  * file-upload flow (`POST /files`, `purpose: "file-extract"`, then
  * `fileid://<id>` in a `qwen-long` system message); images still distill via
  * Qwen-VL inline.
@@ -43,11 +43,16 @@ import type { GoogleTransport } from '../providers/google-transport.js'
 import {
   DASHSCOPE_CHUNK_PAGES,
   DASHSCOPE_RENDER_WIDTH,
+  MAX_DISTILL_PAGES,
   PROVIDER_CHUNK_PAGES,
   PROVIDER_RENDER_WIDTH,
   distillPdfViaPages,
+  missingPdfPageCompletionMarkers,
+  pdfPageCompletionMarker,
+  stripPdfPageCompletionMarkers,
   type VisionCaller,
 } from '../files/pdf-distill.js'
+import { probePdfPageCount } from '../files/pdf-pages.js'
 import sharp from 'sharp'
 
 export type MediaBackend =
@@ -100,6 +105,11 @@ export type MediaResult = {
   usageByModel?: Array<{ model: string; usage: TokenUsage }>
   /** The call stopped at its output ceiling. Drives the distiller's re-split. */
   truncated?: boolean
+  /** PDF metadata from the validated document reader. */
+  pageCount?: number
+  /** The document reader omitted capped or unreadable pages. */
+  documentTruncated?: boolean
+  failedPages?: number[]
 }
 
 /**
@@ -232,26 +242,69 @@ async function runGoogle(
   req: MediaRequest,
 ): Promise<MediaResult> {
   const fetchFn = req.fetchFn ?? fetch
-  const native = await withTimeout(req.timeoutMs, undefined, (signal) =>
-    googleGenerate(
-      fetchFn,
-      transport,
-      req.model,
-      [
-        { text: req.prompt },
-        { inlineData: { mimeType: req.mime, data: req.buffer.toString('base64') } },
-      ],
-      req.maxOutputTokens,
-      req.errorLabel,
-      signal,
-    ),
-  )
-  if (native.text || req.mime !== 'application/pdf') return native
+  if (req.mime !== 'application/pdf') {
+    return withTimeout(req.timeoutMs, undefined, (signal) =>
+      googleGenerate(
+        fetchFn,
+        transport,
+        req.model,
+        [
+          { text: req.prompt },
+          { inlineData: { mimeType: req.mime, data: req.buffer.toString('base64') } },
+        ],
+        req.maxOutputTokens,
+        req.errorLabel,
+        signal,
+      ),
+    )
+  }
 
-  // A native PDF read that comes back empty is usually an image-only document
-  // Gemini declined to describe. Rendering the pages and reading them as
-  // images is what recovers it — and it is strictly better than the caller's
-  // next move, which is the local `unpdf` text layer a scan does not have.
+  const pageCount = await probePdfPageCount(req.buffer)
+  let native: MediaResult | null = null
+  let nativeFailure: unknown
+  if (pageCount !== null && pageCount > 0 && pageCount <= MAX_DISTILL_PAGES) {
+    const pageNumbers = Array.from({ length: pageCount }, (_, index) => index + 1)
+    const markerInstruction =
+      `\n\nThis PDF has exactly ${pageCount} pages. Start every page with its exact \`## Page N\` heading. ` +
+      'After the COMPLETE transcription of each page, append its exact HTML comment marker. ' +
+      'Never emit a marker before the whole page is complete. Required markers: ' +
+      pageNumbers.map(pdfPageCompletionMarker).join(' ')
+    try {
+      native = await withTimeout(req.timeoutMs, undefined, (signal) =>
+        googleGenerate(
+          fetchFn,
+          transport,
+          req.model,
+          [
+            { text: req.prompt + markerInstruction },
+            { inlineData: { mimeType: req.mime, data: req.buffer.toString('base64') } },
+          ],
+          req.maxOutputTokens,
+          req.errorLabel,
+          signal,
+        ),
+      )
+    } catch (error) {
+      nativeFailure = error
+      console.warn(`[media/backend] Gemini native PDF read failed; trying rendered pages: ${String(error)}`)
+    }
+    if (native && missingPdfPageCompletionMarkers(native.text, pageNumbers).length === 0) {
+      return {
+        ...native,
+        text: stripPdfPageCompletionMarkers(native.text),
+        truncated: false,
+        pageCount,
+        documentTruncated: false,
+        failedPages: [],
+      }
+    }
+  }
+
+  // Native PDF output is accepted only when every expected page marker is
+  // present. Empty output, nominal end-turn truncation, an unknown page count,
+  // and the page cap all fall back to the same rendered-page engine used by
+  // every other provider.
+  let renderedFailure: unknown
   const distilled = await distillPdfViaPages(req.buffer, {
     visionCaller: googleVisionCaller(fetchFn, transport, req.model, req.errorLabel),
     renderWidth: PROVIDER_RENDER_WIDTH,
@@ -259,15 +312,30 @@ async function runGoogle(
     maxOutputTokensPerChunk: req.maxOutputTokens,
     timeoutMs: req.timeoutMs,
   }).catch((err) => {
+    renderedFailure = err
     console.warn(`[media/backend] Gemini page-render fallback failed: ${String(err)}`)
     return null
   })
-  if (!distilled?.text) return native
+  if (!distilled?.text) {
+    throw renderedFailure ?? nativeFailure ?? new Error(
+      `Gemini ${req.errorLabel} could not produce a page-complete PDF transcription.`,
+    )
+  }
+  const usageByModel = new Map<string, TokenUsage>()
+  if (native?.usage) usageByModel.set(native.model, native.usage)
+  for (const item of distilled.usageByModel) {
+    usageByModel.set(item.model, addUsage(usageByModel.get(item.model) ?? null, item.usage)!)
+  }
   return {
     text: distilled.text,
-    usage: addUsage(native.usage, distilled.usage),
+    usage: addUsage(native?.usage ?? null, distilled.usage),
     model: distilled.model,
-    ...(distilled.usageByModel.length > 0 ? { usageByModel: distilled.usageByModel } : {}),
+    ...(usageByModel.size > 0
+      ? { usageByModel: [...usageByModel].map(([model, usage]) => ({ model, usage })) }
+      : {}),
+    pageCount: distilled.totalPages,
+    documentTruncated: distilled.truncated || distilled.failedPages.length > 0,
+    failedPages: distilled.failedPages,
   }
 }
 
@@ -369,11 +437,10 @@ function dashScopeVisionCaller(
 }
 
 /**
- * Gemini over a batch of page images as `inlineData` parts. Only reached when
- * distillation is FORCED on a Google box — the native single-part PDF read is
- * cheaper and higher fidelity, so chat never comes here. Its live caller is
- * the scanned-PDF fallback in `runGoogle`: when a native read returns nothing,
- * rendering the pages is what recovers an image-only document.
+ * Gemini over a batch of page images as `inlineData` parts. Its live caller is
+ * the completeness fallback in `runGoogle`: when a native read is empty,
+ * errors, or omits any required page marker, rendering the pages recovers the
+ * document through the provider-neutral validation engine.
  */
 function googleVisionCaller(
   fetchFn: typeof fetch,
@@ -480,6 +547,9 @@ async function runDashScopePdf(
     usage: result.usage,
     model: result.model,
     ...(result.usageByModel.length > 0 ? { usageByModel: result.usageByModel } : {}),
+    pageCount: result.totalPages,
+    documentTruncated: result.truncated || result.failedPages.length > 0,
+    failedPages: result.failedPages,
   }
 }
 
@@ -609,6 +679,9 @@ async function runProviderBacked(
       usage: result.usage,
       model: result.model,
       ...(result.usageByModel.length > 0 ? { usageByModel: result.usageByModel } : {}),
+      pageCount: result.totalPages,
+      documentTruncated: result.truncated || result.failedPages.length > 0,
+      failedPages: result.failedPages,
     }
   }
 

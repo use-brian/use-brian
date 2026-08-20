@@ -7,8 +7,8 @@
  * bytes back OUT: "can you send me that file" dead-ended with "the record has
  * no downloadable path". This tool closes the loop the same way
  * `imapSaveAttachment` does for email: fetch from the seam → workspace file →
- * hand the returned `fileId` to `sendFile` (or let the user grab it in the
- * web app's Files view).
+ * hand the returned `fileId` to `sendFile` for delivery or `ingestFile` for
+ * consent-gated semantic reading (or let the user grab it in Files).
  *
  * Owner identity comes from ToolContext, never from the input schema — the
  * store additionally resolves the digest under the owner's row-level
@@ -124,7 +124,10 @@ export function createSaveChatMediaTool(deps: SaveChatMediaDeps): Tool {
             filename: name,
             mime: media.mime,
             sizeBytes: file.sizeBytes,
-            next: 'To deliver it in this chat, call sendFile with file="' + file.id + '".',
+            next:
+              'To deliver it in this chat, call sendFile with file="' + file.id + '". ' +
+              'To read or analyze its contents, call ingestFile with fileId="' + file.id + '", ' +
+              'relay the required confirmation to the user, and continue only after explicit approval.',
           },
         }
       } catch (err) {
