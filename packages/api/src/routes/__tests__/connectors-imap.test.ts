@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import request from 'supertest'
 import { connectorRoutes } from '../connectors.js'
 import { setGlobalMailboxSyncDeps } from '../../mailbox/sync-tool.js'
+import { CURRENT_BACKFILL_RECONCILE_VERSION } from '../../mailbox/sync-worker.js'
 import { createTestApp } from './helpers.js'
 import type { ConnectorInstanceStore } from '../../db/connector-instance-store.js'
 import type { ConnectorStore } from '../../db/connector-store.js'
@@ -35,6 +36,7 @@ function makeApp(over: {
     complete: boolean
     total: number
   }
+  archiveTotal?: number
 } = {}) {
   const createUserInstance = vi.fn(async () => ({ id: 'inst_new' }))
   const update = vi.fn(async () => ({ id: 'inst_existing' }))
@@ -49,7 +51,7 @@ function makeApp(over: {
       : { ok: true as const },
   )
   const resolvePreset = vi.fn(async () => (over.preset === undefined ? ALIMAIL : over.preset))
-  const countArchive = vi.fn(async () => ({ total: 3, byFolder: { INBOX: 3 } }))
+  const countArchive = vi.fn(async () => ({ total: over.archiveTotal ?? 3, byFolder: { INBOX: over.archiveTotal ?? 3 } }))
   const probe = vi.fn(async () => over.probeResult ?? ({
     folders: [{ path: 'INBOX', messages: 3 }],
     failedFolders: [],
@@ -70,7 +72,7 @@ function makeApp(over: {
     },
   })
   const app = createTestApp('/api/connectors', router, { userId: USER })
-  return { app, createUserInstance, update, listForUser, verify, resolvePreset, getMembershipWithClearance, setConfigSystem, probe }
+  return { app, createUserInstance, update, listForUser, verify, resolvePreset, getMembershipWithClearance, setConfigSystem, probe, countArchive }
 }
 
 describe('[COMP:api/mailbox-connect-routes] POST /imap/resolve', () => {
@@ -320,6 +322,8 @@ describe('[COMP:api/mailbox-connect-routes] send-as aliases (PATCH /imap/send-as
 })
 
 describe('[COMP:api/mailbox-connect-routes] POST /imap/backfill full-history replay', () => {
+  afterEach(() => setGlobalMailboxSyncDeps(null))
+
   const CREDS = {
     type: 'imap', email: 'maya@harborlane.example', appPassword: 'pw',
     imapHost: 'imap.qiye.aliyun.com', imapPort: 993, smtpHost: 'smtp.qiye.aliyun.com', smtpPort: 465,
@@ -345,7 +349,7 @@ describe('[COMP:api/mailbox-connect-routes] POST /imap/backfill full-history rep
       instances: [instance],
       creds: CREDS,
       probeResult: {
-        folders: [{ path: 'INBOX', messages: 1400 }],
+        folders: [{ path: 'INBOX', messages: 1200 }, { path: 'Sent', messages: 200 }],
         failedFolders: [],
         complete: true,
         total: 1400,
@@ -356,7 +360,11 @@ describe('[COMP:api/mailbox-connect-routes] POST /imap/backfill full-history rep
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({ ok: true, totalEstimate: 1400, estimateComplete: true })
-    expect(probe).toHaveBeenCalledWith(expect.objectContaining({ email: 'maya@harborlane.example' }))
+    expect(probe).toHaveBeenCalledWith(
+      expect.objectContaining({ email: 'maya@harborlane.example' }),
+      undefined,
+      ['INBOX', 'Sent'],
+    )
     expect(setConfigSystem).toHaveBeenCalledWith('inst_1', {
       mailboxSync: expect.objectContaining({
         folders: {
@@ -364,7 +372,7 @@ describe('[COMP:api/mailbox-connect-routes] POST /imap/backfill full-history rep
           Sent: { uidvalidity: '8', lastUid: 600 },
         },
         backfill: expect.objectContaining({
-          scope: 'all', status: 'running', reconcileVersion: 1,
+          scope: 'all', status: 'running', reconcileVersion: CURRENT_BACKFILL_RECONCILE_VERSION,
           totalEstimate: 1400, estimateComplete: true, requestedAt: expect.any(String),
         }),
         lastSyncAt: '2026-08-20T10:17:44.858Z',
@@ -399,10 +407,57 @@ describe('[COMP:api/mailbox-connect-routes] POST /imap/backfill full-history rep
     }
     expect(written.mailboxSync.backfill).toMatchObject({
       estimateComplete: false,
-      reconcileVersion: 1,
+      reconcileVersion: CURRENT_BACKFILL_RECONCILE_VERSION,
       status: 'running',
     })
     expect(written.mailboxSync.backfill).not.toHaveProperty('totalEstimate')
+  })
+
+  it('does not advertise a regressed live count as the complete mailbox total', async () => {
+    const instance = {
+      id: 'inst_1', provider: 'imap', scope: 'user', connected: true,
+      connectedEmail: 'maya@harborlane.example', createdAt: new Date('2026-01-01T00:00:00Z'),
+      ingestionEnabled: false,
+      config: { mailboxSync: { folders: { INBOX: { uidvalidity: '7', lastUid: 12000 } } } },
+    }
+    const { app } = makeApp({
+      instances: [instance],
+      creds: CREDS,
+      archiveTotal: 5_359,
+      probeResult: {
+        folders: [{ path: 'INBOX', messages: 97 }],
+        failedFolders: [],
+        complete: true,
+        total: 97,
+      },
+    })
+
+    const res = await request(app).post('/api/connectors/imap/backfill/preflight').send({})
+
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({
+      complete: false,
+      total: 97,
+      archiveCount: 5_359,
+      knownFolderCount: 1,
+    })
+  })
+
+  it('wakes the guarded worker immediately after the restart is persisted', async () => {
+    const syncInstanceById = vi.fn(async () => ({ synced: true as const, newMessages: 0 }))
+    setGlobalMailboxSyncDeps({ syncInstanceById })
+    const instance = {
+      id: 'inst_1', provider: 'imap', scope: 'user', connected: true,
+      connectedEmail: 'maya@harborlane.example', createdAt: new Date('2026-01-01T00:00:00Z'),
+      ingestionEnabled: false, config: { mailboxSync: { folders: {} } },
+    }
+    const { app, setConfigSystem } = makeApp({ instances: [instance], creds: CREDS })
+
+    const res = await request(app).post('/api/connectors/imap/backfill').send({ scope: 'all' })
+
+    expect(res.status).toBe(200)
+    expect(syncInstanceById).toHaveBeenCalledWith('inst_1')
+    expect(setConfigSystem.mock.invocationCallOrder[0]).toBeLessThan(syncInstanceById.mock.invocationCallOrder[0])
   })
 })
 

@@ -1103,6 +1103,32 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
   const readInstanceId = (v: unknown): string | undefined =>
     typeof v === 'string' && UUID_RE.test(v) ? v : undefined
 
+  /**
+   * Probe the live folder universe without trusting one LIST snapshot more
+   * than the durable archive/cursor evidence. A lower count may be legitimate
+   * after deletes or moves, but it is not safe to advertise as a complete
+   * full-history estimate.
+   */
+  async function probeImapHistory(
+    resolved: { instance: ConnectorInstance; settings: MailboxAccountSettings },
+  ) {
+    const state = readMailboxSyncState(resolved.instance.config)
+    const knownFolderPaths = Object.keys(state.folders)
+    const probe = opts.imapMailbox?.probe ?? probeMailboxFolders
+    const result = await probe(resolved.settings, undefined, knownFolderPaths)
+    const countArchive = opts.imapMailbox?.countArchive ?? countEmailArchiveMessages
+    const archived = await countArchive(resolved.instance.id)
+    const countedPaths = new Set(result.folders.map((folder) => folder.path))
+    const omittedKnownFolder = knownFolderPaths.some((path) => !countedPaths.has(path))
+    const complete = result.complete && !omittedKnownFolder && result.total >= archived.total
+    return {
+      ...result,
+      complete,
+      archiveCount: archived.total,
+      knownFolderCount: knownFolderPaths.length,
+    }
+  }
+
   // Connected-card status: archive counts + sync/backfill cursor state. No
   // IMAP round-trip — safe to poll.
   router.get('/imap/sync-status', async (req, res) => {
@@ -1166,8 +1192,7 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     try {
       const resolved = await resolveImapInstance(userId, readInstanceId((req.body ?? {}).instanceId))
       if (!resolved) { res.status(404).json({ error: 'No connected mailbox' }); return }
-      const probe = opts.imapMailbox?.probe ?? probeMailboxFolders
-      const result = await probe(resolved.settings)
+      const result = await probeImapHistory(resolved)
       res.json(result)
     } catch (err) {
       console.error('[connectors] imap backfill preflight failed:', err)
@@ -1190,8 +1215,7 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     try {
       const resolved = await resolveImapInstance(userId, readInstanceId((req.body ?? {}).instanceId))
       if (!resolved) { res.status(404).json({ error: 'No connected mailbox' }); return }
-      const probe = opts.imapMailbox?.probe ?? probeMailboxFolders
-      const probed = await probe(resolved.settings)
+      const probed = await probeImapHistory(resolved)
       const state = readMailboxSyncState(resolved.instance.config)
       const next: MailboxSyncState = {
         ...state,
@@ -1214,6 +1238,20 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
         },
       }
       await connectorInstanceStore.setConfigSystem(resolved.instance.id, { mailboxSync: next })
+      // The button is an action, not a promise that the periodic poller will
+      // eventually notice. Persist first, then wake the guarded worker. The
+      // five-minute tick remains the retry path, and an already-running pass
+      // returns `in_progress` without duplicating work.
+      const sync = getGlobalMailboxSyncDeps()
+      if (sync) {
+        void sync.syncInstanceById(resolved.instance.id).then((summary) => {
+          if (!summary.synced && summary.reason !== 'in_progress') {
+            console.warn(`[connectors] immediate imap backfill wake failed for ${resolved.instance.id}: ${summary.error ?? summary.reason}`)
+          }
+        }).catch((err) => {
+          console.warn(`[connectors] immediate imap backfill wake failed for ${resolved.instance.id}:`, err)
+        })
+      }
       res.json({
         ok: true,
         totalEstimate: probed.complete ? probed.total : null,

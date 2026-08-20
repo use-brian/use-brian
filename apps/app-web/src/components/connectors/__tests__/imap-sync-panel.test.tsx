@@ -181,6 +181,7 @@ describe("[COMP:web/imap-sync-panel] full-history recovery", () => {
     );
     expect(armCall).toBeDefined();
     expect(JSON.parse(String((armCall?.[1] as RequestInit).body))).toEqual({ scope: "all" });
+    expect(host.textContent).toContain(tm.fullResyncStarted);
   });
 
   it("keeps the all-history resync button available while the current walk is running", async () => {
@@ -252,7 +253,7 @@ describe("[COMP:web/imap-sync-panel] full-history recovery", () => {
     const { zh } = await import("@/lib/i18n/dictionaries/zh");
     for (const d of [en, ja, zh]) {
       const c = d.settings.connectors.imap;
-      for (const key of ["fullResyncBtn", "fullResyncArming", "fullResyncTitle", "fullResyncDescription", "fullResyncDescriptionUnknown", "fullResyncConfirm", "fullResyncCancel", "backfillCountsIncomplete"] as const) {
+      for (const key of ["fullResyncBtn", "fullResyncArming", "fullResyncTitle", "fullResyncDescription", "fullResyncDescriptionUnknown", "fullResyncStarted", "fullResyncConfirm", "fullResyncCancel", "backfillCountsIncomplete"] as const) {
         expect(typeof c[key]).toBe("string");
         expect(c[key]).not.toContain("\u2014");
       }

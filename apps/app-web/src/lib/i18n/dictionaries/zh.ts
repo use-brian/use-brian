@@ -1833,6 +1833,7 @@ export const zh: Dictionary = {
         fullResyncTitle: "要重新同步完整信箱歷史嗎？",
         fullResyncDescription: "郵件伺服器目前回報 {n} 封，但這個數量只是估計。Brian 會重新檢查每個資料夾，可能需要一些時間。此操作不會扣除點數。現有封存郵件仍可搜尋，只會加入遺漏的郵件。",
         fullResyncDescriptionUnknown: "郵件伺服器無法提供完整的郵件總數。Brian 仍會重新檢查每個資料夾並逐步找出遺漏的郵件，可能需要一些時間。此操作不會扣除點數。現有封存郵件仍可搜尋，只會加入遺漏的郵件。",
+        fullResyncStarted: "信箱歷史記錄檢查已開始。Brian 會在背景持續處理，並且只加入遺漏的郵件。",
         fullResyncConfirm: "重新同步全部",
         fullResyncCancel: "取消",
         scope12m: "最近 12 個月",

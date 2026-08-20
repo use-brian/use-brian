@@ -12,6 +12,7 @@ import { describe, it, expect, vi } from 'vitest'
 import {
   createMailboxSyncWorker,
   createMailboxBrainRouter,
+  CURRENT_BACKFILL_RECONCILE_VERSION,
   readMailboxSyncState,
   type MailboxBrainRouterDeps,
   type MailboxSyncWorkerDeps,
@@ -359,6 +360,121 @@ describe('[COMP:api/mailbox-sync-worker] backfill', () => {
     expect(readMailboxSyncState(configs.get('inst-1')).backfill?.status).toBe('done')
   })
 
+  it('recovers a previously seen folder omitted from LIST by addressing its saved path directly', async () => {
+    const sources = { 1: rfc822(1), 2: rfc822(2) }
+    const folders: Record<string, FakeFolderState> = {
+      INBOX: { uidvalidity: '7', uids: [1], sources },
+      Archive: { uidvalidity: '8', uids: [1, 2], sources },
+    }
+    const client = makeFakeImap(folders)
+    ;(client as { list: ImapClientLike['list'] }).list = async () => [{ path: 'INBOX' }]
+    const instance = instanceRow({
+      config: {
+        mailboxSync: {
+          folders: {
+            INBOX: { uidvalidity: '7', lastUid: 1, backfillDone: true },
+            Archive: { uidvalidity: '8', lastUid: 2 },
+          },
+          backfill: {
+            scope: 'all',
+            requestedAt: '2026-08-21T02:00:00Z',
+            reconcileVersion: CURRENT_BACKFILL_RECONCILE_VERSION,
+            status: 'running',
+          },
+        },
+      },
+    } as never)
+    const { worker, insertMessage, configs } = makeWorker({ client, instance, backfillChunk: 10 })
+
+    await worker.tick()
+
+    expect(insertMessage.mock.calls.map((call) => call[0].providerMessageId)).toEqual(['Archive:2', 'Archive:1'])
+    const state = readMailboxSyncState(configs.get('inst-1'))
+    expect(state.folders.Archive.backfillDone).toBe(true)
+    expect(state.folders.Archive.consecutiveListMisses).toBeUndefined()
+    expect(state.backfill?.status).toBe('done')
+  })
+
+  it('retires an omitted deleted folder only after repeated direct failures', async () => {
+    const folders: Record<string, FakeFolderState> = {
+      INBOX: { uidvalidity: '7', uids: [1], sources: { 1: rfc822(1) } },
+      Archive: { uidvalidity: '8', uids: [1], sources: { 1: rfc822(1) } },
+    }
+    const client = makeFakeImap(folders)
+    ;(client as { list: ImapClientLike['list'] }).list = async () => [{ path: 'INBOX' }]
+    const normalStatus = client.status.bind(client)
+    let archiveStatusCalls = 0
+    ;(client as { status: ImapClientLike['status'] }).status = async (path, query) => {
+      if (path === 'Archive') {
+        archiveStatusCalls++
+        throw new Error('mailbox does not exist')
+      }
+      return normalStatus(path, query)
+    }
+    const instance = instanceRow({
+      config: {
+        mailboxSync: {
+          folders: {
+            INBOX: { uidvalidity: '7', lastUid: 1, backfillDone: true },
+            Archive: { uidvalidity: '8', lastUid: 1 },
+          },
+          backfill: {
+            scope: 'all',
+            requestedAt: '2026-08-21T02:00:00Z',
+            reconcileVersion: CURRENT_BACKFILL_RECONCILE_VERSION,
+            status: 'running',
+          },
+        },
+      },
+    } as never)
+    const { worker, configs } = makeWorker({ client, instance, backfillChunk: 10 })
+
+    await worker.tick()
+    expect(readMailboxSyncState(configs.get('inst-1')).backfill?.status).toBe('running')
+    await worker.tick()
+    expect(readMailboxSyncState(configs.get('inst-1')).backfill?.status).toBe('running')
+    await worker.tick()
+
+    const state = readMailboxSyncState(configs.get('inst-1'))
+    expect(state.folders.Archive.consecutiveListMisses).toBe(3)
+    expect(state.backfill?.status).toBe('done')
+    await worker.tick()
+    expect(archiveStatusCalls).toBe(3)
+  })
+
+  it('reopens completed history when a folder appears on a later LIST pass', async () => {
+    const folders: Record<string, FakeFolderState> = {
+      INBOX: { uidvalidity: '7', uids: [1], sources: { 1: rfc822(1) } },
+    }
+    const client = makeFakeImap(folders)
+    const instance = instanceRow({
+      config: {
+        mailboxSync: {
+          folders: { INBOX: { uidvalidity: '7', lastUid: 1, backfillDone: true } },
+          backfill: {
+            scope: 'all',
+            requestedAt: '2026-08-21T02:00:00Z',
+            reconcileVersion: CURRENT_BACKFILL_RECONCILE_VERSION,
+            status: 'done',
+          },
+        },
+      },
+    } as never)
+    const { worker, insertMessage, configs } = makeWorker({ client, instance, backfillChunk: 10 })
+
+    await worker.tick()
+    expect(insertMessage).not.toHaveBeenCalled()
+    folders.Archive = {
+      uidvalidity: '8',
+      uids: [1, 2],
+      sources: { 1: rfc822(1), 2: rfc822(2) },
+    }
+    await worker.tick()
+
+    expect(insertMessage.mock.calls.map((call) => call[0].providerMessageId)).toEqual(['Archive:2', 'Archive:1'])
+    expect(readMailboxSyncState(configs.get('inst-1')).backfill?.status).toBe('done')
+  })
+
   it('does not let an in-flight worker pass overwrite a newer manual all-history restart', async () => {
     const { client, instance } = backfillSetup(10)
     let run: ReturnType<typeof makeWorker>
@@ -369,7 +485,7 @@ describe('[COMP:api/mailbox-sync-worker] backfill', () => {
           backfill: {
             scope: 'all',
             requestedAt: '2026-08-21T01:00:00Z',
-            reconcileVersion: 1,
+            reconcileVersion: CURRENT_BACKFILL_RECONCILE_VERSION,
             status: 'running',
           },
         },
@@ -410,7 +526,7 @@ describe('[COMP:api/mailbox-sync-worker] backfill', () => {
 
     expect(insertMessage.mock.calls.map((call) => call[0].providerMessageId)).toEqual(['INBOX:4', 'INBOX:2'])
     const repaired = readMailboxSyncState(configs.get('inst-1'))
-    expect(repaired.backfill?.reconcileVersion).toBe(1)
+    expect(repaired.backfill?.reconcileVersion).toBe(CURRENT_BACKFILL_RECONCILE_VERSION)
     expect(repaired.backfill?.status).toBe('done')
 
     const fetchesAfterRepair = client.fetchCalls.length
@@ -737,7 +853,7 @@ describe('[COMP:api/mailbox-sync-worker] backfill recovery', () => {
     expect(insertMessage).toHaveBeenCalledTimes(4)
   })
 
-  it('ignores a stale non-selectable cursor when deciding whether active folders are complete', async () => {
+  it('retires a stale cursor after bounded misses instead of holding completion open forever', async () => {
     const folders: Record<string, FakeFolderState> = {
       INBOX: { uidvalidity: '7', uids: [1], sources: { 1: rfc822(1) } },
     }
@@ -751,7 +867,7 @@ describe('[COMP:api/mailbox-sync-worker] backfill recovery', () => {
           backfill: {
             scope: 'all',
             requestedAt: '2026-08-01T00:00:00Z',
-            reconcileVersion: 1,
+            reconcileVersion: CURRENT_BACKFILL_RECONCILE_VERSION,
             status: 'running',
           },
         },
@@ -760,9 +876,12 @@ describe('[COMP:api/mailbox-sync-worker] backfill recovery', () => {
     const { worker, configs } = makeWorker({ client: makeFakeImap(folders), instance })
 
     await worker.tick()
+    await worker.tick()
+    await worker.tick()
 
     const state = readMailboxSyncState(configs.get('inst-1'))
     expect(state.folders['[Gmail]'].backfillDone).toBeUndefined()
+    expect(state.folders['[Gmail]'].consecutiveListMisses).toBe(3)
     expect(state.backfill?.status).toBe('done')
     expect(state.backfill?.totalEstimate).toBe(1)
     expect(state.backfill?.estimateComplete).toBe(true)
@@ -840,7 +959,7 @@ describe('[COMP:api/mailbox-sync-worker] backfill recovery', () => {
           backfill: {
             scope: 'all',
             requestedAt: '2026-08-01T00:00:00Z',
-            reconcileVersion: 1,
+            reconcileVersion: CURRENT_BACKFILL_RECONCILE_VERSION,
             status: 'running',
           },
         },
