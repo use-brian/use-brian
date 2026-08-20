@@ -49,7 +49,7 @@ import { processChannelMessage } from '../channel-pipeline.js'
 import { getChannelForWebhook, resolveRoutingForSurface } from '../../db/channels-store.js'
 import { findAssistantById } from '../../db/users.js'
 import { resolveChannelUser } from '../../db/channel-user-store.js'
-import { archiveUnroutedInbound, appendOutboundChatArchive } from '../../chat-archive/live-writer.js'
+import { archiveUnroutedInbound, appendOutboundChatArchive, resolveChatArchiveInstanceId } from '../../chat-archive/live-writer.js'
 import { hashBridgeToken } from '../../db/custom-channel-token.js'
 import type { CustomChannelStore, ClaimedOutboxItem, CustomChannelBridgeState } from '../../db/custom-channel-store.js'
 
@@ -116,7 +116,11 @@ function makeIntegrationStore(over: { config?: Record<string, unknown>; credenti
   }
 }
 
-function buildApp(opts: { integrationStore?: ReturnType<typeof makeIntegrationStore>; store?: CustomChannelStore } = {}) {
+function buildApp(opts: {
+  integrationStore?: ReturnType<typeof makeIntegrationStore>
+  store?: CustomChannelStore
+  archiveMedia?: { storeBuffer: ReturnType<typeof vi.fn>; uploadTarget: ReturnType<typeof vi.fn> }
+} = {}) {
   const { store } = opts.store ? { store: opts.store } : makeStore()
   const integrationStore = opts.integrationStore ?? makeIntegrationStore()
   const app = createTestApp('/bridge/v1/channels', customChannelBridgeRoutes({
@@ -129,6 +133,7 @@ function buildApp(opts: { integrationStore?: ReturnType<typeof makeIntegrationSt
     memoryStore: {} as never,
     capabilityStore: {} as never,
     sleep: async () => {},
+    archiveMedia: opts.archiveMedia as never,
   }))
   return { app, store, integrationStore }
 }
@@ -405,5 +410,166 @@ describe('[COMP:api/custom-channel-bridge] outbox', () => {
     const { app } = buildApp()
     const res = await request(app).post(`${BASE}/outbox/ack`).set('Authorization', `Bearer ${TOKEN}`).send({ results: [{ id: 'nope' }] })
     expect(res.status).toBe(400)
+  })
+})
+
+// A 1x1 PNG's worth of stand-in bytes, inline like the wechat bridge sends them.
+const PNG_B64 = Buffer.from('fake-image-bytes').toString('base64')
+
+function makeArchiveMedia() {
+  return {
+    storeBuffer: vi.fn(async (input: { filename: string; mime: string; bytes: Buffer }) => ({
+      assetId: '11111111-1111-1111-1111-111111111111',
+      sha256: 'a'.repeat(64),
+      filename: input.filename,
+      mime: input.mime,
+      sizeBytes: input.bytes.length,
+    })),
+    uploadTarget: vi.fn(),
+  }
+}
+
+describe('[COMP:api/custom-channel-bridge] archive-only exits stage media first', () => {
+  it('an unaddressed group image is staged and archived with a stored ref, not filename hints', async () => {
+    const archiveMedia = makeArchiveMedia()
+    vi.mocked(resolveChatArchiveInstanceId).mockResolvedValue('inst-1')
+    const { app } = buildApp({ archiveMedia })
+    const res = await request(app)
+      .post(`${BASE}/inbound`)
+      .set('Authorization', `Bearer ${TOKEN}`)
+      .send(inbound({
+        peerId: 'group-1', senderId: 'u-9', isGroupChat: true, isMentioned: false, text: '',
+        media: [{ kind: 'image', mime: 'image/jpeg', name: 'msg_6.jpg', dataBase64: PNG_B64 }],
+      }))
+    expect(res.status).toBe(202)
+    await flush()
+    expect(archiveMedia.storeBuffer).toHaveBeenCalledTimes(1)
+    expect(archiveMedia.storeBuffer.mock.calls[0][0]).toMatchObject({
+      workspaceId: 'ws-1',
+      instanceId: 'inst-1',
+      ownerUserId: 'owner',
+      source: 'custom',
+      providerMessageId: 'm-1',
+      kind: 'image',
+      filename: 'msg_6.jpg',
+    })
+    expect(archiveUnroutedInbound).toHaveBeenCalledTimes(1)
+    const appended = vi.mocked(archiveUnroutedInbound).mock.calls[0][0]
+    expect(appended.message.archiveMediaRef).toMatchObject({
+      assetId: '11111111-1111-1111-1111-111111111111',
+      sha256: 'a'.repeat(64),
+      filename: 'msg_6.jpg',
+    })
+    expect(appended.message.archiveMediaAvailability).toBeUndefined()
+    expect(processChannelMessage).not.toHaveBeenCalled()
+  })
+
+  it('threads the integration connector instance into staging AND the unrouted append', async () => {
+    const archiveMedia = makeArchiveMedia()
+    const integrationStore = makeIntegrationStore()
+    integrationStore.getByChannelForWebhook.mockResolvedValue({
+      id: 'int-1', channelId: CHANNEL_ID, config: {},
+      credentials: { bridge_token_hash: hashBridgeToken(TOKEN), kind: 'wechat-desktop' },
+      connectorInstanceId: 'inst-from-integration',
+    })
+    const { app } = buildApp({ archiveMedia, integrationStore })
+    await request(app)
+      .post(`${BASE}/inbound`)
+      .set('Authorization', `Bearer ${TOKEN}`)
+      .send(inbound({
+        peerId: 'group-1', senderId: 'u-9', isGroupChat: true, isMentioned: false, text: '',
+        media: [{ kind: 'image', mime: 'image/jpeg', name: 'p.jpg', dataBase64: PNG_B64 }],
+      }))
+    await flush()
+    // The store links assets by exact (instance, provider message id); a
+    // split here orphans the bytes and fails the append.
+    expect(archiveMedia.storeBuffer.mock.calls[0][0]).toMatchObject({ instanceId: 'inst-from-integration' })
+    expect(vi.mocked(archiveUnroutedInbound).mock.calls[0][0]).toMatchObject({ connectorInstanceId: 'inst-from-integration' })
+    expect(resolveChatArchiveInstanceId).not.toHaveBeenCalled()
+  })
+
+  it('a staging failure archives availability=failed, never drops the message', async () => {
+    const archiveMedia = makeArchiveMedia()
+    archiveMedia.storeBuffer.mockRejectedValue(new Error('store is down'))
+    vi.mocked(resolveChatArchiveInstanceId).mockResolvedValue('inst-1')
+    const { app } = buildApp({ archiveMedia })
+    await request(app)
+      .post(`${BASE}/inbound`)
+      .set('Authorization', `Bearer ${TOKEN}`)
+      .send(inbound({
+        peerId: 'group-1', senderId: 'u-9', isGroupChat: true, isMentioned: false, text: '',
+        media: [{ kind: 'image', mime: 'image/jpeg', name: 'p.jpg', dataBase64: PNG_B64 }],
+      }))
+    await flush()
+    expect(archiveUnroutedInbound).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(archiveUnroutedInbound).mock.calls[0][0].message.archiveMediaAvailability).toBe('failed')
+  })
+
+  it("the owner's own media message (isSelf) is staged and archived as outbound with a stored ref", async () => {
+    const archiveMedia = makeArchiveMedia()
+    vi.mocked(resolveChatArchiveInstanceId).mockResolvedValue('inst-1')
+    const { app } = buildApp({ archiveMedia })
+    const res = await request(app)
+      .post(`${BASE}/inbound`)
+      .set('Authorization', `Bearer ${TOKEN}`)
+      .send(inbound({
+        senderId: 'me', senderName: 'Ken', isSelf: true, text: '',
+        media: [{ kind: 'image', mime: 'image/jpeg', name: 'sent.jpg', dataBase64: PNG_B64 }],
+      }))
+    expect(res.status).toBe(202)
+    await flush()
+    expect(archiveMedia.storeBuffer).toHaveBeenCalledTimes(1)
+    expect(appendOutboundChatArchive).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(appendOutboundChatArchive).mock.calls[0][0]).toMatchObject({
+      source: 'custom',
+      archiveMedia: {
+        kind: 'image',
+        ref: { assetId: '11111111-1111-1111-1111-111111111111', filename: 'sent.jpg' },
+      },
+    })
+  })
+})
+
+describe('[COMP:api/custom-channel-bridge] outbound documents', () => {
+  async function runTurnAndGetParams(app: ReturnType<typeof buildApp>['app']) {
+    const res = await request(app).post(`${BASE}/inbound`).set('Authorization', `Bearer ${TOKEN}`).send(inbound())
+    expect(res.status).toBe(200)
+    await flush()
+    expect(processChannelMessage).toHaveBeenCalledTimes(1)
+    return vi.mocked(processChannelMessage).mock.calls[0][0] as unknown as {
+      channelDocumentsSupported?: boolean
+      hooks: { sendResponse: (text: string, documents?: Array<{ filename: string; mime: string; data: Uint8Array; caption?: string }>) => Promise<unknown> }
+    }
+  }
+
+  it('threads channelDocumentsSupported=true only when the bridge declared documents in its state', async () => {
+    const made = makeStore()
+    await made.store.putState(CHANNEL_ID, { status: 'connected', capabilities: { documents: true } })
+    const { app } = buildApp({ store: made.store })
+    const params = await runTurnAndGetParams(app)
+    expect(params.channelDocumentsSupported).toBe(true)
+  })
+
+  it('threads channelDocumentsSupported=false for a bridge that never declared it', async () => {
+    const { app } = buildApp()
+    const params = await runTurnAndGetParams(app)
+    expect(params.channelDocumentsSupported).toBe(false)
+  })
+
+  it('sendResponse forwards documents into the outbox item as base64', async () => {
+    const made = makeStore()
+    await made.store.putState(CHANNEL_ID, { status: 'connected', capabilities: { documents: true } })
+    const { app } = buildApp({ store: made.store })
+    const params = await runTurnAndGetParams(app)
+    await params.hooks.sendResponse('here is the file', [
+      { filename: 'sushi.jpg', mime: 'image/jpeg', data: new Uint8Array([1, 2, 3]), caption: 'from Jack' },
+    ])
+    const messages = made.items.filter((i) => i.type === 'message')
+    expect(messages).toHaveLength(1)
+    const payload = messages[0].payload as { text: string; documents?: Array<{ filename: string; mime: string; dataBase64: string; caption?: string }> }
+    expect(payload.text).toBe('here is the file')
+    expect(payload.documents).toHaveLength(1)
+    expect(payload.documents![0]).toMatchObject({ filename: 'sushi.jpg', mime: 'image/jpeg', caption: 'from Jack' })
+    expect(Buffer.from(payload.documents![0].dataBase64, 'base64')).toEqual(Buffer.from([1, 2, 3]))
   })
 })

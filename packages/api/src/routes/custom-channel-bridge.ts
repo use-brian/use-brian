@@ -169,6 +169,7 @@ export const bridgeStateSchema: z.ZodType<BridgeState> = z.object({
   accountLabel: z.string().max(500).optional(),
   action: bridgeActionSchema.optional(),
   bridgeVersion: z.string().max(200).optional(),
+  capabilities: z.object({ documents: z.boolean().optional() }).optional(),
 })
 
 const bridgeInboundMediaSchema = z.object({
@@ -478,7 +479,7 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
 
       // 2. The bridge account's own message: archive as outbound, never a turn.
       if (msg.isSelf) {
-        await archiveSelfMessage(channel, msg)
+        await archiveSelfMessage(channel, integration, msg)
         res.status(202).json({ ok: true, archivedOnly: true })
         return
       }
@@ -490,10 +491,25 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
       }
 
       const archiveOnly = async (why: string): Promise<void> => {
+        // Stage the bytes FIRST: these exits never reach processMessage's
+        // staging loop, and the bridge cursor advances after this ack — an
+        // attachment archived as filename-only here is unrecoverable.
+        const staged = await stageUnroutedBridgeMedia({
+          channel,
+          connectorInstanceId: integration.connectorInstanceId,
+          msg,
+        })
+        if (staged?.ref) {
+          incoming.archiveMediaRef = staged.ref
+          incoming.archiveMediaAvailability = undefined
+        } else if (staged?.failed) {
+          incoming.archiveMediaAvailability = 'failed'
+        }
         await archiveUnroutedInbound({
           source: 'custom',
           workspaceId: channel.workspaceId,
           conversationId: peerId,
+          connectorInstanceId: integration.connectorInstanceId,
           message: incoming,
         }).catch((err: unknown) => console.error('[custom-channel] unrouted archive append failed:', err))
         console.log(`[custom-channel] ${why} for ${peerId} on channel ${channelId} — archived, not answered`)
@@ -585,6 +601,11 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
       }
 
       // 8. Sequentialize per conversation.
+      // A file reply is deliverable only when THIS bridge declared it can put
+      // one on the wire (`capabilities.documents` in its /state report) — the
+      // static sendFile gate cannot answer that for `custom`, where capability
+      // is a per-bridge fact rather than a per-channel-type one.
+      const bridgeState = await store.getState(channelId).catch(() => null)
       await withChatLock(`custom:${channelId}:${peerId}`, () =>
         processMessage({
           adapter,
@@ -598,6 +619,7 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
           channelId,
           confirmKey,
           archiveConnectorInstanceId: integration.connectorInstanceId,
+          documentsCapable: bridgeState?.capabilities?.documents === true,
         }),
       )
     } catch (err) {
@@ -607,27 +629,132 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
   })
 
   /**
+   * Stage bridge media into the archive for a message that will be archived
+   * WITHOUT running a turn (unaddressed group, allow/blocklist, no routing,
+   * the owner's own message). The routed path stages inside `processMessage`;
+   * these exits used to archive filename hints and silently discard the bytes
+   * the bridge had already delivered — unrecoverable, because the bridge
+   * cursor advances and nothing re-fetches (`msg_6.jpg`, 2026-08-20). Staging
+   * targets the SAME (workspace, instance, owner) triple the append will use:
+   * the store links an asset by exact match and fails the append otherwise.
+   *
+   * Returns the first item's outcome (the append contract carries one media
+   * ref per message); every item is staged so extraction covers all of them.
+   */
+  async function stageUnroutedBridgeMedia(args: {
+    channel: Channel
+    connectorInstanceId: string | null | undefined
+    msg: BridgeInboundMessage
+  }): Promise<
+    | { ref: NonNullable<IncomingMessage['archiveMediaRef']>; failed?: undefined }
+    | { ref?: undefined; failed: true }
+    | null
+  > {
+    const media = args.msg.media ?? []
+    if (media.length === 0 || !options.archiveMedia || !args.msg.messageId) return null
+    let instanceId: string | null = null
+    let ownerUserId: string | null = null
+    try {
+      ownerUserId = await workspaceOwnerId(args.channel.workspaceId)
+      if (!ownerUserId) return null
+      instanceId = args.connectorInstanceId
+        ?? await resolveChatArchiveInstanceId({
+          source: 'custom',
+          ownerUserId,
+          workspaceId: args.channel.workspaceId,
+          assistantId: '',
+          assistantName: '',
+          conversationId: args.msg.peerId,
+        })
+      if (!instanceId) return null
+    } catch (err) {
+      console.error('[custom-channel] unrouted archive media target resolution failed:', err)
+      return { failed: true }
+    }
+    let first: NonNullable<IncomingMessage['archiveMediaRef']> | null = null
+    let firstFailed = false
+    for (const [index, item] of media.entries()) {
+      const kind = item.kind === 'document' ? 'file' : item.kind === 'audio' ? 'voice' : item.kind
+      try {
+        const bytes = await loadMediaBytes(item)
+        const staged = await options.archiveMedia.storeBuffer({
+          workspaceId: args.channel.workspaceId,
+          instanceId,
+          ownerUserId,
+          source: 'custom',
+          providerMessageId: media.length > 1 ? `${args.msg.messageId}#${index}` : args.msg.messageId,
+          kind,
+          filename: item.name,
+          mime: item.mime,
+          bytes,
+        })
+        if (index === 0) {
+          first = {
+            assetId: staged.assetId,
+            sha256: staged.sha256,
+            filename: staged.filename,
+            mime: staged.mime,
+            sizeBytes: staged.sizeBytes,
+          }
+        }
+      } catch (err) {
+        if (index === 0) firstFailed = true
+        console.error('[custom-channel] unrouted archive media staging failed:', err)
+      }
+    }
+    if (first) return { ref: first }
+    if (firstFailed) return { failed: true }
+    return null
+  }
+
+  /**
    * `isSelf`: the owner's own phone reply. It belongs in the archive as an
    * OUTBOUND message on that conversation so the model's history and the
    * owner's real replies line up. The live writer keys outbound appends by a
    * session message id; a bridge-relayed self message has no session row, so
    * a synthetic `bridge-self:<messageId>` cursor stands in.
    */
-  async function archiveSelfMessage(channel: Channel, msg: BridgeInboundMessage): Promise<void> {
+  async function archiveSelfMessage(
+    channel: Channel,
+    integration: ChannelIntegrationWithCredentials,
+    msg: BridgeInboundMessage,
+  ): Promise<void> {
     try {
       const ownerUserId = await workspaceOwnerId(channel.workspaceId)
       if (!ownerUserId) return
       const state = await store.getState(channel.id).catch(() => null)
+      const firstMedia = (msg.media ?? [])[0]
+      let archiveMedia: Parameters<typeof appendOutboundChatArchive>[0]['archiveMedia']
+      if (firstMedia) {
+        const kind = firstMedia.kind === 'document' ? 'file' : firstMedia.kind === 'audio' ? 'voice' : firstMedia.kind
+        const staged = await stageUnroutedBridgeMedia({
+          channel,
+          connectorInstanceId: integration.connectorInstanceId,
+          msg,
+        })
+        archiveMedia = staged?.ref
+          ? { kind, ref: staged.ref }
+          : {
+              kind,
+              ref: null,
+              availability: staged?.failed ? 'failed' : 'missing',
+              filename: firstMedia.name,
+              mime: firstMedia.mime,
+              sizeBytes: firstMedia.sizeBytes ?? 0,
+            }
+      }
       await appendOutboundChatArchive({
         source: 'custom',
         ownerUserId,
         workspaceId: channel.workspaceId,
+        connectorInstanceId: integration.connectorInstanceId,
         assistantId: msg.senderId,
         assistantName: msg.senderName ?? state?.accountLabel ?? msg.senderId,
         conversationId: msg.peerId,
         sessionMessageId: `bridge-self:${msg.messageId}`,
         providerMessageId: msg.messageId,
         text: msg.text,
+        archiveMedia,
         replyToProviderId: msg.replyToMessageId ?? null,
       })
     } catch (err) {
@@ -647,6 +774,7 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
     channelId: string
     confirmKey: string
     archiveConnectorInstanceId?: string | null
+    documentsCapable?: boolean
   }): Promise<void> {
     const { adapter, incoming, bridgeMessage, assistant, channelUserId, ownerId, isIdentified, routing, channelId, confirmKey } = params
     const peerId = incoming.channelId
@@ -800,6 +928,7 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
       incomingChannelMessageId: incoming.messageId ?? null,
       archiveIncoming: incoming,
       archiveConnectorInstanceId: params.archiveConnectorInstanceId,
+      channelDocumentsSupported: params.documentsCapable === true,
       modelAlias: routing.modelAlias,
       adaptiveResearchEnabled: true,
       abortController,
@@ -853,11 +982,19 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
             text: `${displayName}${inputSummary}\n\n${replyHint}`,
           })
         },
-        async sendResponse(text) {
+        async sendResponse(text, documents) {
           const finalText = text.replace(/[\u200B-\u200D\uFEFF]/g, '').trim()
           const reply = finalText || "I couldn't generate a reply - please rephrase or try again."
           await cancelTyping()
-          const channelMessageId = await adapter.sendMessage(peerId, { text: reply, format: 'markdown' })
+          // Documents reach this hook only when the sendFile gate admitted
+          // them, which for `custom` requires the bridge's declared
+          // `capabilities.documents` \u2014 the adapter base64-encodes them into
+          // the outbox item and the bridge performs the real file send.
+          const channelMessageId = await adapter.sendMessage(peerId, {
+            text: reply,
+            format: 'markdown',
+            ...(documents && documents.length > 0 ? { documents } : {}),
+          })
           return channelMessageId ? { channelMessageId } : undefined
         },
         async onDowngraded(resetsAt) {

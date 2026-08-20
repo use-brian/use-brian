@@ -122,4 +122,56 @@ describe('[COMP:api/chat-archive-live-capture] normalizer', () => {
       media_ref: { filename: 'report.pdf', mime: 'application/pdf', size_bytes: 7 },
     })
   })
+
+  it('normalizes an outbound self message with a STAGED archive asset as a stored v2 ref', () => {
+    // The owner's own photo relayed by a bridge: bytes were staged before the
+    // append, so the ref must carry asset identity + availability=stored —
+    // that is what lets the store link the bytes and run extraction.
+    const result = normalizeOutboundChatMessage({
+      providerMessageId: 'wx-self-9',
+      conversationId: 'c-1',
+      assistantId: 'me',
+      assistantName: 'Ken',
+      text: '',
+      archiveMedia: {
+        kind: 'image',
+        ref: { assetId: 'asset-1', sha256: 'f'.repeat(64), filename: 'sent.jpg', mime: 'image/jpeg', sizeBytes: 123 },
+      },
+    })
+    expect(result).toMatchObject({
+      direction: 'outbound',
+      kind: 'image',
+      body_text: null,
+      media_ref: {
+        asset_id: 'asset-1',
+        sha256: 'f'.repeat(64),
+        availability: 'stored',
+        filename: 'sent.jpg',
+        mime: 'image/jpeg',
+        size_bytes: 123,
+      },
+    })
+  })
+
+  it('normalizes an outbound self message whose staging failed as availability=failed, never silently text-only', () => {
+    const result = normalizeOutboundChatMessage({
+      providerMessageId: 'wx-self-10',
+      conversationId: 'c-1',
+      assistantId: 'me',
+      assistantName: 'Ken',
+      text: '',
+      archiveMedia: {
+        kind: 'image',
+        ref: null,
+        availability: 'failed',
+        filename: 'sent.jpg',
+        mime: 'image/jpeg',
+        sizeBytes: 0,
+      },
+    })
+    expect(result).toMatchObject({
+      kind: 'image',
+      media_ref: { availability: 'failed', filename: 'sent.jpg', mime: 'image/jpeg' },
+    })
+  })
 })

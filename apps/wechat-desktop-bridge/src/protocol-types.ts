@@ -25,6 +25,8 @@ export type BridgeState = {
   action?: BridgeAction
   /** Bridge build / version string for the Studio card. */
   bridgeVersion?: string
+  /** What this bridge can put on the wire; unlocks `sendFile` on the platform side. */
+  capabilities?: { documents?: boolean }
 }
 
 export type BridgeMediaKind = 'image' | 'document' | 'voice' | 'audio' | 'video'

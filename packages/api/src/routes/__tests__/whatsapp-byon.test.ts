@@ -400,3 +400,76 @@ describe('[COMP:api/whatsapp-byon-route] internal routing', () => {
     expect(captured[0]).toMatchObject({ archiveMediaAvailability: 'failed' })
   })
 })
+
+describe('[COMP:api/whatsapp-contact-directory] contact directory relay', () => {
+  function contactsApp(over: {
+    archiveContacts?: ReturnType<typeof vi.fn>
+    connectorInstanceId?: string | null
+  } = {}) {
+    const archiveContacts = over.archiveContacts
+    const app = express()
+    app.use(express.json())
+    app.use('/internal/whatsapp', whatsappByonRoutes({
+      connectorSecret: 'secret',
+      integrationStore: {
+        getByChannelForWebhook: vi.fn(async () => ({ connectorInstanceId: over.connectorInstanceId ?? 'inst-1' })),
+      } as never,
+      ingestor: {} as never,
+      bot: {} as never,
+      getChannel: vi.fn(async () => ({ workspaceId: 'ws-1' })) as never,
+      getWorkspaceOwnerUserId: vi.fn(async () => 'owner-1'),
+      archiveContacts: archiveContacts as never,
+    }))
+    return app
+  }
+
+  it('rejects a bad secret and a bad payload', async () => {
+    const app = contactsApp({ archiveContacts: vi.fn() })
+    expect((await request(app).post('/internal/whatsapp/contacts').set('X-Connector-Secret', 'wrong')
+      .send({ channelId: 'c', contacts: [{ contactId: 'x' }] })).status).toBe(401)
+    expect((await request(app).post('/internal/whatsapp/contacts').set('X-Connector-Secret', 'secret')
+      .send({ channelId: 'c', contacts: [] })).status).toBe(400)
+  })
+
+  it('202-skips when no archive is deployed, instead of erroring the connector', async () => {
+    const app = contactsApp({ archiveContacts: undefined })
+    const res = await request(app).post('/internal/whatsapp/contacts').set('X-Connector-Secret', 'secret')
+      .send({ channelId: 'byon-channel', contacts: [{ contactId: '852@s.whatsapp.net', savedName: 'Ken' }] })
+    expect(res.status).toBe(202)
+    expect(res.body).toMatchObject({ ok: true, skipped: true })
+  })
+
+  it('upserts named contacts under the channel workspace/owner/instance and drops nameless ones', async () => {
+    const archiveContacts = vi.fn(async () => ({ upserted: 2 }))
+    const app = contactsApp({ archiveContacts })
+    const res = await request(app).post('/internal/whatsapp/contacts').set('X-Connector-Secret', 'secret')
+      .send({
+        channelId: 'byon-channel',
+        contacts: [
+          { contactId: '85266986281@s.whatsapp.net', savedName: 'Jack Chan', pushName: 'jackie' },
+          { contactId: '15551234567@s.whatsapp.net', pushName: 'Sam' },
+          { contactId: 'nameless@s.whatsapp.net' },
+        ],
+      })
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ ok: true, upserted: 2 })
+    expect(archiveContacts).toHaveBeenCalledWith({
+      workspaceId: 'ws-1',
+      instanceId: 'inst-1',
+      ownerUserId: 'owner-1',
+      source: 'whatsapp',
+      contacts: [
+        { contactId: '85266986281@s.whatsapp.net', savedName: 'Jack Chan', pushName: 'jackie' },
+        { contactId: '15551234567@s.whatsapp.net', pushName: 'Sam' },
+      ],
+    })
+  })
+
+  it('reports an archive failure as 502, never a silent success', async () => {
+    const archiveContacts = vi.fn(async () => { throw new Error('store down') })
+    const app = contactsApp({ archiveContacts })
+    const res = await request(app).post('/internal/whatsapp/contacts').set('X-Connector-Secret', 'secret')
+      .send({ channelId: 'byon-channel', contacts: [{ contactId: 'x@s.whatsapp.net', savedName: 'X' }] })
+    expect(res.status).toBe(502)
+  })
+})

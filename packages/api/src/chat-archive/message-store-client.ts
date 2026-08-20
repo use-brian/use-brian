@@ -21,6 +21,7 @@ import { createHash, createHmac } from 'node:crypto'
 
 /** Contract identifiers. Bump deliberately; the store may be an old build. */
 export const SEARCH_CONTRACT_V1 = 'ub.chat.search.v1'
+export const CONTACTS_CONTRACT_V1 = 'ub.chat.contacts.v1'
 
 export type ChatArchiveHit = {
   segment_id: string
@@ -31,6 +32,8 @@ export type ChatArchiveHit = {
   conversation_id: string
   sender_id: string
   sender_display?: string
+  /** The owner's saved name for this sender, from the synced contact directory. */
+  sender_contact_name?: string
   sent_at: string
   direction: string
   kind: string
@@ -77,6 +80,8 @@ export type ChatChannel = {
   last_message_preview: string
   last_sender_id?: string
   last_sender_display?: string
+  /** The owner's saved name for the last sender, from the synced contact directory. */
+  last_sender_contact_name?: string
   last_direction: string
 }
 
@@ -252,6 +257,46 @@ export class MessageStoreClient {
   }
 
   /**
+   * Reads attachment bytes back out of the archive.
+   *
+   * Owner-bound: the store resolves the digest under the owner's row-level
+   * security, and a digest belonging to someone else is a 404 deliberately
+   * indistinguishable from a missing one. The digest comes from a search hit's
+   * `media_sha256`; there is no lookup by asset id.
+   *
+   * `maxBytes` is enforced against Content-Length before buffering — archive
+   * per-kind ceilings (512 MB video) are far above what any delivery path
+   * accepts, so the caller must state its own bound.
+   */
+  async downloadMedia(input: {
+    ownerUserId: string
+    sha256: string
+    maxBytes: number
+  }): Promise<{ bytes: Buffer; mime: string }> {
+    const digest = input.sha256.trim().toLowerCase()
+    if (!/^[0-9a-f]{64}$/.test(digest)) {
+      throw new Error('downloadMedia requires a 64-hex sha256 digest')
+    }
+    const params = new URLSearchParams({ owner_user_id: input.ownerUserId })
+    const requestUri = `/media/${digest}?${params.toString()}`
+    const response = await this.send('GET', requestUri, {
+      'X-UB-Signature': signRequest('GET', requestUri, this.secret),
+    })
+    const declared = Number(response.headers.get('content-length') ?? '0')
+    if (declared > input.maxBytes) {
+      throw new Error(`archive media is ${declared} bytes — over the ${input.maxBytes}-byte limit for this operation`)
+    }
+    const bytes = Buffer.from(await response.arrayBuffer())
+    if (bytes.length > input.maxBytes) {
+      throw new Error(`archive media is ${bytes.length} bytes — over the ${input.maxBytes}-byte limit for this operation`)
+    }
+    return {
+      bytes,
+      mime: response.headers.get('content-type') ?? 'application/octet-stream',
+    }
+  }
+
+  /**
    * Lists archived conversations, most recently active first.
    *
    * Nothing in the archive stores a human-readable channel name — provider
@@ -272,6 +317,48 @@ export class MessageStoreClient {
     })
     const body = (await response.json()) as { channels?: ChatChannel[] }
     return body.channels ?? []
+  }
+
+  /**
+   * Upserts the owner's contact directory for one channel connector.
+   *
+   * Names resolve at QUERY time (search/channels join the directory on
+   * `sender_id`), so a directory entry that arrives after the messages did
+   * still names every old row — the archive's raw `sender_display` stays
+   * whatever the provider sent with each message.
+   *
+   * Empty strings never clobber a stored name; the store keeps the previous
+   * non-empty value per column.
+   */
+  async upsertContacts(input: {
+    workspaceId: string
+    instanceId: string
+    ownerUserId: string
+    source: string
+    contacts: Array<{
+      contactId: string
+      /** The owner's own address-book name for this contact (the strongest label). */
+      savedName?: string | null
+      /** The name the contact set for themselves (WhatsApp pushName). */
+      pushName?: string | null
+      /** Business-verified display name, when the platform provides one. */
+      verifiedName?: string | null
+    }>
+  }): Promise<{ upserted: number }> {
+    if (input.contacts.length === 0) return { upserted: 0 }
+    return this.postJson<{ upserted: number }>('/contacts', {
+      contract: CONTACTS_CONTRACT_V1,
+      workspace_id: input.workspaceId,
+      instance_id: input.instanceId,
+      owner_user_id: input.ownerUserId,
+      source: input.source,
+      contacts: input.contacts.map((c) => ({
+        contact_id: c.contactId,
+        ...(c.savedName ? { saved_name: c.savedName } : {}),
+        ...(c.pushName ? { push_name: c.pushName } : {}),
+        ...(c.verifiedName ? { verified_name: c.verifiedName } : {}),
+      })),
+    })
   }
 
   /** Leases enrichment windows for Pipeline B. */

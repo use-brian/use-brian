@@ -234,6 +234,17 @@ export type ToolContext = {
   outboundAttachments?: AttachmentCollector
 
   /**
+   * Per-channel-INSTANCE document capability, for channel types where file
+   * delivery is a per-connection fact rather than a per-type one. A `custom`
+   * bridge declares `capabilities.documents` in its state report and the
+   * route threads the answer here; `sendFile` admits the channel when this is
+   * true even though `custom` stays out of the static
+   * `DOCUMENT_CAPABLE_CHANNELS` set (an undeclared bridge would silently drop
+   * the enqueued documents). Absent everywhere else — the static set decides.
+   */
+  channelDocumentsSupported?: boolean
+
+  /**
    * Per-turn accumulator. Every read of a KB entry / memory / episodic row
    * calls `note(row.sensitivity)` so that subsequent write tools (saveMemory,
    * addKnowledgeEntry) can stamp rows with the max sensitivity of what the

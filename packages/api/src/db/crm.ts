@@ -551,7 +551,15 @@ export async function listContacts(ctx: AccessContext, filters: ContactListFilte
   let idx = ap.nextIdx
 
   if (filters.query) {
-    wheres.push(`(e.display_name ILIKE $${idx} OR e.attributes->>'email' ILIKE $${idx})`)
+    // A phone-shaped query ("+852 6698 6281", "85266986281") must find the
+    // contact regardless of how the stored number is spaced or prefixed, so
+    // both sides compare digits-only. Gated on >= 5 query digits: shorter
+    // digit runs ("Suite 21") are not phone searches and would fan out.
+    const queryDigits = filters.query.replace(/\D/g, '')
+    const phoneArm = queryDigits.length >= 5
+      ? ` OR regexp_replace(COALESCE(e.attributes->>'phone', ''), '[^0-9]', '', 'g') LIKE '%' || regexp_replace($${idx}, '[^0-9]', '', 'g') || '%'`
+      : ''
+    wheres.push(`(e.display_name ILIKE $${idx} OR e.attributes->>'email' ILIKE $${idx}${phoneArm})`)
     values.push(`%${filters.query}%`); idx++
   }
   if (filters.tag) {

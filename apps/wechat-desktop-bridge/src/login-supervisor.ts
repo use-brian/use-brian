@@ -69,7 +69,14 @@ export function createLoginSupervisor(deps: LoginSupervisorDeps): LoginSuperviso
   let ticking = false
 
   async function publish(state: BridgeState): Promise<void> {
-    const next: BridgeState = { ...state, bridgeVersion: deps.bridgeVersion }
+    // `documents: true` is a promise the outbox worker keeps: it performs a
+    // real file send for `payload.documents` (outbox-worker.ts), so the
+    // platform's `sendFile` may admit this channel.
+    const next: BridgeState = {
+      ...state,
+      bridgeVersion: deps.bridgeVersion,
+      capabilities: { documents: true, ...state.capabilities },
+    }
     if (last && JSON.stringify(last) === JSON.stringify(next)) return
     try {
       await deps.bridge.putState(next)

@@ -84,7 +84,10 @@ export function createSendFileTool(
       // The pipeline hands documents to every adapter and the incapable ones
       // drop them silently, so without this the tool would report success and
       // the model would tell the user a file is attached that never arrives.
-      if (!DOCUMENT_CAPABLE_CHANNELS.has(context.channelType)) {
+      // `channelDocumentsSupported` admits a channel INSTANCE that proved the
+      // capability at runtime (a custom bridge declaring `documents` in its
+      // state report) without widening the static per-type set.
+      if (!DOCUMENT_CAPABLE_CHANNELS.has(context.channelType) && context.channelDocumentsSupported !== true) {
         const where = 'Tell the user to fetch the file from the web app, or to ask again on web chat, Telegram, or Slack.'
         return {
           data:

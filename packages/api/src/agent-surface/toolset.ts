@@ -52,6 +52,7 @@ const BRIDGE_READ_NAMES = [
   'getRowHistory',
   // Person-compartmented local chat archive
   'searchChatHistory',
+  'listChatChannels',
   // Scheduling + ingest reads
   'searchScheduledJobs',
   'listIngestRules',
