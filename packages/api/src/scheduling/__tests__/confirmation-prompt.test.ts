@@ -19,9 +19,10 @@ vi.mock('@use-brian/channels', async (importOriginal) => ({
   createSlackAdapter: vi.fn(),
   createTelegramAdapter: vi.fn(),
   createWhatsAppAdapter: vi.fn(),
+  createCustomAdapter: vi.fn(),
 }))
 
-import { createSlackAdapter, createTelegramAdapter, SlackApiError } from '@use-brian/channels'
+import { createCustomAdapter, createSlackAdapter, createTelegramAdapter, SlackApiError } from '@use-brian/channels'
 import type { ToolConfirmationRequest } from '@use-brian/core'
 
 import { resolveTelegramBotToken, sendConfirmationPrompt } from '../confirmation-prompt.js'
@@ -29,6 +30,7 @@ import type { ChannelIntegrationStore } from '../../db/channel-integrations.js'
 
 const mockCreateTelegramAdapter = vi.mocked(createTelegramAdapter)
 const mockCreateSlackAdapter = vi.mocked(createSlackAdapter)
+const mockCreateCustomAdapter = vi.mocked(createCustomAdapter)
 
 /** The slice of the channel adapter's `sendMessage` this module exercises. */
 type SendMessage = (
@@ -158,6 +160,41 @@ describe('[COMP:scheduling/confirmation-prompt] sendConfirmationPrompt', () => {
 
     const msg = sendMessage.mock.calls[0][1]
     expect(msg.actions?.map((a) => a.id)).toEqual(['allow', 'deny', 'always', 'never'])
+  })
+
+  it('enqueues a text confirmation on the selected custom-channel bridge', async () => {
+    const sendMessage = vi.fn<SendMessage>(async () => {})
+    mockCreateCustomAdapter.mockReturnValue({ sendMessage } as never)
+    const integrationStore = fakeIntegrationStore('unused')
+    vi.mocked(integrationStore.getCredentialsForAssistantIntegrationSystem).mockResolvedValueOnce({
+      channelId: 'bridge-channel-1',
+      credentials: {},
+    } as never)
+    const enqueue = vi.fn(async () => 'outbox-1')
+
+    const result = await sendConfirmationPrompt(
+      {
+        workspaceId: 'ws-1',
+        assistantId: 'a_1',
+        channelType: 'custom',
+        channelId: 'peer-1',
+        channelIntegrationId: 'integration-1',
+      },
+      { ...req, allowPersistentApproval: true },
+      {
+        integrationStore,
+        customChannelStore: { enqueue },
+      },
+    )
+
+    expect(result).toEqual({ delivered: true, channelType: 'custom' })
+    expect(integrationStore.getCredentialsForAssistantIntegrationSystem).toHaveBeenCalledWith(
+      'ws-1', 'a_1', 'integration-1', 'custom', 'peer-1',
+    )
+    expect(mockCreateCustomAdapter).toHaveBeenCalledOnce()
+    expect(sendMessage).toHaveBeenCalledWith('peer-1', {
+      text: expect.stringContaining('Reply: yes / no / always / never'),
+    })
   })
 
   it('does not build an adapter for a telegram target with no resolvable token', async () => {

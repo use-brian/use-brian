@@ -35,9 +35,10 @@ export type BridgeInboundMedia = {
   kind: BridgeMediaKind
   mime: string
   name: string
-  /** Exactly one of dataBase64 / url. */
+  /** Exactly one of dataBase64 / url / stored. */
   dataBase64?: string
   url?: string
+  stored?: { assetId: string; sha256: string }
   sizeBytes?: number
   durationSec?: number
 }
@@ -62,7 +63,21 @@ export type BridgeInboundMessage = {
   media?: BridgeInboundMedia[]
 }
 
-export type BridgeInbound = { message: BridgeInboundMessage }
+export type BridgeInbound = {
+  message: BridgeInboundMessage
+  /**
+   * Media upgrade (additive, v1.2; send only when the hello `features`
+   * include 'media_upgrade'): `message` was already delivered and `media`
+   * now carries better bytes for the same `messageId`. The server re-stages
+   * the asset and re-appends the archive row; it never runs a turn.
+   */
+  mediaUpgrade?: boolean
+}
+
+/** Hello `features` name for the media-upgrade ability. */
+export const FEATURE_MEDIA_UPGRADE = 'media_upgrade'
+/** Hello `features` name for raw streamed media uploads. */
+export const FEATURE_MEDIA_STREAM = 'media_stream'
 
 type OutboxDocument = { filename: string; mime: string; dataBase64: string; caption?: string }
 
@@ -80,6 +95,7 @@ export type OutboxItem =
       }
     }
   | { id: string; type: 'typing'; peerId: string; createdAt: string; payload: { on: boolean } }
+  | { id: string; type: 'status'; peerId: string; createdAt: string; payload: { text: string } }
   | { id: string; type: 'input'; peerId: null; createdAt: string; payload: { requestId: string; value: string } }
   | { id: string; type: 'disconnect'; peerId: null; createdAt: string; payload: Record<string, never> }
 
@@ -92,5 +108,7 @@ export type HelloResponse = {
   kind: string | null
   config: { requireMention?: boolean; userAccessMode?: string }
   protocol: number
+  /** Optional server abilities by name (additive, v1.2). Absent on older platforms. */
+  features?: string[]
   serverTime: string
 }

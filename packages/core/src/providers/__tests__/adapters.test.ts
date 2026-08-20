@@ -190,7 +190,10 @@ describe('[COMP:media/backend] Multimodal backend per adapter', () => {
     expect(res.text).toContain('[Figure: bar chart of revenue]')
     expect(res.model).toBe(DASHSCOPE_VISION_MODEL)
     expect(res.usage).toEqual({ inputTokens: 20, outputTokens: 8 })
-  })
+    // This is a routing contract, not a latency assertion. PDF.js + the native
+    // canvas can spend more than Vitest's 5s default starting under the full
+    // concurrent CI suite (the same reason the 12-page case below has 20s).
+  }, 20_000)
 
   it('reads past the retired 10-page cap, batching pages into chunked calls', async () => {
     // The visual track used to stop at DASHSCOPE_MAX_PDF_VISUAL_PAGES = 10,

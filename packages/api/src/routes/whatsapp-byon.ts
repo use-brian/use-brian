@@ -539,6 +539,27 @@ export function whatsappByonRoutes(opts: WhatsappByonRoutesOptions): Router {
           : null
         if (channel && ownerUserId) {
           const integration = await opts.integrationStore.getByChannelForWebhook(input.channelId, 'whatsapp')
+          // The staging block above already stored the bytes; without the ref
+          // here the outbound row archives text-only and the unlinked asset is
+          // swept after the grace period — every owner-sent image used to
+          // vanish this way (zero outbound whatsapp media rows, 2026-08-20).
+          let archiveMedia: Parameters<typeof appendOutboundChatArchive>[0]['archiveMedia']
+          if (input.archiveMediaType) {
+            const kind = input.archiveMediaType === 'photo' ? ('image' as const)
+              : input.archiveMediaType === 'video' ? ('video' as const)
+                : input.archiveMediaType === 'voice' ? ('voice' as const)
+                  : ('file' as const)
+            archiveMedia = input.archiveMediaRef
+              ? { kind, ref: input.archiveMediaRef }
+              : {
+                  kind,
+                  ref: null,
+                  availability: input.archiveMediaAvailability === 'failed' ? 'failed' : 'missing',
+                  filename: input.archiveMediaName,
+                  mime: input.archiveMediaMime,
+                  sizeBytes: input.archiveMediaSizeBytes ?? 0,
+                }
+          }
           await appendOutboundChatArchive({
             source: 'whatsapp',
             ownerUserId,
@@ -550,6 +571,7 @@ export function whatsappByonRoutes(opts: WhatsappByonRoutesOptions): Router {
             sessionMessageId: `wa-self:${input.messageId}`,
             providerMessageId: input.messageId,
             text: /^<media:[^>]+>$/.test(input.text.trim()) ? '' : input.text,
+            archiveMedia,
             replyToProviderId: null,
           })
         }

@@ -127,7 +127,7 @@ describe('[COMP:app/wechat-desktop-bridge] mapMessage', () => {
     expect(messageMayHaveMedia({ type: 3 })).toBe(true)
     expect(messageMayHaveMedia({ type: 49 })).toBe(true)
     expect(messageMayHaveMedia({ type: 1 })).toBe(false)
-    expect(messageMayHaveMedia({ type: 47 })).toBe(false)
+    expect(messageMayHaveMedia({ type: 47 })).toBe(true)
     expect(mimeForMedia({ type: 'file', format: 'docx' })).toBe(
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     )

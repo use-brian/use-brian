@@ -36,6 +36,7 @@ import {
   createCustomAdapter,
   bridgeInboundOversize,
   CUSTOM_CHANNEL_PROTOCOL_VERSION,
+  CUSTOM_CHANNEL_FEATURES,
   BRIDGE_INBOUND_TEXT_MAX_BYTES,
   BRIDGE_INBOUND_MEDIA_MAX_ITEMS,
   BRIDGE_INBOUND_MEDIA_MAX_BYTES,
@@ -48,7 +49,15 @@ import {
   type OutboxItem,
 } from '@use-brian/channels'
 import type { IncomingMessage } from '@use-brian/channels'
-import { parseFileContent, sanitize as sanitizeAnalytics } from '@use-brian/core'
+import {
+  composeVoiceTurnText,
+  parseFileContent,
+  sanitize as sanitizeAnalytics,
+  transcribeFirstAudio,
+  TRANSCRIPTION_DISABLED_REASON,
+  type MediaBackend,
+  type TokenUsage,
+} from '@use-brian/core'
 import type { ConfirmationDecision, ConfirmationResolver, ContentBlock } from '@use-brian/core'
 import type { LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, McpSettingsStore } from '@use-brian/core'
 import { getToolDisplayName, formatConfirmationInput } from '@use-brian/shared'
@@ -63,6 +72,7 @@ import type {
   CustomChannelCredentials,
 } from '../db/channel-integrations.js'
 import type { CustomChannelStore } from '../db/custom-channel-store.js'
+import type { DeferredConfirmationStore } from '../db/deferred-confirmation-store.js'
 import { bridgeTokenMatches } from '../db/custom-channel-token.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import { query } from '../db/client.js'
@@ -71,12 +81,13 @@ import { channelUserErrorText } from './_channel-error-text.js'
 import { cacheInboundImageTag } from './channel-file-cache.js'
 import { billingPartyForAssistant } from '../billing-party.js'
 import type { ChatArchiveLiveMedia } from '../chat-archive/live-media.js'
-import { archiveMediaRef } from '../chat-archive/live-media.js'
+import { archiveMediaRef, mediaByteLimit, type ChatArchiveMediaKind } from '../chat-archive/live-media.js'
 import {
   resolveChatArchiveInstanceId,
   archiveUnroutedInbound,
   appendOutboundChatArchive,
 } from '../chat-archive/live-writer.js'
+import { tryResolveSchedulerConfirmation } from '../scheduling/confirmation-registry.js'
 
 export type CustomChannelBridgeRouteOptions = {
   /** Servable background-lane model, resolved at boot; forwarded to the
@@ -92,6 +103,7 @@ export type CustomChannelBridgeRouteOptions = {
   checkCreditBudget?: import('./route-helpers.js').CreditBudgetGate
   integrationStore: ChannelIntegrationStore
   customChannelStore: CustomChannelStore
+  deferredConfirmationStore?: DeferredConfirmationStore
   channelUserStore?: ChannelUserStore
   workerManager?: import('@use-brian/core').WorkerManager
   connectorStore?: ConnectorStore
@@ -111,6 +123,13 @@ export type CustomChannelBridgeRouteOptions = {
   sessionStateStore?: import('@use-brian/core').SessionStateStore
   capabilityStore: import('@use-brian/core').CapabilityStore
   archiveMedia?: ChatArchiveLiveMedia
+  /** Same short-voice preflight used by Telegram/WhatsApp. */
+  voiceTranscription?: {
+    enabled: boolean
+    apiKey: string
+    backend?: MediaBackend
+    model?: string
+  }
   /** Injectable clock/sleep for the long-poll (tests). */
   sleep?: (ms: number) => Promise<void>
 }
@@ -178,11 +197,15 @@ const bridgeInboundMediaSchema = z.object({
   name: z.string().min(1).max(1024),
   dataBase64: z.string().optional(),
   url: z.string().url().max(4096).optional(),
+  stored: z.object({
+    assetId: z.string().uuid(),
+    sha256: z.string().regex(/^[a-f0-9]{64}$/i),
+  }).optional(),
   sizeBytes: z.number().int().nonnegative().optional(),
   durationSec: z.number().nonnegative().optional(),
 }).refine(
-  (m) => (m.dataBase64 != null) !== (m.url != null),
-  { message: 'exactly one of dataBase64 / url is required' },
+  (m) => [m.dataBase64, m.url, m.stored].filter((value) => value != null).length === 1,
+  { message: 'exactly one of dataBase64 / url / stored is required' },
 )
 
 export const bridgeInboundSchema: z.ZodType<BridgeInbound> = z.object({
@@ -201,6 +224,7 @@ export const bridgeInboundSchema: z.ZodType<BridgeInbound> = z.object({
     replyToMessageId: z.string().max(512).optional(),
     media: z.array(bridgeInboundMediaSchema).max(BRIDGE_INBOUND_MEDIA_MAX_ITEMS).optional(),
   }),
+  mediaUpgrade: z.boolean().optional(),
 })
 
 export const outboxAckSchema: z.ZodType<OutboxAck> = z.object({
@@ -283,6 +307,21 @@ async function loadMediaBytes(item: BridgeInboundMedia): Promise<Buffer> {
   }
 }
 
+function archiveKindFor(item: BridgeInboundMedia): ChatArchiveMediaKind {
+  return item.kind === 'document' ? 'file' : item.kind === 'audio' ? 'voice' : item.kind
+}
+
+function storedArchiveRef(item: BridgeInboundMedia): NonNullable<IncomingMessage['archiveMediaRef']> | null {
+  if (!item.stored || item.sizeBytes == null) return null
+  return {
+    assetId: item.stored.assetId,
+    sha256: item.stored.sha256.toLowerCase(),
+    filename: item.name,
+    mime: item.mime,
+    sizeBytes: item.sizeBytes,
+  }
+}
+
 function toOutboxItem(item: { id: string; type: string; peerId: string | null; payload: Record<string, unknown>; createdAt: string }): OutboxItem {
   return item as unknown as OutboxItem
 }
@@ -347,6 +386,7 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
         userAccessMode: config.userAccessMode ?? 'allow_all',
       },
       protocol: CUSTOM_CHANNEL_PROTOCOL_VERSION,
+      features: [...CUSTOM_CHANNEL_FEATURES],
       serverTime: new Date().toISOString(),
     }
     res.json(hello)
@@ -379,6 +419,81 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
     } catch (err) {
       console.error(`[custom-channel] heartbeat failed for channel ${channel.id}:`, err)
       res.status(500).json({ error: 'internal_error' })
+    }
+  })
+
+  // ── POST /media/:messageId ─────────────────────────────────
+  // Raw-body streaming path. The global JSON parser explicitly skips this
+  // route even when the attachment itself is application/json.
+  router.post('/:channelId/media/:messageId', async (req, res) => {
+    const { channel, integration } = bridgeContext(res)
+    const parsed = z.object({
+      peerId: z.string().min(1).max(512),
+      kind: z.enum(['image', 'video', 'voice', 'file']),
+      mime: z.string().min(1).max(255),
+      filename: z.string().min(1).max(1024),
+      sha256: z.string().regex(/^[a-f0-9]{64}$/i),
+      size: z.coerce.number().int().nonnegative(),
+      slot: z.coerce.number().int().min(0).max(BRIDGE_INBOUND_MEDIA_MAX_ITEMS - 1).optional(),
+    }).safeParse(req.query)
+    if (!parsed.success) {
+      res.status(400).json({ error: 'bad_media_metadata', detail: parsed.error.message })
+      return
+    }
+    if (!options.archiveMedia) {
+      res.status(503).json({ error: 'media_store_unavailable' })
+      return
+    }
+    const declaredLength = Number(req.headers['content-length'] ?? '-1')
+    if (!Number.isSafeInteger(declaredLength) || declaredLength !== parsed.data.size) {
+      res.status(400).json({ error: 'content_length_mismatch' })
+      return
+    }
+    const limit = mediaByteLimit(parsed.data.kind)
+    if (parsed.data.size > limit) {
+      res.status(413).json({ error: 'payload_too_large', limit })
+      return
+    }
+    try {
+      const ownerUserId = await workspaceOwnerId(channel.workspaceId)
+      if (!ownerUserId) {
+        res.status(503).json({ error: 'workspace_owner_unavailable' })
+        return
+      }
+      const instanceId = integration.connectorInstanceId
+        ?? await resolveChatArchiveInstanceId({
+          source: 'custom',
+          ownerUserId,
+          workspaceId: channel.workspaceId,
+          assistantId: '',
+          assistantName: '',
+          conversationId: parsed.data.peerId,
+        })
+      if (!instanceId) {
+        res.status(503).json({ error: 'archive_instance_unavailable' })
+        return
+      }
+      const rawMessageId = String(req.params.messageId)
+      const providerMessageId = parsed.data.slot && parsed.data.slot > 0
+        ? `${rawMessageId}#${parsed.data.slot}`
+        : rawMessageId
+      const staged = await options.archiveMedia.storeStream({
+        workspaceId: channel.workspaceId,
+        instanceId,
+        ownerUserId,
+        source: 'custom',
+        providerMessageId,
+        kind: parsed.data.kind,
+        filename: parsed.data.filename,
+        mime: parsed.data.mime,
+        sha256: parsed.data.sha256.toLowerCase(),
+        sizeBytes: parsed.data.size,
+        body: req as unknown as AsyncIterable<Uint8Array>,
+      })
+      res.status(201).json(staged)
+    } catch (err) {
+      console.error('[custom-channel] streamed media upload failed:', err)
+      res.status(502).json({ error: 'media_upload_failed' })
     }
   })
 
@@ -461,6 +576,16 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
     if (!parsed.success) { res.status(400).json({ error: 'bad_payload', detail: parsed.error.message }); return }
     const oversize = bridgeInboundOversize(parsed.data)
     if (oversize) { res.status(413).json({ error: 'payload_too_large', detail: oversize }); return }
+    for (const item of parsed.data.message.media ?? []) {
+      if (item.stored && item.sizeBytes == null) {
+        res.status(400).json({ error: 'bad_payload', detail: 'stored media requires sizeBytes' })
+        return
+      }
+      if (item.stored && item.sizeBytes! > mediaByteLimit(archiveKindFor(item))) {
+        res.status(413).json({ error: 'payload_too_large', detail: `stored media item "${item.name}" exceeds its archive limit` })
+        return
+      }
+    }
 
     const msg = parsed.data.message
     const peerId = msg.peerId
@@ -477,7 +602,19 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
         return
       }
 
+      // A media upgrade re-delivers better bytes for an already-delivered
+      // message (custom-channel.md → "Media upgrade"). It must carry the
+      // bytes, and it only ever archives — never a turn, or an old message
+      // would be answered twice.
+      const isMediaUpgrade = parsed.data.mediaUpgrade === true
+      if (isMediaUpgrade && (!msg.messageId || (msg.media ?? []).length === 0)) {
+        res.status(400).json({ error: 'bad_payload', detail: 'mediaUpgrade requires messageId and media' })
+        return
+      }
+
       // 2. The bridge account's own message: archive as outbound, never a turn.
+      //    A self media upgrade lands here too — the duplicate outbound append
+      //    carries the re-staged asset and the store refreshes the row.
       if (msg.isSelf) {
         await archiveSelfMessage(channel, integration, msg)
         res.status(202).json({ ok: true, archivedOnly: true })
@@ -514,6 +651,14 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
         }).catch((err: unknown) => console.error('[custom-channel] unrouted archive append failed:', err))
         console.log(`[custom-channel] ${why} for ${peerId} on channel ${channelId} — archived, not answered`)
         res.status(202).json({ ok: true, archivedOnly: true })
+      }
+
+      // Media upgrade: stage + duplicate append only, before any routing —
+      // the store's (instance_id, provider_message_id) upsert replaces the
+      // asset, re-queues extraction and refreshes the row's media_ref.
+      if (isMediaUpgrade) {
+        await archiveOnly('media upgrade')
+        return
       }
 
       // 3. Group + requireMention (default true) + not mentioned → archived.
@@ -598,6 +743,27 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
           return
         }
         pending.resolver.resolve(pending.toolCallId, 'deny')
+      } else {
+        const decision = DECISION_MAP[incoming.text.trim().toLowerCase()]
+        if (decision && options.deferredConfirmationStore) {
+          // A custom peer id is only unique inside its routed assistant/channel
+          // (many WeChat accounts have the same `filehelper` peer). Scope the
+          // DB lookup by assistant, then carry the trusted deferred-row user
+          // into the registry guard so another tenant cannot approve it.
+          const deferred = await options.deferredConfirmationStore.findPendingByChannel(
+            'custom',
+            peerId,
+            routing.assistantId,
+          )
+          if (deferred && tryResolveSchedulerConfirmation(deferred.toolCallId, decision, {
+            userId: deferred.userId,
+            channelType: 'custom',
+            channelId: peerId,
+          })) {
+            await options.deferredConfirmationStore.markResolved(deferred.toolCallId, decision)
+            return
+          }
+        }
       }
 
       // 8. Sequentialize per conversation.
@@ -674,8 +840,13 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
     let first: NonNullable<IncomingMessage['archiveMediaRef']> | null = null
     let firstFailed = false
     for (const [index, item] of media.entries()) {
-      const kind = item.kind === 'document' ? 'file' : item.kind === 'audio' ? 'voice' : item.kind
+      const kind = archiveKindFor(item)
       try {
+        const alreadyStored = storedArchiveRef(item)
+        if (alreadyStored) {
+          if (index === 0) first = alreadyStored
+          continue
+        }
         const bytes = await loadMediaBytes(item)
         const staged = await options.archiveMedia.storeBuffer({
           workspaceId: args.channel.workspaceId,
@@ -726,7 +897,7 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
       const firstMedia = (msg.media ?? [])[0]
       let archiveMedia: Parameters<typeof appendOutboundChatArchive>[0]['archiveMedia']
       if (firstMedia) {
-        const kind = firstMedia.kind === 'document' ? 'file' : firstMedia.kind === 'audio' ? 'voice' : firstMedia.kind
+        const kind = archiveKindFor(firstMedia)
         const staged = await stageUnroutedBridgeMedia({
           channel,
           connectorInstanceId: integration.connectorInstanceId,
@@ -782,19 +953,47 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
     // ── Content blocks (text + media) — same shapes as routes/wechat.ts ──
     const userContentBlocks: ContentBlock[] = []
     const mediaItems = bridgeMessage.media ?? []
+    let voiceTranscriptionUsage: { usage: TokenUsage | null; model: string; audioSeconds?: number } | null = null
+    let voiceHandled = false
     for (const [index, item] of mediaItems.entries()) {
-      const archiveKind = item.kind === 'document' ? 'file' : item.kind === 'audio' ? 'voice' : item.kind
+      const archiveKind = archiveKindFor(item)
+      const alreadyStored = storedArchiveRef(item)
       if (index === 0) {
         incoming.mediaType = item.kind === 'image' ? 'photo' : item.kind
         incoming.mediaMime = item.mime
         incoming.mediaName = item.name
         incoming.mediaSizeBytes = item.sizeBytes ?? 0
-        incoming.archiveMediaAvailability = 'missing'
+        if (alreadyStored) {
+          incoming.archiveMediaRef = alreadyStored
+          incoming.archiveMediaAvailability = undefined
+        } else {
+          incoming.archiveMediaAvailability = 'missing'
+        }
       }
+      const isVoice = item.kind === 'voice' || item.kind === 'audio'
       try {
-        const bytes = await loadMediaBytes(item)
-        if (index === 0) incoming.mediaSizeBytes = bytes.length
-        if (options.archiveMedia && assistant.workspaceId && incoming.messageId) {
+        // Images/documents are model inputs. Short voice notes are also read
+        // back for the synchronous Telegram-parity transcription preflight;
+        // large audio/video stay archive-first and never enter API memory.
+        const voiceFitsLivePreflight = (item.sizeBytes ?? 0) <= BRIDGE_INBOUND_MEDIA_MAX_BYTES
+        const needsLiveBytes = item.kind === 'image'
+          || item.kind === 'document'
+          || (isVoice && !voiceHandled && voiceFitsLivePreflight && options.voiceTranscription?.enabled === true)
+        let bytes: Buffer
+        if (alreadyStored && needsLiveBytes) {
+          if (!options.archiveMedia) throw new Error('stored media cannot be loaded without the archive')
+          bytes = (await options.archiveMedia.loadStored({
+            ownerUserId: ownerId,
+            sha256: alreadyStored.sha256,
+            kind: archiveKind,
+          })).bytes
+        } else if (alreadyStored) {
+          bytes = Buffer.alloc(0)
+        } else {
+          bytes = await loadMediaBytes(item)
+        }
+        if (index === 0 && !alreadyStored) incoming.mediaSizeBytes = bytes.length
+        if (!alreadyStored && options.archiveMedia && assistant.workspaceId && incoming.messageId) {
           try {
             const archiveInstanceId = params.archiveConnectorInstanceId
               ?? await resolveChatArchiveInstanceId({
@@ -863,14 +1062,43 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
               })
             }
           }
-        } else if (item.kind === 'voice' || item.kind === 'audio') {
-          userContentBlocks.push({
-            type: 'text',
-            text: '[The user sent a voice message. You cannot hear it directly. It is archived and '
-              + 'transcribed asynchronously — use searchChatHistory to retrieve the transcript. '
-              + 'If the search returns nothing, transcription has not finished yet; say so rather '
-              + 'than saying the content is unavailable.]',
-          })
+        } else if (isVoice && !voiceHandled) {
+          voiceHandled = true
+          let transcript: string | undefined
+          let failure: string | undefined
+          if (!options.voiceTranscription?.enabled) {
+            failure = TRANSCRIPTION_DISABLED_REASON
+          } else if (!voiceFitsLivePreflight) {
+            failure = `the voice note exceeds the ${BRIDGE_INBOUND_MEDIA_MAX_BYTES}-byte live transcription limit`
+          } else if (bytes.length === 0) {
+            failure = 'the voice bytes could not be loaded for transcription'
+          } else {
+            const result = await transcribeFirstAudio(
+              [{
+                buffer: bytes,
+                mime: item.mime,
+                index: 0,
+                ...(item.durationSec !== undefined ? { durationSeconds: item.durationSec } : {}),
+              }],
+              {
+                enabled: true,
+                apiKey: options.voiceTranscription.apiKey,
+                ...(options.voiceTranscription.backend ? { backend: options.voiceTranscription.backend } : {}),
+                model: options.voiceTranscription.model,
+                onFailure: (reason) => { failure = reason },
+              },
+            )
+            if (result) {
+              voiceTranscriptionUsage = {
+                usage: result.usage,
+                model: result.model,
+                ...(result.audioSeconds !== undefined ? { audioSeconds: result.audioSeconds } : {}),
+              }
+              if (result.text.trim()) transcript = result.text
+              else failure = 'the audio was silent or unintelligible'
+            }
+          }
+          incoming.text = composeVoiceTurnText(transcript, failure, incoming.text)
         } else if (item.kind === 'video') {
           userContentBlocks.push({
             type: 'text',
@@ -881,12 +1109,21 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
           })
         }
       } catch (err) {
-        if (index === 0) incoming.archiveMediaAvailability = 'failed'
+        if (index === 0 && !alreadyStored) incoming.archiveMediaAvailability = 'failed'
         console.error('[custom-channel] media load failed:', err)
-        userContentBlocks.push({
-          type: 'text',
-          text: '[The user sent an attachment that could not be loaded. Ask them to resend it.]',
-        })
+        if (isVoice && !voiceHandled) {
+          voiceHandled = true
+          incoming.text = composeVoiceTurnText(
+            undefined,
+            'the voice bytes could not be loaded for transcription',
+            incoming.text,
+          )
+        } else {
+          userContentBlocks.push({
+            type: 'text',
+            text: '[The user sent an attachment that could not be loaded. Ask them to resend it.]',
+          })
+        }
       }
     }
     if (incoming.text.trim()) {
@@ -907,6 +1144,12 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
       if (lastTypingAt === 0) return
       lastTypingAt = 0
       await store.enqueue(channelId, { type: 'typing', peerId, payload: { on: false } }).catch(() => {})
+    }
+    let statusSent = false
+    async function sendWorkingStatus(): Promise<void> {
+      if (statusSent) return
+      statusSent = true
+      await adapter.sendStatus(peerId, 'Working...').catch(() => {})
     }
 
     const abortController = new AbortController()
@@ -955,11 +1198,20 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
       episodicStore: options.episodicStore,
       sessionStateStore: options.sessionStateStore,
       capabilityStore: options.capabilityStore,
+      voiceTranscriptionUsage,
       hooks: {
         async onProcessingStart() {
           await refreshTyping()
         },
+        async onStatus() {
+          await sendWorkingStatus()
+          await refreshTyping()
+        },
         async onToolStart() {
+          await sendWorkingStatus()
+          await refreshTyping()
+        },
+        async onToolInput() {
           await refreshTyping()
         },
         async onToolResult() {

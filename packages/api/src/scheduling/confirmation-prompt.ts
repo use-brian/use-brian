@@ -21,12 +21,14 @@ import {
   createSlackAdapter,
   createTelegramAdapter,
   createWhatsAppAdapter,
+  createCustomAdapter,
   describeSlackError,
   isSlackApiError,
 } from '@use-brian/channels'
 import { getToolDisplayName, formatConfirmationInput } from '@use-brian/shared'
 import { query } from '../db/client.js'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
+import type { CustomChannelStore } from '../db/custom-channel-store.js'
 
 export type ConfirmationPromptTarget = {
   workspaceId?: string
@@ -42,6 +44,7 @@ export type ConfirmationPromptDeps = {
   defaultTelegramBotToken?: string
   waConnectorUrl?: string
   waConnectorSecret?: string
+  customChannelStore?: Pick<CustomChannelStore, 'enqueue'>
 }
 
 /**
@@ -188,6 +191,38 @@ export async function sendConfirmationPrompt(
           text: `${displayName}${inputSummary}\n\n${replyHint}`,
         })
       }
+    } else if (target.channelType === 'custom') {
+      if (!deps.integrationStore || !deps.customChannelStore || !target.workspaceId) {
+        return {
+          delivered: false,
+          channelType: target.channelType,
+          reason: `The confirmation prompt for \`${req.toolName}\` could not be sent: no custom-channel bridge integration is available, so \`${target.channelId}\` was never asked. The parked tool call will time out unanswered.`,
+        }
+      }
+      const integration = target.channelIntegrationId
+        ? await deps.integrationStore.getCredentialsForAssistantIntegrationSystem(
+            target.workspaceId,
+            target.assistantId,
+            target.channelIntegrationId,
+            'custom',
+            target.channelId,
+          )
+        : await deps.integrationStore.getCredentialsForAssistantSystem(target.assistantId, 'custom')
+      if (!integration) {
+        return {
+          delivered: false,
+          channelType: target.channelType,
+          reason: `The confirmation prompt for \`${req.toolName}\` could not be sent: this assistant has no connected custom-channel bridge, so \`${target.channelId}\` was never asked. The parked tool call will time out unanswered.`,
+        }
+      }
+      const replyHint = allowPersist
+        ? 'Reply: yes / no / always / never'
+        : 'Reply: yes / no'
+      await createCustomAdapter({
+        enqueue: (item) => deps.customChannelStore!.enqueue(integration.channelId, item),
+      }).sendMessage(target.channelId, {
+        text: `${displayName}${inputSummary}\n\n${replyHint}`,
+      })
     } else if (target.channelType === 'whatsapp') {
       if (!deps.waConnectorUrl || !deps.waConnectorSecret) {
         return {

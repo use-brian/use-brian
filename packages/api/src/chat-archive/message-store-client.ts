@@ -108,6 +108,12 @@ export type UploadMediaInput = {
 /** What a caller needs to hand an uploader that holds the bytes but not the secret. */
 export type MediaUploadTargetInput = Omit<UploadMediaInput, 'bytes'> & { sha256: string }
 
+export type UploadMediaStreamInput = MediaUploadTargetInput & {
+  /** Node request stream or another fetch-compatible async byte stream. */
+  body: AsyncIterable<Uint8Array>
+  sizeBytes: number
+}
+
 /** A one-asset, pre-signed destination for an uploader outside this process. */
 export type MediaUploadTarget = {
   url: string
@@ -253,6 +259,38 @@ export class MessageStoreClient {
         'Content-Type': input.mime || 'application/octet-stream',
         'X-UB-Signature': signRequest('POST', requestUri, this.secret),
       },
+    }
+  }
+
+  /**
+   * Proxy an already-hashed raw stream into the store without buffering it in
+   * the API. The signed URI commits to all metadata and the digest; the store
+   * hashes again as it writes.
+   */
+  async uploadMediaStream(input: UploadMediaStreamInput): Promise<UploadedMedia> {
+    const target = this.mediaUploadTarget(input)
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), Math.max(this.timeoutMs, 10 * 60_000))
+    try {
+      const init = {
+        method: 'POST',
+        headers: {
+          ...target.headers,
+          'Content-Length': String(input.sizeBytes),
+        },
+        body: input.body,
+        // Required by Node fetch for a streaming request body.
+        duplex: 'half',
+        signal: controller.signal,
+      } as unknown as RequestInit
+      const response = await this.fetchImpl(target.url, init)
+      if (!response.ok) {
+        const detail = await response.text().catch(() => '')
+        throw new Error(`message store POST /media failed: ${response.status} ${detail.slice(0, 500)}`)
+      }
+      return (await response.json()) as UploadedMedia
+    } finally {
+      clearTimeout(timer)
     }
   }
 

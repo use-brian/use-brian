@@ -27,6 +27,42 @@ describe('[COMP:app/wechat-desktop-bridge] state file', () => {
     expect(JSON.parse(await readFile(path, 'utf8'))).toEqual({ version: 1, cursors: { a: 2 } })
   })
 
+  it('round-trips an undelivered media recovery entry across a restart', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'bridge-state-'))
+    const path = join(dir, 'state.json')
+    await saveStateFile(path, {
+      version: 1,
+      cursors: { wxid_example1: 10 },
+      pendingMediaUpgrades: {
+        wxid_example1: [{
+          localId: 11,
+          message: {
+            peerId: 'wxid_example1', senderId: 'wxid_example1', messageId: '1011', text: 'plan.docx',
+            timestamp: 1_700_000_000_000, isGroupChat: false,
+          },
+          kind: 'file',
+          delivered: false,
+          variant: undefined,
+          forwardedSha256: null,
+          stagedMedia: {
+            kind: 'document', mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            name: 'plan.docx', sizeBytes: 123,
+            stored: { assetId: '11111111-1111-1111-1111-111111111111', sha256: 'a'.repeat(64) },
+          },
+          attempts: 3,
+          firstSeenAt: 1_700_000_000_000,
+          nextAttemptAt: 1_700_000_060_000,
+        }],
+      },
+    })
+    const loaded = await loadStateFile(path)
+    expect(loaded.state.pendingMediaUpgrades?.wxid_example1?.[0]).toMatchObject({
+      localId: 11, kind: 'file', delivered: false, attempts: 3, nextAttemptAt: 1_700_000_060_000,
+      stagedMedia: { name: 'plan.docx', stored: { sha256: 'a'.repeat(64) } },
+    })
+    expect(loaded.state.cursors.wxid_example1).toBe(10)
+  })
+
   it('treats a corrupt file as fresh and drops non-numeric cursors', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'bridge-state-'))
     const path = join(dir, 'state.json')

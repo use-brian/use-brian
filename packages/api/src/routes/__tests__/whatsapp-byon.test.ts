@@ -1,6 +1,13 @@
 import express from 'express'
 import request from 'supertest'
 import { describe, expect, it, vi } from 'vitest'
+
+vi.mock('../../chat-archive/live-writer.js', () => ({
+  appendOutboundChatArchive: vi.fn(async () => {}),
+  resolveChatArchiveInstanceId: vi.fn(async () => 'inst-1'),
+}))
+
+import { appendOutboundChatArchive } from '../../chat-archive/live-writer.js'
 import { whatsappByonRoutes } from '../whatsapp-byon.js'
 
 const payload = {
@@ -85,6 +92,52 @@ describe('[COMP:api/whatsapp-byon-route] internal routing', () => {
     expect(response.status).toBe(200)
     // The assistant must never answer the user's own outgoing message.
     expect(handle).not.toHaveBeenCalled()
+  })
+
+  it("archives the owner's own (fromMe) IMAGE with the staged asset ref, not text-only", async () => {
+    vi.mocked(appendOutboundChatArchive).mockClear()
+    const storeBuffer = vi.fn(async () => ({
+      assetId: '22222222-2222-2222-2222-222222222222',
+      sha256: 'b'.repeat(64),
+      filename: 'sent.jpg',
+      mime: 'image/jpeg',
+      sizeBytes: 12,
+    }))
+    const app = express()
+    app.use(express.json())
+    app.use('/internal/whatsapp', whatsappByonRoutes({
+      connectorSecret: 'secret',
+      integrationStore: { getByChannelForWebhook: vi.fn(async () => null), setStatusByChannelSystem: vi.fn() } as never,
+      ingestor: { isIngestChannel: vi.fn(async () => true), ingest: vi.fn() } as never,
+      bot: { resolveHandler: vi.fn(async () => null) },
+      archiveIncoming: vi.fn(async () => {}),
+      archiveMedia: { storeBuffer, uploadTarget: vi.fn() } as never,
+      getChannel: vi.fn(async () => ({ workspaceId: 'ws-1' })) as never,
+      getWorkspaceOwnerUserId: vi.fn(async () => 'owner-1'),
+    }))
+    const response = await request(app)
+      .post('/internal/whatsapp/inbound')
+      .set('X-Connector-Secret', 'secret')
+      .send({
+        ...payload,
+        messageId: 'self-img-1',
+        fromMe: true,
+        text: '<media:image>',
+        mediaBase64: Buffer.from('sent-bytes').toString('base64'),
+        mediaMimeType: 'image/jpeg',
+        mediaFileName: 'sent.jpg',
+      })
+    expect(response.status).toBe(200)
+    expect(storeBuffer).toHaveBeenCalledTimes(1)
+    expect(appendOutboundChatArchive).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(appendOutboundChatArchive).mock.calls[0][0]).toMatchObject({
+      providerMessageId: 'self-img-1',
+      text: '',
+      archiveMedia: {
+        kind: 'image',
+        ref: { assetId: '22222222-2222-2222-2222-222222222222', filename: 'sent.jpg' },
+      },
+    })
   })
 
   it('passes an unknown channel to the closed official fallback', async () => {

@@ -76,6 +76,10 @@ export function createOutboxWorker(deps: OutboxWorkerDeps): OutboxWorker {
         case 'typing':
           // The desktop client cannot emit a typing indicator.
           return { id: item.id, ok: true }
+        case 'status': {
+          const failed = await sendText(item.peerId, item.payload.text)
+          return failed ? { ...failed, id: item.id } : { id: item.id, ok: true }
+        }
         case 'input':
           // This platform never asks for typed input; the phone confirms.
           return { id: item.id, ok: true }

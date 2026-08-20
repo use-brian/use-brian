@@ -13,6 +13,7 @@ import type {
   MediaUploadTarget,
   MediaUploadTargetInput,
   MessageStoreClient,
+  UploadMediaStreamInput,
   UploadMediaInput,
 } from './message-store-client.js'
 
@@ -54,6 +55,8 @@ export function archiveMediaRef(
 
 export type ChatArchiveLiveMedia = {
   storeBuffer(input: Omit<UploadMediaInput, 'bytes'> & { bytes: Buffer }): Promise<StagedArchiveMedia>
+  storeStream(input: UploadMediaStreamInput): Promise<StagedArchiveMedia>
+  loadStored(input: { ownerUserId: string; sha256: string; kind: ChatArchiveMediaKind }): Promise<{ bytes: Buffer; mime: string }>
   /**
    * Pre-sign an upload so a connector can send bytes to the store directly.
    *
@@ -81,6 +84,27 @@ export function createChatArchiveLiveMedia(client: MessageStoreClient): ChatArch
         mime: input.mime,
         sizeBytes: uploaded.size_bytes,
       }
+    },
+    async storeStream(input) {
+      const limit = mediaByteLimit(input.kind)
+      if (input.sizeBytes > limit) {
+        throw new Error(`chat archive ${input.kind} attachment exceeds ${limit} bytes`)
+      }
+      const uploaded = await client.uploadMediaStream(input)
+      return {
+        assetId: uploaded.asset_id,
+        sha256: uploaded.sha256,
+        filename: input.filename,
+        mime: input.mime,
+        sizeBytes: uploaded.size_bytes,
+      }
+    },
+    loadStored(input) {
+      return client.downloadMedia({
+        ownerUserId: input.ownerUserId,
+        sha256: input.sha256,
+        maxBytes: mediaByteLimit(input.kind),
+      })
     },
     uploadTarget(input) {
       return client.mediaUploadTarget(input)
