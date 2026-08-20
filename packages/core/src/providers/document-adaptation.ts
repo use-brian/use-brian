@@ -24,11 +24,12 @@
  *
  * ## Applied per concrete model, including the fallback
  *
- * `nativePdf` comes from the registry row of the model being dispatched to, so
- * a Gemini primary passes through untouched (zero overhead) while an Anthropic
- * fallback wrapped around it receives the distillate instead of silently
- * dropping the block. That only works because the routing provider wraps each
- * concrete provider separately — see `routing.ts`.
+ * `nativePdf` comes from the registry row of the model being dispatched to,
+ * but native support is not a completeness signal. When a distillation port is
+ * available, PDFs from every concrete provider go through that validated
+ * boundary. `nativePdf: true` remains an emergency pass-through only when no
+ * distillation port exists. Routing still wraps each concrete provider
+ * separately — see `routing.ts`.
  *
  * ## Ports, not dependencies
  *
@@ -89,7 +90,7 @@ export type DistillateCachePort = {
 }
 
 export type DocumentAdaptationOptions = {
-  /** From the dispatched model's registry row. `true` = PDFs pass through. */
+  /** Provider capability. Native pass-through is used only without a distill port. */
   nativePdf: boolean
   /** From the dispatched model's registry row. `true` = images pass through. */
   vision: boolean
@@ -130,7 +131,7 @@ function shouldAdaptBlock(
   options: DocumentAdaptationOptions,
 ): block is InlineMediaBlock {
   return block.type === 'image' && (
-    (block.mimeType === PDF_MIME && !options.nativePdf) ||
+    (block.mimeType === PDF_MIME && (!options.nativePdf || options.distill !== undefined)) ||
     (block.mimeType.startsWith('image/') && !options.vision)
   )
 }
@@ -255,13 +256,14 @@ function swapUnsupportedMedia(
 /**
  * Wrap a provider so inline media it cannot read arrives as distilled text.
  *
- * A provider with both capabilities returns untouched and pays no scan cost.
+ * A capable provider returns untouched only when there is no validated PDF
+ * distillation port to use.
  */
 export function wrapDocumentAdaptation(
   provider: LLMProvider,
   options: DocumentAdaptationOptions,
 ): LLMProvider {
-  if (options.nativePdf && options.vision) return provider
+  if (options.nativePdf && options.vision && !options.distill) return provider
 
   async function adapt(messages: readonly Message[]): Promise<Message[]> {
     if (!hasUnsupportedMedia(messages, options)) return messages as Message[]

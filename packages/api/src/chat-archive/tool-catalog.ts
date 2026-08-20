@@ -24,14 +24,14 @@ export const CHAT_ARCHIVE_SEARCH_TOOL = {
  *
  * Search hits describe media (`media_sha256`, `media_mime`, extraction state)
  * but the bytes live in the archive's content-addressed store. This tool pulls
- * them into the workspace file layer, where `sendFile` and the web app's Files
- * view can reach them.
+ * them into the workspace file layer, where `sendFile`, `ingestFile`, and the
+ * web app's Files view can reach them.
  */
 export const CHAT_ARCHIVE_SAVE_MEDIA_TOOL = {
   name: 'saveChatMedia',
   description:
     'Save a photo, voice note, video, or document from the user\'s archived WeChat/WhatsApp history into the workspace as a real file. ' +
-    'Use when the user asks you to send, save, or forward something that arrived in a chat: find the message with searchChatHistory, take the hit\'s `media_sha256`, save it here, then pass the returned `fileId` to sendFile to deliver it. ' +
+    'Use when the user asks you to send, save, forward, read, or analyze something that arrived in a chat: find the message with searchChatHistory and save the hit\'s `media_sha256`. Pass the returned `fileId` to sendFile for delivery or to ingestFile for consent-gated semantic reading. ' +
     'Only works for hits whose media is stored (`extraction_status` present and media coverage not `missing`); if the digest is absent the original bytes were never captured and cannot be recovered — say so instead of retrying.',
   classification: 'write',
   defaultPolicy: 'allow',

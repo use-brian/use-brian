@@ -45,7 +45,7 @@ describe('[COMP:tools/chat-archive-save-media] saveChatMedia', () => {
     expect(Object.keys(shape)).not.toContain('userId')
   })
 
-  it('saves under /uploads/chat-archive with internal sensitivity and hands the fileId to sendFile', async () => {
+  it('saves under /uploads/chat-archive and hands the fileId to delivery or semantic ingestion', async () => {
     const filesApi = fakeFilesApi()
     const tool = createSaveChatMediaTool({ client: fakeClient(), filesApi })
 
@@ -60,8 +60,10 @@ describe('[COMP:tools/chat-archive-save-media] saveChatMedia', () => {
     expect(writeInput.sensitivity).toBe('internal')
     expect(writeInput.mime).toBe('image/jpeg')
     expect(result.data.fileId).toBe('file-1')
-    // The hand-off sentence is the contract: delivery stays sendFile's job.
+    // Saving preserves bytes only. Delivery and semantic reading stay explicit.
     expect(result.data.next).toContain('sendFile')
+    expect(result.data.next).toContain('ingestFile')
+    expect(result.data.next).toContain('confirmation')
     expect(result.data.next).toContain('file-1')
   })
 
