@@ -8,7 +8,7 @@
  * the bridge's `providerMessageId` in its ack is recorded on the item.
  * `sendTypingIndicator` enqueues `typing {on:true}`; the route enqueues
  * `typing {on:false}` on cleanup. No message edits (the bridge has no edit
- * contract in v1), no status messages.
+ * contract in v1); `sendStatus` enqueues a bridge-rendered, coalesced status.
  *
  * `parseIncoming` takes an already-normalized `BridgeInboundMessage` (the
  * bridge does the platform parsing) and maps it onto `IncomingMessage`:
@@ -16,10 +16,10 @@
  * shared session, a DM one per contact).
  *
  * Outbound markdown passes through as `format:'markdown'`; the bridge decides
- * how to render it for its platform. Documents ride inline as base64 — but
- * v1 does not model bridge capabilities, so `custom` is NOT in
- * `DOCUMENT_CAPABLE_CHANNELS` and `sendFile` refuses (the field is in the
- * wire type so v2 can flip it without a protocol change).
+ * how to render it for its platform. Documents ride inline as base64.
+ * `custom` remains outside static `DOCUMENT_CAPABLE_CHANNELS`; the API admits
+ * `sendFile` per turn only when this bridge reported `documents: true` in its
+ * state capabilities, so an old or text-only bridge refuses honestly.
  *
  * See docs/architecture/channels/custom-channel.md.
  * Component tag: [COMP:channels/custom-adapter].
@@ -33,7 +33,7 @@ const CUSTOM_MAX_MESSAGE_LENGTH = 4000
 
 /** What the adapter appends to the outbox; the API's store implements it. */
 export type CustomOutboxEnqueue = (item: {
-  type: 'message' | 'typing'
+  type: 'message' | 'typing' | 'status'
   peerId: string
   payload: Record<string, unknown>
 }) => Promise<string>
@@ -130,10 +130,9 @@ export function createCustomAdapter(options: CustomAdapterOptions): ChannelAdapt
       }
     },
 
-    async sendStatus(): Promise<string> {
-      // No edit support — a status message would land as a permanent extra
-      // message. The route drives the typing indicator instead.
-      return ''
+    async sendStatus(channelId: string, status: string): Promise<string> {
+      if (!status.trim()) return ''
+      return options.enqueue({ type: 'status', peerId: channelId, payload: { text: status.trim() } })
     },
   }
 }

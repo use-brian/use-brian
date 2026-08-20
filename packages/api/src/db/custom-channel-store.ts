@@ -52,7 +52,7 @@ export type CustomChannelStateView = CustomChannelBridgeState & {
   outboxDepth: number
 }
 
-export type OutboxItemType = 'message' | 'typing' | 'input' | 'disconnect'
+export type OutboxItemType = 'message' | 'typing' | 'status' | 'input' | 'disconnect'
 
 export type OutboxEnqueueInput = {
   type: OutboxItemType

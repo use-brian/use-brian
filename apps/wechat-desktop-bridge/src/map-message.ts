@@ -18,7 +18,7 @@ const MSG_TYPE = {
 } as const
 
 /** Message types whose row may carry a downloadable attachment. */
-const MEDIA_TYPES = new Set<number>([MSG_TYPE.IMAGE, MSG_TYPE.VOICE, MSG_TYPE.VIDEO, MSG_TYPE.APP])
+const MEDIA_TYPES = new Set<number>([MSG_TYPE.IMAGE, MSG_TYPE.VOICE, MSG_TYPE.VIDEO, MSG_TYPE.STICKER, MSG_TYPE.APP])
 const SKIP_TYPES = new Set<number>([MSG_TYPE.SYSTEM, MSG_TYPE.SYSTEM_RECALL])
 
 export const ATTACHMENT_UNAVAILABLE = '[attachment unavailable]'
@@ -62,21 +62,18 @@ export function messageMayHaveMedia(msg: Pick<AgentWechatMessage, 'type'>): bool
   return MEDIA_TYPES.has(baseMessageType(msg.type))
 }
 
-/**
- * Whether this row is an image (type 3) — the only kind the original-image
- * upgrade sweep tracks: the client auto-downloads a video only on play, so
- * opening the chat would not upgrade one.
- */
-export function messageIsImage(msg: Pick<AgentWechatMessage, 'type'>): boolean {
-  return baseMessageType(msg.type) === MSG_TYPE.IMAGE
-}
-
 export type MediaOutcome =
   /** Bytes arrived. */
   | { status: 'fetched'; result: AgentWechatMediaResult }
+  /** Bytes were streamed into the archive and only a stable ref crosses JSON. */
+  | { status: 'stored'; result: AgentWechatMediaResult; media: BridgeInboundMedia }
   /** The container says this row carries no media (type 'unsupported'). */
   | { status: 'unsupported' }
-  /** Retries exhausted with no bytes. */
+  /** Provider row exists but bytes are recoverable and not ready yet. */
+  | { status: 'pending'; result: AgentWechatMediaResult }
+  /** Provider explicitly says the attachment is terminally unavailable. */
+  | { status: 'terminal'; reason: string }
+  /** A transient media lookup/transfer failure; the monitor retains the cursor. */
   | { status: 'unavailable' }
   /** Not attempted (row type has no media). */
   | { status: 'not_applicable' }
@@ -92,6 +89,10 @@ export function mimeForMedia(result: Pick<AgentWechatMediaResult, 'format' | 'ty
 }
 
 function mediaKind(result: AgentWechatMediaResult, msgType: number): BridgeMediaKind {
+  if (result.variant === 'preview' && (result.mime?.startsWith('image/') || MIME_BY_FORMAT[result.format] === 'image/jpeg')) {
+    return 'image'
+  }
+  if (result.kind === 'sticker') return 'image'
   switch (result.type) {
     case 'image':
       return 'image'
@@ -101,6 +102,8 @@ function mediaKind(result: AgentWechatMediaResult, msgType: number): BridgeMedia
       return 'video'
     case 'file':
       return 'document'
+    case 'emoji':
+      return 'image'
   }
   switch (msgType) {
     case MSG_TYPE.IMAGE:
@@ -155,7 +158,22 @@ export function toBridgeMedia(
   }
 }
 
-function messageIdOf(msg: AgentWechatMessage): string {
+/** A raw upload already stored in the archive; no bytes ride in JSON. */
+export function toBridgeStoredMedia(
+  result: AgentWechatMediaResult,
+  msg: Pick<AgentWechatMessage, 'localId' | 'type'>,
+  stored: { assetId: string; sha256: string; sizeBytes: number; mime: string; filename: string },
+): BridgeInboundMedia {
+  return {
+    kind: mediaKind(result, baseMessageType(msg.type)),
+    mime: stored.mime,
+    name: stored.filename,
+    sizeBytes: stored.sizeBytes,
+    stored: { assetId: stored.assetId, sha256: stored.sha256 },
+  }
+}
+
+export function messageIdOf(msg: AgentWechatMessage): string {
   return msg.serverId && msg.serverId > 0 ? String(msg.serverId) : `local-${msg.localId}`
 }
 
@@ -183,12 +201,27 @@ export function mapMessage(
   let text: string
   let mediaItems: BridgeInboundMedia[] | undefined
 
-  const fetched = media.status === 'fetched' ? toBridgeMedia(media.result, msg) : null
+  const result = media.status === 'fetched' || media.status === 'stored' ? media.result : null
+  const fetched = media.status === 'stored'
+    ? media.media
+    : media.status === 'fetched'
+      ? toBridgeMedia(media.result, msg)
+      : null
   if (fetched) {
     mediaItems = [fetched]
     if (type === MSG_TYPE.APP) {
       // For files the content is the XML envelope; the filename is the useful text.
       text = fetched.name
+    } else if (result?.kind === 'video' && result.variant === 'preview') {
+      text = '[video preview]'
+    } else {
+      text = ''
+    }
+  } else if (media.status === 'pending') {
+    if (type === MSG_TYPE.APP) {
+      text = media.result.filename?.trim() || extractAppMessageTitle(content) || ''
+    } else if (type === MSG_TYPE.STICKER) {
+      text = '[sticker]'
     } else {
       text = ''
     }
@@ -200,8 +233,14 @@ export function mapMessage(
     const title = extractAppMessageTitle(content)
     text = title ? `[link] ${title}` : content
     if (media.status === 'unavailable') text = text ? `${text} ${ATTACHMENT_UNAVAILABLE}` : ATTACHMENT_UNAVAILABLE
+    if (media.status === 'terminal') {
+      const note = `[attachment unavailable: ${media.reason}]`
+      text = text ? `${text} ${note}` : note
+    }
   } else if (MEDIA_TYPES.has(type)) {
-    text = ATTACHMENT_UNAVAILABLE
+    text = media.status === 'terminal'
+      ? `[attachment unavailable: ${media.reason}]`
+      : ATTACHMENT_UNAVAILABLE
   } else {
     text = content
   }

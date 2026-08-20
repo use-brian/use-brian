@@ -1238,6 +1238,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     if (
       req.path === '/api/local-files'
       || (req.method === 'PUT' && /^\/internal\/chat-archive\/media\/[^/]+\/content$/.test(req.path))
+      || (req.method === 'POST' && /^\/bridge\/v1\/channels\/[^/]+\/media\/[^/]+$/.test(req.path))
     ) {
       next()
       return
@@ -2481,6 +2482,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     defaultTelegramBotToken: env.TELEGRAM_BOT_TOKEN,
     waConnectorUrl: env.WA_CONNECTOR_URL,
     waConnectorSecret: env.WA_CONNECTOR_SECRET,
+    customChannelStore,
     injectExtraTools,
     resolveAppSoul,
     engineHooks: ports.engineHooks,
@@ -7564,6 +7566,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         connectorInstanceStore, knowledgeStore, gdriveFilesStore, workspaceFilesStore, analytics,
         skillStore, episodicStore, sessionStateStore, fileStore,
         archiveMedia: chatArchiveLiveMedia,
+        voiceTranscription,
+        deferredConfirmationStore,
       }))
     }
   }

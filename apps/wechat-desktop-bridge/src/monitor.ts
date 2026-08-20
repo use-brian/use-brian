@@ -4,17 +4,15 @@
  * first, POSTs each to `/inbound`, and advances the cursor after each 2xx.
  * Spec: docs/architecture/channels/wechat-desktop.md → "Monitor".
  */
-import type { AgentWechatChat, AgentWechatClient, AgentWechatMessage } from './agent-wechat-client.js'
+import type { AgentWechatChat, AgentWechatClient, AgentWechatMediaResult, AgentWechatMessage } from './agent-wechat-client.js'
 import { BridgeHttpError, type BrianBridgeClient } from './brian-bridge-client.js'
 import { consoleLogger, errorMessage, sleep as defaultSleep, type Logger } from './log.js'
 import { ATTACHMENT_UNAVAILABLE, mapMessage, messageMayHaveMedia, type MediaOutcome } from './map-message.js'
-import { createMediaUpgrader } from './media-upgrade.js'
+import { createMediaUpgrader, storeReadyMedia } from './media-upgrade.js'
 import { saveStateFile, type BridgeStateFile } from './state-file.js'
 
 const CHAT_LIST_LIMIT = 200
 const MESSAGE_FETCH_LIMIT = 50
-const MEDIA_RETRY_ATTEMPTS = 15
-const MEDIA_RETRY_INTERVAL_MS = 1000
 
 export type MonitorDeps = {
   agent: AgentWechatClient
@@ -24,11 +22,12 @@ export type MonitorDeps = {
   pollIntervalMs: number
   backfillOnFirstBoot: boolean
   isLoggedIn: () => boolean
-  /** Hello advertised `media_upgrade` — enables the original-image sweep. */
+  /** Hello advertised `media_upgrade` - enables durable media recovery. */
   mediaUpgradeEnabled?: boolean
+  /** Hello advertised `media_stream`; ready bytes take the raw upload path. */
+  mediaStreamEnabled?: boolean
   log?: Logger
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>
-  mediaRetry?: { attempts: number; intervalMs: number }
   onFatal?: (err: unknown) => void
 }
 
@@ -57,7 +56,6 @@ export function isSkippedChat(chat: Pick<AgentWechatChat, 'id' | 'username'>): b
 export function createMonitor(deps: MonitorDeps): Monitor {
   const log = deps.log ?? consoleLogger
   const sleep = deps.sleep ?? defaultSleep
-  const retry = deps.mediaRetry ?? { attempts: MEDIA_RETRY_ATTEMPTS, intervalMs: MEDIA_RETRY_INTERVAL_MS }
   const abort = new AbortController()
   let loopPromise: Promise<void> | null = null
   let ticking = false
@@ -76,39 +74,183 @@ export function createMonitor(deps: MonitorDeps): Monitor {
     state: deps.state,
     persist,
     enabled: deps.mediaUpgradeEnabled === true,
+    mediaStreamEnabled: deps.mediaStreamEnabled === true,
     log,
-    sleep: (ms) => sleep(ms, abort.signal),
     isStopped: () => abort.signal.aborted,
     onFatal: deps.onFatal,
   })
 
-  async function fetchMedia(chatId: string, msg: AgentWechatMessage): Promise<MediaOutcome> {
-    if (!messageMayHaveMedia(msg)) return { status: 'not_applicable' }
-    for (let attempt = 1; attempt <= retry.attempts; attempt++) {
-      if (abort.signal.aborted) break
-      try {
-        const result = await deps.agent.getMedia(chatId, msg.localId)
-        if (result.type === 'unsupported') return { status: 'unsupported' }
-        if (result.data) return { status: 'fetched', result }
-      } catch (err) {
-        log.warn(`media fetch ${chatId}:${msg.localId} attempt ${attempt} failed: ${errorMessage(err)}`)
-      }
-      if (attempt < retry.attempts) await sleep(retry.intervalMs, abort.signal)
+  function mediaReady(result: AgentWechatMediaResult): boolean {
+    return result.status === 'ready' || (!result.status && Boolean(result.data))
+  }
+
+  function mediaTerminal(result: AgentWechatMediaResult): boolean {
+    return result.status === 'unavailable'
+      || result.recoverable === false
+  }
+
+  function stagedResult(entry: NonNullable<BridgeStateFile['pendingMediaUpgrades']>[string][number]): AgentWechatMediaResult {
+    const media = entry.stagedMedia!
+    const ext = media.name.includes('.') ? media.name.slice(media.name.lastIndexOf('.') + 1) : ''
+    return {
+      type: entry.kind === 'sticker' ? 'emoji' : entry.kind,
+      kind: entry.kind,
+      status: 'ready',
+      variant: entry.variant,
+      format: ext,
+      filename: media.name,
+      mime: media.mime,
+      sizeBytes: media.sizeBytes,
+      sha256: media.stored?.sha256,
     }
-    return { status: 'unavailable' }
+  }
+
+  async function fetchMedia(
+    chat: AgentWechatChat,
+    msg: AgentWechatMessage,
+  ): Promise<{ outcome: MediaOutcome; holdCursor: boolean; result?: AgentWechatMediaResult }> {
+    if (!messageMayHaveMedia(msg)) return { outcome: { status: 'not_applicable' }, holdCursor: false }
+    const chatId = chatIdOf(chat)
+    const pending = upgrader.find(chatId, msg.localId)
+    // The raw upload commits before /inbound. Persisting its stable reference
+    // closes the crash/network window between those calls: retry delivery from
+    // the archive even if WeChat has already evicted its local bytes.
+    if (pending?.stagedMedia) {
+      const result = stagedResult(pending)
+      return { outcome: { status: 'stored', result, media: pending.stagedMedia }, holdCursor: false, result }
+    }
+    if (pending && !upgrader.isDue(pending)) {
+      return {
+        outcome: {
+          status: 'pending',
+          result: { type: pending.kind, format: '', filename: '', status: 'pending', kind: pending.kind },
+        },
+        holdCursor: !pending.delivered,
+      }
+    }
+
+    let result: AgentWechatMediaResult
+    try {
+      // A due persisted row can go straight through the idempotent recovery
+      // endpoint. A first-seen row gets a non-mutating read only and remains
+      // behind the cursor until a later poll.
+      result = pending
+        && deps.mediaUpgradeEnabled === true
+        && chat.unreadCount === 0
+        ? await deps.agent.ensureMedia(chatId, msg.localId)
+        : await deps.agent.getMedia(chatId, msg.localId)
+      // The recovery endpoint may drive the desktop UI, so never call it for
+      // an unread chat: opening it would clear the owner's phone badge.
+      if (
+        deps.mediaUpgradeEnabled !== true
+        && !mediaReady(result)
+        && !mediaTerminal(result)
+        && chat.unreadCount === 0
+      ) {
+        result = await deps.agent.ensureMedia(chatId, msg.localId)
+      }
+    } catch (err) {
+      log.warn(`media fetch ${chatId}:${msg.localId} failed: ${errorMessage(err)}`)
+      const mapped = mapMessage(msg, chat, { status: 'unavailable' })
+      if (mapped) {
+        const entry = upgrader.defer({
+          chatId,
+          msg,
+          message: mapped,
+          result: {
+            type: pending?.kind ?? 'pending',
+            format: '',
+            filename: '',
+            status: 'pending',
+            kind: pending?.kind ?? 'image',
+          },
+          delivered: false,
+        })
+        upgrader.noteAttempt(entry)
+        await persist()
+      }
+      return { outcome: { status: 'unavailable' }, holdCursor: true }
+    }
+
+    // Legacy runtimes used `type: unsupported` to mean "this row carries no
+    // attachment". The explicit contract preserves that as not-applicable;
+    // only status=unavailable/recoverable=false is terminal loss.
+    if ((!result.status && result.type === 'unsupported')
+      || (result.status === 'unavailable' && result.kind === 'unsupported' && result.reason === 'unsupported')) {
+      return { outcome: { status: 'unsupported' }, holdCursor: false, result }
+    }
+
+    if (mediaTerminal(result)) {
+      return {
+        outcome: { status: 'terminal', reason: result.reason ?? 'provider reported the attachment unavailable' },
+        holdCursor: false,
+        result,
+      }
+    }
+
+    if (!mediaReady(result)) {
+      const mapped = mapMessage(msg, chat, { status: 'pending', result })
+      if (mapped) {
+        const entry = upgrader.defer({ chatId, msg, message: mapped, result, delivered: false })
+        if (pending) upgrader.noteAttempt(entry, result.retryAfterMs)
+        await persist()
+      }
+      return { outcome: { status: 'pending', result }, holdCursor: true, result }
+    }
+
+    try {
+      const media = await storeReadyMedia({
+        agent: deps.agent,
+        bridge: deps.bridge,
+        chatId,
+        peerId: chatId,
+        msg,
+        result,
+        mediaStreamEnabled: deps.mediaStreamEnabled === true,
+      })
+      if (media.stored) {
+        const mapped = mapMessage(msg, chat, { status: 'stored', result, media })
+        if (mapped) {
+          const { media: _media, ...messageSansMedia } = mapped
+          upgrader.defer({
+            chatId,
+            msg,
+            message: messageSansMedia,
+            result,
+            delivered: false,
+            forwardedSha256: result.sha256 ?? media.stored.sha256,
+            stagedMedia: media,
+          })
+          await persist()
+        }
+      }
+      return { outcome: { status: 'stored', result, media }, holdCursor: false, result }
+    } catch (err) {
+      log.warn(`media transfer ${chatId}:${msg.localId} failed: ${errorMessage(err)}`)
+      const mapped = mapMessage(msg, chat, { status: 'pending', result })
+      if (mapped) {
+        const entry = upgrader.defer({ chatId, msg, message: mapped, result, delivered: false })
+        upgrader.noteAttempt(entry, result.retryAfterMs)
+        await persist()
+      }
+      return { outcome: { status: 'pending', result }, holdCursor: true, result }
+    }
   }
 
   /** Returns true when the cursor may advance past this message. */
   async function forward(chat: AgentWechatChat, msg: AgentWechatMessage): Promise<boolean> {
     const chatId = chatIdOf(chat)
-    const media = await fetchMedia(chatId, msg)
-    const mapped = mapMessage(msg, chat, media)
+    const acquisition = await fetchMedia(chat, msg)
+    if (acquisition.holdCursor) return false
+    const mapped = mapMessage(msg, chat, acquisition.outcome)
     if (!mapped) return true
     try {
       await deps.bridge.postInbound({ message: mapped })
-      // Track image rows for the original-image sweep (the forwarded bytes
-      // are at best WeChat's thumbnail). Persisted by the caller's cursor write.
-      upgrader.register({ chatId, msg, mapped })
+      if (acquisition.result?.variant === 'preview') {
+        upgrader.markDeliveredPreview({ chatId, msg, message: mapped, result: acquisition.result })
+      } else {
+        upgrader.remove(chatId, msg.localId)
+      }
       return true
     } catch (err) {
       if (err instanceof BridgeHttpError && err.status === 413 && mapped.media) {
@@ -118,6 +260,10 @@ export function createMonitor(deps: MonitorDeps): Monitor {
         const { media: _dropped, ...rest } = mapped
         try {
           await deps.bridge.postInbound({ message: { ...rest, text } })
+          // The platform explicitly rejected these bytes. Advance with the
+          // honest terminal note rather than retaining recovery work whose
+          // eventual upload would be rejected in exactly the same way.
+          upgrader.remove(chatId, msg.localId)
           return true
         } catch (err2) {
           return handleInboundError(chatId, msg, err2)
@@ -135,6 +281,7 @@ export function createMonitor(deps: MonitorDeps): Monitor {
     if (err instanceof BridgeHttpError && err.status >= 400 && err.status < 500) {
       // A 4xx is a poison row, not an outage: skip it so it cannot block the chat forever.
       log.error(`inbound ${chatId}:${msg.localId} rejected (${err.status}); skipping row: ${err.message}`)
+      upgrader.remove(chatId, msg.localId)
       return true
     }
     log.warn(`inbound ${chatId}:${msg.localId} failed; will retry next tick: ${errorMessage(err)}`)
@@ -194,8 +341,8 @@ export function createMonitor(deps: MonitorDeps): Monitor {
         await processChat(chat, effective)
       }
       if (seededAny) await persist()
-      // Original-image upgrade pass — after normal forwarding so a new image
-      // is registered before its chat is considered.
+      // Delivered-preview upgrade pass, after normal forwarding so newly
+      // registered previews are eligible on later ticks.
       try {
         await upgrader.sweep(chats)
       } catch (err) {

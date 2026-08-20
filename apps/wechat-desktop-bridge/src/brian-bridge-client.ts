@@ -30,12 +30,29 @@ export class BridgeHttpError extends Error {
 }
 
 type InboundResult = { status: number; archivedOnly: boolean }
+type StreamedMediaResult = {
+  assetId: string
+  sha256: string
+  filename: string
+  mime: string
+  sizeBytes: number
+}
 
 export interface BrianBridgeClient {
   hello(): Promise<HelloResponse>
   putState(state: BridgeState): Promise<void>
   /** Resolves on 2xx; throws BridgeHttpError on 4xx/5xx and a network error otherwise. */
   postInbound(inbound: BridgeInbound): Promise<InboundResult>
+  uploadMedia(input: {
+    messageId: string
+    peerId: string
+    kind: 'image' | 'video' | 'voice' | 'file'
+    mime: string
+    filename: string
+    sha256: string
+    sizeBytes: number
+    body: ReadableStream<Uint8Array>
+  }): Promise<StreamedMediaResult>
   pollOutbox(opts?: { waitMs?: number; limit?: number; signal?: AbortSignal }): Promise<OutboxItem[]>
   ack(results: OutboxAckResult[]): Promise<void>
   heartbeat(): Promise<void>
@@ -95,6 +112,38 @@ export function createBrianBridgeClient(opts: BrianBridgeClientOptions): BrianBr
         /* body is optional */
       }
       return { status: res.status, archivedOnly }
+    },
+    async uploadMedia(input) {
+      const params = new URLSearchParams({
+        peerId: input.peerId,
+        kind: input.kind,
+        mime: input.mime,
+        filename: input.filename,
+        sha256: input.sha256,
+        size: String(input.sizeBytes),
+      })
+      const path = `/media/${encodeURIComponent(input.messageId)}?${params.toString()}`
+      const init = {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${opts.token}`,
+          'Content-Type': input.mime,
+          'Content-Length': String(input.sizeBytes),
+        },
+        body: input.body,
+        duplex: 'half',
+      } as unknown as RequestInit
+      const res = await doFetch(`${base}${path}`, init)
+      if (res.status === 401 || res.status === 404) {
+        throw new FatalConfigError(
+          res.status === 401
+            ? 'Use Brian rejected the bridge token (401). Check BRIAN_BRIDGE_TOKEN and BRIAN_CHANNEL_ID, or rotate the token in Studio.'
+            : 'Use Brian does not know this channel (404). It was deleted or BRIAN_CHANNEL_ID is wrong.',
+          res.status,
+        )
+      }
+      if (!res.ok) throw new BridgeHttpError(res.status, path, await res.text().catch(() => ''))
+      return (await res.json()) as StreamedMediaResult
     },
     async pollOutbox({ waitMs = 25_000, limit = 20, signal } = {}) {
       const res = await request('GET', `/outbox?wait=${waitMs}&limit=${limit}`, undefined, signal)

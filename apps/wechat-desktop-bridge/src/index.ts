@@ -16,7 +16,7 @@ import { consoleLogger as log, errorMessage, sleep } from './log.js'
 import { createLoginSupervisor } from './login-supervisor.js'
 import { createMonitor } from './monitor.js'
 import { createOutboxWorker } from './outbox-worker.js'
-import { FEATURE_MEDIA_UPGRADE } from './protocol-types.js'
+import { FEATURE_MEDIA_STREAM, FEATURE_MEDIA_UPGRADE } from './protocol-types.js'
 import { loadStateFile } from './state-file.js'
 
 async function main(): Promise<void> {
@@ -59,10 +59,16 @@ async function main(): Promise<void> {
     process.exit(5)
   }
   const mediaUpgradeEnabled = hello.features?.includes(FEATURE_MEDIA_UPGRADE) === true
+  const mediaStreamEnabled = hello.features?.includes(FEATURE_MEDIA_STREAM) === true
   log.info(
     mediaUpgradeEnabled
-      ? 'server supports media_upgrade: original-image sweep enabled'
-      : 'server does not advertise media_upgrade: images keep their thumbnails',
+      ? 'server supports media_upgrade: durable attachment recovery enabled'
+      : 'server does not advertise media_upgrade: archive upgrades disabled',
+  )
+  log.info(
+    mediaStreamEnabled
+      ? 'server supports media_stream: ready attachment bytes use raw uploads'
+      : 'server does not advertise media_stream: attachment bytes use the legacy inline path',
   )
 
   // /health listener first so compose sees us while we wait for the container.
@@ -109,6 +115,7 @@ async function main(): Promise<void> {
     backfillOnFirstBoot: config.BACKFILL_ON_FIRST_BOOT,
     isLoggedIn: () => supervisor?.isLoggedIn() ?? false,
     mediaUpgradeEnabled,
+    mediaStreamEnabled,
     log,
     onFatal: fatal,
   })

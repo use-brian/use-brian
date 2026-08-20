@@ -5,14 +5,17 @@
 #   openssl rand -hex 32 > agent-wechat-token && chmod 600 agent-wechat-token
 #   cp .env.example .env   # fill in from Studio -> Channels -> Custom (wechat-desktop)
 #
-# Upstream image: ghcr.io/thisnick/agent-wechat (third-party; the WeChat Linux
-# client automation lives entirely there, not in this bridge). Pin it by digest
-# for a reproducible deploy; mirror it to a registry you control before relying
-# on it in production.
+# The runtime source is vendored as a standalone build root in
+# brian-message-store/agent-wechat. AGENT_WECHAT_SOURCE defaults to the sibling
+# checkout layout used by the operator docs; set it when the repositories live
+# elsewhere. AGENT_WECHAT_IMAGE is the local/pinned output tag.
 
 services:
   agent-wechat:
-    image: ghcr.io/thisnick/agent-wechat:latest
+    image: ${AGENT_WECHAT_IMAGE:-use-brian/agent-wechat:local}
+    build:
+      context: ${AGENT_WECHAT_SOURCE:-../../../brian-message-store/agent-wechat}
+      dockerfile: docker/Dockerfile
     security_opt:
       - seccomp=unconfined
     cap_add:

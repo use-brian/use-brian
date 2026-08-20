@@ -12,6 +12,7 @@ import {
   createCustomAdapter,
   base64DecodedLength,
   bridgeInboundOversize,
+  CUSTOM_CHANNEL_FEATURES,
   BRIDGE_INBOUND_MEDIA_MAX_BYTES,
   BRIDGE_INBOUND_TEXT_MAX_BYTES,
   type BridgeInboundMessage,
@@ -127,16 +128,34 @@ describe('[COMP:channels/custom-adapter] outbox items', () => {
     expect(enqueue).not.toHaveBeenCalled()
   })
 
-  it('sendTypingIndicator enqueues typing on; editMessage is unsupported; sendStatus is a no-op', async () => {
+  it('enqueues typing and status items while editMessage remains unsupported', async () => {
     const { adapter, enqueue } = build()
     await adapter.sendTypingIndicator('peer-1')
     expect(enqueue).toHaveBeenCalledWith({ type: 'typing', peerId: 'peer-1', payload: { on: true } })
     await expect(adapter.editMessage('peer-1', 'x', { text: 'y' })).rejects.toThrow(/edit/)
-    expect(await adapter.sendStatus('peer-1', 'thinking')).toBe('')
+    await expect(adapter.sendStatus('peer-1', 'Working...')).resolves.toBe('outbox-item-1')
+    expect(enqueue).toHaveBeenLastCalledWith({
+      type: 'status',
+      peerId: 'peer-1',
+      payload: { text: 'Working...' },
+    })
   })
 })
 
 describe('[COMP:channels/custom-adapter] inbound limits', () => {
+  it('advertises raw media streaming and does not apply the inline cap to stored refs', () => {
+    expect(CUSTOM_CHANNEL_FEATURES).toContain('media_stream')
+    expect(bridgeInboundOversize({ message: inbound({
+      media: [{
+        kind: 'video',
+        mime: 'video/mp4',
+        name: 'large.mp4',
+        stored: { assetId: '11111111-1111-1111-1111-111111111111', sha256: 'a'.repeat(64) },
+        sizeBytes: BRIDGE_INBOUND_MEDIA_MAX_BYTES + 1,
+      }],
+    }) })).toBeNull()
+  })
+
   it('computes decoded base64 length', () => {
     expect(base64DecodedLength('')).toBe(0)
     expect(base64DecodedLength(Buffer.from('a').toString('base64'))).toBe(1)

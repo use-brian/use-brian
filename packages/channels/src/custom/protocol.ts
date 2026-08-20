@@ -27,7 +27,11 @@ export const CUSTOM_CHANNEL_PROTOCOL_VERSION = 1
  * they do not speak, so the number can effectively never move.
  */
 export const CUSTOM_CHANNEL_FEATURE_MEDIA_UPGRADE = 'media_upgrade'
-export const CUSTOM_CHANNEL_FEATURES = [CUSTOM_CHANNEL_FEATURE_MEDIA_UPGRADE] as const
+export const CUSTOM_CHANNEL_FEATURE_MEDIA_STREAM = 'media_stream'
+export const CUSTOM_CHANNEL_FEATURES = [
+  CUSTOM_CHANNEL_FEATURE_MEDIA_UPGRADE,
+  CUSTOM_CHANNEL_FEATURE_MEDIA_STREAM,
+] as const
 
 export const BRIDGE_INBOUND_TEXT_MAX_BYTES = 64 * 1024
 export const BRIDGE_INBOUND_MEDIA_MAX_ITEMS = 4
@@ -72,9 +76,14 @@ export type BridgeInboundMedia = {
   kind: BridgeInboundMediaKind
   mime: string
   name: string
-  /** Exactly one of dataBase64 / url. url must be fetchable from the API with no auth. */
+  /** Exactly one of dataBase64 / url / stored. */
   dataBase64?: string
   url?: string
+  /** Result of the authenticated raw-body `/media/:messageId` upload. */
+  stored?: {
+    assetId: string
+    sha256: string
+  }
   sizeBytes?: number
   durationSec?: number
 }
@@ -136,7 +145,7 @@ export function bridgeInboundOversize(inbound: BridgeInbound): string | null {
     if (item.dataBase64 && base64DecodedLength(item.dataBase64) > BRIDGE_INBOUND_MEDIA_MAX_BYTES) {
       return `media item "${item.name}" exceeds ${BRIDGE_INBOUND_MEDIA_MAX_BYTES} bytes`
     }
-    if (item.sizeBytes != null && item.sizeBytes > BRIDGE_INBOUND_MEDIA_MAX_BYTES) {
+    if (item.stored == null && item.sizeBytes != null && item.sizeBytes > BRIDGE_INBOUND_MEDIA_MAX_BYTES) {
       return `media item "${item.name}" exceeds ${BRIDGE_INBOUND_MEDIA_MAX_BYTES} bytes`
     }
   }
@@ -157,6 +166,7 @@ export type OutboxMessagePayload = {
 export type OutboxItem =
   | { id: string; type: 'message'; peerId: string; createdAt: string; payload: OutboxMessagePayload }
   | { id: string; type: 'typing'; peerId: string; createdAt: string; payload: { on: boolean } }
+  | { id: string; type: 'status'; peerId: string; createdAt: string; payload: { text: string } }
   | { id: string; type: 'input'; peerId: null; createdAt: string; payload: { requestId: string; value: string } }
   | { id: string; type: 'disconnect'; peerId: null; createdAt: string; payload: Record<string, never> }
 

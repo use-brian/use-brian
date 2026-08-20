@@ -24,8 +24,17 @@ HTTPS, Docker Engine 24+ and the compose plugin. No inbound port is needed.
 
 1. Install Docker (`https://docs.docker.com/engine/install/`) and make sure
    `docker compose version` works.
-2. Copy this directory to the box (or `git clone` the use-brian repo and `cd
-   use-brian/apps/wechat-desktop-bridge`).
+2. Clone both open repositories as siblings. The compose stack builds the
+   audited runtime source from `brian-message-store/agent-wechat`:
+
+   ```sh
+   git clone https://github.com/use-brian/brian-message-store
+   git clone https://github.com/use-brian/use-brian
+   cd use-brian/apps/wechat-desktop-bridge
+   ```
+
+   If the repositories are not siblings, set `AGENT_WECHAT_SOURCE` in `.env`
+   to the absolute path of the standalone `agent-wechat` directory.
 3. Create the container token:
 
    ```sh
@@ -65,8 +74,8 @@ or channel id exits immediately with one sentence saying so; fix `.env` and
 
 ## Day-to-day
 
-- **Upgrades:** `docker compose pull && docker compose build --pull && docker
-  compose up -d`. The WeChat session usually survives (it lives in the
+- **Upgrades:** pull both repositories, then `docker compose build --pull &&
+  docker compose up -d`. The WeChat session usually survives (it lives in the
   `agent-wechat-*` volumes); if not, Studio shows a fresh QR.
 - **Backups:** the two `agent-wechat-*` volumes hold the desktop session and
   the message store; the `bridge-data` volume holds `bridge-state.json` (the

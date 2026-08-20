@@ -3,6 +3,7 @@
  * cursor advance, at-least-once on failure, official-account skip.
  */
 import { mkdtemp, readFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { beforeEach, describe, expect, it } from 'vitest'
@@ -28,7 +29,6 @@ function makeMonitor(over: Partial<Parameters<typeof createMonitor>[0]> = {}): M
     isLoggedIn: () => true,
     log: silentLogger,
     sleep: async () => {},
-    mediaRetry: { attempts: 3, intervalMs: 0 },
     ...over,
   })
 }
@@ -111,6 +111,37 @@ describe('[COMP:app/wechat-desktop-bridge] monitor', () => {
     expect(bridge.inbound.map((i) => i.message.text)).toEqual(['hello 1', 'hello 2', 'hello 3'])
   })
 
+  it('persists a committed raw upload and retries inbound without reading WeChat bytes again', async () => {
+    state.cursors.wxid_example1 = 0
+    agent.chats = [chat({ id: 'wxid_example1', lastMsgLocalId: 1 })]
+    agent.messages.set('wxid_example1', [msg({ localId: 1, chatId: 'wxid_example1', type: 49, content: '' })])
+    const bytes = 'document bytes'
+    agent.media.set('wxid_example1:1', [{
+      type: 'file', kind: 'file', status: 'ready', variant: 'original', format: 'docx', filename: 'plan.docx',
+      data: Buffer.from(bytes).toString('base64'), mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      sizeBytes: Buffer.byteLength(bytes), sha256: createHash('sha256').update(bytes).digest('hex'),
+    }])
+    bridge.failInboundWith = new Error('ECONNRESET')
+    bridge.failInboundTimes = 1
+    const monitor = makeMonitor({ mediaStreamEnabled: true })
+    await monitor.tick()
+    expect(state.cursors.wxid_example1).toBe(0)
+    expect(state.pendingMediaUpgrades?.wxid_example1?.[0]?.stagedMedia?.stored).toBeDefined()
+    expect(agent.mediaCalls).toBe(1)
+    expect(bridge.uploads).toHaveLength(1)
+
+    // Simulate provider-local eviction after the archive already committed.
+    agent.media.set('wxid_example1:1', [{
+      type: 'file', kind: 'file', status: 'pending', format: 'docx', filename: 'plan.docx', recoverable: true,
+    }])
+    await monitor.tick()
+    expect(agent.mediaCalls).toBe(1)
+    expect(bridge.uploads).toHaveLength(1)
+    expect(bridge.inbound).toHaveLength(1)
+    expect(bridge.inbound[0]!.message.media?.[0]?.stored).toBeDefined()
+    expect(state.cursors.wxid_example1).toBe(1)
+  })
+
   it('skips official accounts but forwards File Transfer (filehelper)', async () => {
     state.cursors['gh_official1'] = 0
     state.cursors['filehelper'] = 0
@@ -133,28 +164,53 @@ describe('[COMP:app/wechat-desktop-bridge] monitor', () => {
     expect(bridge.inbound).toHaveLength(0)
   })
 
-  it('retries media until bytes arrive and forwards them inline', async () => {
+  it('holds a pending media row before the cursor and delivers it when ready on a later tick', async () => {
     state.cursors['wxid_example1'] = 0
-    agent.chats = [chat({ id: 'wxid_example1', lastMsgLocalId: 1 })]
+    agent.chats = [chat({ id: 'wxid_example1', lastMsgLocalId: 1, unreadCount: 1 })]
     agent.messages.set('wxid_example1', [msg({ localId: 1, chatId: 'wxid_example1', type: 3, content: '' })])
     agent.media.set('wxid_example1:1', [
-      { type: 'image', format: 'jpg', filename: 'a.jpg' },
+      { type: 'image', format: 'jpg', filename: 'a.jpg', status: 'pending', kind: 'image', reason: 'not_downloaded' },
       { type: 'image', format: 'jpg', filename: 'a.jpg', data: 'aGVsbG8=' },
     ])
-    await makeMonitor().tick()
+    const monitor = makeMonitor({ mediaUpgradeEnabled: true })
+    await monitor.tick()
+    expect(bridge.inbound).toHaveLength(0)
+    expect(state.cursors['wxid_example1']).toBe(0)
+    agent.chats[0]!.unreadCount = 0
+    state.pendingMediaUpgrades!.wxid_example1![0]!.nextAttemptAt = 0
+    await monitor.tick()
     expect(agent.mediaCalls).toBe(2)
     expect(bridge.inbound[0]!.message.media![0]).toMatchObject({ kind: 'image', dataBase64: 'aGVsbG8=' })
+    expect(state.cursors['wxid_example1']).toBe(1)
   })
 
-  it('sends [attachment unavailable] after retries are exhausted and still advances', async () => {
+  it('advances without bytes only for an explicit terminal provider reason', async () => {
     state.cursors['wxid_example1'] = 0
     agent.chats = [chat({ id: 'wxid_example1', lastMsgLocalId: 1 })]
     agent.messages.set('wxid_example1', [msg({ localId: 1, chatId: 'wxid_example1', type: 3, content: '' })])
-    agent.media.set('wxid_example1:1', [{ type: 'image', format: 'jpg', filename: 'a.jpg' }])
+    agent.media.set('wxid_example1:1', [{
+      type: 'image', format: 'jpg', filename: 'a.jpg', status: 'unavailable', kind: 'image', reason: 'expired', recoverable: false,
+    }])
     await makeMonitor().tick()
-    expect(agent.mediaCalls).toBe(3)
-    expect(bridge.inbound[0]!.message.text).toBe('[attachment unavailable]')
+    expect(agent.mediaCalls).toBe(1)
+    expect(bridge.inbound[0]!.message.text).toBe('[attachment unavailable: expired]')
     expect(state.cursors['wxid_example1']).toBe(1)
+  })
+
+  it('treats a known unsupported app subtype as a link, not a lost attachment', async () => {
+    state.cursors['wxid_example1'] = 0
+    agent.chats = [chat({ id: 'wxid_example1', lastMsgLocalId: 1 })]
+    agent.messages.set('wxid_example1', [msg({
+      localId: 1, chatId: 'wxid_example1', type: 49,
+      content: '<msg><appmsg><title>Some article</title></appmsg></msg>',
+    })])
+    agent.media.set('wxid_example1:1', [{
+      type: 'unsupported', format: '', filename: '', status: 'unavailable', kind: 'unsupported',
+      reason: 'unsupported', recoverable: false,
+    }])
+    await makeMonitor().tick()
+    expect(bridge.inbound[0]!.message.text).toBe('[link] Some article')
+    expect(state.cursors.wxid_example1).toBe(1)
   })
 
   it('on 413 re-sends the text with an [attachment too large] note', async () => {
@@ -178,18 +234,30 @@ describe('[COMP:app/wechat-desktop-bridge] monitor', () => {
     agent.messages.set('wxid_example1', [msg({ localId: 1, chatId: 'wxid_example1', type: 3, content: '' })])
     // forward() consumes the thumbnail; the sweep's re-fetch gets the original.
     agent.media.set('wxid_example1:1', [
-      { type: 'image', format: 'jpg', filename: 'a.jpg', data: thumbB64 },
-      { type: 'image', format: 'jpg', filename: 'a.jpg', data: fullB64 },
+      {
+        type: 'image', format: 'jpg', filename: 'a.jpg', data: thumbB64,
+        status: 'ready', kind: 'image', variant: 'preview', mime: 'image/jpeg', sizeBytes: 5,
+        sha256: createHash('sha256').update('thumb').digest('hex'),
+      },
+      {
+        type: 'image', format: 'jpg', filename: 'a.jpg', data: fullB64,
+        status: 'ready', kind: 'image', variant: 'original', mime: 'image/jpeg', sizeBytes: 24,
+        sha256: createHash('sha256').update('full-size-original-bytes').digest('hex'),
+      },
     ])
-    await makeMonitor({ mediaUpgradeEnabled: true }).tick()
+    const monitor = makeMonitor({ mediaUpgradeEnabled: true, mediaStreamEnabled: true })
+    await monitor.tick()
+    expect(bridge.inbound).toHaveLength(1)
+    state.pendingMediaUpgrades!.wxid_example1![0]!.nextAttemptAt = 0
+    await monitor.tick()
     expect(agent.openedChats).toEqual(['wxid_example1'])
     expect(bridge.inbound).toHaveLength(2)
     expect(bridge.inbound[0]!.mediaUpgrade).toBeUndefined()
-    expect(bridge.inbound[0]!.message.media![0]!.dataBase64).toBe(thumbB64)
+    expect(bridge.inbound[0]!.message.media![0]!.stored?.sha256).toBe(createHash('sha256').update('thumb').digest('hex'))
     expect(bridge.inbound[1]!.mediaUpgrade).toBe(true)
-    expect(bridge.inbound[1]!.message.media![0]!.dataBase64).toBe(fullB64)
+    expect(bridge.inbound[1]!.message.media![0]!.stored?.sha256).toBe(createHash('sha256').update('full-size-original-bytes').digest('hex'))
     expect(bridge.inbound[1]!.message.messageId).toBe(bridge.inbound[0]!.message.messageId)
-    expect(state.pendingMediaUpgrades).toEqual({})
+    expect(state.pendingMediaUpgrades).toBeUndefined()
   })
 
   it('without the feature the sweep never opens chats and no pendings are recorded', async () => {

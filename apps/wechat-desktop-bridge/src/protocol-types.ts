@@ -35,9 +35,10 @@ export type BridgeInboundMedia = {
   kind: BridgeMediaKind
   mime: string
   name: string
-  /** Exactly one of dataBase64 / url. */
+  /** Exactly one of dataBase64 / url / stored. */
   dataBase64?: string
   url?: string
+  stored?: { assetId: string; sha256: string }
   sizeBytes?: number
   durationSec?: number
 }
@@ -75,6 +76,8 @@ export type BridgeInbound = {
 
 /** Hello `features` name for the media-upgrade ability. */
 export const FEATURE_MEDIA_UPGRADE = 'media_upgrade'
+/** Hello `features` name for raw streamed media uploads. */
+export const FEATURE_MEDIA_STREAM = 'media_stream'
 
 type OutboxDocument = { filename: string; mime: string; dataBase64: string; caption?: string }
 
@@ -92,6 +95,7 @@ export type OutboxItem =
       }
     }
   | { id: string; type: 'typing'; peerId: string; createdAt: string; payload: { on: boolean } }
+  | { id: string; type: 'status'; peerId: string; createdAt: string; payload: { text: string } }
   | { id: string; type: 'input'; peerId: null; createdAt: string; payload: { requestId: string; value: string } }
   | { id: string; type: 'disconnect'; peerId: null; createdAt: string; payload: Record<string, never> }
 

@@ -83,6 +83,7 @@ import type {
   EpisodicStore, UsageStore, AnalyticsLogger, RetrievalStore,
 } from '@use-brian/core'
 import type { DeferredConfirmationStore } from '../db/deferred-confirmation-store.js'
+import type { CustomChannelStore } from '../db/custom-channel-store.js'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 import type { ChatEpisodeIngestor } from '../ingest-port.js'
 import type { InjectExtraTools, ResolveAppSoul } from '../tool-injection-port.js'
@@ -181,6 +182,7 @@ export type CalleeExecutorOptions = {
   defaultTelegramBotToken?: string
   waConnectorUrl?: string
   waConnectorSecret?: string
+  customChannelStore?: Pick<CustomChannelStore, 'enqueue'>
   /**
    * Host per-turn extra-tool injector. When the CALLEE is an app assistant the
    * host gives extra tools to (e.g. a publishing app a workspace primary
@@ -1932,6 +1934,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
                 defaultTelegramBotToken: options.defaultTelegramBotToken,
                 waConnectorUrl: options.waConnectorUrl,
                 waConnectorSecret: options.waConnectorSecret,
+                customChannelStore: options.customChannelStore,
               },
             )
           }

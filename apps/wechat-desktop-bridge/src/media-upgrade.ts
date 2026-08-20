@@ -1,61 +1,145 @@
 /**
- * Original-image upgrade sweep. WeChat auto-downloads only a ~6–10 KB
- * thumbnail with an image message; the full-size bytes appear on disk only
- * after the client renders the chat. The monitor registers every forwarded
- * image row here; the sweep opens read chats (`unreadCount === 0` — opening
- * marks a chat read and WeChat syncs read state to the phone, so an unread
- * chat is never touched), re-fetches the media, and re-posts the message with
- * `mediaUpgrade: true` when the bytes changed.
- * Spec: docs/architecture/channels/wechat-desktop.md → "Original image upgrade".
+ * Durable media recovery for the WeChat desktop bridge.
+ *
+ * A message row can exist before WeChat has materialized its attachment. The
+ * bridge persists that pending state, keeps an undelivered row ahead of the
+ * chat cursor, and retries with exponential backoff. Preview bytes may be
+ * delivered once; their recovery entry remains until original bytes arrive,
+ * then the same provider message id is re-posted as an archive-only upgrade.
+ *
+ * Spec: docs/architecture/channels/wechat-desktop.md -> "Durable media recovery".
  */
-import { createHash } from 'node:crypto'
-import type { AgentWechatChat, AgentWechatClient, AgentWechatMessage } from './agent-wechat-client.js'
+import type {
+  AgentWechatChat,
+  AgentWechatClient,
+  AgentWechatMediaResult,
+  AgentWechatMessage,
+} from './agent-wechat-client.js'
 import { BridgeHttpError, FatalConfigError, type BrianBridgeClient } from './brian-bridge-client.js'
-import { consoleLogger, errorMessage, sleep as defaultSleep, type Logger } from './log.js'
-import { messageIsImage, toBridgeMedia } from './map-message.js'
-import type { BridgeInboundMessage } from './protocol-types.js'
+import { consoleLogger, errorMessage, type Logger } from './log.js'
+import { messageIdOf, toBridgeMedia, toBridgeStoredMedia } from './map-message.js'
+import type { BridgeInboundMedia, BridgeInboundMessage } from './protocol-types.js'
 import type { BridgeStateFile, PendingMediaUpgrade } from './state-file.js'
 
-/** Chats opened per sweep — keeps the client UI calm on a busy account. */
 const MAX_CHATS_PER_SWEEP = 2
-/** Wait after the open before re-fetching, so the download can land. */
-const OPEN_SETTLE_MS = 2500
-/** Same-bytes re-fetches (spread across sweeps) before giving up. */
-const MAX_ATTEMPTS = 4
-const MAX_AGE_MS = 72 * 60 * 60 * 1000
-/** Per-chat pending cap; oldest entries drop first. */
-const MAX_PENDING_PER_CHAT = 20
+const BACKOFF_BASE_MS = 2_000
+const BACKOFF_MAX_MS = 60 * 60 * 1000
+
+function isReady(result: AgentWechatMediaResult): boolean {
+  return result.status === 'ready' || (!result.status && Boolean(result.data))
+}
+
+function isTerminal(result: AgentWechatMediaResult): boolean {
+  return result.status === 'unavailable'
+    || result.recoverable === false
+    || result.type === 'unsupported'
+}
+
+function mediaKind(result: AgentWechatMediaResult): PendingMediaUpgrade['kind'] {
+  if (result.kind === 'file' || result.kind === 'video' || result.kind === 'voice' || result.kind === 'sticker') {
+    return result.kind
+  }
+  return 'image'
+}
+
+function archiveUploadKind(result: AgentWechatMediaResult): 'image' | 'video' | 'voice' | 'file' {
+  if (result.variant === 'preview' && result.mime?.startsWith('image/')) return 'image'
+  if (result.kind === 'sticker' || result.kind === 'image' || result.type === 'image' || result.type === 'emoji') return 'image'
+  if (result.kind === 'video' || result.type === 'video') return 'video'
+  if (result.kind === 'voice' || result.type === 'voice') return 'voice'
+  return 'file'
+}
+
+function nextDelay(attempts: number, retryAfterMs?: number): number {
+  const exponential = Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** Math.min(attempts, 11))
+  return Math.max(exponential, retryAfterMs ?? 0)
+}
+
+/**
+ * Turn a ready runtime descriptor into one custom-channel media item. New
+ * servers use raw streaming; an older server falls back to the descriptor's
+ * embedded base64 so a rolling deploy remains compatible.
+ */
+export async function storeReadyMedia(input: {
+  agent: AgentWechatClient
+  bridge: BrianBridgeClient
+  chatId: string
+  peerId: string
+  msg: AgentWechatMessage
+  result: AgentWechatMediaResult
+  mediaStreamEnabled: boolean
+}): Promise<BridgeInboundMedia> {
+  const { result } = input
+  if (!isReady(result)) throw new Error('cannot store media that is not ready')
+
+  if (input.mediaStreamEnabled && result.sha256 && result.sizeBytes != null) {
+    const content = await input.agent.getMediaContent(input.chatId, input.msg.localId)
+    if (content.contentLength !== result.sizeBytes) {
+      throw new Error(`agent-wechat media size changed (${content.contentLength} != ${result.sizeBytes})`)
+    }
+    if (content.etag && content.etag.toLowerCase() !== result.sha256.toLowerCase()) {
+      throw new Error('agent-wechat media digest changed before upload')
+    }
+    const stored = await input.bridge.uploadMedia({
+      messageId: messageIdOf(input.msg),
+      peerId: input.peerId,
+      kind: archiveUploadKind(result),
+      mime: result.mime ?? content.mime,
+      filename: result.filename || content.filename,
+      sha256: result.sha256,
+      sizeBytes: result.sizeBytes,
+      body: content.body,
+    })
+    return toBridgeStoredMedia(result, input.msg, stored)
+  }
+
+  const inline = toBridgeMedia(result, input.msg)
+  if (!inline) throw new Error('ready media carried neither a stream descriptor nor inline bytes')
+  return inline
+}
 
 export type MediaUpgraderDeps = {
   agent: AgentWechatClient
   bridge: BrianBridgeClient
   state: BridgeStateFile
-  /** Persist the state file (the monitor's own persist). */
   persist: () => Promise<void>
-  /** Hello advertised the `media_upgrade` feature. False disables everything. */
+  /** Hello advertised `media_upgrade`. */
   enabled: boolean
+  /** Hello advertised `media_stream`. */
+  mediaStreamEnabled?: boolean
   log?: Logger
-  sleep?: (ms: number) => Promise<void>
   isStopped?: () => boolean
   now?: () => number
-  /** Wrong token / deleted channel — the process must exit (monitor parity). */
   onFatal?: (err: unknown) => void
 }
 
 export type MediaUpgrader = {
-  /** Track a just-forwarded image row for a later upgrade attempt. */
-  register(input: { chatId: string; msg: AgentWechatMessage; mapped: BridgeInboundMessage }): void
-  /** One upgrade pass over the current chat list. */
+  find(chatId: string, localId: number): PendingMediaUpgrade | undefined
+  isDue(entry: PendingMediaUpgrade): boolean
+  /** Persist a provider-pending row. `delivered=false` keeps the cursor behind it. */
+  defer(input: {
+    chatId: string
+    msg: AgentWechatMessage
+    message: BridgeInboundMessage
+    result: AgentWechatMediaResult
+    delivered?: boolean
+    forwardedSha256?: string | null
+    stagedMedia?: BridgeInboundMedia
+  }): PendingMediaUpgrade
+  noteAttempt(entry: PendingMediaUpgrade, retryAfterMs?: number): void
+  remove(chatId: string, localId: number): void
+  /** A preview was successfully posted; keep recovering it as an archive upgrade. */
+  markDeliveredPreview(input: {
+    chatId: string
+    msg: AgentWechatMessage
+    message: BridgeInboundMessage
+    result: AgentWechatMediaResult
+  }): void
   sweep(chats: AgentWechatChat[]): Promise<void>
-}
-
-export function sha256Base64(dataBase64: string): string {
-  return createHash('sha256').update(Buffer.from(dataBase64, 'base64')).digest('hex')
 }
 
 export function createMediaUpgrader(deps: MediaUpgraderDeps): MediaUpgrader {
   const log = deps.log ?? consoleLogger
-  const sleep = deps.sleep ?? defaultSleep
   const now = deps.now ?? Date.now
   const stopped = deps.isStopped ?? (() => false)
 
@@ -64,127 +148,202 @@ export function createMediaUpgrader(deps: MediaUpgraderDeps): MediaUpgrader {
     return deps.state.pendingMediaUpgrades
   }
 
-  /** Drop exhausted/expired entries; returns true when anything changed. */
-  function prune(chatId: string): boolean {
-    const map = pendings()
-    const entries = map[chatId]
-    if (!entries) return false
-    const kept = entries.filter((e) => e.attempts < MAX_ATTEMPTS && now() - e.firstSeenAt <= MAX_AGE_MS)
-    const changed = kept.length !== entries.length
-    if (kept.length === 0) delete map[chatId]
-    else map[chatId] = kept
-    return changed
+  function find(chatId: string, localId: number): PendingMediaUpgrade | undefined {
+    return deps.state.pendingMediaUpgrades?.[chatId]?.find((entry) => entry.localId === localId)
   }
 
-  return {
-    register({ chatId, msg, mapped }) {
-      if (!deps.enabled || !messageIsImage(msg)) return
-      const { media: _media, ...messageSansMedia } = mapped
-      const dataBase64 = mapped.media?.[0]?.dataBase64
-      const entry: PendingMediaUpgrade = {
-        localId: msg.localId,
-        message: messageSansMedia,
-        forwardedSha256: dataBase64 ? sha256Base64(dataBase64) : null,
+  function remove(chatId: string, localId: number): void {
+    const map = deps.state.pendingMediaUpgrades
+    const entries = map?.[chatId]
+    if (!entries) return
+    const kept = entries.filter((entry) => entry.localId !== localId)
+    if (kept.length > 0) map![chatId] = kept
+    else delete map![chatId]
+    if (map && Object.keys(map).length === 0) delete deps.state.pendingMediaUpgrades
+  }
+
+  function defer(input: {
+    chatId: string
+    msg: AgentWechatMessage
+    message: BridgeInboundMessage
+    result: AgentWechatMediaResult
+    delivered?: boolean
+    forwardedSha256?: string | null
+    stagedMedia?: BridgeInboundMedia
+  }): PendingMediaUpgrade {
+    const map = pendings()
+    const entries = (map[input.chatId] ??= [])
+    let entry = entries.find((candidate) => candidate.localId === input.msg.localId)
+    if (!entry) {
+      entry = {
+        localId: input.msg.localId,
+        message: input.message,
+        kind: mediaKind(input.result),
+        delivered: input.delivered === true,
+        variant: input.result.variant,
+        forwardedSha256: input.forwardedSha256 ?? null,
+        stagedMedia: input.stagedMedia,
         attempts: 0,
         firstSeenAt: now(),
+        nextAttemptAt: now() + nextDelay(0, input.result.retryAfterMs),
       }
-      const map = pendings()
-      const entries = (map[chatId] ??= [])
       entries.push(entry)
-      if (entries.length > MAX_PENDING_PER_CHAT) entries.splice(0, entries.length - MAX_PENDING_PER_CHAT)
-      // The caller persists right after (cursor advance) — no extra write here.
+    } else {
+      entry.message = input.message
+      entry.kind = mediaKind(input.result)
+      entry.variant = input.result.variant
+      if (input.delivered !== undefined) entry.delivered = input.delivered
+      if (input.forwardedSha256 !== undefined) entry.forwardedSha256 = input.forwardedSha256
+      if (input.stagedMedia !== undefined) entry.stagedMedia = input.stagedMedia
+    }
+    return entry
+  }
+
+  function noteAttempt(entry: PendingMediaUpgrade, retryAfterMs?: number): void {
+    entry.attempts += 1
+    entry.nextAttemptAt = now() + nextDelay(entry.attempts, retryAfterMs)
+  }
+
+  const api: MediaUpgrader = {
+    find,
+    isDue: (entry) => now() >= entry.nextAttemptAt,
+    defer,
+    noteAttempt,
+    remove,
+    markDeliveredPreview({ chatId, msg, message, result }) {
+      if (!deps.enabled || result.variant !== 'preview') return
+      const { media: _media, ...messageSansMedia } = message
+      const entry = defer({
+        chatId,
+        msg,
+        message: messageSansMedia,
+        result,
+        delivered: true,
+        forwardedSha256: result.sha256 ?? null,
+      })
+      delete entry.stagedMedia
     },
 
     async sweep(chats) {
       if (!deps.enabled) return
       const map = deps.state.pendingMediaUpgrades
-      if (!map || Object.keys(map).length === 0) return
-      const byChat = new Map(chats.map((c) => [c.id || c.username, c]))
+      if (!map) return
+      const byChat = new Map(chats.map((chat) => [chat.id || chat.username, chat]))
       let changed = false
-      let opened = 0
+      let drivenChats = 0
+
       for (const chatId of Object.keys(map)) {
-        if (stopped()) break
-        if (prune(chatId)) changed = true
-        const entries = map[chatId]
-        if (!entries || entries.length === 0) continue
+        if (stopped() || drivenChats >= MAX_CHATS_PER_SWEEP) break
         const chat = byChat.get(chatId)
-        if (!chat) continue
-        // Read-safety gate: opening a chat marks it read (and syncs to the
-        // phone). Only touch chats the owner has already read everywhere.
-        if (chat.unreadCount !== 0) continue
-        if (opened >= MAX_CHATS_PER_SWEEP) break
-        opened++
+        if (!chat || chat.unreadCount !== 0) continue
+        const due = (map[chatId] ?? []).filter((entry) => entry.delivered && api.isDue(entry))
+        if (due.length === 0) continue
+        drivenChats += 1
 
-        let openOk = false
-        try {
-          const result = await deps.agent.openChat(chatId)
-          openOk = result.ok
-          if (!result.ok) log.warn(`media upgrade: open ${chatId} refused: ${result.error ?? 'unknown'}`)
-        } catch (err) {
-          log.warn(`media upgrade: open ${chatId} failed: ${errorMessage(err)}`)
-        }
-        if (!openOk) {
-          for (const e of entries) e.attempts++
-          changed = true
-          continue
-        }
-        await sleep(OPEN_SETTLE_MS)
-
-        for (const entry of [...entries]) {
+        for (const entry of [...due]) {
           if (stopped()) break
-          let upgradedBase64: string | null = null
-          let mediaResult
-          try {
-            mediaResult = await deps.agent.getMedia(chatId, entry.localId)
-            if (mediaResult.data) {
-              const sha = sha256Base64(mediaResult.data)
-              if (sha !== entry.forwardedSha256) upgradedBase64 = mediaResult.data
+          if (entry.stagedMedia) {
+            try {
+              await deps.bridge.postInbound({
+                message: { ...entry.message, media: [entry.stagedMedia] },
+                mediaUpgrade: true,
+              })
+              remove(chatId, entry.localId)
+              changed = true
+              log.info(`media recovery: ${chatId}:${entry.localId} delivered its committed archive upgrade`)
+            } catch (err) {
+              if (err instanceof FatalConfigError) {
+                deps.onFatal?.(err)
+                return
+              }
+              if (err instanceof BridgeHttpError && err.status >= 400 && err.status < 500) {
+                log.error(`media recovery: staged upgrade ${chatId}:${entry.localId} rejected (${err.status})`)
+                remove(chatId, entry.localId)
+              } else {
+                log.warn(`media recovery: staged upgrade ${chatId}:${entry.localId} failed; will retry: ${errorMessage(err)}`)
+                noteAttempt(entry)
+              }
+              changed = true
             }
-          } catch (err) {
-            log.warn(`media upgrade: fetch ${chatId}:${entry.localId} failed: ${errorMessage(err)}`)
-          }
-          if (!upgradedBase64 || !mediaResult) {
-            entry.attempts++
-            changed = true
             continue
           }
-          const media = toBridgeMedia(mediaResult, { localId: entry.localId, type: 3 })
-          if (!media) {
-            entry.attempts++
-            changed = true
-            continue
-          }
+          let result: AgentWechatMediaResult
           try {
+            result = await deps.agent.ensureMedia(chatId, entry.localId)
+          } catch (err) {
+            log.warn(`media recovery: ensure ${chatId}:${entry.localId} failed: ${errorMessage(err)}`)
+            noteAttempt(entry)
+            changed = true
+            continue
+          }
+
+          if (isTerminal(result)) {
+            log.warn(`media recovery: ${chatId}:${entry.localId} is terminal (${result.reason ?? 'unavailable'}); keeping delivered preview`)
+            remove(chatId, entry.localId)
+            changed = true
+            continue
+          }
+          if (!isReady(result) || result.variant === 'preview' || result.sha256 === entry.forwardedSha256) {
+            noteAttempt(entry, result.retryAfterMs)
+            changed = true
+            continue
+          }
+
+          try {
+            const synthetic: AgentWechatMessage = {
+              localId: entry.localId,
+              serverId: Number(entry.message.messageId) || 0,
+              chatId,
+              type: entry.kind === 'image' ? 3
+                : entry.kind === 'voice' ? 34
+                  : entry.kind === 'video' ? 43
+                    : entry.kind === 'sticker' ? 47 : 49,
+              content: '',
+              timestamp: new Date(entry.message.timestamp).toISOString(),
+            }
+            const media = await storeReadyMedia({
+              agent: deps.agent,
+              bridge: deps.bridge,
+              chatId,
+              peerId: entry.message.peerId,
+              msg: synthetic,
+              result,
+              mediaStreamEnabled: deps.mediaStreamEnabled === true,
+            })
+            if (media.stored) {
+              entry.stagedMedia = media
+              entry.variant = result.variant
+              // Commit the stable archive reference before the separate
+              // /inbound call, so a crash cannot strand an uploaded original.
+              await deps.persist()
+            }
             await deps.bridge.postInbound({
               message: { ...entry.message, media: [media] },
               mediaUpgrade: true,
             })
-            log.info(
-              `media upgrade: ${chatId}:${entry.localId} upgraded (${media.sizeBytes ?? '?'} bytes replaces thumbnail)`,
-            )
-            entries.splice(entries.indexOf(entry), 1)
+            remove(chatId, entry.localId)
             changed = true
+            log.info(`media recovery: ${chatId}:${entry.localId} upgraded to ${result.variant ?? 'ready'}`)
           } catch (err) {
             if (err instanceof FatalConfigError) {
               deps.onFatal?.(err)
               return
             }
             if (err instanceof BridgeHttpError && err.status >= 400 && err.status < 500) {
-              // Poison for this flow: oversize, or a platform that stopped
-              // advertising the feature. Keep the thumbnail.
-              log.error(`media upgrade: ${chatId}:${entry.localId} rejected (${err.status}); keeping thumbnail`)
-              entries.splice(entries.indexOf(entry), 1)
+              log.error(`media recovery: upgrade ${chatId}:${entry.localId} rejected (${err.status}); keeping delivered preview`)
+              remove(chatId, entry.localId)
               changed = true
             } else {
-              // 5xx / network: leave untouched for the next sweep.
-              log.warn(`media upgrade: post ${chatId}:${entry.localId} failed; will retry: ${errorMessage(err)}`)
+              log.warn(`media recovery: upgrade ${chatId}:${entry.localId} failed; will retry: ${errorMessage(err)}`)
+              noteAttempt(entry)
+              changed = true
             }
           }
         }
-        if (prune(chatId)) changed = true
-        if (entries.length === 0 && map[chatId]) delete map[chatId]
       }
       if (changed) await deps.persist()
     },
   }
+
+  return api
 }
