@@ -72,6 +72,7 @@ import {
   withFreshBlockIds,
   PAGE_TEMPLATE_CATEGORIES,
   pageTemplateCategorySchema,
+  filterToolsByCapabilities,
 } from '@use-brian/core'
 import type {
   BindingConfig,
@@ -304,6 +305,8 @@ type BuildOpts = {
    * holds the `configure` grant — resolved by the server before build).
    */
   agentTools?: { reads: Map<string, Tool>; writes: Map<string, Tool> }
+  /** Active grants on the bound assistant, used for model-visibility filtering. */
+  agentActiveCapabilities?: ReadonlySet<string>
   /**
    * Commerce-store tools for a custom Home app, ALREADY filtered to the
    * principal's `storeScope` by `filterStoreTools`. They arrive pre-filtered
@@ -1545,12 +1548,18 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
   // Reads ride both scopes; writes require read_write + the configure gate
   // (pre-resolved by the server into `agentWritesEnabled`). Same bridge as
   // every other tool — one Tool instance, per-request context.
-  const agentReadBridges: BrainTool[] = opts.agentTools
-    ? [...opts.agentTools.reads.values()].map((t) => bridgeCoreTool(t, resolveCtx, workspaceId))
+  const visibleAgentReads = opts.agentTools
+    ? filterToolsByCapabilities(opts.agentTools.reads, opts.agentActiveCapabilities ?? new Set())
+    : null
+  const visibleAgentWrites = opts.agentTools
+    ? filterToolsByCapabilities(opts.agentTools.writes, opts.agentActiveCapabilities ?? new Set())
+    : null
+  const agentReadBridges: BrainTool[] = visibleAgentReads
+    ? [...visibleAgentReads.values()].map((t) => bridgeCoreTool(t, resolveCtx, workspaceId))
     : []
   const agentWriteBridges: BrainTool[] =
-    opts.agentTools && opts.scope === 'read_write' && opts.agentWritesEnabled
-      ? [...opts.agentTools.writes.values()].map((t) => bridgeCoreTool(t, resolveCtx, workspaceId))
+    visibleAgentWrites && opts.scope === 'read_write' && opts.agentWritesEnabled
+      ? [...visibleAgentWrites.values()].map((t) => bridgeCoreTool(t, resolveCtx, workspaceId))
       : []
   const agentReadNames = new Set(agentReadBridges.map((t) => t.name))
 
@@ -1885,10 +1894,15 @@ export function buildHomeAppTools(deps: HomeAppToolDeps): BrainTool[] {
  * lazily as before.
  */
 export async function resolveAgentGate(workspaceId: string): Promise<boolean> {
-  const target = await resolveWriteTarget(workspaceId)
-  if (!target) return false
-  const caps = await loadActiveCapabilities(target.assistantId)
+  const caps = await resolveAgentCapabilities(workspaceId)
   return caps.has('configure')
+}
+
+/** Active grants for model-visibility filtering on the brain MCP. */
+export async function resolveAgentCapabilities(workspaceId: string): Promise<ReadonlySet<string>> {
+  const target = await resolveWriteTarget(workspaceId)
+  if (!target) return new Set()
+  return loadActiveCapabilities(target.assistantId)
 }
 
 /**

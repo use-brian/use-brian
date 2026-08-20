@@ -40,15 +40,18 @@ import {
  * `urlEntry` is the entry the URL currently points at (a page id, a
  * `panel:<id>` sentinel, or null at the `/p` index). `syncUrl` mirrors the
  * active tab's entry back into the URL — `router.replace(docEntryPath(...))`
- * in the shell, a plain assignment in tests.
+ * in the shell, a plain assignment in tests. `suspendUrlSync` is used by the
+ * explicit Suggested landing: Page's tab state remains entirely untouched
+ * while Suggested owns the content pane and hides the Page top bar.
  */
 export function useDocTabs(
   workspaceId: string,
   urlEntry: string | null,
   syncUrl: (entry: string | null) => void,
+  suspendUrlSync = false,
 ): [TabsState, React.Dispatch<React.SetStateAction<TabsState>>] {
   // Seeded once per mount from the workspace's session strip (`seedDocTabs`
-  // decides whether the restored strip or the URL wins — see its doc).
+  // decides whether the restored strip or URL wins — see its doc).
   const seed = React.useRef<ReturnType<typeof seedDocTabs> | null>(null);
   if (seed.current === null) {
     seed.current = seedDocTabs(readDocTabsSession(workspaceId), urlEntry);
@@ -97,8 +100,9 @@ export function useDocTabs(
   // own external changes and this effect own tab-driven ones; both guard on
   // equality, so they converge.
   React.useEffect(() => {
+    if (suspendUrlSync) return;
     if (urlEntryRef.current !== activeEntry) syncUrlRef.current(activeEntry);
-  }, [activeEntry]);
+  }, [activeEntry, suspendUrlSync]);
 
   // URL → tabs: reconcile a URL change from OUTSIDE the tab actions — a
   // chat-created draft auto-navigation (`floating-chat` calls `router.replace`
@@ -108,13 +112,14 @@ export function useDocTabs(
   // not-yet-synced URL from being mistaken for an external change; both effects
   // guard on equality, so they converge with no ping-pong.
   React.useEffect(() => {
+    if (suspendUrlSync) return;
     if (skipFirstUrlAdopt.current) {
       skipFirstUrlAdopt.current = false;
       return;
     }
     if (urlEntry === activeEntryRef.current) return;
     setTabsState((s) => (urlEntry ? openPage(s, urlEntry) : blankActiveTab(s)));
-  }, [urlEntry]);
+  }, [suspendUrlSync, urlEntry]);
 
   return [tabsState, setTabsState];
 }

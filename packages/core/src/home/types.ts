@@ -23,11 +23,23 @@ import { z } from 'zod'
 
 // ── Live signals (assembled in packages/api/src/home/signals.ts) ──────────
 
+/** Presentation groups for the unified approval queue on Suggested for you.
+ * These are not new approval kinds: every canonical backend kind maps into
+ * exactly one of these four user-facing concerns. */
+export type ApprovalGroupCounts = {
+  externalActions: number
+  contentReview: number
+  systemImprovements: number
+  questionsAndAccess: number
+}
+
 export type HomeSignals = {
   /** Unverified brain-inbox rows awaiting review. */
   brainReviewCount: number
-  /** Pending approvals for the workspace. */
+  /** All pending approvals for the workspace. */
   approvalsCount: number
+  /** The same pending rows grouped for the expanded Suggested-for-you card. */
+  approvalGroups: ApprovalGroupCounts
   /** Confirmed autopilot goals needing the user: blocked, or armed but not yet
    *  working (ready to kick start). Drafts count under `taskTriageCount` — one
    *  item, one card (task-goal-autopilot.md §8). A confirmed goal in

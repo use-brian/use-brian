@@ -7,9 +7,11 @@
  * be any more: which apps a workspace shows is configuration
  * (`workspaces.home_apps`, migration 385) and Page may be deselected, so a
  * fixed `/p` would drop those workspaces onto a surface that is not on their
- * strip. Home resolution is now one rule everywhere — the persisted app,
- * constrained to the configured list, falling back to its first entry
- * (`homePath`, `lib/operator-apps.ts`).
+ * strip. Home resolution is now one rule everywhere — the persisted app and
+ * its last safe pathname, constrained to the configured list and falling back
+ * to its first entry (`homePath`, `lib/operator-apps.ts`). The daily/+3
+ * approvals cadence may then replace that resume destination with the explicit
+ * Suggested briefing (`homeLandingPath`, `lib/suggested-landing.ts`).
  *
  * Resolution is client-side because the sticky selection lives in
  * localStorage. That costs nothing here: this route renders no UI, it only
@@ -30,6 +32,8 @@ import { Suspense, useEffect } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useSidebarData } from "@/components/doc/doc-sidebar-data";
 import { homePath } from "@/lib/operator-apps";
+import { pendingApprovalTotal } from "@/lib/api/home-dock";
+import { homeLandingPath } from "@/lib/suggested-landing";
 import { forwardPlanGateCheckoutReturn } from "@/lib/plan-gate";
 
 function WorkspaceRootRedirect() {
@@ -37,7 +41,7 @@ function WorkspaceRootRedirect() {
   const workspaceId = params?.workspaceId ?? "";
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { homeApps } = useSidebarData();
+  const { homeApps, dock, dockLoading } = useSidebarData();
 
   useEffect(() => {
     if (!workspaceId) return;
@@ -47,13 +51,19 @@ function WorkspaceRootRedirect() {
       router.replace(`/w/${workspaceId}/p?${capture ? "capture=1" : "record=1"}`);
       return;
     }
+    if (dockLoading) return;
+    const resumePath = homePath(workspaceId, homeApps);
     router.replace(
       forwardPlanGateCheckoutReturn(
-        homePath(workspaceId, homeApps),
+        homeLandingPath(
+          workspaceId,
+          resumePath,
+          pendingApprovalTotal(dock),
+        ),
         searchParams?.toString() ?? "",
       ),
     );
-  }, [homeApps, router, searchParams, workspaceId]);
+  }, [dock, dockLoading, homeApps, router, searchParams, workspaceId]);
 
   return null;
 }

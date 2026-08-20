@@ -42,6 +42,7 @@ function iso(msAgo: number): string {
 let rowSeq = 0;
 function makeRow(partial: Partial<PendingApprovalRow> = {}): PendingApprovalRow {
   rowSeq += 1;
+  const { workflowStepRunId = null, ...rest } = partial;
   return {
     id: `appr-${rowSeq}`,
     kind: "tool_invocation",
@@ -53,10 +54,11 @@ function makeRow(partial: Partial<PendingApprovalRow> = {}): PendingApprovalRow 
     originatingAssistantId: "asst-1",
     blockingSessionId: null,
     workflowRunId: null,
+    workflowStepRunId,
     deliveryChannelType: "web",
     createdAt: iso(HOUR),
     expiresAt: null,
-    ...partial,
+    ...rest,
   };
 }
 
@@ -69,6 +71,7 @@ describe("[COMP:app-web/approvals] isActionable", () => {
       "staged_skill_creation",
       "staged_skill_update",
       "browser_skill_send",
+      "email_sender",
     ];
     for (const kind of inPlace) {
       expect(isActionable(kind)).toBe(true);
@@ -85,10 +88,11 @@ describe("[COMP:app-web/approvals] isActionable", () => {
     }
   });
 
-  it("ACTIONABLE_KINDS holds exactly the seven in-place kinds", () => {
+  it("ACTIONABLE_KINDS holds exactly the eight in-place kinds", () => {
     expect([...ACTIONABLE_KINDS].sort()).toEqual(
       [
         "browser_skill_send",
+        "email_sender",
         "staged_skill_creation",
         "staged_skill_update",
         "staged_write",

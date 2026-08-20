@@ -30,9 +30,14 @@
  * the JSON view (`lib/approval-previews.ts` parses, `ToolPreview` in
  * `approval-tool-previews.tsx` renders — first: `gmailSendMessage` as a
  * mail-client-style email card), with the raw input kept one toggle away
- * and the generic view as the fallback for everything else. Only
+ * and the generic view as the fallback for everything else. Reviewed
+ * workflow IMAP replies add body-only immutable revision editing and are
+ * excluded from batch resolution: every save replaces the pending row,
+ * while Approve and send always executes the newest frozen row. Only
  * `distribution_draft` (feed) and `question` (chat) still list with a
  * native-surface hint — the unified respond route 422s them by design.
+ * Unknown-email-sender access cards resolve in place but stay out of batch
+ * actions, so allowlisting an address is always an explicit per-card choice.
  * Filterable by kind / assistant / age.
  *
  * app-web is single-workspace-per-route (no chrome workspace switcher),
@@ -55,6 +60,7 @@ import {
   isSkillApprovalKind,
   listApprovals,
   listSkillApprovalDetails,
+  reviseEmailApproval,
   respondByKind,
   type ApprovalKind,
   type PendingApprovalRow,
@@ -87,10 +93,13 @@ import {
 import {
   extractAttachmentLines,
   extractEmailSender,
+  isReviewedWorkflowEmailApproval,
+  MAX_REVIEWED_EMAIL_BODY_CHARS,
   parseToolPreview,
   type ToolPreviewData,
 } from "@/lib/approval-previews";
 import { ToolPreview } from "./approval-tool-previews";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
   Select,
@@ -199,7 +208,15 @@ export function ApprovalsPanel() {
     [rows, filter, now],
   );
   const actionableIds = useMemo(
-    () => filtered.filter((r) => isActionable(r.kind)).map((r) => r.id),
+    () =>
+      filtered
+        .filter(
+          (r) =>
+            isActionable(r.kind) &&
+            r.kind !== "email_sender" &&
+            !isReviewedWorkflowEmailApproval(r),
+        )
+        .map((r) => r.id),
     [filtered],
   );
   const kindOptions = useMemo(() => presentKinds(rows ?? []), [rows]);
@@ -232,6 +249,21 @@ export function ApprovalsPanel() {
       return next;
     });
     // Tell the chrome ApprovalsPill its count dropped.
+    requestApprovalsRefresh(activeId);
+  }
+
+  function handleRevised(previousId: string, replacement: PendingApprovalRow) {
+    setRows((prev) =>
+      prev
+        ? prev.map((row) => (row.id === previousId ? replacement : row))
+        : prev,
+    );
+    setSelected((prev) => {
+      if (!prev.has(previousId)) return prev;
+      const next = new Set(prev);
+      next.delete(previousId);
+      return next;
+    });
     requestApprovalsRefresh(activeId);
   }
 
@@ -393,16 +425,21 @@ export function ApprovalsPanel() {
         <ul className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-2">
           {filtered.map((row) => (
             <ApprovalCard
-              key={row.id}
+              key={row.workflowStepRunId ?? row.id}
               row={row}
               skillDetail={skillDetails?.[row.id]}
               skillDetailsLoaded={skillDetails !== null}
               assistantNames={assistantNames}
-              selectable={isActionable(row.kind)}
+              selectable={
+                isActionable(row.kind) &&
+                row.kind !== "email_sender" &&
+                !isReviewedWorkflowEmailApproval(row)
+              }
               selected={selected.has(row.id)}
               batchBusy={batchBusy}
               onToggleSelect={toggleSelect}
               onResolved={handleResolved}
+              onRevised={handleRevised}
             />
           ))}
         </ul>
@@ -620,6 +657,7 @@ function ApprovalCard({
   batchBusy,
   onToggleSelect,
   onResolved,
+  onRevised,
 }: {
   row: PendingApprovalRow;
   skillDetail?: SkillApprovalDetail;
@@ -630,6 +668,7 @@ function ApprovalCard({
   batchBusy: boolean;
   onToggleSelect: (id: string) => void;
   onResolved: (id: string) => void;
+  onRevised: (previousId: string, replacement: PendingApprovalRow) => void;
 }) {
   const t = useT();
   // Route-derived workspace for the Feed-inbox deep link on
@@ -639,6 +678,23 @@ function ApprovalCard({
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const reviewedEmail = isReviewedWorkflowEmailApproval(row);
+  const frozenEmailBody =
+    reviewedEmail && typeof row.arguments.body === "string"
+      ? row.arguments.body
+      : "";
+  const [editingEmail, setEditingEmail] = useState(false);
+  const [emailBody, setEmailBody] = useState(frozenEmailBody);
+  const [revisionBusy, setRevisionBusy] = useState(false);
+  const [revisionError, setRevisionError] = useState<string | null>(null);
+  const [revisionNotice, setRevisionNotice] = useState<string | null>(null);
+
+  // A successful save replaces the row id while this component stays mounted
+  // under its stable workflow-step key. Rebase the editor on that immutable
+  // replacement so the next edit always starts from what Approve will send.
+  useEffect(() => {
+    setEmailBody(frozenEmailBody);
+  }, [row.id, frozenEmailBody]);
 
   const actionable = isActionable(row.kind);
   // staged_write rows always title on the staged tool's name — the
@@ -651,7 +707,11 @@ function ApprovalCard({
       ? (row.arguments as { umbrella?: { name?: string } }).umbrella?.name
       : undefined;
   const headline =
-    row.kind === "staged_write"
+    row.kind === "email_sender"
+      ? row.approvalPayload.senderName?.trim() ||
+        row.approvalPayload.sender ||
+        t.approvalsPage.kind.email_sender
+      : row.kind === "staged_write"
       ? row.toolName
       : row.kind === "staged_skill_creation"
         ? stagedCreationName || t.approvalsPage.kind[row.kind]
@@ -756,6 +816,25 @@ function ApprovalCard({
     setError("error" in result ? result.error : t.approvalsPage.respondError);
   }
 
+  async function saveEmailRevision() {
+    if (!reviewedEmail) return;
+    setRevisionBusy(true);
+    setRevisionError(null);
+    setRevisionNotice(null);
+    const result = await reviseEmailApproval(row.id, emailBody);
+    setRevisionBusy(false);
+    if (!result.ok) {
+      setRevisionError(result.error);
+      return;
+    }
+    onRevised(row.id, result.approval);
+    setEditingEmail(false);
+    const revision = result.approval.approvalPayload.emailDraftRevision ?? 1;
+    setRevisionNotice(
+      format(t.approvalsPage.emailRevision.saved, { revision }),
+    );
+  }
+
   // Everything except distribution_draft (feed) and question (chat) now
   // resolves in place, so only those two reach the hint branch.
   const surfaceLabel =
@@ -827,6 +906,98 @@ function ApprovalCard({
               row.kind === "tool_invocation") && (
               <ToolCallBody row={row} preview={toolPreview} />
             )}
+            {reviewedEmail && (
+              <div className="mt-2 flex max-w-2xl flex-col gap-2 rounded-md border border-border bg-muted/20 p-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-medium">
+                    {format(t.approvalsPage.emailRevision.revision, {
+                      revision:
+                        row.approvalPayload.emailDraftRevision ?? 1,
+                    })}
+                  </span>
+                  <span className="text-xs text-muted-foreground">
+                    {t.approvalsPage.emailRevision.lockedEnvelope}
+                  </span>
+                  {!editingEmail && (
+                    <button
+                      type="button"
+                      disabled={busy || batchBusy || revisionBusy}
+                      onClick={() => {
+                        setEmailBody(frozenEmailBody);
+                        setRevisionError(null);
+                        setRevisionNotice(null);
+                        setEditingEmail(true);
+                      }}
+                      className="ml-auto text-xs font-medium text-primary hover:underline disabled:opacity-50"
+                    >
+                      {t.approvalsPage.emailRevision.edit}
+                    </button>
+                  )}
+                </div>
+                {editingEmail && (
+                  <div className="flex flex-col gap-2">
+                    <label className="text-xs font-medium" htmlFor={`email-draft-${row.id}`}>
+                      {t.approvalsPage.emailRevision.bodyLabel}
+                    </label>
+                    <textarea
+                      id={`email-draft-${row.id}`}
+                      value={emailBody}
+                      onChange={(event) => {
+                        setEmailBody(event.target.value);
+                        setRevisionError(null);
+                      }}
+                      maxLength={MAX_REVIEWED_EMAIL_BODY_CHARS}
+                      disabled={revisionBusy}
+                      className="min-h-56 w-full resize-y rounded-md border border-border bg-background px-3 py-2 text-sm leading-relaxed focus:outline-none focus:ring-2 focus:ring-primary/30 disabled:opacity-60"
+                    />
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-[11px] tabular-nums text-muted-foreground">
+                        {format(t.approvalsPage.emailRevision.characterCount, {
+                          count: emailBody.length,
+                          max: MAX_REVIEWED_EMAIL_BODY_CHARS,
+                        })}
+                      </span>
+                      <span className="ml-auto flex items-center gap-2">
+                        <button
+                          type="button"
+                          disabled={revisionBusy}
+                          onClick={() => {
+                            setEmailBody(frozenEmailBody);
+                            setRevisionError(null);
+                            setEditingEmail(false);
+                          }}
+                          className="text-xs px-3 py-1.5 rounded-md border border-border bg-background hover:bg-muted disabled:opacity-50"
+                        >
+                          {t.approvalsPage.emailRevision.cancel}
+                        </button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          disabled={
+                            revisionBusy ||
+                            emailBody.trim().length === 0 ||
+                            emailBody === frozenEmailBody
+                          }
+                          onClick={() => void saveEmailRevision()}
+                        >
+                          {revisionBusy
+                            ? t.approvalsPage.emailRevision.saving
+                            : t.approvalsPage.emailRevision.save}
+                        </Button>
+                      </span>
+                    </div>
+                  </div>
+                )}
+                {revisionNotice && (
+                  <span className="text-xs text-emerald-600 dark:text-emerald-400">
+                    {revisionNotice}
+                  </span>
+                )}
+                {revisionError && (
+                  <span className="text-xs text-red-500">{revisionError}</span>
+                )}
+              </div>
+            )}
             {row.kind === "staged_skill_creation" && (
               <SkillCreationBody row={row} />
             )}
@@ -857,6 +1028,7 @@ function ApprovalCard({
             {row.kind === "browser_skill_send" && (
               <BrowserSkillSendBody row={row} />
             )}
+            {row.kind === "email_sender" && <EmailSenderBody row={row} />}
             <div className="text-xs text-muted-foreground mt-0.5">
               {metaLine}
             </div>
@@ -913,19 +1085,33 @@ function ApprovalCard({
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
-                    disabled={busy || batchBusy || approveBlocked}
+                    disabled={
+                      busy ||
+                      batchBusy ||
+                      approveBlocked ||
+                      revisionBusy ||
+                      editingEmail
+                    }
                     onClick={() => respond("approved")}
                     className="text-xs px-3 py-1.5 rounded-md bg-action text-action-foreground hover:opacity-90 disabled:opacity-50"
                   >
-                    {t.approvalsPage.approveAction}
+                    {reviewedEmail
+                      ? t.approvalsPage.emailRevision.approveAndSend
+                      : row.kind === "email_sender"
+                        ? t.approvalsPage.emailSender.allow
+                        : t.approvalsPage.approveAction}
                   </button>
                   <button
                     type="button"
-                    disabled={busy || batchBusy}
+                    disabled={busy || batchBusy || revisionBusy || editingEmail}
                     onClick={() => respond("rejected")}
                     className="text-xs px-3 py-1.5 rounded-md border border-border hover:bg-muted disabled:opacity-50"
                   >
-                    {t.approvalsPage.rejectAction}
+                    {reviewedEmail
+                      ? t.approvalsPage.emailRevision.discard
+                      : row.kind === "email_sender"
+                        ? t.approvalsPage.emailSender.dismiss
+                        : t.approvalsPage.rejectAction}
                   </button>
                   {error && <span className="text-xs text-red-500">{error}</span>}
                 </div>
@@ -949,6 +1135,34 @@ function ApprovalCard({
         </div>
       </div>
     </li>
+  );
+}
+
+/** Unknown-sender access request (agentmail D4). Approval adds the exact
+ * address to this inbox's allowlist; dismissal keeps future mail ingest-only
+ * and deliberately does not create a blocklist entry. */
+function EmailSenderBody({ row }: { row: PendingApprovalRow }) {
+  const t = useT();
+  const p = row.approvalPayload;
+  return (
+    <div className="mt-1 flex max-w-2xl flex-col gap-1.5 rounded-md border border-border bg-muted/20 p-3">
+      <p className="text-xs text-muted-foreground">
+        {t.approvalsPage.emailSender.effect}
+      </p>
+      <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
+        <dt className="text-muted-foreground">{t.approvalsPage.emailSender.from}</dt>
+        <dd className="truncate text-foreground">{p.sender ?? ""}</dd>
+        <dt className="text-muted-foreground">{t.approvalsPage.emailSender.inbox}</dt>
+        <dd className="truncate text-foreground">{p.inboxAddress ?? ""}</dd>
+        <dt className="text-muted-foreground">{t.approvalsPage.emailSender.subject}</dt>
+        <dd className="truncate text-foreground">
+          {p.subject || t.approvalsPage.emailSender.noSubject}
+        </dd>
+      </dl>
+      {p.preview ? (
+        <p className="line-clamp-2 text-xs text-muted-foreground">{p.preview}</p>
+      ) : null}
+    </div>
   );
 }
 

@@ -4,8 +4,9 @@
  * Home Dock — the single "Suggested for you" entry in the sidebar, rendered
  * before the surface-specific rows of every operator mini-app (and above the
  * Page sections). Deliberately quiet: one row, a sparkle, and a "needs you"
- * count. The actual suggestions live in the Page content pane (`SuggestedView`,
- * the Home landing), not here - the sidebar stays Notion-calm.
+ * count. The actual suggestions live at the explicit `/p?suggested=1` Page
+ * content-pane route (`SuggestedView`), not here - the sidebar stays
+ * Notion-calm.
  *
  * The badge is the live total of items waiting on the user — the sum of the
  * resolved dock's "Needs you" card counts (approvals + brain reviews +
@@ -23,6 +24,7 @@ import Link from "next/link";
 import { Sparkles } from "lucide-react";
 import { useT, format } from "@/lib/i18n/client";
 import { needsYouTotal } from "@/lib/api/home-dock";
+import { suggestedPath } from "@/lib/suggested-landing";
 import { useSidebarData } from "./doc-sidebar-data";
 
 export function HomeDock({ workspaceId }: { workspaceId: string }) {
@@ -31,7 +33,7 @@ export function HomeDock({ workspaceId }: { workspaceId: string }) {
   const needsYou = needsYouTotal(dock);
   return (
     <Link
-      href={`/w/${workspaceId}/p`}
+      href={suggestedPath(workspaceId)}
       className="group mb-1.5 flex items-center gap-2.5 rounded-md px-2 py-1.5 hover:bg-sidebar-accent"
     >
       <Sparkles className="size-4 shrink-0 text-primary" aria-hidden />

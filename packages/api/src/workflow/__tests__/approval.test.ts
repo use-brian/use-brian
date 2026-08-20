@@ -169,7 +169,7 @@ function fakeApprovalsStore(): PendingApprovalsStore & { rows: PendingApproval[]
         createdAt: new Date(),
         kind: 'workflow_step',
         blockingSessionId: null,
-        approvalPayload: {},
+        approvalPayload: params.approvalPayload ?? {},
         originatingAssistantId: params.originatingAssistantId,
         answerText: null,
       }
@@ -233,6 +233,9 @@ function fakeApprovalsStore(): PendingApprovalsStore & { rows: PendingApproval[]
     },
     async getById(_u, id) { return rows.find((r) => r.id === id) ?? null },
     async getByIdSystem(id) { return rows.find((r) => r.id === id) ?? null },
+    async reviseWorkflowEmailBody() {
+      throw new Error('reviseWorkflowEmailBody not used in workflow approval tests')
+    },
     async respond(id, decision, responder, reason) {
       const r = rows.find((x) => x.id === id)
       if (!r || r.status !== 'pending') return null
@@ -340,6 +343,10 @@ describe('[COMP:workflow/approval] Phase C — pause + resume', () => {
     const askTool = askPolicyTool('gmailSendMessage', () => {
       throw new Error('tool should not run during pause')
     })
+    askTool.describeConfirmation = async () => [
+      '• From: sales@example.com',
+      '• To: me@example.com',
+    ]
 
     const executorDeps: ExecutorDeps = {
       workflowStore: stores.workflowStore,
@@ -391,6 +398,10 @@ describe('[COMP:workflow/approval] Phase C — pause + resume', () => {
     expect(approvals.rows[0].toolName).toBe('gmailSendMessage')
     expect(approvals.rows[0].originatingAssistantId).toBe(PRIMARY_ASSISTANT_ID)
     expect(approvals.rows[0].arguments).toEqual({ to: 'me@example.com', body: 'hi' })
+    expect(approvals.rows[0].approvalPayload.displayLines).toEqual([
+      '• From: sales@example.com',
+      '• To: me@example.com',
+    ])
     expect(approvals.rows[0].deliveryChannelType).toBe('telegram')
     // Delivery dispatched.
     expect(dispatched).toHaveLength(1)

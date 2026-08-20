@@ -50,12 +50,15 @@ function makeApproval(over: Partial<PendingApproval> = {}): PendingApproval {
 type Stores = {
   listPendingForWorkspace: ReturnType<typeof vi.fn>
   getById: ReturnType<typeof vi.fn>
+  reviseWorkflowEmailBody: ReturnType<typeof vi.fn>
   getRole: ReturnType<typeof vi.fn>
 }
 
 function makeApp(stores: Partial<Stores> = {}) {
   const listPendingForWorkspace = stores.listPendingForWorkspace ?? vi.fn(async () => [])
   const getById = stores.getById ?? vi.fn(async () => null)
+  const reviseWorkflowEmailBody =
+    stores.reviseWorkflowEmailBody ?? vi.fn(async () => null)
   const getRole = stores.getRole ?? vi.fn(async () => 'member')
 
   const app = express()
@@ -67,12 +70,22 @@ function makeApp(stores: Partial<Stores> = {}) {
   app.use(
     '/api/approvals',
     approvalsRoutes({
-      approvalsStore: { listPendingForWorkspace, getById } as never,
+      approvalsStore: {
+        listPendingForWorkspace,
+        getById,
+        reviseWorkflowEmailBody,
+      } as never,
       workspaceStore: { getRole } as never,
       bridgeDeps: {} as never,
     }),
   )
-  return { app, listPendingForWorkspace, getById, getRole }
+  return {
+    app,
+    listPendingForWorkspace,
+    getById,
+    reviseWorkflowEmailBody,
+    getRole,
+  }
 }
 
 beforeEach(() => {
@@ -120,6 +133,103 @@ describe('[COMP:api/unified-approvals-route] GET /count', () => {
     })
     const res = await request(app).get('/api/approvals/count?workspaceId=ws-1').expect(200)
     expect(res.body.pending).toBe(2)
+  })
+})
+
+describe('[COMP:api/unified-approvals-route] POST /:id/revise-email', () => {
+  const reviewedReply = () =>
+    makeApproval({
+      toolName: 'imapSendMessage__sales_1a2b3c4d',
+      arguments: {
+        to: ['client@example.com'],
+        subject: 'Re: Contract question',
+        body: 'Original draft',
+        inReplyTo: 'INBOX:42',
+        account: 'sales@example.com',
+      },
+      originatingAssistantId: 'assistant-1',
+    })
+
+  it('atomically replaces the pending row with the body-only revision', async () => {
+    const replacement = reviewedReply()
+    replacement.id = 'ap-2'
+    replacement.arguments = { ...replacement.arguments, body: 'Hand-edited draft' }
+    replacement.approvalPayload = {
+      emailDraftRevision: 2,
+      supersedesApprovalId: 'ap-1',
+    }
+    const { app, reviseWorkflowEmailBody } = makeApp({
+      getById: vi.fn(async () => reviewedReply()),
+      reviseWorkflowEmailBody: vi.fn(async () => replacement),
+    })
+    const res = await request(app)
+      .post('/api/approvals/ap-1/revise-email')
+      .send({
+        body: 'Hand-edited draft',
+        // Envelope overrides are not part of the route contract and never
+        // reach the store.
+        to: ['attacker@example.com'],
+      })
+      .expect(200)
+    expect(reviseWorkflowEmailBody).toHaveBeenCalledWith(
+      'ap-1',
+      'Hand-edited draft',
+      'u-1',
+    )
+    expect(res.body.approval.id).toBe('ap-2')
+    expect(res.body.approval.arguments).toEqual(replacement.arguments)
+    expect(res.body.approval.workflowStepRunId).toBe('step-1')
+  })
+
+  it('rejects blank, oversized, and unchanged bodies', async () => {
+    const { app, reviseWorkflowEmailBody } = makeApp({
+      getById: vi.fn(async () => reviewedReply()),
+    })
+    await request(app)
+      .post('/api/approvals/ap-1/revise-email')
+      .send({ body: '   ' })
+      .expect(400)
+    await request(app)
+      .post('/api/approvals/ap-1/revise-email')
+      .send({ body: 'x'.repeat(100_001) })
+      .expect(400)
+    await request(app)
+      .post('/api/approvals/ap-1/revise-email')
+      .send({ body: 'Original draft' })
+      .expect(400)
+    expect(reviseWorkflowEmailBody).not.toHaveBeenCalled()
+  })
+
+  it('rejects a non-reviewed email shape and a different assigned approver', async () => {
+    const withCc = reviewedReply()
+    withCc.arguments = { ...withCc.arguments, cc: ['other@example.com'] }
+    const wrongShape = makeApp({ getById: vi.fn(async () => withCc) })
+    await request(wrongShape.app)
+      .post('/api/approvals/ap-1/revise-email')
+      .send({ body: 'Changed' })
+      .expect(422)
+
+    const wrongApprover = makeApp({
+      getById: vi.fn(async () =>
+        makeApproval({ ...reviewedReply(), approverUserId: 'u-2' }),
+      ),
+    })
+    await request(wrongApprover.app)
+      .post('/api/approvals/ap-1/revise-email')
+      .send({ body: 'Changed' })
+      .expect(403)
+  })
+
+  it('returns conflict when another approve or edit wins the atomic race', async () => {
+    const { app } = makeApp({
+      getById: vi.fn(async () => reviewedReply()),
+      reviseWorkflowEmailBody: vi.fn(async () => null),
+    })
+    const res = await request(app)
+      .post('/api/approvals/ap-1/revise-email')
+      .send({ body: 'Changed' })
+      .expect(409)
+    expect(res.body.error).toMatch(/another session/i)
   })
 })
 

@@ -912,6 +912,25 @@ export type WorkflowRunStore = {
     input?: Record<string, unknown>
   }): Promise<WorkflowRunRecord>
 
+  /**
+   * Idempotent webhook-only insert (migration 453). Optional so custom and
+   * in-memory stores that never serve the public webhook route do not need a
+   * meaningless implementation. A receiver presented with an idempotency key
+   * fails closed when its store does not implement this method.
+   */
+  createWebhookRun?(params: {
+    workflowId: string
+    workspaceId: string
+    triggeredBy: string | null
+    triggerKind: WorkflowTriggerKind
+    input?: Record<string, unknown>
+    idempotencyKey: string
+    bodySha256: string
+  }): Promise<
+    | { kind: 'created' | 'duplicate'; run: WorkflowRunRecord }
+    | { kind: 'conflict' }
+  >
+
   getRunById(userId: string, id: string): Promise<WorkflowRunRecord | null>
   /** System-level read for the executor (no RLS). */
   getRunSystem(id: string): Promise<WorkflowRunRecord | null>

@@ -8,9 +8,9 @@
  *     Workflow — how you shape the brain. It never grows.
  *   - OPERATOR APPS — things you run over the brain (Page, Tasks, CRM,
  *     Feed, Browsers, Chat) — live under Home in the app-bar. Selecting Home
- *     resolves to the workspace's LAST-USED operator app, cached per
- *     workspace in localStorage, so leaving to Studio and returning resumes
- *     where you were.
+ *     resolves to the workspace's LAST-USED operator app and its last safe
+ *     pathname, cached per workspace in localStorage, so leaving to Studio and
+ *     returning resumes where you were.
  *
  * WHICH apps are on the strip is workspace config, not a constant: the
  * `enabled` list threaded through every resolver here comes from
@@ -125,13 +125,95 @@ export function customAppPath(workspaceId: string, appId: string): string {
   return `/w/${workspaceId}/apps/${appId}`;
 }
 
-/** Route for ANY strip entry — built-in key or `custom:<uuid>`. */
-export function homeAppPath(workspaceId: string, entry: HomeAppEntry): string {
+/** Base route for ANY strip entry — built-in key or `custom:<uuid>`. */
+export function homeAppBasePath(
+  workspaceId: string,
+  entry: HomeAppEntry,
+): string {
   const customId = customHomeAppId(entry);
   if (customId) return customAppPath(workspaceId, customId);
   if (isOperatorAppKey(entry)) return operatorAppPath(workspaceId, entry);
   // A reserved-but-not-enabled built-in must never produce a dead route.
   return operatorAppPath(workspaceId, DEFAULT_OPERATOR_APP);
+}
+
+/** Per-workspace, per-app pathname cache. Query strings are deliberately not
+ * stored: app handoffs, OAuth/checkout returns, and filters may be transient or
+ * sensitive, while a pathname is enough to resume durable objects/surfaces. */
+export function homeAppLocationStorageKey(
+  workspaceId: string,
+  entry: HomeAppEntry,
+): string {
+  return `doc:operator-app-location:${workspaceId}:${entry}`;
+}
+
+/** Whether a pathname is safely inside this exact app's route family. */
+export function isHomeAppPath(
+  workspaceId: string,
+  entry: HomeAppEntry,
+  pathname: string,
+): boolean {
+  if (
+    !pathname.startsWith("/") ||
+    pathname.includes("?") ||
+    pathname.includes("#")
+  ) {
+    return false;
+  }
+  const base = homeAppBasePath(workspaceId, entry);
+  return pathname === base || pathname.startsWith(`${base}/`);
+}
+
+/** Read a previously visited safe pathname for one app. */
+export function readHomeAppLocation(
+  workspaceId: string,
+  entry: HomeAppEntry,
+): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const pathname = window.localStorage.getItem(
+      homeAppLocationStorageKey(workspaceId, entry),
+    );
+    return pathname && isHomeAppPath(workspaceId, entry, pathname)
+      ? pathname
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Remember a routed app position. Page's bare `/p` is a shell landing/panel,
+ * not a more useful position than an already-cached `/p/<pageId>`, so it never
+ * overwrites the document location. */
+export function writeHomeAppLocation(
+  workspaceId: string,
+  entry: HomeAppEntry,
+  pathname: string,
+): void {
+  if (
+    typeof window === "undefined" ||
+    !isHomeAppPath(workspaceId, entry, pathname)
+  ) {
+    return;
+  }
+  const base = homeAppBasePath(workspaceId, entry);
+  if (entry === "page" && pathname === base) return;
+  try {
+    window.localStorage.setItem(
+      homeAppLocationStorageKey(workspaceId, entry),
+      pathname,
+    );
+  } catch {
+    // Non-fatal: resume falls back to the app's base route.
+  }
+}
+
+/** Resume route for an app: its last validated pathname, then its base. */
+export function homeAppPath(workspaceId: string, entry: HomeAppEntry): string {
+  return (
+    readHomeAppLocation(workspaceId, entry) ??
+    homeAppBasePath(workspaceId, entry)
+  );
 }
 
 /** Matches the custom-app route, capturing the `workspace_home_apps` row id. */

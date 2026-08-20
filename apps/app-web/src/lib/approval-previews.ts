@@ -17,6 +17,18 @@
  * [COMP:app-web/approvals]
  */
 
+import type { PendingApprovalRow } from "@/lib/api/approvals";
+
+export const MAX_REVIEWED_EMAIL_BODY_CHARS = 100_000;
+
+const REVIEWED_EMAIL_ARGUMENT_KEYS = new Set([
+  "to",
+  "subject",
+  "body",
+  "inReplyTo",
+  "account",
+]);
+
 /** Discriminator for the specific previews the queue knows how to render. */
 type ToolPreviewKind = "email_send" | "shopify_refund" | "shopify_cancel";
 
@@ -130,6 +142,33 @@ export function parseToolPreview(
     default:
       return null;
   }
+}
+
+/**
+ * The narrow workflow email shape that supports body-only hand revision.
+ * Keep this aligned with the API route's independent authorization check:
+ * the client helper controls UX (editor + no batch), never server authority.
+ */
+export function isReviewedWorkflowEmailApproval(
+  row: PendingApprovalRow,
+): boolean {
+  const canonicalToolName = row.toolName?.split("__", 1)[0];
+  if (row.kind !== "workflow_step" || canonicalToolName !== "imapSendMessage") {
+    return false;
+  }
+  const args = row.arguments ?? {};
+  if (Object.keys(args).some((key) => !REVIEWED_EMAIL_ARGUMENT_KEYS.has(key))) {
+    return false;
+  }
+  return (
+    Array.isArray(args.to) &&
+    args.to.length === 1 &&
+    typeof args.to[0] === "string" &&
+    typeof args.subject === "string" &&
+    typeof args.body === "string" &&
+    typeof args.inReplyTo === "string" &&
+    (args.account === undefined || typeof args.account === "string")
+  );
 }
 
 /**
