@@ -1,9 +1,49 @@
 import type { NextConfig } from "next";
 import dotenv from "dotenv";
+import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { resolve, sep } from "node:path";
-import { resolveOssGitCommitSha } from "./build-info.config";
+
+const GIT_COMMIT_PATTERN = /^[0-9a-f]{7,40}$/i;
+
+function normalizedCommit(value: string | undefined): string | null {
+  const trimmed = value?.trim();
+  return trimmed && GIT_COMMIT_PATTERN.test(trimmed) ? trimmed.toLowerCase() : null;
+}
+
+// Keep this resolution self-contained. Next loads its compiled config when a
+// source-free release starts, so sibling TypeScript build helpers are absent.
+function resolveOssGitCommitSha(): string {
+  const configured =
+    normalizedCommit(process.env.NEXT_PUBLIC_OSS_GIT_COMMIT_SHA) ??
+    normalizedCommit(process.env.OSS_GIT_COMMIT_SHA);
+  if (configured) return configured;
+
+  try {
+    const repositoryRoot = realpathSync(resolve(import.meta.dirname, "..", ".."));
+    const discoveredGitRoot = realpathSync(
+      execFileSync("git", ["rev-parse", "--show-toplevel"], {
+        cwd: repositoryRoot,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim(),
+    );
+    if (discoveredGitRoot !== repositoryRoot) return "";
+
+    return (
+      normalizedCommit(
+        execFileSync("git", ["rev-parse", "HEAD"], {
+          cwd: repositoryRoot,
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "ignore"],
+        }),
+      ) ?? ""
+    );
+  } catch {
+    return "";
+  }
+}
 
 // Load .env from monorepo root
 dotenv.config({ path: resolve(import.meta.dirname, "..", "..", ".env") });
