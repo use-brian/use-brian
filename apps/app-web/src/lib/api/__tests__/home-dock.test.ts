@@ -8,7 +8,12 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 vi.mock("@/lib/auth-fetch", () => ({ authFetch: vi.fn() }));
 
 import { authFetch } from "@/lib/auth-fetch";
-import { fetchHomeDock, needsYouTotal, type ResolvedDock } from "../home-dock";
+import {
+  fetchHomeDock,
+  needsYouTotal,
+  pendingApprovalTotal,
+  type ResolvedDock,
+} from "../home-dock";
 
 const mockAuthFetch = vi.mocked(authFetch);
 
@@ -29,6 +34,12 @@ function dockWith(needsYou: ResolvedDock["needsYou"]): ResolvedDock {
     generatedAt: null,
     note: null,
     needsYou,
+    approvalGroups: {
+      externalActions: 0,
+      contentReview: 0,
+      systemImprovements: 0,
+      questionsAndAccess: 0,
+    },
     pickUp: [],
     comingUp: [],
     brain: { entryCount: 0, growth7d: 0, hasConnector: false },
@@ -65,6 +76,20 @@ describe("[COMP:app-web/home-dock] needsYouTotal", () => {
         ]),
       ),
     ).toBe(4);
+  });
+});
+
+describe("[COMP:app-web/home-dock] pendingApprovalTotal", () => {
+  it("reads only the authoritative approvals card", () => {
+    expect(
+      pendingApprovalTotal(
+        dockWith([
+          { kind: "brain_review", count: 10, caption: null },
+          { kind: "approvals", count: 4, caption: null },
+        ]),
+      ),
+    ).toBe(4);
+    expect(pendingApprovalTotal(dockWith([]))).toBe(0);
   });
 });
 

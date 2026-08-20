@@ -29,7 +29,8 @@
  *
  * Sync state is an OPAQUE per-provider cursor on `connector_instance.config`
  * (D13): `config.mailboxSync = { folders: { [path]: { uidvalidity, lastUid,
- * backfillLow? } }, backfill? }`. Nothing above the seam is IMAP-shaped.
+ * backfillLow?, backfillDone?, retryUids? } }, backfill? }`. Nothing above the
+ * seam is IMAP-shaped.
  *
  * Structure follows `createKnowledgeSyncWorker` (own-table store, injected
  * seams, `start/stop/tick`); instance iteration + cursor persistence follow
@@ -75,6 +76,7 @@ import type { IngestRuleRow, IngestRulesStore } from '../db/ingest-rules-store.j
 import { appendBatchEvent } from '../db/pending-ingest-batches-store.js'
 import {
   deleteEmailArchiveFolder,
+  findArchivedEmailUids,
   insertEmailArchiveMessage,
   type EmailArchiveMessageInput,
 } from '../db/email-archive-store.js'
@@ -97,9 +99,19 @@ export type MailboxFolderCursor = {
   uidvalidity: string
   /** Highest UID already delta-synced. */
   lastUid: number
-  /** Backfill checkpoint — lowest UID already archived (descending walk). */
+  /** Most recent server STATUS count; refreshed by every successful pass. */
+  serverMessages?: number
+  /** Backfill checkpoint — lowest UID already reconciled (descending walk). */
   backfillLow?: number
   backfillDone?: boolean
+  /** Sparse durable retry ledger for UIDs that are still absent from the archive. */
+  retryUids?: Record<string, MailboxUidRetry>
+}
+
+export type MailboxUidRetry = {
+  attempts: number
+  lastError: string
+  lastAttemptAt: string
 }
 
 export type MailboxBackfillScope = '12m' | '2y' | 'all'
@@ -107,22 +119,24 @@ export type MailboxBackfillScope = '12m' | '2y' | 'all'
 export type MailboxBackfillState = {
   scope: MailboxBackfillScope
   requestedAt: string
+  /** Algorithm marker; older cursors are reopened once for gap reconciliation. */
+  reconcileVersion?: number
   /**
-   * `stalled` is a TERMINAL state, and the reason this type has three values
-   * instead of two. `status` only ever became `done` on the success path, so a
-   * backfill pass that threw reproducibly left it `running` forever: every tick
-   * re-entered the backfill branch, threw again, and the state that would end
-   * the loop was only writable by the path the loop prevented reaching. Three
-   * mailboxes sat that way for up to twelve days (2026-08-08). A stalled
-   * backfill is skipped, so delta sync resumes; re-arming clears it.
+   * `stalled` remains readable for cursors written by older releases. The
+   * worker automatically resumes it as `running`; current releases never park
+   * a mailbox permanently because transient failures must self-heal.
    */
   status: 'running' | 'done' | 'stalled'
-  /** STATUS-count ceiling captured at arm time — drives "Syncing N of M". */
+  /** Current sum of per-folder STATUS counts, only present when complete. */
   totalEstimate?: number
+  /** False means one or more folder STATUS calls failed; total is unknown. */
+  estimateComplete?: boolean
   /** Consecutive failed backfill passes; reset by any successful pass. */
   consecutiveFailures?: number
-  /** Why the backfill stalled — surfaced to the user, not just the journal. */
+  /** Most recent pass failure, surfaced to the user and cleared on recovery. */
   lastError?: string | null
+  /** Last time a checkpoint advanced or a missing UID was successfully stored. */
+  lastProgressAt?: string
 }
 
 /** A message the backfill permanently quarantined (un-fetchable / un-insertable). */
@@ -164,16 +178,8 @@ export function readMailboxSyncState(config: Record<string, unknown> | null | un
   }
 }
 
-/** Bound on the diagnostic `recentSkips` tail — the count is unbounded, the list is not. */
+/** Bound on the legacy diagnostic `recentSkips` tail — new backfills use `retryUids`. */
 const MAX_RECENT_SKIPS = 25
-
-/**
- * Consecutive failed backfill folder-passes before the backfill parks itself as
- * `stalled`. Bounded on purpose: an unbounded retry is what turned one bad
- * backfill into twelve days of five-minute failures. Delta sync is unaffected
- * either way, so parking costs the user history, never new mail.
- */
-const MAX_BACKFILL_FAILURES = 12
 
 /**
  * ImapFlow puts the useful half of a failure on properties, not on `message`:
@@ -202,6 +208,30 @@ function recordSkip(state: MailboxSyncState, skip: MailboxSkip): void {
   const recent = state.recentSkips ?? []
   recent.push(skip)
   state.recentSkips = recent.length > MAX_RECENT_SKIPS ? recent.slice(-MAX_RECENT_SKIPS) : recent
+}
+
+function recordUidRetry(cursor: MailboxFolderCursor, uid: number, error: string, at: string): void {
+  const key = String(uid)
+  const previous = cursor.retryUids?.[key]
+  cursor.retryUids ??= {}
+  cursor.retryUids[key] = {
+    attempts: (previous?.attempts ?? 0) + 1,
+    lastError: error,
+    lastAttemptAt: at,
+  }
+}
+
+function clearUidRetry(cursor: MailboxFolderCursor, uid: number): void {
+  if (!cursor.retryUids?.[String(uid)]) return
+  delete cursor.retryUids[String(uid)]
+  if (Object.keys(cursor.retryUids).length === 0) delete cursor.retryUids
+}
+
+function retryUidNumbers(cursor: MailboxFolderCursor): number[] {
+  return Object.keys(cursor.retryUids ?? {})
+    .map(Number)
+    .filter((uid) => Number.isSafeInteger(uid) && uid > 0)
+    .sort((a, b) => b - a)
 }
 
 export function backfillFloorDate(scope: MailboxBackfillScope, now: Date): Date | null {
@@ -233,7 +263,7 @@ export async function parseSyncedMessage(params: {
   try {
     parsed = await simpleParser(msg.source)
   } catch {
-    return null // an unparseable message is skipped, never fatal (poller posture)
+    return null // delta skips it; backfill retains its UID for durable retry
   }
   const env = msg.envelope ?? {}
   const from =
@@ -689,11 +719,14 @@ export type MailboxSyncWorkerDeps = {
   sessions?: MailboxSessionCache
   insertMessage?: typeof insertEmailArchiveMessage
   deleteFolder?: typeof deleteEmailArchiveFolder
+  findArchivedUids?: typeof findArchivedEmailUids
   intervalMs?: number
   /** Max NEW (delta) messages fetched per folder per tick. */
   deltaChunk?: number
   /** Max backfill messages fetched per folder per tick. */
   backfillChunk?: number
+  /** Max backfill UIDs checked against the archive per folder per tick. */
+  backfillReconcileWindow?: number
   /**
    * Builds the guard that keeps the IMAP socket from idling past its
    * inactivity timeout during the per-message insert phase. Injectable so
@@ -746,7 +779,7 @@ export type MailboxSyncWorker = {
  * and because the backfill walks newest-first over a floor checkpoint that
  * same batch is retried first on every tick, stalling forever. On failure we
  * bisect until the offending UID is alone, then report it as `poison` for the
- * caller to quarantine and step over.
+ * caller to retain in the durable retry ledger while the main walk continues.
  *
  * Guarded by `client.usable`: if the session itself dropped (connection lost
  * mid-fetch) we rethrow instead of bisecting, so a transient network failure
@@ -797,14 +830,21 @@ async function fetchChunkResilient(
 const DEFAULT_INTERVAL_MS = 5 * 60_000
 const DEFAULT_DELTA_CHUNK = 100
 const DEFAULT_BACKFILL_CHUNK = 200
+const DEFAULT_BACKFILL_RECONCILE_WINDOW = 2_000
+export const CURRENT_BACKFILL_RECONCILE_VERSION = 1
 
 export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyncWorker {
   const sessions = deps.sessions ?? createMailboxSessionCache()
   const insertMessage = deps.insertMessage ?? insertEmailArchiveMessage
   const deleteFolder = deps.deleteFolder ?? deleteEmailArchiveFolder
+  const findArchivedUids = deps.findArchivedUids ?? findArchivedEmailUids
   const intervalMs = deps.intervalMs ?? DEFAULT_INTERVAL_MS
   const deltaChunk = deps.deltaChunk ?? DEFAULT_DELTA_CHUNK
   const backfillChunk = deps.backfillChunk ?? DEFAULT_BACKFILL_CHUNK
+  const backfillReconcileWindow = Math.max(
+    backfillChunk,
+    deps.backfillReconcileWindow ?? DEFAULT_BACKFILL_RECONCILE_WINDOW,
+  )
   const keepWarm = deps.keepWarm ?? ((client: ImapClientLike) => createSocketKeepWarm(client))
   const now = deps.now ?? (() => new Date())
   const router = deps.brain
@@ -844,18 +884,20 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
     state: MailboxSyncState
     workspaceId: string
     assistantId: string | null
-  }): Promise<number> {
+  }): Promise<{ deltaInserted: number; backfillFailed: boolean }> {
     const { client, inst, settings, folder, state, workspaceId, assistantId } = params
     const ownerUserId = inst.userId
-    if (!ownerUserId) return 0
+    if (!ownerUserId) return { deltaInserted: 0, backfillFailed: false }
     // Count of NEW (delta) mail archived this pass — the "N new messages"
     // reported by an on-demand `syncMailboxNow`. Backfill (historical) inserts
     // are archive-only catch-up, not new arrivals, and are not counted.
     let deltaInserted = 0
+    let backfillFailed = false
 
     const status = await client.status(folder, { messages: true, uidNext: true, uidValidity: true })
     const uidvalidity = String(status.uidValidity ?? '')
     const uidNext = status.uidNext ?? 1
+    const serverMessages = status.messages ?? 0
     let cursor: MailboxFolderCursor | undefined = state.folders[folder]
 
     // UIDVALIDITY change: the server reassigned this folder's UIDs — every
@@ -872,9 +914,14 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
       // backfill the user has ALREADY confirmed must not wait a whole extra
       // poll interval to start: fall through so it runs THIS tick. With no
       // armed backfill we're done — ingest nothing.
-      cursor = { uidvalidity, lastUid: Math.max(0, uidNext - 1) }
+      cursor = { uidvalidity, lastUid: Math.max(0, uidNext - 1), serverMessages }
       state.folders[folder] = cursor
-      if (!(state.backfill && state.backfill.status === 'running')) return 0
+      if (!(state.backfill && state.backfill.status !== 'done')) {
+        return { deltaInserted: 0, backfillFailed: false }
+      }
+    } else {
+      cursor.serverMessages = serverMessages
+      state.folders[folder] = cursor
     }
 
     // ── Delta: new mail since lastUid ──
@@ -946,126 +993,165 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
       }
     }
 
-    // ── Backfill: descending walk below backfillLow (archive-only, D6) ──
+    // ── Backfill: reconcile descending UID windows (archive-only, D6) ──
     //
-    // The pass is deliberately NON-FATAL, and that is the whole point of the
-    // wrapper below. Backfill is archive-only catch-up; new mail arrives through
-    // the delta walk above, so a backfill that cannot run must never stop mail
-    // from syncing. Before 2026-08-08 it threw straight out of syncFolder: the
-    // tick aborted mid folder-loop (starving every later folder of even delta
-    // sync), and because `status` only cleared to `done` on the success path,
-    // the next tick re-ran the identical failing pass — forever, at full rate.
-    // Three mailboxes sat frozen that way, one for twelve days, while the UI
-    // read "Syncing 72,497 of 155,363". Same posture as the per-message
-    // quarantine above, one level up.
+    // `backfillLow` is a scan checkpoint, not proof that every higher UID was
+    // inserted. Each window is compared with the archive first, so re-arming a
+    // mailbox skips rows already present and downloads only gaps. A UID that
+    // cannot be fetched, parsed, or inserted is recorded in a sparse durable
+    // retry ledger; the main walk can continue while that UID is retried on
+    // later worker ticks. Whole-pass failures are non-fatal and retry forever
+    // at the worker cadence, so a transient provider outage cannot abandon the
+    // user's history or block delta sync for this or later folders.
     const backfill = state.backfill
-    if (backfill && backfill.status === 'running' && !cursor.backfillDone) {
+    if (backfill && backfill.status !== 'done') {
+      // Cursors written by the former terminal-stall implementation recover
+      // automatically after upgrade; new code never writes `stalled`.
+      backfill.status = 'running'
       const runBackfillPass = async (): Promise<void> => {
-      const floor = backfillFloorDate(backfill.scope, now())
-      const lock = await client.getMailboxLock(folder)
-      let inScope: number[] | false = false
-      try {
-        inScope = await client.search(
-          floor ? { since: floor } : { all: true },
-          { uid: true },
-        )
-      } finally {
-        lock.release()
-      }
-      const high = cursor.backfillLow ?? cursor.lastUid + 1
-      const pending = (inScope || []).filter((uid) => uid < high).sort((a, b) => b - a)
-      if (pending.length === 0) {
-        cursor.backfillDone = true
-        state.folders[folder] = cursor
-        return
-      }
-      const chunk = pending.slice(0, backfillChunk)
-      const query = {
-        uid: true,
-        envelope: true,
-        internalDate: true,
-        headers: ['references'],
-        source: { start: 0, maxLength: SYNC_SOURCE_BYTES },
-      }
-      // Resilient fetch: a poison UID the server errors on is bisected out and
-      // returned as `poison` rather than aborting the whole batch. A dropped
-      // session rethrows here (quarantines nothing) and fails the tick.
-      let fetched: ImapFetchedMessage[] = []
-      let poison: number[] = []
-      const lock2 = await client.getMailboxLock(folder)
-      try {
-        const r = await fetchChunkResilient(client, chunk, query)
-        fetched = r.fetched
-        poison = r.poison
-      } finally {
-        lock2.release()
-      }
-      // Newest-first: recent mail is searchable within minutes of consent.
-      fetched.sort((a, b) => b.uid - a.uid)
-      // Up to `backfillChunk` (200) sequential inserts with the session held and
-      // the socket silent — the window that crash-looped the workers container
-      // on 2026-07-28. See `createSocketKeepWarm`.
-      const backfillKeepWarm = keepWarm(client)
-      for (const msg of fetched) {
-        await backfillKeepWarm.pingIfIdle()
-        const parsed = await parseSyncedMessage({ accountEmail: settings.email, folder, msg })
-        if (parsed) {
-          try {
-            await insertMessage({
-              ...parsed.archive,
-              instanceId: inst.id,
-              workspaceId,
-              ownerUserId,
-            })
-          } catch (err) {
-            // One un-insertable message never wedges the walk — quarantine it;
-            // the checkpoint advance below always runs, so the walk steps over.
-            recordSkip(state, { folder, uid: msg.uid, reason: `insert: ${errText(err)}`, at: now().toISOString() })
+        const passNow = now().toISOString()
+        const floor = backfillFloorDate(backfill.scope, now())
+        const lock = await client.getMailboxLock(folder)
+        let inScope: number[] | false = false
+        try {
+          inScope = await client.search(floor ? { since: floor } : { all: true }, { uid: true })
+        } finally {
+          lock.release()
+        }
+
+        const inScopeUids = (inScope || []).filter((uid) => uid <= cursor.lastUid)
+        const inScopeSet = new Set(inScopeUids)
+
+        // First repair the retry ledger: an idempotent insert may have landed
+        // before a crash, and a message may have since been deleted server-side.
+        // Neither case needs another body download.
+        const retryCandidates = retryUidNumbers(cursor)
+        for (const uid of retryCandidates) {
+          if (!inScopeSet.has(uid)) clearUidRetry(cursor, uid)
+        }
+        const remainingRetryCandidates = retryUidNumbers(cursor)
+        const archivedRetries = await findArchivedUids(inst.id, folder, remainingRetryCandidates)
+        for (const uid of archivedRetries) clearUidRetry(cursor, uid)
+        // While the main scan is unfinished, reserve most of the body budget
+        // for discovering fresh gaps. A large retry ledger must not starve the
+        // rest of the mailbox. Once scanning is done, the full budget drains
+        // retries.
+        const retryBudget = cursor.backfillDone ? backfillChunk : Math.floor(backfillChunk / 4)
+        const retryChunk = retryUidNumbers(cursor).slice(0, retryBudget)
+
+        // Use the rest of the body-fetch budget to scan a much larger UID
+        // window. Already-archived rows advance the checkpoint without FETCH.
+        const newMissing: number[] = []
+        let fullyScannedPending = false
+        const remainingFetchBudget = backfillChunk - retryChunk.length
+        if (!cursor.backfillDone && remainingFetchBudget > 0) {
+          const high = cursor.backfillLow ?? cursor.lastUid + 1
+          const pending = inScopeUids.filter((uid) => uid < high).sort((a, b) => b - a)
+          if (pending.length === 0) {
+            cursor.backfillDone = true
+            fullyScannedPending = true
+          } else {
+            const window = pending.slice(0, backfillReconcileWindow)
+            const archived = await findArchivedUids(inst.id, folder, window)
+            let examined = 0
+            for (const uid of window) {
+              if (archived.has(uid)) {
+                cursor.backfillLow = Math.min(cursor.backfillLow ?? Number.MAX_SAFE_INTEGER, uid)
+                clearUidRetry(cursor, uid)
+                backfill.lastProgressAt = passNow
+                examined++
+                continue
+              }
+              if (newMissing.length >= remainingFetchBudget) break
+              newMissing.push(uid)
+              examined++
+            }
+            fullyScannedPending = examined === pending.length
           }
         }
-        cursor.backfillLow = Math.min(cursor.backfillLow ?? Number.MAX_SAFE_INTEGER, msg.uid)
+
+        const requested = [...retryChunk, ...newMissing]
+        const newMissingSet = new Set(newMissing)
+        if (requested.length > 0) {
+          const query = {
+            uid: true,
+            envelope: true,
+            internalDate: true,
+            headers: ['references'],
+            source: { start: 0, maxLength: SYNC_SOURCE_BYTES },
+          }
+          let fetched: ImapFetchedMessage[] = []
+          let poison: number[] = []
+          const fetchLock = await client.getMailboxLock(folder)
+          try {
+            const result = await fetchChunkResilient(client, requested, query)
+            fetched = result.fetched
+            poison = result.poison
+          } finally {
+            fetchLock.release()
+          }
+
+          const fetchedByUid = new Map(fetched.map((message) => [message.uid, message]))
+          const poisonSet = new Set(poison)
+          const backfillKeepWarm = keepWarm(client)
+          for (const uid of requested) {
+            const message = fetchedByUid.get(uid)
+            let retryError: string | null = null
+            if (poisonSet.has(uid)) {
+              retryError = 'fetch: server errored on FETCH'
+            } else if (!message) {
+              retryError = 'fetch: server omitted requested UID'
+            } else {
+              await backfillKeepWarm.pingIfIdle()
+              const parsed = await parseSyncedMessage({ accountEmail: settings.email, folder, msg: message })
+              if (!parsed) {
+                retryError = 'parse: message body could not be parsed'
+              } else {
+                try {
+                  await insertMessage({
+                    ...parsed.archive,
+                    instanceId: inst.id,
+                    workspaceId,
+                    ownerUserId,
+                  })
+                  clearUidRetry(cursor, uid)
+                  backfill.lastProgressAt = passNow
+                } catch (err) {
+                  retryError = `insert: ${errText(err)}`
+                }
+              }
+            }
+
+            if (retryError) recordUidRetry(cursor, uid, retryError, passNow)
+            // Advancing only after the outcome (archive row or durable retry)
+            // closes the crash window without letting an old retry skip newer,
+            // not-yet-scanned UIDs.
+            if (newMissingSet.has(uid)) {
+              cursor.backfillLow = Math.min(cursor.backfillLow ?? Number.MAX_SAFE_INTEGER, uid)
+              backfill.lastProgressAt = passNow
+            }
+            state.folders[folder] = cursor
+          }
+        }
+
+        if (fullyScannedPending) cursor.backfillDone = true
         state.folders[folder] = cursor
-      }
-      // UIDs the server errored on: quarantine each and advance the checkpoint
-      // past it. Without this the next tick re-selects it and the newest-first
-      // walk re-fails on it first — the exact 5-minute-forever stall this fixes.
-      for (const uid of poison) {
-        recordSkip(state, { folder, uid, reason: 'fetch: server errored on FETCH', at: now().toISOString() })
-        cursor.backfillLow = Math.min(cursor.backfillLow ?? Number.MAX_SAFE_INTEGER, uid)
-        state.folders[folder] = cursor
-      }
-      if (chunk.length === pending.length) {
-        cursor.backfillDone = true
-        state.folders[folder] = cursor
-      }
       }
 
       try {
         await runBackfillPass()
-        // Any successful pass clears the ledger: a stall must mean "failing
-        // now", not "failed once during a network blip three weeks ago".
-        backfill.consecutiveFailures = 0
-        backfill.lastError = null
       } catch (err) {
-        // Counted per folder-pass, so a mailbox with four syncable folders
-        // burns the budget in ~3 ticks (~15 min) before parking the backfill.
+        backfillFailed = true
         const failures = (backfill.consecutiveFailures ?? 0) + 1
         backfill.consecutiveFailures = failures
         backfill.lastError = errText(err)
-        if (failures >= MAX_BACKFILL_FAILURES) {
-          backfill.status = 'stalled'
-          console.error(
-            `[mailbox-sync] backfill STALLED for instance ${inst.id} (folder ${folder}) after ${failures} consecutive failures: ${backfill.lastError}`,
-          )
-        } else {
-          console.warn(
-            `[mailbox-sync] backfill pass failed for instance ${inst.id} (folder ${folder}, ${failures}/${MAX_BACKFILL_FAILURES}): ${backfill.lastError}`,
-          )
-        }
+        console.warn(
+          `[mailbox-sync] backfill pass failed for instance ${inst.id} (folder ${folder}, consecutive failures ${failures}): ${backfill.lastError}`,
+        )
       }
       state.backfill = backfill
     }
-    return deltaInserted
+    return { deltaInserted, backfillFailed }
   }
 
   async function syncInstance(inst: ConnectorInstance): Promise<{ newMessages: number }> {
@@ -1079,11 +1165,33 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
     }
     const assistantId = deps.resolveAssistantId ? await deps.resolveAssistantId(workspaceId) : null
     const state = readMailboxSyncState(inst.config)
+    // This is the generation token for the state this pass may persist. The
+    // user can explicitly restart `all` while the pass is in flight; a
+    // conditional write below prevents this older cursor from winning that
+    // race and erasing the newer request.
+    const expectedBackfillRequestedAt = state.backfill?.requestedAt ?? null
+
+    // Older workers treated `backfillLow` / `backfillDone` as proof that every
+    // traversed UID landed. Reopen those cursors exactly once after upgrade so
+    // an already-affected mailbox self-heals without a manual resync click.
+    // Archive reconciliation makes this a metadata scan plus bodies for gaps,
+    // not a replay of everything already stored.
+    if (state.backfill && state.backfill.reconcileVersion !== CURRENT_BACKFILL_RECONCILE_VERSION) {
+      state.backfill.reconcileVersion = CURRENT_BACKFILL_RECONCILE_VERSION
+      state.backfill.status = 'running'
+      for (const cursor of Object.values(state.folders)) {
+        delete cursor.backfillLow
+        delete cursor.backfillDone
+      }
+    }
 
     let newMessages = 0
+    let activeFolderPaths: string[] = []
+    let backfillPassFailed = false
     try {
       await sessions.withClient(`sync:${inst.id}`, settings, async (client) => {
         const syncable = syncableFolders(await client.list())
+        activeFolderPaths = syncable.map((folder) => folder.path)
         // Per-folder isolation: a folder that throws must not deny every LATER
         // folder its turn. Previously the first throw escaped this loop, so on a
         // mailbox whose second folder failed, folders three and four were never
@@ -1093,7 +1201,7 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
         const folderErrors: string[] = []
         for (const f of syncable) {
           try {
-            newMessages += await syncFolder({
+            const folderResult = await syncFolder({
               client,
               inst,
               settings,
@@ -1102,6 +1210,8 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
               workspaceId,
               assistantId,
             })
+            newMessages += folderResult.deltaInserted
+            backfillPassFailed ||= folderResult.backfillFailed
           } catch (err) {
             // A DEAD CREDENTIAL aborts the loop and is rethrown UNWRAPPED.
             // Both halves matter: every remaining folder would fail the same
@@ -1114,26 +1224,60 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
           }
         }
         if (folderErrors.length > 0) {
+          if (state.backfill) {
+            state.backfill.estimateComplete = false
+            delete state.backfill.totalEstimate
+          }
           throw new Error(
             `${folderErrors.length}/${syncable.length} folder(s) failed — ${folderErrors.join('; ')}`,
           )
         }
       })
-      if (state.backfill && state.backfill.status === 'running') {
-        const allDone = Object.values(state.folders).every((c) => c.backfillDone)
-        if (allDone) state.backfill = { ...state.backfill, status: 'done' }
+      if (state.backfill) {
+        if (!backfillPassFailed) {
+          // No active folder's pass failed this tick. Clear only pass-level
+          // transport/provider errors; per-UID failures stay in `retryUids`.
+          state.backfill.consecutiveFailures = 0
+          state.backfill.lastError = null
+        }
+        // Only folders selectable in the current LIST response participate in
+        // totals and completion. Persisted cursors for renamed or `\Noselect`
+        // containers must not keep an otherwise complete mailbox running.
+        const activeCursors = activeFolderPaths
+          .map((path) => state.folders[path])
+          .filter((cursor): cursor is MailboxFolderCursor => Boolean(cursor))
+        const estimateComplete = activeCursors.every((cursor) => typeof cursor.serverMessages === 'number')
+        state.backfill.estimateComplete = estimateComplete
+        if (estimateComplete) {
+          state.backfill.totalEstimate = activeCursors.reduce((sum, cursor) => sum + (cursor.serverMessages ?? 0), 0)
+        } else {
+          delete state.backfill.totalEstimate
+        }
+        const allDone = activeCursors.every(
+          (cursor) => cursor.backfillDone && retryUidNumbers(cursor).length === 0,
+        )
+        state.backfill.status = allDone ? 'done' : 'running'
       }
       state.lastSyncAt = now().toISOString()
       state.lastError = null
       state.lastFailedSyncAt = null
-      await deps.connectorInstanceStore.setConfigSystem(inst.id, { mailboxSync: state })
+      const persisted = await deps.connectorInstanceStore.setMailboxSyncStateSystem(
+        inst.id,
+        state,
+        expectedBackfillRequestedAt,
+      )
+      if (!persisted) {
+        console.info(`[mailbox-sync] instance ${inst.id}: preserved a newer mailbox history request`)
+      }
       await deps.connectorInstanceStore.markHealth?.(inst.id, 'ok', null)
       return { newMessages }
     } catch (err) {
       const message = errText(err)
       state.lastError = message
       state.lastFailedSyncAt = now().toISOString()
-      await deps.connectorInstanceStore.setConfigSystem(inst.id, { mailboxSync: state }).catch(() => {})
+      await deps.connectorInstanceStore
+        .setMailboxSyncStateSystem(inst.id, state, expectedBackfillRequestedAt)
+        .catch(() => false)
       // `auth_failed` stays reserved for a DEAD CREDENTIAL. inject.ts withholds
       // every mailbox tool from an `auth_failed` instance, so marking it on an
       // ordinary sync error would take away search/read/send from a mailbox

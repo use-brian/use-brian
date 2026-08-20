@@ -30,6 +30,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import {
   SensitivityAccumulator,
   CONFIGURE_CAPABILITY,
+  filterToolsByCapabilities,
   type CapabilityStore,
   type Tool,
   type ToolContext,
@@ -194,12 +195,14 @@ export function assistantMcpRoutes(opts: Options): Router {
 
     // ── One stateless McpServer per request, same as the brain MCP.
     const server = new McpServer({ name: 'use-brian-assistant', version: '1.0.0' })
+    const visibleReads = filterToolsByCapabilities(opts.agentTools.reads, activeCapabilities)
+    const visibleWrites = filterToolsByCapabilities(opts.agentTools.writes, activeCapabilities)
     const tools = [
-      ...[...opts.agentTools.reads.values()].map((t) =>
+      ...[...visibleReads.values()].map((t) =>
         bridgeCoreTool(t, resolveCtx, assistant.workspaceId ?? ''),
       ),
       ...(configureGranted
-        ? [...opts.agentTools.writes.values()].map((t) =>
+        ? [...visibleWrites.values()].map((t) =>
             bridgeCoreTool(t, resolveCtx, assistant.workspaceId ?? ''),
           )
         : []),

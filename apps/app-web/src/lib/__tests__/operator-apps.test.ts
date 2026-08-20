@@ -7,14 +7,18 @@ import {
   customAppIdFromPathname,
   customAppPath,
   homeAppFromPathname,
+  homeAppBasePath,
+  homeAppLocationStorageKey,
   homeAppPath,
   homePath,
   operatorAppFromSurface,
   operatorAppPath,
   operatorAppStorageKey,
   readOperatorApp,
+  readHomeAppLocation,
   reorderHomeApps,
   writeOperatorApp,
+  writeHomeAppLocation,
 } from "../operator-apps";
 
 describe("[COMP:app-web/operator-app-bar] operator app registry", () => {
@@ -66,6 +70,35 @@ describe("[COMP:app-web/operator-app-bar] operator app registry", () => {
     expect(customAppPath("w1", "app-1")).toBe("/w/w1/apps/app-1");
     expect(homeAppPath("w1", "custom:app-1")).toBe("/w/w1/apps/app-1");
     expect(homeAppPath("w1", "chat")).toBe("/w/w1/chat");
+  });
+
+  it("resumes each app's last safe pathname without carrying a query", () => {
+    writeHomeAppLocation("w1", "page", "/w/w1/p/page-7");
+    writeHomeAppLocation("w1", "feed", "/w/w1/feed/posts?status=draft");
+
+    expect(readHomeAppLocation("w1", "page")).toBe("/w/w1/p/page-7");
+    expect(homeAppPath("w1", "page")).toBe("/w/w1/p/page-7");
+    // Callers pass `usePathname()`, so a full URL/query is rejected rather than
+    // persisted and replayed later.
+    expect(readHomeAppLocation("w1", "feed")).toBeNull();
+    expect(homeAppPath("w1", "feed")).toBe("/w/w1/feed");
+  });
+
+  it("does not let Page's bare shell overwrite a remembered document", () => {
+    writeHomeAppLocation("w1", "page", "/w/w1/p/page-7");
+    writeHomeAppLocation("w1", "page", "/w/w1/p");
+    expect(homeAppPath("w1", "page")).toBe("/w/w1/p/page-7");
+  });
+
+  it("rejects cross-workspace and cross-app cached paths", () => {
+    window.localStorage.setItem(
+      homeAppLocationStorageKey("w1", "tasks"),
+      "/w/w2/tasks",
+    );
+    expect(readHomeAppLocation("w1", "tasks")).toBeNull();
+    expect(homeAppPath("w1", "tasks")).toBe(
+      homeAppBasePath("w1", "tasks"),
+    );
   });
 
   it("reads the active custom app id off the path", () => {

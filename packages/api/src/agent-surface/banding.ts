@@ -61,6 +61,11 @@ export const TIER2_WRITE_BANDS: Readonly<Record<string, WriteBand>> = {
   //    creation and updates land in the Approvals inbox.
   createAssistant: 'approve',
   updateAssistant: 'approve',
+
+  // ── Hosted operator lifecycle bindings — platform-global destinations.
+  configureOperatorWorkflowEventBinding: 'approve',
+  disableOperatorWorkflowEventBinding: 'approve',
+  testOperatorWorkflowEventBinding: 'approve',
 }
 
 export function bandOf(toolName: string): WriteBand | null {

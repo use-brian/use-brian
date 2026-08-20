@@ -1,31 +1,35 @@
 "use client";
 
 /**
- * Suggested-for-you — the full Home content-pane surface (doc-shell.tsx, the
- * `!urlViewId` index). A daily briefing the workspace assistant curates: a slim
- * build bar, a conversational note, the "needs you" actions, drafts to resume,
- * upcoming workflows, and brain growth - a full-width dashboard (main + rail).
+ * Suggested-for-you — the explicit `?suggested=1` Home content-pane surface in
+ * `doc-shell.tsx`. A daily briefing the workspace assistant curates: a slim
+ * Personal-chat launcher, a conversational note, the "needs you" actions,
+ * drafts to resume, upcoming workflows, and brain growth - a full-width
+ * dashboard (main + rail).
  *
  * Data: the resolved dock (the assistant's layout artifact already merged over
  * live signals, dead cards dropped - the freshness contract lives server-side)
  * is OWNED by `DocSidebarDataProvider` and shared with the sidebar's badge
  * (`HomeDock`) — this view renders `useSidebarData().dock`, revalidates it on
  * re-entry via `reloadDock()`, and pushes the Refresh result (one primary-
- * assistant curation turn) back through `setDock`. The build bar calls
- * `onBuild` (the shell's page builder), so the type-a-prompt flow survives
- * here. Spec: docs/architecture/features/home-dock.md.
+ * assistant curation turn) back through `setDock`. The composer hands a prompt
+ * + chosen assistant into a fresh Personal thread in the Chat operator app.
+ * Spec: docs/architecture/features/home-dock.md.
  *
  * [COMP:app-web/home-suggested]
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   ArrowUp,
   Brain,
   Cable,
+  Check,
   ClipboardCheck,
   CheckCircle2,
+  ChevronDown,
   ChevronRight,
   Clock,
   FileText,
@@ -42,9 +46,22 @@ import { useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 import { AssistantAvatar } from "@/components/assistant-avatar";
 import { SuggestedFileDrop } from "@/components/doc/suggested-file-drop";
-import { getAssistantIdentity, type AssistantIdentity } from "@/lib/api/views";
-import { refreshHomeDock, type ResolvedNeed } from "@/lib/api/home-dock";
+import {
+  listWorkspaceAssistants,
+  type WorkspaceAssistantSummary,
+} from "@/lib/api/views";
+import {
+  pendingApprovalTotal,
+  refreshHomeDock,
+  type ResolvedNeed,
+} from "@/lib/api/home-dock";
+import { markSuggestedShown } from "@/lib/suggested-landing";
+import {
+  personalChatHandoffPath,
+  stashChatHandoff,
+} from "@/lib/chat-handoff";
 import { type PanelId } from "@/lib/doc-page-url";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { useSidebarData } from "./doc-sidebar-data";
 
 type AccentKey = "review" | "approve" | "resume" | "workflow" | "alert" | "runs";
@@ -90,7 +107,6 @@ type Props = {
    *  failed fetch) the header degrades to the generic glyph + "Your assistant". */
   assistantId?: string;
   userName?: string | null;
-  onBuild?: (text: string) => void;
   /** Open a needs-you panel (Approvals / Autopilot) as a doc-shell tab. When
    *  absent (e.g. a non-shell host), the cards fall back to their route link. */
   onOpenPanel?: (panel: PanelId) => void;
@@ -100,12 +116,18 @@ export function SuggestedView({
   workspaceId,
   assistantId,
   userName,
-  onBuild,
   onOpenPanel,
 }: Props) {
-  const t = useT().docPage.suggested;
+  const copy = useT();
+  const t = copy.docPage.suggested;
+  const tChat = copy.chat;
+  const router = useRouter();
   const { dock, dockLoading: loading, reloadDock, setDock } = useSidebarData();
-  const [assistant, setAssistant] = useState<AssistantIdentity | null>(null);
+  const [assistants, setAssistants] = useState<WorkspaceAssistantSummary[]>([]);
+  const [selectedAssistantId, setSelectedAssistantId] = useState<string | null>(
+    assistantId ?? null,
+  );
+  const [assistantPickerOpen, setAssistantPickerOpen] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [noteDismissed, setNoteDismissed] = useState(false);
   const [q, setQ] = useState("");
@@ -121,21 +143,39 @@ export function SuggestedView({
     if (!loading) reloadDock();
   }, [loading, reloadDock]);
 
-  // The note card's identity header (getAssistantIdentity returns null on any
-  // error, so a failed fetch just keeps the generic fallback).
+  // Both automatic and manual entry reset the shared daily/+3-approvals
+  // watermark, but only after the provider has resolved this visible briefing.
   useEffect(() => {
-    if (!assistantId) {
-      setAssistant(null);
-      return;
-    }
+    if (loading) return;
+    markSuggestedShown(workspaceId, pendingApprovalTotal(dock));
+  }, [dock, loading, workspaceId]);
+
+  // The same accessible roster the Chat operator app validates on arrival.
+  // Keep the current pick when it is still present; otherwise reset to the
+  // workspace primary (the shell-provided id first, then the roster's kind).
+  useEffect(() => {
     let alive = true;
-    getAssistantIdentity(assistantId).then((identity) => {
-      if (alive) setAssistant(identity);
-    });
+    listWorkspaceAssistants(workspaceId)
+      .then((rows) => {
+        if (!alive) return;
+        setAssistants(rows);
+        setSelectedAssistantId((current) => {
+          if (current && rows.some((row) => row.id === current)) return current;
+          if (assistantId && rows.some((row) => row.id === assistantId)) {
+            return assistantId;
+          }
+          return (
+            rows.find((row) => row.kind === "primary")?.id ?? rows[0]?.id ?? null
+          );
+        });
+      })
+      .catch(() => {
+        if (alive) setAssistants([]);
+      });
     return () => {
       alive = false;
     };
-  }, [assistantId]);
+  }, [assistantId, workspaceId]);
 
   const refresh = useCallback(async () => {
     setRefreshing(true);
@@ -147,11 +187,17 @@ export function SuggestedView({
     }
   }, [workspaceId]);
 
-  function build() {
+  function startPersonalChat() {
     const text = q.trim();
-    if (!text) return;
-    onBuild?.(text);
+    if (!text || !selectedAssistantId) return;
+    stashChatHandoff({
+      workspaceId,
+      assistantId: selectedAssistantId,
+      text,
+      ts: Date.now(),
+    });
     setQ("");
+    router.push(personalChatHandoffPath(workspaceId, selectedAssistantId));
   }
 
   const now = new Date();
@@ -170,6 +216,13 @@ export function SuggestedView({
   const comingUp = dock?.comingUp ?? [];
   const brain = dock?.brain ?? null;
   const mainEmpty = !note && needsYou.length === 0 && pickUp.length === 0;
+  const assistant =
+    assistants.find((row) => row.id === assistantId) ??
+    assistants.find((row) => row.kind === "primary") ??
+    null;
+  const selectedAssistant =
+    assistants.find((row) => row.id === selectedAssistantId) ??
+    (assistant?.id === selectedAssistantId ? assistant : null);
 
   return (
     <div className="mx-auto w-full max-w-[1240px] px-8 pb-12 pt-11 lg:px-12">
@@ -195,18 +248,88 @@ export function SuggestedView({
         </button>
       </div>
 
-      {/* Slim build bar — keeps the type-a-prompt build flow in the new rhythm */}
-      <div className="mt-5 flex items-center gap-2.5 rounded-xl border border-border bg-card px-3 py-2 shadow-sm transition-[border-color,box-shadow] focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30 [&_:focus-visible]:shadow-none">
-        <Sparkles className="size-[17px] shrink-0 text-muted-foreground/60" aria-hidden />
+      {/* Fresh Personal-chat launcher. The prompt handoff is one-shot and the
+          Chat app re-validates the assistant before it auto-sends. */}
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          startPersonalChat();
+        }}
+        className="mt-5 flex items-center gap-2 rounded-xl border border-border bg-card px-2.5 py-2 shadow-sm transition-[border-color,box-shadow] focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30 [&_:focus-visible]:shadow-none"
+      >
+        {selectedAssistant ? (
+          assistants.length > 1 ? (
+            <Popover
+              open={assistantPickerOpen}
+              onOpenChange={setAssistantPickerOpen}
+            >
+              <PopoverTrigger
+                type="button"
+                aria-label={tChat.switchAssistant}
+                className="flex min-w-0 max-w-44 shrink-0 items-center gap-1.5 rounded-lg px-1.5 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              >
+                <AssistantAvatar
+                  id={selectedAssistant.id}
+                  name={selectedAssistant.name}
+                  iconSeed={selectedAssistant.iconSeed ?? undefined}
+                  size="xs"
+                />
+                <span className="truncate">{selectedAssistant.name}</span>
+                <ChevronDown className="size-3.5 shrink-0" aria-hidden />
+              </PopoverTrigger>
+              <PopoverContent align="start" className="w-60 gap-0.5 p-1">
+                <p className="px-2 py-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                  {tChat.switchAssistantTitle}
+                </p>
+                {assistants.map((row) => (
+                  <button
+                    key={row.id}
+                    type="button"
+                    onClick={() => {
+                      setSelectedAssistantId(row.id);
+                      setAssistantPickerOpen(false);
+                    }}
+                    className={cn(
+                      "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
+                      row.id === selectedAssistant.id
+                        ? "bg-muted text-foreground"
+                        : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
+                    )}
+                  >
+                    <AssistantAvatar
+                      id={row.id}
+                      name={row.name}
+                      iconSeed={row.iconSeed ?? undefined}
+                      size="sm"
+                    />
+                    <span className="min-w-0 flex-1 truncate">{row.name}</span>
+                    {row.id === selectedAssistant.id ? (
+                      <Check className="size-4 shrink-0 text-primary" aria-hidden />
+                    ) : null}
+                  </button>
+                ))}
+              </PopoverContent>
+            </Popover>
+          ) : (
+            <span className="flex min-w-0 max-w-44 shrink-0 items-center gap-1.5 px-1.5 py-1 text-xs font-medium text-muted-foreground">
+              <AssistantAvatar
+                id={selectedAssistant.id}
+                name={selectedAssistant.name}
+                iconSeed={selectedAssistant.iconSeed ?? undefined}
+                size="xs"
+              />
+              <span className="truncate">{selectedAssistant.name}</span>
+            </span>
+          )
+        ) : (
+          <Sparkles
+            className="mx-1 size-[17px] shrink-0 text-muted-foreground/60"
+            aria-hidden
+          />
+        )}
         <input
           value={q}
           onChange={(e) => setQ(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              build();
-            }
-          }}
           placeholder={t.buildPlaceholder}
           /* The wrapping bar draws the focus ring (focus-within); the inner
              input opts out of the global :focus-visible box-shadow —
@@ -214,15 +337,14 @@ export function SuggestedView({
           className="min-w-0 flex-1 bg-transparent text-sm text-foreground outline-none focus-visible:shadow-none placeholder:text-muted-foreground"
         />
         <button
-          type="button"
-          onClick={build}
-          disabled={!q.trim()}
-          aria-label={t.buildPlaceholder}
+          type="submit"
+          disabled={!q.trim() || !selectedAssistantId}
+          aria-label={tChat.send}
           className="inline-flex size-7 shrink-0 items-center justify-center rounded-full bg-action text-action-foreground transition-colors hover:bg-action/90 disabled:bg-foreground/10 disabled:text-muted-foreground"
         >
           <ArrowUp className="size-4" aria-hidden />
         </button>
-      </div>
+      </form>
 
       {/* Drop files to add to the brain — store raw bytes + decompose content. */}
       <SuggestedFileDrop workspaceId={workspaceId} />
@@ -283,6 +405,7 @@ export function SuggestedView({
                     <ActionCard
                       key={card.kind}
                       card={card}
+                      approvalGroups={dock?.approvalGroups}
                       workspaceId={workspaceId}
                       t={t}
                       onOpenPanel={onOpenPanel}
@@ -439,15 +562,33 @@ type SuggestedT = ReturnType<typeof useT>["docPage"]["suggested"];
 
 function ActionCard({
   card,
+  approvalGroups,
   workspaceId,
   t,
   onOpenPanel,
 }: {
   card: ResolvedNeed;
+  approvalGroups?: {
+    externalActions: number;
+    contentReview: number;
+    systemImprovements: number;
+    questionsAndAccess: number;
+  };
   workspaceId: string;
   t: SuggestedT;
   onOpenPanel?: (panel: PanelId) => void;
 }) {
+  if (card.kind === "approvals") {
+    return (
+      <ApprovalSummaryCard
+        card={card}
+        groups={approvalGroups}
+        workspaceId={workspaceId}
+        t={t}
+        onOpenPanel={onOpenPanel}
+      />
+    );
+  }
   const cfg = cardConfig(card.kind, workspaceId, t);
   const a = ACCENT[cfg.accent];
   // `items-stretch` is load-bearing: panel cards render as <button>, and the
@@ -496,6 +637,136 @@ function ActionCard({
   }
   return (
     <Link href={cfg.href} className={cardClass}>
+      {inner}
+    </Link>
+  );
+}
+
+type ApprovalGroups = NonNullable<
+  import("@/lib/api/home-dock").ResolvedDock["approvalGroups"]
+>;
+
+/** The approval signal is broader than a normal need card: it is a unified
+ * queue spanning actions, publishing, system proposals, and requests for
+ * input/access. Keep the total authoritative while explaining the mix in four
+ * compact, live-counted groups. */
+function ApprovalSummaryCard({
+  card,
+  groups,
+  workspaceId,
+  t,
+  onOpenPanel,
+}: {
+  card: ResolvedNeed;
+  groups?: ApprovalGroups;
+  workspaceId: string;
+  t: SuggestedT;
+  onOpenPanel?: (panel: PanelId) => void;
+}) {
+  const liveGroups: ApprovalGroups = groups ?? {
+    // Backward-compatible rollout fallback: an older API still exposes the
+    // authoritative total, so keep it visible under the broadest group.
+    externalActions: card.count,
+    contentReview: 0,
+    systemImprovements: 0,
+    questionsAndAccess: 0,
+  };
+  const items = [
+    {
+      key: "externalActions",
+      count: liveGroups.externalActions,
+      Icon: CheckCircle2,
+      title: t.approvalGroups.externalActionsTitle,
+      caption: t.approvalGroups.externalActionsCaption,
+    },
+    {
+      key: "contentReview",
+      count: liveGroups.contentReview,
+      Icon: FileText,
+      title: t.approvalGroups.contentReviewTitle,
+      caption: t.approvalGroups.contentReviewCaption,
+    },
+    {
+      key: "systemImprovements",
+      count: liveGroups.systemImprovements,
+      Icon: Sparkles,
+      title: t.approvalGroups.systemImprovementsTitle,
+      caption: t.approvalGroups.systemImprovementsCaption,
+    },
+    {
+      key: "questionsAndAccess",
+      count: liveGroups.questionsAndAccess,
+      Icon: ClipboardCheck,
+      title: t.approvalGroups.questionsAndAccessTitle,
+      caption: t.approvalGroups.questionsAndAccessCaption,
+    },
+  ].filter((item) => item.count > 0);
+  const cardClass = cn(
+    "group relative flex flex-col items-stretch rounded-2xl border border-border bg-card p-4 text-left transition-all hover:border-rose-500/40 hover:shadow-md sm:col-span-2",
+  );
+  const inner = (
+    <>
+      <div className="flex items-start gap-3">
+        <span className="grid size-9 shrink-0 place-items-center rounded-[10px] bg-rose-500/12 text-rose-600 dark:text-rose-400">
+          <CheckCircle2 className="size-[18px]" strokeWidth={1.8} aria-hidden />
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block text-[14.5px] font-semibold text-foreground">
+            {t.approvalsTitle}
+          </span>
+          <span className="mt-0.5 block text-[12.5px] leading-snug text-muted-foreground">
+            {card.caption ?? t.approvalsCaption}
+          </span>
+        </span>
+        <span className="text-[24px] font-extrabold leading-none text-rose-600 dark:text-rose-400">
+          {card.count}
+        </span>
+      </div>
+
+      <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
+        {items.map((item) => (
+          <span
+            key={item.key}
+            className="flex min-w-0 items-center gap-2.5 rounded-xl border border-border/70 bg-muted/25 px-3 py-2.5"
+          >
+            <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-background text-muted-foreground ring-1 ring-border/70">
+              <item.Icon className="size-4" strokeWidth={1.8} aria-hidden />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block text-[12.5px] font-semibold text-foreground">
+                {item.title}
+              </span>
+              <span className="block truncate text-[11.5px] text-muted-foreground">
+                {item.caption}
+              </span>
+            </span>
+            <span className="min-w-6 shrink-0 rounded-full bg-rose-500/12 px-1.5 py-0.5 text-center text-[11px] font-bold tabular-nums text-rose-600 dark:text-rose-400">
+              {item.count}
+            </span>
+          </span>
+        ))}
+      </div>
+
+      <span className="mt-3 inline-flex items-center gap-1 text-[12.5px] font-semibold text-rose-600 dark:text-rose-400">
+        {t.approvalsCta}
+        <ChevronRight className="size-3.5" aria-hidden />
+      </span>
+    </>
+  );
+
+  if (onOpenPanel) {
+    return (
+      <button
+        type="button"
+        onClick={() => onOpenPanel("approvals")}
+        className={cardClass}
+      >
+        {inner}
+      </button>
+    );
+  }
+  return (
+    <Link href={`/w/${workspaceId}/approvals`} className={cardClass}>
       {inner}
     </Link>
   );

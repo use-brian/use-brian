@@ -40,6 +40,8 @@
  */
 
 import Link from "next/link";
+import { useEffect, useState } from "react";
+import { usePathname } from "next/navigation";
 import { useIntentPrefetch } from "@/lib/surface-prefetch";
 import {
   CheckSquare,
@@ -57,7 +59,9 @@ import { useT } from "@/lib/i18n/client";
 import { Tooltip } from "@/components/ui/tooltip";
 import {
   customHomeAppId,
+  homeAppBasePath,
   homeAppPath,
+  isHomeAppPath,
   isBuiltinHomeAppKey,
   isOperatorAppKey,
   writeOperatorApp,
@@ -107,6 +111,11 @@ export function OperatorAppBar({
 }) {
   const t = useT().operatorBar;
   const intentPrefetch = useIntentPrefetch();
+  const pathname = usePathname();
+  // `homeAppPath` reads localStorage. Keep the hydration frame on deterministic
+  // base paths, then resolve cached locations after mount.
+  const [locationsReady, setLocationsReady] = useState(false);
+  useEffect(() => setLocationsReady(true), []);
   const labels: Record<OperatorAppKey, string> = {
     page: t.page,
     office: t.office,
@@ -154,7 +163,11 @@ export function OperatorAppBar({
         const Icon = custom ? Puzzle : APP_ICON[key as OperatorAppKey];
         const label = custom ? custom.name : labels[key as OperatorAppKey];
         const isActive = key === active;
-        const href = homeAppPath(workspaceId, key);
+        const href = locationsReady
+          ? key === active && pathname && isHomeAppPath(workspaceId, key, pathname)
+            ? pathname
+            : homeAppPath(workspaceId, key)
+          : homeAppBasePath(workspaceId, key);
         return (
           <Tooltip key={key} label={label}>
             <Link

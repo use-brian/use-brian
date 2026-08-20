@@ -6,7 +6,14 @@
 
 import { describe, it, expect, vi } from 'vitest'
 import { z } from 'zod'
-import { buildTool, CONFIGURE_CAPABILITY, type ControlPlaneReader, type Tool, type ToolContext } from '@use-brian/core'
+import {
+  buildTool,
+  CONFIGURE_CAPABILITY,
+  OPERATOR_AUTOMATION_CAPABILITY,
+  type ControlPlaneReader,
+  type Tool,
+  type ToolContext,
+} from '@use-brian/core'
 
 vi.mock('../../db/client.js', () => ({
   query: vi.fn().mockResolvedValue({
@@ -49,6 +56,9 @@ function stubTool(name: string): Tool {
     name,
     description: `${name} stub`,
     inputSchema: z.object({ value: z.string().optional() }),
+    ...(name.includes('OperatorWorkflowEvent')
+      ? { requiresCapability: OPERATOR_AUTOMATION_CAPABILITY }
+      : {}),
     async execute() {
       return { data: `${name} executed` }
     },
@@ -106,6 +116,9 @@ describe('[COMP:agent-surface/banding] band table', () => {
     expect(bandOf('disableSkill')).toBe('auto')
     expect(bandOf('setConnectorPolicy')).toBe('auto')
     expect(bandOf('proposeSkill')).toBe('auto')
+    expect(bandOf('configureOperatorWorkflowEventBinding')).toBe('approve')
+    expect(bandOf('disableOperatorWorkflowEventBinding')).toBe('approve')
+    expect(bandOf('testOperatorWorkflowEventBinding')).toBe('approve')
   })
 
   it('reads are not control-plane writes', () => {
@@ -136,6 +149,18 @@ describe('[COMP:agent-surface/toolset] buildAgentToolset', () => {
     const { toolset } = makeToolset(['listWorkflows'])
     expect(toolset.writes.has('createWorkflow')).toBe(false)
     expect(toolset.reads.has('listWorkflows')).toBe(true)
+  })
+
+  it('bridges hosted operator tools when injected and preserves their stricter capability', () => {
+    const { toolset } = makeToolset([
+      'listOperatorWorkflowEventBindings',
+      'configureOperatorWorkflowEventBinding',
+    ])
+    expect(toolset.reads.get('listOperatorWorkflowEventBindings')?.requiresCapability)
+      .toBe(OPERATOR_AUTOMATION_CAPABILITY)
+    const configure = toolset.writes.get('configureOperatorWorkflowEventBinding')!
+    expect(configure.requiresCapability).toBe(OPERATOR_AUTOMATION_CAPABILITY)
+    expect(configure.description).toContain('human approval')
   })
 
   it('auto-band writes pass through unwrapped — execute runs the real tool', async () => {

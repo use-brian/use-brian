@@ -66,6 +66,7 @@ describe('[COMP:api/pending-approvals-store] create', () => {
       originatingAssistantId: 'assistant-1',
       toolName: 'sendEmail',
       arguments: { to: 'a@b.c' },
+      approvalPayload: { displayLines: ['• From: sales@example.com'] },
       approverUserId: 'u-1',
       deliveryChannelType: 'web',
     })
@@ -75,7 +76,8 @@ describe('[COMP:api/pending-approvals-store] create', () => {
     expect(sql).toContain('INSERT INTO pending_approvals')
     // arguments is JSON-encoded at the wire layer.
     expect(params?.[4]).toBe(JSON.stringify({ to: 'a@b.c' }))
-    expect(params?.[9]).toBe('assistant-1')
+    expect(params?.[5]).toBe(JSON.stringify({ displayLines: ['• From: sales@example.com'] }))
+    expect(params?.[10]).toBe('assistant-1')
   })
 })
 
@@ -172,6 +174,52 @@ describe('[COMP:api/pending-approvals-store] getByIdSystem', () => {
     const approval = await store.getByIdSystem('ap-1')
     expect(approval?.id).toBe('ap-1')
     expect(mockQueryWithRLS).not.toHaveBeenCalled()
+  })
+})
+
+describe('[COMP:api/pending-approvals-store] reviseWorkflowEmailBody', () => {
+  it('supersedes and inserts the immutable body-only replacement atomically', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [
+        makeRow({
+          id: 'ap-2',
+          toolName: 'imapSendMessage__sales_1a2b3c4d',
+          arguments: {
+            to: ['client@example.com'],
+            subject: 'Re: Hello',
+            body: 'Edited body',
+            inReplyTo: 'INBOX:42',
+          },
+          approvalPayload: {
+            emailDraftRevision: 2,
+            supersedesApprovalId: 'ap-1',
+          },
+        }),
+      ],
+      rowCount: 1,
+    } as never)
+    const revised = await store.reviseWorkflowEmailBody(
+      'ap-1',
+      'Edited body',
+      'u-1',
+    )
+    expect(revised?.id).toBe('ap-2')
+    expect(revised?.arguments.body).toBe('Edited body')
+    expect(revised?.approvalPayload.emailDraftRevision).toBe(2)
+    const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]]
+    expect(sql).toContain("SET status = 'superseded'")
+    expect(sql).toContain("split_part(tool_name, '__', 1) = 'imapSendMessage'")
+    expect(sql).toContain("jsonb_set(arguments, '{body}'")
+    expect(sql).toContain("'supersedesApprovalId', id")
+    expect(sql).toContain('originating_assistant_id')
+    expect(params).toEqual(['ap-1', 'Edited body', 'u-1'])
+  })
+
+  it('returns null when the source row no longer owns the pending cursor', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    expect(
+      await store.reviseWorkflowEmailBody('ap-1', 'Edited body', 'u-1'),
+    ).toBeNull()
   })
 })
 

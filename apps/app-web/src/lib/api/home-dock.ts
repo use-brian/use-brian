@@ -34,6 +34,14 @@ export type ResolvedDock = {
   generatedAt: string | null;
   note: string | null;
   needsYou: ResolvedNeed[];
+  /** Pending approvals grouped for the expanded home card. Optional so a web
+   *  deploy remains compatible with an older API response during rollout. */
+  approvalGroups?: {
+    externalActions: number;
+    contentReview: number;
+    systemImprovements: number;
+    questionsAndAccess: number;
+  };
   pickUp: { id: string; name: string; updatedAt: string }[];
   comingUp: { id: string; name: string; nextRunAt: string }[];
   brain: {
@@ -55,6 +63,12 @@ export type ResolvedDock = {
 export function needsYouTotal(dock: ResolvedDock | null): number {
   if (!dock) return 0;
   return dock.needsYou.reduce((sum, n) => sum + Math.max(0, n.count), 0);
+}
+
+/** Authoritative pending-approval total carried by the live approvals card. */
+export function pendingApprovalTotal(dock: ResolvedDock | null): number {
+  const approval = dock?.needsYou.find((need) => need.kind === "approvals");
+  return Math.max(0, approval?.count ?? 0);
 }
 
 /** The resolved dock, or null on error (the caller renders a quiet fallback). */

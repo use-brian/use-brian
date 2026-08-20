@@ -75,6 +75,7 @@ export function makeRequestApproval(deps: ApprovalBridgeDeps): NonNullable<Execu
     assistantId,
     toolName,
     arguments: args,
+    displayLines,
     deliveryChannel,
     expiresAt,
   }) => {
@@ -92,6 +93,7 @@ export function makeRequestApproval(deps: ApprovalBridgeDeps): NonNullable<Execu
       originatingAssistantId: assistantId,
       toolName,
       arguments: args,
+      approvalPayload: displayLines ? { displayLines } : undefined,
       approverUserId,
       deliveryChannelType: deliveryChannel,
       deliveryChannelId: null, // delivery layer resolves the channel id from approver's preferred channel

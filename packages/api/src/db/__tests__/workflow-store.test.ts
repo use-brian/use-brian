@@ -213,6 +213,61 @@ describe('[COMP:api/workflow-store] createDbWorkflowRunStore', () => {
     expect((mockQuery.mock.calls[0][1] as unknown[])[5]).toBeNull()
   })
 
+  it('createWebhookRun inserts with a workflow-scoped idempotency key and body digest', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [runRow()], rowCount: 1 } as never)
+    const out = await runs.createWebhookRun!({
+      workflowId: 'wf-1',
+      workspaceId: 'ws-1',
+      triggeredBy: 'u-1',
+      triggerKind: 'manual',
+      input: { event: 'signup' },
+      idempotencyKey: 'user.signed_up:u-1',
+      bodySha256: 'a'.repeat(64),
+    })
+
+    expect(out).toMatchObject({ kind: 'created', run: { id: 'run-1' } })
+    const [sql, values] = mockQuery.mock.calls[0]
+    expect(sql).toContain('ON CONFLICT (workflow_id, webhook_idempotency_key)')
+    expect(values).toEqual(expect.arrayContaining(['user.signed_up:u-1', 'a'.repeat(64)]))
+  })
+
+  it('createWebhookRun returns duplicate only when the existing raw-body digest matches', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+      .mockResolvedValueOnce({
+        rows: [runRow({ webhookBodySha256: 'a'.repeat(64) })],
+        rowCount: 1,
+      } as never)
+
+    const duplicate = await runs.createWebhookRun!({
+      workflowId: 'wf-1',
+      workspaceId: 'ws-1',
+      triggeredBy: 'u-1',
+      triggerKind: 'manual',
+      input: {},
+      idempotencyKey: 'event-1',
+      bodySha256: 'a'.repeat(64),
+    })
+    expect(duplicate).toMatchObject({ kind: 'duplicate', run: { id: 'run-1' } })
+
+    mockQuery
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+      .mockResolvedValueOnce({
+        rows: [runRow({ webhookBodySha256: 'b'.repeat(64) })],
+        rowCount: 1,
+      } as never)
+    const conflict = await runs.createWebhookRun!({
+      workflowId: 'wf-1',
+      workspaceId: 'ws-1',
+      triggeredBy: 'u-1',
+      triggerKind: 'manual',
+      input: {},
+      idempotencyKey: 'event-1',
+      bodySha256: 'a'.repeat(64),
+    })
+    expect(conflict).toEqual({ kind: 'conflict' })
+  })
+
   it('getRunById is RLS-scoped while getRunSystem bypasses RLS', async () => {
     mockRls.mockResolvedValueOnce({ rows: [runRow()], rowCount: 1 } as never)
     expect((await runs.getRunById('u-1', 'run-1'))?.id).toBe('run-1')

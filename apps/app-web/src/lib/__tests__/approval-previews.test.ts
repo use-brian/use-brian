@@ -10,12 +10,42 @@ import {
   emailBodyPreviewMarkdown,
   extractAttachmentLines,
   extractEmailSender,
+  isReviewedWorkflowEmailApproval,
   parseEmailSendArgs,
   parseShopifyCancelArgs,
   parseShopifyRefundArgs,
   parseToolPreview,
   splitRecipients,
 } from "../approval-previews";
+import type { PendingApprovalRow } from "../api/approvals";
+
+function reviewedEmailRow(
+  over: Partial<PendingApprovalRow> = {},
+): PendingApprovalRow {
+  return {
+    id: "ap-1",
+    kind: "workflow_step",
+    status: "pending",
+    toolName: "imapSendMessage__sales_1a2b3c4d",
+    arguments: {
+      to: ["client@example.com"],
+      subject: "Re: Hello",
+      body: "Draft",
+      inReplyTo: "INBOX:42",
+      account: "sales@example.com",
+    },
+    approvalPayload: {},
+    approverUserId: "user-1",
+    originatingAssistantId: "assistant-1",
+    blockingSessionId: null,
+    workflowRunId: "run-1",
+    workflowStepRunId: "step-1",
+    deliveryChannelType: "web",
+    createdAt: "2026-08-20T00:00:00.000Z",
+    expiresAt: null,
+    ...over,
+  };
+}
 
 describe("[COMP:app-web/approvals] parseToolPreview", () => {
   it("recognises gmailSendMessage and parses the email shape", () => {
@@ -262,6 +292,35 @@ describe("[COMP:app-web/approvals] parseEmailSendArgs", () => {
       attachments: ["file-id-1", 42, null, "/docs/plan.md"],
     });
     expect(email?.attachments).toEqual(["file-id-1", "/docs/plan.md"]);
+  });
+});
+
+describe("[COMP:app-web/approvals] reviewed workflow email editing", () => {
+  it("recognises the locked body-editable IMAP reply including an account suffix", () => {
+    expect(isReviewedWorkflowEmailApproval(reviewedEmailRow())).toBe(true);
+  });
+
+  it("keeps other emails and envelope-expanded sends out of editing and batch exceptions", () => {
+    expect(
+      isReviewedWorkflowEmailApproval(
+        reviewedEmailRow({ kind: "tool_invocation" }),
+      ),
+    ).toBe(false);
+    expect(
+      isReviewedWorkflowEmailApproval(
+        reviewedEmailRow({ toolName: "gmailSendMessage" }),
+      ),
+    ).toBe(false);
+    expect(
+      isReviewedWorkflowEmailApproval(
+        reviewedEmailRow({
+          arguments: {
+            ...reviewedEmailRow().arguments,
+            cc: ["other@example.com"],
+          },
+        }),
+      ),
+    ).toBe(false);
   });
 });
 

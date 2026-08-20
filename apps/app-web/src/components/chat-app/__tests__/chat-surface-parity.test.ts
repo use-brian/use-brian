@@ -80,4 +80,13 @@ describe("[COMP:app-web/chat-parity] Chat surface parity", () => {
       'embeddedChatSuppressed || activeSurface === "chat"',
     );
   });
+
+  it("consumes the Home handoff only after Personal-chat roster validation", () => {
+    expect(source).toContain("takeChatHandoff(workspaceId, Date.now())");
+    expect(source).toContain("resolveChatHandoffAction({");
+    expect(source).toContain("assistantIds: assistants.map((row) => row.id)");
+    expect(source).toContain('if (action === "prefill")');
+    expect(source).toContain("void send({ text })");
+    expect(source).not.toContain('searchParams?.get("prompt")');
+  });
 });

@@ -654,6 +654,35 @@ describe('[COMP:api/connector-instance-store] createConnectorInstanceStore', () 
     })
   })
 
+  describe('setMailboxSyncStateSystem', () => {
+    it('uses requestedAt as a compare-and-set token and reports whether the cursor won', async () => {
+      const store = createConnectorInstanceStore(key)
+      const mailboxSync = {
+        folders: {},
+        backfill: { scope: 'all', requestedAt: '2026-08-21T01:00:00Z', status: 'running' },
+      }
+      mockQuery
+        .mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
+        .mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+
+      expect(await store.setMailboxSyncStateSystem(
+        'ci_1',
+        mailboxSync,
+        '2026-08-20T01:00:00Z',
+      )).toBe(true)
+      const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]]
+      expect(sql).toContain("config #>> '{mailboxSync,backfill,requestedAt}'")
+      expect(sql).toContain('IS NOT DISTINCT FROM $3::text')
+      expect(params).toEqual([
+        'ci_1',
+        JSON.stringify(mailboxSync),
+        '2026-08-20T01:00:00Z',
+      ])
+
+      expect(await store.setMailboxSyncStateSystem('ci_1', mailboxSync, null)).toBe(false)
+    })
+  })
+
   describe('[COMP:integrations/connector-health] reconnect resets health', () => {
     it('update() with fresh credentials also clears auth_failed', async () => {
       const store = createConnectorInstanceStore(key)

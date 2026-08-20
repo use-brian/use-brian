@@ -17,7 +17,13 @@
  * [COMP:home/merge]
  */
 
-import { URGENT_NEED_KINDS, type HomeDockLayout, type HomeSignals, type NeedCardKind } from './types.js'
+import {
+  URGENT_NEED_KINDS,
+  type ApprovalGroupCounts,
+  type HomeDockLayout,
+  type HomeSignals,
+  type NeedCardKind,
+} from './types.js'
 
 export type ResolvedNeed = {
   kind: NeedCardKind
@@ -34,6 +40,8 @@ export type ResolvedDock = {
   note: string | null
   /** "Needs you" action cards — ordered, live-counted, dead cards dropped. */
   needsYou: ResolvedNeed[]
+  /** Live pending-approval rows grouped for the expanded approvals card. */
+  approvalGroups: ApprovalGroupCounts
   /** "Pick up where you left off" — recent drafts. */
   pickUp: { id: string; name: string; updatedAt: string }[]
   /** "Coming up" — upcoming scheduled workflow runs. */
@@ -119,6 +127,7 @@ export function mergeHomeDock(
     generatedAt: layout?.generatedAt ?? null,
     note: layout?.note ?? null,
     needsYou,
+    approvalGroups: signals.approvalGroups,
     pickUp: signals.recentDrafts,
     comingUp: signals.upcomingWorkflows,
     brain: {

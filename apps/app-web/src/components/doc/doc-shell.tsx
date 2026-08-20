@@ -165,10 +165,20 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
   // renders the panel instead of a page, keeping the tab strip + sidebar. A
   // panel URL never has a `[pageId]` segment, so `urlViewId` is null here.
   const urlPanel = panelFromSearch(searchParams?.toString());
+  // Suggested is an explicit Home landing, separate from Page's blank-tab
+  // view. It owns the content pane without changing Page's tabs or remembered
+  // app position.
+  const suggestedOpen = searchParams?.get("suggested") === "1";
   // The single "what does the active tab point at" value the tab strip mirrors:
-  // a panel entry (`panel:<id>`), a page id, or null (the Suggested-for-you
-  // home). Page id and panel are mutually exclusive by construction.
-  const urlEntry = urlPanel ? panelTabEntry(urlPanel) : urlViewId;
+  // a panel entry (`panel:<id>`), a page id, or null (Page's blank tab or the
+  // explicit Suggested landing). Page id and panel are mutually exclusive by
+  // construction; `suggestedOpen` tells the tab hook to suspend URL syncing so
+  // the stored Page position remains untouched beneath the briefing.
+  const urlEntry = suggestedOpen
+    ? null
+    : urlPanel
+      ? panelTabEntry(urlPanel)
+      : urlViewId;
 
   // Sidebar lists + page-mutation handlers live in the hoisted provider
   // (`DocSidebarDataProvider`, mounted by the workspace layout). The centre
@@ -294,18 +304,23 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
   // ── Tab strip + per-tab browse history — the top "layer" (Row 1) ──────
   // The active tab's current ENTRY is the source of truth for what the pane
   // shows — a page id, a panel sentinel (`panel:<id>`, Approvals / Autopilot),
-  // or null (the Suggested-for-you home). `useDocTabs` owns the strip and both
+  // or null (Page's blank tab). `useDocTabs` owns the strip and both
   // directions of the URL mirror (`/p/<id>` or `/p?panel=<id>`); the
-  // pathname/query-keyed reads below load the body. `doc-tabs.ts` treats every
-  // entry as an opaque string, so panel entries flow through unchanged.
+  // pathname/query-keyed reads below load the body. The explicit Suggested
+  // route pauses both sync directions and hides the Page top bar, leaving the
+  // entire strip untouched beneath it. `doc-tabs.ts` treats every entry as an
+  // opaque string, so panel entries flow through unchanged.
   //
   // The strip is SESSION-scoped, not mount-scoped: this shell is mounted by
   // `p/layout.tsx`, which Next tears down whenever the user steps out to a
   // sibling surface (Brain / Studio / Workflow — they hang off the workspace
   // layout, one level up), so the strip is held in `doc-tabs-session.ts` and
   // restored on re-entry. It still resets on a hard reload.
-  const [tabsState, setTabsState] = useDocTabs(workspaceId, urlEntry, (entry) =>
-    router.replace(docEntryPath(workspaceId, entry)),
+  const [tabsState, setTabsState] = useDocTabs(
+    workspaceId,
+    urlEntry,
+    (entry) => router.replace(docEntryPath(workspaceId, entry)),
+    suggestedOpen,
   );
 
   const [activeError, setActiveError] = useState<string | null>(null);
@@ -1195,39 +1210,41 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
         {/* Ambient "the assistant is working on this page" claw + status pill,
             behind the editor content. Visible only while a run is active. */}
         <AssistantRunClaw run={assistantRun} />
-        {/* Top "layer" (Row 1) — PERSISTENT across every state (loaded page,
-            blank tab, empty selection, error): sidebar toggle, browse-history
-            arrows, and the open-tab strip. The breadcrumb + action navbar
-            (Row 2, PageHeader) sits BELOW it, only when a page is loaded. */}
-        <DocTopBar
-          tabs={tabViews}
-          canBack={canGoBack(tabsState)}
-          canForward={canGoForward(tabsState)}
-          sidebarCollapsed={sidebarCollapsed}
-          onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
-          onBack={() => setTabsState(back)}
-          onForward={() => setTabsState(forward)}
-          onSwitchTab={(key) => setTabsState((s) => switchTab(s, key))}
-          onCloseTab={(key) => setTabsState((s) => closeTab(s, key))}
-          onNewTab={() => setTabsState(newTab)}
-        />
+        {/* Top "layer" (Row 1) — persistent across Page states (loaded page,
+            blank tab, empty selection, error) but hidden on the separate
+            Suggested briefing: sidebar toggle, browse-history arrows, and the
+            open-tab strip. The breadcrumb + action navbar (Row 2, PageHeader)
+            sits BELOW it, only when a page is loaded. */}
+        {!suggestedOpen && (
+          <DocTopBar
+            tabs={tabViews}
+            canBack={canGoBack(tabsState)}
+            canForward={canGoForward(tabsState)}
+            sidebarCollapsed={sidebarCollapsed}
+            onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
+            onBack={() => setTabsState(back)}
+            onForward={() => setTabsState(forward)}
+            onSwitchTab={(key) => setTabsState((s) => switchTab(s, key))}
+            onCloseTab={(key) => setTabsState((s) => closeTab(s, key))}
+            onNewTab={() => setTabsState(newTab)}
+          />
+        )}
         {topError && (
           <div className="border-b border-destructive/40 bg-destructive/10 px-4 py-2 text-sm text-destructive">
             {topError}
           </div>
         )}
-        {/* Panel tab (Approvals / Autopilot / Recordings) — takes precedence
-            over the Suggested home (a panel URL has no `[pageId]`, so
-            `urlViewId` is null and the home branch would otherwise match). The
-            panel owns its own header + scrolling; we give it a filled flex
-            column to sit in.
+        {/* Panel tab (Approvals / Autopilot / Recordings). Suggested is an
+            explicit, mutually exclusive landing and suppresses a stray panel
+            query if both parameters are ever present. The panel owns its own
+            header + scrolling; we give it a filled flex column to sit in.
 
             A keyed record, not a ternary: this was `panel === "approvals" ? A :
             Autopilot`, which silently renders Autopilot for ANY panel that is
             not approvals — a third panel would have looked wired up and shown
             the wrong board. `Record<PanelId, …>` makes the next one a compile
             error instead. */}
-        {urlPanel ? (
+        {!suggestedOpen && urlPanel ? (
           <div className="flex min-h-0 flex-1 flex-col">
             {
               (
@@ -1241,25 +1258,33 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
             }
           </div>
         ) : null}
-        {!urlPanel && !urlViewId && !activeError && (
+        {suggestedOpen && !activeError && (
           <div className="flex-1 min-h-0 overflow-y-auto">
-            {/* Home IS the assistant's full-width "Suggested for you" surface;
-                its slim build bar (onBuild) keeps the type-a-prompt page-build
-                flow that the old centered hero used to own. The needs-you cards
-                open Approvals / Autopilot as panel tabs (onOpenPanel). Spec:
+            {/* The explicit Home briefing. Its slim composer starts a fresh
+                Personal conversation in Chat; needs-you cards open doc-shell
+                panels without making this the Page app's default. Spec:
                 docs/architecture/features/home-dock.md. */}
             <SuggestedView
               workspaceId={workspaceId}
               assistantId={assistantId}
               userName={user.name}
               onOpenPanel={openPanelInNewTab}
-              onBuild={(text) =>
-                handleBuildPage(text, {
-                  model: "pro",
-                  researchMode: false,
-                  fileIds: [],
-                })
-              }
+            />
+          </div>
+        )}
+        {!suggestedOpen && !urlPanel && !urlViewId && !activeError && (
+          <div className="flex-1 min-h-0 overflow-y-auto">
+            {/* Page's own blank-tab view. Mini-app navigation resumes a cached
+                page when one exists; this is the cold/no-position fallback. */}
+            <EmptyPageLanding
+              workspaceId={workspaceId}
+              assistantId={assistantId}
+              cards={landingCards}
+              onOpenCard={navigateToView}
+              onSubmitPrompt={(text, opts) => handleBuildPage(text, opts)}
+              onStartBlank={() => void handleStartBlankNew()}
+              onStartFromTemplate={() => setLandingGalleryOpen(true)}
+              studioSetupIncomplete={studioSetupIncomplete}
             />
           </div>
         )}
@@ -1268,7 +1293,7 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
             {activeError}
           </div>
         )}
-        {urlViewId && !activeError && (
+        {!suggestedOpen && urlViewId && !activeError && (
           <>
             {/* Row 2 chrome. `pageView` is the loaded metadata for THIS url; while
                 it's still in flight (the brief post-switch window) we paint a

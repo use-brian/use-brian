@@ -668,11 +668,11 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
     // `tgConfig`, and `adapter` from the enclosing request scope.
     async function handleIncoming(incoming: IncomingMessage): Promise<void> {
       // 4b. Sender access. A blocklist match is a hard denial. An allowlist
-      //     match is carried through identity resolution because, on a private
-      //     DM, it is also an explicit conversation-only guest grant. The
-      //     linked owner remains implicit and is recognized below; deciding
-      //     the whole allowlist here would lock the owner out unless they
-      //     redundantly listed themself.
+      //     match is carried through identity resolution because it is also an
+      //     explicit conversation-only guest grant in private DMs and groups.
+      //     The linked owner remains implicit and is recognized below;
+      //     deciding the whole allowlist here would lock the owner out unless
+      //     they redundantly listed themself.
       const integrationConfig = boundIntegration.config ?? {}
       const accessMode = integrationConfig.userAccessMode ?? 'allow_all'
       const rawSender = incoming.raw as { from?: { id: number; username?: string } }
@@ -914,11 +914,13 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
               isIdentified = true
             } else if (incoming.isGroupChat || explicitAllowlistGrant) {
               // Tier 2 in a group, or an explicitly allowlisted private DM:
-              // keep the sender's shadow identity. Private guests take the
-              // conversation-only pipeline lane and never inherit owner state.
+              // keep the sender's shadow identity on the conversation-only
+              // external-guest lane. Connector access is granted separately
+              // below only for an exact allowlist match, so allow_all and
+              // blocklist group senders never inherit a stale opt-in.
               channelUserId = resolved.user.id
               isIdentified = false
-              externalGuest = !incoming.isGroupChat && explicitAllowlistGrant
+              externalGuest = true
             } else {
               // Tier 2 in private chat: redirect to the official shared bot.
               // Telegram never exposes email, so unlinked private-chat users
@@ -983,7 +985,10 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
           ownerId: routedOwnerId,
           isIdentified,
           externalGuest,
-          externalGuestConnectorTools: externalGuest && integrationConfig.allowGuestConnectorTools === true,
+          externalGuestConnectorTools:
+            externalGuest
+            && explicitAllowlistGrant
+            && integrationConfig.allowGuestConnectorTools === true,
           archiveConnectorInstanceId: boundIntegration.connectorInstanceId,
           ...options,
           pendingConfResolvers,

@@ -31,7 +31,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   docPagePath,
   pageIdFromPathname,
@@ -46,11 +46,16 @@ import { useChatDockSuppressed } from "@/lib/chat-dock-suppress";
 import {
   DEFAULT_OPERATOR_APP,
   homeAppFromPathname,
+  homeAppBasePath,
   homeAppPath,
+  isHomeAppPath,
   readOperatorApp,
+  writeHomeAppLocation,
   writeOperatorApp,
   type HomeAppEntry,
 } from "@/lib/operator-apps";
+import { pendingApprovalTotal } from "@/lib/api/home-dock";
+import { homeLandingPath } from "@/lib/suggested-landing";
 import { useDocChatOthersRun } from "@/lib/doc-chat-relay";
 import { useOfflineSync } from "@/lib/offline/use-offline-sync";
 import { useWorkspaceEvents } from "@/lib/workspace-events";
@@ -102,6 +107,7 @@ export function WorkspaceChrome({
   const t = useT().docPage;
   const router = useRouter();
   const pathname = usePathname();
+  const searchParams = useSearchParams();
   // The single connectivity driver — mounted here (chrome is on every surface)
   // so the global offline flag + write-queue flush run app-wide, not just on
   // the doc page. The collab socket signal reaches it via the module store
@@ -136,6 +142,8 @@ export function WorkspaceChrome({
     studioSetupIncomplete,
     homeApps,
     customApps,
+    dock,
+    dockLoading,
     reloadSidebar,
     handleNewDraft,
     handleAddChild,
@@ -262,25 +270,60 @@ export function WorkspaceChrome({
   // Brain / Studio / Workflow. Visiting an app persists it per workspace, and
   // the top-row Home icon + ⌘/Ctrl+1 resolve to the persisted app — Home
   // resumes your last app, never a hard-coded `/p`.
-  const activeOperatorApp = homeAppFromPathname(activeSurface, pathname);
+  const suggestedOpen =
+    activeSurface === "p" && searchParams?.get("suggested") === "1";
+  const routedOperatorApp = homeAppFromPathname(activeSurface, pathname);
   useEffect(() => {
+    if (suggestedOpen) return;
     // Only remember an app the workspace actually shows. Persisting a disabled
     // one would make Home resolve to a surface that is not on the strip.
-    if (activeOperatorApp && (homeApps as string[]).includes(activeOperatorApp)) {
-      writeOperatorApp(workspaceId, activeOperatorApp);
+    if (routedOperatorApp && (homeApps as string[]).includes(routedOperatorApp)) {
+      writeOperatorApp(workspaceId, routedOperatorApp);
+      if (pathname) {
+        writeHomeAppLocation(workspaceId, routedOperatorApp, pathname);
+      }
     }
-  }, [activeOperatorApp, workspaceId, homeApps]);
+  }, [homeApps, pathname, routedOperatorApp, suggestedOpen, workspaceId]);
   // localStorage is client-only; render the SSR-safe default first and
   // resolve after mount (and whenever a visit updates the cache).
   const [homeApp, setHomeApp] = useState<HomeAppEntry>(DEFAULT_OPERATOR_APP);
+  const [navigationCacheReady, setNavigationCacheReady] = useState(false);
+  useEffect(() => setNavigationCacheReady(true), []);
   useEffect(() => {
-    if (activeOperatorApp && (homeApps as string[]).includes(activeOperatorApp)) {
-      setHomeApp(activeOperatorApp);
+    if (
+      !suggestedOpen &&
+      routedOperatorApp &&
+      (homeApps as string[]).includes(routedOperatorApp)
+    ) {
+      setHomeApp(routedOperatorApp);
     } else {
       setHomeApp(readOperatorApp(workspaceId, homeApps));
     }
-  }, [workspaceId, activeOperatorApp, homeApps]);
-  const homeHref = homeAppPath(workspaceId, homeApp);
+  }, [homeApps, routedOperatorApp, suggestedOpen, workspaceId]);
+  const activeOperatorApp = suggestedOpen ? homeApp : routedOperatorApp;
+  // While the selected app is open, its live pathname is newer than the
+  // effect-written cache by one render. Use it immediately so a Home click
+  // after an in-app navigation cannot jump back to the previous object.
+  const currentAppPath =
+    !suggestedOpen &&
+    routedOperatorApp === homeApp &&
+    pathname &&
+    isHomeAppPath(workspaceId, homeApp, pathname)
+      ? pathname
+      : null;
+  const resumeHomeHref = currentAppPath
+    ? currentAppPath
+    : navigationCacheReady
+      ? homeAppPath(workspaceId, homeApp)
+      : homeAppBasePath(workspaceId, homeApp);
+  const homeHref =
+    suggestedOpen || dockLoading || !navigationCacheReady
+      ? resumeHomeHref
+      : homeLandingPath(
+          workspaceId,
+          resumeHomeHref,
+          pendingApprovalTotal(dock),
+        );
   const onDismissStudioNudge = useCallback(() => {
     setNudgeDismissed(true);
     try {
@@ -432,6 +475,8 @@ export function WorkspaceChrome({
             setSidebarOpen(false);
           }}
           activeSurface={activeSurface}
+          activeOperatorApp={activeOperatorApp}
+          suggestedOpen={suggestedOpen}
           studioNudge={studioNudge}
           onDismissStudioNudge={onDismissStudioNudge}
           homeHref={homeHref}

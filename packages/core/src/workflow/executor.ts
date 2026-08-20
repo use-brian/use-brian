@@ -380,6 +380,8 @@ export type ExecutorDeps = {
     assistantId: string
     toolName: string
     arguments: Record<string, unknown>
+    /** Server-resolved confirmation details for the queue preview. */
+    displayLines?: string[]
     deliveryChannel: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams'
     expiresAt: Date | null
   }) => Promise<void>
@@ -1024,6 +1026,7 @@ export async function advanceWorkflowRun(
       assistantId: result.assistantId,
       toolName: result.toolName,
       arguments: result.arguments,
+      displayLines: result.displayLines,
       deliveryChannel: result.deliveryChannel,
       expiresAt: result.expiresAt,
     })
@@ -1161,6 +1164,7 @@ type StepDispatchResult =
       assistantId: string
       toolName: string
       arguments: Record<string, unknown>
+      displayLines?: string[]
       deliveryChannel: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams'
       expiresAt: Date | null
     }
@@ -1706,7 +1710,26 @@ async function dispatchToolCall(
     }
   }
   if (needsConfirmation) {
-    return askPolicyOutcome(step, ctx, interpolatedArgs)
+    let displayLines: string[] | undefined
+    if (tool.describeConfirmation) {
+      try {
+        const lines = await tool.describeConfirmation(interpolatedArgs, {
+          userId: ctx.run.triggeredBy ?? ctx.workflow.createdBy,
+          assistantId: ctx.toolAssistantId,
+          sessionId: `workflow_run_${ctx.run.id}`,
+          appId: 'Use Brian',
+          channelType: 'workflow',
+          channelId: ctx.run.id,
+          workspaceId: ctx.run.workspaceId,
+          assistantKind: ctx.externalClientPrincipal ? 'standard' : 'primary',
+          abortSignal: new AbortController().signal,
+        })
+        if (lines?.length) displayLines = lines
+      } catch (err) {
+        console.debug(`[workflow] describeConfirmation failed for ${step.toolName}:`, err)
+      }
+    }
+    return askPolicyOutcome(step, ctx, interpolatedArgs, displayLines)
   }
   // Phase C activation lives in `dispatchStep` (one level up): when
   // `deps.requestApproval` is set, the executor flips the dispatchResult
@@ -1781,6 +1804,7 @@ function askPolicyOutcome(
   step: ToolCallStep,
   ctx: DispatchContext,
   args: Record<string, unknown>,
+  displayLines?: string[],
 ): StepDispatchResult {
   if (ctx.deps.requestApproval) {
     // Resolve the approver: triggered_by user for manual runs, workflow
@@ -1796,6 +1820,7 @@ function askPolicyOutcome(
       assistantId: ctx.toolAssistantId,
       toolName: step.toolName,
       arguments: args,
+      displayLines,
       deliveryChannel,
       expiresAt,
     }

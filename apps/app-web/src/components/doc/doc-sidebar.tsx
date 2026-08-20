@@ -78,9 +78,8 @@ import {
   Users,
 } from "lucide-react";
 import type { WorkspaceSurface } from "@/lib/doc-page-url";
-import { usePathname } from "next/navigation";
 import type { CustomHomeApp } from "@/lib/api/home-apps";
-import { homeAppFromPathname, type HomeAppEntry } from "@/lib/operator-apps";
+import type { HomeAppEntry } from "@/lib/operator-apps";
 import { OperatorAppBar } from "./operator-app-bar";
 import {
   DropdownMenu,
@@ -197,6 +196,11 @@ type Props = {
    * when no surface matches (e.g. the workspace root).
    */
   activeSurface: WorkspaceSurface | null;
+  /** Active strip entry. On the explicit Suggested landing this remains the
+   *  cached app underneath the briefing rather than pretending Page was used. */
+  activeOperatorApp: HomeAppEntry | null;
+  /** Suppresses every app-specific sidebar body while the briefing is open. */
+  suggestedOpen: boolean;
   /**
    * Studio cold-start nudge: `true` while the workspace has no connected
    * connector AND the per-workspace dismissal hasn't been set. Shows a subtle
@@ -296,11 +300,11 @@ export function DocSidebar(props: Props) {
   const [query, setQuery] = useState("");
   const q = query.trim().toLowerCase();
   useEffect(() => {
-    if (props.activeSurface !== "p") {
+    if (props.activeSurface !== "p" || props.suggestedOpen) {
       setSearchOpen(false);
       setQuery("");
     }
-  }, [props.activeSurface]);
+  }, [props.activeSurface, props.suggestedOpen]);
 
   // ── One labeled pill at a time (keeps the row inside the ~240px bar) ──
   // The active surface is normally THE pill (Notion-style "current section").
@@ -317,10 +321,7 @@ export function DocSidebar(props: Props) {
   const surfacePill = (s: WorkspaceSurface) => surfaceActive(s) && !utilityPillOpen;
   /** Home is the operator hub: it lights up for ANY operator-app surface
    *  (Page / Tasks / Feed) — the app-bar row below shows which. */
-  // Custom apps all share the `apps` surface, so the ACTIVE entry has to come
-  // off the path (which app id), not the segment.
-  const pathname = usePathname();
-  const activeOperatorApp = homeAppFromPathname(props.activeSurface, pathname);
+  const activeOperatorApp = props.activeOperatorApp;
   const homeActive = activeOperatorApp !== null;
   const homePill = homeActive && !utilityPillOpen;
   const matches = useCallback(
@@ -689,7 +690,7 @@ export function DocSidebar(props: Props) {
           </button>
         </Tooltip>
         {/* Search filters the page tree, so it's a Home-only utility. */}
-        {props.activeSurface === "p" && (
+        {props.activeSurface === "p" && !props.suggestedOpen && (
           <Tooltip label={t.iconSearch}>
             <button
               type="button"
@@ -734,7 +735,7 @@ export function DocSidebar(props: Props) {
       />
 
       {/* Search input — revealed by the Search icon (Home only). */}
-      {searchOpen && props.activeSurface === "p" && (
+      {searchOpen && props.activeSurface === "p" && !props.suggestedOpen && (
         <div className="px-2 pb-2">
           <input
             type="text"
@@ -759,7 +760,7 @@ export function DocSidebar(props: Props) {
             ONLY on Home (`'p'`); Office / Brain / Studio / Workflow / Tasks /
             CRM / Browsers / Chat each swap in their own panel; every other
             surface (approvals, knowledge-base, root) renders nothing here. */}
-        {props.activeSurface === "office" ? (
+        {!props.suggestedOpen && props.activeSurface === "office" ? (
           <OfficeSidebarPanel workspaceId={workspaceId} />
         ) : props.activeSurface === "brain" ? (
           <BrainSidebarPanel workspaceId={workspaceId} />
@@ -781,7 +782,7 @@ export function DocSidebar(props: Props) {
           <ShopifySidebarPanel workspaceId={workspaceId} />
         ) : null}
 
-        {props.activeSurface === "p" && (
+        {!props.suggestedOpen && props.activeSurface === "p" && (
           <>
         {/* Search mode — flat hit lists (saved, then drafts). Nesting is
             dropped here on purpose so a buried match isn't hidden under a

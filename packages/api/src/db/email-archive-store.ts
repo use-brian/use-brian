@@ -187,6 +187,38 @@ export async function countEmailArchiveMessages(
 }
 
 /**
+ * Return the subset of a bounded IMAP UID window that is already archived.
+ *
+ * Backfill uses this lightweight reconciliation before requesting message
+ * bodies. The unique constraint remains the final race/crash belt, but a
+ * routine resync should not spend bandwidth downloading 100k messages merely
+ * to discover that every insert is a no-op.
+ */
+export async function findArchivedEmailUids(
+  instanceId: string,
+  folder: string,
+  uids: number[],
+): Promise<Set<number>> {
+  if (uids.length === 0) return new Set()
+  const refs = uids.map((uid) => `${folder}:${uid}`)
+  const res = await query<{ provider_message_id: string }>(
+    `SELECT provider_message_id
+       FROM email_archive_messages
+      WHERE instance_id = $1
+        AND folder = $2
+        AND provider_message_id = ANY($3::text[])`,
+    [instanceId, folder, refs],
+  )
+  const found = new Set<number>()
+  for (const row of res.rows) {
+    const i = row.provider_message_id.lastIndexOf(':')
+    const uid = Number(row.provider_message_id.slice(i + 1))
+    if (Number.isSafeInteger(uid) && uid > 0) found.add(uid)
+  }
+  return found
+}
+
+/**
  * Drop a folder's rows (segments cascade). The UIDVALIDITY-change recovery:
  * the folder's UIDs were reassigned server-side, so its archive is rebuilt
  * from scratch — other folders untouched, never corrupted (§5).

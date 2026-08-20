@@ -37,16 +37,26 @@ type Api = {
  * until the two directions agree — the same convergence the real router +
  * `usePathname()` produce.
  */
-function mountSurface(workspaceId: string, initialUrl: string | null) {
+function mountSurface(
+  workspaceId: string,
+  initialUrl: string | null,
+  initiallySuspended = false,
+) {
   const container = document.createElement("div");
   const root: Root = createRoot(container);
   let url = initialUrl;
+  let suspended = initiallySuspended;
   let api: Api | null = null;
 
   function Probe({ entry }: { entry: string | null }) {
-    const [state, setState] = useDocTabs(workspaceId, entry, (next) => {
-      url = next;
-    });
+    const [state, setState] = useDocTabs(
+      workspaceId,
+      entry,
+      (next) => {
+        url = next;
+      },
+      suspended,
+    );
     api = { state, setState };
     return null;
   }
@@ -81,6 +91,12 @@ function mountSurface(workspaceId: string, initialUrl: string | null) {
     },
     /** An EXTERNAL navigation (sidebar row, deep link) landing on this mount. */
     navigate(entry: string | null) {
+      url = entry;
+      settle();
+    },
+    /** Enter or leave a non-Page landing hosted by the doc shell. */
+    suspendUrlSync(next: boolean, entry: string | null) {
+      suspended = next;
       url = entry;
       settle();
     },
@@ -157,5 +173,19 @@ describe("[COMP:app-web/doc-tabs-session] Doc tab strip across a surface switch"
     expect(s.state.tabs).toHaveLength(2);
     expect(activePageId(s.state)).toBeNull();
     expect(s.url).toBeNull();
+  });
+
+  it("preserves the full Page strip while the explicit Suggested landing is open", () => {
+    const first = mountSurface(WS, "page-2");
+    first.dispatch((s) => openPage(s, "page-3"));
+    const before = first.state;
+
+    first.suspendUrlSync(true, null);
+    expect(first.url).toBeNull();
+    expect(first.state).toEqual(before);
+
+    first.suspendUrlSync(false, "page-3");
+    expect(activePageId(first.state)).toBe("page-3");
+    expect(first.state.tabs[0]?.history).toEqual(["page-2", "page-3"]);
   });
 });
