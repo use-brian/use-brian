@@ -1726,6 +1726,7 @@ function ConnectorsList() {
 
     if (id === "local") {
       setShowLocalForm(rid);
+      revealConnectForm(rid);
       setLocalDirError(null);
       setConnecting(null);
       return;
