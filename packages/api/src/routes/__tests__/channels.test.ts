@@ -1024,6 +1024,32 @@ describe('[COMP:api/channel-destinations-route] GET channel-destinations', () =>
     ])
   })
 
+  it('normalizes Slack thread sessions to one base-channel destination', async () => {
+    mockRows([
+      destRow({
+        channelType: 'slack',
+        channelId: 'C123:thread:100.001',
+        title: 'Older thread',
+        lastActiveAt: new Date('2026-08-20T01:00:00Z'),
+      }),
+      destRow({
+        channelType: 'slack',
+        channelId: 'C123:thread:100.002',
+        title: 'Newer thread',
+        lastActiveAt: new Date('2026-08-20T02:00:00Z'),
+      }),
+      destRow({ channelType: 'slack', channelId: 'C456:thread:200.001' }),
+    ])
+
+    const res = await request(buildApp()).get('/api/workspaces/ws-1/channel-destinations')
+
+    expect(res.status).toBe(200)
+    expect(res.body.destinations).toEqual([
+      expect.objectContaining({ channelType: 'slack', channelId: 'C123', title: 'Newer thread' }),
+      expect.objectContaining({ channelType: 'slack', channelId: 'C456' }),
+    ])
+  })
+
   it('labels a Telegram forum topic from the seen-chat inventory', async () => {
     mockRows([destRow({ channelId: '-100555:topic:42' })])
     const integrationStore = {

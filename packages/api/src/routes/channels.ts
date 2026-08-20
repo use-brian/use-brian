@@ -61,6 +61,7 @@ import {
 import { ensureSlackConnectorInstance } from '../ingest/slack-connector-instance.js'
 import { ensureMsTeamsConnectorInstance } from '../ingest/msteams-connector-instance.js'
 import { query, queryWithRLS } from '../db/client.js'
+import { providerChannelIdFromSession } from '../db/sessions.js'
 
 // Per-integration behavior config accepted by `PATCH .../channels/:id/config`.
 // Mirrors the `ChannelIntegrationConfig` type (db/channel-integrations.ts).
@@ -553,7 +554,23 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
        LIMIT 200`,
       [workspaceId],
     )
-    const rows = result.rows.filter((r) => {
+    // Slack sessions are thread-qualified in storage, but workflow delivery
+    // targets a provider channel (threading is a separate deliver option).
+    // Normalize before validation and collapse several thread sessions from
+    // the same channel to the newest destination row.
+    const destinations = new Map<string, (typeof result.rows)[number]>()
+    for (const row of result.rows) {
+      const normalized = {
+        ...row,
+        channelId: providerChannelIdFromSession(row.channelType, row.channelId),
+      }
+      const key = `${normalized.channelType}:${normalized.channelId}`
+      const existing = destinations.get(key)
+      if (!existing || normalized.lastActiveAt.getTime() > existing.lastActiveAt.getTime()) {
+        destinations.set(key, normalized)
+      }
+    }
+    const rows = [...destinations.values()].filter((r) => {
       const shape = DESTINATION_ID_SHAPE[r.channelType]
       return !shape || shape.test(r.channelId)
     })

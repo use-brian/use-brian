@@ -149,6 +149,38 @@ export function isMultiParticipantSession(s: SessionShape): boolean {
   )
 }
 
+/** Storage-only delimiter for a Slack thread-qualified session channel id. */
+export const SLACK_THREAD_SESSION_DELIMITER = ':thread:'
+
+/**
+ * Turn a provider Slack channel + root `thread_ts` into the conversation id
+ * stored on `sessions.channel_id`. A missing root preserves the legacy
+ * channel-level session used when the integration does not reply in threads.
+ *
+ * Slack API calls must keep using the base channel id plus a separate
+ * `thread_ts`; this encoded id is only for Brian's session-scoped state.
+ */
+export function buildSlackSessionChannelId(
+  channelId: string,
+  threadTs?: string | null,
+): string {
+  return threadTs
+    ? `${channelId}${SLACK_THREAD_SESSION_DELIMITER}${threadTs}`
+    : channelId
+}
+
+/** Convert a stored session conversation id back to a provider destination. */
+export function providerChannelIdFromSession(
+  channelType: string,
+  sessionChannelId: string,
+): string {
+  if (channelType !== 'slack') return sessionChannelId
+  const delimiterIndex = sessionChannelId.indexOf(SLACK_THREAD_SESSION_DELIMITER)
+  return delimiterIndex === -1
+    ? sessionChannelId
+    : sessionChannelId.slice(0, delimiterIndex)
+}
+
 /**
  * Create a workspace-shared chat session (the Chat app's "New workspace chat").
  *
@@ -1156,9 +1188,11 @@ export async function getSessionTopicLabels(sessionId: string, limit = 20): Prom
 
 /**
  * Locate a session message by the channel-native triple
- * (channel_type, channel_id, channel_message_id). Used by the
+ * (channel_type, provider channel_id, channel_message_id). Used by the
  * Slack `reaction_added` and Telegram `message_reaction` handlers to
  * route an emoji reaction back to the assistant turn it referred to.
+ * Slack's reaction payload omits the parent thread timestamp, so its base
+ * channel id also matches thread-qualified session ids under that channel.
  *
  * Returns the session_message row + session row (for the workspace
  * scope the feedback writer needs). Returns `null` if no row matches
@@ -1197,7 +1231,13 @@ export async function findSessionMessageByChannelTriple(
      JOIN sessions s ON s.id = sm.session_id
      JOIN assistants a ON a.id = s.assistant_id
      WHERE s.channel_type = $1
-       AND s.channel_id = $2
+       AND (
+         s.channel_id = $2
+         OR (
+           s.channel_type = 'slack'
+           AND s.channel_id LIKE $2 || ':thread:%'
+         )
+       )
        AND sm.channel_message_id = $3
        AND sm.role = 'assistant'
      LIMIT 1`,
@@ -1393,8 +1433,10 @@ export function buildGroupChatContextPrompt(
 
 /**
  * Find the user's most-active messaging channel (telegram or slack).
- * Returns the channel_type and channel_id of the session with the most
- * recent activity, excluding 'web' and 'cron' sessions.
+ * Returns the channel_type and provider delivery channel id of the session
+ * with the most recent activity, excluding 'web' and 'cron' sessions. A
+ * thread-qualified Slack session is normalized back to its base channel;
+ * scheduled delivery expresses threading separately.
  * Returns null if the user has never used a messaging channel.
  */
 export async function getPreferredChannel(
@@ -1412,7 +1454,10 @@ export async function getPreferredChannel(
      LIMIT 1`,
     [assistantId, userId],
   )
-  return result.rows[0] ?? null
+  const row = result.rows[0]
+  return row
+    ? { ...row, channelId: providerChannelIdFromSession(row.channelType, row.channelId) }
+    : null
 }
 
 // ── Introspection: workspace session history (audit §6-a) ────────────

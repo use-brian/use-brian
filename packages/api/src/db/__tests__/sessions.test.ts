@@ -22,6 +22,10 @@ import {
   listSessionsByChannelForWorkspaceSystem,
   getSessionTranscriptForWorkspaceSystem,
   toStampedMessages,
+  buildSlackSessionChannelId,
+  providerChannelIdFromSession,
+  getPreferredChannel,
+  findSessionMessageByChannelTriple,
 } from '../sessions.js'
 import { query } from '../client.js'
 
@@ -29,6 +33,25 @@ const mockQuery = vi.mocked(query)
 
 beforeEach(() => {
   mockQuery.mockReset()
+})
+
+describe('[COMP:api/slack-route] Slack thread session identity', () => {
+  it('gives each root timestamp its own session and resumes replies on that root', () => {
+    expect(buildSlackSessionChannelId('C123', '100.001')).toBe('C123:thread:100.001')
+    expect(buildSlackSessionChannelId('C123', '100.002')).toBe('C123:thread:100.002')
+    expect(buildSlackSessionChannelId('C123', '100.001')).toBe('C123:thread:100.001')
+  })
+
+  it('keeps the legacy channel session without a thread root', () => {
+    expect(buildSlackSessionChannelId('C123')).toBe('C123')
+    expect(buildSlackSessionChannelId('C123', null)).toBe('C123')
+  })
+
+  it('recovers provider destinations only for Slack thread-qualified ids', () => {
+    expect(providerChannelIdFromSession('slack', 'C123:thread:100.001')).toBe('C123')
+    expect(providerChannelIdFromSession('slack', 'C123')).toBe('C123')
+    expect(providerChannelIdFromSession('telegram', '-100:topic:42')).toBe('-100:topic:42')
+  })
 })
 
 describe('[COMP:api/sessions-route] findOrCreateSession', () => {
@@ -91,6 +114,34 @@ describe('[COMP:api/sessions-route] findSessionById', () => {
     await findSessionById('s_1')
     expect(mockQuery).toHaveBeenCalledTimes(2)
     expect(mockQuery.mock.calls[1][0]).toContain('UPDATE sessions SET last_active_at')
+  })
+})
+
+describe('[COMP:api/slack-route] Slack base-channel compatibility', () => {
+  it('returns the base Slack channel as the preferred delivery destination', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ channelType: 'slack', channelId: 'C123:thread:100.001' }],
+      rowCount: 1,
+    } as never)
+
+    await expect(getPreferredChannel('a_1', 'u_1')).resolves.toEqual({
+      channelType: 'slack',
+      channelId: 'C123',
+    })
+  })
+
+  it('lets Slack reaction lookup match a message inside a thread session', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ messageId: 'm_1', sessionId: 's_1', assistantId: 'a_1', workspaceId: 'w_1' }],
+      rowCount: 1,
+    } as never)
+
+    await findSessionMessageByChannelTriple('slack', 'C123', '101.001')
+
+    const [sql, params] = mockQuery.mock.calls[0]
+    expect(sql).toContain("s.channel_type = 'slack'")
+    expect(sql).toContain("s.channel_id LIKE $2 || ':thread:%'")
+    expect(params).toEqual(['slack', 'C123', '101.001'])
   })
 })
 

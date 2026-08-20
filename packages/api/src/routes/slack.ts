@@ -52,6 +52,7 @@ import { ensureSlackConnectorInstance } from '../ingest/slack-connector-instance
 import { cacheInboundImageTag } from './channel-file-cache.js'
 import { classifyMedia, buildDocumentFiledReply, buildOversizeDocReply } from '../ingest/channel-media-intake.js'
 import { dispatchReactionFeedback } from '../feedback/reaction-dispatch.js'
+import { buildSlackSessionChannelId } from '../db/sessions.js'
 
 /**
  * Pipeline-C ingest port. The Slack webhook stays in the open core; the
@@ -214,6 +215,24 @@ const DECISION_MAP: Record<string, ConfirmationDecision> = {
 export type ActiveSlackTurn = { controller: AbortController; messageId?: string }
 
 /**
+ * Resolve the Slack reply target and Brian conversation id together so they
+ * cannot drift. Thread delivery uses Slack's separate `thread_ts`; session
+ * storage encodes that same root under the base channel id.
+ */
+export function resolveSlackThreadScope(
+  incoming: Pick<IncomingMessage, 'channelId' | 'messageId' | 'replyToMessageId'>,
+  replyInThread: boolean,
+): { threadTs: string | undefined; sessionChannelId: string } {
+  const threadTs = replyInThread
+    ? (incoming.replyToMessageId ?? incoming.messageId)
+    : undefined
+  return {
+    threadTs,
+    sessionChannelId: buildSlackSessionChannelId(incoming.channelId, threadTs),
+  }
+}
+
+/**
  * Edit-to-retry only cancels the running loop when the edited message IS
  * the one that loop is answering. Both ids must be known for that claim
  * to hold - an unknown id on either side is "some other message", never
@@ -319,14 +338,15 @@ export async function resolveSlackSender(params: {
 export function slackRoutes(options: SlackRouteOptions): Router {
   const router = Router()
 
-  // Active abort controllers — keyed by channelId, so "stop" messages
-  // can cancel the in-flight query loop. `messageId` is the Slack `ts` of
+  // Active abort controllers — keyed by the thread-qualified session channel
+  // id, so "stop" messages cancel only the in-flight loop in their thread.
+  // `messageId` is the Slack `ts` of
   // the message that turn is answering, so an edit-to-retry can tell
   // "the user edited THE message being answered" from "the user edited
   // some other message while an unrelated turn is running".
   const activeAbortControllers = new Map<string, ActiveSlackTurn>()
 
-  // Pending Slack confirmations — keyed by channelId
+  // Pending Slack confirmations — keyed by thread-qualified session channel id.
   type SlackPendingConf = { resolver: ConfirmationResolver; toolCallId: string }
   const pendingSlackConfirmations = new Map<string, SlackPendingConf>()
 
@@ -625,20 +645,24 @@ export function slackRoutes(options: SlackRouteOptions): Router {
 
     // Compute thread target: if replyInThread is enabled, reply in the
     // existing thread (thread_ts) or start a new thread on the user's message (ts).
-    const threadTs = slackConfig.replyInThread
-      ? (incoming.replyToMessageId ?? incoming.messageId)
-      : undefined
+    const { threadTs, sessionChannelId } = resolveSlackThreadScope(
+      incoming,
+      slackConfig.replyInThread === true,
+    )
+    // Slack delivery still needs the bare channel id + thread_ts, but Brian's
+    // session identity must include the thread root. Until this split, every
+    // native Slack thread in one DM/channel appended to the same transcript.
 
     // ── Check if this message is an abort request or edit ───────
     // Bypass the chat lock — abort the running loop immediately.
     const ABORT_KEYWORDS = ['stop', 'cancel', 'abort', 'nevermind', 'never mind']
     const normalizedText = incoming.text.trim().toLowerCase()
-    const activeTurn = activeAbortControllers.get(incoming.channelId)
+    const activeTurn = activeAbortControllers.get(sessionChannelId)
     if (activeTurn) {
       if (ABORT_KEYWORDS.includes(normalizedText)) {
         // Explicit abort — cancel and acknowledge
         activeTurn.controller.abort()
-        activeAbortControllers.delete(incoming.channelId)
+        activeAbortControllers.delete(sessionChannelId)
         await adapter.sendMessage(incoming.channelId, { text: 'Stopped.' }, threadTs ? { threadTs } : undefined)
         return
       }
@@ -652,24 +676,24 @@ export function slackRoutes(options: SlackRouteOptions): Router {
         // link-unfurl `message_changed` on the user's NEXT message aborted
         // an in-flight "yes" confirmation with "Something went wrong".)
         activeTurn.controller.abort()
-        activeAbortControllers.delete(incoming.channelId)
+        activeAbortControllers.delete(sessionChannelId)
       }
     }
 
     // ── Check if this message is a confirmation response ──────
-    const pendingConf = pendingSlackConfirmations.get(incoming.channelId)
+    const pendingConf = pendingSlackConfirmations.get(sessionChannelId)
     if (pendingConf) {
       const normalized = incoming.text.trim().toLowerCase()
       const decision = DECISION_MAP[normalized]
       if (decision) {
         pendingConf.resolver.resolve(pendingConf.toolCallId, decision)
-        pendingSlackConfirmations.delete(incoming.channelId)
+        pendingSlackConfirmations.delete(sessionChannelId)
         return
       }
       // If the text doesn't match any decision keyword, treat as deny
       // and process as a new message
       pendingConf.resolver.resolve(pendingConf.toolCallId, 'deny')
-      pendingSlackConfirmations.delete(incoming.channelId)
+      pendingSlackConfirmations.delete(sessionChannelId)
     } else if (options.deferredConfirmationStore) {
       // Check for a deferred confirmation from a scheduled job
       const normalized = incoming.text.trim().toLowerCase()
@@ -754,7 +778,7 @@ export function slackRoutes(options: SlackRouteOptions): Router {
     //    Awaited (not fire-and-forget) so the deferred background producers
     //    drain AFTER the user-facing reply, never concurrently with it.
     try {
-      await withChatLock(`slack:${incoming.channelId}`, () =>
+      await withChatLock(`slack:${sessionChannelId}`, () =>
         processMessage({
           backgroundModel: options.backgroundModel,
           adapter,
@@ -765,6 +789,7 @@ export function slackRoutes(options: SlackRouteOptions): Router {
           isIdentified,
           archiveConnectorInstanceId: integration.connectorInstanceId,
           threadTs,
+          sessionChannelId,
           botToken: slackCreds.bot_token,
           ...options,
           pendingSlackConfirmations,
@@ -1113,6 +1138,8 @@ type ProcessMessageParams = {
   isIdentified: boolean
   archiveConnectorInstanceId?: string | null
   threadTs?: string
+  /** Thread-qualified Brian conversation id; never sent to the Slack API. */
+  sessionChannelId: string
   botToken: string
   ingestChannelMediaRef?: SlackRouteOptions['ingestChannelMediaRef']
   provider: LLMProvider
@@ -1245,7 +1272,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
       fileName: f.name,
       sizeBytes: null, // Slack IncomingFile carries no size; the stream byte-cap guards.
       sender: { id: incoming.userId, name: null },
-      conversationId: incoming.channelId,
+      conversationId: params.sessionChannelId,
       workspaceId: assistant.workspaceId!,
       assistantId: assistant.id,
       actingUserId: ownerId,
@@ -1328,7 +1355,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
           ? await cacheInboundImageTag({
               fileStore: params.fileStore,
               channelType: 'slack',
-              channelId: incoming.channelId,
+              channelId: params.sessionChannelId,
               // MUST match what processChannelMessage below passes as
               // `userId` — the cache row's session is an idempotent
               // find of the turn's own session, and a mismatch would
@@ -1400,7 +1427,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
 
   // ── Abort controller ──
   const abortController = new AbortController()
-  params.activeAbortControllers.set(incoming.channelId, {
+  params.activeAbortControllers.set(params.sessionChannelId, {
     controller: abortController,
     messageId: incoming.messageId,
   })
@@ -1413,6 +1440,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     isIdentified,
     channelType: 'slack',
     channelId: incoming.channelId,
+    sessionChannelId: params.sessionChannelId,
     actorChannelId: incoming.userId, // Slack user id (e.g. U0123) → X-Sidanclaw-Actor-Id
     messageText: incoming.text,
     userContentBlocks,
@@ -1479,7 +1507,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
         await updateToolStatus()
       },
       async onConfirmationRequired(req, resolver) {
-        params.pendingSlackConfirmations.set(incoming.channelId, {
+        params.pendingSlackConfirmations.set(params.sessionChannelId, {
           resolver,
           toolCallId: req.toolCallId,
         })
@@ -1544,10 +1572,10 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
       },
       async onCleanup() {
         // Only clear our own entry - a successor turn (e.g. the edit that
-        // aborted this one) may already have registered under this channel.
-        const current = params.activeAbortControllers.get(incoming.channelId)
+        // aborted this one) may already have registered under this thread.
+        const current = params.activeAbortControllers.get(params.sessionChannelId)
         if (current?.controller === abortController) {
-          params.activeAbortControllers.delete(incoming.channelId)
+          params.activeAbortControllers.delete(params.sessionChannelId)
         }
         await adapter.clearStatus?.(incoming.channelId, { messageId: incoming.messageId })
       },
