@@ -214,6 +214,7 @@ describe('[COMP:api/custom-channel-bridge] hello + state + heartbeat', () => {
       config: { requireMention: false, userAccessMode: 'allowlist' },
       protocol: 1,
     })
+    expect(res.body.features).toContain('media_upgrade')
     expect(typeof res.body.serverTime).toBe('string')
     expect(store.touchSeen).toHaveBeenCalledWith(CHANNEL_ID)
   })
@@ -527,6 +528,63 @@ describe('[COMP:api/custom-channel-bridge] archive-only exits stage media first'
         ref: { assetId: '11111111-1111-1111-1111-111111111111', filename: 'sent.jpg' },
       },
     })
+  })
+})
+
+describe('[COMP:api/custom-channel-bridge] media upgrade', () => {
+  it('rejects an upgrade without media with 400', async () => {
+    const { app } = buildApp({ archiveMedia: makeArchiveMedia() })
+    const res = await request(app)
+      .post(`${BASE}/inbound`)
+      .set('Authorization', `Bearer ${TOKEN}`)
+      .send({ ...inbound(), mediaUpgrade: true })
+    expect(res.status).toBe(400)
+    await flush()
+    expect(archiveUnroutedInbound).not.toHaveBeenCalled()
+    expect(processChannelMessage).not.toHaveBeenCalled()
+  })
+
+  it('re-stages and re-appends without running a turn, even on a routed DM', async () => {
+    const archiveMedia = makeArchiveMedia()
+    vi.mocked(resolveChatArchiveInstanceId).mockResolvedValue('inst-1')
+    const { app } = buildApp({ archiveMedia })
+    const res = await request(app)
+      .post(`${BASE}/inbound`)
+      .set('Authorization', `Bearer ${TOKEN}`)
+      .send({
+        ...inbound({ text: '', media: [{ kind: 'image', mime: 'image/jpeg', name: 'msg_6.jpg', dataBase64: PNG_B64 }] }),
+        mediaUpgrade: true,
+      })
+    expect(res.status).toBe(202)
+    expect(res.body).toEqual({ ok: true, archivedOnly: true })
+    await flush()
+    expect(archiveMedia.storeBuffer).toHaveBeenCalledTimes(1)
+    expect(archiveMedia.storeBuffer.mock.calls[0][0]).toMatchObject({ providerMessageId: 'm-1', kind: 'image' })
+    expect(archiveUnroutedInbound).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(archiveUnroutedInbound).mock.calls[0][0].message.archiveMediaRef).toMatchObject({
+      assetId: '11111111-1111-1111-1111-111111111111',
+    })
+    // The whole point: an already-answered message must never be answered twice.
+    expect(processChannelMessage).not.toHaveBeenCalled()
+    expect(resolveRoutingForSurface).not.toHaveBeenCalled()
+  })
+
+  it('an isSelf upgrade flows through the outbound append (duplicate, store refreshes the ref)', async () => {
+    const archiveMedia = makeArchiveMedia()
+    vi.mocked(resolveChatArchiveInstanceId).mockResolvedValue('inst-1')
+    const { app } = buildApp({ archiveMedia })
+    const res = await request(app)
+      .post(`${BASE}/inbound`)
+      .set('Authorization', `Bearer ${TOKEN}`)
+      .send({
+        ...inbound({ senderId: 'me', isSelf: true, text: '', media: [{ kind: 'image', mime: 'image/jpeg', name: 'sent.jpg', dataBase64: PNG_B64 }] }),
+        mediaUpgrade: true,
+      })
+    expect(res.status).toBe(202)
+    await flush()
+    expect(appendOutboundChatArchive).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(appendOutboundChatArchive).mock.calls[0][0]).toMatchObject({ providerMessageId: 'm-1' })
+    expect(processChannelMessage).not.toHaveBeenCalled()
   })
 })
 

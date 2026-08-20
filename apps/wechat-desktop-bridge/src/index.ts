@@ -16,6 +16,7 @@ import { consoleLogger as log, errorMessage, sleep } from './log.js'
 import { createLoginSupervisor } from './login-supervisor.js'
 import { createMonitor } from './monitor.js'
 import { createOutboxWorker } from './outbox-worker.js'
+import { FEATURE_MEDIA_UPGRADE } from './protocol-types.js'
 import { loadStateFile } from './state-file.js'
 
 async function main(): Promise<void> {
@@ -57,6 +58,12 @@ async function main(): Promise<void> {
     console.error(`Use Brian speaks bridge protocol ${hello.protocol}; this bridge speaks 1. Upgrade the bridge.`)
     process.exit(5)
   }
+  const mediaUpgradeEnabled = hello.features?.includes(FEATURE_MEDIA_UPGRADE) === true
+  log.info(
+    mediaUpgradeEnabled
+      ? 'server supports media_upgrade: original-image sweep enabled'
+      : 'server does not advertise media_upgrade: images keep their thumbnails',
+  )
 
   // /health listener first so compose sees us while we wait for the container.
   const app = express()
@@ -101,6 +108,7 @@ async function main(): Promise<void> {
     pollIntervalMs: config.POLL_INTERVAL_MS,
     backfillOnFirstBoot: config.BACKFILL_ON_FIRST_BOOT,
     isLoggedIn: () => supervisor?.isLoggedIn() ?? false,
+    mediaUpgradeEnabled,
     log,
     onFatal: fatal,
   })

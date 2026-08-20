@@ -62,7 +62,19 @@ export type BridgeInboundMessage = {
   media?: BridgeInboundMedia[]
 }
 
-export type BridgeInbound = { message: BridgeInboundMessage }
+export type BridgeInbound = {
+  message: BridgeInboundMessage
+  /**
+   * Media upgrade (additive, v1.2; send only when the hello `features`
+   * include 'media_upgrade'): `message` was already delivered and `media`
+   * now carries better bytes for the same `messageId`. The server re-stages
+   * the asset and re-appends the archive row; it never runs a turn.
+   */
+  mediaUpgrade?: boolean
+}
+
+/** Hello `features` name for the media-upgrade ability. */
+export const FEATURE_MEDIA_UPGRADE = 'media_upgrade'
 
 type OutboxDocument = { filename: string; mime: string; dataBase64: string; caption?: string }
 
@@ -92,5 +104,7 @@ export type HelloResponse = {
   kind: string | null
   config: { requireMention?: boolean; userAccessMode?: string }
   protocol: number
+  /** Optional server abilities by name (additive, v1.2). Absent on older platforms. */
+  features?: string[]
   serverTime: string
 }

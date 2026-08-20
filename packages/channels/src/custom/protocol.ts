@@ -20,6 +20,15 @@
 
 export const CUSTOM_CHANNEL_PROTOCOL_VERSION = 1
 
+/**
+ * Optional server abilities advertised by name in the hello `features` array.
+ * Additive (v1.2): bridges gate optional behaviour on a feature's presence,
+ * never on `protocol` — deployed v1 bridges hard-exit on a protocol number
+ * they do not speak, so the number can effectively never move.
+ */
+export const CUSTOM_CHANNEL_FEATURE_MEDIA_UPGRADE = 'media_upgrade'
+export const CUSTOM_CHANNEL_FEATURES = [CUSTOM_CHANNEL_FEATURE_MEDIA_UPGRADE] as const
+
 export const BRIDGE_INBOUND_TEXT_MAX_BYTES = 64 * 1024
 export const BRIDGE_INBOUND_MEDIA_MAX_ITEMS = 4
 export const BRIDGE_INBOUND_MEDIA_MAX_BYTES = 25 * 1024 * 1024
@@ -90,7 +99,18 @@ export type BridgeInboundMessage = {
   media?: BridgeInboundMedia[]
 }
 
-export type BridgeInbound = { message: BridgeInboundMessage }
+export type BridgeInbound = {
+  message: BridgeInboundMessage
+  /**
+   * Media upgrade (additive, v1.2; send only when the hello `features`
+   * include 'media_upgrade'): `message` was already delivered through this
+   * endpoint and `media` now carries better bytes for the same `messageId`
+   * (e.g. the WeChat original after the thumbnail). The server re-stages the
+   * asset and re-appends the archive row; it never runs a turn. Requires
+   * `messageId` + non-empty `media`.
+   */
+  mediaUpgrade?: boolean
+}
 
 /** Byte length of a base64 payload after decoding (ignores padding). */
 export function base64DecodedLength(b64: string): number {
@@ -152,5 +172,7 @@ export type BridgeHello = {
   kind: string | null
   config: { requireMention: boolean; userAccessMode: string }
   protocol: typeof CUSTOM_CHANNEL_PROTOCOL_VERSION
+  /** Optional server abilities by name (additive, v1.2) — see CUSTOM_CHANNEL_FEATURES. */
+  features: string[]
   serverTime: string
 }

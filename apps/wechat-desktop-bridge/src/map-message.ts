@@ -62,6 +62,15 @@ export function messageMayHaveMedia(msg: Pick<AgentWechatMessage, 'type'>): bool
   return MEDIA_TYPES.has(baseMessageType(msg.type))
 }
 
+/**
+ * Whether this row is an image (type 3) — the only kind the original-image
+ * upgrade sweep tracks: the client auto-downloads a video only on play, so
+ * opening the chat would not upgrade one.
+ */
+export function messageIsImage(msg: Pick<AgentWechatMessage, 'type'>): boolean {
+  return baseMessageType(msg.type) === MSG_TYPE.IMAGE
+}
+
 export type MediaOutcome =
   /** Bytes arrived. */
   | { status: 'fetched'; result: AgentWechatMediaResult }
@@ -128,7 +137,11 @@ function approxDecodedBytes(b64: string): number {
   return Math.max(0, Math.floor((b64.length * 3) / 4) - padding)
 }
 
-function toMedia(result: AgentWechatMediaResult, msg: AgentWechatMessage): BridgeInboundMedia | null {
+/** agent-wechat media result → protocol media item. Exported for the upgrade sweep. */
+export function toBridgeMedia(
+  result: AgentWechatMediaResult,
+  msg: Pick<AgentWechatMessage, 'localId' | 'type'>,
+): BridgeInboundMedia | null {
   if (!result.data) return null
   const mime = mimeForMedia(result)
   const ext = (result.format ?? '').replace(/^\./, '')
@@ -170,7 +183,7 @@ export function mapMessage(
   let text: string
   let mediaItems: BridgeInboundMedia[] | undefined
 
-  const fetched = media.status === 'fetched' ? toMedia(media.result, msg) : null
+  const fetched = media.status === 'fetched' ? toBridgeMedia(media.result, msg) : null
   if (fetched) {
     mediaItems = [fetched]
     if (type === MSG_TYPE.APP) {

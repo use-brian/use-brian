@@ -169,4 +169,36 @@ describe('[COMP:app/wechat-desktop-bridge] monitor', () => {
     expect(bridge.inbound[0]!.message.media).toBeUndefined()
     expect(bridge.inbound[0]!.message.text).toBe('[attachment too large]')
   })
+
+  it('with mediaUpgradeEnabled, a forwarded image thumb upgrades once the read chat serves better bytes', async () => {
+    const thumbB64 = Buffer.from('thumb').toString('base64')
+    const fullB64 = Buffer.from('full-size-original-bytes').toString('base64')
+    state.cursors['wxid_example1'] = 0
+    agent.chats = [chat({ id: 'wxid_example1', lastMsgLocalId: 1, unreadCount: 0 })]
+    agent.messages.set('wxid_example1', [msg({ localId: 1, chatId: 'wxid_example1', type: 3, content: '' })])
+    // forward() consumes the thumbnail; the sweep's re-fetch gets the original.
+    agent.media.set('wxid_example1:1', [
+      { type: 'image', format: 'jpg', filename: 'a.jpg', data: thumbB64 },
+      { type: 'image', format: 'jpg', filename: 'a.jpg', data: fullB64 },
+    ])
+    await makeMonitor({ mediaUpgradeEnabled: true }).tick()
+    expect(agent.openedChats).toEqual(['wxid_example1'])
+    expect(bridge.inbound).toHaveLength(2)
+    expect(bridge.inbound[0]!.mediaUpgrade).toBeUndefined()
+    expect(bridge.inbound[0]!.message.media![0]!.dataBase64).toBe(thumbB64)
+    expect(bridge.inbound[1]!.mediaUpgrade).toBe(true)
+    expect(bridge.inbound[1]!.message.media![0]!.dataBase64).toBe(fullB64)
+    expect(bridge.inbound[1]!.message.messageId).toBe(bridge.inbound[0]!.message.messageId)
+    expect(state.pendingMediaUpgrades).toEqual({})
+  })
+
+  it('without the feature the sweep never opens chats and no pendings are recorded', async () => {
+    state.cursors['wxid_example1'] = 0
+    agent.chats = [chat({ id: 'wxid_example1', lastMsgLocalId: 1, unreadCount: 0 })]
+    agent.messages.set('wxid_example1', [msg({ localId: 1, chatId: 'wxid_example1', type: 3, content: '' })])
+    agent.media.set('wxid_example1:1', [{ type: 'image', format: 'jpg', filename: 'a.jpg', data: 'aGVsbG8=' }])
+    await makeMonitor().tick()
+    expect(agent.openedChats).toHaveLength(0)
+    expect(state.pendingMediaUpgrades).toBeUndefined()
+  })
 })

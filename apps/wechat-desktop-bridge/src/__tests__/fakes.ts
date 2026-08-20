@@ -40,6 +40,8 @@ export type FakeAgent = AgentWechatClient & {
   authCalls: number
   logoutCalls: number
   mediaCalls: number
+  openedChats: string[]
+  openResult: { ok: boolean; error?: string }
   /** Login WS control: push events into the most recent subscription. */
   emit(event: AgentWechatLoginEvent): void
   subscriptions: number
@@ -58,6 +60,8 @@ export function fakeAgent(): FakeAgent {
     authCalls: 0,
     logoutCalls: 0,
     mediaCalls: 0,
+    openedChats: [],
+    openResult: { ok: true },
     subscriptions: 0,
     closedSubscriptions: 0,
     emit(event) {
@@ -92,6 +96,10 @@ export function fakeAgent(): FakeAgent {
     async sendMessage(params) {
       a.sent.push(params)
       return a.sendResult
+    },
+    async openChat(chatId) {
+      a.openedChats.push(chatId)
+      return a.openResult
     },
     subscribeLogin(h) {
       a.subscriptions++

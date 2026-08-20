@@ -8,6 +8,7 @@ import type { AgentWechatChat, AgentWechatClient, AgentWechatMessage } from './a
 import { BridgeHttpError, type BrianBridgeClient } from './brian-bridge-client.js'
 import { consoleLogger, errorMessage, sleep as defaultSleep, type Logger } from './log.js'
 import { ATTACHMENT_UNAVAILABLE, mapMessage, messageMayHaveMedia, type MediaOutcome } from './map-message.js'
+import { createMediaUpgrader } from './media-upgrade.js'
 import { saveStateFile, type BridgeStateFile } from './state-file.js'
 
 const CHAT_LIST_LIMIT = 200
@@ -23,6 +24,8 @@ export type MonitorDeps = {
   pollIntervalMs: number
   backfillOnFirstBoot: boolean
   isLoggedIn: () => boolean
+  /** Hello advertised `media_upgrade` — enables the original-image sweep. */
+  mediaUpgradeEnabled?: boolean
   log?: Logger
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>
   mediaRetry?: { attempts: number; intervalMs: number }
@@ -67,6 +70,18 @@ export function createMonitor(deps: MonitorDeps): Monitor {
     }
   }
 
+  const upgrader = createMediaUpgrader({
+    agent: deps.agent,
+    bridge: deps.bridge,
+    state: deps.state,
+    persist,
+    enabled: deps.mediaUpgradeEnabled === true,
+    log,
+    sleep: (ms) => sleep(ms, abort.signal),
+    isStopped: () => abort.signal.aborted,
+    onFatal: deps.onFatal,
+  })
+
   async function fetchMedia(chatId: string, msg: AgentWechatMessage): Promise<MediaOutcome> {
     if (!messageMayHaveMedia(msg)) return { status: 'not_applicable' }
     for (let attempt = 1; attempt <= retry.attempts; attempt++) {
@@ -91,6 +106,9 @@ export function createMonitor(deps: MonitorDeps): Monitor {
     if (!mapped) return true
     try {
       await deps.bridge.postInbound({ message: mapped })
+      // Track image rows for the original-image sweep (the forwarded bytes
+      // are at best WeChat's thumbnail). Persisted by the caller's cursor write.
+      upgrader.register({ chatId, msg, mapped })
       return true
     } catch (err) {
       if (err instanceof BridgeHttpError && err.status === 413 && mapped.media) {
@@ -176,6 +194,13 @@ export function createMonitor(deps: MonitorDeps): Monitor {
         await processChat(chat, effective)
       }
       if (seededAny) await persist()
+      // Original-image upgrade pass — after normal forwarding so a new image
+      // is registered before its chat is considered.
+      try {
+        await upgrader.sweep(chats)
+      } catch (err) {
+        log.warn(`media upgrade sweep failed: ${errorMessage(err)}`)
+      }
     } finally {
       ticking = false
     }

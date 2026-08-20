@@ -36,6 +36,7 @@ import {
   createCustomAdapter,
   bridgeInboundOversize,
   CUSTOM_CHANNEL_PROTOCOL_VERSION,
+  CUSTOM_CHANNEL_FEATURES,
   BRIDGE_INBOUND_TEXT_MAX_BYTES,
   BRIDGE_INBOUND_MEDIA_MAX_ITEMS,
   BRIDGE_INBOUND_MEDIA_MAX_BYTES,
@@ -201,6 +202,7 @@ export const bridgeInboundSchema: z.ZodType<BridgeInbound> = z.object({
     replyToMessageId: z.string().max(512).optional(),
     media: z.array(bridgeInboundMediaSchema).max(BRIDGE_INBOUND_MEDIA_MAX_ITEMS).optional(),
   }),
+  mediaUpgrade: z.boolean().optional(),
 })
 
 export const outboxAckSchema: z.ZodType<OutboxAck> = z.object({
@@ -347,6 +349,7 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
         userAccessMode: config.userAccessMode ?? 'allow_all',
       },
       protocol: CUSTOM_CHANNEL_PROTOCOL_VERSION,
+      features: [...CUSTOM_CHANNEL_FEATURES],
       serverTime: new Date().toISOString(),
     }
     res.json(hello)
@@ -477,7 +480,19 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
         return
       }
 
+      // A media upgrade re-delivers better bytes for an already-delivered
+      // message (custom-channel.md → "Media upgrade"). It must carry the
+      // bytes, and it only ever archives — never a turn, or an old message
+      // would be answered twice.
+      const isMediaUpgrade = parsed.data.mediaUpgrade === true
+      if (isMediaUpgrade && (!msg.messageId || (msg.media ?? []).length === 0)) {
+        res.status(400).json({ error: 'bad_payload', detail: 'mediaUpgrade requires messageId and media' })
+        return
+      }
+
       // 2. The bridge account's own message: archive as outbound, never a turn.
+      //    A self media upgrade lands here too — the duplicate outbound append
+      //    carries the re-staged asset and the store refreshes the row.
       if (msg.isSelf) {
         await archiveSelfMessage(channel, integration, msg)
         res.status(202).json({ ok: true, archivedOnly: true })
@@ -514,6 +529,14 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
         }).catch((err: unknown) => console.error('[custom-channel] unrouted archive append failed:', err))
         console.log(`[custom-channel] ${why} for ${peerId} on channel ${channelId} — archived, not answered`)
         res.status(202).json({ ok: true, archivedOnly: true })
+      }
+
+      // Media upgrade: stage + duplicate append only, before any routing —
+      // the store's (instance_id, provider_message_id) upsert replaces the
+      // asset, re-queues extraction and refreshes the row's media_ref.
+      if (isMediaUpgrade) {
+        await archiveOnly('media upgrade')
+        return
       }
 
       // 3. Group + requireMention (default true) + not mentioned → archived.
