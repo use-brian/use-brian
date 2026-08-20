@@ -4,14 +4,16 @@
  * Connected-card panel for the Company Email (imap) connector: archive sync
  * status ("Syncing 8,200 of 14,200" / "Up to date") + the backfill consent
  * flow (D9 — cheap STATUS preflight, then scope choices with Later as a
- * first-class option; live tools work with zero backfill) + the send-as
- * alias list (mailbox-imap.md → "Send-as aliases": the addresses this
+ * first-class option; live tools work with zero backfill) + the post-completion
+ * full-history recovery action (preflight → confirm → idempotent all-history
+ * replay) + the send-as alias list (mailbox-imap.md → "Send-as aliases": the addresses this
  * mailbox may reply AS; `PATCH /imap/send-as`, read back on sync-status).
  *
  * [COMP:web/imap-sync-panel]
  */
 
 import { useCallback, useEffect, useState } from "react";
+import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { authFetch } from "@/lib/auth-fetch";
 import { useT } from "@/lib/i18n/client";
 
@@ -135,7 +137,7 @@ export function ImapSyncPanel({ instanceId }: { instanceId?: string } = {}) {
     return () => clearInterval(timer);
   }, [loadStatus]);
 
-  async function runPreflight() {
+  async function probeMailbox(): Promise<ProbeResult | null> {
     setProbing(true);
     setError(null);
     try {
@@ -144,12 +146,19 @@ export function ImapSyncPanel({ instanceId }: { instanceId?: string } = {}) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ instanceId }),
       });
-      if (res.ok) setProbe((await res.json()) as ProbeResult);
-      else setError(tm.backfillFailed);
+      if (res.ok) return (await res.json()) as ProbeResult;
+      setError(tm.backfillFailed);
     } catch {
       setError(tm.backfillFailed);
+    } finally {
+      setProbing(false);
     }
-    setProbing(false);
+    return null;
+  }
+
+  async function runPreflight() {
+    const result = await probeMailbox();
+    if (result) setProbe(result);
   }
 
   async function armBackfill(scope: "12m" | "2y" | "all") {
@@ -171,6 +180,19 @@ export function ImapSyncPanel({ instanceId }: { instanceId?: string } = {}) {
       setError(tm.backfillFailed);
     }
     setArming(false);
+  }
+
+  async function resyncEntireHistory() {
+    const result = await probeMailbox();
+    if (!result) return;
+    const confirmed = await confirmDialog({
+      title: tm.fullResyncTitle,
+      description: tm.fullResyncDescription.replace("{n}", String(result.total)),
+      confirmLabel: tm.fullResyncConfirm,
+      cancelLabel: tm.fullResyncCancel,
+    });
+    if (!confirmed) return;
+    await armBackfill("all");
   }
 
   async function saveAliases(next: string[]) {
@@ -256,6 +278,17 @@ export function ImapSyncPanel({ instanceId }: { instanceId?: string } = {}) {
           className="text-xs font-medium border border-border px-3 py-1 rounded-lg text-muted-foreground hover:bg-muted disabled:opacity-50 transition-colors"
         >
           {probing ? tm.backfillProbing : backfillStalled ? tm.backfillRetryBtn : tm.backfillProbeBtn}
+        </button>
+      )}
+      {status.backfill?.status === "done" && !probe && (
+        <button
+          type="button"
+          data-testid="imap-full-history-resync"
+          onClick={() => void resyncEntireHistory()}
+          disabled={probing || arming}
+          className="text-xs font-medium border border-border px-3 py-1 rounded-lg text-muted-foreground hover:bg-muted disabled:opacity-50 transition-colors"
+        >
+          {probing ? tm.backfillProbing : arming ? tm.fullResyncArming : tm.fullResyncBtn}
         </button>
       )}
       {probe && !backfillRunning && (
