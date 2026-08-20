@@ -3687,7 +3687,7 @@ function ConnectorsList() {
         onConnectorAdded={() => fetchConnectors()}
         // Resolve the real row first: a synthetic `{ id }` carries no instance
         // UUID, so its form key becomes stale when Directory Add refetches.
-        onOauthConnect={(entry, opts) => {
+        onConnectorConnect={(entry, opts) => {
           const connector = resolveDirectoryConnectRow(connectors, entry.id) as Connector;
           void handleConnect(connector, {
             ...opts,
