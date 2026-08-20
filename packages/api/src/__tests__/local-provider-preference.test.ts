@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -54,5 +54,30 @@ describe('[COMP:api/codex-provider] local provider preference persistence', () =
     await saveLocalProviderPreference('dashscope-intl', path)
 
     expect(await loadLocalProviderPreference(path)).toBe('dashscope-intl')
+  })
+
+  it('ignores an inaccessible legacy launcher preference at service boot', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'brian-provider-preference-'))
+    temporaryDirectories.push(directory)
+    const protectedDirectory = join(directory, 'launcher-home')
+    const path = join(protectedDirectory, 'config.json')
+    await mkdir(protectedDirectory)
+    await writeFile(path, JSON.stringify({ preferredProvider: 'openai-codex' }), 'utf8')
+    await chmod(protectedDirectory, 0o000)
+
+    try {
+      expect(await loadLocalProviderPreference(path)).toBeNull()
+    } finally {
+      await chmod(protectedDirectory, 0o700)
+    }
+  })
+
+  it('still rejects malformed readable launcher configuration', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'brian-provider-preference-'))
+    temporaryDirectories.push(directory)
+    const path = join(directory, 'config.json')
+    await writeFile(path, '{malformed', 'utf8')
+
+    await expect(loadLocalProviderPreference(path)).rejects.toThrow()
   })
 })

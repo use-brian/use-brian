@@ -878,6 +878,29 @@ describe('[COMP:wa-connector/socket-manager] contact directory relay', () => {
     ])
   })
 
+  it('stores both LID and phone-number aliases so saved names join phone-number message rows', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({}) })
+    vi.stubGlobal('fetch', fetchMock)
+    const mgr = manager()
+    await mgr.connect('a-1')
+
+    fakeSockets[0].ev.emit('contacts.upsert', [{
+      id: '237288437104831@lid',
+      lid: '237288437104831@lid',
+      phoneNumber: '85266986281@s.whatsapp.net',
+      name: 'Jack Chan',
+      notify: 'jackie',
+    }])
+    await settle()
+
+    const call = fetchMock.mock.calls.find((c: unknown[]) => String(c[0]).endsWith('/internal/whatsapp/contacts'))
+    expect(call).toBeTruthy()
+    expect(JSON.parse((call![1] as { body: string }).body).contacts).toEqual([
+      { contactId: '237288437104831@lid', savedName: 'Jack Chan', pushName: 'jackie' },
+      { contactId: '85266986281@s.whatsapp.net', savedName: 'Jack Chan', pushName: 'jackie' },
+    ])
+  })
+
   it('a nothing-but-nameless sync sends no request at all', async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({}) })
     vi.stubGlobal('fetch', fetchMock)

@@ -19,6 +19,14 @@ export type ToolContext = {
   appId: string
   channelType: string
   channelId: string
+  /**
+   * Session-scoped provider conversation id when it is narrower than the
+   * physical delivery channel. Threaded Slack turns use
+   * `<channelId>:thread:<threadTs>` here while `channelId` remains the bare
+   * Slack API destination. Consumers that correlate conversation-local state
+   * fall back to `channelId` when this field is absent.
+   */
+  channelSessionId?: string
   /** Team ID when the assistant is team-owned. Used by saveMemory for team scope. */
   workspaceId?: string | null
   /** Immutable provider lane captured by workers spawned from this turn. */

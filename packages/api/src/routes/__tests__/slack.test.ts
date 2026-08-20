@@ -39,6 +39,8 @@ vi.mock('../../billing-party.js', () => ({
   }),
 }))
 vi.mock('../../db/sessions.js', () => ({
+  buildSlackSessionChannelId: (channelId: string, threadTs?: string | null) =>
+    threadTs ? `${channelId}:thread:${threadTs}` : channelId,
   findOrCreateSession: vi.fn(),
   addSessionMessage: vi.fn(),
   toStampedMessages: vi.fn((msgs: Array<{ role: string; content: unknown }>) => msgs.map((m) => ({ role: m.role, content: m.content }))),
@@ -71,7 +73,12 @@ vi.mock('../../billing/credit-gate.js', () => ({
   creditGateStatus: vi.fn(() => 'ok'),
 }))
 
-import { slackRoutes, shouldAbortForEdit, resolveSlackSender } from '../slack.js'
+import {
+  slackRoutes,
+  shouldAbortForEdit,
+  resolveSlackSender,
+  resolveSlackThreadScope,
+} from '../slack.js'
 import { verifySlackSignature } from '@use-brian/channels'
 import { getChannelForWebhook, resolveAssistantForSurface, resolveRoutingForSurface } from '../../db/channels-store.js'
 
@@ -420,6 +427,47 @@ describe('[COMP:api/slack-route] shouldAbortForEdit', () => {
     expect(shouldAbortForEdit(running(undefined), '1.100')).toBe(false)
     expect(shouldAbortForEdit(running('1.100'), undefined)).toBe(false)
     expect(shouldAbortForEdit(running(undefined), undefined)).toBe(false)
+  })
+})
+
+describe('[COMP:api/slack-route] Slack thread session scope', () => {
+  const incoming = (over: Partial<{
+    channelId: string
+    messageId: string
+    replyToMessageId: string
+  }> = {}) => ({
+    channelId: 'C123',
+    messageId: '100.001',
+    replyToMessageId: undefined,
+    ...over,
+  })
+
+  it('opens a different session for each top-level thread root', () => {
+    expect(resolveSlackThreadScope(incoming({ messageId: '100.001' }), true)).toEqual({
+      threadTs: '100.001',
+      sessionChannelId: 'C123:thread:100.001',
+    })
+    expect(resolveSlackThreadScope(incoming({ messageId: '100.002' }), true)).toEqual({
+      threadTs: '100.002',
+      sessionChannelId: 'C123:thread:100.002',
+    })
+  })
+
+  it('resumes every reply on its parent thread session', () => {
+    expect(resolveSlackThreadScope(incoming({
+      messageId: '100.099',
+      replyToMessageId: '100.001',
+    }), true)).toEqual({
+      threadTs: '100.001',
+      sessionChannelId: 'C123:thread:100.001',
+    })
+  })
+
+  it('keeps channel-level identity when thread replies are disabled', () => {
+    expect(resolveSlackThreadScope(incoming(), false)).toEqual({
+      threadTs: undefined,
+      sessionChannelId: 'C123',
+    })
   })
 })
 

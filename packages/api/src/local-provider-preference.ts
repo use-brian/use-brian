@@ -29,7 +29,7 @@ export async function loadLocalProviderPreference(
     const parsed = PreferredProviderSchema.safeParse(config.preferredProvider)
     return parsed.success ? parsed.data : null
   } catch (error) {
-    if (isMissingFile(error)) return null
+    if (isOptionalConfigUnavailable(error)) return null
     throw error
   }
 }
@@ -60,4 +60,13 @@ function isMissingFile(error: unknown): boolean {
     'code' in error &&
     (error as NodeJS.ErrnoException).code === 'ENOENT'
   )
+}
+
+function isOptionalConfigUnavailable(error: unknown): boolean {
+  if (!(error instanceof Error) || !('code' in error)) return false
+  const code = (error as NodeJS.ErrnoException).code
+  // This legacy launcher preference is migration input, not runtime state.
+  // Hardened services may intentionally be unable to traverse the launcher's
+  // home directory; boot with the workspace-scoped provider preference then.
+  return code === 'ENOENT' || code === 'EACCES' || code === 'EPERM' || code === 'ENOTDIR'
 }

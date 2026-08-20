@@ -132,7 +132,7 @@ export function createConfirmRecordingProcessingTool(deps: ConfirmRecordingProce
       // channel session. Prevents confirming a recording from another chat.
       const expectedKey = deps.buildChannelSessionKey({
         channel: context.channelType,
-        channelId: context.channelId,
+        channelId: context.channelSessionId ?? context.channelId,
         userId: context.userId,
       })
       if (pending.channelSessionKey !== expectedKey) {

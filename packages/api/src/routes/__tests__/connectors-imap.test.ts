@@ -29,6 +29,7 @@ function makeApp(over: {
   membership?: { role: 'owner' | 'admin' | 'member'; clearance: 'public' | 'internal' | 'confidential' } | null
   /** Decrypted credentials for the resolved instance (sync-status path). */
   creds?: Record<string, unknown> | null
+  probeResult?: { folders: Array<{ path: string; messages: number }>; total: number }
 } = {}) {
   const createUserInstance = vi.fn(async () => ({ id: 'inst_new' }))
   const update = vi.fn(async () => ({ id: 'inst_existing' }))
@@ -44,6 +45,7 @@ function makeApp(over: {
   )
   const resolvePreset = vi.fn(async () => (over.preset === undefined ? ALIMAIL : over.preset))
   const countArchive = vi.fn(async () => ({ total: 3, byFolder: { INBOX: 3 } }))
+  const probe = vi.fn(async () => over.probeResult ?? ({ folders: [{ path: 'INBOX', messages: 3 }], total: 3 }))
   const router = connectorRoutes({
     connectorStore: {} as ConnectorStore,
     connectorInstanceStore: {
@@ -53,11 +55,12 @@ function makeApp(over: {
       verify: verify as never,
       resolvePreset: resolvePreset as never,
       countArchive: countArchive as never,
+      probe: probe as never,
       getMembershipWithClearance: getMembershipWithClearance as never,
     },
   })
   const app = createTestApp('/api/connectors', router, { userId: USER })
-  return { app, createUserInstance, update, listForUser, verify, resolvePreset, getMembershipWithClearance, setConfigSystem }
+  return { app, createUserInstance, update, listForUser, verify, resolvePreset, getMembershipWithClearance, setConfigSystem, probe }
 }
 
 describe('[COMP:api/mailbox-connect-routes] POST /imap/resolve', () => {
@@ -303,6 +306,54 @@ describe('[COMP:api/mailbox-connect-routes] send-as aliases (PATCH /imap/send-as
     // Never watched → null, not a fabricated "off".
     const { app: bare } = makeApp({ instances: [MAILBOX], creds: CREDS })
     expect((await request(bare).get('/api/connectors/imap/sync-status')).body.idle).toBeNull()
+  })
+})
+
+describe('[COMP:api/mailbox-connect-routes] POST /imap/backfill full-history replay', () => {
+  const CREDS = {
+    type: 'imap', email: 'maya@harborlane.example', appPassword: 'pw',
+    imapHost: 'imap.qiye.aliyun.com', imapPort: 993, smtpHost: 'smtp.qiye.aliyun.com', smtpPort: 465,
+  }
+
+  it('re-arms a completed all-history walk in place without deleting archive rows', async () => {
+    const instance = {
+      id: 'inst_1', provider: 'imap', scope: 'user', connected: true,
+      connectedEmail: 'maya@harborlane.example', createdAt: new Date('2026-01-01T00:00:00Z'),
+      ingestionEnabled: false,
+      config: {
+        mailboxSync: {
+          folders: {
+            INBOX: { uidvalidity: '7', lastUid: 12000, backfillLow: 1, backfillDone: true },
+            Sent: { uidvalidity: '8', lastUid: 600, backfillLow: 2, backfillDone: true },
+          },
+          backfill: { scope: 'all', requestedAt: '2026-07-24T10:00:37.642Z', status: 'done', totalEstimate: 97 },
+          lastSyncAt: '2026-08-20T10:17:44.858Z',
+        },
+      },
+    }
+    const { app, setConfigSystem, probe } = makeApp({
+      instances: [instance],
+      creds: CREDS,
+      probeResult: { folders: [{ path: 'INBOX', messages: 97 }], total: 97 },
+    })
+
+    const res = await request(app).post('/api/connectors/imap/backfill').send({ scope: 'all' })
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ ok: true, totalEstimate: 97 })
+    expect(probe).toHaveBeenCalledWith(expect.objectContaining({ email: 'maya@harborlane.example' }))
+    expect(setConfigSystem).toHaveBeenCalledWith('inst_1', {
+      mailboxSync: expect.objectContaining({
+        folders: {
+          INBOX: { uidvalidity: '7', lastUid: 12000 },
+          Sent: { uidvalidity: '8', lastUid: 600 },
+        },
+        backfill: expect.objectContaining({
+          scope: 'all', status: 'running', totalEstimate: 97, requestedAt: expect.any(String),
+        }),
+        lastSyncAt: '2026-08-20T10:17:44.858Z',
+      }),
+    })
   })
 })
 
