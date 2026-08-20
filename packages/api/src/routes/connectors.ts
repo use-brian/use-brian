@@ -123,7 +123,12 @@ import { DESKTOP_OAUTH_EXCHANGERS, type DesktopOAuthExchangeResult } from '../co
 import { resolveMailboxPreset } from '../mailbox/presets.js'
 import { verifyMailboxConnection } from '../mailbox/verify.js'
 import { probeMailboxFolders } from '../mailbox/probe.js'
-import { readMailboxSyncState, type MailboxBackfillScope, type MailboxSyncState } from '../mailbox/sync-worker.js'
+import {
+  CURRENT_BACKFILL_RECONCILE_VERSION,
+  readMailboxSyncState,
+  type MailboxBackfillScope,
+  type MailboxSyncState,
+} from '../mailbox/sync-worker.js'
 import { getGlobalMailboxSyncDeps } from '../mailbox/sync-tool.js'
 import { normalizeSendAsAliases, readSendAsAliases } from '../mailbox/send-as.js'
 import { readMailboxIdleStatus } from '../mailbox/idle-watcher.js'
@@ -1199,15 +1204,21 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
         backfill: {
           scope,
           requestedAt: new Date().toISOString(),
+          reconcileVersion: CURRENT_BACKFILL_RECONCILE_VERSION,
           status: 'running',
-          // Upper bound shown as "Syncing N of M" — per-scope exact counts
-          // would need per-folder date SEARCHes; the STATUS total is the
-          // cheap honest ceiling.
-          totalEstimate: probed.total,
+          // A partial STATUS walk is an honest lower bound, never a mailbox
+          // total. The worker repairs the estimate from later successful
+          // per-folder STATUS calls; the UI never formats it as "N of M".
+          ...(probed.complete ? { totalEstimate: probed.total } : {}),
+          estimateComplete: probed.complete,
         },
       }
       await connectorInstanceStore.setConfigSystem(resolved.instance.id, { mailboxSync: next })
-      res.json({ ok: true, totalEstimate: probed.total })
+      res.json({
+        ok: true,
+        totalEstimate: probed.complete ? probed.total : null,
+        estimateComplete: probed.complete,
+      })
     } catch (err) {
       console.error('[connectors] imap backfill arm failed:', err)
       res.status(500).json({ error: 'Failed to start the backfill' })

@@ -2,7 +2,7 @@
 
 /**
  * Connected-card panel for the Company Email (imap) connector: archive sync
- * status ("Syncing 8,200 of 14,200" / "Up to date") + the backfill consent
+ * status ("Syncing mailbox history" / "Up to date") + the backfill consent
  * flow (D9 — cheap STATUS preflight, then scope choices with Later as a
  * first-class option; live tools work with zero backfill) + the post-completion
  * full-history recovery action (preflight → confirm → idempotent all-history
@@ -26,6 +26,7 @@ export type ImapSyncStatus = {
     scope: string;
     status: "running" | "done" | "stalled";
     totalEstimate?: number;
+    estimateComplete?: boolean;
     consecutiveFailures?: number;
     lastError?: string | null;
   } | null;
@@ -80,30 +81,35 @@ export function looksLikeEmailAddress(value: string): boolean {
   return /^[^\s@<>,;"]+@[^\s@<>,;"]+\.[^\s@<>,;"]+$/.test(value.trim());
 }
 
-/** Pure status-line formatter — "Syncing N of M" while a backfill runs,
- *  "History sync paused" once it has parked, else "Up to date" with the
- *  archived count. Exported for tests.
+/** Pure status-line formatter - an honest archived count while a backfill
+ *  runs, a legacy recovery line for old `stalled` cursors, else "Up to date".
+ *  Exported for tests.
  *
- *  The paused branch exists because the running branch used to be a lie: a
- *  wedged backfill kept `status: "running"` forever, so this line read
- *  "Syncing 72,497 of 155,363..." for twelve days while nothing moved. A
- *  progress string with no progress behind it is worse than an error. */
+ *  An archive row count and a live server STATUS estimate have different
+ *  semantics (deleted mail, partial folder probes, and scope can all differ),
+ *  so this deliberately never presents them as an "N of M" progress pair. */
 export function formatImapSyncLine(
   status: Pick<ImapSyncStatus, "archived" | "backfill">,
-  copy: { syncing: string; upToDate: string; backfillStalled: string },
+  copy: { syncing: string; upToDate: string; backfillRetrying: string; backfillStalled: string },
 ): string {
   if (status.backfill?.status === "stalled") {
     return copy.backfillStalled.replace("{n}", String(status.archived));
   }
   const backfillRunning = status.backfill?.status === "running";
+  if (backfillRunning && status.backfill?.lastError) {
+    return copy.backfillRetrying.replace("{n}", String(status.archived));
+  }
   return backfillRunning
-    ? copy.syncing
-        .replace("{n}", String(status.archived))
-        .replace("{m}", String(status.backfill?.totalEstimate ?? status.archived))
+    ? copy.syncing.replace("{n}", String(status.archived))
     : copy.upToDate.replace("{n}", String(status.archived));
 }
 
-type ProbeResult = { folders: Array<{ path: string; messages: number }>; total: number };
+type ProbeResult = {
+  folders: Array<{ path: string; messages: number }>;
+  failedFolders: Array<{ path: string }>;
+  complete: boolean;
+  total: number;
+};
 
 /**
  * `instanceId` targets a specific connected mailbox (multi-account); omit for
@@ -187,7 +193,9 @@ export function ImapSyncPanel({ instanceId }: { instanceId?: string } = {}) {
     if (!result) return;
     const confirmed = await confirmDialog({
       title: tm.fullResyncTitle,
-      description: tm.fullResyncDescription.replace("{n}", String(result.total)),
+      description: result.complete
+        ? tm.fullResyncDescription.replace("{n}", String(result.total))
+        : tm.fullResyncDescriptionUnknown,
       confirmLabel: tm.fullResyncConfirm,
       cancelLabel: tm.fullResyncCancel,
     });
@@ -239,6 +247,7 @@ export function ImapSyncPanel({ instanceId }: { instanceId?: string } = {}) {
   const backfillRunning = status.backfill?.status === "running";
   const aliases = status.sendAsAliases ?? [];
   const backfillStalled = status.backfill?.status === "stalled";
+  const backfillWaitingToRetry = backfillRunning && Boolean(status.backfill?.lastError);
   const syncLine = formatImapSyncLine(status, tm);
   const liveLine = formatImapLiveLine(status.idle, tm);
 
@@ -257,11 +266,10 @@ export function ImapSyncPanel({ instanceId }: { instanceId?: string } = {}) {
           {liveLine}
         </p>
       )}
-      {/* A parked backfill reports the server's own words. The generic
-          "it will retry automatically" line is reserved for the transient
-          case, because once parked it will NOT retry until re-armed - saying
-          otherwise is how this stayed invisible for twelve days. */}
-      {backfillStalled ? (
+      {/* `stalled` is a legacy server state. Current workers resume it
+          automatically, but reporting its last provider error is still useful
+          until the next worker tick rewrites it as running. */}
+      {backfillStalled || backfillWaitingToRetry ? (
         <p className="text-xs text-destructive">
           {tm.backfillStalledDetail.replace("{err}", status.backfill?.lastError ?? tm.syncErrorUnknown)}
         </p>
@@ -269,8 +277,9 @@ export function ImapSyncPanel({ instanceId }: { instanceId?: string } = {}) {
         status.lastError && <p className="text-xs text-destructive">{tm.syncError}</p>
       )}
 
-      {/* Backfill consent - offered when none has been armed, and again once one
-          has parked, otherwise a stalled mailbox has no way back. */}
+      {/* Backfill consent is offered when none has been armed. A legacy
+          stalled cursor also retains a manual restart affordance while the
+          worker's automatic recovery is pending. */}
       {(!status.backfill || backfillStalled) && !probe && (
         <button
           onClick={() => void runPreflight()}
@@ -294,7 +303,9 @@ export function ImapSyncPanel({ instanceId }: { instanceId?: string } = {}) {
       {probe && !backfillRunning && (
         <div className="space-y-2">
           <p className="text-xs text-muted-foreground">
-            {tm.backfillCounts.replace("{n}", String(probe.total))}
+            {probe.complete
+              ? tm.backfillCounts.replace("{n}", String(probe.total))
+              : tm.backfillCountsIncomplete}
           </p>
           <p className="text-[11px] text-muted-foreground">{tm.backfillHelp}</p>
           <div className="flex flex-wrap gap-2">

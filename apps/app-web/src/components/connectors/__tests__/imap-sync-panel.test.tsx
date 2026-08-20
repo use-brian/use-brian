@@ -34,16 +34,19 @@ const tm = en.settings.connectors.imap;
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 describe("[COMP:web/imap-sync-panel] sync line", () => {
-  it("shows 'Syncing N of M' while a backfill runs, using the arm-time STATUS ceiling", () => {
+  it("shows the archived count without presenting a server estimate as an N-of-M total", () => {
     const line = formatImapSyncLine(
-      { archived: 8200, backfill: { scope: "all", status: "running", totalEstimate: 14200 } },
+      {
+        archived: 8200,
+        backfill: { scope: "all", status: "running", totalEstimate: 14200, estimateComplete: false },
+      },
       tm,
     );
     expect(line).toContain("8200");
-    expect(line).toContain("14200");
+    expect(line).not.toContain("14200");
   });
 
-  it("falls back to the archived count when the estimate is missing, and to 'up to date' when no backfill runs", () => {
+  it("uses the same honest running line when no estimate exists, and 'up to date' after completion", () => {
     const running = formatImapSyncLine(
       { archived: 12, backfill: { scope: "12m", status: "running" } },
       tm,
@@ -58,6 +61,18 @@ describe("[COMP:web/imap-sync-panel] sync line", () => {
     expect(formatImapSyncLine({ archived: 0, backfill: null }, tm)).toBe(
       tm.upToDate.replace("{n}", "0"),
     );
+  });
+
+  it("says the worker is waiting to retry after a transient backfill failure", () => {
+    const line = formatImapSyncLine(
+      {
+        archived: 731,
+        backfill: { scope: "all", status: "running", lastError: "connection timeout" },
+      },
+      tm,
+    );
+    expect(line).toBe(tm.backfillRetrying.replace("{n}", "731"));
+    expect(line).not.toMatch(/ of /);
   });
 
   it("reports a parked backfill instead of claiming progress it is not making", () => {
@@ -112,10 +127,18 @@ describe("[COMP:web/imap-sync-panel] full-history recovery", () => {
     testMocks.confirmDialog.mockReset().mockResolvedValue(true);
     testMocks.authFetch.mockImplementation(async (url: string, init?: RequestInit) => {
       if (url.endsWith("/imap/backfill/preflight")) {
-        return { ok: true, json: async () => ({ folders: [{ path: "INBOX", messages: 97 }], total: 97 }) };
+        return {
+          ok: true,
+          json: async () => ({
+            folders: [{ path: "INBOX", messages: 97 }],
+            failedFolders: [],
+            complete: true,
+            total: 97,
+          }),
+        };
       }
       if (url.endsWith("/imap/backfill") && init?.method === "POST") {
-        return { ok: true, json: async () => ({ ok: true, totalEstimate: 97 }) };
+        return { ok: true, json: async () => ({ ok: true, totalEstimate: 97, estimateComplete: true }) };
       }
       if (url.includes("/imap/sync-status")) {
         return { ok: true, json: async () => doneStatus };
@@ -172,12 +195,34 @@ describe("[COMP:web/imap-sync-panel] full-history recovery", () => {
     )).toBe(false);
   });
 
+  it("uses count-free confirmation copy when the folder probe is incomplete", async () => {
+    testMocks.confirmDialog.mockResolvedValueOnce(false);
+    testMocks.authFetch.mockImplementationOnce(async () => ({
+      ok: true,
+      json: async () => ({
+        folders: [{ path: "INBOX", messages: 97 }],
+        failedFolders: [{ path: "Archive" }],
+        complete: false,
+        total: 97,
+      }),
+    }));
+    const button = host.querySelector<HTMLButtonElement>("[data-testid='imap-full-history-resync']")!;
+
+    await act(async () => button.click());
+    await settle();
+
+    expect(testMocks.confirmDialog).toHaveBeenCalledWith(expect.objectContaining({
+      description: tm.fullResyncDescriptionUnknown,
+    }));
+    expect(tm.fullResyncDescriptionUnknown).not.toContain("{n}");
+  });
+
   it("has localized, credit-honest recovery copy without em dashes", async () => {
     const { ja } = await import("@/lib/i18n/dictionaries/ja");
     const { zh } = await import("@/lib/i18n/dictionaries/zh");
     for (const d of [en, ja, zh]) {
       const c = d.settings.connectors.imap;
-      for (const key of ["fullResyncBtn", "fullResyncArming", "fullResyncTitle", "fullResyncDescription", "fullResyncConfirm", "fullResyncCancel"] as const) {
+      for (const key of ["fullResyncBtn", "fullResyncArming", "fullResyncTitle", "fullResyncDescription", "fullResyncDescriptionUnknown", "fullResyncConfirm", "fullResyncCancel", "backfillCountsIncomplete"] as const) {
         expect(typeof c[key]).toBe("string");
         expect(c[key]).not.toContain("\u2014");
       }

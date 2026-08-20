@@ -22,6 +22,7 @@ import {
   insertEmailArchiveMessage,
   searchEmailArchive,
   countEmailArchiveMessages,
+  findArchivedEmailUids,
 } from '../../db/email-archive-store.js'
 import { query, queryWithRLS, getPool } from '../../db/client.js'
 import { MAX_CHARS } from '../../db/text-chunking.js'
@@ -264,5 +265,28 @@ describe('[COMP:api/email-archive-store] counts', () => {
     mockQuery.mockResolvedValue({ rows: [{ folder: 'INBOX', n: '3' }, { folder: 'Sent', n: '2' }], rowCount: 2 } as never)
     const counts = await countEmailArchiveMessages('inst-1')
     expect(counts).toEqual({ total: 5, byFolder: { INBOX: 3, Sent: 2 } })
+  })
+
+  it('finds only archived UIDs in the requested folder window', async () => {
+    mockQuery.mockResolvedValue({
+      rows: [
+        { provider_message_id: 'Archive:2024:9' },
+        { provider_message_id: 'Archive:2024:7' },
+      ],
+      rowCount: 2,
+    } as never)
+
+    await expect(findArchivedEmailUids('inst-1', 'Archive:2024', [10, 9, 8, 7])).resolves.toEqual(
+      new Set([9, 7]),
+    )
+    expect(mockQuery).toHaveBeenCalledWith(
+      expect.stringContaining('provider_message_id = ANY'),
+      ['inst-1', 'Archive:2024', ['Archive:2024:10', 'Archive:2024:9', 'Archive:2024:8', 'Archive:2024:7']],
+    )
+  })
+
+  it('does not query for an empty reconciliation window', async () => {
+    await expect(findArchivedEmailUids('inst-1', 'INBOX', [])).resolves.toEqual(new Set())
+    expect(mockQuery).not.toHaveBeenCalled()
   })
 })
