@@ -168,6 +168,13 @@ function makeInstanceStore(instance: ConnectorInstance) {
     async setConfigSystem(id: string, config: Record<string, unknown>) {
       configs.set(id, { ...configs.get(id), ...config })
     },
+    async setMailboxSyncStateSystem(id: string, mailboxSync: unknown, expectedRequestedAt: string | null) {
+      const current = configs.get(id)
+      const currentSync = current?.mailboxSync as { backfill?: { requestedAt?: string } } | undefined
+      if ((currentSync?.backfill?.requestedAt ?? null) !== expectedRequestedAt) return false
+      configs.set(id, { ...current, mailboxSync })
+      return true
+    },
     async markHealth(id: string, status: string, error?: string | null) {
       healthCalls.push({ id, status, error: error ?? null })
     },
@@ -213,7 +220,7 @@ function makeWorker(over: Partial<MailboxSyncWorkerDeps> & { client: ImapClientL
     ...(over.keepWarm ? { keepWarm: over.keepWarm } : {}),
     ...(over.onEvent ? { onEvent: over.onEvent } : {}),
   })
-  return { worker, configs, insertMessage, deleteFolder, findArchivedUids, healthCalls, instanceId: instance.id }
+  return { worker, store, configs, insertMessage, deleteFolder, findArchivedUids, healthCalls, instanceId: instance.id }
 }
 
 // ── First sync + backfill preflight gate (D9) ───────────────────
@@ -350,6 +357,34 @@ describe('[COMP:api/mailbox-sync-worker] backfill', () => {
     expect(insertMessage.mock.calls.map((call) => call[0].providerMessageId)).toEqual(['INBOX:4', 'INBOX:2'])
     expect(client.fetchCalls).toEqual(['INBOX:4,2'])
     expect(readMailboxSyncState(configs.get('inst-1')).backfill?.status).toBe('done')
+  })
+
+  it('does not let an in-flight worker pass overwrite a newer manual all-history restart', async () => {
+    const { client, instance } = backfillSetup(10)
+    let run: ReturnType<typeof makeWorker>
+    const insertMessage = vi.fn(async (_input: EmailArchiveMessageInput) => {
+      await run.store.setConfigSystem('inst-1', {
+        mailboxSync: {
+          folders: { INBOX: { uidvalidity: '7', lastUid: 6 } },
+          backfill: {
+            scope: 'all',
+            requestedAt: '2026-08-21T01:00:00Z',
+            reconcileVersion: 1,
+            status: 'running',
+          },
+        },
+      })
+      return { inserted: true, messageId: 'am-new', segmentCount: 1 }
+    })
+    run = makeWorker({ client, instance, backfillChunk: 10, insertMessage })
+
+    await run.worker.tick()
+
+    const state = readMailboxSyncState(run.configs.get('inst-1'))
+    expect(state.backfill?.requestedAt).toBe('2026-08-21T01:00:00Z')
+    expect(state.backfill?.scope).toBe('all')
+    expect(state.folders.INBOX.backfillLow).toBeUndefined()
+    expect(state.folders.INBOX.backfillDone).toBeUndefined()
   })
 
   it('automatically reopens an old completed cursor once and repairs its missing archive rows', async () => {

@@ -1165,6 +1165,11 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
     }
     const assistantId = deps.resolveAssistantId ? await deps.resolveAssistantId(workspaceId) : null
     const state = readMailboxSyncState(inst.config)
+    // This is the generation token for the state this pass may persist. The
+    // user can explicitly restart `all` while the pass is in flight; a
+    // conditional write below prevents this older cursor from winning that
+    // race and erasing the newer request.
+    const expectedBackfillRequestedAt = state.backfill?.requestedAt ?? null
 
     // Older workers treated `backfillLow` / `backfillDone` as proof that every
     // traversed UID landed. Reopen those cursors exactly once after upgrade so
@@ -1256,14 +1261,23 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
       state.lastSyncAt = now().toISOString()
       state.lastError = null
       state.lastFailedSyncAt = null
-      await deps.connectorInstanceStore.setConfigSystem(inst.id, { mailboxSync: state })
+      const persisted = await deps.connectorInstanceStore.setMailboxSyncStateSystem(
+        inst.id,
+        state,
+        expectedBackfillRequestedAt,
+      )
+      if (!persisted) {
+        console.info(`[mailbox-sync] instance ${inst.id}: preserved a newer mailbox history request`)
+      }
       await deps.connectorInstanceStore.markHealth?.(inst.id, 'ok', null)
       return { newMessages }
     } catch (err) {
       const message = errText(err)
       state.lastError = message
       state.lastFailedSyncAt = now().toISOString()
-      await deps.connectorInstanceStore.setConfigSystem(inst.id, { mailboxSync: state }).catch(() => {})
+      await deps.connectorInstanceStore
+        .setMailboxSyncStateSystem(inst.id, state, expectedBackfillRequestedAt)
+        .catch(() => false)
       // `auth_failed` stays reserved for a DEAD CREDENTIAL. inject.ts withholds
       // every mailbox tool from an `auth_failed` instance, so marking it on an
       // ordinary sync error would take away search/read/send from a mailbox

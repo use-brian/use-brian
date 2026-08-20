@@ -106,8 +106,8 @@ describe("[COMP:web/imap-sync-panel] full-history recovery", () => {
 
   const doneStatus = {
     email: "maya@harborlane.example",
-    archived: 5340,
-    backfill: { scope: "all", status: "done" as const, totalEstimate: 97 },
+    archived: 800,
+    backfill: { scope: "all", status: "done" as const, totalEstimate: 1200 },
     lastSyncAt: "2026-08-20T10:17:44.858Z",
     lastError: null,
     ingestionEnabled: false,
@@ -130,15 +130,15 @@ describe("[COMP:web/imap-sync-panel] full-history recovery", () => {
         return {
           ok: true,
           json: async () => ({
-            folders: [{ path: "INBOX", messages: 97 }],
+            folders: [{ path: "INBOX", messages: 1200 }],
             failedFolders: [],
             complete: true,
-            total: 97,
+            total: 1200,
           }),
         };
       }
       if (url.endsWith("/imap/backfill") && init?.method === "POST") {
-        return { ok: true, json: async () => ({ ok: true, totalEstimate: 97, estimateComplete: true }) };
+        return { ok: true, json: async () => ({ ok: true, totalEstimate: 1200, estimateComplete: true }) };
       }
       if (url.includes("/imap/sync-status")) {
         return { ok: true, json: async () => doneStatus };
@@ -172,7 +172,7 @@ describe("[COMP:web/imap-sync-panel] full-history recovery", () => {
 
     expect(testMocks.confirmDialog).toHaveBeenCalledWith({
       title: tm.fullResyncTitle,
-      description: tm.fullResyncDescription.replace("{n}", "97"),
+      description: tm.fullResyncDescription.replace("{n}", "1200"),
       confirmLabel: tm.fullResyncConfirm,
       cancelLabel: tm.fullResyncCancel,
     });
@@ -181,6 +181,36 @@ describe("[COMP:web/imap-sync-panel] full-history recovery", () => {
     );
     expect(armCall).toBeDefined();
     expect(JSON.parse(String((armCall?.[1] as RequestInit).body))).toEqual({ scope: "all" });
+  });
+
+  it("keeps the all-history resync button available while the current walk is running", async () => {
+    act(() => root.unmount());
+    host.remove();
+    testMocks.authFetch.mockImplementation(async (url: string) => {
+      if (url.includes("/imap/sync-status")) {
+        return {
+          ok: true,
+          json: async () => ({
+            ...doneStatus,
+            backfill: { scope: "all", status: "running", totalEstimate: 1200 },
+          }),
+        };
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    host = document.createElement("div");
+    document.body.append(host);
+    root = createRoot(host);
+    await act(async () => {
+      root.render(
+        <I18nProvider locale="en" dict={dict}>
+          <ImapSyncPanel />
+        </I18nProvider>,
+      );
+    });
+    await settle();
+
+    expect(host.querySelector("[data-testid='imap-full-history-resync']")).not.toBeNull();
   });
 
   it("does not re-arm when the user cancels after the preflight", async () => {

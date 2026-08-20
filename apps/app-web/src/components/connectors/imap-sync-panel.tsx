@@ -277,19 +277,19 @@ export function ImapSyncPanel({ instanceId }: { instanceId?: string } = {}) {
         status.lastError && <p className="text-xs text-destructive">{tm.syncError}</p>
       )}
 
-      {/* Backfill consent is offered when none has been armed. A legacy
-          stalled cursor also retains a manual restart affordance while the
-          worker's automatic recovery is pending. */}
-      {(!status.backfill || backfillStalled) && !probe && (
+      {/* Initial consent is offered only before history has been armed. */}
+      {!status.backfill && !probe && (
         <button
           onClick={() => void runPreflight()}
           disabled={probing}
           className="text-xs font-medium border border-border px-3 py-1 rounded-lg text-muted-foreground hover:bg-muted disabled:opacity-50 transition-colors"
         >
-          {probing ? tm.backfillProbing : backfillStalled ? tm.backfillRetryBtn : tm.backfillProbeBtn}
+          {probing ? tm.backfillProbing : tm.backfillProbeBtn}
         </button>
       )}
-      {status.backfill?.status === "done" && !probe && (
+      {/* A confirmed all-history restart is always available after consent,
+          including while the current walk is running or waiting to retry. */}
+      {status.backfill && !probe && (
         <button
           type="button"
           data-testid="imap-full-history-resync"

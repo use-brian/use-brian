@@ -325,7 +325,7 @@ describe('[COMP:api/mailbox-connect-routes] POST /imap/backfill full-history rep
     imapHost: 'imap.qiye.aliyun.com', imapPort: 993, smtpHost: 'smtp.qiye.aliyun.com', smtpPort: 465,
   }
 
-  it('re-arms a completed all-history walk in place without deleting archive rows', async () => {
+  it('re-arms an already-running all-history walk in place without deleting archive rows', async () => {
     const instance = {
       id: 'inst_1', provider: 'imap', scope: 'user', connected: true,
       connectedEmail: 'maya@harborlane.example', createdAt: new Date('2026-01-01T00:00:00Z'),
@@ -333,10 +333,10 @@ describe('[COMP:api/mailbox-connect-routes] POST /imap/backfill full-history rep
       config: {
         mailboxSync: {
           folders: {
-            INBOX: { uidvalidity: '7', lastUid: 12000, backfillLow: 1, backfillDone: true },
-            Sent: { uidvalidity: '8', lastUid: 600, backfillLow: 2, backfillDone: true },
+            INBOX: { uidvalidity: '7', lastUid: 12000, backfillLow: 900 },
+            Sent: { uidvalidity: '8', lastUid: 600, backfillLow: 400 },
           },
-          backfill: { scope: 'all', requestedAt: '2026-07-24T10:00:37.642Z', status: 'done', totalEstimate: 97 },
+          backfill: { scope: 'all', requestedAt: '2026-07-24T10:00:37.642Z', status: 'running', totalEstimate: 1400 },
           lastSyncAt: '2026-08-20T10:17:44.858Z',
         },
       },
@@ -345,17 +345,17 @@ describe('[COMP:api/mailbox-connect-routes] POST /imap/backfill full-history rep
       instances: [instance],
       creds: CREDS,
       probeResult: {
-        folders: [{ path: 'INBOX', messages: 97 }],
+        folders: [{ path: 'INBOX', messages: 1400 }],
         failedFolders: [],
         complete: true,
-        total: 97,
+        total: 1400,
       },
     })
 
     const res = await request(app).post('/api/connectors/imap/backfill').send({ scope: 'all' })
 
     expect(res.status).toBe(200)
-    expect(res.body).toEqual({ ok: true, totalEstimate: 97, estimateComplete: true })
+    expect(res.body).toEqual({ ok: true, totalEstimate: 1400, estimateComplete: true })
     expect(probe).toHaveBeenCalledWith(expect.objectContaining({ email: 'maya@harborlane.example' }))
     expect(setConfigSystem).toHaveBeenCalledWith('inst_1', {
       mailboxSync: expect.objectContaining({
@@ -365,7 +365,7 @@ describe('[COMP:api/mailbox-connect-routes] POST /imap/backfill full-history rep
         },
         backfill: expect.objectContaining({
           scope: 'all', status: 'running', reconcileVersion: 1,
-          totalEstimate: 97, estimateComplete: true, requestedAt: expect.any(String),
+          totalEstimate: 1400, estimateComplete: true, requestedAt: expect.any(String),
         }),
         lastSyncAt: '2026-08-20T10:17:44.858Z',
       }),
