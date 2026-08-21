@@ -187,7 +187,7 @@ export async function countEmailArchiveMessages(
   return { total, byFolder }
 }
 
-type ExactArchiveMessageRow = {
+type LiteralArchiveMessageRow = {
   provider_message_id: string
   folder: string
   from_addr: string
@@ -198,58 +198,94 @@ type ExactArchiveMessageRow = {
   rfc_message_id: string | null
   in_reply_to: string | null
   references_ids: string[] | null
+  matched_segment: string | null
 }
 
 /**
- * Exact metadata/body fallback for a live provider search that is known to
- * return false-empty results. This is intentionally not semantic search: it
- * needs no embedding and preserves the caller's structured predicates.
+ * Deterministic metadata/body search for the unified literal mailbox lane.
+ * This intentionally needs no embedding. Keyword body predicates run against
+ * the already-trigram-indexed segment corpus, while sender/subject predicates
+ * stay on the message envelope so exact lookup cannot be ranked away.
  */
-export async function searchExactEmailArchiveMessages(input: {
+export async function searchLiteralEmailArchiveMessages(input: {
   ownerUserId: string
   instanceId: string
   params: MailboxSearchParams
 }): Promise<MailboxSearchHit[]> {
   const values: unknown[] = [input.ownerUserId, input.instanceId]
-  const clauses = ['owner_user_id = $1', 'instance_id = $2']
+  const clauses = ['em.owner_user_id = $1', 'em.instance_id = $2']
+  const containsPattern = (value: string) =>
+    `%${value.trim().replace(/[\\%_]/g, (character) => `\\${character}`)}%`
   const addLike = (column: string, value: string | undefined) => {
     if (!value?.trim()) return
-    values.push(`%${value.trim()}%`)
-    clauses.push(`${column} ILIKE $${values.length}`)
+    values.push(containsPattern(value))
+    clauses.push(`${column} ILIKE $${values.length} ESCAPE E'\\\\'`)
   }
-  addLike('from_addr', input.params.from)
-  addLike('subject', input.params.subject)
+  addLike('em.from_addr', input.params.from)
+  addLike('em.subject', input.params.subject)
   if (input.params.folder) {
     values.push(input.params.folder)
-    clauses.push(`folder = $${values.length}`)
+    clauses.push(`em.folder = $${values.length}`)
   }
   if (input.params.since) {
     values.push(input.params.since)
-    clauses.push(`sent_at >= $${values.length}::timestamptz`)
+    clauses.push(`em.sent_at >= $${values.length}::timestamptz`)
   }
   if (input.params.before) {
     values.push(input.params.before)
-    clauses.push(`sent_at < $${values.length}::timestamptz`)
+    clauses.push(`em.sent_at < $${values.length}::timestamptz`)
   }
   const keywords = (input.params.keywords ?? []).map((term) => term.trim()).filter(Boolean)
+  let literalRank = '0'
+  let matchedSegment = 'NULL::text'
   if (keywords.length > 0) {
-    const matches: string[] = []
+    const fromMatches: string[] = []
+    const subjectMatches: string[] = []
+    const segmentMatches: string[] = []
+    const snippetMatches: string[] = []
     for (const keyword of keywords) {
-      values.push(`%${keyword}%`)
+      values.push(containsPattern(keyword))
       const p = `$${values.length}`
-      matches.push(`(body_text ILIKE ${p} OR subject ILIKE ${p} OR from_addr ILIKE ${p})`)
+      fromMatches.push(`em.from_addr ILIKE ${p} ESCAPE E'\\\\'`)
+      subjectMatches.push(`em.subject ILIKE ${p} ESCAPE E'\\\\'`)
+      segmentMatches.push(`es.segment_text ILIKE ${p} ESCAPE E'\\\\'`)
+      snippetMatches.push(`es_snippet.segment_text ILIKE ${p} ESCAPE E'\\\\'`)
     }
-    clauses.push(`(${matches.join(' OR ')})`)
+    const fromPredicate = `(${fromMatches.join(' OR ')})`
+    const subjectPredicate = `(${subjectMatches.join(' OR ')})`
+    const segmentPredicate = `EXISTS (
+      SELECT 1
+        FROM email_archive_segments es
+       WHERE es.message_id = em.id
+         AND es.retracted_at IS NULL
+         AND (${segmentMatches.join(' OR ')})
+    )`
+    clauses.push(`(${fromPredicate} OR ${subjectPredicate} OR ${segmentPredicate})`)
+    literalRank = `CASE
+      WHEN ${fromPredicate} THEN 0
+      WHEN ${subjectPredicate} THEN 1
+      ELSE 2
+    END`
+    matchedSegment = `(
+      SELECT es_snippet.segment_text
+        FROM email_archive_segments es_snippet
+       WHERE es_snippet.message_id = em.id
+         AND es_snippet.retracted_at IS NULL
+         AND (${snippetMatches.join(' OR ')})
+       ORDER BY es_snippet.segment_index ASC
+       LIMIT 1
+    )`
   }
   values.push(input.params.limit)
   const limitIdx = values.length
-  const res = await queryWithRLS<ExactArchiveMessageRow>(
+  const res = await queryWithRLS<LiteralArchiveMessageRow>(
     input.ownerUserId,
-    `SELECT provider_message_id, folder, from_addr, to_addrs, sent_at,
-            subject, body_text, rfc_message_id, in_reply_to, references_ids
-       FROM email_archive_messages
+    `SELECT em.provider_message_id, em.folder, em.from_addr, em.to_addrs, em.sent_at,
+            em.subject, em.body_text, em.rfc_message_id, em.in_reply_to, em.references_ids,
+            ${literalRank} AS literal_rank, ${matchedSegment} AS matched_segment
+       FROM email_archive_messages em
       WHERE ${clauses.join(' AND ')}
-      ORDER BY sent_at DESC NULLS LAST
+      ORDER BY literal_rank ASC, em.sent_at DESC NULLS LAST
       LIMIT $${limitIdx}`,
     values,
   )
@@ -260,7 +296,7 @@ export async function searchExactEmailArchiveMessages(input: {
     to: row.to_addrs ?? [],
     date: row.sent_at ? new Date(row.sent_at).toISOString() : null,
     subject: row.subject,
-    snippet: normalizeText(row.body_text).slice(0, 200) || undefined,
+    snippet: normalizeText(row.matched_segment ?? row.body_text).slice(0, 200) || undefined,
     messageId: row.rfc_message_id,
     inReplyTo: row.in_reply_to,
     references: row.references_ids ?? [],

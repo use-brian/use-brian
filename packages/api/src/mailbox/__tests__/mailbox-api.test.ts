@@ -8,6 +8,7 @@ import {
   htmlToText,
   collectAttachmentParts,
   findPartNode,
+  mergeMailboxSearchHits,
 } from '../mailbox-api.js'
 import {
   createMailboxSessionCache,
@@ -329,15 +330,106 @@ describe('[COMP:api/mailbox-imap-client] AliMail false-empty recovery', () => {
     expect(result.note).toMatch(/synced personal archive/i)
   })
 
-  it('does not distrust an empty selective search from other providers', async () => {
+  it('recovers a plain-name keyword from archived sender, subject, or body text', async () => {
+    const fake = makeFakeClient({
+      INBOX: { uids: [], emptyKeywordSearch: true, messages: {} },
+    })
+    const archived = vi.fn(async () => [{
+      id: 'INBOX:41',
+      folder: 'INBOX',
+      from: 'Rowan <rowan@example.com>',
+      date: '2026-08-01T00:00:00.000Z',
+      subject: 'Project update',
+      snippet: 'The literal archive found this without an embedding.',
+    }])
+
+    const result = await makeApi(fake.client, {
+      settings: ALIMAIL_SETTINGS,
+      searchArchivedMessages: archived,
+    }).searchMessages({ keywords: ['Rowan'], since: '2026-07-01', archiveSince: null, limit: 20 })
+
+    expect(archived).toHaveBeenCalledWith(expect.objectContaining({ keywords: ['Rowan'], since: undefined }))
+    expect(result.hits.map((hit) => hit.id)).toEqual(['INBOX:41'])
+    expect(result.note).toMatch(/synced personal archive/i)
+  })
+
+  it('keeps native empty semantics on other providers but still runs the literal archive arm', async () => {
     const fake = makeFakeClient({
       INBOX: { uids: [1], emptyKeywordSearch: true, messages: { 1: msg(1) } },
     })
-    const archived = vi.fn(async () => [])
+    const archived = vi.fn(async () => [{
+      id: 'Archive:8', folder: 'Archive', from: 'Person <person@example.com>',
+      date: '2026-08-01T00:00:00.000Z', subject: 'Found locally',
+    }])
     const result = await makeApi(fake.client, { searchArchivedMessages: archived })
       .searchMessages({ folder: 'INBOX', from: 'person@example.com', limit: 20 })
-    expect(result.hits).toEqual([])
-    expect(archived).not.toHaveBeenCalled()
+    expect(fake.searches).toHaveLength(1)
+    expect(archived).toHaveBeenCalledOnce()
+    expect(result.hits.map((hit) => hit.id)).toEqual(['Archive:8'])
+  })
+})
+
+describe('[COMP:api/mailbox-imap-client] unified literal live + archive search', () => {
+  it('ranks sender before subject before body and prefers the current live ref for duplicates', () => {
+    const params = { keywords: ['Rowan'], since: '2026-07-01', limit: 20 }
+    const archive = [
+      {
+        id: 'Old folder:7', folder: 'Old folder', from: 'Rowan <rowan@example.com>',
+        date: '2026-07-01T00:00:00.000Z', subject: 'Hello', snippet: 'Archived body',
+        messageId: '<same@example.com>',
+      },
+      {
+        id: 'Archive:8', folder: 'Archive', from: 'other@example.com',
+        date: '2026-08-10T00:00:00.000Z', subject: 'Rowan project', snippet: 'Subject match',
+      },
+      {
+        id: 'Archive:9', folder: 'Archive', from: 'other@example.com',
+        date: '2026-08-20T00:00:00.000Z', subject: 'Project', snippet: 'Body mentions Rowan',
+      },
+    ]
+    const live = [{
+      id: 'INBOX:17', folder: 'INBOX', from: 'Rowan <rowan@example.com>',
+      date: '2026-07-01T00:00:00.000Z', subject: 'Hello', messageId: '<same@example.com>',
+    }]
+
+    const merged = mergeMailboxSearchHits({ live, archive, params })
+
+    expect(merged.map((hit) => hit.id)).toEqual(['INBOX:17', 'Archive:8', 'Archive:9'])
+    expect(merged[0].snippet).toBe('Archived body')
+  })
+
+  it('keeps healthy live results when the archive arm fails', async () => {
+    const fake = makeFakeClient({
+      INBOX: { uids: [1], messages: { 1: msg(1, { subject: 'Rowan project' }) } },
+    })
+    const result = await makeApi(fake.client, {
+      searchArchivedMessages: vi.fn(async () => { throw new Error('archive unavailable') }),
+    }).searchMessages({ keywords: ['Rowan'], since: '2026-07-01', limit: 20 })
+
+    expect(result.hits.map((hit) => hit.id)).toEqual(['INBOX:1'])
+    expect(result.note).toMatch(/archive could not be searched/i)
+  })
+
+  it('returns archive matches with an incomplete note when the default live scope fails', async () => {
+    const fake = makeFakeClient({ INBOX: { uids: [], messages: {} } })
+    ;(fake.client as { list: ImapClientLike['list'] }).list = async () => { throw new Error('live unavailable') }
+    const result = await makeApi(fake.client, {
+      searchArchivedMessages: vi.fn(async () => [{
+        id: 'INBOX:7', folder: 'INBOX', from: 'Rowan <rowan@example.com>',
+        date: '2026-08-01T00:00:00.000Z', subject: 'Hello',
+      }]),
+    }).searchMessages({ keywords: ['Rowan'], since: '2026-07-01', limit: 20 })
+
+    expect(result.hits.map((hit) => hit.id)).toEqual(['INBOX:7'])
+    expect(result.note).toMatch(/live mailbox search failed/i)
+  })
+
+  it('does not turn a live failure plus an empty archive into an honest-looking no-match', async () => {
+    const fake = makeFakeClient({ INBOX: { uids: [], messages: {} } })
+    ;(fake.client as { list: ImapClientLike['list'] }).list = async () => { throw new Error('live unavailable') }
+    await expect(makeApi(fake.client, {
+      searchArchivedMessages: vi.fn(async () => []),
+    }).searchMessages({ keywords: ['Rowan'], since: '2026-07-01', limit: 20 })).rejects.toThrow('live unavailable')
   })
 })
 

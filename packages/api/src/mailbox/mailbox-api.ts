@@ -240,6 +240,63 @@ function matchesDegraded(hit: MailboxSearchHit, params: MailboxSearchParams): bo
   return keywords.some((k) => haystack.includes(k))
 }
 
+function hasSelectiveTextSearch(params: MailboxSearchParams): boolean {
+  return Boolean(
+    params.from?.trim() ||
+    params.subject?.trim() ||
+    params.keywords?.some((keyword) => keyword.trim()),
+  )
+}
+
+function messageIdentity(hit: MailboxSearchHit): string {
+  const rfcMessageId = hit.messageId?.trim().toLowerCase()
+  return rfcMessageId ? `rfc:${rfcMessageId}` : `provider:${hit.id}`
+}
+
+function literalMatchTier(hit: MailboxSearchHit, params: MailboxSearchParams): number {
+  const from = hit.from.toLowerCase()
+  const subject = hit.subject.toLowerCase()
+  const snippet = hit.snippet?.toLowerCase() ?? ''
+  const keywords = (params.keywords ?? []).map((keyword) => keyword.trim().toLowerCase()).filter(Boolean)
+
+  if (params.from?.trim() && from.includes(params.from.trim().toLowerCase())) return 0
+  if (keywords.some((keyword) => from.includes(keyword))) return 0
+  if (params.subject?.trim() && subject.includes(params.subject.trim().toLowerCase())) return 1
+  if (keywords.some((keyword) => subject.includes(keyword))) return 1
+  if (keywords.some((keyword) => snippet.includes(keyword))) return 2
+  // A server-side body match can have no bounded snippet (or the matching text
+  // can sit beyond it). Keep it after observable literal matches, never drop it.
+  return 3
+}
+
+/**
+ * Fuse the live and literal-archive arms. The current live folder:uid wins for
+ * a duplicate, while an archive body snippet can fill a missing live snippet.
+ */
+export function mergeMailboxSearchHits(input: {
+  live: MailboxSearchHit[]
+  archive: MailboxSearchHit[]
+  params: MailboxSearchParams
+}): MailboxSearchHit[] {
+  const byIdentity = new Map<string, MailboxSearchHit>()
+  for (const hit of input.archive) byIdentity.set(messageIdentity(hit), { ...hit })
+  for (const hit of input.live) {
+    const key = messageIdentity(hit)
+    const archived = byIdentity.get(key)
+    byIdentity.set(key, archived
+      ? { ...archived, ...hit, snippet: hit.snippet ?? archived.snippet }
+      : { ...hit })
+  }
+  const time = (date: string | null) => date ? Date.parse(date) || 0 : 0
+  return [...byIdentity.values()]
+    .sort((a, b) =>
+      literalMatchTier(a, input.params) - literalMatchTier(b, input.params) ||
+      time(b.date) - time(a.date) ||
+      a.id.localeCompare(b.id),
+    )
+    .slice(0, input.params.limit)
+}
+
 async function fetchHitsForUids(
   client: ImapClientLike,
   folder: string,
@@ -348,7 +405,7 @@ export type CreateMailboxApiOptions = {
    * or non-selectable are still excluded.
    */
   getKnownFolderPaths?: () => Promise<string[]>
-  /** Owner-scoped synced-archive fallback for provider false-empty searches. */
+  /** Owner-scoped literal arm over the synced archive; needs no embeddings. */
   searchArchivedMessages?: (params: MailboxSearchParams) => Promise<MailboxSearchHit[]>
   sessions?: MailboxSessionCache
   /**
@@ -471,107 +528,129 @@ export function createMailboxApi(opts: CreateMailboxApiOptions): MailboxApi {
 
     async searchMessages(params) {
       const settings = await opts.getSettings()
-      return sessions.withClient(opts.cacheKey, settings, async (client) => {
-        let folders: string[]
-        if (params.folder) {
-          folders = [params.folder]
-        } else {
-          const listed = await client.list()
-          const listedPaths = new Set(listed.map((folder) => folder.path))
-          const knownFolderPaths = await opts.getKnownFolderPaths?.() ?? []
-          folders = [...new Set([
-            ...syncableFolders(listed).map((folder) => folder.path),
-            // Only recover paths absent from raw LIST. A known path that LIST
-            // returned as Junk/Trash/Drafts/All/non-selectable is an explicit
-            // exclusion, not a truncated-list candidate.
-            ...knownFolderPaths.filter((path) => path.length > 0 && !listedPaths.has(path)),
-          ])]
-        }
+      const literalSearch = hasSelectiveTextSearch(params)
+      const archiveParams: MailboxSearchParams = {
+        ...params,
+        since: params.archiveSince === null ? undefined : params.archiveSince ?? params.since,
+      }
+      const archivePromise = literalSearch && opts.searchArchivedMessages
+        ? Promise.resolve()
+          .then(() => opts.searchArchivedMessages!(archiveParams))
+          .then((hits) => ({ attempted: true, hits, error: null as unknown }))
+          .catch((error: unknown) => ({ attempted: true, hits: [] as MailboxSearchHit[], error }))
+        : Promise.resolve({ attempted: false, hits: [] as MailboxSearchHit[], error: null as unknown })
 
-        const outcomes: FolderSearchOutcome[] = []
-        const folderFailures: unknown[] = []
-        for (const folder of folders) {
-          try {
-            outcomes.push(await searchFolder(
-              client,
-              folder,
-              params,
-              isAliMailImapHost(settings.imapHost) && Boolean(params.from?.trim() || params.subject?.trim()),
-            ))
-          } catch (err) {
-            // An explicit scope has no useful partial answer. For the default
-            // whole-mailbox scope, keep healthy custom folders searchable but
-            // never turn a total provider failure into an honest-looking
-            // empty result.
-            if (params.folder || (err as { authenticationFailed?: boolean })?.authenticationFailed) throw err
-            folderFailures.push(err)
+      let live: {
+        hits: MailboxSearchHit[]
+        outcomes: FolderSearchOutcome[]
+        folderFailures: unknown[]
+        error: unknown
+      }
+      try {
+        const result = await sessions.withClient(opts.cacheKey, settings, async (client) => {
+          let folders: string[]
+          if (params.folder) {
+            folders = [params.folder]
+          } else {
+            const listed = await client.list()
+            const listedPaths = new Set(listed.map((folder) => folder.path))
+            const knownFolderPaths = await opts.getKnownFolderPaths?.() ?? []
+            folders = [...new Set([
+              ...syncableFolders(listed).map((folder) => folder.path),
+              // Only recover paths absent from raw LIST. A known path that LIST
+              // returned as Junk/Trash/Drafts/All/non-selectable is an explicit
+              // exclusion, not a truncated-list candidate.
+              ...knownFolderPaths.filter((path) => path.length > 0 && !listedPaths.has(path)),
+            ])]
           }
-        }
-        if (folderFailures.length > 0 && outcomes.length === 0) throw folderFailures[0]
 
-        const time = (d: string | null) => (d ? Date.parse(d) || 0 : 0)
-        let merged = outcomes
-          .flatMap((o) => o.hits)
-          .sort((a, b) => time(b.date) - time(a.date))
-          .slice(0, params.limit)
-
-        let archiveFallback = false
-        let archiveFallbackFailed = false
-        if (
-          merged.length === 0 &&
-          isAliMailImapHost(settings.imapHost) &&
-          Boolean(params.from?.trim() || params.subject?.trim()) &&
-          opts.searchArchivedMessages
-        ) {
-          try {
-            merged = (await opts.searchArchivedMessages(params)).slice(0, params.limit)
-            archiveFallback = true
-          } catch {
-            archiveFallbackFailed = true
+          const outcomes: FolderSearchOutcome[] = []
+          const folderFailures: unknown[] = []
+          for (const folder of folders) {
+            try {
+              outcomes.push(await searchFolder(
+                client,
+                folder,
+                params,
+                isAliMailImapHost(settings.imapHost) && literalSearch,
+              ))
+            } catch (err) {
+              // An explicit scope has no useful partial answer. For the default
+              // whole-mailbox scope, keep healthy custom folders searchable but
+              // never turn a total provider failure into an honest-looking
+              // empty result.
+              if (params.folder || (err as { authenticationFailed?: boolean })?.authenticationFailed) throw err
+              folderFailures.push(err)
+            }
           }
-        }
+          if (folderFailures.length > 0 && outcomes.length === 0) throw folderFailures[0]
 
-        // Bounded snippet pass over the final result set only.
-        for (const hit of archiveFallback ? [] : merged) {
-          const ref = parseMessageRef(hit.id)
-          if (!ref) continue
-          const lock = await client.getMailboxLock(ref.folder)
-          try {
-            hit.snippet = await fetchSnippet(client, ref.uid)
-          } finally {
-            lock.release()
+          const time = (date: string | null) => date ? Date.parse(date) || 0 : 0
+          const hits = outcomes
+            .flatMap((outcome) => outcome.hits)
+            .sort((a, b) => time(b.date) - time(a.date))
+            .slice(0, params.limit)
+
+          // Fetch snippets only for the bounded live arm. Archive hits already
+          // carry a body snippet and their folder:uid may be stale after a move.
+          for (const hit of hits) {
+            const ref = parseMessageRef(hit.id)
+            if (!ref) continue
+            const lock = await client.getMailboxLock(ref.folder)
+            try {
+              hit.snippet = await fetchSnippet(client, ref.uid)
+            } finally {
+              lock.release()
+            }
           }
-        }
+          return { hits, outcomes, folderFailures }
+        })
+        live = { ...result, error: null }
+      } catch (error) {
+        live = { hits: [], outcomes: [], folderFailures: [], error }
+      }
 
-        const notes: string[] = []
-        if (outcomes.some((o) => o.degraded === 'charset')) {
-          notes.push(
-            'The mail server rejected the non-ASCII search terms, so matching degraded to a client-side scan of recent subjects and senders (message bodies were not searched). Narrow by sender or date for better recall.',
-          )
-        }
-        if (outcomes.some((o) => o.degraded === 'alimail-empty')) {
-          notes.push(
-            'AliMail returned an empty selective search, so recent message envelopes were filtered client-side (message bodies were not searched).',
-          )
-        }
-        if (archiveFallback) {
-          notes.push(
-            merged.length > 0
-              ? 'The live selective search found no match; these results came from the synced personal archive and may lag or carry a stale folder:uid if a message was moved after sync.'
-              : 'The live selective search and the synced personal archive found no match; because the live fallback scans only recent envelopes, older unsynced mail remains inconclusive.',
-          )
-        } else if (archiveFallbackFailed) {
-          notes.push(
-            'The live selective search found no match and the synced-archive fallback failed, so absence is inconclusive.',
-          )
-        }
-        if (folderFailures.length > 0) {
-          notes.push(
-            `${folderFailures.length} mailbox folder(s) could not be searched, so these results may be incomplete.`,
-          )
-        }
-        return { hits: merged, ...(notes.length ? { note: notes.join(' ') } : {}) }
-      })
+      const archive = await archivePromise
+      const authenticationFailed = Boolean((live.error as { authenticationFailed?: boolean } | null)?.authenticationFailed)
+      if (live.error && (params.folder || authenticationFailed || archive.hits.length === 0)) throw live.error
+
+      const merged = mergeMailboxSearchHits({ live: live.hits, archive: archive.hits, params })
+      const liveIdentities = new Set(live.hits.map(messageIdentity))
+      const archiveOnlyCount = merged.filter((hit) => !liveIdentities.has(messageIdentity(hit))).length
+      const notes: string[] = []
+      if (live.outcomes.some((outcome) => outcome.degraded === 'charset')) {
+        notes.push(
+          'The mail server rejected the non-ASCII search terms, so recent subjects and senders were filtered client-side; the synced archive was also searched literally for body matches.',
+        )
+      }
+      if (live.outcomes.some((outcome) => outcome.degraded === 'alimail-empty')) {
+        notes.push(
+          'AliMail returned an empty selective search, so recent message envelopes were filtered client-side; the synced archive was also searched literally for body matches.',
+        )
+      }
+      if (live.error && archive.hits.length > 0) {
+        notes.push(
+          'The live mailbox search failed, so these matches came from the synced personal archive; current folder locations and unsynced mail may be incomplete.',
+        )
+      } else if (archive.error) {
+        notes.push(
+          'The synced personal archive could not be searched, so the live results may be incomplete.',
+        )
+      } else if (archiveOnlyCount > 0) {
+        notes.push(
+          'Results include literal matches from the synced personal archive; archive rows may lag or carry a stale folder:uid if a message moved after sync.',
+        )
+      } else if (archive.attempted && merged.length === 0) {
+        notes.push(
+          'The live mailbox and synced personal archive found no literal match; if history sync is incomplete, older unsynced mail remains inconclusive.',
+        )
+      }
+      if (live.folderFailures.length > 0) {
+        notes.push(
+          `${live.folderFailures.length} mailbox folder(s) could not be searched, so these results may be incomplete.`,
+        )
+      }
+      return { hits: merged, ...(notes.length ? { note: notes.join(' ') } : {}) }
     },
 
     async getMessage(id) {

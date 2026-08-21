@@ -30,7 +30,7 @@ import { createMailboxContactImportTools, getGlobalMailboxContactImportDeps } fr
 import { createSyncMailboxNowTool, getGlobalMailboxSyncDeps } from '../mailbox/sync-tool.js'
 import type { MailboxAccountSettings } from '../mailbox/types.js'
 import { enqueueFileIngestJob } from '../db/file-ingest-jobs-store.js'
-import { countEmailArchiveMessages, searchExactEmailArchiveMessages } from '../db/email-archive-store.js'
+import { countEmailArchiveMessages, searchLiteralEmailArchiveMessages } from '../db/email-archive-store.js'
 import { enqueueGDriveLazyEnrichment } from '../db/gdrive-enrichment-store.js'
 import {
   getGDriveCatalogReadPolicy,
@@ -4672,7 +4672,7 @@ async function injectMailboxTools(params: {
         getSettings,
         getSendAsAliases,
         getKnownFolderPaths,
-        searchArchivedMessages: (params) => searchExactEmailArchiveMessages({
+        searchArchivedMessages: (params) => searchLiteralEmailArchiveMessages({
           ownerUserId: userId,
           instanceId: boundId,
           params,

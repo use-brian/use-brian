@@ -154,6 +154,7 @@ describe('[COMP:tools/mailbox-imap] Company mailbox tools', () => {
     const params = (api.searchMessages as ReturnType<typeof vi.fn>).mock.calls[0][0]
     expect(params.limit).toBe(MAILBOX_DEFAULT_LIMIT)
     expect(params.folder).toBeUndefined()  // impl default = every selectable ordinary folder
+    expect(params.archiveSince).toBeNull() // literal archive searches all synced history
     const since = new Date(`${params.since}T00:00:00Z`).getTime()
     const ninetyDaysAgo = Date.now() - 90 * 24 * 60 * 60 * 1000
     expect(Math.abs(since - ninetyDaysAgo)).toBeLessThan(2 * 24 * 60 * 60 * 1000)
@@ -211,6 +212,7 @@ describe('[COMP:tools/mailbox-imap] Company mailbox tools', () => {
     expect(api.searchMessages).toHaveBeenCalledWith(expect.objectContaining({
       from: 'sender@example.com',
       since: '2026-01-15',
+      archiveSince: '2026-01-15',
     }))
   })
 
@@ -224,6 +226,7 @@ describe('[COMP:tools/mailbox-imap] Company mailbox tools', () => {
     const params = (api.searchMessages as ReturnType<typeof vi.fn>).mock.calls[0][0]
     expect(params.folder).toBe('Archive')
     expect(params.since).toBe('2024-01-01')
+    expect(params.archiveSince).toBe('2024-01-01')
     expect(params.limit).toBe(MAILBOX_MAX_LIMIT)
   })
 

@@ -137,6 +137,11 @@ export type MailboxSearchParams = {
   folder?: string
   /** YYYY-MM-DD lower bound. Undefined means the full live mailbox history. */
   since?: string
+  /**
+   * Literal archive lower bound. `null` explicitly means full synced history;
+   * undefined inherits `since` for direct seam callers.
+   */
+  archiveSince?: string | null
   before?: string
   /** Core always supplies (default 20, capped at 50). */
   limit: number
@@ -443,9 +448,9 @@ export function createMailboxTools(
       'The email account is connected through IMAP/SMTP, which is the connection method rather than the provider; it may be hosted by Gmail/Google Workspace, AliMail, or another provider. ' +
       "It is the user's exact bound address, never the assistant's own address. " +
       'Searches every selectable ordinary folder by default, including INBOX, Sent, Archive, and custom folders, so mail moved by a user or provider rule is still discoverable. Junk, Trash, Drafts, aggregate All Mail, and non-selectable containers are excluded; pass `folder` to search one folder only. ' +
-      'Server-side search is substring matching with no ranking — iterate like grep: start with 2-4 `keywords` (they are OR\'d in one round trip, so include synonyms), ' +
-      'then refine by sender, subject, or date. Results come back grouped into conversation threads with snippets. ' +
-      `Sender- or subject-constrained searches cover the full live history by default; broad and keyword-only searches default to the last ${MAILBOX_DEFAULT_WINDOW_DAYS} days. Pass \`since\` to set an explicit lower bound. ` +
+      'Literal search combines the live mail server with the synced personal archive, so provider search quirks and missing embeddings cannot hide an exact sender, subject, or body match. Start with 2-4 `keywords` (they are OR\'d, so include synonyms), then refine by sender, subject, or date. ' +
+      'Sender matches rank ahead of subject matches, then body matches; results come back grouped into conversation threads with snippets. ' +
+      `Sender- or subject-constrained searches cover the full live history by default. Broad and keyword-only live search defaults to the last ${MAILBOX_DEFAULT_WINDOW_DAYS} days, while its literal archive arm covers all synced history. Pass \`since\` to bound both. ` +
       accountRoutingDescription,
     inputSchema: z.object({
       keywords: z
@@ -500,6 +505,7 @@ export function createMailboxTools(
           subject: input.subject,
           folder: input.folder,
           since: input.since ?? (hasEnvelopeFilter ? undefined : isoDaysAgo(MAILBOX_DEFAULT_WINDOW_DAYS)),
+          archiveSince: input.since ?? null,
           before: input.before,
           limit,
         })
