@@ -179,4 +179,30 @@ export function matchingEmailApprovals(
   );
 }
 
+/** Exact CRM people represented by one frozen reviewed-email recipient. */
+export function linkedContactsForEmailApproval(
+  row: PendingApprovalRow,
+  record: CrmApprovalRecord,
+  data: CrmData,
+  participantContactIds: readonly string[] = [],
+): CrmContactRow[] {
+  const recipients = new Set(approvalRecipients(row));
+  const candidateIds = new Set<string>();
+  if (record.kind === "contact") candidateIds.add(record.row.id);
+  if (record.kind === "company") {
+    for (const contact of data.contacts) {
+      if (contact.companyId === record.row.id) candidateIds.add(contact.id);
+    }
+  }
+  if (record.kind === "deal") {
+    if (record.row.contactId) candidateIds.add(record.row.contactId);
+    for (const id of participantContactIds) candidateIds.add(id);
+  }
+  return data.contacts.filter((contact) =>
+    candidateIds.has(contact.id)
+    && Boolean(contact.email)
+    && recipients.has(bareAddress(contact.email!)),
+  );
+}
+
 export { formatCurrencyTotals } from "@/lib/crm-view";

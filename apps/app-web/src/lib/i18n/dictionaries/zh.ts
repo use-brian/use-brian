@@ -5538,7 +5538,7 @@ export const zh: Dictionary = {
       activityTitle: "關係活動", addNote: "新增備註", logActivity: "記錄活動", notePlaceholder: "記錄通話、會議、決定或關係備註", saveNote: "儲存備註", saveActivity: "儲存活動", activitySubject: "主旨（選填）", occurredAt: "發生時間（選填）", activityLoading: "載入活動中...", activityEmpty: "尚未有活動記錄。", activityLoadFailed: "無法載入關係活動。", approvalsLoadFailed: "無法載入待核准回覆。",
       activityType: { note: "備註", call: "通話", meeting: "會議", message: "電郵", field_change: "欄位變更", stage_change: "階段變更" },
       activityDirection: { internal: "內部", inbound: "傳入", outbound: "傳出" },
-      reviewedReplies: "等待核准的回覆", replyBody: "電郵內容", editReply: "編輯回覆", saveRevision: "儲存修訂", rejectReply: "拒絕", approveSend: "核准並傳送", approvalFailed: "無法處理核准。",
+      reviewedReplies: "等待核准的回覆", reviewDraft: "待審閱草稿", draftRevision: "修訂版本 {number}", linkedContact: "已連結聯絡人", conversation: "電郵對話", conversationLoading: "正在載入電郵對話...", conversationUnavailable: "同步郵箱中暫時沒有這段電郵對話。你仍可審閱及核准草稿。", conversationLoadFailed: "無法載入電郵對話。", conversationTruncated: "顯示最新訊息", messageTruncated: "訊息已縮短以供審閱", replyBody: "電郵內容", editReply: "編輯回覆", saveRevision: "儲存修訂", discardChanges: "捨棄變更", unsavedChanges: "尚未儲存的變更", savedDraftReady: "已儲存並可供核准", saveBeforeApprove: "請先儲存此修訂版本再核准。", rejectReply: "拒絕", approveSend: "核准並傳送", approvalFailed: "無法處理核准。",
       reportsTitle: "CRM報告", reportsDescription: "以可見商機及已記錄階段歷史計算的確定總數。", reportsLoading: "載入報告中...", reportsFailed: "無法載入CRM報告。",
       openValue: "進行中價值", weightedForecast: "加權預測", winRate: "成功率", closedDeals: "贏得 / 失去", wonLost: "已結束商機數", noValue: "沒有價值", notEnoughHistory: "歷史不足",
       pipelineBreakdown: "管線明細", stageColumn: "階段", countColumn: "數量", valueColumn: "價值", velocityColumn: "時間中位數", days: "日",

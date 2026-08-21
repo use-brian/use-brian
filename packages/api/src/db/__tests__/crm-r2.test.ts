@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildCrmReport,
+  buildCrmEmailReviewThread,
   crmRowsToCsv,
   findCrmDuplicateGroups,
   validateCustomFieldValue,
@@ -79,5 +80,29 @@ describe('[COMP:crm/r2-store] deterministic CRM R2 projections', () => {
     expect(csv).toContain('currency_code')
     expect(csv).toContain('"Deal, one"')
     expect(csv).toContain('HKD')
+  })
+
+  it('anchors an oldest-first bounded archived email thread with honest truncation', () => {
+    const messages = Array.from({ length: 102 }, (_, index) => ({
+      id: `row-${index}`,
+      providerMessageId: `INBOX:${index + 1}`,
+      folder: 'INBOX',
+      fromAddr: index % 2 ? 'Sales <sales@example.test>' : 'Client <client@example.test>',
+      toAddrs: [index % 2 ? 'client@example.test' : 'sales@example.test'],
+      ccAddrs: [],
+      sentAt: new Date(Date.UTC(2026, 7, 1, 0, index)).toISOString(),
+      subject: index === 0 ? 'Contract question' : 'Re: Contract question',
+      bodyText: index === 101 ? 'x'.repeat(12_001) : `Message ${index + 1}`,
+      rfcMessageId: `<message-${index + 1}@example.test>`,
+      inReplyTo: index === 0 ? null : `<message-${index}@example.test>`,
+      referencesIds: index === 0 ? [] : [`<message-1@example.test>`, `<message-${index}@example.test>`],
+    }))
+    const thread = buildCrmEmailReviewThread(messages, 'INBOX:102')
+    expect(thread?.messages).toHaveLength(100)
+    expect(thread?.messages[0].id).toBe('INBOX:3')
+    expect(thread?.messages.at(-1)?.id).toBe('INBOX:102')
+    expect(thread?.messages.at(-1)?.body).toHaveLength(12_000)
+    expect(thread?.messages.at(-1)?.bodyTruncated).toBe(true)
+    expect(thread?.truncated).toBe(true)
   })
 })

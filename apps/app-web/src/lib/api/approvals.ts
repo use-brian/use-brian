@@ -10,6 +10,7 @@
  *
  *   GET  /api/approvals?workspaceId=
  *   GET  /api/approvals/count?workspaceId=
+ *   GET  /api/approvals/:id/email-review-context?entityId=
  *   POST /api/approvals/:id/revise-email
  *   POST /api/approvals/:id/respond
  *
@@ -103,10 +104,14 @@ export type RespondResult =
 /** List every pending approval for the workspace. */
 export async function listApprovals(
   workspaceId: string,
+  options?: { throwOnError?: boolean },
 ): Promise<PendingApprovalRow[]> {
   const q = new URLSearchParams({ workspaceId });
   const res = await authFetch(`${API_URL}/api/approvals?${q.toString()}`);
-  if (!res.ok) return [];
+  if (!res.ok) {
+    if (options?.throwOnError) throw new Error(`Could not load approvals (${res.status}).`);
+    return [];
+  }
   const data = (await res.json()) as { approvals?: PendingApprovalRow[] };
   return Array.isArray(data.approvals) ? data.approvals : [];
 }
@@ -114,6 +119,40 @@ export async function listApprovals(
 export type ReviseEmailApprovalResult =
   | { ok: true; approval: PendingApprovalRow }
   | { ok: false; error: string; status: number };
+
+type EmailReviewMessage = {
+  id: string;
+  folder: string;
+  from: string;
+  to: string[];
+  cc: string[];
+  sentAt: string | null;
+  subject: string;
+  body: string;
+  bodyTruncated: boolean;
+};
+
+export type EmailReviewContext = {
+  thread: {
+    subject: string;
+    messages: EmailReviewMessage[];
+    truncated: boolean;
+  } | null;
+};
+
+/** Load the owner-scoped archived chain tied to this exact pending approval. */
+export async function fetchEmailReviewContext(
+  id: string,
+  entityId: string,
+): Promise<EmailReviewContext> {
+  const q = new URLSearchParams({ entityId });
+  const res = await authFetch(
+    `${API_URL}/api/approvals/${encodeURIComponent(id)}/email-review-context?${q.toString()}`,
+  );
+  const data = (await res.json().catch(() => ({}))) as EmailReviewContext & { error?: string };
+  if (!res.ok) throw new Error(data.error ?? `Could not load the email conversation (${res.status}).`);
+  return { thread: data.thread ?? null };
+}
 
 /**
  * Save a body-only revision of a reviewed workflow IMAP reply. The server

@@ -208,6 +208,8 @@ import { saveLocalProviderPreference } from './local-provider-preference.js'
 import { brainRoutes } from './routes/brain.js'
 import { brainInboxRoutes } from './routes/brain-inbox.js'
 import { crmRoutes } from './routes/crm.js'
+import { getCrmEmailReviewContext } from './db/crm-r2.js'
+import { resolveWorkspaceViewpoint } from './db/workspace-viewpoint.js'
 import { createBrainEntryMutator } from './brain-entry-mutation.js'
 import { taskGuardrailRoutes } from './routes/task-guardrails.js'
 import { homeRoutes } from './routes/home.js'
@@ -5102,6 +5104,18 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     approvalsStore: pendingApprovalsStore,
     workspaceStore,
     bridgeDeps: approvalBridgeDeps,
+    emailReviewContext: async (input) => {
+      const ctx = await resolveWorkspaceViewpoint(input.userId, input.workspaceId, null)
+      if (!ctx) return null
+      return getCrmEmailReviewContext({
+        ctx,
+        entityId: input.entityId,
+        recipient: input.recipient,
+        replyTo: input.replyTo,
+        toolName: input.toolName,
+        account: input.account,
+      })
+    },
     resumeDeps: {
       approvalsStore: pendingApprovalsStore,
       sessionResumeStore,

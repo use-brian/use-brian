@@ -9,6 +9,7 @@
  *
  *   GET  /                  — list every pending approval for a workspace
  *   GET  /count             — pending count (nav badge)
+ *   GET  /:id/email-review-context — CRM-linked archived reply thread
  *   POST /:id/revise-email   — body-only immutable IMAP draft revision
  *   POST /:id/respond        — approve / reject
  *
@@ -35,6 +36,7 @@ import type {
   PendingApprovalsStore,
 } from '../db/pending-approvals-store.js'
 import type { WorkspaceStore } from '../db/workspace-store.js'
+import type { CrmEmailReviewContext } from '../db/crm-r2.js'
 import {
   resumeFromApproval,
   enqueueToolInvocationResume,
@@ -49,6 +51,20 @@ export type UnifiedApprovalRouteOptions = {
   approvalsStore: PendingApprovalsStore
   workspaceStore: WorkspaceStore
   bridgeDeps: ApprovalBridgeDeps
+  /**
+   * Resolve the CRM-linked, owner-scoped archived thread for one frozen
+   * reviewed reply. The route performs approval authority checks first; this
+   * seam resolves the caller's workspace viewpoint and record relationship.
+   */
+  emailReviewContext(input: {
+    userId: string
+    workspaceId: string
+    entityId: string
+    recipient: string
+    replyTo: string
+    toolName: string
+    account?: string | null
+  }): Promise<CrmEmailReviewContext | null>
   /**
    * WU-6.4 — Path B durable resume deps for `tool_invocation` rows.
    * When set, the route resolves `tool_invocation` approvals in place
@@ -152,6 +168,55 @@ export function approvalsRoutes(opts: UnifiedApprovalRouteOptions): Router {
     }
     const rows = await opts.approvalsStore.listPendingForWorkspace(userId, workspaceId)
     res.json({ pending: rows.length })
+  })
+
+  // GET /:id/email-review-context — the thread read is keyed to the exact
+  // frozen approval, not to display text from the browser. The resolver must
+  // additionally prove the access-scoped CRM relationship and mailbox owner.
+  router.get('/:id/email-review-context', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) {
+      res.status(401).json({ error: 'Unauthorized' })
+      return
+    }
+    const entityId = typeof req.query.entityId === 'string' ? req.query.entityId : null
+    if (!entityId) {
+      res.status(400).json({ error: 'entityId query param is required' })
+      return
+    }
+    const approval = await opts.approvalsStore.getById(userId, req.params.id)
+    if (!approval) {
+      res.status(404).json({ error: 'Approval not found' })
+      return
+    }
+    if (approval.approverUserId !== userId) {
+      res.status(403).json({ error: 'Only the assigned approver can review this draft' })
+      return
+    }
+    if (approval.status !== 'pending') {
+      res.status(409).json({ error: `Approval is already ${approval.status}` })
+      return
+    }
+    if (!isReviewedImapReply(approval)) {
+      res.status(422).json({ error: 'Only a reviewed workflow IMAP reply has email review context' })
+      return
+    }
+    const context = await opts.emailReviewContext({
+      userId,
+      workspaceId: approval.workspaceId,
+      entityId,
+      recipient: approval.arguments.to[0] as string,
+      replyTo: approval.arguments.inReplyTo as string,
+      toolName: approval.toolName,
+      account: typeof approval.arguments.account === 'string'
+        ? approval.arguments.account
+        : null,
+    })
+    if (!context) {
+      res.status(404).json({ error: 'The approval is not linked to this CRM record' })
+      return
+    }
+    res.json(context)
   })
 
   // POST /:id/revise-email — body-only hand editing for the reviewed IMAP
@@ -368,8 +433,18 @@ function canonicalToolName(toolName: string): string {
   return toolName.split('__', 1)[0]
 }
 
+type ReviewedImapReplyApproval = PendingApproval & {
+  arguments: {
+    to: [string]
+    subject: string
+    body: string
+    inReplyTo: string
+    account?: string
+  }
+}
+
 /** Runtime-frozen shape of the client-principal reviewed reply. */
-function isReviewedImapReply(approval: PendingApproval): boolean {
+function isReviewedImapReply(approval: PendingApproval): approval is ReviewedImapReplyApproval {
   if (approval.kind !== 'workflow_step' || canonicalToolName(approval.toolName) !== 'imapSendMessage') {
     return false
   }

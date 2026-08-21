@@ -207,6 +207,7 @@ export function CrmRecordDetail({
           workspaceId={workspaceId}
           record={record}
           data={data}
+          onOpenContact={(contact) => onOpenRecord({ kind: "contact", row: contact })}
         />
 
         {/* Relationships — joined client-side from the flat payload. */}

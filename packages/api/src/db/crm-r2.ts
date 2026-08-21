@@ -10,7 +10,12 @@
  * [COMP:crm/r2-store]
  */
 
-import type { AccessContext, EntityRecord } from '@use-brian/core'
+import {
+  stitchMailboxThreads,
+  type AccessContext,
+  type EntityRecord,
+  type MailboxSearchHit,
+} from '@use-brian/core'
 import { buildAccessPredicate } from './access-predicate.js'
 import { getPool, query, queryGated, queryWithRLS } from './client.js'
 import { getEntityById, updateEntity } from './entities-store.js'
@@ -615,6 +620,195 @@ async function contactEmailsForEntity(ctx: AccessContext, entity: EntityRecord):
     values,
   )
   return [...new Set(rows.rows.map((r) => bareAddress(r.email)).filter(Boolean))]
+}
+
+const CRM_EMAIL_THREAD_MESSAGE_LIMIT = 100
+const CRM_EMAIL_THREAD_CANDIDATE_LIMIT = 251
+const CRM_EMAIL_THREAD_BODY_CHARS = 12_000
+
+type CrmEmailArchiveThreadRow = {
+  id: string
+  providerMessageId: string
+  folder: string
+  fromAddr: string
+  toAddrs: string[]
+  ccAddrs: string[]
+  sentAt: Date | string | null
+  subject: string
+  bodyText: string
+  rfcMessageId: string | null
+  inReplyTo: string | null
+  referencesIds: string[]
+}
+
+export type CrmEmailReviewMessage = {
+  id: string
+  folder: string
+  from: string
+  to: string[]
+  cc: string[]
+  sentAt: string | null
+  subject: string
+  body: string
+  bodyTruncated: boolean
+}
+
+export type CrmEmailReviewThread = {
+  subject: string
+  messages: CrmEmailReviewMessage[]
+  truncated: boolean
+}
+
+export type CrmEmailReviewContext = {
+  thread: CrmEmailReviewThread | null
+}
+
+/**
+ * Convert owner-scoped archive rows into the exact thread containing the
+ * frozen reply target. Kept pure so the oldest-first and bounding contract is
+ * testable without weakening the store's authority query.
+ */
+export function buildCrmEmailReviewThread(
+  rows: readonly CrmEmailArchiveThreadRow[],
+  anchorProviderMessageId: string,
+  candidateCapHit = false,
+): CrmEmailReviewThread | null {
+  const byProviderId = new Map(rows.map((row) => [row.providerMessageId, row]))
+  const hits: MailboxSearchHit[] = rows.map((row) => ({
+    id: row.providerMessageId,
+    folder: row.folder,
+    from: row.fromAddr,
+    to: row.toAddrs,
+    date: row.sentAt instanceof Date ? row.sentAt.toISOString() : row.sentAt,
+    subject: row.subject,
+    messageId: row.rfcMessageId,
+    inReplyTo: row.inReplyTo,
+    references: row.referencesIds,
+  }))
+  const stitched = stitchMailboxThreads(hits)
+  const selected = stitched.find((thread) =>
+    thread.messages.some((message) => message.id === anchorProviderMessageId),
+  )
+  if (!selected) return null
+  const bounded = selected.messages.slice(-CRM_EMAIL_THREAD_MESSAGE_LIMIT)
+  return {
+    subject: selected.subject,
+    truncated: candidateCapHit || selected.messages.length > bounded.length,
+    messages: bounded.flatMap((message) => {
+      const row = byProviderId.get(message.id)
+      if (!row) return []
+      return [{
+        id: row.providerMessageId,
+        folder: row.folder,
+        from: row.fromAddr,
+        to: row.toAddrs,
+        cc: row.ccAddrs,
+        sentAt: row.sentAt instanceof Date ? row.sentAt.toISOString() : row.sentAt,
+        subject: row.subject,
+        body: row.bodyText.slice(0, CRM_EMAIL_THREAD_BODY_CHARS),
+        bodyTruncated: row.bodyText.length > CRM_EMAIL_THREAD_BODY_CHARS,
+      }]
+    }),
+  }
+}
+
+function mailboxInstancePrefix(toolName: string): string | null | undefined {
+  const separator = toolName.indexOf('__')
+  if (separator === -1) return null
+  const match = toolName.match(/_([a-f0-9]{8})$/i)
+  return match?.[1].toLowerCase()
+}
+
+/**
+ * Approval-anchored CRM email context. `null` means the record is absent or
+ * its linked contact addresses do not include the approval's frozen
+ * recipient. `{ thread: null }` means authority was valid but the owner's
+ * archive cannot currently supply the frozen reply target.
+ */
+export async function getCrmEmailReviewContext(input: {
+  ctx: AccessContext
+  entityId: string
+  recipient: string
+  replyTo: string
+  toolName: string
+  account?: string | null
+}): Promise<CrmEmailReviewContext | null> {
+  const entity = await getEntityById(input.ctx, input.entityId)
+  if (!entity || !['person', 'company', 'deal'].includes(entity.kind)) return null
+  const addresses = await contactEmailsForEntity(input.ctx, entity)
+  if (!addresses.includes(bareAddress(input.recipient))) return null
+
+  const instancePrefix = mailboxInstancePrefix(input.toolName)
+  if (instancePrefix === undefined) return { thread: null }
+  const instances = await queryWithRLS<{ id: string }>(
+    input.ctx.userId,
+    `SELECT id
+       FROM connector_instance
+      WHERE scope = 'user' AND user_id = $1 AND provider = 'imap'
+        AND ($2::text IS NULL OR lower(connected_email) = lower($2))
+        AND ($3::text IS NULL OR replace(id::text, '-', '') LIKE $3 || '%')
+      ORDER BY created_at ASC
+      LIMIT $4`,
+    [input.ctx.userId, input.account ?? null, instancePrefix,
+      instancePrefix === null ? 1 : 2],
+  )
+  if (instances.rows.length !== 1) return { thread: null }
+  const instanceId = instances.rows[0].id
+
+  const anchor = await queryWithRLS<CrmEmailArchiveThreadRow>(
+    input.ctx.userId,
+    `SELECT id, provider_message_id AS "providerMessageId", folder,
+            from_addr AS "fromAddr", to_addrs AS "toAddrs", cc_addrs AS "ccAddrs",
+            sent_at AS "sentAt", subject, left(body_text, $5) AS "bodyText",
+            rfc_message_id AS "rfcMessageId", in_reply_to AS "inReplyTo",
+            references_ids AS "referencesIds"
+       FROM email_archive_messages
+      WHERE workspace_id = $1 AND owner_user_id = $2
+        AND instance_id = $3 AND provider_message_id = $4
+      LIMIT 1`,
+    [input.ctx.workspaceId, input.ctx.userId, instanceId, input.replyTo,
+      CRM_EMAIL_THREAD_BODY_CHARS + 1],
+  )
+  const anchorRow = anchor.rows[0]
+  if (!anchorRow) return { thread: null }
+  const referenceIds = [...new Set([
+    anchorRow.rfcMessageId,
+    anchorRow.inReplyTo,
+    ...anchorRow.referencesIds,
+  ].filter((value): value is string => Boolean(value)))]
+
+  const candidates = await queryWithRLS<CrmEmailArchiveThreadRow>(
+    input.ctx.userId,
+    `SELECT id, provider_message_id AS "providerMessageId", folder,
+            from_addr AS "fromAddr", to_addrs AS "toAddrs", cc_addrs AS "ccAddrs",
+            sent_at AS "sentAt", subject, left(body_text, $7) AS "bodyText",
+            rfc_message_id AS "rfcMessageId", in_reply_to AS "inReplyTo",
+            references_ids AS "referencesIds"
+       FROM email_archive_messages
+      WHERE workspace_id = $1 AND owner_user_id = $2 AND instance_id = $3
+        AND (
+          provider_message_id = $4
+          OR rfc_message_id = ANY($5::text[])
+          OR in_reply_to = ANY($5::text[])
+          OR references_ids && $5::text[]
+          OR lower(trim(regexp_replace(subject,
+               '^((re|fwd?|aw|回复|回覆|转发|轉發)[[:space:]]*[:：][[:space:]]*)+', '', 'i'))
+             = lower(trim(regexp_replace($6,
+               '^((re|fwd?|aw|回复|回覆|转发|轉發)[[:space:]]*[:：][[:space:]]*)+', '', 'i'))
+        )
+      ORDER BY (provider_message_id = $4) DESC, sent_at DESC NULLS LAST, created_at DESC
+      LIMIT $8`,
+    [input.ctx.workspaceId, input.ctx.userId, instanceId, input.replyTo,
+      referenceIds, anchorRow.subject, CRM_EMAIL_THREAD_BODY_CHARS + 1,
+      CRM_EMAIL_THREAD_CANDIDATE_LIMIT],
+  )
+  return {
+    thread: buildCrmEmailReviewThread(
+      candidates.rows,
+      input.replyTo,
+      candidates.rows.length === CRM_EMAIL_THREAD_CANDIDATE_LIMIT,
+    ),
+  }
 }
 
 export async function listCrmTimeline(input: {
