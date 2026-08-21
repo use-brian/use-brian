@@ -29,6 +29,7 @@ import { createSearchEmailArchiveTool, getGlobalMailboxArchiveDeps } from '../ma
 import { createSyncMailboxNowTool, getGlobalMailboxSyncDeps } from '../mailbox/sync-tool.js'
 import type { MailboxAccountSettings } from '../mailbox/types.js'
 import { enqueueFileIngestJob } from '../db/file-ingest-jobs-store.js'
+import { countEmailArchiveMessages } from '../db/email-archive-store.js'
 import { enqueueGDriveLazyEnrichment } from '../db/gdrive-enrichment-store.js'
 import {
   getGDriveCatalogReadPolicy,
@@ -4645,7 +4646,32 @@ async function injectMailboxTools(params: {
           return []
         }
       }
-      const rawApi = createMailboxApi({ cacheKey: boundId, getSettings, getSendAsAliases })
+      const getKnownFolderPaths = async (): Promise<string[]> => {
+        const paths = new Set<string>()
+        try {
+          const current = await store.getSystem(boundId)
+          const sync = current?.config?.mailboxSync as { folders?: unknown } | undefined
+          const folders = sync?.folders
+          if (folders && typeof folders === 'object' && !Array.isArray(folders)) {
+            for (const path of Object.keys(folders)) paths.add(path)
+          }
+        } catch {
+          // Live LIST remains available even if config lookup is degraded.
+        }
+        try {
+          const archived = await countEmailArchiveMessages(boundId)
+          for (const path of Object.keys(archived.byFolder)) paths.add(path)
+        } catch {
+          // The archive is a recovery hint, not a dependency of live IMAP.
+        }
+        return [...paths]
+      }
+      const rawApi = createMailboxApi({
+        cacheKey: boundId,
+        getSettings,
+        getSendAsAliases,
+        getKnownFolderPaths,
+      })
       bound.push({ instanceId: boundId, email, api: withHealth(withAudit(rawApi, email), boundId) })
     }
     if (bound.length === 0) {

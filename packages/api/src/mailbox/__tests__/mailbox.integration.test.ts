@@ -46,7 +46,7 @@ describeIf('[COMP:api/mailbox-imap-client] live IMAP/SMTP round-trip', () => {
     expect(result).toEqual({ ok: true })
   }, 60_000)
 
-  it('OR-searches across INBOX + Sent with a bounded window', async () => {
+  it('OR-searches across selectable folders with a bounded window', async () => {
     const since = new Date(Date.now() - 90 * 24 * 3600 * 1000).toISOString().slice(0, 10)
     const started = Date.now()
     const { hits, note } = await api.searchMessages({

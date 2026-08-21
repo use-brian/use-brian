@@ -1113,14 +1113,18 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     resolved: { instance: ConnectorInstance; settings: MailboxAccountSettings },
   ) {
     const state = readMailboxSyncState(resolved.instance.config)
-    const knownFolderPaths = Object.keys(state.folders)
-    const probe = opts.imapMailbox?.probe ?? probeMailboxFolders
-    const result = await probe(resolved.settings, undefined, knownFolderPaths)
     const countArchive = opts.imapMailbox?.countArchive ?? countEmailArchiveMessages
     const archived = await countArchive(resolved.instance.id)
-    const countedPaths = new Set(result.folders.map((folder) => folder.path))
-    const omittedKnownFolder = knownFolderPaths.some((path) => !countedPaths.has(path))
-    const complete = result.complete && !omittedKnownFolder && result.total >= archived.total
+    const knownFolderPaths = [...new Set([
+      ...Object.keys(state.folders),
+      ...Object.keys(archived.byFolder),
+    ])]
+    const probe = opts.imapMailbox?.probe ?? probeMailboxFolders
+    const result = await probe(resolved.settings, undefined, knownFolderPaths)
+    // The probe owns known-path completeness, including intentional raw-LIST
+    // exclusions. The archive-count guard separately catches a regressed or
+    // partial universe without forcing an excluded special folder back in.
+    const complete = result.complete && result.total >= archived.total
     return {
       ...result,
       complete,
@@ -1237,6 +1241,7 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
           estimateComplete: probed.complete,
         },
       }
+      delete next.folderDiscoveryMisses
       await connectorInstanceStore.setConfigSystem(resolved.instance.id, { mailboxSync: next })
       // The button is an action, not a promise that the periodic poller will
       // eventually notice. Persist first, then wake the guarded worker. The
