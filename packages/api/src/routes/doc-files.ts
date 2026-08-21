@@ -32,7 +32,7 @@ import type {
 } from '@use-brian/core'
 import type { GcsFilesClient } from '../files/gcs-client.js'
 import type { FilesClientResolver } from '../files/files-api.js'
-import { buildStorageKey } from '../files/gcs-client.js'
+import { storageKeyForWorkspaceFile } from '../files/local-directory-import.js'
 import { isAllowedMime } from './files.js'
 
 const MAX_FILE_SIZE = 20 * 1024 * 1024 // 20 MB
@@ -225,7 +225,7 @@ export function docFilesRoutes(deps: DocFilesDeps): Router {
         return
       }
 
-      const key = buildStorageKey(workspaceId, id)
+      const key = storageKeyForWorkspaceFile(row)
       const blobClient = resolver ? await resolver.forUri(workspaceId, row.storageUri) : gcs
       const url = await blobClient.signedReadUrl(key)
       // Cloud backends return a signed HTTPS URL → redirect so the browser fetches
@@ -246,7 +246,7 @@ export function docFilesRoutes(deps: DocFilesDeps): Router {
         res.status(404).json({ error: 'File not found' })
         return
       }
-      res.setHeader('Content-Type', blob.mime || row.mime)
+      res.setHeader('Content-Type', row.mime || blob.mime)
       res.setHeader('Cache-Control', 'private, max-age=3600')
       res.setHeader('Content-Length', String(blob.bytes.length))
       res.send(blob.bytes)

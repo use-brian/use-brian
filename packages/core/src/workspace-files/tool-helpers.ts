@@ -137,5 +137,7 @@ export function errorMessage(err: FilesError): string {
         : `No workspace file at path ${err.reference}. Paths are exact — a leading slash, a folder segment, or the extension being off by one character all miss the same way, and a file that was moved or renamed no longer answers to its old path. Call fileSearch (by name, title, tag, or parent_path) to get the file's current id and path, then retry with what it returns. Do NOT retry this exact path.`
     case 'conflict':
       return `A file already exists at ${err.path}. Pass an existing id (or delete first) to overwrite.`
+    case 'read_only':
+      return `${err.path} is a read-only file imported from Local Directory. Read or download it, or edit the original file on the server and sync the directory again.`
   }
 }

@@ -16,6 +16,11 @@ vi.mock('../../mcp/client.js', () => ({
   discoverMcpServer: (...a: unknown[]) => mockDiscover(...a),
 }))
 
+const mockListUsable = vi.fn().mockResolvedValue([])
+vi.mock('../../connectors/usable-connectors.js', () => ({
+  listUsableWorkspaceConnectors: (...a: unknown[]) => mockListUsable(...a),
+}))
+
 import { connectorRoutes } from '../connectors.js'
 import type { ConnectorStore } from '../../db/connector-store.js'
 import type { ConnectorInstanceStore, ConnectorInstance } from '../../db/connector-instance-store.js'
@@ -100,6 +105,7 @@ function makeApp(userId?: string) {
   app.use('/api/connectors', connectorRoutes({
     connectorStore,
     connectorInstanceStore,
+    connectorGrantStore: {} as never,
     mcpSettingsStore: { getPolicy: m.getPolicy, setPolicy: m.setPolicy } as never,
     shopifyVerifyToken: m.shopifyVerifyToken,
   }))
@@ -151,8 +157,8 @@ describe('[COMP:api/connectors-route] /api/connectors', () => {
   })
 
   it('GET / merges built-in placeholders with the caller instances', async () => {
-    const { app, listForUser } = makeApp('u1')
-    listForUser.mockResolvedValue([
+    const { app, listByUser } = makeApp('u1')
+    listByUser.mockResolvedValue([
       instance({
         provider: 'gcal',
         label: 'Work cal',
@@ -181,10 +187,56 @@ describe('[COMP:api/connectors-route] /api/connectors', () => {
     expect(github?.connectorInstanceId).toBeUndefined()
   })
 
+  it('GET /?workspaceId classifies workspace-owned storage outside Personal', async () => {
+    const { app, listByUser } = makeApp('u1')
+    const workspaceId = '22222222-2222-2222-2222-222222222222'
+    const localInstance = instance({
+      id: '33333333-3333-3333-3333-333333333333',
+      scope: 'workspace',
+      userId: null,
+      workspaceId,
+      provider: 'local',
+      label: 'Local Directory Storage',
+      credentialsType: 'local',
+    })
+    listByUser.mockResolvedValue([
+      instance({ provider: 'gcal', label: 'Personal calendar' }),
+    ])
+    mockListUsable.mockResolvedValue([
+      { instance: localInstance, source: 'team_native' },
+    ])
+
+    const res = await request(app).get(`/api/connectors?workspaceId=${workspaceId}`)
+
+    expect(res.status).toBe(200)
+    expect(mockListUsable).toHaveBeenCalledWith(expect.objectContaining({
+      userId: 'u1',
+      workspaceId,
+    }))
+    const rows = res.body.connectors as Array<Record<string, unknown>>
+    expect(rows.find((row) => row.connectorInstanceId === localInstance.id)).toMatchObject({
+      id: 'local',
+      connected: true,
+      readonly: true,
+      source: 'team_native',
+      addable: false,
+    })
+  })
+
+  it('GET / rejects an invalid workspaceId before resolving shared connectors', async () => {
+    const { app } = makeApp('u1')
+
+    const res = await request(app).get('/api/connectors?workspaceId=not-a-workspace')
+
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe('Invalid workspaceId')
+    expect(mockListUsable).not.toHaveBeenCalled()
+  })
+
   it('GET / hides internal WhatsApp channel instances', async () => {
-    const { app, listForUser } = makeApp('u1')
-    listForUser.mockResolvedValue([
-      instance({ provider: 'whatsapp', label: 'WhatsApp', scope: 'workspace', userId: null, workspaceId: 'ws-1' }),
+    const { app, listByUser } = makeApp('u1')
+    listByUser.mockResolvedValue([
+      instance({ provider: 'whatsapp', label: 'WhatsApp' }),
     ])
 
     const res = await request(app).get('/api/connectors')
@@ -196,8 +248,8 @@ describe('[COMP:api/connectors-route] /api/connectors', () => {
   })
 
   it('GET /directory lists the official catalog with added/connected flags', async () => {
-    const { app, listForUser } = makeApp('u1')
-    listForUser.mockResolvedValue([instance({ provider: 'github', connected: true })])
+    const { app, listByUser } = makeApp('u1')
+    listByUser.mockResolvedValue([instance({ provider: 'github', connected: true })])
     const res = await request(app).get('/api/connectors/directory')
     expect(res.status).toBe(200)
     const dir = res.body.directory as Array<Record<string, unknown>>
