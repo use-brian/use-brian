@@ -29,8 +29,8 @@
  *
  * Sync state is an OPAQUE per-provider cursor on `connector_instance.config`
  * (D13): `config.mailboxSync = { folders: { [path]: { uidvalidity, lastUid,
- * backfillLow?, backfillDone?, retryUids? } }, backfill? }`. Nothing above the
- * seam is IMAP-shaped.
+ * backfillLow?, backfillDone?, retryUids? } }, folderDiscoveryMisses?,
+ * backfill? }`. Nothing above the seam is IMAP-shaped.
  *
  * Structure follows `createKnowledgeSyncWorker` (own-table store, injected
  * seams, `start/stop/tick`); instance iteration + cursor persistence follow
@@ -75,6 +75,7 @@ import type { DbEpisodesStore } from '../db/episodes-store.js'
 import type { IngestRuleRow, IngestRulesStore } from '../db/ingest-rules-store.js'
 import { appendBatchEvent } from '../db/pending-ingest-batches-store.js'
 import {
+  countEmailArchiveMessages,
   deleteEmailArchiveFolder,
   findArchivedEmailUids,
   insertEmailArchiveMessage,
@@ -152,6 +153,13 @@ export type MailboxSkip = {
 
 export type MailboxSyncState = {
   folders: Record<string, MailboxFolderCursor>
+  /**
+   * Consecutive direct-open failures for archive-known paths that have no
+   * cursor yet. They cannot use `MailboxFolderCursor.consecutiveListMisses`:
+   * fabricating UIDVALIDITY before STATUS succeeds could later make the
+   * worker delete valid archive rows as if the provider had reassigned UIDs.
+   */
+  folderDiscoveryMisses?: Record<string, number>
   backfill?: MailboxBackfillState
   lastSyncAt?: string
   lastError?: string | null
@@ -171,6 +179,7 @@ export function readMailboxSyncState(config: Record<string, unknown> | null | un
   const raw = (config?.mailboxSync ?? {}) as Partial<MailboxSyncState>
   return {
     folders: (raw.folders ?? {}) as Record<string, MailboxFolderCursor>,
+    ...(raw.folderDiscoveryMisses ? { folderDiscoveryMisses: raw.folderDiscoveryMisses } : {}),
     ...(raw.backfill ? { backfill: raw.backfill } : {}),
     ...(raw.lastSyncAt ? { lastSyncAt: raw.lastSyncAt } : {}),
     ...(raw.lastError !== undefined ? { lastError: raw.lastError } : {}),
@@ -722,6 +731,7 @@ export type MailboxSyncWorkerDeps = {
   insertMessage?: typeof insertEmailArchiveMessage
   deleteFolder?: typeof deleteEmailArchiveFolder
   findArchivedUids?: typeof findArchivedEmailUids
+  countArchive?: typeof countEmailArchiveMessages
   intervalMs?: number
   /** Max NEW (delta) messages fetched per folder per tick. */
   deltaChunk?: number
@@ -833,7 +843,7 @@ const DEFAULT_INTERVAL_MS = 5 * 60_000
 const DEFAULT_DELTA_CHUNK = 100
 const DEFAULT_BACKFILL_CHUNK = 200
 const DEFAULT_BACKFILL_RECONCILE_WINDOW = 2_000
-export const CURRENT_BACKFILL_RECONCILE_VERSION = 2
+export const CURRENT_BACKFILL_RECONCILE_VERSION = 3
 /** A renamed/deleted folder must not wedge history forever, but one short LIST is not enough to retire it. */
 const MAX_CONSECUTIVE_FOLDER_LIST_MISSES = 3
 
@@ -842,6 +852,7 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
   const insertMessage = deps.insertMessage ?? insertEmailArchiveMessage
   const deleteFolder = deps.deleteFolder ?? deleteEmailArchiveFolder
   const findArchivedUids = deps.findArchivedUids ?? findArchivedEmailUids
+  const countArchive = deps.countArchive ?? countEmailArchiveMessages
   const intervalMs = deps.intervalMs ?? DEFAULT_INTERVAL_MS
   const deltaChunk = deps.deltaChunk ?? DEFAULT_DELTA_CHUNK
   const backfillChunk = deps.backfillChunk ?? DEFAULT_BACKFILL_CHUNK
@@ -1188,32 +1199,63 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
         delete cursor.backfillDone
         delete cursor.consecutiveListMisses
       }
+      delete state.folderDiscoveryMisses
     }
 
     let newMessages = 0
     let activeFolderPaths: string[] = []
+    let archiveFolderPaths: string[] = []
     let unresolvedOmittedFolders = 0
     let backfillPassFailed = false
     try {
+      // The archive is durable evidence of folders the mutable cursor config
+      // may have forgotten. Read it only when history has been armed;
+      // delta-only mailboxes need no recovery roster.
+      archiveFolderPaths = state.backfill
+        ? Object.keys((await countArchive(inst.id)).byFolder)
+        : []
       await sessions.withClient(`sync:${inst.id}`, settings, async (client) => {
-        const syncable = syncableFolders(await client.list())
+        const listed = await client.list()
+        const syncable = syncableFolders(listed)
         activeFolderPaths = syncable.map((folder) => folder.path)
-        const listedPaths = new Set(activeFolderPaths)
+        // Raw LIST membership matters here: a known path that is present but
+        // filtered as Junk/Trash/Drafts/All/non-selectable is intentionally
+        // excluded, not transiently omitted and eligible for a direct open.
+        const listedPaths = new Set(listed.map((folder) => folder.path))
         for (const path of activeFolderPaths) {
           const cursor = state.folders[path]
           if (cursor) delete cursor.consecutiveListMisses
+          if (state.folderDiscoveryMisses) delete state.folderDiscoveryMisses[path]
         }
+        if (state.folderDiscoveryMisses && Object.keys(state.folderDiscoveryMisses).length === 0) {
+          delete state.folderDiscoveryMisses
+        }
+
+        const durableFolderPaths = [...new Set([
+          ...Object.keys(state.folders),
+          ...archiveFolderPaths,
+        ])]
 
         // A later LIST can reveal a folder that was missing when an earlier
         // pass declared the then-visible roster complete. Reopen the durable
         // request before syncFolder sees it, so the new/reappeared folder is
         // backfilled on this same tick instead of merely establishing a delta
         // cursor and silently skipping its history forever.
-        if (state.backfill?.status === 'done' && activeFolderPaths.some((path) => {
-          const cursor = state.folders[path]
-          return !cursor || !cursor.backfillDone || retryUidNumbers(cursor).length > 0
-        })) {
-          state.backfill.status = 'running'
+        if (state.backfill?.status === 'done') {
+          const listedNeedsWork = activeFolderPaths.some((path) => {
+            const cursor = state.folders[path]
+            return !cursor || !cursor.backfillDone || retryUidNumbers(cursor).length > 0
+          })
+          const omittedNeedsDiscovery = durableFolderPaths.some((path) => {
+            if (listedPaths.has(path)) return false
+            const cursor = state.folders[path]
+            if (cursor) {
+              return (!cursor.backfillDone || retryUidNumbers(cursor).length > 0) &&
+                (cursor.consecutiveListMisses ?? 0) < MAX_CONSECUTIVE_FOLDER_LIST_MISSES
+            }
+            return (state.folderDiscoveryMisses?.[path] ?? 0) < MAX_CONSECUTIVE_FOLDER_LIST_MISSES
+          })
+          if (listedNeedsWork || omittedNeedsDiscovery) state.backfill.status = 'running'
         }
         // Per-folder isolation: a folder that throws must not deny every LATER
         // folder its turn. Previously the first throw escaped this loop, so on a
@@ -1254,12 +1296,17 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
         // a genuinely deleted/renamed path; LIST keeps running every later tick
         // and will reopen the walk if that path ever reappears.
         if (state.backfill?.status !== 'done') {
-          const omitted = Object.entries(state.folders).filter(([path, cursor]) =>
-            !listedPaths.has(path) &&
-            (!cursor.backfillDone || retryUidNumbers(cursor).length > 0) &&
-            (cursor.consecutiveListMisses ?? 0) < MAX_CONSECUTIVE_FOLDER_LIST_MISSES,
-          )
-          for (const [path, priorCursor] of omitted) {
+          const omitted = durableFolderPaths.filter((path) => {
+            if (listedPaths.has(path)) return false
+            const cursor = state.folders[path]
+            if (cursor) {
+              return (!cursor.backfillDone || retryUidNumbers(cursor).length > 0) &&
+                (cursor.consecutiveListMisses ?? 0) < MAX_CONSECUTIVE_FOLDER_LIST_MISSES
+            }
+            return (state.folderDiscoveryMisses?.[path] ?? 0) < MAX_CONSECUTIVE_FOLDER_LIST_MISSES
+          })
+          for (const path of omitted) {
+            const priorCursor = state.folders[path]
             try {
               const folderResult = await syncFolder({
                 client,
@@ -1271,14 +1318,24 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
                 assistantId,
               })
               delete state.folders[path]?.consecutiveListMisses
+              if (state.folderDiscoveryMisses) delete state.folderDiscoveryMisses[path]
               activeFolderPaths.push(path)
               newMessages += folderResult.deltaInserted
               backfillPassFailed ||= folderResult.backfillFailed
             } catch (err) {
               if ((err as { authenticationFailed?: boolean })?.authenticationFailed) throw err
-              const misses = (priorCursor.consecutiveListMisses ?? 0) + 1
-              priorCursor.consecutiveListMisses = misses
-              state.folders[path] = priorCursor
+              const misses = priorCursor
+                ? (priorCursor.consecutiveListMisses ?? 0) + 1
+                : (state.folderDiscoveryMisses?.[path] ?? 0) + 1
+              if (priorCursor) {
+                priorCursor.consecutiveListMisses = misses
+                state.folders[path] = priorCursor
+              } else {
+                state.folderDiscoveryMisses = {
+                  ...state.folderDiscoveryMisses,
+                  [path]: misses,
+                }
+              }
               if (misses < MAX_CONSECUTIVE_FOLDER_LIST_MISSES) unresolvedOmittedFolders++
             }
           }

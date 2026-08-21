@@ -204,6 +204,7 @@ function makeWorker(over: Partial<MailboxSyncWorkerDeps> & { client: ImapClientL
   const insertMessage = vi.fn(async (_input: EmailArchiveMessageInput) => ({ inserted: true, messageId: 'am-1', segmentCount: 1 }))
   const deleteFolder = vi.fn(async (_instanceId: string, _folder: string) => 0)
   const findArchivedUids = vi.fn(async (_instanceId: string, _folder: string, _uids: number[]) => new Set<number>())
+  const countArchive = vi.fn(async () => ({ total: 0, byFolder: {} as Record<string, number> }))
   const worker = createMailboxSyncWorker({
     connectorInstanceStore: store,
     resolvePersonalWorkspaceId: async () => 'ws-1',
@@ -214,6 +215,7 @@ function makeWorker(over: Partial<MailboxSyncWorkerDeps> & { client: ImapClientL
     insertMessage: (over.insertMessage ?? insertMessage) as never,
     deleteFolder: deleteFolder as never,
     findArchivedUids: (over.findArchivedUids ?? findArchivedUids) as never,
+    countArchive: (over.countArchive ?? countArchive) as never,
     ...('brain' in over ? { brain: over.brain } : {}),
     backfillChunk: over.backfillChunk,
     backfillReconcileWindow: over.backfillReconcileWindow,
@@ -221,7 +223,7 @@ function makeWorker(over: Partial<MailboxSyncWorkerDeps> & { client: ImapClientL
     ...(over.keepWarm ? { keepWarm: over.keepWarm } : {}),
     ...(over.onEvent ? { onEvent: over.onEvent } : {}),
   })
-  return { worker, store, configs, insertMessage, deleteFolder, findArchivedUids, healthCalls, instanceId: instance.id }
+  return { worker, store, configs, insertMessage, deleteFolder, findArchivedUids, countArchive, healthCalls, instanceId: instance.id }
 }
 
 // ── First sync + backfill preflight gate (D9) ───────────────────
@@ -393,6 +395,115 @@ describe('[COMP:api/mailbox-sync-worker] backfill', () => {
     expect(state.folders.Archive.backfillDone).toBe(true)
     expect(state.folders.Archive.consecutiveListMisses).toBeUndefined()
     expect(state.backfill?.status).toBe('done')
+  })
+
+  it('recovers a custom folder from archive evidence after its mutable cursor was lost', async () => {
+    const folders: Record<string, FakeFolderState> = {
+      INBOX: { uidvalidity: '7', uids: [1], sources: { 1: rfc822(1) } },
+      'Client correspondence': {
+        uidvalidity: '8',
+        uids: [1, 2],
+        sources: { 1: rfc822(1), 2: rfc822(2) },
+      },
+    }
+    const client = makeFakeImap(folders)
+    ;(client as { list: ImapClientLike['list'] }).list = async () => [{ path: 'INBOX' }]
+    const instance = instanceRow({
+      config: {
+        mailboxSync: {
+          // The archive still contains this custom path, but a partial config
+          // write lost its cursor. That must not make the remaining gap
+          // permanently undiscoverable.
+          folders: { INBOX: { uidvalidity: '7', lastUid: 1, backfillDone: true } },
+          backfill: {
+            scope: 'all',
+            requestedAt: '2026-08-21T02:00:00Z',
+            reconcileVersion: CURRENT_BACKFILL_RECONCILE_VERSION,
+            status: 'done',
+          },
+        },
+      },
+    } as never)
+    const findArchivedUids = vi.fn(async (_instanceId: string, folder: string, uids: number[]) =>
+      folder === 'Client correspondence'
+        ? new Set(uids.filter((uid) => uid === 1))
+        : new Set(uids),
+    )
+    const { worker, insertMessage, configs } = makeWorker({
+      client,
+      instance,
+      backfillChunk: 10,
+      findArchivedUids: findArchivedUids as never,
+      countArchive: vi.fn(async () => ({
+        total: 2,
+        byFolder: { 'Client correspondence': 2 },
+      })) as never,
+    })
+
+    await worker.tick()
+
+    expect(client.fetchCalls).toEqual(['Client correspondence:2'])
+    expect(insertMessage.mock.calls.map((call) => call[0].providerMessageId)).toEqual([
+      'Client correspondence:2',
+    ])
+    const state = readMailboxSyncState(configs.get('inst-1'))
+    expect(state.folders['Client correspondence']).toMatchObject({
+      uidvalidity: '8',
+      lastUid: 2,
+      backfillDone: true,
+    })
+    expect(state.folderDiscoveryMisses).toBeUndefined()
+    expect(state.backfill?.status).toBe('done')
+  })
+
+  it('bounds retries for an archive-known path with no cursor without fabricating UIDVALIDITY', async () => {
+    const folders: Record<string, FakeFolderState> = {
+      INBOX: { uidvalidity: '7', uids: [1], sources: { 1: rfc822(1) } },
+    }
+    const client = makeFakeImap(folders)
+    let missingStatusCalls = 0
+    const normalStatus = client.status.bind(client)
+    ;(client as { status: ImapClientLike['status'] }).status = async (path, query) => {
+      if (path === 'Former project') {
+        missingStatusCalls++
+        throw new Error('mailbox does not exist')
+      }
+      return normalStatus(path, query)
+    }
+    const instance = instanceRow({
+      config: {
+        mailboxSync: {
+          folders: { INBOX: { uidvalidity: '7', lastUid: 1, backfillDone: true } },
+          backfill: {
+            scope: 'all',
+            requestedAt: '2026-08-21T02:00:00Z',
+            reconcileVersion: CURRENT_BACKFILL_RECONCILE_VERSION,
+            status: 'done',
+          },
+        },
+      },
+    } as never)
+    const { worker, configs } = makeWorker({
+      client,
+      instance,
+      countArchive: vi.fn(async () => ({
+        total: 1,
+        byFolder: { 'Former project': 1 },
+      })) as never,
+    })
+
+    await worker.tick()
+    expect(readMailboxSyncState(configs.get('inst-1')).backfill?.status).toBe('running')
+    await worker.tick()
+    expect(readMailboxSyncState(configs.get('inst-1')).backfill?.status).toBe('running')
+    await worker.tick()
+
+    const state = readMailboxSyncState(configs.get('inst-1'))
+    expect(state.folderDiscoveryMisses).toEqual({ 'Former project': 3 })
+    expect(state.folders['Former project']).toBeUndefined()
+    expect(state.backfill?.status).toBe('done')
+    await worker.tick()
+    expect(missingStatusCalls).toBe(3)
   })
 
   it('retires an omitted deleted folder only after repeated direct failures', async () => {

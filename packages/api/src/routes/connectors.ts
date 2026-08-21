@@ -70,13 +70,17 @@ import {
 } from '@use-brian/shared'
 import type { ConnectorStore, ConnectorCredentials } from '../db/connector-store.js'
 import type { ConnectorInstanceStore, ConnectorInstance, ConnectorHealthStatus } from '../db/connector-instance-store.js'
+import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
 import { effectiveReadClearance, getWorkspaceMembershipWithClearanceSystem } from '../db/workspace-store.js'
+import { listUsableWorkspaceConnectors } from '../connectors/usable-connectors.js'
 import { buildConnectorAuthHeaders } from '../mcp/auth-headers.js'
 import { customConnectorRoutes } from './custom-connectors.js'
 import { validateGcsByoBinding } from '../files/gcs-byo-validate.js'
 import type { GcsServiceAccountCredentials } from '../files/gcs-client.js'
 import { validateS3ByoBinding } from '../files/s3-byo-validate.js'
 import type { S3Credentials } from '../files/s3-client.js'
+import { scanLocalDirectory } from '../files/local-directory-import.js'
+import { reconcileLocalDirectoryFiles } from '../db/local-directory-import.js'
 import { normalizeShopDomain, packShopifyTokens, packShopifyAppCredentials, unpackShopifyAppCredentials, getShopIdentity, verifyShopifyOAuthQueryHmac, exchangeShopifyAuthorizationCode } from '../shopify/client.js'
 import {
   getWordPressSiteIdentity,
@@ -171,11 +175,22 @@ type ConnectorRowOut = {
    * though `connected` is still true. Drives the "Reconnect needed" UI state.
    */
   healthStatus?: ConnectorHealthStatus
+  /** Workspace-shared rows are not personal credentials owned by the viewer. */
+  readonly?: boolean
+  /** How a workspace-shared row reaches the active workspace. */
+  source?: 'granted' | 'team_native'
+  /** OSS currently uses the generic teammate attribution for granted rows. */
+  sharedBy?: string | null
 }
 
 type ConnectorRouteOptions = {
   connectorStore: ConnectorStore
   connectorInstanceStore: ConnectorInstanceStore
+  /**
+   * Resolves the active workspace's clearance-filtered shared rows for
+   * `GET /?workspaceId=`. Omitted only by narrow route-test harnesses.
+   */
+  connectorGrantStore?: ConnectorGrantStore
   mcpSettingsStore?: McpSettingsStore
   /**
    * Enables the workspace-scoped bring-your-own GCS storage endpoints
@@ -214,6 +229,10 @@ type ConnectorRouteOptions = {
   }
   localStorage?: {
     requireWorkspaceAdmin: (userId: string, workspaceId: string) => Promise<boolean>
+    /** Read-only filesystem inventory seam. Defaults to the real scanner. */
+    scan?: typeof scanLocalDirectory
+    /** Descriptor reconciliation seam. Defaults to the Postgres implementation. */
+    reconcile?: typeof reconcileLocalDirectoryFiles
   }
   /**
    * Test seam for `/shopify/resolve-domain` (branded domain → myshopify host).
@@ -340,7 +359,11 @@ function placeholderRow(entry: ConnectorEntry): ConnectorRowOut {
 }
 
 /** A real connector_instance row, projected to the page's connector shape. */
-function instanceRow(inst: ConnectorInstance, isPrimary: boolean): ConnectorRowOut {
+function instanceRow(
+  inst: ConnectorInstance,
+  isPrimary: boolean,
+  workspaceSource?: 'granted' | 'team_native',
+): ConnectorRowOut {
   const entry = OFFICIAL_BY_ID.get(inst.provider)
   const config = inst.config ?? {}
   return {
@@ -349,7 +372,7 @@ function instanceRow(inst: ConnectorInstance, isPrimary: boolean): ConnectorRowO
     name: entry?.name ?? inst.label,
     label: inst.label,
     isPrimary,
-    addable: entry ? connectorSupportsMultipleInstances(entry) : false,
+    addable: workspaceSource ? false : entry ? connectorSupportsMultipleInstances(entry) : false,
     description: entry?.description,
     connected: inst.connected,
     ingestionEnabled: inst.ingestionEnabled,
@@ -363,6 +386,13 @@ function instanceRow(inst: ConnectorInstance, isPrimary: boolean): ConnectorRowO
       ? 'full_drive_readonly'
       : inst.provider === 'gdrive' ? 'picked_files' : undefined,
     healthStatus: inst.healthStatus,
+    ...(workspaceSource
+      ? {
+          readonly: true,
+          source: workspaceSource,
+          sharedBy: null,
+        }
+      : {}),
   }
 }
 
@@ -609,6 +639,90 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
   })
 
   // ── Local directory storage (workspace-scoped) ──────────────
+
+  router.post('/local/preflight', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const localStorage = opts.localStorage
+    if (!localStorage) { res.status(404).json({ error: 'Local storage connector not available' }); return }
+
+    const body = (req.body ?? {}) as { workspaceId?: string; path?: string }
+    const workspaceId = typeof body.workspaceId === 'string' ? body.workspaceId : ''
+    if (!UUID_RE.test(workspaceId)) { res.status(400).json({ error: 'Invalid workspaceId' }); return }
+    if (!(await localStorage.requireWorkspaceAdmin(userId, workspaceId))) {
+      res.status(403).json({ error: 'Workspace owner or admin required' }); return
+    }
+
+    try {
+      let dirPath = typeof body.path === 'string' ? body.path.trim() : ''
+      if (!dirPath) {
+        const existing = await connectorInstanceStore.findByWorkspaceProviderSystem(workspaceId, 'local')
+        dirPath = existing?.connected && typeof existing.config?.path === 'string'
+          ? existing.config.path.trim()
+          : ''
+      }
+      if (!dirPath) { res.status(400).json({ error: 'Missing path' }); return }
+      const scan = await (localStorage.scan ?? scanLocalDirectory)({ rootPath: dirPath, workspaceId })
+      res.json({
+        ok: true,
+        path: scan.rootPath,
+        fileCount: scan.fileCount,
+        totalBytes: scan.totalBytes,
+        truncated: scan.truncated,
+      })
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code
+      const message = code === 'EACCES' || code === 'EPERM'
+        ? 'Directory is not readable by the API process'
+        : err instanceof Error && err.message === 'Path is not a directory'
+          ? err.message
+          : 'Directory does not exist or cannot be scanned'
+      res.status(400).json({ error: message })
+    }
+  })
+
+  router.post('/local/import', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const localStorage = opts.localStorage
+    if (!localStorage) { res.status(404).json({ error: 'Local storage connector not available' }); return }
+
+    const body = (req.body ?? {}) as { workspaceId?: string }
+    const workspaceId = typeof body.workspaceId === 'string' ? body.workspaceId : ''
+    if (!UUID_RE.test(workspaceId)) { res.status(400).json({ error: 'Invalid workspaceId' }); return }
+    if (!(await localStorage.requireWorkspaceAdmin(userId, workspaceId))) {
+      res.status(403).json({ error: 'Workspace owner or admin required' }); return
+    }
+
+    try {
+      const existing = await connectorInstanceStore.findByWorkspaceProviderSystem(workspaceId, 'local')
+      const dirPath = existing?.connected && typeof existing.config?.path === 'string'
+        ? existing.config.path.trim()
+        : ''
+      if (!existing || !dirPath) {
+        res.status(409).json({ error: 'Connect Local Directory before importing files' }); return
+      }
+      const scan = await (localStorage.scan ?? scanLocalDirectory)({ rootPath: dirPath, workspaceId })
+      if (scan.truncated) {
+        res.status(422).json({
+          error: 'Directory exceeds the 100,000-file import limit',
+          fileCount: scan.fileCount,
+          totalBytes: scan.totalBytes,
+        })
+        return
+      }
+      const result = await (localStorage.reconcile ?? reconcileLocalDirectoryFiles)({
+        userId,
+        workspaceId,
+        connectorInstanceId: existing.id,
+        files: scan.files,
+      })
+      res.json({ ok: true, fileCount: scan.fileCount, totalBytes: scan.totalBytes, ...result })
+    } catch (err) {
+      console.error('[connectors] local import failed:', err)
+      res.status(500).json({ error: 'Failed to import Local Directory files' })
+    }
+  })
 
   router.post('/local/connect', async (req, res) => {
     const userId = req.userId
@@ -1113,14 +1227,18 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     resolved: { instance: ConnectorInstance; settings: MailboxAccountSettings },
   ) {
     const state = readMailboxSyncState(resolved.instance.config)
-    const knownFolderPaths = Object.keys(state.folders)
-    const probe = opts.imapMailbox?.probe ?? probeMailboxFolders
-    const result = await probe(resolved.settings, undefined, knownFolderPaths)
     const countArchive = opts.imapMailbox?.countArchive ?? countEmailArchiveMessages
     const archived = await countArchive(resolved.instance.id)
-    const countedPaths = new Set(result.folders.map((folder) => folder.path))
-    const omittedKnownFolder = knownFolderPaths.some((path) => !countedPaths.has(path))
-    const complete = result.complete && !omittedKnownFolder && result.total >= archived.total
+    const knownFolderPaths = [...new Set([
+      ...Object.keys(state.folders),
+      ...Object.keys(archived.byFolder),
+    ])]
+    const probe = opts.imapMailbox?.probe ?? probeMailboxFolders
+    const result = await probe(resolved.settings, undefined, knownFolderPaths)
+    // The probe owns known-path completeness, including intentional raw-LIST
+    // exclusions. The archive-count guard separately catches a regressed or
+    // partial universe without forcing an excluded special folder back in.
+    const complete = result.complete && result.total >= archived.total
     return {
       ...result,
       complete,
@@ -1237,6 +1355,7 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
           estimateComplete: probed.complete,
         },
       }
+      delete next.folderDiscoveryMisses
       await connectorInstanceStore.setConfigSystem(resolved.instance.id, { mailboxSync: next })
       // The button is an action, not a promise that the periodic poller will
       // eventually notice. Persist first, then wake the guarded worker. The
@@ -1263,9 +1382,9 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     }
   })
 
-  /** Group the caller's instances by provider, each list oldest-first. */
-  async function instancesByProvider(userId: string): Promise<Map<string, ConnectorInstance[]>> {
-    const instances = await connectorInstanceStore.listForUser(userId)
+  /** Group the caller's PERSONAL instances by provider, each list oldest-first. */
+  async function personalInstancesByProvider(userId: string): Promise<Map<string, ConnectorInstance[]>> {
+    const instances = await connectorInstanceStore.listByUser(userId, userId)
     const byProvider = new Map<string, ConnectorInstance[]>()
     for (const inst of instances) {
       if (CHANNEL_INFRASTRUCTURE_PROVIDERS.has(inst.provider)) continue
@@ -1283,8 +1402,23 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
   router.get('/', async (req, res) => {
     const userId = req.userId
     if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const workspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId : null
+    if (workspaceId && !UUID_RE.test(workspaceId)) {
+      res.status(400).json({ error: 'Invalid workspaceId' })
+      return
+    }
     try {
-      const byProvider = await instancesByProvider(userId)
+      const [byProvider, usable] = await Promise.all([
+        personalInstancesByProvider(userId),
+        workspaceId && opts.connectorGrantStore
+          ? listUsableWorkspaceConnectors({
+              connectorInstanceStore,
+              connectorGrantStore: opts.connectorGrantStore,
+              userId,
+              workspaceId,
+            })
+          : Promise.resolve([]),
+      ])
       const rows: ConnectorRowOut[] = []
 
       // Every official connector: real instances if connected/added, else the
@@ -1303,6 +1437,16 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
         insts.forEach((inst, i) => rows.push(instanceRow(inst, i === 0)))
       }
 
+      // Append only this active workspace's clearance-filtered rows. The DTO
+      // metadata is load-bearing: `readonly + team_native` selects the
+      // workspace-owned panel; without it the UI mis-buckets the row as
+      // Personal and offers invalid Expose / Transfer actions.
+      for (const item of usable) {
+        if (item.source === 'personal') continue
+        if (CHANNEL_INFRASTRUCTURE_PROVIDERS.has(item.instance.provider)) continue
+        rows.push(instanceRow(item.instance, false, item.source))
+      }
+
       res.json({ connectors: rows })
     } catch (err) {
       console.error('[connectors] list failed:', err)
@@ -1315,7 +1459,7 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     const userId = req.userId
     if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
     try {
-      const byProvider = await instancesByProvider(userId)
+      const byProvider = await personalInstancesByProvider(userId)
       const directory = OFFICIAL_CONNECTORS.map((entry) => {
         const insts = byProvider.get(entry.id) ?? []
         return {

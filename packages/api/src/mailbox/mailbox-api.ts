@@ -3,7 +3,7 @@
  *
  * Core (`packages/core/src/tools/base/mailbox.ts`) owns search policy
  * (window/cap defaults, thread stitching); this module owns the mechanism:
- * folder scope resolution (INBOX + SPECIAL-USE `\Sent` by default), the
+ * folder scope resolution (every selectable ordinary folder by default), the
  * server-side OR-tree search with the BADCHARSET client-side fallback,
  * bounded snippet fetches, MIME/charset decode (mailparser — load-bearing
  * for Chinese enterprise mail), reply threading headers, and the best-effort
@@ -26,6 +26,7 @@ import {
 import { buildImapSearchQuery, hasNonAsciiTerm } from './search-criteria.js'
 import {
   defaultMailboxSessionCache,
+  syncableFolders,
   type ImapBodyStructureNode,
   type ImapClientLike,
   type ImapFetchedMessage,
@@ -323,6 +324,12 @@ export type CreateMailboxApiOptions = {
   cacheKey: string
   /** Lazy credential resolution (the `getPat` pattern — resolved per call). */
   getSettings: () => Promise<MailboxAccountSettings>
+  /**
+   * Durable cursor/archive folder paths used when a successful LIST response
+   * is temporarily truncated. Paths that raw LIST explicitly marks special
+   * or non-selectable are still excluded.
+   */
+  getKnownFolderPaths?: () => Promise<string[]>
   sessions?: MailboxSessionCache
   /**
    * APPEND the sent bytes to the IMAP Sent folder after SMTP submission
@@ -446,19 +453,36 @@ export function createMailboxApi(opts: CreateMailboxApiOptions): MailboxApi {
       const settings = await opts.getSettings()
       return sessions.withClient(opts.cacheKey, settings, async (client) => {
         let folders: string[]
-        let sentMissing = false
         if (params.folder) {
           folders = [params.folder]
         } else {
-          const sent = await resolveSentPath(client)
-          folders = sent ? ['INBOX', sent] : ['INBOX']
-          sentMissing = !sent
+          const listed = await client.list()
+          const listedPaths = new Set(listed.map((folder) => folder.path))
+          const knownFolderPaths = await opts.getKnownFolderPaths?.() ?? []
+          folders = [...new Set([
+            ...syncableFolders(listed).map((folder) => folder.path),
+            // Only recover paths absent from raw LIST. A known path that LIST
+            // returned as Junk/Trash/Drafts/All/non-selectable is an explicit
+            // exclusion, not a truncated-list candidate.
+            ...knownFolderPaths.filter((path) => path.length > 0 && !listedPaths.has(path)),
+          ])]
         }
 
         const outcomes: FolderSearchOutcome[] = []
+        const folderFailures: unknown[] = []
         for (const folder of folders) {
-          outcomes.push(await searchFolder(client, folder, params))
+          try {
+            outcomes.push(await searchFolder(client, folder, params))
+          } catch (err) {
+            // An explicit scope has no useful partial answer. For the default
+            // whole-mailbox scope, keep healthy custom folders searchable but
+            // never turn a total provider failure into an honest-looking
+            // empty result.
+            if (params.folder || (err as { authenticationFailed?: boolean })?.authenticationFailed) throw err
+            folderFailures.push(err)
+          }
         }
+        if (folderFailures.length > 0 && outcomes.length === 0) throw folderFailures[0]
 
         const time = (d: string | null) => (d ? Date.parse(d) || 0 : 0)
         const merged = outcomes
@@ -484,8 +508,10 @@ export function createMailboxApi(opts: CreateMailboxApiOptions): MailboxApi {
             'The mail server rejected the non-ASCII search terms, so matching degraded to a client-side scan of recent subjects and senders (message bodies were not searched). Narrow by sender or date for better recall.',
           )
         }
-        if (sentMissing) {
-          notes.push('No Sent folder was found on the server, so only INBOX was searched.')
+        if (folderFailures.length > 0) {
+          notes.push(
+            `${folderFailures.length} mailbox folder(s) could not be searched, so these results may be incomplete.`,
+          )
         }
         return { hits: merged, ...(notes.length ? { note: notes.join(' ') } : {}) }
       })

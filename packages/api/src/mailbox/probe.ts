@@ -28,7 +28,9 @@ export async function probeMailboxFolders(
   const client = createClient(settings)
   await client.connect()
   try {
-    const syncable = syncableFolders(await client.list())
+    const listed = await client.list()
+    const syncable = syncableFolders(listed)
+    const listedPaths = new Set(listed.map((folder) => folder.path))
     // LIST is normally authoritative, but some enterprise servers have
     // returned a temporarily truncated folder universe while the same paths
     // remained directly addressable. The durable cursor roster lets the cheap
@@ -36,7 +38,10 @@ export async function probeMailboxFolders(
     // LIST sum as the whole mailbox.
     const paths = [...new Set([
       ...syncable.map((folder) => folder.path),
-      ...knownFolderPaths.filter((path) => path.length > 0),
+      // A known path present in raw LIST but absent from `syncable` is an
+      // intentional special/non-selectable exclusion, not a truncated-LIST
+      // recovery candidate.
+      ...knownFolderPaths.filter((path) => path.length > 0 && !listedPaths.has(path)),
     ])]
     const folders: Array<{ path: string; messages: number }> = []
     const failedFolders: Array<{ path: string }> = []

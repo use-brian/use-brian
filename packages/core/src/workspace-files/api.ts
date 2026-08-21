@@ -55,7 +55,12 @@ export type FilesConflictError = {
   path: string
 }
 
-export type FilesError = FilesQuotaError | FilesNotFoundError | FilesConflictError
+type FilesReadOnlyError = {
+  kind: 'read_only'
+  path: string
+}
+
+export type FilesError = FilesQuotaError | FilesNotFoundError | FilesConflictError | FilesReadOnlyError
 
 export type FilesResult<T> = { ok: true; value: T } | { ok: false; error: FilesError }
 
@@ -109,7 +114,7 @@ export type FilesSearchParams = {
  * tool's `execute(input, context)` can pass it through transparently.
  *
  * Errors land in the `FilesResult` envelope where they are user-facing
- * (quota, not-found, conflict). Other failures throw.
+ * (quota, not-found, conflict, read-only). Other failures throw.
  */
 export type FilesApi = {
   write(ctx: FilesContext, params: FilesWriteParams): Promise<FilesResult<WorkspaceFile>>

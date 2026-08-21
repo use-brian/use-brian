@@ -12,10 +12,25 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 vi.mock('../../connector-config.js', () => ({ getConnectorConfig: () => undefined }))
+vi.mock('../../db/email-archive-store.js', async () => {
+  const actual = await vi.importActual<typeof import('../../db/email-archive-store.js')>(
+    '../../db/email-archive-store.js',
+  )
+  return {
+    ...actual,
+    countEmailArchiveMessages: vi.fn(async () => ({
+      total: 2,
+      byFolder: { 'Archived correspondence': 2 },
+    })),
+  }
+})
 
 const sendMessage = vi.fn(async (_p: unknown) => ({ messageId: '<sent@x>', from: 'bd@harborlane.example' }))
 const resolveSender = vi.fn(async (_p: unknown) => ({ from: 'bd@harborlane.example', allowed: ['maya@harborlane.example', 'bd@harborlane.example'] }))
-const createMailboxApiMock = vi.fn((opts: { getSendAsAliases?: () => Promise<string[]> }) => ({
+const createMailboxApiMock = vi.fn((opts: {
+  getSendAsAliases?: () => Promise<string[]>
+  getKnownFolderPaths?: () => Promise<string[]>
+}) => ({
   searchMessages: vi.fn(),
   getMessage: vi.fn(),
   getAttachment: vi.fn(),
@@ -51,7 +66,13 @@ function preflightResult(over: Partial<ConnectorActionPreflight> = {}): Connecto
 
 async function inject(audit?: ConnectorActionAudit) {
   const tools = new Map<string, Tool>()
-  const getSystem = vi.fn(async () => ({ id: 'inst-imap-1', config: { sendAsAliases: ['bd@harborlane.example'] } }))
+  const getSystem = vi.fn(async () => ({
+    id: 'inst-imap-1',
+    config: {
+      sendAsAliases: ['bd@harborlane.example'],
+      mailboxSync: { folders: { 'Client correspondence': { uidvalidity: '7', lastUid: 4 } } },
+    },
+  }))
   const instanceStore = {
     getAuthCredentialsSystem: vi.fn(async () => IMAP_CREDS),
     getCredentialsSystem: vi.fn(async () => null),
@@ -92,6 +113,15 @@ describe('[COMP:tools/mailbox-imap] send-as aliases at injection', () => {
     expect(typeof opts.getSendAsAliases).toBe('function')
     expect(await opts.getSendAsAliases!()).toEqual(['bd@harborlane.example'])
     expect(getSystem).toHaveBeenCalledWith('inst-imap-1')
+  })
+
+  it('gives live search the union of cursor-known and archive-known folder paths', async () => {
+    await inject()
+    const opts = createMailboxApiMock.mock.calls[0][0]
+    expect(await opts.getKnownFolderPaths!()).toEqual([
+      'Client correspondence',
+      'Archived correspondence',
+    ])
   })
 
   it('the executed send_email audit records the RESOLVED sender, not just the bound account (row 7)', async () => {

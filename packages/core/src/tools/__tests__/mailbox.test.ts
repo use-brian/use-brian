@@ -120,8 +120,10 @@ describe('[COMP:tools/mailbox-imap] Company mailbox tools', () => {
     expect(search.description).not.toMatch(/company mailbox/i)
     expect(search.isReadOnly).toBe(true)
     expect(search.requiresConfirmation).toBeFalsy()
-    // D12 #3 — the description must say sent mail is in the default scope.
-    expect(search.description).toMatch(/INBOX and Sent/i)
+    // D12 #3 — the description must say rule-moved custom-folder mail is in
+    // the default scope, while the noisy/special folders remain excluded.
+    expect(search.description).toMatch(/INBOX, Sent, Archive, and custom folders/i)
+    expect(search.description).toMatch(/Junk, Trash, Drafts, aggregate All Mail/i)
 
     const get = toolByName(tools, 'imapGetMessage')
     expect(get.description).toMatch(/^Read a full email from the user's connected email account/)
@@ -150,7 +152,7 @@ describe('[COMP:tools/mailbox-imap] Company mailbox tools', () => {
     await search.execute({ keywords: ['invoice'] }, CTX)
     const params = (api.searchMessages as ReturnType<typeof vi.fn>).mock.calls[0][0]
     expect(params.limit).toBe(MAILBOX_DEFAULT_LIMIT)
-    expect(params.folder).toBeUndefined()  // impl default = INBOX + Sent
+    expect(params.folder).toBeUndefined()  // impl default = every selectable ordinary folder
     const since = new Date(`${params.since}T00:00:00Z`).getTime()
     const ninetyDaysAgo = Date.now() - 90 * 24 * 60 * 60 * 1000
     expect(Math.abs(since - ninetyDaysAgo)).toBeLessThan(2 * 24 * 60 * 60 * 1000)

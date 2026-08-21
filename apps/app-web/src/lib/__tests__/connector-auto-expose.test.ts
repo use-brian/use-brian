@@ -128,6 +128,19 @@ describe("[COMP:app-web/connector-auto-expose] resolveAutoExpose", () => {
     ).toEqual({ expose: true, connectorInstanceId: "inst-own" });
   });
 
+  it("never exposes a UUID-armed workspace-owned storage binding", () => {
+    expect(
+      resolveAutoExpose(
+        base({
+          connectors: [
+            row({ id: "local", connectorInstanceId: "inst-local", readonly: true }),
+          ],
+          arm: { slug: "local", instanceId: "inst-local" },
+        }),
+      ),
+    ).toEqual({ expose: false, pending: false });
+  });
+
   it("exposes in a solo workspace too — the grant is what reaches workspace config pickers", () => {
     expect(resolveAutoExpose(base({ workspace: soloWorkspace }))).toEqual({
       expose: true,

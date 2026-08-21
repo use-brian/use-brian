@@ -102,4 +102,33 @@ describe('[COMP:api/mailbox-connect-routes] mailbox preflight completeness', () 
       total: 97,
     })
   })
+
+  it('does not revive a known path that raw LIST now marks as excluded', async () => {
+    const client = {
+      connect: vi.fn(async () => {}),
+      logout: vi.fn(async () => {}),
+      close: vi.fn(),
+      list: vi.fn(async () => [
+        { path: 'INBOX' },
+        { path: 'Spam', specialUse: '\\Junk' },
+        { path: '[Gmail]', flags: new Set(['\\Noselect']) },
+      ]),
+      status: vi.fn(async (path: string) => ({
+        path,
+        messages: 4,
+        uidNext: 5,
+        uidValidity: 1n,
+      })),
+    } as unknown as ImapClientLike
+
+    await expect(
+      probeMailboxFolders(SETTINGS, () => client, ['Spam', '[Gmail]']),
+    ).resolves.toEqual({
+      folders: [{ path: 'INBOX', messages: 4 }],
+      failedFolders: [],
+      complete: true,
+      total: 4,
+    })
+    expect(client.status).toHaveBeenCalledTimes(1)
+  })
 })

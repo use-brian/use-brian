@@ -40,6 +40,9 @@ type FakeFolder = {
   rejectKeywordSearch?: boolean
   /** Downloadable body parts, keyed `${uid}:${partId}`. */
   parts?: Record<string, FakePart>
+  specialUse?: string
+  flags?: Set<string>
+  lockError?: string
 }
 
 function rfc822(body: string, headers: Record<string, string>): Buffer {
@@ -60,13 +63,16 @@ function makeFakeClient(folders: Record<string, FakeFolder>, opts?: { specialUse
     async logout() {},
     close() {},
     async list() {
-      return Object.keys(folders).map((path) => ({
+      return Object.entries(folders).map(([path, folder]) => ({
         path,
+        ...(folder.specialUse ? { specialUse: folder.specialUse } : {}),
         ...(opts?.specialUseSent === path ? { specialUse: '\\Sent' } : {}),
+        ...(folder.flags ? { flags: folder.flags } : {}),
       }))
     },
     async getMailboxLock(path: string) {
       if (!folders[path]) throw new Error(`no such folder ${path}`)
+      if (folders[path].lockError) throw new Error(folders[path].lockError)
       openFolder = path
       return { release() {} }
     },
@@ -141,6 +147,7 @@ function makeApi(
     saveSentCopy?: boolean
     settings?: MailboxAccountSettings
     sendAsAliases?: string[]
+    knownFolderPaths?: string[]
   } = {},
 ) {
   const sessions = createMailboxSessionCache({ createClient: () => client })
@@ -151,45 +158,89 @@ function makeApi(
     sendComposed: (over.sendComposed ?? vi.fn(async () => {})) as never,
     ...(over.saveSentCopy !== undefined ? { saveSentCopy: over.saveSentCopy } : {}),
     ...(over.sendAsAliases ? { getSendAsAliases: async () => over.sendAsAliases! } : {}),
+    ...(over.knownFolderPaths ? { getKnownFolderPaths: async () => over.knownFolderPaths! } : {}),
   })
 }
 
 const BASE_PARAMS = { since: '2026-01-01', limit: 20 }
 
 describe('[COMP:api/mailbox-imap-client] searchMessages folder scope', () => {
-  it('searches INBOX and the SPECIAL-USE \\Sent folder by default (D12 #3)', async () => {
+  it('searches INBOX, Sent, and regular custom folders by default (D12 #3)', async () => {
     const { client, searches } = makeFakeClient(
       {
         INBOX: { uids: [1], messages: { 1: msg(1) } },
         'Sent Messages': { uids: [2], messages: { 2: msg(2, { subject: 'my reply' }) } },
+        'Client correspondence': { uids: [3], messages: { 3: msg(3, { subject: 'moved by rule' }) } },
       },
       { specialUseSent: 'Sent Messages' },
     )
     const api = makeApi(client)
     const { hits } = await api.searchMessages({ ...BASE_PARAMS, keywords: ['reply'] })
     const searchedFolders = [...new Set(searches.map((s) => s.folder))]
-    expect(searchedFolders).toEqual(expect.arrayContaining(['INBOX', 'Sent Messages']))
-    expect(hits.map((h) => h.folder)).toEqual(expect.arrayContaining(['INBOX', 'Sent Messages']))
+    expect(searchedFolders).toEqual(['INBOX', 'Sent Messages', 'Client correspondence'])
+    expect(hits.map((h) => h.folder)).toEqual(expect.arrayContaining([
+      'INBOX',
+      'Sent Messages',
+      'Client correspondence',
+    ]))
   })
 
-  it('falls back to well-known Sent folder names when no SPECIAL-USE flag exists', async () => {
+  it('searches a cursor/archive-known custom folder omitted from a truncated LIST response', async () => {
+    const fake = makeFakeClient({
+      INBOX: { uids: [1], messages: { 1: msg(1) } },
+      'Client correspondence': { uids: [2], messages: { 2: msg(2) } },
+    })
+    ;(fake.client as { list: ImapClientLike['list'] }).list = async () => [{ path: 'INBOX' }]
+    const result = await makeApi(fake.client, {
+      knownFolderPaths: ['INBOX', 'Client correspondence'],
+    }).searchMessages({ ...BASE_PARAMS })
+
+    expect([...new Set(fake.searches.map((search) => search.folder))]).toEqual([
+      'INBOX',
+      'Client correspondence',
+    ])
+    expect(result.hits.map((hit) => hit.folder)).toEqual(expect.arrayContaining([
+      'INBOX',
+      'Client correspondence',
+    ]))
+  })
+
+  it('excludes Junk, Trash, Drafts, All Mail, and non-selectable containers from the default scope', async () => {
     const { client, searches } = makeFakeClient({
       INBOX: { uids: [1], messages: { 1: msg(1) } },
-      '已发送': { uids: [], messages: {} },
+      Archive: { uids: [], messages: {} },
+      Junk: { uids: [], messages: {}, specialUse: '\\Junk' },
+      Trash: { uids: [], messages: {}, specialUse: '\\Trash' },
+      Drafts: { uids: [], messages: {}, specialUse: '\\Drafts' },
+      'All Mail': { uids: [], messages: {}, specialUse: '\\All' },
+      Container: { uids: [], messages: {}, flags: new Set(['\\Noselect']) },
     })
     const api = makeApi(client)
     await api.searchMessages({ ...BASE_PARAMS })
-    expect(searches.map((s) => s.folder)).toEqual(expect.arrayContaining(['INBOX', '已发送']))
+    expect([...new Set(searches.map((s) => s.folder))]).toEqual(['INBOX', 'Archive'])
   })
 
-  it('searches only the explicit folder when one is given, and only INBOX when no Sent exists', async () => {
+  it('searches only the explicit folder when one is given', async () => {
     const explicit = makeFakeClient({ INBOX: { uids: [], messages: {} }, Archive: { uids: [3], messages: { 3: msg(3) } } })
     await makeApi(explicit.client).searchMessages({ ...BASE_PARAMS, folder: 'Archive' })
     expect([...new Set(explicit.searches.map((s) => s.folder))]).toEqual(['Archive'])
+  })
 
-    const inboxOnly = makeFakeClient({ INBOX: { uids: [1], messages: { 1: msg(1) } } })
-    const result = await makeApi(inboxOnly.client).searchMessages({ ...BASE_PARAMS })
-    expect(result.note).toMatch(/only INBOX/i)
+  it('returns healthy-folder results with an honest note when one default folder fails', async () => {
+    const { client } = makeFakeClient({
+      INBOX: { uids: [1], messages: { 1: msg(1) } },
+      'Broken custom folder': { uids: [], messages: {}, lockError: 'cannot select folder' },
+    })
+    const result = await makeApi(client).searchMessages({ ...BASE_PARAMS })
+    expect(result.hits.map((hit) => hit.folder)).toEqual(['INBOX'])
+    expect(result.note).toMatch(/1 mailbox folder.*incomplete/i)
+  })
+
+  it('throws when every default folder fails instead of returning a false empty result', async () => {
+    const { client } = makeFakeClient({
+      INBOX: { uids: [], messages: {}, lockError: 'server unavailable' },
+    })
+    await expect(makeApi(client).searchMessages({ ...BASE_PARAMS })).rejects.toThrow('server unavailable')
   })
 
   it('caps per-folder fetches to the limit (an unindexed scan cannot flood the turn)', async () => {

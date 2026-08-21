@@ -131,7 +131,7 @@ export type MailboxSearchParams = {
   subject?: string
   /**
    * Explicit folder override. Undefined = the implementation's default scope:
-   * INBOX plus the server's Sent folder (resolved via SPECIAL-USE `\Sent`).
+   * every selectable ordinary folder, including regular custom/nested folders.
    */
   folder?: string
   /** YYYY-MM-DD lower bound — core always supplies one (default window). */
@@ -417,7 +417,7 @@ export function createMailboxTools(
       "Search email in the user's connected email account. Use this to summarize email, check recent email, or find specific email regardless of provider. " +
       'The email account is connected through IMAP/SMTP, which is the connection method rather than the provider; it may be hosted by Gmail/Google Workspace, AliMail, or another provider. ' +
       "It is the user's exact bound address, never the assistant's own address. " +
-      'Searches INBOX and Sent by default, so "what did I reply to X" is answerable; pass `folder` to search elsewhere. ' +
+      'Searches every selectable ordinary folder by default, including INBOX, Sent, Archive, and custom folders, so mail moved by a user or provider rule is still discoverable. Junk, Trash, Drafts, aggregate All Mail, and non-selectable containers are excluded; pass `folder` to search one folder only. ' +
       'Server-side search is substring matching with no ranking — iterate like grep: start with 2-4 `keywords` (they are OR\'d in one round trip, so include synonyms), ' +
       'then refine by sender, subject, or date. Results come back grouped into conversation threads with snippets. ' +
       `Defaults to the last ${MAILBOX_DEFAULT_WINDOW_DAYS} days — pass \`since\` to search older mail. ` +
@@ -433,7 +433,7 @@ export function createMailboxTools(
       folder: z
         .string()
         .optional()
-        .describe('Search a specific folder instead of the default INBOX + Sent scope.'),
+        .describe('Search one specific folder instead of the default all-selectable-folders scope.'),
       since: z
         .string()
         .regex(/^\d{4}-\d{2}-\d{2}$/)

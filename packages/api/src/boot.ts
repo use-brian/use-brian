@@ -4681,6 +4681,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     app.use('/api/connectors', requireAuth(env.JWT_SECRET), connectorRoutes({
       connectorStore,
       connectorInstanceStore,
+      connectorGrantStore,
       mcpSettingsStore,
       gcsByo: {
         requireWorkspaceAdmin: async (userId, workspaceId) => {

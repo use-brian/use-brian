@@ -25,7 +25,7 @@ describe("[COMP:app-web/studio-connectors] Local Directory connect form", () => 
     expect(localConnectBranch).toContain("revealConnectForm(rid)");
   });
 
-  it("submits the server-validated active workspace and refuses an empty id", () => {
+  it("preflights, connects, and imports for the server-validated active workspace", () => {
     expect(page).toContain("const { activeId, active } = useWorkspaces();");
     expect(page).toContain('const workspaceId = activeId ?? "";');
     expect(page).not.toContain("useParams");
@@ -35,6 +35,9 @@ describe("[COMP:app-web/studio-connectors] Local Directory connect form", () => 
     const localSubmit = page.slice(start, end);
 
     expect(localSubmit).toContain("if (!workspaceId)");
-    expect(localSubmit).toContain("JSON.stringify({ workspaceId, path: localDirPath.trim() })");
+    expect(localSubmit).toContain("await preflightLocal(path)");
+    expect(localSubmit).toContain("await confirmLocalImport(preflight)");
+    expect(localSubmit).toContain("JSON.stringify({ workspaceId, path })");
+    expect(localSubmit).toContain("await importLocalDirectory()");
   });
 });
