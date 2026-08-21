@@ -70,6 +70,34 @@ function baseParams() {
   }
 }
 
+function whatsappCloudIntegration(allowedUserIds = ['15551234567']) {
+  return {
+    id: 'int-wa',
+    channelId: 'channel-wa',
+    channelType: 'whatsapp' as const,
+    teamId: 'waba-1',
+    teamName: 'Support',
+    botUserId: 'phone-1',
+    botUsername: null,
+    config: { userAccessMode: 'allowlist' as const, allowedUserIds },
+    status: 'active' as const,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    lastEventAt: null,
+    connectorInstanceId: null,
+    credentials: {
+      provider: 'cloud_api' as const,
+      access_token: 'cloud-token',
+      app_secret: 'app-secret',
+      verify_token: 'verify-token',
+      phone_number_id: 'phone-1',
+      waba_id: 'waba-1',
+      display_phone_number: '+15550000000',
+      graph_api_version: 'v26.0',
+    },
+  }
+}
+
 beforeEach(() => {
   sendMessage.mockReset()
   sendMessage.mockResolvedValue('1751970000.111111')
@@ -264,31 +292,7 @@ describe('[COMP:workflow/channel-delivery] thread-reply pass-through', () => {
   })
 
   it('whatsapp cloud: replies through the exact triggering integration', async () => {
-    vi.mocked(integrationStore.getCredentialsForAssistantIntegrationSystem).mockResolvedValueOnce({
-      id: 'int-wa',
-      channelId: 'channel-wa',
-      channelType: 'whatsapp',
-      teamId: 'waba-1',
-      teamName: 'Support',
-      botUserId: 'phone-1',
-      botUsername: null,
-      config: { userAccessMode: 'allowlist', allowedUserIds: ['15551234567'] },
-      status: 'active',
-      createdAt: new Date(),
-      updatedAt: new Date(),
-      lastEventAt: null,
-      connectorInstanceId: null,
-      credentials: {
-        provider: 'cloud_api',
-        access_token: 'cloud-token',
-        app_secret: 'app-secret',
-        verify_token: 'verify-token',
-        phone_number_id: 'phone-1',
-        waba_id: 'waba-1',
-        display_phone_number: '+15550000000',
-        graph_api_version: 'v26.0',
-      },
-    })
+    vi.mocked(integrationStore.getCredentialsForAssistantIntegrationSystem).mockResolvedValueOnce(whatsappCloudIntegration())
     const deliver = createWorkflowChannelDelivery({
       integrationStore,
       now: () => Date.parse('2026-08-17T12:00:00.000Z'),
@@ -300,6 +304,8 @@ describe('[COMP:workflow/channel-delivery] thread-reply pass-through', () => {
       channelId: '15551234567',
       channelIntegrationId: 'int-wa',
       replyToTrigger: {
+        actorId: '15551234567',
+        recipientType: 'individual',
         providerAccountId: 'phone-1',
         occurredAt: '2026-08-17T11:00:00.000Z',
       },
@@ -309,6 +315,7 @@ describe('[COMP:workflow/channel-delivery] thread-reply pass-through', () => {
       accessToken: 'cloud-token',
       phoneNumberId: 'phone-1',
       graphApiVersion: 'v26.0',
+      recipientType: 'individual',
     })
     expect(sendMessage).toHaveBeenCalledWith(
       '15551234567',
@@ -322,6 +329,63 @@ describe('[COMP:workflow/channel-delivery] thread-reply pass-through', () => {
     })
   })
 
+  it('whatsapp cloud: checks the participant allowlist and replies to the triggering group', async () => {
+    vi.mocked(integrationStore.getCredentialsForAssistantIntegrationSystem).mockResolvedValueOnce(whatsappCloudIntegration())
+    const deliver = createWorkflowChannelDelivery({
+      integrationStore,
+      now: () => Date.parse('2026-08-17T12:00:00.000Z'),
+    })
+
+    const outcome = await deliver({
+      ...baseParams(),
+      channelType: 'whatsapp',
+      channelId: 'group-1',
+      channelIntegrationId: 'int-wa',
+      replyToTrigger: {
+        actorId: '15551234567',
+        recipientType: 'group',
+        providerAccountId: 'phone-1',
+        occurredAt: '2026-08-17T11:00:00.000Z',
+      },
+    })
+
+    expect(mockedCreateWhatsAppCloudAdapter).toHaveBeenCalledWith({
+      accessToken: 'cloud-token',
+      phoneNumberId: 'phone-1',
+      graphApiVersion: 'v26.0',
+      recipientType: 'group',
+    })
+    expect(sendMessage).toHaveBeenCalledWith(
+      'group-1',
+      { text: 'per-person update', format: 'markdown' },
+    )
+    expect(outcome).toMatchObject({ status: 'delivered', channelId: 'group-1' })
+  })
+
+  it('whatsapp cloud: refuses a delayed group reply when the triggering participant is no longer allowed', async () => {
+    vi.mocked(integrationStore.getCredentialsForAssistantIntegrationSystem).mockResolvedValueOnce(whatsappCloudIntegration([]))
+    const deliver = createWorkflowChannelDelivery({
+      integrationStore,
+      now: () => Date.parse('2026-08-17T12:00:00.000Z'),
+    })
+
+    const outcome = await deliver({
+      ...baseParams(),
+      channelType: 'whatsapp',
+      channelId: 'group-1',
+      channelIntegrationId: 'int-wa',
+      replyToTrigger: {
+        actorId: '15551234567',
+        recipientType: 'group',
+        providerAccountId: 'phone-1',
+        occurredAt: '2026-08-17T11:00:00.000Z',
+      },
+    })
+
+    expect(outcome).toEqual({ status: 'skipped', channelType: 'whatsapp', reason: 'access_denied' })
+    expect(mockedCreateWhatsAppCloudAdapter).not.toHaveBeenCalled()
+  })
+
   it('whatsapp cloud: refuses replies after the customer-service window', async () => {
     const deliver = createWorkflowChannelDelivery({
       integrationStore,
@@ -333,6 +397,8 @@ describe('[COMP:workflow/channel-delivery] thread-reply pass-through', () => {
       channelId: '15551234567',
       channelIntegrationId: 'int-wa',
       replyToTrigger: {
+        actorId: '15551234567',
+        recipientType: 'individual',
         providerAccountId: 'phone-1',
         occurredAt: '2026-08-17T11:59:59.000Z',
       },

@@ -152,7 +152,7 @@ export function createWorkflowChannelDelivery(
       ) {
         return { status: 'skipped', channelType, reason: 'provider_mismatch' }
       }
-      if (!whatsappCloudUserAllowed(integration.config ?? {}, channelId)) {
+      if (!whatsappCloudUserAllowed(integration.config ?? {}, replyToTrigger.actorId)) {
         return { status: 'skipped', channelType, reason: 'access_denied' }
       }
 
@@ -173,6 +173,7 @@ export function createWorkflowChannelDelivery(
         graphApiVersion: typeof credentials.graph_api_version === 'string'
           ? credentials.graph_api_version
           : undefined,
+        recipientType: replyToTrigger.recipientType,
       }).sendMessage(channelId, { text: deliverable, format: 'markdown' })
       return {
         status: 'delivered',

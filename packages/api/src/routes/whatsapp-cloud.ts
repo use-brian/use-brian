@@ -123,6 +123,7 @@ export async function dispatchWhatsAppCloudWorkflowEvent(input: {
   const raw = incoming.raw as {
     message?: { type?: unknown }
     phoneNumberId?: unknown
+    groupId?: unknown
   } | null
   await dispatcher.dispatch({
     workspaceId,
@@ -132,6 +133,7 @@ export async function dispatchWhatsAppCloudWorkflowEvent(input: {
     channelId: incoming.channelId,
     mentions: [],
     isBot: false,
+    isGroupChat: incoming.isGroupChat,
     providerAccountId,
     occurredAt: new Date(incoming.timestamp * 1000).toISOString(),
     payload: {
@@ -139,6 +141,7 @@ export async function dispatchWhatsAppCloudWorkflowEvent(input: {
       message_id: incoming.messageId,
       from: incoming.userId,
       phone_number_id: typeof raw?.phoneNumberId === 'string' ? raw.phoneNumberId : null,
+      group_id: typeof raw?.groupId === 'string' ? raw.groupId : null,
       message_type: typeof raw?.message?.type === 'string' ? raw.message.type : null,
       media_type: incoming.mediaType ?? null,
     },
@@ -253,7 +256,8 @@ export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router 
         isIdentified = resolved.isIdentified
       }
 
-      const confirmKey = `${channelId}:${incoming.channelId}`
+      const conversationKey = `${channelId}:${incoming.channelId}`
+      const confirmKey = `${conversationKey}:${incoming.userId}`
       const parked = pending.get(confirmKey)
       if (parked) {
         const decision = DECISIONS[incoming.text.trim().toLowerCase()]
@@ -262,7 +266,7 @@ export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router 
         if (decision) return
       }
 
-      await withChatLock(`whatsapp-cloud:${confirmKey}`, () => processMessage({
+      await withChatLock(`whatsapp-cloud:${conversationKey}`, () => processMessage({
         credentials, incoming, assistant, ownerId, channelUserId, isIdentified,
         externalConnectorToolsAllowed: whatsappCloudExternalConnectorToolsAllowed(config, isIdentified),
         routing, confirmKey,
@@ -300,6 +304,7 @@ export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router 
       accessToken: credentials.access_token,
       phoneNumberId: credentials.phone_number_id,
       graphApiVersion: credentials.graph_api_version,
+      recipientType: incoming.isGroupChat ? 'group' as const : 'individual' as const,
     }
     const adapter = createWhatsAppCloudAdapter(apiOptions)
     const userContentBlocks: ContentBlock[] = []
@@ -354,7 +359,7 @@ export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router 
       messageText: incoming.text,
       rawUserText: incoming.text,
       userContentBlocks,
-      isGroupChat: false,
+      isGroupChat: incoming.isGroupChat,
       replyToMessageId: incoming.replyToMessageId ?? null,
       incomingChannelMessageId: incoming.messageId ?? null,
       archiveIncoming: incoming,
