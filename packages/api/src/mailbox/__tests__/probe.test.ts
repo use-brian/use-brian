@@ -56,4 +56,50 @@ describe('[COMP:api/mailbox-connect-routes] mailbox preflight completeness', () 
       total: 6,
     })
   })
+
+  it('directly counts a previously seen folder omitted from the latest LIST response', async () => {
+    const client = {
+      connect: vi.fn(async () => {}),
+      logout: vi.fn(async () => {}),
+      close: vi.fn(),
+      list: vi.fn(async () => [{ path: 'INBOX' }]),
+      status: vi.fn(async (path: string) => ({
+        path,
+        messages: path === 'INBOX' ? 97 : 5_400,
+        uidNext: 1,
+        uidValidity: 1n,
+      })),
+    } as unknown as ImapClientLike
+
+    await expect(probeMailboxFolders(SETTINGS, () => client, ['INBOX', 'Archive'])).resolves.toEqual({
+      folders: [
+        { path: 'INBOX', messages: 97 },
+        { path: 'Archive', messages: 5_400 },
+      ],
+      failedFolders: [],
+      complete: true,
+      total: 5_497,
+    })
+    expect(client.status).toHaveBeenCalledWith('Archive', expect.any(Object))
+  })
+
+  it('keeps the estimate incomplete when an omitted known folder is no longer addressable', async () => {
+    const client = {
+      connect: vi.fn(async () => {}),
+      logout: vi.fn(async () => {}),
+      close: vi.fn(),
+      list: vi.fn(async () => [{ path: 'INBOX' }]),
+      status: vi.fn(async (path: string) => {
+        if (path === 'Archive') throw new Error('folder temporarily unavailable')
+        return { path, messages: 97, uidNext: 98, uidValidity: 1n }
+      }),
+    } as unknown as ImapClientLike
+
+    await expect(probeMailboxFolders(SETTINGS, () => client, ['Archive'])).resolves.toMatchObject({
+      folders: [{ path: 'INBOX', messages: 97 }],
+      failedFolders: [{ path: 'Archive' }],
+      complete: false,
+      total: 97,
+    })
+  })
 })

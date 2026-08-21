@@ -122,6 +122,7 @@ export function ImapSyncPanel({ instanceId }: { instanceId?: string } = {}) {
   const [probe, setProbe] = useState<ProbeResult | null>(null);
   const [probing, setProbing] = useState(false);
   const [arming, setArming] = useState(false);
+  const [syncStarted, setSyncStarted] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [aliasDraft, setAliasDraft] = useState("");
   const [aliasSaving, setAliasSaving] = useState(false);
@@ -177,6 +178,7 @@ export function ImapSyncPanel({ instanceId }: { instanceId?: string } = {}) {
         body: JSON.stringify({ scope, instanceId }),
       });
       if (res.ok) {
+        setSyncStarted(true);
         setProbe(null);
         await loadStatus();
       } else {
@@ -255,6 +257,11 @@ export function ImapSyncPanel({ instanceId }: { instanceId?: string } = {}) {
     <div className="space-y-2 border border-border rounded-lg p-3">
       <div className="text-[13px] font-medium">{tm.syncStatusTitle}</div>
       <p className="text-xs text-muted-foreground">{syncLine}</p>
+      {syncStarted && (
+        <p className="text-xs text-muted-foreground" role="status">
+          {tm.fullResyncStarted}
+        </p>
+      )}
       {/* The IDLE watcher's posture in one line ("Live: connected, last new
           mail at 09:41"). Absent until a watcher has ever reported. */}
       {liveLine && (

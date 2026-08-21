@@ -78,15 +78,16 @@ type BrowseDirectoryProps = {
   onClose: () => void;
   onConnectorAdded: () => void;
   /**
-   * Launches the connectors page's OAuth flow for an oauth_required entry.
-   * The page owns the per-provider authorize/setup flow, closes this catalog,
-   * selects hidden providers before showing inline forms, and threads
-   * `[:add]:<workspaceId>` through `state` so both Connect and "Add another"
-   * land on the right callback with the right intent.
+   * Launches the connectors page's canonical per-provider setup flow.
+   * The page owns OAuth, inline credential forms, and generic connect
+   * mutations; it closes this catalog and selects hidden providers before
+   * showing inline forms. OAuth also threads `[:add]:<workspaceId>` through
+   * `state` so both Connect and "Add another" land on the right callback with
+   * the right intent.
    * Absent → the modal falls back to its degraded self-built Google URL
    * (legacy standalone use).
    */
-  onOauthConnect?: (entry: { id: string }, opts?: { addAnother?: boolean }) => void;
+  onConnectorConnect?: (entry: { id: string }, opts?: { addAnother?: boolean }) => void;
   /** Opens provider app settings without starting OAuth. */
   onConfigureApp?: (entry: { id: string }) => void;
 };
@@ -101,7 +102,7 @@ type SkillCatalogEntry = {
   source: string;
 };
 
-export function BrowseDirectory({ open, onClose, onConnectorAdded, onOauthConnect, onConfigureApp }: BrowseDirectoryProps) {
+export function BrowseDirectory({ open, onClose, onConnectorAdded, onConnectorConnect, onConfigureApp }: BrowseDirectoryProps) {
   const t = useT();
   const [activeTab, setActiveTab] = useState<"connectors" | "skills">("connectors");
   const [directory, setDirectory] = useState<DirectoryEntry[]>([]);
@@ -212,22 +213,24 @@ export function BrowseDirectory({ open, onClose, onConnectorAdded, onOauthConnec
   // the create-disconnected-instance path (the rail's PAT form targets the
   // new instance by id).
   function handleAddAnother(entry: DirectoryEntry) {
-    if (entry.oauth_required && onOauthConnect) {
-      onOauthConnect(entry, { addAnother: true });
+    if (entry.oauth_required && onConnectorConnect) {
+      onConnectorConnect(entry, { addAnother: true });
       return;
     }
     handleAdd(entry);
   }
 
   async function handleConnect(entry: DirectoryEntry) {
-    if (entry.id === "cli") {
-      onClose();
+    // The connectors page is the single owner of provider-specific setup.
+    // In particular, Local Directory needs an inline path form before its
+    // body-requiring route can be called; the modal's generic empty POST would
+    // otherwise fail UUID validation before the form ever appeared.
+    if (onConnectorConnect) {
+      onConnectorConnect(entry);
       return;
     }
-    // Prefer the page's OAuth flow (correct per-provider authorize URL +
-    // workspace-scoped return); the block below is the degraded fallback.
-    if (entry.oauth_required && onOauthConnect) {
-      onOauthConnect(entry);
+    if (entry.id === "cli") {
+      onClose();
       return;
     }
     setAddingId(entry.id);
@@ -254,7 +257,7 @@ export function BrowseDirectory({ open, onClose, onConnectorAdded, onOauthConnec
       return;
     }
 
-    // Non-OAuth connectors
+    // Degraded standalone fallback for callers without the page handoff.
     try {
       const res = await authFetch(`${API_URL}/api/connectors/${entry.id}/connect`, {
         method: "POST",

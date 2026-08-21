@@ -106,6 +106,8 @@ export type MailboxFolderCursor = {
   backfillDone?: boolean
   /** Sparse durable retry ledger for UIDs that are still absent from the archive. */
   retryUids?: Record<string, MailboxUidRetry>
+  /** Consecutive successful LIST passes that omitted this previously seen path. */
+  consecutiveListMisses?: number
 }
 
 export type MailboxUidRetry = {
@@ -831,7 +833,9 @@ const DEFAULT_INTERVAL_MS = 5 * 60_000
 const DEFAULT_DELTA_CHUNK = 100
 const DEFAULT_BACKFILL_CHUNK = 200
 const DEFAULT_BACKFILL_RECONCILE_WINDOW = 2_000
-export const CURRENT_BACKFILL_RECONCILE_VERSION = 1
+export const CURRENT_BACKFILL_RECONCILE_VERSION = 2
+/** A renamed/deleted folder must not wedge history forever, but one short LIST is not enough to retire it. */
+const MAX_CONSECUTIVE_FOLDER_LIST_MISSES = 3
 
 export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyncWorker {
   const sessions = deps.sessions ?? createMailboxSessionCache()
@@ -1182,16 +1186,35 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
       for (const cursor of Object.values(state.folders)) {
         delete cursor.backfillLow
         delete cursor.backfillDone
+        delete cursor.consecutiveListMisses
       }
     }
 
     let newMessages = 0
     let activeFolderPaths: string[] = []
+    let unresolvedOmittedFolders = 0
     let backfillPassFailed = false
     try {
       await sessions.withClient(`sync:${inst.id}`, settings, async (client) => {
         const syncable = syncableFolders(await client.list())
         activeFolderPaths = syncable.map((folder) => folder.path)
+        const listedPaths = new Set(activeFolderPaths)
+        for (const path of activeFolderPaths) {
+          const cursor = state.folders[path]
+          if (cursor) delete cursor.consecutiveListMisses
+        }
+
+        // A later LIST can reveal a folder that was missing when an earlier
+        // pass declared the then-visible roster complete. Reopen the durable
+        // request before syncFolder sees it, so the new/reappeared folder is
+        // backfilled on this same tick instead of merely establishing a delta
+        // cursor and silently skipping its history forever.
+        if (state.backfill?.status === 'done' && activeFolderPaths.some((path) => {
+          const cursor = state.folders[path]
+          return !cursor || !cursor.backfillDone || retryUidNumbers(cursor).length > 0
+        })) {
+          state.backfill.status = 'running'
+        }
         // Per-folder isolation: a folder that throws must not deny every LATER
         // folder its turn. Previously the first throw escaped this loop, so on a
         // mailbox whose second folder failed, folders three and four were never
@@ -1223,6 +1246,43 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
             folderErrors.push(`${f.path}: ${errText(err)}`)
           }
         }
+
+        // A successful LIST response can still be a transiently truncated
+        // folder universe. While history is active, use the durable roster to
+        // try omitted paths directly. If STATUS/SELECT still works, the path is
+        // active and continues normally. Only repeated direct failures retire
+        // a genuinely deleted/renamed path; LIST keeps running every later tick
+        // and will reopen the walk if that path ever reappears.
+        if (state.backfill?.status !== 'done') {
+          const omitted = Object.entries(state.folders).filter(([path, cursor]) =>
+            !listedPaths.has(path) &&
+            (!cursor.backfillDone || retryUidNumbers(cursor).length > 0) &&
+            (cursor.consecutiveListMisses ?? 0) < MAX_CONSECUTIVE_FOLDER_LIST_MISSES,
+          )
+          for (const [path, priorCursor] of omitted) {
+            try {
+              const folderResult = await syncFolder({
+                client,
+                inst,
+                settings,
+                folder: path,
+                state,
+                workspaceId,
+                assistantId,
+              })
+              delete state.folders[path]?.consecutiveListMisses
+              activeFolderPaths.push(path)
+              newMessages += folderResult.deltaInserted
+              backfillPassFailed ||= folderResult.backfillFailed
+            } catch (err) {
+              if ((err as { authenticationFailed?: boolean })?.authenticationFailed) throw err
+              const misses = (priorCursor.consecutiveListMisses ?? 0) + 1
+              priorCursor.consecutiveListMisses = misses
+              state.folders[path] = priorCursor
+              if (misses < MAX_CONSECUTIVE_FOLDER_LIST_MISSES) unresolvedOmittedFolders++
+            }
+          }
+        }
         if (folderErrors.length > 0) {
           if (state.backfill) {
             state.backfill.estimateComplete = false
@@ -1246,14 +1306,15 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
         const activeCursors = activeFolderPaths
           .map((path) => state.folders[path])
           .filter((cursor): cursor is MailboxFolderCursor => Boolean(cursor))
-        const estimateComplete = activeCursors.every((cursor) => typeof cursor.serverMessages === 'number')
+        const estimateComplete = unresolvedOmittedFolders === 0 &&
+          activeCursors.every((cursor) => typeof cursor.serverMessages === 'number')
         state.backfill.estimateComplete = estimateComplete
         if (estimateComplete) {
           state.backfill.totalEstimate = activeCursors.reduce((sum, cursor) => sum + (cursor.serverMessages ?? 0), 0)
         } else {
           delete state.backfill.totalEstimate
         }
-        const allDone = activeCursors.every(
+        const allDone = unresolvedOmittedFolders === 0 && activeCursors.every(
           (cursor) => cursor.backfillDone && retryUidNumbers(cursor).length === 0,
         )
         state.backfill.status = allDone ? 'done' : 'running'

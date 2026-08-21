@@ -2034,6 +2034,7 @@ export const en = {
         fullResyncTitle: "Resync the entire mailbox history?",
         fullResyncDescription: "The mail server currently reports {n} messages, but this count is only an estimate. Brian will recheck every folder, which can take time. No credits are charged. Existing archived messages stay searchable; only missing messages are added.",
         fullResyncDescriptionUnknown: "The mail server could not provide a complete message count. Brian will still recheck every folder and gradually discover missing messages, which can take time. No credits are charged. Existing archived messages stay searchable; only missing messages are added.",
+        fullResyncStarted: "Mailbox history check started. Brian will keep working in the background and add only missing messages.",
         fullResyncConfirm: "Resync everything",
         fullResyncCancel: "Cancel",
         scope12m: "Last 12 months",
