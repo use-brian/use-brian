@@ -936,7 +936,31 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
     expect(audits.find((a) => a.type === 'workflow.step_delivered')).toBeUndefined()
   })
 
-  it('resolves a WhatsApp trigger reply from trusted event input', async () => {
+  it.each([
+    {
+      name: 'direct message without the newer isGroupChat field',
+      channelId: '15551234567',
+      isGroupChat: undefined,
+      groupId: null,
+      recipientType: 'individual' as const,
+    },
+    {
+      name: 'group message',
+      channelId: 'group-1',
+      isGroupChat: true,
+      groupId: 'group-1',
+      recipientType: 'group' as const,
+    },
+    {
+      name: 'group message whose persisted group id disagrees',
+      channelId: 'group-1',
+      isGroupChat: true,
+      groupId: 'group-2',
+      recipientType: 'group' as const,
+    },
+  ])('validates WhatsApp trigger reply metadata for a $name', async ({
+    channelId, isGroupChat, groupId, recipientType,
+  }) => {
     const stores = makeFakeStores()
     const deliveries: Array<Parameters<NonNullable<ExecutorDeps['deliverToChannel']>>[0]> = []
     const consultDeliveries: unknown[] = []
@@ -971,12 +995,17 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
         sourceType: 'channel',
         provider: 'whatsapp',
         channelIntegrationId: 'ci-wa',
-        channelId: '15551234567',
+        channelId,
         actorId: '15551234567',
+        ...(isGroupChat !== undefined ? { isGroupChat } : {}),
         providerAccountId: 'phone-1',
         occurredAt: '2026-08-17T11:00:00.000Z',
       },
-      event: { text: 'Is 2pm available?' },
+      event: {
+        text: 'Is 2pm available?',
+        from: '15551234567',
+        group_id: groupId,
+      },
     })
     await stores.workflowStore.update(USER_ID, workflow.id, {
       trigger: {
@@ -995,13 +1024,20 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
 
     const outcome = await advanceWorkflowRun(deps, run.id)
 
+    if (groupId !== null && groupId !== channelId) {
+      expect(outcome.kind).toBe('failed')
+      expect(deliveries).toEqual([])
+      return
+    }
     expect(outcome.kind).toBe('completed')
     expect(consultDeliveries).toEqual([undefined])
     expect(deliveries).toEqual([expect.objectContaining({
       channelType: 'whatsapp',
-      channelId: '15551234567',
+      channelId,
       channelIntegrationId: 'ci-wa',
       replyToTrigger: {
+        actorId: '15551234567',
+        recipientType,
         providerAccountId: 'phone-1',
         occurredAt: '2026-08-17T11:00:00.000Z',
       },
