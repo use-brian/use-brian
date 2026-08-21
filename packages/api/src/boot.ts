@@ -207,6 +207,7 @@ import { codexProviderRoutes } from './routes/codex-provider.js'
 import { saveLocalProviderPreference } from './local-provider-preference.js'
 import { brainRoutes } from './routes/brain.js'
 import { brainInboxRoutes } from './routes/brain-inbox.js'
+import { crmRoutes } from './routes/crm.js'
 import { createBrainEntryMutator } from './brain-entry-mutation.js'
 import { taskGuardrailRoutes } from './routes/task-guardrails.js'
 import { homeRoutes } from './routes/home.js'
@@ -5958,6 +5959,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // (The public /api/brain/stream SSE mount lives ABOVE the bare `/api`
   // requireAuth guards — see the block next to workflowWebhookRoutes.)
   app.use('/api/brain', requireAuth(env.JWT_SECRET), brainRoutes({ entitiesStore, entityLinksStore, retrievalStore, knowledgeStore, workspaceSkillStore, workspaceSkillFilesStore, connectorInstanceStore }))
+  app.use('/api/crm', requireAuth(env.JWT_SECRET), crmRoutes({
+    workspaceStore,
+    entityLinks: entityLinksStore,
+  }))
   // Brain inbox (verification surface). Open + hosted share this one mount: the
   // route's deps are all open (brain-inbox-store / entities-store / crm / sessions /
   // notify). `entityKindClassifier` is boot's own; `pendingClassificationStore` is

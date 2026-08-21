@@ -23,6 +23,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import {
   Brain,
+  Archive,
   Building2,
   Calendar,
   CircleDashed,
@@ -63,6 +64,9 @@ import {
 } from "@/components/brain/property-field";
 import { AmountCell, CompanyCell, STAGE_DOT, type CellCommit } from "./crm-cells";
 import { ResizablePeek } from "@/components/operator/resizable-peek";
+import { CrmActivityTimeline } from "./crm-activity";
+import { CrmCustomFields } from "./crm-custom-fields";
+import { CrmParticipants } from "./crm-participants";
 
 export type CrmRecordRef =
   | { kind: "deal"; row: CrmDealRow }
@@ -97,6 +101,8 @@ export function CrmRecordDetail({
   commits,
   onClose,
   onOpenRecord,
+  onChanged,
+  onArchive,
 }: {
   workspaceId: string;
   record: CrmRecordRef;
@@ -105,6 +111,8 @@ export function CrmRecordDetail({
   commits: RecordCommits;
   onClose: () => void;
   onOpenRecord: (ref: CrmRecordRef) => void;
+  onChanged: () => void;
+  onArchive: (ref: CrmRecordRef) => void;
 }) {
   const t = useT().crmPage;
 
@@ -131,6 +139,15 @@ export function CrmRecordDetail({
     <ResizablePeek storageKey="operator:peek-width" ariaLabel={record.row.name} onDismiss={onClose}>
       {/* Slim action toolbar — the Brain entry page's top-row shape. */}
       <div className="flex items-center justify-end gap-1 border-b border-border/60 px-3 py-2">
+        <button
+          type="button"
+          aria-label={t.r2.archive}
+          title={t.r2.archive}
+          onClick={() => onArchive(record)}
+          className="rounded-md p-1.5 text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+        >
+          <Archive className="size-4" aria-hidden />
+        </button>
         <Link
           href={brainRowUrl("", workspaceId, record.row.id, record.kind)}
           title={t.openInBrain}
@@ -184,6 +201,26 @@ export function CrmRecordDetail({
           record={record}
           data={data}
           onOpenRecord={onOpenRecord}
+        />
+
+        {record.kind === "deal" && (
+          <CrmParticipants
+            workspaceId={workspaceId}
+            dealId={record.row.id}
+            contacts={data.contacts}
+          />
+        )}
+
+        <CrmCustomFields
+          workspaceId={workspaceId}
+          record={record}
+          onChanged={onChanged}
+        />
+
+        <CrmActivityTimeline
+          workspaceId={workspaceId}
+          record={record}
+          data={data}
         />
 
         {/* From the brain — the rollup's embedded context. */}

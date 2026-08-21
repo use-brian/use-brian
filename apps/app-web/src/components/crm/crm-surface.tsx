@@ -25,7 +25,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { Kanban, Rows3 } from "lucide-react";
+import { BarChart3, Kanban, Rows3, Settings2 } from "lucide-react";
 import { OperatorTopbar } from "@/components/operator/operator-topbar";
 import { cn } from "@/lib/utils";
 import { mutateSurfaceCache, useCachedResource } from "@/lib/surface-cache";
@@ -33,6 +33,8 @@ import { surfaceDataKey } from "@/lib/surface-prefetch";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Button } from "@/components/ui/button";
+import { confirmDialog } from "@/components/ui/confirm-dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -47,6 +49,7 @@ import {
   DEAL_STAGES,
   fetchWorkspaceCrm,
   isOpenStage,
+  setCrmRecordArchived,
   type CrmCompanyRow,
   type CrmContactRow,
   type CrmData,
@@ -97,6 +100,10 @@ import {
   type CrmRecordRef,
   type RecordCommits,
 } from "./crm-record-detail";
+import { CrmActions } from "./crm-actions";
+import { CrmConfigDialog } from "./crm-config";
+import { CrmReportingDialog } from "./crm-reporting";
+import { CrmSavedViews } from "./crm-saved-views";
 
 const NONE = "__none__";
 
@@ -249,6 +256,8 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
   // ── Mutations (in-place adjusts) ──────────────────────────────────────
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkError, setBulkError] = useState<string | null>(null);
+  const [configOpen, setConfigOpen] = useState(false);
+  const [reportsOpen, setReportsOpen] = useState(false);
 
   const patchDeal = useCallback((id: string, patch: Partial<CrmDealRow>) => {
     setData((prev) => ({
@@ -341,6 +350,21 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
     }),
     [commitField, patchDeal, patchContact, patchCompany],
   );
+
+  const archiveRecord = useCallback(async (ref: CrmRecordRef) => {
+    const confirmed = await confirmDialog({
+      title: t.r2.archiveTitle,
+      description: format(t.r2.archiveDescription, { name: ref.row.name }),
+      confirmLabel: t.r2.archive,
+      cancelLabel: t.r2.cancel,
+      variant: "destructive",
+    });
+    if (!confirmed) return;
+    await setCrmRecordArchived(workspaceId, ref.row.id, true);
+    setOpenRecord(null);
+    await refreshCrm();
+    requestBrainRefresh(workspaceId);
+  }, [t, workspaceId, refreshCrm]);
 
   /** Bulk = client loop over the per-row adjust wire (failed ids STAY
    *  SELECTED for a retry — the Reviews-queue contract; §1.6). */
@@ -490,8 +514,9 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
           </div>
         }
         right={
-          view.section === "deals" ? (
-            <>
+          <>
+            {view.section === "deals" && (
+              <>
               {data !== null && (
                 <span className="text-[12.5px] text-sidebar-foreground/70 max-lg:hidden">
                   {format(t.dealCountSummary, {
@@ -529,8 +554,40 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
                 <Rows3 className="size-3.5" aria-hidden />
                 {t.viewTable}
               </button>
-            </>
-          ) : undefined
+              </>
+            )}
+            <CrmSavedViews
+              workspaceId={workspaceId}
+              section={view.section}
+              currentSearch={searchParams.toString()}
+              onApply={(search) =>
+                router.replace(search ? `${pathname}?${search}` : pathname, {
+                  scroll: false,
+                })
+              }
+            />
+            <Button
+              size="icon-sm"
+              variant="ghost"
+              aria-label={t.r2.reportsTitle}
+              onClick={() => setReportsOpen(true)}
+            >
+              <BarChart3 aria-hidden />
+            </Button>
+            <Button
+              size="icon-sm"
+              variant="ghost"
+              aria-label={t.r2.configTitle}
+              onClick={() => setConfigOpen(true)}
+            >
+              <Settings2 aria-hidden />
+            </Button>
+            <CrmActions
+              workspaceId={workspaceId}
+              section={view.section}
+              onChanged={reload}
+            />
+          </>
         }
       />
 
@@ -764,9 +821,21 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
             commits={commits}
             onClose={() => setOpenRecord(null)}
             onOpenRecord={(ref) => setOpenRecord({ kind: ref.kind, id: ref.row.id })}
+            onChanged={reload}
+            onArchive={(ref) => void archiveRecord(ref)}
           />
         )}
       </div>
+      <CrmConfigDialog
+        workspaceId={workspaceId}
+        open={configOpen}
+        onOpenChange={setConfigOpen}
+      />
+      <CrmReportingDialog
+        workspaceId={workspaceId}
+        open={reportsOpen}
+        onOpenChange={setReportsOpen}
+      />
     </div>
   );
 }
