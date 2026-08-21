@@ -191,6 +191,8 @@ export type DeliverToChannel = (params: {
   threadRef?: string
   /** Trusted source metadata resolved by the executor, never authored. */
   replyToTrigger?: {
+    actorId: string
+    recipientType: 'individual' | 'group'
     providerAccountId: string
     occurredAt: string
   }
@@ -1299,6 +1301,8 @@ async function dispatchAssistantCall(
   let triggerReplyTarget: {
     channelId: string
     channelIntegrationId: string
+    actorId: string
+    recipientType: 'individual' | 'group'
     providerAccountId: string
     occurredAt: string
   } | undefined
@@ -1309,8 +1313,13 @@ async function dispatchAssistantCall(
       channelIntegrationId?: unknown
       channelId?: unknown
       actorId?: unknown
+      isGroupChat?: unknown
       providerAccountId?: unknown
       occurredAt?: unknown
+    } | undefined
+    const event = ctx.run.input.event as {
+      from?: unknown
+      group_id?: unknown
     } | undefined
     const integrationId = typeof trigger?.channelIntegrationId === 'string'
       ? trigger.channelIntegrationId
@@ -1330,7 +1339,13 @@ async function dispatchAssistantCall(
       || !sourceStillConfigured
       || typeof trigger.channelId !== 'string'
       || typeof trigger.actorId !== 'string'
-      || trigger.channelId !== trigger.actorId
+      || (trigger.isGroupChat === true
+        ? trigger.channelId === trigger.actorId
+          || event?.group_id !== trigger.channelId
+          || event.from !== trigger.actorId
+        : trigger.channelId !== trigger.actorId
+          || (event?.group_id !== undefined && event.group_id !== null)
+          || (event?.from !== undefined && event.from !== trigger.actorId))
       || typeof trigger.providerAccountId !== 'string'
       || typeof trigger.occurredAt !== 'string'
     ) {
@@ -1343,8 +1358,10 @@ async function dispatchAssistantCall(
       }
     }
     triggerReplyTarget = {
-      channelId: trigger.actorId,
+      channelId: trigger.channelId,
       channelIntegrationId: integrationId,
+      actorId: trigger.actorId,
+      recipientType: trigger.isGroupChat === true ? 'group' : 'individual',
       providerAccountId: trigger.providerAccountId,
       occurredAt: trigger.occurredAt,
     }
@@ -1590,6 +1607,8 @@ async function dispatchAssistantCall(
               threadRef,
               replyToTrigger: triggerReplyTarget
                 ? {
+                    actorId: triggerReplyTarget.actorId,
+                    recipientType: triggerReplyTarget.recipientType,
                     providerAccountId: triggerReplyTarget.providerAccountId,
                     occurredAt: triggerReplyTarget.occurredAt,
                   }

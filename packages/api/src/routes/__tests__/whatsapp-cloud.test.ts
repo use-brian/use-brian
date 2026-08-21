@@ -92,6 +92,7 @@ describe('[COMP:api/whatsapp-cloud-route]', () => {
       channelId: '15551234567',
       mentions: [],
       isBot: false,
+      isGroupChat: false,
       providerAccountId: 'phone-1',
       occurredAt: '1970-01-01T00:00:01.000Z',
       payload: {
@@ -99,6 +100,7 @@ describe('[COMP:api/whatsapp-cloud-route]', () => {
         message_id: 'wamid-1',
         from: '15551234567',
         phone_number_id: 'phone-1',
+        group_id: null,
         message_type: 'text',
         media_type: null,
       },
@@ -127,6 +129,33 @@ describe('[COMP:api/whatsapp-cloud-route]', () => {
     expect(dispatch).not.toHaveBeenCalled()
   })
 
+  it('dispatches group workflows with separate participant and group identities', async () => {
+    const dispatch = vi.fn().mockResolvedValue(undefined)
+    await dispatchWhatsAppCloudWorkflowEvent({
+      dispatcher: { dispatch } as never,
+      workspaceId: 'ws-1',
+      channelIntegrationId: 'int-1',
+      config: { userAccessMode: 'allowlist', allowedUserIds: ['15551234567'] },
+      providerAccountId: 'phone-1',
+      incoming: {
+        userId: '15551234567',
+        channelId: 'group-1',
+        messageId: 'wamid-group-1',
+        text: 'Hello team',
+        isGroupChat: true,
+        timestamp: 1,
+        raw: { phoneNumberId: 'phone-1', groupId: 'group-1', message: { type: 'text' } },
+      },
+    })
+
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({
+      actorId: '15551234567',
+      channelId: 'group-1',
+      isGroupChat: true,
+      payload: expect.objectContaining({ group_id: 'group-1' }),
+    }))
+  })
+
   it('routes a signed authorized webhook to workflows independently of chat', async () => {
     vi.mocked(getChannelForWebhook).mockResolvedValue({
       id: 'chan-1',
@@ -150,6 +179,7 @@ describe('[COMP:api/whatsapp-cloud-route]', () => {
             messages: [{
               id: 'wamid-route-1',
               from: '15551234567',
+              group_id: 'group-1',
               timestamp: '1',
               type: 'text',
               text: { body: 'Start the support workflow' },
@@ -177,6 +207,8 @@ describe('[COMP:api/whatsapp-cloud-route]', () => {
       source: { type: 'channel', channelIntegrationId: 'int-1', channel: 'whatsapp' },
       text: 'Start the support workflow',
       actorId: '15551234567',
+      channelId: 'group-1',
+      isGroupChat: true,
     }))
   })
   it('answers Meta subscription verification with the challenge', async () => {

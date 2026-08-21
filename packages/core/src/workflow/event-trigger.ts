@@ -85,6 +85,8 @@ export type DispatchEvent = {
   tags?: string[]
   /** Whether a bot authored the event — gated by `EventMatch.fromBots`. */
   isBot: boolean
+  /** Whether a channel event came from a shared group conversation. */
+  isGroupChat?: boolean
   /** Provider account that received the event (for source-bound replies). */
   providerAccountId?: string
   /** Provider-authored occurrence time, normalized to ISO-8601. */
@@ -152,6 +154,8 @@ export type WorkflowEventInput = {
     providerAccountId?: string
     /** Trusted provider event time, normalized to ISO-8601. */
     occurredAt?: string
+    /** Trusted channel conversation shape, when the producer supplies one. */
+    isGroupChat?: boolean
   }
   /** The source-normalized event payload. */
   event: Record<string, unknown>
@@ -350,6 +354,7 @@ function buildInput(event: DispatchEvent): WorkflowEventInput {
       actorId: event.actorId,
       ...(event.providerAccountId ? { providerAccountId: event.providerAccountId } : {}),
       ...(event.occurredAt ? { occurredAt: event.occurredAt } : {}),
+      ...(event.isGroupChat !== undefined ? { isGroupChat: event.isGroupChat } : {}),
     }
   } else if (src.type === 'page') {
     trigger = {

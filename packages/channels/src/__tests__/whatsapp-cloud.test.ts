@@ -40,6 +40,21 @@ describe('[COMP:channels/whatsapp-cloud]', () => {
     })
   })
 
+  it('keeps a group participant as the user while routing the conversation by group id', () => {
+    const groupPayload = structuredClone(payload)
+    groupPayload.entry[0].changes[0].value.messages[0] = {
+      ...groupPayload.entry[0].changes[0].value.messages[0],
+      group_id: 'group-1',
+    } as never
+
+    expect(parseWhatsAppCloudMessages(groupPayload)[0]).toMatchObject({
+      userId: '15551234567',
+      channelId: 'group-1',
+      isGroupChat: true,
+      raw: { groupId: 'group-1', senderName: 'Ada' },
+    })
+  })
+
   it('normalizes media IDs without exposing Meta bearer URLs', () => {
     const mediaPayload = structuredClone(payload)
     mediaPayload.entry[0].changes[0].value.messages[0] = {
@@ -66,8 +81,24 @@ describe('[COMP:channels/whatsapp-cloud]', () => {
       expect.objectContaining({ method: 'POST' }),
     )
     const body = JSON.parse(fetchMock.mock.calls[0][1].body)
+    expect(body.recipient_type).toBe('individual')
     expect(body.to).toBe('15551234567')
     expect(body.text.body).toBe('Hello *Ada*')
+  })
+
+  it('sends group replies to the group recipient', async () => {
+    fetchMock.mockResolvedValue({
+      ok: true, json: async () => ({ messages: [{ id: 'wamid.group' }] }),
+    })
+    const adapter = createWhatsAppCloudAdapter({
+      accessToken: 'token', phoneNumberId: 'phone-1', graphApiVersion: 'v26.0',
+      recipientType: 'group',
+    })
+
+    await adapter.sendMessage('group-1', { text: 'Hello group' })
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body)
+    expect(body).toMatchObject({ recipient_type: 'group', to: 'group-1' })
   })
 
   it('subscribes the Meta app to the WABA', async () => {
