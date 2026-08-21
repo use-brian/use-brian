@@ -116,6 +116,7 @@ export {
   createMailboxTools,
   singleMailboxRouter,
   stitchMailboxThreads,
+  inferExactExternalEmail,
   MAILBOX_DEFAULT_WINDOW_DAYS,
   MAILBOX_DEFAULT_LIMIT,
   MAILBOX_MAX_LIMIT,

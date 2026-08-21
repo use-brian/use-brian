@@ -25,7 +25,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { Kanban, Rows3 } from "lucide-react";
+import { BarChart3, Kanban, Rows3, Settings2 } from "lucide-react";
 import { OperatorTopbar } from "@/components/operator/operator-topbar";
 import { cn } from "@/lib/utils";
 import { mutateSurfaceCache, useCachedResource } from "@/lib/surface-cache";
@@ -33,6 +33,16 @@ import { surfaceDataKey } from "@/lib/surface-prefetch";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Button } from "@/components/ui/button";
+import { confirmDialog } from "@/components/ui/confirm-dialog";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { useWorkspaceContext } from "@/lib/workspace-context";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -44,14 +54,17 @@ import {
   type AdjustMemoryChanges,
 } from "@/lib/api/brain-inbox";
 import {
-  DEAL_STAGES,
+  fetchCrmConfig,
   fetchWorkspaceCrm,
   isOpenStage,
+  setCrmPipelineStage,
+  setCrmRecordArchived,
   type CrmCompanyRow,
   type CrmContactRow,
   type CrmData,
   type CrmDealRow,
-  type DealStage,
+  type CrmPipeline,
+  type CrmPipelineStage,
 } from "@/lib/api/crm";
 import {
   applyCompanyFilters,
@@ -63,7 +76,8 @@ import {
   crmQuickCounts,
   crmTagOptions,
   localDateStr,
-  matchesDealQuickFilter,
+  legacyStageForPipelineStage,
+  resolveDealPipelineStage,
   searchFromCrmView,
   sortDeals,
   crmViewFromSearch,
@@ -80,8 +94,8 @@ import {
   AmountCell,
   CloseDateCell,
   CompanyCell,
-  StageCell,
-  STAGE_DOT,
+  PipelineStageCell,
+  PIPELINE_CATEGORY_DOT,
   TagsCell,
   TextFieldCell,
 } from "./crm-cells";
@@ -97,6 +111,10 @@ import {
   type CrmRecordRef,
   type RecordCommits,
 } from "./crm-record-detail";
+import { CrmActions } from "./crm-actions";
+import { CrmConfigDialog } from "./crm-config";
+import { CrmReportingDialog } from "./crm-reporting";
+import { CrmSavedViews } from "./crm-saved-views";
 
 const NONE = "__none__";
 
@@ -104,6 +122,7 @@ type CrmPrimitive = "deal" | "contact" | "company";
 
 export function CrmSurface({ workspaceId }: { workspaceId: string }) {
   const t = useT().crmPage;
+  const { role } = useWorkspaceContext();
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -115,14 +134,20 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
   const crmKey = surfaceDataKey("crm", workspaceId);
   const crm = useCachedResource(crmKey, () => fetchWorkspaceCrm(workspaceId));
   const data = crm.data ?? null;
+  const configKey = `${crmKey}:config`;
+  const configResource = useCachedResource(configKey, () => fetchCrmConfig(workspaceId));
+  const config = configResource.data ?? null;
   // Only a failure with nothing on screen is a load error.
-  const loadError = data === null && crm.error !== undefined;
+  const loadError =
+    (data === null && crm.error !== undefined) ||
+    (config === null && configResource.error !== undefined);
 
   // Stable callback, not the resource object — see the note in tasks-surface.
   const refreshCrm = crm.refresh;
   const reload = useCallback(() => {
     void refreshCrm();
-  }, [refreshCrm]);
+    void configResource.refresh();
+  }, [refreshCrm, configResource.refresh]);
 
   /** Optimistic patch against the cached value (survives leaving the surface). */
   const setData = useCallback(
@@ -152,9 +177,28 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
   const companies = data?.companies ?? [];
   const companyNames = useMemo(() => companyNameById(companies), [companies]);
   const contactNames = useMemo(() => contactNameById(contacts), [contacts]);
+  const selectedPipeline = useMemo<CrmPipeline | null>(() => {
+    if (!config || config.pipelines.length === 0) return null;
+    return (
+      config.pipelines.find((pipeline) => pipeline.id === view.pipeline) ??
+      config.pipelines.find((pipeline) => pipeline.isDefault) ??
+      config.pipelines[0]
+    );
+  }, [config, view.pipeline]);
+  const pipelineDeals = useMemo(
+    () =>
+      selectedPipeline
+        ? deals.filter((row) =>
+            row.pipelineId
+              ? row.pipelineId === selectedPipeline.id
+              : selectedPipeline.isDefault,
+          )
+        : [],
+    [deals, selectedPipeline],
+  );
   const counts = useMemo(
-    () => crmQuickCounts(deals, contacts, now),
-    [deals, contacts, now],
+    () => crmQuickCounts(pipelineDeals, contacts, now),
+    [pipelineDeals, contacts, now],
   );
   const stats = useMemo(() => companyStats(contacts, deals), [contacts, deals]);
   const tagOptions = useMemo(
@@ -163,18 +207,28 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
   );
 
   const filteredDeals = useMemo(
-    () => sortDeals(applyDealFilters(deals, view, companyNames, now), view.sort),
-    [deals, view, companyNames, now],
+    () =>
+      sortDeals(
+        applyDealFilters(deals, view, companyNames, now, selectedPipeline),
+        view.sort,
+      ),
+    [deals, view, companyNames, now, selectedPipeline],
   );
   // The board owns the closed fold itself (rail chips), so it reads the
   // filter WITHOUT the fold applied only when a stage/quick filter is off.
   const boardDeals = useMemo(
     () =>
       sortDeals(
-        applyDealFilters(deals, { ...view, closed: true }, companyNames, now),
+        applyDealFilters(
+          deals,
+          { ...view, closed: true },
+          companyNames,
+          now,
+          selectedPipeline,
+        ),
         view.sort,
       ),
-    [deals, view, companyNames, now],
+    [deals, view, companyNames, now, selectedPipeline],
   );
   const filteredContacts = useMemo(
     () => applyContactFilters(contacts, view),
@@ -186,8 +240,15 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
   );
 
   const openDealCount = useMemo(
-    () => deals.filter((d) => isOpenStage(d.stage)).length,
-    [deals],
+    () =>
+      selectedPipeline
+        ? pipelineDeals.filter(
+            (deal) =>
+              resolveDealPipelineStage(deal, selectedPipeline)?.category ===
+              "open",
+          ).length
+        : 0,
+    [pipelineDeals, selectedPipeline],
   );
 
   // ── Selection (table rows) ────────────────────────────────────────────
@@ -249,6 +310,9 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
   // ── Mutations (in-place adjusts) ──────────────────────────────────────
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkError, setBulkError] = useState<string | null>(null);
+  const [mutationError, setMutationError] = useState<string | null>(null);
+  const [configOpen, setConfigOpen] = useState(false);
+  const [reportsOpen, setReportsOpen] = useState(false);
 
   const patchDeal = useCallback((id: string, patch: Partial<CrmDealRow>) => {
     setData((prev) => ({
@@ -302,10 +366,29 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
           else if (ref.kind === "contact") patchContact(ref.row.id, { name });
           else patchCompany(ref.row.id, { name });
         }),
-      dealStage: (row) => (stage) =>
-        commitField("deal", row.id, { stage }, () =>
-          patchDeal(row.id, { stage }),
-        ),
+      dealPipelineStage: (row) => async (stageId) => {
+        const stage = config?.pipelines
+          .flatMap((pipeline) => pipeline.stages)
+          .find((candidate) => candidate.id === stageId);
+        if (!stage) return { ok: false, error: t.r2.stageChangeFailed };
+        try {
+          await setCrmPipelineStage(workspaceId, row.id, stageId);
+          patchDeal(row.id, {
+            pipelineId: stage.pipelineId,
+            pipelineStageId: stage.id,
+            stage: legacyStageForPipelineStage(stage),
+            probability: stage.probability,
+          });
+          setMutationError(null);
+          requestBrainRefresh(workspaceId);
+          return { ok: true };
+        } catch (cause) {
+          const error =
+            cause instanceof Error ? cause.message : t.r2.stageChangeFailed;
+          setMutationError(error);
+          return { ok: false, error };
+        }
+      },
       dealAmount: (row) => (amount) =>
         commitField("deal", row.id, { amount }, () =>
           patchDeal(row.id, { amount }),
@@ -339,8 +422,23 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
           patchCompany(row.id, { tags }),
         ),
     }),
-    [commitField, patchDeal, patchContact, patchCompany],
+    [commitField, config, patchDeal, patchContact, patchCompany, t, workspaceId],
   );
+
+  const archiveRecord = useCallback(async (ref: CrmRecordRef) => {
+    const confirmed = await confirmDialog({
+      title: t.r2.archiveTitle,
+      description: format(t.r2.archiveDescription, { name: ref.row.name }),
+      confirmLabel: t.r2.archive,
+      cancelLabel: t.r2.cancel,
+      variant: "destructive",
+    });
+    if (!confirmed) return;
+    await setCrmRecordArchived(workspaceId, ref.row.id, true);
+    setOpenRecord(null);
+    await refreshCrm();
+    requestBrainRefresh(workspaceId);
+  }, [t, workspaceId, refreshCrm]);
 
   /** Bulk = client loop over the per-row adjust wire (failed ids STAY
    *  SELECTED for a retry — the Reviews-queue contract; §1.6). */
@@ -382,8 +480,56 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
     [selectedVisible, bulkBusy, workspaceId, t],
   );
 
+  const runBulkPipelineStage = useCallback(
+    async (stageId: string) => {
+      const ids = selectedVisible;
+      const stage = selectedPipeline?.stages.find(
+        (candidate) => candidate.id === stageId,
+      );
+      if (ids.length === 0 || bulkBusy || !stage) return;
+      setBulkBusy(true);
+      setBulkError(null);
+      const failed: string[] = [];
+      try {
+        for (const id of ids) {
+          try {
+            await setCrmPipelineStage(workspaceId, id, stageId);
+            patchDeal(id, {
+              pipelineId: stage.pipelineId,
+              pipelineStageId: stage.id,
+              stage: legacyStageForPipelineStage(stage),
+              probability: stage.probability,
+            });
+          } catch {
+            failed.push(id);
+          }
+        }
+        if (failed.length > 0) {
+          setSelected(new Set(failed));
+          setBulkError(
+            format(t.bulkPartialFail, {
+              failed: String(failed.length),
+              total: String(ids.length),
+            }),
+          );
+        } else {
+          setSelected(new Set());
+        }
+      } finally {
+        setBulkBusy(false);
+        requestBrainRefresh(workspaceId);
+      }
+    }, [
+      selectedVisible,
+      selectedPipeline,
+      bulkBusy,
+      workspaceId,
+      patchDeal,
+      t,
+    ],
+  );
+
   // ── Render ────────────────────────────────────────────────────────────
-  const stageLabels = t.stage as Record<string, string>;
   const sectionLabels: Record<CrmSection, string> = {
     deals: t.sectionDeals,
     contacts: t.sectionContacts,
@@ -423,10 +569,10 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
           {
             key: "stage",
             label: t.filterStage,
-            options: DEAL_STAGES.map((sKey) => ({
-              value: sKey,
-              label: stageLabels[sKey] ?? sKey,
-              dot: STAGE_DOT[sKey],
+            options: (selectedPipeline?.stages ?? []).map((stage) => ({
+              value: stage.id,
+              label: stage.name,
+              dot: PIPELINE_CATEGORY_DOT[stage.category],
             })),
           },
         ]
@@ -490,8 +636,33 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
           </div>
         }
         right={
-          view.section === "deals" ? (
-            <>
+          <>
+            {view.section === "deals" && (
+              <>
+              {selectedPipeline && config && config.pipelines.length > 1 && (
+                <Select
+                  value={selectedPipeline.id}
+                  onValueChange={(pipeline) => {
+                    if (typeof pipeline === "string") {
+                      setView({ pipeline, stages: [], quick: null });
+                    }
+                  }}
+                >
+                  <SelectTrigger
+                    aria-label={t.r2.pipeline}
+                    className="h-7 w-36 border-sidebar-border bg-sidebar-accent/40 text-[12.5px] shadow-none"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {config.pipelines.map((pipeline) => (
+                      <SelectItem key={pipeline.id} value={pipeline.id}>
+                        {pipeline.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
               {data !== null && (
                 <span className="text-[12.5px] text-sidebar-foreground/70 max-lg:hidden">
                   {format(t.dealCountSummary, {
@@ -529,8 +700,48 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
                 <Rows3 className="size-3.5" aria-hidden />
                 {t.viewTable}
               </button>
-            </>
-          ) : undefined
+              </>
+            )}
+            <CrmSavedViews
+              workspaceId={workspaceId}
+              section={view.section}
+              currentSearch={searchParams.toString()}
+              onApply={(search) =>
+                router.replace(search ? `${pathname}?${search}` : pathname, {
+                  scroll: false,
+                })
+              }
+            />
+            <Button
+              size="icon-sm"
+              variant="ghost"
+              aria-label={t.r2.reportsTitle}
+              onClick={() => setReportsOpen(true)}
+            >
+              <BarChart3 aria-hidden />
+            </Button>
+            {role !== "member" && (
+              <Button
+                size="icon-sm"
+                variant="ghost"
+                aria-label={t.r2.configTitle}
+                onClick={() => setConfigOpen(true)}
+              >
+                <Settings2 aria-hidden />
+              </Button>
+            )}
+            <CrmActions
+              workspaceId={workspaceId}
+              section={view.section}
+              data={data}
+              config={config}
+              onChanged={reload}
+              onCreated={async (created) => {
+                await refreshCrm();
+                setOpenRecord({ kind: created.kind, id: created.id });
+              }}
+            />
+          </>
         }
       />
 
@@ -550,15 +761,9 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
             error={bulkError}
             companies={companies}
             tagOptions={tagOptions}
-            stageLabels={stageLabels}
+            stages={selectedPipeline?.stages ?? []}
             onClear={() => setSelected(new Set())}
-            onDealStage={(stage) =>
-              void runBulk(
-                "deal",
-                () => ({ stage }),
-                (id) => patchDeal(id, { stage }),
-              )
-            }
+            onDealStage={(stageId) => void runBulkPipelineStage(stageId)}
             onContactCompany={(companyId) =>
               void runBulk(
                 "contact",
@@ -633,7 +838,7 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
               }
               onSet={(key, values) => {
                 if (key === "stage")
-                  setView({ quick: null, stages: values as DealStage[] });
+                  setView({ quick: null, stages: values });
                 else if (key === "company") setView({ company: values });
                 else if (key === "tag") setView({ tag: values });
               }}
@@ -668,9 +873,21 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
           </div>
         )}
 
+        {mutationError && (
+          <div
+            role="alert"
+            className="flex items-center justify-between gap-3 border-b border-destructive/20 bg-destructive/5 px-4 py-2 text-xs text-destructive"
+          >
+            <span>{mutationError}</span>
+            <button type="button" className="underline" onClick={() => setMutationError(null)}>
+              {t.r2.dismiss}
+            </button>
+          </div>
+        )}
+
         {/* Body. */}
         <div className="min-h-0 flex-1 overflow-auto">
-          {data === null ? (
+          {data === null || config === null ? (
             <div className="p-6 text-sm text-muted-foreground">
               {loadError ? (
                 <span>
@@ -687,18 +904,23 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
                 t.loading
               )}
             </div>
+          ) : !selectedPipeline ? (
+            <div className="p-6 text-sm text-muted-foreground">
+              {t.r2.noPipelines}
+            </div>
           ) : view.section === "deals" && view.view === "board" ? (
-            boardDeals.length === 0 && deals.length === 0 ? (
+            boardDeals.length === 0 && pipelineDeals.length === 0 ? (
               <div className="p-6 text-sm text-muted-foreground">{t.emptyDeals}</div>
             ) : (
               <CrmBoard
                 rows={boardDeals}
+                pipeline={selectedPipeline}
                 companyNames={companyNames}
                 contactNames={contactNames}
                 showClosed={view.closed}
                 onToggleClosed={() => setView({ closed: !view.closed })}
                 onStageDrop={(row, stage) =>
-                  void commits.dealStage(row)(stage)
+                  commits.dealPipelineStage(row)(stage.id)
                 }
                 onOpenRecord={(row) =>
                   setOpenRecord({ kind: "deal", id: row.id })
@@ -708,10 +930,10 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
           ) : view.section === "deals" ? (
             <DealsTable
               rows={filteredDeals}
-              companies={companies}
               companyNames={companyNames}
               contactNames={contactNames}
               today={today}
+              pipeline={selectedPipeline}
               selected={selected}
               onToggle={toggle}
               allSelected={allSelected}
@@ -756,17 +978,31 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
       </div>
 
         {/* Master-detail record pane. */}
-        {record && data && (
+        {record && data && config && (
           <CrmRecordDetail
             workspaceId={workspaceId}
             record={record}
             data={data}
+            config={config}
             commits={commits}
             onClose={() => setOpenRecord(null)}
             onOpenRecord={(ref) => setOpenRecord({ kind: ref.kind, id: ref.row.id })}
+            onChanged={reload}
+            onArchive={(ref) => void archiveRecord(ref)}
           />
         )}
       </div>
+      <CrmConfigDialog
+        workspaceId={workspaceId}
+        open={configOpen}
+        onOpenChange={setConfigOpen}
+        onChanged={() => void configResource.refresh()}
+      />
+      <CrmReportingDialog
+        workspaceId={workspaceId}
+        open={reportsOpen}
+        onOpenChange={setReportsOpen}
+      />
     </div>
   );
 }
@@ -811,10 +1047,10 @@ function TableHead({
 
 function DealsTable({
   rows,
-  companies,
   companyNames,
   contactNames,
   today,
+  pipeline,
   selected,
   onToggle,
   allSelected,
@@ -825,10 +1061,10 @@ function DealsTable({
   empty,
 }: {
   rows: CrmDealRow[];
-  companies: readonly CrmCompanyRow[];
   companyNames: Map<string, string>;
   contactNames: Map<string, string>;
   today: string;
+  pipeline: CrmPipeline;
   selected: Set<string>;
   onToggle: (id: string) => void;
   allSelected: boolean;
@@ -882,13 +1118,21 @@ function DealsTable({
             >
               {row.name}
             </button>
-            <StageCell value={row.stage} onCommit={commits.dealStage(row)} />
+            <PipelineStageCell
+              stageId={resolveDealPipelineStage(row, pipeline)?.id ?? null}
+              stages={pipeline.stages}
+              onCommit={commits.dealPipelineStage(row)}
+            />
             <span className="truncate text-[12.5px] text-muted-foreground">
               {(row.companyId ? companyNames.get(row.companyId) : null) ??
                 (row.contactId ? contactNames.get(row.contactId) : null) ??
                 ""}
             </span>
-            <AmountCell value={row.amount} onCommit={commits.dealAmount(row)} />
+            <AmountCell
+              value={row.amount}
+              currencyCode={row.currencyCode}
+              onCommit={commits.dealAmount(row)}
+            />
             <CloseDateCell
               value={row.closeDate}
               overdue={overdue}
@@ -1169,7 +1413,7 @@ function BulkBar({
   error,
   companies,
   tagOptions,
-  stageLabels,
+  stages,
   onClear,
   onDealStage,
   onContactCompany,
@@ -1181,9 +1425,9 @@ function BulkBar({
   error: string | null;
   companies: readonly CrmCompanyRow[];
   tagOptions: string[];
-  stageLabels: Record<string, string>;
+  stages: readonly CrmPipelineStage[];
   onClear: () => void;
-  onDealStage: (stage: DealStage) => void;
+  onDealStage: (stageId: string) => void;
   onContactCompany: (companyId: string | null) => void;
   onAddTag: (tag: string) => void;
 }) {
@@ -1198,10 +1442,10 @@ function BulkBar({
         <BulkMenu
           label={t.bulkStage}
           items={Object.fromEntries(
-            DEAL_STAGES.map((s) => [s, stageLabels[s] ?? s]),
+            stages.map((stage) => [stage.id, stage.name]),
           )}
           disabled={busy}
-          onPick={(s) => onDealStage(s as DealStage)}
+          onPick={onDealStage}
         />
       )}
       {section === "contacts" && (

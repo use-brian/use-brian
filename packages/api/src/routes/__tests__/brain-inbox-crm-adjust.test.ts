@@ -46,12 +46,14 @@ vi.mock('../../db/crm.js', () => ({
   updateDeal: vi.fn(),
   setDealStage: vi.fn(),
 }))
+vi.mock('../../db/crm-r2.js', () => ({ appendCrmActivity: vi.fn().mockResolvedValue(null) }))
 
 import { brainInboxRoutes } from '../brain-inbox.js'
 import { query } from '../../db/client.js'
 import { appendBrainVerification } from '../../db/brain-inbox-store.js'
 import { updateEntity } from '../../db/entities-store.js'
 import { setDealStage, updateCompany, updateContact, updateDeal } from '../../db/crm.js'
+import { appendCrmActivity } from '../../db/crm-r2.js'
 
 const mockQuery = vi.mocked(query)
 const mockUpdateEntity = vi.mocked(updateEntity)
@@ -126,6 +128,14 @@ describe('[COMP:crm/update] CRM adjust — typed fields (REST boundary)', () => 
     expect(vi.mocked(appendBrainVerification)).toHaveBeenCalledWith(
       expect.objectContaining({ targetKind: 'entity', action: 'adjust_attributes' }),
     )
+    expect(vi.mocked(appendCrmActivity)).toHaveBeenCalledWith(expect.objectContaining({
+      entityId: ROW,
+      activityType: 'field_change',
+      metadata: expect.objectContaining({
+        before: expect.objectContaining({ email: 'old@acme.com' }),
+        after: expect.objectContaining({ email: 'sam@acme.com' }),
+      }),
+    }))
   })
 
   it('company domain applies via updateCompany', async () => {

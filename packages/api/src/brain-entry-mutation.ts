@@ -41,6 +41,7 @@ import {
 } from './db/crm.js'
 import { updateWorkspaceFileMeta } from './db/workspace-files.js'
 import { updateTask } from './db/tasks.js'
+import { appendCrmActivity } from './db/crm-r2.js'
 import { notifyBrainInboxChange } from './brain-stream/notify.js'
 
 export const EDITABLE_BRAIN_PRIMITIVES = [
@@ -859,6 +860,47 @@ export function createBrainEntryMutator(args: {
           )
         }
         await Promise.all(writes)
+
+        const changedFields = [
+          ...(nextName !== undefined ? ['display_name'] : []),
+          ...(nextSensitivity !== undefined ? ['sensitivity'] : []),
+          ...sentTyped.map(([key]) => key),
+        ]
+        if (changedFields.length > 0) {
+          const beforeValues: Record<string, unknown> = {}
+          const afterValues: Record<string, unknown> = {}
+          if (nextName !== undefined) {
+            beforeValues.display_name = prev.name
+            afterValues.display_name = nextName
+          }
+          if (nextSensitivity !== undefined) {
+            beforeValues.sensitivity = prev.sensitivity
+            afterValues.sensitivity = nextSensitivity
+          }
+          for (const [key, value] of sentTyped) {
+            beforeValues[key] = (prev.attributes ?? {})[key] ?? null
+            afterValues[key] = value ?? null
+          }
+          const stageChanged = nextStage !== undefined
+          // The CRM write is already committed. Activity history is a
+          // best-effort append and must never turn a successful edit into a
+          // false 500; retryable producers can use source ids when needed.
+          void appendCrmActivity({
+            userId,
+            workspaceId,
+            entityId: rowId,
+            activityType: stageChanged ? 'stage_change' : 'field_change',
+            summary: stageChanged ? 'Deal stage changed' : 'CRM fields updated',
+            metadata: {
+              fields: changedFields,
+              before: beforeValues,
+              after: afterValues,
+              ...(stageChanged
+                ? { fromStage: (prev.attributes ?? {}).stage ?? null, toStage: nextStage }
+                : {}),
+            },
+          }).catch((err) => console.error('[brain-entry-mutation] CRM activity append failed:', err))
+        }
 
         // Realtime repaint: the CRM row itself, plus the linked entity when
         // this adjust mirrored name / sensitivity onto it (the graph view +

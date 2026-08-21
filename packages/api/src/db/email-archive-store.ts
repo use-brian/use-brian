@@ -28,6 +28,7 @@ import {
 } from './segment-coverage.js'
 import { buildLexicalMatch, fuseByReciprocalRank, tokenizeSearchTerms } from './segment-lexical.js'
 import { MAX_CHARS, splitLongText } from './text-chunking.js'
+import type { MailboxSearchHit, MailboxSearchParams } from '@use-brian/core'
 
 export type EmailArchiveMessageInput = {
   instanceId: string
@@ -184,6 +185,122 @@ export async function countEmailArchiveMessages(
     total += n
   }
   return { total, byFolder }
+}
+
+type LiteralArchiveMessageRow = {
+  provider_message_id: string
+  folder: string
+  from_addr: string
+  to_addrs: string[] | null
+  sent_at: string | Date | null
+  subject: string
+  body_text: string
+  rfc_message_id: string | null
+  in_reply_to: string | null
+  references_ids: string[] | null
+  matched_segment: string | null
+}
+
+/**
+ * Deterministic metadata/body search for the unified literal mailbox lane.
+ * This intentionally needs no embedding. Keyword body predicates run against
+ * the already-trigram-indexed segment corpus, while sender/subject predicates
+ * stay on the message envelope so exact lookup cannot be ranked away.
+ */
+export async function searchLiteralEmailArchiveMessages(input: {
+  ownerUserId: string
+  instanceId: string
+  params: MailboxSearchParams
+}): Promise<MailboxSearchHit[]> {
+  const values: unknown[] = [input.ownerUserId, input.instanceId]
+  const clauses = ['em.owner_user_id = $1', 'em.instance_id = $2']
+  const containsPattern = (value: string) =>
+    `%${value.trim().replace(/[\\%_]/g, (character) => `\\${character}`)}%`
+  const addLike = (column: string, value: string | undefined) => {
+    if (!value?.trim()) return
+    values.push(containsPattern(value))
+    clauses.push(`${column} ILIKE $${values.length} ESCAPE E'\\\\'`)
+  }
+  addLike('em.from_addr', input.params.from)
+  addLike('em.subject', input.params.subject)
+  if (input.params.folder) {
+    values.push(input.params.folder)
+    clauses.push(`em.folder = $${values.length}`)
+  }
+  if (input.params.since) {
+    values.push(input.params.since)
+    clauses.push(`em.sent_at >= $${values.length}::timestamptz`)
+  }
+  if (input.params.before) {
+    values.push(input.params.before)
+    clauses.push(`em.sent_at < $${values.length}::timestamptz`)
+  }
+  const keywords = (input.params.keywords ?? []).map((term) => term.trim()).filter(Boolean)
+  let literalRank = '0'
+  let matchedSegment = 'NULL::text'
+  if (keywords.length > 0) {
+    const fromMatches: string[] = []
+    const subjectMatches: string[] = []
+    const segmentMatches: string[] = []
+    const snippetMatches: string[] = []
+    for (const keyword of keywords) {
+      values.push(containsPattern(keyword))
+      const p = `$${values.length}`
+      fromMatches.push(`em.from_addr ILIKE ${p} ESCAPE E'\\\\'`)
+      subjectMatches.push(`em.subject ILIKE ${p} ESCAPE E'\\\\'`)
+      segmentMatches.push(`es.segment_text ILIKE ${p} ESCAPE E'\\\\'`)
+      snippetMatches.push(`es_snippet.segment_text ILIKE ${p} ESCAPE E'\\\\'`)
+    }
+    const fromPredicate = `(${fromMatches.join(' OR ')})`
+    const subjectPredicate = `(${subjectMatches.join(' OR ')})`
+    const segmentPredicate = `EXISTS (
+      SELECT 1
+        FROM email_archive_segments es
+       WHERE es.message_id = em.id
+         AND es.retracted_at IS NULL
+         AND (${segmentMatches.join(' OR ')})
+    )`
+    clauses.push(`(${fromPredicate} OR ${subjectPredicate} OR ${segmentPredicate})`)
+    literalRank = `CASE
+      WHEN ${fromPredicate} THEN 0
+      WHEN ${subjectPredicate} THEN 1
+      ELSE 2
+    END`
+    matchedSegment = `(
+      SELECT es_snippet.segment_text
+        FROM email_archive_segments es_snippet
+       WHERE es_snippet.message_id = em.id
+         AND es_snippet.retracted_at IS NULL
+         AND (${snippetMatches.join(' OR ')})
+       ORDER BY es_snippet.segment_index ASC
+       LIMIT 1
+    )`
+  }
+  values.push(input.params.limit)
+  const limitIdx = values.length
+  const res = await queryWithRLS<LiteralArchiveMessageRow>(
+    input.ownerUserId,
+    `SELECT em.provider_message_id, em.folder, em.from_addr, em.to_addrs, em.sent_at,
+            em.subject, em.body_text, em.rfc_message_id, em.in_reply_to, em.references_ids,
+            ${literalRank} AS literal_rank, ${matchedSegment} AS matched_segment
+       FROM email_archive_messages em
+      WHERE ${clauses.join(' AND ')}
+      ORDER BY literal_rank ASC, em.sent_at DESC NULLS LAST
+      LIMIT $${limitIdx}`,
+    values,
+  )
+  return res.rows.map((row) => ({
+    id: row.provider_message_id,
+    folder: row.folder,
+    from: row.from_addr,
+    to: row.to_addrs ?? [],
+    date: row.sent_at ? new Date(row.sent_at).toISOString() : null,
+    subject: row.subject,
+    snippet: normalizeText(row.matched_segment ?? row.body_text).slice(0, 200) || undefined,
+    messageId: row.rfc_message_id,
+    inReplyTo: row.in_reply_to,
+    references: row.references_ids ?? [],
+  }))
 }
 
 /**

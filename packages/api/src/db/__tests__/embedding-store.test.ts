@@ -18,6 +18,8 @@ const queries: { text: string; values?: unknown[] }[] = []
 let claimRows: { id: string; embed_text: string | null }[] = []
 /** Rows served to the backlog half (`created_at <= cutoff`), when it runs. */
 let olderRows: { id: string; embed_text: string | null }[] = []
+/** Rows served by the delayed failed-row retry lane. */
+let retryRows: { id: string; embed_text: string | null }[] = []
 
 /**
  * Checked-out-connection ledger. B2's whole point is that no pooled
@@ -39,11 +41,14 @@ const fakeClient = {
       return {
         rows: [
           reltuplesUnavailable
-            ? { approx_total: null, unembedded: '0' }
-            : { approx_total: String(embeddedCount + 500), unembedded: '500' },
+            ? { approx_total: null, unattempted: '0', failed_unembedded: '0' }
+            : { approx_total: String(embeddedCount + 500), unattempted: '500', failed_unembedded: '0' },
         ],
         rowCount: 1,
       }
+    }
+    if (text.includes('WITH retry AS')) {
+      return { rows: retryRows, rowCount: retryRows.length }
     }
     if (text.includes('FOR UPDATE SKIP LOCKED')) {
       // The claim is split across two bounded range scans (see
@@ -86,6 +91,7 @@ beforeEach(() => {
   queries.length = 0
   claimRows = []
   olderRows = []
+  retryRows = []
   checkedOut = 0
   maxCheckedOut = 0
   embeddedCount = 0
@@ -96,7 +102,11 @@ beforeEach(() => {
 })
 
 function claims(): { text: string; values?: unknown[] }[] {
-  return queries.filter((q) => q.text.includes('FOR UPDATE SKIP LOCKED'))
+  return queries.filter((q) => q.text.includes('FOR UPDATE SKIP LOCKED') && !q.text.includes('WITH retry AS'))
+}
+
+function retryClaims(): { text: string; values?: unknown[] }[] {
+  return queries.filter((q) => q.text.includes('WITH retry AS'))
 }
 
 /** The content hash the store derives for a given embed text. */
@@ -183,6 +193,33 @@ describe('[COMP:brain/embedding-store] withClaimedRows', () => {
     const [priority, backlog] = claims()
     expect(priority.values).toEqual([3])
     expect(backlog.values).toEqual([2])
+  })
+
+  it('uses only unused capacity for a bounded delayed failure retry lane', async () => {
+    claimRows = [{ id: 'new-1', embed_text: 'new' }]
+    olderRows = []
+    retryRows = [{ id: 'retry-1', embed_text: 'recovered' }]
+    await store.withClaimedRows('email_segment', 50, async (rows) => {
+      expect(rows.map((row) => row.id)).toEqual(['new-1', 'retry-1'])
+    })
+
+    expect(retryClaims()).toHaveLength(1)
+    expect(retryClaims()[0].values).toEqual([10])
+    expect(retryClaims()[0].text).toContain("embedding_failed_at <= now() - INTERVAL '1 hour'")
+    expect(retryClaims()[0].text).toContain('ORDER BY valid_from DESC, embedding_failed_at ASC')
+    expect(retryClaims()[0].text).toContain('SET embedding_failed_at = NULL')
+  })
+
+  it('does not touch failed rows when normal work fills the batch', async () => {
+    claimRows = [
+      { id: 'new-1', embed_text: 'one' },
+      { id: 'new-2', embed_text: 'two' },
+    ]
+    retryRows = [{ id: 'retry-1', embed_text: 'old failure' }]
+    await store.withClaimedRows('memories', 2, async (rows) => {
+      expect(rows.map((row) => row.id)).toEqual(['new-1', 'new-2'])
+    })
+    expect(retryClaims()).toHaveLength(0)
   })
 
   // ── B5: recency expression + embed budget ─────────────────────
@@ -413,7 +450,7 @@ describe('[COMP:brain/embedding-store] withClaimedRows', () => {
       ]
       await apply.commit(results)
     })
-    const update = queries.find((q) => q.text.includes('UPDATE memories') && q.text.includes('embedding'))
+    const update = queries.find((q) => q.text.includes('UPDATE memories') && q.text.includes('v.embedding::vector'))
     expect(update).toBeDefined()
     expect(update!.text).toContain('v.embedding::vector')
     expect(update!.text).toContain('embedding_failed_at      = NULL')

@@ -52,6 +52,7 @@ type Stores = {
   getById: ReturnType<typeof vi.fn>
   reviseWorkflowEmailBody: ReturnType<typeof vi.fn>
   getRole: ReturnType<typeof vi.fn>
+  emailReviewContext: ReturnType<typeof vi.fn>
 }
 
 function makeApp(stores: Partial<Stores> = {}) {
@@ -60,6 +61,7 @@ function makeApp(stores: Partial<Stores> = {}) {
   const reviseWorkflowEmailBody =
     stores.reviseWorkflowEmailBody ?? vi.fn(async () => null)
   const getRole = stores.getRole ?? vi.fn(async () => 'member')
+  const emailReviewContext = stores.emailReviewContext ?? vi.fn(async () => ({ thread: null }))
 
   const app = express()
   app.use(express.json())
@@ -77,6 +79,7 @@ function makeApp(stores: Partial<Stores> = {}) {
       } as never,
       workspaceStore: { getRole } as never,
       bridgeDeps: {} as never,
+      emailReviewContext,
     }),
   )
   return {
@@ -85,6 +88,7 @@ function makeApp(stores: Partial<Stores> = {}) {
     getById,
     reviseWorkflowEmailBody,
     getRole,
+    emailReviewContext,
   }
 }
 
@@ -133,6 +137,82 @@ describe('[COMP:api/unified-approvals-route] GET /count', () => {
     })
     const res = await request(app).get('/api/approvals/count?workspaceId=ws-1').expect(200)
     expect(res.body.pending).toBe(2)
+  })
+})
+
+describe('[COMP:api/unified-approvals-route] GET /:id/email-review-context', () => {
+  const reviewedReply = () => makeApproval({
+    toolName: 'imapSendMessage__sales_1a2b3c4d',
+    arguments: {
+      to: ['client@example.com'],
+      subject: 'Re: Contract question',
+      body: 'Draft reply',
+      inReplyTo: 'INBOX:42',
+      account: 'sales@example.com',
+    },
+  })
+
+  it('returns only assigned, pending, strict-shape approval context', async () => {
+    const context = {
+      thread: {
+        subject: 'Contract question',
+        truncated: false,
+        messages: [{
+          id: 'INBOX:42', folder: 'INBOX', from: 'Client <client@example.com>',
+          to: ['sales@example.com'], cc: [], sentAt: '2026-08-20T09:00:00.000Z',
+          subject: 'Contract question', body: 'Could you clarify?', bodyTruncated: false,
+        }],
+      },
+    }
+    const { app, emailReviewContext } = makeApp({
+      getById: vi.fn(async () => reviewedReply()),
+      emailReviewContext: vi.fn(async () => context),
+    })
+    const response = await request(app)
+      .get('/api/approvals/ap-1/email-review-context?entityId=contact-1')
+      .expect(200)
+    expect(response.body).toEqual(context)
+    expect(emailReviewContext).toHaveBeenCalledWith({
+      userId: 'u-1', workspaceId: 'ws-1', entityId: 'contact-1',
+      recipient: 'client@example.com', replyTo: 'INBOX:42',
+      toolName: 'imapSendMessage__sales_1a2b3c4d', account: 'sales@example.com',
+    })
+  })
+
+  it('rejects missing entity, wrong approver, stale rows, and non-reviewed shapes', async () => {
+    const missingEntity = makeApp({ getById: vi.fn(async () => reviewedReply()) })
+    await request(missingEntity.app)
+      .get('/api/approvals/ap-1/email-review-context')
+      .expect(400)
+
+    const wrongApprover = makeApp({
+      getById: vi.fn(async () => ({ ...reviewedReply(), approverUserId: 'u-2' })),
+    })
+    await request(wrongApprover.app)
+      .get('/api/approvals/ap-1/email-review-context?entityId=contact-1')
+      .expect(403)
+
+    const stale = makeApp({
+      getById: vi.fn(async () => ({ ...reviewedReply(), status: 'superseded' } as PendingApproval)),
+    })
+    await request(stale.app)
+      .get('/api/approvals/ap-1/email-review-context?entityId=contact-1')
+      .expect(409)
+
+    const wrongShape = makeApp({ getById: vi.fn(async () => makeApproval()) })
+    await request(wrongShape.app)
+      .get('/api/approvals/ap-1/email-review-context?entityId=contact-1')
+      .expect(422)
+  })
+
+  it('404s when the CRM record does not own the frozen recipient relationship', async () => {
+    const { app } = makeApp({
+      getById: vi.fn(async () => reviewedReply()),
+      emailReviewContext: vi.fn(async () => null),
+    })
+    await request(app)
+      .get('/api/approvals/ap-1/email-review-context?entityId=contact-1')
+      .expect(404)
   })
 })
 
@@ -353,6 +433,7 @@ describe('[COMP:api/unified-approvals-route] email_sender respond (agentmail.md 
         approvalsStore: { listPendingForWorkspace: vi.fn(async () => []), getById, respond } as never,
         workspaceStore: { getRole: vi.fn(async () => 'member') } as never,
         bridgeDeps: {} as never,
+        emailReviewContext: vi.fn(async () => ({ thread: null })),
         ...(over.withDeps === false ? {} : { emailSenderDeps: { allowlistSender } }),
       }),
     )

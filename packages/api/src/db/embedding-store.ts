@@ -183,6 +183,8 @@ const RECENCY_WINDOW_MONTHS = resolveEmbedRecencyWindowMonths(
   process.env.EMBED_RECENCY_WINDOW_MONTHS,
 )
 const BUDGET_SEGMENTS = resolveEmbedBudgetSegments(process.env.EMBED_BUDGET_SEGMENTS)
+export const EMBEDDING_FAILURE_RETRY_DELAY_HOURS = 1
+export const EMBEDDING_FAILURE_RETRY_BATCH_MAX = 10
 
 /**
  * How long a per-corpus embedded-row count is trusted before it is re-measured.
@@ -211,8 +213,8 @@ export function __resetEmbedBudgetCache(): void {
  *
  * Two known imprecisions, both acceptable and both in the safe direction:
  * `reltuples` lags until autovacuum ANALYZEs, and the difference counts
- * permanently-failed rows as embedded (they are excluded from the partial
- * index), so the budget engages slightly early rather than slightly late.
+ * failed rows stay unembedded and are subtracted through their own partial
+ * retry index, so a provider incident cannot falsely consume the budget.
  *
  * Returns null when `reltuples` is unavailable (a table never analyzed reports
  * -1). The caller then proceeds unbudgeted — the 12-month window still bounds
@@ -222,19 +224,26 @@ async function approxEmbeddedCount(
   client: pg.PoolClient,
   table: string,
 ): Promise<number | null> {
-  const res = await client.query<{ approx_total: string | null; unembedded: string }>(
+  const res = await client.query<{
+    approx_total: string | null
+    unattempted: string
+    failed_unembedded: string
+  }>(
     `SELECT (SELECT reltuples::bigint FROM pg_class WHERE oid = to_regclass($1))::text
               AS approx_total,
             (SELECT count(*) FROM ${table}
               WHERE embedding IS NULL AND embedding_failed_at IS NULL)::text
-              AS unembedded`,
+              AS unattempted,
+            (SELECT count(*) FROM ${table}
+              WHERE embedding IS NULL AND embedding_failed_at IS NOT NULL)::text
+              AS failed_unembedded`,
     [table],
   )
   const row = res.rows[0]
   if (!row || row.approx_total === null) return null
   const total = Number(row.approx_total)
   if (!Number.isFinite(total) || total < 0) return null
-  return Math.max(0, total - Number(row.unembedded))
+  return Math.max(0, total - Number(row.unattempted) - Number(row.failed_unembedded))
 }
 
 /**
@@ -370,6 +379,38 @@ export function createDbEmbeddingStore(): EmbeddingStore {
             limit - claimed.length,
           ])
           claimed.push(...older.rows)
+        }
+
+        // A failure is delayed work, not a terminal state. New/unattempted
+        // rows always lead; only unused capacity is filled by a deliberately
+        // small retry lane so a provider-wide outage cannot create a retry
+        // storm. Resetting the failure marker in this same short transaction
+        // claims the row. A repeated failure in phase 3 stamps a fresh time.
+        const retryLimit = Math.min(
+          EMBEDDING_FAILURE_RETRY_BATCH_MAX,
+          Math.max(0, limit - claimed.length),
+        )
+        if (retryLimit > 0) {
+          const retry = await client.query<ClaimedRow>(
+            `WITH retry AS (
+               SELECT id
+                 FROM ${table}
+                WHERE embedding IS NULL
+                  AND embedding_failed_at <= now() - INTERVAL '${EMBEDDING_FAILURE_RETRY_DELAY_HOURS} hour'
+                  AND ${recencyExpr} > now() - INTERVAL '${RECENCY_WINDOW_MONTHS} months'
+                ORDER BY ${recencyExpr} DESC, embedding_failed_at ASC
+                LIMIT $1
+                FOR UPDATE SKIP LOCKED
+             )
+             UPDATE ${table} AS t
+                SET embedding_failed_at = NULL,
+                    embedding_failure_reason = NULL
+               FROM retry
+              WHERE t.id = retry.id
+             RETURNING t.id, (${textExpr}) AS embed_text, t.workspace_id, t.user_id`,
+            [retryLimit],
+          )
+          claimed.push(...retry.rows)
         }
         return claimed
       })

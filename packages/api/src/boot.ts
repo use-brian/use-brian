@@ -192,6 +192,7 @@ import { EXTRACTION_MODEL } from './build-episode-ingestors.js'
 import { createMailboxSyncWorker } from './mailbox/sync-worker.js'
 import { setGlobalMailboxArchiveDeps } from './mailbox/archive-search-tool.js'
 import { setGlobalMailboxSyncDeps } from './mailbox/sync-tool.js'
+import { setGlobalMailboxContactImportDeps } from './mailbox/contact-import-tools.js'
 import { createMailboxIdleWatcher } from './mailbox/idle-watcher.js'
 import { createChatArchiveTools } from './chat-archive/chat-tools.js'
 import { createSaveChatMediaTool } from './chat-archive/save-media-tool.js'
@@ -207,6 +208,9 @@ import { codexProviderRoutes } from './routes/codex-provider.js'
 import { saveLocalProviderPreference } from './local-provider-preference.js'
 import { brainRoutes } from './routes/brain.js'
 import { brainInboxRoutes } from './routes/brain-inbox.js'
+import { crmRoutes } from './routes/crm.js'
+import { getCrmEmailReviewContext } from './db/crm-r2.js'
+import { resolveWorkspaceViewpoint } from './db/workspace-viewpoint.js'
 import { createBrainEntryMutator } from './brain-entry-mutation.js'
 import { taskGuardrailRoutes } from './routes/task-guardrails.js'
 import { homeRoutes } from './routes/home.js'
@@ -1460,6 +1464,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
   })
   const crmStore = createDbCrmStore()
+  setGlobalMailboxContactImportDeps({ crm: crmStore })
   const workspaceFilesStore = createDbWorkspaceFilesStore()
   const workspaceFileUploadsStore = createWorkspaceFileUploadsStore()
   const workflowStore = createDbWorkflowStore()
@@ -5101,6 +5106,18 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     approvalsStore: pendingApprovalsStore,
     workspaceStore,
     bridgeDeps: approvalBridgeDeps,
+    emailReviewContext: async (input) => {
+      const ctx = await resolveWorkspaceViewpoint(input.userId, input.workspaceId, null)
+      if (!ctx) return null
+      return getCrmEmailReviewContext({
+        ctx,
+        entityId: input.entityId,
+        recipient: input.recipient,
+        replyTo: input.replyTo,
+        toolName: input.toolName,
+        account: input.account,
+      })
+    },
     resumeDeps: {
       approvalsStore: pendingApprovalsStore,
       sessionResumeStore,
@@ -5958,6 +5975,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // (The public /api/brain/stream SSE mount lives ABOVE the bare `/api`
   // requireAuth guards — see the block next to workflowWebhookRoutes.)
   app.use('/api/brain', requireAuth(env.JWT_SECRET), brainRoutes({ entitiesStore, entityLinksStore, retrievalStore, knowledgeStore, workspaceSkillStore, workspaceSkillFilesStore, connectorInstanceStore }))
+  app.use('/api/crm', requireAuth(env.JWT_SECRET), crmRoutes({
+    workspaceStore,
+    entityLinks: entityLinksStore,
+  }))
   // Brain inbox (verification surface). Open + hosted share this one mount: the
   // route's deps are all open (brain-inbox-store / entities-store / crm / sessions /
   // notify). `entityKindClassifier` is boot's own; `pendingClassificationStore` is
