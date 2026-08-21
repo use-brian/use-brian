@@ -1100,13 +1100,10 @@ export function ChannelDetail({
               ))}
             </SelectContent>
           </Select>
-          {/* Surface routing is for multi-conversation channels (Slack channels,
-              Telegram chats/topics). A WhatsApp number has one conversation
-              stream, so it just gets the default assistant — same for a WeChat
-              bot (operators don't know contacts' iLink ids) and a custom bridge
-              (peer ids are whatever the bridge reports; operators don't know
-              them up front). */}
-          {channel.channelType !== "whatsapp" &&
+          {/* Official WhatsApp Cloud groups are addressable by Meta group id.
+              Linked-number WhatsApp, WeChat, and custom bridge peer ids are not
+              operator-discoverable here, so those transports use the default. */}
+          {(channel.channelType !== "whatsapp" || channel.integrationProvider === "cloud_api") &&
             channel.channelType !== "wechat" &&
             channel.channelType !== "custom" && (
             <SurfaceInput
