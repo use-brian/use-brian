@@ -10,6 +10,7 @@ export type WhatsAppCloudApiOptions = {
   phoneNumberId: string
   graphApiVersion?: string
   graphApiBaseUrl?: string
+  recipientType?: 'individual' | 'group'
 }
 
 export type WhatsAppCloudPhoneNumber = {
@@ -28,6 +29,7 @@ type CloudMessage = {
   from?: string
   timestamp?: string
   type?: string
+  group_id?: string
   context?: { id?: string }
   text?: { body?: string }
   image?: { id?: string; mime_type?: string; caption?: string }
@@ -142,9 +144,10 @@ export function parseWhatsAppCloudMessages(payload: unknown): IncomingMessage[] 
         if (!message.id || !message.from) continue
         const media = mediaFrom(message)
         const text = message.text?.body ?? media.caption ?? ''
+        const groupId = message.group_id?.trim() || null
         incoming.push({
           userId: message.from,
-          channelId: message.from,
+          channelId: groupId ?? message.from,
           messageId: message.id,
           text,
           ...(media.id ? { mediaUrl: `whatsapp-cloud:${media.id}` } : {}),
@@ -152,11 +155,12 @@ export function parseWhatsAppCloudMessages(payload: unknown): IncomingMessage[] 
           ...(media.mime ? { mediaMime: media.mime } : {}),
           ...(media.name ? { mediaName: media.name } : {}),
           ...(message.context?.id ? { replyToMessageId: message.context.id } : {}),
-          isGroupChat: false,
+          isGroupChat: groupId !== null,
           timestamp: Number(message.timestamp ?? 0) || Math.floor(Date.now() / 1000),
           raw: {
             message,
             phoneNumberId: value?.metadata?.phone_number_id,
+            groupId,
             senderName: value?.contacts?.find((contact) => contact.wa_id === message.from)?.profile?.name,
           },
         })
@@ -207,6 +211,7 @@ export function createWhatsAppCloudApi(options: WhatsAppCloudApiOptions) {
 
 export function createWhatsAppCloudAdapter(options: WhatsAppCloudApiOptions): ChannelAdapter {
   async function sendText(to: string, body: string): Promise<string> {
+    const recipientType = options.recipientType ?? 'individual'
     const data = await graphRequest<{ messages?: Array<{ id?: string }> }>(
       options,
       `${encodeURIComponent(options.phoneNumberId)}/messages`,
@@ -214,8 +219,8 @@ export function createWhatsAppCloudAdapter(options: WhatsAppCloudApiOptions): Ch
         method: 'POST',
         body: JSON.stringify({
           messaging_product: 'whatsapp',
-          recipient_type: 'individual',
-          to: to.replace(/^\+/, ''),
+          recipient_type: recipientType,
+          to: recipientType === 'individual' ? to.replace(/^\+/, '') : to,
           type: 'text',
           text: { preview_url: true, body },
         }),
