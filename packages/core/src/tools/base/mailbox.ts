@@ -10,9 +10,10 @@
  *
  * Core stays network-free: the injected `MailboxApi` seam is implemented by
  * the API layer (`packages/api/src/mailbox/`, imapflow + nodemailer). Core
- * owns the agentic-search policy (D12): the 90-day default window, the
- * result cap, snippet truncation, and client-side thread stitching from
- * `References`/`In-Reply-To` (never the optional server THREAD extension).
+ * owns the agentic-search policy (D12): full-history sender/subject lookup,
+ * the 90-day broad-search window, result caps, snippet truncation, and
+ * client-side thread stitching from `References`/`In-Reply-To` (never the
+ * optional server THREAD extension).
  *
  * Attachment delivery (Phase 3, D15-D17): `imapGetMessage` lists parts with
  * their BODYSTRUCTURE ids, `imapSaveAttachment` lands one part's bytes in the
@@ -134,8 +135,8 @@ export type MailboxSearchParams = {
    * every selectable ordinary folder, including regular custom/nested folders.
    */
   folder?: string
-  /** YYYY-MM-DD lower bound — core always supplies one (default window). */
-  since: string
+  /** YYYY-MM-DD lower bound. Undefined means the full live mailbox history. */
+  since?: string
   before?: string
   /** Core always supplies (default 20, capped at 50). */
   limit: number
@@ -420,7 +421,7 @@ export function createMailboxTools(
       'Searches every selectable ordinary folder by default, including INBOX, Sent, Archive, and custom folders, so mail moved by a user or provider rule is still discoverable. Junk, Trash, Drafts, aggregate All Mail, and non-selectable containers are excluded; pass `folder` to search one folder only. ' +
       'Server-side search is substring matching with no ranking — iterate like grep: start with 2-4 `keywords` (they are OR\'d in one round trip, so include synonyms), ' +
       'then refine by sender, subject, or date. Results come back grouped into conversation threads with snippets. ' +
-      `Defaults to the last ${MAILBOX_DEFAULT_WINDOW_DAYS} days — pass \`since\` to search older mail. ` +
+      `Sender- or subject-constrained searches cover the full live history by default; broad and keyword-only searches default to the last ${MAILBOX_DEFAULT_WINDOW_DAYS} days. Pass \`since\` to set an explicit lower bound. ` +
       accountRoutingDescription,
     inputSchema: z.object({
       keywords: z
@@ -438,7 +439,7 @@ export function createMailboxTools(
         .string()
         .regex(/^\d{4}-\d{2}-\d{2}$/)
         .optional()
-        .describe(`Earliest date (YYYY-MM-DD). Default: ${MAILBOX_DEFAULT_WINDOW_DAYS} days ago.`),
+        .describe(`Earliest date (YYYY-MM-DD). Broad/keyword-only default: ${MAILBOX_DEFAULT_WINDOW_DAYS} days ago; sender/subject default: full history.`),
       before: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('Latest date (YYYY-MM-DD), exclusive.'),
       maxResults: z
         .number()
@@ -459,12 +460,13 @@ export function createMailboxTools(
       const api = resolved.api
       try {
         const limit = Math.min(input.maxResults ?? MAILBOX_DEFAULT_LIMIT, MAILBOX_MAX_LIMIT)
+        const hasEnvelopeFilter = Boolean(input.from?.trim() || input.subject?.trim())
         const { hits, note } = await api.searchMessages({
           keywords: input.keywords,
           from: input.from,
           subject: input.subject,
           folder: input.folder,
-          since: input.since ?? isoDaysAgo(MAILBOX_DEFAULT_WINDOW_DAYS),
+          since: input.since ?? (hasEnvelopeFilter ? undefined : isoDaysAgo(MAILBOX_DEFAULT_WINDOW_DAYS)),
           before: input.before,
           limit,
         })
