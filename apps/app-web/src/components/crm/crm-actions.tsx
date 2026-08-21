@@ -27,7 +27,10 @@ import {
   mergeCrmRecords,
   setCrmRecordArchived,
   undoCrmMerge,
+  type CrmConfig,
+  type CrmData,
   type CrmDuplicateGroup,
+  type CrmFieldDefinition,
 } from "@/lib/api/crm";
 import {
   CRM_IMPORT_FIELDS,
@@ -44,11 +47,17 @@ type DialogKind = "create" | "import" | "duplicates" | "archive" | null;
 export function CrmActions({
   workspaceId,
   section,
+  data,
+  config,
   onChanged,
+  onCreated,
 }: {
   workspaceId: string;
   section: "deals" | "contacts" | "companies";
+  data: CrmData | null;
+  config: CrmConfig | null;
   onChanged: () => void;
+  onCreated: (created: { id: string; kind: "deal" | "contact" | "company" }) => void | Promise<void>;
 }) {
   const t = useT().crmPage.r2;
   const [dialog, setDialog] = useState<DialogKind>(null);
@@ -65,7 +74,7 @@ export function CrmActions({
 
   return (
     <>
-      <Button size="sm" onClick={() => setDialog("create")}>
+      <Button size="sm" disabled={!data || !config} onClick={() => setDialog("create")}>
         <Plus aria-hidden /> {t.newRecord}
       </Button>
       <DropdownMenu>
@@ -82,10 +91,16 @@ export function CrmActions({
 
       <CreateDialog
         workspaceId={workspaceId}
+        data={data}
+        config={config}
         open={dialog === "create"}
         initialKind={section === "contacts" ? "contact" : section === "companies" ? "company" : "deal"}
         onOpenChange={(open) => setDialog(open ? "create" : null)}
-        onCreated={() => { setDialog(null); onChanged(); }}
+        onCreated={(created) => {
+          setDialog(null);
+          onChanged();
+          void onCreated(created);
+        }}
       />
       <ImportDialog
         workspaceId={workspaceId}
@@ -134,40 +149,85 @@ function Shell({ open, onOpenChange, title, description, children }: {
   );
 }
 
-function CreateDialog({ workspaceId, open, initialKind, onOpenChange, onCreated }: {
+function CreateDialog({ workspaceId, data, config, open, initialKind, onOpenChange, onCreated }: {
   workspaceId: string;
+  data: CrmData | null;
+  config: CrmConfig | null;
   open: boolean;
   initialKind: CrmImportKind;
   onOpenChange: (open: boolean) => void;
-  onCreated: () => void;
+  onCreated: (created: { id: string; kind: "deal" | "contact" | "company" }) => void;
 }) {
   const t = useT().crmPage.r2;
   const [kind, setKind] = useState<CrmImportKind>(initialKind);
   const [name, setName] = useState("");
   const [primary, setPrimary] = useState("");
   const [secondary, setSecondary] = useState("");
+  const [companyId, setCompanyId] = useState("");
+  const [contactId, setContactId] = useState("");
+  const [pipelineStageId, setPipelineStageId] = useState("");
+  const [closeDate, setCloseDate] = useState("");
+  const [source, setSource] = useState("");
+  const [tags, setTags] = useState("");
+  const [customFields, setCustomFields] = useState<Record<string, unknown>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
-    if (open) setKind(initialKind);
-  }, [open, initialKind]);
+    if (!open) return;
+    setKind(initialKind);
+    setName("");
+    setPrimary("");
+    setSecondary("");
+    setCompanyId("");
+    setContactId("");
+    setPipelineStageId(
+      config?.pipelines.find((pipeline) => pipeline.isDefault)?.stages[0]?.id ??
+        config?.pipelines[0]?.stages[0]?.id ??
+        "",
+    );
+    setCloseDate("");
+    setSource("");
+    setTags("");
+    setCustomFields({});
+    setError(null);
+  }, [open, initialKind, config]);
+
+  const fields = (config?.fields ?? []).filter(
+    (field) => field.entityKind === (kind === "contact" ? "person" : kind),
+  );
 
   async function submit() {
     if (!name.trim()) return;
     setBusy(true);
     setError(null);
     const record: Record<string, unknown> = { kind, name: name.trim() };
-    if (kind === "contact") { record.email = primary.trim() || null; record.phone = secondary.trim() || null; }
-    else if (kind === "company") record.domain = primary.trim() || null;
+    if (kind === "contact") {
+      record.email = primary.trim() || null;
+      record.phone = secondary.trim() || null;
+      record.companyId = companyId || null;
+      record.tags = tags.split(",").map((tag) => tag.trim()).filter(Boolean);
+    }
+    else if (kind === "company") {
+      record.domain = primary.trim() || null;
+      record.tags = tags.split(",").map((tag) => tag.trim()).filter(Boolean);
+    }
     else {
       const amount = Number(primary);
       if (primary.trim() && Number.isFinite(amount)) record.amount = amount;
       record.currencyCode = secondary.trim().toUpperCase() || "USD";
+      record.companyId = companyId || null;
+      record.contactId = contactId || null;
+      record.pipelineStageId = pipelineStageId || undefined;
+      record.closeDate = closeDate || null;
+      record.source = source.trim() || null;
     }
+    if (Object.keys(customFields).length > 0) record.customFields = customFields;
     try {
-      await createCrmRecord(workspaceId, record);
-      setName(""); setPrimary(""); setSecondary("");
-      onCreated();
+      const created = await createCrmRecord(workspaceId, record);
+      const createdKind = created.kind === "person" ? "contact" : created.kind;
+      if (createdKind === "deal" || createdKind === "contact" || createdKind === "company") {
+        onCreated({ id: created.id, kind: createdKind });
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : t.createFailed);
     } finally {
@@ -178,7 +238,17 @@ function CreateDialog({ workspaceId, open, initialKind, onOpenChange, onCreated 
   return (
     <Shell open={open} onOpenChange={onOpenChange} title={t.newRecord} description={t.newRecordDescription}>
       <div className="space-y-4">
-        <Select value={kind} onValueChange={(value) => setKind(value as CrmImportKind)}>
+        <Select value={kind} onValueChange={(value) => {
+          setKind(value as CrmImportKind);
+          setPrimary("");
+          setSecondary("");
+          setCompanyId("");
+          setContactId("");
+          setCloseDate("");
+          setSource("");
+          setTags("");
+          setCustomFields({});
+        }}>
           <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="contact">{t.kindContact}</SelectItem>
@@ -187,9 +257,22 @@ function CreateDialog({ workspaceId, open, initialKind, onOpenChange, onCreated 
           </SelectContent>
         </Select>
         <Input label={t.name} value={name} onChange={setName} autoFocus />
-        {kind === "contact" && <><Input label={t.email} value={primary} onChange={setPrimary} /><Input label={t.phone} value={secondary} onChange={setSecondary} /></>}
-        {kind === "company" && <Input label={t.domain} value={primary} onChange={setPrimary} />}
-        {kind === "deal" && <><Input label={t.amount} value={primary} onChange={setPrimary} /><Input label={t.currency} value={secondary} onChange={setSecondary} placeholder="USD" /></>}
+        {kind === "contact" && <><Input label={t.email} value={primary} onChange={setPrimary} /><Input label={t.phone} value={secondary} onChange={setSecondary} /><RelationshipSelect allowClear label={t.company} value={companyId} placeholder={t.noCompany} items={(data?.companies ?? []).map((row) => ({ value: row.id, label: row.name }))} onChange={setCompanyId} /><Input label={t.tags} value={tags} onChange={setTags} placeholder={t.tagsPlaceholder} /></>}
+        {kind === "company" && <><Input label={t.domain} value={primary} onChange={setPrimary} /><Input label={t.tags} value={tags} onChange={setTags} placeholder={t.tagsPlaceholder} /></>}
+        {kind === "deal" && <>
+          <div className="grid gap-4 sm:grid-cols-2"><Input label={t.amount} type="number" value={primary} onChange={setPrimary} /><Input label={t.currency} value={secondary} onChange={setSecondary} placeholder="USD" /></div>
+          <RelationshipSelect label={t.pipelineStage} value={pipelineStageId} placeholder={t.pickStage} items={(config?.pipelines ?? []).flatMap((pipeline) => pipeline.stages.map((stage) => ({ value: stage.id, label: `${pipeline.name}: ${stage.name}` })))} onChange={setPipelineStageId} />
+          <div className="grid gap-4 sm:grid-cols-2"><RelationshipSelect allowClear label={t.company} value={companyId} placeholder={t.noCompany} items={(data?.companies ?? []).map((row) => ({ value: row.id, label: row.name }))} onChange={setCompanyId} /><RelationshipSelect allowClear label={t.contact} value={contactId} placeholder={t.noContact} items={(data?.contacts ?? []).map((row) => ({ value: row.id, label: row.name }))} onChange={setContactId} /></div>
+          <div className="grid gap-4 sm:grid-cols-2"><Input label={t.closeDate} type="date" value={closeDate} onChange={setCloseDate} /><Input label={t.source} value={source} onChange={setSource} /></div>
+        </>}
+        {fields.length > 0 && (
+          <div className="space-y-3 rounded-xl border border-border p-3">
+            <div className="text-xs font-medium">{t.customFields}</div>
+            {fields.map((field) => (
+              <CreateField key={field.id} field={field} value={customFields[field.fieldKey]} onChange={(value) => setCustomFields((current) => ({ ...current, [field.fieldKey]: value }))} />
+            ))}
+          </div>
+        )}
         {error && <div className="text-xs text-destructive">{error}</div>}
         <div className="flex justify-end gap-2"><Button variant="outline" onClick={() => onOpenChange(false)}>{t.cancel}</Button><Button disabled={busy || !name.trim()} onClick={() => void submit()}>{busy ? t.saving : t.create}</Button></div>
       </div>
@@ -211,6 +294,20 @@ function ImportDialog({ workspaceId, open, initialKind, onOpenChange, onImported
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<string | null>(null);
   const mapped = useMemo(() => preview ? mapCrmCsvRows(preview, kind, mapping) : [], [preview, kind, mapping]);
+  const importLabels: Record<string, string> = {
+    name: t.name,
+    email: t.email,
+    phone: t.phone,
+    companyId: t.company,
+    contactId: t.contact,
+    tags: t.tags,
+    domain: t.domain,
+    stage: t.pipelineStage,
+    amount: t.amount,
+    currencyCode: t.currency,
+    closeDate: t.closeDate,
+    source: t.source,
+  };
   useEffect(() => {
     if (open) setKind(initialKind);
   }, [open, initialKind]);
@@ -248,12 +345,20 @@ function ImportDialog({ workspaceId, open, initialKind, onOpenChange, onImported
                     <span className="truncate text-muted-foreground">{header}</span>
                     <Select value={mapping[index] ?? "__skip__"} onValueChange={(value) => setMapping((current) => ({ ...current, [index]: value === "__skip__" ? null : value }))}>
                       <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
-                      <SelectContent><SelectItem value="__skip__">{t.skipColumn}</SelectItem>{CRM_IMPORT_FIELDS[kind].map((field) => <SelectItem key={field} value={field}>{field}</SelectItem>)}</SelectContent>
+                      <SelectContent><SelectItem value="__skip__">{t.skipColumn}</SelectItem>{CRM_IMPORT_FIELDS[kind].map((field) => <SelectItem key={field} value={field}>{importLabels[field] ?? field}</SelectItem>)}</SelectContent>
                     </Select>
                   </div>
                 ))}
               </div>
             </div>
+            {preview.rows.length > 0 && (
+              <div className="overflow-x-auto rounded-xl border border-border">
+                <table className="w-full min-w-max text-left text-[11px]">
+                  <thead className="bg-muted/30 text-muted-foreground"><tr>{preview.headers.map((header, index) => <th key={`${header}-${index}`} className="px-2.5 py-2 font-medium">{header}</th>)}</tr></thead>
+                  <tbody>{preview.rows.slice(0, 3).map((row, rowIndex) => <tr key={rowIndex} className="border-t border-border/60">{preview.headers.map((_, index) => <td key={index} className="max-w-48 truncate px-2.5 py-2">{row[index] ?? ""}</td>)}</tr>)}</tbody>
+                </table>
+              </div>
+            )}
             <div className="text-xs text-muted-foreground">{t.previewRows.replace("{count}", String(preview.rows.length))}{preview.truncated ? ` ${t.importCapped}` : ""}</div>
           </>
         )}
@@ -284,12 +389,18 @@ function DuplicatesDialog({ workspaceId, open, onOpenChange, onMerged }: {
   const t = useT().crmPage.r2;
   const [groups, setGroups] = useState<CrmDuplicateGroup[]>([]);
   const [loaded, setLoaded] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [lastMerge, setLastMerge] = useState<{ id: string; undoUntil: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     if (!open || loaded) return;
     setLoaded(true);
-    void fetchCrmDuplicates(workspaceId).then(setGroups).catch(() => setGroups([]));
+    setLoading(true);
+    setError(null);
+    void fetchCrmDuplicates(workspaceId)
+      .then(setGroups)
+      .catch((cause) => setError(cause instanceof Error ? cause.message : t.duplicatesLoadFailed))
+      .finally(() => setLoading(false));
   }, [open, loaded, workspaceId]);
   return (
     <Shell open={open} onOpenChange={(next) => { if (!next) setLoaded(false); onOpenChange(next); }} title={t.reviewDuplicates} description={t.duplicatesDescription}>
@@ -313,7 +424,8 @@ function DuplicatesDialog({ workspaceId, open, onOpenChange, onMerged }: {
             })()}>{t.undoMerge}</Button>
           </div>
         )}
-        {error && <div className="text-xs text-destructive">{error}</div>}
+        {error && <div className="flex items-center justify-between gap-2 text-xs text-destructive"><span>{error}</span><Button size="xs" variant="ghost" onClick={() => { setLoaded(false); setError(null); }}>{t.retry}</Button></div>}
+        {loading && <div className="text-sm text-muted-foreground">{t.duplicatesLoading}</div>}
         {groups.map((group) => (
           <div key={`${group.kind}:${group.reason}:${group.value}`} className="rounded-xl border border-border p-3">
             <div className="text-[10px] uppercase tracking-wide text-muted-foreground">{t.duplicateReasons[group.reason]} · {group.value}</div>
@@ -332,7 +444,7 @@ function DuplicatesDialog({ workspaceId, open, onOpenChange, onMerged }: {
             })()}><GitMerge aria-hidden />{t.merge}</Button>}</div>)}</div>
           </div>
         ))}
-        {loaded && groups.length === 0 && <div className="text-sm text-muted-foreground">{t.noDuplicates}</div>}
+        {loaded && !loading && !error && groups.length === 0 && <div className="text-sm text-muted-foreground">{t.noDuplicates}</div>}
       </div>
     </Shell>
   );
@@ -346,34 +458,93 @@ function ArchivedDialog({ workspaceId, open, onOpenChange, onRestored }: {
 }) {
   const t = useT().crmPage.r2;
   const [rows, setRows] = useState<Array<{ id: string; name: string; kind: string }>>([]);
-  useEffect(() => {
-    if (!open) return;
-    void fetchWorkspaceCrm(workspaceId, true).then((data) => {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  async function reload() {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await fetchWorkspaceCrm(workspaceId, true);
       setRows([
         ...data.contacts.filter((row) => row.archivedAt).map((row) => ({ id: row.id, name: row.name, kind: t.kindContact })),
         ...data.companies.filter((row) => row.archivedAt).map((row) => ({ id: row.id, name: row.name, kind: t.kindCompany })),
         ...data.deals.filter((row) => row.archivedAt).map((row) => ({ id: row.id, name: row.name, kind: t.kindDeal })),
       ]);
-    }).catch(() => setRows([]));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : t.archivedLoadFailed);
+    } finally {
+      setLoading(false);
+    }
+  }
+  useEffect(() => {
+    if (!open) return;
+    void reload();
   }, [open, workspaceId, t]);
   return (
     <Shell open={open} onOpenChange={onOpenChange} title={t.archivedRecords} description={t.archivedDescription}>
       <div className="space-y-2">
+        {error && <div className="flex items-center justify-between gap-2 text-xs text-destructive"><span>{error}</span><Button size="xs" variant="ghost" onClick={() => void reload()}>{t.retry}</Button></div>}
+        {loading && <div className="text-sm text-muted-foreground">{t.archivedLoading}</div>}
         {rows.map((row) => (
           <div key={row.id} className="flex items-center justify-between rounded-lg border border-border px-3 py-2">
             <div><div className="text-xs font-medium">{row.name}</div><div className="text-[10px] text-muted-foreground">{row.kind}</div></div>
             <Button size="xs" variant="outline" onClick={() => void setCrmRecordArchived(workspaceId, row.id, false).then(() => {
               setRows((current) => current.filter((item) => item.id !== row.id));
               onRestored();
-            })}><ArchiveRestore aria-hidden />{t.restore}</Button>
+            }).catch((cause) => setError(cause instanceof Error ? cause.message : t.restoreFailed))}><ArchiveRestore aria-hidden />{t.restore}</Button>
           </div>
         ))}
-        {rows.length === 0 && <div className="text-sm text-muted-foreground">{t.noArchived}</div>}
+        {!loading && !error && rows.length === 0 && <div className="text-sm text-muted-foreground">{t.noArchived}</div>}
       </div>
     </Shell>
   );
 }
 
-function Input({ label, value, onChange, placeholder, autoFocus }: { label: string; value: string; onChange: (value: string) => void; placeholder?: string; autoFocus?: boolean }) {
-  return <label className="block text-xs"><span className="mb-1 block text-muted-foreground">{label}</span><input autoFocus={autoFocus} value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} className="h-9 w-full rounded-lg border border-border bg-background px-3 text-sm outline-none" /></label>;
+function RelationshipSelect({ label, value, placeholder, items, onChange, allowClear = false }: {
+  label: string;
+  value: string;
+  placeholder: string;
+  items: Array<{ value: string; label: string }>;
+  onChange: (value: string) => void;
+  allowClear?: boolean;
+}) {
+  return (
+    <label className="block text-xs">
+      <span className="mb-1 block text-muted-foreground">{label}</span>
+      <Select value={value || undefined} onValueChange={(next) => typeof next === "string" && onChange(next === "__none__" ? "" : next)}>
+        <SelectTrigger className="w-full"><SelectValue placeholder={placeholder} /></SelectTrigger>
+        <SelectContent>{allowClear && <SelectItem value="__none__">{placeholder}</SelectItem>}{items.map((item) => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}</SelectContent>
+      </Select>
+    </label>
+  );
+}
+
+function CreateField({ field, value, onChange }: {
+  field: CrmFieldDefinition;
+  value: unknown;
+  onChange: (value: unknown) => void;
+}) {
+  const t = useT().crmPage.r2;
+  if (field.fieldType === "boolean") {
+    return <RelationshipSelect label={field.label} value={value === true ? "true" : value === false ? "false" : ""} placeholder={t.pickValue} items={[{ value: "true", label: t.yes }, { value: "false", label: t.no }]} onChange={(next) => onChange(next === "true")} />;
+  }
+  if (field.fieldType === "single_select") {
+    return <RelationshipSelect label={field.label} value={typeof value === "string" ? value : ""} placeholder={t.pickValue} items={field.options.map((option) => ({ value: option, label: option }))} onChange={onChange} />;
+  }
+  return (
+    <Input
+      label={field.label}
+      type={field.fieldType === "number" ? "number" : field.fieldType === "date" ? "date" : "text"}
+      value={Array.isArray(value) ? value.join(", ") : typeof value === "string" || typeof value === "number" ? String(value) : ""}
+      onChange={(next) => {
+        if (field.fieldType === "number") onChange(next === "" ? null : Number(next));
+        else if (field.fieldType === "multi_select") onChange(next.split(",").map((part) => part.trim()).filter(Boolean));
+        else onChange(next);
+      }}
+    />
+  );
+}
+
+function Input({ label, value, onChange, placeholder, autoFocus, type = "text" }: { label: string; value: string; onChange: (value: string) => void; placeholder?: string; autoFocus?: boolean; type?: "text" | "number" | "date" }) {
+  return <label className="block text-xs"><span className="mb-1 block text-muted-foreground">{label}</span><input type={type} autoFocus={autoFocus} value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} className="h-9 w-full rounded-lg border border-border bg-background px-3 text-sm outline-none" /></label>;
 }

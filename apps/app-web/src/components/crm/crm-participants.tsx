@@ -27,10 +27,20 @@ export function CrmParticipants({ workspaceId, dealId, contacts }: {
   const t = useT().crmPage.r2;
   const [participants, setParticipants] = useState<CrmDealParticipant[]>([]);
   const [adding, setAdding] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   async function reload() {
-    setParticipants(await listCrmDealParticipants(workspaceId, dealId));
+    setLoading(true);
+    setError(null);
+    try {
+      setParticipants(await listCrmDealParticipants(workspaceId, dealId));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : t.participantsLoadFailed);
+    } finally {
+      setLoading(false);
+    }
   }
-  useEffect(() => { void reload().catch(() => setParticipants([])); }, [workspaceId, dealId]);
+  useEffect(() => { void reload(); }, [workspaceId, dealId]);
   const available = useMemo(() => {
     const present = new Set(participants.map((row) => row.contactId));
     return contacts.filter((row) => !present.has(row.id));
@@ -45,23 +55,26 @@ export function CrmParticipants({ workspaceId, dealId, contacts }: {
       {adding && (
         <Select onValueChange={(contactId) => {
           if (typeof contactId !== "string") return;
-          void addCrmDealParticipant(workspaceId, dealId, contactId).then(() => {
-            setAdding(false);
-            void reload();
-          });
+          void addCrmDealParticipant(workspaceId, dealId, contactId)
+            .then(() => {
+              setAdding(false);
+              void reload();
+            })
+            .catch((cause) => setError(cause instanceof Error ? cause.message : t.participantChangeFailed));
         }}>
           <SelectTrigger className="mb-2 w-full"><SelectValue placeholder={t.pickContact} /></SelectTrigger>
           <SelectContent>{available.map((contact) => <SelectItem key={contact.id} value={contact.id}>{contact.name}{contact.email ? ` · ${contact.email}` : ""}</SelectItem>)}</SelectContent>
         </Select>
       )}
+      {error && <div className="mb-2 flex items-center justify-between gap-2 rounded-lg bg-destructive/5 px-2.5 py-2 text-xs text-destructive"><span>{error}</span><Button size="xs" variant="ghost" onClick={() => void reload()}>{t.retry}</Button></div>}
       <div className="space-y-1.5">
         {participants.map((participant) => (
           <div key={participant.contactId} className="flex items-center justify-between rounded-lg bg-muted/30 px-2.5 py-2">
             <div className="min-w-0"><div className="truncate text-xs font-medium">{participant.name}{participant.isPrimary ? <span className="ml-1.5 text-[10px] text-muted-foreground">{t.primaryContact}</span> : null}</div>{participant.email && <div className="truncate text-[10px] text-muted-foreground">{participant.email}</div>}</div>
-            <Button size="icon-xs" variant="ghost" aria-label={t.removeParticipant} onClick={() => void removeCrmDealParticipant(workspaceId, dealId, participant.contactId).then(reload)}><X aria-hidden /></Button>
+            <Button size="icon-xs" variant="ghost" aria-label={t.removeParticipant} onClick={() => void removeCrmDealParticipant(workspaceId, dealId, participant.contactId).then(reload).catch((cause) => setError(cause instanceof Error ? cause.message : t.participantChangeFailed))}><X aria-hidden /></Button>
           </div>
         ))}
-        {participants.length === 0 && <div className="text-xs text-muted-foreground">{t.noParticipants}</div>}
+        {loading ? <div className="text-xs text-muted-foreground">{t.participantsLoading}</div> : !error && participants.length === 0 && <div className="text-xs text-muted-foreground">{t.noParticipants}</div>}
       </div>
     </section>
   );

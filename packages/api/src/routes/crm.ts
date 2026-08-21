@@ -222,8 +222,12 @@ export function crmRoutes({ workspaceStore, entityLinks }: RouteOptions): Router
     } else {
       const defaultPipeline = config.pipelines.find((p) => p.isDefault) ?? config.pipelines[0]
       const requestedStage = text(body.pipelineStageId, 100)
-      const stageConfig = defaultPipeline?.stages.find((s) => s.id === requestedStage)
-        ?? defaultPipeline?.stages[0]
+      const requestedPipeline = requestedStage
+        ? config.pipelines.find((pipeline) => pipeline.stages.some((stage) => stage.id === requestedStage))
+        : undefined
+      const selectedPipeline = requestedPipeline ?? defaultPipeline
+      const stageConfig = selectedPipeline?.stages.find((s) => s.id === requestedStage)
+        ?? selectedPipeline?.stages[0]
       const legacyStage = stageConfig?.legacyKey && LEGACY_STAGES.has(stageConfig.legacyKey as DealStage)
         ? stageConfig.legacyKey as DealStage
         : stageConfig?.category === 'won' ? 'won'
@@ -246,7 +250,7 @@ export function crmRoutes({ workspaceStore, entityLinks }: RouteOptions): Router
       if (entity) {
         const attributes = {
           ...entity.attributes,
-          pipeline_id: defaultPipeline?.id,
+          pipeline_id: selectedPipeline?.id,
           pipeline_stage_id: stageConfig?.id,
           currency_code: (text(body.currencyCode, 3) ?? 'USD').toUpperCase(),
           ...(text(body.ownerId, 100) ? { owner_id: text(body.ownerId, 100) } : {}),

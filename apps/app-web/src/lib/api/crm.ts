@@ -2,7 +2,8 @@
  * CRM operator-surface SDK — the flat CRM read behind `/w/[id]/crm`
  * (`GET /api/brain/crm`, [COMP:brain/crm-list-http]): every live deal /
  * contact / company the viewer can see, one payload, 500/kind cap, full
- * operator fields. The client joins display names by id (`crm-view.ts`).
+ * operator fields. The client joins display names by id (`crm-view.ts`) and
+ * resolves the workspace's stable pipeline stages from the configuration API.
  * Mutations reuse the existing brain-inbox adjust wire (`adjustBrainRow`
  * in `lib/api/brain-inbox.ts`) — the CRM-typed fields ride the same
  * endpoint (crm.md → "Operator surface"); stage changes route through
@@ -23,26 +24,6 @@ export type DealStage =
   | "negotiation"
   | "won"
   | "lost";
-
-/** The six locked stages, pipeline order (crm.md decision 2). */
-export const DEAL_STAGES: DealStage[] = [
-  "lead",
-  "qualified",
-  "proposal",
-  "negotiation",
-  "won",
-  "lost",
-];
-
-/** The four working-pipeline stages — the board's columns. */
-export const OPEN_STAGES: DealStage[] = [
-  "lead",
-  "qualified",
-  "proposal",
-  "negotiation",
-];
-
-export const CLOSED_STAGES: DealStage[] = ["won", "lost"];
 
 export function isOpenStage(stage: DealStage): boolean {
   return stage !== "won" && stage !== "lost";
@@ -241,7 +222,13 @@ export async function fetchCrmTimeline(
 export async function createCrmActivity(
   workspaceId: string,
   entityId: string,
-  input: { activityType: "note" | "call" | "meeting" | "message"; summary: string },
+  input: {
+    activityType: "note" | "call" | "meeting" | "message";
+    direction?: "inbound" | "outbound" | "internal";
+    occurredAt?: string;
+    subject?: string;
+    summary: string;
+  },
 ): Promise<CrmActivity> {
   const body = await jsonRequest<{ activity: CrmActivity }>(
     `/api/crm/${encodeURIComponent(workspaceId)}/records/${encodeURIComponent(entityId)}/activities`,

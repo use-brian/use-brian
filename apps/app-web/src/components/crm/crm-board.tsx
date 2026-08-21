@@ -19,20 +19,22 @@ import { ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import {
-  CLOSED_STAGES,
-  OPEN_STAGES,
   type CrmDealRow,
-  type DealStage,
+  type CrmPipeline,
+  type CrmPipelineStage,
 } from "@/lib/api/crm";
 import {
   formatAmount,
-  groupDealsByStage,
+  formatCurrencyTotals,
+  groupDealsByPipelineStage,
   localDateStr,
+  resolveDealPipelineStage,
 } from "@/lib/crm-view";
-import { STAGE_DOT } from "./crm-cells";
+import { PipelineStageCell, PIPELINE_CATEGORY_DOT } from "./crm-cells";
 
 export function CrmBoard({
   rows,
+  pipeline,
   companyNames,
   contactNames,
   showClosed,
@@ -42,41 +44,43 @@ export function CrmBoard({
 }: {
   /** Filtered deals — open AND closed (the board owns the fold). */
   rows: CrmDealRow[];
+  pipeline: CrmPipeline;
   companyNames: Map<string, string>;
   contactNames: Map<string, string>;
   /** Reveal the won/lost columns (else they fold into the rail). */
   showClosed: boolean;
   onToggleClosed: () => void;
-  onStageDrop: (row: CrmDealRow, stage: DealStage) => void;
+  onStageDrop: (row: CrmDealRow, stage: CrmPipelineStage) => Promise<{ ok: boolean; error?: string }>;
   onOpenRecord: (row: CrmDealRow) => void;
 }) {
   const t = useT().crmPage;
-  const stageLabels = t.stage as Record<string, string>;
   const [dragId, setDragId] = useState<string | null>(null);
-  const [overColumn, setOverColumn] = useState<DealStage | null>(null);
+  const [overColumn, setOverColumn] = useState<string | null>(null);
 
-  const columns = showClosed
-    ? [...OPEN_STAGES, ...CLOSED_STAGES]
-    : OPEN_STAGES;
-  const summaries = groupDealsByStage(rows, columns);
-  const closedSummaries = groupDealsByStage(rows, CLOSED_STAGES);
+  const openStages = pipeline.stages.filter((stage) => stage.category === "open");
+  const closedStages = pipeline.stages.filter((stage) => stage.category !== "open");
+  const columns = showClosed ? pipeline.stages : openStages;
+  const summaries = groupDealsByPipelineStage(rows, pipeline, columns);
+  const closedSummaries = groupDealsByPipelineStage(rows, pipeline, closedStages);
   const today = localDateStr(new Date());
 
-  function dropHandlers(stage: DealStage) {
+  function dropHandlers(stage: CrmPipelineStage) {
     return {
       onDragOver: (e: React.DragEvent) => {
         e.preventDefault();
-        setOverColumn(stage);
+        setOverColumn(stage.id);
       },
       onDragLeave: () =>
-        setOverColumn((c) => (c === stage ? null : c)),
+        setOverColumn((current) => (current === stage.id ? null : current)),
       onDrop: (e: React.DragEvent) => {
         e.preventDefault();
         setOverColumn(null);
         const id = e.dataTransfer.getData("text/deal-id") || dragId;
         setDragId(null);
         const row = rows.find((r) => r.id === id);
-        if (row && row.stage !== stage) onStageDrop(row, stage);
+        if (row && resolveDealPipelineStage(row, pipeline)?.id !== stage.id) {
+          void onStageDrop(row, stage);
+        }
       },
     };
   }
@@ -84,29 +88,29 @@ export function CrmBoard({
   return (
     <div className="flex h-full min-w-max flex-col gap-3 p-4">
       <div className="flex min-h-0 flex-1 gap-3">
-        {summaries.map(({ stage, rows: cards, amountSum }) => (
+        {summaries.map(({ stage, rows: cards, currencyTotals }) => (
           <div
-            key={stage}
+            key={stage.id}
             {...dropHandlers(stage)}
             className={cn(
               "flex w-72 shrink-0 flex-col rounded-2xl bg-muted/30 transition-shadow",
-              overColumn === stage && "ring-2 ring-primary/40",
+              overColumn === stage.id && "ring-2 ring-primary/40",
             )}
           >
             <div className="flex items-center gap-1.5 px-3.5 pb-1 pt-2.5">
               <span
-                className={cn("size-2 shrink-0 rounded-full", STAGE_DOT[stage])}
+                className={cn("size-2 shrink-0 rounded-full", PIPELINE_CATEGORY_DOT[stage.category])}
                 aria-hidden
               />
               <span className="text-[12.5px] font-semibold text-foreground/80">
-                {stageLabels[stage] ?? stage}
+                {stage.name}
               </span>
               <span className="tabular-nums text-[12px] text-muted-foreground">
                 {cards.length}
               </span>
-              {amountSum > 0 && (
+              {Object.keys(currencyTotals).length > 0 && (
                 <span className="ml-auto tabular-nums text-[11.5px] font-medium text-muted-foreground/80">
-                  {formatAmount(amountSum)}
+                  {formatCurrencyTotals(currencyTotals, true)}
                 </span>
               )}
             </div>
@@ -126,8 +130,8 @@ export function CrmBoard({
                 const overdue =
                   row.closeDate !== null &&
                   row.closeDate < today &&
-                  stage !== "won" &&
-                  stage !== "lost";
+                  stage.category === "open";
+                const resolvedStage = resolveDealPipelineStage(row, pipeline);
                 return (
                   <div
                     key={row.id}
@@ -161,7 +165,7 @@ export function CrmBoard({
                     <div className="mt-2 flex items-center gap-1.5">
                       {row.amount !== null && (
                         <span className="text-[11.5px] font-medium tabular-nums text-foreground/80">
-                          {formatAmount(row.amount)}
+                          {formatAmount(row.amount, row.currencyCode)}
                         </span>
                       )}
                       {row.closeDate && (
@@ -178,6 +182,21 @@ export function CrmBoard({
                         </span>
                       )}
                     </div>
+                    <div
+                      className="mt-1.5 border-t border-border/40 pt-1"
+                      draggable={false}
+                      onPointerDown={(event) => event.stopPropagation()}
+                    >
+                      <PipelineStageCell
+                        compact
+                        stageId={resolvedStage?.id ?? null}
+                        stages={pipeline.stages}
+                        onCommit={(stageId) => {
+                          const next = pipeline.stages.find((candidate) => candidate.id === stageId);
+                          return next ? onStageDrop(row, next) : Promise.resolve({ ok: false });
+                        }}
+                      />
+                    </div>
                   </div>
                 );
               })}
@@ -191,27 +210,27 @@ export function CrmBoard({
           full columns. Hidden while the columns are showing. */}
       {!showClosed && (
         <div className="flex items-center gap-2">
-          {closedSummaries.map(({ stage, rows: cards, amountSum }) => (
+          {closedSummaries.map(({ stage, rows: cards, currencyTotals }) => (
             <button
-              key={stage}
+              key={stage.id}
               type="button"
               onClick={onToggleClosed}
               {...dropHandlers(stage)}
               className={cn(
                 "inline-flex h-8 items-center gap-1.5 rounded-full bg-muted/40 px-3.5 text-[12px] font-medium text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground",
-                overColumn === stage && "ring-2 ring-primary/40",
+                overColumn === stage.id && "ring-2 ring-primary/40",
               )}
             >
               <ChevronRight className="size-3.5" aria-hidden />
               <span
-                className={cn("size-2 rounded-full", STAGE_DOT[stage])}
+                className={cn("size-2 rounded-full", PIPELINE_CATEGORY_DOT[stage.category])}
                 aria-hidden
               />
-              {stageLabels[stage] ?? stage}
+              {stage.name}
               <span className="tabular-nums">{cards.length}</span>
-              {stage === "won" && amountSum > 0 && (
+              {stage.category === "won" && Object.keys(currencyTotals).length > 0 && (
                 <span className="tabular-nums text-muted-foreground/70">
-                  {formatAmount(amountSum)}
+                  {formatCurrencyTotals(currencyTotals, true)}
                 </span>
               )}
             </button>

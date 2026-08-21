@@ -31,12 +31,22 @@ export function CrmSavedViews({
 }) {
   const t = useT().crmPage.r2;
   const [views, setViews] = useState<CrmSavedView[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   async function reload() {
-    setViews(await listCrmSavedViews(workspaceId));
+    setLoading(true);
+    setError(null);
+    try {
+      setViews(await listCrmSavedViews(workspaceId));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : t.savedViewsLoadFailed);
+    } finally {
+      setLoading(false);
+    }
   }
   useEffect(() => {
-    void reload().catch(() => setViews([]));
+    void reload();
   }, [workspaceId]);
 
   async function saveCurrent() {
@@ -47,12 +57,16 @@ export function CrmSavedViews({
       cancelLabel: t.cancel,
     });
     if (!name) return;
-    await saveCrmView(workspaceId, {
-      name,
-      section,
-      queryState: { search: currentSearch },
-    });
-    await reload();
+    try {
+      await saveCrmView(workspaceId, {
+        name,
+        section,
+        queryState: { search: currentSearch },
+      });
+      await reload();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : t.savedViewChangeFailed);
+    }
   }
 
   return (
@@ -86,14 +100,19 @@ export function CrmSavedViews({
               onClick={(event) => {
                 event.preventDefault();
                 event.stopPropagation();
-                void deleteCrmView(workspaceId, view.id).then(reload);
+                void deleteCrmView(workspaceId, view.id).then(reload).catch((cause) => setError(cause instanceof Error ? cause.message : t.savedViewChangeFailed));
               }}
             >
               <Trash2 className="size-3.5" aria-hidden />
             </button>
           </DropdownMenuItem>
         ))}
-        {views.length === 0 && (
+        {error && (
+          <div className="flex items-center justify-between gap-2 px-3 py-2 text-xs text-destructive"><span>{error}</span><button type="button" className="underline" onClick={() => void reload()}>{t.retry}</button></div>
+        )}
+        {loading ? (
+          <div className="px-3 py-2 text-xs text-muted-foreground">{t.savedViewsLoading}</div>
+        ) : !error && views.length === 0 && (
           <div className="px-3 py-2 text-xs text-muted-foreground">{t.noSavedViews}</div>
         )}
       </DropdownMenuContent>

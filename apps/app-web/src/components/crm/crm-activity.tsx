@@ -3,9 +3,9 @@
 /** Record-scoped relationship timeline plus existing reviewed-email approvals. */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ArrowDownLeft, ArrowUpRight, Check, Clock3, Mail, MessageSquarePlus, X } from "lucide-react";
+import { ArrowDownLeft, ArrowUpRight, Check, Clock3, Mail, MessageSquarePlus, RefreshCw, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { promptDialog } from "@/components/ui/prompt-dialog";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ToolPreview } from "@/components/doc/panels/approval-tool-previews";
 import { parseToolPreview } from "@/lib/approval-previews";
 import {
@@ -39,19 +39,36 @@ export function CrmActivityTimeline({
   const [approvals, setApprovals] = useState<PendingApprovalRow[]>([]);
   const [participantEmails, setParticipantEmails] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
+  const [activityError, setActivityError] = useState(false);
+  const [approvalError, setApprovalError] = useState(false);
+  const [composerOpen, setComposerOpen] = useState(false);
+  const [activityType, setActivityType] = useState<"note" | "call" | "meeting" | "message">("note");
+  const [direction, setDirection] = useState<"internal" | "inbound" | "outbound">("internal");
+  const [subject, setSubject] = useState("");
+  const [summary, setSummary] = useState("");
+  const [occurredAt, setOccurredAt] = useState("");
+  const [saving, setSaving] = useState(false);
 
   const reload = useCallback(async () => {
     setLoading(true);
-    const [timeline, pending, participants] = await Promise.all([
-      fetchCrmTimeline(workspaceId, record.row.id).catch(() => []),
-      listApprovals(workspaceId).catch(() => []),
+    setActivityError(false);
+    setApprovalError(false);
+    const [timeline, pending, participants] = await Promise.allSettled([
+      fetchCrmTimeline(workspaceId, record.row.id),
+      listApprovals(workspaceId),
       record.kind === "deal"
-        ? listCrmDealParticipants(workspaceId, record.row.id).catch(() => [])
+        ? listCrmDealParticipants(workspaceId, record.row.id)
         : Promise.resolve([]),
     ]);
-    setActivities(timeline);
-    setApprovals(pending);
-    setParticipantEmails(participants.flatMap((participant) => participant.email ? [participant.email] : []));
+    if (timeline.status === "fulfilled") setActivities(timeline.value);
+    else setActivityError(true);
+    if (pending.status === "fulfilled") setApprovals(pending.value);
+    else setApprovalError(true);
+    if (participants.status === "fulfilled") {
+      setParticipantEmails(participants.value.flatMap((participant) => participant.email ? [participant.email] : []));
+    } else {
+      setApprovalError(true);
+    }
     setLoading(false);
   }, [workspaceId, record.row.id]);
 
@@ -64,20 +81,28 @@ export function CrmActivityTimeline({
     [record, data, approvals, participantEmails],
   );
 
-  async function addNote() {
-    const summary = await promptDialog({
-      title: t.addNote,
-      placeholder: t.notePlaceholder,
-      confirmLabel: t.saveNote,
-      cancelLabel: t.cancel,
-      multiline: true,
-    });
-    if (!summary) return;
-    const activity = await createCrmActivity(workspaceId, record.row.id, {
-      activityType: "note",
-      summary,
-    });
-    setActivities((current) => [activity, ...current]);
+  async function saveActivity() {
+    if (!summary.trim() || saving) return;
+    setSaving(true);
+    setActivityError(false);
+    try {
+      const activity = await createCrmActivity(workspaceId, record.row.id, {
+        activityType,
+        direction,
+        subject: subject.trim() || undefined,
+        occurredAt: occurredAt ? new Date(occurredAt).toISOString() : undefined,
+        summary: summary.trim(),
+      });
+      setActivities((current) => [activity, ...current]);
+      setComposerOpen(false);
+      setSubject("");
+      setSummary("");
+      setOccurredAt("");
+    } catch {
+      setActivityError(true);
+    } finally {
+      setSaving(false);
+    }
   }
 
   return (
@@ -87,11 +112,60 @@ export function CrmActivityTimeline({
           <Clock3 className="size-3.5" aria-hidden />
           {t.activityTitle}
         </div>
-        <Button size="xs" variant="ghost" onClick={() => void addNote()}>
+        <Button size="xs" variant="ghost" onClick={() => setComposerOpen((open) => !open)}>
           <MessageSquarePlus aria-hidden />
-          {t.addNote}
+          {t.logActivity}
         </Button>
       </div>
+
+      {composerOpen && (
+        <div className="mb-3 space-y-2 rounded-xl border border-border bg-muted/20 p-3">
+          <div className="grid gap-2 sm:grid-cols-2">
+            <Select value={activityType} onValueChange={(value) => setActivityType(value as typeof activityType)}>
+              <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {(["note", "call", "meeting", "message"] as const).map((type) => (
+                  <SelectItem key={type} value={type}>{t.activityType[type]}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Select value={direction} onValueChange={(value) => setDirection(value as typeof direction)}>
+              <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {(["internal", "inbound", "outbound"] as const).map((value) => (
+                  <SelectItem key={value} value={value}>{t.activityDirection[value]}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <input
+            value={subject}
+            onChange={(event) => setSubject(event.target.value)}
+            placeholder={t.activitySubject}
+            className="h-8 w-full rounded-lg border border-border bg-background px-2.5 text-xs outline-none"
+          />
+          <textarea
+            value={summary}
+            onChange={(event) => setSummary(event.target.value)}
+            placeholder={t.notePlaceholder}
+            rows={4}
+            className="w-full resize-y rounded-lg border border-border bg-background px-2.5 py-2 text-xs outline-none"
+          />
+          <label className="block text-[11px] text-muted-foreground">
+            <span className="mb-1 block">{t.occurredAt}</span>
+            <input
+              type="datetime-local"
+              value={occurredAt}
+              onChange={(event) => setOccurredAt(event.target.value)}
+              className="h-8 w-full rounded-lg border border-border bg-background px-2.5 text-xs text-foreground outline-none"
+            />
+          </label>
+          <div className="flex justify-end gap-2">
+            <Button size="xs" variant="ghost" onClick={() => setComposerOpen(false)}>{t.cancel}</Button>
+            <Button size="xs" disabled={saving || !summary.trim()} onClick={() => void saveActivity()}>{saving ? t.saving : t.saveActivity}</Button>
+          </div>
+        </div>
+      )}
 
       {emailApprovals.length > 0 && (
         <div className="mb-3 space-y-2">
@@ -117,7 +191,19 @@ export function CrmActivityTimeline({
         </div>
       )}
 
-      {loading ? (
+      {approvalError && (
+        <div className="mb-3 flex items-center justify-between gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+          <span>{t.approvalsLoadFailed}</span>
+          <Button size="xs" variant="ghost" onClick={() => void reload()}><RefreshCw aria-hidden />{t.retry}</Button>
+        </div>
+      )}
+
+      {activityError ? (
+        <div className="flex items-center justify-between gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+          <span>{t.activityLoadFailed}</span>
+          <Button size="xs" variant="ghost" onClick={() => void reload()}><RefreshCw aria-hidden />{t.retry}</Button>
+        </div>
+      ) : loading ? (
         <div className="text-xs text-muted-foreground">{t.activityLoading}</div>
       ) : activities.length === 0 ? (
         <div className="text-xs text-muted-foreground">{t.activityEmpty}</div>

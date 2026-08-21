@@ -43,26 +43,23 @@ import { format } from "@/lib/i18n/format";
 import { getEntity, type EntityRollup } from "@/lib/api/brain";
 import { brainRowUrl } from "@/lib/brain-deep-link";
 import {
-  DEAL_STAGES,
   isOpenStage,
   type CrmCompanyRow,
+  type CrmConfig,
   type CrmContactRow,
   type CrmDealRow,
   type CrmData,
-  type DealStage,
 } from "@/lib/api/crm";
-import { formatAmount } from "@/lib/crm-view";
+import { formatAmount, formatCurrencyTotals, resolveDealPipelineStage } from "@/lib/crm-view";
 import {
   DateProperty,
   PageTitle,
   PropertyRow,
-  SelectProperty,
   StaticProperty,
   TagsProperty,
   TextProperty,
-  type SelectPropertyOption,
 } from "@/components/brain/property-field";
-import { AmountCell, CompanyCell, STAGE_DOT, type CellCommit } from "./crm-cells";
+import { AmountCell, CompanyCell, PipelineStageCell, type CellCommit } from "./crm-cells";
 import { ResizablePeek } from "@/components/operator/resizable-peek";
 import { CrmActivityTimeline } from "./crm-activity";
 import { CrmCustomFields } from "./crm-custom-fields";
@@ -77,7 +74,7 @@ export type CrmRecordRef =
 export type RecordCommits = {
   /** Rename any record (`display_name` through the shared adjust path). */
   rename: (ref: CrmRecordRef) => CellCommit<string>;
-  dealStage: (row: CrmDealRow) => CellCommit<DealStage>;
+  dealPipelineStage: (row: CrmDealRow) => CellCommit<string>;
   dealAmount: (row: CrmDealRow) => CellCommit<number | null>;
   dealClose: (row: CrmDealRow) => CellCommit<string | null>;
   contactEmail: (row: CrmContactRow) => CellCommit<string | null>;
@@ -98,6 +95,7 @@ export function CrmRecordDetail({
   workspaceId,
   record,
   data,
+  config,
   commits,
   onClose,
   onOpenRecord,
@@ -108,6 +106,7 @@ export function CrmRecordDetail({
   record: CrmRecordRef;
   /** The whole flat payload — relationships join client-side. */
   data: CrmData;
+  config: CrmConfig;
   commits: RecordCommits;
   onClose: () => void;
   onOpenRecord: (ref: CrmRecordRef) => void;
@@ -119,19 +118,26 @@ export function CrmRecordDetail({
   // ── From the brain — the entity rollup (row id IS the entity id) ──────
   const [rollup, setRollup] = useState<EntityRollup | null>(null);
   const [rollupMissed, setRollupMissed] = useState(false);
+  const [rollupError, setRollupError] = useState(false);
+  const [rollupAttempt, setRollupAttempt] = useState(0);
   useEffect(() => {
     let cancelled = false;
     setRollup(null);
     setRollupMissed(false);
-    void getEntity(record.row.id, workspaceId).then((r) => {
-      if (cancelled) return;
-      if (r) setRollup(r);
-      else setRollupMissed(true);
-    });
+    setRollupError(false);
+    void getEntity(record.row.id, workspaceId)
+      .then((r) => {
+        if (cancelled) return;
+        if (r) setRollup(r);
+        else setRollupMissed(true);
+      })
+      .catch(() => {
+        if (!cancelled) setRollupError(true);
+      });
     return () => {
       cancelled = true;
     };
-  }, [record.row.id, workspaceId]);
+  }, [record.row.id, workspaceId, rollupAttempt]);
 
   return (
     // A floating peek panel, NOT a flex sibling — it overlays the content
@@ -180,6 +186,7 @@ export function CrmRecordDetail({
             <DealFields
               row={record.row}
               data={data}
+              config={config}
               commits={commits}
               onOpenRecord={onOpenRecord}
             />
@@ -195,6 +202,12 @@ export function CrmRecordDetail({
             <CompanyFields row={record.row} commits={commits} />
           )}
         </div>
+
+        <CrmActivityTimeline
+          workspaceId={workspaceId}
+          record={record}
+          data={data}
+        />
 
         {/* Relationships — joined client-side from the flat payload. */}
         <Relationships
@@ -214,13 +227,8 @@ export function CrmRecordDetail({
         <CrmCustomFields
           workspaceId={workspaceId}
           record={record}
+          config={config}
           onChanged={onChanged}
-        />
-
-        <CrmActivityTimeline
-          workspaceId={workspaceId}
-          record={record}
-          data={data}
         />
 
         {/* From the brain — the rollup's embedded context. */}
@@ -229,7 +237,12 @@ export function CrmRecordDetail({
             <Brain className="size-3.5" aria-hidden />
             {t.fromBrain}
           </div>
-          {rollupMissed ? (
+          {rollupError ? (
+            <div className="flex items-center justify-between gap-2 text-[12.5px] text-destructive">
+              <span>{t.fromBrainFailed}</span>
+              <button type="button" className="underline" onClick={() => setRollupAttempt((attempt) => attempt + 1)}>{t.retry}</button>
+            </div>
+          ) : rollupMissed ? (
             <div className="text-[12.5px] text-muted-foreground/60">
               {t.fromBrainEmpty}
             </div>
@@ -249,26 +262,26 @@ export function CrmRecordDetail({
 function DealFields({
   row,
   data,
+  config,
   commits,
   onOpenRecord,
 }: {
   row: CrmDealRow;
   data: CrmData;
+  config: CrmConfig;
   commits: RecordCommits;
   onOpenRecord: (ref: CrmRecordRef) => void;
 }) {
   const t = useT();
   const tc = t.crmPage;
-  const stageLabels = tc.stage as Record<string, string>;
   const drawerLabels = t.brainPage.detailDrawer.propertyLabels as Record<
     string,
     string
   >;
-  const stageOptions: SelectPropertyOption[] = DEAL_STAGES.map((s) => ({
-    value: s,
-    label: stageLabels[s] ?? s,
-    dotClassName: STAGE_DOT[s],
-  }));
+  const pipeline = config.pipelines.find((candidate) => candidate.id === row.pipelineId)
+    ?? config.pipelines.find((candidate) => candidate.isDefault)
+    ?? config.pipelines[0];
+  const pipelineStage = pipeline ? resolveDealPipelineStage(row, pipeline) : null;
   const company = row.companyId
     ? data.companies.find((c) => c.id === row.companyId)
     : null;
@@ -277,16 +290,20 @@ function DealFields({
     : null;
   return (
     <>
-      <SelectProperty
-        icon={<CircleDashed />}
-        label={drawerLabels.stage ?? tc.stageLabel}
-        value={row.stage}
-        options={stageOptions}
-        onCommit={(stage) => commits.dealStage(row)(stage as DealStage)}
-      />
+      {pipeline && (
+        <PropertyRow icon={<CircleDashed />} label={drawerLabels.stage ?? tc.r2.pipelineStage}>
+          <div className="flex min-h-9 items-center">
+            <PipelineStageCell
+              stageId={pipelineStage?.id ?? null}
+              stages={pipeline.stages}
+              onCommit={commits.dealPipelineStage(row)}
+            />
+          </div>
+        </PropertyRow>
+      )}
       <PropertyRow icon={<DollarSign />} label={drawerLabels.amount ?? tc.amountLabel}>
         <div className="flex min-h-9 items-center">
-          <AmountCell value={row.amount} onCommit={commits.dealAmount(row)} />
+          <AmountCell value={row.amount} currencyCode={row.currencyCode} onCommit={commits.dealAmount(row)} />
         </div>
       </PropertyRow>
       <DateProperty
@@ -450,7 +467,13 @@ function Relationships({
     );
     const deals = data.deals.filter((d) => d.companyId === record.row.id);
     const openDeals = deals.filter((d) => isOpenStage(d.stage));
-    const pipeline = openDeals.reduce((sum, d) => sum + (d.amount ?? 0), 0);
+    const pipelineTotals = openDeals.reduce<Record<string, number>>((totals, deal) => {
+      if (deal.amount === null) return totals;
+      const currency = deal.currencyCode?.toUpperCase() || "USD";
+      totals[currency] = Math.round(((totals[currency] ?? 0) + deal.amount) * 100) / 100;
+      return totals;
+    }, {});
+    const pipelineValue = formatCurrencyTotals(pipelineTotals, true);
     return (
       <section className="mt-4 border-t border-border/60 pt-4">
         <RelationBlock
@@ -469,18 +492,18 @@ function Relationships({
         </RelationBlock>
         <RelationBlock
           title={
-            pipeline > 0
-              ? format(t.openDealsWithValue, { value: formatAmount(pipeline) })
+            pipelineValue
+              ? format(t.openDealsWithValue, { value: pipelineValue })
               : t.openDeals
           }
           count={openDeals.length}
           empty={t.noneYet}
         >
-          {deals.map((d) => (
+          {openDeals.map((d) => (
             <RecordLink
               key={d.id}
               name={d.name}
-              meta={d.amount !== null ? formatAmount(d.amount) : undefined}
+              meta={d.amount !== null ? formatAmount(d.amount, d.currencyCode) : undefined}
               onClick={() => onOpenRecord({ kind: "deal", row: d })}
             />
           ))}
@@ -499,7 +522,7 @@ function Relationships({
             <RecordLink
               key={d.id}
               name={d.name}
-              meta={d.amount !== null ? formatAmount(d.amount) : undefined}
+              meta={d.amount !== null ? formatAmount(d.amount, d.currencyCode) : undefined}
               onClick={() => onOpenRecord({ kind: "deal", row: d })}
             />
           ))}

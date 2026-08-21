@@ -3,8 +3,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { SlidersHorizontal } from "lucide-react";
 import {
-  fetchCrmConfig,
-  setCrmPipelineStage,
   updateCrmCustomFields,
   type CrmConfig,
 } from "@/lib/api/crm";
@@ -21,27 +19,23 @@ import {
 export function CrmCustomFields({
   workspaceId,
   record,
+  config,
   onChanged,
 }: {
   workspaceId: string;
   record: CrmRecordRef;
+  config: CrmConfig;
   onChanged: () => void;
 }) {
   const t = useT().crmPage.r2;
-  const [config, setConfig] = useState<CrmConfig | null>(null);
   const [error, setError] = useState<string | null>(null);
   const entityKind = record.kind === "contact" ? "person" : record.kind;
   const values = record.row.customFields ?? {};
 
-  useEffect(() => {
-    void fetchCrmConfig(workspaceId).then(setConfig).catch(() => setConfig(null));
-  }, [workspaceId]);
-
   const fields = useMemo(
-    () => config?.fields.filter((field) => field.entityKind === entityKind) ?? [],
+    () => config.fields.filter((field) => field.entityKind === entityKind),
     [config, entityKind],
   );
-  const stages = config?.pipelines.flatMap((pipeline) => pipeline.stages) ?? [];
 
   async function saveField(key: string, value: unknown) {
     setError(null);
@@ -53,18 +47,7 @@ export function CrmCustomFields({
     }
   }
 
-  async function saveStage(stageId: string | null) {
-    if (!stageId) return;
-    setError(null);
-    try {
-      await setCrmPipelineStage(workspaceId, record.row.id, stageId);
-      onChanged();
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : t.updateFailed);
-    }
-  }
-
-  if (fields.length === 0 && (record.kind !== "deal" || stages.length === 0)) return null;
+  if (fields.length === 0) return null;
 
   return (
     <section className="mt-4 border-t border-border/60 pt-4">
@@ -73,24 +56,6 @@ export function CrmCustomFields({
         {t.customFields}
       </div>
       <div className="space-y-2">
-        {record.kind === "deal" && stages.length > 0 && (
-          <label className="grid grid-cols-[120px_minmax(0,1fr)] items-center gap-2 text-xs">
-            <span className="text-muted-foreground">{t.pipelineStage}</span>
-            <Select
-              value={record.row.pipelineStageId ?? undefined}
-              onValueChange={(value) => void saveStage(value)}
-            >
-              <SelectTrigger className="w-full"><SelectValue placeholder={t.pickStage} /></SelectTrigger>
-              <SelectContent>
-                {config?.pipelines.map((pipeline) => pipeline.stages.map((stage) => (
-                  <SelectItem key={stage.id} value={stage.id}>
-                    {pipeline.name} / {stage.name} ({stage.probability}%)
-                  </SelectItem>
-                )))}
-              </SelectContent>
-            </Select>
-          </label>
-        )}
         {fields.map((field) => (
           <FieldEditor
             key={field.id}

@@ -54,7 +54,9 @@ vi.mock('../../db/crm-r2.js', () => ({
 
 import { crmRoutes } from '../crm.js'
 import { resolveWorkspaceViewpoint } from '../../db/workspace-viewpoint.js'
-import { createCrmPipeline, getCrmConfig } from '../../db/crm-r2.js'
+import { createDeal } from '../../db/crm.js'
+import { getEntityById, updateEntity } from '../../db/entities-store.js'
+import { appendCrmActivity, createCrmPipeline, getCrmConfig } from '../../db/crm-r2.js'
 
 const WS = 'd126f352-7f5c-48b2-88d0-66694be0c93d'
 const CTX = { userId: 'user-1', workspaceId: WS }
@@ -115,5 +117,48 @@ describe('[COMP:api/crm-r2-route] CRM R2 route authority', () => {
       .send({ name: 'Renewals' })
     expect(adminResponse.status).toBe(201)
     expect(createCrmPipeline).toHaveBeenCalledWith({ ...CTX, name: 'Renewals' })
+  })
+
+  it('creates a deal in the pipeline that owns the requested stable stage', async () => {
+    vi.mocked(getCrmConfig).mockResolvedValue({
+      fields: [],
+      pipelines: [
+        {
+          id: 'pipeline-default', name: 'Sales', isDefault: true, position: 0,
+          stages: [{ id: 'stage-lead', pipelineId: 'pipeline-default', name: 'Lead', legacyKey: 'lead', category: 'open', position: 0, probability: 10, requiredFields: [] }],
+        },
+        {
+          id: 'pipeline-renewals', name: 'Renewals', isDefault: false, position: 1,
+          stages: [{ id: 'stage-review', pipelineId: 'pipeline-renewals', name: 'Review', legacyKey: null, category: 'open', position: 0, probability: 65, requiredFields: [] }],
+        },
+      ],
+    } as never)
+    vi.mocked(createDeal).mockResolvedValue({ id: 'deal-1', contactId: null } as never)
+    vi.mocked(getEntityById).mockResolvedValue({
+      id: 'deal-1', attributes: {},
+    } as never)
+    vi.mocked(updateEntity).mockResolvedValue({} as never)
+
+    const response = await request(makeApp())
+      .post(`/api/crm/${WS}/records`)
+      .send({ kind: 'deal', name: 'Annual renewal', pipelineStageId: 'stage-review', currencyCode: 'eur' })
+
+    expect(response.status).toBe(201)
+    expect(updateEntity).toHaveBeenCalledWith(
+      CTX.userId,
+      'deal-1',
+      expect.objectContaining({
+        attributes: expect.objectContaining({
+          pipeline_id: 'pipeline-renewals',
+          pipeline_stage_id: 'stage-review',
+          currency_code: 'EUR',
+        }),
+      }),
+      CTX,
+    )
+    expect(appendCrmActivity).toHaveBeenCalledWith(expect.objectContaining({
+      entityId: 'deal-1',
+      activityType: 'field_change',
+    }))
   })
 })

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Dialog } from "@base-ui/react/dialog";
 import { BarChart3, CircleDollarSign, Gauge, Target, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -20,11 +20,19 @@ export function CrmReportingDialog({
   const t = useT().crmPage.r2;
   const [report, setReport] = useState<CrmReport | null>(null);
   const [failed, setFailed] = useState(false);
+  const reload = useCallback(async () => {
+    setReport(null);
+    setFailed(false);
+    try {
+      setReport(await fetchCrmReport(workspaceId));
+    } catch {
+      setFailed(true);
+    }
+  }, [workspaceId]);
   useEffect(() => {
     if (!open) return;
-    setFailed(false);
-    void fetchCrmReport(workspaceId).then(setReport).catch(() => setFailed(true));
-  }, [open, workspaceId]);
+    void reload();
+  }, [open, reload]);
 
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
@@ -46,7 +54,7 @@ export function CrmReportingDialog({
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto p-5">
             {failed ? (
-              <div className="text-sm text-destructive">{t.reportsFailed}</div>
+              <div className="flex items-center justify-between gap-3 text-sm text-destructive"><span>{t.reportsFailed}</span><Button size="sm" variant="outline" onClick={() => void reload()}>{t.retry}</Button></div>
             ) : !report ? (
               <div className="text-sm text-muted-foreground">{t.reportsLoading}</div>
             ) : (

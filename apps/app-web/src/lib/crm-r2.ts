@@ -179,9 +179,4 @@ export function matchingEmailApprovals(
   );
 }
 
-export function formatCurrencyTotals(values: Record<string, number>): string {
-  return Object.entries(values)
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([currency, amount]) => `${currency} ${amount.toLocaleString(undefined, { maximumFractionDigits: 2 })}`)
-    .join(" · ");
-}
+export { formatCurrencyTotals } from "@/lib/crm-view";
