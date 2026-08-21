@@ -38,6 +38,8 @@ type FakeFolder = {
   messages: Record<number, ImapFetchedMessage>
   /** When set, the FIRST search with keyword criteria throws (BADCHARSET). */
   rejectKeywordSearch?: boolean
+  /** AliMail failure shape: selective string criteria succeed with no UIDs. */
+  emptyKeywordSearch?: boolean
   /** Downloadable body parts, keyed `${uid}:${partId}`. */
   parts?: Record<string, FakePart>
   specialUse?: string
@@ -83,6 +85,7 @@ function makeFakeClient(folders: Record<string, FakeFolder>, opts?: { specialUse
       if (folder.rejectKeywordSearch && hasKeywordCriteria) {
         throw new Error('NO [BADCHARSET (US-ASCII)] SEARCH failed')
       }
+      if (folder.emptyKeywordSearch && hasKeywordCriteria) return []
       return [...folder.uids]
     },
     fetch(range: string) {
@@ -148,6 +151,7 @@ function makeApi(
     settings?: MailboxAccountSettings
     sendAsAliases?: string[]
     knownFolderPaths?: string[]
+    searchArchivedMessages?: ReturnType<typeof vi.fn>
   } = {},
 ) {
   const sessions = createMailboxSessionCache({ createClient: () => client })
@@ -159,6 +163,7 @@ function makeApi(
     ...(over.saveSentCopy !== undefined ? { saveSentCopy: over.saveSentCopy } : {}),
     ...(over.sendAsAliases ? { getSendAsAliases: async () => over.sendAsAliases! } : {}),
     ...(over.knownFolderPaths ? { getKnownFolderPaths: async () => over.knownFolderPaths! } : {}),
+    ...(over.searchArchivedMessages ? { searchArchivedMessages: over.searchArchivedMessages } : {}),
   })
 }
 
@@ -277,6 +282,62 @@ describe('[COMP:api/mailbox-imap-client] BADCHARSET degradation (§4 empirical f
     })
     const api = makeApi(client)
     await expect(api.searchMessages({ ...BASE_PARAMS, folder: 'INBOX', keywords: ['invoice'] })).rejects.toThrow()
+  })
+})
+
+describe('[COMP:api/mailbox-imap-client] AliMail false-empty recovery', () => {
+  const ALIMAIL_SETTINGS = { ...SETTINGS, imapHost: 'imap.qiye.aliyun.com' }
+
+  it('filters a bounded recent envelope scan when a selective search returns empty', async () => {
+    const fake = makeFakeClient({
+      INBOX: {
+        uids: [1, 2],
+        emptyKeywordSearch: true,
+        messages: {
+          1: msg(1, { from: [{ name: 'Person', address: 'person@example.com' }] }),
+          2: msg(2, { from: [{ name: 'Other', address: 'other@example.com' }] }),
+        },
+      },
+    })
+    const result = await makeApi(fake.client, { settings: ALIMAIL_SETTINGS })
+      .searchMessages({ folder: 'INBOX', from: 'person@example.com', limit: 20 })
+
+    expect(result.hits.map((hit) => hit.id)).toEqual(['INBOX:1'])
+    expect(fake.searches).toHaveLength(2)
+    expect(fake.searches[1].query).toHaveProperty('since')
+    expect(result.note).toMatch(/AliMail returned an empty selective search/i)
+  })
+
+  it('falls back to the owner-scoped archive when the bounded live scan is empty', async () => {
+    const fake = makeFakeClient({
+      INBOX: { uids: [], emptyKeywordSearch: true, messages: {} },
+    })
+    const archived = vi.fn(async () => [{
+      id: 'Client:9',
+      folder: 'Client',
+      from: 'Person <person@example.com>',
+      date: '2026-08-01T00:00:00.000Z',
+      subject: 'Hello',
+    }])
+    const result = await makeApi(fake.client, {
+      settings: ALIMAIL_SETTINGS,
+      searchArchivedMessages: archived,
+    }).searchMessages({ from: 'person@example.com', limit: 20 })
+
+    expect(archived).toHaveBeenCalledWith(expect.objectContaining({ from: 'person@example.com' }))
+    expect(result.hits[0].id).toBe('Client:9')
+    expect(result.note).toMatch(/synced personal archive/i)
+  })
+
+  it('does not distrust an empty selective search from other providers', async () => {
+    const fake = makeFakeClient({
+      INBOX: { uids: [1], emptyKeywordSearch: true, messages: { 1: msg(1) } },
+    })
+    const archived = vi.fn(async () => [])
+    const result = await makeApi(fake.client, { searchArchivedMessages: archived })
+      .searchMessages({ folder: 'INBOX', from: 'person@example.com', limit: 20 })
+    expect(result.hits).toEqual([])
+    expect(archived).not.toHaveBeenCalled()
   })
 })
 

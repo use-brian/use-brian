@@ -28,6 +28,11 @@ const GMAIL_PRESET: MailboxPreset = {
   smtpPort: 465,
 }
 
+export function isAliMailImapHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase().replace(/\.$/, '')
+  return normalized === ALIMAIL_PRESET.imapHost || normalized.endsWith('.qiye.aliyun.com')
+}
+
 /**
  * Match an MX exchange hostname to a preset. `qiye.aliyun.com` is the current
  * Alibaba enterprise-mail MX; `mxhichina.com` is its long-lived legacy alias

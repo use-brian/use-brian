@@ -16,6 +16,7 @@
 import { simpleParser, type ParsedMail } from 'mailparser'
 import {
   MAILBOX_ATTACHMENT_MAX_BYTES,
+  MAILBOX_DEFAULT_WINDOW_DAYS,
   type MailboxApi,
   type MailboxAttachment,
   type MailboxAttachmentBytes,
@@ -35,6 +36,7 @@ import {
 import { composeMailboxMessage, sendComposedMessage } from './smtp.js'
 import { bareEmailAddress, senderIdentities } from './send-as.js'
 import type { MailboxAccountSettings } from './types.js'
+import { isAliMailImapHost } from './presets.js'
 
 const SNIPPET_SOURCE_BYTES = 16 * 1024
 const FULL_MESSAGE_SOURCE_BYTES = 4 * 1024 * 1024
@@ -277,18 +279,23 @@ async function fetchSnippet(
 
 type FolderSearchOutcome = {
   hits: MailboxSearchHit[]
-  degraded: boolean
+  degraded: 'charset' | 'alimail-empty' | null
+}
+
+function isoDaysAgo(days: number): string {
+  return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
 }
 
 async function searchFolder(
   client: ImapClientLike,
   folder: string,
   params: MailboxSearchParams,
+  recoverAliMailEmpty: boolean,
 ): Promise<FolderSearchOutcome> {
   const lock = await client.getMailboxLock(folder)
   try {
     let uids: number[] | false = false
-    let degraded = false
+    let degraded: FolderSearchOutcome['degraded'] = null
     try {
       uids = await client.search(buildImapSearchQuery(params), { uid: true })
     } catch (err) {
@@ -296,15 +303,26 @@ async function searchFolder(
       // BADCHARSET-class failure: the server refused the UTF-8 criteria.
       // Fall back to a date-bounded header scan filtered client-side
       // (bounded — subject/sender matching only, plan §4).
-      degraded = true
+      degraded = 'charset'
       uids = await client.search(
         buildImapSearchQuery({ since: params.since, before: params.before, limit: params.limit }),
         { uid: true },
       )
     }
+    if ((!uids || uids.length === 0) && recoverAliMailEmpty) {
+      degraded = 'alimail-empty'
+      uids = await client.search(
+        buildImapSearchQuery({
+          since: params.since ?? isoDaysAgo(MAILBOX_DEFAULT_WINDOW_DAYS),
+          before: params.before,
+          limit: params.limit,
+        }),
+        { uid: true },
+      )
+    }
     if (!uids || uids.length === 0) return { hits: [], degraded }
 
-    if (!degraded) {
+    if (degraded === null) {
       const capped = uids.slice(-params.limit)
       const hits = await fetchHitsForUids(client, folder, capped)
       return { hits, degraded }
@@ -330,6 +348,8 @@ export type CreateMailboxApiOptions = {
    * or non-selectable are still excluded.
    */
   getKnownFolderPaths?: () => Promise<string[]>
+  /** Owner-scoped synced-archive fallback for provider false-empty searches. */
+  searchArchivedMessages?: (params: MailboxSearchParams) => Promise<MailboxSearchHit[]>
   sessions?: MailboxSessionCache
   /**
    * APPEND the sent bytes to the IMAP Sent folder after SMTP submission
@@ -472,7 +492,12 @@ export function createMailboxApi(opts: CreateMailboxApiOptions): MailboxApi {
         const folderFailures: unknown[] = []
         for (const folder of folders) {
           try {
-            outcomes.push(await searchFolder(client, folder, params))
+            outcomes.push(await searchFolder(
+              client,
+              folder,
+              params,
+              isAliMailImapHost(settings.imapHost) && Boolean(params.from?.trim() || params.subject?.trim()),
+            ))
           } catch (err) {
             // An explicit scope has no useful partial answer. For the default
             // whole-mailbox scope, keep healthy custom folders searchable but
@@ -485,13 +510,29 @@ export function createMailboxApi(opts: CreateMailboxApiOptions): MailboxApi {
         if (folderFailures.length > 0 && outcomes.length === 0) throw folderFailures[0]
 
         const time = (d: string | null) => (d ? Date.parse(d) || 0 : 0)
-        const merged = outcomes
+        let merged = outcomes
           .flatMap((o) => o.hits)
           .sort((a, b) => time(b.date) - time(a.date))
           .slice(0, params.limit)
 
+        let archiveFallback = false
+        let archiveFallbackFailed = false
+        if (
+          merged.length === 0 &&
+          isAliMailImapHost(settings.imapHost) &&
+          Boolean(params.from?.trim() || params.subject?.trim()) &&
+          opts.searchArchivedMessages
+        ) {
+          try {
+            merged = (await opts.searchArchivedMessages(params)).slice(0, params.limit)
+            archiveFallback = true
+          } catch {
+            archiveFallbackFailed = true
+          }
+        }
+
         // Bounded snippet pass over the final result set only.
-        for (const hit of merged) {
+        for (const hit of archiveFallback ? [] : merged) {
           const ref = parseMessageRef(hit.id)
           if (!ref) continue
           const lock = await client.getMailboxLock(ref.folder)
@@ -503,9 +544,25 @@ export function createMailboxApi(opts: CreateMailboxApiOptions): MailboxApi {
         }
 
         const notes: string[] = []
-        if (outcomes.some((o) => o.degraded)) {
+        if (outcomes.some((o) => o.degraded === 'charset')) {
           notes.push(
             'The mail server rejected the non-ASCII search terms, so matching degraded to a client-side scan of recent subjects and senders (message bodies were not searched). Narrow by sender or date for better recall.',
+          )
+        }
+        if (outcomes.some((o) => o.degraded === 'alimail-empty')) {
+          notes.push(
+            'AliMail returned an empty selective search, so recent message envelopes were filtered client-side (message bodies were not searched).',
+          )
+        }
+        if (archiveFallback) {
+          notes.push(
+            merged.length > 0
+              ? 'The live selective search found no match; these results came from the synced personal archive and may lag or carry a stale folder:uid if a message was moved after sync.'
+              : 'The live selective search and the synced personal archive found no match; because the live fallback scans only recent envelopes, older unsynced mail remains inconclusive.',
+          )
+        } else if (archiveFallbackFailed) {
+          notes.push(
+            'The live selective search found no match and the synced-archive fallback failed, so absence is inconclusive.',
           )
         }
         if (folderFailures.length > 0) {

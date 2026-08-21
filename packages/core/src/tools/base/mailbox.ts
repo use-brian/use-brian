@@ -275,6 +275,30 @@ function isoDaysAgo(days: number): string {
   return d.toISOString().slice(0, 10)
 }
 
+const EMAIL_ADDRESS_RE = /[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+/gi
+
+/**
+ * Deterministically recover an exact sender address from the current request.
+ * A single external address is safe to promote; zero or several addresses are
+ * left to the model because guessing would narrow the search incorrectly.
+ */
+export function inferExactExternalEmail(params: {
+  texts: Array<string | null | undefined>
+  boundAccountEmail?: string
+  explicitFrom?: string
+}): string | undefined {
+  if (params.explicitFrom?.trim()) return undefined
+  const bound = params.boundAccountEmail?.trim().toLowerCase()
+  const found = new Set<string>()
+  for (const text of params.texts) {
+    for (const match of text?.match(EMAIL_ADDRESS_RE) ?? []) {
+      const email = match.toLowerCase()
+      if (email !== bound) found.add(email)
+    }
+  }
+  return found.size === 1 ? [...found][0] : undefined
+}
+
 function truncateSnippet(s: string | undefined): string | undefined {
   if (!s) return s
   return s.length > MAILBOX_SNIPPET_CHARS ? `${s.slice(0, MAILBOX_SNIPPET_CHARS)}…` : s
@@ -454,16 +478,25 @@ export function createMailboxTools(
     isReadOnly: true,
     timeoutMs: 30_000,
 
-    async execute(input) {
+    async execute(input, context) {
       const resolved = resolveForInput(input)
       if (!resolved.ok) return { data: resolved.error, isError: true }
       const api = resolved.api
       try {
         const limit = Math.min(input.maxResults ?? MAILBOX_DEFAULT_LIMIT, MAILBOX_MAX_LIMIT)
-        const hasEnvelopeFilter = Boolean(input.from?.trim() || input.subject?.trim())
+        const inferredFrom = inferExactExternalEmail({
+          texts: [context.userMessageText, ...(input.keywords ?? [])],
+          boundAccountEmail: resolved.email,
+          explicitFrom: input.from,
+        })
+        const from = input.from ?? inferredFrom
+        const keywords = inferredFrom
+          ? input.keywords?.filter((term) => term.trim().toLowerCase() !== inferredFrom)
+          : input.keywords
+        const hasEnvelopeFilter = Boolean(from?.trim() || input.subject?.trim())
         const { hits, note } = await api.searchMessages({
-          keywords: input.keywords,
-          from: input.from,
+          keywords: keywords?.length ? keywords : undefined,
+          from,
           subject: input.subject,
           folder: input.folder,
           since: input.since ?? (hasEnvelopeFilter ? undefined : isoDaysAgo(MAILBOX_DEFAULT_WINDOW_DAYS)),

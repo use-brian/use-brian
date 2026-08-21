@@ -28,6 +28,7 @@ import {
 } from './segment-coverage.js'
 import { buildLexicalMatch, fuseByReciprocalRank, tokenizeSearchTerms } from './segment-lexical.js'
 import { MAX_CHARS, splitLongText } from './text-chunking.js'
+import type { MailboxSearchHit, MailboxSearchParams } from '@use-brian/core'
 
 export type EmailArchiveMessageInput = {
   instanceId: string
@@ -184,6 +185,86 @@ export async function countEmailArchiveMessages(
     total += n
   }
   return { total, byFolder }
+}
+
+type ExactArchiveMessageRow = {
+  provider_message_id: string
+  folder: string
+  from_addr: string
+  to_addrs: string[] | null
+  sent_at: string | Date | null
+  subject: string
+  body_text: string
+  rfc_message_id: string | null
+  in_reply_to: string | null
+  references_ids: string[] | null
+}
+
+/**
+ * Exact metadata/body fallback for a live provider search that is known to
+ * return false-empty results. This is intentionally not semantic search: it
+ * needs no embedding and preserves the caller's structured predicates.
+ */
+export async function searchExactEmailArchiveMessages(input: {
+  ownerUserId: string
+  instanceId: string
+  params: MailboxSearchParams
+}): Promise<MailboxSearchHit[]> {
+  const values: unknown[] = [input.ownerUserId, input.instanceId]
+  const clauses = ['owner_user_id = $1', 'instance_id = $2']
+  const addLike = (column: string, value: string | undefined) => {
+    if (!value?.trim()) return
+    values.push(`%${value.trim()}%`)
+    clauses.push(`${column} ILIKE $${values.length}`)
+  }
+  addLike('from_addr', input.params.from)
+  addLike('subject', input.params.subject)
+  if (input.params.folder) {
+    values.push(input.params.folder)
+    clauses.push(`folder = $${values.length}`)
+  }
+  if (input.params.since) {
+    values.push(input.params.since)
+    clauses.push(`sent_at >= $${values.length}::timestamptz`)
+  }
+  if (input.params.before) {
+    values.push(input.params.before)
+    clauses.push(`sent_at < $${values.length}::timestamptz`)
+  }
+  const keywords = (input.params.keywords ?? []).map((term) => term.trim()).filter(Boolean)
+  if (keywords.length > 0) {
+    const matches: string[] = []
+    for (const keyword of keywords) {
+      values.push(`%${keyword}%`)
+      const p = `$${values.length}`
+      matches.push(`(body_text ILIKE ${p} OR subject ILIKE ${p} OR from_addr ILIKE ${p})`)
+    }
+    clauses.push(`(${matches.join(' OR ')})`)
+  }
+  values.push(input.params.limit)
+  const limitIdx = values.length
+  const res = await queryWithRLS<ExactArchiveMessageRow>(
+    input.ownerUserId,
+    `SELECT provider_message_id, folder, from_addr, to_addrs, sent_at,
+            subject, body_text, rfc_message_id, in_reply_to, references_ids
+       FROM email_archive_messages
+      WHERE ${clauses.join(' AND ')}
+      ORDER BY sent_at DESC NULLS LAST
+      LIMIT $${limitIdx}`,
+    values,
+  )
+  return res.rows.map((row) => ({
+    id: row.provider_message_id,
+    folder: row.folder,
+    from: row.from_addr,
+    to: row.to_addrs ?? [],
+    date: row.sent_at ? new Date(row.sent_at).toISOString() : null,
+    subject: row.subject,
+    snippet: normalizeText(row.body_text).slice(0, 200) || undefined,
+    messageId: row.rfc_message_id,
+    inReplyTo: row.in_reply_to,
+    references: row.references_ids ?? [],
+  }))
 }
 
 /**

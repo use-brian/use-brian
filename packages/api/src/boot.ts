@@ -192,6 +192,7 @@ import { EXTRACTION_MODEL } from './build-episode-ingestors.js'
 import { createMailboxSyncWorker } from './mailbox/sync-worker.js'
 import { setGlobalMailboxArchiveDeps } from './mailbox/archive-search-tool.js'
 import { setGlobalMailboxSyncDeps } from './mailbox/sync-tool.js'
+import { setGlobalMailboxContactImportDeps } from './mailbox/contact-import-tools.js'
 import { createMailboxIdleWatcher } from './mailbox/idle-watcher.js'
 import { createChatArchiveTools } from './chat-archive/chat-tools.js'
 import { createSaveChatMediaTool } from './chat-archive/save-media-tool.js'
@@ -1463,6 +1464,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
   })
   const crmStore = createDbCrmStore()
+  setGlobalMailboxContactImportDeps({ crm: crmStore })
   const workspaceFilesStore = createDbWorkspaceFilesStore()
   const workspaceFileUploadsStore = createWorkspaceFileUploadsStore()
   const workflowStore = createDbWorkflowStore()

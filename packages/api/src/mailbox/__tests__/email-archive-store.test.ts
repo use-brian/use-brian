@@ -23,6 +23,7 @@ import {
   searchEmailArchive,
   countEmailArchiveMessages,
   findArchivedEmailUids,
+  searchExactEmailArchiveMessages,
 } from '../../db/email-archive-store.js'
 import { query, queryWithRLS, getPool } from '../../db/client.js'
 import { MAX_CHARS } from '../../db/text-chunking.js'
@@ -257,6 +258,34 @@ describe('[COMP:api/email-archive-store] searchEmailArchive (person compartment)
     // Lexical arm + coverage probe; the vector arm never issued a query.
     expect(mockQueryWithRLS).toHaveBeenCalledTimes(2)
     warn.mockRestore()
+  })
+})
+
+describe('[COMP:api/email-archive-store] exact provider fallback', () => {
+  it('preserves structured filters and owner-scoped RLS without embeddings', async () => {
+    mockQueryWithRLS.mockResolvedValue({
+      rows: [{
+        provider_message_id: 'Client:7', folder: 'Client', from_addr: 'Person <person@example.com>',
+        to_addrs: ['me@example.com'], sent_at: '2026-08-01T00:00:00Z', subject: 'Hello',
+        body_text: 'Recent note', rfc_message_id: '<m7@example.com>', in_reply_to: null,
+        references_ids: [],
+      }],
+      rowCount: 1,
+    } as never)
+
+    const hits = await searchExactEmailArchiveMessages({
+      ownerUserId: 'owner-1',
+      instanceId: 'inst-1',
+      params: { from: 'person@example.com', since: '2026-07-01', limit: 20 },
+    })
+
+    const [rlsUser, sql, params] = mockQueryWithRLS.mock.calls[0] as unknown as [string, string, unknown[]]
+    expect(rlsUser).toBe('owner-1')
+    expect(sql).toContain('owner_user_id = $1')
+    expect(sql).toContain('instance_id = $2')
+    expect(sql).toContain('from_addr ILIKE')
+    expect(params).toEqual(expect.arrayContaining(['owner-1', 'inst-1', '%person@example.com%', '2026-07-01']))
+    expect(hits[0]).toMatchObject({ id: 'Client:7', from: 'Person <person@example.com>' })
   })
 })
 

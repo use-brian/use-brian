@@ -26,10 +26,11 @@ import { renderEmailBody } from '@use-brian/channels'
 import { createMailboxApi } from '../mailbox/mailbox-api.js'
 import { readSendAsAliases } from '../mailbox/send-as.js'
 import { createSearchEmailArchiveTool, getGlobalMailboxArchiveDeps } from '../mailbox/archive-search-tool.js'
+import { createMailboxContactImportTools, getGlobalMailboxContactImportDeps } from '../mailbox/contact-import-tools.js'
 import { createSyncMailboxNowTool, getGlobalMailboxSyncDeps } from '../mailbox/sync-tool.js'
 import type { MailboxAccountSettings } from '../mailbox/types.js'
 import { enqueueFileIngestJob } from '../db/file-ingest-jobs-store.js'
-import { countEmailArchiveMessages } from '../db/email-archive-store.js'
+import { countEmailArchiveMessages, searchExactEmailArchiveMessages } from '../db/email-archive-store.js'
 import { enqueueGDriveLazyEnrichment } from '../db/gdrive-enrichment-store.js'
 import {
   getGDriveCatalogReadPolicy,
@@ -4671,6 +4672,11 @@ async function injectMailboxTools(params: {
         getSettings,
         getSendAsAliases,
         getKnownFolderPaths,
+        searchArchivedMessages: (params) => searchExactEmailArchiveMessages({
+          ownerUserId: userId,
+          instanceId: boundId,
+          params,
+        }),
       })
       bound.push({ instanceId: boundId, email, api: withHealth(withAudit(rawApi, email), boundId) })
     }
@@ -4686,6 +4692,7 @@ async function injectMailboxTools(params: {
     // and write grants resolve through that mailbox's governance id.
     const archiveDeps = getGlobalMailboxArchiveDeps()
     const syncDeps = getGlobalMailboxSyncDeps()
+    const contactImportDeps = getGlobalMailboxContactImportDeps()
     for (const [index, mailbox] of bound.entries()) {
       const governanceId = connectorInstanceGovernanceId('imap', mailbox.instanceId)
       const accountRef = {
@@ -4743,6 +4750,14 @@ async function injectMailboxTools(params: {
           accounts: [accountRef],
           boundAccount: accountRef,
           deps: syncDeps,
+        }))
+      }
+      if (contactImportDeps) {
+        accountTools.push(...createMailboxContactImportTools({
+          ownerUserId: userId,
+          instanceId: mailbox.instanceId,
+          accountEmail: mailbox.email,
+          deps: contactImportDeps,
         }))
       }
 

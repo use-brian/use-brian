@@ -171,6 +171,37 @@ describe('[COMP:tools/mailbox-imap] Company mailbox tools', () => {
     expect(calls[1][0]).toMatchObject({ subject: 'renewal notice', since: undefined })
   })
 
+  it('promotes one external email in the user turn to an exact full-history sender filter', async () => {
+    const api = makeApi()
+    const search = toolByName(toolsFor(api), 'imapSearchMessages')
+
+    await search.execute(
+      { keywords: ['person@example.com'] },
+      { ...CTX, userMessageText: 'Find mail from person@example.com' },
+    )
+
+    expect(api.searchMessages).toHaveBeenCalledWith(expect.objectContaining({
+      from: 'person@example.com',
+      keywords: undefined,
+      since: undefined,
+    }))
+  })
+
+  it('does not guess a sender from several external addresses or the bound account', async () => {
+    const api = makeApi()
+    const search = toolByName(toolsFor(api), 'imapSearchMessages')
+
+    await search.execute(
+      { keywords: ['thread'] },
+      { ...CTX, userMessageText: 'Compare first@example.com, second@example.com, and me@corp.com' },
+    )
+
+    expect(api.searchMessages).toHaveBeenCalledWith(expect.objectContaining({
+      from: undefined,
+      keywords: ['thread'],
+    }))
+  })
+
   it('honors an explicit sender-search date bound instead of widening it', async () => {
     const api = makeApi()
     const search = toolByName(toolsFor(api), 'imapSearchMessages')

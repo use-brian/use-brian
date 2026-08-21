@@ -283,6 +283,8 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'imapSaveAttachment', description: 'Save an email attachment into the workspace as a file', classification: 'read', defaultPolicy: 'allow' },
     { name: 'searchEmailArchive', description: 'Search the synced email archive by meaning', classification: 'read', defaultPolicy: 'allow' },
     { name: 'syncMailboxNow', description: 'Pull new email into the searchable email archive now', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'previewMailboxContactImport', description: 'Preview missing CRM contacts from synced mailbox sender envelopes', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'importMailboxContacts', description: 'Import a confirmed batch of mailbox senders into CRM', classification: 'write', defaultPolicy: 'ask' },
   ],
   // Workspace Files — Q3 / company-brain §10. Note: this row is for
   // governance display (Settings ▸ Connectors, Assistant ▸ Tools) only.
