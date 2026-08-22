@@ -2,8 +2,8 @@
  * Injection-level tests for the company-mailbox (imap) connector:
  * Layer-1/Layer-2 gating, the unavailable[] notice, and the send governance
  * chain — `ask` classification in the registry, connector_actions
- * `send_email` audit, and the classifier preflight short-circuiting BEFORE
- * any network call (plan §10 "Governance" row).
+ * `send_email` audit, and advisory classifier preflight after app policy
+ * admits the exact email payload (plan §10 "Governance" row).
  *
  * [COMP:tools/mailbox-imap]
  */
@@ -17,6 +17,34 @@ vi.mock('../../connector-config.js', () => ({
   getConnectorConfig: (provider: string) => provider === 'google'
     ? { clientId: 'gmail-client', clientSecret: 'gmail-secret' }
     : undefined,
+}))
+
+const mailboxSendMessage = vi.fn(async (_params: unknown) => ({ messageId: '<sent@harborlane.example>' }))
+const createMailboxApiMock = vi.fn((opts: {
+  getSettings: () => Promise<typeof IMAP_CREDS>
+}) => ({
+  searchMessages: vi.fn(),
+  getMessage: vi.fn(),
+  getAttachment: vi.fn(async () => {
+    await opts.getSettings()
+    return {
+      filename: 'proposal.pdf',
+      mime: 'application/pdf',
+      bytes: new Uint8Array([1, 2, 3]),
+    }
+  }),
+  resolveSender: vi.fn(async (p: { from?: string }) => {
+    const settings = await opts.getSettings()
+    return { from: p.from ?? settings.email, allowed: [settings.email] }
+  }),
+  sendMessage: vi.fn(async (p: { from?: string }) => {
+    const settings = await opts.getSettings()
+    await mailboxSendMessage(p)
+    return { messageId: '<sent@harborlane.example>', from: p.from ?? settings.email }
+  }),
+}))
+vi.mock('../../mailbox/mailbox-api.js', () => ({
+  createMailboxApi: (opts: never) => createMailboxApiMock(opts),
 }))
 
 import { OFFICIAL_CONNECTOR_TOOLS } from '@use-brian/shared'
@@ -58,6 +86,7 @@ function instanceStoreStub(): ConnectorInstanceStore {
   return {
     getAuthCredentialsSystem: vi.fn(async () => IMAP_CREDS),
     getCredentialsSystem: vi.fn(async () => null),
+    markHealth: vi.fn(async () => false),
   } as unknown as ConnectorInstanceStore
 }
 
@@ -127,6 +156,8 @@ async function injectImap(
 beforeEach(() => {
   vi.spyOn(console, 'error').mockImplementation(() => {})
   vi.spyOn(console, 'debug').mockImplementation(() => {})
+  mailboxSendMessage.mockClear()
+  createMailboxApiMock.mockClear()
 })
 
 describe('[COMP:tools/mailbox-imap] imap injection', () => {
@@ -194,9 +225,7 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
       getCredentialsSystem: vi.fn(async () => null),
     } as unknown as ConnectorInstanceStore
 
-    // Deny preflight short-circuits the send before any IMAP/SMTP call — we only
-    // assert the audited `from`, which the injector sets from the RESOLVED account.
-    const emit = vi.fn(async () => ({ status: 'denied' as const }))
+    const emit = vi.fn(async (_idCtx: unknown, _params: { payload: Record<string, unknown> }) => ({ status: 'executed' as const }))
     const audit = {
       preflight: vi.fn(() => preflightResult({ shouldDeny: true, classifierMatches: ['x'] })),
       emit,
@@ -224,14 +253,14 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
     await opsSend.execute({ to: ['x@y.z'], subject: 's', body: 'b' }, {} as never)
     expect(emit).toHaveBeenLastCalledWith(
       { userId: 'u-1', assistantId: 'a-1' },
-      expect.objectContaining({ status: 'denied', payload: expect.objectContaining({ from: 'ops@harborlane.example' }) }),
+      expect.objectContaining({ status: 'executed', payload: expect.objectContaining({ from: 'ops@harborlane.example' }) }),
     )
 
     // The primary retains canonical names for compatibility and is bound too.
     await primarySend.execute({ to: ['x@y.z'], subject: 's', body: 'b' }, {} as never)
     expect(emit).toHaveBeenLastCalledWith(
       { userId: 'u-1', assistantId: 'a-1' },
-      expect.objectContaining({ status: 'denied', payload: expect.objectContaining({ from: 'maya@harborlane.example' }) }),
+      expect.objectContaining({ status: 'executed', payload: expect.objectContaining({ from: 'maya@harborlane.example' }) }),
     )
   })
 
@@ -313,7 +342,7 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
     }))
     const audit = {
       preflight: vi.fn(() => preflightResult({ shouldDeny: true, classifierMatches: ['test'] })),
-      emit: vi.fn(async () => ({ status: 'denied' as const })),
+      emit: vi.fn(async () => ({ status: 'executed' as const })),
     } as unknown as ConnectorActionAudit
     const tools = new Map<string, Tool>()
     await injectMcpTools({
@@ -371,7 +400,7 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
         grant('imap-teammate', 'teammate@harborlane.example', 'u-2', '2026-07-03T00:00:00Z'),
       ]),
     }
-    const emit = vi.fn(async () => ({ status: 'denied' as const }))
+    const emit = vi.fn(async (_idCtx: unknown, _params: { payload: Record<string, unknown> }) => ({ status: 'executed' as const }))
     const audit = {
       preflight: vi.fn(() => preflightResult({ shouldDeny: true, classifierMatches: ['test'] })),
       emit,
@@ -477,31 +506,36 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
     expect(instanceStore.getAuthCredentialsSystem).toHaveBeenCalledWith('inst-imap-team-2')
   })
 
-  it('classifier preflight deny short-circuits the send BEFORE any network call and audits status=denied', async () => {
-    const emit = vi.fn(async () => ({ status: 'denied' as const }))
+  it('classifier detection is advisory after policy admission and cannot veto the send', async () => {
+    const emit = vi.fn(async (_idCtx: unknown, _params: { payload: Record<string, unknown> }) => ({ status: 'executed' as const }))
+    const preflight = vi.fn(() => preflightResult({ shouldDeny: true, classifierMatches: ['credential'] }))
     const audit = {
-      preflight: vi.fn(() => preflightResult({ shouldDeny: true, classifierMatches: ['credential'] })),
+      preflight,
       emit,
     } as unknown as ConnectorActionAudit
     const { tools } = await injectImap({ audit })
     const send = tools.get('imapSendMessage')!
     const result = await send.execute(
-      { to: ['x@y.z'], subject: 's', body: 'sk_live_secret' },
+      { to: ['recipient@example.com'], subject: 's', body: 'sk_live_secret' },
       {} as never,
     )
-    expect(result.isError).toBe(true)
-    expect(String(result.data)).toMatch(/classifier blocked/)
+    expect(result.isError, JSON.stringify(result)).toBeFalsy()
+    expect(mailboxSendMessage).toHaveBeenCalledTimes(1)
+    expect(preflight).toHaveBeenCalledWith(expect.objectContaining({
+      enforcement: 'advisory',
+      payload: expect.objectContaining({ body: 'sk_live_secret' }),
+    }))
     expect(emit).toHaveBeenCalledWith(
       { userId: 'u-1', assistantId: 'a-1' },
-      expect.objectContaining({ connectorId: 'imap', actionKind: 'send_email', status: 'denied' }),
+      expect.objectContaining({
+        connectorId: 'imap', actionKind: 'send_email', status: 'executed',
+        payload: expect.not.objectContaining({ body: expect.anything() }),
+      }),
     )
-    // The deny threw before createMailboxApi's sendMessage — no IMAP/SMTP
-    // connection was ever attempted (nothing here stubs the network; a real
-    // attempt would reject with a connection error, not the classifier copy).
   })
 
-  it('includes attachment metadata, never bytes, in classifier preflight and denied audit', async () => {
-    const emit = vi.fn(async () => ({ status: 'denied' as const }))
+  it('includes attachment metadata, never bytes or body text, in the executed audit', async () => {
+    const emit = vi.fn(async (_idCtx: unknown, _params: { payload: Record<string, unknown> }) => ({ status: 'executed' as const }))
     const preflight = vi.fn((_input: unknown) => preflightResult({
       shouldDeny: true,
       classifierMatches: ['proposal.pdf'],
@@ -512,7 +546,7 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
 
     const result = await send.execute(
       {
-        to: ['x@y.z'],
+        to: ['recipient@example.com'],
         subject: 'Proposal',
         body: 'Attached.',
         attachments: ['file-1'],
@@ -520,14 +554,16 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
       { workspaceId: 'ws-1', userId: 'u-1', assistantId: 'a-1' } as never,
     )
 
-    expect(result.isError).toBe(true)
+    expect(result.isError, JSON.stringify(result)).toBeFalsy()
     const expectedAttachments = [{
       name: 'proposal.pdf',
       mime: 'application/pdf',
       size_bytes: 3,
     }]
     expect(preflight).toHaveBeenCalledWith(expect.objectContaining({
+      enforcement: 'advisory',
       payload: expect.objectContaining({
+        body: 'Attached.',
         attachment_count: 1,
         attachments: expectedAttachments,
       }),
@@ -535,10 +571,12 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
     expect(emit).toHaveBeenCalledWith(
       { userId: 'u-1', assistantId: 'a-1' },
       expect.objectContaining({
-        status: 'denied',
+        status: 'executed',
         payload: expect.objectContaining({ attachments: expectedAttachments }),
       }),
     )
+    const emittedPayload = emit.mock.calls[0][1].payload
+    expect(emittedPayload).not.toHaveProperty('body')
     expect(JSON.stringify(preflight.mock.calls[0][0])).not.toContain('data')
   })
 })

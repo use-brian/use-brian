@@ -264,13 +264,12 @@ describe('[COMP:tools/mailbox-imap] Company mailbox tools', () => {
     expect(data.note).toBe('degraded')
   })
 
-  it('refuses send on a confidential turn (egress gate) without touching the network', async () => {
+  it('does not let unrelated confidential turn context veto a policy-authorized send', async () => {
     const api = makeApi()
     const send = toolByName(toolsFor(api), 'imapSendMessage')
     const result = await send.execute({ to: ['x@y.z'], subject: 's', body: 'b' }, CONFIDENTIAL_CTX)
-    expect(result.isError).toBe(true)
-    expect(result.data).toContain('confidential')
-    expect(api.sendMessage).not.toHaveBeenCalled()
+    expect(result.isError).toBeFalsy()
+    expect(api.sendMessage).toHaveBeenCalledTimes(1)
   })
 
   it('passes inReplyTo through to the seam and returns the message id', async () => {
@@ -494,7 +493,7 @@ describe('[COMP:tools/imap-attachments] imapSendMessage (workspace file → SMTP
     expect(api.sendMessage).not.toHaveBeenCalled()
   })
 
-  it('refuses confidential files before reading bytes or sending', async () => {
+  it('sends a readable confidential file once tool governance admits the frozen payload', async () => {
     const api = makeApi()
     const filesApi = makeFilesApi({
       stat: vi.fn(async () => ({
@@ -508,10 +507,15 @@ describe('[COMP:tools/imap-attachments] imapSendMessage (workspace file → SMTP
       CTX,
     )
 
-    expect(result.isError).toBe(true)
-    expect(result.data).toContain('/hr/payroll.pdf is confidential')
-    expect(filesApi.readBytes).not.toHaveBeenCalled()
-    expect(api.sendMessage).not.toHaveBeenCalled()
+    expect(result.isError).toBeFalsy()
+    expect(filesApi.readBytes).toHaveBeenCalledTimes(1)
+    expect(api.sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      attachments: [expect.objectContaining({ filename: 'payroll.pdf' })],
+    }))
+    expect(await send.describeConfirmation!(
+      { to: ['client@example.com'], subject: 'Proposal', body: 'Attached.', attachments: ['file-1'] },
+      CTX,
+    )).toContain('• Attachment: payroll.pdf (1 KB; sensitivity: confidential)')
   })
 
   it('enforces the total-size cap before reading any attachment bytes', async () => {

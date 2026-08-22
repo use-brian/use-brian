@@ -564,7 +564,7 @@ export function createMailboxTools(
       'A reply goes out from the address the original was sent to when that is one of the account\'s configured send-as aliases (otherwise from the account itself); pass `from` only to pick a specific configured alias - any other address is refused. ' +
       'Copy additional people with `cc` (visible to every recipient) or `bcc` (hidden from the others); put an internal colleague you are looping in on `cc` unless the user asks to keep them hidden. ' +
       'Workspace files can be attached as real email attachments: pass their ids or absolute paths in `attachments`. ' +
-      'Only brain-saved files can be attached; confidential files are refused. Limits: 10 attachments, 18 MB total. ' +
+      'Only brain-saved files can be attached; attachment access follows workspace permissions and configured Allow/Ask/Block policy decides the exact send. Limits: 10 attachments, 18 MB total. ' +
       'If attachment resolution fails, relay the reason honestly and never claim the document was attached. ' +
       accountRoutingDescription,
     inputSchema: z.object({
@@ -675,9 +675,8 @@ export function createMailboxTools(
           if (seen.has(file.id)) continue
           seen.add(file.id)
           lines.push(
-            file.sensitivity === 'confidential'
-              ? `• Attachment: ${file.name} (confidential: send will be refused)`
-              : `• Attachment: ${file.name} (${formatSize(file.sizeBytes)})`,
+            `• Attachment: ${file.name} (${formatSize(file.sizeBytes)}` +
+            `${file.sensitivity === 'confidential' ? '; sensitivity: confidential' : ''})`,
           )
         }
       }
@@ -688,19 +687,6 @@ export function createMailboxTools(
       const resolved = resolveForInput(input)
       if (!resolved.ok) return { data: resolved.error, isError: true }
       try {
-        // Egress-safety gate (the gmailSendMessage / agentmail precedent):
-        // if confidential content entered the model's context this turn, the
-        // free-text body could carry it out of the workspace — refuse.
-        if (context.sensitivity?.max === 'confidential') {
-          return {
-            data:
-              'This turn is handling confidential workspace content, so the email cannot be sent — ' +
-              'recipients are outside the workspace and the message body could carry it. Share confidential ' +
-              'material from the web app instead, or compose the email in a separate turn that does not read ' +
-              'confidential data.',
-            isError: true,
-          }
-        }
         let attachments: MailboxOutgoingAttachment[] | undefined
         if (input.attachments && input.attachments.length > 0) {
           if (!attachmentDeps) {
@@ -724,14 +710,6 @@ export function createMailboxTools(
             const file = stat.value
             if (seen.has(file.id)) continue
             seen.add(file.id)
-            if (file.sensitivity === 'confidential') {
-              return {
-                data:
-                  `${file.path} is confidential and cannot be emailed — email recipients are outside the workspace. ` +
-                  'Tell the user to share it from the web app instead.',
-                isError: true,
-              }
-            }
             files.push({
               id: file.id,
               path: file.path,

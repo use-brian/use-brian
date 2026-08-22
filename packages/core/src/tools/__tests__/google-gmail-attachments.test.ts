@@ -191,7 +191,7 @@ describe('[COMP:tools/gmail-attachments] gmailSendMessage attachments', () => {
     expect(sent).toHaveLength(0)
   })
 
-  it('refuses confidential files by name', async () => {
+  it('sends a readable confidential file once tool governance admits the frozen payload', async () => {
     const secret = fakeFile({ sensitivity: 'confidential', path: '/hr/salaries.xlsx', name: 'salaries.xlsx' })
     const { api, sent } = gmailApi()
     const tool = sendTool(api, filesApiFor([secret]))
@@ -201,25 +201,21 @@ describe('[COMP:tools/gmail-attachments] gmailSendMessage attachments', () => {
       makeContext(),
     )
 
-    expect(result.isError).toBe(true)
-    expect(result.data).toContain('/hr/salaries.xlsx is confidential')
-    expect(sent).toHaveLength(0)
+    expect(result.isError).toBeUndefined()
+    expect(sent).toHaveLength(1)
+    expect(sent[0]?.attachments).toEqual([
+      expect.objectContaining({ filename: 'salaries.xlsx' }),
+    ])
   })
 
-  // WS3 finding #6: the confidential refusal now covers the email BODY too,
-  // not only attachments. The body is free text the model composes, so a
-  // secret read this turn could be pasted in; the turn sensitivity floor
-  // (context.sensitivity.max) gates the send the same way a confidential
-  // attachment does.
-  it('refuses the send when the turn sensitivity floor is confidential (body egress)', async () => {
+  it('does not let unrelated confidential turn context veto a policy-authorized send', async () => {
     const { api, sent } = gmailApi()
     const result = await sendTool(api).execute(
       SEND,
       makeContext({ sensitivity: { max: 'confidential' } as never }),
     )
-    expect(result.isError).toBe(true)
-    expect(String(result.data)).toMatch(/confidential/i)
-    expect(sent).toHaveLength(0)
+    expect(result.isError).toBeUndefined()
+    expect(sent).toHaveLength(1)
   })
 
   it('sends normally when the turn floor is internal', async () => {
@@ -365,7 +361,7 @@ describe('[COMP:tools/gmail-attachments] gmailSendMessage attachments', () => {
       expect(lines).toContain('• Attachment: /uploads/missing.pdf (not found)')
     })
 
-    it('flags confidential files as refusable and dedupes refs to the same file', async () => {
+    it('labels confidential files for informed approval and dedupes refs to the same file', async () => {
       const secret = fakeFile({ sensitivity: 'confidential', name: 'salaries.xlsx', path: '/hr/salaries.xlsx' })
       const tool = sendTool(gmailApi().api, filesApiFor([secret]))
 
@@ -376,7 +372,7 @@ describe('[COMP:tools/gmail-attachments] gmailSendMessage attachments', () => {
 
       const attachmentLines = lines!.filter((l) => l.startsWith('• Attachment:'))
       expect(attachmentLines).toEqual([
-        '• Attachment: salaries.xlsx (confidential: send will be refused)',
+        '• Attachment: salaries.xlsx (1 KB; sensitivity: confidential)',
       ])
     })
   })
