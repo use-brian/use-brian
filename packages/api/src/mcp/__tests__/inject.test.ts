@@ -41,6 +41,10 @@ const getDriveFileContentWithMetadata = vi.fn(async (_token: string, _fileId: st
   },
   content: 'Renewals require finance approval.',
 }))
+const sendGmailMessage = vi.fn(async (_token: string, _params: unknown) => ({
+  id: 'gmail-message-1',
+  threadId: 'gmail-thread-1',
+}))
 vi.mock('../../google/client.js', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   refreshGoogleAccessToken: (refreshToken: string, clientId: string, clientSecret: string) =>
@@ -51,6 +55,7 @@ vi.mock('../../google/client.js', async (importOriginal) => ({
     getCalendarEvent(token, eventId, calendarId),
   getDriveFileContentWithMetadata: (token: string, fileId: string, mime?: string) =>
     getDriveFileContentWithMetadata(token, fileId, mime),
+  sendGmailMessage: (token: string, params: unknown) => sendGmailMessage(token, params),
 }))
 
 const enqueueGDriveLazyEnrichment = vi.fn(async (_input: unknown) => ({ enqueued: true, jobId: 'job-1' }))
@@ -1187,6 +1192,7 @@ describe('[COMP:api/mcp-inject] multi-account Google built-ins', () => {
     refreshGoogleAccessToken.mockClear()
     getGoogleTask.mockClear()
     getCalendarEvent.mockClear()
+    sendGmailMessage.mockClear()
   })
   afterEach(() => {
     getConnectorConfig.mockReset()
@@ -1257,6 +1263,50 @@ describe('[COMP:api/mcp-inject] multi-account Google built-ins', () => {
     }
     expect(await variant.describeConfirmation(input, {})).toContain(
       '• From: work@example.com',
+    )
+  })
+
+  it('lets admitted Gmail sends proceed while classification remains advisory audit metadata', async () => {
+    const tools = new Map()
+    const { connectorStore, connectorInstanceStore } = googleStores()
+    connectorStore.list.mockResolvedValue([
+      { id: 'ci-gm1', connectorId: 'gmail', name: 'Gmail', connectedEmail: 'primary@example.com', connected: true, url: null, custom: false, createdAt: new Date('2026-01-01T00:00:00Z') },
+    ])
+    const preflight = vi.fn(() => ({
+      responseCeiling: 'public' as const,
+      retrievalMax: 'public' as const,
+      classifierDetected: 'confidential' as const,
+      classifierMatches: ['credential'],
+      shouldDeny: true,
+      shadowOnly: false,
+    }))
+    const emit = vi.fn(async () => ({ status: 'executed' as const }))
+    await injectMcpTools({
+      userId: 'u-1', assistantId: 'a-1', tools,
+      connectorStore: connectorStore as never,
+      settingsStore: settingsStoreStub() as never,
+      connectorInstanceStore: connectorInstanceStore as never,
+      connectorActionAudit: { preflight, emit } as never,
+      keepBuiltinsDirect: true,
+    })
+
+    const result = await tools.get('gmailSendMessage')!.execute(
+      { to: ['client@example.com'], subject: 'Hello', body: 'sk_live_secret' },
+      {} as never,
+    )
+
+    expect(result.isError).toBeFalsy()
+    expect(sendGmailMessage).toHaveBeenCalledTimes(1)
+    expect(preflight).toHaveBeenCalledWith(expect.objectContaining({
+      enforcement: 'advisory',
+      payload: expect.objectContaining({ body: 'sk_live_secret' }),
+    }))
+    expect(emit).toHaveBeenCalledWith(
+      { userId: 'u-1', assistantId: 'a-1' },
+      expect.objectContaining({
+        connectorId: 'gmail', actionKind: 'send_email', status: 'executed',
+        payload: expect.not.objectContaining({ body: expect.anything() }),
+      }),
     )
   })
 

@@ -12,9 +12,8 @@
  * inboxes (decision D1), so send/draft/search take an optional `fromInbox`
  * and default to the answering assistant's bound inbox.
  *
- * Egress: sends reuse the Gmail chain — confidential-turn refusal here
- * (WS3 finding #6 pattern), classification `ask` + connector_actions audit
- * at the injection layer.
+ * Egress: sends reuse the Gmail chain — exact inbox grant plus configured
+ * Allow/Ask/Block policy, with connector_actions audit at the injection layer.
  *
  * Spec: docs/architecture/integrations/agentmail.md → "Connector tools".
  * Component tag: [COMP:tools/agentmail]
@@ -71,12 +70,6 @@ export type AgentmailToolApi = {
     inReplyTo?: string
   }): Promise<{ draftId: string; sendAt: string | null }>
 }
-
-const CONFIDENTIAL_REFUSAL =
-  'This turn is handling confidential workspace content, so the email cannot go out — ' +
-  'recipients are outside the workspace and the message could carry it. Share confidential ' +
-  'material from the web app instead, or compose the email in a separate turn that does not ' +
-  'read confidential data.'
 
 async function resolveInbox(
   api: AgentmailToolApi,
@@ -158,11 +151,8 @@ export function createAgentmailTools(api: AgentmailToolApi): Tool[] {
     requiresConfirmation: true,
     timeoutMs: 30_000,
 
-    async execute(input, context) {
+    async execute(input) {
       try {
-        if (context.sensitivity?.max === 'confidential') {
-          return { data: CONFIDENTIAL_REFUSAL, isError: true }
-        }
         const inbox = await resolveInbox(api, input.fromInbox)
         if (!inbox.ok) return { data: inbox.error, isError: true }
         const result = await api.send({
@@ -263,13 +253,8 @@ export function createAgentmailTools(api: AgentmailToolApi): Tool[] {
     requiresConfirmation: true,
     timeoutMs: 30_000,
 
-    async execute(input, context) {
+    async execute(input) {
       try {
-        // A scheduled draft egresses without another human step, so the
-        // confidential-turn refusal applies here exactly as it does to send.
-        if (context.sensitivity?.max === 'confidential') {
-          return { data: CONFIDENTIAL_REFUSAL, isError: true }
-        }
         const inbox = await resolveInbox(api, input.fromInbox)
         if (!inbox.ok) return { data: inbox.error, isError: true }
         const result = await api.createDraft({

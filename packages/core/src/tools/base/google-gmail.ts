@@ -153,7 +153,7 @@ export function createGmailTools(
       'pass their ids or paths in `attachments`. Only files already SAVED in the workspace brain can be attached — ' +
       'a photo or document the user just sent in this conversation is an upload, not a saved file yet, so save it first ' +
       'and pass the path that save returns. An `<attached_file id="…">` id will NOT resolve here. ' +
-      'Confidential files cannot be emailed. Limits: 10 attachments, 18 MB total. ' +
+      'Attachment access follows workspace permissions; configured Allow/Ask/Block policy decides whether the exact email may be sent. Limits: 10 attachments, 18 MB total. ' +
       'If attaching fails, relay the reason honestly and do not send the email claiming an attachment that is not on it — ' +
       'either send it without and say so, or stop and tell the user what is blocking you.',
     inputSchema: z.object({
@@ -241,9 +241,8 @@ export function createGmailTools(
         if (seen.has(f.id)) continue
         seen.add(f.id)
         lines.push(
-          f.sensitivity === 'confidential'
-            ? `• Attachment: ${f.name} (confidential: send will be refused)`
-            : `• Attachment: ${f.name} (${formatSize(f.sizeBytes)})`,
+          `• Attachment: ${f.name} (${formatSize(f.sizeBytes)}` +
+          `${f.sensitivity === 'confidential' ? '; sensitivity: confidential' : ''})`,
         )
       }
       return lines.length > 0 ? lines : null
@@ -251,24 +250,6 @@ export function createGmailTools(
 
     async execute(input, context) {
       try {
-        // Egress-safety gate: if confidential content entered the model's
-        // context this turn, refuse the send. The body is free text the model
-        // composes and could carry the secret, and email recipients are
-        // outside the workspace. This mirrors the confidential *attachment*
-        // refusal below (which blocks even with human approval) — memory/CRM
-        // writes only *label* at this floor, but an email egresses, so it is
-        // refused. Before this, the attachment path was guarded but the body
-        // was not. WS3 injection→action finding #6, 2026-07-07.
-        if (context.sensitivity?.max === 'confidential') {
-          return {
-            data:
-              'This turn is handling confidential workspace content, so the email cannot be sent — ' +
-              'recipients are outside the workspace and the message body could carry it. Share confidential ' +
-              'material from the web app instead, or compose the email in a separate turn that does not read ' +
-              'confidential data.',
-            isError: true,
-          }
-        }
         let attachments: GmailOutgoingAttachment[] | undefined
         if (input.attachments && input.attachments.length > 0) {
           const filesApi = opts?.filesApi
@@ -296,12 +277,6 @@ export function createGmailTools(
             const file = result.value
             if (seen.has(file.id)) continue
             seen.add(file.id)
-            if (file.sensitivity === 'confidential') {
-              return {
-                data: `${file.path} is confidential and cannot be emailed — email recipients are outside the workspace. Tell the user to share it from the web app instead.`,
-                isError: true,
-              }
-            }
             files.push({ id: file.id, path: file.path, name: file.name, mime: file.mime, sizeBytes: file.sizeBytes })
           }
 

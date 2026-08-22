@@ -5,6 +5,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Tool } from '@use-brian/core'
+import type { ConnectorActionAudit, ConnectorActionPreflight } from '../../connector-action-port.js'
 
 vi.mock('../../connector-config.js', () => ({
   getConnectorConfig: () => undefined,
@@ -53,6 +54,7 @@ function providerStub() {
 async function injectAgentmail(over: {
   handled?: string[]
   getGrant?: ReturnType<typeof vi.fn>
+  audit?: ConnectorActionAudit
 } = {}) {
   const provider = providerStub()
   const tools = new Map<string, Tool>()
@@ -76,10 +78,23 @@ async function injectAgentmail(over: {
     connectorInstanceStore: connectorInstanceStore as never,
     assistantConnectorGrantsStore: { getForAssistantSystem } as never,
     emailInboxProvider: provider as never,
+    ...(over.audit ? { connectorActionAudit: over.audit } : {}),
     keepBuiltinsDirect: true,
   })
 
   return { tools, provider, result, getForAssistantSystem }
+}
+
+function preflightResult(over: Partial<ConnectorActionPreflight> = {}): ConnectorActionPreflight {
+  return {
+    responseCeiling: 'public',
+    retrievalMax: 'public',
+    classifierDetected: 'public',
+    classifierMatches: [],
+    shouldDeny: false,
+    shadowOnly: false,
+    ...over,
+  }
 }
 
 beforeEach(() => {
@@ -135,6 +150,42 @@ describe('[COMP:tools/agentmail] Channel-owned mailbox injection', () => {
       2,
       'assistant-1',
       'agentmail:inbox-primary',
+    )
+  })
+
+  it('treats payload classification as advisory after the exact inbox grant admits the send', async () => {
+    const preflight = vi.fn(() => preflightResult({
+      shouldDeny: true,
+      classifierDetected: 'confidential',
+      classifierMatches: ['credential'],
+    }))
+    const emit = vi.fn(async () => ({ status: 'executed' as const }))
+    const audit = { preflight, emit } as unknown as ConnectorActionAudit
+    const { tools, provider } = await injectAgentmail({ audit })
+
+    const result = await tools.get('agentmailSendMessage')!.execute(
+      {
+        to: ['contact@example.com'],
+        subject: 'Hello',
+        body: 'sk_live_secret',
+      },
+      {} as never,
+    )
+
+    expect(result.isError).toBeFalsy()
+    expect(provider.sendMessage).toHaveBeenCalledTimes(1)
+    expect(preflight).toHaveBeenCalledWith(expect.objectContaining({
+      enforcement: 'advisory',
+      payload: expect.objectContaining({ body: 'sk_live_secret' }),
+    }))
+    expect(emit).toHaveBeenCalledWith(
+      { userId: 'user-1', assistantId: 'assistant-1' },
+      expect.objectContaining({
+        connectorId: 'agentmail',
+        actionKind: 'send_email',
+        status: 'executed',
+        payload: expect.not.objectContaining({ body: expect.anything() }),
+      }),
     )
   })
 
