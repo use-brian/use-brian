@@ -53,6 +53,7 @@ function renderHeader(over: Partial<ViewMetadata> = {}): string {
         <PageHeader
           view={view}
           breadcrumb={crumbs}
+          teamspace={{ name: "Product", icon: "🧭" }}
           provider={null}
           status="connected"
           synced

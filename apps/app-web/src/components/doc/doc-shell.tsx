@@ -1304,6 +1304,13 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
               <PageHeader
                 view={pageView}
                 breadcrumb={breadcrumb}
+                teamspace={
+                  pageView.teamspaceId === null
+                    ? null
+                    : sidebar.teamspaces.find(
+                        (teamspace) => teamspace.id === pageView.teamspaceId,
+                      )
+                }
                 provider={collab.provider}
                 status={collab.status}
                 synced={collab.synced}

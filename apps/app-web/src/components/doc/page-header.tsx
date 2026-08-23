@@ -3,9 +3,9 @@
 /**
  * Page top bar — Row 2, the Notion-style **navbar** (location + actions).
  *
- *   [ ⌂ Workspace › Ancestor › 📄 Current ]      [sync?] [avatars] [Share] [★] [⋯]
+ *   [ Teamspace › Ancestor › 📄 Current ]         [sync?] [avatars] [Share] [★] [⋯]
  *
- * Left: the location **breadcrumb** (workspace → ancestors → current page);
+ * Left: the location **breadcrumb** (teamspace → ancestors → current page);
  * the current crumb is click-to-rename (`onRenameValue`), followed by a
  * **Published badge** when the page is currently live on the web (resolved,
  * cascade-aware `view.published`; links to `/share/p/<id>`; refreshed via
@@ -63,7 +63,7 @@ import type { Crumb } from "@/lib/sidebar-tree";
 import type { CollabStatus } from "@/lib/collab/use-collab-provider";
 import { usePresence } from "@/lib/collab/use-presence";
 import { useT, format } from "@/lib/i18n/client";
-import { Breadcrumb } from "./breadcrumb";
+import { Breadcrumb, type BreadcrumbTeamspace } from "./breadcrumb";
 import { CollabStatusIndicator } from "./error-states";
 import { PresenceAvatars } from "./presence-avatars";
 import { ScheduleBadge } from "./schedule-badge";
@@ -76,6 +76,8 @@ type PageHeaderProps = {
   view: ViewMetadata;
   /** Ancestor chain root → … → active (for the breadcrumb). */
   breadcrumb: Crumb[];
+  /** Page-tree container; null is Private, undefined while the list resolves. */
+  teamspace: BreadcrumbTeamspace | null | undefined;
   /** Shared collab provider — drives the live presence face-pile. */
   provider: HocuspocusProvider | null;
   status: CollabStatus;
@@ -127,6 +129,7 @@ const CONNECTING_GRACE_MS = 1000;
 export function PageHeader({
   view,
   breadcrumb,
+  teamspace,
   provider,
   status,
   synced,
@@ -328,6 +331,7 @@ export function PageHeader({
         <div className="flex min-w-0 flex-1 items-center">
           <Breadcrumb
             crumbs={breadcrumb}
+            teamspace={teamspace}
             onNavigate={onNavigate}
             onRenameCurrent={(name) => onRenameValue(view.id, name)}
           />

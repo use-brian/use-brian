@@ -1,5 +1,5 @@
 /**
- * [COMP:app-web/breadcrumb] Breadcrumb — depth-aware top-bar location trail.
+ * [COMP:app-web/breadcrumb] Breadcrumb — stable teamspace-to-page trail.
  *
  * app-web vitest has no jsdom, so we assert over server-rendered markup
  * (`renderToStaticMarkup`) — the same SSR-only pattern floating-toolbar.test.tsx
@@ -25,6 +25,7 @@ import { Breadcrumb } from "../breadcrumb";
 
 const dict = en as unknown as Dictionary;
 const RENAME_HINT = en.docPage.breadcrumbRenameHint;
+const TEAMSPACE = { name: "Product", icon: "🧭" };
 
 function crumb(id: string, name: string): Crumb {
   return { id, name, icon: null, entity: "tasks", viewType: "table", nameOrigin: "user" };
@@ -43,29 +44,48 @@ function html(node: ReactElement): string {
   );
 }
 
+function visibleText(markup: string): string {
+  return markup.replace(/<[^>]+>/g, "");
+}
+
 describe("[COMP:app-web/breadcrumb] Breadcrumb current-crumb rename", () => {
   it("renders nothing for an empty chain", () => {
-    expect(html(<Breadcrumb crumbs={[]} onNavigate={() => {}} />)).toBe("");
+    expect(
+      html(
+        <Breadcrumb
+          crumbs={[]}
+          teamspace={TEAMSPACE}
+          onNavigate={() => {}}
+        />,
+      ),
+    ).toBe("");
   });
 
-  it("root-level page: current crumb is a rename button when wired", () => {
+  it("root-level page: keeps the teamspace before the current page", () => {
     const markup = html(
       <Breadcrumb
         crumbs={[crumb("p1", "Quarterly plan")]}
+        teamspace={TEAMSPACE}
         onNavigate={() => {}}
         onRenameCurrent={() => {}}
       />,
     );
+    expect(visibleText(markup)).toBe("🧭Product/Quarterly plan");
+    expect(markup).not.toContain("Acme");
     expect(markup).toContain("<button");
     expect(markup).toContain(`title="${RENAME_HINT}"`);
-    expect(markup).toContain("Quarterly plan");
   });
 
   it("root-level page: current crumb is a plain label without the handler", () => {
     const markup = html(
-      <Breadcrumb crumbs={[crumb("p1", "Quarterly plan")]} onNavigate={() => {}} />,
+      <Breadcrumb
+        crumbs={[crumb("p1", "Quarterly plan")]}
+        teamspace={TEAMSPACE}
+        onNavigate={() => {}}
+      />,
     );
-    // No rename handler → no interactive control at all on a root page.
+    // The teamspace is a non-interactive location label, and without a rename
+    // handler the current page is a label too.
     expect(markup).not.toContain("<button");
     expect(markup).not.toContain(`title="${RENAME_HINT}"`);
     expect(markup).toContain("Quarterly plan");
@@ -75,6 +95,7 @@ describe("[COMP:app-web/breadcrumb] Breadcrumb current-crumb rename", () => {
     const markup = html(
       <Breadcrumb
         crumbs={[crumb("p1", "   ")]}
+        teamspace={TEAMSPACE}
         onNavigate={() => {}}
         onRenameCurrent={() => {}}
       />,
@@ -82,17 +103,35 @@ describe("[COMP:app-web/breadcrumb] Breadcrumb current-crumb rename", () => {
     expect(markup).toContain(en.docPage.breadcrumbUntitled);
   });
 
-  it("nested page: only the trailing crumb carries the rename hint", () => {
+  it("nested page: shows teamspace then every page layer", () => {
     const markup = html(
       <Breadcrumb
         crumbs={[crumb("root", "Workspace docs"), crumb("leaf", "Sub page")]}
+        teamspace={TEAMSPACE}
         onNavigate={() => {}}
         onRenameCurrent={() => {}}
       />,
     );
+    expect(visibleText(markup)).toBe(
+      "🧭Product/Workspace docs/Sub page",
+    );
+    expect(markup).not.toContain("Acme");
     // Exactly one rename target — the current page, not the ancestor.
     const hits = markup.split(`title="${RENAME_HINT}"`).length - 1;
     expect(hits).toBe(1);
     expect(markup).toContain("Sub page");
+  });
+
+  it("private page: uses Private as the leading container", () => {
+    const markup = html(
+      <Breadcrumb
+        crumbs={[crumb("p1", "Personal notes")]}
+        teamspace={null}
+        onNavigate={() => {}}
+      />,
+    );
+    expect(visibleText(markup)).toBe(
+      `${en.docPage.sidebarPrivate}/Personal notes`,
+    );
   });
 });
