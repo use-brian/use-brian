@@ -34,6 +34,10 @@ describe('[COMP:billing/cost-tracker] isOverheadSource', () => {
       expect(OVERHEAD_SOURCES).toContain(src)
     }
   })
+
+  it('enumerates delegated document editing (migration-461 parity)', () => {
+    expect(OVERHEAD_SOURCES).toContain('overhead:doc-edit')
+  })
 })
 
 describe('[COMP:billing/cost-tracker] calculateCost', () => {
