@@ -10,9 +10,10 @@
  *
  * Core stays network-free: the injected `MailboxApi` seam is implemented by
  * the API layer (`packages/api/src/mailbox/`, imapflow + nodemailer). Core
- * owns the agentic-search policy (D12): the 90-day default window, the
- * result cap, snippet truncation, and client-side thread stitching from
- * `References`/`In-Reply-To` (never the optional server THREAD extension).
+ * owns the agentic-search policy (D12): full-history sender/subject lookup,
+ * the 90-day broad-search window, result caps, snippet truncation, and
+ * client-side thread stitching from `References`/`In-Reply-To` (never the
+ * optional server THREAD extension).
  *
  * Attachment delivery (Phase 3, D15-D17): `imapGetMessage` lists parts with
  * their BODYSTRUCTURE ids, `imapSaveAttachment` lands one part's bytes in the
@@ -131,11 +132,16 @@ export type MailboxSearchParams = {
   subject?: string
   /**
    * Explicit folder override. Undefined = the implementation's default scope:
-   * INBOX plus the server's Sent folder (resolved via SPECIAL-USE `\Sent`).
+   * every selectable ordinary folder, including regular custom/nested folders.
    */
   folder?: string
-  /** YYYY-MM-DD lower bound — core always supplies one (default window). */
-  since: string
+  /** YYYY-MM-DD lower bound. Undefined means the full live mailbox history. */
+  since?: string
+  /**
+   * Literal archive lower bound. `null` explicitly means full synced history;
+   * undefined inherits `since` for direct seam callers.
+   */
+  archiveSince?: string | null
   before?: string
   /** Core always supplies (default 20, capped at 50). */
   limit: number
@@ -272,6 +278,30 @@ export function stitchMailboxThreads(hits: MailboxSearchHit[]): MailboxThread[] 
 function isoDaysAgo(days: number): string {
   const d = new Date(Date.now() - days * 24 * 60 * 60 * 1000)
   return d.toISOString().slice(0, 10)
+}
+
+const EMAIL_ADDRESS_RE = /[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+/gi
+
+/**
+ * Deterministically recover an exact sender address from the current request.
+ * A single external address is safe to promote; zero or several addresses are
+ * left to the model because guessing would narrow the search incorrectly.
+ */
+export function inferExactExternalEmail(params: {
+  texts: Array<string | null | undefined>
+  boundAccountEmail?: string
+  explicitFrom?: string
+}): string | undefined {
+  if (params.explicitFrom?.trim()) return undefined
+  const bound = params.boundAccountEmail?.trim().toLowerCase()
+  const found = new Set<string>()
+  for (const text of params.texts) {
+    for (const match of text?.match(EMAIL_ADDRESS_RE) ?? []) {
+      const email = match.toLowerCase()
+      if (email !== bound) found.add(email)
+    }
+  }
+  return found.size === 1 ? [...found][0] : undefined
 }
 
 function truncateSnippet(s: string | undefined): string | undefined {
@@ -417,10 +447,10 @@ export function createMailboxTools(
       "Search email in the user's connected email account. Use this to summarize email, check recent email, or find specific email regardless of provider. " +
       'The email account is connected through IMAP/SMTP, which is the connection method rather than the provider; it may be hosted by Gmail/Google Workspace, AliMail, or another provider. ' +
       "It is the user's exact bound address, never the assistant's own address. " +
-      'Searches INBOX and Sent by default, so "what did I reply to X" is answerable; pass `folder` to search elsewhere. ' +
-      'Server-side search is substring matching with no ranking — iterate like grep: start with 2-4 `keywords` (they are OR\'d in one round trip, so include synonyms), ' +
-      'then refine by sender, subject, or date. Results come back grouped into conversation threads with snippets. ' +
-      `Defaults to the last ${MAILBOX_DEFAULT_WINDOW_DAYS} days — pass \`since\` to search older mail. ` +
+      'Searches every selectable ordinary folder by default, including INBOX, Sent, Archive, and custom folders, so mail moved by a user or provider rule is still discoverable. Junk, Trash, Drafts, aggregate All Mail, and non-selectable containers are excluded; pass `folder` to search one folder only. ' +
+      'Literal search combines the live mail server with the synced personal archive, so provider search quirks and missing embeddings cannot hide an exact sender, subject, or body match. Start with 2-4 `keywords` (they are OR\'d, so include synonyms), then refine by sender, subject, or date. ' +
+      'Sender matches rank ahead of subject matches, then body matches; results come back grouped into conversation threads with snippets. ' +
+      `Sender- or subject-constrained searches cover the full live history by default. Broad and keyword-only live search defaults to the last ${MAILBOX_DEFAULT_WINDOW_DAYS} days, while its literal archive arm covers all synced history. Pass \`since\` to bound both. ` +
       accountRoutingDescription,
     inputSchema: z.object({
       keywords: z
@@ -433,12 +463,12 @@ export function createMailboxTools(
       folder: z
         .string()
         .optional()
-        .describe('Search a specific folder instead of the default INBOX + Sent scope.'),
+        .describe('Search one specific folder instead of the default all-selectable-folders scope.'),
       since: z
         .string()
         .regex(/^\d{4}-\d{2}-\d{2}$/)
         .optional()
-        .describe(`Earliest date (YYYY-MM-DD). Default: ${MAILBOX_DEFAULT_WINDOW_DAYS} days ago.`),
+        .describe(`Earliest date (YYYY-MM-DD). Broad/keyword-only default: ${MAILBOX_DEFAULT_WINDOW_DAYS} days ago; sender/subject default: full history.`),
       before: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('Latest date (YYYY-MM-DD), exclusive.'),
       maxResults: z
         .number()
@@ -453,18 +483,29 @@ export function createMailboxTools(
     isReadOnly: true,
     timeoutMs: 30_000,
 
-    async execute(input) {
+    async execute(input, context) {
       const resolved = resolveForInput(input)
       if (!resolved.ok) return { data: resolved.error, isError: true }
       const api = resolved.api
       try {
         const limit = Math.min(input.maxResults ?? MAILBOX_DEFAULT_LIMIT, MAILBOX_MAX_LIMIT)
+        const inferredFrom = inferExactExternalEmail({
+          texts: [context.userMessageText, ...(input.keywords ?? [])],
+          boundAccountEmail: resolved.email,
+          explicitFrom: input.from,
+        })
+        const from = input.from ?? inferredFrom
+        const keywords = inferredFrom
+          ? input.keywords?.filter((term) => term.trim().toLowerCase() !== inferredFrom)
+          : input.keywords
+        const hasEnvelopeFilter = Boolean(from?.trim() || input.subject?.trim())
         const { hits, note } = await api.searchMessages({
-          keywords: input.keywords,
-          from: input.from,
+          keywords: keywords?.length ? keywords : undefined,
+          from,
           subject: input.subject,
           folder: input.folder,
-          since: input.since ?? isoDaysAgo(MAILBOX_DEFAULT_WINDOW_DAYS),
+          since: input.since ?? (hasEnvelopeFilter ? undefined : isoDaysAgo(MAILBOX_DEFAULT_WINDOW_DAYS)),
+          archiveSince: input.since ?? null,
           before: input.before,
           limit,
         })
@@ -523,7 +564,7 @@ export function createMailboxTools(
       'A reply goes out from the address the original was sent to when that is one of the account\'s configured send-as aliases (otherwise from the account itself); pass `from` only to pick a specific configured alias - any other address is refused. ' +
       'Copy additional people with `cc` (visible to every recipient) or `bcc` (hidden from the others); put an internal colleague you are looping in on `cc` unless the user asks to keep them hidden. ' +
       'Workspace files can be attached as real email attachments: pass their ids or absolute paths in `attachments`. ' +
-      'Only brain-saved files can be attached; confidential files are refused. Limits: 10 attachments, 18 MB total. ' +
+      'Only brain-saved files can be attached; attachment access follows workspace permissions and configured Allow/Ask/Block policy decides the exact send. Limits: 10 attachments, 18 MB total. ' +
       'If attachment resolution fails, relay the reason honestly and never claim the document was attached. ' +
       accountRoutingDescription,
     inputSchema: z.object({
@@ -634,9 +675,8 @@ export function createMailboxTools(
           if (seen.has(file.id)) continue
           seen.add(file.id)
           lines.push(
-            file.sensitivity === 'confidential'
-              ? `• Attachment: ${file.name} (confidential: send will be refused)`
-              : `• Attachment: ${file.name} (${formatSize(file.sizeBytes)})`,
+            `• Attachment: ${file.name} (${formatSize(file.sizeBytes)}` +
+            `${file.sensitivity === 'confidential' ? '; sensitivity: confidential' : ''})`,
           )
         }
       }
@@ -647,19 +687,6 @@ export function createMailboxTools(
       const resolved = resolveForInput(input)
       if (!resolved.ok) return { data: resolved.error, isError: true }
       try {
-        // Egress-safety gate (the gmailSendMessage / agentmail precedent):
-        // if confidential content entered the model's context this turn, the
-        // free-text body could carry it out of the workspace — refuse.
-        if (context.sensitivity?.max === 'confidential') {
-          return {
-            data:
-              'This turn is handling confidential workspace content, so the email cannot be sent — ' +
-              'recipients are outside the workspace and the message body could carry it. Share confidential ' +
-              'material from the web app instead, or compose the email in a separate turn that does not read ' +
-              'confidential data.',
-            isError: true,
-          }
-        }
         let attachments: MailboxOutgoingAttachment[] | undefined
         if (input.attachments && input.attachments.length > 0) {
           if (!attachmentDeps) {
@@ -683,14 +710,6 @@ export function createMailboxTools(
             const file = stat.value
             if (seen.has(file.id)) continue
             seen.add(file.id)
-            if (file.sensitivity === 'confidential') {
-              return {
-                data:
-                  `${file.path} is confidential and cannot be emailed — email recipients are outside the workspace. ` +
-                  'Tell the user to share it from the web app instead.',
-                isError: true,
-              }
-            }
             files.push({
               id: file.id,
               path: file.path,

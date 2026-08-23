@@ -26,9 +26,11 @@ import { renderEmailBody } from '@use-brian/channels'
 import { createMailboxApi } from '../mailbox/mailbox-api.js'
 import { readSendAsAliases } from '../mailbox/send-as.js'
 import { createSearchEmailArchiveTool, getGlobalMailboxArchiveDeps } from '../mailbox/archive-search-tool.js'
+import { createMailboxContactImportTools, getGlobalMailboxContactImportDeps } from '../mailbox/contact-import-tools.js'
 import { createSyncMailboxNowTool, getGlobalMailboxSyncDeps } from '../mailbox/sync-tool.js'
 import type { MailboxAccountSettings } from '../mailbox/types.js'
 import { enqueueFileIngestJob } from '../db/file-ingest-jobs-store.js'
+import { countEmailArchiveMessages, searchLiteralEmailArchiveMessages } from '../db/email-archive-store.js'
 import { enqueueGDriveLazyEnrichment } from '../db/gdrive-enrichment-store.js'
 import {
   getGDriveCatalogReadPolicy,
@@ -2777,14 +2779,11 @@ async function injectGoogleTools(
         },
         sendMessage: async (params) => {
           const token = await getToken()
-          // Connector-action audit wrap (per `connector-actions.md`).
-          // With the payload classifier (#3) in place, the email body
-          // CAN be recorded in the audit payload — the classifier
-          // guarantees the recorded content is at-or-below the
-          // computed ceiling. In shadow mode the body is still
-          // recorded but a `classifier_would_have_denied` warning
-          // attaches; in enforce mode a deny short-circuits before the
-          // network call.
+          // Connector-action audit wrap (per `connector-actions.md`). The
+          // classifier sees the transient full draft, but email governance is
+          // authoritative: reaching this callback means the exact frozen
+          // input passed its grant + Allow/Ask/Block policy. Classification is
+          // therefore advisory and raw body text is not persisted.
           //
           // v1 `audienceClearance='public'` for all recipients —
           // per-recipient classification (internal vs external) is a
@@ -2797,7 +2796,6 @@ async function injectGoogleTools(
             subject: params.subject,
             has_body: Boolean(params.body),
             body_length: params.body?.length ?? 0,
-            body: params.body ?? '',
             // Attachment METADATA only — never bytes. Filenames ride
             // through the payload classifier with the rest.
             attachment_count: params.attachments?.length ?? 0,
@@ -2808,38 +2806,20 @@ async function injectGoogleTools(
             })),
           }
 
-          // Preflight: classifier decides BEFORE the network call. In
-          // enforce mode + breach → deny without sending. In shadow
-          // mode the audit captures the warning but execution proceeds.
+          const classifierPayload = {
+            ...auditPayload,
+            body: params.body ?? '',
+          }
+
+          // Advisory preflight: audit the detection without adding a hidden
+          // post-policy veto after the user admitted this exact email.
           let preflight: ConnectorActionPreflight | undefined
           if (connectorActionAudit) {
             preflight = connectorActionAudit.preflight({
               audienceClearance: 'public',
-              payload: auditPayload,
+              payload: classifierPayload,
+              enforcement: 'advisory',
             })
-            if (preflight.shouldDeny) {
-              try {
-                await connectorActionAudit.emit(
-                  { userId, assistantId },
-                  {
-                    connectorId: 'gmail',
-                    actionKind: 'send_email',
-                    audienceClearance: 'public',
-                    status: 'denied',
-                    payload: auditPayload,
-                    preflight,
-                  },
-                )
-              } catch (auditErr) {
-                console.warn(
-                  '[mcp-inject] gmail classifier-deny audit emit failed:',
-                  auditErr instanceof Error ? auditErr.message : String(auditErr),
-                )
-              }
-              throw new Error(
-                `This email contains content the classifier blocked (matched patterns: ${preflight.classifierMatches.join(', ')}). Revise the message and try again.`,
-              )
-            }
           }
 
           try {
@@ -4429,10 +4409,9 @@ async function injectMsGraphTools(
 // sets: primary canonical names plus stable suffixed variants. Credentials are
 // the typed `type:'imap'` blob on each connector_instance;
 // `imapSendMessage` reuses the Gmail governance chain verbatim: `ask`
-// classification + write-grant gate
-// (registry-derived), the connector_actions `send_email` audit with the
-// payload-classifier preflight before the network call, and the
-// confidential-turn egress refusal inside the core tool.
+// classification + write-grant gate (registry-derived), then advisory
+// connector_actions classification + audit. Reaching execution means the
+// exact frozen payload already passed configured governance.
 
 async function injectMailboxTools(params: {
   connectors: Array<{ connectorId: string; connected: boolean; id?: string; createdAt?: Date; name?: string }>
@@ -4526,7 +4505,7 @@ async function injectMailboxTools(params: {
     }
   }
 
-  // Audit-wrapped send (the Gmail pattern): classifier preflight decides
+  // Audit-wrapped send (the Gmail pattern): classifier preflight observes
   // BEFORE the network call; executed/failed both audit. v1
   // `audienceClearance='public'` for all recipients, like gmail. `from` is the
   // sending identity — the RESOLVED sender when the seam reports one (a
@@ -4547,7 +4526,6 @@ async function injectMailboxTools(params: {
         subject: p.subject,
         has_body: Boolean(p.body),
         body_length: p.body?.length ?? 0,
-        body: p.body ?? '',
         in_reply_to: p.inReplyTo ?? null,
         attachment_count: p.attachments?.length ?? 0,
         attachments: (p.attachments ?? []).map((attachment) => ({
@@ -4556,22 +4534,14 @@ async function injectMailboxTools(params: {
           size_bytes: attachment.data.byteLength,
         })),
       }
+      const classifierPayload = { ...auditPayload, body: p.body ?? '' }
       let preflight: ConnectorActionPreflight | undefined
       if (connectorActionAudit) {
-        preflight = connectorActionAudit.preflight({ audienceClearance: 'public', payload: auditPayload })
-        if (preflight.shouldDeny) {
-          try {
-            await connectorActionAudit.emit(
-              { userId, assistantId },
-              { connectorId: 'imap', actionKind: 'send_email', audienceClearance: 'public', status: 'denied', payload: auditPayload, preflight },
-            )
-          } catch (auditErr) {
-            console.warn('[mcp-inject] imap classifier-deny audit emit failed:', auditErr instanceof Error ? auditErr.message : String(auditErr))
-          }
-          throw new Error(
-            `This email contains content the classifier blocked (matched patterns: ${preflight.classifierMatches.join(', ')}). Revise the message and try again.`,
-          )
-        }
+        preflight = connectorActionAudit.preflight({
+          audienceClearance: 'public',
+          payload: classifierPayload,
+          enforcement: 'advisory',
+        })
       }
       try {
         const result = await raw.sendMessage(p)
@@ -4645,7 +4615,37 @@ async function injectMailboxTools(params: {
           return []
         }
       }
-      const rawApi = createMailboxApi({ cacheKey: boundId, getSettings, getSendAsAliases })
+      const getKnownFolderPaths = async (): Promise<string[]> => {
+        const paths = new Set<string>()
+        try {
+          const current = await store.getSystem(boundId)
+          const sync = current?.config?.mailboxSync as { folders?: unknown } | undefined
+          const folders = sync?.folders
+          if (folders && typeof folders === 'object' && !Array.isArray(folders)) {
+            for (const path of Object.keys(folders)) paths.add(path)
+          }
+        } catch {
+          // Live LIST remains available even if config lookup is degraded.
+        }
+        try {
+          const archived = await countEmailArchiveMessages(boundId)
+          for (const path of Object.keys(archived.byFolder)) paths.add(path)
+        } catch {
+          // The archive is a recovery hint, not a dependency of live IMAP.
+        }
+        return [...paths]
+      }
+      const rawApi = createMailboxApi({
+        cacheKey: boundId,
+        getSettings,
+        getSendAsAliases,
+        getKnownFolderPaths,
+        searchArchivedMessages: (params) => searchLiteralEmailArchiveMessages({
+          ownerUserId: userId,
+          instanceId: boundId,
+          params,
+        }),
+      })
       bound.push({ instanceId: boundId, email, api: withHealth(withAudit(rawApi, email), boundId) })
     }
     if (bound.length === 0) {
@@ -4660,6 +4660,7 @@ async function injectMailboxTools(params: {
     // and write grants resolve through that mailbox's governance id.
     const archiveDeps = getGlobalMailboxArchiveDeps()
     const syncDeps = getGlobalMailboxSyncDeps()
+    const contactImportDeps = getGlobalMailboxContactImportDeps()
     for (const [index, mailbox] of bound.entries()) {
       const governanceId = connectorInstanceGovernanceId('imap', mailbox.instanceId)
       const accountRef = {
@@ -4719,6 +4720,14 @@ async function injectMailboxTools(params: {
           deps: syncDeps,
         }))
       }
+      if (contactImportDeps) {
+        accountTools.push(...createMailboxContactImportTools({
+          ownerUserId: userId,
+          instanceId: mailbox.instanceId,
+          accountEmail: mailbox.email,
+          deps: contactImportDeps,
+        }))
+      }
 
       const suffix = index === 0 ? '' : instanceToolSuffix(mailbox.instanceId, mailbox.email)
       for (const rawTool of accountTools) {
@@ -4757,9 +4766,8 @@ async function injectMailboxTools(params: {
 // One tool set covers every inbox handled by this assistant (decision D1): the
 // tools take an optional `fromInbox` and default to its first (oldest) inbox.
 // Sends and drafts reuse the Gmail governance chain — `ask` classification
-// (OFFICIAL_CONNECTOR_TOOLS), the connector_actions audit + payload
-// classifier preflight here, and the confidential-turn egress refusal inside
-// the core tool.
+// (OFFICIAL_CONNECTOR_TOOLS), exact inbox grants, then advisory
+// connector_actions classification + audit.
 
 async function injectAgentmailTools(params: {
   provider: EmailInboxProvider
@@ -4778,26 +4786,18 @@ async function injectAgentmailTools(params: {
 
   const auditedEgress = async <T>(
     actionKind: 'send_email' | 'draft_email',
-    payload: Record<string, unknown>,
+    auditPayload: Record<string, unknown>,
+    classifierPayload: Record<string, unknown>,
     run: () => Promise<T>,
     externalIdOf: (result: T) => string | null,
   ): Promise<T> => {
     let preflight: ConnectorActionPreflight | undefined
     if (connectorActionAudit) {
-      preflight = connectorActionAudit.preflight({ audienceClearance: 'public', payload })
-      if (preflight.shouldDeny) {
-        try {
-          await connectorActionAudit.emit(
-            { userId, assistantId },
-            { connectorId: 'agentmail', actionKind, audienceClearance: 'public', status: 'denied', payload, preflight },
-          )
-        } catch (auditErr) {
-          console.warn('[mcp-inject] agentmail classifier-deny audit emit failed:', auditErr instanceof Error ? auditErr.message : String(auditErr))
-        }
-        throw new Error(
-          `This email contains content the classifier blocked (matched patterns: ${preflight.classifierMatches.join(', ')}). Revise the message and try again.`,
-        )
-      }
+      preflight = connectorActionAudit.preflight({
+        audienceClearance: 'public',
+        payload: classifierPayload,
+        enforcement: 'advisory',
+      })
     }
     try {
       const result = await run()
@@ -4805,7 +4805,7 @@ async function injectAgentmailTools(params: {
         try {
           await connectorActionAudit.emit(
             { userId, assistantId },
-            { connectorId: 'agentmail', actionKind, audienceClearance: 'public', status: 'executed', externalId: externalIdOf(result), payload, preflight },
+            { connectorId: 'agentmail', actionKind, audienceClearance: 'public', status: 'executed', externalId: externalIdOf(result), payload: auditPayload, preflight },
           )
         } catch (auditErr) {
           console.warn('[mcp-inject] agentmail connector_action audit emit failed (best-effort, suppressed):', auditErr instanceof Error ? auditErr.message : String(auditErr))
@@ -4819,7 +4819,7 @@ async function injectAgentmailTools(params: {
             { userId, assistantId },
             {
               connectorId: 'agentmail', actionKind, audienceClearance: 'public', status: 'failed',
-              payload: { ...payload, error: err instanceof Error ? err.message : String(err) },
+              payload: { ...auditPayload, error: err instanceof Error ? err.message : String(err) },
               preflight,
             },
           )
@@ -4860,7 +4860,7 @@ async function injectAgentmailTools(params: {
     },
     async send(p) {
       await assertInboxAction(p.inboxAddress, 'agentmailSendMessage')
-      const payload = {
+      const auditPayload = {
         from: p.inboxAddress,
         to: p.to,
         cc: p.cc ?? [],
@@ -4868,15 +4868,15 @@ async function injectAgentmailTools(params: {
         subject: p.subject,
         has_body: Boolean(p.body),
         body_length: p.body.length,
-        body: p.body,
       }
       // The model composes `body` in markdown; render the
-      // multipart/alternative pair at this egress boundary (the audit
-      // payload above keeps the raw markdown for the classifier).
+      // multipart/alternative pair at this egress boundary. Classification
+      // sees the raw markdown transiently; the persisted audit omits it.
       const rendered = renderEmailBody(p.body)
       return auditedEgress(
         'send_email',
-        payload,
+        auditPayload,
+        { ...auditPayload, body: p.body },
         () =>
           provider.sendMessage(p.inboxAddress, {
             to: p.to,
@@ -4909,7 +4909,7 @@ async function injectAgentmailTools(params: {
     },
     async createDraft(p) {
       await assertInboxAction(p.inboxAddress, 'agentmailCreateDraft')
-      const payload = {
+      const auditPayload = {
         from: p.inboxAddress,
         to: p.to,
         cc: p.cc ?? [],
@@ -4917,7 +4917,6 @@ async function injectAgentmailTools(params: {
         subject: p.subject,
         has_body: Boolean(p.body),
         body_length: p.body.length,
-        body: p.body,
         send_at: p.sendAt ?? null,
       }
       // Same markdown → text+html rendering as send — a draft (scheduled or
@@ -4925,7 +4924,8 @@ async function injectAgentmailTools(params: {
       const rendered = renderEmailBody(p.body)
       const draft = await auditedEgress(
         'draft_email',
-        payload,
+        auditPayload,
+        { ...auditPayload, body: p.body },
         () =>
           provider.createDraft(p.inboxAddress, {
             to: p.to,

@@ -65,6 +65,13 @@ export type LiveChatArchiveWriter = {
     workspaceId: string
     conversationId: string
     message: IncomingMessage
+    /**
+     * The channel's connector instance, when the route has one. Threading it
+     * keeps unrouted rows — and any media asset staged before this append —
+     * under the SAME binding the routed path uses: the store links assets by
+     * exact (workspace, instance, owner) and fails the append on a mismatch.
+     */
+    connectorInstanceId?: string | null
   }): Promise<void>
   persistInbound<T>(
     input: LiveArchiveContext & { message: IncomingMessage },
@@ -75,6 +82,7 @@ export type LiveChatArchiveWriter = {
     providerMessageId?: string | null
     text: string
     documents?: OutgoingDocument[]
+    archiveMedia?: Parameters<typeof normalizeOutboundChatMessage>[0]['archiveMedia']
     replyToProviderId?: string | null
   }): Promise<void>
 }
@@ -201,6 +209,7 @@ export function createLiveChatArchiveWriter(deps: {
         source: input.source,
         ownerUserId,
         workspaceId: input.workspaceId,
+        connectorInstanceId: input.connectorInstanceId,
       })
       if (!binding) return
       await deps.fanout.fanout({
@@ -273,6 +282,7 @@ export function createLiveChatArchiveWriter(deps: {
           assistantName: input.assistantName,
           text: input.text,
           documents: input.documents,
+          archiveMedia: input.archiveMedia,
           replyToProviderId: input.replyToProviderId,
         })],
         sourceCursor: { session_message_id: input.sessionMessageId },
@@ -301,12 +311,9 @@ export async function persistInboundChatArchive<T>(
  * sits on the inbound path of every channel, so it must never be the reason a
  * message is dropped.
  */
-export async function archiveUnroutedInbound(input: {
-  source: ChannelSource
-  workspaceId: string
-  conversationId: string
-  message: IncomingMessage
-}): Promise<void> {
+export async function archiveUnroutedInbound(
+  input: Parameters<LiveChatArchiveWriter['appendUnroutedInbound']>[0],
+): Promise<void> {
   if (!globalWriter) return
   await globalWriter.appendUnroutedInbound(input)
 }

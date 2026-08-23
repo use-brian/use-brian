@@ -52,6 +52,7 @@ const BRIDGE_READ_NAMES = [
   'getRowHistory',
   // Person-compartmented local chat archive
   'searchChatHistory',
+  'listChatChannels',
   // Scheduling + ingest reads
   'searchScheduledJobs',
   'listIngestRules',
@@ -59,6 +60,8 @@ const BRIDGE_READ_NAMES = [
   // Inter-assistant
   'listConnectedAssistants',
   'askAssistant',
+  // Hosted operator extension (absent in OSS; capability-gated when injected).
+  'listOperatorWorkflowEventBindings',
 ] as const
 
 const BRIDGE_WRITE_NAMES = [
@@ -78,6 +81,10 @@ const BRIDGE_WRITE_NAMES = [
   'retractMemory',
   'deleteBrainRow',
   'reclassifySensitivity',
+  // Hosted operator extension (absent in OSS; always Approve-band).
+  'configureOperatorWorkflowEventBinding',
+  'disableOperatorWorkflowEventBinding',
+  'testOperatorWorkflowEventBinding',
 ] as const
 
 export type AgentSurfaceKind = 'brain_mcp' | 'assistant_mcp' | 'public_api'

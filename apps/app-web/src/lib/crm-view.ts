@@ -23,6 +23,8 @@ import {
   type CrmCompanyRow,
   type CrmContactRow,
   type CrmDealRow,
+  type CrmPipeline,
+  type CrmPipelineStage,
   type DealStage,
 } from "@/lib/api/crm";
 // One codec for the multi-value URL shape across both operator surfaces —
@@ -132,12 +134,14 @@ export type CrmViewState = {
   view: ViewMode;
   /** Active attention quick-filter, or null. */
   quick: CrmQuickFilter | null;
+  /** Selected stable pipeline id. Null resolves to the workspace default. */
+  pipeline: string | null;
   /**
    * Deal stage filter (empty = all). Like every property filter here, it is
    * a SET — OR within the property, AND across properties, matching the
    * Tasks surface (they drive the same `FilterBar`).
    */
-  stages: DealStage[];
+  stages: string[];
   /** Company filter: entity ids and/or `"none"` (unlinked). Empty = any. */
   company: string[];
   /** Tag filter (contacts/companies): any-of. Empty = any. */
@@ -153,6 +157,7 @@ export const DEFAULT_CRM_VIEW: CrmViewState = {
   section: "deals",
   view: "board",
   quick: null,
+  pipeline: null,
   stages: [],
   company: [],
   tag: [],
@@ -170,15 +175,6 @@ function oneOf<T extends string>(
     : null;
 }
 
-const STAGE_KEYS: readonly DealStage[] = [
-  "lead",
-  "qualified",
-  "proposal",
-  "negotiation",
-  "won",
-  "lost",
-];
-
 /** Parse the surface's search params (unknown → default). The dock card's
  *  `?filter=overdue` deep link lands here: a quick-filter with no explicit
  *  section resolves to its home section. */
@@ -192,13 +188,12 @@ export function crmViewFromSearch(
   const section =
     oneOf(params.get("section"), CRM_SECTIONS) ??
     (quick ? sectionForQuickFilter(quick) : DEFAULT_CRM_VIEW.section);
-  const stages = multiParam(params, "stage", { splitCommas: true }).filter(
-    (s): s is DealStage => (STAGE_KEYS as readonly string[]).includes(s),
-  );
+  const stages = multiParam(params, "stage", { splitCommas: true });
   return {
     section,
     view: oneOf(params.get("view"), VIEW_MODES) ?? DEFAULT_CRM_VIEW.view,
     quick,
+    pipeline: params.get("pipeline"),
     stages,
     // Company ids are opaque and comma-free, so they comma-join; tags are
     // user text and repeat the param instead (a tag may contain a comma).
@@ -218,6 +213,7 @@ export function searchFromCrmView(state: CrmViewState): string {
     params.set("section", state.section);
   if (state.view !== DEFAULT_CRM_VIEW.view) params.set("view", state.view);
   if (state.quick) params.set("filter", state.quick);
+  if (state.pipeline) params.set("pipeline", state.pipeline);
   if (state.stages.length > 0) params.set("stage", state.stages.join(","));
   if (state.company.length > 0) params.set("company", state.company.join(","));
   // Repeated, never joined — a tag may contain a comma.
@@ -302,14 +298,27 @@ export function applyDealFilters(
   state: CrmViewState,
   companyNames: Map<string, string>,
   now: Date,
+  pipeline?: CrmPipeline | null,
 ): CrmDealRow[] {
   const needle = state.q.trim().toLowerCase();
   return rows.filter((row) => {
+    if (pipeline) {
+      const belongs = row.pipelineId
+        ? row.pipelineId === pipeline.id
+        : pipeline.isDefault;
+      if (!belongs) return false;
+    }
     if (state.quick && state.quick !== "orphaned") {
       if (!matchesDealQuickFilter(row, state.quick, now)) return false;
     } else if (state.stages.length > 0) {
-      if (!state.stages.includes(row.stage)) return false;
-    } else if (!state.closed && !isOpenStage(row.stage)) {
+      const resolved = pipeline ? resolveDealPipelineStage(row, pipeline) : null;
+      if (!state.stages.includes(resolved?.id ?? row.stage)) return false;
+    } else if (
+      !state.closed &&
+      (pipeline
+        ? resolveDealPipelineStage(row, pipeline)?.category !== "open"
+        : !isOpenStage(row.stage))
+    ) {
       return false;
     }
     if (!matchesCompany(row, state.company)) return false;
@@ -397,36 +406,78 @@ export function sortDeals(rows: CrmDealRow[], sort: DealSortKey): CrmDealRow[] {
 
 // ── Board grouping ──────────────────────────────────────────────────────
 
-export type StageSummary = {
-  stage: DealStage;
+export type PipelineStageSummary = {
+  stage: CrmPipelineStage;
   rows: CrmDealRow[];
-  /** Sum of the column's priced amounts (null-amount rows excluded — the
-   *  No-amount preset catches those). */
-  amountSum: number;
+  /** Explicit per-currency totals. Mixed currencies are never combined. */
+  currencyTotals: Record<string, number>;
 };
 
-/** Group filtered deals into stage columns, pipeline order. Every stage in
- *  `stages` gets a column even when empty (stable board layout). */
-export function groupDealsByStage(
+/** Resolve a deal's stable stage, with the legacy key as the migration bridge. */
+export function resolveDealPipelineStage(
+  row: CrmDealRow,
+  pipeline: CrmPipeline,
+): CrmPipelineStage | null {
+  return pipeline.stages.find((stage) => stage.id === row.pipelineStageId)
+    ?? pipeline.stages.find((stage) => stage.legacyKey === row.stage)
+    ?? null;
+}
+
+export function legacyStageForPipelineStage(stage: CrmPipelineStage): DealStage {
+  if (stage.legacyKey) return stage.legacyKey;
+  if (stage.category === "won") return "won";
+  if (stage.category === "lost") return "lost";
+  return "lead";
+}
+
+function currencyCode(row: CrmDealRow): string {
+  const code = row.currencyCode?.trim().toUpperCase();
+  return code && /^[A-Z]{3}$/.test(code) ? code : "USD";
+}
+
+/** Group filtered deals into stable pipeline-stage columns. */
+export function groupDealsByPipelineStage(
   rows: readonly CrmDealRow[],
-  stages: readonly DealStage[],
-): StageSummary[] {
+  pipeline: CrmPipeline,
+  stages: readonly CrmPipelineStage[],
+): PipelineStageSummary[] {
   return stages.map((stage) => {
-    const inStage = rows.filter((r) => r.stage === stage);
+    const inStage = rows.filter(
+      (row) => resolveDealPipelineStage(row, pipeline)?.id === stage.id,
+    );
+    const currencyTotals: Record<string, number> = {};
+    for (const row of inStage) {
+      if (row.amount === null) continue;
+      const code = currencyCode(row);
+      currencyTotals[code] = Math.round(((currencyTotals[code] ?? 0) + row.amount) * 100) / 100;
+    }
     return {
       stage,
       rows: inStage,
-      amountSum: inStage.reduce((sum, r) => sum + (r.amount ?? 0), 0),
+      currencyTotals,
     };
   });
 }
 
-/** Compact money label for column headers / cards: $12.5k, $140k, $1.2M —
- *  one decimal below 100 of the unit, integers above. */
-export function formatAmount(amount: number): string {
-  const compact = (v: number, suffix: string) =>
-    `$${v >= 100 ? Math.round(v) : Math.round(v * 10) / 10}${suffix}`;
-  if (Math.abs(amount) >= 1_000_000) return compact(amount / 1_000_000, "M");
-  if (Math.abs(amount) >= 1_000) return compact(amount / 1_000, "k");
-  return `$${amount.toLocaleString()}`;
+/** Currency-explicit compact label for working views. */
+export function formatAmount(amount: number, currency = "USD", compact = true): string {
+  const code = currency.trim().toUpperCase() || "USD";
+  if (!compact) {
+    return `${code} ${amount.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+  }
+  const withSuffix = (v: number, suffix: string) =>
+    `${code} ${v >= 100 ? Math.round(v) : Math.round(v * 10) / 10}${suffix}`;
+  if (Math.abs(amount) >= 1_000_000) return withSuffix(amount / 1_000_000, "M");
+  if (Math.abs(amount) >= 1_000) return withSuffix(amount / 1_000, "k");
+  return `${code} ${amount.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+}
+
+export function formatCurrencyTotals(
+  values: Record<string, number>,
+  compact = false,
+): string {
+  return Object.entries(values)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([currency, amount]) => formatAmount(amount, currency, compact))
+    .join(" · ");
 }

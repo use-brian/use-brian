@@ -10,6 +10,8 @@
  *
  *   GET  /api/approvals?workspaceId=
  *   GET  /api/approvals/count?workspaceId=
+ *   GET  /api/approvals/:id/email-review-context?entityId=
+ *   POST /api/approvals/:id/revise-email
  *   POST /api/approvals/:id/respond
  *
  * `workflow_step`, `tool_invocation`, and `staged_write` approvals resolve
@@ -39,7 +41,8 @@ export type ApprovalKind =
   | "staged_skill_creation"
   | "staged_skill_update"
   | "workflow_refinement"
-  | "browser_skill_send";
+  | "browser_skill_send"
+  | "email_sender";
 
 /** Provenance surface for `staged_write` rows — which credential class the agent used. */
 type StagedWriteSurface = "brain_mcp" | "assistant_mcp" | "public_api";
@@ -71,11 +74,23 @@ export type PendingApprovalRow = {
     /** Drift that voided a grant and re-gated this send (R2-2). */
     drift?: string | null;
     contractSummary?: string;
+    // email_sender: the inbound sender-access request shown in the queue
+    inboxAddress?: string;
+    channelIntegrationId?: string;
+    sender?: string;
+    senderName?: string | null;
+    subject?: string | null;
+    preview?: string | null;
+    /** Immutable hand-edited workflow email revision metadata. */
+    emailDraftRevision?: number;
+    supersedesApprovalId?: string;
+    editedByUserId?: string;
   };
   approverUserId: string;
   originatingAssistantId: string | null;
   blockingSessionId: string | null;
   workflowRunId: string | null;
+  workflowStepRunId: string | null;
   deliveryChannelType: string;
   createdAt: string;
   expiresAt: string | null;
@@ -89,12 +104,85 @@ export type RespondResult =
 /** List every pending approval for the workspace. */
 export async function listApprovals(
   workspaceId: string,
+  options?: { throwOnError?: boolean },
 ): Promise<PendingApprovalRow[]> {
   const q = new URLSearchParams({ workspaceId });
   const res = await authFetch(`${API_URL}/api/approvals?${q.toString()}`);
-  if (!res.ok) return [];
+  if (!res.ok) {
+    if (options?.throwOnError) throw new Error(`Could not load approvals (${res.status}).`);
+    return [];
+  }
   const data = (await res.json()) as { approvals?: PendingApprovalRow[] };
   return Array.isArray(data.approvals) ? data.approvals : [];
+}
+
+export type ReviseEmailApprovalResult =
+  | { ok: true; approval: PendingApprovalRow }
+  | { ok: false; error: string; status: number };
+
+type EmailReviewMessage = {
+  id: string;
+  folder: string;
+  from: string;
+  to: string[];
+  cc: string[];
+  sentAt: string | null;
+  subject: string;
+  body: string;
+  bodyTruncated: boolean;
+};
+
+export type EmailReviewContext = {
+  thread: {
+    subject: string;
+    messages: EmailReviewMessage[];
+    truncated: boolean;
+  } | null;
+};
+
+/** Load the owner-scoped archived chain tied to this exact pending approval. */
+export async function fetchEmailReviewContext(
+  id: string,
+  entityId: string,
+): Promise<EmailReviewContext> {
+  const q = new URLSearchParams({ entityId });
+  const res = await authFetch(
+    `${API_URL}/api/approvals/${encodeURIComponent(id)}/email-review-context?${q.toString()}`,
+  );
+  const data = (await res.json().catch(() => ({}))) as EmailReviewContext & { error?: string };
+  if (!res.ok) throw new Error(data.error ?? `Could not load the email conversation (${res.status}).`);
+  return { thread: data.thread ?? null };
+}
+
+/**
+ * Save a body-only revision of a reviewed workflow IMAP reply. The server
+ * locks every envelope/authority field and returns a NEW pending approval;
+ * callers must replace the old row id before allowing Approve and send.
+ */
+export async function reviseEmailApproval(
+  id: string,
+  body: string,
+): Promise<ReviseEmailApprovalResult> {
+  const res = await authFetch(
+    `${API_URL}/api/approvals/${encodeURIComponent(id)}/revise-email`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ body }),
+    },
+  );
+  const data = (await res.json().catch(() => ({}))) as {
+    approval?: PendingApprovalRow;
+    error?: string;
+  };
+  if (!res.ok || !data.approval) {
+    return {
+      ok: false,
+      error: data.error ?? `Could not save the email revision (${res.status}).`,
+      status: res.status,
+    };
+  }
+  return { ok: true, approval: data.approval };
 }
 
 /**

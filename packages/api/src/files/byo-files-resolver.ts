@@ -21,6 +21,8 @@ import {
 import { createS3FilesClient, type S3Credentials } from './s3-client.js'
 import { createLocalFilesClient } from './local-files-client.js'
 import type { FilesClientResolver, ResolvedFilesClient } from './files-api.js'
+import * as path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 /** A workspace's GCS bring-your-own binding. */
 export type GcsStorageBinding = {
@@ -127,8 +129,21 @@ export function createCachedByoFilesResolver(deps: CachedByoResolverDeps): Files
     },
 
     async forUri(workspaceId: string, storageUri: string): Promise<GcsFilesClient> {
-      const bucket = parseStorageBucket(storageUri)
       const binding = await deps.lookup(workspaceId)
+      if (storageUri.startsWith('file://')) {
+        if (binding?.kind === 'local') {
+          const basePath = path.resolve(binding.path)
+          const targetPath = path.resolve(fileURLToPath(storageUri))
+          if (targetPath === basePath || targetPath.startsWith(`${basePath}${path.sep}`)) {
+            return getClient(binding)
+          }
+        }
+        // A disconnected or replaced local binding is dormant. The fallback
+        // cannot read it, but routing there lets the byte read return not_found
+        // instead of trying to parse an arbitrary absolute path as a bucket.
+        return deps.fallback.forUri(workspaceId, storageUri)
+      }
+      const bucket = parseStorageBucket(storageUri)
       const bindingBucket = binding
         ? binding.kind === 'local' ? binding.path : binding.bucket
         : null

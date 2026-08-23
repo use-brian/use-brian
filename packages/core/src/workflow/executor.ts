@@ -27,6 +27,7 @@ import type {
   ToolCallStep,
   WaitStep,
   WorkflowDefinition,
+  ResolvedExternalClientWorkflowPrincipal,
   WorkflowRecord,
   WorkflowRunOutcome,
   WorkflowRunRecord,
@@ -37,6 +38,7 @@ import type {
 import { evaluateBoolean, JsonLogicEvalError } from './condition.js'
 import { buildReachability, startStepIds } from './graph.js'
 import { interpolateString, interpolateValue, type InterpolationScope } from './interpolation.js'
+import { reviewedClientReplyViolation } from './schemas.js'
 import type { ResearchDepthConfig } from '../engine/research-depth.js'
 import { sanitizeDeliveryText } from '@use-brian/shared'
 
@@ -374,8 +376,12 @@ export type ExecutorDeps = {
     stepRunId: string
     workspaceId: string
     approverUserId: string
+    /** Frozen connector/tool authority for approval resume. */
+    assistantId: string
     toolName: string
     arguments: Record<string, unknown>
+    /** Server-resolved confirmation details for the queue preview. */
+    displayLines?: string[]
     deliveryChannel: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams'
     expiresAt: Date | null
   }) => Promise<void>
@@ -435,6 +441,103 @@ const MAX_STEP_EXECUTIONS_PER_RUN = 100
  * `storeOutputAs` forbids the `__` prefix.
  */
 const FRONTIER_VAR = '__frontier'
+const EXTERNAL_CLIENT_PRINCIPAL_VAR = '__externalClientPrincipal'
+
+function clientPrincipalError(message: string): Error {
+  return Object.assign(new Error(message), { reason: 'client_principal_unresolved' })
+}
+
+function isFrozenClientPrincipal(value: unknown): value is ResolvedExternalClientWorkflowPrincipal {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const row = value as Record<string, unknown>
+  return (
+    typeof row.apiKeyId === 'string'
+    && UUID_RE.test(row.apiKeyId)
+    && typeof row.externalUserId === 'string'
+    && row.externalUserId.length > 0
+    && row.externalUserId.length <= 256
+  )
+}
+
+/** Resolve the definition binding or reuse the engine-owned frozen run value. */
+export function resolveExternalClientWorkflowPrincipal(
+  definition: WorkflowDefinition,
+  run: Pick<WorkflowRunRecord, 'input' | 'vars'>,
+): ResolvedExternalClientWorkflowPrincipal | undefined {
+  const frozen = run.vars[EXTERNAL_CLIENT_PRINCIPAL_VAR]
+  if (frozen !== undefined) {
+    if (!isFrozenClientPrincipal(frozen)) {
+      throw clientPrincipalError('The workflow run contains an invalid frozen client principal.')
+    }
+    return frozen
+  }
+
+  const principal = definition.principal
+  if (!principal) return undefined
+  if (!UUID_RE.test(principal.apiKeyId)) {
+    throw clientPrincipalError('The workflow client principal references an invalid API key id.')
+  }
+  if (!UUID_RE.test(principal.assistantId)) {
+    throw clientPrincipalError('The workflow client principal references an invalid assistant id.')
+  }
+
+  if (principal.resolve.kind === 'static') {
+    return {
+      apiKeyId: principal.apiKeyId,
+      externalUserId: principal.resolve.externalUserId,
+    }
+  }
+
+  const event = run.input.event
+  const sender = event && typeof event === 'object' && !Array.isArray(event)
+    ? (event as Record<string, unknown>).sender
+    : undefined
+  if (typeof sender !== 'string' || !sender.trim()) {
+    throw clientPrincipalError(
+      'This client-principal workflow requires input.event.sender, but the run has no sender.',
+    )
+  }
+  const normalized = sender.trim().toLowerCase()
+  const match = principal.resolve.clients.find(
+    (client) => client.sender.trim().toLowerCase() === normalized,
+  )
+  if (!match) {
+    throw clientPrincipalError(
+      `No external client principal is mapped for sender "${normalized}".`,
+    )
+  }
+  return { apiKeyId: principal.apiKeyId, externalUserId: match.externalUserId }
+}
+
+/** Runtime backstop for definitions persisted outside the Zod authoring gate. */
+function principalBoundStepViolation(step: WorkflowStep): string | null {
+  if (step.type === 'branch') return null
+  if (step.type === 'tool_call') {
+    const violation = reviewedClientReplyViolation(step)
+    return violation
+      ? `External-client workflow step "${step.id}" is not a valid reviewed reply: ${violation}.`
+      : null
+  }
+  if (step.type !== 'assistant_call') {
+    return `External-client workflow step "${step.id}" is ${step.type}; the principal-bound lane permits only drafts, branches, and a structurally reviewed IMAP reply.`
+  }
+  if (step.target.capabilityId) return `External-client workflow step "${step.id}" cannot use a capability.`
+  if (step.skills?.length || step.enforcedSkills?.length) {
+    return `External-client workflow step "${step.id}" cannot inject skills.`
+  }
+  if (step.page) return `External-client workflow step "${step.id}" cannot anchor or write a page.`
+  if (step.deliver) return `External-client workflow step "${step.id}" cannot deliver output.`
+  if (step.session === 'persistent') {
+    return `External-client workflow step "${step.id}" cannot use a persistent session.`
+  }
+  if (step.depth || step.researchMode === true) {
+    return `External-client workflow step "${step.id}" cannot enable research.`
+  }
+  if (step.blueprintId) {
+    return `External-client workflow step "${step.id}" cannot write blueprint output.`
+  }
+  return null
+}
 
 export type AdvanceOptions = {
   /**
@@ -491,6 +594,43 @@ export async function advanceWorkflowRun(
     return failOutcome(runId, '<unknown>', err, 0)
   }
 
+  // Resolve and freeze run-wide external-client authority before building a
+  // registry, session, or model request. Definition edits during a paused run
+  // cannot switch clients, and an unmapped sender fails closed with no member
+  // fallback.
+  let externalClientPrincipal: ResolvedExternalClientWorkflowPrincipal | undefined
+  try {
+    externalClientPrincipal = resolveExternalClientWorkflowPrincipal(workflow.definition, run)
+    if (externalClientPrincipal && !(EXTERNAL_CLIENT_PRINCIPAL_VAR in run.vars)) {
+      run.vars = {
+        ...run.vars,
+        [EXTERNAL_CLIENT_PRINCIPAL_VAR]: externalClientPrincipal,
+      }
+      await deps.runStore.updateRun(runId, { vars: run.vars })
+    }
+  } catch (err) {
+    const error: ExecutorError = {
+      message: err instanceof Error ? err.message : String(err),
+      reason:
+        typeof (err as { reason?: unknown } | null)?.reason === 'string'
+          ? (err as { reason: string }).reason
+          : 'client_principal_unresolved',
+    }
+    await markRunFailed(deps, run, '<principal>', error)
+    return failOutcome(runId, '<principal>', error, 0)
+  }
+  if (
+    externalClientPrincipal
+    && workflow.definition.steps.filter((step) => step.type === 'tool_call').length > 1
+  ) {
+    const error: ExecutorError = {
+      message: 'An external-client workflow may contain at most one reviewed IMAP reply step.',
+      reason: 'client_principal_step_forbidden',
+    }
+    await markRunFailed(deps, run, '<principal>', error)
+    return failOutcome(runId, '<principal>', error, 0)
+  }
+
   // Hosted paid gate (see ExecutorDeps.workspaceComputeAllowed): a workspace
   // with no active plan cannot spend autonomous compute. Checked on every
   // advance (fresh runs AND wait/approval resumes) so a run paused before
@@ -513,12 +653,16 @@ export async function advanceWorkflowRun(
     await markRunFailed(deps, run, '<unknown>', err)
     return failOutcome(runId, '<unknown>', err, 0)
   }
+  // Ordinary deterministic tool steps run on the workspace primary. A
+  // client-bound workflow's one reviewed reply instead uses the assistant
+  // whose API-key boundary and mailbox grants authored the draft.
+  const toolAssistantId = workflow.definition.principal?.assistantId ?? primaryAssistantId
 
   let toolRegistry: Map<string, Tool>
   try {
     toolRegistry = await deps.buildToolRegistry({
       workspaceId: run.workspaceId,
-      assistantId: primaryAssistantId,
+      assistantId: toolAssistantId,
       // Scheduled / wait-wakeup runs have `run.triggeredBy === null`; fall
       // back to the workflow's creator so RLS-touching tool resolvers have
       // a real user (matches the pattern used by deliver/consult below).
@@ -672,8 +816,10 @@ export async function advanceWorkflowRun(
         run,
         workflow,
         primaryAssistantId,
+        toolAssistantId,
         toolRegistry,
         consultTransport: deps.consultTransport,
+        externalClientPrincipal,
         scope: interp,
         deps,
       })
@@ -877,8 +1023,10 @@ export async function advanceWorkflowRun(
       stepRunId,
       workspaceId: run.workspaceId,
       approverUserId: result.approverUserId,
+      assistantId: result.assistantId,
       toolName: result.toolName,
       arguments: result.arguments,
+      displayLines: result.displayLines,
       deliveryChannel: result.deliveryChannel,
       expiresAt: result.expiresAt,
     })
@@ -1013,8 +1161,10 @@ type StepDispatchResult =
   | {
       kind: 'paused_approval'
       approverUserId: string
+      assistantId: string
       toolName: string
       arguments: Record<string, unknown>
+      displayLines?: string[]
       deliveryChannel: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams'
       expiresAt: Date | null
     }
@@ -1023,8 +1173,11 @@ type DispatchContext = {
   run: WorkflowRunRecord
   workflow: WorkflowRecord
   primaryAssistantId: string
+  /** Assistant whose grants/connector instances back deterministic tool_call. */
+  toolAssistantId: string
   toolRegistry: Map<string, Tool>
   consultTransport: ConsultTransport
+  externalClientPrincipal?: ResolvedExternalClientWorkflowPrincipal
   scope: InterpolationScope
   /** Phase C — when present, ask-policy tool_calls pause instead of failing. */
   deps: ExecutorDeps
@@ -1046,6 +1199,47 @@ type SettledStep = {
 }
 
 async function dispatchStep(step: WorkflowStep, ctx: DispatchContext): Promise<StepDispatchResult> {
+  if (ctx.externalClientPrincipal) {
+    const violation = principalBoundStepViolation(step)
+    if (violation) {
+      return {
+        kind: 'failed',
+        error: { message: violation, reason: 'client_principal_step_forbidden' },
+      }
+    }
+    if (step.type === 'tool_call') {
+      const trigger = ctx.run.input.trigger as {
+        sourceType?: unknown
+        provider?: unknown
+        connectorInstanceId?: unknown
+      } | undefined
+      const connectorInstanceId = typeof trigger?.connectorInstanceId === 'string'
+        ? trigger.connectorInstanceId
+        : null
+      const sourceStillConfigured = ctx.workflow.trigger.kind === 'event'
+        && connectorInstanceId !== null
+        && ctx.workflow.trigger.event.sources.some((subscription) =>
+          subscription.source.type === 'connector'
+          && subscription.source.provider === 'imap'
+          && subscription.source.connectorInstanceId === connectorInstanceId,
+        )
+      if (
+        ctx.run.triggerKind !== 'event'
+        || trigger?.sourceType !== 'connector'
+        || trigger.provider !== 'imap'
+        || !sourceStillConfigured
+      ) {
+        return {
+          kind: 'failed',
+          error: {
+            message:
+              `External-client reviewed reply step "${step.id}" can run only from the configured IMAP connector event that started this run.`,
+            reason: 'client_principal_reply_source_invalid',
+          },
+        }
+      }
+    }
+  }
   switch (step.type) {
     case 'assistant_call':
       return dispatchAssistantCall(step, ctx)
@@ -1084,6 +1278,21 @@ async function dispatchAssistantCall(
           `Set the target to 'primary' or a concrete assistant id (edit the workflow in the builder or via updateWorkflow).`,
         reason: 'invalid_assistant_target',
       },
+    }
+  }
+
+  if (ctx.externalClientPrincipal) {
+    const expectedAssistantId = ctx.workflow.definition.principal?.assistantId
+    if (!expectedAssistantId || expectedAssistantId !== targetAssistantId) {
+      return {
+        kind: 'failed',
+        error: {
+          message:
+            `assistant_call step "${step.id}" resolves to assistant ${targetAssistantId}, but the inherited API key ` +
+            `is configured for ${expectedAssistantId ?? 'an unknown assistant'}.`,
+          reason: 'client_principal_assistant_mismatch',
+        },
+      }
     }
   }
 
@@ -1255,6 +1464,7 @@ async function dispatchAssistantCall(
     // callee executor, which filters the callee's tool surface to exactly
     // this set. Undefined = the callee's normal tool surface.
     allowedTools: step.tools,
+    externalClientPrincipal: ctx.externalClientPrincipal,
     // Per-step skill allow-list: a `skills` list rides through to the callee
     // executor, which offers `useSkill` over exactly these brain skills (each
     // still gated by the callee's enablement + clearance). Injected after the
@@ -1476,15 +1686,16 @@ async function dispatchToolCall(
   // mcp_tool_settings. `block`-policy tools never make it into the registry
   // (injectMcpTools skips them at build time). First-party tools default to
   // `requiresConfirmation === false` and have no `resolveConfirmation`.
-  let needsConfirmation = !!tool.requiresConfirmation
+  const forceConfirmation = step.approval?.required === true
+  let needsConfirmation = forceConfirmation || !!tool.requiresConfirmation
   if (tool.resolveConfirmation) {
     try {
       // Run with a synthetic context — only the userId/assistantId fields
       // are read by the resolver. We don't have the workflow ToolContext
       // built yet (and don't need it for policy lookup).
-      needsConfirmation = await tool.resolveConfirmation({
+      const resolvedConfirmation = await tool.resolveConfirmation({
         userId: ctx.run.triggeredBy ?? ctx.workflow.createdBy,
-        assistantId: ctx.primaryAssistantId,
+        assistantId: ctx.toolAssistantId,
         sessionId: `workflow_run_${ctx.run.id}`,
         appId: 'Use Brian',
         channelType: 'workflow',
@@ -1492,13 +1703,33 @@ async function dispatchToolCall(
         workspaceId: ctx.run.workspaceId,
         abortSignal: new AbortController().signal,
       } satisfies ToolContext, interpolatedArgs)
+      needsConfirmation = forceConfirmation || resolvedConfirmation
     } catch {
       // Treat resolver failure as ask-policy (fail-closed).
       needsConfirmation = true
     }
   }
   if (needsConfirmation) {
-    return askPolicyOutcome(step, ctx, interpolatedArgs)
+    let displayLines: string[] | undefined
+    if (tool.describeConfirmation) {
+      try {
+        const lines = await tool.describeConfirmation(interpolatedArgs, {
+          userId: ctx.run.triggeredBy ?? ctx.workflow.createdBy,
+          assistantId: ctx.toolAssistantId,
+          sessionId: `workflow_run_${ctx.run.id}`,
+          appId: 'Use Brian',
+          channelType: 'workflow',
+          channelId: ctx.run.id,
+          workspaceId: ctx.run.workspaceId,
+          assistantKind: ctx.externalClientPrincipal ? 'standard' : 'primary',
+          abortSignal: new AbortController().signal,
+        })
+        if (lines?.length) displayLines = lines
+      } catch (err) {
+        console.debug(`[workflow] describeConfirmation failed for ${step.toolName}:`, err)
+      }
+    }
+    return askPolicyOutcome(step, ctx, interpolatedArgs, displayLines)
   }
   // Phase C activation lives in `dispatchStep` (one level up): when
   // `deps.requestApproval` is set, the executor flips the dispatchResult
@@ -1525,13 +1756,13 @@ async function dispatchToolCall(
   const abortController = new AbortController()
   const toolContext: ToolContext = {
     userId: ctx.run.triggeredBy ?? ctx.workflow.createdBy,
-    assistantId: ctx.primaryAssistantId,
+    assistantId: ctx.toolAssistantId,
     sessionId: `workflow_run_${ctx.run.id}`,
     appId: 'Use Brian',
     channelType: 'workflow',
     channelId: ctx.run.id,
     workspaceId: ctx.run.workspaceId,
-    assistantKind: 'primary',
+    assistantKind: ctx.externalClientPrincipal ? 'standard' : 'primary',
     abortSignal: abortController.signal,
   }
 
@@ -1573,6 +1804,7 @@ function askPolicyOutcome(
   step: ToolCallStep,
   ctx: DispatchContext,
   args: Record<string, unknown>,
+  displayLines?: string[],
 ): StepDispatchResult {
   if (ctx.deps.requestApproval) {
     // Resolve the approver: triggered_by user for manual runs, workflow
@@ -1585,8 +1817,10 @@ function askPolicyOutcome(
     return {
       kind: 'paused_approval',
       approverUserId,
+      assistantId: ctx.toolAssistantId,
       toolName: step.toolName,
       arguments: args,
+      displayLines,
       deliveryChannel,
       expiresAt,
     }

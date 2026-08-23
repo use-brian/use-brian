@@ -22,6 +22,8 @@ import {
   insertEmailArchiveMessage,
   searchEmailArchive,
   countEmailArchiveMessages,
+  findArchivedEmailUids,
+  searchLiteralEmailArchiveMessages,
 } from '../../db/email-archive-store.js'
 import { query, queryWithRLS, getPool } from '../../db/client.js'
 import { MAX_CHARS } from '../../db/text-chunking.js'
@@ -259,10 +261,105 @@ describe('[COMP:api/email-archive-store] searchEmailArchive (person compartment)
   })
 })
 
+describe('[COMP:api/email-archive-store] unified literal mailbox search', () => {
+  it('preserves structured filters and owner-scoped RLS without embeddings', async () => {
+    mockQueryWithRLS.mockResolvedValue({
+      rows: [{
+        provider_message_id: 'Client:7', folder: 'Client', from_addr: 'Person <person@example.com>',
+        to_addrs: ['me@example.com'], sent_at: '2026-08-01T00:00:00Z', subject: 'Hello',
+        body_text: 'Recent note', rfc_message_id: '<m7@example.com>', in_reply_to: null,
+        references_ids: [], matched_segment: null,
+      }],
+      rowCount: 1,
+    } as never)
+
+    const hits = await searchLiteralEmailArchiveMessages({
+      ownerUserId: 'owner-1',
+      instanceId: 'inst-1',
+      params: { from: 'person@example.com', since: '2026-07-01', limit: 20 },
+    })
+
+    const [rlsUser, sql, params] = mockQueryWithRLS.mock.calls[0] as unknown as [string, string, unknown[]]
+    expect(rlsUser).toBe('owner-1')
+    expect(sql).toContain('owner_user_id = $1')
+    expect(sql).toContain('instance_id = $2')
+    expect(sql).toContain('from_addr ILIKE')
+    expect(params).toEqual(expect.arrayContaining(['owner-1', 'inst-1', '%person@example.com%', '2026-07-01']))
+    expect(hits[0]).toMatchObject({ id: 'Client:7', from: 'Person <person@example.com>' })
+  })
+
+  it('matches keyword bodies through trigram-indexed segments and ranks sender before subject before body', async () => {
+    mockQueryWithRLS.mockResolvedValue({
+      rows: [{
+        provider_message_id: 'Archive:9', folder: 'Archive', from_addr: 'other@example.com',
+        to_addrs: ['me@example.com'], sent_at: '2026-08-01T00:00:00Z', subject: 'Project',
+        body_text: 'A long body whose useful passage is later.', rfc_message_id: '<m9@example.com>',
+        in_reply_to: null, references_ids: [], matched_segment: 'The useful Person passage.',
+      }],
+      rowCount: 1,
+    } as never)
+
+    const hits = await searchLiteralEmailArchiveMessages({
+      ownerUserId: 'owner-1',
+      instanceId: 'inst-1',
+      params: { keywords: ['Person'], limit: 20 },
+    })
+
+    const [, sql, params] = mockQueryWithRLS.mock.calls[0] as unknown as [string, string, unknown[]]
+    expect(sql).toContain('FROM email_archive_segments es')
+    expect(sql).toContain('es.segment_text ILIKE')
+    expect(sql).toContain('es_snippet.segment_text')
+    expect(sql).toContain('CASE')
+    expect(sql).toContain('WHEN (em.from_addr ILIKE')
+    expect(sql).toContain('WHEN (em.subject ILIKE')
+    expect(sql).toContain('ORDER BY literal_rank ASC, em.sent_at DESC')
+    expect(sql).not.toContain('embedding')
+    expect(params).toContain('%Person%')
+    expect(hits[0].snippet).toBe('The useful Person passage.')
+  })
+
+  it('treats LIKE metacharacters as literal mailbox text', async () => {
+    mockQueryWithRLS.mockResolvedValue({ rows: [], rowCount: 0 } as never)
+
+    await searchLiteralEmailArchiveMessages({
+      ownerUserId: 'owner-1',
+      instanceId: 'inst-1',
+      params: { keywords: ['100%_ready'], limit: 20 },
+    })
+
+    const [, sql, params] = mockQueryWithRLS.mock.calls[0] as unknown as [string, string, unknown[]]
+    expect(sql).toContain("ESCAPE E'\\\\'")
+    expect(params).toContain('%100\\%\\_ready%')
+  })
+})
+
 describe('[COMP:api/email-archive-store] counts', () => {
   it('reconciles per-folder totals for the completeness check', async () => {
     mockQuery.mockResolvedValue({ rows: [{ folder: 'INBOX', n: '3' }, { folder: 'Sent', n: '2' }], rowCount: 2 } as never)
     const counts = await countEmailArchiveMessages('inst-1')
     expect(counts).toEqual({ total: 5, byFolder: { INBOX: 3, Sent: 2 } })
+  })
+
+  it('finds only archived UIDs in the requested folder window', async () => {
+    mockQuery.mockResolvedValue({
+      rows: [
+        { provider_message_id: 'Archive:2024:9' },
+        { provider_message_id: 'Archive:2024:7' },
+      ],
+      rowCount: 2,
+    } as never)
+
+    await expect(findArchivedEmailUids('inst-1', 'Archive:2024', [10, 9, 8, 7])).resolves.toEqual(
+      new Set([9, 7]),
+    )
+    expect(mockQuery).toHaveBeenCalledWith(
+      expect.stringContaining('provider_message_id = ANY'),
+      ['inst-1', 'Archive:2024', ['Archive:2024:10', 'Archive:2024:9', 'Archive:2024:8', 'Archive:2024:7']],
+    )
+  })
+
+  it('does not query for an empty reconciliation window', async () => {
+    await expect(findArchivedEmailUids('inst-1', 'INBOX', [])).resolves.toEqual(new Set())
+    expect(mockQuery).not.toHaveBeenCalled()
   })
 })

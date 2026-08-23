@@ -85,7 +85,7 @@ describe('[COMP:files/byo-resolver] createCachedByoFilesResolver', () => {
     expect(resolved.uriScheme).toBe('file')
     expect(createLocalClient).toHaveBeenCalledWith({ baseDir: '/srv/brian-files' })
 
-    const client = await resolver.forUri(ws, 'file:///srv/brian-files/workspace_1/file_1')
+    const client = await resolver.forUri(ws, 'file:///srv/brian-files/customer-content/deep/report.pdf')
     expect(client).toBe(byoClients.get('/srv/brian-files'))
   })
 
@@ -96,6 +96,12 @@ describe('[COMP:files/byo-resolver] createCachedByoFilesResolver', () => {
     expect(r.byo).toBe(false)
     expect(r.gcs).toBe(appGcs)
     expect(createGcsClient).not.toHaveBeenCalled()
+  })
+
+  it('treats a file URI as dormant after the local binding disconnects', async () => {
+    const { appGcs, resolver } = harness(null)
+    const client = await resolver.forUri(ws, 'file:///files/report.md')
+    expect(client).toBe(appGcs)
   })
 
   it('caches the per-bucket client across calls', async () => {

@@ -13,11 +13,11 @@
  * plus an always-on Built-in group for
  * first-party workspace primitives like Workspace Files, which carry no
  * connect/disconnect state), with the selected connector's management panel
- * beside it. Every connector is
- * personal; connecting one auto-exposes it to the active workspace (solo
- * included — exposure is what surfaces it on workspace config pickers), and
- * the detail panel's "Workspace access" card states the sharing status
- * explicitly with the expose / revoke pair. See
+ * beside it. Ordinary OAuth/PAT/custom connectors start personal and
+ * auto-expose to the active workspace when connected (solo included).
+ * Workspace storage bindings and transferred connectors are workspace-owned
+ * and render their clearance-gated management panel instead of personal
+ * expose / transfer controls. See
  * docs/architecture/integrations/mcp.md → "Unified connectors — the
  * master-detail Studio surface".
  *
@@ -53,7 +53,6 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
 import { Check, Download, FolderOpen, Pencil, Upload, X } from "lucide-react";
 import { authFetch } from "@/lib/auth-fetch";
 import { BrowseDirectory } from "./browse-directory";
@@ -1104,9 +1103,8 @@ function ConnectorAuthSection(props: {
 function ConnectorsList() {
   const t = useT();
   const tc = t.settings.connectors;
-  const { active } = useWorkspaces();
-  const params = useParams<{ workspaceId: string }>();
-  const workspaceId = params?.workspaceId ?? "";
+  const { activeId, active } = useWorkspaces();
+  const workspaceId = activeId ?? "";
   const [connectors, setConnectors] = useState<Connector[]>([]);
   const [loading, setLoading] = useState(true);
   const [connecting, setConnecting] = useState<string | null>(null);
@@ -1188,6 +1186,7 @@ function ConnectorsList() {
   const [showLocalForm, setShowLocalForm] = useState<string | null>(null);
   const [localDirPath, setLocalDirPath] = useState("");
   const [localDirError, setLocalDirError] = useState<string | null>(null);
+  const [localDirNotice, setLocalDirNotice] = useState<string | null>(null);
 
   const [showCliForm, setShowCliForm] = useState<string | null>(null);
   const [newCliLabel, setNewCliLabel] = useState("");
@@ -1726,6 +1725,7 @@ function ConnectorsList() {
 
     if (id === "local") {
       setShowLocalForm(rid);
+      revealConnectForm(rid);
       setLocalDirError(null);
       setConnecting(null);
       return;
@@ -2865,8 +2865,6 @@ function ConnectorsList() {
         setShowGcsForm(null);
         setGcsKey(""); setGcsBucket(""); setGcsProjectId("");
         fetchConnectors();
-        // gcs is single_instance, so the slug-only arm is never ambiguous.
-        setJustConnected({ slug: c.id, instanceId: c.connectorInstanceId });
       } else {
         const data = (await res.json().catch(() => ({}))) as { code?: string };
         setGcsError(
@@ -3001,7 +2999,6 @@ function ConnectorsList() {
         setShowS3Form(null);
         setS3Bucket(""); setS3Region(""); setS3Endpoint(""); setS3AccessKeyId(""); setS3SecretKey("");
         fetchConnectors();
-        setJustConnected({ slug: c.id, instanceId: c.connectorInstanceId });
       } else {
         const data = (await res.json().catch(() => ({}))) as { code?: string };
         setS3Error(
@@ -3017,31 +3014,135 @@ function ConnectorsList() {
     setConnecting(null);
   }
 
+  type LocalPreflight = { fileCount: number; totalBytes: number; truncated: boolean };
+  type LocalImportResult = {
+    created: number;
+    updated: number;
+    unchanged: number;
+    retracted: number;
+    skipped: number;
+  };
+
+  function localByteCount(bytes: number): string {
+    if (bytes < 1024) return `${bytes.toLocaleString()} B`;
+    const units = ["KB", "MB", "GB", "TB"];
+    let value = bytes / 1024;
+    let unit = units[0];
+    for (let index = 1; index < units.length && value >= 1024; index++) {
+      value /= 1024;
+      unit = units[index];
+    }
+    return `${value.toLocaleString(undefined, { maximumFractionDigits: 1 })} ${unit}`;
+  }
+
+  async function preflightLocal(path?: string): Promise<LocalPreflight | null> {
+    const res = await authFetch(`${API_URL}/api/connectors/local/preflight`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspaceId, ...(path ? { path } : {}) }),
+    });
+    if (!res.ok) return null;
+    return res.json() as Promise<LocalPreflight>;
+  }
+
+  async function confirmLocalImport(preflight: LocalPreflight, syncing = false): Promise<boolean> {
+    if (preflight.truncated) {
+      setLocalDirError(tc.local.errLimit);
+      setLocalDirNotice(tc.local.errLimit);
+      return false;
+    }
+    return confirmDialog({
+      title: tc.local.confirmTitle,
+      description: tc.local.confirmDesc
+        .replace("{count}", preflight.fileCount.toLocaleString())
+        .replace("{bytes}", localByteCount(preflight.totalBytes)),
+      confirmLabel: syncing ? tc.local.confirmSyncBtn : tc.local.confirmBtn,
+      cancelLabel: tc.cancel,
+    });
+  }
+
+  function localImportNotice(result: LocalImportResult): string {
+    return tc.local.importDone
+      .replace("{created}", result.created.toLocaleString())
+      .replace("{updated}", result.updated.toLocaleString())
+      .replace("{unchanged}", result.unchanged.toLocaleString())
+      .replace("{retracted}", result.retracted.toLocaleString())
+      .replace("{skipped}", result.skipped.toLocaleString());
+  }
+
+  async function importLocalDirectory(): Promise<LocalImportResult | null> {
+    const res = await authFetch(`${API_URL}/api/connectors/local/import`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspaceId }),
+    });
+    if (!res.ok) return null;
+    return res.json() as Promise<LocalImportResult>;
+  }
+
   async function handleSaveLocal(c: Connector) {
-    if (!localDirPath.trim()) return;
+    const path = localDirPath.trim();
+    if (!path) return;
+    if (!workspaceId) {
+      setLocalDirError(tc.local.errGeneric);
+      return;
+    }
     const rid = rowId(c);
     setConnecting(rid);
     setLocalDirError(null);
+    setLocalDirNotice(null);
     try {
+      const preflight = await preflightLocal(path);
+      if (!preflight) {
+        setLocalDirError(tc.local.errScan);
+        return;
+      }
+      if (!(await confirmLocalImport(preflight))) return;
+
       const res = await authFetch(`${API_URL}/api/connectors/local/connect`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ workspaceId, path: localDirPath.trim() }),
+        body: JSON.stringify({ workspaceId, path }),
       });
-      if (res.ok) {
-        setConnectors((prev) => prev.map((x) => (isSameRow(x, c) ? { ...x, connected: true } : x)));
-        setSelected(rid);
-        setShowLocalForm(null);
-        setLocalDirPath("");
-        fetchConnectors();
-        setJustConnected({ slug: c.id, instanceId: c.connectorInstanceId });
-      } else {
+      if (!res.ok) {
         setLocalDirError(tc.local.errGeneric);
+        return;
       }
+
+      setConnectors((prev) => prev.map((x) => (isSameRow(x, c) ? { ...x, connected: true } : x)));
+      setSelected(rid);
+      setShowLocalForm(null);
+      setLocalDirPath("");
+      const imported = await importLocalDirectory();
+      setLocalDirNotice(imported ? localImportNotice(imported) : tc.local.errImport);
+      fetchConnectors();
     } catch {
       setLocalDirError(tc.local.errGeneric);
+    } finally {
+      setConnecting(null);
     }
-    setConnecting(null);
+  }
+
+  async function handleSyncLocal(c: Connector) {
+    if (!workspaceId) return;
+    const rid = rowId(c);
+    setConnecting(rid);
+    setLocalDirError(null);
+    setLocalDirNotice(null);
+    try {
+      const preflight = await preflightLocal();
+      if (!preflight) {
+        setLocalDirNotice(tc.local.errScan);
+        return;
+      }
+      if (!(await confirmLocalImport(preflight, true))) return;
+      const imported = await importLocalDirectory();
+      setLocalDirNotice(imported ? localImportNotice(imported) : tc.local.errImport);
+    } catch {
+      setLocalDirNotice(tc.local.errImport);
+    } finally {
+      setConnecting(null);
+    }
   }
 
   async function handleSaveCli(c: Connector) {
@@ -3684,7 +3785,7 @@ function ConnectorsList() {
         onConnectorAdded={() => fetchConnectors()}
         // Resolve the real row first: a synthetic `{ id }` carries no instance
         // UUID, so its form key becomes stale when Directory Add refetches.
-        onOauthConnect={(entry, opts) => {
+        onConnectorConnect={(entry, opts) => {
           const connector = resolveDirectoryConnectRow(connectors, entry.id) as Connector;
           void handleConnect(connector, {
             ...opts,
@@ -3905,6 +4006,16 @@ function ConnectorsList() {
                         takes the editor away. Same renderer the owner panel
                         uses - see the note beside its definition. */}
                     {msGraphConfigButton(sel, rid)}
+                    {sel.id === "local" && sel.connected && (
+                      <button
+                        type="button"
+                        onClick={() => void handleSyncLocal(sel)}
+                        disabled={connecting === rid}
+                        className="text-xs font-medium border border-border px-3 py-1 rounded-lg text-muted-foreground hover:text-foreground hover:border-primary/30 transition-colors disabled:opacity-50"
+                      >
+                        {connecting === rid ? tc.local.syncingBtn : tc.local.syncBtn}
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={() => handleRemoveWorkspaceConnector(sel)}
@@ -3915,6 +4026,9 @@ function ConnectorsList() {
                         : tc.removeBtn}
                     </button>
                   </div>
+                  {sel.id === "local" && localDirNotice && (
+                    <p className="text-xs text-muted-foreground">{localDirNotice}</p>
+                  )}
 
                   {msGraphConfigForm(sel, rid)}
 
@@ -4354,6 +4468,15 @@ function ConnectorsList() {
                       {tc.addAnother}
                     </button>
                   )}
+                  {sel.id === "local" && sel.connected && (
+                    <button
+                      onClick={() => void handleSyncLocal(sel)}
+                      disabled={connecting === rid}
+                      className="text-xs font-medium border border-border px-3 py-1 rounded-lg text-muted-foreground hover:text-foreground hover:border-primary/30 transition-colors disabled:opacity-50"
+                    >
+                      {connecting === rid ? tc.local.syncingBtn : tc.local.syncBtn}
+                    </button>
+                  )}
                   {/* Remove (or Disconnect for storage) on every real instance:
                       custom MCPs, directory connectors, and any credentialed
                       built-in instance including Google OAuth.
@@ -4536,8 +4659,11 @@ function ConnectorsList() {
                           </button>
                         </div>
                       </>
-                    )}
-                  </div>
+                  )}
+                </div>
+                )}
+                {sel.id === "local" && localDirNotice && (
+                  <p className="text-xs text-muted-foreground">{localDirNotice}</p>
                 )}
 
                 {/* PAT input form (for GitHub and other API key connectors) */}
@@ -4954,10 +5080,10 @@ function ConnectorsList() {
                       </button>
                       <button
                         onClick={() => handleSaveLocal(sel)}
-                        disabled={!localDirPath.trim() || connecting === rid}
+                        disabled={!workspaceId || !localDirPath.trim() || connecting === rid}
                         className="text-xs font-medium bg-action text-action-foreground px-3 py-1 rounded-lg hover:bg-action/90 disabled:opacity-50 transition-colors"
                       >
-                        {connecting === rid ? tc.local.connectingBtn : tc.local.connectBtn}
+                        {connecting === rid ? tc.local.scanningBtn : tc.local.connectBtn}
                       </button>
                     </div>
                   </div>

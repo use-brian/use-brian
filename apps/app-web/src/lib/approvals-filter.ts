@@ -34,6 +34,9 @@ export const ACTIONABLE_KINDS: readonly ApprovalKind[] = [
   // Logic-block terminal sends (computer-use R2-5): the block's runner
   // polls the row, so responding in place IS the resume.
   "browser_skill_send",
+  // Unknown inbound email sender: approve allowlists the address for this
+  // inbox; reject dismisses the request and keeps the sender ingest-only.
+  "email_sender",
 ];
 
 export function isActionable(kind: ApprovalKind): boolean {

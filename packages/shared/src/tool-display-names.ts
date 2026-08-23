@@ -186,6 +186,8 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   imapSaveAttachment: 'Save email attachment',
   syncMailboxNow: 'Sync company mailbox now',
   searchEmailArchive: 'Search mailbox archive',
+  previewMailboxContactImport: 'Preview mailbox contacts',
+  importMailboxContacts: 'Import mailbox contacts',
 
   // Workspace files (Q3 / company-brain §10)
   fileWrite: 'Save workspace file',

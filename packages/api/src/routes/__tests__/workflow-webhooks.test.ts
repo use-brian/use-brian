@@ -11,7 +11,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import request from 'supertest'
-import { createHmac } from 'node:crypto'
+import { createHash, createHmac } from 'node:crypto'
 import { createTestApp } from './helpers.js'
 
 vi.mock('@use-brian/core', async (io) => ({
@@ -26,7 +26,7 @@ const mockAdvance = vi.mocked(advanceWorkflowRun)
 
 const SECRET = 'webhook-secret'
 const workflowStore = { findByWebhookSlugSystem: vi.fn() }
-const runStore = { createRun: vi.fn() }
+const runStore = { createRun: vi.fn(), createWebhookRun: vi.fn() }
 
 function app() {
   return createTestApp(
@@ -55,12 +55,13 @@ function sign(body: Buffer, secret = SECRET) {
   return `sha256=${createHmac('sha256', secret).update(body).digest('hex')}`
 }
 
-function post(slug: string, body: Buffer, signature: string) {
-  return request(app())
+function post(slug: string, body: Buffer, signature: string, idempotencyKey?: string) {
+  const req = request(app())
     .post(`/api/workflow-webhooks/${slug}`)
     .set('Content-Type', 'application/octet-stream')
     .set('X-Workflow-Signature', signature)
-    .send(body)
+  if (idempotencyKey !== undefined) req.set('X-Workflow-Idempotency-Key', idempotencyKey)
+  return req.send(body)
 }
 
 beforeEach(() => {
@@ -114,6 +115,60 @@ describe('[COMP:api/workflow-webhooks-route] POST /workflow-webhooks/:slug', () 
     const body = Buffer.from('{}')
     const res = await post('hook-1', body, sign(body))
     expect(res.body.status).toBe('awaiting_wait')
+  })
+
+  it('creates an idempotent run with a digest of the exact signed body', async () => {
+    workflowStore.findByWebhookSlugSystem.mockResolvedValueOnce(webhookWorkflow())
+    runStore.createWebhookRun.mockResolvedValueOnce({
+      kind: 'created',
+      run: { id: 'run-1' },
+    })
+    mockAdvance.mockResolvedValueOnce({ kind: 'completed', runId: 'run-1' } as never)
+    const body = Buffer.from('{"order":42}')
+    const res = await post('hook-1', body, sign(body), 'order.created:42')
+
+    expect(res.status).toBe(200)
+    expect(runStore.createWebhookRun).toHaveBeenCalledWith(expect.objectContaining({
+      workflowId: 'wf-1',
+      idempotencyKey: 'order.created:42',
+      bodySha256: createHash('sha256').update(body).digest('hex'),
+    }))
+    expect(runStore.createRun).not.toHaveBeenCalled()
+    expect(mockAdvance).toHaveBeenCalledWith(expect.anything(), 'run-1')
+  })
+
+  it('returns an existing run without advancing an exact retry', async () => {
+    workflowStore.findByWebhookSlugSystem.mockResolvedValueOnce(webhookWorkflow())
+    runStore.createWebhookRun.mockResolvedValueOnce({
+      kind: 'duplicate',
+      run: { id: 'run-1', status: 'completed', error: null },
+    })
+    const body = Buffer.from('{"order":42}')
+    const res = await post('hook-1', body, sign(body), 'order.created:42')
+
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ runId: 'run-1', status: 'completed', duplicate: true })
+    expect(mockAdvance).not.toHaveBeenCalled()
+  })
+
+  it('rejects reuse of an idempotency key with different body bytes', async () => {
+    workflowStore.findByWebhookSlugSystem.mockResolvedValueOnce(webhookWorkflow())
+    runStore.createWebhookRun.mockResolvedValueOnce({ kind: 'conflict' })
+    const body = Buffer.from('{"order":43}')
+    const res = await post('hook-1', body, sign(body), 'order.created:42')
+
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({ error: 'idempotency_conflict' })
+    expect(mockAdvance).not.toHaveBeenCalled()
+  })
+
+  it('rejects an empty idempotency key before creating a run', async () => {
+    workflowStore.findByWebhookSlugSystem.mockResolvedValueOnce(webhookWorkflow())
+    const body = Buffer.from('{}')
+    const res = await post('hook-1', body, sign(body), ' ')
+
+    expect(res.status).toBe(400)
+    expect(runStore.createWebhookRun).not.toHaveBeenCalled()
   })
 
   // ── trigger.match.condition — server-side event filter ──────────────────

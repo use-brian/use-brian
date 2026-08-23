@@ -10,8 +10,30 @@ export const CHAT_ARCHIVE_SEARCH_TOOL = {
     'Narrow with `channel` (get one from listChatChannels or a prior hit) and a `since`/`until` range. ' +
     'Image OCR and descriptions, document passages, audio transcripts, and sampled video content are ' +
     'searched alongside captions and message text. Results report how much of the range is not yet ' +
-    'semantically indexed, so a thin result set can be told apart from an unindexed one.',
+    'semantically indexed, so a thin result set can be told apart from an unindexed one. ' +
+    'Hits carry the sender\'s id (a phone number or platform id), their display/push name, and the ' +
+    'saved contact name when the user\'s synced address book has one — when only a bare number comes ' +
+    'back, cross-check it against the CRM with listContacts before telling the user no name is known. ' +
+    'Hits with media also carry `media_sha256`: pass it to saveChatMedia to save or send the actual file.',
   classification: 'read',
+  defaultPolicy: 'allow',
+} as const
+
+/**
+ * The retrieval half of "send me that file".
+ *
+ * Search hits describe media (`media_sha256`, `media_mime`, extraction state)
+ * but the bytes live in the archive's content-addressed store. This tool pulls
+ * them into the workspace file layer, where `sendFile`, `ingestFile`, and the
+ * web app's Files view can reach them.
+ */
+export const CHAT_ARCHIVE_SAVE_MEDIA_TOOL = {
+  name: 'saveChatMedia',
+  description:
+    'Save a photo, voice note, video, or document from the user\'s archived WeChat/WhatsApp history into the workspace as a real file. ' +
+    'Use when the user asks you to send, save, forward, read, or analyze something that arrived in a chat: find the message with searchChatHistory and save the hit\'s `media_sha256`. Pass the returned `fileId` to sendFile for delivery or to ingestFile for consent-gated semantic reading. ' +
+    'Only works for hits whose media is stored (`extraction_status` present and media coverage not `missing`); if the digest is absent the original bytes were never captured and cannot be recovered — say so instead of retrying.',
+  classification: 'write',
   defaultPolicy: 'allow',
 } as const
 

@@ -30,7 +30,7 @@
  */
 
 import { Router, raw } from 'express'
-import { createHmac, timingSafeEqual } from 'node:crypto'
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
 import {
   advanceWorkflowRun,
   evaluateBoolean,
@@ -46,6 +46,8 @@ export type WorkflowWebhookRouteOptions = {
 }
 
 const SIGNATURE_HEADER = 'x-workflow-signature'
+const IDEMPOTENCY_HEADER = 'x-workflow-idempotency-key'
+const MAX_IDEMPOTENCY_KEY_LENGTH = 200
 
 function verifySignature(body: Buffer, secret: string, header: string | undefined): boolean {
   if (!header) return false
@@ -102,6 +104,16 @@ export function workflowWebhookRoutes(opts: WorkflowWebhookRouteOptions): Router
       return
     }
 
+    const idempotencyHeader = req.header(IDEMPOTENCY_HEADER)
+    const idempotencyKey = idempotencyHeader?.trim()
+    if (
+      idempotencyHeader !== undefined
+      && (!idempotencyKey || idempotencyKey.length > MAX_IDEMPOTENCY_KEY_LENGTH)
+    ) {
+      res.status(400).json({ error: 'Invalid idempotency key' })
+      return
+    }
+
     if (!workflow.enabled) {
       res.status(409).json({ error: 'Workflow disabled' })
       return
@@ -133,7 +145,7 @@ export function workflowWebhookRoutes(opts: WorkflowWebhookRouteOptions): Router
       }
     }
 
-    const run = await opts.runStore.createRun({
+    const runParams = {
       workflowId: workflow.id,
       workspaceId: workflow.workspaceId,
       // Webhook fires without a user — fall back to the creator for
@@ -141,7 +153,36 @@ export function workflowWebhookRoutes(opts: WorkflowWebhookRouteOptions): Router
       triggeredBy: workflow.createdBy,
       triggerKind: 'manual',
       input,
-    })
+    } as const
+
+    let run
+    if (idempotencyKey) {
+      if (!opts.runStore.createWebhookRun) {
+        res.status(500).json({ error: 'Webhook idempotency unavailable' })
+        return
+      }
+      const result = await opts.runStore.createWebhookRun({
+        ...runParams,
+        idempotencyKey,
+        bodySha256: createHash('sha256').update(body).digest('hex'),
+      })
+      if (result.kind === 'conflict') {
+        res.status(409).json({ error: 'idempotency_conflict' })
+        return
+      }
+      run = result.run
+      if (result.kind === 'duplicate') {
+        res.json({
+          runId: run.id,
+          status: run.status,
+          error: run.error,
+          duplicate: true,
+        })
+        return
+      }
+    } else {
+      run = await opts.runStore.createRun(runParams)
+    }
 
     const outcome = await advanceWorkflowRun(opts.runDeps, run.id)
 

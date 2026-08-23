@@ -9,6 +9,8 @@
  *
  *   GET  /                  — list every pending approval for a workspace
  *   GET  /count             — pending count (nav badge)
+ *   GET  /:id/email-review-context — CRM-linked archived reply thread
+ *   POST /:id/revise-email   — body-only immutable IMAP draft revision
  *   POST /:id/respond        — approve / reject
  *
  * Respond dispatch by kind:
@@ -28,8 +30,13 @@
  */
 
 import { Router } from 'express'
-import type { ApprovalKind, PendingApprovalsStore } from '../db/pending-approvals-store.js'
+import type {
+  ApprovalKind,
+  PendingApproval,
+  PendingApprovalsStore,
+} from '../db/pending-approvals-store.js'
 import type { WorkspaceStore } from '../db/workspace-store.js'
+import type { CrmEmailReviewContext } from '../db/crm-r2.js'
 import {
   resumeFromApproval,
   enqueueToolInvocationResume,
@@ -37,10 +44,27 @@ import {
   type ToolInvocationResumeDeps,
 } from '../workflow/approval.js'
 
+const MAX_REVIEWED_EMAIL_BODY_CHARS = 100_000
+const REVIEWED_EMAIL_ARGUMENT_KEYS = new Set(['to', 'subject', 'body', 'inReplyTo', 'account'])
+
 export type UnifiedApprovalRouteOptions = {
   approvalsStore: PendingApprovalsStore
   workspaceStore: WorkspaceStore
   bridgeDeps: ApprovalBridgeDeps
+  /**
+   * Resolve the CRM-linked, owner-scoped archived thread for one frozen
+   * reviewed reply. The route performs approval authority checks first; this
+   * seam resolves the caller's workspace viewpoint and record relationship.
+   */
+  emailReviewContext(input: {
+    userId: string
+    workspaceId: string
+    entityId: string
+    recipient: string
+    replyTo: string
+    toolName: string
+    account?: string | null
+  }): Promise<CrmEmailReviewContext | null>
   /**
    * WU-6.4 — Path B durable resume deps for `tool_invocation` rows.
    * When set, the route resolves `tool_invocation` approvals in place
@@ -121,23 +145,7 @@ export function approvalsRoutes(opts: UnifiedApprovalRouteOptions): Router {
     }
 
     const rows = await opts.approvalsStore.listPendingForWorkspace(userId, workspaceId)
-    res.json({
-      approvals: rows.map((r) => ({
-        id: r.id,
-        kind: r.kind,
-        status: r.status,
-        toolName: r.toolName,
-        arguments: r.arguments,
-        approvalPayload: r.approvalPayload,
-        approverUserId: r.approverUserId,
-        originatingAssistantId: r.originatingAssistantId,
-        blockingSessionId: r.blockingSessionId,
-        workflowRunId: r.workflowRunId,
-        deliveryChannelType: r.deliveryChannelType,
-        createdAt: r.createdAt.toISOString(),
-        expiresAt: r.expiresAt?.toISOString() ?? null,
-      })),
-    })
+    res.json({ approvals: rows.map(serializeApproval) })
   })
 
   // GET /count — pending count for the workspace (nav badge).
@@ -160,6 +168,109 @@ export function approvalsRoutes(opts: UnifiedApprovalRouteOptions): Router {
     }
     const rows = await opts.approvalsStore.listPendingForWorkspace(userId, workspaceId)
     res.json({ pending: rows.length })
+  })
+
+  // GET /:id/email-review-context — the thread read is keyed to the exact
+  // frozen approval, not to display text from the browser. The resolver must
+  // additionally prove the access-scoped CRM relationship and mailbox owner.
+  router.get('/:id/email-review-context', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) {
+      res.status(401).json({ error: 'Unauthorized' })
+      return
+    }
+    const entityId = typeof req.query.entityId === 'string' ? req.query.entityId : null
+    if (!entityId) {
+      res.status(400).json({ error: 'entityId query param is required' })
+      return
+    }
+    const approval = await opts.approvalsStore.getById(userId, req.params.id)
+    if (!approval) {
+      res.status(404).json({ error: 'Approval not found' })
+      return
+    }
+    if (approval.approverUserId !== userId) {
+      res.status(403).json({ error: 'Only the assigned approver can review this draft' })
+      return
+    }
+    if (approval.status !== 'pending') {
+      res.status(409).json({ error: `Approval is already ${approval.status}` })
+      return
+    }
+    if (!isReviewedImapReply(approval)) {
+      res.status(422).json({ error: 'Only a reviewed workflow IMAP reply has email review context' })
+      return
+    }
+    const context = await opts.emailReviewContext({
+      userId,
+      workspaceId: approval.workspaceId,
+      entityId,
+      recipient: approval.arguments.to[0] as string,
+      replyTo: approval.arguments.inReplyTo as string,
+      toolName: approval.toolName,
+      account: typeof approval.arguments.account === 'string'
+        ? approval.arguments.account
+        : null,
+    })
+    if (!context) {
+      res.status(404).json({ error: 'The approval is not linked to this CRM record' })
+      return
+    }
+    res.json(context)
+  })
+
+  // POST /:id/revise-email — body-only hand editing for the reviewed IMAP
+  // reply boundary. The store supersedes + replaces atomically; this route
+  // accepts no envelope fields, so the browser cannot move the reply to a
+  // different recipient/thread/account while presenting it as a text edit.
+  router.post('/:id/revise-email', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) {
+      res.status(401).json({ error: 'Unauthorized' })
+      return
+    }
+    const body = (req.body ?? {}) as { body?: unknown }
+    if (typeof body.body !== 'string' || body.body.trim().length === 0) {
+      res.status(400).json({ error: 'body must be a non-empty string' })
+      return
+    }
+    if (body.body.length > MAX_REVIEWED_EMAIL_BODY_CHARS) {
+      res.status(400).json({ error: `body must be at most ${MAX_REVIEWED_EMAIL_BODY_CHARS} characters` })
+      return
+    }
+
+    const approval = await opts.approvalsStore.getById(userId, req.params.id)
+    if (!approval) {
+      res.status(404).json({ error: 'Approval not found' })
+      return
+    }
+    if (approval.approverUserId !== userId) {
+      res.status(403).json({ error: 'Only the assigned approver can revise this draft' })
+      return
+    }
+    if (approval.status !== 'pending') {
+      res.status(409).json({ error: `Approval is already ${approval.status}` })
+      return
+    }
+    if (!isReviewedImapReply(approval)) {
+      res.status(422).json({ error: 'Only a reviewed workflow IMAP reply body can be revised' })
+      return
+    }
+    if (approval.arguments.body === body.body) {
+      res.status(400).json({ error: 'The revised body is unchanged' })
+      return
+    }
+
+    const replacement = await opts.approvalsStore.reviseWorkflowEmailBody(
+      approval.id,
+      body.body,
+      userId,
+    )
+    if (!replacement) {
+      res.status(409).json({ error: 'The draft changed or was resolved in another session. Refresh and review the latest version.' })
+      return
+    }
+    res.json({ approval: serializeApproval(replacement) })
   })
 
   // POST /:id/respond — approve / reject.
@@ -316,4 +427,53 @@ export function approvalsRoutes(opts: UnifiedApprovalRouteOptions): Router {
   })
 
   return router
+}
+
+function canonicalToolName(toolName: string): string {
+  return toolName.split('__', 1)[0]
+}
+
+type ReviewedImapReplyApproval = PendingApproval & {
+  arguments: {
+    to: [string]
+    subject: string
+    body: string
+    inReplyTo: string
+    account?: string
+  }
+}
+
+/** Runtime-frozen shape of the client-principal reviewed reply. */
+function isReviewedImapReply(approval: PendingApproval): approval is ReviewedImapReplyApproval {
+  if (approval.kind !== 'workflow_step' || canonicalToolName(approval.toolName) !== 'imapSendMessage') {
+    return false
+  }
+  const args = approval.arguments
+  if (Object.keys(args).some((key) => !REVIEWED_EMAIL_ARGUMENT_KEYS.has(key))) return false
+  return Array.isArray(args.to)
+    && args.to.length === 1
+    && typeof args.to[0] === 'string'
+    && typeof args.subject === 'string'
+    && typeof args.body === 'string'
+    && typeof args.inReplyTo === 'string'
+    && (args.account === undefined || typeof args.account === 'string')
+}
+
+function serializeApproval(r: PendingApproval) {
+  return {
+    id: r.id,
+    kind: r.kind,
+    status: r.status,
+    toolName: r.toolName,
+    arguments: r.arguments,
+    approvalPayload: r.approvalPayload,
+    approverUserId: r.approverUserId,
+    originatingAssistantId: r.originatingAssistantId,
+    blockingSessionId: r.blockingSessionId,
+    workflowRunId: r.workflowRunId,
+    workflowStepRunId: r.workflowStepRunId,
+    deliveryChannelType: r.deliveryChannelType,
+    createdAt: r.createdAt.toISOString(),
+    expiresAt: r.expiresAt?.toISOString() ?? null,
+  }
 }

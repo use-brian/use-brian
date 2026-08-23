@@ -97,6 +97,24 @@ describe('[COMP:recordings/confirm-recording-processing] confirmRecordingProcess
     expect(deps.deletePending).not.toHaveBeenCalled()
   })
 
+  it('uses the thread-qualified conversation id when the channel supplies one', async () => {
+    const deps = makeDeps({
+      getPending: vi.fn(async () => ({
+        recordingId: 'rec-1',
+        channelSessionKey: 'slack:C123:thread:100.001:u-1',
+        defaultBlueprintSlug: 'tpl-default',
+      })),
+    })
+    const tool = createConfirmRecordingProcessingTool(deps)
+    const res = await tool.execute(
+      { recordingId: 'rec-1', choice: 'tpl-default' },
+      { ...ctx, channelSessionId: 'C123:thread:100.001' },
+    )
+
+    expect(res.isError).toBeFalsy()
+    expect(deps.enqueueRecordingJob).toHaveBeenCalledOnce()
+  })
+
   it('rejects an unrecognised choice, names it, lists the valid choices, and queues NOTHING', async () => {
     const deps = makeDeps()
     const tool = createConfirmRecordingProcessingTool(deps)

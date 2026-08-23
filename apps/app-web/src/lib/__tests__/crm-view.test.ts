@@ -7,6 +7,7 @@ import type {
   CrmCompanyRow,
   CrmContactRow,
   CrmDealRow,
+  CrmPipeline,
 } from "@/lib/api/crm";
 import {
   applyContactFilters,
@@ -15,7 +16,7 @@ import {
   crmQuickCounts,
   crmViewFromSearch,
   formatAmount,
-  groupDealsByStage,
+  groupDealsByPipelineStage,
   localDateStr,
   matchesDealQuickFilter,
   searchFromCrmView,
@@ -25,6 +26,18 @@ import {
 } from "@/lib/crm-view";
 
 const NOW = new Date("2026-07-22T12:00:00Z");
+
+const PIPELINE: CrmPipeline = {
+  id: "pipeline-sales",
+  name: "Sales",
+  isDefault: true,
+  position: 0,
+  stages: [
+    { id: "stage-lead", pipelineId: "pipeline-sales", name: "Lead", legacyKey: "lead", category: "open", position: 0, probability: 10, requiredFields: [] },
+    { id: "stage-qualified", pipelineId: "pipeline-sales", name: "Qualified", legacyKey: "qualified", category: "open", position: 1, probability: 30, requiredFields: [] },
+    { id: "stage-won", pipelineId: "pipeline-sales", name: "Won", legacyKey: "won", category: "won", position: 2, probability: 100, requiredFields: [] },
+  ],
+};
 
 function deal(over: Partial<CrmDealRow> = {}): CrmDealRow {
   return {
@@ -174,6 +187,27 @@ describe("[COMP:app-web/crm-view] CRM view logic", () => {
     expect(hits.map((r) => r.id)).toEqual(["d1"]);
   });
 
+  it("filters by the selected stable pipeline and custom stage id", () => {
+    const customPipeline: CrmPipeline = {
+      ...PIPELINE,
+      id: "pipeline-custom",
+      isDefault: false,
+      stages: [{ ...PIPELINE.stages[0], id: "stage-review", pipelineId: "pipeline-custom", name: "Review", legacyKey: null }],
+    };
+    const rows = [
+      deal({ id: "custom", pipelineId: customPipeline.id, pipelineStageId: "stage-review" }),
+      deal({ id: "default", pipelineId: PIPELINE.id, pipelineStageId: "stage-lead", stage: "lead" }),
+    ];
+    const hits = applyDealFilters(
+      rows,
+      { ...DEFAULT_CRM_VIEW, pipeline: customPipeline.id, stages: ["stage-review"] },
+      new Map(),
+      NOW,
+      customPipeline,
+    );
+    expect(hits.map((row) => row.id)).toEqual(["custom"]);
+  });
+
   it("contact filtering: orphaned preset + company facet", () => {
     const rows = [
       contact({ id: "linked" }),
@@ -258,7 +292,8 @@ describe("[COMP:app-web/crm-surface] CRM surface state contract", () => {
   it("round-trips MULTI-value filters; tags repeat, ids comma-join", () => {
     const state = {
       ...DEFAULT_CRM_VIEW,
-      stages: ["proposal", "negotiation"] as const,
+      pipeline: "pipeline-sales",
+      stages: ["stage-proposal", "stage-negotiation"] as const,
       company: ["co1", "co2"],
       tag: ["vip", "asia, pacific"],
     };
@@ -276,7 +311,7 @@ describe("[COMP:app-web/crm-surface] CRM surface state contract", () => {
   it("parses both shapes, so pre-multi single-value links survive", () => {
     expect(crmViewFromSearch("company=co1").company).toEqual(["co1"]);
     expect(crmViewFromSearch("stage=lead,won").stages).toEqual(["lead", "won"]);
-    expect(crmViewFromSearch("stage=lead&stage=bogus").stages).toEqual(["lead"]);
+    expect(crmViewFromSearch("stage=stage-lead&stage=custom-review").stages).toEqual(["stage-lead", "custom-review"]);
     expect(crmViewFromSearch("tag=vip").tag).toEqual(["vip"]);
   });
 
@@ -289,22 +324,23 @@ describe("[COMP:app-web/crm-surface] CRM surface state contract", () => {
 });
 
 describe("[COMP:app-web/crm-board] Deal board grouping", () => {
-  it("every stage gets a column; sums skip null amounts", () => {
+  it("every stable stage gets a column and keeps currencies separate", () => {
     const rows = [
-      deal({ id: "d1", stage: "lead", amount: 100 }),
-      deal({ id: "d2", stage: "lead", amount: null }),
+      deal({ id: "d1", stage: "lead", pipelineId: PIPELINE.id, pipelineStageId: "stage-lead", amount: 100, currencyCode: "USD" }),
+      deal({ id: "d2", stage: "lead", pipelineId: PIPELINE.id, pipelineStageId: "stage-lead", amount: 80, currencyCode: "EUR" }),
+      deal({ id: "d3", stage: "lead", pipelineId: PIPELINE.id, pipelineStageId: "stage-lead", amount: null }),
     ];
-    const groups = groupDealsByStage(rows, ["lead", "qualified"]);
+    const groups = groupDealsByPipelineStage(rows, PIPELINE, PIPELINE.stages.slice(0, 2));
     expect(groups).toHaveLength(2);
-    expect(groups[0].rows).toHaveLength(2);
-    expect(groups[0].amountSum).toBe(100);
+    expect(groups[0].rows).toHaveLength(3);
+    expect(groups[0].currencyTotals).toEqual({ USD: 100, EUR: 80 });
     expect(groups[1].rows).toHaveLength(0);
   });
 
-  it("formatAmount compacts to k/M for column headers", () => {
-    expect(formatAmount(950)).toBe("$950");
-    expect(formatAmount(12_500)).toBe("$12.5k");
-    expect(formatAmount(140_000)).toBe("$140k");
-    expect(formatAmount(1_200_000)).toBe("$1.2M");
+  it("formatAmount always makes currency explicit", () => {
+    expect(formatAmount(950)).toBe("USD 950");
+    expect(formatAmount(12_500, "EUR")).toBe("EUR 12.5k");
+    expect(formatAmount(140_000, "JPY")).toBe("JPY 140k");
+    expect(formatAmount(1_200_000)).toBe("USD 1.2M");
   });
 });

@@ -844,6 +844,33 @@ describe('[COMP:api/brain-mcp] agent capability toolset gating (agent-facing cap
     expect(tools.map((t) => t.name)).not.toContain('listAssistants')
     expect(tools.map((t) => t.name)).not.toContain('runWorkflow')
   })
+
+  it('filters hosted operator tools out of tools/list until the bound assistant has the grant', () => {
+    const operatorRead = buildTool({
+      name: 'listOperatorWorkflowEventBindings',
+      description: 'operator read',
+      inputSchema: z.object({}),
+      requiresCapability: 'operator_automation',
+      isReadOnly: true,
+      async execute() { return { data: [] } },
+    })
+    const operatorTools = { reads: new Map([[operatorRead.name, operatorRead]]), writes: new Map() }
+    const hidden = buildBrainTools({
+      workspaceId: 'ws', scope: 'read', keyId: 'k', maxClearance: null,
+      ...ALL_STUBS,
+      agentTools: operatorTools,
+      agentActiveCapabilities: new Set(),
+    })
+    expect(hidden.map((tool) => tool.name)).not.toContain(operatorRead.name)
+
+    const visible = buildBrainTools({
+      workspaceId: 'ws', scope: 'read', keyId: 'k', maxClearance: null,
+      ...ALL_STUBS,
+      agentTools: operatorTools,
+      agentActiveCapabilities: new Set(['operator_automation']),
+    })
+    expect(visible.map((tool) => tool.name)).toContain(operatorRead.name)
+  })
 })
 
 describe('[COMP:api/brain-mcp] primary-assistant authority (agent-facing capability surface §2)', () => {

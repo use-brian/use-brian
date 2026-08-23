@@ -77,6 +77,23 @@ describe('[COMP:tools/email-archive-search] searchEmailArchive tool', () => {
     expect(search).toHaveBeenCalledWith(expect.objectContaining({ instanceId: 'inst-ops' }), undefined)
   })
 
+  it('promotes one external address in the current turn to the structured archive filter', async () => {
+    const search = vi.fn(async () => ({ hits: [], coverage: { complete: true, note: null } }))
+    const boundAccount = { instanceId: 'inst-1', email: 'me@corp.com', isPrimary: true }
+    const tool = createSearchEmailArchiveTool({
+      ownerUserId: 'owner-1', accounts: [boundAccount], boundAccount,
+      deps: { search: search as never },
+    })
+    await tool.execute(
+      { query: 'find messages from person@example.com' },
+      { ...CTX, userMessageText: 'Do I have email from person@example.com?' },
+    )
+    expect(search).toHaveBeenCalledWith(
+      expect.objectContaining({ from: 'person@example.com' }),
+      undefined,
+    )
+  })
+
   it('states the routing contract: archive for semantic recall, live imap tools for fresh mail, searchBrain for cross-source', () => {
     const tool = createSearchEmailArchiveTool({
       ownerUserId: 'o',

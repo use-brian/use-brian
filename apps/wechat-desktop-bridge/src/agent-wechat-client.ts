@@ -45,6 +45,24 @@ export type AgentWechatMediaResult = {
   url?: string
   format: string
   filename: string
+  status?: 'ready' | 'pending' | 'unavailable'
+  kind?: 'image' | 'file' | 'video' | 'voice' | 'sticker' | 'unsupported'
+  variant?: 'original' | 'preview' | 'raw'
+  mime?: string
+  sizeBytes?: number
+  sha256?: string
+  reason?: string
+  action?: string
+  retryAfterMs?: number
+  recoverable?: boolean
+}
+
+type AgentWechatMediaContent = {
+  body: ReadableStream<Uint8Array>
+  contentLength: number
+  mime: string
+  filename: string
+  etag?: string
 }
 
 type AgentWechatAuthStatus = {
@@ -80,6 +98,16 @@ export interface AgentWechatClient {
   /** Newest-first, as the container returns it. */
   listMessages(chatId: string, limit?: number, offset?: number): Promise<AgentWechatMessage[]>
   getMedia(chatId: string, localId: number): Promise<AgentWechatMediaResult>
+  ensureMedia(chatId: string, localId: number): Promise<AgentWechatMediaResult>
+  getMediaContent(chatId: string, localId: number): Promise<AgentWechatMediaContent>
+  /**
+   * Select the chat in the client UI (the container's `chat_open` plan). The
+   * client then downloads the full-size media for viewport-visible messages —
+   * the trigger the original-image upgrade rides. Serialized against sends by
+   * the container's global plan lock. NOTE: opening marks the chat read and
+   * WeChat syncs read state to the phone — callers gate on `unreadCount === 0`.
+   */
+  openChat(chatId: string): Promise<{ ok: boolean; error?: string }>
   sendMessage(params: AgentWechatSendParams): Promise<AgentWechatSendResult>
   /** Open /api/ws/login and stream events until closed. */
   subscribeLogin(handlers: {
@@ -160,7 +188,30 @@ export function createAgentWechatClient(opts: AgentWechatClientOptions): AgentWe
     listMessages: (chatId, limit, offset) =>
       request('GET', `/api/messages/${encodeURIComponent(chatId)}${qs({ limit, offset })}`),
     getMedia: (chatId, localId) =>
-      request('GET', `/api/messages/${encodeURIComponent(chatId)}/media/${localId}`),
+      request('GET', `/api/messages/${encodeURIComponent(chatId)}/media/${localId}${qs({ descriptorOnly: true })}`),
+    ensureMedia: (chatId, localId) =>
+      request('POST', `/api/messages/${encodeURIComponent(chatId)}/media/${localId}/ensure${qs({ descriptorOnly: true })}`),
+    async getMediaContent(chatId, localId) {
+      const path = `/api/messages/${encodeURIComponent(chatId)}/media/${localId}/content`
+      const res = await doFetch(`${base}${path}`, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${opts.token}` },
+      })
+      if (!res.ok) throw new AgentWechatHttpError(res.status, path, await res.text().catch(() => ''))
+      const body = res.body
+      if (!body) throw new Error(`agent-wechat ${path} returned no body`)
+      const disposition = res.headers.get('content-disposition') ?? ''
+      const filename = /filename="([^"]+)"/i.exec(disposition)?.[1] ?? `${localId}`
+      return {
+        body,
+        contentLength: Number(res.headers.get('content-length') ?? '0'),
+        mime: res.headers.get('content-type') ?? 'application/octet-stream',
+        filename,
+        etag: res.headers.get('etag')?.replace(/^"|"$/g, ''),
+      }
+    },
+    openChat: (chatId) =>
+      request('POST', `/api/chats/${encodeURIComponent(chatId)}/open`),
     sendMessage: (params) => request('POST', '/api/messages/send', params),
     subscribeLogin(handlers) {
       const wsUrl = base.replace(/^http/, 'ws') + `/api/ws/login${qs({ token: opts.token })}`

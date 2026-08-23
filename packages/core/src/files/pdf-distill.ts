@@ -21,9 +21,10 @@
  * ~6x against the page-per-call loop this replaced, and lets a table spanning
  * a page break transcribe coherently.
  *
- * A chunk that hits its ceiling anyway (`truncated`) is split in half and each
- * half retried once — pathologically dense pages are handled by adaptation
- * rather than by lowering the default for everyone.
+ * Every page must return an exact completion marker. A batch missing even one
+ * marker is recursively split until each incomplete page is retried alone;
+ * an incomplete single page gets one final retry. Provider stop reasons are
+ * advisory because not every transport reports output truncation faithfully.
  *
  * ## Honesty
  *
@@ -109,7 +110,9 @@ const PDF_DISTILL_PROMPT =
   'inline where they appear, as `[Figure: ...]`, including any numbers or labels they carry.\n' +
   '- Start each page with a `## Page N` heading using the page numbers given below.\n' +
   '- If a page is blank, write its heading followed by `(blank page)`.\n' +
-  'Output only the Markdown transcription.'
+  '- After each COMPLETE page, append its exact supplied `PDF_PAGE_N_COMPLETE` HTML comment marker.\n' +
+  '- Never emit a marker until that whole page has been transcribed.\n' +
+  'Output only the Markdown transcription and completion markers.'
 
 /**
  * The engine version participates in the distillate cache key: a change to the
@@ -117,7 +120,7 @@ const PDF_DISTILL_PROMPT =
  * same bytes, so it must not read a cache entry written by the old engine.
  * Bump this whenever any of those change.
  */
-const PDF_DISTILL_ENGINE_VERSION = 1
+const PDF_DISTILL_ENGINE_VERSION = 2
 
 // ── Seams ──────────────────────────────────────────────────────
 
@@ -218,12 +221,28 @@ function pageRangeLabel(pages: VisionPage[]): string {
   return first === last ? `page ${first}` : `pages ${first}-${last}`
 }
 
+export function pdfPageCompletionMarker(pageNumber: number): string {
+  return `<!-- PDF_PAGE_${pageNumber}_COMPLETE -->`
+}
+
+export function missingPdfPageCompletionMarkers(
+  text: string,
+  pageNumbers: readonly number[],
+): number[] {
+  return pageNumbers.filter((pageNumber) => !text.includes(pdfPageCompletionMarker(pageNumber)))
+}
+
+export function stripPdfPageCompletionMarkers(text: string): string {
+  return text.replace(/\s*<!--\s*PDF_PAGE_\d+_COMPLETE\s*-->\s*/g, '\n\n').trim()
+}
+
 function chunkPrompt(pages: VisionPage[], totalPages: number): string {
   const numbers = pages.map((p) => p.pageNumber).join(', ')
   return (
     `${PDF_DISTILL_PROMPT}\n\n` +
     `These images are ${pageRangeLabel(pages)} of a ${totalPages}-page document, in order. ` +
-    `Use exactly these page numbers in the headings: ${numbers}.`
+    `Use exactly these page numbers in the headings: ${numbers}.\n` +
+    `Required completion markers: ${pages.map((page) => pdfPageCompletionMarker(page.pageNumber)).join(' ')}`
   )
 }
 
@@ -283,7 +302,7 @@ async function transcribeChunk(
   chunk: PageChunk,
   totalPages: number,
   options: DistillPdfOptions,
-  allowResplit: boolean,
+  singlePageRetriesRemaining: number,
 ): Promise<ChunkOutcome> {
   const perPage = options.outputTokensPerPage ?? CHUNK_OUTPUT_TOKENS_PER_PAGE
   const ceiling = chunkOutputCeiling(chunk.pages.length, perPage, options.maxOutputTokensPerChunk)
@@ -299,25 +318,58 @@ async function transcribeChunk(
     })
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err)
-    // A single-page chunk has nothing left to split; report it as failed.
-    if (!allowResplit || chunk.pages.length < 2) {
-      return {
-        pages: chunk.pages,
-        text: '',
-        usage: null,
-        model: null,
-        failedPages: chunk.pages.map((p) => p.pageNumber),
-        failureReason: reason,
-      }
+    if (chunk.pages.length >= 2) {
+      return splitAndRetry(chunk, totalPages, options, reason)
     }
-    return splitAndRetry(chunk, totalPages, options, reason)
+    if (singlePageRetriesRemaining > 0) {
+      return transcribeChunk(chunk, totalPages, options, singlePageRetriesRemaining - 1)
+    }
+    return {
+      pages: chunk.pages,
+      text: '',
+      usage: null,
+      model: null,
+      failedPages: chunk.pages.map((p) => p.pageNumber),
+      failureReason: reason,
+    }
   }
 
-  // Truncated at the ceiling: the transcription is cut mid-document, so half
-  // the pages per call and try each half once. Keeping the partial text would
-  // silently drop the tail of the chunk.
-  if (result.truncated && allowResplit && chunk.pages.length >= 2) {
-    return splitAndRetry(chunk, totalPages, options, 'output ceiling reached')
+  const missingPages = missingPdfPageCompletionMarkers(
+    result.text,
+    chunk.pages.map((page) => page.pageNumber),
+  )
+  if (missingPages.length > 0 && chunk.pages.length >= 2) {
+    const reason = result.truncated
+      ? 'output ceiling reached before every page completed'
+      : `completion marker missing for page${missingPages.length === 1 ? '' : 's'} ${missingPages.join(', ')}`
+    return splitAndRetry(chunk, totalPages, options, reason, result.usage, result.model)
+  }
+  if (missingPages.length > 0 && singlePageRetriesRemaining > 0) {
+    const retried = await transcribeChunk(
+      chunk,
+      totalPages,
+      options,
+      singlePageRetriesRemaining - 1,
+    )
+    return {
+      ...retried,
+      usage: addUsage(result.usage, retried.usage),
+      model: result.model ?? retried.model,
+    }
+  }
+  if (missingPages.length > 0) {
+    return {
+      pages: chunk.pages,
+      // The response is structurally incomplete. Discard it instead of
+      // handing a cut-off page to the model beside a warning note.
+      text: '',
+      usage: result.usage,
+      model: result.model,
+      failedPages: missingPages,
+      failureReason: result.truncated
+        ? 'output ceiling reached before the page completion marker'
+        : 'provider returned a nominally complete turn without the page completion marker',
+    }
   }
 
   return {
@@ -326,7 +378,6 @@ async function transcribeChunk(
     usage: result.usage,
     model: result.model,
     failedPages: [],
-    ...(result.truncated ? { failureReason: 'output ceiling reached' } : {}),
   }
 }
 
@@ -335,23 +386,27 @@ async function splitAndRetry(
   totalPages: number,
   options: DistillPdfOptions,
   reason: string,
+  priorUsage?: TokenUsage | null,
+  priorModel?: string | null,
 ): Promise<ChunkOutcome> {
   const mid = Math.ceil(chunk.pages.length / 2)
   const halves: PageChunk[] = [
     { pages: chunk.pages.slice(0, mid) },
     { pages: chunk.pages.slice(mid) },
   ]
-  // One retry per half only (`allowResplit: false`) — an unbounded split
-  // recursion on a genuinely broken page would fan out to a call per page and
-  // then keep failing, paying N times for the same answer.
+  // Recursion is bounded by page count: each multi-page batch is halved, and
+  // each single page is attempted at most twice.
   const outcomes = await mapWithConcurrency(halves, 2, (half) =>
-    transcribeChunk(half, totalPages, options, false),
+    transcribeChunk(half, totalPages, options, 1),
   )
   const merged: ChunkOutcome = {
     pages: chunk.pages,
     text: outcomes.map((o) => o.text).filter(Boolean).join('\n\n'),
-    usage: outcomes.reduce<TokenUsage | null>((acc, o) => addUsage(acc, o.usage), null),
-    model: outcomes.find((o) => o.model)?.model ?? null,
+    usage: outcomes.reduce<TokenUsage | null>(
+      (acc, o) => addUsage(acc, o.usage),
+      priorUsage ?? null,
+    ),
+    model: priorModel ?? outcomes.find((o) => o.model)?.model ?? null,
     failedPages: outcomes.flatMap((o) => o.failedPages),
   }
   if (merged.failedPages.length > 0) merged.failureReason = reason
@@ -366,7 +421,9 @@ function stitchChunks(
   const ordered = [...outcomes].sort(
     (a, b) => (a.pages[0]?.pageNumber ?? 0) - (b.pages[0]?.pageNumber ?? 0),
   )
-  const sections = ordered.map((o) => o.text).filter((t) => t.length > 0)
+  const sections = ordered
+    .map((o) => stripPdfPageCompletionMarkers(o.text))
+    .filter((t) => t.length > 0)
 
   const failed = ordered.flatMap((o) => o.failedPages).sort((a, b) => a - b)
   if (failed.length > 0) {
@@ -418,7 +475,7 @@ export async function distillPdfViaPages(
   const outcomes = await mapWithConcurrency(
     chunks,
     options.concurrency ?? DEFAULT_DISTILL_CONCURRENCY,
-    (chunk) => transcribeChunk(chunk, render.totalPages, options, true),
+    (chunk) => transcribeChunk(chunk, render.totalPages, options, 1),
   )
 
   const readPages = outcomes.reduce((n, o) => n + (o.pages.length - o.failedPages.length), 0)

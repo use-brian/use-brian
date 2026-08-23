@@ -19,6 +19,14 @@ export type ToolContext = {
   appId: string
   channelType: string
   channelId: string
+  /**
+   * Session-scoped provider conversation id when it is narrower than the
+   * physical delivery channel. Threaded Slack turns use
+   * `<channelId>:thread:<threadTs>` here while `channelId` remains the bare
+   * Slack API destination. Consumers that correlate conversation-local state
+   * fall back to `channelId` when this field is absent.
+   */
+  channelSessionId?: string
   /** Team ID when the assistant is team-owned. Used by saveMemory for team scope. */
   workspaceId?: string | null
   /** Immutable provider lane captured by workers spawned from this turn. */
@@ -232,6 +240,17 @@ export type ToolContext = {
    * honest error there. See docs/architecture/features/files.md → "sendFile".
    */
   outboundAttachments?: AttachmentCollector
+
+  /**
+   * Per-channel-INSTANCE document capability, for channel types where file
+   * delivery is a per-connection fact rather than a per-type one. A `custom`
+   * bridge declares `capabilities.documents` in its state report and the
+   * route threads the answer here; `sendFile` admits the channel when this is
+   * true even though `custom` stays out of the static
+   * `DOCUMENT_CAPABLE_CHANNELS` set (an undeclared bridge would silently drop
+   * the enqueued documents). Absent everywhere else — the static set decides.
+   */
+  channelDocumentsSupported?: boolean
 
   /**
    * Per-turn accumulator. Every read of a KB entry / memory / episodic row

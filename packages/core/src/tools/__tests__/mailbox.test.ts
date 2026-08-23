@@ -120,8 +120,11 @@ describe('[COMP:tools/mailbox-imap] Company mailbox tools', () => {
     expect(search.description).not.toMatch(/company mailbox/i)
     expect(search.isReadOnly).toBe(true)
     expect(search.requiresConfirmation).toBeFalsy()
-    // D12 #3 — the description must say sent mail is in the default scope.
-    expect(search.description).toMatch(/INBOX and Sent/i)
+    // D12 #3 — the description must say rule-moved custom-folder mail is in
+    // the default scope, while the noisy/special folders remain excluded.
+    expect(search.description).toMatch(/INBOX, Sent, Archive, and custom folders/i)
+    expect(search.description).toMatch(/Junk, Trash, Drafts, aggregate All Mail/i)
+    expect(search.description).toMatch(/sender- or subject-constrained searches cover the full live history/i)
 
     const get = toolByName(tools, 'imapGetMessage')
     expect(get.description).toMatch(/^Read a full email from the user's connected email account/)
@@ -150,10 +153,67 @@ describe('[COMP:tools/mailbox-imap] Company mailbox tools', () => {
     await search.execute({ keywords: ['invoice'] }, CTX)
     const params = (api.searchMessages as ReturnType<typeof vi.fn>).mock.calls[0][0]
     expect(params.limit).toBe(MAILBOX_DEFAULT_LIMIT)
-    expect(params.folder).toBeUndefined()  // impl default = INBOX + Sent
+    expect(params.folder).toBeUndefined()  // impl default = every selectable ordinary folder
+    expect(params.archiveSince).toBeNull() // literal archive searches all synced history
     const since = new Date(`${params.since}T00:00:00Z`).getTime()
     const ninetyDaysAgo = Date.now() - 90 * 24 * 60 * 60 * 1000
     expect(Math.abs(since - ninetyDaysAgo)).toBeLessThan(2 * 24 * 60 * 60 * 1000)
+  })
+
+  it('searches the full live history by default for sender or subject constraints', async () => {
+    const api = makeApi()
+    const search = toolByName(toolsFor(api), 'imapSearchMessages')
+
+    await search.execute({ from: 'sender@example.com' }, CTX)
+    await search.execute({ subject: 'renewal notice' }, CTX)
+
+    const calls = (api.searchMessages as ReturnType<typeof vi.fn>).mock.calls
+    expect(calls[0][0]).toMatchObject({ from: 'sender@example.com', since: undefined })
+    expect(calls[1][0]).toMatchObject({ subject: 'renewal notice', since: undefined })
+  })
+
+  it('promotes one external email in the user turn to an exact full-history sender filter', async () => {
+    const api = makeApi()
+    const search = toolByName(toolsFor(api), 'imapSearchMessages')
+
+    await search.execute(
+      { keywords: ['person@example.com'] },
+      { ...CTX, userMessageText: 'Find mail from person@example.com' },
+    )
+
+    expect(api.searchMessages).toHaveBeenCalledWith(expect.objectContaining({
+      from: 'person@example.com',
+      keywords: undefined,
+      since: undefined,
+    }))
+  })
+
+  it('does not guess a sender from several external addresses or the bound account', async () => {
+    const api = makeApi()
+    const search = toolByName(toolsFor(api), 'imapSearchMessages')
+
+    await search.execute(
+      { keywords: ['thread'] },
+      { ...CTX, userMessageText: 'Compare first@example.com, second@example.com, and me@corp.com' },
+    )
+
+    expect(api.searchMessages).toHaveBeenCalledWith(expect.objectContaining({
+      from: undefined,
+      keywords: ['thread'],
+    }))
+  })
+
+  it('honors an explicit sender-search date bound instead of widening it', async () => {
+    const api = makeApi()
+    const search = toolByName(toolsFor(api), 'imapSearchMessages')
+
+    await search.execute({ from: 'sender@example.com', since: '2026-01-15' }, CTX)
+
+    expect(api.searchMessages).toHaveBeenCalledWith(expect.objectContaining({
+      from: 'sender@example.com',
+      since: '2026-01-15',
+      archiveSince: '2026-01-15',
+    }))
   })
 
   it('honors explicit since/folder and hard-caps maxResults', async () => {
@@ -166,6 +226,7 @@ describe('[COMP:tools/mailbox-imap] Company mailbox tools', () => {
     const params = (api.searchMessages as ReturnType<typeof vi.fn>).mock.calls[0][0]
     expect(params.folder).toBe('Archive')
     expect(params.since).toBe('2024-01-01')
+    expect(params.archiveSince).toBe('2024-01-01')
     expect(params.limit).toBe(MAILBOX_MAX_LIMIT)
   })
 
@@ -203,13 +264,12 @@ describe('[COMP:tools/mailbox-imap] Company mailbox tools', () => {
     expect(data.note).toBe('degraded')
   })
 
-  it('refuses send on a confidential turn (egress gate) without touching the network', async () => {
+  it('does not let unrelated confidential turn context veto a policy-authorized send', async () => {
     const api = makeApi()
     const send = toolByName(toolsFor(api), 'imapSendMessage')
     const result = await send.execute({ to: ['x@y.z'], subject: 's', body: 'b' }, CONFIDENTIAL_CTX)
-    expect(result.isError).toBe(true)
-    expect(result.data).toContain('confidential')
-    expect(api.sendMessage).not.toHaveBeenCalled()
+    expect(result.isError).toBeFalsy()
+    expect(api.sendMessage).toHaveBeenCalledTimes(1)
   })
 
   it('passes inReplyTo through to the seam and returns the message id', async () => {
@@ -433,7 +493,7 @@ describe('[COMP:tools/imap-attachments] imapSendMessage (workspace file → SMTP
     expect(api.sendMessage).not.toHaveBeenCalled()
   })
 
-  it('refuses confidential files before reading bytes or sending', async () => {
+  it('sends a readable confidential file once tool governance admits the frozen payload', async () => {
     const api = makeApi()
     const filesApi = makeFilesApi({
       stat: vi.fn(async () => ({
@@ -447,10 +507,15 @@ describe('[COMP:tools/imap-attachments] imapSendMessage (workspace file → SMTP
       CTX,
     )
 
-    expect(result.isError).toBe(true)
-    expect(result.data).toContain('/hr/payroll.pdf is confidential')
-    expect(filesApi.readBytes).not.toHaveBeenCalled()
-    expect(api.sendMessage).not.toHaveBeenCalled()
+    expect(result.isError).toBeFalsy()
+    expect(filesApi.readBytes).toHaveBeenCalledTimes(1)
+    expect(api.sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      attachments: [expect.objectContaining({ filename: 'payroll.pdf' })],
+    }))
+    expect(await send.describeConfirmation!(
+      { to: ['client@example.com'], subject: 'Proposal', body: 'Attached.', attachments: ['file-1'] },
+      CTX,
+    )).toContain('• Attachment: payroll.pdf (1 KB; sensitivity: confidential)')
   })
 
   it('enforces the total-size cap before reading any attachment bytes', async () => {

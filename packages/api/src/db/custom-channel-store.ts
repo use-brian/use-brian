@@ -38,6 +38,8 @@ export type CustomChannelBridgeState = {
   accountLabel?: string
   action?: BridgeAction
   bridgeVersion?: string
+  /** Bridge-declared delivery capabilities (see BridgeState.capabilities). */
+  capabilities?: { documents?: boolean }
 }
 
 export type CustomChannelStateView = CustomChannelBridgeState & {
@@ -50,7 +52,7 @@ export type CustomChannelStateView = CustomChannelBridgeState & {
   outboxDepth: number
 }
 
-export type OutboxItemType = 'message' | 'typing' | 'input' | 'disconnect'
+export type OutboxItemType = 'message' | 'typing' | 'status' | 'input' | 'disconnect'
 
 export type OutboxEnqueueInput = {
   type: OutboxItemType
@@ -98,6 +100,7 @@ type StateRow = {
   account_label: string | null
   action: BridgeAction | null
   bridge_version: string | null
+  capabilities: { documents?: boolean } | null
   last_seen_at: Date | string | null
   updated_at: Date | string | null
   outbox_depth: string | number | null
@@ -121,14 +124,15 @@ export function createCustomChannelStore(): CustomChannelStore {
     async putState(channelId, state) {
       await query(
         `INSERT INTO custom_channel_bridge_state
-           (channel_id, status, message, account_label, action, bridge_version, last_seen_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5::jsonb, $6, now(), now())
+           (channel_id, status, message, account_label, action, bridge_version, capabilities, last_seen_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7::jsonb, now(), now())
          ON CONFLICT (channel_id) DO UPDATE SET
            status = EXCLUDED.status,
            message = EXCLUDED.message,
            account_label = EXCLUDED.account_label,
            action = EXCLUDED.action,
            bridge_version = EXCLUDED.bridge_version,
+           capabilities = EXCLUDED.capabilities,
            last_seen_at = now(),
            updated_at = now()`,
         [
@@ -138,6 +142,7 @@ export function createCustomChannelStore(): CustomChannelStore {
           state.accountLabel ?? null,
           state.action ? JSON.stringify(state.action) : null,
           state.bridgeVersion ?? null,
+          state.capabilities ? JSON.stringify(state.capabilities) : null,
         ],
       )
     },
@@ -145,7 +150,7 @@ export function createCustomChannelStore(): CustomChannelStore {
     async getState(channelId, now = new Date()) {
       const result = await query<StateRow>(
         `SELECT s.channel_id, s.status, s.message, s.account_label, s.action, s.bridge_version,
-                s.last_seen_at, s.updated_at,
+                s.capabilities, s.last_seen_at, s.updated_at,
                 (SELECT count(*) FROM custom_channel_outbox o
                   WHERE o.channel_id = s.channel_id AND o.acked_at IS NULL AND o.expires_at > now()) AS outbox_depth
            FROM custom_channel_bridge_state s
@@ -163,6 +168,7 @@ export function createCustomChannelStore(): CustomChannelStore {
         accountLabel: row.account_label ?? undefined,
         action: row.action ?? undefined,
         bridgeVersion: row.bridge_version ?? undefined,
+        capabilities: row.capabilities ?? undefined,
         lastSeenAt,
         updatedAt: iso(row.updated_at),
         online,

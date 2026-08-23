@@ -273,7 +273,7 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
   // docs/architecture/integrations/mailbox-imap.md). Generic `imap` provider;
   // AliMail is a connect-time preset, never a branded connector (D1).
   imap: [
-    { name: 'imapSearchMessages', description: "Summarize, check, or search email in the user's connected email account (INBOX + Sent)", classification: 'read', defaultPolicy: 'allow' },
+    { name: 'imapSearchMessages', description: "Summarize, check, or search email across the user's ordinary mailbox folders; sender/subject lookups cover full history", classification: 'read', defaultPolicy: 'allow' },
     { name: 'imapGetMessage', description: "Read a specific email from the user's connected email account", classification: 'read', defaultPolicy: 'allow' },
     { name: 'imapSendMessage', description: "Send email with optional workspace-file attachments from the user's connected email account", classification: 'write', defaultPolicy: 'ask' },
     // Read/allow like syncMailboxNow: it writes only inside the workspace
@@ -283,6 +283,8 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'imapSaveAttachment', description: 'Save an email attachment into the workspace as a file', classification: 'read', defaultPolicy: 'allow' },
     { name: 'searchEmailArchive', description: 'Search the synced email archive by meaning', classification: 'read', defaultPolicy: 'allow' },
     { name: 'syncMailboxNow', description: 'Pull new email into the searchable email archive now', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'previewMailboxContactImport', description: 'Preview missing CRM contacts from synced mailbox sender envelopes', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'importMailboxContacts', description: 'Import a confirmed batch of mailbox senders into CRM', classification: 'write', defaultPolicy: 'ask' },
   ],
   // Workspace Files — Q3 / company-brain §10. Note: this row is for
   // governance display (Settings ▸ Connectors, Assistant ▸ Tools) only.

@@ -90,6 +90,7 @@ function makeStubApprovalsStore(approval: PendingApproval | null) {
     countPendingForUser: vi.fn(),
     getById: vi.fn(),
     getByIdSystem: vi.fn().mockResolvedValue(approval),
+    reviseWorkflowEmailBody: vi.fn(),
     respond: vi.fn(),
     expireDue: vi.fn(),
     expireDueQuestions: vi.fn(),

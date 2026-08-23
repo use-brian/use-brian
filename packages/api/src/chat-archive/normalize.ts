@@ -90,8 +90,33 @@ export function normalizeOutboundChatMessage(input: {
   sentAt?: Date
   documents?: OutgoingDocument[]
   replyToProviderId?: string | null
-}): CanonicalIngestMessage {
+  /**
+   * A durable archive asset staged BEFORE this append (the owner's own media
+   * relayed by a bridge, staged the same way inbound attachments are). Takes
+   * precedence over `documents`, which describe an outgoing file by metadata
+   * only — a stored ref is what lets the store link bytes and run extraction.
+   */
+  archiveMedia?: {
+    kind: 'image' | 'video' | 'voice' | 'file'
+    ref: {
+      assetId: string
+      sha256: string
+      filename: string
+      mime: string
+      sizeBytes: number
+    } | null
+    /** Set when the bytes could not be staged; travels as availability. */
+    availability?: 'missing' | 'failed'
+    filename?: string
+    mime?: string
+    sizeBytes?: number
+  }
+}): AnyCanonicalIngestMessage {
   const document = input.documents?.[0]
+  const media = input.archiveMedia
+  const mediaKind = media
+    ? media.kind
+    : document ? 'file' : null
   return {
     provider_message_id: input.providerMessageId,
     conversation_id: input.conversationId,
@@ -99,14 +124,30 @@ export function normalizeOutboundChatMessage(input: {
     sender_display: input.assistantName,
     sent_at: (input.sentAt ?? new Date()).toISOString(),
     direction: 'outbound',
-    kind: document ? 'file' : (/^https?:\/\/\S+$/i.test(input.text.trim()) ? 'link' : 'text'),
+    kind: mediaKind ?? (/^https?:\/\/\S+$/i.test(input.text.trim()) ? 'link' : 'text'),
     body_text: input.text.length > 0 ? input.text : null,
-    media_ref: document ? {
-      filename: document.filename,
-      mime: document.mime,
-      size_bytes: document.data.byteLength,
-    } : null,
+    media_ref: media
+      ? (media.ref
+          ? {
+              asset_id: media.ref.assetId,
+              sha256: media.ref.sha256,
+              availability: 'stored',
+              filename: media.ref.filename,
+              mime: media.ref.mime,
+              size_bytes: media.ref.sizeBytes,
+            }
+          : {
+              availability: media.availability ?? 'missing',
+              filename: media.filename ?? '',
+              mime: media.mime ?? '',
+              size_bytes: Math.max(0, media.sizeBytes ?? 0),
+            })
+      : document ? {
+          filename: document.filename,
+          mime: document.mime,
+          size_bytes: document.data.byteLength,
+        } : null,
     reply_to_provider_id: input.replyToProviderId ?? null,
     raw_provider_blob: null,
-  }
+  } as AnyCanonicalIngestMessage
 }

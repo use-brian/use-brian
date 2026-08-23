@@ -7,6 +7,7 @@ import {
   chunkPagesForVision,
   distillConfigKey,
   distillPdfViaPages,
+  pdfPageCompletionMarker,
   type VisionCaller,
 } from '../pdf-distill.js'
 import type { RenderedPdfPage, RenderPdfPagesResult } from '../pdf-pages.js'
@@ -34,7 +35,12 @@ function fakeRenderer(totalPages: number) {
 
 /** Transcribes each page as `## Page N` so ordering is checkable. */
 const echoCaller: VisionCaller = async (req) => ({
-  text: req.images.map((p) => `## Page ${p.pageNumber}\n\ncontent ${p.pageNumber}`).join('\n\n'),
+  text: req.images
+    .map(
+      (p) =>
+        `## Page ${p.pageNumber}\n\ncontent ${p.pageNumber}\n\n${pdfPageCompletionMarker(p.pageNumber)}`,
+    )
+    .join('\n\n'),
   usage: { inputTokens: 100 * req.images.length, outputTokens: 20 * req.images.length },
   model: 'fake-vision',
 })
@@ -89,6 +95,7 @@ describe('[COMP:files/pdf-distill] distillPdfViaPages', () => {
     expect(result.totalPages).toBe(5)
     expect(result.truncated).toBe(false)
     expect(result.failedPages).toEqual([])
+    expect(result.text).not.toContain('PDF_PAGE_')
     const order = [...result.text.matchAll(/## Page (\d+)/g)].map((m) => Number(m[1]))
     expect(order).toEqual([1, 2, 3, 4, 5])
     expect(result.usage).toEqual({ inputTokens: 500, outputTokens: 100 })
@@ -141,11 +148,20 @@ describe('[COMP:files/pdf-distill] distillPdfViaPages', () => {
     expect(result.failedPages).toEqual([])
   })
 
-  it('does not re-split forever: a half that still truncates is accepted as-is', async () => {
+  it('recursively splits a nominal end-turn response whose page markers are missing', async () => {
     const calls: number[][] = []
     const caller: VisionCaller = async (req) => {
-      calls.push(req.images.map((p) => p.pageNumber))
-      return { text: `partial ${req.images[0]!.pageNumber}`, usage: null, model: 'fake-vision', truncated: true }
+      const numbers = req.images.map((p) => p.pageNumber)
+      calls.push(numbers)
+      if (numbers.length > 1) {
+        return {
+          text: `partial ${numbers[0]}`,
+          usage: null,
+          model: 'fake-vision',
+          truncated: false,
+        }
+      }
+      return echoCaller(req)
     }
 
     const result = await distillPdfViaPages(Buffer.from('x'), {
@@ -154,11 +170,30 @@ describe('[COMP:files/pdf-distill] distillPdfViaPages', () => {
       renderPages: fakeRenderer(4),
     })
 
-    // One split, then stop — an unbounded recursion would pay per page and
-    // keep failing on a genuinely dense document.
-    expect(calls).toEqual([[1, 2, 3, 4], [1, 2], [3, 4]])
-    expect(result.text).toContain('partial 1')
-    expect(result.text).toContain('partial 3')
+    expect(calls[0]).toEqual([1, 2, 3, 4])
+    expect(calls).toEqual(expect.arrayContaining([[1, 2], [3, 4], [1], [2], [3], [4]]))
+    expect(calls).toHaveLength(7)
+    expect(result.failedPages).toEqual([])
+    expect(result.text).not.toContain('partial')
+    expect([...result.text.matchAll(/## Page (\d+)/g)].map((m) => Number(m[1]))).toEqual([1, 2, 3, 4])
+  })
+
+  it('retries an incomplete single page once, then fails honestly', async () => {
+    const caller = vi.fn<VisionCaller>(async () => ({
+      text: '## Page 1\n\ncut off',
+      usage: null,
+      model: 'fake-vision',
+      truncated: false,
+    }))
+
+    await expect(
+      distillPdfViaPages(Buffer.from('x'), {
+        visionCaller: caller,
+        chunkPages: 1,
+        renderPages: fakeRenderer(1),
+      }),
+    ).rejects.toThrow(/nominally complete turn without the page completion marker/)
+    expect(caller).toHaveBeenCalledTimes(2)
   })
 
   it('notes failed pages in the output instead of dropping them silently', async () => {

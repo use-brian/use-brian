@@ -25,6 +25,22 @@ import {
 } from '@whiskeysockets/baileys'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+
+/**
+ * The slice of a Baileys `Contact` (and `contacts.update` partial) the relay
+ * reads. `name` = the owner's saved address-book name; `notify` = the
+ * contact's self-set pushName; `verifiedName` = business verification.
+ */
+type ContactSyncEntry = {
+  id?: string | null
+  /** Phone-number JID twin when `id` is WhatsApp's privacy-preserving LID. */
+  phoneNumber?: string | null
+  /** LID twin when `id` is the phone-number JID. */
+  lid?: string | null
+  name?: string | null
+  notify?: string | null
+  verifiedName?: string | null
+}
 import { createHash, randomUUID } from 'node:crypto'
 import { createReadStream, createWriteStream } from 'node:fs'
 import { rm } from 'node:fs/promises'
@@ -348,6 +364,69 @@ export function createSocketManager(options: SocketManagerOptions): SocketManage
       }
     } catch (err) {
       console.error('[socket-manager] API inbound forward error:', err)
+    }
+  }
+
+  // ── Forward the owner's contact directory to brian-api ──
+
+  /**
+   * Relay contact sync entries for the archive's name directory.
+   *
+   * Only user JIDs with at least one name survive the filter — groups,
+   * broadcasts, and nameless entries carry nothing worth storing. Baileys v7
+   * can identify one contact by both a privacy LID and a phone-number JID;
+   * store both aliases because archived messages prefer the phone-number twin
+   * when it is available. Batched at 200 per request because pairing-time sync
+   * can deliver the whole address book at once. Best-effort: a failed relay
+   * costs display names, never messages, and the next sync event retries
+   * naturally.
+   */
+  async function forwardContacts(channelId: string, entries: ContactSyncEntry[]): Promise<void> {
+    const contactsById = new Map<string, {
+      contactId: string
+      savedName?: string
+      pushName?: string
+      verifiedName?: string
+    }>()
+    for (const c of entries) {
+      if (!c.name && !c.notify && !c.verifiedName) continue
+      const ids = new Set(
+        [c.id, c.phoneNumber, c.lid]
+          .filter((id): id is string => Boolean(id))
+          .map((id) => jidNormalizedUser(id)),
+      )
+      for (const contactId of ids) {
+        if (contactId.endsWith('@g.us') || contactId.endsWith('@broadcast') || contactId.endsWith('@status')) continue
+        const previous = contactsById.get(contactId)
+        contactsById.set(contactId, {
+          contactId,
+          ...(c.name || previous?.savedName ? { savedName: c.name ?? previous?.savedName } : {}),
+          ...(c.notify || previous?.pushName ? { pushName: c.notify ?? previous?.pushName } : {}),
+          ...(c.verifiedName || previous?.verifiedName
+            ? { verifiedName: c.verifiedName ?? previous?.verifiedName }
+            : {}),
+        })
+      }
+    }
+    const contacts = [...contactsById.values()]
+    if (contacts.length === 0) return
+    for (let i = 0; i < contacts.length; i += 200) {
+      const batch = contacts.slice(i, i + 200)
+      try {
+        const res = await fetch(`${apiUrl}/internal/whatsapp/contacts`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Connector-Secret': connectorSecret,
+          },
+          body: JSON.stringify({ channelId, contacts: batch }),
+        })
+        if (!res.ok) {
+          console.error(`[socket-manager] contact relay failed: ${res.status} ${res.statusText}`)
+        }
+      } catch (err) {
+        console.error('[socket-manager] contact relay error:', err)
+      }
     }
   }
 
@@ -743,6 +822,29 @@ export function createSocketManager(options: SocketManagerOptions): SocketManage
     sock.ev.on('group-participants.update', (update) => {
       handleGroupParticipantsUpdate(channelId, sock, update).catch((err) => {
         console.error(`[socket-manager] group-participants error for ${channelId}:`, err)
+      })
+    })
+
+    // ── Contact directory sync ──
+    // The primary phone syncs its address book to companions: `name` is the
+    // name the OWNER saved for the contact, `notify` the contact's own
+    // pushName. Relayed so archived history is searchable by the names the
+    // owner actually uses, not just by number. `contacts.upsert` fires in bulk
+    // at pairing (app-state sync) and incrementally afterwards.
+    sock.ev.on('contacts.upsert', (contacts) => {
+      forwardContacts(channelId, contacts).catch((err) => {
+        console.error(`[socket-manager] contacts.upsert relay error for ${channelId}:`, err)
+      })
+    })
+    sock.ev.on('contacts.update', (updates) => {
+      forwardContacts(channelId, updates).catch((err) => {
+        console.error(`[socket-manager] contacts.update relay error for ${channelId}:`, err)
+      })
+    })
+    sock.ev.on('messaging-history.set', (history: { contacts?: ContactSyncEntry[] }) => {
+      if (!history.contacts || history.contacts.length === 0) return
+      forwardContacts(channelId, history.contacts).catch((err) => {
+        console.error(`[socket-manager] history contacts relay error for ${channelId}:`, err)
       })
     })
 

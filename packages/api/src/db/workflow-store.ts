@@ -474,6 +474,59 @@ export function createDbWorkflowRunStore(): WorkflowRunStore {
       notifyWorkspaceChange(workspaceId, 'workflow_run', 'create', run.id)
       return run
     },
+    async createWebhookRun({
+      workflowId,
+      workspaceId,
+      triggeredBy,
+      triggerKind,
+      input,
+      idempotencyKey,
+      bodySha256,
+    }) {
+      const triggerPageId = extractTriggerPageId(input)
+      const inserted = await query<RunRow>(
+        `INSERT INTO workflow_runs (
+           workflow_id, workspace_id, triggered_by, trigger_kind, input,
+           trigger_page_id, webhook_idempotency_key, webhook_body_sha256
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (workflow_id, webhook_idempotency_key)
+           WHERE webhook_idempotency_key IS NOT NULL
+         DO NOTHING
+         RETURNING ${RUN_SELECT}`,
+        [
+          workflowId,
+          workspaceId,
+          triggeredBy,
+          triggerKind,
+          JSON.stringify(input ?? {}),
+          triggerPageId,
+          idempotencyKey,
+          bodySha256,
+        ],
+      )
+
+      if (inserted.rows[0]) {
+        const run = rowToRun(inserted.rows[0])
+        notifyWorkspaceChange(workspaceId, 'workflow_run', 'create', run.id)
+        return { kind: 'created', run }
+      }
+
+      // A concurrent insert with the same unique key completes before the
+      // ON CONFLICT statement returns, so this read resolves its final row.
+      const existing = await query<RunRow & { webhookBodySha256: string }>(
+        `SELECT ${RUN_SELECT}, webhook_body_sha256 AS "webhookBodySha256"
+           FROM workflow_runs
+          WHERE workflow_id = $1 AND webhook_idempotency_key = $2`,
+        [workflowId, idempotencyKey],
+      )
+      const row = existing.rows[0]
+      if (!row) {
+        throw new Error('Webhook idempotency conflict row was not found')
+      }
+      if (row.webhookBodySha256 !== bodySha256) return { kind: 'conflict' }
+      return { kind: 'duplicate', run: rowToRun(row) }
+    },
     async getRunById(userId, id) {
       const result = await queryWithRLS<RunRow>(
         userId,
@@ -1354,4 +1407,3 @@ export async function pauseWorkflowSystem(
   )
   if (result.rows[0]) notifyWorkspaceChange(result.rows[0].workspaceId, 'workflow', 'update', workflowId)
 }
-

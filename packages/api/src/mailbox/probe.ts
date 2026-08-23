@@ -12,27 +12,59 @@ import type { MailboxAccountSettings } from './types.js'
 
 export type MailboxProbeResult = {
   folders: Array<{ path: string; messages: number }>
+  /** Listed or previously known folders that STATUS could not count on this pass. */
+  failedFolders: Array<{ path: string }>
+  /** True only when every listed or previously known syncable folder contributed to `total`. */
+  complete: boolean
+  /** Sum of successful folder counts; never presented as complete when false. */
   total: number
 }
 
 export async function probeMailboxFolders(
   settings: MailboxAccountSettings,
   createClient: (s: MailboxAccountSettings) => ImapClientLike = createImapClient,
+  knownFolderPaths: readonly string[] = [],
 ): Promise<MailboxProbeResult> {
   const client = createClient(settings)
   await client.connect()
   try {
-    const syncable = syncableFolders(await client.list())
+    const listed = await client.list()
+    const syncable = syncableFolders(listed)
+    const listedPaths = new Set(listed.map((folder) => folder.path))
+    // LIST is normally authoritative, but some enterprise servers have
+    // returned a temporarily truncated folder universe while the same paths
+    // remained directly addressable. The durable cursor roster lets the cheap
+    // probe recover those folders by path instead of blessing the truncated
+    // LIST sum as the whole mailbox.
+    const paths = [...new Set([
+      ...syncable.map((folder) => folder.path),
+      // A known path present in raw LIST but absent from `syncable` is an
+      // intentional special/non-selectable exclusion, not a truncated-LIST
+      // recovery candidate.
+      ...knownFolderPaths.filter((path) => path.length > 0 && !listedPaths.has(path)),
+    ])]
     const folders: Array<{ path: string; messages: number }> = []
-    for (const f of syncable) {
+    const failedFolders: Array<{ path: string }> = []
+    for (const path of paths) {
       try {
-        const status = await client.status(f.path, { messages: true, uidNext: true, uidValidity: true })
-        folders.push({ path: f.path, messages: status.messages ?? 0 })
+        const status = await client.status(path, { messages: true, uidNext: true, uidValidity: true })
+        folders.push({ path, messages: status.messages ?? 0 })
       } catch {
-        // A non-STATUSable folder (e.g. \Noselect) is skipped, never fatal.
+        // LIST succeeded but this folder did not contribute to the estimate.
+        // Preserve that fact: silently summing the survivors produced an
+        // archived-count versus tiny partial-total progress lie on an
+        // intermittently reachable mailbox. Non-selectable LIST containers
+        // were already removed by syncableFolders(), so this is a real
+        // incomplete probe.
+        failedFolders.push({ path })
       }
     }
-    return { folders, total: folders.reduce((sum, f) => sum + f.messages, 0) }
+    return {
+      folders,
+      failedFolders,
+      complete: failedFolders.length === 0,
+      total: folders.reduce((sum, f) => sum + f.messages, 0),
+    }
   } finally {
     try {
       await client.logout()

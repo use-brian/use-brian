@@ -86,8 +86,14 @@ export type CreateApprovalParams = {
   workspaceId: string
   workflowRunId: string
   workflowStepRunId: string
+  /** Assistant whose scoped registry must execute the frozen tool on resume. */
+  originatingAssistantId: string
   toolName: string
   arguments: Record<string, unknown>
+  /** Server-resolved confirmation details displayed by the approvals queue. */
+  approvalPayload?: {
+    displayLines?: string[]
+  }
   approverUserId: string
   deliveryChannelType: ApprovalDeliveryChannel
   deliveryChannelId?: string | null
@@ -495,6 +501,20 @@ export type PendingApprovalsStore = {
   getByIdSystem(id: string): Promise<PendingApproval | null>
 
   /**
+   * Body-only revision for a pending workflow IMAP email. Atomically
+   * supersedes the approval the user saw and creates its immutable
+   * replacement while preserving the envelope, thread, workflow cursor,
+   * mailbox authority, approver, and expiry. Returns null when the source
+   * row lost an approve/edit race, is not an IMAP workflow approval, belongs
+   * to another approver, or the body is unchanged.
+   */
+  reviseWorkflowEmailBody(
+    id: string,
+    body: string,
+    responderUserId: string,
+  ): Promise<PendingApproval | null>
+
+  /**
    * Atomic respond — flips a pending row to approved/rejected and stamps
    * the responder. Returns the updated row, or `null` if the row was
    * already non-pending (idempotency: double-click on Approve/Reject is a
@@ -652,10 +672,10 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
       const result = await query(
         `INSERT INTO pending_approvals (
            workspace_id, workflow_run_id, workflow_step_run_id, tool_name,
-           arguments, approver_user_id, delivery_channel_type,
-           delivery_channel_id, expires_at
+           arguments, approval_payload, approver_user_id, delivery_channel_type,
+           delivery_channel_id, expires_at, originating_assistant_id
          )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
          RETURNING ${COLS}`,
         [
           params.workspaceId,
@@ -663,10 +683,12 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
           params.workflowStepRunId,
           params.toolName,
           JSON.stringify(params.arguments),
+          JSON.stringify(params.approvalPayload ?? {}),
           params.approverUserId,
           params.deliveryChannelType,
           params.deliveryChannelId ?? null,
           params.expiresAt ?? null,
+          params.originatingAssistantId,
         ],
       )
       const approval = rowToApproval(result.rows[0] as Record<string, unknown>)
@@ -1103,6 +1125,58 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
         [id],
       )
       return result.rows[0] ? rowToApproval(result.rows[0] as Record<string, unknown>) : null
+    },
+
+    async reviseWorkflowEmailBody(id, body, responderUserId) {
+      // One statement is the concurrency boundary: either this UPDATE owns
+      // the still-pending row and its replacement is inserted, or an approve,
+      // reject, expiry, or competing edit won first and no replacement exists.
+      // Only `arguments.body` changes. Every authority-bearing field is copied
+      // from the frozen source row, never accepted from the HTTP request.
+      const result = await query(
+        `WITH superseded AS (
+           UPDATE pending_approvals
+           SET status = 'superseded',
+               responded_at = now(),
+               responded_by = $3,
+               reject_reason = 'Draft revised'
+           WHERE id = $1
+             AND status = 'pending'
+             AND kind = 'workflow_step'
+             AND split_part(tool_name, '__', 1) = 'imapSendMessage'
+             AND approver_user_id = $3
+             AND arguments->>'body' IS DISTINCT FROM $2
+           RETURNING *
+         ), replacement AS (
+           INSERT INTO pending_approvals (
+             workspace_id, workflow_run_id, workflow_step_run_id, tool_name,
+             arguments, approver_user_id, delivery_channel_type,
+             delivery_channel_id, expires_at, kind, blocking_session_id,
+             approval_payload, originating_assistant_id
+           )
+           SELECT
+             workspace_id, workflow_run_id, workflow_step_run_id, tool_name,
+             jsonb_set(arguments, '{body}', to_jsonb($2::text), true),
+             approver_user_id, delivery_channel_type, delivery_channel_id,
+             expires_at, kind, blocking_session_id,
+             approval_payload || jsonb_build_object(
+               'emailDraftRevision',
+                 COALESCE((approval_payload->>'emailDraftRevision')::integer, 1) + 1,
+               'supersedesApprovalId', id,
+               'editedByUserId', $3
+             ),
+             originating_assistant_id
+           FROM superseded
+           RETURNING ${COLS}
+         )
+         SELECT * FROM replacement`,
+        [id, body, responderUserId],
+      )
+      if (!result.rows[0]) return null
+      const replacement = rowToApproval(result.rows[0] as Record<string, unknown>)
+      notifyWorkspaceChange(replacement.workspaceId, 'approval', 'update', id)
+      notifyWorkspaceChange(replacement.workspaceId, 'approval', 'create', replacement.id)
+      return replacement
     },
 
     async respond(id, decision, responderUserId, rejectReason) {

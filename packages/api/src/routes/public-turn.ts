@@ -30,9 +30,7 @@ import {
   sanitize as sanitizeAnalytics,
   stripUnsignedToolUses, modelRequiresToolSignatures,
   modelToCompactionTier,
-  clientCompartment,
   unionCompartments,
-  canRead,
   buildWorkspaceFilesContext,
   buildSessionStateBlock,
 } from '@use-brian/core'
@@ -78,7 +76,6 @@ import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
 import type { ConnectorInstanceStore } from '../db/connector-instance-store.js'
 import {
   findAssistantById,
-  findOrCreateUser,
   findUserByEmail,
   findUserById,
   findUserByAuthProvider,
@@ -95,6 +92,15 @@ import { resolveChatModelSelection } from '../model-resolution.js'
 import { checkUsageBudget, type CreditBudgetGate } from './route-helpers.js'
 import { query } from '../db/client.js'
 import type { ProviderAvailability } from '@use-brian/shared/model-registry'
+import {
+  applyPublicResearchToolCeiling,
+  resolveClientSelfMemory,
+  resolveExternalClientIdentity,
+} from './client-principal-runtime.js'
+
+// Backward-compatible exports for callers/tests that imported these pure
+// seams from public-turn before the reusable principal runtime was extracted.
+export { applyPublicResearchToolCeiling, resolveClientSelfMemory } from './client-principal-runtime.js'
 
 /** Everything the pipeline needs — a structural subset of
  *  `PublicApiRouteOptions`, so `public-api.ts` passes its options
@@ -422,24 +428,6 @@ const PUBLIC_TURN_FILES_INDEX_CAP = 50
 
 const CLIENT_MEMORY_TAG = 'client-self'
 
-export function resolveClientSelfMemory(params: {
-  isExternal: boolean
-  isIdentified: boolean
-  assistantKind: 'primary' | 'standard' | 'app'
-  assistantClearance: 'public' | 'internal' | 'confidential'
-  workspaceId: string | null
-  externalUserId: string
-}): { compartment: string } | null {
-  if (
-    !params.isExternal
-    || !params.isIdentified
-    || !params.workspaceId
-    || params.assistantKind === 'primary'
-    || !canRead(params.assistantClearance, 'internal')
-  ) return null
-  return { compartment: clientCompartment(params.externalUserId) }
-}
-
 /**
  * Upsert one consumer-attested client memory before prompt construction.
  * Reusing the consumer key supersedes the existing row. The sensitivity and
@@ -499,22 +487,6 @@ export async function upsertClientMemory(params: {
  * Apply the immutable key ceiling and the per-turn research-consent gate.
  * Returning true tells the caller to skip MCP injection entirely.
  */
-export function applyPublicResearchToolCeiling<T>(params: {
-  tools: Map<string, T>
-  toolPolicy: PublicTurnInput['toolPolicy']
-  internalScope: boolean
-  allowPublicResearch: boolean
-}): boolean {
-  if (params.toolPolicy !== 'public_research' || params.internalScope) return false
-  const allowed = params.allowPublicResearch
-    ? new Set(['webSearch', 'urlReader'])
-    : new Set<string>()
-  for (const name of params.tools.keys()) {
-    if (!allowed.has(name)) params.tools.delete(name)
-  }
-  return true
-}
-
 const RETRY_HINT =
   '[Note: the user retried this message. Your previous response did not satisfy them. Take a different angle — do not repeat the same structure, examples, or recommendations.]\n\n'
 const EDIT_HINT =
@@ -571,7 +543,6 @@ export async function executePublicTurn(
   // asserts a real person" is the existing semantic, and giving the newer
   // spelling different tier behavior would be the footgun.
   const claimedEmail = body.claims?.email ?? body.externalUserEmail
-  const authProviderId = `${input.identityNamespace}:${body.externalUserId}`
   const wantsIdentified = body.identified === true || !!claimedEmail
   const internalScope = input.contextScope === 'internal-member'
   let user
@@ -598,42 +569,19 @@ export async function executePublicTurn(
     user = resolved
     // Member-grade turn: memory tools on, as this member (same as web chat).
     isIdentified = true
-  } else if (wantsIdentified) {
-    if (claimedEmail) {
-      // Tier 1 with email — auto-merge into an existing platform user
-      // if one matches by email. Otherwise create the shadow seeded
-      // with the email so a future OAuth signup will promote it.
-      const existing = await findUserByEmail(claimedEmail)
-      if (existing) {
-        user = existing
-      } else {
-        ;({ user } = await findOrCreateUser({
-          authProvider: 'channel',
-          authProviderId,
-          email: claimedEmail,
-          name: body.externalUserName,
-        }))
-      }
-    } else {
-      // Tier 1 without email — memory tools work, but no auto-merge
-      // path because we have no cross-provider identity key. The
-      // consumer is asserting "this is a stable real person."
-      ;({ user } = await findOrCreateUser({
-        authProvider: 'channel',
-        authProviderId,
-        name: body.externalUserName,
-      }))
-    }
-    isIdentified = true
   } else {
-    // Tier 2 — anonymous shadow. Falls back to a stable provider:id
-    // string so the row is never nameless.
-    const fallbackName = `api:${body.externalUserId}`
-    ;({ user } = await findOrCreateUser({
-      authProvider: 'channel',
-      authProviderId,
-      name: body.externalUserName ?? fallbackName,
-    }))
+    // External lane: the shared resolver is also used by principal-bound
+    // workflows, so the shadow namespace and Tier-1 semantics cannot drift
+    // between HTTP and background execution.
+    const resolved = await resolveExternalClientIdentity({
+      identityNamespace: input.identityNamespace,
+      externalUserId: body.externalUserId,
+      externalUserName: body.externalUserName,
+      claimedEmail,
+      identified: wantsIdentified,
+    })
+    user = resolved.user
+    isIdentified = resolved.identified
   }
 
   const externalPrincipal = !internalScope && isExternalPrincipal(user)

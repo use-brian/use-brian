@@ -62,8 +62,22 @@ export type ConnectorActionPreflight = {
   classifierMatches: string[]
   /** True iff classifier outranks ceiling AND env flag enforces. */
   shouldDeny: boolean
-  /** True iff classifier outranks ceiling AND env flag is OFF (shadow). */
+  /** True iff classifier outranks ceiling but the result is advisory. */
   shadowOnly: boolean
+}
+
+export type ConnectorActionPreflightParams = Pick<
+  ConnectorActionEmitParams,
+  'audienceClearance' | 'payload'
+> & {
+  /**
+   * `enforce` lets the classifier veto before the network call. `advisory`
+   * records the same detection as a warning but leaves the configured tool
+   * grant/policy authoritative. Email sends and drafts use `advisory` because
+   * reaching execution means their frozen payload was already admitted by
+   * Allow/Ask/Block governance.
+   */
+  enforcement?: 'enforce' | 'advisory'
 }
 
 export type EmitConnectorActionResult = {
@@ -80,9 +94,7 @@ export type EmitConnectorActionResult = {
  */
 export interface ConnectorActionAudit extends ConnectorActionAuditDeps {
   /** Classify a payload BEFORE the network call (no audit row written). */
-  preflight(
-    params: Pick<ConnectorActionEmitParams, 'audienceClearance' | 'payload'>,
-  ): ConnectorActionPreflight
+  preflight(params: ConnectorActionPreflightParams): ConnectorActionPreflight
   /** Emit the `connector_action` Episode + audit row after the action runs. */
   emit(
     idCtx: { userId: string; assistantId: string },

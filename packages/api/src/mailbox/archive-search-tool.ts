@@ -20,7 +20,7 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool } from '@use-brian/core'
+import { buildTool, inferExactExternalEmail, type Tool } from '@use-brian/core'
 import { searchEmailArchive } from '../db/email-archive-store.js'
 
 export type MailboxArchiveDeps = {
@@ -112,7 +112,7 @@ export function createSearchEmailArchiveTool(opts: CreateArchiveSearchToolOption
     isConcurrencySafe: true,
     requiresConfirmation: false,
     timeoutMs: 30_000,
-    async execute(input) {
+    async execute(input, context) {
       const accounts = opts.accounts
       if (accounts.length === 0) {
         return { data: 'No email account is connected through IMAP/SMTP. Connect one in Studio → Connectors, then try again.', isError: true }
@@ -135,13 +135,18 @@ export function createSearchEmailArchiveTool(opts: CreateArchiveSearchToolOption
         target = accounts.find((a) => a.isPrimary) ?? accounts[0]
       }
       try {
+        const inferredFrom = inferExactExternalEmail({
+          texts: [context.userMessageText, input.query],
+          boundAccountEmail: target.email,
+          explicitFrom: input.from,
+        })
         const { hits, coverage } = await search(
           {
             ownerUserId: opts.ownerUserId,
             instanceId: target.instanceId,
             query: input.query,
             topK: input.topK,
-            from: input.from,
+            from: input.from ?? inferredFrom,
             since: input.since,
             before: input.before,
           },

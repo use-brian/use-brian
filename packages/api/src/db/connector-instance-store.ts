@@ -254,6 +254,17 @@ export type ConnectorInstanceStore = {
   setConfigSystem(id: string, config: Record<string, unknown>): Promise<void>
 
   /**
+   * Persist one mailbox-sync cursor only if its backfill request is still the
+   * one the worker started with. A user may re-arm `all` while an older worker
+   * pass is in flight; that older pass must not overwrite the newer request.
+   */
+  setMailboxSyncStateSystem(
+    id: string,
+    mailboxSync: unknown,
+    expectedRequestedAt: string | null,
+  ): Promise<boolean>
+
+  /**
    * Re-encrypt and persist the credentials envelope with no acting user.
    * The Fathom ingest poller uses this to write back a rotated
    * refresh-token tuple (Fathom refresh tokens are one-time-use, so the
@@ -663,6 +674,18 @@ export function createConnectorInstanceStore(encryptionKey: Buffer | null): Conn
          WHERE id = $1`,
         [id, JSON.stringify(config)],
       )
+    },
+
+    async setMailboxSyncStateSystem(id, mailboxSync, expectedRequestedAt) {
+      const result = await query(
+        `UPDATE connector_instance
+         SET config = COALESCE(config, '{}') || jsonb_build_object('mailboxSync', $2::jsonb)
+         WHERE id = $1
+           AND (config #>> '{mailboxSync,backfill,requestedAt}')
+               IS NOT DISTINCT FROM $3::text`,
+        [id, JSON.stringify(mailboxSync), expectedRequestedAt],
+      )
+      return (result.rowCount ?? 0) > 0
     },
 
     async updateCredentialsSystem(id, credentials) {

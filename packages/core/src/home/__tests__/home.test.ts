@@ -7,6 +7,12 @@ function signals(over: Partial<HomeSignals> = {}): HomeSignals {
   return {
     brainReviewCount: 5,
     approvalsCount: 2,
+    approvalGroups: {
+      externalActions: 1,
+      contentReview: 0,
+      systemImprovements: 1,
+      questionsAndAccess: 0,
+    },
     autopilotCount: 0,
     taskTriageCount: 0,
     taskCleanupCount: 0,
@@ -73,6 +79,12 @@ describe('[COMP:home/merge] mergeHomeDock', () => {
     // caption from artifact, count from live signals (not the artifact)
     expect(dock.needsYou[0].caption).toBe('Two need a signature')
     expect(dock.needsYou[0].count).toBe(2)
+    expect(dock.approvalGroups).toEqual({
+      externalActions: 1,
+      contentReview: 0,
+      systemImprovements: 1,
+      questionsAndAccess: 0,
+    })
   })
 
   it('drops a card the artifact selected once its live count is gone (freshness)', () => {

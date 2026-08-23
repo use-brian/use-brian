@@ -149,6 +149,38 @@ describe('[COMP:files/send-file] sendFile', () => {
     }
   })
 
+  it('refuses a custom bridge that never declared document capability', async () => {
+    // Capability on `custom` is a per-BRIDGE fact: an undeclared bridge would
+    // silently drop the enqueued documents, so the static set stays closed
+    // and admission requires the route-threaded flag.
+    const tool = createSendFileTool(statOnlyApi(fakeFile()))
+    const result = await tool.execute(
+      { file: '/reports/q1.md' },
+      makeContext({ channelType: 'custom' }),
+    )
+    expect(result.isError).toBe(true)
+    expect(String(result.data)).toContain('custom')
+  })
+
+  it('admits a custom bridge whose state declared documents (channelDocumentsSupported)', async () => {
+    const tool = createSendFileTool(statOnlyApi(fakeFile()))
+    const result = await tool.execute(
+      { file: '/reports/q1.md' },
+      makeContext({ channelType: 'custom', channelDocumentsSupported: true }),
+    )
+    expect(result.isError).toBeFalsy()
+  })
+
+  it('applies the custom bridge 25 MB protocol ceiling to an admitted bridge', async () => {
+    const big = fakeFile({ sizeBytes: 30 * 1024 * 1024 })
+    const result = await createSendFileTool(statOnlyApi(big)).execute(
+      { file: '/reports/q1.md' },
+      makeContext({ channelType: 'custom', channelDocumentsSupported: true }),
+    )
+    expect(result.isError).toBe(true)
+    expect(String(result.data)).toContain('over the')
+  })
+
   it('applies Discord\'s stricter 10 MiB ceiling, not the generic 45 MB one', async () => {
     const big = fakeFile({ sizeBytes: 20 * 1024 * 1024 })
 

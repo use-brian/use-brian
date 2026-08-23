@@ -238,9 +238,10 @@ export type ChannelIntegrationConfig = {
   /** WhatsApp Cloud public business number, safe to expose for chat links. */
   whatsappDisplayPhoneNumber?: string
   /**
-   * Telegram BYO only. When true, explicitly allowlisted private-DM guests
-   * may use connector tools enabled for the routed assistant. Their shadow
-   * identity/session and all non-connector external-guest boundaries remain.
+   * Telegram BYO only. When true, explicitly allowlisted guests in private
+   * DMs and groups may use connector tools enabled for the routed assistant.
+   * Their shadow identity/session and all non-connector external-guest
+   * boundaries remain.
    */
   allowGuestConnectorTools?: boolean // default: false
   blockedUserIds?: string[]    // used when userAccessMode = 'blocklist' — @handle or numeric ID

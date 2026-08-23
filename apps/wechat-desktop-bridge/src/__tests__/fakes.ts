@@ -34,12 +34,15 @@ export type FakeAgent = AgentWechatClient & {
   chats: AgentWechatChat[]
   messages: Map<string, AgentWechatMessage[]>
   media: Map<string, AgentWechatMediaResult[]>
+  lastMedia: Map<string, AgentWechatMediaResult>
   sent: AgentWechatSendParams[]
   sendResult: { success: boolean; error?: string }
   auth: { status: 'logged_in' | 'logged_out' | 'app_not_running' | 'unknown'; loggedInUser?: string }
   authCalls: number
   logoutCalls: number
   mediaCalls: number
+  openedChats: string[]
+  openResult: { ok: boolean; error?: string }
   /** Login WS control: push events into the most recent subscription. */
   emit(event: AgentWechatLoginEvent): void
   subscriptions: number
@@ -52,12 +55,15 @@ export function fakeAgent(): FakeAgent {
     chats: [],
     messages: new Map(),
     media: new Map(),
+    lastMedia: new Map(),
     sent: [],
     sendResult: { success: true },
     auth: { status: 'logged_out' },
     authCalls: 0,
     logoutCalls: 0,
     mediaCalls: 0,
+    openedChats: [],
+    openResult: { ok: true },
     subscriptions: 0,
     closedSubscriptions: 0,
     emit(event) {
@@ -86,12 +92,34 @@ export function fakeAgent(): FakeAgent {
       a.mediaCalls++
       const key = `${chatId}:${localId}`
       const queue = a.media.get(key)
-      if (!queue || queue.length === 0) return { type: 'unsupported', format: '', filename: '' }
-      return queue.length > 1 ? queue.shift()! : queue[0]!
+      const result = !queue || queue.length === 0
+        ? { type: 'unsupported', format: '', filename: '', status: 'unavailable' as const, kind: 'unsupported' as const }
+        : queue.length > 1 ? queue.shift()! : queue[0]!
+      a.lastMedia.set(key, result)
+      return result
+    },
+    async ensureMedia(chatId, localId) {
+      a.openedChats.push(chatId)
+      return a.getMedia(chatId, localId)
+    },
+    async getMediaContent(chatId, localId) {
+      const result = a.lastMedia.get(`${chatId}:${localId}`)
+      const bytes = Buffer.from(result?.data ?? '', 'base64')
+      return {
+        body: new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(bytes); controller.close() } }),
+        contentLength: bytes.length,
+        mime: result?.mime ?? 'application/octet-stream',
+        filename: result?.filename ?? `${localId}`,
+        etag: result?.sha256,
+      }
     },
     async sendMessage(params) {
       a.sent.push(params)
       return a.sendResult
+    },
+    async openChat(chatId) {
+      a.openedChats.push(chatId)
+      return a.openResult
     },
     subscribeLogin(h) {
       a.subscriptions++
@@ -116,6 +144,7 @@ export type FakeBridge = BrianBridgeClient & {
   /** Throw this on the next N postInbound calls. */
   failInboundWith: Error | null
   failInboundTimes: number
+  uploads: Array<{ messageId: string; bytes: Buffer }>
 }
 
 export function fakeBridge(): FakeBridge {
@@ -126,6 +155,7 @@ export function fakeBridge(): FakeBridge {
     queue: [],
     failInboundWith: null,
     failInboundTimes: 0,
+    uploads: [],
     async hello() {
       return {
         channelId: 'chan_example',
@@ -147,6 +177,17 @@ export function fakeBridge(): FakeBridge {
       }
       b.inbound.push(inbound)
       return { status: 200, archivedOnly: false }
+    },
+    async uploadMedia(input) {
+      const bytes = Buffer.from(await new Response(input.body).arrayBuffer())
+      b.uploads.push({ messageId: input.messageId, bytes })
+      return {
+        assetId: '11111111-1111-1111-1111-111111111111',
+        sha256: input.sha256,
+        filename: input.filename,
+        mime: input.mime,
+        sizeBytes: input.sizeBytes,
+      }
     },
     async pollOutbox() {
       // Yield a macrotask like a real long-poll would, so loops under test never starve the event loop.

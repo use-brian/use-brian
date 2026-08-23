@@ -78,15 +78,16 @@ type BrowseDirectoryProps = {
   onClose: () => void;
   onConnectorAdded: () => void;
   /**
-   * Launches the connectors page's OAuth flow for an oauth_required entry.
-   * The page owns the per-provider authorize/setup flow, closes this catalog,
-   * selects hidden providers before showing inline forms, and threads
-   * `[:add]:<workspaceId>` through `state` so both Connect and "Add another"
-   * land on the right callback with the right intent.
+   * Launches the connectors page's canonical per-provider setup flow.
+   * The page owns OAuth, inline credential forms, and generic connect
+   * mutations; it closes this catalog and selects hidden providers before
+   * showing inline forms. OAuth also threads `[:add]:<workspaceId>` through
+   * `state` so both Connect and "Add another" land on the right callback with
+   * the right intent.
    * Absent → the modal falls back to its degraded self-built Google URL
    * (legacy standalone use).
    */
-  onOauthConnect?: (entry: { id: string }, opts?: { addAnother?: boolean }) => void;
+  onConnectorConnect?: (entry: { id: string }, opts?: { addAnother?: boolean }) => void;
   /** Opens provider app settings without starting OAuth. */
   onConfigureApp?: (entry: { id: string }) => void;
 };
@@ -101,7 +102,7 @@ type SkillCatalogEntry = {
   source: string;
 };
 
-export function BrowseDirectory({ open, onClose, onConnectorAdded, onOauthConnect, onConfigureApp }: BrowseDirectoryProps) {
+export function BrowseDirectory({ open, onClose, onConnectorAdded, onConnectorConnect, onConfigureApp }: BrowseDirectoryProps) {
   const t = useT();
   const [activeTab, setActiveTab] = useState<"connectors" | "skills">("connectors");
   const [directory, setDirectory] = useState<DirectoryEntry[]>([]);
@@ -212,22 +213,24 @@ export function BrowseDirectory({ open, onClose, onConnectorAdded, onOauthConnec
   // the create-disconnected-instance path (the rail's PAT form targets the
   // new instance by id).
   function handleAddAnother(entry: DirectoryEntry) {
-    if (entry.oauth_required && onOauthConnect) {
-      onOauthConnect(entry, { addAnother: true });
+    if (entry.oauth_required && onConnectorConnect) {
+      onConnectorConnect(entry, { addAnother: true });
       return;
     }
     handleAdd(entry);
   }
 
   async function handleConnect(entry: DirectoryEntry) {
-    if (entry.id === "cli") {
-      onClose();
+    // The connectors page is the single owner of provider-specific setup.
+    // In particular, Local Directory needs an inline path form before its
+    // body-requiring route can be called; the modal's generic empty POST would
+    // otherwise fail UUID validation before the form ever appeared.
+    if (onConnectorConnect) {
+      onConnectorConnect(entry);
       return;
     }
-    // Prefer the page's OAuth flow (correct per-provider authorize URL +
-    // workspace-scoped return); the block below is the degraded fallback.
-    if (entry.oauth_required && onOauthConnect) {
-      onOauthConnect(entry);
+    if (entry.id === "cli") {
+      onClose();
       return;
     }
     setAddingId(entry.id);
@@ -254,7 +257,7 @@ export function BrowseDirectory({ open, onClose, onConnectorAdded, onOauthConnec
       return;
     }
 
-    // Non-OAuth connectors
+    // Degraded standalone fallback for callers without the page handoff.
     try {
       const res = await authFetch(`${API_URL}/api/connectors/${entry.id}/connect`, {
         method: "POST",
@@ -488,7 +491,7 @@ function DirectorySection({
       <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3">
         {title}
       </h3>
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         {entries.map((entry) => (
           <DirectoryCard
             key={entry.id}
@@ -586,9 +589,9 @@ function DirectoryCard({
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
-              <span className="text-sm font-medium truncate">{entry.name}</span>
+              <span className="text-sm font-medium leading-5 break-words">{entry.name}</span>
             </div>
-            <p className="text-[11px] text-muted-foreground mt-0.5 line-clamp-2">
+            <p className="text-[11px] text-muted-foreground mt-0.5 leading-4 break-words">
               {entry.description}
             </p>
             {entry.author && (
@@ -640,7 +643,7 @@ function SkillSection({ title, skills }: { title: string; skills: SkillCatalogEn
   return (
     <div>
       <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3">{title}</h3>
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         {skills.map((skill) => (
           <div key={skill.id} className="flex items-start gap-3 border border-border rounded-xl p-4 hover:bg-muted/20 transition-colors">
             <div className="w-9 h-9 rounded-lg bg-muted flex items-center justify-center shrink-0 mt-0.5">
@@ -651,15 +654,15 @@ function SkillSection({ title, skills }: { title: string; skills: SkillCatalogEn
             <div className="flex-1 min-w-0">
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium truncate">{skill.name}</span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm font-medium leading-5 break-words">{skill.name}</span>
                     {skill.category !== "custom" && (
                       <span className={`text-[9px] font-medium px-1.5 py-0.5 rounded-full border ${SKILL_CATEGORY_COLORS[skill.category] ?? SKILL_CATEGORY_COLORS.custom}`}>
                         {skill.category}
                       </span>
                     )}
                   </div>
-                  <p className="text-[11px] text-muted-foreground mt-0.5 line-clamp-2">{skill.description}</p>
+                  <p className="text-[11px] text-muted-foreground mt-0.5 leading-4 break-words">{skill.description}</p>
                   {skill.requiresConnectors.length > 0 && (
                     <p className="text-[10px] text-muted-foreground/60 mt-1">{t.browseDirectory.requiresPrefix} {skill.requiresConnectors.join(", ")}</p>
                   )}

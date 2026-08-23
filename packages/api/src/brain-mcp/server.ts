@@ -30,7 +30,7 @@ import type { Sensitivity } from '@use-brian/core'
 import type { BrainKeyScope } from '../db/brain-keys-store.js'
 import {
   buildBrainTools,
-  resolveAgentGate,
+  resolveAgentCapabilities,
   type BrainCrmTools,
   type BrainDocTools,
   type BrainFileTools,
@@ -185,9 +185,12 @@ export function brainMcpRoutes(opts: Options): Router {
     // agent write tools appear only when the bound primary assistant holds
     // the `configure` capability (resolved fresh per request so a revoked
     // grant takes effect immediately).
+    const agentActiveCapabilities = opts.agentTools
+      ? await resolveAgentCapabilities(auth.workspaceId)
+      : new Set<string>()
     const agentWritesEnabled =
       opts.agentTools && auth.scope === 'read_write'
-        ? await resolveAgentGate(auth.workspaceId)
+        ? agentActiveCapabilities.has('configure')
         : false
     // Every Home app bridge call spends one unit of its daily budget — this
     // is a data path, and leaving it free would make it the one unbounded
@@ -243,6 +246,7 @@ export function brainMcpRoutes(opts: Options): Router {
       docTools: opts.docTools,
       ingest: opts.ingest,
       agentTools: opts.agentTools,
+      agentActiveCapabilities,
       agentWritesEnabled,
       embedder: opts.embedder,
       browserSkills: opts.browserSkills,

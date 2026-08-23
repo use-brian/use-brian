@@ -49,7 +49,12 @@ export type DeferredConfirmationInsert = {
 export type DeferredConfirmationStore = {
   insert(data: DeferredConfirmationInsert): Promise<void>
   findByToolCallId(toolCallId: string): Promise<DeferredConfirmation | null>
-  findPendingByChannel(channelType: string, channelId: string): Promise<DeferredConfirmation | null>
+  findPendingByChannel(
+    channelType: string,
+    channelId: string,
+    /** Optional tenant/routing scope for channel ids that are not globally unique. */
+    assistantId?: string,
+  ): Promise<DeferredConfirmation | null>
   markResolved(toolCallId: string, decision: string): Promise<void>
   cleanupExpired(): Promise<number>
 }
@@ -86,7 +91,7 @@ export function createDeferredConfirmationStore(): DeferredConfirmationStore {
       return result.rows[0] ?? null
     },
 
-    async findPendingByChannel(channelType, channelId) {
+    async findPendingByChannel(channelType, channelId, assistantId) {
       const result = await query<DeferredConfirmation>(
         `SELECT id, job_id AS "jobId", tool_call_id AS "toolCallId",
                 tool_name AS "toolName", server_name AS "serverName",
@@ -97,10 +102,11 @@ export function createDeferredConfirmationStore(): DeferredConfirmationStore {
                 resolved_at AS "resolvedAt"
          FROM deferred_confirmations
          WHERE channel_type = $1 AND channel_id = $2
+           AND ($3::uuid IS NULL OR assistant_id = $3)
            AND status = 'pending' AND expires_at > now()
          ORDER BY created_at ASC
          LIMIT 1`,
-        [channelType, channelId],
+        [channelType, channelId, assistantId ?? null],
       )
       return result.rows[0] ?? null
     },

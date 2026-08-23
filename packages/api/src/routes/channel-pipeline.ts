@@ -348,7 +348,15 @@ export type ChannelPipelineParams = {
 
   // ── Channel context ──
   channelType: 'whatsapp' | 'telegram' | 'slack' | 'discord' | 'email' | 'msteams' | 'wechat' | 'custom'
+  /** Physical provider destination used for delivery and connector actions. */
   channelId: string
+  /**
+   * Conversation id used for session-scoped storage/state when narrower than
+   * the provider destination. Threaded Slack passes
+   * `<channelId>:thread:<threadTs>` while delivery keeps the bare channel id.
+   * Defaults to `channelId` for every other channel.
+   */
+  sessionChannelId?: string
   /**
    * The acting user's channel-native id captured from the inbound webhook —
    * WhatsApp phone, Telegram `@handle`, Slack user id. Forwarded to
@@ -413,6 +421,13 @@ export type ChannelPipelineParams = {
   archiveInboundAlreadyPersisted?: boolean
   /** Exact connector backing this route, when known. */
   archiveConnectorInstanceId?: string | null
+  /**
+   * Per-channel-instance document capability (custom bridges declare it in
+   * their state report). Threaded onto ToolContext so the `sendFile` gate can
+   * admit a bridge that proved it delivers files — see
+   * `ToolContext.channelDocumentsSupported`.
+   */
+  channelDocumentsSupported?: boolean
 
   // ── Model ──
   /** The model alias string from the assistant record. */
@@ -793,6 +808,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     capabilityStore,
   } = params
   const externalGuest = params.externalGuest === true
+  const sessionChannelId = params.sessionChannelId ?? channelId
   const externalGuestConnectorTools = externalGuest && params.externalGuestConnectorTools === true
   const connectorToolsAllowed = connectorToolsAllowedForChannelTurn(
     externalGuest,
@@ -816,7 +832,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     assistantId: assistant.id,
     userId,
     channelType,
-    channelId,
+    channelId: sessionChannelId,
   })
 
   // Expose session ID to channel hooks (e.g., WhatsApp confirmation store)
@@ -1296,7 +1312,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     const channelMessages = await getGroupChatContext({
       assistantId: assistant.id,
       channelType,
-      channelId,
+      channelId: sessionChannelId,
     })
     groupChatContext = buildGroupChatContextPrompt(channelMessages, userId)
   }
@@ -1673,7 +1689,11 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // not in Layer 1 (the tool name only appears here, when a pending row exists).
   {
     try {
-      const channelSessionKey = buildChannelSessionKey({ channel: channelType, channelId, userId })
+      const channelSessionKey = buildChannelSessionKey({
+        channel: channelType,
+        channelId: sessionChannelId,
+        userId,
+      })
       const pendingRecordings = await listPendingRecordingConfirmationsForSession(channelSessionKey)
       if (pendingRecordings.length > 0) {
         const lines = pendingRecordings.map((p) => {
@@ -1824,6 +1844,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         context: {
           userId, assistantId: assistant.id, sessionId: session.id,
           appId: 'Use Brian', channelType, channelId,
+          channelSessionId: sessionChannelId,
           userTimezone,
           abortSignal: new AbortController().signal,
           requestTools: allTools,
@@ -1915,6 +1936,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
       context: {
         userId, assistantId: assistant.id, sessionId: session.id,
         appId: 'Use Brian', channelType, channelId,
+        channelSessionId: sessionChannelId,
         workspaceId: assistant.workspaceId ?? undefined,
         workerRuntime: customLlmRuntime
           ? {
@@ -1936,6 +1958,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         workerManager,
         activeCapabilities,
         outboundAttachments: attachmentCollector,
+        channelDocumentsSupported: params.channelDocumentsSupported,
         sensitivity: sensitivityAccumulator,
         compartmentAccumulator,
         evidence: replyEvidence,

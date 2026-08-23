@@ -2,12 +2,12 @@
  * Auto-expose gate — decides whether a just-connected personal connector
  * should be automatically shared with the active workspace (app-web).
  *
- * Under the unified-connectors model the Studio -> Connectors page is a single
- * list of personal connectors. Connecting one while a workspace is active
- * auto-creates a `connector_grant` (exposing it to the workspace at the
- * member's clearance, computed server-side). This pure function is the
- * "should we, and for which instance?" decision so it can be unit-tested
- * without a DOM.
+ * Under the unified-connectors model, connecting a PERSONAL connector while a
+ * workspace is active auto-creates a `connector_grant` (exposing it to the
+ * workspace at the member's clearance, computed server-side). Workspace-owned
+ * rows (including direct GCS/S3/Local storage bindings) never enter this flow.
+ * This pure function is the "should we, and for which instance?" decision so
+ * it can be unit-tested without a DOM.
  *
  * Multi-instance resolution: the arm names the just-connected connector by
  * `connector_instance` UUID whenever the connect path knows it — the
@@ -111,6 +111,9 @@ export function resolveAutoExpose(input: AutoExposeInput): AutoExposeDecision {
     target = connectors.find((c) => c.connectorInstanceId === arm.instanceId);
     // Not in the list yet (post-connect refetch pending) — wait.
     if (!target) return { expose: false, pending: true };
+    // A UUID arm can resolve a freshly-created workspace binding directly.
+    // It is already available by ownership and cannot receive a grant.
+    if (target.readonly) return { expose: false, pending: false };
   } else {
     // The member's own connected instances of this provider. Readonly rows
     // are a teammate's exposure into this workspace — never ours to grant.

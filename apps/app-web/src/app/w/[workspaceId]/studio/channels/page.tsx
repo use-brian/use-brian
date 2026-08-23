@@ -7,8 +7,9 @@
  * docs/architecture/channels/adapter-pattern.md → "Workspace channels").
  * Channels are owned by the workspace — this page lists them, renames them,
  * edits each one's clearance and enabled capabilities, and wires per-surface
- * assistant routing. Channels are *created* by connecting a bot from the inline
- * "+ Add channel" form; there is no separate "new channel" page.
+ * assistant routing. Channels are *created* by connecting a bot from the
+ * "+ Add channel" modal (`AddChannelDialog`); there is no separate "new
+ * channel" page.
  *
  * Mirrors Studio → Connectors / Events: a left rail groups every channel by
  * status — Needs attention (revoked/invalid) / Active / the hosted-only
@@ -133,7 +134,9 @@ import {
   Pencil,
   SmilePlus,
   UsersRound,
+  X,
 } from "lucide-react";
+import { Dialog } from "@base-ui/react/dialog";
 
 // Slack manifest's `request_url` must be a syntactically valid URL — Slack
 // posts a verification challenge to it. Our slack route returns the challenge
@@ -500,20 +503,21 @@ export default function StudioChannelsPage() {
         {activeId && (
           <button
             type="button"
-            onClick={() => setAddOpen((v) => !v)}
+            onClick={() => setAddOpen(true)}
             className="shrink-0 text-sm font-medium rounded-md bg-action text-action-foreground px-3 py-1.5"
           >
-            {addOpen ? tr.add.close : tr.add.cta}
+            {tr.add.cta}
           </button>
         )}
       </StudioTopbarActions>
 
-      {addOpen && activeId && (
-        <AddChannelForm
+      {activeId && (
+        <AddChannelDialog
+          open={addOpen}
+          onClose={() => setAddOpen(false)}
           workspaceId={activeId}
           assistants={assistants}
           onCreated={onChannelCreated}
-          onClose={() => setAddOpen(false)}
           emailConfigured={emailConfigured}
           emailDomains={emailDomains}
           onEmailCreated={refreshEmailInboxes}
@@ -1927,12 +1931,74 @@ function TelegramMentionOverrides({
 }
 
 /**
- * Workspace-driven channel connect — the "+ Add channel" inline expander on
- * studio/channels. Validates credentials via the workspace-scoped connect
- * endpoints (`POST /api/workspaces/:id/channels/{slack,telegram}`),
- * optionally seeds default routing to an assistant in this workspace, and
- * shows the Slack webhook URL the user must register manually (Telegram
- * auto-registers).
+ * "+ Add channel" modal on studio/channels. A base-ui `Dialog` that hosts
+ * `AddChannelForm` — the popup owns the title / close affordance and the
+ * scroll container so the form body stays chrome-free (and mountable
+ * standalone in tests). Closing mid-pairing is allowed: every connect tab
+ * tears its own stream / poll down on unmount.
+ */
+export function AddChannelDialog({
+  open,
+  onClose,
+  ...formProps
+}: {
+  open: boolean;
+  onClose: () => void;
+} & Omit<Parameters<typeof AddChannelForm>[0], "onClose">) {
+  const t = useT();
+  const add = t.studioPage.channels.add;
+  return (
+    <Dialog.Root
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) onClose();
+      }}
+    >
+      <Dialog.Portal>
+        <Dialog.Backdrop
+          className={cn(
+            "fixed inset-0 z-50 bg-background/80 backdrop-blur-sm transition-opacity duration-150",
+            "data-[starting-style]:opacity-0 data-[ending-style]:opacity-0",
+          )}
+        />
+        <Dialog.Popup
+          className={cn(
+            "fixed left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2",
+            "flex max-h-[calc(100vh-3rem)] w-[calc(100vw-2rem)] max-w-2xl flex-col",
+            "rounded-2xl border border-border bg-background shadow-xl ring-1 ring-foreground/5 outline-none",
+            "transition-all duration-150",
+            "data-[starting-style]:opacity-0 data-[starting-style]:scale-95",
+            "data-[ending-style]:opacity-0 data-[ending-style]:scale-95",
+          )}
+        >
+          <div className="flex shrink-0 items-center justify-between gap-2 px-5 pt-5 pb-3">
+            <Dialog.Title className="text-sm font-semibold text-foreground">
+              {add.title}
+            </Dialog.Title>
+            <Dialog.Close
+              aria-label={add.close}
+              className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            >
+              <X className="size-4" aria-hidden />
+            </Dialog.Close>
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-5">
+            {open && <AddChannelForm {...formProps} onClose={onClose} />}
+          </div>
+        </Dialog.Popup>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
+/**
+ * Workspace-driven channel connect — the body of the "+ Add channel" modal
+ * (`AddChannelDialog`) on studio/channels. Validates credentials via the
+ * workspace-scoped connect endpoints
+ * (`POST /api/workspaces/:id/channels/{slack,telegram}`), optionally seeds
+ * default routing to an assistant in this workspace, and shows the Slack
+ * webhook URL the user must register manually (Telegram auto-registers).
+ * Renders no card chrome or title of its own — the dialog owns those.
  */
 export function AddChannelForm({
   workspaceId,
@@ -2220,19 +2286,8 @@ export function AddChannelForm({
     "text-sm rounded-md border border-border bg-background px-2 py-1.5 font-mono disabled:opacity-50";
 
   return (
-    <div className="border border-border rounded-md bg-card p-5 flex flex-col gap-4">
-      <div className="flex items-center justify-between gap-2">
-        <h2 className="text-sm font-semibold">{add.title}</h2>
-        <button
-          type="button"
-          onClick={onClose}
-          className="text-xs text-muted-foreground hover:text-foreground"
-        >
-          {add.close}
-        </button>
-      </div>
-
-      <div className="flex gap-1 border-b border-border">
+    <div className="flex flex-col gap-4">
+      <div className="flex gap-1 overflow-x-auto border-b border-border">
         {(
           [
             "slack",

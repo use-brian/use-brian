@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import sharp from 'sharp'
 import { distillFileToText } from '../distill.js'
+import { pdfPageCompletionMarker } from '../pdf-distill.js'
 import { minimalPdf } from './pdf-fixture.js'
 
 function mockResponse(body: unknown, init: ResponseInit = {}): Response {
@@ -18,12 +19,12 @@ describe('[COMP:files/distill] distillFileToText', () => {
       captured.url = String(url)
       captured.init = init
       return mockResponse({
-        candidates: [{ content: { parts: [{ text: '# Heading\n\nbody' }] } }],
+        candidates: [{ content: { parts: [{ text: `# Heading\n\nbody\n\n${pdfPageCompletionMarker(1)}` }] } }],
         usageMetadata: { promptTokenCount: 50, candidatesTokenCount: 20 },
       })
     })
 
-    const buffer = Buffer.from('fake-pdf-bytes')
+    const buffer = minimalPdf(1, 'body')
     const result = await distillFileToText(
       { buffer, mime: 'application/pdf' },
       { apiKey: 'test-key', fetchFn: fetchFn as unknown as typeof fetch },
@@ -32,6 +33,7 @@ describe('[COMP:files/distill] distillFileToText', () => {
     expect(result.text).toBe('# Heading\n\nbody')
     expect(result.model).toBe('gemini-2.5-flash')
     expect(result.usage).toEqual({ inputTokens: 50, outputTokens: 20 })
+    expect(result.pageCount).toBe(1)
 
     expect(captured.url).toContain('/models/gemini-2.5-flash:generateContent')
     const headers = captured.init?.headers as Record<string, string>
@@ -54,6 +56,42 @@ describe('[COMP:files/distill] distillFileToText', () => {
       { apiKey: 'k', fetchFn: fetchFn as unknown as typeof fetch },
     )
     expect(result.text).toBe('')
+  })
+
+  it('falls back to rendered pages when Gemini ends normally without a page completion marker', async () => {
+    const fetchFn = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(init?.body as string)
+      const parts = body.contents[0].parts as Array<{
+        inlineData?: { mimeType: string }
+      }>
+      const isNativePdf = parts.some((part) => part.inlineData?.mimeType === 'application/pdf')
+      return mockResponse({
+        candidates: [{
+          content: {
+            parts: [{
+              text: isNativePdf
+                ? '## Page 1\n\ncut off despite STOP'
+                : `## Page 1\n\ncomplete text\n\n${pdfPageCompletionMarker(1)}`,
+            }],
+          },
+          finishReason: 'STOP',
+        }],
+        usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5 },
+      })
+    })
+
+    const result = await distillFileToText(
+      { buffer: minimalPdf(1, 'complete text'), mime: 'application/pdf' },
+      { apiKey: 'k', fetchFn: fetchFn as unknown as typeof fetch },
+    )
+
+    expect(fetchFn).toHaveBeenCalledTimes(2)
+    expect(result.text).toContain('complete text')
+    expect(result.text).not.toContain('cut off')
+    expect(result.text).not.toContain('PDF_PAGE_1_COMPLETE')
+    expect(result.usage).toEqual({ inputTokens: 20, outputTokens: 10 })
+    expect(result.pageCount).toBe(1)
+    expect(result.truncated).toBe(false)
   })
 
   it('throws on a non-ok HTTP response (no local fallback for images)', async () => {
@@ -104,7 +142,7 @@ describe('[COMP:files/distill] distillFileToText', () => {
     const fetchFn = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       calls.push({ url: String(url), init })
       return mockResponse({
-        choices: [{ message: { content: '## Page 1\n\n# PDF content' }, finish_reason: 'stop' }],
+        choices: [{ message: { content: `## Page 1\n\n# PDF content\n\n${pdfPageCompletionMarker(1)}` }, finish_reason: 'stop' }],
         usage: { prompt_tokens: 40, completion_tokens: 15 },
       })
     })
@@ -137,7 +175,16 @@ describe('[COMP:files/distill] distillFileToText', () => {
     const fetchFn = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       bodies.push(JSON.parse(init!.body as string))
       return mockResponse({
-        choices: [{ message: { content: '## Page 1\n\na\n\n## Page 2\n\nb' }, finish_reason: 'stop' }],
+        choices: [{
+          message: {
+            content: Array.from(
+              { length: 6 },
+              (_, index) =>
+                `## Page ${index + 1}\n\ncontent ${index + 1}\n\n${pdfPageCompletionMarker(index + 1)}`,
+            ).join('\n\n'),
+          },
+          finish_reason: 'stop',
+        }],
       })
     })
 

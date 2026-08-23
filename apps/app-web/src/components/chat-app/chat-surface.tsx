@@ -181,6 +181,11 @@ import {
   type ChatLocation,
   type ChatView,
 } from "@/lib/chat-last-location";
+import {
+  resolveChatHandoffAction,
+  takeChatHandoff,
+  type PendingChatHandoff,
+} from "@/lib/chat-handoff";
 import { accelEnterLabel } from "@/lib/surface-shortcuts";
 import { fetchPendingQuestion } from "@/lib/api/pending-questions";
 import { PendingQuestionPanel } from "@/components/chrome/pending-question-panel";
@@ -302,6 +307,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   } | null>(null);
   const [researchExhausted, setResearchExhausted] = useState(false);
   const [assistants, setAssistants] = useState<WorkspaceAssistantSummary[]>([]);
+  const [assistantsLoaded, setAssistantsLoaded] = useState(false);
   /** The room's clearance-filtered `@mention` roster (T-H4) — assistants plus
    *  ONLY the members who can read THIS room. Null until fetched (a fresh
    *  Workspace pane with no session yet, or the fetch hasn't landed); the
@@ -323,6 +329,10 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
    *  Reset whenever the pane returns to a fresh chat — the pick is per chat,
    *  not a sticky preference. */
   const [pickedAssistantId, setPickedAssistantId] = useState<string | null>(null);
+  const [pendingHandoff, setPendingHandoff] =
+    useState<PendingChatHandoff | null>(null);
+  const handoffWorkspaceRef = useRef<string | null>(null);
+  const resolvedHandoffRef = useRef<string | null>(null);
   const [switcherOpen, setSwitcherOpen] = useState(false);
   /** Personal rows across every assistant — resolves an open thread's binding
    *  (each row carries the `assistantId` it was fetched under). */
@@ -736,12 +746,19 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   useEffect(() => {
     if (!workspaceId) return;
     let cancelled = false;
+    setAssistantsLoaded(false);
     listWorkspaceAssistants(workspaceId)
       .then((list) => {
-        if (!cancelled) setAssistants(list);
+        if (!cancelled) {
+          setAssistants(list);
+          setAssistantsLoaded(true);
+        }
       })
       .catch(() => {
-        if (!cancelled) setAssistants([]);
+        if (!cancelled) {
+          setAssistants([]);
+          setAssistantsLoaded(true);
+        }
       });
     return () => {
       cancelled = true;
@@ -2440,6 +2457,54 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       void send({ text });
     };
   }, [send]);
+
+  // Home's compact composer opens this route with an explicit fresh Personal
+  // location and leaves the private prompt in a one-shot per-tab handoff.
+  // Strict Mode re-runs effects, so remember which workspace was consumed.
+  useEffect(() => {
+    if (!workspaceId || handoffWorkspaceRef.current === workspaceId) return;
+    handoffWorkspaceRef.current = workspaceId;
+    setPendingHandoff(takeChatHandoff(workspaceId, Date.now()));
+  }, [workspaceId]);
+
+  // Wait until BOTH roster validation and the `?assistant=` picker have
+  // resolved. A stale/removed assistant keeps the exact prompt as an editable
+  // draft; it must never auto-send to the primary fallback.
+  useEffect(() => {
+    const action = resolveChatHandoffAction({
+      handoff: pendingHandoff,
+      assistantsLoaded,
+      assistantIds: assistants.map((row) => row.id),
+      activeAssistantId: activeAssistant?.id ?? null,
+      activeSessionId,
+      view,
+    });
+    if (!pendingHandoff || action === "wait") return;
+    const handoffKey =
+      `${pendingHandoff.workspaceId}:` +
+      `${pendingHandoff.assistantId}:${pendingHandoff.ts}`;
+    if (resolvedHandoffRef.current === handoffKey) return;
+    resolvedHandoffRef.current = handoffKey;
+    if (action === "drop") {
+      setPendingHandoff(null);
+      return;
+    }
+    const text = pendingHandoff.text;
+    setPendingHandoff(null);
+    if (action === "prefill") {
+      setInput((current) => (current.trim() ? current : text));
+      return;
+    }
+    void send({ text });
+  }, [
+    activeAssistant?.id,
+    activeSessionId,
+    assistants,
+    assistantsLoaded,
+    pendingHandoff,
+    send,
+    view,
+  ]);
 
   const retryUserMessage = useCallback(
     (messageId: string) => {

@@ -28,19 +28,15 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import {
-  DEAL_STAGES,
   type CrmCompanyRow,
-  type DealStage,
+  type CrmPipelineStage,
 } from "@/lib/api/crm";
+import { formatAmount } from "@/lib/crm-view";
 
 export type CellCommit<T> = (next: T) => Promise<{ ok: boolean; error?: string }>;
 
-/** Stage dot tints — pipeline-ordered warmth; won/lost close the loop. */
-export const STAGE_DOT: Record<DealStage, string> = {
-  lead: "bg-muted-foreground/50",
-  qualified: "bg-sky-500",
-  proposal: "bg-blue-500",
-  negotiation: "bg-amber-500",
+export const PIPELINE_CATEGORY_DOT: Record<CrmPipelineStage["category"], string> = {
+  open: "bg-blue-500",
   won: "bg-emerald-500",
   lost: "bg-red-500/70",
 };
@@ -49,46 +45,56 @@ const CELL_TRIGGER =
   "inline-flex h-7 max-w-full items-center gap-1.5 rounded-md px-1.5 text-[13px] " +
   "text-foreground/90 transition-colors hover:bg-muted/70 disabled:opacity-50";
 
-/** Stage pill cell — a `Select` over the six locked stages. */
-export function StageCell({
-  value,
+/** Stable pipeline-stage picker used by board, table, bulk, and detail. */
+export function PipelineStageCell({
+  stageId,
+  stages,
   onCommit,
   disabled,
+  compact = false,
 }: {
-  value: DealStage;
-  onCommit: CellCommit<DealStage>;
+  stageId: string | null;
+  stages: readonly CrmPipelineStage[];
+  onCommit: CellCommit<string>;
   disabled?: boolean;
+  compact?: boolean;
 }) {
-  const t = useT().crmPage;
-  const labels = t.stage as Record<string, string>;
+  const t = useT().crmPage.r2;
   const [busy, setBusy] = useState(false);
+  const selected = stages.find((stage) => stage.id === stageId) ?? null;
   return (
     <Select
-      value={value}
-      onValueChange={(v) => {
-        if (typeof v !== "string" || v === value) return;
+      value={selected?.id}
+      onValueChange={(value) => {
+        if (typeof value !== "string" || value === selected?.id) return;
         setBusy(true);
-        void onCommit(v as DealStage).finally(() => setBusy(false));
+        void onCommit(value).finally(() => setBusy(false));
       }}
       disabled={disabled || busy}
-      items={Object.fromEntries(DEAL_STAGES.map((s) => [s, labels[s] ?? s]))}
     >
       <SelectTrigger
+        aria-label={t.pipelineStage}
         className={cn(
           CELL_TRIGGER,
-          "w-auto border-0 bg-transparent shadow-none dark:bg-transparent",
-          "[&>svg:last-child]:opacity-0 hover:[&>svg:last-child]:opacity-60",
+          compact ? "h-6 max-w-40 px-1 text-[11px]" : "w-auto",
+          "border-0 bg-transparent shadow-none dark:bg-transparent",
           busy && "opacity-60",
         )}
       >
-        <span className={cn("size-2 shrink-0 rounded-full", STAGE_DOT[value])} aria-hidden />
-        <span className="truncate">{labels[value] ?? value}</span>
+        {selected ? (
+          <>
+            <span className={cn("size-2 shrink-0 rounded-full", PIPELINE_CATEGORY_DOT[selected.category])} aria-hidden />
+            <span className="truncate">{selected.name}</span>
+          </>
+        ) : (
+          <span className="truncate text-muted-foreground">{t.pickStage}</span>
+        )}
       </SelectTrigger>
       <SelectContent alignItemWithTrigger={false}>
-        {DEAL_STAGES.map((s) => (
-          <SelectItem key={s} value={s}>
-            <span className={cn("size-2 shrink-0 rounded-full", STAGE_DOT[s])} aria-hidden />
-            <span>{labels[s] ?? s}</span>
+        {stages.map((stage) => (
+          <SelectItem key={stage.id} value={stage.id}>
+            <span className={cn("size-2 shrink-0 rounded-full", PIPELINE_CATEGORY_DOT[stage.category])} aria-hidden />
+            <span>{stage.name}</span>
           </SelectItem>
         ))}
       </SelectContent>
@@ -99,10 +105,12 @@ export function StageCell({
 /** Amount cell — quiet button revealing a number input; empty commits null. */
 export function AmountCell({
   value,
+  currencyCode = "USD",
   onCommit,
   disabled,
 }: {
   value: number | null;
+  currencyCode?: string;
   onCommit: CellCommit<number | null>;
   disabled?: boolean;
 }) {
@@ -158,7 +166,7 @@ export function AmountCell({
       )}
     >
       <span className="whitespace-nowrap">
-        {value !== null ? `$${value.toLocaleString()}` : t.noAmountCell}
+        {value !== null ? formatAmount(value, currencyCode, false) : t.noAmountCell}
       </span>
     </button>
   );

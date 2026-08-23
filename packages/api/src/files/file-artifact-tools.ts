@@ -19,7 +19,13 @@
 // DESCRIPTOR search) already exists and the pair would be model-confusable.
 
 import { z } from 'zod'
-import { buildTool, actorFromContext, type Embedder, type Tool } from '@use-brian/core'
+import {
+  buildTool,
+  actorFromContext,
+  type Embedder,
+  type RetrievalActor,
+  type Tool,
+} from '@use-brian/core'
 import {
   searchFileSegments,
   readFileSegmentRange,
@@ -29,6 +35,11 @@ import {
 export type CreateSearchFileContentToolDeps = {
   /** Query embedder for the vector arm; omit to fall back to the ILIKE arm. */
   embedder?: Pick<Embedder, 'embed'>
+  /** Access-scoped artifact lookup used only to diagnose a zero-segment file. */
+  getFile?: (
+    actor: RetrievalActor,
+    fileId: string,
+  ) => Promise<{ id: string; name: string; mime: string } | null>
 }
 
 /** Sequential paging defaults to a 10-segment window when only `fromIndex` is given. */
@@ -70,7 +81,7 @@ const inputSchema = z.object({
  * the loop) and returns a plain message when the session has no workspace.
  */
 export function createSearchFileContentTool(deps: CreateSearchFileContentToolDeps = {}): Tool {
-  const { embedder } = deps
+  const { embedder, getFile } = deps
   return buildTool({
     name: 'searchFileContent',
     description:
@@ -101,7 +112,32 @@ export function createSearchFileContentTool(deps: CreateSearchFileContentToolDep
             embedder ? { embedder } : undefined,
           )
         }
-        return { data: hits }
+        if (hits.length > 0 || !getFile) return { data: hits }
+
+        // An empty relevance result is a legitimate no-match when the file is
+        // indexed. Probe its first segment to distinguish that case from a raw
+        // artifact whose bytes were saved but never entered Pipeline B.
+        const firstSegment =
+          input.fromIndex === 0
+            ? hits
+            : await readFileSegmentRange(actor, {
+                fileId: input.fileId,
+                fromIndex: 0,
+                toIndex: 0,
+              })
+        if (firstSegment.length > 0) return { data: hits }
+
+        const file = await getFile(actor, input.fileId)
+        if (!file) return { data: hits }
+        return {
+          data:
+            `No document content was read. The stored file "${file.name}" (${file.mime}, id ${file.id}) ` +
+            'has zero indexed segments, so searchFileContent cannot inspect its contents yet. ' +
+            `Call ingestFile with {"fileId":"${file.id}"}. If ingestFile asks for confirmation, ` +
+            'relay that confirmation to the user and call it again only after approval. Wait for ingestion ' +
+            'to finish, then retry searchFileContent. Do not guess or claim that this empty result means no match.',
+          isError: true,
+        }
       } catch (err) {
         return {
           data: `searchFileContent failed: ${err instanceof Error ? err.message : String(err)}`,

@@ -192,8 +192,10 @@ import { EXTRACTION_MODEL } from './build-episode-ingestors.js'
 import { createMailboxSyncWorker } from './mailbox/sync-worker.js'
 import { setGlobalMailboxArchiveDeps } from './mailbox/archive-search-tool.js'
 import { setGlobalMailboxSyncDeps } from './mailbox/sync-tool.js'
+import { setGlobalMailboxContactImportDeps } from './mailbox/contact-import-tools.js'
 import { createMailboxIdleWatcher } from './mailbox/idle-watcher.js'
 import { createChatArchiveTools } from './chat-archive/chat-tools.js'
+import { createSaveChatMediaTool } from './chat-archive/save-media-tool.js'
 import { resolveIngestPlaceholders } from './ingest/placeholder-resolver.js'
 import { createMeteredProfileStore } from './db/metered-profile-store.js'
 import { createWorkspaceModelDefaultsStore } from './db/workspace-model-defaults-store.js'
@@ -206,6 +208,9 @@ import { codexProviderRoutes } from './routes/codex-provider.js'
 import { saveLocalProviderPreference } from './local-provider-preference.js'
 import { brainRoutes } from './routes/brain.js'
 import { brainInboxRoutes } from './routes/brain-inbox.js'
+import { crmRoutes } from './routes/crm.js'
+import { getCrmEmailReviewContext } from './db/crm-r2.js'
+import { resolveWorkspaceViewpoint } from './db/workspace-viewpoint.js'
 import { createBrainEntryMutator } from './brain-entry-mutation.js'
 import { taskGuardrailRoutes } from './routes/task-guardrails.js'
 import { homeRoutes } from './routes/home.js'
@@ -1238,6 +1243,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     if (
       req.path === '/api/local-files'
       || (req.method === 'PUT' && /^\/internal\/chat-archive\/media\/[^/]+\/content$/.test(req.path))
+      || (req.method === 'POST' && /^\/bridge\/v1\/channels\/[^/]+\/media\/[^/]+$/.test(req.path))
     ) {
       next()
       return
@@ -1459,6 +1465,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
   })
   const crmStore = createDbCrmStore()
+  setGlobalMailboxContactImportDeps({ crm: crmStore })
   const workspaceFilesStore = createDbWorkspaceFilesStore()
   const workspaceFileUploadsStore = createWorkspaceFileUploadsStore()
   const workflowStore = createDbWorkflowStore()
@@ -1612,10 +1619,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // workspace runtime at execution time; without either runtime, the provider
   // call fails honestly instead of the feature disappearing at boot.
   const synthesisModel = BACKGROUND_MODEL
-  // A PDF bound for a model whose registry row says `nativePdf: false` is
-  // swapped for its distillate HERE, at the provider boundary — so web chat,
-  // every channel adapter, the outage fallback firing mid-turn, and replayed
-  // history all inherit it with no per-route wiring. Ports keep core DB-free.
+  // Every PDF is swapped for a page-complete validated distillate HERE, at the
+  // provider boundary — so web chat, every channel adapter, the outage
+  // fallback firing mid-turn, and replayed history all inherit it with no
+  // per-route wiring. `nativePdf` is only an emergency path when this port is
+  // absent. Ports keep core DB-free.
   //
   // `mediaBackend` is read lazily inside `distill` because the provider-backed
   // rung is resolved AFTER this provider exists (it needs `provider` itself).
@@ -1633,7 +1641,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         { buffer, mime },
         { backend: selectMediaBackend(mime) },
       )
-      return { text: result.text, model: result.model, usage: result.usage }
+      return {
+        text: result.text,
+        model: result.model,
+        usage: result.usage,
+        ...(result.pageCount !== undefined ? { pageCount: result.pageCount } : {}),
+        ...(result.truncated !== undefined ? { truncated: result.truncated } : {}),
+      }
     },
   }
   const distillateCache: DistillateCachePort = {
@@ -2057,7 +2071,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // ToolContext per call, so read ceilings hold on every path.
     tools.set(
       'searchFileContent',
-      createSearchFileContentTool({ embedder: sharedEmbedder }),
+      createSearchFileContentTool({
+        embedder: sharedEmbedder,
+        getFile: async (actor, fileId) => {
+          const file = await workspaceFilesStore.getById(actor, fileId)
+          return file ? { id: file.id, name: file.name, mime: file.mime } : null
+        },
+      }),
     )
 
     // The recording surface for chat, registered at the same seam and for the
@@ -2471,6 +2491,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     knowledgeStore,
     gdriveFilesStore,
     capabilityStore,
+    apiKeyStore,
     episodicStore,
     analytics,
     usageStore,
@@ -2480,6 +2501,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     defaultTelegramBotToken: env.TELEGRAM_BOT_TOKEN,
     waConnectorUrl: env.WA_CONNECTOR_URL,
     waConnectorSecret: env.WA_CONNECTOR_SECRET,
+    customChannelStore,
     injectExtraTools,
     resolveAppSoul,
     engineHooks: ports.engineHooks,
@@ -2523,6 +2545,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         callerSessionId: '',
         sessionKey: request.contextId,
         allowedTools: request.allowedTools,
+        externalClientPrincipal: request.externalClientPrincipal,
         skills: request.skills,
         enforcedSkills: request.enforcedSkills,
         depth: request.depth,
@@ -2999,6 +3022,19 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       const skills = await workspaceSkillStore.listForWorkspace(workspaceId, { actingUserId: userId })
       return skills.filter((s) => s.state !== 'archived').map((s) => ({ slug: s.slug, name: s.name }))
     },
+    listAuthorableClientApiKeys: async (userId, assistantId) =>
+      (await apiKeyStore.listForUser(userId, assistantId)).map((key) => ({
+        id: key.id,
+        assistantId: key.assistantId,
+        name: key.name,
+        scope: key.scope,
+        audience: key.audience,
+        anonymousContext: key.anonymousContext,
+        toolPolicy: key.toolPolicy,
+        status: key.status,
+        createdAt: key.createdAt.toISOString(),
+        lastUsedAt: key.lastUsedAt?.toISOString() ?? null,
+      })),
     listTriggerJobs: (workflowId) => jobStore.listFiringJobsForWorkflowSystem(workflowId),
     isKnownTool: (name) => allTools.has(name),
     resolveKnownWorkflowTools: async ({ userId, workspaceId, assistantId, toolNames }) => {
@@ -3565,6 +3601,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     allTools.set('saveFileToBrain', fileTools.saveFileToBrain)
     allTools.set('sendFile', fileTools.sendFile)
     allTools.set('renderPdf', fileTools.renderPdf)
+    // Archive media retrieval needs BOTH seams: the store (bytes) and the
+    // file layer (where sendFile and the web Files view can reach them) —
+    // which is why it registers here and not with the read-only archive
+    // tools at their earlier block.
+    if (messageStoreClient) {
+      allTools.set('saveChatMedia', createSaveChatMediaTool({ client: messageStoreClient, filesApi }))
+    }
     brainFileTools = {
       fileWrite: fileTools.fileWrite,
       fileAppend: fileTools.fileAppend,
@@ -4653,6 +4696,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     app.use('/api/connectors', requireAuth(env.JWT_SECRET), connectorRoutes({
       connectorStore,
       connectorInstanceStore,
+      connectorGrantStore,
       mcpSettingsStore,
       gcsByo: {
         requireWorkspaceAdmin: async (userId, workspaceId) => {
@@ -5072,6 +5116,18 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     approvalsStore: pendingApprovalsStore,
     workspaceStore,
     bridgeDeps: approvalBridgeDeps,
+    emailReviewContext: async (input) => {
+      const ctx = await resolveWorkspaceViewpoint(input.userId, input.workspaceId, null)
+      if (!ctx) return null
+      return getCrmEmailReviewContext({
+        ctx,
+        entityId: input.entityId,
+        recipient: input.recipient,
+        replyTo: input.replyTo,
+        toolName: input.toolName,
+        account: input.account,
+      })
+    },
     resumeDeps: {
       approvalsStore: pendingApprovalsStore,
       sessionResumeStore,
@@ -5929,6 +5985,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // (The public /api/brain/stream SSE mount lives ABOVE the bare `/api`
   // requireAuth guards — see the block next to workflowWebhookRoutes.)
   app.use('/api/brain', requireAuth(env.JWT_SECRET), brainRoutes({ entitiesStore, entityLinksStore, retrievalStore, knowledgeStore, workspaceSkillStore, workspaceSkillFilesStore, connectorInstanceStore }))
+  app.use('/api/crm', requireAuth(env.JWT_SECRET), crmRoutes({
+    workspaceStore,
+    entityLinks: entityLinksStore,
+  }))
   // Brain inbox (verification surface). Open + hosted share this one mount: the
   // route's deps are all open (brain-inbox-store / entities-store / crm / sessions /
   // notify). `entityKindClassifier` is boot's own; `pendingClassificationStore` is
@@ -7360,6 +7420,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             incomingChannelMessageId: input.messageId,
             archiveIncoming: {
               userId: input.senderPnJid ?? input.senderJid,
+              senderDisplay: input.senderName,
               channelId: input.chatJid,
               messageId: input.messageId,
               text: /^<media:[^>]+>$/.test(input.text.trim()) ? '' : input.text,
@@ -7431,6 +7492,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         }),
         passUnknownToFallback: ports.whatsappOfficialFallback,
         archiveMedia: chatArchiveLiveMedia,
+        archiveContacts: messageStoreClient
+          ? (input) => messageStoreClient.upsertContacts(input)
+          : undefined,
       }))
     }
 
@@ -7547,6 +7611,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         connectorInstanceStore, knowledgeStore, gdriveFilesStore, workspaceFilesStore, analytics,
         skillStore, episodicStore, sessionStateStore, fileStore,
         archiveMedia: chatArchiveLiveMedia,
+        voiceTranscription,
+        deferredConfirmationStore,
       }))
     }
   }

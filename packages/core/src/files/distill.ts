@@ -5,10 +5,10 @@
  * Runs on whichever adapter is configured, via the shared `media/backend.ts`
  * seam: Gemini `inlineData` (`generateContent`) over AI Studio or Vertex,
  * Qwen-VL / `qwen-long` over DashScope, or the deployment's own chat model.
- * A PDF takes one of two paths — Gemini's native inlineData reader, or
- * full-page image distillation (`files/pdf-distill.ts`) on every other
- * backend. Images use Qwen-VL inline; non-PDF office documents keep the
- * `qwen-long` file-upload flow.
+ * A PDF takes one of two validated paths — Gemini's native inlineData reader
+ * with per-page completion markers, or full-page image distillation
+ * (`files/pdf-distill.ts`). Images use Qwen-VL inline; non-PDF office
+ * documents keep the `qwen-long` file-upload flow.
  *
  * PDFs additionally have a local text-layer fallback (`extractPdfText`, via
  * unpdf): when the configured adapter cannot distill the document — e.g. a
@@ -56,6 +56,9 @@ export type DistillResult = {
   usage: TokenUsage | null
   model: string
   usageByModel?: Array<{ model: string; usage: TokenUsage }>
+  pageCount?: number
+  truncated?: boolean
+  failedPages?: number[]
 }
 
 const DEFAULT_MODEL = 'gemini-2.5-flash'
@@ -97,7 +100,16 @@ export async function distillFileToText(
     // Native distillation produced text, or this is a non-PDF (images have no
     // local fallback) — done. An empty PDF result falls through to the text
     // layer below in case the adapter silently declined it.
-    if (result.text.trim() || !isPdf) return result
+    if (result.text.trim() || !isPdf) {
+      return {
+        ...result,
+        ...(result.pageCount !== undefined ? { pageCount: result.pageCount } : {}),
+        ...(result.documentTruncated !== undefined
+          ? { truncated: result.documentTruncated }
+          : {}),
+        ...(result.failedPages !== undefined ? { failedPages: result.failedPages } : {}),
+      }
+    }
   } catch (err) {
     // The adapter couldn't distill this document. Only PDFs have a local
     // fallback; anything else is a real failure the caller must see.

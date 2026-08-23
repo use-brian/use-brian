@@ -31,6 +31,7 @@ import type {
 import type { GcsFilesClient } from './gcs-client.js'
 import { buildStorageKey, buildStorageUri, type StorageUriScheme } from './gcs-client.js'
 import type { WorkspaceAuditStore } from '../db/workspace-audit-store.js'
+import { localDirectoryMetadata, storageKeyForWorkspaceFile } from './local-directory-import.js'
 
 /**
  * Per-workspace resolution of the bytes-layer client. The default
@@ -362,6 +363,7 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
     async append(ctx, idOrPath, content): Promise<FilesResult<WorkspaceFile>> {
       const file = await resolveByIdOrPath(ctx, idOrPath)
       if (!file) return err({ kind: 'not_found', reference: idOrPath })
+      if (localDirectoryMetadata(file)) return err({ kind: 'read_only', path: file.path })
 
       const addBytes = Buffer.from(content, 'utf-8')
       const { byo } = await resolver.forWorkspace(ctx.workspaceId)
@@ -378,7 +380,7 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
       }
 
       const gcs = await resolver.forUri(ctx.workspaceId, file.storageUri)
-      const storageKey = buildStorageKey(ctx.workspaceId, file.id)
+      const storageKey = storageKeyForWorkspaceFile(file)
       await gcs.appendBlob(storageKey, addBytes)
 
       const newSize = file.sizeBytes + addBytes.length
@@ -409,7 +411,7 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
       if (!file) return err({ kind: 'not_found', reference: idOrPath })
 
       const gcs = await resolver.forUri(ctx.workspaceId, file.storageUri)
-      const blob = await gcs.readBlob(buildStorageKey(ctx.workspaceId, file.id))
+      const blob = await gcs.readBlob(storageKeyForWorkspaceFile(file))
       if (!blob) {
         // Row exists but bytes are missing — orphaned row. Surface as
         // not_found; ops can investigate via storage_uri.
@@ -425,7 +427,7 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
       if (!file) return err({ kind: 'not_found', reference: idOrPath })
 
       const gcs = await resolver.forUri(ctx.workspaceId, file.storageUri)
-      const blob = await gcs.readBlob(buildStorageKey(ctx.workspaceId, file.id))
+      const blob = await gcs.readBlob(storageKeyForWorkspaceFile(file))
       if (!blob) {
         return err({ kind: 'not_found', reference: idOrPath })
       }
@@ -457,13 +459,14 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
     async delete(ctx, idOrPath): Promise<FilesResult<{ id: string; path: string }>> {
       const file = await resolveByIdOrPath(ctx, idOrPath)
       if (!file) return err({ kind: 'not_found', reference: idOrPath })
+      if (localDirectoryMetadata(file)) return err({ kind: 'read_only', path: file.path })
 
       const deleted = await store.delete(ctx.userId, ctx.workspaceId, file.id)
       if (!deleted) return err({ kind: 'not_found', reference: idOrPath })
 
       try {
         const gcs = await resolver.forUri(ctx.workspaceId, file.storageUri)
-        await gcs.deleteBlob(buildStorageKey(ctx.workspaceId, file.id))
+        await gcs.deleteBlob(storageKeyForWorkspaceFile(file))
       } catch (gcsErr) {
         console.warn(
           `[files-api] delete: GCS deleteBlob failed for ${file.id} (row already deleted):`,

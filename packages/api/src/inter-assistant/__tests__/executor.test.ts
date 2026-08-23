@@ -27,6 +27,8 @@ vi.mock('@use-brian/core', async (io) => ({
 }))
 vi.mock('../../db/users.js', () => ({
   findAssistantById: vi.fn(),
+  findOrCreateUser: vi.fn(),
+  findUserByEmail: vi.fn(),
   findUserById: vi.fn(),
 }))
 vi.mock('../../db/sessions.js', () => ({
@@ -93,13 +95,19 @@ import {
   extractEffectContract,
   RESULT_PATH,
 } from '@use-brian/core'
-import { findAssistantById, findUserById } from '../../db/users.js'
+import {
+  findAssistantById,
+  findOrCreateUser,
+  findUserByEmail,
+  findUserById,
+} from '../../db/users.js'
 import {
   findOrCreateSession,
   addSessionMessage,
   listSessionsByChannelForWorkspaceSystem,
 } from '../../db/sessions.js'
 import { billingPartyForAssistant } from '../../billing-party.js'
+import { resolveReadCeilingsSystem } from '../../db/workspace-store.js'
 import { runProactiveCompaction } from '../../routes/proactive-compaction.js'
 import { injectDocTools } from '../../doc/inject.js'
 import { injectMcpTools } from '../../mcp/inject.js'
@@ -115,6 +123,9 @@ const mockInjectMcp = vi.mocked(injectMcpTools)
 
 const mockFindAssistant = vi.mocked(findAssistantById)
 const mockFindUser = vi.mocked(findUserById)
+const mockFindOrCreateUser = vi.mocked(findOrCreateUser)
+const mockFindUserByEmail = vi.mocked(findUserByEmail)
+const mockResolveReadCeilings = vi.mocked(resolveReadCeilingsSystem)
 const mockSession = vi.mocked(findOrCreateSession)
 const mockAddMessage = vi.mocked(addSessionMessage)
 const mockListConversationSessions = vi.mocked(listSessionsByChannelForWorkspaceSystem)
@@ -199,12 +210,127 @@ beforeEach(() => {
     (id === 'callee-1' ? calleeAssistant : id === 'caller-1' ? callerAssistant : null) as never,
   )
   mockFindUser.mockResolvedValue({ id: 'owner-1', timezone: 'UTC' } as never)
+  mockFindUserByEmail.mockResolvedValue(null)
+  mockFindOrCreateUser.mockResolvedValue({
+    user: {
+      id: 'client-shadow-1',
+      authProvider: 'channel',
+      authProviderId: 'api:00000000-0000-4000-8000-000000000010:client-17',
+      name: 'api:client-17',
+    },
+    isNew: false,
+  } as never)
+  mockResolveReadCeilings.mockResolvedValue({ clearance: 'confidential', compartments: null })
   mockBilling.mockResolvedValue('owner-1')
   mockSession.mockResolvedValue({ id: 'sess-1' } as never)
   vi.spyOn(console, 'error').mockImplementation(() => {})
 })
 
 describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
+  it('[COMP:api/client-principal-runtime] reconstructs the API client surface for a workflow consult', async () => {
+    const scopedMemory = memoryStore()
+    const clientAssistant = {
+      id: 'callee-1',
+      ownerUserId: 'owner-1',
+      workspaceId: 'workspace-1',
+      kind: 'standard',
+      clearance: 'internal',
+      compartments: null,
+      defaultCompartments: [],
+      name: 'Studio Brian',
+    }
+    mockFindAssistant.mockImplementation(async (id: string) =>
+      (id === 'callee-1' ? clientAssistant : id === 'caller-1' ? callerAssistant : null) as never,
+    )
+    mockResolveReadCeilings.mockResolvedValue({ clearance: 'public', compartments: [] })
+    yieldsText('Internal draft')
+
+    const readClientInfo = {
+      name: 'readClientInfo',
+      description: 'Read the current client profile',
+      inputSchema: {} as never,
+      isConcurrencySafe: true,
+      isReadOnly: true,
+      requiresConfirmation: false,
+      execute: vi.fn(),
+    }
+    const sendClientEmail = {
+      name: 'sendClientEmail',
+      description: 'Send an email to the current client',
+      inputSchema: {} as never,
+      isConcurrencySafe: false,
+      isReadOnly: false,
+      requiresConfirmation: false,
+      execute: vi.fn(),
+    }
+
+    const callee = createCalleeExecutor({
+      provider: {} as never,
+      tools: new Map([
+        ['readClientInfo', readClientInfo],
+        ['sendClientEmail', sendClientEmail],
+      ]) as never,
+      memoryStore: scopedMemory as never,
+      capabilityStore: { listActive: vi.fn().mockResolvedValue([]) } as never,
+      connectorStore: {} as never,
+      mcpSettingsStore: {} as never,
+      apiKeyStore: {
+        getByIdSystem: vi.fn().mockResolvedValue({
+          id: '00000000-0000-4000-8000-000000000010',
+          assistantId: 'callee-1',
+          scope: 'chat',
+          audience: 'external',
+          toolPolicy: 'assistant',
+          status: 'active',
+        }),
+      } as never,
+    })
+
+    await expect(callee({
+      ...baseParams,
+      workspaceId: 'workspace-1',
+      expectedWorkspaceId: 'workspace-1',
+      callerChannelType: 'workflow',
+      externalClientPrincipal: {
+        apiKeyId: '00000000-0000-4000-8000-000000000010',
+        externalUserId: 'client-17',
+      },
+    })).resolves.toBe('Internal draft')
+
+    expect(mockSession).toHaveBeenCalledWith(expect.objectContaining({ userId: 'client-shadow-1' }))
+    expect(mockInjectMcp).toHaveBeenCalledWith(expect.objectContaining({
+      keepBuiltinsDirect: true,
+      keepDynamicToolsDirect: true,
+      actorIdentity: {
+        channel: 'api',
+        id: 'client-17',
+        userId: 'client-shadow-1',
+      },
+    }))
+    expect(scopedMemory.getIndex).toHaveBeenCalledWith(expect.objectContaining({
+      userId: 'client-shadow-1',
+      clearance: 'public',
+      compartments: [],
+      clientSelfMemory: { compartment: 'client:client-17' },
+    }))
+    expect(scopedMemory.getWorkspaceIndex).not.toHaveBeenCalled()
+    const loopArgs = mockQueryLoop.mock.calls.at(-1)?.[0]
+    expect(loopArgs.tools.has('readClientInfo')).toBe(true)
+    expect(loopArgs.tools.has('sendClientEmail')).toBe(false)
+    expect(loopArgs.tools.has('saveMemory')).toBe(false)
+    expect(loopArgs.context).toMatchObject({
+      userId: 'client-shadow-1',
+      workspaceId: 'workspace-1',
+      clearance: 'public',
+      compartments: [],
+      clientSelfMemory: { compartment: 'client:client-17' },
+      memoryWriteSensitivityFloor: 'internal',
+      memoryWriteCompartments: ['client:client-17'],
+      assistantDefaultCompartments: ['client:client-17'],
+    })
+    expect(loopArgs.systemPrompt).toContain('External client boundary')
+  })
+
   it('throws when the callee assistant does not exist', async () => {
     mockFindAssistant.mockResolvedValueOnce(null as never)
     await expect(executor()(baseParams)).rejects.toThrow('Callee assistant not found')

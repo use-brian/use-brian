@@ -82,12 +82,9 @@ export type TabsSeed = {
  *  2. **Stored strip + a URL entry** (a deep link, a sidebar page click from
  *     Brain) — the URL wins for the *active tab*; the rest of the strip is
  *     kept. Same as any in-surface navigation.
- *  3. **Stored strip + no URL entry** (the nav rail's Home targets a bare
- *     `/w/<id>/p`) — the STRIP wins and the URL follows. The nav rail is a
- *     surface switcher, not a browser home button: coming back to Home must
- *     show the doc surface as it was left. Blanking the active tab stays the
- *     behaviour of clicking Home while the surface is already mounted, which
- *     is a live URL change and never routes through here.
+ *  3. **Stored strip + no URL entry** (a bare `/w/<id>/p`) — the STRIP wins
+ *     and the URL follows. The app switcher is a surface switcher, not a
+ *     browser home button: returning to Page must restore its last position.
  */
 export function seedDocTabs(
   stored: TabsState | null,

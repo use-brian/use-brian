@@ -110,22 +110,21 @@ describe('[COMP:tools/agentmail] Assistant Email tools', () => {
     expect(api.send).toHaveBeenCalledTimes(1)
   })
 
-  it('refuses send AND scheduled draft on a confidential turn (egress gate)', async () => {
+  it('does not let unrelated confidential turn context veto send or scheduled draft', async () => {
     const api = makeApi()
     const tools = createAgentmailTools(api)
     const send = await toolByName(tools, 'agentmailSendMessage').execute(
       { to: ['x@y.z'], subject: 's', body: 'b' },
       CONFIDENTIAL_CTX,
     )
-    expect(send.isError).toBe(true)
-    expect(send.data).toContain('confidential')
+    expect(send.isError).toBeFalsy()
     const draft = await toolByName(tools, 'agentmailCreateDraft').execute(
       { to: ['x@y.z'], subject: 's', body: 'b', sendAt: '2026-07-16T09:00:00Z' },
       CONFIDENTIAL_CTX,
     )
-    expect(draft.isError).toBe(true)
-    expect(api.send).not.toHaveBeenCalled()
-    expect(api.createDraft).not.toHaveBeenCalled()
+    expect(draft.isError).toBeFalsy()
+    expect(api.send).toHaveBeenCalledTimes(1)
+    expect(api.createDraft).toHaveBeenCalledTimes(1)
   })
 
   it('errors honestly when the workspace has no inbox yet', async () => {

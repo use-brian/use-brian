@@ -80,17 +80,27 @@ const REQUEST = (messages: Message[]): ProviderRequest => ({
   messages,
 })
 
-describe('[COMP:providers/document-adaptation] native pass-through', () => {
-  it('returns the provider untouched when the model reads PDFs natively', async () => {
+describe('[COMP:providers/document-adaptation] native PDF validation', () => {
+  it('distills PDFs through the validated boundary even when the model reads them natively', async () => {
     const { provider, requests } = recordingProvider()
     const { port, distill } = fakeDistill()
     const wrapped = wrapDocumentAdaptation(provider, { nativePdf: true, vision: true, distill: port })
 
-    // Identity: the Gemini path pays nothing, not even a message scan.
-    expect(wrapped).toBe(provider)
+    expect(wrapped).not.toBe(provider)
 
     await drain(wrapped.stream(REQUEST([{ role: 'user', content: [pdfBlock()] }])))
-    expect(distill).not.toHaveBeenCalled()
+    expect(distill).toHaveBeenCalledOnce()
+    const content = requests[0]!.messages[0]!.content as Array<{ type: string; text?: string }>
+    expect(content[0]!.type).toBe('text')
+    expect(content[0]!.text).toContain('Quarterly revenue up 12%.')
+  })
+
+  it('keeps native pass-through as an emergency path when no distillation port exists', async () => {
+    const { provider, requests } = recordingProvider()
+    const wrapped = wrapDocumentAdaptation(provider, { nativePdf: true, vision: true })
+
+    expect(wrapped).toBe(provider)
+    await drain(wrapped.stream(REQUEST([{ role: 'user', content: [pdfBlock()] }])))
     expect(requests[0]!.messages[0]!.content).toEqual([pdfBlock()])
   })
 })
@@ -164,7 +174,7 @@ describe('[COMP:providers/document-adaptation] non-native swap', () => {
       content: [imageBlock('image/jpeg', IMAGE_BYTES, 'chart.jpg'), pdfBlock()],
     }])))
 
-    expect(distill).toHaveBeenCalledTimes(1)
+    expect(distill).toHaveBeenCalledTimes(2)
     expect(distill).toHaveBeenCalledWith({
       buffer: Buffer.from(IMAGE_BYTES, 'base64'),
       mime: 'image/jpeg',
@@ -178,7 +188,8 @@ describe('[COMP:providers/document-adaptation] non-native swap', () => {
     expect(content[0]!.text).toContain('name="chart.jpg"')
     expect(content[0]!.text).toContain('type="image/jpeg"')
     expect(content[0]!.text).toContain('A chart showing rising revenue.')
-    expect(content[1]).toEqual(pdfBlock())
+    expect(content[1]!.type).toBe('text')
+    expect(content[1]!.text).toContain('type="application/pdf"')
   })
 
   it('does not mutate the caller\'s messages (session history is shared state)', async () => {
@@ -335,7 +346,7 @@ describe('[COMP:providers/document-adaptation] honest failure', () => {
 })
 
 describe('[COMP:providers/document-adaptation] applied per concrete model in routing', () => {
-  it('passes through on the Gemini primary but distills for its Anthropic fallback', async () => {
+  it('uses one cached validated distillate for a Gemini primary and its Anthropic fallback', async () => {
     // The registry pairs `gemini-flash-3` (nativePdf) with the `claude-haiku-4-5`
     // outage fallback (not native). An outage mid-PDF-turn used to hand the
     // fallback a block its adapter drops silently.
@@ -351,12 +362,13 @@ describe('[COMP:providers/document-adaptation] applied per concrete model in rou
       },
     }
     const { port, distill } = fakeDistill()
+    const cache = memoryCache()
 
     const routing = createRoutingProvider(
       { gemini: failing, anthropic: anthropic.provider },
       {
         availability: new Set(['gemini', 'anthropic']),
-        documentAdaptation: { distill: port },
+        documentAdaptation: { distill: port, cache: cache.port },
       },
     )
 
@@ -365,8 +377,9 @@ describe('[COMP:providers/document-adaptation] applied per concrete model in rou
       model: 'gemini-flash-3',
     }))
 
-    // Primary saw the raw PDF (native), fallback saw the distillate.
-    expect(gemini.requests[0]!.messages[0]!.content).toEqual([pdfBlock()])
+    const primaryContent = gemini.requests[0]!.messages[0]!.content as Array<{ type: string; text?: string }>
+    expect(primaryContent[0]!.type).toBe('text')
+    expect(primaryContent[0]!.text).toContain('Quarterly revenue up 12%.')
     expect(distill).toHaveBeenCalledTimes(1)
     const fallbackContent = anthropic.requests[0]!.messages[0]!.content as Array<{ type: string; text?: string }>
     expect(fallbackContent[0]!.type).toBe('text')

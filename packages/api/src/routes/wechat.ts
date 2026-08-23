@@ -59,6 +59,7 @@ import { billingPartyForAssistant } from '../billing-party.js'
 import type { ChatArchiveLiveMedia } from '../chat-archive/live-media.js'
 import { archiveMediaRef } from '../chat-archive/live-media.js'
 import { resolveChatArchiveInstanceId, archiveUnroutedInbound } from '../chat-archive/live-writer.js'
+import { query } from '../db/client.js'
 
 export type WechatRouteOptions = {
   /** Servable background-lane model, resolved at boot; forwarded to the
@@ -207,6 +208,81 @@ export function wechatRoutes(options: WechatRouteOptions): Router {
     }
   })
 
+  /**
+   * Stage an unrouted message's media into the archive before its append.
+   *
+   * Mirrors processMessage's staging block, but resolves the target from the
+   * WORKSPACE OWNER (what `appendUnroutedInbound` uses) rather than a billing
+   * party — the store links assets by exact (workspace, instance, owner) and
+   * fails the append on a mismatch. Sets `incoming.archiveMediaRef` /
+   * `archiveMediaAvailability` in place, exactly like the routed loop.
+   */
+  async function stageUnroutedWechatMedia(args: {
+    channel: { workspaceId: string }
+    connectorInstanceId: string | null | undefined
+    incoming: IncomingMessage
+    raw: WeixinMessage | undefined
+  }): Promise<void> {
+    const { incoming, raw } = args
+    if (!options.archiveMedia || !raw || !incoming.messageId) return
+    const mediaItem = findWechatMediaItem(raw.item_list)
+    if (!mediaItem) return
+    const fallbackKind = mediaItem.video_item ? 'video'
+      : mediaItem.voice_item ? 'voice'
+        : mediaItem.image_item ? 'image' : 'file'
+    incoming.mediaType = fallbackKind === 'image' ? 'photo'
+      : fallbackKind === 'file' ? 'document' : fallbackKind
+    incoming.archiveMediaAvailability = 'missing'
+    try {
+      const owner = await query<{ ownerUserId: string }>(
+        `SELECT owner_user_id AS "ownerUserId" FROM workspaces WHERE id = $1`,
+        [args.channel.workspaceId],
+      )
+      const ownerUserId = owner.rows[0]?.ownerUserId
+      if (!ownerUserId) return
+      const maxBytes = fallbackKind === 'video' || fallbackKind === 'voice'
+        ? MAX_LARGE_MEDIA_BYTES : MAX_SMALL_MEDIA_BYTES
+      const media = await downloadWechatMediaItem(mediaItem, { maxBytes })
+      if (!media) throw new Error('iLink media item did not contain downloadable bytes')
+      const archiveKind = media.mime === 'image/gif' ? 'video' : media.kind
+      incoming.mediaType = archiveKind === 'image' ? 'photo'
+        : archiveKind === 'file' ? 'document' : archiveKind
+      incoming.mediaMime = media.mime
+      incoming.mediaName = media.name
+      incoming.mediaSizeBytes = media.data.length
+      const instanceId = args.connectorInstanceId
+        ?? await resolveChatArchiveInstanceId({
+          source: 'wechat',
+          ownerUserId,
+          workspaceId: args.channel.workspaceId,
+          assistantId: '',
+          assistantName: '',
+          conversationId: incoming.channelId,
+        })
+      if (!instanceId) throw new Error('wechat archive instance could not be resolved')
+      const asset = await options.archiveMedia.storeBuffer({
+        workspaceId: args.channel.workspaceId,
+        instanceId,
+        ownerUserId,
+        source: 'wechat',
+        providerMessageId: incoming.messageId,
+        kind: archiveKind,
+        filename: media.name,
+        mime: media.mime,
+        bytes: media.data,
+      })
+      const ref = archiveMediaRef(asset)
+      incoming.archiveMediaRef = {
+        assetId: ref.asset_id!, sha256: ref.sha256!, filename: ref.filename,
+        mime: ref.mime, sizeBytes: ref.size_bytes,
+      }
+      incoming.archiveMediaAvailability = undefined
+    } catch (err) {
+      incoming.archiveMediaAvailability = 'failed'
+      throw err
+    }
+  }
+
   // ── Inbound message from the long-poll connector ──────────────
   router.post('/inbound', async (req, res) => {
     const parsed = inboundSchema.safeParse(req.body)
@@ -275,10 +351,23 @@ export function wechatRoutes(options: WechatRouteOptions): Router {
         // A failure here must not change the outcome. The message is already
         // going unanswered; losing it from the archive too is strictly worse
         // than a logged error.
+        //
+        // Media too: this exit never reaches processMessage's staging loop,
+        // and iLink CDN bytes cannot be re-fetched later — an attachment
+        // archived here as filename hints is unrecoverable. Stage first,
+        // under the SAME (workspace owner, instance) the unrouted append
+        // resolves to; the store links assets by exact match.
+        await stageUnroutedWechatMedia({
+          channel,
+          connectorInstanceId: integration.connectorInstanceId,
+          incoming,
+          raw: incoming.raw as WeixinMessage | undefined,
+        }).catch((err) => console.error('[wechat] unrouted archive media staging failed:', err))
         await archiveUnroutedInbound({
           source: 'wechat',
           workspaceId: channel.workspaceId,
           conversationId: peerId,
+          connectorInstanceId: integration.connectorInstanceId,
           message: incoming,
         }).catch((err) => console.error('[wechat] unrouted archive append failed:', err))
         console.log(`[wechat] no assistant routing for ${peerId} on channel ${channelId} — archived, not answered`)

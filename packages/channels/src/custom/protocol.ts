@@ -20,6 +20,19 @@
 
 export const CUSTOM_CHANNEL_PROTOCOL_VERSION = 1
 
+/**
+ * Optional server abilities advertised by name in the hello `features` array.
+ * Additive (v1.2): bridges gate optional behaviour on a feature's presence,
+ * never on `protocol` — deployed v1 bridges hard-exit on a protocol number
+ * they do not speak, so the number can effectively never move.
+ */
+export const CUSTOM_CHANNEL_FEATURE_MEDIA_UPGRADE = 'media_upgrade'
+export const CUSTOM_CHANNEL_FEATURE_MEDIA_STREAM = 'media_stream'
+export const CUSTOM_CHANNEL_FEATURES = [
+  CUSTOM_CHANNEL_FEATURE_MEDIA_UPGRADE,
+  CUSTOM_CHANNEL_FEATURE_MEDIA_STREAM,
+] as const
+
 export const BRIDGE_INBOUND_TEXT_MAX_BYTES = 64 * 1024
 export const BRIDGE_INBOUND_MEDIA_MAX_ITEMS = 4
 export const BRIDGE_INBOUND_MEDIA_MAX_BYTES = 25 * 1024 * 1024
@@ -43,6 +56,16 @@ export type BridgeState = {
   action?: BridgeAction
   /** Bridge build / version string for the Studio card. */
   bridgeVersion?: string
+  /**
+   * What this bridge can actually put on the wire. Additive (v1.1): an older
+   * bridge that never reports it is treated as text-only, so `sendFile`
+   * refuses honestly instead of the adapter enqueueing documents the bridge
+   * would silently drop. Declare `documents: true` ONLY when the bridge's
+   * outbox worker performs a real file send for `payload.documents`.
+   */
+  capabilities?: {
+    documents?: boolean
+  }
 }
 
 // ── Inbound (POST /inbound) ────────────────────────────────────
@@ -53,9 +76,14 @@ export type BridgeInboundMedia = {
   kind: BridgeInboundMediaKind
   mime: string
   name: string
-  /** Exactly one of dataBase64 / url. url must be fetchable from the API with no auth. */
+  /** Exactly one of dataBase64 / url / stored. */
   dataBase64?: string
   url?: string
+  /** Result of the authenticated raw-body `/media/:messageId` upload. */
+  stored?: {
+    assetId: string
+    sha256: string
+  }
   sizeBytes?: number
   durationSec?: number
 }
@@ -80,7 +108,18 @@ export type BridgeInboundMessage = {
   media?: BridgeInboundMedia[]
 }
 
-export type BridgeInbound = { message: BridgeInboundMessage }
+export type BridgeInbound = {
+  message: BridgeInboundMessage
+  /**
+   * Media upgrade (additive, v1.2; send only when the hello `features`
+   * include 'media_upgrade'): `message` was already delivered through this
+   * endpoint and `media` now carries better bytes for the same `messageId`
+   * (e.g. the WeChat original after the thumbnail). The server re-stages the
+   * asset and re-appends the archive row; it never runs a turn. Requires
+   * `messageId` + non-empty `media`.
+   */
+  mediaUpgrade?: boolean
+}
 
 /** Byte length of a base64 payload after decoding (ignores padding). */
 export function base64DecodedLength(b64: string): number {
@@ -106,7 +145,7 @@ export function bridgeInboundOversize(inbound: BridgeInbound): string | null {
     if (item.dataBase64 && base64DecodedLength(item.dataBase64) > BRIDGE_INBOUND_MEDIA_MAX_BYTES) {
       return `media item "${item.name}" exceeds ${BRIDGE_INBOUND_MEDIA_MAX_BYTES} bytes`
     }
-    if (item.sizeBytes != null && item.sizeBytes > BRIDGE_INBOUND_MEDIA_MAX_BYTES) {
+    if (item.stored == null && item.sizeBytes != null && item.sizeBytes > BRIDGE_INBOUND_MEDIA_MAX_BYTES) {
       return `media item "${item.name}" exceeds ${BRIDGE_INBOUND_MEDIA_MAX_BYTES} bytes`
     }
   }
@@ -127,6 +166,7 @@ export type OutboxMessagePayload = {
 export type OutboxItem =
   | { id: string; type: 'message'; peerId: string; createdAt: string; payload: OutboxMessagePayload }
   | { id: string; type: 'typing'; peerId: string; createdAt: string; payload: { on: boolean } }
+  | { id: string; type: 'status'; peerId: string; createdAt: string; payload: { text: string } }
   | { id: string; type: 'input'; peerId: null; createdAt: string; payload: { requestId: string; value: string } }
   | { id: string; type: 'disconnect'; peerId: null; createdAt: string; payload: Record<string, never> }
 
@@ -142,5 +182,7 @@ export type BridgeHello = {
   kind: string | null
   config: { requireMention: boolean; userAccessMode: string }
   protocol: typeof CUSTOM_CHANNEL_PROTOCOL_VERSION
+  /** Optional server abilities by name (additive, v1.2) — see CUSTOM_CHANNEL_FEATURES. */
+  features: string[]
   serverTime: string
 }

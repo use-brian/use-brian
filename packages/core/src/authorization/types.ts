@@ -48,6 +48,14 @@ export const CONFIGURE_CAPABILITY = 'configure'
  */
 export const ANALYTICS_QUERY_CAPABILITY = 'analytics_query'
 
+/**
+ * Hosted operator lifecycle-automation capability. It is intentionally
+ * separate from workspace `configure`: an ordinary workspace owner may arm
+ * configuration, but only an operator can grant authority over platform-wide
+ * signup and billing event destinations.
+ */
+export const OPERATOR_AUTOMATION_CAPABILITY = 'operator_automation'
+
 export type CapabilityStore = {
   /** Active capability names for one assistant. Used by the per-turn tool-list filter. */
   listActive(assistantId: string): Promise<string[]>

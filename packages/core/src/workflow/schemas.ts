@@ -10,8 +10,8 @@
 
 import { z } from 'zod'
 import { WORKFLOW_STEP_TYPES } from './types.js'
-import type { WorkflowDefinition } from './types.js'
-import { findCycle, parallelRegionSteps } from './graph.js'
+import type { ToolCallStep, WorkflowDefinition } from './types.js'
+import { buildReachability, findCycle, parallelRegionSteps } from './graph.js'
 import { ResearchDepthConfigSchema } from '../engine/research-depth.js'
 
 // ── Step ID and common shape ────────────────────────────────────────────
@@ -221,6 +221,10 @@ const assistantCallStepSchema = z.object({
 // ── tool_call ───────────────────────────────────────────────────────────
 
 const approvalSchema = z.object({
+  // Unlike a mutable connector policy, this is part of the workflow's
+  // definition: every run must pause even when the tool otherwise resolves
+  // to allow. The external-client reply boundary relies on this invariant.
+  required: z.boolean().optional(),
   // Approval pings have no custom-channel renderer yet (approvals are out of
   // the custom-channel v1 scope); the enum stays narrower than deliver's.
   deliveryChannel: z.enum(['web', 'telegram', 'slack', 'whatsapp', 'msteams']).optional(),
@@ -238,6 +242,69 @@ const toolCallStepSchema = z.object({
   arguments: z.record(z.unknown()),
   approval: approvalSchema.optional(),
 })
+
+const REVIEWED_REPLY_TOOL = 'imapSendMessage'
+const REVIEWED_REPLY_TO = '{{input.event.sender}}'
+const REVIEWED_REPLY_SUBJECT = '{{input.event.subject}}'
+const REVIEWED_REPLY_THREAD = '{{input.event.message_id}}'
+const REVIEWED_REPLY_BODY_RE = /^\{\{vars\.([a-zA-Z][a-zA-Z0-9_]*)\}\}$/
+const REVIEWED_REPLY_ARGUMENT_KEYS = new Set(['to', 'subject', 'body', 'inReplyTo', 'account'])
+
+function canonicalToolName(toolName: string): string {
+  const suffix = toolName.indexOf('__')
+  return suffix === -1 ? toolName : toolName.slice(0, suffix)
+}
+
+/**
+ * Structural contract for the only egress step accepted in an
+ * external-client workflow. Exported so the executor can enforce the same
+ * shape against legacy/directly persisted definitions at run time.
+ */
+export function reviewedClientReplyViolation(step: ToolCallStep): string | null {
+  if (canonicalToolName(step.toolName) !== REVIEWED_REPLY_TOOL) {
+    return 'only imapSendMessage may cross the reviewed external-client reply boundary'
+  }
+  if (step.approval?.required !== true) {
+    return 'the reviewed IMAP reply must set approval.required to true'
+  }
+  const keys = Object.keys(step.arguments)
+  const unknown = keys.find((key) => !REVIEWED_REPLY_ARGUMENT_KEYS.has(key))
+  if (unknown) {
+    return `the reviewed IMAP reply cannot set arguments.${unknown}`
+  }
+  const to = step.arguments.to
+  if (!Array.isArray(to) || to.length !== 1 || to[0] !== REVIEWED_REPLY_TO) {
+    return `the reviewed IMAP reply recipient must be exactly ["${REVIEWED_REPLY_TO}"]`
+  }
+  const subject = step.arguments.subject
+  if (
+    typeof subject !== 'string'
+    || subject.split(REVIEWED_REPLY_SUBJECT).length !== 2
+    || subject.replace(REVIEWED_REPLY_SUBJECT, '').includes('{{')
+    || subject.replace(REVIEWED_REPLY_SUBJECT, '').includes('}}')
+  ) {
+    return `the reviewed IMAP reply subject must contain exactly one ${REVIEWED_REPLY_SUBJECT} token and no other interpolation`
+  }
+  if (typeof step.arguments.body !== 'string' || !REVIEWED_REPLY_BODY_RE.test(step.arguments.body)) {
+    return 'the reviewed IMAP reply body must be exactly one {{vars.<draft>}} token'
+  }
+  if (step.arguments.inReplyTo !== REVIEWED_REPLY_THREAD) {
+    return `the reviewed IMAP reply thread must be exactly "${REVIEWED_REPLY_THREAD}"`
+  }
+  if ('account' in step.arguments) {
+    const account = step.arguments.account
+    if (typeof account !== 'string' || !account.trim() || account.includes('{{') || account.includes('}}')) {
+      return 'the reviewed IMAP reply account must be one literal connected mailbox address'
+    }
+  }
+  return null
+}
+
+function reviewedReplyBodyVar(step: ToolCallStep): string | null {
+  return typeof step.arguments.body === 'string'
+    ? REVIEWED_REPLY_BODY_RE.exec(step.arguments.body)?.[1] ?? null
+    : null
+}
 
 // ── wait ────────────────────────────────────────────────────────────────
 
@@ -365,6 +432,33 @@ const nodePositionSchema = z
   .object({ x: z.number().finite(), y: z.number().finite() })
   .strict()
 
+const externalUserIdSchema = z
+  .string()
+  .min(1)
+  .max(256)
+  .refine((value) => !/[\u0000-\u001f\u007f]/.test(value), 'externalUserId contains control characters')
+
+const externalClientWorkflowPrincipalSchema = z
+  .object({
+    kind: z.literal('api_external_client'),
+    apiKeyId: z.string().uuid(),
+    assistantId: z.string().uuid(),
+    resolve: z.discriminatedUnion('kind', [
+      z.object({
+        kind: z.literal('static'),
+        externalUserId: externalUserIdSchema,
+      }).strict(),
+      z.object({
+        kind: z.literal('event_sender_map'),
+        clients: z.array(z.object({
+          sender: z.string().email().max(320),
+          externalUserId: externalUserIdSchema,
+        }).strict()).min(1).max(500),
+      }).strict(),
+    ]),
+  })
+  .strict()
+
 export const WorkflowDefinitionSchema = z
   .object({
     // Scalar = one entry step; ARRAY = trigger fan-out (every listed step
@@ -373,9 +467,114 @@ export const WorkflowDefinitionSchema = z
     startStepId: z
       .union([stepIdSchema, z.array(stepIdSchema).min(1).max(MAX_FAN_OUT_WIDTH)]),
     steps: z.array(tolerantStepSchema).min(1).max(50),
+    principal: externalClientWorkflowPrincipalSchema.optional(),
     layout: z.record(nodePositionSchema).optional(),
   })
   .superRefine((def, ctx) => {
+    if (def.principal) {
+      if (def.principal.resolve.kind === 'event_sender_map') {
+        const senders = new Set<string>()
+        for (const [i, client] of def.principal.resolve.clients.entries()) {
+          const sender = client.sender.trim().toLowerCase()
+          if (senders.has(sender)) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: `client principal sender map contains duplicate sender "${sender}".`,
+              path: ['principal', 'resolve', 'clients', i, 'sender'],
+            })
+          }
+          senders.add(sender)
+        }
+      }
+
+      const reachability = buildReachability(def as WorkflowDefinition)
+      const reviewedReplies = def.steps.filter((step) => step.type === 'tool_call')
+      if (reviewedReplies.length > 1) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'an external-client workflow may contain at most one reviewed IMAP reply step.',
+          path: ['steps'],
+        })
+      }
+      for (const [i, step] of def.steps.entries()) {
+        if (step.type === 'tool_call') {
+          const violation = reviewedClientReplyViolation(step)
+          if (violation) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: `external-client workflow step "${step.id}" is not a valid reviewed reply: ${violation}.`,
+              path: ['steps', i],
+            })
+            continue
+          }
+          const bodyVar = reviewedReplyBodyVar(step)
+          const producer = bodyVar
+            ? def.steps.find((candidate) =>
+                candidate.type === 'assistant_call'
+                && candidate.storeOutputAs === bodyVar
+                && reachability.get(candidate.id)?.has(step.id),
+              )
+            : undefined
+          if (!producer) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              message:
+                `external-client reviewed reply step "${step.id}" must take its body from a reachable ` +
+                'preceding assistant_call storeOutputAs variable.',
+              path: ['steps', i, 'arguments', 'body'],
+            })
+          }
+          continue
+        }
+        if (step.type !== 'assistant_call' && step.type !== 'branch') {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message:
+              `external-client workflow step "${step.id}" must be assistant_call, branch, or a structurally reviewed IMAP reply; ` +
+              'the principal-bound model lane has no other tool, wait, send, or page egress.',
+            path: ['steps', i, 'type'],
+          })
+          continue
+        }
+        if (step.type !== 'assistant_call') continue
+
+        if (
+          step.target.assistantId !== 'primary'
+          && step.target.assistantId !== def.principal.assistantId
+        ) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message:
+              `external-client workflow step "${step.id}" targets assistant ${step.target.assistantId}, ` +
+              `but the inherited API key belongs to ${def.principal.assistantId}.`,
+            path: ['steps', i, 'target', 'assistantId'],
+          })
+        }
+
+        const forbidden: Array<[unknown, string]> = [
+          [step.target.capabilityId, 'target.capabilityId'],
+          [step.skills?.length ? step.skills : undefined, 'skills'],
+          [step.enforcedSkills?.length ? step.enforcedSkills : undefined, 'enforcedSkills'],
+          [step.page, 'page'],
+          [step.deliver, 'deliver'],
+          [step.session === 'persistent' ? step.session : undefined, 'session'],
+          [step.depth, 'depth'],
+          [step.researchMode === true ? step.researchMode : undefined, 'researchMode'],
+          [step.blueprintId, 'blueprintId'],
+        ]
+        for (const [value, field] of forbidden) {
+          if (value === undefined) continue
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message:
+              `external-client workflow step "${step.id}" cannot set ${field}; ` +
+              'the principal-bound lane is an isolated, non-delivering draft consult.',
+            path: ['steps', i, ...field.split('.')],
+          })
+        }
+      }
+    }
+
     // Step IDs must be unique.
     const seen = new Set<string>()
     for (const step of def.steps) {

@@ -128,6 +128,25 @@ describe("[COMP:app-web/connector-groups] groupConnectors", () => {
     expect(grouped.available).toEqual([]);
   });
 
+  it("buckets workspace-owned Local Directory storage outside Personal", () => {
+    const localStorage = {
+      id: "local",
+      connectorInstanceId: "inst-local",
+      connected: true,
+      name: "Local Directory Storage",
+      readonly: true,
+      source: "team_native" as const,
+    };
+
+    const grouped = groupConnectors([localStorage], {
+      exposedGrants: {},
+    });
+
+    expect(grouped.workspace).toEqual([localStorage]);
+    expect(grouped.personal).toEqual([]);
+    expect(grouped.shared).toEqual([]);
+  });
+
   it("buckets nothing as builtin when no builtinIds are passed", () => {
     const filesPlaceholder = { id: "files", connected: false, name: "Workspace Files" };
     const grouped = groupConnectors([filesPlaceholder], {

@@ -15,10 +15,16 @@
  * [COMP:api/home-signals]
  */
 
-import { computeNextRun, type HomeSignals, type WorkflowTrigger } from '@use-brian/core'
+import {
+  computeNextRun,
+  type ApprovalGroupCounts,
+  type HomeSignals,
+  type WorkflowTrigger,
+} from '@use-brian/core'
 import type { SavedViewStore } from '@use-brian/core'
 import { query } from '../db/client.js'
 import { countBrainInbox } from '../db/brain-inbox-store.js'
+import type { ApprovalKind } from '../db/pending-approvals-store.js'
 import { isOssEdition } from '../routes/local-session.js'
 
 const UPCOMING_CAP = 4
@@ -56,7 +62,7 @@ export async function assembleHomeSignals(
 ): Promise<HomeSignals> {
   const [
     review,
-    approvalsCount,
+    approvals,
     autopilotCount,
     taskTriageCount,
     taskCleanupCount,
@@ -70,7 +76,7 @@ export async function assembleHomeSignals(
     hasConnector,
   ] = await Promise.all([
     safe(() => countBrainInbox(workspaceId).then((r) => r.total), 0),
-    safe(() => countPendingApprovals(workspaceId), 0),
+    safe(() => pendingApprovalSummary(workspaceId), emptyApprovalSummary()),
     safe(() => countAutopilotAttention(workspaceId), 0),
     safe(() => countTaskTriage(workspaceId), 0),
     safe(() => countTaskCleanup(workspaceId), 0),
@@ -89,7 +95,8 @@ export async function assembleHomeSignals(
 
   return {
     brainReviewCount: review,
-    approvalsCount,
+    approvalsCount: approvals.total,
+    approvalGroups: approvals.groups,
     autopilotCount,
     taskTriageCount,
     taskCleanupCount,
@@ -132,13 +139,64 @@ function computeUpcoming(
     .map(({ id, name, nextRunAt }) => ({ id, name, nextRunAt }))
 }
 
-async function countPendingApprovals(workspaceId: string): Promise<number> {
-  const res = await query<{ count: string }>(
-    `SELECT COUNT(*)::text AS count FROM pending_approvals
-     WHERE workspace_id = $1 AND status = 'pending'`,
+type ApprovalGroupKey = keyof ApprovalGroupCounts
+
+/** Compile-time-exhaustive placement for the canonical backend taxonomy. A
+ * new ApprovalKind must be assigned here before the API can compile. */
+const APPROVAL_GROUP_BY_KIND = {
+  workflow_step: 'externalActions',
+  tool_invocation: 'externalActions',
+  staged_write: 'externalActions',
+  browser_skill_send: 'externalActions',
+  distribution_draft: 'contentReview',
+  staged_skill_creation: 'systemImprovements',
+  staged_skill_update: 'systemImprovements',
+  workflow_refinement: 'systemImprovements',
+  question: 'questionsAndAccess',
+  email_sender: 'questionsAndAccess',
+} satisfies Record<ApprovalKind, ApprovalGroupKey>
+
+function emptyApprovalGroups(): ApprovalGroupCounts {
+  return {
+    externalActions: 0,
+    contentReview: 0,
+    systemImprovements: 0,
+    questionsAndAccess: 0,
+  }
+}
+
+function emptyApprovalSummary(): { total: number; groups: ApprovalGroupCounts } {
+  return { total: 0, groups: emptyApprovalGroups() }
+}
+
+/** Pure fold kept exported so the taxonomy-to-presentation boundary has a
+ * focused test without mocking the database client. Unknown future DB values
+ * fail visible under actions until the canonical union + exhaustive map catch
+ * up, rather than disappearing from the authoritative total. */
+export function groupPendingApprovalCounts(
+  rows: ReadonlyArray<{ kind: string; count: string | number }>,
+): { total: number; groups: ApprovalGroupCounts } {
+  const groups = emptyApprovalGroups()
+  let total = 0
+  for (const row of rows) {
+    const count = Math.max(0, Number.parseInt(String(row.count), 10) || 0)
+    total += count
+    const group = APPROVAL_GROUP_BY_KIND[row.kind as ApprovalKind] ?? 'externalActions'
+    groups[group] += count
+  }
+  return { total, groups }
+}
+
+async function pendingApprovalSummary(
+  workspaceId: string,
+): Promise<{ total: number; groups: ApprovalGroupCounts }> {
+  const res = await query<{ kind: string; count: string }>(
+    `SELECT kind, COUNT(*)::text AS count FROM pending_approvals
+     WHERE workspace_id = $1 AND status = 'pending'
+     GROUP BY kind`,
     [workspaceId],
   )
-  return Number.parseInt(res.rows[0]?.count ?? '0', 10)
+  return groupPendingApprovalCounts(res.rows)
 }
 
 /** Confirmed autopilot goals needing the user (task-goal-autopilot.md §8):

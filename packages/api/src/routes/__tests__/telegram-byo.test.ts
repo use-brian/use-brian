@@ -1228,7 +1228,7 @@ describe('[COMP:api/telegram-byo-route] cross-assistant identity bleed', () => {
   })
 })
 
-describe('[COMP:api/telegram-byo-route] allowlisted private guests', () => {
+describe('[COMP:api/telegram-byo-route] allowlisted Telegram guests', () => {
   function buildPrivateDm(
     fromId: number,
     text: string,
@@ -1246,6 +1246,28 @@ describe('[COMP:api/telegram-byo-route] allowlisted private guests', () => {
         chat: { id: fromId, type: 'private' },
         date: Math.floor(Date.now() / 1000),
         text,
+      },
+    }
+  }
+
+  function buildGroupMessage(
+    fromId: number,
+    text: string,
+    username?: string,
+  ): Record<string, unknown> {
+    return {
+      update_id: fromId * 10,
+      message: {
+        message_id: fromId,
+        from: {
+          id: fromId,
+          first_name: 'Guest',
+          ...(username ? { username } : {}),
+        },
+        chat: { id: -1001234567890, type: 'supergroup' },
+        date: Math.floor(Date.now() / 1000),
+        text: `@testbot ${text}`,
+        entities: [{ type: 'mention', offset: 0, length: 8 }],
       },
     }
   }
@@ -1282,6 +1304,7 @@ describe('[COMP:api/telegram-byo-route] allowlisted private guests', () => {
     allowedUserIds: string[],
     linked: { userId: string; assistantId: string | null } | null = null,
     allowGuestConnectorTools = false,
+    userAccessMode: 'allowlist' | 'allow_all' = 'allowlist',
   ) {
     return createTestApp(
       '/webhook/telegram-byo',
@@ -1292,7 +1315,7 @@ describe('[COMP:api/telegram-byo-route] allowlisted private guests', () => {
         memoryStore: {} as never,
         integrationStore: makeIntegrationStore({
           requireMention: true,
-          userAccessMode: 'allowlist',
+          userAccessMode,
           allowedUserIds,
           allowGuestConnectorTools,
         }) as never,
@@ -1364,6 +1387,50 @@ describe('[COMP:api/telegram-byo-route] allowlisted private guests', () => {
       userId: 'shadow_with_tools',
       externalGuest: true,
       externalGuestConnectorTools: true,
+    })
+  })
+
+  it('extends the isolated connector opt-in to an explicitly allowlisted group guest', async () => {
+    const { resolveChannelUser } = await import('../../db/channel-user-store.js')
+    vi.mocked(resolveChannelUser).mockResolvedValueOnce({
+      user: { id: 'shadow_group_guest' } as never,
+      isIdentified: false,
+    })
+
+    const app = makeGuestApp(['@friend'], null, true)
+    await postUpdate(app, buildGroupMessage(42, 'check the calendar', 'friend'))
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    expect(pipelineCalls).toHaveLength(1)
+    expect(pipelineCalls[0]).toMatchObject({
+      channelId: '-1001234567890',
+      userId: 'shadow_group_guest',
+      isIdentified: false,
+      isGroupChat: true,
+      externalGuest: true,
+      externalGuestConnectorTools: true,
+    })
+  })
+
+  it('keeps an unlinked allow_all group sender isolated without inheriting a stale tool opt-in', async () => {
+    const { resolveChannelUser } = await import('../../db/channel-user-store.js')
+    vi.mocked(resolveChannelUser).mockResolvedValueOnce({
+      user: { id: 'shadow_unlisted_group_sender' } as never,
+      isIdentified: false,
+    })
+
+    const app = makeGuestApp([], null, true, 'allow_all')
+    await postUpdate(app, buildGroupMessage(42, 'hello', 'visitor'))
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    expect(pipelineCalls).toHaveLength(1)
+    expect(pipelineCalls[0]).toMatchObject({
+      userId: 'shadow_unlisted_group_sender',
+      isGroupChat: true,
+      externalGuest: true,
+      externalGuestConnectorTools: false,
     })
   })
 

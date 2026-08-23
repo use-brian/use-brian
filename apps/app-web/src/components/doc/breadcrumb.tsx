@@ -1,17 +1,16 @@
 "use client";
 
 /**
- * The page top-bar breadcrumb — Notion's "location" trail.
+ * The page top-bar breadcrumb — the page tree's location trail.
  *
- * Two shapes, by depth:
- *  - **Root-level page** (no ancestors) → the page *is* the root, so we show
- *    only the page itself (its icon + name). No workspace crumb, no chain.
- *  - **Nested page** (≥1 ancestor) → the full Notion trail
- *    **workspace / ancestor / … / current page**, `/`-separated, with an icon
- *    on every crumb. The leading crumb carries the workspace's team avatar +
- *    name (→ workspace home); intermediate crumbs navigate to that ancestor;
- *    the trailing crumb is the current page. Below `sm` the workspace +
- *    ancestors collapse away, leaving just the current crumb.
+ * Every depth uses one stable shape:
+ * **teamspace / root page / … / current page**, `/`-separated, with an icon
+ * on every crumb. A root page therefore keeps its teamspace before the page
+ * name, and private pages lead with "Private". The workspace is app chrome,
+ * not part of the page tree, so it never replaces the teamspace here.
+ * Intermediate page crumbs navigate to that ancestor; the teamspace is a
+ * label because it has no page view; the trailing crumb is the current page.
+ * Below `sm` the teamspace + ancestors collapse away, leaving the current.
  *
  * The **current crumb is the page's rename affordance**: when `onRenameCurrent`
  * is wired (it is, from `PageHeader`), clicking it opens a **Notion-style
@@ -32,17 +31,21 @@
 
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { Popover as PopoverPrimitive } from "@base-ui/react/popover";
+import { LockKeyhole, Users } from "lucide-react";
 import { derivePageIcon } from "@/lib/api/views";
 import { PageIcon } from "./page-icon";
 import type { Crumb } from "@/lib/sidebar-tree";
+import type { Teamspace } from "@/lib/api/teamspaces";
 import { useT } from "@/lib/i18n/client";
-import { TeamAvatar } from "@/components/team-avatar";
-import { useWorkspaceContext } from "@/lib/workspace-context";
+
+export type BreadcrumbTeamspace = Pick<Teamspace, "name" | "icon">;
 
 type BreadcrumbProps = {
   /** Full chain root → … → active (from `buildBreadcrumb`). */
   crumbs: Crumb[];
-  /** Navigate to a page id, or to the workspace home with `null`. */
+  /** The page's container; `null` is Private, `undefined` is still loading. */
+  teamspace: BreadcrumbTeamspace | null | undefined;
+  /** Navigate to an ancestor page id. */
   onNavigate: (viewId: string | null) => void;
   /**
    * Commit a new name for the current (trailing) page. When provided, the
@@ -53,54 +56,34 @@ type BreadcrumbProps = {
   onRenameCurrent?: (name: string) => void;
 };
 
-export function Breadcrumb({ crumbs, onNavigate, onRenameCurrent }: BreadcrumbProps) {
+export function Breadcrumb({
+  crumbs,
+  teamspace,
+  onNavigate,
+  onRenameCurrent,
+}: BreadcrumbProps) {
   const t = useT().docPage;
-  const ws = useWorkspaceContext();
   const label = (name: string) => (name.trim() ? name : t.breadcrumbUntitled);
 
   if (crumbs.length === 0) return null;
   const current = crumbs[crumbs.length - 1];
   const ancestors = crumbs.slice(0, -1);
 
-  // Root-level page: the page is the root — just show it, no workspace/chain.
-  if (ancestors.length === 0) {
-    return (
-      <nav
-        aria-label="Breadcrumb"
-        className="flex min-w-0 items-center gap-1.5 text-sm font-medium text-foreground"
-      >
-        <CurrentCrumb crumb={current} label={label} onRename={onRenameCurrent} t={t} />
-      </nav>
-    );
-  }
-
-  // Nested page: workspace / ancestor / … / current — icons on each crumb.
+  // Stable at every depth: teamspace / root / … / current. During the brief
+  // teamspace-list load window we keep the known page chain rather than claim
+  // a wrong container; the resolved label joins without changing page depth.
   return (
     <nav
       aria-label="Breadcrumb"
       className="flex min-w-0 items-center gap-1 text-sm text-muted-foreground"
     >
-      <button
-        type="button"
-        onClick={() => onNavigate(null)}
-        aria-label={t.breadcrumbHomeAria}
-        className="hidden shrink-0 items-center gap-1.5 rounded px-1 py-0.5 hover:bg-muted hover:text-foreground sm:flex"
-      >
-        <span className="grid size-[18px] place-items-center [&_svg]:size-[18px]">
-          <TeamAvatar
-            id={ws.workspaceId}
-            name={ws.name}
-            iconSeed={ws.iconSeed}
-            iconUrl={ws.iconUrl}
-            size="sm"
-          />
-        </span>
-        <span className="max-w-[140px] truncate">{ws.name}</span>
-      </button>
+      {teamspace !== undefined ? (
+        <TeamspaceCrumb teamspace={teamspace} label={label} t={t} />
+      ) : null}
 
-      {ancestors.map((crumb) => (
+      {ancestors.map((crumb, index) => (
         <span key={crumb.id} className="hidden min-w-0 items-center gap-1 sm:flex">
-          <Separator t={t} />
+          {teamspace !== undefined || index > 0 ? <Separator t={t} /> : null}
           <button
             type="button"
             onClick={() => onNavigate(crumb.id)}
@@ -113,11 +96,41 @@ export function Breadcrumb({ crumbs, onNavigate, onRenameCurrent }: BreadcrumbPr
         </span>
       ))}
 
-      <span className="hidden sm:inline">
-        <Separator t={t} />
-      </span>
+      {teamspace !== undefined || ancestors.length > 0 ? (
+        <span className="hidden sm:inline">
+          <Separator t={t} />
+        </span>
+      ) : null}
       <CurrentCrumb crumb={current} label={label} onRename={onRenameCurrent} t={t} />
     </nav>
+  );
+}
+
+/** Leading page-tree container. Teamspaces and Private have no page view. */
+function TeamspaceCrumb({
+  teamspace,
+  label,
+  t,
+}: {
+  teamspace: BreadcrumbTeamspace | null;
+  label: (name: string) => string;
+  t: ReturnType<typeof useT>["docPage"];
+}) {
+  const name = teamspace === null ? t.sidebarPrivate : label(teamspace.name);
+  return (
+    <span
+      title={name}
+      className="hidden min-w-0 shrink-0 items-center gap-1.5 px-1 py-0.5 sm:flex"
+    >
+      {teamspace === null ? (
+        <LockKeyhole className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+      ) : teamspace.icon ? (
+        <span className="shrink-0 text-[15px] leading-none">{teamspace.icon}</span>
+      ) : (
+        <Users className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+      )}
+      <span className="max-w-[140px] truncate">{name}</span>
+    </span>
   );
 }
 

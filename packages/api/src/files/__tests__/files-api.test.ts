@@ -459,6 +459,46 @@ describe('[COMP:files/api] createFilesApi.delete', () => {
     expect(store.rows.size).toBe(0)
     expect(audit.events.find((e) => e.eventType === 'file.deleted')).toBeTruthy()
   })
+
+  it('reads an imported original by relative key and refuses source mutations', async () => {
+    const gcs = makeFakeGcs()
+    const store = makeFakeStore()
+    const api = createFilesApi({ gcs, store, auditStore: makeFakeAudit(), bucket: 'local-root' })
+    const relativePath = 'existing/research.md'
+    await gcs.writeBlob(relativePath, Buffer.from('source bytes'), {
+      workspaceId: ctx.workspaceId,
+      mime: 'text/markdown',
+    })
+    await store.create(ctx.userId, {
+      id: 'imported-file-id',
+      workspaceId: ctx.workspaceId,
+      path: '/local/existing/research.md',
+      parentPath: '/local/existing',
+      name: 'research.md',
+      title: 'research.md',
+      mime: 'text/markdown',
+      sizeBytes: 12,
+      storageUri: 'file:///srv/files/existing/research.md',
+      createdByUserId: ctx.userId,
+      metadata: {
+        localDirectory: {
+          connectorInstanceId: 'local-instance',
+          relativePath,
+          fingerprint: '12:1',
+          readOnly: true,
+        },
+      },
+    })
+
+    const read = await api.read(ctx, '/local/existing/research.md')
+    expect(read.ok && read.value.content).toBe('source bytes')
+    const append = await api.append(ctx, '/local/existing/research.md', 'changed')
+    expect(append.ok ? null : append.error.kind).toBe('read_only')
+    const deleted = await api.delete(ctx, '/local/existing/research.md')
+    expect(deleted.ok ? null : deleted.error.kind).toBe('read_only')
+    expect(gcs.blobs.get(relativePath)?.toString()).toBe('source bytes')
+    expect(store.rows.size).toBe(1)
+  })
 })
 
 describe('[COMP:files/byo-resolver] per-workspace client routing', () => {

@@ -169,8 +169,8 @@ function fakeApprovalsStore(): PendingApprovalsStore & { rows: PendingApproval[]
         createdAt: new Date(),
         kind: 'workflow_step',
         blockingSessionId: null,
-        approvalPayload: {},
-        originatingAssistantId: null,
+        approvalPayload: params.approvalPayload ?? {},
+        originatingAssistantId: params.originatingAssistantId,
         answerText: null,
       }
       rows.push(r); return r
@@ -233,6 +233,9 @@ function fakeApprovalsStore(): PendingApprovalsStore & { rows: PendingApproval[]
     },
     async getById(_u, id) { return rows.find((r) => r.id === id) ?? null },
     async getByIdSystem(id) { return rows.find((r) => r.id === id) ?? null },
+    async reviseWorkflowEmailBody() {
+      throw new Error('reviseWorkflowEmailBody not used in workflow approval tests')
+    },
     async respond(id, decision, responder, reason) {
       const r = rows.find((x) => x.id === id)
       if (!r || r.status !== 'pending') return null
@@ -340,6 +343,10 @@ describe('[COMP:workflow/approval] Phase C — pause + resume', () => {
     const askTool = askPolicyTool('gmailSendMessage', () => {
       throw new Error('tool should not run during pause')
     })
+    askTool.describeConfirmation = async () => [
+      '• From: sales@example.com',
+      '• To: me@example.com',
+    ]
 
     const executorDeps: ExecutorDeps = {
       workflowStore: stores.workflowStore,
@@ -389,7 +396,12 @@ describe('[COMP:workflow/approval] Phase C — pause + resume', () => {
     // Pending row created.
     expect(approvals.rows).toHaveLength(1)
     expect(approvals.rows[0].toolName).toBe('gmailSendMessage')
+    expect(approvals.rows[0].originatingAssistantId).toBe(PRIMARY_ASSISTANT_ID)
     expect(approvals.rows[0].arguments).toEqual({ to: 'me@example.com', body: 'hi' })
+    expect(approvals.rows[0].approvalPayload.displayLines).toEqual([
+      '• From: sales@example.com',
+      '• To: me@example.com',
+    ])
     expect(approvals.rows[0].deliveryChannelType).toBe('telegram')
     // Delivery dispatched.
     expect(dispatched).toHaveLength(1)
@@ -398,6 +410,83 @@ describe('[COMP:workflow/approval] Phase C — pause + resume', () => {
     expect(audit.events.find((e) => e.eventType === 'workflow.approval_requested')).toBeTruthy()
     // Run state = awaiting_input.
     expect(stores.runs.get(run.id)?.status).toBe('awaiting_input')
+  })
+
+  it('approval.required forces a frozen approval even when the tool policy is allow', async () => {
+    const stores = makeStores()
+    const approvals = fakeApprovalsStore()
+    const audit = fakeAuditStore()
+    let executed = false
+    const allowTool = buildTool({
+      name: 'imapSendMessage',
+      description: 'send mail',
+      inputSchema: z.object({
+        to: z.array(z.string()),
+        subject: z.string(),
+        body: z.string(),
+        inReplyTo: z.string(),
+      }),
+      requiresConfirmation: false,
+      async execute() {
+        executed = true
+        return { data: { ok: true } }
+      },
+    })
+    const executorDeps: ExecutorDeps = {
+      workflowStore: stores.workflowStore,
+      runStore: stores.runStore,
+      consultTransport: FAKE_TRANSPORT,
+      resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
+      buildToolRegistry: async () => new Map([['imapSendMessage', allowTool]]),
+    }
+    const bridgeDeps: ApprovalBridgeDeps = {
+      approvalsStore: approvals,
+      auditStore: audit,
+      workflowStore: stores.workflowStore,
+      runStore: stores.runStore,
+      buildToolRegistry: executorDeps.buildToolRegistry,
+      resolvePrimary: executorDeps.resolvePrimary,
+      deliveries: async () => {},
+      executorDeps,
+    }
+    executorDeps.requestApproval = makeRequestApproval(bridgeDeps)
+    const workflow = await stores.workflowStore.create({
+      userId: USER_ID,
+      workspaceId: WORKSPACE_ID,
+      name: 'always review mail',
+      definition: {
+        startStepId: 'send',
+        steps: [{
+          id: 'send',
+          type: 'tool_call',
+          toolName: 'imapSendMessage',
+          arguments: {
+            to: ['buyer@customer.example'],
+            subject: 'Re: Question',
+            body: 'Draft body',
+            inReplyTo: 'INBOX:17',
+          },
+          approval: { required: true },
+        }],
+      },
+    })
+    const run = await stores.runStore.createRun({
+      workflowId: workflow.id,
+      workspaceId: WORKSPACE_ID,
+      triggeredBy: USER_ID,
+      triggerKind: 'manual',
+    })
+
+    const outcome = await advanceWorkflowRun(executorDeps, run.id)
+
+    expect(outcome).toMatchObject({ kind: 'paused', reason: 'approval' })
+    expect(executed).toBe(false)
+    expect(approvals.rows[0].arguments).toEqual({
+      to: ['buyer@customer.example'],
+      subject: 'Re: Question',
+      body: 'Draft body',
+      inReplyTo: 'INBOX:17',
+    })
   })
 
   it('resume(approved) runs the gated tool with frozen arguments and continues the run', async () => {

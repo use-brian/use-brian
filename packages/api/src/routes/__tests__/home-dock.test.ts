@@ -19,6 +19,12 @@ import { homeDockRoutes, type HomeDockRoutesDeps } from '../home-dock.js'
 const SIGNALS: HomeSignals = {
   brainReviewCount: 2,
   approvalsCount: 0,
+  approvalGroups: {
+    externalActions: 0,
+    contentReview: 0,
+    systemImprovements: 0,
+    questionsAndAccess: 0,
+  },
   autopilotCount: 0,
   taskTriageCount: 0,
   taskCleanupCount: 0,
@@ -90,6 +96,7 @@ describe('[COMP:api/home-dock-routes] GET /api/home-dock', () => {
     // Live-counted "needs you" — brainReviewCount=2 survives, dead cards dropped.
     expect(dock.needsYou).toContainEqual({ kind: 'brain_review', count: 2, caption: null })
     expect(dock.needsYou.every((c: { count: number }) => c.count > 0)).toBe(true)
+    expect(dock.approvalGroups).toEqual(SIGNALS.approvalGroups)
     // Signals pass through to the resolved dock unchanged.
     expect(dock.pickUp).toEqual(SIGNALS.recentDrafts)
     expect(dock.comingUp).toEqual(SIGNALS.upcomingWorkflows)

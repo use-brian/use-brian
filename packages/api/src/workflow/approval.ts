@@ -72,8 +72,10 @@ export function makeRequestApproval(deps: ApprovalBridgeDeps): NonNullable<Execu
     stepRunId,
     workspaceId,
     approverUserId,
+    assistantId,
     toolName,
     arguments: args,
+    displayLines,
     deliveryChannel,
     expiresAt,
   }) => {
@@ -88,8 +90,10 @@ export function makeRequestApproval(deps: ApprovalBridgeDeps): NonNullable<Execu
       workspaceId,
       workflowRunId: runId,
       workflowStepRunId: stepRunId,
+      originatingAssistantId: assistantId,
       toolName,
       arguments: args,
+      approvalPayload: displayLines ? { displayLines } : undefined,
       approverUserId,
       deliveryChannelType: deliveryChannel,
       deliveryChannelId: null, // delivery layer resolves the channel id from approver's preferred channel
@@ -210,12 +214,15 @@ export async function resumeFromApproval(
     })
     return { status: 'failed', runId: run.id }
   }
+  const toolAssistantId = updated.originatingAssistantId
+    ?? workflow.definition.principal?.assistantId
+    ?? primaryAssistantId
 
   let registry: Awaited<ReturnType<ApprovalBridgeDeps['buildToolRegistry']>>
   try {
     registry = await deps.buildToolRegistry({
       workspaceId: run.workspaceId,
-      assistantId: primaryAssistantId,
+      assistantId: toolAssistantId,
       userId: run.triggeredBy ?? workflow.createdBy,
     })
   } catch (err) {
@@ -249,13 +256,13 @@ export async function resumeFromApproval(
 
   const toolContext: ToolContext = {
     userId: run.triggeredBy ?? workflow.createdBy,
-    assistantId: primaryAssistantId,
+    assistantId: toolAssistantId,
     sessionId: `workflow_run_${run.id}`,
     appId: 'Use Brian',
     channelType: 'workflow',
     channelId: run.id,
     workspaceId: run.workspaceId,
-    assistantKind: 'primary',
+    assistantKind: workflow.definition.principal ? 'standard' : 'primary',
     abortSignal: new AbortController().signal,
   }
 

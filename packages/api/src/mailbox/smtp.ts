@@ -6,7 +6,8 @@
  * and AgentMail lanes) into a `multipart/alternative` message. The message is
  * composed ONCE (MailComposer) so the exact bytes that went out can also be
  * appended to the IMAP Sent folder — SMTP submission does not save a sent
- * copy on most corporate servers, and the search default scope (INBOX + Sent)
+ * copy on most corporate servers, and the search default scope (all selectable
+ * ordinary folders)
  * depends on one existing.
  *
  * Raw SMTP has the same CR/LF header-injection surface the Gmail client
