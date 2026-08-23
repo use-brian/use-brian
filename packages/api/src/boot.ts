@@ -3434,6 +3434,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   allTools.set('listDeals', crmTools.listDeals)
   allTools.set('updateDeal', crmTools.updateDeal)
   allTools.set('advanceDealStage', crmTools.advanceDealStage)
+  allTools.set('listCrmFields', crmTools.listCrmFields)
+  allTools.set('setCrmCustomFields', crmTools.setCrmCustomFields)
 
   // ── Brain-MCP-dedicated tool instances ──
   const brainMemoryTools = createMemoryTools(memoryStore, { entityStore: entitiesStore, entityLinksStore })

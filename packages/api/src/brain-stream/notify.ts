@@ -130,6 +130,9 @@ export const BRAIN_WRITE_TOOL_SIGNALS: Record<string, { primitive: BrainPrimitiv
   saveDeal: { primitive: 'deal', action: 'update' },
   updateDeal: { primitive: 'deal', action: 'update' },
   advanceDealStage: { primitive: 'deal', action: 'update' },
+  // The target kind is resolved inside the typed write. Use the broad entity
+  // invalidation so every access-scoped CRM kind refreshes safely.
+  setCrmCustomFields: { primitive: 'entity', action: 'update' },
   // Entities + self profile (chat-only — not bridged via MCP v1)
   updateSelfProfile: { primitive: 'entity', action: 'update' },
   createEntity: { primitive: 'entity', action: 'create' },

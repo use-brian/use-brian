@@ -71,6 +71,8 @@ describe('[COMP:crm/r2-store] deterministic CRM R2 projections', () => {
     expect(validateCustomFieldValue({ fieldType: 'single_select', options: ['A'], isRequired: false }, 'B')).toBe(false)
     expect(validateCustomFieldValue({ fieldType: 'date', options: [], isRequired: false }, '2026-02-29')).toBe(false)
     expect(validateCustomFieldValue({ fieldType: 'date', options: [], isRequired: false }, '2028-02-29')).toBe(true)
+    expect(validateCustomFieldValue({ fieldType: 'entity_reference', options: ['company'], isRequired: false }, 'd126f352-7f5c-48b2-88d0-66694be0c93d')).toBe(true)
+    expect(validateCustomFieldValue({ fieldType: 'entity_reference', options: ['company'], isRequired: false }, 'Example Company')).toBe(false)
   })
 
   it('exports RFC-style escaped CSV without merging currencies', () => {
@@ -80,6 +82,17 @@ describe('[COMP:crm/r2-store] deterministic CRM R2 projections', () => {
     expect(csv).toContain('currency_code')
     expect(csv).toContain('"Deal, one"')
     expect(csv).toContain('HKD')
+  })
+
+  it('exports typed custom fields as re-importable columns', () => {
+    const csv = crmRowsToCsv([
+      row({ attributes: { custom_fields: { work_type: 'SaaS', audiences: ['Portfolio', 'Partners'] } } }),
+    ], 'deal', [
+      { id: 'f1', entityKind: 'deal', fieldKey: 'work_type', label: 'Work type', fieldType: 'single_select', options: ['SaaS'], isRequired: false, position: 0 },
+      { id: 'f2', entityKind: 'deal', fieldKey: 'audiences', label: 'Audiences', fieldType: 'multi_select', options: ['Portfolio', 'Partners'], isRequired: false, position: 1 },
+    ])
+    expect(csv.split('\n')[0]).toContain('Work type,Audiences')
+    expect(csv).toContain('SaaS,Portfolio|Partners')
   })
 
   it('anchors an oldest-first bounded archived email thread with honest truncation', () => {

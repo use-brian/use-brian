@@ -12,6 +12,7 @@ import type {
   CrmContactRow,
   CrmData,
   CrmDealRow,
+  CrmFieldDefinition,
 } from "@/lib/api/crm";
 
 export type CsvPreview = {
@@ -66,6 +67,20 @@ export function parseCrmCsv(source: string, limit = 500): CsvPreview {
 
 export type CrmImportKind = "contact" | "company" | "deal";
 
+/** Derive a valid stable key without forcing operators to type an identifier. */
+export function crmFieldKeyFromLabel(label: string): string {
+  const slug = label.trim().toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 57);
+  if (/^[a-z]/.test(slug)) return slug;
+  if (slug) return `field_${slug}`;
+  let hash = 2_166_136_261;
+  for (const character of label.trim()) {
+    hash ^= character.codePointAt(0) ?? 0;
+    hash = Math.imul(hash, 16_777_619);
+  }
+  return `field_${(hash >>> 0).toString(36)}`;
+}
+
 export const CRM_IMPORT_FIELDS: Record<CrmImportKind, string[]> = {
   contact: ["name", "email", "phone", "companyId", "tags"],
   company: ["name", "domain", "tags"],
@@ -81,7 +96,11 @@ export const CRM_IMPORT_FIELDS: Record<CrmImportKind, string[]> = {
   ],
 };
 
-function autoField(header: string, kind: CrmImportKind): string | null {
+function autoField(
+  header: string,
+  kind: CrmImportKind,
+  fields: readonly CrmFieldDefinition[] = [],
+): string | null {
   const normalized = header.toLowerCase().replace(/[^a-z0-9]+/g, "");
   const aliases: Record<string, string> = {
     fullname: "name",
@@ -100,28 +119,93 @@ function autoField(header: string, kind: CrmImportKind): string | null {
     ?? CRM_IMPORT_FIELDS[kind].find(
       (field) => field.toLowerCase() === normalized,
     );
-  return candidate ?? null;
+  if (candidate) return candidate;
+  const entityKind = kind === "contact" ? "person" : kind;
+  const exactLabel = header.trim().toLocaleLowerCase();
+  const custom = fields.find((field) =>
+    field.entityKind === entityKind
+    && (
+      field.label.trim().toLocaleLowerCase() === exactLabel
+      || (normalized.length > 0
+        && field.fieldKey.toLowerCase().replace(/[^a-z0-9]+/g, "") === normalized)
+    ),
+  );
+  return custom ? `custom:${custom.fieldKey}` : null;
 }
 
 export function suggestedCrmCsvMapping(
   headers: readonly string[],
   kind: CrmImportKind,
+  fields: readonly CrmFieldDefinition[] = [],
 ): Record<number, string | null> {
-  return Object.fromEntries(headers.map((header, index) => [index, autoField(header, kind)]));
+  return Object.fromEntries(headers.map((header, index) => [index, autoField(header, kind, fields)]));
+}
+
+function referenceValue(
+  raw: string,
+  field: CrmFieldDefinition,
+  data?: CrmData | null,
+): string {
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(raw)) {
+    return raw;
+  }
+  if (!data) return raw;
+  const candidates = [
+    ...(field.options.includes("person") ? data.contacts : []),
+    ...(field.options.includes("company") ? data.companies : []),
+    ...(field.options.includes("deal") ? data.deals : []),
+  ].filter((row) => row.name.trim().toLowerCase() === raw.trim().toLowerCase());
+  return candidates.length === 1 ? candidates[0].id : raw;
+}
+
+function customValue(
+  raw: string,
+  field: CrmFieldDefinition,
+  data?: CrmData | null,
+): unknown {
+  switch (field.fieldType) {
+    case "number": {
+      const value = Number(raw.replace(/,/g, ""));
+      return Number.isFinite(value) ? value : raw;
+    }
+    case "boolean": {
+      const normalized = raw.trim().toLowerCase();
+      if (["true", "yes", "y", "1"].includes(normalized)) return true;
+      if (["false", "no", "n", "0"].includes(normalized)) return false;
+      return raw;
+    }
+    case "multi_select":
+      return raw.split(/[|;]/).map((value) => value.trim()).filter(Boolean);
+    case "entity_reference":
+      return referenceValue(raw, field, data);
+    default:
+      return raw;
+  }
 }
 
 export function mapCrmCsvRows(
   preview: CsvPreview,
   kind: CrmImportKind,
   mapping: Record<number, string | null>,
+  fields: readonly CrmFieldDefinition[] = [],
+  data?: CrmData | null,
 ): Record<string, unknown>[] {
+  const fieldsByKey = new Map(fields.map((field) => [field.fieldKey, field]));
   return preview.rows.map((cells) => {
     const record: Record<string, unknown> = { kind };
     for (const [indexText, target] of Object.entries(mapping)) {
       if (!target) continue;
       const raw = cells[Number(indexText)] ?? "";
       if (!raw) continue;
-      if (target === "tags") record.tags = raw.split(/[|;]/).map((v) => v.trim()).filter(Boolean);
+      if (target.startsWith("custom:")) {
+        const field = fieldsByKey.get(target.slice("custom:".length));
+        if (!field) continue;
+        const customFields = record.customFields && typeof record.customFields === "object"
+          ? record.customFields as Record<string, unknown>
+          : {};
+        customFields[field.fieldKey] = customValue(raw, field, data);
+        record.customFields = customFields;
+      } else if (target === "tags") record.tags = raw.split(/[|;]/).map((v) => v.trim()).filter(Boolean);
       else if (target === "amount") {
         const amount = Number(raw.replace(/[^0-9.-]/g, ""));
         if (Number.isFinite(amount)) record.amount = amount;

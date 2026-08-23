@@ -229,6 +229,7 @@ export function CrmRecordDetail({
           workspaceId={workspaceId}
           record={record}
           config={config}
+          data={data}
           onChanged={onChanged}
         />
 

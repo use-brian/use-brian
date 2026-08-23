@@ -23,6 +23,7 @@ import {
   type CrmCompanyRow,
   type CrmContactRow,
   type CrmDealRow,
+  type CrmFieldDefinition,
   type CrmPipeline,
   type CrmPipelineStage,
   type DealStage,
@@ -146,6 +147,10 @@ export type CrmViewState = {
   company: string[];
   /** Tag filter (contacts/companies): any-of. Empty = any. */
   tag: string[];
+  /** Typed custom-field filters keyed by stable field key. */
+  custom: Record<string, string[]>;
+  /** `cf:<fieldKey>` for a single-valued custom grouping. */
+  group: string | null;
   /** Free-text needle over names (+ email/domain). */
   q: string;
   sort: DealSortKey;
@@ -161,6 +166,8 @@ export const DEFAULT_CRM_VIEW: CrmViewState = {
   stages: [],
   company: [],
   tag: [],
+  custom: {},
+  group: null,
   q: "",
   sort: "updated",
   closed: false,
@@ -189,6 +196,12 @@ export function crmViewFromSearch(
     oneOf(params.get("section"), CRM_SECTIONS) ??
     (quick ? sectionForQuickFilter(quick) : DEFAULT_CRM_VIEW.section);
   const stages = multiParam(params, "stage", { splitCommas: true });
+  const custom: Record<string, string[]> = {};
+  for (const [key, value] of params.entries()) {
+    if (!key.startsWith("cf.") || !value) continue;
+    const fieldKey = key.slice(3);
+    custom[fieldKey] = [...(custom[fieldKey] ?? []), value];
+  }
   return {
     section,
     view: oneOf(params.get("view"), VIEW_MODES) ?? DEFAULT_CRM_VIEW.view,
@@ -199,6 +212,8 @@ export function crmViewFromSearch(
     // user text and repeat the param instead (a tag may contain a comma).
     company: multiParam(params, "company", { splitCommas: true }),
     tag: multiParam(params, "tag", { splitCommas: false }),
+    custom,
+    group: params.get("group"),
     q: params.get("q") ?? "",
     sort: oneOf(params.get("sort"), DEAL_SORT_KEYS) ?? DEFAULT_CRM_VIEW.sort,
     closed: params.get("closed") === "1",
@@ -218,6 +233,10 @@ export function searchFromCrmView(state: CrmViewState): string {
   if (state.company.length > 0) params.set("company", state.company.join(","));
   // Repeated, never joined — a tag may contain a comma.
   for (const tag of state.tag) params.append("tag", tag);
+  for (const fieldKey of Object.keys(state.custom).sort()) {
+    for (const value of state.custom[fieldKey] ?? []) params.append(`cf.${fieldKey}`, value);
+  }
+  if (state.group) params.set("group", state.group);
   if (state.q.length > 0) params.set("q", state.q);
   if (state.sort !== DEFAULT_CRM_VIEW.sort) params.set("sort", state.sort);
   if (state.closed) params.set("closed", "1");
@@ -290,6 +309,27 @@ function matchesTag(
   return tag.some((t) => row.tags.includes(t));
 }
 
+export const CRM_EMPTY_CUSTOM_VALUE = "__none__";
+
+function customValue(row: { customFields?: Record<string, unknown> }, key: string): unknown {
+  return row.customFields?.[key];
+}
+
+function matchesCustomFields(
+  row: { customFields?: Record<string, unknown> },
+  filters: Record<string, string[]>,
+): boolean {
+  return Object.entries(filters).every(([key, selected]) => {
+    if (selected.length === 0) return true;
+    const value = customValue(row, key);
+    const empty = value === null || value === undefined || value === ""
+      || (Array.isArray(value) && value.length === 0);
+    if (empty) return selected.includes(CRM_EMPTY_CUSTOM_VALUE);
+    if (Array.isArray(value)) return selected.some((choice) => value.includes(choice));
+    return selected.includes(String(value));
+  });
+}
+
 /** Filter deals to the view state. The closed fold applies FIRST (won/lost
  *  hide unless revealed or explicitly stage-filtered in); quick filters
  *  pick their own slice (they only ever match open stages). */
@@ -322,6 +362,7 @@ export function applyDealFilters(
       return false;
     }
     if (!matchesCompany(row, state.company)) return false;
+    if (!matchesCustomFields(row, state.custom)) return false;
     if (needle) {
       const company = row.companyId
         ? (companyNames.get(row.companyId) ?? "")
@@ -346,6 +387,7 @@ export function applyContactFilters(
       return false;
     if (!matchesCompany(row, state.company)) return false;
     if (!matchesTag(row, state.tag)) return false;
+    if (!matchesCustomFields(row, state.custom)) return false;
     if (
       needle &&
       !row.name.toLowerCase().includes(needle) &&
@@ -363,6 +405,7 @@ export function applyCompanyFilters(
   const needle = state.q.trim().toLowerCase();
   return rows.filter((row) => {
     if (!matchesTag(row, state.tag)) return false;
+    if (!matchesCustomFields(row, state.custom)) return false;
     if (
       needle &&
       !row.name.toLowerCase().includes(needle) &&
@@ -371,6 +414,43 @@ export function applyCompanyFilters(
       return false;
     return true;
   });
+}
+
+export type CrmCustomGroup<T> = { value: string; label: string; rows: T[] };
+
+export function groupRowsByCustomField<T extends { customFields?: Record<string, unknown> }>(
+  rows: readonly T[],
+  field: CrmFieldDefinition,
+  referenceLabels: Map<string, string> = new Map(),
+  emptyLabel = "No value",
+  booleanLabels: { true: string; false: string } = { true: "true", false: "false" },
+  unavailableLabel = "Unavailable record",
+): CrmCustomGroup<T>[] {
+  const groups = new Map<string, T[]>();
+  for (const row of rows) {
+    const raw = customValue(row, field.fieldKey);
+    const value = raw === null || raw === undefined || raw === "" ? CRM_EMPTY_CUSTOM_VALUE : String(raw);
+    const group = groups.get(value) ?? [];
+    group.push(row);
+    groups.set(value, group);
+  }
+  return [...groups.entries()]
+    .map(([value, groupedRows]) => ({
+      value,
+      label: value === CRM_EMPTY_CUSTOM_VALUE
+        ? emptyLabel
+        : field.fieldType === "boolean"
+          ? value === "true" ? booleanLabels.true : booleanLabels.false
+          : field.fieldType === "entity_reference"
+            ? referenceLabels.get(value) ?? unavailableLabel
+            : value,
+      rows: groupedRows,
+    }))
+    .sort((a, b) => {
+      if (a.value === CRM_EMPTY_CUSTOM_VALUE) return 1;
+      if (b.value === CRM_EMPTY_CUSTOM_VALUE) return -1;
+      return a.label.localeCompare(b.label);
+    });
 }
 
 export function sortDeals(rows: CrmDealRow[], sort: DealSortKey): CrmDealRow[] {

@@ -125,7 +125,8 @@ export type CrmFieldType =
   | "date"
   | "boolean"
   | "single_select"
-  | "multi_select";
+  | "multi_select"
+  | "entity_reference";
 
 export type CrmFieldDefinition = {
   id: string;
@@ -368,6 +369,29 @@ export function createCrmField(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
   });
+}
+
+export const CRM_PRESET_IDS = [
+  "services_saas",
+  "enterprise_sales",
+  "partnership_referral",
+] as const;
+export type CrmPresetId = (typeof CRM_PRESET_IDS)[number];
+export type CrmPresetApplyResult = {
+  created: string[];
+  skipped: string[];
+  revived: string[];
+  conflicts: string[];
+};
+
+export function applyCrmFieldPreset(
+  workspaceId: string,
+  presetId: CrmPresetId,
+): Promise<CrmPresetApplyResult> {
+  return jsonRequest(
+    `/api/crm/${encodeURIComponent(workspaceId)}/field-presets/${encodeURIComponent(presetId)}`,
+    { method: "POST" },
+  );
 }
 
 export async function archiveCrmField(

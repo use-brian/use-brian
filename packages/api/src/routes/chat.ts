@@ -5936,7 +5936,8 @@ export function chatRoutes(options: WebChatOptions): Router {
       ])
       const COORDINATOR_RESEARCH_EXTRA_TOOLS = new Set([
         // Write tools — for ingesting research findings.
-        'updateSelfProfile', 'saveContact', 'saveCompany', 'saveDeal', 'createEntity',
+        'updateSelfProfile', 'saveContact', 'saveCompany', 'saveDeal',
+        'setCrmCustomFields', 'createEntity',
         // Update + edge tools — required for the "link existing
         // entities" case ("save all edges with current brain entities
         // according to researches above"). Without these the
@@ -5945,7 +5946,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         // the entity ids the model needs to chain into createEdge or
         // updateContact({ links: [...] }).
         'updateContact', 'updateCompany', 'updateDeal',
-        'listContacts', 'listCompanies', 'listDeals',
+        'listContacts', 'listCompanies', 'listDeals', 'listCrmFields',
         'getContact', 'getCompany', 'getDeal',
         'createEdge',
       ])

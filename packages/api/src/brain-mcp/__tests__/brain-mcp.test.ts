@@ -122,6 +122,8 @@ const CRM_TOOLS_STUB: BrainCrmTools = {
   listDeals: stubCoreTool('listDeals', true),
   updateDeal: stubCoreTool('updateDeal'),
   advanceDealStage: stubCoreTool('advanceDealStage'),
+  listCrmFields: stubCoreTool('listCrmFields', true),
+  setCrmCustomFields: stubCoreTool('setCrmCustomFields'),
 }
 
 const RETRIEVAL_TOOLS_STUB: BrainRetrievalTools = {
@@ -195,6 +197,7 @@ const READ_TOOL_NAMES = [
   'listCompanies',
   'listContacts',
   'listDeals',
+  'listCrmFields',
   'listTasks',
   'searchBrain',
   'searchFileContent',
@@ -222,6 +225,7 @@ const WRITE_TOOL_NAMES = [
   'saveFileToBrain',
   'saveMemory',
   'saveTask',
+  'setCrmCustomFields',
   'updateCompany',
   'updateContact',
   'updateDeal',

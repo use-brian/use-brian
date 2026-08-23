@@ -13,6 +13,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
+  applyCrmFieldPreset,
+  CRM_PRESET_IDS,
   createCrmField,
   archiveCrmField,
   createCrmPipeline,
@@ -21,8 +23,10 @@ import {
   type CrmConfig,
   type CrmFieldType,
   type CrmStageCategory,
+  type CrmPresetId,
 } from "@/lib/api/crm";
 import { useT } from "@/lib/i18n/client";
+import { crmFieldKeyFromLabel } from "@/lib/crm-r2";
 
 export function CrmConfigDialog({
   workspaceId,
@@ -48,6 +52,8 @@ export function CrmConfigDialog({
   const [stageProbability, setStageProbability] = useState("50");
   const [fieldLabel, setFieldLabel] = useState("");
   const [fieldOptions, setFieldOptions] = useState("");
+  const [referenceKinds, setReferenceKinds] = useState<Array<"person" | "company" | "deal">>(["company"]);
+  const [presetResult, setPresetResult] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(false);
 
@@ -108,10 +114,11 @@ export function CrmConfigDialog({
   async function addField() {
     const label = fieldLabel.trim();
     if (!label) return;
-    const suggested = label.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 63);
+    const suggested = crmFieldKeyFromLabel(label);
     if (!suggested || busy) return;
     const choices = fieldType === "single_select" || fieldType === "multi_select" ? fieldOptions : "";
     if ((fieldType === "single_select" || fieldType === "multi_select") && !choices.trim()) return;
+    if (fieldType === "entity_reference" && referenceKinds.length === 0) return;
     setBusy(true);
     try {
       await createCrmField(workspaceId, {
@@ -119,10 +126,32 @@ export function CrmConfigDialog({
         fieldKey: suggested,
         label,
         fieldType,
-        options: choices.split(",").map((option) => option.trim()).filter(Boolean),
+        options: fieldType === "entity_reference"
+          ? referenceKinds
+          : choices.split(",").map((option) => option.trim()).filter(Boolean),
       });
       setFieldLabel("");
       setFieldOptions("");
+      await reload();
+      onChanged?.();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : t.configFailed);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function applyPreset(presetId: CrmPresetId) {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    setPresetResult(null);
+    try {
+      const result = await applyCrmFieldPreset(workspaceId, presetId);
+      setPresetResult(t.presetResult
+        .replace("{created}", String(result.created.length + result.revived.length))
+        .replace("{skipped}", String(result.skipped.length))
+        .replace("{conflicts}", String(result.conflicts.length)));
       await reload();
       onChanged?.();
     } catch (cause) {
@@ -197,6 +226,19 @@ export function CrmConfigDialog({
             </section>
 
             <section className="border-t border-border pt-5">
+              <div className="mb-5">
+                <div className="mb-3"><h3 className="text-sm font-semibold">{t.fieldPresets}</h3><p className="text-xs text-muted-foreground">{t.fieldPresetsHelp}</p></div>
+                <div className="grid gap-2 sm:grid-cols-3">
+                  {CRM_PRESET_IDS.map((presetId) => (
+                    <div key={presetId} className="rounded-xl border border-border p-3">
+                      <div className="text-xs font-medium">{t.presetNames[presetId]}</div>
+                      <div className="mt-1 min-h-8 text-[11px] text-muted-foreground">{t.presetDescriptions[presetId]}</div>
+                      <Button className="mt-3" size="xs" variant="outline" disabled={busy} onClick={() => void applyPreset(presetId)}>{t.applyPreset}</Button>
+                    </div>
+                  ))}
+                </div>
+                {presetResult && <div className="mt-2 text-xs text-muted-foreground">{presetResult}</div>}
+              </div>
               <div className="mb-3"><h3 className="text-sm font-semibold">{t.customFields}</h3><p className="text-xs text-muted-foreground">{t.fieldsHelp}</p></div>
               <div className="mb-3 grid gap-2 rounded-xl border border-border bg-muted/20 p-3 sm:grid-cols-2 lg:grid-cols-[150px_150px_minmax(0,1fr)_auto]">
                 <Select value={fieldKind} onValueChange={(value) => setFieldKind(value as typeof fieldKind)}>
@@ -210,7 +252,7 @@ export function CrmConfigDialog({
                 <Select value={fieldType} onValueChange={(value) => setFieldType(value as CrmFieldType)}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
-                    {(["text", "number", "date", "boolean", "single_select", "multi_select"] as CrmFieldType[]).map((type) => (
+                    {(["text", "number", "date", "boolean", "single_select", "multi_select", "entity_reference"] as CrmFieldType[]).map((type) => (
                       <SelectItem key={type} value={type}>{t.fieldTypes[type]}</SelectItem>
                     ))}
                   </SelectContent>
@@ -220,6 +262,16 @@ export function CrmConfigDialog({
                 {(fieldType === "single_select" || fieldType === "multi_select") && (
                   <div className="sm:col-span-2 lg:col-span-4">
                     <ConfigInput label={t.fieldOptions} value={fieldOptions} onChange={setFieldOptions} placeholder={t.fieldOptionsPlaceholder} />
+                  </div>
+                )}
+                {fieldType === "entity_reference" && (
+                  <div className="sm:col-span-2 lg:col-span-4">
+                    <div className="mb-1 text-xs text-muted-foreground">{t.referenceTargets}</div>
+                    <div className="flex flex-wrap gap-2">{(["person", "company", "deal"] as const).map((target) => (
+                      <Button key={target} size="xs" variant={referenceKinds.includes(target) ? "default" : "outline"} onClick={() => setReferenceKinds((current) => current.includes(target) ? current.filter((item) => item !== target) : [...current, target])}>
+                        {target === "person" ? t.kindContact : target === "company" ? t.kindCompany : t.kindDeal}
+                      </Button>
+                    ))}</div>
                   </div>
                 )}
               </div>

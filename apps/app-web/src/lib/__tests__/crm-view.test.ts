@@ -8,6 +8,7 @@ import type {
   CrmContactRow,
   CrmDealRow,
   CrmPipeline,
+  CrmFieldDefinition,
 } from "@/lib/api/crm";
 import {
   applyContactFilters,
@@ -17,6 +18,7 @@ import {
   crmViewFromSearch,
   formatAmount,
   groupDealsByPipelineStage,
+  groupRowsByCustomField,
   localDateStr,
   matchesDealQuickFilter,
   searchFromCrmView,
@@ -277,6 +279,36 @@ describe("[COMP:app-web/crm-view] CRM view logic", () => {
     expect(stats.get("co1")).toEqual({ contacts: 1, openDeals: 1 });
   });
 
+  it("filters typed custom fields with OR within a field and AND across fields", () => {
+    const rows = [
+      deal({ id: "saas-referral", customFields: { work_type: "SaaS", opportunity_type: "Referral" } }),
+      deal({ id: "services-referral", customFields: { work_type: "Services", opportunity_type: "Referral" } }),
+      deal({ id: "saas-new", customFields: { work_type: "SaaS", opportunity_type: "New business" } }),
+    ];
+    const filtered = applyDealFilters(rows, {
+      ...DEFAULT_CRM_VIEW,
+      custom: { work_type: ["SaaS", "Services"], opportunity_type: ["Referral"] },
+    }, new Map(), NOW);
+    expect(filtered.map((row) => row.id)).toEqual(["saas-referral", "services-referral"]);
+  });
+
+  it("groups a single-valued reference field with an explicit empty group", () => {
+    const field: CrmFieldDefinition = {
+      id: "f1", entityKind: "deal", fieldKey: "referral_source", label: "Referral source",
+      fieldType: "entity_reference", options: ["company"], isRequired: false, position: 0,
+    };
+    const groups = groupRowsByCustomField([
+      deal({ id: "linked", customFields: { referral_source: "co1" } }),
+      deal({ id: "unavailable", customFields: { referral_source: "co-archived" } }),
+      deal({ id: "empty", customFields: {} }),
+    ], field, new Map([["co1", "Partner Co"]]), "No value", undefined, "Unavailable record");
+    expect(groups.map((group) => [group.label, group.rows.map((row) => row.id)])).toEqual([
+      ["Partner Co", ["linked"]],
+      ["Unavailable record", ["unavailable"]],
+      ["No value", ["empty"]],
+    ]);
+  });
+
 });
 
 describe("[COMP:app-web/crm-surface] CRM surface state contract", () => {
@@ -296,12 +328,15 @@ describe("[COMP:app-web/crm-surface] CRM surface state contract", () => {
       stages: ["stage-proposal", "stage-negotiation"] as const,
       company: ["co1", "co2"],
       tag: ["vip", "asia, pacific"],
+      custom: { work_type: ["SaaS", "Consulting, design"] },
+      group: "cf:opportunity_type",
     };
     const search = searchFromCrmView({ ...state, stages: [...state.stages] });
     const params = new URLSearchParams(search);
     expect(params.getAll("company")).toEqual(["co1,co2"]);
     // A tag containing a comma must stay one tag.
     expect(params.getAll("tag")).toEqual(["vip", "asia, pacific"]);
+    expect(params.getAll("cf.work_type")).toEqual(["SaaS", "Consulting, design"]);
     expect(crmViewFromSearch(search)).toEqual({
       ...state,
       stages: [...state.stages],

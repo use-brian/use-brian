@@ -112,7 +112,7 @@ describe('[COMP:api/brain-stream-fanout] notifyBrainWriteIfMatch', () => {
       'saveTask', 'updateTask', 'closeTask', 'reopenTask',
       'saveContact', 'updateContact',
       'saveCompany', 'updateCompany',
-      'saveDeal', 'updateDeal', 'advanceDealStage',
+      'saveDeal', 'updateDeal', 'advanceDealStage', 'setCrmCustomFields',
       'updateSelfProfile', 'createEntity',
       'fileWrite', 'fileAppend', 'fileSetMeta', 'fileDelete',
     ])

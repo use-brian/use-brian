@@ -5,6 +5,8 @@ import {
   createDeal, getDealById, listDeals, updateDeal, setDealStage,
   batchLabels,
 } from './crm.js'
+import { appendCrmActivity, getCrmConfig, updateCrmCustomFields } from './crm-r2.js'
+import { getEntityById } from './entities-store.js'
 
 /**
  * Create a CrmStore backed by PostgreSQL.
@@ -73,6 +75,50 @@ export function createDbCrmStore(deps: { entityLinks?: EntityLinksStore } = {}):
     // Batch label resolution (Phase 1 — Notion-feel relation cells).
     batchLabels(ctx, requests) {
       return batchLabels(ctx, requests)
+    },
+
+    async listCustomFields(ctx, entityKind) {
+      const config = await getCrmConfig(ctx.userId, ctx.workspaceId)
+      return entityKind
+        ? config.fields.filter((field) => field.entityKind === entityKind)
+        : config.fields
+    },
+    async getCustomFields(ctx, entityId) {
+      const entity = await getEntityById(ctx, entityId)
+      if (!entity || !['person', 'company', 'deal'].includes(entity.kind)) return null
+      const current = entity.attributes.custom_fields
+      return {
+        id: entity.id,
+        entityKind: entity.kind as 'person' | 'company' | 'deal',
+        values: current && typeof current === 'object' && !Array.isArray(current)
+          ? current as Record<string, unknown>
+          : {},
+      }
+    },
+    async setCustomFields(ctx, entityId, values) {
+      const before = await getEntityById(ctx, entityId)
+      const updated = await updateCrmCustomFields({ ctx, entityId, values })
+      if (!updated) return null
+      const current = updated.attributes.custom_fields
+      await appendCrmActivity({
+        userId: ctx.userId,
+        workspaceId: ctx.workspaceId,
+        entityId: updated.id,
+        activityType: 'field_change',
+        summary: 'Custom fields updated',
+        metadata: {
+          fields: Object.keys(values),
+          before: before?.attributes.custom_fields ?? {},
+          after: current ?? {},
+        },
+      })
+      return {
+        id: updated.id,
+        entityKind: updated.kind as 'person' | 'company' | 'deal',
+        values: current && typeof current === 'object' && !Array.isArray(current)
+          ? current as Record<string, unknown>
+          : {},
+      }
     },
   }
 }

@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   mapCrmCsvRows,
+  crmFieldKeyFromLabel,
   linkedContactsForEmailApproval,
   matchingEmailApprovals,
   parseCrmCsv,
   suggestedCrmCsvMapping,
 } from "@/lib/crm-r2";
+import type { CrmFieldDefinition } from "@/lib/api/crm";
 
 describe("[COMP:app-web/crm-r2] CRM R2 pure client logic", () => {
   it("parses quoted CSV and previews no more than the cap", () => {
@@ -22,6 +24,40 @@ describe("[COMP:app-web/crm-r2] CRM R2 pure client logic", () => {
     expect(mapCrmCsvRows(preview, "contact", mapping)).toEqual([
       { kind: "contact", name: "Jane", tags: ["lead", "vip"] },
     ]);
+  });
+
+  it("auto-maps and converts typed custom fields, including visible references", () => {
+    const preview = parseCrmCsv("Name,Work type,Active,Referral source\nDeal one,SaaS,yes,Partner Co");
+    const fields: CrmFieldDefinition[] = [
+      { id: "f1", entityKind: "deal", fieldKey: "work_type", label: "Work type", fieldType: "single_select", options: ["SaaS", "Services"], isRequired: false, position: 0 },
+      { id: "f2", entityKind: "deal", fieldKey: "active", label: "Active", fieldType: "boolean", options: [], isRequired: false, position: 1 },
+      { id: "f3", entityKind: "deal", fieldKey: "referral_source", label: "Referral source", fieldType: "entity_reference", options: ["company"], isRequired: false, position: 2 },
+    ];
+    const mapping = suggestedCrmCsvMapping(preview.headers, "deal", fields);
+    const records = mapCrmCsvRows(preview, "deal", mapping, fields, {
+      contacts: [], deals: [], companies: [{ id: "d126f352-7f5c-48b2-88d0-66694be0c93d", name: "Partner Co", domain: null, tags: [], updatedAt: "2026-08-20T00:00:00Z" }],
+    });
+    expect(records).toEqual([{
+      kind: "deal",
+      name: "Deal one",
+      customFields: {
+        work_type: "SaaS",
+        active: true,
+        referral_source: "d126f352-7f5c-48b2-88d0-66694be0c93d",
+      },
+    }]);
+  });
+
+  it("only auto-maps non-Latin custom labels on an exact label match", () => {
+    const fields: CrmFieldDefinition[] = [
+      { id: "f1", entityKind: "company", fieldKey: "account_tier", label: "客戶級別", fieldType: "text", options: [], isRequired: false, position: 0 },
+    ];
+    expect(suggestedCrmCsvMapping(["客戶級別", "其他欄位"], "company", fields)).toEqual({
+      0: "custom:account_tier",
+      1: null,
+    });
+    expect(crmFieldKeyFromLabel("客戶級別")).toMatch(/^field_[a-z0-9]+$/);
+    expect(crmFieldKeyFromLabel("2027 segment")).toBe("field_2027_segment");
   });
 
   it("matches reviewed IMAP sends by exact normalized recipient", () => {
