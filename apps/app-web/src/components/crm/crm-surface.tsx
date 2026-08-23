@@ -25,7 +25,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { BarChart3, Kanban, Rows3, Settings2 } from "lucide-react";
+import { BarChart3, Kanban, Mail, Rows3, Settings2 } from "lucide-react";
 import { OperatorTopbar } from "@/components/operator/operator-topbar";
 import { cn } from "@/lib/utils";
 import { mutateSurfaceCache, useCachedResource } from "@/lib/surface-cache";
@@ -94,6 +94,15 @@ import {
 } from "@/lib/crm-view";
 import { requestBrainRefresh } from "@/lib/brain-events";
 import {
+  listApprovals,
+  type PendingApprovalRow,
+} from "@/lib/api/approvals";
+import {
+  APPROVALS_REFRESH_EVENT,
+  type ApprovalsRefreshDetail,
+} from "@/lib/approvals-events";
+import { crmEmailApprovalQueue } from "@/lib/crm-r2";
+import {
   AmountCell,
   CloseDateCell,
   CompanyCell,
@@ -118,6 +127,7 @@ import { CrmActions } from "./crm-actions";
 import { CrmConfigDialog } from "./crm-config";
 import { CrmReportingDialog } from "./crm-reporting";
 import { CrmSavedViews } from "./crm-saved-views";
+import { CrmEmailReviewWorkspace } from "./crm-email-review";
 
 const NONE = "__none__";
 
@@ -152,6 +162,32 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
     void configResource.refresh();
   }, [refreshCrm, configResource.refresh]);
 
+  const [pendingApprovals, setPendingApprovals] = useState<PendingApprovalRow[]>([]);
+  const [approvalsLoading, setApprovalsLoading] = useState(true);
+  const [approvalsError, setApprovalsError] = useState(false);
+  const reloadApprovals = useCallback(async () => {
+    setApprovalsLoading(true);
+    setApprovalsError(false);
+    try {
+      setPendingApprovals(await listApprovals(workspaceId, { throwOnError: true }));
+    } catch {
+      setApprovalsError(true);
+    } finally {
+      setApprovalsLoading(false);
+    }
+  }, [workspaceId]);
+  useEffect(() => {
+    void reloadApprovals();
+    const handleRefresh = (event: Event) => {
+      const detail = (event as CustomEvent<ApprovalsRefreshDetail>).detail;
+      if (!detail?.workspaceId || detail.workspaceId === workspaceId) {
+        void reloadApprovals();
+      }
+    };
+    window.addEventListener(APPROVALS_REFRESH_EVENT, handleRefresh);
+    return () => window.removeEventListener(APPROVALS_REFRESH_EVENT, handleRefresh);
+  }, [reloadApprovals, workspaceId]);
+
   /** Optimistic patch against the cached value (survives leaving the surface). */
   const setData = useCallback(
     (updater: (previous: CrmData) => CrmData) => {
@@ -178,6 +214,10 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
   const deals = data?.deals ?? [];
   const contacts = data?.contacts ?? [];
   const companies = data?.companies ?? [];
+  const emailQueue = useMemo(
+    () => (data ? crmEmailApprovalQueue(data, pendingApprovals) : []),
+    [data, pendingApprovals],
+  );
   const companyNames = useMemo(() => companyNameById(companies), [companies]);
   const contactNames = useMemo(() => contactNameById(contacts), [contacts]);
   const selectedPipeline = useMemo<CrmPipeline | null>(() => {
@@ -223,6 +263,13 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
   const selectedGroupField = view.group?.startsWith("cf:")
     ? groupableFields.find((field) => field.fieldKey === view.group?.slice(3)) ?? null
     : null;
+
+  useEffect(() => {
+    if (view.review !== "email" || approvalsLoading) return;
+    const selectedExists = emailQueue.some((item) => item.approval.id === view.draft);
+    const nextDraft = selectedExists ? view.draft : emailQueue[0]?.approval.id ?? null;
+    if (nextDraft !== view.draft) setView({ draft: nextDraft });
+  }, [approvalsLoading, emailQueue, setView, view.draft, view.review]);
 
   const filteredDeals = useMemo(
     () =>
@@ -653,34 +700,56 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
       <OperatorTopbar
         app="crm"
         center={
-          <div className="flex shrink-0 items-center gap-0.5 rounded-lg bg-sidebar-accent/60 p-0.5">
-            {CRM_SECTIONS.map((section) => (
-              <button
-                key={section}
-                type="button"
-                aria-pressed={view.section === section}
-                onClick={() =>
-                  setView({ section, quick: null, stages: [], custom: {}, group: null, q: "" })
-                }
-                className={cn(
-                  "inline-flex h-6.5 items-center gap-1.5 rounded-md px-2 text-[12.5px] transition-colors",
-                  view.section === section
-                    ? "bg-background font-medium shadow-sm"
-                    : "text-sidebar-foreground/70 hover:text-sidebar-accent-foreground",
-                )}
-              >
-                {sectionLabels[section]}
-                {data !== null && (
-                  <span className="tabular-nums text-[11px] text-muted-foreground">
-                    {sectionCounts[section]}
-                  </span>
-                )}
-              </button>
-            ))}
+          <div className="flex shrink-0 items-center gap-1">
+            <div className="hidden items-center gap-0.5 rounded-lg bg-sidebar-accent/60 p-0.5 sm:flex">
+              {CRM_SECTIONS.map((section) => (
+                <button
+                  key={section}
+                  type="button"
+                  aria-pressed={view.review === null && view.section === section}
+                  onClick={() =>
+                    setView({ section, review: null, draft: null, quick: null, stages: [], custom: {}, group: null, q: "" })
+                  }
+                  className={cn(
+                    "inline-flex h-6.5 items-center gap-1.5 rounded-md px-2 text-[12.5px] transition-colors",
+                    view.review === null && view.section === section
+                      ? "bg-background font-medium shadow-sm"
+                      : "text-sidebar-foreground/70 hover:text-sidebar-accent-foreground",
+                  )}
+                >
+                  {sectionLabels[section]}
+                  {data !== null && (
+                    <span className="tabular-nums text-[11px] text-muted-foreground">
+                      {sectionCounts[section]}
+                    </span>
+                  )}
+                </button>
+              ))}
+            </div>
+            <button
+              type="button"
+              aria-label={t.r2.emailDrafts}
+              aria-pressed={view.review === "email"}
+              onClick={() => setView({ review: "email", draft: view.draft ?? emailQueue[0]?.approval.id ?? null })}
+              className={cn(
+                "inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12.5px] transition-colors",
+                view.review === "email"
+                  ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                  : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground",
+              )}
+            >
+              <Mail className="size-3.5" aria-hidden />
+              <span className="hidden sm:inline">{t.r2.emailDrafts}</span>
+              {!approvalsLoading && emailQueue.length > 0 && (
+                <span className="rounded-full bg-amber-500/15 px-1.5 text-[10px] font-semibold tabular-nums text-amber-700 dark:text-amber-300">
+                  {emailQueue.length}
+                </span>
+              )}
+            </button>
           </div>
         }
         right={
-          <>
+          view.review === null ? <>
             {view.section === "deals" && (
               <>
               {selectedPipeline && config && config.pipelines.length > 1 && (
@@ -786,7 +855,7 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
                 setOpenRecord({ kind: created.kind, id: created.id });
               }}
             />
-          </>
+          </> : null
         }
       />
 
@@ -795,6 +864,46 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
           and never covers the bar. */}
       <div className="relative flex min-h-0 flex-1">
         <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
+
+        {view.review === "email" ? (
+          data === null ? (
+            <div className="p-6 text-sm text-muted-foreground">
+              {crm.error !== undefined ? (
+                <span>
+                  {t.loadFailed}{" "}
+                  <button type="button" onClick={() => void refreshCrm()} className="underline hover:text-foreground">
+                    {t.retry}
+                  </button>
+                </span>
+              ) : t.loading}
+            </div>
+          ) : (
+            <CrmEmailReviewWorkspace
+              workspaceId={workspaceId}
+              data={data}
+              items={emailQueue}
+              selectedId={view.draft}
+              loading={approvalsLoading}
+              loadError={approvalsError}
+              onSelect={(draft) => setView({ review: "email", draft })}
+              onReload={() => void reloadApprovals()}
+              onResolved={(approvalId) => {
+                const nextDraft = emailQueue.find((item) => item.approval.id !== approvalId)?.approval.id ?? null;
+                setPendingApprovals((current) => current.filter((approval) => approval.id !== approvalId));
+                setView({ draft: nextDraft });
+              }}
+              onRevised={(oldId, next) => {
+                setPendingApprovals((current) => current.map((approval) => approval.id === oldId ? next : approval));
+                setView({ draft: next.id });
+              }}
+              onOpenContact={(contactId) => {
+                setView({ section: "contacts", review: null, draft: null });
+                setOpenRecord({ kind: "contact", id: contactId });
+              }}
+            />
+          )
+        ) : (
+          <>
 
         {/* Toolbar — attention presets + filters + search in ONE quiet strip
             (it swaps for the bulk bar while table rows are checked). */}
@@ -1034,10 +1143,12 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
             />}/>
           )}
         </div>
+          </>
+        )}
       </div>
 
         {/* Master-detail record pane. */}
-        {record && data && config && (
+        {view.review === null && record && data && config && (
           <CrmRecordDetail
             workspaceId={workspaceId}
             record={record}
@@ -1046,6 +1157,10 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
             commits={commits}
             onClose={() => setOpenRecord(null)}
             onOpenRecord={(ref) => setOpenRecord({ kind: ref.kind, id: ref.row.id })}
+            onReviewEmail={(draft) => {
+              setOpenRecord(null);
+              setView({ review: "email", draft });
+            }}
             onChanged={reload}
             onArchive={(ref) => void archiveRecord(ref)}
           />

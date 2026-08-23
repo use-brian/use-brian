@@ -77,6 +77,7 @@ import {
   slackRoutes,
   shouldAbortForEdit,
   resolveSlackSender,
+  resolveSlackAddressing,
   resolveSlackThreadScope,
 } from '../slack.js'
 import { verifySlackSignature } from '@use-brian/channels'
@@ -468,6 +469,63 @@ describe('[COMP:api/slack-route] Slack thread session scope', () => {
       threadTs: undefined,
       sessionChannelId: 'C123',
     })
+  })
+})
+
+describe('[COMP:api/slack-route] realtime thread addressing', () => {
+  const target = {
+    id: 'target-1',
+    workspaceId: 'w-1',
+    assistantId: 'a-1',
+    channelType: 'slack',
+    conversationRef: 'C123',
+    threadRef: '100.001',
+    taskIds: ['task-1'],
+    contextText: 'Daily workflow task',
+    expiresAt: new Date('2099-01-01T00:00:00Z'),
+    createdByUserId: 'u-1',
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  }
+
+  it('admits an unmentioned reply only when the exact active target exists', async () => {
+    const findActive = vi.fn(async () => target)
+    const result = await resolveSlackAddressing({
+      incoming: {
+        channelId: 'C123',
+        replyToMessageId: '100.001',
+        isGroupChat: true,
+        isMentioned: false,
+      },
+      requireMention: true,
+      workspaceId: 'w-1',
+      assistantId: 'a-1',
+      targetStore: { findActive } as never,
+    })
+    expect(result).toEqual({ accepted: true, target })
+    expect(findActive).toHaveBeenCalledWith({
+      workspaceId: 'w-1',
+      assistantId: 'a-1',
+      channelType: 'slack',
+      conversationRef: 'C123',
+      threadRef: '100.001',
+    })
+  })
+
+  it('keeps the ordinary mention gate when no active target exists', async () => {
+    const result = await resolveSlackAddressing({
+      incoming: {
+        channelId: 'C123',
+        replyToMessageId: '100.001',
+        isGroupChat: true,
+        isMentioned: false,
+      },
+      requireMention: true,
+      workspaceId: 'w-1',
+      assistantId: 'a-1',
+      targetStore: { findActive: vi.fn(async () => null) } as never,
+    })
+    expect(result).toEqual({ accepted: false, target: null })
   })
 })
 

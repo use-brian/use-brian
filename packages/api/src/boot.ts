@@ -97,6 +97,7 @@ import {
   type OfficeToolPolicy,
   createFindPageTool,
   createIngestRuleTools,
+  createRealtimeThreadTargetTools,
   createEntityKindClassifier,
   createCircuitBreaker,
   createKnowledgeSyncWorker,
@@ -276,6 +277,8 @@ import { createDeferredConfirmationStore } from './db/deferred-confirmation-stor
 import { createDbKnowledgeStore } from './db/knowledge-store.js'
 import { createKnowledgeRepoWriter } from './knowledge/repo-writer.js'
 import { createDbKbMaintenanceStore, kbMaintenanceRunGuard } from './knowledge/maintenance.js'
+import { createDbKnowledgeCaptureRuleStore } from './knowledge/capture-rules.js'
+import { createRealtimeThreadTargetStore } from './db/realtime-thread-target-store.js'
 import { knowledgeRoutes, workspaceKnowledgeRoutes } from './routes/knowledge.js'
 import { brandRoutes } from './routes/brand.js'
 import { getBranchHead, getRepoTree, getFileContents, compareCommits, getRepoPermissions } from './github/client.js'
@@ -572,6 +575,7 @@ import { createWorkspaceCustomLlmResolver } from './custom-llm-runtime.js'
 import { createDbCompartmentStore } from './db/compartment-store.js'
 import { compartmentRoutes } from './routes/compartments.js'
 import { brainMcpRoutes } from './brain-mcp/server.js'
+import { associationRoutes } from './routes/association.js'
 import { createStoreToolResolver } from './home-apps/store-tools-resolver.js'
 import { appsShopifyRoutes } from './routes/apps-shopify.js'
 import { agentAllowedToolsFor } from './brain-mcp/store-tools.js'
@@ -1107,6 +1111,7 @@ export interface BootContext {
    */
   savedViewStore: ReturnType<typeof createDbSavedViewStore>
   knowledgeStore: ReturnType<typeof createDbKnowledgeStore>
+  knowledgeCaptureRuleStore: ReturnType<typeof createDbKnowledgeCaptureRuleStore>
   capabilityStore: ReturnType<typeof createDbCapabilityStore>
   apiKeyStore: ReturnType<typeof createDbApiKeyStore>
   usageStore: UsageStore | undefined
@@ -1942,6 +1947,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const chatConfirmationStore = createChatConfirmationStore()
   const deferredConfirmationStore = createDeferredConfirmationStore()
   const knowledgeStore = createDbKnowledgeStore()
+  const knowledgeCaptureRuleStore = createDbKnowledgeCaptureRuleStore()
+  const realtimeThreadTargetStore = createRealtimeThreadTargetStore()
   const kbMaintenanceStore = createDbKbMaintenanceStore()
 
   // ── Assistant KB repo writer ──
@@ -3178,6 +3185,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   allTools.set('bulkUpdateTasks', taskTools.bulkUpdateTasks)
   allTools.set('archiveTasks', taskTools.archiveTasks)
 
+  // Temporary channel-neutral thread authority. Workflow steps can bind a
+  // just-delivered provider message id; inbound adapters consult the same
+  // store before applying their ordinary mention/address gate.
+  const realtimeThreadTargetTools = createRealtimeThreadTargetTools(realtimeThreadTargetStore)
+  allTools.set('setRealtimeThreadTarget', realtimeThreadTargetTools.setRealtimeThreadTarget)
+  allTools.set('listRealtimeThreadTargets', realtimeThreadTargetTools.listRealtimeThreadTargets)
+  allTools.set('removeRealtimeThreadTarget', realtimeThreadTargetTools.removeRealtimeThreadTarget)
+
   // ── Brand primitive ──
   // Boot-built like the file tools (NOT through mcp/inject.ts): both carry
   // `requiresCapability: 'brand'`, so the per-turn `filterToolsByCapabilities`
@@ -4226,6 +4241,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     workerManager,
     workerRunsStore,
     knowledgeStore,
+    knowledgeCaptureRuleStore,
     knowledgeRepoWriter,
     gdriveFilesStore,
     skillStore,
@@ -4352,6 +4368,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     storeTools: shopifyStoreTools,
     askAssistant: ({ workspaceId, storeScope, task }) =>
       askShopifyAssistant({ workspaceId, storeScope, task, callerSessionId: 'app:shopify' }),
+  }))
+
+  // Association operations uses the same workspace-scoped credentials as
+  // Brain MCP. Mount before the bare authenticated `/api` routers: brain keys
+  // and OAuth access tokens are deliberately not first-party JWTs.
+  app.use('/api/association', associationRoutes({
+    brainKeyStore,
+    authorizationStore: oauthAuthorizationStore,
   }))
 
   app.use('/api/brain/mcp', brainMcpRoutes({
@@ -4677,6 +4701,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     blobClient: filesBlobClient ?? undefined,
     filesResolver: filesResolver ?? undefined,
     workspaceMembership: getWorkspaceMembershipWithClearanceSystem,
+    publicApiUrl: env.API_URL,
   }))
 
   // Built-in connector lifecycle (list / store-credentials / disconnect /
@@ -6044,6 +6069,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   app.use('/api/workspaces/:workspaceId/knowledge', requireAuth(env.JWT_SECRET), workspaceKnowledgeRoutes({
     knowledgeStore,
+    knowledgeCaptureRuleStore,
     allowLocalSources: env.LOCAL_FILESYSTEM_SOURCES_ENABLED === true,
     connectorInstanceStore,
     connectorGrantStore,
@@ -6106,6 +6132,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const workflowEventDispatcher: WorkflowEventDispatcher = createWorkflowEventDispatcher({
     findEventTriggeredWorkflows: ({ workspaceId }) =>
       findEventTriggeredWorkflowsSystem(workspaceId),
+    findAdditionalConnectorEventWorkspaces: ({ connectorInstanceId }) =>
+      connectorGrantStore.listGrantedWorkspaceIdsForInstanceSystem(connectorInstanceId),
     startWorkflowRun: async ({ workflowId, workspaceId, input }) => {
       const recent = await countRecentRunsForWorkflowSystem(
         workflowId,
@@ -7272,6 +7300,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     workspaceFilesStore,
     savedViewStore,
     knowledgeStore,
+    knowledgeCaptureRuleStore,
     capabilityStore,
     apiKeyStore,
     usageStore,
@@ -7446,6 +7475,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             connectorGrantStore,
             connectorInstanceStore,
             knowledgeStore,
+            knowledgeCaptureRuleStore,
             gdriveFilesStore,
             workspaceFilesStore,
             filesApi: filesApi ?? undefined,
@@ -7511,6 +7541,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         },
         channelUserStore, workerManager, connectorStore, mcpSettingsStore,
         assistantConnectorStore, connectorGrantStore, connectorInstanceStore, knowledgeStore,
+        knowledgeCaptureRuleStore,
         gdriveFilesStore, workspaceFilesStore, filesApi: filesApi ?? undefined, analytics,
         skillStore, deferredConfirmationStore, episodicStore,
         sessionStateStore, voiceTranscription, workspaceToolPolicyStore,
@@ -7526,7 +7557,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         memoryStore, usageStore, checkCreditBudget: ports.checkCreditBudget,
         integrationStore, channelUserStore, linkedAccountStore, linkCodeStore,
         workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
-        connectorInstanceStore, knowledgeStore, gdriveFilesStore, workspaceFilesStore,
+        connectorInstanceStore, knowledgeStore, knowledgeCaptureRuleStore, gdriveFilesStore, workspaceFilesStore,
+        realtimeThreadTargetStore,
         filesApi: filesApi ?? undefined, analytics, skillStore,
         deferredConfirmationStore, episodicStore, sessionStateStore, workflowEventDispatcher,
         slackWebhookIngestor: channelHosts.slackWebhookIngestor, connectorActionStore, episodesStore,
@@ -7539,7 +7571,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         memoryStore, usageStore, checkCreditBudget: ports.checkCreditBudget,
         integrationStore, channelUserStore,
         workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
-        connectorInstanceStore, workspaceToolPolicyStore, knowledgeStore, gdriveFilesStore, workspaceFilesStore,
+        connectorInstanceStore, workspaceToolPolicyStore, knowledgeStore, knowledgeCaptureRuleStore, gdriveFilesStore, workspaceFilesStore,
         filesApi: filesApi ?? undefined, analytics, skillStore,
         episodicStore, sessionStateStore, artifactPromoter, fileStore, workflowEventDispatcher,
       }))
@@ -7552,7 +7584,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         memoryStore, usageStore, checkCreditBudget: ports.checkCreditBudget,
         integrationStore, channelUserStore,
         workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
-        connectorInstanceStore, knowledgeStore, gdriveFilesStore, workspaceFilesStore,
+        connectorInstanceStore, knowledgeStore, knowledgeCaptureRuleStore, gdriveFilesStore, workspaceFilesStore,
         analytics, skillStore,
         episodicStore, sessionStateStore, artifactPromoter,
         msteamsWebhookIngestor: channelHosts.msteamsWebhookIngestor,
@@ -7567,7 +7599,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           tools: allTools, capabilityStore, memoryStore, usageStore,
           checkCreditBudget: ports.checkCreditBudget, integrationStore, channelUserStore,
           workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
-          connectorInstanceStore, knowledgeStore, gdriveFilesStore, workspaceFilesStore, analytics,
+          connectorInstanceStore, knowledgeStore, knowledgeCaptureRuleStore, gdriveFilesStore, workspaceFilesStore, analytics,
           skillStore, episodicStore, sessionStateStore, fileStore,
         }))
       }
@@ -7579,7 +7611,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           tools: allTools, capabilityStore, memoryStore, usageStore,
           checkCreditBudget: ports.checkCreditBudget, integrationStore, channelUserStore,
           workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
-          connectorInstanceStore, knowledgeStore, gdriveFilesStore, workspaceFilesStore, analytics,
+          connectorInstanceStore, knowledgeStore, knowledgeCaptureRuleStore, gdriveFilesStore, workspaceFilesStore, analytics,
           skillStore, episodicStore, sessionStateStore, fileStore,
           // Without this the route's staging block is unreachable and every
           // inbound attachment archives as `availability: 'missing'` — the
@@ -7600,7 +7632,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         tools: allTools, capabilityStore, memoryStore, usageStore,
         checkCreditBudget: ports.checkCreditBudget, integrationStore, customChannelStore, channelUserStore,
         workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
-        connectorInstanceStore, knowledgeStore, gdriveFilesStore, workspaceFilesStore, analytics,
+        connectorInstanceStore, knowledgeStore, knowledgeCaptureRuleStore, gdriveFilesStore, workspaceFilesStore, analytics,
         skillStore, episodicStore, sessionStateStore, fileStore,
         archiveMedia: chatArchiveLiveMedia,
         voiceTranscription,

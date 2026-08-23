@@ -16,6 +16,7 @@ import {
   admitTask,
   buildTaskPolicyPromptBlock,
   evaluateTaskAdmission,
+  evaluateTaskMutationPolicy,
   matchesPredicate,
   normalizeTaskTitle,
   proposeRuleFromTombstones,
@@ -150,6 +151,66 @@ describe('[COMP:tasks/admission] matchesPredicate', () => {
     expect(
       matchesPredicate({ source_kinds: ['slack_thread'] }, candidate({ sourceKind: null })),
     ).toBe(false)
+  })
+
+  it('keeps legacy predicates creation-only and matches channel-neutral mutation scope', () => {
+    const mutation = candidate({
+      lane: 'assistant',
+      operation: 'update_status',
+      authority: 'realtime_thread_target',
+      channelType: 'feishu',
+      channelRef: 'chat-1',
+      threadRef: 'root-1',
+    })
+    expect(matchesPredicate({ channel_refs: ['chat-1'] }, mutation)).toBe(false)
+    expect(matchesPredicate({
+      operations: ['update_status'],
+      authorities: ['realtime_thread_target'],
+      channel_types: ['feishu'],
+    }, mutation)).toBe(true)
+  })
+})
+
+describe('[COMP:tasks/admission] delegated mutation policy', () => {
+  const input = {
+    operation: 'update_status' as const,
+    authority: 'realtime_thread_target' as const,
+    title: 'Ship the release',
+    channelType: 'slack',
+    channelRef: 'C123',
+    threadRef: '1700000000.000100',
+  }
+
+  it('is deny-by-default and requires an operation-aware allow rule', () => {
+    expect(evaluateTaskMutationPolicy(input, [])).toMatchObject({ allowed: false })
+    expect(evaluateTaskMutationPolicy(input, [rule({
+      effect: 'allow',
+      predicate: { channel_refs: ['C123'] },
+    })])).toMatchObject({ allowed: false })
+    expect(evaluateTaskMutationPolicy(input, [rule({
+      effect: 'allow',
+      predicate: {
+        operations: ['update_status'],
+        authorities: ['realtime_thread_target'],
+      },
+    })])).toEqual({ allowed: true, matchedRuleId: 'rule-1' })
+  })
+
+  it('lets a matching deny override a matching allow', () => {
+    const allow = rule({
+      id: 'allow-1',
+      effect: 'allow',
+      predicate: { operations: ['update_status'], authorities: ['realtime_thread_target'] },
+    })
+    const deny = rule({
+      id: 'deny-1',
+      effect: 'deny',
+      predicate: { operations: ['update_status'], thread_refs: [input.threadRef] },
+    })
+    expect(evaluateTaskMutationPolicy(input, [allow, deny])).toMatchObject({
+      allowed: false,
+      matchedRuleId: 'deny-1',
+    })
   })
 })
 

@@ -15,6 +15,9 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { renderToString } from "react-dom/server";
 import { ReadOnlyPageBlocks, commentAnchorsByBlock } from "../read-only-page-blocks";
 import type { PublicBlock, PublicComment, PublicSource } from "@/lib/api/public-share";
@@ -27,6 +30,10 @@ const cell = (text: string) => ({
 
 const source: PublicSource = { kind: "link", token: "tok" };
 const emptyPayload = { a2ui: "0.8", root: { type: "container", children: [] } } as unknown as ViewPayload;
+const globalsCss = readFileSync(
+  resolve(dirname(fileURLToPath(import.meta.url)), "../../../app/globals.css"),
+  "utf8",
+);
 
 const comment = (
   threadId: string,
@@ -133,6 +140,36 @@ describe("[COMP:app-web/share-dialog] ReadOnlyPageBlocks toggle body", () => {
     expect(html).toContain("<details");
     // No `open` attribute on the <details> tag → collapsed by default.
     expect(html).not.toMatch(/<details[^>]*\bopen\b/);
+  });
+});
+
+describe("[COMP:app-web/share-dialog] public typography parity", () => {
+  it("uses the editor's shared body and per-level heading metrics", () => {
+    expect(globalsCss).toMatch(
+      /\.doc-collab-editor \.ProseMirror,\s*\.doc-public-body\s*\{[^}]*font-size:\s*16px;[^}]*line-height:\s*1\.5;/,
+    );
+    expect(globalsCss).toMatch(
+      /\.doc-collab-editor \.ProseMirror h2,\s*\.doc-public-body h2\s*\{[^}]*font-size:\s*1\.5rem;[^}]*margin:\s*2rem 0 0\.75rem;[^}]*padding:\s*3px 0;/,
+    );
+    expect(globalsCss).toMatch(
+      /\.doc-collab-editor \.ProseMirror p,\s*\.doc-public-body p\s*\{[^}]*margin:\s*0;[^}]*padding:\s*3px 0;/,
+    );
+    expect(globalsCss).toMatch(
+      /\.doc-public-body p:empty\s*\{[^}]*min-height:\s*calc\(1\.5em \+ 6px\);/,
+    );
+  });
+
+  it("does not override the shared metrics from Tailwind's utilities layer", () => {
+    const html = renderToString(
+      <ReadOnlyPageBlocks
+        blocks={[{ kind: "text", id: "p1", text: "Same measure" }]}
+        payload={emptyPayload}
+        source={source}
+      />,
+    );
+    expect(html).toContain('class="doc-public-body text-foreground"');
+    expect(html).not.toContain("text-[15px]");
+    expect(html).not.toContain("leading-7");
   });
 });
 

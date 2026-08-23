@@ -241,6 +241,94 @@ describe('[COMP:workflow/event-trigger] createWorkflowEventDispatcher', () => {
     })
   })
 
+  it('fans one connector event out to every distinct exposed workspace with a matching workflow', async () => {
+    const connectorSource = {
+      type: 'connector' as const,
+      connectorInstanceId: 'mailbox-1',
+      provider: 'imap',
+    }
+    const event: DispatchEvent = {
+      ...SLACK_EVENT,
+      workspaceId: 'ws-origin',
+      source: connectorSource,
+    }
+    const foundIn: string[] = []
+    const started: Array<{ workflowId: string; workspaceId: string }> = []
+    const dispatcher = createWorkflowEventDispatcher({
+      findAdditionalConnectorEventWorkspaces: async ({ connectorInstanceId, producerWorkspaceId }) => {
+        expect(connectorInstanceId).toBe('mailbox-1')
+        expect(producerWorkspaceId).toBe('ws-origin')
+        return ['ws-shared-a', 'ws-shared-b', 'ws-shared-a', 'ws-origin']
+      },
+      findEventTriggeredWorkflows: async ({ workspaceId }) => {
+        foundIn.push(workspaceId)
+        return [{
+          workflowId: `wf-${workspaceId}`,
+          workspaceId,
+          sources: [{ source: connectorSource }],
+        }]
+      },
+      startWorkflowRun: async ({ workflowId, workspaceId }) => {
+        started.push({ workflowId, workspaceId })
+      },
+    })
+
+    await dispatcher.dispatch(event)
+
+    expect(foundIn).toEqual(['ws-origin', 'ws-shared-a', 'ws-shared-b'])
+    expect(started).toEqual([
+      { workflowId: 'wf-ws-origin', workspaceId: 'ws-origin' },
+      { workflowId: 'wf-ws-shared-a', workspaceId: 'ws-shared-a' },
+      { workflowId: 'wf-ws-shared-b', workspaceId: 'ws-shared-b' },
+    ])
+  })
+
+  it('does not resolve additional workspaces for a non-connector event', async () => {
+    let grantLookups = 0
+    const dispatcher = createWorkflowEventDispatcher({
+      findAdditionalConnectorEventWorkspaces: async () => {
+        grantLookups += 1
+        return ['ws-other']
+      },
+      findEventTriggeredWorkflows: async () => [],
+      startWorkflowRun: async () => {},
+    })
+
+    await dispatcher.dispatch(SLACK_EVENT)
+
+    expect(grantLookups).toBe(0)
+  })
+
+  it('fails closed to the producer workspace when connector exposure lookup fails', async () => {
+    const connectorSource = {
+      type: 'connector' as const,
+      connectorInstanceId: 'mailbox-1',
+      provider: 'imap',
+    }
+    const foundIn: string[] = []
+    const errors: WorkflowEventDispatchError[] = []
+    const dispatcher = createWorkflowEventDispatcher({
+      findAdditionalConnectorEventWorkspaces: async () => {
+        throw new Error('grant store unavailable')
+      },
+      findEventTriggeredWorkflows: async ({ workspaceId }) => {
+        foundIn.push(workspaceId)
+        return []
+      },
+      startWorkflowRun: async () => {},
+      onError: (_err, ctx) => errors.push(ctx),
+    })
+
+    await expect(dispatcher.dispatch({
+      ...SLACK_EVENT,
+      workspaceId: 'ws-origin',
+      source: connectorSource,
+    })).resolves.toBeUndefined()
+
+    expect(foundIn).toEqual(['ws-origin'])
+    expect(errors).toEqual([{ workspaceId: 'ws-origin' }])
+  })
+
   it('is a no-op when the workspace has no event-triggered workflow', async () => {
     let starts = 0
     const dispatcher = createWorkflowEventDispatcher({

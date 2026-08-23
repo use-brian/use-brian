@@ -307,6 +307,10 @@ function isGuidanceOnly(rule: TaskRule): boolean {
     !predicate.source_kinds?.length &&
     !predicate.lanes?.length &&
     !predicate.title_matches?.length &&
-    !predicate.channel_refs?.length
+    !predicate.channel_refs?.length &&
+    !predicate.channel_types?.length &&
+    !predicate.thread_refs?.length &&
+    !predicate.operations?.length &&
+    !predicate.authorities?.length
   );
 }

@@ -36,7 +36,12 @@ import type { LinkCodeStore } from '../db/link-codes.js'
 import type { LinkedAccountStore } from '../db/linked-accounts.js'
 import { mergeShadowUser } from '../db/linked-accounts.js'
 import { resolveAssistantForSurface, resolveRoutingForSurface, getChannelForWebhook } from '../db/channels-store.js'
-import { parseFileContent, buildTool, sanitize as sanitizeAnalytics } from '@use-brian/core'
+import {
+  parseFileContent,
+  buildTool,
+  resolveRealtimeThreadAddressing,
+  sanitize as sanitizeAnalytics,
+} from '@use-brian/core'
 import { z } from 'zod'
 import type { ConfirmationDecision, ConfirmationResolver, ContentBlock } from '@use-brian/core'
 import type { LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, McpSettingsStore, WorkflowEventDispatcher } from '@use-brian/core'
@@ -130,6 +135,9 @@ type SlackRouteOptions = {
   /** Stage 5: enables team-native connector_instance consumption. */
   connectorInstanceStore?: import('../db/connector-instance-store.js').ConnectorInstanceStore
   knowledgeStore?: import('@use-brian/core').KnowledgeStoreInterface
+  /** Temporary, channel-neutral thread authority store. */
+  realtimeThreadTargetStore?: import('@use-brian/core').RealtimeThreadTargetStore
+  knowledgeCaptureRuleStore?: import('../knowledge/capture-rules.js').KnowledgeCaptureRuleStore
   gdriveFilesStore?: import('@use-brian/core').GDriveFilesStore
   /** Workspace files store (Q3 §10). Optional. */
   workspaceFilesStore?: import('@use-brian/core').WorkspaceFilesStore
@@ -230,6 +238,31 @@ export function resolveSlackThreadScope(
     threadTs,
     sessionChannelId: buildSlackSessionChannelId(incoming.channelId, threadTs),
   }
+}
+
+export async function resolveSlackAddressing(input: {
+  incoming: Pick<IncomingMessage, 'channelId' | 'replyToMessageId' | 'isGroupChat' | 'isMentioned'>
+  requireMention: boolean
+  workspaceId: string | null
+  assistantId: string
+  targetStore?: import('@use-brian/core').RealtimeThreadTargetStore
+}): Promise<{
+  accepted: boolean
+  target: import('@use-brian/core').RealtimeThreadTarget | null
+}> {
+  const explicitlyAddressed =
+    !input.incoming.isGroupChat ||
+    !input.requireMention ||
+    input.incoming.isMentioned === true
+  return resolveRealtimeThreadAddressing({
+    explicitlyAddressed,
+    workspaceId: input.workspaceId,
+    assistantId: input.assistantId,
+    channelType: 'slack',
+    conversationRef: input.incoming.channelId,
+    threadRef: input.incoming.replyToMessageId,
+    targetStore: input.targetStore,
+  })
 }
 
 /**
@@ -496,6 +529,9 @@ export function slackRoutes(options: SlackRouteOptions): Router {
       botToken: slackCreds.bot_token,
       botUserId: integration.botUserId ?? undefined,
       config: slackConfig,
+      // The route applies the normal mention gate after assistant resolution,
+      // where it can also consult an active realtime thread target.
+      deferMentionGate: true,
       onMessage: (msg) => { extractedMessage = msg },
       onOutboundAudit: async (event) => {
         if (outboundAuditHolder.fn) await outboundAuditHolder.fn(event)
@@ -637,6 +673,20 @@ export function slackRoutes(options: SlackRouteOptions): Router {
       if (blocked.includes(incoming.userId)) return
     }
 
+    // Addressing gate. An exact, unexpired realtime thread target may admit an
+    // otherwise unmentioned channel reply. This is deliberately after access
+    // control and assistant/workspace resolution; a target never grants user
+    // identity or workspace access.
+    const addressing = await resolveSlackAddressing({
+      incoming,
+      requireMention: slackConfig.requireMention ?? true,
+      workspaceId: assistant.workspaceId,
+      assistantId: assistant.id,
+      targetStore: options.realtimeThreadTargetStore,
+    })
+    if (!addressing.accepted) return
+    const realtimeThreadTarget = addressing.target
+
     // Ack reaction — instant visual feedback before processing starts
     if (slackConfig.ackReaction && incoming.messageId) {
       adapter.reactToMessage?.(incoming.channelId, incoming.messageId, slackConfig.ackReaction)
@@ -647,7 +697,7 @@ export function slackRoutes(options: SlackRouteOptions): Router {
     // existing thread (thread_ts) or start a new thread on the user's message (ts).
     const { threadTs, sessionChannelId } = resolveSlackThreadScope(
       incoming,
-      slackConfig.replyInThread === true,
+      slackConfig.replyInThread === true || realtimeThreadTarget !== null,
     )
     // Slack delivery still needs the bare channel id + thread_ts, but Brian's
     // session identity must include the thread root. Until this split, every
@@ -790,6 +840,7 @@ export function slackRoutes(options: SlackRouteOptions): Router {
           archiveConnectorInstanceId: integration.connectorInstanceId,
           threadTs,
           sessionChannelId,
+          realtimeThreadTarget,
           botToken: slackCreds.bot_token,
           ...options,
           pendingSlackConfirmations,
@@ -1140,6 +1191,7 @@ type ProcessMessageParams = {
   threadTs?: string
   /** Thread-qualified Brian conversation id; never sent to the Slack API. */
   sessionChannelId: string
+  realtimeThreadTarget?: import('@use-brian/core').RealtimeThreadTarget | null
   botToken: string
   ingestChannelMediaRef?: SlackRouteOptions['ingestChannelMediaRef']
   provider: LLMProvider
@@ -1159,6 +1211,7 @@ type ProcessMessageParams = {
   /** Stage 5: enables team-native connector_instance consumption. */
   connectorInstanceStore?: import('../db/connector-instance-store.js').ConnectorInstanceStore
   knowledgeStore?: import('@use-brian/core').KnowledgeStoreInterface
+  knowledgeCaptureRuleStore?: import('../knowledge/capture-rules.js').KnowledgeCaptureRuleStore
   gdriveFilesStore?: import('@use-brian/core').GDriveFilesStore
   /** Workspace files store (Q3 §10). Optional. */
   workspaceFilesStore?: import('@use-brian/core').WorkspaceFilesStore
@@ -1441,6 +1494,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     channelType: 'slack',
     channelId: incoming.channelId,
     sessionChannelId: params.sessionChannelId,
+    realtimeThreadTarget: params.realtimeThreadTarget,
     actorChannelId: incoming.userId, // Slack user id (e.g. U0123) → X-Sidanclaw-Actor-Id
     messageText: incoming.text,
     userContentBlocks,
@@ -1469,6 +1523,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     connectorGrantStore: params.connectorGrantStore,
     connectorInstanceStore: params.connectorInstanceStore,
     knowledgeStore: params.knowledgeStore,
+    knowledgeCaptureRuleStore: params.knowledgeCaptureRuleStore,
     gdriveFilesStore: params.gdriveFilesStore,
     workspaceFilesStore: params.workspaceFilesStore,
     filesApi: params.filesApi,

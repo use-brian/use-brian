@@ -42,7 +42,7 @@ import { desktopBridge } from "@/lib/desktop-auth-source";
 import { format } from "@/lib/i18n/format";
 import { authFetch } from "@/lib/auth-fetch";
 import { primaryAuthUrl, webAppUrl } from "@/lib/primary-auth";
-import { getUserInfo, getInitials } from "@/lib/user";
+import { getUserInfo } from "@/lib/user";
 import { signOutActiveAccount } from "@/lib/account-logout";
 import { updateWorkspacePickerPreferences } from "@/lib/api/workspaces";
 import {
@@ -51,6 +51,7 @@ import {
 } from "@/lib/workspace-picker";
 import { getAccountsDir, type AccountDirEntry } from "@/lib/accounts";
 import { TeamAvatar } from "@/components/team-avatar";
+import { UserAvatar } from "@/components/ui/user-avatar";
 import {
   CreateWorkspaceForm,
   type CreatedWorkspace,
@@ -675,7 +676,6 @@ function AccountRow({
   onSwitch: () => void;
   t: ReturnType<typeof useT>["workspaceSwitcher"];
 }) {
-  const initials = getInitials(account.name || account.email || "?");
   return (
     <button
       type="button"
@@ -693,12 +693,12 @@ function AccountRow({
         isActive ? "bg-muted/60 cursor-default" : "hover:bg-muted cursor-pointer",
       )}
     >
-      <div
-        className="h-6 w-6 rounded-full bg-muted text-xs flex items-center justify-center font-medium shrink-0"
-        aria-hidden
-      >
-        {initials}
-      </div>
+      <UserAvatar
+        size={24}
+        name={account.name}
+        email={account.email}
+        avatarUrl={account.avatarUrl}
+      />
       <span className="flex-1 truncate text-xs text-muted-foreground">
         {account.email || account.name}
       </span>

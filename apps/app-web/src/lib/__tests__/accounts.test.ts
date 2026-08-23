@@ -29,7 +29,12 @@ describe("[COMP:app-web/accounts] getAccountsDir", () => {
   });
 
   it("parses the account directory from the cookie", () => {
-    const dir = [{ id: "u1", name: "Ada", email: "ada@x.com" }];
+    const dir = [{
+      id: "u1",
+      name: "Ada",
+      email: "ada@x.com",
+      avatarUrl: "https://api.example/avatar/u1",
+    }];
     setCookie(dirCookie(dir));
     expect(getAccountsDir()).toEqual(dir);
   });

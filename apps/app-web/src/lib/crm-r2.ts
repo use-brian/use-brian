@@ -231,6 +231,31 @@ export type CrmApprovalRecord =
   | { kind: "contact"; row: CrmContactRow }
   | { kind: "company"; row: CrmCompanyRow };
 
+export type CrmEmailApprovalQueueItem = {
+  approval: PendingApprovalRow;
+  contacts: CrmContactRow[];
+};
+
+/**
+ * Project the workspace approval queue into the CRM email-review inbox.
+ * Only the strict reviewed-workflow shape and an exact visible contact-email
+ * match qualify. Unlinked outbound approvals remain in the global approval
+ * queue instead of inventing a CRM relationship from a subject or name.
+ */
+export function crmEmailApprovalQueue(
+  data: CrmData,
+  approvals: readonly PendingApprovalRow[],
+): CrmEmailApprovalQueueItem[] {
+  return approvals.flatMap((approval) => {
+    if (!isReviewedWorkflowEmailApproval(approval)) return [];
+    const recipients = new Set(approvalRecipients(approval));
+    const contacts = data.contacts.filter(
+      (contact) => contact.email && recipients.has(bareAddress(contact.email)),
+    );
+    return contacts.length > 0 ? [{ approval, contacts }] : [];
+  });
+}
+
 function recordContactEmails(record: CrmApprovalRecord, data: CrmData): string[] {
   const emails: string[] = [];
   if (record.kind === "contact" && record.row.email) emails.push(record.row.email);

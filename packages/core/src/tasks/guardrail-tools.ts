@@ -102,6 +102,8 @@ function workspaceGate(
 }
 
 const laneEnum = z.enum(['extracted', 'assistant'])
+const operationEnum = z.enum(['create', 'update_status', 'update_details', 'archive'])
+const authorityEnum = z.enum(['realtime_thread_target'])
 
 /**
  * The `when` predicate, described for the model. Every field is optional and
@@ -134,7 +136,27 @@ const predicateShape = z.object({
     .array(z.string().min(1).max(128))
     .max(20)
     .optional()
-    .describe('Channel ids the rule is scoped to (e.g. a Slack channel id). Omit for all channels.'),
+    .describe('Provider conversation ids or connector refs the rule is scoped to. Omit for all conversations.'),
+  channel_types: z
+    .array(z.string().trim().toLowerCase().min(1).max(64))
+    .max(20)
+    .optional()
+    .describe('Channel adapter types such as slack, discord, or feishu. Omit for every adapter.'),
+  thread_refs: z
+    .array(z.string().trim().min(1).max(256))
+    .max(20)
+    .optional()
+    .describe('Exact provider root-thread ids. Prefer authority-wide rules unless one thread needs a special exception.'),
+  operations: z
+    .array(operationEnum)
+    .max(4)
+    .optional()
+    .describe('Task actions governed by this rule. Existing rules that omit this field remain creation-only. update_details covers title, description, assignee, due date, tags, parent, attributes, links, and external references.'),
+  authorities: z
+    .array(authorityEnum)
+    .max(1)
+    .optional()
+    .describe('Delegated authority source. realtime_thread_target means a user/workflow opened one exact thread for a bounded time.'),
   require: z
     .array(
       z.enum([
@@ -181,6 +203,12 @@ export function createTaskGuardrailTools(
     async execute(input, context) {
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
+      if (context.taskAuthority) {
+        return {
+          data: 'Rejecting a task teaches a durable workspace rule and is not available from a temporary realtime thread target. Nothing was changed.',
+          isError: true,
+        }
+      }
 
       const result = await store.rejectTask({
         workspaceId: context.workspaceId!,
@@ -222,17 +250,17 @@ export function createTaskGuardrailTools(
     name: 'saveTaskRule',
     requiresCapability: 'tasks',
     description:
-      'Record a standing rule about when tasks may be created in this workspace. Use when the user states a policy ("stop making tasks out of standup chatter", "never create a task without an owner", "no tasks from the #random channel", "always create the tasks Brian suggests from #support"). ' +
+      'Record a standing rule about when tasks may be created or changed in this workspace. Use when the user states a creation policy ("stop making tasks out of standup chatter") or delegated thread policy ("let replies in realtime task threads update status and details"). ' +
       'Pass BOTH `when` (the machine-checkable conditions) and `nl_clause` (the user\'s sentence). The conditions are enforced exactly; the sentence is additionally shown to the extractor, which is the only enforcement a rule gets when it cannot be reduced to conditions. ' +
       'If a policy is genuinely fuzzy ("only things I actually committed to"), still pass it as `nl_clause` with the narrowest honest `when` you can — and tell the user it is best-effort guidance rather than a hard block.',
     inputSchema: z.object({
       effect: z
         .enum(['deny', 'require', 'allow'])
         .describe(
-          '"deny" blocks matching tasks outright. "require" holds matching tasks for review until they have the fields listed in `when.require`. "allow" opts matching, agent-ready suggestions back into automatic creation — by default extracted tasks only land as suggestions for review.',
+          '"deny" blocks matching task actions. "require" applies to creation and holds matching tasks for review until they have the fields listed in `when.require`. "allow" opts matching, agent-ready suggestions into automatic creation or authorizes the delegated operations named in `when.operations`.',
         ),
       when: predicateShape.describe(
-        'Conditions, ANDed together. A "deny" or "allow" rule needs at least one of source_kinds / lanes / title_matches / channel_refs — an empty condition set would apply to every task in the workspace and is rejected.',
+        'Conditions, ANDed together. A "deny" or "allow" rule needs at least one source, lane, title, channel, thread, operation, or authority condition. Existing predicates without operations remain creation-only.',
       ),
       nl_clause: z
         .string()
@@ -287,7 +315,7 @@ export function createTaskGuardrailTools(
     isReadOnly: true,
     isConcurrencySafe: true,
     description:
-      'List this workspace\'s task-creation rules, including ones that are only PROPOSED (suggested after repeated rejections and not yet enforcing). Use before saving a new rule to avoid restating one that already exists, and when the user asks why a task was or was not created.',
+      'List this workspace\'s task rules for creation and delegated changes, including ones that are only PROPOSED (suggested after repeated rejections and not yet enforcing). Use before saving a new rule to avoid restating one that already exists.',
     inputSchema: z.object({
       include_disabled: tolerantBoolean()
         .optional()

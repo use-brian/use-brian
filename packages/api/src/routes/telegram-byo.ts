@@ -122,6 +122,7 @@ type TelegramByoRouteOptions = {
   /** Shared workspace tool policy (migration 312) — team-owned connector allow/ask/block. */
   workspaceToolPolicyStore?: import('../db/workspace-tool-policy-store.js').WorkspaceToolPolicyStore
   knowledgeStore?: KnowledgeStoreInterface
+  knowledgeCaptureRuleStore?: import('../knowledge/capture-rules.js').KnowledgeCaptureRuleStore
   gdriveFilesStore?: GDriveFilesStore
   /** Workspace files store (Q3 §10). Optional. */
   workspaceFilesStore?: import('@use-brian/core').WorkspaceFilesStore
@@ -1133,6 +1134,7 @@ type ProcessMessageParams = {
   /** Shared workspace tool policy (migration 312) — team-owned connector allow/ask/block. */
   workspaceToolPolicyStore?: import('../db/workspace-tool-policy-store.js').WorkspaceToolPolicyStore
   knowledgeStore?: KnowledgeStoreInterface
+  knowledgeCaptureRuleStore?: import('../knowledge/capture-rules.js').KnowledgeCaptureRuleStore
   gdriveFilesStore?: GDriveFilesStore
   /** Workspace files store (Q3 §10). Optional. */
   workspaceFilesStore?: import('@use-brian/core').WorkspaceFilesStore
@@ -1613,6 +1615,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     connectorInstanceStore: params.connectorInstanceStore,
     workspaceToolPolicyStore: params.workspaceToolPolicyStore,
     knowledgeStore: params.knowledgeStore,
+    knowledgeCaptureRuleStore: params.knowledgeCaptureRuleStore,
     gdriveFilesStore: params.gdriveFilesStore,
     workspaceFilesStore: params.workspaceFilesStore,
     filesApi: params.filesApi,

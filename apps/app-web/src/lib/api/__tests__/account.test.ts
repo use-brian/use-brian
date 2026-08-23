@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@/lib/auth-fetch", () => ({ authFetch: vi.fn() }));
 
 import { authFetch } from "@/lib/auth-fetch";
-import { uploadAvatar } from "../account";
+import { planProfileRefresh, uploadAvatar } from "../account";
 
 const mockAuthFetch = vi.mocked(authFetch);
 
@@ -26,5 +26,27 @@ describe("[COMP:api/account-avatar] app-web account API", () => {
     const form = init?.body as FormData;
     expect(form.get("workspaceId")).toBe("ws-active");
     expect(form.get("file")).toBe(file);
+  });
+
+  it("round-trips hosted profile changes through the primary auth site", () => {
+    const plan = planProfileRefresh(
+      "https://usebrian.ai",
+      "https://app.usebrian.ai/w/ws-active/p/page-1",
+    );
+
+    expect(plan.kind).toBe("redirect");
+    if (plan.kind !== "redirect") throw new Error("expected redirect plan");
+    const url = new URL(plan.url);
+    expect(url.origin).toBe("https://usebrian.ai");
+    expect(url.pathname).toBe("/api/auth/refresh-and-return");
+    expect(url.searchParams.get("next")).toBe(
+      "https://app.usebrian.ai/w/ws-active/p/page-1",
+    );
+  });
+
+  it("refreshes the profile cookie in place for dev and OSS", () => {
+    expect(
+      planProfileRefresh(null, "http://localhost:3003/w/ws-active/p/page-1"),
+    ).toEqual({ kind: "local" });
   });
 });

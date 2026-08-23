@@ -509,7 +509,7 @@ export function WorkspaceChrome({
         // data-doc-mobile-menu: in the desktop shell a narrow window drops to
         // this mobile layout, so globals.css nudges this below the traffic lights.
         data-doc-mobile-menu
-        className="fixed left-2 top-2 z-20 inline-flex h-9 w-9 items-center justify-center rounded-md bg-background/80 text-foreground shadow ring-1 ring-border backdrop-blur md:hidden"
+        className="fixed left-2 top-2 z-20 inline-flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 md:hidden"
       >
         <svg
           width="18"

@@ -712,11 +712,13 @@ function CollabEditorInner({
         CollaborationCursor.configure({
           provider,
           // `id` rides along so the top-bar face-pile (`usePresence`) can
-          // dedupe the same person across tabs; `name`/`color` drive the
-          // in-document caret.
+          // dedupe the same person across tabs; `avatarUrl` gives it the
+          // person's profile photo; `name`/`color` drive the in-document
+          // caret and the initials fallback.
           user: {
             id: user?.id ?? "me",
             name: user?.name ?? "You",
+            avatarUrl: user?.avatarUrl,
             color: colorForUserId(user?.id ?? "me"),
           },
         }),

@@ -20,7 +20,10 @@ import {
   type ConnectedToolSource,
 } from "../workflow-tools";
 import { authFetch } from "@/lib/auth-fetch";
-import { listConnectedWorkflowToolSources } from "../api/workflow";
+import {
+  listConnectedWorkflowToolSources,
+  listWorkspaceConnectorOptions,
+} from "../api/workflow";
 
 const mockAuthFetch = vi.mocked(authFetch);
 
@@ -274,5 +277,38 @@ describe("[COMP:app-web/workflow-tools] connected connector loading", () => {
         classification: "read",
       }],
     });
+  });
+
+  it("offers both workspace-owned and exposed personal connectors as event sources", async () => {
+    mockAuthFetch.mockResolvedValueOnce(json({
+      teamNative: [
+        { id: "team-mailbox", provider: "imap", label: "Team inbox", connected: true },
+      ],
+      granted: [
+        {
+          instance: {
+            id: "shared-mailbox",
+            provider: "imap",
+            label: "Shared inbox",
+            connected: true,
+          },
+        },
+      ],
+    }));
+
+    await expect(listWorkspaceConnectorOptions("workspace-1")).resolves.toEqual([
+      { id: "team-mailbox", provider: "imap", label: "Team inbox", connected: true },
+      { id: "shared-mailbox", provider: "imap", label: "Shared inbox", connected: true },
+    ]);
+  });
+
+  it("de-duplicates an instance returned through both connector inventory paths", async () => {
+    const row = { id: "mailbox-1", provider: "imap", label: "Inbox", connected: true };
+    mockAuthFetch.mockResolvedValueOnce(json({
+      teamNative: [row],
+      granted: [{ instance: row }],
+    }));
+
+    await expect(listWorkspaceConnectorOptions("workspace-1")).resolves.toEqual([row]);
   });
 });

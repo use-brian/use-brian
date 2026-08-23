@@ -131,6 +131,10 @@ export type DealSortKey = (typeof DEAL_SORT_KEYS)[number];
 
 export type CrmViewState = {
   section: CrmSection;
+  /** Dedicated consequential-action workspace layered over the record lens. */
+  review: "email" | null;
+  /** Selected pending approval while `review=email`. */
+  draft: string | null;
   /** Deals presentation — board is the default (pipeline-first, §1.4). */
   view: ViewMode;
   /** Active attention quick-filter, or null. */
@@ -160,6 +164,8 @@ export type CrmViewState = {
 
 export const DEFAULT_CRM_VIEW: CrmViewState = {
   section: "deals",
+  review: null,
+  draft: null,
   view: "board",
   quick: null,
   pipeline: null,
@@ -204,6 +210,8 @@ export function crmViewFromSearch(
   }
   return {
     section,
+    review: params.get("review") === "email" ? "email" : null,
+    draft: params.get("review") === "email" ? params.get("draft") : null,
     view: oneOf(params.get("view"), VIEW_MODES) ?? DEFAULT_CRM_VIEW.view,
     quick,
     pipeline: params.get("pipeline"),
@@ -226,6 +234,10 @@ export function searchFromCrmView(state: CrmViewState): string {
   const params = new URLSearchParams();
   if (state.section !== DEFAULT_CRM_VIEW.section)
     params.set("section", state.section);
+  if (state.review === "email") {
+    params.set("review", "email");
+    if (state.draft) params.set("draft", state.draft);
+  }
   if (state.view !== DEFAULT_CRM_VIEW.view) params.set("view", state.view);
   if (state.quick) params.set("filter", state.quick);
   if (state.pipeline) params.set("pipeline", state.pipeline);

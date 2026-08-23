@@ -30,7 +30,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type TouchEvent as ReactTouchEvent,
 } from "react";
-import { MessageSquare, X } from "lucide-react";
+import { FileText, MessageSquare, X } from "lucide-react";
 import { isImageIcon } from "@use-brian/shared/page-icon";
 import {
   fetchPublicPageFor,
@@ -117,6 +117,35 @@ export function SharedPageEmptyBody() {
     <p data-testid="shared-page-empty" className="text-sm text-muted-foreground">
       {t.emptyBody}
     </p>
+  );
+}
+
+/** Static counterpart of the in-app `PageTitle`: same icon slot, display face,
+ * responsive 30px -> 36px title scale, and bottom rhythm, without edit controls.
+ * Image-icon tokens require member auth, so a public page uses the same neutral
+ * document fallback glyph when its icon is not a public emoji. */
+export function PublicPageTitle({
+  title,
+  icon,
+}: {
+  title: string;
+  icon: string | null;
+}) {
+  return (
+    <header className="mb-4 flex flex-col gap-1">
+      <div className="flex size-12 items-center justify-center">
+        {icon && !isImageIcon(icon) ? (
+          <span aria-hidden className="text-[40px] leading-none">
+            {icon}
+          </span>
+        ) : (
+          <FileText className="size-9 text-muted-foreground/55" aria-hidden />
+        )}
+      </div>
+      <h1 className="doc-page-title text-3xl font-bold leading-tight text-foreground md:text-4xl">
+        {title}
+      </h1>
+    </header>
   );
 }
 
@@ -507,11 +536,10 @@ export function PublicPageView({ source, initial }: { source: PublicSource; init
         </a>
       </header>
 
-      {/* Wider shell so the comment rail has gutter room to the right of the
-          fixed-width reading column. The reading column stays `max-w-3xl`; the
-          extra width is gutter for the (now `w-96`) rail. Generous bottom padding
-          so the last block isn't flush to the viewport edge (matches the editor). */}
-      <main className="mx-auto w-full max-w-7xl px-6 pt-10 pb-40">
+      {/* Wider shell gives the 384px comment rail room beside the editor-width
+          reading column. Generous bottom padding keeps the last block from
+          sitting flush against the viewport edge, matching the editor. */}
+      <main className="mx-auto w-full max-w-7xl px-4 pt-4 pb-40 md:px-10 md:pt-6 lg:px-16">
         {/* `isolate` makes this the stacking context the guest draft swatches
             paint into at `z-[-1]` — behind the text, above the page background. */}
         <div ref={wrapRef} className="relative isolate">
@@ -522,16 +550,11 @@ export function PublicPageView({ source, initial }: { source: PublicSource; init
               lands on a highlighted comment (no-op at `xl+`). */}
           <div
             onClick={onContentClick}
-            className={`${page.fullWidth ? "max-w-none" : "max-w-3xl"}${
+            className={`${page.fullWidth ? "w-full" : "doc-page-content"}${
               comments.length > 0 ? " mx-auto xl:mx-0" : " mx-auto"
             }`}
           >
-            <header className="mb-8">
-              <div className="flex items-center gap-3">
-                {page.icon && !isImageIcon(page.icon) ? <span className="text-3xl leading-none">{page.icon}</span> : null}
-                <h1 className="text-3xl font-bold tracking-tight">{page.title}</h1>
-              </div>
-            </header>
+            <PublicPageTitle title={page.title} icon={page.icon} />
             {/* The page's recording — player + transcript, same chrome slot
                 as the in-app brief (above the blocks, never a block). */}
             {recording ? (

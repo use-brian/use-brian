@@ -19,7 +19,12 @@ import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
 import type { PublicComment } from "@/lib/api/public-share";
-import { commentThreadIdAt, MobileCommentDrawer, SharedPageEmptyBody } from "../public-page-view";
+import {
+  commentThreadIdAt,
+  MobileCommentDrawer,
+  PublicPageTitle,
+  SharedPageEmptyBody,
+} from "../public-page-view";
 
 const dict = en as unknown as Dictionary;
 
@@ -99,5 +104,24 @@ describe("[COMP:app-web/share-dialog] SharedPageEmptyBody", () => {
     expect(html).toContain(en.sharedPage.emptyBody);
     // Muted, not an error state: an empty published page is a valid page.
     expect(html).toContain("text-muted-foreground");
+  });
+});
+
+describe("[COMP:app-web/share-dialog] PublicPageTitle", () => {
+  it("mirrors the in-app page title scale and icon-above-title layout", () => {
+    const html = wrap(<PublicPageTitle title="Quarterly plan" icon="🔎" />);
+    expect(html).toContain("mb-4 flex flex-col gap-1");
+    expect(html).toContain("text-[40px]");
+    expect(html).toContain("🔎");
+    expect(html).toContain("doc-page-title");
+    expect(html).toContain("text-3xl");
+    expect(html).toContain("md:text-4xl");
+    expect(html).toContain("Quarterly plan");
+  });
+
+  it("keeps the in-app-sized fallback slot when no public emoji is available", () => {
+    const html = wrap(<PublicPageTitle title="Untitled" icon={null} />);
+    expect(html).toContain("size-9");
+    expect(html).toContain("text-muted-foreground/55");
   });
 });

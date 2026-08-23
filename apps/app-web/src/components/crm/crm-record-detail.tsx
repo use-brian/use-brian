@@ -99,6 +99,7 @@ export function CrmRecordDetail({
   commits,
   onClose,
   onOpenRecord,
+  onReviewEmail,
   onChanged,
   onArchive,
 }: {
@@ -110,6 +111,7 @@ export function CrmRecordDetail({
   commits: RecordCommits;
   onClose: () => void;
   onOpenRecord: (ref: CrmRecordRef) => void;
+  onReviewEmail: (approvalId: string) => void;
   onChanged: () => void;
   onArchive: (ref: CrmRecordRef) => void;
 }) {
@@ -208,6 +210,7 @@ export function CrmRecordDetail({
           record={record}
           data={data}
           onOpenContact={(contact) => onOpenRecord({ kind: "contact", row: contact })}
+          onReviewEmail={onReviewEmail}
         />
 
         {/* Relationships — joined client-side from the flat payload. */}

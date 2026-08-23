@@ -46,6 +46,8 @@ type AccountRouteOptions = {
   filesResolver?: FilesClientResolver
   /** Authorizes the workspace selected by app-web for a new avatar write. */
   workspaceMembership?: (userId: string, workspaceId: string) => Promise<unknown | null>
+  /** Canonical public API origin used in the persisted avatar proxy URL. */
+  publicApiUrl?: string
 }
 
 type StoredAvatar = {
@@ -609,11 +611,15 @@ export function accountRoutes(options: AccountRouteOptions = {}): Router {
           mime: file.mimetype,
         })
 
-        // Absolute proxy URL composed from the request so it works across the
-        // api / dev / prod hosts. The `?v=` cache-bust forces the <img> to
-        // refetch after a re-upload (the proxy URL path is otherwise stable).
+        // Use the configured PUBLIC API origin in hosted deployments. Cloud
+        // Run terminates TLS before Express, so req.protocol is `http` unless
+        // proxy trust is enabled; persisting that internal scheme makes every
+        // browser reject the avatar as mixed content. Tests/dev without a
+        // configured origin keep the request-derived fallback.
         const v = avatarId.slice(0, 8)
-        const avatarUrl = `${req.protocol}://${req.get('host')}/api/account/avatar/${userId}?v=${v}`
+        const publicOrigin = options.publicApiUrl?.replace(/\/$/, '')
+          ?? `${req.protocol}://${req.get('host')}`
+        const avatarUrl = `${publicOrigin}/api/account/avatar/${userId}?v=${v}`
         try {
           const updated = await updateUserAvatar(userId, {
             url: avatarUrl,

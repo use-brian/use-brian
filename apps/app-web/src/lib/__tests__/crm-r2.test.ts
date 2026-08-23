@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   mapCrmCsvRows,
+  crmEmailApprovalQueue,
   crmFieldKeyFromLabel,
   linkedContactsForEmailApproval,
   matchingEmailApprovals,
@@ -88,5 +89,10 @@ describe("[COMP:app-web/crm-r2] CRM R2 pure client logic", () => {
       { contacts: [contact], companies: [], deals: [] },
       ["c1"],
     )).toEqual([contact]);
+    expect(crmEmailApprovalQueue(
+      { contacts: [contact], companies: [], deals: [] },
+      approvals,
+    ).map((item) => ({ id: item.approval.id, contacts: item.contacts.map((row) => row.id) })))
+      .toEqual([{ id: "a1", contacts: ["c1"] }]);
   });
 });

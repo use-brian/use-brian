@@ -28,7 +28,7 @@ import {
   latestWorkflowProposalReceipt,
   parseSlashCommand, buildSlashCommandBlock,
 } from '@use-brian/core'
-import type { FilesApi, OutboundAttachment } from '@use-brian/core'
+import type { FilesApi, OutboundAttachment, RealtimeThreadTarget } from '@use-brian/core'
 import { resolveBrandContext } from '../brand/prompt-context.js'
 import type { IncomingMessage, OutgoingDocument } from '@use-brian/channels'
 import { parseFollowUps, resolveCharter } from '@use-brian/shared'
@@ -400,6 +400,11 @@ export type ChannelPipelineParams = {
    */
   replyToMessageId?: string | number | null
   /**
+   * Active channel-neutral target resolved by the inbound route. It bypasses
+   * addressing only; task tools separately enforce its bound lineage + rules.
+   */
+  realtimeThreadTarget?: RealtimeThreadTarget | null
+  /**
    * Raw channel payload — used by resolveReplyText for Telegram so it
    * can read `reply_to_message.text` directly without a DB lookup.
    */
@@ -470,6 +475,8 @@ export type ChannelPipelineParams = {
   connectorInstanceStore?: import('../db/connector-instance-store.js').ConnectorInstanceStore
   workspaceToolPolicyStore?: import('../db/workspace-tool-policy-store.js').WorkspaceToolPolicyStore
   knowledgeStore?: KnowledgeStoreInterface
+  /** Workspace capture categories; absent/empty keeps interactive KB writes dark. */
+  knowledgeCaptureRuleStore?: import('../knowledge/capture-rules.js').KnowledgeCaptureRuleStore
   gdriveFilesStore?: GDriveFilesStore
   /** Workspace files store (Q3 §10). When set + the assistant has the
    *  `files` capability + `assistant.workspaceId` is bound, the
@@ -799,7 +806,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     modelAlias, adaptiveResearchEnabled, abortController,
     provider, systemPrompt, tools, memoryStore, usageStore,
     analytics, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore, connectorInstanceStore, workspaceToolPolicyStore,
-    knowledgeStore, gdriveFilesStore, skillStore, workerManager,
+    knowledgeStore, knowledgeCaptureRuleStore, gdriveFilesStore, skillStore, workerManager,
     episodicStore, sessionStateStore, workspaceFilesStore, filesApi, readCachedFile,
     replyToMessageId, replyRaw, incomingChannelMessageId,
     voiceTranscriptionUsage,
@@ -814,6 +821,17 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     externalGuest,
     params.externalGuestConnectorTools,
   )
+  const taskAuthority = params.realtimeThreadTarget
+    ? {
+        kind: 'realtime_thread_target' as const,
+        targetId: params.realtimeThreadTarget.id,
+        channelType: params.realtimeThreadTarget.channelType,
+        channelRef: params.realtimeThreadTarget.conversationRef,
+        threadRef: params.realtimeThreadTarget.threadRef,
+        taskIds: params.realtimeThreadTarget.taskIds,
+        expiresAt: params.realtimeThreadTarget.expiresAt.toISOString(),
+      }
+    : undefined
 
   // Every background call in this pipeline (session-state diff, memory nudge,
   // research classifier) runs on this one id. Boot resolves it against the
@@ -1073,12 +1091,17 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     anchorTimezone,
   })
 
-  const replyResolved = await resolveReplyText({
+  const storedReply = await resolveReplyText({
     channelType,
     replyToMessageId: replyToMessageId ?? null,
     session,
     raw: replyRaw,
   })
+  const replyResolved = storedReply ?? (
+    params.realtimeThreadTarget?.contextText
+      ? { text: params.realtimeThreadTarget.contextText, fromAssistant: true }
+      : null
+  )
 
   const recentUserTurns: ClassifierRecentTurn[] = preExistingDbMessages
     .filter((m) => m.role === 'user' && Array.isArray(m.content))
@@ -1472,6 +1495,18 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   const privateRuntimeContextParts = splitPrompt.privateRuntimeContext
     ? [splitPrompt.privateRuntimeContext]
     : []
+  if (params.realtimeThreadTarget) {
+    const bound = params.realtimeThreadTarget.taskIds.length > 0
+      ? params.realtimeThreadTarget.taskIds.map((id) => `- ${id}`).join('\n')
+      : '- none (conversation only; task writes are out of scope)'
+    privateRuntimeContextParts.push(
+      '# Temporary realtime thread authority\n\n' +
+      `The user or an authorized workflow opened this exact ${channelType} thread until ${params.realtimeThreadTarget.expiresAt.toISOString()}. ` +
+      'Treat this reply as addressed to you even without a mention. Resolve short references against the visible replied-to message. ' +
+      'Task tools independently enforce the workspace rules and exact bound task lineages; do not create or change another task, and ask when the intended bound task is ambiguous.\n\n' +
+      `Bound task lineage ids:\n${bound}`,
+    )
+  }
   if (externalGuest) {
     privateRuntimeContextParts.push(
       '# External guest boundary\n\n' +
@@ -1608,8 +1643,10 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         assistantConnectorStore,
         userTimezone: channelUser?.timezone ?? undefined,
         knowledgeStore,
+        knowledgeCaptureRuleStore,
         knowledgeRepoWriter,
         allowKnowledgeWrites: true,
+        knowledgeCaptureText: params.rawUserText ?? messageText,
         gdriveFilesStore,
         connectorGrantStore,
         connectorInstanceStore,
@@ -1642,6 +1679,9 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         },
       })
       unavailableCapabilities = injection.unavailable
+      if (injection.knowledgeCapturePrompt) {
+        privateRuntimeContextParts.push(injection.knowledgeCapturePrompt)
+      }
     } catch (err) {
       console.error(`[${channelType}] MCP tool injection failed:`, err)
     }
@@ -1845,6 +1885,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
           userId, assistantId: assistant.id, sessionId: session.id,
           appId: 'Use Brian', channelType, channelId,
           channelSessionId: sessionChannelId,
+          taskAuthority,
           userTimezone,
           abortSignal: new AbortController().signal,
           requestTools: allTools,
@@ -1937,6 +1978,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         userId, assistantId: assistant.id, sessionId: session.id,
         appId: 'Use Brian', channelType, channelId,
         channelSessionId: sessionChannelId,
+        taskAuthority,
         workspaceId: assistant.workspaceId ?? undefined,
         workerRuntime: customLlmRuntime
           ? {

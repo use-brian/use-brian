@@ -787,8 +787,21 @@ export async function listWorkspaceConnectorOptions(
     label: string;
     connected: boolean;
   };
-  const data = (await res.json()) as { teamNative?: Row[] } | null;
-  const rows = Array.isArray(data?.teamNative) ? data!.teamNative : [];
+  const data = (await res.json()) as {
+    teamNative?: Row[];
+    granted?: Array<{ instance?: Row }>;
+  } | null;
+  // Exposure is the workspace's operational-access boundary. A granted
+  // personal connector is already usable by the workspace assistant and is
+  // equally valid as an explicit workflow event source; ownership transfer is
+  // reserved for credential administration. De-duplicate defensively in case
+  // a transitional response exposes the same instance through both arrays.
+  const rows = [...new Map([
+    ...(Array.isArray(data?.teamNative) ? data.teamNative : []),
+    ...(Array.isArray(data?.granted)
+      ? data.granted.flatMap((grant) => (grant.instance ? [grant.instance] : []))
+      : []),
+  ].map((row) => [row.id, row])).values()];
   return rows.map((r) => ({
     id: r.id,
     provider: r.provider,

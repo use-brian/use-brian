@@ -144,6 +144,31 @@ describe('[COMP:channels/slack] createSlackAdapter parseIncoming', () => {
     expect(adapter.parseIncoming(event)).toBeNull()
   })
 
+  it('can defer the mention gate to a route that resolves realtime thread targets', () => {
+    const routeOwned = createSlackAdapter({
+      botToken: 'xoxb-test',
+      botUserId: 'U_BOT',
+      deferMentionGate: true,
+    })
+    const result = routeOwned.parseIncoming({
+      type: 'event_callback',
+      event: {
+        type: 'message',
+        text: 'This is done',
+        user: 'U_USER',
+        channel: 'C_CHANNEL',
+        ts: '1680000001.000200',
+        thread_ts: '1680000000.000100',
+      },
+    })
+    expect(result).toMatchObject({
+      text: 'This is done',
+      isGroupChat: true,
+      isMentioned: false,
+      replyToMessageId: '1680000000.000100',
+    })
+  })
+
   it('ignores bot messages (bot_id present)', () => {
     const event = {
       type: 'event_callback',

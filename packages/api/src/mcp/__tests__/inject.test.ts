@@ -206,8 +206,22 @@ describe('[COMP:api/mcp-inject] KB write-tool exposure gate', () => {
     allowKnowledgeWrites?: boolean
     withWriter?: boolean
     keepBuiltinsDirect?: boolean
+    withCaptureRule?: boolean
   }) {
     const tools = new Map()
+    const targetSourceId = params.sources[0]?.id ?? null
+    const knowledgeCaptureRuleStore = {
+      listEnabledForWorkspace: vi.fn().mockResolvedValue(
+        params.withCaptureRule === false
+          ? []
+          : [{
+              id: 'rule-1', workspaceId: 'ws-1', name: 'Pricing research',
+              matchPhrases: ['pricing'], instructions: 'Capture verified pricing changes.',
+              targetSourceId, pathPrefix: '', defaultSensitivity: 'internal', enabled: true,
+              createdBy: 'u-1', createdAt: new Date(), updatedAt: new Date(),
+            }],
+      ),
+    }
     const result = await injectMcpTools({
       userId: 'u-1',
       assistantId: 'a-1',
@@ -217,6 +231,9 @@ describe('[COMP:api/mcp-inject] KB write-tool exposure gate', () => {
       knowledgeStore: kbStoreStub(params.sources),
       knowledgeRepoWriter: params.withWriter === false ? undefined : (repoWriterStub as never),
       allowKnowledgeWrites: params.allowKnowledgeWrites,
+      knowledgeCaptureRuleStore: knowledgeCaptureRuleStore as never,
+      knowledgeCaptureText: 'latest pricing research',
+      assistantTeamId: 'ws-1',
       keepBuiltinsDirect: params.keepBuiltinsDirect ?? true,
     })
     return { tools, result }
@@ -229,6 +246,8 @@ describe('[COMP:api/mcp-inject] KB write-tool exposure gate', () => {
   it('exposes updateKnowledgeEntry on an interactive surface with a writable source', async () => {
     const { tools, result } = await inject({ sources: WRITABLE, allowKnowledgeWrites: true })
     expect([...tools.keys()]).toContain('updateKnowledgeEntry')
+    expect([...tools.keys()]).toContain('addKnowledgeEntry')
+    expect(result.knowledgeCapturePrompt).toContain('Pricing research')
     expect(result.unavailable.join(' ')).not.toContain('knowledge base editing')
   })
 
@@ -241,25 +260,38 @@ describe('[COMP:api/mcp-inject] KB write-tool exposure gate', () => {
   it('keeps write tools out on non-interactive surfaces (default), with no unavailable advert', async () => {
     const { tools, result } = await inject({ sources: WRITABLE })
     expect([...tools.keys()]).not.toContain('updateKnowledgeEntry')
+    expect([...tools.keys()]).not.toContain('addKnowledgeEntry')
     expect([...tools.keys()]).toContain('searchKnowledge')
     // The capability doesn't exist on this surface by design — advertising
     // it as "unavailable" would invite the model to promise it.
     expect(result.unavailable.join(' ')).not.toContain('knowledge base editing')
   })
 
+  it('keeps interactive assistants read-only when no capture category matches', async () => {
+    const { tools, result } = await inject({
+      sources: WRITABLE,
+      allowKnowledgeWrites: true,
+      withCaptureRule: false,
+    })
+    expect([...tools.keys()]).not.toContain('addKnowledgeEntry')
+    expect([...tools.keys()]).not.toContain('updateKnowledgeEntry')
+    expect(result.knowledgeCapturePrompt).toBeUndefined()
+    expect(result.unavailable.join(' ')).not.toContain('knowledge capture')
+  })
+
   it('reports a precise read-only reason when no source is writable', async () => {
     const { tools, result } = await inject({ sources: READ_ONLY, allowKnowledgeWrites: true })
     expect([...tools.keys()]).not.toContain('updateKnowledgeEntry')
-    const line = result.unavailable.find((u) => u.includes('knowledge base editing'))
+    const line = result.unavailable.find((u) => u.includes('knowledge capture category'))
     expect(line).toBeDefined()
     expect(line).toContain('read-only')
     expect(line).toContain('acme/kb')
   })
 
-  it('reports not-configured when the writer port is absent (open standalone)', async () => {
+  it('reports the matched category as unavailable when the writer port is absent', async () => {
     const { result } = await inject({ sources: WRITABLE, allowKnowledgeWrites: true, withWriter: false })
-    const line = result.unavailable.find((u) => u.includes('knowledge base editing'))
-    expect(line).toContain('not configured')
+    const line = result.unavailable.find((u) => u.includes('knowledge capture category'))
+    expect(line).toContain('read-only')
   })
 
   it('keeps write tools out of the mcp_search index when gated (closed world)', async () => {

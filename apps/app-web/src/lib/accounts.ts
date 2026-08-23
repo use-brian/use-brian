@@ -26,6 +26,8 @@ export type AccountDirEntry = {
   id: string;
   name: string;
   email: string;
+  /** Profile photo URL carried by the primary auth directory cookie. */
+  avatarUrl?: string;
 };
 
 let cachedDir: AccountDirEntry[] | null = null;

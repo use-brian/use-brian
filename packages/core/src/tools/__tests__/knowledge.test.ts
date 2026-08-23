@@ -58,14 +58,13 @@ const ctx: ToolContext = {
 beforeEach(() => { vi.clearAllMocks() })
 
 describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
-  it('returns 4 tools', () => {
+  it('returns only the 3 read tools by default', () => {
     const tools = createKnowledgeTools(mockStore)
-    expect(tools).toHaveLength(4)
+    expect(tools).toHaveLength(3)
     expect(tools.map((t) => t.name)).toEqual([
       'searchKnowledge',
       'browseKnowledge',
       'readKnowledgeEntry',
-      'addKnowledgeEntry',
     ])
   })
 
@@ -231,10 +230,71 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
   })
 
   describe('addKnowledgeEntry', () => {
+    const manualCaptureRule = {
+      id: 'rule-manual',
+      name: 'Pricing research',
+      instructions: 'Capture verified pricing changes.',
+      targetSourceId: null,
+      targetLabel: 'Manual entries',
+      pathPrefix: 'research/offers',
+      defaultSensitivity: 'public' as const,
+    }
+
+    it('keeps both mutation tools absent without write authorization', () => {
+      const names = createKnowledgeTools(mockStore, {
+        repoConnected: true,
+        captureRules: [manualCaptureRule],
+      }).map((tool) => tool.name)
+      expect(names).not.toContain('addKnowledgeEntry')
+      expect(names).not.toContain('updateKnowledgeEntry')
+    })
+
+    it('writes to Manual entries even when sources are connected when the matched rule targets manual', async () => {
+      vi.mocked(mockStore.create).mockResolvedValueOnce({ id: 'manual-new', path: 'research/offers/student' })
+      const tools = createKnowledgeTools(mockStore, {
+        repoConnected: true,
+        allowWrites: true,
+        captureRules: [manualCaptureRule],
+      })
+      const result = await byName(tools, 'addKnowledgeEntry').execute({
+        path: 'research/offers/student',
+        title: 'Student offer',
+        content: 'Verified offer.',
+        captureRuleId: manualCaptureRule.id,
+      }, ctx)
+
+      expect(result.isError).toBeUndefined()
+      expect(mockStore.create).toHaveBeenCalledWith(expect.objectContaining({
+        path: 'research/offers/student',
+        sensitivity: 'public',
+      }))
+    })
+
+    it('rejects an unmatched rule id and an out-of-scope path', async () => {
+      const tool = byName(createKnowledgeTools(mockStore, {
+        repoConnected: true,
+        allowWrites: true,
+        captureRules: [manualCaptureRule],
+      }), 'addKnowledgeEntry')
+
+      const wrongRule = await tool.execute({
+        path: 'research/offers/student', title: 'Student', content: 'Body', captureRuleId: 'other',
+      }, ctx)
+      expect(wrongRule.isError).toBe(true)
+      expect(String(wrongRule.data)).toContain('did not match this turn')
+
+      const wrongPath = await tool.execute({
+        path: 'sales/student', title: 'Student', content: 'Body', captureRuleId: manualCaptureRule.id,
+      }, ctx)
+      expect(wrongPath.isError).toBe(true)
+      expect(String(wrongPath.data)).toContain('outside that scope')
+      expect(mockStore.create).not.toHaveBeenCalled()
+    })
+
     it('creates an entry when no repo connected, using workspaceId from context', async () => {
       vi.mocked(mockStore.create).mockResolvedValueOnce({ id: 'new1', path: 'docs/new' })
 
-      const tools = createKnowledgeTools(mockStore, { repoConnected: false })
+      const tools = createKnowledgeTools(mockStore, { repoConnected: false, allowWrites: true })
       const result = await tools[3].execute(
         { path: 'docs/new', title: 'New Doc', content: 'Content here' },
         ctx,
@@ -251,7 +311,7 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
 
       vi.mocked(mockStore.create).mockResolvedValueOnce({ id: 'new2', path: 'docs/x' })
 
-      const tools = createKnowledgeTools(mockStore, { repoConnected: false })
+      const tools = createKnowledgeTools(mockStore, { repoConnected: false, allowWrites: true })
       await tools[3].execute(
         { path: 'docs/x', title: 'X', content: 'Body', sensitivity: 'public' },
         { ...ctx, sensitivity: accumulator },
@@ -269,7 +329,7 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
 
       vi.mocked(mockStore.create).mockResolvedValueOnce({ id: 'new3', path: 'docs/r' })
 
-      const tools = createKnowledgeTools(mockStore, { repoConnected: false })
+      const tools = createKnowledgeTools(mockStore, { repoConnected: false, allowWrites: true })
       await tools[3].execute(
         { path: 'docs/r', title: 'R', content: 'Body' },
         { ...ctx, sensitivity: accumulator, researchMode: true },
@@ -285,7 +345,7 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
 
       vi.mocked(mockStore.create).mockResolvedValueOnce({ id: 'new4', path: 'docs/c' })
 
-      const tools = createKnowledgeTools(mockStore, { repoConnected: false })
+      const tools = createKnowledgeTools(mockStore, { repoConnected: false, allowWrites: true })
       await tools[3].execute(
         { path: 'docs/c', title: 'C', content: 'Body' },
         { ...ctx, sensitivity: accumulator, researchMode: true },
@@ -319,7 +379,7 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
     it('a store failure on create says nothing was saved', async () => {
       vi.mocked(mockStore.create).mockRejectedValueOnce(new Error('violates unique constraint'))
 
-      const tools = createKnowledgeTools(mockStore, { repoConnected: false })
+      const tools = createKnowledgeTools(mockStore, { repoConnected: false, allowWrites: true })
       const result = await tools[3].execute(
         { path: 'docs/new', title: 'New', content: 'Body' },
         ctx,
@@ -334,20 +394,15 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
       expect(data).toMatch(/do not tell the user it was saved/i)
     })
 
-    it('rejects writes when repo is connected', async () => {
+    it('does not expose either write tool when repo is connected without authorization', async () => {
       const tools = createKnowledgeTools(mockStore, { repoConnected: true })
-      const result = await tools[3].execute(
-        { path: 'docs/new', title: 'New', content: 'Body' },
-        ctx,
-      )
-
-      expect(result.isError).toBe(true)
-      expect(result.data).toContain('No writable knowledge source')
+      expect(tools.map((tool) => tool.name)).not.toContain('addKnowledgeEntry')
+      expect(tools.map((tool) => tool.name)).not.toContain('updateKnowledgeEntry')
       expect(mockStore.create).not.toHaveBeenCalled()
     })
 
     it('rejects writes when assistant has no team', async () => {
-      const tools = createKnowledgeTools(mockStore, { repoConnected: false })
+      const tools = createKnowledgeTools(mockStore, { repoConnected: false, allowWrites: true })
       const result = await tools[3].execute(
         { path: 'docs/new', title: 'New', content: 'Body' },
         { ...ctx, workspaceId: null },
@@ -480,13 +535,13 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
       expect(createKnowledgeTools(mockStore).map((t) => t.name)).not.toContain('updateKnowledgeEntry')
     })
 
-    it('requires confirmation and forbids proactive use in the description', () => {
+    it('requires confirmation and describes explicit workflow governance', () => {
       const tool = byName(createKnowledgeTools(mockStore, writeOpts()), 'updateKnowledgeEntry')
       expect(tool.requiresConfirmation).toBe(true)
-      expect(tool.description).toContain('explicitly asked')
+      expect(tool.description).toContain('explicitly configured workflow')
       const add = byName(createKnowledgeTools(mockStore, writeOpts()), 'addKnowledgeEntry')
       expect(add.requiresConfirmation).toBe(true)
-      expect(add.description).toContain('explicitly asked')
+      expect(add.description).toContain('explicitly configured workflow')
     })
 
     it('routes a repo-synced entry through the writer', async () => {
@@ -507,6 +562,28 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
       })
       expect(result.data).toMatchObject({ id: 'e1', commit: 'abc1234' })
       expect(mockStore.updateManualEntryContent).not.toHaveBeenCalled()
+    })
+
+    it('rejects an update whose entry belongs to another capture destination', async () => {
+      vi.mocked(mockStore.getById).mockResolvedValueOnce(repoEntry)
+      const tools = createKnowledgeTools(mockStore, {
+        repoConnected: true,
+        allowWrites: true,
+        captureRules: [{
+          id: 'manual-rule',
+          name: 'Manual decisions',
+          instructions: 'Capture decisions.',
+          targetSourceId: null,
+          targetLabel: 'Manual entries',
+          pathPrefix: '',
+          defaultSensitivity: 'internal',
+        }],
+      })
+      const result = await byName(tools, 'updateKnowledgeEntry').execute({
+        id: 'e1', content: 'New body', changeSummary: 'x', captureRuleId: 'manual-rule',
+      }, ctx)
+      expect(result.isError).toBe(true)
+      expect(String(result.data)).toContain('another knowledge destination')
     })
 
     it('relays writer failures (e.g. staleness) with the reason-specific retry verdict', async () => {

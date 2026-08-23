@@ -126,6 +126,7 @@ export {
 } from './base/mailbox.js'
 export type { MailboxApi, MailboxAccountRouter, MailboxAccountRef, MailboxSearchParams, MailboxSearchHit, MailboxMessage, MailboxThread, MailboxAttachment, MailboxAttachmentBytes, MailboxOutgoingAttachment, MailboxAttachmentDeps, CreateMailboxToolsOptions } from './base/mailbox.js'
 export { createKnowledgeTools } from './base/knowledge.js'
+export type { KnowledgeToolOptions, KnowledgeWriteCaptureRule } from './base/knowledge.js'
 export { createInterAssistantTools } from './base/ask-assistant.js'
 export type { InterAssistantDeps } from './base/ask-assistant.js'
 export { createReportBugTool } from './base/report-bug.js'

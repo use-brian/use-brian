@@ -3,6 +3,7 @@ import { buildCitationIndex } from '@use-brian/shared'
 import { createTaskTools, type TaskToolEvent } from '../tools.js'
 import { formatToolError } from '../../engine/tool-executor.js'
 import type { TaskRecord, TaskStore } from '../types.js'
+import type { TaskAdmissionPort, TaskRuleRecord } from '../admission.js'
 
 // The real store persists provenance (source*, mig 316/334) but does NOT
 // project it back on reads — `TaskRecord` is deliberately a compact,
@@ -604,6 +605,104 @@ describe('[COMP:tasks/tools] closeTask + reopenTask', () => {
     const { closeTask } = createTaskTools(store)
     const result = await closeTask.execute({ id: UUID_B }, ctxNoWorkspace)
     expect(result.isError).toBe(true)
+  })
+})
+
+describe('[COMP:tasks/tools] realtime thread mutation authority', () => {
+  function admission(rules: TaskRuleRecord[]): TaskAdmissionPort {
+    return {
+      listActiveRules: async () => rules,
+      findSimilarTombstones: async () => [],
+      findSimilarTasks: async () => [],
+      recordCandidate: async () => {},
+    }
+  }
+
+  function allowRule(operations: TaskRuleRecord['predicate']['operations']): TaskRuleRecord {
+    return {
+      id: 'rule-allow',
+      workspaceId: 'workspace_1',
+      status: 'active',
+      effect: 'allow',
+      predicate: { operations, authorities: ['realtime_thread_target'] },
+      nlClause: 'Replies in active task threads may maintain the bound task.',
+      reason: null,
+      origin: 'user',
+      createdAt: new Date(),
+    }
+  }
+
+  function targetContext(taskIds: string[]) {
+    return {
+      ...ctx,
+      channelType: 'slack',
+      channelId: 'C123',
+      taskAuthority: {
+        kind: 'realtime_thread_target' as const,
+        targetId: 'target-1',
+        channelType: 'slack',
+        channelRef: 'C123',
+        threadRef: '1700000000.000100',
+        taskIds,
+        expiresAt: '2099-01-01T00:00:00.000Z',
+      },
+    }
+  }
+
+  it('closes an exactly bound task when status updates are allowed', async () => {
+    const store = makeFakeStore()
+    const directTools = createTaskTools(store)
+    await directTools.saveTask.execute({ title: 'Ship' }, ctx)
+    const id = store.rows[0].id
+    const tools = createTaskTools(store, { admission: admission([allowRule(['update_status'])]) })
+
+    const result = await tools.closeTask.execute({ id }, targetContext([id]))
+    expect(result.isError).toBeFalsy()
+    expect(store.rows[0].status).toBe('done')
+  })
+
+  it('denies a detail change when only status changes are allowed', async () => {
+    const store = makeFakeStore()
+    const directTools = createTaskTools(store)
+    await directTools.saveTask.execute({ title: 'Ship' }, ctx)
+    const id = store.rows[0].id
+    const tools = createTaskTools(store, { admission: admission([allowRule(['update_status'])]) })
+
+    const result = await tools.updateTask.execute({ id, title: 'Ship safely' }, targetContext([id]))
+    expect(result.isError).toBe(true)
+    expect(store.rows[0].title).toBe('Ship')
+  })
+
+  it('denies a task outside the target binding even when the operation is allowed', async () => {
+    const store = makeFakeStore()
+    const directTools = createTaskTools(store)
+    await directTools.saveTask.execute({ title: 'Bound' }, ctx)
+    await directTools.saveTask.execute({ title: 'Other' }, ctx)
+    const [bound, other] = store.rows
+    const tools = createTaskTools(store, { admission: admission([allowRule(['update_status'])]) })
+
+    const result = await tools.closeTask.execute({ id: other.id }, targetContext([bound.id]))
+    expect(result.isError).toBe(true)
+    expect(other.status).toBe('todo')
+  })
+
+  it('keeps a historical target binding valid after the task id supersedes', async () => {
+    const store = makeFakeStore()
+    const directTools = createTaskTools(store)
+    await directTools.saveTask.execute({ title: 'Bound lineage' }, ctx)
+    const current = store.rows[0]
+    const historicalId = '00000000-0000-0000-0000-000000000001'
+    store.resolveById = async (_access, id) =>
+      id === historicalId || id === current.id ? { ...current } : null
+    const tools = createTaskTools(store, { admission: admission([allowRule(['update_status'])]) })
+
+    const result = await tools.closeTask.execute(
+      { id: current.id },
+      targetContext([historicalId]),
+    )
+
+    expect(result.isError).toBeFalsy()
+    expect(current.status).toBe('done')
   })
 })
 

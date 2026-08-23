@@ -149,6 +149,15 @@ describe("[COMP:app-web/crm-view] CRM view logic", () => {
     expect(counts.orphaned).toBe(1);
   });
 
+  it("round-trips the dedicated email review and selected draft in the CRM URL", () => {
+    const view = crmViewFromSearch("review=email&draft=approval-2&section=contacts");
+    expect(view.review).toBe("email");
+    expect(view.draft).toBe("approval-2");
+    expect(searchFromCrmView(view)).toContain("review=email");
+    expect(searchFromCrmView(view)).toContain("draft=approval-2");
+    expect(crmViewFromSearch("draft=orphaned").draft).toBeNull();
+  });
+
   it("deal filtering: closed fold by default, quick filters pick their own slice", () => {
     const rows = [
       deal({ id: "open" }),

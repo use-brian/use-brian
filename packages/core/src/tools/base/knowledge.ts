@@ -3,15 +3,13 @@
  *
  * Built-in tools injected directly into the tool map (no MCP indirection).
  *
- * Write surface (docs/architecture/features/knowledge-base.md → "Assistant
- * direct edits"): source-backed knowledge bases are assistant-editable only
- * when the injector passes a `repoWriter` — which it does only on
- * interactive, confirmation-capable surfaces AND when a source is writable.
- * GitHub uses its cached PAT probe; local sources use the filesystem writer.
- * Every write carries
- * `requiresConfirmation` (per-edit Approve/Deny) and the descriptions
- * forbid proactive use: the assistant edits the KB only when the user
- * explicitly asked in the conversation.
+ * Write surface (docs/architecture/features/knowledge-base.md → "Workspace
+ * capture rules"): interactive assistants receive the two write tools only
+ * when the newest human turn matched an enabled workspace capture rule. The
+ * rule fixes the destination and optional path prefix; every write still
+ * carries `requiresConfirmation`. Explicit workflow tool_call steps use the
+ * same tools without a capture rule because the authored workflow step plus
+ * approval pause is already the governing authorization.
  */
 
 import { z } from 'zod'
@@ -38,14 +36,26 @@ export type KnowledgeToolOptions = {
   repoWriter?: KnowledgeRepoWriter
   /** Writable source targets. Local sources do not require a PAT probe. */
   writableSources?: Array<{ id: string; repo: string; sourceType: 'github' | 'local' }>
+  /** Matched, usable per-turn capture authorizations for interactive chat. */
+  captureRules?: KnowledgeWriteCaptureRule[]
   /**
-   * Interactive-surface flag: gates emission of `updateKnowledgeEntry`
-   * entirely. Non-interactive surfaces (workflow, scheduled, A2A, public
-   * API) never see the tool.
+   * Governing flag: gates emission of BOTH write tools entirely. Interactive
+   * callers set it only after a capture-rule match; workflow tool_call
+   * execution sets it because the authored step is separately governed.
    */
   allowWrites?: boolean
   /** Requesting member's display label (email) for commit attribution. */
   requesterLabel?: string | null
+}
+
+export type KnowledgeWriteCaptureRule = {
+  id: string
+  name: string
+  instructions: string
+  targetSourceId: string | null
+  targetLabel: string
+  pathPrefix: string
+  defaultSensitivity: Sensitivity
 }
 
 /**
@@ -56,8 +66,20 @@ export type KnowledgeToolOptions = {
 const NO_WORKSPACE_KB =
   'This assistant is not attached to a workspace, and the knowledge base is a workspace resource — so there is no knowledge base to read here (this is not an empty result). Nothing you pass will change that in this conversation: do not retry searchKnowledge / browseKnowledge / readKnowledgeEntry. Answer from what you already know and tell the user this assistant has no knowledge base.'
 
-const EXPLICIT_ASK_RULE =
-  'Only use this when the user has explicitly asked, in this conversation, to change the knowledge base — never proactively.'
+function captureRuleDescription(rules: readonly KnowledgeWriteCaptureRule[]): string {
+  if (rules.length === 0) {
+    return 'Use only for an explicitly configured workflow write step; never invent a write outside that step.'
+  }
+  return `Use only for durable information covered by one of these matched capture rules: ${rules.map((rule) => `"${rule.name}" (${rule.id}) -> ${rule.targetLabel}${rule.pathPrefix ? ` under ${rule.pathPrefix}/` : ''}`).join('; ')}.`
+}
+
+function pathWithinPrefix(path: string, prefix: string): boolean {
+  const normalizedPath = path.replace(/^\/+|\/+$/g, '')
+  const normalizedPrefix = prefix.replace(/^\/+|\/+$/g, '')
+  return normalizedPrefix.length === 0
+    || normalizedPath === normalizedPrefix
+    || normalizedPath.startsWith(`${normalizedPrefix}/`)
+}
 
 /**
  * Retry verdict per repo-write rejection reason.
@@ -316,6 +338,23 @@ export function createKnowledgeTools(
     )
   }
 
+  const captureRules = opts?.captureRules ?? []
+  const hasCaptureRules = captureRules.length > 0
+
+  function resolveCaptureRule(captureRuleId: string | undefined): KnowledgeWriteCaptureRule | string | null {
+    if (!hasCaptureRules) return null
+    if (!captureRuleId) {
+      return 'captureRuleId is required for this knowledge write. Nothing was written. Use one of the matched rule ids from this tool description.'
+    }
+    const rule = captureRules.find((candidate) => candidate.id === captureRuleId)
+    return rule ?? `Capture rule "${captureRuleId}" did not match this turn, so it cannot authorize a knowledge write. Nothing was written.`
+  }
+
+  function sourceForCaptureRule(rule: KnowledgeWriteCaptureRule) {
+    if (rule.targetSourceId === null) return null
+    return opts?.writableSources?.find((source) => source.id === rule.targetSourceId)
+  }
+
   /** Pick the create target among writable sources; string = error message. */
   function pickWritableSource(
     requestedRepo: string | undefined,
@@ -347,9 +386,9 @@ export function createKnowledgeTools(
   const addKnowledgeEntry = buildTool({
     name: 'addKnowledgeEntry',
     description:
-      `Add a new entry to the knowledge base. ${EXPLICIT_ASK_RULE} ` +
+      `Add a new entry to the knowledge base. ${captureRuleDescription(captureRules)} ` +
       'Requires a path (directory-like), title, and content. The knowledge base is for curated, reusable information — not personal notes. ' +
-      'When the knowledge base is synced from a source, the entry is written directly to that source on approval. ' +
+      'A matched capture rule fixes the destination and path scope; do not redirect it. When the destination is a synced source, the entry is written directly to that source on approval. ' +
       'Sensitivity controls which assistants can read the entry: `public` (safe for external output), `internal` (team-wide, default), `confidential` (restricted to high-clearance assistants only). ' +
       'If the turn has drawn on confidential sources, the entry will be stamped `confidential` even if a lower tier was requested — no silent downgrade.',
     inputSchema: z.object({
@@ -361,8 +400,11 @@ export function createKnowledgeTools(
         'Access tier for this entry. Defaults to `internal`. Use `public` only for customer-facing content.',
       ),
       repo: z.string().optional().describe(
-        'Target source (GitHub owner/name or local directory). Only needed when more than one source is writable.',
+        'Workflow-only target source (GitHub owner/name or local directory). Interactive capture rules already fix the destination.',
       ),
+      captureRuleId: hasCaptureRules
+        ? z.string().describe('Required matched capture rule id from this tool description.')
+        : z.string().optional().describe('Workflow paths omit this; interactive capture paths require it.'),
     }),
     isConcurrencySafe: true,
     isReadOnly: false,
@@ -370,11 +412,18 @@ export function createKnowledgeTools(
     timeoutMs: 30_000,
 
     async describeConfirmation(input, _context) {
-      const args = input as { path?: string; title?: string; content?: string; sensitivity?: string; repo?: string }
-      const target = opts?.repoConnected ? pickWritableSource(args.repo) : null
+      const args = input as { path?: string; title?: string; content?: string; sensitivity?: string; repo?: string; captureRuleId?: string }
+      const resolvedRule = resolveCaptureRule(args.captureRuleId)
+      const rule = resolvedRule && typeof resolvedRule !== 'string' ? resolvedRule : null
+      const captureSource = rule ? sourceForCaptureRule(rule) : undefined
+      const target = rule
+        ? rule.targetSourceId === null ? null : (captureSource ?? `Configured destination ${rule.targetLabel} is no longer writable.`)
+        : opts?.repoConnected ? pickWritableSource(args.repo) : null
       const lines = [
         `Create knowledge entry "${args.title ?? ''}" at ${args.path ?? ''}`,
-        target && typeof target !== 'string'
+        rule?.targetSourceId === null
+          ? 'Saves to Manual entries'
+          : target && typeof target !== 'string'
           ? target.sourceType === 'local' ? `Writes directly to ${target.repo}` : `Commits directly to ${target.repo}`
           : 'Saves to the workspace knowledge base',
         `Sensitivity: ${args.sensitivity ?? 'internal'} (raised automatically if this turn used higher-tier sources)`,
@@ -391,26 +440,39 @@ export function createKnowledgeTools(
         }
       }
 
+      const resolvedRule = resolveCaptureRule(input.captureRuleId)
+      if (typeof resolvedRule === 'string') return { data: resolvedRule, isError: true }
+      if (resolvedRule && !pathWithinPrefix(input.path, resolvedRule.pathPrefix)) {
+        return {
+          data: `Capture rule "${resolvedRule.name}" only authorizes paths under "${resolvedRule.pathPrefix}/". "${input.path}" is outside that scope, so nothing was written.`,
+          isError: true,
+        }
+      }
+
       // Stamp: max of what the model was exposed to this turn vs the requested
       // value. Prevents a downgrade laundering path where confidential context
       // gets summarised back into a public entry. Research turns default the
       // requested tier to `public` (public-web provenance) and drop the
       // accumulator floor for internal-tier orientation reads — confidential
       // stays a hard floor. See researchWriteFloor.
-      const requested: Sensitivity =
-        input.sensitivity ?? (context.researchMode ? 'public' : 'internal')
+      const requested: Sensitivity = input.sensitivity
+        ?? resolvedRule?.defaultSensitivity
+        ?? (context.researchMode ? 'public' : 'internal')
       const accumulatorMax: Sensitivity = researchWriteFloor(
         context.sensitivity?.max,
         context.researchMode,
       )
       const stamp: Sensitivity = RANK[accumulatorMax] > RANK[requested] ? accumulatorMax : requested
 
-      if (opts?.repoConnected) {
+      const captureSource = resolvedRule ? sourceForCaptureRule(resolvedRule) : undefined
+      const writesManual = resolvedRule?.targetSourceId === null
+
+      if ((resolvedRule && !writesManual) || (!resolvedRule && opts?.repoConnected)) {
         // Repo mode — direct commit through the write-back port. The port is
         // present only on interactive surfaces with a push-capable source
         // (docs/architecture/features/knowledge-base.md → "Assistant direct
         // edits"); its absence here is a normal, explainable state.
-        if (!opts.repoWriter || (opts.writableSources ?? []).length === 0) {
+        if (!opts?.repoWriter || (resolvedRule ? !captureSource : (opts.writableSources ?? []).length === 0)) {
           return {
             data:
               'No writable knowledge source is available on this surface, so the entry was not created. ' +
@@ -420,7 +482,7 @@ export function createKnowledgeTools(
             isError: true,
           }
         }
-        const target = pickWritableSource(input.repo)
+        const target = resolvedRule ? captureSource! : pickWritableSource(input.repo)
         if (typeof target === 'string') {
           return { data: target, isError: true }
         }
@@ -486,7 +548,7 @@ export function createKnowledgeTools(
   const updateKnowledgeEntry = buildTool({
     name: 'updateKnowledgeEntry',
     description:
-      `Replace the body of an existing knowledge base entry. ${EXPLICIT_ASK_RULE} ` +
+      `Replace the body of an existing knowledge base entry. ${captureRuleDescription(captureRules)} ` +
       'Read the entry first (readKnowledgeEntry) and pass the complete new body in markdown — this is a full replacement, not a patch. ' +
       'The entry\'s metadata (title, tags, sensitivity) is preserved as-is; do not include YAML frontmatter. ' +
       'Repo-synced entries are committed directly to the source repository on approval.',
@@ -494,6 +556,9 @@ export function createKnowledgeTools(
       id: z.string().describe('Entry ID (full UUID from search/browse results).'),
       content: z.string().describe('The complete replacement body in markdown (no frontmatter).'),
       changeSummary: z.string().describe('One line describing the change — becomes the commit message subject.'),
+      captureRuleId: hasCaptureRules
+        ? z.string().describe('Required matched capture rule id from this tool description.')
+        : z.string().optional().describe('Workflow paths omit this; interactive capture paths require it.'),
     }),
     isConcurrencySafe: false,
     isReadOnly: false,
@@ -501,7 +566,7 @@ export function createKnowledgeTools(
     timeoutMs: 30_000,
 
     async describeConfirmation(input, context) {
-      const args = input as { id?: string; content?: string; changeSummary?: string }
+      const args = input as { id?: string; content?: string; changeSummary?: string; captureRuleId?: string }
       if (!args.id || !context.workspaceId) return null
       try {
         const entry = await readEntry(context, args.id)
@@ -542,6 +607,8 @@ export function createKnowledgeTools(
       if (!context.workspaceId) {
         return { data: NO_WORKSPACE_KB, isError: true }
       }
+      const resolvedRule = resolveCaptureRule(input.captureRuleId)
+      if (typeof resolvedRule === 'string') return { data: resolvedRule, isError: true }
       let entry
       try {
         entry = await readEntry(context, input.id)
@@ -567,6 +634,21 @@ export function createKnowledgeTools(
             }),
             isError: true,
           }
+      }
+
+      if (resolvedRule) {
+        if (entry.sourceId !== resolvedRule.targetSourceId) {
+          return {
+            data: `Capture rule "${resolvedRule.name}" authorizes only ${resolvedRule.targetLabel}; this entry belongs to another knowledge destination. Nothing was written.`,
+            isError: true,
+          }
+        }
+        if (!pathWithinPrefix(entry.path, resolvedRule.pathPrefix)) {
+          return {
+            data: `Capture rule "${resolvedRule.name}" only authorizes entries under "${resolvedRule.pathPrefix}/"; "${entry.path}" is outside that scope. Nothing was written.`,
+            isError: true,
+          }
+        }
       }
 
       // No-laundering guard: an update never reclassifies the entry
@@ -646,13 +728,14 @@ export function createKnowledgeTools(
     },
   })
 
-  const tools = [searchKnowledge, browseKnowledge, readKnowledgeEntry, addKnowledgeEntry]
-  // D2 (chat-only writes): `updateKnowledgeEntry` exists only on interactive
-  // surfaces — for repo-synced KBs it additionally needs a push-capable
-  // source (the injector only passes `repoWriter` then). Not injected ⇒ not
-  // discoverable via mcp_search (closed world).
-  if (opts?.allowWrites && (opts.repoWriter || !opts.repoConnected)) {
-    tools.push(updateKnowledgeEntry)
+  const tools: Tool[] = [searchKnowledge, browseKnowledge, readKnowledgeEntry]
+  // Closed world: both mutation tools appear together, only after the caller
+  // has established capture-rule authorization (interactive) or explicit
+  // workflow governance. Manual capture rules remain writable even when repo
+  // sources are connected; source rules require the writer port.
+  const hasManualCapture = captureRules.some((rule) => rule.targetSourceId === null)
+  if (opts?.allowWrites && (hasManualCapture || opts.repoWriter || !opts.repoConnected)) {
+    tools.push(addKnowledgeEntry, updateKnowledgeEntry)
   }
   return tools
 }

@@ -20,7 +20,7 @@
 
 import type { AccessContext, CachedFile } from '@use-brian/core'
 import { promoteCachedFile, wrapMcpTools, buildToolIndex, createMcpSearchTools, legacyMcpToolName, createGoogleCalendarTools, createGmailTools, createGoogleTasksTools, createGoogleDriveTools, createGoogleDocsTools, createGoogleSheetsTools, createGoogleSlidesTools, createGDriveFilesTools, createGitHubTools, createNotionTools, createFathomTools, createShopifyTools, createWordPressTools, createSearchConsoleTools, createMsGraphTools, createKnowledgeTools, createAgentmailTools, createMailboxTools, workspaceFilesCtxFor, workspaceFilesErrorMessage, workspaceFilesGate, GOOGLE_MAPS_TOOL_NAMES } from '@use-brian/core'
-import type { Tool, McpSettingsStore, McpServerConfig, KnowledgeStoreInterface, KnowledgeRepoWriter, AuthorizedFile, GDriveFilesStore, GDriveFileKind, LocalSource, RemoteSource, EngineHooks, FilesApi, AgentmailToolApi, MailboxApi, MailboxAccountRouter } from '@use-brian/core'
+import type { Tool, McpSettingsStore, McpServerConfig, KnowledgeStoreInterface, KnowledgeRepoWriter, KnowledgeWriteCaptureRule, AuthorizedFile, GDriveFilesStore, GDriveFileKind, LocalSource, RemoteSource, EngineHooks, FilesApi, AgentmailToolApi, MailboxApi, MailboxAccountRouter } from '@use-brian/core'
 import { getGlobalEmailInboxProvider, type EmailInboxProvider } from '../agentmail/provider.js'
 import { renderEmailBody } from '@use-brian/channels'
 import { createMailboxApi } from '../mailbox/mailbox-api.js'
@@ -150,6 +150,11 @@ import { connectorInstanceGovernanceId } from '../db/connector-instance-store.js
 // or env), NOT getEnv (closed env schema) — so this open injector imports no
 // closed code. See connector-config.ts + oss-local-brain-wedge.md §12.2.
 import { getConnectorConfig } from '../connector-config.js'
+import {
+  buildKnowledgeCapturePrompt,
+  matchKnowledgeCaptureRules,
+  type KnowledgeCaptureRuleStore,
+} from '../knowledge/capture-rules.js'
 
 // ── Discovery cache (in-memory, per-process) ──────────────────
 
@@ -394,6 +399,8 @@ export type McpInjectionResult = {
   unavailable: string[]
   /** Names from `restrictSearchToToolNames` that survived connector discovery and policy scoping. */
   restrictedSearchToolNames?: string[]
+  /** Trusted runtime block, present only when usable matched rules emitted write tools. */
+  knowledgeCapturePrompt?: string
 }
 
 export async function injectMcpTools(params: {
@@ -420,6 +427,14 @@ export async function injectMcpTools(params: {
    * closed.
    */
   allowKnowledgeWrites?: boolean
+  /**
+   * Interactive capture matching. Both are required for chat/channel turns;
+   * absent store/text means no rule match and therefore no write tools.
+   */
+  knowledgeCaptureRuleStore?: KnowledgeCaptureRuleStore
+  knowledgeCaptureText?: string
+  /** Explicit workflow tool_call steps are governed by their authored step + approval pause. */
+  knowledgeWriteAuthorization?: 'capture' | 'workflow'
   gdriveFilesStore?: GDriveFilesStore
   /**
    * Stage 4/5 of the team-connector promotion: when the turn is on a
@@ -551,6 +566,7 @@ export async function injectMcpTools(params: {
   const {
     userId, assistantId, tools, connectorStore, settingsStore, assistantConnectorStore,
     userTimezone, knowledgeStore, knowledgeRepoWriter, allowKnowledgeWrites = false,
+    knowledgeCaptureRuleStore, knowledgeCaptureText, knowledgeWriteAuthorization = 'capture',
     gdriveFilesStore,
     connectorGrantStore, connectorInstanceStore, workspaceToolPolicyStore, assistantTeamId,
     connectorActionAudit, assistantConnectorGrantsStore, workspaceDomain,
@@ -560,6 +576,24 @@ export async function injectMcpTools(params: {
   } = params
 
   const unavailable: string[] = []
+  let knowledgeCapturePrompt: string | undefined
+
+  let matchedCaptureRules = [] as Awaited<ReturnType<KnowledgeCaptureRuleStore['listEnabledForWorkspace']>>
+  if (
+    allowKnowledgeWrites
+    && knowledgeWriteAuthorization === 'capture'
+    && assistantTeamId
+    && knowledgeCaptureRuleStore
+    && knowledgeCaptureText?.trim()
+  ) {
+    try {
+      const enabled = await knowledgeCaptureRuleStore.listEnabledForWorkspace(assistantTeamId)
+      matchedCaptureRules = matchKnowledgeCaptureRules(enabled, knowledgeCaptureText)
+    } catch (err) {
+      // Authorization lookup fails closed. Reads remain available.
+      console.error('[mcp-inject] knowledge capture-rule lookup failed:', err)
+    }
+  }
 
   // Call-time connector-liveness writer (migration 294). Passed to the built-in
   // injectors so a 401/403 at tool-call time flips the backing instance to
@@ -1733,7 +1767,7 @@ export async function injectMcpTools(params: {
     try {
       const hasEntries = await knowledgeStore.hasEntriesForAssistant(assistantId)
       const sources = await knowledgeStore.listSourcesForAssistant(assistantId)
-      if (hasEntries || sources.length > 0) {
+      if (hasEntries || sources.length > 0 || matchedCaptureRules.some((rule) => rule.targetSourceId === null)) {
         const repoConnected = sources.length > 0
 
         // KB write exposure: GitHub sources require a cached push-capability
@@ -1742,14 +1776,58 @@ export async function injectMcpTools(params: {
         const writableSources = sources
           .filter((s) => s.sourceType === 'local' || s.writeAccess === true)
           .map((s) => ({ id: s.id, repo: s.repo, sourceType: s.sourceType }))
-        const writeEnabled =
-          allowKnowledgeWrites && !!knowledgeRepoWriter && writableSources.length > 0
+
+        const captureAuthorizations: KnowledgeWriteCaptureRule[] = []
+        for (const rule of matchedCaptureRules) {
+          if (rule.targetSourceId === null) {
+            captureAuthorizations.push({
+              id: rule.id,
+              name: rule.name,
+              instructions: rule.instructions,
+              targetSourceId: null,
+              targetLabel: 'Manual entries',
+              pathPrefix: rule.pathPrefix,
+              defaultSensitivity: rule.defaultSensitivity,
+            })
+            continue
+          }
+          const source = sources.find((candidate) => candidate.id === rule.targetSourceId)
+          const writable = writableSources.find((candidate) => candidate.id === rule.targetSourceId)
+          if (source && writable && knowledgeRepoWriter) {
+            captureAuthorizations.push({
+              id: rule.id,
+              name: rule.name,
+              instructions: rule.instructions,
+              targetSourceId: rule.targetSourceId,
+              targetLabel: source.repo,
+              pathPrefix: rule.pathPrefix,
+              defaultSensitivity: rule.defaultSensitivity,
+            })
+          } else {
+            unavailable.push(
+              source
+                ? `knowledge capture category "${rule.name}" (its destination ${source.repo} is currently read-only)`
+                : `knowledge capture category "${rule.name}" (its configured destination is not enabled for this assistant)`,
+            )
+          }
+        }
+
+        const workflowWriteEnabled =
+          allowKnowledgeWrites
+          && knowledgeWriteAuthorization === 'workflow'
+          && (!repoConnected || (!!knowledgeRepoWriter && writableSources.length > 0))
+        const captureWriteEnabled =
+          allowKnowledgeWrites
+          && knowledgeWriteAuthorization === 'capture'
+          && captureAuthorizations.length > 0
+        const writeEnabled = workflowWriteEnabled || captureWriteEnabled
 
         const kbTools = createKnowledgeTools(knowledgeStore, {
           repoConnected,
-          allowWrites: allowKnowledgeWrites,
+          allowWrites: writeEnabled,
           repoWriter: writeEnabled ? knowledgeRepoWriter : undefined,
           writableSources: writeEnabled ? writableSources : [],
+          captureRules: captureWriteEnabled ? captureAuthorizations : [],
           requesterLabel: actorIdentity?.email ?? null,
         })
         for (const tool of kbTools) {
@@ -1759,7 +1837,12 @@ export async function injectMcpTools(params: {
 
         // Capability honesty: explain why source write-back is unavailable
         // instead of letting the model hunt for a tool that is not present.
-        if (allowKnowledgeWrites && repoConnected && !writeEnabled) {
+        if (
+          allowKnowledgeWrites
+          && knowledgeWriteAuthorization === 'workflow'
+          && repoConnected
+          && !writeEnabled
+        ) {
           const githubRepos = sources.filter((s) => s.sourceType !== 'local').map((s) => s.repo).join(', ')
           unavailable.push(
             !knowledgeRepoWriter
@@ -1767,6 +1850,17 @@ export async function injectMcpTools(params: {
               : githubRepos
                 ? `knowledge base editing (the GitHub token backing ${githubRepos} is read-only — needs push permission; reconnect it with a read-write token in Studio → Connectors to enable assistant edits)`
                 : 'knowledge base editing (no writable source is available)',
+          )
+        }
+
+        if (captureWriteEnabled) {
+          knowledgeCapturePrompt = buildKnowledgeCapturePrompt(
+            matchedCaptureRules
+              .filter((rule) => captureAuthorizations.some((authorization) => authorization.id === rule.id))
+              .map((rule) => ({
+                ...rule,
+                targetLabel: captureAuthorizations.find((authorization) => authorization.id === rule.id)!.targetLabel,
+              })),
           )
         }
 
@@ -1974,6 +2068,7 @@ export async function injectMcpTools(params: {
     enrichConfirmation: enricher,
     unavailable,
     restrictedSearchToolNames: [...restrictedSearchToolNames],
+    knowledgeCapturePrompt,
   }
 }
 
