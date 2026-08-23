@@ -25,6 +25,7 @@ import {
   notifyBrainChange,
   notifyBrainInboxChange,
   notifyBrainWriteIfMatch,
+  notifyRoomMentionRecorded,
 } from '../notify.js'
 
 beforeEach(() => {
@@ -166,6 +167,33 @@ describe('[COMP:api/brain-stream-fanout] notifyBrainInboxChange', () => {
     notifyBrainInboxChange(null, 'memory', 'mem-1', 'update')
     notifyBrainInboxChange(undefined, 'memory', 'mem-1', 'update')
     notifyBrainInboxChange('', 'memory', 'mem-1', 'update')
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(calls).toEqual([])
+  })
+})
+
+describe('[COMP:api/brain-stream-fanout] notifyRoomMentionRecorded', () => {
+  it('fires pg_notify with the inbox primitive (T-H8, docs/plans/room-human-mentions.md)', async () => {
+    notifyRoomMentionRecorded('ws-1')
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0].sql).toBe('SELECT pg_notify($1, $2)')
+    expect(calls[0].params[0]).toBe('brain_events')
+    expect(JSON.parse(String(calls[0].params[1]))).toEqual({
+      workspaceId: 'ws-1',
+      primitive: 'inbox',
+      action: 'update',
+      rowId: undefined,
+    })
+  })
+
+  it('no-ops on a falsy workspaceId', async () => {
+    notifyRoomMentionRecorded(null)
+    notifyRoomMentionRecorded(undefined)
+    notifyRoomMentionRecorded('')
     await Promise.resolve()
     await Promise.resolve()
     expect(calls).toEqual([])

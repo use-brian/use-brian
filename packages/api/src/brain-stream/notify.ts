@@ -103,6 +103,22 @@ export function notifyWorkspaceChange(
 }
 
 /**
+ * Emitter for the `inbox` primitive (T-H8, docs/plans/room-human-mentions.md)
+ * — fired after a room `@mention` is recorded so `InboxPanel` and the sidebar
+ * unread badge (both mounted by the never-unmounting `/w/[workspaceId]`
+ * layout) can self-heal instead of waiting for a full page load. Workspace-
+ * wide, not per-recipient: `notifyWorkspaceChange` has no per-user targeting,
+ * so every open tab refetches its OWN Inbox and a teammate who wasn't
+ * mentioned just sees no change. Called from the chat/session route layer
+ * (the three call sites in docs/plans/room-human-mentions.md T-H1) right
+ * after `docNotificationsStore.recordRoomMentions` returns a nonzero count —
+ * same fire-and-forget semantics as every other emitter here.
+ */
+export function notifyRoomMentionRecorded(workspaceId: string | null | undefined): void {
+  notifyWorkspaceChange(workspaceId, 'inbox', 'update')
+}
+
+/**
  * Single source of truth for "this tool changes a brain row → emit this
  * signal". The set deliberately covers every chat-side brain-write tool. The
  * MCP bridge is a subset — `createEntity` / `updateSelfProfile` aren't exposed

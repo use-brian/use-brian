@@ -387,13 +387,22 @@ export async function rebindWorkspaceSessionAssistant(
  * assistant replies only when addressed (an ordinary `/api/chat` send).
  * Never busy-gated.
  */
+/** A member named in the text who cannot read this room (D-H4) — the sender
+ *  is told, the message still posts, and no row is written for them. */
+export type UnreachableMention = { id: string; name: string };
+
 export async function postRoomMessage(
   sessionId: string,
   message: string,
   /** The quote this post replies to, when the user picked one. Text only —
    *  the stored quote is a snapshot, not a link (see `_reply-context.ts`). */
   replyTo?: { text: string },
-): Promise<{ id: string; sequenceNum: number; timestamp: string }> {
+): Promise<{
+  id: string;
+  sequenceNum: number;
+  timestamp: string;
+  unreachableMentions: UnreachableMention[];
+}> {
   const res = await authFetch(
     `${API_URL}/api/sessions/${encodeURIComponent(sessionId)}/messages`,
     {
@@ -409,7 +418,39 @@ export async function postRoomMessage(
     const body = (await res.json().catch(() => ({}))) as { error?: string };
     throw new Error(body.error ?? `Post failed: ${res.status}`);
   }
-  return (await res.json()) as { id: string; sequenceNum: number; timestamp: string };
+  const body = (await res.json()) as {
+    id: string;
+    sequenceNum: number;
+    timestamp: string;
+    unreachableMentions?: UnreachableMention[];
+  };
+  return { ...body, unreachableMentions: body.unreachableMentions ?? [] };
+}
+
+/**
+ * The room's `@mention` roster (`GET /api/sessions/:id/mentionable`,
+ * docs/plans/room-human-mentions.md T-H4) — assistants plus ONLY the
+ * workspace members who pass THIS room's clearance. Already filtered
+ * server-side: the client must do no clearance logic of its own with the
+ * result (D-H4).
+ */
+export async function fetchMentionableRoster(
+  sessionId: string,
+): Promise<{
+  assistants: { id: string; name: string }[];
+  members: { id: string; name: string }[];
+}> {
+  const res = await authFetch(
+    `${API_URL}/api/sessions/${encodeURIComponent(sessionId)}/mentionable`,
+  );
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? `Mentionable roster failed: ${res.status}`);
+  }
+  return (await res.json()) as {
+    assistants: { id: string; name: string }[];
+    members: { id: string; name: string }[];
+  };
 }
 
 /**
@@ -451,7 +492,7 @@ export async function editRoomMessage(
   sessionId: string,
   messageId: string,
   message: string,
-): Promise<void> {
+): Promise<{ unreachableMentions: UnreachableMention[] }> {
   const res = await authFetch(
     `${API_URL}/api/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}`,
     {
@@ -464,6 +505,10 @@ export async function editRoomMessage(
     const body = (await res.json().catch(() => ({}))) as { error?: string };
     throw new Error(body.error ?? `Edit failed: ${res.status}`);
   }
+  const body = (await res.json().catch(() => ({}))) as {
+    unreachableMentions?: UnreachableMention[];
+  };
+  return { unreachableMentions: body.unreachableMentions ?? [] };
 }
 
 /**

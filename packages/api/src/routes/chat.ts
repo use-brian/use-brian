@@ -19,6 +19,9 @@ import { renderArtifactManifest } from '../files/artifact-manifest.js'
 import { promotePastedText, shouldPromotePaste } from '../files/paste-promotion.js'
 import type { ArtifactPromoter } from '../files/artifact-promote.js'
 import { mayAssistantAnswerInRoom } from './_room-binding.js'
+import { recordRoomMentionsForMessage, type RecordRoomMentionsResult } from '../room-mentions.js'
+import type { Sensitivity } from '@use-brian/core'
+import { resolveMentionSpans } from '@use-brian/shared/mention-matching'
 import { recordOverheadUsage } from './_overhead-usage.js'
 import { composeRecoveryMessage } from './_recovery-message.js'
 import { composeEmptyTurnSynthesis } from './_empty-turn-synthesis.js'
@@ -350,6 +353,21 @@ type WebChatOptions = {
    */
   checkCreditBudget?: CreditBudgetGate
   publishSessionEvent?: PublishSessionEvent
+  /**
+   * Room human `@mention` badge signal (docs/plans/room-human-mentions.md
+   * T-H8) — called fire-and-forget after a room message's mentions are
+   * recorded, whenever that actually notified someone new. Same shape and
+   * call pattern as `sessionRoutes`' `SessionRouteOptions.onRoomMentionRecorded`
+   * (`routes/sessions.ts`) — the addressed path (this route) and the silent
+   * post / edit paths (that one) share ONE emitter via this identical hook
+   * type. Absent = no live fan-out (unit tests; hosts that haven't wired
+   * the emitter). Owned by E-inbox; this route only calls it.
+   */
+  onRoomMentionRecorded?: (input: {
+    workspaceId: string
+    sessionId: string
+    recipientUserIds: string[]
+  }) => void
   isPlaceholderTitle?: (title: string | null | undefined) => boolean
   getTitleChannelPrefix?: (title: string | null | undefined) => string | null
   injectExtraTools?: InjectExtraTools
@@ -1339,9 +1357,16 @@ export function detectRoomAddress(params: {
 }): boolean {
   if (params.ask === true) return true
   if (params.replyToAssistant === true) return true
-  const name = params.assistantName.trim().toLowerCase()
+  const name = params.assistantName.trim()
   if (!name) return false
-  return params.message.toLowerCase().includes(`@${name}`)
+  // The shared matcher (T-H5, docs/plans/room-human-mentions.md), not a bare
+  // `.includes('@' + name)`: the old check had no word-boundary guard, so
+  // `@Janet` would address an assistant named "Jane". `resolveMentionSpans`'s
+  // `isNameContinuation` boundary fixes that while keeping every existing
+  // trigger — case-insensitivity, multi-word names, and trailing punctuation
+  // (`@Brian,` / `@Brian.` / `@Brian?` all still address, since none of
+  // `,`/`./`?` are a letter/number/underscore).
+  return resolveMentionSpans(params.message, [{ id: 'assistant', name }]).length > 0
 }
 
 const RoomResponseGroupRequestSchema = z.object({
@@ -2980,6 +3005,11 @@ export function chatRoutes(options: WebChatOptions): Router {
         }
       }
       if (isRoomSession && typeof message === 'string' && message.trim()) {
+        // A `const` alias so the narrowed `string` type survives into the
+        // closures below (`persistRoomPost` / `recordMentionsFor`) — `message`
+        // itself is `let`-bound and mutable elsewhere in this handler, so TS
+        // widens it back to `string | undefined` inside a nested function body.
+        const roomMessageText = message
         // Reply-to-assistant trigger: resolve the replied-to row's role. One
         // cheap indexed read, only when a room message carries replyTo.
         let replyToAssistant = false
@@ -3001,7 +3031,47 @@ export function chatRoutes(options: WebChatOptions): Router {
           replyToAssistant,
         })
 
-        const persistRoomPost = async (): Promise<SessionMessage> => {
+        // Room human @mentions (docs/plans/room-human-mentions.md T-H1/T-H2)
+        // — resolved once, right after the row that carries the tag is
+        // CREATED, never once per POST (the multi-assistant fan-out reuses
+        // one row across several POSTs; only the creator should record).
+        // Isolated + logged: the row is already committed by the time this
+        // runs, so a recording failure must not fail the send.
+        const recordMentionsFor = async (
+          stored: SessionMessage,
+        ): Promise<RecordRoomMentionsResult> => {
+          if (!assistant.workspaceId) return { recipientUserIds: [], unreachable: [] }
+          try {
+            const mentions = await recordRoomMentionsForMessage({
+              workspaceId: assistant.workspaceId,
+              sessionId: session.id,
+              sessionMessageId: stored.id,
+              text: roomMessageText,
+              actorUserId: user.id,
+              sessionClearance: (session.effectiveClearance as Sensitivity | null) ?? null,
+            })
+            if (mentions.recipientUserIds.length > 0 && options.onRoomMentionRecorded) {
+              try {
+                options.onRoomMentionRecorded({
+                  workspaceId: assistant.workspaceId,
+                  sessionId: session.id,
+                  recipientUserIds: mentions.recipientUserIds,
+                })
+              } catch (err) {
+                console.error('[chat] onRoomMentionRecorded hook failed:', err)
+              }
+            }
+            return mentions
+          } catch (err) {
+            console.error('[chat] room mention recording failed:', err)
+            return { recipientUserIds: [], unreachable: [] }
+          }
+        }
+
+        const persistRoomPost = async (): Promise<{
+          stored: SessionMessage
+          mentions: RecordRoomMentionsResult
+        }> => {
           const stored = await addSessionMessage({
             sessionId: session.id,
             role: 'user',
@@ -3020,14 +3090,20 @@ export function chatRoutes(options: WebChatOptions): Router {
               content: stored.content,
             },
           })
-          return stored
+          const mentions = await recordMentionsFor(stored)
+          return { stored, mentions }
         }
 
         if (!addressed) {
           // A silent post: send = post, instantly, for every member (D2).
           // No turn runs — the mention gate is also the unit-economics gate.
           sendEvent('session', { sessionId: session.id })
-          await persistRoomPost()
+          const { mentions } = await persistRoomPost()
+          if (mentions.unreachable.length > 0) {
+            // D-H4: names matched in the text that could not be reached
+            // because they fail the room's clearance.
+            sendEvent('mention_unreachable', { unreachable: mentions.unreachable })
+          }
           sendEvent('posted', {})
           sendEvent('done', {})
           res.end()
@@ -3069,7 +3145,13 @@ export function chatRoutes(options: WebChatOptions): Router {
           // Addressed mid-turn. Persist now (instant fan-in), then either
           // fold into the already-armed follow-up turn or become it.
           sendEvent('session', { sessionId: session.id })
-          prePersistedUserMsg ??= await persistRoomPost()
+          if (!prePersistedUserMsg) {
+            const persisted = await persistRoomPost()
+            prePersistedUserMsg = persisted.stored
+            if (persisted.mentions.unreachable.length > 0) {
+              sendEvent('mention_unreachable', { unreachable: persisted.mentions.unreachable })
+            }
+          }
           if (admission === 'fold') {
             // Depth one: a follow-up turn is already armed — this message's
             // row folds into its coalesced backlog (T4/T5).
@@ -3588,6 +3670,42 @@ export function chatRoutes(options: WebChatOptions): Router {
           id: storedUserMsg.id,
           ...(isMultiParticipantSession(session) ? { senderUserId: user.id } : {}),
         })
+        // Room human @mentions (T-H1/T-H2) — this is the single-assistant
+        // addressed-and-runs-immediately case, and the FIRST POST of a
+        // multi-assistant fan-out (currentIndex 0, no sourceMessageId): the
+        // one persist that actually creates this row. Every later fan-out
+        // POST reuses it via `prePersistedUserMsg`, so it never reaches
+        // here — that's what keeps this a once-per-row call, not
+        // once-per-POST. The un-addressed/queued paths above already
+        // recorded via `persistRoomPost`'s own call.
+        if (isRoomSession && assistant.workspaceId && typeof message === 'string' && message.trim()) {
+          try {
+            const mentions = await recordRoomMentionsForMessage({
+              workspaceId: assistant.workspaceId,
+              sessionId: session.id,
+              sessionMessageId: storedUserMsg.id,
+              text: message,
+              actorUserId: user.id,
+              sessionClearance: (session.effectiveClearance as Sensitivity | null) ?? null,
+            })
+            if (mentions.recipientUserIds.length > 0 && options.onRoomMentionRecorded) {
+              try {
+                options.onRoomMentionRecorded({
+                  workspaceId: assistant.workspaceId,
+                  sessionId: session.id,
+                  recipientUserIds: mentions.recipientUserIds,
+                })
+              } catch (err) {
+                console.error('[chat] onRoomMentionRecorded hook failed:', err)
+              }
+            }
+            if (mentions.unreachable.length > 0) {
+              sendEvent('mention_unreachable', { unreachable: mentions.unreachable })
+            }
+          } catch (err) {
+            console.error('[chat] room mention recording failed:', err)
+          }
+        }
       }
 
       // Adaptive research-classifier overhead — the Gemini call happened

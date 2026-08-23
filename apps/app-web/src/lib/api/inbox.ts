@@ -25,11 +25,37 @@ export type InboxPendingReply = {
   lastActivityAt: string;
 };
 
-export type InboxMention = {
+/**
+ * A page/comment mention (migration 227) and a room mention (migration 448,
+ * PH2 of docs/plans/room-human-mentions.md — a human `@Jane Doe` tag in
+ * workspace chat) are a discriminated union on `kind`, mirroring
+ * `InboxMention` in `packages/core/src/doc/inbox-types.ts`, so a renderer
+ * switching on `.kind` can't forget a case.
+ */
+export type InboxMention = InboxPageMention | InboxRoomMention;
+
+export type InboxPageMention = {
+  kind: "mention";
   id: string;
   pageId: string;
   pageTitle: string;
   threadId: string | null;
+  actorUserId: string;
+  actorName: string | null;
+  preview: string | null;
+  createdAt: string;
+  readAt: string | null;
+};
+
+/** A room mention (T-H7) — links to the room (`sessionId`), not a page. No
+ *  scroll-to-message: the room opens positioned at latest (§5, deferred). */
+export type InboxRoomMention = {
+  kind: "room_mention";
+  id: string;
+  sessionId: string;
+  sessionMessageId: string;
+  /** `sessions.title`, or `""` for an untitled room. */
+  roomTitle: string;
   actorUserId: string;
   actorName: string | null;
   preview: string | null;

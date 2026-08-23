@@ -9,9 +9,14 @@
  *      Inbox the moment the user replies, resolves the thread, or DISMISSES
  *      the row by opening it (a `doc_inbox_dismissals` row, migration 426 —
  *      the one piece of state the derived model does need).
- *   2. **Mentions** — a recorded `doc_notifications` row (migration 227)
- *      written when another member @-tagged the user in a page body or a
- *      comment. These carry a read/unread state; only UNREAD ones are listed.
+ *   2. **Mentions** — a recorded `doc_notifications` row written when
+ *      another member @-tags the user. Two shapes share the table (migration
+ *      452 widened it in place, D-H5 in docs/plans/room-human-mentions.md):
+ *      a page/comment mention (migration 227, `kind='mention'`, anchored to
+ *      a `page_id`) and a room mention (migration 452, `kind='room_mention'`,
+ *      anchored to a `session_id`/`session_message_id` — a human `@Jane Doe`
+ *      tag in workspace chat). These carry a read/unread state; only UNREAD
+ *      ones are listed.
  *
  * Both lanes are additionally bounded by the workspace's retention window
  * (`workspaces.inbox_retention_days`, migration 426) — see
@@ -26,6 +31,8 @@
  *
  * [COMP:core/inbox-types]
  */
+
+import type { Sensitivity } from '../security/sensitivity.js'
 
 // ── Retention window (migration 426) ───────────────────────────
 
@@ -75,8 +82,22 @@ export type InboxPendingReply = {
   lastActivityAt: string
 }
 
-/** A recorded mention — one `doc_notifications` row of kind `'mention'`. */
-export type InboxMention = {
+/**
+ * A recorded mention — one `doc_notifications` row. A page/comment mention
+ * (`kind='mention'`) and a room mention (`kind='room_mention'`, migration
+ * 452) are a discriminated union on `kind` rather than one shape with every
+ * page/session field optional, so a renderer switching on `kind` cannot
+ * forget a case. This mirrors the DB's XOR check
+ * (`num_nonnulls(page_id, session_id) = 1`) — exactly one of the two target
+ * shapes is ever populated for a given row.
+ */
+export type InboxMention = InboxPageMention | InboxRoomMention
+
+/** A page/comment mention (migration 227) — the original shape, kept
+ *  source-compatible for existing call sites (same fields as before, plus
+ *  the `kind` discriminant). */
+export type InboxPageMention = {
+  kind: 'mention'
   id: string
   pageId: string
   pageTitle: string
@@ -87,6 +108,32 @@ export type InboxMention = {
   /** The actor's display name (joined from `users`), or null if unavailable. */
   actorName: string | null
   /** Short snippet of the surrounding text. */
+  preview: string | null
+  createdAt: string
+  /** ISO timestamp; null = unread. */
+  readAt: string | null
+}
+
+/** A room mention (migration 452, docs/plans/room-human-mentions.md T-H3) —
+ *  a human `@Jane Doe` tag in workspace chat. No page is involved; the
+ *  target is the room itself, anchored to the message that carried the tag
+ *  (`sessionMessageId`), which is what makes edit diff-reconcile (D-H6) and
+ *  the multi-assistant fan-out's write idempotency (T-H2) possible. */
+export type InboxRoomMention = {
+  kind: 'room_mention'
+  id: string
+  sessionId: string
+  sessionMessageId: string
+  /** `sessions.title` (joined), or `''` if the room has none — mirrors
+   *  `InboxPageMention.pageTitle`'s empty-string-not-null convention so the
+   *  Inbox row can fall back to its own copy the same way. PH2 (T-H7): this
+   *  is what lets a room-mention row name the room instead of a page. */
+  roomTitle: string
+  /** Who tagged the user. */
+  actorUserId: string
+  /** The actor's display name (joined from `users`), or null if unavailable. */
+  actorName: string | null
+  /** Short snippet of the surrounding message text. */
   preview: string | null
   createdAt: string
   /** ISO timestamp; null = unread. */
@@ -147,4 +194,56 @@ export type DocNotificationsStore = {
     workspaceId: string,
     opts?: { since?: Date | null },
   ): Promise<number>
+
+  /**
+   * Record a ROOM mention for each recipient (migration 452, T-H3/T-H6 in
+   * docs/plans/room-human-mentions.md). Same recipient hygiene as
+   * `recordMentions` — self-mentions dropped, dedupe, and every candidate
+   * validated as a member of `workspaceId` system-side — PLUS a check
+   * `recordMentions` has no equivalent of: each recipient must also pass the
+   * room's `effective_clearance` under the same `canRead(memberClearance,
+   * sessionClearance)` predicate `gateSessionRead` uses
+   * (`packages/api/src/routes/sessions.ts`). This is a hard boundary
+   * independent of any roster-endpoint filtering upstream (T-H4's
+   * `/mentionable` endpoint is a convenience; this is the enforcement) — no
+   * `preview` text may ever reach a recipient who is below the room's
+   * clearance.
+   *
+   * Idempotent under the multi-assistant fan-out: `@Ops @Sales @Jane Doe`
+   * sends one POST per assistant target, but only the first creates the
+   * user-message row, so every writer racing to record the SAME
+   * `(sessionMessageId, recipientUserId)` pair lands on one row via
+   * `ON CONFLICT … DO UPDATE SET read_at = NULL, preview = …` — which is
+   * also D-H6's "re-add a name whose row was already read re-surfaces that
+   * row" behavior, rather than inserting a duplicate.
+   *
+   * Returns the number of rows inserted or updated (i.e. recipients
+   * notified).
+   */
+  recordRoomMentions(params: {
+    workspaceId: string
+    sessionId: string
+    sessionMessageId: string
+    /**
+     * The room's `sessions.effective_clearance`. `null`/`undefined` means no
+     * restriction — mirrors `gateSessionRead`'s own
+     * `if (session.effectiveClearance && !canRead(...))` check, so a session
+     * with no clearance set gates nobody.
+     */
+    sessionClearance: Sensitivity | null | undefined
+    actorUserId: string
+    recipientUserIds: string[]
+    preview?: string | null
+  }): Promise<number>
+
+  /**
+   * Retract room-mention rows for a set of recipients on one message
+   * (D-H6's edit-diff "name removed" case). Deletes ONLY rows that are
+   * still unread — a row already read means the ping already happened, so
+   * it survives the edit. Returns the number of rows deleted.
+   */
+  retractRoomMentions(params: {
+    sessionMessageId: string
+    recipientUserIds: string[]
+  }): Promise<number>
 }
