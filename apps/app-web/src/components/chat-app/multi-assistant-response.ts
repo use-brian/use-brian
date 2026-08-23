@@ -5,11 +5,101 @@
  * independently validates the response group and every assistant's room
  * clearance; this module must never be treated as an authorization boundary.
  *
+ * The actual mention matching (spans, trailing-query parsing, candidate
+ * filtering) has moved to `@use-brian/shared/mention-matching` so the server
+ * can re-validate a room message against the SAME rules the composer used to
+ * paint it — see docs/plans/room-human-mentions.md → T-H5. This module
+ * re-exports those symbols for existing import paths, and keeps the
+ * genuinely app-specific (React/DOM-aware) helpers.
+ *
  * Spec: docs/architecture/features/chat-app.md → "Choosing an assistant".
  * [COMP:app-web/multi-assistant-response]
  */
 
-const MAX_ROOM_RESPONDERS = 8;
+export {
+  MAX_ROOM_RESPONDERS,
+  mentionCandidatesFor,
+  resolveMentionQuery,
+  resolveMentionSpans,
+  resolveMentionedAssistants,
+  trailingMentionQuery,
+  type AssistantLike,
+  type MentionQuery,
+  type MentionSpan,
+  type MentionTarget,
+} from "@use-brian/shared/mention-matching";
+
+import {
+  MAX_ROOM_RESPONDERS,
+  resolveMentionSpans,
+  type AssistantLike,
+  type MentionTarget,
+} from "@use-brian/shared/mention-matching";
+
+/**
+ * The room composer's own discriminator (docs/plans/room-human-mentions.md
+ * T-H5). `MentionTarget` deliberately carries no `kind` field — adding one
+ * there would collide with the real, unrelated `WorkspaceAssistantSummary.kind`
+ * ('primary' | 'standard' | 'app') and break structural assignability at
+ * every existing assistant-only call site. This is the caller-owned type the
+ * plan says to define locally: a merged roster entry knows whether picking
+ * it wakes a paid model turn or just pings a teammate.
+ */
+export type RoomMentionKind = "assistant" | "member";
+export type RoomMentionTarget = MentionTarget & { mentionKind: RoomMentionKind };
+
+export type PartitionedRoomMentions<T extends RoomMentionTarget> = {
+  /** Distinct assistants mentioned, in textual order, deduped and capped —
+   *  feeds the existing multi-assistant send routing (T9) unchanged. */
+  assistants: T[];
+  /** Distinct members mentioned, in textual order, deduped and capped — a UI
+   *  hint only; the server independently re-resolves the persisted text and
+   *  is authoritative (T-H2). */
+  members: T[];
+};
+
+/**
+ * Resolve every `@mention` across a MERGED assistant+member roster and
+ * partition the result by kind, in ONE pass over `resolveMentionSpans`
+ * (T-H5/D-H2).
+ *
+ * This must run over the merged roster in a single pass rather than calling
+ * `resolveMentionedAssistants` against an assistants-only roster and a
+ * members-only roster separately: `resolveMentionSpans`'s longest-name-wins
+ * rule can only pick ONE winner at a given position, and running it twice
+ * against two disjoint sub-rosters would let both partitions claim the same
+ * span (assistant "Jane" and member "Jane Doe" both "matching" `@Jane Doe`).
+ * Only a single pass over the full roster reproduces the server's
+ * `resolveRoomMentions` decision, which is what keeps the client's `addressed`
+ * boolean and the eventual server turn-or-post decision from disagreeing.
+ *
+ * Assistants must be ordered first in the roster the caller passes in: an
+ * exact name TIE then resolves to the assistant (D-H3), the same ordering
+ * trick `resolveRoomMentions` uses server-side.
+ */
+export function partitionRoomMentions<T extends RoomMentionTarget>(
+  text: string,
+  roster: T[],
+  max = MAX_ROOM_RESPONDERS,
+): PartitionedRoomMentions<T> {
+  const assistants: T[] = [];
+  const members: T[] = [];
+  const seenAssistants = new Set<string>();
+  const seenMembers = new Set<string>();
+  for (const span of resolveMentionSpans(text, roster)) {
+    const target = span.assistant;
+    if (target.mentionKind === "assistant") {
+      if (seenAssistants.has(target.id) || assistants.length >= max) continue;
+      seenAssistants.add(target.id);
+      assistants.push(target);
+    } else {
+      if (seenMembers.has(target.id) || members.length >= max) continue;
+      seenMembers.add(target.id);
+      members.push(target);
+    }
+  }
+  return { assistants, members };
+}
 
 /**
  * Is the composer's assistant chip a live PICKER, or a static label?
@@ -36,97 +126,6 @@ export function isAssistantPickerLive(params: {
 }): boolean {
   if (params.rosterSize < 2) return false;
   return !params.hasOpenSession || params.paneIsRoom;
-}
-
-type AssistantLike = {
-  id: string;
-  name: string;
-};
-
-type MentionMatch<T> = {
-  assistant: T;
-  index: number;
-  end: number;
-};
-
-function isNameContinuation(value: string | undefined): boolean {
-  return value !== undefined && /[\p{L}\p{N}_]/u.test(value);
-}
-
-/** One resolved `@Assistant Name` occurrence, as a range over the text. */
-export type MentionSpan<T> = {
-  assistant: T;
-  /** Index of the `@`. */
-  start: number;
-  /** Index one past the last character of the name. */
-  end: number;
-};
-
-/**
- * Locate every `@Assistant Name` occurrence in textual order.
- *
- * At an overlapping position the longest name wins (`@Sales EU` over
- * `@Sales`), and an accepted span occupies its range so no shorter name can
- * be read out of the middle of it.
- *
- * This is the ONE matching rule behind both what the composer paints as a
- * mention chip and who the send actually addresses — a token that looks
- * resolved must be the token that answers.
- */
-export function resolveMentionSpans<T extends AssistantLike>(
-  text: string,
-  roster: T[],
-): MentionSpan<T>[] {
-  const lower = text.toLocaleLowerCase();
-  const candidates: MentionMatch<T>[] = [];
-
-  for (const assistant of roster) {
-    const name = assistant.name.trim().toLocaleLowerCase();
-    if (!name) continue;
-    const needle = `@${name}`;
-    let from = 0;
-    for (;;) {
-      const index = lower.indexOf(needle, from);
-      if (index < 0) break;
-      const end = index + needle.length;
-      if (!isNameContinuation(lower[end])) {
-        candidates.push({ assistant, index, end });
-      }
-      from = index + 1;
-    }
-  }
-
-  candidates.sort((a, b) => a.index - b.index || b.end - a.end);
-  const spans: MentionSpan<T>[] = [];
-  let occupiedUntil = -1;
-  for (const match of candidates) {
-    if (match.index < occupiedUntil) continue;
-    spans.push({ assistant: match.assistant, start: match.index, end: match.end });
-    occupiedUntil = match.end;
-  }
-  return spans;
-}
-
-/**
- * Resolve every distinct mentioned assistant in textual order.
- *
- * Repeating the same assistant still produces one reply. The cap bounds one
- * explicit send to the small-team product ceiling.
- */
-export function resolveMentionedAssistants<T extends AssistantLike>(
-  text: string,
-  roster: T[],
-  max = MAX_ROOM_RESPONDERS,
-): T[] {
-  const result: T[] = [];
-  const seen = new Set<string>();
-  for (const span of resolveMentionSpans(text, roster)) {
-    if (seen.has(span.assistant.id)) continue;
-    result.push(span.assistant);
-    seen.add(span.assistant.id);
-    if (result.length >= max) break;
-  }
-  return result;
 }
 
 /** Move the active autocomplete option, wrapping at either end. */
@@ -176,79 +175,6 @@ export function completeTrailingAssistantMention(
   name: string,
 ): string {
   return text.replace(/@[^@]*$/, () => `@${name} `);
-}
-
-/** The trailing `@…` the composer is currently completing. */
-export type MentionQuery = {
-  /** Index of the `@`. */
-  at: number;
-  /** What the user has typed after it (may contain spaces — names do). */
-  partial: string;
-};
-
-/** Assistant names contain spaces, so the query cannot stop at one. */
-const TRAILING_MENTION = /(^|\s)@([^@]*)$/;
-
-/** The `@…` run at the end of the text, or null when there is none. */
-export function trailingMentionQuery(text: string): MentionQuery | null {
-  const match = text.match(TRAILING_MENTION);
-  if (!match) return null;
-  return { at: (match.index ?? 0) + match[1].length, partial: match[2] };
-}
-
-/**
- * Decide whether the `@` autocomplete should be open, and carry the dismissal
- * anchor forward.
- *
- * Two suppressions, both anchored to a SPECIFIC `@` so that a new mention
- * later in the same message always reopens the popup:
- *
- * - **Already completed.** A confirmed mention keeps the trailing-`@` shape
- *   (`@Blendit `) because names may contain spaces, so the regex alone cannot
- *   tell a resolved token from a partial one — which is why picking `@Blendit`
- *   used to leave `@Blendit Media` hanging as a live suggestion. Anything the
- *   user types after the completion is prose. Deleting back INTO the name
- *   breaks the prefix and the popup returns, which is how `@Blendit` is
- *   extended to `@Blendit Media`.
- * - **Dismissed.** Escape or a click outside closes the popup for that `@`;
- *   it stays closed while the user keeps typing that token. The anchor is
- *   dropped as soon as the trailing `@` is gone, so the next `@` opens fresh.
- */
-export function resolveMentionQuery(params: {
-  text: string;
-  /** The composer value produced by the last accepted completion. */
-  completedInput: string | null;
-  /** Text before the `@` the user dismissed. */
-  dismissedPrefix: string | null;
-}): { query: MentionQuery | null; dismissedPrefix: string | null } {
-  const query = trailingMentionQuery(params.text);
-  if (!query) return { query: null, dismissedPrefix: null };
-  if (
-    params.completedInput !== null &&
-    params.text.startsWith(params.completedInput) &&
-    query.at < params.completedInput.length
-  ) {
-    return { query: null, dismissedPrefix: params.dismissedPrefix };
-  }
-  if (
-    params.dismissedPrefix !== null &&
-    params.text.slice(0, query.at) === params.dismissedPrefix
-  ) {
-    return { query: null, dismissedPrefix: params.dismissedPrefix };
-  }
-  return { query, dismissedPrefix: params.dismissedPrefix };
-}
-
-/** Roster entries whose name starts with what has been typed after the `@`. */
-export function mentionCandidatesFor<T extends AssistantLike>(
-  query: MentionQuery | null,
-  roster: T[],
-): T[] {
-  if (!query) return [];
-  const partial = query.partial.toLocaleLowerCase();
-  return roster.filter((assistant) =>
-    assistant.name.toLocaleLowerCase().startsWith(partial),
-  );
 }
 
 /** Select the assistant whose activity the Work Bench is rendering. */

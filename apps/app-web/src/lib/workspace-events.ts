@@ -25,6 +25,9 @@
  *   workspace_config → HOME_APPS_REFRESH_EVENT +
  *                     WORKSPACE_IDENTITY_REFRESH_EVENT (Home app-bar plus the
  *                     workspace name/icon in persistent chrome)
+ *   inbox           → INBOX_REFRESH_EVENT (InboxPanel + the sidebar unread
+ *                     badge, same never-unmounting-layout reasoning as
+ *                     `assistant` above — docs/plans/room-human-mentions.md T-H8)
  *
  * Catch-up without replay: on every EventSource `open` (first connect AND
  * each auto-reconnect) and on `visibilitychange → visible`, all domain
@@ -75,6 +78,10 @@ import {
   WORKSPACE_IDENTITY_REFRESH_EVENT,
   type WorkspaceIdentityRefreshDetail,
 } from "@/lib/workspace-identity-events";
+import {
+  INBOX_REFRESH_EVENT,
+  type InboxRefreshDetail,
+} from "@/lib/inbox-refresh-events";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -95,7 +102,8 @@ type WorkspacePrimitive =
   | "skill"
   | "scheduled_job"
   | "assistant"
-  | "workspace_config";
+  | "workspace_config"
+  | "inbox";
 
 export type WorkspaceChangePayload = {
   workspaceId: string;
@@ -209,6 +217,15 @@ export function routeWorkspaceChange(
           } satisfies WorkspaceIdentityRefreshDetail,
         },
       ];
+    case "inbox":
+      return [
+        {
+          event: INBOX_REFRESH_EVENT,
+          detail: {
+            workspaceId: payload.workspaceId,
+          } satisfies InboxRefreshDetail,
+        },
+      ];
     default:
       return [];
   }
@@ -225,6 +242,7 @@ export function allDomainDispatches(workspaceId: string): DomainDispatch[] {
     { event: ASSISTANT_REFRESH_EVENT, detail: { workspaceId } },
     { event: HOME_APPS_REFRESH_EVENT, detail: { workspaceId } },
     { event: WORKSPACE_IDENTITY_REFRESH_EVENT, detail: { workspaceId } },
+    { event: INBOX_REFRESH_EVENT, detail: { workspaceId } },
   ];
 }
 

@@ -487,7 +487,9 @@ export function WorkspaceChrome({
 
       {/* Inbox flyout — anchored to the right edge of the left bar; overlays the
           surface, never a standalone route. A row click soft-navigates to the
-          doc page surface (and closes the panel). */}
+          doc page surface (page mention) or the Chat surface (room mention,
+          T-H7 — positioned at latest; scroll-to-message is deferred) and
+          closes the panel. */}
       <InboxPanel
         open={inboxOpen}
         workspaceId={workspaceId}
@@ -495,6 +497,11 @@ export function WorkspaceChrome({
         onClose={() => setInboxOpen(false)}
         onOpenPage={(pageId) => {
           navigateToView(pageId);
+          setInboxOpen(false);
+        }}
+        onOpenRoom={(sessionId) => {
+          routeProgress.start();
+          router.push(`/w/${workspaceId}/chat?s=${encodeURIComponent(sessionId)}`);
           setInboxOpen(false);
         }}
       />

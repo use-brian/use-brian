@@ -186,6 +186,48 @@ describe('[COMP:chat-ui/chat-composer] mention-chip mirror', () => {
     expect(chipped.match(/text-sm/g)?.length).toBe(2)
     expect(chipped).toContain('composer-highlight-input')
   })
+
+  it('carries an optional per-range class alongside the base chip class (docs/plans/room-human-mentions.md T-H9)', () => {
+    // Purely additive: a range with no className renders exactly as before...
+    expect(
+      splitHighlightSegments('ask @Blendit now', [{ start: 4, end: 12 }]),
+    ).toEqual([
+      { text: 'ask ', highlighted: false },
+      { text: '@Blendit', highlighted: true },
+      { text: ' now', highlighted: false },
+    ])
+    // ...and a range that sets one carries it on the segment, base class
+    // still implied (the render layer, not this pure split, appends it).
+    expect(
+      splitHighlightSegments('ask @Blendit now', [
+        { start: 4, end: 12, className: 'composer-mention-chip-member' },
+      ]),
+    ).toEqual([
+      { text: 'ask ', highlighted: false },
+      { text: '@Blendit', highlighted: true, className: 'composer-mention-chip-member' },
+      { text: ' now', highlighted: false },
+    ])
+
+    const chipped = renderToString(
+      <ChatComposer
+        value="ask @Blendit and @Jane Doe"
+        onChange={() => {}}
+        onSend={() => {}}
+        highlightRanges={[
+          { start: 4, end: 12 },
+          { start: 17, end: 27, className: 'composer-mention-chip-member' },
+        ]}
+      />,
+    )
+    // The base class is on EVERY highlighted span; the variant is appended,
+    // never a replacement, so a host that only styles the base class still
+    // gets a sensible (if undifferentiated) chip. (The lookahead excludes
+    // the "-member" spelling so the combined class's shared prefix isn't
+    // double-counted against the plain base-class span.)
+    expect(chipped.match(/composer-mention-chip(?!-member)/g)?.length).toBe(2)
+    expect(chipped).toContain('class="composer-mention-chip"')
+    expect(chipped).toContain('class="composer-mention-chip composer-mention-chip-member"')
+  })
 })
 
 describe('[COMP:chat-ui/chat-composer] auto-grow fit', () => {

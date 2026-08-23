@@ -12,8 +12,19 @@ import {
 /** Keeps the mirror's last line from collapsing where the textarea keeps one. */
 const ZERO_WIDTH_SPACE = '\u200b'
 
-/** A half-open `[start, end)` range over the composer value. */
-export type HighlightRange = { start: number; end: number }
+/**
+ * A half-open `[start, end)` range over the composer value.
+ *
+ * `className` is optional and purely additive (docs/plans/room-human-mentions.md
+ * T-H9): every range still paints the base `composer-mention-chip` look, and
+ * a caller that never sets it gets exactly today's single-style chip. It
+ * exists so a host distinguishing several kinds of resolved mention (e.g. an
+ * assistant mention that will run a paid turn vs. a plain notification) can
+ * paint them differently WITHOUT a second mirror/backdrop mechanism — the
+ * host defines the concrete class in its own stylesheet, this package only
+ * carries the hook through to the rendered chip.
+ */
+export type HighlightRange = { start: number; end: number; className?: string }
 
 /**
  * Split `value` into alternating plain / highlighted runs.
@@ -21,34 +32,47 @@ export type HighlightRange = { start: number; end: number }
  * Ranges are clamped to the value and merged where they overlap, so a stale
  * range from a previous keystroke can never drop or duplicate a character —
  * the concatenated segments always reproduce `value` exactly, which is what
- * keeps the mirror layer aligned with the textarea glyph for glyph.
+ * keeps the mirror layer aligned with the textarea glyph for glyph. Each
+ * highlighted segment carries the class of the range it came from (falling
+ * back to the base chip look when unset); a range that gets swallowed by an
+ * earlier, later-ending overlap loses its class along with its bounds — the
+ * caller decides overlap ordering the same way it already does today.
  */
 export function splitHighlightSegments(
   value: string,
   ranges: HighlightRange[],
-): Array<{ text: string; highlighted: boolean }> {
+): Array<{ text: string; highlighted: boolean; className?: string }> {
   const sorted = ranges
     .map((range) => ({
       start: Math.max(0, Math.min(range.start, value.length)),
       end: Math.max(0, Math.min(range.end, value.length)),
+      className: range.className,
     }))
     .filter((range) => range.end > range.start)
     .sort((a, b) => a.start - b.start)
 
-  const segments: Array<{ text: string; highlighted: boolean }> = []
+  const segments: Array<{ text: string; highlighted: boolean; className?: string }> = []
   let cursor = 0
   for (const range of sorted) {
     if (range.start < cursor) {
       // Overlapping ranges merge rather than double-paint.
       if (range.end <= cursor) continue
-      segments.push({ text: value.slice(cursor, range.end), highlighted: true })
+      segments.push({
+        text: value.slice(cursor, range.end),
+        highlighted: true,
+        ...(range.className ? { className: range.className } : {}),
+      })
       cursor = range.end
       continue
     }
     if (range.start > cursor) {
       segments.push({ text: value.slice(cursor, range.start), highlighted: false })
     }
-    segments.push({ text: value.slice(range.start, range.end), highlighted: true })
+    segments.push({
+      text: value.slice(range.start, range.end),
+      highlighted: true,
+      ...(range.className ? { className: range.className } : {}),
+    })
     cursor = range.end
   }
   if (cursor < value.length) {
@@ -368,7 +392,12 @@ export function ChatComposer(props: ChatComposerProps) {
               {splitHighlightSegments(props.value, highlightRanges).map(
                 (segment, index) =>
                   segment.highlighted ? (
-                    <span key={index} className="composer-mention-chip">
+                    <span
+                      key={index}
+                      className={['composer-mention-chip', segment.className]
+                        .filter(Boolean)
+                        .join(' ')}
+                    >
                       {segment.text}
                     </span>
                   ) : (

@@ -15,6 +15,7 @@ import { APPROVALS_REFRESH_EVENT } from "@/lib/approvals-events";
 import { WORKFLOW_REFRESH_EVENT } from "@/lib/workflow-events";
 import { HOME_APPS_REFRESH_EVENT } from "@/lib/home-apps-events";
 import { WORKSPACE_IDENTITY_REFRESH_EVENT } from "@/lib/workspace-identity-events";
+import { INBOX_REFRESH_EVENT } from "@/lib/inbox-refresh-events";
 import {
   allDomainDispatches,
   createRefreshFolder,
@@ -110,6 +111,16 @@ describe("[COMP:app-web/workspace-events] routeWorkspaceChange", () => {
     ]);
   });
 
+  // Regression-shaped like the assistant/workspace_config cases: InboxPanel +
+  // the sidebar unread badge (doc-sidebar.tsx) are both mounted by the
+  // never-unmounting workspace layout, so a room `@mention` recorded while
+  // the recipient is elsewhere needs a signal, not a mount effect.
+  it("routes inbox changes to the inbox-refresh bus (T-H8)", () => {
+    expect(routeWorkspaceChange(payload("inbox"))).toEqual([
+      { event: INBOX_REFRESH_EVENT, detail: { workspaceId: "ws-1" } },
+    ]);
+  });
+
   it("ignores unknown primitives — a newer server must never break an older client", () => {
     expect(
       routeWorkspaceChange(
@@ -133,6 +144,8 @@ describe("[COMP:app-web/workspace-events] routeWorkspaceChange", () => {
     // ...and the app-bar config, for the same reason.
     expect(events).toContain(HOME_APPS_REFRESH_EVENT);
     expect(events).toContain(WORKSPACE_IDENTITY_REFRESH_EVENT);
+    // ...and the Inbox badge, same reasoning (T-H8).
+    expect(events).toContain(INBOX_REFRESH_EVENT);
   });
 });
 
