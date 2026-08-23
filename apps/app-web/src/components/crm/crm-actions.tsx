@@ -20,6 +20,7 @@ import {
 } from "@/components/ui/select";
 import {
   createCrmRecord,
+  createCrmField,
   downloadCrmCsv,
   fetchCrmDuplicates,
   fetchWorkspaceCrm,
@@ -31,9 +32,11 @@ import {
   type CrmData,
   type CrmDuplicateGroup,
   type CrmFieldDefinition,
+  type CrmFieldType,
 } from "@/lib/api/crm";
 import {
   CRM_IMPORT_FIELDS,
+  crmFieldKeyFromLabel,
   mapCrmCsvRows,
   parseCrmCsv,
   suggestedCrmCsvMapping,
@@ -41,6 +44,7 @@ import {
   type CsvPreview,
 } from "@/lib/crm-r2";
 import { useT } from "@/lib/i18n/client";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 
 type DialogKind = "create" | "import" | "duplicates" | "archive" | null;
 
@@ -51,6 +55,7 @@ export function CrmActions({
   config,
   onChanged,
   onCreated,
+  role,
 }: {
   workspaceId: string;
   section: "deals" | "contacts" | "companies";
@@ -58,6 +63,7 @@ export function CrmActions({
   config: CrmConfig | null;
   onChanged: () => void;
   onCreated: (created: { id: string; kind: "deal" | "contact" | "company" }) => void | Promise<void>;
+  role: string | null | undefined;
 }) {
   const t = useT().crmPage.r2;
   const [dialog, setDialog] = useState<DialogKind>(null);
@@ -104,6 +110,9 @@ export function CrmActions({
       />
       <ImportDialog
         workspaceId={workspaceId}
+        data={data}
+        config={config}
+        canCreateField={role === "owner" || role === "admin"}
         open={dialog === "import"}
         initialKind={section === "contacts" ? "contact" : section === "companies" ? "company" : "deal"}
         onOpenChange={(open) => setDialog(open ? "import" : null)}
@@ -269,7 +278,7 @@ function CreateDialog({ workspaceId, data, config, open, initialKind, onOpenChan
           <div className="space-y-3 rounded-xl border border-border p-3">
             <div className="text-xs font-medium">{t.customFields}</div>
             {fields.map((field) => (
-              <CreateField key={field.id} field={field} value={customFields[field.fieldKey]} onChange={(value) => setCustomFields((current) => ({ ...current, [field.fieldKey]: value }))} />
+              <CreateField key={field.id} field={field} data={data} value={customFields[field.fieldKey]} onChange={(value) => setCustomFields((current) => ({ ...current, [field.fieldKey]: value }))} />
             ))}
           </div>
         )}
@@ -280,8 +289,11 @@ function CreateDialog({ workspaceId, data, config, open, initialKind, onOpenChan
   );
 }
 
-function ImportDialog({ workspaceId, open, initialKind, onOpenChange, onImported }: {
+function ImportDialog({ workspaceId, data, config, canCreateField, open, initialKind, onOpenChange, onImported }: {
   workspaceId: string;
+  data: CrmData | null;
+  config: CrmConfig | null;
+  canCreateField: boolean;
   open: boolean;
   initialKind: CrmImportKind;
   onOpenChange: (open: boolean) => void;
@@ -291,9 +303,21 @@ function ImportDialog({ workspaceId, open, initialKind, onOpenChange, onImported
   const [kind, setKind] = useState<CrmImportKind>(initialKind);
   const [preview, setPreview] = useState<CsvPreview | null>(null);
   const [mapping, setMapping] = useState<Record<number, string | null>>({});
+  const [fields, setFields] = useState<CrmFieldDefinition[]>(config?.fields ?? []);
+  const [createColumn, setCreateColumn] = useState<number | null>(null);
+  const [newFieldLabel, setNewFieldLabel] = useState("");
+  const [newFieldType, setNewFieldType] = useState<CrmFieldType>("text");
+  const [newFieldOptions, setNewFieldOptions] = useState("");
+  const [newReferenceKinds, setNewReferenceKinds] = useState<Array<"person" | "company" | "deal">>(["company"]);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<string | null>(null);
-  const mapped = useMemo(() => preview ? mapCrmCsvRows(preview, kind, mapping) : [], [preview, kind, mapping]);
+  const [importErrors, setImportErrors] = useState<Array<{ row: number; error: string }>>([]);
+  const mapped = useMemo(
+    () => preview ? mapCrmCsvRows(preview, kind, mapping, fields, data) : [],
+    [preview, kind, mapping, fields, data],
+  );
+  const entityKind = kind === "contact" ? "person" : kind;
+  const availableFields = fields.filter((field) => field.entityKind === entityKind);
   const importLabels: Record<string, string> = {
     name: t.name,
     email: t.email,
@@ -309,13 +333,48 @@ function ImportDialog({ workspaceId, open, initialKind, onOpenChange, onImported
     source: t.source,
   };
   useEffect(() => {
-    if (open) setKind(initialKind);
-  }, [open, initialKind]);
+    if (!open) return;
+    setKind(initialKind);
+    setFields(config?.fields ?? []);
+    setCreateColumn(null);
+  }, [open, initialKind, config]);
+
+  async function createMappedField() {
+    if (createColumn === null || !newFieldLabel.trim()) return;
+    const fieldKey = crmFieldKeyFromLabel(newFieldLabel);
+    const options = newFieldType === "entity_reference"
+      ? newReferenceKinds
+      : newFieldType === "single_select" || newFieldType === "multi_select"
+        ? newFieldOptions.split(",").map((option) => option.trim()).filter(Boolean)
+        : [];
+    if (!fieldKey || ((newFieldType === "single_select" || newFieldType === "multi_select" || newFieldType === "entity_reference") && options.length === 0)) return;
+    setBusy(true);
+    setResult(null);
+    try {
+      const created = await createCrmField(workspaceId, {
+        entityKind,
+        fieldKey,
+        label: newFieldLabel.trim(),
+        fieldType: newFieldType,
+        options,
+      });
+      setFields((current) => [...current, created]);
+      setMapping((current) => ({ ...current, [createColumn]: `custom:${created.fieldKey}` }));
+      setCreateColumn(null);
+      setNewFieldLabel("");
+      setNewFieldOptions("");
+      setNewFieldType("text");
+    } catch (cause) {
+      setResult(cause instanceof Error ? cause.message : t.configFailed);
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return (
     <Shell open={open} onOpenChange={onOpenChange} title={t.importCsv} description={t.importDescription}>
       <div className="space-y-4">
-        <Select value={kind} onValueChange={(value) => { setKind(value as CrmImportKind); if (preview) setMapping(suggestedCrmCsvMapping(preview.headers, value as CrmImportKind)); }}>
+        <Select value={kind} onValueChange={(value) => { const nextKind = value as CrmImportKind; setKind(nextKind); setCreateColumn(null); if (preview) setMapping(suggestedCrmCsvMapping(preview.headers, nextKind, fields)); }}>
           <SelectTrigger><SelectValue /></SelectTrigger>
           <SelectContent><SelectItem value="contact">{t.kindContact}</SelectItem><SelectItem value="company">{t.kindCompany}</SelectItem><SelectItem value="deal">{t.kindDeal}</SelectItem></SelectContent>
         </Select>
@@ -329,8 +388,9 @@ function ImportDialog({ workspaceId, open, initialKind, onOpenChange, onImported
             void file.text().then((source) => {
               const next = parseCrmCsv(source, 500);
               setPreview(next);
-              setMapping(suggestedCrmCsvMapping(next.headers, kind));
+              setMapping(suggestedCrmCsvMapping(next.headers, kind, fields));
               setResult(null);
+              setImportErrors([]);
             });
           }}
           className="block w-full rounded-lg border border-border p-2 text-xs file:mr-3 file:rounded-md file:border-0 file:bg-muted file:px-3 file:py-1.5"
@@ -343,13 +403,45 @@ function ImportDialog({ workspaceId, open, initialKind, onOpenChange, onImported
                 {preview.headers.map((header, index) => (
                   <div key={`${header}-${index}`} className="grid grid-cols-2 items-center gap-2 text-xs">
                     <span className="truncate text-muted-foreground">{header}</span>
-                    <Select value={mapping[index] ?? "__skip__"} onValueChange={(value) => setMapping((current) => ({ ...current, [index]: value === "__skip__" ? null : value }))}>
+                    <Select value={mapping[index] ?? "__skip__"} onValueChange={(value) => {
+                      if (value === "__create__") {
+                        setCreateColumn(index);
+                        setNewFieldLabel(header);
+                        return;
+                      }
+                      setCreateColumn(null);
+                      setMapping((current) => ({ ...current, [index]: value === "__skip__" ? null : value }));
+                    }}>
                       <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
-                      <SelectContent><SelectItem value="__skip__">{t.skipColumn}</SelectItem>{CRM_IMPORT_FIELDS[kind].map((field) => <SelectItem key={field} value={field}>{importLabels[field] ?? field}</SelectItem>)}</SelectContent>
+                      <SelectContent>
+                        <SelectItem value="__skip__">{t.skipColumn}</SelectItem>
+                        {CRM_IMPORT_FIELDS[kind].map((field) => <SelectItem key={field} value={field}>{importLabels[field] ?? field}</SelectItem>)}
+                        {availableFields.map((field) => <SelectItem key={field.id} value={`custom:${field.fieldKey}`}>{field.label}</SelectItem>)}
+                        {canCreateField && <SelectItem value="__create__">{t.createFieldFromColumn}</SelectItem>}
+                      </SelectContent>
                     </Select>
                   </div>
                 ))}
               </div>
+              {createColumn !== null && (
+                <div className="mt-3 space-y-3 rounded-lg border border-border bg-muted/20 p-3">
+                  <div className="text-xs font-medium">{t.createFieldFromColumn}</div>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <Input label={t.fieldLabel} value={newFieldLabel} onChange={setNewFieldLabel} />
+                    <label className="text-xs"><span className="mb-1 block text-muted-foreground">{t.fieldType}</span>
+                      <Select value={newFieldType} onValueChange={(value) => setNewFieldType(value as CrmFieldType)}>
+                        <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                        <SelectContent>{(["text", "number", "date", "boolean", "single_select", "multi_select", "entity_reference"] as CrmFieldType[]).map((type) => <SelectItem key={type} value={type}>{t.fieldTypes[type]}</SelectItem>)}</SelectContent>
+                      </Select>
+                    </label>
+                  </div>
+                  {(newFieldType === "single_select" || newFieldType === "multi_select") && <Input label={t.fieldOptions} value={newFieldOptions} onChange={setNewFieldOptions} placeholder={t.fieldOptionsPlaceholder} />}
+                  {newFieldType === "entity_reference" && (
+                    <div className="space-y-1"><div className="text-xs text-muted-foreground">{t.referenceTargets}</div><div className="flex flex-wrap gap-2">{(["person", "company", "deal"] as const).map((target) => <Button key={target} size="xs" variant={newReferenceKinds.includes(target) ? "default" : "outline"} onClick={() => setNewReferenceKinds((current) => current.includes(target) ? current.filter((item) => item !== target) : [...current, target])}>{target === "person" ? t.kindContact : target === "company" ? t.kindCompany : t.kindDeal}</Button>)}</div></div>
+                  )}
+                  <div className="flex justify-end gap-2"><Button size="sm" variant="ghost" onClick={() => setCreateColumn(null)}>{t.cancel}</Button><Button size="sm" disabled={busy || !newFieldLabel.trim()} onClick={() => void createMappedField()}>{busy ? t.saving : t.addField}</Button></div>
+                </div>
+              )}
             </div>
             {preview.rows.length > 0 && (
               <div className="overflow-x-auto rounded-xl border border-border">
@@ -363,11 +455,22 @@ function ImportDialog({ workspaceId, open, initialKind, onOpenChange, onImported
           </>
         )}
         {result && <div className="text-xs">{result}</div>}
+        {importErrors.length > 0 && (
+          <div className="max-h-32 space-y-1 overflow-y-auto rounded-lg border border-destructive/30 bg-destructive/5 p-2 text-xs text-destructive">
+            {importErrors.map((failure) => (
+              <div key={`${failure.row}-${failure.error}`}>
+                {t.importRowError.replace("{row}", String(failure.row)).replace("{error}", failure.error)}
+              </div>
+            ))}
+          </div>
+        )}
         <div className="flex justify-end gap-2"><Button variant="outline" onClick={() => onOpenChange(false)}>{t.cancel}</Button><Button disabled={busy || mapped.length === 0 || !mapped.every((row) => typeof row.name === "string")} onClick={() => void (async () => {
           setBusy(true);
+          setImportErrors([]);
           try {
             const imported = await importCrmRecords(workspaceId, mapped);
             setResult(t.importResult.replace("{created}", String(imported.created)).replace("{failed}", String(imported.failed)));
+            setImportErrors(imported.results.flatMap((item) => item.error ? [{ row: item.row, error: item.error }] : []));
             if (imported.failed === 0) onImported();
           } catch (cause) {
             setResult(cause instanceof Error ? cause.message : t.importFailed);
@@ -519,8 +622,9 @@ function RelationshipSelect({ label, value, placeholder, items, onChange, allowC
   );
 }
 
-function CreateField({ field, value, onChange }: {
+function CreateField({ field, data, value, onChange }: {
   field: CrmFieldDefinition;
+  data: CrmData | null;
   value: unknown;
   onChange: (value: unknown) => void;
 }) {
@@ -530,6 +634,14 @@ function CreateField({ field, value, onChange }: {
   }
   if (field.fieldType === "single_select") {
     return <RelationshipSelect label={field.label} value={typeof value === "string" ? value : ""} placeholder={t.pickValue} items={field.options.map((option) => ({ value: option, label: option }))} onChange={onChange} />;
+  }
+  if (field.fieldType === "entity_reference") {
+    const items = [
+      ...(field.options.includes("person") ? data?.contacts ?? [] : []),
+      ...(field.options.includes("company") ? data?.companies ?? [] : []),
+      ...(field.options.includes("deal") ? data?.deals ?? [] : []),
+    ].map((row) => ({ value: row.id, label: row.name }));
+    return <label className="block text-xs"><span className="mb-1 block text-muted-foreground">{field.label}</span><SearchableSelect value={typeof value === "string" ? value : ""} onValueChange={(next) => onChange(next || null)} items={items} placeholder={t.pickValue} searchPlaceholder={t.searchRecords} emptyMessage={t.noMatchingRecords} /></label>;
   }
   return (
     <Input

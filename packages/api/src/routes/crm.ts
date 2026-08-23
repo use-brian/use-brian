@@ -25,7 +25,10 @@ import { getEntityById, updateEntity } from '../db/entities-store.js'
 import { createEntityMergeStore } from '../db/entity-merge-store.js'
 import {
   CRM_FIELD_TYPES,
+  CRM_PRESET_IDS,
+  CRM_REFERENCE_KINDS,
   addCrmDealParticipant,
+  applyCrmFieldPreset,
   appendCrmActivity,
   archiveCrmFieldDefinition,
   createCrmFieldDefinition,
@@ -46,7 +49,7 @@ import {
   setCrmDealPipelineStage,
   updateCrmCustomFields,
   updateCrmStage,
-  validateCustomFieldValue,
+  validateCrmCustomFieldValues,
   type CrmEntityKind,
   type CrmFieldType,
   type CrmStageCategory,
@@ -182,21 +185,12 @@ export function crmRoutes({ workspaceStore, entityLinks }: RouteOptions): Router
       ? body.customFields as Record<string, unknown>
       : null
     const config = await getCrmConfig(ctx.userId, ctx.workspaceId)
-    const definitions = config.fields.filter((field) => field.entityKind === kind)
-    if (customFields) {
-      const definitionsByKey = new Map(definitions.map((field) => [field.fieldKey, field]))
-      for (const [key, value] of Object.entries(customFields)) {
-        const definition = definitionsByKey.get(key)
-        if (!definition || !validateCustomFieldValue(definition, value)) {
-          throw new Error(`Invalid custom field value for '${key}'`)
-        }
-      }
-    }
-    for (const definition of definitions.filter((field) => field.isRequired)) {
-      if (!validateCustomFieldValue(definition, customFields?.[definition.fieldKey])) {
-        throw new Error(`Required custom field is missing: '${definition.fieldKey}'`)
-      }
-    }
+    await validateCrmCustomFieldValues({
+      ctx,
+      entityKind: kind,
+      values: customFields ?? {},
+      requireAll: true,
+    })
 
     let id: string
     if (kind === 'person') {
@@ -354,8 +348,11 @@ export function crmRoutes({ workspaceStore, entityLinks }: RouteOptions): Router
       res.status(400).json({ error: 'kind must be contacts, companies, or deals' })
       return
     }
-    const rows = await listCrmR2Records(member.ctx)
-    const csv = crmRowsToCsv(rows, kind)
+    const [rows, config] = await Promise.all([
+      listCrmR2Records(member.ctx),
+      getCrmConfig(member.ctx.userId, member.ctx.workspaceId),
+    ])
+    const csv = crmRowsToCsv(rows, kind, config.fields)
     res.setHeader('Content-Type', 'text/csv; charset=utf-8')
     res.setHeader('Content-Disposition', `attachment; filename="crm-${kind}.csv"`)
     res.send(`\uFEFF${csv}`)
@@ -597,6 +594,11 @@ export function crmRoutes({ workspaceStore, entityLinks }: RouteOptions): Router
       res.status(400).json({ error: 'Select fields require at least one option' })
       return
     }
+    if (fieldType === 'entity_reference'
+      && (options.length === 0 || options.some((kind) => !(CRM_REFERENCE_KINDS as readonly string[]).includes(kind)))) {
+      res.status(400).json({ error: 'Reference fields require at least one valid target kind' })
+      return
+    }
     const field = await createCrmFieldDefinition({
       userId: member.ctx.userId,
       workspaceId: member.ctx.workspaceId,
@@ -619,6 +621,22 @@ export function crmRoutes({ workspaceStore, entityLinks }: RouteOptions): Router
     )
     if (!ok) res.status(404).json({ error: 'Field not found' })
     else res.json({ ok: true })
+  })
+
+  router.post('/:workspaceId/field-presets/:presetId', async (req, res) => {
+    const member = await memberContext(req as never, res)
+    if (!member || !requireAdmin(member.role, res)) return
+    const presetId = req.params.presetId
+    if (!(CRM_PRESET_IDS as readonly string[]).includes(presetId)) {
+      res.status(404).json({ error: 'CRM field preset not found' })
+      return
+    }
+    const result = await applyCrmFieldPreset({
+      userId: member.ctx.userId,
+      workspaceId: member.ctx.workspaceId,
+      presetId: presetId as (typeof CRM_PRESET_IDS)[number],
+    })
+    res.json(result)
   })
 
   router.get('/:workspaceId/views', async (req, res) => {

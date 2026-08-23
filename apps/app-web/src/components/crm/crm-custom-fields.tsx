@@ -5,6 +5,7 @@ import { SlidersHorizontal } from "lucide-react";
 import {
   updateCrmCustomFields,
   type CrmConfig,
+  type CrmData,
 } from "@/lib/api/crm";
 import type { CrmRecordRef } from "./crm-record-detail";
 import { useT } from "@/lib/i18n/client";
@@ -15,16 +16,19 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 
 export function CrmCustomFields({
   workspaceId,
   record,
   config,
+  data,
   onChanged,
 }: {
   workspaceId: string;
   record: CrmRecordRef;
   config: CrmConfig;
+  data: CrmData;
   onChanged: () => void;
 }) {
   const t = useT().crmPage.r2;
@@ -62,6 +66,11 @@ export function CrmCustomFields({
             label={field.label}
             type={field.fieldType}
             options={field.options}
+            referenceItems={field.fieldType === "entity_reference" ? [
+              ...(field.options.includes("person") ? data.contacts : []),
+              ...(field.options.includes("company") ? data.companies : []),
+              ...(field.options.includes("deal") ? data.deals : []),
+            ].map((row) => ({ value: row.id, label: row.name })) : []}
             value={values[field.fieldKey]}
             onCommit={(value) => void saveField(field.fieldKey, value)}
           />
@@ -76,12 +85,14 @@ function FieldEditor({
   label,
   type,
   options,
+  referenceItems,
   value,
   onCommit,
 }: {
   label: string;
   type: string;
   options: string[];
+  referenceItems: Array<{ value: string; label: string }>;
   value: unknown;
   onCommit: (value: unknown) => void;
 }) {
@@ -91,6 +102,30 @@ function FieldEditor({
     setDraft(Array.isArray(value) ? value.join(", ") : String(value ?? ""));
   }, [value]);
 
+  if (type === "entity_reference") {
+    const items = [
+      { value: "__empty__", label: t.emptyValue },
+      ...(typeof value === "string" && !referenceItems.some((item) => item.value === value)
+        ? [{ value, label: t.referenceUnavailable }]
+        : []),
+      ...referenceItems,
+    ];
+    return (
+      <label className="grid grid-cols-[120px_minmax(0,1fr)] items-center gap-2 text-xs">
+        <span className="text-muted-foreground">{label}</span>
+        <SearchableSelect
+          value={typeof value === "string" ? value : "__empty__"}
+          onValueChange={(next) => onCommit(next === "__empty__" ? null : next)}
+          items={items}
+          placeholder={t.pickValue}
+          searchPlaceholder={t.searchRecords}
+          emptyMessage={t.noMatchingRecords}
+          className="h-8 text-xs"
+        />
+      </label>
+    );
+  }
+
   if (type === "boolean" || type === "single_select") {
     const optionsForSelect = type === "boolean" ? ["true", "false"] : options;
     return (
@@ -98,10 +133,13 @@ function FieldEditor({
         <span className="text-muted-foreground">{label}</span>
         <Select
           value={value == null ? undefined : String(value)}
-          onValueChange={(next) => onCommit(type === "boolean" ? next === "true" : next)}
+          onValueChange={(next) => onCommit(
+            next === "__empty__" ? null : type === "boolean" ? next === "true" : next,
+          )}
         >
           <SelectTrigger className="w-full"><SelectValue placeholder={t.emptyValue} /></SelectTrigger>
           <SelectContent>
+            <SelectItem value="__empty__">{t.emptyValue}</SelectItem>
             {optionsForSelect.map((option) => (
               <SelectItem key={option} value={option}>
                 {type === "boolean" ? (option === "true" ? t.yes : t.no) : option}

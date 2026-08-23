@@ -21,6 +21,10 @@ export type TaskRulePredicate = {
   lanes?: TaskLane[];
   title_matches?: string[];
   channel_refs?: string[];
+  channel_types?: string[];
+  thread_refs?: string[];
+  operations?: ("create" | "update_status" | "update_details" | "archive")[];
+  authorities?: "realtime_thread_target"[];
   require?: (
     | "assignee"
     | "due"
@@ -259,6 +263,10 @@ export function describeTaskRulePredicate(p: TaskRulePredicate): string {
   if (p.title_matches?.length)
     parts.push(`mentioning ${p.title_matches.join(", ")}`);
   if (p.channel_refs?.length) parts.push(`in ${p.channel_refs.join(", ")}`);
+  if (p.channel_types?.length) parts.push(`on ${p.channel_types.join(", ")}`);
+  if (p.thread_refs?.length) parts.push(`threads ${p.thread_refs.join(", ")}`);
+  if (p.operations?.length) parts.push(`operations ${p.operations.join(" + ")}`);
+  if (p.authorities?.length) parts.push(`via ${p.authorities.join(", ")}`);
   if (p.require?.length) parts.push(`must have ${p.require.join(" + ")}`);
   return parts.join(" ");
 }

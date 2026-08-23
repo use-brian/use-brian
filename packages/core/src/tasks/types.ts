@@ -156,6 +156,14 @@ export type TaskStore = {
    */
   getById(ctx: AccessContext, id: string): Promise<TaskRecord | null>
 
+  /**
+   * Resolve a historical bi-temporal id to its current live row while applying
+   * the same access projection as getById. Optional for non-versioned stores;
+   * delegated thread bindings use it so one update does not invalidate the
+   * lineage anchor captured when the thread target was created.
+   */
+  resolveById?(ctx: AccessContext, id: string): Promise<TaskRecord | null>
+
   list(ctx: AccessContext, filters: TaskListFilters): Promise<TaskListRow[]>
 
   /**

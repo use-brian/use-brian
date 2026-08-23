@@ -42,6 +42,18 @@ const AWAY: PresenceUser = {
 };
 
 describe("[COMP:app-web/presence-avatars] Presence face-pile", () => {
+  it("renders a profile photo when presence carries an avatar URL", () => {
+    const html = render([
+      { ...ACTIVE, avatarUrl: "https://api.example/avatar/u-alice" },
+    ]);
+    expect(html).toContain('src="https://api.example/avatar/u-alice"');
+    expect(html).toContain('aria-label="Alice"');
+  });
+
+  it("falls back to initials when no profile photo is available", () => {
+    expect(render([ACTIVE])).toContain(">A</span>");
+  });
+
   it("dims a backgrounded peer and labels them away", () => {
     const html = render([AWAY]);
     expect(html).toContain("opacity-40");

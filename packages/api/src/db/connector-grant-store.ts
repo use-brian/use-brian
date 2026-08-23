@@ -151,6 +151,13 @@ export type ConnectorGrantStore = {
   listForTargetSystem(targetType: ConnectorGrantTarget, targetId: string): Promise<GrantWithInstance[]>
 
   /**
+   * System-level event fan-out targets for one personal connector instance.
+   * A live exposure is the authorization boundary; revocation removes the row
+   * and therefore removes the workspace from the next dispatch immediately.
+   */
+  listGrantedWorkspaceIdsForInstanceSystem(connectorInstanceId: string): Promise<string[]>
+
+  /**
    * System-level: find a single connected, member-exposed instance of a given
    * provider granted to a target (e.g. a workspace). Used by the KB sync
    * credential provider as the fallback for the team's GitHub PAT now that the
@@ -279,6 +286,18 @@ export function createConnectorGrantStore(): ConnectorGrantStore {
         [targetType, targetId],
       )
       return result.rows.map(unflatten)
+    },
+
+    async listGrantedWorkspaceIdsForInstanceSystem(connectorInstanceId) {
+      const result = await query<{ workspaceId: string }>(
+        `SELECT target_id AS "workspaceId"
+           FROM connector_grant
+          WHERE connector_instance_id = $1
+            AND target_type = 'workspace'
+          ORDER BY granted_at ASC, target_id ASC`,
+        [connectorInstanceId],
+      )
+      return result.rows.map((row) => row.workspaceId)
     },
 
     async findGrantedInstanceByProviderSystem(targetType, targetId, provider) {

@@ -27,6 +27,7 @@ import {
   createSlackLinkCode,
   createWhatsappLinkCode,
   MAX_AVATAR_BYTES,
+  planProfileRefresh,
   type LinkedAccount,
   type TelegramLinkCode,
   type SlackLinkCode,
@@ -41,6 +42,7 @@ import { buildWhatsappDeepLink } from "@/lib/whatsapp-link";
 import { format } from "@/lib/i18n/format";
 import { isOssEdition, isHostedEdition } from "@/lib/edition";
 import { useWorkspaceContext } from "@/lib/workspace-context";
+import { primaryAuthUrl } from "@/lib/primary-auth";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -69,12 +71,21 @@ export function AccountSection() {
   const displayLabel = userInfo?.name || userInfo?.email || "";
 
   /**
-   * Re-pull the `user` cookie via the refresh bridge (which now carries
-   * `avatarUrl`) so the sidebar + switcher update without a full reload, then
-   * sync the module cache + local state. Returns the fresh info, if any.
+   * Re-pull the `user` cookie through the route allowed to write it. Hosted
+   * app-web navigates through the primary site's refresh-and-return bridge;
+   * dev/OSS refresh in place, then sync the module cache + local state.
    */
   async function refreshUserInfo(): Promise<UserInfo | null> {
-    await fetch("/api/auth/refresh", { method: "POST" });
+    if (typeof window !== "undefined") {
+      const plan = planProfileRefresh(primaryAuthUrl(), window.location.href);
+      if (plan.kind === "redirect") {
+        window.location.assign(plan.url);
+        return null;
+      }
+    }
+
+    const refreshed = await fetch("/api/auth/refresh", { method: "POST" });
+    if (!refreshed.ok) throw new Error("profile_refresh_failed");
     const info = getUserInfo();
     if (info) {
       setUserInfoCache(info);

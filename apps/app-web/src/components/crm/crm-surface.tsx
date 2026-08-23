@@ -25,7 +25,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { BarChart3, Kanban, Rows3, Settings2 } from "lucide-react";
+import { BarChart3, Kanban, Mail, Rows3, Settings2 } from "lucide-react";
 import { OperatorTopbar } from "@/components/operator/operator-topbar";
 import { cn } from "@/lib/utils";
 import { mutateSurfaceCache, useCachedResource } from "@/lib/surface-cache";
@@ -63,6 +63,7 @@ import {
   type CrmContactRow,
   type CrmData,
   type CrmDealRow,
+  type CrmFieldDefinition,
   type CrmPipeline,
   type CrmPipelineStage,
 } from "@/lib/api/crm";
@@ -75,6 +76,8 @@ import {
   contactNameById,
   crmQuickCounts,
   crmTagOptions,
+  CRM_EMPTY_CUSTOM_VALUE,
+  groupRowsByCustomField,
   localDateStr,
   legacyStageForPipelineStage,
   resolveDealPipelineStage,
@@ -90,6 +93,15 @@ import {
   type CrmViewState,
 } from "@/lib/crm-view";
 import { requestBrainRefresh } from "@/lib/brain-events";
+import {
+  listApprovals,
+  type PendingApprovalRow,
+} from "@/lib/api/approvals";
+import {
+  APPROVALS_REFRESH_EVENT,
+  type ApprovalsRefreshDetail,
+} from "@/lib/approvals-events";
+import { crmEmailApprovalQueue } from "@/lib/crm-r2";
 import {
   AmountCell,
   CloseDateCell,
@@ -115,6 +127,7 @@ import { CrmActions } from "./crm-actions";
 import { CrmConfigDialog } from "./crm-config";
 import { CrmReportingDialog } from "./crm-reporting";
 import { CrmSavedViews } from "./crm-saved-views";
+import { CrmEmailReviewWorkspace } from "./crm-email-review";
 
 const NONE = "__none__";
 
@@ -149,6 +162,32 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
     void configResource.refresh();
   }, [refreshCrm, configResource.refresh]);
 
+  const [pendingApprovals, setPendingApprovals] = useState<PendingApprovalRow[]>([]);
+  const [approvalsLoading, setApprovalsLoading] = useState(true);
+  const [approvalsError, setApprovalsError] = useState(false);
+  const reloadApprovals = useCallback(async () => {
+    setApprovalsLoading(true);
+    setApprovalsError(false);
+    try {
+      setPendingApprovals(await listApprovals(workspaceId, { throwOnError: true }));
+    } catch {
+      setApprovalsError(true);
+    } finally {
+      setApprovalsLoading(false);
+    }
+  }, [workspaceId]);
+  useEffect(() => {
+    void reloadApprovals();
+    const handleRefresh = (event: Event) => {
+      const detail = (event as CustomEvent<ApprovalsRefreshDetail>).detail;
+      if (!detail?.workspaceId || detail.workspaceId === workspaceId) {
+        void reloadApprovals();
+      }
+    };
+    window.addEventListener(APPROVALS_REFRESH_EVENT, handleRefresh);
+    return () => window.removeEventListener(APPROVALS_REFRESH_EVENT, handleRefresh);
+  }, [reloadApprovals, workspaceId]);
+
   /** Optimistic patch against the cached value (survives leaving the surface). */
   const setData = useCallback(
     (updater: (previous: CrmData) => CrmData) => {
@@ -175,6 +214,10 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
   const deals = data?.deals ?? [];
   const contacts = data?.contacts ?? [];
   const companies = data?.companies ?? [];
+  const emailQueue = useMemo(
+    () => (data ? crmEmailApprovalQueue(data, pendingApprovals) : []),
+    [data, pendingApprovals],
+  );
   const companyNames = useMemo(() => companyNameById(companies), [companies]);
   const contactNames = useMemo(() => contactNameById(contacts), [contacts]);
   const selectedPipeline = useMemo<CrmPipeline | null>(() => {
@@ -205,6 +248,28 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
     () => crmTagOptions(contacts, companies),
     [contacts, companies],
   );
+  const sectionEntityKind = view.section === "contacts" ? "person" : view.section === "companies" ? "company" : "deal";
+  const sectionFields = useMemo(
+    () => (config?.fields ?? []).filter((field) => field.entityKind === sectionEntityKind),
+    [config, sectionEntityKind],
+  );
+  const sectionRows = view.section === "deals" ? deals : view.section === "contacts" ? contacts : companies;
+  const referenceNames = useMemo(() => new Map([
+    ...contacts.map((row) => [row.id, row.name] as const),
+    ...companies.map((row) => [row.id, row.name] as const),
+    ...deals.map((row) => [row.id, row.name] as const),
+  ]), [contacts, companies, deals]);
+  const groupableFields = sectionFields.filter((field) => field.fieldType !== "multi_select");
+  const selectedGroupField = view.group?.startsWith("cf:")
+    ? groupableFields.find((field) => field.fieldKey === view.group?.slice(3)) ?? null
+    : null;
+
+  useEffect(() => {
+    if (view.review !== "email" || approvalsLoading) return;
+    const selectedExists = emailQueue.some((item) => item.approval.id === view.draft);
+    const nextDraft = selectedExists ? view.draft : emailQueue[0]?.approval.id ?? null;
+    if (nextDraft !== view.draft) setView({ draft: nextDraft });
+  }, [approvalsLoading, emailQueue, setView, view.draft, view.review]);
 
   const filteredDeals = useMemo(
     () =>
@@ -598,6 +663,32 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
           },
         ]
       : []),
+    ...sectionFields.map((field) => {
+      let options: Array<{ value: string; label: string }>;
+      if (field.fieldType === "single_select" || field.fieldType === "multi_select") {
+        options = field.options.map((option) => ({ value: option, label: option }));
+      } else if (field.fieldType === "boolean") {
+        options = [{ value: "true", label: t.r2.yes }, { value: "false", label: t.r2.no }];
+      } else if (field.fieldType === "entity_reference") {
+        options = [
+          ...(field.options.includes("person") ? contacts : []),
+          ...(field.options.includes("company") ? companies : []),
+          ...(field.options.includes("deal") ? deals : []),
+        ].map((row) => ({ value: row.id, label: row.name }));
+      } else {
+        const values = new Set<string>();
+        for (const row of sectionRows) {
+          const value = row.customFields?.[field.fieldKey];
+          if (value !== null && value !== undefined && value !== "" && !Array.isArray(value)) values.add(String(value));
+        }
+        options = [...values].sort((a, b) => a.localeCompare(b)).map((value) => ({ value, label: value }));
+      }
+      return {
+        key: `cf:${field.fieldKey}`,
+        label: field.label,
+        options: [{ value: CRM_EMPTY_CUSTOM_VALUE, label: t.r2.emptyValue }, ...options],
+      };
+    }),
   ];
 
   return (
@@ -609,34 +700,56 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
       <OperatorTopbar
         app="crm"
         center={
-          <div className="flex shrink-0 items-center gap-0.5 rounded-lg bg-sidebar-accent/60 p-0.5">
-            {CRM_SECTIONS.map((section) => (
-              <button
-                key={section}
-                type="button"
-                aria-pressed={view.section === section}
-                onClick={() =>
-                  setView({ section, quick: null, stages: [], q: "" })
-                }
-                className={cn(
-                  "inline-flex h-6.5 items-center gap-1.5 rounded-md px-2 text-[12.5px] transition-colors",
-                  view.section === section
-                    ? "bg-background font-medium shadow-sm"
-                    : "text-sidebar-foreground/70 hover:text-sidebar-accent-foreground",
-                )}
-              >
-                {sectionLabels[section]}
-                {data !== null && (
-                  <span className="tabular-nums text-[11px] text-muted-foreground">
-                    {sectionCounts[section]}
-                  </span>
-                )}
-              </button>
-            ))}
+          <div className="flex shrink-0 items-center gap-1">
+            <div className="hidden items-center gap-0.5 rounded-lg bg-sidebar-accent/60 p-0.5 sm:flex">
+              {CRM_SECTIONS.map((section) => (
+                <button
+                  key={section}
+                  type="button"
+                  aria-pressed={view.review === null && view.section === section}
+                  onClick={() =>
+                    setView({ section, review: null, draft: null, quick: null, stages: [], custom: {}, group: null, q: "" })
+                  }
+                  className={cn(
+                    "inline-flex h-6.5 items-center gap-1.5 rounded-md px-2 text-[12.5px] transition-colors",
+                    view.review === null && view.section === section
+                      ? "bg-background font-medium shadow-sm"
+                      : "text-sidebar-foreground/70 hover:text-sidebar-accent-foreground",
+                  )}
+                >
+                  {sectionLabels[section]}
+                  {data !== null && (
+                    <span className="tabular-nums text-[11px] text-muted-foreground">
+                      {sectionCounts[section]}
+                    </span>
+                  )}
+                </button>
+              ))}
+            </div>
+            <button
+              type="button"
+              aria-label={t.r2.emailDrafts}
+              aria-pressed={view.review === "email"}
+              onClick={() => setView({ review: "email", draft: view.draft ?? emailQueue[0]?.approval.id ?? null })}
+              className={cn(
+                "inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12.5px] transition-colors",
+                view.review === "email"
+                  ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                  : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground",
+              )}
+            >
+              <Mail className="size-3.5" aria-hidden />
+              <span className="hidden sm:inline">{t.r2.emailDrafts}</span>
+              {!approvalsLoading && emailQueue.length > 0 && (
+                <span className="rounded-full bg-amber-500/15 px-1.5 text-[10px] font-semibold tabular-nums text-amber-700 dark:text-amber-300">
+                  {emailQueue.length}
+                </span>
+              )}
+            </button>
           </div>
         }
         right={
-          <>
+          view.review === null ? <>
             {view.section === "deals" && (
               <>
               {selectedPipeline && config && config.pipelines.length > 1 && (
@@ -732,6 +845,7 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
             )}
             <CrmActions
               workspaceId={workspaceId}
+              role={role}
               section={view.section}
               data={data}
               config={config}
@@ -741,7 +855,7 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
                 setOpenRecord({ kind: created.kind, id: created.id });
               }}
             />
-          </>
+          </> : null
         }
       />
 
@@ -750,6 +864,46 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
           and never covers the bar. */}
       <div className="relative flex min-h-0 flex-1">
         <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
+
+        {view.review === "email" ? (
+          data === null ? (
+            <div className="p-6 text-sm text-muted-foreground">
+              {crm.error !== undefined ? (
+                <span>
+                  {t.loadFailed}{" "}
+                  <button type="button" onClick={() => void refreshCrm()} className="underline hover:text-foreground">
+                    {t.retry}
+                  </button>
+                </span>
+              ) : t.loading}
+            </div>
+          ) : (
+            <CrmEmailReviewWorkspace
+              workspaceId={workspaceId}
+              data={data}
+              items={emailQueue}
+              selectedId={view.draft}
+              loading={approvalsLoading}
+              loadError={approvalsError}
+              onSelect={(draft) => setView({ review: "email", draft })}
+              onReload={() => void reloadApprovals()}
+              onResolved={(approvalId) => {
+                const nextDraft = emailQueue.find((item) => item.approval.id !== approvalId)?.approval.id ?? null;
+                setPendingApprovals((current) => current.filter((approval) => approval.id !== approvalId));
+                setView({ draft: nextDraft });
+              }}
+              onRevised={(oldId, next) => {
+                setPendingApprovals((current) => current.map((approval) => approval.id === oldId ? next : approval));
+                setView({ draft: next.id });
+              }}
+              onOpenContact={(contactId) => {
+                setView({ section: "contacts", review: null, draft: null });
+                setOpenRecord({ kind: "contact", id: contactId });
+              }}
+            />
+          )
+        ) : (
+          <>
 
         {/* Toolbar — attention presets + filters + search in ONE quiet strip
             (it swaps for the bulk bar while table rows are checked). */}
@@ -831,41 +985,55 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
                       // A quick-filter owns the stage slice; its pill would lie.
                       stage: view.quick ? [] : view.stages,
                       company: view.company,
+                      ...Object.fromEntries(Object.entries(view.custom).map(([key, values]) => [`cf:${key}`, values])),
                     }
                   : view.section === "contacts"
-                    ? { company: view.company, tag: view.tag }
-                    : { tag: view.tag }
+                    ? { company: view.company, tag: view.tag, ...Object.fromEntries(Object.entries(view.custom).map(([key, values]) => [`cf:${key}`, values])) }
+                    : { tag: view.tag, ...Object.fromEntries(Object.entries(view.custom).map(([key, values]) => [`cf:${key}`, values])) }
               }
               onSet={(key, values) => {
                 if (key === "stage")
                   setView({ quick: null, stages: values });
                 else if (key === "company") setView({ company: values });
                 else if (key === "tag") setView({ tag: values });
+                else if (key.startsWith("cf:")) {
+                  const fieldKey = key.slice(3);
+                  const custom = { ...view.custom };
+                  if (values.length === 0) delete custom[fieldKey];
+                  else custom[fieldKey] = values;
+                  setView({ custom });
+                }
               }}
               search={view.q}
               onSearch={(q) => setView({ q })}
               searchPlaceholder={t.searchPlaceholder}
               viewOptions={
-                view.section === "deals" && view.view === "table" ? (
+                (groupableFields.length > 0 || (view.section === "deals" && view.view === "table")) ? (
                   <>
-                    <ViewOptionSection label={t.sortLabel}>
-                      {DEAL_SORT_KEYS.map((sKey) => (
-                        <ViewOptionRow
-                          key={sKey}
-                          label={sortLabels[sKey] ?? sKey}
-                          selected={view.sort === sKey}
-                          onPick={() => setView({ sort: sKey })}
+                    {groupableFields.length > 0 && <ViewOptionSection label={t.r2.groupBy}>
+                      <ViewOptionRow label={t.r2.noGrouping} selected={!selectedGroupField} onPick={() => setView({ group: null })} />
+                      {groupableFields.map((field) => <ViewOptionRow key={field.id} label={field.label} selected={selectedGroupField?.id === field.id} onPick={() => setView({ group: `cf:${field.fieldKey}`, view: "table" })} />)}
+                    </ViewOptionSection>}
+                    {view.section === "deals" && view.view === "table" && <>
+                      <ViewOptionSection label={t.sortLabel}>
+                        {DEAL_SORT_KEYS.map((sKey) => (
+                          <ViewOptionRow
+                            key={sKey}
+                            label={sortLabels[sKey] ?? sKey}
+                            selected={view.sort === sKey}
+                            onPick={() => setView({ sort: sKey })}
+                          />
+                        ))}
+                      </ViewOptionSection>
+                      <label className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-[13px] text-muted-foreground transition-colors hover:bg-muted">
+                        <Checkbox
+                          checked={view.closed}
+                          onCheckedChange={(checked) => setView({ closed: checked })}
+                          aria-label={t.showClosed}
                         />
-                      ))}
-                    </ViewOptionSection>
-                    <label className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-[13px] text-muted-foreground transition-colors hover:bg-muted">
-                      <Checkbox
-                        checked={view.closed}
-                        onCheckedChange={(checked) => setView({ closed: checked })}
-                        aria-label={t.showClosed}
-                      />
-                      {t.showClosed}
-                    </label>
+                        {t.showClosed}
+                      </label>
+                    </>}
                   </>
                 ) : undefined
               }
@@ -908,7 +1076,7 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
             <div className="p-6 text-sm text-muted-foreground">
               {t.r2.noPipelines}
             </div>
-          ) : view.section === "deals" && view.view === "board" ? (
+          ) : view.section === "deals" && view.view === "board" && !selectedGroupField ? (
             boardDeals.length === 0 && pipelineDeals.length === 0 ? (
               <div className="p-6 text-sm text-muted-foreground">{t.emptyDeals}</div>
             ) : (
@@ -928,8 +1096,8 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
               />
             )
           ) : view.section === "deals" ? (
-            <DealsTable
-              rows={filteredDeals}
+            <CrmGroupedRows rows={filteredDeals} field={selectedGroupField} referenceLabels={referenceNames} emptyLabel={t.r2.emptyValue} unavailableLabel={t.r2.referenceUnavailable} booleanLabels={{ true: t.r2.yes, false: t.r2.no }} render={(groupRows) => <DealsTable
+              rows={groupRows}
               companyNames={companyNames}
               contactNames={contactNames}
               today={today}
@@ -942,10 +1110,10 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
               commits={commits}
               onOpenRecord={(row) => setOpenRecord({ kind: "deal", id: row.id })}
               empty={deals.length === 0 ? t.emptyDeals : t.emptyFiltered}
-            />
+            />}/>
           ) : view.section === "contacts" ? (
-            <ContactsTable
-              rows={filteredContacts}
+            <CrmGroupedRows rows={filteredContacts} field={selectedGroupField} referenceLabels={referenceNames} emptyLabel={t.r2.emptyValue} unavailableLabel={t.r2.referenceUnavailable} booleanLabels={{ true: t.r2.yes, false: t.r2.no }} render={(groupRows) => <ContactsTable
+              rows={groupRows}
               companies={companies}
               selected={selected}
               onToggle={toggle}
@@ -957,10 +1125,10 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
                 setOpenRecord({ kind: "contact", id: row.id })
               }
               empty={contacts.length === 0 ? t.emptyContacts : t.emptyFiltered}
-            />
+            />}/>
           ) : (
-            <CompaniesTable
-              rows={filteredCompanies}
+            <CrmGroupedRows rows={filteredCompanies} field={selectedGroupField} referenceLabels={referenceNames} emptyLabel={t.r2.emptyValue} unavailableLabel={t.r2.referenceUnavailable} booleanLabels={{ true: t.r2.yes, false: t.r2.no }} render={(groupRows) => <CompaniesTable
+              rows={groupRows}
               stats={stats}
               selected={selected}
               onToggle={toggle}
@@ -972,13 +1140,15 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
                 setOpenRecord({ kind: "company", id: row.id })
               }
               empty={companies.length === 0 ? t.emptyCompanies : t.emptyFiltered}
-            />
+            />}/>
           )}
         </div>
+          </>
+        )}
       </div>
 
         {/* Master-detail record pane. */}
-        {record && data && config && (
+        {view.review === null && record && data && config && (
           <CrmRecordDetail
             workspaceId={workspaceId}
             record={record}
@@ -987,6 +1157,10 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
             commits={commits}
             onClose={() => setOpenRecord(null)}
             onOpenRecord={(ref) => setOpenRecord({ kind: ref.kind, id: ref.row.id })}
+            onReviewEmail={(draft) => {
+              setOpenRecord(null);
+              setView({ review: "email", draft });
+            }}
             onChanged={reload}
             onArchive={(ref) => void archiveRecord(ref)}
           />
@@ -1008,6 +1182,33 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
 }
 
 // ── Tables ──────────────────────────────────────────────────────────────
+
+function CrmGroupedRows<T extends { id: string; customFields?: Record<string, unknown> }>({
+  rows,
+  field,
+  referenceLabels,
+  emptyLabel,
+  unavailableLabel,
+  booleanLabels,
+  render,
+}: {
+  rows: readonly T[];
+  field: CrmFieldDefinition | null;
+  referenceLabels: Map<string, string>;
+  emptyLabel: string;
+  unavailableLabel: string;
+  booleanLabels: { true: string; false: string };
+  render: (rows: T[]) => React.ReactNode;
+}) {
+  if (!field || rows.length === 0) return <>{render([...rows])}</>;
+  const groups = groupRowsByCustomField(rows, field, referenceLabels, emptyLabel, booleanLabels, unavailableLabel);
+  return <div>{groups.map((group) => <section key={group.value}>
+    <div className="sticky top-0 z-10 flex items-center gap-2 border-y border-border/60 bg-muted/90 px-4 py-2 text-xs font-medium backdrop-blur-sm">
+      <span>{group.label}</span><span className="tabular-nums text-muted-foreground">{group.rows.length}</span>
+    </div>
+    {render(group.rows)}
+  </section>)}</div>;
+}
 
 // One grid template per table, shared by the header strip and the rows so
 // the columns can never drift apart.

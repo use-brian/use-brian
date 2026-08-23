@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { extractCitations, formatStamp, type CitationIndex } from '@use-brian/shared'
 import type { AccessContext } from '../security/access-context.js'
 import { unionCompartments } from '../security/compartments.js'
-import { buildTool, type Tool } from '../tools/types.js'
+import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
 import { tolerantBoolean, tolerantEnumArray, tolerantInt } from '../tools/schema-tolerance.js'
 import {
   applyExplicitCloses,
@@ -21,7 +21,12 @@ import {
   type TaskRecordStatus,
   type TaskStore,
 } from './types.js'
-import { admitTask, type TaskAdmissionPort } from './admission.js'
+import {
+  admitTask,
+  evaluateTaskMutationPolicy,
+  type TaskAdmissionPort,
+  type TaskRuleOperation,
+} from './admission.js'
 
 /**
  * Tools that let the primary assistant manage workspace-scoped tasks via
@@ -257,6 +262,88 @@ export function createTaskTools(
   bulkUpdateTasks: Tool
   archiveTasks: Tool
 } {
+  function accessFor(context: ToolContext): AccessContext {
+    return ctxFor({
+      userId: context.userId,
+      assistantId: context.assistantId,
+      workspaceId: context.workspaceId!,
+      assistantKind: context.assistantKind,
+      clearance: context.clearance,
+      compartments: context.compartments,
+    })
+  }
+
+  function resolveVisibleTask(context: ToolContext, id: string): Promise<TaskRecord | null> {
+    const access = accessFor(context)
+    return store.resolveById
+      ? store.resolveById(access, id)
+      : store.getById(access, id)
+  }
+
+  async function authorizeDelegatedOperation(
+    context: ToolContext,
+    operation: TaskRuleOperation,
+    input: { taskId?: string; title?: string },
+  ): Promise<{ data: string; isError: true } | null> {
+    const authority = context.taskAuthority
+    if (!authority) return null
+
+    if (!context.workspaceId || new Date(authority.expiresAt).getTime() <= Date.now()) {
+      return {
+        data: 'This thread no longer has active task authority. Ask the user for a direct instruction before changing a task.',
+        isError: true,
+      }
+    }
+    if (!opts?.admission) {
+      return {
+        data: 'Task mutation policy is unavailable in this runtime, so this delegated thread cannot change tasks. Nothing was changed.',
+        isError: true,
+      }
+    }
+
+    let title = input.title ?? ''
+    if (input.taskId) {
+      if (authority.taskIds.length === 0) {
+        return {
+          data: 'This realtime thread target is not bound to any task. Nothing was changed.',
+          isError: true,
+        }
+      }
+      const requested = await resolveVisibleTask(context, input.taskId)
+      if (!requested || requested.workspaceId !== context.workspaceId) {
+        return { data: taskNotFoundMessage(input.taskId), isError: true }
+      }
+      const boundHeads = await Promise.all(
+        authority.taskIds.map((id) => resolveVisibleTask(context, id)),
+      )
+      if (!boundHeads.some((task) => task?.id === requested.id)) {
+        return {
+          data: `Task ${input.taskId} is outside this realtime thread target's bound task scope. Nothing was changed.`,
+          isError: true,
+        }
+      }
+      title = requested.title
+    }
+
+    const rules = await opts.admission.listActiveRules(context.workspaceId)
+    const decision = evaluateTaskMutationPolicy(
+      {
+        operation,
+        authority: authority.kind,
+        title,
+        channelType: authority.channelType,
+        channelRef: authority.channelRef,
+        threadRef: authority.threadRef,
+      },
+      rules,
+    )
+    if (decision.allowed) return null
+    return {
+      data: `${decision.explanation} Nothing was changed. Ask the user for a direct instruction or add a scoped allow rule.`,
+      isError: true,
+    }
+  }
+
   const saveTask = buildTool({
     name: 'saveTask',
     requiresCapability: 'tasks',
@@ -301,6 +388,8 @@ export function createTaskTools(
     async execute(input, context) {
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
+      const delegated = await authorizeDelegatedOperation(context, 'create', { title: input.title })
+      if (delegated) return delegated
 
       // Resolve the cited moment through the SAME validator the record's
       // citations use: an impossible stamp (`[00:85]`) or one past the end of
@@ -490,15 +579,21 @@ export function createTaskTools(
   })
 
   async function applyUpdate(
-    context: { userId: string; workspaceId?: string | null },
+    context: ToolContext,
     id: string,
     fields: Parameters<TaskStore['update']>[2],
+    operations: readonly TaskRuleOperation[],
   ): Promise<
     | { data: string; isError: true }
     | { ok: true; record: TaskRecord; changedFields: string[] }
   > {
     const gate = workspaceGate(context.workspaceId)
     if (gate) return gate
+
+    for (const operation of operations) {
+      const delegated = await authorizeDelegatedOperation(context, operation, { taskId: id })
+      if (delegated) return delegated
+    }
 
     let updated: TaskRecord | null
     try {
@@ -563,17 +658,7 @@ export function createTaskTools(
         if (gate) return gate
         let base = input.attributes
         if (base === undefined) {
-          const current = await store.getById(
-            ctxFor({
-              userId: context.userId,
-              assistantId: context.assistantId,
-              workspaceId: context.workspaceId!,
-              assistantKind: context.assistantKind,
-              clearance: context.clearance,
-              compartments: context.compartments,
-            }),
-            input.id,
-          )
+          const current = await resolveVisibleTask(context, input.id)
           if (!current || current.workspaceId !== context.workspaceId) {
             return { data: taskNotFoundMessage(input.id), isError: true }
           }
@@ -616,7 +701,18 @@ export function createTaskTools(
       }
 
       if (hasFieldChange) {
-        const result = await applyUpdate(context, input.id, fields)
+        const operations: TaskRuleOperation[] = []
+        if (input.status !== undefined) {
+          operations.push(input.status === 'archived' ? 'archive' : 'update_status')
+        }
+        if (
+          Object.keys(fields).some((key) => key !== 'status') ||
+          hasLinkChange ||
+          hasCloseChange
+        ) {
+          operations.push('update_details')
+        }
+        const result = await applyUpdate(context, input.id, fields, [...new Set(operations)])
         if ('isError' in result) return result
         opts?.onEvent?.({ type: 'task_updated', taskId: result.record.id, fields: result.changedFields }, eventCtx(context))
         const { linksMsg, closesMsg } = await writeEdgesAndClose(result.record.id)
@@ -628,8 +724,14 @@ export function createTaskTools(
       // Links/closes-only path: gate + write edges against the existing task id.
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
-      const { linksMsg, closesMsg } = await writeEdgesAndClose(input.id)
-      return { data: `Updated task [${input.id}]${linksMsg}${closesMsg}` }
+      const delegated = await authorizeDelegatedOperation(context, 'update_details', { taskId: input.id })
+      if (delegated) return delegated
+      const current = await resolveVisibleTask(context, input.id)
+      if (!current || current.workspaceId !== context.workspaceId) {
+        return { data: taskNotFoundMessage(input.id), isError: true }
+      }
+      const { linksMsg, closesMsg } = await writeEdgesAndClose(current.id)
+      return { data: `Updated task [${current.id}]${linksMsg}${closesMsg}` }
     },
   })
 
@@ -639,7 +741,7 @@ export function createTaskTools(
     description: 'Mark a task as done. Shorthand for `updateTask({id, status: "done"})`. Use `reopenTask` to revert.',
     inputSchema: z.object({ id: idShape }),
     async execute(input, context) {
-      const result = await applyUpdate(context, input.id, { status: 'done' })
+      const result = await applyUpdate(context, input.id, { status: 'done' }, ['update_status'])
       if ('isError' in result) return result
       opts?.onEvent?.({ type: 'task_updated', taskId: result.record.id, fields: ['status'] }, eventCtx(context))
       return { data: `Closed task [${result.record.id}]: ${result.record.title}` }
@@ -652,7 +754,7 @@ export function createTaskTools(
     description: 'Reopen a closed task — sets status back to `todo`. Shorthand for `updateTask({id, status: "todo"})`.',
     inputSchema: z.object({ id: idShape }),
     async execute(input, context) {
-      const result = await applyUpdate(context, input.id, { status: 'todo' })
+      const result = await applyUpdate(context, input.id, { status: 'todo' }, ['update_status'])
       if ('isError' in result) return result
       opts?.onEvent?.({ type: 'task_updated', taskId: result.record.id, fields: ['status'] }, eventCtx(context))
       return { data: `Reopened task [${result.record.id}]: ${result.record.title}` }
@@ -798,6 +900,9 @@ export function createTaskTools(
     async execute(input, context) {
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
+      if (context.taskAuthority) {
+        return { data: 'Bulk task updates are not available from a realtime thread target. Nothing was changed.', isError: true }
+      }
       const rows = await resolveBulkRows(context, input.filter)
       if (rows.length === 0) return { data: 'No tasks match that filter — nothing to update.' }
       const { updated, failed } = await applyBulk(context, rows, (row) => {
@@ -828,6 +933,9 @@ export function createTaskTools(
     async execute(input, context) {
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
+      if (context.taskAuthority) {
+        return { data: 'Bulk task archiving is not available from a realtime thread target. Nothing was changed.', isError: true }
+      }
       const rows = await resolveBulkRows(context, input.filter)
       if (rows.length === 0) return { data: 'No tasks match that filter — nothing to archive.' }
       const { updated, failed } = await applyBulk(context, rows, () => ({ status: 'archived' }))

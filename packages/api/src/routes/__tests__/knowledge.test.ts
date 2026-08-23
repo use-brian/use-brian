@@ -487,6 +487,97 @@ const GH_SOURCE = {
   defaultSensitivity: 'internal' as const, createdAt: new Date(),
 }
 
+const knowledgeCaptureRuleStore = {
+  listForWorkspace: vi.fn(),
+  listEnabledForWorkspace: vi.fn(),
+  create: vi.fn(),
+  update: vi.fn(),
+  delete: vi.fn(),
+}
+
+function appWsCapture(userId?: string) {
+  return createTestApp(
+    '/api/workspaces/:workspaceId/knowledge',
+    workspaceKnowledgeRoutes({
+      knowledgeStore: knowledgeStore as never,
+      knowledgeCaptureRuleStore: knowledgeCaptureRuleStore as never,
+    }),
+    userId ? { userId } : undefined,
+  )
+}
+
+const CAPTURE_BODY = {
+  name: 'Product decisions',
+  matchPhrases: ['product decision', 'we decided'],
+  instructions: 'Capture the decision, rationale, owner, and effective date.',
+  targetSourceId: null,
+  pathPrefix: 'decisions/product',
+  defaultSensitivity: 'internal',
+  enabled: true,
+}
+
+describe('[COMP:knowledge/capture-rules] workspace capture-rule routes', () => {
+  it('lets every member inspect the default-off rule list', async () => {
+    knowledgeCaptureRuleStore.listForWorkspace.mockResolvedValueOnce([])
+    const res = await request(appWsCapture('u1'))
+      .get('/api/workspaces/ws-1/knowledge/capture-rules')
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ rules: [], canManage: false })
+    expect(knowledgeCaptureRuleStore.listForWorkspace).toHaveBeenCalledWith('ws-1')
+  })
+
+  it('refuses rule creation by a non-manager', async () => {
+    const res = await request(appWsCapture('u1'))
+      .post('/api/workspaces/ws-1/knowledge/capture-rules')
+      .send(CAPTURE_BODY)
+    expect(res.status).toBe(403)
+    expect(knowledgeCaptureRuleStore.create).not.toHaveBeenCalled()
+  })
+
+  it('lets an owner create a Manual-entries rule without requiring a default KB', async () => {
+    mockRls.mockResolvedValueOnce({
+      rows: [{ role: 'owner', clearance: 'confidential', compartments: null }],
+      rowCount: 1,
+    } as never)
+    knowledgeCaptureRuleStore.create.mockImplementationOnce(async (input) => ({
+      id: '22222222-2222-4222-8222-222222222222',
+      ...input,
+      createdAt: new Date(0),
+      updatedAt: new Date(0),
+    }))
+    const res = await request(appWsCapture('u1'))
+      .post('/api/workspaces/ws-1/knowledge/capture-rules')
+      .send(CAPTURE_BODY)
+    expect(res.status).toBe(201)
+    expect(res.body.rule.targetSourceId).toBeNull()
+    expect(knowledgeStore.getSource).not.toHaveBeenCalled()
+    expect(knowledgeCaptureRuleStore.create).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: 'ws-1',
+      createdBy: 'u1',
+      pathPrefix: 'decisions/product',
+    }))
+  })
+
+  it('refuses a connected-source destination that is not writable', async () => {
+    const sourceId = '11111111-1111-4111-8111-111111111111'
+    mockRls.mockResolvedValueOnce({
+      rows: [{ role: 'admin', clearance: 'confidential', compartments: null }],
+      rowCount: 1,
+    } as never)
+    knowledgeStore.getSource.mockResolvedValueOnce({
+      ...GH_SOURCE,
+      id: sourceId,
+      writeAccess: false,
+    })
+    const res = await request(appWsCapture('u1'))
+      .post('/api/workspaces/ws-1/knowledge/capture-rules')
+      .send({ ...CAPTURE_BODY, targetSourceId: sourceId })
+    expect(res.status).toBe(409)
+    expect(res.body.reason).toBe('not_writable')
+    expect(knowledgeCaptureRuleStore.create).not.toHaveBeenCalled()
+  })
+})
+
 describe('[COMP:api/knowledge-route] PATCH /sources/:id (default sensitivity)', () => {
   it('rejects an invalid tier with 400', async () => {
     const res = await request(appWs('u1'))

@@ -155,6 +155,7 @@ export async function buildWorkflowToolRegistry(
     // Author the decision as an `assistant_call` and the write as a
     // `tool_call`.
     allowKnowledgeWrites: true,
+    knowledgeWriteAuthorization: 'workflow',
     knowledgeRepoWriter: deps.knowledgeRepoWriter,
     filesApi: deps.filesApi,
     engineHooks: deps.engineHooks,

@@ -22,10 +22,14 @@ import { getEntityById, updateEntity } from './entities-store.js'
 
 export const CRM_FIELD_TYPES = [
   'text', 'number', 'date', 'boolean', 'single_select', 'multi_select',
+  'entity_reference',
 ] as const
 export type CrmFieldType = (typeof CRM_FIELD_TYPES)[number]
 export type CrmEntityKind = 'person' | 'company' | 'deal'
 export type CrmStageCategory = 'open' | 'won' | 'lost'
+
+export const CRM_REFERENCE_KINDS = ['person', 'company', 'deal'] as const
+export type CrmReferenceKind = (typeof CRM_REFERENCE_KINDS)[number]
 
 export type CrmPipelineStage = {
   id: string
@@ -60,6 +64,35 @@ export type CrmFieldDefinition = {
 export type CrmConfig = {
   pipelines: CrmPipeline[]
   fields: CrmFieldDefinition[]
+}
+
+export const CRM_PRESET_IDS = [
+  'services_saas', 'enterprise_sales', 'partnership_referral',
+] as const
+export type CrmPresetId = (typeof CRM_PRESET_IDS)[number]
+
+type CrmPresetField = Omit<CrmFieldDefinition, 'id' | 'position'>
+
+export const CRM_FIELD_PRESETS: Record<CrmPresetId, readonly CrmPresetField[]> = {
+  services_saas: [
+    { entityKind: 'deal', fieldKey: 'work_type', label: 'Work type', fieldType: 'single_select', options: ['Consulting / services', 'SaaS', 'On-premise'], isRequired: false },
+    { entityKind: 'deal', fieldKey: 'opportunity_type', label: 'Opportunity type', fieldType: 'single_select', options: ['New business', 'Upsell', 'Referral'], isRequired: false },
+    { entityKind: 'company', fieldKey: 'upsell_potential', label: 'Upsell potential', fieldType: 'multi_select', options: ['Consulting / services', 'SaaS', 'On-premise'], isRequired: false },
+    { entityKind: 'company', fieldKey: 'referral_potential', label: 'Referral potential', fieldType: 'single_select', options: ['None', 'Low', 'Medium', 'High'], isRequired: false },
+    { entityKind: 'company', fieldKey: 'referral_audience', label: 'Referral audience', fieldType: 'multi_select', options: ['Partner network', 'Portfolio companies', 'Peer businesses', 'Other'], isRequired: false },
+  ],
+  enterprise_sales: [
+    { entityKind: 'deal', fieldKey: 'deployment_model', label: 'Deployment model', fieldType: 'single_select', options: ['Cloud', 'Hybrid', 'On-premise'], isRequired: false },
+    { entityKind: 'deal', fieldKey: 'security_review_status', label: 'Security review', fieldType: 'single_select', options: ['Not started', 'In progress', 'Approved', 'Blocked'], isRequired: false },
+    { entityKind: 'deal', fieldKey: 'procurement_status', label: 'Procurement status', fieldType: 'single_select', options: ['Not started', 'In progress', 'Approved', 'Blocked'], isRequired: false },
+    { entityKind: 'company', fieldKey: 'account_tier', label: 'Account tier', fieldType: 'single_select', options: ['Strategic', 'Growth', 'Standard'], isRequired: false },
+  ],
+  partnership_referral: [
+    { entityKind: 'deal', fieldKey: 'referral_source', label: 'Referral source', fieldType: 'entity_reference', options: ['person', 'company'], isRequired: false },
+    { entityKind: 'deal', fieldKey: 'opportunity_type', label: 'Opportunity type', fieldType: 'single_select', options: ['New business', 'Upsell', 'Referral'], isRequired: false },
+    { entityKind: 'company', fieldKey: 'referral_potential', label: 'Referral potential', fieldType: 'single_select', options: ['None', 'Low', 'Medium', 'High'], isRequired: false },
+    { entityKind: 'company', fieldKey: 'referral_audience', label: 'Referral audience', fieldType: 'multi_select', options: ['Partner network', 'Portfolio companies', 'Peer businesses', 'Other'], isRequired: false },
+  ],
 }
 
 const DEFAULT_STAGES = [
@@ -276,6 +309,83 @@ export async function archiveCrmFieldDefinition(
   return (result.rowCount ?? 0) > 0
 }
 
+function sameFieldShape(existing: Pick<CrmFieldDefinition, 'fieldType' | 'options'>, preset: CrmPresetField): boolean {
+  return existing.fieldType === preset.fieldType
+    && existing.options.length === preset.options.length
+    && existing.options.every((option, index) => option === preset.options[index])
+}
+
+export type CrmPresetApplyResult = {
+  created: string[]
+  skipped: string[]
+  revived: string[]
+  conflicts: string[]
+}
+
+/** Idempotently materialize a reusable preset as ordinary field definitions. */
+export async function applyCrmFieldPreset(input: {
+  userId: string
+  workspaceId: string
+  presetId: CrmPresetId
+}): Promise<CrmPresetApplyResult> {
+  const fields = CRM_FIELD_PRESETS[input.presetId]
+  const result: CrmPresetApplyResult = { created: [], skipped: [], revived: [], conflicts: [] }
+  for (const field of fields) {
+    const existingResult = await queryWithRLS<ConfigFieldRow & { archivedAt: Date | null }>(
+      input.userId,
+      `SELECT id, entity_kind AS "entityKind", field_key AS "fieldKey", label,
+              field_type AS "fieldType", options, is_required AS "isRequired", position,
+              archived_at AS "archivedAt"
+         FROM crm_field_definitions
+        WHERE workspace_id = $1 AND entity_kind = $2 AND field_key = $3
+        LIMIT 1`,
+      [input.workspaceId, field.entityKind, field.fieldKey],
+    )
+    const raw = existingResult.rows[0]
+    const existing = raw ? {
+      ...raw,
+      options: Array.isArray(raw.options)
+        ? raw.options.filter((value): value is string => typeof value === 'string')
+        : [],
+    } : null
+    if (existing) {
+      if (!sameFieldShape(existing, field)) {
+        result.conflicts.push(field.fieldKey)
+        continue
+      }
+      if (!existing.archivedAt) {
+        result.skipped.push(field.fieldKey)
+        continue
+      }
+      const revived = await queryWithRLS(
+        input.userId,
+        `UPDATE crm_field_definitions SET archived_at = NULL
+          WHERE id = $1 AND workspace_id = $2 AND
+            (SELECT COUNT(*) FROM crm_field_definitions
+              WHERE workspace_id = $2 AND entity_kind = $3 AND archived_at IS NULL) < 50`,
+        [existing.id, input.workspaceId, field.entityKind],
+      )
+      if ((revived.rowCount ?? 0) > 0) result.revived.push(field.fieldKey)
+      else result.conflicts.push(field.fieldKey)
+      continue
+    }
+    try {
+      const created = await createCrmFieldDefinition({
+        userId: input.userId,
+        workspaceId: input.workspaceId,
+        ...field,
+      })
+      if (created) result.created.push(field.fieldKey)
+      else result.conflicts.push(field.fieldKey)
+    } catch {
+      // A concurrent application may have created the key. Report the race as
+      // a conflict rather than overwriting or claiming success.
+      result.conflicts.push(field.fieldKey)
+    }
+  }
+  return result
+}
+
 export type CrmRecordRow = {
   id: string
   kind: CrmEntityKind
@@ -394,7 +504,45 @@ export function validateCustomFieldValue(
     case 'multi_select':
       return Array.isArray(value)
         && value.every((v) => typeof v === 'string' && definition.options.includes(v))
+    case 'entity_reference':
+      return typeof value === 'string'
+        && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
   }
+}
+
+export async function validateCrmCustomFieldValues(input: {
+  ctx: AccessContext
+  entityKind: CrmEntityKind
+  values: Record<string, unknown>
+  requireAll?: boolean
+}): Promise<CrmFieldDefinition[]> {
+  const config = await getCrmConfig(input.ctx.userId, input.ctx.workspaceId)
+  const definitions = config.fields.filter((field) => field.entityKind === input.entityKind)
+  const byKey = new Map(definitions.map((field) => [field.fieldKey, field]))
+  for (const [key, value] of Object.entries(input.values)) {
+    const definition = byKey.get(key)
+    if (!definition) {
+      const valid = definitions.map((field) => field.fieldKey).join(', ') || '(none configured)'
+      throw new Error(`Unknown custom field '${key}'. Valid fields: ${valid}. Call listCrmFields before retrying.`)
+    }
+    if (!validateCustomFieldValue(definition, value)) {
+      throw new Error(`Invalid ${definition.fieldType} value for custom field '${key}'`)
+    }
+    if (definition.fieldType === 'entity_reference' && value !== null && value !== undefined && value !== '') {
+      const target = await getEntityById(input.ctx, value as string)
+      if (!target || target.attributes.crm_archived_at || !definition.options.includes(target.kind)) {
+        throw new Error(`Reference for custom field '${key}' must be a visible ${definition.options.join(' or ')}`)
+      }
+    }
+  }
+  if (input.requireAll) {
+    for (const definition of definitions.filter((field) => field.isRequired)) {
+      if (!validateCustomFieldValue(definition, input.values[definition.fieldKey])) {
+        throw new Error(`Required custom field is missing: '${definition.fieldKey}'`)
+      }
+    }
+  }
+  return definitions
 }
 
 export async function updateCrmCustomFields(input: {
@@ -406,13 +554,11 @@ export async function updateCrmCustomFields(input: {
   if (!old || !['person', 'company', 'deal'].includes(old.kind)) return null
   const config = await getCrmConfig(input.ctx.userId, input.ctx.workspaceId)
   const definitions = config.fields.filter((f) => f.entityKind === old.kind)
-  const byKey = new Map(definitions.map((f) => [f.fieldKey, f]))
-  for (const [key, value] of Object.entries(input.values)) {
-    const definition = byKey.get(key)
-    if (!definition || !validateCustomFieldValue(definition, value)) {
-      throw new Error(`Invalid custom field value for '${key}'`)
-    }
-  }
+  await validateCrmCustomFieldValues({
+    ctx: input.ctx,
+    entityKind: old.kind as CrmEntityKind,
+    values: input.values,
+  })
   const current = old.attributes.custom_fields
   const custom = current && typeof current === 'object' && !Array.isArray(current)
     ? { ...(current as Record<string, unknown>) }
@@ -1140,32 +1286,47 @@ export async function getCrmReport(ctx: AccessContext): Promise<CrmReport> {
   })))
 }
 
-export function crmRowsToCsv(rows: readonly CrmRecordRow[], kind: CrmEntityKind): string {
+export function crmRowsToCsv(
+  rows: readonly CrmRecordRow[],
+  kind: CrmEntityKind,
+  fields: readonly CrmFieldDefinition[] = [],
+): string {
   const escape = (value: unknown) => {
     const raw = value == null ? '' : String(value)
     return /[",\n\r]/.test(raw) ? `"${raw.replace(/"/g, '""')}"` : raw
   }
   const selected = rows.filter((r) => r.kind === kind)
+  const customFields = fields.filter((field) => field.entityKind === kind)
+  const customValues = (row: CrmRecordRow): unknown[] => {
+    const values = row.attributes.custom_fields
+    const custom = values && typeof values === 'object' && !Array.isArray(values)
+      ? values as Record<string, unknown>
+      : {}
+    return customFields.map((field) => {
+      const value = custom[field.fieldKey]
+      return Array.isArray(value) ? value.join('|') : value
+    })
+  }
   if (kind === 'person') {
     return [
-      ['name', 'email', 'phone', 'company_id', 'tags'].join(','),
+      ['name', 'email', 'phone', 'company_id', 'tags', ...customFields.map((field) => field.label)].map(escape).join(','),
       ...selected.map((r) => [r.name, r.attributes.email, r.attributes.phone,
-        r.attributes.company_id, Array.isArray(r.attributes.tags) ? r.attributes.tags.join('|') : '']
+        r.attributes.company_id, Array.isArray(r.attributes.tags) ? r.attributes.tags.join('|') : '', ...customValues(r)]
         .map(escape).join(',')),
     ].join('\n')
   }
   if (kind === 'company') {
     return [
-      ['name', 'domain', 'tags'].join(','),
+      ['name', 'domain', 'tags', ...customFields.map((field) => field.label)].map(escape).join(','),
       ...selected.map((r) => [r.name, r.attributes.domain,
-        Array.isArray(r.attributes.tags) ? r.attributes.tags.join('|') : '']
+        Array.isArray(r.attributes.tags) ? r.attributes.tags.join('|') : '', ...customValues(r)]
         .map(escape).join(',')),
     ].join('\n')
   }
   return [
-    ['name', 'stage', 'amount', 'currency_code', 'close_date', 'contact_id', 'company_id', 'source'].join(','),
+    ['name', 'stage', 'amount', 'currency_code', 'close_date', 'contact_id', 'company_id', 'source', ...customFields.map((field) => field.label)].map(escape).join(','),
     ...selected.map((r) => [r.name, r.attributes.stage, r.attributes.amount,
       r.attributes.currency_code, r.attributes.close_date, r.attributes.contact_id,
-      r.attributes.company_id, r.attributes.source].map(escape).join(',')),
+      r.attributes.company_id, r.attributes.source, ...customValues(r)].map(escape).join(',')),
   ].join('\n')
 }

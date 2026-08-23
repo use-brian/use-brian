@@ -56,6 +56,10 @@ const predicateSchema = z.object({
   lanes: z.array(z.enum(['extracted', 'assistant'])).max(2).optional(),
   title_matches: z.array(z.string().min(2).max(120)).max(10).optional(),
   channel_refs: z.array(z.string().min(1).max(128)).max(20).optional(),
+  channel_types: z.array(z.string().trim().toLowerCase().min(1).max(64)).max(20).optional(),
+  thread_refs: z.array(z.string().trim().min(1).max(256)).max(20).optional(),
+  operations: z.array(z.enum(['create', 'update_status', 'update_details', 'archive'])).max(4).optional(),
+  authorities: z.array(z.enum(['realtime_thread_target'])).max(1).optional(),
   require: z
     .array(
       z.enum([

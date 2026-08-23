@@ -10,10 +10,11 @@ type FakeData = {
   companies: CompanyRecord[]
   contacts: ContactRecord[]
   deals: DealRecord[]
+  customFields: Map<string, Record<string, unknown>>
 }
 
 function makeFakeStore(): CrmStore & { data: FakeData } {
-  const data: FakeData = { companies: [], contacts: [], deals: [] }
+  const data: FakeData = { companies: [], contacts: [], deals: [], customFields: new Map() }
   let next = 100
   const newId = (prefix: string) => `${prefix}-${String(next++).padStart(8, '0')}-0000-0000-0000-000000000000`.slice(0, 36)
 
@@ -211,6 +212,35 @@ function makeFakeStore(): CrmStore & { data: FakeData } {
         }
       }
       return out
+    },
+    async listCustomFields(_ctx, entityKind) {
+      const fields = [
+        { id: 'field-1', entityKind: 'deal' as const, fieldKey: 'work_type', label: 'Work type', fieldType: 'single_select' as const, options: ['SaaS', 'Services'], isRequired: false, position: 0 },
+        { id: 'field-2', entityKind: 'company' as const, fieldKey: 'referral_source', label: 'Referral source', fieldType: 'entity_reference' as const, options: ['company'], isRequired: false, position: 0 },
+      ]
+      return entityKind ? fields.filter((field) => field.entityKind === entityKind) : fields
+    },
+    async setCustomFields(ctx, entityId, values) {
+      const kind = data.contacts.some((row) => row.id === entityId)
+        ? 'person' as const
+        : data.companies.some((row) => row.id === entityId)
+          ? 'company' as const
+          : data.deals.some((row) => row.id === entityId) ? 'deal' as const : null
+      if (!kind) return null
+      const valid = (await store.listCustomFields!(ctx, kind)).map((field) => field.fieldKey)
+      const unknown = Object.keys(values).find((key) => !valid.includes(key))
+      if (unknown) throw new Error(`Unknown custom field '${unknown}'. Valid fields: ${valid.join(', ')}. Call listCrmFields before retrying.`)
+      const next = { ...(data.customFields.get(entityId) ?? {}), ...values }
+      data.customFields.set(entityId, next)
+      return { id: entityId, entityKind: kind, values: next }
+    },
+    async getCustomFields(_ctx, entityId) {
+      const kind = data.contacts.some((row) => row.id === entityId)
+        ? 'person' as const
+        : data.companies.some((row) => row.id === entityId)
+          ? 'company' as const
+          : data.deals.some((row) => row.id === entityId) ? 'deal' as const : null
+      return kind ? { id: entityId, entityKind: kind, values: data.customFields.get(entityId) ?? {} } : null
     },
   }
   return store
@@ -682,17 +712,51 @@ describe('[COMP:crm/cross-entity] cross-entity filters', () => {
     expect(rows[0].stage).toBe('proposal')
   })
 
+  it('lists the typed field vocabulary and writes only valid stable keys', async () => {
+    const store = makeFakeStore()
+    const tools = createCrmTools(store)
+    await tools.saveDeal.execute({ stage: 'lead' }, ctx)
+    const dealId = store.data.deals[0].id
+
+    const catalog = await tools.listCrmFields.execute({ entity_kind: 'deal' }, ctx)
+    expect(catalog.data).toEqual({ fields: [expect.objectContaining({
+      field_key: 'work_type', field_type: 'single_select', options: ['SaaS', 'Services'],
+    })] })
+
+    const updated = await tools.setCrmCustomFields.execute({
+      id: dealId,
+      values: { work_type: 'SaaS' },
+    }, ctx)
+    expect(updated.isError).toBeFalsy()
+    expect(store.data.customFields.get(dealId)).toEqual({ work_type: 'SaaS' })
+
+    store.data.customFields.set(dealId, { work_type: 'SaaS', archived_field: 'hidden' })
+    const readBack = await tools.listCrmFields.execute({ record_id: dealId }, ctx)
+    expect(readBack.data).toEqual(expect.objectContaining({
+      record: { id: dealId, entity_kind: 'deal', values: { work_type: 'SaaS' } },
+    }))
+
+    const rejected = await tools.setCrmCustomFields.execute({
+      id: dealId,
+      values: { made_up_field: 'x' },
+    }, ctx)
+    expect(rejected.isError).toBe(true)
+    expect(rejected.data).toContain('Valid fields: work_type')
+    expect(rejected.data).toContain('listCrmFields')
+  })
+
   // §17 — every CRM tool must declare requiresCapability='crm' so the
   // per-turn filterToolsByCapabilities gate hides the tool from assistants
   // without an active 'crm' grant. See docs/plans/company-brain.md §17.
-  it('all 13 CRM tools declare requiresCapability="crm"', () => {
+  it('all 15 CRM tools declare requiresCapability="crm"', () => {
     const tools = createCrmTools(makeFakeStore())
     const surface = [
       tools.saveContact, tools.getContact, tools.listContacts, tools.updateContact,
       tools.saveCompany, tools.getCompany, tools.listCompanies, tools.updateCompany,
       tools.saveDeal, tools.getDeal, tools.listDeals, tools.updateDeal, tools.advanceDealStage,
+      tools.listCrmFields, tools.setCrmCustomFields,
     ]
-    expect(surface).toHaveLength(13)
+    expect(surface).toHaveLength(15)
     for (const tool of surface) {
       expect(tool.requiresCapability).toBe('crm')
     }
@@ -709,6 +773,7 @@ describe('[COMP:crm/cross-entity] cross-entity filters', () => {
       tools.saveContact, tools.getContact, tools.listContacts, tools.updateContact,
       tools.saveCompany, tools.getCompany, tools.listCompanies, tools.updateCompany,
       tools.saveDeal, tools.getDeal, tools.listDeals, tools.updateDeal, tools.advanceDealStage,
+      tools.listCrmFields, tools.setCrmCustomFields,
     ]
     // Walk a Zod schema and collect every attached .describe() string, so the
     // sweep reaches field-level descriptions (where the leak actually was),

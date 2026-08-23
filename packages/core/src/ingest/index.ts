@@ -79,3 +79,6 @@ export * from './workflow-trigger.js'
 // Agent-mediated rule edit tools — chat surface for adding / updating /
 // deleting ingest rules per connector instance.
 export * from './tools.js'
+
+// Temporary channel-neutral thread authority + management tools.
+export * from './realtime-thread-targets.js'

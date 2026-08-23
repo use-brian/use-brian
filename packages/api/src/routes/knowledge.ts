@@ -42,6 +42,11 @@ import { promises as fs } from 'node:fs'
 import * as nodePath from 'node:path'
 import { execFile } from 'node:child_process'
 import type { KnowledgeRepoWriter } from '@use-brian/core'
+import {
+  KnowledgeCaptureRuleInputSchema,
+  type KnowledgeCaptureRuleInput,
+  type KnowledgeCaptureRuleStore,
+} from '../knowledge/capture-rules.js'
 
 // Re-exported for existing consumers/tests; the implementations moved to
 // `../knowledge/repo-files.ts` so the assistant repo writer shares them.
@@ -126,6 +131,8 @@ type KnowledgeRouteOptions = {
    * routes answer 503.
    */
   kbMaintenanceStore?: KbMaintenanceStore
+  /** Workspace-wide, default-off interactive assistant capture governance. */
+  knowledgeCaptureRuleStore?: KnowledgeCaptureRuleStore
   workflowStore?: WorkflowStore
   jobStore?: JobStore
   resolvePrimary?: (workspaceId: string) => Promise<string | null>
@@ -1090,6 +1097,7 @@ export function workspaceKnowledgeRoutes({
   knowledgeRepoWriter,
   openLocalPath = openPathWithSystem,
   kbMaintenanceStore,
+  knowledgeCaptureRuleStore,
   workflowStore,
   jobStore,
   resolvePrimary,
@@ -1172,6 +1180,132 @@ export function workspaceKnowledgeRoutes({
       compartments: effectiveReadCompartments(auth.role, auth.compartments, null),
     }
   }
+
+  function requireWorkspaceManager(
+    auth: NonNullable<Awaited<ReturnType<typeof verifyWorkspaceMember>>>,
+    res: import('express').Response,
+  ): boolean {
+    if (auth.role === 'owner' || auth.role === 'admin') return true
+    res.status(403).json({ error: 'Workspace owner or admin required to manage capture rules.' })
+    return false
+  }
+
+  async function validateCaptureDestination(
+    auth: NonNullable<Awaited<ReturnType<typeof verifyWorkspaceMember>>>,
+    input: KnowledgeCaptureRuleInput,
+    res: import('express').Response,
+  ): Promise<boolean> {
+    if (input.targetSourceId === null) return true
+    const source = await knowledgeStore.getSource(input.targetSourceId)
+    if (!source || source.workspaceId !== auth.workspaceId) {
+      res.status(400).json({ error: 'Capture destination is not a knowledge source in this workspace.' })
+      return false
+    }
+    if (!sourceWritable(source)) {
+      res.status(409).json({
+        error: source.sourceType === 'local'
+          ? 'Local write-back is not configured on this server.'
+          : 'The capture destination is read-only. Reconnect it with a read-write token first.',
+        reason: 'not_writable',
+      })
+      return false
+    }
+    return true
+  }
+
+  // ── Workspace automatic-capture rules (mig 458) ───────────────
+  // Empty list is the default and means interactive assistants get no KB
+  // mutation tools. Rules are global to the workspace and may target Manual
+  // entries or any exact writable connected source.
+
+  router.get('/capture-rules', async (req, res) => {
+    const auth = await verifyWorkspaceMember(req as any, res)
+    if (!auth) return
+    if (!knowledgeCaptureRuleStore) {
+      res.status(503).json({ error: 'Knowledge capture rules are not configured on this server.' })
+      return
+    }
+    try {
+      const rules = await knowledgeCaptureRuleStore.listForWorkspace(auth.workspaceId)
+      res.json({ rules, canManage: auth.role === 'owner' || auth.role === 'admin' })
+    } catch (err) {
+      console.error('[knowledge:workspace] list capture rules failed:', err)
+      res.status(500).json({ error: 'Failed to list capture rules' })
+    }
+  })
+
+  router.post('/capture-rules', async (req, res) => {
+    const auth = await verifyWorkspaceMember(req as any, res)
+    if (!auth || !requireWorkspaceManager(auth, res)) return
+    if (!knowledgeCaptureRuleStore) {
+      res.status(503).json({ error: 'Knowledge capture rules are not configured on this server.' })
+      return
+    }
+    const parsed = KnowledgeCaptureRuleInputSchema.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ') })
+      return
+    }
+    try {
+      if (!(await validateCaptureDestination(auth, parsed.data, res))) return
+      const rule = await knowledgeCaptureRuleStore.create({
+        ...parsed.data,
+        workspaceId: auth.workspaceId,
+        createdBy: auth.userId,
+      })
+      res.status(201).json({ rule })
+    } catch (err) {
+      console.error('[knowledge:workspace] create capture rule failed:', err)
+      res.status(500).json({ error: 'Failed to create capture rule' })
+    }
+  })
+
+  router.put('/capture-rules/:id', async (req, res) => {
+    const auth = await verifyWorkspaceMember(req as any, res)
+    if (!auth || !requireWorkspaceManager(auth, res)) return
+    if (!knowledgeCaptureRuleStore) {
+      res.status(503).json({ error: 'Knowledge capture rules are not configured on this server.' })
+      return
+    }
+    const parsed = KnowledgeCaptureRuleInputSchema.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ') })
+      return
+    }
+    try {
+      if (!(await validateCaptureDestination(auth, parsed.data, res))) return
+      const rule = await knowledgeCaptureRuleStore.update({
+        ...parsed.data,
+        id: (req.params as { id: string }).id,
+        workspaceId: auth.workspaceId,
+      })
+      if (!rule) { res.status(404).json({ error: 'Capture rule not found' }); return }
+      res.json({ rule })
+    } catch (err) {
+      console.error('[knowledge:workspace] update capture rule failed:', err)
+      res.status(500).json({ error: 'Failed to update capture rule' })
+    }
+  })
+
+  router.delete('/capture-rules/:id', async (req, res) => {
+    const auth = await verifyWorkspaceMember(req as any, res)
+    if (!auth || !requireWorkspaceManager(auth, res)) return
+    if (!knowledgeCaptureRuleStore) {
+      res.status(503).json({ error: 'Knowledge capture rules are not configured on this server.' })
+      return
+    }
+    try {
+      const deleted = await knowledgeCaptureRuleStore.delete(
+        (req.params as { id: string }).id,
+        auth.workspaceId,
+      )
+      if (!deleted) { res.status(404).json({ error: 'Capture rule not found' }); return }
+      res.status(204).end()
+    } catch (err) {
+      console.error('[knowledge:workspace] delete capture rule failed:', err)
+      res.status(500).json({ error: 'Failed to delete capture rule' })
+    }
+  })
 
   /**
    * Shared resolution for both proposal routes: entry (member-clearance

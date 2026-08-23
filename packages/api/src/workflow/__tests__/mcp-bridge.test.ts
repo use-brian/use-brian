@@ -109,6 +109,7 @@ describe('[COMP:workflow/mcp-bridge] buildWorkflowToolRegistry', () => {
     const deps = { ...makeDeps(new Map<string, Tool>()), knowledgeRepoWriter: writer } as WorkflowToolRegistryDeps
     await buildWorkflowToolRegistry(deps, scope)
     expect(mockInject.mock.calls[0][0].allowKnowledgeWrites).toBe(true)
+    expect(mockInject.mock.calls[0][0].knowledgeWriteAuthorization).toBe('workflow')
     expect(mockInject.mock.calls[0][0].knowledgeRepoWriter).toBe(writer)
     // The executor can only see `requiresConfirmation` on a built-in that was
     // left directly in the map; routing it behind mcp_call would hide it.

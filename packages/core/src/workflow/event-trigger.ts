@@ -221,6 +221,17 @@ export type WorkflowEventDispatcherDeps = {
   findEventTriggeredWorkflows: EventTriggeredWorkflowFinder
   startWorkflowRun: WorkflowRunStarter
   /**
+   * System-side exposure lookup for connector events. The producer workspace
+   * always remains a target; this port returns additional workspaces that
+   * currently hold a live connector grant for the exact instance. Omitted for
+   * minimal boots/tests. A lookup failure fails closed for additional targets
+   * while preserving the producer workspace's existing behavior.
+   */
+  findAdditionalConnectorEventWorkspaces?: (params: {
+    connectorInstanceId: string
+    producerWorkspaceId: string
+  }) => Promise<string[]>
+  /**
    * OPTIONAL second subscriber type: goals parked on `until:event`. Wire BOTH
    * to enable the goal fan-out; if either is absent the dispatcher behaves
    * byte-for-byte as workflow-only (the default — see the `EventWaitingGoal`
@@ -401,6 +412,33 @@ function buildInput(event: DispatchEvent): WorkflowEventInput {
 export function createWorkflowEventDispatcher(
   deps: WorkflowEventDispatcherDeps,
 ): WorkflowEventDispatcher {
+  async function targetEvents(event: DispatchEvent): Promise<DispatchEvent[]> {
+    const findAdditional = deps.findAdditionalConnectorEventWorkspaces
+    if (event.source.type !== 'connector' || !findAdditional) return [event]
+
+    let additionalWorkspaceIds: string[]
+    try {
+      additionalWorkspaceIds = await findAdditional({
+        connectorInstanceId: event.source.connectorInstanceId,
+        producerWorkspaceId: event.workspaceId,
+      })
+    } catch (err) {
+      // The original producer workspace is already a trusted routing result.
+      // A grant lookup outage must not broaden access, and must not regress
+      // that existing target either.
+      deps.onError?.(err, { workspaceId: event.workspaceId })
+      return [event]
+    }
+
+    const workspaceIds = [...new Set([
+      event.workspaceId,
+      ...additionalWorkspaceIds.filter((id) => id.length > 0),
+    ])]
+    return workspaceIds.map((workspaceId) =>
+      workspaceId === event.workspaceId ? event : { ...event, workspaceId },
+    )
+  }
+
   // ── Subscriber 1: event-triggered workflows. The original behavior, kept
   //    byte-for-byte — its early returns scope to this helper, never to the
   //    whole dispatch (so they cannot suppress the goal subscriber below). ──
@@ -469,11 +507,17 @@ export function createWorkflowEventDispatcher(
 
   return {
     async dispatch(event) {
-      // Two independent subscriber fan-outs over one event. Workflows first
-      // (unchanged), then the optional goal subscriber. Neither suppresses the
-      // other; each isolates its own failures to `onError`.
-      await dispatchToWorkflows(event)
-      await dispatchToGoals(event)
+      // One physical connector event may target several explicitly exposed
+      // workspaces. Each target still needs its own matching subscription;
+      // merely holding a grant never persists the event or starts a run.
+      const events = await targetEvents(event)
+      for (const targetEvent of events) {
+        // Two independent subscriber fan-outs over one workspace event.
+        // Workflows first, then the optional goal subscriber. Neither
+        // suppresses the other; each isolates failures to `onError`.
+        await dispatchToWorkflows(targetEvent)
+        await dispatchToGoals(targetEvent)
+      }
     },
   }
 }

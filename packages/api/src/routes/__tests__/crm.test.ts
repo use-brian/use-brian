@@ -27,9 +27,12 @@ vi.mock('../../brain-stream/notify.js', () => ({
 }))
 vi.mock('../../db/crm-r2.js', () => ({
   CRM_FIELD_TYPES: [
-    'text', 'number', 'date', 'boolean', 'single_select', 'multi_select',
+    'text', 'number', 'date', 'boolean', 'single_select', 'multi_select', 'entity_reference',
   ],
+  CRM_PRESET_IDS: ['services_saas', 'enterprise_sales', 'partnership_referral'],
+  CRM_REFERENCE_KINDS: ['person', 'company', 'deal'],
   addCrmDealParticipant: vi.fn(),
+  applyCrmFieldPreset: vi.fn(),
   appendCrmActivity: vi.fn(),
   archiveCrmFieldDefinition: vi.fn(),
   createCrmFieldDefinition: vi.fn(),
@@ -50,13 +53,20 @@ vi.mock('../../db/crm-r2.js', () => ({
   setCrmDealPipelineStage: vi.fn(),
   updateCrmCustomFields: vi.fn(),
   updateCrmStage: vi.fn(),
+  validateCrmCustomFieldValues: vi.fn(),
 }))
 
 import { crmRoutes } from '../crm.js'
 import { resolveWorkspaceViewpoint } from '../../db/workspace-viewpoint.js'
 import { createDeal } from '../../db/crm.js'
 import { getEntityById, updateEntity } from '../../db/entities-store.js'
-import { appendCrmActivity, createCrmPipeline, getCrmConfig } from '../../db/crm-r2.js'
+import {
+  appendCrmActivity,
+  applyCrmFieldPreset,
+  createCrmPipeline,
+  getCrmConfig,
+  validateCrmCustomFieldValues,
+} from '../../db/crm-r2.js'
 
 const WS = 'd126f352-7f5c-48b2-88d0-66694be0c93d'
 const CTX = { userId: 'user-1', workspaceId: WS }
@@ -76,6 +86,7 @@ describe('[COMP:api/crm-r2-route] CRM R2 route authority', () => {
     vi.clearAllMocks()
     vi.mocked(resolveWorkspaceViewpoint).mockResolvedValue(CTX as never)
     vi.mocked(getCrmConfig).mockResolvedValue(CONFIG)
+    vi.mocked(validateCrmCustomFieldValues).mockResolvedValue([])
   })
 
   it('requires authentication and workspace membership', async () => {
@@ -160,5 +171,30 @@ describe('[COMP:api/crm-r2-route] CRM R2 route authority', () => {
       entityId: 'deal-1',
       activityType: 'field_change',
     }))
+    expect(validateCrmCustomFieldValues).toHaveBeenCalledWith({
+      ctx: CTX,
+      entityKind: 'deal',
+      values: {},
+      requireAll: true,
+    })
+  })
+
+  it('reserves reusable field presets for admins and reports idempotent results', async () => {
+    const denied = await request(makeApp('member'))
+      .post(`/api/crm/${WS}/field-presets/services_saas`)
+    expect(denied.status).toBe(403)
+
+    vi.mocked(applyCrmFieldPreset).mockResolvedValue({
+      created: ['work_type'], skipped: ['opportunity_type'], revived: [], conflicts: [],
+    })
+    const applied = await request(makeApp('admin'))
+      .post(`/api/crm/${WS}/field-presets/services_saas`)
+    expect(applied.status).toBe(200)
+    expect(applied.body.created).toEqual(['work_type'])
+    expect(applyCrmFieldPreset).toHaveBeenCalledWith({
+      userId: CTX.userId,
+      workspaceId: WS,
+      presetId: 'services_saas',
+    })
   })
 })

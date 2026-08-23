@@ -15,6 +15,7 @@
  *   - getContact / listContacts
  *   - getCompany / listCompanies
  *   - getDeal     / listDeals
+ *   - listCrmFields (optionally with one record's current values)
  *   - fileRead / fileSearch  → bridged `createFileTools` (workspace filesystem)
  *
  * Write surface (`read_write` keys only):
@@ -23,6 +24,7 @@
  *   - saveContact / updateContact
  *   - saveCompany / updateCompany
  *   - saveDeal    / updateDeal / advanceDealStage
+ *   - setCrmCustomFields
  *   - fileWrite / fileAppend / fileSetMeta / fileDelete
  *   - saveFileToBrain / saveFileBytes
  *
@@ -168,6 +170,8 @@ export type BrainCrmTools = {
   listDeals: Tool
   updateDeal: Tool
   advanceDealStage: Tool
+  listCrmFields: Tool
+  setCrmCustomFields: Tool
 }
 
 export type BrainRetrievalTools = {
@@ -395,6 +399,7 @@ const READ_TOOL_NAMES = new Set<string>([
   'listCompanies',
   'getDeal',
   'listDeals',
+  'listCrmFields',
   // Workspace files (read) — present only when fileTools are wired
   'fileRead',
   'fileSearch',
@@ -1419,6 +1424,8 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
     bridgeCoreTool(opts.crmTools.listDeals, resolveCtx, workspaceId),
     bridgeCoreTool(opts.crmTools.updateDeal, resolveCtx, workspaceId),
     bridgeCoreTool(opts.crmTools.advanceDealStage, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.listCrmFields, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.setCrmCustomFields, resolveCtx, workspaceId),
   ]
 
   // ── File bridges (workspace filesystem). Present only when a blob client is
@@ -1614,7 +1621,8 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
     ...crmBridges.filter((t) =>
       t.name === 'getContact' || t.name === 'listContacts' ||
       t.name === 'getCompany' || t.name === 'listCompanies' ||
-      t.name === 'getDeal' || t.name === 'listDeals',
+      t.name === 'getDeal' || t.name === 'listDeals' ||
+      t.name === 'listCrmFields',
     ),
     ...fileBridges.filter((t) => t.name === 'fileRead' || t.name === 'fileSearch'),
     ...brandBridges.filter((t) => t.name === 'getBrand'),
@@ -1635,7 +1643,7 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       t.name === 'saveContact' || t.name === 'updateContact' ||
       t.name === 'saveCompany' || t.name === 'updateCompany' ||
       t.name === 'saveDeal' || t.name === 'updateDeal' ||
-      t.name === 'advanceDealStage',
+      t.name === 'advanceDealStage' || t.name === 'setCrmCustomFields',
     ),
     ...fileBridges.filter((t) =>
       t.name === 'fileWrite' || t.name === 'fileAppend' ||

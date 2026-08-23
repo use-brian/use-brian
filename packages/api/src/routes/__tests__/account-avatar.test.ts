@@ -123,6 +123,7 @@ function avatarOptions(gcs: GcsFilesClient, resolver = makeResolver(gcs)) {
     blobClient: gcs,
     filesResolver: resolver,
     workspaceMembership: mockWorkspaceMembership,
+    publicApiUrl: 'https://api.example',
   }
 }
 
@@ -155,7 +156,7 @@ describe('[COMP:api/account-avatar] Avatar routes', () => {
       })
 
     expect(res.status).toBe(200)
-    expect(res.body.avatarUrl).toMatch(/\/api\/account\/avatar\/u_1\?v=/)
+    expect(res.body.avatarUrl).toMatch(/^https:\/\/api\.example\/api\/account\/avatar\/u_1\?v=/)
     expect(mockWorkspaceMembership).toHaveBeenCalledWith('u_1', 'ws_1')
     // Blob key keeps workspaceId/avatar-id as the final two path components.
     expect(gcs.blobs.size).toBe(1)

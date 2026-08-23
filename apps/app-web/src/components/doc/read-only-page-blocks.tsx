@@ -127,7 +127,7 @@ function renderInline(node: TipNode, key: string): ReactNode {
     if (mark.type === "bold") el = <strong>{el}</strong>;
     else if (mark.type === "italic") el = <em>{el}</em>;
     else if (mark.type === "strike") el = <s>{el}</s>;
-    else if (mark.type === "code") el = <code className="rounded bg-muted px-1 py-0.5 text-[0.9em]">{el}</code>;
+    else if (mark.type === "code") el = <code>{el}</code>;
     else if (mark.type === "comment") {
       // Commented text shares the editor's `.doc-comment-hl` swatch (so the
       // resting + linked-hover states match across surfaces). `data-comment-thread`
@@ -232,11 +232,11 @@ function renderNode(node: TipNode, key: string): ReactNode {
     case "listItem":
       return <li key={key}>{renderNodes(node.content, key)}</li>;
     case "blockquote":
-      return <blockquote key={key} className="border-l-2 border-border pl-3 text-muted-foreground">{renderNodes(node.content, key)}</blockquote>;
+      return <blockquote key={key}>{renderNodes(node.content, key)}</blockquote>;
     case "codeBlock":
-      return <pre key={key} className="overflow-x-auto rounded-md bg-muted p-3 text-sm"><code>{plainText(node)}</code></pre>;
+      return <pre key={key}><code>{plainText(node)}</code></pre>;
     case "horizontalRule":
-      return <hr key={key} className="my-4 border-border" />;
+      return <hr key={key} />;
     case "hardBreak":
       return <br key={key} />;
     case "text":
@@ -527,12 +527,12 @@ function BlockView({
       );
     }
     case "divider":
-      return <hr {...root} className={cx("my-4 border-border", root.className)} />;
+      return <hr {...root} className={root.className} />;
     case "code": {
       // No inline run to paint inside a code block → an anchored thread tints it.
       const r = rootProps(block, a);
       return (
-        <pre {...r} className={cx("overflow-x-auto rounded-md bg-muted p-3 text-sm", r.className)}>
+        <pre {...r} className={r.className}>
           <code>{String(block.code ?? "")}</code>
         </pre>
       );
@@ -541,7 +541,7 @@ function BlockView({
       const rich = anchorRich(block.richText, a);
       const r = rootProps(block, rich.unplaced);
       return (
-        <blockquote {...r} className={cx("border-l-2 border-border pl-3 text-muted-foreground", r.className)}>
+        <blockquote {...r} className={r.className}>
           {renderNodes(rich.nodes, "rt")}
         </blockquote>
       );
@@ -552,7 +552,7 @@ function BlockView({
       return (
         <div
           {...r}
-          className={cx("flex gap-3 rounded-md border border-border bg-muted/40 px-3 py-2", r.className)}
+          className={cx("doc-callout flex gap-3 rounded-md border border-border bg-muted/40 px-3 py-2", r.className)}
         >
           <div className="flex-shrink-0 pt-[2px] text-lg leading-none">{String(block.icon ?? "💡")}</div>
           <div className="min-w-0 flex-1">
@@ -583,7 +583,7 @@ function BlockView({
           className={cx("flex items-start gap-2", r.className)}
           style={indent ? { marginLeft: indent * 24 } : undefined}
         >
-          <span className="doc-todo-check grid h-7 flex-none place-items-center">
+          <span className="doc-todo-check">
             <input type="checkbox" checked={Boolean(block.checked)} readOnly disabled />
             <span />
           </span>
@@ -627,7 +627,7 @@ function BlockView({
       );
       const rp = rootProps(block, pending);
       return (
-        <div {...rp} className={cx("doc-public-table-wrap my-2 overflow-x-auto", rp.className)}>
+        <div {...rp} className={cx("doc-public-table-wrap overflow-x-auto", rp.className)}>
           <table className="doc-public-table">
             <tbody>
               {cells.map((row, r) => (
@@ -740,7 +740,7 @@ function BlockView({
       // Client-only: chart/diagram widgets touch `window` at render, so we
       // skip them during SSR and paint after mount.
       return mounted && widget ? (
-        <div {...root} className={cx("my-2", root.className)}>
+        <div {...root} className={cx("doc-embed", root.className)}>
           {renderWidget(widget, noop)}
         </div>
       ) : null;
@@ -836,5 +836,9 @@ export function ReadOnlyPageBlocks({
     }
   }
 
-  return <div className="doc-public-body text-[15px] leading-7 text-foreground">{out}</div>;
+  // Font size, line-height, paragraph padding, and every heading level are
+  // shared with `.ProseMirror` in globals.css. Do not add Tailwind typography
+  // utilities here: the utilities layer would override that shared contract and
+  // silently compress the public page again.
+  return <div className="doc-public-body text-foreground">{out}</div>;
 }

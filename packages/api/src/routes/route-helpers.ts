@@ -303,6 +303,8 @@ export type ChannelMcpStores = {
    * caller also sets `allowKnowledgeWrites` on the injection params.
    */
   knowledgeRepoWriter?: KnowledgeRepoWriter
+  /** Default-off workspace governance for interactive KB write exposure. */
+  knowledgeCaptureRuleStore?: import('../knowledge/capture-rules.js').KnowledgeCaptureRuleStore
   gdriveFilesStore?: GDriveFilesStore
   connectorGrantStore?: ConnectorGrantStore
   connectorInstanceStore?: ConnectorInstanceStore
@@ -384,6 +386,8 @@ export type ApplyMcpInjectionParams = {
    * → "Assistant direct edits".
    */
   allowKnowledgeWrites?: boolean
+  /** Newest human turn used by the deterministic capture-rule matcher. */
+  knowledgeCaptureText?: string
 }
 
 /**
@@ -421,6 +425,9 @@ export async function applyMcpInjection(
       knowledgeStore: stores.knowledgeStore,
       knowledgeRepoWriter: stores.knowledgeRepoWriter,
       allowKnowledgeWrites: params.allowKnowledgeWrites === true,
+      knowledgeCaptureRuleStore: stores.knowledgeCaptureRuleStore,
+      knowledgeCaptureText: params.knowledgeCaptureText,
+      knowledgeWriteAuthorization: 'capture',
       gdriveFilesStore: stores.gdriveFilesStore,
       connectorGrantStore: stores.connectorGrantStore,
       connectorInstanceStore: stores.connectorInstanceStore,

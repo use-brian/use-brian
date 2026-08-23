@@ -38,6 +38,7 @@ import { StudioTopbarActions } from "@/components/studio/studio-topbar";
 import { AddSourceModal, type ConnectorInstanceOption } from "@/components/knowledge/add-source-modal";
 import { KbChatPanel } from "@/components/knowledge/kb-chat-panel";
 import { KbMaintenanceForm } from "@/components/knowledge/kb-maintenance-form";
+import { KbCaptureRules } from "@/components/knowledge/kb-capture-rules";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n";
@@ -461,6 +462,8 @@ export default function StudioKnowledgePage() {
           {format(copy.validationWarning, { message: connectWarning })}
         </div>
       )}
+
+      <KbCaptureRules workspaceId={activeId} sources={sources ?? []} />
 
       {loading ? (
         <div className="py-10 text-center text-sm text-muted-foreground">{copy.loading}</div>

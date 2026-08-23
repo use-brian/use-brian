@@ -108,6 +108,13 @@ export type SlackAdapterOptions = {
   botUserId?: string
   config?: SlackAdapterConfig
   /**
+   * Route-owned addressing mode. Parse unmentioned channel messages so the
+   * route can admit an active channel-neutral realtime thread target, then
+   * apply the ordinary mention gate itself. Default false keeps standalone
+   * adapter behavior unchanged.
+   */
+  deferMentionGate?: boolean
+  /**
    * Called when `handleEvent()` parses an inbound message.
    * Optional: if the adapter is constructed purely to send messages
    * (e.g. from the scheduled-job executor), `handleEvent` won't be
@@ -193,7 +200,7 @@ export function createSlackAdapter(options: SlackAdapterOptions): ChannelAdapter
         const isDM = isDirectMessage(event.channel ?? '')
         const text = msg.text ?? ''
         const mentioned = isBotMentioned(text)
-        if (!isDM && requireMention && !mentioned) return null
+        if (!isDM && requireMention && !mentioned && !options.deferMentionGate) return null
 
         return {
           userId: msg.user,
@@ -226,7 +233,7 @@ export function createSlackAdapter(options: SlackAdapterOptions): ChannelAdapter
       const mentioned = isBotMentioned(text)
 
       // In channels, filter by mention requirement
-      if (!isDM && requireMention && !mentioned) return null
+      if (!isDM && requireMention && !mentioned && !options.deferMentionGate) return null
 
       // Extract file metadata for downstream processing
       const files = event.files?.map((f) => ({

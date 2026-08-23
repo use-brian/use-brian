@@ -3,7 +3,15 @@ import { derivePresence } from "../use-presence";
 
 type RawStates = Map<
   number,
-  { user?: { id?: string; name?: string; color?: string }; active?: boolean }
+  {
+    user?: {
+      id?: string;
+      name?: string;
+      avatarUrl?: string | null;
+      color?: string;
+    };
+    active?: boolean;
+  }
 >;
 
 describe("[COMP:app-web/collab-presence] derivePresence", () => {
@@ -56,6 +64,24 @@ describe("[COMP:app-web/collab-presence] derivePresence", () => {
     expect(out).toHaveLength(1);
     // Any tab being the local client marks the merged entry as self.
     expect(out[0].isSelf).toBe(true);
+  });
+
+  it("carries a profile photo through presence and fills it from a newer tab", () => {
+    const states: RawStates = new Map([
+      [10, { user: { id: "u-alice", name: "Alice", color: "#E5484D" } }],
+      [11, {
+        user: {
+          id: "u-alice",
+          name: "Alice",
+          avatarUrl: "https://api.example/avatar/u-alice",
+          color: "#E5484D",
+        },
+      }],
+    ]);
+
+    const out = derivePresence(states, 11);
+    expect(out).toHaveLength(1);
+    expect(out[0].avatarUrl).toBe("https://api.example/avatar/u-alice");
   });
 
   it("skips peers mid-handshake (no usable user field yet)", () => {

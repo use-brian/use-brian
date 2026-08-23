@@ -435,6 +435,28 @@ const LIVE_TASK_ID_CTE = `WITH RECURSIVE chain AS (
 )`
 
 /**
+ * Resolve any row in a task's bi-temporal chain to its live head, retaining
+ * the universal viewer projection. Temporary thread targets persist a lineage
+ * anchor for days, while every edit rotates the live id, so their task gate
+ * must compare resolved heads rather than raw ids.
+ */
+export async function resolveTaskById(
+  ctx: AccessContext,
+  id: string,
+): Promise<TaskRecord | null> {
+  const ap = buildAccessPredicate(ctx, { startIdx: 2 })
+  const result = await queryWithRLS<TaskRow>(
+    ctx.userId,
+    `${LIVE_TASK_ID_CTE}
+     SELECT ${FULL_SELECT} FROM tasks
+      WHERE ${ap.sql}
+        AND id = (SELECT id FROM chain WHERE valid_to IS NULL LIMIT 1)`,
+    [id, ...ap.params],
+  )
+  return result.rows.length === 0 ? null : toRecord(result.rows[0])
+}
+
+/**
  * Bi-temporal supersession update.
  *
  * Each `updateTask` call closes the prior row (`valid_to = now()`,

@@ -5,9 +5,10 @@
  * collaborator face-pile. Subscribes to the shared `HocuspocusProvider`'s
  * `awareness` and returns the deduped set of people currently on the page.
  *
- * Identity + colour come from the `user` field that `CollaborationCursor`
- * writes into awareness (`{ id, name, color }`), so an avatar's ring colour
- * always matches that person's live cursor caret. We dedupe by `id` (the
+ * Identity, profile photo, and colour come from the `user` field that
+ * `CollaborationCursor` writes into awareness (`{ id, name, avatarUrl,
+ * color }`), so an avatar's ring colour always matches that person's live
+ * cursor caret. We dedupe by `id` (the
  * same person open in two tabs collapses to one avatar) and order
  * online-first — actively-viewing people (and yourself, who never dims)
  * cluster on the left, away peers sink right — with yourself last within
@@ -24,6 +25,8 @@ export type PresenceUser = {
   /** Stable per-person id (falls back to the awareness clientID). */
   id: string;
   name: string;
+  /** Profile photo URL. Absent/null falls back to cursor-coloured initials. */
+  avatarUrl?: string | null;
   /** Cursor colour assigned by `colorForUserId` — drives the avatar ring. */
   color: string;
   /** True when this entry includes the local client (this browser tab). */
@@ -37,7 +40,12 @@ export type PresenceUser = {
   active: boolean;
 };
 
-type AwarenessUser = { id?: string; name?: string; color?: string };
+type AwarenessUser = {
+  id?: string;
+  name?: string;
+  avatarUrl?: string | null;
+  color?: string;
+};
 /** The fields this app publishes per Yjs awareness client. */
 type AwarenessState = { user?: AwarenessUser; active?: boolean };
 
@@ -67,11 +75,17 @@ export function derivePresence(
       // and treat them as active if any of their tabs is foregrounded.
       if (isSelf) existing.isSelf = true;
       existing.active = existing.active || active;
+      // During version skew an older tab may omit the photo while a newer tab
+      // publishes it. Keep the first usable URL for the deduped person.
+      if (!existing.avatarUrl && user.avatarUrl) {
+        existing.avatarUrl = user.avatarUrl;
+      }
       continue;
     }
     byId.set(id, {
       id,
       name: user.name,
+      avatarUrl: user.avatarUrl,
       color: user.color ?? "var(--primary)",
       isSelf,
       active,
@@ -123,7 +137,7 @@ export function usePresence(
  * transport but renders its own canonical editors). */
 export function usePublishPresenceIdentity(
   provider: HocuspocusProvider | null,
-  user: { id?: string; name: string } | null,
+  user: { id?: string; name: string; avatarUrl?: string | null } | null,
 ): void {
   useEffect(() => {
     const awareness = provider?.awareness;
@@ -132,9 +146,10 @@ export function usePublishPresenceIdentity(
     awareness.setLocalStateField("user", {
       id,
       name: user.name,
+      avatarUrl: user.avatarUrl,
       color: colorForUserId(id),
     });
-  }, [provider, user?.id, user?.name]);
+  }, [provider, user?.id, user?.name, user?.avatarUrl]);
 }
 
 /**

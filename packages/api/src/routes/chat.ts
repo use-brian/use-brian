@@ -452,6 +452,8 @@ type WebChatOptions = {
    * `allowKnowledgeWrites: true` to `applyMcpInjection`.
    */
   knowledgeRepoWriter?: import('@use-brian/core').KnowledgeRepoWriter
+  /** Workspace capture categories; absent/empty keeps interactive KB writes dark. */
+  knowledgeCaptureRuleStore?: import('../knowledge/capture-rules.js').KnowledgeCaptureRuleStore
   gdriveFilesStore?: import('@use-brian/core').GDriveFilesStore
   skillStore?: import('../db/skill-store.js').SkillStore
   /**
@@ -5294,7 +5296,11 @@ export function chatRoutes(options: WebChatOptions): Router {
       // same tool set or assistants degrade silently when consumers switch
       // transports.
       const connectorUserId = await getConnectorUserId(user.id, assistant.workspaceId)
-      const { enrichConfirmation, unavailable: unavailableCapabilities } = await applyMcpInjection({
+      const {
+        enrichConfirmation,
+        unavailable: unavailableCapabilities,
+        knowledgeCapturePrompt,
+      } = await applyMcpInjection({
         scope: 'chat',
         connectorUserId,
         assistant,
@@ -5326,6 +5332,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         // tools may exist here (D2 — chat-only). The public API shares
         // `applyMcpInjection` and must NOT set this.
         allowKnowledgeWrites: true,
+        knowledgeCaptureText: message ?? '',
         // On-demand introspection lane (ability audit §6-c/d): workspace
         // PRIMARY assistants only — these read workspace-operational state
         // (approvals / scheduled jobs / research runs / session history).
@@ -5335,6 +5342,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             ? options.introspectionTools
             : undefined,
       })
+      if (knowledgeCapturePrompt) privateRuntimeContextParts.push(knowledgeCapturePrompt)
 
       // Inject skills — budget-aware listing + useSkill tool
       if (options.skillStore) {
@@ -6054,7 +6062,8 @@ export function chatRoutes(options: WebChatOptions): Router {
       ])
       const COORDINATOR_RESEARCH_EXTRA_TOOLS = new Set([
         // Write tools — for ingesting research findings.
-        'updateSelfProfile', 'saveContact', 'saveCompany', 'saveDeal', 'createEntity',
+        'updateSelfProfile', 'saveContact', 'saveCompany', 'saveDeal',
+        'setCrmCustomFields', 'createEntity',
         // Update + edge tools — required for the "link existing
         // entities" case ("save all edges with current brain entities
         // according to researches above"). Without these the
@@ -6063,7 +6072,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         // the entity ids the model needs to chain into createEdge or
         // updateContact({ links: [...] }).
         'updateContact', 'updateCompany', 'updateDeal',
-        'listContacts', 'listCompanies', 'listDeals',
+        'listContacts', 'listCompanies', 'listDeals', 'listCrmFields',
         'getContact', 'getCompany', 'getDeal',
         'createEdge',
       ])

@@ -2,9 +2,9 @@
  * CRM store interface.
  *
  * Workspace-scoped contact / company / deal records (see
- * docs/architecture/features/crm.md). Schema is deliberately frozen v1
- * per docs/plans/company-brain.md §15: no custom fields, no custom
- * pipelines.
+ * docs/architecture/features/crm.md). The canonical record shape remains
+ * fixed while CRM R2 adds bounded workspace pipelines and typed custom
+ * fields through the optional catalog methods below.
  *
  * Read methods take `ctx: AccessContext` (WU-4.2b) so the store can
  * compose the universal access predicate (workspace + visibility double
@@ -28,6 +28,28 @@ export type DealStage = (typeof DEAL_STAGES)[number]
  * later. Same convention as `TaskExternalRef`.
  */
 export type CrmExternalRef = Record<string, unknown>
+
+export const CRM_CUSTOM_FIELD_TYPES = [
+  'text', 'number', 'date', 'boolean', 'single_select', 'multi_select',
+  'entity_reference',
+] as const
+export type CrmCustomFieldType = (typeof CRM_CUSTOM_FIELD_TYPES)[number]
+export type CrmCustomFieldEntityKind = 'person' | 'company' | 'deal'
+export type CrmCustomFieldDefinition = {
+  id: string
+  entityKind: CrmCustomFieldEntityKind
+  fieldKey: string
+  label: string
+  fieldType: CrmCustomFieldType
+  options: string[]
+  isRequired: boolean
+  position: number
+}
+export type CrmCustomFieldWriteResult = {
+  id: string
+  entityKind: CrmCustomFieldEntityKind
+  values: Record<string, unknown>
+}
 
 // ── Companies ──────────────────────────────────────────────────────
 
@@ -312,4 +334,23 @@ export type CrmStore = {
     ctx: AccessContext,
     requests: { entity: 'company' | 'contact' | 'deal'; ids: string[] }[],
   ): Promise<Map<string, string>>
+
+  /** Live typed workspace vocabulary used by both chat and Brain MCP. */
+  listCustomFields?(
+    ctx: AccessContext,
+    entityKind?: CrmCustomFieldEntityKind,
+  ): Promise<CrmCustomFieldDefinition[]>
+
+  /** Read current typed values for one visible CRM entity. */
+  getCustomFields?(
+    ctx: AccessContext,
+    entityId: string,
+  ): Promise<CrmCustomFieldWriteResult | null>
+
+  /** Patch one visible CRM entity through the R2 catalog and reference gate. */
+  setCustomFields?(
+    ctx: AccessContext,
+    entityId: string,
+    values: Record<string, unknown>,
+  ): Promise<CrmCustomFieldWriteResult | null>
 }

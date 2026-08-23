@@ -82,14 +82,14 @@ describe('[COMP:context-engine/layer-1-system-prompt] system-prompt constants', 
     expect(RESEARCH_MODE_ADDENDUM.length).toBeLessThan(1500)
   })
 
-  it('LAYER_1_SYSTEM_PROMPT extends "never ask for text confirmation" to brain saves', () => {
+  it('LAYER_1_SYSTEM_PROMPT keeps confirmations in the UI without prescribing KB auto-saves', () => {
     // Regression — deadlock 2026-06-04: the model asked "Want this saved to the
     // brain?" in prose. The base rule must cover brain saves; the askQuestion-
     // not-prose routing lives in the coordinator addenda (kept out of L1 to
     // hold the fresh-user token budget — see prompt-token-cost.test.ts).
     expect(LAYER_1_SYSTEM_PROMPT).toContain('never ask for text confirmation')
-    expect(LAYER_1_SYSTEM_PROMPT).toMatch(/Saving facts, research findings, or entities/)
-    expect(LAYER_1_SYSTEM_PROMPT).toMatch(/Want this saved\?/)
+    expect(LAYER_1_SYSTEM_PROMPT).not.toMatch(/Saving facts, research findings, or entities/)
+    expect(LAYER_1_SYSTEM_PROMPT).not.toMatch(/Want this saved\?/)
   })
 
   it('COORDINATOR_RESEARCH_ADDENDUM routes questions through askQuestion, never prose', () => {

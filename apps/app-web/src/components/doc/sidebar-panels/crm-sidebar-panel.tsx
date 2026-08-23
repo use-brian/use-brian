@@ -25,7 +25,13 @@ import { useSearchParams } from "next/navigation";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import { BRAIN_REFRESH_EVENT } from "@/lib/brain-events";
+import {
+  APPROVALS_REFRESH_EVENT,
+  type ApprovalsRefreshDetail,
+} from "@/lib/approvals-events";
+import { listApprovals, type PendingApprovalRow } from "@/lib/api/approvals";
 import { fetchWorkspaceCrm, type CrmData } from "@/lib/api/crm";
+import { crmEmailApprovalQueue } from "@/lib/crm-r2";
 import {
   crmQuickCounts,
   crmViewFromSearch,
@@ -65,21 +71,38 @@ export function CrmSidebarPanel({ workspaceId }: { workspaceId: string }) {
 
   // ── Live counts (own fetch; refreshed on the surface's mutate signal) ──
   const [data, setData] = useState<CrmData | null>(null);
-  const refresh = useCallback(() => {
-    fetchWorkspaceCrm(workspaceId)
-      .then(setData)
-      .catch(() => setData({ deals: [], contacts: [], companies: [] }));
+  const [approvals, setApprovals] = useState<PendingApprovalRow[]>([]);
+  const refresh = useCallback(async () => {
+    const [crm, pending] = await Promise.allSettled([
+      fetchWorkspaceCrm(workspaceId),
+      listApprovals(workspaceId, { throwOnError: true }),
+    ]);
+    setData(crm.status === "fulfilled" ? crm.value : { deals: [], contacts: [], companies: [] });
+    if (pending.status === "fulfilled") setApprovals(pending.value);
   }, [workspaceId]);
   useEffect(() => {
     setData(null);
-    refresh();
-    window.addEventListener(BRAIN_REFRESH_EVENT, refresh);
-    return () => window.removeEventListener(BRAIN_REFRESH_EVENT, refresh);
-  }, [refresh]);
+    void refresh();
+    const handleBrainRefresh = () => void refresh();
+    const handleApprovalsRefresh = (event: Event) => {
+      const detail = (event as CustomEvent<ApprovalsRefreshDetail>).detail;
+      if (!detail?.workspaceId || detail.workspaceId === workspaceId) void refresh();
+    };
+    window.addEventListener(BRAIN_REFRESH_EVENT, handleBrainRefresh);
+    window.addEventListener(APPROVALS_REFRESH_EVENT, handleApprovalsRefresh);
+    return () => {
+      window.removeEventListener(BRAIN_REFRESH_EVENT, handleBrainRefresh);
+      window.removeEventListener(APPROVALS_REFRESH_EVENT, handleApprovalsRefresh);
+    };
+  }, [refresh, workspaceId]);
 
   const counts = useMemo(
     () => crmQuickCounts(data?.deals ?? [], data?.contacts ?? [], new Date()),
     [data],
+  );
+  const emailDraftCount = useMemo(
+    () => (data ? crmEmailApprovalQueue(data, approvals).length : 0),
+    [approvals, data],
   );
 
   const view = crmViewFromSearch(searchParams);
@@ -111,9 +134,9 @@ export function CrmSidebarPanel({ workspaceId }: { workspaceId: string }) {
             key={section}
             href={section === "deals" ? base : `${base}?section=${section}`}
             aria-current={
-              view.section === section && !view.quick ? "page" : undefined
+              view.review === null && view.section === section && !view.quick ? "page" : undefined
             }
-            className={rowCls(view.section === section && !view.quick)}
+            className={rowCls(view.review === null && view.section === section && !view.quick)}
           >
             <span className="min-w-0 flex-1 truncate">
               {sectionLabels[section]}
@@ -125,6 +148,14 @@ export function CrmSidebarPanel({ workspaceId }: { workspaceId: string }) {
             )}
           </Link>
         ))}
+        <Link
+          href={`${base}?review=email`}
+          aria-current={view.review === "email" ? "page" : undefined}
+          className={rowCls(view.review === "email")}
+        >
+          <span className="min-w-0 flex-1 truncate">{t.r2.emailDrafts}</span>
+          <AttentionBadge count={emailDraftCount} />
+        </Link>
       </div>
 
       {/* Attention presets — live counts as the amber attention badge. */}
@@ -137,8 +168,8 @@ export function CrmSidebarPanel({ workspaceId }: { workspaceId: string }) {
               href={`${base}?filter=${f}${
                 sectionForQuickFilter(f) === "deals" ? "&view=table" : ""
               }`}
-              aria-current={view.quick === f ? "page" : undefined}
-              className={rowCls(view.quick === f)}
+              aria-current={view.review === null && view.quick === f ? "page" : undefined}
+              className={rowCls(view.review === null && view.quick === f)}
             >
               <span className="min-w-0 flex-1 truncate">{quickLabels[f]}</span>
               <AttentionBadge count={counts[f]} />

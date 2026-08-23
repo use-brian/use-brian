@@ -71,6 +71,11 @@ export const PROPOSAL_CLUSTER_MATCH = 0.5
 /** Which write path produced the candidate. */
 export type TaskLane = 'extracted' | 'assistant'
 
+/** Task-rule operation vocabulary. Legacy predicates with no operations are creation-only. */
+export type TaskRuleOperation = 'create' | 'update_status' | 'update_details' | 'archive'
+/** Delegated authority kinds. Direct chat keeps the pre-existing tool behavior. */
+type TaskRuleAuthority = 'realtime_thread_target'
+
 export type TaskRuleEffect = 'deny' | 'require' | 'allow'
 export type TaskRuleStatus = 'active' | 'proposed' | 'disabled'
 export type TaskRuleRequirement =
@@ -131,6 +136,10 @@ export type TaskRulePredicate = {
   /** Case-insensitive substring, tested against the NORMALIZED title. */
   title_matches?: string[]
   channel_refs?: string[]
+  channel_types?: string[]
+  thread_refs?: string[]
+  operations?: TaskRuleOperation[]
+  authorities?: TaskRuleAuthority[]
   /** `effect: 'require'` only. */
   require?: TaskRuleRequirement[]
 }
@@ -174,6 +183,12 @@ export type TaskAdmissionCandidate = {
   sourceKind?: string | null
   /** Slack channel id / connector ref, for `channel_refs` predicates. */
   channelRef?: string | null
+  /** Provider adapter id and thread root for channel-neutral mutation policy. */
+  channelType?: string | null
+  threadRef?: string | null
+  /** Omitted by legacy creation callers and interpreted as `create`. */
+  operation?: TaskRuleOperation
+  authority?: TaskRuleAuthority | null
   sourceEpisodeId?: string | null
   createdByAssistantId?: string | null
   /** Present on automatic extraction after the separate readiness judge. */
@@ -366,6 +381,33 @@ export function matchesPredicate(
     if (!predicate.channel_refs.includes(candidate.channelRef)) return false
   }
 
+  if (predicate.channel_types?.length) {
+    if (!candidate.channelType) return false
+    const candidateType = candidate.channelType.trim().toLowerCase()
+    if (!predicate.channel_types.some((value) => value.trim().toLowerCase() === candidateType)) {
+      return false
+    }
+  }
+
+  if (predicate.thread_refs?.length) {
+    if (!candidate.threadRef) return false
+    if (!predicate.thread_refs.includes(candidate.threadRef)) return false
+  }
+
+  const operation = candidate.operation ?? 'create'
+  if (predicate.operations?.length) {
+    if (!predicate.operations.includes(operation)) return false
+  } else if (operation !== 'create') {
+    // Compatibility boundary: every rule authored before operations existed
+    // governed creation only. Never widen it into mutation authority.
+    return false
+  }
+
+  if (predicate.authorities?.length) {
+    if (!candidate.authority) return false
+    if (!predicate.authorities.includes(candidate.authority)) return false
+  }
+
   return true
 }
 
@@ -441,18 +483,79 @@ export function validateRulePredicate(
     Boolean(predicate.source_kinds?.length) ||
     Boolean(predicate.lanes?.length) ||
     Boolean(predicate.title_matches?.length) ||
-    Boolean(predicate.channel_refs?.length)
+    Boolean(predicate.channel_refs?.length) ||
+    Boolean(predicate.channel_types?.length) ||
+    Boolean(predicate.thread_refs?.length) ||
+    Boolean(predicate.operations?.length) ||
+    Boolean(predicate.authorities?.length)
 
   if (effect === 'deny' && !hasCondition) {
-    return 'A deny rule needs at least one condition (source_kinds, lanes, title_matches, or channel_refs) — an empty predicate would block every task in the workspace.'
+    return 'A deny rule needs at least one condition (source, lane, title, channel, thread, operation, or authority) — an empty predicate would block every task in the workspace.'
   }
   if (effect === 'require' && !predicate.require?.length) {
     return 'A require rule needs at least one requirement (assignee, due, description, resolved_target, explicit_commitment, completion_signal, or agent_ready).'
   }
   if (effect === 'allow' && !hasCondition) {
-    return 'An allow rule needs at least one condition (source_kinds, lanes, title_matches, or channel_refs) — an empty predicate would auto-create every suggestion in the workspace.'
+    return 'An allow rule needs at least one condition (source, lane, title, channel, thread, operation, or authority) — an empty predicate would authorize every matching task action in the workspace.'
   }
   return null
+}
+
+export type TaskMutationPolicyInput = {
+  operation: TaskRuleOperation
+  authority: TaskRuleAuthority
+  title: string
+  channelType: string
+  channelRef: string
+  threadRef: string
+}
+
+export type TaskMutationPolicyDecision =
+  | { allowed: true; matchedRuleId: string }
+  | { allowed: false; matchedRuleId?: string; explanation: string }
+
+/**
+ * Deterministic policy for a task mutation made under delegated thread
+ * authority. Matching deny wins; matching allow is required; no match denies.
+ */
+export function evaluateTaskMutationPolicy(
+  input: TaskMutationPolicyInput,
+  rules: readonly TaskRuleRecord[],
+): TaskMutationPolicyDecision {
+  const candidate: TaskAdmissionCandidate = {
+    workspaceId: '',
+    title: input.title,
+    lane: 'assistant',
+    sourceKind: null,
+    channelRef: input.channelRef,
+    channelType: input.channelType,
+    threadRef: input.threadRef,
+    operation: input.operation,
+    authority: input.authority,
+  }
+
+  for (const rule of rules) {
+    if (rule.status !== 'active' || rule.effect !== 'deny') continue
+    if (!matchesPredicate(rule.predicate, candidate)) continue
+    return {
+      allowed: false,
+      matchedRuleId: rule.id,
+      explanation: rule.nlClause
+        ? `Blocked by the workspace task rule: "${rule.nlClause}".`
+        : `Blocked by workspace task rule ${rule.id}.`,
+    }
+  }
+
+  for (const rule of rules) {
+    if (rule.status !== 'active' || rule.effect !== 'allow') continue
+    if (!matchesPredicate(rule.predicate, candidate)) continue
+    return { allowed: true, matchedRuleId: rule.id }
+  }
+
+  return {
+    allowed: false,
+    explanation: `No active task rule allows ${input.operation} from a realtime thread target.`,
+  }
 }
 
 // ── The decision ─────────────────────────────────────────────────────────────
@@ -793,7 +896,12 @@ export function buildTaskPolicyPromptBlock(
       rules
         // An allow rule is a permission, not a rejection - its sentence must
         // never appear under "do NOT emit them".
-        .filter((r) => r.status === 'active' && r.effect !== 'allow' && r.nlClause?.trim())
+        .filter((r) =>
+          r.status === 'active' &&
+          r.effect !== 'allow' &&
+          (!r.predicate.operations?.length || r.predicate.operations.includes('create')) &&
+          r.nlClause?.trim(),
+        )
         .map((r) => r.nlClause!.trim()),
     ),
   ]

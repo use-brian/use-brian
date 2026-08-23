@@ -10,6 +10,17 @@ import type { AttachmentCollector } from '../workspace-files/attachments.js'
 import type { LLMProvider } from '../providers/types.js'
 import type { AccessContext } from '../security/access-context.js'
 
+type TaskAuthorityContext = {
+  kind: 'realtime_thread_target'
+  targetId: string
+  channelType: string
+  channelRef: string
+  threadRef: string
+  /** Lineage anchors; task tools forward-resolve each one before comparison. */
+  taskIds: readonly string[]
+  expiresAt: string
+}
+
 // ── Tool context ───────────────────────────────────────────────
 
 export type ToolContext = {
@@ -27,6 +38,12 @@ export type ToolContext = {
    * fall back to `channelId` when this field is absent.
    */
   channelSessionId?: string
+  /**
+   * Narrow delegated task authority carried by a temporary channel thread
+   * target. Presence never means "allow": task tools require a bound lineage
+   * plus a matching active task rule for every requested operation.
+   */
+  taskAuthority?: TaskAuthorityContext
   /** Team ID when the assistant is team-owned. Used by saveMemory for team scope. */
   workspaceId?: string | null
   /** Immutable provider lane captured by workers spawned from this turn. */

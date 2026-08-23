@@ -1,5 +1,5 @@
 import type { EntityLinksStore, TaskRecord, TaskStore } from '@use-brian/core'
-import { createTask, findRecentDuplicateTask, findTasksByExternalRefSystem, getTaskById, listTasks, updateTask } from './tasks.js'
+import { createTask, findRecentDuplicateTask, findTasksByExternalRefSystem, getTaskById, listTasks, resolveTaskById, updateTask } from './tasks.js'
 
 /**
  * Create a TaskStore backed by PostgreSQL.
@@ -66,6 +66,9 @@ export function createDbTaskStore(
     },
     getById(ctx, id) {
       return getTaskById(ctx, id)
+    },
+    resolveById(ctx, id) {
+      return resolveTaskById(ctx, id)
     },
     list(ctx, filters) {
       return listTasks(ctx, filters)

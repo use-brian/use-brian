@@ -73,6 +73,7 @@ export type WhatsAppCloudRouteOptions = {
   connectorInstanceStore?: import('../db/connector-instance-store.js').ConnectorInstanceStore
   workspaceToolPolicyStore?: import('../db/workspace-tool-policy-store.js').WorkspaceToolPolicyStore
   knowledgeStore?: import('@use-brian/core').KnowledgeStoreInterface
+  knowledgeCaptureRuleStore?: import('../knowledge/capture-rules.js').KnowledgeCaptureRuleStore
   gdriveFilesStore?: import('@use-brian/core').GDriveFilesStore
   workspaceFilesStore?: import('@use-brian/core').WorkspaceFilesStore
   filesApi?: import('@use-brian/core').FilesApi
@@ -376,6 +377,7 @@ export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router 
       connectorInstanceStore: options.connectorInstanceStore,
       workspaceToolPolicyStore: options.workspaceToolPolicyStore,
       knowledgeStore: options.knowledgeStore,
+      knowledgeCaptureRuleStore: options.knowledgeCaptureRuleStore,
       gdriveFilesStore: options.gdriveFilesStore,
       workspaceFilesStore: options.workspaceFilesStore,
       filesApi: options.filesApi,

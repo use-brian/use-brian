@@ -93,6 +93,9 @@ const BUILTIN_TOOL_CATALOG: ToolCatalogItem[] = [
   { name: "getTime", description: "Get the current date and time", classification: "read" },
   { name: "createTask", description: "Create a task to track work", classification: "write" },
   { name: "updateTask", description: "Update or complete a task", classification: "write" },
+  { name: "setRealtimeThreadTarget", description: "Temporarily listen and act in one exact messaging thread", classification: "write" },
+  { name: "listRealtimeThreadTargets", description: "List active realtime messaging-thread targets", classification: "read" },
+  { name: "removeRealtimeThreadTarget", description: "Stop listening to a realtime messaging-thread target", classification: "write" },
 ];
 
 /**

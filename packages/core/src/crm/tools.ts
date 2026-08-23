@@ -21,6 +21,7 @@ import {
   type CompanyRecord,
   type ContactListRow,
   type ContactRecord,
+  type CrmCustomFieldEntityKind,
   type CrmStore,
   type DealListRow,
   type DealRecord,
@@ -29,11 +30,13 @@ import {
 
 /**
  * Tools that let the primary assistant manage workspace-scoped CRM
- * records via chat. 13 tools across three entities:
+ * records via chat. 15 tools across three canonical entities plus the typed
+ * workspace field catalog:
  *
  *   contacts:  saveContact, getContact, listContacts, updateContact
  *   companies: saveCompany, getCompany, listCompanies, updateCompany
  *   deals:     saveDeal, getDeal, listDeals, updateDeal, advanceDealStage
+ *   typed:     listCrmFields, setCrmCustomFields
  *
  * Same-shape helpers + structure as `createTaskTools` (Q1) — see
  * docs/architecture/features/crm.md.
@@ -554,6 +557,8 @@ export function createCrmTools(
   listDeals: Tool
   updateDeal: Tool
   advanceDealStage: Tool
+  listCrmFields: Tool
+  setCrmCustomFields: Tool
 } {
   // ── Contacts ────────────────────────────────────────────────────
   const saveContact = buildTool({
@@ -1315,9 +1320,121 @@ export function createCrmTools(
     },
   })
 
+  const listCrmFields = buildTool({
+    name: 'listCrmFields',
+    requiresCapability: 'crm',
+    description:
+      'List the current workspace custom-field catalog. Call this before reading or writing workspace-specific CRM dimensions. ' +
+      'The result is the complete valid vocabulary: stable field_key, entity_kind, field_type, options, required state, and position. ' +
+      'Pass record_id when you also need the current custom values on one visible contact, company, or deal. ' +
+      'For entity_reference fields, options are the allowed target kinds. Never guess a field key from a label.',
+    inputSchema: z.object({
+      entity_kind: z.enum(['person', 'company', 'deal']).optional(),
+      record_id: idShape.optional(),
+    }),
+    isConcurrencySafe: true,
+    isReadOnly: true,
+    async execute(input, context) {
+      const gate = workspaceGate(context.workspaceId)
+      if (gate) return gate
+      if (!store.listCustomFields) {
+        return { data: 'Typed CRM fields are not available on this deployment.', isError: true }
+      }
+      const record = input.record_id
+        ? await store.getCustomFields?.(readCtxFor(context), input.record_id)
+        : null
+      if (input.record_id && !record) {
+        return {
+          data: `CRM entity ${input.record_id} was not found or is not visible. Re-resolve it with listContacts, listCompanies, or listDeals before retrying.`,
+          isError: true,
+        }
+      }
+      if (record && input.entity_kind && record.entityKind !== input.entity_kind) {
+        return {
+          data: `CRM entity ${record.id} is a ${record.entityKind}, not a ${input.entity_kind}. Re-call listCrmFields with entity_kind=${record.entityKind}.`,
+          isError: true,
+        }
+      }
+      const fields = await store.listCustomFields(
+        readCtxFor(context),
+        (record?.entityKind ?? input.entity_kind) as CrmCustomFieldEntityKind | undefined,
+      )
+      const visibleFieldKeys = new Set(fields.map((field) => field.fieldKey))
+      return {
+        data: {
+          fields: fields.map((field) => ({
+            field_key: field.fieldKey,
+            label: field.label,
+            entity_kind: field.entityKind,
+            field_type: field.fieldType,
+            options: field.options,
+            is_required: field.isRequired,
+            position: field.position,
+          })),
+          ...(record ? { record: {
+            id: record.id,
+            entity_kind: record.entityKind,
+            values: Object.fromEntries(
+              Object.entries(record.values).filter(([key]) => visibleFieldKeys.has(key)),
+            ),
+          } } : {}),
+        },
+      }
+    },
+  })
+
+  const setCrmCustomFields = buildTool({
+    name: 'setCrmCustomFields',
+    requiresCapability: 'crm',
+    description:
+      'Patch typed custom fields on one visible CRM entity. Call listCrmFields first and use only its stable field_key values. ' +
+      'Pass null to clear an optional field. Select values must come from the catalog. An entity_reference value must be a visible CRM entity id of an allowed kind. ' +
+      'This does not create field definitions and must never be used with guessed keys.',
+    inputSchema: z.object({
+      id: idShape.describe('Visible contact, company, or deal UUID.'),
+      values: z.record(z.unknown()).refine(
+        (values) => Object.keys(values).length > 0 && Object.keys(values).length <= 50,
+        'values must contain between 1 and 50 field keys',
+      ),
+    }),
+    async execute(input, context) {
+      const gate = workspaceGate(context.workspaceId)
+      if (gate) return gate
+      if (!store.setCustomFields) {
+        return { data: 'Typed CRM fields are not available on this deployment.', isError: true }
+      }
+      try {
+        const updated = await store.setCustomFields(
+          ctxFor({
+            userId: context.userId,
+            assistantId: context.assistantId,
+            workspaceId: context.workspaceId!,
+            assistantKind: context.assistantKind,
+            clearance: context.clearance,
+            compartments: context.compartments,
+          }),
+          input.id,
+          input.values,
+        )
+        if (!updated) {
+          return {
+            data: `CRM entity ${input.id} was not found or is not visible. Re-resolve it with listContacts, listCompanies, or listDeals before retrying.`,
+            isError: true,
+          }
+        }
+        return {
+          data: `Updated custom fields on ${updated.entityKind} [${updated.id}]: ${JSON.stringify(updated.values)}`,
+        }
+      } catch (error) {
+        return { data: error instanceof Error ? error.message : String(error), isError: true }
+      }
+    },
+  })
+
   return {
     saveContact, getContact, listContacts, updateContact,
     saveCompany, getCompany, listCompanies, updateCompany,
     saveDeal, getDeal, listDeals, updateDeal, advanceDealStage,
+    listCrmFields, setCrmCustomFields,
   }
 }

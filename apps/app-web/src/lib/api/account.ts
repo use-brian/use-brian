@@ -12,9 +12,9 @@
  * - `POST /api/account/avatar` (multipart `file` + active `workspaceId`) uploads a profile photo.
  * - `DELETE /api/account/avatar` removes it.
  *
- * After any of these, callers should re-pull the `user` cookie via the
- * `/api/auth/refresh` bridge so the chrome (sidebar, switcher) updates without
- * a full reload.
+ * After any of these, callers should re-pull the profile-bearing `user` cookie.
+ * Dev/OSS can use the local `/api/auth/refresh` bridge; hosted app-web must use
+ * the primary site's top-level `refresh-and-return` round trip.
  */
 
 import { authFetch } from "@/lib/auth-fetch";
@@ -23,6 +23,27 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
 /** 5 MB — mirrors the backend cap on `POST /api/account/avatar`. */
 export const MAX_AVATAR_BYTES = 5 * 1024 * 1024;
+
+export type ProfileRefreshPlan =
+  | { kind: "local" }
+  | { kind: "redirect"; url: string };
+
+/**
+ * Decide how app-web must refresh the profile-bearing `user` cookie after an
+ * account mutation. Hosted app-web cannot call its own refresh route: only the
+ * primary site may rotate the shared `.usebrian.ai` cookies, so it needs a
+ * top-level refresh-and-return round trip. Dev and OSS own their cookies
+ * locally and can use the same-origin POST bridge without navigating away.
+ */
+export function planProfileRefresh(
+  primaryAuthOrigin: string | null,
+  currentUrl: string,
+): ProfileRefreshPlan {
+  if (!primaryAuthOrigin) return { kind: "local" };
+  const url = new URL("/api/auth/refresh-and-return", primaryAuthOrigin);
+  url.searchParams.set("next", currentUrl);
+  return { kind: "redirect", url: url.toString() };
+}
 
 /** Update the user's display name. Resolves `true` on success. */
 export async function updateDisplayName(name: string): Promise<boolean> {

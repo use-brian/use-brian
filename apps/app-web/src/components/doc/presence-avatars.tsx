@@ -15,6 +15,7 @@
  * [COMP:app-web/presence-avatars]
  */
 
+import { useEffect, useState } from "react";
 import { getInitials } from "@/lib/user";
 import { readableTextColor } from "@/lib/collab/cursor-color";
 import { useT, format } from "@/lib/i18n/client";
@@ -66,7 +67,7 @@ export function PresenceAvatars({
               zIndex: shown.length - i,
             }}
           >
-            {getInitials(u.name)}
+            <PresenceAvatarFace user={u} />
           </span>
         );
       })}
@@ -84,4 +85,23 @@ export function PresenceAvatars({
       )}
     </div>
   );
+}
+
+function PresenceAvatarFace({ user }: { user: PresenceUser }) {
+  const [failed, setFailed] = useState(false);
+  useEffect(() => setFailed(false), [user.avatarUrl]);
+
+  if (user.avatarUrl && !failed) {
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img
+        src={user.avatarUrl}
+        alt=""
+        className="size-full rounded-full object-cover"
+        onError={() => setFailed(true)}
+      />
+    );
+  }
+
+  return <>{getInitials(user.name)}</>;
 }

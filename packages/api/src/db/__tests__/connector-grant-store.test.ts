@@ -197,6 +197,33 @@ describe('[COMP:api/connector-grant-store] createConnectorGrantStore', () => {
     })
   })
 
+  describe('listGrantedWorkspaceIdsForInstanceSystem', () => {
+    it('returns every workspace that currently exposes the connector instance', async () => {
+      mockQuery.mockResolvedValueOnce({
+        rows: [{ workspaceId: 'ws_a' }, { workspaceId: 'ws_b' }],
+        rowCount: 2,
+      } as never)
+
+      await expect(
+        store.listGrantedWorkspaceIdsForInstanceSystem('ci_1'),
+      ).resolves.toEqual(['ws_a', 'ws_b'])
+
+      const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]]
+      expect(sql).toContain('FROM connector_grant')
+      expect(sql).toContain('connector_instance_id = $1')
+      expect(sql).toContain("target_type = 'workspace'")
+      expect(params).toEqual(['ci_1'])
+    })
+
+    it('returns no event targets after the last exposure is revoked', async () => {
+      mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+
+      await expect(
+        store.listGrantedWorkspaceIdsForInstanceSystem('ci_1'),
+      ).resolves.toEqual([])
+    })
+  })
+
   describe('listByGrantor', () => {
     it('lists by grantor through RLS', async () => {
       mockQueryWithRLS.mockResolvedValueOnce({

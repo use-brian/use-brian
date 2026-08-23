@@ -98,6 +98,7 @@ export type MsTeamsRouteOptions = {
   connectorGrantStore?: import('../db/connector-grant-store.js').ConnectorGrantStore
   connectorInstanceStore?: import('../db/connector-instance-store.js').ConnectorInstanceStore
   knowledgeStore?: import('@use-brian/core').KnowledgeStoreInterface
+  knowledgeCaptureRuleStore?: import('../knowledge/capture-rules.js').KnowledgeCaptureRuleStore
   gdriveFilesStore?: import('@use-brian/core').GDriveFilesStore
   workspaceFilesStore?: import('@use-brian/core').WorkspaceFilesStore
   /** Transient upload cache (`file_cache`). When present, inbound images are
@@ -448,6 +449,7 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
       connectorGrantStore: options.connectorGrantStore,
       connectorInstanceStore: options.connectorInstanceStore,
       knowledgeStore: options.knowledgeStore,
+      knowledgeCaptureRuleStore: options.knowledgeCaptureRuleStore,
       gdriveFilesStore: options.gdriveFilesStore,
       workspaceFilesStore: options.workspaceFilesStore,
       artifactPromoter: options.artifactPromoter ?? null,

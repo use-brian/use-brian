@@ -487,12 +487,18 @@
      doc editing/reading surface only. The page headline is owned
      separately by `page-title.tsx`, so in-body headings sit just beneath
      it. */
-  .doc-collab-editor .ProseMirror {
+  /* The editable and public read-only projections share one base type scale.
+     Keep this declaration grouped: the public renderer is deliberately static,
+     but the authored page must not shrink or loosen when it is shared. */
+  .doc-collab-editor .ProseMirror,
+  .doc-public-body {
     font-size: 16px;
     /* Notion's body leading. Measured from Notion: same-list items render at
        a uniform 24px pitch = 1.5 × 16px with no inter-item spacing. (Was 1.7,
        which made every body line + list row ~3px too tall.) */
     line-height: 1.5;
+  }
+  .doc-collab-editor .ProseMirror {
     /* Left gutter that hosts the hover drag handle (drag-handle.tsx). The
        handle is a sibling element the plugin hides the moment the cursor
        leaves `.ProseMirror` for any non-handle element — so it must live
@@ -548,7 +554,8 @@
      these and MUST move with them.
      All four levels render in `--font-display` (OS UI font first) so their
      weights below are REAL, not PingFang faux-bold — see the var's note. */
-  .doc-collab-editor .ProseMirror :is(h1, h2, h3, h4) {
+  .doc-collab-editor .ProseMirror :is(h1, h2, h3, h4),
+  .doc-public-body :is(h1, h2, h3, h4) {
     font-family: var(--font-display);
     /* Notion sets headings at NEUTRAL tracking — no negative letter-spacing. We
        previously tightened to −0.015em for an Apple/Linear display look, but that
@@ -559,84 +566,43 @@
   }
   /* Heading weight = Notion's SEMIBOLD (600) at every level — the screenshot's
      lighter headings, not the earlier 800/700 extra-bold. */
-  .doc-collab-editor .ProseMirror h1 {
+  .doc-collab-editor .ProseMirror h1,
+  .doc-public-body h1 {
     font-size: 1.75rem;
     font-weight: 600;
     line-height: 1.3;
     margin: 2.5rem 0 0.75rem;
     padding: 3px 0;
   }
-  .doc-collab-editor .ProseMirror h2 {
+  .doc-collab-editor .ProseMirror h2,
+  .doc-public-body h2 {
     font-size: 1.5rem;
     font-weight: 600;
     line-height: 1.3;
     margin: 2rem 0 0.75rem;
     padding: 3px 0;
   }
-  .doc-collab-editor .ProseMirror h3 {
+  .doc-collab-editor .ProseMirror h3,
+  .doc-public-body h3 {
     font-size: 1.25rem;
     font-weight: 600;
     line-height: 1.3;
     margin: 1.75rem 0 0.75rem;
     padding: 3px 0;
   }
-  .doc-collab-editor .ProseMirror h4 {
+  .doc-collab-editor .ProseMirror h4,
+  .doc-public-body h4 {
     font-size: 1.125rem;
     font-weight: 600;
     line-height: 1.3;
     margin: 1.5rem 0 0.75rem;
     padding: 3px 0;
   }
-  /* Public / published read-only page body (read-only-page-blocks.tsx). The
-     renderer emits semantic tags with no per-tag classes, so without this the
-     Tailwind preflight reset collapses every heading to body size ("formatting
-     gone"). Mirrors the editor's display scale so a shared page reads like the
-     authored one. Spacing is driven here (the container dropped `space-y`). */
-  /* Inter-block rhythm. Applied to the body AND to each toggle body, so blocks
-     nested under a `<details>` get the SAME gaps as top-level ones. The editor
-     gets this for free — its per-block margins (`.ProseMirror h2`, `… p`) apply
-     to every descendant, including inside a toggle. The read-only renderer drives
-     spacing from the container instead, so a direct-child-only `> * + *` never
-     reaches into `.doc-toggle-body`: nested headings/paragraphs would collapse
-     together (no heading gap, no paragraph breathing room). The `.doc-toggle-body`
-     selector uses a descendant combinator, so toggles nested in toggles inherit
-     the rhythm at every depth too. */
-  .doc-public-body > * + *,
-  .doc-public-body .doc-toggle-body > * + * {
-    margin-top: 0.5rem;
-  }
-  .doc-public-body > :first-child {
-    margin-top: 0;
-  }
-  .doc-public-body :is(h1, h2, h3, h4) {
-    font-family: var(--font-display);
-    /* Neutral tracking + semibold weight, mirroring the editor (Notion match). */
-    letter-spacing: normal;
-    line-height: 1.3;
-  }
-  /* Headings get the wider pre-heading gap whether at the top level or nested in
-     a toggle body — matches the editor, where a body heading keeps its full
-     `margin-top` (only the toggle SUMMARY line is zeroed, never the body blocks). */
-  .doc-public-body > :is(h1, h2, h3, h4),
-  .doc-public-body .doc-toggle-body > :is(h1, h2, h3, h4) {
-    margin-top: 1.75rem;
-  }
-  .doc-public-body h1 {
-    font-size: 1.75rem;
-    font-weight: 600;
-  }
-  .doc-public-body h2 {
-    font-size: 1.5rem;
-    font-weight: 600;
-  }
-  .doc-public-body h3 {
-    font-size: 1.25rem;
-    font-weight: 600;
-  }
-  .doc-public-body h4 {
-    font-size: 1.125rem;
-    font-weight: 600;
-  }
+  /* The public projection emits the same semantic heading nodes as the editor.
+     Their scale AND their per-level margins/padding are therefore owned by the
+     grouped rules above, not a public-only approximation. This is what keeps an
+     empty list row followed by a heading, or a heading nested in a toggle, at
+     the exact authored rhythm. */
   /* Lists — markers + nesting cycle like the editor (and Notion): bullets
      ● disc → ○ circle → ▪ square, numbers 1. → a. → i., repeating every 3 levels.
      Mirrors the editor's DRAWN-marker treatment exactly (see the `.ProseMirror`
@@ -772,7 +738,8 @@
     border-collapse: collapse;
     width: auto;
     max-width: 100%;
-    margin: 0.5rem 0;
+    margin: 0.75rem 0;
+    overflow: hidden;
   }
   .doc-public-body .doc-public-table td,
   .doc-public-body .doc-public-table th {
@@ -780,6 +747,8 @@
     padding: 0.375rem 0.625rem;
     vertical-align: top;
     text-align: left;
+    min-width: 5rem;
+    position: relative;
   }
   .doc-public-body .doc-public-table th {
     background: var(--muted);
@@ -798,7 +767,8 @@
      outer breathing room between the divider and its neighbours.
      `gripReferenceRect` (block-drag-handle.ts) special-cases <hr> so the grip
      centres on the rule, not on a text first-line band that would float below. */
-  .doc-collab-editor .ProseMirror hr {
+  .doc-collab-editor .ProseMirror hr,
+  .doc-public-body hr {
     box-sizing: content-box;
     height: 1px;
     margin: 0.75rem 0;
@@ -806,6 +776,8 @@
     border: none;
     background-color: var(--border);
     background-clip: content-box;
+  }
+  .doc-collab-editor .ProseMirror hr {
     cursor: grab;
   }
   /* The page title (page-title.tsx) shares the heading display face so the
@@ -820,9 +792,17 @@
   /* Every text block gets 3px top + 3px bottom padding (non-collapsing), so
      adjacent paragraphs sit ~6px apart on top of the 1.5 leading → ~30px row
      pitch. Notion uses the same 3px block padding. */
-  .doc-collab-editor .ProseMirror p {
+  .doc-collab-editor .ProseMirror p,
+  .doc-public-body p {
     margin: 0;
     padding: 3px 0;
+  }
+  /* ProseMirror keeps an empty paragraph/list item one line tall with its
+     trailing-break node. Static HTML has no such node, so preserve the same
+     30px row (24px line + 3px padding on each side) explicitly. This is
+     especially visible for intentionally blank bullets followed by a heading. */
+  .doc-public-body p:empty {
+    min-height: calc(1.5em + 6px);
   }
   /* Empty-line placeholder (Tiptap `@tiptap/extension-placeholder`): paints the
      "Press 'space' for AI or '/' for commands" hint as a non-selectable
@@ -1083,6 +1063,13 @@
     height: calc(1.5em + 6px);
     user-select: none;
   }
+  .doc-public-body .doc-todo-check {
+    flex: 0 0 auto;
+    display: grid;
+    place-items: center;
+    height: calc(1.5em + 6px);
+    user-select: none;
+  }
   .doc-collab-editor .ProseMirror ul[data-type="taskList"] li > div {
     flex: 1 1 auto;
     min-width: 0;
@@ -1158,7 +1145,8 @@
   .doc-public-body .doc-todo-check > input[type="checkbox"]:checked + span {
     transform: scale(1);
   }
-  .doc-collab-editor .ProseMirror blockquote {
+  .doc-collab-editor .ProseMirror blockquote,
+  .doc-public-body blockquote {
     border-left: 3px solid var(--border);
     padding-left: 0.875rem;
     color: var(--muted-foreground);
@@ -1168,13 +1156,15 @@
        blocks (≈ 14px above/below). */
     margin: 0.5rem 0;
   }
-  .doc-collab-editor .ProseMirror :not(pre) > code {
+  .doc-collab-editor .ProseMirror :not(pre) > code,
+  .doc-public-body :not(pre) > code {
     font-size: 0.875em;
     background: var(--muted);
     padding: 0.1em 0.35em;
     border-radius: 0.25rem;
   }
-  .doc-collab-editor .ProseMirror pre {
+  .doc-collab-editor .ProseMirror pre,
+  .doc-public-body pre {
     background: var(--muted);
     border-radius: 0.5rem;
     padding: 0.75rem 1rem;
@@ -1444,7 +1434,10 @@
      in the editor rhythm. Higher specificity overrides the utility class. */
   .doc-collab-editor .ProseMirror .doc-callout,
   .doc-collab-editor .ProseMirror .doc-toggle,
-  .doc-collab-editor .ProseMirror .doc-embed {
+  .doc-collab-editor .ProseMirror .doc-embed,
+  .doc-public-body .doc-callout,
+  .doc-public-body .doc-toggle,
+  .doc-public-body .doc-embed {
     margin-top: 0.75rem;
     margin-bottom: 0.75rem;
   }
