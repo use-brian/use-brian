@@ -32,6 +32,7 @@ function pendingRow(over: Record<string, unknown> = {}) {
 
 function mentionRow(over: Record<string, unknown> = {}) {
   return {
+    kind: 'mention',
     id: 'n-1',
     pageId: 'p-1',
     pageTitle: 'Weekly',
@@ -39,6 +40,25 @@ function mentionRow(over: Record<string, unknown> = {}) {
     actorUserId: 'u-2',
     actorName: 'Ada',
     preview: 'hey @you',
+    createdAt: '2026-03-01T00:00:00.000Z',
+    readAt: null,
+    ...over,
+  }
+}
+
+// Room mention (migration 452, PH2 of docs/plans/room-human-mentions.md) —
+// the route is store-shape-agnostic, so these exercise that a room_mention
+// row rides the same merged payload + read path as a page mention.
+function roomMentionRow(over: Record<string, unknown> = {}) {
+  return {
+    kind: 'room_mention',
+    id: 'n-2',
+    sessionId: 's-1',
+    sessionMessageId: 'm-1',
+    roomTitle: 'Product Room',
+    actorUserId: 'u-2',
+    actorName: 'Ada',
+    preview: '@Jane Doe can you look at this',
     createdAt: '2026-03-01T00:00:00.000Z',
     readAt: null,
     ...over,
@@ -104,6 +124,19 @@ describe('[COMP:api/inbox-routes] inboxRoutes', () => {
     expect(res.body.unreadMentionCount).toBe(1)
   })
 
+  it('merges a room mention alongside a page mention in the same lane (PH2)', async () => {
+    const { app } = makeApp({
+      mentions: [mentionRow(), roomMentionRow()],
+    })
+    const res = await request(app).get(`/api/workspaces/${WS}/inbox`).expect(200)
+    expect(res.body.mentions).toHaveLength(2)
+    expect(res.body.unreadMentionCount).toBe(2)
+    const kinds = res.body.mentions.map((m: { kind: string }) => m.kind).sort()
+    expect(kinds).toEqual(['mention', 'room_mention'])
+    const room = res.body.mentions.find((m: { kind: string }) => m.kind === 'room_mention')
+    expect(room).toMatchObject({ sessionId: 's-1', sessionMessageId: 'm-1', roomTitle: 'Product Room' })
+  })
+
   it('resolves ONE cutoff and passes the same instant to both lanes', async () => {
     const { app, listPendingRepliesForUser, listForUser, getInboxRetentionDays } = makeApp({
       retentionDays: 30,
@@ -158,5 +191,14 @@ describe('[COMP:api/inbox-routes] inboxRoutes', () => {
       .send({ ids: ['n-1'] })
       .expect(204)
     expect(markRead).toHaveBeenCalledWith(USER, { ids: ['n-1'] })
+  })
+
+  it('read marks a room mention id exactly as it does a page mention (PH2)', async () => {
+    const { app, markRead } = makeApp({})
+    await request(app)
+      .post(`/api/workspaces/${WS}/inbox/read`)
+      .send({ ids: ['n-2'] })
+      .expect(204)
+    expect(markRead).toHaveBeenCalledWith(USER, { ids: ['n-2'] })
   })
 })

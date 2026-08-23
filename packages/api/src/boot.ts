@@ -519,6 +519,7 @@ import { createDbDocEntityStore } from './db/doc-entity-store.js'
 import { docEntitiesRoutes } from './routes/doc-entities.js'
 import { createDbCommentThreadStore } from './db/comment-thread-store.js'
 import { createDbDocNotificationsStore } from './db/doc-notifications-store.js'
+import { notifyRoomMentionRecorded } from './brain-stream/notify.js'
 import { commentRoutes } from './routes/comments.js'
 import { inboxRoutes } from './routes/inbox.js'
 import { createDbEpisodicStore } from './db/episodic-store.js'
@@ -4186,6 +4187,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     checkMeteredSpendCap: ports.meteredBilling?.checkMeteredSpendCap,
     chargeMeteredSurcharge: ports.meteredBilling?.chargeMeteredSurcharge,
     publishSessionEvent,
+    // T-H8 (docs/plans/room-human-mentions.md): fan out the Inbox live-badge
+    // signal after a room mention is recorded, so InboxPanel + the sidebar
+    // unread badge — both in the never-unmounting workspace layout — can
+    // self-heal instead of waiting for a full page load.
+    onRoomMentionRecorded: (input) => notifyRoomMentionRecorded(input.workspaceId),
     isPlaceholderTitle,
     getTitleChannelPrefix,
     injectExtraTools,
@@ -4455,6 +4461,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     publishSessionEvent,
     setSessionTyping,
     getSessionPresence,
+    // T-H8 (docs/plans/room-human-mentions.md) — same emitter + reasoning as
+    // the chatRoutes wiring above; this covers the silent-post and edit
+    // call sites that live in sessions.ts rather than chat.ts.
+    onRoomMentionRecorded: (input) => notifyRoomMentionRecorded(input.workspaceId),
     ...(roomIngestor
       ? {
           onRoomPost: (post) => {

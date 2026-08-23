@@ -89,6 +89,22 @@ export type BrainPrimitive =
    * docs/architecture/platform/realtime-sync.md.
    */
   | 'workspace_config'
+  /**
+   * The doc INBOX changed — today, a room `@mention` recorded for a
+   * teammate (migration 452, docs/plans/room-human-mentions.md T-H8).
+   * Carries no rowId: the payload is a workspace-wide signal, not a
+   * per-recipient one (`notifyWorkspaceChange` has no per-user targeting),
+   * so every open tab in the workspace refetches its OWN Inbox via the
+   * authed `GET /workspaces/:id/inbox` — a teammate who wasn't mentioned
+   * just sees no change.
+   *
+   * This primitive exists for the same reason as `workspace_config`:
+   * `InboxPanel` and the sidebar unread badge (`doc-sidebar.tsx`) are both
+   * mounted by the `/w/[workspaceId]` layout, which NEVER unmounts during
+   * SPA navigation, so a mount-only effect there can never self-heal. See
+   * docs/architecture/platform/realtime-sync.md.
+   */
+  | 'inbox'
 
 /** Alias reflecting the widened, workspace-wide scope. */
 export type WorkspacePrimitive = BrainPrimitive

@@ -1,13 +1,22 @@
 "use client";
 
 /**
- * The `@` assistant autocomplete, shared by the room composer and the inline
+ * The `@` mention autocomplete, shared by the room composer and the inline
  * message editor.
  *
- * Owns exactly one thing: which assistant this text addresses. The popup is
+ * Owns which assistant a room turn addresses AND — since
+ * docs/plans/room-human-mentions.md (T-H4/T-H5/T-H9) — which teammate a room
+ * message notifies. The caller merges both into one roster (assistants
+ * first, so an exact name tie resolves to the assistant per D-H3) and tags
+ * each entry's `mentionKind`; this module is agnostic to what a resolved
+ * mention DOES, only to which name in the text it resolved to. The popup is
  * dismissible (Escape, a click anywhere outside), never re-offers a mention
- * the user already confirmed, and reports the resolved mention ranges so the
- * text field can paint them as chips instead of plain prose.
+ * the user already confirmed, and reports every resolved mention as a
+ * `highlightRanges` entry for `@use-brian/chat-ui`'s `ChatComposer` — an
+ * assistant mention rides its base chip look, a member mention adds the
+ * `composer-mention-chip-member` class (defined in app-web's globals.css) so
+ * "this will run a paid model turn" reads visibly different from "this will
+ * just notify a teammate" (D-H2/T-H9) WITHOUT a second painting mechanism.
  *
  * Spec: docs/architecture/features/chat-app.md → "Choosing an assistant".
  * [COMP:app-web/mention-autocomplete]
@@ -21,6 +30,7 @@ import {
   useState,
   type KeyboardEvent,
 } from "react";
+import { User } from "lucide-react";
 import { AssistantAvatar } from "@/components/assistant-avatar";
 import { useT, format } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
@@ -39,7 +49,20 @@ export type MentionAssistant = {
   id: string;
   name: string;
   iconSeed?: number | null;
+  /**
+   * Which kind of roster entry this is (docs/plans/room-human-mentions.md
+   * T-H5/T-H9). Omitted (or `"assistant"`) for the pre-existing
+   * assistants-only rosters — the room's merged roster tags a teammate
+   * explicitly so the popup and the composer can show "will answer and cost
+   * a turn" as visually distinct from "will just be notified".
+   */
+  mentionKind?: "assistant" | "member";
 };
+
+/** Must match the class defined in `apps/app-web/src/app/globals.css` —
+ *  `@use-brian/chat-ui`'s `ChatComposer` appends it alongside the base
+ *  `composer-mention-chip` class, never in place of it (T-H9). */
+const MEMBER_CHIP_CLASS_NAME = "composer-mention-chip-member";
 
 export type AssistantMentions = {
   /** Attach to the element wrapping BOTH the popup and the text field — a
@@ -54,8 +77,15 @@ export type AssistantMentions = {
   /** Runs before the composer's Enter-to-send; consumes navigation, Enter and
    *  Escape while the popup is open. */
   handleKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
-  /** Resolved mention ranges over the current value, for chip painting. */
-  highlightRanges: { start: number; end: number }[];
+  /**
+   * Resolved mention ranges over the current value, for chip painting
+   * (T-H9). Every resolved mention gets a range; a member mention's range
+   * carries `className: "composer-mention-chip-member"` so `ChatComposer`
+   * paints it distinguishably from an assistant mention (which rides the
+   * base chip look alone) — same `resolveMentionSpans` output, different
+   * treatment, one painting mechanism.
+   */
+  highlightRanges: { start: number; end: number; className?: string }[];
   /**
    * Drop the completion + dismissal anchors — after a send, or when the field
    * is torn down.
@@ -188,12 +218,18 @@ export function useAssistantMentions(params: {
     [candidates, dismiss, insert, open, selectedIndex],
   );
 
+  // Every resolved mention becomes a highlight range; a member's range
+  // carries the extra class ChatComposer appends alongside the base chip
+  // (T-H9) — see `highlightRanges`'s doc comment on the type.
   const highlightRanges = useMemo(
     () =>
       enabled
         ? resolveMentionSpans(value, assistants).map((span) => ({
             start: span.start,
             end: span.end,
+            ...(span.assistant.mentionKind === "member"
+              ? { className: MEMBER_CHIP_CLASS_NAME }
+              : {}),
           }))
         : [],
     [enabled, value, assistants],
@@ -231,33 +267,57 @@ export function MentionAutocompleteList(props: {
         props.className,
       )}
     >
-      {mentions.candidates.map((assistant, index) => (
-        <button
-          key={assistant.id}
-          type="button"
-          role="option"
-          aria-selected={index === mentions.selectedIndex}
-          onMouseDown={(event) => {
-            // mousedown, not click — keep the text field focused.
-            event.preventDefault();
-            mentions.insert(assistant.name);
-          }}
-          onMouseEnter={() => mentions.setSelectedIndex(index)}
-          aria-label={format(t.mentionInsertAria, { name: assistant.name })}
-          className={cn(
-            "flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-foreground hover:bg-accent",
-            index === mentions.selectedIndex && "bg-accent",
-          )}
-        >
-          <AssistantAvatar
-            id={assistant.id}
-            name={assistant.name}
-            iconSeed={assistant.iconSeed ?? undefined}
-            size="xs"
-          />
-          <span className="min-w-0 flex-1 truncate">@{assistant.name}</span>
-        </button>
-      ))}
+      {mentions.candidates.map((assistant, index) => {
+        const isMember = assistant.mentionKind === "member";
+        return (
+          <button
+            key={assistant.id}
+            type="button"
+            role="option"
+            aria-selected={index === mentions.selectedIndex}
+            onMouseDown={(event) => {
+              // mousedown, not click — keep the text field focused.
+              event.preventDefault();
+              mentions.insert(assistant.name);
+            }}
+            onMouseEnter={() => mentions.setSelectedIndex(index)}
+            aria-label={
+              isMember
+                ? format(t.mentionInsertMemberAria, { name: assistant.name })
+                : format(t.mentionInsertAria, { name: assistant.name })
+            }
+            className={cn(
+              "flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-foreground hover:bg-accent",
+              index === mentions.selectedIndex && "bg-accent",
+            )}
+          >
+            {isMember ? (
+              <span
+                aria-hidden
+                className="flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground"
+              >
+                <User className="size-3" />
+              </span>
+            ) : (
+              <AssistantAvatar
+                id={assistant.id}
+                name={assistant.name}
+                iconSeed={assistant.iconSeed ?? undefined}
+                size="xs"
+              />
+            )}
+            <span className="min-w-0 flex-1 truncate">@{assistant.name}</span>
+            {isMember && (
+              <span
+                aria-hidden
+                className="shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground"
+              >
+                {t.mentionMemberBadge}
+              </span>
+            )}
+          </button>
+        );
+      })}
     </div>
   );
 }
