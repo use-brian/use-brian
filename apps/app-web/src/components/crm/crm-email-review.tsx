@@ -289,6 +289,54 @@ export function CrmEmailReviewWorkspace({
         data-email-context-rail
         className="flex min-h-[24rem] shrink-0 flex-col border-b border-border/70 bg-background lg:min-h-0 lg:min-w-60 lg:flex-1 lg:border-b-0 lg:border-r"
       >
+        {row && selected && (
+          <div data-email-crm-profile className="shrink-0 border-b border-border/70 px-3 py-3">
+            <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{t.crmProfile}</div>
+            <div className="mt-2 space-y-2">
+              {selected.contacts.map((contact) => {
+                const company = contact.companyId
+                  ? data.companies.find((candidate) => candidate.id === contact.companyId)
+                  : null;
+                return (
+                  <button
+                    key={contact.id}
+                    type="button"
+                    onClick={() => onOpenContact(contact.id)}
+                    className="group w-full rounded-xl border border-border bg-card p-3 text-left shadow-sm transition-colors hover:bg-accent/40"
+                  >
+                    <div className="flex items-center gap-2.5">
+                      <span className="grid size-9 shrink-0 place-items-center rounded-full bg-muted"><UserRound className="size-4" aria-hidden /></span>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5 text-sm font-medium">
+                          <span className="truncate">{contact.name}</span>
+                          <ChevronRight className="size-3.5 opacity-0 transition-opacity group-hover:opacity-100" aria-hidden />
+                        </div>
+                        <div className="truncate text-[11px] text-muted-foreground">{contact.email}</div>
+                      </div>
+                    </div>
+                    <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-muted-foreground">
+                      {contact.phone && <span className="inline-flex items-center gap-1"><Phone className="size-3" aria-hidden />{contact.phone}</span>}
+                      {company && <span className="inline-flex items-center gap-1"><Building2 className="size-3" aria-hidden />{company.name}</span>}
+                      {contact.tags.length > 0 && <span className="inline-flex items-center gap-1"><Tags className="size-3" aria-hidden />{contact.tags.join(", ")}</span>}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+
+            {relatedDeals.length > 0 && (
+              <div className="mt-3">
+                <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{t.relatedDeals}</div>
+                <div className="mt-1.5 flex flex-wrap gap-1.5">
+                  {relatedDeals.slice(0, 4).map((deal) => (
+                    <span key={deal.id} className="max-w-full truncate rounded-full bg-muted px-2 py-1 text-[10px] text-muted-foreground">{deal.name}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="flex items-start justify-between gap-3 border-b border-border/70 px-4 py-3">
           <div className="min-w-0">
             <h2 className="text-sm font-semibold">{t.emailDrafts}</h2>
@@ -313,7 +361,7 @@ export function CrmEmailReviewWorkspace({
           </div>
         )}
 
-        <div className="min-h-0 flex-1 overflow-y-auto p-2 max-lg:max-h-48 lg:max-h-[45%]">
+        <div data-email-draft-list className="min-h-0 flex-1 overflow-y-auto p-2 max-lg:max-h-48">
           {loadError && items.length === 0 ? (
             <div className="rounded-lg border border-destructive/25 bg-destructive/5 p-3 text-xs text-destructive">
               <p>{t.emailDraftsLoadFailed}</p>
@@ -380,53 +428,6 @@ export function CrmEmailReviewWorkspace({
           )}
         </div>
 
-        {row && selected && (
-          <div className="min-h-0 border-t border-border/70 px-3 py-3 lg:flex-1 lg:overflow-y-auto">
-            <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{t.crmProfile}</div>
-            <div className="mt-2 space-y-2">
-              {selected.contacts.map((contact) => {
-                const company = contact.companyId
-                  ? data.companies.find((candidate) => candidate.id === contact.companyId)
-                  : null;
-                return (
-                  <button
-                    key={contact.id}
-                    type="button"
-                    onClick={() => onOpenContact(contact.id)}
-                    className="group w-full rounded-xl border border-border bg-card p-3 text-left shadow-sm transition-colors hover:bg-accent/40"
-                  >
-                    <div className="flex items-center gap-2.5">
-                      <span className="grid size-9 shrink-0 place-items-center rounded-full bg-muted"><UserRound className="size-4" aria-hidden /></span>
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-1.5 text-sm font-medium">
-                          <span className="truncate">{contact.name}</span>
-                          <ChevronRight className="size-3.5 opacity-0 transition-opacity group-hover:opacity-100" aria-hidden />
-                        </div>
-                        <div className="truncate text-[11px] text-muted-foreground">{contact.email}</div>
-                      </div>
-                    </div>
-                    <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-muted-foreground">
-                      {contact.phone && <span className="inline-flex items-center gap-1"><Phone className="size-3" aria-hidden />{contact.phone}</span>}
-                      {company && <span className="inline-flex items-center gap-1"><Building2 className="size-3" aria-hidden />{company.name}</span>}
-                      {contact.tags.length > 0 && <span className="inline-flex items-center gap-1"><Tags className="size-3" aria-hidden />{contact.tags.join(", ")}</span>}
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-
-            {relatedDeals.length > 0 && (
-              <div className="mt-3">
-                <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{t.relatedDeals}</div>
-                <div className="mt-1.5 flex flex-wrap gap-1.5">
-                  {relatedDeals.slice(0, 4).map((deal) => (
-                    <span key={deal.id} className="max-w-full truncate rounded-full bg-muted px-2 py-1 text-[10px] text-muted-foreground">{deal.name}</span>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
       </aside>
 
       <main
@@ -556,7 +557,7 @@ export function CrmEmailReviewWorkspace({
                 {actionError && <p role="alert" className="mt-2 text-xs text-destructive">{actionError}</p>}
               </div>
 
-              <div className="shrink-0 border-t border-border/70 bg-background/95 p-3 backdrop-blur">
+              <div data-email-review-actions className="shrink-0 border-t border-border/70 bg-background/95 px-3 pt-3 pb-20 backdrop-blur">
                 {dirty && (
                   <div className="mb-2 flex items-center justify-between gap-2">
                     <p className="text-[10px] text-muted-foreground">{t.saveBeforeApprove}</p>

@@ -166,13 +166,20 @@ afterEach(() => {
 });
 
 describe("[COMP:app-web/crm-email-review] dedicated review workspace", () => {
-  it("combines queue and CRM context beside the resizable thread and draft surface", async () => {
+  it("keeps the compact CRM profile above the queue and clears the dock from review actions", async () => {
     await mount();
 
     const contextRail = container!.querySelector<HTMLElement>("[data-email-context-rail]")!;
+    const profile = contextRail.querySelector<HTMLElement>("[data-email-crm-profile]")!;
+    const draftList = contextRail.querySelector<HTMLElement>("[data-email-draft-list]")!;
     const reviewMain = container!.querySelector<HTMLElement>("[data-email-review-main]")!;
+    const reviewActions = reviewMain.querySelector<HTMLElement>("[data-email-review-actions]")!;
     expect(contextRail.textContent).toContain("Jamie Example");
     expect(contextRail.textContent).toContain("Website refresh");
+    expect([...contextRail.querySelectorAll("[data-email-crm-profile], [data-email-draft-list]")])
+      .toEqual([profile, draftList]);
+    expect(profile.classList.contains("lg:flex-1")).toBe(false);
+    expect(reviewActions.classList.contains("pb-20")).toBe(true);
     expect(reviewMain.textContent).toContain("Project update");
     expect(reviewMain.textContent).toContain("Could we start next week?");
     expect(reviewMain.querySelector('[role="separator"][aria-orientation="vertical"]')).toBeTruthy();
