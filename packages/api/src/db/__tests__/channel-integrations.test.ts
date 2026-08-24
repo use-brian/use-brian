@@ -14,6 +14,7 @@ import {
   encryptCredentials,
   decryptCredentials,
   loadChannelCredentialKey,
+  trustedGuestAuthorityChanged,
 } from '../channel-integrations.js'
 
 function makeKey(): Buffer {
@@ -69,6 +70,20 @@ describe('[COMP:api/channel-integrations-store] encrypt/decrypt roundtrip', () =
     const plaintextLen = Buffer.from(JSON.stringify(credentials), 'utf8').length
     // 12 (IV) + 16 (tag) = 28 byte overhead, plus the ciphertext itself.
     expect(encrypted.length).toBeGreaterThanOrEqual(plaintextLen + 28)
+  })
+})
+
+describe('[COMP:api/channel-integrations-store] trusted guest authority changes', () => {
+  it('detects the full-access toggle and its active allowlist surface', () => {
+    expect(trustedGuestAuthorityChanged({}, { allowTrustedGuestFullAccess: true })).toBe(true)
+    expect(trustedGuestAuthorityChanged(
+      { allowTrustedGuestFullAccess: true, userAccessMode: 'allowlist', allowedUserIds: ['42'] },
+      { allowTrustedGuestFullAccess: true, userAccessMode: 'allowlist', allowedUserIds: ['84'] },
+    )).toBe(true)
+    expect(trustedGuestAuthorityChanged(
+      { allowGuestConnectorTools: false },
+      { allowGuestConnectorTools: true },
+    )).toBe(false)
   })
 })
 

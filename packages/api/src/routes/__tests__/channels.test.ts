@@ -442,7 +442,11 @@ describe('[COMP:api/channels-route] channel config', () => {
     } as unknown as ChannelIntegrationStore
     const res = await request(buildApp({ integrationStore }))
       .patch('/api/workspaces/ws-1/channels/chan-1/config')
-      .send({ requireMention: false, allowGuestConnectorTools: true })
+      .send({
+        requireMention: false,
+        allowGuestConnectorTools: true,
+        allowTrustedGuestFullAccess: true,
+      })
     expect(res.status).toBe(200)
     // Existing config survives; both Telegram guest fields are accepted.
     expect(updateConfig).toHaveBeenCalledWith({
@@ -452,12 +456,30 @@ describe('[COMP:api/channels-route] channel config', () => {
         ackReaction: 'eyes',
         requireMention: false,
         allowGuestConnectorTools: true,
+        allowTrustedGuestFullAccess: true,
       },
     })
     expect(res.body.channel.config).toEqual({
       ackReaction: 'eyes',
       requireMention: false,
     })
+  })
+
+  it('PATCH config requires owner or admin authority for trusted guest membership grants', async () => {
+    vi.mocked(getChannelForUser).mockResolvedValue(makeChannel())
+    const updateConfig = vi.fn()
+    const integrationStore = {
+      listForWorkspace: vi.fn().mockResolvedValue([makeIntegration()]),
+      updateConfig,
+    } as unknown as ChannelIntegrationStore
+
+    const res = await request(buildApp({ integrationStore, role: 'member' }))
+      .patch('/api/workspaces/ws-1/channels/chan-1/config')
+      .send({ allowTrustedGuestFullAccess: true })
+
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe('trusted_guest_access_requires_admin')
+    expect(updateConfig).not.toHaveBeenCalled()
   })
 
   it('PATCH config normalizes WhatsApp Cloud allowlist phone numbers', async () => {

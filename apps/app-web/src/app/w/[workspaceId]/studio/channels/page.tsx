@@ -1405,6 +1405,19 @@ export function ChannelConfigSection({
     commitAccessIds([...accessIds, v]);
   }
 
+  async function setTrustedGuestFullAccess(next: boolean): Promise<void> {
+    if (next) {
+      const ok = await confirmDialog({
+        title: cfg.trustedGuestFullAccessConfirmTitle,
+        description: cfg.trustedGuestFullAccessConfirmDescription,
+        confirmLabel: cfg.trustedGuestFullAccessConfirmAction,
+        cancelLabel: cfg.trustedGuestFullAccessConfirmCancel,
+      });
+      if (!ok) return;
+    }
+    await save({ allowTrustedGuestFullAccess: next });
+  }
+
   const accessControl = (
     <div className="flex flex-col gap-1.5">
       <div className="flex items-center justify-between gap-3">
@@ -1632,13 +1645,24 @@ export function ChannelConfigSection({
             </div>
             {accessControl}
             {accessMode === "allowlist" && (
-              <ConfigToggle
-                label={cfg.guestConnectorTools}
-                hint={cfg.guestConnectorToolsHint}
-                checked={config.allowGuestConnectorTools ?? false}
-                disabled={saving}
-                onChange={(v) => void save({ allowGuestConnectorTools: v })}
-              />
+              <>
+                <ConfigToggle
+                  label={cfg.trustedGuestFullAccess}
+                  hint={cfg.trustedGuestFullAccessHint}
+                  checked={config.allowTrustedGuestFullAccess ?? false}
+                  disabled={saving}
+                  onChange={(v) => void setTrustedGuestFullAccess(v)}
+                />
+                {!config.allowTrustedGuestFullAccess && (
+                  <ConfigToggle
+                    label={cfg.guestConnectorTools}
+                    hint={cfg.guestConnectorToolsHint}
+                    checked={config.allowGuestConnectorTools ?? false}
+                    disabled={saving}
+                    onChange={(v) => void save({ allowGuestConnectorTools: v })}
+                  />
+                )}
+              </>
             )}
           </section>
 

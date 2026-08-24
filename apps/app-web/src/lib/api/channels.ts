@@ -70,6 +70,8 @@ export type ChannelIntegrationConfig = {
   whatsappDisplayPhoneNumber?: string;
   /** Telegram BYO: allow explicitly listed DM guests to use enabled connectors. */
   allowGuestConnectorTools?: boolean;
+  /** Telegram BYO: numeric allowlist entries become revocable workspace members. */
+  allowTrustedGuestFullAccess?: boolean;
   blockedUserIds?: string[];
 };
 

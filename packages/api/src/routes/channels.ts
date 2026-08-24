@@ -86,6 +86,7 @@ export const channelConfigSchema = z.object({
   userAccessMode: z.enum(['allow_all', 'allowlist', 'blocklist', 'group_members']).optional(),
   allowedUserIds: z.array(z.string().max(50)).max(100).optional(),
   allowGuestConnectorTools: z.boolean().optional(),
+  allowTrustedGuestFullAccess: z.boolean().optional(),
   blockedUserIds: z.array(z.string().max(50)).max(100).optional(),
 }).strict()
 
@@ -842,6 +843,23 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
     }
 
     const merged = { ...integration.config, ...patch }
+    const changesTrustedGuestAuthority =
+      parsed.data.allowTrustedGuestFullAccess !== undefined
+      || (
+        (integration.config.allowTrustedGuestFullAccess === true
+          || merged.allowTrustedGuestFullAccess === true)
+        && (
+          parsed.data.allowedUserIds !== undefined
+          || parsed.data.userAccessMode !== undefined
+        )
+      )
+    if (changesTrustedGuestAuthority && role !== 'owner' && role !== 'admin') {
+      res.status(403).json({
+        error: 'trusted_guest_access_requires_admin',
+        detail: 'Only the workspace owner or an admin can change trusted guest full access.',
+      })
+      return
+    }
     try {
       const updated = await opts.integrationStore.updateConfig({
         actingUserId: userId,

@@ -255,6 +255,12 @@ export type ChannelIntegrationConfig = {
    * boundaries remain.
    */
   allowGuestConnectorTools?: boolean // default: false
+  /**
+   * Telegram BYO only. Exact numeric-id allowlist matches become revocable
+   * workspace members and use the normal identified-member capability path.
+   * Usernames are intentionally ineligible because Telegram can reassign them.
+   */
+  allowTrustedGuestFullAccess?: boolean // default: false
   blockedUserIds?: string[]    // used when userAccessMode = 'blocklist' — @handle or numeric ID
   /**
    * WhatsApp BYON bot only — group chat JIDs the bot is allowed to reply in
@@ -558,6 +564,24 @@ type CiRow = {
   updatedAt: Date
   lastEventAt: Date | null
   connectorInstanceId: string | null
+}
+
+/** Authority-changing subset of integration config. Kept pure for the route
+ * and store tests; the DB store repeats the operator check so legacy callers
+ * cannot bypass the workspace Channels route's friendly 403. */
+export function trustedGuestAuthorityChanged(
+  current: ChannelIntegrationConfig,
+  next: ChannelIntegrationConfig,
+): boolean {
+  if (current.allowTrustedGuestFullAccess !== next.allowTrustedGuestFullAccess) return true
+  if (
+    current.allowTrustedGuestFullAccess === true
+    || next.allowTrustedGuestFullAccess === true
+  ) {
+    if (current.userAccessMode !== next.userAccessMode) return true
+    return JSON.stringify(current.allowedUserIds ?? []) !== JSON.stringify(next.allowedUserIds ?? [])
+  }
+  return false
 }
 
 export function createDbChannelIntegrationStore(key: Buffer): ChannelIntegrationStore {
@@ -934,6 +958,48 @@ export function createDbChannelIntegrationStore(key: Buffer): ChannelIntegration
     },
 
     async updateConfig(params) {
+      const authority = await queryWithRLS<{
+        config: ChannelIntegrationConfig | null
+        role: 'owner' | 'admin' | 'member'
+      }>(
+        params.actingUserId,
+        `SELECT ci.config, wm.role
+           FROM channel_integrations ci
+           JOIN channels c ON c.id = ci.channel_id
+           JOIN workspace_members wm
+             ON wm.workspace_id = c.workspace_id AND wm.user_id = $2
+          WHERE ci.id = $1
+          LIMIT 1`,
+        [params.id, params.actingUserId],
+      )
+      const current = authority.rows[0]
+      if (!current) {
+        throw new Error('Integration not found or not authorized')
+      }
+      if (
+        current.role !== 'owner'
+        && current.role !== 'admin'
+        && trustedGuestAuthorityChanged(current.config ?? {}, params.config)
+      ) {
+        throw new Error('not authorized: trusted guest full access requires owner or admin')
+      }
+
+      // Revoke channel-provisioned workspace membership before persisting a
+      // config that removes its durable numeric-id grant. If cleanup fails,
+      // the config update must not succeed and leave a stale member authorized.
+      const trustedNumericIds = params.config.userAccessMode === 'allowlist'
+        && params.config.allowTrustedGuestFullAccess === true
+        ? (params.config.allowedUserIds ?? [])
+            .map((entry) => entry.trim())
+            .filter((entry) => /^\d+$/.test(entry))
+        : []
+      await query(
+        `DELETE FROM channel_trusted_access_grants
+          WHERE integration_id = $1
+            AND NOT (provider = 'telegram' AND provider_user_id = ANY($2::text[]))`,
+        [params.id, trustedNumericIds],
+      )
+
       const result = await queryWithRLS<CiRow>(
         params.actingUserId,
         `UPDATE channel_integrations

@@ -32,7 +32,13 @@ import type { IncomingMessage, TelegramAdapterConfig, RequireMentionConfig, Chat
 import { findAssistantById, findUserById } from '../db/users.js'
 import { getWorkspaceRoleSystem } from '../db/workspace-store.js'
 import { query } from '../db/client.js'
-import { channelLinkBindsHere, resolveChannelUser, fetchTelegramProfile, type ChannelUserStore } from '../db/channel-user-store.js'
+import {
+  channelLinkBindsHere,
+  ensureTrustedChannelWorkspaceMembership,
+  resolveChannelUser,
+  fetchTelegramProfile,
+  type ChannelUserStore,
+} from '../db/channel-user-store.js'
 import {
   resolveAnyRoutingForChannel,
   resolveTelegramRoutingForSurface,
@@ -687,8 +693,10 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
         return fromId === entry
       }
 
-      const explicitAllowlistGrant = accessMode === 'allowlist'
-        && (integrationConfig.allowedUserIds ?? []).some(matchesEntry)
+      const matchingAllowlistEntry = accessMode === 'allowlist'
+        ? (integrationConfig.allowedUserIds ?? []).find(matchesEntry)?.trim()
+        : undefined
+      const explicitAllowlistGrant = matchingAllowlistEntry !== undefined
       if (
         accessMode === 'blocklist'
         && (integrationConfig.blockedUserIds ?? []).some(matchesEntry)
@@ -959,6 +967,36 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
         && !foundLinkedOwner
       ) {
         return
+      }
+
+      // The stronger trusted-user grant is deliberately numeric-id-only:
+      // Telegram usernames can be renamed or reassigned. Provision the
+      // sender's own shadow as a revocable workspace member, then use the
+      // existing identified-member path end to end. Never borrow ownerId.
+      if (
+        externalGuest
+        && integrationConfig.allowTrustedGuestFullAccess === true
+        && matchingAllowlistEntry === fromId
+        && /^\d+$/.test(matchingAllowlistEntry)
+        && routedAssistant.workspaceId
+      ) {
+        try {
+          await ensureTrustedChannelWorkspaceMembership({
+            integrationId: boundIntegration.id,
+            workspaceId: routedAssistant.workspaceId,
+            userId: channelUserId,
+            provider: 'telegram',
+            providerUserId: fromId,
+          })
+          isIdentified = true
+          externalGuest = false
+        } catch (err) {
+          console.error('[telegram-byo] trusted guest membership provisioning failed:', err)
+          await adapter.sendMessage(incoming.channelId, {
+            text: 'Trusted access could not be activated right now. Please try again shortly.',
+          }).catch(() => {})
+          return
+        }
       }
 
       // 5b. Audio FILE → recording-to-brain pipeline instead of normal chat.

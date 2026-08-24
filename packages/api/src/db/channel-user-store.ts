@@ -17,6 +17,7 @@ import { query, getPool } from './client.js'
 import { findUserByEmail, findOrCreateUser, type User } from './users.js'
 import { mergeShadowUser } from './linked-accounts.js'
 import { getWorkspaceRoleSystem } from './workspace-store.js'
+import { joinDefaultTeamspacesSystem } from './teamspace-store.js'
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -427,6 +428,98 @@ export async function ensureAssistantMember(assistantId: string, userId: string)
      ON CONFLICT (assistant_id, user_id) DO NOTHING`,
     [assistantId, userId],
   )
+}
+
+/**
+ * Provision the sender behind an explicitly trusted numeric Telegram-id grant
+ * as a real workspace member. The channel-owned marker/grant rows make the
+ * membership revocable without ever claiming a pre-existing membership.
+ *
+ * The member ceiling is confidential so the routed assistant remains the
+ * effective authority bound (`min(member, assistant)` plus compartment
+ * intersection). Actor/session/memory ownership stays on `userId`; callers
+ * must never substitute the workspace owner.
+ */
+export async function ensureTrustedChannelWorkspaceMembership(params: {
+  integrationId: string
+  workspaceId: string
+  userId: string
+  provider: 'telegram'
+  providerUserId: string
+}): Promise<void> {
+  const client = await getPool().connect()
+  let createdMembership = false
+  try {
+    await client.query('BEGIN')
+
+    const inserted = await client.query<{ id: string }>(
+      `INSERT INTO workspace_members (workspace_id, user_id, role, clearance)
+       VALUES ($1, $2, 'member', 'confidential')
+       ON CONFLICT (workspace_id, user_id) DO NOTHING
+       RETURNING id`,
+      [params.workspaceId, params.userId],
+    )
+
+    if (inserted.rows.length > 0) {
+      createdMembership = true
+      await client.query(
+        `INSERT INTO channel_trusted_memberships (workspace_id, user_id)
+         VALUES ($1, $2)`,
+        [params.workspaceId, params.userId],
+      )
+    }
+
+    const marker = await client.query<{ ok: number }>(
+      `SELECT 1 AS ok
+         FROM channel_trusted_memberships
+        WHERE workspace_id = $1 AND user_id = $2`,
+      [params.workspaceId, params.userId],
+    )
+
+    // A pre-existing membership needs no channel-owned lifecycle marker. It
+    // already grants the normal member path and must never be removed by a
+    // channel config change.
+    if (marker.rows.length > 0) {
+      await client.query(
+        `INSERT INTO channel_trusted_access_grants
+           (integration_id, workspace_id, user_id, provider, provider_user_id)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (integration_id, provider, provider_user_id) DO NOTHING`,
+        [
+          params.integrationId,
+          params.workspaceId,
+          params.userId,
+          params.provider,
+          params.providerUserId,
+        ],
+      )
+    }
+
+    await client.query(
+      `INSERT INTO assistant_members (assistant_id, user_id, role)
+       SELECT id, $2, 'member' FROM assistants WHERE workspace_id = $1
+       ON CONFLICT (assistant_id, user_id) DO NOTHING`,
+      [params.workspaceId, params.userId],
+    )
+
+    await client.query('COMMIT')
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw err
+  } finally {
+    client.release()
+  }
+
+  // New workspace members join General just like the normal add-member seam.
+  // Keep this outside the transaction because the shared helper owns default
+  // teamspace healing and uses the system pool itself.
+  if (createdMembership) {
+    try {
+      await joinDefaultTeamspacesSystem(params.workspaceId, params.userId)
+    } catch (err) {
+      console.error('[channel-user-store] trusted member default-teamspace join failed:', err)
+    }
+  }
 }
 
 // ── Shadow dedup helpers ─────────────────────────────────────
