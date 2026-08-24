@@ -260,6 +260,7 @@ describe('[COMP:api/public-api-route] lane derivation (docs/plans/api-chat-modes
       { claims: { email: 'x@client.example' } },
       { externalUserEmail: 'x@client.example' },
       { clientMemory: { key: 'profile', summary: 'private client detail' } },
+      { clientLead: { key: 'handoff' } },
       { allowPublicResearch: true },
     ]) {
       const res = await authedPost(
@@ -287,6 +288,19 @@ describe('[COMP:api/public-api-route] lane derivation (docs/plans/api-chat-modes
     expect(mockTurn.mock.calls[0][1].body.clientMemory).toEqual(body.clientMemory)
   })
 
+  it('validates and forwards deterministic client-lead input', async () => {
+    const body = {
+      externalUserEmail: 'buyer@customer.example',
+      clientLead: {
+        key: 'studio-consultation:session-1',
+        name: 'Buyer - Studio consultation',
+      },
+    }
+    const res = await authedPost(keyRow(), body)
+    expect(res.status).toBe(200)
+    expect(mockTurn.mock.calls[0][1].body.clientLead).toEqual(body.clientLead)
+  })
+
   it('forwards explicit research consent only for a public-research key', async () => {
     const res = await authedPost(keyRow(), { allowPublicResearch: true })
     expect(res.status).toBe(200)
@@ -308,6 +322,22 @@ describe('[COMP:api/public-api-route] lane derivation (docs/plans/api-chat-modes
       { key: 'profile', summary: 'detail', tags: Array.from({ length: 17 }, () => 'tag') },
     ]) {
       const res = await authedPost(keyRow(), { identified: true, clientMemory })
+      expect(res.status).toBe(400)
+      expect(res.body.error).toBe('invalid_input')
+    }
+    expect(mockTurn).not.toHaveBeenCalled()
+  })
+
+  it('rejects malformed client-lead input before the turn runs', async () => {
+    for (const clientLead of [
+      { key: 'contains spaces' },
+      { key: 'handoff', name: '' },
+      { key: 'handoff', extra: true },
+    ]) {
+      const res = await authedPost(keyRow(), {
+        externalUserEmail: 'buyer@customer.example',
+        clientLead,
+      })
       expect(res.status).toBe(400)
       expect(res.body.error).toBe('invalid_input')
     }

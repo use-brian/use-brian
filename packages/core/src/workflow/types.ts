@@ -314,6 +314,7 @@ type ExternalClientWorkflowPrincipal = {
   assistantId: string
   resolve:
     | { kind: 'static'; externalUserId: string }
+    | { kind: 'verified_email_pairing' }
     | {
         kind: 'event_sender_map'
         clients: Array<{ sender: string; externalUserId: string }>

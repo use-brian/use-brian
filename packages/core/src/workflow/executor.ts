@@ -358,6 +358,16 @@ export type ExecutorDeps = {
   getAuthFailedConnectors?: (
     workspaceId: string,
   ) => Promise<Array<{ provider: string; label: string }>>
+  /**
+   * Resolve one inbound sender to one previously verified API client pairing.
+   * Implementations must validate the live key + assistant and return null for
+   * both zero and ambiguous matches. Called before any registry or model work.
+   */
+  resolveVerifiedClientEmail?: (params: {
+    apiKeyId: string
+    assistantId: string
+    email: string
+  }) => Promise<string | null>
   /** Test override; defaults to `Date.now`. */
   now?: () => number
   /**
@@ -467,10 +477,15 @@ function isFrozenClientPrincipal(value: unknown): value is ResolvedExternalClien
 }
 
 /** Resolve the definition binding or reuse the engine-owned frozen run value. */
-export function resolveExternalClientWorkflowPrincipal(
+export async function resolveExternalClientWorkflowPrincipal(
   definition: WorkflowDefinition,
   run: Pick<WorkflowRunRecord, 'input' | 'vars'>,
-): ResolvedExternalClientWorkflowPrincipal | undefined {
+  resolveVerifiedClientEmail?: (params: {
+    apiKeyId: string
+    assistantId: string
+    email: string
+  }) => Promise<string | null>,
+): Promise<ResolvedExternalClientWorkflowPrincipal | undefined> {
   const frozen = run.vars[EXTERNAL_CLIENT_PRINCIPAL_VAR]
   if (frozen !== undefined) {
     if (!isFrozenClientPrincipal(frozen)) {
@@ -505,6 +520,23 @@ export function resolveExternalClientWorkflowPrincipal(
     )
   }
   const normalized = sender.trim().toLowerCase()
+  if (principal.resolve.kind === 'verified_email_pairing') {
+    if (!resolveVerifiedClientEmail) {
+      throw clientPrincipalError('Verified-email client pairing is unavailable in this runtime.')
+    }
+    const externalUserId = await resolveVerifiedClientEmail({
+      apiKeyId: principal.apiKeyId,
+      assistantId: principal.assistantId,
+      email: normalized,
+    })
+    if (!externalUserId) {
+      throw clientPrincipalError(
+        `No unique verified external client principal is paired for sender "${normalized}".`,
+      )
+    }
+    return { apiKeyId: principal.apiKeyId, externalUserId }
+  }
+
   const match = principal.resolve.clients.find(
     (client) => client.sender.trim().toLowerCase() === normalized,
   )
@@ -607,7 +639,11 @@ export async function advanceWorkflowRun(
   // fallback.
   let externalClientPrincipal: ResolvedExternalClientWorkflowPrincipal | undefined
   try {
-    externalClientPrincipal = resolveExternalClientWorkflowPrincipal(workflow.definition, run)
+    externalClientPrincipal = await resolveExternalClientWorkflowPrincipal(
+      workflow.definition,
+      run,
+      deps.resolveVerifiedClientEmail,
+    )
     if (externalClientPrincipal && !(EXTERNAL_CLIENT_PRINCIPAL_VAR in run.vars)) {
       run.vars = {
         ...run.vars,

@@ -18,7 +18,7 @@ import type { Sensitivity } from '@use-brian/core'
 import { clientCompartment } from '@use-brian/core'
 import { buildAccessPredicate } from './access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
-import { getAppPool, query, queryGated, queryWithRLS, rollbackAndRelease } from './client.js'
+import { getAppPool, getPool, query, queryGated, queryWithRLS, rollbackAndRelease } from './client.js'
 
 /**
  * `entities` store. Schema spec:
@@ -398,6 +398,130 @@ export async function getOrCreateClientContactEntity(params: {
   await query(`UPDATE users SET entity_id = $1 WHERE id = $2`, [newEntity.id, params.userId])
 
   return newEntity
+}
+
+/**
+ * Transactional application handoff: ensure the exact client contact and one
+ * idempotent CRM lead together. Locking `users.entity_id` serializes retries
+ * for one external principal, so the consumer key cannot mint duplicate deals
+ * without requiring a caller-selectable global uniqueness key.
+ *
+ * [COMP:brain/client-contact-entity]
+ */
+export async function getOrCreateClientContactAndLeadEntities(params: {
+  userId: string
+  workspaceId: string
+  assistantId: string
+  displayName: string
+  externalUserId: string
+  identityNamespace: string
+  email?: string | null
+  lead: { key: string; name?: string }
+}): Promise<{ contact: EntityRecord; lead: EntityRecord }> {
+  const client = await getPool().connect()
+  try {
+    await client.query('BEGIN')
+
+    const anchor = await client.query<{ entityId: string | null }>(
+      `SELECT entity_id AS "entityId" FROM users WHERE id = $1 FOR UPDATE`,
+      [params.userId],
+    )
+
+    let contactRow: EntityRow | undefined
+    const anchoredId = anchor.rows[0]?.entityId
+    if (anchoredId) {
+      const existing = await client.query<EntityRow>(
+        `SELECT ${FULL_SELECT} FROM entities
+         WHERE id = $1 AND workspace_id = $2 AND kind = 'person' AND valid_to IS NULL`,
+        [anchoredId, params.workspaceId],
+      )
+      contactRow = existing.rows[0]
+    }
+
+    if (!contactRow) {
+      const attributes: Record<string, unknown> = {
+        client: true,
+        externalUserId: params.externalUserId,
+      }
+      if (params.email) attributes.email = params.email
+      const created = await client.query<EntityRow>(
+        `INSERT INTO entities (
+           kind, display_name, attributes, sensitivity,
+           workspace_id, user_id, assistant_id,
+           created_by_user_id, created_by_assistant_id, source, compartments
+         )
+         VALUES (
+           'person', $1, $2::jsonb, 'internal',
+           $3, NULL, NULL,
+           $4, $5, 'user', $6::text[]
+         )
+         RETURNING ${FULL_SELECT}`,
+        [
+          params.displayName,
+          JSON.stringify(attributes),
+          params.workspaceId,
+          params.userId,
+          params.assistantId,
+          [clientCompartment(params.externalUserId)],
+        ],
+      )
+      contactRow = created.rows[0]
+      await client.query(`UPDATE users SET entity_id = $1 WHERE id = $2`, [contactRow.id, params.userId])
+    }
+
+    const existingLead = await client.query<EntityRow>(
+      `SELECT ${FULL_SELECT} FROM entities
+       WHERE workspace_id = $1
+         AND kind = 'deal'
+         AND valid_to IS NULL
+         AND attributes->>'contact_id' = $2
+         AND attributes->'external_ref'->>'provider' = $3
+         AND attributes->'external_ref'->>'id' = $4
+       ORDER BY created_at ASC
+       LIMIT 1
+       FOR UPDATE`,
+      [params.workspaceId, contactRow.id, params.identityNamespace, params.lead.key],
+    )
+
+    let leadRow = existingLead.rows[0]
+    if (!leadRow) {
+      const leadAttributes = {
+        stage: 'lead',
+        contact_id: contactRow.id,
+        external_ref: { provider: params.identityNamespace, id: params.lead.key },
+      }
+      const created = await client.query<EntityRow>(
+        `INSERT INTO entities (
+           kind, display_name, attributes, sensitivity,
+           workspace_id, user_id, assistant_id,
+           created_by_user_id, created_by_assistant_id, source, compartments
+         )
+         VALUES (
+           'deal', $1, $2::jsonb, 'internal',
+           $3, NULL, NULL,
+           $4, $5, 'user', $6::text[]
+         )
+         RETURNING ${FULL_SELECT}`,
+        [
+          params.lead.name ?? `${params.displayName} - lead`,
+          JSON.stringify(leadAttributes),
+          params.workspaceId,
+          params.userId,
+          params.assistantId,
+          [clientCompartment(params.externalUserId)],
+        ],
+      )
+      leadRow = created.rows[0]
+    }
+
+    await client.query('COMMIT')
+    return { contact: toEntity(contactRow), lead: toEntity(leadRow) }
+  } catch (err) {
+    await client.query('ROLLBACK')
+    throw err
+  } finally {
+    client.release()
+  }
 }
 
 /**

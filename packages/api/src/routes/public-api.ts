@@ -179,6 +179,11 @@ const clientMemorySchema = z.object({
   tags: z.array(z.string().min(1).max(64)).max(16).optional(),
 }).strict()
 
+const clientLeadSchema = z.object({
+  key: z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/),
+  name: z.string().min(1).max(200).optional(),
+}).strict()
+
 const messageSchema = z.object({
   externalUserId: z.string().min(1).max(256),
   externalUserName: z.string().min(1).max(120).optional(),
@@ -203,6 +208,8 @@ const messageSchema = z.object({
    * client. Sensitivity and compartments are server-owned.
    */
   clientMemory: clientMemorySchema.optional(),
+  /** Atomic, idempotent CRM contact + lead accrual for a verified client. */
+  clientLead: clientLeadSchema.optional(),
   /** Explicit per-turn consent gate for a public_research key's web tools. */
   allowPublicResearch: z.boolean().optional(),
   /**
@@ -345,13 +352,14 @@ export function publicApiRoutes(options: PublicApiRouteOptions): Router {
           || body.claims !== undefined
           || body.externalUserEmail !== undefined
           || body.clientMemory !== undefined
+          || body.clientLead !== undefined
           || body.allowPublicResearch !== undefined
         ) {
           return fail(
             res,
             400,
             'invalid_input',
-            'identified/claims/externalUserEmail/clientMemory/allowPublicResearch are external-lane fields and not valid with an internal-audience key',
+            'identified/claims/externalUserEmail/clientMemory/clientLead/allowPublicResearch are external-lane fields and not valid with an internal-audience key',
           )
         }
         await executePublicTurn(

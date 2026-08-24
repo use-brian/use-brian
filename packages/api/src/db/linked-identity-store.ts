@@ -47,6 +47,17 @@ export type LinkedIdentityStore = {
   findByProvider(provider: string, providerId: string): Promise<LinkedIdentity | null>
 
   /**
+   * Fail-closed email routing for principal-bound workflows. Returns one
+   * external user id only when the exact live API key + assistant pairing is
+   * unique; zero and ambiguous matches both return null.
+   */
+  findUniqueVerifiedApiClientByEmail(params: {
+    apiKeyId: string
+    assistantId: string
+    email: string
+  }): Promise<string | null>
+
+  /**
    * Create or refresh an identity row. Idempotent on (provider, provider_id).
    * No RLS — called after link-code verification.
    */
@@ -73,6 +84,25 @@ export function createLinkedIdentityStore(): LinkedIdentityStore {
         [provider, providerId],
       )
       return result.rows[0] ?? null
+    },
+
+    async findUniqueVerifiedApiClientByEmail(params) {
+      const result = await query<{ providerId: string }>(
+        `SELECT DISTINCT li.provider_id AS "providerId"
+           FROM api_keys k
+           JOIN linked_identities li
+             ON li.provider = 'api:' || k.id::text
+          WHERE k.id = $1
+            AND k.assistant_id = $2
+            AND k.status = 'active'
+            AND k.audience = 'external'
+            AND k.scope = 'chat'
+            AND lower(li.metadata->>'email') = $3
+          ORDER BY li.provider_id
+          LIMIT 2`,
+        [params.apiKeyId, params.assistantId, params.email.trim().toLowerCase()],
+      )
+      return result.rows.length === 1 ? result.rows[0].providerId : null
     },
 
     async upsert(params) {
