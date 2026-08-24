@@ -7,6 +7,7 @@ const release = vi.fn()
 const connect = vi.fn(async () => ({ query, release }))
 
 vi.mock('../client.js', () => ({
+  applyRLSGucs: vi.fn(),
   getPool: vi.fn(() => ({ connect })),
   query: vi.fn(),
   queryGated: vi.fn(),
