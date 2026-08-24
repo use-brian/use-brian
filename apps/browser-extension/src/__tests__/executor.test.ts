@@ -11,6 +11,7 @@
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { TabExecutor, ExecutorError, isDetachedError, retryableAfterReattach, hostMatchesSite } from '../executor.js'
+import { ACTION_CURSOR_MARKER } from '../action-cursor.js'
 
 type Stub = {
   attach: ReturnType<typeof vi.fn>
@@ -388,6 +389,64 @@ describe('[COMP:ext/agent] Native dropdown option clicks', () => {
     )
     expect(err.message).not.toMatch(/box model/i)
     expect(err.message).not.toMatch(/not visible/i)
+  })
+})
+
+describe('[COMP:sandbox/action-cursor] Chromium My Browser action cursor', () => {
+  function installActionTarget(): void {
+    dbg.sendCommand.mockImplementation(async (_target, method, params) => {
+      if (method === 'Accessibility.getFullAXTree') {
+        return {
+          nodes: [{
+            nodeId: 'field', backendDOMNodeId: 9, role: { value: 'textbox' },
+            name: { value: 'Search' }, ignored: false,
+          }],
+        }
+      }
+      if (method === 'DOM.getBoxModel' && params?.backendNodeId === 9) {
+        return { model: { content: [10, 20, 210, 20, 210, 60, 10, 60] } }
+      }
+      return {}
+    })
+  }
+
+  it('arms the inert page overlay before the trusted click and field input', async () => {
+    installActionTarget()
+    const executor = new TabExecutor()
+    await executor.attach(42)
+    const snapshot = await executor.snapshot()
+    const ref = snapshot.nodes[0]!.ref
+
+    await executor.click(ref)
+    await executor.type(ref, 'hello')
+
+    const calls = dbg.sendCommand.mock.calls
+    const cursorCalls = calls.filter((call) => call[1] === 'Runtime.evaluate')
+    expect(cursorCalls).toHaveLength(2)
+    expect(cursorCalls[0]?.[2]?.expression).toContain(ACTION_CURSOR_MARKER)
+    expect(cursorCalls[0]?.[2]?.expression).toContain('("pointer")')
+    expect(cursorCalls[1]?.[2]?.expression).toContain('("typing")')
+    expect(calls.indexOf(cursorCalls[0]!)).toBeLessThan(
+      calls.findIndex((call) => call[1] === 'Input.dispatchMouseEvent'),
+    )
+    expect(calls.indexOf(cursorCalls[1]!)).toBeLessThan(
+      calls.findIndex((call) => call[1] === 'Input.insertText'),
+    )
+  })
+
+  it('still performs the real click when cosmetic injection fails', async () => {
+    installActionTarget()
+    const implementation = dbg.sendCommand.getMockImplementation()!
+    dbg.sendCommand.mockImplementation(async (target, method, params) => {
+      if (method === 'Runtime.evaluate') throw new Error('page rejected cosmetic script')
+      return implementation(target, method, params)
+    })
+    const executor = new TabExecutor()
+    await executor.attach(42)
+    const snapshot = await executor.snapshot()
+
+    await expect(executor.click(snapshot.nodes[0]!.ref)).resolves.toBeUndefined()
+    expect(dbg.sendCommand.mock.calls.filter((call) => call[1] === 'Input.dispatchMouseEvent')).toHaveLength(3)
   })
 })
 

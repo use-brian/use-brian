@@ -111,8 +111,12 @@ describe('[COMP:sandbox/e2b-cloud] E2BCloudProvider', () => {
 
     const cmds = commands.map((c) => c.cmd)
     expect(cmds.some((c) => c.includes(cli.open('https://news.ycombinator.com/')))).toBe(true)
-    expect(cmds).toContain(cli.click('@e1'))
-    expect(cmds).toContain(cli.fill('@e2', 'hello'))
+    const click = cmds.find((c) => c.includes(cli.click('@e1')))
+    const fill = cmds.find((c) => c.includes(cli.fill('@e2', 'hello')))
+    expect(click).toContain(cli.armActionCursor('pointer'))
+    expect(fill).toContain(cli.armActionCursor('typing'))
+    expect(click?.indexOf(cli.armActionCursor('pointer'))).toBeLessThan(click?.indexOf(cli.click('@e1')) ?? -1)
+    expect(fill?.indexOf(cli.armActionCursor('typing'))).toBeLessThan(fill?.indexOf(cli.fill('@e2', 'hello')) ?? -1)
     // One exec per op: navigate (open+get url) and snapshot (snap+url+title)
     // each ran as a single chained command.
     expect(cmds.filter((c) => c.includes('agent-browser')).length).toBe(4)
@@ -307,10 +311,10 @@ describe('[COMP:sandbox/e2b-cloud] E2BCloudProvider', () => {
 
   it('maps agent-browser failures to stale_ref vs backend_error', async () => {
     const { runtime } = fakeRuntime((cmd) => {
-      if (cmd === cli.click('@e9')) {
+      if (cmd.includes(cli.click('@e9'))) {
         return { stdout: '', stderr: 'Error: no element with ref @e9 (stale snapshot)', exitCode: 1 }
       }
-      if (cmd === cli.click('@e1')) return { stdout: '', stderr: 'daemon crashed', exitCode: 1 }
+      if (cmd.includes(cli.click('@e1'))) return { stdout: '', stderr: 'daemon crashed', exitCode: 1 }
       return undefined
     })
     const provider = createE2bCloudProvider(runtime)

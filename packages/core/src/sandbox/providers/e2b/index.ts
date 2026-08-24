@@ -193,10 +193,16 @@ export function createE2bCloudProvider(
         )
       },
       click: async (ref) => {
-        await runBrowserCommand(sandboxId, cli.click(ref))
+        await runBrowserCommand(
+          sandboxId,
+          chainCommands(cli.armActionCursor('pointer'), cli.click(ref)),
+        )
       },
       type: async (ref, text) => {
-        await runBrowserCommand(sandboxId, cli.fill(ref, text))
+        await runBrowserCommand(
+          sandboxId,
+          chainCommands(cli.armActionCursor('typing'), cli.fill(ref, text)),
+        )
       },
       typeSecret: async (ref, secret) => {
         if (secret.includes('\0')) {

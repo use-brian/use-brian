@@ -358,6 +358,10 @@ describe('[COMP:sandbox/runner-shim] The governed shim protocol (R2-9)', () => {
     expect(source).toContain('raise RunnerDenied')
     expect(source).toContain('ALLOWED_SITE = "instagram.com"')
     expect(source).toContain('browser skill left declared site')
+    expect(source).toContain('def _arm_action_cursor(kind):')
+    expect(source).toContain('_arm_action_cursor("pointer")')
+    expect(source).toContain('_arm_action_cursor("typing")')
+    expect(source).toContain('_ab("eval", "-b", _ACTION_CURSOR[kind])')
     // The stub path records "would send" instead of firing (rehearsal).
     expect(source).toContain('_would_send.append')
     expect(sendRequestPath(3)).toBe('.runner/send-3.request.json')

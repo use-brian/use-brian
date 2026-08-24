@@ -19,6 +19,7 @@
  * The host half of the handshake lives in skill-runner.ts; this file is the
  * codegen + the file-protocol types shared by both halves and the tests.
  */
+import { encodeActionCursorArmScript } from './action-cursor.js'
 
 export const RUNNER_DIR = '.runner'
 export const RUNNER_MODULE_PATH = 'runner.py'
@@ -70,6 +71,8 @@ export type BlockRunResult = {
  * the send handshake.
  */
 export function buildRunnerShimSource(opts: { sendTimeoutSeconds: number; allowedSite?: string }): string {
+  const pointerCursor = encodeActionCursorArmScript('pointer')
+  const typingCursor = encodeActionCursorArmScript('typing')
   return `"""Use Brian governed browser runner (R2-9).
 
 Blocks drive THESE verbs only. The terminal verb (submit) never fires without
@@ -88,6 +91,7 @@ ALLOWED_SITE = ${JSON.stringify(opts.allowedSite ?? '')}
 _send_counter = 0
 _would_send = []
 _last_snapshot = {}
+_ACTION_CURSOR = {"pointer": ${JSON.stringify(pointerCursor)}, "typing": ${JSON.stringify(typingCursor)}}
 
 
 class RunnerDenied(Exception):
@@ -112,6 +116,14 @@ def _assert_site(url=None):
     host = (urlparse(current).hostname or "").lower()
     if host != ALLOWED_SITE and not host.endswith("." + ALLOWED_SITE):
         raise RuntimeError("browser skill left declared site %s and reached %s" % (ALLOWED_SITE, host or current))
+
+
+def _arm_action_cursor(kind):
+    """Cosmetic only: cursor failure never changes the governed action."""
+    try:
+        _ab("eval", "-b", _ACTION_CURSOR[kind])
+    except Exception:
+        pass
 
 
 def open(url):
@@ -144,6 +156,7 @@ def find(label):
 
 def click(ref):
     _assert_site()
+    _arm_action_cursor("pointer")
     out = _ab("click", ref)
     _assert_site()
     return out
@@ -151,6 +164,7 @@ def click(ref):
 
 def fill(ref, text):
     _assert_site()
+    _arm_action_cursor("typing")
     out = _ab("fill", ref, text)
     _assert_site()
     return out

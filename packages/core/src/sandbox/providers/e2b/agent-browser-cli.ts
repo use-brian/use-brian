@@ -14,6 +14,7 @@
  * (Playwright storageState shape: {cookies, origins}).
  */
 import type { BrowserSnapshot, BrowserSnapshotNode } from '../../types.js'
+import { encodeActionCursorArmScript, type ActionCursorKind } from '../../action-cursor.js'
 
 const ACTIONABLE_ROLES = new Set([
   'button', 'link', 'textbox', 'textfield', 'textfieldwithcombobox', 'searchbox',
@@ -89,6 +90,14 @@ export const cli = {
   },
   fill(ref: string, text: string): string {
     return `${AGENT_BROWSER_BIN} fill ${shellQuote(ref)} ${shellQuote(text)}`
+  },
+  /**
+   * Cosmetic only: a failed page injection must never stop the real action
+   * chained after it. `-b` keeps the generated page expression shell-safe.
+   */
+  armActionCursor(kind: ActionCursorKind): string {
+    const encoded = encodeActionCursorArmScript(kind)
+    return `(${AGENT_BROWSER_BIN} eval -b ${shellQuote(encoded)} >/dev/null 2>&1 || true)`
   },
   /**
    * Trusted auth-broker fill: the command string contains no credential.

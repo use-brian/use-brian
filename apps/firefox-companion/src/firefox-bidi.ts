@@ -4,6 +4,7 @@
  * [COMP:ext/firefox-companion]
  */
 import WebSocket from "ws";
+import { ACTION_CURSOR_FUNCTION } from "./action-cursor.js";
 
 export class FirefoxBidiError extends Error {
   constructor(
@@ -302,6 +303,14 @@ export class FirefoxBidiExecutor {
     })) as { type?: string; result?: unknown };
   }
 
+  private async armActionCursor(kind: "pointer" | "typing"): Promise<void> {
+    try {
+      await this.callFunction(ACTION_CURSOR_FUNCTION, [kind]);
+    } catch {
+      // Cosmetic only: page injection must never change the real action.
+    }
+  }
+
   async execute(op: string, args: Record<string, unknown>): Promise<unknown> {
     switch (op) {
       case "navigate":
@@ -388,9 +397,10 @@ export class FirefoxBidiExecutor {
     return { sharedId: stored.sharedId };
   }
 
-  private async click(ref: string): Promise<void> {
+  private async click(ref: string, cursorKind: "pointer" | "typing" = "pointer"): Promise<void> {
     const element = this.sharedNode(ref);
     try {
+      await this.armActionCursor(cursorKind);
       await this.command("input.performActions", {
         context: this.mustContext(),
         actions: [
@@ -415,7 +425,7 @@ export class FirefoxBidiExecutor {
   }
 
   private async type(ref: string, text: string): Promise<void> {
-    await this.click(ref);
+    await this.click(ref, "typing");
     await this.command("input.performActions", {
       context: this.mustContext(),
       actions: [
