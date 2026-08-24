@@ -50,6 +50,7 @@ export const INTERACTIVE_CHANNEL_TYPES: ReadonlySet<string> = new Set([
   'web',
   'telegram',
   'slack',
+  'feishu',
   'whatsapp',
   'discord',
   // A custom (bridge-driven) channel is a live human surface: the bridge

@@ -5,7 +5,8 @@
  *
  * The pipeline lens over the SAME entity rows the chat tools and Brain
  * graph read (lens, not data): three sections (Deals — default, board-first
- * — / Contacts / Companies) switched in the header + sidebar panel;
+ * — / Contacts / Companies) switched from the sidebar, with a compact top-bar
+ * fallback while that sidebar is collapsed or unavailable on narrow layouts;
  * attention quick-filters with live counts; per-section filter row +
  * search; the deal board (drag-to-stage) or dense tables with inline cell
  * edit; a master-detail record pane with brain context
@@ -25,7 +26,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { BarChart3, Kanban, Mail, Rows3, Settings2 } from "lucide-react";
+import { BarChart3, ChevronDown, Kanban, Mail, Rows3, Settings2 } from "lucide-react";
 import { OperatorTopbar } from "@/components/operator/operator-topbar";
 import { cn } from "@/lib/utils";
 import { mutateSurfaceCache, useCachedResource } from "@/lib/surface-cache";
@@ -693,22 +694,98 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {/* Chrome — the shared operator top bar names the app; the section
-          switch rides its center slot, the deals count + view toggle its
-          right slot, replacing the old icon+title header row
-          ([COMP:app-web/operator-topbar]). */}
+      {/* Chrome — the shared operator top bar names the app. The expanded
+          desktop sidebar already owns destination navigation, so the center
+          switch is only a collapsed-sidebar / narrow-layout fallback. Deals
+          controls stay in the right slot ([COMP:app-web/operator-topbar]). */}
       <OperatorTopbar
         app="crm"
+        appChipClassName="hidden sm:flex sm:w-[148px] lg:w-[200px]"
+        centerVisibility="when-sidebar-unavailable"
         center={
-          <div className="flex shrink-0 items-center gap-1">
-            <div className="hidden items-center gap-0.5 rounded-lg bg-sidebar-accent/60 p-0.5 sm:flex">
+          <div
+            data-crm-fallback-navigation
+            className="flex shrink-0 items-center gap-1"
+          >
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                className="inline-flex h-7 max-w-40 items-center gap-1.5 rounded-md bg-sidebar-accent/60 px-2 text-[12.5px] text-sidebar-accent-foreground md:hidden"
+              >
+                {view.review === "email" && (
+                  <Mail className="size-3.5 shrink-0" aria-hidden />
+                )}
+                <span className="truncate">
+                  {view.review === "email"
+                    ? t.r2.emailDrafts
+                    : sectionLabels[view.section]}
+                </span>
+                <ChevronDown
+                  className="size-3.5 shrink-0 text-muted-foreground"
+                  aria-hidden
+                />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start">
+                {CRM_SECTIONS.map((section) => (
+                  <DropdownMenuItem
+                    key={section}
+                    onClick={() =>
+                      setView({
+                        section,
+                        review: null,
+                        draft: null,
+                        quick: null,
+                        stages: [],
+                        custom: {},
+                        group: null,
+                        q: "",
+                      })
+                    }
+                  >
+                    <span className="min-w-28 flex-1">
+                      {sectionLabels[section]}
+                    </span>
+                    {data !== null && (
+                      <span className="tabular-nums text-muted-foreground">
+                        {sectionCounts[section]}
+                      </span>
+                    )}
+                  </DropdownMenuItem>
+                ))}
+                <DropdownMenuItem
+                  onClick={() =>
+                    setView({
+                      review: "email",
+                      draft: view.draft ?? emailQueue[0]?.approval.id ?? null,
+                    })
+                  }
+                >
+                  <Mail className="size-3.5" aria-hidden />
+                  <span className="min-w-28 flex-1">{t.r2.emailDrafts}</span>
+                  {!approvalsLoading && emailQueue.length > 0 && (
+                    <span className="tabular-nums text-muted-foreground">
+                      {emailQueue.length}
+                    </span>
+                  )}
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <div className="hidden items-center gap-0.5 rounded-lg bg-sidebar-accent/60 p-0.5 md:flex">
               {CRM_SECTIONS.map((section) => (
                 <button
                   key={section}
                   type="button"
                   aria-pressed={view.review === null && view.section === section}
                   onClick={() =>
-                    setView({ section, review: null, draft: null, quick: null, stages: [], custom: {}, group: null, q: "" })
+                    setView({
+                      section,
+                      review: null,
+                      draft: null,
+                      quick: null,
+                      stages: [],
+                      custom: {},
+                      group: null,
+                      q: "",
+                    })
                   }
                   className={cn(
                     "inline-flex h-6.5 items-center gap-1.5 rounded-md px-2 text-[12.5px] transition-colors",
@@ -725,27 +802,32 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
                   )}
                 </button>
               ))}
+              <button
+                type="button"
+                aria-label={t.r2.emailDrafts}
+                aria-pressed={view.review === "email"}
+                onClick={() =>
+                  setView({
+                    review: "email",
+                    draft: view.draft ?? emailQueue[0]?.approval.id ?? null,
+                  })
+                }
+                className={cn(
+                  "inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12.5px] transition-colors",
+                  view.review === "email"
+                    ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                    : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground",
+                )}
+              >
+                <Mail className="size-3.5" aria-hidden />
+                <span>{t.r2.emailDrafts}</span>
+                {!approvalsLoading && emailQueue.length > 0 && (
+                  <span className="rounded-full bg-amber-500/15 px-1.5 text-[10px] font-semibold tabular-nums text-amber-700 dark:text-amber-300">
+                    {emailQueue.length}
+                  </span>
+                )}
+              </button>
             </div>
-            <button
-              type="button"
-              aria-label={t.r2.emailDrafts}
-              aria-pressed={view.review === "email"}
-              onClick={() => setView({ review: "email", draft: view.draft ?? emailQueue[0]?.approval.id ?? null })}
-              className={cn(
-                "inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12.5px] transition-colors",
-                view.review === "email"
-                  ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                  : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground",
-              )}
-            >
-              <Mail className="size-3.5" aria-hidden />
-              <span className="hidden sm:inline">{t.r2.emailDrafts}</span>
-              {!approvalsLoading && emailQueue.length > 0 && (
-                <span className="rounded-full bg-amber-500/15 px-1.5 text-[10px] font-semibold tabular-nums text-amber-700 dark:text-amber-300">
-                  {emailQueue.length}
-                </span>
-              )}
-            </button>
           </div>
         }
         right={

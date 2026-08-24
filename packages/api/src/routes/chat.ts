@@ -283,6 +283,7 @@ function resolveRunChannel(session: {
     return 'doc'
   if (session.channelType === 'telegram') return 'telegram'
   if (session.channelType === 'slack') return 'slack'
+  if (session.channelType === 'feishu') return 'feishu'
   if (session.channelType === 'cron') return 'cron'
   if (session.channelType === 'web') return 'web'
   return 'unknown'

@@ -3,7 +3,7 @@
  * Shared channel message processing pipeline.
  *
  * Eliminates the ~350 lines of duplicated processMessage logic across
- * WhatsApp, Telegram, and Slack routes. Each channel provides a thin
+ * WhatsApp, Telegram, Slack, and Feishu/Lark routes. Each channel provides a thin
  * `ChannelHooks` implementation for channel-specific rendering (typing,
  * confirmations, response delivery, tool status).
  *
@@ -113,7 +113,7 @@ const PER_TURN_FILES_INDEX_CAP = 50
  *
  * **Streaming vs final-only channels.** Two delivery models share this
  * interface:
- *  - **Final-only** (Telegram, Slack, WhatsApp): the pipeline buffers
+ *  - **Final-only** (Telegram, Slack, WhatsApp, Feishu/Lark): the pipeline buffers
  *    text into a single string and calls `sendResponse(fullText)` once
  *    on `turn_complete`. These channels leave `onTextDelta` /
  *    `onCitation` unimplemented.
@@ -136,7 +136,7 @@ export type ChannelHooks = {
   /**
    * Called on every `text_delta` event from the query loop. Streaming
    * channels (web SSE) emit each chunk as it arrives; final-only
-   * channels (Telegram, Slack, WhatsApp) leave this unimplemented and
+   * channels (Telegram, Slack, WhatsApp, Feishu/Lark) leave this unimplemented and
    * receive the accumulated text via `sendResponse` instead.
    */
   onTextDelta?(text: string): Promise<void>
@@ -170,7 +170,7 @@ export type ChannelHooks = {
    * `session_messages`. Streaming channels use this to surface the
    * DB-assigned id to the client so it can attach feedback / edit /
    * retry actions to that specific user turn (the web chat panel reads
-   * `id` from this event). Final-only channels (Telegram, Slack,
+   * `id` from this event). Final-only channels (Telegram, Slack, Feishu/Lark,
    * WhatsApp) typically don't need this — actions on individual user
    * messages aren't part of their UI affordance.
    *
@@ -235,11 +235,11 @@ export type ChannelHooks = {
    * Channels that can't deliver documents ignore the argument (the
    * `sendFile` tool already refused on those channels, so it stays empty).
    *
-   * Channels that talk to messaging platforms (Slack, Telegram) MAY
+   * Channels that talk to messaging platforms (Slack, Telegram, Feishu/Lark) MAY
    * return `{ channelMessageId }` — the platform-native id the
    * adapter received from its send call. The pipeline stamps it onto
    * the most-recently-persisted assistant `session_messages` row so
-   * later reaction handlers can map a Slack reaction or Telegram
+   * later reaction handlers can map a Slack or Feishu/Lark reaction or Telegram
    * `message_reaction` update back to the assistant turn it
    * reacted to. Channels that don't have a stable platform id
    * (web streaming, scheduled-job executor) return `void`.
@@ -327,7 +327,7 @@ export type ChannelPipelineParams = {
   /**
    * Whether the channel user is identified (linked account or matched email).
    * Controls pattern extraction and memory context.
-   * WhatsApp/Web always true; Telegram/Slack may be false for shadow users.
+   * WhatsApp/Web always true; Telegram/Slack/Feishu-Lark may be false for shadow users.
    */
   isIdentified: boolean
   /**
@@ -347,7 +347,7 @@ export type ChannelPipelineParams = {
   checkCreditBudget?: CreditBudgetGate
 
   // ── Channel context ──
-  channelType: 'whatsapp' | 'telegram' | 'slack' | 'discord' | 'email' | 'msteams' | 'wechat' | 'custom'
+  channelType: 'whatsapp' | 'telegram' | 'slack' | 'discord' | 'email' | 'msteams' | 'wechat' | 'custom' | 'feishu'
   /** Physical provider destination used for delivery and connector actions. */
   channelId: string
   /**
@@ -359,7 +359,7 @@ export type ChannelPipelineParams = {
   sessionChannelId?: string
   /**
    * The acting user's channel-native id captured from the inbound webhook —
-   * WhatsApp phone, Telegram `@handle`, Slack user id. Forwarded to
+   * WhatsApp phone, Telegram `@handle`, Slack user id, or Feishu/Lark open id. Forwarded to
    * `injectMcpTools` as the `X-Sidanclaw-Actor-Id` for opted-in connectors.
    * Optional: absent (or a Telegram user with no @username) ⇒ no native id is
    * sent (channel + email + userId still are). See tool-hooks.md.
@@ -395,7 +395,7 @@ export type ChannelPipelineParams = {
   /**
    * Channel-native ID of the message the user is replying to, if any.
    * Telegram passes `reply_to_message.message_id`; Slack passes
-   * `thread_ts`; WhatsApp passes the quoted message ID. The pipeline
+   * `thread_ts`; Feishu/Lark passes `parent_id`/`root_id`; WhatsApp passes the quoted message ID. The pipeline
    * resolves this to text via resolveReplyText().
    */
   replyToMessageId?: string | number | null
@@ -445,7 +445,7 @@ export type ChannelPipelineParams = {
    * loop gets the research budget (100 turns / 100 tool calls). Skipped on
    * short messages, free plans, and when no message text is present.
    *
-   * Channels (Telegram / Slack / WhatsApp) opt in here because they have no
+   * Channels (Telegram / Slack / Feishu-Lark / WhatsApp) opt in here because they have no
    * manual toggle. The web chat route runs its own adaptive path in
    * `routes/chat.ts` against the same classifier.
    */
@@ -758,7 +758,7 @@ export function recordChannelToolResults(input: {
   for (const block of input.results) {
     if (block.type !== 'tool_result') continue
     // Realtime parity with the web chat lane (realtime-sync): a brain write
-    // from a Telegram / Slack / WhatsApp turn must repaint an open brain page
+    // from a Telegram / Slack / Feishu-Lark / WhatsApp turn must repaint an open brain page
     // the same way a web-chat write does. Same fire-and-forget map lookup
     // chat.ts uses.
     notifyBrainWriteIfMatch(input.workspaceId, block.name, block.isError ?? false)
@@ -1071,7 +1071,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   const tierBudget = chatTierBudget({ model: logicalModel, researchMode: adaptiveResearchActive })
 
   // v2 (brain_extraction_v2_enabled): per-turn regex pattern extraction
-  // retired. Channel-side facts (Slack / Telegram / WhatsApp) now land
+  // retired. Channel-side facts (Slack / Telegram / Feishu-Lark / WhatsApp) now land
   // via the chat-compaction Episode → Pipeline B path, which produces
   // structured entities / tasks / memories with proper authorship +
   // justification. See Q9 of the design thread + the `chatEpisodeIngestor`
@@ -1474,7 +1474,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     // "how many open tasks do I have?" was answered from a TEAMMATE's
     // assignee id, and the "2 open" / "21 total" numbers that followed were
     // all that teammate's. See layer-1-system-prompt.md → "Speaker identity".
-    // `actorChannelId` (Slack `U…`, Telegram handle/id, WhatsApp number) rides
+    // `actorChannelId` (Slack `U…`, Telegram handle/id, Feishu/Lark open id, WhatsApp number) rides
     // along so "what is my Slack id" is answered as fact, not guessed.
     speakerIdentity: isIdentified && !externalGuest
       ? speakerIdentityFromUser(channelUser, { type: channelType, id: actorChannelId ?? null })
@@ -1658,7 +1658,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         readCachedFile,
         // Actor identity for opted-in connectors. `actorChannelId` is the
         // channel-native id captured from the inbound webhook by the channel
-        // route (Slack user id / Telegram @handle / WhatsApp phone); email +
+        // route (Slack user id / Telegram @handle / Feishu-Lark open id / WhatsApp phone); email +
         // userId come from the resolved channel user. Server-resolved, never
         // model output. See docs/architecture/engine/tool-hooks.md.
         actorIdentity: {
@@ -2164,7 +2164,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
             pendingClaimLedger = null
           }
           // Strip the trailing <followup>[…]</followup> tag — messaging
-          // channels (Telegram, Slack, WhatsApp) have no chip affordance,
+          // channels (Telegram, Slack, WhatsApp, Feishu/Lark) have no chip affordance,
           // so the raw tag would leak into the message body. Web parses
           // it client-side and renders chips. See
           // docs/architecture/features/follow-up-questions.md.

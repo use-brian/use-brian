@@ -18,8 +18,9 @@ import type { FilesClientResolver } from '../files/files-api.js'
 type AccountRouteOptions = {
   linkedAccountStore?: LinkedAccountStore
   /**
-   * Telegram link-code store for the Settings → Account → Connected accounts
-   * connect flow. When absent, POST /telegram/link-code returns 503.
+   * Shared link-code store for the Settings → Account → Connected accounts
+   * Telegram, Slack, WhatsApp, and Feishu/Lark connect flows. When absent,
+   * their link-code endpoints return 503.
    * See docs/architecture/platform/auth.md → "Linked accounts".
    */
   linkCodeStore?: LinkCodeStore
@@ -85,6 +86,7 @@ const upload = multer({
  *                                              (first-owned assistant, Settings flow)
  *   POST   /api/account/slack/link-code      — mint a 6-char Slack link code (same rule;
  *                                              pasted to the Brian app in Slack)
+ *   POST   /api/account/feishu/link-code     — mint a 6-char Feishu/Lark link code
  *   DELETE /api/account/memories             — wipe memories + user_souls for the calling user
  *   DELETE /api/account                      — tear down the user's entire footprint
  *   PATCH  /api/account/profile              — update display name
@@ -234,6 +236,44 @@ export function accountRoutes(options: AccountRouteOptions = {}): Router {
       res.json({ code: code.code, expiresAt: code.expiresAt })
     } catch (err) {
       console.error('[account] slack link-code failed:', err)
+      res.status(500).json({ error: 'Failed to generate linking code' })
+    }
+  })
+
+  // ── POST /api/account/feishu/link-code ────────────────────────
+  // Same first-owned-assistant handshake as Slack. The user sends the code
+  // to Brian in Feishu/Lark; routes/feishu.ts redeems it and uses the claimed
+  // identity before falling back to an anonymous channel shadow.
+
+  router.post('/feishu/link-code', async (req, res) => {
+    const userId = req.userId
+    if (!userId) {
+      res.status(401).json({ error: 'Missing or invalid Authorization header' })
+      return
+    }
+    if (!options.linkCodeStore) {
+      res.status(503).json({ error: 'Feishu linking not configured' })
+      return
+    }
+
+    try {
+      const assistantRow = await query<{ id: string }>(
+        `SELECT id FROM assistants
+         WHERE owner_user_id = $1
+         ORDER BY created_at ASC
+         LIMIT 1`,
+        [userId],
+      )
+      const assistantId = assistantRow.rows[0]?.id
+      if (!assistantId) {
+        res.status(409).json({ error: 'no_assistant' })
+        return
+      }
+
+      const code = await options.linkCodeStore.create({ userId, assistantId })
+      res.json({ code: code.code, expiresAt: code.expiresAt })
+    } catch (err) {
+      console.error('[account] feishu link-code failed:', err)
       res.status(500).json({ error: 'Failed to generate linking code' })
     }
   })

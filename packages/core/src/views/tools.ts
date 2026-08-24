@@ -270,7 +270,7 @@ export function createRenderViewTool(deps: ViewToolDeps): Tool {
       'Use this when the user asks to "show me", "list", "kanban", a calendar/schedule of dated tasks, or any visual request — instead of writing a Markdown table. ' +
       'What the user sees depends on the channel. Web app chat: the result is saved as a draft page in the Pages sidebar and the app opens it — that page is how the view is displayed. ' +
       'Anchored doc sessions: the table/board/calendar is appended to the anchored page as a block. ' +
-      'Every other channel (Slack, Telegram, WhatsApp, Discord, API) CANNOT display an interactive view: the result instead includes a ready-to-paste `textRendering` you must use to present the data in your reply, and NO page is created unless you pass createPage:true; when a page is created or appended out-app the result carries a `url` your reply must include. ' +
+      'Every other channel (Slack, Telegram, Feishu/Lark, WhatsApp, Discord, API) CANNOT display an interactive view: the result instead includes a ready-to-paste `textRendering` you must use to present the data in your reply, and NO page is created unless you pass createPage:true; when a page is created or appended out-app the result carries a `url` your reply must include. ' +
       'Unanchored scheduled/automated sessions get the data only (no page is created). ' +
       '\n\n' +
       'ONLY these exact (entity, viewType) combinations are valid. Pick one VERBATIM; the tool rejects anything else: ' +
@@ -621,7 +621,7 @@ export function createRenderChartTool(deps: ViewToolDeps): Tool {
       '\n\n' +
       'What the user sees depends on the channel. Web app chat: the chart persists as a draft page in the Pages sidebar and the app opens it. ' +
       'Anchored doc sessions: the chart block is appended to the anchored page. ' +
-      'Every other channel (Slack, Telegram, WhatsApp, Discord, API) CANNOT display a chart: the result includes a `textRendering` (label: value lines) to present in your reply, NO page is created unless you pass createPage:true, and any created/appended page comes back with a `url` your reply must include.',
+      'Every other channel (Slack, Telegram, Feishu/Lark, WhatsApp, Discord, API) CANNOT display a chart: the result includes a `textRendering` (label: value lines) to present in your reply, NO page is created unless you pass createPage:true, and any created/appended page comes back with a `url` your reply must include.',
     inputSchema: z.object({
       kind: chartKindSchema.describe('Picks the chart widget shape.'),
       createPage: z

@@ -1,10 +1,11 @@
 /**
- * `recordFeedback` — single writer for all three feedback surfaces.
+ * `recordFeedback` — single writer for all four feedback surfaces.
  *
  * Channels:
  *  - Web chat → `POST /api/feedback` (`routes/feedback.ts`)
  *  - Slack    → `reaction_added` event (`routes/slack.ts`)
  *  - Telegram → `message_reaction` update (`routes/telegram.ts`)
+ *  - Feishu   → normalized reaction event (`routes/feishu.ts`)
  *
  * Every path lands here so the analytics row + the heuristic
  * feedback-memory write happen identically regardless of source. The
@@ -26,14 +27,14 @@ import { createMemory } from '../db/memories.js'
  * `metadata.source` so the reflection prompt and analytics dashboards
  * can break down by surface.
  */
-export type FeedbackSource = 'web' | 'slack' | 'telegram'
+export type FeedbackSource = 'web' | 'slack' | 'telegram' | 'feishu'
 
 export type RecordFeedbackParams = {
-  /** Internal user id (the resolver in the route layer maps a Slack
-   *  user / Telegram user / web JWT to this). */
+  /** Internal user id (the resolver in the route layer maps a Slack,
+   *  Telegram, Feishu/Lark, or web identity to this). */
   userId: string
   /** UUID of the assistant message being reacted to —
-   *  `session_messages.id`. The Slack/Telegram reaction handlers look
+   *  `session_messages.id`. The Slack/Telegram/Feishu reaction handlers look
    *  this up via `findSessionMessageByChannelId` before calling
    *  through. Web passes it directly from the chat UI. */
   messageId: string
@@ -47,7 +48,7 @@ export type RecordFeedbackParams = {
    *  Reactions: the normalised emoji label (`:thumbsdown:`). */
   details?: string
   source: FeedbackSource
-  /** Optional channel id (Slack channel, Telegram chat). Persisted on
+  /** Optional channel id (Slack channel, Telegram or Feishu/Lark chat). Persisted on
    *  `analytics_events.channel_type` is set from `source`; this rides
    *  on metadata for surface-level analytics breakdowns. */
   channelId?: string

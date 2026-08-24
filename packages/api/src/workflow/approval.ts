@@ -38,7 +38,7 @@ export type ApprovalDeliveryDispatcher = (params: {
   toolName: string
   arguments: Record<string, unknown>
   approverUserId: string
-  deliveryChannelType: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams'
+  deliveryChannelType: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams' | 'feishu'
   deliveryChannelId: string | null
 }) => Promise<void>
 

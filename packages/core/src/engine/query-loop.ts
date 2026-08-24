@@ -148,7 +148,7 @@ export type QueryEvent =
    * The grounding gate fired: the turn's figure-bearing draft carries
    * claims backed by no evidence this run — a verification nudge naming
    * the exact values was injected and a corrected turn follows. Final-only
-   * channels (Telegram / Slack / WhatsApp) MUST reset their accumulated
+   * channels (Telegram / Slack / Feishu-Lark / WhatsApp) MUST reset their accumulated
    * outbound text buffer on this event so the unverified draft is never
    * delivered; all consumers should log it as the `grounding_nudge_fired`
    * analytics event (`matchedCue` → `matched_cue`).

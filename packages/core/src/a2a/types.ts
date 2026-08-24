@@ -32,6 +32,7 @@ export type ChannelType =
   | 'web'
   | 'telegram'
   | 'slack'
+  | 'feishu'
   | 'cron'
   | 'workflow'
   | 'a2a-external'
@@ -252,7 +253,7 @@ export type ConsultRequest = {
    * "Deferred confirmations".
    */
   deliver?: {
-    channelType: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams' | 'custom'
+    channelType: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams' | 'custom' | 'feishu'
     channelId: string
     channelIntegrationId?: string
   }

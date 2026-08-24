@@ -328,7 +328,7 @@ export type CalleeQueryParams = {
    * A2A; confirmations are stripped (the approval was already granted).
    */
   deliverTarget?: {
-    channelType: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams' | 'custom'
+    channelType: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams' | 'custom' | 'feishu'
     channelId: string
     channelIntegrationId?: string
   }
@@ -355,7 +355,7 @@ export type CalleeQueryParams = {
    * `askAssistant` free-mode consult keeps read-only memory. Absent → treated
    * as a non-workflow origin (read-only memory).
    */
-  callerChannelType?: 'web' | 'telegram' | 'slack' | 'cron' | 'workflow' | 'a2a-external'
+  callerChannelType?: 'web' | 'telegram' | 'slack' | 'feishu' | 'cron' | 'workflow' | 'a2a-external'
   /**
    * Originating workflow id (`ConsultRequest.workflowId`), set for a workflow
    * `assistant_call` step. Drives memory continuity: memories the step writes

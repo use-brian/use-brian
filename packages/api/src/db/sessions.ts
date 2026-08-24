@@ -1115,7 +1115,7 @@ export function coalesceConsecutiveUserMessages<
  * - replyToText:       snapshot text of the message being replied to, if any
  * - topicLabel:        normalized topic label from the classifier
  * - topicConfidence:   0..1 classifier confidence
- * - channelMessageId:  channel-native ID of this message (Telegram, Slack, WhatsApp)
+ * - channelMessageId:  channel-native ID of this message (Telegram, Slack, Feishu/Lark, WhatsApp)
  * - senderUserId:      per-message author. Set for `mode='draft'` sessions so
  *                      team-shared UIs can render per-turn attribution.
  */
@@ -1251,7 +1251,7 @@ export async function findSessionMessageByChannelTriple(
  *
  * Outgoing assistant turns are persisted by the channel pipeline
  * BEFORE the adapter actually delivers them — the adapter returns
- * the channel-native id (Slack `ts`, Telegram `message_id`) only
+ * the channel-native id (Slack `ts`, Telegram/Feishu-Lark `message_id`) only
  * after sending. This helper closes that gap so reaction handlers
  * can later look the row up via `findSessionMessageByChannelId` and
  * route feedback to the correct memory-recall events. Best-effort:
@@ -1432,7 +1432,7 @@ export function buildGroupChatContextPrompt(
 }
 
 /**
- * Find the user's most-active messaging channel (telegram or slack).
+ * Find the user's most-active messaging channel.
  * Returns the channel_type and provider delivery channel id of the session
  * with the most recent activity, excluding 'web' and 'cron' sessions. A
  * thread-qualified Slack session is normalized back to its base channel;
@@ -1447,7 +1447,7 @@ export async function getPreferredChannel(
     `SELECT channel_type as "channelType", channel_id as "channelId"
      FROM sessions
      WHERE assistant_id = $1 AND user_id = $2
-       AND channel_type IN ('telegram', 'slack', 'whatsapp', 'custom')
+       AND channel_type IN ('telegram', 'slack', 'whatsapp', 'custom', 'feishu')
        AND channel_id NOT IN ('notifications', 'default')
        AND (channel_type != 'whatsapp' OR channel_id LIKE '%@%')
      ORDER BY last_active_at DESC

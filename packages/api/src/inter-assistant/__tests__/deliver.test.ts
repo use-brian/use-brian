@@ -10,17 +10,20 @@ vi.mock('../../db/sessions.js', () => ({
 vi.mock('@use-brian/channels', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@use-brian/channels')>()),
   createSlackAdapter: vi.fn(),
+  createFeishuAdapter: vi.fn(),
   createTelegramAdapter: vi.fn(),
 }))
+vi.mock('../../feishu/client.js', () => ({ createFeishuApi: vi.fn(() => ({})) }))
 
 import { deliverToChannel } from '../deliver.js'
 import { findOrCreateSession, addSessionMessage } from '../../db/sessions.js'
-import { createSlackAdapter, createTelegramAdapter, SlackApiError } from '@use-brian/channels'
+import { createFeishuAdapter, createSlackAdapter, createTelegramAdapter, SlackApiError } from '@use-brian/channels'
 
 const mockFindOrCreateSession = vi.mocked(findOrCreateSession)
 const mockAddSessionMessage = vi.mocked(addSessionMessage)
 const mockCreateTelegramAdapter = vi.mocked(createTelegramAdapter)
 const mockCreateSlackAdapter = vi.mocked(createSlackAdapter)
+const mockCreateFeishuAdapter = vi.mocked(createFeishuAdapter)
 
 describe('[COMP:api/inter-assistant-deliver] deliverToChannel', () => {
   beforeEach(() => {
@@ -142,6 +145,32 @@ describe('[COMP:api/inter-assistant-deliver] deliverToChannel', () => {
         integrationStore,
       }),
     ).resolves.not.toThrow()
+  })
+
+  it('delivers an inter-assistant relay to Feishu through direct REST credentials', async () => {
+    const sendMessage = vi.fn().mockResolvedValue('om_1')
+    mockCreateFeishuAdapter.mockReturnValue({ sendMessage } as never)
+    const integrationStore = {
+      getCredentialsForAssistantSystem: vi.fn().mockResolvedValue({
+        credentials: { app_id: 'cli_a', app_secret: 'secret', brand: 'lark' },
+        botUserId: 'ou_bot',
+      }),
+    } as never
+
+    const result = await deliverToChannel({
+      assistantId: 'a_1',
+      userId: 'u_1',
+      text: 'Relayed answer',
+      channelType: 'feishu',
+      channelId: 'oc_chat',
+      integrationStore,
+    })
+
+    expect(result).toEqual({ delivered: true, channelType: 'feishu' })
+    expect(sendMessage).toHaveBeenCalledWith('oc_chat', {
+      text: 'Relayed answer',
+      format: 'markdown',
+    })
   })
 
   it('no explicit channel: defaults to web notification, no outbound push', async () => {

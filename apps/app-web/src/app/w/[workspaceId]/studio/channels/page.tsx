@@ -76,6 +76,7 @@ import {
   connectSlackChannel,
   connectTelegramChannel,
   connectDiscordChannel,
+  connectFeishuChannel,
   connectMsTeamsChannel,
   connectWhatsAppCloudChannel,
   startWechatPairing,
@@ -152,6 +153,7 @@ const PLACEHOLDER_SLACK_WEBHOOK_URL = `${DISPLAY_API_URL}/webhook/slack/REPLACE-
 // generic glyph rather than rendering blank.
 const PLATFORM_GLYPH: Partial<Record<Channel["channelType"], string>> = {
   slack: "#",
+  feishu: "F",
   email: "@",
   msteams: "T",
   wechat: "微",
@@ -979,6 +981,7 @@ export function ChannelDetail({
       {(channel.channelType === "slack" ||
         channel.channelType === "telegram" ||
         channel.channelType === "discord" ||
+        channel.channelType === "feishu" ||
         channel.channelType === "custom" ||
         (channel.channelType === "whatsapp" && channel.integrationProvider === "cloud_api")) &&
         channel.integrationId && (
@@ -1327,7 +1330,7 @@ function SurfaceInput({
 }
 
 /**
- * Per-integration behavior config for a Slack / Telegram channel — the
+ * Per-integration behavior config for a messaging channel — the
  * `channel_integrations.config` JSONB. Edits PATCH
  * `/workspaces/:id/channels/:id/config`; the server merges each patch into the
  * stored config. See docs/architecture/channels/adapter-pattern.md.
@@ -1351,6 +1354,7 @@ export function ChannelConfigSection({
   // enforced connector-side (not from this config) and there is no ack-reaction
   // on the Discord inbound path, so both are hidden for Discord channels.
   const isDiscord = channel.channelType === "discord";
+  const isFeishu = channel.channelType === "feishu";
   // A custom bridge: group mention gating (the bridge reports `isMentioned`)
   // + access control by bridge-reported sender id. No ack reaction — the
   // protocol has no reaction item.
@@ -1458,6 +1462,8 @@ export function ChannelConfigSection({
               ? cfg.accessAllDescSlack
               : isDiscord
                 ? cfg.accessAllDescDiscord
+                : isFeishu
+                  ? cfg.accessAllDescFeishu
                 : isCustom
                   ? cfg.accessAllDescCustom
                   : isWhatsAppCloud
@@ -1522,6 +1528,8 @@ export function ChannelConfigSection({
                   ? cfg.userIdPlaceholderSlack
                   : isDiscord
                     ? cfg.userIdPlaceholderDiscord
+                    : isFeishu
+                      ? cfg.userIdPlaceholderFeishu
                     : isCustom
                       ? cfg.userIdPlaceholderCustom
                       : isWhatsAppCloud
@@ -1543,6 +1551,8 @@ export function ChannelConfigSection({
               ? cfg.userIdHintSlack
               : isDiscord
                 ? cfg.userIdHintDiscord
+                : isFeishu
+                  ? cfg.userIdHintFeishu
                 : isCustom
                   ? cfg.userIdHintCustom
                   : isWhatsAppCloud
@@ -1692,7 +1702,7 @@ export function ChannelConfigSection({
         {cfg.title}
       </div>
 
-      {isSlack && (
+      {(isSlack || isFeishu) && (
         <ConfigToggle
           label={cfg.replyInThread}
           hint={cfg.replyInThreadHint}
@@ -1705,7 +1715,13 @@ export function ChannelConfigSection({
       {!isDiscord && !isWhatsAppCloud && (
         <ConfigToggle
           label={cfg.requireMention}
-          hint={isCustom ? cfg.requireMentionHintCustom : cfg.requireMentionHintSlack}
+          hint={
+            isCustom
+              ? cfg.requireMentionHintCustom
+              : isFeishu
+                ? cfg.requireMentionHintFeishu
+                : cfg.requireMentionHintSlack
+          }
           checked={config.requireMention ?? true}
           disabled={saving}
           onChange={(v) => void save({ requireMention: v })}
@@ -2020,7 +2036,7 @@ export function AddChannelForm({
   const t = useT();
   const add = t.studioPage.channels.add;
   const [platform, setPlatform] = useState<
-    "slack" | "telegram" | "discord" | "whatsapp" | "email" | "msteams" | "wechat" | "custom"
+    "slack" | "telegram" | "discord" | "feishu" | "whatsapp" | "email" | "msteams" | "wechat" | "custom"
   >("slack");
 
   // WhatsApp pairs via QR (no token submit). After the connect stream reports
@@ -2054,6 +2070,12 @@ export function AddChannelForm({
         pairingCode: string | null;
       }
     | { kind: "discord"; botUsername: string; inviteUrl: string; connectorError: string | null }
+    | {
+        kind: "feishu";
+        botName: string;
+        brand: "feishu" | "lark";
+        connectorError: string | null;
+      }
     | { kind: "email"; address: string }
     | { kind: "msteams"; webhookUrl: string }
     | { kind: "custom"; channelId: string; kindLabel: string | null; bridgeToken: string }
@@ -2065,6 +2087,9 @@ export function AddChannelForm({
   const [signingSecret, setSigningSecret] = useState("");
   const [tgBotToken, setTgBotToken] = useState("");
   const [dcBotToken, setDcBotToken] = useState("");
+  const [feishuBrand, setFeishuBrand] = useState<"feishu" | "lark">("feishu");
+  const [feishuAppId, setFeishuAppId] = useState("");
+  const [feishuAppSecret, setFeishuAppSecret] = useState("");
   const [msAppId, setMsAppId] = useState("");
   const [msAppPassword, setMsAppPassword] = useState("");
   const [msTenantId, setMsTenantId] = useState("");
@@ -2149,6 +2174,21 @@ export function AddChannelForm({
           pairingCode: result.pairingCode,
         });
         setTgBotToken("");
+      } else if (platform === "feishu") {
+        const result = await connectFeishuChannel(workspaceId, {
+          appId: feishuAppId.trim(),
+          appSecret: feishuAppSecret,
+          brand: feishuBrand,
+          defaultAssistantId: defaultAssistantId || null,
+        });
+        await onCreated(result.channel);
+        setSuccess({
+          kind: "feishu",
+          botName: result.botName,
+          brand: result.brand,
+          connectorError: result.connectorError,
+        });
+        setFeishuAppSecret("");
       } else if (platform === "msteams") {
         const result = await connectMsTeamsChannel(workspaceId, {
           appId: msAppId.trim(),
@@ -2224,6 +2264,8 @@ export function AddChannelForm({
       : platform === "telegram"
         ? tgBotToken.length > 0 &&
           (isHostedEdition() || defaultAssistantId.length > 0)
+        : platform === "feishu"
+          ? feishuAppId.trim().length > 0 && feishuAppSecret.length > 0
         : platform === "msteams"
           ? msAppId.trim().length > 0 && msAppPassword.length > 0 && msTenantId.trim().length > 0
           : platform === "email"
@@ -2233,7 +2275,7 @@ export function AddChannelForm({
               ? customName.trim().length > 0
               : dcBotToken.length > 0);
 
-  function pickPlatform(p: "slack" | "telegram" | "discord" | "whatsapp" | "email" | "msteams" | "wechat" | "custom"): void {
+  function pickPlatform(p: "slack" | "telegram" | "discord" | "feishu" | "whatsapp" | "email" | "msteams" | "wechat" | "custom"): void {
     setPlatform(p);
     setSuccess(null);
     setError(null);
@@ -2293,12 +2335,13 @@ export function AddChannelForm({
             "slack",
             "telegram",
             "discord",
+            "feishu",
             "msteams",
             "whatsapp",
             "wechat",
             "custom",
             ...(emailConfigured ? ["email"] : []),
-          ] as Array<"slack" | "telegram" | "discord" | "whatsapp" | "email" | "msteams" | "wechat" | "custom">
+          ] as Array<"slack" | "telegram" | "discord" | "feishu" | "whatsapp" | "email" | "msteams" | "wechat" | "custom">
         ).map((p) => (
           <button
             key={p}
@@ -2602,6 +2645,67 @@ export function AddChannelForm({
             </Select>
           </label>
         </div>
+      ) : platform === "feishu" ? (
+        <div className="flex flex-col gap-3">
+          <p className="text-xs text-muted-foreground">{add.feishu.hint}</p>
+          <a
+            href={
+              feishuBrand === "feishu"
+                ? "https://open.feishu.cn/app"
+                : "https://open.larksuite.com/app"
+            }
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-1 self-start text-xs text-primary hover:underline"
+          >
+            {add.feishu.portalLink}
+            <ExternalLink className="size-3" aria-hidden />
+          </a>
+          <label className="flex flex-col gap-1">
+            <span className="text-xs font-medium">{add.feishu.brandLabel}</span>
+            <Select
+              value={feishuBrand}
+              onValueChange={(v) => {
+                if (v === "feishu" || v === "lark") setFeishuBrand(v);
+              }}
+              items={{
+                feishu: add.feishu.brandFeishu,
+                lark: add.feishu.brandLark,
+              }}
+              disabled={submitting || !!success}
+            >
+              <SelectTrigger size="sm" className="text-sm">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="feishu">{add.feishu.brandFeishu}</SelectItem>
+                <SelectItem value="lark">{add.feishu.brandLark}</SelectItem>
+              </SelectContent>
+            </Select>
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-xs font-medium">{add.feishu.appIdLabel}</span>
+            <input
+              type="text"
+              value={feishuAppId}
+              onChange={(e) => setFeishuAppId(e.target.value)}
+              placeholder="cli_..."
+              disabled={submitting || !!success}
+              className={FIELD_INPUT}
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-xs font-medium">{add.feishu.appSecretLabel}</span>
+            <input
+              type="password"
+              value={feishuAppSecret}
+              onChange={(e) => setFeishuAppSecret(e.target.value)}
+              placeholder="••••••••••••••••"
+              disabled={submitting || !!success}
+              className={FIELD_INPUT}
+            />
+          </label>
+        </div>
       ) : platform === "msteams" ? (
         <div className="flex flex-col gap-3">
           <p className="text-xs text-muted-foreground">{add.msteamsHint}</p>
@@ -2878,6 +2982,36 @@ export function AddChannelForm({
               type="button"
               onClick={onClose}
               className="text-xs font-medium rounded-md border border-border px-2 py-1 hover:bg-muted"
+            >
+              {add.done}
+            </button>
+          </div>
+        </div>
+      )}
+      {success?.kind === "feishu" && (
+        <div className="flex flex-col gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3">
+          <p className="text-sm font-medium text-emerald-600 dark:text-emerald-400">
+            {format(add.feishu.connected, {
+              name: success.botName,
+              platform:
+                success.brand === "feishu"
+                  ? add.feishu.brandFeishu
+                  : add.feishu.brandLark,
+            })}
+          </p>
+          {success.connectorError && (
+            <p className="text-xs text-amber-600 dark:text-amber-400">
+              {add.feishu.connectorWarning}
+            </p>
+          )}
+          <p className="text-xs text-muted-foreground">
+            {add.feishu.testHint}
+          </p>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-md border border-border px-2 py-1 text-xs font-medium hover:bg-muted"
             >
               {add.done}
             </button>

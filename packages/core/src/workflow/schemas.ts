@@ -176,7 +176,7 @@ const assistantCallStepSchema = z.object({
    */
   deliver: z.union([
     z.object({
-      channelType: z.enum(['web', 'telegram', 'slack', 'whatsapp', 'msteams', 'custom']),
+      channelType: z.enum(['web', 'telegram', 'slack', 'whatsapp', 'msteams', 'custom', 'feishu']),
       channelId: z.string().min(1).max(256),
       channelIntegrationId: z.string().uuid().optional(),
       thread: z.object({ fromStep: stepIdSchema }).strict().optional(),
@@ -227,7 +227,7 @@ const approvalSchema = z.object({
   required: z.boolean().optional(),
   // Approval pings have no custom-channel renderer yet (approvals are out of
   // the custom-channel v1 scope); the enum stays narrower than deliver's.
-  deliveryChannel: z.enum(['web', 'telegram', 'slack', 'whatsapp', 'msteams']).optional(),
+  deliveryChannel: z.enum(['web', 'telegram', 'slack', 'whatsapp', 'msteams', 'feishu']).optional(),
   expiresAfterHours: z.number().int().min(1).max(24 * 30).optional(),
 })
 
@@ -750,20 +750,21 @@ export const WorkflowDefinitionSchema = z
       }
     }
 
-    // Bot integrations are currently an explicit part of Telegram delivery
-    // identity only. Reject inert ids on other channel types instead of
-    // persisting a selection runtime would ignore.
+    // Bot integrations are part of Telegram and Feishu delivery identity.
+    // Reject inert ids on other channel types instead of persisting a
+    // selection runtime would ignore.
     for (const [i, step] of def.steps.entries()) {
       if (
         step.type === 'assistant_call' &&
         step.deliver &&
         'channelIntegrationId' in step.deliver &&
         step.deliver.channelIntegrationId &&
-        step.deliver.channelType !== 'telegram'
+        step.deliver.channelType !== 'telegram' &&
+        step.deliver.channelType !== 'feishu'
       ) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: `step "${step.id}".deliver.channelIntegrationId is only supported for telegram delivery.`,
+          message: `step "${step.id}".deliver.channelIntegrationId is only supported for telegram and feishu delivery.`,
           path: ['steps', i, 'deliver', 'channelIntegrationId'],
         })
       }
@@ -771,8 +772,8 @@ export const WorkflowDefinitionSchema = z
 
     // `deliver.thread.fromStep` must reference a DIFFERENT assistant_call step
     // that delivers to the SAME channel — the thread parent is the message
-    // that step posted this run. Also platform-gated: only Slack (thread_ts)
-    // and Telegram (reply) support threaded replies. Mirrors the page.fromStep
+    // that step posted this run. Also platform-gated: Slack (thread_ts),
+    // Telegram (reply), and Feishu (reply_in_thread) support threaded replies. Mirrors the page.fromStep
     // checks — catches the dangling reference at authoring time instead of a
     // silent top-level fallback on every run.
     const deliverSteps = new Map(
@@ -796,10 +797,10 @@ export const WorkflowDefinitionSchema = z
         !step.deliver.thread
       ) continue
       const ref = step.deliver.thread.fromStep
-      if (step.deliver.channelType !== 'slack' && step.deliver.channelType !== 'telegram') {
+      if (step.deliver.channelType !== 'slack' && step.deliver.channelType !== 'telegram' && step.deliver.channelType !== 'feishu') {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: `step "${step.id}".deliver.thread is only supported for slack (thread reply) and telegram (reply) deliveries — ${step.deliver.channelType} has no threaded replies.`,
+          message: `step "${step.id}".deliver.thread is only supported for slack, telegram, and feishu deliveries — ${step.deliver.channelType} has no threaded replies.`,
           path: ['steps', i, 'deliver', 'thread'],
         })
         continue
@@ -1001,7 +1002,7 @@ export const WorkflowTriggerSchema = z.discriminatedUnion('kind', [
      * authoring warning. `web` is never a delivery target.
      * See docs/architecture/features/workflow.md §3.
      */
-    delivery: z.object({ channel: z.enum(['telegram', 'slack', 'whatsapp']) }).optional(),
+    delivery: z.object({ channel: z.enum(['telegram', 'slack', 'whatsapp', 'feishu']) }).optional(),
     /**
      * Trigger-row behavioral policy — mirrors the `scheduled_jobs` columns
      * (`silent_until_fire`, `nag_interval_mins`, `nag_until_keyword`). Lives on

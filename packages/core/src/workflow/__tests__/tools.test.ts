@@ -277,7 +277,7 @@ function makeAllTools(opts?: {
   jobStore?: JobStore & { rows: ScheduledJob[] }
   validateDeliveryTarget?: (args: {
     assistantId: string
-    channelType: 'telegram' | 'slack' | 'whatsapp'
+    channelType: 'telegram' | 'slack' | 'whatsapp' | 'feishu'
     channelId: string
   }) => Promise<{ ok: boolean; reason?: string }>
   preflightConnectorTool?: (args: {

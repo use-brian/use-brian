@@ -87,7 +87,7 @@ describe('[COMP:api/channel-tool-observability] Channel tool observability', () 
 
   it('emits tool_executed on the pipeline channel, never the hardcoded web literal', () => {
     const { logger, events } = makeAnalytics()
-    for (const channelType of ['telegram', 'slack', 'whatsapp', 'discord']) {
+    for (const channelType of ['telegram', 'slack', 'whatsapp', 'discord', 'feishu']) {
       recordChannelToolResults({
         ...base,
         channelType,
@@ -96,7 +96,7 @@ describe('[COMP:api/channel-tool-observability] Channel tool observability', () 
         usageStore: undefined,
       })
     }
-    expect(events.map((e) => e.channelType)).toEqual(['telegram', 'slack', 'whatsapp', 'discord'])
+    expect(events.map((e) => e.channelType)).toEqual(['telegram', 'slack', 'whatsapp', 'discord', 'feishu'])
     expect(events.every((e) => e.eventName === 'tool_executed')).toBe(true)
     expect(events.some((e) => e.channelType === 'web')).toBe(false)
   })

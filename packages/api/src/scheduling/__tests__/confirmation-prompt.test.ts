@@ -17,12 +17,14 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 vi.mock('@use-brian/channels', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@use-brian/channels')>()),
   createSlackAdapter: vi.fn(),
+  createFeishuAdapter: vi.fn(),
   createTelegramAdapter: vi.fn(),
   createWhatsAppAdapter: vi.fn(),
   createCustomAdapter: vi.fn(),
 }))
+vi.mock('../../feishu/client.js', () => ({ createFeishuApi: vi.fn(() => ({})) }))
 
-import { createCustomAdapter, createSlackAdapter, createTelegramAdapter, SlackApiError } from '@use-brian/channels'
+import { createCustomAdapter, createFeishuAdapter, createSlackAdapter, createTelegramAdapter, SlackApiError } from '@use-brian/channels'
 import type { ToolConfirmationRequest } from '@use-brian/core'
 
 import { resolveTelegramBotToken, sendConfirmationPrompt } from '../confirmation-prompt.js'
@@ -30,6 +32,7 @@ import type { ChannelIntegrationStore } from '../../db/channel-integrations.js'
 
 const mockCreateTelegramAdapter = vi.mocked(createTelegramAdapter)
 const mockCreateSlackAdapter = vi.mocked(createSlackAdapter)
+const mockCreateFeishuAdapter = vi.mocked(createFeishuAdapter)
 const mockCreateCustomAdapter = vi.mocked(createCustomAdapter)
 
 /** The slice of the channel adapter's `sendMessage` this module exercises. */
@@ -160,6 +163,69 @@ describe('[COMP:scheduling/confirmation-prompt] sendConfirmationPrompt', () => {
 
     const msg = sendMessage.mock.calls[0][1]
     expect(msg.actions?.map((a) => a.id)).toEqual(['allow', 'deny', 'always', 'never'])
+  })
+
+  it('sends a Feishu confirmation as an interactive card action set', async () => {
+    const sendMessage = vi.fn<SendMessage>(async () => {})
+    mockCreateFeishuAdapter.mockReturnValue({ sendMessage } as never)
+    const integrationStore = {
+      getCredentialsForAssistantSystem: vi.fn(async () => ({
+        credentials: { app_id: 'cli_a', app_secret: 'secret', brand: 'feishu' },
+        botUserId: 'ou_bot',
+      })),
+    } as unknown as ChannelIntegrationStore
+
+    const result = await sendConfirmationPrompt(
+      { assistantId: 'a_1', channelType: 'feishu', channelId: 'oc_chat' },
+      { ...req, allowPersistentApproval: true },
+      { integrationStore },
+    )
+
+    expect(result).toEqual({ delivered: true, channelType: 'feishu' })
+    expect(sendMessage).toHaveBeenCalledWith('oc_chat', expect.objectContaining({
+      actions: [
+        expect.objectContaining({ data: 'mcp_confirm:tc_1:allow' }),
+        expect.objectContaining({ data: 'mcp_confirm:tc_1:deny' }),
+        expect.objectContaining({ data: 'mcp_confirm:tc_1:always_allow' }),
+        expect.objectContaining({ data: 'mcp_confirm:tc_1:always_deny' }),
+      ],
+    }))
+  })
+
+  it('sends a Feishu confirmation through the explicitly selected integration', async () => {
+    const sendMessage = vi.fn<SendMessage>(async () => {})
+    mockCreateFeishuAdapter.mockReturnValue({ sendMessage } as never)
+    const integrationStore = {
+      getCredentialsForAssistantSystem: vi.fn(async () => {
+        throw new Error('default integration must not be used')
+      }),
+      getCredentialsForAssistantIntegrationSystem: vi.fn(async () => ({
+        credentials: { app_id: 'cli_selected', app_secret: 'secret', brand: 'lark' },
+        botUserId: 'ou_selected_bot',
+      })),
+    } as unknown as ChannelIntegrationStore
+
+    const result = await sendConfirmationPrompt(
+      {
+        workspaceId: 'ws-1',
+        assistantId: 'a_1',
+        channelType: 'feishu',
+        channelId: 'oc_selected_chat',
+        channelIntegrationId: '00000000-0000-4000-8000-000000000001',
+      },
+      req,
+      { integrationStore },
+    )
+
+    expect(result).toEqual({ delivered: true, channelType: 'feishu' })
+    expect(integrationStore.getCredentialsForAssistantIntegrationSystem).toHaveBeenCalledWith(
+      'ws-1',
+      'a_1',
+      '00000000-0000-4000-8000-000000000001',
+      'feishu',
+      'oc_selected_chat',
+    )
+    expect(integrationStore.getCredentialsForAssistantSystem).not.toHaveBeenCalled()
   })
 
   it('enqueues a text confirmation on the selected custom-channel bridge', async () => {

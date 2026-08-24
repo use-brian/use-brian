@@ -131,7 +131,8 @@ export function computePercent(cost: number, cap: number) {
 // ── Budget gate ───────────────────────────────────────────────
 
 /**
- * Centralised budget gate used by all channels (web, Telegram, Slack, WhatsApp).
+ * Centralised budget gate used by all channels (web, Telegram, Slack,
+ * WhatsApp, Feishu/Lark).
  *
  * Returns `ok` / `downgraded` / `blocked` plus a `resetsAt` ISO timestamp
  * so callers can tell the user when the allowance resets.

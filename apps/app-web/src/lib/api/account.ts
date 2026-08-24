@@ -75,7 +75,7 @@ export async function removeAvatar(): Promise<boolean> {
   return res.ok;
 }
 
-// ── Connected accounts (Telegram / Slack / WhatsApp linking) ──
+// ── Connected accounts (Telegram / Slack / WhatsApp / Feishu linking) ──
 // Settings → Account → Connected accounts. Wire contracts:
 // - `GET    /api/account/linked-accounts` lists linked provider identities.
 // - `DELETE /api/account/linked-accounts/:id` unlinks one.
@@ -84,6 +84,8 @@ export async function removeAvatar(): Promise<boolean> {
 //   @username for the t.me deep link (null when unresolvable).
 // - `POST   /api/account/slack/link-code` mints the same code shape for
 //   Slack (no deep link; pasted to the Brian app in Slack).
+// - `POST   /api/account/feishu/link-code` mints the same code shape for
+//   Feishu/Lark (pasted to Brian in a DM or an addressed group message).
 // See docs/architecture/platform/auth.md → "Linked accounts".
 
 export type LinkedAccount = {
@@ -153,6 +155,24 @@ export async function createSlackLinkCode(): Promise<SlackLinkCode | null> {
     });
     if (!res.ok) return null;
     return (await res.json()) as SlackLinkCode;
+  } catch {
+    return null;
+  }
+}
+
+export type FeishuLinkCode = {
+  code: string;
+  expiresAt: string;
+};
+
+/** Mint a Feishu/Lark link code. Resolves `null` on a non-OK response. */
+export async function createFeishuLinkCode(): Promise<FeishuLinkCode | null> {
+  try {
+    const res = await authFetch(`${API_URL}/api/account/feishu/link-code`, {
+      method: "POST",
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as FeishuLinkCode;
   } catch {
     return null;
   }

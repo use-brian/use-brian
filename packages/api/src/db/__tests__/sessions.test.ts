@@ -145,6 +145,22 @@ describe('[COMP:api/slack-route] Slack base-channel compatibility', () => {
   })
 })
 
+describe('[COMP:api/feishu-route] Feishu preferred-channel delivery', () => {
+  it('keeps a Feishu chat id as the preferred delivery destination', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ channelType: 'feishu', channelId: 'oc_chat123' }],
+      rowCount: 1,
+    } as never)
+
+    await expect(getPreferredChannel('a_1', 'u_1')).resolves.toEqual({
+      channelType: 'feishu',
+      channelId: 'oc_chat123',
+    })
+
+    expect(mockQuery.mock.calls[0][0]).toContain("'feishu'")
+  })
+})
+
 describe('[COMP:api/sessions-route] updateSessionStatus', () => {
   it('issues an UPDATE setting status and last_active_at', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)

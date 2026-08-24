@@ -33,6 +33,7 @@ export type AssistantRunChannel =
   | 'web'
   | 'telegram'
   | 'slack'
+  | 'feishu'
   | 'mcp'
   | 'cron'
   | 'unknown'

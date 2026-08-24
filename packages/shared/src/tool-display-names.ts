@@ -1,7 +1,7 @@
 /**
  * Human-readable display names for tools shown in confirmation prompts.
  *
- * Used by Telegram, Slack, and web routes when asking users to approve
+ * Used by Telegram, Slack, Feishu/Lark, and web routes when asking users to approve
  * a tool action. Maps internal camelCase tool names to short, plain
  * English descriptions so users see "Create calendar event" instead of
  * "googleCalendarCreateEvent".
@@ -415,7 +415,7 @@ const FIELD_LABELS: Record<string, string> = {
  * Human-readable fields (title, name, summary) are sorted first so users
  * see what matters before IDs. Internal ID fields are hidden. Field names
  * are converted to human-friendly labels. Used by all channel routes
- * (Telegram, Slack, WhatsApp) for consistent confirmation prompts.
+ * (Telegram, Slack, Feishu/Lark, WhatsApp) for consistent confirmation prompts.
  *
  * @param input   - The tool input object.
  * @param bullet  - Prefix for each line (default `"• "`).

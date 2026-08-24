@@ -1,14 +1,22 @@
 "use client";
 
 /**
- * Dedicated CRM email-review workspace. The queue, archived conversation,
- * and linked-person/draft rail are independent viewport regions so a reviewer
- * never has to scroll through record metadata to reach the draft or actions.
+ * Dedicated CRM email-review workspace. A compact queue + relationship rail
+ * sits beside one resizable work surface containing the archived conversation
+ * and draft, so the message being reviewed owns most of the viewport.
  *
  * [COMP:app-web/crm-email-review]
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   Building2,
   Check,
@@ -38,6 +46,122 @@ import { format } from "@/lib/i18n/format";
 import { cn } from "@/lib/utils";
 
 type ReviewOperation = "save" | "approve" | "reject" | null;
+
+const REVIEW_MAIN_STORAGE_KEY = "crm:email-review-main-width";
+const REVIEW_MAIN_MIN_WIDTH = 448;
+const REVIEW_CONTEXT_MIN_WIDTH = 240;
+const REVIEW_RESIZE_STEP = 24;
+
+function storedReviewWidth(): number | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(REVIEW_MAIN_STORAGE_KEY);
+    const parsed = raw === null ? NaN : Number(raw);
+    return Number.isFinite(parsed) && parsed >= REVIEW_MAIN_MIN_WIDTH
+      ? parsed
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function useEmailReviewResize() {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const mainRef = useRef<HTMLElement>(null);
+  const frameRef = useRef<number | null>(null);
+  const detachDragRef = useRef<(() => void) | null>(null);
+  const [width, setWidth] = useState<number | null>(storedReviewWidth);
+  const [resizing, setResizing] = useState(false);
+
+  const clamp = useCallback((desired: number) => {
+    const available = containerRef.current?.getBoundingClientRect().width
+      ?? window.innerWidth;
+    const maximum = Math.max(
+      REVIEW_MAIN_MIN_WIDTH,
+      available - REVIEW_CONTEXT_MIN_WIDTH,
+    );
+    return Math.min(Math.max(desired, REVIEW_MAIN_MIN_WIDTH), maximum);
+  }, []);
+
+  const persist = useCallback((next: number | null) => {
+    try {
+      if (next === null) window.localStorage.removeItem(REVIEW_MAIN_STORAGE_KEY);
+      else window.localStorage.setItem(REVIEW_MAIN_STORAGE_KEY, String(next));
+    } catch {
+      // A remembered split is a convenience, never a requirement.
+    }
+  }, []);
+
+  useEffect(() => () => {
+    detachDragRef.current?.();
+    if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+  }, []);
+
+  const onPointerDown = useCallback((event: ReactPointerEvent<HTMLElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    detachDragRef.current?.();
+    const container = containerRef.current?.getBoundingClientRect();
+    const right = container?.right ?? window.innerWidth;
+    let latest = mainRef.current?.getBoundingClientRect().width
+      ?? width
+      ?? REVIEW_MAIN_MIN_WIDTH;
+    setResizing(true);
+
+    const onMove = (moveEvent: PointerEvent) => {
+      latest = clamp(right - moveEvent.clientX);
+      if (frameRef.current !== null) return;
+      frameRef.current = requestAnimationFrame(() => {
+        frameRef.current = null;
+        setWidth(latest);
+      });
+    };
+    const detach = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onEnd);
+      window.removeEventListener("pointercancel", onEnd);
+    };
+    const onEnd = () => {
+      detach();
+      detachDragRef.current = null;
+      setResizing(false);
+      setWidth(latest);
+      persist(latest);
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onEnd);
+    window.addEventListener("pointercancel", onEnd);
+    detachDragRef.current = detach;
+  }, [clamp, persist, width]);
+
+  const onDoubleClick = useCallback(() => {
+    setWidth(null);
+    persist(null);
+  }, [persist]);
+
+  const onKeyDown = useCallback((event: ReactKeyboardEvent<HTMLElement>) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    const current = mainRef.current?.getBoundingClientRect().width
+      ?? width
+      ?? REVIEW_MAIN_MIN_WIDTH;
+    const delta = event.key === "ArrowLeft"
+      ? REVIEW_RESIZE_STEP
+      : -REVIEW_RESIZE_STEP;
+    const next = clamp(current + delta);
+    setWidth(next);
+    persist(next);
+  }, [clamp, persist, width]);
+
+  return {
+    containerRef,
+    mainRef,
+    width,
+    resizing,
+    handleProps: { onPointerDown, onDoubleClick, onKeyDown },
+  };
+}
 
 export function CrmEmailReviewWorkspace({
   workspaceId,
@@ -122,6 +246,13 @@ export function CrmEmailReviewWorkspace({
   const relatedDeals = data.deals.filter(
     (deal) => deal.contactId && selectedContactIds.has(deal.contactId),
   );
+  const {
+    containerRef,
+    mainRef,
+    width: reviewWidth,
+    resizing,
+    handleProps,
+  } = useEmailReviewResize();
 
   async function respond(decision: "approved" | "rejected") {
     if (!row || operation) return;
@@ -152,10 +283,11 @@ export function CrmEmailReviewWorkspace({
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-y-auto bg-muted/10 lg:grid lg:grid-cols-[16rem_minmax(0,1fr)_minmax(22rem,28rem)] lg:overflow-hidden">
+    <div ref={containerRef} className="flex h-full min-h-0 flex-col overflow-y-auto bg-muted/10 lg:flex-row lg:overflow-hidden">
       <aside
         aria-label={t.emailDraftQueue}
-        className="flex min-h-52 shrink-0 flex-col border-b border-border/70 bg-background lg:min-h-0 lg:shrink lg:border-b-0 lg:border-r"
+        data-email-context-rail
+        className="flex min-h-[24rem] shrink-0 flex-col border-b border-border/70 bg-background lg:min-h-0 lg:min-w-60 lg:flex-1 lg:border-b-0 lg:border-r"
       >
         <div className="flex items-start justify-between gap-3 border-b border-border/70 px-4 py-3">
           <div className="min-w-0">
@@ -181,7 +313,7 @@ export function CrmEmailReviewWorkspace({
           </div>
         )}
 
-        <div className="min-h-0 flex-1 overflow-y-auto p-2 max-lg:max-h-48">
+        <div className="min-h-0 flex-1 overflow-y-auto p-2 max-lg:max-h-48 lg:max-h-[45%]">
           {loadError && items.length === 0 ? (
             <div className="rounded-lg border border-destructive/25 bg-destructive/5 p-3 text-xs text-destructive">
               <p>{t.emailDraftsLoadFailed}</p>
@@ -247,51 +379,132 @@ export function CrmEmailReviewWorkspace({
             </ol>
           )}
         </div>
+
+        {row && selected && (
+          <div className="min-h-0 border-t border-border/70 px-3 py-3 lg:flex-1 lg:overflow-y-auto">
+            <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{t.crmProfile}</div>
+            <div className="mt-2 space-y-2">
+              {selected.contacts.map((contact) => {
+                const company = contact.companyId
+                  ? data.companies.find((candidate) => candidate.id === contact.companyId)
+                  : null;
+                return (
+                  <button
+                    key={contact.id}
+                    type="button"
+                    onClick={() => onOpenContact(contact.id)}
+                    className="group w-full rounded-xl border border-border bg-card p-3 text-left shadow-sm transition-colors hover:bg-accent/40"
+                  >
+                    <div className="flex items-center gap-2.5">
+                      <span className="grid size-9 shrink-0 place-items-center rounded-full bg-muted"><UserRound className="size-4" aria-hidden /></span>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5 text-sm font-medium">
+                          <span className="truncate">{contact.name}</span>
+                          <ChevronRight className="size-3.5 opacity-0 transition-opacity group-hover:opacity-100" aria-hidden />
+                        </div>
+                        <div className="truncate text-[11px] text-muted-foreground">{contact.email}</div>
+                      </div>
+                    </div>
+                    <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-muted-foreground">
+                      {contact.phone && <span className="inline-flex items-center gap-1"><Phone className="size-3" aria-hidden />{contact.phone}</span>}
+                      {company && <span className="inline-flex items-center gap-1"><Building2 className="size-3" aria-hidden />{company.name}</span>}
+                      {contact.tags.length > 0 && <span className="inline-flex items-center gap-1"><Tags className="size-3" aria-hidden />{contact.tags.join(", ")}</span>}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+
+            {relatedDeals.length > 0 && (
+              <div className="mt-3">
+                <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{t.relatedDeals}</div>
+                <div className="mt-1.5 flex flex-wrap gap-1.5">
+                  {relatedDeals.slice(0, 4).map((deal) => (
+                    <span key={deal.id} className="max-w-full truncate rounded-full bg-muted px-2 py-1 text-[10px] text-muted-foreground">{deal.name}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </aside>
 
-      <section
-        aria-label={t.conversation}
-        className="flex min-h-[22rem] min-w-0 shrink-0 flex-col border-b border-border/70 bg-background lg:min-h-0 lg:shrink lg:border-b-0 lg:border-r"
+      <main
+        ref={mainRef}
+        aria-label={t.reviewDraft}
+        data-email-review-main
+        style={reviewWidth !== null ? {
+          width: reviewWidth,
+          maxWidth: "calc(100% - 15rem)",
+        } : undefined}
+        className={cn(
+          "relative flex min-h-[42rem] min-w-0 shrink-0 flex-col bg-background lg:min-h-0 lg:min-w-[28rem] lg:w-[68%]",
+          resizing && "select-none",
+        )}
       >
-        {row ? (
+        <div className="hidden lg:block">
+          <div
+            role="separator"
+            tabIndex={0}
+            aria-orientation="vertical"
+            aria-label={dictionary.filterBar.resize}
+            aria-valuemin={REVIEW_MAIN_MIN_WIDTH}
+            aria-valuenow={reviewWidth !== null ? Math.round(reviewWidth) : undefined}
+            {...handleProps}
+            className="group/resize absolute inset-y-0 left-0 z-10 w-2 -translate-x-1/2 cursor-col-resize touch-none select-none outline-none focus-visible:bg-primary/10 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary/50"
+          >
+            <div
+              className={cn(
+                "mx-auto h-full w-px bg-transparent transition-colors group-hover/resize:bg-primary/40",
+                resizing && "bg-primary/60 group-hover/resize:bg-primary/60",
+              )}
+            />
+          </div>
+        </div>
+
+        {row && selected ? (
           <>
-            <header className="border-b border-border/70 px-5 py-3">
-              <div className="flex items-center gap-2 text-[11px] font-medium text-muted-foreground">
-                <Mail className="size-3.5" aria-hidden />
-                {t.conversation}
-                {context?.thread?.truncated && <span>· {t.conversationTruncated}</span>}
+            <header className="shrink-0 border-b border-border/70 px-5 py-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex min-w-0 items-center gap-2 text-[11px] font-medium text-muted-foreground">
+                  <Mail className="size-3.5 shrink-0" aria-hidden />
+                  <span>{t.conversation}</span>
+                  {context?.thread?.truncated && <span>· {t.conversationTruncated}</span>}
+                </div>
+                <span className="shrink-0 rounded-full border border-border bg-muted/50 px-2 py-0.5 text-[10px] text-muted-foreground">
+                  {format(t.draftRevision, { number: revision })}
+                </span>
               </div>
               <h3 className="mt-1 truncate text-sm font-semibold">{email?.subject || t.reviewDraft}</h3>
               <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
                 {sender} → {email?.to.join(", ")}
               </p>
             </header>
-            <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
-              {contextLoading ? (
-                <div className="grid h-full min-h-48 place-items-center text-xs text-muted-foreground">
-                  <span className="inline-flex items-center gap-2"><RefreshCw className="size-3.5 animate-spin" aria-hidden />{t.conversationLoading}</span>
+
+            {contextLoading ? (
+              <div className="shrink-0 border-b border-border/70 px-5 py-4 text-xs text-muted-foreground">
+                <span className="inline-flex items-center gap-2"><RefreshCw className="size-3.5 animate-spin" aria-hidden />{t.conversationLoading}</span>
+              </div>
+            ) : contextError ? (
+              <div className="flex shrink-0 items-center justify-between gap-3 border-b border-destructive/20 bg-destructive/5 px-5 py-3 text-xs text-destructive">
+                <p>{t.conversationLoadFailed}</p>
+                <Button size="xs" variant="ghost" onClick={() => void loadContext()}>
+                  <RefreshCw aria-hidden /> {t.retry}
+                </Button>
+              </div>
+            ) : !context?.thread ? (
+              <div className="flex shrink-0 items-start gap-3 border-b border-border/70 bg-muted/20 px-5 py-3">
+                <span className="grid size-8 shrink-0 place-items-center rounded-full bg-muted text-muted-foreground">
+                  <Clock3 className="size-3.5" aria-hidden />
+                </span>
+                <div className="min-w-0">
+                  <p className="text-xs font-medium">{t.conversationNotSynced}</p>
+                  <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">{t.conversationUnavailable}</p>
                 </div>
-              ) : contextError ? (
-                <div className="grid h-full min-h-48 place-items-center">
-                  <div className="max-w-sm text-center text-xs text-destructive">
-                    <p>{t.conversationLoadFailed}</p>
-                    <Button size="xs" variant="ghost" className="mt-2" onClick={() => void loadContext()}>
-                      <RefreshCw aria-hidden /> {t.retry}
-                    </Button>
-                  </div>
-                </div>
-              ) : !context?.thread ? (
-                <div className="grid h-full min-h-48 place-items-center">
-                  <div className="max-w-sm text-center">
-                    <span className="mx-auto grid size-10 place-items-center rounded-full bg-muted text-muted-foreground">
-                      <Clock3 className="size-4" aria-hidden />
-                    </span>
-                    <p className="mt-3 text-xs font-medium">{t.conversationNotSynced}</p>
-                    <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">{t.conversationUnavailable}</p>
-                  </div>
-                </div>
-              ) : (
-                <ol className="mx-auto max-w-3xl space-y-3">
+              </div>
+            ) : (
+              <section aria-label={t.conversation} className="min-h-40 max-h-[42%] shrink-0 overflow-y-auto border-b border-border/70 bg-muted/10 px-5 py-4">
+                <ol className="mx-auto max-w-4xl space-y-3">
                   {context.thread.messages.map((message) => (
                     <li key={`${message.folder}:${message.id}`} className="rounded-xl border border-border/70 bg-card p-3 shadow-sm">
                       <div className="flex items-start justify-between gap-3">
@@ -313,125 +526,66 @@ export function CrmEmailReviewWorkspace({
                     </li>
                   ))}
                 </ol>
-              )}
-            </div>
-          </>
-        ) : (
-          <EmptySelection label={t.selectEmailDraft} />
-        )}
-      </section>
+              </section>
+            )}
 
-      <aside
-        aria-label={t.reviewDraft}
-        className="flex min-h-[34rem] min-w-0 shrink-0 flex-col bg-background lg:min-h-0 lg:shrink"
-      >
-        {row && selected ? (
-          <>
-            <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
-              <div className="flex items-center justify-between gap-2">
-                <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{t.crmProfile}</div>
-                <span className="rounded-full border border-border bg-muted/50 px-2 py-0.5 text-[10px] text-muted-foreground">
-                  {format(t.draftRevision, { number: revision })}
-                </span>
+            <section className="flex min-h-[28rem] flex-1 flex-col">
+              <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-5 py-4">
+                <div className="flex items-center justify-between gap-2">
+                  <label htmlFor={`crm-email-review-${row.id}`} className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                    {t.reviewDraft}
+                  </label>
+                  <span className={cn("text-[10px]", dirty ? "text-amber-700 dark:text-amber-300" : "text-emerald-700 dark:text-emerald-300")}>
+                    {dirty ? t.unsavedChanges : t.savedDraftReady}
+                  </span>
+                </div>
+
+                <dl className="mt-2 grid grid-cols-[3.5rem_minmax(0,1fr)] gap-x-2 gap-y-1 rounded-xl border border-border/70 bg-muted/20 px-3 py-2 text-[11px]">
+                  <dt className="text-muted-foreground">{emailT.from}</dt><dd className="truncate">{sender}</dd>
+                  <dt className="text-muted-foreground">{emailT.to}</dt><dd className="truncate">{email?.to.join(", ")}</dd>
+                  <dt className="text-muted-foreground">{emailT.subject}</dt><dd className="line-clamp-2 font-medium">{email?.subject}</dd>
+                </dl>
+
+                <textarea
+                  id={`crm-email-review-${row.id}`}
+                  value={body}
+                  onChange={(event) => setBody(event.target.value)}
+                  aria-label={t.replyBody}
+                  className="mt-2 min-h-64 w-full flex-1 resize-none rounded-xl border border-border bg-background px-3 py-3 text-[12.5px] leading-6 outline-none transition-shadow focus:ring-2 focus:ring-ring/30"
+                />
+                {actionError && <p role="alert" className="mt-2 text-xs text-destructive">{actionError}</p>}
               </div>
 
-              <div className="mt-2 space-y-2">
-                {selected.contacts.map((contact) => {
-                  const company = contact.companyId
-                    ? data.companies.find((candidate) => candidate.id === contact.companyId)
-                    : null;
-                  return (
-                    <button
-                      key={contact.id}
-                      type="button"
-                      onClick={() => onOpenContact(contact.id)}
-                      className="group w-full rounded-xl border border-border bg-card p-3 text-left shadow-sm transition-colors hover:bg-accent/40"
-                    >
-                      <div className="flex items-center gap-2.5">
-                        <span className="grid size-9 shrink-0 place-items-center rounded-full bg-muted"><UserRound className="size-4" aria-hidden /></span>
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-1.5 text-sm font-medium">
-                            <span className="truncate">{contact.name}</span>
-                            <ChevronRight className="size-3.5 opacity-0 transition-opacity group-hover:opacity-100" aria-hidden />
-                          </div>
-                          <div className="truncate text-[11px] text-muted-foreground">{contact.email}</div>
-                        </div>
-                      </div>
-                      <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-muted-foreground">
-                        {contact.phone && <span className="inline-flex items-center gap-1"><Phone className="size-3" aria-hidden />{contact.phone}</span>}
-                        {company && <span className="inline-flex items-center gap-1"><Building2 className="size-3" aria-hidden />{company.name}</span>}
-                        {contact.tags.length > 0 && <span className="inline-flex items-center gap-1"><Tags className="size-3" aria-hidden />{contact.tags.join(", ")}</span>}
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-
-              {relatedDeals.length > 0 && (
-                <div className="mt-3">
-                  <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{t.relatedDeals}</div>
-                  <div className="mt-1.5 flex flex-wrap gap-1.5">
-                    {relatedDeals.slice(0, 4).map((deal) => (
-                      <span key={deal.id} className="max-w-full truncate rounded-full bg-muted px-2 py-1 text-[10px] text-muted-foreground">{deal.name}</span>
-                    ))}
+              <div className="shrink-0 border-t border-border/70 bg-background/95 p-3 backdrop-blur">
+                {dirty && (
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <p className="text-[10px] text-muted-foreground">{t.saveBeforeApprove}</p>
+                    <Button size="xs" variant="ghost" disabled={operation !== null} onClick={() => setBody(savedBody)}>
+                      {t.discardChanges}
+                    </Button>
                   </div>
-                </div>
-              )}
-
-              <div className="mt-4 flex items-center justify-between gap-2">
-                <label htmlFor={`crm-email-review-${row.id}`} className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                  {t.reviewDraft}
-                </label>
-                <span className={cn("text-[10px]", dirty ? "text-amber-700 dark:text-amber-300" : "text-emerald-700 dark:text-emerald-300")}>
-                  {dirty ? t.unsavedChanges : t.savedDraftReady}
-                </span>
-              </div>
-
-              <dl className="mt-2 grid grid-cols-[3.5rem_minmax(0,1fr)] gap-x-2 gap-y-1 rounded-xl border border-border/70 bg-muted/20 px-3 py-2 text-[11px]">
-                <dt className="text-muted-foreground">{emailT.from}</dt><dd className="truncate">{sender}</dd>
-                <dt className="text-muted-foreground">{emailT.to}</dt><dd className="truncate">{email?.to.join(", ")}</dd>
-                <dt className="text-muted-foreground">{emailT.subject}</dt><dd className="line-clamp-2 font-medium">{email?.subject}</dd>
-              </dl>
-
-              <textarea
-                id={`crm-email-review-${row.id}`}
-                value={body}
-                onChange={(event) => setBody(event.target.value)}
-                aria-label={t.replyBody}
-                className="mt-2 min-h-64 w-full resize-none rounded-xl border border-border bg-background px-3 py-3 text-[12.5px] leading-6 outline-none transition-shadow focus:ring-2 focus:ring-ring/30"
-              />
-              {actionError && <p role="alert" className="mt-2 text-xs text-destructive">{actionError}</p>}
-            </div>
-
-            <div className="border-t border-border/70 bg-background/95 p-3 backdrop-blur">
-              {dirty && (
-                <div className="mb-2 flex items-center justify-between gap-2">
-                  <p className="text-[10px] text-muted-foreground">{t.saveBeforeApprove}</p>
-                  <Button size="xs" variant="ghost" disabled={operation !== null} onClick={() => setBody(savedBody)}>
-                    {t.discardChanges}
-                  </Button>
-                </div>
-              )}
-              <div className="flex items-center justify-end gap-2">
-                <Button size="sm" variant="destructive" disabled={operation !== null} onClick={() => void respond("rejected")}>
-                  <X aria-hidden /> {operation === "reject" ? t.rejectingReply : t.rejectReply}
-                </Button>
-                {dirty ? (
-                  <Button size="sm" disabled={operation !== null || body.trim().length === 0} onClick={() => void saveRevision()}>
-                    {operation === "save" ? t.saving : t.saveRevision}
-                  </Button>
-                ) : (
-                  <Button size="sm" disabled={operation !== null} onClick={() => void respond("approved")}>
-                    <Check aria-hidden /> {operation === "approve" ? t.approvingReply : t.approveSend}
-                  </Button>
                 )}
+                <div className="flex items-center justify-end gap-2">
+                  <Button size="sm" variant="destructive" disabled={operation !== null} onClick={() => void respond("rejected")}>
+                    <X aria-hidden /> {operation === "reject" ? t.rejectingReply : t.rejectReply}
+                  </Button>
+                  {dirty ? (
+                    <Button size="sm" disabled={operation !== null || body.trim().length === 0} onClick={() => void saveRevision()}>
+                      {operation === "save" ? t.saving : t.saveRevision}
+                    </Button>
+                  ) : (
+                    <Button size="sm" disabled={operation !== null} onClick={() => void respond("approved")}>
+                      <Check aria-hidden /> {operation === "approve" ? t.approvingReply : t.approveSend}
+                    </Button>
+                  )}
+                </div>
               </div>
-            </div>
+            </section>
           </>
         ) : (
           <EmptySelection label={t.selectEmailDraft} />
         )}
-      </aside>
+      </main>
     </div>
   );
 }

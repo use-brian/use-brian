@@ -141,13 +141,13 @@ export type AssistantCallStep = WorkflowStepCommon & {
    * Optional delivery target. When set, the step's text response is pushed
    * to this user channel after the consult completes (best-effort).
    * `thread.fromStep` posts it as a thread reply under the message an
-   * earlier deliver-step pushed this run (Slack thread / Telegram reply;
-   * those two platforms only, same channel on both steps — schema-enforced).
+   * earlier deliver-step pushed this run (Slack thread, Telegram reply, or
+   * Feishu reply-in-thread; same channel on both steps — schema-enforced).
    * See `docs/architecture/engine/scheduled-jobs.md` → "Channel delivery".
    */
   deliver?:
     | {
-        channelType: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams' | 'custom'
+        channelType: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams' | 'custom' | 'feishu'
         channelId: string
         channelIntegrationId?: string
         thread?: { fromStep: string }
@@ -204,7 +204,7 @@ export type ToolCallStep = WorkflowStepCommon & {
   approval?: {
     /** Force a detached approval even when the effective tool policy is allow. */
     required?: boolean
-    deliveryChannel?: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams'
+    deliveryChannel?: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams' | 'feishu'
     /**
      * Hours before the approval auto-expires (status='expired').
      * Omit for no expiry — totally detached, user can return any time.
@@ -354,7 +354,7 @@ export type WorkflowDefinition = {
  *  - `connector` — a `connector_instance` row (GitHub, Fathom, Gmail,
  *    Calendar — anything with an ingest poller). Its events reach the
  *    workflow dispatcher through the ingest engine's `onEvent` seam.
- *  - `channel` — a `channel_integrations` row (Slack, Telegram, WhatsApp —
+ *  - `channel` — a `channel_integrations` row (Slack, Telegram, Feishu, WhatsApp —
  *    a BYO bot). Its events reach the dispatcher straight from the channel
  *    webhook, with no `connector_instance` substrate in between.
  *  - `page` — an *internal* source: one watched doc page. It fires when a
@@ -381,7 +381,7 @@ export type EventSourceRef =
       type: 'channel'
       /** `channel_integrations.id` whose inbound messages feed this workflow. */
       channelIntegrationId: string
-      /** Denormalized channel type — 'slack' | 'telegram' | 'whatsapp'. */
+      /** Denormalized channel type — 'slack' | 'telegram' | 'feishu' | 'whatsapp'. */
       channel: string
     }
   | {
@@ -534,7 +534,7 @@ export type WorkflowTrigger =
        * sole/terminal `assistant_call` step's `deliver`. See
        * docs/architecture/features/workflow.md §3.
        */
-      delivery?: { channel: 'telegram' | 'slack' | 'whatsapp' }
+      delivery?: { channel: 'telegram' | 'slack' | 'whatsapp' | 'feishu' }
       /**
        * Trigger-row behavioral policy — mirrors the `scheduled_jobs` columns.
        * The nag pair (interval + keyword) must be set together.

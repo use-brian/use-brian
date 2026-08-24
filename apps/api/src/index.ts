@@ -108,6 +108,8 @@ const env: OpenApiEnv = {
   // Discord connect returns 503, Telegram/Slack unaffected.
   DISCORD_CONNECTOR_URL: process.env.DISCORD_CONNECTOR_URL,
   DISCORD_CONNECTOR_SECRET: process.env.DISCORD_CONNECTOR_SECRET,
+  FEISHU_CONNECTOR_URL: process.env.FEISHU_CONNECTOR_URL,
+  FEISHU_CONNECTOR_SECRET: process.env.FEISHU_CONNECTOR_SECRET,
   // Optional self-hosted WhatsApp bridge. The launcher starts one locally and
   // supplies both values; bare API boots leave WhatsApp unavailable when unset.
   WA_CONNECTOR_URL: process.env.WA_CONNECTOR_URL,

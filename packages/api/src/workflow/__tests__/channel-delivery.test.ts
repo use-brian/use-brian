@@ -19,12 +19,13 @@ vi.mock('../../db/client.js', () => ({
   query: vi.fn(async () => ({ rows: [] })),
 }))
 
-const { sendMessage, createTelegramAdapter, createWhatsAppCloudAdapter } = vi.hoisted(() => {
+const { sendMessage, createTelegramAdapter, createWhatsAppCloudAdapter, createFeishuAdapter } = vi.hoisted(() => {
   const send = vi.fn()
   return {
     sendMessage: send,
     createTelegramAdapter: vi.fn(() => ({ sendMessage: send })),
     createWhatsAppCloudAdapter: vi.fn(() => ({ sendMessage: send })),
+    createFeishuAdapter: vi.fn(() => ({ sendMessage: send })),
   }
 })
 // Adapters are mocked; `describeSlackError` / `SlackApiError` are NOT — the
@@ -35,7 +36,10 @@ vi.mock('@use-brian/channels', async (importOriginal) => ({
   createTelegramAdapter,
   createWhatsAppAdapter: vi.fn(() => ({ sendMessage })),
   createWhatsAppCloudAdapter,
+  createFeishuAdapter,
 }))
+
+vi.mock('../../feishu/client.js', () => ({ createFeishuApi: vi.fn(() => ({})) }))
 
 import { createWorkflowChannelDelivery } from '../channel-delivery.js'
 import {
@@ -178,6 +182,36 @@ describe('[COMP:workflow/channel-delivery] thread-reply pass-through', () => {
       { threadTs: '778899' },
     )
     expect(outcome).toMatchObject({ status: 'delivered', messageId: '1751970000.111111' })
+  })
+
+  it('feishu: resolves encrypted app credentials and passes the thread reply anchor', async () => {
+    vi.mocked(integrationStore.getCredentialsForAssistantSystem).mockResolvedValueOnce({
+      credentials: { app_id: 'cli_app', app_secret: 'secret', brand: 'lark' },
+      botUserId: 'ou_bot',
+      config: { replyInThread: true },
+    } as never)
+    const deliver = createWorkflowChannelDelivery({ integrationStore })
+    const outcome = await deliver({
+      ...baseParams(),
+      channelType: 'feishu',
+      channelId: 'oc_chat',
+      threadRef: 'om_root',
+    })
+    expect(createFeishuAdapter).toHaveBeenCalledWith(expect.objectContaining({
+      botOpenId: 'ou_bot',
+      config: { replyInThread: true },
+    }))
+    expect(sendMessage).toHaveBeenCalledWith(
+      'oc_chat',
+      expect.objectContaining({ text: 'per-person update', format: 'markdown' }),
+      { threadTs: 'om_root' },
+    )
+    expect(outcome).toMatchObject({
+      status: 'delivered',
+      channelType: 'feishu',
+      channelId: 'oc_chat',
+      messageId: '1751970000.111111',
+    })
   })
 
   it('telegram: retries the shared bot when the assistant BYO bot cannot see the chat', async () => {

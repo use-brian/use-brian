@@ -53,7 +53,7 @@ type EventSourceRef =
   | {
       type: "channel";
       channelIntegrationId: string;
-      /** Denormalized channel type — 'slack' | 'telegram' | 'whatsapp'. */
+      /** Denormalized channel type — 'slack' | 'telegram' | 'feishu' | 'whatsapp'. */
       channel: string;
     }
   | {
@@ -119,7 +119,7 @@ export type WorkflowTrigger =
        * Telegram topic and stamps it onto the terminal assistant_call step.
        * Mirrors `packages/core/src/workflow/schemas.ts`.
        */
-      delivery?: { channel: "telegram" | "slack" | "whatsapp" };
+      delivery?: { channel: "telegram" | "slack" | "whatsapp" | "feishu" };
       /** Trigger-row behavioral policy (silent-until-fire + nag). */
       policy?: {
         silentUntilFire?: boolean;
@@ -141,7 +141,7 @@ export type WorkflowTrigger =
 
 // ── Definition shape (mirrors WorkflowDefinitionSchema) ──────────────────
 
-export type DeliverChannelType = "web" | "telegram" | "slack" | "whatsapp";
+export type DeliverChannelType = "web" | "telegram" | "slack" | "whatsapp" | "feishu";
 
 /**
  * Page anchor — the bounded "edit page X" / "create a page" step
@@ -233,7 +233,7 @@ export type ToolCallStep = {
   arguments: Record<string, unknown>;
   approval?: {
     required?: boolean;
-    deliveryChannel?: "web" | "telegram" | "slack" | "whatsapp";
+    deliveryChannel?: "web" | "telegram" | "slack" | "whatsapp" | "feishu";
     expiresAfterHours?: number;
   };
 };
@@ -886,7 +886,7 @@ export async function listConnectedWorkflowToolSources(
 
 export type WorkspaceChannelOption = {
   id: string;
-  channelType: "slack" | "telegram" | "whatsapp";
+  channelType: "slack" | "telegram" | "whatsapp" | "feishu";
   displayName: string;
 };
 
@@ -951,7 +951,7 @@ export async function listWorkspaceMemberOptions(
  * Derived from `sessions` joined to `assistants` (workspace filter).
  */
 export type ChannelDestination = {
-  channelType: "telegram" | "slack" | "whatsapp";
+  channelType: "telegram" | "slack" | "whatsapp" | "feishu";
   channelId: string;
   channelIntegrationId?: string | null;
   integrationLabel?: string | null;

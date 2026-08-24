@@ -3,7 +3,7 @@
  *
  * Shared by every surface that can receive an upload, because it lived in
  * `routes/chat.ts` alone for its whole life — so the guidance reached web
- * chat and NO channel. Telegram, Slack, WhatsApp, Discord, WeChat and MS
+ * chat and NO channel. Telegram, Slack, Feishu/Lark, WhatsApp, Discord, WeChat and MS
  * Teams turns ran without it, which is precisely where the failure it exists
  * to prevent actually happens: a user sends a photo to a messaging channel,
  * asks for it to be forwarded, and the model has to work out the

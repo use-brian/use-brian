@@ -51,6 +51,7 @@ export const DOCUMENT_CAPABLE_CHANNELS: ReadonlySet<string> = new Set([
   'telegram',
   'slack',
   'discord',
+  'feishu',
   'email',
   'msteams',
 ])
@@ -63,6 +64,10 @@ export const DOCUMENT_CAPABLE_CHANNELS: ReadonlySet<string> = new Set([
  */
 const CHANNEL_DOCUMENT_BYTE_CAPS: Readonly<Record<string, number>> = {
   discord: 10 * 1024 * 1024,
+  // Conservative common ceiling for Feishu/Lark message-file uploads. Keep
+  // the gate below the provider boundary so sendFile cannot claim success for
+  // a payload the adapter will reject.
+  feishu: 20 * 1024 * 1024,
   // The bridge protocol's per-item media ceiling (base64 in an outbox item).
   // `custom` is admitted per-instance via `channelDocumentsSupported`, not by
   // the static set — the cap still applies whenever it is.

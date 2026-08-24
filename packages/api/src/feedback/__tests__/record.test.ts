@@ -2,8 +2,8 @@
  * Unit tests for the single feedback writer.
  * Component tag: [COMP:brain/feedback-recorder].
  *
- * `recordFeedback` is the one writer behind all three feedback surfaces
- * (web modal, Slack reaction, Telegram reaction). Every path must write
+ * `recordFeedback` is the one writer behind all four feedback surfaces
+ * (web modal, Slack reaction, Telegram reaction, Feishu/Lark reaction). Every path must write
  * exactly one `analytics_events` row; the auto-memory branch fires only
  * for negative feedback carrying ≥10 chars of trimmed details, which is
  * how reactions (short emoji labels) are kept out of the memory store

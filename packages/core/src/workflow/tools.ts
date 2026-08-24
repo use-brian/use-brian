@@ -210,7 +210,7 @@ export type WorkflowToolDeps = {
   validateDeliveryTarget?: (args: {
     workspaceId?: string
     assistantId: string
-    channelType: 'telegram' | 'slack' | 'whatsapp'
+    channelType: 'telegram' | 'slack' | 'whatsapp' | 'feishu'
     channelId: string
     channelIntegrationId?: string
   }) => Promise<{ ok: boolean; reason?: string }>
@@ -340,7 +340,7 @@ const RECENT_RUNS_DEFAULT_LIMIT = 10
 export const TRIGGER_INPUT_DESCRIPTION =
   `Optional trigger. The ONLY trigger kinds that exist: ${WORKFLOW_TRIGGER_KINDS.join(' | ')}. ` +
   `If the user asks to trigger on anything outside these kinds (and, for events, outside the source types below), that capability does not exist — say so plainly instead of improvising. Omit for manual (run on demand). ` +
-  `\n- \`{ kind: "schedule", schedule: {type: "daily"|"weekly"|"monthly"|"once"|"cron", ...}, timezone?, mode?, delivery?: { channel: "telegram"|"slack"|"whatsapp" }, policy?: { silentUntilFire?, nagIntervalMins?, nagUntilKeyword? } }\` ` +
+  `\n- \`{ kind: "schedule", schedule: {type: "daily"|"weekly"|"monthly"|"once"|"cron", ...}, timezone?, mode?, delivery?: { channel: "telegram"|"slack"|"whatsapp"|"feishu" }, policy?: { silentUntilFire?, nagIntervalMins?, nagUntilKeyword? } }\` ` +
   `fires on a cadence in ONE call — scheduling is a workflow trigger, so no separate scheduling step or tool is needed. \`delivery.channel\` pushes the result to the user (for a recurring reminder the exact chat + Telegram topic are captured automatically from this session); \`policy\` covers "remind every N min until <keyword>" and silent-until-fire. ` +
   `\n- \`{ kind: "event", event: { sources: [{ source, match? }, ...] } }\` fires from a workspace signal and IS fully authorable here. The ONLY source types: ${WORKFLOW_EVENT_SOURCE_TYPES.join(' | ')}. ` +
   `Shapes: \`{ type: "connector", connectorInstanceId, provider }\` (a CONNECTED connector instance), \`{ type: "channel", channelIntegrationId, channel }\` (a connected chat integration; get channelIntegrationId from listChannels.integrationId, never listChannels.id), \`{ type: "page", pageId }\` (a doc page + its direct children), \`{ type: "task" }\` (the workspace's tasks — id-less), \`{ type: "knowledge" }\` (the workspace's knowledge base — id-less). ` +
@@ -697,7 +697,7 @@ function warningsFor(
     // emit nothing. Steer the author to a messaging channel or a page anchor.
     if (step.type === 'assistant_call' && step.deliver?.channelType === 'web') {
       warnings.push(
-        `Step "${step.id}" delivers to the \`web\` channel, which is not a push target — the message will not be sent anywhere. To surface output to the user, deliver to a messaging channel (telegram / slack / whatsapp), or write to a page via a \`page\` anchor.`,
+        `Step "${step.id}" delivers to the \`web\` channel, which is not a push target — the message will not be sent anywhere. To surface output to the user, deliver to a messaging channel (telegram / slack / whatsapp / feishu), or write to a page via a \`page\` anchor.`,
       )
     }
     // Blueprint binding vs `tools` allow-list — the allow-list is applied
@@ -1043,7 +1043,7 @@ async function dependencyIssues(
     const targets: Array<{
       stepId: string
       assistantTarget: AssistantCallStep['target']['assistantId']
-      channelType: 'telegram' | 'slack' | 'whatsapp'
+      channelType: 'telegram' | 'slack' | 'whatsapp' | 'feishu'
       channelId: string
       channelIntegrationId?: string
     }> = []
@@ -1087,7 +1087,7 @@ async function dependencyIssues(
           targets.push({
             stepId: termStep.id,
             assistantTarget: termStep.target.assistantId,
-            channelType: resolved.channelType as 'telegram' | 'slack' | 'whatsapp',
+            channelType: resolved.channelType as 'telegram' | 'slack' | 'whatsapp' | 'feishu',
             channelId: resolved.channelId,
           })
         }
@@ -1366,7 +1366,7 @@ function staticPageAnchorId(def: WorkflowDefinition): string | null {
  */
 function stampTerminalDeliver(
   def: WorkflowDefinition,
-  deliver: { channelType: 'telegram' | 'slack' | 'whatsapp'; channelId: string },
+  deliver: { channelType: 'telegram' | 'slack' | 'whatsapp' | 'feishu'; channelId: string },
 ): WorkflowDefinition | null {
   let idx = -1
   for (let i = def.steps.length - 1; i >= 0; i--) {
@@ -1390,7 +1390,7 @@ function stampTerminalDeliver(
  */
 function terminalExplicitDeliverId(
   def: WorkflowDefinition,
-  channel: 'telegram' | 'slack' | 'whatsapp',
+  channel: 'telegram' | 'slack' | 'whatsapp' | 'feishu',
 ): string | null {
   const termId = terminalAssistantCallId(def)
   const termStep = termId ? def.steps.find((s) => s.id === termId) : undefined
@@ -1405,7 +1405,7 @@ function terminalExplicitDeliverId(
  * matching session/preferred channel). Points at `listSlackChannels` for Slack;
  * for Telegram/WhatsApp the sanctioned path is authoring from inside the chat.
  */
-function unresolvedDeliveryError(channel: 'telegram' | 'slack' | 'whatsapp'): string {
+function unresolvedDeliveryError(channel: 'telegram' | 'slack' | 'whatsapp' | 'feishu'): string {
   if (channel === 'slack') {
     return (
       'Cannot resolve which Slack channel to deliver to from this session. Call `listSlackChannels` to get the target channel\'s id, ' +
@@ -1440,7 +1440,7 @@ function deriveReminderInstructions(def: WorkflowDefinition): string {
 const SLACK_CHANNEL_ID_PROSE = /\b[CG]0[A-Z0-9]{6,}\b/
 /** Compose-a-message phrasing ("Your response IS the Slack message"). The
  *  singular `message\b` is deliberate — reading contexts say "messages". */
-const MESSAGING_OUTPUT_PHRASE = /\b(?:the|a|your|this)\s+(?:slack|telegram|whatsapp)\s+message\b/i
+const MESSAGING_OUTPUT_PHRASE = /\b(?:the|a|your|this)\s+(?:slack|telegram|whatsapp|feishu|lark)\s+message\b/i
 
 /**
  * Messaging output composed with nothing bound to send it — the 2026-08-11
@@ -1723,7 +1723,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       `The callee then runs with the doc tools (getCurrentPage / patchPage / renderPage) against that page.` +
       `\n\nSkills: when a step should follow a saved brain skill, ATTACH it on the step — NEVER just name the skill in the prompt (a workflow callee has no skill surface unless the step attaches one, so a prose-only reference silently does nothing on every run). \`enforcedSkills: ["<slug>"]\` force-loads the skill's instructions every run (the usual choice for workflows); \`skills: ["<slug>"]\` offers it via useSkill and the callee chooses. Use exact skill slugs; an attached slug that matches no workspace skill or built-in id is rejected. ` +
       `For structured output, an assistant_call research step may also set \`blueprintId: "<workspace skill slug | page-template id>"\` together with a \`page\` anchor to fill that blueprint instead of free-form authoring — blueprints themselves are created in the web app (Brain → Blueprints) or minted from a skill's extraction spec; they cannot be created from chat, so never claim otherwise.` +
-      `\n\nChannel delivery: a step's \`deliver: { channelType, channelId }\` pushes that step's output to a static messaging destination (Slack channelId from listSlackChannels). For a WhatsApp channel-event workflow that must answer the customer who triggered this run, use exactly \`deliver: { channelType: "whatsapp", replyToTrigger: true }\`; never add a channelId or phone number. This variant is valid only when every event source is a WhatsApp channel integration. To post a THREAD — one parent message with replies under it — use one deliver-step per message and give each follow-up step \`deliver: { ..., thread: { fromStep: "<parent step id>" } }\`: it replies under the message that earlier step posted this run (same channel required; slack + telegram only). Do NOT concatenate multiple messages into one step's output and expect threading. ` +
+      `\n\nChannel delivery: a step's \`deliver: { channelType, channelId }\` pushes that step's output to a static messaging destination. For a WhatsApp channel-event workflow that must answer the customer who triggered this run, use exactly \`deliver: { channelType: "whatsapp", replyToTrigger: true }\`; never add a channelId or phone number. This variant is valid only when every event source is a WhatsApp channel integration. To post a THREAD - one parent message with replies under it - use one deliver-step per message and give each follow-up step \`deliver: { ..., thread: { fromStep: "<parent step id>" } }\`: it replies under the message that earlier step posted this run (same channel required; slack, telegram, and feishu). Do NOT concatenate multiple messages into one step's output and expect threading. ` +
       `To MENTION people in a Slack delivery, first call \`listSlackMembers\` and embed the literal \`<@MEMBER_ID>\` ids in the step prompt — plain @name renders as text and notifies nobody.`,
     inputSchema: z.object({
       name: z

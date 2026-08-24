@@ -8,7 +8,9 @@
 
 import { findOrCreateSession, addSessionMessage } from '../db/sessions.js'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
+import type { FeishuCredentials } from '../db/channel-integrations.js'
 import {
+  createFeishuAdapter,
   createSlackAdapter,
   createTelegramAdapter,
   createWhatsAppAdapter,
@@ -16,6 +18,7 @@ import {
   isSlackApiError,
 } from '@use-brian/channels'
 import { sanitizeDeliveryText } from '@use-brian/shared'
+import { createFeishuApi } from '../feishu/client.js'
 
 export type DeliveryParams = {
   assistantId: string
@@ -23,7 +26,7 @@ export type DeliveryParams = {
   text: string
   /** Original session where the user asked (if known). */
   sessionId?: string
-  /** Original channel type (web/telegram/slack/whatsapp). */
+  /** Original channel type (web/telegram/slack/whatsapp/feishu). */
   channelType?: string
   /** Original channel ID (chat ID, thread ID, etc.). */
   channelId?: string
@@ -137,6 +140,27 @@ export async function deliverToChannel(params: DeliveryParams): Promise<ChannelD
       const adapter = createSlackAdapter({
         botToken: (integration.credentials as { bot_token: string }).bot_token,
         botUserId: integration.botUserId ?? undefined,
+      })
+      await adapter.sendMessage(channelId, { text, format: 'markdown' })
+    } else if (channelType === 'feishu') {
+      const integration = integrationStore
+        ? await integrationStore.getCredentialsForAssistantSystem(assistantId, 'feishu')
+        : null
+      if (!integration) {
+        return {
+          delivered: false,
+          channelType,
+          reason: `Not delivered to Feishu / Lark: this assistant has no connected enterprise app, so chat \`${channelId}\` cannot be posted to and the message was not delivered. Connect Feishu / Lark for this assistant in Studio before promising delivery; retrying will not help until then.`,
+        }
+      }
+      const credentials = integration.credentials as FeishuCredentials
+      const adapter = createFeishuAdapter({
+        api: createFeishuApi({
+          appId: credentials.app_id,
+          appSecret: credentials.app_secret,
+          brand: credentials.brand,
+        }),
+        botOpenId: integration.botUserId ?? undefined,
       })
       await adapter.sendMessage(channelId, { text, format: 'markdown' })
     } else if (channelType === 'whatsapp') {

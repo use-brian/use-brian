@@ -335,6 +335,7 @@ import { whatsappIngestAdminRoutes } from './routes/whatsapp-byon-admin.js'
 import { telegramByoRoutes } from './routes/telegram-byo.js'
 import { slackRoutes } from './routes/slack.js'
 import { discordRoutes } from './routes/discord.js'
+import { feishuRoutes } from './routes/feishu.js'
 import { msteamsRoutes } from './routes/msteams.js'
 import { telegramLinkingRoutes } from './routes/telegram-linking.js'
 import { slackLinkingRoutes } from './routes/slack-linking.js'
@@ -342,6 +343,7 @@ import { createDbChannelUserStore } from './db/channel-user-store.js'
 import { createDiscordConnectorClient } from './discord/connector-client.js'
 import { createWhatsappConnectorClient } from './whatsapp/connector-client.js'
 import { createWechatConnectorClient } from './wechat/connector-client.js'
+import { createFeishuConnectorClient } from './feishu/connector-client.js'
 import { wechatRoutes } from './routes/wechat.js'
 import { customChannelBridgeRoutes } from './routes/custom-channel-bridge.js'
 import { createCustomChannelStore } from './db/custom-channel-store.js'
@@ -697,6 +699,9 @@ export interface OpenApiEnv {
    */
   DISCORD_CONNECTOR_URL?: string
   DISCORD_CONNECTOR_SECRET?: string
+  /** Feishu/Lark long-connection bridge. Both values are required together. */
+  FEISHU_CONNECTOR_URL?: string
+  FEISHU_CONNECTOR_SECRET?: string
   /**
    * WeChat iLink long-poll connector bridge (`apps/wechat-connector`). Both
    * set → the WeChat QR pairing endpoints work and `/internal/wechat/*` is
@@ -3894,7 +3899,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // Take-Over link to the user's channel out-of-band, before any work.
     // Channels drop mid-turn model text and have no live chip, so the model
     // relaying the link cannot reach them — deliverToChannel persists to the
-    // session AND pushes to telegram/slack/whatsapp (web is persist-only; the
+    // session AND pushes to telegram/slack/whatsapp/feishu (web is persist-only; the
     // live chip covers realtime there). The tool only fires this on
     // interactive sessions (never headless/autonomous).
     onCloudSessionStarted: async (toolCtx, { takeoverUrl }) => {
@@ -7385,6 +7390,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             connectorSecret: env.WECHAT_CONNECTOR_SECRET,
           })
         : undefined
+    const feishuConnector =
+      env.FEISHU_CONNECTOR_URL && env.FEISHU_CONNECTOR_SECRET
+        ? createFeishuConnectorClient({
+            connectorUrl: env.FEISHU_CONNECTOR_URL,
+            connectorSecret: env.FEISHU_CONNECTOR_SECRET,
+          })
+        : undefined
 
     // Workspace channels operator surface (Studio → Channels).
     app.use('/api', requireAuth(env.JWT_SECRET), channelsRoutes({
@@ -7394,6 +7406,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       discordConnector,
       whatsappConnector,
       wechatConnector,
+      feishuConnector,
       customChannelStore,
       // Fallback bot for naming sessions-derived telegram delivery destinations.
       telegramBotToken: env.TELEGRAM_BOT_TOKEN,
@@ -7530,7 +7543,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       }))
     }
 
-    // Telegram / Slack account linking — web-side of the link-code handshake.
+    // Telegram / Slack / Feishu-Lark account linking — web-side of the link-code handshake.
     app.use('/api/assistants/:assistantId/telegram', requireAuth(env.JWT_SECRET),
       telegramLinkingRoutes({ linkedAccountStore, linkCodeStore }))
     app.use('/api/assistants/:assistantId/slack', requireAuth(env.JWT_SECRET),
@@ -7630,6 +7643,48 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           // re-fetched later; this is the only moment those bytes exist.
           archiveMedia: chatArchiveLiveMedia,
           }))
+      }
+      if (env.FEISHU_CONNECTOR_SECRET) {
+        app.use('/internal/feishu', feishuRoutes({
+          backgroundModel,
+          artifactPromoter,
+          connectorSecret: env.FEISHU_CONNECTOR_SECRET,
+          provider,
+          configuredProviders,
+          resolveWorkspaceCustomLlm,
+          systemPrompt: LAYER_1_SYSTEM_PROMPT,
+          tools: allTools,
+          capabilityStore,
+          memoryStore,
+          usageStore,
+          checkCreditBudget: ports.checkCreditBudget,
+          integrationStore,
+          channelUserStore,
+          linkedAccountStore,
+          linkCodeStore,
+          deferredConfirmationStore,
+          workflowEventDispatcher,
+          workerManager,
+          connectorStore,
+          mcpSettingsStore,
+          assistantConnectorStore,
+          connectorGrantStore,
+          connectorInstanceStore,
+          workspaceToolPolicyStore,
+          knowledgeStore,
+          knowledgeCaptureRuleStore,
+          gdriveFilesStore,
+          workspaceFilesStore,
+          filesApi: filesApi ?? undefined,
+          readCachedFile: (id, access) => fileStore.get(id, access),
+          analytics,
+          skillStore,
+          episodicStore,
+          sessionStateStore,
+          fileStore,
+          archiveMedia: chatArchiveLiveMedia,
+          voiceTranscription,
+        }))
       }
       // Custom (bridge-driven) channels. Unconditional: auth is the per-channel
       // bridge token, not an env secret. Mounted OUTSIDE /api on purpose so no
