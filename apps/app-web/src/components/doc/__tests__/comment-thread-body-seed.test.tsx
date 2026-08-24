@@ -10,14 +10,14 @@
  * on resolve. After navigating back, the band re-passes the STALE seed to the
  * freshly remounted `<CommentThreadBody>`. The body skips its mount fetch while a
  * seed is present (so the empty fetch can't clobber the optimistic row) and skips
- * the re-send because the module-level `sentSeedThreadIds` already has the id — so
+ * the re-send because the browser-realm seed registry already has the id — so
  * a naive remount did NEITHER and stranded the thread on "No comments yet".
  *
- * The fix: the body resolves its seed to `null` when `sentSeedThreadIds.has(
- * thread.id)` at mount, so an already-seeded thread is treated as seedless and
+ * The fix: the body resolves its seed to `null` when the browser-realm registry
+ * already claims `thread.id` at mount, so an already-seeded thread is treated as seedless and
  * its mount fetch loads the persisted comments. This test mounts the SAME thread
- * twice (the post, then the navigate-back remount) against the same module-level
- * set and asserts the second mount fetches + renders the comment.
+ * twice (the post, then the navigate-back remount) against the same realm-wide
+ * registry and asserts the second mount fetches + renders the comment.
  *
  * Driven for real in jsdom (`createRoot` + `act`, no `@testing-library/react`),
  * matching `page-comments.test.tsx`.
@@ -43,14 +43,20 @@ vi.mock("@/lib/api/sessions", async (orig) => ({
 // authFetch backs both useComposerControls' model-tier probe (stays default on a
 // not-ok response) AND the first mount's seed `/api/chat` send (throws before the
 // stream reader, which is fine — all we need from mount 1 is that it registers
-// the thread id in `sentSeedThreadIds`).
+// the thread id in the realm-wide seed registry).
 vi.mock("@/lib/auth-fetch", () => ({
   authFetch: vi.fn(() =>
     Promise.resolve({ ok: false, json: () => Promise.resolve({}) }),
   ),
 }));
 
-import { CommentThreadBody, type CommentSeed } from "../comment-thread-body";
+import {
+  CommentThreadBody,
+  claimCommentSeed,
+  hasClaimedCommentSeed,
+  hasPersistedInterruptedComment,
+  type CommentSeed,
+} from "../comment-thread-body";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -137,11 +143,14 @@ describe("[COMP:app-web/comment-thread-body] seed one-shot across navigation", (
 
   it("a remount with a stale already-sent seed fetches the persisted comment instead of 'No comments yet'", async () => {
     // ── Mount 1: the post. The seed is brand-new, so the body auto-sends it
-    //    (registering the thread id in the module-level sentSeedThreadIds) and
+    //    (registering the thread id in the browser-realm seed claims) and
     //    skips the mount fetch — the optimistic row carries the comment.
     await mount(body(true));
-    // The send path skips the mount fetch (seed present), so no fetch yet.
-    expect(mockFetchMessages).not.toHaveBeenCalled();
+    // The send path skips the MOUNT fetch. Our mocked `/api/chat` rejection is
+    // an ambiguous send, so the recovery path performs one canonical fetch and
+    // finds the persisted row without surfacing the misleading load error.
+    expect(mockFetchMessages).toHaveBeenCalledTimes(1);
+    expect(container!.textContent).not.toContain(dict.comments.loadError);
     // Simulate navigating to another page: the running-thread body unmounts.
     act(() => root!.unmount());
     container!.remove();
@@ -155,8 +164,39 @@ describe("[COMP:app-web/comment-thread-body] seed one-shot across navigation", (
       thread.sessionId,
       expect.anything(),
     );
+    expect(mockFetchMessages).toHaveBeenCalledTimes(2);
     const text = container!.textContent ?? "";
     expect(text).toContain("Help me to format current page properties");
     expect(text).not.toContain(dict.comments.emptyThread);
+  });
+});
+
+describe("[COMP:app-web/comment-thread-body] interrupted seed idempotency", () => {
+  it("claims a seed once in the browser-realm registry", () => {
+    const id = "th_realm_claim";
+    expect(hasClaimedCommentSeed(id)).toBe(false);
+    expect(claimCommentSeed(id)).toBe(true);
+    expect(hasClaimedCommentSeed(id)).toBe(true);
+    expect(claimCommentSeed(id)).toBe(false);
+  });
+
+  it("reconciles only a new persisted user row with the exact optimistic body", () => {
+    const older = { ...persisted[0], id: "old-same-body" };
+    const newer = { ...persisted[0], id: "new-same-body" };
+    const known = new Set([older.id]);
+
+    expect(
+      hasPersistedInterruptedComment([older], known, seed.message),
+    ).toBe(false);
+    expect(
+      hasPersistedInterruptedComment([older, newer], known, seed.message),
+    ).toBe(true);
+    expect(
+      hasPersistedInterruptedComment(
+        [{ ...newer, content: "A different reply" }],
+        known,
+        seed.message,
+      ),
+    ).toBe(false);
   });
 });

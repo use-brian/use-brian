@@ -137,12 +137,56 @@ export type CommentSeed = {
  * minted thread can briefly render in TWO surfaces at once (the on-content
  * popover and the margin rail disagree for a frame while the anchor element
  * resolves, so both mount an expanded body) or remount as the routing settles.
- * The per-instance `seedSentRef` guards one body; this module-level set guards
- * across instances so the seeded message is sent exactly once — never the
- * duplicate "hello + hello" two-reply turn. Thread ids are UUIDs (never reused),
- * so the set only grows by the handful of comments opened per page session.
+ *
+ * This registry belongs to the browser REALM, not this module instance. Next
+ * can evaluate one client source through more than one compiled entry graph;
+ * a module-local Set then gives each copy its own "exactly once" claim and both
+ * copies can POST the same seed. `globalThis` is shared by those copies while
+ * still resetting naturally on a full page load. Thread ids are UUIDs (never
+ * reused), so the Set only grows by the handful of comments opened per page
+ * session.
  */
-const sentSeedThreadIds = new Set<string>();
+const COMMENT_SEED_CLAIMS_KEY = "__useBrianCommentSeedClaims";
+type CommentSeedClaimScope = typeof globalThis & {
+  __useBrianCommentSeedClaims?: Set<string>;
+};
+
+function commentSeedClaims(): Set<string> {
+  const scope = globalThis as CommentSeedClaimScope;
+  scope[COMMENT_SEED_CLAIMS_KEY] ??= new Set<string>();
+  return scope[COMMENT_SEED_CLAIMS_KEY];
+}
+
+export function hasClaimedCommentSeed(threadId: string): boolean {
+  return commentSeedClaims().has(threadId);
+}
+
+export function claimCommentSeed(threadId: string): boolean {
+  const claims = commentSeedClaims();
+  if (claims.has(threadId)) return false;
+  claims.add(threadId);
+  return true;
+}
+
+/**
+ * A failed SSE read is an ambiguous commit: the server may already have stored
+ * the optimistic user row and continued a `doc_thread` turn in the background.
+ * Reconcile only an exact NEW row, never an older identical comment, so a real
+ * pre-persist failure still surfaces instead of silently dropping the reply.
+ */
+export function hasPersistedInterruptedComment(
+  rows: DocSessionMessage[],
+  knownMessageIds: ReadonlySet<string>,
+  body: string,
+): boolean {
+  const expected = body.trim();
+  return rows.some(
+    (row) =>
+      row.role === "user" &&
+      !knownMessageIds.has(row.id) &&
+      extractMessageText(row.content).trim() === expected,
+  );
+}
 
 type Props = {
   thread: CommentThread;
@@ -275,14 +319,14 @@ export function CommentThreadBody({
   // the seed is stale and must be ignored — `CollabPageEditor` + `PageComments`
   // persist across page navigation (no React key), so `PageComments` still holds
   // the `seed` for this thread id after you navigate away and back, and re-passes
-  // it to the freshly remounted body. `sentSeedThreadIds` already records that
+  // it to the freshly remounted body. The realm seed registry already records that
   // this thread's seed was sent; when it has, treat the prop as no seed so the
   // mount fetch below runs and loads the persisted comments. Without this the
   // remount skipped BOTH the fetch (seed present) AND the re-send (already sent),
   // stranding the thread on "No comments yet" while its comment-count badge read
   // 1. See docs/architecture/features/doc-comments.md → "Exactly-once seed".
   const seedRef = React.useRef(
-    seed && !sentSeedThreadIds.has(thread.id) ? seed : null,
+    seed && !hasClaimedCommentSeed(thread.id) ? seed : null,
   );
   const seedSentRef = React.useRef(false);
 
@@ -342,9 +386,8 @@ export function CommentThreadBody({
   // refresh. The ref guard makes React StrictMode's double-mount send once.
   React.useEffect(() => {
     const s = seedRef.current;
-    if (!s || seedSentRef.current || sentSeedThreadIds.has(thread.id)) return;
+    if (!s || seedSentRef.current || !claimCommentSeed(thread.id)) return;
     seedSentRef.current = true;
-    sentSeedThreadIds.add(thread.id);
     void sendReply({
       body: s.message,
       fileIds: s.fileIds,
@@ -500,6 +543,7 @@ export function CommentThreadBody({
     const hasRecordings = attachedRecordingIds.length > 0;
     const model = override ? override.model : controls.model;
     const researchMode = override ? override.researchMode : controls.researchMode;
+    const knownMessageIds = new Set(messages.map((message) => message.id));
     if (
       (!body && !hasFiles && !hasRecordings) ||
       busy ||
@@ -595,6 +639,7 @@ export function CommentThreadBody({
       const decoder = new TextDecoder();
       const buf = createSSEBuffer();
       let acc = "";
+      let duplicateInFlight = false;
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -603,6 +648,13 @@ export function CommentThreadBody({
             acc += (ev.data as { text?: string }).text ?? "";
             setStreaming(acc);
             setStreamActivity(null);
+          } else if (ev.event === "error") {
+            const code = (ev.data as { code?: string }).code;
+            if (code === "turn_in_flight") {
+              duplicateInFlight = true;
+            } else {
+              throw new Error(code ?? "comment turn failed");
+            }
           } else if (ev.event === "tool_start" && !acc) {
             // Reflect the assistant's work before any reply text lands.
             const name = (ev.data as { name?: string }).name;
@@ -677,6 +729,13 @@ export function CommentThreadBody({
       }
       const rows = await fetchSessionMessages(thread.sessionId);
       setMessages(rows);
+      if (duplicateInFlight) {
+        // This renderer lost the exactly-once race to an already-running copy.
+        // Retire the seed, refresh `sessionStatus`, then let the existing live
+        // reconnect effect attach to the winning turn instead of showing an
+        // error or trying the seed again.
+        seedRef.current = null;
+      }
       if (mentions.length > 0) {
         void recordDocMention({
           workspaceId,
@@ -688,7 +747,20 @@ export function CommentThreadBody({
       }
       onChanged();
     } catch {
-      setError(t.loadError);
+      // A network/SSE failure does not prove the send failed. `doc_thread`
+      // turns deliberately survive a disconnected client, so first reconcile
+      // the exact optimistic row from the canonical transcript. If it landed,
+      // retire the seed and refresh the thread status so the reconnect effect
+      // can attach to the background turn. Only a genuinely absent row gets
+      // the load error.
+      const rows = await fetchSessionMessages(thread.sessionId);
+      if (hasPersistedInterruptedComment(rows, knownMessageIds, effectiveBody)) {
+        setMessages(rows);
+        seedRef.current = null;
+        onChanged();
+      } else {
+        setError(t.loadError);
+      }
     } finally {
       setStreaming(null);
       setStreamActivity(null);
