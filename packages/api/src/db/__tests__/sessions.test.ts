@@ -26,6 +26,7 @@ import {
   providerChannelIdFromSession,
   getPreferredChannel,
   findSessionMessageByChannelTriple,
+  findSlackVisibleMessageByChannelId,
 } from '../sessions.js'
 import { query } from '../client.js'
 
@@ -51,6 +52,27 @@ describe('[COMP:api/slack-route] Slack thread session identity', () => {
     expect(providerChannelIdFromSession('slack', 'C123:thread:100.001')).toBe('C123')
     expect(providerChannelIdFromSession('slack', 'C123')).toBe('C123')
     expect(providerChannelIdFromSession('telegram', '-100:topic:42')).toBe('-100:topic:42')
+  })
+
+  it('finds only the exact provider message across bare and thread-qualified Slack sessions', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ role: 'assistant', content: [{ type: 'text', text: 'proposal' }], channelMessageId: '100.001' }],
+      rowCount: 1,
+    } as never)
+
+    const result = await findSlackVisibleMessageByChannelId({
+      assistantId: 'assistant-test',
+      channelId: 'C0THREAD01',
+      channelMessageId: '100.001',
+    })
+
+    expect(result?.role).toBe('assistant')
+    const [sql, params] = mockQuery.mock.calls[0]
+    expect(sql).toContain("s.channel_type = 'slack'")
+    expect(sql).toContain("s.channel_id LIKE $2 || ':thread:%'")
+    expect(sql).toContain('sm.channel_message_id = $3')
+    expect(sql).not.toContain('sm.channel_message_id LIKE')
+    expect(params).toEqual(['assistant-test', 'C0THREAD01', '100.001'])
   })
 })
 

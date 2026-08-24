@@ -380,6 +380,15 @@ export type ChannelPipelineParams = {
    */
   userContentBlocks: ContentBlock[]
   /**
+   * Bounded context read from the current provider conversation before this
+   * turn (for example, Slack's visible thread during an empty-session
+   * cutover). It is untrusted material the user can see, so it joins the
+   * user-visible context envelope on the newest user turn. It must never enter
+   * private runtime/system context and is not persisted as authored session
+   * history by this pipeline.
+   */
+  providerVisibleContext?: string | null
+  /**
    * The adapter's raw inbound message text (`incoming.text`) BEFORE any
    * attachment-context prefix or voice-transcript wrapper was prepended.
    * When present, over the paste-promotion threshold, and `artifactPromoter`
@@ -1542,7 +1551,10 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
       )
     }
   }
-  const userVisibleContext = splitPrompt.userVisibleContext
+  const userVisibleContext = [
+    splitPrompt.userVisibleContext,
+    params.providerVisibleContext?.trim() ?? '',
+  ].filter((part) => part.length > 0).join('\n\n')
 
   // ── Uploaded-file save policy ──
   // Shared with chat.ts. Channels are where this matters MOST — a photo sent

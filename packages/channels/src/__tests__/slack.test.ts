@@ -598,6 +598,88 @@ describe('[COMP:channels/slack] read-method form encoding', () => {
     expect(history.get('channel')).toBe('C0TESTFORM1')
     expect(history.get('limit')).toBe('5')
     expect(history.has('latest')).toBe(false)
+    expect(history.has('oldest')).toBe(false)
+    expect(history.has('inclusive')).toBe(false)
+  })
+
+  it('conversations.replies binds channel + root ts in form data and drops an undefined cursor', async () => {
+    await createSlackApi({ botToken: 'xoxb-test' }).conversationsReplies(
+      'C0TESTFORM1',
+      '1723800000.000100',
+      { limit: 5 },
+    )
+    expect(calls).toHaveLength(1)
+    expect(calls[0].contentType).toBe('application/x-www-form-urlencoded')
+    const replies = new URLSearchParams(calls[0].body)
+    expect(replies.get('channel')).toBe('C0TESTFORM1')
+    expect(replies.get('ts')).toBe('1723800000.000100')
+    expect(replies.get('limit')).toBe('100')
+    expect(replies.has('cursor')).toBe(false)
+  })
+})
+
+describe('[COMP:channels/slack] bounded thread reads', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('follows cursors and keeps the root plus newest replies when the output is truncated', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        json: async () => ({
+          ok: true,
+          messages: [
+            { type: 'message', user: 'UROOT', text: 'proposal', ts: '1723800000.000100' },
+            { type: 'message', user: 'U1', text: 'old reply', ts: '1723800001.000100' },
+          ],
+          response_metadata: { next_cursor: 'NEXT' },
+        }),
+      } as unknown as Response)
+      .mockResolvedValueOnce({
+        json: async () => ({
+          ok: true,
+          messages: [
+            { type: 'message', user: 'U2', text: 'newer reply', ts: '1723800002.000100' },
+            { type: 'message', user: 'U3', text: 'newest reply', ts: '1723800003.000100' },
+          ],
+          response_metadata: { next_cursor: '' },
+        }),
+      } as unknown as Response)
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await createSlackApi({ botToken: 'xoxb-test' }).conversationsReplies(
+      'C0TESTFORM1',
+      '1723800000.000100',
+      { limit: 2 },
+    )
+
+    expect(result.messages.map((message) => message.text)).toEqual(['proposal', 'newest reply'])
+    expect(result.truncated).toBe(true)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    const secondBody = new URLSearchParams(fetchMock.mock.calls[1][1].body as string)
+    expect(secondBody.get('cursor')).toBe('NEXT')
+  })
+
+  it('deduplicates provider pages and reports a complete chronological thread', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      json: async () => ({
+        ok: true,
+        messages: [
+          { type: 'message', user: 'U2', text: 'second', ts: '1723800001.000100' },
+          { type: 'message', user: 'U1', text: 'root', ts: '1723800000.000100' },
+          { type: 'message', user: 'U2', text: 'second', ts: '1723800001.000100' },
+        ],
+        response_metadata: { next_cursor: '' },
+      }),
+    } as unknown as Response)))
+
+    const result = await createSlackApi({ botToken: 'xoxb-test' }).conversationsReplies(
+      'C0TESTFORM1',
+      '1723800000.000100',
+    )
+    expect(result.messages.map((message) => message.ts)).toEqual([
+      '1723800000.000100',
+      '1723800001.000100',
+    ])
+    expect(result.truncated).toBe(false)
   })
 })
 

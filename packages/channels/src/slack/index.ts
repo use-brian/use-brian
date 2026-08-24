@@ -11,7 +11,11 @@ export {
   SLACK_TRANSIENT_ERROR_CODES,
 } from './errors.js'
 export type { SlackErrorTarget } from './errors.js'
-export type { SlackApi } from './api.js'
+export type {
+  SlackApi,
+  SlackConversationMessage,
+  SlackThreadMessages,
+} from './api.js'
 export {
   resolveMentionsInText,
   resolveMentionsCached,
