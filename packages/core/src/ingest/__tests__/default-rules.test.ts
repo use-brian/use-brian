@@ -6,9 +6,8 @@ import {
   type IngestSourceProvider,
 } from '../default-rules.js'
 
-// Launch sources that ship with non-empty default rules. WhatsApp is
-// intentionally excluded — it is default-drop (empty rules), asserted
-// separately below.
+// Launch sources that ship with non-empty default rules. Feishu and WhatsApp
+// are consent-gated and intentionally default-drop, asserted separately.
 const SOURCES: readonly IngestSourceProvider[] = [
   'slack',
   'github',
@@ -30,6 +29,7 @@ const UNIVERSAL_FILTERS = [
 
 const SOURCE_SPECIFIC_FILTERS: Record<IngestSourceProvider, readonly string[]> = {
   slack: ['channel_match', 'is_dm', 'is_mention', 'user_match'],
+  feishu: ['channel_match', 'is_dm', 'is_mention', 'user_match'],
   github: ['event_type', 'repo_match', 'actor_match', 'branch_match'],
   calendar: ['attendee_match', 'organizer_match', 'subject_contains', 'is_recurring'],
   fathom: ['meeting_subject_contains', 'attendee_match'],
@@ -53,6 +53,11 @@ describe('[COMP:brain/default-rules] Default ingest rule templates', () => {
       for (const source of SOURCES) {
         expect(DEFAULT_INGEST_RULES[source].length).toBeGreaterThan(0)
       }
+    })
+
+    it('keeps consent-gated channel sources default-drop', () => {
+      expect(DEFAULT_INGEST_RULES.feishu).toEqual([])
+      expect(DEFAULT_INGEST_RULES.whatsapp).toEqual([])
     })
 
     it('exposes the same lists via getDefaultRules', () => {

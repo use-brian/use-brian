@@ -52,6 +52,10 @@ vi.mock('../../feishu/client.js', () => ({
   validateFeishuCredentials: vi.fn(),
 }))
 
+vi.mock('../../ingest/feishu-connector-instance.js', () => ({
+  ensureFeishuConnectorInstance: vi.fn().mockResolvedValue(undefined),
+}))
+
 import {
   listChannelsForWorkspace,
   getChannelForUser,
@@ -941,7 +945,9 @@ describe('[COMP:api/channels-route] workspace-driven connect', () => {
     vi.mocked(getChannelForUser).mockResolvedValue(
       makeChannel({ id: 'chan-feishu', channelType: 'feishu', displayName: 'Brian for Lark' }),
     )
-    const upsert = vi.fn()
+    const upsert = vi.fn().mockResolvedValue(
+      makeIntegration({ id: 'int-feishu', channelId: 'chan-feishu', channelType: 'feishu' }),
+    )
     const integrationStore = {
       upsert,
       listForWorkspace: vi.fn().mockResolvedValue([
@@ -995,7 +1001,9 @@ describe('[COMP:api/channels-route] workspace-driven connect', () => {
     vi.mocked(findOrCreateChannelForWorkspaceConnect).mockResolvedValue({ channelId: 'chan-feishu', reused: false })
     vi.mocked(getChannelForUser).mockResolvedValue(makeChannel({ id: 'chan-feishu', channelType: 'feishu' }))
     const integrationStore = {
-      upsert: vi.fn(),
+      upsert: vi.fn().mockResolvedValue(
+        makeIntegration({ id: 'int-feishu', channelId: 'chan-feishu', channelType: 'feishu' }),
+      ),
       listForWorkspace: vi.fn().mockResolvedValue([]),
     } as unknown as ChannelIntegrationStore
     const feishuConnector = {

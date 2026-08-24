@@ -62,6 +62,7 @@ import {
 } from '../db/channels-store.js'
 import { ensureSlackConnectorInstance } from '../ingest/slack-connector-instance.js'
 import { ensureMsTeamsConnectorInstance } from '../ingest/msteams-connector-instance.js'
+import { ensureFeishuConnectorInstance } from '../ingest/feishu-connector-instance.js'
 import { query, queryWithRLS } from '../db/client.js'
 import { providerChannelIdFromSession } from '../db/sessions.js'
 
@@ -1281,7 +1282,7 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
     }
 
     try {
-      await opts.integrationStore.upsert({
+      const integration = await opts.integrationStore.upsert({
         channelId: provisioned.channelId,
         channelType: 'feishu',
         teamId: parsed.data.appId,
@@ -1295,6 +1296,16 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
         },
         actingUserId: userId,
       })
+      // Connector-instance provisioning is non-fatal for channel setup. The
+      // passive-ingest dispatcher retries lazily for pre-migration installs.
+      try {
+        await ensureFeishuConnectorInstance({
+          channelIntegrationId: integration.id,
+          actingUserId: userId,
+        })
+      } catch (error) {
+        console.error('[channels] feishu CI provisioning failed:', error)
+      }
     } catch (error) {
       console.error('[channels] feishu integration upsert failed:', error)
       res.status(500).json({ error: 'Failed to save integration' })

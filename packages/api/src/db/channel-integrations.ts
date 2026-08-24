@@ -218,6 +218,8 @@ export type RequireMentionOverride = {
 export type SeenChat = {
   chatId: string
   chatTitle: string | null
+  /** Feishu/Lark observation type. Absent on legacy and Telegram entries. */
+  chatType?: 'p2p' | 'group'
   isForum: boolean
   topics: Array<{ topicId: number; name: string | null; lastSeenAt: string }>
   lastSeenAt: string
@@ -243,6 +245,11 @@ export type ChannelIntegrationConfig = {
    * to the app that observed the chat. Topic fields are Telegram-specific.
    */
   seenChats?: SeenChat[]
+  /**
+   * Feishu/Lark only. Admin-owned fail-closed admission gate for passive group
+   * ingest. Rules choose routing only after this allowlist admits the chat.
+   */
+  ambientIngestChatIds?: string[]
   userAccessMode?: UserAccessMode // default: 'allow_all'
   // Slack sender filter; Telegram owner-plus-guest grants. @handle or numeric ID.
   allowedUserIds?: string[]

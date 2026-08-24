@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
   tryResolveSchedulerConfirmation: vi.fn(),
   dispatchReactionFeedback: vi.fn(),
   billingPartyForAssistant: vi.fn(),
+  ensureFeishuConnectorInstance: vi.fn(),
   processChannelMessage: vi.fn(),
 }))
 
@@ -51,6 +52,9 @@ vi.mock('../../feedback/reaction-dispatch.js', () => ({
   dispatchReactionFeedback: mocks.dispatchReactionFeedback,
 }))
 vi.mock('../../billing-party.js', () => ({ billingPartyForAssistant: mocks.billingPartyForAssistant }))
+vi.mock('../../ingest/feishu-connector-instance.js', () => ({
+  ensureFeishuConnectorInstance: mocks.ensureFeishuConnectorInstance,
+}))
 vi.mock('../../db/chat-lock.js', () => ({ withChatLock: (_key: string, fn: () => unknown) => fn() }))
 vi.mock('../channel-pipeline.js', () => ({ processChannelMessage: mocks.processChannelMessage }))
 
@@ -81,6 +85,7 @@ function normalizedMessage(over: Record<string, unknown> = {}) {
 
 function setup(over: {
   config?: Record<string, unknown>
+  connectorInstanceId?: string | null
   list?: unknown[]
   route?: Partial<FeishuRouteOptions>
 } = {}) {
@@ -95,7 +100,9 @@ function setup(over: {
       channelId: CHANNEL_ROW_ID,
       botUserId: 'ou_bot',
       config: over.config ?? {},
-      connectorInstanceId: 'archive-instance-1',
+      connectorInstanceId: over.connectorInstanceId === undefined
+        ? 'archive-instance-1'
+        : over.connectorInstanceId,
       credentials: { app_id: 'cli_a', app_secret: 'secret', brand: 'feishu' },
     })),
     mergeConfigSystem: vi.fn(async (
@@ -139,6 +146,7 @@ describe('[COMP:api/feishu-route] bridge route', () => {
       workspaceId: 'workspace-1',
     })
     mocks.billingPartyForAssistant.mockResolvedValue('owner-1')
+    mocks.ensureFeishuConnectorInstance.mockResolvedValue('promoted-instance-1')
     mocks.findUserById.mockResolvedValue({ id: 'linked-user-1' })
     mocks.channelLinkBindsHere.mockResolvedValue(true)
     mocks.ensureAssistantMember.mockResolvedValue(undefined)
@@ -243,8 +251,125 @@ describe('[COMP:api/feishu-route] bridge route', () => {
     await vi.waitFor(() => expect(integrationStore.mergeConfigSystem).toHaveBeenCalledOnce())
     const mutate = integrationStore.mergeConfigSystem.mock.calls[0][1]
     expect(mutate({})).toMatchObject({
-      seenChats: [expect.objectContaining({ chatId: 'oc_chat' })],
+      seenChats: [expect.objectContaining({ chatId: 'oc_chat', chatType: 'p2p' })],
     })
+  })
+
+  it('passively ingests a non-addressed message from an admin-enabled group', async () => {
+    const feishuWebhookIngestor = { ingest: vi.fn(async () => null) }
+    mocks.getChannelForWebhook.mockResolvedValue({
+      id: CHANNEL_ROW_ID,
+      workspaceId: 'workspace-1',
+      status: 'active',
+      enabledCapabilities: ['chat', 'broadcast', 'ingest'],
+    })
+    const { app } = setup({
+      config: {
+        requireMention: true,
+        ambientIngestChatIds: ['oc_chat'],
+      },
+      route: { feishuWebhookIngestor } as never,
+    })
+    await request(app)
+      .post('/internal/feishu/inbound')
+      .set('X-Connector-Secret', 'shared-secret')
+      .send({
+        channelId: CHANNEL_ROW_ID,
+        message: normalizedMessage({ chatType: 'group', mentionedBot: false }),
+      })
+      .expect(202)
+
+    await vi.waitFor(() => expect(feishuWebhookIngestor.ingest).toHaveBeenCalledOnce())
+    expect(feishuWebhookIngestor.ingest).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: 'workspace-1',
+      connectorInstanceId: 'archive-instance-1',
+      appId: 'cli_a',
+      chatId: 'oc_chat',
+      senderId: 'ou_sender',
+      senderName: 'Sender',
+      text: 'hello',
+    }))
+    expect(mocks.processChannelMessage).not.toHaveBeenCalled()
+  })
+
+  it('does not let an ingest rule bypass the per-group ambient allowlist', async () => {
+    const feishuWebhookIngestor = { ingest: vi.fn(async () => null) }
+    mocks.getChannelForWebhook.mockResolvedValue({
+      id: CHANNEL_ROW_ID,
+      workspaceId: 'workspace-1',
+      status: 'active',
+      enabledCapabilities: ['chat', 'broadcast', 'ingest'],
+    })
+    const { app } = setup({
+      config: { requireMention: true, ambientIngestChatIds: [] },
+      route: { feishuWebhookIngestor } as never,
+    })
+    await request(app)
+      .post('/internal/feishu/inbound')
+      .set('X-Connector-Secret', 'shared-secret')
+      .send({
+        channelId: CHANNEL_ROW_ID,
+        message: normalizedMessage({ chatType: 'group', mentionedBot: false }),
+      })
+      .expect(202)
+    await vi.waitFor(() => expect(mocks.claimChannelEvent).toHaveBeenCalled())
+    expect(feishuWebhookIngestor.ingest).not.toHaveBeenCalled()
+  })
+
+  it('lazily provisions a default-off source for a pre-feature Feishu integration', async () => {
+    const feishuWebhookIngestor = { ingest: vi.fn(async () => null) }
+    mocks.getChannelForWebhook.mockResolvedValue({
+      id: CHANNEL_ROW_ID,
+      workspaceId: 'workspace-1',
+      status: 'active',
+      enabledCapabilities: ['chat', 'broadcast', 'ingest'],
+    })
+    const { app } = setup({
+      connectorInstanceId: null,
+      config: { requireMention: true, ambientIngestChatIds: [] },
+      route: { feishuWebhookIngestor } as never,
+    })
+    await request(app)
+      .post('/internal/feishu/inbound')
+      .set('X-Connector-Secret', 'shared-secret')
+      .send({
+        channelId: CHANNEL_ROW_ID,
+        message: normalizedMessage({ chatType: 'group', mentionedBot: false }),
+      })
+      .expect(202)
+
+    await vi.waitFor(() => expect(mocks.ensureFeishuConnectorInstance).toHaveBeenCalledWith({
+      channelIntegrationId: 'integration-1',
+      actingUserId: 'owner-1',
+    }))
+    expect(feishuWebhookIngestor.ingest).not.toHaveBeenCalled()
+  })
+
+  it('keeps addressed group turns out of passive ingest to prevent duplication', async () => {
+    const feishuWebhookIngestor = { ingest: vi.fn(async () => null) }
+    mocks.getChannelForWebhook.mockResolvedValue({
+      id: CHANNEL_ROW_ID,
+      workspaceId: 'workspace-1',
+      status: 'active',
+      enabledCapabilities: ['chat', 'broadcast', 'ingest'],
+    })
+    const { app } = setup({
+      config: {
+        requireMention: true,
+        ambientIngestChatIds: ['oc_chat'],
+      },
+      route: { feishuWebhookIngestor } as never,
+    })
+    await request(app)
+      .post('/internal/feishu/inbound')
+      .set('X-Connector-Secret', 'shared-secret')
+      .send({
+        channelId: CHANNEL_ROW_ID,
+        message: normalizedMessage({ chatType: 'group', mentionedBot: true }),
+      })
+      .expect(202)
+    await vi.waitFor(() => expect(mocks.processChannelMessage).toHaveBeenCalledOnce())
+    expect(feishuWebhookIngestor.ingest).not.toHaveBeenCalled()
   })
 
   it('applies the live group mention gate in the API route', async () => {
