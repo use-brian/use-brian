@@ -48,6 +48,25 @@ function viewerCtx(context: ToolContext): AccessContext {
  */
 const CRM_NOTE_ENTITY_KINDS = new Set(['person', 'company', 'deal'])
 
+const CLIENT_SELF_TAG = 'client-self'
+const CLIENT_MEMORY_TAG_PREFIX = 'client-memory:'
+
+function isServerOwnedClientMemoryTag(tag: string): boolean {
+  return tag === CLIENT_SELF_TAG || tag.startsWith(CLIENT_MEMORY_TAG_PREFIX)
+}
+
+/**
+ * Client-memory identity tags are minted by the server, never the model.
+ * Replacement-tag updates retain the existing reserved tags and discard any
+ * model-supplied attempt to add a different deterministic key.
+ */
+function mergeClientMemoryTags(existing: string[], proposed: string[]): string[] {
+  return Array.from(new Set([
+    ...existing.filter(isServerOwnedClientMemoryTag),
+    ...proposed.filter((tag) => !isServerOwnedClientMemoryTag(tag)),
+  ]))
+}
+
 /**
  * Reject write payloads whose summary or detail matches the operational-
  * state regex set (Nth follow-up, N overdue, awaiting confirmation, Nth
@@ -266,7 +285,14 @@ export function createMemoryTools(
         const updates: Record<string, unknown> = {}
         if (input.summary !== undefined) updates.summary = input.summary
         if (input.detail !== undefined) updates.detail = input.detail
-        if (input.tags !== undefined) updates.tags = input.tags
+        if (input.tags !== undefined) {
+          let replacementTags = input.tags
+          if (context.clientSelfMemory) {
+            const existing = await store.getById(viewerCtx(context), resolvedId)
+            replacementTags = mergeClientMemoryTags(existing?.tags ?? [], input.tags)
+          }
+          updates.tags = replacementTags
+        }
 
         // Wrap in try/catch so malformed-UUID errors (when resolution above
         // didn't find a match and we're falling through with a non-UUID) are
@@ -409,7 +435,9 @@ export function createMemoryTools(
       let noteEntity:
         | { id: string; displayName: string; kind: string }
         | null = null
-      let effectiveTags = input.tags
+      let effectiveTags = context.clientSelfMemory && input.tags
+        ? mergeClientMemoryTags([], input.tags)
+        : input.tags
       if (input.entityId) {
         if (!opts?.entityStore || !opts?.entityLinksStore) {
           return {

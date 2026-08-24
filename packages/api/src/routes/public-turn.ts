@@ -102,6 +102,17 @@ import {
 // seams from public-turn before the reusable principal runtime was extracted.
 export { applyPublicResearchToolCeiling, resolveClientSelfMemory } from './client-principal-runtime.js'
 
+export function shouldExposeSaveMemoryTool(params: {
+  isIdentified: boolean
+  externalPrincipal: boolean
+  hasClientSelfMemory: boolean
+  hasDeterministicClientMemory: boolean
+}): boolean {
+  return params.isIdentified
+    && (!params.externalPrincipal || params.hasClientSelfMemory)
+    && !params.hasDeterministicClientMemory
+}
+
 /** Everything the pipeline needs — a structural subset of
  *  `PublicApiRouteOptions`, so `public-api.ts` passes its options
  *  object straight through. */
@@ -903,7 +914,12 @@ export async function executePublicTurn(
   }
 
   const { saveMemory, getMemory } = createMemoryTools(deps.memoryStore)
-  if (isIdentified && (!externalPrincipal || clientSelfMemory)) {
+  if (shouldExposeSaveMemoryTool({
+    isIdentified,
+    externalPrincipal,
+    hasClientSelfMemory: !!clientSelfMemory,
+    hasDeterministicClientMemory: !!body.clientMemory,
+  })) {
     baseTools.set('saveMemory', saveMemory)
   }
   if (isIdentified || fullScope) {
