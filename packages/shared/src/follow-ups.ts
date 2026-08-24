@@ -4,7 +4,7 @@
  * user-visible text and the parsed question list.
  *
  * Web renders the questions as clickable chips; messaging channels
- * (Telegram, Slack, WhatsApp) have no chip affordance, so they call this
+ * (Telegram, Slack, Feishu/Lark, WhatsApp) have no chip affordance, so they call this
  * to strip the tag before sending — otherwise the raw `<followup>...`
  * text leaks into the message body.
  *

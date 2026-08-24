@@ -1,6 +1,6 @@
 /**
- * `dispatchReactionFeedback` — Slack `reaction_added` + Telegram
- * `message_reaction` → `recordFeedback`.
+ * `dispatchReactionFeedback` — Slack `reaction_added`, Telegram
+ * `message_reaction`, and Feishu/Lark `reaction` → `recordFeedback`.
  *
  * Each messaging-platform reaction handler hands the raw reaction
  * (emoji string + the channel-native message id + a user-resolver
@@ -41,13 +41,14 @@ import { recordFeedback, type FeedbackSource } from './record.js'
 
 export type ReactionDispatchInput = {
   source: FeedbackSource
-  /** Channel-native chat id (Slack channel id, Telegram chat id). */
+  /** Channel-native chat id (Slack channel id, Telegram/Feishu-Lark chat id). */
   channelId: string
   /** Channel-native message id the reaction targets (Slack `ts`,
-   *  Telegram `message_id` as string). */
+   *  Telegram/Feishu-Lark `message_id` as string). */
   channelMessageId: string
   /** Raw emoji as the platform delivers it: Slack name without
-   *  colons (`thumbsup`, `+1`), Telegram unicode (`👍`). */
+   *  colons (`thumbsup`, `+1`), Telegram unicode (`👍`), or a
+   *  Feishu/Lark symbolic emoji type (`THUMBSUP`). */
   rawEmoji: string
   /**
    * Resolve the reacting user to an internal user id. Receives the

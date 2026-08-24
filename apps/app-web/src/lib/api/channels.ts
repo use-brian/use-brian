@@ -27,7 +27,8 @@ export type ChannelType =
   | "email"
   | "msteams"
   | "wechat"
-  | "custom";
+  | "custom"
+  | "feishu";
 export type ChannelClearance = "public" | "internal" | "confidential";
 export type ChannelCapability = "chat" | "broadcast" | "ingest";
 type ChannelStatus = "active" | "revoked" | "invalid";
@@ -53,7 +54,7 @@ export type RequireMentionOverride = { chatId: string; topicId?: number | null }
 /**
  * Per-integration behavior config — the `channel_integrations.config` JSONB.
  * Mirrors `ChannelIntegrationConfig` in packages/api. Not every field applies
- * to every channel: `replyInThread` is Slack-only, `requireMentionOverrides` /
+ * to every channel: `replyInThread` applies to Slack and Feishu, `requireMentionOverrides` /
  * `seenChats` are Telegram-only.
  */
 export type ChannelIntegrationConfig = {
@@ -317,6 +318,48 @@ export async function connectDiscordChannel(
     );
   }
   return (await res.json()) as ConnectDiscordResult;
+}
+
+export type ConnectFeishuInput = {
+  appId: string;
+  appSecret: string;
+  brand: "feishu" | "lark";
+  defaultAssistantId?: string | null;
+  displayName?: string;
+};
+
+export type ConnectFeishuResult = {
+  channel: Channel;
+  reused: boolean;
+  botOpenId: string;
+  botName: string;
+  brand: "feishu" | "lark";
+  connectorError: string | null;
+};
+
+/** Connect a tenant-owned Feishu or Lark enterprise app. */
+export async function connectFeishuChannel(
+  workspaceId: string,
+  input: ConnectFeishuInput,
+): Promise<ConnectFeishuResult> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/channels/feishu`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as {
+      error?: string;
+      detail?: string;
+    };
+    throw new Error(
+      data.detail ?? data.error ?? `Feishu/Lark connect failed (${res.status})`,
+    );
+  }
+  return (await res.json()) as ConnectFeishuResult;
 }
 
 export type ConnectMsTeamsInput = {

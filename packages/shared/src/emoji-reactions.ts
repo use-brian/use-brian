@@ -2,10 +2,11 @@
  * Emoji-reaction → feedback classifier.
  *
  * When a user reacts to an assistant message with an emoji on Slack
- * (`reaction_added` event, `:thumbsup:` / `:+1:`) or Telegram
- * (`message_reaction` update, raw emoji string `👍`), this map
+ * (`reaction_added` event, `:thumbsup:` / `:+1:`), Telegram
+ * (`message_reaction` update, raw emoji string `👍`), or Feishu/Lark
+ * (symbolic type such as `THUMBSUP`), this map
  * translates the reaction into the same `{kind, issueType, details}`
- * shape the web feedback modal produces — so all three channels flow
+ * shape the web feedback modal produces — so all four channels flow
  * through the same `recordFeedback()` writer and land in the same
  * `analytics_events feedback_positive` / `feedback_negative` stream
  * the brain's reflection consolidation reads.
@@ -82,11 +83,13 @@ const REACTION_MAP: Record<string, ReactionClassification> = {
   // Celebration
   tada: { kind: 'positive', issueType: 'celebration' },
   party_popper: { kind: 'positive', issueType: 'celebration' },
+  party: { kind: 'positive', issueType: 'celebration' },
   '🎉': { kind: 'positive', issueType: 'celebration' },
   // Affirmation
   'white_check_mark': { kind: 'positive', issueType: 'affirmation' },
   'check_mark_button': { kind: 'positive', issueType: 'affirmation' },
   heavy_check_mark: { kind: 'positive', issueType: 'affirmation' },
+  done: { kind: 'positive', issueType: 'affirmation' },
   '✅': { kind: 'positive', issueType: 'affirmation' },
   // Strong approval / excellent
   '100': { kind: 'positive', issueType: 'excellent' },

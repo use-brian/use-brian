@@ -451,7 +451,7 @@ export function modelToCompactionTier(model: string): CompactionTier {
 
 /**
  * Per-channel-class multiplier on the plan threshold. Persistent
- * messaging channels (Telegram/Slack/WhatsApp) accumulate topics quickly
+ * messaging channels (Telegram/Slack/Feishu-Lark/WhatsApp) accumulate topics quickly
  * and benefit from more-frequent compaction, so their effective
  * threshold is half of the plan threshold.
  */
@@ -481,7 +481,7 @@ export type IdleCompactionLevel = 'none' | 'soft' | 'hard'
 
 /**
  * Determine idle compaction level based on time since last activity.
- * Only for messaging channels (Telegram, Slack, WhatsApp).
+ * Only for messaging channels (Telegram, Slack, Feishu/Lark, WhatsApp).
  */
 export function getIdleCompactionLevel(lastActiveAt: Date): IdleCompactionLevel {
   const hours = (Date.now() - lastActiveAt.getTime()) / (1000 * 60 * 60)

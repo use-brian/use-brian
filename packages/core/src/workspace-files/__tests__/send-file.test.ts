@@ -140,7 +140,7 @@ describe('[COMP:files/send-file] sendFile', () => {
   })
 
   it('allows the channels whose adapters really upload documents', async () => {
-    for (const channelType of ['web', 'telegram', 'slack', 'discord', 'email', 'msteams']) {
+    for (const channelType of ['web', 'telegram', 'slack', 'discord', 'feishu', 'email', 'msteams']) {
       const result = await createSendFileTool(statOnlyApi(fakeFile())).execute(
         { file: '/reports/q1.md' },
         makeContext({ channelType }),
@@ -198,6 +198,17 @@ describe('[COMP:files/send-file] sendFile', () => {
     )
     expect(onDiscord.isError).toBe(true)
     expect(String(onDiscord.data)).toContain('10 MB')
+  })
+
+  it('applies the Feishu/Lark 20 MiB message-file ceiling', async () => {
+    const big = fakeFile({ sizeBytes: 21 * 1024 * 1024 })
+    const result = await createSendFileTool(statOnlyApi(big)).execute(
+      { file: '/reports/q1.md' },
+      makeContext({ channelType: 'feishu' }),
+    )
+
+    expect(result.isError).toBe(true)
+    expect(String(result.data)).toContain('20 MB')
   })
 
   it('blocks confidential files on external channels but allows them on web', async () => {

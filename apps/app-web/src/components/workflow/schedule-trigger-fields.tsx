@@ -348,7 +348,7 @@ export function ScheduleTriggerFields({ trigger, onChange, disabled }: Props) {
                       : {
                           ...trigger,
                           delivery: {
-                            channel: v as "telegram" | "slack" | "whatsapp",
+                            channel: v as "telegram" | "slack" | "whatsapp" | "feishu",
                           },
                         },
                   );
@@ -358,6 +358,7 @@ export function ScheduleTriggerFields({ trigger, onChange, disabled }: Props) {
                   none: b.scheduleDeliveryNone,
                   telegram: b.deliverChannelTelegram,
                   slack: b.deliverChannelSlack,
+                  feishu: b.deliverChannelFeishu,
                   whatsapp: b.deliverChannelWhatsApp,
                 }}
               >
@@ -370,6 +371,7 @@ export function ScheduleTriggerFields({ trigger, onChange, disabled }: Props) {
                     {b.deliverChannelTelegram}
                   </SelectItem>
                   <SelectItem value="slack">{b.deliverChannelSlack}</SelectItem>
+                  <SelectItem value="feishu">{b.deliverChannelFeishu}</SelectItem>
                   <SelectItem value="whatsapp">
                     {b.deliverChannelWhatsApp}
                   </SelectItem>

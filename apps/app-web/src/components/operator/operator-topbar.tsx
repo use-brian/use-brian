@@ -19,9 +19,9 @@
  *    └─ desktop sidebar collapse, wired to the layout-level `useSidebarData()`
  *
  * `center` and `right` are composable slots the mounting surface fills
- * (Tasks: counts + Table|Board toggle; CRM: section switch + deals view
- * toggle) so the bar never knows surface internals — the brain-topbar slot
- * contract. Painted in the same warm-grey `--sidebar*` palette as
+ * (Tasks: counts + Table|Board toggle; CRM: fallback destination switch +
+ * deals view toggle) so the bar never knows surface internals — the
+ * brain-topbar slot contract. Painted in the same warm-grey `--sidebar*` palette as
  * `doc-topbar.tsx`, whose class recipes this file copies verbatim.
  *
  * Mobile: the collapse toggle hides (the chrome's fixed hamburger drives the
@@ -60,6 +60,7 @@ export function OperatorTopbar({
   customApp,
   appChipClassName,
   center,
+  centerVisibility = "always",
   right,
 }: {
   /** Which built-in operator app the chip names (icon + `operatorBar` label).
@@ -78,6 +79,9 @@ export function OperatorTopbar({
   /** Cluster after the tab chip (CRM's section switch). Scrolls instead of
    *  painting over the right cluster when the bar is cramped. */
   center?: React.ReactNode;
+  /** Keep the center slot as a compact navigation fallback on narrow layouts
+   *  and on desktop only while the persistent sidebar is collapsed. */
+  centerVisibility?: "always" | "when-sidebar-unavailable";
   /** Right-aligned cluster (counts, view toggles). */
   right?: React.ReactNode;
 }) {
@@ -164,7 +168,20 @@ export function OperatorTopbar({
         {/* Surface-injected clusters. The center slot scrolls instead of
             letting content paint over the right cluster when the bar is
             cramped (the brain-topbar overflow rule). */}
-        <div className="flex min-w-0 flex-1 items-center gap-2 self-center overflow-x-auto pl-2">
+        <div
+          data-center-visibility={centerVisibility}
+          data-center-desktop-hidden={
+            centerVisibility === "when-sidebar-unavailable" && !sidebarCollapsed
+              ? "true"
+              : "false"
+          }
+          className={cn(
+            "flex min-w-0 flex-1 items-center gap-2 self-center overflow-x-auto pl-2",
+            centerVisibility === "when-sidebar-unavailable" &&
+              !sidebarCollapsed &&
+              "md:hidden",
+          )}
+        >
           {center}
         </div>
       </div>

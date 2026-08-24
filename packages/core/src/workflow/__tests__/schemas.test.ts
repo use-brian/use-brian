@@ -433,6 +433,18 @@ describe('[COMP:workflow/schemas] WorkflowDefinitionSchema', () => {
     expect(WorkflowDefinitionSchema.safeParse(def).success).toBe(true)
   })
 
+  it('accepts a Feishu destination pinned to one channel integration', () => {
+    const def = {
+      startStepId: 'send',
+      steps: [deliverStep('send', {
+        channelType: 'feishu',
+        channelId: 'oc_0123456789abcdef',
+        channelIntegrationId: '00000000-0000-4000-8000-000000000001',
+      })],
+    }
+    expect(WorkflowDefinitionSchema.safeParse(def).success).toBe(true)
+  })
+
   it('accepts a source-bound WhatsApp trigger reply with no authored recipient', () => {
     const def = {
       startStepId: 'reply',
@@ -456,7 +468,7 @@ describe('[COMP:workflow/schemas] WorkflowDefinitionSchema', () => {
     expect(WorkflowDefinitionSchema.safeParse(def).success).toBe(false)
   })
 
-  it('rejects channelIntegrationId on a non-Telegram destination', () => {
+  it('rejects channelIntegrationId on an unsupported destination', () => {
     const def = {
       startStepId: 'send',
       steps: [deliverStep('send', {

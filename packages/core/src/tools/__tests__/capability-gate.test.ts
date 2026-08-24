@@ -99,7 +99,7 @@ describe('[COMP:tools/capability-gate] filterToolsByCapabilities', () => {
 
 describe('[COMP:tools/capability-gate] isAutonomousToolContext (Tier-C write-gate discriminator)', () => {
   // Interactive channels — a live human can tap Allow, so NOT autonomous.
-  it.each(['web', 'telegram', 'slack', 'whatsapp', 'discord'])(
+  it.each(['web', 'telegram', 'slack', 'feishu', 'whatsapp', 'discord'])(
     'treats interactive channel %s as NOT autonomous',
     (channelType) => {
       expect(isAutonomousToolContext({ channelType })).toBe(false)
@@ -131,7 +131,7 @@ describe('[COMP:tools/capability-gate] isAutonomousToolContext (Tier-C write-gat
     // `custom` is a bridge-driven channel relaying a live human's chat
     // (docs/architecture/channels/custom-channel.md).
     expect([...INTERACTIVE_CHANNEL_TYPES].sort()).toEqual(
-      ['custom', 'discord', 'slack', 'telegram', 'web', 'whatsapp'],
+      ['custom', 'discord', 'feishu', 'slack', 'telegram', 'web', 'whatsapp'],
     )
   })
 })

@@ -48,6 +48,10 @@ vi.mock('@use-brian/channels', () => ({
   stripMarkdown: vi.fn(),
 }))
 
+vi.mock('../../feishu/client.js', () => ({
+  validateFeishuCredentials: vi.fn(),
+}))
+
 import {
   listChannelsForWorkspace,
   getChannelForUser,
@@ -75,6 +79,8 @@ import { queryWithRLS } from '../../db/client.js'
 import type { WorkspaceStore } from '../../db/workspace-store.js'
 import type { ChannelIntegrationStore } from '../../db/channel-integrations.js'
 import type { DiscordConnectorClient } from '../../discord/connector-client.js'
+import type { FeishuConnectorClient } from '../../feishu/connector-client.js'
+import { validateFeishuCredentials } from '../../feishu/client.js'
 import type { LinkCodeStore } from '../../db/link-codes.js'
 import type { CustomChannelStore } from '../../db/custom-channel-store.js'
 import { hashBridgeToken } from '../../db/custom-channel-token.js'
@@ -101,6 +107,7 @@ function buildApp(
     integrationStore?: ChannelIntegrationStore
     apiUrl?: string
     discordConnector?: DiscordConnectorClient
+    feishuConnector?: FeishuConnectorClient
     telegramBotToken?: string
     ownerPairing?: {
       enabled: boolean
@@ -120,6 +127,7 @@ function buildApp(
       integrationStore: opts.integrationStore,
       apiUrl: opts.apiUrl,
       discordConnector: opts.discordConnector,
+      feishuConnector: opts.feishuConnector,
       telegramBotToken: opts.telegramBotToken,
       ownerPairing: opts.ownerPairing,
       customChannelStore: opts.customChannelStore,
@@ -307,6 +315,20 @@ describe('[COMP:api/channels-route] DELETE channel', () => {
     )
     expect(res.status).toBe(204)
     expect(disconnect).not.toHaveBeenCalled()
+  })
+
+  it('tears down the Feishu long connection after deleting the channel', async () => {
+    vi.mocked(getChannelForUser).mockResolvedValue(
+      makeChannel({ id: 'chan-feishu', channelType: 'feishu' }),
+    )
+    vi.mocked(deleteChannel).mockResolvedValue(true)
+    const disconnect = vi.fn().mockResolvedValue(undefined)
+    const feishuConnector = { disconnect } as unknown as FeishuConnectorClient
+    const res = await request(buildApp({ feishuConnector })).delete(
+      '/api/workspaces/ws-1/channels/chan-feishu',
+    )
+    expect(res.status).toBe(204)
+    expect(disconnect).toHaveBeenCalledWith('chan-feishu')
   })
 })
 
@@ -884,6 +906,87 @@ describe('[COMP:api/channels-route] workspace-driven connect', () => {
     expect(res.status).toBe(201)
     expect(res.body.connectorError).toContain('connector unreachable')
   })
+
+  it('POST /feishu 201s, encrypts the brand-bound app credentials, and opens the bridge', async () => {
+    vi.mocked(validateFeishuCredentials).mockResolvedValue({
+      botOpenId: 'ou_bot',
+      botName: 'Brian for Lark',
+    })
+    vi.mocked(findOrCreateChannelForWorkspaceConnect).mockResolvedValue({
+      channelId: 'chan-feishu',
+      reused: false,
+    })
+    vi.mocked(getChannelForUser).mockResolvedValue(
+      makeChannel({ id: 'chan-feishu', channelType: 'feishu', displayName: 'Brian for Lark' }),
+    )
+    const upsert = vi.fn()
+    const integrationStore = {
+      upsert,
+      listForWorkspace: vi.fn().mockResolvedValue([
+        makeIntegration({ id: 'int-feishu', channelId: 'chan-feishu', channelType: 'feishu', botUserId: 'ou_bot' }),
+      ]),
+    } as unknown as ChannelIntegrationStore
+    const connect = vi.fn().mockResolvedValue({ channelId: 'chan-feishu', status: 'connected' })
+    const feishuConnector = { connect } as unknown as FeishuConnectorClient
+
+    const res = await request(buildApp({ integrationStore, feishuConnector }))
+      .post('/api/workspaces/ws-1/channels/feishu')
+      .send({
+        appId: 'cli_lark_app',
+        appSecret: 'lark-secret',
+        brand: 'lark',
+        defaultAssistantId: ASSISTANT_UUID,
+      })
+
+    expect(res.status).toBe(201)
+    expect(res.body).toMatchObject({
+      botOpenId: 'ou_bot',
+      botName: 'Brian for Lark',
+      brand: 'lark',
+      connectorError: null,
+    })
+    expect(validateFeishuCredentials).toHaveBeenCalledWith({
+      appId: 'cli_lark_app',
+      appSecret: 'lark-secret',
+      brand: 'lark',
+    })
+    expect(findOrCreateChannelForWorkspaceConnect).toHaveBeenCalledWith(expect.objectContaining({
+      channelType: 'feishu',
+      externalIdentity: { teamId: 'cli_lark_app', botUserId: 'ou_bot' },
+    }))
+    expect(upsert).toHaveBeenCalledWith(expect.objectContaining({
+      channelId: 'chan-feishu',
+      channelType: 'feishu',
+      teamId: 'cli_lark_app',
+      botUserId: 'ou_bot',
+      credentials: { app_id: 'cli_lark_app', app_secret: 'lark-secret', brand: 'lark' },
+    }))
+    expect(connect).toHaveBeenCalledWith('chan-feishu', {
+      appId: 'cli_lark_app',
+      appSecret: 'lark-secret',
+      brand: 'lark',
+    })
+  })
+
+  it('POST /feishu reports a non-fatal connectorError after credentials are saved', async () => {
+    vi.mocked(validateFeishuCredentials).mockResolvedValue({ botOpenId: 'ou_bot', botName: 'Brian' })
+    vi.mocked(findOrCreateChannelForWorkspaceConnect).mockResolvedValue({ channelId: 'chan-feishu', reused: false })
+    vi.mocked(getChannelForUser).mockResolvedValue(makeChannel({ id: 'chan-feishu', channelType: 'feishu' }))
+    const integrationStore = {
+      upsert: vi.fn(),
+      listForWorkspace: vi.fn().mockResolvedValue([]),
+    } as unknown as ChannelIntegrationStore
+    const feishuConnector = {
+      connect: vi.fn().mockRejectedValue(new Error('websocket handshake failed')),
+    } as unknown as FeishuConnectorClient
+
+    const res = await request(buildApp({ integrationStore, feishuConnector }))
+      .post('/api/workspaces/ws-1/channels/feishu')
+      .send({ appId: 'cli_app', appSecret: 'secret', brand: 'feishu' })
+
+    expect(res.status).toBe(201)
+    expect(res.body.connectorError).toContain('websocket handshake failed')
+  })
 })
 
 describe('[COMP:api/slack-channels-route] GET slack-channels', () => {
@@ -1011,6 +1114,8 @@ describe('[COMP:api/channel-destinations-route] GET channel-destinations', () =>
       destRow({ channelType: 'telegram', channelId: '-100555' }),
       destRow({ channelType: 'telegram', channelId: '-100555:topic:42' }),
       destRow({ channelType: 'telegram', channelId: '-100555:topic:invalid' }),
+      destRow({ channelType: 'feishu', channelId: 'not-a-feishu-chat' }),
+      destRow({ channelType: 'feishu', channelId: 'oc_project123' }),
       // WhatsApp JIDs pass through unfiltered.
       destRow({ channelType: 'whatsapp', channelId: '1203630@g.us' }),
     ])
@@ -1020,6 +1125,7 @@ describe('[COMP:api/channel-destinations-route] GET channel-destinations', () =>
       'C0BB4AK5BHB',
       '-100555',
       '-100555:topic:42',
+      'oc_project123',
       '1203630@g.us',
     ])
   })
@@ -1169,6 +1275,50 @@ describe('[COMP:api/channel-destinations-route] GET channel-destinations', () =>
         channelId: '-100555',
         channelIntegrationId: 'int-ops',
         integrationLabel: '@ops_bot',
+      }),
+    ])
+  })
+
+  it('returns one destination per Feishu app that observed the chat', async () => {
+    mockRows([destRow({ channelType: 'feishu', channelId: 'oc_project123' })])
+    const seenChat = {
+      chatId: 'oc_project123',
+      chatTitle: null,
+      isForum: false,
+      topics: [],
+      lastSeenAt: '2026-08-24T09:45:15Z',
+    }
+    const integrationStore = {
+      listForWorkspace: vi.fn().mockResolvedValue([
+        makeIntegration({
+          id: 'int-feishu',
+          channelType: 'feishu',
+          teamName: 'Mainland app',
+          config: { seenChats: [seenChat] },
+        }),
+        makeIntegration({
+          id: 'int-lark',
+          channelType: 'feishu',
+          teamName: 'Global app',
+          config: { seenChats: [seenChat] },
+        }),
+      ]),
+    } as unknown as ChannelIntegrationStore
+
+    const res = await request(buildApp({ integrationStore }))
+      .get('/api/workspaces/ws-1/channel-destinations')
+
+    expect(res.status).toBe(200)
+    expect(res.body.destinations).toEqual([
+      expect.objectContaining({
+        channelId: 'oc_project123',
+        channelIntegrationId: 'int-feishu',
+        integrationLabel: 'Mainland app',
+      }),
+      expect.objectContaining({
+        channelId: 'oc_project123',
+        channelIntegrationId: 'int-lark',
+        integrationLabel: 'Global app',
       }),
     ])
   })

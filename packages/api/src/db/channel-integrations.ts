@@ -82,6 +82,14 @@ export type MsTeamsCredentials = {
   tenant_id: string
 }
 
+/** Feishu/Lark custom-app credentials for REST + long-connection access. */
+export type FeishuCredentials = {
+  app_id: string
+  app_secret: string
+  /** Mainland China Feishu or international Lark API domain. */
+  brand: 'feishu' | 'lark'
+}
+
 /**
  * Threads (Meta) distribution credentials. Long-lived (60d) token from the
  * OAuth code → short-lived → long-lived exchange. Refreshed by a daily job
@@ -168,6 +176,7 @@ export type ChannelCredentials =
   | WhatsAppCloudCredentials
   | DiscordCredentials
   | MsTeamsCredentials
+  | FeishuCredentials
   | ThreadsCredentials
   | TwitterCredentials
   | EmailCredentials
@@ -199,8 +208,9 @@ export type RequireMentionOverride = {
 
 /**
  * A chat the bot has been observed in. Populated opportunistically by the
- * BYO route from inbound messages and `my_chat_member` events, so the
- * settings UI can render human-readable group/topic names instead of raw IDs.
+ * BYO routes from inbound messages and membership events, so settings and
+ * workflow destination pickers can associate provider chats with the exact
+ * integration that observed them.
  * Topic names come from `forum_topic_created` / `forum_topic_edited` service
  * messages — topics that existed before the bot joined appear here with
  * only an id until the owner edits the topic once.
@@ -216,10 +226,10 @@ export type SeenChat = {
 /**
  * Per-integration behavior settings stored in the `config` JSONB column.
  * Shared across Slack and Telegram BYO integrations. Not all fields apply
- * to every channel — `replyInThread` is Slack-only (Telegram has no threads).
+ * to every channel — `replyInThread` applies to Slack and Feishu/Lark.
  */
 export type ChannelIntegrationConfig = {
-  replyInThread?: boolean      // default: false — reply at channel level (Slack only)
+  replyInThread?: boolean      // Slack default false; Feishu route defaults true for thread context
   ackReaction?: string         // default: '' — no reaction. e.g. 'eyes', 'brain', '👀'
   requireMention?: boolean     // default: true — only respond when @mentioned in groups
   /**
@@ -229,7 +239,8 @@ export type ChannelIntegrationConfig = {
   requireMentionOverrides?: RequireMentionOverride[]
   /**
    * Opportunistically populated inventory of chats the bot has seen. Feeds
-   * the settings UI's override selector. Telegram BYO only.
+   * Telegram's override selector and pins Feishu/Lark workflow destinations
+   * to the app that observed the chat. Topic fields are Telegram-specific.
    */
   seenChats?: SeenChat[]
   userAccessMode?: UserAccessMode // default: 'allow_all'

@@ -37,6 +37,8 @@ import type { LinkCodeStore } from '../db/link-codes.js'
 import type { DiscordConnectorClient } from '../discord/connector-client.js'
 import type { WhatsappConnectorClient } from '../whatsapp/connector-client.js'
 import type { WechatConnectorClient } from '../wechat/connector-client.js'
+import type { FeishuConnectorClient } from '../feishu/connector-client.js'
+import { validateFeishuCredentials } from '../feishu/client.js'
 import type { CustomChannelStore } from '../db/custom-channel-store.js'
 import { mintBridgeToken, hashBridgeToken } from '../db/custom-channel-token.js'
 import type {
@@ -142,6 +144,8 @@ export type ChannelsRouteOptions = {
    * returns 503 if missing. See docs/architecture/channels/wechat.md.
    */
   wechatConnector?: WechatConnectorClient
+  /** Feishu/Lark long-connection bridge used to start/stop inbound delivery. */
+  feishuConnector?: FeishuConnectorClient
   /**
    * Custom (bridge-driven) channel state + outbox store. Required for the
    * custom channel endpoints (POST `.../channels/custom`, rotate-token,
@@ -214,6 +218,14 @@ const connectMsTeamsSchema = z.object({
   displayName: z.string().min(1).max(200).optional(),
 }).strict()
 
+const connectFeishuSchema = z.object({
+  appId: z.string().min(1).max(200),
+  appSecret: z.string().min(1).max(500),
+  brand: z.enum(['feishu', 'lark']),
+  defaultAssistantId: z.string().uuid().nullish(),
+  displayName: z.string().min(1).max(200).optional(),
+}).strict()
+
 const connectWhatsAppCloudSchema = z.object({
   accessToken: z.string().min(1),
   appSecret: z.string().min(8),
@@ -264,6 +276,7 @@ const TELEGRAM_DESTINATION_ID_PATTERN = /^(-?\d+)(?::topic:([1-9]\d*))?$/
 const DESTINATION_ID_SHAPE: Record<string, RegExp> = {
   telegram: TELEGRAM_DESTINATION_ID_PATTERN,
   slack: /^[CDG][A-Z0-9]+$/,
+  feishu: /^oc_[A-Za-z0-9]+$/,
   // Only linked-number JIDs support proactive delivery today. Official Cloud
   // API phone numbers are omitted until approved template sends exist.
   whatsapp: /@/,
@@ -548,7 +561,7 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
        FROM sessions s
        JOIN assistants a ON a.id = s.assistant_id
        WHERE a.workspace_id = $1
-         AND s.channel_type IN ('telegram', 'slack', 'whatsapp', 'custom')
+         AND s.channel_type IN ('telegram', 'slack', 'whatsapp', 'custom', 'feishu')
          AND s.channel_id <> 'notifications'
        ORDER BY s.channel_type, s.channel_id, s.last_active_at DESC
        LIMIT 200`,
@@ -581,11 +594,11 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
         .map((r) => r.channelId),
     )]
     const telegramNames = await resolveTelegramTitles(userId, workspaceId, telegramIdsToResolve)
-    let telegramIntegrations: ChannelIntegration[] = []
+    let messagingIntegrations: ChannelIntegration[] = []
     if (opts.integrationStore) {
       try {
-        telegramIntegrations = (await opts.integrationStore.listForWorkspace(userId, workspaceId))
-          .filter((integration) => integration.channelType === 'telegram' && integration.status === 'active')
+        messagingIntegrations = (await opts.integrationStore.listForWorkspace(userId, workspaceId))
+          .filter((integration) => integration.status === 'active')
       } catch {
         // Destination discovery stays best-effort; unresolved rows remain usable
         // through the shared/default bot path.
@@ -602,19 +615,34 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
           title,
           lastActiveAt: r.lastActiveAt.toISOString(),
         }
-        if (r.channelType !== 'telegram') return [base]
-        const parsed = parseTelegramDestinationId(r.channelId)
-        const owners = parsed
-          ? telegramIntegrations.filter((integration) =>
+        if (r.channelType === 'telegram') {
+          const parsed = parseTelegramDestinationId(r.channelId)
+          const owners = parsed
+            ? messagingIntegrations.filter((integration) =>
+              integration.channelType === 'telegram' &&
               integration.config.seenChats?.some((chat) => chat.chatId === parsed.chatId),
             )
-          : []
-        if (owners.length === 0) return [{ ...base, channelIntegrationId: null, integrationLabel: null }]
-        return owners.map((integration) => ({
-          ...base,
-          channelIntegrationId: integration.id,
-          integrationLabel: integration.botUsername ? `@${integration.botUsername}` : integration.teamName,
-        }))
+            : []
+          if (owners.length === 0) return [{ ...base, channelIntegrationId: null, integrationLabel: null }]
+          return owners.map((integration) => ({
+            ...base,
+            channelIntegrationId: integration.id,
+            integrationLabel: integration.botUsername ? `@${integration.botUsername}` : integration.teamName,
+          }))
+        }
+        if (r.channelType === 'feishu') {
+          const owners = messagingIntegrations.filter((integration) =>
+            integration.channelType === 'feishu' &&
+            integration.config.seenChats?.some((chat) => chat.chatId === r.channelId),
+          )
+          if (owners.length === 0) return [{ ...base, channelIntegrationId: null, integrationLabel: null }]
+          return owners.map((integration) => ({
+            ...base,
+            channelIntegrationId: integration.id,
+            integrationLabel: integration.teamName,
+          }))
+        }
+        return [base]
       }),
     })
   })
@@ -1170,6 +1198,115 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
       // Bot user id == Discord Application id; the UI uses it to build the
       // server-invite URL (a bot must be in a server before it can be messaged).
       botId: info.botId,
+      connectorError,
+    })
+  })
+
+  // POST /workspaces/:workspaceId/channels/feishu - BYO Feishu/Lark app.
+  // Validates app credentials without opening a socket, stores them encrypted,
+  // then asks the dedicated bridge to establish the one long connection.
+  router.post('/workspaces/:workspaceId/channels/feishu', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const { workspaceId } = req.params
+
+    const role = await opts.workspaceStore.getRole(userId, workspaceId)
+    if (!role) { res.status(403).json({ error: 'Not a member of this workspace' }); return }
+    if (!opts.integrationStore) {
+      res.status(503).json({ error: 'Channel integrations are not configured on this server' })
+      return
+    }
+    if (!opts.feishuConnector) {
+      res.status(503).json({ error: 'Feishu connect requires the long-connection bridge to be configured' })
+      return
+    }
+
+    const parsed = connectFeishuSchema.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Invalid input', detail: parsed.error.message })
+      return
+    }
+
+    let info: Awaited<ReturnType<typeof validateFeishuCredentials>>
+    try {
+      info = await validateFeishuCredentials({
+        appId: parsed.data.appId,
+        appSecret: parsed.data.appSecret,
+        brand: parsed.data.brand,
+      })
+    } catch (error) {
+      res.status(400).json({
+        error: `${parsed.data.brand === 'lark' ? 'Lark' : 'Feishu'} rejected the app credentials`,
+        detail: (error as Error).message,
+      })
+      return
+    }
+
+    let provisioned
+    try {
+      provisioned = await findOrCreateChannelForWorkspaceConnect({
+        workspaceId,
+        channelType: 'feishu',
+        displayName: parsed.data.displayName ?? info.botName,
+        externalIdentity: { botUserId: info.botOpenId, teamId: parsed.data.appId },
+        defaultAssistantId: parsed.data.defaultAssistantId ?? null,
+      })
+    } catch (error) {
+      const message = (error as Error).message
+      console.error('[channels] feishu channel provisioning failed:', error)
+      if (message.toLowerCase().includes('workspace')) {
+        res.status(400).json({ error: 'defaultAssistantId must belong to this workspace' })
+        return
+      }
+      res.status(500).json({ error: 'Failed to provision channel' })
+      return
+    }
+
+    try {
+      await opts.integrationStore.upsert({
+        channelId: provisioned.channelId,
+        channelType: 'feishu',
+        teamId: parsed.data.appId,
+        teamName: info.botName,
+        botUserId: info.botOpenId,
+        botUsername: null,
+        credentials: {
+          app_id: parsed.data.appId,
+          app_secret: parsed.data.appSecret,
+          brand: parsed.data.brand,
+        },
+        actingUserId: userId,
+      })
+    } catch (error) {
+      console.error('[channels] feishu integration upsert failed:', error)
+      res.status(500).json({ error: 'Failed to save integration' })
+      return
+    }
+
+    let connectorError: string | null = null
+    try {
+      await opts.feishuConnector.connect(provisioned.channelId, {
+        appId: parsed.data.appId,
+        appSecret: parsed.data.appSecret,
+        brand: parsed.data.brand,
+      })
+    } catch (error) {
+      connectorError = (error as Error).message
+      console.error('[channels] feishu connector connect failed:', error)
+    }
+
+    const channel = await getChannelForUser(userId, provisioned.channelId)
+    if (!channel) {
+      res.status(500).json({ error: 'Channel created but no longer visible' })
+      return
+    }
+    const integrations = await loadIntegrations(userId, workspaceId)
+    res.status(provisioned.reused ? 200 : 201).json({
+      channel: serializeChannel(channel, integrations.get(provisioned.channelId)),
+      reused: provisioned.reused,
+      botOpenId: info.botOpenId,
+      botName: info.botName,
+      brand: parsed.data.brand,
       connectorError,
     })
   })
@@ -1900,6 +2037,12 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
     if (channel.channelType === 'discord' && opts.discordConnector) {
       opts.discordConnector.disconnect(channelId).catch((err) => {
         console.error('[channels] discord connector disconnect failed:', err)
+      })
+    }
+
+    if (channel.channelType === 'feishu' && opts.feishuConnector) {
+      opts.feishuConnector.disconnect(channelId).catch((err) => {
+        console.error('[channels] feishu connector disconnect failed:', err)
       })
     }
 

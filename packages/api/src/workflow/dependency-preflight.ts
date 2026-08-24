@@ -194,7 +194,7 @@ async function resolveConnectorCredential(
 export type ValidateDeliveryTarget = (args: {
   workspaceId?: string
   assistantId: string
-  channelType: 'telegram' | 'slack' | 'whatsapp'
+  channelType: 'telegram' | 'slack' | 'whatsapp' | 'feishu'
   channelId: string
   channelIntegrationId?: string
 }) => Promise<{ ok: boolean; reason?: string }>
@@ -439,6 +439,35 @@ export function createWorkflowDependencyPreflight(options: WorkflowDependencyPre
       return options.waConnectorUrl && options.waConnectorSecret
         ? { ok: true }
         : { ok: false, reason: 'WhatsApp is not connected' }
+    }
+
+    if (channelType === 'feishu') {
+      if (!options.integrationStore) return { ok: true }
+      const integration = channelIntegrationId && workspaceId
+        ? await options.integrationStore.getCredentialsForAssistantIntegrationSystem(
+            workspaceId,
+            assistantId,
+            channelIntegrationId,
+            'feishu',
+            channelId,
+          )
+        : await options.integrationStore.getCredentialsForAssistantSystem(assistantId, 'feishu')
+      if (!integration) {
+        return {
+          ok: false,
+          reason: 'Feishu/Lark is not connected to this assistant and destination',
+        }
+      }
+      const credentials = integration.credentials as {
+        app_id?: unknown
+        app_secret?: unknown
+        brand?: unknown
+      }
+      return typeof credentials.app_id === 'string'
+        && typeof credentials.app_secret === 'string'
+        && (credentials.brand === 'feishu' || credentials.brand === 'lark')
+        ? { ok: true }
+        : { ok: false, reason: 'Feishu/Lark credentials are incomplete; reconnect the channel' }
     }
 
     return { ok: true }

@@ -36,7 +36,7 @@ import { getPool, query, queryWithRLS } from './client.js'
 
 // ── Types ──────────────────────────────────────────────────────
 
-export type ChannelType = 'telegram' | 'slack' | 'whatsapp' | 'discord' | 'email' | 'msteams' | 'wechat' | 'custom'
+export type ChannelType = 'telegram' | 'slack' | 'whatsapp' | 'discord' | 'email' | 'msteams' | 'wechat' | 'custom' | 'feishu'
 export type ChannelClearance = 'public' | 'internal' | 'confidential'
 export type ChannelCapability = 'chat' | 'broadcast' | 'ingest'
 export type ChannelStatus = 'active' | 'revoked' | 'invalid'
@@ -94,6 +94,10 @@ export const CHANNEL_CAPABILITIES: Record<ChannelType, ChannelCapability[]> = {
   // Microsoft Teams mirrors Slack: chat + broadcast + passive ingest
   // (docs/architecture/channels/msteams.md).
   msteams: ['chat', 'broadcast', 'ingest'],
+  // Feishu/Lark launches with addressed chat + proactive delivery. Passive
+  // ingest remains off until the elevated all-group-message scope has a
+  // tenant-validated consent and operator-toggle path.
+  feishu: ['chat', 'broadcast'],
   // WeChat iLink bots are DMs-only chat — no groups, no broadcast surface,
   // no ingest substrate (docs/architecture/channels/wechat.md).
   wechat: ['chat'],

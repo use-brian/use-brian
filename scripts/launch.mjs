@@ -14,7 +14,8 @@
  *   4. start the api (:4000), doc-sync sidecar (:8080), app-web (:3003), local
  *      Discord Gateway connector (:8090), local WhatsApp connector (:8091),
  *      local chat archive (:8092), local WeChat connector (:8093), and local
- *      browser relay (first free port from :8094), all pointed at the local API;
+ *      browser relay (first free port from :8094), local Feishu connector
+ *      (:8095), all pointed at the local API;
  *      single-process event buses.
  *   5. open the browser straight into an authenticated session as the local
  *      owner (/auth/local-session auto-provisions one Personal workspace — no
@@ -120,7 +121,7 @@ function reserveAvailablePort(preferredPort) {
 
 // The embedded brain uses a distinctive high port so it never collides with a
 // developer's local Postgres on the default 5432 (verified failure mode).
-const PORTS = { pglite: 54329, api: 4000, docSync: 8080, appWeb: 3003, discordConnector: 8090, waConnector: 8091, messageStore: 8092, wechatConnector: 8093 }
+const PORTS = { pglite: 54329, api: 4000, docSync: 8080, appWeb: 3003, discordConnector: 8090, waConnector: 8091, messageStore: 8092, wechatConnector: 8093, feishuConnector: 8095 }
 
 // ── config (ChatGPT sign-in OR one API credential) ──────────────────
 mkdirSync(CONFIG_DIR, { recursive: true })
@@ -207,6 +208,8 @@ const waConnectorSecret = process.env.WA_CONNECTOR_SECRET || config.waConnectorS
 // Shared API <-> WeChat iLink bridge secret. Pairing and long-polling require
 // the bridge even for local-only use, so the launcher owns and persists it.
 const wechatConnectorSecret = process.env.WECHAT_CONNECTOR_SECRET || config.wechatConnectorSecret || randomBytes(32).toString('hex')
+// Shared API <-> Feishu/Lark long-connection bridge secret.
+const feishuConnectorSecret = process.env.FEISHU_CONNECTOR_SECRET || config.feishuConnectorSecret || randomBytes(32).toString('hex')
 // Loopback API -> chat archive append authentication. The launcher owns both
 // processes, so this follows the same generate-once/persist lifecycle as the
 // other local bridge secrets and is never printed.
@@ -230,7 +233,7 @@ const browserVaultEncryptionKey = process.env.BROWSER_VAULT_ENCRYPTION_KEY || co
 const browserCredentialEncryptionKey = process.env.BROWSER_CREDENTIAL_ENCRYPTION_KEY || config.browserCredentialEncryptionKey || randomBytes(32).toString('base64')
 writeFileSync(
   CONFIG_FILE,
-  JSON.stringify({ ...config, ...(geminiKey ? { geminiApiKey: geminiKey } : {}), ...(preferredProvider ? { preferredProvider } : {}), jwtSecret, docSyncSecret, discordConnectorSecret, waConnectorSecret, wechatConnectorSecret, messageStoreHmacSecret, browserRelaySecret, channelCredentialKey, browserVaultEncryptionKey, browserCredentialEncryptionKey, ownerName }, null, 2),
+  JSON.stringify({ ...config, ...(geminiKey ? { geminiApiKey: geminiKey } : {}), ...(preferredProvider ? { preferredProvider } : {}), jwtSecret, docSyncSecret, discordConnectorSecret, waConnectorSecret, wechatConnectorSecret, feishuConnectorSecret, messageStoreHmacSecret, browserRelaySecret, channelCredentialKey, browserVaultEncryptionKey, browserCredentialEncryptionKey, ownerName }, null, 2),
 )
 
 // External-store escape hatch: a real Postgres URL skips the embedded brain.
@@ -239,6 +242,7 @@ const databaseUrl = process.env.DATABASE_URL || `postgres://localhost:${PORTS.pg
 const useLocalDiscordConnector = !process.env.DISCORD_CONNECTOR_URL
 const useLocalWaConnector = !process.env.WA_CONNECTOR_URL
 const useLocalWechatConnector = !process.env.WECHAT_CONNECTOR_URL
+const useLocalFeishuConnector = !process.env.FEISHU_CONNECTOR_URL
 const useLocalBrowserRelay = !process.env.BROWSER_RELAY_URL
 const browserRelayReservation = useLocalBrowserRelay ? await reserveAvailablePort(8094) : null
 const browserRelayPort = browserRelayReservation?.port
@@ -271,6 +275,8 @@ const env = {
   WA_CONNECTOR_SECRET: waConnectorSecret,
   WECHAT_CONNECTOR_URL: process.env.WECHAT_CONNECTOR_URL || `http://127.0.0.1:${PORTS.wechatConnector}`,
   WECHAT_CONNECTOR_SECRET: wechatConnectorSecret,
+  FEISHU_CONNECTOR_URL: process.env.FEISHU_CONNECTOR_URL || `http://127.0.0.1:${PORTS.feishuConnector}`,
+  FEISHU_CONNECTOR_SECRET: feishuConnectorSecret,
   BROWSER_RELAY_URL: process.env.BROWSER_RELAY_URL || `http://127.0.0.1:${browserRelayPort}`,
   BROWSER_RELAY_SECRET: browserRelaySecret,
   BROWSER_VAULT_ENCRYPTION_KEY: browserVaultEncryptionKey,
@@ -311,7 +317,7 @@ const children = []
 // OOMs alone, run()'s exit handler names it, and the launcher shuts down
 // cleanly. The platform repo already caps its API dev process the same way.
 // Sized generously above observed steady-state; override with USEBRIAN_HEAP_MB.
-const HEAP_MB = { pglite: 1024, api: 2048, 'doc-sync': 1024, 'app-web': 2048, 'browser-relay': 512, 'discord-connector': 512, 'wa-connector': 512, 'wechat-connector': 512 }
+const HEAP_MB = { pglite: 1024, api: 2048, 'doc-sync': 1024, 'app-web': 2048, 'browser-relay': 512, 'discord-connector': 512, 'wa-connector': 512, 'wechat-connector': 512, 'feishu-connector': 512 }
 function run(label, cmd, args, extraEnv = {}, cwd = ROOT) {
   const heapMb = Number(process.env.USEBRIAN_HEAP_MB) || HEAP_MB[label]
   const nodeOptions = heapMb
@@ -573,13 +579,22 @@ if (useLocalWechatConnector) {
   })
   await waitForPort(PORTS.wechatConnector, 'WeChat connector')
 }
+if (useLocalFeishuConnector) {
+  console.log(`[launch] starting Feishu/Lark connector (:${PORTS.feishuConnector}) ...`)
+  run('feishu-connector', 'pnpm', ['--filter', '@use-brian/feishu-connector', 'exec', 'tsx', 'src/index.ts'], {
+    PORT: String(PORTS.feishuConnector),
+    USEBRIAN_API_URL: `http://127.0.0.1:${PORTS.api}`,
+  })
+  await waitForPort(PORTS.feishuConnector, 'Feishu/Lark connector')
+}
 const entryUrl = `http://localhost:${PORTS.appWeb}/api/auth/local-session`
 const discordStatus = useLocalDiscordConnector ? ` · discord :${PORTS.discordConnector}` : ' · discord external'
 const waStatus = useLocalWaConnector ? ` · whatsapp :${PORTS.waConnector}` : ' · whatsapp external'
 const messageStoreStatus = messageStoreLaunch.enabled ? ` · chat-archive :${PORTS.messageStore}` : ' · chat-archive off'
 const wechatStatus = useLocalWechatConnector ? ` · wechat :${PORTS.wechatConnector}` : ' · wechat external'
+const feishuStatus = useLocalFeishuConnector ? ` · feishu :${PORTS.feishuConnector}` : ' · feishu external'
 const browserRelayStatus = useLocalBrowserRelay ? ` · browser-relay :${browserRelayPort}` : ' · browser-relay external'
-console.log(`\n[launch] Use Brian is up. Opening ${entryUrl}\n  (api :${PORTS.api} · doc-sync :${PORTS.docSync} · app-web :${PORTS.appWeb}${discordStatus}${waStatus}${messageStoreStatus}${wechatStatus}${browserRelayStatus})\n  Ctrl-C to stop everything.\n`)
+console.log(`\n[launch] Use Brian is up. Opening ${entryUrl}\n  (api :${PORTS.api} · doc-sync :${PORTS.docSync} · app-web :${PORTS.appWeb}${discordStatus}${waStatus}${messageStoreStatus}${wechatStatus}${feishuStatus}${browserRelayStatus})\n  Ctrl-C to stop everything.\n`)
 if (preferredProvider === 'openai-codex') {
   console.log('[launch] Open Settings → AI providers to complete ChatGPT sign-in.')
 }

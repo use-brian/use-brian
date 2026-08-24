@@ -25,12 +25,14 @@ import {
   unlinkAccount,
   createTelegramLinkCode,
   createSlackLinkCode,
+  createFeishuLinkCode,
   createWhatsappLinkCode,
   MAX_AVATAR_BYTES,
   planProfileRefresh,
   type LinkedAccount,
   type TelegramLinkCode,
   type SlackLinkCode,
+  type FeishuLinkCode,
   type WhatsappLinkCode,
 } from "@/lib/api/account";
 import {
@@ -501,6 +503,7 @@ function ConnectedAccountsSection() {
       )}
 
       <SlackLinkRow />
+      <FeishuLinkRow />
       <WhatsappLinkRow />
     </div>
   );
@@ -682,6 +685,206 @@ export function SlackLinkRow({
           </div>
           <p className="text-[12px] text-muted-foreground">
             {t.settings.account.connectSlackHint}
+          </p>
+          <div className="flex items-center gap-3">
+            {expired && (
+              <button
+                type="button"
+                onClick={() => void onConnect()}
+                disabled={busy}
+                className="text-sm font-medium px-4 py-2 rounded-lg bg-action text-action-foreground hover:bg-action/90 disabled:opacity-50"
+              >
+                {busy ? "…" : t.settings.account.generateNewCode}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setState({ kind: "unlinked" })}
+              className="text-sm text-muted-foreground hover:text-foreground"
+            >
+              {t.settings.common.cancel}
+            </button>
+          </div>
+          <p className="text-[11px] text-muted-foreground">
+            {expired
+              ? t.settings.account.codeExpired
+              : format(t.settings.account.codeExpiresIn, {
+                  time: formatCountdown(secondsLeft),
+                })}
+          </p>
+        </div>
+      )}
+
+      {notice && (
+        <p
+          className={
+            notice.kind === "success"
+              ? "text-[12px] text-primary"
+              : "text-[12px] text-red-400"
+          }
+        >
+          {notice.text}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Feishu/Lark account link. Provider messages do not expose a stable sign-in
+ * email, so linking upgrades an anonymous channel shadow to the user's real
+ * account and personal memory. [COMP:app-web/feishu-link]
+ */
+type FeishuLinkState =
+  | { kind: "loading" }
+  | { kind: "unlinked" }
+  | { kind: "linked"; account: LinkedAccount }
+  | { kind: "connecting"; code: FeishuLinkCode };
+
+function feishuStateFromAccounts(accounts: LinkedAccount[]): FeishuLinkState {
+  const row = accounts.find((account) => account.provider === "feishu");
+  return row ? { kind: "linked", account: row } : { kind: "unlinked" };
+}
+
+export function FeishuLinkRow({
+  initialAccounts,
+}: {
+  initialAccounts?: LinkedAccount[];
+} = {}) {
+  const t = useT();
+  const [state, setState] = useState<FeishuLinkState>(() =>
+    initialAccounts ? feishuStateFromAccounts(initialAccounts) : { kind: "loading" },
+  );
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<Status>(null);
+  const [secondsLeft, setSecondsLeft] = useState(0);
+
+  useEffect(() => {
+    if (initialAccounts) return;
+    let cancelled = false;
+    void listLinkedAccounts().then((accounts) => {
+      if (!cancelled) setState(feishuStateFromAccounts(accounts));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [initialAccounts]);
+
+  useEffect(() => {
+    if (state.kind !== "connecting") return;
+    const expiresAt = state.code.expiresAt;
+    setSecondsLeft(linkCodeSecondsLeft(expiresAt));
+    const tick = setInterval(() => {
+      setSecondsLeft(linkCodeSecondsLeft(expiresAt));
+    }, 1000);
+    const poll = setInterval(() => {
+      if (linkCodeSecondsLeft(expiresAt) <= 0) return;
+      void listLinkedAccounts().then((accounts) => {
+        const row = accounts.find((account) => account.provider === "feishu");
+        if (row) {
+          setState({ kind: "linked", account: row });
+          setNotice({ kind: "success", text: t.settings.account.feishuLinked });
+        }
+      });
+    }, 3000);
+    return () => {
+      clearInterval(tick);
+      clearInterval(poll);
+    };
+  }, [state, t]);
+
+  async function onConnect() {
+    setBusy(true);
+    setNotice(null);
+    try {
+      const code = await createFeishuLinkCode();
+      if (!code) {
+        setNotice({ kind: "error", text: t.settings.account.feishuUnavailable });
+        return;
+      }
+      setState({ kind: "connecting", code });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onDisconnect() {
+    if (state.kind !== "linked") return;
+    const ok = await confirmDialog({
+      title: t.settings.account.disconnectFeishuTitle,
+      description: t.settings.account.disconnectFeishuConfirm,
+      confirmLabel: t.settings.account.disconnect,
+      cancelLabel: t.settings.common.cancel,
+      variant: "destructive",
+    });
+    if (!ok) return;
+    setBusy(true);
+    setNotice(null);
+    try {
+      const removed = await unlinkAccount(state.account.id);
+      if (!removed) {
+        setNotice({ kind: "error", text: t.settings.account.connectError });
+        return;
+      }
+      setState({ kind: "unlinked" });
+      setNotice({ kind: "success", text: t.settings.account.feishuUnlinked });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const expired = state.kind === "connecting" && secondsLeft <= 0;
+
+  return (
+    <div className="space-y-4 pt-2">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-sm font-medium">{t.settings.account.feishu}</div>
+          <div className="text-xs text-muted-foreground truncate">
+            {state.kind === "loading" && t.settings.common.loading}
+            {state.kind === "unlinked" && t.settings.account.notConnected}
+            {state.kind === "connecting" && t.settings.account.notConnected}
+            {state.kind === "linked" &&
+              format(t.settings.account.feishuConnectedAs, {
+                id: state.account.providerId,
+              })}
+          </div>
+        </div>
+        {state.kind === "unlinked" && (
+          <button
+            type="button"
+            onClick={() => void onConnect()}
+            disabled={busy}
+            className="text-sm font-medium px-4 py-2 rounded-lg bg-action text-action-foreground hover:bg-action/90 disabled:opacity-50"
+          >
+            {busy ? "…" : t.settings.account.connect}
+          </button>
+        )}
+        {state.kind === "linked" && (
+          <button
+            type="button"
+            onClick={() => void onDisconnect()}
+            disabled={busy}
+            className="text-sm font-medium border border-border px-4 py-2 rounded-lg hover:bg-muted transition-colors disabled:opacity-50"
+          >
+            {busy ? "…" : t.settings.account.disconnect}
+          </button>
+        )}
+      </div>
+
+      {state.kind === "unlinked" && (
+        <p className="text-[12px] text-muted-foreground">
+          {t.settings.account.feishuDesc}
+        </p>
+      )}
+
+      {state.kind === "connecting" && (
+        <div className="rounded-lg border border-border bg-muted/30 p-4 space-y-3">
+          <div className="text-2xl font-mono tracking-[0.3em] text-center select-all">
+            {state.code.code}
+          </div>
+          <p className="text-[12px] text-muted-foreground">
+            {t.settings.account.connectFeishuHint}
           </p>
           <div className="flex items-center gap-3">
             {expired && (

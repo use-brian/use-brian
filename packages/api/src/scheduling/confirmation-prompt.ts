@@ -6,7 +6,8 @@
  * (`packages/api/src/inter-assistant/executor.ts`); when its inner query loop
  * hits an `ask`-policy MCP tool, the callee parks the confirmation and calls
  * this to prompt the user on the step's `deliver` channel — inline buttons
- * (Telegram), keyword instructions (Slack/WhatsApp), or persist-only (web).
+ * (Telegram/Feishu), keyword instructions (Slack/WhatsApp), or persist-only
+ * (web).
  *
  * The user's reply reaches the suspended resolver through the shared
  * in-memory registry (`confirmation-registry.ts`); this module only sends
@@ -19,6 +20,7 @@
 import type { ToolConfirmationRequest } from '@use-brian/core'
 import {
   createSlackAdapter,
+  createFeishuAdapter,
   createTelegramAdapter,
   createWhatsAppAdapter,
   createCustomAdapter,
@@ -29,6 +31,8 @@ import { getToolDisplayName, formatConfirmationInput } from '@use-brian/shared'
 import { query } from '../db/client.js'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 import type { CustomChannelStore } from '../db/custom-channel-store.js'
+import { createFeishuApi } from '../feishu/client.js'
+import type { FeishuCredentials } from '../db/channel-integrations.js'
 
 export type ConfirmationPromptTarget = {
   workspaceId?: string
@@ -191,6 +195,53 @@ export async function sendConfirmationPrompt(
           text: `${displayName}${inputSummary}\n\n${replyHint}`,
         })
       }
+    } else if (target.channelType === 'feishu') {
+      const integration = !deps.integrationStore
+        ? null
+        : target.channelIntegrationId
+          ? target.workspaceId
+            ? await deps.integrationStore.getCredentialsForAssistantIntegrationSystem(
+                target.workspaceId,
+                target.assistantId,
+                target.channelIntegrationId,
+                'feishu',
+                target.channelId,
+              )
+            : null
+          : await deps.integrationStore.getCredentialsForAssistantSystem(
+              target.assistantId,
+              'feishu',
+            )
+      if (!integration) {
+        return {
+          delivered: false,
+          channelType: target.channelType,
+          reason: `The confirmation prompt for \`${req.toolName}\` could not be sent: this assistant has no connected Feishu or Lark app, so chat \`${target.channelId}\` cannot be posted to and the user was never asked. Connect Feishu / Lark for this assistant in Studio; the parked tool call will time out unanswered until then.`,
+        }
+      }
+      const credentials = integration.credentials as FeishuCredentials
+      const adapter = createFeishuAdapter({
+        api: createFeishuApi({
+          appId: credentials.app_id,
+          appSecret: credentials.app_secret,
+          brand: credentials.brand,
+        }),
+        botOpenId: integration.botUserId ?? undefined,
+      })
+      const actions = [
+        { id: 'allow', label: 'Allow', data: `mcp_confirm:${req.toolCallId}:allow` },
+        { id: 'deny', label: 'Deny', data: `mcp_confirm:${req.toolCallId}:deny` },
+      ]
+      if (allowPersist) {
+        actions.push(
+          { id: 'always', label: 'Always Allow', data: `mcp_confirm:${req.toolCallId}:always_allow` },
+          { id: 'never', label: 'Always Deny', data: `mcp_confirm:${req.toolCallId}:always_deny` },
+        )
+      }
+      await adapter.sendMessage(target.channelId, {
+        text: `${displayName}${inputSummary}\n\nAllow this action?`,
+        actions,
+      })
     } else if (target.channelType === 'custom') {
       if (!deps.integrationStore || !deps.customChannelStore || !target.workspaceId) {
         return {

@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const fetchEmailReviewContext = vi.fn();
 const respondByKind = vi.fn();
 const reviseEmailApproval = vi.fn();
+const setStoredWidth = vi.fn();
 vi.mock("@/lib/api/approvals", async (importOriginal) => {
   const original = await importOriginal<typeof import("@/lib/api/approvals")>();
   return {
@@ -130,6 +131,14 @@ function button(text: string): HTMLButtonElement {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  Object.defineProperty(window, "localStorage", {
+    configurable: true,
+    value: {
+      getItem: vi.fn(() => null),
+      removeItem: vi.fn(),
+      setItem: setStoredWidth,
+    },
+  });
   fetchEmailReviewContext.mockResolvedValue({
     thread: {
       subject: "Project update",
@@ -157,14 +166,17 @@ afterEach(() => {
 });
 
 describe("[COMP:app-web/crm-email-review] dedicated review workspace", () => {
-  it("shows the queue, archived chain, CRM profile, draft, and send action together", async () => {
+  it("combines queue and CRM context beside the resizable thread and draft surface", async () => {
     await mount();
 
-    expect(container!.textContent).toContain("Project update");
-    expect(container!.textContent).toContain("Could we start next week?");
-    expect(container!.textContent).toContain("Jamie Example");
-    expect(container!.textContent).toContain("Website refresh");
-    expect(container!.querySelector<HTMLTextAreaElement>("textarea")?.value)
+    const contextRail = container!.querySelector<HTMLElement>("[data-email-context-rail]")!;
+    const reviewMain = container!.querySelector<HTMLElement>("[data-email-review-main]")!;
+    expect(contextRail.textContent).toContain("Jamie Example");
+    expect(contextRail.textContent).toContain("Website refresh");
+    expect(reviewMain.textContent).toContain("Project update");
+    expect(reviewMain.textContent).toContain("Could we start next week?");
+    expect(reviewMain.querySelector('[role="separator"][aria-orientation="vertical"]')).toBeTruthy();
+    expect(reviewMain.querySelector<HTMLTextAreaElement>("textarea")?.value)
       .toBe("Thanks for the update. We can start next week.");
     expect(button(dict.crmPage.r2.approveSend)).toBeTruthy();
     expect(fetchEmailReviewContext).toHaveBeenCalledWith("approval-1", "contact-1");
@@ -182,5 +194,30 @@ describe("[COMP:app-web/crm-email-review] dedicated review workspace", () => {
     expect([...container!.querySelectorAll("button")].some(
       (candidate) => candidate.textContent?.trim() === dict.crmPage.r2.approveSend,
     )).toBe(false);
+  });
+
+  it("resizes the main review surface from the keyboard-accessible divider", async () => {
+    await mount();
+    const shell = container!.firstElementChild as HTMLElement;
+    const reviewMain = container!.querySelector<HTMLElement>("[data-email-review-main]")!;
+    const separator = reviewMain.querySelector<HTMLElement>('[role="separator"]')!;
+    shell.getBoundingClientRect = () => ({
+      width: 1000,
+      right: 1000,
+    }) as DOMRect;
+    reviewMain.getBoundingClientRect = () => ({ width: 696 }) as DOMRect;
+
+    await act(async () => {
+      separator.dispatchEvent(new KeyboardEvent("keydown", {
+        bubbles: true,
+        key: "ArrowLeft",
+      }));
+    });
+
+    expect(reviewMain.style.width).toBe("720px");
+    expect(setStoredWidth).toHaveBeenCalledWith(
+      "crm:email-review-main-width",
+      "720",
+    );
   });
 });

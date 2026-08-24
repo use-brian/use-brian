@@ -33,6 +33,7 @@ import {
   createWhatsAppAdapter,
   createWhatsAppCloudAdapter,
   createMsTeamsAdapter,
+  createFeishuAdapter,
   createCustomAdapter,
   describeSlackError,
   isSlackApiError,
@@ -42,6 +43,8 @@ import type { CustomChannelStore } from '../db/custom-channel-store.js'
 import { findOrCreateSession, addSessionMessage } from '../db/sessions.js'
 import { query } from './../db/client.js'
 import { whatsappCloudUserAllowed } from '../whatsapp/cloud-access.js'
+import { createFeishuApi } from '../feishu/client.js'
+import type { FeishuCredentials } from '../db/channel-integrations.js'
 
 export type WorkflowChannelDeliveryOptions = {
   /** BYO Telegram + Slack credentials. */
@@ -258,6 +261,36 @@ export function createWorkflowChannelDelivery(
         // into `__delivery.error`. Same control flow, model-actionable copy.
         return { status: 'failed', channelType, error: slackDeliveryFailure(err, channelId, threadRef) }
       }
+    }
+
+    if (channelType === 'feishu') {
+      if (!options.integrationStore) return { status: 'skipped', channelType, reason: 'no_integration' }
+      const integ = channelIntegrationId
+        ? await options.integrationStore.getCredentialsForAssistantIntegrationSystem(
+            workspaceId,
+            assistantId,
+            channelIntegrationId,
+            'feishu',
+            channelId,
+          )
+        : await options.integrationStore.getCredentialsForAssistantSystem(assistantId, 'feishu')
+      if (!integ) return { status: 'skipped', channelType, reason: 'no_integration' }
+      const credentials = integ.credentials as FeishuCredentials
+      const adapter = createFeishuAdapter({
+        api: createFeishuApi({
+          appId: credentials.app_id,
+          appSecret: credentials.app_secret,
+          brand: credentials.brand,
+        }),
+        botOpenId: integ.botUserId ?? undefined,
+        config: { replyInThread: integ.config?.replyInThread ?? true },
+      })
+      const messageId = await adapter.sendMessage(
+        channelId,
+        { text: deliverable, format: 'markdown' },
+        threadRef ? { threadTs: threadRef } : undefined,
+      )
+      return { status: 'delivered', channelType, channelId, messageId: messageId || undefined }
     }
 
     if (channelType === 'msteams') {

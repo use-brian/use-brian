@@ -1613,6 +1613,7 @@ function DeliverField({
             items={{
               telegram: b.deliverChannelTelegram,
               slack: b.deliverChannelSlack,
+              feishu: b.deliverChannelFeishu,
               whatsapp: b.deliverChannelWhatsApp,
               web: b.deliverChannelWeb,
             }}
@@ -1623,6 +1624,7 @@ function DeliverField({
             <SelectContent>
               <SelectItem value="telegram">{b.deliverChannelTelegram}</SelectItem>
               <SelectItem value="slack">{b.deliverChannelSlack}</SelectItem>
+              <SelectItem value="feishu">{b.deliverChannelFeishu}</SelectItem>
               <SelectItem value="whatsapp">{b.deliverChannelWhatsApp}</SelectItem>
               <SelectItem value="web">{b.deliverChannelWeb}</SelectItem>
             </SelectContent>

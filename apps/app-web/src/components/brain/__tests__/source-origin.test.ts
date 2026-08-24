@@ -12,7 +12,12 @@ const copy: SourceOriginCopy = {
     "Created by memory consolidation on {date}, synthesized from earlier memories.",
   originExtraction: "Extracted from {source} on {date}.",
   originAuthorFallback: "Saved by {author} on {date}.",
-  originChannelLabels: { web: "web chat", telegram: "Telegram", other: "chat" },
+  originChannelLabels: {
+    web: "web chat",
+    telegram: "Telegram",
+    feishu: "Feishu / Lark",
+    other: "chat",
+  },
   originEpisodeKinds: { meeting: "a meeting", other: "an ingested source" },
 };
 
@@ -44,6 +49,13 @@ describe("[COMP:app-web/brain-source-origin] originClue", () => {
       "Nova",
     );
     expect(telegram).toBe("Saved from a Telegram conversation.");
+    const feishu = originClue(
+      makeOrigin({ kind: "chat", channelType: "feishu" }),
+      copy,
+      SAVED_AT,
+      "Nova",
+    );
+    expect(feishu).toBe("Saved from a Feishu / Lark conversation.");
     const exotic = originClue(
       makeOrigin({ kind: "chat", channelType: "matrix" }),
       copy,

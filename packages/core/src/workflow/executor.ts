@@ -128,8 +128,8 @@ export type DeliveryOutcome =
       channelType: string
       channelId: string
       /**
-       * Platform message id of the pushed message (Slack ts / Telegram
-       * message id), when the adapter reports one. The executor records it
+       * Platform message id of the pushed message (Slack ts / Telegram or
+       * Feishu message id), when the adapter reports one. The executor records it
        * under the reserved run var `__deliveryMsg_<stepId>` so a later
        * step's `deliver.thread.fromStep` can reply under this message.
        */
@@ -178,13 +178,13 @@ export type DeliverToChannel = (params: {
   assistantId: string
   /** Billing / delivery-session owner. */
   userId: string
-  channelType: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams' | 'custom'
+  channelType: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams' | 'custom' | 'feishu'
   channelId: string
   channelIntegrationId?: string
   text: string
   /**
    * Platform message id to reply under (Slack thread_ts / Telegram
-   * reply_to_message_id) — resolved by the executor from an earlier
+   * reply_to_message_id / Feishu message_id) — resolved by the executor from an earlier
    * deliver-step's recorded message id when the step sets
    * `deliver.thread.fromStep`. Absent = top-level post.
    */
@@ -382,7 +382,7 @@ export type ExecutorDeps = {
     arguments: Record<string, unknown>
     /** Server-resolved confirmation details for the queue preview. */
     displayLines?: string[]
-    deliveryChannel: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams'
+    deliveryChannel: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams' | 'feishu'
     expiresAt: Date | null
   }) => Promise<void>
   /**
@@ -1165,7 +1165,7 @@ type StepDispatchResult =
       toolName: string
       arguments: Record<string, unknown>
       displayLines?: string[]
-      deliveryChannel: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams'
+      deliveryChannel: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams' | 'feishu'
       expiresAt: Date | null
     }
 

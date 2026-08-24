@@ -363,6 +363,22 @@ describe('[COMP:scheduling/tools] createScheduledJob', () => {
     expect(store.rows[0].channelId).toBe('C_SLACK')
   })
 
+  it('accepts Feishu/Lark as a messaging delivery channel', async () => {
+    const store = makeFakeJobStore()
+    const { createScheduledJob } = createSchedulingTools({ jobStore: store, workflowStore: makeFakeWorkflowStore() })
+    await createScheduledJob.execute(
+      {
+        schedule: { type: 'daily', time: '09:00' },
+        timezone: 'UTC',
+        instructions: 'ping',
+        deliveryChannel: 'feishu',
+      },
+      { ...ctx, preferredChannel: { channelType: 'feishu', channelId: 'oc_chat' } },
+    )
+    expect(store.rows[0].channelType).toBe('feishu')
+    expect(store.rows[0].channelId).toBe('oc_chat')
+  })
+
   it('rejects an explicit deliveryChannel that the session cannot resolve (no cross-wiring)', async () => {
     const store = makeFakeJobStore()
     const { createScheduledJob } = createSchedulingTools({ jobStore: store, workflowStore: makeFakeWorkflowStore() })

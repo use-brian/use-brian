@@ -144,7 +144,7 @@ export function createControlPlaneTools(reader: ControlPlaneReader): ControlPlan
   const listChannels = buildTool({
     name: 'listChannels',
     description:
-      'List the messaging channels wired into this workspace (telegram / slack / whatsapp): ' +
+      'List the messaging channels wired into this workspace (telegram / slack / whatsapp / feishu): ' +
       'id, integrationId, integration status, type, display name, clearance, enabled capabilities, and status. ' +
       'For a workflow channel event source, use integrationId as channelIntegrationId; id is the owning channel row and is not interchangeable.',
     inputSchema: z.object({}),

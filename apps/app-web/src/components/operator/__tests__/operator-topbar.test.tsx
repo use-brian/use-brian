@@ -87,6 +87,29 @@ describe("[COMP:app-web/operator-topbar] Operator top bar chrome", () => {
     expect(html).toContain("RIGHT-SLOT");
   });
 
+  it("uses center navigation only as a mobile or collapsed-sidebar fallback", () => {
+    const expanded = wrap(
+      <OperatorTopbar
+        app="crm"
+        centerVisibility="when-sidebar-unavailable"
+        center={<span>CRM-NAV</span>}
+      />,
+    );
+    expect(expanded).toContain('data-center-visibility="when-sidebar-unavailable"');
+    expect(expanded).toContain('data-center-desktop-hidden="true"');
+
+    sidebarState.collapsed = true;
+    const collapsed = wrap(
+      <OperatorTopbar
+        app="crm"
+        centerVisibility="when-sidebar-unavailable"
+        center={<span>CRM-NAV</span>}
+      />,
+    );
+    expect(collapsed).toContain('data-center-desktop-hidden="false"');
+    expect(collapsed).toContain("CRM-NAV");
+  });
+
   it("accepts a surface-owned responsive app-chip width", () => {
     const html = wrap(
       <OperatorTopbar

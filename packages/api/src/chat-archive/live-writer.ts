@@ -11,7 +11,7 @@ import type { ExternalSinkFanout } from '../ingest/external-sink-fanout.js'
 import { normalizeInboundChatMessage, normalizeOutboundChatMessage } from './normalize.js'
 
 type Queryable = Pick<pg.ClientBase, 'query'>
-type ChannelSource = 'whatsapp' | 'telegram' | 'slack' | 'discord' | 'email' | 'msteams' | 'wechat' | 'custom'
+type ChannelSource = 'whatsapp' | 'telegram' | 'slack' | 'discord' | 'email' | 'msteams' | 'wechat' | 'custom' | 'feishu'
 
 export type LiveArchiveContext = {
   source: ChannelSource
