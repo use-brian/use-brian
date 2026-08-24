@@ -48,11 +48,14 @@ vi.mock('../../db/crm-r2.js', () => ({
   getCrmConfig: vi.fn(),
   getCrmR2Record: vi.fn(),
   getCrmReport: vi.fn(),
+  getCrmSummary: vi.fn(),
   listCrmDealParticipants: vi.fn(),
+  listCrmRecordPage: vi.fn(),
   listCrmRecordRelationships: vi.fn(),
   listCrmR2Records: vi.fn(),
   listCrmSavedViews: vi.fn(),
   listCrmTimeline: vi.fn(),
+  lookupCrmRecords: vi.fn(),
   removeCrmDealParticipant: vi.fn(),
   reorderCrmFields: vi.fn(),
   reorderCrmPipelines: vi.fn(),
@@ -79,8 +82,12 @@ import {
   createCrmPipeline,
   getCrmConfig,
   getCrmR2Record,
+  getCrmSummary,
   listCrmDealParticipants,
+  listCrmRecordPage,
   listCrmRecordRelationships,
+  listCrmR2Records,
+  lookupCrmRecords,
   setCrmDealPrimaryContact,
   updateCrmPipeline,
   validateCrmCustomFieldValues,
@@ -243,6 +250,74 @@ describe('[COMP:api/crm-config-http] CRM configuration HTTP boundary', () => {
       pipelineId: 'pipeline-1',
       name: 'Renewals',
     })
+  })
+})
+
+describe('[COMP:api/crm-page-http] CRM collection HTTP boundary', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.mocked(resolveWorkspaceViewpoint).mockResolvedValue(CTX as never)
+  })
+
+  it('activates keyset paging only when kind is supplied and forwards URL filters', async () => {
+    vi.mocked(listCrmRecordPage).mockResolvedValue({
+      items: [], nextCursor: 'next-page', hasMore: true,
+    })
+
+    const response = await request(makeApp()).get(
+      `/api/crm/${WS}/records?kind=deal&limit=500&sort=amount&direction=asc`
+      + `&pipeline=pipeline-1&stage=stage-1,stage-2&company=none&owner=user-2,none`
+      + `&filter=overdue&cf.work_type=SaaS&q=fictional`,
+    )
+
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({ items: [], nextCursor: 'next-page', hasMore: true })
+    expect(listCrmRecordPage).toHaveBeenCalledWith(CTX, expect.objectContaining({
+      kind: 'deal', limit: 100, sort: 'amount', direction: 'asc',
+      pipelineId: 'pipeline-1', stageIds: ['stage-1', 'stage-2'],
+      companyIds: ['none'], owners: ['user-2', 'none'], attention: 'overdue',
+      custom: { work_type: ['SaaS'] }, search: 'fictional',
+    }))
+  })
+
+  it('keeps the no-kind compatibility response outside the main paged contract', async () => {
+    vi.mocked(listCrmR2Records).mockResolvedValue([])
+
+    const response = await request(makeApp()).get(`/api/crm/${WS}/records`)
+
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({ deals: [], contacts: [], companies: [] })
+    expect(listCrmR2Records).toHaveBeenCalledWith(CTX, { includeArchived: false })
+    expect(listCrmRecordPage).not.toHaveBeenCalled()
+  })
+
+  it('serves access-scoped summary and bounded lookup resources', async () => {
+    vi.mocked(getCrmSummary).mockResolvedValue({
+      totals: { deals: 2, contacts: 4, companies: 1 },
+      attention: { overdue: 1, stale: 0, noAmount: 1, orphaned: 2 },
+      stages: [],
+    })
+    vi.mocked(lookupCrmRecords).mockResolvedValue([])
+
+    const summary = await request(makeApp()).get(`/api/crm/${WS}/summary?pipeline=pipeline-1`)
+    const lookup = await request(makeApp()).get(`/api/crm/${WS}/lookup?kind=contact&limit=900&q=fic`)
+
+    expect(summary.status).toBe(200)
+    expect(getCrmSummary).toHaveBeenCalledWith(CTX, 'pipeline-1')
+    expect(lookup.status).toBe(200)
+    expect(lookupCrmRecords).toHaveBeenCalledWith({
+      ctx: CTX, kind: 'person', query: 'fic', limit: 100,
+    })
+  })
+
+  it('rejects invalid kind, sort, direction, cursor, and limit shapes', async () => {
+    expect((await request(makeApp()).get(`/api/crm/${WS}/records?kind=unknown`)).status).toBe(400)
+    expect((await request(makeApp()).get(`/api/crm/${WS}/records?kind=contact&sort=amount`)).status).toBe(400)
+    expect((await request(makeApp()).get(`/api/crm/${WS}/records?kind=deal&direction=sideways`)).status).toBe(400)
+    expect((await request(makeApp()).get(`/api/crm/${WS}/records?kind=deal&limit=0`)).status).toBe(400)
+    expect((await request(makeApp()).get(`/api/crm/${WS}/lookup?kind=company&limit=nope`)).status).toBe(400)
+    vi.mocked(listCrmRecordPage).mockRejectedValueOnce(new Error('Invalid CRM cursor'))
+    expect((await request(makeApp()).get(`/api/crm/${WS}/records?kind=deal&cursor=bad`)).status).toBe(400)
   })
 })
 

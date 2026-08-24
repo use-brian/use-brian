@@ -1,7 +1,8 @@
 /**
- * CRM operator-surface SDK. Collection compatibility reads, canonical cold
- * record reads, typed record PATCH, stable pipeline stages, and R2 resources
- * all live behind `/api/crm`. Stage changes retain their dedicated route.
+ * CRM operator-surface SDK. Keyset collection pages, authoritative summary,
+ * compact relationship lookup, canonical cold record reads, typed record
+ * PATCH, stable pipeline stages, and R2 resources live behind `/api/crm`.
+ * The flat compatibility read remains only for bounded legacy dialogs.
  *
  * Spec: docs/architecture/features/crm.md → "Operator surface".
  * [COMP:app-web/crm-surface]
@@ -78,6 +79,111 @@ export type CrmData = {
   contacts: CrmContactRow[];
   companies: CrmCompanyRow[];
 };
+
+export type CrmCollectionKind = "deal" | "contact" | "company";
+export type CrmCollectionSort = "updated" | "name" | "amount" | "close";
+export type CrmSortDirection = "asc" | "desc";
+
+export type CrmRecordPage<T extends CrmPublicRecord = CrmPublicRecord> = {
+  items: T[];
+  nextCursor: string | null;
+  hasMore: boolean;
+};
+
+export type CrmCollectionQuery = {
+  kind: CrmCollectionKind;
+  cursor?: string | null;
+  limit?: number;
+  sort?: CrmCollectionSort;
+  direction?: CrmSortDirection;
+  q?: string;
+  archived?: boolean;
+  owner?: string[];
+  pipeline?: string | null;
+  stage?: string[];
+  company?: string[];
+  tag?: string[];
+  custom?: Record<string, string[]>;
+  filter?: "overdue" | "stale" | "noAmount" | "orphaned" | null;
+};
+
+function appendMany(params: URLSearchParams, key: string, values: readonly string[] | undefined) {
+  for (const value of values ?? []) params.append(key, value);
+}
+
+export function crmCollectionSearch(query: CrmCollectionQuery): string {
+  const params = new URLSearchParams({ kind: query.kind });
+  if (query.cursor) params.set("cursor", query.cursor);
+  if (query.limit) params.set("limit", String(query.limit));
+  if (query.sort) params.set("sort", query.sort);
+  if (query.direction) params.set("direction", query.direction);
+  if (query.q?.trim()) params.set("q", query.q.trim());
+  if (query.archived) params.set("archived", "true");
+  if (query.pipeline) params.set("pipeline", query.pipeline);
+  if (query.filter) params.set("filter", query.filter);
+  appendMany(params, "owner", query.owner);
+  appendMany(params, "stage", query.stage);
+  appendMany(params, "company", query.company);
+  appendMany(params, "tag", query.tag);
+  for (const [key, values] of Object.entries(query.custom ?? {})) {
+    appendMany(params, `cf.${key}`, values);
+  }
+  return params.toString();
+}
+
+export function fetchCrmRecordPage<T extends CrmPublicRecord = CrmPublicRecord>(
+  workspaceId: string,
+  query: CrmCollectionQuery,
+): Promise<CrmRecordPage<T>> {
+  return jsonRequest(
+    `/api/crm/${encodeURIComponent(workspaceId)}/records?${crmCollectionSearch(query)}`,
+  );
+}
+
+export type CrmDealBoardPages = Record<string, CrmRecordPage<Extract<CrmPublicRecord, { kind: "deal" }>>>;
+
+/** One independent keyset per board stage. */
+export async function fetchCrmDealBoardPages(
+  workspaceId: string,
+  query: Omit<CrmCollectionQuery, "kind" | "stage" | "cursor">,
+  stageIds: readonly string[],
+): Promise<CrmDealBoardPages> {
+  const entries = await Promise.all(stageIds.map(async (stageId) => [
+    stageId,
+    await fetchCrmRecordPage<Extract<CrmPublicRecord, { kind: "deal" }>>(workspaceId, {
+      ...query,
+      kind: "deal",
+      stage: [stageId],
+    }),
+  ] as const));
+  return Object.fromEntries(entries);
+}
+
+export type CrmSummary = {
+  totals: { deals: number; contacts: number; companies: number };
+  attention: { overdue: number; stale: number; noAmount: number; orphaned: number };
+  stages: Array<{ stageId: string; count: number; values: Record<string, number> }>;
+};
+
+export function fetchCrmSummary(workspaceId: string, pipeline?: string | null): Promise<CrmSummary> {
+  const query = pipeline ? `?pipeline=${encodeURIComponent(pipeline)}` : "";
+  return jsonRequest(`/api/crm/${encodeURIComponent(workspaceId)}/summary${query}`);
+}
+
+export type CrmLookupRow = { id: string; name: string; hint: string | null };
+
+export function fetchCrmLookup(
+  workspaceId: string,
+  kind: CrmCollectionKind,
+  q = "",
+  limit = 100,
+): Promise<CrmLookupRow[]> {
+  const params = new URLSearchParams({ kind, limit: String(limit) });
+  if (q.trim()) params.set("q", q.trim());
+  return jsonRequest<{ items: CrmLookupRow[] }>(
+    `/api/crm/${encodeURIComponent(workspaceId)}/lookup?${params.toString()}`,
+  ).then((body) => body.items);
+}
 
 export type CrmPublicRecord =
   | ({ kind: "deal" } & CrmDealRow)

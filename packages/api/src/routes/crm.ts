@@ -44,11 +44,14 @@ import {
   getCrmConfig,
   getCrmR2Record,
   getCrmReport,
+  getCrmSummary,
   listCrmDealParticipants,
+  listCrmRecordPage,
   listCrmRecordRelationships,
   listCrmR2Records,
   listCrmSavedViews,
   listCrmTimeline,
+  lookupCrmRecords,
   removeCrmDealParticipant,
   reorderCrmFields,
   reorderCrmPipelines,
@@ -81,6 +84,9 @@ const STAGE_CATEGORIES = new Set<CrmStageCategory>(['open', 'won', 'lost'])
 const LEGACY_STAGES = new Set<DealStage>([
   'lead', 'qualified', 'proposal', 'negotiation', 'won', 'lost',
 ])
+const CRM_PAGE_SORTS = new Set(['updated', 'name', 'amount', 'close'])
+const CRM_DIRECTIONS = new Set(['asc', 'desc'])
+const CRM_ATTENTION = new Set(['overdue', 'stale', 'noAmount', 'orphaned'])
 
 function text(value: unknown, max = 200): string | null {
   return typeof value === 'string' && value.trim().length > 0
@@ -104,6 +110,25 @@ function stringArray(value: unknown, max = 50): string[] {
     ? value.filter((v): v is string => typeof v === 'string')
         .map((v) => v.trim()).filter(Boolean).slice(0, max)
     : []
+}
+
+function queryText(value: unknown, max = 500): string | null {
+  const raw = Array.isArray(value) ? value[0] : value
+  return typeof raw === 'string' && raw.trim() ? raw.trim().slice(0, max) : null
+}
+
+function queryArray(value: unknown, max = 50): string[] {
+  const raw = Array.isArray(value) ? value : typeof value === 'string' ? [value] : []
+  return raw.flatMap((item) => typeof item === 'string' ? item.split(',') : [])
+    .map((item) => item.trim()).filter(Boolean).slice(0, max)
+}
+
+function queryKind(value: unknown): CrmEntityKind | null {
+  const raw = queryText(value, 20)
+  if (raw === 'contact' || raw === 'contacts' || raw === 'person') return 'person'
+  if (raw === 'company' || raw === 'companies') return 'company'
+  if (raw === 'deal' || raw === 'deals') return 'deal'
+  return null
 }
 
 function publicRecord(row: CrmRecordRow) {
@@ -361,6 +386,57 @@ export function crmRoutes({ workspaceStore, entityLinks }: RouteOptions): Router
     const member = await memberContext(req as never, res)
     if (!member) return
     try {
+      if (req.query.kind !== undefined) {
+        const kind = queryKind(req.query.kind)
+        if (!kind) {
+          res.status(400).json({ error: 'kind must be deal, contact, or company' })
+          return
+        }
+        const sort = queryText(req.query.sort, 20) ?? 'updated'
+        const direction = queryText(req.query.direction, 10) ?? 'desc'
+        if (!CRM_PAGE_SORTS.has(sort)
+          || ((sort === 'amount' || sort === 'close') && kind !== 'deal')) {
+          res.status(400).json({ error: 'sort is not available for this record kind' })
+          return
+        }
+        if (!CRM_DIRECTIONS.has(direction)) {
+          res.status(400).json({ error: 'direction must be asc or desc' })
+          return
+        }
+        const requestedLimit = Number(queryText(req.query.limit, 4) ?? '50')
+        if (!Number.isInteger(requestedLimit) || requestedLimit < 1) {
+          res.status(400).json({ error: 'limit must be a positive integer' })
+          return
+        }
+        const attention = queryText(req.query.filter, 20)
+        if (attention && !CRM_ATTENTION.has(attention)) {
+          res.status(400).json({ error: 'filter is not a supported attention filter' })
+          return
+        }
+        const custom: Record<string, string[]> = {}
+        for (const [key, value] of Object.entries(req.query)) {
+          if (!key.startsWith('cf.') || key.length <= 3) continue
+          custom[key.slice(3)] = queryArray(value)
+        }
+        const page = await listCrmRecordPage(member.ctx, {
+          kind,
+          limit: Math.min(requestedLimit, 100),
+          cursor: queryText(req.query.cursor, 2_000),
+          sort: sort as 'updated' | 'name' | 'amount' | 'close',
+          direction: direction as 'asc' | 'desc',
+          search: queryText(req.query.q, 500),
+          includeArchived: req.query.archived === 'true',
+          owners: queryArray(req.query.owner),
+          pipelineId: queryText(req.query.pipeline, 100),
+          stageIds: queryArray(req.query.stage),
+          companyIds: queryArray(req.query.company),
+          tags: queryArray(req.query.tag),
+          custom,
+          attention: attention as 'overdue' | 'stale' | 'noAmount' | 'orphaned' | null,
+        })
+        res.json({ ...page, items: page.items.map(publicRecord) })
+        return
+      }
       const rows = await listCrmR2Records(member.ctx, {
         includeArchived: req.query.archived === 'true',
       })
@@ -371,8 +447,52 @@ export function crmRoutes({ workspaceStore, entityLinks }: RouteOptions): Router
         companies: records.filter((r) => r.kind === 'company'),
       })
     } catch (err) {
+      if (req.query.kind !== undefined && err instanceof Error
+        && (err.message.includes('cursor') || err.message.includes('sort'))) {
+        res.status(400).json({ error: err.message })
+        return
+      }
       console.error('[crm] list failed:', err)
       res.status(500).json({ error: 'Failed to load CRM records' })
+    }
+  })
+
+  router.get('/:workspaceId/summary', async (req, res) => {
+    const member = await memberContext(req as never, res)
+    if (!member) return
+    try {
+      const summary = await getCrmSummary(member.ctx, queryText(req.query.pipeline, 100))
+      res.json(summary)
+    } catch (err) {
+      console.error('[crm] summary failed:', err)
+      res.status(500).json({ error: 'Failed to load CRM summary' })
+    }
+  })
+
+  router.get('/:workspaceId/lookup', async (req, res) => {
+    const member = await memberContext(req as never, res)
+    if (!member) return
+    const kind = queryKind(req.query.kind)
+    if (!kind) {
+      res.status(400).json({ error: 'kind must be deal, contact, or company' })
+      return
+    }
+    const requestedLimit = Number(queryText(req.query.limit, 4) ?? '25')
+    if (!Number.isInteger(requestedLimit) || requestedLimit < 1) {
+      res.status(400).json({ error: 'limit must be a positive integer' })
+      return
+    }
+    try {
+      const items = await lookupCrmRecords({
+        ctx: member.ctx,
+        kind,
+        query: queryText(req.query.q, 500),
+        limit: Math.min(requestedLimit, 100),
+      })
+      res.json({ items })
+    } catch (err) {
+      console.error('[crm] lookup failed:', err)
+      res.status(500).json({ error: 'Failed to load CRM lookup' })
     }
   })
 

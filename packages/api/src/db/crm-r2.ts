@@ -1003,6 +1003,395 @@ export async function listCrmR2Records(
   }))
 }
 
+export type CrmPageSort = 'updated' | 'name' | 'amount' | 'close'
+export type CrmSortDirection = 'asc' | 'desc'
+
+export type CrmPageOptions = {
+  kind: CrmEntityKind
+  limit: number
+  cursor?: string | null
+  sort: CrmPageSort
+  direction: CrmSortDirection
+  search?: string | null
+  includeArchived?: boolean
+  owners?: string[]
+  pipelineId?: string | null
+  stageIds?: string[]
+  companyIds?: string[]
+  tags?: string[]
+  custom?: Record<string, string[]>
+  attention?: 'overdue' | 'stale' | 'noAmount' | 'orphaned' | null
+}
+
+type CrmCursor = {
+  kind: CrmEntityKind
+  sort: CrmPageSort
+  direction: CrmSortDirection
+  value: string | number | null
+  id: string
+}
+
+export function encodeCrmCursor(cursor: CrmCursor): string {
+  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url')
+}
+
+export function decodeCrmCursor(value: string): CrmCursor {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'))
+  } catch {
+    throw new Error('Invalid CRM cursor')
+  }
+  if (!parsed || typeof parsed !== 'object') throw new Error('Invalid CRM cursor')
+  const cursor = parsed as Partial<CrmCursor>
+  if (!CRM_REFERENCE_KINDS.includes(cursor.kind as CrmEntityKind)
+    || !['updated', 'name', 'amount', 'close'].includes(String(cursor.sort))
+    || !['asc', 'desc'].includes(String(cursor.direction))
+    || typeof cursor.id !== 'string'
+    || !(cursor.value === null || typeof cursor.value === 'string' || typeof cursor.value === 'number')) {
+    throw new Error('Invalid CRM cursor')
+  }
+  return cursor as CrmCursor
+}
+
+function crmSortExpression(kind: CrmEntityKind, sort: CrmPageSort): {
+  sql: string
+  cursorCast: string
+} {
+  if (sort === 'name') return { sql: 'lower(e.display_name)', cursorCast: 'text' }
+  if (sort === 'amount' && kind === 'deal') {
+    return { sql: `NULLIF(e.attributes->>'amount','')::numeric`, cursorCast: 'numeric' }
+  }
+  if (sort === 'close' && kind === 'deal') {
+    return { sql: `NULLIF(e.attributes->>'close_date','')`, cursorCast: 'text' }
+  }
+  return { sql: 'e.updated_at', cursorCast: 'timestamptz' }
+}
+
+export type CrmRecordPage = {
+  items: CrmRecordRow[]
+  nextCursor: string | null
+  hasMore: boolean
+}
+
+/** Access-scoped server-authoritative collection query with an opaque keyset. */
+export async function listCrmRecordPage(
+  ctx: AccessContext,
+  options: CrmPageOptions,
+): Promise<CrmRecordPage> {
+  const limit = Math.max(1, Math.min(100, options.limit))
+  if ((options.sort === 'amount' || options.sort === 'close') && options.kind !== 'deal') {
+    throw new Error(`${options.sort} sort is only available for deals`)
+  }
+  const cursor = options.cursor ? decodeCrmCursor(options.cursor) : null
+  if (cursor && (cursor.kind !== options.kind || cursor.sort !== options.sort
+    || cursor.direction !== options.direction)) {
+    throw new Error('CRM cursor does not match this query')
+  }
+  const ap = buildAccessPredicate(ctx, { alias: 'e', startIdx: 1 })
+  const values: unknown[] = [...ap.params]
+  const where: string[] = [
+    ap.sql,
+    `e.kind = $${values.length + 1}`,
+    'e.valid_to IS NULL',
+    'e.retracted_at IS NULL',
+  ]
+  values.push(options.kind)
+  if (options.includeArchived) where.push(`e.attributes ? 'crm_archived_at'`)
+  else where.push(`NOT (e.attributes ? 'crm_archived_at')`)
+  const add = (sql: (index: number) => string, value: unknown) => {
+    const index = values.length + 1
+    where.push(sql(index))
+    values.push(value)
+  }
+  if (options.search?.trim()) {
+    const pattern = `%${options.search.trim()}%`
+    add((index) => options.kind === 'person'
+      ? `(e.display_name ILIKE $${index} OR e.attributes->>'email' ILIKE $${index}
+          OR e.attributes->>'phone' ILIKE $${index}
+          OR (e.attributes->'tags')::text ILIKE $${index}
+          OR EXISTS (
+            SELECT 1 FROM crm_field_definitions f
+             WHERE f.workspace_id = e.workspace_id AND f.entity_kind = e.kind
+               AND f.archived_at IS NULL
+               AND f.field_type = ANY(ARRAY['text','single_select','multi_select'])
+               AND (e.attributes->'custom_fields'->>f.field_key ILIKE $${index}
+                 OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(
+                   CASE WHEN jsonb_typeof(e.attributes->'custom_fields'->f.field_key) = 'array'
+                     THEN e.attributes->'custom_fields'->f.field_key ELSE '[]'::jsonb END
+                 ) item WHERE item ILIKE $${index}))
+          ))`
+      : options.kind === 'company'
+        ? `(e.display_name ILIKE $${index} OR e.attributes->>'domain' ILIKE $${index}
+            OR (e.attributes->'tags')::text ILIKE $${index}
+            OR EXISTS (
+              SELECT 1 FROM crm_field_definitions f
+               WHERE f.workspace_id = e.workspace_id AND f.entity_kind = e.kind
+                 AND f.archived_at IS NULL
+                 AND f.field_type = ANY(ARRAY['text','single_select','multi_select'])
+                 AND (e.attributes->'custom_fields'->>f.field_key ILIKE $${index}
+                   OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(
+                     CASE WHEN jsonb_typeof(e.attributes->'custom_fields'->f.field_key) = 'array'
+                       THEN e.attributes->'custom_fields'->f.field_key ELSE '[]'::jsonb END
+                   ) item WHERE item ILIKE $${index}))
+            ))`
+        : `(e.display_name ILIKE $${index} OR e.attributes->>'source' ILIKE $${index}
+            OR EXISTS (SELECT 1 FROM entities related
+              WHERE related.workspace_id = e.workspace_id
+                AND related.valid_to IS NULL AND related.retracted_at IS NULL
+                AND related.id::text = ANY(ARRAY[
+                  NULLIF(e.attributes->>'contact_id',''),
+                  NULLIF(e.attributes->>'company_id','')
+                ]) AND related.display_name ILIKE $${index})
+            OR EXISTS (
+              SELECT 1 FROM crm_field_definitions f
+               WHERE f.workspace_id = e.workspace_id AND f.entity_kind = e.kind
+                 AND f.archived_at IS NULL
+                 AND f.field_type = ANY(ARRAY['text','single_select','multi_select'])
+                 AND (e.attributes->'custom_fields'->>f.field_key ILIKE $${index}
+                   OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(
+                     CASE WHEN jsonb_typeof(e.attributes->'custom_fields'->f.field_key) = 'array'
+                       THEN e.attributes->'custom_fields'->f.field_key ELSE '[]'::jsonb END
+                   ) item WHERE item ILIKE $${index}))
+            ))`, pattern)
+  }
+  if (options.owners?.length) {
+    const ownerIds = options.owners.filter((owner) => owner !== 'none')
+    const includeNone = options.owners.includes('none')
+    add((index) => `(${ownerIds.length > 0 ? `e.attributes->>'owner_id' = ANY($${index}::text[])` : 'false'}
+      ${includeNone ? `OR NULLIF(e.attributes->>'owner_id','') IS NULL` : ''})`, ownerIds)
+  }
+  if (options.pipelineId && options.kind === 'deal') {
+    add((index) => `e.attributes->>'pipeline_id' = $${index}`, options.pipelineId)
+  }
+  if (options.stageIds?.length && options.kind === 'deal') {
+    add((index) => `e.attributes->>'pipeline_stage_id' = ANY($${index}::text[])`, options.stageIds)
+  }
+  if (options.companyIds?.length && options.kind !== 'company') {
+    const ids = options.companyIds.filter((id) => id !== 'none')
+    const includeNone = options.companyIds.includes('none')
+    add((index) => `(${ids.length > 0 ? `e.attributes->>'company_id' = ANY($${index}::text[])` : 'false'}
+      ${includeNone ? `OR NULLIF(e.attributes->>'company_id','') IS NULL` : ''})`, ids)
+  }
+  if (options.tags?.length && options.kind !== 'deal') {
+    add((index) => `COALESCE(e.attributes->'tags','[]'::jsonb) ?| $${index}::text[]`, options.tags)
+  }
+  if (options.attention === 'orphaned' && options.kind === 'person') {
+    where.push(`NULLIF(e.attributes->>'company_id','') IS NULL`)
+  }
+  if (options.kind === 'deal' && options.attention && options.attention !== 'orphaned') {
+    where.push(`(CASE
+      WHEN NULLIF(e.attributes->>'pipeline_stage_id','') IS NOT NULL THEN EXISTS (
+        SELECT 1 FROM crm_pipeline_stages page_stage
+         WHERE page_stage.id::text = e.attributes->>'pipeline_stage_id'
+           AND page_stage.workspace_id = e.workspace_id
+           AND page_stage.archived_at IS NULL AND page_stage.category = 'open'
+      )
+      ELSE COALESCE(e.attributes->>'stage','lead') NOT IN ('won','lost')
+    END)`)
+    if (options.attention === 'overdue') {
+      where.push(`NULLIF(e.attributes->>'close_date','')::date < CURRENT_DATE`)
+    } else if (options.attention === 'stale') {
+      where.push(`e.updated_at < now() - interval '30 days'`)
+    } else {
+      where.push(`NULLIF(e.attributes->>'amount','') IS NULL`)
+    }
+  }
+  for (const [key, selected] of Object.entries(options.custom ?? {})) {
+    if (selected.length === 0) continue
+    const emptyTokens = new Set(['__empty__', '__none__'])
+    const keyIndex = values.length + 1
+    values.push(key)
+    const valueIndex = values.length + 1
+    values.push(selected.filter((value) => !emptyTokens.has(value)))
+    const includeEmpty = selected.some((value) => emptyTokens.has(value))
+    where.push(`(
+      e.attributes->'custom_fields'->>$${keyIndex} = ANY($${valueIndex}::text[])
+      OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(
+        CASE WHEN jsonb_typeof(e.attributes->'custom_fields'->$${keyIndex}) = 'array'
+          THEN e.attributes->'custom_fields'->$${keyIndex} ELSE '[]'::jsonb END
+      ) value WHERE value = ANY($${valueIndex}::text[]))
+      ${includeEmpty ? `OR e.attributes->'custom_fields'->$${keyIndex} IS NULL` : ''}
+    )`)
+  }
+  const sort = crmSortExpression(options.kind, options.sort)
+  const direction = options.direction === 'asc' ? 'ASC' : 'DESC'
+  const comparison = options.direction === 'asc' ? '>' : '<'
+  if (cursor) {
+    const valueIndex = values.length + 1
+    values.push(cursor.value)
+    const idIndex = values.length + 1
+    values.push(cursor.id)
+    where.push(cursor.value === null
+      ? `(${sort.sql} IS NULL AND e.id ${comparison} $${idIndex}::uuid)`
+      : `(${sort.sql} IS NULL OR ${sort.sql} ${comparison} $${valueIndex}::${sort.cursorCast}
+          OR (${sort.sql} = $${valueIndex}::${sort.cursorCast} AND e.id ${comparison} $${idIndex}::uuid))`)
+  }
+  values.push(limit + 1)
+  const result = await queryGated<{
+    id: string
+    kind: CrmEntityKind
+    name: string
+    attributes: Record<string, unknown> | null
+    archivedAt: Date | null
+    updatedAt: Date
+    sortValue: Date | string | number | null
+  }>(ctx,
+    `SELECT e.id, e.kind, e.display_name AS name, e.attributes,
+            NULLIF(e.attributes->>'crm_archived_at','')::timestamptz AS "archivedAt",
+            e.updated_at AS "updatedAt", ${sort.sql} AS "sortValue"
+       FROM entities e
+      WHERE ${where.join(' AND ')}
+      ORDER BY (${sort.sql} IS NULL) ASC, ${sort.sql} ${direction}, e.id ${direction}
+      LIMIT $${values.length}`,
+    values,
+  )
+  const hasMore = result.rows.length > limit
+  const pageRows = result.rows.slice(0, limit)
+  const items = pageRows.map((row) => ({
+    id: row.id,
+    kind: row.kind,
+    name: row.name,
+    attributes: row.attributes ?? {},
+    archivedAt: row.archivedAt?.toISOString() ?? null,
+    updatedAt: row.updatedAt.toISOString(),
+  }))
+  const last = pageRows.at(-1)
+  const cursorValue = last?.sortValue instanceof Date
+    ? last.sortValue.toISOString()
+    : last?.sortValue ?? null
+  return {
+    items,
+    hasMore,
+    nextCursor: hasMore && last ? encodeCrmCursor({
+      kind: options.kind,
+      sort: options.sort,
+      direction: options.direction,
+      value: cursorValue,
+      id: last.id,
+    }) : null,
+  }
+}
+
+export type CrmSummary = {
+  totals: { deals: number; contacts: number; companies: number }
+  attention: { overdue: number; stale: number; noAmount: number; orphaned: number }
+  stages: Array<{ stageId: string; count: number; values: Record<string, number> }>
+}
+
+export async function getCrmSummary(
+  ctx: AccessContext,
+  pipelineId?: string | null,
+): Promise<CrmSummary> {
+  const ap = buildAccessPredicate(ctx, { alias: 'e', startIdx: 1 })
+  const aggregateValues: unknown[] = [...ap.params, ['person', 'company', 'deal']]
+  const pipelinePredicate = pipelineId
+    ? `AND e.attributes->>'pipeline_id' = $${aggregateValues.push(pipelineId)}`
+    : ''
+  const openDeal = `(CASE
+    WHEN NULLIF(e.attributes->>'pipeline_stage_id','') IS NOT NULL THEN EXISTS (
+      SELECT 1 FROM crm_pipeline_stages summary_stage
+       WHERE summary_stage.id::text = e.attributes->>'pipeline_stage_id'
+         AND summary_stage.workspace_id = e.workspace_id
+         AND summary_stage.archived_at IS NULL AND summary_stage.category = 'open'
+    )
+    ELSE COALESCE(e.attributes->>'stage','lead') NOT IN ('won','lost')
+  END)`
+  const aggregate = await queryGated<{
+    deals: string; contacts: string; companies: string
+    overdue: string; stale: string; noAmount: string; orphaned: string
+  }>(ctx,
+    `SELECT
+       COUNT(*) FILTER (WHERE e.kind = 'deal' ${pipelinePredicate})::text AS deals,
+       COUNT(*) FILTER (WHERE e.kind = 'person')::text AS contacts,
+       COUNT(*) FILTER (WHERE e.kind = 'company')::text AS companies,
+       COUNT(*) FILTER (WHERE e.kind = 'deal' ${pipelinePredicate}
+         AND ${openDeal}
+         AND NULLIF(e.attributes->>'close_date','')::date < CURRENT_DATE)::text AS overdue,
+       COUNT(*) FILTER (WHERE e.kind = 'deal' ${pipelinePredicate}
+         AND ${openDeal}
+         AND e.updated_at < now() - interval '30 days')::text AS stale,
+       COUNT(*) FILTER (WHERE e.kind = 'deal' ${pipelinePredicate}
+         AND ${openDeal}
+         AND NULLIF(e.attributes->>'amount','') IS NULL)::text AS "noAmount",
+       COUNT(*) FILTER (WHERE e.kind = 'person'
+         AND NULLIF(e.attributes->>'company_id','') IS NULL)::text AS orphaned
+     FROM entities e
+     WHERE ${ap.sql} AND e.kind = ANY($${ap.nextIdx}::text[])
+       AND e.valid_to IS NULL AND e.retracted_at IS NULL
+       AND NOT (e.attributes ? 'crm_archived_at')`,
+    aggregateValues,
+  )
+  const stageAp = buildAccessPredicate(ctx, { alias: 'e', startIdx: 1 })
+  const stageValues: unknown[] = [...stageAp.params]
+  let pipelineSql = ''
+  if (pipelineId) {
+    stageValues.push(pipelineId)
+    pipelineSql = `AND e.attributes->>'pipeline_id' = $${stageValues.length}`
+  }
+  const stages = await queryGated<{
+    stageId: string; currency: string; stageCount: string; value: string | null
+  }>(ctx,
+    `SELECT e.attributes->>'pipeline_stage_id' AS "stageId",
+            COALESCE(NULLIF(upper(e.attributes->>'currency_code'),''),'USD') AS currency,
+            SUM(COUNT(*)) OVER (
+              PARTITION BY e.attributes->>'pipeline_stage_id'
+            )::text AS "stageCount",
+            SUM(NULLIF(e.attributes->>'amount','')::numeric)::text AS value
+       FROM entities e
+      WHERE ${stageAp.sql} AND e.kind = 'deal' AND e.valid_to IS NULL
+        AND e.retracted_at IS NULL AND NOT (e.attributes ? 'crm_archived_at')
+        AND NULLIF(e.attributes->>'pipeline_stage_id','') IS NOT NULL
+        ${pipelineSql}
+      GROUP BY e.attributes->>'pipeline_stage_id', currency`,
+    stageValues,
+  )
+  const stageMap = new Map<string, { stageId: string; count: number; values: Record<string, number> }>()
+  for (const row of stages.rows) {
+    const summary = stageMap.get(row.stageId) ?? { stageId: row.stageId, count: 0, values: {} }
+    summary.count = Number(row.stageCount)
+    if (row.value !== null) summary.values[row.currency] = Number(row.value)
+    stageMap.set(row.stageId, summary)
+  }
+  const row = aggregate.rows[0]
+  return {
+    totals: { deals: Number(row?.deals ?? 0), contacts: Number(row?.contacts ?? 0), companies: Number(row?.companies ?? 0) },
+    attention: { overdue: Number(row?.overdue ?? 0), stale: Number(row?.stale ?? 0), noAmount: Number(row?.noAmount ?? 0), orphaned: Number(row?.orphaned ?? 0) },
+    stages: [...stageMap.values()],
+  }
+}
+
+export async function lookupCrmRecords(input: {
+  ctx: AccessContext
+  kind: CrmEntityKind
+  query?: string | null
+  limit: number
+}): Promise<Array<{ id: string; name: string; hint: string | null }>> {
+  const ap = buildAccessPredicate(input.ctx, { alias: 'e', startIdx: 1 })
+  const limit = Math.max(1, Math.min(100, input.limit))
+  const values: unknown[] = [...ap.params, input.kind]
+  let search = ''
+  if (input.query?.trim()) {
+    values.push(`%${input.query.trim()}%`)
+    search = `AND (e.display_name ILIKE $${values.length}
+      OR COALESCE(e.canonical_id,'') ILIKE $${values.length})`
+  }
+  values.push(limit)
+  const result = await queryGated<{ id: string; name: string; hint: string | null }>(input.ctx,
+    `SELECT e.id, e.display_name AS name,
+            CASE WHEN e.kind = 'person' THEN COALESCE(e.attributes->>'email', e.canonical_id)
+                 WHEN e.kind = 'company' THEN COALESCE(e.attributes->>'domain', e.canonical_id)
+                 ELSE e.attributes->>'source' END AS hint
+       FROM entities e
+      WHERE ${ap.sql} AND e.kind = $${ap.nextIdx}
+        AND e.valid_to IS NULL AND e.retracted_at IS NULL
+        AND NOT (e.attributes ? 'crm_archived_at') ${search}
+      ORDER BY lower(e.display_name), e.id LIMIT $${values.length}`,
+    values,
+  )
+  return result.rows
+}
+
 export async function setCrmArchived(input: {
   ctx: AccessContext
   entityId: string

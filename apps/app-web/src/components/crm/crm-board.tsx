@@ -3,7 +3,8 @@
 /**
  * Deal board — the pipeline flavour of the CRM operator surface and its
  * DEFAULT view (crm-operator-surface §1.4: pipeline-at-a-glance IS the CRM
- * job). One column per open stage with a live count + amount sum in the
+ * job). One independently paged column per open stage with an authoritative
+ * summary count + amount sum in the
  * header; won/lost fold into a collapsed closed rail so the board stays a
  * working pipeline, not an archive — the rail chips are drop targets, so
  * dragging a card onto "Won" closes the deal without revealing the columns.
@@ -22,6 +23,7 @@ import {
   type CrmDealRow,
   type CrmPipeline,
   type CrmPipelineStage,
+  type CrmRecordPage,
 } from "@/lib/api/crm";
 import {
   formatAmount,
@@ -35,16 +37,24 @@ import { PipelineStageCell, PIPELINE_CATEGORY_DOT } from "./crm-cells";
 export function CrmBoard({
   rows,
   pipeline,
+  stageSummary,
+  pages,
+  loadingMore,
   companyNames,
   contactNames,
   showClosed,
   onToggleClosed,
   onStageDrop,
   onOpenRecord,
+  onLoadMore,
 }: {
   /** Filtered deals — open AND closed (the board owns the fold). */
   rows: CrmDealRow[];
   pipeline: CrmPipeline;
+  /** Authoritative totals are independent of how many cards are loaded. */
+  stageSummary: Map<string, { stageId: string; count: number; values: Record<string, number> }>;
+  pages: Record<string, CrmRecordPage<Extract<import("@/lib/api/crm").CrmPublicRecord, { kind: "deal" }>>>;
+  loadingMore: ReadonlySet<string>;
   companyNames: Map<string, string>;
   contactNames: Map<string, string>;
   /** Reveal the won/lost columns (else they fold into the rail). */
@@ -52,6 +62,7 @@ export function CrmBoard({
   onToggleClosed: () => void;
   onStageDrop: (row: CrmDealRow, stage: CrmPipelineStage) => Promise<{ ok: boolean; error?: string }>;
   onOpenRecord: (row: CrmDealRow) => void;
+  onLoadMore: (stageId: string) => void;
 }) {
   const t = useT().crmPage;
   const [dragId, setDragId] = useState<string | null>(null);
@@ -88,7 +99,9 @@ export function CrmBoard({
   return (
     <div className="flex h-full min-w-max flex-col gap-3 p-4">
       <div className="flex min-h-0 flex-1 gap-3">
-        {summaries.map(({ stage, rows: cards, currencyTotals }) => (
+        {summaries.map(({ stage, rows: cards }) => {
+          const authoritative = stageSummary.get(stage.id);
+          return (
           <div
             key={stage.id}
             {...dropHandlers(stage)}
@@ -106,11 +119,11 @@ export function CrmBoard({
                 {stage.name}
               </span>
               <span className="tabular-nums text-[12px] text-muted-foreground">
-                {cards.length}
+                {authoritative?.count ?? 0}
               </span>
-              {Object.keys(currencyTotals).length > 0 && (
+              {authoritative && Object.keys(authoritative.values).length > 0 && (
                 <span className="ml-auto tabular-nums text-[11.5px] font-medium text-muted-foreground/80">
-                  {formatCurrencyTotals(currencyTotals, true)}
+                  {formatCurrencyTotals(authoritative.values, true)}
                 </span>
               )}
             </div>
@@ -200,9 +213,19 @@ export function CrmBoard({
                   </div>
                 );
               })}
+              {pages[stage.id]?.hasMore && (
+                <button
+                  type="button"
+                  disabled={loadingMore.has(stage.id)}
+                  onClick={() => onLoadMore(stage.id)}
+                  className="rounded-lg px-3 py-2 text-xs font-medium text-muted-foreground hover:bg-muted disabled:opacity-50"
+                >
+                  {loadingMore.has(stage.id) ? t.r2.loadingMore : t.r2.loadMore}
+                </button>
+              )}
             </div>
           </div>
-        ))}
+        )})}
       </div>
 
       {/* Closed rail — collapsed won/lost summaries. Chips are DROP TARGETS
@@ -210,7 +233,9 @@ export function CrmBoard({
           full columns. Hidden while the columns are showing. */}
       {!showClosed && (
         <div className="flex items-center gap-2">
-          {closedSummaries.map(({ stage, rows: cards, currencyTotals }) => (
+          {closedSummaries.map(({ stage }) => {
+            const authoritative = stageSummary.get(stage.id);
+            return (
             <button
               key={stage.id}
               type="button"
@@ -227,14 +252,14 @@ export function CrmBoard({
                 aria-hidden
               />
               {stage.name}
-              <span className="tabular-nums">{cards.length}</span>
-              {stage.category === "won" && Object.keys(currencyTotals).length > 0 && (
+              <span className="tabular-nums">{authoritative?.count ?? 0}</span>
+              {stage.category === "won" && authoritative && Object.keys(authoritative.values).length > 0 && (
                 <span className="tabular-nums text-muted-foreground/70">
-                  {formatCurrencyTotals(currencyTotals, true)}
+                  {formatCurrencyTotals(authoritative.values, true)}
                 </span>
               )}
             </button>
-          ))}
+          )})}
         </div>
       )}
     </div>

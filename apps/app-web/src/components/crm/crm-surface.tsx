@@ -7,8 +7,8 @@
  * graph read (lens, not data): three sections (Deals — default, board-first
  * — / Contacts / Companies) switched from the sidebar, with a compact top-bar
  * fallback while that sidebar is collapsed or unavailable on narrow layouts;
- * attention quick-filters with live counts; per-section filter row +
- * search; the deal board (drag-to-stage) or dense tables with inline cell
+ * attention quick-filters with summary-owned counts; debounced, server-backed
+ * filters/search; independently paged deal columns or keyset tables with inline cell
  * edit; a master-detail record pane with brain context
  * (`crm-record-detail.tsx`). Checking table rows swaps the filter row for
  * the bulk bar (client loop over the per-row adjust wire — no server bulk
@@ -25,7 +25,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { BarChart3, ChevronDown, Kanban, Mail, Rows3, Settings2 } from "lucide-react";
+import { BarChart3, ChevronDown, ChevronUp, Kanban, Mail, Rows3, Settings2 } from "lucide-react";
 import { OperatorTopbar } from "@/components/operator/operator-topbar";
 import { cn } from "@/lib/utils";
 import { mutateSurfaceCache, useCachedResource } from "@/lib/surface-cache";
@@ -53,38 +53,49 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
+  fetchCrmDealBoardPages,
+  fetchCrmLookup,
   fetchCrmRecord,
+  fetchCrmRecordPage,
   fetchCrmConfig,
-  fetchWorkspaceCrm,
+  fetchCrmSummary,
   isOpenStage,
   setCrmPipelineStage,
   setCrmRecordArchived,
   updateCrmRecord,
+  type CrmCollectionQuery,
   type CrmCompanyRow,
   type CrmContactRow,
   type CrmData,
+  type CrmDealBoardPages,
   type CrmDealRow,
   type CrmFieldDefinition,
   type CrmPipeline,
   type CrmPipelineStage,
+  type CrmPublicRecord,
   type CrmRecordBundle,
+  type CrmRecordPage,
+  type CrmSummary,
 } from "@/lib/api/crm";
 import {
+  appendCrmPage,
   applyCompanyFilters,
   applyContactFilters,
   applyDealFilters,
   companyNameById,
-  companyStats,
   contactNameById,
-  crmQuickCounts,
+  crmColumnRegistry,
   crmCollectionHref,
+  crmPageQuery,
   crmRecordHref,
   crmRecordMatchesRoute,
+  crmSectionCounts,
   crmTagOptions,
   CRM_EMPTY_CUSTOM_VALUE,
   groupRowsByCustomField,
   localDateStr,
   legacyStageForPipelineStage,
+  normalizeCrmColumns,
   resolveDealPipelineStage,
   searchFromCrmView,
   sortDeals,
@@ -94,6 +105,7 @@ import {
   DEAL_SORT_KEYS,
   CRM_SECTIONS,
   type CrmQuickFilter,
+  type CrmColumnDefinition,
   type CrmSection,
   type CrmViewState,
 } from "@/lib/crm-view";
@@ -140,6 +152,80 @@ type CrmPrimitive = "deal" | "contact" | "company";
 
 export type CrmRouteRecord = { kind: CrmPrimitive; id: string };
 
+type CrmCollectionPayload = {
+  section: CrmSection;
+  query: CrmCollectionQuery;
+  page: CrmRecordPage | null;
+  boardPages: CrmDealBoardPages | null;
+};
+
+type CrmDirectories = {
+  contacts: Awaited<ReturnType<typeof fetchCrmLookup>>;
+  companies: Awaited<ReturnType<typeof fetchCrmLookup>>;
+  deals: Awaited<ReturnType<typeof fetchCrmLookup>>;
+};
+
+function collectionRecords(payload: CrmCollectionPayload | null): CrmPublicRecord[] {
+  if (!payload) return [];
+  if (payload.boardPages) {
+    const rows = new Map<string, CrmPublicRecord>();
+    for (const page of Object.values(payload.boardPages)) {
+      for (const row of page.items) rows.set(row.id, row);
+    }
+    return [...rows.values()];
+  }
+  return payload.page?.items ?? [];
+}
+
+function dataFromRecords(records: readonly CrmPublicRecord[]): CrmData {
+  return {
+    deals: records.filter((row): row is Extract<CrmPublicRecord, { kind: "deal" }> => row.kind === "deal"),
+    contacts: records.filter((row): row is Extract<CrmPublicRecord, { kind: "contact" }> => row.kind === "contact"),
+    companies: records.filter((row): row is Extract<CrmPublicRecord, { kind: "company" }> => row.kind === "company"),
+  };
+}
+
+function directoryData(directories: CrmDirectories | null): CrmData {
+  if (!directories) return { deals: [], contacts: [], companies: [] };
+  return {
+    contacts: directories.contacts.map((row) => ({
+      id: row.id, name: row.name, email: row.hint, phone: null, companyId: null,
+      tags: [], ownerId: null, customFields: {}, archivedAt: null, updatedAt: "",
+    })),
+    companies: directories.companies.map((row) => ({
+      id: row.id, name: row.name, domain: row.hint, tags: [], ownerId: null,
+      customFields: {}, archivedAt: null, updatedAt: "",
+    })),
+    deals: directories.deals.map((row) => ({
+      id: row.id, name: row.name, stage: "lead", amount: null, closeDate: null,
+      contactId: null, companyId: null, ownerId: null, source: row.hint,
+      customFields: {}, archivedAt: null, updatedAt: "",
+    })),
+  };
+}
+
+function mergeCrmData(base: CrmData, overlay: CrmData): CrmData {
+  const merge = <T extends { id: string }>(left: readonly T[], right: readonly T[]) => {
+    const rows = new Map(left.map((row) => [row.id, row]));
+    for (const row of right) rows.set(row.id, row);
+    return [...rows.values()];
+  };
+  return {
+    deals: merge(base.deals, overlay.deals),
+    contacts: merge(base.contacts, overlay.contacts),
+    companies: merge(base.companies, overlay.companies),
+  };
+}
+
+function useDebouncedValue<T>(value: T, delayMs: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebounced(value), delayMs);
+    return () => window.clearTimeout(timer);
+  }, [delayMs, value]);
+  return debounced;
+}
+
 export function CrmSurface({ workspaceId, routeRecord = null }: {
   workspaceId: string;
   routeRecord?: CrmRouteRecord | null;
@@ -150,33 +236,123 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
   const pathname = usePathname();
   const searchParams = useSearchParams();
 
-  // ── Data ──────────────────────────────────────────────────────────────
-  // Cache-backed, same as Tasks: a revisit paints the last known deals /
-  // contacts / companies immediately and revalidates behind them. See
-  // `lib/surface-cache.ts`.
+  // ── View state (URL is the source of truth) ───────────────────────────
+  const view = useMemo(() => crmViewFromSearch(searchParams), [searchParams]);
+  const setView = useCallback(
+    (patch: Partial<CrmViewState>) => {
+      const next = { ...view, ...patch };
+      const search = searchFromCrmView(next);
+      router.replace(search ? `${pathname}?${search}` : pathname, { scroll: false });
+    },
+    [view, router, pathname],
+  );
+
+  // ── Independently cached data regions ─────────────────────────────────
   const crmKey = surfaceDataKey("crm", workspaceId);
-  const crm = useCachedResource(crmKey, () => fetchWorkspaceCrm(workspaceId));
-  const data = crm.data ?? null;
   const configKey = `${crmKey}:config`;
   const configResource = useCachedResource(configKey, () => fetchCrmConfig(workspaceId));
   const config = configResource.data ?? null;
+  const selectedPipeline = useMemo<CrmPipeline | null>(() => {
+    if (!config || config.pipelines.length === 0) return null;
+    return config.pipelines.find((pipeline) => pipeline.id === view.pipeline)
+      ?? config.pipelines.find((pipeline) => pipeline.isDefault)
+      ?? config.pipelines[0];
+  }, [config, view.pipeline]);
+
+  const debouncedSearch = useDebouncedValue(view.q, 250);
+  const openStageIds = useMemo(
+    () => selectedPipeline?.stages.filter((stage) => stage.category === "open").map((stage) => stage.id) ?? [],
+    [selectedPipeline],
+  );
+  const stageSlice = view.section === "deals" && view.stages.length === 0 && !view.quick && !view.closed
+    ? openStageIds
+    : view.stages;
+  const collectionQuery = useMemo(() => crmPageQuery(
+    { ...view, pipeline: selectedPipeline?.id ?? view.pipeline },
+    debouncedSearch,
+    stageSlice,
+  ), [debouncedSearch, selectedPipeline?.id, stageSlice, view]);
+  const isBoardCollection = view.section === "deals" && view.view === "board" && view.group === null;
+  const boardStageIds = useMemo(() => {
+    if (!selectedPipeline) return [];
+    if (view.stages.length > 0) return view.stages;
+    return selectedPipeline.stages
+      .filter((stage) => view.closed || stage.category === "open")
+      .map((stage) => stage.id);
+  }, [selectedPipeline, view.closed, view.stages]);
+  const collectionKey = config === null || (view.section === "deals" && selectedPipeline === null)
+    ? null
+    : `${crmKey}:collection:${view.section}:${isBoardCollection ? "board" : "table"}:${JSON.stringify(collectionQuery)}:${boardStageIds.join(",")}`;
+  const collectionResource = useCachedResource<CrmCollectionPayload>(collectionKey, async () => {
+    if (isBoardCollection) {
+      const { kind: _kind, stage: _stage, cursor: _cursor, ...boardQuery } = collectionQuery;
+      return {
+        section: view.section,
+        query: collectionQuery,
+        page: null,
+        boardPages: await fetchCrmDealBoardPages(workspaceId, boardQuery, boardStageIds),
+      };
+    }
+    return {
+      section: view.section,
+      query: collectionQuery,
+      page: await fetchCrmRecordPage(workspaceId, collectionQuery),
+      boardPages: null,
+    };
+  });
+  const [retainedCollection, setRetainedCollection] = useState<CrmCollectionPayload | null>(null);
+  useEffect(() => {
+    if (collectionResource.data) setRetainedCollection(collectionResource.data);
+  }, [collectionResource.data]);
+  const collection = collectionResource.data
+    ?? (retainedCollection?.section === view.section ? retainedCollection : null);
+
+  const directoriesResource = useCachedResource<CrmDirectories>(`${crmKey}:lookups`, async () => {
+    const [contacts, companies, deals] = await Promise.all([
+      fetchCrmLookup(workspaceId, "contact"),
+      fetchCrmLookup(workspaceId, "company"),
+      fetchCrmLookup(workspaceId, "deal"),
+    ]);
+    return { contacts, companies, deals };
+  });
+  const summaryKey = `${crmKey}:summary:${selectedPipeline?.id ?? "all"}`;
+  const summaryResource = useCachedResource<CrmSummary>(
+    summaryKey,
+    () => fetchCrmSummary(workspaceId, selectedPipeline?.id),
+  );
+  const emailContextResource = useCachedResource<CrmData>(
+    view.review === "email" ? `${crmKey}:email-context` : null,
+    async () => {
+      const [contacts, companies, deals] = await Promise.all([
+        fetchCrmRecordPage<Extract<CrmPublicRecord, { kind: "contact" }>>(workspaceId, { kind: "contact", limit: 100 }),
+        fetchCrmRecordPage<Extract<CrmPublicRecord, { kind: "company" }>>(workspaceId, { kind: "company", limit: 100 }),
+        fetchCrmRecordPage<Extract<CrmPublicRecord, { kind: "deal" }>>(workspaceId, { kind: "deal", limit: 100 }),
+      ]);
+      return { contacts: contacts.items, companies: companies.items, deals: deals.items };
+    },
+  );
+  const pageData = useMemo(() => dataFromRecords(collectionRecords(collection)), [collection]);
+  const mergedData = useMemo(() => mergeCrmData(
+    mergeCrmData(directoryData(directoriesResource.data ?? null), emailContextResource.data ?? { deals: [], contacts: [], companies: [] }),
+    pageData,
+  ), [directoriesResource.data, emailContextResource.data, pageData]);
+  const data: CrmData | null = collection || emailContextResource.data ? mergedData : null;
+
   const recordKey = `${crmKey}:record:${routeRecord?.id ?? "none"}`;
   const recordResource = useCachedResource(
     recordKey,
     () => routeRecord ? fetchCrmRecord(workspaceId, routeRecord.id) : Promise.resolve(null),
   );
   const recordBundle = routeRecord ? recordResource.data : null;
-  // Only a failure with nothing on screen is a load error.
-  const loadError =
-    (data === null && crm.error !== undefined) ||
-    (config === null && configResource.error !== undefined);
+  const loadError = collection === null && collectionResource.error !== undefined;
 
-  // Stable callback, not the resource object — see the note in tasks-surface.
-  const refreshCrm = crm.refresh;
+  const refreshCrm = collectionResource.refresh;
   const reload = useCallback(() => {
     void refreshCrm();
     void configResource.refresh();
-  }, [refreshCrm, configResource.refresh]);
+    void summaryResource.refresh();
+    void directoriesResource.refresh();
+  }, [refreshCrm, configResource.refresh, directoriesResource.refresh, summaryResource.refresh]);
 
   const [pendingApprovals, setPendingApprovals] = useState<PendingApprovalRow[]>([]);
   const [approvalsLoading, setApprovalsLoading] = useState(true);
@@ -212,25 +388,27 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
     return () => window.removeEventListener(APPROVALS_REFRESH_EVENT, handleRefresh);
   }, [reloadApprovals, workspaceId]);
 
-  /** Optimistic patch against the cached value (survives leaving the surface). */
+  /** Optimistic patch against only the loaded keysets. */
   const setData = useCallback(
     (updater: (previous: CrmData) => CrmData) => {
-      mutateSurfaceCache<CrmData>(crmKey, updater);
-    },
-    [crmKey],
-  );
-
-  // ── View state (URL is the source of truth) ───────────────────────────
-  const view = useMemo(() => crmViewFromSearch(searchParams), [searchParams]);
-  const setView = useCallback(
-    (patch: Partial<CrmViewState>) => {
-      const next = { ...view, ...patch };
-      const search = searchFromCrmView(next);
-      router.replace(search ? `${pathname}?${search}` : pathname, {
-        scroll: false,
+      mutateSurfaceCache<CrmCollectionPayload>(collectionKey, (previous) => {
+        const current = dataFromRecords(collectionRecords(previous));
+        const next = updater(current);
+        const rows = previous.section === "deals" ? next.deals
+          : previous.section === "contacts" ? next.contacts : next.companies;
+        if (previous.boardPages) {
+          return {
+            ...previous,
+            boardPages: Object.fromEntries(Object.entries(previous.boardPages).map(([stageId, page]) => [
+              stageId,
+              { ...page, items: page.items.map((item) => rows.find((row) => row.id === item.id) as Extract<CrmPublicRecord, { kind: "deal" }> ?? item) },
+            ])),
+          };
+        }
+        return previous.page ? { ...previous, page: { ...previous.page, items: rows as CrmPublicRecord[] } } : previous;
       });
     },
-    [view, router, pathname],
+    [collectionKey],
   );
   const collectionPath = crmCollectionHref(workspaceId);
   const recordHref = useCallback(
@@ -248,39 +426,19 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
 
   // ── Derived ───────────────────────────────────────────────────────────
   const now = useMemo(() => new Date(), []);
-  const deals = data?.deals ?? [];
-  const contacts = data?.contacts ?? [];
-  const companies = data?.companies ?? [];
+  const deals = pageData.deals;
+  const contacts = pageData.contacts;
+  const companies = pageData.companies;
+  const allDeals = data?.deals ?? [];
+  const allContacts = data?.contacts ?? [];
+  const allCompanies = data?.companies ?? [];
   const emailQueue = useMemo(
     () => (data ? crmEmailApprovalQueue(data, pendingApprovals) : []),
     [data, pendingApprovals],
   );
-  const companyNames = useMemo(() => companyNameById(companies), [companies]);
-  const contactNames = useMemo(() => contactNameById(contacts), [contacts]);
-  const selectedPipeline = useMemo<CrmPipeline | null>(() => {
-    if (!config || config.pipelines.length === 0) return null;
-    return (
-      config.pipelines.find((pipeline) => pipeline.id === view.pipeline) ??
-      config.pipelines.find((pipeline) => pipeline.isDefault) ??
-      config.pipelines[0]
-    );
-  }, [config, view.pipeline]);
-  const pipelineDeals = useMemo(
-    () =>
-      selectedPipeline
-        ? deals.filter((row) =>
-            row.pipelineId
-              ? row.pipelineId === selectedPipeline.id
-              : selectedPipeline.isDefault,
-          )
-        : [],
-    [deals, selectedPipeline],
-  );
-  const counts = useMemo(
-    () => crmQuickCounts(pipelineDeals, contacts, now),
-    [pipelineDeals, contacts, now],
-  );
-  const stats = useMemo(() => companyStats(contacts, deals), [contacts, deals]);
+  const companyNames = useMemo(() => companyNameById(allCompanies), [allCompanies]);
+  const contactNames = useMemo(() => contactNameById(allContacts), [allContacts]);
+  const counts = summaryResource.data?.attention ?? { overdue: 0, stale: 0, noAmount: 0, orphaned: 0 };
   const tagOptions = useMemo(
     () => crmTagOptions(contacts, companies),
     [contacts, companies],
@@ -299,11 +457,27 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
   );
   const sectionRows = view.section === "deals" ? deals : view.section === "contacts" ? contacts : companies;
   const referenceNames = useMemo(() => new Map([
-    ...contacts.map((row) => [row.id, row.name] as const),
-    ...companies.map((row) => [row.id, row.name] as const),
-    ...deals.map((row) => [row.id, row.name] as const),
-  ]), [contacts, companies, deals]);
+    ...(data?.contacts ?? []).map((row) => [row.id, row.name] as const),
+    ...(data?.companies ?? []).map((row) => [row.id, row.name] as const),
+    ...(data?.deals ?? []).map((row) => [row.id, row.name] as const),
+  ]), [data]);
   const groupableFields = sectionFields.filter((field) => field.fieldType !== "multi_select");
+  const columnRegistry = useMemo(
+    () => crmColumnRegistry(view.section, sectionFields),
+    [sectionFields, view.section],
+  );
+  const visibleColumns = useMemo(
+    () => normalizeCrmColumns(view.section, sectionFields, view.columns),
+    [sectionFields, view.columns, view.section],
+  );
+  const activeColumns = useMemo(
+    () => visibleColumns.flatMap((key) => columnRegistry.find((column) => column.key === key) ?? []),
+    [columnRegistry, visibleColumns],
+  );
+  const ownerNames = useMemo(
+    () => new Map(ownerOptions.map((owner) => [owner.id, owner.name])),
+    [ownerOptions],
+  );
   const selectedGroupField = view.group?.startsWith("cf:")
     ? groupableFields.find((field) => field.fieldKey === view.group?.slice(3)) ?? null
     : null;
@@ -318,10 +492,11 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
   const filteredDeals = useMemo(
     () =>
       sortDeals(
-        applyDealFilters(deals, view, companyNames, now, selectedPipeline),
+        applyDealFilters(deals, { ...view, q: debouncedSearch }, companyNames, now, selectedPipeline),
         view.sort,
+        view.direction,
       ),
-    [deals, view, companyNames, now, selectedPipeline],
+    [deals, view, debouncedSearch, companyNames, now, selectedPipeline],
   );
   // The board owns the closed fold itself (rail chips), so it reads the
   // filter WITHOUT the fold applied only when a stage/quick filter is off.
@@ -330,35 +505,32 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
       sortDeals(
         applyDealFilters(
           deals,
-          { ...view, closed: true },
+          { ...view, q: debouncedSearch, closed: true },
           companyNames,
           now,
           selectedPipeline,
         ),
         view.sort,
+        view.direction,
       ),
-    [deals, view, companyNames, now, selectedPipeline],
+    [deals, view, debouncedSearch, companyNames, now, selectedPipeline],
   );
   const filteredContacts = useMemo(
-    () => applyContactFilters(contacts, view),
-    [contacts, view],
+    () => applyContactFilters(contacts, { ...view, q: debouncedSearch }),
+    [contacts, view, debouncedSearch],
   );
   const filteredCompanies = useMemo(
-    () => applyCompanyFilters(companies, view),
-    [companies, view],
+    () => applyCompanyFilters(companies, { ...view, q: debouncedSearch }),
+    [companies, view, debouncedSearch],
   );
 
-  const openDealCount = useMemo(
-    () =>
-      selectedPipeline
-        ? pipelineDeals.filter(
-            (deal) =>
-              resolveDealPipelineStage(deal, selectedPipeline)?.category ===
-              "open",
-          ).length
-        : 0,
-    [pipelineDeals, selectedPipeline],
+  const stageSummary = useMemo(
+    () => new Map((summaryResource.data?.stages ?? []).map((stage) => [stage.stageId, stage])),
+    [summaryResource.data?.stages],
   );
+  const openDealCount = selectedPipeline?.stages
+    .filter((stage) => stage.category === "open")
+    .reduce((total, stage) => total + (stageSummary.get(stage.id)?.count ?? 0), 0) ?? 0;
 
   // ── Selection (table rows) ────────────────────────────────────────────
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -435,8 +607,62 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkError, setBulkError] = useState<string | null>(null);
   const [mutationError, setMutationError] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState<Set<string>>(new Set());
   const [configOpen, setConfigOpen] = useState(false);
   const [reportsOpen, setReportsOpen] = useState(false);
+
+  const loadMorePage = useCallback(async () => {
+    const payload = collectionResource.data;
+    if (!payload?.page?.hasMore || !payload.page.nextCursor || !collectionKey) return;
+    setLoadingMore((current) => new Set(current).add("table"));
+    setMutationError(null);
+    try {
+      const next = await fetchCrmRecordPage(workspaceId, {
+        ...payload.query,
+        cursor: payload.page.nextCursor,
+      });
+      mutateSurfaceCache<CrmCollectionPayload>(collectionKey, (current) => current.page ? {
+        ...current,
+        page: { ...next, items: appendCrmPage(current.page.items, next.items) },
+      } : current);
+    } catch {
+      setMutationError(t.r2.loadMoreFailed);
+    } finally {
+      setLoadingMore((current) => {
+        const next = new Set(current); next.delete("table"); return next;
+      });
+    }
+  }, [collectionKey, collectionResource.data, t.r2.loadMoreFailed, workspaceId]);
+
+  const loadMoreStage = useCallback(async (stageId: string) => {
+    const payload = collectionResource.data;
+    if (!payload?.boardPages) return;
+    const page = payload.boardPages[stageId];
+    if (!page?.hasMore || !page.nextCursor || !collectionKey) return;
+    setLoadingMore((current) => new Set(current).add(stageId));
+    setMutationError(null);
+    try {
+      const next = await fetchCrmRecordPage<Extract<CrmPublicRecord, { kind: "deal" }>>(workspaceId, {
+        ...payload.query,
+        kind: "deal",
+        stage: [stageId],
+        cursor: page.nextCursor,
+      });
+      mutateSurfaceCache<CrmCollectionPayload>(collectionKey, (current) => current.boardPages ? {
+        ...current,
+        boardPages: {
+          ...current.boardPages,
+          [stageId]: { ...next, items: appendCrmPage(current.boardPages[stageId]?.items ?? [], next.items) },
+        },
+      } : current);
+    } catch {
+      setMutationError(t.r2.loadMoreFailed);
+    } finally {
+      setLoadingMore((current) => {
+        const next = new Set(current); next.delete(stageId); return next;
+      });
+    }
+  }, [collectionKey, collectionResource.data, t.r2.loadMoreFailed, workspaceId]);
 
   const patchDeal = useCallback((id: string, patch: Partial<CrmDealRow>) => {
     setData((prev) => ({
@@ -484,6 +710,7 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
       try {
         const bundle = await updateCrmRecord(workspaceId, id, changes);
         reconcileRecord(bundle);
+        void summaryResource.refresh();
         setMutationError(null);
         requestBrainRefresh(workspaceId);
         return { ok: true };
@@ -493,7 +720,7 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
         return { ok: false, error };
       }
     },
-    [reconcileRecord, t.r2.updateFailed, workspaceId],
+    [reconcileRecord, summaryResource.refresh, t.r2.updateFailed, workspaceId],
   );
 
   const commits: RecordCommits = useMemo(
@@ -514,6 +741,7 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
             stage: legacyStageForPipelineStage(stage),
             probability: stage.probability,
           });
+          void summaryResource.refresh();
           setMutationError(null);
           if (routeRecord?.id === row.id) void recordResource.refresh();
           requestBrainRefresh(workspaceId);
@@ -545,7 +773,7 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
       companyTags: (row) => (tags) =>
         commitField(row.id, { tags }),
     }),
-    [commitField, config, patchDeal, recordResource.refresh, routeRecord?.id, t, workspaceId],
+    [commitField, config, patchDeal, recordResource.refresh, routeRecord?.id, summaryResource.refresh, t, workspaceId],
   );
 
   const archiveRecord = useCallback(async (ref: CrmRecordRef) => {
@@ -560,8 +788,9 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
     await setCrmRecordArchived(workspaceId, ref.row.id, true);
     closeRecord();
     await refreshCrm();
+    await summaryResource.refresh();
     requestBrainRefresh(workspaceId);
-  }, [closeRecord, t, workspaceId, refreshCrm]);
+  }, [closeRecord, t, workspaceId, refreshCrm, summaryResource.refresh]);
 
   /** Bulk = client loop over the per-row adjust wire (failed ids STAY
    *  SELECTED for a retry — the Reviews-queue contract; §1.6). */
@@ -597,10 +826,11 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
         }
       } finally {
         setBulkBusy(false);
+        void summaryResource.refresh();
         requestBrainRefresh(workspaceId);
       }
     },
-    [selectedVisible, bulkBusy, reconcileRecord, workspaceId, t],
+    [selectedVisible, bulkBusy, reconcileRecord, summaryResource.refresh, workspaceId, t],
   );
 
   const runBulkPipelineStage = useCallback(
@@ -640,6 +870,7 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
         }
       } finally {
         setBulkBusy(false);
+        void summaryResource.refresh();
         requestBrainRefresh(workspaceId);
       }
     }, [
@@ -648,6 +879,7 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
       bulkBusy,
       workspaceId,
       patchDeal,
+      summaryResource.refresh,
       t,
     ],
   );
@@ -666,14 +898,11 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
   };
   const sortLabels: Record<string, string> = {
     updated: t.sortUpdated,
+    name: t.sortName,
     amount: t.sortAmount,
     close: t.sortClose,
   };
-  const sectionCounts: Record<CrmSection, number> = {
-    deals: deals.length,
-    contacts: contacts.length,
-    companies: companies.length,
-  };
+  const sectionCounts = crmSectionCounts(summaryResource.data);
   const sectionQuicks: readonly CrmQuickFilter[] =
     view.section === "deals"
       ? DEAL_QUICK_FILTERS
@@ -681,7 +910,8 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
         ? CONTACT_QUICK_FILTERS
         : [];
 
-  const hasSelection = selectedVisible.length > 0 && view.view === "table";
+  const isTablePresentation = view.section !== "deals" || view.view === "table" || selectedGroupField !== null;
+  const hasSelection = selectedVisible.length > 0 && isTablePresentation;
   const today = localDateStr(now);
 
   // Property → value defs for the FilterBar (Notion-style funnel picker),
@@ -707,7 +937,7 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
             label: t.filterCompany,
             options: [
               { value: "none", label: t.noCompany },
-              ...companies.map((c) => ({ value: c.id, label: c.name })),
+              ...allCompanies.map((c) => ({ value: c.id, label: c.name })),
             ],
           },
         ]
@@ -737,9 +967,9 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
         options = [{ value: "true", label: t.r2.yes }, { value: "false", label: t.r2.no }];
       } else if (field.fieldType === "entity_reference") {
         options = [
-          ...(field.options.includes("person") ? contacts : []),
-          ...(field.options.includes("company") ? companies : []),
-          ...(field.options.includes("deal") ? deals : []),
+          ...(field.options.includes("person") ? allContacts : []),
+          ...(field.options.includes("company") ? allCompanies : []),
+          ...(field.options.includes("deal") ? allDeals : []),
         ].map((row) => ({ value: row.id, label: row.name }));
       } else {
         const values = new Set<string>();
@@ -803,13 +1033,16 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
                         custom: {},
                         group: null,
                         q: "",
+                        columns: [],
+                        sort: "updated",
+                        direction: "desc",
                       })
                     }
                   >
                     <span className="min-w-28 flex-1">
                       {sectionLabels[section]}
                     </span>
-                    {data !== null && (
+                    {summaryResource.data && (
                       <span className="tabular-nums text-muted-foreground">
                         {sectionCounts[section]}
                       </span>
@@ -850,6 +1083,9 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
                       custom: {},
                       group: null,
                       q: "",
+                      columns: [],
+                      sort: "updated",
+                      direction: "desc",
                     })
                   }
                   className={cn(
@@ -860,7 +1096,7 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
                   )}
                 >
                   {sectionLabels[section]}
-                  {data !== null && (
+                  {summaryResource.data && (
                     <span className="tabular-nums text-[11px] text-muted-foreground">
                       {sectionCounts[section]}
                     </span>
@@ -923,7 +1159,7 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
                   </SelectContent>
                 </Select>
               )}
-              {data !== null && (
+              {summaryResource.data && (
                 <span className="text-[12.5px] text-sidebar-foreground/70 max-lg:hidden">
                   {format(t.dealCountSummary, {
                     open: String(openDealCount),
@@ -1015,7 +1251,7 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
         {view.review === "email" ? (
           data === null ? (
             <div className="p-6 text-sm text-muted-foreground">
-              {crm.error !== undefined ? (
+              {emailContextResource.error !== undefined ? (
                 <span>
                   {t.loadFailed}{" "}
                   <button type="button" onClick={() => void refreshCrm()} className="underline hover:text-foreground">
@@ -1065,7 +1301,7 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
             count={selectedVisible.length}
             busy={bulkBusy}
             error={bulkError}
-            companies={companies}
+            companies={allCompanies}
             tagOptions={tagOptions}
             stages={selectedPipeline?.stages ?? []}
             owners={ownerOptions}
@@ -1165,15 +1401,44 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
               onSearch={(q) => setView({ q })}
               searchPlaceholder={t.searchPlaceholder}
               viewOptions={
-                (groupableFields.length > 0 || (view.section === "deals" && view.view === "table")) ? (
+                (groupableFields.length > 0 || isTablePresentation) ? (
                   <>
                     {groupableFields.length > 0 && <ViewOptionSection label={t.r2.groupBy}>
                       <ViewOptionRow label={t.r2.noGrouping} selected={!selectedGroupField} onPick={() => setView({ group: null })} />
                       {groupableFields.map((field) => <ViewOptionRow key={field.id} label={field.label} selected={selectedGroupField?.id === field.id} onPick={() => setView({ group: `cf:${field.fieldKey}`, view: "table" })} />)}
                     </ViewOptionSection>}
-                    {view.section === "deals" && view.view === "table" && <>
+                    {isTablePresentation && <>
+                      <ViewOptionSection label={t.r2.columns}>
+                        {columnRegistry.map((column) => (
+                          <ColumnOptionRow
+                            key={column.key}
+                            label={crmColumnLabel(column.key, sectionFields, t)}
+                            checked={visibleColumns.includes(column.key)}
+                            pinned={column.pinned}
+                            canMoveUp={visibleColumns.indexOf(column.key) > 1}
+                            canMoveDown={visibleColumns.includes(column.key) && visibleColumns.indexOf(column.key) < visibleColumns.length - 1}
+                            onToggle={() => {
+                              if (column.pinned) return;
+                              setView({
+                                columns: visibleColumns.includes(column.key)
+                                  ? visibleColumns.filter((key) => key !== column.key)
+                                  : [...visibleColumns, column.key],
+                              });
+                            }}
+                            onMove={(offset) => {
+                              const index = visibleColumns.indexOf(column.key);
+                              if (index < 1) return;
+                              const target = index + offset;
+                              if (target < 1 || target >= visibleColumns.length) return;
+                              const columns = [...visibleColumns];
+                              [columns[index], columns[target]] = [columns[target], columns[index]];
+                              setView({ columns });
+                            }}
+                          />
+                        ))}
+                      </ViewOptionSection>
                       <ViewOptionSection label={t.sortLabel}>
-                        {DEAL_SORT_KEYS.map((sKey) => (
+                        {(view.section === "deals" ? DEAL_SORT_KEYS : ["updated", "name"] as const).map((sKey) => (
                           <ViewOptionRow
                             key={sKey}
                             label={sortLabels[sKey] ?? sKey}
@@ -1182,6 +1447,11 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
                           />
                         ))}
                       </ViewOptionSection>
+                      <ViewOptionSection label={t.r2.sortDirection}>
+                        <ViewOptionRow label={t.r2.descending} selected={view.direction === "desc"} onPick={() => setView({ direction: "desc" })} />
+                        <ViewOptionRow label={t.r2.ascending} selected={view.direction === "asc"} onPick={() => setView({ direction: "asc" })} />
+                      </ViewOptionSection>
+                      {view.section === "deals" && (
                       <label className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-[13px] text-muted-foreground transition-colors hover:bg-muted">
                         <Checkbox
                           checked={view.closed}
@@ -1190,6 +1460,7 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
                         />
                         {t.showClosed}
                       </label>
+                      )}
                     </>}
                   </>
                 ) : undefined
@@ -1212,7 +1483,7 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
 
         {/* Body. */}
         <div className="min-h-0 flex-1 overflow-auto">
-          {data === null || config === null ? (
+          {collection === null ? (
             <div className="p-6 text-sm text-muted-foreground">
               {loadError ? (
                 <span>
@@ -1229,17 +1500,20 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
                 t.loading
               )}
             </div>
-          ) : !selectedPipeline ? (
+          ) : view.section === "deals" && !selectedPipeline ? (
             <div className="p-6 text-sm text-muted-foreground">
               {t.r2.noPipelines}
             </div>
           ) : view.section === "deals" && view.view === "board" && !selectedGroupField ? (
-            boardDeals.length === 0 && pipelineDeals.length === 0 ? (
+            (summaryResource.data?.totals.deals ?? 0) === 0 ? (
               <div className="p-6 text-sm text-muted-foreground">{t.emptyDeals}</div>
             ) : (
               <CrmBoard
                 rows={boardDeals}
-                pipeline={selectedPipeline}
+                pipeline={selectedPipeline!}
+                stageSummary={stageSummary}
+                pages={collectionResource.data?.boardPages ?? {}}
+                loadingMore={loadingMore}
                 companyNames={companyNames}
                 contactNames={contactNames}
                 showClosed={view.closed}
@@ -1250,15 +1524,20 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
                 onOpenRecord={(row) =>
                   openRecord("deal", row.id)
                 }
+                onLoadMore={(stageId) => void loadMoreStage(stageId)}
               />
             )
           ) : view.section === "deals" ? (
             <CrmGroupedRows rows={filteredDeals} field={selectedGroupField} referenceLabels={referenceNames} emptyLabel={t.r2.emptyValue} unavailableLabel={t.r2.referenceUnavailable} booleanLabels={{ true: t.r2.yes, false: t.r2.no }} render={(groupRows) => <DealsTable
               rows={groupRows}
+              columns={activeColumns}
+              fields={sectionFields}
+              ownerNames={ownerNames}
+              referenceNames={referenceNames}
               companyNames={companyNames}
               contactNames={contactNames}
               today={today}
-              pipeline={selectedPipeline}
+              pipeline={selectedPipeline!}
               selected={selected}
               onToggle={toggle}
               allSelected={allSelected}
@@ -1271,7 +1550,11 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
           ) : view.section === "contacts" ? (
             <CrmGroupedRows rows={filteredContacts} field={selectedGroupField} referenceLabels={referenceNames} emptyLabel={t.r2.emptyValue} unavailableLabel={t.r2.referenceUnavailable} booleanLabels={{ true: t.r2.yes, false: t.r2.no }} render={(groupRows) => <ContactsTable
               rows={groupRows}
-              companies={companies}
+              columns={activeColumns}
+              fields={sectionFields}
+              ownerNames={ownerNames}
+              referenceNames={referenceNames}
+              companies={allCompanies}
               selected={selected}
               onToggle={toggle}
               allSelected={allSelected}
@@ -1286,7 +1569,10 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
           ) : (
             <CrmGroupedRows rows={filteredCompanies} field={selectedGroupField} referenceLabels={referenceNames} emptyLabel={t.r2.emptyValue} unavailableLabel={t.r2.referenceUnavailable} booleanLabels={{ true: t.r2.yes, false: t.r2.no }} render={(groupRows) => <CompaniesTable
               rows={groupRows}
-              stats={stats}
+              columns={activeColumns}
+              fields={sectionFields}
+              ownerNames={ownerNames}
+              referenceNames={referenceNames}
               selected={selected}
               onToggle={toggle}
               allSelected={allSelected}
@@ -1298,6 +1584,17 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
               }
               empty={companies.length === 0 ? t.emptyCompanies : t.emptyFiltered}
             />}/>
+          )}
+          {!isBoardCollection && collectionResource.data?.page?.hasMore && (
+            <div className="flex justify-center border-t border-border/60 p-3">
+              <Button
+                variant="outline"
+                disabled={loadingMore.has("table")}
+                onClick={() => void loadMorePage()}
+              >
+                {loadingMore.has("table") ? t.r2.loadingMore : t.r2.loadMore}
+              </Button>
+            </div>
           )}
         </div>
           </>
@@ -1399,6 +1696,74 @@ function RecordRouteState({
 
 // ── Tables ──────────────────────────────────────────────────────────────
 
+type CrmPageDictionary = ReturnType<typeof useT>["crmPage"];
+
+function crmColumnLabel(
+  key: string,
+  fields: readonly CrmFieldDefinition[],
+  t: CrmPageDictionary,
+): string {
+  if (key.startsWith("cf:")) {
+    return fields.find((field) => field.fieldKey === key.slice(3))?.label ?? key.slice(3);
+  }
+  return ({
+    name: t.nameLabel,
+    stage: t.stageLabel,
+    company: t.companyLabel,
+    contact: t.contactLabel,
+    amount: t.amountLabel,
+    close: t.closeDateLabel,
+    owner: t.r2.owner,
+    source: t.r2.source,
+    updated: t.updatedLabel,
+    email: t.emailLabel,
+    phone: t.phoneLabel,
+    tags: t.tagsLabel,
+    domain: t.domainLabel,
+  } as Record<string, string>)[key] ?? key;
+}
+
+function ColumnOptionRow({
+  label,
+  checked,
+  pinned,
+  canMoveUp,
+  canMoveDown,
+  onToggle,
+  onMove,
+}: {
+  label: string;
+  checked: boolean;
+  pinned: boolean;
+  canMoveUp: boolean;
+  canMoveDown: boolean;
+  onToggle: () => void;
+  onMove: (offset: -1 | 1) => void;
+}) {
+  const t = useT().crmPage.r2;
+  return (
+    <div className="flex items-center gap-1 rounded-md px-2 py-1 text-[13px] text-muted-foreground hover:bg-muted">
+      <Checkbox
+        checked={checked}
+        disabled={pinned}
+        aria-label={label}
+        onCheckedChange={onToggle}
+      />
+      <button type="button" className="min-w-0 flex-1 truncate text-left" onClick={onToggle} disabled={pinned}>
+        {label}
+      </button>
+      {checked && !pinned ? <>
+        <button type="button" disabled={!canMoveUp} aria-label={`${t.moveUp}: ${label}`} onClick={() => onMove(-1)} className="rounded p-1 hover:bg-background disabled:opacity-30">
+          <ChevronUp className="size-3.5" aria-hidden />
+        </button>
+        <button type="button" disabled={!canMoveDown} aria-label={`${t.moveDown}: ${label}`} onClick={() => onMove(1)} className="rounded p-1 hover:bg-background disabled:opacity-30">
+          <ChevronDown className="size-3.5" aria-hidden />
+        </button>
+      </> : null}
+    </div>
+  );
+}
+
 function CrmGroupedRows<T extends { id: string; customFields?: Record<string, unknown> }>({
   rows,
   field,
@@ -1426,44 +1791,62 @@ function CrmGroupedRows<T extends { id: string; customFields?: Record<string, un
   </section>)}</div>;
 }
 
-// One grid template per table, shared by the header strip and the rows so
-// the columns can never drift apart.
-const DEAL_GRID =
-  "grid-cols-[28px_minmax(0,1fr)_130px_minmax(0,140px)_110px_105px_82px]";
-const CONTACT_GRID =
-  "grid-cols-[28px_minmax(0,1fr)_minmax(0,180px)_120px_minmax(0,150px)_110px_82px]";
-const COMPANY_GRID =
-  "grid-cols-[28px_minmax(0,1fr)_minmax(0,170px)_minmax(0,150px)_92px_92px_82px]";
+function crmGrid(columns: readonly CrmColumnDefinition[]): React.CSSProperties {
+  return {
+    gridTemplateColumns: `28px ${columns.map((column) =>
+      `minmax(${column.minWidth}px,${column.key === "name" ? "1.35fr" : "1fr"})`).join(" ")}`,
+  };
+}
 
-/** Quiet sticky column-header strip. */
-function TableHead({
-  grid,
-  labels,
-}: {
-  grid: string;
-  labels: (string | null)[];
+/** Quiet sticky column-header strip generated from the personal registry. */
+function TableHead({ columns, fields }: {
+  columns: readonly CrmColumnDefinition[];
+  fields: readonly CrmFieldDefinition[];
 }) {
+  const t = useT().crmPage;
   return (
     <div
-      className={cn(
-        "sticky top-0 z-10 grid items-center gap-1 border-b border-border/60 bg-background/95 px-4 py-1.5 backdrop-blur",
-        grid,
-      )}
+      className="sticky top-0 z-10 grid items-center gap-1 border-b border-border/60 bg-background/95 px-4 py-1.5 backdrop-blur"
+      style={crmGrid(columns)}
     >
-      {labels.map((label, i) => (
+      <span />
+      {columns.map((column) => (
         <span
-          key={i}
+          key={column.key}
           className="truncate text-[11px] font-medium uppercase tracking-wide text-muted-foreground/60"
         >
-          {label ?? ""}
+          {crmColumnLabel(column.key, fields, t)}
         </span>
       ))}
     </div>
   );
 }
 
+function CustomValue({
+  row,
+  column,
+  referenceNames,
+}: {
+  row: { customFields?: Record<string, unknown> };
+  column: CrmColumnDefinition;
+  referenceNames: Map<string, string>;
+}) {
+  const t = useT().crmPage.r2;
+  const raw = row.customFields?.[column.key.slice(3)];
+  const values = Array.isArray(raw) ? raw : raw === null || raw === undefined || raw === "" ? [] : [raw];
+  const rendered = values.map((value) => {
+    if (typeof value === "boolean") return value ? t.yes : t.no;
+    return referenceNames.get(String(value)) ?? String(value);
+  }).join(", ");
+  return <span className="truncate px-1.5 text-[12.5px] text-muted-foreground">{rendered || t.emptyValue}</span>;
+}
+
 function DealsTable({
   rows,
+  columns,
+  fields,
+  ownerNames,
+  referenceNames,
   companyNames,
   contactNames,
   today,
@@ -1478,6 +1861,10 @@ function DealsTable({
   empty,
 }: {
   rows: CrmDealRow[];
+  columns: readonly CrmColumnDefinition[];
+  fields: readonly CrmFieldDefinition[];
+  ownerNames: Map<string, string>;
+  referenceNames: Map<string, string>;
   companyNames: Map<string, string>;
   contactNames: Map<string, string>;
   today: string;
@@ -1495,19 +1882,8 @@ function DealsTable({
   if (rows.length === 0)
     return <div className="p-6 text-sm text-muted-foreground">{empty}</div>;
   return (
-    <div className="min-w-[720px] pb-2">
-      <TableHead
-        grid={DEAL_GRID}
-        labels={[
-          null,
-          t.nameLabel,
-          t.stageLabel,
-          t.companyLabel,
-          t.amountLabel,
-          t.closeDateLabel,
-          t.updatedLabel,
-        ]}
-      />
+    <div className="min-w-max pb-2">
+      <TableHead columns={columns} fields={fields} />
       {rows.map((row) => {
         const overdue =
           isOpenStage(row.stage) &&
@@ -1516,46 +1892,26 @@ function DealsTable({
         return (
           <div
             key={row.id}
-            className={cn(
-              "group/crm grid items-center gap-1 px-4 py-1.5 transition-colors",
-              DEAL_GRID,
-              selected.has(row.id) ? "bg-primary/5" : "hover:bg-muted/40",
-            )}
+            className={cn("group/crm grid items-center gap-1 px-4 py-1.5 transition-colors", selected.has(row.id) ? "bg-primary/5" : "hover:bg-muted/40")}
+            style={crmGrid(columns)}
           >
             <RowCheckbox
               checked={selected.has(row.id)}
               name={row.name}
               onToggle={() => onToggle(row.id)}
             />
-            <button
-              type="button"
-              onClick={() => onOpenRecord(row)}
-              title={t.openRecord}
-              className="truncate py-1 text-left text-[13.5px] font-medium text-foreground hover:underline"
-            >
-              {row.name}
-            </button>
-            <PipelineStageCell
-              stageId={resolveDealPipelineStage(row, pipeline)?.id ?? null}
-              stages={pipeline.stages}
-              onCommit={commits.dealPipelineStage(row)}
-            />
-            <span className="truncate text-[12.5px] text-muted-foreground">
-              {(row.companyId ? companyNames.get(row.companyId) : null) ??
-                (row.contactId ? contactNames.get(row.contactId) : null) ??
-                ""}
-            </span>
-            <AmountCell
-              value={row.amount}
-              currencyCode={row.currencyCode}
-              onCommit={commits.dealAmount(row)}
-            />
-            <CloseDateCell
-              value={row.closeDate}
-              overdue={overdue}
-              onCommit={commits.dealClose(row)}
-            />
-            <UpdatedCell iso={row.updatedAt} />
+            {columns.map((column) => {
+              if (column.source === "custom") return <CustomValue key={column.key} row={row} column={column} referenceNames={referenceNames} />;
+              if (column.key === "name") return <button key={column.key} type="button" onClick={() => onOpenRecord(row)} title={t.openRecord} className="truncate py-1 text-left text-[13.5px] font-medium text-foreground hover:underline">{row.name}</button>;
+              if (column.key === "stage") return <PipelineStageCell key={column.key} stageId={resolveDealPipelineStage(row, pipeline)?.id ?? null} stages={pipeline.stages} onCommit={commits.dealPipelineStage(row)} />;
+              if (column.key === "company") return <span key={column.key} className="truncate text-[12.5px] text-muted-foreground">{row.companyId ? companyNames.get(row.companyId) ?? "" : ""}</span>;
+              if (column.key === "contact") return <span key={column.key} className="truncate text-[12.5px] text-muted-foreground">{row.contactId ? contactNames.get(row.contactId) ?? "" : ""}</span>;
+              if (column.key === "amount") return <AmountCell key={column.key} value={row.amount} currencyCode={row.currencyCode} onCommit={commits.dealAmount(row)} />;
+              if (column.key === "close") return <CloseDateCell key={column.key} value={row.closeDate} overdue={overdue} onCommit={commits.dealClose(row)} />;
+              if (column.key === "owner") return <span key={column.key} className="truncate px-1.5 text-[12.5px] text-muted-foreground">{row.ownerId ? ownerNames.get(row.ownerId) ?? t.r2.memberUnavailable : t.r2.unassigned}</span>;
+              if (column.key === "source") return <span key={column.key} className="truncate px-1.5 text-[12.5px] text-muted-foreground">{row.source ?? t.noValue}</span>;
+              return <UpdatedCell key={column.key} iso={row.updatedAt} />;
+            })}
           </div>
         );
       })}
@@ -1571,6 +1927,10 @@ function DealsTable({
 
 function ContactsTable({
   rows,
+  columns,
+  fields,
+  ownerNames,
+  referenceNames,
   companies,
   selected,
   onToggle,
@@ -1582,6 +1942,10 @@ function ContactsTable({
   empty,
 }: {
   rows: CrmContactRow[];
+  columns: readonly CrmColumnDefinition[];
+  fields: readonly CrmFieldDefinition[];
+  ownerNames: Map<string, string>;
+  referenceNames: Map<string, string>;
   companies: readonly CrmCompanyRow[];
   selected: Set<string>;
   onToggle: (id: string) => void;
@@ -1596,62 +1960,29 @@ function ContactsTable({
   if (rows.length === 0)
     return <div className="p-6 text-sm text-muted-foreground">{empty}</div>;
   return (
-    <div className="min-w-[720px] pb-2">
-      <TableHead
-        grid={CONTACT_GRID}
-        labels={[
-          null,
-          t.nameLabel,
-          t.emailLabel,
-          t.phoneLabel,
-          t.companyLabel,
-          t.tagsLabel,
-          t.updatedLabel,
-        ]}
-      />
+    <div className="min-w-max pb-2">
+      <TableHead columns={columns} fields={fields} />
       {rows.map((row) => (
         <div
           key={row.id}
-          className={cn(
-            "group/crm grid items-center gap-1 px-4 py-1.5 transition-colors",
-            CONTACT_GRID,
-            selected.has(row.id) ? "bg-primary/5" : "hover:bg-muted/40",
-          )}
+          className={cn("group/crm grid items-center gap-1 px-4 py-1.5 transition-colors", selected.has(row.id) ? "bg-primary/5" : "hover:bg-muted/40")}
+          style={crmGrid(columns)}
         >
           <RowCheckbox
             checked={selected.has(row.id)}
             name={row.name}
             onToggle={() => onToggle(row.id)}
           />
-          <button
-            type="button"
-            onClick={() => onOpenRecord(row)}
-            title={t.openRecord}
-            className="truncate py-1 text-left text-[13.5px] font-medium text-foreground hover:underline"
-          >
-            {row.name}
-          </button>
-          <TextFieldCell
-            value={row.email}
-            placeholder={t.noValue}
-            ariaLabel={t.emailLabel}
-            inputType="email"
-            onCommit={commits.contactEmail(row)}
-          />
-          <TextFieldCell
-            value={row.phone}
-            placeholder={t.noValue}
-            ariaLabel={t.phoneLabel}
-            inputType="tel"
-            onCommit={commits.contactPhone(row)}
-          />
-          <CompanyCell
-            companyId={row.companyId}
-            companies={companies}
-            onCommit={commits.contactCompany(row)}
-          />
-          <TagsCell tags={row.tags} onCommit={commits.contactTags(row)} />
-          <UpdatedCell iso={row.updatedAt} />
+          {columns.map((column) => {
+            if (column.source === "custom") return <CustomValue key={column.key} row={row} column={column} referenceNames={referenceNames} />;
+            if (column.key === "name") return <button key={column.key} type="button" onClick={() => onOpenRecord(row)} title={t.openRecord} className="truncate py-1 text-left text-[13.5px] font-medium text-foreground hover:underline">{row.name}</button>;
+            if (column.key === "email") return <TextFieldCell key={column.key} value={row.email} placeholder={t.noValue} ariaLabel={t.emailLabel} inputType="email" onCommit={commits.contactEmail(row)} />;
+            if (column.key === "phone") return <TextFieldCell key={column.key} value={row.phone} placeholder={t.noValue} ariaLabel={t.phoneLabel} inputType="tel" onCommit={commits.contactPhone(row)} />;
+            if (column.key === "company") return <CompanyCell key={column.key} companyId={row.companyId} companies={companies} onCommit={commits.contactCompany(row)} />;
+            if (column.key === "tags") return <TagsCell key={column.key} tags={row.tags} onCommit={commits.contactTags(row)} />;
+            if (column.key === "owner") return <span key={column.key} className="truncate px-1.5 text-[12.5px] text-muted-foreground">{row.ownerId ? ownerNames.get(row.ownerId) ?? t.r2.memberUnavailable : t.r2.unassigned}</span>;
+            return <UpdatedCell key={column.key} iso={row.updatedAt} />;
+          })}
         </div>
       ))}
       <SelectAllFooter
@@ -1666,7 +1997,10 @@ function ContactsTable({
 
 function CompaniesTable({
   rows,
-  stats,
+  columns,
+  fields,
+  ownerNames,
+  referenceNames,
   selected,
   onToggle,
   allSelected,
@@ -1677,7 +2011,10 @@ function CompaniesTable({
   empty,
 }: {
   rows: CrmCompanyRow[];
-  stats: Map<string, { contacts: number; openDeals: number }>;
+  columns: readonly CrmColumnDefinition[];
+  fields: readonly CrmFieldDefinition[];
+  ownerNames: Map<string, string>;
+  referenceNames: Map<string, string>;
   selected: Set<string>;
   onToggle: (id: string) => void;
   allSelected: boolean;
@@ -1691,60 +2028,29 @@ function CompaniesTable({
   if (rows.length === 0)
     return <div className="p-6 text-sm text-muted-foreground">{empty}</div>;
   return (
-    <div className="min-w-[680px] pb-2">
-      <TableHead
-        grid={COMPANY_GRID}
-        labels={[
-          null,
-          t.nameLabel,
-          t.domainLabel,
-          t.tagsLabel,
-          t.sectionContacts,
-          t.sectionDeals,
-          t.updatedLabel,
-        ]}
-      />
-      {rows.map((row) => {
-        const s = stats.get(row.id) ?? { contacts: 0, openDeals: 0 };
-        return (
+    <div className="min-w-max pb-2">
+      <TableHead columns={columns} fields={fields} />
+      {rows.map((row) => (
           <div
             key={row.id}
-            className={cn(
-              "group/crm grid items-center gap-1 px-4 py-1.5 transition-colors",
-              COMPANY_GRID,
-              selected.has(row.id) ? "bg-primary/5" : "hover:bg-muted/40",
-            )}
+            className={cn("group/crm grid items-center gap-1 px-4 py-1.5 transition-colors", selected.has(row.id) ? "bg-primary/5" : "hover:bg-muted/40")}
+            style={crmGrid(columns)}
           >
             <RowCheckbox
               checked={selected.has(row.id)}
               name={row.name}
               onToggle={() => onToggle(row.id)}
             />
-            <button
-              type="button"
-              onClick={() => onOpenRecord(row)}
-              title={t.openRecord}
-              className="truncate py-1 text-left text-[13.5px] font-medium text-foreground hover:underline"
-            >
-              {row.name}
-            </button>
-            <TextFieldCell
-              value={row.domain}
-              placeholder={t.noValue}
-              ariaLabel={t.domainLabel}
-              onCommit={commits.companyDomain(row)}
-            />
-            <TagsCell tags={row.tags} onCommit={commits.companyTags(row)} />
-            <span className="px-1.5 text-[12.5px] tabular-nums text-muted-foreground">
-              {s.contacts}
-            </span>
-            <span className="px-1.5 text-[12.5px] tabular-nums text-muted-foreground">
-              {s.openDeals}
-            </span>
-            <UpdatedCell iso={row.updatedAt} />
+            {columns.map((column) => {
+              if (column.source === "custom") return <CustomValue key={column.key} row={row} column={column} referenceNames={referenceNames} />;
+              if (column.key === "name") return <button key={column.key} type="button" onClick={() => onOpenRecord(row)} title={t.openRecord} className="truncate py-1 text-left text-[13.5px] font-medium text-foreground hover:underline">{row.name}</button>;
+              if (column.key === "domain") return <TextFieldCell key={column.key} value={row.domain} placeholder={t.noValue} ariaLabel={t.domainLabel} onCommit={commits.companyDomain(row)} />;
+              if (column.key === "tags") return <TagsCell key={column.key} tags={row.tags} onCommit={commits.companyTags(row)} />;
+              if (column.key === "owner") return <span key={column.key} className="truncate px-1.5 text-[12.5px] text-muted-foreground">{row.ownerId ? ownerNames.get(row.ownerId) ?? t.r2.memberUnavailable : t.r2.unassigned}</span>;
+              return <UpdatedCell key={column.key} iso={row.updatedAt} />;
+            })}
           </div>
-        );
-      })}
+      ))}
       <SelectAllFooter
         allSelected={allSelected}
         hasSelection={hasSelection}
