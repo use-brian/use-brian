@@ -17,6 +17,7 @@ import {
   readOperatorApp,
   readHomeAppLocation,
   reorderHomeApps,
+  sidebarSurfaceForHome,
   writeOperatorApp,
   writeHomeAppLocation,
 } from "../operator-apps";
@@ -55,6 +56,18 @@ describe("[COMP:app-web/operator-app-bar] operator app registry", () => {
     // not the segment, so the surface map deliberately says nothing.
     expect(operatorAppFromSurface("apps")).toBeNull();
     expect(operatorAppFromSurface(null)).toBeNull();
+  });
+
+  it("keeps the selected app sidebar visible while Suggested owns the pane", () => {
+    // The briefing route is always /p?suggested=1. Its routed surface alone
+    // would either show Page navigation for every app or, as before this fix,
+    // force the entire app-specific sidebar body to disappear.
+    expect(sidebarSurfaceForHome("p", "page", true)).toBe("p");
+    expect(sidebarSurfaceForHome("p", "office", true)).toBe("office");
+    expect(sidebarSurfaceForHome("p", "tasks", true)).toBe("tasks");
+    expect(sidebarSurfaceForHome("p", "custom:app-1", true)).toBe("apps");
+    // Ordinary routes remain authoritative when the briefing is closed.
+    expect(sidebarSurfaceForHome("brain", "page", false)).toBe("brain");
   });
 
   it("builds each app's route", () => {

@@ -17,6 +17,7 @@
     "test": "turbo run test",
     "test:integration": "turbo run test:integration",
     "smoke": "pnpm --filter @use-brian/core smoke",
+    "release:browser-extension": "scripts/publish-browser-extension.sh",
     "eval": "pnpm --filter @use-brian/api eval"
   },
   "devDependencies": {

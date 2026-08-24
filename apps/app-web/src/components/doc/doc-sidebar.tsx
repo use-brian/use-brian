@@ -79,7 +79,10 @@ import {
 } from "lucide-react";
 import type { WorkspaceSurface } from "@/lib/doc-page-url";
 import type { CustomHomeApp } from "@/lib/api/home-apps";
-import type { HomeAppEntry } from "@/lib/operator-apps";
+import {
+  sidebarSurfaceForHome,
+  type HomeAppEntry,
+} from "@/lib/operator-apps";
 import { OperatorAppBar } from "./operator-app-bar";
 import {
   DropdownMenu,
@@ -200,7 +203,7 @@ type Props = {
   /** Active strip entry. On the explicit Suggested landing this remains the
    *  cached app underneath the briefing rather than pretending Page was used. */
   activeOperatorApp: HomeAppEntry | null;
-  /** Suppresses every app-specific sidebar body while the briefing is open. */
+  /** Keeps the sticky app's sidebar body mounted while the briefing is open. */
   suggestedOpen: boolean;
   /**
    * Studio cold-start nudge: `true` while the workspace has no connected
@@ -264,6 +267,15 @@ export function DocSidebar(props: Props) {
   // in the bundled app when offline. No-op on web/thin (gate keeps it false).
   const offline = useIsOffline();
   const { workspaceId, saved, drafts, activeId } = props;
+  const activeOperatorApp = props.activeOperatorApp;
+  // Suggested always routes through `/p`, but it is only borrowing Page's
+  // content pane. Keep the sticky Home app's sidebar body underneath it so the
+  // first daily landing cannot look like the sidebar failed to load.
+  const sidebarSurface = sidebarSurfaceForHome(
+    props.activeSurface,
+    activeOperatorApp,
+    props.suggestedOpen,
+  );
   // Hover/focus on a surface icon starts that surface's route prefetch AND its
   // landing fetch, so the click lands on work already in flight. See
   // `lib/surface-prefetch.ts`.
@@ -308,11 +320,11 @@ export function DocSidebar(props: Props) {
   const [query, setQuery] = useState("");
   const q = query.trim().toLowerCase();
   useEffect(() => {
-    if (props.activeSurface !== "p" || props.suggestedOpen) {
+    if (sidebarSurface !== "p") {
       setSearchOpen(false);
       setQuery("");
     }
-  }, [props.activeSurface, props.suggestedOpen]);
+  }, [sidebarSurface]);
 
   // ── One labeled pill at a time (keeps the row inside the ~240px bar) ──
   // The active surface is normally THE pill (Notion-style "current section").
@@ -329,7 +341,6 @@ export function DocSidebar(props: Props) {
   const surfacePill = (s: WorkspaceSurface) => surfaceActive(s) && !utilityPillOpen;
   /** Home is the operator hub: it lights up for ANY operator-app surface
    *  (Page / Tasks / Feed) — the app-bar row below shows which. */
-  const activeOperatorApp = props.activeOperatorApp;
   const homeActive = activeOperatorApp !== null;
   const homePill = homeActive && !utilityPillOpen;
   const matches = useCallback(
@@ -698,7 +709,7 @@ export function DocSidebar(props: Props) {
           </button>
         </Tooltip>
         {/* Search filters the page tree, so it's a Home-only utility. */}
-        {props.activeSurface === "p" && !props.suggestedOpen && (
+        {sidebarSurface === "p" && (
           <Tooltip label={t.iconSearch}>
             <button
               type="button"
@@ -743,7 +754,7 @@ export function DocSidebar(props: Props) {
       />
 
       {/* Search input — revealed by the Search icon (Home only). */}
-      {searchOpen && props.activeSurface === "p" && !props.suggestedOpen && (
+      {searchOpen && sidebarSurface === "p" && (
         <div className="px-2 pb-2">
           <input
             type="text"
@@ -764,33 +775,34 @@ export function DocSidebar(props: Props) {
           <HomeDock workspaceId={workspaceId} />
         ) : null}
 
-        {/* Surface-aware body. The page tree (Favorites / Drafts / search) shows
-            ONLY on Home (`'p'`); Office / Brain / Studio / Workflow / Tasks /
-            CRM / Browsers / Chat each swap in their own panel; every other
-            surface (approvals, knowledge-base, root) renders nothing here. */}
-        {!props.suggestedOpen && props.activeSurface === "office" ? (
+        {/* Surface-aware body. Suggested borrows `/p` for its content pane but
+            resolves this body from the sticky Home app, so first load keeps the
+            selected app's navigation visible. Page shows the page tree; Office
+            / Brain / Studio / Workflow / Tasks / CRM / Browsers / Chat swap in
+            their own panel; every other surface renders nothing here. */}
+        {sidebarSurface === "office" ? (
           <OfficeSidebarPanel workspaceId={workspaceId} />
-        ) : props.activeSurface === "brain" ? (
+        ) : sidebarSurface === "brain" ? (
           <BrainSidebarPanel workspaceId={workspaceId} />
-        ) : props.activeSurface === "studio" ? (
+        ) : sidebarSurface === "studio" ? (
           <StudioSidebarPanel workspaceId={workspaceId} />
-        ) : props.activeSurface === "workflow" ? (
+        ) : sidebarSurface === "workflow" ? (
           <WorkflowSidebarPanel workspaceId={workspaceId} />
-        ) : props.activeSurface === "feed" ? (
+        ) : sidebarSurface === "feed" ? (
           <FeedSidebarPanel workspaceId={workspaceId} />
-        ) : props.activeSurface === "tasks" ? (
+        ) : sidebarSurface === "tasks" ? (
           <TasksSidebarPanel workspaceId={workspaceId} />
-        ) : props.activeSurface === "crm" ? (
+        ) : sidebarSurface === "crm" ? (
           <CrmSidebarPanel workspaceId={workspaceId} />
-        ) : props.activeSurface === "computer" ? (
+        ) : sidebarSurface === "computer" ? (
           <BrowsersSidebarPanel workspaceId={workspaceId} />
-        ) : props.activeSurface === "chat" ? (
+        ) : sidebarSurface === "chat" ? (
           <ChatSidebarPanel workspaceId={workspaceId} />
-        ) : props.activeSurface === "shopify" ? (
+        ) : sidebarSurface === "shopify" ? (
           <ShopifySidebarPanel workspaceId={workspaceId} />
         ) : null}
 
-        {!props.suggestedOpen && props.activeSurface === "p" && (
+        {sidebarSurface === "p" && (
           <>
         {/* Search mode — flat hit lists (saved, then drafts). Nesting is
             dropped here on purpose so a buried match isn't hidden under a

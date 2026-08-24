@@ -2377,7 +2377,10 @@ html[data-vt-back="true"]::view-transition-new(root) {
 .is-canvas-desktop {
   /* Horizontal space the macOS traffic lights occupy in the top-left corner.
      Three ~12px buttons span ~x=14..66; 4.75rem (76px) clears them with a small
-     gap. The sidebar's first row is indented by this so the lights share it. */
+     gap at 100% page zoom. The pre-paint script + persistent WorkspaceChrome
+     override this with 76 / zoomFactor CSS px because the native lights do not
+     participate in Chromium page zoom. The sidebar's first row is indented by
+     this so the lights share it. */
   --doc-titlebar-lights: 4.75rem;
 }
 /* Windows and Linux keep a standard OS frame (apps/app-desktop branches

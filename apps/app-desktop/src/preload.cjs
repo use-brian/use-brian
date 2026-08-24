@@ -19,13 +19,18 @@
 //
 // Spec: docs/architecture/features/app-desktop.md → "Sign-in landing" + "Sign-out";
 //       docs/plans/canvas-desktop-bundled-offline.md → Phase 1 ("Remaining wiring").
-const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer, webFrame } = require("electron");
 
 /** @type {Record<string, unknown>} */
 const bridge = {
   // The host OS, so app-web can gate macOS-only chrome (e.g. the traffic-light
   // inset in `.is-canvas-desktop`) without shipping a new desktop build.
   platform: process.platform,
+  // Native macOS traffic lights stay in window coordinates while page zoom
+  // scales app-web's CSS pixels. Expose only the current numeric factor so the
+  // workspace chrome can keep its 76px clearance invariant. `webFrame` is used
+  // here in preload because the sandboxed renderer cannot import Electron.
+  getZoomFactor: () => webFrame.getZoomFactor(),
   // Local/self-hosted targets may put their browser-facing API on a separate
   // gateway-protected origin. The renderer uses this non-secret marker to opt
   // REST/SSE into Chromium credentials so that origin's gateway cookie is sent.

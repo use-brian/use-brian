@@ -61,6 +61,11 @@ import { useOfflineSync } from "@/lib/offline/use-offline-sync";
 import { useWorkspaceEvents } from "@/lib/workspace-events";
 import { cn } from "@/lib/utils";
 import { CHAT_SEED_EVENT, type ChatSeed } from "@/lib/chat-seed";
+import { desktopBridge } from "@/lib/desktop-auth-source";
+import {
+  desktopTitlebarInsetCssPx,
+  resolveDesktopZoomFactor,
+} from "@/lib/desktop-titlebar";
 import { DocSidebar } from "./doc-sidebar";
 import { InboxPanel } from "./inbox-panel";
 import { useSidebarData } from "./doc-sidebar-data";
@@ -118,6 +123,55 @@ export function WorkspaceChrome({
   // their existing listeners. Mounted on the chrome so every surface —
   // workflow, approvals, brain, skills — stays live without its own stream.
   useWorkspaceEvents(workspaceId);
+
+  // Keep macOS native traffic lights and the zoomable web chrome in the same
+  // coordinate system. The three OS buttons stay fixed when Electron's View
+  // menu changes page zoom, so a static 4.75rem inset grows into a large gap at
+  // high zoom and shrinks into an overlap at low zoom. The exact factor comes
+  // from new preloads; outer/inner geometry covers older frameless shells.
+  // WorkspaceChrome persists across every workspace surface, so one listener
+  // keeps the sidebar, collapsed topbars, and mobile-menu clearance aligned.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const desktop = desktopBridge();
+    if (!desktop) return;
+
+    const root = document.documentElement;
+    root.classList.add("is-canvas-desktop");
+    if (desktop.platform && desktop.platform !== "darwin") {
+      root.classList.add("is-canvas-desktop-standard-frame");
+      root.style.removeProperty("--doc-titlebar-lights");
+      return;
+    }
+    root.classList.remove("is-canvas-desktop-standard-frame");
+    const getZoomFactor = desktop.getZoomFactor;
+
+    function syncTitlebarInset() {
+      let reported: number | undefined;
+      try {
+        reported = getZoomFactor?.();
+      } catch {
+        // A stale/partially upgraded bridge falls through to window geometry.
+      }
+      const zoomFactor = resolveDesktopZoomFactor(reported, {
+        outerWidth: window.outerWidth,
+        innerWidth: window.innerWidth,
+      });
+      root.style.setProperty(
+        "--doc-titlebar-lights",
+        `${desktopTitlebarInsetCssPx(zoomFactor)}px`,
+      );
+    }
+
+    syncTitlebarInset();
+    window.addEventListener("resize", syncTitlebarInset);
+    window.visualViewport?.addEventListener("resize", syncTitlebarInset);
+    return () => {
+      window.removeEventListener("resize", syncTitlebarInset);
+      window.visualViewport?.removeEventListener("resize", syncTitlebarInset);
+    };
+  }, []);
+
   const activeSurface = surfaceFromPathname(pathname);
   // Views that embed their OWN chat take a suppression hold. The full Chat app
   // is route-known and hides the dock directly: a second launcher there can
