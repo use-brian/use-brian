@@ -14,11 +14,10 @@
  * the bulk bar (client loop over the per-row adjust wire — no server bulk
  * lane yet, §8 Phase 4).
  *
- * State model: the URL is the single source of truth for the view
+ * State model: the URL is the single source of truth for the view and record
  * (`crm-view.ts` codec) — the sidebar panel and the Home dock card
- * (`?filter=overdue`) deep-link into it. Mutations ride the brain-inbox
- * adjust wire (`adjustBrainRow`; CRM adjusts are IN PLACE — the id never
- * changes); stage commits route through `setDealStage` server-side.
+ * (`?filter=overdue`) deep-link into it. Canonical field changes use the CRM
+ * record PATCH boundary; stage commits retain the dedicated stage route.
  *
  * Spec: docs/architecture/features/crm.md → "Operator surface".
  * [COMP:app-web/crm-surface]
@@ -51,15 +50,13 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
-  adjustBrainRow,
-  type AdjustMemoryChanges,
-} from "@/lib/api/brain-inbox";
-import {
+  fetchCrmRecord,
   fetchCrmConfig,
   fetchWorkspaceCrm,
   isOpenStage,
   setCrmPipelineStage,
   setCrmRecordArchived,
+  updateCrmRecord,
   type CrmCompanyRow,
   type CrmContactRow,
   type CrmData,
@@ -67,6 +64,7 @@ import {
   type CrmFieldDefinition,
   type CrmPipeline,
   type CrmPipelineStage,
+  type CrmRecordBundle,
 } from "@/lib/api/crm";
 import {
   applyCompanyFilters,
@@ -76,6 +74,9 @@ import {
   companyStats,
   contactNameById,
   crmQuickCounts,
+  crmCollectionHref,
+  crmRecordHref,
+  crmRecordMatchesRoute,
   crmTagOptions,
   CRM_EMPTY_CUSTOM_VALUE,
   groupRowsByCustomField,
@@ -134,7 +135,12 @@ const NONE = "__none__";
 
 type CrmPrimitive = "deal" | "contact" | "company";
 
-export function CrmSurface({ workspaceId }: { workspaceId: string }) {
+export type CrmRouteRecord = { kind: CrmPrimitive; id: string };
+
+export function CrmSurface({ workspaceId, routeRecord = null }: {
+  workspaceId: string;
+  routeRecord?: CrmRouteRecord | null;
+}) {
   const t = useT().crmPage;
   const { role } = useWorkspaceContext();
   const router = useRouter();
@@ -151,6 +157,12 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
   const configKey = `${crmKey}:config`;
   const configResource = useCachedResource(configKey, () => fetchCrmConfig(workspaceId));
   const config = configResource.data ?? null;
+  const recordKey = `${crmKey}:record:${routeRecord?.id ?? "none"}`;
+  const recordResource = useCachedResource(
+    recordKey,
+    () => routeRecord ? fetchCrmRecord(workspaceId, routeRecord.id) : Promise.resolve(null),
+  );
+  const recordBundle = routeRecord ? recordResource.data : null;
   // Only a failure with nothing on screen is a load error.
   const loadError =
     (data === null && crm.error !== undefined) ||
@@ -209,6 +221,19 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
     },
     [view, router, pathname],
   );
+  const collectionPath = crmCollectionHref(workspaceId);
+  const recordHref = useCallback(
+    (kind: CrmPrimitive, id: string, search = searchParams.toString()) =>
+      crmRecordHref(workspaceId, kind, id, search),
+    [searchParams, workspaceId],
+  );
+  const openRecord = useCallback((kind: CrmPrimitive, id: string, search?: string) => {
+    router.push(recordHref(kind, id, search), { scroll: false });
+  }, [recordHref, router]);
+  const closeRecord = useCallback(() => {
+    const search = searchParams.toString();
+    router.push(crmCollectionHref(workspaceId, search), { scroll: false });
+  }, [router, searchParams, workspaceId]);
 
   // ── Derived ───────────────────────────────────────────────────────────
   const now = useMemo(() => new Date(), []);
@@ -353,25 +378,40 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
     );
   }, [allSelected, visibleRows]);
 
-  // ── Record detail ─────────────────────────────────────────────────────
-  const [openRecord, setOpenRecord] = useState<{
-    kind: CrmPrimitive;
-    id: string;
-  } | null>(null);
-  // Re-derive the record from fresh data so inline patches show live.
+  // ── Record detail (canonical URL + cold record resource) ──────────────
   const record: CrmRecordRef | null = useMemo(() => {
-    if (!openRecord || !data) return null;
-    if (openRecord.kind === "deal") {
-      const row = data.deals.find((d) => d.id === openRecord.id);
-      return row ? { kind: "deal", row } : null;
-    }
-    if (openRecord.kind === "contact") {
-      const row = data.contacts.find((c) => c.id === openRecord.id);
-      return row ? { kind: "contact", row } : null;
-    }
-    const row = data.companies.find((c) => c.id === openRecord.id);
-    return row ? { kind: "company", row } : null;
-  }, [openRecord, data]);
+    if (!routeRecord || !crmRecordMatchesRoute(recordBundle, routeRecord.kind, routeRecord.id)) return null;
+    const row = recordBundle.record;
+    if (row.kind === "deal") return { kind: "deal", row };
+    if (row.kind === "contact") return { kind: "contact", row };
+    return { kind: "company", row };
+  }, [recordBundle, routeRecord]);
+  const detailData = useMemo<CrmData>(() => {
+    const base = data ?? { deals: [], contacts: [], companies: [] };
+    if (!recordBundle) return base;
+    const merge = <T extends { id: string }>(...groups: readonly T[][]): T[] => {
+      const rows = new Map<string, T>();
+      for (const group of groups) for (const row of group) rows.set(row.id, row);
+      return [...rows.values()];
+    };
+    return {
+      deals: merge(
+        base.deals,
+        recordBundle.relationships.deals,
+        recordBundle.record.kind === "deal" ? [recordBundle.record] : [],
+      ),
+      contacts: merge(
+        base.contacts,
+        recordBundle.relationships.contacts,
+        recordBundle.record.kind === "contact" ? [recordBundle.record] : [],
+      ),
+      companies: merge(
+        base.companies,
+        recordBundle.relationships.companies,
+        recordBundle.record.kind === "company" ? [recordBundle.record] : [],
+      ),
+    };
+  }, [data, recordBundle]);
 
   // ── Mutations (in-place adjusts) ──────────────────────────────────────
   const [bulkBusy, setBulkBusy] = useState(false);
@@ -407,31 +447,42 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
     [],
   );
 
-  /** One inline-cell commit: adjust (in place) + local patch + repaint. */
+  const reconcileRecord = useCallback((bundle: CrmRecordBundle) => {
+    const next = bundle.record;
+    if (next.kind === "deal") patchDeal(next.id, next);
+    else if (next.kind === "contact") patchContact(next.id, next);
+    else patchCompany(next.id, next);
+    if (routeRecord?.id === next.id) {
+      mutateSurfaceCache<CrmRecordBundle | null>(recordKey, () => bundle);
+    }
+  }, [patchCompany, patchContact, patchDeal, recordKey, routeRecord?.id]);
+
+  /** One canonical CRM field commit, reconciled from the server record. */
   const commitField = useCallback(
     async (
-      primitive: CrmPrimitive,
       id: string,
-      changes: AdjustMemoryChanges,
-      apply: () => void,
+      changes: Record<string, unknown>,
     ): Promise<{ ok: boolean; error?: string }> => {
-      const result = await adjustBrainRow(workspaceId, primitive, id, changes);
-      if (!result.ok) return { ok: false, error: result.error };
-      apply();
-      requestBrainRefresh(workspaceId);
-      return { ok: true };
+      try {
+        const bundle = await updateCrmRecord(workspaceId, id, changes);
+        reconcileRecord(bundle);
+        setMutationError(null);
+        requestBrainRefresh(workspaceId);
+        return { ok: true };
+      } catch (cause) {
+        const error = cause instanceof Error ? cause.message : t.r2.updateFailed;
+        setMutationError(error);
+        return { ok: false, error };
+      }
     },
-    [workspaceId],
+    [reconcileRecord, t.r2.updateFailed, workspaceId],
   );
 
   const commits: RecordCommits = useMemo(
     () => ({
       rename: (ref) => (name) =>
-        commitField(ref.kind, ref.row.id, { display_name: name }, () => {
-          if (ref.kind === "deal") patchDeal(ref.row.id, { name });
-          else if (ref.kind === "contact") patchContact(ref.row.id, { name });
-          else patchCompany(ref.row.id, { name });
-        }),
+        commitField(ref.row.id, { name }),
+      owner: (ref) => (ownerId) => commitField(ref.row.id, { ownerId }),
       dealPipelineStage: (row) => async (stageId) => {
         const stage = config?.pipelines
           .flatMap((pipeline) => pipeline.stages)
@@ -446,6 +497,7 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
             probability: stage.probability,
           });
           setMutationError(null);
+          if (routeRecord?.id === row.id) void recordResource.refresh();
           requestBrainRefresh(workspaceId);
           return { ok: true };
         } catch (cause) {
@@ -456,39 +508,26 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
         }
       },
       dealAmount: (row) => (amount) =>
-        commitField("deal", row.id, { amount }, () =>
-          patchDeal(row.id, { amount }),
-        ),
-      dealClose: (row) => (close_date) =>
-        commitField("deal", row.id, { close_date }, () =>
-          patchDeal(row.id, { closeDate: close_date }),
-        ),
+        commitField(row.id, { amount }),
+      dealClose: (row) => (closeDate) => commitField(row.id, { closeDate }),
+      dealCompany: (row) => (companyId) => commitField(row.id, { companyId }),
+      dealContact: (row) => (contactId) => commitField(row.id, { contactId }),
+      dealCurrency: (row) => (currencyCode) => commitField(row.id, { currencyCode }),
+      dealSource: (row) => (source) => commitField(row.id, { source }),
+      dealWinLossReason: (row) => (winLossReason) => commitField(row.id, { winLossReason }),
       contactEmail: (row) => (email) =>
-        commitField("contact", row.id, { email }, () =>
-          patchContact(row.id, { email }),
-        ),
+        commitField(row.id, { email }),
       contactPhone: (row) => (phone) =>
-        commitField("contact", row.id, { phone }, () =>
-          patchContact(row.id, { phone }),
-        ),
-      contactCompany: (row) => (company_id) =>
-        commitField("contact", row.id, { company_id }, () =>
-          patchContact(row.id, { companyId: company_id }),
-        ),
+        commitField(row.id, { phone }),
+      contactCompany: (row) => (companyId) => commitField(row.id, { companyId }),
       contactTags: (row) => (tags) =>
-        commitField("contact", row.id, { tags }, () =>
-          patchContact(row.id, { tags }),
-        ),
+        commitField(row.id, { tags }),
       companyDomain: (row) => (domain) =>
-        commitField("company", row.id, { domain }, () =>
-          patchCompany(row.id, { domain }),
-        ),
+        commitField(row.id, { domain }),
       companyTags: (row) => (tags) =>
-        commitField("company", row.id, { tags }, () =>
-          patchCompany(row.id, { tags }),
-        ),
+        commitField(row.id, { tags }),
     }),
-    [commitField, config, patchDeal, patchContact, patchCompany, t, workspaceId],
+    [commitField, config, patchDeal, recordResource.refresh, routeRecord?.id, t, workspaceId],
   );
 
   const archiveRecord = useCallback(async (ref: CrmRecordRef) => {
@@ -501,18 +540,16 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
     });
     if (!confirmed) return;
     await setCrmRecordArchived(workspaceId, ref.row.id, true);
-    setOpenRecord(null);
+    closeRecord();
     await refreshCrm();
     requestBrainRefresh(workspaceId);
-  }, [t, workspaceId, refreshCrm]);
+  }, [closeRecord, t, workspaceId, refreshCrm]);
 
   /** Bulk = client loop over the per-row adjust wire (failed ids STAY
    *  SELECTED for a retry — the Reviews-queue contract; §1.6). */
   const runBulk = useCallback(
     async (
-      primitive: CrmPrimitive,
-      changesFor: (id: string) => AdjustMemoryChanges | null,
-      applyFor: (id: string) => void,
+      changesFor: (id: string) => Record<string, unknown> | null,
     ) => {
       const ids = selectedVisible;
       if (ids.length === 0 || bulkBusy) return;
@@ -523,9 +560,11 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
         for (const id of ids) {
           const changes = changesFor(id);
           if (!changes) continue;
-          const result = await adjustBrainRow(workspaceId, primitive, id, changes);
-          if (result.ok) applyFor(id);
-          else failed.push(id);
+          try {
+            reconcileRecord(await updateCrmRecord(workspaceId, id, changes));
+          } catch {
+            failed.push(id);
+          }
         }
         if (failed.length > 0) {
           setSelected(new Set(failed));
@@ -543,7 +582,7 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
         requestBrainRefresh(workspaceId);
       }
     },
-    [selectedVisible, bulkBusy, workspaceId, t],
+    [selectedVisible, bulkBusy, reconcileRecord, workspaceId, t],
   );
 
   const runBulkPipelineStage = useCallback(
@@ -934,7 +973,7 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
               onChanged={reload}
               onCreated={async (created) => {
                 await refreshCrm();
-                setOpenRecord({ kind: created.kind, id: created.id });
+                openRecord(created.kind, created.id);
               }}
             />
           </> : null
@@ -979,8 +1018,13 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
                 setView({ draft: next.id });
               }}
               onOpenContact={(contactId) => {
-                setView({ section: "contacts", review: null, draft: null });
-                setOpenRecord({ kind: "contact", id: contactId });
+                const next = searchFromCrmView({
+                  ...view,
+                  section: "contacts",
+                  review: null,
+                  draft: null,
+                });
+                openRecord("contact", contactId, next);
               }}
             />
           )
@@ -1001,30 +1045,16 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
             onClear={() => setSelected(new Set())}
             onDealStage={(stageId) => void runBulkPipelineStage(stageId)}
             onContactCompany={(companyId) =>
-              void runBulk(
-                "contact",
-                () => ({ company_id: companyId }),
-                (id) => patchContact(id, { companyId }),
-              )
+              void runBulk(() => ({ companyId }))
             }
             onAddTag={(tag) => {
-              const primitive: CrmPrimitive =
-                view.section === "contacts" ? "contact" : "company";
               const rows: readonly (CrmContactRow | CrmCompanyRow)[] =
                 view.section === "contacts" ? contacts : companies;
               void runBulk(
-                primitive,
                 (id) => {
                   const row = rows.find((r) => r.id === id);
                   if (!row || row.tags.includes(tag)) return null;
                   return { tags: [...row.tags, tag] };
-                },
-                (id) => {
-                  const row = rows.find((r) => r.id === id);
-                  if (!row || row.tags.includes(tag)) return;
-                  const tags = [...row.tags, tag];
-                  if (view.section === "contacts") patchContact(id, { tags });
-                  else patchCompany(id, { tags });
                 },
               );
             }}
@@ -1173,7 +1203,7 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
                   commits.dealPipelineStage(row)(stage.id)
                 }
                 onOpenRecord={(row) =>
-                  setOpenRecord({ kind: "deal", id: row.id })
+                  openRecord("deal", row.id)
                 }
               />
             )
@@ -1190,7 +1220,7 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
               hasSelection={selectedVisible.length > 0}
               onToggleAll={toggleAll}
               commits={commits}
-              onOpenRecord={(row) => setOpenRecord({ kind: "deal", id: row.id })}
+              onOpenRecord={(row) => openRecord("deal", row.id)}
               empty={deals.length === 0 ? t.emptyDeals : t.emptyFiltered}
             />}/>
           ) : view.section === "contacts" ? (
@@ -1204,7 +1234,7 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
               onToggleAll={toggleAll}
               commits={commits}
               onOpenRecord={(row) =>
-                setOpenRecord({ kind: "contact", id: row.id })
+                openRecord("contact", row.id)
               }
               empty={contacts.length === 0 ? t.emptyContacts : t.emptyFiltered}
             />}/>
@@ -1219,7 +1249,7 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
               onToggleAll={toggleAll}
               commits={commits}
               onOpenRecord={(row) =>
-                setOpenRecord({ kind: "company", id: row.id })
+                openRecord("company", row.id)
               }
               empty={companies.length === 0 ? t.emptyCompanies : t.emptyFiltered}
             />}/>
@@ -1230,22 +1260,46 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
       </div>
 
         {/* Master-detail record pane. */}
-        {view.review === null && record && data && config && (
+        {view.review === null && routeRecord && (
+          recordResource.error !== undefined ? (
+            <RecordRouteState
+              title={t.r2.recordLoadFailed}
+              description={t.r2.recordLoadFailedDescription}
+              actionLabel={t.retry}
+              onAction={() => void recordResource.refresh()}
+              secondaryLabel={t.r2.returnToCrm}
+              onSecondary={closeRecord}
+            />
+          ) : recordBundle === undefined ? (
+            <RecordRouteState title={t.loading} />
+          ) : recordBundle === null || !record ? (
+            <RecordRouteState
+              title={t.r2.recordNotFound}
+              description={t.r2.recordNotFoundDescription}
+              actionLabel={t.r2.returnToCrm}
+              onAction={closeRecord}
+            />
+          ) : (
           <CrmRecordDetail
             workspaceId={workspaceId}
             record={record}
-            data={data}
-            config={config}
+            data={detailData}
+            config={config ?? { pipelines: [], fields: [] }}
             commits={commits}
-            onClose={() => setOpenRecord(null)}
-            onOpenRecord={(ref) => setOpenRecord({ kind: ref.kind, id: ref.row.id })}
+            initialParticipants={recordBundle.participants}
+            onClose={closeRecord}
+            onOpenRecord={(ref) => openRecord(ref.kind, ref.row.id)}
             onReviewEmail={(draft) => {
-              setOpenRecord(null);
-              setView({ review: "email", draft });
+              const next = searchFromCrmView({ ...view, review: "email", draft });
+              router.push(`${collectionPath}?${next}`, { scroll: false });
             }}
-            onChanged={reload}
+            onChanged={() => {
+              reload();
+              void recordResource.refresh();
+            }}
             onArchive={(ref) => void archiveRecord(ref)}
           />
+          )
         )}
       </div>
       <CrmConfigDialog
@@ -1260,6 +1314,41 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
         onOpenChange={setReportsOpen}
       />
     </div>
+  );
+}
+
+function RecordRouteState({
+  title,
+  description,
+  actionLabel,
+  onAction,
+  secondaryLabel,
+  onSecondary,
+}: {
+  title: string;
+  description?: string;
+  actionLabel?: string;
+  onAction?: () => void;
+  secondaryLabel?: string;
+  onSecondary?: () => void;
+}) {
+  return (
+    <aside className="absolute inset-y-0 right-0 z-20 flex w-full max-w-[min(42rem,92vw)] items-center justify-center border-l border-border/60 bg-background p-6 shadow-xl">
+      <div className="max-w-sm text-center">
+        <h2 className="text-base font-semibold">{title}</h2>
+        {description ? (
+          <p className="mt-1 text-sm text-muted-foreground">{description}</p>
+        ) : null}
+        {actionLabel && onAction ? (
+          <div className="mt-4 flex justify-center gap-2">
+            {secondaryLabel && onSecondary ? (
+              <Button variant="outline" onClick={onSecondary}>{secondaryLabel}</Button>
+            ) : null}
+            <Button onClick={onAction}>{actionLabel}</Button>
+          </div>
+        ) : null}
+      </div>
+    </aside>
   );
 }
 

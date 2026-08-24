@@ -14,6 +14,9 @@ vi.mock('../../db/crm.js', () => ({
   createCompany: vi.fn(),
   createContact: vi.fn(),
   createDeal: vi.fn(),
+  updateCompany: vi.fn(),
+  updateContact: vi.fn(),
+  updateDeal: vi.fn(),
 }))
 vi.mock('../../db/entities-store.js', () => ({
   getEntityById: vi.fn(),
@@ -43,14 +46,17 @@ vi.mock('../../db/crm-r2.js', () => ({
   deleteCrmSavedView: vi.fn(),
   findCrmDuplicateGroups: vi.fn(),
   getCrmConfig: vi.fn(),
+  getCrmR2Record: vi.fn(),
   getCrmReport: vi.fn(),
   listCrmDealParticipants: vi.fn(),
+  listCrmRecordRelationships: vi.fn(),
   listCrmR2Records: vi.fn(),
   listCrmSavedViews: vi.fn(),
   listCrmTimeline: vi.fn(),
   removeCrmDealParticipant: vi.fn(),
   setCrmArchived: vi.fn(),
   setCrmDealPipelineStage: vi.fn(),
+  setCrmDealPrimaryContact: vi.fn(),
   updateCrmCustomFields: vi.fn(),
   updateCrmStage: vi.fn(),
   validateCrmCustomFieldValues: vi.fn(),
@@ -58,13 +64,17 @@ vi.mock('../../db/crm-r2.js', () => ({
 
 import { crmRoutes } from '../crm.js'
 import { resolveWorkspaceViewpoint } from '../../db/workspace-viewpoint.js'
-import { createDeal } from '../../db/crm.js'
+import { createDeal, updateContact, updateDeal } from '../../db/crm.js'
 import { getEntityById, updateEntity } from '../../db/entities-store.js'
 import {
   appendCrmActivity,
   applyCrmFieldPreset,
   createCrmPipeline,
   getCrmConfig,
+  getCrmR2Record,
+  listCrmDealParticipants,
+  listCrmRecordRelationships,
+  setCrmDealPrimaryContact,
   validateCrmCustomFieldValues,
 } from '../../db/crm-r2.js'
 
@@ -73,7 +83,9 @@ const CTX = { userId: 'user-1', workspaceId: WS }
 const CONFIG = { pipelines: [], fields: [] }
 
 function makeApp(role: string | null = 'member', authenticated = true) {
-  const workspaceStore = { getRole: vi.fn().mockResolvedValue(role) }
+  const workspaceStore = {
+    getRole: vi.fn(async (userId: string) => userId === CTX.userId ? role : null),
+  }
   return createTestApp(
     '/api/crm',
     crmRoutes({ workspaceStore: workspaceStore as never }),
@@ -196,5 +208,136 @@ describe('[COMP:api/crm-r2-route] CRM R2 route authority', () => {
       workspaceId: WS,
       presetId: 'services_saas',
     })
+  })
+})
+
+describe('[COMP:api/crm-record-http] canonical CRM record HTTP boundary', () => {
+  const beforeContact = {
+    id: 'contact-1',
+    kind: 'person' as const,
+    name: 'Fictional Contact',
+    attributes: { email: 'old@example.test', tags: [] },
+    archivedAt: null,
+    updatedAt: '2026-08-20T00:00:00.000Z',
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.mocked(resolveWorkspaceViewpoint).mockResolvedValue(CTX as never)
+    vi.mocked(listCrmRecordRelationships).mockResolvedValue({
+      contacts: [], companies: [], deals: [],
+    })
+    vi.mocked(listCrmDealParticipants).mockResolvedValue([])
+    vi.mocked(appendCrmActivity).mockResolvedValue(null)
+    vi.mocked(setCrmDealPrimaryContact).mockResolvedValue(true)
+  })
+
+  it('cold-loads one visible deal with direct relationships and participants', async () => {
+    const deal = {
+      id: 'deal-1', kind: 'deal' as const, name: 'Example engagement',
+      attributes: { contact_id: 'contact-1', currency_code: 'HKD' },
+      archivedAt: null, updatedAt: '2026-08-20T00:00:00.000Z',
+    }
+    vi.mocked(getCrmR2Record).mockResolvedValue(deal)
+    vi.mocked(listCrmRecordRelationships).mockResolvedValue({
+      contacts: [beforeContact], companies: [], deals: [],
+    })
+    vi.mocked(listCrmDealParticipants).mockResolvedValue([{
+      contactId: 'contact-1', role: 'Sponsor', isPrimary: true,
+      name: 'Fictional Contact', email: 'old@example.test',
+    }])
+
+    const response = await request(makeApp()).get(`/api/crm/${WS}/records/deal-1`)
+
+    expect(response.status).toBe(200)
+    expect(response.body.record).toMatchObject({ id: 'deal-1', kind: 'deal', currencyCode: 'HKD' })
+    expect(response.body.relationships.contacts[0]).toMatchObject({ id: 'contact-1', kind: 'contact' })
+    expect(response.body.participants[0]).toMatchObject({ role: 'Sponsor', isPrimary: true })
+  })
+
+  it('rejects kind-specific field drift and inactive owners', async () => {
+    vi.mocked(getCrmR2Record).mockResolvedValue(beforeContact)
+
+    const wrongField = await request(makeApp())
+      .patch(`/api/crm/${WS}/records/contact-1`)
+      .send({ amount: 50 })
+    expect(wrongField.status).toBe(400)
+    expect(wrongField.body.error).toContain('Unsupported fields')
+
+    const inactiveOwner = await request(makeApp())
+      .patch(`/api/crm/${WS}/records/contact-1`)
+      .send({ ownerId: 'former-member' })
+    expect(inactiveOwner.status).toBe(400)
+    expect(inactiveOwner.body.error).toContain('active workspace member')
+  })
+
+  it('patches through the typed helper, reconciles the returned record, and logs each changed field', async () => {
+    const afterContact = {
+      ...beforeContact,
+      attributes: { ...beforeContact.attributes, email: 'new@example.test' },
+      updatedAt: '2026-08-24T00:00:00.000Z',
+    }
+    vi.mocked(getCrmR2Record)
+      .mockResolvedValueOnce(beforeContact)
+      .mockResolvedValueOnce(afterContact)
+    vi.mocked(updateContact).mockResolvedValue({ id: 'contact-1' } as never)
+    vi.mocked(getEntityById).mockResolvedValue({
+      id: 'contact-1', kind: 'person', attributes: afterContact.attributes,
+    } as never)
+
+    const response = await request(makeApp())
+      .patch(`/api/crm/${WS}/records/contact-1`)
+      .send({ email: 'new@example.test' })
+
+    expect(response.status).toBe(200)
+    expect(response.body.record.email).toBe('new@example.test')
+    expect(updateContact).toHaveBeenCalledWith(
+      CTX.userId,
+      'contact-1',
+      { email: 'new@example.test' },
+      undefined,
+      CTX,
+    )
+    expect(appendCrmActivity).toHaveBeenCalledTimes(1)
+    expect(appendCrmActivity).toHaveBeenCalledWith(expect.objectContaining({
+      entityId: 'contact-1',
+      metadata: { field: 'email', before: 'old@example.test', after: 'new@example.test' },
+    }))
+  })
+
+  it('clears a deal primary contact through the atomic participant boundary', async () => {
+    const beforeDeal = {
+      id: 'deal-1', kind: 'deal' as const, name: 'Example engagement',
+      attributes: { contact_id: 'contact-1' }, archivedAt: null,
+      updatedAt: '2026-08-20T00:00:00.000Z',
+    }
+    const afterDeal = {
+      ...beforeDeal,
+      attributes: {},
+      updatedAt: '2026-08-24T00:00:00.000Z',
+    }
+    vi.mocked(getCrmR2Record)
+      .mockResolvedValueOnce(beforeDeal)
+      .mockResolvedValueOnce(afterDeal)
+    vi.mocked(setCrmDealPrimaryContact).mockResolvedValue(true)
+    vi.mocked(updateDeal).mockResolvedValue({ id: 'deal-1' } as never)
+    vi.mocked(getEntityById).mockResolvedValue({
+      id: 'deal-1', kind: 'deal', attributes: {},
+    } as never)
+
+    const response = await request(makeApp())
+      .patch(`/api/crm/${WS}/records/deal-1`)
+      .send({ contactId: null })
+
+    expect(response.status).toBe(200)
+    expect(setCrmDealPrimaryContact).toHaveBeenCalledWith({
+      ctx: CTX, dealId: 'deal-1', contactId: null,
+    })
+    expect(updateDeal).toHaveBeenCalledWith(
+      CTX.userId, 'deal-1', { contactId: null }, undefined, CTX,
+    )
+    expect(appendCrmActivity).toHaveBeenCalledWith(expect.objectContaining({
+      metadata: { field: 'contactId', before: 'contact-1', after: null },
+    }))
   })
 })

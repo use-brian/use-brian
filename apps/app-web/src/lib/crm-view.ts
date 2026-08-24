@@ -26,6 +26,7 @@ import {
   type CrmFieldDefinition,
   type CrmPipeline,
   type CrmPipelineStage,
+  type CrmRecordBundle,
   type DealStage,
 } from "@/lib/api/crm";
 // One codec for the multi-value URL shape across both operator surfaces —
@@ -122,6 +123,33 @@ export function crmQuickCounts(
 
 export const CRM_SECTIONS = ["deals", "contacts", "companies"] as const;
 export type CrmSection = (typeof CRM_SECTIONS)[number];
+export type CrmRecordKind = "deal" | "contact" | "company";
+
+/** Canonical collection/detail hrefs. Search state is kept verbatim so
+ * opening a record and returning to its collection preserves the lens. */
+export function crmCollectionHref(workspaceId: string, search = ""): string {
+  const path = `/w/${encodeURIComponent(workspaceId)}/crm`;
+  return search ? `${path}?${search}` : path;
+}
+
+export function crmRecordHref(
+  workspaceId: string,
+  kind: CrmRecordKind,
+  recordId: string,
+  search = "",
+): string {
+  const path = `${crmCollectionHref(workspaceId)}/${kind}/${encodeURIComponent(recordId)}`;
+  return search ? `${path}?${search}` : path;
+}
+
+/** Guard the cold record response against a stale or mistyped route. */
+export function crmRecordMatchesRoute(
+  bundle: CrmRecordBundle | null | undefined,
+  kind: CrmRecordKind,
+  recordId: string,
+): bundle is CrmRecordBundle {
+  return bundle?.record.kind === kind && bundle.record.id === recordId;
+}
 
 const VIEW_MODES = ["board", "table"] as const;
 type ViewMode = (typeof VIEW_MODES)[number];

@@ -1,13 +1,7 @@
 /**
- * CRM operator-surface SDK — the flat CRM read behind `/w/[id]/crm`
- * (`GET /api/brain/crm`, [COMP:brain/crm-list-http]): every live deal /
- * contact / company the viewer can see, one payload, 500/kind cap, full
- * operator fields. The client joins display names by id (`crm-view.ts`) and
- * resolves the workspace's stable pipeline stages from the configuration API.
- * Mutations reuse the existing brain-inbox adjust wire (`adjustBrainRow`
- * in `lib/api/brain-inbox.ts`) — the CRM-typed fields ride the same
- * endpoint (crm.md → "Operator surface"); stage changes route through
- * `setDealStage` server-side.
+ * CRM operator-surface SDK. Collection compatibility reads, canonical cold
+ * record reads, typed record PATCH, stable pipeline stages, and R2 resources
+ * all live behind `/api/crm`. Stage changes retain their dedicated route.
  *
  * Spec: docs/architecture/features/crm.md → "Operator surface".
  * [COMP:app-web/crm-surface]
@@ -85,6 +79,17 @@ export type CrmData = {
   companies: CrmCompanyRow[];
 };
 
+export type CrmPublicRecord =
+  | ({ kind: "deal" } & CrmDealRow)
+  | ({ kind: "contact" } & CrmContactRow)
+  | ({ kind: "company" } & CrmCompanyRow);
+
+export type CrmRecordBundle = {
+  record: CrmPublicRecord;
+  relationships: CrmData;
+  participants: CrmDealParticipant[];
+};
+
 export async function fetchWorkspaceCrm(workspaceId: string, includeArchived = false): Promise<CrmData> {
   const res = await authFetch(
     `${API_URL}/api/crm/${encodeURIComponent(workspaceId)}/records${includeArchived ? "?archived=true" : ""}`,
@@ -96,6 +101,34 @@ export async function fetchWorkspaceCrm(workspaceId: string, includeArchived = f
     contacts: body.contacts ?? [],
     companies: body.companies ?? [],
   };
+}
+
+export async function fetchCrmRecord(
+  workspaceId: string,
+  entityId: string,
+): Promise<CrmRecordBundle | null> {
+  const res = await authFetch(
+    `${API_URL}/api/crm/${encodeURIComponent(workspaceId)}/records/${encodeURIComponent(entityId)}`,
+  );
+  if (res.status === 404) return null;
+  const body = (await res.json().catch(() => ({}))) as CrmRecordBundle & { error?: string };
+  if (!res.ok) throw new Error(body.error ?? `Failed to load CRM record (${res.status})`);
+  return body;
+}
+
+export function updateCrmRecord(
+  workspaceId: string,
+  entityId: string,
+  changes: Record<string, unknown>,
+): Promise<CrmRecordBundle> {
+  return jsonRequest(
+    `/api/crm/${encodeURIComponent(workspaceId)}/records/${encodeURIComponent(entityId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(changes),
+    },
+  );
 }
 
 export type CrmStageCategory = "open" | "won" | "lost";
@@ -457,13 +490,14 @@ export async function addCrmDealParticipant(
   workspaceId: string,
   dealId: string,
   contactId: string,
+  options: { role?: string | null; isPrimary?: boolean } = {},
 ): Promise<void> {
   await jsonRequest(
     `/api/crm/${encodeURIComponent(workspaceId)}/records/${encodeURIComponent(dealId)}/participants`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ contactId }),
+      body: JSON.stringify({ contactId, ...options }),
     },
   );
 }

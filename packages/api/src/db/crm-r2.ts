@@ -395,6 +395,152 @@ export type CrmRecordRow = {
   updatedAt: string
 }
 
+function entityToCrmRecordRow(entity: EntityRecord): CrmRecordRow {
+  return {
+    id: entity.id,
+    kind: entity.kind as CrmEntityKind,
+    name: entity.displayName,
+    attributes: entity.attributes,
+    archivedAt: typeof entity.attributes.crm_archived_at === 'string'
+      ? entity.attributes.crm_archived_at
+      : null,
+    updatedAt: entity.updatedAt.toISOString(),
+  }
+}
+
+/** Cold-load one CRM record without depending on a collection page. */
+export async function getCrmR2Record(
+  ctx: AccessContext,
+  entityId: string,
+): Promise<CrmRecordRow | null> {
+  const entity = await getEntityById(ctx, entityId)
+  if (!entity || !['person', 'company', 'deal'].includes(entity.kind)) return null
+  return entityToCrmRecordRow(entity)
+}
+
+export type CrmRecordRelationships = {
+  contacts: CrmRecordRow[]
+  companies: CrmRecordRow[]
+  deals: CrmRecordRow[]
+}
+
+async function listRelatedKind(
+  ctx: AccessContext,
+  kind: CrmEntityKind,
+  relationshipSql: (firstIndex: number) => string,
+  relationshipParams: unknown[],
+): Promise<CrmRecordRow[]> {
+  const ap = buildAccessPredicate(ctx, { alias: 'e', startIdx: 1 })
+  const kindIndex = ap.nextIdx
+  const firstRelationshipIndex = kindIndex + 1
+  const result = await queryGated<{
+    id: string
+    kind: CrmEntityKind
+    name: string
+    attributes: Record<string, unknown> | null
+    archivedAt: Date | null
+    updatedAt: Date
+  }>(
+    ctx,
+    `SELECT e.id, e.kind, e.display_name AS name, e.attributes,
+            NULLIF(e.attributes->>'crm_archived_at','')::timestamptz AS "archivedAt",
+            e.updated_at AS "updatedAt"
+       FROM entities e
+      WHERE ${ap.sql} AND e.kind = $${kindIndex}
+        AND e.valid_to IS NULL AND e.retracted_at IS NULL
+        AND NOT (e.attributes ? 'crm_archived_at')
+        AND (${relationshipSql(firstRelationshipIndex)})
+      ORDER BY e.updated_at DESC, e.id DESC`,
+    [...ap.params, kind, ...relationshipParams],
+  )
+  return result.rows.map((row) => ({
+    id: row.id,
+    kind: row.kind,
+    name: row.name,
+    attributes: row.attributes ?? {},
+    archivedAt: row.archivedAt?.toISOString() ?? null,
+    updatedAt: row.updatedAt.toISOString(),
+  }))
+}
+
+/**
+ * Direct, access-scoped relationship summaries for a cold record page.
+ * Participant-linked deals are included for both people and companies.
+ */
+export async function listCrmRecordRelationships(
+  ctx: AccessContext,
+  record: CrmRecordRow,
+): Promise<CrmRecordRelationships> {
+  if (record.kind === 'person') {
+    const companyId = typeof record.attributes.company_id === 'string'
+      ? record.attributes.company_id
+      : null
+    const [companies, deals] = await Promise.all([
+      companyId
+        ? listRelatedKind(ctx, 'company', (index) => `e.id = $${index}`, [companyId])
+        : Promise.resolve([]),
+      listRelatedKind(
+        ctx,
+        'deal',
+        (index) => `e.attributes->>'contact_id' = $${index}
+          OR EXISTS (
+            SELECT 1 FROM crm_deal_contacts dc
+             WHERE dc.workspace_id = e.workspace_id
+               AND dc.deal_id = e.id AND dc.contact_id = $${index}
+          )`,
+        [record.id],
+      ),
+    ])
+    return { contacts: [], companies, deals }
+  }
+
+  if (record.kind === 'company') {
+    const contacts = await listRelatedKind(
+      ctx,
+      'person',
+      (index) => `e.attributes->>'company_id' = $${index}`,
+      [record.id],
+    )
+    const visibleContactIds = contacts.map((contact) => contact.id)
+    const deals = await listRelatedKind(
+      ctx,
+      'deal',
+      (index) => `e.attributes->>'company_id' = $${index}
+        OR ($${index + 1}::text[] <> '{}'::text[] AND EXISTS (
+          SELECT 1 FROM crm_deal_contacts dc
+           WHERE dc.workspace_id = e.workspace_id AND dc.deal_id = e.id
+             AND dc.contact_id = ANY($${index + 1}::text[])
+        ))`,
+      [record.id, visibleContactIds],
+    )
+    return { contacts, companies: [], deals }
+  }
+
+  const contactId = typeof record.attributes.contact_id === 'string'
+    ? record.attributes.contact_id
+    : null
+  const companyId = typeof record.attributes.company_id === 'string'
+    ? record.attributes.company_id
+    : null
+  const [contacts, companies] = await Promise.all([
+    listRelatedKind(
+      ctx,
+      'person',
+      (index) => `($${index}::text IS NOT NULL AND e.id = $${index})
+        OR EXISTS (
+          SELECT 1 FROM crm_deal_contacts dc
+           WHERE dc.workspace_id = e.workspace_id
+             AND dc.deal_id = $${index + 1} AND dc.contact_id = e.id
+        )`,
+      [contactId, record.id],
+    ),
+    companyId
+      ? listRelatedKind(ctx, 'company', (index) => `e.id = $${index}`, [companyId])
+      : Promise.resolve([]),
+  ])
+  return { contacts, companies, deals: [] }
+}
+
 export async function listCrmR2Records(
   ctx: AccessContext,
   options: { includeArchived?: boolean } = {},
@@ -613,6 +759,14 @@ export async function addCrmDealParticipant(input: {
   role?: string | null
   isPrimary?: boolean
 }): Promise<boolean> {
+  if (input.isPrimary) {
+    return setCrmDealPrimaryContact({
+      ctx: input.ctx,
+      dealId: input.dealId,
+      contactId: input.contactId,
+      ...(input.role !== undefined ? { role: input.role } : {}),
+    })
+  }
   const [deal, contact] = await Promise.all([
     getEntityById(input.ctx, input.dealId),
     getEntityById(input.ctx, input.contactId),
@@ -621,12 +775,6 @@ export async function addCrmDealParticipant(input: {
   const client = await getPool().connect()
   try {
     await client.query('BEGIN')
-    if (input.isPrimary) {
-      await client.query(
-        `UPDATE crm_deal_contacts SET is_primary = false WHERE deal_id = $1`,
-        [input.dealId],
-      )
-    }
     await client.query(
       `INSERT INTO crm_deal_contacts
          (workspace_id, deal_id, contact_id, role, is_primary, created_by)
@@ -634,9 +782,52 @@ export async function addCrmDealParticipant(input: {
        ON CONFLICT (deal_id, contact_id) DO UPDATE
          SET role = EXCLUDED.role, is_primary = EXCLUDED.is_primary`,
       [input.ctx.workspaceId, input.dealId, input.contactId, input.role ?? null,
-        input.isPrimary ?? false, input.ctx.userId],
+        false, input.ctx.userId],
     )
-    if (input.isPrimary) {
+    await client.query('COMMIT')
+    return true
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw err
+  } finally {
+    client.release()
+  }
+}
+
+/** Keep the participant primary flag and canonical deal contact in one
+ * transaction. `contactId: null` clears both representations. */
+export async function setCrmDealPrimaryContact(input: {
+  ctx: AccessContext
+  dealId: string
+  contactId: string | null
+  role?: string | null
+}): Promise<boolean> {
+  const deal = await getEntityById(input.ctx, input.dealId)
+  if (!deal || deal.kind !== 'deal') return false
+  if (input.contactId) {
+    const contact = await getEntityById(input.ctx, input.contactId)
+    if (!contact || contact.kind !== 'person') return false
+  }
+  const client = await getPool().connect()
+  try {
+    await client.query('BEGIN')
+    await client.query(
+      `UPDATE crm_deal_contacts
+          SET is_primary = false
+        WHERE workspace_id = $1 AND deal_id = $2`,
+      [input.ctx.workspaceId, input.dealId],
+    )
+    if (input.contactId) {
+      await client.query(
+        `INSERT INTO crm_deal_contacts
+           (workspace_id, deal_id, contact_id, role, is_primary, created_by)
+         VALUES ($1,$2,$3,$4,true,$5)
+         ON CONFLICT (deal_id, contact_id) DO UPDATE SET
+           is_primary = true,
+           role = CASE WHEN $6::boolean THEN EXCLUDED.role ELSE crm_deal_contacts.role END`,
+        [input.ctx.workspaceId, input.dealId, input.contactId, input.role ?? null,
+          input.ctx.userId, input.role !== undefined],
+      )
       await client.query(
         `UPDATE entities SET
            attributes = jsonb_set(COALESCE(attributes, '{}'::jsonb),
@@ -644,6 +835,13 @@ export async function addCrmDealParticipant(input: {
            updated_at = now()
          WHERE id = $1 AND workspace_id = $3`,
         [input.dealId, input.contactId, input.ctx.workspaceId],
+      )
+    } else {
+      await client.query(
+        `UPDATE entities SET attributes = COALESCE(attributes, '{}'::jsonb) - 'contact_id',
+            updated_at = now()
+          WHERE id = $1 AND workspace_id = $2`,
+        [input.dealId, input.ctx.workspaceId],
       )
     }
     await client.query('COMMIT')
