@@ -45,7 +45,17 @@ import type {
   ChannelIntegration,
   ChannelIntegrationStore,
   SeenChat,
+  WhatsAppCloudCredentials,
 } from '../db/channel-integrations.js'
+import {
+  whatsappCloudManagedGroupStore,
+  type WhatsAppCloudManagedGroup,
+  type WhatsAppCloudManagedGroupStore,
+} from '../db/whatsapp-cloud-managed-groups.js'
+import {
+  createWhatsAppCloudManagedGroupsApi,
+  isWhatsAppCloudNotFoundError,
+} from '../whatsapp/cloud-managed-groups-client.js'
 import {
   listChannelsForWorkspace,
   getChannelForUser,
@@ -89,6 +99,7 @@ export const channelConfigSchema = z.object({
   allowGuestConnectorTools: z.boolean().optional(),
   allowTrustedGuestFullAccess: z.boolean().optional(),
   blockedUserIds: z.array(z.string().max(50)).max(100).optional(),
+  whatsappCloudAllowAllGroupMembers: z.boolean().optional(),
 }).strict()
 
 const WHATSAPP_E164_DIGITS = /^[1-9]\d{7,14}$/
@@ -170,6 +181,8 @@ export type ChannelsRouteOptions = {
     requiredOnConnect?: boolean
     linkCodeStore: LinkCodeStore
   }
+  /** Injectable seam for the managed-group ledger. */
+  whatsappCloudManagedGroupStore?: WhatsAppCloudManagedGroupStore
 }
 
 const updateSchema = z.object({
@@ -237,6 +250,10 @@ const connectWhatsAppCloudSchema = z.object({
   graphApiVersion: z.string().regex(/^v\d+\.\d+$/).default(DEFAULT_WHATSAPP_GRAPH_API_VERSION),
   defaultAssistantId: z.string().uuid().nullish(),
   displayName: z.string().min(1).max(200).optional(),
+}).strict()
+
+const createWhatsAppCloudGroupSchema = z.object({
+  subject: z.string().trim().min(1).max(128),
 }).strict()
 
 const wechatPairStartSchema = z.object({
@@ -349,8 +366,24 @@ function serializeChannelAssistant(a: ChannelAssistant): Record<string, unknown>
   }
 }
 
+function serializeWhatsAppCloudManagedGroup(group: WhatsAppCloudManagedGroup): Record<string, unknown> {
+  return {
+    id: group.id,
+    channelId: group.channelId,
+    requestId: group.requestId,
+    providerGroupId: group.providerGroupId,
+    subject: group.subject,
+    inviteLink: group.inviteLink,
+    status: group.status,
+    error: group.error,
+    createdAt: group.createdAt.toISOString(),
+    updatedAt: group.updatedAt.toISOString(),
+  }
+}
+
 export function channelsRoutes(opts: ChannelsRouteOptions): Router {
   const router = Router()
+  const managedGroups = opts.whatsappCloudManagedGroupStore ?? whatsappCloudManagedGroupStore
 
   /**
    * Resolve a channel by id, scoped to the URL workspace + the acting user's
@@ -412,6 +445,31 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
       }
     }))
     return new Map(hydrated.map((r) => [r.channelId, r]))
+  }
+
+  async function resolveWhatsAppCloudCredentials(
+    userId: string,
+    workspaceId: string,
+    channelId: string,
+  ): Promise<WhatsAppCloudCredentials | null> {
+    if (!opts.integrationStore) return null
+    const integrations = await opts.integrationStore.listForWorkspace(userId, workspaceId)
+    const integration = integrations.find((row) => row.channelId === channelId && row.channelType === 'whatsapp')
+    if (!integration) return null
+    const withCredentials = await opts.integrationStore.getForUserWithCredentials(userId, integration.id)
+    const credentials = withCredentials?.credentials as Partial<WhatsAppCloudCredentials> | undefined
+    if (credentials?.provider === 'cloud_api'
+      && typeof credentials.access_token === 'string'
+      && typeof credentials.phone_number_id === 'string'
+      && typeof credentials.graph_api_version === 'string') {
+      return credentials as WhatsAppCloudCredentials
+    }
+    // Official rows are identifiable without decrypting secrets. Never fall
+    // through to linked-number teardown if their encrypted payload is corrupt.
+    if (integration.botUserId && integration.teamId) {
+      throw new Error('Official WhatsApp Cloud credentials are invalid')
+    }
+    return null
   }
 
   /**
@@ -718,6 +776,91 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
     if (!channel) return
     const integrations = await loadIntegrations(userId, workspaceId)
     res.json({ channel: serializeChannel(channel, integrations.get(channelId)) })
+  })
+
+  router.get('/workspaces/:workspaceId/channels/:channelId/whatsapp-cloud/groups', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const { workspaceId, channelId } = req.params
+    const role = await opts.workspaceStore.getRole(userId, workspaceId)
+    if (!role) { res.status(403).json({ error: 'Not a member of this workspace' }); return }
+    const channel = await loadChannel(userId, workspaceId, channelId, res)
+    if (!channel) return
+    if (!opts.integrationStore) {
+      res.status(503).json({ error: 'Channel integrations are not configured on this server' })
+      return
+    }
+
+    try {
+      const credentials = await resolveWhatsAppCloudCredentials(userId, workspaceId, channelId)
+      if (channel.channelType !== 'whatsapp' || !credentials) {
+        res.status(404).json({ error: 'Official WhatsApp Cloud channel not found' })
+        return
+      }
+      const groups = await managedGroups.listByChannel(userId, channelId)
+      res.json({ groups: groups.map(serializeWhatsAppCloudManagedGroup) })
+    } catch (err) {
+      console.error('[channels] WhatsApp managed groups list failed:', err)
+      res.status(500).json({ error: 'Failed to list managed WhatsApp groups' })
+    }
+  })
+
+  router.post('/workspaces/:workspaceId/channels/:channelId/whatsapp-cloud/groups', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const { workspaceId, channelId } = req.params
+    const role = await opts.workspaceStore.getRole(userId, workspaceId)
+    if (!role) { res.status(403).json({ error: 'Not a member of this workspace' }); return }
+    const parsed = createWhatsAppCloudGroupSchema.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Invalid input', detail: parsed.error.message })
+      return
+    }
+    const channel = await loadChannel(userId, workspaceId, channelId, res)
+    if (!channel) return
+    if (!opts.integrationStore) {
+      res.status(503).json({ error: 'Channel integrations are not configured on this server' })
+      return
+    }
+
+    let credentials: WhatsAppCloudCredentials | null
+    try {
+      credentials = await resolveWhatsAppCloudCredentials(userId, workspaceId, channelId)
+    } catch (err) {
+      console.error('[channels] WhatsApp Cloud credential resolution failed:', err)
+      res.status(500).json({ error: 'Failed to resolve WhatsApp Cloud credentials' })
+      return
+    }
+    if (channel.channelType !== 'whatsapp' || !credentials) {
+      res.status(404).json({ error: 'Official WhatsApp Cloud channel not found' })
+      return
+    }
+
+    const pendingGroup = await managedGroups.createPending(userId, channelId, parsed.data.subject)
+    let requestId: string
+    try {
+      const api = createWhatsAppCloudManagedGroupsApi({
+        accessToken: credentials.access_token,
+        phoneNumberId: credentials.phone_number_id,
+        graphApiVersion: credentials.graph_api_version,
+      })
+      requestId = (await api.createGroup(parsed.data.subject)).requestId
+    } catch (err) {
+      await managedGroups.deletePending(userId, pendingGroup.id).catch((cleanupError) => {
+        console.error('[channels] WhatsApp managed group pending cleanup failed:', cleanupError)
+      })
+      console.error('[channels] WhatsApp managed group create failed:', err)
+      res.status(502).json({ error: 'Meta could not create the WhatsApp group' })
+      return
+    }
+
+    try {
+      const group = await managedGroups.attachRequestId(userId, pendingGroup.id, requestId)
+      res.status(202).json({ group: serializeWhatsAppCloudManagedGroup(group) })
+    } catch (err) {
+      console.error('[channels] WhatsApp managed group request persistence failed:', err)
+      res.status(500).json({ error: 'Meta accepted the group request but it could not be persisted' })
+    }
   })
 
   // PATCH /workspaces/:workspaceId/channels/:channelId — clearance,
@@ -2032,11 +2175,51 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
     const channel = await loadChannel(userId, workspaceId, channelId, res)
     if (!channel) return
 
-    const integrations = await loadIntegrations(userId, workspaceId)
-    const channelIntegration = integrations.get(channelId)
-    const isWhatsAppCloud = channel.channelType === 'whatsapp' && channelIntegration
-      ? ((await opts.integrationStore?.getForUserWithCredentials(userId, channelIntegration.id))?.credentials as { provider?: string } | undefined)?.provider === 'cloud_api'
-      : false
+    let cloudCredentials: WhatsAppCloudCredentials | null = null
+    if (channel.channelType === 'whatsapp' && opts.integrationStore) {
+      try {
+        cloudCredentials = await resolveWhatsAppCloudCredentials(userId, workspaceId, channelId)
+      } catch (err) {
+        console.error('[channels] WhatsApp Cloud credential resolution failed during delete:', err)
+        res.status(502).json({ error: 'Failed to prepare WhatsApp Cloud channel deletion' })
+        return
+      }
+    }
+    const isWhatsAppCloud = cloudCredentials !== null
+    const cloudGroups = channel.channelType === 'whatsapp'
+      ? await managedGroups.listByChannel(userId, channelId)
+      : []
+
+    // Never discard the cleanup ledger while managed Meta groups exist but
+    // their credentials are unavailable. Keeping the channel lets an operator
+    // restore the credential key and retry safely.
+    if (cloudGroups.length > 0 && !cloudCredentials) {
+      res.status(502).json({ error: 'WhatsApp Cloud credentials are required to delete managed groups' })
+      return
+    }
+
+    if (cloudCredentials) {
+      if (cloudGroups.some((group) => group.status === 'creating')) {
+        res.status(409).json({ error: 'A managed WhatsApp group is still being created' })
+        return
+      }
+      const api = createWhatsAppCloudManagedGroupsApi({
+        accessToken: cloudCredentials.access_token,
+        phoneNumberId: cloudCredentials.phone_number_id,
+        graphApiVersion: cloudCredentials.graph_api_version,
+      })
+      for (const group of cloudGroups) {
+        if (group.status !== 'active' || !group.providerGroupId) continue
+        try {
+          await api.deleteGroup(group.providerGroupId)
+        } catch (err) {
+          if (isWhatsAppCloudNotFoundError(err)) continue
+          console.error('[channels] WhatsApp managed group delete failed:', err)
+          res.status(502).json({ error: 'Meta could not delete a managed WhatsApp group' })
+          return
+        }
+      }
+    }
 
     if (channel.channelType === 'whatsapp' && !isWhatsAppCloud && opts.whatsappConnector) {
       await opts.whatsappConnector.disconnect(channelId).catch((err) => {
