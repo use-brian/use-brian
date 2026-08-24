@@ -158,7 +158,7 @@ type ViewMode = (typeof VIEW_MODES)[number];
 
 export const DEAL_SORT_KEYS = ["updated", "name", "amount", "close"] as const;
 export type DealSortKey = (typeof DEAL_SORT_KEYS)[number];
-export const CRM_SORT_DIRECTIONS = ["asc", "desc"] as const;
+const CRM_SORT_DIRECTIONS = ["asc", "desc"] as const;
 export type CrmSortDirection = (typeof CRM_SORT_DIRECTIONS)[number];
 
 export type CrmColumnDefinition = {

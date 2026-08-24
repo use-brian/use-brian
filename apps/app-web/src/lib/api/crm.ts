@@ -82,7 +82,7 @@ export type CrmData = {
 
 export type CrmCollectionKind = "deal" | "contact" | "company";
 export type CrmCollectionSort = "updated" | "name" | "amount" | "close";
-export type CrmSortDirection = "asc" | "desc";
+type CrmSortDirection = "asc" | "desc";
 
 export type CrmRecordPage<T extends CrmPublicRecord = CrmPublicRecord> = {
   items: T[];
