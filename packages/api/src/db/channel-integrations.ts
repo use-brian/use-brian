@@ -24,7 +24,7 @@ import {
   decryptCredentials as _decryptCredentials,
 } from './credential-crypto.js'
 import { parseTopicChannelId } from '@use-brian/channels'
-import { query, queryWithRLS } from './client.js'
+import { getPool, query, queryWithRLS } from './client.js'
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -504,6 +504,17 @@ export type ChannelIntegrationStore = {
     mutate: (current: ChannelIntegrationConfig) => ChannelIntegrationConfig,
   ): Promise<void>
 
+  /**
+   * Replace one trusted Telegram @username allowlist entry with the numeric id
+   * from Telegram's authenticated sender envelope. The row is locked while
+   * validating that allowlist mode and trusted full access are still active.
+   */
+  pinTrustedTelegramUsernameSystem?(
+    id: string,
+    usernameEntry: string,
+    providerUserId: string,
+  ): Promise<boolean>
+
   /** Update last_event_at. Webhook path — no RLS. */
   touchLastEventAt(id: string): Promise<void>
 
@@ -589,6 +600,44 @@ export function trustedGuestAuthorityChanged(
     return JSON.stringify(current.allowedUserIds ?? []) !== JSON.stringify(next.allowedUserIds ?? [])
   }
   return false
+}
+
+/** Resolve a trusted Telegram username entry to its stable sender id. Returns
+ * null when the grant changed or disappeared before the first matching turn. */
+export function pinTrustedTelegramUsernameInConfig(
+  current: ChannelIntegrationConfig,
+  usernameEntry: string,
+  providerUserId: string,
+): ChannelIntegrationConfig | null {
+  const expected = usernameEntry.trim().toLowerCase()
+  if (
+    !expected.startsWith('@')
+    || !/^\d+$/.test(providerUserId)
+    || current.userAccessMode !== 'allowlist'
+    || current.allowTrustedGuestFullAccess !== true
+  ) {
+    return null
+  }
+
+  let matched = false
+  const replaced = (current.allowedUserIds ?? []).map((rawEntry) => {
+    const entry = rawEntry.trim()
+    if (entry.toLowerCase() === expected) {
+      matched = true
+      return providerUserId
+    }
+    return entry
+  })
+  if (!matched) return null
+
+  const seen = new Set<string>()
+  const allowedUserIds = replaced.filter((entry) => {
+    const key = entry.startsWith('@') ? entry.toLowerCase() : entry
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+  return { ...current, allowedUserIds }
 }
 
 export function createDbChannelIntegrationStore(key: Buffer): ChannelIntegrationStore {
@@ -1019,6 +1068,44 @@ export function createDbChannelIntegrationStore(key: Buffer): ChannelIntegration
         throw new Error('Integration not found or not authorized')
       }
       return result.rows[0]
+    },
+
+    async pinTrustedTelegramUsernameSystem(id, usernameEntry, providerUserId) {
+      const client = await getPool().connect()
+      try {
+        await client.query('BEGIN')
+        const locked = await client.query<{ config: ChannelIntegrationConfig | null }>(
+          `SELECT config
+             FROM channel_integrations
+            WHERE id = $1
+            FOR UPDATE`,
+          [id],
+        )
+        const next = locked.rows[0]
+          ? pinTrustedTelegramUsernameInConfig(
+              locked.rows[0].config ?? {},
+              usernameEntry,
+              providerUserId,
+            )
+          : null
+        if (!next) {
+          await client.query('ROLLBACK')
+          return false
+        }
+        await client.query(
+          `UPDATE channel_integrations
+              SET config = $2, updated_at = now()
+            WHERE id = $1`,
+          [id, JSON.stringify(next)],
+        )
+        await client.query('COMMIT')
+        return true
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => {})
+        throw err
+      } finally {
+        client.release()
+      }
     },
 
     async mergeConfigSystem(id, mutate) {

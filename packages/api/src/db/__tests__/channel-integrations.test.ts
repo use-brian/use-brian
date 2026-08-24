@@ -8,14 +8,23 @@
  * it exists.
  */
 
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { randomBytes } from 'node:crypto'
+vi.mock('../client.js', () => ({
+  getPool: vi.fn(),
+  query: vi.fn(),
+  queryWithRLS: vi.fn(),
+}))
+
 import {
+  createDbChannelIntegrationStore,
   encryptCredentials,
   decryptCredentials,
   loadChannelCredentialKey,
+  pinTrustedTelegramUsernameInConfig,
   trustedGuestAuthorityChanged,
 } from '../channel-integrations.js'
+import { getPool } from '../client.js'
 
 function makeKey(): Buffer {
   return randomBytes(32)
@@ -84,6 +93,78 @@ describe('[COMP:api/channel-integrations-store] trusted guest authority changes'
       { allowGuestConnectorTools: false },
       { allowGuestConnectorTools: true },
     )).toBe(false)
+  })
+
+  it('pins a case-insensitive username to one stable numeric id', () => {
+    expect(pinTrustedTelegramUsernameInConfig(
+      {
+        userAccessMode: 'allowlist',
+        allowTrustedGuestFullAccess: true,
+        allowedUserIds: ['@FrIeNd', '42', '@colleague'],
+      },
+      '@friend',
+      '42',
+    )).toMatchObject({
+      allowedUserIds: ['42', '@colleague'],
+    })
+  })
+
+  it('refuses to pin after the trusted username grant is no longer active', () => {
+    expect(pinTrustedTelegramUsernameInConfig(
+      {
+        userAccessMode: 'allowlist',
+        allowTrustedGuestFullAccess: false,
+        allowedUserIds: ['@friend'],
+      },
+      '@friend',
+      '42',
+    )).toBeNull()
+  })
+
+  it('locks and persists the username-to-id pin in one transaction', async () => {
+    const client = {
+      query: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({
+          rows: [{
+            config: {
+              userAccessMode: 'allowlist',
+              allowTrustedGuestFullAccess: true,
+              allowedUserIds: ['@friend'],
+            },
+          }],
+        })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] }),
+      release: vi.fn(),
+    }
+    vi.mocked(getPool).mockReturnValue({
+      connect: vi.fn(async () => client),
+    } as never)
+
+    const store = createDbChannelIntegrationStore(makeKey())
+    await expect(store.pinTrustedTelegramUsernameSystem?.(
+      'integration_1',
+      '@friend',
+      '42',
+    )).resolves.toBe(true)
+
+    expect(client.query).toHaveBeenCalledWith(
+      expect.stringContaining('FOR UPDATE'),
+      ['integration_1'],
+    )
+    expect(client.query).toHaveBeenCalledWith(
+      expect.stringContaining('UPDATE channel_integrations'),
+      ['integration_1', expect.stringContaining('"allowedUserIds":["42"]')],
+    )
+    expect(client.query.mock.calls.map(([sql]) => sql)).toEqual([
+      'BEGIN',
+      expect.stringContaining('FOR UPDATE'),
+      expect.stringContaining('UPDATE channel_integrations'),
+      'COMMIT',
+    ])
+    expect(client.release).toHaveBeenCalled()
   })
 })
 

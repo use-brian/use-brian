@@ -969,18 +969,31 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
         return
       }
 
-      // The stronger trusted-user grant is deliberately numeric-id-only:
-      // Telegram usernames can be renamed or reassigned. Provision the
-      // sender's own shadow as a revocable workspace member, then use the
-      // existing identified-member path end to end. Never borrow ownerId.
+      // Numeric ids are durable immediately. A listed @username is convenient
+      // input, so resolve it on first use by replacing it with Telegram's
+      // authenticated sender id before provisioning membership. Both inputs
+      // therefore converge to the same durable config and identity lane.
       if (
         externalGuest
         && integrationConfig.allowTrustedGuestFullAccess === true
-        && matchingAllowlistEntry === fromId
-        && /^\d+$/.test(matchingAllowlistEntry)
+        && matchingAllowlistEntry !== undefined
         && routedAssistant.workspaceId
       ) {
         try {
+          if (matchingAllowlistEntry.startsWith('@')) {
+            const pinUsername = options.integrationStore.pinTrustedTelegramUsernameSystem
+            if (!pinUsername) {
+              throw new Error('trusted username pinning is unavailable')
+            }
+            const pinned = await pinUsername(
+              boundIntegration.id,
+              matchingAllowlistEntry,
+              fromId,
+            )
+            if (!pinned) {
+              throw new Error('trusted username grant changed before it could be pinned')
+            }
+          }
           await ensureTrustedChannelWorkspaceMembership({
             integrationId: boundIntegration.id,
             workspaceId: routedAssistant.workspaceId,

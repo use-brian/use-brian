@@ -431,8 +431,9 @@ export async function ensureAssistantMember(assistantId: string, userId: string)
 }
 
 /**
- * Provision the sender behind an explicitly trusted numeric Telegram-id grant
- * as a real workspace member. The channel-owned marker/grant rows make the
+ * Provision the sender behind a trusted Telegram grant as a real workspace
+ * member. Username inputs have already been pinned to this numeric provider id
+ * by the route. The channel-owned marker/grant rows make the
  * membership revocable without ever claiming a pre-existing membership.
  *
  * The member ceiling is confidential so the routed assistant remains the

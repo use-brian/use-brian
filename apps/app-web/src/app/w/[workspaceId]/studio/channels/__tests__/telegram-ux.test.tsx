@@ -186,6 +186,9 @@ describe("[COMP:app-web/studio-channels] Telegram UX", () => {
       confirmLabel: "Give full access",
       cancelLabel: "Cancel",
     });
+    const confirmation = confirmDialog.mock.calls.at(-1)?.[0];
+    expect(confirmation?.description).toContain("@username");
+    expect(confirmation?.description).toContain("stable numeric ID");
   });
 });
 
