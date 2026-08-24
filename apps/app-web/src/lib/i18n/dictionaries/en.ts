@@ -158,6 +158,11 @@ export const en = {
     streamInterrupted:
       "The connection dropped before the reply finished. Any page changes already made were saved. Send another message to continue.",
     // Assistant switcher — pick which workspace assistant this chat talks to.
+    /** The POST body closed with no terminal event: the turn is still running
+     *  server-side and the dock is re-attaching to it. */
+    turnReconnecting:
+      "Connection dropped. Still working in the background; the reply will appear when it finishes.",
+    turnReconnectFailed: "Could not reconnect to the running turn. Reload to check.",
     switchAssistant: "Switch assistant",
     switchAssistantTitle: "Talk to",
     emptyTitle: "Ask Use Brian",
@@ -5653,6 +5658,8 @@ export const en = {
     liveWorkNoProgress: "No progress for {minutes}m",
     turnStoppedBy: "{name} stopped this turn.",
     turnStoppedByYou: "You stopped this turn.",
+    turnReconnecting:
+      "Connection dropped. Your assistant is still working; the reply will appear here when it finishes.",
     turnReclaimed:
       "The previous turn stopped responding and was reset, so the chat is unblocked. Nothing was lost: your messages are still here. Send again to continue.",
     pinnedContext: "Pins",

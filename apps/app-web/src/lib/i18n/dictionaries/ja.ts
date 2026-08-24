@@ -136,6 +136,9 @@ export const ja: Dictionary = {
     error: "送信できませんでした。もう一度お試しください。",
     streamInterrupted:
       "返信の途中で接続が切れました。これまでのページの変更は保存済みです。続けるにはもう一度メッセージを送ってください。",
+    turnReconnecting:
+      "接続が切れました。バックグラウンドで処理を続けています。完了すると返信が表示されます。",
+    turnReconnectFailed: "実行中のターンに再接続できませんでした。再読み込みして確認してください。",
     switchAssistant: "アシスタントを切り替え",
     switchAssistantTitle: "話す相手",
     emptyTitle: "Use Brian に依頼",
@@ -5438,6 +5441,8 @@ export const ja: Dictionary = {
     liveWorkNoProgress: "{minutes} 分間、進捗がありません",
     turnStoppedBy: "{name} がこのターンを停止しました。",
     turnStoppedByYou: "このターンを停止しました。",
+    turnReconnecting:
+      "接続が切れました。アシスタントは処理を続けています。完了すると返信がここに表示されます。",
     turnReclaimed:
       "前のターンが応答しなくなったためリセットし、チャットのブロックを解除しました。メッセージはすべて残っています。もう一度送信すると続けられます。",
     pinnedContext: "ピン",
