@@ -17,16 +17,12 @@
  */
 
 export {
-  MAX_ROOM_RESPONDERS,
   mentionCandidatesFor,
   resolveMentionQuery,
   resolveMentionSpans,
-  resolveMentionedAssistants,
   trailingMentionQuery,
   type AssistantLike,
   type MentionQuery,
-  type MentionSpan,
-  type MentionTarget,
 } from "@use-brian/shared/mention-matching";
 
 import {
@@ -45,7 +41,7 @@ import {
  * plan says to define locally: a merged roster entry knows whether picking
  * it wakes a paid model turn or just pings a teammate.
  */
-export type RoomMentionKind = "assistant" | "member";
+type RoomMentionKind = "assistant" | "member";
 export type RoomMentionTarget = MentionTarget & { mentionKind: RoomMentionKind };
 
 export type PartitionedRoomMentions<T extends RoomMentionTarget> = {

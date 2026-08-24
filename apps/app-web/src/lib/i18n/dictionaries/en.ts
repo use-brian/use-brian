@@ -572,7 +572,7 @@ export const en = {
     inboxPendingSubtitle: "Your assistant replied",
     inboxMentionByActor: "{actor} mentioned you",
     inboxMentionAnon: "You were mentioned",
-    // Room mentions (migration 448) — same wording, plus the room's name so
+    // Room mentions (migration 469): same wording, plus the room's name so
     // the row reads as coming from a room rather than a page.
     inboxMentionByActorInRoom: "{actor} mentioned you in {room}",
     inboxMentionAnonInRoom: "You were mentioned in {room}",
