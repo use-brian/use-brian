@@ -79,6 +79,8 @@ import {
   connectFeishuChannel,
   connectMsTeamsChannel,
   connectWhatsAppCloudChannel,
+  listWhatsAppCloudGroups,
+  createWhatsAppCloudGroup,
   startWechatPairing,
   getWechatPairingStatus,
   submitWechatVerifyCode,
@@ -100,6 +102,7 @@ import {
   type ChannelIntegrationConfig,
   type ChannelModelAlias,
   type CustomChannelState,
+  type WhatsAppCloudGroup,
   type RequireMentionOverride,
   type UserAccessMode,
 } from "@/lib/api/channels";
@@ -664,9 +667,11 @@ export function ChannelDetail({
 
   async function onDisconnect(): Promise<void> {
     const dc = t.studioPage.channels.disconnect;
+    const isWhatsAppCloud =
+      channel.channelType === "whatsapp" && channel.integrationProvider === "cloud_api";
     const ok = await confirmDialog({
       title: dc.confirmTitle,
-      description: dc.warning,
+      description: isWhatsAppCloud ? dc.whatsappCloudWarning : dc.warning,
       confirmLabel: dc.confirm,
       cancelLabel: dc.cancel,
       variant: "destructive",
@@ -1007,6 +1012,7 @@ export function ChannelDetail({
           <WhatsAppCloudChatSection
             phoneNumber={channel.config?.whatsappDisplayPhoneNumber ?? null}
           />
+          <WhatsAppCloudGroupsSection workspaceId={workspaceId} channelId={channel.id} />
         </>
       )}
 
@@ -1150,6 +1156,143 @@ export function ChannelDetail({
         )}
       </div>
     </div>
+  );
+}
+
+export function WhatsAppCloudGroupsSection({
+  workspaceId,
+  channelId,
+}: {
+  workspaceId: string;
+  channelId: string;
+}) {
+  const t = useT();
+  const copy = t.studioPage.channels.whatsappCloudGroups;
+  const [groups, setGroups] = useState<WhatsAppCloudGroup[]>([]);
+  const [subject, setSubject] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [creating, setCreating] = useState(false);
+  const [loadError, setLoadError] = useState(false);
+  const [createError, setCreateError] = useState(false);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  const refresh = useCallback(async (quiet = false) => {
+    if (!quiet) setLoading(true);
+    try {
+      setGroups(await listWhatsAppCloudGroups(workspaceId, channelId));
+      setLoadError(false);
+    } catch {
+      if (!quiet) setLoadError(true);
+    } finally {
+      if (!quiet) setLoading(false);
+    }
+  }, [workspaceId, channelId]);
+
+  useEffect(() => {
+    void refresh();
+    const timer = window.setInterval(() => void refresh(true), 5_000);
+    return () => window.clearInterval(timer);
+  }, [refresh]);
+
+  async function createGroup(): Promise<void> {
+    const nextSubject = subject.trim();
+    if (!nextSubject) return;
+    setCreating(true);
+    setCreateError(false);
+    try {
+      const group = await createWhatsAppCloudGroup(workspaceId, channelId, nextSubject);
+      setGroups((current) => [group, ...current.filter((item) => item.id !== group.id)]);
+      setSubject("");
+    } catch {
+      setCreateError(true);
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  function copyInvite(group: WhatsAppCloudGroup): void {
+    if (!group.inviteLink) return;
+    void navigator.clipboard.writeText(group.inviteLink).then(() => {
+      setCopiedId(group.id);
+      window.setTimeout(() => setCopiedId(null), 1_500);
+    });
+  }
+
+  return (
+    <section className="flex flex-col gap-3 rounded-lg border border-border px-4 py-3">
+      <div>
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          {copy.title}
+        </h3>
+        <p className="mt-1 text-xs text-muted-foreground">{copy.hint}</p>
+      </div>
+      <form
+        className="flex flex-col gap-2 sm:flex-row"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void createGroup();
+        }}
+      >
+        <input
+          type="text"
+          value={subject}
+          maxLength={128}
+          aria-label={copy.subjectLabel}
+          placeholder={copy.subjectPlaceholder}
+          onChange={(event) => setSubject(event.target.value)}
+          disabled={creating}
+          className="min-w-0 flex-1 rounded-md border border-border bg-muted/50 px-3 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
+        />
+        <button
+          type="submit"
+          disabled={creating || !subject.trim()}
+          className="rounded-md bg-action px-3 py-1.5 text-sm font-medium text-action-foreground disabled:opacity-50"
+        >
+          {creating ? copy.creatingAction : copy.createAction}
+        </button>
+      </form>
+      {createError && <p className="text-xs text-destructive">{copy.createError}</p>}
+      {loading ? (
+        <p className="text-sm text-muted-foreground">{copy.loading}</p>
+      ) : loadError ? (
+        <p className="text-xs text-destructive">{copy.loadError}</p>
+      ) : groups.length === 0 ? (
+        <p className="text-sm text-muted-foreground">{copy.empty}</p>
+      ) : (
+        <ul className="flex flex-col gap-2">
+          {groups.map((group) => (
+            <li key={group.id} className="flex flex-col gap-2 rounded-md bg-muted/40 px-3 py-2 sm:flex-row sm:items-center">
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-sm font-medium">{group.subject}</div>
+                <div className={cn("text-xs", group.status === "failed" ? "text-destructive" : "text-muted-foreground")}>
+                  {copy.status[group.status]}
+                </div>
+              </div>
+              {group.status === "active" && group.inviteLink && (
+                <div className="flex shrink-0 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => copyInvite(group)}
+                    className="text-xs font-medium text-muted-foreground hover:text-foreground"
+                  >
+                    {copiedId === group.id ? copy.copied : copy.copyInvite}
+                  </button>
+                  <a
+                    href={group.inviteLink}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 text-xs font-medium text-action hover:underline"
+                  >
+                    {copy.openInvite}
+                    <ExternalLink className="h-3 w-3" aria-hidden />
+                  </a>
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 
@@ -1754,6 +1897,16 @@ export function ChannelConfigSection({
       {!isDiscord && !isWhatsAppCloud && !isCustom && ackReactionControl}
 
       {accessControl}
+
+      {isWhatsAppCloud && (
+        <ConfigToggle
+          label={cfg.whatsappAllowAllGroupMembers}
+          hint={cfg.whatsappAllowAllGroupMembersHint}
+          checked={config.whatsappCloudAllowAllGroupMembers ?? false}
+          disabled={saving}
+          onChange={(v) => void save({ whatsappCloudAllowAllGroupMembers: v })}
+        />
+      )}
 
       {saving && (
         <span className="text-xs text-muted-foreground">

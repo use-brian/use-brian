@@ -152,7 +152,11 @@ export function createWorkflowChannelDelivery(
       ) {
         return { status: 'skipped', channelType, reason: 'provider_mismatch' }
       }
-      if (!whatsappCloudUserAllowed(integration.config ?? {}, replyToTrigger.actorId)) {
+      if (!whatsappCloudUserAllowed(
+        integration.config ?? {},
+        replyToTrigger.actorId,
+        replyToTrigger.recipientType === 'group',
+      )) {
         return { status: 'skipped', channelType, reason: 'access_denied' }
       }
 

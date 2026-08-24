@@ -70,7 +70,10 @@ function baseParams() {
   }
 }
 
-function whatsappCloudIntegration(allowedUserIds = ['15551234567']) {
+function whatsappCloudIntegration(
+  allowedUserIds = ['15551234567'],
+  whatsappCloudAllowAllGroupMembers = false,
+) {
   return {
     id: 'int-wa',
     channelId: 'channel-wa',
@@ -79,7 +82,11 @@ function whatsappCloudIntegration(allowedUserIds = ['15551234567']) {
     teamName: 'Support',
     botUserId: 'phone-1',
     botUsername: null,
-    config: { userAccessMode: 'allowlist' as const, allowedUserIds },
+    config: {
+      userAccessMode: 'allowlist' as const,
+      allowedUserIds,
+      whatsappCloudAllowAllGroupMembers,
+    },
     status: 'active' as const,
     createdAt: new Date(),
     updatedAt: new Date(),
@@ -384,6 +391,30 @@ describe('[COMP:workflow/channel-delivery] thread-reply pass-through', () => {
 
     expect(outcome).toEqual({ status: 'skipped', channelType: 'whatsapp', reason: 'access_denied' })
     expect(mockedCreateWhatsAppCloudAdapter).not.toHaveBeenCalled()
+  })
+
+  it('whatsapp cloud: replies to a non-allowlisted group participant when group access is enabled', async () => {
+    vi.mocked(integrationStore.getCredentialsForAssistantIntegrationSystem)
+      .mockResolvedValueOnce(whatsappCloudIntegration([], true))
+    const deliver = createWorkflowChannelDelivery({
+      integrationStore,
+      now: () => Date.parse('2026-08-17T12:00:00.000Z'),
+    })
+
+    const outcome = await deliver({
+      ...baseParams(),
+      channelType: 'whatsapp',
+      channelId: 'group-1',
+      channelIntegrationId: 'int-wa',
+      replyToTrigger: {
+        actorId: '15551234567',
+        recipientType: 'group',
+        providerAccountId: 'phone-1',
+        occurredAt: '2026-08-17T11:00:00.000Z',
+      },
+    })
+
+    expect(outcome).toMatchObject({ status: 'delivered', channelId: 'group-1' })
   })
 
   it('whatsapp cloud: refuses replies after the customer-service window', async () => {

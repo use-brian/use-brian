@@ -3,7 +3,9 @@ import type { ChannelIntegrationConfig } from '../db/channel-integrations.js'
 export function whatsappCloudUserAllowed(
   config: ChannelIntegrationConfig,
   userId: string,
+  isGroupChat: boolean,
 ): boolean {
+  if (isGroupChat && config.whatsappCloudAllowAllGroupMembers === true) return true
   // Public business numbers fail closed until an operator chooses an access
   // mode; this also protects the partial provisioning window.
   if (!config.userAccessMode) return false
