@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import type { Channel } from "@/lib/api/channels";
+import type { ConfirmOptions } from "@/components/ui/confirm-dialog";
 import {
   AddChannelForm,
   ChannelConfigSection,
@@ -16,7 +17,9 @@ import {
   WhatsAppCloudChatSection,
 } from "../page";
 
-const confirmDialog = vi.hoisted(() => vi.fn(async () => false));
+const confirmDialog = vi.hoisted(() =>
+  vi.fn(async (_options: ConfirmOptions) => false),
+);
 
 vi.mock("@/components/ui/confirm-dialog", () => ({ confirmDialog }));
 
