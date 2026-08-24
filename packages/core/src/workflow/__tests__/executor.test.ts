@@ -1106,6 +1106,44 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
     expect(seenAllowed).toEqual([['webFetch', 'getMemory'], undefined])
   })
 
+  it('overlays builder maxTurns onto legacy depth while preserving sibling caps', async () => {
+    const stores = makeFakeStores()
+    const seenDepth: Array<ConsultRequest['depth']> = []
+    const deps: ExecutorDeps = {
+      workflowStore: stores.workflowStore,
+      runStore: stores.runStore,
+      consultTransport: {
+        async send(request: ConsultRequest): Promise<ConsultResponse> {
+          seenDepth.push(request.depth)
+          return makeConsultTransport().send(request)
+        },
+      },
+      resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
+      buildToolRegistry: async () => new Map(),
+    }
+
+    const definition: WorkflowDefinition = {
+      startStepId: 'collect',
+      steps: [
+        {
+          id: 'collect',
+          type: 'assistant_call',
+          target: { assistantId: 'primary' },
+          prompt: 'collect the current period',
+          maxTurns: 12,
+          depth: { tier: 'standard', maxTurns: 6, maxToolCalls: 8, timeoutMs: 240_000 },
+        },
+      ],
+    }
+
+    const { run } = await seedWorkflowAndRun(deps, definition)
+    await advanceWorkflowRun(deps, run.id)
+
+    expect(seenDepth).toEqual([
+      { tier: 'standard', maxTurns: 12, maxToolCalls: 8, timeoutMs: 240_000 },
+    ])
+  })
+
   it('passes an assistant_call `skills` allow-list through as the consult skills', async () => {
     const stores = makeFakeStores()
     const seenSkills: Array<string[] | undefined> = []

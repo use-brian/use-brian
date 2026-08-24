@@ -221,25 +221,38 @@ async function postJson(
   url: string,
   headers: Record<string, string>,
   body: unknown,
+  options: { retry429Once?: boolean } = {},
 ): Promise<unknown> {
-  const res = await fetchImpl(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...headers },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
-  })
-  const raw = await res.text()
-  if (!res.ok) {
-    // Upstream error text stays server-side; the result carries a coded
-    // sentence (vendor wordings are not our interface).
-    console.error(`[engines] upstream ${url} → ${res.status}: ${raw.slice(0, 500)}`)
-    throw new Error(`upstream_error status=${res.status}`)
+  const maxAttempts = options.retry429Once ? 2 : 1
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const res = await fetchImpl(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...headers },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+    })
+    const raw = await res.text()
+    if (!res.ok) {
+      if (res.status === 429 && attempt + 1 < maxAttempts) {
+        const retryAfter = Number(res.headers?.get?.('retry-after'))
+        const delayMs = Number.isFinite(retryAfter)
+          ? Math.min(Math.max(retryAfter * 1_000, 0), 5_000)
+          : 250
+        await new Promise((resolve) => setTimeout(resolve, delayMs))
+        continue
+      }
+      // Upstream error text stays server-side; the result carries a coded
+      // sentence (vendor wordings are not our interface).
+      console.error(`[engines] upstream ${url} → ${res.status}: ${raw.slice(0, 500)}`)
+      throw new Error(`upstream_error status=${res.status}`)
+    }
+    try {
+      return JSON.parse(raw) as unknown
+    } catch {
+      throw new Error('upstream_error status=unparseable')
+    }
   }
-  try {
-    return JSON.parse(raw) as unknown
-  } catch {
-    throw new Error('upstream_error status=unparseable')
-  }
+  throw new Error('upstream_error status=429')
 }
 
 type CallOpts = { country?: string }
@@ -480,6 +493,7 @@ export function createEngineAskers(
               messages: [{ role: 'user', content: question }],
               max_tokens: MAX_ANSWER_TOKENS,
             },
+            { retry429Once: true },
           )) as {
             choices?: Array<{ message?: { content?: string } }>
             citations?: string[]

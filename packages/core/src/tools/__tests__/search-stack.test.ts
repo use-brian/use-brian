@@ -241,6 +241,122 @@ describe('[COMP:tools/search] webSearch outage surfacing', () => {
   })
 })
 
+describe('[COMP:tools/search] webSearch exact-provider panels', () => {
+  const ENV_KEYS = ['BRAVE_SEARCH_API_KEY', 'SERPER_API_KEY', 'TAVILY_API_KEY'] as const
+  let savedEnv: Record<string, string | undefined>
+  let fetchSpy: MockInstance<typeof fetch>
+
+  const ctx = { abortSignal: new AbortController().signal } as ToolContext
+
+  beforeEach(() => {
+    savedEnv = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]))
+    process.env.BRAVE_SEARCH_API_KEY = 'brave-token'
+    process.env.SERPER_API_KEY = 'serper-token'
+    process.env.TAVILY_API_KEY = 'tavily-token'
+    fetchSpy = vi.spyOn(globalThis, 'fetch') as unknown as MockInstance<typeof fetch>
+  })
+
+  afterEach(() => {
+    for (const key of ENV_KEYS) {
+      if (savedEnv[key] === undefined) delete process.env[key]
+      else process.env[key] = savedEnv[key]
+    }
+    fetchSpy.mockRestore()
+  })
+
+  it('requires exactly one query shape and an exact provider for panels', () => {
+    expect(webSearchTool.inputSchema.safeParse({}).success).toBe(false)
+    expect(webSearchTool.inputSchema.safeParse({ query: 'one', queries: ['two'], provider: 'serper' }).success)
+      .toBe(false)
+    expect(webSearchTool.inputSchema.safeParse({ queries: ['one'] }).success).toBe(false)
+    expect(webSearchTool.inputSchema.safeParse({ queries: ['one'], provider: 'serper' }).success).toBe(true)
+  })
+
+  it('uses only the selected provider and makes its provenance model-visible', async () => {
+    fetchSpy.mockImplementation(async (input) => {
+      const url = String(input)
+      expect(url).toContain('google.serper.dev')
+      return new Response(
+        JSON.stringify({ organic: [{ title: 'Use Brian', link: 'https://usebrian.ai/', snippet: 'Company brain' }] }),
+        { status: 200 },
+      )
+    })
+
+    const out = await webSearchTool.execute(
+      { query: 'AI company brain', provider: 'serper', maxResults: 10 },
+      ctx,
+    )
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+    expect(out.isError).toBeUndefined()
+    expect(out.data).toMatchObject({
+      provider: 'serper',
+      expectedQueries: 1,
+      completed: 1,
+      failed: 0,
+      searches: [{ query: 'AI company brain', status: 'ok', provider: 'serper' }],
+    })
+    expect(out.meta).toMatchObject({
+      searchProvider: 'serper',
+      searchProviderUnits: 1,
+      externalCost_model: 'serper',
+      externalCost_flatCostUsd: 0.001,
+    })
+  })
+
+  it('preserves input order and partial errors while charging only served units', async () => {
+    fetchSpy.mockImplementation(async (_input, init) => {
+      const query = String(JSON.parse(String(init?.body)).q)
+      if (query === 'q2') return new Response('rate limited', { status: 429 })
+      return new Response(
+        JSON.stringify({ organic: [{ title: query, link: `https://${query}.example`, snippet: `${query} result` }] }),
+        { status: 200 },
+      )
+    })
+
+    const out = await webSearchTool.execute(
+      { queries: ['q1', 'q2', 'q3'], provider: 'serper', maxResults: 10 },
+      ctx,
+    )
+    const data = out.data as {
+      completed: number
+      failed: number
+      searches: Array<{ query: string; status: string; error?: string }>
+    }
+
+    expect(out.isError).toBeUndefined()
+    expect(data.completed).toBe(2)
+    expect(data.failed).toBe(1)
+    expect(data.searches.map((search) => [search.query, search.status])).toEqual([
+      ['q1', 'ok'],
+      ['q2', 'error'],
+      ['q3', 'ok'],
+    ])
+    expect(data.searches[1].error).toMatch(/Serper HTTP 429/)
+    expect(out.meta).toMatchObject({
+      searchProvider: 'serper',
+      searchProviderUnits: 2,
+      externalCost_flatCostUsd: 0.002,
+    })
+  })
+
+  it('fails closed without a configured exact provider and makes no request', async () => {
+    delete process.env.SERPER_API_KEY
+    const out = await webSearchTool.execute({ query: 'q', provider: 'serper' }, ctx)
+    expect(out.isError).toBe(true)
+    expect(String(out.data)).toContain('not configured')
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('marks an all-error panel as a tool error without recording served cost', async () => {
+    fetchSpy.mockResolvedValue(new Response('rate limited', { status: 429 }))
+    const out = await webSearchTool.execute({ queries: ['q1', 'q2'], provider: 'serper' }, ctx)
+    expect(out.isError).toBe(true)
+    expect(out.meta).toMatchObject({ searchProvider: 'serper', searchProviderUnits: 0 })
+    expect(out.meta).not.toHaveProperty('externalCost_flatCostUsd')
+  })
+})
+
 // ── Provider response parsing (mocked fetch) ────────────────────
 
 describe('[COMP:tools/search] Provider response parsers', () => {
