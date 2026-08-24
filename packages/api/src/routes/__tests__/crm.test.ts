@@ -54,10 +54,17 @@ vi.mock('../../db/crm-r2.js', () => ({
   listCrmSavedViews: vi.fn(),
   listCrmTimeline: vi.fn(),
   removeCrmDealParticipant: vi.fn(),
+  reorderCrmFields: vi.fn(),
+  reorderCrmPipelines: vi.fn(),
+  reorderCrmStages: vi.fn(),
+  restoreCrmFieldDefinition: vi.fn(),
   setCrmArchived: vi.fn(),
   setCrmDealPipelineStage: vi.fn(),
   setCrmDealPrimaryContact: vi.fn(),
+  setCrmStageArchived: vi.fn(),
   updateCrmCustomFields: vi.fn(),
+  updateCrmFieldDefinition: vi.fn(),
+  updateCrmPipeline: vi.fn(),
   updateCrmStage: vi.fn(),
   validateCrmCustomFieldValues: vi.fn(),
 }))
@@ -75,6 +82,7 @@ import {
   listCrmDealParticipants,
   listCrmRecordRelationships,
   setCrmDealPrimaryContact,
+  updateCrmPipeline,
   validateCrmCustomFieldValues,
 } from '../../db/crm-r2.js'
 
@@ -118,7 +126,7 @@ describe('[COMP:api/crm-r2-route] CRM R2 route authority', () => {
 
     expect(response.status).toBe(200)
     expect(response.body).toEqual(CONFIG)
-    expect(getCrmConfig).toHaveBeenCalledWith(CTX.userId, WS)
+    expect(getCrmConfig).toHaveBeenCalledWith(CTX.userId, WS, false)
   })
 
   it('reserves pipeline configuration for owners and admins', async () => {
@@ -207,6 +215,33 @@ describe('[COMP:api/crm-r2-route] CRM R2 route authority', () => {
       userId: CTX.userId,
       workspaceId: WS,
       presetId: 'services_saas',
+    })
+  })
+})
+
+describe('[COMP:api/crm-config-http] CRM configuration HTTP boundary', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.mocked(resolveWorkspaceViewpoint).mockResolvedValue(CTX as never)
+  })
+
+  it('keeps lifecycle mutations admin-only', async () => {
+    const denied = await request(makeApp('member'))
+      .patch(`/api/crm/${WS}/pipelines/pipeline-1`)
+      .send({ name: 'Renewals' })
+    expect(denied.status).toBe(403)
+    expect(updateCrmPipeline).not.toHaveBeenCalled()
+
+    vi.mocked(updateCrmPipeline).mockResolvedValue(true)
+    const allowed = await request(makeApp('admin'))
+      .patch(`/api/crm/${WS}/pipelines/pipeline-1`)
+      .send({ name: 'Renewals' })
+    expect(allowed.status).toBe(200)
+    expect(updateCrmPipeline).toHaveBeenCalledWith({
+      userId: CTX.userId,
+      workspaceId: WS,
+      pipelineId: 'pipeline-1',
+      name: 'Renewals',
     })
   })
 })

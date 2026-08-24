@@ -43,6 +43,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useWorkspaceContext } from "@/lib/workspace-context";
+import { loadWorkspaceRoster } from "@/lib/api/workspace-roster";
+import type { FeedWorkspaceMember } from "@/lib/api/feed";
+import { memberDisplayName } from "@/components/brain/property-edit";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -142,7 +145,7 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
   routeRecord?: CrmRouteRecord | null;
 }) {
   const t = useT().crmPage;
-  const { role } = useWorkspaceContext();
+  const { role, me } = useWorkspaceContext();
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -178,6 +181,14 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
   const [pendingApprovals, setPendingApprovals] = useState<PendingApprovalRow[]>([]);
   const [approvalsLoading, setApprovalsLoading] = useState(true);
   const [approvalsError, setApprovalsError] = useState(false);
+  const [roster, setRoster] = useState<FeedWorkspaceMember[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    void loadWorkspaceRoster(workspaceId)
+      .then((members) => { if (!cancelled) setRoster(members); })
+      .catch(() => { if (!cancelled) setRoster([]); });
+    return () => { cancelled = true; };
+  }, [workspaceId]);
   const reloadApprovals = useCallback(async () => {
     setApprovalsLoading(true);
     setApprovalsError(false);
@@ -273,6 +284,13 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
   const tagOptions = useMemo(
     () => crmTagOptions(contacts, companies),
     [contacts, companies],
+  );
+  const ownerOptions = useMemo(
+    () => roster.map((member) => ({
+      id: member.userId,
+      name: memberDisplayName(member) ?? t.r2.memberUnknown,
+    })),
+    [roster, t.r2.memberUnknown],
   );
   const sectionEntityKind = view.section === "contacts" ? "person" : view.section === "companies" ? "company" : "deal";
   const sectionFields = useMemo(
@@ -703,6 +721,14 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
           },
         ]
       : []),
+    {
+      key: "owner",
+      label: t.r2.owner,
+      options: [
+        { value: "none", label: t.r2.noOwner },
+        ...ownerOptions.map((owner) => ({ value: owner.id, label: owner.name })),
+      ],
+    },
     ...sectionFields.map((field) => {
       let options: Array<{ value: string; label: string }>;
       if (field.fieldType === "single_select" || field.fieldType === "multi_select") {
@@ -1042,8 +1068,10 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
             companies={companies}
             tagOptions={tagOptions}
             stages={selectedPipeline?.stages ?? []}
+            owners={ownerOptions}
             onClear={() => setSelected(new Set())}
             onDealStage={(stageId) => void runBulkPipelineStage(stageId)}
+            onOwner={(ownerId) => void runBulk(() => ({ ownerId }))}
             onContactCompany={(companyId) =>
               void runBulk(() => ({ companyId }))
             }
@@ -1061,6 +1089,21 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
           />
         ) : (
           <div className="flex flex-wrap items-center gap-2 border-b border-border/60 px-4 py-2.5">
+            <button
+              type="button"
+              aria-pressed={view.owner.length === 1 && view.owner[0] === me.id}
+              onClick={() => setView({
+                owner: view.owner.length === 1 && view.owner[0] === me.id ? [] : [me.id],
+              })}
+              className={cn(
+                "inline-flex h-7 items-center rounded-full border px-2.5 text-xs transition-colors",
+                view.owner.length === 1 && view.owner[0] === me.id
+                  ? "border-foreground bg-foreground text-background"
+                  : "border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground",
+              )}
+            >
+              {t.r2.myRecords}
+            </button>
             {sectionQuicks.map((f) => {
               const active = view.quick === f;
               const count = counts[f];
@@ -1097,17 +1140,19 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
                       // A quick-filter owns the stage slice; its pill would lie.
                       stage: view.quick ? [] : view.stages,
                       company: view.company,
+                      owner: view.owner,
                       ...Object.fromEntries(Object.entries(view.custom).map(([key, values]) => [`cf:${key}`, values])),
                     }
                   : view.section === "contacts"
-                    ? { company: view.company, tag: view.tag, ...Object.fromEntries(Object.entries(view.custom).map(([key, values]) => [`cf:${key}`, values])) }
-                    : { tag: view.tag, ...Object.fromEntries(Object.entries(view.custom).map(([key, values]) => [`cf:${key}`, values])) }
+                    ? { company: view.company, tag: view.tag, owner: view.owner, ...Object.fromEntries(Object.entries(view.custom).map(([key, values]) => [`cf:${key}`, values])) }
+                    : { tag: view.tag, owner: view.owner, ...Object.fromEntries(Object.entries(view.custom).map(([key, values]) => [`cf:${key}`, values])) }
               }
               onSet={(key, values) => {
                 if (key === "stage")
                   setView({ quick: null, stages: values });
                 else if (key === "company") setView({ company: values });
                 else if (key === "tag") setView({ tag: values });
+                else if (key === "owner") setView({ owner: values });
                 else if (key.startsWith("cf:")) {
                   const fieldKey = key.slice(3);
                   const custom = { ...view.custom };
@@ -1786,8 +1831,10 @@ function BulkBar({
   companies,
   tagOptions,
   stages,
+  owners,
   onClear,
   onDealStage,
+  onOwner,
   onContactCompany,
   onAddTag,
 }: {
@@ -1798,8 +1845,10 @@ function BulkBar({
   companies: readonly CrmCompanyRow[];
   tagOptions: string[];
   stages: readonly CrmPipelineStage[];
+  owners: readonly { id: string; name: string }[];
   onClear: () => void;
   onDealStage: (stageId: string) => void;
+  onOwner: (ownerId: string | null) => void;
   onContactCompany: (companyId: string | null) => void;
   onAddTag: (tag: string) => void;
 }) {
@@ -1831,6 +1880,15 @@ function BulkBar({
           onPick={(id) => onContactCompany(id === NONE ? null : id)}
         />
       )}
+      <BulkMenu
+        label={t.r2.bulkOwner}
+        items={{
+          [NONE]: t.r2.unassigned,
+          ...Object.fromEntries(owners.map((owner) => [owner.id, owner.name])),
+        }}
+        disabled={busy}
+        onPick={(id) => onOwner(id === NONE ? null : id)}
+      />
       {section !== "deals" && (
         <DropdownMenu>
           <DropdownMenuTrigger

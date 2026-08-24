@@ -142,6 +142,7 @@ export type CrmPipelineStage = {
   position: number;
   probability: number;
   requiredFields: string[];
+  archivedAt?: string | null;
 };
 
 export type CrmPipeline = {
@@ -150,6 +151,7 @@ export type CrmPipeline = {
   isDefault: boolean;
   position: number;
   stages: CrmPipelineStage[];
+  archivedAt?: string | null;
 };
 
 export type CrmFieldType =
@@ -170,6 +172,7 @@ export type CrmFieldDefinition = {
   options: string[];
   isRequired: boolean;
   position: number;
+  archivedAt?: string | null;
 };
 
 export type CrmConfig = {
@@ -184,8 +187,8 @@ async function jsonRequest<T>(path: string, init?: RequestInit): Promise<T> {
   return body;
 }
 
-export function fetchCrmConfig(workspaceId: string): Promise<CrmConfig> {
-  return jsonRequest(`/api/crm/${encodeURIComponent(workspaceId)}/config`);
+export function fetchCrmConfig(workspaceId: string, includeArchived = false): Promise<CrmConfig> {
+  return jsonRequest(`/api/crm/${encodeURIComponent(workspaceId)}/config${includeArchived ? "?archived=true" : ""}`);
 }
 
 export async function createCrmRecord(
@@ -387,6 +390,44 @@ export function createCrmPipelineStage(
   );
 }
 
+export function updateCrmPipeline(
+  workspaceId: string,
+  pipelineId: string,
+  changes: { name?: string; isDefault?: boolean; archived?: boolean },
+): Promise<{ ok: true }> {
+  return jsonRequest(
+    `/api/crm/${encodeURIComponent(workspaceId)}/pipelines/${encodeURIComponent(pipelineId)}`,
+    { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(changes) },
+  );
+}
+
+export function reorderCrmPipelines(workspaceId: string, orderedIds: string[]): Promise<{ ok: true }> {
+  return jsonRequest(`/api/crm/${encodeURIComponent(workspaceId)}/pipelines/reorder`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ orderedIds }),
+  });
+}
+
+export function updateCrmPipelineStage(
+  workspaceId: string,
+  stageId: string,
+  changes: Partial<Pick<CrmPipelineStage, "name" | "category" | "probability" | "requiredFields">> & { archived?: boolean },
+): Promise<CrmPipelineStage | { ok: true }> {
+  return jsonRequest(`/api/crm/${encodeURIComponent(workspaceId)}/stages/${encodeURIComponent(stageId)}`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(changes),
+  });
+}
+
+export function reorderCrmPipelineStages(
+  workspaceId: string,
+  pipelineId: string,
+  orderedIds: string[],
+): Promise<{ ok: true }> {
+  return jsonRequest(
+    `/api/crm/${encodeURIComponent(workspaceId)}/pipelines/${encodeURIComponent(pipelineId)}/stages/reorder`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ orderedIds }) },
+  );
+}
+
 export function createCrmField(
   workspaceId: string,
   input: {
@@ -435,6 +476,34 @@ export async function archiveCrmField(
     `/api/crm/${encodeURIComponent(workspaceId)}/fields/${encodeURIComponent(fieldId)}`,
     { method: "DELETE" },
   );
+}
+
+export function updateCrmField(
+  workspaceId: string,
+  fieldId: string,
+  changes: { label?: string; options?: string[]; isRequired?: boolean },
+): Promise<CrmFieldDefinition> {
+  return jsonRequest(`/api/crm/${encodeURIComponent(workspaceId)}/fields/${encodeURIComponent(fieldId)}`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(changes),
+  });
+}
+
+export async function restoreCrmField(workspaceId: string, fieldId: string): Promise<void> {
+  await jsonRequest(
+    `/api/crm/${encodeURIComponent(workspaceId)}/fields/${encodeURIComponent(fieldId)}/restore`,
+    { method: "POST" },
+  );
+}
+
+export function reorderCrmFields(
+  workspaceId: string,
+  entityKind: "person" | "company" | "deal",
+  orderedIds: string[],
+): Promise<{ ok: true }> {
+  return jsonRequest(`/api/crm/${encodeURIComponent(workspaceId)}/fields/reorder`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ entityKind, orderedIds }),
+  });
 }
 
 export async function updateCrmCustomFields(

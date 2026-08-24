@@ -158,6 +158,20 @@ describe("[COMP:app-web/crm-view] CRM view logic", () => {
     expect(crmViewFromSearch("draft=orphaned").draft).toBeNull();
   });
 
+  it("round-trips owner state and applies the same owner filter to every section", () => {
+    const view = crmViewFromSearch("owner=user-1,none&section=contacts");
+    expect(view.owner).toEqual(["user-1", "none"]);
+    expect(searchFromCrmView(view)).toContain("owner=user-1%2Cnone");
+    expect(applyDealFilters([
+      deal({ id: "mine", ownerId: "user-1" }),
+      deal({ id: "other", ownerId: "user-2" }),
+    ], { ...DEFAULT_CRM_VIEW, owner: ["user-1"] }, new Map(), NOW).map((row) => row.id)).toEqual(["mine"]);
+    expect(applyContactFilters([
+      contact({ id: "mine", ownerId: "user-1" }),
+      contact({ id: "empty", ownerId: null }),
+    ], { ...DEFAULT_CRM_VIEW, owner: ["none"] }).map((row) => row.id)).toEqual(["empty"]);
+  });
+
   it("deal filtering: closed fold by default, quick filters pick their own slice", () => {
     const rows = [
       deal({ id: "open" }),

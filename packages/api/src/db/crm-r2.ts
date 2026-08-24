@@ -16,8 +16,9 @@ import {
   type EntityRecord,
   type MailboxSearchHit,
 } from '@use-brian/core'
+import type { PoolClient } from 'pg'
 import { buildAccessPredicate } from './access-predicate.js'
-import { getPool, query, queryGated, queryWithRLS } from './client.js'
+import { applyRLSGucs, getPool, query, queryGated, queryWithRLS } from './client.js'
 import { getEntityById, updateEntity } from './entities-store.js'
 
 export const CRM_FIELD_TYPES = [
@@ -40,6 +41,7 @@ export type CrmPipelineStage = {
   position: number
   probability: number
   requiredFields: string[]
+  archivedAt?: string | null
 }
 
 export type CrmPipeline = {
@@ -48,6 +50,7 @@ export type CrmPipeline = {
   isDefault: boolean
   position: number
   stages: CrmPipelineStage[]
+  archivedAt?: string | null
 }
 
 export type CrmFieldDefinition = {
@@ -59,6 +62,7 @@ export type CrmFieldDefinition = {
   options: string[]
   isRequired: boolean
   position: number
+  archivedAt?: string | null
 }
 
 export type CrmConfig = {
@@ -107,7 +111,8 @@ const DEFAULT_STAGES = [
 /** Lazy seed for workspaces created after migration 455. */
 export async function ensureCrmDefaultPipeline(workspaceId: string): Promise<string> {
   const existing = await query<{ id: string }>(
-    `SELECT id FROM crm_pipelines WHERE workspace_id = $1 AND is_default LIMIT 1`,
+    `SELECT id FROM crm_pipelines
+      WHERE workspace_id = $1 AND is_default AND archived_at IS NULL LIMIT 1`,
     [workspaceId],
   )
   if (existing.rows[0]) return existing.rows[0].id
@@ -118,7 +123,7 @@ export async function ensureCrmDefaultPipeline(workspaceId: string): Promise<str
     const pipeline = await client.query<{ id: string }>(
       `INSERT INTO crm_pipelines (workspace_id, name, is_default, position)
        VALUES ($1, 'Sales', true, 0)
-       ON CONFLICT (workspace_id) WHERE is_default DO UPDATE
+       ON CONFLICT (workspace_id) WHERE is_default AND archived_at IS NULL DO UPDATE
          SET is_default = EXCLUDED.is_default
        RETURNING id`,
       [workspaceId],
@@ -143,50 +148,70 @@ export async function ensureCrmDefaultPipeline(workspaceId: string): Promise<str
   }
 }
 
-type ConfigStageRow = Omit<CrmPipelineStage, 'requiredFields'> & { requiredFields: string[] | null }
-type ConfigFieldRow = Omit<CrmFieldDefinition, 'options'> & { options: unknown }
+type ConfigStageRow = Omit<CrmPipelineStage, 'requiredFields' | 'archivedAt'> & {
+  requiredFields: string[] | null
+  archivedAt: Date | null
+}
+type ConfigFieldRow = Omit<CrmFieldDefinition, 'options' | 'archivedAt'> & {
+  options: unknown
+  archivedAt: Date | null
+}
 
-export async function getCrmConfig(userId: string, workspaceId: string): Promise<CrmConfig> {
+export async function getCrmConfig(
+  userId: string,
+  workspaceId: string,
+  includeArchived = false,
+): Promise<CrmConfig> {
   await ensureCrmDefaultPipeline(workspaceId)
   const [pipelineRows, stageRows, fieldRows] = await Promise.all([
-    queryWithRLS<{ id: string; name: string; isDefault: boolean; position: number }>(
+    queryWithRLS<{ id: string; name: string; isDefault: boolean; position: number; archivedAt: Date | null }>(
       userId,
-      `SELECT id, name, is_default AS "isDefault", position
+      `SELECT id, name, is_default AS "isDefault", position, archived_at AS "archivedAt"
          FROM crm_pipelines WHERE workspace_id = $1
-        ORDER BY position, created_at`,
+           ${includeArchived ? '' : 'AND archived_at IS NULL'}
+        ORDER BY archived_at NULLS FIRST, position, created_at`,
       [workspaceId],
     ),
     queryWithRLS<ConfigStageRow>(
       userId,
       `SELECT id, pipeline_id AS "pipelineId", name, legacy_key AS "legacyKey",
-              category, position, probability, required_fields AS "requiredFields"
+              category, position, probability, required_fields AS "requiredFields",
+              archived_at AS "archivedAt"
          FROM crm_pipeline_stages WHERE workspace_id = $1
-        ORDER BY pipeline_id, position`,
+           ${includeArchived ? '' : 'AND archived_at IS NULL'}
+        ORDER BY archived_at NULLS FIRST, pipeline_id, position`,
       [workspaceId],
     ),
     queryWithRLS<ConfigFieldRow>(
       userId,
       `SELECT id, entity_kind AS "entityKind", field_key AS "fieldKey", label,
-              field_type AS "fieldType", options, is_required AS "isRequired", position
+              field_type AS "fieldType", options, is_required AS "isRequired", position,
+              archived_at AS "archivedAt"
          FROM crm_field_definitions
-        WHERE workspace_id = $1 AND archived_at IS NULL
-        ORDER BY entity_kind, position, created_at`,
+        WHERE workspace_id = $1 ${includeArchived ? '' : 'AND archived_at IS NULL'}
+        ORDER BY archived_at NULLS FIRST, entity_kind, position, created_at`,
       [workspaceId],
     ),
   ])
   const stagesByPipeline = new Map<string, CrmPipelineStage[]>()
   for (const row of stageRows.rows) {
     const stages = stagesByPipeline.get(row.pipelineId) ?? []
-    stages.push({ ...row, requiredFields: row.requiredFields ?? [] })
+    stages.push({
+      ...row,
+      requiredFields: row.requiredFields ?? [],
+      archivedAt: row.archivedAt?.toISOString() ?? null,
+    })
     stagesByPipeline.set(row.pipelineId, stages)
   }
   return {
     pipelines: pipelineRows.rows.map((p) => ({
       ...p,
+      archivedAt: p.archivedAt?.toISOString() ?? null,
       stages: stagesByPipeline.get(p.id) ?? [],
     })),
     fields: fieldRows.rows.map((f) => ({
       ...f,
+      archivedAt: f.archivedAt?.toISOString() ?? null,
       options: Array.isArray(f.options)
         ? f.options.filter((v): v is string => typeof v === 'string')
         : [],
@@ -203,8 +228,9 @@ export async function createCrmPipeline(input: {
     input.userId,
     `INSERT INTO crm_pipelines (workspace_id, name, is_default, position, created_by)
      VALUES ($1,$2,false,
-       COALESCE((SELECT MAX(position) + 1 FROM crm_pipelines WHERE workspace_id = $1), 0),$3)
-     RETURNING id, name, is_default AS "isDefault", position`,
+       COALESCE((SELECT MAX(position) + 1 FROM crm_pipelines
+                  WHERE workspace_id = $1 AND archived_at IS NULL), 0),$3)
+     RETURNING id, name, is_default AS "isDefault", position, NULL::timestamptz AS "archivedAt"`,
     [input.workspaceId, input.name, input.userId],
   )
   return { ...inserted.rows[0], stages: [] }
@@ -224,15 +250,22 @@ export async function createCrmStage(input: {
     `INSERT INTO crm_pipeline_stages
        (workspace_id, pipeline_id, name, category, position, probability, required_fields)
      SELECT $1,$2,$3,$4,
-       COALESCE((SELECT MAX(position) + 1 FROM crm_pipeline_stages WHERE pipeline_id = $2),0),
+       COALESCE((SELECT MAX(position) + 1 FROM crm_pipeline_stages
+                  WHERE pipeline_id = $2 AND archived_at IS NULL),0),
        $5,$6
-     WHERE EXISTS (SELECT 1 FROM crm_pipelines WHERE id = $2 AND workspace_id = $1)
+     WHERE EXISTS (SELECT 1 FROM crm_pipelines
+                    WHERE id = $2 AND workspace_id = $1 AND archived_at IS NULL)
      RETURNING id, pipeline_id AS "pipelineId", name, legacy_key AS "legacyKey",
-       category, position, probability, required_fields AS "requiredFields"`,
+       category, position, probability, required_fields AS "requiredFields",
+       NULL::timestamptz AS "archivedAt"`,
     [input.workspaceId, input.pipelineId, input.name, input.category, input.probability, input.requiredFields ?? []],
   )
   const row = inserted.rows[0]
-  return row ? { ...row, requiredFields: row.requiredFields ?? [] } : null
+  return row ? {
+    ...row,
+    requiredFields: row.requiredFields ?? [],
+    archivedAt: row.archivedAt?.toISOString() ?? null,
+  } : null
 }
 
 export async function updateCrmStage(input: {
@@ -251,14 +284,246 @@ export async function updateCrmStage(input: {
        category = COALESCE($5, category),
        probability = COALESCE($6, probability),
        required_fields = COALESCE($7, required_fields)
-     WHERE id = $2 AND workspace_id = $1
+     WHERE id = $2 AND workspace_id = $1 AND archived_at IS NULL
      RETURNING id, pipeline_id AS "pipelineId", name, legacy_key AS "legacyKey",
-       category, position, probability, required_fields AS "requiredFields"`,
+       category, position, probability, required_fields AS "requiredFields",
+       archived_at AS "archivedAt"`,
     [input.workspaceId, input.stageId, input.userId, input.name ?? null,
       input.category ?? null, input.probability ?? null, input.requiredFields ?? null],
   )
   const row = updated.rows[0]
-  return row ? { ...row, requiredFields: row.requiredFields ?? [] } : null
+  return row ? {
+    ...row,
+    requiredFields: row.requiredFields ?? [],
+    archivedAt: row.archivedAt?.toISOString() ?? null,
+  } : null
+}
+
+async function withCrmConfigTransaction<T>(
+  userId: string,
+  work: (client: PoolClient) => Promise<T>,
+): Promise<T> {
+  const client = await getPool().connect()
+  try {
+    await client.query('BEGIN')
+    await applyRLSGucs(client, userId)
+    const value = await work(client)
+    await client.query('COMMIT')
+    return value
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw error
+  } finally {
+    client.release()
+  }
+}
+
+function assertExactOrder(actual: string[], requested: string[]): void {
+  if (actual.length !== requested.length
+    || new Set(actual).size !== actual.length
+    || new Set(requested).size !== requested.length
+    || actual.some((id) => !requested.includes(id))) {
+    throw new Error('orderedIds must contain every live row exactly once')
+  }
+}
+
+export async function updateCrmPipeline(input: {
+  userId: string
+  workspaceId: string
+  pipelineId: string
+  name?: string
+  isDefault?: boolean
+  archived?: boolean
+}): Promise<boolean> {
+  return withCrmConfigTransaction(input.userId, async (client) => {
+    const selected = await client.query<{ isDefault: boolean; archivedAt: Date | null }>(
+      `SELECT is_default AS "isDefault", archived_at AS "archivedAt"
+         FROM crm_pipelines
+        WHERE id = $1 AND workspace_id = $2 FOR UPDATE`,
+      [input.pipelineId, input.workspaceId],
+    )
+    const pipeline = selected.rows[0]
+    if (!pipeline) return false
+    if (input.archived === true) {
+      if (pipeline.isDefault) throw new Error('The default pipeline cannot be archived')
+      const used = await client.query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM entities
+          WHERE workspace_id = $1 AND kind = 'deal' AND valid_to IS NULL
+            AND retracted_at IS NULL AND NOT (attributes ? 'crm_archived_at')
+            AND attributes->>'pipeline_id' = $2`,
+        [input.workspaceId, input.pipelineId],
+      )
+      const count = Number(used.rows[0]?.count ?? 0)
+      if (count > 0) throw new Error(`Move ${count} live deal${count === 1 ? '' : 's'} before archiving this pipeline`)
+    }
+    if (input.isDefault === true && input.archived === true) {
+      throw new Error('An archived pipeline cannot be the default')
+    }
+    if (input.archived === false && pipeline.archivedAt) {
+      await client.query(
+        `UPDATE crm_pipelines SET archived_at = NULL, is_default = false,
+            position = COALESCE((SELECT MAX(position) + 1 FROM crm_pipelines
+              WHERE workspace_id = $2 AND archived_at IS NULL), 0)
+          WHERE id = $1 AND workspace_id = $2`,
+        [input.pipelineId, input.workspaceId],
+      )
+    }
+    if (input.name !== undefined) {
+      await client.query(
+        `UPDATE crm_pipelines SET name = $3
+          WHERE id = $1 AND workspace_id = $2`,
+        [input.pipelineId, input.workspaceId, input.name],
+      )
+    }
+    if (input.isDefault === true) {
+      await client.query(
+        `UPDATE crm_pipelines SET is_default = false
+          WHERE workspace_id = $1 AND archived_at IS NULL`,
+        [input.workspaceId],
+      )
+      await client.query(
+        `UPDATE crm_pipelines SET is_default = true
+          WHERE id = $1 AND workspace_id = $2 AND archived_at IS NULL`,
+        [input.pipelineId, input.workspaceId],
+      )
+    }
+    if (input.archived === true) {
+      await client.query(
+        `UPDATE crm_pipelines SET archived_at = now(), is_default = false
+          WHERE id = $1 AND workspace_id = $2`,
+        [input.pipelineId, input.workspaceId],
+      )
+      await client.query(
+        `UPDATE crm_pipelines SET position = position + 1000000
+          WHERE workspace_id = $1 AND archived_at IS NULL`,
+        [input.workspaceId],
+      )
+      await client.query(
+        `WITH ranked AS (
+           SELECT id, row_number() OVER (ORDER BY position, created_at) - 1 AS next_position
+             FROM crm_pipelines WHERE workspace_id = $1 AND archived_at IS NULL
+         )
+         UPDATE crm_pipelines p SET position = ranked.next_position
+           FROM ranked WHERE p.id = ranked.id`,
+        [input.workspaceId],
+      )
+    }
+    return true
+  })
+}
+
+export async function reorderCrmPipelines(input: {
+  userId: string
+  workspaceId: string
+  orderedIds: string[]
+}): Promise<void> {
+  await withCrmConfigTransaction(input.userId, async (client) => {
+    const current = await client.query<{ id: string }>(
+      `SELECT id FROM crm_pipelines
+        WHERE workspace_id = $1 AND archived_at IS NULL ORDER BY position FOR UPDATE`,
+      [input.workspaceId],
+    )
+    assertExactOrder(current.rows.map((row) => row.id), input.orderedIds)
+    await client.query(
+      `UPDATE crm_pipelines SET position = position + 1000000
+        WHERE workspace_id = $1 AND archived_at IS NULL`,
+      [input.workspaceId],
+    )
+    for (const [position, id] of input.orderedIds.entries()) {
+      await client.query(
+        `UPDATE crm_pipelines SET position = $3
+          WHERE id = $1 AND workspace_id = $2 AND archived_at IS NULL`,
+        [id, input.workspaceId, position],
+      )
+    }
+  })
+}
+
+export async function setCrmStageArchived(input: {
+  userId: string
+  workspaceId: string
+  stageId: string
+  archived: boolean
+}): Promise<boolean> {
+  return withCrmConfigTransaction(input.userId, async (client) => {
+    const selected = await client.query<{ pipelineId: string; archivedAt: Date | null }>(
+      `SELECT pipeline_id AS "pipelineId", archived_at AS "archivedAt"
+         FROM crm_pipeline_stages
+        WHERE id = $1 AND workspace_id = $2 FOR UPDATE`,
+      [input.stageId, input.workspaceId],
+    )
+    const stage = selected.rows[0]
+    if (!stage) return false
+    if (input.archived) {
+      const used = await client.query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM entities
+          WHERE workspace_id = $1 AND kind = 'deal' AND valid_to IS NULL
+            AND retracted_at IS NULL AND NOT (attributes ? 'crm_archived_at')
+            AND attributes->>'pipeline_stage_id' = $2`,
+        [input.workspaceId, input.stageId],
+      )
+      const count = Number(used.rows[0]?.count ?? 0)
+      if (count > 0) throw new Error(`Move ${count} live deal${count === 1 ? '' : 's'} before archiving this stage`)
+      await client.query(
+        `UPDATE crm_pipeline_stages SET archived_at = now()
+          WHERE id = $1 AND workspace_id = $2`,
+        [input.stageId, input.workspaceId],
+      )
+    } else if (stage.archivedAt) {
+      await client.query(
+        `UPDATE crm_pipeline_stages SET archived_at = NULL,
+            position = COALESCE((SELECT MAX(position) + 1 FROM crm_pipeline_stages
+              WHERE pipeline_id = $3 AND archived_at IS NULL), 0)
+          WHERE id = $1 AND workspace_id = $2`,
+        [input.stageId, input.workspaceId, stage.pipelineId],
+      )
+    }
+    await client.query(
+      `UPDATE crm_pipeline_stages SET position = position + 1000000
+        WHERE pipeline_id = $1 AND archived_at IS NULL`,
+      [stage.pipelineId],
+    )
+    await client.query(
+      `WITH ranked AS (
+         SELECT id, row_number() OVER (ORDER BY position, created_at) - 1 AS next_position
+           FROM crm_pipeline_stages WHERE pipeline_id = $1 AND archived_at IS NULL
+       )
+       UPDATE crm_pipeline_stages s SET position = ranked.next_position
+         FROM ranked WHERE s.id = ranked.id`,
+      [stage.pipelineId],
+    )
+    return true
+  })
+}
+
+export async function reorderCrmStages(input: {
+  userId: string
+  workspaceId: string
+  pipelineId: string
+  orderedIds: string[]
+}): Promise<void> {
+  await withCrmConfigTransaction(input.userId, async (client) => {
+    const current = await client.query<{ id: string }>(
+      `SELECT id FROM crm_pipeline_stages
+        WHERE workspace_id = $1 AND pipeline_id = $2 AND archived_at IS NULL
+        ORDER BY position FOR UPDATE`,
+      [input.workspaceId, input.pipelineId],
+    )
+    assertExactOrder(current.rows.map((row) => row.id), input.orderedIds)
+    await client.query(
+      `UPDATE crm_pipeline_stages SET position = position + 1000000
+        WHERE workspace_id = $1 AND pipeline_id = $2 AND archived_at IS NULL`,
+      [input.workspaceId, input.pipelineId],
+    )
+    for (const [position, id] of input.orderedIds.entries()) {
+      await client.query(
+        `UPDATE crm_pipeline_stages SET position = $4
+          WHERE id = $1 AND workspace_id = $2 AND pipeline_id = $3
+            AND archived_at IS NULL`,
+        [id, input.workspaceId, input.pipelineId, position],
+      )
+    }
+  })
 }
 
 export async function createCrmFieldDefinition(input: {
@@ -282,13 +547,15 @@ export async function createCrmFieldDefinition(input: {
      WHERE (SELECT COUNT(*) FROM crm_field_definitions
              WHERE workspace_id = $1 AND entity_kind = $2 AND archived_at IS NULL) < 50
      RETURNING id, entity_kind AS "entityKind", field_key AS "fieldKey", label,
-       field_type AS "fieldType", options, is_required AS "isRequired", position`,
+       field_type AS "fieldType", options, is_required AS "isRequired", position,
+       NULL::timestamptz AS "archivedAt"`,
     [input.workspaceId, input.entityKind, input.fieldKey, input.label, input.fieldType,
       JSON.stringify(input.options ?? []), input.isRequired ?? false, input.userId],
   )
   const row = inserted.rows[0]
   return row ? {
     ...row,
+    archivedAt: null,
     options: Array.isArray(row.options)
       ? row.options.filter((v): v is string => typeof v === 'string')
       : [],
@@ -300,13 +567,172 @@ export async function archiveCrmFieldDefinition(
   workspaceId: string,
   fieldId: string,
 ): Promise<boolean> {
-  const result = await queryWithRLS(
-    userId,
-    `UPDATE crm_field_definitions SET archived_at = now()
+  return withCrmConfigTransaction(userId, async (client) => {
+    const result = await client.query<{ entityKind: CrmEntityKind }>(
+      `UPDATE crm_field_definitions SET archived_at = now()
+        WHERE id = $1 AND workspace_id = $2 AND archived_at IS NULL
+        RETURNING entity_kind AS "entityKind"`,
+      [fieldId, workspaceId],
+    )
+    const row = result.rows[0]
+    if (!row) return false
+    await client.query(
+      `UPDATE crm_field_definitions SET position = position + 1000000
+        WHERE workspace_id = $1 AND entity_kind = $2 AND archived_at IS NULL`,
+      [workspaceId, row.entityKind],
+    )
+    await client.query(
+      `WITH ranked AS (
+         SELECT id, row_number() OVER (ORDER BY position, created_at) - 1 AS next_position
+           FROM crm_field_definitions
+          WHERE workspace_id = $1 AND entity_kind = $2 AND archived_at IS NULL
+       )
+       UPDATE crm_field_definitions f SET position = ranked.next_position
+         FROM ranked WHERE f.id = ranked.id`,
+      [workspaceId, row.entityKind],
+    )
+    return true
+  })
+}
+
+export async function updateCrmFieldDefinition(input: {
+  userId: string
+  workspaceId: string
+  fieldId: string
+  label?: string
+  options?: string[]
+  isRequired?: boolean
+}): Promise<CrmFieldDefinition | null> {
+  const existing = await queryWithRLS<ConfigFieldRow>(
+    input.userId,
+    `SELECT id, entity_kind AS "entityKind", field_key AS "fieldKey", label,
+            field_type AS "fieldType", options, is_required AS "isRequired", position,
+            archived_at AS "archivedAt"
+       FROM crm_field_definitions
       WHERE id = $1 AND workspace_id = $2 AND archived_at IS NULL`,
-    [fieldId, workspaceId],
+    [input.fieldId, input.workspaceId],
   )
-  return (result.rowCount ?? 0) > 0
+  const before = existing.rows[0]
+  if (!before) return null
+  const currentOptions = Array.isArray(before.options)
+    ? before.options.filter((value): value is string => typeof value === 'string')
+    : []
+  if (input.options && (before.fieldType === 'single_select' || before.fieldType === 'multi_select')
+    && input.options.length === 0) {
+    throw new Error('Select fields require at least one option')
+  }
+  if (input.options && before.fieldType === 'entity_reference'
+    && (input.options.length === 0
+      || input.options.some((kind) => !(CRM_REFERENCE_KINDS as readonly string[]).includes(kind)))) {
+    throw new Error('Reference fields require at least one valid target kind')
+  }
+  if (input.options && (before.fieldType === 'single_select' || before.fieldType === 'multi_select')) {
+    const removed = currentOptions.filter((option) => !input.options!.includes(option))
+    if (removed.length > 0) {
+      const usage = await queryWithRLS<{ count: string }>(
+        input.userId,
+        before.fieldType === 'single_select'
+          ? `SELECT COUNT(*)::text AS count FROM entities
+              WHERE workspace_id = $1 AND kind = $2 AND valid_to IS NULL
+                AND retracted_at IS NULL AND NOT (attributes ? 'crm_archived_at')
+                AND attributes->'custom_fields'->>$3 = ANY($4::text[])`
+          : `SELECT COUNT(*)::text AS count FROM entities
+              WHERE workspace_id = $1 AND kind = $2 AND valid_to IS NULL
+                AND retracted_at IS NULL AND NOT (attributes ? 'crm_archived_at')
+                AND EXISTS (
+                  SELECT 1 FROM jsonb_array_elements_text(
+                    COALESCE(attributes->'custom_fields'->$3, '[]'::jsonb)
+                  ) value WHERE value = ANY($4::text[])
+                )`,
+        [input.workspaceId, before.entityKind, before.fieldKey, removed],
+      )
+      const count = Number(usage.rows[0]?.count ?? 0)
+      if (count > 0) throw new Error(`Cannot remove options used by ${count} live record${count === 1 ? '' : 's'}`)
+    }
+  }
+  const updated = await queryWithRLS<ConfigFieldRow>(
+    input.userId,
+    `UPDATE crm_field_definitions SET
+       label = COALESCE($3, label),
+       options = COALESCE($4::jsonb, options),
+       is_required = COALESCE($5, is_required)
+     WHERE id = $1 AND workspace_id = $2 AND archived_at IS NULL
+     RETURNING id, entity_kind AS "entityKind", field_key AS "fieldKey", label,
+       field_type AS "fieldType", options, is_required AS "isRequired", position,
+       archived_at AS "archivedAt"`,
+    [input.fieldId, input.workspaceId, input.label ?? null,
+      input.options ? JSON.stringify(input.options) : null, input.isRequired ?? null],
+  )
+  const row = updated.rows[0]
+  return row ? {
+    ...row,
+    options: Array.isArray(row.options)
+      ? row.options.filter((value): value is string => typeof value === 'string')
+      : [],
+    archivedAt: row.archivedAt?.toISOString() ?? null,
+  } : null
+}
+
+export async function restoreCrmFieldDefinition(
+  userId: string,
+  workspaceId: string,
+  fieldId: string,
+): Promise<boolean> {
+  return withCrmConfigTransaction(userId, async (client) => {
+    const selected = await client.query<{ entityKind: CrmEntityKind }>(
+      `SELECT entity_kind AS "entityKind" FROM crm_field_definitions
+        WHERE id = $1 AND workspace_id = $2 AND archived_at IS NOT NULL FOR UPDATE`,
+      [fieldId, workspaceId],
+    )
+    const row = selected.rows[0]
+    if (!row) return false
+    const live = await client.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM crm_field_definitions
+        WHERE workspace_id = $1 AND entity_kind = $2 AND archived_at IS NULL`,
+      [workspaceId, row.entityKind],
+    )
+    if (Number(live.rows[0]?.count ?? 0) >= 50) {
+      throw new Error('Custom field limit reached')
+    }
+    await client.query(
+      `UPDATE crm_field_definitions SET archived_at = NULL,
+          position = COALESCE((SELECT MAX(position) + 1 FROM crm_field_definitions
+            WHERE workspace_id = $2 AND entity_kind = $3 AND archived_at IS NULL), 0)
+        WHERE id = $1 AND workspace_id = $2`,
+      [fieldId, workspaceId, row.entityKind],
+    )
+    return true
+  })
+}
+
+export async function reorderCrmFields(input: {
+  userId: string
+  workspaceId: string
+  entityKind: CrmEntityKind
+  orderedIds: string[]
+}): Promise<void> {
+  await withCrmConfigTransaction(input.userId, async (client) => {
+    const current = await client.query<{ id: string }>(
+      `SELECT id FROM crm_field_definitions
+        WHERE workspace_id = $1 AND entity_kind = $2 AND archived_at IS NULL
+        ORDER BY position FOR UPDATE`,
+      [input.workspaceId, input.entityKind],
+    )
+    assertExactOrder(current.rows.map((row) => row.id), input.orderedIds)
+    await client.query(
+      `UPDATE crm_field_definitions SET position = position + 1000000
+        WHERE workspace_id = $1 AND entity_kind = $2 AND archived_at IS NULL`,
+      [input.workspaceId, input.entityKind],
+    )
+    for (const [position, id] of input.orderedIds.entries()) {
+      await client.query(
+        `UPDATE crm_field_definitions SET position = $4
+          WHERE id = $1 AND workspace_id = $2 AND entity_kind = $3
+            AND archived_at IS NULL`,
+        [id, input.workspaceId, input.entityKind, position],
+      )
+    }
+  })
 }
 
 function sameFieldShape(existing: Pick<CrmFieldDefinition, 'fieldType' | 'options'>, preset: CrmPresetField): boolean {
@@ -775,6 +1201,7 @@ export async function addCrmDealParticipant(input: {
   const client = await getPool().connect()
   try {
     await client.query('BEGIN')
+    await applyRLSGucs(client, input.ctx.userId)
     await client.query(
       `INSERT INTO crm_deal_contacts
          (workspace_id, deal_id, contact_id, role, is_primary, created_by)
@@ -811,6 +1238,7 @@ export async function setCrmDealPrimaryContact(input: {
   const client = await getPool().connect()
   try {
     await client.query('BEGIN')
+    await applyRLSGucs(client, input.ctx.userId)
     await client.query(
       `UPDATE crm_deal_contacts
           SET is_primary = false

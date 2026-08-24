@@ -179,6 +179,8 @@ export type CrmViewState = {
   company: string[];
   /** Tag filter (contacts/companies): any-of. Empty = any. */
   tag: string[];
+  /** Owner user ids and/or `"none"`. Empty = any. */
+  owner: string[];
   /** Typed custom-field filters keyed by stable field key. */
   custom: Record<string, string[]>;
   /** `cf:<fieldKey>` for a single-valued custom grouping. */
@@ -200,6 +202,7 @@ export const DEFAULT_CRM_VIEW: CrmViewState = {
   stages: [],
   company: [],
   tag: [],
+  owner: [],
   custom: {},
   group: null,
   q: "",
@@ -248,6 +251,7 @@ export function crmViewFromSearch(
     // user text and repeat the param instead (a tag may contain a comma).
     company: multiParam(params, "company", { splitCommas: true }),
     tag: multiParam(params, "tag", { splitCommas: false }),
+    owner: multiParam(params, "owner", { splitCommas: true }),
     custom,
     group: params.get("group"),
     q: params.get("q") ?? "",
@@ -273,6 +277,7 @@ export function searchFromCrmView(state: CrmViewState): string {
   if (state.company.length > 0) params.set("company", state.company.join(","));
   // Repeated, never joined — a tag may contain a comma.
   for (const tag of state.tag) params.append("tag", tag);
+  if (state.owner.length > 0) params.set("owner", state.owner.join(","));
   for (const fieldKey of Object.keys(state.custom).sort()) {
     for (const value of state.custom[fieldKey] ?? []) params.append(`cf.${fieldKey}`, value);
   }
@@ -382,6 +387,10 @@ export function applyDealFilters(
 ): CrmDealRow[] {
   const needle = state.q.trim().toLowerCase();
   return rows.filter((row) => {
+    if (state.owner.length > 0) {
+      const owner = row.ownerId ?? null;
+      if (!(owner ? state.owner.includes(owner) : state.owner.includes("none"))) return false;
+    }
     if (pipeline) {
       const belongs = row.pipelineId
         ? row.pipelineId === pipeline.id
@@ -423,6 +432,10 @@ export function applyContactFilters(
 ): CrmContactRow[] {
   const needle = state.q.trim().toLowerCase();
   return rows.filter((row) => {
+    if (state.owner.length > 0) {
+      const owner = row.ownerId ?? null;
+      if (!(owner ? state.owner.includes(owner) : state.owner.includes("none"))) return false;
+    }
     if (state.quick === "orphaned" && !matchesContactQuickFilter(row, "orphaned"))
       return false;
     if (!matchesCompany(row, state.company)) return false;
@@ -444,6 +457,10 @@ export function applyCompanyFilters(
 ): CrmCompanyRow[] {
   const needle = state.q.trim().toLowerCase();
   return rows.filter((row) => {
+    if (state.owner.length > 0) {
+      const owner = row.ownerId ?? null;
+      if (!(owner ? state.owner.includes(owner) : state.owner.includes("none"))) return false;
+    }
     if (!matchesTag(row, state.tag)) return false;
     if (!matchesCustomFields(row, state.custom)) return false;
     if (
