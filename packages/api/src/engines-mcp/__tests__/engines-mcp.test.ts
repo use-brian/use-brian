@@ -169,10 +169,12 @@ describe('[COMP:api/engines-mcp] AI Engines MCP', () => {
         .fn()
         .mockResolvedValueOnce(fakeResponse('You exceeded your quota, buy credits at ...', 429))
         .mockResolvedValueOnce(perplexityResponse('fine'))
+        .mockResolvedValueOnce(fakeResponse('Still rate limited', 429))
       const [tool] = createEngineTools(env, fetchMock as unknown as typeof fetch)
       const result = await tool.handler({ questions: ['q1', 'q2'] })
       const payload = JSON.parse(textOf(result)) as AskPayload
       // Partial: one errored, one answered — the call as a whole is NOT an error.
+      expect(fetchMock).toHaveBeenCalledTimes(3)
       expect(result.isError).toBeFalsy()
       expect(payload.results[0].answers[0].error).toContain('upstream_error status=429')
       expect(textOf(result)).not.toContain('quota')

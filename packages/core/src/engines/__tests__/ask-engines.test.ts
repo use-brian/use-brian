@@ -82,7 +82,7 @@ describe('[COMP:core/ask-engines] engine ask framework', () => {
     it('counts only units that returned an answer — refused units are not billable', async () => {
       const fetchMock = vi
         .fn()
-        .mockResolvedValueOnce(fakeResponse('You exceeded your quota', 429))
+        .mockResolvedValueOnce(fakeResponse('upstream unavailable', 500))
         .mockResolvedValueOnce(perplexityResponse('served'))
       const [asker] = createEngineAskers(PPLX, fetchMock as unknown as typeof fetch)
       const run = await asker.run({ questions: ['q1', 'q2'] })
@@ -91,6 +91,32 @@ describe('[COMP:core/ask-engines] engine ask framework', () => {
       expect(run.allFailed).toBe(false)
       // Vendor wording never reaches the caller — only the coded sentence.
       expect(JSON.stringify(run.payload)).not.toContain('quota')
+    })
+
+    it('retries one Perplexity 429 inside the same billable unit', async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(fakeResponse('You exceeded your quota', 429))
+        .mockResolvedValueOnce(perplexityResponse('served after retry'))
+      const [asker] = createEngineAskers(PPLX, fetchMock as unknown as typeof fetch)
+      const run = await asker.run({ question: 'q1' })
+
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(run.successfulUnits).toBe(1)
+      expect(run.allFailed).toBe(false)
+      expect(JSON.stringify(run.payload)).not.toContain('quota')
+    })
+
+    it('stops after the bounded Perplexity 429 retry and reports the unit failed', async () => {
+      const fetchMock = vi.fn().mockResolvedValue(fakeResponse('still limited', 429))
+      const [asker] = createEngineAskers(PPLX, fetchMock as unknown as typeof fetch)
+      const run = await asker.run({ question: 'q1' })
+
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(run.successfulUnits).toBe(0)
+      expect(run.allFailed).toBe(true)
+      expect(JSON.stringify(run.payload)).toContain('upstream_error status=429')
+      expect(JSON.stringify(run.payload)).not.toContain('still limited')
     })
 
     it('reports allFailed with zero billable units when every unit errored', async () => {

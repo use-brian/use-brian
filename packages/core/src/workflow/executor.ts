@@ -44,9 +44,10 @@ import { sanitizeDeliveryText } from '@use-brian/shared'
 
 /**
  * Build a `ResearchDepthConfig` from a step's per-step run-time settings
- * (step-level evolution of mig 196). Returns undefined when neither knob is
- * set so backward-compatible runs preserve the historical 5-turn / 30s
- * callee default.
+ * (step-level evolution of mig 196). Builder-owned fields overlay the legacy
+ * `depth` object field-by-field so changing maxTurns in the UI cannot leave a
+ * stale nested cap in force. Returns undefined when no depth knob is set so
+ * backward-compatible runs preserve the historical callee default.
  *
  *   researchMode=true → `tier: 'deep'` (raises turn / tool-call / wall-clock
  *                        caps to the deep preset).
@@ -54,16 +55,22 @@ import { sanitizeDeliveryText } from '@use-brian/shared'
  *                        the route layer; the resolver clamps again to
  *                        `RESEARCH_BUDGET_CEILING.maxTurns`).
  *
+ * Explicit maxToolCalls / timeoutMs (and a legacy tier when researchMode is
+ * not enabled) remain intact because the builder does not expose those fields
+ * at the same level.
+ *
  * Legacy workflows authored before per-step settings have their step rows
  * backfilled from the workflow row's columns on read (see
  * `packages/api/src/db/workflow-store.ts` → `backfillStepRunSettings`),
  * so this function only ever consults step state.
  */
 function buildStepDepth(step: AssistantCallStep): ResearchDepthConfig | undefined {
-  const tier = step.researchMode ? 'deep' : undefined
-  const maxTurns = step.maxTurns ?? undefined
-  if (tier === undefined && maxTurns === undefined) return undefined
-  return { tier, maxTurns }
+  const depth: ResearchDepthConfig = {
+    ...step.depth,
+    ...(step.researchMode ? { tier: 'deep' as const } : {}),
+    ...(step.maxTurns != null ? { maxTurns: step.maxTurns } : {}),
+  }
+  return Object.keys(depth).length > 0 ? depth : undefined
 }
 
 /**
@@ -1475,12 +1482,12 @@ async function dispatchAssistantCall(
     // instructions (not offered via `useSkill`). Same governance as `skills`.
     // Undefined/empty = no enforced skills.
     enforcedSkills: step.enforcedSkills,
-    // Research depth: step-level `depth` always wins; otherwise derive from
-    // the step-level `researchMode` + `maxTurns` knobs (step-level evolution
-    // of mig 196). Legacy workflow-row columns are backfilled onto each
-    // step by the workflow-store reader, so step-level always wins here.
-    // Both absent → the callee's default budget.
-    depth: step.depth ?? buildStepDepth(step),
+    // Research depth: merge the legacy `depth` object with the builder's
+    // top-level knobs. Numeric maxTurns and researchMode=true overlay their
+    // corresponding fields while preserving maxToolCalls / timeoutMs. This
+    // prevents a stale depth.maxTurns from overriding what the UI displays.
+    // All absent → the callee's default budget.
+    depth: buildStepDepth(step),
     // Per-step model alias (step-level evolution of mig 196) — Standard /
     // Pro / Max pick for this specific assistant_call. Falls back to the
     // workflow row's column so old in-memory test fixtures that don't run
