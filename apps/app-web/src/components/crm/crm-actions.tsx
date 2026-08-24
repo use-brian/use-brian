@@ -46,7 +46,7 @@ import {
 import { useT } from "@/lib/i18n/client";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 
-type DialogKind = "create" | "import" | "duplicates" | "archive" | null;
+export type CrmActionDialog = "create" | "import" | "duplicates" | "archive" | null;
 
 export function CrmActions({
   workspaceId,
@@ -56,6 +56,11 @@ export function CrmActions({
   onChanged,
   onCreated,
   role,
+  mobileMenu = false,
+  dialogsOnly = false,
+  renderDialogs = true,
+  activeDialog,
+  onDialogChange,
 }: {
   workspaceId: string;
   section: "deals" | "contacts" | "companies";
@@ -64,9 +69,22 @@ export function CrmActions({
   onChanged: () => void;
   onCreated: (created: { id: string; kind: "deal" | "contact" | "company" }) => void | Promise<void>;
   role: string | null | undefined;
+  /** Render action items inside the surface's one narrow-screen menu. */
+  mobileMenu?: boolean;
+  /** Render the dialogs beside a menu whose popup unmounts when closed. */
+  dialogsOnly?: boolean;
+  /** Keep dialogs outside an unmounting dropdown popup. */
+  renderDialogs?: boolean;
+  activeDialog?: CrmActionDialog;
+  onDialogChange?: (dialog: CrmActionDialog) => void;
 }) {
   const t = useT().crmPage.r2;
-  const [dialog, setDialog] = useState<DialogKind>(null);
+  const [localDialog, setLocalDialog] = useState<CrmActionDialog>(null);
+  const dialog = activeDialog === undefined ? localDialog : activeDialog;
+  const setDialog = (next: CrmActionDialog) => {
+    if (activeDialog === undefined) setLocalDialog(next);
+    onDialogChange?.(next);
+  };
 
   async function exportCsv() {
     const blob = await downloadCrmCsv(workspaceId, section);
@@ -80,22 +98,30 @@ export function CrmActions({
 
   return (
     <>
-      <Button size="sm" disabled={!data || !config} onClick={() => setDialog("create")}>
-        <Plus aria-hidden /> {t.newRecord}
-      </Button>
-      <DropdownMenu>
-        <DropdownMenuTrigger
-          render={<Button size="icon-sm" variant="ghost" aria-label={t.moreActions}><MoreHorizontal aria-hidden /></Button>}
-        />
-        <DropdownMenuContent align="end">
-          <DropdownMenuItem onClick={() => setDialog("import")}><Upload aria-hidden />{t.importCsv}</DropdownMenuItem>
-          <DropdownMenuItem onClick={() => void exportCsv()}><Download aria-hidden />{t.exportCsv}</DropdownMenuItem>
-          <DropdownMenuItem onClick={() => setDialog("duplicates")}><GitMerge aria-hidden />{t.reviewDuplicates}</DropdownMenuItem>
-          <DropdownMenuItem onClick={() => setDialog("archive")}><ArchiveRestore aria-hidden />{t.archivedRecords}</DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+      {!dialogsOnly && (mobileMenu ? <>
+        <DropdownMenuItem disabled={!data} onClick={() => setDialog("create")}><Plus aria-hidden />{t.newRecord}</DropdownMenuItem>
+        <DropdownMenuItem onClick={() => setDialog("import")}><Upload aria-hidden />{t.importCsv}</DropdownMenuItem>
+        <DropdownMenuItem onClick={() => void exportCsv()}><Download aria-hidden />{t.exportCsv}</DropdownMenuItem>
+        <DropdownMenuItem onClick={() => setDialog("duplicates")}><GitMerge aria-hidden />{t.reviewDuplicates}</DropdownMenuItem>
+        <DropdownMenuItem onClick={() => setDialog("archive")}><ArchiveRestore aria-hidden />{t.archivedRecords}</DropdownMenuItem>
+      </> : <>
+        <Button size="sm" disabled={!data} onClick={() => setDialog("create")}>
+          <Plus aria-hidden /> {t.newRecord}
+        </Button>
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            render={<Button size="icon-sm" variant="ghost" aria-label={t.moreActions}><MoreHorizontal aria-hidden /></Button>}
+          />
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem onClick={() => setDialog("import")}><Upload aria-hidden />{t.importCsv}</DropdownMenuItem>
+            <DropdownMenuItem onClick={() => void exportCsv()}><Download aria-hidden />{t.exportCsv}</DropdownMenuItem>
+            <DropdownMenuItem onClick={() => setDialog("duplicates")}><GitMerge aria-hidden />{t.reviewDuplicates}</DropdownMenuItem>
+            <DropdownMenuItem onClick={() => setDialog("archive")}><ArchiveRestore aria-hidden />{t.archivedRecords}</DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </>)}
 
-      <CreateDialog
+      {renderDialogs && <><CreateDialog
         workspaceId={workspaceId}
         data={data}
         config={config}
@@ -130,6 +156,7 @@ export function CrmActions({
         onOpenChange={(open) => setDialog(open ? "archive" : null)}
         onRestored={onChanged}
       />
+      </>}
     </>
   );
 }

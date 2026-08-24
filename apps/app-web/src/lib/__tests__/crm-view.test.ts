@@ -20,6 +20,7 @@ import {
   crmPageQuery,
   crmQuickCounts,
   crmSectionCounts,
+  crmUsesBoardPages,
   crmViewFromSearch,
   formatAmount,
   groupDealsByPipelineStage,
@@ -457,6 +458,17 @@ describe("[COMP:app-web/crm-collection] paged collection state", () => {
     expect(lead.getAll("stage")).toEqual(["stage-lead"]);
     expect(qualified.getAll("stage")).toEqual(["stage-qualified"]);
     expect(lead.getAll("owner")).toEqual(qualified.getAll("owner"));
+  });
+});
+
+describe("[COMP:app-web/crm-responsive] isolated collection presentation", () => {
+  it("needs configuration only for a deal board with independent stage pages", () => {
+    expect(crmUsesBoardPages(DEFAULT_CRM_VIEW, true)).toBe(true);
+    expect(crmUsesBoardPages(DEFAULT_CRM_VIEW, false)).toBe(false);
+    expect(crmUsesBoardPages({ ...DEFAULT_CRM_VIEW, view: "table" }, false)).toBe(false);
+    expect(crmUsesBoardPages({ ...DEFAULT_CRM_VIEW, section: "contacts" }, false)).toBe(false);
+    expect(crmUsesBoardPages({ ...DEFAULT_CRM_VIEW, section: "companies" }, false)).toBe(false);
+    expect(crmUsesBoardPages({ ...DEFAULT_CRM_VIEW, group: "cf:work_type" }, true)).toBe(false);
   });
 });
 

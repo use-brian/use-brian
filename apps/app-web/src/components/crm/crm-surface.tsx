@@ -91,6 +91,7 @@ import {
   crmRecordMatchesRoute,
   crmSectionCounts,
   crmTagOptions,
+  crmUsesBoardPages,
   CRM_EMPTY_CUSTOM_VALUE,
   groupRowsByCustomField,
   localDateStr,
@@ -145,8 +146,16 @@ import { CrmConfigDialog } from "./crm-config";
 import { CrmReportingDialog } from "./crm-reporting";
 import { CrmSavedViews } from "./crm-saved-views";
 import { CrmEmailReviewWorkspace } from "./crm-email-review";
+import { CrmMobileActions } from "./crm-mobile-actions";
 
 const NONE = "__none__";
+const EMPTY_PIPELINE: CrmPipeline = {
+  id: "unavailable",
+  name: "",
+  isDefault: false,
+  position: 0,
+  stages: [],
+};
 
 type CrmPrimitive = "deal" | "contact" | "company";
 
@@ -272,7 +281,7 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
     debouncedSearch,
     stageSlice,
   ), [debouncedSearch, selectedPipeline?.id, stageSlice, view]);
-  const isBoardCollection = view.section === "deals" && view.view === "board" && view.group === null;
+  const isBoardCollection = crmUsesBoardPages(view, selectedPipeline !== null);
   const boardStageIds = useMemo(() => {
     if (!selectedPipeline) return [];
     if (view.stages.length > 0) return view.stages;
@@ -280,9 +289,7 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
       .filter((stage) => view.closed || stage.category === "open")
       .map((stage) => stage.id);
   }, [selectedPipeline, view.closed, view.stages]);
-  const collectionKey = config === null || (view.section === "deals" && selectedPipeline === null)
-    ? null
-    : `${crmKey}:collection:${view.section}:${isBoardCollection ? "board" : "table"}:${JSON.stringify(collectionQuery)}:${boardStageIds.join(",")}`;
+  const collectionKey = `${crmKey}:collection:${view.section}:${isBoardCollection ? "board" : "table"}:${JSON.stringify(collectionQuery)}:${boardStageIds.join(",")}`;
   const collectionResource = useCachedResource<CrmCollectionPayload>(collectionKey, async () => {
     if (isBoardCollection) {
       const { kind: _kind, stage: _stage, cursor: _cursor, ...boardQuery } = collectionQuery;
@@ -1146,7 +1153,7 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
                 >
                   <SelectTrigger
                     aria-label={t.r2.pipeline}
-                    className="h-7 w-36 border-sidebar-border bg-sidebar-accent/40 text-[12.5px] shadow-none"
+                    className="hidden h-7 w-36 border-sidebar-border bg-sidebar-accent/40 text-[12.5px] shadow-none sm:flex"
                   >
                     <SelectValue />
                   </SelectTrigger>
@@ -1172,14 +1179,14 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
                 aria-label={t.viewBoard}
                 onClick={() => setView({ view: "board" })}
                 className={cn(
-                  "inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12.5px]",
+                  "inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12.5px] max-sm:w-7 max-sm:justify-center max-sm:px-0",
                   view.view === "board"
                     ? "bg-sidebar-accent text-sidebar-accent-foreground"
                     : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60",
                 )}
               >
                 <Kanban className="size-3.5" aria-hidden />
-                {t.viewBoard}
+                <span className="max-sm:hidden">{t.viewBoard}</span>
               </button>
               <button
                 type="button"
@@ -1187,56 +1194,70 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
                 aria-label={t.viewTable}
                 onClick={() => setView({ view: "table" })}
                 className={cn(
-                  "inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12.5px]",
+                  "inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12.5px] max-sm:w-7 max-sm:justify-center max-sm:px-0",
                   view.view === "table"
                     ? "bg-sidebar-accent text-sidebar-accent-foreground"
                     : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60",
                 )}
               >
                 <Rows3 className="size-3.5" aria-hidden />
-                {t.viewTable}
+                <span className="max-sm:hidden">{t.viewTable}</span>
               </button>
               </>
             )}
-            <CrmSavedViews
-              workspaceId={workspaceId}
-              section={view.section}
-              currentSearch={searchParams.toString()}
-              onApply={(search) =>
-                router.replace(search ? `${pathname}?${search}` : pathname, {
-                  scroll: false,
-                })
-              }
-            />
-            <Button
-              size="icon-sm"
-              variant="ghost"
-              aria-label={t.r2.reportsTitle}
-              onClick={() => setReportsOpen(true)}
-            >
-              <BarChart3 aria-hidden />
-            </Button>
-            {role !== "member" && (
+            <div className="hidden items-center gap-1 sm:flex">
+              <CrmSavedViews
+                workspaceId={workspaceId}
+                section={view.section}
+                currentSearch={searchParams.toString()}
+                onApply={(search) =>
+                  router.replace(search ? `${pathname}?${search}` : pathname, { scroll: false })
+                }
+              />
               <Button
                 size="icon-sm"
                 variant="ghost"
-                aria-label={t.r2.configTitle}
-                onClick={() => setConfigOpen(true)}
+                aria-label={t.r2.reportsTitle}
+                onClick={() => setReportsOpen(true)}
               >
-                <Settings2 aria-hidden />
+                <BarChart3 aria-hidden />
               </Button>
-            )}
-            <CrmActions
+              {role !== "member" && (
+                <Button size="icon-sm" variant="ghost" aria-label={t.r2.configTitle} onClick={() => setConfigOpen(true)}>
+                  <Settings2 aria-hidden />
+                </Button>
+              )}
+              <CrmActions
+                workspaceId={workspaceId}
+                role={role}
+                section={view.section}
+                data={data}
+                config={config}
+                onChanged={reload}
+                onCreated={async (created) => {
+                  await refreshCrm();
+                  openRecord(created.kind, created.id);
+                }}
+              />
+            </div>
+            <CrmMobileActions
               workspaceId={workspaceId}
               role={role}
               section={view.section}
               data={data}
               config={config}
+              currentSearch={searchParams.toString()}
+              onApplySearch={(search) =>
+                router.replace(search ? `${pathname}?${search}` : pathname, { scroll: false })
+              }
               onChanged={reload}
               onCreated={async (created) => {
                 await refreshCrm();
                 openRecord(created.kind, created.id);
               }}
+              onPipeline={(pipelineId) => setView({ pipeline: pipelineId, stages: [], quick: null })}
+              onReports={() => setReportsOpen(true)}
+              onConfig={() => setConfigOpen(true)}
             />
           </> : null
         }
@@ -1248,13 +1269,36 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
       <div className="relative flex min-h-0 flex-1">
         <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
 
+        {view.review === null && <>
+          {collectionResource.error !== undefined && collection !== null && (
+            <ResourceFailureBar label={t.r2.collectionLoadFailed} retry={t.retry} onRetry={() => void collectionResource.refresh()} />
+          )}
+          {summaryResource.error !== undefined && (
+            <ResourceFailureBar label={t.r2.summaryLoadFailed} retry={t.retry} onRetry={() => void summaryResource.refresh()} />
+          )}
+          {directoriesResource.error !== undefined && (
+            <ResourceFailureBar label={t.r2.lookupLoadFailed} retry={t.retry} onRetry={() => void directoriesResource.refresh()} />
+          )}
+          {configResource.error !== undefined && (
+            <ResourceFailureBar label={t.r2.configLoadFailed} retry={t.retry} onRetry={() => void configResource.refresh()} />
+          )}
+        </>}
+
         {view.review === "email" ? (
           data === null ? (
             <div className="p-6 text-sm text-muted-foreground">
               {emailContextResource.error !== undefined ? (
                 <span>
                   {t.loadFailed}{" "}
-                  <button type="button" onClick={() => void refreshCrm()} className="underline hover:text-foreground">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void refreshCrm();
+                      void emailContextResource.refresh();
+                      void directoriesResource.refresh();
+                    }}
+                    className="underline hover:text-foreground"
+                  >
                     {t.retry}
                   </button>
                 </span>
@@ -1267,9 +1311,13 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
               items={emailQueue}
               selectedId={view.draft}
               loading={approvalsLoading}
-              loadError={approvalsError}
+              loadError={approvalsError || emailContextResource.error !== undefined || directoriesResource.error !== undefined}
               onSelect={(draft) => setView({ review: "email", draft })}
-              onReload={() => void reloadApprovals()}
+              onReload={() => {
+                void reloadApprovals();
+                void emailContextResource.refresh();
+                void directoriesResource.refresh();
+              }}
               onResolved={(approvalId) => {
                 const nextDraft = emailQueue.find((item) => item.approval.id !== approvalId)?.approval.id ?? null;
                 setPendingApprovals((current) => current.filter((approval) => approval.id !== approvalId));
@@ -1500,9 +1548,11 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
                 t.loading
               )}
             </div>
-          ) : view.section === "deals" && !selectedPipeline ? (
+          ) : view.section === "deals" && view.view === "board" && !selectedPipeline ? (
             <div className="p-6 text-sm text-muted-foreground">
-              {t.r2.noPipelines}
+              {configResource.error !== undefined ? (
+                <span>{t.r2.configLoadFailed} <button type="button" className="underline" onClick={() => void configResource.refresh()}>{t.retry}</button></span>
+              ) : config === null ? t.r2.configLoading : t.r2.noPipelines}
             </div>
           ) : view.section === "deals" && view.view === "board" && !selectedGroupField ? (
             (summaryResource.data?.totals.deals ?? 0) === 0 ? (
@@ -1537,7 +1587,7 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
               companyNames={companyNames}
               contactNames={contactNames}
               today={today}
-              pipeline={selectedPipeline!}
+              pipeline={selectedPipeline ?? EMPTY_PIPELINE}
               selected={selected}
               onToggle={toggle}
               allSelected={allSelected}
@@ -1675,7 +1725,7 @@ function RecordRouteState({
   onSecondary?: () => void;
 }) {
   return (
-    <aside className="absolute inset-y-0 right-0 z-20 flex w-full max-w-[min(42rem,92vw)] items-center justify-center border-l border-border/60 bg-background p-6 shadow-xl">
+    <aside className="absolute inset-y-0 right-0 z-20 flex w-full items-center justify-center border-l border-border/60 bg-background p-6 shadow-xl lg:max-w-[min(42rem,92vw)]">
       <div className="max-w-sm text-center">
         <h2 className="text-base font-semibold">{title}</h2>
         {description ? (
@@ -1691,6 +1741,19 @@ function RecordRouteState({
         ) : null}
       </div>
     </aside>
+  );
+}
+
+function ResourceFailureBar({ label, retry, onRetry }: {
+  label: string;
+  retry: string;
+  onRetry: () => void;
+}) {
+  return (
+    <div role="alert" className="flex items-center justify-between gap-3 border-b border-amber-500/20 bg-amber-500/5 px-4 py-2 text-xs text-amber-800 dark:text-amber-200">
+      <span>{label}</span>
+      <button type="button" className="shrink-0 underline" onClick={onRetry}>{retry}</button>
+    </div>
   );
 }
 

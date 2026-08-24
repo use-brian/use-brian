@@ -96,7 +96,7 @@ async function settle() {
   });
 }
 
-async function mount() {
+async function mount(overrides: { items?: CrmEmailApprovalQueueItem[]; selectedId?: string | null; loading?: boolean; loadError?: boolean } = {}) {
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -106,10 +106,10 @@ async function mount() {
         <CrmEmailReviewWorkspace
           workspaceId="workspace-1"
           data={data}
-          items={items}
-          selectedId={approval.id}
-          loading={false}
-          loadError={false}
+          items={overrides.items ?? items}
+          selectedId={overrides.selectedId === undefined ? approval.id : overrides.selectedId}
+          loading={overrides.loading ?? false}
+          loadError={overrides.loadError ?? false}
           onSelect={vi.fn()}
           onReload={vi.fn()}
           onResolved={vi.fn()}
@@ -166,6 +166,14 @@ afterEach(() => {
 });
 
 describe("[COMP:app-web/crm-email-review] dedicated review workspace", () => {
+  it("renders one all-caught-up state without a second selection empty", async () => {
+    await mount({ items: [], selectedId: null });
+
+    expect(container!.querySelectorAll("[data-email-empty-state]")).toHaveLength(1);
+    expect(container!.textContent?.match(new RegExp(dict.crmPage.r2.emailDraftsEmpty, "g"))).toHaveLength(1);
+    expect(container!.textContent).not.toContain(dict.crmPage.r2.selectEmailDraft);
+  });
+
   it("keeps the compact CRM profile above the queue and clears the dock from review actions", async () => {
     await mount();
 

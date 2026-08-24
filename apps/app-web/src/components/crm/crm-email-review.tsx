@@ -282,6 +282,25 @@ export function CrmEmailReviewWorkspace({
     setOperation(null);
   }
 
+  if (items.length === 0) {
+    return (
+      <div data-email-empty-state className="grid h-full min-h-0 place-items-center bg-muted/10 p-6 text-center">
+        <div className="max-w-sm">
+          <span className="mx-auto grid size-11 place-items-center rounded-full bg-muted text-muted-foreground">
+            {loadError ? <X className="size-4" aria-hidden />
+              : loading ? <RefreshCw className="size-4 animate-spin" aria-hidden />
+                : <Check className="size-4" aria-hidden />}
+          </span>
+          <p className="mt-3 text-sm font-medium">
+            {loadError ? t.emailDraftsLoadFailed : loading ? t.emailDraftsLoading : t.emailDraftsEmpty}
+          </p>
+          {!loadError && !loading && <p className="mt-1 text-xs text-muted-foreground">{t.emailDraftsEmptyDescription}</p>}
+          {loadError && <Button size="xs" variant="ghost" className="mt-3" onClick={onReload}><RefreshCw aria-hidden />{t.retry}</Button>}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div ref={containerRef} className="flex h-full min-h-0 flex-col overflow-y-auto bg-muted/10 lg:flex-row lg:overflow-hidden">
       <aside
@@ -362,27 +381,7 @@ export function CrmEmailReviewWorkspace({
         )}
 
         <div data-email-draft-list className="min-h-0 flex-1 overflow-y-auto p-2 max-lg:max-h-48">
-          {loadError && items.length === 0 ? (
-            <div className="rounded-lg border border-destructive/25 bg-destructive/5 p-3 text-xs text-destructive">
-              <p>{t.emailDraftsLoadFailed}</p>
-              <Button size="xs" variant="ghost" className="mt-2" onClick={onReload}>
-                <RefreshCw aria-hidden /> {t.retry}
-              </Button>
-            </div>
-          ) : loading && items.length === 0 ? (
-            <p className="p-2 text-xs text-muted-foreground">{t.emailDraftsLoading}</p>
-          ) : items.length === 0 ? (
-            <div className="px-2 py-8 text-center">
-              <span className="mx-auto grid size-10 place-items-center rounded-full bg-muted text-muted-foreground">
-                <Check className="size-4" aria-hidden />
-              </span>
-              <p className="mt-3 text-xs font-medium">{t.emailDraftsEmpty}</p>
-              <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
-                {t.emailDraftsEmptyDescription}
-              </p>
-            </div>
-          ) : (
-            <ol className="space-y-1">
+          <ol className="space-y-1">
               {items.map((item) => {
                 const itemPreview = parseToolPreview(item.approval.toolName, item.approval.arguments);
                 const itemEmail = itemPreview?.kind === "email_send" ? itemPreview.email : null;
@@ -424,8 +423,7 @@ export function CrmEmailReviewWorkspace({
                   </li>
                 );
               })}
-            </ol>
-          )}
+          </ol>
         </div>
 
       </aside>

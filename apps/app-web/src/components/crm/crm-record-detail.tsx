@@ -24,6 +24,7 @@ import Link from "next/link";
 import {
   Brain,
   Archive,
+  ArrowLeft,
   Building2,
   Calendar,
   CircleDashed,
@@ -198,9 +199,17 @@ export function CrmRecordDetail({
   return (
     // A floating peek panel, NOT a flex sibling — it overlays the content
     // pane so opening a record never reflows the table/board underneath.
-    <ResizablePeek storageKey="operator:peek-width" ariaLabel={record.row.name} onDismiss={onClose}>
+    <ResizablePeek responsiveFullWidth storageKey="operator:peek-width" ariaLabel={record.row.name} onDismiss={onClose}>
       {/* Slim action toolbar — the Brain entry page's top-row shape. */}
       <div className="flex items-center justify-end gap-1 border-b border-border/60 px-3 py-2">
+        <button
+          type="button"
+          onClick={onClose}
+          className="mr-auto inline-flex items-center gap-1.5 rounded-md px-2 py-1.5 text-sm font-medium text-muted-foreground hover:bg-accent/60 hover:text-foreground lg:hidden"
+        >
+          <ArrowLeft className="size-4" aria-hidden />
+          {t.r2.returnToCrm}
+        </button>
         <button
           type="button"
           aria-label={t.r2.archive}
@@ -221,7 +230,7 @@ export function CrmRecordDetail({
           type="button"
           aria-label={t.closeDetail}
           onClick={onClose}
-          className="rounded-md p-1.5 text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+          className="hidden rounded-md p-1.5 text-muted-foreground hover:bg-accent/60 hover:text-foreground lg:inline-flex"
         >
           <X className="size-4" aria-hidden />
         </button>

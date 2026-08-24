@@ -306,6 +306,12 @@ export const DEFAULT_CRM_VIEW: CrmViewState = {
   closed: false,
 };
 
+/** Only a configured, ungrouped deal board needs independent stage pages.
+ * Every other lens can load its collection without CRM configuration. */
+export function crmUsesBoardPages(state: CrmViewState, hasPipeline: boolean): boolean {
+  return state.section === "deals" && state.view === "board" && state.group === null && hasPipeline;
+}
+
 function oneOf<T extends string>(
   value: string | null,
   allowed: readonly T[],
