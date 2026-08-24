@@ -87,9 +87,12 @@ describe('[COMP:api/channel-billing-identity] Channel billing identity', () => {
 
   it('bills every overhead call to the resolved billing party and records the actor', () => {
     const calls = pipelineCode.match(/recordOverheadUsage\(\{[\s\S]*?\n(\s*)\}\)/g) ?? []
-    // classifier, transcription, session-state diff, memory nudge, recovery
-    // message. If a sixth is added, it has to opt into the same identities.
-    expect(calls.length).toBe(5)
+    // classifier, transcription, session-state diff, memory nudge, and the
+    // recovery message at BOTH its call sites — the catch handler, and the
+    // `turn_complete` branch where the loop ended cleanly but assembled
+    // nothing deliverable and a tool had already run. If a seventh is added,
+    // it has to opt into the same identities.
+    expect(calls.length).toBe(6)
     for (const call of calls) {
       expect(call).toContain('userId: billingUserId')
       expect(call).toContain('actorUserId: userId')
