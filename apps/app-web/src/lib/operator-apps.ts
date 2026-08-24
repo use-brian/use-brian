@@ -79,7 +79,7 @@ export const DEFAULT_OPERATOR_APP: OperatorAppKey = "page";
 /** App key → the `WorkspaceSurface` route segment it lives on. Browsers reuses
  *  the existing `/computer` route family (the Take-Over live view + its new
  *  session-rail index). */
-const APP_SEGMENT: Record<OperatorAppKey, string> = {
+const APP_SEGMENT: Record<OperatorAppKey, WorkspaceSurface> = {
   page: "p",
   office: "office",
   tasks: "tasks",
@@ -110,6 +110,23 @@ export function operatorAppFromSurface(
 ): OperatorAppKey | null {
   if (!surface) return null;
   return SURFACE_TO_APP[surface] ?? null;
+}
+
+/**
+ * Sidebar body to keep underneath the explicit Suggested briefing.
+ *
+ * Suggested is hosted on `/p`, but it does not turn the selected Home app into
+ * Page. Resolving from the sticky app keeps that app's already-loaded sidebar
+ * navigation visible while the briefing temporarily owns the content pane.
+ */
+export function sidebarSurfaceForHome(
+  routedSurface: WorkspaceSurface | null,
+  activeApp: HomeAppEntry | null,
+  suggestedOpen: boolean,
+): WorkspaceSurface | null {
+  if (!suggestedOpen || !activeApp) return routedSurface;
+  if (customHomeAppId(activeApp)) return "apps";
+  return isOperatorAppKey(activeApp) ? APP_SEGMENT[activeApp] : routedSurface;
 }
 
 /** Route for a built-in operator app (`/w/<id>/p`, `/w/<id>/tasks`, …). */

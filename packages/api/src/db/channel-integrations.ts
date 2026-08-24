@@ -24,7 +24,7 @@ import {
   decryptCredentials as _decryptCredentials,
 } from './credential-crypto.js'
 import { parseTopicChannelId } from '@use-brian/channels'
-import { query, queryWithRLS } from './client.js'
+import { getPool, query, queryWithRLS } from './client.js'
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -218,6 +218,8 @@ export type RequireMentionOverride = {
 export type SeenChat = {
   chatId: string
   chatTitle: string | null
+  /** Feishu/Lark observation type. Absent on legacy and Telegram entries. */
+  chatType?: 'p2p' | 'group'
   isForum: boolean
   topics: Array<{ topicId: number; name: string | null; lastSeenAt: string }>
   lastSeenAt: string
@@ -243,6 +245,11 @@ export type ChannelIntegrationConfig = {
    * to the app that observed the chat. Topic fields are Telegram-specific.
    */
   seenChats?: SeenChat[]
+  /**
+   * Feishu/Lark only. Admin-owned fail-closed admission gate for passive group
+   * ingest. Rules choose routing only after this allowlist admits the chat.
+   */
+  ambientIngestChatIds?: string[]
   userAccessMode?: UserAccessMode // default: 'allow_all'
   // Slack sender filter; Telegram owner-plus-guest grants. @handle or numeric ID.
   allowedUserIds?: string[]
@@ -255,6 +262,12 @@ export type ChannelIntegrationConfig = {
    * boundaries remain.
    */
   allowGuestConnectorTools?: boolean // default: false
+  /**
+   * Telegram BYO only. Exact numeric-id allowlist matches become revocable
+   * workspace members and use the normal identified-member capability path.
+   * Usernames are intentionally ineligible because Telegram can reassign them.
+   */
+  allowTrustedGuestFullAccess?: boolean // default: false
   blockedUserIds?: string[]    // used when userAccessMode = 'blocklist' — @handle or numeric ID
   /**
    * WhatsApp BYON bot only — group chat JIDs the bot is allowed to reply in
@@ -491,6 +504,17 @@ export type ChannelIntegrationStore = {
     mutate: (current: ChannelIntegrationConfig) => ChannelIntegrationConfig,
   ): Promise<void>
 
+  /**
+   * Replace one trusted Telegram @username allowlist entry with the numeric id
+   * from Telegram's authenticated sender envelope. The row is locked while
+   * validating that allowlist mode and trusted full access are still active.
+   */
+  pinTrustedTelegramUsernameSystem?(
+    id: string,
+    usernameEntry: string,
+    providerUserId: string,
+  ): Promise<boolean>
+
   /** Update last_event_at. Webhook path — no RLS. */
   touchLastEventAt(id: string): Promise<void>
 
@@ -558,6 +582,62 @@ type CiRow = {
   updatedAt: Date
   lastEventAt: Date | null
   connectorInstanceId: string | null
+}
+
+/** Authority-changing subset of integration config. Kept pure for the route
+ * and store tests; the DB store repeats the operator check so legacy callers
+ * cannot bypass the workspace Channels route's friendly 403. */
+export function trustedGuestAuthorityChanged(
+  current: ChannelIntegrationConfig,
+  next: ChannelIntegrationConfig,
+): boolean {
+  if (current.allowTrustedGuestFullAccess !== next.allowTrustedGuestFullAccess) return true
+  if (
+    current.allowTrustedGuestFullAccess === true
+    || next.allowTrustedGuestFullAccess === true
+  ) {
+    if (current.userAccessMode !== next.userAccessMode) return true
+    return JSON.stringify(current.allowedUserIds ?? []) !== JSON.stringify(next.allowedUserIds ?? [])
+  }
+  return false
+}
+
+/** Resolve a trusted Telegram username entry to its stable sender id. Returns
+ * null when the grant changed or disappeared before the first matching turn. */
+export function pinTrustedTelegramUsernameInConfig(
+  current: ChannelIntegrationConfig,
+  usernameEntry: string,
+  providerUserId: string,
+): ChannelIntegrationConfig | null {
+  const expected = usernameEntry.trim().toLowerCase()
+  if (
+    !expected.startsWith('@')
+    || !/^\d+$/.test(providerUserId)
+    || current.userAccessMode !== 'allowlist'
+    || current.allowTrustedGuestFullAccess !== true
+  ) {
+    return null
+  }
+
+  let matched = false
+  const replaced = (current.allowedUserIds ?? []).map((rawEntry) => {
+    const entry = rawEntry.trim()
+    if (entry.toLowerCase() === expected) {
+      matched = true
+      return providerUserId
+    }
+    return entry
+  })
+  if (!matched) return null
+
+  const seen = new Set<string>()
+  const allowedUserIds = replaced.filter((entry) => {
+    const key = entry.startsWith('@') ? entry.toLowerCase() : entry
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+  return { ...current, allowedUserIds }
 }
 
 export function createDbChannelIntegrationStore(key: Buffer): ChannelIntegrationStore {
@@ -934,6 +1014,48 @@ export function createDbChannelIntegrationStore(key: Buffer): ChannelIntegration
     },
 
     async updateConfig(params) {
+      const authority = await queryWithRLS<{
+        config: ChannelIntegrationConfig | null
+        role: 'owner' | 'admin' | 'member'
+      }>(
+        params.actingUserId,
+        `SELECT ci.config, wm.role
+           FROM channel_integrations ci
+           JOIN channels c ON c.id = ci.channel_id
+           JOIN workspace_members wm
+             ON wm.workspace_id = c.workspace_id AND wm.user_id = $2
+          WHERE ci.id = $1
+          LIMIT 1`,
+        [params.id, params.actingUserId],
+      )
+      const current = authority.rows[0]
+      if (!current) {
+        throw new Error('Integration not found or not authorized')
+      }
+      if (
+        current.role !== 'owner'
+        && current.role !== 'admin'
+        && trustedGuestAuthorityChanged(current.config ?? {}, params.config)
+      ) {
+        throw new Error('not authorized: trusted guest full access requires owner or admin')
+      }
+
+      // Revoke channel-provisioned workspace membership before persisting a
+      // config that removes its durable numeric-id grant. If cleanup fails,
+      // the config update must not succeed and leave a stale member authorized.
+      const trustedNumericIds = params.config.userAccessMode === 'allowlist'
+        && params.config.allowTrustedGuestFullAccess === true
+        ? (params.config.allowedUserIds ?? [])
+            .map((entry) => entry.trim())
+            .filter((entry) => /^\d+$/.test(entry))
+        : []
+      await query(
+        `DELETE FROM channel_trusted_access_grants
+          WHERE integration_id = $1
+            AND NOT (provider = 'telegram' AND provider_user_id = ANY($2::text[]))`,
+        [params.id, trustedNumericIds],
+      )
+
       const result = await queryWithRLS<CiRow>(
         params.actingUserId,
         `UPDATE channel_integrations
@@ -946,6 +1068,44 @@ export function createDbChannelIntegrationStore(key: Buffer): ChannelIntegration
         throw new Error('Integration not found or not authorized')
       }
       return result.rows[0]
+    },
+
+    async pinTrustedTelegramUsernameSystem(id, usernameEntry, providerUserId) {
+      const client = await getPool().connect()
+      try {
+        await client.query('BEGIN')
+        const locked = await client.query<{ config: ChannelIntegrationConfig | null }>(
+          `SELECT config
+             FROM channel_integrations
+            WHERE id = $1
+            FOR UPDATE`,
+          [id],
+        )
+        const next = locked.rows[0]
+          ? pinTrustedTelegramUsernameInConfig(
+              locked.rows[0].config ?? {},
+              usernameEntry,
+              providerUserId,
+            )
+          : null
+        if (!next) {
+          await client.query('ROLLBACK')
+          return false
+        }
+        await client.query(
+          `UPDATE channel_integrations
+              SET config = $2, updated_at = now()
+            WHERE id = $1`,
+          [id, JSON.stringify(next)],
+        )
+        await client.query('COMMIT')
+        return true
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => {})
+        throw err
+      } finally {
+        client.release()
+      }
     },
 
     async mergeConfigSystem(id, mutate) {

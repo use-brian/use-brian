@@ -161,6 +161,7 @@ export function ResizablePeek({
   storageKey,
   ariaLabel,
   onDismiss,
+  responsiveFullWidth = false,
   children,
 }: {
   storageKey: string;
@@ -170,6 +171,8 @@ export function ResizablePeek({
    *  a click on it (or Escape anywhere an editor hasn't claimed it)
    *  collapses the peek. */
   onDismiss?: () => void;
+  /** Below `lg`, become a full-width destination and hide resize chrome. */
+  responsiveFullWidth?: boolean;
   children: React.ReactNode;
 }) {
   const { width, resizing, handleProps } = usePeekResize(storageKey);
@@ -202,9 +205,12 @@ export function ResizablePeek({
           // The slide-in is skipped mid-resize so the panel tracks the pointer.
           !resizing && "animate-in slide-in-from-right-4 fade-in duration-200",
           resizing && "select-none",
+          responsiveFullWidth && "max-lg:!w-full",
         )}
       >
-        <PeekResizeHandle resizing={resizing} {...handleProps} />
+        <div className={cn(responsiveFullWidth && "max-lg:hidden")}>
+          <PeekResizeHandle resizing={resizing} {...handleProps} />
+        </div>
         {children}
       </aside>
     </>

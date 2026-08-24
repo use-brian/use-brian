@@ -3,7 +3,7 @@
  *
  * Fulfils the interface declared in `packages/core/src/doc/inbox-types.ts`
  * against the `doc_notifications` table (migration 227; widened by migration
- * 452 to also hold ROOM mentions — see `recordRoomMentions` /
+ * 469 to also hold ROOM mentions — see `recordRoomMentions` /
  * `retractRoomMentions` below, docs/plans/room-human-mentions.md). Only
  * **mentions** are stored here; the "pending assistant reply" half of the
  * Inbox is derived (see `listPendingRepliesForUser` on
@@ -57,7 +57,7 @@ function mapMention(row: MentionRow): InboxMention {
   return {
     kind: 'mention',
     id: row.id,
-    // NOT NULL for a kind='mention' row (the XOR check, migration 452) —
+    // NOT NULL for a kind='mention' row (the XOR check, migration 469) —
     // asserted here rather than re-typed as optional so InboxPageMention
     // keeps its original, narrower shape for every existing call site.
     pageId: row.pageId as string,
@@ -177,7 +177,7 @@ export function createDbDocNotificationsStore(): DocNotificationsStore {
       const preview = clampPreview(params.preview)
       // ON CONFLICT targets the partial unique index on
       // (session_message_id, recipient_user_id) WHERE session_message_id IS
-      // NOT NULL (migration 452) — the WHERE clause here must repeat that
+      // NOT NULL (migration 469) — the WHERE clause here must repeat that
       // predicate for Postgres to infer the partial index. This is what makes
       // the write idempotent under the multi-assistant fan-out (T-H2) AND is
       // D-H6's "re-add a name whose row was already read re-surfaces that
@@ -239,7 +239,7 @@ export function createDbDocNotificationsStore(): DocNotificationsStore {
       // stay, so widening the window restores them. The LIMIT stays as a
       // backstop for a workspace with a huge window and a very loud teammate.
       //
-      // Both `kind`s (migration 452, PH2): `mapInboxMention` dispatches each
+      // Both `kind`s (migration 469, PH2): `mapInboxMention` dispatches each
       // row to the matching `InboxMention` member, so a room row never runs
       // through the page mapper (which assumes a non-null `pageId`) or vice
       // versa.

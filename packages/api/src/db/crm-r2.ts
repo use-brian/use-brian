@@ -16,8 +16,9 @@ import {
   type EntityRecord,
   type MailboxSearchHit,
 } from '@use-brian/core'
+import type { PoolClient } from 'pg'
 import { buildAccessPredicate } from './access-predicate.js'
-import { getPool, query, queryGated, queryWithRLS } from './client.js'
+import { applyRLSGucs, getPool, query, queryGated, queryWithRLS } from './client.js'
 import { getEntityById, updateEntity } from './entities-store.js'
 
 export const CRM_FIELD_TYPES = [
@@ -40,6 +41,7 @@ export type CrmPipelineStage = {
   position: number
   probability: number
   requiredFields: string[]
+  archivedAt?: string | null
 }
 
 export type CrmPipeline = {
@@ -48,6 +50,7 @@ export type CrmPipeline = {
   isDefault: boolean
   position: number
   stages: CrmPipelineStage[]
+  archivedAt?: string | null
 }
 
 export type CrmFieldDefinition = {
@@ -59,6 +62,7 @@ export type CrmFieldDefinition = {
   options: string[]
   isRequired: boolean
   position: number
+  archivedAt?: string | null
 }
 
 export type CrmConfig = {
@@ -107,7 +111,8 @@ const DEFAULT_STAGES = [
 /** Lazy seed for workspaces created after migration 455. */
 export async function ensureCrmDefaultPipeline(workspaceId: string): Promise<string> {
   const existing = await query<{ id: string }>(
-    `SELECT id FROM crm_pipelines WHERE workspace_id = $1 AND is_default LIMIT 1`,
+    `SELECT id FROM crm_pipelines
+      WHERE workspace_id = $1 AND is_default AND archived_at IS NULL LIMIT 1`,
     [workspaceId],
   )
   if (existing.rows[0]) return existing.rows[0].id
@@ -118,7 +123,7 @@ export async function ensureCrmDefaultPipeline(workspaceId: string): Promise<str
     const pipeline = await client.query<{ id: string }>(
       `INSERT INTO crm_pipelines (workspace_id, name, is_default, position)
        VALUES ($1, 'Sales', true, 0)
-       ON CONFLICT (workspace_id) WHERE is_default DO UPDATE
+       ON CONFLICT (workspace_id) WHERE is_default AND archived_at IS NULL DO UPDATE
          SET is_default = EXCLUDED.is_default
        RETURNING id`,
       [workspaceId],
@@ -143,50 +148,70 @@ export async function ensureCrmDefaultPipeline(workspaceId: string): Promise<str
   }
 }
 
-type ConfigStageRow = Omit<CrmPipelineStage, 'requiredFields'> & { requiredFields: string[] | null }
-type ConfigFieldRow = Omit<CrmFieldDefinition, 'options'> & { options: unknown }
+type ConfigStageRow = Omit<CrmPipelineStage, 'requiredFields' | 'archivedAt'> & {
+  requiredFields: string[] | null
+  archivedAt: Date | null
+}
+type ConfigFieldRow = Omit<CrmFieldDefinition, 'options' | 'archivedAt'> & {
+  options: unknown
+  archivedAt: Date | null
+}
 
-export async function getCrmConfig(userId: string, workspaceId: string): Promise<CrmConfig> {
+export async function getCrmConfig(
+  userId: string,
+  workspaceId: string,
+  includeArchived = false,
+): Promise<CrmConfig> {
   await ensureCrmDefaultPipeline(workspaceId)
   const [pipelineRows, stageRows, fieldRows] = await Promise.all([
-    queryWithRLS<{ id: string; name: string; isDefault: boolean; position: number }>(
+    queryWithRLS<{ id: string; name: string; isDefault: boolean; position: number; archivedAt: Date | null }>(
       userId,
-      `SELECT id, name, is_default AS "isDefault", position
+      `SELECT id, name, is_default AS "isDefault", position, archived_at AS "archivedAt"
          FROM crm_pipelines WHERE workspace_id = $1
-        ORDER BY position, created_at`,
+           ${includeArchived ? '' : 'AND archived_at IS NULL'}
+        ORDER BY archived_at NULLS FIRST, position, created_at`,
       [workspaceId],
     ),
     queryWithRLS<ConfigStageRow>(
       userId,
       `SELECT id, pipeline_id AS "pipelineId", name, legacy_key AS "legacyKey",
-              category, position, probability, required_fields AS "requiredFields"
+              category, position, probability, required_fields AS "requiredFields",
+              archived_at AS "archivedAt"
          FROM crm_pipeline_stages WHERE workspace_id = $1
-        ORDER BY pipeline_id, position`,
+           ${includeArchived ? '' : 'AND archived_at IS NULL'}
+        ORDER BY archived_at NULLS FIRST, pipeline_id, position`,
       [workspaceId],
     ),
     queryWithRLS<ConfigFieldRow>(
       userId,
       `SELECT id, entity_kind AS "entityKind", field_key AS "fieldKey", label,
-              field_type AS "fieldType", options, is_required AS "isRequired", position
+              field_type AS "fieldType", options, is_required AS "isRequired", position,
+              archived_at AS "archivedAt"
          FROM crm_field_definitions
-        WHERE workspace_id = $1 AND archived_at IS NULL
-        ORDER BY entity_kind, position, created_at`,
+        WHERE workspace_id = $1 ${includeArchived ? '' : 'AND archived_at IS NULL'}
+        ORDER BY archived_at NULLS FIRST, entity_kind, position, created_at`,
       [workspaceId],
     ),
   ])
   const stagesByPipeline = new Map<string, CrmPipelineStage[]>()
   for (const row of stageRows.rows) {
     const stages = stagesByPipeline.get(row.pipelineId) ?? []
-    stages.push({ ...row, requiredFields: row.requiredFields ?? [] })
+    stages.push({
+      ...row,
+      requiredFields: row.requiredFields ?? [],
+      archivedAt: row.archivedAt?.toISOString() ?? null,
+    })
     stagesByPipeline.set(row.pipelineId, stages)
   }
   return {
     pipelines: pipelineRows.rows.map((p) => ({
       ...p,
+      archivedAt: p.archivedAt?.toISOString() ?? null,
       stages: stagesByPipeline.get(p.id) ?? [],
     })),
     fields: fieldRows.rows.map((f) => ({
       ...f,
+      archivedAt: f.archivedAt?.toISOString() ?? null,
       options: Array.isArray(f.options)
         ? f.options.filter((v): v is string => typeof v === 'string')
         : [],
@@ -203,8 +228,9 @@ export async function createCrmPipeline(input: {
     input.userId,
     `INSERT INTO crm_pipelines (workspace_id, name, is_default, position, created_by)
      VALUES ($1,$2,false,
-       COALESCE((SELECT MAX(position) + 1 FROM crm_pipelines WHERE workspace_id = $1), 0),$3)
-     RETURNING id, name, is_default AS "isDefault", position`,
+       COALESCE((SELECT MAX(position) + 1 FROM crm_pipelines
+                  WHERE workspace_id = $1 AND archived_at IS NULL), 0),$3)
+     RETURNING id, name, is_default AS "isDefault", position, NULL::timestamptz AS "archivedAt"`,
     [input.workspaceId, input.name, input.userId],
   )
   return { ...inserted.rows[0], stages: [] }
@@ -224,15 +250,22 @@ export async function createCrmStage(input: {
     `INSERT INTO crm_pipeline_stages
        (workspace_id, pipeline_id, name, category, position, probability, required_fields)
      SELECT $1,$2,$3,$4,
-       COALESCE((SELECT MAX(position) + 1 FROM crm_pipeline_stages WHERE pipeline_id = $2),0),
+       COALESCE((SELECT MAX(position) + 1 FROM crm_pipeline_stages
+                  WHERE pipeline_id = $2 AND archived_at IS NULL),0),
        $5,$6
-     WHERE EXISTS (SELECT 1 FROM crm_pipelines WHERE id = $2 AND workspace_id = $1)
+     WHERE EXISTS (SELECT 1 FROM crm_pipelines
+                    WHERE id = $2 AND workspace_id = $1 AND archived_at IS NULL)
      RETURNING id, pipeline_id AS "pipelineId", name, legacy_key AS "legacyKey",
-       category, position, probability, required_fields AS "requiredFields"`,
+       category, position, probability, required_fields AS "requiredFields",
+       NULL::timestamptz AS "archivedAt"`,
     [input.workspaceId, input.pipelineId, input.name, input.category, input.probability, input.requiredFields ?? []],
   )
   const row = inserted.rows[0]
-  return row ? { ...row, requiredFields: row.requiredFields ?? [] } : null
+  return row ? {
+    ...row,
+    requiredFields: row.requiredFields ?? [],
+    archivedAt: row.archivedAt?.toISOString() ?? null,
+  } : null
 }
 
 export async function updateCrmStage(input: {
@@ -251,14 +284,246 @@ export async function updateCrmStage(input: {
        category = COALESCE($5, category),
        probability = COALESCE($6, probability),
        required_fields = COALESCE($7, required_fields)
-     WHERE id = $2 AND workspace_id = $1
+     WHERE id = $2 AND workspace_id = $1 AND archived_at IS NULL
      RETURNING id, pipeline_id AS "pipelineId", name, legacy_key AS "legacyKey",
-       category, position, probability, required_fields AS "requiredFields"`,
+       category, position, probability, required_fields AS "requiredFields",
+       archived_at AS "archivedAt"`,
     [input.workspaceId, input.stageId, input.userId, input.name ?? null,
       input.category ?? null, input.probability ?? null, input.requiredFields ?? null],
   )
   const row = updated.rows[0]
-  return row ? { ...row, requiredFields: row.requiredFields ?? [] } : null
+  return row ? {
+    ...row,
+    requiredFields: row.requiredFields ?? [],
+    archivedAt: row.archivedAt?.toISOString() ?? null,
+  } : null
+}
+
+async function withCrmConfigTransaction<T>(
+  userId: string,
+  work: (client: PoolClient) => Promise<T>,
+): Promise<T> {
+  const client = await getPool().connect()
+  try {
+    await client.query('BEGIN')
+    await applyRLSGucs(client, userId)
+    const value = await work(client)
+    await client.query('COMMIT')
+    return value
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw error
+  } finally {
+    client.release()
+  }
+}
+
+function assertExactOrder(actual: string[], requested: string[]): void {
+  if (actual.length !== requested.length
+    || new Set(actual).size !== actual.length
+    || new Set(requested).size !== requested.length
+    || actual.some((id) => !requested.includes(id))) {
+    throw new Error('orderedIds must contain every live row exactly once')
+  }
+}
+
+export async function updateCrmPipeline(input: {
+  userId: string
+  workspaceId: string
+  pipelineId: string
+  name?: string
+  isDefault?: boolean
+  archived?: boolean
+}): Promise<boolean> {
+  return withCrmConfigTransaction(input.userId, async (client) => {
+    const selected = await client.query<{ isDefault: boolean; archivedAt: Date | null }>(
+      `SELECT is_default AS "isDefault", archived_at AS "archivedAt"
+         FROM crm_pipelines
+        WHERE id = $1 AND workspace_id = $2 FOR UPDATE`,
+      [input.pipelineId, input.workspaceId],
+    )
+    const pipeline = selected.rows[0]
+    if (!pipeline) return false
+    if (input.archived === true) {
+      if (pipeline.isDefault) throw new Error('The default pipeline cannot be archived')
+      const used = await client.query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM entities
+          WHERE workspace_id = $1 AND kind = 'deal' AND valid_to IS NULL
+            AND retracted_at IS NULL AND NOT (attributes ? 'crm_archived_at')
+            AND attributes->>'pipeline_id' = $2`,
+        [input.workspaceId, input.pipelineId],
+      )
+      const count = Number(used.rows[0]?.count ?? 0)
+      if (count > 0) throw new Error(`Move ${count} live deal${count === 1 ? '' : 's'} before archiving this pipeline`)
+    }
+    if (input.isDefault === true && input.archived === true) {
+      throw new Error('An archived pipeline cannot be the default')
+    }
+    if (input.archived === false && pipeline.archivedAt) {
+      await client.query(
+        `UPDATE crm_pipelines SET archived_at = NULL, is_default = false,
+            position = COALESCE((SELECT MAX(position) + 1 FROM crm_pipelines
+              WHERE workspace_id = $2 AND archived_at IS NULL), 0)
+          WHERE id = $1 AND workspace_id = $2`,
+        [input.pipelineId, input.workspaceId],
+      )
+    }
+    if (input.name !== undefined) {
+      await client.query(
+        `UPDATE crm_pipelines SET name = $3
+          WHERE id = $1 AND workspace_id = $2`,
+        [input.pipelineId, input.workspaceId, input.name],
+      )
+    }
+    if (input.isDefault === true) {
+      await client.query(
+        `UPDATE crm_pipelines SET is_default = false
+          WHERE workspace_id = $1 AND archived_at IS NULL`,
+        [input.workspaceId],
+      )
+      await client.query(
+        `UPDATE crm_pipelines SET is_default = true
+          WHERE id = $1 AND workspace_id = $2 AND archived_at IS NULL`,
+        [input.pipelineId, input.workspaceId],
+      )
+    }
+    if (input.archived === true) {
+      await client.query(
+        `UPDATE crm_pipelines SET archived_at = now(), is_default = false
+          WHERE id = $1 AND workspace_id = $2`,
+        [input.pipelineId, input.workspaceId],
+      )
+      await client.query(
+        `UPDATE crm_pipelines SET position = position + 1000000
+          WHERE workspace_id = $1 AND archived_at IS NULL`,
+        [input.workspaceId],
+      )
+      await client.query(
+        `WITH ranked AS (
+           SELECT id, row_number() OVER (ORDER BY position, created_at) - 1 AS next_position
+             FROM crm_pipelines WHERE workspace_id = $1 AND archived_at IS NULL
+         )
+         UPDATE crm_pipelines p SET position = ranked.next_position
+           FROM ranked WHERE p.id = ranked.id`,
+        [input.workspaceId],
+      )
+    }
+    return true
+  })
+}
+
+export async function reorderCrmPipelines(input: {
+  userId: string
+  workspaceId: string
+  orderedIds: string[]
+}): Promise<void> {
+  await withCrmConfigTransaction(input.userId, async (client) => {
+    const current = await client.query<{ id: string }>(
+      `SELECT id FROM crm_pipelines
+        WHERE workspace_id = $1 AND archived_at IS NULL ORDER BY position FOR UPDATE`,
+      [input.workspaceId],
+    )
+    assertExactOrder(current.rows.map((row) => row.id), input.orderedIds)
+    await client.query(
+      `UPDATE crm_pipelines SET position = position + 1000000
+        WHERE workspace_id = $1 AND archived_at IS NULL`,
+      [input.workspaceId],
+    )
+    for (const [position, id] of input.orderedIds.entries()) {
+      await client.query(
+        `UPDATE crm_pipelines SET position = $3
+          WHERE id = $1 AND workspace_id = $2 AND archived_at IS NULL`,
+        [id, input.workspaceId, position],
+      )
+    }
+  })
+}
+
+export async function setCrmStageArchived(input: {
+  userId: string
+  workspaceId: string
+  stageId: string
+  archived: boolean
+}): Promise<boolean> {
+  return withCrmConfigTransaction(input.userId, async (client) => {
+    const selected = await client.query<{ pipelineId: string; archivedAt: Date | null }>(
+      `SELECT pipeline_id AS "pipelineId", archived_at AS "archivedAt"
+         FROM crm_pipeline_stages
+        WHERE id = $1 AND workspace_id = $2 FOR UPDATE`,
+      [input.stageId, input.workspaceId],
+    )
+    const stage = selected.rows[0]
+    if (!stage) return false
+    if (input.archived) {
+      const used = await client.query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM entities
+          WHERE workspace_id = $1 AND kind = 'deal' AND valid_to IS NULL
+            AND retracted_at IS NULL AND NOT (attributes ? 'crm_archived_at')
+            AND attributes->>'pipeline_stage_id' = $2`,
+        [input.workspaceId, input.stageId],
+      )
+      const count = Number(used.rows[0]?.count ?? 0)
+      if (count > 0) throw new Error(`Move ${count} live deal${count === 1 ? '' : 's'} before archiving this stage`)
+      await client.query(
+        `UPDATE crm_pipeline_stages SET archived_at = now()
+          WHERE id = $1 AND workspace_id = $2`,
+        [input.stageId, input.workspaceId],
+      )
+    } else if (stage.archivedAt) {
+      await client.query(
+        `UPDATE crm_pipeline_stages SET archived_at = NULL,
+            position = COALESCE((SELECT MAX(position) + 1 FROM crm_pipeline_stages
+              WHERE pipeline_id = $3 AND archived_at IS NULL), 0)
+          WHERE id = $1 AND workspace_id = $2`,
+        [input.stageId, input.workspaceId, stage.pipelineId],
+      )
+    }
+    await client.query(
+      `UPDATE crm_pipeline_stages SET position = position + 1000000
+        WHERE pipeline_id = $1 AND archived_at IS NULL`,
+      [stage.pipelineId],
+    )
+    await client.query(
+      `WITH ranked AS (
+         SELECT id, row_number() OVER (ORDER BY position, created_at) - 1 AS next_position
+           FROM crm_pipeline_stages WHERE pipeline_id = $1 AND archived_at IS NULL
+       )
+       UPDATE crm_pipeline_stages s SET position = ranked.next_position
+         FROM ranked WHERE s.id = ranked.id`,
+      [stage.pipelineId],
+    )
+    return true
+  })
+}
+
+export async function reorderCrmStages(input: {
+  userId: string
+  workspaceId: string
+  pipelineId: string
+  orderedIds: string[]
+}): Promise<void> {
+  await withCrmConfigTransaction(input.userId, async (client) => {
+    const current = await client.query<{ id: string }>(
+      `SELECT id FROM crm_pipeline_stages
+        WHERE workspace_id = $1 AND pipeline_id = $2 AND archived_at IS NULL
+        ORDER BY position FOR UPDATE`,
+      [input.workspaceId, input.pipelineId],
+    )
+    assertExactOrder(current.rows.map((row) => row.id), input.orderedIds)
+    await client.query(
+      `UPDATE crm_pipeline_stages SET position = position + 1000000
+        WHERE workspace_id = $1 AND pipeline_id = $2 AND archived_at IS NULL`,
+      [input.workspaceId, input.pipelineId],
+    )
+    for (const [position, id] of input.orderedIds.entries()) {
+      await client.query(
+        `UPDATE crm_pipeline_stages SET position = $4
+          WHERE id = $1 AND workspace_id = $2 AND pipeline_id = $3
+            AND archived_at IS NULL`,
+        [id, input.workspaceId, input.pipelineId, position],
+      )
+    }
+  })
 }
 
 export async function createCrmFieldDefinition(input: {
@@ -282,13 +547,15 @@ export async function createCrmFieldDefinition(input: {
      WHERE (SELECT COUNT(*) FROM crm_field_definitions
              WHERE workspace_id = $1 AND entity_kind = $2 AND archived_at IS NULL) < 50
      RETURNING id, entity_kind AS "entityKind", field_key AS "fieldKey", label,
-       field_type AS "fieldType", options, is_required AS "isRequired", position`,
+       field_type AS "fieldType", options, is_required AS "isRequired", position,
+       NULL::timestamptz AS "archivedAt"`,
     [input.workspaceId, input.entityKind, input.fieldKey, input.label, input.fieldType,
       JSON.stringify(input.options ?? []), input.isRequired ?? false, input.userId],
   )
   const row = inserted.rows[0]
   return row ? {
     ...row,
+    archivedAt: null,
     options: Array.isArray(row.options)
       ? row.options.filter((v): v is string => typeof v === 'string')
       : [],
@@ -300,13 +567,172 @@ export async function archiveCrmFieldDefinition(
   workspaceId: string,
   fieldId: string,
 ): Promise<boolean> {
-  const result = await queryWithRLS(
-    userId,
-    `UPDATE crm_field_definitions SET archived_at = now()
+  return withCrmConfigTransaction(userId, async (client) => {
+    const result = await client.query<{ entityKind: CrmEntityKind }>(
+      `UPDATE crm_field_definitions SET archived_at = now()
+        WHERE id = $1 AND workspace_id = $2 AND archived_at IS NULL
+        RETURNING entity_kind AS "entityKind"`,
+      [fieldId, workspaceId],
+    )
+    const row = result.rows[0]
+    if (!row) return false
+    await client.query(
+      `UPDATE crm_field_definitions SET position = position + 1000000
+        WHERE workspace_id = $1 AND entity_kind = $2 AND archived_at IS NULL`,
+      [workspaceId, row.entityKind],
+    )
+    await client.query(
+      `WITH ranked AS (
+         SELECT id, row_number() OVER (ORDER BY position, created_at) - 1 AS next_position
+           FROM crm_field_definitions
+          WHERE workspace_id = $1 AND entity_kind = $2 AND archived_at IS NULL
+       )
+       UPDATE crm_field_definitions f SET position = ranked.next_position
+         FROM ranked WHERE f.id = ranked.id`,
+      [workspaceId, row.entityKind],
+    )
+    return true
+  })
+}
+
+export async function updateCrmFieldDefinition(input: {
+  userId: string
+  workspaceId: string
+  fieldId: string
+  label?: string
+  options?: string[]
+  isRequired?: boolean
+}): Promise<CrmFieldDefinition | null> {
+  const existing = await queryWithRLS<ConfigFieldRow>(
+    input.userId,
+    `SELECT id, entity_kind AS "entityKind", field_key AS "fieldKey", label,
+            field_type AS "fieldType", options, is_required AS "isRequired", position,
+            archived_at AS "archivedAt"
+       FROM crm_field_definitions
       WHERE id = $1 AND workspace_id = $2 AND archived_at IS NULL`,
-    [fieldId, workspaceId],
+    [input.fieldId, input.workspaceId],
   )
-  return (result.rowCount ?? 0) > 0
+  const before = existing.rows[0]
+  if (!before) return null
+  const currentOptions = Array.isArray(before.options)
+    ? before.options.filter((value): value is string => typeof value === 'string')
+    : []
+  if (input.options && (before.fieldType === 'single_select' || before.fieldType === 'multi_select')
+    && input.options.length === 0) {
+    throw new Error('Select fields require at least one option')
+  }
+  if (input.options && before.fieldType === 'entity_reference'
+    && (input.options.length === 0
+      || input.options.some((kind) => !(CRM_REFERENCE_KINDS as readonly string[]).includes(kind)))) {
+    throw new Error('Reference fields require at least one valid target kind')
+  }
+  if (input.options && (before.fieldType === 'single_select' || before.fieldType === 'multi_select')) {
+    const removed = currentOptions.filter((option) => !input.options!.includes(option))
+    if (removed.length > 0) {
+      const usage = await queryWithRLS<{ count: string }>(
+        input.userId,
+        before.fieldType === 'single_select'
+          ? `SELECT COUNT(*)::text AS count FROM entities
+              WHERE workspace_id = $1 AND kind = $2 AND valid_to IS NULL
+                AND retracted_at IS NULL AND NOT (attributes ? 'crm_archived_at')
+                AND attributes->'custom_fields'->>$3 = ANY($4::text[])`
+          : `SELECT COUNT(*)::text AS count FROM entities
+              WHERE workspace_id = $1 AND kind = $2 AND valid_to IS NULL
+                AND retracted_at IS NULL AND NOT (attributes ? 'crm_archived_at')
+                AND EXISTS (
+                  SELECT 1 FROM jsonb_array_elements_text(
+                    COALESCE(attributes->'custom_fields'->$3, '[]'::jsonb)
+                  ) value WHERE value = ANY($4::text[])
+                )`,
+        [input.workspaceId, before.entityKind, before.fieldKey, removed],
+      )
+      const count = Number(usage.rows[0]?.count ?? 0)
+      if (count > 0) throw new Error(`Cannot remove options used by ${count} live record${count === 1 ? '' : 's'}`)
+    }
+  }
+  const updated = await queryWithRLS<ConfigFieldRow>(
+    input.userId,
+    `UPDATE crm_field_definitions SET
+       label = COALESCE($3, label),
+       options = COALESCE($4::jsonb, options),
+       is_required = COALESCE($5, is_required)
+     WHERE id = $1 AND workspace_id = $2 AND archived_at IS NULL
+     RETURNING id, entity_kind AS "entityKind", field_key AS "fieldKey", label,
+       field_type AS "fieldType", options, is_required AS "isRequired", position,
+       archived_at AS "archivedAt"`,
+    [input.fieldId, input.workspaceId, input.label ?? null,
+      input.options ? JSON.stringify(input.options) : null, input.isRequired ?? null],
+  )
+  const row = updated.rows[0]
+  return row ? {
+    ...row,
+    options: Array.isArray(row.options)
+      ? row.options.filter((value): value is string => typeof value === 'string')
+      : [],
+    archivedAt: row.archivedAt?.toISOString() ?? null,
+  } : null
+}
+
+export async function restoreCrmFieldDefinition(
+  userId: string,
+  workspaceId: string,
+  fieldId: string,
+): Promise<boolean> {
+  return withCrmConfigTransaction(userId, async (client) => {
+    const selected = await client.query<{ entityKind: CrmEntityKind }>(
+      `SELECT entity_kind AS "entityKind" FROM crm_field_definitions
+        WHERE id = $1 AND workspace_id = $2 AND archived_at IS NOT NULL FOR UPDATE`,
+      [fieldId, workspaceId],
+    )
+    const row = selected.rows[0]
+    if (!row) return false
+    const live = await client.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM crm_field_definitions
+        WHERE workspace_id = $1 AND entity_kind = $2 AND archived_at IS NULL`,
+      [workspaceId, row.entityKind],
+    )
+    if (Number(live.rows[0]?.count ?? 0) >= 50) {
+      throw new Error('Custom field limit reached')
+    }
+    await client.query(
+      `UPDATE crm_field_definitions SET archived_at = NULL,
+          position = COALESCE((SELECT MAX(position) + 1 FROM crm_field_definitions
+            WHERE workspace_id = $2 AND entity_kind = $3 AND archived_at IS NULL), 0)
+        WHERE id = $1 AND workspace_id = $2`,
+      [fieldId, workspaceId, row.entityKind],
+    )
+    return true
+  })
+}
+
+export async function reorderCrmFields(input: {
+  userId: string
+  workspaceId: string
+  entityKind: CrmEntityKind
+  orderedIds: string[]
+}): Promise<void> {
+  await withCrmConfigTransaction(input.userId, async (client) => {
+    const current = await client.query<{ id: string }>(
+      `SELECT id FROM crm_field_definitions
+        WHERE workspace_id = $1 AND entity_kind = $2 AND archived_at IS NULL
+        ORDER BY position FOR UPDATE`,
+      [input.workspaceId, input.entityKind],
+    )
+    assertExactOrder(current.rows.map((row) => row.id), input.orderedIds)
+    await client.query(
+      `UPDATE crm_field_definitions SET position = position + 1000000
+        WHERE workspace_id = $1 AND entity_kind = $2 AND archived_at IS NULL`,
+      [input.workspaceId, input.entityKind],
+    )
+    for (const [position, id] of input.orderedIds.entries()) {
+      await client.query(
+        `UPDATE crm_field_definitions SET position = $4
+          WHERE id = $1 AND workspace_id = $2 AND entity_kind = $3
+            AND archived_at IS NULL`,
+        [id, input.workspaceId, input.entityKind, position],
+      )
+    }
+  })
 }
 
 function sameFieldShape(existing: Pick<CrmFieldDefinition, 'fieldType' | 'options'>, preset: CrmPresetField): boolean {
@@ -395,6 +821,152 @@ export type CrmRecordRow = {
   updatedAt: string
 }
 
+function entityToCrmRecordRow(entity: EntityRecord): CrmRecordRow {
+  return {
+    id: entity.id,
+    kind: entity.kind as CrmEntityKind,
+    name: entity.displayName,
+    attributes: entity.attributes,
+    archivedAt: typeof entity.attributes.crm_archived_at === 'string'
+      ? entity.attributes.crm_archived_at
+      : null,
+    updatedAt: entity.updatedAt.toISOString(),
+  }
+}
+
+/** Cold-load one CRM record without depending on a collection page. */
+export async function getCrmR2Record(
+  ctx: AccessContext,
+  entityId: string,
+): Promise<CrmRecordRow | null> {
+  const entity = await getEntityById(ctx, entityId)
+  if (!entity || !['person', 'company', 'deal'].includes(entity.kind)) return null
+  return entityToCrmRecordRow(entity)
+}
+
+export type CrmRecordRelationships = {
+  contacts: CrmRecordRow[]
+  companies: CrmRecordRow[]
+  deals: CrmRecordRow[]
+}
+
+async function listRelatedKind(
+  ctx: AccessContext,
+  kind: CrmEntityKind,
+  relationshipSql: (firstIndex: number) => string,
+  relationshipParams: unknown[],
+): Promise<CrmRecordRow[]> {
+  const ap = buildAccessPredicate(ctx, { alias: 'e', startIdx: 1 })
+  const kindIndex = ap.nextIdx
+  const firstRelationshipIndex = kindIndex + 1
+  const result = await queryGated<{
+    id: string
+    kind: CrmEntityKind
+    name: string
+    attributes: Record<string, unknown> | null
+    archivedAt: Date | null
+    updatedAt: Date
+  }>(
+    ctx,
+    `SELECT e.id, e.kind, e.display_name AS name, e.attributes,
+            NULLIF(e.attributes->>'crm_archived_at','')::timestamptz AS "archivedAt",
+            e.updated_at AS "updatedAt"
+       FROM entities e
+      WHERE ${ap.sql} AND e.kind = $${kindIndex}
+        AND e.valid_to IS NULL AND e.retracted_at IS NULL
+        AND NOT (e.attributes ? 'crm_archived_at')
+        AND (${relationshipSql(firstRelationshipIndex)})
+      ORDER BY e.updated_at DESC, e.id DESC`,
+    [...ap.params, kind, ...relationshipParams],
+  )
+  return result.rows.map((row) => ({
+    id: row.id,
+    kind: row.kind,
+    name: row.name,
+    attributes: row.attributes ?? {},
+    archivedAt: row.archivedAt?.toISOString() ?? null,
+    updatedAt: row.updatedAt.toISOString(),
+  }))
+}
+
+/**
+ * Direct, access-scoped relationship summaries for a cold record page.
+ * Participant-linked deals are included for both people and companies.
+ */
+export async function listCrmRecordRelationships(
+  ctx: AccessContext,
+  record: CrmRecordRow,
+): Promise<CrmRecordRelationships> {
+  if (record.kind === 'person') {
+    const companyId = typeof record.attributes.company_id === 'string'
+      ? record.attributes.company_id
+      : null
+    const [companies, deals] = await Promise.all([
+      companyId
+        ? listRelatedKind(ctx, 'company', (index) => `e.id = $${index}`, [companyId])
+        : Promise.resolve([]),
+      listRelatedKind(
+        ctx,
+        'deal',
+        (index) => `e.attributes->>'contact_id' = $${index}
+          OR EXISTS (
+            SELECT 1 FROM crm_deal_contacts dc
+             WHERE dc.workspace_id = e.workspace_id
+               AND dc.deal_id = e.id AND dc.contact_id = $${index}
+          )`,
+        [record.id],
+      ),
+    ])
+    return { contacts: [], companies, deals }
+  }
+
+  if (record.kind === 'company') {
+    const contacts = await listRelatedKind(
+      ctx,
+      'person',
+      (index) => `e.attributes->>'company_id' = $${index}`,
+      [record.id],
+    )
+    const visibleContactIds = contacts.map((contact) => contact.id)
+    const deals = await listRelatedKind(
+      ctx,
+      'deal',
+      (index) => `e.attributes->>'company_id' = $${index}
+        OR ($${index + 1}::text[] <> '{}'::text[] AND EXISTS (
+          SELECT 1 FROM crm_deal_contacts dc
+           WHERE dc.workspace_id = e.workspace_id AND dc.deal_id = e.id
+             AND dc.contact_id = ANY($${index + 1}::text[])
+        ))`,
+      [record.id, visibleContactIds],
+    )
+    return { contacts, companies: [], deals }
+  }
+
+  const contactId = typeof record.attributes.contact_id === 'string'
+    ? record.attributes.contact_id
+    : null
+  const companyId = typeof record.attributes.company_id === 'string'
+    ? record.attributes.company_id
+    : null
+  const [contacts, companies] = await Promise.all([
+    listRelatedKind(
+      ctx,
+      'person',
+      (index) => `($${index}::text IS NOT NULL AND e.id = $${index})
+        OR EXISTS (
+          SELECT 1 FROM crm_deal_contacts dc
+           WHERE dc.workspace_id = e.workspace_id
+             AND dc.deal_id = $${index + 1} AND dc.contact_id = e.id
+        )`,
+      [contactId, record.id],
+    ),
+    companyId
+      ? listRelatedKind(ctx, 'company', (index) => `e.id = $${index}`, [companyId])
+      : Promise.resolve([]),
+  ])
+  return { contacts, companies, deals: [] }
+}
+
 export async function listCrmR2Records(
   ctx: AccessContext,
   options: { includeArchived?: boolean } = {},
@@ -429,6 +1001,395 @@ export async function listCrmR2Records(
     archivedAt: r.archivedAt?.toISOString() ?? null,
     updatedAt: r.updatedAt.toISOString(),
   }))
+}
+
+export type CrmPageSort = 'updated' | 'name' | 'amount' | 'close'
+export type CrmSortDirection = 'asc' | 'desc'
+
+export type CrmPageOptions = {
+  kind: CrmEntityKind
+  limit: number
+  cursor?: string | null
+  sort: CrmPageSort
+  direction: CrmSortDirection
+  search?: string | null
+  includeArchived?: boolean
+  owners?: string[]
+  pipelineId?: string | null
+  stageIds?: string[]
+  companyIds?: string[]
+  tags?: string[]
+  custom?: Record<string, string[]>
+  attention?: 'overdue' | 'stale' | 'noAmount' | 'orphaned' | null
+}
+
+type CrmCursor = {
+  kind: CrmEntityKind
+  sort: CrmPageSort
+  direction: CrmSortDirection
+  value: string | number | null
+  id: string
+}
+
+export function encodeCrmCursor(cursor: CrmCursor): string {
+  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url')
+}
+
+export function decodeCrmCursor(value: string): CrmCursor {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'))
+  } catch {
+    throw new Error('Invalid CRM cursor')
+  }
+  if (!parsed || typeof parsed !== 'object') throw new Error('Invalid CRM cursor')
+  const cursor = parsed as Partial<CrmCursor>
+  if (!CRM_REFERENCE_KINDS.includes(cursor.kind as CrmEntityKind)
+    || !['updated', 'name', 'amount', 'close'].includes(String(cursor.sort))
+    || !['asc', 'desc'].includes(String(cursor.direction))
+    || typeof cursor.id !== 'string'
+    || !(cursor.value === null || typeof cursor.value === 'string' || typeof cursor.value === 'number')) {
+    throw new Error('Invalid CRM cursor')
+  }
+  return cursor as CrmCursor
+}
+
+function crmSortExpression(kind: CrmEntityKind, sort: CrmPageSort): {
+  sql: string
+  cursorCast: string
+} {
+  if (sort === 'name') return { sql: 'lower(e.display_name)', cursorCast: 'text' }
+  if (sort === 'amount' && kind === 'deal') {
+    return { sql: `NULLIF(e.attributes->>'amount','')::numeric`, cursorCast: 'numeric' }
+  }
+  if (sort === 'close' && kind === 'deal') {
+    return { sql: `NULLIF(e.attributes->>'close_date','')`, cursorCast: 'text' }
+  }
+  return { sql: 'e.updated_at', cursorCast: 'timestamptz' }
+}
+
+export type CrmRecordPage = {
+  items: CrmRecordRow[]
+  nextCursor: string | null
+  hasMore: boolean
+}
+
+/** Access-scoped server-authoritative collection query with an opaque keyset. */
+export async function listCrmRecordPage(
+  ctx: AccessContext,
+  options: CrmPageOptions,
+): Promise<CrmRecordPage> {
+  const limit = Math.max(1, Math.min(100, options.limit))
+  if ((options.sort === 'amount' || options.sort === 'close') && options.kind !== 'deal') {
+    throw new Error(`${options.sort} sort is only available for deals`)
+  }
+  const cursor = options.cursor ? decodeCrmCursor(options.cursor) : null
+  if (cursor && (cursor.kind !== options.kind || cursor.sort !== options.sort
+    || cursor.direction !== options.direction)) {
+    throw new Error('CRM cursor does not match this query')
+  }
+  const ap = buildAccessPredicate(ctx, { alias: 'e', startIdx: 1 })
+  const values: unknown[] = [...ap.params]
+  const where: string[] = [
+    ap.sql,
+    `e.kind = $${values.length + 1}`,
+    'e.valid_to IS NULL',
+    'e.retracted_at IS NULL',
+  ]
+  values.push(options.kind)
+  if (options.includeArchived) where.push(`e.attributes ? 'crm_archived_at'`)
+  else where.push(`NOT (e.attributes ? 'crm_archived_at')`)
+  const add = (sql: (index: number) => string, value: unknown) => {
+    const index = values.length + 1
+    where.push(sql(index))
+    values.push(value)
+  }
+  if (options.search?.trim()) {
+    const pattern = `%${options.search.trim()}%`
+    add((index) => options.kind === 'person'
+      ? `(e.display_name ILIKE $${index} OR e.attributes->>'email' ILIKE $${index}
+          OR e.attributes->>'phone' ILIKE $${index}
+          OR (e.attributes->'tags')::text ILIKE $${index}
+          OR EXISTS (
+            SELECT 1 FROM crm_field_definitions f
+             WHERE f.workspace_id = e.workspace_id AND f.entity_kind = e.kind
+               AND f.archived_at IS NULL
+               AND f.field_type = ANY(ARRAY['text','single_select','multi_select'])
+               AND (e.attributes->'custom_fields'->>f.field_key ILIKE $${index}
+                 OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(
+                   CASE WHEN jsonb_typeof(e.attributes->'custom_fields'->f.field_key) = 'array'
+                     THEN e.attributes->'custom_fields'->f.field_key ELSE '[]'::jsonb END
+                 ) item WHERE item ILIKE $${index}))
+          ))`
+      : options.kind === 'company'
+        ? `(e.display_name ILIKE $${index} OR e.attributes->>'domain' ILIKE $${index}
+            OR (e.attributes->'tags')::text ILIKE $${index}
+            OR EXISTS (
+              SELECT 1 FROM crm_field_definitions f
+               WHERE f.workspace_id = e.workspace_id AND f.entity_kind = e.kind
+                 AND f.archived_at IS NULL
+                 AND f.field_type = ANY(ARRAY['text','single_select','multi_select'])
+                 AND (e.attributes->'custom_fields'->>f.field_key ILIKE $${index}
+                   OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(
+                     CASE WHEN jsonb_typeof(e.attributes->'custom_fields'->f.field_key) = 'array'
+                       THEN e.attributes->'custom_fields'->f.field_key ELSE '[]'::jsonb END
+                   ) item WHERE item ILIKE $${index}))
+            ))`
+        : `(e.display_name ILIKE $${index} OR e.attributes->>'source' ILIKE $${index}
+            OR EXISTS (SELECT 1 FROM entities related
+              WHERE related.workspace_id = e.workspace_id
+                AND related.valid_to IS NULL AND related.retracted_at IS NULL
+                AND related.id::text = ANY(ARRAY[
+                  NULLIF(e.attributes->>'contact_id',''),
+                  NULLIF(e.attributes->>'company_id','')
+                ]) AND related.display_name ILIKE $${index})
+            OR EXISTS (
+              SELECT 1 FROM crm_field_definitions f
+               WHERE f.workspace_id = e.workspace_id AND f.entity_kind = e.kind
+                 AND f.archived_at IS NULL
+                 AND f.field_type = ANY(ARRAY['text','single_select','multi_select'])
+                 AND (e.attributes->'custom_fields'->>f.field_key ILIKE $${index}
+                   OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(
+                     CASE WHEN jsonb_typeof(e.attributes->'custom_fields'->f.field_key) = 'array'
+                       THEN e.attributes->'custom_fields'->f.field_key ELSE '[]'::jsonb END
+                   ) item WHERE item ILIKE $${index}))
+            ))`, pattern)
+  }
+  if (options.owners?.length) {
+    const ownerIds = options.owners.filter((owner) => owner !== 'none')
+    const includeNone = options.owners.includes('none')
+    add((index) => `(${ownerIds.length > 0 ? `e.attributes->>'owner_id' = ANY($${index}::text[])` : 'false'}
+      ${includeNone ? `OR NULLIF(e.attributes->>'owner_id','') IS NULL` : ''})`, ownerIds)
+  }
+  if (options.pipelineId && options.kind === 'deal') {
+    add((index) => `e.attributes->>'pipeline_id' = $${index}`, options.pipelineId)
+  }
+  if (options.stageIds?.length && options.kind === 'deal') {
+    add((index) => `e.attributes->>'pipeline_stage_id' = ANY($${index}::text[])`, options.stageIds)
+  }
+  if (options.companyIds?.length && options.kind !== 'company') {
+    const ids = options.companyIds.filter((id) => id !== 'none')
+    const includeNone = options.companyIds.includes('none')
+    add((index) => `(${ids.length > 0 ? `e.attributes->>'company_id' = ANY($${index}::text[])` : 'false'}
+      ${includeNone ? `OR NULLIF(e.attributes->>'company_id','') IS NULL` : ''})`, ids)
+  }
+  if (options.tags?.length && options.kind !== 'deal') {
+    add((index) => `COALESCE(e.attributes->'tags','[]'::jsonb) ?| $${index}::text[]`, options.tags)
+  }
+  if (options.attention === 'orphaned' && options.kind === 'person') {
+    where.push(`NULLIF(e.attributes->>'company_id','') IS NULL`)
+  }
+  if (options.kind === 'deal' && options.attention && options.attention !== 'orphaned') {
+    where.push(`(CASE
+      WHEN NULLIF(e.attributes->>'pipeline_stage_id','') IS NOT NULL THEN EXISTS (
+        SELECT 1 FROM crm_pipeline_stages page_stage
+         WHERE page_stage.id::text = e.attributes->>'pipeline_stage_id'
+           AND page_stage.workspace_id = e.workspace_id
+           AND page_stage.archived_at IS NULL AND page_stage.category = 'open'
+      )
+      ELSE COALESCE(e.attributes->>'stage','lead') NOT IN ('won','lost')
+    END)`)
+    if (options.attention === 'overdue') {
+      where.push(`NULLIF(e.attributes->>'close_date','')::date < CURRENT_DATE`)
+    } else if (options.attention === 'stale') {
+      where.push(`e.updated_at < now() - interval '30 days'`)
+    } else {
+      where.push(`NULLIF(e.attributes->>'amount','') IS NULL`)
+    }
+  }
+  for (const [key, selected] of Object.entries(options.custom ?? {})) {
+    if (selected.length === 0) continue
+    const emptyTokens = new Set(['__empty__', '__none__'])
+    const keyIndex = values.length + 1
+    values.push(key)
+    const valueIndex = values.length + 1
+    values.push(selected.filter((value) => !emptyTokens.has(value)))
+    const includeEmpty = selected.some((value) => emptyTokens.has(value))
+    where.push(`(
+      e.attributes->'custom_fields'->>$${keyIndex} = ANY($${valueIndex}::text[])
+      OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(
+        CASE WHEN jsonb_typeof(e.attributes->'custom_fields'->$${keyIndex}) = 'array'
+          THEN e.attributes->'custom_fields'->$${keyIndex} ELSE '[]'::jsonb END
+      ) value WHERE value = ANY($${valueIndex}::text[]))
+      ${includeEmpty ? `OR e.attributes->'custom_fields'->$${keyIndex} IS NULL` : ''}
+    )`)
+  }
+  const sort = crmSortExpression(options.kind, options.sort)
+  const direction = options.direction === 'asc' ? 'ASC' : 'DESC'
+  const comparison = options.direction === 'asc' ? '>' : '<'
+  if (cursor) {
+    const valueIndex = values.length + 1
+    values.push(cursor.value)
+    const idIndex = values.length + 1
+    values.push(cursor.id)
+    where.push(cursor.value === null
+      ? `(${sort.sql} IS NULL AND e.id ${comparison} $${idIndex}::uuid)`
+      : `(${sort.sql} IS NULL OR ${sort.sql} ${comparison} $${valueIndex}::${sort.cursorCast}
+          OR (${sort.sql} = $${valueIndex}::${sort.cursorCast} AND e.id ${comparison} $${idIndex}::uuid))`)
+  }
+  values.push(limit + 1)
+  const result = await queryGated<{
+    id: string
+    kind: CrmEntityKind
+    name: string
+    attributes: Record<string, unknown> | null
+    archivedAt: Date | null
+    updatedAt: Date
+    sortValue: Date | string | number | null
+  }>(ctx,
+    `SELECT e.id, e.kind, e.display_name AS name, e.attributes,
+            NULLIF(e.attributes->>'crm_archived_at','')::timestamptz AS "archivedAt",
+            e.updated_at AS "updatedAt", ${sort.sql} AS "sortValue"
+       FROM entities e
+      WHERE ${where.join(' AND ')}
+      ORDER BY (${sort.sql} IS NULL) ASC, ${sort.sql} ${direction}, e.id ${direction}
+      LIMIT $${values.length}`,
+    values,
+  )
+  const hasMore = result.rows.length > limit
+  const pageRows = result.rows.slice(0, limit)
+  const items = pageRows.map((row) => ({
+    id: row.id,
+    kind: row.kind,
+    name: row.name,
+    attributes: row.attributes ?? {},
+    archivedAt: row.archivedAt?.toISOString() ?? null,
+    updatedAt: row.updatedAt.toISOString(),
+  }))
+  const last = pageRows.at(-1)
+  const cursorValue = last?.sortValue instanceof Date
+    ? last.sortValue.toISOString()
+    : last?.sortValue ?? null
+  return {
+    items,
+    hasMore,
+    nextCursor: hasMore && last ? encodeCrmCursor({
+      kind: options.kind,
+      sort: options.sort,
+      direction: options.direction,
+      value: cursorValue,
+      id: last.id,
+    }) : null,
+  }
+}
+
+export type CrmSummary = {
+  totals: { deals: number; contacts: number; companies: number }
+  attention: { overdue: number; stale: number; noAmount: number; orphaned: number }
+  stages: Array<{ stageId: string; count: number; values: Record<string, number> }>
+}
+
+export async function getCrmSummary(
+  ctx: AccessContext,
+  pipelineId?: string | null,
+): Promise<CrmSummary> {
+  const ap = buildAccessPredicate(ctx, { alias: 'e', startIdx: 1 })
+  const aggregateValues: unknown[] = [...ap.params, ['person', 'company', 'deal']]
+  const pipelinePredicate = pipelineId
+    ? `AND e.attributes->>'pipeline_id' = $${aggregateValues.push(pipelineId)}`
+    : ''
+  const openDeal = `(CASE
+    WHEN NULLIF(e.attributes->>'pipeline_stage_id','') IS NOT NULL THEN EXISTS (
+      SELECT 1 FROM crm_pipeline_stages summary_stage
+       WHERE summary_stage.id::text = e.attributes->>'pipeline_stage_id'
+         AND summary_stage.workspace_id = e.workspace_id
+         AND summary_stage.archived_at IS NULL AND summary_stage.category = 'open'
+    )
+    ELSE COALESCE(e.attributes->>'stage','lead') NOT IN ('won','lost')
+  END)`
+  const aggregate = await queryGated<{
+    deals: string; contacts: string; companies: string
+    overdue: string; stale: string; noAmount: string; orphaned: string
+  }>(ctx,
+    `SELECT
+       COUNT(*) FILTER (WHERE e.kind = 'deal' ${pipelinePredicate})::text AS deals,
+       COUNT(*) FILTER (WHERE e.kind = 'person')::text AS contacts,
+       COUNT(*) FILTER (WHERE e.kind = 'company')::text AS companies,
+       COUNT(*) FILTER (WHERE e.kind = 'deal' ${pipelinePredicate}
+         AND ${openDeal}
+         AND NULLIF(e.attributes->>'close_date','')::date < CURRENT_DATE)::text AS overdue,
+       COUNT(*) FILTER (WHERE e.kind = 'deal' ${pipelinePredicate}
+         AND ${openDeal}
+         AND e.updated_at < now() - interval '30 days')::text AS stale,
+       COUNT(*) FILTER (WHERE e.kind = 'deal' ${pipelinePredicate}
+         AND ${openDeal}
+         AND NULLIF(e.attributes->>'amount','') IS NULL)::text AS "noAmount",
+       COUNT(*) FILTER (WHERE e.kind = 'person'
+         AND NULLIF(e.attributes->>'company_id','') IS NULL)::text AS orphaned
+     FROM entities e
+     WHERE ${ap.sql} AND e.kind = ANY($${ap.nextIdx}::text[])
+       AND e.valid_to IS NULL AND e.retracted_at IS NULL
+       AND NOT (e.attributes ? 'crm_archived_at')`,
+    aggregateValues,
+  )
+  const stageAp = buildAccessPredicate(ctx, { alias: 'e', startIdx: 1 })
+  const stageValues: unknown[] = [...stageAp.params]
+  let pipelineSql = ''
+  if (pipelineId) {
+    stageValues.push(pipelineId)
+    pipelineSql = `AND e.attributes->>'pipeline_id' = $${stageValues.length}`
+  }
+  const stages = await queryGated<{
+    stageId: string; currency: string; stageCount: string; value: string | null
+  }>(ctx,
+    `SELECT e.attributes->>'pipeline_stage_id' AS "stageId",
+            COALESCE(NULLIF(upper(e.attributes->>'currency_code'),''),'USD') AS currency,
+            SUM(COUNT(*)) OVER (
+              PARTITION BY e.attributes->>'pipeline_stage_id'
+            )::text AS "stageCount",
+            SUM(NULLIF(e.attributes->>'amount','')::numeric)::text AS value
+       FROM entities e
+      WHERE ${stageAp.sql} AND e.kind = 'deal' AND e.valid_to IS NULL
+        AND e.retracted_at IS NULL AND NOT (e.attributes ? 'crm_archived_at')
+        AND NULLIF(e.attributes->>'pipeline_stage_id','') IS NOT NULL
+        ${pipelineSql}
+      GROUP BY e.attributes->>'pipeline_stage_id', currency`,
+    stageValues,
+  )
+  const stageMap = new Map<string, { stageId: string; count: number; values: Record<string, number> }>()
+  for (const row of stages.rows) {
+    const summary = stageMap.get(row.stageId) ?? { stageId: row.stageId, count: 0, values: {} }
+    summary.count = Number(row.stageCount)
+    if (row.value !== null) summary.values[row.currency] = Number(row.value)
+    stageMap.set(row.stageId, summary)
+  }
+  const row = aggregate.rows[0]
+  return {
+    totals: { deals: Number(row?.deals ?? 0), contacts: Number(row?.contacts ?? 0), companies: Number(row?.companies ?? 0) },
+    attention: { overdue: Number(row?.overdue ?? 0), stale: Number(row?.stale ?? 0), noAmount: Number(row?.noAmount ?? 0), orphaned: Number(row?.orphaned ?? 0) },
+    stages: [...stageMap.values()],
+  }
+}
+
+export async function lookupCrmRecords(input: {
+  ctx: AccessContext
+  kind: CrmEntityKind
+  query?: string | null
+  limit: number
+}): Promise<Array<{ id: string; name: string; hint: string | null }>> {
+  const ap = buildAccessPredicate(input.ctx, { alias: 'e', startIdx: 1 })
+  const limit = Math.max(1, Math.min(100, input.limit))
+  const values: unknown[] = [...ap.params, input.kind]
+  let search = ''
+  if (input.query?.trim()) {
+    values.push(`%${input.query.trim()}%`)
+    search = `AND (e.display_name ILIKE $${values.length}
+      OR COALESCE(e.canonical_id,'') ILIKE $${values.length})`
+  }
+  values.push(limit)
+  const result = await queryGated<{ id: string; name: string; hint: string | null }>(input.ctx,
+    `SELECT e.id, e.display_name AS name,
+            CASE WHEN e.kind = 'person' THEN COALESCE(e.attributes->>'email', e.canonical_id)
+                 WHEN e.kind = 'company' THEN COALESCE(e.attributes->>'domain', e.canonical_id)
+                 ELSE e.attributes->>'source' END AS hint
+       FROM entities e
+      WHERE ${ap.sql} AND e.kind = $${ap.nextIdx}
+        AND e.valid_to IS NULL AND e.retracted_at IS NULL
+        AND NOT (e.attributes ? 'crm_archived_at') ${search}
+      ORDER BY lower(e.display_name), e.id LIMIT $${values.length}`,
+    values,
+  )
+  return result.rows
 }
 
 export async function setCrmArchived(input: {
@@ -613,6 +1574,14 @@ export async function addCrmDealParticipant(input: {
   role?: string | null
   isPrimary?: boolean
 }): Promise<boolean> {
+  if (input.isPrimary) {
+    return setCrmDealPrimaryContact({
+      ctx: input.ctx,
+      dealId: input.dealId,
+      contactId: input.contactId,
+      ...(input.role !== undefined ? { role: input.role } : {}),
+    })
+  }
   const [deal, contact] = await Promise.all([
     getEntityById(input.ctx, input.dealId),
     getEntityById(input.ctx, input.contactId),
@@ -621,12 +1590,7 @@ export async function addCrmDealParticipant(input: {
   const client = await getPool().connect()
   try {
     await client.query('BEGIN')
-    if (input.isPrimary) {
-      await client.query(
-        `UPDATE crm_deal_contacts SET is_primary = false WHERE deal_id = $1`,
-        [input.dealId],
-      )
-    }
+    await applyRLSGucs(client, input.ctx.userId)
     await client.query(
       `INSERT INTO crm_deal_contacts
          (workspace_id, deal_id, contact_id, role, is_primary, created_by)
@@ -634,9 +1598,53 @@ export async function addCrmDealParticipant(input: {
        ON CONFLICT (deal_id, contact_id) DO UPDATE
          SET role = EXCLUDED.role, is_primary = EXCLUDED.is_primary`,
       [input.ctx.workspaceId, input.dealId, input.contactId, input.role ?? null,
-        input.isPrimary ?? false, input.ctx.userId],
+        false, input.ctx.userId],
     )
-    if (input.isPrimary) {
+    await client.query('COMMIT')
+    return true
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw err
+  } finally {
+    client.release()
+  }
+}
+
+/** Keep the participant primary flag and canonical deal contact in one
+ * transaction. `contactId: null` clears both representations. */
+export async function setCrmDealPrimaryContact(input: {
+  ctx: AccessContext
+  dealId: string
+  contactId: string | null
+  role?: string | null
+}): Promise<boolean> {
+  const deal = await getEntityById(input.ctx, input.dealId)
+  if (!deal || deal.kind !== 'deal') return false
+  if (input.contactId) {
+    const contact = await getEntityById(input.ctx, input.contactId)
+    if (!contact || contact.kind !== 'person') return false
+  }
+  const client = await getPool().connect()
+  try {
+    await client.query('BEGIN')
+    await applyRLSGucs(client, input.ctx.userId)
+    await client.query(
+      `UPDATE crm_deal_contacts
+          SET is_primary = false
+        WHERE workspace_id = $1 AND deal_id = $2`,
+      [input.ctx.workspaceId, input.dealId],
+    )
+    if (input.contactId) {
+      await client.query(
+        `INSERT INTO crm_deal_contacts
+           (workspace_id, deal_id, contact_id, role, is_primary, created_by)
+         VALUES ($1,$2,$3,$4,true,$5)
+         ON CONFLICT (deal_id, contact_id) DO UPDATE SET
+           is_primary = true,
+           role = CASE WHEN $6::boolean THEN EXCLUDED.role ELSE crm_deal_contacts.role END`,
+        [input.ctx.workspaceId, input.dealId, input.contactId, input.role ?? null,
+          input.ctx.userId, input.role !== undefined],
+      )
       await client.query(
         `UPDATE entities SET
            attributes = jsonb_set(COALESCE(attributes, '{}'::jsonb),
@@ -644,6 +1652,13 @@ export async function addCrmDealParticipant(input: {
            updated_at = now()
          WHERE id = $1 AND workspace_id = $3`,
         [input.dealId, input.contactId, input.ctx.workspaceId],
+      )
+    } else {
+      await client.query(
+        `UPDATE entities SET attributes = COALESCE(attributes, '{}'::jsonb) - 'contact_id',
+            updated_at = now()
+          WHERE id = $1 AND workspace_id = $2`,
+        [input.dealId, input.ctx.workspaceId],
       )
     }
     await client.query('COMMIT')

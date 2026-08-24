@@ -9,12 +9,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import type { Channel } from "@/lib/api/channels";
+import type { ConfirmOptions } from "@/components/ui/confirm-dialog";
 import {
   AddChannelForm,
   ChannelConfigSection,
   normalizeWhatsAppPhoneNumberInput,
   WhatsAppCloudChatSection,
 } from "../page";
+
+const confirmDialog = vi.hoisted(() =>
+  vi.fn(async (_options: ConfirmOptions) => false),
+);
+
+vi.mock("@/components/ui/confirm-dialog", () => ({ confirmDialog }));
 
 vi.mock("@/lib/api/channels", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api/channels")>();
@@ -128,6 +135,7 @@ describe("[COMP:app-web/studio-channels] Telegram UX", () => {
     expect(cards[0].textContent).toContain("Owner + allowlist");
     expect(cards[0].textContent).toContain("@friend");
     expect(cards[0].textContent).toContain("Guest connected tools");
+    expect(cards[0].textContent).toContain("Trusted users have full access");
     expect(
       cards[0].querySelector<HTMLInputElement>('input[type="checkbox"]:checked'),
     ).not.toBeNull();
@@ -135,6 +143,55 @@ describe("[COMP:app-web/studio-channels] Telegram UX", () => {
     expect(cards[1].textContent).toContain("Require @mention");
     expect(cards[2].textContent).toContain("DMs + groups");
     expect(cards[2].textContent).toContain("Working reaction");
+  });
+
+  it("confirms before enabling trusted full access", async () => {
+    const channel: Channel = {
+      id: "channel_1",
+      workspaceId: "workspace_1",
+      channelType: "telegram",
+      clearance: "internal",
+      enabledCapabilities: ["chat"],
+      status: "active",
+      displayName: "Telegram bot",
+      createdAt: "2026-08-09T00:00:00.000Z",
+      updatedAt: "2026-08-09T00:00:00.000Z",
+      integrationId: "integration_1",
+      config: {
+        userAccessMode: "allowlist",
+        allowedUserIds: ["42"],
+      },
+    };
+
+    await act(async () => {
+      root.render(
+        localized(
+          <ChannelConfigSection
+            workspaceId="workspace_1"
+            channel={channel}
+            onUpdated={vi.fn()}
+          />,
+        ),
+      );
+    });
+
+    const toggle = [...host.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')]
+      .find((input) => input.parentElement?.textContent?.includes("Trusted users have full access"));
+    expect(toggle).toBeDefined();
+
+    await act(async () => {
+      toggle?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(confirmDialog).toHaveBeenCalledWith({
+      title: "Give trusted users full access?",
+      description: expect.stringContaining("workspace member"),
+      confirmLabel: "Give full access",
+      cancelLabel: "Cancel",
+    });
+    const confirmation = confirmDialog.mock.calls.at(-1)?.[0];
+    expect(confirmation?.description).toContain("@username");
+    expect(confirmation?.description).toContain("stable numeric ID");
   });
 });
 

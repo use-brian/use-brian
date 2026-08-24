@@ -7,9 +7,8 @@
  * which lists our origins; this module is the other half of that channel. The
  * messenger is injected so the decision logic is testable outside Chrome.
  *
- * The extension id is configuration, not a constant: an unpacked build gets a
- * per-machine id, and the Chrome Web Store fixes one at publish. Leaving it
- * unset simply falls back to the copy-paste flow.
+ * The published extension has a fixed Chrome Web Store id. Source-checkout
+ * users can override it because an unpacked build gets a per-machine id.
  */
 
 export type ExtensionPairResult =
@@ -24,17 +23,17 @@ export type ExtensionMessenger = (extensionId: string, message: unknown) => Prom
 
 /**
  * Canonical install destination shared by every My Browser entry point.
- * Replace the pre-publish search with the final listing URL when P2 ships.
  */
 export const BROWSER_EXTENSION_INSTALL_URL =
-  "https://chromewebstore.google.com/search/Use%20Brian";
+  "https://chromewebstore.google.com/detail/use-brian-browser-agent/nnmbbacnkekaoccmkmlfaghjaamgdpjn";
 
 /**
  * Module-local on purpose. Every caller reaches it through the `extensionId`
  * option's default, and anything wanting a different build passes one. An
  * export would only invite a second opinion on which extension we talk to.
  */
-const EXTENSION_ID = process.env.NEXT_PUBLIC_BROWSER_EXTENSION_ID ?? "";
+const EXTENSION_ID =
+  process.env.NEXT_PUBLIC_BROWSER_EXTENSION_ID ?? "nnmbbacnkekaoccmkmlfaghjaamgdpjn";
 
 type ChromeRuntime = {
   sendMessage?: (id: string, message: unknown, cb: (response: unknown) => void) => void;

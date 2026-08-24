@@ -39,10 +39,11 @@ export type UserAccessMode =
   | "blocklist"
   | "group_members";
 
-/** A Telegram chat the bot has seen — feeds the per-chat override picker. */
+/** A provider chat the bot has seen - feeds destination and ingest pickers. */
 export type SeenChat = {
   chatId: string;
   chatTitle: string | null;
+  chatType?: "p2p" | "group";
   isForum: boolean;
   topics: { topicId: number; name: string | null; lastSeenAt: string }[];
   lastSeenAt: string;
@@ -54,8 +55,8 @@ export type RequireMentionOverride = { chatId: string; topicId?: number | null }
 /**
  * Per-integration behavior config — the `channel_integrations.config` JSONB.
  * Mirrors `ChannelIntegrationConfig` in packages/api. Not every field applies
- * to every channel: `replyInThread` applies to Slack and Feishu, `requireMentionOverrides` /
- * `seenChats` are Telegram-only.
+ * to every channel: `replyInThread` applies to Slack and Feishu, while topic
+ * fields inside `seenChats` are Telegram-only.
  */
 export type ChannelIntegrationConfig = {
   replyInThread?: boolean;
@@ -64,17 +65,23 @@ export type ChannelIntegrationConfig = {
   requireMentionOverrides?: RequireMentionOverride[];
   /** Webhook-populated, read-only — never sent in a config PATCH. */
   seenChats?: SeenChat[];
+  /** Feishu/Lark passive-ingest security allowlist. Dedicated admin API only. */
+  ambientIngestChatIds?: string[];
   userAccessMode?: UserAccessMode;
   allowedUserIds?: string[];
   /** WhatsApp Cloud public business number used for wa.me chat links. */
   whatsappDisplayPhoneNumber?: string;
   /** Telegram BYO: allow explicitly listed DM guests to use enabled connectors. */
   allowGuestConnectorTools?: boolean;
+  /** Telegram BYO: numeric allowlist entries become revocable workspace members. */
+  allowTrustedGuestFullAccess?: boolean;
   blockedUserIds?: string[];
 };
 
 /** The fields a config PATCH may set — `seenChats` is webhook-owned. */
-export type ChannelConfigPatch = Partial<Omit<ChannelIntegrationConfig, "seenChats">>;
+export type ChannelConfigPatch = Partial<
+  Omit<ChannelIntegrationConfig, "seenChats" | "ambientIngestChatIds">
+>;
 
 export type Channel = {
   id: string;

@@ -32,7 +32,13 @@ import type { IncomingMessage, TelegramAdapterConfig, RequireMentionConfig, Chat
 import { findAssistantById, findUserById } from '../db/users.js'
 import { getWorkspaceRoleSystem } from '../db/workspace-store.js'
 import { query } from '../db/client.js'
-import { channelLinkBindsHere, resolveChannelUser, fetchTelegramProfile, type ChannelUserStore } from '../db/channel-user-store.js'
+import {
+  channelLinkBindsHere,
+  ensureTrustedChannelWorkspaceMembership,
+  resolveChannelUser,
+  fetchTelegramProfile,
+  type ChannelUserStore,
+} from '../db/channel-user-store.js'
 import {
   resolveAnyRoutingForChannel,
   resolveTelegramRoutingForSurface,
@@ -687,8 +693,10 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
         return fromId === entry
       }
 
-      const explicitAllowlistGrant = accessMode === 'allowlist'
-        && (integrationConfig.allowedUserIds ?? []).some(matchesEntry)
+      const matchingAllowlistEntry = accessMode === 'allowlist'
+        ? (integrationConfig.allowedUserIds ?? []).find(matchesEntry)?.trim()
+        : undefined
+      const explicitAllowlistGrant = matchingAllowlistEntry !== undefined
       if (
         accessMode === 'blocklist'
         && (integrationConfig.blockedUserIds ?? []).some(matchesEntry)
@@ -959,6 +967,49 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
         && !foundLinkedOwner
       ) {
         return
+      }
+
+      // Numeric ids are durable immediately. A listed @username is convenient
+      // input, so resolve it on first use by replacing it with Telegram's
+      // authenticated sender id before provisioning membership. Both inputs
+      // therefore converge to the same durable config and identity lane.
+      if (
+        externalGuest
+        && integrationConfig.allowTrustedGuestFullAccess === true
+        && matchingAllowlistEntry !== undefined
+        && routedAssistant.workspaceId
+      ) {
+        try {
+          if (matchingAllowlistEntry.startsWith('@')) {
+            const pinUsername = options.integrationStore.pinTrustedTelegramUsernameSystem
+            if (!pinUsername) {
+              throw new Error('trusted username pinning is unavailable')
+            }
+            const pinned = await pinUsername(
+              boundIntegration.id,
+              matchingAllowlistEntry,
+              fromId,
+            )
+            if (!pinned) {
+              throw new Error('trusted username grant changed before it could be pinned')
+            }
+          }
+          await ensureTrustedChannelWorkspaceMembership({
+            integrationId: boundIntegration.id,
+            workspaceId: routedAssistant.workspaceId,
+            userId: channelUserId,
+            provider: 'telegram',
+            providerUserId: fromId,
+          })
+          isIdentified = true
+          externalGuest = false
+        } catch (err) {
+          console.error('[telegram-byo] trusted guest membership provisioning failed:', err)
+          await adapter.sendMessage(incoming.channelId, {
+            text: 'Trusted access could not be activated right now. Please try again shortly.',
+          }).catch(() => {})
+          return
+        }
       }
 
       // 5b. Audio FILE → recording-to-brain pipeline instead of normal chat.

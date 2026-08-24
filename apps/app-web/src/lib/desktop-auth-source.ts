@@ -30,7 +30,11 @@ interface DesktopTokens {
  * present in every mode (thin shell + bundled); the token methods are added only
  * by the bundled app.
  */
-interface DesktopBridge {
+export interface DesktopBridge {
+  /** Host OS reported by Electron (`darwin`, `win32`, or `linux`). */
+  platform?: string;
+  /** Current Chromium page zoom factor, exposed read-only by the preload. */
+  getZoomFactor?: () => number;
   /**
    * The shell can provide a whole-computer playback stream for the dock
    * recorder. New macOS/Windows shells expose true; old shells and browsers

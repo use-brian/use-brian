@@ -9,9 +9,8 @@
  *     amount on deals; Orphaned on contacts) shared with their live counts —
  *     the `overdue` definition must match `countDealAttention` in
  *     packages/api/src/home/signals.ts (the `deal_attention` dock card);
- *   - per-section filters + sort;
- *   - the display-name joins (client-side — the flat route deliberately
- *     ships ids only, crm.md → "Operator surface");
+ *   - the server collection-query projection plus loaded-page presentation;
+ *   - display-name joins from the independent compact lookup directory;
  *   - the board's stage grouping + per-column amount summaries.
  *
  * Spec: docs/architecture/features/crm.md → "Operator surface".
@@ -21,11 +20,15 @@
 import {
   isOpenStage,
   type CrmCompanyRow,
+  type CrmCollectionQuery,
+  type CrmCollectionSort,
   type CrmContactRow,
   type CrmDealRow,
   type CrmFieldDefinition,
   type CrmPipeline,
   type CrmPipelineStage,
+  type CrmRecordBundle,
+  type CrmSummary,
   type DealStage,
 } from "@/lib/api/crm";
 // One codec for the multi-value URL shape across both operator surfaces —
@@ -122,12 +125,128 @@ export function crmQuickCounts(
 
 export const CRM_SECTIONS = ["deals", "contacts", "companies"] as const;
 export type CrmSection = (typeof CRM_SECTIONS)[number];
+export type CrmRecordKind = "deal" | "contact" | "company";
+
+/** Canonical collection/detail hrefs. Search state is kept verbatim so
+ * opening a record and returning to its collection preserves the lens. */
+export function crmCollectionHref(workspaceId: string, search = ""): string {
+  const path = `/w/${encodeURIComponent(workspaceId)}/crm`;
+  return search ? `${path}?${search}` : path;
+}
+
+export function crmRecordHref(
+  workspaceId: string,
+  kind: CrmRecordKind,
+  recordId: string,
+  search = "",
+): string {
+  const path = `${crmCollectionHref(workspaceId)}/${kind}/${encodeURIComponent(recordId)}`;
+  return search ? `${path}?${search}` : path;
+}
+
+/** Guard the cold record response against a stale or mistyped route. */
+export function crmRecordMatchesRoute(
+  bundle: CrmRecordBundle | null | undefined,
+  kind: CrmRecordKind,
+  recordId: string,
+): bundle is CrmRecordBundle {
+  return bundle?.record.kind === kind && bundle.record.id === recordId;
+}
 
 const VIEW_MODES = ["board", "table"] as const;
 type ViewMode = (typeof VIEW_MODES)[number];
 
-export const DEAL_SORT_KEYS = ["updated", "amount", "close"] as const;
+export const DEAL_SORT_KEYS = ["updated", "name", "amount", "close"] as const;
 export type DealSortKey = (typeof DEAL_SORT_KEYS)[number];
+const CRM_SORT_DIRECTIONS = ["asc", "desc"] as const;
+export type CrmSortDirection = (typeof CRM_SORT_DIRECTIONS)[number];
+
+export type CrmColumnDefinition = {
+  key: string;
+  source: "canonical" | "custom";
+  minWidth: number;
+  sortable: boolean;
+  editable: boolean;
+  pinned: boolean;
+};
+
+const CANONICAL_COLUMNS: Record<CrmSection, readonly CrmColumnDefinition[]> = {
+  deals: [
+    { key: "name", source: "canonical", minWidth: 180, sortable: true, editable: true, pinned: true },
+    { key: "stage", source: "canonical", minWidth: 130, sortable: false, editable: true, pinned: false },
+    { key: "company", source: "canonical", minWidth: 140, sortable: false, editable: true, pinned: false },
+    { key: "contact", source: "canonical", minWidth: 140, sortable: false, editable: true, pinned: false },
+    { key: "amount", source: "canonical", minWidth: 110, sortable: true, editable: true, pinned: false },
+    { key: "close", source: "canonical", minWidth: 105, sortable: true, editable: true, pinned: false },
+    { key: "owner", source: "canonical", minWidth: 130, sortable: false, editable: true, pinned: false },
+    { key: "source", source: "canonical", minWidth: 140, sortable: false, editable: true, pinned: false },
+    { key: "updated", source: "canonical", minWidth: 82, sortable: true, editable: false, pinned: false },
+  ],
+  contacts: [
+    { key: "name", source: "canonical", minWidth: 180, sortable: true, editable: true, pinned: true },
+    { key: "email", source: "canonical", minWidth: 180, sortable: false, editable: true, pinned: false },
+    { key: "phone", source: "canonical", minWidth: 120, sortable: false, editable: true, pinned: false },
+    { key: "company", source: "canonical", minWidth: 150, sortable: false, editable: true, pinned: false },
+    { key: "tags", source: "canonical", minWidth: 140, sortable: false, editable: true, pinned: false },
+    { key: "owner", source: "canonical", minWidth: 130, sortable: false, editable: true, pinned: false },
+    { key: "updated", source: "canonical", minWidth: 82, sortable: true, editable: false, pinned: false },
+  ],
+  companies: [
+    { key: "name", source: "canonical", minWidth: 180, sortable: true, editable: true, pinned: true },
+    { key: "domain", source: "canonical", minWidth: 170, sortable: false, editable: true, pinned: false },
+    { key: "tags", source: "canonical", minWidth: 150, sortable: false, editable: true, pinned: false },
+    { key: "owner", source: "canonical", minWidth: 130, sortable: false, editable: true, pinned: false },
+    { key: "updated", source: "canonical", minWidth: 82, sortable: true, editable: false, pinned: false },
+  ],
+};
+
+const DEFAULT_COLUMNS: Record<CrmSection, readonly string[]> = {
+  deals: ["name", "stage", "company", "amount", "close", "updated"],
+  contacts: ["name", "email", "phone", "company", "tags", "updated"],
+  companies: ["name", "domain", "tags", "updated"],
+};
+
+export function crmColumnRegistry(
+  section: CrmSection,
+  fields: readonly CrmFieldDefinition[],
+): CrmColumnDefinition[] {
+  return [
+    ...CANONICAL_COLUMNS[section],
+    ...fields.map((field) => ({
+      key: `cf:${field.fieldKey}`,
+      source: "custom" as const,
+      minWidth: field.fieldType === "multi_select" ? 170 : 140,
+      sortable: false,
+      editable: true,
+      pinned: false,
+    })),
+  ];
+}
+
+export function normalizeCrmColumns(
+  section: CrmSection,
+  fields: readonly CrmFieldDefinition[],
+  requested: readonly string[],
+): string[] {
+  const allowed = new Set(crmColumnRegistry(section, fields).map((column) => column.key));
+  const source = requested.length > 0 ? requested : DEFAULT_COLUMNS[section];
+  const columns = source.filter((key, index) => allowed.has(key) && source.indexOf(key) === index && key !== "name");
+  return ["name", ...columns];
+}
+
+export function appendCrmPage<T extends { id: string }>(current: readonly T[], next: readonly T[]): T[] {
+  const rows = new Map(current.map((row) => [row.id, row]));
+  for (const row of next) rows.set(row.id, row);
+  return [...rows.values()];
+}
+
+export function crmSectionCounts(summary: CrmSummary | null | undefined): Record<CrmSection, number> {
+  return {
+    deals: summary?.totals.deals ?? 0,
+    contacts: summary?.totals.contacts ?? 0,
+    companies: summary?.totals.companies ?? 0,
+  };
+}
 
 export type CrmViewState = {
   section: CrmSection;
@@ -151,6 +270,8 @@ export type CrmViewState = {
   company: string[];
   /** Tag filter (contacts/companies): any-of. Empty = any. */
   tag: string[];
+  /** Owner user ids and/or `"none"`. Empty = any. */
+  owner: string[];
   /** Typed custom-field filters keyed by stable field key. */
   custom: Record<string, string[]>;
   /** `cf:<fieldKey>` for a single-valued custom grouping. */
@@ -158,6 +279,9 @@ export type CrmViewState = {
   /** Free-text needle over names (+ email/domain). */
   q: string;
   sort: DealSortKey;
+  direction: CrmSortDirection;
+  /** Personal visible-column order. Empty means the section default. */
+  columns: string[];
   /** Reveal won/lost rows (they fold by default). */
   closed: boolean;
 };
@@ -172,12 +296,21 @@ export const DEFAULT_CRM_VIEW: CrmViewState = {
   stages: [],
   company: [],
   tag: [],
+  owner: [],
   custom: {},
   group: null,
   q: "",
   sort: "updated",
+  direction: "desc",
+  columns: [],
   closed: false,
 };
+
+/** Only a configured, ungrouped deal board needs independent stage pages.
+ * Every other lens can load its collection without CRM configuration. */
+export function crmUsesBoardPages(state: CrmViewState, hasPipeline: boolean): boolean {
+  return state.section === "deals" && state.view === "board" && state.group === null && hasPipeline;
+}
 
 function oneOf<T extends string>(
   value: string | null,
@@ -220,10 +353,13 @@ export function crmViewFromSearch(
     // user text and repeat the param instead (a tag may contain a comma).
     company: multiParam(params, "company", { splitCommas: true }),
     tag: multiParam(params, "tag", { splitCommas: false }),
+    owner: multiParam(params, "owner", { splitCommas: true }),
     custom,
     group: params.get("group"),
     q: params.get("q") ?? "",
     sort: oneOf(params.get("sort"), DEAL_SORT_KEYS) ?? DEFAULT_CRM_VIEW.sort,
+    direction: oneOf(params.get("direction"), CRM_SORT_DIRECTIONS) ?? DEFAULT_CRM_VIEW.direction,
+    columns: multiParam(params, "columns", { splitCommas: true }),
     closed: params.get("closed") === "1",
   };
 }
@@ -245,14 +381,40 @@ export function searchFromCrmView(state: CrmViewState): string {
   if (state.company.length > 0) params.set("company", state.company.join(","));
   // Repeated, never joined — a tag may contain a comma.
   for (const tag of state.tag) params.append("tag", tag);
+  if (state.owner.length > 0) params.set("owner", state.owner.join(","));
   for (const fieldKey of Object.keys(state.custom).sort()) {
     for (const value of state.custom[fieldKey] ?? []) params.append(`cf.${fieldKey}`, value);
   }
   if (state.group) params.set("group", state.group);
   if (state.q.length > 0) params.set("q", state.q);
   if (state.sort !== DEFAULT_CRM_VIEW.sort) params.set("sort", state.sort);
+  if (state.direction !== DEFAULT_CRM_VIEW.direction) params.set("direction", state.direction);
+  if (state.columns.length > 0) params.set("columns", state.columns.join(","));
   if (state.closed) params.set("closed", "1");
   return params.toString();
+}
+
+/** Translate URL-owned view state into the API-owned server query. */
+export function crmPageQuery(
+  state: CrmViewState,
+  q = state.q,
+  stageOverride?: readonly string[],
+): CrmCollectionQuery {
+  const kind = state.section === "contacts" ? "contact" : state.section === "companies" ? "company" : "deal";
+  return {
+    kind,
+    limit: 50,
+    sort: kind === "deal" ? state.sort : state.sort === "name" ? "name" : "updated",
+    direction: state.direction,
+    q,
+    owner: state.owner,
+    pipeline: kind === "deal" ? state.pipeline : null,
+    stage: kind === "deal" ? [...(stageOverride ?? state.stages)] : [],
+    company: kind === "company" ? [] : state.company,
+    tag: kind === "deal" ? [] : state.tag,
+    custom: state.custom,
+    filter: state.quick,
+  };
 }
 
 // ── Display-name joins (client-side) ────────────────────────────────────
@@ -354,6 +516,10 @@ export function applyDealFilters(
 ): CrmDealRow[] {
   const needle = state.q.trim().toLowerCase();
   return rows.filter((row) => {
+    if (state.owner.length > 0) {
+      const owner = row.ownerId ?? null;
+      if (!(owner ? state.owner.includes(owner) : state.owner.includes("none"))) return false;
+    }
     if (pipeline) {
       const belongs = row.pipelineId
         ? row.pipelineId === pipeline.id
@@ -395,6 +561,10 @@ export function applyContactFilters(
 ): CrmContactRow[] {
   const needle = state.q.trim().toLowerCase();
   return rows.filter((row) => {
+    if (state.owner.length > 0) {
+      const owner = row.ownerId ?? null;
+      if (!(owner ? state.owner.includes(owner) : state.owner.includes("none"))) return false;
+    }
     if (state.quick === "orphaned" && !matchesContactQuickFilter(row, "orphaned"))
       return false;
     if (!matchesCompany(row, state.company)) return false;
@@ -416,6 +586,10 @@ export function applyCompanyFilters(
 ): CrmCompanyRow[] {
   const needle = state.q.trim().toLowerCase();
   return rows.filter((row) => {
+    if (state.owner.length > 0) {
+      const owner = row.ownerId ?? null;
+      if (!(owner ? state.owner.includes(owner) : state.owner.includes("none"))) return false;
+    }
     if (!matchesTag(row, state.tag)) return false;
     if (!matchesCustomFields(row, state.custom)) return false;
     if (
@@ -465,14 +639,22 @@ export function groupRowsByCustomField<T extends { customFields?: Record<string,
     });
 }
 
-export function sortDeals(rows: CrmDealRow[], sort: DealSortKey): CrmDealRow[] {
+export function sortDeals(
+  rows: CrmDealRow[],
+  sort: DealSortKey,
+  direction?: CrmSortDirection,
+): CrmDealRow[] {
   const sorted = [...rows];
+  const sign = direction === "asc" ? 1 : direction === "desc" ? -1 : null;
   switch (sort) {
     case "updated":
       sorted.sort(
         (a, b) =>
-          new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
+          (new Date(a.updatedAt).getTime() - new Date(b.updatedAt).getTime()) * (sign ?? -1),
       );
+      break;
+    case "name":
+      sorted.sort((a, b) => a.name.localeCompare(b.name) * (sign ?? 1));
       break;
     case "amount":
       // Biggest first; unpriced rows sink to the bottom.
@@ -480,7 +662,7 @@ export function sortDeals(rows: CrmDealRow[], sort: DealSortKey): CrmDealRow[] {
         if (a.amount === null && b.amount === null) return 0;
         if (a.amount === null) return 1;
         if (b.amount === null) return -1;
-        return b.amount - a.amount;
+        return (a.amount - b.amount) * (sign ?? -1);
       });
       break;
     case "close":
@@ -489,7 +671,8 @@ export function sortDeals(rows: CrmDealRow[], sort: DealSortKey): CrmDealRow[] {
         if (a.closeDate === null && b.closeDate === null) return 0;
         if (a.closeDate === null) return 1;
         if (b.closeDate === null) return -1;
-        return a.closeDate < b.closeDate ? -1 : a.closeDate > b.closeDate ? 1 : 0;
+        const compared = a.closeDate < b.closeDate ? -1 : a.closeDate > b.closeDate ? 1 : 0;
+        return compared * (sign ?? 1);
       });
       break;
   }

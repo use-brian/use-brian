@@ -91,7 +91,7 @@ export type BrainPrimitive =
   | 'workspace_config'
   /**
    * The doc INBOX changed — today, a room `@mention` recorded for a
-   * teammate (migration 452, docs/plans/room-human-mentions.md T-H8).
+   * teammate (migration 469, docs/plans/room-human-mentions.md T-H8).
    * Carries no rowId: the payload is a workspace-wide signal, not a
    * per-recipient one (`notifyWorkspaceChange` has no per-user targeting),
    * so every open tab in the workspace refetches its OWN Inbox via the

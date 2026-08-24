@@ -1,13 +1,8 @@
 /**
- * CRM operator-surface SDK — the flat CRM read behind `/w/[id]/crm`
- * (`GET /api/brain/crm`, [COMP:brain/crm-list-http]): every live deal /
- * contact / company the viewer can see, one payload, 500/kind cap, full
- * operator fields. The client joins display names by id (`crm-view.ts`) and
- * resolves the workspace's stable pipeline stages from the configuration API.
- * Mutations reuse the existing brain-inbox adjust wire (`adjustBrainRow`
- * in `lib/api/brain-inbox.ts`) — the CRM-typed fields ride the same
- * endpoint (crm.md → "Operator surface"); stage changes route through
- * `setDealStage` server-side.
+ * CRM operator-surface SDK. Keyset collection pages, authoritative summary,
+ * compact relationship lookup, canonical cold record reads, typed record
+ * PATCH, stable pipeline stages, and R2 resources live behind `/api/crm`.
+ * The flat compatibility read remains only for bounded legacy dialogs.
  *
  * Spec: docs/architecture/features/crm.md → "Operator surface".
  * [COMP:app-web/crm-surface]
@@ -85,6 +80,122 @@ export type CrmData = {
   companies: CrmCompanyRow[];
 };
 
+export type CrmCollectionKind = "deal" | "contact" | "company";
+export type CrmCollectionSort = "updated" | "name" | "amount" | "close";
+type CrmSortDirection = "asc" | "desc";
+
+export type CrmRecordPage<T extends CrmPublicRecord = CrmPublicRecord> = {
+  items: T[];
+  nextCursor: string | null;
+  hasMore: boolean;
+};
+
+export type CrmCollectionQuery = {
+  kind: CrmCollectionKind;
+  cursor?: string | null;
+  limit?: number;
+  sort?: CrmCollectionSort;
+  direction?: CrmSortDirection;
+  q?: string;
+  archived?: boolean;
+  owner?: string[];
+  pipeline?: string | null;
+  stage?: string[];
+  company?: string[];
+  tag?: string[];
+  custom?: Record<string, string[]>;
+  filter?: "overdue" | "stale" | "noAmount" | "orphaned" | null;
+};
+
+function appendMany(params: URLSearchParams, key: string, values: readonly string[] | undefined) {
+  for (const value of values ?? []) params.append(key, value);
+}
+
+export function crmCollectionSearch(query: CrmCollectionQuery): string {
+  const params = new URLSearchParams({ kind: query.kind });
+  if (query.cursor) params.set("cursor", query.cursor);
+  if (query.limit) params.set("limit", String(query.limit));
+  if (query.sort) params.set("sort", query.sort);
+  if (query.direction) params.set("direction", query.direction);
+  if (query.q?.trim()) params.set("q", query.q.trim());
+  if (query.archived) params.set("archived", "true");
+  if (query.pipeline) params.set("pipeline", query.pipeline);
+  if (query.filter) params.set("filter", query.filter);
+  appendMany(params, "owner", query.owner);
+  appendMany(params, "stage", query.stage);
+  appendMany(params, "company", query.company);
+  appendMany(params, "tag", query.tag);
+  for (const [key, values] of Object.entries(query.custom ?? {})) {
+    appendMany(params, `cf.${key}`, values);
+  }
+  return params.toString();
+}
+
+export function fetchCrmRecordPage<T extends CrmPublicRecord = CrmPublicRecord>(
+  workspaceId: string,
+  query: CrmCollectionQuery,
+): Promise<CrmRecordPage<T>> {
+  return jsonRequest(
+    `/api/crm/${encodeURIComponent(workspaceId)}/records?${crmCollectionSearch(query)}`,
+  );
+}
+
+export type CrmDealBoardPages = Record<string, CrmRecordPage<Extract<CrmPublicRecord, { kind: "deal" }>>>;
+
+/** One independent keyset per board stage. */
+export async function fetchCrmDealBoardPages(
+  workspaceId: string,
+  query: Omit<CrmCollectionQuery, "kind" | "stage" | "cursor">,
+  stageIds: readonly string[],
+): Promise<CrmDealBoardPages> {
+  const entries = await Promise.all(stageIds.map(async (stageId) => [
+    stageId,
+    await fetchCrmRecordPage<Extract<CrmPublicRecord, { kind: "deal" }>>(workspaceId, {
+      ...query,
+      kind: "deal",
+      stage: [stageId],
+    }),
+  ] as const));
+  return Object.fromEntries(entries);
+}
+
+export type CrmSummary = {
+  totals: { deals: number; contacts: number; companies: number };
+  attention: { overdue: number; stale: number; noAmount: number; orphaned: number };
+  stages: Array<{ stageId: string; count: number; values: Record<string, number> }>;
+};
+
+export function fetchCrmSummary(workspaceId: string, pipeline?: string | null): Promise<CrmSummary> {
+  const query = pipeline ? `?pipeline=${encodeURIComponent(pipeline)}` : "";
+  return jsonRequest(`/api/crm/${encodeURIComponent(workspaceId)}/summary${query}`);
+}
+
+export type CrmLookupRow = { id: string; name: string; hint: string | null };
+
+export function fetchCrmLookup(
+  workspaceId: string,
+  kind: CrmCollectionKind,
+  q = "",
+  limit = 100,
+): Promise<CrmLookupRow[]> {
+  const params = new URLSearchParams({ kind, limit: String(limit) });
+  if (q.trim()) params.set("q", q.trim());
+  return jsonRequest<{ items: CrmLookupRow[] }>(
+    `/api/crm/${encodeURIComponent(workspaceId)}/lookup?${params.toString()}`,
+  ).then((body) => body.items);
+}
+
+export type CrmPublicRecord =
+  | ({ kind: "deal" } & CrmDealRow)
+  | ({ kind: "contact" } & CrmContactRow)
+  | ({ kind: "company" } & CrmCompanyRow);
+
+export type CrmRecordBundle = {
+  record: CrmPublicRecord;
+  relationships: CrmData;
+  participants: CrmDealParticipant[];
+};
+
 export async function fetchWorkspaceCrm(workspaceId: string, includeArchived = false): Promise<CrmData> {
   const res = await authFetch(
     `${API_URL}/api/crm/${encodeURIComponent(workspaceId)}/records${includeArchived ? "?archived=true" : ""}`,
@@ -98,6 +209,34 @@ export async function fetchWorkspaceCrm(workspaceId: string, includeArchived = f
   };
 }
 
+export async function fetchCrmRecord(
+  workspaceId: string,
+  entityId: string,
+): Promise<CrmRecordBundle | null> {
+  const res = await authFetch(
+    `${API_URL}/api/crm/${encodeURIComponent(workspaceId)}/records/${encodeURIComponent(entityId)}`,
+  );
+  if (res.status === 404) return null;
+  const body = (await res.json().catch(() => ({}))) as CrmRecordBundle & { error?: string };
+  if (!res.ok) throw new Error(body.error ?? `Failed to load CRM record (${res.status})`);
+  return body;
+}
+
+export function updateCrmRecord(
+  workspaceId: string,
+  entityId: string,
+  changes: Record<string, unknown>,
+): Promise<CrmRecordBundle> {
+  return jsonRequest(
+    `/api/crm/${encodeURIComponent(workspaceId)}/records/${encodeURIComponent(entityId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(changes),
+    },
+  );
+}
+
 export type CrmStageCategory = "open" | "won" | "lost";
 
 export type CrmPipelineStage = {
@@ -109,6 +248,7 @@ export type CrmPipelineStage = {
   position: number;
   probability: number;
   requiredFields: string[];
+  archivedAt?: string | null;
 };
 
 export type CrmPipeline = {
@@ -117,6 +257,7 @@ export type CrmPipeline = {
   isDefault: boolean;
   position: number;
   stages: CrmPipelineStage[];
+  archivedAt?: string | null;
 };
 
 export type CrmFieldType =
@@ -137,6 +278,7 @@ export type CrmFieldDefinition = {
   options: string[];
   isRequired: boolean;
   position: number;
+  archivedAt?: string | null;
 };
 
 export type CrmConfig = {
@@ -151,8 +293,8 @@ async function jsonRequest<T>(path: string, init?: RequestInit): Promise<T> {
   return body;
 }
 
-export function fetchCrmConfig(workspaceId: string): Promise<CrmConfig> {
-  return jsonRequest(`/api/crm/${encodeURIComponent(workspaceId)}/config`);
+export function fetchCrmConfig(workspaceId: string, includeArchived = false): Promise<CrmConfig> {
+  return jsonRequest(`/api/crm/${encodeURIComponent(workspaceId)}/config${includeArchived ? "?archived=true" : ""}`);
 }
 
 export async function createCrmRecord(
@@ -354,6 +496,44 @@ export function createCrmPipelineStage(
   );
 }
 
+export function updateCrmPipeline(
+  workspaceId: string,
+  pipelineId: string,
+  changes: { name?: string; isDefault?: boolean; archived?: boolean },
+): Promise<{ ok: true }> {
+  return jsonRequest(
+    `/api/crm/${encodeURIComponent(workspaceId)}/pipelines/${encodeURIComponent(pipelineId)}`,
+    { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(changes) },
+  );
+}
+
+export function reorderCrmPipelines(workspaceId: string, orderedIds: string[]): Promise<{ ok: true }> {
+  return jsonRequest(`/api/crm/${encodeURIComponent(workspaceId)}/pipelines/reorder`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ orderedIds }),
+  });
+}
+
+export function updateCrmPipelineStage(
+  workspaceId: string,
+  stageId: string,
+  changes: Partial<Pick<CrmPipelineStage, "name" | "category" | "probability" | "requiredFields">> & { archived?: boolean },
+): Promise<CrmPipelineStage | { ok: true }> {
+  return jsonRequest(`/api/crm/${encodeURIComponent(workspaceId)}/stages/${encodeURIComponent(stageId)}`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(changes),
+  });
+}
+
+export function reorderCrmPipelineStages(
+  workspaceId: string,
+  pipelineId: string,
+  orderedIds: string[],
+): Promise<{ ok: true }> {
+  return jsonRequest(
+    `/api/crm/${encodeURIComponent(workspaceId)}/pipelines/${encodeURIComponent(pipelineId)}/stages/reorder`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ orderedIds }) },
+  );
+}
+
 export function createCrmField(
   workspaceId: string,
   input: {
@@ -402,6 +582,34 @@ export async function archiveCrmField(
     `/api/crm/${encodeURIComponent(workspaceId)}/fields/${encodeURIComponent(fieldId)}`,
     { method: "DELETE" },
   );
+}
+
+export function updateCrmField(
+  workspaceId: string,
+  fieldId: string,
+  changes: { label?: string; options?: string[]; isRequired?: boolean },
+): Promise<CrmFieldDefinition> {
+  return jsonRequest(`/api/crm/${encodeURIComponent(workspaceId)}/fields/${encodeURIComponent(fieldId)}`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(changes),
+  });
+}
+
+export async function restoreCrmField(workspaceId: string, fieldId: string): Promise<void> {
+  await jsonRequest(
+    `/api/crm/${encodeURIComponent(workspaceId)}/fields/${encodeURIComponent(fieldId)}/restore`,
+    { method: "POST" },
+  );
+}
+
+export function reorderCrmFields(
+  workspaceId: string,
+  entityKind: "person" | "company" | "deal",
+  orderedIds: string[],
+): Promise<{ ok: true }> {
+  return jsonRequest(`/api/crm/${encodeURIComponent(workspaceId)}/fields/reorder`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ entityKind, orderedIds }),
+  });
 }
 
 export async function updateCrmCustomFields(
@@ -457,13 +665,14 @@ export async function addCrmDealParticipant(
   workspaceId: string,
   dealId: string,
   contactId: string,
+  options: { role?: string | null; isPrimary?: boolean } = {},
 ): Promise<void> {
   await jsonRequest(
     `/api/crm/${encodeURIComponent(workspaceId)}/records/${encodeURIComponent(dealId)}/participants`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ contactId }),
+      body: JSON.stringify({ contactId, ...options }),
     },
   );
 }

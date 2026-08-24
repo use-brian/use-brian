@@ -26,7 +26,7 @@ export type DefaultRuleTemplate = {
 // support and must not appear here. (Gmail stays a send/read connector but is
 // not an ingestion source — its poll producer + adapter were removed.) Do not
 // derive from OFFICIAL_CONNECTORS.
-export const INGEST_SOURCE_PROVIDERS = ['slack', 'github', 'calendar', 'fathom', 'whatsapp', 'email', 'imap', 'shopify'] as const // drift-sweep: intentionally-narrow:ingest-engine-only
+export const INGEST_SOURCE_PROVIDERS = ['slack', 'feishu', 'github', 'calendar', 'fathom', 'whatsapp', 'email', 'imap', 'shopify'] as const // drift-sweep: intentionally-narrow:ingest-engine-only
 export type IngestSourceProvider = typeof INGEST_SOURCE_PROVIDERS[number]
 
 export const DEFAULT_INGEST_RULES: Readonly<
@@ -65,6 +65,11 @@ export const DEFAULT_INGEST_RULES: Readonly<
       routing_schedule: '0 9 * * 1-5',
     },
   ],
+  // Feishu/Lark is default-drop. Receiving every group message requires the
+  // separately approved `im:message.group_msg` scope, and an observed group
+  // must also pass the integration's admin-owned ambient allowlist. Enabling
+  // one group writes its `channel_match` rule through Studio -> Events.
+  feishu: [],
   github: [
     {
       filter_type: 'event_type',

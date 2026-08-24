@@ -94,10 +94,10 @@ export const CHANNEL_CAPABILITIES: Record<ChannelType, ChannelCapability[]> = {
   // Microsoft Teams mirrors Slack: chat + broadcast + passive ingest
   // (docs/architecture/channels/msteams.md).
   msteams: ['chat', 'broadcast', 'ingest'],
-  // Feishu/Lark launches with addressed chat + proactive delivery. Passive
-  // ingest remains off until the elevated all-group-message scope has a
-  // tenant-validated consent and operator-toggle path.
-  feishu: ['chat', 'broadcast'],
+  // Feishu/Lark can passively ingest only observed groups with both the
+  // tenant's all-group-message permission and an admin allowlist entry. The
+  // capability is a global kill switch; the per-group gate remains default-off.
+  feishu: ['chat', 'broadcast', 'ingest'],
   // WeChat iLink bots are DMs-only chat — no groups, no broadcast surface,
   // no ingest substrate (docs/architecture/channels/wechat.md).
   wechat: ['chat'],

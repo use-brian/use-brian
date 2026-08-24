@@ -1,4 +1,4 @@
--- 452: widen `doc_notifications` to also hold a ROOM mention (a human
+-- 469: widen `doc_notifications` to also hold a ROOM mention (a human
 -- `@Jane Doe` tag in workspace chat), not only a page/comment mention.
 -- docs/plans/room-human-mentions.md (T-H3, D-H5).
 --

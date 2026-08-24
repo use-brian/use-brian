@@ -1046,6 +1046,8 @@ export interface ChannelHostHooks {
   slackWebhookIngestor?: import('./routes/slack.js').SlackWebhookIngestor
   /** Pipeline-C rules-engine ingest for Microsoft Teams channel traffic (closed). */
   msteamsWebhookIngestor?: import('./routes/msteams.js').MsTeamsWebhookIngestor
+  /** Shared Pipeline-C message-channel ingest for Feishu/Lark group traffic. */
+  feishuWebhookIngestor?: import('./routes/feishu.js').FeishuWebhookIngestor
   /** Universal channel-media intake for Slack pulled attachments. */
   slackIngestChannelMediaRef?: Parameters<typeof slackRoutes>[0]['ingestChannelMediaRef']
   /** Universal channel-media intake for Discord attachments. */
@@ -7664,6 +7666,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           linkCodeStore,
           deferredConfirmationStore,
           workflowEventDispatcher,
+          feishuWebhookIngestor: channelHosts.feishuWebhookIngestor,
           workerManager,
           connectorStore,
           mcpSettingsStore,

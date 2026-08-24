@@ -23,9 +23,16 @@ for (const entry of readdirSync(staticDir)) {
 }
 
 const build = computeSourceHash(root)
+const sourceDateEpoch = process.env.SOURCE_DATE_EPOCH
+const builtAt = sourceDateEpoch
+  ? new Date(Number(sourceDateEpoch) * 1_000)
+  : new Date()
+if (Number.isNaN(builtAt.getTime())) {
+  throw new Error('SOURCE_DATE_EPOCH must be Unix seconds')
+}
 writeFileSync(
   join(dist, 'build-info.json'),
-  `${JSON.stringify({ build, builtAt: new Date().toISOString() }, null, 2)}\n`,
+  `${JSON.stringify({ build, builtAt: builtAt.toISOString() }, null, 2)}\n`,
 )
 
 console.log(

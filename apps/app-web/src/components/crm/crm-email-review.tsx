@@ -282,6 +282,25 @@ export function CrmEmailReviewWorkspace({
     setOperation(null);
   }
 
+  if (items.length === 0) {
+    return (
+      <div data-email-empty-state className="grid h-full min-h-0 place-items-center bg-muted/10 p-6 text-center">
+        <div className="max-w-sm">
+          <span className="mx-auto grid size-11 place-items-center rounded-full bg-muted text-muted-foreground">
+            {loadError ? <X className="size-4" aria-hidden />
+              : loading ? <RefreshCw className="size-4 animate-spin" aria-hidden />
+                : <Check className="size-4" aria-hidden />}
+          </span>
+          <p className="mt-3 text-sm font-medium">
+            {loadError ? t.emailDraftsLoadFailed : loading ? t.emailDraftsLoading : t.emailDraftsEmpty}
+          </p>
+          {!loadError && !loading && <p className="mt-1 text-xs text-muted-foreground">{t.emailDraftsEmptyDescription}</p>}
+          {loadError && <Button size="xs" variant="ghost" className="mt-3" onClick={onReload}><RefreshCw aria-hidden />{t.retry}</Button>}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div ref={containerRef} className="flex h-full min-h-0 flex-col overflow-y-auto bg-muted/10 lg:flex-row lg:overflow-hidden">
       <aside
@@ -289,99 +308,8 @@ export function CrmEmailReviewWorkspace({
         data-email-context-rail
         className="flex min-h-[24rem] shrink-0 flex-col border-b border-border/70 bg-background lg:min-h-0 lg:min-w-60 lg:flex-1 lg:border-b-0 lg:border-r"
       >
-        <div className="flex items-start justify-between gap-3 border-b border-border/70 px-4 py-3">
-          <div className="min-w-0">
-            <h2 className="text-sm font-semibold">{t.emailDrafts}</h2>
-            <p className="mt-0.5 text-[11px] text-muted-foreground">
-              {format(t.emailDraftCount, { count: String(items.length) })}
-            </p>
-          </div>
-          <Button
-            size="icon-xs"
-            variant="ghost"
-            aria-label={t.refreshEmailDrafts}
-            disabled={loading}
-            onClick={onReload}
-          >
-            <RefreshCw className={cn(loading && "animate-spin")} aria-hidden />
-          </Button>
-        </div>
-
-        {dirty && (
-          <div className="border-b border-amber-500/20 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-800 dark:text-amber-200">
-            {t.finishDraftBeforeSwitching}
-          </div>
-        )}
-
-        <div className="min-h-0 flex-1 overflow-y-auto p-2 max-lg:max-h-48 lg:max-h-[45%]">
-          {loadError && items.length === 0 ? (
-            <div className="rounded-lg border border-destructive/25 bg-destructive/5 p-3 text-xs text-destructive">
-              <p>{t.emailDraftsLoadFailed}</p>
-              <Button size="xs" variant="ghost" className="mt-2" onClick={onReload}>
-                <RefreshCw aria-hidden /> {t.retry}
-              </Button>
-            </div>
-          ) : loading && items.length === 0 ? (
-            <p className="p-2 text-xs text-muted-foreground">{t.emailDraftsLoading}</p>
-          ) : items.length === 0 ? (
-            <div className="px-2 py-8 text-center">
-              <span className="mx-auto grid size-10 place-items-center rounded-full bg-muted text-muted-foreground">
-                <Check className="size-4" aria-hidden />
-              </span>
-              <p className="mt-3 text-xs font-medium">{t.emailDraftsEmpty}</p>
-              <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
-                {t.emailDraftsEmptyDescription}
-              </p>
-            </div>
-          ) : (
-            <ol className="space-y-1">
-              {items.map((item) => {
-                const itemPreview = parseToolPreview(item.approval.toolName, item.approval.arguments);
-                const itemEmail = itemPreview?.kind === "email_send" ? itemPreview.email : null;
-                const active = item.approval.id === row?.id;
-                const switchBlocked = dirty && !active;
-                return (
-                  <li key={item.approval.id}>
-                    <button
-                      type="button"
-                      disabled={switchBlocked}
-                      aria-pressed={active}
-                      title={switchBlocked ? t.finishDraftBeforeSwitching : undefined}
-                      onClick={() => onSelect(item.approval.id)}
-                      className={cn(
-                        "group w-full rounded-lg px-2.5 py-2.5 text-left transition-colors",
-                        active
-                          ? "bg-foreground text-background shadow-sm"
-                          : "hover:bg-muted",
-                        switchBlocked && "cursor-not-allowed opacity-45",
-                      )}
-                    >
-                      <div className="flex items-start gap-2">
-                        <Mail className={cn("mt-0.5 size-3.5 shrink-0", active ? "text-background/75" : "text-amber-600")} aria-hidden />
-                        <div className="min-w-0 flex-1">
-                          <div className="line-clamp-2 text-xs font-medium leading-snug">
-                            {itemEmail?.subject || t.reviewDraft}
-                          </div>
-                          <div className={cn("mt-1 truncate text-[11px]", active ? "text-background/65" : "text-muted-foreground")}>
-                            {item.contacts.map((contact) => contact.name).join(", ")}
-                          </div>
-                          <div className={cn("mt-1 flex items-center justify-between gap-2 text-[10px]", active ? "text-background/55" : "text-muted-foreground/80")}>
-                            <span>{format(t.draftRevision, { number: item.approval.approvalPayload.emailDraftRevision ?? 1 })}</span>
-                            <time>{new Date(item.approval.createdAt).toLocaleDateString()}</time>
-                          </div>
-                        </div>
-                        <ChevronRight className={cn("mt-1 size-3.5 shrink-0 opacity-0 transition-opacity group-hover:opacity-100", active && "opacity-100")} aria-hidden />
-                      </div>
-                    </button>
-                  </li>
-                );
-              })}
-            </ol>
-          )}
-        </div>
-
         {row && selected && (
-          <div className="min-h-0 border-t border-border/70 px-3 py-3 lg:flex-1 lg:overflow-y-auto">
+          <div data-email-crm-profile className="shrink-0 border-b border-border/70 px-3 py-3">
             <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{t.crmProfile}</div>
             <div className="mt-2 space-y-2">
               {selected.contacts.map((contact) => {
@@ -427,6 +355,77 @@ export function CrmEmailReviewWorkspace({
             )}
           </div>
         )}
+
+        <div className="flex items-start justify-between gap-3 border-b border-border/70 px-4 py-3">
+          <div className="min-w-0">
+            <h2 className="text-sm font-semibold">{t.emailDrafts}</h2>
+            <p className="mt-0.5 text-[11px] text-muted-foreground">
+              {format(t.emailDraftCount, { count: String(items.length) })}
+            </p>
+          </div>
+          <Button
+            size="icon-xs"
+            variant="ghost"
+            aria-label={t.refreshEmailDrafts}
+            disabled={loading}
+            onClick={onReload}
+          >
+            <RefreshCw className={cn(loading && "animate-spin")} aria-hidden />
+          </Button>
+        </div>
+
+        {dirty && (
+          <div className="border-b border-amber-500/20 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-800 dark:text-amber-200">
+            {t.finishDraftBeforeSwitching}
+          </div>
+        )}
+
+        <div data-email-draft-list className="min-h-0 flex-1 overflow-y-auto p-2 max-lg:max-h-48">
+          <ol className="space-y-1">
+              {items.map((item) => {
+                const itemPreview = parseToolPreview(item.approval.toolName, item.approval.arguments);
+                const itemEmail = itemPreview?.kind === "email_send" ? itemPreview.email : null;
+                const active = item.approval.id === row?.id;
+                const switchBlocked = dirty && !active;
+                return (
+                  <li key={item.approval.id}>
+                    <button
+                      type="button"
+                      disabled={switchBlocked}
+                      aria-pressed={active}
+                      title={switchBlocked ? t.finishDraftBeforeSwitching : undefined}
+                      onClick={() => onSelect(item.approval.id)}
+                      className={cn(
+                        "group w-full rounded-lg px-2.5 py-2.5 text-left transition-colors",
+                        active
+                          ? "bg-foreground text-background shadow-sm"
+                          : "hover:bg-muted",
+                        switchBlocked && "cursor-not-allowed opacity-45",
+                      )}
+                    >
+                      <div className="flex items-start gap-2">
+                        <Mail className={cn("mt-0.5 size-3.5 shrink-0", active ? "text-background/75" : "text-amber-600")} aria-hidden />
+                        <div className="min-w-0 flex-1">
+                          <div className="line-clamp-2 text-xs font-medium leading-snug">
+                            {itemEmail?.subject || t.reviewDraft}
+                          </div>
+                          <div className={cn("mt-1 truncate text-[11px]", active ? "text-background/65" : "text-muted-foreground")}>
+                            {item.contacts.map((contact) => contact.name).join(", ")}
+                          </div>
+                          <div className={cn("mt-1 flex items-center justify-between gap-2 text-[10px]", active ? "text-background/55" : "text-muted-foreground/80")}>
+                            <span>{format(t.draftRevision, { number: item.approval.approvalPayload.emailDraftRevision ?? 1 })}</span>
+                            <time>{new Date(item.approval.createdAt).toLocaleDateString()}</time>
+                          </div>
+                        </div>
+                        <ChevronRight className={cn("mt-1 size-3.5 shrink-0 opacity-0 transition-opacity group-hover:opacity-100", active && "opacity-100")} aria-hidden />
+                      </div>
+                    </button>
+                  </li>
+                );
+              })}
+          </ol>
+        </div>
+
       </aside>
 
       <main
@@ -556,7 +555,7 @@ export function CrmEmailReviewWorkspace({
                 {actionError && <p role="alert" className="mt-2 text-xs text-destructive">{actionError}</p>}
               </div>
 
-              <div className="shrink-0 border-t border-border/70 bg-background/95 p-3 backdrop-blur">
+              <div data-email-review-actions className="shrink-0 border-t border-border/70 bg-background/95 px-3 pt-3 pb-20 backdrop-blur">
                 {dirty && (
                   <div className="mb-2 flex items-center justify-between gap-2">
                     <p className="text-[10px] text-muted-foreground">{t.saveBeforeApprove}</p>

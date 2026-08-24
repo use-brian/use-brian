@@ -5,7 +5,7 @@
  * membership + drops self-mentions before a system-side bulk INSERT, and that
  * list/markRead/unreadCount run RLS-scoped to the recipient.
  *
- * [COMP:api/room-mention-store] below covers migration 452's room-mention
+ * [COMP:api/room-mention-store] below covers migration 469's room-mention
  * recorder/retraction: the additional room-clearance gate, the upsert that
  * makes the multi-assistant fan-out idempotent and re-surfaces a read row on
  * re-add (D-H6), and unread-only retraction.
@@ -258,7 +258,7 @@ describe('[COMP:api/doc-notifications-store] createDbDocNotificationsStore', () 
   })
 })
 
-// ── Room mentions (migration 452, docs/plans/room-human-mentions.md) ─────
+// ── Room mentions (migration 469, docs/plans/room-human-mentions.md) ─────
 
 describe('[COMP:api/room-mention-store] createDbDocNotificationsStore — room mentions', () => {
   const SESSION = '00000000-0000-0000-0000-0000000000d1'
@@ -359,7 +359,7 @@ describe('[COMP:api/room-mention-store] createDbDocNotificationsStore — room m
     })
 
     const insertSql = mockBareQuery.mock.calls[1][0] as string
-    // Targets the migration-452 partial unique index; re-adding a name whose
+    // Targets the migration-469 partial unique index; re-adding a name whose
     // row was read clears read_at instead of inserting a duplicate (D-H6).
     expect(insertSql).toContain(
       'ON CONFLICT (session_message_id, recipient_user_id) WHERE session_message_id IS NOT NULL',

@@ -62,6 +62,7 @@ import {
 } from '../db/channels-store.js'
 import { ensureSlackConnectorInstance } from '../ingest/slack-connector-instance.js'
 import { ensureMsTeamsConnectorInstance } from '../ingest/msteams-connector-instance.js'
+import { ensureFeishuConnectorInstance } from '../ingest/feishu-connector-instance.js'
 import { query, queryWithRLS } from '../db/client.js'
 import { providerChannelIdFromSession } from '../db/sessions.js'
 
@@ -86,6 +87,7 @@ export const channelConfigSchema = z.object({
   userAccessMode: z.enum(['allow_all', 'allowlist', 'blocklist', 'group_members']).optional(),
   allowedUserIds: z.array(z.string().max(50)).max(100).optional(),
   allowGuestConnectorTools: z.boolean().optional(),
+  allowTrustedGuestFullAccess: z.boolean().optional(),
   blockedUserIds: z.array(z.string().max(50)).max(100).optional(),
 }).strict()
 
@@ -842,6 +844,23 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
     }
 
     const merged = { ...integration.config, ...patch }
+    const changesTrustedGuestAuthority =
+      parsed.data.allowTrustedGuestFullAccess !== undefined
+      || (
+        (integration.config.allowTrustedGuestFullAccess === true
+          || merged.allowTrustedGuestFullAccess === true)
+        && (
+          parsed.data.allowedUserIds !== undefined
+          || parsed.data.userAccessMode !== undefined
+        )
+      )
+    if (changesTrustedGuestAuthority && role !== 'owner' && role !== 'admin') {
+      res.status(403).json({
+        error: 'trusted_guest_access_requires_admin',
+        detail: 'Only the workspace owner or an admin can change trusted guest full access.',
+      })
+      return
+    }
     try {
       const updated = await opts.integrationStore.updateConfig({
         actingUserId: userId,
@@ -1263,7 +1282,7 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
     }
 
     try {
-      await opts.integrationStore.upsert({
+      const integration = await opts.integrationStore.upsert({
         channelId: provisioned.channelId,
         channelType: 'feishu',
         teamId: parsed.data.appId,
@@ -1277,6 +1296,16 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
         },
         actingUserId: userId,
       })
+      // Connector-instance provisioning is non-fatal for channel setup. The
+      // passive-ingest dispatcher retries lazily for pre-migration installs.
+      try {
+        await ensureFeishuConnectorInstance({
+          channelIntegrationId: integration.id,
+          actingUserId: userId,
+        })
+      } catch (error) {
+        console.error('[channels] feishu CI provisioning failed:', error)
+      }
     } catch (error) {
       console.error('[channels] feishu integration upsert failed:', error)
       res.status(500).json({ error: 'Failed to save integration' })

@@ -24,6 +24,7 @@ import Link from "next/link";
 import {
   Brain,
   Archive,
+  ArrowLeft,
   Building2,
   Calendar,
   CircleDashed,
@@ -32,6 +33,7 @@ import {
   Globe,
   Handshake,
   Mail,
+  Percent,
   Phone,
   Tags,
   UserRound,
@@ -49,17 +51,26 @@ import {
   type CrmContactRow,
   type CrmDealRow,
   type CrmData,
+  type CrmDealParticipant,
 } from "@/lib/api/crm";
+import { loadWorkspaceRoster } from "@/lib/api/workspace-roster";
+import type { FeedWorkspaceMember } from "@/lib/api/feed";
+import {
+  memberDisplayName,
+} from "@/components/brain/property-edit";
 import { formatAmount, formatCurrencyTotals, resolveDealPipelineStage } from "@/lib/crm-view";
 import {
   DateProperty,
   PageTitle,
+  PersonProperty,
   PropertyRow,
   StaticProperty,
   TagsProperty,
   TextProperty,
+  type PersonPropertyOption,
 } from "@/components/brain/property-field";
 import { AmountCell, CompanyCell, PipelineStageCell, type CellCommit } from "./crm-cells";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 import { ResizablePeek } from "@/components/operator/resizable-peek";
 import { CrmActivityTimeline } from "./crm-activity";
 import { CrmCustomFields } from "./crm-custom-fields";
@@ -74,9 +85,15 @@ export type CrmRecordRef =
 export type RecordCommits = {
   /** Rename any record (`display_name` through the shared adjust path). */
   rename: (ref: CrmRecordRef) => CellCommit<string>;
+  owner: (ref: CrmRecordRef) => CellCommit<string | null>;
   dealPipelineStage: (row: CrmDealRow) => CellCommit<string>;
   dealAmount: (row: CrmDealRow) => CellCommit<number | null>;
   dealClose: (row: CrmDealRow) => CellCommit<string | null>;
+  dealCompany: (row: CrmDealRow) => CellCommit<string | null>;
+  dealContact: (row: CrmDealRow) => CellCommit<string | null>;
+  dealCurrency: (row: CrmDealRow) => CellCommit<string>;
+  dealSource: (row: CrmDealRow) => CellCommit<string | null>;
+  dealWinLossReason: (row: CrmDealRow) => CellCommit<string | null>;
   contactEmail: (row: CrmContactRow) => CellCommit<string | null>;
   contactPhone: (row: CrmContactRow) => CellCommit<string | null>;
   contactCompany: (row: CrmContactRow) => CellCommit<string | null>;
@@ -102,6 +119,7 @@ export function CrmRecordDetail({
   onReviewEmail,
   onChanged,
   onArchive,
+  initialParticipants,
 }: {
   workspaceId: string;
   record: CrmRecordRef;
@@ -114,8 +132,45 @@ export function CrmRecordDetail({
   onReviewEmail: (approvalId: string) => void;
   onChanged: () => void;
   onArchive: (ref: CrmRecordRef) => void;
+  initialParticipants: CrmDealParticipant[];
 }) {
-  const t = useT().crmPage;
+  const dictionary = useT();
+  const t = dictionary.crmPage;
+  const [roster, setRoster] = useState<FeedWorkspaceMember[] | null>(null);
+  const [rosterLoading, setRosterLoading] = useState(true);
+  useEffect(() => {
+    let cancelled = false;
+    setRosterLoading(true);
+    loadWorkspaceRoster(workspaceId)
+      .then((rows) => {
+        if (!cancelled) setRoster(rows);
+      })
+      .catch(() => {
+        if (!cancelled) setRoster([]);
+      })
+      .finally(() => {
+        if (!cancelled) setRosterLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [workspaceId]);
+  const ownerId = record.row.ownerId ?? null;
+  const owner = ownerId && roster
+    ? roster.find((member) => member.userId === ownerId) ?? null
+    : null;
+  const memberRoleLabels = dictionary.brainPage.detailDrawer.memberRole as Record<string, string>;
+  const ownerOptions: PersonPropertyOption[] = (roster ?? []).map((member) => ({
+    id: member.userId,
+    name: memberDisplayName(member) ?? t.r2.memberUnknown,
+    email: member.email,
+    avatarUrl: member.avatarUrl,
+    roleLabel: memberRoleLabels[member.role] ?? null,
+  }));
+  const ownerValue = owner ? {
+    name: memberDisplayName(owner) ?? t.r2.memberUnknown,
+    email: owner.email,
+    avatarUrl: owner.avatarUrl,
+    roleLabel: memberRoleLabels[owner.role] ?? null,
+  } : null;
 
   // ── From the brain — the entity rollup (row id IS the entity id) ──────
   const [rollup, setRollup] = useState<EntityRollup | null>(null);
@@ -144,9 +199,17 @@ export function CrmRecordDetail({
   return (
     // A floating peek panel, NOT a flex sibling — it overlays the content
     // pane so opening a record never reflows the table/board underneath.
-    <ResizablePeek storageKey="operator:peek-width" ariaLabel={record.row.name} onDismiss={onClose}>
+    <ResizablePeek responsiveFullWidth storageKey="operator:peek-width" ariaLabel={record.row.name} onDismiss={onClose}>
       {/* Slim action toolbar — the Brain entry page's top-row shape. */}
       <div className="flex items-center justify-end gap-1 border-b border-border/60 px-3 py-2">
+        <button
+          type="button"
+          onClick={onClose}
+          className="mr-auto inline-flex items-center gap-1.5 rounded-md px-2 py-1.5 text-sm font-medium text-muted-foreground hover:bg-accent/60 hover:text-foreground lg:hidden"
+        >
+          <ArrowLeft className="size-4" aria-hidden />
+          {t.r2.returnToCrm}
+        </button>
         <button
           type="button"
           aria-label={t.r2.archive}
@@ -167,7 +230,7 @@ export function CrmRecordDetail({
           type="button"
           aria-label={t.closeDetail}
           onClick={onClose}
-          className="rounded-md p-1.5 text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+          className="hidden rounded-md p-1.5 text-muted-foreground hover:bg-accent/60 hover:text-foreground lg:inline-flex"
         >
           <X className="size-4" aria-hidden />
         </button>
@@ -184,6 +247,17 @@ export function CrmRecordDetail({
 
         {/* Typed fields — the entry page's field block. */}
         <div className="mt-3 flex flex-col">
+          <PersonProperty
+            icon={<UserRound />}
+            label={t.r2.owner}
+            value={ownerValue}
+            loading={rosterLoading}
+            unknownLabel={ownerId && !owner ? t.r2.memberUnavailable : null}
+            options={ownerOptions}
+            currentId={ownerId}
+            clearLabel={t.r2.unassigned}
+            onCommit={commits.owner(record)}
+          />
           {record.kind === "deal" && (
             <DealFields
               row={record.row}
@@ -225,6 +299,8 @@ export function CrmRecordDetail({
             workspaceId={workspaceId}
             dealId={record.row.id}
             contacts={data.contacts}
+            initialParticipants={initialParticipants}
+            onChanged={onChanged}
           />
         )}
 
@@ -287,12 +363,6 @@ function DealFields({
     ?? config.pipelines.find((candidate) => candidate.isDefault)
     ?? config.pipelines[0];
   const pipelineStage = pipeline ? resolveDealPipelineStage(row, pipeline) : null;
-  const company = row.companyId
-    ? data.companies.find((c) => c.id === row.companyId)
-    : null;
-  const contact = row.contactId
-    ? data.contacts.find((c) => c.id === row.contactId)
-    : null;
   return (
     <>
       {pipeline && (
@@ -319,25 +389,48 @@ function DealFields({
           commits.dealClose(row)(next.length > 0 ? next : null)
         }
       />
-      {company && (
-        <StaticProperty
-          icon={<Building2 />}
-          label={tc.companyLabel}
-        >
-          <RecordLink
-            name={company.name}
-            onClick={() => onOpenRecord({ kind: "company", row: company })}
-          />
-        </StaticProperty>
-      )}
-      {contact && (
-        <StaticProperty icon={<UserRound />} label={tc.contactLabel}>
-          <RecordLink
-            name={contact.name}
-            onClick={() => onOpenRecord({ kind: "contact", row: contact })}
-          />
-        </StaticProperty>
-      )}
+      <ReferenceProperty
+        icon={<Building2 />}
+        label={tc.companyLabel}
+        value={row.companyId}
+        rows={data.companies}
+        clearLabel={tc.r2.noCompany}
+        onCommit={commits.dealCompany(row)}
+        onOpen={(company) => onOpenRecord({ kind: "company", row: company })}
+      />
+      <ReferenceProperty
+        icon={<UserRound />}
+        label={tc.contactLabel}
+        value={row.contactId}
+        rows={data.contacts}
+        clearLabel={tc.r2.noContact}
+        onCommit={commits.dealContact(row)}
+        onOpen={(contact) => onOpenRecord({ kind: "contact", row: contact })}
+      />
+      <TextProperty
+        icon={<DollarSign />}
+        label={tc.r2.currency}
+        value={row.currencyCode ?? "USD"}
+        onCommit={(next) => commits.dealCurrency(row)(next.trim().toUpperCase())}
+        maxLength={3}
+      />
+      <StaticProperty icon={<Percent />} label={tc.r2.probability}>
+        {`${row.probability ?? pipelineStage?.probability ?? 0}%`}
+      </StaticProperty>
+      <TextProperty
+        icon={<CircleDashed />}
+        label={tc.r2.source}
+        value={row.source ?? ""}
+        onCommit={(next) => commits.dealSource(row)(next.trim() || null)}
+        maxLength={256}
+      />
+      <TextProperty
+        icon={<CircleDashed />}
+        label={tc.r2.winLossReason}
+        value={row.winLossReason ?? ""}
+        onCommit={(next) => commits.dealWinLossReason(row)(next.trim() || null)}
+        maxLength={1_000}
+      />
     </>
   );
 }
@@ -427,6 +520,69 @@ function CompanyFields({
         onCommit={commits.companyTags(row)}
       />
     </>
+  );
+}
+
+function ReferenceProperty<T extends CrmContactRow | CrmCompanyRow>({
+  icon,
+  label,
+  value,
+  rows,
+  clearLabel,
+  onCommit,
+  onOpen,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: string | null;
+  rows: T[];
+  clearLabel: string;
+  onCommit: CellCommit<string | null>;
+  onOpen: (row: T) => void;
+}) {
+  const t = useT().crmPage;
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const selected = value ? rows.find((row) => row.id === value) ?? null : null;
+  const none = "__none__";
+  return (
+    <PropertyRow icon={icon} label={label} error={error}>
+      <div className="flex min-h-9 min-w-0 items-center gap-1">
+        <SearchableSelect
+          value={value ?? none}
+          onValueChange={(next) => {
+            const nextId = next === none ? null : next;
+            if (nextId === value) return;
+            setBusy(true);
+            setError(null);
+            void onCommit(nextId).then((result) => {
+              setBusy(false);
+              if (!result.ok) setError(result.error ?? t.r2.updateFailed);
+            });
+          }}
+          items={[
+            { value: none, label: clearLabel },
+            ...rows.map((row) => ({ value: row.id, label: row.name })),
+          ]}
+          searchPlaceholder={t.r2.searchRecords}
+          emptyMessage={t.r2.noMatchingRecords}
+          disabled={busy}
+          className="h-8 min-w-0 flex-1 border-0 bg-transparent px-1.5 shadow-none"
+          aria-label={label}
+        />
+        {selected ? (
+          <button
+            type="button"
+            aria-label={t.openRecord}
+            title={t.openRecord}
+            onClick={() => onOpen(selected)}
+            className="shrink-0 rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+          >
+            <ExternalLink className="size-3.5" aria-hidden />
+          </button>
+        ) : null}
+      </div>
+    </PropertyRow>
   );
 }
 

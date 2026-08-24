@@ -45,6 +45,7 @@ import { createFeishuApi } from '../feishu/client.js'
 import { claimChannelEvent } from '../db/channel-event-dedup.js'
 import {
   type ChannelIntegrationConfig,
+  type ChannelIntegrationWithCredentials,
   type FeishuCredentials,
 } from '../db/channel-integrations.js'
 import { getChannelForWebhook, resolveRoutingForSurface } from '../db/channels-store.js'
@@ -67,6 +68,28 @@ import { resolveChatArchiveInstanceId } from '../chat-archive/live-writer.js'
 import type { DeferredConfirmationStore } from '../db/deferred-confirmation-store.js'
 import { tryResolveSchedulerConfirmation } from '../scheduling/confirmation-registry.js'
 import { dispatchReactionFeedback } from '../feedback/reaction-dispatch.js'
+import { ensureFeishuConnectorInstance } from '../ingest/feishu-connector-instance.js'
+
+export type FeishuWebhookIngestInput = {
+  workspaceId: string
+  userId: string
+  assistantId: string | null
+  connectorInstanceId: string
+  appId: string
+  chatId: string
+  messageId: string
+  threadId: string | null
+  senderId: string
+  senderName: string | null
+  text: string
+  mentionIds: string[]
+  createTime: number
+  isBot: boolean
+}
+
+export type FeishuWebhookIngestor = {
+  ingest(input: FeishuWebhookIngestInput): Promise<{ episodeId: string } | null>
+}
 
 export type FeishuRouteOptions = Omit<DiscordRouteOptions, 'ingestChannelMediaRef'> & {
   filesApi?: import('@use-brian/core').FilesApi
@@ -79,6 +102,8 @@ export type FeishuRouteOptions = Omit<DiscordRouteOptions, 'ingestChannelMediaRe
   linkCodeStore?: LinkCodeStore
   deferredConfirmationStore?: DeferredConfirmationStore
   workflowEventDispatcher?: WorkflowEventDispatcher
+  /** Hosted Pipeline-C implementation; absent in OSS leaves chat unaffected. */
+  feishuWebhookIngestor?: FeishuWebhookIngestor
   archiveMedia?: ChatArchiveLiveMedia
   voiceTranscription?: {
     enabled: boolean
@@ -194,10 +219,82 @@ function workflowEventMessage(value: unknown): FeishuNormalizedMessage | null {
   return message as FeishuNormalizedMessage
 }
 
+/**
+ * Feed one non-addressed, explicitly enabled Feishu group message into the
+ * shared Slack/Feishu Pipeline-C ingestor. Provider admission stays here; the
+ * injected implementation owns no Feishu policy and cannot bypass the admin
+ * allowlist.
+ */
+async function dispatchFeishuIngest(params: {
+  options: FeishuRouteOptions
+  channel: NonNullable<Awaited<ReturnType<typeof getChannelForWebhook>>>
+  integration: ChannelIntegrationWithCredentials
+  eventMessage: FeishuNormalizedMessage
+}): Promise<void> {
+  const { options, channel, integration, eventMessage } = params
+  const ingestor = options.feishuWebhookIngestor
+  if (!ingestor || eventMessage.chatType !== 'group') return
+  const isBot = eventMessage.senderIsBot === true || eventMessage.senderType === 'bot'
+  if (isBot || !eventMessage.content.trim()) return
+  if (!channel.enabledCapabilities.includes('ingest')) return
+
+  const config = (integration.config ?? {}) as ChannelIntegrationConfig
+  // A message that starts a live turn already reaches memory through Pipeline
+  // A. Passive ingest covers only the exchange between addressed turns.
+  const interactiveEnabled = channel.enabledCapabilities.includes('chat')
+  const addressed = interactiveEnabled
+    && (!(config.requireMention ?? true) || eventMessage.mentionedBot)
+
+  // Resolve/provision before the allowlist check so a pre-feature Feishu
+  // integration acquires its default-off connector instance on the next group
+  // event and can appear in Studio. Provisioning alone never admits content.
+  const routing = await resolveRoutingForSurface(channel.id, eventMessage.chatId)
+  if (!routing) return
+  const assistant = await findAssistantById(routing.assistantId)
+  if (!assistant) return
+  const ownerId = await billingPartyForAssistant({
+    id: assistant.id,
+    ownerUserId: assistant.ownerUserId ?? null,
+    workspaceId: assistant.workspaceId ?? null,
+  })
+
+  let connectorInstanceId = integration.connectorInstanceId
+  if (!connectorInstanceId) {
+    connectorInstanceId = await ensureFeishuConnectorInstance({
+      channelIntegrationId: integration.id,
+      actingUserId: ownerId,
+    })
+  }
+  if (addressed || !(config.ambientIngestChatIds ?? []).includes(eventMessage.chatId)) return
+
+  const credentials = integration.credentials as FeishuCredentials
+  const mentionIds = eventMessage.mentions
+    .map((mention) => mention.openId ?? mention.userId ?? mention.key)
+    .filter((id): id is string => typeof id === 'string' && id.length > 0)
+
+  await ingestor.ingest({
+    workspaceId: channel.workspaceId,
+    userId: ownerId,
+    assistantId: assistant.id,
+    connectorInstanceId,
+    appId: credentials.app_id,
+    chatId: eventMessage.chatId,
+    messageId: eventMessage.messageId,
+    threadId: eventMessage.threadId ?? eventMessage.rootId ?? null,
+    senderId: eventMessage.senderId,
+    senderName: eventMessage.senderName ?? null,
+    text: eventMessage.content,
+    mentionIds,
+    createTime: eventMessage.createTime,
+    isBot,
+  })
+}
+
 async function persistFeishuSeenChat(
   store: FeishuRouteOptions['integrationStore'],
   integrationId: string,
   chatId: string,
+  chatType: 'p2p' | 'group',
 ): Promise<void> {
   await store.mergeConfigSystem(integrationId, (current) => {
     const seen = current.seenChats ?? []
@@ -211,6 +308,7 @@ async function persistFeishuSeenChat(
           {
             chatId,
             chatTitle: null,
+            chatType,
             isForum: false,
             topics: [],
             lastSeenAt: now,
@@ -218,13 +316,16 @@ async function persistFeishuSeenChat(
         ],
       }
     }
-    if (Date.now() - Date.parse(existing.lastSeenAt) <= SEEN_CHAT_STALE_MS) {
+    if (
+      existing.chatType === chatType
+      && Date.now() - Date.parse(existing.lastSeenAt) <= SEEN_CHAT_STALE_MS
+    ) {
       return current
     }
     return {
       ...current,
       seenChats: seen.map((chat) =>
-        chat.chatId === chatId ? { ...chat, lastSeenAt: now } : chat,
+        chat.chatId === chatId ? { ...chat, chatType, lastSeenAt: now } : chat,
       ),
     }
   })
@@ -473,6 +574,7 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
       options.integrationStore,
       integration.id,
       eventMessage.chatId,
+      eventMessage.chatType,
     ).catch((error) => {
       console.error('[feishu] seen-chat observation failed:', error)
     })
@@ -672,6 +774,16 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
           },
         }).catch((error) => {
           console.error('[feishu] workflow event dispatch failed:', error)
+        })
+      }
+      if (options.feishuWebhookIngestor) {
+        await dispatchFeishuIngest({
+          options,
+          channel,
+          integration,
+          eventMessage,
+        }).catch((error) => {
+          console.error('[feishu] passive ingest dispatch failed:', error)
         })
       }
     }

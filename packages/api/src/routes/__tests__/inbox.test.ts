@@ -46,7 +46,7 @@ function mentionRow(over: Record<string, unknown> = {}) {
   }
 }
 
-// Room mention (migration 452, PH2 of docs/plans/room-human-mentions.md) —
+// Room mention (migration 469, PH2 of docs/plans/room-human-mentions.md) —
 // the route is store-shape-agnostic, so these exercise that a room_mention
 // row rides the same merged payload + read path as a page mention.
 function roomMentionRow(over: Record<string, unknown> = {}) {

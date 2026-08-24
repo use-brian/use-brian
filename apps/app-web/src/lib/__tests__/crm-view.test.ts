@@ -10,17 +10,24 @@ import type {
   CrmPipeline,
   CrmFieldDefinition,
 } from "@/lib/api/crm";
+import { crmCollectionSearch } from "@/lib/api/crm";
 import {
+  appendCrmPage,
   applyContactFilters,
   applyDealFilters,
   companyStats,
+  crmColumnRegistry,
+  crmPageQuery,
   crmQuickCounts,
+  crmSectionCounts,
+  crmUsesBoardPages,
   crmViewFromSearch,
   formatAmount,
   groupDealsByPipelineStage,
   groupRowsByCustomField,
   localDateStr,
   matchesDealQuickFilter,
+  normalizeCrmColumns,
   searchFromCrmView,
   sectionForQuickFilter,
   sortDeals,
@@ -156,6 +163,20 @@ describe("[COMP:app-web/crm-view] CRM view logic", () => {
     expect(searchFromCrmView(view)).toContain("review=email");
     expect(searchFromCrmView(view)).toContain("draft=approval-2");
     expect(crmViewFromSearch("draft=orphaned").draft).toBeNull();
+  });
+
+  it("round-trips owner state and applies the same owner filter to every section", () => {
+    const view = crmViewFromSearch("owner=user-1,none&section=contacts");
+    expect(view.owner).toEqual(["user-1", "none"]);
+    expect(searchFromCrmView(view)).toContain("owner=user-1%2Cnone");
+    expect(applyDealFilters([
+      deal({ id: "mine", ownerId: "user-1" }),
+      deal({ id: "other", ownerId: "user-2" }),
+    ], { ...DEFAULT_CRM_VIEW, owner: ["user-1"] }, new Map(), NOW).map((row) => row.id)).toEqual(["mine"]);
+    expect(applyContactFilters([
+      contact({ id: "mine", ownerId: "user-1" }),
+      contact({ id: "empty", ownerId: null }),
+    ], { ...DEFAULT_CRM_VIEW, owner: ["none"] }).map((row) => row.id)).toEqual(["empty"]);
   });
 
   it("deal filtering: closed fold by default, quick filters pick their own slice", () => {
@@ -364,6 +385,90 @@ describe("[COMP:app-web/crm-surface] CRM surface state contract", () => {
     expect(crmViewFromSearch("filter=overdue").section).toBe("deals");
     expect(crmViewFromSearch("filter=orphaned").section).toBe("contacts");
     expect(sectionForQuickFilter("overdue")).toBe("deals");
+  });
+});
+
+describe("[COMP:app-web/crm-collection] paged collection state", () => {
+  const customField: CrmFieldDefinition = {
+    id: "field-1", entityKind: "deal", fieldKey: "work_type", label: "Work type",
+    fieldType: "single_select", options: ["Services", "SaaS"], isRequired: false, position: 0,
+  };
+
+  it("round-trips personal column order while keeping name pinned", () => {
+    const state = {
+      ...DEFAULT_CRM_VIEW,
+      view: "table" as const,
+      columns: ["name", "cf:work_type", "amount"],
+      direction: "asc" as const,
+    };
+    const decoded = crmViewFromSearch(searchFromCrmView(state));
+    expect(decoded.columns).toEqual(["name", "cf:work_type", "amount"]);
+    expect(decoded.direction).toBe("asc");
+    expect(normalizeCrmColumns("deals", [customField], ["amount", "name", "amount", "missing", "cf:work_type"]))
+      .toEqual(["name", "amount", "cf:work_type"]);
+    expect(crmColumnRegistry("deals", [customField]).find((column) => column.key === "name")?.pinned).toBe(true);
+  });
+
+  it("resets query authority through one serialized server request", () => {
+    const query = crmPageQuery({
+      ...DEFAULT_CRM_VIEW,
+      section: "deals",
+      pipeline: "pipeline-sales",
+      stages: ["stage-qualified"],
+      company: ["co1"],
+      owner: ["user-1", "none"],
+      custom: { work_type: ["SaaS"] },
+      q: "fictional",
+      sort: "amount",
+      direction: "asc",
+    });
+    const params = new URLSearchParams(crmCollectionSearch(query));
+    expect(params.get("kind")).toBe("deal");
+    expect(params.getAll("stage")).toEqual(["stage-qualified"]);
+    expect(params.getAll("owner")).toEqual(["user-1", "none"]);
+    expect(params.getAll("cf.work_type")).toEqual(["SaaS"]);
+    expect(params.get("direction")).toBe("asc");
+    expect(params.get("q")).toBe("fictional");
+  });
+
+  it("appends a cursor page without duplicating rows already loaded", () => {
+    const first = [deal({ id: "d1" }), deal({ id: "d2", name: "Old" })];
+    const next = [deal({ id: "d2", name: "Updated" }), deal({ id: "d3" })];
+    expect(appendCrmPage(first, next).map((row) => [row.id, row.name])).toEqual([
+      ["d1", "Deal - Acme"], ["d2", "Updated"], ["d3", "Deal - Acme"],
+    ]);
+  });
+
+  it("takes section counts from the server summary rather than loaded-page length", () => {
+    expect(crmSectionCounts({
+      totals: { deals: 151, contacts: 87, companies: 42 },
+      attention: { overdue: 3, stale: 4, noAmount: 5, orphaned: 6 },
+      stages: [],
+    })).toEqual({ deals: 151, contacts: 87, companies: 42 });
+  });
+
+  it("builds independent board-stage queries instead of a loaded-page grouping contract", () => {
+    const base = crmPageQuery({
+      ...DEFAULT_CRM_VIEW,
+      pipeline: "pipeline-sales",
+      owner: ["user-1"],
+    }, "", ["stage-lead"]);
+    const lead = new URLSearchParams(crmCollectionSearch({ ...base, stage: ["stage-lead"] }));
+    const qualified = new URLSearchParams(crmCollectionSearch({ ...base, stage: ["stage-qualified"] }));
+    expect(lead.getAll("stage")).toEqual(["stage-lead"]);
+    expect(qualified.getAll("stage")).toEqual(["stage-qualified"]);
+    expect(lead.getAll("owner")).toEqual(qualified.getAll("owner"));
+  });
+});
+
+describe("[COMP:app-web/crm-responsive] isolated collection presentation", () => {
+  it("needs configuration only for a deal board with independent stage pages", () => {
+    expect(crmUsesBoardPages(DEFAULT_CRM_VIEW, true)).toBe(true);
+    expect(crmUsesBoardPages(DEFAULT_CRM_VIEW, false)).toBe(false);
+    expect(crmUsesBoardPages({ ...DEFAULT_CRM_VIEW, view: "table" }, false)).toBe(false);
+    expect(crmUsesBoardPages({ ...DEFAULT_CRM_VIEW, section: "contacts" }, false)).toBe(false);
+    expect(crmUsesBoardPages({ ...DEFAULT_CRM_VIEW, section: "companies" }, false)).toBe(false);
+    expect(crmUsesBoardPages({ ...DEFAULT_CRM_VIEW, group: "cf:work_type" }, true)).toBe(false);
   });
 });
 

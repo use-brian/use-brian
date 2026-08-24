@@ -241,6 +241,7 @@ vi.mock('../../db/channel-user-store.js', async () => {
       user: { id: 'owner_1' },
       isIdentified: true,
     })),
+    ensureTrustedChannelWorkspaceMembership: vi.fn(async () => {}),
     fetchTelegramProfile: vi.fn(async () => null),
   }
 })
@@ -286,6 +287,7 @@ const mockResolveTelegramRouting = vi.mocked(resolveTelegramRoutingForSurface)
 
 function makeIntegrationStore(
   config: Record<string, unknown> = { requireMention: true },
+  pinTrustedUsername = true,
 ) {
   return {
     getByChannelForWebhook: vi.fn(async () => ({
@@ -302,6 +304,7 @@ function makeIntegrationStore(
     })),
     touchLastEventAt: vi.fn(async () => undefined),
     setBotUsername: vi.fn(async () => undefined),
+    pinTrustedTelegramUsernameSystem: vi.fn(async () => pinTrustedUsername),
     mergeConfigSystem: vi.fn(async () => undefined),
   }
 }
@@ -1305,6 +1308,8 @@ describe('[COMP:api/telegram-byo-route] allowlisted Telegram guests', () => {
     linked: { userId: string; assistantId: string | null } | null = null,
     allowGuestConnectorTools = false,
     userAccessMode: 'allowlist' | 'allow_all' = 'allowlist',
+    allowTrustedGuestFullAccess = false,
+    pinTrustedUsername = true,
   ) {
     return createTestApp(
       '/webhook/telegram-byo',
@@ -1318,7 +1323,8 @@ describe('[COMP:api/telegram-byo-route] allowlisted Telegram guests', () => {
           userAccessMode,
           allowedUserIds,
           allowGuestConnectorTools,
-        }) as never,
+          allowTrustedGuestFullAccess,
+        }, pinTrustedUsername) as never,
         linkedAccountStore: makeLinkedAccountStore(linked) as never,
         channelUserStore: channelUserStoreStub as never,
         capabilityStore: {} as never,
@@ -1411,6 +1417,154 @@ describe('[COMP:api/telegram-byo-route] allowlisted Telegram guests', () => {
       externalGuest: true,
       externalGuestConnectorTools: true,
     })
+  })
+
+  it('provisions a numeric allowlist match as a full workspace member when explicitly enabled', async () => {
+    const {
+      ensureTrustedChannelWorkspaceMembership,
+      resolveChannelUser,
+    } = await import('../../db/channel-user-store.js')
+    const { findAssistantById } = await import('../../db/users.js')
+    vi.mocked(ensureTrustedChannelWorkspaceMembership).mockClear()
+    vi.mocked(findAssistantById).mockResolvedValueOnce({
+      id: 'assistant_1',
+      name: 'Test Assistant',
+      ownerUserId: 'owner_1',
+      workspaceId: 'workspace_1',
+      defaultModelAlias: 'gemini-flash',
+      systemPrompt: null,
+      clearance: 'confidential',
+      kind: 'standard',
+    } as never)
+    vi.mocked(resolveChannelUser).mockResolvedValueOnce({
+      user: { id: 'shadow_trusted_member' } as never,
+      isIdentified: false,
+    })
+
+    const app = makeGuestApp(['42'], null, false, 'allowlist', true)
+    await postUpdate(app, buildPrivateDm(42, 'search the web'))
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    expect(ensureTrustedChannelWorkspaceMembership).toHaveBeenCalledWith({
+      integrationId: 'integ_1',
+      workspaceId: 'workspace_1',
+      userId: 'shadow_trusted_member',
+      provider: 'telegram',
+      providerUserId: '42',
+    })
+    expect(pipelineCalls).toHaveLength(1)
+    expect(pipelineCalls[0]).toMatchObject({
+      userId: 'shadow_trusted_member',
+      isIdentified: true,
+      externalGuest: false,
+      externalGuestConnectorTools: false,
+    })
+  })
+
+  it('pins a username allowlist match and provisions the sender as a full workspace member', async () => {
+    const {
+      ensureTrustedChannelWorkspaceMembership,
+      resolveChannelUser,
+    } = await import('../../db/channel-user-store.js')
+    const { findAssistantById } = await import('../../db/users.js')
+    vi.mocked(ensureTrustedChannelWorkspaceMembership).mockClear()
+    vi.mocked(findAssistantById).mockResolvedValueOnce({
+      id: 'assistant_1',
+      name: 'Test Assistant',
+      ownerUserId: 'owner_1',
+      workspaceId: 'workspace_1',
+      defaultModelAlias: 'gemini-flash',
+      systemPrompt: null,
+      clearance: 'confidential',
+      kind: 'standard',
+    } as never)
+    vi.mocked(resolveChannelUser).mockResolvedValueOnce({
+      user: { id: 'shadow_handle_guest' } as never,
+      isIdentified: false,
+    })
+
+    const app = makeGuestApp(['@friend'], null, false, 'allowlist', true)
+    await postUpdate(app, buildPrivateDm(42, 'hello', 'friend'))
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    expect(ensureTrustedChannelWorkspaceMembership).toHaveBeenCalledWith({
+      integrationId: 'integ_1',
+      workspaceId: 'workspace_1',
+      userId: 'shadow_handle_guest',
+      provider: 'telegram',
+      providerUserId: '42',
+    })
+    expect(pipelineCalls[0]).toMatchObject({
+      userId: 'shadow_handle_guest',
+      isIdentified: true,
+      externalGuest: false,
+    })
+  })
+
+  it('fails closed when a username grant changes before it can be pinned', async () => {
+    const {
+      ensureTrustedChannelWorkspaceMembership,
+      resolveChannelUser,
+    } = await import('../../db/channel-user-store.js')
+    const { findAssistantById } = await import('../../db/users.js')
+    vi.mocked(ensureTrustedChannelWorkspaceMembership).mockClear()
+    vi.mocked(findAssistantById).mockResolvedValueOnce({
+      id: 'assistant_1',
+      name: 'Test Assistant',
+      ownerUserId: 'owner_1',
+      workspaceId: 'workspace_1',
+      defaultModelAlias: 'gemini-flash',
+      systemPrompt: null,
+      clearance: 'confidential',
+      kind: 'standard',
+    } as never)
+    vi.mocked(resolveChannelUser).mockResolvedValueOnce({
+      user: { id: 'shadow_stale_handle' } as never,
+      isIdentified: false,
+    })
+
+    const app = makeGuestApp(['@friend'], null, false, 'allowlist', true, false)
+    await postUpdate(app, buildPrivateDm(42, 'hello', 'friend'))
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    expect(ensureTrustedChannelWorkspaceMembership).not.toHaveBeenCalled()
+    expect(pipelineCalls).toEqual([])
+    expect(adapterSendCalls.at(-1)?.text).toContain('Trusted access could not be activated')
+  })
+
+  it('fails closed when trusted membership cannot be provisioned', async () => {
+    const {
+      ensureTrustedChannelWorkspaceMembership,
+      resolveChannelUser,
+    } = await import('../../db/channel-user-store.js')
+    const { findAssistantById } = await import('../../db/users.js')
+    vi.mocked(ensureTrustedChannelWorkspaceMembership).mockClear()
+    vi.mocked(ensureTrustedChannelWorkspaceMembership).mockRejectedValueOnce(new Error('db unavailable'))
+    vi.mocked(findAssistantById).mockResolvedValueOnce({
+      id: 'assistant_1',
+      name: 'Test Assistant',
+      ownerUserId: 'owner_1',
+      workspaceId: 'workspace_1',
+      defaultModelAlias: 'gemini-flash',
+      systemPrompt: null,
+      clearance: 'confidential',
+      kind: 'standard',
+    } as never)
+    vi.mocked(resolveChannelUser).mockResolvedValueOnce({
+      user: { id: 'shadow_failed_grant' } as never,
+      isIdentified: false,
+    })
+
+    const app = makeGuestApp(['42'], null, false, 'allowlist', true)
+    await postUpdate(app, buildPrivateDm(42, 'search the web'))
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    expect(pipelineCalls).toEqual([])
+    expect(adapterSendCalls.at(-1)?.text).toContain('Trusted access could not be activated')
   })
 
   it('keeps an unlinked allow_all group sender isolated without inheriting a stale tool opt-in', async () => {

@@ -20,6 +20,9 @@ import {
   createCompany,
   createContact,
   createDeal,
+  updateCompany,
+  updateContact,
+  updateDeal,
 } from '../db/crm.js'
 import { getEntityById, updateEntity } from '../db/entities-store.js'
 import { createEntityMergeStore } from '../db/entity-merge-store.js'
@@ -39,19 +42,34 @@ import {
   deleteCrmSavedView,
   findCrmDuplicateGroups,
   getCrmConfig,
+  getCrmR2Record,
   getCrmReport,
+  getCrmSummary,
   listCrmDealParticipants,
+  listCrmRecordPage,
+  listCrmRecordRelationships,
   listCrmR2Records,
   listCrmSavedViews,
   listCrmTimeline,
+  lookupCrmRecords,
   removeCrmDealParticipant,
+  reorderCrmFields,
+  reorderCrmPipelines,
+  reorderCrmStages,
+  restoreCrmFieldDefinition,
+  setCrmDealPrimaryContact,
   setCrmArchived,
   setCrmDealPipelineStage,
+  setCrmStageArchived,
   updateCrmCustomFields,
+  updateCrmFieldDefinition,
+  updateCrmPipeline,
   updateCrmStage,
   validateCrmCustomFieldValues,
   type CrmEntityKind,
   type CrmFieldType,
+  type CrmRecordRelationships,
+  type CrmRecordRow,
   type CrmStageCategory,
 } from '../db/crm-r2.js'
 import { notifyBrainInboxChange } from '../brain-stream/notify.js'
@@ -66,6 +84,9 @@ const STAGE_CATEGORIES = new Set<CrmStageCategory>(['open', 'won', 'lost'])
 const LEGACY_STAGES = new Set<DealStage>([
   'lead', 'qualified', 'proposal', 'negotiation', 'won', 'lost',
 ])
+const CRM_PAGE_SORTS = new Set(['updated', 'name', 'amount', 'close'])
+const CRM_DIRECTIONS = new Set(['asc', 'desc'])
+const CRM_ATTENTION = new Set(['overdue', 'stale', 'noAmount', 'orphaned'])
 
 function text(value: unknown, max = 200): string | null {
   return typeof value === 'string' && value.trim().length > 0
@@ -91,7 +112,26 @@ function stringArray(value: unknown, max = 50): string[] {
     : []
 }
 
-function publicRecord(row: Awaited<ReturnType<typeof listCrmR2Records>>[number]) {
+function queryText(value: unknown, max = 500): string | null {
+  const raw = Array.isArray(value) ? value[0] : value
+  return typeof raw === 'string' && raw.trim() ? raw.trim().slice(0, max) : null
+}
+
+function queryArray(value: unknown, max = 50): string[] {
+  const raw = Array.isArray(value) ? value : typeof value === 'string' ? [value] : []
+  return raw.flatMap((item) => typeof item === 'string' ? item.split(',') : [])
+    .map((item) => item.trim()).filter(Boolean).slice(0, max)
+}
+
+function queryKind(value: unknown): CrmEntityKind | null {
+  const raw = queryText(value, 20)
+  if (raw === 'contact' || raw === 'contacts' || raw === 'person') return 'person'
+  if (raw === 'company' || raw === 'companies') return 'company'
+  if (raw === 'deal' || raw === 'deals') return 'deal'
+  return null
+}
+
+function publicRecord(row: CrmRecordRow) {
   const a = row.attributes
   const common = {
     id: row.id,
@@ -136,6 +176,54 @@ function publicRecord(row: Awaited<ReturnType<typeof listCrmR2Records>>[number])
     source: typeof a.source === 'string' ? a.source : null,
     winLossReason: typeof a.win_loss_reason === 'string' ? a.win_loss_reason : null,
   }
+}
+
+function publicRelationships(relationships: CrmRecordRelationships) {
+  return {
+    contacts: relationships.contacts.map(publicRecord),
+    companies: relationships.companies.map(publicRecord),
+    deals: relationships.deals.map(publicRecord),
+  }
+}
+
+function hasOwn(body: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(body, key)
+}
+
+function patchText(
+  body: Record<string, unknown>,
+  key: string,
+  max: number,
+): string | null | undefined {
+  if (!hasOwn(body, key)) return undefined
+  if (body[key] === null || body[key] === '') return null
+  if (typeof body[key] !== 'string') throw new Error(`${key} must be text or null`)
+  const value = body[key].trim()
+  if (!value) return null
+  return value.slice(0, max)
+}
+
+function patchTags(body: Record<string, unknown>): string[] | undefined {
+  if (!hasOwn(body, 'tags')) return undefined
+  if (!Array.isArray(body.tags) || body.tags.some((tag) => typeof tag !== 'string')) {
+    throw new Error('tags must be an array of text values')
+  }
+  return stringArray(body.tags, 20)
+}
+
+function patchDate(body: Record<string, unknown>, key: string): Date | null | undefined {
+  const value = patchText(body, key, 10)
+  if (value === undefined || value === null) return value
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) throw new Error(`${key} must be an ISO calendar date`)
+  const parsed = new Date(`${value}T00:00:00Z`)
+  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) {
+    throw new Error(`${key} must be an ISO calendar date`)
+  }
+  return parsed
+}
+
+function sameValue(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left ?? null) === JSON.stringify(right ?? null)
 }
 
 export function crmRoutes({ workspaceStore, entityLinks }: RouteOptions): Router {
@@ -280,10 +368,75 @@ export function crmRoutes({ workspaceStore, entityLinks }: RouteOptions): Router
     return { id, kind }
   }
 
+  async function readRecordBundle(ctx: AccessContext, entityId: string) {
+    const record = await getCrmR2Record(ctx, entityId)
+    if (!record) return null
+    const [relationships, participants] = await Promise.all([
+      listCrmRecordRelationships(ctx, record),
+      record.kind === 'deal' ? listCrmDealParticipants(ctx, record.id) : Promise.resolve([]),
+    ])
+    return {
+      record: publicRecord(record),
+      relationships: publicRelationships(relationships),
+      participants: participants ?? [],
+    }
+  }
+
   router.get('/:workspaceId/records', async (req, res) => {
     const member = await memberContext(req as never, res)
     if (!member) return
     try {
+      if (req.query.kind !== undefined) {
+        const kind = queryKind(req.query.kind)
+        if (!kind) {
+          res.status(400).json({ error: 'kind must be deal, contact, or company' })
+          return
+        }
+        const sort = queryText(req.query.sort, 20) ?? 'updated'
+        const direction = queryText(req.query.direction, 10) ?? 'desc'
+        if (!CRM_PAGE_SORTS.has(sort)
+          || ((sort === 'amount' || sort === 'close') && kind !== 'deal')) {
+          res.status(400).json({ error: 'sort is not available for this record kind' })
+          return
+        }
+        if (!CRM_DIRECTIONS.has(direction)) {
+          res.status(400).json({ error: 'direction must be asc or desc' })
+          return
+        }
+        const requestedLimit = Number(queryText(req.query.limit, 4) ?? '50')
+        if (!Number.isInteger(requestedLimit) || requestedLimit < 1) {
+          res.status(400).json({ error: 'limit must be a positive integer' })
+          return
+        }
+        const attention = queryText(req.query.filter, 20)
+        if (attention && !CRM_ATTENTION.has(attention)) {
+          res.status(400).json({ error: 'filter is not a supported attention filter' })
+          return
+        }
+        const custom: Record<string, string[]> = {}
+        for (const [key, value] of Object.entries(req.query)) {
+          if (!key.startsWith('cf.') || key.length <= 3) continue
+          custom[key.slice(3)] = queryArray(value)
+        }
+        const page = await listCrmRecordPage(member.ctx, {
+          kind,
+          limit: Math.min(requestedLimit, 100),
+          cursor: queryText(req.query.cursor, 2_000),
+          sort: sort as 'updated' | 'name' | 'amount' | 'close',
+          direction: direction as 'asc' | 'desc',
+          search: queryText(req.query.q, 500),
+          includeArchived: req.query.archived === 'true',
+          owners: queryArray(req.query.owner),
+          pipelineId: queryText(req.query.pipeline, 100),
+          stageIds: queryArray(req.query.stage),
+          companyIds: queryArray(req.query.company),
+          tags: queryArray(req.query.tag),
+          custom,
+          attention: attention as 'overdue' | 'stale' | 'noAmount' | 'orphaned' | null,
+        })
+        res.json({ ...page, items: page.items.map(publicRecord) })
+        return
+      }
       const rows = await listCrmR2Records(member.ctx, {
         includeArchived: req.query.archived === 'true',
       })
@@ -294,8 +447,52 @@ export function crmRoutes({ workspaceStore, entityLinks }: RouteOptions): Router
         companies: records.filter((r) => r.kind === 'company'),
       })
     } catch (err) {
+      if (req.query.kind !== undefined && err instanceof Error
+        && (err.message.includes('cursor') || err.message.includes('sort'))) {
+        res.status(400).json({ error: err.message })
+        return
+      }
       console.error('[crm] list failed:', err)
       res.status(500).json({ error: 'Failed to load CRM records' })
+    }
+  })
+
+  router.get('/:workspaceId/summary', async (req, res) => {
+    const member = await memberContext(req as never, res)
+    if (!member) return
+    try {
+      const summary = await getCrmSummary(member.ctx, queryText(req.query.pipeline, 100))
+      res.json(summary)
+    } catch (err) {
+      console.error('[crm] summary failed:', err)
+      res.status(500).json({ error: 'Failed to load CRM summary' })
+    }
+  })
+
+  router.get('/:workspaceId/lookup', async (req, res) => {
+    const member = await memberContext(req as never, res)
+    if (!member) return
+    const kind = queryKind(req.query.kind)
+    if (!kind) {
+      res.status(400).json({ error: 'kind must be deal, contact, or company' })
+      return
+    }
+    const requestedLimit = Number(queryText(req.query.limit, 4) ?? '25')
+    if (!Number.isInteger(requestedLimit) || requestedLimit < 1) {
+      res.status(400).json({ error: 'limit must be a positive integer' })
+      return
+    }
+    try {
+      const items = await lookupCrmRecords({
+        ctx: member.ctx,
+        kind,
+        query: queryText(req.query.q, 500),
+        limit: Math.min(requestedLimit, 100),
+      })
+      res.json({ items })
+    } catch (err) {
+      console.error('[crm] lookup failed:', err)
+      res.status(500).json({ error: 'Failed to load CRM lookup' })
     }
   })
 
@@ -308,6 +505,178 @@ export function crmRoutes({ workspaceStore, entityLinks }: RouteOptions): Router
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       res.status(400).json({ error: message })
+    }
+  })
+
+  router.get('/:workspaceId/records/:entityId', async (req, res) => {
+    const member = await memberContext(req as never, res)
+    if (!member) return
+    try {
+      const bundle = await readRecordBundle(member.ctx, req.params.entityId)
+      if (!bundle) {
+        res.status(404).json({ error: 'Record not found' })
+        return
+      }
+      res.json(bundle)
+    } catch (err) {
+      console.error('[crm] record read failed:', err)
+      res.status(500).json({ error: 'Failed to load CRM record' })
+    }
+  })
+
+  router.patch('/:workspaceId/records/:entityId', async (req, res) => {
+    const member = await memberContext(req as never, res)
+    if (!member) return
+    try {
+      const before = await getCrmR2Record(member.ctx, req.params.entityId)
+      if (!before) {
+        res.status(404).json({ error: 'Record not found' })
+        return
+      }
+      const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body)
+        ? req.body as Record<string, unknown>
+        : {}
+      const common = new Set(['name', 'ownerId'])
+      const kindFields = before.kind === 'person'
+        ? ['email', 'phone', 'companyId', 'tags']
+        : before.kind === 'company'
+          ? ['domain', 'tags']
+          : ['companyId', 'contactId', 'amount', 'currencyCode', 'closeDate', 'source', 'winLossReason']
+      const allowed = new Set([...common, ...kindFields])
+      const unknown = Object.keys(body).filter((key) => !allowed.has(key))
+      if (unknown.length > 0) throw new Error(`Unsupported fields for this record: ${unknown.join(', ')}`)
+      if (Object.keys(body).length === 0) {
+        const bundle = await readRecordBundle(member.ctx, before.id)
+        if (!bundle) throw new Error('Record is no longer available')
+        res.json(bundle)
+        return
+      }
+
+      const name = patchText(body, 'name', 256)
+      if (hasOwn(body, 'name') && !name) throw new Error('name cannot be empty')
+      const ownerId = patchText(body, 'ownerId', 100)
+      if (ownerId && !await workspaceStore.getRole(ownerId, member.ctx.workspaceId)) {
+        throw new Error('ownerId must be an active workspace member')
+      }
+
+      if (before.kind === 'person') {
+        const companyId = patchText(body, 'companyId', 100)
+        if (companyId) {
+          const company = await getEntityById(member.ctx, companyId)
+          if (!company || company.kind !== 'company') throw new Error('companyId must reference a visible company in this workspace')
+        }
+        const updated = await updateContact(member.ctx.userId, before.id, {
+          ...(name !== undefined ? { name: name as string } : {}),
+          ...(hasOwn(body, 'email') ? { email: patchText(body, 'email', 320) } : {}),
+          ...(hasOwn(body, 'phone') ? { phone: patchText(body, 'phone', 100) } : {}),
+          ...(companyId !== undefined ? { companyId } : {}),
+          ...(hasOwn(body, 'tags') ? { tags: patchTags(body) } : {}),
+        }, entityLinks, member.ctx)
+        if (!updated) throw new Error('Record is no longer available')
+      } else if (before.kind === 'company') {
+        const updated = await updateCompany(member.ctx.userId, before.id, {
+          ...(name !== undefined ? { name: name as string } : {}),
+          ...(hasOwn(body, 'domain') ? { domain: patchText(body, 'domain', 320) } : {}),
+          ...(hasOwn(body, 'tags') ? { tags: patchTags(body) } : {}),
+        }, member.ctx)
+        if (!updated) throw new Error('Record is no longer available')
+      } else {
+        const companyId = patchText(body, 'companyId', 100)
+        const contactId = patchText(body, 'contactId', 100)
+        if (companyId) {
+          const company = await getEntityById(member.ctx, companyId)
+          if (!company || company.kind !== 'company') throw new Error('companyId must reference a visible company in this workspace')
+        }
+        if (contactId) {
+          const contact = await getEntityById(member.ctx, contactId)
+          if (!contact || contact.kind !== 'person') throw new Error('contactId must reference a visible contact in this workspace')
+        }
+        const amount = hasOwn(body, 'amount') ? finiteNumber(body.amount) : undefined
+        if (hasOwn(body, 'amount') && amount === undefined) throw new Error('amount must be a finite number or null')
+        if (amount !== undefined && amount !== null && amount < 0) throw new Error('amount must be greater than or equal to 0')
+        const closeDate = patchDate(body, 'closeDate')
+        const needsTypedUpdate = companyId !== undefined
+          || amount !== undefined || closeDate !== undefined
+        if (needsTypedUpdate) {
+          const updated = await updateDeal(member.ctx.userId, before.id, {
+            ...(companyId !== undefined ? { companyId } : {}),
+            ...(amount !== undefined ? { amount } : {}),
+            ...(closeDate !== undefined ? { closeDate } : {}),
+          }, entityLinks, member.ctx)
+          if (!updated) throw new Error('Record is no longer available')
+        }
+        if (contactId !== undefined) {
+          const primaryUpdated = await setCrmDealPrimaryContact({
+            ctx: member.ctx,
+            dealId: before.id,
+            contactId,
+          })
+          if (!primaryUpdated) throw new Error('Record relationship is no longer available')
+          // The transaction above owns relational consistency. The typed
+          // helper repairs the graph projection through its existing lane.
+          const repaired = await updateDeal(member.ctx.userId, before.id, { contactId }, entityLinks, member.ctx)
+          if (!repaired) throw new Error('Record is no longer available')
+        }
+      }
+
+      const currentEntity = await getEntityById(member.ctx, before.id)
+      if (!currentEntity) throw new Error('Record is no longer available')
+      const attributes = { ...currentEntity.attributes }
+      if (ownerId !== undefined) {
+        if (ownerId) attributes.owner_id = ownerId
+        else delete attributes.owner_id
+      }
+      if (before.kind === 'deal') {
+        const currencyCode = patchText(body, 'currencyCode', 3)
+        if (currencyCode !== undefined) {
+          if (currencyCode && !/^[a-z]{3}$/i.test(currencyCode)) throw new Error('currencyCode must contain three letters')
+          if (currencyCode) attributes.currency_code = currencyCode.toUpperCase()
+          else delete attributes.currency_code
+        }
+        for (const [inputKey, attributeKey, max] of [
+          ['source', 'source', 100],
+          ['winLossReason', 'win_loss_reason', 2_000],
+        ] as const) {
+          const value = patchText(body, inputKey, max)
+          if (value === undefined) continue
+          if (value) attributes[attributeKey] = value
+          else delete attributes[attributeKey]
+        }
+      }
+      const needsFinalUpdate = ownerId !== undefined || (before.kind === 'deal' && (
+        name !== undefined || hasOwn(body, 'currencyCode') || hasOwn(body, 'source')
+          || hasOwn(body, 'winLossReason')
+      ))
+      if (needsFinalUpdate) {
+        const updated = await updateEntity(member.ctx.userId, before.id, {
+          ...(before.kind === 'deal' && name !== undefined ? { displayName: name as string } : {}),
+          attributes,
+        }, member.ctx)
+        if (!updated) throw new Error('Record is no longer available')
+      }
+
+      const bundle = await readRecordBundle(member.ctx, before.id)
+      if (!bundle) throw new Error('Record is no longer available')
+      const beforePublic = publicRecord(before) as unknown as Record<string, unknown>
+      const afterPublic = bundle.record as unknown as Record<string, unknown>
+      const changedFields = Object.keys(body).filter((field) => !sameValue(beforePublic[field], afterPublic[field]))
+      for (const field of changedFields) {
+        await appendCrmActivity({
+          userId: member.ctx.userId,
+          workspaceId: member.ctx.workspaceId,
+          entityId: before.id,
+          activityType: 'field_change',
+          summary: `CRM ${field} updated`,
+          metadata: { field, before: beforePublic[field] ?? null, after: afterPublic[field] ?? null },
+        })
+      }
+      if (changedFields.length > 0) {
+        void notifyBrainInboxChange(member.ctx.workspaceId,
+          before.kind === 'person' ? 'contact' : before.kind, before.id, 'update')
+      }
+      res.json(bundle)
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) })
     }
   })
 
@@ -511,7 +880,9 @@ export function crmRoutes({ workspaceStore, entityLinks }: RouteOptions): Router
   router.get('/:workspaceId/config', async (req, res) => {
     const member = await memberContext(req as never, res)
     if (!member) return
-    res.json(await getCrmConfig(member.ctx.userId, member.ctx.workspaceId))
+    const includeArchived = req.query.archived === 'true'
+    if (includeArchived && !requireAdmin(member.role, res)) return
+    res.json(await getCrmConfig(member.ctx.userId, member.ctx.workspaceId, includeArchived))
   })
 
   router.post('/:workspaceId/pipelines', async (req, res) => {
@@ -523,6 +894,49 @@ export function crmRoutes({ workspaceStore, entityLinks }: RouteOptions): Router
       return
     }
     res.status(201).json(await createCrmPipeline({ ...member.ctx, name }))
+  })
+
+  router.patch('/:workspaceId/pipelines/:pipelineId', async (req, res) => {
+    const member = await memberContext(req as never, res)
+    if (!member || !requireAdmin(member.role, res)) return
+    const name = hasOwn(req.body ?? {}, 'name') ? text(req.body?.name, 100) : undefined
+    if (hasOwn(req.body ?? {}, 'name') && !name) {
+      res.status(400).json({ error: 'name cannot be empty' })
+      return
+    }
+    try {
+      const ok = await updateCrmPipeline({
+        userId: member.ctx.userId,
+        workspaceId: member.ctx.workspaceId,
+        pipelineId: req.params.pipelineId,
+        ...(name !== undefined ? { name: name as string } : {}),
+        ...(typeof req.body?.isDefault === 'boolean' ? { isDefault: req.body.isDefault } : {}),
+        ...(typeof req.body?.archived === 'boolean' ? { archived: req.body.archived } : {}),
+      })
+      if (!ok) res.status(404).json({ error: 'Pipeline not found' })
+      else res.json({ ok: true })
+    } catch (error) {
+      res.status(409).json({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+
+  router.post('/:workspaceId/pipelines/reorder', async (req, res) => {
+    const member = await memberContext(req as never, res)
+    if (!member || !requireAdmin(member.role, res)) return
+    if (!Array.isArray(req.body?.orderedIds) || req.body.orderedIds.some((id: unknown) => typeof id !== 'string')) {
+      res.status(400).json({ error: 'orderedIds must be an array of ids' })
+      return
+    }
+    try {
+      await reorderCrmPipelines({
+        userId: member.ctx.userId,
+        workspaceId: member.ctx.workspaceId,
+        orderedIds: req.body.orderedIds,
+      })
+      res.json({ ok: true })
+    } catch (error) {
+      res.status(409).json({ error: error instanceof Error ? error.message : String(error) })
+    }
   })
 
   router.post('/:workspaceId/pipelines/:pipelineId/stages', async (req, res) => {
@@ -562,19 +976,67 @@ export function crmRoutes({ workspaceStore, entityLinks }: RouteOptions): Router
       res.status(400).json({ error: 'probability must be between 0 and 100' })
       return
     }
-    const stage = await updateCrmStage({
-      userId: member.ctx.userId,
-      workspaceId: member.ctx.workspaceId,
-      stageId: req.params.stageId,
-      name: text(req.body?.name, 100) ?? undefined,
-      category: category as CrmStageCategory | undefined,
-      probability: probability ?? undefined,
-      requiredFields: Array.isArray(req.body?.requiredFields)
-        ? stringArray(req.body.requiredFields)
-        : undefined,
-    })
-    if (!stage) res.status(404).json({ error: 'Stage not found' })
-    else res.json(stage)
+    try {
+      const archived = typeof req.body?.archived === 'boolean' ? req.body.archived : undefined
+      if (archived === false) {
+        const restored = await setCrmStageArchived({
+          userId: member.ctx.userId, workspaceId: member.ctx.workspaceId,
+          stageId: req.params.stageId, archived: false,
+        })
+        if (!restored) {
+          res.status(404).json({ error: 'Stage not found' })
+          return
+        }
+      }
+      const hasMetadata = ['name', 'category', 'probability', 'requiredFields']
+        .some((key) => hasOwn(req.body ?? {}, key))
+      const stage = hasMetadata ? await updateCrmStage({
+        userId: member.ctx.userId,
+        workspaceId: member.ctx.workspaceId,
+        stageId: req.params.stageId,
+        name: text(req.body?.name, 100) ?? undefined,
+        category: category as CrmStageCategory | undefined,
+        probability: probability ?? undefined,
+        requiredFields: Array.isArray(req.body?.requiredFields)
+          ? stringArray(req.body.requiredFields)
+          : undefined,
+      }) : null
+      if (hasMetadata && !stage) {
+        res.status(404).json({ error: 'Stage not found' })
+        return
+      }
+      if (archived === true) {
+        const archivedOk = await setCrmStageArchived({
+          userId: member.ctx.userId, workspaceId: member.ctx.workspaceId,
+          stageId: req.params.stageId, archived: true,
+        })
+        if (!archivedOk) {
+          res.status(404).json({ error: 'Stage not found' })
+          return
+        }
+      }
+      res.json(stage ?? { ok: true })
+    } catch (error) {
+      res.status(409).json({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+
+  router.post('/:workspaceId/pipelines/:pipelineId/stages/reorder', async (req, res) => {
+    const member = await memberContext(req as never, res)
+    if (!member || !requireAdmin(member.role, res)) return
+    if (!Array.isArray(req.body?.orderedIds) || req.body.orderedIds.some((id: unknown) => typeof id !== 'string')) {
+      res.status(400).json({ error: 'orderedIds must be an array of ids' })
+      return
+    }
+    try {
+      await reorderCrmStages({
+        userId: member.ctx.userId, workspaceId: member.ctx.workspaceId,
+        pipelineId: req.params.pipelineId, orderedIds: req.body.orderedIds,
+      })
+      res.json({ ok: true })
+    } catch (error) {
+      res.status(409).json({ error: error instanceof Error ? error.message : String(error) })
+    }
   })
 
   router.post('/:workspaceId/fields', async (req, res) => {
@@ -621,6 +1083,69 @@ export function crmRoutes({ workspaceStore, entityLinks }: RouteOptions): Router
     )
     if (!ok) res.status(404).json({ error: 'Field not found' })
     else res.json({ ok: true })
+  })
+
+  router.patch('/:workspaceId/fields/:fieldId', async (req, res) => {
+    const member = await memberContext(req as never, res)
+    if (!member || !requireAdmin(member.role, res)) return
+    const allowed = new Set(['label', 'options', 'isRequired'])
+    const unknown = Object.keys(req.body ?? {}).filter((key) => !allowed.has(key))
+    if (unknown.length > 0) {
+      res.status(400).json({ error: `Field key and type are immutable; unsupported fields: ${unknown.join(', ')}` })
+      return
+    }
+    const label = hasOwn(req.body ?? {}, 'label') ? text(req.body?.label, 100) : undefined
+    if (hasOwn(req.body ?? {}, 'label') && !label) {
+      res.status(400).json({ error: 'label cannot be empty' })
+      return
+    }
+    try {
+      const field = await updateCrmFieldDefinition({
+        userId: member.ctx.userId, workspaceId: member.ctx.workspaceId,
+        fieldId: req.params.fieldId,
+        ...(label !== undefined ? { label: label as string } : {}),
+        ...(Array.isArray(req.body?.options) ? { options: stringArray(req.body.options) } : {}),
+        ...(typeof req.body?.isRequired === 'boolean' ? { isRequired: req.body.isRequired } : {}),
+      })
+      if (!field) res.status(404).json({ error: 'Field not found' })
+      else res.json(field)
+    } catch (error) {
+      res.status(409).json({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+
+  router.post('/:workspaceId/fields/:fieldId/restore', async (req, res) => {
+    const member = await memberContext(req as never, res)
+    if (!member || !requireAdmin(member.role, res)) return
+    try {
+      const ok = await restoreCrmFieldDefinition(
+        member.ctx.userId, member.ctx.workspaceId, req.params.fieldId,
+      )
+      if (!ok) res.status(404).json({ error: 'Archived field not found' })
+      else res.json({ ok: true })
+    } catch (error) {
+      res.status(409).json({ error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+
+  router.post('/:workspaceId/fields/reorder', async (req, res) => {
+    const member = await memberContext(req as never, res)
+    if (!member || !requireAdmin(member.role, res)) return
+    const entityKind = req.body?.entityKind as CrmEntityKind
+    if (!CRM_KINDS.has(entityKind) || !Array.isArray(req.body?.orderedIds)
+      || req.body.orderedIds.some((id: unknown) => typeof id !== 'string')) {
+      res.status(400).json({ error: 'entityKind and orderedIds are required' })
+      return
+    }
+    try {
+      await reorderCrmFields({
+        userId: member.ctx.userId, workspaceId: member.ctx.workspaceId,
+        entityKind, orderedIds: req.body.orderedIds,
+      })
+      res.json({ ok: true })
+    } catch (error) {
+      res.status(409).json({ error: error instanceof Error ? error.message : String(error) })
+    }
   })
 
   router.post('/:workspaceId/field-presets/:presetId', async (req, res) => {

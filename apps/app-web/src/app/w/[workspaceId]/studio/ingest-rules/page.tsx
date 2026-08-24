@@ -34,6 +34,7 @@ import { authFetch } from "@/lib/auth-fetch";
 import { ConnectorIcon } from "@/components/connectors/connector-icon";
 import { SensitivityBadge } from "@/components/sensitivity-badge";
 import { WhatsappGroupManager } from "@/components/ingest/whatsapp-groups";
+import { FeishuGroupManager } from "@/components/ingest/feishu-groups";
 import { IngestRuleEditor, type EditableRule } from "@/components/ingest/rule-editor";
 import { useWorkspaces } from "@/contexts/workspace-context";
 import { ingestSourceNotice } from "@/lib/ingest-source-notice";
@@ -651,6 +652,7 @@ export default function StudioIngestRulesPage() {
         {/* Actions — enable/disable, plus the GitHub repo-picker toggle.
             A provider whose ingest cannot fire gets an explanation instead of
             a switch (ingestUnavailable). */}
+        {s.provider !== "feishu" && (
         <div className="flex flex-wrap items-center gap-2">
           {ingestUnavailable(s) ? (
             <p className="text-[12px] leading-relaxed text-muted-foreground">
@@ -692,14 +694,24 @@ export default function StudioIngestRulesPage() {
             </button>
           )}
         </div>
+        )}
 
         {showPicker && (
           <GithubRepoPicker instanceId={s.instanceId} copy={copy.repos} />
         )}
 
+        {s.provider === "feishu" && s.connected && (
+          <div className="rounded-lg border border-border px-4 py-3">
+            <FeishuGroupManager
+              instanceId={s.instanceId}
+              onChange={fetchSources}
+            />
+          </div>
+        )}
+
         {/* Routing rules — a plain section label; each rule is its own
             standalone card (RuleCard), not rows nested inside one card. */}
-        {s.connected && (
+        {s.connected && s.provider !== "feishu" && (
           <div className="space-y-2">
             <div className="text-[13px] font-medium">{copy.rulesTitle}</div>
             <IngestRuleEditor
