@@ -10,6 +10,7 @@ export type WhatsAppCloudApiOptions = {
   phoneNumberId: string
   graphApiVersion?: string
   graphApiBaseUrl?: string
+  recipientType?: 'individual' | 'group'
 }
 
 export type WhatsAppCloudPhoneNumber = {
@@ -23,11 +24,36 @@ export type WhatsAppCloudMedia = {
   mimeType: string
 }
 
+export class WhatsAppCloudApiError extends Error {
+  readonly status: number
+
+  constructor(status: number, message: string) {
+    super(message)
+    this.name = 'WhatsAppCloudApiError'
+    this.status = status
+  }
+}
+
+export type WhatsAppCloudGroupLifecycleRow = {
+  type: string
+  requestId: string
+  groupId?: string
+  subject?: string
+  inviteLink?: string
+  errors?: unknown[]
+}
+
+export type WhatsAppCloudGroupLifecycleEvents = {
+  phoneNumberId: string
+  rows: WhatsAppCloudGroupLifecycleRow[]
+}
+
 type CloudMessage = {
   id?: string
   from?: string
   timestamp?: string
   type?: string
+  group_id?: string
   context?: { id?: string }
   text?: { body?: string }
   image?: { id?: string; mime_type?: string; caption?: string }
@@ -40,6 +66,20 @@ type CloudValue = {
   metadata?: { phone_number_id?: string }
   contacts?: Array<{ wa_id?: string; profile?: { name?: string } }>
   messages?: CloudMessage[]
+  groups?: Array<{
+    type?: string
+    request_id?: string
+    group_id?: string
+    subject?: string
+    invite_link?: string
+    errors?: unknown[]
+  }>
+  type?: string
+  request_id?: string
+  group_id?: string
+  subject?: string
+  invite_link?: string
+  errors?: unknown[]
 }
 
 export type WhatsAppCloudWebhookPayload = {
@@ -68,8 +108,12 @@ async function graphRequest<T>(
   })
   if (!response.ok) {
     const detail = await response.text().catch(() => '')
-    throw new Error(`WhatsApp Cloud API failed (${response.status}): ${detail || response.statusText}`)
+    throw new WhatsAppCloudApiError(
+      response.status,
+      `WhatsApp Cloud API failed (${response.status}): ${detail || response.statusText}`,
+    )
   }
+  if (response.status === 204) return undefined as T
   return await response.json() as T
 }
 
@@ -142,9 +186,10 @@ export function parseWhatsAppCloudMessages(payload: unknown): IncomingMessage[] 
         if (!message.id || !message.from) continue
         const media = mediaFrom(message)
         const text = message.text?.body ?? media.caption ?? ''
+        const groupId = message.group_id?.trim() || null
         incoming.push({
           userId: message.from,
-          channelId: message.from,
+          channelId: groupId ?? message.from,
           messageId: message.id,
           text,
           ...(media.id ? { mediaUrl: `whatsapp-cloud:${media.id}` } : {}),
@@ -152,11 +197,12 @@ export function parseWhatsAppCloudMessages(payload: unknown): IncomingMessage[] 
           ...(media.mime ? { mediaMime: media.mime } : {}),
           ...(media.name ? { mediaName: media.name } : {}),
           ...(message.context?.id ? { replyToMessageId: message.context.id } : {}),
-          isGroupChat: false,
+          isGroupChat: groupId !== null,
           timestamp: Number(message.timestamp ?? 0) || Math.floor(Date.now() / 1000),
           raw: {
             message,
             phoneNumberId: value?.metadata?.phone_number_id,
+            groupId,
             senderName: value?.contacts?.find((contact) => contact.wa_id === message.from)?.profile?.name,
           },
         })
@@ -164,6 +210,38 @@ export function parseWhatsAppCloudMessages(payload: unknown): IncomingMessage[] 
     }
   }
   return incoming
+}
+
+/** Normalize group provisioning lifecycle updates, grouped by receiving phone number. */
+export function parseWhatsAppCloudGroupLifecycleEvents(
+  payload: unknown,
+): WhatsAppCloudGroupLifecycleEvents[] {
+  const body = payload as WhatsAppCloudWebhookPayload
+  if (body?.object !== 'whatsapp_business_account' || !Array.isArray(body.entry)) return []
+  const events: WhatsAppCloudGroupLifecycleEvents[] = []
+  for (const entry of body.entry) {
+    for (const change of entry.changes ?? []) {
+      if (change.field !== 'group_lifecycle_update') continue
+      const value = change.value
+      const phoneNumberId = value?.metadata?.phone_number_id
+      if (typeof phoneNumberId !== 'string' || !phoneNumberId) continue
+      const rows: WhatsAppCloudGroupLifecycleRow[] = []
+      const lifecycleRows = value.groups ?? (value.type || value.request_id ? [value] : [])
+      for (const row of lifecycleRows) {
+        if (typeof row.type !== 'string' || !row.type || typeof row.request_id !== 'string' || !row.request_id) continue
+        rows.push({
+          type: row.type,
+          requestId: row.request_id,
+          ...(typeof row.group_id === 'string' && row.group_id ? { groupId: row.group_id } : {}),
+          ...(typeof row.subject === 'string' && row.subject ? { subject: row.subject } : {}),
+          ...(typeof row.invite_link === 'string' && row.invite_link ? { inviteLink: row.invite_link } : {}),
+          ...(Array.isArray(row.errors) ? { errors: row.errors } : {}),
+        })
+      }
+      if (rows.length > 0) events.push({ phoneNumberId, rows })
+    }
+  }
+  return events
 }
 
 export function whatsappCloudMediaId(incoming: IncomingMessage): string | null {
@@ -180,6 +258,36 @@ export function createWhatsAppCloudApi(options: WhatsAppCloudApiOptions) {
 
     async subscribeApp(wabaId: string): Promise<void> {
       return subscribeWhatsAppCloudApp(options, wabaId)
+    },
+
+    async createGroup(subject: string): Promise<string> {
+      const data = await graphRequest<{ request_id?: string }>(
+        options,
+        `${encodeURIComponent(options.phoneNumberId)}/groups`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ messaging_product: 'whatsapp', subject }),
+        },
+      )
+      if (typeof data.request_id !== 'string' || !data.request_id) {
+        throw new Error('WhatsApp group response did not contain a request ID')
+      }
+      return data.request_id
+    },
+
+    async getGroupInviteLink(groupId: string): Promise<string> {
+      const data = await graphRequest<{ invite_link?: string }>(
+        options,
+        `${encodeURIComponent(groupId)}/invite_link`,
+      )
+      if (typeof data.invite_link !== 'string' || !data.invite_link) {
+        throw new Error('WhatsApp group response did not contain an invite link')
+      }
+      return data.invite_link
+    },
+
+    async deleteGroup(groupId: string): Promise<void> {
+      await graphRequest<unknown>(options, encodeURIComponent(groupId), { method: 'DELETE' })
     },
 
     async downloadMedia(mediaId: string, maxBytes = 25 * 1024 * 1024): Promise<WhatsAppCloudMedia> {
@@ -207,6 +315,7 @@ export function createWhatsAppCloudApi(options: WhatsAppCloudApiOptions) {
 
 export function createWhatsAppCloudAdapter(options: WhatsAppCloudApiOptions): ChannelAdapter {
   async function sendText(to: string, body: string): Promise<string> {
+    const recipientType = options.recipientType ?? 'individual'
     const data = await graphRequest<{ messages?: Array<{ id?: string }> }>(
       options,
       `${encodeURIComponent(options.phoneNumberId)}/messages`,
@@ -214,8 +323,8 @@ export function createWhatsAppCloudAdapter(options: WhatsAppCloudApiOptions): Ch
         method: 'POST',
         body: JSON.stringify({
           messaging_product: 'whatsapp',
-          recipient_type: 'individual',
-          to: to.replace(/^\+/, ''),
+          recipient_type: recipientType,
+          to: recipientType === 'individual' ? to.replace(/^\+/, '') : to,
           type: 'text',
           text: { preview_url: true, body },
         }),
