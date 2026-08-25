@@ -7,6 +7,9 @@ import { tavilyProvider } from '../base/search-tavily.js'
 import { duckDuckGoProvider } from '../base/search-ddg.js'
 import { webSearchTool } from '../base/web-search.js'
 import type { ToolContext } from '../types.js'
+import { createToolExecutor, NO_TOOL_TIMEOUT } from '../../engine/tool-executor.js'
+import { createLoopDetector } from '../../engine/loop-detector.js'
+import type { ContentBlock } from '../../providers/types.js'
 
 // ── Helpers ─────────────────────────────────────────────────────
 
@@ -34,6 +37,27 @@ function withEnv<T>(key: string, value: string | undefined, fn: () => T): T {
     if (prev === undefined) delete process.env[key]
     else process.env[key] = prev
   }
+}
+
+function waitWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    const onAbort = () => {
+      clearTimeout(timer)
+      reject(new Error('This operation was aborted'))
+    }
+    if (signal?.aborted) onAbort()
+    else signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+async function drainResults(executor: ReturnType<typeof createToolExecutor>): Promise<ContentBlock[]> {
+  const all: ContentBlock[] = []
+  for await (const batch of executor.getRemainingResults()) all.push(...batch.blocks)
+  return all
 }
 
 // ── Stack composer tests ────────────────────────────────────────
@@ -269,6 +293,7 @@ describe('[COMP:tools/search] webSearch exact-provider panels', () => {
   })
 
   afterEach(() => {
+    vi.useRealTimers()
     for (const key of ENV_KEYS) {
       if (savedEnv[key] === undefined) delete process.env[key]
       else process.env[key] = savedEnv[key]
@@ -387,6 +412,151 @@ describe('[COMP:tools/search] webSearch exact-provider panels', () => {
       searchProviderUnits: 2,
       externalCost_model: 'serpapi',
       externalCost_flatCostUsd: 0.05,
+    })
+  })
+
+  it('lets a 25-query multi-wave panel exceed 15 seconds without aborting queued work', async () => {
+    vi.useFakeTimers()
+    const queries = Array.from({ length: 25 }, (_, index) => `q${index + 1}`)
+    let active = 0
+    let maxActive = 0
+    fetchSpy.mockImplementation(async (input, init) => {
+      active += 1
+      maxActive = Math.max(maxActive, active)
+      try {
+        await waitWithAbort(10_000, init?.signal ?? undefined)
+        const query = new URL(String(input)).searchParams.get('q') ?? ''
+        return new Response(JSON.stringify({
+          organic_results: [{ title: query, link: `https://${query}.example`, snippet: `${query} result` }],
+        }), { status: 200 })
+      } finally {
+        active -= 1
+      }
+    })
+
+    expect(webSearchTool.timeoutMs).toBe(NO_TOOL_TIMEOUT)
+    const executor = createToolExecutor({
+      tools: new Map([['webSearch', webSearchTool]]),
+      context: ctx,
+      loopDetector: createLoopDetector(),
+    })
+    executor.addTool('panel', 'webSearch', { queries, provider: 'serpapi', maxResults: 10 })
+    const resultPromise = drainResults(executor)
+    await vi.runAllTimersAsync()
+    const results = await resultPromise
+
+    expect(fetchSpy).toHaveBeenCalledTimes(25)
+    expect(maxActive).toBe(4)
+    expect(results).toHaveLength(1)
+    const block = results[0] as Extract<ContentBlock, { type: 'tool_result' }>
+    const data = JSON.parse(String(block.content)) as {
+      completed: number
+      failed: number
+      searches: Array<{ query: string; status: string }>
+    }
+    expect(block.isError).toBeUndefined()
+    expect(data.completed).toBe(25)
+    expect(data.failed).toBe(0)
+    expect(data.searches.map((search) => search.query)).toEqual(queries)
+  })
+
+  it('times out one slow panel query without blocking later queued queries', async () => {
+    vi.useFakeTimers()
+    fetchSpy.mockImplementation(async (input, init) => {
+      const query = new URL(String(input)).searchParams.get('q') ?? ''
+      await waitWithAbort(query === 'q1' ? 30_000 : 1_000, init?.signal ?? undefined)
+      return new Response(JSON.stringify({
+        organic_results: [{ title: query, link: `https://${query}.example`, snippet: `${query} result` }],
+      }), { status: 200 })
+    })
+
+    const resultPromise = webSearchTool.execute(
+      { queries: ['q1', 'q2', 'q3', 'q4', 'q5'], provider: 'serpapi', maxResults: 10 },
+      ctx,
+    )
+    await vi.runAllTimersAsync()
+    const out = await resultPromise
+    const data = out.data as {
+      completed: number
+      failed: number
+      searches: Array<{ query: string; status: string; error?: string }>
+    }
+
+    expect(fetchSpy).toHaveBeenCalledTimes(5)
+    expect(data.completed).toBe(4)
+    expect(data.failed).toBe(1)
+    expect(data.searches.map((search) => [search.query, search.status])).toEqual([
+      ['q1', 'error'],
+      ['q2', 'ok'],
+      ['q3', 'ok'],
+      ['q4', 'ok'],
+      ['q5', 'ok'],
+    ])
+    expect(data.searches[0].error).toBe('search timed out after 15000ms')
+    expect(out.meta).toMatchObject({
+      searchProvider: 'serpapi',
+      searchProviderUnits: 4,
+      externalCost_flatCostUsd: 0.1,
+    })
+    expect(out.meta?.searchProviderErrors).toContain('q1: search timed out after 15000ms')
+  })
+
+  it('labels parent-aborted active and queued rows as cancelled, never provider unavailable', async () => {
+    vi.useFakeTimers()
+    const controller = new AbortController()
+    const callerCtx = { abortSignal: controller.signal } as ToolContext
+    fetchSpy.mockImplementation(async (input, init) => {
+      const query = new URL(String(input)).searchParams.get('q') ?? ''
+      await waitWithAbort(30_000, init?.signal ?? undefined)
+      return new Response(JSON.stringify({
+        organic_results: [{ title: query, link: `https://${query}.example`, snippet: `${query} result` }],
+      }), { status: 200 })
+    })
+
+    const resultPromise = webSearchTool.execute(
+      { queries: ['q1', 'q2', 'q3', 'q4', 'q5'], provider: 'serpapi', maxResults: 10 },
+      callerCtx,
+    )
+    await vi.advanceTimersByTimeAsync(1_000)
+    controller.abort()
+    await vi.runAllTimersAsync()
+    const out = await resultPromise
+    const data = out.data as {
+      searches: Array<{ query: string; status: string; error?: string }>
+    }
+
+    expect(fetchSpy).toHaveBeenCalledTimes(4)
+    expect(data.searches).toHaveLength(5)
+    expect(data.searches.every((search) => search.status === 'error')).toBe(true)
+    expect(data.searches.every((search) => search.error === 'search cancelled by caller')).toBe(true)
+    expect(JSON.stringify(data)).not.toContain('provider unavailable')
+  })
+
+  it('preserves a deadline as the first abort cause if the parent aborts during cleanup', async () => {
+    vi.useFakeTimers()
+    const controller = new AbortController()
+    const callerCtx = { abortSignal: controller.signal } as ToolContext
+    fetchSpy.mockImplementation(async (_input, init) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => {
+        setTimeout(() => reject(new Error('provider cleanup finished')), 2_000)
+      }, { once: true })
+    }))
+
+    const resultPromise = webSearchTool.execute(
+      { query: 'q1', provider: 'serpapi', maxResults: 10 },
+      callerCtx,
+    )
+    setTimeout(() => controller.abort(), 16_000)
+    await vi.runAllTimersAsync()
+    const out = await resultPromise
+    const data = out.data as {
+      searches: Array<{ query: string; status: string; error?: string }>
+    }
+
+    expect(data.searches[0]).toMatchObject({
+      query: 'q1',
+      status: 'error',
+      error: 'search timed out after 15000ms',
     })
   })
 
