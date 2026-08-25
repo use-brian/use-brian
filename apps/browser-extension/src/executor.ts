@@ -6,6 +6,7 @@
  */
 import { buildSnapshot, type BuiltSnapshot, type CdpAXNode } from './snapshot.js'
 import { RESTRICTED_TAB_MESSAGE } from './tab-eligibility.js'
+import { buildActionCursorArmExpression, type ActionCursorKind } from './action-cursor.js'
 
 export class ExecutorError extends Error {
   constructor(
@@ -258,6 +259,13 @@ export class TabExecutor {
       }
       throw err
     }
+  }
+
+  private async armActionCursor(tabId: number, kind: ActionCursorKind): Promise<void> {
+    await this.cdp(tabId, 'Runtime.evaluate', {
+      expression: buildActionCursorArmExpression(kind),
+      returnByValue: true,
+    }).catch(() => undefined)
   }
 
   /** Accessible name of a ref from the latest snapshot (approval previews ride this server-side too). */
@@ -545,6 +553,7 @@ export class TabExecutor {
     const x = (quad[0] + quad[4]) / 2
     const y = (quad[1] + quad[5]) / 2
     const base = { x, y, button: 'left', clickCount: 1 } as const
+    await this.armActionCursor(tabId, 'pointer')
     await this.cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y })
     await this.cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', ...base })
     await this.cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', ...base })
@@ -562,6 +571,7 @@ export class TabExecutor {
         'backend_error',
       )
     }
+    await this.armActionCursor(tabId, 'typing')
     try {
       await this.cdp(tabId, 'DOM.focus', { backendNodeId })
     } catch (err) {

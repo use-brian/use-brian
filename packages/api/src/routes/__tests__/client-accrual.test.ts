@@ -28,11 +28,20 @@ vi.mock('../../db/client.js', () => ({
 }))
 
 const contactCalls: unknown[] = []
+const leadCalls: unknown[] = []
 let contactImpl: () => Promise<{ id: string }> = async () => ({ id: 'ent-client-1' })
+let leadImpl: () => Promise<{ contact: { id: string }; lead: { id: string } }> = async () => ({
+  contact: { id: 'ent-client-1' },
+  lead: { id: 'ent-lead-1' },
+})
 vi.mock('../../db/entities-store.js', () => ({
   getOrCreateClientContactEntity: vi.fn(async (params: unknown) => {
     contactCalls.push(params)
     return contactImpl()
+  }),
+  getOrCreateClientContactAndLeadEntities: vi.fn(async (params: unknown) => {
+    leadCalls.push(params)
+    return leadImpl()
   }),
 }))
 
@@ -75,9 +84,11 @@ function input(overrides: Partial<Parameters<typeof accrueClientPrincipal>[0]> =
 
 beforeEach(() => {
   contactCalls.length = 0
+  leadCalls.length = 0
   pairingUpserts.length = 0
   existingPairing = null
   contactImpl = async () => ({ id: 'ent-client-1' })
+  leadImpl = async () => ({ contact: { id: 'ent-client-1' }, lead: { id: 'ent-lead-1' } })
   vi.clearAllMocks()
 })
 
@@ -112,6 +123,37 @@ describe('[COMP:api/client-accrual] client-principal accrual', () => {
 
     expect(accrual).toEqual({ compartments: [], contactEntityId: null })
     expect(contactCalls).toHaveLength(0)
+    expect(pairingUpserts).toHaveLength(0)
+  })
+
+  it('uses the transactional contact-plus-lead seam for an explicit CRM handoff', async () => {
+    const accrual = await accrueClientPrincipal(input({
+      clientLead: { key: 'studio-consultation:session-1', name: 'Ada - Studio consultation' },
+    }))
+
+    expect(accrual).toEqual({
+      compartments: ['client:cust_a'],
+      contactEntityId: 'ent-client-1',
+    })
+    expect(contactCalls).toHaveLength(0)
+    expect(leadCalls).toHaveLength(1)
+    expect(leadCalls[0]).toMatchObject({
+      userId: 'shadow-a',
+      workspaceId: 'ws-1',
+      assistantId: 'asst-1',
+      identityNamespace: 'api:key-1',
+      externalUserId: 'cust_a',
+      lead: { key: 'studio-consultation:session-1' },
+    })
+    expect(pairingUpserts).toHaveLength(1)
+  })
+
+  it('fails an explicit CRM handoff instead of reporting contact-only success', async () => {
+    leadImpl = async () => { throw new Error('lead insert failed') }
+
+    await expect(accrueClientPrincipal(input({
+      clientLead: { key: 'studio-consultation:session-1' },
+    }))).rejects.toThrow('lead insert failed')
     expect(pairingUpserts).toHaveLength(0)
   })
 

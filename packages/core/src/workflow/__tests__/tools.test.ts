@@ -793,10 +793,7 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
       name: 'Review client replies',
       clientBoundary: {
         assistantId: PRIMARY_ASSISTANT_ID,
-        resolve: {
-          kind: 'event_sender_map',
-          clients: [{ sender: 'buyer@customer.example', externalUserId: 'client-17' }],
-        },
+        resolve: { kind: 'verified_email_pairing' },
       },
       definition: {
         startStepId: 'draft',
@@ -852,10 +849,7 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
       kind: 'api_external_client',
       apiKeyId: keyId,
       assistantId: PRIMARY_ASSISTANT_ID,
-      resolve: {
-        kind: 'event_sender_map',
-        clients: [{ sender: 'buyer@customer.example', externalUserId: 'client-17' }],
-      },
+      resolve: { kind: 'verified_email_pairing' },
     })
   })
 

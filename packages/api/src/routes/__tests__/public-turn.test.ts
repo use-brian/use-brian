@@ -31,6 +31,7 @@ import {
   openPublicTurnSse,
   resolveClientSelfMemory,
   resolvePublicContextBlock,
+  shouldExposeSaveMemoryTool,
   upsertClientMemory,
 } from '../public-turn.js'
 import { formatPrivateRuntimeContext } from '../_prompt-builder.js'
@@ -53,6 +54,32 @@ function makeRes() {
 beforeEach(() => vi.clearAllMocks())
 
 describe('[COMP:api/public-turn] Shared public turn pipeline', () => {
+  describe('memory write tool exposure', () => {
+    it('withholds redundant model writes on deterministic client-memory registration', () => {
+      expect(shouldExposeSaveMemoryTool({
+        isIdentified: true,
+        externalPrincipal: true,
+        hasClientSelfMemory: true,
+        hasDeterministicClientMemory: true,
+      })).toBe(false)
+    })
+
+    it('allows later client-isolated learning and ordinary member writes', () => {
+      expect(shouldExposeSaveMemoryTool({
+        isIdentified: true,
+        externalPrincipal: true,
+        hasClientSelfMemory: true,
+        hasDeterministicClientMemory: false,
+      })).toBe(true)
+      expect(shouldExposeSaveMemoryTool({
+        isIdentified: true,
+        externalPrincipal: false,
+        hasClientSelfMemory: false,
+        hasDeterministicClientMemory: false,
+      })).toBe(true)
+    })
+  })
+
   describe('public SSE wire', () => {
     it('sets anti-buffering headers and emits named JSON events', () => {
       const headers = new Map<string, string>()

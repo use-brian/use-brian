@@ -155,6 +155,59 @@ describe('[COMP:memory/tools] saveMemory', () => {
     expect(store.rows[0].summary).toBe('Likes ramen')
   })
 
+  it('preserves server-owned client tags and rejects forged replacements on update', async () => {
+    const store = makeFakeStore()
+    const seeded = await store.create({
+      assistantId: ctx.assistantId,
+      userId: ctx.userId,
+      summary: 'Consultation intake',
+      tags: ['client-self', 'client-memory:consultation-1', 'consultation'],
+      sensitivity: 'internal',
+      createdByUserId: ctx.userId,
+    })
+    const { saveMemory } = createMemoryTools(store)
+
+    const result = await saveMemory.execute(
+      {
+        id: seeded.id,
+        tags: ['sales-intent', 'client-self', 'client-memory:forged'],
+      },
+      {
+        ...ctx,
+        clearance: 'public',
+        compartments: [],
+        clientSelfMemory: { compartment: 'client:studio-client:alice' },
+      },
+    )
+
+    expect(result.isError).toBeFalsy()
+    expect(store.rows[0].tags).toEqual([
+      'client-self',
+      'client-memory:consultation-1',
+      'sales-intent',
+    ])
+  })
+
+  it('does not accept server-owned client tags on a model-created row', async () => {
+    const store = makeFakeStore()
+    const { saveMemory } = createMemoryTools(store)
+
+    await saveMemory.execute(
+      {
+        summary: 'Follow-up preference',
+        tags: ['client-self', 'client-memory:forged', 'preference'],
+      },
+      {
+        ...ctx,
+        clearance: 'public',
+        compartments: [],
+        clientSelfMemory: { compartment: 'client:studio-client:alice' },
+      },
+    )
+
+    expect(store.rows[0].tags).toEqual(['preference'])
+  })
+
   it('stamps writeSource + episode anchor on create (synthesis provenance), defaulting to model', async () => {
     // Chat default: source 'model', no episode anchor.
     const chatStore = makeFakeStore()

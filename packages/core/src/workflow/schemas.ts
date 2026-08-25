@@ -449,6 +449,9 @@ const externalClientWorkflowPrincipalSchema = z
         externalUserId: externalUserIdSchema,
       }).strict(),
       z.object({
+        kind: z.literal('verified_email_pairing'),
+      }).strict(),
+      z.object({
         kind: z.literal('event_sender_map'),
         clients: z.array(z.object({
           sender: z.string().email().max(320),

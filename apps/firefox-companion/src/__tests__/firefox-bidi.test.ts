@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { FirefoxBidiExecutor, FirefoxBidiError, firefoxBidiInternals } from "../firefox-bidi.js";
+import { ACTION_CURSOR_MARKER } from "../action-cursor.js";
 
 type Listener = (...args: any[]) => void;
 
@@ -89,6 +90,12 @@ describe("[COMP:ext/firefox-companion] Firefox BiDi executor", () => {
     await executor.execute("click", { ref: "@e1" });
     await executor.execute("type", { ref: "@e1", text: "ok" });
     expect(socket.sent.filter((message) => message.method === "input.performActions")).toHaveLength(3);
+    const cursors = socket.sent.filter(
+      (message) => message.method === "script.callFunction"
+        && String(message.params.functionDeclaration).includes(ACTION_CURSOR_MARKER),
+    );
+    expect(cursors.map((message) => (message.params.arguments as Array<{ value: string }>)[0]?.value))
+      .toEqual(["pointer", "typing"]);
     expect(await executor.execute("currentUrl", {})).toEqual({
       url: "https://example.com",
       title: "Example",
@@ -100,6 +107,10 @@ describe("[COMP:ext/firefox-companion] Firefox BiDi executor", () => {
     await executor.execute("takeoverInput", {
       event: { kind: "click", x: 100, y: 50, frameW: 200, frameH: 100 },
     });
+    expect(socket.sent.filter(
+      (message) => message.method === "script.callFunction"
+        && String(message.params.functionDeclaration).includes(ACTION_CURSOR_MARKER),
+    )).toHaveLength(2);
     expect(socket.sent.some((message) => message.method === "browsingContext.captureScreenshot")).toBe(true);
   });
 

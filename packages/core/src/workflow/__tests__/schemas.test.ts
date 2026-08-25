@@ -992,7 +992,7 @@ describe('[COMP:api/client-principal-runtime] external-client definition boundar
     storeOutputAs: 'draft',
   }
 
-  it('accepts a static client and an administrator-authored sender map', () => {
+  it('accepts a static client, verified email pairing, and an administrator-authored sender map', () => {
     const staticResult = WorkflowDefinitionSchema.safeParse({
       startStepId: 'draft',
       principal: {
@@ -1004,6 +1004,18 @@ describe('[COMP:api/client-principal-runtime] external-client definition boundar
       steps: [draftStep],
     })
     expect(staticResult.success).toBe(true)
+
+    const verifiedEmailResult = WorkflowDefinitionSchema.safeParse({
+      startStepId: 'draft',
+      principal: {
+        kind: 'api_external_client',
+        apiKeyId,
+        assistantId: '00000000-0000-4000-8000-000000000011',
+        resolve: { kind: 'verified_email_pairing' },
+      },
+      steps: [draftStep],
+    })
+    expect(verifiedEmailResult.success).toBe(true)
 
     const mapResult = WorkflowDefinitionSchema.safeParse({
       startStepId: 'draft',

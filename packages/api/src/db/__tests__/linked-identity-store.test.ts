@@ -56,6 +56,54 @@ describe('[COMP:api/linked-identity-store] createLinkedIdentityStore', () => {
     })
   })
 
+  describe('findUniqueVerifiedApiClientByEmail', () => {
+    it('binds the lookup to the exact active external chat key and assistant', async () => {
+      mockQuery.mockResolvedValueOnce({
+        rows: [{ providerId: 'studio-client:abc123' }],
+        rowCount: 1,
+      } as never)
+
+      const externalUserId = await store.findUniqueVerifiedApiClientByEmail({
+        apiKeyId: '00000000-0000-4000-8000-000000000010',
+        assistantId: '00000000-0000-4000-8000-000000000011',
+        email: ' Buyer@Customer.Example ',
+      })
+
+      expect(externalUserId).toBe('studio-client:abc123')
+      const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]]
+      expect(sql).toContain("li.provider = 'api:' || k.id::text")
+      expect(sql).toContain("k.status = 'active'")
+      expect(sql).toContain("k.audience = 'external'")
+      expect(sql).toContain("k.scope = 'chat'")
+      expect(sql).toContain("lower(li.metadata->>'email') = $3")
+      expect(sql).not.toContain('FROM entities')
+      expect(params).toEqual([
+        '00000000-0000-4000-8000-000000000010',
+        '00000000-0000-4000-8000-000000000011',
+        'buyer@customer.example',
+      ])
+    })
+
+    it('fails closed for zero or ambiguous distinct pairings', async () => {
+      mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+      expect(await store.findUniqueVerifiedApiClientByEmail({
+        apiKeyId: '00000000-0000-4000-8000-000000000010',
+        assistantId: '00000000-0000-4000-8000-000000000011',
+        email: 'buyer@customer.example',
+      })).toBeNull()
+
+      mockQuery.mockResolvedValueOnce({
+        rows: [{ providerId: 'client-a' }, { providerId: 'client-b' }],
+        rowCount: 2,
+      } as never)
+      expect(await store.findUniqueVerifiedApiClientByEmail({
+        apiKeyId: '00000000-0000-4000-8000-000000000010',
+        assistantId: '00000000-0000-4000-8000-000000000011',
+        email: 'buyer@customer.example',
+      })).toBeNull()
+    })
+  })
+
   describe('upsert', () => {
     it('INSERT ... ON CONFLICT on (provider, provider_id), refreshes user_id + metadata', async () => {
       mockQuery.mockResolvedValueOnce({

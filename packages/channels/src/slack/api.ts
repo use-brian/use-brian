@@ -99,6 +99,24 @@ export type SlackApiOptions = {
   onOutboundAudit?: (event: SlackOutboundAudit) => Promise<void>
 }
 
+/** Provider fields needed to project a Slack thread into model-visible text. */
+export type SlackConversationMessage = {
+  type: string
+  user?: string
+  bot_id?: string
+  text?: string
+  ts: string
+  thread_ts?: string
+  subtype?: string
+}
+
+export type SlackThreadMessages = {
+  /** Root first, followed by replies in chronological order. */
+  messages: SlackConversationMessage[]
+  /** True when the bounded reader omitted provider messages. */
+  truncated: boolean
+}
+
 export function createSlackApi(options: SlackApiOptions) {
   const base = 'https://slack.com/api'
   const onOutboundAudit = options.onOutboundAudit
@@ -133,7 +151,7 @@ export function createSlackApi(options: SlackApiOptions) {
    *    already a member of).
    *
    * Rule: GET-family read methods (`conversations.info` / `.list` /
-   * `.history`, `users.list`) and `files.getUploadURLExternal` go through
+   * `.history` / `.replies`, `users.list`) and `files.getUploadURLExternal` go through
    * here; JSON `call` is only for methods proven to accept it.
    * `undefined`/`null` params are dropped; the rest are stringified.
    */
@@ -362,13 +380,85 @@ export function createSlackApi(options: SlackApiOptions) {
       return { members }
     },
 
-    /** Fetch recent messages from a channel. Requires channels:history scope.
+    /** Fetch recent messages from a channel. Requires the matching history scope.
      *  Form-encoded: GET-family — a JSON body loses the required `channel`. */
-    conversationsHistory: (channel: string, opts?: { limit?: number; latest?: string }) =>
-      callForm<{ messages: Array<{ type: string; user?: string; bot_id?: string; text?: string; ts: string; subtype?: string }> }>(
+    conversationsHistory: (
+      channel: string,
+      opts?: { limit?: number; latest?: string; oldest?: string; inclusive?: boolean },
+    ) =>
+      callForm<{ messages: SlackConversationMessage[] }>(
         'conversations.history',
-        { channel, limit: opts?.limit ?? 20, latest: opts?.latest },
+        {
+          channel,
+          limit: opts?.limit ?? 20,
+          latest: opts?.latest,
+          oldest: opts?.oldest,
+          inclusive: opts?.inclusive,
+        },
       ),
+
+    /**
+     * Read one Slack thread with bounded cursor pagination. Slack returns the
+     * root first; when the requested output window is smaller than the thread,
+     * retain that root plus the newest replies so both the referent and current
+     * discussion survive. The page ceiling prevents an unexpectedly huge
+     * thread from spinning a channel turn indefinitely.
+     *
+     * Slack may reject bot tokens for public/private channel threads even when
+     * the corresponding `*:history` scope is present. The channel route owns
+     * that provider-specific root-only fallback because it can also consult
+     * the locally stored provider-message id; this client reports the rejection
+     * honestly as `SlackApiError`.
+     */
+    conversationsReplies: async (
+      channel: string,
+      threadTs: string,
+      opts?: { limit?: number },
+    ): Promise<SlackThreadMessages> => {
+      const outputLimit = Math.min(Math.max(opts?.limit ?? 50, 1), 100)
+      const pageLimit = Math.max(outputLimit, 100)
+      const collected: SlackConversationMessage[] = []
+      let cursor: string | undefined
+      let providerHasMore = false
+
+      for (let page = 0; page < 10; page++) {
+        const res = await callForm<{
+          messages?: SlackConversationMessage[]
+          has_more?: boolean
+          response_metadata?: { next_cursor?: string }
+        }>('conversations.replies', {
+          channel,
+          ts: threadTs,
+          limit: pageLimit,
+          cursor,
+        })
+        collected.push(...(res.messages ?? []))
+        providerHasMore = res.has_more === true
+        cursor = res.response_metadata?.next_cursor || undefined
+        if (!cursor) break
+      }
+
+      const byTs = new Map<string, SlackConversationMessage>()
+      for (const message of collected) byTs.set(message.ts, message)
+      const chronological = [...byTs.values()].sort((a, b) => a.ts.localeCompare(b.ts))
+      const root = chronological.find((message) => message.ts === threadTs)
+      let messages = chronological
+      if (chronological.length > outputLimit) {
+        if (outputLimit === 1) {
+          messages = root ? [root] : chronological.slice(-1)
+        } else {
+          const newest = chronological
+            .filter((message) => message.ts !== root?.ts)
+            .slice(-(outputLimit - 1))
+          messages = root ? [root, ...newest] : chronological.slice(-outputLimit)
+        }
+      }
+
+      return {
+        messages,
+        truncated: Boolean(cursor) || providerHasMore || chronological.length > messages.length,
+      }
+    },
 
     // ── File upload (external upload flow) ─────────────────────────
     // The three-step replacement for the deprecated `files.upload`:

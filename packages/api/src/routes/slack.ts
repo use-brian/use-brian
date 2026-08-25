@@ -26,8 +26,19 @@
 
 import { Router } from 'express'
 import type { Request } from 'express'
-import { createSlackAdapter, describeSlackError, verifySlackSignature } from '@use-brian/channels'
-import type { IncomingMessage, SlackAdapterConfig } from '@use-brian/channels'
+import {
+  createSlackAdapter,
+  createSlackApi,
+  describeSlackError,
+  isSlackApiError,
+  verifySlackSignature,
+} from '@use-brian/channels'
+import type {
+  IncomingMessage,
+  SlackAdapterConfig,
+  SlackApi,
+  SlackConversationMessage,
+} from '@use-brian/channels'
 import { findAssistantById, findUserById } from '../db/users.js'
 import { query } from '../db/client.js'
 import { withChatLock } from '../db/chat-lock.js'
@@ -57,7 +68,12 @@ import { ensureSlackConnectorInstance } from '../ingest/slack-connector-instance
 import { cacheInboundImageTag } from './channel-file-cache.js'
 import { classifyMedia, buildDocumentFiledReply, buildOversizeDocReply } from '../ingest/channel-media-intake.js'
 import { dispatchReactionFeedback } from '../feedback/reaction-dispatch.js'
-import { buildSlackSessionChannelId } from '../db/sessions.js'
+import {
+  buildSlackSessionChannelId,
+  findSessionByChannel,
+  findSlackVisibleMessageByChannelId,
+  getSessionMessages,
+} from '../db/sessions.js'
 
 /**
  * Pipeline-C ingest port. The Slack webhook stays in the open core; the
@@ -1295,6 +1311,246 @@ export function createSlackReactToMessageTool(args: {
   })
 }
 
+const SLACK_THREAD_ROOT_FALLBACK_CODES: ReadonlySet<string> = new Set([
+  'not_allowed_token_type',
+  'method_not_supported_for_channel_type',
+  'missing_scope',
+  'no_permission',
+  'channel_not_found',
+  'thread_not_found',
+])
+
+type SlackVisibleThreadMessage = SlackConversationMessage & {
+  /** Synthetic label used only when the provider read fell back to one exact stored row. */
+  authorLabel?: string
+}
+
+export type SlackCurrentThreadRead = {
+  messages: SlackVisibleThreadMessage[]
+  truncated: boolean
+  coverage: 'full_thread' | 'root_only'
+  source: 'slack_replies' | 'slack_history' | 'stored_message'
+  /** Diagnosis for a degraded root-only provider read. */
+  providerWarning?: string
+}
+
+function storedSlackMessageText(content: unknown): string {
+  if (typeof content === 'string') return content.trim()
+  if (!Array.isArray(content)) return ''
+  return (content as Array<{ type?: string; text?: string }>)
+    .filter((block) => block?.type === 'text' && typeof block.text === 'string')
+    .map((block) => block.text as string)
+    .join(' ')
+    .trim()
+}
+
+function limitSlackThreadRead(
+  read: SlackCurrentThreadRead,
+  requestedLimit: number,
+): SlackCurrentThreadRead {
+  const limit = Math.min(Math.max(requestedLimit, 1), 100)
+  if (read.messages.length <= limit) return read
+  const root = read.messages[0]
+  const messages = limit === 1
+    ? [root]
+    : [root, ...read.messages.slice(-(limit - 1))]
+  return { ...read, messages, truncated: true }
+}
+
+/**
+ * Read the server-bound current Slack thread. Full replies are preferred. A
+ * known bot-token/channel restriction falls back to the exact thread root,
+ * first through Slack history and then through one exact locally stored
+ * provider-message match. No caller can widen the channel or thread because
+ * both identifiers arrive through this closure, not the model's tool input.
+ */
+export async function readBoundSlackThread(args: {
+  api: Pick<SlackApi, 'conversationsReplies' | 'conversationsHistory'>
+  channelId: string
+  threadTs: string
+  limit?: number
+  findStoredRoot?: () => Promise<{ role: string; content: unknown } | null>
+}): Promise<SlackCurrentThreadRead> {
+  const outputLimit = Math.min(Math.max(args.limit ?? 100, 1), 100)
+  try {
+    const result = await args.api.conversationsReplies(
+      args.channelId,
+      args.threadTs,
+      { limit: outputLimit },
+    )
+    return {
+      messages: result.messages,
+      truncated: result.truncated,
+      coverage: 'full_thread',
+      source: 'slack_replies',
+    }
+  } catch (replyError) {
+    if (
+      !isSlackApiError(replyError)
+      || !SLACK_THREAD_ROOT_FALLBACK_CODES.has(replyError.code)
+    ) {
+      throw replyError
+    }
+
+    const providerWarning =
+      `Slack did not grant a full reply-thread read. ${describeSlackError(replyError)}`
+    let fallbackError: unknown = replyError
+    try {
+      const history = await args.api.conversationsHistory(args.channelId, {
+        oldest: args.threadTs,
+        latest: args.threadTs,
+        inclusive: true,
+        limit: 1,
+      })
+      const root = history.messages.find((message) => message.ts === args.threadTs)
+      if (root) {
+        return {
+          messages: [root],
+          truncated: true,
+          coverage: 'root_only',
+          source: 'slack_history',
+          providerWarning,
+        }
+      }
+    } catch (historyError) {
+      fallbackError = historyError
+    }
+
+    try {
+      const stored = await args.findStoredRoot?.()
+      const text = storedSlackMessageText(stored?.content)
+      if (stored && text) {
+        return {
+          messages: [{
+            type: 'message',
+            ts: args.threadTs,
+            text,
+            authorLabel: stored.role === 'assistant'
+              ? 'Assistant (stored visible message)'
+              : 'Slack user (stored visible message)',
+          }],
+          truncated: true,
+          coverage: 'root_only',
+          source: 'stored_message',
+          providerWarning,
+        }
+      }
+    } catch {
+      // The provider diagnosis is more actionable than a best-effort local DB
+      // fallback failure, so keep the provider error as the terminal result.
+    }
+
+    throw fallbackError
+  }
+}
+
+const SLACK_THREAD_CONTEXT_CHAR_CAP = 24_000
+const SLACK_THREAD_MESSAGE_CHAR_CAP = 4_000
+
+/** Project Slack's provider objects into bounded, explicitly untrusted text. */
+export function formatSlackThreadSnapshot(
+  read: SlackCurrentThreadRead,
+  opts?: { excludeMessageTs?: string | null },
+): string | null {
+  const messages = read.messages
+    .filter((message) => message.ts !== opts?.excludeMessageTs)
+    .filter((message) => typeof message.text === 'string' && message.text.trim().length > 0)
+  if (messages.length === 0) return null
+
+  const coverage = read.coverage === 'full_thread'
+    ? 'Coverage: provider thread snapshot.'
+    : 'Coverage: root message only. Slack did not grant a full reply read; do not treat this as complete thread history.'
+  const lines = ['# Current Slack thread', coverage]
+  let length = lines.join('\n\n').length
+  let omittedForSize = false
+
+  for (const message of messages) {
+    const speaker = message.authorLabel
+      ?? (message.bot_id
+        ? `Slack bot ${message.bot_id}`
+        : message.user
+          ? `Slack user ${message.user}`
+          : 'Slack message')
+    const normalized = message.text!.replace(/\s+/g, ' ').trim()
+    const text = normalized.length > SLACK_THREAD_MESSAGE_CHAR_CAP
+      ? `${normalized.slice(0, SLACK_THREAD_MESSAGE_CHAR_CAP)}...`
+      : normalized
+    const line = `- [${message.ts}] ${speaker}: ${text}`
+    if (length + line.length + 2 > SLACK_THREAD_CONTEXT_CHAR_CAP) {
+      omittedForSize = true
+      break
+    }
+    lines.push(line)
+    length += line.length + 1
+  }
+
+  if (read.truncated || omittedForSize) {
+    lines.push('[Additional visible Slack messages were omitted by the bounded reader.]')
+  }
+  if (read.providerWarning) lines.push(`Provider note: ${read.providerWarning}`)
+  return lines.join('\n\n')
+}
+
+/** Read-only tool exposed only on a threaded Slack turn. */
+export function createSlackReadCurrentThreadTool(args: {
+  readThread: (limit: number) => Promise<SlackCurrentThreadRead>
+}): Tool {
+  return buildTool({
+    name: 'readCurrentSlackThread',
+    description:
+      'Read the visible messages in this current Slack thread. Use it when the user refers to messages above, earlier discussion, or a vague referent whose context is missing. The server fixes the Slack channel and thread; this tool cannot inspect another conversation.',
+    inputSchema: z.object({
+      limit: z.number().int().min(1).max(100).optional()
+        .describe('Maximum visible messages to return. Defaults to 50.'),
+    }),
+    isConcurrencySafe: true,
+    isReadOnly: true,
+    async execute(input) {
+      try {
+        const read = await args.readThread(input.limit ?? 50)
+        const snapshot = formatSlackThreadSnapshot(read)
+        return {
+          data: snapshot
+            ?? 'Slack read the current thread successfully, but it contained no visible text messages.',
+        }
+      } catch (err) {
+        return {
+          data:
+            `The current Slack thread could not be read, so its history is unknown. ${describeSlackError(err)} ` +
+            'Do not claim the thread is empty and do not infer what the missing messages said.',
+          isError: true,
+        }
+      }
+    },
+  })
+}
+
+/**
+ * Fetch one provider snapshot only for a new/empty exact thread session. The
+ * result is returned for the current prompt envelope and is never inserted as
+ * authored `session_messages` history.
+ */
+export async function loadSlackThreadBootstrapContext(args: {
+  findSession: () => Promise<{ id: string } | null>
+  listSessionMessages: (sessionId: string) => Promise<unknown[]>
+  readThread: () => Promise<SlackCurrentThreadRead>
+  incomingMessageId?: string | null
+}): Promise<{ context: string | null; read: SlackCurrentThreadRead | null }> {
+  const session = await args.findSession()
+  if (session) {
+    const messages = await args.listSessionMessages(session.id)
+    if (messages.length > 0) return { context: null, read: null }
+  }
+
+  const read = await args.readThread()
+  return {
+    context: formatSlackThreadSnapshot(read, {
+      excludeMessageTs: args.incomingMessageId,
+    }),
+    read,
+  }
+}
+
 async function processMessage(params: ProcessMessageParams): Promise<void> {
   const { adapter, incoming, assistant, channelUserId, ownerId, isIdentified, threadTs, botToken, ingestChannelMediaRef } = params
   const threadOpts = threadTs ? { threadTs } : undefined
@@ -1443,8 +1699,87 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     return
   }
 
-  // ── Slack-specific: reactToMessage tool ──
+  // ── Slack-specific: provider-visible thread recovery + reaction tools ──
   const extraTools = new Map(params.tools)
+  let providerVisibleContext: string | null = null
+  if (threadTs) {
+    const slackApi = createSlackApi({ botToken })
+    let cachedThreadRead: Promise<SlackCurrentThreadRead> | null = null
+    const readThread = async (limit: number): Promise<SlackCurrentThreadRead> => {
+      cachedThreadRead ??= readBoundSlackThread({
+        api: slackApi,
+        channelId: incoming.channelId,
+        threadTs,
+        // Fetch the maximum once; the automatic snapshot and a later tool call
+        // share it, then each caller receives its own bounded projection.
+        limit: 100,
+        findStoredRoot: async () => {
+          const stored = await findSlackVisibleMessageByChannelId({
+            assistantId: assistant.id,
+            channelId: incoming.channelId,
+            channelMessageId: threadTs,
+          })
+          return stored ? { role: stored.role, content: stored.content } : null
+        },
+      })
+      return limitSlackThreadRead(await cachedThreadRead, limit)
+    }
+
+    extraTools.set(
+      'readCurrentSlackThread',
+      createSlackReadCurrentThreadTool({ readThread }),
+    )
+
+    // A top-level message is itself a brand-new thread root, so there cannot
+    // be anything above it to hydrate. Replies carry the root ts and are the
+    // only turns where an empty exact session can represent a cutover.
+    if (incoming.replyToMessageId) {
+      try {
+        const bootstrap = await loadSlackThreadBootstrapContext({
+          findSession: () => findSessionByChannel({
+            assistantId: assistant.id,
+            userId: channelUserId,
+            channelType: 'slack',
+            channelId: params.sessionChannelId,
+          }),
+          listSessionMessages: (sessionId) => getSessionMessages(sessionId, { limit: 1 }),
+          readThread: () => readThread(50),
+          incomingMessageId: incoming.messageId,
+        })
+        providerVisibleContext = bootstrap.context
+        if (bootstrap.read?.coverage === 'root_only') {
+          console.warn(
+            `[slack] thread context hydration degraded to root-only (${bootstrap.read.source}):`,
+            bootstrap.read.providerWarning,
+          )
+          params.analytics?.logEvent({
+            userId: channelUserId,
+            assistantId: assistant.id,
+            eventName: 'slack_thread_context_hydration_degraded',
+            channelType: 'slack',
+            metadata: {
+              source: sanitizeAnalytics(bootstrap.read.source),
+              error_message: sanitizeAnalytics((bootstrap.read.providerWarning ?? '').slice(0, 200)),
+            },
+          })
+        }
+      } catch (err) {
+        const diagnosis = describeSlackError(err)
+        console.warn('[slack] thread context hydration failed; continuing without snapshot:', diagnosis)
+        params.analytics?.logEvent({
+          userId: channelUserId,
+          assistantId: assistant.id,
+          eventName: 'slack_thread_context_hydration_failed',
+          channelType: 'slack',
+          metadata: {
+            error_type: sanitizeAnalytics((err as Error)?.name ?? 'unknown'),
+            error_message: sanitizeAnalytics(diagnosis.slice(0, 200)),
+          },
+        })
+      }
+    }
+  }
+
   const reactToMessage = createSlackReactToMessageTool({
     adapter,
     channelId: incoming.channelId,
@@ -1498,6 +1833,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     actorChannelId: incoming.userId, // Slack user id (e.g. U0123) → X-Sidanclaw-Actor-Id
     messageText: incoming.text,
     userContentBlocks,
+    providerVisibleContext,
     // Raw paste for the large-paste intercept (Slack has no prefix wrapper).
     rawUserText: incoming.text ?? '',
     isGroupChat: incoming.isGroupChat,

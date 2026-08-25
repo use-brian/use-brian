@@ -15,6 +15,12 @@ vi.mock('@use-brian/channels', () => {
       editMessage,
       handleEvent,
     })),
+    createSlackApi: vi.fn(() => ({
+      conversationsReplies: vi.fn(async () => ({ messages: [], truncated: false })),
+      conversationsHistory: vi.fn(async () => ({ messages: [] })),
+    })),
+    describeSlackError: vi.fn((err: unknown) => err instanceof Error ? err.message : String(err)),
+    isSlackApiError: vi.fn(() => false),
     verifySlackSignature: vi.fn(),
     __mocks: { sendMessage, sendStatus, editMessage, handleEvent },
   }
@@ -41,6 +47,8 @@ vi.mock('../../billing-party.js', () => ({
 vi.mock('../../db/sessions.js', () => ({
   buildSlackSessionChannelId: (channelId: string, threadTs?: string | null) =>
     threadTs ? `${channelId}:thread:${threadTs}` : channelId,
+  findSessionByChannel: vi.fn(async () => null),
+  findSlackVisibleMessageByChannelId: vi.fn(async () => null),
   findOrCreateSession: vi.fn(),
   addSessionMessage: vi.fn(),
   toStampedMessages: vi.fn((msgs: Array<{ role: string; content: unknown }>) => msgs.map((m) => ({ role: m.role, content: m.content }))),

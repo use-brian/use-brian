@@ -1305,6 +1305,41 @@ export async function findSessionMessageByChannelId(
 }
 
 /**
+ * Find the visible Slack message carrying one exact provider timestamp across
+ * the bare-channel and thread-qualified session shapes. This is deliberately
+ * narrower than a transcript search: it is the compatibility fallback for a
+ * session-key cutover where the current thread session cannot resolve its root
+ * but an older session stored that same Slack message id.
+ *
+ * The lookup stays bound to the current assistant and bare Slack channel. It
+ * never accepts a model-provided target and never returns neighbouring rows
+ * from the legacy channel-wide session (which could belong to another thread).
+ */
+export async function findSlackVisibleMessageByChannelId(params: {
+  assistantId: string
+  channelId: string
+  channelMessageId: string
+}): Promise<Pick<SessionMessage, 'role' | 'content' | 'channelMessageId'> | null> {
+  const result = await query<Pick<SessionMessage, 'role' | 'content' | 'channelMessageId'>>(
+    `SELECT sm.role, sm.content,
+            sm.channel_message_id as "channelMessageId"
+     FROM session_messages sm
+     JOIN sessions s ON s.id = sm.session_id
+     WHERE s.assistant_id = $1
+       AND s.channel_type = 'slack'
+       AND (
+         s.channel_id = $2
+         OR s.channel_id LIKE $2 || ':thread:%'
+       )
+       AND sm.channel_message_id = $3
+     ORDER BY sm.created_at DESC
+     LIMIT 1`,
+    [params.assistantId, params.channelId, params.channelMessageId],
+  )
+  return result.rows[0] ?? null
+}
+
+/**
  * Delete a message and all subsequent messages in the session
  * (by sequence_num). Used for retry/edit — destroy-and-regenerate semantics.
  *

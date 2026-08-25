@@ -31,7 +31,10 @@
 
 import type { AnalyticsLogger } from '@use-brian/core'
 import { clientCompartment, sanitize as sanitizeAnalytics } from '@use-brian/core'
-import { getOrCreateClientContactEntity } from '../db/entities-store.js'
+import {
+  getOrCreateClientContactAndLeadEntities,
+  getOrCreateClientContactEntity,
+} from '../db/entities-store.js'
 import { isExternalPrincipal } from '../db/external-principal.js'
 import { createLinkedIdentityStore } from '../db/linked-identity-store.js'
 
@@ -49,6 +52,8 @@ export type ClientAccrualInput = {
   email?: string | null
   orgId?: string | null
   identified: boolean
+  /** Explicit deterministic CRM handoff. Failures are request-fatal. */
+  clientLead?: { key: string; name?: string }
   analytics?: AnalyticsLogger
   ownerId: string
 }
@@ -82,14 +87,30 @@ export async function accrueClientPrincipal(input: ClientAccrualInput): Promise<
   // they do cause to be written stays walled off from other clients.
   if (!input.identified || !input.workspaceId) return { compartments, contactEntityId: null }
 
-  try {
-    const contact = await getOrCreateClientContactEntity({
-      userId: input.user.id,
-      workspaceId: input.workspaceId,
-      displayName: input.externalUserName ?? input.user.name ?? input.email ?? input.externalUserId,
-      externalUserId: input.externalUserId,
-      email: input.email ?? null,
+  const contactParams = {
+    userId: input.user.id,
+    workspaceId: input.workspaceId,
+    displayName: input.externalUserName ?? input.user.name ?? input.email ?? input.externalUserId,
+    externalUserId: input.externalUserId,
+    email: input.email ?? null,
+  }
+
+  // An explicit lead handoff is part of the caller-visible contract. Contact
+  // and lead are one transaction, and any subsequent pairing failure bubbles
+  // so a retry can complete idempotently instead of reporting false success.
+  if (input.clientLead) {
+    const { contact } = await getOrCreateClientContactAndLeadEntities({
+      ...contactParams,
+      assistantId: input.assistantId,
+      identityNamespace: input.identityNamespace,
+      lead: input.clientLead,
     })
+    await recordPairing(input, contact.id)
+    return { compartments, contactEntityId: contact.id }
+  }
+
+  try {
+    const contact = await getOrCreateClientContactEntity(contactParams)
 
     await recordPairing(input, contact.id)
 

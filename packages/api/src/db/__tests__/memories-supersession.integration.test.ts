@@ -13,7 +13,12 @@ import pg from 'pg'
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({
+    ...(process.env.DATABASE_URL
+      ? { connectionString: process.env.DATABASE_URL }
+      : { database: 'sidanclaw' }),
+    connectionTimeoutMillis: 2000,
+  })
   try {
     const client = await p.connect()
     try {
@@ -127,6 +132,7 @@ describeIf('[COMP:memory/supersession] updateMemory (transactional supersession)
       detail: 'original detail',
       sensitivity: 'internal',
       tags: ['a', 'b'],
+      compartments: ['client:studio-client:alice'],
       confidence: 0.7,
       createdByUserId: userId,
       createdByAssistantId: assistantId,
@@ -137,6 +143,7 @@ describeIf('[COMP:memory/supersession] updateMemory (transactional supersession)
     expect(updated!.tags).toEqual(['a', 'b'])
     expect(updated!.confidence).toBeCloseTo(0.7)
     expect(updated!.sensitivity).toBe('internal')
+    expect(updated!.compartments).toEqual(['client:studio-client:alice'])
     expect(updated!.assistantId).toBe(assistantId)
     expect(updated!.userId).toBe(userId)
   })

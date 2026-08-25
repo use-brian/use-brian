@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { z } from 'zod'
 import {
   advanceWorkflowRun,
@@ -398,12 +398,94 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
     expect(consulted).toBe(false)
   })
 
-  it('[COMP:api/client-principal-runtime] keeps the frozen client after the definition changes', () => {
+  it('[COMP:api/client-principal-runtime] resolves one verified email pairing before any consult work', async () => {
+    const stores = makeFakeStores()
+    const resolveVerifiedClientEmail = vi.fn(async () => 'studio-client:abc123')
+    const requests: ConsultRequest[] = []
+    const deps: ExecutorDeps = {
+      workflowStore: stores.workflowStore,
+      runStore: stores.runStore,
+      consultTransport: {
+        async send(request) {
+          requests.push(request)
+          return makeConsultTransport({ responseText: 'Exact-client draft' }).send(request)
+        },
+      },
+      resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
+      buildToolRegistry: async () => new Map(),
+      resolveVerifiedClientEmail,
+    }
+    const definition: WorkflowDefinition = {
+      startStepId: 'draft',
+      principal: {
+        kind: 'api_external_client',
+        apiKeyId: '00000000-0000-4000-8000-000000000010',
+        assistantId: PRIMARY_ASSISTANT_ID,
+        resolve: { kind: 'verified_email_pairing' },
+      },
+      steps: [{
+        id: 'draft',
+        type: 'assistant_call',
+        target: { assistantId: 'primary' },
+        prompt: 'Draft a reply',
+      }],
+    }
+    const { run } = await seedWorkflowAndRun(deps, definition, 'event', {
+      event: { sender: ' Buyer@Customer.Example ' },
+    })
+
+    const outcome = await advanceWorkflowRun(deps, run.id)
+
+    expect(outcome.kind).toBe('completed')
+    expect(resolveVerifiedClientEmail).toHaveBeenCalledWith({
+      apiKeyId: '00000000-0000-4000-8000-000000000010',
+      assistantId: PRIMARY_ASSISTANT_ID,
+      email: 'buyer@customer.example',
+    })
+    expect(requests[0].externalClientPrincipal?.externalUserId).toBe('studio-client:abc123')
+  })
+
+  it('[COMP:api/client-principal-runtime] fails a missing or ambiguous verified pairing before registry construction', async () => {
+    let registryBuilt = false
+    const deps = makeDeps({
+      resolveVerifiedClientEmail: async () => null,
+      buildToolRegistry: async () => {
+        registryBuilt = true
+        return new Map()
+      },
+    })
+    const definition: WorkflowDefinition = {
+      startStepId: 'draft',
+      principal: {
+        kind: 'api_external_client',
+        apiKeyId: '00000000-0000-4000-8000-000000000010',
+        assistantId: PRIMARY_ASSISTANT_ID,
+        resolve: { kind: 'verified_email_pairing' },
+      },
+      steps: [{
+        id: 'draft',
+        type: 'assistant_call',
+        target: { assistantId: 'primary' },
+        prompt: 'Draft a reply',
+      }],
+    }
+    const { run } = await seedWorkflowAndRun(deps, definition, 'event', {
+      event: { sender: 'buyer@customer.example' },
+    })
+
+    const outcome = await advanceWorkflowRun(deps, run.id)
+
+    expect(outcome.kind).toBe('failed')
+    if (outcome.kind === 'failed') expect(outcome.error.reason).toBe('client_principal_unresolved')
+    expect(registryBuilt).toBe(false)
+  })
+
+  it('[COMP:api/client-principal-runtime] keeps the frozen client after the definition changes', async () => {
     const frozen = {
       apiKeyId: '00000000-0000-4000-8000-000000000010',
       externalUserId: 'client-17',
     }
-    const resolved = resolveExternalClientWorkflowPrincipal(
+    const resolved = await resolveExternalClientWorkflowPrincipal(
       {
         startStepId: 'draft',
         principal: {

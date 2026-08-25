@@ -37,6 +37,7 @@ export type Memory = {
   detail: string | null
   confidence: number
   sensitivity: Sensitivity
+  compartments: string[]
   source: string
   sourceSessionId: string | null
   recallCount: number
@@ -71,7 +72,7 @@ export type Memory = {
 const MEMORY_SELECT = `
   id, assistant_id as "assistantId", user_id as "userId", app_id as "appId",
   workspace_id as "workspaceId",
-  scope, tags, summary, detail, confidence, sensitivity, source,
+  scope, tags, summary, detail, confidence, sensitivity, compartments, source,
   source_session_id as "sourceSessionId",
   recall_count as "recallCount", useful_recall_count as "usefulRecallCount",
   last_recalled_at as "lastRecalledAt",
@@ -258,8 +259,9 @@ export async function createMemory(
  * (`valid_to=now()`, `superseded_by=<new_id>`) and a new row carrying the
  * merged fields is inserted with `valid_from=now()` and a fresh UUID.
  *
- * The new row inherits the old row's authorship, visibility, source, and
- * audit columns; only the fields explicitly passed in `updates` change.
+ * The new row inherits the old row's authorship, visibility (including its
+ * non-declassifying compartment/category wall), source, and audit columns;
+ * only the fields explicitly passed in `updates` change.
  * Operational counters (recall_count, useful_recall_count, last_recalled_at,
  * query_hashes, recall_days) reset on the new row — they track usage of
  * this version of the assertion, not the underlying fact. Consolidation
@@ -343,9 +345,9 @@ export async function updateMemory(
            created_by_user_id, created_by_assistant_id, source_episode_id,
            verified_by_user_id, verified_at,
            original_scope, original_sensitivity, original_summary,
-           valid_from
+           compartments, valid_from
          )
-         VALUES ($1, $2, $3, COALESCE($4, (SELECT workspace_id FROM assistants WHERE id = $1)), $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, now())
+         VALUES ($1, $2, $3, COALESCE($4, (SELECT workspace_id FROM assistants WHERE id = $1)), $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, now())
          RETURNING ${MEMORY_SELECT}`,
         [
           old.assistantId, old.userId, old.appId, next.workspaceId,
@@ -354,6 +356,7 @@ export async function updateMemory(
           old.createdByUserId, old.createdByAssistantId, old.sourceEpisodeId,
           old.verifiedByUserId, old.verifiedAt,
           old.originalScope, old.originalSensitivity, old.originalSummary,
+          old.compartments,
         ],
       )
       const newRow = insertResult.rows[0]
@@ -566,6 +569,7 @@ export async function getIdentityMemories(ctx: AccessContext): Promise<Memory[]>
       detail: null,
       confidence: 1.0,
       sensitivity: self.sensitivity,
+      compartments: [],
       source: 'user',
       sourceSessionId: null,
       recallCount: 0,

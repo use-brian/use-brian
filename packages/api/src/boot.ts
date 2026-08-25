@@ -354,6 +354,7 @@ import { ingestRoutes } from './routes/ingest.js'
 import { processChannelMessage } from './routes/channel-pipeline.js'
 import { loadConnectorRegistry } from './registry/load-registry.js'
 import { createDbLinkedAccountStore } from './db/linked-accounts.js'
+import { createLinkedIdentityStore } from './db/linked-identity-store.js'
 import { createChannelRouteStore } from './db/channel-route-store.js'
 import { createDbLinkCodeStore } from './db/link-codes.js'
 import { optionalAuth, requireAuth } from './auth/middleware.js'
@@ -1859,6 +1860,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   const channelRouteStore = createChannelRouteStore()
   const linkedAccountStore = createDbLinkedAccountStore()
+  const linkedIdentityStore = createLinkedIdentityStore()
   const linkCodeStore = createDbLinkCodeStore()
 
   // Telegram-linked notify + bot-username memo (only with a bot token).
@@ -2644,6 +2646,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     consultTransport,
     resolvePrimary: resolvePrimaryAssistantForWorkspace,
     sendPage: sendPagePort,
+    resolveVerifiedClientEmail: ({ apiKeyId, assistantId, email }) =>
+      linkedIdentityStore.findUniqueVerifiedApiClientByEmail({ apiKeyId, assistantId, email }),
     buildToolRegistry: ({ workspaceId, assistantId, userId }) => buildWorkflowToolRegistry(
       {
         firstParty: allTools,

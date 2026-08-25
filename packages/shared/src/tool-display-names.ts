@@ -302,6 +302,7 @@ const TOOL_STATUS_NAMES: Record<string, string> = {
   notionCreatePage: 'Creating a Notion page',
   useSkill: 'Using a skill',
   shareCurrentWorkToWorkspace: 'Creating a workspace chat',
+  readCurrentSlackThread: 'Reading the Slack thread',
   // Browser / computer-use. These are fallbacks before the input arrives;
   // `describeToolInput` overrides the URL-carrying ones with the page host
   // ("Browsing news.ycombinator.com") so the timeline says WHERE, not just WHAT.

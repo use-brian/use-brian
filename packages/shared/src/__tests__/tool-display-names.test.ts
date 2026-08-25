@@ -43,4 +43,8 @@ describe('[COMP:shared/tool-display-names] channel tool-status labels', () => {
       expect(humanizeToolName('someNewTool')).toBe('Some New Tool')
     })
   })
+
+  it('labels the server-scoped Slack history reader plainly', () => {
+    expect(humanizeToolName('readCurrentSlackThread')).toBe('Reading the Slack thread')
+  })
 })

@@ -102,6 +102,17 @@ import {
 // seams from public-turn before the reusable principal runtime was extracted.
 export { applyPublicResearchToolCeiling, resolveClientSelfMemory } from './client-principal-runtime.js'
 
+export function shouldExposeSaveMemoryTool(params: {
+  isIdentified: boolean
+  externalPrincipal: boolean
+  hasClientSelfMemory: boolean
+  hasDeterministicClientMemory: boolean
+}): boolean {
+  return params.isIdentified
+    && (!params.externalPrincipal || params.hasClientSelfMemory)
+    && !params.hasDeterministicClientMemory
+}
+
 /** Everything the pipeline needs — a structural subset of
  *  `PublicApiRouteOptions`, so `public-api.ts` passes its options
  *  object straight through. */
@@ -232,6 +243,11 @@ export type PublicTurnBody = {
     summary: string
     detail?: string
     tags?: string[]
+  }
+  /** Deterministic CRM handoff; contact + lead are ensured transactionally. */
+  clientLead?: {
+    key: string
+    name?: string
   }
   /** Public-research-key tools are withheld unless this turn opts in. */
   allowPublicResearch?: boolean
@@ -601,6 +617,14 @@ export async function executePublicTurn(
       'clientMemory requires an identified external client and a non-primary assistant with internal clearance',
     )
   }
+  if (body.clientLead && (!externalPrincipal || !isIdentified || !claimedEmail || !assistant.workspaceId)) {
+    return fail(
+      res,
+      400,
+      'invalid_input',
+      'clientLead requires an identified external client with a verified email and workspace',
+    )
+  }
 
   // Ensure the user appears in the assistant's member list — same
   // pattern as resolveChannelUser. Lets the owner see who's been
@@ -634,6 +658,7 @@ export async function executePublicTurn(
         email: claimedEmail ?? null,
         orgId: body.claims?.orgId ?? null,
         identified: isIdentified,
+        clientLead: body.clientLead,
         analytics: deps.analytics,
         ownerId,
       })
@@ -889,7 +914,12 @@ export async function executePublicTurn(
   }
 
   const { saveMemory, getMemory } = createMemoryTools(deps.memoryStore)
-  if (isIdentified && (!externalPrincipal || clientSelfMemory)) {
+  if (shouldExposeSaveMemoryTool({
+    isIdentified,
+    externalPrincipal,
+    hasClientSelfMemory: !!clientSelfMemory,
+    hasDeterministicClientMemory: !!body.clientMemory,
+  })) {
     baseTools.set('saveMemory', saveMemory)
   }
   if (isIdentified || fullScope) {
