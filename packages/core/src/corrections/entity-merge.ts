@@ -68,6 +68,8 @@ export interface EntityMergeSnapshot {
   entityId: string
   displayName: string
   attributes: Record<string, unknown>
+  /** Optional for backward compatibility with merge snapshots created before alias capture. */
+  aliases?: readonly string[]
   tags: readonly string[]
   validTo: Date | null
   supersededBy: string | null
@@ -97,6 +99,7 @@ export type MergeFailureCode =
   | 'entity_inactive'
   | 'self_merge'
   | 'conflict_requires_resolution'
+  | 'alias_conflict'
 
 export type UndoFailureCode =
   | 'merge_not_found'
@@ -132,6 +135,7 @@ export interface ApplyMergeInput {
   mergedBy: string
   reason: string | null
   reconciledAttributes: Record<string, unknown>
+  reconciledAliases: readonly string[]
   reconciledTags: readonly string[]
   mergedAttributesSnapshot: EntityMergeSnapshot
   survivingAttributesPreMerge: EntityMergeSnapshot
@@ -154,6 +158,13 @@ export interface EntityMergeRepository {
     workspaceId: string,
     entityId: string,
   ): Promise<EntityMergeSnapshot | null>
+
+  /** Return the id of a third live entity claiming one of the learned aliases. */
+  findLiveAliasConflict?(
+    workspaceId: string,
+    excludedIds: readonly string[],
+    aliases: readonly string[],
+  ): Promise<string | null>
 
   applyMerge(input: ApplyMergeInput): Promise<EntityMergeRecord>
 
@@ -378,6 +389,26 @@ export function reconcileTags(
   return out
 }
 
+/**
+ * A confirmed merge teaches the survivor every name previously attached to
+ * the merged-away record. Aliases are stored lowercase and never repeat the
+ * survivor's display name.
+ */
+export function reconcileAliases(
+  survivorDisplayName: string,
+  survivorAliases: readonly string[],
+  mergedDisplayName: string,
+  mergedAliases: readonly string[],
+): readonly string[] {
+  const survivorName = survivorDisplayName.trim().toLowerCase()
+  const out = new Set<string>()
+  for (const value of [...survivorAliases, mergedDisplayName, ...mergedAliases]) {
+    const alias = value.trim().toLowerCase()
+    if (alias && alias !== survivorName) out.add(alias)
+  }
+  return [...out]
+}
+
 const UNDO_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 
 export function isWithinUndoWindow(mergedAt: Date, now: Date): boolean {
@@ -442,6 +473,28 @@ export async function mergeEntities(
   }
 
   const reconciledTags = reconcileTags(survivor.tags, mergedAway.tags)
+  const survivorAliases = survivor.aliases ?? []
+  const reconciledAliases = reconcileAliases(
+    survivor.displayName,
+    survivorAliases,
+    mergedAway.displayName,
+    mergedAway.aliases ?? [],
+  )
+  const existingAliases = new Set(survivorAliases.map((alias) => alias.trim().toLowerCase()))
+  const learnedAliases = reconciledAliases.filter((alias) => !existingAliases.has(alias))
+  if (learnedAliases.length > 0 && deps.repo.findLiveAliasConflict) {
+    const conflictId = await deps.repo.findLiveAliasConflict(
+      args.workspaceId,
+      [args.survivingId, args.mergedId],
+      learnedAliases,
+    )
+    if (conflictId) {
+      throw new EntityMergeError(
+        'alias_conflict',
+        'a learned alias is already claimed by another live entity',
+      )
+    }
+  }
   const cascadeRequested = args.cascade ?? true
   const cascadeApplied = cascadeRequested && args.specializationPointer != null
 
@@ -452,6 +505,7 @@ export async function mergeEntities(
     mergedBy: args.actorUserId,
     reason: args.reason ?? null,
     reconciledAttributes,
+    reconciledAliases,
     reconciledTags,
     mergedAttributesSnapshot: mergedAway,
     survivingAttributesPreMerge: survivor,

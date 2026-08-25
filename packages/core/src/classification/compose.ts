@@ -74,6 +74,15 @@ export type ComposeExecutorDeps = {
 
 const CRM_KINDS = new Set(['person', 'company', 'deal'])
 
+function stableExternalRef(attributes: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  const value = attributes?.external_ref
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const ref = value as Record<string, unknown>
+  if (typeof ref.provider !== 'string' || !ref.provider.trim()
+    || typeof ref.id !== 'string' || !ref.id.trim()) return undefined
+  return ref
+}
+
 export function createComposeExecutor(deps: ComposeExecutorDeps): ComposeExecutor {
   return {
     async write(writes, ctx) {
@@ -210,6 +219,7 @@ async function writeCrmEntity(
         workspaceId: ctx.workspaceId,
         name: ent.display_name,
         email,
+        externalRef: stableExternalRef(ent.attributes),
         // Extraction provenance — previously omitted, so compose-written
         // CRM rows landed source='user' with no episode back-edge while the
         // non-CRM branch stamped both (2026-07-10 source audit).
@@ -217,14 +227,14 @@ async function writeCrmEntity(
         sourceEpisodeId: ctx.sourceEpisodeId ?? null,
         createdByAssistantId: ctx.assistantId ?? null,
       })
-      return resolveCrmEntityId(deps, ctx, ent.display_name, ent.canonical_id ?? null, 'person')
+      return contact.id
     }
     case 'company': {
       const domain =
         typeof ent.canonical_id === 'string' && !ent.canonical_id.includes('@')
           ? ent.canonical_id
           : (ent.attributes?.domain as string | undefined) ?? null
-      await deps.crm.createCompany({
+      const company = await deps.crm.createCompany({
         userId: ctx.actorUserId,
         workspaceId: ctx.workspaceId,
         name: ent.display_name,
@@ -234,7 +244,7 @@ async function writeCrmEntity(
         sourceEpisodeId: ctx.sourceEpisodeId ?? null,
         createdByAssistantId: ctx.assistantId ?? null,
       })
-      return resolveCrmEntityId(deps, ctx, ent.display_name, domain, 'company')
+      return company.id
     }
     case 'deal': {
       const deal = await deps.crm.createDeal({
@@ -245,47 +255,11 @@ async function writeCrmEntity(
         sourceEpisodeId: ctx.sourceEpisodeId ?? null,
         createdByAssistantId: ctx.assistantId ?? null,
       })
-      // Deals don't have a name column on the specialization row; the
-      // entity row is the addressable one. CRM.createDeal writes both
-      // atomically; we resolve to the entity by display_name fallback.
-      return resolveCrmEntityId(deps, ctx, ent.display_name, null, 'deal')
+      return deal.id
     }
     default:
       throw new Error(`[classification/compose] CRM_KINDS includes unhandled kind: ${ent.kind}`)
   }
-}
-
-/**
- * CRM tools return specialization records, not entity rows. We resolve
- * the entity id by name (and canonical_id when present) via the system
- * lookup. Best-effort — returns the first match.
- */
-async function resolveCrmEntityId(
-  deps: ComposeExecutorDeps,
-  ctx: CompositionContext,
-  displayName: string,
-  canonicalId: string | null,
-  kind: 'person' | 'company' | 'deal',
-): Promise<string> {
-  if (canonicalId) {
-    const byCanonical = await deps.entities.findByCanonicalIdSystem(
-      ctx.actorUserId,
-      ctx.workspaceId,
-      canonicalId,
-    )
-    const live = byCanonical.find((e) => e.kind === kind && e.retractedAt === null && e.validTo === null)
-    if (live) return live.id
-  }
-  const byName = await deps.entities.findByNameSystem(
-    ctx.actorUserId,
-    ctx.workspaceId,
-    displayName,
-    { kind },
-  )
-  if (byName) return byName.id
-  throw new Error(
-    `[classification/compose] could not resolve CRM entity row for ${kind} "${displayName}" — CRM write may have failed`,
-  )
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────

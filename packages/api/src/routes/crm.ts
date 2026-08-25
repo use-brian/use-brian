@@ -25,7 +25,7 @@ import {
   updateDeal,
 } from '../db/crm.js'
 import { getEntityById, updateEntity } from '../db/entities-store.js'
-import { createEntityMergeStore } from '../db/entity-merge-store.js'
+import { createEntityMergeStore, EntityMergeStoreError } from '../db/entity-merge-store.js'
 import {
   CRM_FIELD_TYPES,
   CRM_PRESET_IDS,
@@ -589,7 +589,9 @@ export function crmRoutes({ workspaceStore, entityLinks }: RouteOptions): Router
         }
         if (contactId) {
           const contact = await getEntityById(member.ctx, contactId)
-          if (!contact || contact.kind !== 'person') throw new Error('contactId must reference a visible contact in this workspace')
+          if (!contact || contact.kind !== 'person' || contact.attributes.self === true) {
+            throw new Error('contactId must reference a visible CRM contact in this workspace')
+          }
         }
         const amount = hasOwn(body, 'amount') ? finiteNumber(body.amount) : undefined
         if (hasOwn(body, 'amount') && amount === undefined) throw new Error('amount must be a finite number or null')
@@ -843,7 +845,8 @@ export function crmRoutes({ workspaceStore, entityLinks }: RouteOptions): Router
     const member = await memberContext(req as never, res)
     if (!member) return
     const entity = await getEntityById(member.ctx, req.params.entityId)
-    if (!entity || !CRM_KINDS.has(entity.kind as CrmEntityKind)) {
+    if (!entity || entity.attributes.self === true
+      || !CRM_KINDS.has(entity.kind as CrmEntityKind)) {
       res.status(404).json({ error: 'Record not found' })
       return
     }
@@ -1265,7 +1268,8 @@ export function crmRoutes({ workspaceStore, entityLinks }: RouteOptions): Router
       getEntityById(member.ctx, survivingId),
       getEntityById(member.ctx, mergedId),
     ])
-    if (!survivor || !merged || survivor.kind !== merged.kind
+    if (!survivor || !merged || survivor.attributes.self === true || merged.attributes.self === true
+      || survivor.kind !== merged.kind
       || !CRM_KINDS.has(survivor.kind as CrmEntityKind)) {
       res.status(404).json({ error: 'Visible CRM records of the same kind are required' })
       return
@@ -1286,7 +1290,7 @@ export function crmRoutes({ workspaceStore, entityLinks }: RouteOptions): Router
         undoUntil: new Date(record.mergedAt.getTime() + 7 * 86_400_000).toISOString(),
       })
     } catch (err) {
-      const status = err instanceof EntityMergeError ? 409 : 500
+      const status = err instanceof EntityMergeError || err instanceof EntityMergeStoreError ? 409 : 500
       res.status(status).json({ error: err instanceof Error ? err.message : String(err) })
     }
   })

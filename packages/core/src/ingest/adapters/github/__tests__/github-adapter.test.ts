@@ -103,6 +103,7 @@ describe('[COMP:brain/source-adapters/github] GitHub source adapter', () => {
       const ev = normalize({ fixture: 'push-default.json', event: 'push' })
       expect(ev?.event_type).toBe('push')
       expect(ev?.push?.default_branch).toBe(true)
+      expect(ev?.actor.id).toBe('10101')
     })
 
     it('pull_request opened → "pull_request.opened"', () => {

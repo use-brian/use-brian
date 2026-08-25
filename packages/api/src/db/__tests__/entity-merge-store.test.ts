@@ -15,15 +15,29 @@ const clientQueries: { text: string; values?: unknown[] }[] = []
 let poolRows: Record<string, unknown>[] = []
 let poolRowCount = 0
 let clientInsertRow: Record<string, unknown> | null = null
+let clientAliasConflict = false
+let clientSnapshotsCurrent = true
+
+async function runClientQuery(text: string, values?: unknown[]) {
+  clientQueries.push({ text, values })
+  if (text.includes('FOR UPDATE')) {
+    return {
+      rows: clientSnapshotsCurrent ? [{ id: 'e-survivor' }, { id: 'e-merged' }] : [],
+      rowCount: clientSnapshotsCurrent ? 2 : 0,
+    }
+  }
+  if (text.includes("COALESCE(aliases, '{}'::text[])")) {
+    return { rows: clientAliasConflict ? [{ id: 'e-third' }] : [], rowCount: clientAliasConflict ? 1 : 0 }
+  }
+  if (text.trim().startsWith('INSERT INTO entity_merges')) {
+    return { rows: clientInsertRow ? [clientInsertRow] : [], rowCount: 1 }
+  }
+  if (text.trim().startsWith('UPDATE entities')) return { rows: [], rowCount: 1 }
+  return { rows: [], rowCount: 0 }
+}
 
 const fakeClient = {
-  query: vi.fn(async (text: string, values?: unknown[]) => {
-    clientQueries.push({ text, values })
-    if (text.trim().startsWith('INSERT INTO entity_merges')) {
-      return { rows: clientInsertRow ? [clientInsertRow] : [], rowCount: 1 }
-    }
-    return { rows: [], rowCount: 0 }
-  }),
+  query: vi.fn(runClientQuery),
   release: vi.fn(),
 }
 
@@ -64,6 +78,7 @@ function mergeRow(over: Record<string, unknown> = {}): Record<string, unknown> {
       entityId: 'e-merged',
       displayName: 'Acme Corp',
       attributes: { domain: 'acme.com' },
+      aliases: ['acme-corp'],
       tags: [],
       validTo: null,
       supersededBy: null,
@@ -73,6 +88,7 @@ function mergeRow(over: Record<string, unknown> = {}): Record<string, unknown> {
       entityId: 'e-survivor',
       displayName: 'Acme',
       attributes: {},
+      aliases: ['acme-old'],
       tags: [],
       validTo: null,
       supersededBy: null,
@@ -91,9 +107,12 @@ beforeEach(() => {
   poolRows = []
   poolRowCount = 0
   clientInsertRow = null
+  clientAliasConflict = false
+  clientSnapshotsCurrent = true
   fakePool.query.mockClear()
   fakePool.connect.mockClear()
-  fakeClient.query.mockClear()
+  fakeClient.query.mockReset()
+  fakeClient.query.mockImplementation(runClientQuery)
   fakeClient.release.mockClear()
 })
 
@@ -104,6 +123,7 @@ describe('[COMP:corrections/entity-merge-store] readEntityForMerge', () => {
         id: 'e-1',
         displayName: 'Acme',
         attributes: { domain: 'acme.com' },
+        aliases: ['acme-old'],
         validTo: null,
         supersededBy: null,
         workspaceId: 'ws-1',
@@ -114,6 +134,7 @@ describe('[COMP:corrections/entity-merge-store] readEntityForMerge', () => {
     expect(snap!.entityId).toBe('e-1')
     expect(snap!.tags).toEqual([])
     expect(snap!.attributes).toEqual({ domain: 'acme.com' })
+    expect(snap!.aliases).toEqual(['acme-old'])
     expect(poolQueries[0].values).toEqual(['e-1', 'ws-1'])
   })
 
@@ -132,6 +153,7 @@ describe('[COMP:corrections/entity-merge-store] applyMerge', () => {
       mergedBy: 'u-1',
       reason: 'duplicate',
       reconciledAttributes: { domain: 'acme.com' },
+      reconciledAliases: ['acme-old', 'acme-corp'],
       reconciledTags: [],
       mergedAttributesSnapshot: mergeRow().mergedAttributesSnapshot as never,
       survivingAttributesPreMerge: mergeRow().survivingAttributesPreMerge as never,
@@ -163,6 +185,7 @@ describe('[COMP:corrections/entity-merge-store] applyMerge', () => {
     )
     expect(rewrite!.values?.[0]).toBe('e-survivor')
     expect(rewrite!.values?.[1]).toBe(JSON.stringify({ domain: 'acme.com' }))
+    expect(rewrite!.values?.[2]).toEqual(['acme-old', 'acme-corp'])
     // 3. insert record
     expect(texts.some((t) => t.includes('INSERT INTO entity_merges'))).toBe(true)
     expect(texts[texts.length - 1]).toBe('COMMIT')
@@ -171,21 +194,37 @@ describe('[COMP:corrections/entity-merge-store] applyMerge', () => {
 
   it('ROLLBACKs and rethrows when a statement fails', async () => {
     clientInsertRow = null // INSERT returns no row → rowToMergeRecord throws on undefined
-    fakeClient.query.mockImplementationOnce(async (text: string) => {
-      clientQueries.push({ text })
-      return { rows: [], rowCount: 0 }
-    })
     // Force the INSERT to throw.
     fakeClient.query.mockImplementation(async (text: string, values?: unknown[]) => {
-      clientQueries.push({ text, values })
       if (text.trim().startsWith('INSERT INTO entity_merges')) {
+        clientQueries.push({ text, values })
         throw new Error('insert failed')
       }
-      return { rows: [], rowCount: 0 }
+      return runClientQuery(text, values)
     })
     await expect(repo.applyMerge(input())).rejects.toThrow('insert failed')
     expect(clientQueries.map((q) => q.text)).toContain('ROLLBACK')
     expect(fakeClient.release).toHaveBeenCalledOnce()
+  })
+
+  it('serializes alias learning and rejects a concurrent third claim without leaking its id', async () => {
+    clientAliasConflict = true
+    await expect(repo.applyMerge(input())).rejects.toMatchObject({
+      code: 'alias_conflict',
+      message: 'a learned alias is already claimed by another live entity',
+    })
+    expect(clientQueries.some((q) => q.text.includes('pg_advisory_xact_lock'))).toBe(true)
+    expect(clientQueries.map((q) => q.text)).toContain('ROLLBACK')
+  })
+
+  it('rejects stale entity snapshots after taking the workspace lock', async () => {
+    clientSnapshotsCurrent = false
+    await expect(repo.applyMerge(input())).rejects.toMatchObject({
+      code: 'stale_snapshot',
+      message: 'one or both entities changed while the merge was being reviewed',
+    })
+    expect(clientQueries.map((q) => q.text)).toContain('ROLLBACK')
+    expect(clientQueries.some((q) => q.text.includes('INSERT INTO entity_merges'))).toBe(false)
   })
 })
 
@@ -204,8 +243,22 @@ describe('[COMP:corrections/entity-merge-store] applyUndoMerge', () => {
     )
     expect(unSupersede!.values).toEqual(['e-merged', 'ws-1'])
     const stampUndone = clientQueries.find((q) => q.text.includes('UPDATE entity_merges'))
+    const restore = clientQueries.find(
+      (q) => q.text.includes('UPDATE entities') && q.text.includes('aliases = $3::text[]'),
+    )
+    expect(restore!.values?.[2]).toEqual(['acme-old'])
     expect(stampUndone!.values).toEqual(['m-1', NOW, 'u-2', 'mistake', false])
     expect(clientQueries.map((q) => q.text).pop()).toBe('COMMIT')
+  })
+})
+
+describe('[COMP:corrections/entity-merge-store] findLiveAliasConflict', () => {
+  it('scopes the collision check to live third-party rows', async () => {
+    poolRows = [{ id: 'e-third' }]
+    expect(await repo.findLiveAliasConflict?.('ws-1', ['e-a', 'e-b'], ['alias-one']))
+      .toBe('e-third')
+    expect(poolQueries[0].text).toContain('valid_to IS NULL')
+    expect(poolQueries[0].values).toEqual(['ws-1', ['e-a', 'e-b'], ['alias-one']])
   })
 })
 

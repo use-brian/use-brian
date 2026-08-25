@@ -10,7 +10,7 @@ function event(overrides: Partial<GithubNormalizedEvent> = {}): GithubNormalized
     occurred_at: new Date('2026-05-28T10:00:00Z'),
     repo: 'whatever/belvedere',
     branch: 'feature/x',
-    actor: { login: 'alice', is_bot: false },
+    actor: { login: 'alice', id: '10101', is_bot: false },
     payload: {},
     ...overrides,
   }
@@ -29,13 +29,31 @@ describe('[COMP:brain/source-adapters/github/extract-writes] extractWritesFromGi
   })
 
   it('produces a derived person entity for the actor', () => {
-    const writes = extractWritesFromGithubEvent(event({ actor: { login: 'alice', is_bot: false } }))
+    const writes = extractWritesFromGithubEvent(event({ actor: { login: 'alice', id: '10101', is_bot: false } }))
     expect(writes!.entities).toHaveLength(1)
     const actor = writes!.entities![0]
     expect(actor?.kind).toBe('person')
     expect(actor?.display_name).toBe('alice')
     expect(actor?.canonical_id).toBe('https://github.com/alice')
     expect(actor?.attributes?.github_login).toBe('alice')
+    expect(actor?.attributes?.github_user_id).toBe('10101')
+    expect(actor?.attributes?.external_ref).toEqual({
+      provider: 'github',
+      id: '10101',
+      url: 'https://github.com/alice',
+    })
+  })
+
+  it('keeps the provider identity stable when the login changes', () => {
+    const before = extractWritesFromGithubEvent(event({
+      actor: { login: 'rivera-dev', id: '10101', is_bot: false },
+    }))!.entities![0]
+    const after = extractWritesFromGithubEvent(event({
+      actor: { login: 'rivera-engineering', id: '10101', is_bot: false },
+    }))!.entities![0]
+    expect(before.attributes?.external_ref).toMatchObject({ provider: 'github', id: '10101' })
+    expect(after.attributes?.external_ref).toMatchObject({ provider: 'github', id: '10101' })
+    expect(before.display_name).not.toBe(after.display_name)
   })
 
   it('produces a documented_by edge from repo → actor', () => {

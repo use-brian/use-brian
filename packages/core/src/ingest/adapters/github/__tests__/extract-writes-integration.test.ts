@@ -38,7 +38,7 @@ function baseEvent(overrides: Partial<GithubNormalizedEvent> = {}): GithubNormal
     occurred_at: NOW,
     repo: 'whatever/belvedere',
     branch: 'feature/x',
-    actor: { login: 'alice', is_bot: false },
+    actor: { login: 'alice', id: '10101', is_bot: false },
     payload: {},
     ...overrides,
   }

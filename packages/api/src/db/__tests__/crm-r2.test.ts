@@ -1,4 +1,12 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+
+vi.mock('@use-brian/core', async () => {
+  const [{ stitchMailboxThreads }, { jaroWinkler }] = await Promise.all([
+    import('../../../../core/src/tools/base/mailbox.js'),
+    import('../../../../core/src/entities/resolver.js'),
+  ])
+  return { stitchMailboxThreads, jaroWinkler }
+})
 import {
   buildCrmReport,
   buildCrmEmailReviewThread,
@@ -50,6 +58,52 @@ describe('[COMP:crm/r2-store] deterministic CRM R2 projections', () => {
     expect(groups.some((g) => g.reason === 'name' && g.records.length === 2)).toBe(true)
     expect(groups.some((g) => g.reason === 'domain' && g.records.length === 2)).toBe(true)
     expect(groups.some((g) => g.reason === 'name' && g.value === '陳大文')).toBe(true)
+  })
+
+  it('suggests prefix-shaped aliases while avoiding unrelated similar names', () => {
+    const groups = findCrmDuplicateGroups([
+      row({ id: 'p1', kind: 'person', name: 'Morgan Reed', source: 'user', canonicalId: 'morgan@example.test', createdAt: '2026-01-01T00:00:00.000Z' }),
+      row({ id: 'p2', kind: 'person', name: 'morganreed77', source: 'extracted', createdAt: '2026-08-01T00:00:00.000Z' }),
+      row({ id: 'p3', kind: 'person', name: 'Jordan Reed', source: 'user' }),
+    ])
+    const similar = groups.find((group) => group.reason === 'similar_name')
+    expect(similar?.records.map((record) => record.id)).toEqual(['p1', 'p2'])
+  })
+
+  it('keeps similarity review pairwise instead of merging transitive chains', () => {
+    const groups = findCrmDuplicateGroups([
+      row({ id: 'p1', kind: 'person', name: 'Alexander' }),
+      row({ id: 'p2', kind: 'person', name: 'Alex' }),
+      row({ id: 'p3', kind: 'person', name: 'Alexis' }),
+    ]).filter((group) => group.reason === 'similar_name')
+    expect(groups.length).toBeGreaterThan(0)
+    expect(groups.every((group) => group.records.length === 2)).toBe(true)
+    expect(groups.some((group) => group.records.map((record) => record.id).sort().join(',') === 'p1,p3'))
+      .toBe(false)
+  })
+
+  it('bounds duplicate-review groups and records for homogeneous datasets', () => {
+    const groups = findCrmDuplicateGroups(Array.from({ length: 1_600 }, (_, index) => row({
+      id: `p-${index}`,
+      kind: 'person',
+      name: `alex${index}`,
+      attributes: { email: index < 100 ? 'shared@example.test' : undefined },
+    })))
+    expect(groups.length).toBeLessThanOrEqual(200)
+    expect(groups.every((group) => group.records.length <= 50)).toBe(true)
+  })
+
+  it('matches exact aliases and structured provider identities', () => {
+    const groups = findCrmDuplicateGroups([
+      row({ id: 'p1', kind: 'person', name: 'Taylor Quinn', aliases: ['tquinn'] }),
+      row({ id: 'p2', kind: 'person', name: 'tquinn' }),
+      row({ id: 'p3', kind: 'person', name: 'Casey Park', attributes: { external_ref: { provider: 'github', id: 'casey-dev' } } }),
+      row({ id: 'p4', kind: 'person', name: 'casey-dev', attributes: { external_ref: { provider: 'GitHub', id: 'casey-dev' } } }),
+    ])
+    expect(groups.some((group) => group.reason === 'name'
+      && group.records.map((record) => record.id).sort().join(',') === 'p1,p2')).toBe(true)
+    expect(groups.some((group) => group.reason === 'external_identity'
+      && group.records.map((record) => record.id).sort().join(',') === 'p3,p4')).toBe(true)
   })
 
   it('groups currency totals, weights open value, and refuses to invent velocity', () => {

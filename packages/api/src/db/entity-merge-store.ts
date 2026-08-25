@@ -18,10 +18,10 @@
  * Merge mechanics:
  *   - applyMerge supersedes the merged entity (`valid_to = now()`,
  *     `superseded_by = survivingId`), overwrites the survivor's
- *     `attributes` with the reconciled set, and writes one
+ *     `attributes` and aliases with the reconciled sets, and writes one
  *     `entity_merges` row — all in one transaction.
  *   - applyUndoMerge reverses it: clears the merged entity's
- *     supersession, restores the survivor's pre-merge `attributes`, and
+ *     supersession, restores the survivor's pre-merge attributes/aliases, and
  *     stamps the merge row undone.
  *   - Edges are intentionally untouched (auto-redirect via `superseded_by`
  *     is retrieval's concern — see entity-merge.ts header).
@@ -44,6 +44,16 @@ import type {
 } from '@use-brian/core'
 import { getPool, query } from './client.js'
 
+export class EntityMergeStoreError extends Error {
+  constructor(
+    readonly code: 'alias_conflict' | 'stale_snapshot',
+    message: string,
+  ) {
+    super(message)
+    this.name = 'EntityMergeStoreError'
+  }
+}
+
 // Specialization tables that can carry a merge cascade. Post CRM↔entity
 // collapse (crm-entity-unification) there are no specialization tables
 // left — contacts/companies/deals folded into `entities` — so nothing
@@ -62,6 +72,7 @@ function reviveSnapshot(raw: unknown): EntityMergeSnapshot {
     entityId: s.entityId as string,
     displayName: s.displayName as string,
     attributes: (s.attributes as Record<string, unknown>) ?? {},
+    ...(Array.isArray(s.aliases) ? { aliases: s.aliases as string[] } : {}),
     tags: (s.tags as string[]) ?? [],
     validTo: s.validTo ? new Date(s.validTo as string) : null,
     supersededBy: (s.supersededBy as string | null) ?? null,
@@ -73,6 +84,7 @@ type EntityRowForMerge = {
   id: string
   displayName: string
   attributes: Record<string, unknown>
+  aliases: string[] | null
   validTo: Date | null
   supersededBy: string | null
   workspaceId: string
@@ -83,6 +95,7 @@ function rowToSnapshot(row: EntityRowForMerge): EntityMergeSnapshot {
     entityId: row.id,
     displayName: row.displayName,
     attributes: row.attributes ?? {},
+    aliases: row.aliases ?? [],
     tags: [], // entities have no tags column (migration 125)
     validTo: row.validTo,
     supersededBy: row.supersededBy,
@@ -136,6 +149,7 @@ export function createEntityMergeStore(): EntityMergeRepository {
         `SELECT id,
                 display_name  AS "displayName",
                 attributes,
+                aliases,
                 valid_to      AS "validTo",
                 superseded_by AS "supersededBy",
                 workspace_id  AS "workspaceId"
@@ -147,34 +161,141 @@ export function createEntityMergeStore(): EntityMergeRepository {
       return row ? rowToSnapshot(row) : null
     },
 
+    async findLiveAliasConflict(workspaceId, excludedIds, aliases) {
+      if (aliases.length === 0) return null
+      const result = await query<{ id: string }>(
+        `SELECT id
+           FROM entities
+          WHERE workspace_id = $1
+            AND id <> ALL($2::uuid[])
+            AND valid_to IS NULL AND retracted_at IS NULL
+            AND (
+              lower(display_name) = ANY($3::text[])
+              OR COALESCE(aliases, '{}'::text[]) && $3::text[]
+            )
+          ORDER BY created_at ASC
+          LIMIT 1`,
+        [workspaceId, excludedIds, aliases],
+      )
+      return result.rows[0]?.id ?? null
+    },
+
     async applyMerge(input: ApplyMergeInput): Promise<EntityMergeRecord> {
       const client = await getPool().connect()
       try {
         await client.query('BEGIN')
 
-        // 1. Supersede the merged entity → points at the survivor.
+        // Serialize alias-learning merges per workspace, then repeat the
+        // third-claim check inside the transaction. The orchestration's
+        // earlier check provides a quick rejection; this one closes the
+        // concurrent-merge race before either row changes.
         await client.query(
+          `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+          [input.workspaceId],
+        )
+        const locked = await client.query<{ id: string }>(
+          `SELECT id
+             FROM entities
+            WHERE workspace_id = $1
+              AND valid_to IS NULL AND retracted_at IS NULL
+              AND (
+                (id = $2 AND display_name = $4 AND attributes = $5::jsonb
+                  AND COALESCE(aliases, '{}'::text[]) = $6::text[]
+                  AND superseded_by IS NOT DISTINCT FROM $7::uuid)
+                OR
+                (id = $3 AND display_name = $8 AND attributes = $9::jsonb
+                  AND COALESCE(aliases, '{}'::text[]) = $10::text[]
+                  AND superseded_by IS NOT DISTINCT FROM $11::uuid)
+              )
+            FOR UPDATE`,
+          [
+            input.workspaceId,
+            input.survivingId,
+            input.mergedId,
+            input.survivingAttributesPreMerge.displayName,
+            JSON.stringify(input.survivingAttributesPreMerge.attributes),
+            input.survivingAttributesPreMerge.aliases ?? [],
+            input.survivingAttributesPreMerge.supersededBy,
+            input.mergedAttributesSnapshot.displayName,
+            JSON.stringify(input.mergedAttributesSnapshot.attributes),
+            input.mergedAttributesSnapshot.aliases ?? [],
+            input.mergedAttributesSnapshot.supersededBy,
+          ],
+        )
+        if (locked.rows.length !== 2) {
+          throw new EntityMergeStoreError(
+            'stale_snapshot',
+            'one or both entities changed while the merge was being reviewed',
+          )
+        }
+        const priorAliases = new Set(
+          (input.survivingAttributesPreMerge.aliases ?? [])
+            .map((alias) => alias.trim().toLowerCase()),
+        )
+        const learnedAliases = input.reconciledAliases
+          .filter((alias) => !priorAliases.has(alias.trim().toLowerCase()))
+        if (learnedAliases.length > 0) {
+          const conflict = await client.query<{ id: string }>(
+            `SELECT id
+               FROM entities
+              WHERE workspace_id = $1
+                AND id <> ALL($2::uuid[])
+                AND valid_to IS NULL AND retracted_at IS NULL
+                AND (
+                  lower(display_name) = ANY($3::text[])
+                  OR COALESCE(aliases, '{}'::text[]) && $3::text[]
+                )
+              LIMIT 1`,
+            [input.workspaceId, [input.survivingId, input.mergedId], learnedAliases],
+          )
+          if (conflict.rows[0]) {
+            throw new EntityMergeStoreError(
+              'alias_conflict',
+              'a learned alias is already claimed by another live entity',
+            )
+          }
+        }
+
+        // 1. Supersede the merged entity → points at the survivor.
+        const superseded = await client.query(
           `UPDATE entities
               SET valid_to      = $2,
                   superseded_by = $3,
                   updated_at    = now()
-            WHERE id = $1 AND workspace_id = $4`,
+            WHERE id = $1 AND workspace_id = $4
+              AND valid_to IS NULL AND retracted_at IS NULL`,
           [input.mergedId, input.now, input.survivingId, input.workspaceId],
         )
+        if (superseded.rowCount !== 1) {
+          throw new EntityMergeStoreError(
+            'stale_snapshot',
+            'the merged-away entity changed while the merge was being reviewed',
+          )
+        }
 
-        // 2. Overwrite the survivor's attributes with the reconciled set.
+        // 2. Overwrite the survivor's attributes and retain every confirmed
+        //    name variant as an alias, so future ingest converges here.
         //    (Tags are not persisted — entities have no tags column.)
-        await client.query(
+        const survivorUpdated = await client.query(
           `UPDATE entities
               SET attributes = $2::jsonb,
+                  aliases = $3::text[],
                   updated_at = now()
-            WHERE id = $1 AND workspace_id = $3`,
+            WHERE id = $1 AND workspace_id = $4
+              AND valid_to IS NULL AND retracted_at IS NULL`,
           [
             input.survivingId,
             JSON.stringify(input.reconciledAttributes),
+            input.reconciledAliases,
             input.workspaceId,
           ],
         )
+        if (survivorUpdated.rowCount !== 1) {
+          throw new EntityMergeStoreError(
+            'stale_snapshot',
+            'the surviving entity changed while the merge was being reviewed',
+          )
+        }
 
         // 3. Write the merge record.
         const inserted = await client.query(
@@ -230,19 +351,37 @@ export function createEntityMergeStore(): EntityMergeRepository {
           [mergeRecord.mergedId, mergeRecord.workspaceId],
         )
 
-        // 2. Restore the survivor's pre-merge attributes.
+        // 2. Restore the survivor's pre-merge attributes and, for snapshots
+        //    created after alias capture shipped, its exact prior aliases.
         if (mergeRecord.survivingAttributesPreMerge) {
-          await client.query(
-            `UPDATE entities
-                SET attributes = $2::jsonb,
-                    updated_at = now()
-              WHERE id = $1 AND workspace_id = $3`,
-            [
-              mergeRecord.survivingId,
-              JSON.stringify(mergeRecord.survivingAttributesPreMerge.attributes),
-              mergeRecord.workspaceId,
-            ],
-          )
+          const snapshot = mergeRecord.survivingAttributesPreMerge
+          if (snapshot.aliases) {
+            await client.query(
+              `UPDATE entities
+                  SET attributes = $2::jsonb,
+                      aliases = $3::text[],
+                      updated_at = now()
+                WHERE id = $1 AND workspace_id = $4`,
+              [
+                mergeRecord.survivingId,
+                JSON.stringify(snapshot.attributes),
+                snapshot.aliases,
+                mergeRecord.workspaceId,
+              ],
+            )
+          } else {
+            await client.query(
+              `UPDATE entities
+                  SET attributes = $2::jsonb,
+                      updated_at = now()
+                WHERE id = $1 AND workspace_id = $3`,
+              [
+                mergeRecord.survivingId,
+                JSON.stringify(snapshot.attributes),
+                mergeRecord.workspaceId,
+              ],
+            )
+          }
         }
 
         // 3. Stamp the merge row undone — `findMergeById` filters these

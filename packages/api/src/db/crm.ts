@@ -57,6 +57,15 @@ function attrStr(a: Record<string, unknown>, key: string): string | null {
   return typeof v === 'string' && v.length > 0 ? v : null
 }
 
+function stableExternalIdentity(ref: CrmExternalRef | undefined): {
+  provider: string
+  id: string
+} | null {
+  const provider = typeof ref?.provider === 'string' ? ref.provider.trim().toLowerCase() : ''
+  const id = typeof ref?.id === 'string' ? ref.id.trim() : ''
+  return provider && id ? { provider, id } : null
+}
+
 /** Reject a cross-workspace relationship reference (replaces the
  *  `contacts_company_workspace_match_trg` / `deals_links_workspace_match_trg`
  *  triggers). A ref in another workspace throws; a non-existent ref is
@@ -75,6 +84,23 @@ async function assertSameWorkspace(
   const ws = r.rows[0]?.workspaceId
   if (ws && ws !== workspaceId) {
     throw new Error(`${label} must reference a row in the same workspace`)
+  }
+}
+
+async function assertNotSelfPerson(
+  refId: string | null | undefined,
+  workspaceId: string,
+  label: string,
+): Promise<void> {
+  if (!refId) return
+  const result = await query<{ kind: string; isSelf: boolean }>(
+    `SELECT kind, COALESCE((attributes->>'self')::boolean, false) AS "isSelf"
+       FROM entities
+      WHERE id = $1 AND workspace_id = $2 AND valid_to IS NULL AND retracted_at IS NULL`,
+    [refId, workspaceId],
+  )
+  if (result.rows[0]?.kind === 'person' && result.rows[0].isSelf) {
+    throw new Error(`${label} cannot reference the workspace self identity`)
   }
 }
 
@@ -428,15 +454,20 @@ export async function createContact(
   assertAuthorshipPresent('createContact', userId)
   await assertSameWorkspace(params.companyId, params.workspaceId, 'company_id')
 
-  // Upsert-by-email (high confidence) then by name, scoped to rows the
+  // Upsert by email, then a stable provider identity, then exact name or
+  // learned alias. All matches are scoped to rows the caller can read.
   // caller can read (see dedupeAccessContext) — an invisible same-name
   // contact belonging to another principal is NOT a merge target; the
   // caller gets their own visible row instead. Self entities
   // (`attributes.self=true`) are excluded — you are not your own contact.
   const ap = buildAccessPredicate(
     dedupeAccessContext(userId, params.workspaceId, params.access),
-    { startIdx: 4 },
+    { startIdx: 6 },
   )
+  const externalIdentity = stableExternalIdentity(params.externalRef)
+  const externalRef = externalIdentity
+    ? { ...params.externalRef, ...externalIdentity }
+    : params.externalRef
   const existing = await queryWithRLS<{ id: string }>(
     userId,
     `(SELECT id, 1 AS pri FROM entities
@@ -449,18 +480,35 @@ export async function createContact(
      UNION ALL
      (SELECT id, 2 AS pri FROM entities
        WHERE workspace_id = $1 AND kind = 'person'
-         AND lower(display_name) = lower($3)
+         AND $3::text IS NOT NULL AND $4::text IS NOT NULL
+         AND lower(attributes->'external_ref'->>'provider') = $3
+         AND attributes->'external_ref'->>'id' = $4
+         AND valid_to IS NULL AND retracted_at IS NULL
+         AND NOT COALESCE((attributes->>'self')::boolean, false)
+         AND ${ap.sql}
+       ORDER BY created_at ASC LIMIT 1)
+     UNION ALL
+     (SELECT id, 3 AS pri FROM entities
+       WHERE workspace_id = $1 AND kind = 'person'
+         AND (lower(display_name) = lower($5) OR lower($5) = ANY(aliases))
          AND valid_to IS NULL AND retracted_at IS NULL
          AND NOT COALESCE((attributes->>'self')::boolean, false)
          AND ${ap.sql}
        ORDER BY created_at ASC LIMIT 1)
      ORDER BY pri ASC LIMIT 1`,
-    [params.workspaceId, params.email ?? null, params.name, ...ap.params],
+    [
+      params.workspaceId,
+      params.email ?? null,
+      externalIdentity?.provider ?? null,
+      externalIdentity?.id ?? null,
+      params.name,
+      ...ap.params,
+    ],
   )
   if (existing.rows[0]) {
     const merged = await mergeContactFields(userId, existing.rows[0].id, {
       email: params.email ?? null, phone: params.phone ?? null,
-      companyId: params.companyId ?? null, tags: params.tags, externalRef: params.externalRef,
+      companyId: params.companyId ?? null, tags: params.tags, externalRef,
     }, entityLinks)
     if (merged) return merged
   }
@@ -469,7 +517,7 @@ export async function createContact(
     kind: 'person',
     displayName: params.name,
     canonicalId: params.email ?? null,
-    attributes: contactAttributes(params),
+    attributes: contactAttributes({ ...params, externalRef }),
     sensitivity: params.sensitivity ?? 'internal',
     workspaceId: params.workspaceId,
     // Workspace-scoped — see the note in `createCompany` and migration 423.
@@ -524,7 +572,7 @@ async function mergeContactFields(
 
 async function getContactByIdSystem(userId: string, id: string): Promise<ContactRecord | null> {
   const e = await getEntityByIdSystem(userId, id)
-  if (!e || e.kind !== 'person') return null
+  if (!e || e.kind !== 'person' || e.attributes.self === true) return null
   return contactFromEntity(e)
 }
 
@@ -534,7 +582,8 @@ export async function getContactById(ctx: AccessContext, id: string): Promise<Co
     ctx.userId,
     `SELECT ${CONTACT_SELECT} FROM entities e
       WHERE ${ap.sql} AND e.kind = 'person'
-        AND e.id = $${ap.nextIdx} AND e.valid_to IS NULL`,
+        AND e.id = $${ap.nextIdx} AND e.valid_to IS NULL
+        AND NOT COALESCE((e.attributes->>'self')::boolean, false)`,
     [...ap.params, id],
   )
   if (result.rows.length === 0) return null
@@ -592,7 +641,7 @@ export async function updateContact(
   access?: AccessContext,
 ): Promise<ContactRecord | null> {
   const old = access ? await getEntityById(access, id) : await getEntityByIdSystem(userId, id)
-  if (!old || old.kind !== 'person') return null
+  if (!old || old.kind !== 'person' || old.attributes.self === true) return null
   if (fields.companyId !== undefined) {
     await assertSameWorkspace(fields.companyId, old.workspaceId, 'company_id')
   }
@@ -682,6 +731,7 @@ export async function createDeal(
   assertNonNegativeAmount(params.amount)
   await assertSameWorkspace(params.contactId, params.workspaceId, 'contact_id')
   await assertSameWorkspace(params.companyId, params.workspaceId, 'company_id')
+  await assertNotSelfPerson(params.contactId, params.workspaceId, 'contact_id')
 
   let displayName = 'Deal'
   if (params.companyId) {
@@ -783,6 +833,7 @@ export async function updateDeal(
   if (!old || old.kind !== 'deal') return null
   if (fields.companyId !== undefined) await assertSameWorkspace(fields.companyId, old.workspaceId, 'company_id')
   if (fields.contactId !== undefined) await assertSameWorkspace(fields.contactId, old.workspaceId, 'contact_id')
+  if (fields.contactId !== undefined) await assertNotSelfPerson(fields.contactId, old.workspaceId, 'contact_id')
 
   const a = { ...old.attributes }
   if (fields.contactId !== undefined) { if (fields.contactId) a.contact_id = fields.contactId; else delete a.contact_id }

@@ -41,7 +41,7 @@ function repoEntity(repo: string): DerivedEntity {
   }
 }
 
-function actorEntity(login: string, isBot: boolean): DerivedEntity | null {
+function actorEntity(login: string, providerId: string | undefined, isBot: boolean): DerivedEntity | null {
   // Skip bot accounts — they're system identities, not persons.
   if (isBot) return null
   if (!login) return null
@@ -50,7 +50,17 @@ function actorEntity(login: string, isBot: boolean): DerivedEntity | null {
     kind: PERSON_KIND,
     display_name: login,
     canonical_id: `https://github.com/${login}`,
-    attributes: { github_login: login },
+    attributes: {
+      github_login: login,
+      ...(providerId ? {
+        github_user_id: providerId,
+        external_ref: {
+          provider: 'github',
+          id: providerId,
+          url: `https://github.com/${login}`,
+        },
+      } : {}),
+    },
   }
 }
 
@@ -59,14 +69,15 @@ function actorEntity(login: string, isBot: boolean): DerivedEntity | null {
  * deterministically produce. Returns null when there's nothing to write
  * (e.g. push from a bot account that we deliberately skip).
  *
- * Composition executor handles dedup by canonical_id, so repeated PR
- * webhooks on the same repo are idempotent.
+ * Composition handles repositories by canonical URL and people by their
+ * structured provider identity, so repeated webhooks are idempotent even
+ * when an account login changes.
  */
 export function extractWritesFromGithubEvent(
   event: GithubNormalizedEvent,
 ): CompositionWrite | null {
   const repo = repoEntity(event.repo)
-  const actor = actorEntity(event.actor.login, event.actor.is_bot)
+  const actor = actorEntity(event.actor.login, event.actor.id, event.actor.is_bot)
 
   const entities: DerivedEntity[] = []
   const edges: DerivedEdge[] = []

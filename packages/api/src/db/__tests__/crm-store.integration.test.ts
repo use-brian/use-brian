@@ -242,6 +242,26 @@ describeIf('[COMP:api/crm-store] CRM store + RLS (integration)', () => {
       ).rejects.toThrow(/same workspace/)
     })
 
+    it('rejects a workspace self identity as a deal contact', async () => {
+      const client = await pool!.connect()
+      let selfId: string
+      try {
+        const result = await client.query<{ id: string }>(
+          `INSERT INTO entities
+             (kind, display_name, workspace_id, user_id, created_by_user_id, source, attributes)
+           VALUES ('person', 'Workspace identity', $1, $2, $2, 'user', '{"self":true}'::jsonb)
+           RETURNING id`,
+          [workspaceId, userId],
+        )
+        selfId = result.rows[0].id
+      } finally {
+        client.release()
+      }
+      await expect(
+        store.createDeal({ userId, workspaceId, contactId: selfId }),
+      ).rejects.toThrow(/self identity/)
+    })
+
     it('createContact dedupes by email — same address upserts into the existing row', async () => {
       const a = await store.createContact({ userId, workspaceId, name: 'A', email: 'team@acme.example' })
       // Second call with same email + different name should land on the
@@ -265,6 +285,49 @@ describeIf('[COMP:api/crm-store] CRM store + RLS (integration)', () => {
       }
       // The live row's id matches the supersession-merge return value.
       expect(b.email).toBe('team@acme.example')
+    })
+
+    it('createContact dedupes by stable provider identity before display name', async () => {
+      const first = await store.createContact({
+        userId,
+        workspaceId,
+        name: 'octavia-dev',
+        externalRef: { provider: 'github', id: '20202', url: 'https://github.com/octavia-dev' },
+      })
+      const second = await store.createContact({
+        userId,
+        workspaceId,
+        name: 'Octavia Rivera',
+        externalRef: { provider: 'GitHub', id: '20202' },
+      })
+      expect(second.id).toBe(first.id)
+
+      const client = await pool!.connect()
+      try {
+        const result = await client.query<{ n: string }>(
+          `SELECT count(*)::text AS n FROM entities
+            WHERE workspace_id = $1 AND kind = 'person'
+              AND lower(attributes->'external_ref'->>'provider') = 'github'
+              AND attributes->'external_ref'->>'id' = '20202'
+              AND valid_to IS NULL`,
+          [workspaceId],
+        )
+        expect(Number(result.rows[0]?.n)).toBe(1)
+      } finally {
+        client.release()
+      }
+    })
+
+    it('createContact converges a learned alias on the existing contact', async () => {
+      const first = await store.createContact({ userId, workspaceId, name: 'Morgan Reed' })
+      const client = await pool!.connect()
+      try {
+        await client.query(`UPDATE entities SET aliases = ARRAY['morganreed77'] WHERE id = $1`, [first.id])
+      } finally {
+        client.release()
+      }
+      const second = await store.createContact({ userId, workspaceId, name: 'morganreed77' })
+      expect(second.id).toBe(first.id)
     })
   })
 

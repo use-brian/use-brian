@@ -50,7 +50,7 @@ export type GithubNormalizedEvent = {
   occurred_at: Date
   repo: string
   branch: string | null
-  actor: { login: string; is_bot: boolean }
+  actor: { login: string; id?: string; is_bot: boolean }
   /** Raw event payload; kept for envelope-mapper field lookups. */
   payload: Record<string, unknown>
   /** Set when `event_type === 'push'`. */

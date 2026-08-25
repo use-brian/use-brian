@@ -5585,7 +5585,7 @@ export const ja: Dictionary = {
     r2: {
       newRecord: "新規", newRecordDescription: "このワークスペースに担当者、会社、または案件を作成します。", moreActions: "その他のCRM操作",
       importCsv: "CSVをインポート", importDescription: "レコード種別を選び、CSV列を対応付け、プレビューを確認して最大500行を取り込みます。", exportCsv: "CSVをエクスポート",
-      reviewDuplicates: "重複を確認", duplicatesDescription: "メール、ドメインの完全一致と正規化した名前による候補です。",
+      reviewDuplicates: "重複を確認", duplicatesDescription: "完全一致する識別情報、既知の別名、慎重な名前の類似判定による候補です。統合は毎回ユーザーが選択します。",
       archivedRecords: "アーカイブ済み", archivedDescription: "有効なCRMから除外したレコードを復元できます。", noArchived: "アーカイブ済みレコードはありません。", restore: "復元", archivedLoading: "アーカイブ済みレコードを読み込み中...", archivedLoadFailed: "アーカイブ済みレコードを読み込めませんでした。", restoreFailed: "レコードを復元できませんでした。",
       archive: "アーカイブ", archiveTitle: "CRMレコードをアーカイブしますか？", archiveDescription: "{name}をアーカイブします。有効なCRMから外れますが後で復元できます。",
       name: "名前", email: "メール", phone: "電話", domain: "ドメイン", amount: "金額", currency: "通貨", company: "会社", contact: "担当者", noCompany: "会社なし", noContact: "担当者なし", tags: "タグ", tagsPlaceholder: "見込み客, 顧客", closeDate: "完了予定日", source: "流入元", probability: "確度", winLossReason: "受注・失注理由", owner: "所有者", noOwner: "所有者なし", myRecords: "自分のレコード", bulkOwner: "所有者を設定", unassigned: "未割り当て", memberUnknown: "不明なメンバー", memberUnavailable: "利用できないメンバー",
@@ -5593,7 +5593,7 @@ export const ja: Dictionary = {
       create: "作成", creating: "作成中...", createFailed: "レコードを作成できませんでした。", saving: "保存中...", save: "保存", add: "追加", next: "次へ", cancel: "キャンセル", close: "閉じる",
       kindContact: "担当者", kindCompany: "会社", kindDeal: "案件", pickCsv: "CSVファイルを選択", mapColumns: "列を対応付け", skipColumn: "取り込まない", createFieldFromColumn: "この列からフィールドを作成",
       previewRows: "{count}行を取り込めます。", importCapped: "先頭500行だけが対象です。", importAction: "インポート", importing: "インポート中...", importFailed: "CSVをインポートできませんでした。", importResult: "{created}件作成、{failed}件失敗。", importRowError: "{row}行目: {error}",
-      duplicateReasons: { email: "同じメール", domain: "同じドメイン", name: "同じ正規化名" }, keepRecord: "保持",
+      duplicateReasons: { email: "同じメール", domain: "同じドメイン", name: "同じ名前または別名", external_identity: "同じ外部ID", similar_name: "類似した名前" }, keepRecord: "保持",
       mergeRecords: "レコードを統合しますか？", mergeDescription: "{merged}を{survivor}に統合します。7日間は取り消せます。", merge: "統合", mergeFailed: "レコードを統合できませんでした。", mergeComplete: "レコードを統合しました", undoMerge: "統合を取り消す", undoAvailableUntil: "{date}まで取り消せます。", undoFailed: "統合を取り消せませんでした。", noDuplicates: "重複候補はありません。", duplicatesLoading: "重複候補を読み込み中...", duplicatesLoadFailed: "重複候補を読み込めませんでした。",
       savedViews: "ビュー", saveView: "CRMビューを保存", viewName: "ビュー名", saveCurrentView: "現在の絞り込みを保存", deleteView: "ビューを削除", noSavedViews: "保存済みCRMビューはありません。", savedViewsLoading: "保存済みビューを読み込み中...", savedViewsLoadFailed: "保存済みビューを読み込めませんでした。", savedViewChangeFailed: "保存済みビューを更新できませんでした。",
       crmActions: "CRM操作", configTitle: "CRM設定", configDescription: "このワークスペースの限定されたパイプラインと型付きフィールドです。", configFailed: "CRM設定を更新できませんでした。", configLoading: "CRM設定を読み込み中...", retry: "再試行",

@@ -33,6 +33,7 @@ export {
   type ReconciliationResult,
   RESERVED_RECONCILIATION_FIELDS,
   reconcileAttributes,
+  reconcileAliases,
   reconcileTags,
   isWithinUndoWindow,
   mergeEntities,

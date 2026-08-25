@@ -4,6 +4,7 @@ import {
   UndoMergeError,
   isWithinUndoWindow,
   mergeEntities,
+  reconcileAliases,
   reconcileAttributes,
   reconcileTags,
   undoMerge,
@@ -35,6 +36,7 @@ function snapshot(overrides: Partial<EntityMergeSnapshot> = {}): EntityMergeSnap
     entityId: 'e-default',
     displayName: 'Default',
     attributes: {},
+    aliases: [],
     tags: [],
     validTo: null,
     supersededBy: null,
@@ -47,6 +49,7 @@ function makeRepo(seed: {
   entities?: Record<string, EntityMergeSnapshot>
   merges?: Record<string, EntityMergeRecord>
   activeEntities?: Set<string>
+  aliasConflictId?: string | null
 } = {}): FakeRepo {
   const entities = new Map<string, EntityMergeSnapshot>(
     Object.entries(seed.entities ?? {}),
@@ -66,6 +69,9 @@ function makeRepo(seed: {
       const e = entities.get(entityId)
       if (!e || e.workspaceId !== workspaceId) return null
       return e
+    },
+    async findLiveAliasConflict() {
+      return seed.aliasConflictId ?? null
     },
     async applyMerge(input) {
       applyMergeCalls.push(input)
@@ -245,6 +251,17 @@ describe('[COMP:corrections/entity-merge] mergeEntities + reconciliation', () =>
     })
   })
 
+  describe('reconcileAliases (pure)', () => {
+    it('learns the merged display name and aliases without repeating the survivor', () => {
+      expect(reconcileAliases(
+        'Morgan Reed',
+        ['mreed'],
+        'morganreed77',
+        ['Morgan Reed', 'mreed'],
+      )).toEqual(['mreed', 'morganreed77'])
+    })
+  })
+
   describe('isWithinUndoWindow (pure)', () => {
     it('true at 6d 23h after merge', () => {
       const merged = new Date('2026-05-01T00:00:00Z')
@@ -283,6 +300,7 @@ describe('[COMP:corrections/entity-merge] mergeEntities + reconciliation', () =>
       expect(repo.applyMergeCalls).toHaveLength(1)
       expect(repo.applyMergeCalls[0]!.reconciledTags).toEqual(['EU', 'priority'])
       expect(repo.applyMergeCalls[0]!.reconciledAttributes).toEqual({ website: 'a.com', phone: '555' })
+      expect(repo.applyMergeCalls[0]!.reconciledAliases).toEqual([])
     })
 
     it('cascade opt-out does not invoke cascade port', async () => {
@@ -380,6 +398,23 @@ describe('[COMP:corrections/entity-merge] mergeEntities + reconciliation', () =>
           depsWith(repo),
         ),
       ).rejects.toMatchObject({ code: 'conflict_requires_resolution' })
+      expect(repo.applyMergeCalls).toHaveLength(0)
+    })
+
+    it('rejects a learned alias already claimed by a third live entity', async () => {
+      const repo = makeRepo({
+        entities: {
+          'e-s': survivor,
+          'e-m': snapshot({ entityId: 'e-m', displayName: 'acme-hq' }),
+        },
+        aliasConflictId: 'e-third',
+      })
+      await expect(
+        mergeEntities(
+          { workspaceId: WS, survivingId: 'e-s', mergedId: 'e-m', actorUserId: 'u-1', mode: 'survivor-wins' },
+          depsWith(repo),
+        ),
+      ).rejects.toMatchObject({ code: 'alias_conflict' })
       expect(repo.applyMergeCalls).toHaveLength(0)
     })
 

@@ -5538,7 +5538,7 @@ export const zh: Dictionary = {
     r2: {
       newRecord: "新增", newRecordDescription: "在這個工作空間建立聯絡人、公司或商機。", moreActions: "更多CRM操作",
       importCsv: "匯入CSV", importDescription: "選擇記錄類型、對應CSV欄位、檢查預覽，然後匯入最多500列。", exportCsv: "匯出CSV",
-      reviewDuplicates: "檢查重複記錄", duplicatesDescription: "按完全相同的電郵、網域及標準化名稱產生的確定候選。",
+      reviewDuplicates: "檢查重複記錄", duplicatesDescription: "按完全相同的識別資料、已知別名及保守的名稱相似度產生候選。每次合併均由你選擇。",
       archivedRecords: "已封存記錄", archivedDescription: "還原已從使用中CRM移除的記錄。", noArchived: "沒有已封存記錄。", restore: "還原", archivedLoading: "正在載入已封存記錄...", archivedLoadFailed: "無法載入已封存記錄。", restoreFailed: "無法還原記錄。",
       archive: "封存", archiveTitle: "封存CRM記錄？", archiveDescription: "封存{name}？它會離開使用中CRM，但之後可以還原。",
       name: "名稱", email: "電郵", phone: "電話", domain: "網域", amount: "金額", currency: "貨幣", company: "公司", contact: "聯絡人", noCompany: "沒有公司", noContact: "沒有聯絡人", tags: "標籤", tagsPlaceholder: "潛在客戶, 客戶", closeDate: "預計完成日期", source: "來源", probability: "成功機率", winLossReason: "贏得或失去原因", owner: "負責人", noOwner: "沒有負責人", myRecords: "我的記錄", bulkOwner: "設定負責人", unassigned: "未指派", memberUnknown: "未知成員", memberUnavailable: "成員無法使用",
@@ -5546,7 +5546,7 @@ export const zh: Dictionary = {
       create: "建立", creating: "建立中...", createFailed: "無法建立記錄。", saving: "儲存中...", save: "儲存", add: "新增", next: "下一步", cancel: "取消", close: "關閉",
       kindContact: "聯絡人", kindCompany: "公司", kindDeal: "商機", pickCsv: "選擇CSV檔案", mapColumns: "對應欄位", skipColumn: "不要匯入", createFieldFromColumn: "從這一欄建立欄位",
       previewRows: "{count}列可匯入。", importCapped: "只包含首500列。", importAction: "匯入", importing: "匯入中...", importFailed: "無法匯入CSV。", importResult: "已建立{created}筆；{failed}筆失敗。", importRowError: "第{row}列：{error}",
-      duplicateReasons: { email: "相同電郵", domain: "相同網域", name: "相同標準化名稱" }, keepRecord: "保留",
+      duplicateReasons: { email: "相同電郵", domain: "相同網域", name: "相同名稱或別名", external_identity: "相同外部識別", similar_name: "相似名稱" }, keepRecord: "保留",
       mergeRecords: "合併記錄？", mergeDescription: "把{merged}合併至{survivor}。七日內可以復原。", merge: "合併", mergeFailed: "無法合併記錄。", mergeComplete: "已合併記錄", undoMerge: "復原合併", undoAvailableUntil: "可於{date}前復原。", undoFailed: "無法復原合併。", noDuplicates: "沒有重複候選。", duplicatesLoading: "正在載入重複候選...", duplicatesLoadFailed: "無法載入重複候選。",
       savedViews: "檢視", saveView: "儲存CRM檢視", viewName: "檢視名稱", saveCurrentView: "儲存目前篩選", deleteView: "刪除檢視", noSavedViews: "沒有已儲存的CRM檢視。", savedViewsLoading: "正在載入已儲存檢視...", savedViewsLoadFailed: "無法載入已儲存檢視。", savedViewChangeFailed: "無法更新已儲存檢視。",
       crmActions: "CRM操作", configTitle: "CRM設定", configDescription: "這個工作空間的有限管線及具類型欄位。", configFailed: "無法更新CRM設定。", configLoading: "正在載入CRM設定...", retry: "重試",

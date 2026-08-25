@@ -11,6 +11,7 @@
  */
 
 import {
+  jaroWinkler,
   stitchMailboxThreads,
   type AccessContext,
   type EntityRecord,
@@ -819,6 +820,11 @@ export type CrmRecordRow = {
   attributes: Record<string, unknown>
   archivedAt: string | null
   updatedAt: string
+  aliases?: string[]
+  canonicalId?: string | null
+  source?: string
+  verifiedAt?: string | null
+  createdAt?: string
 }
 
 function entityToCrmRecordRow(entity: EntityRecord): CrmRecordRow {
@@ -831,6 +837,11 @@ function entityToCrmRecordRow(entity: EntityRecord): CrmRecordRow {
       ? entity.attributes.crm_archived_at
       : null,
     updatedAt: entity.updatedAt.toISOString(),
+    aliases: entity.aliases,
+    canonicalId: entity.canonicalId,
+    source: entity.source,
+    verifiedAt: entity.verifiedAt?.toISOString() ?? null,
+    createdAt: entity.createdAt.toISOString(),
   }
 }
 
@@ -841,6 +852,7 @@ export async function getCrmR2Record(
 ): Promise<CrmRecordRow | null> {
   const entity = await getEntityById(ctx, entityId)
   if (!entity || !['person', 'company', 'deal'].includes(entity.kind)) return null
+  if (entity.attributes.self === true) return null
   return entityToCrmRecordRow(entity)
 }
 
@@ -874,6 +886,7 @@ async function listRelatedKind(
        FROM entities e
       WHERE ${ap.sql} AND e.kind = $${kindIndex}
         AND e.valid_to IS NULL AND e.retracted_at IS NULL
+        AND NOT COALESCE((e.attributes->>'self')::boolean, false)
         AND NOT (e.attributes ? 'crm_archived_at')
         AND (${relationshipSql(firstRelationshipIndex)})
       ORDER BY e.updated_at DESC, e.id DESC`,
@@ -979,15 +992,23 @@ export async function listCrmR2Records(
     attributes: Record<string, unknown> | null
     archivedAt: Date | null
     updatedAt: Date
+    aliases: string[] | null
+    canonicalId: string | null
+    source: string
+    verifiedAt: Date | null
+    createdAt: Date
   }>(
     ctx,
-    `SELECT e.id, e.kind, e.display_name AS name, e.attributes,
+    `SELECT e.id, e.kind, e.display_name AS name, e.attributes, e.aliases,
+            e.canonical_id AS "canonicalId", e.source,
+            e.verified_at AS "verifiedAt", e.created_at AS "createdAt",
             NULLIF(e.attributes->>'crm_archived_at','')::timestamptz AS "archivedAt",
             e.updated_at AS "updatedAt"
        FROM entities e
       WHERE ${ap.sql}
         AND e.kind = ANY($${ap.nextIdx}::text[])
         AND e.valid_to IS NULL AND e.retracted_at IS NULL
+        AND NOT COALESCE((e.attributes->>'self')::boolean, false)
         ${options.includeArchived ? '' : `AND NOT (e.attributes ? 'crm_archived_at')`}
       ORDER BY e.updated_at DESC
       LIMIT 1500`,
@@ -1000,6 +1021,11 @@ export async function listCrmR2Records(
     attributes: r.attributes ?? {},
     archivedAt: r.archivedAt?.toISOString() ?? null,
     updatedAt: r.updatedAt.toISOString(),
+    aliases: r.aliases ?? [],
+    canonicalId: r.canonicalId,
+    source: r.source,
+    verifiedAt: r.verifiedAt?.toISOString() ?? null,
+    createdAt: r.createdAt.toISOString(),
   }))
 }
 
@@ -1095,6 +1121,7 @@ export async function listCrmRecordPage(
     `e.kind = $${values.length + 1}`,
     'e.valid_to IS NULL',
     'e.retracted_at IS NULL',
+    `NOT COALESCE((e.attributes->>'self')::boolean, false)`,
   ]
   values.push(options.kind)
   if (options.includeArchived) where.push(`e.attributes ? 'crm_archived_at'`)
@@ -1319,6 +1346,7 @@ export async function getCrmSummary(
      FROM entities e
      WHERE ${ap.sql} AND e.kind = ANY($${ap.nextIdx}::text[])
        AND e.valid_to IS NULL AND e.retracted_at IS NULL
+       AND NOT COALESCE((e.attributes->>'self')::boolean, false)
        AND NOT (e.attributes ? 'crm_archived_at')`,
     aggregateValues,
   )
@@ -1385,6 +1413,7 @@ export async function lookupCrmRecords(input: {
        FROM entities e
       WHERE ${ap.sql} AND e.kind = $${ap.nextIdx}
         AND e.valid_to IS NULL AND e.retracted_at IS NULL
+        AND NOT COALESCE((e.attributes->>'self')::boolean, false)
         AND NOT (e.attributes ? 'crm_archived_at') ${search}
       ORDER BY lower(e.display_name), e.id LIMIT $${values.length}`,
     values,
@@ -1398,7 +1427,7 @@ export async function setCrmArchived(input: {
   archived: boolean
 }): Promise<EntityRecord | null> {
   const old = await getEntityById(input.ctx, input.entityId)
-  if (!old || !['person', 'company', 'deal'].includes(old.kind)) return null
+  if (!old || old.attributes.self === true || !['person', 'company', 'deal'].includes(old.kind)) return null
   const attributes = { ...old.attributes }
   if (input.archived) attributes.crm_archived_at = new Date().toISOString()
   else delete attributes.crm_archived_at
@@ -1491,7 +1520,8 @@ export async function validateCrmCustomFieldValues(input: {
     }
     if (definition.fieldType === 'entity_reference' && value !== null && value !== undefined && value !== '') {
       const target = await getEntityById(input.ctx, value as string)
-      if (!target || target.attributes.crm_archived_at || !definition.options.includes(target.kind)) {
+      if (!target || target.attributes.self === true
+        || target.attributes.crm_archived_at || !definition.options.includes(target.kind)) {
         throw new Error(`Reference for custom field '${key}' must be a visible ${definition.options.join(' or ')}`)
       }
     }
@@ -1512,7 +1542,7 @@ export async function updateCrmCustomFields(input: {
   values: Record<string, unknown>
 }): Promise<EntityRecord | null> {
   const old = await getEntityById(input.ctx, input.entityId)
-  if (!old || !['person', 'company', 'deal'].includes(old.kind)) return null
+  if (!old || old.attributes.self === true || !['person', 'company', 'deal'].includes(old.kind)) return null
   const config = await getCrmConfig(input.ctx.userId, input.ctx.workspaceId)
   const definitions = config.fields.filter((f) => f.entityKind === old.kind)
   await validateCrmCustomFieldValues({
@@ -1560,7 +1590,8 @@ export async function listCrmDealParticipants(
        FROM crm_deal_contacts dc
        JOIN entities e ON e.id = dc.contact_id
       WHERE dc.workspace_id = $1 AND dc.deal_id = $2
-        AND e.kind = 'person' AND e.valid_to IS NULL AND ${ap.sql}
+        AND e.kind = 'person' AND e.valid_to IS NULL
+        AND NOT COALESCE((e.attributes->>'self')::boolean, false) AND ${ap.sql}
       ORDER BY dc.is_primary DESC, dc.created_at`,
     [ctx.workspaceId, dealId, ...ap.params],
   )
@@ -1586,7 +1617,8 @@ export async function addCrmDealParticipant(input: {
     getEntityById(input.ctx, input.dealId),
     getEntityById(input.ctx, input.contactId),
   ])
-  if (!deal || deal.kind !== 'deal' || !contact || contact.kind !== 'person') return false
+  if (!deal || deal.kind !== 'deal' || !contact || contact.kind !== 'person'
+    || contact.attributes.self === true) return false
   const client = await getPool().connect()
   try {
     await client.query('BEGIN')
@@ -1622,7 +1654,7 @@ export async function setCrmDealPrimaryContact(input: {
   if (!deal || deal.kind !== 'deal') return false
   if (input.contactId) {
     const contact = await getEntityById(input.ctx, input.contactId)
-    if (!contact || contact.kind !== 'person') return false
+    if (!contact || contact.kind !== 'person' || contact.attributes.self === true) return false
   }
   const client = await getPool().connect()
   try {
@@ -1895,7 +1927,7 @@ export async function getCrmEmailReviewContext(input: {
   account?: string | null
 }): Promise<CrmEmailReviewContext | null> {
   const entity = await getEntityById(input.ctx, input.entityId)
-  if (!entity || !['person', 'company', 'deal'].includes(entity.kind)) return null
+  if (!entity || entity.attributes.self === true || !['person', 'company', 'deal'].includes(entity.kind)) return null
   const addresses = await contactEmailsForEntity(input.ctx, entity)
   if (!addresses.includes(bareAddress(input.recipient))) return null
 
@@ -1978,7 +2010,7 @@ export async function listCrmTimeline(input: {
   limit?: number
 }): Promise<CrmActivity[] | null> {
   const entity = await getEntityById(input.ctx, input.entityId)
-  if (!entity || !['person', 'company', 'deal'].includes(entity.kind)) return null
+  if (!entity || entity.attributes.self === true || !['person', 'company', 'deal'].includes(entity.kind)) return null
   const limit = Math.min(Math.max(input.limit ?? 50, 1), 100)
   const addresses = await contactEmailsForEntity(input.ctx, entity)
   const [activities, mail] = await Promise.all([
@@ -2105,7 +2137,7 @@ export async function deleteCrmSavedView(
 
 export type CrmDuplicateGroup = {
   kind: CrmEntityKind
-  reason: 'email' | 'domain' | 'name'
+  reason: 'email' | 'domain' | 'name' | 'external_identity' | 'similar_name'
   value: string
   records: Array<{ id: string; name: string }>
 }
@@ -2114,8 +2146,68 @@ function normalizedName(value: string): string {
   return value.toLowerCase().normalize('NFKD').replace(/[^\p{L}\p{N}]+/gu, '')
 }
 
+function externalIdentity(attributes: Record<string, unknown>): string {
+  const value = attributes.external_ref
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return ''
+  const ref = value as Record<string, unknown>
+  const provider = typeof ref.provider === 'string' ? ref.provider.trim().toLowerCase() : ''
+  const id = typeof ref.id === 'string' ? ref.id.trim() : ''
+  return provider && id ? `${provider}:${id}` : ''
+}
+
+function duplicateNames(row: CrmRecordRow): string[] {
+  return [...new Set([row.name, ...(row.aliases ?? [])].map(normalizedName).filter(Boolean))]
+}
+
+function commonPrefixLength(a: string, b: string): number {
+  const length = Math.min(a.length, b.length)
+  let index = 0
+  while (index < length && a[index] === b[index]) index += 1
+  return index
+}
+
+function isPrefixShapedSimilarName(leftNames: readonly string[], rightNames: readonly string[]): boolean {
+  return leftNames.some((left) => rightNames.some((right) => {
+    const shorter = Math.min(left.length, right.length)
+    if (shorter < 3) return false
+    const prefix = commonPrefixLength(left, right)
+    return prefix >= 3 && prefix / shorter >= 0.6 && jaroWinkler(left, right) >= 0.85
+  }))
+}
+
+function identityCompleteness(row: CrmRecordRow): number {
+  let score = row.canonicalId ? 1 : 0
+  if (typeof row.attributes.email === 'string' && row.attributes.email.trim()) score += 1
+  if (typeof row.attributes.domain === 'string' && row.attributes.domain.trim()) score += 1
+  if (externalIdentity(row.attributes)) score += 1
+  return score
+}
+
+function presentationQuality(name: string): number {
+  return (name.includes(' ') ? 2 : 0) - (/\d/.test(name) ? 1 : 0)
+}
+
+function compareSurvivors(a: CrmRecordRow, b: CrmRecordRow): number {
+  const verified = Number(Boolean(b.verifiedAt)) - Number(Boolean(a.verifiedAt))
+  if (verified) return verified
+  const authored = Number(b.source === 'user') - Number(a.source === 'user')
+  if (authored) return authored
+  const identity = identityCompleteness(b) - identityCompleteness(a)
+  if (identity) return identity
+  const presentation = presentationQuality(b.name) - presentationQuality(a.name)
+  if (presentation) return presentation
+  const created = (a.createdAt ?? '').localeCompare(b.createdAt ?? '')
+  return created || a.id.localeCompare(b.id)
+}
+
+const MAX_DUPLICATE_GROUPS = 200
+const MAX_DUPLICATE_GROUP_RECORDS = 50
+
 export function findCrmDuplicateGroups(rows: readonly CrmRecordRow[]): CrmDuplicateGroup[] {
   const buckets = new Map<string, CrmDuplicateGroup>()
+  const rowById = new Map(rows.map((row) => [row.id, row]))
+  const namesById = new Map(rows.map((row) => [row.id, duplicateNames(row)]))
+  const exactKeysById = new Map<string, Set<string>>()
   for (const row of rows) {
     const candidates: Array<{ reason: CrmDuplicateGroup['reason']; value: string }> = []
     if (row.kind === 'person') {
@@ -2128,8 +2220,9 @@ export function findCrmDuplicateGroups(rows: readonly CrmRecordRow[]): CrmDuplic
         : ''
       if (domain) candidates.push({ reason: 'domain', value: domain })
     }
-    const name = normalizedName(row.name)
-    if (name) candidates.push({ reason: 'name', value: name })
+    const identity = externalIdentity(row.attributes)
+    if (identity) candidates.push({ reason: 'external_identity', value: identity })
+    for (const name of namesById.get(row.id) ?? []) candidates.push({ reason: 'name', value: name })
     for (const candidate of candidates) {
       const key = `${row.kind}:${candidate.reason}:${candidate.value}`
       const group = buckets.get(key) ?? {
@@ -2138,11 +2231,55 @@ export function findCrmDuplicateGroups(rows: readonly CrmRecordRow[]): CrmDuplic
         value: candidate.value,
         records: [],
       }
-      group.records.push({ id: row.id, name: row.name })
+      if (!group.records.some((record) => record.id === row.id)) {
+        group.records.push({ id: row.id, name: row.name })
+      }
       buckets.set(key, group)
+      const keys = exactKeysById.get(row.id) ?? new Set<string>()
+      keys.add(key)
+      exactKeysById.set(row.id, keys)
     }
   }
-  return [...buckets.values()].filter((g) => g.records.length > 1)
+  const exact = [...buckets.values()].filter((group) => group.records.length > 1)
+  const sharesExactIdentity = (leftId: string, rightId: string): boolean => {
+    const leftKeys = exactKeysById.get(leftId)
+    const rightKeys = exactKeysById.get(rightId)
+    if (!leftKeys || !rightKeys) return false
+    for (const key of leftKeys) if (rightKeys.has(key)) return true
+    return false
+  }
+
+  const similarGroups: CrmDuplicateGroup[] = []
+  const similarLimit = Math.max(0, MAX_DUPLICATE_GROUPS - exact.length)
+  if (similarLimit > 0) {
+    similarityScan:
+    for (let i = 0; i < rows.length; i += 1) {
+      for (let j = i + 1; j < rows.length; j += 1) {
+        const left = rows[i]
+        const right = rows[j]
+        if (left.kind !== right.kind || sharesExactIdentity(left.id, right.id)) continue
+        if (isPrefixShapedSimilarName(
+          namesById.get(left.id) ?? [],
+          namesById.get(right.id) ?? [],
+        )) {
+          const pair = [left, right].sort(compareSurvivors)
+          similarGroups.push({
+            kind: left.kind,
+            reason: 'similar_name',
+            value: [left.name, right.name].sort().join(' / '),
+            records: pair.map((row) => ({ id: row.id, name: row.name })),
+          })
+          if (similarGroups.length >= similarLimit) break similarityScan
+        }
+      }
+    }
+  }
+
+  for (const group of exact) {
+    group.records.sort((left, right) => compareSurvivors(rowById.get(left.id)!, rowById.get(right.id)!))
+    group.records = group.records.slice(0, MAX_DUPLICATE_GROUP_RECORDS)
+  }
+  return [...exact.slice(0, MAX_DUPLICATE_GROUPS), ...similarGroups]
 }
 
 export type CrmReport = {

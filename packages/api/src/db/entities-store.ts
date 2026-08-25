@@ -18,7 +18,7 @@ import type { Sensitivity } from '@use-brian/core'
 import { clientCompartment } from '@use-brian/core'
 import { buildAccessPredicate } from './access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
-import { getAppPool, getPool, query, queryGated, queryWithRLS, rollbackAndRelease } from './client.js'
+import { applyRLSGucs, getAppPool, getPool, query, queryGated, queryWithRLS, rollbackAndRelease } from './client.js'
 
 /**
  * `entities` store. Schema spec:
@@ -949,61 +949,78 @@ export async function addEntityAlias(
     throw new Error('alias must be 1-200 characters after trim')
   }
 
-  // Look up the target entity (and its workspace) under RLS.
-  const target = await queryWithRLS<{ workspaceId: string; displayName: string }>(
-    actorUserId,
-    `SELECT workspace_id AS "workspaceId", display_name AS "displayName"
-       FROM entities
-      WHERE id = $1 AND valid_to IS NULL`,
-    [entityId],
-  )
-  if (target.rows.length === 0) return { kind: 'not_found' }
-  const { workspaceId, displayName } = target.rows[0]
+  const client = await getAppPool().connect()
+  try {
+    await client.query('BEGIN')
+    await applyRLSGucs(client, actorUserId)
 
-  // Self-alias check — adding an entity's own display_name as alias is
-  // a no-op (lookups already match display_name). Still allowed so
-  // callers don't have to special-case; just don't store the redundancy.
-  if (displayName.toLowerCase() === normalized) {
-    const fresh = await queryWithRLS<EntityRow>(
-      actorUserId,
-      `SELECT ${FULL_SELECT} FROM entities WHERE id = $1`,
+    // Resolve the workspace first, then take the same workspace lock as
+    // entity merge before locking the row. A second read after the lock is
+    // authoritative if the entity changed while we waited.
+    const located = await client.query<{ workspaceId: string }>(
+      `SELECT workspace_id AS "workspaceId" FROM entities
+        WHERE id = $1 AND valid_to IS NULL AND retracted_at IS NULL`,
       [entityId],
     )
-    return { kind: 'ok', entity: toEntity(fresh.rows[0]) }
-  }
+    if (!located.rows[0]) {
+      await client.query('COMMIT')
+      return { kind: 'not_found' }
+    }
+    const workspaceId = located.rows[0].workspaceId
+    await client.query(
+      `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+      [workspaceId],
+    )
+    const target = await client.query<EntityRow>(
+      `SELECT ${FULL_SELECT} FROM entities
+        WHERE id = $1 AND workspace_id = $2
+          AND valid_to IS NULL AND retracted_at IS NULL
+        FOR UPDATE`,
+      [entityId, workspaceId],
+    )
+    if (!target.rows[0]) {
+      await client.query('COMMIT')
+      return { kind: 'not_found' }
+    }
 
-  // Conflict check — does another live entity in this workspace already
-  // claim this alias (or have it as its display_name)? GIN-indexed.
-  const conflict = await queryWithRLS<{ id: string }>(
-    actorUserId,
-    `SELECT id FROM entities
-      WHERE workspace_id = $1
-        AND id <> $2
-        AND valid_to IS NULL
-        AND (lower(display_name) = $3 OR $3 = ANY(aliases))
-      LIMIT 1`,
-    [workspaceId, entityId, normalized],
-  )
-  if (conflict.rows.length > 0) {
-    return { kind: 'conflict', conflictingEntityId: conflict.rows[0].id }
-  }
+    // Adding an entity's own display name is an idempotent no-op.
+    if (target.rows[0].displayName.toLowerCase() === normalized) {
+      await client.query('COMMIT')
+      return { kind: 'ok', entity: toEntity(target.rows[0]) }
+    }
 
-  // Append + dedup in a single statement so concurrent writers can't
-  // race a duplicate in.
-  const updated = await queryWithRLS<EntityRow>(
-    actorUserId,
-    `UPDATE entities
-        SET aliases = (
-              SELECT array_agg(DISTINCT a)
-                FROM unnest(aliases || ARRAY[$2]::text[]) AS a
-            ),
-            updated_at = now()
-      WHERE id = $1 AND valid_to IS NULL
-      RETURNING ${FULL_SELECT}`,
-    [entityId, normalized],
-  )
-  if (updated.rows.length === 0) return { kind: 'not_found' }
-  return { kind: 'ok', entity: toEntity(updated.rows[0]) }
+    const conflict = await client.query<{ id: string }>(
+      `SELECT id FROM entities
+        WHERE workspace_id = $1
+          AND id <> $2
+          AND valid_to IS NULL AND retracted_at IS NULL
+          AND (lower(display_name) = $3 OR $3 = ANY(aliases))
+        LIMIT 1`,
+      [workspaceId, entityId, normalized],
+    )
+    if (conflict.rows[0]) {
+      await client.query('COMMIT')
+      return { kind: 'conflict', conflictingEntityId: conflict.rows[0].id }
+    }
+
+    const updated = await client.query<EntityRow>(
+      `UPDATE entities
+          SET aliases = (
+                SELECT array_agg(DISTINCT a)
+                  FROM unnest(aliases || ARRAY[$2]::text[]) AS a
+              ),
+              updated_at = now()
+        WHERE id = $1 AND workspace_id = $3
+          AND valid_to IS NULL AND retracted_at IS NULL
+        RETURNING ${FULL_SELECT}`,
+      [entityId, normalized, workspaceId],
+    )
+    await client.query('COMMIT')
+    if (!updated.rows[0]) return { kind: 'not_found' }
+    return { kind: 'ok', entity: toEntity(updated.rows[0]) }
+  } finally {
+    await rollbackAndRelease(client)
+  }
 }
 
 export async function removeEntityAlias(

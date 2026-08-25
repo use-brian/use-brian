@@ -436,7 +436,7 @@ export async function deleteCrmView(workspaceId: string, viewId: string): Promis
 
 export type CrmDuplicateGroup = {
   kind: "person" | "company" | "deal";
-  reason: "email" | "domain" | "name";
+  reason: "email" | "domain" | "name" | "external_identity" | "similar_name";
   value: string;
   records: Array<{ id: string; name: string }>;
 };

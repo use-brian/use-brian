@@ -39,6 +39,7 @@ import type {
 const userSchema = z
   .object({
     login: z.string().min(1),
+    id: z.union([z.number().int().nonnegative(), z.string().min(1)]).optional(),
     type: z.string().optional(),
   })
   .passthrough()
@@ -175,6 +176,10 @@ function isBotLogin(login: string, type?: string): boolean {
   return login.endsWith('[bot]')
 }
 
+function providerUserId(id: string | number | undefined): string | undefined {
+  return id === undefined ? undefined : String(id)
+}
+
 function branchFromRef(ref: string): string | null {
   const prefix = 'refs/heads/'
   if (ref.startsWith(prefix)) return ref.slice(prefix.length)
@@ -217,6 +222,7 @@ function normalizePush(
     branch,
     actor: {
       login: payload.sender.login,
+      id: providerUserId(payload.sender.id),
       is_bot: isBotLogin(payload.sender.login, payload.sender.type),
     },
     payload,
@@ -249,6 +255,7 @@ function normalizePullRequest(
     branch: payload.pull_request.base?.ref ?? null,
     actor: {
       login: payload.sender.login,
+      id: providerUserId(payload.sender.id),
       is_bot: isBotLogin(payload.sender.login, payload.sender.type),
     },
     payload,
@@ -280,6 +287,7 @@ function normalizeIssues(
     branch: null,
     actor: {
       login: payload.sender.login,
+      id: providerUserId(payload.sender.id),
       is_bot: isBotLogin(payload.sender.login, payload.sender.type),
     },
     payload,
@@ -301,6 +309,7 @@ function normalizeRelease(
     branch: null,
     actor: {
       login: payload.sender.login,
+      id: providerUserId(payload.sender.id),
       is_bot: isBotLogin(payload.sender.login, payload.sender.type),
     },
     payload,
@@ -323,6 +332,7 @@ function normalizeSecurityAdvisory(
     branch: null,
     actor: {
       login: payload.sender?.login ?? 'github',
+      id: providerUserId(payload.sender?.id),
       is_bot: true,
     },
     payload,
@@ -343,6 +353,7 @@ function normalizeGenericAlert(
     branch: null,
     actor: {
       login: payload.sender?.login ?? 'github',
+      id: providerUserId(payload.sender?.id),
       is_bot: true,
     },
     payload,

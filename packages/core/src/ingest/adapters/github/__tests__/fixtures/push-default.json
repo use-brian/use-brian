@@ -9,6 +9,7 @@
   },
   "sender": {
     "login": "alice",
+    "id": 10101,
     "type": "User"
   },
   "head_commit": {

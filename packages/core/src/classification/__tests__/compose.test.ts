@@ -170,16 +170,10 @@ describe('[COMP:classification/compose] createComposeExecutor', () => {
     })
   })
 
-  it('routes person kind through CRM.createContact and resolves entity id', async () => {
+  it('routes person kind through CRM.createContact and uses the returned entity id', async () => {
     const entities = makeEntityStoreStub()
     const links = makeLinksStoreStub()
     const crm = makeCrmStub()
-
-    // Pre-seed the byName map so resolveCrmEntityId finds the entity row that
-    // the CRM tool would have written atomically alongside the contact.
-    const ent = makeEntity({ id: 'ent-person-1', kind: 'person', displayName: 'Alice Chen', canonicalId: 'alice@acme.com' })
-    entities.byName.set('person:alice chen', ent)
-    entities.byCanonical.set('person:alice@acme.com', ent)
 
     const exec = createComposeExecutor({ entities: entities.stub, links: links.stub, crm: crm.stub })
     const writes: CompositionWrite = {
@@ -191,22 +185,40 @@ describe('[COMP:classification/compose] createComposeExecutor', () => {
       },
     }
     const out = await exec.write(writes, baseCtx())
-    expect(out.entityIds.primary).toBe('ent-person-1')
+    expect(out.entityIds.primary).toBe('contact-1')
     expect(crm.calls.find((c) => c.method === 'createContact')).toBeDefined()
     expect(entities.created).toHaveLength(0)  // CRM path, not direct EntityStore.create
+  })
+
+  it('forwards a structured external identity without treating its URL as email', async () => {
+    const entities = makeEntityStoreStub()
+    const links = makeLinksStoreStub()
+    const crm = makeCrmStub()
+    const exec = createComposeExecutor({ entities: entities.stub, links: links.stub, crm: crm.stub })
+
+    const out = await exec.write({
+      primary: {
+        ref: 'primary',
+        kind: 'person',
+        display_name: 'octavia-dev',
+        canonical_id: 'https://github.com/octavia-dev',
+        attributes: {
+          external_ref: { provider: 'github', id: '20202', url: 'https://github.com/octavia-dev' },
+        },
+      },
+    }, baseCtx())
+
+    expect(crm.calls.find((call) => call.method === 'createContact')?.params).toMatchObject({
+      email: null,
+      externalRef: { provider: 'github', id: '20202' },
+    })
+    expect(out.entityIds.primary).toBe('contact-1')
   })
 
   it('writes composed entities + edge with resolved refs', async () => {
     const entities = makeEntityStoreStub()
     const links = makeLinksStoreStub()
     const crm = makeCrmStub()
-
-    const personEnt = makeEntity({ id: 'ent-person', kind: 'person', displayName: 'Alice', canonicalId: 'alice@acme.com' })
-    const companyEnt = makeEntity({ id: 'ent-company', kind: 'company', displayName: 'acme.com', canonicalId: 'acme.com' })
-    entities.byName.set('person:alice', personEnt)
-    entities.byName.set('company:acme.com', companyEnt)
-    entities.byCanonical.set('person:alice@acme.com', personEnt)
-    entities.byCanonical.set('company:acme.com', companyEnt)
 
     const exec = createComposeExecutor({ entities: entities.stub, links: links.stub, crm: crm.stub })
     const writes: CompositionWrite = {
@@ -219,12 +231,12 @@ describe('[COMP:classification/compose] createComposeExecutor', () => {
       ],
     }
     const out = await exec.write(writes, baseCtx())
-    expect(out.entityIds.primary).toBe('ent-person')
-    expect(out.entityIds.employer).toBe('ent-company')
+    expect(out.entityIds.primary).toBe('contact-1')
+    expect(out.entityIds.employer).toBe('company-1')
     expect(out.edgeIds).toHaveLength(1)
     expect(links.created[0]?.edgeType).toBe('works_at')
-    expect(links.created[0]?.sourceId).toBe('ent-person')
-    expect(links.created[0]?.targetId).toBe('ent-company')
+    expect(links.created[0]?.sourceId).toBe('contact-1')
+    expect(links.created[0]?.targetId).toBe('company-1')
   })
 
   it('dedups non-CRM entity by canonical_id, supersedes when attributes differ', async () => {
