@@ -76,6 +76,8 @@ describe('[COMP:api/linked-identity-store] createLinkedIdentityStore', () => {
       expect(sql).toContain("k.audience = 'external'")
       expect(sql).toContain("k.scope = 'chat'")
       expect(sql).toContain("lower(li.metadata->>'email') = $3")
+      expect(sql).not.toContain('DELETE FROM linked_identities')
+      expect(sql).not.toContain('UPDATE linked_identities')
       expect(sql).not.toContain('FROM entities')
       expect(params).toEqual([
         '00000000-0000-4000-8000-000000000010',
@@ -92,15 +94,34 @@ describe('[COMP:api/linked-identity-store] createLinkedIdentityStore', () => {
         email: 'buyer@customer.example',
       })).toBeNull()
 
-      mockQuery.mockResolvedValueOnce({
-        rows: [{ providerId: 'client-a' }, { providerId: 'client-b' }],
-        rowCount: 2,
-      } as never)
+      mockQuery.mockResolvedValueOnce({ rows: [{ providerId: null }], rowCount: 1 } as never)
       expect(await store.findUniqueVerifiedApiClientByEmail({
         apiKeyId: '00000000-0000-4000-8000-000000000010',
         assistantId: '00000000-0000-4000-8000-000000000011',
         email: 'buyer@customer.example',
       })).toBeNull()
+    })
+
+    it('selects only a same-user/entity historical Studio canonical id without mutating rows', async () => {
+      mockQuery.mockResolvedValueOnce({
+        rows: [{ providerId: 'studio-client:canonical' }],
+        rowCount: 1,
+      } as never)
+
+      expect(await store.findUniqueVerifiedApiClientByEmail({
+        apiKeyId: '00000000-0000-4000-8000-000000000010',
+        assistantId: '00000000-0000-4000-8000-000000000011',
+        email: 'buyer@customer.example',
+      })).toBe('studio-client:canonical')
+
+      const [sql] = mockQuery.mock.calls[0] as [string, unknown[]]
+      expect(sql).toContain("provider_id LIKE 'studio-client:%'")
+      expect(sql).toContain("provider_id NOT LIKE 'studio-demo:%'")
+      expect(sql).toContain('COUNT(DISTINCT user_id) AS user_count')
+      expect(sql).toContain('COUNT(*) FILTER (WHERE entity_id IS NULL) AS missing_entity_count')
+      expect(sql).toContain('COUNT(DISTINCT entity_id) AS entity_count')
+      expect(sql).not.toContain('DELETE FROM linked_identities')
+      expect(sql).not.toContain('UPDATE linked_identities')
     })
   })
 
