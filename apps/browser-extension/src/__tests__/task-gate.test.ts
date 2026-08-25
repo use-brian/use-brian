@@ -199,6 +199,42 @@ describe('[COMP:ext/agent] Per-task consent gate (P1.7)', () => {
     expect(gate.isStopped()).toBe(false)
   })
 
+  it('allows pre-approval after relay loss ends the active task', async () => {
+    const preapprovalStates: boolean[] = []
+    const gate = new TaskGate({
+      prompt: async ({ allowPreApproval }) => {
+        preapprovalStates.push(allowPreApproval)
+        return { allowed: true, tabId: 5 }
+      },
+    })
+
+    await gate.requireTab()
+    gate.registerCreatedTab(6)
+    expect(gate.endTask()).toEqual([6])
+    expect(gate.currentTab()).toBeNull()
+
+    await gate.requireTab()
+    expect(preapprovalStates).toEqual([true, true])
+    expect(gate.isStopped()).toBe(false)
+  })
+
+  it('does not let an Allow from an ended relay task restore authorization', async () => {
+    let allow: (() => void) | null = null
+    const gate = new TaskGate({
+      prompt: () => new Promise((resolve) => {
+        allow = () => resolve({ allowed: true, tabId: 5 })
+      }),
+    })
+
+    const pending = gate.requireTab()
+    gate.endTask()
+    allow?.()
+
+    await expect(pending).rejects.toMatchObject({ code: 'stopped' })
+    expect(gate.currentTab()).toBeNull()
+    expect(gate.isStopped()).toBe(false)
+  })
+
   it('a DECLINED prompt leaves Stop latched (declining is not a release)', async () => {
     const gate = new TaskGate({ prompt: async () => ({ allowed: false, reason: 'denied' }) })
     gate.stop()

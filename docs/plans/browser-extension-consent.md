@@ -14,7 +14,8 @@ Pre-approval does not widen browser access:
 
 - restricted, privileged, and incognito pages remain ineligible;
 - the server-supplied `task_tabs` or `full_browser` profile policy still bounds available tabs;
-- relay disconnect still revokes the active task;
+- relay disconnect still revokes the active task, but reconnecting does not count as pressing Stop;
+  the stored pre-approval preference governs the next task;
 - the popup Stop action still ends the active task and task-created tabs;
 - after Stop, automatic approval is suppressed until the user manually allows a new task.
 - cancelling the browser's own control indicator also requires a fresh manual Allow.
