@@ -3,17 +3,19 @@ import { buildTool } from '../types.js'
 import { createSearchStack } from './search-stack.js'
 import { braveProvider } from './search-brave.js'
 import { serperProvider } from './search-serper.js'
+import { serpApiProvider } from './search-serpapi.js'
 import { tavilyProvider } from './search-tavily.js'
 import { duckDuckGoProvider } from './search-ddg.js'
 import { encodeExternalCostMeta } from '../../billing/external-cost.js'
 import { flatSearchCostUsd } from '../../billing/search-provider-rates.js'
 
-const SEARCH_PROVIDER_NAMES = ['brave', 'serper', 'tavily', 'duckduckgo'] as const
+const SEARCH_PROVIDER_NAMES = ['brave', 'serper', 'serpapi', 'tavily', 'duckduckgo'] as const
 type SearchProviderName = (typeof SEARCH_PROVIDER_NAMES)[number]
 
 const providersByName = {
   brave: braveProvider,
   serper: serperProvider,
+  serpapi: serpApiProvider,
   tavily: tavilyProvider,
   duckduckgo: duckDuckGoProvider,
 } satisfies Record<SearchProviderName, typeof braveProvider>
@@ -40,13 +42,15 @@ async function mapPool<T, R>(
 /**
  * Web search tool — model-driven search with provider fallback.
  *
- * Provider order: Brave → Serper → Tavily → DuckDuckGo.
+ * Provider order: Brave → Serper → SerpAPI → Tavily → DuckDuckGo.
  *
  * - Brave is first because it's fast, commerce-aware, and cheap.
  * - Serper (Google SERP) is second because Google indexes commercial sites
  *   better than anything else — the motivating bug was "flight prices" which
  *   Brave/Tavily mis-indexed and Google gets right.
- * - Tavily is third for AI-optimized research queries.
+ * - SerpAPI is a second Google SERP backend for exact-provider measurements
+ *   and fallback when Serper rejects a request.
+ * - Tavily follows for AI-optimized research queries.
  * - DuckDuckGo is the no-token fallback for local dev without any env set.
  *
  * This is the explicit `webSearch` tool the model calls. It replaces
@@ -72,7 +76,7 @@ const webSearchInputSchema = z
       .enum(SEARCH_PROVIDER_NAMES)
       .optional()
       .describe(
-        'Exact provider for repeatable measurement. Omit for normal Brave → Serper → Tavily → DuckDuckGo fallback.',
+        'Exact provider for repeatable measurement. Omit for normal Brave → Serper → SerpAPI → Tavily → DuckDuckGo fallback.',
       ),
     maxResults: z.number().optional().describe('Maximum results per query (default 5, max 10)'),
   })
@@ -188,8 +192,8 @@ export const webSearchTool = buildTool({
       context.abortSignal,
     )
 
-    // `meta.searchProvider` carries the winning provider name (brave / serper
-    // / tavily / duckduckgo) back to the analytics log site via ToolResult.meta.
+    // `meta.searchProvider` carries the winning provider name (brave / serper /
+    // serpapi / tavily / duckduckgo) back to analytics via ToolResult.meta.
     // `externalCost_*` keys carry the per-call USD so the chat route can
     // write a `usage_tracking` row (flat cost, 0 tokens) per billing policy.
     // Both are omitted when no provider served the call.

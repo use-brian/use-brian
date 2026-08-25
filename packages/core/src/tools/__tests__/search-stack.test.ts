@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } fr
 import { createSearchStack, type SearchProvider, type SearchResult } from '../base/search-stack.js'
 import { braveProvider } from '../base/search-brave.js'
 import { serperProvider } from '../base/search-serper.js'
+import { serpApiProvider } from '../base/search-serpapi.js'
 import { tavilyProvider } from '../base/search-tavily.js'
 import { duckDuckGoProvider } from '../base/search-ddg.js'
 import { webSearchTool } from '../base/web-search.js'
@@ -170,6 +171,15 @@ describe('[COMP:tools/search] Provider availability gates', () => {
     })
   })
 
+  it('serpApiProvider gates on SERPAPI_API_KEY', () => {
+    withEnv('SERPAPI_API_KEY', undefined, () => {
+      expect(serpApiProvider.available()).toBe(false)
+    })
+    withEnv('SERPAPI_API_KEY', 'test-token', () => {
+      expect(serpApiProvider.available()).toBe(true)
+    })
+  })
+
   it('tavilyProvider gates on TAVILY_API_KEY', () => {
     withEnv('TAVILY_API_KEY', undefined, () => {
       expect(tavilyProvider.available()).toBe(false)
@@ -191,7 +201,7 @@ describe('[COMP:tools/search] Provider availability gates', () => {
 // ── webSearch tool: outage vs genuine no-results ─────────────────
 
 describe('[COMP:tools/search] webSearch outage surfacing', () => {
-  const ENV_KEYS = ['BRAVE_SEARCH_API_KEY', 'SERPER_API_KEY', 'TAVILY_API_KEY'] as const
+  const ENV_KEYS = ['BRAVE_SEARCH_API_KEY', 'SERPER_API_KEY', 'SERPAPI_API_KEY', 'TAVILY_API_KEY'] as const
   let savedEnv: Record<string, string | undefined>
   let fetchSpy: MockInstance<typeof fetch>
 
@@ -201,6 +211,7 @@ describe('[COMP:tools/search] webSearch outage surfacing', () => {
     savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]))
     delete process.env.BRAVE_SEARCH_API_KEY
     delete process.env.SERPER_API_KEY
+    delete process.env.SERPAPI_API_KEY
     process.env.TAVILY_API_KEY = 'test-token'
     fetchSpy = vi.spyOn(globalThis, 'fetch') as unknown as MockInstance<typeof fetch>
   })
@@ -242,7 +253,7 @@ describe('[COMP:tools/search] webSearch outage surfacing', () => {
 })
 
 describe('[COMP:tools/search] webSearch exact-provider panels', () => {
-  const ENV_KEYS = ['BRAVE_SEARCH_API_KEY', 'SERPER_API_KEY', 'TAVILY_API_KEY'] as const
+  const ENV_KEYS = ['BRAVE_SEARCH_API_KEY', 'SERPER_API_KEY', 'SERPAPI_API_KEY', 'TAVILY_API_KEY'] as const
   let savedEnv: Record<string, string | undefined>
   let fetchSpy: MockInstance<typeof fetch>
 
@@ -252,6 +263,7 @@ describe('[COMP:tools/search] webSearch exact-provider panels', () => {
     savedEnv = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]))
     process.env.BRAVE_SEARCH_API_KEY = 'brave-token'
     process.env.SERPER_API_KEY = 'serper-token'
+    process.env.SERPAPI_API_KEY = 'serpapi-token'
     process.env.TAVILY_API_KEY = 'tavily-token'
     fetchSpy = vi.spyOn(globalThis, 'fetch') as unknown as MockInstance<typeof fetch>
   })
@@ -270,6 +282,7 @@ describe('[COMP:tools/search] webSearch exact-provider panels', () => {
       .toBe(false)
     expect(webSearchTool.inputSchema.safeParse({ queries: ['one'] }).success).toBe(false)
     expect(webSearchTool.inputSchema.safeParse({ queries: ['one'], provider: 'serper' }).success).toBe(true)
+    expect(webSearchTool.inputSchema.safeParse({ queries: ['one'], provider: 'serpapi' }).success).toBe(true)
   })
 
   it('uses only the selected provider and makes its provenance model-visible', async () => {
@@ -337,6 +350,43 @@ describe('[COMP:tools/search] webSearch exact-provider panels', () => {
       searchProvider: 'serper',
       searchProviderUnits: 2,
       externalCost_flatCostUsd: 0.002,
+    })
+  })
+
+  it('runs an exact SerpAPI panel without falling through and records its units', async () => {
+    fetchSpy.mockImplementation(async (input) => {
+      const url = new URL(String(input))
+      expect(url.origin + url.pathname).toBe('https://serpapi.com/search.json')
+      expect(url.searchParams.get('engine')).toBe('google')
+      expect(url.searchParams.get('api_key')).toBe('serpapi-token')
+      const query = url.searchParams.get('q') ?? ''
+      return new Response(JSON.stringify({
+        organic_results: [{ title: query, link: 'https://usebrian.ai/', snippet: 'Company brain' }],
+      }), { status: 200 })
+    })
+
+    const out = await webSearchTool.execute(
+      { queries: ['q1', 'q2'], provider: 'serpapi', maxResults: 10 },
+      ctx,
+    )
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+    expect(out.isError).toBeUndefined()
+    expect(out.data).toMatchObject({
+      provider: 'serpapi',
+      expectedQueries: 2,
+      completed: 2,
+      failed: 0,
+      searches: [
+        { query: 'q1', status: 'ok', provider: 'serpapi' },
+        { query: 'q2', status: 'ok', provider: 'serpapi' },
+      ],
+    })
+    expect(out.meta).toMatchObject({
+      searchProvider: 'serpapi',
+      searchProviderUnits: 2,
+      externalCost_model: 'serpapi',
+      externalCost_flatCostUsd: 0.05,
     })
   })
 
@@ -414,6 +464,48 @@ describe('[COMP:tools/search] Provider response parsers', () => {
     await withEnv('SERPER_API_KEY', 'test-token', async () => {
       const results = await serperProvider.search('flights', 5)
       expect(results).toEqual([{ title: 'KAYAK', url: 'https://www.kayak.com', snippet: '$87 cheap flights' }])
+    })
+  })
+
+  it('serpApiProvider parses organic_results[] and normalizes link→url', async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          organic_results: [
+            { title: 'Use Brian', link: 'https://usebrian.ai/', snippet: 'AI company brain' },
+          ],
+        }),
+        { status: 200 },
+      ),
+    )
+    await withEnv('SERPAPI_API_KEY', 'test-token', async () => {
+      const results = await serpApiProvider.search('company brain', 5)
+      expect(results).toEqual([{ title: 'Use Brian', url: 'https://usebrian.ai/', snippet: 'AI company brain' }])
+    })
+  })
+
+  it('serpApiProvider treats a structured provider error as a failure, not an empty result', async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: 'Your account has run out of searches.' }), { status: 200 }),
+    )
+    await withEnv('SERPAPI_API_KEY', 'test-token', async () => {
+      await expect(serpApiProvider.search('company brain', 5)).rejects.toThrow(/run out of searches/)
+    })
+  })
+
+  it('serpApiProvider treats a successful empty Google search as a trusted empty result', async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          search_metadata: { status: 'Success' },
+          search_information: { organic_results_state: 'Fully empty' },
+          error: "Google hasn't returned any results for this query.",
+        }),
+        { status: 200 },
+      ),
+    )
+    await withEnv('SERPAPI_API_KEY', 'test-token', async () => {
+      await expect(serpApiProvider.search('no matching documents', 5)).resolves.toEqual([])
     })
   })
 

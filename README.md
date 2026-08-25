@@ -222,7 +222,7 @@ into `.env` or `~/.usebrian/`.
 
 | Capability | Key(s) to set | What you get |
 |---|---|---|
-| Web search | `BRAVE_SEARCH_API_KEY`, `TAVILY_API_KEY`, or `SERPER_API_KEY` | Upgrade the search tool past the free DuckDuckGo fallback (Brave, Tavily tuned for AI, or Serper Google results) |
+| Web search | `BRAVE_SEARCH_API_KEY`, `SERPER_API_KEY`, `SERPAPI_API_KEY`, or `TAVILY_API_KEY` | Upgrade the search tool past the free DuckDuckGo fallback (Brave, Tavily tuned for AI, or either Google-results provider) |
 | Page fetches | `JINA_API_KEY` | Cleaner page reads via Jina Reader (works keyless at lower limits) |
 | Read X / Twitter | `TWITTER_BEARER_TOKEN` | Read x.com permalinks through the official X API v2 |
 | X search | `XAI_API_KEY` | Fall back to xAI Grok and enable the `xSearch` tool (profiles, search, non-permalink URLs) |
