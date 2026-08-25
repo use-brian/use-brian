@@ -655,6 +655,60 @@ export function assembleDeliverableText(turns: { content: ContentBlock[] }[]): s
 }
 
 /**
+ * Why `assembleDeliverableText` came back with nothing.
+ *
+ *  - `tools_only`    — the run called tools but never reached a terminal turn.
+ *                      Work may already have shipped side effects, so a blind
+ *                      retry can duplicate them.
+ *  - `no_model_output` — no turn carried text OR a tool call. The provider
+ *                      returned nothing usable, `EMPTY_RETRY_PLAN` included.
+ *                      Retrying is safe and is often all that is needed.
+ *  - `text_withheld` — text existed and this pipeline refused to send it: the
+ *                      grounding gate retracted the draft (`deliveryCutIdx`)
+ *                      or the instruction-leak sanitiser stripped it. Retrying
+ *                      is safe.
+ */
+export type EmptyDeliveryReason = 'tools_only' | 'no_model_output' | 'text_withheld'
+
+/**
+ * Classify an empty delivery window so telemetry records WHICH failure this
+ * was and the caller can decide whether a retry is safe to suggest.
+ *
+ * `window` is `pendingAssistantTurns.slice(deliveryCutIdx)` and may legitimately
+ * be EMPTY: when the grounding gate retracts every turn it has yielded, the cut
+ * consumes the whole buffer. An empty window has no tool call and no text, so
+ * the structural tests below would call it `no_model_output` — which is exactly
+ * backwards, since the model did speak and this pipeline withheld it. Hence
+ * `retractedCount` (the cut index) decides that case first.
+ */
+export function classifyEmptyDelivery(input: {
+  window: { content: ContentBlock[] }[]
+  /** `deliveryCutIdx`: turns the grounding gate cut out of the window. */
+  retractedCount: number
+}): EmptyDeliveryReason {
+  const { window, retractedCount } = input
+  if (window.length === 0) {
+    return retractedCount > 0 ? 'text_withheld' : 'no_model_output'
+  }
+  if (window.some((t) => t.content.some((b) => b.type === 'tool_use'))) return 'tools_only'
+  if (window.some((t) => t.content.some((b) => b.type === 'text'))) return 'text_withheld'
+  return 'no_model_output'
+}
+
+/**
+ * What a channel user is told when a turn produced nothing deliverable and no
+ * tool ran that a retry could duplicate.
+ *
+ * Deliberately claims nothing about tools: the `tools_only` branch falls back
+ * here when `composeRecoveryMessage` declines (no SUCCESSFUL tool call to
+ * describe), and in that case tools were called and failed. Short, always true,
+ * and it tells the user the one thing they need — the message arrived, and
+ * sending it again is safe.
+ */
+export const EMPTY_DELIVERY_NOTICE =
+  'I could not produce a reply to that message. Please send it again, or rephrase it.'
+
+/**
  * Connector access for a channel turn. Normal channel users keep the existing
  * connector path. An explicit external guest needs the integration owner's
  * opt-in because the tools act through credentials granted to the routed
@@ -1075,6 +1129,16 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     return
   }
   const turnProvider = customLlmRuntime?.provider ?? provider
+  // The model analytics must NAME, which is not the one the tier resolved.
+  // `model` is the platform tier's serving model; on a workspace custom
+  // endpoint `turnProvider` is swapped out and the provider pins its own wire
+  // id, so `model` never reaches a provider at all. Labelling an event with it
+  // points an investigator at a model that did not run: on 2026-08-24 a
+  // `channel_delivery_empty` blamed `gemini-3.7-flash` for a turn actually
+  // served by `custom:646340b5`. `turn_completed` already reports the truth via
+  // `event.response.model`; this is the same answer for the events that fire
+  // before a response exists to read it from.
+  const analyticsModel = customLlmRuntime?.selector ?? model
   // Tier budget (chat-route parity) — research mode gets 100/100. Other
   // tiers inherit the queryLoop defaults via `null`.
   const tierBudget = chatTierBudget({ model: logicalModel, researchMode: adaptiveResearchActive })
@@ -2057,7 +2121,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
             metadata: {
               matched_cue: sanitizeAnalytics(event.matchedCue),
               unbacked_count: event.unbackedCount,
-              model: sanitizeAnalytics(model),
+              model: sanitizeAnalytics(analyticsModel),
             },
           })
           break
@@ -2170,7 +2234,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
               metadata: {
                 backed_count: pendingClaimLedger.filter((c) => c.status === 'backed').length,
                 unverified_count: pendingClaimLedger.filter((c) => c.status === 'unverified').length,
-                model: sanitizeAnalytics(model),
+                model: sanitizeAnalytics(analyticsModel),
               },
             })
             pendingClaimLedger = null
@@ -2190,18 +2254,80 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
           // Nothing deliverable: every turn was a tool call, retracted by the
           // grounding gate, or stripped by the leak sanitiser. Delta-summing
           // used to paper over this by shipping whatever streamed (narration,
-          // suppressed text) — the very leak this assembly closes. Send
-          // nothing rather than an empty bubble, and leave a trace: silence
-          // here is a real failure, not a clean turn.
+          // suppressed text) — the very leak this assembly closes. An empty
+          // bubble is still not the answer, but neither is SILENCE: to the
+          // person on the other end it is indistinguishable from being
+          // ignored, so they cannot tell a broken backend from a bot that
+          // chose not to reply, and they re-ask into the same hole. That is
+          // the 2026-08-24 Telegram case — a workspace custom endpoint
+          // returned a clean 200 with no content and no usage on every
+          // attempt, `EMPTY_RETRY_PLAN` spent both retries against it, and the
+          // user got nothing back twice while a "Hi" in the same session
+          // answered fine. This branch is the interactive-lane analogue of
+          // the callee lane's typed `empty_response` throw: a human cannot be
+          // handed an error object, so they are handed a sentence. Every
+          // caller of this pipeline across BOTH trees is an attended surface
+          // with a person waiting on a reply — the open channel routes, and
+          // the closed `api-platform` telegram / whatsapp / agentmail routes,
+          // which are thin layers over this same function rather than forks
+          // of it. No cron, workflow, or A2A lane reaches here, so there is no
+          // unattended surface for the notice to spam.
           if (!outboundText && documents.length === 0) {
+            const emptyReason = classifyEmptyDelivery({
+              window: pendingAssistantTurns.slice(deliveryCutIdx),
+              retractedCount: deliveryCutIdx,
+            })
             console.warn(
-              `[${channelType}] no deliverable text at turn_complete (session ${session.id}) — nothing sent`,
+              `[${channelType}] no deliverable text at turn_complete (session ${session.id}, reason ${emptyReason})`,
             )
             analytics?.logEvent({
               userId, assistantId: assistant.id, sessionId: session.id,
               eventName: 'channel_delivery_empty', channelType,
-              metadata: { turns: pendingAssistantTurns.length, model: sanitizeAnalytics(model) },
+              metadata: {
+                turns: pendingAssistantTurns.length,
+                reason: sanitizeAnalytics(emptyReason),
+                model: sanitizeAnalytics(analyticsModel),
+              },
             })
+            // `tools_only` is the one reason where "try again" is the wrong
+            // advice: a tool may already have shipped a side effect, so the
+            // user needs to CHECK, not resend. That is exactly what
+            // `composeRecoveryMessage` exists for on the catch path, and it
+            // matches the user's language while it is at it. It returns null
+            // when no tool actually succeeded (nothing to describe, and a
+            // retry is safe after all) and on any synthesis failure, both of
+            // which fall through to the fixed notice. It runs on the
+            // background provider on purpose: the endpoint that just produced
+            // nothing must not also decide whether the user hears about it.
+            const recovered = emptyReason === 'tools_only'
+              ? await composeRecoveryMessage({
+                  provider: backgroundProvider,
+                  pendingAssistantTurns,
+                  userText: messageText,
+                  channelType,
+                })
+              : null
+            if (recovered) {
+              await recordOverheadUsage({
+                usageStore,
+                userId: billingUserId,
+                actorUserId: userId,
+                assistantId: assistant.id,
+                sessionId: session.id,
+                userMessageId: userMessageRow.id,
+                model: recovered.model,
+                usage: recovered.usage,
+                source: 'overhead:recovery-message',
+                triggerKey: 'recovery_message',
+                ...backgroundUsageAttribution,
+              })
+            }
+            // Not persisted as an assistant row. `flushBufferedTurns` has
+            // already run and skips zero-content turns, so there is nothing to
+            // append this to, and the catch path's recovery message has the
+            // same shape. The consequence is real and deliberate: the model
+            // does not see this sentence on the next turn.
+            await sendResponseAndStampChannelId(recovered?.text ?? EMPTY_DELIVERY_NOTICE)
           } else {
             await sendResponseAndStampChannelId(
               outboundText,
