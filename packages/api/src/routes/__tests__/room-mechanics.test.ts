@@ -41,7 +41,7 @@ describe('[COMP:api/room-mechanics] shared live activity (T13)', () => {
     const publishSessionEvent = vi.fn()
 
     publishRoomTurnActivity({
-      isRoomSession: true,
+      mirror: true,
       sessionId: 'room-1',
       senderUserId: 'user-1',
       event: 'status',
@@ -49,7 +49,7 @@ describe('[COMP:api/room-mechanics] shared live activity (T13)', () => {
       publishSessionEvent,
     })
     publishRoomTurnActivity({
-      isRoomSession: true,
+      mirror: true,
       sessionId: 'room-1',
       senderUserId: 'user-1',
       event: 'worker_start',
@@ -82,7 +82,7 @@ describe('[COMP:api/room-mechanics] shared live activity (T13)', () => {
     const publishSessionEvent = vi.fn()
 
     publishRoomTurnActivity({
-      isRoomSession: true,
+      mirror: true,
       sessionId: 'room-1',
       senderUserId: 'user-1',
       event: 'tool_input',
@@ -103,11 +103,11 @@ describe('[COMP:api/room-mechanics] shared live activity (T13)', () => {
     })
   })
 
-  it('does not put personal-chat activity on the shared bus', () => {
+  it('does not put activity on the shared bus while the mirror is off (a personal chat whose direct stream is alive)', () => {
     const publishSessionEvent = vi.fn()
 
     publishRoomTurnActivity({
-      isRoomSession: false,
+      mirror: false,
       sessionId: 'private-1',
       senderUserId: 'user-1',
       event: 'status',

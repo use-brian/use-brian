@@ -144,6 +144,61 @@ export type SessionRouteOptions = {
 /** Max characters accepted for one room post (text-only in P1 — T12). */
 const ROOM_POST_MAX_CHARS = 32_000
 
+/** One SSE frame the reconnect relay writes: `event:` name + JSON `data:`. */
+export type ReconnectRelayFrame = { event: string; data: unknown }
+
+/**
+ * Reconnect-mode relay decision for `GET /:id/stream` (the non-room branch),
+ * kept pure so the bus-event -> SSE-frame mapping is unit-testable without a
+ * socket (`[COMP:api/session-turn-reconnect]`).
+ *
+ * A client whose `POST /api/chat` body was severed mid-turn (2026-08-24: Cloud
+ * Run cut a personal stream at its request cap while the turn kept running,
+ * and the client had nothing to re-attach to) re-attaches here and must see
+ * the same feed the direct stream carried:
+ *   - `turn_stream`    -> `snapshot`  (payload as-is: `{ text, activity }`)
+ *   - `turn_activity`  -> `activity`  (payload as-is; `event` is `tool_start`
+ *     | `tool_input` | `tool_result` | `tool_dropped` | `status` |
+ *     `worker_start` | `tool_confirmation_required` |
+ *     `tool_confirmation_resolved`)
+ *   - `turn_completed` -> `turn_completed` (payload as-is: `{ senderUserId,
+ *     reason?, stoppedByName? }`) THEN `done {}`, with `finalize` true: the
+ *     relay writes both frames and ends the response. The server never
+ *     reopens; a client that wants more opens a new stream.
+ * Every other bus kind (room posts, presence, pins, the room-only
+ * `turn_started`) is not part of a personal turn and yields no frame.
+ */
+export function reconnectRelayFrames(
+  event: SessionEvent,
+): { frames: ReconnectRelayFrame[]; finalize: boolean } {
+  switch (event.kind) {
+    case 'turn_stream':
+      return { frames: [{ event: 'snapshot', data: event.payload }], finalize: false }
+    case 'turn_activity':
+      return { frames: [{ event: 'activity', data: event.payload }], finalize: false }
+    case 'turn_completed':
+      return {
+        frames: [
+          { event: 'turn_completed', data: event.payload },
+          { event: 'done', data: {} },
+        ],
+        finalize: true,
+      }
+    default:
+      return { frames: [], finalize: false }
+  }
+}
+
+/**
+ * What the reconnect stream's 5s DB-status backstop sends when it, not the
+ * bus, notices the turn ended: the same terminal pair, with an empty
+ * `turn_completed` because there is no bus payload to relay.
+ */
+export const RECONNECT_BACKSTOP_FRAMES: readonly ReconnectRelayFrame[] = [
+  { event: 'turn_completed', data: {} },
+  { event: 'done', data: {} },
+]
+
 export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
   const subscribeSessionEvents = opts.subscribeSessionEvents ?? noopSubscribeSessionEvents
   const publishSessionEvent = opts.publishSessionEvent ?? noopPublishSessionEvent
@@ -1344,17 +1399,27 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
 
   // GET /api/sessions/:id/stream — reconnect to an in-flight turn.
   //
-  // A doc comment-reply turn runs to completion in the background after a page
-  // refresh (the `doc_thread` carve-out in chat.ts), so a reloaded thread needs
-  // to re-attach to the live reply. This endpoint emits the session's current
-  // `status`; if it isn't `running` there's nothing in flight, so it sends
-  // `done` and closes. While `running` it subscribes to the session turn bus and
-  // forwards each `turn_stream` snapshot (the full reply-so-far + the running
-  // tool's name) as a `snapshot` SSE frame, ending on `turn_completed`. A 5s
-  // DB-status poll is the backstop finalizer for any missed completion signal
-  // (a cross-instance turn end, a dropped NOTIFY). Same access gate as
-  // `/:id/messages`. See docs/architecture/features/doc-comments.md → "Live
-  // turn reconnect".
+  // Every chat turn runs to completion in the background once its
+  // `POST /api/chat` body is gone (chat.ts; since 2026-08-24 that is every
+  // session, not only `doc_thread` comment replies: Cloud Run severed a
+  // personal stream at its request cap and the client had nothing to
+  // re-attach to). A reloaded or cut-off client re-attaches here.
+  //
+  // RECONNECT mode (every non-room session): emit the session's current
+  // `status`; if it isn't `running` there's nothing in flight, so send `done`
+  // and close. While `running`, subscribe to the session turn bus and relay
+  // through the pure `reconnectRelayFrames`:
+  //   `turn_stream`    -> `snapshot`       (full reply-so-far + running tool)
+  //   `turn_activity`  -> `activity`       (tool steps, confirmation cards)
+  //   `turn_completed` -> `turn_completed`, then `done`, then close.
+  // A 5s DB-status poll is the backstop finalizer for any missed completion
+  // signal (a cross-instance turn end, a dropped NOTIFY); it sends
+  // `turn_completed {}` then `done {}`. A `: keepalive` comment every 25s
+  // defeats proxy idle timeouts (100s). The server never reopens; the client
+  // reopens on a bare close. Same access gate as `/:id/messages`.
+  //
+  // FOLLOW mode (workspace-shared rooms, below) is unchanged.
+  // See docs/architecture/features/doc-comments.md → "Live turn reconnect".
   router.get('/:id/stream', async (req, res) => {
     const jwtUserId = (req as { userId?: string }).userId
     if (!jwtUserId) {
@@ -1471,12 +1536,14 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
     let closed = false
     let unsubscribe: (() => void) | null = null
     let poll: NodeJS.Timeout | null = null
-    const finalize = () => {
+    let keepalive: NodeJS.Timeout | null = null
+    const finalize = (frames: readonly ReconnectRelayFrame[]) => {
       if (closed) return
       closed = true
       if (poll) clearInterval(poll)
+      if (keepalive) clearInterval(keepalive)
       unsubscribe?.()
-      send('done', {})
+      for (const frame of frames) send(frame.event, frame.data)
       res.end()
     }
 
@@ -1485,31 +1552,43 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       userId: jwtUserId,
       name: null,
       cb: (event: SessionEvent) => {
-        if (event.kind === 'turn_stream') {
-          send('snapshot', event.payload)
-        } else if (event.kind === 'turn_completed') {
-          finalize()
+        const relay = reconnectRelayFrames(event)
+        if (relay.finalize) {
+          finalize(relay.frames)
+          return
         }
+        for (const frame of relay.frames) send(frame.event, frame.data)
       },
     })
 
     // Backstop: the bus event can be missed (a turn that ended on another
     // instance, a dropped NOTIFY). Poll the authoritative DB status so the
     // client never hangs on "working" past the turn. The stuck-session-sweeper
-    // flips an abandoned turn to 'timeout', which is also caught here.
+    // flips an abandoned turn to 'timeout', which is also caught here. There
+    // is no bus payload to relay, so the backstop sends the bare pair.
     poll = setInterval(() => {
       void findSessionById(req.params.id)
         .then((s) => {
-          if (!s || s.status !== 'running') finalize()
+          if (!s || s.status !== 'running') finalize(RECONNECT_BACKSTOP_FRAMES)
         })
         .catch(() => {})
     }, 5_000)
     poll.unref?.()
 
+    // A long tool call writes nothing for minutes and a proxy cuts an idle
+    // response at 100s; now that every turn can be followed here, not just a
+    // comment reply, that idle window is ordinary (2026-08-24). A comment line
+    // every 25s keeps the relay non-idle; SSE parsers ignore ':' lines.
+    keepalive = setInterval(() => {
+      if (!res.writableEnded) res.write(': keepalive\n\n')
+    }, 25_000)
+    keepalive.unref?.()
+
     req.on('close', () => {
       if (closed) return
       closed = true
       if (poll) clearInterval(poll)
+      if (keepalive) clearInterval(keepalive)
       unsubscribe?.()
     })
   })
