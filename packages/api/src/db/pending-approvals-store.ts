@@ -100,6 +100,8 @@ export type CreateApprovalParams = {
   /** Server-resolved confirmation details displayed by the approvals queue. */
   approvalPayload?: {
     displayLines?: string[]
+    /** Exact learned-rule application frozen before this approval existed. */
+    decisionApplicationId?: string
   }
   approverUserId: string
   deliveryChannelType: ApprovalDeliveryChannel
@@ -130,6 +132,8 @@ export type CreateToolInvocationParams = {
     description?: string
     displayLines?: string[]
     allowPersistentApproval?: boolean
+    /** Exact learned-rule application for this frozen tool invocation. */
+    decisionApplicationId?: string
   }
   deliveryChannelType: ApprovalDeliveryChannel
   deliveryChannelId?: string | null
@@ -1003,6 +1007,9 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
       }
       if (params.approvalPayload.allowPersistentApproval !== undefined) {
         payload.allowPersistentApproval = params.approvalPayload.allowPersistentApproval
+      }
+      if (params.approvalPayload.decisionApplicationId !== undefined) {
+        payload.decisionApplicationId = params.approvalPayload.decisionApplicationId
       }
 
       const result = await query(

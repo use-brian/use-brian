@@ -296,6 +296,20 @@ export type ConsultRequest = {
    * for ordinary askAssistant consults.
    */
   workflowRunId?: string
+  /**
+   * Internal prompt-attribution context for workflow assistant calls. The
+   * actor stays in `caller.userId`; this envelope carries only operation
+   * identity and an optional frozen email/tool applicability key. It is never
+   * rendered into model text.
+   */
+  decisionContext?: {
+    operationId: string
+    externalPrincipal: boolean
+    applicability?: {
+      kind: 'email' | 'tool'
+      key?: string | null
+    }
+  }
   caller: CallerIdentity
   chain: ConsultChain
 }

@@ -36,7 +36,7 @@ import type {
   WorkflowStore,
 } from './types.js'
 import { evaluateBoolean, JsonLogicEvalError } from './condition.js'
-import { buildReachability, startStepIds } from './graph.js'
+import { buildReachability, startStepIds, stepSuccessors } from './graph.js'
 import { interpolateString, interpolateValue, type InterpolationScope } from './interpolation.js'
 import { reviewedClientReplyViolation } from './schemas.js'
 import type { ResearchDepthConfig } from '../engine/research-depth.js'
@@ -403,6 +403,8 @@ export type ExecutorDeps = {
     displayLines?: string[]
     deliveryChannel: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams' | 'feishu'
     expiresAt: Date | null
+    /** Exact out-of-band application id from the immediately upstream model step. */
+    decisionApplicationId?: string
   }) => Promise<void>
   /**
    * Page-anchor creation port — backs `assistant_call.page.create`. The API
@@ -1074,6 +1076,7 @@ export async function advanceWorkflowRun(
       displayLines: result.displayLines,
       deliveryChannel: result.deliveryChannel,
       expiresAt: result.expiresAt,
+      decisionApplicationId: result.decisionApplicationId,
     })
     await deps.runStore.updateRun(runId, {
       status: 'awaiting_input',
@@ -1212,6 +1215,7 @@ type StepDispatchResult =
       displayLines?: string[]
       deliveryChannel: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams' | 'feishu'
       expiresAt: Date | null
+      decisionApplicationId?: string
     }
 
 type DispatchContext = {
@@ -1502,6 +1506,29 @@ async function dispatchAssistantCall(
     }
   }
 
+  const orderedStepIds = ctx.workflow.definition.steps.map((candidate) => candidate.id)
+  const directSuccessors = stepSuccessors(step, orderedStepIds)
+  const directToolSteps = directSuccessors
+    .map((id) => ctx.workflow.definition.steps.find((candidate) => candidate.id === id))
+    .filter((candidate): candidate is ToolCallStep => candidate?.type === 'tool_call')
+  // Applicability can only be frozen without guessing when exactly one tool
+  // consumes this model step. Fan-out still receives the application id for
+  // exact outcome linkage, but renders only general rules.
+  const directToolStep = directSuccessors.length === 1 && directToolSteps.length === 1
+    ? directToolSteps[0]
+    : null
+  const canonicalDirectToolName = directToolStep?.toolName.split('__', 1)[0] ?? null
+  let reviewedEmailAccountKey: string | null = null
+  if (directToolStep && canonicalDirectToolName === 'imapSendMessage') {
+    const frozenArgs = interpolateValue(directToolStep.arguments, ctx.scope)
+    if (frozenArgs && typeof frozenArgs === 'object' && !Array.isArray(frozenArgs)) {
+      const value = (frozenArgs as Record<string, unknown>).account
+      if (typeof value === 'string' && value.trim() && !value.includes('{{')) {
+        reviewedEmailAccountKey = value.trim().slice(0, 256)
+      }
+    }
+  }
+
   const request: ConsultRequest = {
     target: {
       workspaceId: ctx.run.workspaceId,
@@ -1569,6 +1596,20 @@ async function dispatchAssistantCall(
     // consult stamp source_id=<runId>, which is what the next run's
     // `{{lastRun.output.<key>}}` reads.
     workflowRunId: ctx.run.id,
+    decisionContext: {
+      operationId: `${ctx.run.id}:${step.id}`,
+      externalPrincipal: ctx.externalClientPrincipal !== undefined,
+      ...(directToolStep && canonicalDirectToolName
+        ? {
+            applicability: {
+              kind: canonicalDirectToolName === 'imapSendMessage' ? 'email' as const : 'tool' as const,
+              key: canonicalDirectToolName === 'imapSendMessage'
+                ? reviewedEmailAccountKey
+                : canonicalDirectToolName.slice(0, 256),
+            },
+          }
+        : {}),
+    },
     caller: {
       workspaceId: ctx.run.workspaceId,
       assistantId: ctx.primaryAssistantId,
@@ -1590,6 +1631,24 @@ async function dispatchAssistantCall(
 
   switch (task.status.state) {
     case 'completed': {
+      const decisionApplicationId = task.artifacts
+        .filter((artifact) => artifact.name === 'decision-playbook-application')
+        .flatMap((artifact) => artifact.parts)
+        .find((part) => part.kind === 'data' && typeof part.data.applicationId === 'string')
+      const applicationId = decisionApplicationId?.kind === 'data'
+        && typeof decisionApplicationId.data.applicationId === 'string'
+        && UUID_RE.test(decisionApplicationId.data.applicationId)
+        ? decisionApplicationId.data.applicationId
+        : null
+      if (applicationId) {
+        varsPatch = {
+          ...varsPatch,
+          ...Object.fromEntries(directSuccessors.map((id) => [
+            `__decisionApplication_${id}`,
+            applicationId,
+          ])),
+        }
+      }
       const lastAgent = (task.history ?? [])
         .slice()
         .reverse()
@@ -1876,6 +1935,11 @@ function askPolicyOutcome(
     const expiresAt = step.approval?.expiresAfterHours
       ? new Date(Date.now() + step.approval.expiresAfterHours * 60 * 60 * 1000)
       : null
+    const linkedApplication = ctx.scope.vars[`__decisionApplication_${step.id}`]
+    const decisionApplicationId = typeof linkedApplication === 'string'
+      && UUID_RE.test(linkedApplication)
+      ? linkedApplication
+      : undefined
     return {
       kind: 'paused_approval',
       approverUserId,
@@ -1885,6 +1949,7 @@ function askPolicyOutcome(
       displayLines,
       deliveryChannel,
       expiresAt,
+      decisionApplicationId,
     }
   }
   // Phase A guard.

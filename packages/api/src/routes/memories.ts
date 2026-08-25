@@ -34,13 +34,15 @@ import {
   createMemory,
   listUnverifiedByWorkspace,
   countUnverifiedByWorkspace,
-  markVerifiedDirect,
 } from '../db/memories.js'
 import { query } from '../db/client.js'
 import { queryWithRLS } from '../db/client.js'
 import { resolveAssistantAccess } from '../db/users.js'
 import { getWorkspaceRoleSystem, resolveReadCeilingsSystem } from '../db/workspace-store.js'
-import { recordVerification } from '../db/memory-verifications-store.js'
+import {
+  adjustMemoryDecision,
+  verifyMemoryDecision,
+} from '../db/memory-verifications-store.js'
 import { listMemoriesByRecentOutcome } from '../db/memory-recall-events-store.js'
 import { notifyBrainInboxChange } from '../brain-stream/notify.js'
 
@@ -688,21 +690,20 @@ export function memoryRoutes(): Router {
         res.status(400).json({ error: 'Memory is not workspace-partitioned' })
         return
       }
-      const stamped = await markVerifiedDirect(memoryId, userId)
-      if (!stamped) {
-        res.status(404).json({ error: 'Memory not found' })
-        return
-      }
-      await recordVerification({
+      const verified = await verifyMemoryDecision({
         memoryId,
         workspaceId: memory.workspaceId,
         verifiedBy: userId,
-        action: 'confirm',
       })
+      if (verified.status === 'not_found') {
+        res.status(404).json({ error: 'Memory not found' })
+        return
+      }
+      const stamped = await getMemoryById(ctx, memoryId)
       // Realtime repaint so the now-verified memory drops off the inbox queue
       // on other tabs / devices.
       void notifyBrainInboxChange(memory.workspaceId, 'memory', memoryId, 'update')
-      res.json({ memory: stamped })
+      res.json({ memory: stamped ?? memory })
     } catch (err) {
       console.error('[memories] verify failed:', err)
       res.status(500).json({ error: 'Failed to verify memory' })
@@ -716,8 +717,8 @@ export function memoryRoutes(): Router {
   // `memory_verifications` carrying the (model_value → user_value)
   // transition for that field; the memory row itself supersedes
   // through `updateMemory` (carrying authorship + original_* forward).
-  // The new active row is then stamped with `verified_by_user_id` +
-  // `verified_at` via `markVerifiedDirect`.
+  // The new active row is stamped with `verified_by_user_id` + `verified_at`
+  // inside the same decision-writer transaction.
   //
   // Allowed fields:
   //   `scope`        — 'shared' (personal scope) | 'workspace_shared'
@@ -848,23 +849,11 @@ export function memoryRoutes(): Router {
             ? before.workspaceId
             : undefined
 
-      const updated = await updateMemory(memoryId, {
-        scope: nextScope,
-        workspaceId: computedWorkspaceId,
-        sensitivity: nextSensitivity,
-        summary: nextSummary,
-        detail: nextDetail,
-      })
-      if (!updated) {
-        res.status(404).json({ error: 'Memory not found' })
-        return
-      }
-
       // Per-field audit envelope. `model_value` is read from the row
       // pre-supersession; `original_scope` etc. on `memories` carry the
       // first-save snapshot so the row's lineage stays intact.
       const reasonText = typeof reason === 'string' ? reason.slice(0, 500) : undefined
-      const writes: Promise<unknown>[] = []
+      const verifications: Parameters<typeof adjustMemoryDecision>[0]['verifications'] = []
       if (nextScope !== undefined) {
         const modelScope =
           before.scope === 'workspace'
@@ -873,41 +862,32 @@ export function memoryRoutes(): Router {
               ? 'workspace_shared'
               : 'personal'
         if (modelScope !== scopeUserValue) {
-          writes.push(
-            recordVerification({
-              memoryId,
-              workspaceId: updated.workspaceId ?? before.workspaceId,
-              verifiedBy: userId,
+          verifications.push(
+            {
               action: 'adjust_scope',
               modelValue: modelScope,
               userValue: scopeUserValue,
               reason: reasonText,
-            }),
+            },
           )
         }
       }
       if (nextSensitivity !== undefined && nextSensitivity !== before.sensitivity) {
-        writes.push(
-          recordVerification({
-            memoryId,
-            workspaceId: updated.workspaceId ?? before.workspaceId,
-            verifiedBy: userId,
+        verifications.push(
+          {
             action: 'adjust_sensitivity',
             modelValue: before.sensitivity,
             userValue: nextSensitivity,
             reason: reasonText,
-          }),
+          },
         )
       }
       if (
         (nextSummary !== undefined && nextSummary !== before.summary) ||
         (nextDetail !== undefined && nextDetail !== before.detail)
       ) {
-        writes.push(
-          recordVerification({
-            memoryId,
-            workspaceId: updated.workspaceId ?? before.workspaceId,
-            verifiedBy: userId,
+        verifications.push(
+          {
             action: 'edit_summary',
             modelValue: { summary: before.summary, detail: before.detail },
             userValue: {
@@ -915,23 +895,34 @@ export function memoryRoutes(): Router {
               detail: nextDetail ?? before.detail,
             },
             reason: reasonText,
-          }),
+          },
         )
       }
-      await Promise.all(writes)
-
-      // Supersession minted a new row id — stamp verification on the new
-      // active row so the next call to listUnverifiedByWorkspace
-      // (workspace pill, review page) drops it from the queue.
-      const stamped = await markVerifiedDirect(updated.id, userId)
+      const stamped = await adjustMemoryDecision({
+        memoryId,
+        workspaceId: before.workspaceId,
+        verifiedBy: userId,
+        updates: {
+          scope: nextScope,
+          workspaceId: computedWorkspaceId,
+          sensitivity: nextSensitivity,
+          summary: nextSummary,
+          detail: nextDetail,
+        },
+        verifications,
+      })
+      if (!stamped) {
+        res.status(404).json({ error: 'Memory not found' })
+        return
+      }
       // Realtime repaint for the adjusted (now-verified) memory row.
       void notifyBrainInboxChange(
-        updated.workspaceId ?? before.workspaceId,
+        stamped.workspaceId ?? before.workspaceId,
         'memory',
-        updated.id,
+        stamped.id,
         'update',
       )
-      res.json({ memory: stamped ?? updated })
+      res.json({ memory: stamped })
     } catch (err) {
       console.error('[memories] adjust failed:', err)
       res.status(500).json({ error: 'Failed to adjust memory' })

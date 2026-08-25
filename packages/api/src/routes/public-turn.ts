@@ -51,7 +51,7 @@ import type {
 } from '@use-brian/core'
 import type { ContentBlock, EngineHooks } from '@use-brian/core'
 import { sanitizeDeliveryText, resolveCharter, renderCharterBlock } from '@use-brian/shared'
-import { listActivePlaybookRules } from '../db/playbook-store.js'
+import { loadDecisionPlaybookContext } from '../decision-learning/playbook-context.js'
 import { runProactiveCompaction } from './proactive-compaction.js'
 import { notifyBrainWriteIfMatch } from '../brain-stream/notify.js'
 import { applyMcpInjection, buildUnavailableCapabilitiesPrompt, injectSkills } from './route-helpers.js'
@@ -1058,6 +1058,21 @@ export async function executePublicTurn(
   // model treat its own colleague as an unauthenticated stranger.
   const endUserContext = internalScope ? '' : buildEndUserIdentityContext(body, { isIdentified })
 
+  const decisionPlaybookContext = await loadDecisionPlaybookContext({
+    workspaceId: assistant.workspaceId ?? null,
+    assistantId: assistant.id,
+    actorUserId: user.id,
+    externalPrincipal,
+    operationKind: 'public_turn',
+    operationId: storedUserMsg.id,
+    sourceKind: 'session_message',
+    sourceId: storedUserMsg.id,
+    channelType: 'api',
+    analytics: deps.analytics,
+    logLabel: 'public-turn',
+  })
+  const playbookRules = decisionPlaybookContext.playbookRules
+
   let fullSystemPrompt: string
   // Representations of content the visitor can actually see. Empty on this
   // surface today (no reply quotes, no open page), but the three-way split
@@ -1081,10 +1096,7 @@ export async function executePublicTurn(
     const split = buildSplitSystemPrompt({
       basePrompt: deps.systemPrompt,
       charter: resolveCharter(assistant),
-      playbookRules: await listActivePlaybookRules(assistant.id).catch((err) => {
-        console.error('[public-turn] playbook rules fetch failed:', err)
-        return []
-      }),
+      playbookRules,
       memoryContext: contextBlock,
       workspaceFilesContext,
       brandContext,
@@ -1119,10 +1131,6 @@ export async function executePublicTurn(
     // Same Layer 2 the shared builder renders: the charter block (with
     // admitted playbook rules), not the raw legacy column (which a
     // post-418 write no longer updates).
-    const playbookRules = await listActivePlaybookRules(assistant.id).catch((err) => {
-      console.error('[public-turn] playbook rules fetch failed:', err)
-      return [] as string[]
-    })
     const charterBlock = renderCharterBlock(resolveCharter(assistant), { playbookRules })
     const assistantSystemPrompt = charterBlock
       ? `${deps.systemPrompt}\n\n${charterBlock}`

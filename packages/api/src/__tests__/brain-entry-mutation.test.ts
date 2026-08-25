@@ -2,11 +2,22 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('../db/brain-inbox-store.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../db/brain-inbox-store.js')>()
+  const appendBrainVerification = vi.fn()
   return {
     ...actual,
     getBrainInboxRow: vi.fn(),
     listBrainInbox: vi.fn(),
-    appendBrainVerification: vi.fn(),
+    appendBrainVerification,
+    applyBrainCorrection: vi.fn(async <T,>(params: {
+      mutate: (client: never) => Promise<T>
+      verifications: (result: T) => readonly unknown[]
+    }) => {
+      const result = await params.mutate({} as never)
+      for (const verification of params.verifications(result)) {
+        await appendBrainVerification(verification)
+      }
+      return result
+    }),
     markVerifiedGeneric: vi.fn(),
   }
 })
@@ -16,6 +27,7 @@ vi.mock('../db/memories.js', () => ({
   markVerifiedDirect: vi.fn(),
 }))
 vi.mock('../db/memory-verifications-store.js', () => ({
+  adjustMemoryDecision: vi.fn(),
   recordVerification: vi.fn(),
 }))
 vi.mock('../brain-stream/notify.js', () => ({
@@ -26,9 +38,8 @@ import { createBrainEntryMutator } from '../brain-entry-mutation.js'
 import { getBrainInboxRow } from '../db/brain-inbox-store.js'
 import {
   getMemoryByIdSystem,
-  markVerifiedDirect,
-  updateMemory,
 } from '../db/memories.js'
+import { adjustMemoryDecision } from '../db/memory-verifications-store.js'
 
 const workspaceStore = {
   getRole: vi.fn().mockResolvedValue('member'),
@@ -100,7 +111,7 @@ describe('[COMP:api/brain-entry-mutation] shared Review-entry mutation seam', ()
 
     expect(result.status).toBe(403)
     expect(getBrainInboxRow).not.toHaveBeenCalled()
-    expect(updateMemory).not.toHaveBeenCalled()
+    expect(adjustMemoryDecision).not.toHaveBeenCalled()
   })
 
   it('returns not-found rather than stale when the bound row disappeared', async () => {
@@ -117,7 +128,7 @@ describe('[COMP:api/brain-entry-mutation] shared Review-entry mutation seam', ()
     })
 
     expect(result.status).toBe(404)
-    expect(updateMemory).not.toHaveBeenCalled()
+    expect(adjustMemoryDecision).not.toHaveBeenCalled()
   })
 
   it('fails a stale confirmed preview before any writer runs', async () => {
@@ -135,7 +146,7 @@ describe('[COMP:api/brain-entry-mutation] shared Review-entry mutation seam', ()
 
     expect(result.status).toBe(409)
     expect(result.body).toMatchObject({ code: 'stale_entry' })
-    expect(updateMemory).not.toHaveBeenCalled()
+    expect(adjustMemoryDecision).not.toHaveBeenCalled()
   })
 
   it('applies an assistant-owned memory through the same non-redirecting path', async () => {
@@ -149,16 +160,13 @@ describe('[COMP:api/brain-entry-mutation] shared Review-entry mutation seam', ()
       summary: 'Application essay draft',
       detail: 'Third-year student.',
     } as never)
-    vi.mocked(updateMemory).mockResolvedValueOnce({
+    vi.mocked(adjustMemoryDecision).mockResolvedValueOnce({
       id: '22222222-2222-4222-8222-222222222222',
       workspaceId: 'workspace-1',
       scope: 'shared',
       sensitivity: 'public',
       summary: 'Application essay draft',
       detail: 'Graduate.',
-    } as never)
-    vi.mocked(markVerifiedDirect).mockResolvedValueOnce({
-      id: '22222222-2222-4222-8222-222222222222',
     } as never)
     const mutator = createBrainEntryMutator({ workspaceStore })
 
@@ -175,9 +183,12 @@ describe('[COMP:api/brain-entry-mutation] shared Review-entry mutation seam', ()
     expect(result.body.memory).toMatchObject({
       id: '22222222-2222-4222-8222-222222222222',
     })
-    expect(updateMemory).toHaveBeenCalledWith(
-      row.id,
-      expect.objectContaining({ detail: 'Graduate.' }),
-    )
+    expect(adjustMemoryDecision).toHaveBeenCalledWith(expect.objectContaining({
+      memoryId: row.id,
+      workspaceId: 'workspace-1',
+      verifiedBy: 'user-1',
+      updates: expect.objectContaining({ detail: 'Graduate.' }),
+      verifications: [expect.objectContaining({ action: 'edit_summary' })],
+    }))
   })
 })

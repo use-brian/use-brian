@@ -78,6 +78,7 @@ export function makeRequestApproval(deps: ApprovalBridgeDeps): NonNullable<Execu
     displayLines,
     deliveryChannel,
     expiresAt,
+    decisionApplicationId,
   }) => {
     // Look up the workflow name for the audit + delivery message.
     const run = await deps.runStore.getRunSystem(runId)
@@ -93,7 +94,10 @@ export function makeRequestApproval(deps: ApprovalBridgeDeps): NonNullable<Execu
       originatingAssistantId: assistantId,
       toolName,
       arguments: args,
-      approvalPayload: displayLines ? { displayLines } : undefined,
+      approvalPayload: {
+        ...(displayLines ? { displayLines } : {}),
+        ...(decisionApplicationId ? { decisionApplicationId } : {}),
+      },
       approverUserId,
       deliveryChannelType: deliveryChannel,
       deliveryChannelId: null, // delivery layer resolves the channel id from approver's preferred channel

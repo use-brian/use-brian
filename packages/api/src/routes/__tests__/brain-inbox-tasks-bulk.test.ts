@@ -7,7 +7,7 @@
  * body validation (action / ids / set), the once-per-call assignee
  * membership check, per-row ownership (cross-workspace rows fail their id
  * without failing the batch), the priority merge into each row's live
- * attributes, and the delete path's set-wise task / goal / audit operation.
+ * attributes, and delegation to the atomic task / goal / evidence writer.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
@@ -25,6 +25,8 @@ vi.mock('../../db/brain-inbox-store.js', () => ({
   getBrainInboxRow: vi.fn(),
   markVerifiedGeneric: vi.fn(),
   appendBrainVerification: vi.fn(),
+  deleteBrainInboxTasks: vi.fn(),
+  applyBrainCorrection: vi.fn(),
   pruneDanglingEntityLinks: vi.fn(),
   primitiveToTable: vi.fn((p: string) => (p === 'task' ? 'tasks' : p)),
 }))
@@ -37,7 +39,10 @@ vi.mock('../../db/memories.js', () => ({
   getMemoryByIdSystem: vi.fn(),
   markVerifiedDirect: vi.fn(),
 }))
-vi.mock('../../db/memory-verifications-store.js', () => ({ recordVerification: vi.fn() }))
+vi.mock('../../db/memory-verifications-store.js', () => ({
+  adjustMemoryDecision: vi.fn(),
+  recordVerification: vi.fn(),
+}))
 vi.mock('../../db/entities-store.js', () => ({
   updateEntity: vi.fn(),
   reclassifyEntityKind: vi.fn(),
@@ -54,12 +59,12 @@ import { brainInboxRoutes } from '../brain-inbox.js'
 import { query } from '../../db/client.js'
 import { updateTask } from '../../db/tasks.js'
 import { rejectTask } from '../../db/task-admission-store.js'
-import { appendBrainVerification } from '../../db/brain-inbox-store.js'
+import { deleteBrainInboxTasks } from '../../db/brain-inbox-store.js'
 
 const mockQuery = vi.mocked(query)
 const mockUpdate = vi.mocked(updateTask)
 const mockReject = vi.mocked(rejectTask)
-const mockAudit = vi.mocked(appendBrainVerification)
+const mockDeleteTasks = vi.mocked(deleteBrainInboxTasks)
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 function makeApp(role: string | null = 'member') {
@@ -149,9 +154,9 @@ describe('[COMP:api/tasks-bulk-route] POST /:workspaceId/tasks/bulk', () => {
     expect(fields.attributes).toEqual({ estimate_days: 3, priority: 'urgent' })
   })
 
-  it('plain delete closes tasks, retires every hosted goal, and audits in one set operation', async () => {
+  it('plain delete delegates task, hosted-goal, and evidence writes to one atomic store operation', async () => {
     const app = makeApp()
-    mockQuery.mockResolvedValueOnce({ rows: [{ id: 't1' }] } as any)
+    mockDeleteTasks.mockResolvedValueOnce(['t1'])
     const res = await request(app).post(URL).send({ action: 'delete', ids: ['t1', 'missing'] })
     expect(res.status).toBe(200)
     expect(res.body).toEqual({
@@ -161,20 +166,12 @@ describe('[COMP:api/tasks-bulk-route] POST /:workspaceId/tasks/bulk', () => {
         { id: 'missing', ok: false },
       ],
     })
-    expect(mockQuery).toHaveBeenCalledTimes(1)
-    const sql = String(mockQuery.mock.calls[0][0])
-    expect(sql).toContain('WITH deleted_tasks AS')
-    expect(sql).toContain('id = ANY($1::uuid[])')
-    expect(sql).toContain('UPDATE goals')
-    expect(sql).toContain("status = 'abandoned'")
-    expect(sql).toContain('INSERT INTO brain_verifications')
-    expect(mockQuery.mock.calls[0][1]).toEqual([
-      ['t1', 'missing'],
-      'w1',
-      ['done', 'abandoned'],
-      'u1',
-    ])
-    expect(mockAudit).not.toHaveBeenCalled()
+    expect(mockDeleteTasks).toHaveBeenCalledWith({
+      taskIds: ['t1', 'missing'],
+      workspaceId: 'w1',
+      deletedByUserId: 'u1',
+    })
+    expect(mockQuery).not.toHaveBeenCalled()
     expect(mockUpdate).not.toHaveBeenCalled()
   })
 
@@ -220,6 +217,7 @@ describe('[COMP:api/tasks-bulk-route] POST /:workspaceId/tasks/bulk', () => {
       taskId: 't1',
       reason,
       createRule: true,
+      recordBrainVerification: true,
     })
     expect(mockReject).toHaveBeenNthCalledWith(2, {
       workspaceId: 'w1',
@@ -227,8 +225,8 @@ describe('[COMP:api/tasks-bulk-route] POST /:workspaceId/tasks/bulk', () => {
       taskId: 't2',
       reason,
       createRule: true,
+      recordBrainVerification: true,
     })
-    expect(mockAudit).toHaveBeenCalledTimes(2)
     // Only the two ownership probes touch the route-level query seam; the
     // rejection primitive owns each atomic delete/tombstone/rule transaction.
     expect(mockQuery).toHaveBeenCalledTimes(2)

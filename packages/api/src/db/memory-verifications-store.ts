@@ -25,6 +25,12 @@ import type pg from 'pg'
 
 import { getPool, query } from './client.js'
 import { appendDecisionEvent } from './decision-event-store.js'
+import {
+  markVerifiedDirect,
+  updateMemory,
+  type Memory,
+  type MemoryUpdateFields,
+} from './memories.js'
 
 export type MemoryVerificationAction =
   | 'confirm'
@@ -65,6 +71,99 @@ export type RecordVerificationParams = {
   modelValue?: unknown
   userValue?: unknown
   reason?: string
+}
+
+export type VerifyMemoryDecisionResult =
+  | { status: 'verified'; stamped: true }
+  | { status: 'already_verified'; stamped: false }
+  | { status: 'not_found'; stamped: false }
+
+/** Atomic confirm path used by the per-assistant review route. */
+export async function verifyMemoryDecision(params: {
+  memoryId: string
+  workspaceId: string
+  verifiedBy: string
+}): Promise<VerifyMemoryDecisionResult> {
+  const client = await getPool().connect()
+  try {
+    await client.query('BEGIN')
+    const selected = await client.query<{ verifiedByUserId: string | null }>(
+      `SELECT verified_by_user_id AS "verifiedByUserId"
+         FROM memories
+        WHERE id = $1 AND workspace_id = $2 AND valid_to IS NULL
+        FOR UPDATE`,
+      [params.memoryId, params.workspaceId],
+    )
+    if (!selected.rows[0]) {
+      await client.query('COMMIT')
+      return { status: 'not_found', stamped: false }
+    }
+    if (selected.rows[0].verifiedByUserId) {
+      await client.query('COMMIT')
+      return { status: 'already_verified', stamped: false }
+    }
+    await client.query(
+      `UPDATE memories
+          SET verified_by_user_id = $2,
+              verified_at = now(),
+              updated_at = now()
+        WHERE id = $1 AND valid_to IS NULL`,
+      [params.memoryId, params.verifiedBy],
+    )
+    await recordVerification({
+      memoryId: params.memoryId,
+      workspaceId: params.workspaceId,
+      verifiedBy: params.verifiedBy,
+      action: 'confirm',
+    }, client)
+    await client.query('COMMIT')
+    return { status: 'verified', stamped: true }
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw err
+  } finally {
+    client.release()
+  }
+}
+
+/**
+ * Supersede a memory, append every field-level verification/event, and stamp
+ * the new live version in one transaction. Callers compute bounded before /
+ * after values; this writer owns the durable state transition.
+ */
+export async function adjustMemoryDecision(params: {
+  memoryId: string
+  workspaceId: string
+  verifiedBy: string
+  updates: MemoryUpdateFields
+  verifications: Array<Omit<RecordVerificationParams, 'memoryId' | 'workspaceId' | 'verifiedBy'>>
+}): Promise<Memory | null> {
+  const client = await getPool().connect()
+  try {
+    await client.query('BEGIN')
+    const updated = await updateMemory(params.memoryId, params.updates, undefined, client)
+    if (!updated) {
+      await client.query('COMMIT')
+      return null
+    }
+    for (const verification of params.verifications) {
+      await recordVerification({
+        ...verification,
+        memoryId: params.memoryId,
+        workspaceId: params.workspaceId,
+        verifiedBy: params.verifiedBy,
+      }, client)
+    }
+    const stamped = await markVerifiedDirect(updated.id, params.verifiedBy, client)
+    if (!stamped) throw new Error('Superseded memory disappeared before verification stamp')
+    await client.query('COMMIT')
+    return stamped
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw err
+  } finally {
+    client.release()
+  }
 }
 
 /**

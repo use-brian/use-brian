@@ -61,4 +61,31 @@ describe('[COMP:api/decision-provenance-store] provenance writes', () => {
     }, invalid as never)).rejects.toThrow()
     expect(invalid.query).not.toHaveBeenCalled()
   })
+
+  it('returns the existing application for a retried operation', async () => {
+    const client = {
+      query: vi.fn()
+        .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+        .mockResolvedValueOnce({ rows: [{ id: UUID.record }], rowCount: 1 }),
+    }
+    const result = await appendDecisionApplication({
+      workspaceId: UUID.workspace,
+      actorUserId: UUID.actor,
+      assistantId: UUID.assistant,
+      operationKind: 'workflow_assistant_call',
+      operationId: 'run-1:draft',
+      artifactRefs: [{ kind: 'assistant_playbook_rule', id: UUID.artifact }],
+      visibility: 'owner',
+      sensitivity: 'internal',
+    }, client as never)
+    expect(result).toEqual({ id: UUID.record })
+    expect(client.query.mock.calls[0][0]).toContain('ON CONFLICT')
+    expect(client.query.mock.calls[1][0]).toContain('FROM decision_applications')
+    expect(client.query.mock.calls[1][1]).toEqual([
+      UUID.actor,
+      UUID.assistant,
+      'workflow_assistant_call',
+      'run-1:draft',
+    ])
+  })
 })

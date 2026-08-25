@@ -12,6 +12,7 @@ const db = vi.hoisted(() => ({
   rollbackAndRelease: vi.fn(),
   applyRLSGucs: vi.fn(),
 }))
+const brain = vi.hoisted(() => ({ appendBrainVerification: vi.fn() }))
 
 vi.mock('../client.js', () => ({
   query: db.query,
@@ -31,6 +32,9 @@ vi.mock('../decision-event-store.js', () => ({
     event: { id: 'decision-1', ...(event as object), createdAt: new Date() },
     inserted: true,
   })),
+}))
+vi.mock('../brain-inbox-store.js', () => ({
+  appendBrainVerification: brain.appendBrainVerification,
 }))
 
 import {
@@ -158,6 +162,7 @@ describe('[COMP:tasks/admission-store] task admission DB adapter', () => {
       taskId: 'task-1',
       reason: 'Discussion about an active task is context, not a new commitment',
       createRule: true,
+      recordBrainVerification: true,
     })
 
     expect(result).toMatchObject({
@@ -185,6 +190,11 @@ describe('[COMP:tasks/admission-store] task admission DB adapter', () => {
         proposedRuleId: null,
         reasonStoredOn: 'task_tombstone',
       },
+    }), expect.anything())
+    expect(brain.appendBrainVerification).toHaveBeenCalledWith(expect.objectContaining({
+      targetKind: 'task',
+      targetId: 'task-1',
+      action: 'delete',
     }), expect.anything())
     // The transaction runs RLS-scoped to the acting user (app pool policies
     // hide every row from the unscoped sentinel).

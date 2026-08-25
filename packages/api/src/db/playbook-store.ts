@@ -24,6 +24,7 @@ import { z } from 'zod'
 import { getPool, query } from './client.js'
 import { excludeExternalPrincipalsSql } from './external-principal.js'
 import { appendDecisionDerivation } from './decision-provenance-store.js'
+import { appendDecisionEvent } from './decision-event-store.js'
 
 export type PlaybookRuleStatus = 'suggested' | 'active' | 'rejected' | 'retired'
 
@@ -83,6 +84,78 @@ export async function listPlaybookRules(assistantId: string): Promise<PlaybookRu
      WHERE assistant_id = $1 AND applies_to_user_id IS NULL
      ORDER BY created_at DESC`,
     [assistantId],
+  )
+  return result.rows
+}
+
+/**
+ * Governance projection for one member. Assistant-wide suggestions and
+ * historical decisions remain owner-only; a member sees only assistant-wide
+ * active rules plus their own decision-reflected suggested/active/retired
+ * rules. No route ever loads another member's scoped rows.
+ */
+export async function listPlaybookRulesForViewer(params: {
+  assistantId: string
+  userId: string
+  isAssistantOwner: boolean
+}): Promise<PlaybookRule[]> {
+  const result = await query<PlaybookRule>(
+    `SELECT ${ROW_COLUMNS} FROM assistant_playbook_rules
+      WHERE assistant_id = $1
+        AND (
+          (
+            applies_to_user_id IS NULL
+            AND ($3::boolean OR status = 'active')
+          )
+          OR (
+            applies_to_user_id = $2
+            AND created_by = 'decision_reflection'
+            AND status IN ('suggested', 'active', 'retired')
+          )
+        )
+      ORDER BY
+        CASE status WHEN 'suggested' THEN 0 WHEN 'active' THEN 1 ELSE 2 END,
+        created_at DESC`,
+    [params.assistantId, params.userId, params.isAssistantOwner],
+  )
+  return result.rows
+}
+
+export type PlaybookPromptRule = Pick<
+  PlaybookRule,
+  | 'id'
+  | 'rule'
+  | 'createdBy'
+  | 'appliesToUserId'
+  | 'applicabilityKind'
+  | 'applicabilityKey'
+  | 'decisionSensitivity'
+>
+
+/** System read for the shared prompt loader; scope filtering happens in SQL. */
+export async function listActivePlaybookRulesForActor(params: {
+  assistantId: string
+  actorUserId: string | null
+  externalPrincipal: boolean
+}): Promise<PlaybookPromptRule[]> {
+  const result = await query<PlaybookPromptRule>(
+    `SELECT id, rule, created_by AS "createdBy",
+            applies_to_user_id AS "appliesToUserId",
+            applicability_kind AS "applicabilityKind",
+            applicability_key AS "applicabilityKey",
+            decision_sensitivity AS "decisionSensitivity"
+       FROM assistant_playbook_rules
+      WHERE assistant_id = $1 AND status = 'active'
+        AND (
+          applies_to_user_id IS NULL
+          OR (
+            $3::boolean = false
+            AND $2::uuid IS NOT NULL
+            AND applies_to_user_id = $2
+          )
+        )
+      ORDER BY decided_at DESC NULLS LAST, created_at DESC`,
+    [params.assistantId, params.actorUserId, params.externalPrincipal],
   )
   return result.rows
 }
@@ -409,7 +482,8 @@ export async function insertDecisionReflectedRules(params: {
         'public',
       )
       const semanticKey = semanticKeyForDecisionRule(proposal)
-      const sourceKinds = [...new Set(events.rows.map((row) => row.sourceKind))].sort()
+      const sourceKinds = [...new Set(events.rows.map((row) =>
+        isReviewedEmailEvidence(row) ? 'reviewed_email' : 'tool_denial'))].sort()
       const dates = events.rows.map((row) => row.createdAt).sort((a, b) => a.getTime() - b.getTime())
       const inserted = await client.query<{ id: string }>(
         `INSERT INTO assistant_playbook_rules (
@@ -472,37 +546,110 @@ export async function insertDecisionReflectedRules(params: {
 export type PlaybookDecision = 'approve' | 'reject' | 'retire'
 
 /**
- * Apply an owner decision. Returns the updated rule, or null when the rule
- * doesn't exist / doesn't belong to the assistant / isn't in a status the
- * decision applies to (approve+reject act on 'suggested'; retire on
- * 'active'). Approve additionally refuses past MAX_ACTIVE_PLAYBOOK_RULES,
- * returning 'cap' so the route can 409 with a real reason.
+ * Apply one governance decision with its journal event in the same
+ * transaction. Assistant-wide rules remain owner-controlled; a member may
+ * decide only a decision-reflected rule scoped to their own user id.
  */
 export async function decidePlaybookRule(params: {
   assistantId: string
   ruleId: string
   decision: PlaybookDecision
   userId: string
-}): Promise<PlaybookRule | 'cap' | null> {
+  workspaceId: string | null
+  isAssistantOwner: boolean
+}): Promise<PlaybookRule | 'cap' | 'forbidden' | null> {
   const { assistantId, ruleId, decision, userId } = params
-  if (decision === 'approve') {
-    const active = await query<{ count: string }>(
-      `SELECT COUNT(*)::text AS count FROM assistant_playbook_rules
-       WHERE assistant_id = $1 AND applies_to_user_id IS NULL AND status = 'active'`,
-      [assistantId],
+  const client = await getPool().connect()
+  try {
+    await client.query('BEGIN')
+    const selected = await client.query<PlaybookRule>(
+      `SELECT ${ROW_COLUMNS} FROM assistant_playbook_rules
+        WHERE id = $1 AND assistant_id = $2
+        FOR UPDATE`,
+      [ruleId, assistantId],
     )
-    if (Number(active.rows[0]?.count ?? 0) >= MAX_ACTIVE_PLAYBOOK_RULES) return 'cap'
+    const rule = selected.rows[0]
+    if (!rule) {
+      await client.query('COMMIT')
+      return null
+    }
+    const userScoped = rule.createdBy === 'decision_reflection'
+      && rule.appliesToUserId !== null
+    const authorized = userScoped
+      ? rule.appliesToUserId === userId
+      : params.isAssistantOwner && rule.appliesToUserId === null
+    if (!authorized) {
+      await client.query('COMMIT')
+      return 'forbidden'
+    }
+
+    const fromStatus = decision === 'retire' ? 'active' : 'suggested'
+    if (rule.status !== fromStatus) {
+      await client.query('COMMIT')
+      return null
+    }
+    if (decision === 'approve') {
+      const cap = userScoped
+        ? MAX_ACTIVE_DECISION_PLAYBOOK_RULES
+        : MAX_ACTIVE_PLAYBOOK_RULES
+      const active = await client.query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM assistant_playbook_rules
+          WHERE assistant_id = $1 AND status = 'active'
+            AND applies_to_user_id IS NOT DISTINCT FROM $2::uuid`,
+        [assistantId, rule.appliesToUserId],
+      )
+      if (Number(active.rows[0]?.count ?? 0) >= cap) {
+        await client.query('COMMIT')
+        return 'cap'
+      }
+    }
+
+    const toStatus = decision === 'approve'
+      ? 'active'
+      : decision === 'reject'
+        ? 'rejected'
+        : 'retired'
+    const updated = await client.query<PlaybookRule>(
+      `UPDATE assistant_playbook_rules
+          SET status = $1, decided_by_user_id = $2,
+              decided_at = now(), updated_at = now()
+        WHERE id = $3 AND assistant_id = $4 AND status = $5
+        RETURNING ${ROW_COLUMNS}`,
+      [toStatus, userId, ruleId, assistantId, fromStatus],
+    )
+    if (!updated.rows[0]) throw new Error('Playbook decision lost its locked rule')
+
+    const event = await appendDecisionEvent({
+      idempotencyKey: `playbook:${ruleId}:${decision}`,
+      workspaceId: params.workspaceId,
+      actorUserId: userId,
+      assistantId,
+      sessionId: null,
+      eventKind: 'playbook.rule_decided',
+      schemaVersion: 1,
+      sourceKind: 'assistant_playbook_rule',
+      sourceId: ruleId,
+      declaredScope: userScoped ? 'user' : 'assistant',
+      visibility: userScoped ? 'owner' : 'workspace',
+      sensitivity: rule.decisionSensitivity,
+      payload: { ruleId, decision },
+    }, client)
+    if (decision === 'reject' || decision === 'retire') {
+      await appendDecisionDerivation({
+        decisionEventId: event.event.id,
+        artifactKind: 'assistant_playbook_rule',
+        artifactId: ruleId,
+        relation: 'invalidates',
+      }, client)
+    }
+    await client.query('COMMIT')
+    return updated.rows[0]
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw err
+  } finally {
+    client.release()
   }
-  const fromStatus = decision === 'retire' ? 'active' : 'suggested'
-  const toStatus = decision === 'approve' ? 'active' : decision === 'reject' ? 'rejected' : 'retired'
-  const result = await query<PlaybookRule>(
-    `UPDATE assistant_playbook_rules
-     SET status = $1, decided_by_user_id = $2, decided_at = now(), updated_at = now()
-     WHERE id = $3 AND assistant_id = $4 AND applies_to_user_id IS NULL AND status = $5
-     RETURNING ${ROW_COLUMNS}`,
-    [toStatus, userId, ruleId, assistantId, fromStatus],
-  )
-  return result.rows[0] ?? null
 }
 
 /**

@@ -124,6 +124,7 @@ describe('[COMP:api/pending-approvals-store] createToolInvocation', () => {
         description: 'Send the proposal email',
         displayLines: ['To: x@y.z'],
         allowPersistentApproval: true,
+        decisionApplicationId: '00000000-0000-4000-8000-000000000099',
       },
       deliveryChannelType: 'web',
     })
@@ -131,6 +132,9 @@ describe('[COMP:api/pending-approvals-store] createToolInvocation', () => {
     expect(approval.blockingSessionId).toBe('sess-1')
     const [sql] = mockQuery.mock.calls[0]
     expect(sql).toContain("'tool_invocation'")
+    expect(JSON.parse(mockQuery.mock.calls[0][1]?.[6] as string)).toMatchObject({
+      decisionApplicationId: '00000000-0000-4000-8000-000000000099',
+    })
   })
 
   it('strips undefined payload keys so JSONB stays symmetric', async () => {
@@ -321,6 +325,24 @@ describe('[COMP:api/pending-approvals-store] respond', () => {
 })
 
 describe('[COMP:api/decision-capture] atomic approval evidence', () => {
+  it('links an exact frozen application id and ignores unrelated payload fields', async () => {
+    const applicationId = '00000000-0000-4000-8000-000000000099'
+    mockQuery.mockResolvedValueOnce({
+      rows: [makeRow({
+        status: 'approved',
+        approvalPayload: {
+          decisionApplicationId: applicationId,
+          applicationId: '00000000-0000-4000-8000-000000000098',
+        },
+      })],
+      rowCount: 1,
+    } as never)
+    await store.respond('ap-1', 'approved', 'u-1')
+    expect(mockAppendDecisionEvent).toHaveBeenCalledWith(expect.objectContaining({
+      causedByApplicationId: applicationId,
+    }), tx)
+  })
+
   it('preserves an inline persistent denial as always_deny', async () => {
     mockQuery.mockResolvedValueOnce({
       rows: [makeRow({

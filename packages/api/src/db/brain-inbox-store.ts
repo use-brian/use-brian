@@ -44,6 +44,8 @@ import type pg from 'pg'
 
 import { getPool, query } from './client.js'
 import { appendDecisionEvent } from './decision-event-store.js'
+import { recordVerification } from './memory-verifications-store.js'
+import { abandonGoalsForHostTaskSystem } from './goals.js'
 
 export type BrainInboxPrimitive =
   | 'memory'
@@ -837,18 +839,20 @@ export async function markVerifiedGeneric(
   primitive: BrainInboxPrimitive,
   rowId: string,
   verifiedByUserId: string,
+  transactionClient?: pg.PoolClient,
 ): Promise<boolean> {
   const table = primitiveToTable(primitive)
-  const result = await query(
-    `UPDATE ${table}
+  const sql = `UPDATE ${table}
         SET verified_by_user_id = $2,
             verified_at = now(),
             updated_at = now()
       WHERE id = $1
         AND valid_to IS NULL
-        AND verified_by_user_id IS NULL`,
-    [rowId, verifiedByUserId],
-  )
+        AND verified_by_user_id IS NULL`
+  const values = [rowId, verifiedByUserId]
+  const result = transactionClient
+    ? await transactionClient.query(sql, values)
+    : await query(sql, values)
   return (result.rowCount ?? 0) > 0
 }
 
@@ -865,6 +869,212 @@ export function primitiveToTable(primitive: BrainInboxPrimitive): string {
     case 'company': return 'entities'
     case 'deal': return 'entities'
     case 'workspace_file': return 'workspace_files'
+  }
+}
+
+export type VerifyBrainInboxRowResult =
+  | { status: 'verified'; stamped: true }
+  | { status: 'already_verified'; stamped: false }
+  | { status: 'not_found'; stamped: false }
+  | { status: 'wrong_workspace'; stamped: false }
+
+/**
+ * Verify one inbox row and append its minimized decision evidence under the
+ * same row lock and transaction. A retry sees the existing verifier stamp and
+ * appends nothing, so double-clicks cannot manufacture evidence.
+ */
+export async function verifyBrainInboxRow(params: {
+  primitive: BrainInboxPrimitive
+  rowId: string
+  workspaceId: string
+  verifiedByUserId: string
+}): Promise<VerifyBrainInboxRowResult> {
+  const client = await getPool().connect()
+  try {
+    await client.query('BEGIN')
+    const table = primitiveToTable(params.primitive)
+    const selected = await client.query<{
+      workspaceId: string
+      verifiedByUserId: string | null
+    }>(
+      `SELECT workspace_id AS "workspaceId",
+              verified_by_user_id AS "verifiedByUserId"
+         FROM ${table}
+        WHERE id = $1 AND valid_to IS NULL
+        FOR UPDATE`,
+      [params.rowId],
+    )
+    const row = selected.rows[0]
+    if (!row) {
+      await client.query('COMMIT')
+      return { status: 'not_found', stamped: false }
+    }
+    if (row.workspaceId !== params.workspaceId) {
+      await client.query('COMMIT')
+      return { status: 'wrong_workspace', stamped: false }
+    }
+    if (row.verifiedByUserId) {
+      await client.query('COMMIT')
+      return { status: 'already_verified', stamped: false }
+    }
+
+    await client.query(
+      `UPDATE ${table}
+          SET verified_by_user_id = $2,
+              verified_at = now(),
+              updated_at = now()
+        WHERE id = $1 AND valid_to IS NULL`,
+      [params.rowId, params.verifiedByUserId],
+    )
+    if (params.primitive === 'memory') {
+      await recordVerification({
+        memoryId: params.rowId,
+        workspaceId: params.workspaceId,
+        verifiedBy: params.verifiedByUserId,
+        action: 'confirm',
+      }, client)
+    } else {
+      const targetKind = params.primitive === 'contact'
+        || params.primitive === 'company'
+        || params.primitive === 'deal'
+        ? 'entity'
+        : params.primitive
+      await appendBrainVerification({
+        targetKind,
+        targetId: params.rowId,
+        workspaceId: params.workspaceId,
+        verifiedByUserId: params.verifiedByUserId,
+        action: 'confirm',
+      }, client)
+    }
+    await client.query('COMMIT')
+    return { status: 'verified', stamped: true }
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw err
+  } finally {
+    client.release()
+  }
+}
+
+export type DeleteBrainInboxRowResult =
+  | { status: 'deleted' }
+  | { status: 'not_found' }
+  | { status: 'wrong_workspace' }
+
+/** Atomic plain soft-delete path, including retrieval/goal cascades and evidence. */
+export async function deleteBrainInboxRow(params: {
+  primitive: BrainInboxPrimitive
+  rowId: string
+  workspaceId: string
+  deletedByUserId: string
+}): Promise<DeleteBrainInboxRowResult> {
+  const client = await getPool().connect()
+  try {
+    await client.query('BEGIN')
+    const table = primitiveToTable(params.primitive)
+    const selected = await client.query<{ workspaceId: string }>(
+      `SELECT workspace_id AS "workspaceId"
+         FROM ${table}
+        WHERE id = $1 AND valid_to IS NULL
+        FOR UPDATE`,
+      [params.rowId],
+    )
+    if (!selected.rows[0]) {
+      await client.query('COMMIT')
+      return { status: 'not_found' }
+    }
+    if (selected.rows[0].workspaceId !== params.workspaceId) {
+      await client.query('COMMIT')
+      return { status: 'wrong_workspace' }
+    }
+
+    await client.query(
+      `UPDATE ${table}
+          SET valid_to = now(), updated_at = now()
+        WHERE id = $1 AND valid_to IS NULL`,
+      [params.rowId],
+    )
+    if (params.primitive === 'workspace_file') {
+      await client.query(
+        `UPDATE file_segments SET valid_to = now()
+          WHERE file_id = $1 AND valid_to IS NULL`,
+        [params.rowId],
+      )
+    }
+    if (params.primitive === 'task') {
+      await abandonGoalsForHostTaskSystem(params.rowId, 'host_task_deleted', { exec: client })
+    }
+    if (params.primitive === 'memory') {
+      await recordVerification({
+        memoryId: params.rowId,
+        workspaceId: params.workspaceId,
+        verifiedBy: params.deletedByUserId,
+        action: 'delete',
+      }, client)
+    } else {
+      const targetKind = params.primitive === 'contact'
+        || params.primitive === 'company'
+        || params.primitive === 'deal'
+        ? 'entity'
+        : params.primitive
+      await appendBrainVerification({
+        targetKind,
+        targetId: params.rowId,
+        workspaceId: params.workspaceId,
+        verifiedByUserId: params.deletedByUserId,
+        action: 'delete',
+      }, client)
+    }
+    await client.query('COMMIT')
+    return { status: 'deleted' }
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw err
+  } finally {
+    client.release()
+  }
+}
+
+/**
+ * Atomic bulk task delete for the operator surface. The transaction owns the
+ * task close, host-goal cascade, native Brain audit, and normalized journal
+ * event for every row that was actually live in this workspace.
+ */
+export async function deleteBrainInboxTasks(params: {
+  taskIds: readonly string[]
+  workspaceId: string
+  deletedByUserId: string
+}): Promise<readonly string[]> {
+  const client = await getPool().connect()
+  try {
+    await client.query('BEGIN')
+    const deleted = await client.query<{ id: string }>(
+      `UPDATE tasks
+          SET valid_to = now(), updated_at = now()
+        WHERE id = ANY($1::uuid[])
+          AND workspace_id = $2
+          AND valid_to IS NULL
+        RETURNING id::text AS id`,
+      [params.taskIds, params.workspaceId],
+    )
+    for (const row of deleted.rows) {
+      await abandonGoalsForHostTaskSystem(row.id, 'host_task_deleted', { exec: client })
+      await appendBrainVerification({
+        targetKind: 'task',
+        targetId: row.id,
+        workspaceId: params.workspaceId,
+        verifiedByUserId: params.deletedByUserId,
+        action: 'delete',
+      }, client)
+    }
+    await client.query('COMMIT')
+    return deleted.rows.map((row) => row.id)
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw err
+  } finally {
+    client.release()
   }
 }
 
@@ -962,6 +1172,35 @@ export async function appendBrainVerification(params: {
     throw err
   } finally {
     ownedClient?.release()
+  }
+}
+
+export type BrainCorrectionVerification = Parameters<typeof appendBrainVerification>[0]
+
+/**
+ * Own the transaction that pairs a Brain correction with its verification and
+ * decision-journal evidence. Domain stores receive the same client through the
+ * callback; callers may compute the minimized verification payload from the
+ * mutation result, but cannot accidentally commit the domain write first.
+ */
+export async function applyBrainCorrection<T>(params: {
+  mutate: (client: pg.PoolClient) => Promise<T>
+  verifications: (result: T) => readonly BrainCorrectionVerification[]
+}): Promise<T> {
+  const client = await getPool().connect()
+  try {
+    await client.query('BEGIN')
+    const result = await params.mutate(client)
+    for (const verification of params.verifications(result)) {
+      await appendBrainVerification(verification, client)
+    }
+    await client.query('COMMIT')
+    return result
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw err
+  } finally {
+    client.release()
   }
 }
 

@@ -179,6 +179,14 @@ export const consultRequestSchema = z.object({
   pageAnchorId: z.string().uuid().optional(),
   // Blueprint slug to fill on a research step (structural-synthesis P4).
   blueprintId: z.string().min(1).max(128).optional(),
+  decisionContext: z.object({
+    operationId: z.string().min(1).max(512),
+    externalPrincipal: z.boolean(),
+    applicability: z.object({
+      kind: z.enum(['email', 'tool']),
+      key: z.string().min(1).max(256).nullable().optional(),
+    }).strict().optional(),
+  }).strict().optional(),
   caller: callerIdentitySchema,
   chain: consultChainSchema,
 })

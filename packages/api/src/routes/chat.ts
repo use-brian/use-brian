@@ -58,7 +58,7 @@ import { resolveModel, ensureServableModel, backgroundLatencyBudgetMs, backgroun
 import { isRegistryModelAvailable, registryRow } from '@use-brian/shared/model-registry'
 import type { ConnectorStore } from '../db/connector-store.js'
 import { getToolDisplayName, stripFollowUps, stripCommentThreadReplyTag, resolveCharter, charterMission, recordingIdFromAnchorKey } from '@use-brian/shared'
-import { listActivePlaybookRules } from '../db/playbook-store.js'
+import { loadDecisionPlaybookContext } from '../decision-learning/playbook-context.js'
 import { CUSTOM_MODEL_IMAGE_FALLBACK_NOTICE, CUSTOM_MODEL_IMAGE_REJECTION } from './_channel-error-text.js'
 import { decideImageTurnRoute } from '../custom-llm-runtime.js'
 import { resolveUser, buildBrowserEscalationPrompt, buildUnavailableCapabilitiesPrompt, injectSkills, isSkillOfferable, checkUsageBudget, applyMcpInjection, type CreditBudgetGate } from './route-helpers.js'
@@ -4419,15 +4419,23 @@ export function chatRoutes(options: WebChatOptions): Router {
         }
       }
 
-      // Owner-admitted playbook rules → `## Playbook` in the charter block
-      // (growth loop Phase 3). Same failure posture as the evolution
-      // snippet: a fetch error omits the section, never blocks the turn.
-      let playbookRules: string[] = []
-      try {
-        playbookRules = await listActivePlaybookRules(assistant.id)
-      } catch (err) {
-        console.error('[chat] playbook rules fetch failed:', err)
-      }
+      // One scoped loader serves every prompt lane. It returns model-visible
+      // rule text separately from the content-free application id used only
+      // by an exact frozen approval created later in this turn.
+      const decisionPlaybookContext = await loadDecisionPlaybookContext({
+        workspaceId: assistant.workspaceId ?? null,
+        assistantId: assistant.id,
+        actorUserId: user.id,
+        externalPrincipal: false,
+        operationKind: 'chat_turn',
+        operationId: storedUserMsg.id,
+        sourceKind: 'session_message',
+        sourceId: storedUserMsg.id,
+        channelType: 'web',
+        analytics: options.analytics,
+        logLabel: 'chat',
+      })
+      const playbookRules = decisionPlaybookContext.playbookRules
 
       // Charter intake mode (growth loop Phase 2): an unconfigured standard
       // assistant being spoken to by its OWNER gets the setup interview -
@@ -6751,6 +6759,9 @@ export function chatRoutes(options: WebChatOptions): Router {
                         description,
                         displayLines,
                         allowPersistentApproval,
+                        ...(decisionPlaybookContext.decisionApplicationId
+                          ? { decisionApplicationId: decisionPlaybookContext.decisionApplicationId }
+                          : {}),
                       },
                       deliveryChannelType: 'web',
                       deliveryChannelId: null,

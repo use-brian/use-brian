@@ -2572,6 +2572,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const { createInProcessTransport } = await import('@use-brian/core')
   const consultTransport = createInProcessTransport({
     runConsult: async ({ request }) => {
+      let decisionApplicationId: string | null = null
       const text = await calleeExecutor({
         workspaceId: request.target.workspaceId,
         callerAssistantId: request.caller.assistantId,
@@ -2595,8 +2596,28 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         workflowId: request.workflowId,
         blueprintId: request.blueprintId,
         workflowRunId: request.workflowRunId,
+        decisionContext: request.decisionContext
+          ? {
+              actorUserId: request.caller.userId,
+              operationId: request.decisionContext.operationId,
+              externalPrincipal: request.decisionContext.externalPrincipal,
+              applicability: request.decisionContext.applicability,
+            }
+          : undefined,
+        onDecisionApplication: (id) => { decisionApplicationId = id },
       })
-      return { text }
+      return {
+        text,
+        ...(decisionApplicationId
+          ? {
+              artifacts: [{
+                artifactId: `decision-application:${decisionApplicationId}`,
+                name: 'decision-playbook-application',
+                parts: [{ kind: 'data' as const, data: { applicationId: decisionApplicationId } }],
+              }],
+            }
+          : {}),
+      }
     },
   })
 
@@ -4905,6 +4926,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     workspaceSkillEnablementStore,
     capabilityStore,
     assistantConnectorGrantsStore,
+    analytics,
   }))
   app.use(
     '/api/assistant-connector-grants',
@@ -6773,6 +6795,19 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     onEvent: (event) => {
       if (event.type === 'subject_processed'
         && event.activated + event.suggested + event.rejected > 0) {
+        analytics.logEvent({
+          userId: event.actorUserId,
+          actorUserId: event.actorUserId,
+          assistantId: event.assistantId,
+          eventName: 'decision_rule_created',
+          channelType: 'worker',
+          metadata: {
+            activated_count: event.activated,
+            suggested_count: event.suggested,
+            rejected_count: event.rejected,
+            deduped_count: event.deduped,
+          },
+        })
         console.log(
           `[decision-reflection] assistant=${event.assistantId} actor=${event.actorUserId} active=${event.activated} suggested=${event.suggested} rejected=${event.rejected} deduped=${event.deduped}`,
         )

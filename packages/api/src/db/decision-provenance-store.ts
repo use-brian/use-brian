@@ -82,6 +82,8 @@ export async function appendDecisionApplication(
        workspace_id, actor_user_id, assistant_id, operation_kind, operation_id,
        artifact_refs, source_kind, source_id, visibility, sensitivity
      ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10)
+     ON CONFLICT (actor_user_id, assistant_id, operation_kind, operation_id)
+       WHERE assistant_id IS NOT NULL DO NOTHING
      RETURNING id`,
     [
       parsed.workspaceId,
@@ -96,7 +98,18 @@ export async function appendDecisionApplication(
       parsed.sensitivity,
     ],
   )
-  return result.rows[0]
+  if (result.rows[0]) return result.rows[0]
+  const existing = await exec.query<{ id: string }>(
+    `SELECT id FROM decision_applications
+      WHERE actor_user_id = $1
+        AND assistant_id IS NOT DISTINCT FROM $2::uuid
+        AND operation_kind = $3 AND operation_id = $4`,
+    [parsed.actorUserId, parsed.assistantId, parsed.operationKind, parsed.operationId],
+  )
+  if (!existing.rows[0]) {
+    throw new Error('Decision application conflicted but could not be read')
+  }
+  return existing.rows[0]
 }
 
 export async function listDecisionDerivationsForArtifact(params: {

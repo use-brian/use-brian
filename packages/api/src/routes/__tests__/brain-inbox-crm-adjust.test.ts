@@ -25,7 +25,10 @@ vi.mock('../../db/memories.js', () => ({
   getMemoryByIdSystem: vi.fn(),
   markVerifiedDirect: vi.fn(),
 }))
-vi.mock('../../db/memory-verifications-store.js', () => ({ recordVerification: vi.fn() }))
+vi.mock('../../db/memory-verifications-store.js', () => ({
+  adjustMemoryDecision: vi.fn(),
+  recordVerification: vi.fn(),
+}))
 vi.mock('../../db/entities-store.js', () => ({
   updateEntity: vi.fn(),
   reclassifyEntityKind: vi.fn(),
@@ -35,9 +38,20 @@ vi.mock('../../db/entities-store.js', () => ({
 }))
 vi.mock('../../db/brain-inbox-store.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../db/brain-inbox-store.js')>()
+  const appendBrainVerification = vi.fn().mockResolvedValue(undefined)
   return {
     ...actual,
-    appendBrainVerification: vi.fn().mockResolvedValue(undefined),
+    appendBrainVerification,
+    applyBrainCorrection: vi.fn(async <T,>(params: {
+      mutate: (client: never) => Promise<T>
+      verifications: (result: T) => readonly unknown[]
+    }) => {
+      const result = await params.mutate({} as never)
+      for (const verification of params.verifications(result)) {
+        await appendBrainVerification(verification)
+      }
+      return result
+    }),
   }
 })
 vi.mock('../../db/crm.js', () => ({
@@ -119,6 +133,7 @@ describe('[COMP:crm/update] CRM adjust — typed fields (REST boundary)', () => 
       { email: 'sam@acme.com', phone: null, companyId: COMPANY, tags: ['vip'] },
       ENTITY_LINKS,
       ACCESS,
+      expect.anything(),
     )
     // Shared-field path untouched: no display_name/sensitivity sent.
     expect(mockUpdateEntity).not.toHaveBeenCalled()
@@ -152,6 +167,7 @@ describe('[COMP:crm/update] CRM adjust — typed fields (REST boundary)', () => 
       ROW,
       { domain: 'acme.com' },
       ACCESS,
+      expect.anything(),
     )
   })
 
@@ -164,7 +180,9 @@ describe('[COMP:crm/update] CRM adjust — typed fields (REST boundary)', () => 
       .send({ stage: 'negotiation' })
 
     expect(res.status).toBe(200)
-    expect(mockSetDealStage).toHaveBeenCalledWith('u_caller', ROW, 'negotiation', ACCESS)
+    expect(mockSetDealStage).toHaveBeenCalledWith(
+      'u_caller', ROW, 'negotiation', ACCESS, expect.anything(),
+    )
     expect(mockUpdateDeal).not.toHaveBeenCalled()
   })
 
@@ -184,8 +202,11 @@ describe('[COMP:crm/update] CRM adjust — typed fields (REST boundary)', () => 
       { amount: 50000, closeDate: new Date('2026-09-30') },
       ENTITY_LINKS,
       ACCESS,
+      expect.anything(),
     )
-    expect(mockSetDealStage).toHaveBeenCalledWith('u_caller', ROW, 'won', ACCESS)
+    expect(mockSetDealStage).toHaveBeenCalledWith(
+      'u_caller', ROW, 'won', ACCESS, expect.anything(),
+    )
     // The updateDeal fields object must never carry stage.
     expect(mockUpdateDeal.mock.calls[0][2]).not.toHaveProperty('stage')
   })
@@ -205,6 +226,7 @@ describe('[COMP:crm/update] CRM adjust — typed fields (REST boundary)', () => 
       { amount: null, closeDate: null },
       ENTITY_LINKS,
       ACCESS,
+      expect.anything(),
     )
   })
 

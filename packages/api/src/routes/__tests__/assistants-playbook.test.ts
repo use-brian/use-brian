@@ -16,17 +16,17 @@ vi.mock('../../db/playbook-store.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../db/playbook-store.js')>()
   return {
     ...actual,
-    listPlaybookRules: vi.fn(),
+    listPlaybookRulesForViewer: vi.fn(),
     decidePlaybookRule: vi.fn(),
   }
 })
 
 import { assistantRoutes } from '../assistants.js'
 import { resolveAssistantAccess } from '../../db/users.js'
-import { decidePlaybookRule, listPlaybookRules } from '../../db/playbook-store.js'
+import { decidePlaybookRule, listPlaybookRulesForViewer } from '../../db/playbook-store.js'
 
 const mockAccess = vi.mocked(resolveAssistantAccess)
-const mockListRules = vi.mocked(listPlaybookRules)
+const mockListRules = vi.mocked(listPlaybookRulesForViewer)
 const mockDecide = vi.mocked(decidePlaybookRule)
 
 const capabilityStore = {
@@ -85,17 +85,43 @@ describe('[COMP:routes/assistant-playbook] Playbook list + owner decision gate',
     expect(res.body.rules).toHaveLength(1)
     expect(res.body.rules[0].rule).toBe(RULE.rule)
     expect(res.body.maxActive).toBeGreaterThan(0)
+    expect(res.body.maxActiveDecision).toBe(6)
+    expect(mockListRules).toHaveBeenCalledWith({
+      assistantId: 'a-1',
+      userId: 'u-member',
+      isAssistantOwner: false,
+    })
   })
 
-  it('blocks a non-owner from deciding (403, decision not applied)', async () => {
+  it('blocks a non-owner from deciding an assistant-wide rule', async () => {
     mockAccess.mockResolvedValueOnce({ assistant: { id: 'a-1', workspaceId: 'w-1' }, role: 'admin' } as never)
+    mockDecide.mockResolvedValueOnce('forbidden')
 
     const res = await request(makeApp({ userId: 'u-admin' }))
       .post('/api/assistants/a-1/playbook/r-1/decision')
       .send({ decision: 'approve' })
 
     expect(res.status).toBe(403)
-    expect(mockDecide).not.toHaveBeenCalled()
+    expect(mockDecide).toHaveBeenCalledWith(expect.objectContaining({
+      userId: 'u-admin',
+      isAssistantOwner: false,
+    }))
+  })
+
+  it('lets a member approve their own scoped decision rule', async () => {
+    mockAccess.mockResolvedValueOnce({ assistant: { id: 'a-1', workspaceId: 'w-1' }, role: 'member' } as never)
+    mockDecide.mockResolvedValueOnce({
+      ...RULE,
+      createdBy: 'decision_reflection',
+      appliesToUserId: 'u-member',
+      status: 'active',
+      decidedByUserId: 'u-member',
+    })
+    const res = await request(makeApp({ userId: 'u-member' }))
+      .post('/api/assistants/a-1/playbook/r-1/decision')
+      .send({ decision: 'approve' })
+    expect(res.status).toBe(200)
+    expect(res.body.rule.status).toBe('active')
   })
 
   it('lets the owner approve a suggestion', async () => {
@@ -110,6 +136,7 @@ describe('[COMP:routes/assistant-playbook] Playbook list + owner decision gate',
     expect(res.body.rule.status).toBe('active')
     expect(mockDecide).toHaveBeenCalledWith({
       assistantId: 'a-1', ruleId: 'r-1', decision: 'approve', userId: 'u-owner',
+      workspaceId: 'w-1', isAssistantOwner: true,
     })
   })
 

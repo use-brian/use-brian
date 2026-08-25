@@ -16,6 +16,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 const mockQueryLoop = vi.fn()
 const mockRunPreflight = vi.fn()
+const mockLoadDecisionPlaybookContext = vi.fn()
 
 // Override queryLoop + runPreflight; everything else (buildPreflightPrompt,
 // prompt/memory-context builders, MODEL_MAP) runs for real so the system-prompt
@@ -30,6 +31,10 @@ vi.mock('../../db/users.js', () => ({
   findOrCreateUser: vi.fn(),
   findUserByEmail: vi.fn(),
   findUserById: vi.fn(),
+  resolveAssistantAccess: vi.fn(),
+}))
+vi.mock('../../decision-learning/playbook-context.js', () => ({
+  loadDecisionPlaybookContext: (...args: unknown[]) => mockLoadDecisionPlaybookContext(...args),
 }))
 vi.mock('../../db/sessions.js', () => ({
   findOrCreateSession: vi.fn(),
@@ -100,6 +105,7 @@ import {
   findOrCreateUser,
   findUserByEmail,
   findUserById,
+  resolveAssistantAccess,
 } from '../../db/users.js'
 import {
   findOrCreateSession,
@@ -125,6 +131,7 @@ const mockFindAssistant = vi.mocked(findAssistantById)
 const mockFindUser = vi.mocked(findUserById)
 const mockFindOrCreateUser = vi.mocked(findOrCreateUser)
 const mockFindUserByEmail = vi.mocked(findUserByEmail)
+const mockResolveAssistantAccess = vi.mocked(resolveAssistantAccess)
 const mockResolveReadCeilings = vi.mocked(resolveReadCeilingsSystem)
 const mockSession = vi.mocked(findOrCreateSession)
 const mockAddMessage = vi.mocked(addSessionMessage)
@@ -211,6 +218,13 @@ beforeEach(() => {
   )
   mockFindUser.mockResolvedValue({ id: 'owner-1', timezone: 'UTC' } as never)
   mockFindUserByEmail.mockResolvedValue(null)
+  mockResolveAssistantAccess.mockResolvedValue({ role: 'member' } as never)
+  mockLoadDecisionPlaybookContext.mockResolvedValue({
+    playbookRules: [],
+    appliedRuleIds: [],
+    decisionApplicationId: null,
+    readFailed: false,
+  })
   mockFindOrCreateUser.mockResolvedValue({
     user: {
       id: 'client-shadow-1',
@@ -488,6 +502,43 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
       reason: 'empty_response',
       message: expect.stringContaining('produced no output'),
     })
+  })
+
+  it('[COMP:api/decision-playbook-context] applies only a validated workflow actor and returns the application out of band', async () => {
+    const applicationId = '00000000-0000-4000-8000-000000000099'
+    mockLoadDecisionPlaybookContext.mockResolvedValueOnce({
+      playbookRules: ['Show the reviewed draft before sending.'],
+      appliedRuleIds: ['00000000-0000-4000-8000-000000000098'],
+      decisionApplicationId: applicationId,
+      readFailed: false,
+    })
+    yieldsText('draft ready')
+    const onDecisionApplication = vi.fn()
+
+    await executor()({
+      ...baseParams,
+      decisionContext: {
+        actorUserId: 'member-1',
+        operationId: 'run-1:draft',
+        externalPrincipal: false,
+        applicability: { kind: 'email', key: 'primary-mailbox' },
+      },
+      onDecisionApplication,
+    })
+
+    expect(mockResolveAssistantAccess).toHaveBeenCalledWith('member-1', 'callee-1')
+    expect(mockLoadDecisionPlaybookContext).toHaveBeenCalledWith(expect.objectContaining({
+      assistantId: 'callee-1',
+      actorUserId: 'member-1',
+      externalPrincipal: false,
+      operationKind: 'workflow_assistant_call',
+      operationId: 'run-1:draft',
+      applicability: { kind: 'email', key: 'primary-mailbox' },
+    }))
+    expect(onDecisionApplication).toHaveBeenCalledWith(applicationId)
+    const prompt = mockQueryLoop.mock.calls[0][0].systemPrompt as string
+    expect(prompt).toContain('Show the reviewed draft before sending.')
+    expect(prompt).not.toContain(applicationId)
   })
 
   it('injects the direct-execution framing for a confirmation-stripped consult', async () => {

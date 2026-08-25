@@ -70,6 +70,9 @@ CREATE INDEX idx_decision_derivations_workspace_created
   ON decision_derivations (workspace_id, created_at DESC);
 CREATE INDEX idx_decision_applications_actor_assistant_created
   ON decision_applications (assistant_id, actor_user_id, created_at DESC);
+CREATE UNIQUE INDEX idx_decision_applications_operation_once
+  ON decision_applications (actor_user_id, assistant_id, operation_kind, operation_id)
+  WHERE assistant_id IS NOT NULL;
 
 -- `entities.id` is globally unique already; this companion unique key lets the
 -- CRM tables carry a composite workspace/id FK so a cross-workspace pointer is

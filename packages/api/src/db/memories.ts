@@ -1,4 +1,5 @@
 import type { AccessContext, EntityLinksStore, Sensitivity } from '@use-brian/core'
+import type pg from 'pg'
 import { buildAccessPredicate } from './access-predicate.js'
 import { buildMemoryAccessPredicate } from './memory-access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
@@ -277,22 +278,26 @@ export async function createMemory(
  * tab — see docs/architecture/context-engine/memory-system.md
  * ("Promote to workspace").
  */
+export type MemoryUpdateFields = {
+  summary?: string
+  detail?: string
+  confidence?: number
+  tags?: string[]
+  sensitivity?: Sensitivity
+  scope?: 'shared' | 'workspace'
+  workspaceId?: string | null
+}
+
 export async function updateMemory(
   id: string,
-  updates: {
-    summary?: string
-    detail?: string
-    confidence?: number
-    tags?: string[]
-    sensitivity?: Sensitivity
-    scope?: 'shared' | 'workspace'
-    workspaceId?: string | null
-  },
+  updates: MemoryUpdateFields,
   access?: AccessContext,
+  transactionClient?: pg.PoolClient,
 ): Promise<Memory | null> {
-  const client = await getPool().connect()
+  const ownedClient = transactionClient ? null : await getPool().connect()
+  const client = transactionClient ?? ownedClient!
   try {
-    await client.query('BEGIN')
+    if (ownedClient) await client.query('BEGIN')
     try {
       // Lock the active version. If none matches (already tombstoned, or
       // id doesn't exist), nothing to supersede — bail before the INSERT.
@@ -312,7 +317,7 @@ export async function updateMemory(
       )
       const old = lockResult.rows[0]
       if (!old) {
-        await client.query('ROLLBACK')
+        if (ownedClient) await client.query('ROLLBACK')
         return null
       }
 
@@ -371,14 +376,14 @@ export async function updateMemory(
         [id, newRow.id],
       )
 
-      await client.query('COMMIT')
+      if (ownedClient) await client.query('COMMIT')
       return newRow
     } catch (err) {
-      await client.query('ROLLBACK').catch(() => {})
+      if (ownedClient) await client.query('ROLLBACK').catch(() => {})
       throw err
     }
   } finally {
-    client.release()
+    ownedClient?.release()
   }
 }
 
@@ -1041,17 +1046,19 @@ export async function countUnverifiedByWorkspace(
 export async function markVerifiedDirect(
   memoryId: string,
   verifiedByUserId: string,
+  transactionClient?: pg.PoolClient,
 ): Promise<Memory | null> {
-  const result = await query<Memory>(
-    `UPDATE memories
+  const sql = `UPDATE memories
         SET verified_by_user_id = $2,
             verified_at = now(),
             updated_at = now()
       WHERE id = $1
         AND valid_to IS NULL
-      RETURNING ${MEMORY_SELECT}`,
-    [memoryId, verifiedByUserId],
-  )
+      RETURNING ${MEMORY_SELECT}`
+  const values = [memoryId, verifiedByUserId]
+  const result = transactionClient
+    ? await transactionClient.query<Memory>(sql, values)
+    : await query<Memory>(sql, values)
   return result.rows[0] ?? null
 }
 

@@ -672,6 +672,128 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
     expect(updated?.finishedAt).toBeInstanceOf(Date)
   })
 
+  it('freezes scoped applicability and carries the exact application into the downstream approval', async () => {
+    const applicationId = '00000000-0000-4000-8000-000000000099'
+    const requests: ConsultRequest[] = []
+    let approval: Parameters<NonNullable<ExecutorDeps['requestApproval']>>[0] | null = null
+    const send = makeFakeTool('imapSendMessage')
+    send.resolveConfirmation = async () => true
+    const deps = makeDeps({
+      consultTransport: {
+        async send(request) {
+          requests.push(request)
+          return {
+            task: {
+              taskId: 'task-1',
+              contextId: 'context-1',
+              status: { state: 'completed', timestamp: new Date().toISOString() },
+              artifacts: [{
+                artifactId: `decision-application:${applicationId}`,
+                name: 'decision-playbook-application',
+                parts: [{ kind: 'data', data: { applicationId } }],
+              }],
+              history: [{
+                messageId: 'message-1',
+                role: 'agent',
+                parts: [{ kind: 'text', text: 'Reviewed draft' }],
+              }],
+            },
+          }
+        },
+      },
+      buildToolRegistry: async () => new Map([['imapSendMessage', send]]),
+      requestApproval: async (params) => { approval = params },
+    })
+    const definition: WorkflowDefinition = {
+      startStepId: 'draft',
+      steps: [
+        {
+          id: 'draft',
+          type: 'assistant_call',
+          target: { assistantId: 'primary' },
+          prompt: 'Draft a reply',
+          storeOutputAs: 'draft',
+        },
+        {
+          id: 'send',
+          type: 'tool_call',
+          toolName: 'imapSendMessage',
+          arguments: {
+            account: 'primary-mailbox',
+            to: ['recipient@example.test'],
+            subject: 'Reply',
+            body: '{{vars.draft}}',
+          },
+        },
+      ],
+    }
+    const { run } = await seedWorkflowAndRun(deps, definition)
+
+    const outcome = await advanceWorkflowRun(deps, run.id)
+
+    expect(outcome).toMatchObject({ kind: 'paused', reason: 'approval' })
+    expect(requests[0].decisionContext).toEqual({
+      operationId: `${run.id}:draft`,
+      externalPrincipal: false,
+      applicability: { kind: 'email', key: 'primary-mailbox' },
+    })
+    expect(approval).toMatchObject({
+      toolName: 'imapSendMessage',
+      decisionApplicationId: applicationId,
+    })
+  })
+
+  it('does not guess operation applicability when an assistant call fans out', async () => {
+    const requests: ConsultRequest[] = []
+    const send = makeFakeTool('imapSendMessage')
+    send.resolveConfirmation = async () => true
+    const deps = makeDeps({
+      consultTransport: {
+        async send(request) {
+          requests.push(request)
+          return makeConsultTransport({ responseText: 'Draft' }).send(request)
+        },
+      },
+      buildToolRegistry: async () => new Map([
+        ['imapSendMessage', send],
+        ['saveMemory', makeFakeTool('saveMemory')],
+      ]),
+      requestApproval: async () => {},
+    })
+    const definition: WorkflowDefinition = {
+      startStepId: 'draft',
+      steps: [
+        {
+          id: 'draft',
+          type: 'assistant_call',
+          target: { assistantId: 'primary' },
+          prompt: 'Draft and archive',
+          nextStepId: ['send', 'archive'],
+        },
+        {
+          id: 'send',
+          type: 'tool_call',
+          toolName: 'imapSendMessage',
+          arguments: { account: 'primary-mailbox', body: 'Draft' },
+          nextStepId: null,
+        },
+        {
+          id: 'archive',
+          type: 'tool_call',
+          toolName: 'saveMemory',
+          arguments: { content: 'Draft' },
+          nextStepId: null,
+        },
+      ],
+    }
+    const { run } = await seedWorkflowAndRun(deps, definition)
+    await advanceWorkflowRun(deps, run.id)
+    expect(requests[0].decisionContext).toEqual({
+      operationId: `${run.id}:draft`,
+      externalPrincipal: false,
+    })
+  })
+
   it("fails the run before any step when workspaceComputeAllowed denies (the hosted paid gate)", async () => {
     // A no-plan ('free') workspace's autonomous compute is blocked on hosted:
     // the injected gate returns false and the run fails with

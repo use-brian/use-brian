@@ -15,10 +15,11 @@ import type {
   GetEntityOpts,
 } from '@use-brian/core'
 import type { Sensitivity } from '@use-brian/core'
+import type pg from 'pg'
 import { clientCompartment } from '@use-brian/core'
 import { buildAccessPredicate } from './access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
-import { getAppPool, getPool, query, queryGated, queryWithRLS, rollbackAndRelease } from './client.js'
+import { applyRLSGucs, getAppPool, getPool, query, queryGated, queryWithRLS, rollbackAndRelease } from './client.js'
 
 /**
  * `entities` store. Schema spec:
@@ -569,19 +570,20 @@ export async function getEntityById(
   ctx: AccessContext,
   id: string,
   opts: { asOf?: Date } = {},
+  transactionClient?: pg.PoolClient,
 ): Promise<EntityRecord | null> {
   // WU-4.2b: universal projection (workspace + visibility-double +
   // optional clearance) gates cross-workspace UUID lookups.
   const ap = buildAccessPredicate(ctx, { startIdx: 3 })
-  const result = await queryWithRLS<EntityRow>(
-    ctx.userId,
-    `SELECT ${FULL_SELECT} FROM entities
+  const sql = `SELECT ${FULL_SELECT} FROM entities
      WHERE id = $1
        AND valid_from <= COALESCE($2::timestamptz, now())
        AND (valid_to IS NULL OR valid_to > COALESCE($2::timestamptz, now()))
-       AND ${ap.sql}`,
-    [id, opts.asOf ?? null, ...ap.params],
-  )
+       AND ${ap.sql}`
+  const values = [id, opts.asOf ?? null, ...ap.params]
+  const result = transactionClient
+    ? await transactionClient.query<EntityRow>(sql, values)
+    : await queryWithRLS<EntityRow>(ctx.userId, sql, values)
   if (result.rows.length === 0) return null
   return toEntity(result.rows[0])
 }
@@ -596,15 +598,16 @@ export async function getEntityByIdSystem(
   actorUserId: string,
   id: string,
   opts: { asOf?: Date } = {},
+  transactionClient?: pg.PoolClient,
 ): Promise<EntityRecord | null> {
-  const result = await queryWithRLS<EntityRow>(
-    actorUserId,
-    `SELECT ${FULL_SELECT} FROM entities
+  const sql = `SELECT ${FULL_SELECT} FROM entities
      WHERE id = $1
        AND valid_from <= COALESCE($2::timestamptz, now())
-       AND (valid_to IS NULL OR valid_to > COALESCE($2::timestamptz, now()))`,
-    [id, opts.asOf ?? null],
-  )
+       AND (valid_to IS NULL OR valid_to > COALESCE($2::timestamptz, now()))`
+  const values = [id, opts.asOf ?? null]
+  const result = transactionClient
+    ? await transactionClient.query<EntityRow>(sql, values)
+    : await queryWithRLS<EntityRow>(actorUserId, sql, values)
   if (result.rows.length === 0) return null
   return toEntity(result.rows[0])
 }
@@ -1084,6 +1087,7 @@ export async function updateEntity(
   id: string,
   fields: EntityUpdateFields,
   access?: AccessContext,
+  transactionClient?: pg.PoolClient,
 ): Promise<EntityRecord | null> {
   const sets: string[] = []
   const values: unknown[] = []
@@ -1131,15 +1135,14 @@ export async function updateEntity(
     values.push(actorUserId)
   }
 
-  const result = await queryWithRLS<EntityRow>(
-    actorUserId,
-    `UPDATE entities
+  const sql = `UPDATE entities
         SET ${sets.join(', ')}
       WHERE id = $${idx}
         AND ${guard}
-      RETURNING ${FULL_SELECT}`,
-    values,
-  )
+      RETURNING ${FULL_SELECT}`
+  const result = transactionClient
+    ? await transactionClient.query<EntityRow>(sql, values)
+    : await queryWithRLS<EntityRow>(actorUserId, sql, values)
   if (result.rows.length === 0) return null
   return toEntity(result.rows[0])
 }
@@ -1799,15 +1802,16 @@ export async function reclassifyEntityKind(
   actorUserId: string,
   id: string,
   params: ReclassifyEntityKindParams,
+  transactionClient?: pg.PoolClient,
 ): Promise<EntityRecord | null> {
-  const result = await queryWithRLS<EntityRow>(
-    actorUserId,
-    `UPDATE entities
+  const sql = `UPDATE entities
         SET kind = $1, updated_at = now()
       WHERE id = $2 AND valid_to IS NULL
-      RETURNING ${FULL_SELECT}`,
-    [params.kind, id],
-  )
+      RETURNING ${FULL_SELECT}`
+  const values = [params.kind, id]
+  const result = transactionClient
+    ? await transactionClient.query<EntityRow>(sql, values)
+    : await queryWithRLS<EntityRow>(actorUserId, sql, values)
   if (result.rows.length === 0) return null
   return toEntity(result.rows[0])
 }
@@ -1851,6 +1855,7 @@ export async function promoteEntityToCrm(
   actorUserId: string,
   id: string,
   params: PromoteEntityToCrmParams,
+  transactionClient?: pg.PoolClient,
 ): Promise<{ entity: EntityRecord; specializationId: string }> {
   if (params.kind === 'deal' && !params.stage) {
     throw new Error("Promoting to 'deal' requires a stage value.")
@@ -1878,15 +1883,16 @@ export async function promoteEntityToCrm(
         ? params.domain ?? null
         : null
 
-  const client = await getAppPool().connect()
+  const ownedClient = transactionClient ? null : await getAppPool().connect()
+  const client = transactionClient ?? ownedClient!
   try {
-    await client.query('BEGIN')
-    // Runs on the app pool (app_user, subject to RLS). SET LOCAL actor scope
-    // reverts at COMMIT/ROLLBACK to the seeded sentinel, so no stale
-    // current_user_id survives onto the pooled connection.
-    await client.query(
-      `SET LOCAL app.current_user_id = '${actorUserId.replace(/'/g, "''")}'`,
-    )
+    if (ownedClient) {
+      await client.query('BEGIN')
+      // Runs on the app pool (app_user, subject to RLS). SET LOCAL actor scope
+      // reverts at COMMIT/ROLLBACK to the seeded sentinel, so no stale
+      // current_user_id survives onto the pooled connection.
+      await applyRLSGucs(client, actorUserId)
+    }
     try {
       // Lock the entity row so a concurrent promote / supersede can't
       // race. The promotion target must be live, non-CRM, and visible
@@ -1898,7 +1904,6 @@ export async function promoteEntityToCrm(
         [id],
       )
       if (entityRes.rows.length === 0) {
-        await client.query('ROLLBACK')
         throw new Error('Entity not found or not live.')
       }
       const before = toEntity(entityRes.rows[0])
@@ -1917,18 +1922,17 @@ export async function promoteEntityToCrm(
       )
       if (updRes.rows.length === 0) {
         // Shouldn't happen given the FOR UPDATE above, but be defensive.
-        await client.query('ROLLBACK')
         throw new Error('Entity vanished between lock and update.')
       }
-      await client.query('COMMIT')
+      if (ownedClient) await client.query('COMMIT')
       const entity = toEntity(updRes.rows[0])
       return { entity, specializationId: entity.id }
     } catch (err) {
-      await client.query('ROLLBACK').catch(() => {})
+      if (ownedClient) await client.query('ROLLBACK').catch(() => {})
       throw err
     }
   } finally {
-    await rollbackAndRelease(client)
+    if (ownedClient) await rollbackAndRelease(client)
   }
 }
 

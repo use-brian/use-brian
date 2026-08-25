@@ -18,7 +18,23 @@ vi.mock('../../db/client.js', () => ({
 }))
 vi.mock('../../db/brain-inbox-store.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../db/brain-inbox-store.js')>()
-  return { ...actual, appendBrainVerification: vi.fn() }
+  const appendBrainVerification = vi.fn()
+  return {
+    ...actual,
+    appendBrainVerification,
+    applyBrainCorrection: vi.fn(async <T,>(params: {
+      mutate: (client: never) => Promise<T>
+      verifications: (result: T) => readonly unknown[]
+    }) => {
+      const result = await params.mutate({} as never)
+      for (const verification of params.verifications(result)) {
+        await appendBrainVerification(verification)
+      }
+      return result
+    }),
+    verifyBrainInboxRow: vi.fn(),
+    deleteBrainInboxRow: vi.fn(),
+  }
 })
 
 // Task adjust calls the tasks store + brain-stream notify; stub both so the
@@ -33,7 +49,10 @@ vi.mock('../../db/memories.js', () => ({
   getMemoryByIdSystem: vi.fn(),
   markVerifiedDirect: vi.fn(),
 }))
-vi.mock('../../db/memory-verifications-store.js', () => ({ recordVerification: vi.fn() }))
+vi.mock('../../db/memory-verifications-store.js', () => ({
+  adjustMemoryDecision: vi.fn(),
+  recordVerification: vi.fn(),
+}))
 vi.mock('../../db/task-admission-store.js', () => ({ rejectTask: vi.fn() }))
 vi.mock('../../db/sessions.js', () => ({
   createInspectionSession: vi.fn(),
@@ -43,18 +62,25 @@ vi.mock('../../db/sessions.js', () => ({
 import { brainInboxRoutes } from '../brain-inbox.js'
 import { query } from '../../db/client.js'
 import { updateTask } from '../../db/tasks.js'
-import { updateMemory, getMemoryByIdSystem, markVerifiedDirect } from '../../db/memories.js'
-import { recordVerification } from '../../db/memory-verifications-store.js'
+import { updateMemory, getMemoryByIdSystem } from '../../db/memories.js'
+import {
+  adjustMemoryDecision,
+} from '../../db/memory-verifications-store.js'
 import { rejectTask } from '../../db/task-admission-store.js'
 import { createBrainEditSession } from '../../db/sessions.js'
+import {
+  deleteBrainInboxRow,
+  verifyBrainInboxRow,
+} from '../../db/brain-inbox-store.js'
 
 const mockQuery = vi.mocked(query)
 const mockUpdateTask = vi.mocked(updateTask)
 const mockUpdateMemory = vi.mocked(updateMemory)
 const mockGetMemoryByIdSystem = vi.mocked(getMemoryByIdSystem)
-const mockMarkVerifiedDirect = vi.mocked(markVerifiedDirect)
-const mockRecordVerification = vi.mocked(recordVerification)
+const mockAdjustMemoryDecision = vi.mocked(adjustMemoryDecision)
 const mockRejectTask = vi.mocked(rejectTask)
+const mockVerifyBrainInboxRow = vi.mocked(verifyBrainInboxRow)
+const mockDeleteBrainInboxRow = vi.mocked(deleteBrainInboxRow)
 
 const WS = 'e1799b0e-9f64-46d5-8ed8-132a2194943d'
 const ROW = 'f4b30b32-1771-4c90-b5af-b1b42311f543'
@@ -67,7 +93,11 @@ function makeApp(role: string | null = 'member') {
 }
 
 describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
-  beforeEach(() => vi.clearAllMocks())
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockVerifyBrainInboxRow.mockResolvedValue({ status: 'verified', stamped: true })
+    mockDeleteBrainInboxRow.mockResolvedValue({ status: 'deleted' })
+  })
 
   it('GET /:workspaceId/:primitive/:rowId returns a live memory row', async () => {
     mockQuery.mockResolvedValueOnce({
@@ -408,14 +438,10 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
     )
   }
 
-  // Shared query sequence for the entity_link verify happy path: ownership
-  // pre-check → markVerifiedGeneric UPDATE → the cascade's edge lookup. The
-  // atomic audit writer is mocked at this route boundary.
+  // The atomic verification writer is mocked at this route boundary; the only
+  // route-owned read left is the existing learned-skill cascade lookup.
   function primeEntityLinkVerify(edge: { source_kind: string; source_id: string; edge_type: string }) {
-    mockQuery
-      .mockResolvedValueOnce({ rows: [{ workspace_id: WS }] } as never) // ownership
-      .mockResolvedValueOnce({ rowCount: 1 } as never) // markVerifiedGeneric
-      .mockResolvedValueOnce({ rows: [edge] } as never) // edge lookup
+    mockQuery.mockResolvedValueOnce({ rows: [edge] } as never)
   }
 
   it('verify confirms the source skill for a learned_from skill edge', async () => {
@@ -455,8 +481,7 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
   })
 
   it('verify skips the skill cascade entirely for a non-entity_link primitive', async () => {
-    // memory verify: ownership → markVerifiedGeneric → memory_verifications
-    // INSERT. No edge lookup, no confirmSkill, even with a store wired.
+    // No edge lookup and no confirmSkill, even with a skill store wired.
     const confirmSkill = vi.fn()
     mockQuery
       .mockResolvedValueOnce({ rows: [{ workspace_id: WS }] } as never)
@@ -469,6 +494,12 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
 
     expect(res.status).toBe(200)
     expect(confirmSkill).not.toHaveBeenCalled()
+    expect(mockVerifyBrainInboxRow).toHaveBeenCalledWith({
+      primitive: 'memory',
+      rowId: ROW,
+      workspaceId: WS,
+      verifiedByUserId: 'u_caller',
+    })
   })
 
   // ── Memory adjust ────────────────────────────────────────────────
@@ -485,7 +516,7 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
       summary: 'old',
       detail: null,
     } as never)
-    mockUpdateMemory.mockResolvedValueOnce({
+    mockAdjustMemoryDecision.mockResolvedValueOnce({
       id: NEW_ROW,
       workspaceId: WS,
       scope: 'shared',
@@ -493,7 +524,6 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
       summary: 'new',
       detail: null,
     } as never)
-    mockMarkVerifiedDirect.mockResolvedValueOnce({ id: NEW_ROW, summary: 'new' } as never)
 
     const res = await request(makeApp())
       .post(`/api/brain-inbox/${WS}/memory/${ROW}/adjust`)
@@ -501,10 +531,10 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
 
     expect(res.status).toBe(200)
     expect(res.headers.location).toBeUndefined()
-    expect(mockUpdateMemory).toHaveBeenCalledWith(
-      ROW,
-      expect.objectContaining({ summary: 'new' }),
-    )
+    expect(mockAdjustMemoryDecision).toHaveBeenCalledWith(expect.objectContaining({
+      memoryId: ROW,
+      updates: expect.objectContaining({ summary: 'new' }),
+    }))
   })
 
   it('memory adjust handles a null-assistant (workspace-shared) memory through the same seam', async () => {
@@ -517,7 +547,7 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
       summary: 'old',
       detail: null,
     } as never)
-    mockUpdateMemory.mockResolvedValueOnce({
+    mockAdjustMemoryDecision.mockResolvedValueOnce({
       id: NEW_ROW,
       workspaceId: WS,
       scope: 'shared',
@@ -525,8 +555,6 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
       summary: 'new',
       detail: null,
     } as never)
-    mockRecordVerification.mockResolvedValue({} as never)
-    mockMarkVerifiedDirect.mockResolvedValueOnce({ id: NEW_ROW, summary: 'new' } as never)
 
     const res = await request(makeApp())
       .post(`/api/brain-inbox/${WS}/memory/${ROW}/adjust`)
@@ -536,12 +564,11 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
     expect(res.body.memory).toMatchObject({ id: NEW_ROW })
     // The redirect assistantId must never be built from null.
     expect(res.headers.location).toBeUndefined()
-    expect(mockUpdateMemory).toHaveBeenCalledWith(ROW, expect.objectContaining({ summary: 'new' }))
-    // Summary change writes an edit_summary verification, and the new row is stamped.
-    expect(mockRecordVerification).toHaveBeenCalledWith(
-      expect.objectContaining({ action: 'edit_summary', verifiedBy: 'u_caller' }),
-    )
-    expect(mockMarkVerifiedDirect).toHaveBeenCalledWith(NEW_ROW, 'u_caller')
+    expect(mockAdjustMemoryDecision).toHaveBeenCalledWith(expect.objectContaining({
+      memoryId: ROW,
+      verifiedBy: 'u_caller',
+      verifications: [expect.objectContaining({ action: 'edit_summary' })],
+    }))
   })
 
   it('null-assistant memory adjust returns 404 when the memory is in another workspace', async () => {
@@ -715,20 +742,16 @@ describe('[COMP:api/brain-inbox-explain] Source descriptor', () => {
 
   it('DELETE of a task cascades to the goals hosted on it (Tasks-assignable must not outlive the task)', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [{ workspace_id: WS }] } as never) // ownership
-    mockQuery.mockResolvedValueOnce({ rows: [] } as never) // soft delete
-    mockQuery.mockResolvedValueOnce({ rowCount: 2 } as never) // goal cascade
-    mockQuery.mockResolvedValueOnce({ rows: [] } as never) // brain_verifications audit
 
     const res = await request(makeApp()).delete(`/api/brain-inbox/${WS}/task/${ROW}`)
 
     expect(res.status).toBe(200)
-    const cascadeSql = mockQuery.mock.calls[2][0] as string
-    expect(cascadeSql).toMatch(/UPDATE goals/)
-    expect(cascadeSql).toMatch(/status = 'abandoned'/)
-    expect(cascadeSql).toMatch(/host_type = 'task'/)
-    // Explicit deletion also retires a running goal; guarded driver status
-    // handoffs prevent the bounded in-flight iteration from resurrecting it.
-    expect(mockQuery.mock.calls[2][1]).toEqual([ROW, 'host_task_deleted', ['done', 'abandoned']])
+    expect(mockDeleteBrainInboxRow).toHaveBeenCalledWith({
+      primitive: 'task',
+      rowId: ROW,
+      workspaceId: WS,
+      deletedByUserId: 'u_caller',
+    })
   })
 
   it('reasoned task DELETE creates a tombstone and explicitly activates a narrow rule', async () => {
@@ -757,6 +780,7 @@ describe('[COMP:api/brain-inbox-explain] Source descriptor', () => {
       taskId: ROW,
       reason: 'Discussion about an active task is context, not a new commitment',
       createRule: true,
+      recordBrainVerification: true,
     })
     expect(res.body).toMatchObject({
       ok: true,
@@ -778,31 +802,30 @@ describe('[COMP:api/brain-inbox-explain] Source descriptor', () => {
 
   it('DELETE of a workspace_file closes its derived file_segments (deleted content must stop being retrievable)', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [{ workspace_id: WS }] } as never) // ownership
-    mockQuery.mockResolvedValueOnce({ rows: [] } as never) // soft delete
-    mockQuery.mockResolvedValueOnce({ rowCount: 3 } as never) // segment cascade
-    mockQuery.mockResolvedValueOnce({ rows: [] } as never) // brain_verifications audit
 
     const res = await request(makeApp()).delete(`/api/brain-inbox/${WS}/workspace_file/${ROW}`)
 
     expect(res.status).toBe(200)
-    // Retrieval reads the SEGMENT's own bi-temporal window, never the parent
-    // file's — closing workspace_files alone leaves the deleted file's text
-    // searchable through searchFileContent and the brain file_segment arm.
-    const cascade = mockQuery.mock.calls.find((c) => /UPDATE file_segments/.test(String(c[0])))
-    expect(cascade).toBeDefined()
-    expect(String(cascade?.[0])).toMatch(/valid_to = now\(\)/)
-    expect(String(cascade?.[0])).toMatch(/valid_to IS NULL/)
-    expect(cascade?.[1]).toEqual([ROW])
+    expect(mockDeleteBrainInboxRow).toHaveBeenCalledWith({
+      primitive: 'workspace_file',
+      rowId: ROW,
+      workspaceId: WS,
+      deletedByUserId: 'u_caller',
+    })
   })
 
   it('DELETE of a non-task primitive runs no goal cascade, and a non-file primitive no segment cascade', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [{ workspace_id: WS }] } as never) // ownership
-    mockQuery.mockResolvedValueOnce({ rows: [] } as never) // soft delete
-    mockQuery.mockResolvedValueOnce({ rows: [] } as never) // memory_verifications audit
 
     const res = await request(makeApp()).delete(`/api/brain-inbox/${WS}/memory/${ROW}`)
 
     expect(res.status).toBe(200)
+    expect(mockDeleteBrainInboxRow).toHaveBeenCalledWith({
+      primitive: 'memory',
+      rowId: ROW,
+      workspaceId: WS,
+      deletedByUserId: 'u_caller',
+    })
     for (const call of mockQuery.mock.calls) {
       expect(String(call[0])).not.toMatch(/UPDATE goals/)
       expect(String(call[0])).not.toMatch(/UPDATE file_segments/)

@@ -1962,6 +1962,147 @@ function CostTab({ assistantId }: { assistantId: string }) {
 
 // ─── Settings tab ────────────────────────────────────────────────
 
+export type DecisionPlaybookRuleView = {
+  id: string;
+  rule: string;
+  rationale: string | null;
+  provenance: unknown;
+  status: "suggested" | "active" | "rejected" | "retired";
+  createdBy: "reflection" | "owner" | "decision_reflection";
+  appliesToUserId: string | null;
+  applicabilityKind: "general" | "email" | "tool";
+  applicabilityKey: string | null;
+  evidenceCount: number;
+  decidedByUserId: string | null;
+};
+
+function decisionRuleProvenance(provenance: unknown): {
+  sourceKinds: string[];
+  firstEvidenceAt: string | null;
+  lastEvidenceAt: string | null;
+} {
+  if (!provenance || typeof provenance !== "object" || Array.isArray(provenance)) {
+    return { sourceKinds: [], firstEvidenceAt: null, lastEvidenceAt: null };
+  }
+  const value = provenance as Record<string, unknown>;
+  return {
+    sourceKinds: Array.isArray(value.sourceKinds)
+      ? value.sourceKinds.filter((item): item is string => typeof item === "string").slice(0, 8)
+      : [],
+    firstEvidenceAt: typeof value.firstEvidenceAt === "string" ? value.firstEvidenceAt : null,
+    lastEvidenceAt: typeof value.lastEvidenceAt === "string" ? value.lastEvidenceAt : null,
+  };
+}
+
+/** Content-minimized decision card shared by suggested/active/retired groups. */
+export function DecisionPlaybookRuleCard({
+  rule,
+  canDecide,
+  deciding,
+  onDecision,
+}: {
+  rule: DecisionPlaybookRuleView;
+  canDecide: boolean;
+  deciding: boolean;
+  onDecision: (decision: "approve" | "reject" | "retire") => void;
+}) {
+  const t = useT();
+  const learned = rule.createdBy === "decision_reflection" && rule.appliesToUserId !== null;
+  const provenance = decisionRuleProvenance(rule.provenance);
+  const applicability = rule.applicabilityKind === "email"
+    ? t.assistant.settings.playbookApplicabilityEmail
+    : rule.applicabilityKind === "tool"
+      ? t.assistant.settings.playbookApplicabilityTool
+      : t.assistant.settings.playbookApplicabilityGeneral;
+  const sourceLabels = provenance.sourceKinds.map((source) =>
+    source === "reviewed_email"
+      ? t.assistant.settings.playbookSourceReviewedEmail
+      : source === "tool_denial"
+        ? t.assistant.settings.playbookSourceToolDecision
+        : t.assistant.settings.playbookSourceDecision,
+  );
+  const dateRange = provenance.firstEvidenceAt
+    ? `${new Date(provenance.firstEvidenceAt).toLocaleDateString()}${
+        provenance.lastEvidenceAt && provenance.lastEvidenceAt !== provenance.firstEvidenceAt
+          ? ` - ${new Date(provenance.lastEvidenceAt).toLocaleDateString()}`
+          : ""
+      }`
+    : null;
+
+  return (
+    <div className="border border-border rounded-lg px-3 py-2.5 space-y-1.5">
+      <div className="flex items-start justify-between gap-3">
+        <div className="text-[14px] text-foreground">
+          {rule.rule}
+          {!learned && rule.status === "active" && !rule.decidedByUserId && (
+            <span className="ml-2 align-middle text-[10px] font-medium uppercase tracking-wide text-muted-foreground border border-border rounded px-1 py-0.5">
+              {t.assistant.settings.playbookAutoBadge}
+            </span>
+          )}
+        </div>
+        {rule.status === "active" && canDecide && (
+          <button
+            onClick={() => onDecision("retire")}
+            disabled={deciding}
+            className="shrink-0 px-2.5 py-1.5 text-[12px] font-medium rounded-md border border-border text-muted-foreground hover:bg-muted disabled:opacity-50 transition-colors"
+          >
+            {t.assistant.settings.playbookRetire}
+          </button>
+        )}
+      </div>
+      {learned ? (
+        <div className="space-y-1 text-[11px] text-muted-foreground">
+          <div className="font-medium text-foreground/75">
+            {t.assistant.settings.playbookLearnedFromDecisions}
+          </div>
+          <div>
+            {applicability}
+            {rule.applicabilityKey ? `: ${rule.applicabilityKey}` : ""}
+            {` · ${format(t.assistant.settings.playbookEvidenceCount, { count: rule.evidenceCount })}`}
+          </div>
+          {(provenance.sourceKinds.length > 0 || dateRange) && (
+            <div>
+              {sourceLabels.length > 0
+                ? format(t.assistant.settings.playbookSourceKinds, {
+                    sources: sourceLabels.join(", "),
+                  })
+                : ""}
+              {sourceLabels.length > 0 && dateRange ? " · " : ""}
+              {dateRange ?? ""}
+            </div>
+          )}
+        </div>
+      ) : rule.rationale ? (
+        <div className="text-[12px] text-muted-foreground">{rule.rationale}</div>
+      ) : null}
+      {rule.status === "suggested" && (
+        canDecide ? (
+          <div className="flex gap-2 pt-1">
+            <button
+              onClick={() => onDecision("approve")}
+              disabled={deciding}
+              className="px-2.5 py-1.5 text-[12px] font-medium rounded-md bg-action text-action-foreground hover:bg-action/80 disabled:opacity-50 transition-colors"
+            >
+              {t.assistant.settings.playbookApprove}
+            </button>
+            <button
+              onClick={() => onDecision("reject")}
+              disabled={deciding}
+              className="px-2.5 py-1.5 text-[12px] font-medium rounded-md border border-border text-muted-foreground hover:bg-muted disabled:opacity-50 transition-colors"
+            >
+              {t.assistant.settings.playbookReject}
+            </button>
+          </div>
+        ) : (
+          <div className="text-[11px] text-muted-foreground">
+            {t.assistant.settings.playbookOwnerOnly}
+          </div>
+        )
+      )}
+    </div>
+  );
+}
+
 function SettingsTab({
   assistantId,
   role,
@@ -2000,9 +2141,7 @@ function SettingsTab({
   // from the team's feedback. Auto-admitted up to the active cap (badged
   // "Auto"; decidedByUserId NULL marks auto-admission); overflow waits as
   // suggestions. Deciding is owner-only, mirroring the API gate.
-  const [playbook, setPlaybook] = useState<
-    { id: string; rule: string; rationale: string | null; status: string; decidedByUserId: string | null }[]
-  >([]);
+  const [playbook, setPlaybook] = useState<DecisionPlaybookRuleView[]>([]);
   const [decidingRule, setDecidingRule] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState("");
@@ -2069,7 +2208,7 @@ function SettingsTab({
   useEffect(() => {
     authFetch(`${API_URL}/api/assistants/${assistantId}/playbook`)
       .then((r) => (r.ok ? r.json() : null))
-      .then((data: { rules?: { id: string; rule: string; rationale: string | null; status: string; decidedByUserId: string | null }[] } | null) => {
+      .then((data: { rules?: DecisionPlaybookRuleView[] } | null) => {
         if (data?.rules) setPlaybook(data.rules);
       })
       .catch(() => {});
@@ -2433,8 +2572,7 @@ function SettingsTab({
           decide owner-only. */}
       <Section title={t.assistant.settings.playbookTitle} description={t.assistant.settings.playbookDesc}>
         <div className="px-5 py-4 space-y-4">
-          {playbook.filter((r) => r.status === "suggested").length === 0 &&
-          playbook.filter((r) => r.status === "active").length === 0 ? (
+          {playbook.filter((r) => r.status !== "rejected").length === 0 ? (
             <p className="text-[13px] text-muted-foreground">{t.assistant.settings.playbookEmpty}</p>
           ) : (
             <>
@@ -2444,34 +2582,13 @@ function SettingsTab({
                     {t.assistant.settings.playbookSuggested}
                   </div>
                   {playbook.filter((r) => r.status === "suggested").map((r) => (
-                    <div key={r.id} className="border border-border rounded-lg px-3 py-2.5 space-y-1.5">
-                      <div className="text-[14px] text-foreground">{r.rule}</div>
-                      {r.rationale && (
-                        <div className="text-[12px] text-muted-foreground">{r.rationale}</div>
-                      )}
-                      {isOwner ? (
-                        <div className="flex gap-2 pt-1">
-                          <button
-                            onClick={() => void decideRule(r.id, "approve")}
-                            disabled={decidingRule === r.id}
-                            className="px-2.5 py-1.5 text-[12px] font-medium rounded-md bg-action text-action-foreground hover:bg-action/80 disabled:opacity-50 transition-colors"
-                          >
-                            {t.assistant.settings.playbookApprove}
-                          </button>
-                          <button
-                            onClick={() => void decideRule(r.id, "reject")}
-                            disabled={decidingRule === r.id}
-                            className="px-2.5 py-1.5 text-[12px] font-medium rounded-md border border-border text-muted-foreground hover:bg-muted disabled:opacity-50 transition-colors"
-                          >
-                            {t.assistant.settings.playbookReject}
-                          </button>
-                        </div>
-                      ) : (
-                        <div className="text-[11px] text-muted-foreground">
-                          {t.assistant.settings.playbookOwnerOnly}
-                        </div>
-                      )}
-                    </div>
+                    <DecisionPlaybookRuleCard
+                      key={r.id}
+                      rule={r}
+                      canDecide={isOwner || (r.createdBy === "decision_reflection" && r.appliesToUserId !== null)}
+                      deciding={decidingRule === r.id}
+                      onDecision={(decision) => void decideRule(r.id, decision)}
+                    />
                   ))}
                 </div>
               )}
@@ -2481,25 +2598,29 @@ function SettingsTab({
                     {t.assistant.settings.playbookActive}
                   </div>
                   {playbook.filter((r) => r.status === "active").map((r) => (
-                    <div key={r.id} className="border border-border rounded-lg px-3 py-2.5 flex items-start justify-between gap-3">
-                      <div className="text-[14px] text-foreground">
-                        {r.rule}
-                        {!r.decidedByUserId && (
-                          <span className="ml-2 align-middle text-[10px] font-medium uppercase tracking-wide text-muted-foreground border border-border rounded px-1 py-0.5">
-                            {t.assistant.settings.playbookAutoBadge}
-                          </span>
-                        )}
-                      </div>
-                      {isOwner && (
-                        <button
-                          onClick={() => void decideRule(r.id, "retire")}
-                          disabled={decidingRule === r.id}
-                          className="shrink-0 px-2.5 py-1.5 text-[12px] font-medium rounded-md border border-border text-muted-foreground hover:bg-muted disabled:opacity-50 transition-colors"
-                        >
-                          {t.assistant.settings.playbookRetire}
-                        </button>
-                      )}
-                    </div>
+                    <DecisionPlaybookRuleCard
+                      key={r.id}
+                      rule={r}
+                      canDecide={isOwner || (r.createdBy === "decision_reflection" && r.appliesToUserId !== null)}
+                      deciding={decidingRule === r.id}
+                      onDecision={(decision) => void decideRule(r.id, decision)}
+                    />
+                  ))}
+                </div>
+              )}
+              {playbook.some((r) => r.status === "retired") && (
+                <div className="space-y-2">
+                  <div className="text-[12px] font-medium text-muted-foreground">
+                    {t.assistant.settings.playbookRetired}
+                  </div>
+                  {playbook.filter((r) => r.status === "retired").map((r) => (
+                    <DecisionPlaybookRuleCard
+                      key={r.id}
+                      rule={r}
+                      canDecide={false}
+                      deciding={false}
+                      onDecision={() => {}}
+                    />
                   ))}
                 </div>
               )}

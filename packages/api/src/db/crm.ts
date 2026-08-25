@@ -9,6 +9,7 @@ import type {
   Sensitivity,
   StableExternalIdentity,
 } from '@use-brian/core'
+import type pg from 'pg'
 import { buildAccessPredicate } from './access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
 import { query, queryGated, queryWithRLS } from './client.js'
@@ -390,8 +391,15 @@ export async function updateCompany(
   id: string,
   fields: CompanyUpdateFields,
   access?: AccessContext,
+  transactionClient?: pg.PoolClient,
 ): Promise<CompanyRecord | null> {
-  const old = access ? await getEntityById(access, id) : await getEntityByIdSystem(userId, id)
+  const old = transactionClient
+    ? access
+      ? await getEntityById(access, id, {}, transactionClient)
+      : await getEntityByIdSystem(userId, id, {}, transactionClient)
+    : access
+      ? await getEntityById(access, id)
+      : await getEntityByIdSystem(userId, id)
   if (!old || old.kind !== 'company') return null
   const a = { ...old.attributes }
   if (fields.domain !== undefined) {
@@ -404,7 +412,7 @@ export async function updateCompany(
     displayName: fields.name,
     canonicalId: fields.domain !== undefined ? (fields.domain ?? null) : undefined,
     attributes: a,
-  }, dedupeAccessContext(userId, old.workspaceId, access))
+  }, dedupeAccessContext(userId, old.workspaceId, access), transactionClient)
   if (!e) return null
   return companyFromEntity(e)
 }
@@ -651,8 +659,15 @@ export async function updateContact(
   fields: ContactUpdateFields,
   entityLinks?: EntityLinksStore,
   access?: AccessContext,
+  transactionClient?: pg.PoolClient,
 ): Promise<ContactRecord | null> {
-  const old = access ? await getEntityById(access, id) : await getEntityByIdSystem(userId, id)
+  const old = transactionClient
+    ? access
+      ? await getEntityById(access, id, {}, transactionClient)
+      : await getEntityByIdSystem(userId, id, {}, transactionClient)
+    : access
+      ? await getEntityById(access, id)
+      : await getEntityByIdSystem(userId, id)
   if (!old || old.kind !== 'person') return null
   if (fields.companyId !== undefined) {
     await assertSameWorkspace(fields.companyId, old.workspaceId, 'company_id')
@@ -668,7 +683,7 @@ export async function updateContact(
     displayName: fields.name,
     canonicalId: fields.email !== undefined ? (fields.email ?? null) : undefined,
     attributes: a,
-  }, dedupeAccessContext(userId, old.workspaceId, access))
+  }, dedupeAccessContext(userId, old.workspaceId, access), transactionClient)
   if (!e) return null
   if (fields.companyId !== undefined) {
     repointGraphEdge(entityLinks, userId, {
@@ -838,9 +853,16 @@ export async function updateDeal(
   fields: DealUpdateFields,
   entityLinks?: EntityLinksStore,
   access?: AccessContext,
+  transactionClient?: pg.PoolClient,
 ): Promise<DealRecord | null> {
   assertNonNegativeAmount(fields.amount)
-  const old = access ? await getEntityById(access, id) : await getEntityByIdSystem(userId, id)
+  const old = transactionClient
+    ? access
+      ? await getEntityById(access, id, {}, transactionClient)
+      : await getEntityByIdSystem(userId, id, {}, transactionClient)
+    : access
+      ? await getEntityById(access, id)
+      : await getEntityByIdSystem(userId, id)
   if (!old || old.kind !== 'deal') return null
   if (fields.companyId !== undefined) await assertSameWorkspace(fields.companyId, old.workspaceId, 'company_id')
   if (fields.contactId !== undefined) {
@@ -857,7 +879,11 @@ export async function updateDeal(
   if (fields.externalRef !== undefined) a.external_ref = fields.externalRef
 
   const e = await updateEntity(
-    userId, id, { attributes: a }, dedupeAccessContext(userId, old.workspaceId, access),
+    userId,
+    id,
+    { attributes: a },
+    dedupeAccessContext(userId, old.workspaceId, access),
+    transactionClient,
   )
   if (!e) return null
 
@@ -885,13 +911,24 @@ export async function setDealStage(
   id: string,
   stage: DealStage,
   access?: AccessContext,
+  transactionClient?: pg.PoolClient,
 ): Promise<DealRecord | null> {
   assertValidStage(stage)
-  const old = access ? await getEntityById(access, id) : await getEntityByIdSystem(userId, id)
+  const old = transactionClient
+    ? access
+      ? await getEntityById(access, id, {}, transactionClient)
+      : await getEntityByIdSystem(userId, id, {}, transactionClient)
+    : access
+      ? await getEntityById(access, id)
+      : await getEntityByIdSystem(userId, id)
   if (!old || old.kind !== 'deal') return null
   const a = { ...old.attributes, stage }
   const e = await updateEntity(
-    userId, id, { attributes: a }, dedupeAccessContext(userId, old.workspaceId, access),
+    userId,
+    id,
+    { attributes: a },
+    dedupeAccessContext(userId, old.workspaceId, access),
+    transactionClient,
   )
   if (!e) return null
   return dealFromEntity(e)

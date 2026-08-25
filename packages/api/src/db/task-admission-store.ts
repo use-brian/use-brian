@@ -47,6 +47,7 @@ import {
 } from '@use-brian/core'
 import { applyRLSGucs, getAppPool, query, rollbackAndRelease } from './client.js'
 import { appendDecisionEvent } from './decision-event-store.js'
+import { appendBrainVerification } from './brain-inbox-store.js'
 import { abandonGoalsForHostTaskSystem } from './goals.js'
 
 // ── Row mappers ──────────────────────────────────────────────────────────────
@@ -403,6 +404,8 @@ export async function rejectTask(input: {
   reason: string
   /** Explicit Tasks-UI consent to create/reuse an active narrow deny rule. */
   createRule?: boolean
+  /** Brain review compatibility audit, committed with the rejection. */
+  recordBrainVerification?: boolean
 }): Promise<{
   title: string
   tombstoneId: string
@@ -537,6 +540,16 @@ export async function rejectTask(input: {
         reasonStoredOn: 'task_tombstone',
       },
     }, client)
+
+    if (input.recordBrainVerification) {
+      await appendBrainVerification({
+        targetKind: 'task',
+        targetId: input.taskId,
+        workspaceId: input.workspaceId,
+        verifiedByUserId: input.userId,
+        action: 'delete',
+      }, client)
+    }
 
     await client.query('COMMIT')
   } finally {

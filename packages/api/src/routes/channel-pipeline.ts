@@ -32,7 +32,7 @@ import type { FilesApi, OutboundAttachment, RealtimeThreadTarget } from '@use-br
 import { resolveBrandContext } from '../brand/prompt-context.js'
 import type { IncomingMessage, OutgoingDocument } from '@use-brian/channels'
 import { parseFollowUps, resolveCharter } from '@use-brian/shared'
-import { listActivePlaybookRules } from '../db/playbook-store.js'
+import { loadDecisionPlaybookContext } from '../decision-learning/playbook-context.js'
 import { runProactiveCompaction } from './proactive-compaction.js'
 import { notifyBrainWriteIfMatch } from '../brain-stream/notify.js'
 import { recordOverheadUsage } from './_overhead-usage.js'
@@ -1514,16 +1514,20 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     }
   }
 
-  // Owner-admitted playbook rules → `## Playbook` in the charter block
-  // (growth loop Phase 3). A fetch error omits the section, never blocks.
-  let playbookRules: string[] = []
-  if (!externalGuest) {
-    try {
-      playbookRules = await listActivePlaybookRules(assistant.id)
-    } catch (err) {
-      console.error(`[${channelType}] playbook rules fetch failed:`, err)
-    }
-  }
+  const decisionPlaybookContext = await loadDecisionPlaybookContext({
+    workspaceId: assistant.workspaceId ?? null,
+    assistantId: assistant.id,
+    actorUserId: userId,
+    externalPrincipal: externalGuest,
+    operationKind: 'channel_turn',
+    operationId: userMessageRow.id,
+    sourceKind: 'session_message',
+    sourceId: userMessageRow.id,
+    channelType,
+    analytics,
+    logLabel: channelType,
+  })
+  const playbookRules = decisionPlaybookContext.playbookRules
 
   // Provenance split: hidden application metadata remains in the trusted
   // system channel. Only the replied-to quote — content the user can see in

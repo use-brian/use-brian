@@ -9,6 +9,7 @@ import type {
   WorkspaceFileMetaPatch,
   WorkspaceFileSupersedePatch,
 } from '@use-brian/core'
+import type pg from 'pg'
 import { buildAccessPredicate } from './access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
 import { getAppPool, query, queryWithRLS, rollbackAndRelease } from './client.js'
@@ -277,6 +278,7 @@ export async function updateWorkspaceFileMeta(
   workspaceId: string,
   id: string,
   patch: WorkspaceFileMetaPatch,
+  transactionClient?: pg.PoolClient,
 ): Promise<WorkspaceFile | null> {
   // Metadata-only edits stay in-place per corrections.md §D.7 — only
   // content (substantive) edits route through `supersedeWorkspaceFile`.
@@ -297,23 +299,22 @@ export async function updateWorkspaceFileMeta(
     // No-op short-circuit — read the current row through the write
     // path's RLS-only gate (this is the write surface; per-viewer
     // projection lives on the read entrypoint).
-    const cur = await queryWithRLS<FileRow>(
-      userId,
-      `SELECT ${FULL_SELECT} FROM workspace_files
-       WHERE id = $1 AND workspace_id = $2 AND valid_to IS NULL`,
-      [id, workspaceId],
-    )
+    const sql = `SELECT ${FULL_SELECT} FROM workspace_files
+       WHERE id = $1 AND workspace_id = $2 AND valid_to IS NULL`
+    const values = [id, workspaceId]
+    const cur = transactionClient
+      ? await transactionClient.query<FileRow>(sql, values)
+      : await queryWithRLS<FileRow>(userId, sql, values)
     return cur.rows.length === 0 ? null : toRecord(cur.rows[0])
   }
 
   values.push(id, workspaceId)
-  const result = await queryWithRLS<FileRow>(
-    userId,
-    `UPDATE workspace_files SET ${sets.join(', ')}
+  const sql = `UPDATE workspace_files SET ${sets.join(', ')}
      WHERE id = $${idx} AND workspace_id = $${idx + 1} AND valid_to IS NULL
-     RETURNING ${FULL_SELECT}`,
-    values,
-  )
+     RETURNING ${FULL_SELECT}`
+  const result = transactionClient
+    ? await transactionClient.query<FileRow>(sql, values)
+    : await queryWithRLS<FileRow>(userId, sql, values)
   if (result.rows.length === 0) return null
 
   // Lifecycle propagation (large-content-artifacts §Phase 2.1): file_segments
@@ -333,7 +334,14 @@ export async function updateWorkspaceFileMeta(
       segValues.push(patch.tags)
       segSets.push(`tags = $${segValues.length}`)
     }
-    await query(`UPDATE file_segments SET ${segSets.join(', ')} WHERE file_id = $1`, segValues)
+    if (transactionClient) {
+      await transactionClient.query(
+        `UPDATE file_segments SET ${segSets.join(', ')} WHERE file_id = $1`,
+        segValues,
+      )
+    } else {
+      await query(`UPDATE file_segments SET ${segSets.join(', ')} WHERE file_id = $1`, segValues)
+    }
   }
   return toRecord(result.rows[0])
 }

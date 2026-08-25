@@ -70,7 +70,7 @@ import { notifyBrainWriteIfMatch, BRAIN_WRITE_TOOL_SIGNALS } from '../brain-stre
 import { runProactiveCompaction } from '../routes/proactive-compaction.js'
 import { registerSchedulerResolver, unregisterSchedulerResolver } from '../scheduling/confirmation-registry.js'
 import { sendConfirmationPrompt } from '../scheduling/confirmation-prompt.js'
-import { findAssistantById, findUserById } from '../db/users.js'
+import { findAssistantById, findUserById, resolveAssistantAccess } from '../db/users.js'
 import { getConnectorUserId, resolveReadCeilingsSystem } from '../db/workspace-store.js'
 import { billingPartyForAssistant } from '../billing-party.js'
 import { recordExternalCostFromMeta } from '../billing-external.js'
@@ -88,6 +88,8 @@ import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 import type { ChatEpisodeIngestor } from '../ingest-port.js'
 import type { InjectExtraTools, ResolveAppSoul } from '../tool-injection-port.js'
 import type { ApiKeyStore } from '../db/api-key-store.js'
+import { loadDecisionPlaybookContext } from '../decision-learning/playbook-context.js'
+import { renderCharterBlock } from '@use-brian/shared'
 import {
   applyPublicResearchToolCeiling,
   resolveApiKeyClientPrincipal,
@@ -383,6 +385,17 @@ export type CalleeQueryParams = {
    * reads on the next run. Absent for ordinary askAssistant consults.
    */
   workflowRunId?: string
+  decisionContext?: {
+    actorUserId: string | null
+    operationId: string
+    externalPrincipal: boolean
+    applicability?: {
+      kind: 'email' | 'tool'
+      key?: string | null
+    }
+  }
+  /** In-process only: captures the application id out of band from model text. */
+  onDecisionApplication?: (applicationId: string) => void
 }
 
 export type CalleeExecutor = (params: CalleeQueryParams) => Promise<string>
@@ -1384,10 +1397,46 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       }
     }
 
+    let decisionPlaybookBlock = ''
+    if (params.decisionContext) {
+      let scopedActorUserId: string | null = null
+      if (!params.decisionContext.externalPrincipal && params.decisionContext.actorUserId) {
+        try {
+          const access = await resolveAssistantAccess(
+            params.decisionContext.actorUserId,
+            calleeAssistant.id,
+          )
+          if (access) scopedActorUserId = params.decisionContext.actorUserId
+          else console.error('[inter-assistant] decision playbook actor is not a callee member')
+        } catch (err) {
+          console.error('[inter-assistant] decision playbook actor resolution failed:', err)
+        }
+      }
+      const playbook = await loadDecisionPlaybookContext({
+        workspaceId: calleeAssistant.workspaceId ?? null,
+        assistantId: calleeAssistant.id,
+        actorUserId: scopedActorUserId ?? params.decisionContext.actorUserId,
+        externalPrincipal: params.decisionContext.externalPrincipal || scopedActorUserId === null,
+        operationKind: 'workflow_assistant_call',
+        operationId: params.decisionContext.operationId,
+        applicability: params.decisionContext.applicability,
+        sourceKind: 'workflow_step',
+        sourceId: params.decisionContext.operationId,
+        channelType: 'workflow',
+        analytics: options.analytics,
+        logLabel: 'inter-assistant',
+      })
+      if (playbook.decisionApplicationId) {
+        params.onDecisionApplication?.(playbook.decisionApplicationId)
+      }
+      const rendered = renderCharterBlock({}, { playbookRules: playbook.playbookRules })
+      if (rendered) decisionPlaybookBlock = `\n\n${rendered}`
+    }
+
     const externalClientGuardBlock = externalClient
       ? `\n\n## External client boundary\nThis automated draft is running as one isolated external client. Use only the inbound request and the client-scoped context and tools available in this turn. Do not infer or request another client identity, do not claim access to workspace-wide context, and do not attempt to deliver or send the result. The final text is an internal draft for workspace review.`
       : ''
-    const fullSystemPrompt = `${systemPrompt}${externalClientGuardBlock}${docAnchorBlock}${priorRunMemoryBlock}${workflowGuardBlock}${recordCreationGuardBlock}${automatedToolPolicyBlock}${unavailableBlock}${skillPromptFragment}${blueprintPromptFragment}${deliveryConversationBlock}\n\n# Context\nCurrent date and time: ${currentDateTime}\nTimezone: ${calleeOwner.timezone}\n\n${memoryContext}`
+    const fullSystemPrompt = `${systemPrompt}${decisionPlaybookBlock}${externalClientGuardBlock}${docAnchorBlock}${priorRunMemoryBlock}${workflowGuardBlock}${recordCreationGuardBlock}${automatedToolPolicyBlock}${unavailableBlock}${skillPromptFragment}${blueprintPromptFragment}${deliveryConversationBlock}\n\n# Context\nCurrent date and time: ${currentDateTime}\nTimezone: ${calleeOwner.timezone}\n\n${memoryContext}`
     // 6. Build messages and run the query loop.
     //
     // Persist the user turn first, then build the message list. A durable
