@@ -211,6 +211,7 @@ import { brainRoutes } from './routes/brain.js'
 import { brainInboxRoutes } from './routes/brain-inbox.js'
 import { crmRoutes } from './routes/crm.js'
 import { getCrmEmailReviewContext } from './db/crm-r2.js'
+import { bootstrapHistoricalCrmIdentityState } from './db/crm-identity-store.js'
 import { resolveWorkspaceViewpoint } from './db/workspace-viewpoint.js'
 import { createBrainEntryMutator } from './brain-entry-mutation.js'
 import { taskGuardrailRoutes } from './routes/task-guardrails.js'
@@ -6268,6 +6269,22 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // ════════════════════════════════════════════════════════════════
   // Open background workers
   // ════════════════════════════════════════════════════════════════
+  if (runWorkers) {
+    try {
+      const bootstrapped = await bootstrapHistoricalCrmIdentityState()
+      if (bootstrapped.bindingsCreated > 0 || bootstrapped.separationsCreated > 0
+        || bootstrapped.collisionsSkipped > 0) {
+        console.log(
+          `[decision-learning] CRM bootstrap: bindings=${bootstrapped.bindingsCreated} separations=${bootstrapped.separationsCreated} collisions=${bootstrapped.collisionsSkipped}`,
+        )
+      }
+    } catch (err) {
+      console.error(
+        '[decision-learning] CRM bootstrap failed:',
+        err instanceof Error ? err.message : err,
+      )
+    }
+  }
   const jobExecutor = createJobExecutor({
     jobStore,
     analytics,

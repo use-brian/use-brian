@@ -436,9 +436,20 @@ export async function deleteCrmView(workspaceId: string, viewId: string): Promis
 
 export type CrmDuplicateGroup = {
   kind: "person" | "company" | "deal";
-  reason: "email" | "domain" | "name";
+  reason: "email" | "phone" | "domain" | "name" | "alias";
   value: string;
   records: Array<{ id: string; name: string }>;
+};
+
+export type CrmSeparation = {
+  id: string;
+  workspaceId: string;
+  leftEntityId: string;
+  rightEntityId: string;
+  leftName: string;
+  rightName: string;
+  reason: string | null;
+  createdAt: string;
 };
 
 export async function fetchCrmDuplicates(workspaceId: string): Promise<CrmDuplicateGroup[]> {
@@ -446,6 +457,35 @@ export async function fetchCrmDuplicates(workspaceId: string): Promise<CrmDuplic
     `/api/crm/${encodeURIComponent(workspaceId)}/duplicates`,
   );
   return body.groups;
+}
+
+export async function fetchCrmSeparations(workspaceId: string): Promise<CrmSeparation[]> {
+  const body = await jsonRequest<{ separations: CrmSeparation[] }>(
+    `/api/crm/${encodeURIComponent(workspaceId)}/separations`,
+  );
+  return body.separations;
+}
+
+export function keepCrmRecordsSeparate(
+  workspaceId: string,
+  leftEntityId: string,
+  rightEntityId: string,
+): Promise<{ separation: CrmSeparation; idempotent: boolean }> {
+  return jsonRequest(`/api/crm/${encodeURIComponent(workspaceId)}/separations`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ leftEntityId, rightEntityId }),
+  });
+}
+
+export async function reviewCrmSeparationAgain(
+  workspaceId: string,
+  separationId: string,
+): Promise<void> {
+  await jsonRequest(
+    `/api/crm/${encodeURIComponent(workspaceId)}/separations/${encodeURIComponent(separationId)}/review-again`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
+  );
 }
 
 export function mergeCrmRecords(

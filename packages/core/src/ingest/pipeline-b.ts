@@ -55,6 +55,7 @@ import {
   type EntityStore,
 } from '../entities/types.js'
 import { resolveEntity } from '../entities/resolver.js'
+import { stableExternalIdentityFromCrmRef } from '../decision-learning/types.js'
 import type { MemoryRecord, MemoryStore } from '../memory/types.js'
 import type { TaskStore } from '../tasks/types.js'
 import {
@@ -2304,6 +2305,34 @@ async function writeEntity(
   deps: PipelineBDeps,
   actorUserId: string,
 ): Promise<EntityRecord | null> {
+  // Person mutation identity is separate from retrieval. Names, email,
+  // aliases, fuzzy scores, and LLM guesses may rank candidates but cannot
+  // select a write target. A source-adapter verified provider subject is the
+  // sole automatic authority; otherwise a distinct person is created.
+  if (ex.kind === 'person') {
+    const email = emailShape(ex.canonical_id) ? ex.canonical_id : null
+    const externalRef = matchPersonExternalRef(episode.personExternalRefs, ex.display_name)
+    const contact = await deps.crm.createContact({
+      userId: actorUserId,
+      workspaceId: episode.workspaceId,
+      name: ex.display_name,
+      email,
+      ...(externalRef ? {
+        externalRef,
+        stableIdentity: stableExternalIdentityFromCrmRef(externalRef) ?? undefined,
+      } : {}),
+      source: 'extracted',
+      sourceEpisodeId: episode.id,
+      createdByAssistantId: episode.createdByAssistantId,
+    })
+    return deps.entities.getById({
+      workspaceId: episode.workspaceId,
+      userId: actorUserId,
+      assistantId: episode.assistantId ?? '',
+      assistantKind: 'primary',
+    }, contact.id)
+  }
+
   // Dedup by canonical_id when present — skip recreating an existing entity.
   // Pipeline-B is a system worker (Privileged-service exception): it
   // must see entities across every viewer in the workspace so the
@@ -2434,31 +2463,6 @@ async function writeEntity(
       }
       // 'ambiguous' / 'no_match' / non-fuzzy-tier fall through to create.
     }
-  }
-
-  if (ex.kind === 'person') {
-    const email = emailShape(ex.canonical_id) ? ex.canonical_id : null
-    // Stamp the platform id (e.g. Slack user id) the source adapter resolved
-    // for this name as the contact's external_ref — metadata, not the name.
-    const externalRef = matchPersonExternalRef(episode.personExternalRefs, ex.display_name)
-    await deps.crm.createContact({
-      userId: actorUserId,
-      workspaceId: episode.workspaceId,
-      name: ex.display_name,
-      email,
-      ...(externalRef ? { externalRef } : {}),
-      // Extraction provenance — previously omitted, so extracted contacts
-      // landed source='user' with no back-edge (2026-07-10 source audit).
-      // Fresh inserts only; the upsert/merge path keeps the existing row's.
-      source: 'extracted',
-      sourceEpisodeId: episode.id,
-      createdByAssistantId: episode.createdByAssistantId,
-    })
-    // CRM wrapper writes a single `entities` row (kind='person', typed
-    // fields in `attributes`; entity.canonical_id = email when present).
-    // It returns the ContactRecord projection, so look up the entity row
-    // here to give the edge loop an entity id.
-    return resolveCrmEntity(deps, actorUserId, episode.workspaceId, ex.display_name, email, 'person')
   }
 
   if (ex.kind === 'company') {

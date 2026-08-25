@@ -17,6 +17,7 @@
 
 import type { AccessContext } from '../security/access-context.js'
 import type { Sensitivity } from '../security/sensitivity.js'
+import type { StableExternalIdentity } from '../decision-learning/types.js'
 
 export const DEAL_STAGES = ['lead', 'qualified', 'proposal', 'negotiation', 'won', 'lost'] as const
 export type DealStage = (typeof DEAL_STAGES)[number]
@@ -199,12 +200,7 @@ export type CrmStore = {
     sourceSessionId?: string | null
     /** The assistant that mediated the write. */
     createdByAssistantId?: string | null
-    /**
-     * Viewer projection for the upsert-dedupe scan: candidates are selected
-     * under this access context so the write never merges into a row the
-     * caller cannot read back (read-your-write). Omitted → the store falls
-     * back to the user-axis projection derived from `userId`.
-     */
+    /** Viewer projection for access-scoped company deduplication. */
     access?: AccessContext
   }): Promise<CompanyRecord>
 
@@ -236,6 +232,12 @@ export type CrmStore = {
     companyId?: string | null
     tags?: string[]
     externalRef?: CrmExternalRef
+    /**
+     * Adapter-verified stable provider subject. This is the only automatic
+     * person write authority; free-form `externalRef`, email, phone, name,
+     * aliases, and fuzzy matches remain metadata/candidates.
+     */
+    stableIdentity?: StableExternalIdentity
     /** Fresh-insert sensitivity tier; omitted → store default (`internal`). Research saves pass `public`. */
     sensitivity?: Sensitivity
     /** Compartment set (MLS category axis) stamped on the fresh entity + specialization pair. Default '{}'. */
@@ -248,12 +250,7 @@ export type CrmStore = {
     sourceSessionId?: string | null
     /** The assistant that mediated the write. */
     createdByAssistantId?: string | null
-    /**
-     * Viewer projection for the upsert-dedupe scan: candidates are selected
-     * under this access context so the write never merges into a row the
-     * caller cannot read back (read-your-write). Omitted → the store falls
-     * back to the user-axis projection derived from `userId`.
-     */
+    /** Viewer projection used when a stable binding resolves an existing row. */
     access?: AccessContext
   }): Promise<ContactRecord>
 

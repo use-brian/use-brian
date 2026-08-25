@@ -32,6 +32,27 @@ export const stableExternalIdentitySchema = z.object({
 
 export type StableExternalIdentity = z.infer<typeof stableExternalIdentitySchema>
 
+/**
+ * Convert a provider-owned CRM reference into mutation-grade identity.
+ *
+ * The allowlist is deliberately narrow. A generic `{provider,id}` object is
+ * only metadata: without the provider installation namespace, the same
+ * subject token can name different people. Extend this switch when an adapter
+ * has a documented, stable subject namespace.
+ */
+export function stableExternalIdentityFromCrmRef(
+  input: unknown,
+): StableExternalIdentity | null {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return null
+  const ref = input as Record<string, unknown>
+  const provider = typeof ref.provider === 'string' ? ref.provider.trim().toLowerCase() : ''
+  if (provider !== 'slack') return null
+  const providerInstanceKey = typeof ref.team_id === 'string' ? ref.team_id.trim() : ''
+  const subjectId = typeof ref.id === 'string' ? ref.id.trim() : ''
+  const parsed = stableExternalIdentitySchema.safeParse({ provider, providerInstanceKey, subjectId })
+  return parsed.success ? parsed.data : null
+}
+
 const baseDecisionEventShape = {
   idempotencyKey: z.string().trim().min(1).max(512),
   workspaceId: z.string().uuid().nullable(),

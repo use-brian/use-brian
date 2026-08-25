@@ -121,6 +121,7 @@ export {
   decisionSensitivitySchema,
   decisionVisibilitySchema,
   parseDecisionEventWrite,
+  stableExternalIdentityFromCrmRef,
   stableExternalIdentitySchema,
   type DecisionDeclaredScope,
   type DecisionEvent,

@@ -7,12 +7,25 @@ import type {
   EntityLinksStore,
   EntityRecord,
   Sensitivity,
+  StableExternalIdentity,
 } from '@use-brian/core'
 import { buildAccessPredicate } from './access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
 import { query, queryGated, queryWithRLS } from './client.js'
 import { emitCrmRelationEdge, emitEdgeFireAndForget, superseedCrmRelationEdge } from './edge-hooks.js'
 import { createEntity, getEntityById, getEntityByIdSystem, updateEntity } from './entities-store.js'
+import {
+  bindImportedCrmIdentity,
+  resolveCrmPersonIdentity,
+} from './crm-identity-store.js'
+
+export class CrmPersonIdentityConflictError extends Error {
+  readonly code = 'person_identity_conflict'
+  constructor(readonly entityIds: readonly string[]) {
+    super('The stable provider identity is bound ambiguously; review duplicates before writing')
+    this.name = 'CrmPersonIdentityConflictError'
+  }
+}
 
 /**
  * CRM SQL layer — post CRM→entity unification
@@ -75,6 +88,31 @@ async function assertSameWorkspace(
   const ws = r.rows[0]?.workspaceId
   if (ws && ws !== workspaceId) {
     throw new Error(`${label} must reference a row in the same workspace`)
+  }
+}
+
+async function assertCrmContactReference(
+  refId: string | null | undefined,
+  workspaceId: string,
+  label: string,
+): Promise<void> {
+  if (!refId) return
+  const result = await query<{
+    workspaceId: string | null
+    kind: string
+    isSelf: boolean
+  }>(
+    `SELECT workspace_id AS "workspaceId", kind,
+            COALESCE((attributes->>'self')::boolean, false) AS "isSelf"
+       FROM entities WHERE id = $1 AND valid_to IS NULL`,
+    [refId],
+  )
+  const row = result.rows[0]
+  if (row?.workspaceId && row.workspaceId !== workspaceId) {
+    throw new Error(`${label} must reference a row in the same workspace`)
+  }
+  if (row && (row.kind !== 'person' || row.isSelf)) {
+    throw new Error(`${label} must reference a non-self CRM person`)
   }
 }
 
@@ -412,6 +450,7 @@ export async function createContact(
     companyId?: string | null
     tags?: string[]
     externalRef?: CrmExternalRef
+    stableIdentity?: StableExternalIdentity
     sensitivity?: Sensitivity
     compartments?: string[]
     source?: 'user' | 'extracted'
@@ -428,41 +467,31 @@ export async function createContact(
   assertAuthorshipPresent('createContact', userId)
   await assertSameWorkspace(params.companyId, params.workspaceId, 'company_id')
 
-  // Upsert-by-email (high confidence) then by name, scoped to rows the
-  // caller can read (see dedupeAccessContext) — an invisible same-name
-  // contact belonging to another principal is NOT a merge target; the
-  // caller gets their own visible row instead. Self entities
-  // (`attributes.self=true`) are excluded — you are not your own contact.
-  const ap = buildAccessPredicate(
-    dedupeAccessContext(userId, params.workspaceId, params.access),
-    { startIdx: 4 },
-  )
-  const existing = await queryWithRLS<{ id: string }>(
-    userId,
-    `(SELECT id, 1 AS pri FROM entities
-       WHERE workspace_id = $1 AND kind = 'person'
-         AND $2::text IS NOT NULL AND lower(canonical_id) = lower($2)
-         AND valid_to IS NULL AND retracted_at IS NULL
-         AND NOT COALESCE((attributes->>'self')::boolean, false)
-         AND ${ap.sql}
-       ORDER BY created_at ASC LIMIT 1)
-     UNION ALL
-     (SELECT id, 2 AS pri FROM entities
-       WHERE workspace_id = $1 AND kind = 'person'
-         AND lower(display_name) = lower($3)
-         AND valid_to IS NULL AND retracted_at IS NULL
-         AND NOT COALESCE((attributes->>'self')::boolean, false)
-         AND ${ap.sql}
-       ORDER BY created_at ASC LIMIT 1)
-     ORDER BY pri ASC LIMIT 1`,
-    [params.workspaceId, params.email ?? null, params.name, ...ap.params],
-  )
-  if (existing.rows[0]) {
-    const merged = await mergeContactFields(userId, existing.rows[0].id, {
-      email: params.email ?? null, phone: params.phone ?? null,
-      companyId: params.companyId ?? null, tags: params.tags, externalRef: params.externalRef,
-    }, entityLinks)
-    if (merged) return merged
+  // Person writes never resolve by name/email/phone/alias/fuzzy evidence.
+  // Only an adapter-verified stable provider identity may select an existing
+  // target. A failed binding read degrades to a fresh person, never a weak-key
+  // upsert (duplicates are recoverable; identity corruption is not).
+  if (params.stableIdentity) {
+    try {
+      const resolution = await resolveCrmPersonIdentity(params.workspaceId, params.stableIdentity)
+      if (resolution.status === 'conflict') {
+        throw new CrmPersonIdentityConflictError(resolution.entityIds)
+      }
+      if (resolution.status === 'resolved') {
+        const merged = await mergeContactFields(userId, resolution.binding.entityId, {
+          email: params.email ?? null,
+          phone: params.phone ?? null,
+          companyId: params.companyId ?? null,
+          tags: params.tags,
+          externalRef: params.externalRef,
+        }, entityLinks, params.access)
+        if (merged) return merged
+        throw new CrmPersonIdentityConflictError([resolution.binding.entityId])
+      }
+    } catch (err) {
+      if (err instanceof CrmPersonIdentityConflictError) throw err
+      console.error('[crm] stable person identity lookup unavailable; creating a distinct record')
+    }
   }
 
   const entity = await createEntity({
@@ -493,6 +522,37 @@ export async function createContact(
       })
     }
   }
+  if (params.stableIdentity) {
+    try {
+      const binding = await bindImportedCrmIdentity({
+        workspaceId: params.workspaceId,
+        entityId: entity.id,
+        identity: params.stableIdentity,
+        sensitivity: params.sensitivity ?? 'internal',
+      })
+      if (binding.status === 'conflict') {
+        // A concurrent writer won the namespace lock after our initial read.
+        // Close the redundant fresh row and return the authoritative target.
+        await query(
+          `UPDATE entities SET valid_to = now(), superseded_by = $2, updated_at = now()
+            WHERE id = $1 AND workspace_id = $3 AND valid_to IS NULL`,
+          [entity.id, binding.entityId, params.workspaceId],
+        )
+        const authoritative = await mergeContactFields(userId, binding.entityId, {
+          email: params.email ?? null,
+          phone: params.phone ?? null,
+          companyId: params.companyId ?? null,
+          tags: params.tags,
+          externalRef: params.externalRef,
+        }, entityLinks, params.access)
+        if (authoritative) return authoritative
+        throw new CrmPersonIdentityConflictError([binding.entityId])
+      }
+    } catch (err) {
+      if (err instanceof CrmPersonIdentityConflictError) throw err
+      console.error('[crm] stable person identity binding unavailable; retained a distinct record')
+    }
+  }
   return contactFromEntity(entity)
 }
 
@@ -504,8 +564,9 @@ async function mergeContactFields(
     tags?: string[]; externalRef?: CrmExternalRef
   },
   entityLinks?: EntityLinksStore,
+  access?: AccessContext,
 ): Promise<ContactRecord | null> {
-  const cur = await getContactByIdSystem(userId, id)
+  const cur = access ? await getContactById(access, id) : await getContactByIdSystem(userId, id)
   if (!cur) return null
   const fields: ContactUpdateFields = {}
   if (incoming.email && incoming.email !== cur.email) fields.email = incoming.email
@@ -519,7 +580,7 @@ async function mergeContactFields(
     fields.externalRef = { ...cur.externalRef, ...incoming.externalRef }
   }
   if (Object.keys(fields).length === 0) return cur
-  return updateContact(userId, id, fields, entityLinks)
+  return updateContact(userId, id, fields, entityLinks, access)
 }
 
 async function getContactByIdSystem(userId: string, id: string): Promise<ContactRecord | null> {
@@ -680,7 +741,7 @@ export async function createDeal(
   assertAuthorshipPresent('createDeal', userId)
   assertValidStage(params.stage)
   assertNonNegativeAmount(params.amount)
-  await assertSameWorkspace(params.contactId, params.workspaceId, 'contact_id')
+  await assertCrmContactReference(params.contactId, params.workspaceId, 'contact_id')
   await assertSameWorkspace(params.companyId, params.workspaceId, 'company_id')
 
   let displayName = 'Deal'
@@ -782,7 +843,9 @@ export async function updateDeal(
   const old = access ? await getEntityById(access, id) : await getEntityByIdSystem(userId, id)
   if (!old || old.kind !== 'deal') return null
   if (fields.companyId !== undefined) await assertSameWorkspace(fields.companyId, old.workspaceId, 'company_id')
-  if (fields.contactId !== undefined) await assertSameWorkspace(fields.contactId, old.workspaceId, 'contact_id')
+  if (fields.contactId !== undefined) {
+    await assertCrmContactReference(fields.contactId, old.workspaceId, 'contact_id')
+  }
 
   const a = { ...old.attributes }
   if (fields.contactId !== undefined) { if (fields.contactId) a.contact_id = fields.contactId; else delete a.contact_id }

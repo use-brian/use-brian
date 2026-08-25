@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   DECISION_EVENT_KINDS,
   parseDecisionEventWrite,
+  stableExternalIdentityFromCrmRef,
 } from '../types.js'
 
 const UUID = {
@@ -108,5 +109,16 @@ describe('[COMP:brain/decision-event-schema] typed decision event registry', () 
         bindingNamespaces: [{ provider: 'slack', subjectId: 'U012345' }],
       },
     })).toThrow()
+  })
+
+  it('promotes only provider-complete Slack references to stable identity', () => {
+    expect(stableExternalIdentityFromCrmRef({
+      provider: 'Slack', id: 'U012345', team_id: 'T000001', url: 'https://example.test/profile',
+    })).toEqual({
+      provider: 'slack', providerInstanceKey: 'T000001', subjectId: 'U012345',
+    })
+    expect(stableExternalIdentityFromCrmRef({ provider: 'slack', id: 'U012345' })).toBeNull()
+    expect(stableExternalIdentityFromCrmRef({ provider: 'email', id: 'person@example.test' })).toBeNull()
+    expect(stableExternalIdentityFromCrmRef({ provider: 'unknown', id: '42', team_id: 'tenant' })).toBeNull()
   })
 })

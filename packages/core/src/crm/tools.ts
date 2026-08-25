@@ -304,45 +304,6 @@ function crmSessionAnchor(
   return context.sessionId
 }
 
-// ── Dedupe-merge visibility (Tier B, write-gating-decision-brief.md §3) ──
-//
-// saveContact / saveCompany upsert: the store silently dedupe-merges into
-// an existing active row (same email/name) instead of inserting. The tool
-// result must SURFACE that branch so a merge into the wrong record is
-// visible in the turn (no gate — supersede is chain-restorable, but a
-// SILENT merge is the risk). `CrmStore.createContact/createCompany` return
-// a plain record with no merged flag, so we detect the merge tool-side
-// without a store-contract change: snapshot the exact-identity candidate
-// ids the store would dedupe against BEFORE the save (same access
-// projection), then check whether the saved row's id was pre-existing.
-// A fresh insert always mints a new id, so id ∈ snapshot ⇒ merged.
-
-/** Ids of active contacts whose email OR name exactly matches (case-insensitive) — the store's dedupe keys. */
-async function existingContactMatchIds(
-  store: CrmStore,
-  ctx: AccessContext,
-  identity: { name: string; email?: string | null },
-): Promise<Set<string>> {
-  const ids = new Set<string>()
-  const email = identity.email?.trim().toLowerCase()
-  const name = identity.name.trim().toLowerCase()
-  try {
-    // listContacts filters name/email by ILIKE substring — query the exact
-    // term, then keep only exact (case-insensitive) matches on the field the
-    // store dedupes on (email first, else name).
-    if (email) {
-      const byEmail = await store.listContacts(ctx, { query: identity.email!, limit: 100 })
-      for (const r of byEmail) if ((r.email ?? '').trim().toLowerCase() === email) ids.add(r.id)
-    }
-    const byName = await store.listContacts(ctx, { query: identity.name, limit: 100 })
-    for (const r of byName) if (r.name.trim().toLowerCase() === name) ids.add(r.id)
-  } catch {
-    // Best-effort: a failed pre-scan just means we can't prove a merge, so
-    // the result falls back to "Created" — never blocks the save.
-  }
-  return ids
-}
-
 /** Ids of active companies whose name exactly matches (case-insensitive) — the store's dedupe key. */
 async function existingCompanyMatchIds(
   store: CrmStore,
@@ -565,7 +526,7 @@ export function createCrmTools(
     name: 'saveContact',
     requiresCapability: 'crm',
     description:
-      'Upsert a contact in the current workspace. Dedupes on email first (case-insensitive), falling back to display name — an existing active contact with the same email or name is superseded with merged tags (union), non-empty phone / email / company_id (incoming wins), and external_ref (shallow merge). Dedupe and reads are scoped to entities visible to you: a same-name contact another member keeps private is never merged into — you get your own row. Use updateContact when you have an explicit id and need to patch other fields. ' +
+      'Create a new contact in the current workspace. A name, email, phone, alias, or fuzzy match never selects an existing person: people can legitimately share them. Use updateContact only when you have an explicit contact id. Provider adapters may resolve an existing person through a server-verified stable external identity, but free-form external_ref is metadata and never write authority. ' +
       'When asked to save a contact, call saveContact FIRST with whatever fields you have — name and email alone are enough; company_id is optional. Never let a company lookup or company creation block the contact save: save the contact, then link the company afterwards (via updateContact) once its id is known. ' +
       'If you do pass company_id, it must be an existing company in this workspace (use listCompanies to confirm); cross-workspace links are rejected by the DB. ' +
       'Pass `links` to record relationship edges from this contact (e.g. cofounder_of a company, attended an event, mentioned in a deal). Use the `entityId` returned from prior saveCompany / saveContact / saveDeal / createEntity calls (or read from list*).',
@@ -603,13 +564,6 @@ export function createCrmTools(
         clearance: context.clearance,
         compartments: context.compartments,
       })
-      // Snapshot the ids the store's upsert-dedupe would target, BEFORE the
-      // write, so the merge branch is visible in the result (Tier B).
-      const priorMatchIds = await existingContactMatchIds(store, dedupeCtx, {
-        name: input.name,
-        email: input.email ?? null,
-      })
-
       try {
         const contact = await store.createContact({
           userId: context.userId,
@@ -653,10 +607,7 @@ export function createCrmTools(
           links: contact.entityId ? input.links : undefined,
         })
         const entitySuffix = contact.entityId ? `, entityId=${contact.entityId}` : ''
-        const merged = priorMatchIds.has(contact.id)
-        const verb = merged
-          ? `Merged into existing contact [${contact.id}${entitySuffix}]: ${contact.name}`
-          : `Created contact [${contact.id}${entitySuffix}]: ${contact.name}`
+        const verb = `Created contact [${contact.id}${entitySuffix}]: ${contact.name}`
         return {
           data:
             verb +

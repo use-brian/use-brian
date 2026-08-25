@@ -11,9 +11,10 @@
  *      `(workspace_id, kind, lower(display_name))` via
  *      `EntityStore.findDuplicateClustersSystem` — scoped to the caller's
  *      visible rows (see "Visibility scoping" below).
- *   2. Per cluster: pick the survivor as `entityIds[0]` — the store
- *      orders it curated-first (verified, then `source='user'`) then
- *      oldest — and call `mergeEntities()` for every other row.
+ *   2. Per non-person cluster: pick the survivor as `entityIds[0]` — the
+ *      store orders it curated-first (verified, then `source='user'`) then
+ *      oldest — and call `mergeEntities()` for every other row. Person
+ *      clusters are suggestions only and require explicit pairwise review.
  *   3. Use `survivor-wins` reconciliation by default — safest mode for
  *      a background heal because it never throws on attribute conflicts
  *      and leaves the survivor's attributes unchanged. Attribute drift
@@ -33,8 +34,9 @@
  *     the user can see). The chat `dedupeEntities` tool always passes it.
  *   - The LLM alias pass is **suggest-only** — a fuzzy matcher on
  *     self-reported confidence, never shown in the confirmation preview,
- *     so it surfaces proposals and never auto-merges (the lexical passes,
- *     being exact-name and previewed, still auto-apply on approval).
+ *     so it surfaces proposals and never auto-merges. Exact-name person
+ *     clusters are also suggestion-only; lexical auto-apply is limited to
+ *     non-person kinds.
  *
  * Scope guardrails:
  *   - `clusterCap` caps how many clusters we touch per invocation
@@ -147,6 +149,8 @@ export interface EntityDedupeResult {
     displayNameNormalized: string
     survivorId: string
     mergedIds: string[]
+    /** Person candidates requiring explicit pairwise review; never auto-merged. */
+    suggestedIds: string[]
     conflictedIds: string[]
     erroredIds: string[]
   }>
@@ -161,6 +165,8 @@ export interface EntityDedupeResult {
       survivorKind: EntityKind
       mergedIds: string[]
       mergedKinds: EntityKind[]
+      suggestedIds: string[]
+      suggestedKinds: EntityKind[]
       erroredIds: string[]
     }>
   }
@@ -238,8 +244,15 @@ export async function runEntityDedupe(
       displayNameNormalized: cluster.displayNameNormalized,
       survivorId,
       mergedIds: [] as string[],
+      suggestedIds: [] as string[],
       conflictedIds: [] as string[],
       erroredIds: [] as string[],
+    }
+
+    if (cluster.kind === 'person') {
+      detail.suggestedIds.push(...mergeIds)
+      result.details.push(detail)
+      continue
     }
 
     for (const mergeId of mergeIds) {
@@ -379,6 +392,8 @@ async function runCrossKindCluster(
       survivorKind: cluster.kinds[0]!,
       mergedIds: [],
       mergedKinds: [],
+      suggestedIds: cluster.entityIds.slice(1),
+      suggestedKinds: cluster.kinds.slice(1),
       erroredIds: cluster.entityIds.slice(1),
     })
     result.crossKind.pairsErrored += cluster.entityIds.length - 1
@@ -407,7 +422,19 @@ async function runCrossKindCluster(
     survivorKind,
     mergedIds: [] as string[],
     mergedKinds: [] as EntityKind[],
+    suggestedIds: [] as string[],
+    suggestedKinds: [] as EntityKind[],
     erroredIds: [] as string[],
+  }
+
+  if (cluster.kinds.includes('person')) {
+    for (let i = 0; i < cluster.entityIds.length; i++) {
+      if (i === survivorIdx) continue
+      detail.suggestedIds.push(cluster.entityIds[i]!)
+      detail.suggestedKinds.push(cluster.kinds[i]!)
+    }
+    result.crossKind.details.push(detail)
+    return
   }
 
   for (let i = 0; i < cluster.entityIds.length; i++) {

@@ -16,17 +16,34 @@ let poolRows: Record<string, unknown>[] = []
 let poolRowCount = 0
 let clientInsertRow: Record<string, unknown> | null = null
 
+const identityProjection = vi.hoisted(() => ({
+  prepare: vi.fn(),
+  applyMerge: vi.fn(),
+  applyUndo: vi.fn(),
+}))
+
+async function runFakeClientQuery(text: string, values?: unknown[]) {
+  clientQueries.push({ text, values })
+  if (text.includes('SELECT COALESCE($3::uuid')) {
+    return { rows: [{ actorUserId: 'u-1', sensitivity: 'internal' }], rowCount: 1 }
+  }
+  if (text.includes('valid_to AS "validTo"') && text.includes('FOR UPDATE')) {
+    return {
+      rows: [
+        { id: 'e-survivor', validTo: null, supersededBy: null, retractedAt: null },
+        { id: 'e-merged', validTo: NOW, supersededBy: 'e-survivor', retractedAt: null },
+      ],
+      rowCount: 2,
+    }
+  }
+  if (text.trim().startsWith('INSERT INTO entity_merges')) {
+    return { rows: clientInsertRow ? [clientInsertRow] : [], rowCount: 1 }
+  }
+  return { rows: [], rowCount: 0 }
+}
+
 const fakeClient = {
-  query: vi.fn(async (text: string, values?: unknown[]) => {
-    clientQueries.push({ text, values })
-    if (text.includes('SELECT COALESCE($3::uuid')) {
-      return { rows: [{ actorUserId: 'u-1', sensitivity: 'internal' }], rowCount: 1 }
-    }
-    if (text.trim().startsWith('INSERT INTO entity_merges')) {
-      return { rows: clientInsertRow ? [clientInsertRow] : [], rowCount: 1 }
-    }
-    return { rows: [], rowCount: 0 }
-  }),
+  query: vi.fn(runFakeClientQuery),
   release: vi.fn(),
 }
 
@@ -56,6 +73,12 @@ vi.mock('../decision-event-store.js', () => ({
 
 vi.mock('../decision-provenance-store.js', () => ({
   appendDecisionDerivation: vi.fn(async () => ({ id: 'derivation-1', inserted: true })),
+}))
+
+vi.mock('../crm-identity-store.js', () => ({
+  prepareCrmMergeIdentityProjection: identityProjection.prepare,
+  applyCrmMergeIdentityProjection: identityProjection.applyMerge,
+  applyCrmUndoIdentityProjection: identityProjection.applyUndo,
 }))
 
 import {
@@ -113,8 +136,21 @@ beforeEach(() => {
   clientInsertRow = null
   fakePool.query.mockClear()
   fakePool.connect.mockClear()
-  fakeClient.query.mockClear()
+  fakeClient.query.mockReset().mockImplementation(runFakeClientQuery)
   fakeClient.release.mockClear()
+  identityProjection.prepare.mockReset().mockResolvedValue({
+    workspaceId: 'ws-1',
+    survivingEntityId: 'e-survivor',
+    mergedEntityId: 'e-merged',
+    mergedDisplayName: 'Acme Corp',
+    survivingAttributes: {},
+    mergedAttributes: { domain: 'acme.com' },
+    sensitivity: 'internal',
+    bindingNamespaces: [],
+    aliasArtifactId: 'e-survivor:acme corp',
+  })
+  identityProjection.applyMerge.mockReset().mockResolvedValue(undefined)
+  identityProjection.applyUndo.mockReset().mockResolvedValue('separation-1')
 })
 
 describe('[COMP:corrections/entity-merge-store] readEntityForMerge', () => {
@@ -198,6 +234,11 @@ describe('[COMP:corrections/entity-merge-store] applyMerge', () => {
       artifactId: 'm-1',
       relation: 'supports',
     }), fakeClient)
+    expect(identityProjection.applyMerge).toHaveBeenCalledWith(
+      fakeClient,
+      expect.objectContaining({ survivingEntityId: 'e-survivor', mergedEntityId: 'e-merged' }),
+      'decision-1',
+    )
     expect(texts[texts.length - 1]).toBe('COMMIT')
     expect(fakeClient.release).toHaveBeenCalledOnce()
   })
@@ -245,6 +286,13 @@ describe('[COMP:corrections/entity-merge-store] applyUndoMerge', () => {
       eventKind: 'crm.merge_undone',
       reversesEventId: 'decision-original',
     }), fakeClient)
+    expect(identityProjection.applyUndo).toHaveBeenCalledWith(fakeClient, expect.objectContaining({
+      survivingEntityId: 'e-survivor',
+      restoredEntityId: 'e-merged',
+      restoredAttributes: { domain: 'acme.com' },
+      originalDecisionEventId: 'decision-original',
+      undoDecisionEventId: 'decision-1',
+    }))
     expect(clientQueries.map((q) => q.text).pop()).toBe('COMMIT')
   })
 })
