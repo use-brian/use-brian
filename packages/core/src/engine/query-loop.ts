@@ -251,7 +251,7 @@ export type QueryLoopOptions = {
    * See docs/architecture/engine/askquestion-suspend-resume.md.
    */
   onTurnEnd?: (turn: number, history: Message[]) => void | Promise<void>
-  /** Channel type — controls max_tokens recovery behavior (web auto-continues, messaging stops). */
+  /** Lane type — controls max_tokens recovery behavior (web and unattended workflows auto-continue; messaging stops). */
   channelType?: string
   /**
    * Completeness gate over the execution-plan tier. When set, a tool-less
@@ -1327,14 +1327,18 @@ async function* queryLoopCore(
       }
     }
 
-    // Layer 5: truncation recovery — auto-continue once for web. A provider
-    // output cap (`max_tokens`) and an SSE EOF without a finish marker
-    // (`incomplete`) are the same user-visible failure: a reply cut off in the
-    // middle. Share one bounded continuation budget across both reasons.
+    // Layer 5: truncation recovery — auto-continue once for web and unattended
+    // workflow assistant calls. A provider output cap (`max_tokens`) and an
+    // SSE EOF without a finish marker (`incomplete`) are the same output-shape
+    // failure: a reply cut off in the middle. Workflow callers assemble final
+    // text only after the consult ends, so they can safely concatenate this
+    // bounded continuation. Attended messaging channels may already have
+    // surfaced the partial text and therefore return normally.
     const responseWasTruncated = response.stopReason === 'max_tokens'
       || response.stopReason === 'incomplete'
     if (responseWasTruncated && !hasToolUse
-        && options.channelType === 'web' && truncationContinuations < 1) {
+        && (options.channelType === 'web' || options.channelType === 'workflow')
+        && truncationContinuations < 1) {
       truncationContinuations++
       nextMessages = [{ role: 'user', content: 'Continue from where you left off.' }]
       if (options.stateless) {

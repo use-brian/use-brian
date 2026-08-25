@@ -1714,6 +1714,12 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         model,
         maxTokens: customLlmRuntime?.maxTokens,
         inputTokenLimit: customLlmRuntime?.inputTokenLimit,
+        // Workflow assistant calls are unattended and their terminal text is
+        // assembled only after the loop ends. Mark the lane explicitly so a
+        // max-token stop or finish-marker-less custom stream gets the core
+        // loop's single bounded continuation instead of recording a visibly
+        // truncated step as completed.
+        channelType: params.callerChannelType === 'workflow' ? 'workflow' : undefined,
         systemPrompt: loopSystemPrompt,
         messages,
         tools: finalTools,
