@@ -57,7 +57,7 @@ import type { Message, LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogg
 import { resolveModel, ensureServableModel, backgroundLatencyBudgetMs, backgroundModelFor, isStandardTier, chatTierBudget, planNudgeCap, tierForModel, isExplicitMeteredModelSelection } from '../model-resolution.js'
 import { isRegistryModelAvailable, registryRow } from '@use-brian/shared/model-registry'
 import type { ConnectorStore } from '../db/connector-store.js'
-import { getToolDisplayName, stripFollowUps, stripCommentThreadReplyTag, resolveCharter, charterMission } from '@use-brian/shared'
+import { getToolDisplayName, stripFollowUps, stripCommentThreadReplyTag, resolveCharter, charterMission, recordingIdFromAnchorKey } from '@use-brian/shared'
 import { listActivePlaybookRules } from '../db/playbook-store.js'
 import { CUSTOM_MODEL_IMAGE_FALLBACK_NOTICE, CUSTOM_MODEL_IMAGE_REJECTION } from './_channel-error-text.js'
 import { decideImageTurnRoute } from '../custom-llm-runtime.js'
@@ -1095,6 +1095,46 @@ export function buildActivePageInstruction(args: {
         'about this page — the brief must require an in-place edit.'
       : '')
   )
+}
+
+/**
+ * A page-linked transcript is chrome backed by recording metadata, not editable
+ * doc blocks. Keep that distinction explicit so a speaker assertion cannot be
+ * "handled" by appending prose to the meeting notes.
+ */
+export function buildActiveRecordingInstruction(recordingId: string): string {
+  return (
+    `# Active recording (id=${recordingId})\n` +
+    'This page visibly carries this recording\'s player and transcript as page chrome, separate from the editable Doc blocks above. ' +
+    'When the user identifies or corrects transcript speakers, call `assignRecordingSpeakers` and omit recordingId so it targets this page. ' +
+    'Resolve external people through `listContacts` / `saveContact` first and pass their contact ids; use `isSelf: true` for the authenticated user. ' +
+    'Do NOT add speaker assignments to the page prose or delegate a Doc edit: that does not change the transcript.'
+  )
+}
+
+/** Parse the narrow success receipt that becomes the client invalidation SSE. */
+export function recordingParticipantsUpdatedReceipt(block: {
+  name: string
+  content: string
+  isError?: boolean
+}): { recordingId: string; pageId?: string } | null {
+  if (block.name !== 'assignRecordingSpeakers' || block.isError) return null
+  try {
+    const parsed = JSON.parse(block.content) as {
+      kind?: unknown
+      recordingId?: unknown
+      pageId?: unknown
+    }
+    if (parsed.kind !== 'recording_speakers_assigned' || typeof parsed.recordingId !== 'string') {
+      return null
+    }
+    return {
+      recordingId: parsed.recordingId,
+      ...(typeof parsed.pageId === 'string' ? { pageId: parsed.pageId } : {}),
+    }
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -4576,6 +4616,24 @@ export function chatRoutes(options: WebChatOptions): Router {
               typeof message === 'string' ? message : '',
             )
             const isEmptyPage = current.page.blocks.length === 0
+            let activeRecordingBlock = ''
+            if (
+              activeCapabilities.has('crm') &&
+              options.tools.has('assignRecordingSpeakers')
+            ) {
+              try {
+                const { createDbSavedViewStore } = await import('../db/saved-views-store.js')
+                const pageMeta = await createDbSavedViewStore().getById(user.id, requestedDocViewId)
+                const activeRecordingId = pageMeta
+                  ? recordingIdFromAnchorKey(pageMeta.anchorKey) ?? pageMeta.linkedRecordingId
+                  : null
+                if (activeRecordingId) {
+                  activeRecordingBlock = `\n\n${buildActiveRecordingInstruction(activeRecordingId)}`
+                }
+              } catch (err) {
+                console.error('[chat] active recording context failed:', err)
+              }
+            }
             const activePageBlock =
               `# Active doc page (id=${outline.pageId}, version=${outline.pageVersion})\n` +
               `Title: ${JSON.stringify(outline.title)}\n` +
@@ -4583,7 +4641,8 @@ export function chatRoutes(options: WebChatOptions): Router {
               buildActivePageInstruction({
                 isEmptyPage,
                 isCommentThread: session.channelType === 'doc_thread',
-              })
+              }) +
+              activeRecordingBlock
             // The open page is visible in the editor and is a valid referent
             // for "this page". Its representation prefixes the user turn;
             // the runtime boundary prevents wrapper ids/instructions from
@@ -6948,6 +7007,14 @@ export function chatRoutes(options: WebChatOptions): Router {
                     // The model still receives the tool result. This event is
                     // only the client re-anchor side channel.
                   }
+                }
+                const recordingReceipt = recordingParticipantsUpdatedReceipt({
+                  name: block.name,
+                  content: block.content,
+                  isError: block.isError,
+                })
+                if (recordingReceipt) {
+                  sendEvent('recording_participants_updated', recordingReceipt)
                 }
                 // Step status only for room viewers — never the result body
                 // (T13: signals + small data; the transcript refetch at

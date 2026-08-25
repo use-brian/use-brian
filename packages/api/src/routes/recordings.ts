@@ -250,7 +250,7 @@ export function openRecordingsRoutes(deps: RouteDeps): Router {
     if (!Array.isArray(participants) || participants.length > 64) {
       return void res.status(400).json({ error: 'participants must be an array' })
     }
-    const cleaned: Array<{ speaker: string; name?: string }> = []
+    const cleaned: typeof recording.participants = []
     for (const entry of participants) {
       const row = entry as { speaker?: unknown; name?: unknown }
       if (typeof row.speaker !== 'string' || !row.speaker.trim() || row.speaker.length > 64) {
@@ -259,9 +259,17 @@ export function openRecordingsRoutes(deps: RouteDeps): Router {
       if (row.name !== undefined && (typeof row.name !== 'string' || row.name.length > 120)) {
         return void res.status(400).json({ error: 'Participant names must be short strings' })
       }
+      const speaker = row.speaker.trim()
+      const name = typeof row.name === 'string' ? row.name.trim() : ''
+      const existing = recording.participants.find((participant) => participant.speaker === speaker)
       cleaned.push({
-        speaker: row.speaker.trim(),
-        ...(typeof row.name === 'string' && row.name.trim() ? { name: row.name.trim() } : {}),
+        speaker,
+        ...(name ? { name } : {}),
+        // The human rename prompt edits display text, not CRM identity. Keep a
+        // validated tool-created contact link across a non-empty rename; an
+        // empty name deliberately unbinds the participant completely.
+        ...(name && existing?.contactId ? { contactId: existing.contactId } : {}),
+        ...(name && existing?.email ? { email: existing.email } : {}),
       })
     }
     await (deps.updateRecording ?? updateRecording)(recording.id, { participants: cleaned })

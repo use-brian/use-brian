@@ -46,6 +46,7 @@ import { CommentQuoteReply } from "@/components/doc/comment-quote-reply";
 import { composeQuotedBody, quoteForRow } from "@/components/doc/comment-quote";
 import { useFileAttachments } from "@/lib/use-file-attachments";
 import { useRecordingUpload } from "@/lib/recordings/use-recording-upload";
+import { dispatchRecordingParticipantsUpdated } from "@/lib/recordings/recording-events";
 import { useFileDrop } from "@/lib/use-file-drop";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
@@ -723,6 +724,17 @@ export function CommentThreadBody({
                   },
                 }),
               );
+            }
+          } else if (ev.event === "recording_participants_updated") {
+            // Speaker assignments mutate recording chrome, not Doc blocks.
+            // Bridge the narrow server receipt to the mounted recording
+            // surface; it re-fetches canonical participant metadata.
+            const d = ev.data as { recordingId?: string; pageId?: string };
+            if (typeof d.recordingId === "string") {
+              dispatchRecordingParticipantsUpdated({
+                recordingId: d.recordingId,
+                ...(typeof d.pageId === "string" ? { pageId: d.pageId } : {}),
+              });
             }
           }
         }

@@ -217,6 +217,7 @@ import {
   useRecordingUpload,
   type StagedRecording,
 } from "@/lib/recordings/use-recording-upload";
+import { dispatchRecordingParticipantsUpdated } from "@/lib/recordings/recording-events";
 import { useDockRecorder } from "@/lib/recorder/use-dock-recorder";
 import { useLiveRecordingPage } from "@/lib/recordings/use-live-recording-page";
 import {
@@ -1926,6 +1927,21 @@ export function FloatingChat({
                     ...(errorMessage ? { result: errorMessage } : {}),
                   });
                 }
+              }
+              break;
+            }
+            case "recording_participants_updated": {
+              const recordingId =
+                typeof payload.recordingId === "string"
+                  ? payload.recordingId
+                  : "";
+              const pageId =
+                typeof payload.pageId === "string" ? payload.pageId : undefined;
+              if (recordingId) {
+                dispatchRecordingParticipantsUpdated({
+                  recordingId,
+                  ...(pageId ? { pageId } : {}),
+                });
               }
               break;
             }

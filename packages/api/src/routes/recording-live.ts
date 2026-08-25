@@ -133,24 +133,48 @@ function livePageBlocks(): LivePageBlocks {
 
 /**
  * Parse a window transcript into per-line speaker attributions. Only the
- * "Speaker N:" shape the prompt asks for is treated as a label — anything
- * else stays inside the text, so a sentence starting "Note:" never becomes
- * a phantom speaker. Labels are consistent within one window only; the user
- * can bind real names on the FINAL transcript's participants.
+ * "Speaker N:" and "Speaker N (Name):" shapes the prompt asks for are treated
+ * as labels — anything else stays inside the text, so a sentence starting
+ * "Note:" never becomes a phantom speaker. A single unambiguous name
+ * qualification replaces that placeholder throughout THIS window, including
+ * earlier lines. Speaker numbers are clip-local, so mappings never cross a
+ * window. Conflicting qualifications fail safe to the placeholder.
  */
 export function parseTranscriptLines(text: string): LiveTranscriptLine[] {
-  const lines: LiveTranscriptLine[] = []
+  const parsed: Array<{
+    speaker: string | null
+    identifiedName: string | null
+    text: string
+  }> = []
+  const namesBySpeaker = new Map<string, Map<string, string>>()
+
   for (const raw of text.split('\n')) {
     const line = raw.trim().replace(/^\*+|\*+$/g, '')
     if (!line) continue
-    const match = /^(speaker\s*(\d+))\s*[:：]\s*(.*)$/i.exec(line)
+    const match = /^speaker\s*(\d+)(?:\s*[（(]\s*([^()（）:\n]{1,80}?)\s*[)）])?\s*[:：]\s*(.*)$/i.exec(line)
     if (match && match[3]) {
-      lines.push({ speaker: `Speaker ${match[2]}`, text: match[3].trim() })
+      const speaker = `Speaker ${match[1]}`
+      const identifiedName = match[2]?.trim() || null
+      parsed.push({ speaker, identifiedName, text: match[3].trim() })
+      if (identifiedName) {
+        const names = namesBySpeaker.get(speaker) ?? new Map<string, string>()
+        names.set(identifiedName.toLocaleLowerCase(), identifiedName)
+        namesBySpeaker.set(speaker, names)
+      }
     } else {
-      lines.push({ speaker: null, text: line })
+      parsed.push({ speaker: null, identifiedName: null, text: line })
     }
   }
-  return lines
+
+  const resolvedNames = new Map<string, string>()
+  for (const [speaker, names] of namesBySpeaker) {
+    if (names.size === 1) resolvedNames.set(speaker, names.values().next().value!)
+  }
+
+  return parsed.map(({ speaker, text }) => ({
+    speaker: speaker ? (resolvedNames.get(speaker) ?? speaker) : null,
+    text,
+  }))
 }
 
 /**
@@ -475,7 +499,10 @@ export function recordingLiveRoutes(deps: RecordingLiveRouteDeps): Router {
               prompt:
                 'Transcribe this meeting-audio window verbatim. When more than one speaker is audible, ' +
                 "prefix each line with a consistent label like 'Speaker 1:' or 'Speaker 2:' (numbers are " +
-                'local to this clip). Return only the transcript lines - no timestamps, no commentary.',
+                "local to this clip). If this clip's words make a speaker's personal name unambiguous, " +
+                "qualify that label on at least one line like 'Speaker 2 (Holly):'. Use only personal names " +
+                'stated or directly confirmed in the clip; do not turn roles or descriptions into names and ' +
+                'do not guess. Return only the transcript lines - no timestamps, no commentary.',
             },
           )
     } catch (error) {

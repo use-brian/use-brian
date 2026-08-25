@@ -354,6 +354,34 @@ describe('[COMP:recordings/live-page-route] parseTranscriptLines', () => {
       { speaker: null, text: 'plain' },
     ])
   })
+
+  it('replaces a speaker placeholder throughout the window when the transcript identifies a name', () => {
+    expect(parseTranscriptLines([
+      'Speaker 4: Before the introduction.',
+      'Speaker 2: Sorry, what was your name?',
+      'Speaker 4 (Holly): You can call me Holly.',
+      'Speaker 4: Yes.',
+    ].join('\n'))).toEqual([
+      { speaker: 'Holly', text: 'Before the introduction.' },
+      { speaker: 'Speaker 2', text: 'Sorry, what was your name?' },
+      { speaker: 'Holly', text: 'You can call me Holly.' },
+      { speaker: 'Holly', text: 'Yes.' },
+    ])
+  })
+
+  it('supports full-width name qualifiers and keeps conflicting identities as placeholders', () => {
+    expect(parseTranscriptLines([
+      'Speaker 1（小莉）：你可以叫我小莉。',
+      'Speaker 1: 你好。',
+      'Speaker 2 (Alex): Hello.',
+      'Speaker 2 (Sam): Sorry, that was wrong.',
+    ].join('\n'))).toEqual([
+      { speaker: '小莉', text: '你可以叫我小莉。' },
+      { speaker: '小莉', text: '你好。' },
+      { speaker: 'Speaker 2', text: 'Hello.' },
+      { speaker: 'Speaker 2', text: 'Sorry, that was wrong.' },
+    ])
+  })
 })
 
 describe('[COMP:recordings/live-page-route] notesRegionOps', () => {

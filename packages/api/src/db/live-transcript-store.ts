@@ -15,7 +15,7 @@
 import { query } from './client.js'
 
 export type LiveTranscriptLine = {
-  /** "Speaker 1" style per-window label, or null when unattributed. */
+  /** Per-window "Speaker 1" placeholder or transcript-resolved personal name; null when unattributed. */
   speaker: string | null
   text: string
 }

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { appAssistantForbidsResearch, appAssistantForbidsCoordinator, isAdaptiveResearchEligible, isUserBlocked, sanitizeTitle, buildActivePageInstruction, buildViewingSkillBlock, createUpdateViewedSkillTool, workspaceSkillRevision, resolveStickyChannelId, isDocSurface, isAppSurface, attachUserVisibleContext, settleInlineToolApproval, buildAttachedRecordingContext, buildUnscopedFileAttachmentInstruction, mayOfferWorkspaceChatHandoff, turnInputAdmission, liveTurnAdmission, SSE_KEEPALIVE_INTERVAL_MS, filterBrainSurfaceTools } from '../chat.js'
+import { appAssistantForbidsResearch, appAssistantForbidsCoordinator, isAdaptiveResearchEligible, isUserBlocked, sanitizeTitle, buildActivePageInstruction, buildActiveRecordingInstruction, recordingParticipantsUpdatedReceipt, buildViewingSkillBlock, createUpdateViewedSkillTool, workspaceSkillRevision, resolveStickyChannelId, isDocSurface, isAppSurface, attachUserVisibleContext, settleInlineToolApproval, buildAttachedRecordingContext, buildUnscopedFileAttachmentInstruction, mayOfferWorkspaceChatHandoff, turnInputAdmission, liveTurnAdmission, SSE_KEEPALIVE_INTERVAL_MS, filterBrainSurfaceTools } from '../chat.js'
 import type { ConfirmationResolver, Message, Tool, ToolContext } from '@use-brian/core'
 import type { PendingApproval, PendingApprovalsStore } from '../../db/pending-approvals-store.js'
 
@@ -475,6 +475,30 @@ describe('[COMP:api/chat-route] buildActivePageInstruction', () => {
     const thread = buildActivePageInstruction({ isEmptyPage: true, isCommentThread: true })
     const noThread = buildActivePageInstruction({ isEmptyPage: true, isCommentThread: false })
     expect(thread).toBe(noThread)
+  })
+})
+
+describe('[COMP:api/chat-route] active recording speaker mutation', () => {
+  it('steers speaker assertions to recording metadata rather than a doc edit', () => {
+    const out = buildActiveRecordingInstruction('rec-1')
+    expect(out).toContain('`assignRecordingSpeakers`')
+    expect(out).toContain('`listContacts` / `saveContact`')
+    expect(out).toContain('Do NOT add speaker assignments to the page prose')
+  })
+
+  it('accepts only a successful typed assignment receipt for client invalidation', () => {
+    const content = JSON.stringify({
+      kind: 'recording_speakers_assigned',
+      recordingId: 'rec-1',
+      pageId: 'page-1',
+    })
+    expect(
+      recordingParticipantsUpdatedReceipt({ name: 'assignRecordingSpeakers', content }),
+    ).toEqual({ recordingId: 'rec-1', pageId: 'page-1' })
+    expect(
+      recordingParticipantsUpdatedReceipt({ name: 'assignRecordingSpeakers', content, isError: true }),
+    ).toBeNull()
+    expect(recordingParticipantsUpdatedReceipt({ name: 'delegateDocEdit', content })).toBeNull()
   })
 })
 
