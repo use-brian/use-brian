@@ -627,6 +627,14 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     expect(toolEvents[0].channelType).toBe('workflow')
   })
 
+  it('marks workflow-origin query loops for bounded truncation recovery', async () => {
+    yieldsText('complete workflow output')
+
+    await executor()({ ...baseParams, callerChannelType: 'workflow' })
+
+    expect(mockQueryLoop.mock.calls[0][0].channelType).toBe('workflow')
+  })
+
   it('records a failed tool call with success=false and a single-line error excerpt', async () => {
     yields([
       {

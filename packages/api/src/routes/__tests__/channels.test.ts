@@ -56,6 +56,11 @@ vi.mock('../../ingest/feishu-connector-instance.js', () => ({
   ensureFeishuConnectorInstance: vi.fn().mockResolvedValue(undefined),
 }))
 
+vi.mock('../../whatsapp/cloud-managed-groups-client.js', () => ({
+  createWhatsAppCloudManagedGroupsApi: vi.fn(),
+  isWhatsAppCloudNotFoundError: vi.fn().mockReturnValue(false),
+}))
+
 import {
   listChannelsForWorkspace,
   getChannelForUser,
@@ -88,6 +93,14 @@ import { validateFeishuCredentials } from '../../feishu/client.js'
 import type { LinkCodeStore } from '../../db/link-codes.js'
 import type { CustomChannelStore } from '../../db/custom-channel-store.js'
 import { hashBridgeToken } from '../../db/custom-channel-token.js'
+import type {
+  WhatsAppCloudManagedGroup,
+  WhatsAppCloudManagedGroupStore,
+} from '../../db/whatsapp-cloud-managed-groups.js'
+import {
+  createWhatsAppCloudManagedGroupsApi,
+  isWhatsAppCloudNotFoundError,
+} from '../../whatsapp/cloud-managed-groups-client.js'
 
 function makeChannel(over: Partial<Channel> = {}): Channel {
   return {
@@ -119,6 +132,7 @@ function buildApp(
       linkCodeStore: LinkCodeStore
     }
     customChannelStore?: CustomChannelStore
+    whatsappCloudManagedGroupStore?: WhatsAppCloudManagedGroupStore
   } = {},
 ) {
   const role = opts.role === undefined ? 'admin' : opts.role
@@ -135,6 +149,7 @@ function buildApp(
       telegramBotToken: opts.telegramBotToken,
       ownerPairing: opts.ownerPairing,
       customChannelStore: opts.customChannelStore,
+      whatsappCloudManagedGroupStore: opts.whatsappCloudManagedGroupStore,
     }),
     userId ? { userId } : undefined,
   )
@@ -160,6 +175,45 @@ function makeIntegration(over: Record<string, unknown> = {}) {
 }
 
 const ASSISTANT_UUID = '00000000-0000-0000-0000-000000000001'
+
+function makeManagedGroup(over: Partial<WhatsAppCloudManagedGroup> = {}): WhatsAppCloudManagedGroup {
+  return {
+    id: 'group-row-1', channelId: 'chan-wa', requestId: null, providerGroupId: null,
+    subject: 'Support team', inviteLink: null, status: 'creating', error: null,
+    createdAt: new Date('2026-08-24T00:00:00Z'), updatedAt: new Date('2026-08-24T00:00:00Z'),
+    ...over,
+  }
+}
+
+function makeCloudIntegrationStore(): ChannelIntegrationStore {
+  const integration = makeIntegration({
+    id: 'int-wa', channelId: 'chan-wa', channelType: 'whatsapp',
+    teamId: 'waba-1', botUserId: 'phone-1',
+  })
+  return {
+    listForWorkspace: vi.fn().mockResolvedValue([integration]),
+    getForUserWithCredentials: vi.fn().mockResolvedValue({
+      ...integration,
+      credentials: {
+        provider: 'cloud_api', access_token: 'token', app_secret: 'secret', verify_token: 'verify',
+        phone_number_id: 'phone-1', waba_id: 'waba-1', display_phone_number: '+15551234567',
+        graph_api_version: 'v26.0',
+      },
+    }),
+  } as unknown as ChannelIntegrationStore
+}
+
+function makeManagedGroupStore(over: Partial<WhatsAppCloudManagedGroupStore> = {}): WhatsAppCloudManagedGroupStore {
+  return {
+    createPending: vi.fn().mockResolvedValue(makeManagedGroup()),
+    attachRequestId: vi.fn().mockResolvedValue(makeManagedGroup({ requestId: 'request-1' })),
+    deletePending: vi.fn().mockResolvedValue(true),
+    listByChannel: vi.fn().mockResolvedValue([]),
+    completeFromLifecycle: vi.fn().mockResolvedValue(true),
+    failFromLifecycle: vi.fn().mockResolvedValue(true),
+    ...over,
+  }
+}
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -333,6 +387,125 @@ describe('[COMP:api/channels-route] DELETE channel', () => {
     )
     expect(res.status).toBe(204)
     expect(disconnect).toHaveBeenCalledWith('chan-feishu')
+  })
+
+  it('blocks Cloud channel deletion while a managed group is creating', async () => {
+    vi.mocked(getChannelForUser).mockResolvedValue(makeChannel({ id: 'chan-wa', channelType: 'whatsapp' }))
+    const groups = makeManagedGroupStore({
+      listByChannel: vi.fn().mockResolvedValue([makeManagedGroup()]),
+    })
+    const deleteGroup = vi.fn()
+    vi.mocked(createWhatsAppCloudManagedGroupsApi).mockReturnValue({
+      createGroup: vi.fn(), getGroupInviteLink: vi.fn(), deleteGroup,
+    })
+
+    const res = await request(buildApp({
+      integrationStore: makeCloudIntegrationStore(), whatsappCloudManagedGroupStore: groups,
+    })).delete('/api/workspaces/ws-1/channels/chan-wa')
+
+    expect(res.status).toBe(409)
+    expect(deleteGroup).not.toHaveBeenCalled()
+    expect(deleteChannel).not.toHaveBeenCalled()
+  })
+
+  it('deletes active Cloud groups sequentially before deleting the local channel', async () => {
+    vi.mocked(getChannelForUser).mockResolvedValue(makeChannel({ id: 'chan-wa', channelType: 'whatsapp' }))
+    vi.mocked(deleteChannel).mockResolvedValue(true)
+    const groups = makeManagedGroupStore({
+      listByChannel: vi.fn().mockResolvedValue([
+        makeManagedGroup({ id: 'row-1', status: 'active', providerGroupId: 'meta-1' }),
+        makeManagedGroup({ id: 'row-2', status: 'failed', error: 'rejected' }),
+        makeManagedGroup({ id: 'row-3', status: 'active', providerGroupId: 'meta-2' }),
+      ]),
+    })
+    const deleteGroup = vi.fn().mockResolvedValue(undefined)
+    vi.mocked(createWhatsAppCloudManagedGroupsApi).mockReturnValue({
+      createGroup: vi.fn(), getGroupInviteLink: vi.fn(), deleteGroup,
+    })
+
+    const res = await request(buildApp({
+      integrationStore: makeCloudIntegrationStore(), whatsappCloudManagedGroupStore: groups,
+    })).delete('/api/workspaces/ws-1/channels/chan-wa')
+
+    expect(res.status).toBe(204)
+    expect(deleteGroup.mock.calls).toEqual([['meta-1'], ['meta-2']])
+    expect(deleteGroup.mock.invocationCallOrder[1]).toBeLessThan(vi.mocked(deleteChannel).mock.invocationCallOrder[0])
+  })
+
+  it('treats a Meta 404 as already deleted', async () => {
+    vi.mocked(getChannelForUser).mockResolvedValue(makeChannel({ id: 'chan-wa', channelType: 'whatsapp' }))
+    vi.mocked(deleteChannel).mockResolvedValue(true)
+    const groups = makeManagedGroupStore({
+      listByChannel: vi.fn().mockResolvedValue([
+        makeManagedGroup({ status: 'active', providerGroupId: 'meta-gone' }),
+      ]),
+    })
+    const error = new Error('gone')
+    vi.mocked(isWhatsAppCloudNotFoundError).mockImplementation((candidate) => candidate === error)
+    vi.mocked(createWhatsAppCloudManagedGroupsApi).mockReturnValue({
+      createGroup: vi.fn(), getGroupInviteLink: vi.fn(), deleteGroup: vi.fn().mockRejectedValue(error),
+    })
+
+    const res = await request(buildApp({
+      integrationStore: makeCloudIntegrationStore(), whatsappCloudManagedGroupStore: groups,
+    })).delete('/api/workspaces/ws-1/channels/chan-wa')
+
+    expect(res.status).toBe(204)
+    expect(deleteChannel).toHaveBeenCalled()
+  })
+})
+
+describe('[COMP:api/channels-route] WhatsApp Cloud managed groups', () => {
+  it('persists pending before Meta create and returns the attached request with 202', async () => {
+    vi.mocked(getChannelForUser).mockResolvedValue(makeChannel({ id: 'chan-wa', channelType: 'whatsapp' }))
+    const groups = makeManagedGroupStore()
+    const createGroup = vi.fn().mockResolvedValue({ requestId: 'request-1' })
+    vi.mocked(createWhatsAppCloudManagedGroupsApi).mockReturnValue({
+      createGroup, getGroupInviteLink: vi.fn(), deleteGroup: vi.fn(),
+    })
+
+    const res = await request(buildApp({
+      integrationStore: makeCloudIntegrationStore(), whatsappCloudManagedGroupStore: groups,
+    })).post('/api/workspaces/ws-1/channels/chan-wa/whatsapp-cloud/groups').send({ subject: '  Support team  ' })
+
+    expect(res.status).toBe(202)
+    expect(res.body.group).toMatchObject({ subject: 'Support team', requestId: 'request-1', status: 'creating' })
+    expect(groups.createPending).toHaveBeenCalledWith('user-1', 'chan-wa', 'Support team')
+    expect(vi.mocked(groups.createPending).mock.invocationCallOrder[0]).toBeLessThan(createGroup.mock.invocationCallOrder[0])
+    expect(groups.attachRequestId).toHaveBeenCalledWith('user-1', 'group-row-1', 'request-1')
+  })
+
+  it('removes the pending row and returns 502 when Meta rejects create', async () => {
+    vi.mocked(getChannelForUser).mockResolvedValue(makeChannel({ id: 'chan-wa', channelType: 'whatsapp' }))
+    const groups = makeManagedGroupStore()
+    vi.mocked(createWhatsAppCloudManagedGroupsApi).mockReturnValue({
+      createGroup: vi.fn().mockRejectedValue(new Error('Meta unavailable')),
+      getGroupInviteLink: vi.fn(), deleteGroup: vi.fn(),
+    })
+
+    const res = await request(buildApp({
+      integrationStore: makeCloudIntegrationStore(), whatsappCloudManagedGroupStore: groups,
+    })).post('/api/workspaces/ws-1/channels/chan-wa/whatsapp-cloud/groups').send({ subject: 'Support team' })
+
+    expect(res.status).toBe(502)
+    expect(groups.deletePending).toHaveBeenCalledWith('user-1', 'group-row-1')
+    expect(groups.attachRequestId).not.toHaveBeenCalled()
+  })
+
+  it('lists serialized managed groups for an official Cloud channel', async () => {
+    vi.mocked(getChannelForUser).mockResolvedValue(makeChannel({ id: 'chan-wa', channelType: 'whatsapp' }))
+    const groups = makeManagedGroupStore({
+      listByChannel: vi.fn().mockResolvedValue([
+        makeManagedGroup({ status: 'active', providerGroupId: 'meta-1', inviteLink: 'https://chat.whatsapp.com/abc' }),
+      ]),
+    })
+
+    const res = await request(buildApp({
+      integrationStore: makeCloudIntegrationStore(), whatsappCloudManagedGroupStore: groups,
+    })).get('/api/workspaces/ws-1/channels/chan-wa/whatsapp-cloud/groups')
+
+    expect(res.status).toBe(200)
+    expect(res.body.groups[0]).toMatchObject({ providerGroupId: 'meta-1', status: 'active' })
   })
 })
 

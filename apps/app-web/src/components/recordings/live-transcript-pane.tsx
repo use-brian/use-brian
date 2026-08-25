@@ -9,8 +9,9 @@
  * Data: `live_transcript_windows` via `GET /api/recordings/live/windows`
  * (poll while mounted — teammates watching the page converge within one
  * interval), plus the same-tab CustomEvent bridge for instant append when
- * THIS tab is the one recording. Lines carry best-effort per-window
- * "Speaker N" labels; real names bind later on the final transcript.
+ * THIS tab is the one recording. Lines carry best-effort per-window speaker
+ * labels, upgraded to a personal name when that window identifies one
+ * unambiguously; remaining placeholders bind later on the final transcript.
  *
  * Mounted by the doc shell when the page carries the `live:` marker block
  * and the final (processed) transcript has not replaced it yet.

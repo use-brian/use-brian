@@ -81,7 +81,7 @@ function sseResponse(raw: string) {
 
 const noop = () => {};
 
-describe("[COMP:app-web/comment-thread-body] doc_title_update stream bridge", () => {
+describe("[COMP:app-web/comment-thread-body] mutation stream bridges", () => {
   let root: Root | null = null;
   let container: HTMLDivElement | null = null;
 
@@ -99,10 +99,15 @@ describe("[COMP:app-web/comment-thread-body] doc_title_update stream bridge", ()
 
   it("relays a doc_title_update SSE as a doc:title-updated window event", async () => {
     const events: Array<Record<string, unknown>> = [];
+    const recordingEvents: Array<Record<string, unknown>> = [];
     const listener = (e: Event) => {
       events.push((e as CustomEvent<Record<string, unknown>>).detail);
     };
+    const recordingListener = (e: Event) => {
+      recordingEvents.push((e as CustomEvent<Record<string, unknown>>).detail);
+    };
     window.addEventListener("doc:title-updated", listener);
+    window.addEventListener("sidan:recording-participants-updated", recordingListener);
 
     const payload = {
       pageId: "p_icon",
@@ -116,6 +121,7 @@ describe("[COMP:app-web/comment-thread-body] doc_title_update stream bridge", ()
         ? Promise.resolve(
             sseResponse(
               `event: doc_title_update\ndata: ${JSON.stringify(payload)}\n\n` +
+                `event: recording_participants_updated\ndata: {"recordingId":"rec-1","pageId":"p_icon"}\n\n` +
                 `event: text_delta\ndata: {"text":"Done."}\n\n`,
             ),
           )
@@ -149,6 +155,7 @@ describe("[COMP:app-web/comment-thread-body] doc_title_update stream bridge", ()
     await act(async () => {});
 
     window.removeEventListener("doc:title-updated", listener);
+    window.removeEventListener("sidan:recording-participants-updated", recordingListener);
 
     expect(events).toHaveLength(1);
     expect(events[0]).toEqual({
@@ -158,5 +165,8 @@ describe("[COMP:app-web/comment-thread-body] doc_title_update stream bridge", ()
       nameOrigin: "auto",
       overwrite: true,
     });
+    expect(recordingEvents).toEqual([
+      { recordingId: "rec-1", pageId: "p_icon" },
+    ]);
   });
 });

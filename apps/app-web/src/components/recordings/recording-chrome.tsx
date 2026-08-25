@@ -45,6 +45,10 @@ import { useT } from "@/lib/i18n/client";
 import { promptDialog } from "@/components/ui/prompt-dialog";
 import { useRecordingPlayer } from "@/lib/recordings/recording-player-context";
 import {
+  RECORDING_PARTICIPANTS_UPDATED_EVENT,
+  type RecordingParticipantsUpdatedDetail,
+} from "@/lib/recordings/recording-events";
+import {
   getRecording,
   updateRecordingParticipants,
   type RecordingSummary,
@@ -181,6 +185,26 @@ export function RecordingChrome({
   useEffect(() => {
     void reloadSummary();
   }, [reloadSummary]);
+
+  // Brian's speaker-assignment tool writes the same participant metadata as
+  // the manual rename path. Its chat receipt is only an invalidation hint:
+  // re-read the canonical row so the visible transcript changes immediately.
+  useEffect(() => {
+    const onParticipantsUpdated = (event: Event) => {
+      const detail = (event as CustomEvent<RecordingParticipantsUpdatedDetail>).detail;
+      if (detail?.recordingId !== recordingId) return;
+      void reloadSummary();
+    };
+    window.addEventListener(
+      RECORDING_PARTICIPANTS_UPDATED_EVENT,
+      onParticipantsUpdated,
+    );
+    return () =>
+      window.removeEventListener(
+        RECORDING_PARTICIPANTS_UPDATED_EVENT,
+        onParticipantsUpdated,
+      );
+  }, [recordingId, reloadSummary]);
 
   // A queued/processing recording becomes playable with no user action —
   // poll while in flight, stop once terminal (the board's polling rule).

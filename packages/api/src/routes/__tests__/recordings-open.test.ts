@@ -169,13 +169,24 @@ describe('[COMP:recordings/open-routes] OSS recordings routes', () => {
   })
 
   it('saves validated speaker-name bindings and rejects malformed ones', async () => {
-    const { app, deps } = makeApp()
+    const { app, deps } = makeApp({
+      getRecording: vi.fn(async () => ({
+        id: 'rec-1',
+        workspaceId: 'ws-1',
+        participants: [
+          { speaker: 'Speaker 1', name: 'Old Name', contactId: 'contact-1', email: 'old@example.test' },
+        ],
+      })),
+    })
     const ok = await request(app)
       .patch('/api/recordings/rec-1/participants')
       .send({ participants: [{ speaker: 'Speaker 1', name: '  Alice  ' }, { speaker: 'Speaker 2' }] })
     expect(ok.status).toBe(200)
     expect(deps.updateRecording).toHaveBeenCalledWith('rec-1', {
-      participants: [{ speaker: 'Speaker 1', name: 'Alice' }, { speaker: 'Speaker 2' }],
+      participants: [
+        { speaker: 'Speaker 1', name: 'Alice', contactId: 'contact-1', email: 'old@example.test' },
+        { speaker: 'Speaker 2' },
+      ],
     })
 
     const bad = await request(app)

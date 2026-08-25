@@ -1,7 +1,7 @@
 /**
  * Per-call rates for web-search providers that don't return token counts.
  *
- * These providers charge flat per-call (Brave, Serper, Tavily) or per-1k,
+ * These providers charge flat per-call (Brave, Serper, SerpAPI, Tavily) or per-1k,
  * not per-token. For billing, the `webSearch` tool emits these rates as
  * `ExternalCost['flat']` so the chat route can write a `usage_tracking`
  * row at the true cost — matching the "External API cost tracking policy"
@@ -10,9 +10,10 @@
  * Keep the keys in sync with `SearchProvider.name` strings in
  * `packages/core/src/tools/base/search-stack.ts`.
  *
- * Last verified: 2026-04-22
+ * Last verified: 2026-08-25
  * - brave: $5.00 per 1k (AI-tier billing; user-confirmed rate).
  * - serper: $50 / 50k queries = $1.00 per 1k.
+ * - serpapi: $25 / 1k searches on the Starter plan = $25.00 per 1k.
  * - tavily: $0.008 / request = $8.00 per 1k.
  * - duckduckgo: free HTML scrape fallback, $0.
  *
@@ -22,6 +23,7 @@
 export const SEARCH_PROVIDER_COST_PER_1K: Record<string, number> = {
   brave: 5.0,
   serper: 1.0,
+  serpapi: 25.0,
   tavily: 8.0,
   duckduckgo: 0.0,
   // xAI's x_search is not served via this path — Grok returns token counts,

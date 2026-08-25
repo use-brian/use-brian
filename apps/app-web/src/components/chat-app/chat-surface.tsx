@@ -150,6 +150,8 @@ import {
   dispatchChatSessionActivity,
   dispatchChatSessionsRefresh,
   shouldAcceptRoomMirror,
+  shouldOpenSessionStream,
+  shouldReopenSessionStream,
 } from "@/lib/chat-session-events";
 import {
   createWorkspaceSession,
@@ -364,6 +366,19 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
    * session switch — it explains one event, it is not a status line.
    */
   const [turnEndNotice, setTurnEndNotice] = useState<string | null>(null);
+  /**
+   * The session whose running turn this surface wants to re-attach to over
+   * `GET /api/sessions/:id/stream` (reconnect mode). Set when the direct
+   * `POST /api/chat` body closed with no terminal event (the turn kept
+   * running server-side, 2026-08-24) and once on hydrating a personal
+   * session, so a reload mid-turn finds its turn again. Cleared by the
+   * stream's `done`. Rooms hold a follow stream regardless of this.
+   */
+  const [reconnectSessionId, setReconnectSessionId] = useState<string | null>(null);
+  /** Shown while a turn that lost its direct stream is being carried by the
+   *  mirror. Cleared by `done` and on a session switch; never set by the
+   *  hydrate probe (no connection dropped there). */
+  const [reconnectNotice, setReconnectNotice] = useState(false);
   // A server `notice` about how THIS turn was served (e.g. the workspace's
   // model endpoint cannot read images, so a built-in model answered). Not an
   // error - the answer is right there - but it must be visible, because an
@@ -1048,6 +1063,14 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     setSelectionQuote(null);
     hydratedRef.current = activeSessionId;
     sessionIdRef.current = activeSessionId;
+    // A personal session opened from the outside (deep link, rail row,
+    // reload) may have a turn running that no stream in this tab is
+    // painting. Want a re-attach once: the route answers `status` then
+    // `done` and closes when idle (one cheap GET), and `status: running`
+    // paints the mirror. Rooms hold their follow stream regardless; a shared
+    // list still loading reads as "not a room" here and the stream effect
+    // simply re-opens in follow mode once the list lands.
+    setReconnectSessionId(activeSessionId && !activeShared ? activeSessionId : null);
     if (!activeSessionId) {
       chat.loadMessages([]);
       // Back on a fresh pane: the assistant pick is per chat, so it resets
@@ -1146,16 +1169,33 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   useEffect(() => {
     setTurnEndNotice(null);
     setTurnNotice(null);
+    setReconnectNotice(false);
   }, [activeSessionId]);
 
   useEffect(() => {
-    if (!activeSessionId || !isSharedOpen) {
+    const reconnectWanted =
+      !!activeSessionId && reconnectSessionId === activeSessionId;
+    if (
+      !activeSessionId ||
+      !shouldOpenSessionStream({ isRoom: isSharedOpen, reconnectWanted })
+    ) {
       resetRemoteTurn();
       setRemoteConfirmation(null);
       setRoomTypers([]);
       return;
     }
     let cancelled = false;
+    // Reconnect-mode bookkeeping (personal sessions), read at close time:
+    // `sawDone` decides the reopen; `sawRunning` / `sawTurnCompleted` decide
+    // what `done` still owes (see `case "done"`). A room never sees `done`.
+    let sawDone = false;
+    let sawRunning = false;
+    let sawTurnCompleted = false;
+    // Whether the user was told the connection dropped. Read from this
+    // render's closure on purpose: the notice and `reconnectSessionId` are
+    // always set in the same batch, so the value matches the stream this
+    // effect run opens.
+    const noticeShowing = reconnectNotice;
     const controller = new AbortController();
     const sessionId = activeSessionId;
     const mintRemoteId = () => `rev-${remoteSeqRef.current++}`;
@@ -1164,7 +1204,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     setRoomTypers([]);
 
     // Opening a room reads it — stamp the unread watermark (T7).
-    markRoomSeen(workspaceId, sessionId);
+    if (isSharedOpen) markRoomSeen(workspaceId, sessionId);
 
     // A room found suspended on open surfaces its answer panel immediately
     // (any member with read access may answer — D8).
@@ -1184,6 +1224,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       switch (event) {
         case "status": {
           const working = payload.status === "running";
+          if (working) sawRunning = true;
           // A GET opened just before this page's POST may carry a stale `idle`
           // frame after the optimistic start signal. Never let it erase live
           // direct ownership; a returning page has no such owner and trusts
@@ -1204,6 +1245,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           break;
         }
         case "turn_started": {
+          sawRunning = true;
           dispatchChatSessionActivity({ workspaceId, sessionId, working: true });
           if (!acceptsMirror) break;
           resetRemoteTurn();
@@ -1215,6 +1257,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           break;
         }
         case "snapshot": {
+          sawRunning = true;
           if (!acceptsMirror) break;
           setRemoteActive(true);
           setRemoteStartedAt((current) => current ?? Date.now());
@@ -1234,6 +1277,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           break;
         }
         case "activity": {
+          sawRunning = true;
           if (!acceptsMirror) break;
           setRemoteActive(true);
           setRemoteStartedAt((current) => current ?? Date.now());
@@ -1407,6 +1451,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           break;
         }
         case "turn_completed": {
+          sawTurnCompleted = true;
+          // A room never sends `done`, so the "still working" line from a
+          // disconnected direct stream ends here; for a personal session
+          // `done` follows at once and clears it again, harmlessly.
+          setReconnectNotice(false);
           dispatchChatSessionActivity({ workspaceId, sessionId, working: false });
           // A turn that ended because it stalled or was stopped has to say so.
           // Silently clearing the card leaves the room wondering whether the
@@ -1444,8 +1493,41 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           void loadTranscript(sessionId);
           void reloadShared();
           dispatchChatSessionsRefresh(workspaceId);
-          markRoomSeen(workspaceId, sessionId);
+          if (isSharedOpen) markRoomSeen(workspaceId, sessionId);
           refreshPendingQuestion(sessionId);
+          break;
+        }
+        case "done": {
+          // Reconnect mode only: the server closes a personal session's
+          // stream on purpose once there is nothing left to attach to (the
+          // turn is over, or was never running) and never reopens it. A
+          // room's follow stream has no `done`.
+          if (isSharedOpen) break;
+          sawDone = true;
+          setReconnectSessionId(null);
+          setReconnectNotice(false);
+          resetRemoteTurn();
+          setRemoteConfirmation(null);
+          // The turn is over, so a card the dead POST stream raised is too.
+          chat.dispatch({ type: "confirmation/clear" });
+          // `turn_completed` already refetched the transcript, the rail and
+          // the pending question, and the idle-open probe (`status` then
+          // `done`) has nothing to refetch while the hydrate fetch is still
+          // landing. Only a `done` after `running` with no `turn_completed`
+          // in between still owes the refetch.
+          if (sawRunning && !sawTurnCompleted) {
+            void loadTranscript(sessionId);
+            dispatchChatSessionsRefresh(workspaceId);
+            refreshPendingQuestion(sessionId);
+          }
+          // The dead POST stream could not report `input_applied` for
+          // anything queued mid-turn. Now that the turn is over, whatever
+          // this client still holds goes out as an ordinary turn (the
+          // queue's "client is the durable holder" fallback).
+          if (sawRunning) {
+            setQueuedNotice(false);
+            flushQueuedInputs();
+          }
           break;
         }
         default:
@@ -1459,7 +1541,19 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           `${API_URL}/api/sessions/${encodeURIComponent(sessionId)}/stream`,
           { signal: controller.signal },
         );
-        if (!res.ok || !res.body) return;
+        if (!res.ok || !res.body) {
+          // A rejected open is not something a retry fixes. A room keeps
+          // its retry cadence as before; a reconnecting personal session
+          // gives up, and reports it only when the user was shown the
+          // reconnect notice (the hydrate probe failing is not news).
+          if (!isSharedOpen) {
+            sawDone = true;
+            setReconnectSessionId(null);
+            setReconnectNotice(false);
+            if (noticeShowing) setError(t.errorGeneric);
+          }
+          return;
+        }
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         const buf = createSSEBuffer();
@@ -1473,9 +1567,14 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       } catch {
         // Transport error / abort — reconnect below (or unmount).
       } finally {
-        // Follow mode never closes server-side on idle, so a close means a
-        // deploy / restart / network blip — re-open after a beat.
-        if (!cancelled) {
+        // Follow mode never closes server-side on idle, so a room close means
+        // a deploy / restart / network blip: re-open after a beat. A
+        // personal session's reconnect stream reopens only when the body
+        // closed WITHOUT `done` (the transport gave up on a turn that may
+        // still be running); after `done` the server has nothing more.
+        if (
+          shouldReopenSessionStream({ isRoom: isSharedOpen, sawDone, cancelled })
+        ) {
           setTimeout(() => {
             if (!cancelled) setSubscribeEpoch((n) => n + 1);
           }, 3_000);
@@ -1489,7 +1588,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     // `resetRemoteTurn` / `refreshPendingQuestion` / `loadTranscript` /
     // `reloadShared` are stable callbacks.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeSessionId, isSharedOpen, subscribeEpoch, meId, workspaceId, tChat.toolNarration]);
+  }, [activeSessionId, isSharedOpen, reconnectSessionId, subscribeEpoch, meId, workspaceId, tChat.toolNarration]);
 
   // ── Typing beacon (rooms) ───────────────────────────────────────────
   // Tell the bus while this member composes: a throttled `true` beacon keeps
@@ -1614,20 +1713,32 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
    *  onError, so the state resets here (the dock's `handleAbort`). */
   const handleAbort = useCallback(() => {
     responseGroupAbortRef.current = true;
-    // A room turn is server-owned and continues after the page stream closes.
-    // Releasing direct ownership lets this room's follow stream immediately
-    // render our own mirrored progress instead of making Stop look like a
-    // completed server cancellation.
+    // Every turn is server-owned and continues after the page stream closes
+    // (the server no longer reads a client close as Stop, 2026-08-24), so
+    // Stop is an explicit `POST /api/chat/stop`. Releasing direct ownership
+    // first lets the session stream render our own mirrored progress until
+    // the server's `turn_completed` lands, instead of making Stop look like
+    // a completed cancellation.
+    const sessionId = sessionIdRef.current;
     directTurnSessionRef.current = null;
     stream.abort();
     chat.dispatch({ type: "stream/abort" });
     turnTextRef.current = "";
     resetTurnActivity();
     // An aborted stream never reaches `onDone`, so the flush happens here
-    // too — the queued text is usually WHY the user reached for Stop.
-    flushQueuedInputs();
+    // too: the queued text is usually WHY the user reached for Stop. It
+    // waits for the stop to land, because a flush racing the still-running
+    // turn is answered `turn_in_flight`. No session id means nothing is
+    // running server-side, so the flush goes straight out.
+    if (!sessionId) {
+      flushQueuedInputs();
+      return;
+    }
+    void stopTurn(sessionId)
+      .catch(() => setError(t.stopTurnFailed))
+      .finally(flushQueuedInputs);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stream, resetTurnActivity, flushQueuedInputs]);
+  }, [stream, resetTurnActivity, flushQueuedInputs, t.stopTurnFailed]);
 
   const copyResetRef = useRef<number | null>(null);
   const handleCopy = useCallback((messageId: string, text: string) => {
@@ -1929,17 +2040,25 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       turnStartedAtRef.current = Date.now();
       setTurnStartedAt(turnStartedAtRef.current);
 
-      const directRoomSessionId = isRoom ? sessionIdRef.current : null;
-      if (directRoomSessionId) {
-        directTurnSessionRef.current = directRoomSessionId;
+      // EVERY session records direct ownership, not just rooms: the session
+      // stream can be open for a personal session too (reconnect mode), and
+      // `shouldAcceptRoomMirror` is what keeps our own mirror quiet while
+      // this POST is still painting. A fresh pane has no id yet; the
+      // `session` event below adopts it.
+      const directSessionId = sessionIdRef.current;
+      directTurnSessionRef.current = directSessionId;
+      if (directSessionId) {
         dispatchChatSessionActivity({
           workspaceId,
-          sessionId: directRoomSessionId,
+          sessionId: directSessionId,
           working: true,
         });
       }
 
       let turnFailed = false;
+      /** The body closed with no terminal event: the turn is still running
+       *  server-side and the session stream has taken over painting it. */
+      let turnDisconnected = false;
       await stream.start({
       url: `${API_URL}/api/chat`,
       authFetch: (url, init) => authFetch(String(url), init),
@@ -1995,6 +2114,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
               // reply that is streaming into it right now.
               sessionIdRef.current = id;
               hydratedRef.current = id;
+              // The POST that minted this id is the one painting it.
+              directTurnSessionRef.current = id;
               // Record the binding so the next turn resolves this thread to
               // the SAME assistant before the rail refetch lands.
               sessionAssistantRef.current.set(id, target.id);
@@ -2381,12 +2502,12 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         }
       },
       onDone: () => {
-        const settledRoomSessionId = directTurnSessionRef.current;
+        const settledSessionId = directTurnSessionRef.current;
         directTurnSessionRef.current = null;
-        if (settledRoomSessionId) {
+        if (settledSessionId) {
           dispatchChatSessionActivity({
             workspaceId,
-            sessionId: settledRoomSessionId,
+            sessionId: settledSessionId,
             working: false,
           });
         }
@@ -2415,6 +2536,42 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         // The turn may have auto-titled the thread — refresh the rail.
         dispatchChatSessionsRefresh(workspaceId);
       },
+      onDisconnect: () => {
+        // The transport closed with no `done` / `error`: a request-timeout
+        // cut, a deploy, a network blip. The server no longer reads a client
+        // close as Stop (2026-08-24), so the turn is still running and its
+        // reply lands in the transcript when it finishes. Hand the paint to
+        // the mirror machinery and re-attach over the session stream.
+        turnDisconnected = true;
+        const sessionId = sessionIdRef.current;
+        const streamedText = turnTextRef.current;
+        const startedAt = turnStartedAtRef.current;
+        directTurnSessionRef.current = null;
+        chat.dispatch({ type: "stream/abort" });
+        turnTextRef.current = "";
+        resetTurnActivity();
+        // Not flushed: the turn is still running, so a re-send would only
+        // be answered `turn_in_flight`. The stream's `done` flushes.
+        setQueuedNotice(false);
+        if (!sessionId) {
+          // No `session` frame ever arrived, so there is nothing to
+          // re-attach to. Report it like any other transport failure.
+          setError(t.errorGeneric);
+          dispatchChatSessionsRefresh(workspaceId);
+          return;
+        }
+        // Paint what the dead stream had so far as the remote turn; the
+        // first `snapshot` off the bus replaces it with the server's text.
+        // Not `resetRemoteTurn()`: our own mirror was suppressed while the
+        // POST was live, so there is nothing stale to clear, and a room's
+        // follow stream is already open to carry on from here.
+        setRemoteAssistantId(target.id);
+        setRemoteActive(true);
+        setRemoteText(streamedText);
+        setRemoteStartedAt((current) => current ?? startedAt ?? Date.now());
+        setReconnectSessionId(sessionId);
+        setReconnectNotice(true);
+      },
       onError: () => {
         turnFailed = true;
         directTurnSessionRef.current = null;
@@ -2431,6 +2588,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       });
       if (
         turnFailed ||
+        turnDisconnected ||
         askedQuestionRef.current ||
         responseGroupAbortRef.current
       ) {
@@ -2771,6 +2929,15 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       setError(t.stopTurnFailed);
     }
   }, [activeSessionId, t.stopTurnFailed]);
+
+  /** A personal session has no Work Bench, so the composer's Stop is its only
+   *  Stop. Keep it while the re-attached mirror carries a turn this tab lost
+   *  its direct stream to; a room keeps the Live card's Stop instead. */
+  const mirrorStopAvailable =
+    !isSharedOpen &&
+    remoteActive &&
+    !!activeSessionId &&
+    reconnectSessionId === activeSessionId;
 
   /** Group-chat timeline metadata: day separators + sender-group headers
    *  (docs/architecture/features/chat-app.md → "Transcript timestamps"). */
@@ -3436,10 +3603,10 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           chat.state.isStreaming && !canQueueMidTurn && "hidden",
         )}
         slotPostInput={
-          chat.state.isStreaming ? (
+          chat.state.isStreaming || mirrorStopAvailable ? (
             <button
               type="button"
-              onClick={handleAbort}
+              onClick={chat.state.isStreaming ? handleAbort : stopActiveTurn}
               aria-label={tChat.abort}
               title={tChat.abort}
               className={cn(
@@ -3906,6 +4073,17 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 className="rounded-lg border border-border/70 bg-muted/30 px-3 py-2 text-xs text-muted-foreground"
               >
                 {turnEndNotice}
+              </p>
+            )}
+            {/* The direct stream died under a turn that is still running;
+                the mirror above is carrying it. Not an error: nothing was
+                lost, the reply lands in the transcript when it finishes. */}
+            {reconnectNotice && (
+              <p
+                role="status"
+                className="rounded-lg border border-border/70 bg-muted/30 px-3 py-2 text-xs text-muted-foreground"
+              >
+                {t.turnReconnecting}
               </p>
             )}
             {/* Typing indicator — teammates mid-composition, off the follow

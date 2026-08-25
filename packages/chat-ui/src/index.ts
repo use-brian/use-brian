@@ -21,6 +21,8 @@ export { useChatSession, type UseChatSessionResult } from './useChatSession.js'
 
 export {
   useMessageStream,
+  runStream,
+  TERMINAL_STREAM_EVENTS,
   type AuthFetch,
   type StreamOptions,
   type StartStream,

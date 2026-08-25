@@ -144,10 +144,10 @@ import {
   registrableSiteOf,
 } from '@use-brian/core'
 
-import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTORS, OFFICIAL_CONNECTOR_TOOLS } from '@use-brian/shared'
+import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTORS, OFFICIAL_CONNECTOR_TOOLS, recordingIdFromAnchorKey } from '@use-brian/shared'
 
 // ── OPEN package imports (@use-brian/api) ──────────────────────────
-import { findAssistantById, getWorkspacePrimaryAssistant, isUserBlockedForAssistant, listAccessibleAssistants } from './db/users.js'
+import { findAssistantById, findUserById, getWorkspacePrimaryAssistant, isUserBlockedForAssistant, listAccessibleAssistants } from './db/users.js'
 import { getTaskByIdSystem } from './db/tasks.js'
 import { createBrowserSkillsStore } from './db/browser-skills-store.js'
 import { createDbConnectorActionStore } from './db/connector-actions-store.js'
@@ -400,6 +400,7 @@ import { createFilesApi, createSingletonFilesClientResolver, type FilesClientRes
 import { createChunkedFileUploadService, type ChunkedFileUploadService } from './files/chunked-upload.js'
 import { createSearchFileContentTool } from './files/file-artifact-tools.js'
 import {
+  createAssignRecordingSpeakersTool,
   createChatSearchRecordingTool,
   createListRecordingsTool,
 } from './recordings/recording-chat-tools.js'
@@ -2113,6 +2114,26 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       createChatSearchRecordingTool({ embedder: sharedEmbedder }),
     )
     tools.set('listRecordings', createListRecordingsTool())
+    tools.set(
+      'assignRecordingSpeakers',
+      createAssignRecordingSpeakersTool({
+        resolvePageRecording: async (actorUserId, pageId) => {
+          const page = await savedViewStore.getById(actorUserId, pageId)
+          if (!page) return null
+          const recordingId = recordingIdFromAnchorKey(page.anchorKey) ?? page.linkedRecordingId
+          return recordingId ? { recordingId, workspaceId: page.workspaceId } : null
+        },
+        getContact: (ctx, contactId) => crmStore.getContactById(ctx, contactId),
+        getSelf: async (userId) => {
+          const user = await findUserById(userId)
+          return user ? { name: user.name, email: user.email } : null
+        },
+        updateParticipants: async (recordingId, participants) => {
+          const updated = await updateRecording(recordingId, { participants })
+          if (!updated) throw new Error(`Recording ${recordingId} disappeared before its participants could be saved.`)
+        },
+      }),
+    )
 
     // Provider-neutral local chat history. These are base read tools rather
     // than connector API tools: the archive remains available when a live

@@ -2225,6 +2225,35 @@ export async function readRecordingRange(
 }
 
 /**
+ * The stable diarization labels that actually occur in one visible recording,
+ * ordered by first appearance. Speaker assignment uses this before writing
+ * `recordings.participants`: accepting a typo would persist an unused mapping
+ * and let the assistant falsely claim the transcript changed.
+ */
+export async function listRecordingSpeakerLabels(
+  actor: RetrievalActor,
+  recordingId: string,
+): Promise<string[]> {
+  const values: unknown[] = []
+  const visibility = visibilityPredicate(actor, undefined, values, { tableAlias: 'ts' })
+  values.push(recordingId)
+  const ridIdx = values.length
+  const res = await queryWithRLS<{ speaker: string; first_index: number }>(
+    actor.userId,
+    `SELECT ts.speaker, min(ts.segment_index)::int AS first_index
+       FROM transcript_segments ts
+      WHERE ${visibility}
+        AND ts.recording_id = $${ridIdx}
+        AND ts.speaker IS NOT NULL
+        AND btrim(ts.speaker) <> ''
+      GROUP BY ts.speaker
+      ORDER BY first_index, ts.speaker`,
+    values,
+  )
+  return res.rows.map((row) => row.speaker)
+}
+
+/**
  * Anonymous public-share transcript read — the shared-page twin of
  * `readRecordingRange`. `[COMP:doc/public-recording]`
  *

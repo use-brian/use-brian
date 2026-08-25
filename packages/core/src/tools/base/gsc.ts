@@ -239,7 +239,7 @@ export function createSearchConsoleTools(api: SearchConsoleToolsApi): Tool[] {
       startDate: DATE.describe('Inclusive start date, YYYY-MM-DD.'),
       endDate: DATE.describe('Inclusive end date, YYYY-MM-DD.'),
       dimensions: z.array(z.enum(SEARCH_CONSOLE_DIMENSIONS)).max(4).optional()
-        .describe(`Group rows by these dimensions (default ["query"]). One of: ${SEARCH_CONSOLE_DIMENSIONS.join(', ')}.`),
+        .describe(`Group rows by these dimensions. Omit for default ["query"]; pass [] for ungrouped property totals. One of: ${SEARCH_CONSOLE_DIMENSIONS.join(', ')}.`),
       rowLimit: z.number().int().min(1).max(1000).optional().describe('Max rows to return (default 100, max 1000).'),
       startRow: z.number().int().min(0).optional().describe('Zero-based row offset for paging (default 0).'),
       searchType: z.enum(SEARCH_CONSOLE_SEARCH_TYPES).optional()
@@ -257,7 +257,7 @@ export function createSearchConsoleTools(api: SearchConsoleToolsApi): Tool[] {
     async execute(input) {
       const siteUrl = await resolveSite(input.siteUrl)
       if (!siteUrl) return noSiteError('searchConsoleQuery')
-      const dimensions = input.dimensions?.length ? [...input.dimensions] : ['query']
+      const dimensions = input.dimensions === undefined ? ['query'] : [...input.dimensions]
       const rowLimit = input.rowLimit ?? 100
       const startRow = input.startRow ?? 0
       const body: SearchConsoleQueryBody = {

@@ -3,21 +3,28 @@ import { readFileSync } from 'node:fs'
 
 const searchRecording = vi.fn()
 const readRecordingRange = vi.fn()
+const listRecordingSpeakerLabels = vi.fn()
 vi.mock('../../db/retrieval-store.js', () => ({
   searchRecording: (...a: unknown[]) => searchRecording(...a),
   readRecordingRange: (...a: unknown[]) => readRecordingRange(...a),
+  listRecordingSpeakerLabels: (...a: unknown[]) => listRecordingSpeakerLabels(...a),
 }))
 
 const listRecordings = vi.fn()
+const getRecording = vi.fn()
 vi.mock('../../db/recordings-store.js', () => ({
   listRecordings: (...a: unknown[]) => listRecordings(...a),
+  getRecording: (...a: unknown[]) => getRecording(...a),
   LIST_RECORDINGS_LIMIT_DEFAULT: 20,
   LIST_RECORDINGS_LIMIT_MAX: 100,
 }))
 
 import {
+  createAssignRecordingSpeakersTool,
   createChatSearchRecordingTool,
   createListRecordingsTool,
+  mergeRecordingParticipants,
+  recordingSpeakerKey,
 } from '../recording-chat-tools.js'
 
 /**
@@ -53,6 +60,8 @@ beforeEach(() => {
   listRecordings.mockResolvedValue([])
   searchRecording.mockResolvedValue([])
   readRecordingRange.mockResolvedValue([])
+  listRecordingSpeakerLabels.mockResolvedValue([])
+  getRecording.mockResolvedValue(null)
 })
 
 describe('[COMP:recordings/recording-chat-tools] searchRecording', () => {
@@ -207,6 +216,115 @@ describe('[COMP:recordings/recording-chat-tools] listRecordings', () => {
   })
 })
 
+describe('[COMP:recordings/recording-chat-tools] assignRecordingSpeakers', () => {
+  const CONTACT_ID = '6ff31f58-d5d4-45f4-9209-9459cda5d98e'
+  const pageTarget = vi.fn()
+  const getContact = vi.fn()
+  const getSelf = vi.fn()
+  const updateParticipants = vi.fn()
+
+  function tool() {
+    return createAssignRecordingSpeakersTool({
+      resolvePageRecording: pageTarget,
+      getRecording,
+      listSpeakerLabels: listRecordingSpeakerLabels,
+      getContact,
+      getSelf,
+      updateParticipants,
+    } as never)
+  }
+
+  beforeEach(() => {
+    pageTarget.mockReset().mockResolvedValue({ recordingId: REC_ID, workspaceId: 'ws-1' })
+    getContact.mockReset().mockResolvedValue({
+      id: CONTACT_ID,
+      workspaceId: 'ws-1',
+      name: 'Fictional Guest',
+      email: 'guest@example.test',
+    })
+    getSelf.mockReset().mockResolvedValue({ name: 'Workspace Member', email: 'member@example.test' })
+    updateParticipants.mockReset().mockResolvedValue(undefined)
+    getRecording.mockResolvedValue({
+      id: REC_ID,
+      workspaceId: 'ws-1',
+      participants: [{ speaker: 'Speaker 3', name: 'Existing Person' }],
+    })
+    listRecordingSpeakerLabels.mockResolvedValue(['Speaker 1', 'Speaker 2', 'Speaker 3'])
+  })
+
+  it('targets the active page, normalizes speaker1, links a CRM contact, resolves self, and preserves other speakers', async () => {
+    const res = await tool().execute(
+      {
+        assignments: [
+          { speaker: 'speaker1', contactId: CONTACT_ID },
+          { speaker: 'Speaker 2', isSelf: true },
+        ],
+      },
+      { ...(CTX as object), docViewId: 'page-1' } as never,
+    )
+
+    expect(pageTarget).toHaveBeenCalledWith('u-1', 'page-1')
+    expect(getContact).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceId: 'ws-1', userId: 'u-1' }),
+      CONTACT_ID,
+    )
+    expect(updateParticipants).toHaveBeenCalledWith(REC_ID, [
+      { speaker: 'Speaker 3', name: 'Existing Person' },
+      {
+        speaker: 'Speaker 1',
+        name: 'Fictional Guest',
+        contactId: CONTACT_ID,
+        email: 'guest@example.test',
+      },
+      { speaker: 'Speaker 2', name: 'Workspace Member', email: 'member@example.test' },
+    ])
+    expect(JSON.parse(String(res.data))).toMatchObject({
+      kind: 'recording_speakers_assigned',
+      recordingId: REC_ID,
+      pageId: 'page-1',
+    })
+  })
+
+  it('stops before writing for a label that is not in the transcript', async () => {
+    const res = await tool().execute(
+      { recordingId: REC_ID, assignments: [{ speaker: 'Speaker 9', contactId: CONTACT_ID }] },
+      CTX,
+    )
+    expect(res.isError).toBe(true)
+    expect(String(res.data)).toContain('Known labels')
+    expect(updateParticipants).not.toHaveBeenCalled()
+  })
+
+  it('stops before writing when a contact is not visible in this workspace', async () => {
+    getContact.mockResolvedValue(null)
+    const res = await tool().execute(
+      { recordingId: REC_ID, assignments: [{ speaker: 'Speaker 1', contactId: CONTACT_ID }] },
+      CTX,
+    )
+    expect(res.isError).toBe(true)
+    expect(String(res.data)).toContain('not visible')
+    expect(updateParticipants).not.toHaveBeenCalled()
+  })
+
+  it('requires exactly one external-contact or self identity per assignment', () => {
+    const schema = tool().inputSchema
+    expect(schema.safeParse({ assignments: [{ speaker: 'Speaker 1' }] }).success).toBe(false)
+    expect(
+      schema.safeParse({ assignments: [{ speaker: 'Speaker 1', contactId: CONTACT_ID, isSelf: true }] }).success,
+    ).toBe(false)
+  })
+
+  it('normalizes only label spelling and merges replacements without dropping unrelated rows', () => {
+    expect(recordingSpeakerKey(' SPEAKER： ４ ')).toBe('speaker4')
+    expect(
+      mergeRecordingParticipants(
+        [{ speaker: 'Speaker 1', name: 'Old' }, { speaker: 'Guest', name: 'Keep' }],
+        [{ speaker: 'speaker1', name: 'New' }],
+      ),
+    ).toEqual([{ speaker: 'speaker1', name: 'New' }, { speaker: 'Guest', name: 'Keep' }])
+  })
+})
+
 /**
  * REGISTRATION. A tool that exists, works, and is not in the base tools map is
  * invisible — which is exactly what happened to `searchRecording`: it was
@@ -224,9 +342,10 @@ describe('[COMP:recordings/recording-chat-tools] registration in the base tool m
     'utf8',
   )
 
-  it('registers searchRecording and listRecordings', () => {
+  it('registers searchRecording, listRecordings, and assignRecordingSpeakers', () => {
     expect(boot).toMatch(/tools\.set\(\s*'searchRecording'/)
     expect(boot).toMatch(/tools\.set\('listRecordings'/)
+    expect(boot).toMatch(/'assignRecordingSpeakers'/)
   })
 
   it('registers them at the SAME seam as searchFileContent (the base map)', () => {

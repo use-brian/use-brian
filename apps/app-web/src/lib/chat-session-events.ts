@@ -92,3 +92,42 @@ export function dispatchChatSessionActivity(
     }),
   );
 }
+
+/**
+ * Whether the chat surface should hold a `GET /api/sessions/:id/stream`
+ * subscription for the open session.
+ *
+ * A room is followed for its whole lifetime (teammate posts, mirrored turns,
+ * presence). A personal session opens the stream only while a re-attach is
+ * WANTED: after the direct `POST /api/chat` body closed without a terminal
+ * event (the turn is still running server-side, see 2026-08-24), and once on
+ * hydrate so a reload mid-turn finds the running turn again. When idle the
+ * route answers `status` then `done` and closes; one cheap GET.
+ */
+export function shouldOpenSessionStream(params: {
+  isRoom: boolean;
+  reconnectWanted: boolean;
+}): boolean {
+  return params.isRoom || params.reconnectWanted;
+}
+
+/**
+ * Whether a closed session stream should be re-opened after a beat.
+ *
+ * Rooms never close server-side on idle, so any close there is a deploy /
+ * restart / network blip and the follow stream comes back. A personal
+ * session's reconnect stream ends on purpose: the server sends `done` when
+ * the turn is over (or was never running) and never reopens. So a non-room
+ * reopens ONLY when the body closed without `done` (the transport gave up on
+ * a turn that may still be running); after `done` there is nothing to attach
+ * to. A cancelled effect (unmount, session switch) never reopens.
+ */
+export function shouldReopenSessionStream(params: {
+  isRoom: boolean;
+  sawDone: boolean;
+  cancelled: boolean;
+}): boolean {
+  if (params.cancelled) return false;
+  if (params.isRoom) return true;
+  return !params.sawDone;
+}

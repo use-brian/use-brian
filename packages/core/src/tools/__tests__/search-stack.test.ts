@@ -2,10 +2,14 @@ import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } fr
 import { createSearchStack, type SearchProvider, type SearchResult } from '../base/search-stack.js'
 import { braveProvider } from '../base/search-brave.js'
 import { serperProvider } from '../base/search-serper.js'
+import { serpApiProvider } from '../base/search-serpapi.js'
 import { tavilyProvider } from '../base/search-tavily.js'
 import { duckDuckGoProvider } from '../base/search-ddg.js'
 import { webSearchTool } from '../base/web-search.js'
 import type { ToolContext } from '../types.js'
+import { createToolExecutor, NO_TOOL_TIMEOUT } from '../../engine/tool-executor.js'
+import { createLoopDetector } from '../../engine/loop-detector.js'
+import type { ContentBlock } from '../../providers/types.js'
 
 // ── Helpers ─────────────────────────────────────────────────────
 
@@ -33,6 +37,27 @@ function withEnv<T>(key: string, value: string | undefined, fn: () => T): T {
     if (prev === undefined) delete process.env[key]
     else process.env[key] = prev
   }
+}
+
+function waitWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    const onAbort = () => {
+      clearTimeout(timer)
+      reject(new Error('This operation was aborted'))
+    }
+    if (signal?.aborted) onAbort()
+    else signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+async function drainResults(executor: ReturnType<typeof createToolExecutor>): Promise<ContentBlock[]> {
+  const all: ContentBlock[] = []
+  for await (const batch of executor.getRemainingResults()) all.push(...batch.blocks)
+  return all
 }
 
 // ── Stack composer tests ────────────────────────────────────────
@@ -170,6 +195,15 @@ describe('[COMP:tools/search] Provider availability gates', () => {
     })
   })
 
+  it('serpApiProvider gates on SERPAPI_API_KEY', () => {
+    withEnv('SERPAPI_API_KEY', undefined, () => {
+      expect(serpApiProvider.available()).toBe(false)
+    })
+    withEnv('SERPAPI_API_KEY', 'test-token', () => {
+      expect(serpApiProvider.available()).toBe(true)
+    })
+  })
+
   it('tavilyProvider gates on TAVILY_API_KEY', () => {
     withEnv('TAVILY_API_KEY', undefined, () => {
       expect(tavilyProvider.available()).toBe(false)
@@ -191,7 +225,7 @@ describe('[COMP:tools/search] Provider availability gates', () => {
 // ── webSearch tool: outage vs genuine no-results ─────────────────
 
 describe('[COMP:tools/search] webSearch outage surfacing', () => {
-  const ENV_KEYS = ['BRAVE_SEARCH_API_KEY', 'SERPER_API_KEY', 'TAVILY_API_KEY'] as const
+  const ENV_KEYS = ['BRAVE_SEARCH_API_KEY', 'SERPER_API_KEY', 'SERPAPI_API_KEY', 'TAVILY_API_KEY'] as const
   let savedEnv: Record<string, string | undefined>
   let fetchSpy: MockInstance<typeof fetch>
 
@@ -201,6 +235,7 @@ describe('[COMP:tools/search] webSearch outage surfacing', () => {
     savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]))
     delete process.env.BRAVE_SEARCH_API_KEY
     delete process.env.SERPER_API_KEY
+    delete process.env.SERPAPI_API_KEY
     process.env.TAVILY_API_KEY = 'test-token'
     fetchSpy = vi.spyOn(globalThis, 'fetch') as unknown as MockInstance<typeof fetch>
   })
@@ -242,7 +277,7 @@ describe('[COMP:tools/search] webSearch outage surfacing', () => {
 })
 
 describe('[COMP:tools/search] webSearch exact-provider panels', () => {
-  const ENV_KEYS = ['BRAVE_SEARCH_API_KEY', 'SERPER_API_KEY', 'TAVILY_API_KEY'] as const
+  const ENV_KEYS = ['BRAVE_SEARCH_API_KEY', 'SERPER_API_KEY', 'SERPAPI_API_KEY', 'TAVILY_API_KEY'] as const
   let savedEnv: Record<string, string | undefined>
   let fetchSpy: MockInstance<typeof fetch>
 
@@ -252,11 +287,13 @@ describe('[COMP:tools/search] webSearch exact-provider panels', () => {
     savedEnv = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]))
     process.env.BRAVE_SEARCH_API_KEY = 'brave-token'
     process.env.SERPER_API_KEY = 'serper-token'
+    process.env.SERPAPI_API_KEY = 'serpapi-token'
     process.env.TAVILY_API_KEY = 'tavily-token'
     fetchSpy = vi.spyOn(globalThis, 'fetch') as unknown as MockInstance<typeof fetch>
   })
 
   afterEach(() => {
+    vi.useRealTimers()
     for (const key of ENV_KEYS) {
       if (savedEnv[key] === undefined) delete process.env[key]
       else process.env[key] = savedEnv[key]
@@ -270,6 +307,7 @@ describe('[COMP:tools/search] webSearch exact-provider panels', () => {
       .toBe(false)
     expect(webSearchTool.inputSchema.safeParse({ queries: ['one'] }).success).toBe(false)
     expect(webSearchTool.inputSchema.safeParse({ queries: ['one'], provider: 'serper' }).success).toBe(true)
+    expect(webSearchTool.inputSchema.safeParse({ queries: ['one'], provider: 'serpapi' }).success).toBe(true)
   })
 
   it('uses only the selected provider and makes its provenance model-visible', async () => {
@@ -337,6 +375,188 @@ describe('[COMP:tools/search] webSearch exact-provider panels', () => {
       searchProvider: 'serper',
       searchProviderUnits: 2,
       externalCost_flatCostUsd: 0.002,
+    })
+  })
+
+  it('runs an exact SerpAPI panel without falling through and records its units', async () => {
+    fetchSpy.mockImplementation(async (input) => {
+      const url = new URL(String(input))
+      expect(url.origin + url.pathname).toBe('https://serpapi.com/search.json')
+      expect(url.searchParams.get('engine')).toBe('google')
+      expect(url.searchParams.get('api_key')).toBe('serpapi-token')
+      const query = url.searchParams.get('q') ?? ''
+      return new Response(JSON.stringify({
+        organic_results: [{ title: query, link: 'https://usebrian.ai/', snippet: 'Company brain' }],
+      }), { status: 200 })
+    })
+
+    const out = await webSearchTool.execute(
+      { queries: ['q1', 'q2'], provider: 'serpapi', maxResults: 10 },
+      ctx,
+    )
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+    expect(out.isError).toBeUndefined()
+    expect(out.data).toMatchObject({
+      provider: 'serpapi',
+      expectedQueries: 2,
+      completed: 2,
+      failed: 0,
+      searches: [
+        { query: 'q1', status: 'ok', provider: 'serpapi' },
+        { query: 'q2', status: 'ok', provider: 'serpapi' },
+      ],
+    })
+    expect(out.meta).toMatchObject({
+      searchProvider: 'serpapi',
+      searchProviderUnits: 2,
+      externalCost_model: 'serpapi',
+      externalCost_flatCostUsd: 0.05,
+    })
+  })
+
+  it('lets a 25-query multi-wave panel exceed 15 seconds without aborting queued work', async () => {
+    vi.useFakeTimers()
+    const queries = Array.from({ length: 25 }, (_, index) => `q${index + 1}`)
+    let active = 0
+    let maxActive = 0
+    fetchSpy.mockImplementation(async (input, init) => {
+      active += 1
+      maxActive = Math.max(maxActive, active)
+      try {
+        await waitWithAbort(10_000, init?.signal ?? undefined)
+        const query = new URL(String(input)).searchParams.get('q') ?? ''
+        return new Response(JSON.stringify({
+          organic_results: [{ title: query, link: `https://${query}.example`, snippet: `${query} result` }],
+        }), { status: 200 })
+      } finally {
+        active -= 1
+      }
+    })
+
+    expect(webSearchTool.timeoutMs).toBe(NO_TOOL_TIMEOUT)
+    const executor = createToolExecutor({
+      tools: new Map([['webSearch', webSearchTool]]),
+      context: ctx,
+      loopDetector: createLoopDetector(),
+    })
+    executor.addTool('panel', 'webSearch', { queries, provider: 'serpapi', maxResults: 10 })
+    const resultPromise = drainResults(executor)
+    await vi.runAllTimersAsync()
+    const results = await resultPromise
+
+    expect(fetchSpy).toHaveBeenCalledTimes(25)
+    expect(maxActive).toBe(4)
+    expect(results).toHaveLength(1)
+    const block = results[0] as Extract<ContentBlock, { type: 'tool_result' }>
+    const data = JSON.parse(String(block.content)) as {
+      completed: number
+      failed: number
+      searches: Array<{ query: string; status: string }>
+    }
+    expect(block.isError).toBeUndefined()
+    expect(data.completed).toBe(25)
+    expect(data.failed).toBe(0)
+    expect(data.searches.map((search) => search.query)).toEqual(queries)
+  })
+
+  it('times out one slow panel query without blocking later queued queries', async () => {
+    vi.useFakeTimers()
+    fetchSpy.mockImplementation(async (input, init) => {
+      const query = new URL(String(input)).searchParams.get('q') ?? ''
+      await waitWithAbort(query === 'q1' ? 30_000 : 1_000, init?.signal ?? undefined)
+      return new Response(JSON.stringify({
+        organic_results: [{ title: query, link: `https://${query}.example`, snippet: `${query} result` }],
+      }), { status: 200 })
+    })
+
+    const resultPromise = webSearchTool.execute(
+      { queries: ['q1', 'q2', 'q3', 'q4', 'q5'], provider: 'serpapi', maxResults: 10 },
+      ctx,
+    )
+    await vi.runAllTimersAsync()
+    const out = await resultPromise
+    const data = out.data as {
+      completed: number
+      failed: number
+      searches: Array<{ query: string; status: string; error?: string }>
+    }
+
+    expect(fetchSpy).toHaveBeenCalledTimes(5)
+    expect(data.completed).toBe(4)
+    expect(data.failed).toBe(1)
+    expect(data.searches.map((search) => [search.query, search.status])).toEqual([
+      ['q1', 'error'],
+      ['q2', 'ok'],
+      ['q3', 'ok'],
+      ['q4', 'ok'],
+      ['q5', 'ok'],
+    ])
+    expect(data.searches[0].error).toBe('search timed out after 15000ms')
+    expect(out.meta).toMatchObject({
+      searchProvider: 'serpapi',
+      searchProviderUnits: 4,
+      externalCost_flatCostUsd: 0.1,
+    })
+    expect(out.meta?.searchProviderErrors).toContain('q1: search timed out after 15000ms')
+  })
+
+  it('labels parent-aborted active and queued rows as cancelled, never provider unavailable', async () => {
+    vi.useFakeTimers()
+    const controller = new AbortController()
+    const callerCtx = { abortSignal: controller.signal } as ToolContext
+    fetchSpy.mockImplementation(async (input, init) => {
+      const query = new URL(String(input)).searchParams.get('q') ?? ''
+      await waitWithAbort(30_000, init?.signal ?? undefined)
+      return new Response(JSON.stringify({
+        organic_results: [{ title: query, link: `https://${query}.example`, snippet: `${query} result` }],
+      }), { status: 200 })
+    })
+
+    const resultPromise = webSearchTool.execute(
+      { queries: ['q1', 'q2', 'q3', 'q4', 'q5'], provider: 'serpapi', maxResults: 10 },
+      callerCtx,
+    )
+    await vi.advanceTimersByTimeAsync(1_000)
+    controller.abort()
+    await vi.runAllTimersAsync()
+    const out = await resultPromise
+    const data = out.data as {
+      searches: Array<{ query: string; status: string; error?: string }>
+    }
+
+    expect(fetchSpy).toHaveBeenCalledTimes(4)
+    expect(data.searches).toHaveLength(5)
+    expect(data.searches.every((search) => search.status === 'error')).toBe(true)
+    expect(data.searches.every((search) => search.error === 'search cancelled by caller')).toBe(true)
+    expect(JSON.stringify(data)).not.toContain('provider unavailable')
+  })
+
+  it('preserves a deadline as the first abort cause if the parent aborts during cleanup', async () => {
+    vi.useFakeTimers()
+    const controller = new AbortController()
+    const callerCtx = { abortSignal: controller.signal } as ToolContext
+    fetchSpy.mockImplementation(async (_input, init) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => {
+        setTimeout(() => reject(new Error('provider cleanup finished')), 2_000)
+      }, { once: true })
+    }))
+
+    const resultPromise = webSearchTool.execute(
+      { query: 'q1', provider: 'serpapi', maxResults: 10 },
+      callerCtx,
+    )
+    setTimeout(() => controller.abort(), 16_000)
+    await vi.runAllTimersAsync()
+    const out = await resultPromise
+    const data = out.data as {
+      searches: Array<{ query: string; status: string; error?: string }>
+    }
+
+    expect(data.searches[0]).toMatchObject({
+      query: 'q1',
+      status: 'error',
+      error: 'search timed out after 15000ms',
     })
   })
 
@@ -414,6 +634,48 @@ describe('[COMP:tools/search] Provider response parsers', () => {
     await withEnv('SERPER_API_KEY', 'test-token', async () => {
       const results = await serperProvider.search('flights', 5)
       expect(results).toEqual([{ title: 'KAYAK', url: 'https://www.kayak.com', snippet: '$87 cheap flights' }])
+    })
+  })
+
+  it('serpApiProvider parses organic_results[] and normalizes link→url', async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          organic_results: [
+            { title: 'Use Brian', link: 'https://usebrian.ai/', snippet: 'AI company brain' },
+          ],
+        }),
+        { status: 200 },
+      ),
+    )
+    await withEnv('SERPAPI_API_KEY', 'test-token', async () => {
+      const results = await serpApiProvider.search('company brain', 5)
+      expect(results).toEqual([{ title: 'Use Brian', url: 'https://usebrian.ai/', snippet: 'AI company brain' }])
+    })
+  })
+
+  it('serpApiProvider treats a structured provider error as a failure, not an empty result', async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: 'Your account has run out of searches.' }), { status: 200 }),
+    )
+    await withEnv('SERPAPI_API_KEY', 'test-token', async () => {
+      await expect(serpApiProvider.search('company brain', 5)).rejects.toThrow(/run out of searches/)
+    })
+  })
+
+  it('serpApiProvider treats a successful empty Google search as a trusted empty result', async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          search_metadata: { status: 'Success' },
+          search_information: { organic_results_state: 'Fully empty' },
+          error: "Google hasn't returned any results for this query.",
+        }),
+        { status: 200 },
+      ),
+    )
+    await withEnv('SERPAPI_API_KEY', 'test-token', async () => {
+      await expect(serpApiProvider.search('no matching documents', 5)).resolves.toEqual([])
     })
   })
 

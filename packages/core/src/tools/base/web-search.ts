@@ -3,22 +3,49 @@ import { buildTool } from '../types.js'
 import { createSearchStack } from './search-stack.js'
 import { braveProvider } from './search-brave.js'
 import { serperProvider } from './search-serper.js'
+import { serpApiProvider } from './search-serpapi.js'
 import { tavilyProvider } from './search-tavily.js'
 import { duckDuckGoProvider } from './search-ddg.js'
 import { encodeExternalCostMeta } from '../../billing/external-cost.js'
 import { flatSearchCostUsd } from '../../billing/search-provider-rates.js'
+import { NO_TOOL_TIMEOUT } from '../../engine/tool-executor.js'
 
-const SEARCH_PROVIDER_NAMES = ['brave', 'serper', 'tavily', 'duckduckgo'] as const
+const SEARCH_PROVIDER_NAMES = ['brave', 'serper', 'serpapi', 'tavily', 'duckduckgo'] as const
 type SearchProviderName = (typeof SEARCH_PROVIDER_NAMES)[number]
 
 const providersByName = {
   brave: braveProvider,
   serper: serperProvider,
+  serpapi: serpApiProvider,
   tavily: tavilyProvider,
   duckduckgo: duckDuckGoProvider,
 } satisfies Record<SearchProviderName, typeof braveProvider>
 
 const PANEL_CONCURRENCY = 4
+const SEARCH_REQUEST_TIMEOUT_MS = 15_000
+
+async function withSearchDeadline<T>(
+  parentSignal: AbortSignal,
+  run: (signal: AbortSignal) => Promise<T>,
+): Promise<{ value: T; timedOut: boolean; cancelled: boolean }> {
+  const deadline = new AbortController()
+  const deadlineReason = new Error(`search timed out after ${SEARCH_REQUEST_TIMEOUT_MS}ms`)
+  const timer = setTimeout(() => deadline.abort(deadlineReason), SEARCH_REQUEST_TIMEOUT_MS)
+  const signal = AbortSignal.any([parentSignal, deadline.signal])
+  try {
+    const value = await run(signal)
+    return {
+      value,
+      // AbortSignal.any preserves the first signal's reason. Inspecting only
+      // controller state here would mislabel a deadline as caller cancellation
+      // if the parent aborts while a provider is still cleaning up.
+      timedOut: signal.aborted && signal.reason === deadlineReason,
+      cancelled: signal.aborted && signal.reason !== deadlineReason,
+    }
+  } finally {
+    clearTimeout(timer)
+  }
+}
 
 async function mapPool<T, R>(
   items: T[],
@@ -40,13 +67,15 @@ async function mapPool<T, R>(
 /**
  * Web search tool — model-driven search with provider fallback.
  *
- * Provider order: Brave → Serper → Tavily → DuckDuckGo.
+ * Provider order: Brave → Serper → SerpAPI → Tavily → DuckDuckGo.
  *
  * - Brave is first because it's fast, commerce-aware, and cheap.
  * - Serper (Google SERP) is second because Google indexes commercial sites
  *   better than anything else — the motivating bug was "flight prices" which
  *   Brave/Tavily mis-indexed and Google gets right.
- * - Tavily is third for AI-optimized research queries.
+ * - SerpAPI is a second Google SERP backend for exact-provider measurements
+ *   and fallback when Serper rejects a request.
+ * - Tavily follows for AI-optimized research queries.
  * - DuckDuckGo is the no-token fallback for local dev without any env set.
  *
  * This is the explicit `webSearch` tool the model calls. It replaces
@@ -72,7 +101,7 @@ const webSearchInputSchema = z
       .enum(SEARCH_PROVIDER_NAMES)
       .optional()
       .describe(
-        'Exact provider for repeatable measurement. Omit for normal Brave → Serper → Tavily → DuckDuckGo fallback.',
+        'Exact provider for repeatable measurement. Omit for normal Brave → Serper → SerpAPI → Tavily → DuckDuckGo fallback.',
       ),
     maxResults: z.number().optional().describe('Maximum results per query (default 5, max 10)'),
   })
@@ -101,7 +130,10 @@ export const webSearchTool = buildTool({
   inputSchema: webSearchInputSchema,
   isConcurrencySafe: true,
   isReadOnly: true,
-  timeoutMs: 15_000,
+  // Exact-provider panels can require seven bounded-concurrency waves. Each
+  // provider request gets its own deadline below so one slow request cannot
+  // abort queued work that has not started yet.
+  timeoutMs: NO_TOOL_TIMEOUT,
 
   async execute(input, context) {
     const maxResults = Math.max(1, Math.min(10, input.maxResults ?? 5))
@@ -121,7 +153,10 @@ export const webSearchTool = buildTool({
       const queries = input.queries ?? [input.query!]
       const strictStack = createSearchStack([selected])
       const searches = await mapPool(queries, PANEL_CONCURRENCY, async (query) => {
-        const outcome = await strictStack(query, maxResults, context.abortSignal)
+        const { value: outcome, timedOut, cancelled } = await withSearchDeadline(
+          context.abortSignal,
+          (signal) => strictStack(query, maxResults, signal),
+        )
         if (outcome.results.length > 0) {
           return {
             query,
@@ -138,7 +173,11 @@ export const webSearchTool = buildTool({
             results: [],
           }
         }
-        const error = outcome.failures.map((failure) => failure.error).join('; ') || 'provider unavailable'
+        const error = cancelled
+          ? 'search cancelled by caller'
+          : timedOut
+            ? `search timed out after ${SEARCH_REQUEST_TIMEOUT_MS}ms`
+            : outcome.failures.map((failure) => failure.error).join('; ') || 'provider unavailable'
         return {
           query,
           status: 'error' as const,
@@ -182,14 +221,17 @@ export const webSearchTool = buildTool({
       }
     }
 
-    const { provider, results, failures, trustedEmpty } = await searchStack(
-      input.query!,
-      maxResults,
+    const {
+      value: { provider, results, failures, trustedEmpty },
+      timedOut,
+      cancelled,
+    } = await withSearchDeadline(
       context.abortSignal,
+      (signal) => searchStack(input.query!, maxResults, signal),
     )
 
-    // `meta.searchProvider` carries the winning provider name (brave / serper
-    // / tavily / duckduckgo) back to the analytics log site via ToolResult.meta.
+    // `meta.searchProvider` carries the winning provider name (brave / serper /
+    // serpapi / tavily / duckduckgo) back to analytics via ToolResult.meta.
     // `externalCost_*` keys carry the per-call USD so the chat route can
     // write a `usage_tracking` row (flat cost, 0 tokens) per billing policy.
     // Both are omitted when no provider served the call.
@@ -206,6 +248,16 @@ export const webSearchTool = buildTool({
         : undefined
 
     if (results.length === 0) {
+      if (cancelled || timedOut) {
+        const reason = cancelled
+          ? 'Web search was cancelled by the caller.'
+          : `Web search timed out after ${SEARCH_REQUEST_TIMEOUT_MS}ms.`
+        return {
+          data: `${reason} No conclusion can be drawn from the empty result.`,
+          isError: true,
+          meta: { searchProviderErrors: reason },
+        }
+      }
       // Outage vs no results. When every provider that ran errored and none
       // returned a trustworthy empty, "No results found" would be a lie the
       // model repeats to the user as "X does not exist" / confabulated

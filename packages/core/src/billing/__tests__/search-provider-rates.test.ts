@@ -5,6 +5,7 @@ describe('[COMP:billing/search-rates] SEARCH_PROVIDER_COST_PER_1K', () => {
   it('has entries for the billable providers in the stack', () => {
     expect(SEARCH_PROVIDER_COST_PER_1K.brave).toBe(5.0)
     expect(SEARCH_PROVIDER_COST_PER_1K.serper).toBe(1.0)
+    expect(SEARCH_PROVIDER_COST_PER_1K.serpapi).toBe(25.0)
     expect(SEARCH_PROVIDER_COST_PER_1K.tavily).toBe(8.0)
     expect(SEARCH_PROVIDER_COST_PER_1K.duckduckgo).toBe(0.0)
   })
@@ -20,6 +21,7 @@ describe('[COMP:billing/search-rates] flatSearchCostUsd', () => {
   it('converts per-1k to per-call', () => {
     expect(flatSearchCostUsd('brave')).toBe(0.005)
     expect(flatSearchCostUsd('serper')).toBe(0.001)
+    expect(flatSearchCostUsd('serpapi')).toBe(0.025)
     expect(flatSearchCostUsd('tavily')).toBe(0.008)
     expect(flatSearchCostUsd('duckduckgo')).toBe(0)
   })

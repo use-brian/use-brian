@@ -255,6 +255,8 @@ export type ChannelIntegrationConfig = {
   allowedUserIds?: string[]
   /** WhatsApp Cloud public business number, safe to expose for chat links. */
   whatsappDisplayPhoneNumber?: string
+  /** WhatsApp Cloud only: let every participant invoke the assistant in API-created groups. */
+  whatsappCloudAllowAllGroupMembers?: boolean // default: false; DMs still use userAccessMode
   /**
    * Telegram BYO only. When true, explicitly allowlisted guests in private
    * DMs and groups may use connector tools enabled for the routed assistant.

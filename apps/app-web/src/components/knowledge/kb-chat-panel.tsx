@@ -36,6 +36,7 @@ import { requestApprovalsRefresh } from "@/lib/approvals-events";
 import {
   fetchSessionMessages,
   extractMessageText,
+  stopTurn,
 } from "@/lib/api/sessions";
 import { listWorkspaceAssistants } from "@/lib/api/views";
 import { pickPrimaryAssistant } from "@/lib/primary-assistant";
@@ -424,8 +425,15 @@ export function KbChatPanel({
             <button
               type="button"
               onClick={() => {
+                const sid = sessionIdRef.current;
                 stream.abort();
                 session.dispatch({ type: "stream/abort" });
+                // The server no longer reads a client close as Stop
+                // (2026-08-24: a dropped connection keeps the turn running
+                // so it can be re-attached), so the explicit stop is the
+                // only thing that ends it. Idempotent server-side, and the
+                // local teardown already happened, so a failure is swallowed.
+                if (sid) void stopTurn(sid).catch(() => {});
               }}
               aria-label={copy.stop}
               title={copy.stop}

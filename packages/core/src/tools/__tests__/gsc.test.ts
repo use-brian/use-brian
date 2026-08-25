@@ -141,6 +141,32 @@ describe('[COMP:tools/gsc] Google Search Console tools', () => {
     expect(body.dimensionFilterGroups).toBeUndefined()
   })
 
+  it('preserves explicit empty dimensions for ungrouped property totals', async () => {
+    const api = mockApi({
+      query: vi.fn().mockResolvedValue({
+        rows: [{ keys: [], clicks: 5, impressions: 100, ctr: 0.05, position: 4.2 }],
+      }),
+    })
+    const result = await tool(api, 'searchConsoleQuery').execute({
+      startDate: '2026-08-01',
+      endDate: '2026-08-07',
+      dimensions: [],
+      rowLimit: 1,
+    }, ctx)
+
+    expect(api.query).toHaveBeenCalledWith('sc-domain:example.com', {
+      startDate: '2026-08-01',
+      endDate: '2026-08-07',
+      dimensions: [],
+      rowLimit: 1,
+      type: 'web',
+    })
+    expect(result.data).toMatchObject({
+      dimensions: [],
+      rows: [{ keys: [], clicks: 5, impressions: 100, ctr: 0.05, position: 4.2 }],
+    })
+  })
+
   it('rejects an unknown dimension at the schema', () => {
     const q = tool(mockApi(), 'searchConsoleQuery')
     const parsed = q.inputSchema.safeParse({ startDate: '2026-08-01', endDate: '2026-08-07', dimensions: ['keyword'] })

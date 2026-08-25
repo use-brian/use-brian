@@ -105,6 +105,28 @@ describe('[COMP:engine/query-loop] Truncation recovery', () => {
     },
   )
 
+  it.each<StopReason>(['max_tokens', 'incomplete'])(
+    'auto-continues an unattended workflow reply stopped by %s',
+    async (stopReason) => {
+      const { provider, calls } = scriptedProvider([
+        responseChunks('3 | Use Brian: absent | Competitors:', stopReason),
+        responseChunks(' #1 example.com\n4 | Use Brian: present', 'end_turn'),
+      ])
+
+      const events = await runLoop(provider, 'workflow')
+
+      expect(calls).toHaveLength(2)
+      expect(calls[1]).toEqual([{ role: 'user', content: 'Continue from where you left off.' }])
+      expect(
+        events
+          .filter((event) => event.type === 'text_delta')
+          .map((event) => event.type === 'text_delta' ? event.text : '')
+          .join(''),
+      ).toBe('3 | Use Brian: absent | Competitors: #1 example.com\n4 | Use Brian: present')
+      expect(events.filter((event) => event.type === 'turn_complete')).toHaveLength(1)
+    },
+  )
+
   it('does not auto-continue an incomplete messaging-channel reply', async () => {
     const { provider, calls } = scriptedProvider([
       responseChunks('Partial reply', 'incomplete'),
