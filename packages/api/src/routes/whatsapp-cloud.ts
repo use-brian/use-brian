@@ -37,6 +37,15 @@ import { cacheInboundImageTag } from './channel-file-cache.js'
 import { processChannelMessage } from './channel-pipeline.js'
 import { channelUserErrorText } from './_channel-error-text.js'
 import { whatsappCloudUserAllowed } from '../whatsapp/cloud-access.js'
+import {
+  whatsappCloudManagedGroupStore,
+  type WhatsAppCloudManagedGroupStore,
+} from '../db/whatsapp-cloud-managed-groups.js'
+import {
+  createWhatsAppCloudManagedGroupsApi,
+  parseWhatsAppCloudManagedGroupLifecycleEvents,
+  type WhatsAppCloudGroupLifecycleEvent,
+} from '../whatsapp/cloud-managed-groups-client.js'
 export { whatsappCloudUserAllowed } from '../whatsapp/cloud-access.js'
 
 const MAX_MEDIA_BYTES = 25 * 1024 * 1024
@@ -86,6 +95,8 @@ export type WhatsAppCloudRouteOptions = {
   capabilityStore: import('@use-brian/core').CapabilityStore
   /** Best-effort producer for workflows triggered by this channel integration. */
   workflowEventDispatcher?: WorkflowEventDispatcher
+  /** Injectable seam for managed-group lifecycle persistence. */
+  whatsappCloudManagedGroupStore?: WhatsAppCloudManagedGroupStore
 }
 
 function isCloudCredentials(credentials: unknown): credentials is WhatsAppCloudCredentials {
@@ -104,9 +115,11 @@ function xmlAttribute(value: string): string {
 export function whatsappCloudExternalConnectorToolsAllowed(
   config: ChannelIntegrationConfig,
   isIdentified: boolean,
+  userId: string,
 ): boolean {
   return !isIdentified
     && config.userAccessMode === 'allowlist'
+    && (config.allowedUserIds ?? []).includes(userId)
 }
 
 export async function dispatchWhatsAppCloudWorkflowEvent(input: {
@@ -118,11 +131,12 @@ export async function dispatchWhatsAppCloudWorkflowEvent(input: {
   incoming: IncomingMessage
 }): Promise<void> {
   const { dispatcher, workspaceId, channelIntegrationId, config, providerAccountId, incoming } = input
-  if (!whatsappCloudUserAllowed(config, incoming.userId)) return
+  if (!whatsappCloudUserAllowed(config, incoming.userId, incoming.isGroupChat)) return
 
   const raw = incoming.raw as {
     message?: { type?: unknown }
     phoneNumberId?: unknown
+    groupId?: unknown
   } | null
   await dispatcher.dispatch({
     workspaceId,
@@ -132,6 +146,7 @@ export async function dispatchWhatsAppCloudWorkflowEvent(input: {
     channelId: incoming.channelId,
     mentions: [],
     isBot: false,
+    isGroupChat: incoming.isGroupChat,
     providerAccountId,
     occurredAt: new Date(incoming.timestamp * 1000).toISOString(),
     payload: {
@@ -139,6 +154,7 @@ export async function dispatchWhatsAppCloudWorkflowEvent(input: {
       message_id: incoming.messageId,
       from: incoming.userId,
       phone_number_id: typeof raw?.phoneNumberId === 'string' ? raw.phoneNumberId : null,
+      group_id: typeof raw?.groupId === 'string' ? raw.groupId : null,
       message_type: typeof raw?.message?.type === 'string' ? raw.message.type : null,
       media_type: incoming.mediaType ?? null,
     },
@@ -147,6 +163,7 @@ export async function dispatchWhatsAppCloudWorkflowEvent(input: {
 
 export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router {
   const router = Router()
+  const managedGroups = options.whatsappCloudManagedGroupStore ?? whatsappCloudManagedGroupStore
   const pending = new Map<string, { resolver: ConfirmationResolver; toolCallId: string }>()
   const seen = new Map<string, number>()
 
@@ -198,9 +215,17 @@ export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router 
       const raw = incoming.raw as { phoneNumberId?: unknown }
       return raw.phoneNumberId === credentials.phone_number_id
     })
+    const lifecycleEvents = parseWhatsAppCloudManagedGroupLifecycleEvents(req.body)
+      .filter((event) => event.phoneNumberId === credentials.phone_number_id)
     res.status(200).end()
-    if (messages.length === 0) return
+    if (messages.length === 0 && lifecycleEvents.length === 0) return
     options.integrationStore.touchLastEventAt(integration.id).catch(() => {})
+
+    for (const event of lifecycleEvents) {
+      void handleGroupLifecycle(credentials, event).catch((err) => {
+        console.error(`[whatsapp-cloud] failed to process group lifecycle ${event.requestId}:`, err)
+      })
+    }
 
     for (const incoming of messages) {
       if (!incoming.messageId) continue
@@ -217,6 +242,34 @@ export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router 
     }
   })
 
+  async function handleGroupLifecycle(
+    credentials: WhatsAppCloudCredentials,
+    event: WhatsAppCloudGroupLifecycleEvent,
+  ): Promise<void> {
+    if (event.event !== 'group_create') return
+    if (event.error) {
+      await persistGroupLifecycle(() => managedGroups.failFromLifecycle(event.requestId, event.error!))
+      return
+    }
+    if (!event.groupId) return
+    const inviteLink = event.inviteLink ?? await createWhatsAppCloudManagedGroupsApi({
+      accessToken: credentials.access_token,
+      phoneNumberId: credentials.phone_number_id,
+      graphApiVersion: credentials.graph_api_version,
+    }).getGroupInviteLink(event.groupId)
+    await persistGroupLifecycle(() => managedGroups.completeFromLifecycle(event.requestId, event.groupId!, inviteLink))
+  }
+
+  async function persistGroupLifecycle(update: () => Promise<boolean>): Promise<void> {
+    // Meta can deliver the lifecycle webhook immediately after accepting the
+    // create call, before the request ID update commits. Brief retries close
+    // that race; duplicate webhook deliveries are idempotent in the store.
+    for (let attempt = 0; attempt < 5; attempt++) {
+      if (await update()) return
+      await new Promise((resolve) => setTimeout(resolve, 200 * (attempt + 1)))
+    }
+  }
+
   async function handleMessage(
     channelId: string,
     channelIntegrationId: string,
@@ -226,7 +279,7 @@ export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router 
   ): Promise<void> {
     const channel = await getChannelForWebhook(channelId)
     if (!channel || channel.status !== 'active') return
-    if (!whatsappCloudUserAllowed(config, incoming.userId)) return
+    if (!whatsappCloudUserAllowed(config, incoming.userId, incoming.isGroupChat)) return
     try {
       if (!channel.enabledCapabilities.includes('chat')) return
       const routing = await resolveRoutingForSurface(channelId, incoming.channelId)
@@ -253,7 +306,8 @@ export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router 
         isIdentified = resolved.isIdentified
       }
 
-      const confirmKey = `${channelId}:${incoming.channelId}`
+      const conversationKey = `${channelId}:${incoming.channelId}`
+      const confirmKey = `${conversationKey}:${incoming.userId}`
       const parked = pending.get(confirmKey)
       if (parked) {
         const decision = DECISIONS[incoming.text.trim().toLowerCase()]
@@ -262,9 +316,9 @@ export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router 
         if (decision) return
       }
 
-      await withChatLock(`whatsapp-cloud:${confirmKey}`, () => processMessage({
+      await withChatLock(`whatsapp-cloud:${conversationKey}`, () => processMessage({
         credentials, incoming, assistant, ownerId, channelUserId, isIdentified,
-        externalConnectorToolsAllowed: whatsappCloudExternalConnectorToolsAllowed(config, isIdentified),
+        externalConnectorToolsAllowed: whatsappCloudExternalConnectorToolsAllowed(config, isIdentified, incoming.userId),
         routing, confirmKey,
       }))
     } finally {
@@ -300,6 +354,7 @@ export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router 
       accessToken: credentials.access_token,
       phoneNumberId: credentials.phone_number_id,
       graphApiVersion: credentials.graph_api_version,
+      recipientType: incoming.isGroupChat ? 'group' as const : 'individual' as const,
     }
     const adapter = createWhatsAppCloudAdapter(apiOptions)
     const userContentBlocks: ContentBlock[] = []
@@ -354,7 +409,7 @@ export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router 
       messageText: incoming.text,
       rawUserText: incoming.text,
       userContentBlocks,
-      isGroupChat: false,
+      isGroupChat: incoming.isGroupChat,
       replyToMessageId: incoming.replyToMessageId ?? null,
       incomingChannelMessageId: incoming.messageId ?? null,
       archiveIncoming: incoming,

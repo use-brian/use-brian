@@ -184,7 +184,8 @@ describe('[COMP:workflow/event-trigger] createWorkflowEventDispatcher', () => {
       ...SLACK_EVENT,
       source: { type: 'channel', channelIntegrationId: 'ci-wa', channel: 'whatsapp' },
       actorId: '15551234567',
-      channelId: '15551234567',
+      channelId: 'group-1',
+      isGroupChat: true,
       providerAccountId: 'phone-1',
       occurredAt: '2026-08-17T11:00:00.000Z',
     }
@@ -203,8 +204,9 @@ describe('[COMP:workflow/event-trigger] createWorkflowEventDispatcher', () => {
       sourceType: 'channel',
       provider: 'whatsapp',
       channelIntegrationId: 'ci-wa',
-      channelId: '15551234567',
+      channelId: 'group-1',
       actorId: '15551234567',
+      isGroupChat: true,
       providerAccountId: 'phone-1',
       occurredAt: '2026-08-17T11:00:00.000Z',
     })

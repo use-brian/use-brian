@@ -71,6 +71,8 @@ export type ChannelIntegrationConfig = {
   allowedUserIds?: string[];
   /** WhatsApp Cloud public business number used for wa.me chat links. */
   whatsappDisplayPhoneNumber?: string;
+  /** Allow every participant to invoke the assistant in Cloud API-created groups. */
+  whatsappCloudAllowAllGroupMembers?: boolean;
   /** Telegram BYO: allow explicitly listed DM guests to use enabled connectors. */
   allowGuestConnectorTools?: boolean;
   /** Telegram BYO: numeric allowlist entries become revocable workspace members. */
@@ -432,6 +434,52 @@ export type ConnectWhatsAppCloudResult = {
   webhookUrl: string | null;
   verifyToken: string;
 };
+
+export type WhatsAppCloudGroup = {
+  id: string;
+  requestId: string | null;
+  providerGroupId: string | null;
+  subject: string;
+  inviteLink: string | null;
+  status: "creating" | "active" | "failed";
+  error: string | null;
+  createdAt: string;
+};
+
+function whatsappCloudGroupsUrl(workspaceId: string, channelId: string): string {
+  return `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/channels/${encodeURIComponent(channelId)}/whatsapp-cloud/groups`;
+}
+
+export async function listWhatsAppCloudGroups(
+  workspaceId: string,
+  channelId: string,
+): Promise<WhatsAppCloudGroup[]> {
+  const res = await authFetch(whatsappCloudGroupsUrl(workspaceId, channelId));
+  if (!res.ok) throw new Error(`Failed to load WhatsApp groups (${res.status})`);
+  const data = (await res.json()) as { groups?: WhatsAppCloudGroup[] };
+  return Array.isArray(data.groups) ? data.groups : [];
+}
+
+export async function createWhatsAppCloudGroup(
+  workspaceId: string,
+  channelId: string,
+  subject: string,
+): Promise<WhatsAppCloudGroup> {
+  const res = await authFetch(whatsappCloudGroupsUrl(workspaceId, channelId), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ subject }),
+  });
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as {
+      error?: string;
+      detail?: string;
+    };
+    throw new Error(data.detail ?? data.error ?? `Group creation failed (${res.status})`);
+  }
+  const data = (await res.json()) as WhatsAppCloudGroup | { group: WhatsAppCloudGroup };
+  return "group" in data ? data.group : data;
+}
 
 /** Connect an official Meta WhatsApp Cloud API phone number. */
 export async function connectWhatsAppCloudChannel(

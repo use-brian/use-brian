@@ -8,7 +8,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
-import type { Channel } from "@/lib/api/channels";
+import { updateChannelConfig, type Channel } from "@/lib/api/channels";
 import type { ConfirmOptions } from "@/components/ui/confirm-dialog";
 import {
   AddChannelForm,
@@ -293,5 +293,51 @@ describe("[COMP:app-web/studio-channels] WhatsApp Cloud access UX", () => {
       host.querySelector<HTMLInputElement>('input[placeholder="15551234567"]'),
     ).not.toBeNull();
     expect(host.textContent).not.toContain("@userinfobot");
+  });
+
+  it("shows a Cloud-only toggle for allowing every group participant", async () => {
+    const channel: Channel = {
+      id: "channel_1",
+      workspaceId: "workspace_1",
+      channelType: "whatsapp",
+      clearance: "internal",
+      enabledCapabilities: ["chat"],
+      status: "active",
+      displayName: "WhatsApp Business",
+      createdAt: "2026-08-09T00:00:00.000Z",
+      updatedAt: "2026-08-09T00:00:00.000Z",
+      integrationId: "integration_1",
+      integrationProvider: "cloud_api",
+      config: {},
+    };
+
+    await act(async () => {
+      root.render(
+        localized(
+          <ChannelConfigSection
+            workspaceId="workspace_1"
+            channel={channel}
+            onUpdated={vi.fn()}
+          />,
+        ),
+      );
+    });
+
+    expect(host.textContent).toContain("Allow all group participants");
+    expect(host.textContent).toContain("Direct messages still follow");
+    const checkbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]');
+    expect(checkbox?.checked).toBe(false);
+
+    vi.mocked(updateChannelConfig).mockResolvedValueOnce({
+      ...channel,
+      config: { whatsappCloudAllowAllGroupMembers: true },
+    });
+    await act(async () => checkbox?.click());
+
+    expect(updateChannelConfig).toHaveBeenCalledWith(
+      "workspace_1",
+      "channel_1",
+      { whatsappCloudAllowAllGroupMembers: true },
+    );
   });
 });

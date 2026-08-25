@@ -194,8 +194,19 @@ permitted sender numbers to the channel allowlist before they can invoke the
 assistant or its configured connectors. Their chats and memory remain isolated
 from the workspace owner's account. Studio normalizes common international phone
 formatting in that allowlist and shows a `wa.me` QR code for starting a chat with
-the connected business number. Authorized inbound messages can also trigger
-workflows that watch this channel integration; a workflow step using
+the connected business number. Eligible Official Business Accounts can also use
+groups created through Meta's Groups API. Members join those groups through
+Meta invite links; existing consumer-created groups cannot be attached to a Cloud
+API number. Create and monitor these managed groups from the Cloud channel detail
+in **Studio → Channels**. Creation completes asynchronously; once a group is active,
+copy or open its invite link to add members. Disconnecting the Cloud channel also
+deletes its managed groups. By default, the sender allowlist controls who can
+invoke the assistant. A channel setting can instead allow every participant in
+API-created groups while keeping direct messages on the configured phone-number
+access policy. Every group member can read replies, so only use a group whose
+members may see the
+assistant's output. Replies return to the originating group. Authorized inbound
+messages can also trigger workflows that watch this channel integration; a workflow step using
 `deliver: { channelType: "whatsapp", replyToTrigger: true }` answers the exact
 originating conversation. Free-form outbound replies are subject to Meta's
 24-hour
