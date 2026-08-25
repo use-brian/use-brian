@@ -81,6 +81,7 @@ import { detectAndResolveNags } from '../scheduling/nag-resolver.js'
 import type { DeferredConfirmationStore } from '../db/deferred-confirmation-store.js'
 import type { JobStore } from '@use-brian/core'
 import type { PendingApprovalsStore, ApprovalKind } from '../db/pending-approvals-store.js'
+import { appendDecisionEvent } from '../db/decision-event-store.js'
 import type { SessionResumeStore } from '../db/session-resume-store.js'
 import type { WorkspaceSkillStore } from '../db/skill-store.js'
 
@@ -200,6 +201,11 @@ export async function settleInlineToolApproval(params: {
   responderUserId: string
   resolver: ConfirmationResolver
   pendingApprovalsStore: Pick<PendingApprovalsStore, 'respond' | 'getByIdSystem'>
+  legacyContext?: {
+    workspaceId: string | null
+    assistantId: string
+    sessionId: string
+  }
 }): Promise<'durable' | 'legacy' | 'already_settled'> {
   const {
     approvalId,
@@ -209,9 +215,40 @@ export async function settleInlineToolApproval(params: {
     responderUserId,
     resolver,
     pendingApprovalsStore,
+    legacyContext,
   } = params
 
   if (!approvalId) {
+    if (legacyContext) {
+      try {
+        await appendDecisionEvent({
+          idempotencyKey: `inline-approval:${legacyContext.sessionId}:${toolCallId}:${decision}`,
+          workspaceId: legacyContext.workspaceId,
+          actorUserId: responderUserId,
+          assistantId: legacyContext.assistantId,
+          sessionId: legacyContext.sessionId,
+          eventKind: 'approval.decided',
+          schemaVersion: 1,
+          sourceKind: 'inline_tool_confirmation',
+          sourceId: toolCallId,
+          declaredScope: 'tool',
+          visibility: 'owner',
+          sensitivity: 'internal',
+          reason: decision === 'deny' || decision === 'always_deny' ? comment ?? null : null,
+          payload: {
+            toolCallId,
+            approvalKind: 'tool_invocation',
+            resolution: decision,
+          },
+        })
+      } catch (err) {
+        if (decision === 'deny' || decision === 'always_deny') {
+          resolver.resolve(toolCallId, decision, comment)
+          return 'legacy'
+        }
+        throw err
+      }
+    }
     resolver.resolve(toolCallId, decision, comment)
     return 'legacy'
   }
@@ -223,6 +260,7 @@ export async function settleInlineToolApproval(params: {
     rowDecision,
     responderUserId,
     rowDecision === 'rejected' ? comment : undefined,
+    decision,
   )
 
   if (settled) {
@@ -8389,6 +8427,14 @@ export function chatRoutes(options: WebChatOptions): Router {
         }
       }
       try {
+        let legacyWorkspaceId: string | null = null
+        if (!approvalId) {
+          const context = await query<{ workspaceId: string | null }>(
+            `SELECT workspace_id AS "workspaceId" FROM assistants WHERE id = $1`,
+            [session.assistantId],
+          )
+          legacyWorkspaceId = context.rows[0]?.workspaceId ?? null
+        }
         await settleInlineToolApproval({
           approvalId,
           toolCallId,
@@ -8397,6 +8443,11 @@ export function chatRoutes(options: WebChatOptions): Router {
           responderUserId: jwtUserId,
           resolver,
           pendingApprovalsStore: options.pendingApprovalsStore,
+          legacyContext: approvalId ? undefined : {
+            workspaceId: legacyWorkspaceId,
+            assistantId: session.assistantId,
+            sessionId: session.id,
+          },
         })
         if (approvalId) approvalResolverIndex.delete(approvalId)
       } catch (err) {

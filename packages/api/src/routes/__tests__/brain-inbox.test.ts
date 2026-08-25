@@ -16,6 +16,10 @@ vi.mock('../../db/client.js', () => ({
   query: vi.fn(),
   queryWithRLS: vi.fn(),
 }))
+vi.mock('../../db/brain-inbox-store.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../db/brain-inbox-store.js')>()
+  return { ...actual, appendBrainVerification: vi.fn() }
+})
 
 // Task adjust calls the tasks store + brain-stream notify; stub both so the
 // happy-path test exercises the route wiring without a DB / live stream.
@@ -405,13 +409,12 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
   }
 
   // Shared query sequence for the entity_link verify happy path: ownership
-  // pre-check → markVerifiedGeneric UPDATE → appendBrainVerification INSERT →
-  // the cascade's edge lookup (returns `edge`).
+  // pre-check → markVerifiedGeneric UPDATE → the cascade's edge lookup. The
+  // atomic audit writer is mocked at this route boundary.
   function primeEntityLinkVerify(edge: { source_kind: string; source_id: string; edge_type: string }) {
     mockQuery
       .mockResolvedValueOnce({ rows: [{ workspace_id: WS }] } as never) // ownership
       .mockResolvedValueOnce({ rowCount: 1 } as never) // markVerifiedGeneric
-      .mockResolvedValueOnce({ rows: [] } as never) // appendBrainVerification
       .mockResolvedValueOnce({ rows: [edge] } as never) // edge lookup
   }
 

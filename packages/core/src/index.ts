@@ -112,3 +112,21 @@ export {
   type MediaRequest,
   type MediaResult,
 } from './media/backend.js'
+
+export {
+  DECISION_EVENT_KINDS,
+  DECISION_EVENT_SCHEMA_VERSION,
+  decisionDeclaredScopeSchema,
+  decisionEventWriteSchema,
+  decisionSensitivitySchema,
+  decisionVisibilitySchema,
+  parseDecisionEventWrite,
+  stableExternalIdentitySchema,
+  type DecisionDeclaredScope,
+  type DecisionEvent,
+  type DecisionEventKind,
+  type DecisionEventWrite,
+  type DecisionSensitivity,
+  type DecisionVisibility,
+  type StableExternalIdentity,
+} from './decision-learning/types.js'

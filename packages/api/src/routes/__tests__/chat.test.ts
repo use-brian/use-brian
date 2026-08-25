@@ -175,6 +175,7 @@ describe('[COMP:api/chat-route] inline approval durability', () => {
       'rejected',
       'user-1',
       'Use the draft account instead',
+      'deny',
     )
     expect(resolve).toHaveBeenCalledWith(
       'tool-1',

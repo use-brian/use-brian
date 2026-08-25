@@ -26,6 +26,13 @@ vi.mock('../goals.js', () => ({
   abandonGoalsForHostTaskSystem: vi.fn().mockResolvedValue(0),
 }))
 
+vi.mock('../decision-event-store.js', () => ({
+  appendDecisionEvent: vi.fn(async (event: unknown) => ({
+    event: { id: 'decision-1', ...(event as object), createdAt: new Date() },
+    inserted: true,
+  })),
+}))
+
 import {
   findOpenTasksForGithubMatch,
   findOrCreateAllowRule,
@@ -33,6 +40,9 @@ import {
   recordCandidate,
   rejectTask,
 } from '../task-admission-store.js'
+import { appendDecisionEvent } from '../decision-event-store.js'
+
+const mockAppendDecisionEvent = vi.mocked(appendDecisionEvent)
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -124,6 +134,9 @@ describe('[COMP:tasks/admission-store] task admission DB adapter', () => {
               source: 'extracted',
               source_kind: 'slack_thread',
               channel_ref: 'C456',
+              source_session_id: '00000000-0000-4000-8000-000000000020',
+              created_by_assistant_id: '00000000-0000-4000-8000-000000000021',
+              sensitivity: 'internal',
             },
           ],
         }
@@ -162,6 +175,17 @@ describe('[COMP:tasks/admission-store] task admission DB adapter', () => {
       channel_refs: ['C456'],
     })
     expect(db.clientQuery.mock.calls.map(([sql]) => sql)).toContain('COMMIT')
+    expect(mockAppendDecisionEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventKind: 'task.rejected',
+      reason: 'Discussion about an active task is context, not a new commitment',
+      payload: {
+        taskId: 'task-1',
+        tombstoneId: 'tombstone-1',
+        activeRuleId: 'rule-1',
+        proposedRuleId: null,
+        reasonStoredOn: 'task_tombstone',
+      },
+    }), expect.anything())
     // The transaction runs RLS-scoped to the acting user (app pool policies
     // hide every row from the unscoped sentinel).
     expect(db.applyRLSGucs).toHaveBeenCalledWith(expect.anything(), 'user-1')

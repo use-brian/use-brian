@@ -12,16 +12,33 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
+const tx = vi.hoisted(() => ({
+  query: vi.fn(),
+  release: vi.fn(),
+}))
+
 vi.mock('../client.js', () => ({
   query: vi.fn(),
   queryWithRLS: vi.fn(),
+  getPool: vi.fn(() => ({
+    connect: async () => tx,
+  })),
+}))
+
+vi.mock('../decision-event-store.js', () => ({
+  appendDecisionEvent: vi.fn(async (event: unknown) => ({
+    event: { id: 'decision-1', ...(event as object), createdAt: new Date() },
+    inserted: true,
+  })),
 }))
 
 import { createPendingApprovalsStore } from '../pending-approvals-store.js'
 import { query, queryWithRLS } from '../client.js'
+import { appendDecisionEvent } from '../decision-event-store.js'
 
 const mockQuery = vi.mocked(query)
 const mockQueryWithRLS = vi.mocked(queryWithRLS)
+const mockAppendDecisionEvent = vi.mocked(appendDecisionEvent)
 const store = createPendingApprovalsStore()
 
 /** A pending_approvals row as the COLS projection returns it (camelCase aliases). */
@@ -54,6 +71,15 @@ function makeRow(over: Record<string, unknown> = {}): Record<string, unknown> {
 beforeEach(() => {
   mockQuery.mockReset()
   mockQueryWithRLS.mockReset()
+  mockAppendDecisionEvent.mockClear()
+  tx.query.mockReset()
+  tx.release.mockReset()
+  tx.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+    if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') {
+      return { rows: [], rowCount: 0 } as never
+    }
+    return mockQuery(sql, params)
+  })
 })
 
 describe('[COMP:api/pending-approvals-store] create', () => {
@@ -291,6 +317,87 @@ describe('[COMP:api/pending-approvals-store] respond', () => {
   it('returns null when the row is already non-pending (idempotent double-click)', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
     expect(await store.respond('ap-1', 'approved', 'u-1')).toBeNull()
+  })
+})
+
+describe('[COMP:api/decision-capture] atomic approval evidence', () => {
+  it('preserves an inline persistent denial as always_deny', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [makeRow({
+        status: 'rejected',
+        kind: 'tool_invocation',
+        toolName: 'sendMessage__mailbox_12345678',
+        blockingSessionId: '00000000-0000-4000-8000-000000000010',
+        originatingAssistantId: '00000000-0000-4000-8000-000000000011',
+      })],
+      rowCount: 1,
+    } as never)
+    await store.respond('ap-1', 'rejected', 'u-1', 'Do not send this', 'always_deny')
+    expect(mockAppendDecisionEvent).toHaveBeenCalledTimes(1)
+    expect(mockAppendDecisionEvent.mock.calls[0][0]).toMatchObject({
+      eventKind: 'approval.decided',
+      declaredScope: 'tool',
+      reason: 'Do not send this',
+      payload: {
+        approvalKind: 'tool_invocation',
+        toolName: 'sendMessage',
+        resolution: 'always_deny',
+      },
+    })
+    expect(tx.query.mock.calls.map((call) => call[0])).toEqual([
+      'BEGIN',
+      expect.stringContaining('UPDATE pending_approvals'),
+      'COMMIT',
+    ])
+  })
+
+  it('rolls back the approval update when event capture fails', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [makeRow({ status: 'approved' })],
+      rowCount: 1,
+    } as never)
+    mockAppendDecisionEvent.mockRejectedValueOnce(new Error('journal unavailable'))
+    await expect(store.respond('ap-1', 'approved', 'u-1')).rejects.toThrow('journal unavailable')
+    expect(tx.query.mock.calls.at(-1)?.[0]).toBe('ROLLBACK')
+  })
+
+  it('captures reviewed-email revision ids but no body, recipient, subject, or arguments', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [makeRow({
+        id: '00000000-0000-4000-8000-000000000020',
+        toolName: 'imapSendMessage',
+        arguments: {
+          to: ['reviewer@example.test'],
+          subject: 'Private subject',
+          body: 'Edited private body',
+          inReplyTo: 'message-1',
+          account: 'mailbox-primary',
+        },
+        approvalPayload: {
+          emailDraftRevision: 2,
+          supersedesApprovalId: '00000000-0000-4000-8000-000000000019',
+        },
+        originatingAssistantId: '00000000-0000-4000-8000-000000000011',
+      })],
+      rowCount: 1,
+    } as never)
+    await store.reviseWorkflowEmailBody(
+      '00000000-0000-4000-8000-000000000019',
+      'Edited private body',
+      '00000000-0000-4000-8000-000000000012',
+    )
+    const event = mockAppendDecisionEvent.mock.calls[0][0]
+    expect(event).toMatchObject({
+      eventKind: 'email.draft_revised',
+      payload: {
+        previousApprovalId: '00000000-0000-4000-8000-000000000019',
+        replacementApprovalId: '00000000-0000-4000-8000-000000000020',
+        previousRevision: 1,
+        newRevision: 2,
+        accountKey: 'mailbox-primary',
+      },
+    })
+    expect(JSON.stringify(event)).not.toMatch(/Edited private body|reviewer@example|Private subject|"arguments"/)
   })
 })
 

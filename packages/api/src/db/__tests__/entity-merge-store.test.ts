@@ -19,6 +19,9 @@ let clientInsertRow: Record<string, unknown> | null = null
 const fakeClient = {
   query: vi.fn(async (text: string, values?: unknown[]) => {
     clientQueries.push({ text, values })
+    if (text.includes('SELECT COALESCE($3::uuid')) {
+      return { rows: [{ actorUserId: 'u-1', sensitivity: 'internal' }], rowCount: 1 }
+    }
     if (text.trim().startsWith('INSERT INTO entity_merges')) {
       return { rows: clientInsertRow ? [clientInsertRow] : [], rowCount: 1 }
     }
@@ -40,11 +43,28 @@ vi.mock('../client.js', () => ({
   query: (text: string, values?: unknown[]) => fakePool.query(text, values),
 }))
 
+vi.mock('../decision-event-store.js', () => ({
+  appendDecisionEvent: vi.fn(async (event: unknown) => ({
+    event: { id: 'decision-1', ...(event as object), createdAt: new Date() },
+    inserted: true,
+  })),
+  findDecisionEventByIdempotencyKey: vi.fn(async () => ({
+    id: 'decision-original',
+    sensitivity: 'internal',
+  })),
+}))
+
+vi.mock('../decision-provenance-store.js', () => ({
+  appendDecisionDerivation: vi.fn(async () => ({ id: 'derivation-1', inserted: true })),
+}))
+
 import {
   createEntityMergeStore,
   createSpecializationCascadeStore,
 } from '../entity-merge-store.js'
 import type { ApplyMergeInput, EntityMergeRecord } from '@use-brian/core'
+import { appendDecisionEvent } from '../decision-event-store.js'
+import { appendDecisionDerivation } from '../decision-provenance-store.js'
 
 const repo = createEntityMergeStore()
 const cascade = createSpecializationCascadeStore()
@@ -165,6 +185,19 @@ describe('[COMP:corrections/entity-merge-store] applyMerge', () => {
     expect(rewrite!.values?.[1]).toBe(JSON.stringify({ domain: 'acme.com' }))
     // 3. insert record
     expect(texts.some((t) => t.includes('INSERT INTO entity_merges'))).toBe(true)
+    expect(appendDecisionEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventKind: 'crm.entities_merged',
+      payload: expect.objectContaining({
+        mergeId: 'm-1',
+        survivingEntityId: 'e-survivor',
+        mergedEntityId: 'e-merged',
+      }),
+    }), fakeClient)
+    expect(appendDecisionDerivation).toHaveBeenCalledWith(expect.objectContaining({
+      artifactKind: 'entity_merge',
+      artifactId: 'm-1',
+      relation: 'supports',
+    }), fakeClient)
     expect(texts[texts.length - 1]).toBe('COMMIT')
     expect(fakeClient.release).toHaveBeenCalledOnce()
   })
@@ -178,6 +211,9 @@ describe('[COMP:corrections/entity-merge-store] applyMerge', () => {
     // Force the INSERT to throw.
     fakeClient.query.mockImplementation(async (text: string, values?: unknown[]) => {
       clientQueries.push({ text, values })
+      if (text.includes('SELECT COALESCE($3::uuid')) {
+        return { rows: [{ actorUserId: 'u-1', sensitivity: 'internal' }], rowCount: 1 }
+      }
       if (text.trim().startsWith('INSERT INTO entity_merges')) {
         throw new Error('insert failed')
       }
@@ -205,6 +241,10 @@ describe('[COMP:corrections/entity-merge-store] applyUndoMerge', () => {
     expect(unSupersede!.values).toEqual(['e-merged', 'ws-1'])
     const stampUndone = clientQueries.find((q) => q.text.includes('UPDATE entity_merges'))
     expect(stampUndone!.values).toEqual(['m-1', NOW, 'u-2', 'mistake', false])
+    expect(appendDecisionEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventKind: 'crm.merge_undone',
+      reversesEventId: 'decision-original',
+    }), fakeClient)
     expect(clientQueries.map((q) => q.text).pop()).toBe('COMMIT')
   })
 })

@@ -46,6 +46,7 @@ import {
   type TaskTombstoneRecord,
 } from '@use-brian/core'
 import { applyRLSGucs, getAppPool, query, rollbackAndRelease } from './client.js'
+import { appendDecisionEvent } from './decision-event-store.js'
 import { abandonGoalsForHostTaskSystem } from './goals.js'
 
 // ── Row mappers ──────────────────────────────────────────────────────────────
@@ -427,8 +428,12 @@ export async function rejectTask(input: {
       source: string | null
       source_kind: string | null
       channel_ref: string | null
+      source_session_id: string | null
+      created_by_assistant_id: string | null
+      sensitivity: 'public' | 'internal' | 'confidential' | 'restricted'
     }>(
-      `SELECT t.id, t.title, t.source, e.source_kind,
+      `SELECT t.id, t.title, t.source, t.source_session_id,
+              t.created_by_assistant_id, t.sensitivity, e.source_kind,
               COALESCE(e.source_ref->>'channel_id', e.source_ref->>'channel_ref') AS channel_ref
          FROM tasks t
          LEFT JOIN episodes e ON e.id = t.source_episode_id
@@ -440,6 +445,9 @@ export async function rejectTask(input: {
     title = existing.rows[0].title
     sourceKind = existing.rows[0].source_kind
     const channelRef = existing.rows[0].channel_ref
+    const sourceSessionId = existing.rows[0].source_session_id
+    const createdByAssistantId = existing.rows[0].created_by_assistant_id
+    const taskSensitivity = existing.rows[0].sensitivity
     const lane: TaskLane = existing.rows[0].source === 'extracted' ? 'extracted' : 'assistant'
 
     await client.query(
@@ -506,6 +514,29 @@ export async function rejectTask(input: {
         activeRuleId = rule.rows[0].id
       }
     }
+
+    await appendDecisionEvent({
+      idempotencyKey: `task-rejection:${tombstoneId}`,
+      workspaceId: input.workspaceId,
+      actorUserId: input.userId,
+      assistantId: createdByAssistantId,
+      sessionId: sourceSessionId,
+      eventKind: 'task.rejected',
+      schemaVersion: 1,
+      sourceKind: 'task_tombstone',
+      sourceId: tombstoneId,
+      declaredScope: 'instance',
+      visibility: 'workspace',
+      sensitivity: taskSensitivity,
+      reason: input.reason,
+      payload: {
+        taskId: input.taskId,
+        tombstoneId,
+        activeRuleId,
+        proposedRuleId: null,
+        reasonStoredOn: 'task_tombstone',
+      },
+    }, client)
 
     await client.query('COMMIT')
   } finally {

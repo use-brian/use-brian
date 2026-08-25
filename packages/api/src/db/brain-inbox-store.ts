@@ -40,7 +40,10 @@
  * Component-map tag: `brain/inbox-store`.
  */
 
-import { query } from './client.js'
+import type pg from 'pg'
+
+import { getPool, query } from './client.js'
+import { appendDecisionEvent } from './decision-event-store.js'
 
 export type BrainInboxPrimitive =
   | 'memory'
@@ -897,21 +900,83 @@ export async function appendBrainVerification(params: {
   modelValue?: unknown
   userValue?: unknown
   reason?: string
-}): Promise<void> {
-  await query(
-    `INSERT INTO brain_verifications (
-       target_kind, target_id, workspace_id, verified_by,
-       action, model_value, user_value, reason
-     ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8)`,
-    [
-      params.targetKind,
-      params.targetId,
-      params.workspaceId,
-      params.verifiedByUserId,
-      params.action,
-      params.modelValue !== undefined ? JSON.stringify(params.modelValue) : null,
-      params.userValue !== undefined ? JSON.stringify(params.userValue) : null,
-      params.reason ?? null,
-    ],
-  )
+}, transactionClient?: pg.PoolClient): Promise<void> {
+  const ownedClient = transactionClient ? null : await getPool().connect()
+  const client = transactionClient ?? ownedClient!
+  try {
+    if (ownedClient) await client.query('BEGIN')
+    const table = primitiveToTable(params.targetKind)
+    const source = await client.query<{
+      sensitivity: 'public' | 'internal' | 'confidential' | 'restricted'
+      userId: string | null
+      assistantId: string | null
+    }>(
+      `SELECT sensitivity, user_id AS "userId", assistant_id AS "assistantId"
+         FROM ${table}
+        WHERE id = $1 AND workspace_id = $2`,
+      [params.targetId, params.workspaceId],
+    )
+    if (!source.rows[0]) {
+      throw new Error(`${params.targetKind} ${params.targetId} not found for verification`)
+    }
+    const verification = await client.query<{ id: string }>(
+      `INSERT INTO brain_verifications (
+         target_kind, target_id, workspace_id, verified_by,
+         action, model_value, user_value, reason
+       ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8)
+       RETURNING id`,
+      [
+        params.targetKind,
+        params.targetId,
+        params.workspaceId,
+        params.verifiedByUserId,
+        params.action,
+        params.modelValue !== undefined ? JSON.stringify(params.modelValue) : null,
+        params.userValue !== undefined ? JSON.stringify(params.userValue) : null,
+        params.reason ?? null,
+      ],
+    )
+    await appendDecisionEvent({
+      idempotencyKey: `brain-verification:${verification.rows[0].id}`,
+      workspaceId: params.workspaceId,
+      actorUserId: params.verifiedByUserId,
+      assistantId: source.rows[0].assistantId,
+      eventKind: 'brain.verification_recorded',
+      schemaVersion: 1,
+      sourceKind: 'brain_verification',
+      sourceId: verification.rows[0].id,
+      declaredScope: 'instance',
+      visibility: source.rows[0].userId === null ? 'workspace' : 'owner',
+      sensitivity: source.rows[0].sensitivity,
+      reason: params.reason,
+      payload: {
+        primitive: params.targetKind,
+        targetId: params.targetId,
+        action: params.action,
+        changedFields: brainVerificationChangedFields(params.action),
+      },
+    }, client)
+    if (ownedClient) await client.query('COMMIT')
+  } catch (err) {
+    if (ownedClient) await client.query('ROLLBACK').catch(() => {})
+    throw err
+  } finally {
+    ownedClient?.release()
+  }
+}
+
+function brainVerificationChangedFields(action: string): string[] {
+  switch (action) {
+    case 'adjust_attributes': return ['attributes']
+    case 'adjust_sensitivity': return ['sensitivity']
+    case 'adjust_scope': return ['scope']
+    case 'edit_summary': return ['summary']
+    case 'edit_assignee': return ['assignee_id']
+    case 'edit_due': return ['due']
+    case 'edit_status': return ['status']
+    case 'delete': return ['valid_to']
+    case 'reclassify_kind': return ['kind']
+    case 'promote_to_crm': return ['kind']
+    default: return []
+  }
 }

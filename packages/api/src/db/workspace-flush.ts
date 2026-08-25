@@ -56,6 +56,13 @@ import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 export const WORKSPACE_FLUSH_TABLES = [
   // Automation + approvals
   'pending_approvals',
+  // Human decision learning (provenance first, then domain hard state, event,
+  // application). All five are learned content, never preserved audit shell.
+  'decision_derivations',
+  'crm_identity_bindings',
+  'crm_entity_separations',
+  'decision_events',
+  'decision_applications',
   'workflows',
   'workflow_runs', // cascade-covered by `workflows`; kept explicit for the classifier
   'sandbox_tasks',
