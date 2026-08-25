@@ -136,7 +136,9 @@ ALTER TABLE assistant_playbook_rules
   ADD COLUMN applicability_key TEXT
     CHECK (applicability_key IS NULL OR length(applicability_key) <= 256),
   ADD COLUMN evidence_count INTEGER NOT NULL DEFAULT 0 CHECK (evidence_count >= 0),
-  ADD COLUMN semantic_key TEXT CHECK (semantic_key IS NULL OR length(semantic_key) <= 256);
+  ADD COLUMN semantic_key TEXT CHECK (semantic_key IS NULL OR length(semantic_key) <= 256),
+  ADD COLUMN decision_sensitivity TEXT NOT NULL DEFAULT 'internal'
+    CHECK (decision_sensitivity IN ('public', 'internal', 'confidential', 'restricted'));
 
 ALTER TABLE assistant_playbook_rules
   DROP CONSTRAINT assistant_playbook_rules_created_by_check;

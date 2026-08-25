@@ -318,6 +318,7 @@ import { skillApprovalsRoutes } from './routes/skill-approvals.js'
 import { createSkillReviewWorker } from './workers/skill-review-worker.js'
 import { createGeminiSkillReviewLLM } from './workers/skill-review-llm.js'
 import { createPlaybookReflectionWorker } from './workers/playbook-reflection-worker.js'
+import { createDecisionReflectionWorker } from './workers/decision-reflection-worker.js'
 import { buildWorkspaceCuratorScope } from './workers/workspace-curator-scope.js'
 import { loadSkillRegistry } from './registry/load-skill-registry.js'
 import { handleRoutes } from './routes/handles.js'
@@ -6729,6 +6730,65 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   })
   if (runWorkers) playbookReflectionWorker.start()
 
+  // ── Decision reflection worker (human-decision learning Phase 4) ──
+  // Daily user-scoped projection from minimized, deliberate decision evidence.
+  // The store independently enforces thresholds and prohibited output.
+  const decisionReflectionWorker = createDecisionReflectionWorker({
+    modelCall: async ({ systemPrompt, prompt, maxTokens, attribution }) => {
+      const workspaceId = await workspaceForAssistant(attribution.assistantId)
+      const customRuntime = await resolveBackgroundRuntime(workspaceId)
+      const callProvider = customRuntime?.provider ?? provider
+      const callModel = customRuntime?.selector ?? BACKGROUND_MODEL
+      const response = await collectStream(callProvider.stream({
+        model: callModel,
+        messages: [{ role: 'user', content: prompt }],
+        systemPrompt,
+        maxTokens,
+      }))
+      if (response.usage && usageStore) {
+        const servedModel = response.model || callModel
+        const cost = customRuntime?.providerKeySource === 'user'
+          ? 0
+          : calculateCost(servedModel, response.usage)
+        usageStore.recordUsage({
+          userId: attribution.userId,
+          assistantId: attribution.assistantId,
+          sessionId: null,
+          model: servedModel,
+          modelTier: 'standard',
+          inputTokens: response.usage.inputTokens,
+          outputTokens: response.usage.outputTokens,
+          cacheReadTokens: response.usage.cacheReadTokens,
+          cacheWriteTokens: response.usage.cacheWriteTokens,
+          actualCostUsd: cost,
+          source: 'overhead:playbook-reflection',
+          providerKeySource: customRuntime?.providerKeySource ?? 'platform',
+        }).catch((err) => console.error('[decision-reflection] usage tracking failed:', err))
+      }
+      return response.content
+        .filter((block) => block.type === 'text')
+        .map((block) => block.type === 'text' ? block.text : '')
+        .join('')
+    },
+    onEvent: (event) => {
+      if (event.type === 'subject_processed'
+        && event.activated + event.suggested + event.rejected > 0) {
+        console.log(
+          `[decision-reflection] assistant=${event.assistantId} actor=${event.actorUserId} active=${event.activated} suggested=${event.suggested} rejected=${event.rejected} deduped=${event.deduped}`,
+        )
+      } else if (event.type === 'error') {
+        console.error(
+          `[decision-reflection] error assistant=${event.assistantId ?? '<global>'} actor=${event.actorUserId ?? '<global>'}: ${event.error}`,
+        )
+      } else if (event.type === 'tick_complete') {
+        console.log(
+          `[decision-reflection] tick complete: processed=${event.processed} skipped=${event.skipped} errors=${event.errors}`,
+        )
+      }
+    },
+  })
+  if (runWorkers) decisionReflectionWorker.start()
+
   // ── Sandbox lifecycle reaper (computer-use.md §7) — kills tasks idle past
   //    the Take-Over abandonment window + runs the vault's per-plan purge.
   //    Only exists when a sandbox provider is configured. ──
@@ -7779,6 +7839,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     console.log('Shutting down — flushing analytics...')
     consolidationWorker.stop()
     skillReviewWorker.stop()
+    playbookReflectionWorker.stop()
+    decisionReflectionWorker.stop()
     embeddingWorker.stop()
     pollWorker.stop()
     runQueueWorker.stop()
