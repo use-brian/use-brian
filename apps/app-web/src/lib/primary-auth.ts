@@ -36,6 +36,25 @@ export function primaryAuthUrl(): string | null {
   );
 }
 
+/**
+ * Rebuild a browser-facing app URL from the configured public app origin.
+ * Next may expose a loopback origin in `request.url` behind ingress or during
+ * remote development; only the path/query/hash are authoritative there.
+ */
+export function publicAppUrl(
+  requestUrl: string | URL,
+  configured =
+    process.env.AUTHED_APP_URL ?? process.env.NEXT_PUBLIC_AUTHED_APP_URL,
+): URL {
+  const request = new URL(requestUrl);
+  if (!configured?.trim()) return request;
+  const target = new URL(configured);
+  target.pathname = request.pathname;
+  target.search = request.search;
+  target.hash = request.hash;
+  return target;
+}
+
 export function resolvePrimaryAuthUrl(
   profile: DeploymentProfile,
   configured: string | undefined,

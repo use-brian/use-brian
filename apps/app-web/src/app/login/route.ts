@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import {
   buildDelegatedLoginUrl,
   primaryAuthUrl,
+  publicAppUrl,
   webAppUrl,
 } from "@/lib/primary-auth";
 import { usebrianEdition } from "@/lib/edition";
@@ -49,7 +50,7 @@ export function resolveAppLoginReturn(
 }
 
 export function GET(request: Request): NextResponse {
-  const requestUrl = new URL(request.url);
+  const requestUrl = publicAppUrl(request.url);
   const returnUrl = resolveAppLoginReturn(
     requestUrl,
     requestUrl.searchParams.get("next"),

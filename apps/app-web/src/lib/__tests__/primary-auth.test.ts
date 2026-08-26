@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { buildDelegatedLoginUrl, resolvePrimaryAuthUrl } from "@/lib/primary-auth";
+import {
+  buildDelegatedLoginUrl,
+  publicAppUrl,
+  resolvePrimaryAuthUrl,
+} from "@/lib/primary-auth";
 
 describe("[COMP:app-web/login-delegation] buildDelegatedLoginUrl", () => {
   it("targets the canonical login and preserves the absolute return URL", () => {
@@ -54,5 +58,22 @@ describe("[COMP:app-web/login-delegation] deployment auth primary", () => {
 
   it("never delegates OSS local-owner auth", () => {
     expect(resolvePrimaryAuthUrl("oss", "https://auth.example", "production")).toBeNull();
+  });
+});
+
+describe("[COMP:app-web/login-delegation] public app return URL", () => {
+  it("replaces a normalized loopback origin while preserving the request target", () => {
+    expect(
+      publicAppUrl(
+        "http://localhost:3003/w/one?view=table#selection",
+        "https://app.customer.example",
+      ).toString(),
+    ).toBe("https://app.customer.example/w/one?view=table#selection");
+  });
+
+  it("uses the request URL when no public app origin is configured", () => {
+    expect(publicAppUrl("http://localhost:3003/login", "").toString()).toBe(
+      "http://localhost:3003/login",
+    );
   });
 });
