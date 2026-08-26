@@ -3134,6 +3134,9 @@ export const ja: Dictionary = {
       deliverChannelIdPlaceholder: "チャンネルまたはチャットID",
       deliverHint:
         "このステップが完了すると、テキスト出力がこのチャンネルに送信されます。配信はベストエフォートで、送信に失敗してもステップは失敗しません。",
+      failureDeliveryLabel: "失敗時の通知",
+      failureDeliveryHint:
+        "ワークフローが失敗またはタイムアウトしたときに、通知を1回だけベストエフォートで送信します。成功またはキャンセル時は送信しません。",
       deliverTelegramChannelLabel: "Telegramチャンネル",
       deliverTelegramChannelPlaceholder: "Telegramチャンネルを選択…",
       deliverTelegramChannelHint: "このワークフローのメッセージ送信に使う接続済みBotを選択します。",
@@ -3313,6 +3316,9 @@ export const ja: Dictionary = {
       eventTaskTagsLabel: "タグで絞り込み（任意）",
       eventTaskTagsHint:
         "いずれかのタグを持つタスクにマッチします。編集時は新しく追加されたタグのみが対象です。後からタグを追加しても発火しますが、タグ付き済みタスクの無関係な編集では発火しません。",
+      eventTaskCurrentTagsLabel: "現在のタグで絞り込み（任意）",
+      eventTaskCurrentTagsHint:
+        "選択したライフサイクルイベントごとに、タスクの現在の全タグを照合します。完了またはブロックの通知に使用します。",
       eventTaskAssigneeLabel: "担当者で絞り込み（任意）",
       eventTaskAssigneeHint:
         "タスクの担当者がこれらのメンバーの場合のみ発火します。未指定の場合は全員が対象です。",

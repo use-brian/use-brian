@@ -38,6 +38,7 @@ import type {
   DeliverChannelType,
   PageAnchor,
   WorkflowModelAlias,
+  WorkflowDelivery,
   WorkflowStep,
 } from "@/lib/api/workflow";
 import {
@@ -375,12 +376,12 @@ export function StepEditor({
             <RailCard title={b.stepRailOutputHeading}>
               <div className="flex flex-col gap-2.5">
                 {step.type === "assistant_call" && (
-                  <DeliverField
-                    step={step}
+                  <WorkflowDeliveryField
+                    delivery={step.deliver}
                     destinations={destinations}
                     channelOptions={channelOptions}
                     slackChannels={slackChannels}
-                    onChange={onChange}
+                    onChange={(delivery) => onChange({ ...step, deliver: delivery })}
                     disabled={disabled}
                     t={t}
                   />
@@ -1459,29 +1460,35 @@ function SkillsField({
  * docs/architecture/features/workflow.md → "Deliver destination picker
  * (web builder)".
  */
-function DeliverField({
-  step,
+export function WorkflowDeliveryField({
+  delivery,
   destinations,
   channelOptions,
   slackChannels,
   onChange,
   disabled,
   t,
+  label,
+  hint,
 }: {
-  step: Extract<WorkflowStep, { type: "assistant_call" }>;
+  delivery?: WorkflowDelivery;
   destinations: ChannelDestination[];
   channelOptions: WorkspaceChannelOption[];
   slackChannels: SlackChannelOption[];
-  onChange: (s: WorkflowStep) => void;
+  onChange: (delivery: WorkflowDelivery | undefined) => void;
   disabled?: boolean;
   t: Dictionary;
+  label?: string;
+  hint?: string;
 }) {
   const b = t.workflowPage.builder;
-  const isTriggerReply = !!step.deliver && "replyToTrigger" in step.deliver;
-  const staticDeliver = step.deliver && "channelId" in step.deliver
-    ? step.deliver
+  const fieldLabel = label ?? b.deliverLabel;
+  const fieldHint = hint ?? b.deliverHint;
+  const isTriggerReply = !!delivery && "replyToTrigger" in delivery;
+  const staticDeliver = delivery && "channelId" in delivery
+    ? delivery
     : undefined;
-  const channelType = step.deliver?.channelType ?? "telegram";
+  const channelType = delivery?.channelType ?? "telegram";
   const channelId = staticDeliver?.channelId ?? "";
   const channelIntegrationId = staticDeliver?.channelIntegrationId;
   const [stickyCustom, setStickyCustom] = useState(false);
@@ -1490,16 +1497,16 @@ function DeliverField({
     return (
       <div className="flex flex-col gap-2">
         <SwitchRow
-          label={b.deliverLabel}
-          hint={b.deliverHint}
+          label={fieldLabel}
+          hint={fieldHint}
           control={
             <Switch
               checked
               onCheckedChange={(checked) => {
-                if (!checked) onChange({ ...step, deliver: undefined });
+                if (!checked) onChange(undefined);
               }}
               disabled={disabled}
-              aria-label={b.deliverLabel}
+              aria-label={fieldLabel}
             />
           }
         />
@@ -1578,36 +1585,30 @@ function DeliverField({
   return (
     <div className="flex flex-col gap-2">
       <SwitchRow
-        label={b.deliverLabel}
-        hint={b.deliverHint}
+        label={fieldLabel}
+        hint={fieldHint}
         control={
           <Switch
-            checked={!!step.deliver}
+            checked={!!delivery}
             onCheckedChange={(checked) => {
               setStickyCustom(false);
-              onChange({
-                ...step,
-                deliver: checked
-                  ? { channelType: "telegram", channelId: "" }
-                  : undefined,
-              });
+              onChange(checked
+                ? { channelType: "telegram", channelId: "" }
+                : undefined);
             }}
             disabled={disabled}
-            aria-label={b.deliverLabel}
+            aria-label={fieldLabel}
           />
         }
       />
-      {step.deliver && (
+      {delivery && (
         <div className="flex flex-col gap-2">
           <Select
             value={channelType}
             onValueChange={(v) => {
               if (!v) return;
               setStickyCustom(false);
-              onChange({
-                ...step,
-                deliver: { channelType: v as DeliverChannelType, channelId: "" },
-              });
+              onChange({ channelType: v as DeliverChannelType, channelId: "" });
             }}
             disabled={disabled}
             items={{
@@ -1648,14 +1649,11 @@ function DeliverField({
                   );
                   if (currentIsKnown && !nextChannelCanUseDestination) setStickyCustom(false);
                   onChange({
-                    ...step,
-                    deliver: {
-                      ...step.deliver,
-                      channelType,
-                      channelId:
-                        currentIsKnown && !nextChannelCanUseDestination ? "" : channelId,
-                      channelIntegrationId: v,
-                    },
+                    ...staticDeliver,
+                    channelType,
+                    channelId:
+                      currentIsKnown && !nextChannelCanUseDestination ? "" : channelId,
+                    channelIntegrationId: v,
                   });
                 }}
                 disabled={disabled}
@@ -1685,30 +1683,24 @@ function DeliverField({
                 if (v === CUSTOM_DESTINATION_VALUE) {
                   setStickyCustom(true);
                   onChange({
-                    ...step,
                     // Spread keeps a chat-authored `thread` (reply-in-thread)
                     // intact across a same-platform destination edit — the
                     // type-change path above deliberately resets it (a thread
                     // parent can't live on another platform).
-                    deliver: {
-                      ...step.deliver,
-                      channelType,
-                      channelId: "",
-                    },
+                    ...staticDeliver,
+                    channelType,
+                    channelId: "",
                   });
                   return;
                 }
                 setStickyCustom(false);
                 const destination = destinationByValue.get(v);
                 onChange({
-                  ...step,
-                  deliver: {
-                    ...step.deliver,
-                    channelType,
-                    channelId: destination?.channelId ?? v,
-                    channelIntegrationId:
-                      destination?.channelIntegrationId ?? channelIntegrationId,
-                  },
+                  ...staticDeliver,
+                  channelType,
+                  channelId: destination?.channelId ?? v,
+                  channelIntegrationId:
+                    destination?.channelIntegrationId ?? channelIntegrationId,
                 });
               }}
               items={items}
@@ -1744,13 +1736,10 @@ function DeliverField({
                 value={channelId}
                 onChange={(e) =>
                   onChange({
-                    ...step,
                     // Same thread-preserving spread as the picker above.
-                    deliver: {
-                      ...step.deliver,
-                      channelType,
-                      channelId: e.target.value,
-                    },
+                    ...staticDeliver,
+                    channelType,
+                    channelId: e.target.value,
                   })
                 }
                 disabled={disabled}

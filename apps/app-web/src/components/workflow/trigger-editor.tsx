@@ -22,11 +22,18 @@
 
 import { useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
-import type { WorkflowTrigger } from "@/lib/api/workflow";
+import type {
+  ChannelDestination,
+  SlackChannelOption,
+  WorkflowDelivery,
+  WorkflowTrigger,
+  WorkspaceChannelOption,
+} from "@/lib/api/workflow";
 import { ManualTriggerPanel } from "./manual-trigger-panel";
 import { ScheduleTriggerFields } from "./schedule-trigger-fields";
 import { WebhookTriggerFields } from "./webhook-trigger-fields";
 import { EventTriggerFields } from "./event-trigger-fields";
+import { WorkflowDeliveryField } from "./step-editor";
 
 type Props = {
   workflowId: string;
@@ -36,6 +43,11 @@ type Props = {
   webhookSecret: string | null;
   onChange: (next: WorkflowTrigger) => void;
   onRotateWebhook: () => void | Promise<void>;
+  failureDelivery?: WorkflowDelivery;
+  onFailureDeliveryChange: (delivery: WorkflowDelivery | undefined) => void;
+  destinations: ChannelDestination[];
+  channelOptions: WorkspaceChannelOption[];
+  slackChannels: SlackChannelOption[];
   disabled?: boolean;
 };
 
@@ -49,6 +61,11 @@ export function TriggerEditor({
   webhookSecret,
   onChange,
   onRotateWebhook,
+  failureDelivery,
+  onFailureDeliveryChange,
+  destinations,
+  channelOptions,
+  slackChannels,
   disabled,
 }: Props) {
   const t = useT();
@@ -161,6 +178,20 @@ export function TriggerEditor({
             disabled={disabled}
           />
         )}
+      </div>
+
+      <div className="border-t border-border/60 pt-4">
+        <WorkflowDeliveryField
+          delivery={failureDelivery}
+          destinations={destinations}
+          channelOptions={channelOptions}
+          slackChannels={slackChannels}
+          onChange={onFailureDeliveryChange}
+          disabled={disabled}
+          t={t}
+          label={b.failureDeliveryLabel}
+          hint={b.failureDeliveryHint}
+        />
       </div>
     </div>
   );

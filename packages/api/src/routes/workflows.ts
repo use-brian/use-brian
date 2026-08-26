@@ -327,6 +327,43 @@ async function dependencyIssues(
         console.warn('[workflows] delivery validator threw:', err)
       }
     }
+    const failureTarget = definition.failureDelivery
+    if (
+      failureTarget
+      && 'channelId' in failureTarget
+      && failureTarget.channelType !== 'web'
+      && failureTarget.channelType !== 'msteams'
+      && failureTarget.channelType !== 'custom'
+    ) {
+      const assistantId = opts.resolvePrimary
+        ? await opts.resolvePrimary(ctx.workspaceId)
+        : null
+      if (assistantId) {
+        try {
+          const result = await opts.validateDeliveryTarget({
+            workspaceId: ctx.workspaceId,
+            assistantId,
+            channelType: failureTarget.channelType,
+            channelId: failureTarget.channelId,
+            channelIntegrationId: failureTarget.channelIntegrationId,
+          })
+          if (!result.ok) {
+            issues.push({
+              path: [
+                'definition',
+                'failureDelivery',
+                failureTarget.channelIntegrationId && !/chat not found/i.test(result.reason ?? '')
+                  ? 'channelIntegrationId'
+                  : 'channelId',
+              ],
+              message: `${failureTarget.channelType} failure notification is invalid: ${result.reason ?? 'channel check failed'}`,
+            })
+          }
+        } catch (err) {
+          console.warn('[workflows] failure delivery validator threw:', err)
+        }
+      }
+    }
   }
 
   if (opts.preflightConnectorTool) {

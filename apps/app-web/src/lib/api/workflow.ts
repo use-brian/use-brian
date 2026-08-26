@@ -96,6 +96,8 @@ export type EventMatch = {
    * updates. Only task events carry tags. Cap 64.
    */
   tags?: string[];
+  /** Task's full live tag set at dispatch time. Task sources only. Cap 64. */
+  currentTags?: string[];
   /** Allow bot-authored events. Default false (self-loop guard). */
   fromBots?: boolean;
 };
@@ -191,16 +193,7 @@ export type AssistantCallStep = {
    */
   blueprintId?: string;
   /** When set, the step's text output is pushed to this channel after the consult. */
-  deliver?:
-    | {
-        channelType: DeliverChannelType;
-        channelId: string;
-        channelIntegrationId?: string;
-      }
-    | {
-        channelType: "whatsapp";
-        replyToTrigger: true;
-      };
+  deliver?: WorkflowDelivery;
   /** `persistent` reuses one callee session across runs; `per_run` (default) is fresh. */
   session?: "per_run" | "persistent";
   /** Per-step model alias. Backfilled from workflow-level on read for legacy rows. */
@@ -283,6 +276,8 @@ export type WorkflowDefinition = {
    */
   startStepId: string | string[];
   steps: WorkflowStep[];
+  /** Best-effort terminal notification for failed or timed-out runs. */
+  failureDelivery?: WorkflowDelivery;
   /** Optional run-wide external-client authority (read-only model lane). */
   principal?: ExternalClientWorkflowPrincipal;
   /**
@@ -292,6 +287,18 @@ export type WorkflowDefinition = {
    */
   layout?: Record<string, WorkflowNodePosition>;
 };
+
+export type WorkflowDelivery =
+  | {
+      channelType: DeliverChannelType;
+      channelId: string;
+      channelIntegrationId?: string;
+      thread?: { fromStep: string };
+    }
+  | {
+      channelType: "whatsapp";
+      replyToTrigger: true;
+    };
 
 // ── Records ───────────────────────────────────────────────────────────────
 

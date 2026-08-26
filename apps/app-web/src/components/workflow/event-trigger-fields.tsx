@@ -225,6 +225,22 @@ export function EventTriggerFields({
                     }
                     disabled={disabled}
                   />
+                  <ChipInput
+                    field="currentTags"
+                    label={t.workflowPage.builder.eventTaskCurrentTagsLabel}
+                    hint={t.workflowPage.builder.eventTaskCurrentTagsHint}
+                    values={sub.match?.currentTags ?? []}
+                    onChange={(next) =>
+                      updateSource(idx, {
+                        ...sub,
+                        match: {
+                          ...(sub.match ?? {}),
+                          currentTags: next.length ? next : undefined,
+                        },
+                      })
+                    }
+                    disabled={disabled}
+                  />
                   <TaskAssigneePicker
                     value={sub.match?.mentions ?? []}
                     options={members}
@@ -282,6 +298,7 @@ function anyMatchSet(m: EventMatch): boolean {
     !!m.inChannels?.length ||
     !!m.mentions?.length ||
     !!m.tags?.length ||
+    !!m.currentTags?.length ||
     m.fromBots === true
   );
 }
@@ -312,9 +329,14 @@ function SourceRow({
     if (next === kind) return;
     // `inChannels` is kind-specific (channel ids for connector/channel, the
     // lifecycle-action mode for page/task), so reset it on a kind switch;
-    // `tags` is task-only, so drop it too.
+    // `tags` and `currentTags` are task-only, so drop them too.
     const carriedMatch = sub.match
-      ? { ...sub.match, inChannels: undefined, tags: undefined }
+      ? {
+          ...sub.match,
+          inChannels: undefined,
+          tags: undefined,
+          currentTags: undefined,
+        }
       : undefined;
     if (next === "task") {
       onChange({

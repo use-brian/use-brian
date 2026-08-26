@@ -2344,6 +2344,35 @@ describe('[COMP:workflow/tools] external-dependency authoring checks', () => {
     expect((r.data as { ok: boolean }).ok).toBe(true)
   })
 
+  it('[COMP:workflow/failure-delivery] summarizes and preflights the primary assistant failure destination', async () => {
+    const validateDeliveryTarget = vi.fn(async () => ({ ok: true }))
+    const { tools } = makeAllTools({ validateDeliveryTarget })
+    const definition: WorkflowDefinition = {
+      startStepId: 's1',
+      steps: [{
+        id: 's1',
+        type: 'assistant_call',
+        target: { assistantId: DELIVERING_ASSISTANT_ID },
+        prompt: 'Collect.',
+      }],
+      failureDelivery: { channelType: 'slack', channelId: 'C_FAILURES' },
+    }
+    const r = await tools.proposeWorkflow.execute(
+      { name: 'X', definition },
+      makeContext({ assistantId: AUTHORING_ASSISTANT_ID }),
+    )
+    expect(r.isError).toBeFalsy()
+    expect((r.data as { summary: string }).summary).toContain(
+      'Failure notification: slack C_FAILURES',
+    )
+    expect(validateDeliveryTarget).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE_ID,
+      assistantId: PRIMARY_ASSISTANT_ID,
+      channelType: 'slack',
+      channelId: 'C_FAILURES',
+    })
+  })
+
   it('blocks a tool_call against a connector whose preflight fails (the Bad credentials incident)', async () => {
     const preflightConnectorTool = vi.fn(async () => ({
       ok: false,
@@ -2530,6 +2559,8 @@ describe('[COMP:workflow/tools] trigger capability surface (closed-world, derive
     expect(TRIGGER_INPUT_DESCRIPTION).toMatch(/provider: "imap"/)
     expect(TRIGGER_INPUT_DESCRIPTION).toMatch(/\{\{input\.event\.message_id\}\}/)
     expect(TRIGGER_INPUT_DESCRIPTION).toMatch(/inReplyTo/)
+    expect(TRIGGER_INPUT_DESCRIPTION).toMatch(/currentTags/)
+    expect(TRIGGER_INPUT_DESCRIPTION).toMatch(/full live tag set/)
   })
 
   it('createWorkflow accepts and persists an event trigger with a task source (chat-authorable, no web builder needed)', async () => {

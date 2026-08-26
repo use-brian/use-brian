@@ -1821,6 +1821,96 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
   })
 })
 
+describe('[COMP:workflow/failure-delivery] terminal workflow notification', () => {
+  it('attempts one sanitized notification after a timeout and stays terminal when delivery fails', async () => {
+    const stores = makeFakeStores()
+    const delivered: string[] = []
+    const audits: WorkflowAuditEvent[] = []
+    const deps: ExecutorDeps = {
+      workflowStore: stores.workflowStore,
+      runStore: stores.runStore,
+      consultTransport: {
+        async send() {
+          throw Object.assign(new Error('token=do-not-send'), {
+            reason: 'timeout',
+            partialOutput: 'partial result',
+          })
+        },
+      },
+      resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
+      buildToolRegistry: async () => new Map(),
+      deliverToChannel: async (params) => {
+        expect(stores.runs.get(run.id)?.status).toBe('timeout')
+        delivered.push(params.text)
+        throw new Error('Slack unavailable')
+      },
+      emitAudit: (event) => {
+        audits.push(event)
+      },
+    }
+    const { run } = await seedWorkflowAndRun(deps, {
+      startStepId: 'collect',
+      steps: [{
+        id: 'collect',
+        type: 'assistant_call',
+        target: { assistantId: 'primary' },
+        prompt: 'collect',
+      }],
+      failureDelivery: { channelType: 'slack', channelId: 'C123' },
+    })
+
+    await advanceWorkflowRun(deps, run.id)
+    await advanceWorkflowRun(deps, run.id)
+
+    expect(delivered).toHaveLength(1)
+    expect(delivered[0]).toContain('Failed step: collect')
+    expect(delivered[0]).toContain('Error: timeout')
+    expect(delivered[0]).not.toContain('do-not-send')
+    expect(stores.runs.get(run.id)?.status).toBe('timeout')
+    expect(audits.filter((event) => event.type === 'workflow.failure_delivered')).toHaveLength(1)
+  })
+
+  it('audits one successful notification and never notifies a successful run', async () => {
+    const stores = makeFakeStores()
+    const delivered: string[] = []
+    const audits: WorkflowAuditEvent[] = []
+    const deps: ExecutorDeps = {
+      workflowStore: stores.workflowStore,
+      runStore: stores.runStore,
+      consultTransport: makeConsultTransport({ fail: 'failed safely' }),
+      resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
+      buildToolRegistry: async () => new Map(),
+      deliverToChannel: async (params) => {
+        delivered.push(params.text)
+        return { status: 'delivered', channelType: params.channelType, channelId: params.channelId }
+      },
+      emitAudit: (event) => {
+        audits.push(event)
+      },
+    }
+    const definition: WorkflowDefinition = {
+      startStepId: 'collect',
+      steps: [{
+        id: 'collect',
+        type: 'assistant_call',
+        target: { assistantId: 'primary' },
+        prompt: 'collect',
+      }],
+      failureDelivery: { channelType: 'slack', channelId: 'C123' },
+    }
+    const failed = await seedWorkflowAndRun(deps, definition)
+    await advanceWorkflowRun(deps, failed.run.id)
+    await advanceWorkflowRun(deps, failed.run.id)
+    expect(delivered).toHaveLength(1)
+    expect(audits.filter((event) => event.type === 'workflow.failure_delivered')).toHaveLength(1)
+
+    deps.consultTransport = makeConsultTransport({ responseText: 'ok' })
+    const successful = await seedWorkflowAndRun(deps, definition)
+    await advanceWorkflowRun(deps, successful.run.id)
+    expect(delivered).toHaveLength(1)
+  })
+})
+
 describe('[COMP:workflow/executor] page anchor resolution', () => {
   const PAGE_ID = '00000000-0000-0000-0000-00000000aaaa'
   const PARENT_ID = '00000000-0000-0000-0000-00000000bbbb'

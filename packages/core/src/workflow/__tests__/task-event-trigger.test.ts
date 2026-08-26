@@ -155,6 +155,7 @@ describe('[COMP:workflow/task-event-trigger] taskLifecycleToDispatchEvent', () =
       updated({ tags: ['old', 'new'], previousTags: ['old'] }),
     )
     expect(ev.tags).toEqual(['new'])
+    expect(ev.currentTags).toEqual(['old', 'new'])
     expect(ev.payload.tags).toEqual(['old', 'new']) // payload keeps the full set
     expect(ev.payload.tagsAdded).toEqual(['new'])
   })
@@ -208,6 +209,35 @@ describe('[COMP:workflow/task-event-trigger] taskLifecycleToDispatchEvent', () =
       updated({ previousStatus: 'todo', status: 'done', tags: ['x'], previousTags: [] }),
     )
     expect(matchesEvent(ev, sub)).toBe(true)
+  })
+
+  it('[COMP:workflow/task-current-tags] terminal filtering uses persistent current tags', () => {
+    const sub = taskSub({
+      inChannels: ['completed', 'blocked'],
+      currentTags: ['geo:route:brian'],
+      fromBots: true,
+    })
+    const terminalBrianTask = taskLifecycleToDispatchEvent(updated({
+      previousStatus: 'in_progress',
+      status: 'done',
+      tags: ['geo:route:brian', 'geo:site:primary'],
+      previousTags: ['geo:route:brian', 'geo:site:primary'],
+      changedFields: ['status'],
+      writtenBy: 'system',
+    }))
+    expect(terminalBrianTask.tags).toEqual([])
+    expect(terminalBrianTask.currentTags).toContain('geo:route:brian')
+    expect(matchesEvent(terminalBrianTask, sub)).toBe(true)
+
+    const unrelated = taskLifecycleToDispatchEvent(updated({
+      previousStatus: 'in_progress',
+      status: 'done',
+      tags: ['geo:route:human'],
+      previousTags: ['geo:route:human'],
+      changedFields: ['status'],
+      writtenBy: 'system',
+    }))
+    expect(matchesEvent(unrelated, sub)).toBe(false)
   })
 
   it('default fromBots=false filters assistant-created tasks; opting in fires', () => {

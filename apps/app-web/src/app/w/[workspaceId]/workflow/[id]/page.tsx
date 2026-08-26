@@ -912,6 +912,13 @@ export default function WorkflowDetailPage({
                 webhookSecret={draft.webhookSecret}
                 onChange={onSaveTrigger}
                 onRotateWebhook={onRotateWebhook}
+                failureDelivery={draft.definition.failureDelivery}
+                onFailureDeliveryChange={(failureDelivery) =>
+                  updateDefinition({ ...draft.definition, failureDelivery })
+                }
+                destinations={destinations}
+                channelOptions={channelOptions}
+                slackChannels={slackChannels}
                 disabled={saving}
               />
             </div>

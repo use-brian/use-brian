@@ -27,6 +27,7 @@ import type {
   ToolCallStep,
   WaitStep,
   WorkflowDefinition,
+  WorkflowDelivery,
   ResolvedExternalClientWorkflowPrincipal,
   WorkflowRecord,
   WorkflowRunOutcome,
@@ -234,6 +235,16 @@ export type WorkflowAuditEvent =
       workflowName: string
       stepId: string
       error: ExecutorError
+    }
+  | {
+      /** Best-effort terminal notification for a failed/timed-out run. */
+      type: 'workflow.failure_delivered'
+      workspaceId: string
+      actorUserId: string | null
+      runId: string
+      workflowId: string
+      stepId: string
+      delivery: DeliveryOutcome
     }
   | {
       type: 'workflow.auto_disabled'
@@ -663,7 +674,7 @@ export async function advanceWorkflowRun(
           ? (err as { reason: string }).reason
           : 'client_principal_unresolved',
     }
-    await markRunFailed(deps, run, '<principal>', error)
+    await markRunFailed(deps, run, '<principal>', error, 'failed', undefined, workflow)
     return failOutcome(runId, '<principal>', error, 0)
   }
   if (
@@ -674,7 +685,7 @@ export async function advanceWorkflowRun(
       message: 'An external-client workflow may contain at most one reviewed IMAP reply step.',
       reason: 'client_principal_step_forbidden',
     }
-    await markRunFailed(deps, run, '<principal>', error)
+    await markRunFailed(deps, run, '<principal>', error, 'failed', undefined, workflow)
     return failOutcome(runId, '<principal>', error, 0)
   }
 
@@ -687,7 +698,7 @@ export async function advanceWorkflowRun(
       message: 'This workspace has no active plan, so scheduled and workflow runs are paused. Pick a plan to resume, or self-host the open-source version.',
       reason: 'workspace_compute_blocked',
     }
-    await markRunFailed(deps, run, run.currentStepId ?? '<unknown>', err)
+    await markRunFailed(deps, run, run.currentStepId ?? '<unknown>', err, 'failed', undefined, workflow)
     return failOutcome(runId, run.currentStepId ?? '<unknown>', err, 0)
   }
 
@@ -697,7 +708,7 @@ export async function advanceWorkflowRun(
   const primaryAssistantId = await deps.resolvePrimary(run.workspaceId)
   if (!primaryAssistantId) {
     const err: ExecutorError = { message: 'Workspace has no primary assistant.', reason: 'no_primary_assistant' }
-    await markRunFailed(deps, run, '<unknown>', err)
+    await markRunFailed(deps, run, '<unknown>', err, 'failed', undefined, workflow)
     return failOutcome(runId, '<unknown>', err, 0)
   }
   // Ordinary deterministic tool steps run on the workspace primary. A
@@ -720,7 +731,7 @@ export async function advanceWorkflowRun(
       message: `Failed to build tool registry: ${err instanceof Error ? err.message : String(err)}`,
       reason: 'tool_registry_failed',
     }
-    await markRunFailed(deps, run, '<unknown>', error)
+    await markRunFailed(deps, run, '<unknown>', error, 'failed', undefined, workflow)
     return failOutcome(runId, '<unknown>', error, 0)
   }
 
@@ -1145,6 +1156,7 @@ export async function advanceWorkflowRun(
       firstFailure.error,
       status,
       composeRunOutcome(vars, runLog, status, new Date(now()), lastOutput, firstFailure.error),
+      workflow,
     )
     await maybeDisableForDeadAnchor(deps, run, workflow, primaryAssistantId, firstFailure.error)
     return failOutcome(
@@ -2479,6 +2491,10 @@ async function markRunFailed(
   // the accumulated vars + step log in scope; omitted by pre-loop infra
   // failures (no workflow logic ran, so there is nothing to hand forward).
   outcome?: WorkflowRunOutcome | null,
+  // Definitions loaded before the failure boundary can declare one durable
+  // failure destination. A missing workflow (the workflow_not_found case)
+  // cannot be notified because there is no trusted destination to resolve.
+  workflow?: WorkflowRecord,
 ): Promise<void> {
   const now = new Date()
   await deps.runStore.updateRun(run.id, {
@@ -2498,6 +2514,185 @@ async function markRunFailed(
     stepId,
     error,
   })
+  if (workflow) {
+    await attemptFailureDelivery(deps, run, workflow, stepId, error, status, outcome)
+  }
+}
+
+function normalizedFailureReason(error: ExecutorError): string {
+  const candidate = typeof error.reason === 'string' ? error.reason : 'workflow_error'
+  const normalized = candidate
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 80)
+  return normalized || 'workflow_error'
+}
+
+function failureStateLines(outcome: WorkflowRunOutcome | null | undefined): string[] {
+  const state = outcome?.state
+  const coverage = state?.coverage
+  let coverageLine = 'Coverage: unavailable'
+  if (coverage && typeof coverage === 'object' && !Array.isArray(coverage)) {
+    const record = coverage as Record<string, unknown>
+    const expected = typeof record.expected === 'number' ? record.expected : null
+    const valid = typeof record.valid === 'number' ? record.valid : null
+    const ratio = typeof record.ratio === 'number' ? record.ratio : null
+    if (expected !== null && valid !== null && expected >= 0 && valid >= 0) {
+      const ratioText = ratio !== null && Number.isFinite(ratio)
+        ? ` (${Math.round(Math.max(0, Math.min(1, ratio)) * 100)}%)`
+        : ''
+      coverageLine = `Coverage: ${valid}/${expected}${ratioText}`
+    }
+  }
+  const scorecard = state?.scorecardWritten
+  const scorecardLine = `Scorecard written: ${scorecard === true ? 'yes' : scorecard === false ? 'no' : 'unknown'}`
+  return [coverageLine, scorecardLine]
+}
+
+function failureReplyTarget(
+  run: WorkflowRunRecord,
+  workflow: WorkflowRecord,
+): {
+  channelId: string
+  channelIntegrationId: string
+  actorId: string
+  recipientType: 'individual' | 'group'
+  providerAccountId: string
+  occurredAt: string
+} | null {
+  const trigger = run.input.trigger as {
+    sourceType?: unknown
+    provider?: unknown
+    channelIntegrationId?: unknown
+    channelId?: unknown
+    actorId?: unknown
+    isGroupChat?: unknown
+    providerAccountId?: unknown
+    occurredAt?: unknown
+  } | undefined
+  const event = run.input.event as { from?: unknown; group_id?: unknown } | undefined
+  const integrationId = typeof trigger?.channelIntegrationId === 'string'
+    ? trigger.channelIntegrationId
+    : null
+  const sourceStillConfigured = workflow.trigger.kind === 'event'
+    && integrationId !== null
+    && workflow.trigger.event.sources.some((subscription) =>
+      subscription.source.type === 'channel'
+      && subscription.source.channel === 'whatsapp'
+      && subscription.source.channelIntegrationId === integrationId,
+    )
+  if (
+    run.triggerKind !== 'event'
+    || trigger?.sourceType !== 'channel'
+    || trigger.provider !== 'whatsapp'
+    || integrationId === null
+    || !sourceStillConfigured
+    || typeof trigger.channelId !== 'string'
+    || typeof trigger.actorId !== 'string'
+    || (trigger.isGroupChat === true
+      ? trigger.channelId === trigger.actorId
+        || event?.group_id !== trigger.channelId
+        || event.from !== trigger.actorId
+      : trigger.channelId !== trigger.actorId
+        || (event?.group_id !== undefined && event.group_id !== null)
+        || (event?.from !== undefined && event.from !== trigger.actorId))
+    || typeof trigger.providerAccountId !== 'string'
+    || typeof trigger.occurredAt !== 'string'
+  ) return null
+  return {
+    channelId: trigger.channelId,
+    channelIntegrationId: integrationId,
+    actorId: trigger.actorId,
+    recipientType: trigger.isGroupChat === true ? 'group' : 'individual',
+    providerAccountId: trigger.providerAccountId,
+    occurredAt: trigger.occurredAt,
+  }
+}
+
+/**
+ * One deterministic, sanitized, best-effort notification owned by the
+ * terminal failure boundary. The run is already terminal before this starts,
+ * so delivery can never turn the original failure into a different status.
+ */
+async function attemptFailureDelivery(
+  deps: ExecutorDeps,
+  run: WorkflowRunRecord,
+  workflow: WorkflowRecord,
+  stepId: string,
+  error: ExecutorError,
+  status: 'failed' | 'timeout',
+  outcome?: WorkflowRunOutcome | null,
+): Promise<void> {
+  const target: WorkflowDelivery | undefined = workflow.definition.failureDelivery
+  if (!target || !deps.deliverToChannel) return
+  const assistantId = await deps.resolvePrimary(run.workspaceId)
+  if (!assistantId) return
+
+  const text = sanitizeDeliveryText([
+    `Workflow "${workflow.name}" ${status}.`,
+    `Failed step: ${stepId}`,
+    `Error: ${normalizedFailureReason(error)}`,
+    ...failureStateLines(outcome),
+    `Run: ${run.id}`,
+  ].join('\n'))
+
+  try {
+    let delivery: DeliveryOutcome
+    if ('replyToTrigger' in target) {
+      const reply = failureReplyTarget(run, workflow)
+      if (!reply) return
+      delivery = await deps.deliverToChannel({
+        workspaceId: run.workspaceId,
+        assistantId,
+        userId: run.triggeredBy ?? workflow.createdBy,
+        channelType: 'whatsapp',
+        channelId: reply.channelId,
+        channelIntegrationId: reply.channelIntegrationId,
+        text,
+        replyToTrigger: reply,
+      })
+    } else {
+      const parent = target.thread
+        ? run.vars[`__deliveryMsg_${target.thread.fromStep}`]
+        : undefined
+      delivery = await deps.deliverToChannel({
+        workspaceId: run.workspaceId,
+        assistantId,
+        userId: run.triggeredBy ?? workflow.createdBy,
+        channelType: target.channelType,
+        channelId: target.channelId,
+        channelIntegrationId: target.channelIntegrationId,
+        text,
+        threadRef: typeof parent === 'string' ? parent : undefined,
+      })
+    }
+    fireAndForgetAudit(deps, {
+      type: 'workflow.failure_delivered',
+      workspaceId: run.workspaceId,
+      actorUserId: run.triggeredBy,
+      runId: run.id,
+      workflowId: workflow.id,
+      stepId,
+      delivery,
+    })
+  } catch (deliveryError) {
+    fireAndForgetAudit(deps, {
+      type: 'workflow.failure_delivered',
+      workspaceId: run.workspaceId,
+      actorUserId: run.triggeredBy,
+      runId: run.id,
+      workflowId: workflow.id,
+      stepId,
+      delivery: {
+        status: 'failed',
+        channelType: target.channelType,
+        error: 'failure_notification_delivery_failed',
+      },
+    })
+    console.warn('[workflow] failure notification failed:', deliveryError)
+  }
 }
 
 function failOutcome(

@@ -3339,6 +3339,9 @@ export const en = {
       deliverChannelIdPlaceholder: "Channel or chat ID",
       deliverHint:
         "When this step finishes, its text output is pushed to this channel. Delivery is best-effort. A send failure won't fail the step.",
+      failureDeliveryLabel: "Failure notification",
+      failureDeliveryHint:
+        "Send one best-effort notification when this workflow ends failed or times out. Successful and cancelled runs do not send it.",
       storeOutputAsLabel: "Save output as (optional)",
       storeOutputAsHint: "Later steps can reference this via {{vars.NAME}}.",
       removeStepBtn: "Remove",
@@ -3518,6 +3521,9 @@ export const en = {
       eventTaskTagsLabel: "With tags (optional)",
       eventTaskTagsHint:
         "Match tasks carrying any of these tags. For edits, only newly added tags count: adding a tag later still fires, but unrelated edits of an already-tagged task don't.",
+      eventTaskCurrentTagsLabel: "Currently has tags (optional)",
+      eventTaskCurrentTagsHint:
+        "Match the task's full current tag set on every selected lifecycle event. Use this for completed or blocked notifications.",
       eventTaskAssigneeLabel: "Assigned to (optional)",
       eventTaskAssigneeHint:
         "Only fire when the task's assignee is one of these members. Leave empty for anyone.",

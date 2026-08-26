@@ -3105,6 +3105,9 @@ export const zh: Dictionary = {
       deliverChannelIdPlaceholder: "管道或聊天 ID",
       deliverHint:
         "此步驟完成後，會將其文字輸出推送至這個管道。傳送採盡力而為；即使傳送失敗也不會導致步驟失敗。",
+      failureDeliveryLabel: "失敗通知",
+      failureDeliveryHint:
+        "工作流程失敗或逾時時，會盡力傳送一次通知。成功或取消的執行不會傳送通知。",
       deliverTelegramChannelLabel: "Telegram 管道",
       deliverTelegramChannelPlaceholder: "選擇 Telegram 管道…",
       deliverTelegramChannelHint: "選擇用來傳送此工作流程訊息的已連接機器人。",
@@ -3280,6 +3283,9 @@ export const zh: Dictionary = {
       eventTaskTagsLabel: "依標籤篩選（選填）",
       eventTaskTagsHint:
         "符合帶有其中任一標籤的任務。編輯時只計算新加入的標籤：之後補上標籤仍會觸發，但已帶標籤任務的無關編輯不會觸發。",
+      eventTaskCurrentTagsLabel: "目前具有標籤（選填）",
+      eventTaskCurrentTagsHint:
+        "在每個所選生命週期事件中，比對任務目前的完整標籤集合。適合用於完成或受阻通知。",
       eventTaskAssigneeLabel: "依負責人篩選（選填）",
       eventTaskAssigneeHint: "只在任務負責人是這些成員時觸發。留空代表任何人。",
       eventTaskAssigneeAdd: "新增成員",

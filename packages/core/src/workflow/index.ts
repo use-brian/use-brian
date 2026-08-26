@@ -4,6 +4,7 @@ export {
   WORKFLOW_STEP_RUN_STATUSES,
   type AssistantTargetRef,
   type AssistantCallStep,
+  type WorkflowDelivery,
   type ToolCallStep,
   type WaitStep,
   type WaitDuration,
