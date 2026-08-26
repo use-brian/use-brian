@@ -2380,6 +2380,15 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
                 output_tokens: usage.outputTokens,
                 cost_usd_micro: Math.round(cost * 1_000_000),
                 cache_hits: usage.cacheReadTokens ?? 0,
+                // HOW the turn ended, not just what it cost. Without this a
+                // turn that halted part-way looks identical in analytics to
+                // one that finished, and the only way to tell them apart is
+                // to eyeball the stored text for a sentence that stops dead
+                // (the 2026-08-25 Telegram truncation took fifteen queries to
+                // pin for exactly this reason). Layer 5 has already spent its
+                // one continuation by the time this fires, so a truncated
+                // value here means the reply really did leave cut off.
+                stop_reason: sanitizeAnalytics(event.response.stopReason ?? 'unknown'),
               },
             })
           }
