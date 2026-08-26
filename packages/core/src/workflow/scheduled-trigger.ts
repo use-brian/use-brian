@@ -187,7 +187,7 @@ export async function syncWorkflowScheduleTrigger(
       viewId: params.viewId ?? null,
       contextProjectId: params.contextProjectId ?? null,
       contextProjectIds: params.contextProjectIds ?? [],
-    })
+    } as Parameters<JobStore['create']>[0])
   }
   return { jobId: job.id, nextRunAt }
 }

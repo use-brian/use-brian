@@ -1625,7 +1625,7 @@ async function applyScheduleTrigger(
       viewId,
       contextProjectId,
       contextProjectIds: contextProjectId ? [contextProjectId] : [],
-    })
+    } as Parameters<JobStore['create']>[0])
     const delivery = await describeDelivery(deps.resolveDeliveryTarget, {
       assistantId: context.assistantId,
       channelType,
@@ -1670,7 +1670,7 @@ async function applyScheduleTrigger(
       viewId,
       contextProjectId,
       contextProjectIds: contextProjectId ? [contextProjectId] : [],
-    })
+    } as Parameters<JobStore['create']>[0])
     return { nextRun: nextRunAt.toISOString(), ...formatRelativeTime(nextRunAt), targetViewId: viewId, ...(targetViewWarning ? { targetViewWarning } : {}), timezone }
   }
 
@@ -2002,7 +2002,8 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
           proposedDescription: input.description ?? null,
           proposedTrigger: trigger ?? null,
           proposedContextProjectId: input.workflowId
-            ? existingWorkflow?.contextProjectId ?? null
+            ? (existingWorkflow as (WorkflowRecord & { contextProjectId?: string | null }) | null)
+                ?.contextProjectId ?? null
             : (context as ToolContext & { activeProjectId?: string | null }).activeProjectId ?? null,
           selectedClientBoundary: selectedClientBoundary
             ? {
@@ -2184,7 +2185,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
           createInput.contextProjectId !== undefined
             ? createInput.contextProjectId
             : (context as ToolContext & { activeProjectId?: string | null }).activeProjectId ?? null,
-      })
+      } as Parameters<WorkflowStore['create']>[0])
       context.workflowProposalReceipt = undefined
 
       deps.onEvent?.({
@@ -2206,7 +2207,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
           definition,
           trigger,
           createInput.targetViewId,
-          record.contextProjectId ?? null,
+          (record as WorkflowRecord & { contextProjectId?: string | null }).contextProjectId ?? null,
         )
         if ('error' in res) scheduleError = res.error
         else schedule = res
@@ -2446,7 +2447,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
               fields.definition ?? existing.definition,
               trigger,
               updateInput.targetViewId,
-              updated.contextProjectId ?? null,
+              (updated as WorkflowRecord & { contextProjectId?: string | null }).contextProjectId ?? null,
             )
             if ('error' in applied) scheduleError = applied.error
             else {

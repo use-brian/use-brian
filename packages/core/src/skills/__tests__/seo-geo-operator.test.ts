@@ -279,7 +279,7 @@ const triggers: Record<string, WorkflowTrigger> = {
   },
 }
 
-function context(): ToolContext {
+function context(): ToolContext & { activeProjectId: string } {
   return {
     userId: USER_ID,
     assistantId: ASSISTANT_ID,

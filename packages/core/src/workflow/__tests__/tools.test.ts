@@ -54,9 +54,10 @@ function fakeStores() {
   const id = () => `00000000-0000-0000-0000-${String(n++).padStart(12, '0')}`
   const workflowStore: WorkflowStore = {
     async create(params) {
+      const projectParams = params as typeof params & { contextProjectId?: string | null }
       const { workspaceId, userId, name, definition, description, trigger, webhookSlug, webhookSecret } = params
       const now = new Date()
-      const r: WorkflowRecord = {
+      const r: WorkflowRecord & { contextProjectId: string | null } = {
         id: id(), workspaceId, createdBy: userId, name, description: description ?? null,
         definition, enabled: true, pausedReason: null,
         trigger: trigger ?? { kind: 'manual' },
@@ -71,7 +72,7 @@ function fakeStores() {
         lifecycleReason: null,
         pinned: false,
         managedBy: null,
-        contextProjectId: params.contextProjectId ?? null,
+        contextProjectId: projectParams.contextProjectId ?? null,
         createdAt: now, updatedAt: now,
       }
       workflows.set(r.id, r)
@@ -192,7 +193,14 @@ function makeJobStore(overrides: Partial<JobStore> = {}): JobStore & { rows: Sch
   return {
     rows,
     async create(params) {
-      const job: ScheduledJob = {
+      const projectParams = params as typeof params & {
+        contextProjectId?: string | null
+        contextProjectIds?: string[]
+      }
+      const job: ScheduledJob & {
+        contextProjectId: string | null
+        contextProjectIds: string[]
+      } = {
         id: `00000000-0000-0000-0000-${String(n++).padStart(12, '0')}`,
         assistantId: params.assistantId,
         userId: params.userId,
@@ -213,8 +221,8 @@ function makeJobStore(overrides: Partial<JobStore> = {}): JobStore & { rows: Sch
         workflowId: params.workflowId ?? null,
         workflowStepRunId: params.workflowStepRunId ?? null,
         viewId: params.viewId ?? null,
-        contextProjectId: params.contextProjectId ?? null,
-        contextProjectIds: params.contextProjectIds ?? [],
+        contextProjectId: projectParams.contextProjectId ?? null,
+        contextProjectIds: projectParams.contextProjectIds ?? [],
       }
       rows.push(job)
       return job
@@ -777,7 +785,8 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
 
   it('freezes the active Project in the proposal receipt and scheduled workflow', async () => {
     const { tools, stores, jobStore } = makeAllTools({ allowLegacyDirectWrites: false })
-    const ctx = makeContext({ activeProjectId: PROJECT_ID })
+    const ctx = makeContext() as ToolContext & { activeProjectId: string | null }
+    ctx.activeProjectId = PROJECT_ID
     const proposed = await tools.proposeWorkflow.execute({
       name: 'Project-bound weekly check',
       definition: SIMPLE_DEF,
@@ -795,9 +804,12 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
     const created = await tools.createWorkflow.execute({}, ctx)
     expect(created.isError).toBeFalsy()
     const workflowId = (created.data as { id: string }).id
-    expect(stores.workflows.get(workflowId)?.contextProjectId).toBe(PROJECT_ID)
-    expect(jobStore.rows[0]?.contextProjectId).toBe(PROJECT_ID)
-    expect(jobStore.rows[0]?.contextProjectIds).toEqual([PROJECT_ID])
+    expect((stores.workflows.get(workflowId) as WorkflowRecord & { contextProjectId?: string | null })
+      ?.contextProjectId).toBe(PROJECT_ID)
+    expect((jobStore.rows[0] as ScheduledJob & { contextProjectId?: string | null })
+      ?.contextProjectId).toBe(PROJECT_ID)
+    expect((jobStore.rows[0] as ScheduledJob & { contextProjectIds?: string[] })
+      ?.contextProjectIds).toEqual([PROJECT_ID])
   })
 
   it('[COMP:api/client-principal-runtime] resolves safe API-key metadata into a receipt-backed reviewed reply', async () => {
