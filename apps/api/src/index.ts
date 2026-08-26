@@ -55,6 +55,10 @@ const env: OpenApiEnv = {
   NODE_ENV: process.env.NODE_ENV || 'development',
   API_URL: process.env.API_URL || 'http://localhost:4000',
   APP_URL: process.env.APP_URL || 'http://localhost:3003',
+  AUTH_PORTAL_URL: process.env.AUTH_PORTAL_URL,
+  GMAIL_SMTP_USER: process.env.GMAIL_SMTP_USER,
+  GMAIL_SMTP_APP_PASSWORD: process.env.GMAIL_SMTP_APP_PASSWORD,
+  EMAIL_FROM_ADDRESS: process.env.EMAIL_FROM_ADDRESS,
   SUPPORT_DIAGNOSTICS_ENABLED: !['false', '0'].includes(
     (process.env.BRIAN_SUPPORT_DIAGNOSTICS_ENABLED ?? '').trim().toLowerCase(),
   ),

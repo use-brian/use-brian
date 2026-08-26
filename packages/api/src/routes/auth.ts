@@ -36,6 +36,10 @@ export type EmailAuthDeps = {
   smtpClient?: SmtpClient
   /** Used to build the verify URL embedded in the email — e.g. `https://usebrian.ai`. */
   appUrl: string
+  /** Outpost enrollment gate. Omitted in hosted/OSS, which keep their policy. */
+  canSignInEmail?: (email: string) => Promise<boolean>
+  /** Exact customer-owned auth/app origins accepted for absolute continuations. */
+  allowedReturnOrigins?: string[]
 }
 
 /**
@@ -257,7 +261,7 @@ export function authRoutes(
       res.status(503).json({ error: 'email_signin_unavailable' })
       return
     }
-    const { magicLinkStore, smtpClient, appUrl } = emailAuth
+    const { magicLinkStore, smtpClient, appUrl, canSignInEmail } = emailAuth
 
     const body = req.body as {
       email?: unknown
@@ -278,18 +282,21 @@ export function authRoutes(
     // Validate inputs — but on any validation failure we still return
     // 200 with the same shape, so the response surface doesn't leak
     // whether the email was acceptable.
-    const ok200 = () => res.status(200).json({ ok: true })
+    const requestStartedAt = Date.now()
+    const ok200 = async () => {
+      const remainingMs = 250 - (Date.now() - requestStartedAt)
+      if (remainingMs > 0) await new Promise((r) => setTimeout(r, remainingMs))
+      res.status(200).json({ ok: true })
+    }
 
     const emailRaw = typeof body.email === 'string' ? body.email.trim().toLowerCase() : ''
     if (!isValidEmail(emailRaw)) {
-      // Constant-time-ish: still spend a tiny moment before responding.
-      await new Promise((r) => setTimeout(r, 5))
-      ok200()
+      await ok200()
       return
     }
 
     const nextPath =
-      typeof body.nextPath === 'string' && isAllowedNextPath(body.nextPath)
+      typeof body.nextPath === 'string' && isAllowedNextPath(body.nextPath, emailAuth.allowedReturnOrigins)
         ? body.nextPath
         : undefined
 
@@ -305,13 +312,18 @@ export function authRoutes(
     try {
       const now = new Date()
       const windowStart = new Date(now.getTime() - 60 * 60 * 1000)
-      const [emailCount, ipCount] = await Promise.all([
+      const [admitted, emailCount, ipCount] = await Promise.all([
+        canSignInEmail ? canSignInEmail(emailRaw) : Promise.resolve(true),
         magicLinkStore.countRecentForEmail(emailRaw, windowStart),
         ip ? magicLinkStore.countRecentForIp(ip, windowStart) : Promise.resolve(0),
       ])
+      if (!admitted) {
+        await ok200()
+        return
+      }
       if (emailCount >= 3 || ipCount >= 10) {
         console.warn(`[auth/email] rate-limited: email=${emailRaw} count=${emailCount} ip=${ip ?? 'none'} ipCount=${ipCount} — silently 200ing`)
-        ok200()
+        await ok200()
         return
       }
 
@@ -336,6 +348,7 @@ export function authRoutes(
       // magic-link flow".
       const link =
         `${appUrl.replace(/\/$/, '')}/login/verify?token=${encodeURIComponent(token)}&lang=${locale}` +
+        (nextPath ? `&next=${encodeURIComponent(nextPath)}` : '') +
         (addAccount ? '&addAccount=1' : '')
 
       // Fire-and-forget: we don't block the response on SMTP. If sending
@@ -347,11 +360,11 @@ export function authRoutes(
           console.error('[auth/email] SMTP send failed:', err)
         })
 
-      ok200()
+      await ok200()
     } catch (err) {
       console.error('[auth/email] request-link error:', err)
       // Still 200 — see docstring. The error is logged for ops.
-      ok200()
+      await ok200()
     }
   })
 
@@ -386,6 +399,10 @@ export function authRoutes(
     const consumed = await magicLinkStore.consumeByToken(token)
     if (!consumed) {
       res.status(401).json({ error: 'expired_or_used' })
+      return
+    }
+    if (emailAuth.canSignInEmail && !(await emailAuth.canSignInEmail(consumed.email))) {
+      res.status(403).json({ error: 'email_enrollment_required' })
       return
     }
 
@@ -447,6 +464,10 @@ export function authRoutes(
     }
     if (result.status !== 'ok') {
       res.status(401).json({ error: 'expired_or_used' })
+      return
+    }
+    if (emailAuth.canSignInEmail && !(await emailAuth.canSignInEmail(result.email))) {
+      res.status(403).json({ error: 'email_enrollment_required' })
       return
     }
 
@@ -810,7 +831,7 @@ const ALLOWED_NEXT_HOSTS = new Set<string>([
   'localhost:3003',
 ])
 
-function isAllowedNextPath(s: string): boolean {
+function isAllowedNextPath(s: string, allowedReturnOrigins: string[] = []): boolean {
   if (typeof s !== 'string') return false
   if (s.length > 512) return false
   if (s.startsWith('//')) return false
@@ -824,7 +845,9 @@ function isAllowedNextPath(s: string): boolean {
   try {
     const u = new URL(s)
     if (u.protocol !== 'https:' && u.protocol !== 'http:') return false
-    return ALLOWED_NEXT_HOSTS.has(u.host)
+    return ALLOWED_NEXT_HOSTS.has(u.host) || allowedReturnOrigins.some((origin) => {
+      try { return new URL(origin).origin === u.origin } catch { return false }
+    })
   } catch {
     return false
   }

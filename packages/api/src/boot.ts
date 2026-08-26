@@ -149,8 +149,10 @@ import {
 import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTORS, OFFICIAL_CONNECTOR_TOOLS, recordingIdFromAnchorKey } from '@use-brian/shared'
 
 // ── OPEN package imports (@use-brian/api) ──────────────────────────
-import { findAssistantById, findUserById, getWorkspacePrimaryAssistant, isUserBlockedForAssistant, listAccessibleAssistants } from './db/users.js'
+import { findAssistantById, findUserByEmail, findUserById, getWorkspacePrimaryAssistant, isUserBlockedForAssistant, listAccessibleAssistants } from './db/users.js'
 import { resolveTurnScopeSystem } from './context-scope/resolve-turn-scope.js'
+import { deploymentProfile } from './edition.js'
+import { createEmailAdmission, requireOutpostAuthPortal } from './auth/email-admission.js'
 import { getTaskByIdSystem } from './db/tasks.js'
 import { createBrowserSkillsStore } from './db/browser-skills-store.js'
 import { createDbConnectorActionStore } from './db/connector-actions-store.js'
@@ -650,6 +652,8 @@ export interface OpenApiEnv {
   NODE_ENV: string
   API_URL: string
   APP_URL: string
+  /** Dedicated Outpost auth portal; falls back to APP_URL in other profiles. */
+  AUTH_PORTAL_URL?: string
   AUTHED_APP_URL?: string
   FEED_URL?: string
   /**
@@ -1186,6 +1190,8 @@ type EmailAuth = {
   magicLinkStore: ReturnType<typeof createDbMagicLinkStore>
   smtpClient: ReturnType<typeof createSmtpClient>
   appUrl: string
+  canSignInEmail?: (email: string) => Promise<boolean>
+  allowedReturnOrigins?: string[]
 } | undefined
 
 export interface BootResult {
@@ -1906,6 +1912,31 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     return officialBotUsernamePromise
   }
 
+  const profile = deploymentProfile()
+  requireOutpostAuthPortal(profile, env.AUTH_PORTAL_URL)
+  const outpostBootstrapEmails = (
+    (process.env.OUTPOST_AUTH_BOOTSTRAP_EMAILS ?? '')
+      .split(',')
+      .map((email) => email.trim().toLowerCase())
+      .filter(Boolean)
+  )
+  const canSignInOutpostEmail = createEmailAdmission({
+    outpost: profile === 'outpost',
+    bootstrapEmails: outpostBootstrapEmails,
+    findUser: findUserByEmail,
+    hasPendingInvitation: async (email) => {
+      const invitation = await query(
+        `SELECT 1 FROM workspace_invitations
+          WHERE lower(email) = $1
+            AND accepted_at IS NULL
+            AND expires_at > now()
+          LIMIT 1`,
+        [email],
+      )
+      return invitation.rows.length > 0
+    },
+  })
+
   const emailAuth: EmailAuth =
     env.GMAIL_SMTP_USER && env.GMAIL_SMTP_APP_PASSWORD && env.EMAIL_FROM_ADDRESS
       ? {
@@ -1917,7 +1948,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             }),
             fromAddress: env.EMAIL_FROM_ADDRESS,
           }),
-          appUrl: env.APP_URL,
+          appUrl: env.AUTH_PORTAL_URL ?? env.APP_URL,
+          canSignInEmail: canSignInOutpostEmail,
+          allowedReturnOrigins: [env.APP_URL, env.AUTHED_APP_URL].filter((origin): origin is string => !!origin),
         }
       : undefined
 
@@ -5109,7 +5142,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     auditStore: workspaceAuditStore,
     invitationStore: workspaceInvitationStore,
     smtpClient: emailAuth?.smtpClient,
-    appUrl: env.APP_URL,
+    appUrl: env.AUTH_PORTAL_URL ?? env.APP_URL,
     blobClient: filesBlobClient ?? undefined,
     filesResolver: filesResolver ?? undefined,
   })
