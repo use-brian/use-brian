@@ -77,7 +77,10 @@ const gate = new TaskGate({ prompt: promptForConsent })
 let relayWasReady = false
 
 async function stopTask(): Promise<void> {
-  const createdTabIds = gate.stop()
+  await clearTask(gate.stop())
+}
+
+async function clearTask(createdTabIds: number[]): Promise<void> {
   await executor.detach()
   if (createdTabIds.length > 0) {
     await chrome.tabs.remove(createdTabIds).catch(() => undefined)
@@ -108,7 +111,10 @@ const client = new RelayClient({
       // A lost control plane must revoke browser control even if the relay
       // process restarts and forgets a queued Stop.
       relayWasReady = false
-      void stopTask()
+      // A transport interruption ends the active task, but it is not the
+      // user's Stop action. Once the relay recovers, local pre-approval may
+      // authorize the next task as configured.
+      void clearTask(gate.endTask())
     }
     void chrome.action.setBadgeText({ text: state === 'ready' ? 'ON' : '' })
     void chrome.action.setBadgeBackgroundColor({ color: '#16a34a' })

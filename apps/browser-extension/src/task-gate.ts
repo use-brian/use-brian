@@ -55,10 +55,10 @@ export class TaskGate {
   private mode: LocalControlMode = 'task_tabs'
   private stopped = false
   private manualApprovalRequired = false
-  private stopGeneration = 0
+  private taskGeneration = 0
   private lastCommandAt = 0
   private promptInFlight: Promise<ConsentOutcome> | null = null
-  private promptStopGeneration = 0
+  private promptTaskGeneration = 0
   private readonly prompt: ConsentPrompter
   private readonly now: () => number
 
@@ -81,21 +81,21 @@ export class TaskGate {
     // usable while no tab is selected; a fresh Allow reactivates the task.
     this.clearAuthorization(true)
     if (!this.promptInFlight) {
-      this.promptStopGeneration = this.stopGeneration
+      this.promptTaskGeneration = this.taskGeneration
       this.promptInFlight = this.prompt({
         allowPreApproval: !this.stopped && !this.manualApprovalRequired,
       }).finally(() => {
         this.promptInFlight = null
       })
     }
-    const stopGeneration = this.promptStopGeneration
+    const taskGeneration = this.promptTaskGeneration
     const outcome = await this.promptInFlight
     if (!outcome.allowed) {
       const { code, message } = DENIAL_ERRORS[outcome.reason]
       throw Object.assign(new Error(message), { code })
     }
-    if (this.stopGeneration !== stopGeneration) {
-      throw Object.assign(new Error('The task stopped while browser permission was pending.'), {
+    if (this.taskGeneration !== taskGeneration) {
+      throw Object.assign(new Error('The task ended while browser permission was pending.'), {
         code: 'stopped',
       })
     }
@@ -183,10 +183,16 @@ export class TaskGate {
 
   /** Persistent Stop. Returns only task-created tabs for caller-side cleanup. */
   stop(): number[] {
-    const created = this.createdTabIds()
-    this.stopGeneration += 1
     this.stopped = true
+    return this.endTask()
+  }
+
+  /** End the active task without turning relay loss into an explicit user Stop. */
+  endTask(): number[] {
+    const created = this.createdTabIds()
+    this.taskGeneration += 1
     this.clearAuthorization(false)
+    this.lastCommandAt = 0
     return created
   }
 

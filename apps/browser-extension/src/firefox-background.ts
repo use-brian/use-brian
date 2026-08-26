@@ -78,7 +78,7 @@ const client = new RelayClient({
       relayWasReady = true
     } else if (relayWasReady) {
       relayWasReady = false
-      gate.stop()
+      gate.endTask()
       boundTabId = null
       void native.request('stop').catch(() => {})
     }
