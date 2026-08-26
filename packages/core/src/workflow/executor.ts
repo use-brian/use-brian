@@ -2627,18 +2627,19 @@ async function attemptFailureDelivery(
 ): Promise<void> {
   const target: WorkflowDelivery | undefined = workflow.definition.failureDelivery
   if (!target || !deps.deliverToChannel) return
-  const assistantId = await deps.resolvePrimary(run.workspaceId)
-  if (!assistantId) return
-
-  const text = sanitizeDeliveryText([
-    `Workflow "${workflow.name}" ${status}.`,
-    `Failed step: ${stepId}`,
-    `Error: ${normalizedFailureReason(error)}`,
-    ...failureStateLines(outcome),
-    `Run: ${run.id}`,
-  ].join('\n'))
 
   try {
+    const assistantId = await deps.resolvePrimary(run.workspaceId)
+    if (!assistantId) return
+
+    const text = sanitizeDeliveryText([
+      `Workflow "${workflow.name}" ${status}.`,
+      `Failed step: ${stepId}`,
+      `Error: ${normalizedFailureReason(error)}`,
+      ...failureStateLines(outcome),
+      `Run: ${run.id}`,
+    ].join('\n'))
+
     let delivery: DeliveryOutcome
     if ('replyToTrigger' in target) {
       const reply = failureReplyTarget(run, workflow)

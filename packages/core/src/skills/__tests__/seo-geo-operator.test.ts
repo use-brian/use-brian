@@ -218,6 +218,7 @@ function executorDefinition(): WorkflowDefinition {
 function notifierDefinition(): WorkflowDefinition {
   return {
     startStepId: 'notify',
+    failureDelivery: { channelType: 'slack', channelId: SLACK_CHANNEL_ID },
     steps: [assistant(
       'notify',
       'Read {{input.event.taskId}} and emit the exact COMPLETED or BLOCKED terminal task payload.',
@@ -415,6 +416,10 @@ describe('[COMP:skills/seo-geo-operator] canonical workflow blueprint', () => {
     expect(notifier.kind).toBe('event')
     if (notifier.kind !== 'event') throw new Error('expected event trigger')
     expect(notifier.event.sources[0].match?.currentTags).toEqual(['geo:route:brian'])
+    expect(notifierDefinition().failureDelivery).toEqual({
+      channelType: 'slack',
+      channelId: SLACK_CHANNEL_ID,
+    })
     expect(context().activeProjectId).toBe(PROJECT_ID)
   })
 })

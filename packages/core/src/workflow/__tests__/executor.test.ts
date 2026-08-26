@@ -1822,6 +1822,40 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
 })
 
 describe('[COMP:workflow/failure-delivery] terminal workflow notification', () => {
+  it('preserves the terminal result when notification assistant resolution fails', async () => {
+    const stores = makeFakeStores()
+    let resolutions = 0
+    const deps: ExecutorDeps = {
+      workflowStore: stores.workflowStore,
+      runStore: stores.runStore,
+      consultTransport: makeConsultTransport({ fail: 'failed safely' }),
+      resolvePrimary: async () => {
+        resolutions += 1
+        if (resolutions > 1) throw new Error('resolver unavailable')
+        return PRIMARY_ASSISTANT_ID
+      },
+      buildToolRegistry: async () => new Map(),
+      deliverToChannel: async () => {
+        throw new Error('delivery must not be attempted')
+      },
+    }
+    const { run } = await seedWorkflowAndRun(deps, {
+      startStepId: 'collect',
+      steps: [{
+        id: 'collect',
+        type: 'assistant_call',
+        target: { assistantId: 'primary' },
+        prompt: 'collect',
+      }],
+      failureDelivery: { channelType: 'slack', channelId: 'C123' },
+    })
+
+    const outcome = await advanceWorkflowRun(deps, run.id)
+
+    expect(outcome.kind).toBe('failed')
+    expect(stores.runs.get(run.id)?.status).toBe('failed')
+  })
+
   it('attempts one sanitized notification after a timeout and stays terminal when delivery fails', async () => {
     const stores = makeFakeStores()
     const delivered: string[] = []
