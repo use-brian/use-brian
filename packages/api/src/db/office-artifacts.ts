@@ -62,7 +62,7 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
         INSERT INTO office_artifacts
           (workspace_id, family, mode, title, creator_user_id, owner_user_id,
            template_version_id, capability_version, sensitivity,
-           visibility_user_ids, required_compartments)
+           visibility_user_ids, compartments)
         VALUES ($1,$2,$10,$3,$4,$4,$5,$6,$7,$8::uuid[],$9::text[])
         RETURNING id, workspace_id AS "workspaceId", family, mode, title,
                   creator_user_id AS "creatorUserId", owner_user_id AS "ownerUserId",

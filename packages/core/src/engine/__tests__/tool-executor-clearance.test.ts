@@ -5,6 +5,7 @@ import { createLoopDetector } from '../loop-detector.js'
 import { buildTool, type Tool, type ToolContext } from '../../tools/types.js'
 import type { ContentBlock } from '../../providers/types.js'
 import { SensitivityAccumulator, type Sensitivity } from '../../security/sensitivity.js'
+import { ContextScopeAccumulator } from '../../security/context-scope.js'
 
 const baseCtx = {
   assistantId: 'a1',
@@ -221,5 +222,96 @@ describe('[COMP:brain/assistant-clearance-enforcement] tool-executor clearance g
 
     expect(seenClearance).toBe('confidential')
     expect(seenAccumulatorIsInstance).toBe(true)
+  })
+})
+
+describe('[COMP:security/scope-evidence] tool result scope evidence', () => {
+  it('notes successful evidence without serializing it to the model', async () => {
+    const scopeAccumulator = new ContextScopeAccumulator()
+    const readTool = buildTool({
+      name: 'scoped_read',
+      description: 'Read one scoped row',
+      inputSchema: z.object({}),
+      isConcurrencySafe: true,
+      async execute() {
+        return {
+          data: { title: 'Visible row' },
+          scopeEvidence: {
+            sensitivity: 'confidential' as const,
+            compartments: ['team:sales'],
+            projectIds: ['p-1'],
+          },
+        }
+      },
+    })
+    const executor = createToolExecutor({
+      tools: new Map<string, Tool>([['scoped_read', readTool]]),
+      context: { ...baseCtx, scopeAccumulator } as ToolContext,
+      loopDetector: createLoopDetector(),
+    })
+    executor.addTool('call_1', 'scoped_read', {})
+    const results = await drainResults(executor)
+
+    expect(scopeAccumulator.evidence).toEqual({
+      sensitivity: 'confidential',
+      compartments: ['team:sales'],
+      projectIds: ['p-1'],
+    })
+    expect(JSON.stringify(results)).not.toContain('scopeEvidence')
+    expect(JSON.stringify(results)).not.toContain('team:sales')
+  })
+
+  it('does not note evidence from an error result', async () => {
+    const scopeAccumulator = new ContextScopeAccumulator()
+    const failedRead = buildTool({
+      name: 'failed_scoped_read',
+      description: 'Fail to read a scoped row',
+      inputSchema: z.object({}),
+      isConcurrencySafe: true,
+      async execute() {
+        return {
+          data: 'not found',
+          isError: true,
+          scopeEvidence: { sensitivity: 'confidential' as const, projectIds: ['p-hidden'] },
+        }
+      },
+    })
+    const executor = createToolExecutor({
+      tools: new Map<string, Tool>([['failed_scoped_read', failedRead]]),
+      context: { ...baseCtx, scopeAccumulator } as ToolContext,
+      loopDetector: createLoopDetector(),
+    })
+    executor.addTool('call_1', 'failed_scoped_read', {})
+    await drainResults(executor)
+    expect(scopeAccumulator.evidence).toEqual({
+      sensitivity: 'public',
+      compartments: [],
+      projectIds: [],
+    })
+  })
+
+  it('rejects an explicit Project outside the assistant write ceiling', async () => {
+    const execute = vi.fn(async () => ({ data: 'should-not-run' }))
+    const writeTool = buildTool({
+      name: 'project_write',
+      description: 'Write into one Project',
+      inputSchema: z.object({ projectIds: z.array(z.string()) }),
+      isConcurrencySafe: true,
+      async execute() {
+        return execute()
+      },
+    })
+    const executor = createToolExecutor({
+      tools: new Map<string, Tool>([['project_write', writeTool]]),
+      context: {
+        ...baseCtx,
+        assistantProjectIds: ['p-allowed'],
+      } as ToolContext,
+      loopDetector: createLoopDetector(),
+    })
+    executor.addTool('call_1', 'project_write', { projectIds: ['p-denied'] })
+    const results = await drainResults(executor)
+    expect(execute).not.toHaveBeenCalled()
+    expect(JSON.stringify(results)).toContain('project_not_granted')
   })
 })

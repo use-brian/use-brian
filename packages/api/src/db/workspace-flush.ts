@@ -153,6 +153,7 @@ export const WORKSPACE_FLUSH_PRESERVED_TABLES = [
   'workspace_members',
   'workspace_invitations',
   'workspace_groups',
+  'workspace_projects',
   'workspace_compartments',
   'member_compartment_grants',
   'teamspaces',
@@ -191,6 +192,7 @@ export const WORKSPACE_FLUSH_PRESERVED_TABLES = [
   'promo_code_redemptions',
   // Audit + ops telemetry
   'workspace_audit_log',
+  'context_scope_reclassification_events',
   'correction_audit',
   'worker_runs',
 ] as const

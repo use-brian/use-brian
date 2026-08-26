@@ -48,6 +48,8 @@ export type AccessContext = {
   assistantKind: AssistantKind
   clearance?: Sensitivity
   compartments?: string[] | null
+  /** Effective Project grant. null/undefined is universe; [] is General-only. */
+  projectIds?: string[] | null
   /**
    * Bypass the member RLS policy and rely **solely** on the
    * `buildAccessPredicate` WHERE-clause for gating. Only for trusted

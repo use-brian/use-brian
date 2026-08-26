@@ -99,7 +99,7 @@ export const OFFICE_ACCESS_SQL = `
          a.owner_user_id              AS "ownerUserId",
          a.sensitivity                AS sensitivity,
          a.visibility_user_ids        AS "visibilityUserIds",
-         a.required_compartments      AS "requiredCompartments",
+         a.compartments               AS "requiredCompartments",
          COALESCE(src.eligible, TRUE) AS "sourcesEligible",
          a.default_workspace_role     AS "defaultWorkspaceRole",
          a.lifecycle_state            AS "lifecycleState",

@@ -2,7 +2,8 @@
  * Universal access projection (P1-12) — see
  * docs/architecture/platform/sensitivity.md → "Universal access predicate"
  * and "Universal resource projection". (A fifth, non-hierarchical
- * "compartment" axis is proposed in docs/plans/compartment-axis.md.)
+ * Team compartment and Project context axes are specified in
+ * docs/architecture/context-engine/scoped-context.md.)
  *
  * Composes the four projection axes — workspace partition, visibility user,
  * visibility assistant, sensitivity clearance — into a single AND-group
@@ -52,6 +53,8 @@ export type AccessPredicate = {
    * - `+ clearance` (a `Sensitivity` string) when `ctx.clearance` is set.
    * - `+ compartments` (a `string[]` for the `<@ $n::text[]` clause) when
    *   `ctx.compartments` is a finite grant (omitted for the universe grant).
+   * - `+ projectIds` (a `string[]` for the `<@ $n::uuid[]` clause) when
+   *   `ctx.projectIds` is a finite grant (omitted for the universe grant).
    *
    * Callers spread this straight into their values array, so the order — not a
    * precise tuple type — is what matters.
@@ -138,6 +141,14 @@ export function buildAccessPredicate(
   if (ctx.compartments !== undefined && ctx.compartments !== null) {
     sql += ` AND ${p}compartments <@ $${nextIdx}::text[]`
     params.push(ctx.compartments)
+    nextIdx += 1
+  }
+
+  // Project axis (optional: null/undefined = universe grant). Project is a
+  // discovery boundary, not an ACL, but uses the same all-of subset rule.
+  if (ctx.projectIds !== undefined && ctx.projectIds !== null) {
+    sql += ` AND ${p}project_ids <@ $${nextIdx}::uuid[]`
+    params.push(ctx.projectIds)
     nextIdx += 1
   }
 

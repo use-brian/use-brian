@@ -30,3 +30,19 @@ export type {
   FigureSource,
 } from './evidence.js'
 export type { AccessContext, AssistantKind } from './access-context.js'
+export {
+  ContextScopeAccumulator,
+  ContextScopeViolation,
+  canonicalScopeGrant,
+  intersectScopeGrants,
+  normalizeProjectName,
+  resolveWriteScope,
+  scopeGrantContains,
+  unionScopeRequirements,
+} from './context-scope.js'
+export type {
+  ResolvedWriteScope,
+  ScopeEvidence,
+  ScopeGrant,
+  TurnScope,
+} from './context-scope.js'
