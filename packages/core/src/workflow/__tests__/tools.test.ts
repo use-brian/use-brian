@@ -22,6 +22,7 @@ const PRIMARY_ASSISTANT_ID = '00000000-0000-0000-0000-000000000002'
 const USER_ID = '00000000-0000-0000-0000-000000000003'
 const DELIVERING_ASSISTANT_ID = '00000000-0000-0000-0000-000000000004'
 const AUTHORING_ASSISTANT_ID = '00000000-0000-0000-0000-000000000005'
+const PROJECT_ID = '00000000-0000-4000-8000-000000000006'
 
 /** Deterministic valid-UUID generator for seeding runs directly into the
  *  fake store's Map (bypassing runWorkflow) — used by the getWorkflowRun
@@ -70,6 +71,7 @@ function fakeStores() {
         lifecycleReason: null,
         pinned: false,
         managedBy: null,
+        contextProjectId: params.contextProjectId ?? null,
         createdAt: now, updatedAt: now,
       }
       workflows.set(r.id, r)
@@ -211,6 +213,8 @@ function makeJobStore(overrides: Partial<JobStore> = {}): JobStore & { rows: Sch
         workflowId: params.workflowId ?? null,
         workflowStepRunId: params.workflowStepRunId ?? null,
         viewId: params.viewId ?? null,
+        contextProjectId: params.contextProjectId ?? null,
+        contextProjectIds: params.contextProjectIds ?? [],
       }
       rows.push(job)
       return job
@@ -769,6 +773,31 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
     expect(data.proposedName).toBe('X')
     expect(data.summary).toContain('echo')
     expect(data.warnings).toEqual([])
+  })
+
+  it('freezes the active Project in the proposal receipt and scheduled workflow', async () => {
+    const { tools, stores, jobStore } = makeAllTools({ allowLegacyDirectWrites: false })
+    const ctx = makeContext({ activeProjectId: PROJECT_ID })
+    const proposed = await tools.proposeWorkflow.execute({
+      name: 'Project-bound weekly check',
+      definition: SIMPLE_DEF,
+      trigger: {
+        kind: 'schedule',
+        schedule: { type: 'weekly', days: ['monday'], time: '09:00' },
+        timezone: 'Asia/Hong_Kong',
+      },
+    }, ctx)
+    expect(proposed.isError).toBeFalsy()
+    expect((proposed.data as { proposedContextProjectId: string }).proposedContextProjectId).toBe(PROJECT_ID)
+
+    // The receipt, not the mutable follow-up context, owns the binding.
+    ctx.activeProjectId = null
+    const created = await tools.createWorkflow.execute({}, ctx)
+    expect(created.isError).toBeFalsy()
+    const workflowId = (created.data as { id: string }).id
+    expect(stores.workflows.get(workflowId)?.contextProjectId).toBe(PROJECT_ID)
+    expect(jobStore.rows[0]?.contextProjectId).toBe(PROJECT_ID)
+    expect(jobStore.rows[0]?.contextProjectIds).toEqual([PROJECT_ID])
   })
 
   it('[COMP:api/client-principal-runtime] resolves safe API-key metadata into a receipt-backed reviewed reply', async () => {

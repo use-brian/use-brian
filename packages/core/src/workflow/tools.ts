@@ -417,6 +417,8 @@ const createProposalInputSchema = z.object({
   definition: WorkflowDefinitionSchema,
   trigger: workflowTriggerReceiptSchema.optional(),
   targetViewId: z.string().uuid().optional(),
+  /** Trusted authoring-turn Project, frozen into the opaque receipt. */
+  contextProjectId: z.string().uuid().nullable().optional(),
 })
 
 const updateProposalInputSchema = z.object({
@@ -1588,6 +1590,7 @@ async function applyScheduleTrigger(
   definition: WorkflowDefinition,
   trigger: ScheduleTrigger,
   targetViewId: string | null | undefined,
+  contextProjectId: string | null,
 ): Promise<ScheduleApplyResult | { error: string }> {
   if (!deps.jobStore) return { error: SCHEDULING_UNAVAILABLE }
   const timezone = trigger.timezone ?? context.userTimezone ?? 'UTC'
@@ -1620,6 +1623,8 @@ async function applyScheduleTrigger(
       nagUntilKeyword: policy?.nagUntilKeyword ?? null,
       workflowId,
       viewId,
+      contextProjectId,
+      contextProjectIds: contextProjectId ? [contextProjectId] : [],
     })
     const delivery = await describeDelivery(deps.resolveDeliveryTarget, {
       assistantId: context.assistantId,
@@ -1663,6 +1668,8 @@ async function applyScheduleTrigger(
       nagUntilKeyword: policy?.nagUntilKeyword ?? null,
       workflowId,
       viewId,
+      contextProjectId,
+      contextProjectIds: contextProjectId ? [contextProjectId] : [],
     })
     return { nextRun: nextRunAt.toISOString(), ...formatRelativeTime(nextRunAt), targetViewId: viewId, ...(targetViewWarning ? { targetViewWarning } : {}), timezone }
   }
@@ -1682,6 +1689,8 @@ async function applyScheduleTrigger(
       nagIntervalMins: policy?.nagIntervalMins ?? null,
       nagUntilKeyword: policy?.nagUntilKeyword ?? null,
       viewId,
+      contextProjectId,
+      contextProjectIds: contextProjectId ? [contextProjectId] : [],
     },
   )
   if ('error' in synced) return { error: synced.error }
@@ -1977,6 +1986,8 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
               definition,
               trigger,
               targetViewId: input.targetViewId ?? undefined,
+              contextProjectId:
+                (context as ToolContext & { activeProjectId?: string | null }).activeProjectId ?? null,
             },
           })
 
@@ -1990,6 +2001,9 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
           proposedName: input.name,
           proposedDescription: input.description ?? null,
           proposedTrigger: trigger ?? null,
+          proposedContextProjectId: input.workflowId
+            ? existingWorkflow?.contextProjectId ?? null
+            : (context as ToolContext & { activeProjectId?: string | null }).activeProjectId ?? null,
           selectedClientBoundary: selectedClientBoundary
             ? {
                 id: selectedClientBoundary.id,
@@ -2166,6 +2180,10 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
         description: createInput.description ?? null,
         definition,
         trigger,
+        contextProjectId:
+          createInput.contextProjectId !== undefined
+            ? createInput.contextProjectId
+            : (context as ToolContext & { activeProjectId?: string | null }).activeProjectId ?? null,
       })
       context.workflowProposalReceipt = undefined
 
@@ -2181,7 +2199,15 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       let schedule: ScheduleApplyResult | undefined
       let scheduleError: string | undefined
       if (trigger?.kind === 'schedule') {
-        const res = await applyScheduleTrigger(deps, context, record.id, definition, trigger, createInput.targetViewId)
+        const res = await applyScheduleTrigger(
+          deps,
+          context,
+          record.id,
+          definition,
+          trigger,
+          createInput.targetViewId,
+          record.contextProjectId ?? null,
+        )
         if ('error' in res) scheduleError = res.error
         else schedule = res
       }
@@ -2420,6 +2446,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
               fields.definition ?? existing.definition,
               trigger,
               updateInput.targetViewId,
+              updated.contextProjectId ?? null,
             )
             if ('error' in applied) scheduleError = applied.error
             else {

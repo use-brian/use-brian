@@ -106,6 +106,9 @@ export async function syncWorkflowScheduleTrigger(
     nagIntervalMins?: number | null
     nagUntilKeyword?: string | null
     viewId?: string | null
+    /** Immutable workflow Project copied onto a newly created firing row. */
+    contextProjectId?: string | null
+    contextProjectIds?: string[]
   },
 ): Promise<{ jobId: string; nextRunAt: Date } | { error: string }> {
   const primaryAssistantId = await deps.resolvePrimary(params.workspaceId)
@@ -182,6 +185,8 @@ export async function syncWorkflowScheduleTrigger(
       workflowId: params.workflowId,
       workflowStepRunId: null,
       viewId: params.viewId ?? null,
+      contextProjectId: params.contextProjectId ?? null,
+      contextProjectIds: params.contextProjectIds ?? [],
     })
   }
   return { jobId: job.id, nextRunAt }
