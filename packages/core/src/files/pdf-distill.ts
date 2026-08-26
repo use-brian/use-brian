@@ -110,7 +110,7 @@ const PDF_DISTILL_PROMPT =
   'inline where they appear, as `[Figure: ...]`, including any numbers or labels they carry.\n' +
   '- Start each page with a `## Page N` heading using the page numbers given below.\n' +
   '- If a page is blank, write its heading followed by `(blank page)`.\n' +
-  '- After each COMPLETE page, append its exact supplied `PDF_PAGE_N_COMPLETE` HTML comment marker.\n' +
+  '- After each COMPLETE page, append its exact supplied `[[PDF_PAGE_N_COMPLETE]]` plain-text marker on its own line.\n' +
   '- Never emit a marker until that whole page has been transcribed.\n' +
   'Output only the Markdown transcription and completion markers.'
 
@@ -120,7 +120,7 @@ const PDF_DISTILL_PROMPT =
  * same bytes, so it must not read a cache entry written by the old engine.
  * Bump this whenever any of those change.
  */
-const PDF_DISTILL_ENGINE_VERSION = 2
+const PDF_DISTILL_ENGINE_VERSION = 3
 
 // ── Seams ──────────────────────────────────────────────────────
 
@@ -222,18 +222,69 @@ function pageRangeLabel(pages: VisionPage[]): string {
 }
 
 export function pdfPageCompletionMarker(pageNumber: number): string {
-  return `<!-- PDF_PAGE_${pageNumber}_COMPLETE -->`
+  return `[[PDF_PAGE_${pageNumber}_COMPLETE]]`
+}
+
+const PDF_PAGE_COMPLETION_LINE = /^\[\[PDF_PAGE_\d+_COMPLETE\]\]$/
+
+function findExactLine(lines: readonly string[], value: string, from: number): number {
+  for (let index = from; index < lines.length; index++) {
+    if (lines[index]!.trim() === value) return index
+  }
+  return -1
 }
 
 export function missingPdfPageCompletionMarkers(
   text: string,
   pageNumbers: readonly number[],
 ): number[] {
-  return pageNumbers.filter((pageNumber) => !text.includes(pdfPageCompletionMarker(pageNumber)))
+  const lines = text.split(/\r?\n/)
+  const missing: number[] = []
+  let searchFrom = 0
+
+  for (let index = 0; index < pageNumbers.length; index++) {
+    const pageNumber = pageNumbers[index]!
+    const headingIndex = findExactLine(lines, `## Page ${pageNumber}`, searchFrom)
+    if (headingIndex === -1) {
+      missing.push(pageNumber)
+      continue
+    }
+
+    const markerIndex = findExactLine(
+      lines,
+      pdfPageCompletionMarker(pageNumber),
+      headingIndex + 1,
+    )
+    const nextPageNumber = pageNumbers[index + 1]
+    const nextHeadingIndex = nextPageNumber === undefined
+      ? -1
+      : findExactLine(lines, `## Page ${nextPageNumber}`, headingIndex + 1)
+    const markerIsInPage = markerIndex !== -1 && (
+      nextPageNumber === undefined
+        ? lines.slice(markerIndex + 1).every((line) => line.trim() === '')
+        : nextHeadingIndex !== -1 &&
+          markerIndex < nextHeadingIndex &&
+          lines.slice(markerIndex + 1, nextHeadingIndex).every((line) => line.trim() === '')
+    )
+
+    if (!markerIsInPage) {
+      missing.push(pageNumber)
+      searchFrom = headingIndex + 1
+      continue
+    }
+    searchFrom = markerIndex + 1
+  }
+
+  return missing
 }
 
 export function stripPdfPageCompletionMarkers(text: string): string {
-  return text.replace(/\s*<!--\s*PDF_PAGE_\d+_COMPLETE\s*-->\s*/g, '\n\n').trim()
+  return text
+    .split(/\r?\n/)
+    .filter((line) => !PDF_PAGE_COMPLETION_LINE.test(line.trim()))
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
 }
 
 function chunkPrompt(pages: VisionPage[], totalPages: number): string {

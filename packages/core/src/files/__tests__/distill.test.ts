@@ -19,7 +19,7 @@ describe('[COMP:files/distill] distillFileToText', () => {
       captured.url = String(url)
       captured.init = init
       return mockResponse({
-        candidates: [{ content: { parts: [{ text: `# Heading\n\nbody\n\n${pdfPageCompletionMarker(1)}` }] } }],
+        candidates: [{ content: { parts: [{ text: `## Page 1\n\n# Heading\n\nbody\n\n${pdfPageCompletionMarker(1)}` }] } }],
         usageMetadata: { promptTokenCount: 50, candidatesTokenCount: 20 },
       })
     })
@@ -30,7 +30,7 @@ describe('[COMP:files/distill] distillFileToText', () => {
       { apiKey: 'test-key', fetchFn: fetchFn as unknown as typeof fetch },
     )
 
-    expect(result.text).toBe('# Heading\n\nbody')
+    expect(result.text).toBe('## Page 1\n\n# Heading\n\nbody')
     expect(result.model).toBe('gemini-2.5-flash')
     expect(result.usage).toEqual({ inputTokens: 50, outputTokens: 20 })
     expect(result.pageCount).toBe(1)
@@ -92,6 +92,20 @@ describe('[COMP:files/distill] distillFileToText', () => {
     expect(result.usage).toEqual({ inputTokens: 20, outputTokens: 10 })
     expect(result.pageCount).toBe(1)
     expect(result.truncated).toBe(false)
+  })
+
+  it('preserves the visual failure when an image-only PDF has no local text fallback', async () => {
+    const fetchFn = vi.fn(async () => mockResponse('vision unavailable', { status: 503 }))
+
+    await expect(
+      distillFileToText(
+        { buffer: minimalPdf(1, ''), mime: 'application/pdf' },
+        { apiKey: 'k', fetchFn: fetchFn as unknown as typeof fetch },
+      ),
+    ).rejects.toThrow(/Gemini file distillation failed \(HTTP 503/)
+
+    // One native attempt plus the bounded two attempts over the rendered page.
+    expect(fetchFn).toHaveBeenCalledTimes(3)
   })
 
   it('throws on a non-ok HTTP response (no local fallback for images)', async () => {
