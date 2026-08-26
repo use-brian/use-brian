@@ -1,4 +1,3 @@
-// REBRAND-CUTOVER: this file contains sidan.ai runtime values that must flip to usebrian.ai when DNS + Vercel domains + OAuth consoles + webhooks are cut over. Grep REBRAND-CUTOVER.
 /**
  * Workspace-invitation email template — i18n subject + HTML + plain-text.
  *
@@ -29,11 +28,6 @@ type WorkspaceInviteContent = {
   text: string
 }
 
-// Hard-coded production icon URL so the brand mark resolves even when an
-// email is sent from a dev/staging environment whose `appUrl` is an
-// unreachable host (e.g. localhost). Mirrors `magic-link-template.ts` so the
-// invitation and sign-in emails share one visual identity.
-const BRAND_ICON_URL = 'https://sidan.ai/icon.png'
 const BRAND_WORDMARK = 'Use Brian'
 
 const escapeHtml = (s: string): string =>
@@ -170,8 +164,7 @@ export function renderWorkspaceInviteEmail(
       <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="max-width:540px;background:#ffffff;border-radius:20px;overflow:hidden;box-shadow:0 18px 60px rgba(0,0,0,0.35);">
         <tr>
           <td align="center" style="background:#0b1020;background:linear-gradient(135deg,#0b1020 0%,#13213a 55%,#0a3a4f 100%);padding:40px 24px 28px;">
-            <img src="${BRAND_ICON_URL}" alt="${BRAND_WORDMARK}" width="64" height="64" style="display:block;width:64px;height:64px;border-radius:14px;border:1px solid rgba(34,211,238,0.25);">
-            <div style="margin-top:16px;font-size:18px;font-weight:600;color:#22d3ee;letter-spacing:0.5px;">${BRAND_WORDMARK}</div>
+            <div style="font-size:18px;font-weight:600;color:#22d3ee;letter-spacing:0.5px;">${BRAND_WORDMARK}</div>
             <div style="margin-top:4px;font-size:12px;color:rgba(255,255,255,0.55);letter-spacing:0.3px;">${escapeHtml(c.tagline)}</div>
           </td>
         </tr>
@@ -211,7 +204,7 @@ export function renderWorkspaceInviteEmail(
       <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="max-width:540px;">
         <tr>
           <td align="center" style="padding:20px 24px 0;">
-            <p style="margin:0;font-size:11px;color:rgba(255,255,255,0.45);line-height:1.6;">${BRAND_WORDMARK} &middot; <a href="https://sidan.ai" style="color:#22d3ee;text-decoration:none;">sidan.ai</a></p>
+            <p style="margin:0;font-size:11px;color:rgba(255,255,255,0.45);line-height:1.6;">${BRAND_WORDMARK}</p>
           </td>
         </tr>
       </table>
