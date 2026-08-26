@@ -44,7 +44,7 @@ export function FeedCloudLinkCard({ assistantId }: { assistantId?: string }) {
     };
   }, [link.state, t.pollFailed, team]);
 
-  if (link.state === "native") return null;
+  if (link.state === "native" || link.state === "disabled") return null;
 
   async function start() {
     const target = assistantId ?? team.assistants[0]?.id;

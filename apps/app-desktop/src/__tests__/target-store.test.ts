@@ -215,7 +215,14 @@ describe("[COMP:app-desktop/target-store] declared API (GET /api/desktop-config)
   });
 
   it("parses the declared apiUrl out of a config body, tolerating junk", () => {
-    expect(parseDesktopConfig({ apiUrl: PROXIED_API, edition: "oss" })).toBe(PROXIED_API);
+    expect(parseDesktopConfig({ apiUrl: PROXIED_API, edition: "oss" })).toEqual({
+      apiUrl: PROXIED_API,
+      auth: "local-session",
+    });
+    expect(parseDesktopConfig({ apiUrl: PROXIED_API, edition: "outpost" })).toEqual({
+      apiUrl: PROXIED_API,
+      auth: "pkce",
+    });
     expect(parseDesktopConfig({})).toBeNull();
     expect(parseDesktopConfig({ apiUrl: "" })).toBeNull();
     expect(parseDesktopConfig({ apiUrl: 42 })).toBeNull();
@@ -235,6 +242,18 @@ describe("[COMP:app-desktop/target-store] declared API (GET /api/desktop-config)
       apiUrl: PROXIED_API,
     });
     expect(resolveTargetFromPersisted(raw).apiUrl).toBe(PROXIED_API);
+  });
+
+  it("round-trips Outpost PKCE auth through the persisted local target", () => {
+    const raw = serializePersistedTarget("local", PROXIED_APP, PROXIED_API, "pkce");
+    expect(parsePersistedTarget(raw)).toEqual({
+      v: 1,
+      kind: "local",
+      appUrl: PROXIED_APP,
+      apiUrl: PROXIED_API,
+      auth: "pkce",
+    });
+    expect(resolveTargetFromPersisted(raw).auth).toBe("pkce");
   });
 
   it("keeps the declaration while parked on cloud, so the way back still works", () => {

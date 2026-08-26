@@ -1,21 +1,18 @@
-/**
- * Build edition: the open single-player core vs the hosted multi-tenant
- * product.
- *
- * app-web is one codebase served by both editions (the local OSS launcher and
- * the hosted platform both run this same app), so hosted-only surfaces -
- * billing, teammates, paid capabilities - are gated on this flag at runtime rather
- * than forked into a second copy.
- *
- * The flag DEFAULTS to the full hosted edition when unset, so a hosted deploy
- * never has to opt in and existing hosted users are unaffected. Only the local
- * OSS launcher (`scripts/launch.mjs`) sets `NEXT_PUBLIC_USEBRIAN_EDITION=oss`
- * to switch app-web into single-player mode.
- */
-type UsebrianEdition = "oss" | "hosted";
+import {
+  deploymentCapabilitiesFor,
+  resolveDeploymentProfile,
+  type DeploymentCapabilities,
+  type DeploymentProfile,
+} from "@use-brian/shared/deployment-capabilities";
 
-function usebrianEdition(): UsebrianEdition {
-  return process.env.NEXT_PUBLIC_USEBRIAN_EDITION === "oss" ? "oss" : "hosted";
+export function usebrianEdition(): DeploymentProfile {
+  return resolveDeploymentProfile(
+    process.env.NEXT_PUBLIC_USEBRIAN_EDITION ?? process.env.USEBRIAN_EDITION,
+  );
+}
+
+export function deploymentCapabilities(): DeploymentCapabilities {
+  return deploymentCapabilitiesFor(usebrianEdition());
 }
 
 /** True in the open single-player edition (no billing, no teammates). */
@@ -23,9 +20,9 @@ export function isOssEdition(): boolean {
   return usebrianEdition() === "oss";
 }
 
-/** True in the hosted multi-tenant edition (the default). */
+/** True only in hosted SaaS, not in the multi-user Outpost profile. */
 export function isHostedEdition(): boolean {
-  return !isOssEdition();
+  return usebrianEdition() === "hosted";
 }
 
 /**

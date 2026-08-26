@@ -22,26 +22,31 @@
  * `/api/auth/logout` on usebrian.ai; if you change one, change the others.
  */
 
-import { isOssEdition } from "@/lib/edition";
+import { usebrianEdition } from "@/lib/edition";
+import type { DeploymentProfile } from "@use-brian/shared/deployment-capabilities";
 
 const ENV_PRIMARY_AUTH_URL = process.env.NEXT_PUBLIC_PRIMARY_AUTH_URL;
 const DEFAULT_PROD_PRIMARY_AUTH_URL = "https://usebrian.ai";
 
 export function primaryAuthUrl(): string | null {
-  // The open single-player edition owns auth locally (the local-owner session),
-  // so it never delegates to a primary — including in a production build, where
-  // `next build` freezes NODE_ENV to "production" and the check below would
-  // otherwise wrongly bounce every self-hosted user to usebrian.ai.
-  if (isOssEdition()) {
-    return null;
-  }
-  if (ENV_PRIMARY_AUTH_URL && ENV_PRIMARY_AUTH_URL.length > 0) {
-    return ENV_PRIMARY_AUTH_URL;
-  }
-  if (process.env.NODE_ENV === "production") {
-    return DEFAULT_PROD_PRIMARY_AUTH_URL;
-  }
-  return null;
+  return resolvePrimaryAuthUrl(
+    usebrianEdition(),
+    ENV_PRIMARY_AUTH_URL,
+    process.env.NODE_ENV,
+  );
+}
+
+export function resolvePrimaryAuthUrl(
+  profile: DeploymentProfile,
+  configured: string | undefined,
+  nodeEnv: string | undefined,
+): string | null {
+  if (profile === "oss") return null;
+  if (configured?.trim()) return configured;
+  // Outpost must never send customer identities to the SaaS auth origin. Its
+  // deployment supplies its own auth primary explicitly.
+  if (profile === "outpost") return null;
+  return nodeEnv === "production" ? DEFAULT_PROD_PRIMARY_AUTH_URL : null;
 }
 
 /**

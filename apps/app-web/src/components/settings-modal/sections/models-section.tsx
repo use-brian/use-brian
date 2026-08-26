@@ -18,7 +18,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Gauge, Layers3, Pencil, Plus, Trash2 } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import { useWorkspaceContext } from "@/lib/workspace-context";
-import { isOssEdition } from "@/lib/edition";
+import { deploymentCapabilities } from "@/lib/edition";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { promptDialog } from "@/components/ui/prompt-dialog";
 import { Button } from "@/components/ui/button";
@@ -438,7 +438,7 @@ export function ModelsSection() {
           <p className="text-[12.5px] text-muted-foreground">{t.loading}</p>
         ) : (
           <div className="space-y-4" role="tabpanel">
-            {isOssEdition() ? (
+            {deploymentCapabilities().selfManagedProviders ? (
               <section className="rounded-xl border border-border/70 px-4 pb-4">
                 <CodexProviderCard />
               </section>

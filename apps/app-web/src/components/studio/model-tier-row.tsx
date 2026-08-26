@@ -30,7 +30,7 @@
 
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useT } from "@/lib/i18n/client";
-import { isHostedEdition } from "@/lib/edition";
+import { deploymentCapabilities } from "@/lib/edition";
 import { modelTierPlanGateApplies } from "@/lib/plan-gate";
 
 export type ModelAlias = "standard" | "pro" | "max";
@@ -55,9 +55,9 @@ export function ModelTierRow({
   plan: string;
 }) {
   const t = useT();
-  const edition = isHostedEdition() ? "hosted" : "oss";
-  const proDisabled = modelTierPlanGateApplies(edition, plan, "pro");
-  const maxDisabled = modelTierPlanGateApplies(edition, plan, "max");
+  const capabilities = deploymentCapabilities();
+  const proDisabled = modelTierPlanGateApplies(capabilities, plan, "pro");
+  const maxDisabled = modelTierPlanGateApplies(capabilities, plan, "max");
   return (
     <div className="px-5 py-3 flex items-center justify-between gap-3">
       <span className="text-[14px] font-medium text-foreground">{label}</span>

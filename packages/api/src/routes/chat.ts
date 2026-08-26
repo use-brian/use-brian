@@ -93,6 +93,7 @@ import type { PendingApprovalsStore, ApprovalKind } from '../db/pending-approval
 import { appendDecisionEvent } from '../db/decision-event-store.js'
 import type { SessionResumeStore } from '../db/session-resume-store.js'
 import type { WorkspaceSkillStore } from '../db/skill-store.js'
+import { deploymentCapabilities } from '../edition.js'
 
 // Module-level map of active confirmation resolvers, keyed by sessionId.
 // Cleaned up on turn_complete or stream close.
@@ -912,11 +913,12 @@ export function isAdaptiveResearchEligible(args: {
   workspaceId: string | null | undefined
   userPlan: string
   assistantKind: string | null | undefined
+  researchPlanGate?: boolean
 }): boolean {
   return (
     args.requestedMode === undefined &&
     !!args.workspaceId &&
-    args.userPlan !== 'free' &&
+    (args.researchPlanGate === false || args.userPlan !== 'free') &&
     args.assistantKind !== 'app'
   )
 }
@@ -2581,6 +2583,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           workspaceId: assistant.workspaceId,
           userPlan,
           assistantKind: assistant.kind,
+          researchPlanGate: deploymentCapabilities().researchPlanGate,
         })
       let adaptiveSessionId: string | null = null
       let adaptiveDbMessages: SessionMessage[] = []
@@ -2699,7 +2702,8 @@ export function chatRoutes(options: WebChatOptions): Router {
           return
         }
         const used = await getWorkspaceResearchUsed(assistant.workspaceId)
-        const isPaid = userPlan !== 'free'
+        const researchPlanGate = deploymentCapabilities().researchPlanGate
+        const isPaid = !researchPlanGate || userPlan !== 'free'
         if (!isPaid && used >= FREE_RESEARCH_QUOTA) {
           // 402 Payment Required is the cleanest mapping — the gate is a
           // billing one, not an auth or shape failure. Frontend handles

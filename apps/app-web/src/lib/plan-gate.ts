@@ -6,6 +6,8 @@
 // real block (the closed credit gate rejects every turn for a no-plan
 // workspace); this decides when the explanatory overlay shows.
 
+import type { DeploymentCapabilities } from "@use-brian/shared/deployment-capabilities";
+
 /**
  * The gate applies on the HOSTED edition when the workspace has no active
  * plan. `'free'` stopped being a plan on 2026-07-10 — it is the
@@ -16,18 +18,18 @@
  * the usage fetch is in flight.
  */
 export function planGateApplies(
-  edition: "oss" | "hosted",
+  capabilities: DeploymentCapabilities,
   plan: string | null | undefined,
 ): boolean {
-  return edition === "hosted" && plan === "free";
+  return capabilities.billing && plan === "free";
 }
 
 export function modelTierPlanGateApplies(
-  edition: "oss" | "hosted",
+  capabilities: DeploymentCapabilities,
   plan: string | null | undefined,
   tier: "standard" | "pro" | "max",
 ): boolean {
-  if (edition === "oss" || tier === "standard") return false;
+  if (!capabilities.planEntitlements || tier === "standard") return false;
   if (tier === "pro") return plan === "free";
   return plan === "free" || plan === "pro";
 }

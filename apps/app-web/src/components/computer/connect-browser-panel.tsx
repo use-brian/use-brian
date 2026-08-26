@@ -16,7 +16,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import { Cable, Check, Copy, Download, Link2, RefreshCw } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
-import { isOssEdition } from "@/lib/edition";
+import { deploymentCapabilities } from "@/lib/edition";
 import { planGateApplies } from "@/lib/plan-gate";
 import { openWorkspaceSettings } from "@/components/settings-modal/settings-modal";
 import {
@@ -107,14 +107,14 @@ export function ConnectBrowserPanel({
   // Plan gate (D3): hosted paid only; OSS never gates. A null/unknown plan does
   // NOT gate (planGateApplies) so a paid user never sees the upsell flash.
   useEffect(() => {
-    const edition = isOssEdition() ? "oss" : "hosted";
-    if (edition === "oss" || !workspaceId) {
+    const capabilities = deploymentCapabilities();
+    if (!capabilities.billing || !workspaceId) {
       setGated(false);
       return;
     }
     let cancelled = false;
     void getWorkspacePlan(workspaceId).then((plan) => {
-      if (!cancelled) setGated(planGateApplies(edition, plan));
+      if (!cancelled) setGated(planGateApplies(capabilities, plan));
     });
     return () => {
       cancelled = true;

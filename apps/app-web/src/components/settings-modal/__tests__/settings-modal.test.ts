@@ -3,22 +3,50 @@ import { renderToString } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
+import { deploymentCapabilitiesFor } from "@use-brian/shared/deployment-capabilities";
 
 vi.mock("@/lib/edition", () => ({
   isOssEdition: () => true,
+  usebrianEdition: () => "oss",
+  deploymentCapabilities: () => ({
+    teammateManagement: false,
+    localOwnerSession: true,
+    billing: false,
+    creditEnforcement: false,
+    planEntitlements: false,
+    hostedPlanLimits: false,
+    managedInfrastructure: false,
+    selfManagedProviders: true,
+    hostedUpgradePrompts: true,
+    researchPlanGate: true,
+  }),
   HOSTED_UPGRADE_URL: "https://usebrian.ai",
 }));
-import { OssVersionFooter, workspaceSettingsSections } from "../settings-modal";
+import {
+  OssVersionFooter,
+  workspaceMembersSectionKind,
+  workspaceSettingsSections,
+} from "../settings-modal";
 
 describe("[COMP:app-web/profile-management] settings navigation", () => {
   it("keeps Browser profiles out of Settings in both editions", () => {
-    expect(workspaceSettingsSections(true)).not.toContain("ws-browser-profiles");
-    expect(workspaceSettingsSections(false)).not.toContain("ws-browser-profiles");
+    expect(workspaceSettingsSections(deploymentCapabilitiesFor("oss"))).not.toContain("ws-browser-profiles");
+    expect(workspaceSettingsSections(deploymentCapabilitiesFor("hosted"))).not.toContain("ws-browser-profiles");
   });
 
   it("keeps hosted-only billing out of OSS but exposes model routing", () => {
-    expect(workspaceSettingsSections(true)).not.toContain("ws-plan");
-    expect(workspaceSettingsSections(true)).toContain("ws-models");
+    const sections = workspaceSettingsSections(deploymentCapabilitiesFor("oss"));
+    expect(sections).not.toContain("ws-plan");
+    expect(sections).toContain("ws-models");
+  });
+
+  it("enables Outpost teammate management without exposing billing", () => {
+    const capabilities = deploymentCapabilitiesFor("outpost");
+    const sections = workspaceSettingsSections(capabilities);
+    expect(sections).toContain("ws-members");
+    expect(sections).not.toContain("ws-plan");
+    expect(workspaceMembersSectionKind(capabilities)).toBe("manage");
+    expect(workspaceMembersSectionKind(deploymentCapabilitiesFor("oss"))).toBe("upgrade");
   });
 });
 

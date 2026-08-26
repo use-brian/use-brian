@@ -93,7 +93,7 @@ import {
   goalAcceptedNoticeFromPayload,
   type GoalAcceptedNotice,
 } from "@/components/chat-app/goal-acknowledgement";
-import { isHostedEdition } from "@/lib/edition";
+import { deploymentCapabilities, isHostedEdition } from "@/lib/edition";
 import { modelTierPlanGateApplies } from "@/lib/plan-gate";
 import {
   ASSISTANT_REFRESH_EVENT,
@@ -647,7 +647,7 @@ export function FloatingChat({
       const saved = localStorage.getItem(MODEL_STORAGE_KEY);
       if (saved === "standard" || saved === "pro" || saved === "max") return saved;
     }
-    return isHostedEdition() ? "standard" : "pro";
+    return deploymentCapabilities().planEntitlements ? "standard" : "pro";
   });
   const [workspacePlan, setWorkspacePlan] = useState<string | null>(null);
   // Research mode — ON adds `mode:'research'` to the next send (coordinator +
@@ -935,7 +935,7 @@ export function FloatingChat({
 
   // Resolve the workspace plan for model-tier gating (per-workspace billing).
   useEffect(() => {
-    if (!workspaceId || !isHostedEdition()) return;
+    if (!workspaceId || !deploymentCapabilities().planEntitlements) return;
     let cancelled = false;
     authFetch(`${API_URL}/api/usage?workspace_id=${encodeURIComponent(workspaceId)}`)
       .then((r) => (r.ok ? r.json() : null))
@@ -1053,8 +1053,8 @@ export function FloatingChat({
   );
 
   useEffect(() => {
-    if (!isHostedEdition()) return;
-    if (modelTierPlanGateApplies("hosted", workspacePlan, model)) {
+    const capabilities = deploymentCapabilities();
+    if (modelTierPlanGateApplies(capabilities, workspacePlan, model)) {
       setModel(model === "max" && workspacePlan === "pro" ? "pro" : "standard");
     }
   }, [workspacePlan, model]);

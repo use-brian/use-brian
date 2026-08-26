@@ -654,6 +654,26 @@ describe('[COMP:api/workspace-store] createWorkspaceStore', () => {
       expect(await store.transferOwnership('u_owner', 't_free', 'u_new')).toBe('transferred')
     })
 
+    it('skips the hosted recipient cap in Outpost', async () => {
+      const previous = process.env.USEBRIAN_EDITION
+      process.env.USEBRIAN_EDITION = 'outpost'
+      try {
+        const { client } = makeTxClient([
+          { rows: [{ ...WS_ROW, plan: 'free' }] },
+          { rows: [{ role: 'member' }] },
+          { rowCount: 1 },
+          { rowCount: 1 },
+          { rowCount: 1 },
+        ])
+
+        expect(await store.transferOwnership('u_owner', 't_free', 'u_new')).toBe('transferred')
+        expect(client.query.mock.calls.map((c) => c[0] as string).join(' ')).not.toContain('ownsPaid')
+      } finally {
+        if (previous === undefined) delete process.env.USEBRIAN_EDITION
+        else process.env.USEBRIAN_EDITION = previous
+      }
+    })
+
     it('skips the cap check entirely for a paid workspace', async () => {
       const { client } = makeTxClient([
         { rows: [WS_ROW] },                 // plan: 'pro'

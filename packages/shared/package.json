@@ -38,6 +38,10 @@
       "types": "./dist/home-apps.d.ts",
       "default": "./dist/home-apps.js"
     },
+    "./deployment-capabilities": {
+      "types": "./dist/deployment-capabilities.d.ts",
+      "default": "./dist/deployment-capabilities.js"
+    },
     "./assistant-charter": {
       "types": "./dist/assistant-charter.d.ts",
       "default": "./dist/assistant-charter.js"

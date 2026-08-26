@@ -39,6 +39,7 @@ import { joinDefaultTeamspacesSystem, leaveWorkspaceTeamspacesSystem } from './t
 import { query, queryWithRLS, getPool } from './client.js'
 import type { ConnectorGrantStore } from './connector-grant-store.js'
 import type { ChannelRouteStore } from './channel-route-store.js'
+import { deploymentCapabilities } from '../edition.js'
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -1700,7 +1701,7 @@ export function createWorkspaceStore(cascades: WorkspaceStoreCascades = {}): Wor
         // recipient's owned-free cap exactly like creating one would —
         // otherwise create-then-transfer trivially bypasses the
         // row-harvesting backstop (workspaces.md → "Creation cap").
-        if (row.plan === 'free') {
+        if (deploymentCapabilities().hostedPlanLimits && row.plan === 'free') {
           const cap = await client.query<{ ownsPaid: boolean; freeOwned: number }>(
             `SELECT
                EXISTS(SELECT 1 FROM workspaces WHERE owner_user_id = $1 AND plan <> 'free') AS "ownsPaid",

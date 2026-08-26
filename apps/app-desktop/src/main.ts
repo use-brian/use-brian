@@ -59,6 +59,8 @@ import {
   parsePersistedTarget,
   serializePersistedTarget,
   targetWindowTitle,
+  type DeclaredDesktopConfig,
+  type TargetAuth,
   type TargetKind,
 } from "./target-store.js";
 import {
@@ -834,7 +836,9 @@ async function probeLocalBrain(apiUrl: string): Promise<LocalProbeResult<undefin
  * under a different name was previously unreachable. Never throws — an older
  * self-host 404s here and falls back.
  */
-async function probeDesktopConfig(appUrl: string): Promise<LocalProbeResult<string | null>> {
+async function probeDesktopConfig(
+  appUrl: string,
+): Promise<LocalProbeResult<DeclaredDesktopConfig | null>> {
   const result = await probeExpectedJson(desktopConfigUrl(appUrl), {
     allowNotFound: true,
     fetchImpl: gatewayProbeFetch,
@@ -848,7 +852,7 @@ async function probeDesktopConfig(appUrl: string): Promise<LocalProbeResult<stri
 }
 
 type DesktopConfigResult =
-  | { readonly kind: "configured"; readonly apiUrl: string | null }
+  | { readonly kind: "configured"; readonly config: DeclaredDesktopConfig | null }
   | { readonly kind: "managed-oauth"; readonly resourceMetadataUrl: string }
   | { readonly kind: "legacy-access" };
 
@@ -868,7 +872,7 @@ async function fetchDeclaredApiUrl(
         ...(authorization ? { Authorization: authorization } : {}),
       },
     });
-    if (res.ok) return { kind: "configured", apiUrl: parseDesktopConfig(await res.json()) };
+    if (res.ok) return { kind: "configured", config: parseDesktopConfig(await res.json()) };
     const access = classifyDesktopConfigAccessResponse({
       status: res.status,
       wwwAuthenticate: res.headers.get("www-authenticate"),
@@ -878,9 +882,9 @@ async function fetchDeclaredApiUrl(
     if (access.kind !== "none") return access;
     // 404 — a self-host predating the endpoint. Preserve the historical
     // hostname-derivation fallback for every non-Access response.
-    return { kind: "configured", apiUrl: null };
+    return { kind: "configured", config: null };
   } catch {
-    return { kind: "configured", apiUrl: null };
+    return { kind: "configured", config: null };
   }
 }
 
@@ -929,7 +933,11 @@ async function probeWithVisibleGatewayFallback<T>(
 async function validateLocalTarget(
   appUrl: string,
   fallbackApiUrl: string,
-): Promise<LocalProbeResult<{ apiUrl: string; declaredApiUrl: string | null }>> {
+): Promise<LocalProbeResult<{
+  apiUrl: string
+  declaredApiUrl: string | null
+  auth: TargetAuth
+}>> {
   console.log(`[gateway-auth] validating app ${appUrl}`);
   const config = await probeWithVisibleGatewayFallback(
     desktopConfigUrl(appUrl),
@@ -940,7 +948,11 @@ async function validateLocalTarget(
     return config;
   }
 
-  const target = localTarget(appUrl, config.value) ?? localTarget(appUrl);
+  const target = localTarget(
+    appUrl,
+    config.value?.apiUrl,
+    config.value?.auth ?? "local-session",
+  ) ?? localTarget(appUrl);
   const apiUrl = target?.apiUrl ?? fallbackApiUrl;
   const health = await probeWithVisibleGatewayFallback(
     healthUrl(apiUrl),
@@ -951,7 +963,14 @@ async function validateLocalTarget(
     return health;
   }
   console.log(`[gateway-auth] target ready: app=${appUrl} api=${apiUrl}`);
-  return { kind: "ready", value: { apiUrl, declaredApiUrl: config.value } };
+  return {
+    kind: "ready",
+    value: {
+      apiUrl,
+      declaredApiUrl: config.value?.apiUrl ?? null,
+      auth: target?.auth ?? "local-session",
+    },
+  };
 }
 
 /**
@@ -959,9 +978,14 @@ async function validateLocalTarget(
  * process-lifetime constant (keep-alive timers, menu labels, and the policy
  * closures all hang off it), so a switch never re-resolves in place.
  */
-function persistTargetAndRelaunch(kind: TargetKind, appUrl?: string, apiUrl?: string | null): void {
+function persistTargetAndRelaunch(
+  kind: TargetKind,
+  appUrl?: string,
+  apiUrl?: string | null,
+  auth?: TargetAuth,
+): void {
   try {
-    writeFileSync(targetFile(), serializePersistedTarget(kind, appUrl, apiUrl));
+    writeFileSync(targetFile(), serializePersistedTarget(kind, appUrl, apiUrl, auth));
   } catch (err) {
     dialog.showErrorBox("Switch failed", `Could not save the target: ${String(err)}`);
     return;
@@ -982,6 +1006,10 @@ function rememberedLocalAppUrl(): string {
  */
 function rememberedLocalApiUrl(): string | null {
   return parsePersistedTarget(readPersistedTargetRaw())?.apiUrl ?? null;
+}
+
+function rememberedLocalAuth(): TargetAuth {
+  return parsePersistedTarget(readPersistedTargetRaw())?.auth ?? "local-session";
 }
 
 let lastLocalMintAt: number | null = null;
@@ -1042,7 +1070,12 @@ function showLocalDown(
  */
 function switchTargetFromMenu(): void {
   if (cfg.target === "local") {
-    persistTargetAndRelaunch("cloud", rememberedLocalAppUrl(), rememberedLocalApiUrl());
+    persistTargetAndRelaunch(
+      "cloud",
+      rememberedLocalAppUrl(),
+      rememberedLocalApiUrl(),
+      rememberedLocalAuth(),
+    );
     return;
   }
   const win = ensureWindow();
@@ -2566,8 +2599,13 @@ if (!gotLock) {
       }
     }
 
-    const declaredApiUrl = discovery.apiUrl;
-    const target = localTarget(normalized.appUrl, declaredApiUrl) ?? normalized;
+    const declaredConfig = discovery.config;
+    const declaredApiUrl = declaredConfig?.apiUrl ?? null;
+    const target = localTarget(
+      normalized.appUrl,
+      declaredApiUrl,
+      declaredConfig?.auth ?? "local-session",
+    ) ?? normalized;
     pendingLocalGatewayUrl = target.appUrl;
     const validation = await validateLocalTarget(target.appUrl, target.apiUrl).finally(() => {
       pendingLocalGatewayUrl = null;
@@ -2580,18 +2618,32 @@ if (!gotLock) {
       };
     }
     const resolvedDeclaredApiUrl = validation.value.declaredApiUrl ?? declaredApiUrl;
-    const resolvedTarget = localTarget(target.appUrl, resolvedDeclaredApiUrl) ?? target;
+    const resolvedTarget = localTarget(
+      target.appUrl,
+      resolvedDeclaredApiUrl,
+      validation.value.auth,
+    ) ?? target;
     // A short delay (not setImmediate) so the ok-reply actually flushes to the
     // renderer and the landing paints "Restarting..." before the process dies.
     // The declaration rides along into the record so startup stays sync.
     setTimeout(
-      () => persistTargetAndRelaunch("local", resolvedTarget.appUrl, resolvedDeclaredApiUrl),
+      () => persistTargetAndRelaunch(
+        "local",
+        resolvedTarget.appUrl,
+        resolvedDeclaredApiUrl,
+        resolvedTarget.auth,
+      ),
       150,
     );
     return { ok: true, url: resolvedTarget.appUrl };
   });
   ipcMain.on("Use Brian:use-cloud", () =>
-    persistTargetAndRelaunch("cloud", rememberedLocalAppUrl(), rememberedLocalApiUrl()),
+    persistTargetAndRelaunch(
+      "cloud",
+      rememberedLocalAppUrl(),
+      rememberedLocalApiUrl(),
+      rememberedLocalAuth(),
+    ),
   );
 
   // Bundled-mode token bridge: the preload reads/writes the Bearer token here.

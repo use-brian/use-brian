@@ -52,7 +52,7 @@ import {
 import { flushWorkspaceData, WorkspaceFlushNotOwnerError } from '../db/workspace-flush.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 import { createConnectionStore } from '../db/connection-store.js'
-import { isOssEdition } from '../edition.js'
+import { deploymentCapabilities } from '../edition.js'
 import type { WorkspaceAuditStore, WorkspaceAuditEventType } from '../db/workspace-audit-store.js'
 import type { WorkspaceInvitationStore } from '../db/workspace-invitation-store.js'
 import type { SmtpClient } from '../email/smtp-client.js'
@@ -182,7 +182,7 @@ export function workspaceRoutes({
       // Hosted billing is per-workspace (migration 143). A user who owns no paid
       // workspace is capped at 2 free-plan workspaces (the Personal one
       // counts). Owning any paid workspace lifts the cap.
-      if (!isOssEdition()) {
+      if (deploymentCapabilities().hostedPlanLimits) {
         const ownsPaid = await query<{ ok: number }>(
           `SELECT 1 AS ok FROM workspaces WHERE owner_user_id = $1 AND plan <> 'free' LIMIT 1`,
           [userId],
@@ -1307,7 +1307,7 @@ export function workspaceRoutes({
       const { workspaceId } = req.params as { workspaceId: string }
       const workspacePlan = await getWorkspacePlan(workspaceId)
 
-      if (!isOssEdition()) {
+      if (deploymentCapabilities().hostedPlanLimits) {
         const countResult = await query<{ count: string }>(
           `SELECT COUNT(*) AS count FROM assistant_members WHERE user_id = $1 AND role = 'owner'`,
           [userId],
