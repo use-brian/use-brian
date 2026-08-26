@@ -23,6 +23,9 @@ ALTER TABLE public.connector_grant
 ALTER TABLE public.ingest_rules
   ADD COLUMN compartments text[] NOT NULL DEFAULT '{}',
   ADD COLUMN project_ids uuid[] NOT NULL DEFAULT '{}';
+ALTER TABLE public.pending_ingest_batches
+  ADD COLUMN compartments text[] NOT NULL DEFAULT '{}',
+  ADD COLUMN project_ids uuid[] NOT NULL DEFAULT '{}';
 
 CREATE INDEX connector_instance_compartments_gin
   ON public.connector_instance USING gin (compartments)
@@ -42,6 +45,73 @@ CREATE INDEX ingest_rules_compartments_gin
 CREATE INDEX ingest_rules_project_ids_gin
   ON public.ingest_rules USING gin (project_ids)
   WHERE cardinality(project_ids) > 0;
+CREATE INDEX pending_ingest_batches_context_due_idx
+  ON public.pending_ingest_batches (workspace_id, fires_at)
+  WHERE processed_at IS NULL;
+
+-- Connector batches snapshot their rule stamp at enqueue. Room batches have
+-- no ingest_rules row and supply their immutable session stamp directly.
+-- Episode writers in hosted and OSS paths already carry rule_id in source_ref;
+-- this trigger makes the persisted root authoritative before Pipeline B reads
+-- it, without provider-specific authority code.
+CREATE FUNCTION public.inherit_episode_ingest_context_scope() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'public', 'pg_temp'
+AS $$
+DECLARE
+  source_rule text := NEW.source_ref->>'rule_id';
+  inherited_compartments text[];
+  inherited_projects uuid[];
+BEGIN
+  IF source_rule IS NULL THEN
+    RETURN NEW;
+  END IF;
+
+  SELECT b.compartments, b.project_ids
+    INTO inherited_compartments, inherited_projects
+    FROM public.pending_ingest_batches b
+   WHERE b.rule_id::text = source_rule
+     AND b.workspace_id = NEW.workspace_id
+     AND b.processed_at IS NULL
+   ORDER BY b.fires_at, b.created_at
+   LIMIT 1;
+
+  IF NOT FOUND THEN
+    SELECT r.compartments, r.project_ids
+      INTO inherited_compartments, inherited_projects
+      FROM public.ingest_rules r
+      JOIN public.connector_instance ci ON ci.id = r.connector_instance_id
+     WHERE r.id::text = source_rule
+       AND (
+         ci.workspace_id = NEW.workspace_id
+         OR EXISTS (
+           SELECT 1 FROM public.connector_grant cg
+            WHERE cg.connector_instance_id = ci.id
+              AND cg.target_type = 'workspace'
+              AND cg.target_id = NEW.workspace_id
+         )
+       )
+     LIMIT 1;
+  END IF;
+
+  NEW.compartments := ARRAY(
+    SELECT DISTINCT value
+      FROM unnest(COALESCE(NEW.compartments, '{}'::text[])
+               || COALESCE(inherited_compartments, '{}'::text[])) value
+     ORDER BY value
+  );
+  NEW.project_ids := ARRAY(
+    SELECT DISTINCT value
+      FROM unnest(COALESCE(NEW.project_ids, '{}'::uuid[])
+               || COALESCE(inherited_projects, '{}'::uuid[])) value
+     ORDER BY value
+  );
+  RETURN NEW;
+END;
+$$;
+CREATE TRIGGER episodes_context_ingest_inherit
+  BEFORE INSERT ON public.episodes
+  FOR EACH ROW EXECUTE FUNCTION public.inherit_episode_ingest_context_scope();
 
 CREATE FUNCTION public.validate_teamspace_context_group() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER
@@ -83,6 +153,124 @@ $$;
 CREATE TRIGGER teamspace_members_linked_roster_immutable
   BEFORE INSERT OR UPDATE OR DELETE ON public.teamspace_members
   FOR EACH ROW EXECUTE FUNCTION public.prevent_linked_teamspace_roster_mutation();
+
+-- Linked Teamspaces derive human access from the flat Team grant. Unlinked
+-- Teamspaces retain their explicit roster exactly.
+DROP POLICY teamspaces_member ON public.teamspaces;
+CREATE POLICY teamspaces_member ON public.teamspaces
+  FOR SELECT
+  USING (
+    (
+      workspace_group_id IS NULL
+      AND id IN (
+        SELECT tm.teamspace_id
+          FROM public.teamspace_members tm
+         WHERE tm.user_id = (current_setting('app.current_user_id', true))::uuid
+      )
+    )
+    OR (
+      workspace_group_id IS NOT NULL
+      AND EXISTS (
+        SELECT 1
+          FROM public.workspace_groups g
+         WHERE g.id = teamspaces.workspace_group_id
+           AND (
+             public.effective_member_team_compartments(
+               (current_setting('app.current_user_id', true))::uuid,
+               teamspaces.workspace_id
+             ) IS NULL
+             OR ARRAY[g.compartment_key]::text[] <@
+                public.effective_member_team_compartments(
+                  (current_setting('app.current_user_id', true))::uuid,
+                  teamspaces.workspace_id
+                )
+           )
+      )
+    )
+  );
+
+-- Page access composes the human Team grant with the trusted assistant GUCs.
+-- A clearance-only legacy agent wrap can still enter unlinked Teamspaces, but
+-- linked Teamspaces fail closed until both clearance and compartments exist.
+DROP POLICY saved_views_workspace_member ON public.saved_views;
+CREATE POLICY saved_views_workspace_member ON public.saved_views
+  USING (
+    workspace_id IN (
+      SELECT wm.workspace_id
+        FROM public.workspace_members wm
+       WHERE wm.user_id = (current_setting('app.current_user_id', true))::uuid
+    )
+    AND (
+      (teamspace_id IS NULL
+        AND created_by = (current_setting('app.current_user_id', true))::uuid)
+      OR EXISTS (
+        SELECT 1
+          FROM public.teamspaces t
+         WHERE t.id = saved_views.teamspace_id
+           AND (
+             (
+               t.workspace_group_id IS NULL
+               AND (
+                 (
+                   NULLIF(current_setting('app.agent_clearance', true), '') IS NULL
+                   AND EXISTS (
+                     SELECT 1 FROM public.teamspace_members tm
+                      WHERE tm.teamspace_id = t.id
+                        AND tm.user_id = (current_setting('app.current_user_id', true))::uuid
+                   )
+                 )
+                 OR (
+                   NULLIF(current_setting('app.agent_clearance', true), '') IS NOT NULL
+                   AND public.sensitivity_rank(t.sensitivity)
+                       <= public.sensitivity_rank(current_setting('app.agent_clearance', true))
+                 )
+               )
+             )
+             OR (
+               t.workspace_group_id IS NOT NULL
+               AND EXISTS (
+                 SELECT 1
+                   FROM public.workspace_groups g
+                  WHERE g.id = t.workspace_group_id
+                    AND (
+                      (
+                        NULLIF(current_setting('app.agent_clearance', true), '') IS NULL
+                        AND (
+                        public.effective_member_team_compartments(
+                          (current_setting('app.current_user_id', true))::uuid,
+                          t.workspace_id
+                        ) IS NULL
+                        OR ARRAY[g.compartment_key]::text[] <@
+                           public.effective_member_team_compartments(
+                             (current_setting('app.current_user_id', true))::uuid,
+                             t.workspace_id
+                           )
+                        )
+                      )
+                      OR (
+                        NULLIF(current_setting('app.agent_clearance', true), '') IS NOT NULL
+                        AND NULLIF(current_setting('app.agent_compartments', true), '') IS NOT NULL
+                        AND public.sensitivity_rank(t.sensitivity)
+                            <= public.sensitivity_rank(current_setting('app.agent_clearance', true))
+                        AND (
+                          current_setting('app.agent_compartments', true)::jsonb = 'null'::jsonb
+                          OR current_setting('app.agent_compartments', true)::jsonb ? g.compartment_key
+                        )
+                      )
+                    )
+               )
+             )
+           )
+      )
+    )
+    AND (
+      NULLIF(current_setting('app.agent_clearance', true), '') IS NULL
+      OR NULLIF(current_setting('app.agent_project_ids', true), '') IS NULL
+      OR current_setting('app.agent_project_ids', true)::jsonb = 'null'::jsonb
+      OR project_id IS NULL
+      OR current_setting('app.agent_project_ids', true)::jsonb ? project_id::text
+    )
+  );
 
 CREATE FUNCTION public.validate_connector_context_scope() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER
@@ -157,6 +345,12 @@ CREATE TRIGGER ingest_rules_context_scope_valid
   BEFORE INSERT OR UPDATE OF connector_instance_id, compartments, project_ids
   ON public.ingest_rules
   FOR EACH ROW EXECUTE FUNCTION public.validate_connector_context_scope();
+CREATE TRIGGER pending_ingest_batches_context_scope_valid
+  BEFORE INSERT OR UPDATE OF workspace_id, compartments, project_ids
+  ON public.pending_ingest_batches
+  FOR EACH ROW EXECUTE FUNCTION public.validate_context_scope_arrays(
+    'workspace_id', 'compartments', 'project_ids'
+  );
 
 -- Freeze the SQL half of normalizeProjectName: trim, then lowercase. When a
 -- task has multiple valid Project tags v1 consumes the first array occurrence

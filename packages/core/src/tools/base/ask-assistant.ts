@@ -185,6 +185,12 @@ If unsure whether to call this, do not call it. Answer with your own tools first
             role: 'user',
             parts: [{ kind: 'text', text: input.question }],
           },
+          contextScope: target.followingWorkspaceId === context.workspaceId
+            ? {
+                groupId: context.activeGroupId ?? null,
+                projectId: context.activeProjectId ?? null,
+              }
+            : undefined,
           caller: {
             workspaceId: context.workspaceId ?? '',
             assistantId: context.assistantId,
@@ -213,7 +219,10 @@ If unsure whether to call this, do not call it. Answer with your own tools first
               .filter((p): p is { kind: 'text'; text: string } => p.kind === 'text')
               .map((p) => p.text)
               .join('\n') ?? ''
-            return { data: text || 'The assistant did not produce a response.' }
+            return {
+              data: text || 'The assistant did not produce a response.',
+              scopeEvidence: response.scopeEvidence,
+            }
           }
           case 'failed': {
             const errMsg = task.status.message?.parts

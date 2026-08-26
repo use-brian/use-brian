@@ -77,6 +77,9 @@ export function createFileIngestor(deps: FileIngestorDeps): FileIngestor {
       assistantKind: ctx.assistantKind,
       clearance: ctx.clearance,
       compartments: ctx.compartments,
+      projectIds: ctx.projectIds,
+      writeCompartments: ctx.writeCompartments,
+      writeProjectIds: ctx.writeProjectIds,
     }
     const sensitivity: FileSensitivity = input.sensitivity ?? 'internal'
     const path = input.path ?? `/uploads/${input.fileName}`
@@ -154,6 +157,8 @@ export function createFileIngestor(deps: FileIngestorDeps): FileIngestor {
       sourceRef: { source_kind: 'file_upload', file_id: file.id },
       contentRef: { source_kind: 'file_upload', file_id: file.id },
       sensitivity: toEpisodeSensitivity(sensitivity),
+      compartments: file.compartments,
+      projectIds: file.projectIds,
     })
 
     return {

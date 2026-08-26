@@ -19,7 +19,7 @@ const FULL_SELECT = `
   id, workspace_id as "workspaceId", path, parent_path as "parentPath",
   name, title, summary, mime, size_bytes as "sizeBytes",
   tags, related_ids as "relatedIds", storage_uri as "storageUri",
-  sensitivity, metadata,
+  sensitivity, compartments, project_ids as "projectIds", metadata,
   user_id as "userId", assistant_id as "assistantId",
   source, source_episode_id as "sourceEpisodeId",
   verified_by_user_id as "verifiedByUserId", verified_at as "verifiedAt",
@@ -35,7 +35,7 @@ const FULL_SELECT = `
 const INDEX_SELECT = `
   id, workspace_id as "workspaceId", path, parent_path as "parentPath",
   name, title, summary, mime, size_bytes as "sizeBytes",
-  tags, sensitivity, updated_at as "updatedAt"
+  tags, sensitivity, compartments, project_ids as "projectIds", updated_at as "updatedAt"
 `
 
 type FileRow = {
@@ -52,6 +52,8 @@ type FileRow = {
   relatedIds: string[]
   storageUri: string
   sensitivity: FileSensitivity
+  compartments: string[]
+  projectIds: string[]
   metadata: Record<string, unknown> | null
   userId: string | null
   assistantId: string | null
@@ -83,6 +85,8 @@ type IndexRow = {
   sizeBytes: number | string
   tags: string[]
   sensitivity: FileSensitivity
+  compartments: string[]
+  projectIds: string[]
   updatedAt: Date
 }
 
@@ -106,6 +110,8 @@ function toRecord(row: FileRow): WorkspaceFile {
     relatedIds: row.relatedIds,
     storageUri: row.storageUri,
     sensitivity: row.sensitivity,
+    compartments: row.compartments ?? [],
+    projectIds: row.projectIds ?? [],
     metadata: row.metadata ?? {},
     userId: row.userId,
     assistantId: row.assistantId,
@@ -139,6 +145,8 @@ function toIndexRow(row: IndexRow): WorkspaceFileIndexRow {
     sizeBytes: asNumber(row.sizeBytes),
     tags: row.tags,
     sensitivity: row.sensitivity,
+    compartments: row.compartments ?? [],
+    projectIds: row.projectIds ?? [],
     updatedAt: row.updatedAt,
   }
 }
@@ -181,7 +189,7 @@ export async function createWorkspaceFile(
     'mime', 'size_bytes', 'tags', 'related_ids', 'storage_uri',
     'sensitivity', 'metadata',
     'user_id', 'assistant_id', 'source', 'source_episode_id',
-    'created_by_user_id', 'created_by_assistant_id', 'compartments',
+    'created_by_user_id', 'created_by_assistant_id', 'compartments', 'project_ids',
   ]
   const values: unknown[] = [
     input.workspaceId,
@@ -204,6 +212,7 @@ export async function createWorkspaceFile(
     input.createdByUserId,
     input.createdByAssistantId ?? null,
     input.compartments ?? [],
+    input.projectIds ?? [],
   ]
   if (input.id) {
     cols.unshift('id')
@@ -236,6 +245,8 @@ export async function createWorkspaceFile(
       assistantId: file.assistantId,
       sourceEpisodeId: file.sourceEpisodeId,
       commitSha: opts.commitSha,
+      compartments: file.compartments,
+      projectIds: file.projectIds,
     })
   }
   return file
@@ -294,6 +305,16 @@ export async function updateWorkspaceFileMeta(
   if (patch.relatedIds !== undefined)  { sets.push(`related_ids = $${idx}`); values.push(patch.relatedIds);  idx++ }
   if (patch.sensitivity !== undefined) { sets.push(`sensitivity = $${idx}`); values.push(patch.sensitivity); idx++ }
   if (patch.metadata !== undefined)    { sets.push(`metadata = $${idx}`);    values.push(JSON.stringify(patch.metadata)); idx++ }
+  if (patch.inheritCompartments !== undefined) {
+    sets.push(`compartments = ARRAY(SELECT DISTINCT unnest(compartments || $${idx}::text[]) ORDER BY 1)`)
+    values.push(patch.inheritCompartments)
+    idx++
+  }
+  if (patch.inheritProjectIds !== undefined) {
+    sets.push(`project_ids = ARRAY(SELECT DISTINCT unnest(project_ids || $${idx}::uuid[]) ORDER BY 1)`)
+    values.push(patch.inheritProjectIds)
+    idx++
+  }
 
   if (sets.length === 0) {
     // No-op short-circuit — read the current row through the write
@@ -323,7 +344,8 @@ export async function updateWorkspaceFileMeta(
   // keep surfacing at the OLD ceiling. Runs immediately after the RLS-gated
   // parent update (segments are rebuildable derived data; a failure here is
   // loud, not silent).
-  if (patch.sensitivity !== undefined || patch.tags !== undefined) {
+  if (patch.sensitivity !== undefined || patch.tags !== undefined
+      || patch.inheritCompartments !== undefined || patch.inheritProjectIds !== undefined) {
     const segSets: string[] = []
     const segValues: unknown[] = [id]
     if (patch.sensitivity !== undefined) {
@@ -333,6 +355,14 @@ export async function updateWorkspaceFileMeta(
     if (patch.tags !== undefined) {
       segValues.push(patch.tags)
       segSets.push(`tags = $${segValues.length}`)
+    }
+    if (patch.inheritCompartments !== undefined) {
+      segValues.push(patch.inheritCompartments)
+      segSets.push(`compartments = ARRAY(SELECT DISTINCT unnest(compartments || $${segValues.length}::text[]) ORDER BY 1)`)
+    }
+    if (patch.inheritProjectIds !== undefined) {
+      segValues.push(patch.inheritProjectIds)
+      segSets.push(`project_ids = ARRAY(SELECT DISTINCT unnest(project_ids || $${segValues.length}::uuid[]) ORDER BY 1)`)
     }
     if (transactionClient) {
       await transactionClient.query(
@@ -351,6 +381,7 @@ export async function updateWorkspaceFileSize(
   workspaceId: string,
   id: string,
   sizeBytes: number,
+  scope: { compartments?: string[]; projectIds?: string[] } = {},
 ): Promise<WorkspaceFile | null> {
   // `append` calls this. Size drift is a content edit but the existing
   // files-api semantics treat append as an in-place bump on the current
@@ -358,10 +389,12 @@ export async function updateWorkspaceFileSize(
   // explicit supersession driver.
   const result = await queryWithRLS<FileRow>(
     userId,
-    `UPDATE workspace_files SET size_bytes = $1
+    `UPDATE workspace_files SET size_bytes = $1,
+       compartments = ARRAY(SELECT DISTINCT unnest(compartments || $4::text[]) ORDER BY 1),
+       project_ids = ARRAY(SELECT DISTINCT unnest(project_ids || $5::uuid[]) ORDER BY 1)
      WHERE id = $2 AND workspace_id = $3 AND valid_to IS NULL
      RETURNING ${FULL_SELECT}`,
-    [sizeBytes, id, workspaceId],
+    [sizeBytes, id, workspaceId, scope.compartments ?? [], scope.projectIds ?? []],
   )
   return result.rows.length === 0 ? null : toRecord(result.rows[0])
 }
@@ -686,14 +719,17 @@ export async function supersedeWorkspaceFile(
          mime, size_bytes, tags, related_ids, storage_uri,
          sensitivity, metadata,
          user_id, assistant_id, source, source_episode_id,
-         valid_from, created_by_user_id, created_by_assistant_id
+         valid_from, created_by_user_id, created_by_assistant_id,
+         compartments, project_ids
        )
        VALUES (
          $1, $2, $3, $4, $5, $6, $7,
          $8, $9, $10, $11, $12,
          $13, $14,
          $15, $16, $17, $18,
-         now(), $19, $20
+         now(), $19, $20,
+         ARRAY(SELECT DISTINCT unnest($21::text[] || $22::text[]) ORDER BY 1),
+         ARRAY(SELECT DISTINCT unnest($23::uuid[] || $24::uuid[]) ORDER BY 1)
        )
        RETURNING ${FULL_SELECT}`,
       [
@@ -717,6 +753,10 @@ export async function supersedeWorkspaceFile(
         old.sourceEpisodeId,
         patch.editorUserId,
         patch.editorAssistantId ?? null,
+        old.compartments ?? [],
+        patch.compartments ?? [],
+        old.projectIds ?? [],
+        patch.projectIds ?? [],
       ],
     )
 

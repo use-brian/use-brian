@@ -69,13 +69,16 @@ export type CompanyRecord = {
   domain: string | null
   tags: string[]
   externalRef: CrmExternalRef
+  sensitivity?: Sensitivity
+  compartments?: string[]
+  projectIds?: string[]
   createdAt: Date
   updatedAt: Date
 }
 
 export type CompanyListRow = Pick<
   CompanyRecord,
-  'id' | 'workspaceId' | 'entityId' | 'name' | 'domain' | 'tags' | 'updatedAt'
+  'id' | 'workspaceId' | 'entityId' | 'name' | 'domain' | 'tags' | 'sensitivity' | 'compartments' | 'projectIds' | 'updatedAt'
 >
 
 export type CompanyListFilters = {
@@ -105,13 +108,16 @@ export type ContactRecord = {
   companyId: string | null
   tags: string[]
   externalRef: CrmExternalRef
+  sensitivity?: Sensitivity
+  compartments?: string[]
+  projectIds?: string[]
   createdAt: Date
   updatedAt: Date
 }
 
 export type ContactListRow = Pick<
   ContactRecord,
-  'id' | 'workspaceId' | 'entityId' | 'name' | 'email' | 'phone' | 'companyId' | 'tags' | 'updatedAt'
+  'id' | 'workspaceId' | 'entityId' | 'name' | 'email' | 'phone' | 'companyId' | 'tags' | 'sensitivity' | 'compartments' | 'projectIds' | 'updatedAt'
 >
 
 export type ContactListFilters = {
@@ -149,13 +155,16 @@ export type DealRecord = {
   amount: number | null
   closeDate: Date | null
   externalRef: CrmExternalRef
+  sensitivity?: Sensitivity
+  compartments?: string[]
+  projectIds?: string[]
   createdAt: Date
   updatedAt: Date
 }
 
 export type DealListRow = Pick<
   DealRecord,
-  'id' | 'workspaceId' | 'entityId' | 'name' | 'contactId' | 'companyId' | 'stage' | 'amount' | 'closeDate' | 'updatedAt'
+  'id' | 'workspaceId' | 'entityId' | 'name' | 'contactId' | 'companyId' | 'stage' | 'amount' | 'closeDate' | 'sensitivity' | 'compartments' | 'projectIds' | 'updatedAt'
 >
 
 export type DealListFilters = {
@@ -192,6 +201,7 @@ export type CrmStore = {
     sensitivity?: Sensitivity
     /** Compartment set (MLS category axis) stamped on the fresh entity + specialization pair. Default '{}'. */
     compartments?: string[]
+    projectIds?: string[]
     /** Fresh-insert source; default 'user'; synthesis passes 'extracted' so the row surfaces in Brain Reviews. */
     source?: 'user' | 'extracted'
     /** Extraction provenance anchor — the Episode this row derives from (Pipeline B / compose / synthesis). */
@@ -220,6 +230,7 @@ export type CrmStore = {
     id: string,
     fields: CompanyUpdateFields,
     access?: AccessContext,
+    scope?: { compartments: string[]; projectIds: string[] },
   ): Promise<CompanyRecord | null>
 
   // Contacts
@@ -242,6 +253,7 @@ export type CrmStore = {
     sensitivity?: Sensitivity
     /** Compartment set (MLS category axis) stamped on the fresh entity + specialization pair. Default '{}'. */
     compartments?: string[]
+    projectIds?: string[]
     /** Fresh-insert source; default 'user'; synthesis passes 'extracted' so the row surfaces in Brain Reviews. */
     source?: 'user' | 'extracted'
     /** Extraction provenance anchor — the Episode this row derives from (Pipeline B / compose / synthesis). */
@@ -264,6 +276,7 @@ export type CrmStore = {
     id: string,
     fields: ContactUpdateFields,
     access?: AccessContext,
+    scope?: { compartments: string[]; projectIds: string[] },
   ): Promise<ContactRecord | null>
 
   // Deals
@@ -280,6 +293,7 @@ export type CrmStore = {
     sensitivity?: Sensitivity
     /** Compartment set (MLS category axis) stamped on the fresh entity + specialization pair. Default '{}'. */
     compartments?: string[]
+    projectIds?: string[]
     /** Fresh-insert source; default 'user'; synthesis passes 'extracted' so the row surfaces in Brain Reviews. */
     source?: 'user' | 'extracted'
     /** Extraction provenance anchor — the Episode this row derives from (Pipeline B / compose / synthesis). */
@@ -300,6 +314,7 @@ export type CrmStore = {
     id: string,
     fields: DealUpdateFields,
     access?: AccessContext,
+    scope?: { compartments: string[]; projectIds: string[] },
   ): Promise<DealRecord | null>
 
   /** Stage-only update — sole cut-point for stage transitions. */
@@ -309,6 +324,7 @@ export type CrmStore = {
     id: string,
     stage: DealStage,
     access?: AccessContext,
+    scope?: { compartments: string[]; projectIds: string[] },
   ): Promise<DealRecord | null>
 
   /**

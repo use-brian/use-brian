@@ -94,6 +94,10 @@ export function createGenerateBlueprintTool(deps: {
         workspaceId,
         userId: context.userId,
         assistantId: context.assistantId,
+        compartments: context.assistantDefaultCompartments ?? [],
+        projectIds: context.assistantDefaultProjectIds ?? [],
+        compartmentGrant: context.assistantCompartments ?? null,
+        projectGrant: context.assistantProjectIds ?? null,
         // Per-surface render default (LOCKED): the in-chat / in-workflow fill
         // is record-only unless explicitly asked — the record is the
         // deliverable; the page is an on-demand projection. The Blueprints-UI

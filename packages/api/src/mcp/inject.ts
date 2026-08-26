@@ -155,6 +155,10 @@ import {
   matchKnowledgeCaptureRules,
   type KnowledgeCaptureRuleStore,
 } from '../knowledge/capture-rules.js'
+import {
+  connectorExposureAllowed,
+  type ConnectorTurnGrant,
+} from '../context-scope/connector-exposure.js'
 
 // ── Discovery cache (in-memory, per-process) ──────────────────
 
@@ -562,6 +566,8 @@ export async function injectMcpTools(params: {
    * announced.
    */
   emailInboxProvider?: EmailInboxProvider | null
+  /** Trusted turn grant used to withhold unbounded/cross-scope connectors. */
+  contextScope?: ConnectorTurnGrant
 }): Promise<McpInjectionResult> {
   const {
     userId, assistantId, tools, connectorStore, settingsStore, assistantConnectorStore,
@@ -572,7 +578,7 @@ export async function injectMcpTools(params: {
     connectorActionAudit, assistantConnectorGrantsStore, workspaceDomain,
     keepBuiltinsDirect = false, keepDynamicToolsDirect = false, restrictSearchToToolNames,
     engineHooks, actorIdentity, filesApi, readCachedFile,
-    introspectionTools, emailInboxProvider,
+    introspectionTools, emailInboxProvider, contextScope,
   } = params
 
   const unavailable: string[] = []
@@ -674,7 +680,8 @@ export async function injectMcpTools(params: {
   // /api/assistants/:id/connectors writes.
   if (assistantTeamId && connectorInstanceStore) {
     try {
-      const teamInstances = await connectorInstanceStore.listByWorkspaceSystem(assistantTeamId)
+      const teamInstances = (await connectorInstanceStore.listByWorkspaceSystem(assistantTeamId))
+        .filter((instance) => connectorExposureAllowed(contextScope, instance))
       for (const inst of teamInstances) {
         if (!inst.custom || !inst.connected || !inst.url) continue
         connectedCustom.push({
@@ -937,12 +944,16 @@ export async function injectMcpTools(params: {
     // matching every other connector's security boundary. Keep every instance:
     // unlike canonical built-ins, CLI servers have independent tool catalogs.
     if (assistantTeamId && connectorInstanceStore) {
-      const [teamNative, grants] = await Promise.all([
+      const [allTeamNative, allGrants] = await Promise.all([
         connectorInstanceStore.listByWorkspaceSystem(assistantTeamId).catch(() => []),
         connectorGrantStore
           ? connectorGrantStore.listForTargetSystem('workspace', assistantTeamId).catch(() => [])
           : Promise.resolve([]),
       ])
+      const teamNative = allTeamNative.filter((instance) =>
+        connectorExposureAllowed(contextScope, instance))
+      const grants = allGrants.filter((grant) =>
+        connectorExposureAllowed(contextScope, grant))
       const seen = new Set(cliInstances.map((inst) => inst.id))
       for (const inst of teamNative) {
         if (inst.provider !== 'cli' || !inst.connected || seen.has(inst.id)) continue
@@ -1129,6 +1140,7 @@ export async function injectMcpTools(params: {
   if (assistantTeamId && connectorGrantStore) {
     try {
       const grants = (await connectorGrantStore.listForTargetSystem('workspace', assistantTeamId))
+        .filter((grant) => connectorExposureAllowed(contextScope, grant))
         .sort((a, b) => (a.instance.createdAt?.getTime() ?? 0) - (b.instance.createdAt?.getTime() ?? 0)
           || String(a.instance.id).localeCompare(String(b.instance.id)))
       const overlaidByGrant = new Set<string>()
@@ -1365,6 +1377,7 @@ export async function injectMcpTools(params: {
   if (assistantTeamId && connectorInstanceStore) {
     try {
       const teamNative = (await connectorInstanceStore.listByWorkspaceSystem(assistantTeamId))
+        .filter((instance) => connectorExposureAllowed(contextScope, instance))
         .sort((a, b) => (a.createdAt?.getTime() ?? 0) - (b.createdAt?.getTime() ?? 0)
           || String(a.id).localeCompare(String(b.id)))
       const overlaidByTeam = new Set<string>()

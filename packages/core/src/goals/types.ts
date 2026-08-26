@@ -89,6 +89,9 @@ export type GoalRecord = {
   policy: GoalPolicy
   status: GoalStatus
   blockerReason: string | null
+  /** Stable Team/Project context inherited by every acting-loop successor. */
+  contextGroupId: string | null
+  contextProjectId: string | null
   /** The acting user — host write-back actor + escalation/delivery default
    *  (the goal speaks as the workspace primary to this user). */
   createdByUserId: string | null
@@ -123,6 +126,9 @@ export type GoalCreateParams = {
   /** Default 'active'. */
   status?: GoalStatus
   createdByUserId?: string | null
+  /** Context selected on the creating turn; immutable for the goal's loop. */
+  contextGroupId?: string | null
+  contextProjectId?: string | null
   /** Default `true` (an explicitly-created goal is confirmed). The auto-draft
    *  hook passes `false` to mint a draft (`confirmed_at` NULL) — see
    *  `task-goal-autopilot.md` §4. */

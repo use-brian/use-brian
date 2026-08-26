@@ -1,5 +1,5 @@
 import type { AccessContext } from './access-context.js'
-import { maxSensitivity, type Sensitivity } from './sensitivity.js'
+import { isSensitivity, maxSensitivity, type Sensitivity } from './sensitivity.js'
 
 /** A finite set is a ceiling; null is the universe grant. */
 export type ScopeGrant = string[] | null
@@ -82,6 +82,10 @@ export class ContextScopeAccumulator {
   readonly #compartments = new Set<string>()
   readonly #projectIds = new Set<string>()
 
+  constructor(initial?: ScopeEvidence | null) {
+    this.note(initial)
+  }
+
   get sensitivity(): Sensitivity {
     return this.#sensitivity
   }
@@ -131,6 +135,40 @@ export class ContextScopeAccumulator {
   noteProjectIds(projectIds: readonly string[] | null | undefined): void {
     this.note({ projectIds: projectIds ? [...projectIds] : undefined })
   }
+}
+
+/** Union/max evidence for exactly the access-filtered rows returned to a model. */
+export function scopeEvidenceFromRows(rows: readonly unknown[]): ScopeEvidence {
+  const accumulator = new ContextScopeAccumulator()
+  const seen = new Set<object>()
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      for (const entry of value) visit(entry)
+      return
+    }
+    if (!value || typeof value !== 'object') return
+    if (seen.has(value)) return
+    seen.add(value)
+    const row = value as {
+      sensitivity?: unknown
+      compartments?: unknown
+      projectIds?: unknown
+      project_ids?: unknown
+    }
+    const projects = row.projectIds ?? row.project_ids
+    accumulator.note({
+      sensitivity: isSensitivity(row.sensitivity) ? row.sensitivity : undefined,
+      compartments: Array.isArray(row.compartments)
+        ? row.compartments.filter((entry): entry is string => typeof entry === 'string')
+        : undefined,
+      projectIds: Array.isArray(projects)
+        ? projects.filter((entry): entry is string => typeof entry === 'string')
+        : undefined,
+    })
+    for (const nested of Object.values(row)) visit(nested)
+  }
+  for (const value of rows) visit(value)
+  return accumulator.evidence
 }
 
 export class ContextScopeViolation extends Error {

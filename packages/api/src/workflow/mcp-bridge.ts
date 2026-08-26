@@ -18,7 +18,7 @@
  * [COMP:workflow/mcp-bridge]
  */
 
-import type { Tool, KnowledgeStoreInterface, KnowledgeRepoWriter, GDriveFilesStore, McpSettingsStore, FilesApi, EngineHooks } from '@use-brian/core'
+import type { Tool, KnowledgeStoreInterface, KnowledgeRepoWriter, GDriveFilesStore, McpSettingsStore, FilesApi, EngineHooks, TurnScope } from '@use-brian/core'
 import { injectMcpTools } from '../mcp/inject.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
@@ -85,6 +85,7 @@ export async function buildWorkflowToolRegistry(
     userId: string | null
     /** Optional — workflow runs do not have a per-request user timezone. */
     userTimezone?: string
+    turnScope?: TurnScope
   },
 ): Promise<Map<string, Tool>> {
   // Start from a fresh shallow copy so first-party tool entries aren't
@@ -160,6 +161,7 @@ export async function buildWorkflowToolRegistry(
     filesApi: deps.filesApi,
     engineHooks: deps.engineHooks,
     assistantConnectorGrantsStore: deps.assistantConnectorGrantsStore,
+    contextScope: scope.turnScope,
   })
 
   stripOrchestrationTools(tools)

@@ -6,10 +6,11 @@ import { charterNeedsIntake, createSaveCharterTool, CHARTER_INTAKE_ADDENDUM } fr
 import { resolvePresenceTimezone } from '../auth/client-timezone.js'
 import { findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, toStampedMessages, getSessionMessages, updateSessionStatus, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels, isSharedChatSession, isMultiParticipantSession, coalesceConsecutiveUserMessages, startTurnLease, touchTurnLease, releaseTurnLease, requestTurnCancel, reclaimStaleTurn, isTurnLeaseLive, TURN_HEARTBEAT_INTERVAL_MS, type SessionMessage } from '../db/sessions.js'
 import { query } from '../db/client.js'
+import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
 import { buildPinnedContextBlock } from '../resolve-session-pins.js'
 import { getSelfEntityId } from '../db/memories.js'
 import { getRecording, type Recording } from '../db/recordings-store.js'
-import { queryLoop, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, probePdfPageCount, estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH, filterToolsByCapabilities, modelToCompactionTier, buildWorkspaceFilesContext, buildUploadPolicyBlock, SensitivityAccumulator, CompartmentAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSupervisorSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, parsePresentedDocumentInput, latestWorkflowProposalReceipt, buildTool, parseSlashCommand, buildSlashCommandBlock, type PresentedDocumentInput, type MediaBackend } from '@use-brian/core'
+import { queryLoop, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, probePdfPageCount, estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH, filterToolsByCapabilities, modelToCompactionTier, buildWorkspaceFilesContext, buildUploadPolicyBlock, SensitivityAccumulator, CompartmentAccumulator, ContextScopeAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSupervisorSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, parsePresentedDocumentInput, latestWorkflowProposalReceipt, buildTool, parseSlashCommand, buildSlashCommandBlock, type PresentedDocumentInput, type MediaBackend } from '@use-brian/core'
 import { deliverTurnInput, registerTurnInbox } from '../turn-inbox.js'
 import { insertClaimProvenance, getClaimsForLatestAssistantMessage } from '../db/claim-provenance-store.js'
 import type { SessionStateStore, SessionStateRecord, PlanStore, AmbientSurface } from '@use-brian/core'
@@ -72,8 +73,13 @@ import {
   getWorkspaceResearchUsed,
   getWorkspaceRoleSystem,
   incrementWorkspaceResearchUsed,
-  resolveReadCeilingsSystem,
 } from '../db/workspace-store.js'
+import {
+  ContextNotAvailableError,
+  formatActiveWorkspaceContext,
+  noteAutomaticScopeEvidence,
+  resolveTurnScopeSystem,
+} from '../context-scope/resolve-turn-scope.js'
 import { getEvolution as getWorkspaceMemoryEvolution } from '../db/workspace-memory-evolution-store.js'
 import { getBrainEvolution } from '../db/workspace-brain-evolution-store.js'
 import { tryResolveSchedulerConfirmation } from '../scheduling/confirmation-registry.js'
@@ -1763,6 +1769,14 @@ export function chatTurnErrorEvent(err: unknown): Record<string, unknown> {
   if (err instanceof ChatTurnRefusal) {
     return { code: err.code, error: err.message, ...err.detail }
   }
+  if (err instanceof ContextNotAvailableError) {
+    return {
+      code: err.code,
+      error: err.message,
+      axis: err.axis,
+      reason: err.reason,
+    }
+  }
   return { error: 'Something went wrong' }
 }
 
@@ -2534,25 +2548,6 @@ export function chatRoutes(options: WebChatOptions): Router {
         providerKeySource: backgroundLlmRuntime?.providerKeySource ?? 'platform' as const,
       }
 
-      // ── Giant-paste promotion (large-content-artifacts §Phase 3.1) ──
-      // An over-threshold paste (8K tokens, CJK-aware) becomes a durable
-      // artifact; the turn (and the persisted user row) carries the manifest
-      // + head excerpt instead. Runs before every message consumer below.
-      // Failure or no promoter → the original paste flows through unchanged.
-      if (message && options.artifactPromoter && assistant.workspaceId && shouldPromotePaste(message)) {
-        const promoted = await promotePastedText({
-          text: message,
-          workspaceId: assistant.workspaceId,
-          actingUserId: user.id,
-          assistantId: assistant.id,
-          promote: options.artifactPromoter,
-        }).catch((err) => {
-          console.error('[chat] paste promotion failed (keeping original text):', err)
-          return null
-        })
-        if (promoted) message = promoted.replaced
-      }
-
       // Adaptive research runs before normal session resolution so a denied
       // research turn does not create an empty thread. Resolve an EXISTING
       // thread read-only here only when the classifier will run, authorize it
@@ -2841,6 +2836,36 @@ export function chatRoutes(options: WebChatOptions): Router {
         sendEvent('error', { error: sessionDenied.error })
         res.end()
         return
+      }
+
+      // Resolve the one trusted scope before this entry point performs any
+      // persistent semantic write or enters the normal model path.
+      const turnScope = await resolveTurnScopeSystem({
+        userId: user.id,
+        assistant,
+        workspaceId: assistant.workspaceId,
+        session: isNewSession
+          ? { ...session, contextLockedAt: null }
+          : session,
+      })
+
+      // Giant-paste promotion writes a durable artifact, so it runs only
+      // after the immutable session scope is known and stamps that scope on
+      // both the file root and its derived segments.
+      if (message && options.artifactPromoter && assistant.workspaceId && shouldPromotePaste(message)) {
+        const promoted = await promotePastedText({
+          text: message,
+          workspaceId: assistant.workspaceId,
+          actingUserId: user.id,
+          assistantId: assistant.id,
+          compartments: turnScope.writeCompartments,
+          projectIds: turnScope.writeProjectIds,
+          promote: options.artifactPromoter,
+        }).catch((err) => {
+          console.error('[chat] paste promotion failed (keeping original text):', err)
+          return null
+        })
+        if (promoted) message = promoted.replaced
       }
 
       // Live multi-watcher sessions (draft mode): any participant can drive a
@@ -3571,7 +3596,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       let recordingContext = ''
       if (Array.isArray(attachedRecordingIds) && attachedRecordingIds.length > 0) {
         const recs = await Promise.all(
-          attachedRecordingIds.map((id) => getRecording(user.id, id).catch(() => null)),
+          attachedRecordingIds.map((id) => getRecording(turnScope.access, id).catch(() => null)),
         )
         recordingContext = buildAttachedRecordingContext(
           recs.filter((r): r is NonNullable<typeof r> => r !== null),
@@ -3996,6 +4021,8 @@ export function chatRoutes(options: WebChatOptions): Router {
         // the compacted window. Both gate on a workspace-scoped assistant.
         workspaceId: assistant.workspaceId ?? undefined,
         chatEpisodeIngestor: options.chatEpisodeIngestor,
+        compartments: turnScope.writeCompartments,
+        projectIds: turnScope.writeProjectIds,
       })
       // Gate on the serving provider: the signature strip is a Gemini-only
       // workaround and would erase a Qwen (openai-compat) turn's tool calls
@@ -4075,21 +4102,13 @@ export function chatRoutes(options: WebChatOptions): Router {
       // low-clearance member reads confidential workspace data through a
       // higher-clearance assistant. Writes keep the assistant's clearance
       // (passed as `assistantClearance` on the tool context below).
-      const { clearance: readClearance, compartments: readCompartments } =
-        await resolveReadCeilingsSystem(
-          user.id,
-          assistant.workspaceId,
-          assistant.clearance,
-          assistant.compartments,
-        )
-      const viewerCtx = {
-        workspaceId: assistant.workspaceId ?? '',
-        userId: user.id,
-        assistantId: assistant.id,
-        assistantKind: assistant.kind,
-        clearance: readClearance,
-        compartments: readCompartments,
-      }
+      const readClearance = turnScope.access.clearance ?? assistant.clearance
+      const readCompartments = turnScope.effectiveCompartments
+      const viewerCtx = turnScope.access
+      const scopeAccumulator = new ContextScopeAccumulator({
+        compartments: turnScope.writeCompartments,
+        projectIds: turnScope.writeProjectIds,
+      })
       const [soul, identityMemories, rankedIndex, preferredChannel, selfEntityId] = await Promise.all([
         options.memoryStore.getSoul(assistant.id, user.id, 'Use Brian'),
         options.memoryStore.getIdentity(viewerCtx),
@@ -4201,9 +4220,11 @@ export function chatRoutes(options: WebChatOptions): Router {
               // Read ceiling = min(member, assistant) — see readClearance above.
               clearance: readClearance,
               compartments: readCompartments,
+              projectIds: turnScope.effectiveProjectIds,
             },
             PER_TURN_FILES_INDEX_CAP,
           )
+          noteAutomaticScopeEvidence(scopeAccumulator, rows)
           workspaceFilesContext = buildWorkspaceFilesContext(rows)
         } catch (err) {
           console.error('[chat] workspace-files index fetch failed:', err)
@@ -4526,6 +4547,8 @@ export function chatRoutes(options: WebChatOptions): Router {
       const privateRuntimeContextParts: string[] = splitPrompt.privateRuntimeContext
         ? [splitPrompt.privateRuntimeContext]
         : []
+      const activeWorkspaceContext = formatActiveWorkspaceContext(turnScope)
+      if (activeWorkspaceContext) privateRuntimeContextParts.push(activeWorkspaceContext)
       const userVisibleContextParts: string[] = splitPrompt.userVisibleContext
         ? [splitPrompt.userVisibleContext]
         : []
@@ -5114,6 +5137,13 @@ export function chatRoutes(options: WebChatOptions): Router {
       // `'public'` under-stamp. See `connector-actions.md` → IFC.
       const sensitivityAccumulator = new SensitivityAccumulator()
       const compartmentAccumulator = new CompartmentAccumulator()
+      noteAutomaticScopeEvidence(scopeAccumulator, [
+        ...identityMemories,
+        ...rankedIndex.rows,
+        ...workspaceIdentityMemories,
+        ...teamMemoryIndex,
+        ...teamVoiceRules,
+      ])
 
       // Per-turn outbound-attachment collector (`sendFile`). Web moves no
       // bytes — the drained list persists onto the final assistant
@@ -5439,6 +5469,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         // `applyMcpInjection` and must NOT set this.
         allowKnowledgeWrites: true,
         knowledgeCaptureText: message ?? '',
+        contextScope: turnScope,
         // On-demand introspection lane (ability audit §6-c/d): workspace
         // PRIMARY assistants only — these read workspace-operational state
         // (approvals / scheduled jobs / research runs / session history).
@@ -6662,6 +6693,11 @@ export function chatRoutes(options: WebChatOptions): Router {
 
       try {
         const presentedDocumentInputs = new Map<string, PresentedDocumentInput>()
+        const scopedLoopTools = bindToolsToAgentAccess(loopTools, {
+          clearance: readClearance,
+          compartments: turnScope.effectiveCompartments,
+          projectIds: turnScope.effectiveProjectIds,
+        })
         for await (const event of queryLoop({
           // BYO-aware: when the workspace set its own Gemini key, the main
           // response runs against that provider (else the platform provider).
@@ -6671,7 +6707,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           inputTokenLimit: customLlmRuntime?.inputTokenLimit,
           systemPrompt: systemPromptWithPreflight,
           messages,
-          tools: loopTools,
+          tools: scopedLoopTools,
           context: {
             userId: user.id,
             assistantId: assistant.id,
@@ -6719,14 +6755,22 @@ export function chatRoutes(options: WebChatOptions): Router {
             // turn) drives write stamping and is naturally bounded by reads.
             clearance: readClearance,
             compartments: readCompartments,
+            projectIds: turnScope.effectiveProjectIds,
+            activeGroupId: turnScope.activeGroupId,
+            activeProjectId: turnScope.activeProjectId,
             assistantClearance: assistant.clearance,
-            assistantCompartments: assistant.compartments,
-            assistantDefaultCompartments: assistant.defaultCompartments,
+            // The effective turn ceiling is intentionally tighter than the
+            // assistant's company-wide grant when Team/Project is selected.
+            assistantCompartments: turnScope.effectiveCompartments,
+            assistantDefaultCompartments: turnScope.writeCompartments,
+            assistantProjectIds: turnScope.effectiveProjectIds,
+            assistantDefaultProjectIds: turnScope.writeProjectIds,
             // Lifted to the per-turn accumulator constructed before the
             // extra-tool injection so the connector_action audit hook sees
             // the same instance the queryLoop populates.
             sensitivity: sensitivityAccumulator,
             compartmentAccumulator,
+            scopeAccumulator,
             evidence: replyEvidence,
             outboundAttachments: outboundAttachmentCollector,
             // Research turns ingest public-web findings: model-driven saves

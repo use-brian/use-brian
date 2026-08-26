@@ -37,6 +37,7 @@ export {
   intersectScopeGrants,
   normalizeProjectName,
   resolveWriteScope,
+  scopeEvidenceFromRows,
   scopeGrantContains,
   unionScopeRequirements,
 } from './context-scope.js'

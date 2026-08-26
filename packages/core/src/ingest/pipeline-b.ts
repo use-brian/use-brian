@@ -96,6 +96,9 @@ export type PipelineBEpisode = {
   sourceKind: SourceKind
   occurredAt: Date
   sensitivity: Sensitivity
+  /** Exact Team/Project scope copied from the source Episode. */
+  compartments?: string[]
+  projectIds?: string[]
   workspaceId: string
   userId: string | null
   assistantId: string | null
@@ -142,6 +145,12 @@ export type PipelineBEpisode = {
  * satisfies this shape.
  */
 export type EpisodeUpdaterPort = {
+  /** Optional root hydration used by background adapters that carry only an Episode id. */
+  getEpisodeByIdSystem?(
+    actorUserId: string,
+    id: string,
+    opts?: { asOf?: Date },
+  ): Promise<{ compartments?: string[]; projectIds?: string[] } | null>
   updateCheckpoint(
     actorUserId: string,
     id: string,
@@ -1421,6 +1430,24 @@ export async function processEpisode(
 ): Promise<PipelineBResult> {
   const actorUserId = episode.createdByUserId
 
+  // Background connector adapters historically projected only the Episode id
+  // and sensitivity. Hydrate the persisted root classification once so every
+  // derived writer receives the same Team/Project scope without requiring
+  // provider-specific code to duplicate the authority contract.
+  if (
+    (episode.compartments === undefined || episode.projectIds === undefined)
+    && deps.episodes.getEpisodeByIdSystem
+  ) {
+    const root = await deps.episodes.getEpisodeByIdSystem(actorUserId, episode.id)
+    if (root) {
+      episode = {
+        ...episode,
+        compartments: root.compartments ?? [],
+        projectIds: root.projectIds ?? [],
+      }
+    }
+  }
+
   // 0. Q20 observation block (WU-4.4). When the episode is tied to both
   // an assistant and a user, and that user is in the assistant's
   // blocklist, archive without extraction. Mirrors the invocation block
@@ -1721,6 +1748,8 @@ export async function processEpisode(
         userId: episode.userId,
         assistantId: episode.assistantId,
         sourceEpisodeId: episode.id,
+        compartments: episode.compartments,
+        projectIds: episode.projectIds,
       })
       edgesWritten.push(link)
     } catch (err) {
@@ -1795,6 +1824,8 @@ export async function processEpisode(
           // human-created row (2026-07-10 source audit).
           source: 'extracted',
           sourceEpisodeId: episode.id,
+          compartments: episode.compartments,
+          projectIds: episode.projectIds,
           createdByAssistantId: episode.createdByAssistantId,
           attributes: quality?.description
             ? { description: quality.description }
@@ -1881,6 +1912,8 @@ export async function processEpisode(
           createdByUserId: episode.createdByUserId,
           createdByAssistantId: episode.createdByAssistantId,
           sourceEpisodeId: episode.id,
+          compartments: episode.compartments,
+          projectIds: episode.projectIds,
         })
         memoriesWritten.push(memory)
       } catch (err) {
@@ -2061,6 +2094,8 @@ async function processEngagementDigest(
           createdByUserId: episode.createdByUserId,
           createdByAssistantId: episode.createdByAssistantId,
           sourceEpisodeId: episode.id,
+          compartments: episode.compartments,
+          projectIds: episode.projectIds,
         })
       } catch (err) {
         console.warn(
@@ -2087,6 +2122,8 @@ async function processEngagementDigest(
           userId: episode.userId,
           assistantId: episode.assistantId,
           sourceEpisodeId: episode.id,
+          compartments: episode.compartments,
+          projectIds: episode.projectIds,
         })
         edgesWritten.push(link)
       } catch (err) {
@@ -2324,6 +2361,8 @@ async function writeEntity(
       source: 'extracted',
       sourceEpisodeId: episode.id,
       createdByAssistantId: episode.createdByAssistantId,
+      compartments: episode.compartments,
+      projectIds: episode.projectIds,
     })
     return deps.entities.getById({
       workspaceId: episode.workspaceId,
@@ -2369,6 +2408,8 @@ async function writeEntity(
           attributes: merged,
           // The new row points at the Episode that triggered the change.
           sourceEpisodeId: episode.id,
+          compartments: episode.compartments,
+          projectIds: episode.projectIds,
         },
       )
       // `supersedeAttributes` returns null only when the row is no longer
@@ -2406,6 +2447,8 @@ async function writeEntity(
       {
         attributes: merged,
         sourceEpisodeId: episode.id,
+        compartments: episode.compartments,
+        projectIds: episode.projectIds,
       },
     )
     return superseded ?? existingByName
@@ -2456,7 +2499,12 @@ async function writeEntity(
           const superseded = await deps.entities.supersedeAttributes(
             actorUserId,
             match.id,
-            { attributes: merged, sourceEpisodeId: episode.id },
+            {
+              attributes: merged,
+              sourceEpisodeId: episode.id,
+              compartments: episode.compartments,
+              projectIds: episode.projectIds,
+            },
           )
           return superseded ?? match
         }
@@ -2478,6 +2526,8 @@ async function writeEntity(
       source: 'extracted',
       sourceEpisodeId: episode.id,
       createdByAssistantId: episode.createdByAssistantId,
+      compartments: episode.compartments,
+      projectIds: episode.projectIds,
     })
     return resolveCrmEntity(deps, actorUserId, episode.workspaceId, ex.display_name, domain, 'company')
   }
@@ -2495,6 +2545,8 @@ async function writeEntity(
     createdByAssistantId: episode.createdByAssistantId,
     sourceEpisodeId: episode.id,
     sensitivity: episode.sensitivity,
+    compartments: episode.compartments,
+    projectIds: episode.projectIds,
     source: 'extracted',
   })
 }

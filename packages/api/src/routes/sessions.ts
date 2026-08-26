@@ -111,6 +111,8 @@ export type SessionRouteOptions = {
     senderName: string | null
     text: string
     effectiveClearance: string | null
+    compartments: string[]
+    projectIds: string[]
   }) => void
   /**
    * Room human `@mention` badge signal (docs/plans/room-human-mentions.md
@@ -848,6 +850,8 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
             senderName: user.name ?? null,
             text,
             effectiveClearance: session.effectiveClearance,
+            compartments: session.contextCompartments,
+            projectIds: session.contextProjectId ? [session.contextProjectId] : [],
           })
         } catch (err) {
           console.error('[sessions] room post capture hook failed:', err)

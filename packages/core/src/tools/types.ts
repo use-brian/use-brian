@@ -328,6 +328,9 @@ export type ToolContext = {
   compartments?: string[] | null
   /** Effective Project READ grant. null/undefined is universe; [] is General-only. */
   projectIds?: string[] | null
+  /** Immutable active context identifiers, resolved outside the model. */
+  activeGroupId?: string | null
+  activeProjectId?: string | null
   /**
    * Authenticated external-client self-memory projection. Memory tools alone
    * thread this onto their AccessContext; every other tool continues to see

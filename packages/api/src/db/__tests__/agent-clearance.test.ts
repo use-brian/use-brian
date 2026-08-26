@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest'
-import { runWithAgentClearance, currentAgentClearance } from '../client.js'
+import {
+  currentAgentClearance,
+  currentAgentCompartments,
+  runWithAgentAccess,
+  runWithAgentClearance,
+} from '../client.js'
 
 /**
  * The agent-principal clearance context (teamspaces — assistant access).
@@ -14,6 +19,30 @@ import { runWithAgentClearance, currentAgentClearance } from '../client.js'
 describe('[COMP:api/agent-clearance] runWithAgentClearance / currentAgentClearance', () => {
   it('has no agent context by default', () => {
     expect(currentAgentClearance()).toBeUndefined()
+    expect(currentAgentCompartments()).toBeUndefined()
+  })
+
+  it('carries the canonical Team grant and preserves null as universe', async () => {
+    await runWithAgentAccess(
+      { clearance: 'internal', compartments: ['team:sales', 'team:sales', 'team:strategy'] },
+      async () => {
+        await Promise.resolve()
+        expect(currentAgentClearance()).toBe('internal')
+        expect(currentAgentCompartments()).toEqual(['team:sales', 'team:strategy'])
+      },
+    )
+    await runWithAgentAccess(
+      { clearance: 'confidential', compartments: null },
+      async () => expect(currentAgentCompartments()).toBeNull(),
+    )
+    expect(currentAgentCompartments()).toBeUndefined()
+  })
+
+  it('keeps a legacy clearance-only wrap distinguishable so linked Teams fail closed', () => {
+    runWithAgentClearance('internal', () => {
+      expect(currentAgentClearance()).toBe('internal')
+      expect(currentAgentCompartments()).toBeUndefined()
+    })
   })
 
   it('carries the clearance across awaits inside the wrap, and not outside it', async () => {
@@ -48,6 +77,7 @@ describe('[COMP:api/agent-clearance] runWithAgentClearance / currentAgentClearan
       expect(currentAgentClearance()).toBe('confidential')
       await runWithAgentClearance('public', async () => {
         expect(currentAgentClearance()).toBe('public')
+        expect(currentAgentCompartments()).toBeUndefined()
       })
       expect(currentAgentClearance()).toBe('confidential')
     })

@@ -6,9 +6,10 @@ import type { ResolvedOfficeAccess } from './access.js'
 
 export type OfficeServiceDeps = {
   generationAvailable(family?: 'document' | 'presentation' | 'spreadsheet'): boolean
-  createShell(params: { userId: string; workspaceId: string; family: 'document' | 'presentation' | 'spreadsheet'; title: string; templateVersionId: string | null; capabilityVersion: number; sensitivity: 'public' | 'internal' | 'confidential'; visibilityUserIds?: string[]; requiredCompartments?: string[] }): Promise<OfficeArtifactRow>
+  createShell(params: { userId: string; workspaceId: string; family: 'document' | 'presentation' | 'spreadsheet'; title: string; templateVersionId: string | null; capabilityVersion: number; sensitivity: 'public' | 'internal' | 'confidential'; visibilityUserIds?: string[]; requiredCompartments?: string[]; projectIds?: string[] }): Promise<OfficeArtifactRow>
   deleteEmptyShell(userId: string, artifactId: string): Promise<boolean>
   getArtifact(userId: string, artifactId: string): Promise<OfficeArtifactRow | null>
+  raiseScope(params: { userId: string; artifactId: string; sensitivity: 'public' | 'internal' | 'confidential'; compartments: string[]; projectIds: string[] }): Promise<boolean>
   resolveAccess(userId: string, artifactId: string): Promise<ResolvedOfficeAccess | null>
   createJob(params: { userId: string; workspaceId: string; artifactId: string; assistantId: string | null; jobKind: OfficeGenerationJobRow['jobKind']; brief: unknown; authorityProjection: unknown; templateVersionId?: string; baseArtifactVersion?: number; idempotencyKey: string }): Promise<OfficeGenerationJobRow>
   latestJob(userId: string, artifactId: string): Promise<OfficeGenerationJobRow | null>
@@ -79,7 +80,7 @@ export function createOfficeService(deps: OfficeServiceDeps): OfficeToolPort {
   return {
     async create(params) {
       if (!deps.generationAvailable(params.family)) throw new OfficeGenerationUnavailableError()
-      const artifact = await deps.createShell({ userId: params.userId, workspaceId: params.workspaceId, family: params.family, title: titleFromOutcome(params.outcome, params.family), templateVersionId: params.templateId ?? null, capabilityVersion: 1, sensitivity: 'internal' })
+      const artifact = await deps.createShell({ userId: params.userId, workspaceId: params.workspaceId, family: params.family, title: titleFromOutcome(params.outcome, params.family), templateVersionId: params.templateId ?? null, capabilityVersion: 1, sensitivity: params.sensitivity, requiredCompartments: params.compartments, projectIds: params.projectIds })
       const brief = {
         workspaceId: params.workspaceId,
         actingUserId: params.userId,
@@ -88,14 +89,14 @@ export function createOfficeService(deps: OfficeServiceDeps): OfficeToolPort {
         outcome: params.outcome,
         audience: params.audience,
         sourceHandles: params.sourceHandles,
-        requestedSensitivityFloor: 'internal',
+        requestedSensitivityFloor: params.sensitivity,
         templateId: params.templateId,
         additionalContext: params.additionalContext,
         idempotencyKey: params.idempotencyKey,
       }
       let job: OfficeGenerationJobRow
       try {
-        job = await deps.createJob({ userId: params.userId, workspaceId: params.workspaceId, artifactId: artifact.id, assistantId: params.assistantId, jobKind: 'create', brief, authorityProjection: { sensitivity: 'internal', visibilityUserIds: [], compartments: [], sourceHandles: params.sourceHandles }, templateVersionId: params.templateId, idempotencyKey: params.idempotencyKey })
+        job = await deps.createJob({ userId: params.userId, workspaceId: params.workspaceId, artifactId: artifact.id, assistantId: params.assistantId, jobKind: 'create', brief, authorityProjection: { sensitivity: params.sensitivity, visibilityUserIds: [], compartments: params.compartments, projectIds: params.projectIds, compartmentGrant: params.compartmentGrant, projectGrant: params.projectGrant, sourceHandles: params.sourceHandles }, templateVersionId: params.templateId, idempotencyKey: params.idempotencyKey })
       } catch (cause) {
         await deps.deleteEmptyShell(params.userId, artifact.id)
         throw cause
@@ -109,14 +110,15 @@ export function createOfficeService(deps: OfficeServiceDeps): OfficeToolPort {
       const [artifact, access] = await Promise.all([deps.getArtifact(params.userId, params.artifactId), deps.resolveAccess(params.userId, params.artifactId)])
       if (!artifact || !access) return null
       const [job, live] = await Promise.all([deps.latestJob(params.userId, params.artifactId), deps.getSnapshot(params.userId, params.artifactId)])
-      return { artifactId: artifact.id, family: artifact.family, mode: artifact.mode, title: artifact.title, version: artifact.headVersion, lifecycleState: artifact.lifecycleState === 'purged' ? 'retained' : artifact.lifecycleState, role: access.role, ...(live ? targetOutline(live.snapshot, params.targetOffset) : {}), job: job ? { id: job.id, status: job.status, stage: job.stage, errorCode: job.errorCode } : undefined }
+      return { artifactId: artifact.id, family: artifact.family, mode: artifact.mode, title: artifact.title, version: artifact.headVersion, lifecycleState: artifact.lifecycleState === 'purged' ? 'retained' : artifact.lifecycleState, role: access.role, scopeEvidence: { sensitivity: artifact.sensitivity, compartments: artifact.compartments, projectIds: artifact.projectIds }, ...(live ? targetOutline(live.snapshot, params.targetOffset) : {}), job: job ? { id: job.id, status: job.status, stage: job.stage, errorCode: job.errorCode } : undefined }
     },
 
     async revise(params) {
       const [artifact, access] = await Promise.all([deps.getArtifact(params.userId, params.artifactId), deps.resolveAccess(params.userId, params.artifactId)])
       if (!artifact || !access || !access.canComment) return null
       if (artifact.headVersion !== params.expectedVersion) return 'version_conflict'
-      const job = await deps.createJob({ userId: params.userId, workspaceId: artifact.workspaceId, artifactId: artifact.id, assistantId: params.assistantId, jobKind: 'revise', brief: { instruction: params.instruction, targetIds: params.targetIds, expectedVersion: params.expectedVersion }, authorityProjection: { role: access.role }, baseArtifactVersion: artifact.headVersion, idempotencyKey: params.idempotencyKey })
+      await deps.raiseScope({ userId: params.userId, artifactId: artifact.id, sensitivity: params.sensitivity, compartments: params.compartments, projectIds: params.projectIds })
+      const job = await deps.createJob({ userId: params.userId, workspaceId: artifact.workspaceId, artifactId: artifact.id, assistantId: params.assistantId, jobKind: 'revise', brief: { instruction: params.instruction, targetIds: params.targetIds, expectedVersion: params.expectedVersion }, authorityProjection: { role: access.role, sensitivity: params.sensitivity, compartments: params.compartments, projectIds: params.projectIds, compartmentGrant: params.compartmentGrant, projectGrant: params.projectGrant }, baseArtifactVersion: artifact.headVersion, idempotencyKey: params.idempotencyKey })
       deps.wakeGeneration?.(params.userId)
       return { jobId: job.id, mode: access.canEdit ? 'direct' : 'proposal' }
     },

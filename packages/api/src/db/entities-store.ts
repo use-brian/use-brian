@@ -14,6 +14,7 @@ import type {
   EntityUpdateFields,
   GetEntityOpts,
 } from '@use-brian/core'
+import { unionScopeRequirements } from '@use-brian/core'
 import type { Sensitivity } from '@use-brian/core'
 import type pg from 'pg'
 import { clientCompartment } from '@use-brian/core'
@@ -61,6 +62,8 @@ const FULL_SELECT = `
   aliases,
   attributes,
   sensitivity,
+  compartments,
+  project_ids AS "projectIds",
   workspace_id AS "workspaceId",
   user_id AS "userId",
   assistant_id AS "assistantId",
@@ -89,6 +92,8 @@ const COMPACT_SELECT = `
   display_name AS "displayName",
   canonical_id AS "canonicalId",
   sensitivity,
+  compartments,
+  project_ids AS "projectIds",
   workspace_id AS "workspaceId",
   source
 `
@@ -103,6 +108,8 @@ type EntityRow = {
   aliases: string[] | null
   attributes: Record<string, unknown> | null
   sensitivity: string
+  compartments: string[]
+  projectIds: string[]
   workspaceId: string
   userId: string | null
   assistantId: string | null
@@ -134,6 +141,8 @@ function toEntity(row: EntityRow): EntityRecord {
     aliases: row.aliases ?? [],
     attributes: row.attributes ?? {},
     sensitivity: row.sensitivity as Sensitivity,
+    compartments: row.compartments ?? [],
+    projectIds: row.projectIds ?? [],
     workspaceId: row.workspaceId,
     userId: row.userId,
     assistantId: row.assistantId,
@@ -163,6 +172,8 @@ type EntityCompactRow = {
   displayName: string
   canonicalId: string | null
   sensitivity: string
+  compartments: string[]
+  projectIds: string[]
   workspaceId: string
   source: string
 }
@@ -174,6 +185,8 @@ function toEntityListRow(row: EntityCompactRow): EntityListRow {
     displayName: row.displayName,
     canonicalId: row.canonicalId,
     sensitivity: row.sensitivity as Sensitivity,
+    compartments: row.compartments ?? [],
+    projectIds: row.projectIds ?? [],
     workspaceId: row.workspaceId,
     source: row.source as EntitySource,
   }
@@ -189,13 +202,13 @@ export async function createEntity(params: EntityCreateParams): Promise<EntityRe
        kind, display_name, canonical_id, aliases, attributes, sensitivity,
        workspace_id, user_id, assistant_id,
        created_by_user_id, created_by_assistant_id, source_episode_id,
-       source, compartments, source_session_id
+       source, compartments, project_ids, source_session_id
      )
      VALUES (
        $1, $2, $3, $4::text[], $5::jsonb, $6,
        $7, $8, $9,
        $10, $11, $12,
-       $13, $14::text[], $15
+       $13, $14::text[], $15::uuid[], $16
      )
      RETURNING ${FULL_SELECT}`,
     [
@@ -213,6 +226,7 @@ export async function createEntity(params: EntityCreateParams): Promise<EntityRe
       params.sourceEpisodeId ?? null,
       params.source,
       params.compartments ?? [],
+      params.projectIds ?? [],
       params.sourceSessionId ?? null,
     ],
   )
@@ -1117,6 +1131,14 @@ export async function updateEntity(
     sets.push(`verified_at = $${idx++}`)
     values.push(fields.verifiedAt)
   }
+  if (fields.inheritCompartments !== undefined) {
+    sets.push(`compartments = ARRAY(SELECT DISTINCT unnest(compartments || $${idx++}::text[]) ORDER BY 1)`)
+    values.push(fields.inheritCompartments)
+  }
+  if (fields.inheritProjectIds !== undefined) {
+    sets.push(`project_ids = ARRAY(SELECT DISTINCT unnest(project_ids || $${idx++}::uuid[]) ORDER BY 1)`)
+    values.push(fields.inheritProjectIds)
+  }
 
   if (sets.length === 0) {
     return access ? getEntityById(access, id) : getEntityByIdSystem(actorUserId, id)
@@ -1198,6 +1220,7 @@ export async function supersedeEntity(
            workspace_id, user_id, assistant_id,
            created_by_user_id, created_by_assistant_id, source_episode_id,
            source, verified_by_user_id, verified_at,
+           compartments, project_ids,
            source_session_id,
            valid_from, valid_to, superseded_by
          )
@@ -1206,7 +1229,8 @@ export async function supersedeEntity(
            $7, $8, $9,
            $10, $11, $12,
            $13, $14, $15,
-           $16,
+           $16::text[], $17::uuid[],
+           $18,
            now(), NULL, NULL
          )
          RETURNING ${FULL_SELECT}`,
@@ -1231,6 +1255,8 @@ export async function supersedeEntity(
           patch.source ?? old.source,
           old.verifiedByUserId,
           old.verifiedAt,
+          unionScopeRequirements(old.compartments, patch.compartments),
+          unionScopeRequirements(old.projectIds, patch.projectIds),
           // The originating conversation carries forward — supersession
           // changes the belief, not where the row came from.
           old.sourceSessionId,

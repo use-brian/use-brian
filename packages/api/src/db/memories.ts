@@ -39,6 +39,7 @@ export type Memory = {
   confidence: number
   sensitivity: Sensitivity
   compartments: string[]
+  projectIds: string[]
   source: string
   sourceSessionId: string | null
   recallCount: number
@@ -73,7 +74,8 @@ export type Memory = {
 const MEMORY_SELECT = `
   id, assistant_id as "assistantId", user_id as "userId", app_id as "appId",
   workspace_id as "workspaceId",
-  scope, tags, summary, detail, confidence, sensitivity, compartments, source,
+  scope, tags, summary, detail, confidence, sensitivity, compartments,
+  project_ids as "projectIds", source,
   source_session_id as "sourceSessionId",
   recall_count as "recallCount", useful_recall_count as "usefulRecallCount",
   last_recalled_at as "lastRecalledAt",
@@ -134,6 +136,7 @@ export async function createMemory(
     sensitivity: Sensitivity
     /** Compartment set (MLS category axis) to stamp on the row. Default '{}'. */
     compartments?: string[]
+    projectIds?: string[]
     createdByUserId: string
     createdByAssistantId?: string
     sourceEpisodeId?: string
@@ -197,7 +200,7 @@ export async function createMemory(
        confidence, sensitivity, source, source_session_id,
        created_by_user_id, created_by_assistant_id, source_episode_id,
        original_scope, original_sensitivity, original_summary,
-       compartments
+       compartments, project_ids
      )
      VALUES (
              CASE
@@ -210,7 +213,7 @@ export async function createMemory(
              $5, $6, $7, $8,
              $9, $10, $11, $12,
              $13, $14, $15,
-             $16, $17, $18, $19)
+             $16, $17, $18, $19, $20)
      RETURNING ${MEMORY_SELECT}`,
     [
       params.assistantId, params.userId, params.appId ?? null, params.workspaceId ?? null,
@@ -225,6 +228,7 @@ export async function createMemory(
       isModelWrite ? params.sensitivity : null,
       isModelWrite ? params.summary : null,
       params.compartments ?? [],
+      params.projectIds ?? [],
     ],
   )
   const memory = result.rows[0]
@@ -249,6 +253,8 @@ export async function createMemory(
       userId: params.userId,
       assistantId: params.assistantId,
       sourceEpisodeId: params.sourceEpisodeId ?? null,
+      compartments: memory.compartments,
+      projectIds: memory.projectIds,
     })
   }
   return memory
@@ -286,6 +292,8 @@ export type MemoryUpdateFields = {
   sensitivity?: Sensitivity
   scope?: 'shared' | 'workspace'
   workspaceId?: string | null
+  compartments?: string[]
+  projectIds?: string[]
 }
 
 export async function updateMemory(
@@ -330,6 +338,8 @@ export async function updateMemory(
         sensitivity: updates.sensitivity ?? old.sensitivity,
         scope: updates.scope ?? old.scope,
         workspaceId: updates.workspaceId !== undefined ? updates.workspaceId : old.workspaceId,
+        compartments: updates.compartments ?? old.compartments,
+        projectIds: updates.projectIds ?? old.projectIds,
       }
 
       // Insert the new version. Authorship + audit columns carry the old
@@ -350,9 +360,9 @@ export async function updateMemory(
            created_by_user_id, created_by_assistant_id, source_episode_id,
            verified_by_user_id, verified_at,
            original_scope, original_sensitivity, original_summary,
-           compartments, valid_from
+           compartments, project_ids, valid_from
          )
-         VALUES ($1, $2, $3, COALESCE($4, (SELECT workspace_id FROM assistants WHERE id = $1)), $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, now())
+         VALUES ($1, $2, $3, COALESCE($4, (SELECT workspace_id FROM assistants WHERE id = $1)), $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, now())
          RETURNING ${MEMORY_SELECT}`,
         [
           old.assistantId, old.userId, old.appId, next.workspaceId,
@@ -361,7 +371,8 @@ export async function updateMemory(
           old.createdByUserId, old.createdByAssistantId, old.sourceEpisodeId,
           old.verifiedByUserId, old.verifiedAt,
           old.originalScope, old.originalSensitivity, old.originalSummary,
-          old.compartments,
+          next.compartments,
+          next.projectIds,
         ],
       )
       const newRow = insertResult.rows[0]
@@ -575,6 +586,7 @@ export async function getIdentityMemories(ctx: AccessContext): Promise<Memory[]>
       confidence: 1.0,
       sensitivity: self.sensitivity,
       compartments: [],
+      projectIds: [],
       source: 'user',
       sourceSessionId: null,
       recallCount: 0,
@@ -661,11 +673,12 @@ export async function getMemoryIndex(
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   _validOnly: boolean = false, // WU-2.6 contract surface; WU-2.2 always-filters at SQL so this is a no-op
 ): Promise<Array<{
-  id: string; summary: string; tags: string[]; appId: string | null; sensitivity: Sensitivity
+  id: string; summary: string; tags: string[]; appId: string | null; sensitivity: Sensitivity; compartments: string[]; projectIds: string[]
 }>> {
   const ap = buildMemoryAccessPredicate(ctx)
-  const result = await query<{ id: string; summary: string; tags: string[]; appId: string | null; sensitivity: Sensitivity }>(
-    `SELECT id, summary, tags, app_id as "appId", sensitivity
+  const result = await query<{ id: string; summary: string; tags: string[]; appId: string | null; sensitivity: Sensitivity; compartments: string[]; projectIds: string[] }>(
+    `SELECT id, summary, tags, app_id as "appId", sensitivity, compartments,
+            project_ids as "projectIds"
      FROM memories
      WHERE ${ap.sql}
        AND scope <> 'workspace'
@@ -756,15 +769,16 @@ export async function getMemoryIndexRanked(
   ctx: AccessContext,
   limit: number,
 ): Promise<{
-  rows: Array<{ id: string; summary: string; tags: string[]; sensitivity: Sensitivity; createdAt: Date }>
+  rows: Array<{ id: string; summary: string; tags: string[]; sensitivity: Sensitivity; compartments: string[]; projectIds: string[]; createdAt: Date }>
   totalCount: number
 }> {
   const ap = buildMemoryAccessPredicate(ctx)
   const limIdx = ap.nextIdx
   const result = await query<{
-    id: string; summary: string; tags: string[]; sensitivity: Sensitivity; createdAt: Date; total: string
+    id: string; summary: string; tags: string[]; sensitivity: Sensitivity; compartments: string[]; projectIds: string[]; createdAt: Date; total: string
   }>(
-    `SELECT id, summary, tags, sensitivity,
+    `SELECT id, summary, tags, sensitivity, compartments,
+            project_ids as "projectIds",
             created_at as "createdAt",
             COUNT(*) OVER () AS total
      FROM memories
@@ -777,7 +791,8 @@ export async function getMemoryIndexRanked(
   )
   const totalCount = result.rows.length > 0 ? Number(result.rows[0].total) : 0
   const rows = result.rows.map((r) => ({
-    id: r.id, summary: r.summary, tags: r.tags, sensitivity: r.sensitivity, createdAt: r.createdAt,
+    id: r.id, summary: r.summary, tags: r.tags, sensitivity: r.sensitivity,
+    compartments: r.compartments, projectIds: r.projectIds, createdAt: r.createdAt,
   }))
   return { rows, totalCount }
 }
@@ -1620,11 +1635,12 @@ export async function getWorkspaceMemoryIndex(
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   _validOnly: boolean = false, // WU-2.6 contract surface; WU-2.2 always-filters at SQL so this is a no-op
 ): Promise<Array<{
-  id: string; summary: string; tags: string[]; appId: string | null; sensitivity: Sensitivity
+  id: string; summary: string; tags: string[]; appId: string | null; sensitivity: Sensitivity; compartments: string[]; projectIds: string[]
 }>> {
   const ap = buildAccessPredicate(ctx)
-  const result = await query<{ id: string; summary: string; tags: string[]; appId: string | null; sensitivity: Sensitivity }>(
-    `SELECT id, summary, tags, app_id as "appId", sensitivity
+  const result = await query<{ id: string; summary: string; tags: string[]; appId: string | null; sensitivity: Sensitivity; compartments: string[]; projectIds: string[] }>(
+    `SELECT id, summary, tags, app_id as "appId", sensitivity, compartments,
+            project_ids as "projectIds"
      FROM memories
      WHERE ${ap.sql}
        AND scope = 'workspace'

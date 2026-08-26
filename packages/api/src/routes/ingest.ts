@@ -102,6 +102,8 @@ function toRuleDto(rule: IngestRuleRow) {
     routingTimezone: rule.routingTimezone,
     alert: rule.alert,
     episodeSensitivity: rule.episodeSensitivity,
+    compartments: rule.compartments,
+    projectIds: rule.projectIds,
   }
 }
 

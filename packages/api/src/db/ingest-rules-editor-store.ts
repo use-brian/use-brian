@@ -40,7 +40,9 @@ const PUBLIC_COLS = `
   routing_schedule AS "routingSchedule",
   routing_timezone AS "routingTimezone",
   alert,
-  episode_sensitivity AS "episodeSensitivity"
+  episode_sensitivity AS "episodeSensitivity",
+  compartments,
+  project_ids AS "projectIds"
 ` as const
 
 const INGEST_PROVIDER_SET = new Set<IngestSourceProvider>(INGEST_SOURCE_PROVIDERS)
@@ -61,6 +63,8 @@ type RuleRow = {
   routingTimezone: string
   alert: boolean
   episodeSensitivity: RuleEpisodeSensitivity | null
+  compartments: string[]
+  projectIds: string[]
 }
 
 function toSummary(row: RuleRow): IngestRuleSummary {
@@ -76,6 +80,8 @@ function toSummary(row: RuleRow): IngestRuleSummary {
     routingTimezone: row.routingTimezone,
     alert: row.alert,
     episodeSensitivity: row.episodeSensitivity,
+    compartments: row.compartments ?? [],
+    projectIds: row.projectIds ?? [],
   }
 }
 
@@ -186,8 +192,8 @@ export function createIngestRuleEditorStore(): IngestRuleEditorStore {
         `INSERT INTO ingest_rules
            (connector_instance_id, source, rule_order, filter_type,
             filter_params, routing_mode, routing_schedule, routing_timezone,
-            alert, episode_sensitivity)
-         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10)
+            alert, episode_sensitivity, compartments, project_ids)
+         VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11, $12)
          RETURNING ${PUBLIC_COLS}`,
         [
           input.connectorInstanceId,
@@ -200,6 +206,8 @@ export function createIngestRuleEditorStore(): IngestRuleEditorStore {
           input.routingTimezone ?? 'UTC',
           input.alert ?? false,
           input.episodeSensitivity ?? null,
+          input.compartments ?? [],
+          input.projectIds ?? [],
         ],
       )
       const row = result.rows[0]
@@ -255,6 +263,10 @@ export function createIngestRuleEditorStore(): IngestRuleEditorStore {
       if (input.patch.alert !== undefined) pushSet('alert', input.patch.alert)
       if (input.patch.episodeSensitivity !== undefined)
         pushSet('episode_sensitivity', input.patch.episodeSensitivity)
+      if (input.patch.compartments !== undefined)
+        pushSet('compartments', input.patch.compartments)
+      if (input.patch.projectIds !== undefined)
+        pushSet('project_ids', input.patch.projectIds)
       if (input.patch.ruleOrder !== undefined) pushSet('rule_order', input.patch.ruleOrder)
 
       if (sets.length === 0) return toSummary(current)

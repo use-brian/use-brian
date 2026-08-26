@@ -102,7 +102,22 @@ export function officeCollaborationRoutes(deps: OfficeCollaborationRouteDeps): R
     if (!artifact || !access || !access.canComment || !artifact.headVersionId) return void res.status(404).json({ error: 'Office artifact not found' })
     const brianTriggerKey = body.data.invokeBrian?.idempotencyKey
     const created = await deps.createThread({ userId, workspaceId: artifact.workspaceId, artifactId, artifactVersionId: artifact.headVersionId, anchor: body.data.anchor, body: body.data.body, mentions: body.data.mentions, brianTriggerKey })
-    const revision = body.data.invokeBrian ? await deps.service.revise({ userId, assistantId: body.data.invokeBrian.assistantId, artifactId, instruction: body.data.body, targetIds: body.data.anchor.targetIds, expectedVersion: body.data.invokeBrian.expectedVersion, idempotencyKey: body.data.invokeBrian.idempotencyKey }) : undefined
+    const revision = body.data.invokeBrian ? await deps.service.revise({
+      userId,
+      assistantId: body.data.invokeBrian.assistantId,
+      artifactId,
+      instruction: body.data.body,
+      targetIds: body.data.anchor.targetIds,
+      expectedVersion: body.data.invokeBrian.expectedVersion,
+      idempotencyKey: body.data.invokeBrian.idempotencyKey,
+      sensitivity: artifact.sensitivity,
+      compartments: artifact.compartments,
+      projectIds: artifact.projectIds,
+      // The artifact read is the authorization gate. A direct @Brian revision
+      // is constrained to the root scope and cannot discover another Project.
+      compartmentGrant: artifact.compartments,
+      projectGrant: artifact.projectIds.length > 0 ? artifact.projectIds : null,
+    }) : undefined
     res.status(201).json({ ...created, revision })
   })
 

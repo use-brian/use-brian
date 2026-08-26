@@ -106,6 +106,8 @@ function accessCtx(ctx: FilesContext): AccessContext {
     assistantId: ctx.assistantId ?? ctx.userId,
     assistantKind: ctx.assistantKind ?? 'standard',
     clearance: ctx.clearance,
+    compartments: ctx.compartments,
+    projectIds: ctx.projectIds,
   }
 }
 
@@ -303,6 +305,8 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
         summary: p.summary ?? null,
         tags: p.tags,
         sensitivity: p.sensitivity,
+        compartments: ctx.writeCompartments,
+        projectIds: ctx.writeProjectIds,
         createdByUserId: ctx.userId,
         createdByAssistantId: ctx.assistantId ?? null,
       })
@@ -384,7 +388,10 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
       await gcs.appendBlob(storageKey, addBytes)
 
       const newSize = file.sizeBytes + addBytes.length
-      const updated = await store.updateSize(ctx.userId, ctx.workspaceId, file.id, newSize)
+      const updated = await store.updateSize(ctx.userId, ctx.workspaceId, file.id, newSize, {
+        compartments: ctx.writeCompartments,
+        projectIds: ctx.writeProjectIds,
+      })
       if (!updated) {
         // Pathological: row vanished mid-append. The GCS append already
         // happened; we leave it for the soft-delete lifecycle.
@@ -447,7 +454,11 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
       const file = await resolveByIdOrPath(ctx, idOrPath)
       if (!file) return err({ kind: 'not_found', reference: idOrPath })
 
-      const updated = await store.updateMeta(ctx.userId, ctx.workspaceId, file.id, patch)
+      const updated = await store.updateMeta(ctx.userId, ctx.workspaceId, file.id, {
+        ...patch,
+        inheritCompartments: ctx.writeCompartments,
+        inheritProjectIds: ctx.writeProjectIds,
+      })
       if (!updated) return err({ kind: 'not_found', reference: idOrPath })
 
       logAudit(ctx, 'file.meta_updated', { id: updated.id, path: updated.path }, {

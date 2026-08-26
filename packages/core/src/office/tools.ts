@@ -9,6 +9,7 @@
 import { z } from 'zod'
 import { canEnableOfficeCreation } from './templates/compiler.js'
 import { buildTool, type Tool } from '../tools/types.js'
+import { resolveWriteScope, scopeEvidenceFromRows, type ScopeEvidence } from '../security/context-scope.js'
 
 export type OfficeArtifactToolProjection = {
   artifactId: string
@@ -22,12 +23,14 @@ export type OfficeArtifactToolProjection = {
   targetsTruncated?: boolean
   nextTargetOffset?: number
   job?: { id: string; status: string; stage: string; errorCode: string | null }
+  /** Internal-only root evidence; the tool strips it before model delivery. */
+  scopeEvidence?: ScopeEvidence
 }
 
 export type OfficeToolPort = {
-  create(params: { userId: string; assistantId: string; workspaceId: string; family: 'document' | 'presentation' | 'spreadsheet'; outcome: string; audience: string; additionalContext?: string; sourceHandles: string[]; templateId?: string; idempotencyKey: string }): Promise<{ artifactId: string; jobId: string }>
+  create(params: { userId: string; assistantId: string; workspaceId: string; family: 'document' | 'presentation' | 'spreadsheet'; outcome: string; audience: string; additionalContext?: string; sourceHandles: string[]; templateId?: string; idempotencyKey: string; sensitivity: 'public' | 'internal' | 'confidential'; compartments: string[]; projectIds: string[]; compartmentGrant: string[] | null; projectGrant: string[] | null }): Promise<{ artifactId: string; jobId: string }>
   get(params: { userId: string; artifactId: string; targetOffset?: number }): Promise<OfficeArtifactToolProjection | null>
-  revise(params: { userId: string; assistantId: string; artifactId: string; instruction: string; targetIds: string[]; expectedVersion: number; idempotencyKey: string }): Promise<{ jobId: string; mode: 'direct' | 'proposal' } | 'version_conflict' | null>
+  revise(params: { userId: string; assistantId: string; artifactId: string; instruction: string; targetIds: string[]; expectedVersion: number; idempotencyKey: string; sensitivity: 'public' | 'internal' | 'confidential'; compartments: string[]; projectIds: string[]; compartmentGrant: string[] | null; projectGrant: string[] | null }): Promise<{ jobId: string; mode: 'direct' | 'proposal' } | 'version_conflict' | null>
 }
 
 function link(origin: string | undefined, workspaceId: string, artifactId: string): string | undefined {
@@ -141,7 +144,15 @@ export function createOfficeTools(params: {
           isError: true,
         }
       }
-      const result = await params.port.create({ userId: context.userId, assistantId: context.assistantId, workspaceId: context.workspaceId, ...input })
+      const writeScope = resolveWriteScope({
+        sensitivity: 'internal',
+        baseCompartments: context.assistantDefaultCompartments,
+        baseProjectIds: context.assistantDefaultProjectIds,
+        evidence: context.scopeAccumulator,
+        compartmentGrant: context.assistantCompartments,
+        projectGrant: context.assistantProjectIds,
+      })
+      const result = await params.port.create({ userId: context.userId, assistantId: context.assistantId, workspaceId: context.workspaceId, ...input, ...writeScope, compartmentGrant: context.compartments ?? null, projectGrant: context.projectIds ?? null })
       return { data: { ...result, status: 'queued', editorUrl: link(params.appOrigin, context.workspaceId, result.artifactId) } }
     },
   })
@@ -159,7 +170,11 @@ export function createOfficeTools(params: {
       if (blocked) return blocked
       const artifact = await params.port.get({ userId: context.userId, artifactId: input.artifactId, targetOffset: input.targetOffset })
       if (!artifact) return { data: artifactUnreachable('getOfficeArtifact', 'read', input.artifactId), isError: true }
-      return { data: { ...artifact, editorUrl: context.workspaceId ? link(params.appOrigin, context.workspaceId, artifact.artifactId) : undefined } }
+      const { scopeEvidence, ...visibleArtifact } = artifact
+      return {
+        data: { ...visibleArtifact, editorUrl: context.workspaceId ? link(params.appOrigin, context.workspaceId, artifact.artifactId) : undefined },
+        scopeEvidence: scopeEvidence ?? scopeEvidenceFromRows([]),
+      }
     },
   })
 
@@ -180,7 +195,15 @@ export function createOfficeTools(params: {
     async execute(input, context) {
       const blocked = await blockGate('reviseOfficeArtifact', context)
       if (blocked) return blocked
-      const result = await params.port.revise({ userId: context.userId, assistantId: context.assistantId, ...input })
+      const writeScope = resolveWriteScope({
+        sensitivity: 'internal',
+        baseCompartments: context.assistantDefaultCompartments,
+        baseProjectIds: context.assistantDefaultProjectIds,
+        evidence: context.scopeAccumulator,
+        compartmentGrant: context.assistantCompartments,
+        projectGrant: context.assistantProjectIds,
+      })
+      const result = await params.port.revise({ userId: context.userId, assistantId: context.assistantId, ...input, ...writeScope, compartmentGrant: context.compartments ?? null, projectGrant: context.projectIds ?? null })
       if (result === 'version_conflict') {
         return {
           data:

@@ -124,6 +124,8 @@ export type EntityRecord = {
   aliases: string[]
   attributes: Record<string, unknown>
   sensitivity: Sensitivity
+  compartments?: string[]
+  projectIds?: string[]
   workspaceId: string
   userId: string | null
   assistantId: string | null
@@ -149,7 +151,7 @@ export type EntityRecord = {
 
 export type EntityListRow = Pick<
   EntityRecord,
-  'id' | 'kind' | 'displayName' | 'canonicalId' | 'sensitivity' | 'workspaceId' | 'source'
+  'id' | 'kind' | 'displayName' | 'canonicalId' | 'sensitivity' | 'compartments' | 'projectIds' | 'workspaceId' | 'source'
 >
 
 export type EntityCreateParams = {
@@ -164,6 +166,7 @@ export type EntityCreateParams = {
   sensitivity?: Sensitivity
   /** Compartment set (MLS category axis) to stamp on the row. Default '{}'. */
   compartments?: string[]
+  projectIds?: string[]
   attributes?: Record<string, unknown>
   /** Initial alias set (lowercased on write). Defaults to `[]`. */
   aliases?: readonly string[]
@@ -185,6 +188,9 @@ export type EntityUpdateFields = {
   sensitivity?: Sensitivity
   verifiedByUserId?: string | null
   verifiedAt?: Date | null
+  /** Internal high-water requirements to union into an in-place update. */
+  inheritCompartments?: string[]
+  inheritProjectIds?: string[]
 }
 
 /**
@@ -203,6 +209,9 @@ export type EntitySupersedePatch = {
   sourceEpisodeId?: string | null
   /** Source of the new row. Defaults to carrying the old row's value. */
   source?: EntitySource
+  /** High-water scope requirements unioned with the superseded row. */
+  compartments?: string[]
+  projectIds?: string[]
 }
 
 export type EntityLinkRecord = {
@@ -222,6 +231,8 @@ export type EntityLinkRecord = {
   retractedReason: string | null
   sourceEpisodeId: string | null
   sensitivity: Sensitivity
+  compartments?: string[]
+  projectIds?: string[]
   workspaceId: string
   userId: string | null
   assistantId: string | null
@@ -241,6 +252,8 @@ export type EntityLinkCreateParams = {
   attributes?: Record<string, unknown>
   sensitivity?: Sensitivity
   sourceEpisodeId?: string | null
+  compartments?: string[]
+  projectIds?: string[]
   /**
    * Bi-temporal validity window. Both default to the column defaults
    * (`validFrom = now()`, `validTo = NULL` — i.e. "currently active").

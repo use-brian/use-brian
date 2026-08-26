@@ -25,6 +25,7 @@
 
 import { z } from 'zod'
 import { buildTool, type Tool } from '../tools/types.js'
+import { resolveWriteScope } from '../security/context-scope.js'
 import type { RoutingMode, RuleEpisodeSensitivity } from './engine.js'
 import {
   INGEST_SOURCE_PROVIDERS,
@@ -53,6 +54,8 @@ export type IngestRuleSummary = {
   routingTimezone: string
   alert: boolean
   episodeSensitivity: RuleEpisodeSensitivity | null
+  compartments: string[]
+  projectIds: string[]
 }
 
 export type AddIngestRuleInput = {
@@ -64,6 +67,9 @@ export type AddIngestRuleInput = {
   routingTimezone?: string
   alert?: boolean
   episodeSensitivity?: RuleEpisodeSensitivity | null
+  /** Trusted defaults supplied by the tool/runtime, never model-facing keys. */
+  compartments?: string[]
+  projectIds?: string[]
   /** When omitted, the rule is appended at the end. */
   ruleOrder?: number
 }
@@ -78,6 +84,8 @@ export type UpdateIngestRuleInput = {
     routingTimezone?: string
     alert?: boolean
     episodeSensitivity?: RuleEpisodeSensitivity | null
+    compartments?: string[]
+    projectIds?: string[]
     ruleOrder?: number
   }
 }
@@ -224,6 +232,13 @@ export function createIngestRuleTools(store: IngestRuleEditorStore): IngestRuleT
     isConcurrencySafe: false,
     isReadOnly: false,
     async execute(input, context) {
+      const writeScope = resolveWriteScope({
+        baseCompartments: context.assistantDefaultCompartments,
+        baseProjectIds: context.assistantDefaultProjectIds,
+        evidence: context.scopeAccumulator,
+        compartmentGrant: context.compartments,
+        projectGrant: context.projectIds,
+      })
       const created = await store.addRule(context.userId, {
         connectorInstanceId: input.connector_instance_id,
         filterType: input.filter_type,
@@ -234,6 +249,8 @@ export function createIngestRuleTools(store: IngestRuleEditorStore): IngestRuleT
         alert: input.alert,
         episodeSensitivity: input.episode_sensitivity ?? null,
         ruleOrder: input.rule_order,
+        compartments: writeScope.compartments,
+        projectIds: writeScope.projectIds,
       })
       return { data: created }
     },

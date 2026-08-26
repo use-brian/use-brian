@@ -19,6 +19,8 @@ import {
   type ConsultTransport,
 } from '../a2a/index.js'
 import type { Tool, ToolContext } from '../tools/types.js'
+import { ContextScopeAccumulator, type TurnScope } from '../security/context-scope.js'
+import type { Sensitivity } from '../security/sensitivity.js'
 import type {
   AssistantCallStep,
   BranchStep,
@@ -112,6 +114,8 @@ export type BuildToolRegistry = (params: {
   /** The acting assistant — typically the workspace's primary. */
   assistantId: string
   userId: string | null
+  /** Trusted execution scope. Undefined only for authoring-time tool lookup. */
+  turnScope?: TurnScope
 }) => Promise<Map<string, Tool>>
 
 /**
@@ -320,6 +324,13 @@ export type ExecutorDeps = {
   consultTransport: ConsultTransport
   resolvePrimary: ResolvePrimaryAssistant
   buildToolRegistry: BuildToolRegistry
+  /** API-owned trusted resolver for the immutable workflow-run snapshot. */
+  resolveRunScope?: (params: {
+    userId: string
+    assistantId: string
+    workspaceId: string
+    run: WorkflowRunRecord
+  }) => Promise<{ turnScope: TurnScope; assistantClearance: Sensitivity }>
   emitAudit?: EmitAuditEvent
   /**
    * Deterministic page-send port backing `send_page` steps (page-actions
@@ -473,6 +484,8 @@ const MAX_STEP_EXECUTIONS_PER_RUN = 100
  * `storeOutputAs` forbids the `__` prefix.
  */
 const FRONTIER_VAR = '__frontier'
+/** Persisted run-wide high-water evidence across wait/approval/process resumes. */
+export const WORKFLOW_SCOPE_EVIDENCE_VAR = '__contextScopeEvidence'
 const EXTERNAL_CLIENT_PRINCIPAL_VAR = '__externalClientPrincipal'
 
 function clientPrincipalError(message: string): Error {
@@ -715,6 +728,34 @@ export async function advanceWorkflowRun(
   // client-bound workflow's one reviewed reply instead uses the assistant
   // whose API-key boundary and mailbox grants authored the draft.
   const toolAssistantId = workflow.definition.principal?.assistantId ?? primaryAssistantId
+  let runtimeScope: Awaited<ReturnType<NonNullable<ExecutorDeps['resolveRunScope']>>> | undefined
+  if (deps.resolveRunScope) {
+    try {
+      runtimeScope = await deps.resolveRunScope({
+        userId: run.triggeredBy ?? workflow.createdBy,
+        assistantId: toolAssistantId,
+        workspaceId: run.workspaceId,
+        run,
+      })
+    } catch (err) {
+      const error: ExecutorError = {
+        message: err instanceof Error ? err.message : String(err),
+        reason: 'context_not_available',
+      }
+      await markRunFailed(deps, run, '<context>', error, 'failed', undefined, workflow)
+      return failOutcome(runId, '<context>', error, 0)
+    }
+  }
+  const scopeAccumulator = new ContextScopeAccumulator(runtimeScope
+    ? {
+        compartments: runtimeScope.turnScope.writeCompartments,
+        projectIds: runtimeScope.turnScope.writeProjectIds,
+      }
+    : undefined)
+  const persistedScopeEvidence = run.vars[WORKFLOW_SCOPE_EVIDENCE_VAR]
+  if (persistedScopeEvidence && typeof persistedScopeEvidence === 'object') {
+    scopeAccumulator.note(persistedScopeEvidence as import('../security/context-scope.js').ScopeEvidence)
+  }
 
   let toolRegistry: Map<string, Tool>
   try {
@@ -725,6 +766,7 @@ export async function advanceWorkflowRun(
       // back to the workflow's creator so RLS-touching tool resolvers have
       // a real user (matches the pattern used by deliver/consult below).
       userId: run.triggeredBy ?? workflow.createdBy,
+      turnScope: runtimeScope?.turnScope,
     })
   } catch (err) {
     const error: ExecutorError = {
@@ -822,12 +864,16 @@ export async function advanceWorkflowRun(
   }
 
   const frontierVars = (): Record<string, unknown> => {
+    const persisted: Record<string, unknown> = {
+      ...vars,
+      [WORKFLOW_SCOPE_EVIDENCE_VAR]: scopeAccumulator.evidence,
+    }
     const frontier = [...pending, ...inFlight.keys(), ...parked]
     if (frontier.length === 0) {
-      const { [FRONTIER_VAR]: _dropped, ...rest } = vars
+      const { [FRONTIER_VAR]: _dropped, ...rest } = persisted
       return rest
     }
-    return { ...vars, [FRONTIER_VAR]: frontier }
+    return { ...persisted, [FRONTIER_VAR]: frontier }
   }
 
   /**
@@ -837,7 +883,12 @@ export async function advanceWorkflowRun(
    * settlement handler below, on one settlement at a time. Never throws.
    */
   const executeStep = async (step: WorkflowStep): Promise<SettledStep> => {
-    const interp: InterpolationScope = { vars, input, lastRun }
+    const {
+      [FRONTIER_VAR]: _frontier,
+      [WORKFLOW_SCOPE_EVIDENCE_VAR]: _scopeEvidence,
+      ...interpolatableVars
+    } = vars
+    const interp: InterpolationScope = { vars: interpolatableVars, input, lastRun }
 
     // Pre-flight: wait step in Phase A fails before dispatch. The step-run
     // row is still recorded so getWorkflowRun shows what blew up.
@@ -878,6 +929,8 @@ export async function advanceWorkflowRun(
         toolRegistry,
         consultTransport: deps.consultTransport,
         externalClientPrincipal,
+        runtimeScope,
+        scopeAccumulator,
         scope: interp,
         deps,
       })
@@ -1239,6 +1292,8 @@ type DispatchContext = {
   toolRegistry: Map<string, Tool>
   consultTransport: ConsultTransport
   externalClientPrincipal?: ResolvedExternalClientWorkflowPrincipal
+  runtimeScope?: { turnScope: TurnScope; assistantClearance: Sensitivity }
+  scopeAccumulator: ContextScopeAccumulator
   scope: InterpolationScope
   /** Phase C — when present, ask-policy tool_calls pause instead of failing. */
   deps: ExecutorDeps
@@ -1559,6 +1614,12 @@ async function dispatchAssistantCall(
       step.session === 'persistent'
         ? `workflow:${ctx.workflow.id}:${step.id}`
         : undefined,
+    contextScope: ctx.runtimeScope
+      ? {
+          groupId: ctx.runtimeScope.turnScope.activeGroupId,
+          projectId: ctx.runtimeScope.turnScope.activeProjectId,
+        }
+      : undefined,
     // Per-step tool restriction: a `tools` allow-list rides through to the
     // callee executor, which filters the callee's tool surface to exactly
     // this set. Undefined = the callee's normal tool surface.
@@ -1639,6 +1700,7 @@ async function dispatchAssistantCall(
   }
 
   const response = await ctx.consultTransport.send(request)
+  ctx.scopeAccumulator.note(response.scopeEvidence)
   const task = response.task
 
   switch (task.status.state) {
@@ -1813,6 +1875,21 @@ async function dispatchToolCall(
   }
 
   const interpolatedArgs = interpolateValue(step.arguments, ctx.scope)
+  const runtimeToolScope = ctx.runtimeScope
+    ? {
+        clearance: ctx.runtimeScope.turnScope.access.clearance,
+        compartments: ctx.runtimeScope.turnScope.effectiveCompartments,
+        projectIds: ctx.runtimeScope.turnScope.effectiveProjectIds,
+        activeGroupId: ctx.runtimeScope.turnScope.activeGroupId,
+        activeProjectId: ctx.runtimeScope.turnScope.activeProjectId,
+        assistantClearance: ctx.runtimeScope.assistantClearance,
+        assistantCompartments: ctx.runtimeScope.turnScope.effectiveCompartments,
+        assistantDefaultCompartments: ctx.runtimeScope.turnScope.writeCompartments,
+        assistantProjectIds: ctx.runtimeScope.turnScope.effectiveProjectIds,
+        assistantDefaultProjectIds: ctx.runtimeScope.turnScope.writeProjectIds,
+        scopeAccumulator: ctx.scopeAccumulator,
+      }
+    : { scopeAccumulator: ctx.scopeAccumulator }
 
   // Policy gate. MCP-discovered tools have `resolveConfirmation` set to a
   // closure that reads the user's effective allow/ask policy from
@@ -1834,6 +1911,7 @@ async function dispatchToolCall(
         channelType: 'workflow',
         channelId: ctx.run.id,
         workspaceId: ctx.run.workspaceId,
+        ...runtimeToolScope,
         abortSignal: new AbortController().signal,
       } satisfies ToolContext, interpolatedArgs)
       needsConfirmation = forceConfirmation || resolvedConfirmation
@@ -1855,6 +1933,7 @@ async function dispatchToolCall(
           channelId: ctx.run.id,
           workspaceId: ctx.run.workspaceId,
           assistantKind: ctx.externalClientPrincipal ? 'standard' : 'primary',
+          ...runtimeToolScope,
           abortSignal: new AbortController().signal,
         })
         if (lines?.length) displayLines = lines
@@ -1896,6 +1975,7 @@ async function dispatchToolCall(
     channelId: ctx.run.id,
     workspaceId: ctx.run.workspaceId,
     assistantKind: ctx.externalClientPrincipal ? 'standard' : 'primary',
+    ...runtimeToolScope,
     abortSignal: abortController.signal,
   }
 
@@ -1922,6 +2002,7 @@ async function dispatchToolCall(
       },
     }
   }
+  ctx.scopeAccumulator.note(result.scopeEvidence)
 
   return { kind: 'success', output: result.data }
 }

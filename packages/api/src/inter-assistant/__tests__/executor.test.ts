@@ -234,7 +234,10 @@ beforeEach(() => {
     },
     isNew: false,
   } as never)
-  mockResolveReadCeilings.mockResolvedValue({ clearance: 'confidential', compartments: null })
+  mockResolveReadCeilings.mockImplementation(async (_userId, _workspaceId, clearance, compartments) => ({
+    clearance,
+    compartments,
+  }))
   mockBilling.mockResolvedValue('owner-1')
   mockSession.mockResolvedValue({ id: 'sess-1' } as never)
   vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -1297,7 +1300,7 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     // actorFromContext requires a workspace bind; the read ceiling drives the
     // clearance/compartment projection.
     expect(ctx.workspaceId).toBe('ws-1')
-    expect(ctx.clearance).toBe('confidential')
+    expect(ctx.clearance).toBe('internal')
     expect(ctx.compartments).toBe(null)
   })
 
@@ -1309,9 +1312,9 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     await executor()({ ...baseParams, callerChannelType: 'workflow' })
     const passedTools = mockQueryLoop.mock.calls[0][0].tools as Map<string, unknown>
     expect(passedTools.has('recentEpisodes')).toBe(false)
-    // The context stays unscoped for retrieval (no clearance forced on).
+    // Turn authority is resolved even when no retrieval adapter is installed.
     const ctx = mockQueryLoop.mock.calls[0][0].context as Record<string, unknown>
-    expect(ctx.clearance).toBeUndefined()
+    expect(ctx.clearance).toBe('internal')
   })
 
   it('omits the retrieval tools for a personal (no-workspace) callee even with a store wired', async () => {

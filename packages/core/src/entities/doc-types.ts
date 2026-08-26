@@ -246,6 +246,9 @@ export type EntityInstance = {
   workspaceId: string
   data: Record<string, CellValue>
   sourceApp: 'doc' | 'chat' | 'import' | 'api'
+  sensitivity?: 'public' | 'internal' | 'confidential'
+  compartments?: string[]
+  projectIds?: string[]
   /** ISO-8601 from `entity_instances.created_at`. */
   createdAt: string
   /** `users.id` — null on system-created rows (e.g. ingest workers). */
@@ -350,7 +353,9 @@ export interface EntityStore {
   updateEntity(
     workspaceId: string,
     id: string,
-    patch: Partial<Pick<EntityInstance, 'data' | 'lastEditedBy'>>,
+    patch: Partial<
+      Pick<EntityInstance, 'data' | 'lastEditedBy' | 'sensitivity' | 'compartments' | 'projectIds'>
+    >,
   ): Promise<EntityInstance>
   deleteEntity(workspaceId: string, id: string): Promise<void>
 

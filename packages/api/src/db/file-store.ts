@@ -2,9 +2,9 @@ import type { AccessContext, FileStore } from '@use-brian/core'
 import { query } from './client.js'
 import { buildAccessPredicate } from './access-predicate.js'
 
-const SELECT = `id, session_id as "sessionId", file_name as "fileName", mime_type as "mimeType", content, summary, size_bytes as "sizeBytes", artifact_file_id as "artifactFileId", artifact_segment_count as "artifactSegmentCount"`
+const SELECT = `id, session_id as "sessionId", file_name as "fileName", mime_type as "mimeType", content, summary, size_bytes as "sizeBytes", artifact_file_id as "artifactFileId", artifact_segment_count as "artifactSegmentCount", sensitivity, compartments, project_ids as "projectIds"`
 
-type Row = { id: string; sessionId: string; fileName: string; mimeType: string; content: string; summary: string | null; sizeBytes: number; artifactFileId: string | null; artifactSegmentCount: number | null }
+type Row = { id: string; sessionId: string; fileName: string; mimeType: string; content: string; summary: string | null; sizeBytes: number; artifactFileId: string | null; artifactSegmentCount: number | null; sensitivity: 'public' | 'internal' | 'confidential'; compartments: string[]; projectIds: string[] }
 
 export function createDbFileStore(): FileStore {
   return {
@@ -13,15 +13,16 @@ export function createDbFileStore(): FileStore {
       const result = await query<Row>(
         `INSERT INTO file_cache
            (session_id, file_name, mime_type, content, summary, size_bytes, expires_at,
-            workspace_id, user_id, assistant_id, sensitivity)
+            workspace_id, user_id, assistant_id, sensitivity, compartments, project_ids)
          VALUES ($1, $2, $3, $4, $5, $6, now() + make_interval(days => $7),
-                 $8, $9, $10, COALESCE($11, 'internal'))
+                 $8, $9, $10, COALESCE($11, 'internal'), $12::text[], $13::uuid[])
          RETURNING ${SELECT}`,
         [
           params.sessionId, params.fileName, params.mimeType, params.content,
           params.summary ?? null, params.sizeBytes, expiryDays,
           params.workspaceId ?? null, params.userId ?? null, params.assistantId ?? null,
           params.sensitivity ?? null,
+          params.compartments ?? [], params.projectIds ?? [],
         ],
       )
       return result.rows[0]

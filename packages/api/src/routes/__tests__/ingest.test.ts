@@ -53,6 +53,8 @@ function instance(overrides: Partial<ConnectorInstance> = {}): ConnectorInstance
     healthStatus: 'ok',
     lastError: null,
     lastCheckedAt: null,
+    compartments: [],
+    projectIds: [],
     createdBy: USER_ID,
     createdAt: new Date(),
     updatedAt: new Date(),

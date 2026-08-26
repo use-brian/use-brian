@@ -105,6 +105,80 @@ ALTER TABLE public.scheduled_jobs
   ADD COLUMN context_compartments text[] NOT NULL DEFAULT '{}',
   ADD COLUMN context_project_ids uuid[] NOT NULL DEFAULT '{}';
 
+-- Derived/background rows copy their root scope inside the database. This is
+-- the final guard against a worker retry or an older call site silently
+-- defaulting a scoped derivative to Workspace General.
+CREATE FUNCTION public.inherit_file_cache_context_scope() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'public', 'pg_temp'
+AS $$
+DECLARE
+  parent_compartments text[];
+  parent_projects uuid[];
+BEGIN
+  SELECT context_compartments, context_project_ids
+    INTO parent_compartments, parent_projects
+    FROM public.sessions WHERE id = NEW.session_id;
+  NEW.compartments := ARRAY(
+    SELECT DISTINCT unnest(COALESCE(parent_compartments, '{}'::text[]) || NEW.compartments)
+    ORDER BY 1
+  );
+  NEW.project_ids := ARRAY(
+    SELECT DISTINCT unnest(COALESCE(parent_projects, '{}'::uuid[]) || NEW.project_ids)
+    ORDER BY 1
+  );
+  RETURN NEW;
+END;
+$$;
+CREATE TRIGGER file_cache_context_scope_inherit
+  BEFORE INSERT ON public.file_cache
+  FOR EACH ROW EXECUTE FUNCTION public.inherit_file_cache_context_scope();
+
+CREATE FUNCTION public.inherit_recording_context_scope() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'public', 'pg_temp'
+AS $$
+BEGIN
+  SELECT e.compartments, e.project_ids
+    INTO NEW.compartments, NEW.project_ids
+    FROM public.episodes e WHERE e.id = NEW.id;
+  RETURN NEW;
+END;
+$$;
+CREATE TRIGGER recordings_context_scope_inherit
+  BEFORE INSERT ON public.recordings
+  FOR EACH ROW EXECUTE FUNCTION public.inherit_recording_context_scope();
+
+CREATE FUNCTION public.inherit_transcript_segment_context_scope() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'public', 'pg_temp'
+AS $$
+BEGIN
+  SELECT e.compartments, e.project_ids
+    INTO NEW.compartments, NEW.project_ids
+    FROM public.episodes e WHERE e.id = NEW.recording_id;
+  RETURN NEW;
+END;
+$$;
+CREATE TRIGGER transcript_segments_context_scope_inherit
+  BEFORE INSERT ON public.transcript_segments
+  FOR EACH ROW EXECUTE FUNCTION public.inherit_transcript_segment_context_scope();
+
+CREATE FUNCTION public.inherit_file_segment_context_scope() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'public', 'pg_temp'
+AS $$
+BEGIN
+  SELECT f.compartments, f.project_ids
+    INTO NEW.compartments, NEW.project_ids
+    FROM public.workspace_files f WHERE f.id = NEW.file_id;
+  RETURN NEW;
+END;
+$$;
+CREATE TRIGGER file_segments_context_scope_inherit
+  BEFORE INSERT ON public.file_segments
+  FOR EACH ROW EXECUTE FUNCTION public.inherit_file_segment_context_scope();
+
 -- Reusable validator for row-local Team requirements and Project UUID arrays.
 -- Only the reserved team: namespace is registry-backed; legacy and client:
 -- compartments keep their existing validation paths.
@@ -286,5 +360,152 @@ $$;
 CREATE TRIGGER saved_views_project_workspace_match
   BEFORE INSERT OR UPDATE OF workspace_id, project_id ON public.saved_views
   FOR EACH ROW EXECUTE FUNCTION public.validate_saved_view_project();
+
+-- Container/root RLS uses the same Team + Project set algebra as the
+-- universal TypeScript predicate. Human page/entity/Office reads receive the
+-- member Team union and no Project filter; assistant executions receive the
+-- trusted GUC projection resolved at the model-entry boundary.
+CREATE FUNCTION public.context_scope_allows_current_principal(
+  p_workspace_id uuid,
+  p_sensitivity text,
+  p_compartments text[],
+  p_project_ids uuid[]
+) RETURNS boolean
+LANGUAGE plpgsql STABLE SECURITY DEFINER
+SET search_path TO 'public', 'pg_temp'
+AS $$
+DECLARE
+  member_clearance text;
+  team_grant text[];
+  agent_clearance text := NULLIF(current_setting('app.agent_clearance', true), '');
+  agent_teams jsonb;
+  agent_projects jsonb;
+BEGIN
+  SELECT wm.clearance INTO member_clearance
+    FROM public.workspace_members wm
+   WHERE wm.workspace_id = p_workspace_id
+     AND wm.user_id = current_setting('app.current_user_id', true)::uuid;
+  IF member_clearance IS NULL THEN RETURN false; END IF;
+
+  IF agent_clearance IS NULL THEN
+    IF public.sensitivity_rank(p_sensitivity) > public.sensitivity_rank(member_clearance) THEN
+      RETURN false;
+    END IF;
+    team_grant := public.effective_member_team_compartments(
+      current_setting('app.current_user_id', true)::uuid,
+      p_workspace_id
+    );
+    RETURN team_grant IS NULL OR COALESCE(p_compartments, '{}') <@ team_grant;
+  END IF;
+
+  IF public.sensitivity_rank(p_sensitivity) > public.sensitivity_rank(agent_clearance) THEN
+    RETURN false;
+  END IF;
+  IF NULLIF(current_setting('app.agent_compartments', true), '') IS NOT NULL THEN
+    agent_teams := current_setting('app.agent_compartments', true)::jsonb;
+    IF agent_teams <> 'null'::jsonb AND NOT (
+      SELECT COALESCE(bool_and(agent_teams ? value), true)
+        FROM unnest(COALESCE(p_compartments, '{}')) AS u(value)
+    ) THEN RETURN false; END IF;
+  END IF;
+  IF NULLIF(current_setting('app.agent_project_ids', true), '') IS NOT NULL THEN
+    agent_projects := current_setting('app.agent_project_ids', true)::jsonb;
+    IF agent_projects <> 'null'::jsonb AND NOT (
+      SELECT COALESCE(bool_and(agent_projects ? value::text), true)
+        FROM unnest(COALESCE(p_project_ids, '{}')) AS u(value)
+    ) THEN RETURN false; END IF;
+  END IF;
+  RETURN true;
+END;
+$$;
+
+DROP POLICY entity_instances_workspace_member ON public.entity_instances;
+CREATE POLICY entity_instances_context_member ON public.entity_instances
+  USING (public.context_scope_allows_current_principal(
+    workspace_id, sensitivity, compartments, project_ids
+  ));
+
+DROP POLICY blueprint_records_workspace_member ON public.blueprint_records;
+CREATE POLICY blueprint_records_context_member ON public.blueprint_records
+  USING (public.context_scope_allows_current_principal(
+    workspace_id, sensitivity, compartments, project_ids
+  ));
+
+DROP POLICY office_artifacts_member ON public.office_artifacts;
+CREATE POLICY office_artifacts_context_member ON public.office_artifacts
+  USING (public.context_scope_allows_current_principal(
+    workspace_id, sensitivity, compartments, project_ids
+  ));
+DROP POLICY office_versions_member ON public.office_artifact_versions;
+CREATE POLICY office_versions_context_member ON public.office_artifact_versions
+  USING (EXISTS (
+    SELECT 1 FROM public.office_artifacts a
+     WHERE a.id = office_artifact_versions.artifact_id
+       AND public.context_scope_allows_current_principal(
+         a.workspace_id, a.sensitivity, a.compartments, a.project_ids
+       )
+  ));
+DROP POLICY office_sources_member ON public.office_artifact_sources;
+CREATE POLICY office_sources_context_member ON public.office_artifact_sources
+  USING (EXISTS (
+    SELECT 1 FROM public.office_artifacts a
+     WHERE a.id = office_artifact_sources.artifact_id
+       AND public.context_scope_allows_current_principal(
+         a.workspace_id, a.sensitivity, a.compartments, a.project_ids
+       )
+  ));
+
+CREATE FUNCTION public.inherit_office_source_root_scope() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'public', 'pg_temp'
+AS $$
+DECLARE
+  root_sensitivity text;
+  root_compartments text[];
+BEGIN
+  SELECT a.sensitivity, a.compartments
+    INTO root_sensitivity, root_compartments
+    FROM public.office_artifacts a WHERE a.id = NEW.artifact_id;
+  NEW.sensitivity := CASE
+    WHEN public.sensitivity_rank(COALESCE(NEW.sensitivity, 'public'))
+       >= public.sensitivity_rank(COALESCE(root_sensitivity, 'public'))
+      THEN NEW.sensitivity ELSE root_sensitivity END;
+  NEW.required_compartments := ARRAY(
+    SELECT DISTINCT value
+      FROM unnest(COALESCE(NEW.required_compartments, '{}') ||
+                  COALESCE(root_compartments, '{}')) AS u(value)
+     ORDER BY value
+  );
+  RETURN NEW;
+END;
+$$;
+CREATE TRIGGER office_sources_root_scope_inherit
+  BEFORE INSERT OR UPDATE OF artifact_id, sensitivity, required_compartments
+  ON public.office_artifact_sources
+  FOR EACH ROW EXECUTE FUNCTION public.inherit_office_source_root_scope();
+
+CREATE FUNCTION public.raise_office_root_from_source() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path TO 'public', 'pg_temp'
+AS $$
+BEGIN
+  UPDATE public.office_artifacts a
+     SET sensitivity = CASE
+           WHEN public.sensitivity_rank(a.sensitivity) >= public.sensitivity_rank(NEW.sensitivity)
+             THEN a.sensitivity ELSE NEW.sensitivity END,
+         compartments = ARRAY(
+           SELECT DISTINCT value
+             FROM unnest(a.compartments || NEW.required_compartments) AS u(value)
+            ORDER BY value
+         ),
+         updated_at = now()
+   WHERE a.id = NEW.artifact_id;
+  RETURN NEW;
+END;
+$$;
+CREATE TRIGGER office_sources_raise_root_scope
+  AFTER INSERT OR UPDATE OF sensitivity, required_compartments
+  ON public.office_artifact_sources
+  FOR EACH ROW EXECUTE FUNCTION public.raise_office_root_from_source();
 
 COMMIT;

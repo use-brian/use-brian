@@ -33,6 +33,7 @@ import type {
   ConsultTransport,
   Task,
 } from './types.js'
+import type { ScopeEvidence } from '../security/context-scope.js'
 
 export type RunConsultParams = {
   request: ConsultRequest
@@ -43,6 +44,7 @@ export type RunConsultResult = {
   text: string
   /** Optional structured artifacts (restricted-mode capability invocations may surface these). */
   artifacts?: Artifact[]
+  scopeEvidence?: ScopeEvidence
 }
 
 export type InProcessTransportDeps = {
@@ -135,7 +137,7 @@ export function createInProcessTransport(deps: InProcessTransportDeps): ConsultT
         history: isFreeMode && responseMessage ? [responseMessage] : undefined,
       }
 
-      return { task }
+      return { task, scopeEvidence: result.scopeEvidence }
     },
   }
 }

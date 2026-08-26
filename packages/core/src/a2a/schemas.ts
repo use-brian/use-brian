@@ -168,6 +168,10 @@ export const consultRequestSchema = z.object({
   }),
   message: a2aMessageSchema,
   contextId: z.string().min(1).optional(),
+  contextScope: z.object({
+    groupId: z.string().uuid().nullable(),
+    projectId: z.string().uuid().nullable(),
+  }).strict().optional(),
   allowedTools: z.array(z.string().min(1)).optional(),
   externalClientPrincipal: z.object({
     apiKeyId: z.string().uuid(),
@@ -193,6 +197,11 @@ export const consultRequestSchema = z.object({
 
 export const consultResponseSchema = z.object({
   task: taskSchema,
+  scopeEvidence: z.object({
+    sensitivity: z.enum(['public', 'internal', 'confidential']).optional(),
+    compartments: z.array(z.string()).optional(),
+    projectIds: z.array(z.string().uuid()).optional(),
+  }).strict().optional(),
 })
 
 // ── Errors ──────────────────────────────────────────────────────────────

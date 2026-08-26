@@ -193,18 +193,23 @@ AS $$
 DECLARE
   member_role text;
   scope_mode text;
+  direct_grant text[];
   has_read_all boolean;
   result text[];
 BEGIN
-  SELECT role, team_scope_mode INTO member_role, scope_mode
+  SELECT role, team_scope_mode, compartments
+    INTO member_role, scope_mode, direct_grant
     FROM public.workspace_members
    WHERE user_id = p_user_id AND workspace_id = p_workspace_id;
 
   IF member_role IS NULL THEN
     RETURN ARRAY[]::text[];
   END IF;
-  IF member_role IN ('owner', 'admin') OR scope_mode = 'legacy' THEN
+  IF member_role IN ('owner', 'admin') THEN
     RETURN NULL;
+  END IF;
+  IF scope_mode = 'legacy' THEN
+    RETURN direct_grant;
   END IF;
 
   SELECT COALESCE(bool_or(g.read_all), false),
@@ -214,7 +219,9 @@ BEGIN
     FROM public.workspace_group_members gm
     JOIN public.workspace_groups g ON g.id = gm.group_id
     LEFT JOIN LATERAL (
-      SELECT gcg.compartment_key AS grant_key
+      SELECT g.compartment_key AS grant_key
+      UNION
+      SELECT gcg.compartment_key
         FROM public.workspace_group_compartment_grants gcg
        WHERE gcg.group_id = g.id
     ) grants ON true
@@ -225,8 +232,37 @@ BEGIN
   IF has_read_all THEN
     RETURN NULL;
   END IF;
+  IF direct_grant IS NOT NULL THEN
+    SELECT COALESCE(array_agg(value ORDER BY value), ARRAY[]::text[])
+      INTO result
+      FROM unnest(result) AS value
+     WHERE value = ANY(direct_grant);
+  END IF;
   RETURN COALESCE(result, ARRAY[]::text[]);
 END;
 $$;
+
+-- Workspace-shared sessions require the same Team grant as their immutable
+-- context projection. Owner-scoped sessions retain sessions_own unchanged.
+DROP POLICY sessions_workspace_shared ON public.sessions;
+CREATE POLICY sessions_workspace_shared ON public.sessions
+  FOR SELECT
+  USING (
+    visibility = 'workspace'
+    AND workspace_id IS NOT NULL
+    AND EXISTS (
+      SELECT 1
+        FROM public.workspace_members wm
+       WHERE wm.workspace_id = sessions.workspace_id
+         AND wm.user_id = (current_setting('app.current_user_id', true))::uuid
+         AND public.sensitivity_rank(sessions.effective_clearance)
+             <= public.sensitivity_rank(wm.clearance)
+         AND (
+           public.effective_member_team_compartments(wm.user_id, wm.workspace_id) IS NULL
+           OR sessions.context_compartments <@
+              public.effective_member_team_compartments(wm.user_id, wm.workspace_id)
+         )
+    )
+  );
 
 COMMIT;

@@ -13,6 +13,7 @@
  */
 
 import type { AccessContext } from '../security/access-context.js'
+import type { Sensitivity } from '../security/sensitivity.js'
 
 export const TASK_STATUSES = ['todo', 'in_progress', 'in_review', 'blocked', 'done', 'archived'] as const
 export type TaskRecordStatus = (typeof TASK_STATUSES)[number]
@@ -57,6 +58,9 @@ export type TaskRecord = {
   parentId: string | null
   externalRef: TaskExternalRef
   attributes: TaskAttributes
+  sensitivity?: Sensitivity
+  compartments?: string[]
+  projectIds?: string[]
   createdAt: Date
   updatedAt: Date
 }
@@ -68,7 +72,7 @@ export type TaskRecord = {
  */
 export type TaskListRow = Pick<
   TaskRecord,
-  'id' | 'workspaceId' | 'title' | 'status' | 'assigneeId' | 'due' | 'tags' | 'parentId' | 'attributes' | 'updatedAt'
+  'id' | 'workspaceId' | 'title' | 'status' | 'assigneeId' | 'due' | 'tags' | 'parentId' | 'attributes' | 'sensitivity' | 'compartments' | 'projectIds' | 'updatedAt'
 >
 
 export type TaskListFilters = {
@@ -77,6 +81,7 @@ export type TaskListFilters = {
   dueBefore?: Date
   dueAfter?: Date
   tag?: string
+  projectId?: string | null
   parentId?: string
   includeArchived?: boolean
   limit?: number
@@ -117,6 +122,8 @@ export type TaskStore = {
     attributes?: TaskAttributes
     /** Compartment set (MLS category axis) to stamp on the row. Default '{}'. */
     compartments?: string[]
+    /** Stable Project association. Empty means Workspace General. */
+    projectIds?: string[]
     /** Fresh-insert source; default 'user'; synthesis + Pipeline B pass 'extracted' so the row surfaces in Brain Reviews. */
     source?: 'user' | 'extracted'
     /**
@@ -180,7 +187,11 @@ export type TaskStore = {
     userId: string,
     id: string,
     fields: TaskUpdateFields,
-    opts?: { writtenBy?: TaskWriteActor },
+    opts?: {
+      writtenBy?: TaskWriteActor
+      /** High-water scope inherited by the successor; never clears old scope. */
+      scope?: { compartments: string[]; projectIds: string[] }
+    },
   ): Promise<TaskRecord | null>
 
   /**

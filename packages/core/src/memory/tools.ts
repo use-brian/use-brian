@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto'
 import type { AccessContext } from '../security/access-context.js'
 import type { Sensitivity } from '../security/sensitivity.js'
 import { maxSensitivity, researchWriteFloor } from '../security/sensitivity.js'
-import { unionCompartments } from '../security/compartments.js'
+import { resolveWriteScope, scopeEvidenceFromRows } from '../security/context-scope.js'
 import { looksLikeCronOperationalState } from '../consolidation/phases.js'
 import type { EntityStore, EntityLinksStore } from '../entities/types.js'
 import { applyExplicitLinks, explicitLinksField, formatLinksSummary } from '../entities/explicit-links.js'
@@ -35,6 +35,7 @@ function viewerCtx(context: ToolContext): AccessContext {
     assistantKind: context.assistantKind ?? 'standard',
     clearance: context.clearance,
     compartments: context.compartments,
+    projectIds: context.projectIds,
     clientSelfMemory: context.clientSelfMemory,
   }
 }
@@ -281,18 +282,43 @@ export function createMemoryTools(
         // workspace's memory by id (WS3 read/write-asymmetry fix). Ingested
         // third-party content reaches this tool, so the scope is load-bearing.
 
-        // Update existing — only include defined fields.
+        const existing = await store.getById(viewerCtx(context), resolvedId)
+        if (!existing) return { data: memoryNotFound(input.id), isError: true }
+
+        // Update existing — only include defined fields, then carry the old
+        // row plus this turn's high-water evidence into the successor.
         const updates: Record<string, unknown> = {}
         if (input.summary !== undefined) updates.summary = input.summary
         if (input.detail !== undefined) updates.detail = input.detail
         if (input.tags !== undefined) {
           let replacementTags = input.tags
           if (context.clientSelfMemory) {
-            const existing = await store.getById(viewerCtx(context), resolvedId)
-            replacementTags = mergeClientMemoryTags(existing?.tags ?? [], input.tags)
+            replacementTags = mergeClientMemoryTags(existing.tags, input.tags)
           }
           updates.tags = replacementTags
         }
+        const legacyEvidence = context.scopeAccumulator
+          ? context.scopeAccumulator.evidence
+          : {
+              sensitivity: context.sensitivity?.max,
+              compartments: context.compartmentAccumulator?.compartments,
+            }
+        const updateStamp = resolveWriteScope({
+          sensitivity: maxSensitivity(
+            existing.sensitivity,
+            researchWriteFloor(legacyEvidence.sensitivity, context.researchMode),
+          ),
+          baseCompartments: existing.compartments,
+          baseProjectIds: existing.projectIds,
+          explicitCompartments: context.memoryWriteCompartments ?? context.assistantDefaultCompartments,
+          explicitProjectIds: context.assistantDefaultProjectIds,
+          evidence: { ...legacyEvidence, sensitivity: undefined },
+          compartmentGrant: context.assistantCompartments ?? context.compartments,
+          projectGrant: context.assistantProjectIds ?? context.projectIds,
+        })
+        updates.sensitivity = updateStamp.sensitivity
+        updates.compartments = updateStamp.compartments
+        updates.projectIds = updateStamp.projectIds
 
         // Wrap in try/catch so malformed-UUID errors (when resolution above
         // didn't find a match and we're falling through with a non-UUID) are
@@ -337,7 +363,10 @@ export function createMemoryTools(
       // self-heal sweeps.
       const stampedSensitivityForScope: 'public' | 'internal' | 'confidential' =
         maxSensitivity(
-          researchWriteFloor(context.sensitivity?.max, context.researchMode),
+          researchWriteFloor(
+            context.scopeAccumulator?.sensitivity ?? context.sensitivity?.max,
+            context.researchMode,
+          ),
           context.memoryWriteSensitivityFloor ?? 'public',
         )
       const scopeDecision = decideMemoryScope({
@@ -381,17 +410,27 @@ export function createMemoryTools(
       // public web, so internal-tier brain-first orientation reads don't
       // raise the floor (confidential still does). See researchWriteFloor.
       const stampedSensitivity: Sensitivity = maxSensitivity(
-        researchWriteFloor(context.sensitivity?.max, context.researchMode),
+        researchWriteFloor(
+          context.scopeAccumulator?.sensitivity ?? context.sensitivity?.max,
+          context.researchMode,
+        ),
         context.memoryWriteSensitivityFloor ?? 'public',
       )
       // Compartment stamp (MLS category axis): the high-water union of
       // compartments READ this turn (the laundering guard) + the assistant's
       // `default_compartments` auto-tag. Explicit per-write compartments arrive
       // with the tool-surface slice. See docs/plans/compartment-axis.md.
-      const stampedCompartments = unionCompartments(
-        context.compartmentAccumulator?.compartments,
-        context.memoryWriteCompartments ?? context.assistantDefaultCompartments,
-      )
+      let createStamp = resolveWriteScope({
+        sensitivity: stampedSensitivity,
+        baseCompartments: context.memoryWriteCompartments ?? context.assistantDefaultCompartments,
+        baseProjectIds: context.assistantDefaultProjectIds,
+        evidence: context.scopeAccumulator
+          ? { ...context.scopeAccumulator.evidence, sensitivity: undefined }
+          : { compartments: context.compartmentAccumulator?.compartments },
+        compartmentGrant: context.assistantCompartments ?? context.compartments,
+        projectGrant: context.assistantProjectIds ?? context.projectIds,
+      })
+      let stampedCompartments = createStamp.compartments
 
       // Voice tag is a team-scope-only concept — voice rules apply to
       // a team's distribution assistant, never to a personal assistant.
@@ -477,6 +516,16 @@ export function createMemoryTools(
           }
         }
         noteEntity = { id: entity.id, displayName: entity.displayName, kind: entity.kind }
+        context.scopeAccumulator?.note(scopeEvidenceFromRows([entity]))
+        createStamp = resolveWriteScope({
+          sensitivity: stampedSensitivity,
+          baseCompartments: context.memoryWriteCompartments ?? context.assistantDefaultCompartments,
+          baseProjectIds: context.assistantDefaultProjectIds,
+          evidence: context.scopeAccumulator,
+          compartmentGrant: context.assistantCompartments ?? context.compartments,
+          projectGrant: context.assistantProjectIds ?? context.projectIds,
+        })
+        stampedCompartments = createStamp.compartments
         // Auto-tag 'note' per spec; preserve user-supplied tags + de-dupe.
         const baseTags = input.tags ?? []
         effectiveTags = baseTags.includes('note') ? baseTags : [...baseTags, 'note']
@@ -506,6 +555,7 @@ export function createMemoryTools(
         workspaceId: effectiveScope === 'team' ? context.workspaceId! : undefined,
         sensitivity: stampedSensitivity,
         compartments: stampedCompartments,
+        projectIds: createStamp.projectIds,
         createdByUserId: context.userId,
         createdByAssistantId: context.assistantId,
       })
@@ -536,6 +586,8 @@ export function createMemoryTools(
             userId: context.userId,
             assistantId: context.assistantId,
             sensitivity: stampedSensitivity,
+            compartments: memory.compartments,
+            projectIds: memory.projectIds,
           })
         } catch (err) {
           console.debug('CRM-note link write failed:', err)
@@ -553,6 +605,8 @@ export function createMemoryTools(
           sourceId: memory.id,
           source: 'model',
           links: input.links,
+          compartments: memory.compartments,
+          projectIds: memory.projectIds,
         })
         return {
           data: `Saved note [${memory.id}] on ${noteEntity.displayName}: ${memory.summary}${formatLinksSummary(linksSummary)}`,
@@ -571,6 +625,8 @@ export function createMemoryTools(
         sourceId: memory.id,
         source: 'model',
         links: context.workspaceId ? input.links : undefined,
+        compartments: memory.compartments,
+        projectIds: memory.projectIds,
       })
       // Return the FULL UUID so the model can round-trip it cleanly on a
       // later update. Returning just the 8-char prefix (as before) led to
@@ -633,6 +689,7 @@ export function createMemoryTools(
             detail: memory.detail,
             tags: memory.tags,
           },
+          scopeEvidence: scopeEvidenceFromRows([memory]),
         }
       }
 
@@ -682,6 +739,7 @@ export function createMemoryTools(
             detail: m.detail,
             tags: m.tags,
           })),
+          scopeEvidence: scopeEvidenceFromRows(results),
         }
       }
 

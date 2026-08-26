@@ -20,6 +20,9 @@ export type CachedFile = {
    */
   artifactFileId?: string | null
   artifactSegmentCount?: number | null
+  sensitivity?: 'public' | 'internal' | 'confidential'
+  compartments?: string[]
+  projectIds?: string[]
 }
 
 export type FileStore = {
@@ -42,6 +45,8 @@ export type FileStore = {
     userId?: string | null
     assistantId?: string | null
     sensitivity?: 'public' | 'internal' | 'confidential'
+    compartments?: string[]
+    projectIds?: string[]
   }): Promise<CachedFile>
 
   /**

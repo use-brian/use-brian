@@ -28,6 +28,8 @@ export type ChatEpisodeInput = {
   content: string
   occurredAt: Date
   messageIdRange: [string, string]
+  compartments?: string[]
+  projectIds?: string[]
   /** Immutable workspace lane captured by the triggering compaction request. */
   llm?: WorkspaceLlmLane
 }
@@ -43,6 +45,9 @@ export type BrainEpisodeInput = {
   occurredAt: Date
   sourceLabel?: string
   sensitivity?: EpisodeSensitivity
+  /** Trusted source/root scope; never accepted from an untrusted request body. */
+  compartments?: string[]
+  projectIds?: string[]
   /**
    * Override the Episode's `source_kind` (default the closed impl uses for a
    * generic text ingest). Doc-page distillation passes `'doc_page'` so the

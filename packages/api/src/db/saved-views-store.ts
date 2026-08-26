@@ -55,6 +55,7 @@ const FULL_SELECT = `
   nest_parent_id AS "nestParentId",
   position,
   teamspace_id   AS "teamspaceId",
+  project_id     AS "projectId",
   full_width     AS "fullWidth",
   clearance,
   origin_prompt  AS "originPrompt",
@@ -82,6 +83,7 @@ const LIST_SELECT = `
   nest_parent_id AS "nestParentId",
   position,
   teamspace_id   AS "teamspaceId",
+  project_id     AS "projectId",
   updated_at     AS "updatedAt"
 `
 
@@ -101,6 +103,7 @@ type FullRow = {
   nestParentId: string | null
   position: number
   teamspaceId: string | null
+  projectId: string | null
   fullWidth: boolean
   clearance: 'public' | 'internal' | 'confidential'
   anchorKey: string | null
@@ -128,6 +131,7 @@ type ListRow = {
   nestParentId: string | null
   position: number
   teamspaceId: string | null
+  projectId: string | null
   anchorKey: string | null
   updatedAt: Date
 }
@@ -151,6 +155,7 @@ function rowToFull(row: FullRow): SavedView {
     nestParentId: row.nestParentId,
     position: row.position,
     teamspaceId: row.teamspaceId,
+    projectId: row.projectId,
     fullWidth: row.fullWidth,
     clearance: row.clearance,
     originPrompt: row.originPrompt,
@@ -178,6 +183,7 @@ function rowToList(row: ListRow): SavedViewListRow {
     nestParentId: row.nestParentId,
     position: row.position,
     teamspaceId: row.teamspaceId,
+    projectId: row.projectId,
     updatedAt: row.updatedAt,
   }
 }
@@ -405,6 +411,10 @@ export function createDbSavedViewStore(
         sets.push(`linked_recording_id = $${idx++}`)
         values.push(fields.linkedRecordingId)
       }
+      if (fields.projectId !== undefined) {
+        sets.push(`project_id = $${idx++}`)
+        values.push(fields.projectId)
+      }
 
       if (sets.length === 0) {
         // No-op update — return current row unchanged.
@@ -497,7 +507,7 @@ export function createDbSavedViewStore(
       return result.rows.length > 0
     },
 
-    async createDraft({ userId, workspaceId, name, nameOrigin, icon, entity, viewType, binding, page, nestParentId, autoPruneDays, originPrompt, anchorKey, writtenBy, deferCreatedEvent, teamspaceId, state }) {
+    async createDraft({ userId, workspaceId, name, nameOrigin, icon, entity, viewType, binding, page, nestParentId, autoPruneDays, originPrompt, anchorKey, writtenBy, deferCreatedEvent, teamspaceId, projectId, state }) {
       // Born-saved rows are durable artifacts (a paid synthesis brief), not
       // speculative renders: no prune date at all, so neither the daily prune
       // worker nor a later `unsave` can strand them on an expired timestamp.
@@ -545,7 +555,7 @@ export function createDbSavedViewStore(
         // a private page, never an insert into a teamspace the caller can't
         // see (the policy WITH CHECK backstops that anyway).
         `INSERT INTO saved_views
-           (workspace_id, created_by, name, name_origin, description, icon, entity, view_type, binding, page, state, nest_parent_id, position, origin_prompt, auto_prune_at, anchor_key, created_event_pending, teamspace_id)
+           (workspace_id, created_by, name, name_origin, description, icon, entity, view_type, binding, page, state, nest_parent_id, position, origin_prompt, auto_prune_at, anchor_key, created_event_pending, teamspace_id, project_id)
          VALUES ($1, $2, $3, $4, NULL, $10, $5, $6, $7, $8, $17, $9,
            (SELECT COALESCE(MAX(position) + 1, 0) FROM saved_views
               WHERE nest_parent_id IS NOT DISTINCT FROM $9 AND workspace_id = $1),
@@ -554,6 +564,11 @@ export function createDbSavedViewStore(
              WHEN $15::boolean THEN $16::uuid
              WHEN $9::uuid IS NOT NULL THEN (SELECT p.teamspace_id FROM saved_views p WHERE p.id = $9)
              ELSE (SELECT t.id FROM teamspaces t WHERE t.workspace_id = $1 AND t.is_default = true)
+           END,
+           CASE
+             WHEN $18::boolean THEN $19::uuid
+             WHEN $9::uuid IS NOT NULL THEN (SELECT p.project_id FROM saved_views p WHERE p.id = $9)
+             ELSE NULL
            END)
          RETURNING ${FULL_SELECT}`,
         [
@@ -574,6 +589,8 @@ export function createDbSavedViewStore(
           teamspaceId !== undefined,
           teamspaceId ?? null,
           bornState,
+          projectId !== undefined,
+          projectId ?? null,
         ],
       )
       const view = rowToFull(result.rows[0])
@@ -684,7 +701,7 @@ export function createDbSavedViewStore(
 
     // ── Doc page-tree (migration 210) ──────────────────────────────
 
-    async reparent(userId, id, newNestParentId, position, writtenBy, teamspaceId) {
+    async reparent(userId, id, newNestParentId, position, writtenBy, teamspaceId, projectId, contextMoveConfirmed) {
       // 1. Cycle guard. Walk up the ancestor chain from the destination
       //    parent (RLS-scoped reads) and refuse the move if it would form
       //    a loop. Done before opening the write transaction so a rejected
@@ -740,8 +757,8 @@ export function createDbSavedViewStore(
         // IS NULL` would otherwise span every workspace the user can see).
         // `teamspace_id` rides along for the destination-teamspace resolve
         // below (migration 313).
-        const found = await client.query<{ workspaceId: string; name: string; teamspaceId: string | null }>(
-          `SELECT workspace_id AS "workspaceId", name, teamspace_id AS "teamspaceId"
+        const found = await client.query<{ workspaceId: string; name: string; teamspaceId: string | null; projectId: string | null }>(
+          `SELECT workspace_id AS "workspaceId", name, teamspace_id AS "teamspaceId", project_id AS "projectId"
              FROM saved_views WHERE id = $1 FOR UPDATE`,
           [id],
         )
@@ -752,6 +769,7 @@ export function createDbSavedViewStore(
         const workspaceId = found.rows[0].workspaceId
         const movedName = found.rows[0].name
         const currentTeamspaceId = found.rows[0].teamspaceId
+        const currentProjectId = found.rows[0].projectId
 
         // Resolve the destination teamspace (migration 313):
         //  - under a page parent → the child always adopts the parent's
@@ -760,9 +778,10 @@ export function createDbSavedViewStore(
         //    or null = Private), else keep the current one (plain reorder /
         //    legacy promote-to-root).
         let destTeamspaceId: string | null
+        let destProjectId: string | null
         if (newNestParentId !== null) {
-          const parentRow = await client.query<{ teamspaceId: string | null }>(
-            `SELECT teamspace_id AS "teamspaceId" FROM saved_views WHERE id = $1`,
+          const parentRow = await client.query<{ teamspaceId: string | null; projectId: string | null }>(
+            `SELECT teamspace_id AS "teamspaceId", project_id AS "projectId" FROM saved_views WHERE id = $1`,
             [newNestParentId],
           )
           if (parentRow.rows.length === 0) {
@@ -772,8 +791,17 @@ export function createDbSavedViewStore(
             return false
           }
           destTeamspaceId = parentRow.rows[0].teamspaceId
+          destProjectId = parentRow.rows[0].projectId
         } else {
           destTeamspaceId = teamspaceId === undefined ? currentTeamspaceId : teamspaceId
+          destProjectId = projectId === undefined ? currentProjectId : projectId
+        }
+        if (
+          (destTeamspaceId !== currentTeamspaceId || destProjectId !== currentProjectId) &&
+          contextMoveConfirmed !== true
+        ) {
+          await client.query('ROLLBACK')
+          return false
         }
 
         // Open a gap at the requested slot among the destination siblings,
@@ -796,9 +824,9 @@ export function createDbSavedViewStore(
         )
         await client.query(
           `UPDATE saved_views
-              SET nest_parent_id = $1, position = $2, teamspace_id = $4
+              SET nest_parent_id = $1, position = $2, teamspace_id = $4, project_id = $5
             WHERE id = $3`,
-          [newNestParentId, position, id, destTeamspaceId],
+          [newNestParentId, position, id, destTeamspaceId, destProjectId],
         )
 
         // Cascade the teamspace across the moved page's whole descendant
@@ -807,7 +835,7 @@ export function createDbSavedViewStore(
         // the caller can see the subtree (it shared the moved row's old
         // teamspace), and the policy's WITH CHECK refuses a destination the
         // caller isn't a member of.
-        if (destTeamspaceId !== currentTeamspaceId) {
+        if (destTeamspaceId !== currentTeamspaceId || destProjectId !== currentProjectId) {
           await client.query(
             `WITH RECURSIVE subtree AS (
                SELECT id FROM saved_views WHERE id = $1
@@ -815,9 +843,9 @@ export function createDbSavedViewStore(
                SELECT sv.id FROM saved_views sv JOIN subtree s ON sv.nest_parent_id = s.id
              )
              UPDATE saved_views
-                SET teamspace_id = $2
+                SET teamspace_id = $2, project_id = $3
               WHERE id IN (SELECT id FROM subtree)`,
-            [id, destTeamspaceId],
+            [id, destTeamspaceId, destProjectId],
           )
         }
 

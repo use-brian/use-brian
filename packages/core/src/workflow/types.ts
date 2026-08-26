@@ -697,6 +697,9 @@ export type WorkflowRecord = {
    * the definition. NULL = a normal user-authored workflow.
    */
   managedBy: string | null
+  /** Immutable Team/Project binding used for future run snapshots. */
+  contextGroupId?: string | null
+  contextProjectId?: string | null
   createdAt: Date
   updatedAt: Date
 }
@@ -775,6 +778,11 @@ export type WorkflowRunRecord = {
   error: Record<string, unknown> | null
   /** Mig 279. Cross-run outcome; null until the run terminates. */
   outcome: WorkflowRunOutcome | null
+  /** Scope snapshot fixed when the run row is created. */
+  contextGroupId?: string | null
+  contextProjectId?: string | null
+  contextCompartments?: string[]
+  contextProjectIds?: string[]
   startedAt: Date
   finishedAt: Date | null
   lastActiveAt: Date
@@ -810,6 +818,8 @@ export type WorkflowStore = {
     researchMode?: boolean
     /** Mig 411. Product-feature ownership marker (e.g. `'knowledge'`). */
     managedBy?: string | null
+    contextGroupId?: string | null
+    contextProjectId?: string | null
   }): Promise<WorkflowRecord>
 
   getById(userId: string, id: string): Promise<WorkflowRecord | null>
@@ -859,6 +869,8 @@ export type WorkflowStore = {
       lifecycleState: WorkflowLifecycleState
       /** Mig 308. The auto-archive veto flag. */
       pinned: boolean
+      contextGroupId: string | null
+      contextProjectId: string | null
     }>,
   ): Promise<WorkflowRecord | null>
 

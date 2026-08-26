@@ -23,6 +23,7 @@ import {
   runMemoryNudge, sanitize as sanitizeAnalytics, createConfirmationResolver,
   classifyTopic, fetchEpisodicContext, filterToolsByCapabilities,
   modelToCompactionTier, SensitivityAccumulator, CompartmentAccumulator,
+  ContextScopeAccumulator,
   buildWorkspaceFilesContext, buildUploadPolicyBlock, AttachmentCollector,
   EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote,
   latestWorkflowProposalReceipt,
@@ -38,7 +39,11 @@ import { notifyBrainWriteIfMatch } from '../brain-stream/notify.js'
 import { recordOverheadUsage } from './_overhead-usage.js'
 import { recordExternalCostFromMeta } from '../billing-external.js'
 import { composeRecoveryMessage } from './_recovery-message.js'
-import { CUSTOM_MODEL_IMAGE_FALLBACK_NOTICE, CUSTOM_MODEL_IMAGE_REJECTION } from './_channel-error-text.js'
+import {
+  CONTEXT_NOT_AVAILABLE_MESSAGE,
+  CUSTOM_MODEL_IMAGE_FALLBACK_NOTICE,
+  CUSTOM_MODEL_IMAGE_REJECTION,
+} from './_channel-error-text.js'
 import { decideImageTurnRoute } from '../custom-llm-runtime.js'
 import { resolveReplyText } from './_reply-context.js'
 import {
@@ -77,7 +82,14 @@ import { createDbKnowledgeStore } from '../db/knowledge-store.js'
 import { createSyncCredentialProvider } from '../knowledge/sync-credentials.js'
 import { buildBrowserEscalationPrompt, buildUnavailableCapabilitiesPrompt, injectSkills, checkUsageBudget } from './route-helpers.js'
 import type { CreditBudgetGate } from './route-helpers.js'
-import { getConnectorUserId, getWorkspacePurpose, getWorkspacePlan, getWorkspaceRoleSystem, resolveReadCeilingsSystem } from '../db/workspace-store.js'
+import { getConnectorUserId, getWorkspacePurpose, getWorkspacePlan, getWorkspaceRoleSystem } from '../db/workspace-store.js'
+import {
+  ContextNotAvailableError,
+  formatActiveWorkspaceContext,
+  noteAutomaticScopeEvidence,
+  resolveTurnScopeSystem,
+} from '../context-scope/resolve-turn-scope.js'
+import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
 import {
   buildChannelSessionKey,
   listPendingRecordingConfirmationsForSession,
@@ -321,6 +333,10 @@ export type ChannelPipelineParams = {
     compartments?: string[] | null
     /** Auto-stamp compartments on writes this assistant authors (⊆ compartments). */
     defaultCompartments?: string[]
+    teamScopeMode?: 'legacy' | 'all' | 'assigned'
+    defaultWorkspaceGroupId?: string | null
+    projectScopeMode?: 'all' | 'assigned'
+    defaultProjectId?: string | null
     /** Drives the primary widen in the universal access predicate. */
     kind: 'primary' | 'standard' | 'app'
   }
@@ -915,6 +931,32 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     channelType,
     channelId: sessionChannelId,
   })
+  let turnScope
+  try {
+    turnScope = await resolveTurnScopeSystem({
+      userId,
+      assistant: {
+        ...assistant,
+        compartments: assistant.compartments ?? null,
+      },
+      workspaceId: assistant.workspaceId,
+      session,
+    })
+  } catch (err) {
+    if (!(err instanceof ContextNotAvailableError)) throw err
+    try {
+      await hooks.sendError(new Error(CONTEXT_NOT_AVAILABLE_MESSAGE))
+    } finally {
+      await hooks.onCleanup?.()
+    }
+    return
+  }
+  const clearance = turnScope.access.clearance ?? assistant.clearance
+  const compartments = turnScope.effectiveCompartments
+  const scopeAccumulator = new ContextScopeAccumulator({
+    compartments: turnScope.writeCompartments,
+    projectIds: turnScope.writeProjectIds,
+  })
 
   // Expose session ID to channel hooks (e.g., WhatsApp confirmation store)
   if (params.sessionRef) params.sessionRef.id = session.id
@@ -1336,6 +1378,8 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     usageStore,
     userMessageId: userMessageRow.id,
     persistLongTermContext: !externalGuest,
+    compartments: turnScope.writeCompartments,
+    projectIds: turnScope.writeProjectIds,
   })
   let messages: Message[] = compactionResult.messages
 
@@ -1350,31 +1394,18 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // with no `workspace_members` row (shadow users) resolve to `public` — most
   // restrictive. Writes keep the assistant's clearance (`assistantClearance`
   // on the ToolContext below).
-  const { clearance, compartments } = await resolveReadCeilingsSystem(
-    userId,
-    assistant.workspaceId,
-    assistant.clearance,
-    assistant.compartments ?? null,
-  )
-
   // ── Memory context (identified users only) ──
   // Per-turn callers use the ranked+capped index slice. See
   // docs/architecture/context-engine/memory-system.md → "Index cap".
   let memoryContext = ''
   if (isIdentified) {
-    const viewerCtx = {
-      workspaceId: assistant.workspaceId ?? '',
-      userId,
-      assistantId: assistant.id,
-      assistantKind: assistant.kind,
-      clearance,
-      compartments,
-    }
+    const viewerCtx = turnScope.access
     const [soul, identityMemories, rankedIndex] = await Promise.all([
       memoryStore.getSoul(assistant.id, userId, 'Use Brian'),
       memoryStore.getIdentity(viewerCtx),
       memoryStore.getIndexRanked(viewerCtx, PER_TURN_INDEX_CAP),
     ])
+    noteAutomaticScopeEvidence(scopeAccumulator, [...identityMemories, ...rankedIndex.rows])
     for (const m of identityMemories) sensitivityAccumulator.note(m.sensitivity)
     for (const r of rankedIndex.rows) sensitivityAccumulator.note(r.sensitivity)
     let workspaceIdentityMems: typeof identityMemories = []
@@ -1388,6 +1419,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
       ])
       for (const m of workspaceIdentityMems) sensitivityAccumulator.note(m.sensitivity)
       for (const r of workspaceIdx) sensitivityAccumulator.note(r.sensitivity)
+      noteAutomaticScopeEvidence(scopeAccumulator, [...workspaceIdentityMems, ...workspaceIdx])
     }
     memoryContext = buildMemoryContext({
       soul,
@@ -1466,9 +1498,11 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
           // Read ceiling = min(member, assistant) — see `clearance` above.
           clearance,
           compartments,
+          projectIds: turnScope.effectiveProjectIds,
         },
         PER_TURN_FILES_INDEX_CAP,
       )
+      noteAutomaticScopeEvidence(scopeAccumulator, rows)
       workspaceFilesContext = buildWorkspaceFilesContext(rows)
     } catch (err) {
       console.error(`[${channelType}] workspace-files index fetch failed:`, err)
@@ -1572,6 +1606,8 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   const privateRuntimeContextParts = splitPrompt.privateRuntimeContext
     ? [splitPrompt.privateRuntimeContext]
     : []
+  const activeWorkspaceContext = formatActiveWorkspaceContext(turnScope)
+  if (activeWorkspaceContext) privateRuntimeContextParts.push(activeWorkspaceContext)
   if (params.realtimeThreadTarget) {
     const bound = params.realtimeThreadTarget.taskIds.length > 0
       ? params.realtimeThreadTarget.taskIds.map((id) => `- ${id}`).join('\n')
@@ -1732,6 +1768,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         connectorInstanceStore,
         workspaceToolPolicyStore,
         assistantTeamId: assistant.workspaceId ?? null,
+        contextScope: turnScope,
         // Workspace-files byte layer — `gmailSendMessage` attachments on
         // channel turns (docs/architecture/integrations/gmail.md).
         filesApi,
@@ -2048,12 +2085,17 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
 
   // ── Query loop ──
   try {
+    const scopedTools = bindToolsToAgentAccess(allTools, {
+      clearance,
+      compartments: turnScope.effectiveCompartments,
+      projectIds: turnScope.effectiveProjectIds,
+    })
     for await (const event of queryLoop({
       provider: turnProvider, model,
       maxTokens: customLlmRuntime?.maxTokens,
       inputTokenLimit: customLlmRuntime?.inputTokenLimit,
       systemPrompt: systemPromptWithPreflight,
-      messages, tools: allTools,
+      messages, tools: scopedTools,
       context: {
         userId, assistantId: assistant.id, sessionId: session.id,
         appId: 'Use Brian', channelType, channelId,
@@ -2083,14 +2125,20 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         channelDocumentsSupported: params.channelDocumentsSupported,
         sensitivity: sensitivityAccumulator,
         compartmentAccumulator,
+        scopeAccumulator,
         evidence: replyEvidence,
         // `clearance` is the read ceiling = min(member, assistant);
         // `assistantClearance` is the write ceiling (the assistant's tier).
         clearance,
         compartments,
+        projectIds: turnScope.effectiveProjectIds,
+        activeGroupId: turnScope.activeGroupId,
+        activeProjectId: turnScope.activeProjectId,
         assistantClearance: assistant.clearance,
-        assistantCompartments: assistant.compartments ?? null,
-        assistantDefaultCompartments: assistant.defaultCompartments ?? [],
+        assistantCompartments: turnScope.effectiveCompartments,
+        assistantDefaultCompartments: turnScope.writeCompartments,
+        assistantProjectIds: turnScope.effectiveProjectIds,
+        assistantDefaultProjectIds: turnScope.writeProjectIds,
       },
       confirmationResolver,
       confirmationTimeoutMs: 300_000,

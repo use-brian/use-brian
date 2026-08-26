@@ -59,6 +59,11 @@ export type Session = {
    * check. NULL for owner-scoped sessions.
    */
   effectiveClearance: string | null
+  /** Immutable Team/Project binding for this conversation (migration 473). */
+  contextGroupId: string | null
+  contextProjectId: string | null
+  contextCompartments: string[]
+  contextLockedAt: Date | null
   createdAt: Date
   lastActiveAt: Date
 }
@@ -252,16 +257,43 @@ export async function findOrCreateSession(params: {
    * resolves; omit (→ NULL) otherwise. Fixed at insert.
    */
   effectiveClearance?: string | null
+  /** Context is fixed on insert; the first message locks it in the database. */
+  contextGroupId?: string | null
+  contextProjectId?: string | null
+  contextCompartments?: string[]
 }): Promise<Session> {
   const appId = params.appId ?? 'Use Brian'
   const appOrigin = params.appOrigin ?? null
   const visibility = params.visibility ?? 'owner'
   const workspaceId = params.workspaceId ?? null
   const effectiveClearance = params.effectiveClearance ?? null
+  const inheritAssistantGroup = params.contextGroupId === undefined
+  const inheritAssistantProject = params.contextProjectId === undefined
+  const contextGroupId = params.contextGroupId ?? null
+  const contextProjectId = params.contextProjectId ?? null
+  const contextCompartments = params.contextCompartments ?? null
 
   const result = await query<Session>(
-    `INSERT INTO sessions (assistant_id, user_id, channel_type, channel_id, app_id, app_origin, visibility, workspace_id, effective_clearance)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    `INSERT INTO sessions (
+       assistant_id, user_id, channel_type, channel_id, app_id, app_origin,
+       visibility, workspace_id, effective_clearance, context_group_id,
+       context_project_id, context_compartments
+     )
+     SELECT $1, $2, $3, $4, $5, $6, $7,
+            COALESCE($8::uuid, a.workspace_id), $9,
+            selected.context_group_id, selected.context_project_id,
+            CASE
+              WHEN $12::text[] IS NOT NULL THEN $12::text[]
+              WHEN g.compartment_key IS NOT NULL THEN ARRAY[g.compartment_key]::text[]
+              ELSE ARRAY[]::text[]
+            END
+       FROM assistants a
+       CROSS JOIN LATERAL (
+         SELECT CASE WHEN $13::boolean THEN a.default_workspace_group_id ELSE $10::uuid END AS context_group_id,
+                CASE WHEN $14::boolean THEN a.default_project_id ELSE $11::uuid END AS context_project_id
+       ) selected
+       LEFT JOIN workspace_groups g ON g.id = selected.context_group_id
+      WHERE a.id = $1
      ON CONFLICT (assistant_id, user_id, channel_type, channel_id, app_id) DO UPDATE
        SET last_active_at = now()
      RETURNING id, assistant_id as "assistantId", user_id as "userId",
@@ -272,8 +304,27 @@ export async function findOrCreateSession(params: {
                downgrade_notice_sent as "downgradeNoticeSent",
                downgrade_notice_pin_message_id as "downgradeNoticePinMessageId",
                mode, visibility, effective_clearance as "effectiveClearance",
+               context_group_id as "contextGroupId",
+               context_project_id as "contextProjectId",
+               context_compartments as "contextCompartments",
+               context_locked_at as "contextLockedAt",
                created_at as "createdAt", last_active_at as "lastActiveAt"`,
-    [params.assistantId, params.userId, params.channelType, params.channelId, appId, appOrigin, visibility, workspaceId, effectiveClearance],
+    [
+      params.assistantId,
+      params.userId,
+      params.channelType,
+      params.channelId,
+      appId,
+      appOrigin,
+      visibility,
+      workspaceId,
+      effectiveClearance,
+      contextGroupId,
+      contextProjectId,
+      contextCompartments,
+      inheritAssistantGroup,
+      inheritAssistantProject,
+    ],
   )
 
   return result.rows[0]
@@ -302,6 +353,10 @@ export async function findSessionByChannel(params: {
             downgrade_notice_sent as "downgradeNoticeSent",
             downgrade_notice_pin_message_id as "downgradeNoticePinMessageId",
             mode, visibility, effective_clearance as "effectiveClearance",
+            context_group_id as "contextGroupId",
+            context_project_id as "contextProjectId",
+            context_compartments as "contextCompartments",
+            context_locked_at as "contextLockedAt",
             created_at as "createdAt", last_active_at as "lastActiveAt"
      FROM sessions
      WHERE assistant_id = $1 AND user_id = $2 AND channel_type = $3
@@ -376,9 +431,16 @@ async function createTransientBrainSession(params: {
 }): Promise<Session> {
   const result = await query<Session>(
     `INSERT INTO sessions (
-       assistant_id, user_id, channel_type, channel_id, app_id, transient
+       assistant_id, user_id, channel_type, channel_id, app_id, transient,
+       workspace_id, context_group_id, context_project_id, context_compartments
      )
-     VALUES ($1, $2, $3, $4, $5, TRUE)
+     SELECT a.id, $2, $3, $4, $5, TRUE, a.workspace_id,
+            a.default_workspace_group_id, a.default_project_id,
+            CASE WHEN g.compartment_key IS NULL THEN ARRAY[]::text[]
+                 ELSE ARRAY[g.compartment_key]::text[] END
+       FROM assistants a
+       LEFT JOIN workspace_groups g ON g.id = a.default_workspace_group_id
+      WHERE a.id = $1
      RETURNING id, assistant_id as "assistantId", user_id as "userId",
                channel_type as "channelType", channel_id as "channelId",
                app_id as "appId", app_origin as "appOrigin", status, compact_summary as "compactSummary",
@@ -387,6 +449,10 @@ async function createTransientBrainSession(params: {
                downgrade_notice_sent as "downgradeNoticeSent",
                downgrade_notice_pin_message_id as "downgradeNoticePinMessageId",
                mode, visibility, effective_clearance as "effectiveClearance",
+               context_group_id as "contextGroupId",
+               context_project_id as "contextProjectId",
+               context_compartments as "contextCompartments",
+               context_locked_at as "contextLockedAt",
                created_at as "createdAt", last_active_at as "lastActiveAt"`,
     [
       params.primaryAssistantId,
@@ -412,6 +478,10 @@ export async function findSessionById(id: string): Promise<Session | null> {
             downgrade_notice_sent as "downgradeNoticeSent",
             downgrade_notice_pin_message_id as "downgradeNoticePinMessageId",
             mode, visibility, effective_clearance as "effectiveClearance",
+            context_group_id as "contextGroupId",
+            context_project_id as "contextProjectId",
+            context_compartments as "contextCompartments",
+            context_locked_at as "contextLockedAt",
             created_at as "createdAt", last_active_at as "lastActiveAt"
      FROM sessions WHERE id = $1`,
     [id],

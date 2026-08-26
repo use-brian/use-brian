@@ -81,6 +81,8 @@ export type RecordingSynthesisArgs = {
   userId: string
   assistantId: string
   sensitivity: string
+  compartments?: string[]
+  projectIds?: string[]
   blueprintSlug: string
   /**
    * Where to file the brief page (the pre-flight destination picker's choice,
@@ -304,6 +306,8 @@ export function createRecordingSynthesizer(deps: RecordingSynthesizerDeps): Reco
         assistantId: args.assistantId,
         assistantKind: 'standard',
         sensitivity: args.sensitivity,
+        compartments: args.compartments ?? [],
+        projectIds: args.projectIds ?? [],
         ...(fullText ? { fullText } : {}),
       },
       blueprint,

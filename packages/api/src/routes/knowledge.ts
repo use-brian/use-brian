@@ -1437,7 +1437,14 @@ export function workspaceKnowledgeRoutes({
       }
       const result = await knowledgeRepoWriter.commitEntryUpdate({
         workspaceId: auth.workspaceId,
-        entry: { id: entry.id, path: entry.path, content: entry.content, sourceId: entry.sourceId },
+        entry: {
+          id: entry.id,
+          path: entry.path,
+          content: entry.content,
+          sourceId: entry.sourceId,
+          compartments: entry.compartments,
+          projectIds: entry.projectIds,
+        },
         newBody: content,
         changeSummary: `update ${entry.path} from knowledge reader`,
         requestedBy: { userId: auth.userId },

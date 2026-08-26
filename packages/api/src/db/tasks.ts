@@ -1,4 +1,5 @@
-import type { AccessContext, EntityLinksStore, TaskListFilters, TaskListRow, TaskRecord, TaskRecordStatus, TaskUpdateFields, TaskWriteActor } from '@use-brian/core'
+import { unionScopeRequirements } from '@use-brian/core'
+import type { AccessContext, EntityLinksStore, Sensitivity, TaskListFilters, TaskListRow, TaskRecord, TaskRecordStatus, TaskUpdateFields, TaskWriteActor } from '@use-brian/core'
 import { buildAccessPredicate } from './access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
 import { getAppPool, query, queryGated, queryWithRLS, rollbackAndRelease } from './client.js'
@@ -10,13 +11,15 @@ const FULL_SELECT = `
   id, workspace_id as "workspaceId", title, status,
   assignee_id as "assigneeId", due, tags,
   parent_id as "parentId", external_ref as "externalRef", attributes,
+  sensitivity, compartments, project_ids as "projectIds",
   created_at as "createdAt", updated_at as "updatedAt"
 `
 
 const COMPACT_SELECT = `
   id, workspace_id as "workspaceId", title, status,
   assignee_id as "assigneeId", due, tags,
-  parent_id as "parentId", attributes, updated_at as "updatedAt"
+  parent_id as "parentId", attributes, sensitivity, compartments,
+  project_ids as "projectIds", updated_at as "updatedAt"
 `
 
 type TaskRow = {
@@ -30,6 +33,9 @@ type TaskRow = {
   parentId: string | null
   externalRef: Record<string, unknown>
   attributes: Record<string, unknown>
+  sensitivity: Sensitivity
+  compartments: string[]
+  projectIds: string[]
   createdAt: Date
   updatedAt: Date
 }
@@ -44,6 +50,9 @@ type CompactRow = {
   tags: string[]
   parentId: string | null
   attributes: Record<string, unknown>
+  sensitivity: Sensitivity
+  compartments: string[]
+  projectIds: string[]
   updatedAt: Date
 }
 
@@ -59,6 +68,9 @@ function toRecord(row: TaskRow): TaskRecord {
     parentId: row.parentId,
     externalRef: row.externalRef ?? {},
     attributes: row.attributes ?? {},
+    sensitivity: row.sensitivity,
+    compartments: row.compartments ?? [],
+    projectIds: row.projectIds ?? [],
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   }
@@ -75,6 +87,9 @@ function toListRow(row: CompactRow): TaskListRow {
     tags: row.tags,
     parentId: row.parentId,
     attributes: row.attributes ?? {},
+    sensitivity: row.sensitivity,
+    compartments: row.compartments ?? [],
+    projectIds: row.projectIds ?? [],
     updatedAt: row.updatedAt,
   }
 }
@@ -154,6 +169,8 @@ export async function createTask(
     attributes?: Record<string, unknown>
     /** Compartment set (MLS category axis) to stamp on the row. Default '{}'. */
     compartments?: string[]
+    /** Stable Project association; at most one by schema. */
+    projectIds?: string[]
     /**
      * Fresh-insert `source`. Default `'user'` (interactive chat / API writes;
      * matches the mig-128 DB default). The structural-synthesis engine and
@@ -203,10 +220,21 @@ export async function createTask(
   // Other universal columns (sensitivity, source, valid_from) take
   // their schema defaults from migration 128.
   assertAuthorshipPresent('createTask', userId)
+  if ((params.projectIds?.length ?? 0) > 0) {
+    const validProject = await queryWithRLS<{ id: string }>(
+      userId,
+      `SELECT id FROM workspace_projects
+        WHERE workspace_id = $1 AND id = $2 AND status = 'active'`,
+      [params.workspaceId, params.projectIds![0]],
+    )
+    if (validProject.rows.length === 0 || params.projectIds!.length > 1) {
+      throw new Error('context_not_available: project')
+    }
+  }
   const result = await queryWithRLS<TaskRow>(
     userId,
-    `INSERT INTO tasks (workspace_id, title, status, assignee_id, due, tags, parent_id, external_ref, attributes, created_by_user_id, compartments, source, source_session_id, source_episode_id, created_by_assistant_id, source_start_ms)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+    `INSERT INTO tasks (workspace_id, title, status, assignee_id, due, tags, parent_id, external_ref, attributes, created_by_user_id, compartments, project_ids, source, source_session_id, source_episode_id, created_by_assistant_id, source_start_ms)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
      RETURNING ${FULL_SELECT}`,
     [
       params.workspaceId,
@@ -220,6 +248,7 @@ export async function createTask(
       JSON.stringify(params.attributes ?? {}),
       userId,
       params.compartments ?? [],
+      params.projectIds ?? [],
       params.source ?? 'user',
       params.sourceSessionId ?? null,
       params.sourceEpisodeId ?? null,
@@ -260,6 +289,8 @@ export async function createTask(
       workspaceId: task.workspaceId,
       source: 'user',
       userId,
+      compartments: task.compartments,
+      projectIds: task.projectIds,
     })
   }
   // Fire-and-forget `depends_on` edges from this task → each
@@ -271,6 +302,8 @@ export async function createTask(
       workspaceId: task.workspaceId,
       source: 'user',
       userId,
+      compartments: task.compartments,
+      projectIds: task.projectIds,
     })
   }
   return task
@@ -331,6 +364,15 @@ export async function listTasks(ctx: AccessContext, filters: TaskListFilters): P
     values.push(filters.tag)
     idx++
   }
+  if (filters.projectId !== undefined) {
+    if (filters.projectId === null) {
+      wheres.push('cardinality(project_ids) = 0')
+    } else {
+      wheres.push(`project_ids = ARRAY[$${idx}::uuid]`)
+      values.push(filters.projectId)
+      idx++
+    }
+  }
   if (filters.parentId) {
     wheres.push(`parent_id = $${idx}`)
     values.push(filters.parentId)
@@ -366,6 +408,8 @@ type OldTaskRow = {
   external_ref: Record<string, unknown>
   attributes: Record<string, unknown>
   sensitivity: string
+  compartments: string[]
+  project_ids: string[]
   user_id: string | null
   assistant_id: string | null
   source: string
@@ -490,6 +534,7 @@ export async function updateTask(
      *  An opts arg, NOT a `fields` key, so it can never trip the
      *  empty-patch no-op check or leak into the supersession write. */
     writtenBy?: TaskWriteActor
+    scope?: { compartments: string[]; projectIds: string[] }
   },
 ): Promise<TaskRecord | null> {
   if (Object.keys(fields).length === 0) {
@@ -528,7 +573,8 @@ export async function updateTask(
 
       const oldRes = await client.query<OldTaskRow>(
         `SELECT workspace_id, title, status, assignee_id, due, tags, parent_id, external_ref, attributes,
-                sensitivity, user_id, assistant_id, source, source_episode_id,
+                sensitivity, compartments, project_ids,
+                user_id, assistant_id, source, source_episode_id,
                 source_session_id, created_by_assistant_id, source_start_ms
          FROM tasks WHERE id = $1 AND valid_to IS NULL`,
         [liveId],
@@ -547,18 +593,22 @@ export async function updateTask(
       const newParentId = fields.parentId !== undefined ? fields.parentId : old.parent_id
       const newExternalRef = fields.externalRef !== undefined ? fields.externalRef : (old.external_ref ?? {})
       const newAttributes = fields.attributes !== undefined ? fields.attributes : (old.attributes ?? {})
+      const nextCompartments = unionScopeRequirements(old.compartments, opts?.scope?.compartments)
+      const nextProjectIds = unionScopeRequirements(old.project_ids, opts?.scope?.projectIds)
 
       const insertRes = await client.query<TaskRow>(
         `INSERT INTO tasks (
            workspace_id, title, status, assignee_id, due, tags, parent_id, external_ref, attributes,
-           sensitivity, user_id, assistant_id, source, source_episode_id,
+           sensitivity, compartments, project_ids,
+           user_id, assistant_id, source, source_episode_id,
            source_session_id, created_by_assistant_id, source_start_ms,
            created_by_user_id, valid_from, valid_to, superseded_by
          )
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb,
-                 $10, $11, $12, $13, $14,
-                 $15, $16, $17,
-                 $18, now(), NULL, NULL)
+                 $10, $11::text[], $12::uuid[],
+                 $13, $14, $15, $16,
+                 $17, $18, $19,
+                 $20, now(), NULL, NULL)
          RETURNING ${FULL_SELECT}`,
         [
           old.workspace_id,
@@ -571,6 +621,8 @@ export async function updateTask(
           JSON.stringify(newExternalRef),
           JSON.stringify(newAttributes),
           old.sensitivity,
+          nextCompartments,
+          nextProjectIds,
           old.user_id,
           old.assistant_id,
           old.source,
@@ -674,6 +726,8 @@ export async function updateTask(
           workspaceId: newTask.workspaceId,
           source: 'user',
           userId,
+          compartments: newTask.compartments,
+          projectIds: newTask.projectIds,
         })
       }
       return newTask

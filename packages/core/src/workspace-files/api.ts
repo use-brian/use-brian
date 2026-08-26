@@ -36,6 +36,11 @@ export type FilesContext = {
    * `null`/`undefined` = universe (clause dropped). See docs/plans/compartment-axis.md.
    */
   compartments?: string[] | null
+  /** Effective Project read grant. Null/undefined is universe. */
+  projectIds?: string[] | null
+  /** Trusted high-water write stamp resolved from the turn. */
+  writeCompartments?: string[]
+  writeProjectIds?: string[]
 }
 
 export type FilesQuotaError = {

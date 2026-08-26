@@ -8,6 +8,7 @@
 import { randomUUID } from 'node:crypto'
 import {
   canonicalScopeGrant,
+  intersectScopeGrants,
   normalizeProjectName,
   type ScopeGrant,
 } from '@use-brian/core'
@@ -61,13 +62,18 @@ export type AssistantContextPrincipal = {
   defaultProjectId: string | null
 }
 
-type GroupGrantRow = { readAll: boolean; compartmentKey: string | null }
+type GroupGrantRow = {
+  readAll: boolean
+  ownCompartmentKey: string
+  compartmentKey: string | null
+}
 
 function groupRowsToGrant(rows: GroupGrantRow[]): ScopeGrant {
   if (rows.some((row) => row.readAll)) return null
-  return canonicalScopeGrant(rows.flatMap((row) => (
-    row.compartmentKey ? [row.compartmentKey] : []
-  )))
+  return canonicalScopeGrant(rows.flatMap((row) =>
+    [row.ownCompartmentKey, row.compartmentKey]
+      .filter((value): value is string => typeof value === 'string'),
+  ))
 }
 
 function mapProject(row: {
@@ -136,7 +142,9 @@ export function createDbContextScopeStore(): ContextScopeStore {
         return { role: row.role, mode: row.mode, grant: canonicalScopeGrant(row.compartments) }
       }
       const grants = await query<GroupGrantRow>(
-        `SELECT g.read_all AS "readAll", gcg.compartment_key AS "compartmentKey"
+        `SELECT g.read_all AS "readAll",
+                g.compartment_key AS "ownCompartmentKey",
+                gcg.compartment_key AS "compartmentKey"
            FROM workspace_group_members gm
            JOIN workspace_groups g ON g.id = gm.group_id
            LEFT JOIN workspace_group_compartment_grants gcg ON gcg.group_id = g.id
@@ -145,7 +153,16 @@ export function createDbContextScopeStore(): ContextScopeStore {
             AND g.kind = 'team'`,
         [userId, workspaceId],
       )
-      return { role: row.role, mode: row.mode, grant: groupRowsToGrant(grants.rows) }
+      const teamGrant = groupRowsToGrant(grants.rows)
+      return {
+        role: row.role,
+        mode: row.mode,
+        // read_all is the sole wildcard and intentionally supersedes the
+        // legacy/direct array, matching effective_member_team_compartments().
+        grant: teamGrant === null
+          ? null
+          : intersectScopeGrants(teamGrant, row.compartments),
+      }
     },
 
     async resolveAssistantPrincipalSystem(assistantId, workspaceId) {
@@ -174,7 +191,9 @@ export function createDbContextScopeStore(): ContextScopeStore {
         teamGrant = canonicalScopeGrant(row.compartments)
       } else {
         const teamRows = await query<GroupGrantRow>(
-          `SELECT g.read_all AS "readAll", gcg.compartment_key AS "compartmentKey"
+          `SELECT g.read_all AS "readAll",
+                  g.compartment_key AS "ownCompartmentKey",
+                  gcg.compartment_key AS "compartmentKey"
              FROM workspace_group_assistants ga
              JOIN workspace_groups g ON g.id = ga.group_id
              LEFT JOIN workspace_group_compartment_grants gcg ON gcg.group_id = g.id
@@ -183,7 +202,12 @@ export function createDbContextScopeStore(): ContextScopeStore {
               AND g.kind = 'team'`,
           [assistantId, workspaceId],
         )
-        teamGrant = groupRowsToGrant(teamRows.rows)
+        const assignedGrant = groupRowsToGrant(teamRows.rows)
+        // A read_all Team is the explicit wildcard. Otherwise the historical
+        // direct array remains an additional compatibility ceiling.
+        teamGrant = assignedGrant === null
+          ? null
+          : intersectScopeGrants(assignedGrant, row.compartments)
       }
 
       let projectGrant: ScopeGrant = null
@@ -244,9 +268,10 @@ export function createDbContextScopeStore(): ContextScopeStore {
         readAll: row.readAll,
         readBundle: row.readAll
           ? null
-          : canonicalScopeGrant(result.rows.flatMap((grant) => (
-            grant.grantKey ? [grant.grantKey] : []
-          ))),
+          : canonicalScopeGrant([
+              row.compartmentKey,
+              ...result.rows.flatMap((grant) => grant.grantKey ? [grant.grantKey] : []),
+            ]),
       }
     },
 
@@ -283,16 +308,23 @@ export function createDbContextScopeStore(): ContextScopeStore {
                 g.read_all AS "readAll",
                 COALESCE(array_agg(gcg.compartment_key ORDER BY gcg.compartment_key)
                   FILTER (WHERE gcg.compartment_key IS NOT NULL), '{}') AS grants
-           FROM workspace_groups g
-           LEFT JOIN workspace_group_compartment_grants gcg ON gcg.group_id = g.id
+          FROM workspace_groups g
+          LEFT JOIN workspace_group_compartment_grants gcg ON gcg.group_id = g.id
           WHERE g.workspace_id = $1 AND g.kind = 'team'
+            AND (
+              public.effective_member_team_compartments($2, $1) IS NULL
+              OR ARRAY[g.compartment_key]::text[] <@
+                 public.effective_member_team_compartments($2, $1)
+            )
           GROUP BY g.id
           ORDER BY g.status, g.name`,
-        [workspaceId],
+        [workspaceId, userId],
       )
       return result.rows.map((row) => ({
         ...row,
-        readBundle: row.readAll ? null : canonicalScopeGrant(row.grants),
+        readBundle: row.readAll
+          ? null
+          : canonicalScopeGrant([row.compartmentKey, ...row.grants]),
       }))
     },
 

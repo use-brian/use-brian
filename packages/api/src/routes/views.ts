@@ -1718,6 +1718,8 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
     // caller's Private section. Ignored when nestParentId is a page — the
     // child always adopts the parent's teamspace.
     teamspaceId: z.string().uuid().nullable().optional(),
+    projectId: z.string().uuid().nullable().optional(),
+    contextMoveConfirmed: z.boolean().optional(),
   })
   router.patch('/views/:id/reparent', async (req, res) => {
     const userId = (req as { userId?: string }).userId
@@ -1741,11 +1743,13 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
       parsed.data.position,
       undefined,
       parsed.data.teamspaceId,
+      parsed.data.projectId,
+      parsed.data.contextMoveConfirmed,
     )
     if (!moved) {
       return badRequest(
         res,
-        'Cannot reparent: the target parent is missing or not accessible, the destination teamspace is not yours to file into, or the move would create a cycle (a page cannot be nested under itself or one of its descendants).',
+        'Cannot reparent: the target parent is missing or not accessible, the destination context is unavailable, the context change was not confirmed, or the move would create a cycle (a page cannot be nested under itself or one of its descendants).',
       )
     }
 

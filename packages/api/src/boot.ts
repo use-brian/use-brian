@@ -148,6 +148,7 @@ import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTORS, OFFICIAL_CONNECTOR_TOOLS, 
 
 // ── OPEN package imports (@use-brian/api) ──────────────────────────
 import { findAssistantById, findUserById, getWorkspacePrimaryAssistant, isUserBlockedForAssistant, listAccessibleAssistants } from './db/users.js'
+import { resolveTurnScopeSystem } from './context-scope/resolve-turn-scope.js'
 import { getTaskByIdSystem } from './db/tasks.js'
 import { createBrowserSkillsStore } from './db/browser-skills-store.js'
 import { createDbConnectorActionStore } from './db/connector-actions-store.js'
@@ -2291,6 +2292,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     createShell: officeArtifactStore.createShell,
     deleteEmptyShell: officeArtifactStore.deleteEmptyShell,
     getArtifact: officeArtifactStore.get,
+    raiseScope: officeArtifactStore.raiseScope,
     resolveAccess: resolveOfficeAccess,
     createJob: officeGenerationStore.create,
     latestJob: officeGenerationStore.latestForArtifact,
@@ -2573,6 +2575,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const consultTransport = createInProcessTransport({
     runConsult: async ({ request }) => {
       let decisionApplicationId: string | null = null
+      let scopeEvidence: import('@use-brian/core').ScopeEvidence | undefined
       const text = await calleeExecutor({
         workspaceId: request.target.workspaceId,
         callerAssistantId: request.caller.assistantId,
@@ -2584,6 +2587,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           .join(' '),
         callerSessionId: '',
         sessionKey: request.contextId,
+        contextGroupId: request.contextScope?.groupId,
+        contextProjectId: request.contextScope?.projectId,
         allowedTools: request.allowedTools,
         externalClientPrincipal: request.externalClientPrincipal,
         skills: request.skills,
@@ -2605,9 +2610,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             }
           : undefined,
         onDecisionApplication: (id) => { decisionApplicationId = id },
+        onScopeEvidence: (evidence) => { scopeEvidence = evidence },
       })
       return {
         text,
+        scopeEvidence,
         ...(decisionApplicationId
           ? {
               artifacts: [{
@@ -2689,10 +2696,25 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     runStore: workflowRunStore,
     consultTransport,
     resolvePrimary: resolvePrimaryAssistantForWorkspace,
+    resolveRunScope: async ({ userId, assistantId, workspaceId, run }) => {
+      const assistant = await findAssistantById(assistantId)
+      if (!assistant) throw new Error('Workflow assistant not found.')
+      const turnScope = await resolveTurnScopeSystem({
+        userId,
+        assistant,
+        workspaceId,
+        key: {
+          contextGroupId: run.contextGroupId ?? null,
+          contextProjectId: run.contextProjectId ?? null,
+          contextLockedAt: run.startedAt,
+        },
+      })
+      return { turnScope, assistantClearance: assistant.clearance }
+    },
     sendPage: sendPagePort,
     resolveVerifiedClientEmail: ({ apiKeyId, assistantId, email }) =>
       linkedIdentityStore.findUniqueVerifiedApiClientByEmail({ apiKeyId, assistantId, email }),
-    buildToolRegistry: ({ workspaceId, assistantId, userId }) => buildWorkflowToolRegistry(
+    buildToolRegistry: ({ workspaceId, assistantId, userId, turnScope }) => buildWorkflowToolRegistry(
       {
         firstParty: allTools,
         connectorStore,
@@ -2713,7 +2735,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         engineHooks: ports.engineHooks,
         assistantConnectorGrantsStore,
       },
-      { workspaceId, assistantId, userId },
+      { workspaceId, assistantId, userId, turnScope },
     ),
     pauseRunForWait: async ({ runId, stepRunId, workspaceId, triggeredBy, dueAt }) => {
       const primary = await resolvePrimaryAssistantForWorkspace(workspaceId)
@@ -2885,6 +2907,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       channelType: 'workflow',
       channelId: goal.id,
       nextRunAt: fireAt,
+      contextGroupId: goal.contextGroupId,
+      contextProjectId: goal.contextProjectId,
     })
   }
 
@@ -3031,6 +3055,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       assistantId,
       name: isVerify ? 'Work a goal to done' : 'Complete a task',
       instructions,
+      contextGroupId: goal.contextGroupId,
+      contextProjectId: goal.contextProjectId,
       // No wall-clock on a goal iteration (2026-08-19). It used to pin the
       // 900s ceiling because the 90s reminder default clipped real work (a
       // browser-skill run in the cloud sandbox, a research pass, file writes)
@@ -5511,11 +5537,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         readOfficeVersionSnapshot(userId, artifactId, versionId),
       ])
       if (!artifact || !loaded) return null
-      const shell = await officeArtifactStore.createShell({ userId, workspaceId: artifact.workspaceId, family: artifact.family, title, templateVersionId: artifact.templateVersionId, capabilityVersion: artifact.capabilityVersion, sensitivity: artifact.sensitivity })
+      const shell = await officeArtifactStore.createShell({ userId, workspaceId: artifact.workspaceId, family: artifact.family, title, templateVersionId: artifact.templateVersionId, capabilityVersion: artifact.capabilityVersion, sensitivity: artifact.sensitivity, requiredCompartments: artifact.compartments, projectIds: artifact.projectIds })
       const snapshot = deriveOfficeSnapshot({ source: loaded.snapshot, artifactId: shell.id, title })
       const bytes = new TextEncoder().encode(JSON.stringify(snapshot))
       const hash = createHash('sha256').update(bytes).digest('hex')
-      const saved = await filesApi.writeBytes({ workspaceId: shell.workspaceId, userId, assistantKind: 'standard', clearance: 'confidential' }, { path: `/office/artifacts/${shell.id}/versions/1-${hash}.json`, bytes, mime: 'application/json', sensitivity: shell.sensitivity })
+      const saved = await filesApi.writeBytes({ workspaceId: shell.workspaceId, userId, assistantKind: 'standard', clearance: 'confidential', writeCompartments: shell.compartments, writeProjectIds: shell.projectIds }, { path: `/office/artifacts/${shell.id}/versions/1-${hash}.json`, bytes, mime: 'application/json', sensitivity: shell.sensitivity })
       if (!saved.ok) throw new Error(`Office version copy save failed: ${saved.error.kind}`)
       const doc = snapshotToYDoc(snapshot)
       const version = await officeArtifactStore.commitVersion({ userId, artifactId: shell.id, expectedVersion: 0, snapshotFileId: saved.value.id, snapshotHash: hash, operationClock: officeStateVector(doc), schemaVersion: snapshot.schemaVersion, capabilityVersion: snapshot.capabilityVersion, origin: 'manual', authorType: 'user', authorUserId: userId, summary: `Copied from version ${versionId}`, checkpointKind: 'named' })
@@ -5636,11 +5662,42 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     appendEvent: officeGenerationStore.appendEvent,
     finish: officeGenerationStore.finish,
   }) : null
-  const commitGeneratedOfficeSnapshot = async (params: { job: import('./db/office-generation.js').OfficeGenerationJobRow; snapshot: OfficeArtifactSnapshot; expectedVersion: number; kind: 'generation' | 'revision' }) => {
+  const commitGeneratedOfficeSnapshot = async (params: { job: import('./db/office-generation.js').OfficeGenerationJobRow; snapshot: OfficeArtifactSnapshot; expectedVersion: number; kind: 'generation' | 'revision'; authority?: import('@use-brian/core').OfficeAuthorityProjection }) => {
     if (!filesApi) throw new Error('Office file storage is unavailable')
     const bytes = new TextEncoder().encode(JSON.stringify(params.snapshot))
     const hash = createHash('sha256').update(bytes).digest('hex')
-    const fileContext = { workspaceId: params.job.workspaceId, userId: params.job.initiatedByUserId, assistantKind: 'standard' as const, clearance: 'confidential' as const }
+    const storedAuthority = params.job.authorityProjection as {
+      sensitivity?: unknown
+      compartments?: unknown
+      projectIds?: unknown
+    }
+    const compartments = params.authority?.compartments ??
+      (Array.isArray(storedAuthority.compartments)
+        ? storedAuthority.compartments.filter((value): value is string => typeof value === 'string')
+        : [])
+    const projectIds = params.authority?.projectIds ??
+      (Array.isArray(storedAuthority.projectIds)
+        ? storedAuthority.projectIds.filter((value): value is string => typeof value === 'string')
+        : [])
+    const sensitivity = params.authority?.sensitivity ??
+      (storedAuthority.sensitivity === 'public' || storedAuthority.sensitivity === 'confidential'
+        ? storedAuthority.sensitivity
+        : 'internal')
+    await officeArtifactStore.raiseScope({
+      userId: params.job.initiatedByUserId,
+      artifactId: params.job.artifactId,
+      sensitivity,
+      compartments,
+      projectIds,
+    })
+    const fileContext = {
+      workspaceId: params.job.workspaceId,
+      userId: params.job.initiatedByUserId,
+      assistantKind: 'standard' as const,
+      clearance: 'confidential' as const,
+      writeCompartments: compartments,
+      writeProjectIds: projectIds,
+    }
     const saved = await filesApi.writeBytes(fileContext, {
       path: `/office/artifacts/${params.job.artifactId}/versions/${params.expectedVersion + 1}-${hash}.json`,
       bytes,
@@ -5686,11 +5743,22 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     buildPipelineDeps(job) {
       return {
         async resolveAuthority() {
-          const projection = job.authorityProjection as { sensitivity?: unknown; visibilityUserIds?: unknown; compartments?: unknown; sourceHandles?: unknown }
+          const projection = job.authorityProjection as { sensitivity?: unknown; visibilityUserIds?: unknown; compartments?: unknown; projectIds?: unknown; compartmentGrant?: unknown; projectGrant?: unknown; sourceHandles?: unknown }
           return {
             sensitivity: projection.sensitivity === 'public' || projection.sensitivity === 'confidential' ? projection.sensitivity : 'internal',
             visibilityUserIds: Array.isArray(projection.visibilityUserIds) ? projection.visibilityUserIds.filter((value): value is string => typeof value === 'string') : [],
             compartments: Array.isArray(projection.compartments) ? projection.compartments.filter((value): value is string => typeof value === 'string') : [],
+            projectIds: Array.isArray(projection.projectIds) ? projection.projectIds.filter((value): value is string => typeof value === 'string') : [],
+            compartmentGrant: projection.compartmentGrant === null
+              ? null
+              : Array.isArray(projection.compartmentGrant)
+                ? projection.compartmentGrant.filter((value): value is string => typeof value === 'string')
+                : null,
+            projectGrant: projection.projectGrant === null
+              ? null
+              : Array.isArray(projection.projectGrant)
+                ? projection.projectGrant.filter((value): value is string => typeof value === 'string')
+                : null,
             sourceHandles: Array.isArray(projection.sourceHandles) ? projection.sourceHandles.filter((value): value is string => typeof value === 'string') : [],
           }
         },
@@ -5706,7 +5774,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             assistantId: brief.assistantId,
             assistantKind: 'app' as const,
             clearance: authority.sensitivity,
-            compartments: authority.compartments,
+            compartments: authority.compartmentGrant ?? null,
+            projectIds: authority.projectGrant ?? null,
           }
           const explicitIds = brief.sourceHandles.flatMap((handle) => {
             const match = handle.match(/^knowledge:([0-9a-f-]{36})$/i)
@@ -5725,6 +5794,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             handle: `knowledge:${entry.id}`,
             excerpt: [entry.title, entry.summary, entry.content].filter(Boolean).join('\n').slice(0, 4_000),
             sensitivity: entry.sensitivity,
+            compartments: entry.compartments,
+            projectIds: entry.projectIds,
           }))
         },
         async inspectUrl(url) {
@@ -5758,8 +5829,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           return read.ok ? { bytes: read.value.bytes, mime: resource.mime } : null
         },
         async cancelled() { return Boolean((await officeGenerationStore.get(job.initiatedByUserId, job.id))?.cancelRequestedAt) },
-        async commit(snapshot) {
-          const committed = await commitGeneratedOfficeSnapshot({ job, snapshot, expectedVersion: 0, kind: 'generation' })
+        async commit(snapshot, { authority }) {
+          const committed = await commitGeneratedOfficeSnapshot({ job, snapshot, expectedVersion: 0, kind: 'generation', authority })
           return { artifactId: job.artifactId, version: committed.version }
         },
       }
@@ -5910,9 +5981,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     sharedSecret: process.env.DOC_SYNC_SECRET,
     async checkpoint(artifactId, expectedVersion, canonicalHash) {
       if (!filesApi) return 'not_found'
-      const raw = await query<{ id: string; workspaceId: string; ownerUserId: string; headVersion: number; headSnapshotHash: string | null }>(`
+      const raw = await query<{ id: string; workspaceId: string; ownerUserId: string; headVersion: number; headSnapshotHash: string | null; compartments: string[]; projectIds: string[] }>(`
         SELECT a.id,a.workspace_id AS "workspaceId",a.owner_user_id AS "ownerUserId",
-               a.head_version::int AS "headVersion",v.snapshot_hash AS "headSnapshotHash"
+               a.head_version::int AS "headVersion",v.snapshot_hash AS "headSnapshotHash",
+               a.compartments, a.project_ids AS "projectIds"
           FROM office_artifacts a
           LEFT JOIN office_artifact_versions v ON v.id=a.head_version_id
          WHERE a.id=$1 AND a.lifecycle_state='active'
@@ -5939,7 +6011,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       // live hash. Otherwise this remains a hard CAS conflict.
       const casVersion = artifact.headVersion === expectedVersion ? expectedVersion : live.baseVersion === artifact.headVersion ? artifact.headVersion : null
       if (casVersion === null) return 'conflict'
-      const fileContext = { workspaceId: artifact.workspaceId, userId: artifact.ownerUserId, assistantKind: 'standard' as const, clearance: 'confidential' as const }
+      const fileContext = { workspaceId: artifact.workspaceId, userId: artifact.ownerUserId, assistantKind: 'standard' as const, clearance: 'confidential' as const, writeCompartments: artifact.compartments, writeProjectIds: artifact.projectIds }
       const saved = await filesApi.writeBytes(fileContext, { path: `/office/artifacts/${artifactId}/versions/${casVersion + 1}-${canonicalHash}.json`, bytes, mime: 'application/json', sensitivity: 'confidential' })
       if (!saved.ok) throw new Error(`Office checkpoint save failed: ${saved.error.kind}`)
       const version = await officeArtifactStore.commitVersion({ userId: artifact.ownerUserId, artifactId, expectedVersion: casVersion, snapshotFileId: saved.value.id, snapshotHash: canonicalHash, operationClock: live.stateVector, schemaVersion: live.snapshot.schemaVersion, capabilityVersion: live.snapshot.capabilityVersion, origin: 'manual', authorType: 'system', summary: 'Collaborative editing checkpoint' })
@@ -6032,11 +6104,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
     createRecord: officeReleaseStore.createRelease,
     async createDerivative({ userId, source, title, sensitivity, selectedObjectIds, visibilityUserIds }) {
-      const shell = await officeArtifactStore.createShell({ userId, workspaceId: source.artifact.workspaceId, family: source.artifact.family, title, templateVersionId: source.artifact.templateVersionId, capabilityVersion: source.artifact.capabilityVersion, sensitivity, visibilityUserIds })
+      const shell = await officeArtifactStore.createShell({ userId, workspaceId: source.artifact.workspaceId, family: source.artifact.family, title, templateVersionId: source.artifact.templateVersionId, capabilityVersion: source.artifact.capabilityVersion, sensitivity, visibilityUserIds, requiredCompartments: source.artifact.compartments, projectIds: source.artifact.projectIds })
       const snapshot = deriveOfficeSnapshot({ source: source.snapshot, artifactId: shell.id, title, selectedObjectIds: selectedObjectIds.length ? selectedObjectIds : undefined })
       const bytes = new TextEncoder().encode(JSON.stringify(snapshot))
       const hash = createHash('sha256').update(bytes).digest('hex')
-      const saved = await filesApi!.writeBytes({ workspaceId: shell.workspaceId, userId, assistantKind: 'standard', clearance: 'confidential' }, { path: `/office/artifacts/${shell.id}/versions/1-${hash}.json`, bytes, mime: 'application/json', sensitivity })
+      const saved = await filesApi!.writeBytes({ workspaceId: shell.workspaceId, userId, assistantKind: 'standard', clearance: 'confidential', writeCompartments: shell.compartments, writeProjectIds: shell.projectIds }, { path: `/office/artifacts/${shell.id}/versions/1-${hash}.json`, bytes, mime: 'application/json', sensitivity })
       if (!saved.ok) throw new Error(`Office derivative snapshot save failed: ${saved.error.kind}`)
       const doc = snapshotToYDoc(snapshot)
       const version = await officeArtifactStore.commitVersion({ userId, artifactId: shell.id, expectedVersion: 0, snapshotFileId: saved.value.id, snapshotHash: hash, operationClock: officeStateVector(doc), schemaVersion: snapshot.schemaVersion, capabilityVersion: snapshot.capabilityVersion, origin: 'manual', authorType: 'user', authorUserId: userId, summary: `Reviewed derivative of ${source.artifact.id}`, checkpointKind: 'release' })

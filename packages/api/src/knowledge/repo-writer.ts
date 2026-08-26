@@ -77,6 +77,8 @@ export type RepoWriterStore = {
     /** Frontmatter-stamp provenance (mig 410). */
     sensitivityExplicit?: boolean
     metadata?: Record<string, unknown>; sourceId?: string | null; sourceSha?: string | null
+    compartments?: string[]
+    projectIds?: string[]
     /**
      * Lifecycle-event provenance for the `knowledge` workflow event source.
      * The writer always passes `'system'` — its write-through IS the
@@ -283,6 +285,7 @@ export function createKnowledgeRepoWriter(deps: KnowledgeRepoWriterDeps): Knowle
     fileContent: string,
     commitSha: string | null,
     requestedBy: { userId: string } | null | undefined,
+    scope: { compartments: string[]; projectIds: string[] },
   ): Promise<{ id: string; path: string }> {
     const parsed = parseMarkdownFile(relativePath, fileContent)
     return await deps.store.upsertByPath({
@@ -299,6 +302,8 @@ export function createKnowledgeRepoWriter(deps: KnowledgeRepoWriterDeps): Knowle
       metadata: { ...parsed.metadata, _rawRelated: parsed.related },
       sourceId: source.id,
       sourceSha: commitSha,
+      compartments: scope.compartments,
+      projectIds: scope.projectIds,
       // Assistant-authored: becomes `DispatchEvent.isBot` on the `knowledge`
       // workflow event source, so a KB-maintenance workflow watching this
       // source does not re-trigger on the write it just caused. A workflow
@@ -321,7 +326,7 @@ export function createKnowledgeRepoWriter(deps: KnowledgeRepoWriterDeps): Knowle
   }
 
   return {
-    async commitEntryUpdate({ workspaceId, entry, newBody, changeSummary, requestedBy }) {
+    async commitEntryUpdate({ workspaceId, entry, newBody, changeSummary, requestedBy, compartments, projectIds }) {
       const target = await resolveTarget(workspaceId, entry.sourceId)
       if (!target.ok) return target.result
       const { source } = target
@@ -388,7 +393,10 @@ export function createKnowledgeRepoWriter(deps: KnowledgeRepoWriterDeps): Knowle
 
       let row: { id: string; path: string }
       try {
-        row = await writeThrough(source, relativePath, newFile, commitSha, requestedBy)
+        row = await writeThrough(source, relativePath, newFile, commitSha, requestedBy, {
+          compartments: compartments ?? entry.compartments ?? [],
+          projectIds: projectIds ?? entry.projectIds ?? [],
+        })
       } catch (err) {
         return mirrorFailure(source.sourceType, commitSha, err)
       }
@@ -398,7 +406,7 @@ export function createKnowledgeRepoWriter(deps: KnowledgeRepoWriterDeps): Knowle
       return { ok: true, entryId: row.id, path: row.path, sourceType: source.sourceType, commitSha, commitUrl }
     },
 
-    async commitEntryCreate({ workspaceId, sourceId, path, fileContent, changeSummary, requestedBy }) {
+    async commitEntryCreate({ workspaceId, sourceId, path, fileContent, changeSummary, requestedBy, compartments, projectIds }) {
       const target = await resolveTarget(workspaceId, sourceId)
       if (!target.ok) return target.result
       const { source } = target
@@ -458,7 +466,10 @@ export function createKnowledgeRepoWriter(deps: KnowledgeRepoWriterDeps): Knowle
 
       let row: { id: string; path: string }
       try {
-        row = await writeThrough(source, relativePath, newFile, commitSha, requestedBy)
+        row = await writeThrough(source, relativePath, newFile, commitSha, requestedBy, {
+          compartments: compartments ?? [],
+          projectIds: projectIds ?? [],
+        })
       } catch (err) {
         return mirrorFailure(source.sourceType, commitSha, err)
       }

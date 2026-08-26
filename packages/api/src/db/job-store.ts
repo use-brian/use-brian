@@ -41,6 +41,10 @@ type JobRow = {
   workflowId: string | null
   workflowStepRunId: string | null
   viewId: string | null
+  contextGroupId: string | null
+  contextProjectId: string | null
+  contextCompartments: string[]
+  contextProjectIds: string[]
 }
 
 const JOB_SELECT = `
@@ -55,7 +59,11 @@ const JOB_SELECT = `
   state_json as "state",
   workflow_id as "workflowId",
   workflow_step_run_id as "workflowStepRunId",
-  view_id as "viewId"
+  view_id as "viewId",
+  context_group_id as "contextGroupId",
+  context_project_id as "contextProjectId",
+  context_compartments as "contextCompartments",
+  context_project_ids as "contextProjectIds"
 `
 
 /**
@@ -127,9 +135,40 @@ export function createDbJobStore(): JobStore {
            assistant_id, user_id, schedule, timezone, mode, instructions,
            channel_type, channel_id, next_run_at,
            silent_until_fire, nag_interval_mins, nag_until_keyword,
-           workflow_id, workflow_step_run_id, view_id
+           workflow_id, workflow_step_run_id, view_id,
+           context_group_id, context_project_id, context_compartments,
+           context_project_ids
          )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+         SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                $13, $14, $15,
+                COALESCE($16::uuid, wr.context_group_id, s.context_group_id, w.context_group_id),
+                COALESCE($17::uuid, wr.context_project_id, s.context_project_id, w.context_project_id),
+                CASE
+                  WHEN $18::text[] IS NOT NULL THEN $18::text[]
+                  WHEN wr.id IS NOT NULL THEN wr.context_compartments
+                  WHEN s.id IS NOT NULL THEN s.context_compartments
+                  WHEN g.compartment_key IS NOT NULL THEN ARRAY[g.compartment_key]::text[]
+                  ELSE ARRAY[]::text[]
+                END,
+                CASE
+                  WHEN $19::uuid[] IS NOT NULL THEN $19::uuid[]
+                  WHEN $17::uuid IS NOT NULL THEN ARRAY[$17::uuid]::uuid[]
+                  WHEN wr.id IS NOT NULL THEN wr.context_project_ids
+                  WHEN s.context_project_id IS NOT NULL THEN ARRAY[s.context_project_id]::uuid[]
+                  WHEN w.context_project_id IS NOT NULL THEN ARRAY[w.context_project_id]::uuid[]
+                  ELSE ARRAY[]::uuid[]
+                END
+           FROM (SELECT $13::uuid AS workflow_id,
+                        $14::uuid AS workflow_step_run_id,
+                        $7::text AS channel_type,
+                        $8::text AS channel_id) input
+           LEFT JOIN workflow_step_runs wsr ON wsr.id = input.workflow_step_run_id
+           LEFT JOIN workflow_runs wr ON wr.id = wsr.run_id
+           LEFT JOIN workflows w ON w.id = COALESCE(wr.workflow_id, input.workflow_id)
+           LEFT JOIN sessions s
+             ON input.channel_type = 'session_resume' AND s.id::text = input.channel_id
+           LEFT JOIN workspace_groups g
+             ON g.id = COALESCE($16::uuid, wr.context_group_id, s.context_group_id, w.context_group_id)
          RETURNING ${JOB_SELECT}`,
         [
           params.assistantId,
@@ -147,6 +186,10 @@ export function createDbJobStore(): JobStore {
           params.workflowId ?? null,
           params.workflowStepRunId ?? null,
           params.viewId ?? null,
+          params.contextGroupId ?? null,
+          params.contextProjectId ?? null,
+          params.contextCompartments === undefined ? null : params.contextCompartments,
+          params.contextProjectIds === undefined ? null : params.contextProjectIds,
         ],
       )
 

@@ -117,6 +117,8 @@ export function buildEpisodeIngestors(deps: EpisodeIngestorDeps): {
       createdByUserId: input.userId,
       createdByAssistantId: input.assistantId,
       sensitivity,
+      compartments: input.compartments,
+      projectIds: input.projectIds,
       summaryText: input.sourceLabel ?? null,
       // The recording path's anchor back-edge — same parity rule as contentRef
       // below: an OSS build that dropped it would orphan every fact extracted
@@ -137,6 +139,8 @@ export function buildEpisodeIngestors(deps: EpisodeIngestorDeps): {
       sourceKind,
       occurredAt: input.occurredAt,
       sensitivity: toCoreSensitivity(sensitivity),
+      compartments: episode.compartments,
+      projectIds: episode.projectIds,
       workspaceId: input.workspaceId,
       userId: input.userId,
       assistantId: input.assistantId,
@@ -169,6 +173,8 @@ export function buildEpisodeIngestors(deps: EpisodeIngestorDeps): {
       createdByUserId: input.userId,
       createdByAssistantId: input.assistantId,
       sensitivity: 'internal',
+      compartments: input.compartments,
+      projectIds: input.projectIds,
       contentRef: {
         source_kind: 'web_chat',
         session_id: input.sessionId,
@@ -181,6 +187,8 @@ export function buildEpisodeIngestors(deps: EpisodeIngestorDeps): {
       sourceKind: 'web_chat',
       occurredAt: input.occurredAt,
       sensitivity: 'internal',
+      compartments: episode.compartments,
+      projectIds: episode.projectIds,
       workspaceId: input.workspaceId,
       userId: input.userId,
       assistantId: input.assistantId,

@@ -22,6 +22,8 @@ export type OfficeArtifactRow = {
   headVersion: number
   capabilityVersion: number
   sensitivity: 'public' | 'internal' | 'confidential'
+  compartments: string[]
+  projectIds: string[]
   defaultWorkspaceRole: 'view' | 'comment' | 'edit'
   lifecycleState: 'active' | 'archived' | 'trash' | 'retained' | 'purged'
   updatedAt: Date
@@ -36,6 +38,7 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
                template_version_id AS "templateVersionId",
                head_version_id AS "headVersionId", head_version::int AS "headVersion",
                capability_version AS "capabilityVersion", sensitivity,
+               compartments, project_ids AS "projectIds",
                default_workspace_role AS "defaultWorkspaceRole",
                lifecycle_state AS "lifecycleState", updated_at AS "updatedAt"
           FROM office_artifacts
@@ -57,21 +60,23 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
       mode?: 'artifact' | 'template'
       visibilityUserIds?: string[]
       requiredCompartments?: string[]
+      projectIds?: string[]
     }): Promise<OfficeArtifactRow> {
       const result = await db<OfficeArtifactRow>(params.userId, `
         INSERT INTO office_artifacts
           (workspace_id, family, mode, title, creator_user_id, owner_user_id,
            template_version_id, capability_version, sensitivity,
-           visibility_user_ids, compartments)
-        VALUES ($1,$2,$10,$3,$4,$4,$5,$6,$7,$8::uuid[],$9::text[])
+           visibility_user_ids, compartments, project_ids)
+        VALUES ($1,$2,$11,$3,$4,$4,$5,$6,$7,$8::uuid[],$9::text[],$10::uuid[])
         RETURNING id, workspace_id AS "workspaceId", family, mode, title,
                   creator_user_id AS "creatorUserId", owner_user_id AS "ownerUserId",
                   template_version_id AS "templateVersionId",
                   head_version_id AS "headVersionId", head_version::int AS "headVersion",
                   capability_version AS "capabilityVersion", sensitivity,
+                  compartments, project_ids AS "projectIds",
                   default_workspace_role AS "defaultWorkspaceRole",
                   lifecycle_state AS "lifecycleState", updated_at AS "updatedAt"
-      `, [params.workspaceId, params.family, params.title, params.userId, params.templateVersionId, params.capabilityVersion, params.sensitivity, params.visibilityUserIds ?? [], params.requiredCompartments ?? [], params.mode ?? 'artifact'])
+      `, [params.workspaceId, params.family, params.title, params.userId, params.templateVersionId, params.capabilityVersion, params.sensitivity, params.visibilityUserIds ?? [], params.requiredCompartments ?? [], params.projectIds ?? [], params.mode ?? 'artifact'])
       const row = result.rows[0]
       if (!row) throw new Error('Office artifact shell insert returned no row')
       return row
@@ -98,11 +103,39 @@ export function createOfficeArtifactStore(db: OfficeDbQuery = defaultOfficeDbQue
                template_version_id AS "templateVersionId",
                head_version_id AS "headVersionId", head_version::int AS "headVersion",
                capability_version AS "capabilityVersion", sensitivity,
+               compartments, project_ids AS "projectIds",
                default_workspace_role AS "defaultWorkspaceRole",
                lifecycle_state AS "lifecycleState", updated_at AS "updatedAt"
           FROM office_artifacts WHERE id = $1
       `, [artifactId])
       return result.rows[0] ?? null
+    },
+
+    async raiseScope(params: {
+      userId: string
+      artifactId: string
+      sensitivity: 'public' | 'internal' | 'confidential'
+      compartments: string[]
+      projectIds: string[]
+    }): Promise<boolean> {
+      const result = await db<{ id: string }>(params.userId, `
+        UPDATE office_artifacts
+           SET sensitivity = CASE
+                 WHEN sensitivity_rank(sensitivity) >= sensitivity_rank($2) THEN sensitivity
+                 ELSE $2 END,
+               compartments = ARRAY(
+                 SELECT DISTINCT value FROM unnest(compartments || $3::text[]) AS u(value)
+                 ORDER BY value
+               ),
+               project_ids = ARRAY(
+                 SELECT DISTINCT value FROM unnest(project_ids || $4::uuid[]) AS u(value)
+                 ORDER BY value
+               ),
+               updated_at = now()
+         WHERE id = $1
+         RETURNING id
+      `, [params.artifactId, params.sensitivity, params.compartments, params.projectIds])
+      return result.rows.length === 1
     },
 
     async listVersions(userId: string, artifactId: string): Promise<Array<Record<string, unknown>>> {

@@ -28,6 +28,7 @@ const FULL_SELECT = `
   recipe_id as "recipeId", host_type as "hostType", host_id as "hostId",
   outcome, done_when as "doneWhen", means, budget, policy, status,
   blocker_reason as "blockerReason", created_by_user_id as "createdByUserId",
+  context_group_id as "contextGroupId", context_project_id as "contextProjectId",
   confirmed_at as "confirmedAt", completion_claim as "completionClaim",
   brief, created_at as "createdAt", updated_at as "updatedAt"
 `
@@ -49,6 +50,8 @@ type GoalRow = {
   status: GoalStatus
   blockerReason: string | null
   createdByUserId: string | null
+  contextGroupId: string | null
+  contextProjectId: string | null
   confirmedAt: Date | null
   completionClaim: GoalCompletionClaim | null
   brief: GoalBrief | null
@@ -73,6 +76,8 @@ function toRecord(row: GoalRow): GoalRecord {
     status: row.status,
     blockerReason: row.blockerReason,
     createdByUserId: row.createdByUserId,
+    contextGroupId: row.contextGroupId,
+    contextProjectId: row.contextProjectId,
     confirmedAt: row.confirmedAt,
     completionClaim: row.completionClaim,
     brief: row.brief,
@@ -88,9 +93,9 @@ export async function createGoal(params: GoalCreateParams): Promise<GoalRecord> 
     `INSERT INTO goals (
        workspace_id, parent_goal_id, recipe_id, host_type, host_id,
        outcome, done_when, means, budget, policy, status, created_by_user_id,
-       confirmed_at, brief
+       context_group_id, context_project_id, confirmed_at, brief
      )
-     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, $11, $12, $13, $14::jsonb)
+     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, $11, $12, $13, $14, $15, $16::jsonb)
      RETURNING ${FULL_SELECT}`,
     [
       params.workspaceId,
@@ -105,6 +110,8 @@ export async function createGoal(params: GoalCreateParams): Promise<GoalRecord> 
       JSON.stringify(params.policy ?? {}),
       params.status ?? 'active',
       params.createdByUserId ?? null,
+      params.contextGroupId ?? null,
+      params.contextProjectId ?? null,
       // Explicitly-created goals are confirmed; the judge-draft path passes
       // `confirmed: false` to mint a draft (autopilot §4/§8).
       params.confirmed === false ? null : new Date(),

@@ -29,6 +29,9 @@ export type ConnectorGrant = {
   targetId: string
   grantedByUserId: string
   grantedAt: Date
+  /** Exposure binding for this target; empty means unbounded/company-wide. */
+  compartments: string[]
+  projectIds: string[]
 }
 
 /** A grant joined with its underlying instance — the shape tool-injection wants. */
@@ -42,7 +45,9 @@ const GRANT_COLS = `
   target_type AS "targetType",
   target_id AS "targetId",
   granted_by_user_id AS "grantedByUserId",
-  granted_at AS "grantedAt"
+  granted_at AS "grantedAt",
+  compartments,
+  project_ids AS "projectIds"
 ` as const
 
 const INSTANCE_COLS_AS = `
@@ -64,6 +69,8 @@ const INSTANCE_COLS_AS = `
   ci.health_status AS "instance_healthStatus",
   ci.last_error AS "instance_lastError",
   ci.last_checked_at AS "instance_lastCheckedAt",
+  ci.compartments AS "instance_compartments",
+  ci.project_ids AS "instance_projectIds",
   ci.created_by AS "instance_createdBy",
   ci.created_at AS "instance_createdAt",
   ci.updated_at AS "instance_updatedAt"
@@ -88,6 +95,8 @@ type FlatGrantInstanceRow = ConnectorGrant & {
   instance_healthStatus: ConnectorInstance['healthStatus']
   instance_lastError: ConnectorInstance['lastError']
   instance_lastCheckedAt: ConnectorInstance['lastCheckedAt']
+  instance_compartments: string[]
+  instance_projectIds: string[]
   instance_createdBy: string | null
   instance_createdAt: Date
   instance_updatedAt: Date
@@ -101,6 +110,8 @@ function unflatten(row: FlatGrantInstanceRow): GrantWithInstance {
     targetId: row.targetId,
     grantedByUserId: row.grantedByUserId,
     grantedAt: row.grantedAt,
+    compartments: row.compartments,
+    projectIds: row.projectIds,
     instance: {
       id: row.instance_id,
       scope: row.instance_scope,
@@ -120,6 +131,8 @@ function unflatten(row: FlatGrantInstanceRow): GrantWithInstance {
       healthStatus: row.instance_healthStatus,
       lastError: row.instance_lastError,
       lastCheckedAt: row.instance_lastCheckedAt,
+      compartments: row.instance_compartments,
+      projectIds: row.instance_projectIds,
       createdBy: row.instance_createdBy,
       createdAt: row.instance_createdAt,
       updatedAt: row.instance_updatedAt,
@@ -137,6 +150,8 @@ export type ConnectorGrantStore = {
     connectorInstanceId: string
     targetType: ConnectorGrantTarget
     targetId: string
+    compartments?: string[]
+    projectIds?: string[]
   }): Promise<ConnectorGrant>
 
   /** Revoke a grant by id. RLS-gated — grantor and team-admin both pass. */
@@ -224,11 +239,19 @@ export function createConnectorGrantStore(): ConnectorGrantStore {
       const result = await queryWithRLS<ConnectorGrant>(
         params.actingUserId,
         `INSERT INTO connector_grant
-           (connector_instance_id, target_type, target_id, granted_by_user_id)
-         VALUES ($1, $2, $3, $4)
+           (connector_instance_id, target_type, target_id, granted_by_user_id,
+            compartments, project_ids)
+         VALUES ($1, $2, $3, $4, $5, $6)
          ON CONFLICT (connector_instance_id, target_type, target_id) DO NOTHING
          RETURNING ${GRANT_COLS}`,
-        [params.connectorInstanceId, params.targetType, params.targetId, params.actingUserId],
+        [
+          params.connectorInstanceId,
+          params.targetType,
+          params.targetId,
+          params.actingUserId,
+          params.compartments ?? [],
+          params.projectIds ?? [],
+        ],
       )
       if (result.rows[0]) return result.rows[0]
 

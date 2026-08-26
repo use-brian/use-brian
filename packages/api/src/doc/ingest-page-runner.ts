@@ -36,6 +36,7 @@ import {
 } from '@use-brian/core'
 import type { DocPageStore } from '@use-brian/core'
 import type { BrainEpisodeIngestor } from '../ingest-port.js'
+import { query } from '../db/client.js'
 import type { EpisodeSensitivity } from '../db/episodes-store.js'
 import type { DocPageSourceStore } from '../db/doc-page-source-store.js'
 
@@ -110,6 +111,18 @@ export async function runIngestPage(
   const ingestor = deps.brainEpisodeIngestor
   const episodeSensitivity = episodeSensitivityFromClearance(view.clearance)
   const occurredAt = new Date()
+  const pageCompartments = view.teamspaceId
+    ? (
+        await query<{ compartmentKey: string }>(
+          `SELECT g.compartment_key AS "compartmentKey"
+             FROM teamspaces t
+             JOIN workspace_groups g ON g.id = t.workspace_group_id
+            WHERE t.id = $1 AND t.workspace_id = $2`,
+          [view.teamspaceId, view.workspaceId],
+        )
+      ).rows.map((row) => row.compartmentKey)
+    : []
+  const pageProjectIds = view.projectId ? [view.projectId] : []
 
   // Port 1 — the "processEpisode runner": one `doc_page` Episode per section,
   // carrying the `(page_id, section_block_id, version)` back-edge so Pipeline B's
@@ -124,6 +137,8 @@ export async function runIngestPage(
       occurredAt,
       sourceLabel: `doc page ${view.name}`,
       sensitivity: episodeSensitivity,
+      compartments: pageCompartments,
+      projectIds: pageProjectIds,
       sourceKind: 'doc_page',
       sourceRef: {
         source_kind: 'doc_page',
@@ -145,6 +160,8 @@ export async function runIngestPage(
       workspaceId: view.workspaceId,
       ownerUserId: view.createdBy,
       sensitivity: view.clearance,
+      compartments: pageCompartments,
+      projectIds: pageProjectIds,
       chunks: chunks.map(
         (c): PageSourceChunk => c, // structural — DocPageSourceChunk == PageSourceChunk shape
       ),

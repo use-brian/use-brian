@@ -100,6 +100,9 @@ export type ConnectorInstance = {
   createdBy: string | null
   createdAt: Date
   updatedAt: Date
+  /** Live exposure binding. Empty arrays mean unbounded/company-wide. */
+  compartments: string[]
+  projectIds: string[]
 }
 
 export type CreateUserInstanceParams = {
@@ -128,6 +131,8 @@ export type CreateWorkspaceInstanceParams = {
   sensitivity?: SensitivityTier
   connected?: boolean
   createdBy: string          // who authorized the connection (team admin)
+  compartments?: string[]
+  projectIds?: string[]
 }
 
 export type UpdateInstanceParams = {
@@ -140,6 +145,8 @@ export type UpdateInstanceParams = {
   /** Ingest routing target (migration 311). `null` clears it (disable / revoke). */
   ingestWorkspaceId?: string | null
   credentials?: ConnectorCredentials | OAuthCredentials | null
+  compartments?: string[]
+  projectIds?: string[]
 }
 
 export type ConnectorInstanceStore = {
@@ -300,6 +307,8 @@ const PUBLIC_COLS = `
   health_status AS "healthStatus",
   last_error AS "lastError",
   last_checked_at AS "lastCheckedAt",
+  compartments,
+  project_ids AS "projectIds",
   created_by AS "createdBy",
   created_at AS "createdAt",
   updated_at AS "updatedAt"
@@ -420,8 +429,9 @@ export function createConnectorInstanceStore(encryptionKey: Buffer | null): Conn
         params.createdBy,
         `INSERT INTO connector_instance
            (scope, user_id, workspace_id, provider, label, connected_email, url,
-            custom, credentials, credentials_type, config, sensitivity, connected, created_by)
-         VALUES ('workspace', NULL, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            custom, credentials, credentials_type, config, sensitivity, connected,
+            created_by, compartments, project_ids)
+         VALUES ('workspace', NULL, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
          RETURNING ${PUBLIC_COLS}`,
         [
           params.workspaceId,
@@ -436,6 +446,8 @@ export function createConnectorInstanceStore(encryptionKey: Buffer | null): Conn
           params.sensitivity ?? 'internal',
           params.connected ?? false,
           params.createdBy,
+          params.compartments ?? [],
+          params.projectIds ?? [],
         ],
       )
       return result.rows[0]
@@ -453,6 +465,8 @@ export function createConnectorInstanceStore(encryptionKey: Buffer | null): Conn
       if (updates.connected !== undefined) { sets.push(`connected = $${idx}`); values.push(updates.connected); idx++ }
       if (updates.ingestionEnabled !== undefined) { sets.push(`ingestion_enabled = $${idx}`); values.push(updates.ingestionEnabled); idx++ }
       if (updates.ingestWorkspaceId !== undefined) { sets.push(`ingest_workspace_id = $${idx}`); values.push(updates.ingestWorkspaceId); idx++ }
+      if (updates.compartments !== undefined) { sets.push(`compartments = $${idx}`); values.push(updates.compartments); idx++ }
+      if (updates.projectIds !== undefined) { sets.push(`project_ids = $${idx}`); values.push(updates.projectIds); idx++ }
       if (updates.credentials !== undefined) {
         const encrypted = encryptOrNull(updates.credentials, encryptionKey)
         sets.push(`credentials = $${idx}`); values.push(encrypted); idx++

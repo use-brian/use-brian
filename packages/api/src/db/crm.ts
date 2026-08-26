@@ -170,12 +170,14 @@ function repointGraphEdge(
   params: {
     sourceEntityId: string; targetEntityId: string | null
     edgeType: 'works_at' | 'engagement_of'; workspaceId: string
+    compartments?: string[]; projectIds?: string[]
   },
 ): void {
   if (!entityLinks) return
   void superseedCrmRelationEdge(entityLinks, userId, {
     sourceEntityId: params.sourceEntityId, targetEntityId: params.targetEntityId,
     edgeType: params.edgeType, workspaceId: params.workspaceId, source: 'user', userId,
+    compartments: params.compartments, projectIds: params.projectIds,
   })
 }
 
@@ -188,6 +190,7 @@ function companyFromEntity(e: EntityRecord): CompanyRecord {
     name: e.displayName,
     domain: attrStr(a, 'domain') ?? e.canonicalId ?? null,
     tags: attrTags(a), externalRef: attrRef(a),
+    sensitivity: e.sensitivity, compartments: e.compartments, projectIds: e.projectIds,
     createdAt: e.createdAt, updatedAt: e.updatedAt,
   }
 }
@@ -200,6 +203,7 @@ function contactFromEntity(e: EntityRecord): ContactRecord {
     phone: attrStr(a, 'phone'),
     companyId: attrStr(a, 'company_id'),
     tags: attrTags(a), externalRef: attrRef(a),
+    sensitivity: e.sensitivity, compartments: e.compartments, projectIds: e.projectIds,
     createdAt: e.createdAt, updatedAt: e.updatedAt,
   }
 }
@@ -216,6 +220,7 @@ function dealFromEntity(e: EntityRecord): DealRecord {
     amount: typeof amount === 'number' ? amount : amount != null ? Number(amount) : null,
     closeDate: typeof closeDate === 'string' ? new Date(closeDate) : null,
     externalRef: attrRef(a),
+    sensitivity: e.sensitivity, compartments: e.compartments, projectIds: e.projectIds,
     createdAt: e.createdAt, updatedAt: e.updatedAt,
   }
 }
@@ -231,6 +236,7 @@ const COMPANY_SELECT = `
   COALESCE(e.attributes->>'domain', e.canonical_id) AS domain,
   e.attributes->'tags' AS tags,
   e.attributes->'external_ref' AS "externalRef",
+  e.sensitivity, e.compartments, e.project_ids AS "projectIds",
   e.created_at AS "createdAt", e.updated_at AS "updatedAt"`
 
 function toCompanyRow(row: CompanyRow): CompanyRecord {
@@ -256,6 +262,7 @@ export async function createCompany(
     externalRef?: CrmExternalRef
     sensitivity?: Sensitivity
     compartments?: string[]
+    projectIds?: string[]
     source?: 'user' | 'extracted'
     /** Extraction provenance anchor — the Episode this company derives from (Pipeline B / compose / synthesis). */
     sourceEpisodeId?: string | null
@@ -287,7 +294,7 @@ export async function createCompany(
   if (existing.rows[0]) {
     const merged = await mergeCompanyFields(userId, existing.rows[0].id, {
       domain: params.domain ?? null, tags: params.tags, externalRef: params.externalRef,
-    })
+    }, { compartments: params.compartments ?? [], projectIds: params.projectIds ?? [] })
     if (merged) return merged
   }
 
@@ -308,6 +315,7 @@ export async function createCompany(
     sourceEpisodeId: params.sourceEpisodeId ?? null,
     sourceSessionId: params.sourceSessionId ?? null,
     compartments: params.compartments ?? [],
+    projectIds: params.projectIds ?? [],
   })
   return companyFromEntity(entity)
 }
@@ -316,6 +324,7 @@ async function mergeCompanyFields(
   userId: string,
   id: string,
   incoming: { domain?: string | null; tags?: string[]; externalRef?: CrmExternalRef },
+  scope: { compartments: string[]; projectIds: string[] },
 ): Promise<CompanyRecord | null> {
   const cur = await getCompanyByIdSystem(userId, id)
   if (!cur) return null
@@ -328,8 +337,10 @@ async function mergeCompanyFields(
   if (incoming.externalRef && Object.keys(incoming.externalRef).length > 0) {
     fields.externalRef = { ...cur.externalRef, ...incoming.externalRef }
   }
-  if (Object.keys(fields).length === 0) return cur
-  return updateCompany(userId, id, fields)
+  const scopeAdds = scope.compartments.some((value) => !cur.compartments?.includes(value))
+    || scope.projectIds.some((value) => !cur.projectIds?.includes(value))
+  if (Object.keys(fields).length === 0 && !scopeAdds) return cur
+  return updateCompany(userId, id, fields, undefined, undefined, scope)
 }
 
 async function getCompanyByIdSystem(userId: string, id: string): Promise<CompanyRecord | null> {
@@ -392,6 +403,7 @@ export async function updateCompany(
   fields: CompanyUpdateFields,
   access?: AccessContext,
   transactionClient?: pg.PoolClient,
+  scope?: { compartments: string[]; projectIds: string[] },
 ): Promise<CompanyRecord | null> {
   const old = transactionClient
     ? access
@@ -412,6 +424,8 @@ export async function updateCompany(
     displayName: fields.name,
     canonicalId: fields.domain !== undefined ? (fields.domain ?? null) : undefined,
     attributes: a,
+    inheritCompartments: scope?.compartments,
+    inheritProjectIds: scope?.projectIds,
   }, dedupeAccessContext(userId, old.workspaceId, access), transactionClient)
   if (!e) return null
   return companyFromEntity(e)
@@ -430,6 +444,7 @@ const CONTACT_SELECT = `
   e.attributes->>'company_id' AS "companyId",
   e.attributes->'tags' AS tags,
   e.attributes->'external_ref' AS "externalRef",
+  e.sensitivity, e.compartments, e.project_ids AS "projectIds",
   e.created_at AS "createdAt", e.updated_at AS "updatedAt"`
 
 function toContactRow(row: ContactRow): ContactRecord {
@@ -461,6 +476,7 @@ export async function createContact(
     stableIdentity?: StableExternalIdentity
     sensitivity?: Sensitivity
     compartments?: string[]
+    projectIds?: string[]
     source?: 'user' | 'extracted'
     /** Extraction provenance anchor — the Episode this contact derives from (Pipeline B / compose / synthesis). */
     sourceEpisodeId?: string | null
@@ -492,7 +508,10 @@ export async function createContact(
           companyId: params.companyId ?? null,
           tags: params.tags,
           externalRef: params.externalRef,
-        }, entityLinks, params.access)
+        }, entityLinks, params.access, {
+          compartments: params.compartments ?? [],
+          projectIds: params.projectIds ?? [],
+        })
         if (merged) return merged
         throw new CrmPersonIdentityConflictError([resolution.binding.entityId])
       }
@@ -520,6 +539,7 @@ export async function createContact(
     sourceEpisodeId: params.sourceEpisodeId ?? null,
     sourceSessionId: params.sourceSessionId ?? null,
     compartments: params.compartments ?? [],
+    projectIds: params.projectIds ?? [],
   })
 
   if (params.companyId) {
@@ -527,6 +547,7 @@ export async function createContact(
       void emitCrmRelationEdge(entityLinks, userId, {
         sourceEntityId: entity.id, targetEntityId: params.companyId,
         edgeType: 'works_at', workspaceId: params.workspaceId, source: 'user', userId,
+        compartments: entity.compartments, projectIds: entity.projectIds,
       })
     }
   }
@@ -552,7 +573,10 @@ export async function createContact(
           companyId: params.companyId ?? null,
           tags: params.tags,
           externalRef: params.externalRef,
-        }, entityLinks, params.access)
+        }, entityLinks, params.access, {
+          compartments: params.compartments ?? [],
+          projectIds: params.projectIds ?? [],
+        })
         if (authoritative) return authoritative
         throw new CrmPersonIdentityConflictError([binding.entityId])
       }
@@ -573,6 +597,7 @@ async function mergeContactFields(
   },
   entityLinks?: EntityLinksStore,
   access?: AccessContext,
+  scope: { compartments: string[]; projectIds: string[] } = { compartments: [], projectIds: [] },
 ): Promise<ContactRecord | null> {
   const cur = access ? await getContactById(access, id) : await getContactByIdSystem(userId, id)
   if (!cur) return null
@@ -587,8 +612,10 @@ async function mergeContactFields(
   if (incoming.externalRef && Object.keys(incoming.externalRef).length > 0) {
     fields.externalRef = { ...cur.externalRef, ...incoming.externalRef }
   }
-  if (Object.keys(fields).length === 0) return cur
-  return updateContact(userId, id, fields, entityLinks, access)
+  const scopeAdds = scope.compartments.some((value) => !cur.compartments?.includes(value))
+    || scope.projectIds.some((value) => !cur.projectIds?.includes(value))
+  if (Object.keys(fields).length === 0 && !scopeAdds) return cur
+  return updateContact(userId, id, fields, entityLinks, access, undefined, scope)
 }
 
 async function getContactByIdSystem(userId: string, id: string): Promise<ContactRecord | null> {
@@ -660,6 +687,7 @@ export async function updateContact(
   entityLinks?: EntityLinksStore,
   access?: AccessContext,
   transactionClient?: pg.PoolClient,
+  scope?: { compartments: string[]; projectIds: string[] },
 ): Promise<ContactRecord | null> {
   const old = transactionClient
     ? access
@@ -683,12 +711,15 @@ export async function updateContact(
     displayName: fields.name,
     canonicalId: fields.email !== undefined ? (fields.email ?? null) : undefined,
     attributes: a,
+    inheritCompartments: scope?.compartments,
+    inheritProjectIds: scope?.projectIds,
   }, dedupeAccessContext(userId, old.workspaceId, access), transactionClient)
   if (!e) return null
   if (fields.companyId !== undefined) {
     repointGraphEdge(entityLinks, userId, {
       sourceEntityId: id, targetEntityId: fields.companyId ?? null,
       edgeType: 'works_at', workspaceId: old.workspaceId,
+      compartments: e.compartments, projectIds: e.projectIds,
     })
   }
   return contactFromEntity(e)
@@ -708,6 +739,7 @@ const DEAL_SELECT = `
   e.attributes->>'amount' AS amount,
   (e.attributes->>'close_date')::date AS "closeDate",
   e.attributes->'external_ref' AS "externalRef",
+  e.sensitivity, e.compartments, e.project_ids AS "projectIds",
   e.created_at AS "createdAt", e.updated_at AS "updatedAt"`
 
 function toDealRow(row: DealRow): DealRecord {
@@ -743,6 +775,7 @@ export async function createDeal(
     externalRef?: CrmExternalRef
     sensitivity?: Sensitivity
     compartments?: string[]
+    projectIds?: string[]
     source?: 'user' | 'extracted'
     /** Extraction provenance anchor — the Episode this deal derives from (Pipeline B / compose / synthesis). */
     sourceEpisodeId?: string | null
@@ -782,12 +815,14 @@ export async function createDeal(
     sourceEpisodeId: params.sourceEpisodeId ?? null,
     sourceSessionId: params.sourceSessionId ?? null,
     compartments: params.compartments ?? [],
+    projectIds: params.projectIds ?? [],
   })
 
   if (entityLinks && params.companyId) {
     void emitCrmRelationEdge(entityLinks, userId, {
       sourceEntityId: entity.id, targetEntityId: params.companyId,
       edgeType: 'engagement_of', workspaceId: params.workspaceId, source: 'user', userId,
+      compartments: entity.compartments, projectIds: entity.projectIds,
     })
   }
   if (entityLinks && params.contactId) {
@@ -795,6 +830,7 @@ export async function createDeal(
       sourceKind: 'entity', sourceId: params.contactId,
       targetKind: 'entity', targetId: entity.id,
       edgeType: 'represents', workspaceId: params.workspaceId, source: 'user', userId,
+      compartments: entity.compartments, projectIds: entity.projectIds,
     })
   }
   return dealFromEntity(entity)
@@ -854,6 +890,7 @@ export async function updateDeal(
   entityLinks?: EntityLinksStore,
   access?: AccessContext,
   transactionClient?: pg.PoolClient,
+  scope?: { compartments: string[]; projectIds: string[] },
 ): Promise<DealRecord | null> {
   assertNonNegativeAmount(fields.amount)
   const old = transactionClient
@@ -881,7 +918,11 @@ export async function updateDeal(
   const e = await updateEntity(
     userId,
     id,
-    { attributes: a },
+    {
+      attributes: a,
+      inheritCompartments: scope?.compartments,
+      inheritProjectIds: scope?.projectIds,
+    },
     dedupeAccessContext(userId, old.workspaceId, access),
     transactionClient,
   )
@@ -891,6 +932,7 @@ export async function updateDeal(
     repointGraphEdge(entityLinks, userId, {
       sourceEntityId: id, targetEntityId: fields.companyId ?? null,
       edgeType: 'engagement_of', workspaceId: old.workspaceId,
+      compartments: e.compartments, projectIds: e.projectIds,
     })
   }
   if (entityLinks && fields.contactId !== undefined && fields.contactId) {
@@ -900,6 +942,7 @@ export async function updateDeal(
       sourceKind: 'entity', sourceId: fields.contactId,
       targetKind: 'entity', targetId: id,
       edgeType: 'represents', workspaceId: old.workspaceId, source: 'user', userId,
+      compartments: e.compartments, projectIds: e.projectIds,
     })
   }
   return dealFromEntity(e)
@@ -912,6 +955,7 @@ export async function setDealStage(
   stage: DealStage,
   access?: AccessContext,
   transactionClient?: pg.PoolClient,
+  scope?: { compartments: string[]; projectIds: string[] },
 ): Promise<DealRecord | null> {
   assertValidStage(stage)
   const old = transactionClient
@@ -926,7 +970,11 @@ export async function setDealStage(
   const e = await updateEntity(
     userId,
     id,
-    { attributes: a },
+    {
+      attributes: a,
+      inheritCompartments: scope?.compartments,
+      inheritProjectIds: scope?.projectIds,
+    },
     dedupeAccessContext(userId, old.workspaceId, access),
     transactionClient,
   )

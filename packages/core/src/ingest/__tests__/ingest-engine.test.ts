@@ -26,6 +26,8 @@ function makeRule(overrides: Partial<IngestRule>): IngestRule {
     routing_timezone: 'UTC',
     alert: false,
     episode_sensitivity: null,
+    compartments: [],
+    project_ids: [],
     ...overrides,
   }
 }
@@ -179,7 +181,11 @@ describe('[COMP:brain/ingest-engine] Dispatch by routing mode', () => {
 
     expect(pCalls).toHaveLength(1)
     expect(pCalls[0].event).toEqual(EVENT)
-    expect(pCalls[0].ctx).toEqual(CTX)
+    expect(pCalls[0].ctx).toEqual({
+      ...CTX,
+      compartments: [],
+      project_ids: [],
+    })
     expect(bCalls).toHaveLength(0)
   })
 
@@ -214,8 +220,46 @@ describe('[COMP:brain/ingest-engine] Dispatch by routing mode', () => {
     expect(bCalls[0].rule_id).toBe('daily')
     expect(bCalls[0].source).toBe('gmail')
     expect(bCalls[0].event).toEqual(EVENT)
+    expect(bCalls[0].compartments).toEqual([])
+    expect(bCalls[0].project_ids).toEqual([])
     // 09:00 UTC the same calendar day
     expect(bCalls[0].fires_at.toISOString()).toBe('2026-05-14T09:00:00.000Z')
+  })
+
+  it('threads the matched rule Team and Project scope through realtime and scheduled dispatch', async () => {
+    const teamCompartment = 'team:11111111-1111-4111-8111-111111111111'
+    const projectId = '22222222-2222-4222-8222-222222222222'
+    const { pipeline, calls: realtimeCalls } = makePipelineB()
+    const realtime = createIngestEngine(makeDeps({
+      rules: [makeRule({ compartments: [teamCompartment], project_ids: [projectId] })],
+      pipelineB: pipeline,
+    }))
+
+    await realtime.ingest(EVENT, CTX)
+
+    expect(realtimeCalls[0]?.ctx).toMatchObject({
+      compartments: [teamCompartment],
+      project_ids: [projectId],
+    })
+
+    const { store, calls: batchCalls } = makeBatches()
+    const scheduled = createIngestEngine(makeDeps({
+      rules: [makeRule({
+        routing_mode: 'scheduled',
+        routing_schedule: '0 9 * * *',
+        compartments: [teamCompartment],
+        project_ids: [projectId],
+      })],
+      batches: store,
+      now: () => new Date('2026-05-14T00:00:00.000Z'),
+    }))
+
+    await scheduled.ingest(EVENT, CTX)
+
+    expect(batchCalls[0]).toMatchObject({
+      compartments: [teamCompartment],
+      project_ids: [projectId],
+    })
   })
 
   it('drop → no pipelineB, no batch, but still fires onEvent', async () => {

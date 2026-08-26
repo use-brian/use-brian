@@ -54,6 +54,7 @@ import {
   runPreflight,
   buildPreflightPrompt,
   EvidenceAccumulator,
+  ContextScopeAccumulator,
   DOC_MUTATION_TOOLS,
   unionCompartments,
 } from '@use-brian/core'
@@ -71,10 +72,15 @@ import { runProactiveCompaction } from '../routes/proactive-compaction.js'
 import { registerSchedulerResolver, unregisterSchedulerResolver } from '../scheduling/confirmation-registry.js'
 import { sendConfirmationPrompt } from '../scheduling/confirmation-prompt.js'
 import { findAssistantById, findUserById, resolveAssistantAccess } from '../db/users.js'
-import { getConnectorUserId, resolveReadCeilingsSystem } from '../db/workspace-store.js'
+import { getConnectorUserId } from '../db/workspace-store.js'
 import { billingPartyForAssistant } from '../billing-party.js'
 import { recordExternalCostFromMeta } from '../billing-external.js'
-import { runWithAgentClearance } from '../db/client.js'
+import { runWithAgentAccess } from '../db/client.js'
+import {
+  formatActiveWorkspaceContext,
+  noteAutomaticScopeEvidence,
+  resolveTurnScopeSystem,
+} from '../context-scope/resolve-turn-scope.js'
 import { injectMcpTools } from '../mcp/inject.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
@@ -270,6 +276,9 @@ export type CalleeQueryParams = {
   expectedWorkspaceId?: string
   question: string
   callerSessionId: string
+  /** Trusted caller/workflow scope snapshot; never accepted from model text. */
+  contextGroupId?: string | null
+  contextProjectId?: string | null
   /**
    * Durable-session key. When set, the callee reuses one session across
    * calls (keyed on this string) and replays recent history into the query
@@ -396,6 +405,8 @@ export type CalleeQueryParams = {
   }
   /** In-process only: captures the application id out of band from model text. */
   onDecisionApplication?: (applicationId: string) => void
+  /** In-process only: returns internal high-water evidence to the caller. */
+  onScopeEvidence?: (evidence: import('@use-brian/core').ScopeEvidence) => void
 }
 
 export type CalleeExecutor = (params: CalleeQueryParams) => Promise<string>
@@ -464,14 +475,17 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       })
     }
     const calleeActorUserId = externalClient?.user.id ?? calleeOwnerUserId
-    const externalReadCeilings = externalClient
-      ? await resolveReadCeilingsSystem(
-          calleeActorUserId,
-          calleeAssistant.workspaceId ?? null,
-          calleeAssistant.clearance,
-          calleeAssistant.compartments,
-        )
-      : null
+    let turnScope = await resolveTurnScopeSystem({
+      userId: calleeActorUserId,
+      assistant: calleeAssistant,
+      workspaceId: calleeAssistant.workspaceId,
+      key: params.contextGroupId !== undefined || params.contextProjectId !== undefined
+        ? {
+            contextGroupId: params.contextGroupId ?? null,
+            contextProjectId: params.contextProjectId ?? null,
+          }
+        : undefined,
+    })
 
     const callerAssistant = await findAssistantById(params.callerAssistantId)
     const callerName = callerAssistant?.name ?? 'Unknown assistant'
@@ -493,8 +507,11 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       // the ASSISTANT's clearance vs the teamspace's sensitivity — never on
       // the acting human account's teamspace memberships (teamspaces.md →
       // "Agent access"; the 2026-08-07 anchor incident).
-      const anchoredPage = await runWithAgentClearance(
-        calleeAssistant.clearance ?? 'internal',
+      const anchoredPage = await runWithAgentAccess(
+        {
+          clearance: turnScope.access.clearance,
+          compartments: turnScope.effectiveCompartments,
+        },
         () => options.savedViewStore!.getById(calleeActorUserId, params.pageAnchorId!),
       )
       if (!anchoredPage) {
@@ -539,7 +556,11 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       // fails the consult.
       if (anchoredPage.state === 'draft') {
         try {
-          await runWithAgentClearance(calleeAssistant.clearance ?? 'internal', () =>
+          await runWithAgentAccess({
+            clearance: turnScope.access.clearance,
+            compartments: turnScope.effectiveCompartments,
+            projectIds: turnScope.effectiveProjectIds,
+          }, () =>
             options.savedViewStore!.setAutoPruneAt(
               calleeActorUserId,
               params.pageAnchorId!,
@@ -570,6 +591,20 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       userId: calleeActorUserId,
       channelType: 'assistant-call',
       channelId,
+      workspaceId: calleeAssistant.workspaceId,
+      contextGroupId: turnScope.activeGroupId,
+      contextProjectId: turnScope.activeProjectId,
+      contextCompartments: turnScope.activeTeam
+        ? [turnScope.activeTeam.compartmentKey]
+        : [],
+    })
+    // A persistent session wins over a newly supplied/default binding. Its
+    // immutable row is the trusted source on every replay.
+    turnScope = await resolveTurnScopeSystem({
+      userId: calleeActorUserId,
+      assistant: calleeAssistant,
+      workspaceId: calleeAssistant.workspaceId,
+      session,
     })
 
     // 3. Build tool set: clone base tools + capability filter + MCP injection.
@@ -628,6 +663,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           workspaceToolPolicyStore: options.workspaceToolPolicyStore,
           assistantConnectorGrantsStore: options.assistantConnectorGrantsStore,
           assistantTeamId: calleeAssistant.workspaceId ?? null,
+          contextScope: turnScope,
           engineHooks: options.engineHooks,
           actorIdentity: externalClient
             ? {
@@ -771,9 +807,6 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     // injected below, and threaded onto the query-loop ToolContext so the
     // retrieval actor is workspace + clearance + compartment scoped (same
     // `min(member, assistant)` ceiling the interactive chat route applies).
-    let retrievalReadCeilings:
-      | Awaited<ReturnType<typeof resolveReadCeilingsSystem>>
-      | null = null
     {
       // Workflow-origin consults auto-tag every created memory `workflow:<id>`
       // (memory continuity — the deterministic key prior-run visibility reads
@@ -800,12 +833,6 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       // would only error in `actorFromContext`. Reads are clearance +
       // compartment projected via the ceilings set on the ToolContext below.
       if (!externalClient && options.retrievalStore && calleeAssistant.workspaceId) {
-        retrievalReadCeilings = externalReadCeilings ?? await resolveReadCeilingsSystem(
-          calleeActorUserId,
-          calleeAssistant.workspaceId,
-          calleeAssistant.clearance,
-          calleeAssistant.compartments,
-        )
         const retrievalTools = createRetrievalTools(options.retrievalStore, {
           onEvent: (evt) => {
             options.analytics?.logEvent({
@@ -1145,7 +1172,11 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       finalTools.set(name, {
         ...tool,
         execute: (input, context) =>
-          runWithAgentClearance(calleeAgentClearance, () => innerExecute(input, context)),
+          runWithAgentAccess({
+            clearance: calleeAgentClearance,
+            compartments: turnScope.effectiveCompartments,
+            projectIds: turnScope.effectiveProjectIds,
+          }, () => innerExecute(input, context)),
       })
     }
 
@@ -1199,12 +1230,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       calleeAssistant.workspaceId !== undefined
 
     const calleeCtx = {
-      workspaceId: calleeAssistant.workspaceId ?? '',
-      userId: calleeActorUserId,
-      assistantId: params.calleeAssistantId,
-      assistantKind: calleeAssistant.kind,
-      clearance: externalReadCeilings?.clearance ?? calleeAssistant.clearance,
-      compartments: externalReadCeilings?.compartments,
+      ...turnScope.access,
       clientSelfMemory: externalClient?.clientSelfMemory,
     }
     const [soul, identityMemories, memoryIndex] = await Promise.all([
@@ -1231,6 +1257,17 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           : Promise.resolve([]),
       ])
     }
+    const scopeAccumulator = new ContextScopeAccumulator({
+      compartments: turnScope.writeCompartments,
+      projectIds: turnScope.writeProjectIds,
+    })
+    noteAutomaticScopeEvidence(scopeAccumulator, [
+      ...identityMemories,
+      ...memoryIndex,
+      ...workspaceIdentityMemories,
+      ...teamMemoryIndex,
+      ...priorRunMemories,
+    ])
 
     // The workflow-specific section is the authoritative rendering for its
     // prior rows. Exclude those ids from the general personal/team indexes so
@@ -1436,7 +1473,8 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     const externalClientGuardBlock = externalClient
       ? `\n\n## External client boundary\nThis automated draft is running as one isolated external client. Use only the inbound request and the client-scoped context and tools available in this turn. Do not infer or request another client identity, do not claim access to workspace-wide context, and do not attempt to deliver or send the result. The final text is an internal draft for workspace review.`
       : ''
-    const fullSystemPrompt = `${systemPrompt}${decisionPlaybookBlock}${externalClientGuardBlock}${docAnchorBlock}${priorRunMemoryBlock}${workflowGuardBlock}${recordCreationGuardBlock}${automatedToolPolicyBlock}${unavailableBlock}${skillPromptFragment}${blueprintPromptFragment}${deliveryConversationBlock}\n\n# Context\nCurrent date and time: ${currentDateTime}\nTimezone: ${calleeOwner.timezone}\n\n${memoryContext}`
+    const activeWorkspaceContext = formatActiveWorkspaceContext(turnScope)
+    const fullSystemPrompt = `${systemPrompt}${decisionPlaybookBlock}${externalClientGuardBlock}${docAnchorBlock}${priorRunMemoryBlock}${workflowGuardBlock}${recordCreationGuardBlock}${automatedToolPolicyBlock}${unavailableBlock}${skillPromptFragment}${blueprintPromptFragment}${deliveryConversationBlock}\n\n# Context\nCurrent date and time: ${currentDateTime}\nTimezone: ${calleeOwner.timezone}\n\n${memoryContext}${activeWorkspaceContext ? `\n\n${activeWorkspaceContext}` : ''}`
     // 6. Build messages and run the query loop.
     //
     // Persist the user turn first, then build the message list. A durable
@@ -1671,6 +1709,10 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           userId: calleeActorUserId,
           assistantId: params.calleeAssistantId,
           sensitivity: calleeAssistant.clearance ?? 'internal',
+          compartments: turnScope.writeCompartments,
+          projectIds: turnScope.writeProjectIds,
+          compartmentGrant: turnScope.effectiveCompartments,
+          projectGrant: turnScope.effectiveProjectIds,
           // The RUN id when available — blueprint records stamp it as
           // source_id, which `{{lastRun.output.*}}` joins on next run.
           sourceRef:
@@ -1781,13 +1823,8 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           channelId: params.callerAssistantId,
           // A page anchor already passed the workspace gate above — the doc
           // tools need workspaceId regardless of the memory-mode conditional.
-          // Brain retrieval tools (when injected) likewise require a
-          // workspace-scoped actor, so `retrievalReadCeilings` being set forces
-          // the bind too.
-          workspaceId:
-            params.pageAnchorId || includeWorkspaceMemories || retrievalReadCeilings || externalClient
-              ? (calleeAssistant.workspaceId ?? undefined)
-              : undefined,
+          // Brain retrieval tools use the same resolved workspace actor.
+          workspaceId: calleeAssistant.workspaceId ?? undefined,
           workerRuntime: customLlmRuntime
             ? {
                 provider: customLlmRuntime.provider,
@@ -1803,19 +1840,23 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           // assistant)` clearance + compartment grant. Set only when retrieval
           // tools were injected; absent otherwise (passthrough, unchanged for
           // callees without brain reads).
-          clearance: externalReadCeilings?.clearance ?? retrievalReadCeilings?.clearance,
-          compartments: externalReadCeilings?.compartments ?? retrievalReadCeilings?.compartments,
+          clearance: turnScope.access.clearance,
+          compartments: turnScope.effectiveCompartments,
+          projectIds: turnScope.effectiveProjectIds,
+          activeGroupId: turnScope.activeGroupId,
+          activeProjectId: turnScope.activeProjectId,
           clientSelfMemory: externalClient?.clientSelfMemory,
           memoryWriteSensitivityFloor: externalClient ? 'internal' : undefined,
           memoryWriteCompartments: externalClient?.writeCompartments,
-          assistantClearance: externalClient ? calleeAssistant.clearance : undefined,
-          assistantCompartments: externalClient ? calleeAssistant.compartments : undefined,
-          assistantDefaultCompartments: externalClient
-            ? unionCompartments(
-                calleeAssistant.defaultCompartments,
-                externalClient.writeCompartments,
-              )
-            : undefined,
+          assistantClearance: calleeAssistant.clearance,
+          assistantCompartments: turnScope.effectiveCompartments,
+          assistantDefaultCompartments: unionCompartments(
+            turnScope.writeCompartments,
+            externalClient?.writeCompartments ?? [],
+          ),
+          assistantProjectIds: turnScope.effectiveProjectIds,
+          assistantDefaultProjectIds: turnScope.writeProjectIds,
+          scopeAccumulator,
           // Doc anchor: renderView/renderChart append to this page instead
           // of minting drafts; patchPage/getCurrentPage target it.
           docViewId: params.pageAnchorId ?? null,
@@ -2120,6 +2161,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         { reason: 'blueprint_record_missing', partialOutput: finalText },
       )
     }
+    params.onScopeEvidence?.(scopeAccumulator.evidence)
     return finalText
   }
 }
