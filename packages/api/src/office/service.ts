@@ -1,4 +1,9 @@
-import type { OfficeArtifactToolProjection, OfficeToolPort } from '@use-brian/core'
+import {
+  canRead,
+  scopeGrantContains,
+  type OfficeArtifactToolProjection,
+  type OfficeToolPort,
+} from '@use-brian/core'
 import type { OfficeArtifactSnapshot } from '@use-brian/office-model'
 import type { OfficeArtifactRow } from '../db/office-artifacts.js'
 import type { OfficeGenerationJobRow } from '../db/office-generation.js'
@@ -31,6 +36,21 @@ function titleFromOutcome(outcome: string, family: 'document' | 'presentation' |
 }
 
 const TARGET_LIMIT = 1_000
+
+function artifactWithinTurnScope(
+  artifact: OfficeArtifactRow,
+  scope: {
+    clearance?: 'public' | 'internal' | 'confidential'
+    compartmentGrant?: string[] | null
+    projectGrant?: string[] | null
+  },
+): boolean {
+  return (
+    (scope.clearance === undefined || canRead(scope.clearance, artifact.sensitivity))
+    && scopeGrantContains(scope.compartmentGrant, artifact.compartments)
+    && scopeGrantContains(scope.projectGrant, artifact.projectIds)
+  )
+}
 
 function targetOutline(snapshot: OfficeArtifactSnapshot, offset = 0): Pick<OfficeArtifactToolProjection, 'targets' | 'targetsTruncated' | 'nextTargetOffset'> {
   const targets: NonNullable<OfficeArtifactToolProjection['targets']> = []
@@ -108,14 +128,14 @@ export function createOfficeService(deps: OfficeServiceDeps): OfficeToolPort {
 
     async get(params) {
       const [artifact, access] = await Promise.all([deps.getArtifact(params.userId, params.artifactId), deps.resolveAccess(params.userId, params.artifactId)])
-      if (!artifact || !access) return null
+      if (!artifact || !access || !artifactWithinTurnScope(artifact, params)) return null
       const [job, live] = await Promise.all([deps.latestJob(params.userId, params.artifactId), deps.getSnapshot(params.userId, params.artifactId)])
       return { artifactId: artifact.id, family: artifact.family, mode: artifact.mode, title: artifact.title, version: artifact.headVersion, lifecycleState: artifact.lifecycleState === 'purged' ? 'retained' : artifact.lifecycleState, role: access.role, scopeEvidence: { sensitivity: artifact.sensitivity, compartments: artifact.compartments, projectIds: artifact.projectIds }, ...(live ? targetOutline(live.snapshot, params.targetOffset) : {}), job: job ? { id: job.id, status: job.status, stage: job.stage, errorCode: job.errorCode } : undefined }
     },
 
     async revise(params) {
       const [artifact, access] = await Promise.all([deps.getArtifact(params.userId, params.artifactId), deps.resolveAccess(params.userId, params.artifactId)])
-      if (!artifact || !access || !access.canComment) return null
+      if (!artifact || !access || !access.canComment || !artifactWithinTurnScope(artifact, params)) return null
       if (artifact.headVersion !== params.expectedVersion) return 'version_conflict'
       await deps.raiseScope({ userId: params.userId, artifactId: artifact.id, sensitivity: params.sensitivity, compartments: params.compartments, projectIds: params.projectIds })
       const job = await deps.createJob({ userId: params.userId, workspaceId: artifact.workspaceId, artifactId: artifact.id, assistantId: params.assistantId, jobKind: 'revise', brief: { instruction: params.instruction, targetIds: params.targetIds, expectedVersion: params.expectedVersion }, authorityProjection: { role: access.role, sensitivity: params.sensitivity, compartments: params.compartments, projectIds: params.projectIds, compartmentGrant: params.compartmentGrant, projectGrant: params.projectGrant }, baseArtifactVersion: artifact.headVersion, idempotencyKey: params.idempotencyKey })

@@ -88,6 +88,7 @@ function teamspaceJson(t: Teamspace, extras: { memberCount?: number; canManage?:
     icon: t.icon,
     description: t.description,
     sensitivity: t.sensitivity,
+    workspaceGroupId: t.workspaceGroupId,
     isDefault: t.isDefault,
     position: t.position,
     createdAt: t.createdAt.toISOString(),
@@ -269,6 +270,9 @@ export function teamspacesRoutes(opts: TeamspacesRouteOptions): Router {
   router.post('/teamspaces/:id/members', async (req, res) => {
     const gate = await requireManage(req, res)
     if (!gate) return
+    if (gate.teamspace.workspaceGroupId !== null) {
+      return res.status(409).json({ error: 'linked_teamspace_roster_is_derived' })
+    }
 
     const parsed = addMemberBodySchema.safeParse(req.body ?? {})
     if (!parsed.success) return badRequest(res, zodMessage(parsed.error))
@@ -297,6 +301,9 @@ export function teamspacesRoutes(opts: TeamspacesRouteOptions): Router {
     // Everyone belongs to General — no leaving, no removals.
     if (teamspace.isDefault) {
       return badRequest(res, 'Members cannot be removed from the default teamspace')
+    }
+    if (teamspace.workspaceGroupId !== null) {
+      return res.status(409).json({ error: 'linked_teamspace_roster_is_derived' })
     }
 
     if (targetUserId !== userId) {

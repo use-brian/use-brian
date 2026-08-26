@@ -36,6 +36,7 @@ function ts(partial: Partial<Teamspace> = {}): Teamspace {
     icon: null,
     description: null,
     sensitivity: 'internal',
+    workspaceGroupId: null,
     isDefault: false,
     position: 0,
     createdBy: 'u-1',
@@ -194,6 +195,27 @@ describe('[COMP:api/teamspaces-route] membership', () => {
       .send({ userId: '2e9f1b34-0000-4000-8000-000000000002' })
     expect(res.status).toBe(201)
     expect(store.addMemberSystem).toHaveBeenCalledWith('ts-1', '2e9f1b34-0000-4000-8000-000000000002')
+  })
+
+  it('refuses direct roster mutation when membership is Team-derived', async () => {
+    member('owner', 'confidential')
+    const store = makeStore({
+      getSystem: vi.fn(async () => ts({
+        workspaceGroupId: '2e9f1b34-0000-4000-8000-000000000099',
+      })),
+    })
+    const add = await request(app(store))
+      .post('/api/teamspaces/ts-1/members')
+      .send({ userId: '2e9f1b34-0000-4000-8000-000000000002' })
+    expect(add.status).toBe(409)
+    expect(add.body.error).toBe('linked_teamspace_roster_is_derived')
+    expect(store.addMemberSystem).not.toHaveBeenCalled()
+
+    const remove = await request(app(store))
+      .delete('/api/teamspaces/ts-1/members/u-1')
+    expect(remove.status).toBe(409)
+    expect(remove.body.error).toBe('linked_teamspace_roster_is_derived')
+    expect(store.removeMemberSystem).not.toHaveBeenCalled()
   })
 
   it('nobody can be removed from (or leave) the default teamspace', async () => {

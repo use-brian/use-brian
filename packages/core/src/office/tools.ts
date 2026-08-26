@@ -29,8 +29,8 @@ export type OfficeArtifactToolProjection = {
 
 export type OfficeToolPort = {
   create(params: { userId: string; assistantId: string; workspaceId: string; family: 'document' | 'presentation' | 'spreadsheet'; outcome: string; audience: string; additionalContext?: string; sourceHandles: string[]; templateId?: string; idempotencyKey: string; sensitivity: 'public' | 'internal' | 'confidential'; compartments: string[]; projectIds: string[]; compartmentGrant: string[] | null; projectGrant: string[] | null }): Promise<{ artifactId: string; jobId: string }>
-  get(params: { userId: string; artifactId: string; targetOffset?: number }): Promise<OfficeArtifactToolProjection | null>
-  revise(params: { userId: string; assistantId: string; artifactId: string; instruction: string; targetIds: string[]; expectedVersion: number; idempotencyKey: string; sensitivity: 'public' | 'internal' | 'confidential'; compartments: string[]; projectIds: string[]; compartmentGrant: string[] | null; projectGrant: string[] | null }): Promise<{ jobId: string; mode: 'direct' | 'proposal' } | 'version_conflict' | null>
+  get(params: { userId: string; artifactId: string; targetOffset?: number; clearance?: 'public' | 'internal' | 'confidential'; compartmentGrant?: string[] | null; projectGrant?: string[] | null }): Promise<OfficeArtifactToolProjection | null>
+  revise(params: { userId: string; assistantId: string; artifactId: string; instruction: string; targetIds: string[]; expectedVersion: number; idempotencyKey: string; sensitivity: 'public' | 'internal' | 'confidential'; compartments: string[]; projectIds: string[]; clearance?: 'public' | 'internal' | 'confidential'; compartmentGrant: string[] | null; projectGrant: string[] | null }): Promise<{ jobId: string; mode: 'direct' | 'proposal' } | 'version_conflict' | null>
 }
 
 function link(origin: string | undefined, workspaceId: string, artifactId: string): string | undefined {
@@ -168,7 +168,14 @@ export function createOfficeTools(params: {
     async execute(input, context) {
       const blocked = await blockGate('getOfficeArtifact', context)
       if (blocked) return blocked
-      const artifact = await params.port.get({ userId: context.userId, artifactId: input.artifactId, targetOffset: input.targetOffset })
+      const artifact = await params.port.get({
+        userId: context.userId,
+        artifactId: input.artifactId,
+        targetOffset: input.targetOffset,
+        clearance: context.clearance,
+        compartmentGrant: context.compartments ?? null,
+        projectGrant: context.projectIds ?? null,
+      })
       if (!artifact) return { data: artifactUnreachable('getOfficeArtifact', 'read', input.artifactId), isError: true }
       const { scopeEvidence, ...visibleArtifact } = artifact
       return {
@@ -203,7 +210,7 @@ export function createOfficeTools(params: {
         compartmentGrant: context.assistantCompartments,
         projectGrant: context.assistantProjectIds,
       })
-      const result = await params.port.revise({ userId: context.userId, assistantId: context.assistantId, ...input, ...writeScope, compartmentGrant: context.compartments ?? null, projectGrant: context.projectIds ?? null })
+      const result = await params.port.revise({ userId: context.userId, assistantId: context.assistantId, ...input, ...writeScope, clearance: context.clearance, compartmentGrant: context.compartments ?? null, projectGrant: context.projectIds ?? null })
       if (result === 'version_conflict') {
         return {
           data:
