@@ -80,6 +80,7 @@ import {
   noteAutomaticScopeEvidence,
   resolveTurnScopeSystem,
 } from '../context-scope/resolve-turn-scope.js'
+import { assertContextActivationReady } from '../context-scope/context-readiness.js'
 import { getEvolution as getWorkspaceMemoryEvolution } from '../db/workspace-memory-evolution-store.js'
 import { getBrainEvolution } from '../db/workspace-brain-evolution-store.js'
 import { tryResolveSchedulerConfirmation } from '../scheduling/confirmation-registry.js'
@@ -2155,7 +2156,7 @@ export function chatRoutes(options: WebChatOptions): Router {
   const router = Router()
 
   router.post('/', async (req, res) => {
-    const { message: rawMessage, sessionId: requestedSessionId, model: requestedModel, fileIds, attachedRecordingIds, truncateFromMessageId, timezone: clientTimezone, assistantId: requestedAssistantId, replyTo, channelId: requestedChannelId, mode: requestedMode, docViewId: requestedDocViewId, docAnchorBlockId: requestedDocAnchorBlockId, docActiveThemeId: requestedActiveThemeId, workspaceId: requestedWorkspaceId, appOrigin: requestedAppOrigin, followupChips: requestedFollowupChips, viewingSkillRowId: requestedViewingSkillRowId, viewingBrainEntry: requestedViewingBrainEntry, kbSourceId: requestedKbSourceId, meteredProfileId, meteredToolRounds, meteredAccepted, ask: requestedAsk, roomResponseGroup: rawRoomResponseGroup, steer: requestedSteer, inputId: requestedInputId, midTurn: requestedMidTurn } = req.body as {
+    const { message: rawMessage, sessionId: requestedSessionId, model: requestedModel, fileIds, attachedRecordingIds, truncateFromMessageId, timezone: clientTimezone, assistantId: requestedAssistantId, replyTo, channelId: requestedChannelId, mode: requestedMode, docViewId: requestedDocViewId, docAnchorBlockId: requestedDocAnchorBlockId, docActiveThemeId: requestedActiveThemeId, workspaceId: requestedWorkspaceId, appOrigin: requestedAppOrigin, contextGroupId: requestedContextGroupId, contextProjectId: requestedContextProjectId, followupChips: requestedFollowupChips, viewingSkillRowId: requestedViewingSkillRowId, viewingBrainEntry: requestedViewingBrainEntry, kbSourceId: requestedKbSourceId, meteredProfileId, meteredToolRounds, meteredAccepted, ask: requestedAsk, roomResponseGroup: rawRoomResponseGroup, steer: requestedSteer, inputId: requestedInputId, midTurn: requestedMidTurn } = req.body as {
       message?: string
       sessionId?: string
       model?: string
@@ -2219,6 +2220,9 @@ export function chatRoutes(options: WebChatOptions): Router {
        * assistant-id-only resolution.
        */
       workspaceId?: string
+      /** Immutable Team/Project binding, accepted only while minting a session. */
+      contextGroupId?: string | null
+      contextProjectId?: string | null
       /** Requesting app-web surface. `presentDocument` is admitted only for
        *  the full Chat operator app, whose client renders its payload. */
       appOrigin?: string
@@ -2754,6 +2758,40 @@ export function chatRoutes(options: WebChatOptions): Router {
       }
       if (!session) {
         const channelId = stickyChannelId || crypto.randomUUID()
+        const requestedContext = requestedContextGroupId !== undefined
+          || requestedContextProjectId !== undefined
+        if (requestedContext) {
+          try {
+            if (requestedContextGroupId || requestedContextProjectId) {
+              if (!assistant.workspaceId) {
+                throw new ContextNotAvailableError('workspace', 'not_found')
+              }
+              await assertContextActivationReady(assistant.workspaceId)
+            }
+            await resolveTurnScopeSystem({
+              userId: user.id,
+              assistant,
+              workspaceId: assistant.workspaceId,
+              session: {
+                contextGroupId: requestedContextGroupId ?? null,
+                contextProjectId: requestedContextProjectId ?? null,
+              },
+            })
+          } catch (error) {
+            const code = (error as { code?: string }).code
+            sendEvent('error', {
+              code: code ?? 'context_not_available',
+              error: code === 'context_activation_blocked'
+                ? 'Scoped context is not ready to activate.'
+                : 'That Team or Project context is not available.',
+              ...((error as { failedChecks?: string[] }).failedChecks
+                ? { failedChecks: (error as { failedChecks: string[] }).failedChecks }
+                : {}),
+            })
+            res.end()
+            return
+          }
+        }
         // Migration 187 — tag the session with the surface it was
         // created from so the chat panel's Recents can scope to that
         // surface. Acceptable values: brain | studio | workflow |
@@ -2773,8 +2811,31 @@ export function chatRoutes(options: WebChatOptions): Router {
           channelType: 'web',
           channelId,
           appOrigin,
+          ...(requestedContextGroupId !== undefined
+            ? { contextGroupId: requestedContextGroupId }
+            : {}),
+          ...(requestedContextProjectId !== undefined
+            ? { contextProjectId: requestedContextProjectId }
+            : {}),
         })
         isNewSession = true
+      }
+
+      if (
+        session
+        && (
+          (requestedContextGroupId !== undefined
+            && requestedContextGroupId !== session.contextGroupId)
+          || (requestedContextProjectId !== undefined
+            && requestedContextProjectId !== session.contextProjectId)
+        )
+      ) {
+        sendEvent('error', {
+          code: 'context_locked',
+          error: 'This conversation has already been bound to its Team and Project context.',
+        })
+        res.end()
+        return
       }
 
       // Defence-in-depth: a `requestedSessionId` lookup via findSessionById

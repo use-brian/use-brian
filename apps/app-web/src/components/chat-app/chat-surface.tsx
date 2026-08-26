@@ -174,6 +174,14 @@ import {
 } from "@/lib/api/sessions";
 import { getUserInfo } from "@/lib/user";
 import { markRoomSeen } from "@/lib/chat-seen";
+import { ContextScopePicker } from "@/components/context/context-scope-picker";
+import { ContextScopeChips } from "@/components/context/context-scope-chips";
+import {
+  listContextProjects,
+  listContextTeams,
+  type ContextProject,
+  type ContextTeam,
+} from "@/lib/api/context-scopes";
 import {
   readChatLocation,
   seedChatLocation,
@@ -329,6 +337,10 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
    *  Reset whenever the pane returns to a fresh chat — the pick is per chat,
    *  not a sticky preference. */
   const [pickedAssistantId, setPickedAssistantId] = useState<string | null>(null);
+  const [contextTeams, setContextTeams] = useState<ContextTeam[]>([]);
+  const [contextProjects, setContextProjects] = useState<ContextProject[]>([]);
+  const [pickedContextGroupId, setPickedContextGroupId] = useState<string | null>(null);
+  const [pickedContextProjectId, setPickedContextProjectId] = useState<string | null>(null);
   const [pendingHandoff, setPendingHandoff] =
     useState<PendingChatHandoff | null>(null);
   const handoffWorkspaceRef = useRef<string | null>(null);
@@ -421,6 +433,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     () => sharedSessions.find((r) => r.id === activeSessionId) ?? null,
     [sharedSessions, activeSessionId],
   );
+  const activeContextSession = activeShared
+    ?? personalSessions.find((session) => session.id === activeSessionId)
+    ?? null;
   /** Whether the CURRENT pane is a room — an open shared thread, or the
    *  Workspace hero about to create one. Drives the post-vs-ask composer. */
   const paneIsRoom = activeSessionId ? !!activeShared : view === "workspace";
@@ -763,6 +778,20 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     return () => {
       cancelled = true;
     };
+  }, [workspaceId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    // Keep archived Projects available for immutable historical-session chips;
+    // the shared picker filters them out of new selections.
+    Promise.all([listContextTeams(workspaceId), listContextProjects(workspaceId, true)])
+      .then(([teams, projects]) => {
+        if (!cancelled) { setContextTeams(teams); setContextProjects(projects); }
+      })
+      .catch(() => {
+        if (!cancelled) { setContextTeams([]); setContextProjects([]); }
+      });
+    return () => { cancelled = true; };
   }, [workspaceId]);
 
   // The room's clearance-filtered `@mention` roster (T-H4). Keyed on the open
@@ -1576,6 +1605,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
 
   const startNewChat = useCallback(() => {
     resetPane();
+    setPickedContextGroupId(null);
+    setPickedContextProjectId(null);
     selectSession(null, "personal");
   }, [resetPane, selectSession]);
 
@@ -1593,6 +1624,10 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       const created = await createWorkspaceSession(
         workspaceId,
         pickedAssistantId ?? undefined,
+        {
+          contextGroupId: pickedContextGroupId,
+          contextProjectId: pickedContextProjectId,
+        },
       );
       resetPane();
       setSharedSessions((rows) => [created, ...rows]);
@@ -1608,7 +1643,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     } finally {
       setStartingShared(false);
     }
-  }, [pickedAssistantId, resetPane, selectSession, startingShared, t, workspaceId]);
+  }, [pickedAssistantId, pickedContextGroupId, pickedContextProjectId, resetPane, selectSession, startingShared, t, workspaceId]);
 
   /** Stop the in-flight turn. Aborted streams fire neither onDone nor
    *  onError, so the state resets here (the dock's `handleAbort`). */
@@ -1829,7 +1864,10 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       setStartingShared(true);
       try {
         // Bind the room to the hero's picked interlocutor (default primary).
-        const created = await createWorkspaceSession(workspaceId, interlocutor.id);
+        const created = await createWorkspaceSession(workspaceId, interlocutor.id, {
+          contextGroupId: pickedContextGroupId,
+          contextProjectId: pickedContextProjectId,
+        });
         sessionIdRef.current = created.id;
         hydratedRef.current = created.id;
         setSharedSessions((rows) => [created, ...rows]);
@@ -1982,6 +2020,12 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             }
           : {}),
         ...(sessionIdRef.current ? { sessionId: sessionIdRef.current } : {}),
+        ...(!sessionIdRef.current
+          ? {
+              contextGroupId: pickedContextGroupId,
+              contextProjectId: pickedContextProjectId,
+            }
+          : {}),
         ...(channelId ? { channelId } : {}),
       },
       onEvent: (event) => {
@@ -2446,7 +2490,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       await loadTranscript(sessionIdRef.current);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [input, activeAssistant, activeSessionId, activeShared, askArmed, model, researchMode, view, workspaceId, chat.state.isStreaming, refreshPendingQuestion, reloadShared, resetTurnActivity, selectSession, startingShared, stream, t, tChat.toolNarration, att.attachments, att.uploading, att.fileIds, att.detach, pendingQuestion, pendingRecordings, recordingUpload.status, assistants, applyQueuedInput, buildStreamedTurnMessage, flushQueuedInputs, mentions.reset, setReplyTo]);
+  }, [input, activeAssistant, activeSessionId, activeShared, askArmed, model, researchMode, view, workspaceId, pickedContextGroupId, pickedContextProjectId, chat.state.isStreaming, refreshPendingQuestion, reloadShared, resetTurnActivity, selectSession, startingShared, stream, t, tChat.toolNarration, att.attachments, att.uploading, att.fileIds, att.detach, pendingQuestion, pendingRecordings, recordingUpload.status, assistants, applyQueuedInput, buildStreamedTurnMessage, flushQueuedInputs, mentions.reset, setReplyTo]);
 
   // The mid-turn flush runs inside `send`'s own `onDone`; the ref is the only
   // way to reach the current `send` from there without a stale closure. The
@@ -3539,6 +3583,16 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 )}
               </div>
             )}
+            <div className="w-full rounded-xl border border-border/70 bg-muted/20 p-3">
+              <ContextScopePicker
+                teams={contextTeams}
+                projects={contextProjects}
+                teamId={pickedContextGroupId}
+                projectId={pickedContextProjectId}
+                onTeamChange={setPickedContextGroupId}
+                onProjectChange={setPickedContextProjectId}
+              />
+            </div>
             <div className="w-full">{composerBox}</div>
             {error && (
               <p className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
@@ -3559,6 +3613,14 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           className="min-h-0 flex-1 overflow-y-auto px-4 py-6"
         >
           <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
+            {activeContextSession && (activeContextSession.contextGroupId || activeContextSession.contextProjectId) ? (
+              <ContextScopeChips
+                teamId={activeContextSession.contextGroupId ?? null}
+                projectId={activeContextSession.contextProjectId ?? null}
+                teams={contextTeams}
+                projects={contextProjects}
+              />
+            ) : null}
             {chat.state.messages.length === 0 &&
               !chat.state.isStreaming &&
               !remoteActive && (

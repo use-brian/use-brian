@@ -62,6 +62,14 @@ export type WorkspaceGroupStore = {
     compartmentKeys: string[]
   }): Promise<void>
   setTeamAssistants(userId: string, groupId: string, assistantIds: string[]): Promise<void>
+  setTeamAssistant(userId: string, groupId: string, assistantId: string, enabled: boolean): Promise<void>
+  updateTeam(userId: string, groupId: string, input: {
+    name?: string
+    description?: string | null
+    color?: string | null
+    status?: 'active'
+  }): Promise<WorkspaceGroup | null>
+  activateMemberTeamMode(userId: string, workspaceId: string, memberUserId: string): Promise<boolean>
   archiveTeam(userId: string, groupId: string): Promise<boolean>
 }
 
@@ -292,6 +300,95 @@ export function createDbWorkspaceGroupStore(): WorkspaceGroupStore {
       } finally {
         await rollbackAndRelease(client)
       }
+    },
+
+    async setTeamAssistant(userId, groupId, assistantId, enabled) {
+      if (enabled) {
+        await queryWithRLS(
+          userId,
+          `INSERT INTO workspace_group_assistants
+             (group_id, assistant_id, added_by_user_id)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (group_id, assistant_id) DO NOTHING`,
+          [groupId, assistantId, userId],
+        )
+        return
+      }
+      await queryWithRLS(
+        userId,
+        `DELETE FROM workspace_group_assistants
+          WHERE group_id = $1 AND assistant_id = $2`,
+        [groupId, assistantId],
+      )
+    },
+
+    async updateTeam(userId, groupId, input) {
+      const sets: string[] = []
+      const values: unknown[] = []
+      const add = (column: string, value: unknown) => {
+        values.push(value)
+        sets.push(`${column} = $${values.length}`)
+      }
+      if (input.name !== undefined) add('name', input.name.trim())
+      if (input.description !== undefined) add('description', input.description)
+      if (input.color !== undefined) add('color', input.color)
+      if (input.status !== undefined) add('status', input.status)
+      if (sets.length === 0) return null
+      values.push(groupId)
+      const client = await getAppPool().connect()
+      try {
+        await client.query('BEGIN')
+        await applyRLSGucs(client, userId)
+        const result = await client.query<{
+          id: string
+          workspaceId: string
+          name: string
+          kind: 'team'
+          key: string
+          description: string | null
+          color: string | null
+          status: 'active' | 'archived'
+          compartmentKey: string
+          readAll: boolean
+          memberCount: number
+          createdAt: Date
+        }>(
+          `UPDATE workspace_groups g
+              SET ${sets.join(', ')}, updated_at = now()
+            WHERE g.id = $${values.length} AND g.kind = 'team'
+            RETURNING g.id, g.workspace_id AS "workspaceId", g.name, g.kind,
+                      g.key, g.description, g.color, g.status,
+                      g.compartment_key AS "compartmentKey",
+                      g.read_all AS "readAll", g.created_at AS "createdAt",
+                      (SELECT COUNT(*)::int FROM workspace_group_members gm
+                        WHERE gm.group_id = g.id) AS "memberCount"`,
+          values,
+        )
+        const row = result.rows[0]
+        if (!row) return null
+        await client.query(
+          `UPDATE workspace_compartments
+              SET label = $2, description = $3, color = $4
+            WHERE managed_by = 'team' AND managed_ref_id = $1`,
+          [row.id, row.name, row.description, row.color],
+        )
+        await client.query('COMMIT')
+        return { ...row, memberCount: Number(row.memberCount), createdAt: row.createdAt.toISOString() }
+      } finally {
+        await rollbackAndRelease(client)
+      }
+    },
+
+    async activateMemberTeamMode(userId, workspaceId, memberUserId) {
+      const result = await queryWithRLS<{ userId: string }>(
+        userId,
+        `UPDATE workspace_members
+            SET team_scope_mode = 'assigned'
+          WHERE workspace_id = $1 AND user_id = $2
+          RETURNING user_id AS "userId"`,
+        [workspaceId, memberUserId],
+      )
+      return result.rows.length > 0
     },
 
     async archiveTeam(userId, groupId) {

@@ -452,6 +452,7 @@ import { createWorkflowDependencyPreflight } from './workflow/dependency-preflig
 import { createDeliveryTargetResolver } from './scheduling/delivery-target.js'
 import { viewsRoutes } from './routes/views.js'
 import { teamspacesRoutes } from './routes/teamspaces.js'
+import { contextScopeRoutes } from './routes/context-scopes.js'
 import { createTeamspaceStore } from './db/teamspace-store.js'
 import { createOfficeArtifactStore } from './db/office-artifacts.js'
 import { getBrandStore } from './db/brand-store.js'
@@ -5061,7 +5062,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   )
 
   app.use('/api/workspaces/:workspaceId/compartments', requireAuth(env.JWT_SECRET), compartmentRoutes({ compartmentStore, workspaceStore }))
-
   app.use('/api/workspaces/:workspaceId/oauth-authorizations', requireAuth(env.JWT_SECRET), oauthAuthorizationsRoutes({
     authorizationStore: oauthAuthorizationStore,
     workspaceStore,
@@ -5214,6 +5214,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // ever surfaced). See docs/architecture/platform/realtime-sync.md.
   app.use('/api/brain/stream', brainStreamRoutes({ workspaceStore, jwtSecret: env.JWT_SECRET }))
   startBrainStreamFanout()
+
+  app.use('/api', requireAuth(env.JWT_SECRET), contextScopeRoutes({
+    workspaceStore,
+    connectorInstanceStore,
+    connectorGrantStore,
+  }))
 
   app.use('/api', requireAuth(env.JWT_SECRET), workflowApprovalsRoutes({
     approvalsStore: pendingApprovalsStore,
@@ -5442,6 +5448,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // See docs/architecture/features/teamspaces.md.
   app.use('/api', requireAuth(env.JWT_SECRET), teamspacesRoutes({
     teamspaceStore: createTeamspaceStore(),
+    workspaceGroupStore,
   }))
 
   // Internal auto-on-save ingest endpoint — doc-sync POSTs here on a debounced

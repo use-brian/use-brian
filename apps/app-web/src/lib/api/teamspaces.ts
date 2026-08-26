@@ -26,6 +26,8 @@ export type Teamspace = {
   icon: string | null;
   description: string | null;
   sensitivity: TeamspaceSensitivity;
+  /** Optional cross-brain Team whose membership becomes this roster. */
+  workspaceGroupId: string | null;
   /** The General teamspace — cannot be deleted or left. */
   isDefault: boolean;
   /** Sidebar section order (General first). */
@@ -120,7 +122,7 @@ export async function createTeamspace(
   return json<Teamspace>(res);
 }
 
-/** Patch name / icon / description / sensitivity (clearance-gated). */
+/** Patch metadata or link/unlink a Team (clearance-gated). */
 export async function updateTeamspace(
   teamspaceId: string,
   patch: {
@@ -128,6 +130,7 @@ export async function updateTeamspace(
     icon?: string | null;
     description?: string;
     sensitivity?: TeamspaceSensitivity;
+    workspaceGroupId?: string | null;
   },
 ): Promise<Teamspace> {
   const res = await authFetch(`${API_URL}/api/teamspaces/${teamspaceId}`, {

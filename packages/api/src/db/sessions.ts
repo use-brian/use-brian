@@ -203,6 +203,8 @@ export async function createWorkspaceChatSession(params: {
   workspaceId: string
   /** The owning assistant's clearance — the session's read floor. */
   effectiveClearance: string | null
+  contextGroupId?: string | null
+  contextProjectId?: string | null
 }): Promise<Session> {
   return findOrCreateSession({
     assistantId: params.assistantId,
@@ -215,6 +217,12 @@ export async function createWorkspaceChatSession(params: {
     visibility: 'workspace',
     workspaceId: params.workspaceId,
     effectiveClearance: params.effectiveClearance,
+    ...(params.contextGroupId !== undefined
+      ? { contextGroupId: params.contextGroupId }
+      : {}),
+    ...(params.contextProjectId !== undefined
+      ? { contextProjectId: params.contextProjectId }
+      : {}),
   })
 }
 

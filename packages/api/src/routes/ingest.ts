@@ -18,6 +18,15 @@ import { createIngestRuleEditorStore } from '../db/ingest-rules-editor-store.js'
 import type { IngestRuleRow, IngestRulesStore } from '../db/ingest-rules-store.js'
 import type { IngestExternalSink, IngestSinkStore } from '../db/ingest-sink-store.js'
 import type { WorkspaceStore } from '../db/workspace-store.js'
+import {
+  createDbContextScopeStore,
+  type ContextScopeStore,
+} from '../db/context-scope-store.js'
+import {
+  assertContextActivationReady,
+  ContextActivationBlockedError,
+  type ContextReadiness,
+} from '../context-scope/context-readiness.js'
 import { listAffiliatedRepos } from '../github/client.js'
 
 type Options = {
@@ -26,6 +35,8 @@ type Options = {
   workspaceStore: WorkspaceStore
   connectorGrantStore: ConnectorGrantStore
   ingestSinkStore: IngestSinkStore
+  contextStore?: ContextScopeStore
+  getReadiness?: (workspaceId: string) => Promise<ContextReadiness>
 }
 
 const PROVIDER_TO_SOURCE: Record<string, IngestSourceProvider> = {
@@ -68,6 +79,9 @@ const addRuleBody = z.object({
   routingTimezone: z.string().min(1).max(64).optional(),
   alert: z.boolean().optional(),
   episodeSensitivity: sensitivitySchema.nullable().optional(),
+  workspaceId: z.string().uuid().optional(),
+  contextGroupId: z.string().uuid().nullable().optional(),
+  contextProjectId: z.string().uuid().nullable().optional(),
   ruleOrder: z.number().int().min(0).optional(),
 })
 const patchRuleBody = addRuleBody.partial().refine((patch) => Object.keys(patch).length > 0, {
@@ -91,7 +105,7 @@ const patchSinkBody = createSinkBody.omit({ workspaceId: true }).partial().refin
   { message: 'Body must include at least one field to update' },
 )
 
-function toRuleDto(rule: IngestRuleRow) {
+function toRuleDto(rule: IngestRuleRow, teamIdByCompartment: ReadonlyMap<string, string>) {
   return {
     id: rule.id,
     ruleOrder: rule.ruleOrder,
@@ -102,8 +116,10 @@ function toRuleDto(rule: IngestRuleRow) {
     routingTimezone: rule.routingTimezone,
     alert: rule.alert,
     episodeSensitivity: rule.episodeSensitivity,
-    compartments: rule.compartments,
-    projectIds: rule.projectIds,
+    contextGroupId: rule.compartments
+      .map((key) => teamIdByCompartment.get(key))
+      .find((id) => id !== undefined) ?? null,
+    contextProjectId: rule.projectIds[0] ?? null,
   }
 }
 
@@ -125,6 +141,7 @@ function toSourceDto(
   workspaceName: string | null,
   workspaceId: string,
   ownedPersonal: boolean,
+  teamIdByCompartment: ReadonlyMap<string, string> = new Map(),
 ) {
   return {
     instanceId: instance.id,
@@ -139,7 +156,7 @@ function toSourceDto(
     connected: instance.connected,
     ingestionEnabled: ingestsIntoWorkspace(instance, workspaceId, ownedPersonal),
     ingestTargetWorkspaceId: instance.ingestWorkspaceId,
-    rules: rules.map(toRuleDto),
+    rules: rules.map((rule) => toRuleDto(rule, teamIdByCompartment)),
   }
 }
 
@@ -162,6 +179,44 @@ function toSinkDto(sink: IngestExternalSink) {
 export function ingestRoutes(opts: Options): Router {
   const router = Router()
   const ruleEditor = createIngestRuleEditorStore()
+  const contextStore = opts.contextStore ?? createDbContextScopeStore()
+
+  async function teamIdsForRules(
+    userId: string,
+    workspaceId: string,
+    rules: IngestRuleRow[],
+  ): Promise<Map<string, string>> {
+    if (!rules.some((rule) => rule.compartments.length > 0)) return new Map()
+    const teams = await contextStore.listTeams(userId, workspaceId)
+    return new Map(teams.map((team) => [team.compartmentKey, team.id]))
+  }
+
+  async function resolveRuleContext(
+    userId: string,
+    workspaceId: string | undefined,
+    groupId: string | null | undefined,
+    projectId: string | null | undefined,
+  ): Promise<{ compartments?: string[]; projectIds?: string[] }> {
+    if (groupId === undefined && projectId === undefined) return {}
+    if (!workspaceId) throw new Error('context_workspace_required')
+    const role = await opts.workspaceStore.getRole(userId, workspaceId)
+    if (role !== 'owner' && role !== 'admin') throw new Error('context_admin_required')
+    const [team, project] = await Promise.all([
+      groupId ? contextStore.getTeamSystem(workspaceId, groupId) : null,
+      projectId ? contextStore.getProjectSystem(workspaceId, projectId) : null,
+    ])
+    if ((groupId && (!team || team.status !== 'active'))
+      || (projectId && (!project || project.status !== 'active'))) {
+      throw new Error('context_not_available')
+    }
+    if (team || project) {
+      await assertContextActivationReady(workspaceId, opts.getReadiness)
+    }
+    return {
+      ...(groupId !== undefined ? { compartments: team ? [team.compartmentKey] : [] } : {}),
+      ...(projectId !== undefined ? { projectIds: project ? [project.id] : [] } : {}),
+    }
+  }
 
   router.get('/sources', async (req, res) => {
     const userId = req.userId
@@ -186,6 +241,7 @@ export function ingestRoutes(opts: Options): Router {
         userId,
         ingestible.map(({ instance }) => instance.id),
       )
+      const teamIdByCompartment = await teamIdsForRules(userId, workspaceId, rules)
       const rulesByInstance = new Map<string, IngestRuleRow[]>()
       for (const rule of rules) {
         const existing = rulesByInstance.get(rule.connectorInstanceId)
@@ -199,6 +255,7 @@ export function ingestRoutes(opts: Options): Router {
         instance.scope === 'workspace' ? workspace.name : null,
         workspaceId,
         ownedPersonal,
+        teamIdByCompartment,
       ))
       const present = new Set(ingestible.map(({ instance }) => instance.provider))
       const available = Object.keys(PROVIDER_TO_SOURCE)
@@ -392,6 +449,12 @@ export function ingestRoutes(opts: Options): Router {
       return void res.status(400).json({ error: 'Invalid body', detail: parsed.error.flatten() })
     }
     try {
+      const context = await resolveRuleContext(
+        userId,
+        parsed.data.workspaceId,
+        parsed.data.contextGroupId,
+        parsed.data.contextProjectId,
+      )
       const rule = await ruleEditor.addRule(userId, {
         connectorInstanceId: instanceId,
         filterType: parsed.data.filterType,
@@ -402,14 +465,20 @@ export function ingestRoutes(opts: Options): Router {
         alert: parsed.data.alert,
         episodeSensitivity: parsed.data.episodeSensitivity ?? null,
         ruleOrder: parsed.data.ruleOrder,
+        ...context,
       })
-      res.status(201).json({ rule })
+      const map = await teamIdsForRules(userId, parsed.data.workspaceId ?? '', [rule])
+      res.status(201).json({ rule: toRuleDto(rule, map) })
     } catch (err) {
+      if (err instanceof ContextActivationBlockedError) {
+        return void res.status(409).json({ error: err.code, failedChecks: err.failedChecks })
+      }
       const message = (err as Error).message
       if (message.toLowerCase().includes('not visible')) {
         return void res.status(404).json({ error: 'Connector not found' })
       }
       if (message.startsWith('addIngestRule:')) return void res.status(400).json({ error: message })
+      if (message.startsWith('context_')) return void res.status(message === 'context_admin_required' ? 403 : 409).json({ error: message })
       console.error('[ingest] add rule failed:', err)
       res.status(500).json({ error: 'Failed to add rule' })
     }
@@ -425,14 +494,26 @@ export function ingestRoutes(opts: Options): Router {
       return void res.status(400).json({ error: 'Invalid body', detail: parsed.error.flatten() })
     }
     try {
-      const rule = await ruleEditor.updateRule(userId, { ruleId, patch: parsed.data })
-      res.json({ rule })
+      const context = await resolveRuleContext(
+        userId,
+        parsed.data.workspaceId,
+        parsed.data.contextGroupId,
+        parsed.data.contextProjectId,
+      )
+      const { workspaceId: _workspaceId, contextGroupId: _groupId, contextProjectId: _projectId, ...rulePatch } = parsed.data
+      const rule = await ruleEditor.updateRule(userId, { ruleId, patch: { ...rulePatch, ...context } })
+      const map = await teamIdsForRules(userId, parsed.data.workspaceId ?? '', [rule])
+      res.json({ rule: toRuleDto(rule, map) })
     } catch (err) {
+      if (err instanceof ContextActivationBlockedError) {
+        return void res.status(409).json({ error: err.code, failedChecks: err.failedChecks })
+      }
       const message = (err as Error).message
       if (message.toLowerCase().includes('not visible')) {
         return void res.status(404).json({ error: 'Rule not found' })
       }
       if (message.startsWith('updateIngestRule:')) return void res.status(400).json({ error: message })
+      if (message.startsWith('context_')) return void res.status(message === 'context_admin_required' ? 403 : 409).json({ error: message })
       console.error('[ingest] patch rule failed:', err)
       res.status(500).json({ error: 'Failed to update rule' })
     }

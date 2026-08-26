@@ -321,6 +321,7 @@ function viewMetadata(view: SavedView) {
     // The sidebar groups sections by this; drag-to-section writes it via
     // /views/:id/reparent.
     teamspaceId: view.teamspaceId ?? null,
+    projectId: view.projectId ?? null,
     // Notion-style per-page width mode (migration 220). The doc client
     // reads this to pick the body wrapper width (full vs constrained column).
     fullWidth: view.fullWidth ?? false,

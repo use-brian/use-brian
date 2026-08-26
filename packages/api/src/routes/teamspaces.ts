@@ -30,6 +30,7 @@ import { Router } from 'express'
 import { z } from 'zod'
 import { canRead, type Sensitivity } from '@use-brian/core'
 import type { TeamspaceStore, Teamspace } from '../db/teamspace-store.js'
+import type { WorkspaceGroupStore } from '../db/workspace-group-store.js'
 import { ensureDefaultTeamspaceSystem, joinDefaultTeamspacesSystem } from '../db/teamspace-store.js'
 import {
   effectiveReadClearance,
@@ -38,6 +39,7 @@ import {
 
 export type TeamspacesRouteOptions = {
   teamspaceStore: TeamspaceStore
+  workspaceGroupStore: WorkspaceGroupStore
 }
 
 const sensitivitySchema = z.enum(['public', 'internal', 'confidential'])
@@ -54,6 +56,7 @@ const patchBodySchema = z.object({
   icon: z.string().trim().min(1).max(16).nullable().optional(),
   description: z.string().trim().max(500).nullable().optional(),
   sensitivity: sensitivitySchema.optional(),
+  workspaceGroupId: z.string().uuid().nullable().optional(),
 })
 
 const addMemberBodySchema = z.object({
@@ -100,6 +103,7 @@ function teamspaceJson(t: Teamspace, extras: { memberCount?: number; canManage?:
 export function teamspacesRoutes(opts: TeamspacesRouteOptions): Router {
   const router = Router()
   const store = opts.teamspaceStore
+  const groupStore = opts.workspaceGroupStore
 
   /** The caller's effective read clearance in a workspace, or null = not a member. */
   async function memberClearance(userId: string, workspaceId: string): Promise<Sensitivity | null> {
@@ -118,7 +122,7 @@ export function teamspacesRoutes(opts: TeamspacesRouteOptions): Router {
   async function requireManage(
     req: import('express').Request,
     res: import('express').Response,
-  ): Promise<{ teamspace: Teamspace; clearance: Sensitivity } | null> {
+  ): Promise<{ userId: string; teamspace: Teamspace; clearance: Sensitivity } | null> {
     const userId = (req as { userId?: string }).userId
     if (!userId) {
       unauthorized(res)
@@ -140,7 +144,7 @@ export function teamspacesRoutes(opts: TeamspacesRouteOptions): Router {
       res.status(403).json({ error: 'insufficient_clearance' })
       return null
     }
-    return { teamspace, clearance }
+    return { userId, teamspace, clearance }
   }
 
   // GET /workspaces/:workspaceId/teamspaces — the caller's sections
@@ -222,11 +226,22 @@ export function teamspacesRoutes(opts: TeamspacesRouteOptions): Router {
       }
     }
 
+    if (parsed.data.workspaceGroupId !== undefined && parsed.data.workspaceGroupId !== null) {
+      const teams = await groupStore.listGroups(gate.userId, gate.teamspace.workspaceId)
+      const linked = teams.find((group) => group.id === parsed.data.workspaceGroupId)
+      if (!linked || linked.kind !== 'team' || linked.status !== 'active') {
+        return res.status(409).json({ error: 'teamspace_team_unavailable' })
+      }
+    }
+
     const updated = await store.update(gate.teamspace.id, {
       ...(parsed.data.name !== undefined ? { name: parsed.data.name } : {}),
       ...(parsed.data.icon !== undefined ? { icon: parsed.data.icon } : {}),
       ...(parsed.data.description !== undefined ? { description: parsed.data.description } : {}),
       ...(next !== undefined ? { sensitivity: next } : {}),
+      ...(parsed.data.workspaceGroupId !== undefined
+        ? { workspaceGroupId: parsed.data.workspaceGroupId }
+        : {}),
     })
     if (!updated) return notFound(res, 'Teamspace not found')
     res.json(teamspaceJson(updated))

@@ -92,6 +92,10 @@ import {
 import { EntryThread } from "@/components/brain/entry-thread";
 import { EntryEditThread } from "@/components/brain/entry-edit-thread";
 import { EntityRow } from "@/components/brain/entity-row";
+import {
+  ReclassifyContextButton,
+  type ReclassifiablePrimitive,
+} from "@/components/context/reclassify-context-dialog";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import {
   Select,
@@ -717,6 +721,17 @@ export function BrainDetailDrawer({
   // Toolbar actions target the same primitive the sections adjust. Knowledge
   // is read-only (no inbox primitive) → no actions, no composer.
   const actionPrim = viewedActionPrim;
+  const contextPrimitive: ReclassifiablePrimitive | null = isKnowledgeKind
+    ? "knowledge"
+    : isEntityKind || inboxPrim === "contact" || inboxPrim === "company" || inboxPrim === "deal"
+      ? "entity"
+      : inboxPrim === "memory"
+        ? "memory"
+        : inboxPrim === "task"
+          ? "task"
+          : inboxPrim === "workspace_file"
+            ? "file"
+            : null;
   const canAct =
     !readOnly &&
     !loading &&
@@ -846,6 +861,14 @@ export function BrainDetailDrawer({
             )}
           </div>
           <div className="flex items-center gap-1 shrink-0">
+            {!readOnly && contextPrimitive ? (
+              <ReclassifyContextButton
+                workspaceId={workspaceId}
+                primitive={contextPrimitive}
+                rowId={primitive?.id ?? displayRow.id}
+                onSaved={() => requestBrainRefresh(workspaceId)}
+              />
+            ) : null}
             {canAct && !rowVerified && (
               <button
                 type="button"

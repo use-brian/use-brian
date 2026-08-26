@@ -157,6 +157,14 @@ export type ConnectorGrantStore = {
   /** Revoke a grant by id. RLS-gated — grantor and team-admin both pass. */
   revoke(actingUserId: string, grantId: string): Promise<boolean>
 
+  /** Replace the exposure's immutable Team/Project binding. */
+  updateContext(
+    actingUserId: string,
+    grantId: string,
+    compartments: string[],
+    projectIds: string[],
+  ): Promise<boolean>
+
   /**
    * System-level: list all grants + their underlying instance rows for a
    * target (e.g. a team). Used by `injectMcpTools` which runs per turn
@@ -289,6 +297,17 @@ export function createConnectorGrantStore(): ConnectorGrantStore {
         await stopIngestionForRevokedWorkspace([g.connectorInstanceId], g.targetId)
       }
       return deleted
+    },
+
+    async updateContext(actingUserId, grantId, compartments, projectIds) {
+      const result = await queryWithRLS(
+        actingUserId,
+        `UPDATE connector_grant
+            SET compartments = $2, project_ids = $3
+          WHERE id = $1`,
+        [grantId, compartments, projectIds],
+      )
+      return (result.rowCount ?? 0) > 0
     },
 
     async listForTargetSystem(targetType, targetId) {

@@ -44,6 +44,9 @@ vi.mock("@/components/recordings/action-items-rail", () => ({
 vi.mock("@/components/recordings/recording-chrome", () => ({
   HashSeek: () => null,
 }));
+vi.mock("@/components/context/reclassify-context-dialog", () => ({
+  ReclassifyContextButton: () => <div data-testid="context-scope" />,
+}));
 
 vi.mock("@/lib/i18n/client", () => ({
   useT: () => ({

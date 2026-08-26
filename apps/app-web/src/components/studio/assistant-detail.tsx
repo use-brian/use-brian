@@ -21,6 +21,7 @@ import type { Dictionary } from "@/lib/i18n";
 import { format } from "@/lib/i18n";
 import { ModelTierRow, isModelAlias, type ModelAlias } from "@/components/studio/model-tier-row";
 import { BrowserIdentitiesPanel } from "@/components/studio/browser-identities-panel";
+import { AssistantContextSettings } from "@/components/context/assistant-context-settings";
 
 /**
  * Assistant detail (app-web) — the tabbed editor for one assistant.
@@ -2647,6 +2648,16 @@ function SettingsTab({
           plan={workspacePlan}
         />
       </Section>
+
+      {currentTeamId ? (
+        <Section title={t.contextScope.assistantContextTitle} description={t.contextScope.assistantContextDescription}>
+          <AssistantContextSettings
+            workspaceId={currentTeamId}
+            assistantId={assistantId}
+            canManage={isOwner || role === "admin"}
+          />
+        </Section>
+      ) : null}
 
       {/* Team */}
       {isOwner && (

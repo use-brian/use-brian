@@ -416,6 +416,8 @@ export type ViewListRow = {
    * docs/architecture/features/teamspaces.md.
    */
   teamspaceId: string | null;
+  /** Stable Project context inherited by the page subtree. */
+  projectId: string | null;
 };
 
 /**
@@ -459,6 +461,8 @@ export type ScheduledJobSummary = {
 export type ViewMetadata = {
   id: string;
   workspaceId: string;
+  /** Stable Project context inherited by the page subtree. */
+  projectId: string | null;
   createdBy: string;
   name: string;
   /**

@@ -43,6 +43,11 @@ import {
 import { z } from 'zod'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 import type { ValidateDeliveryTarget, PreflightConnectorTool } from '../workflow/dependency-preflight.js'
+import {
+  assertContextActivationReady,
+  ContextActivationBlockedError,
+  type ContextReadiness,
+} from '../context-scope/context-readiness.js'
 
 export type WorkflowsRouteOptions = {
   workflowStore: WorkflowStore
@@ -137,6 +142,7 @@ export type WorkflowsRouteOptions = {
       enabled: boolean
     }>
   >
+  getContextReadiness?: (workspaceId: string) => Promise<ContextReadiness>
 }
 
 export type WorkflowAuditDelta =
@@ -158,6 +164,8 @@ const createBodySchema = z.object({
   modelAlias: modelAliasSchema.optional(),
   maxTurns: maxTurnsSchema.nullable().optional(),
   researchMode: z.boolean().optional(),
+  contextGroupId: z.string().uuid().nullable().optional(),
+  contextProjectId: z.string().uuid().nullable().optional(),
 })
 
 const updateBodySchema = z.object({
@@ -179,6 +187,8 @@ const updateBodySchema = z.object({
    * the client's.
    */
   lifecycleState: z.literal('active').optional(),
+  contextGroupId: z.string().uuid().nullable().optional(),
+  contextProjectId: z.string().uuid().nullable().optional(),
 })
 
 const runBodySchema = z.object({
@@ -191,6 +201,26 @@ const notMember = (res: import('express').Response) =>
   void res.status(403).json({ error: 'Not a member of this workspace' })
 const badRequest = (res: import('express').Response, message: string) =>
   void res.status(400).json({ error: message })
+
+async function contextActivationReady(
+  res: import('express').Response,
+  workspaceId: string,
+  groupId: string | null | undefined,
+  projectId: string | null | undefined,
+  getReadiness?: (workspaceId: string) => Promise<ContextReadiness>,
+): Promise<boolean> {
+  if (!groupId && !projectId) return true
+  try {
+    await assertContextActivationReady(workspaceId, getReadiness)
+    return true
+  } catch (error) {
+    if (error instanceof ContextActivationBlockedError) {
+      res.status(409).json({ error: error.code, failedChecks: error.failedChecks })
+      return false
+    }
+    throw error
+  }
+}
 
 /**
  * Structured validation error response. Mirrors a Zod error into a stable
@@ -431,6 +461,8 @@ function serializeWorkflow(w: import('@use-brian/core').WorkflowRecord) {
     lifecycleReason: w.lifecycleReason,
     pinned: w.pinned,
     managedBy: w.managedBy,
+    contextGroupId: w.contextGroupId ?? null,
+    contextProjectId: w.contextProjectId ?? null,
     createdAt: w.createdAt.toISOString(),
     updatedAt: w.updatedAt.toISOString(),
   }
@@ -450,6 +482,8 @@ function serializeSummary(w: import('@use-brian/core').WorkflowRecord) {
     lifecycleReason: w.lifecycleReason,
     pinned: w.pinned,
     managedBy: w.managedBy,
+    contextGroupId: w.contextGroupId ?? null,
+    contextProjectId: w.contextProjectId ?? null,
     updatedAt: w.updatedAt.toISOString(),
   }
 }
@@ -565,6 +599,13 @@ export function workflowsRoutes(opts: WorkflowsRouteOptions): Router {
     }
     const role = await opts.workspaceStore.getRole(userId, parsed.data.workspaceId)
     if (!role) return notMember(res)
+    if (!await contextActivationReady(
+      res,
+      parsed.data.workspaceId,
+      parsed.data.contextGroupId,
+      parsed.data.contextProjectId,
+      opts.getContextReadiness,
+    )) return
 
     const definitionParsed = WorkflowDefinitionSchema.safeParse(parsed.data.definition)
     if (!definitionParsed.success) {
@@ -618,6 +659,8 @@ export function workflowsRoutes(opts: WorkflowsRouteOptions): Router {
       modelAlias: parsed.data.modelAlias,
       maxTurns: parsed.data.maxTurns ?? null,
       researchMode: parsed.data.researchMode,
+      contextGroupId: parsed.data.contextGroupId ?? null,
+      contextProjectId: parsed.data.contextProjectId ?? null,
     })
 
     // Create the backing firing job for a schedule trigger (closes the gap
@@ -653,6 +696,13 @@ export function workflowsRoutes(opts: WorkflowsRouteOptions): Router {
 
     const existing = await opts.workflowStore.getById(userId, req.params.id)
     if (!existing) return notFound(res, 'Workflow not found')
+    if (!await contextActivationReady(
+      res,
+      existing.workspaceId,
+      parsed.data.contextGroupId,
+      parsed.data.contextProjectId,
+      opts.getContextReadiness,
+    )) return
 
     // System-managed workflow (mig 411): its definition and trigger are
     // materialized by the owning feature (e.g. the KB self-maintain config),
@@ -690,6 +740,8 @@ export function workflowsRoutes(opts: WorkflowsRouteOptions): Router {
         fields.enabled = true
       }
     }
+    if (parsed.data.contextGroupId !== undefined) fields.contextGroupId = parsed.data.contextGroupId
+    if (parsed.data.contextProjectId !== undefined) fields.contextProjectId = parsed.data.contextProjectId
 
     if (parsed.data.definition !== undefined) {
       const definitionParsed = WorkflowDefinitionSchema.safeParse(parsed.data.definition)

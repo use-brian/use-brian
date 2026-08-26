@@ -7,11 +7,13 @@ import { createTestApp } from './helpers.js'
 vi.mock('../../db/goals.js', () => ({
   getGoalById: vi.fn(),
   getGoalByIdSystem: vi.fn(),
+  narrowGoalContextSystem: vi.fn(),
   updateGoalSystem: vi.fn(),
   setGoalStatusSystem: vi.fn(),
 }))
-import { getGoalById, updateGoalSystem, setGoalStatusSystem } from '../../db/goals.js'
+import { getGoalById, narrowGoalContextSystem, updateGoalSystem, setGoalStatusSystem } from '../../db/goals.js'
 const mockGetGoalById = vi.mocked(getGoalById)
+const mockNarrowGoalContextSystem = vi.mocked(narrowGoalContextSystem)
 const mockUpdateGoalSystem = vi.mocked(updateGoalSystem)
 const mockSetGoalStatusSystem = vi.mocked(setGoalStatusSystem)
 
@@ -22,6 +24,7 @@ function makeApp(opts: {
   role?: string | null
   goals?: unknown[]
   assessClarity?: GoalsRouteOptions['assessClarity']
+  ready?: boolean
 }) {
   const goalStore = {
     list: vi.fn().mockResolvedValue(opts.goals ?? []),
@@ -33,6 +36,11 @@ function makeApp(opts: {
     countOpenSubGoalsSystem: vi.fn(),
   }
   const workspaceStore = { getRole: vi.fn().mockResolvedValue(opts.role ?? null) }
+  const contextStore = {
+    getTeamSystem: vi.fn(),
+    getProjectSystem: vi.fn(),
+    resolveMemberTeamPrincipalSystem: vi.fn().mockResolvedValue({ role: 'member', mode: 'assigned', grant: null }),
+  }
   const app = createTestApp(
     '/api/goals',
     goalsRoutes({
@@ -40,10 +48,19 @@ function makeApp(opts: {
       workspaceStore: workspaceStore as never,
       assessClarity: opts.assessClarity,
       resolveAssistantId: async () => 'a1',
+      contextStore: contextStore as never,
+      getReadiness: async () => ({
+        enforcementVersion: 1,
+        readyForActivation: opts.ready ?? true,
+        checks: opts.ready === false
+          ? [{ id: 'schema', ready: false, blocking: true, detail: 'missing' }]
+          : [],
+        legacyGeneral: {},
+      } as never),
     }),
     opts.userId ? { userId: opts.userId } : undefined,
   )
-  return { app, goalStore, workspaceStore }
+  return { app, goalStore, workspaceStore, contextStore }
 }
 
 const NOW = new Date('2026-06-30T00:00:00.000Z')
@@ -60,6 +77,8 @@ const DRAFT_GOAL = {
   policy: {},
   status: 'active',
   blockerReason: null,
+  contextGroupId: null,
+  contextProjectId: null,
   createdByUserId: 'u1',
   confirmedAt: null,
   createdAt: NOW,
@@ -308,6 +327,90 @@ describe('[COMP:api/goals-route] POST /api/goals/:id/outcome — inline edit', (
   })
 })
 
+describe('[COMP:workflow/context-scope] PUT /api/goals/:id/context — narrowing only', () => {
+  const TEAM_ID = '11111111-1111-4111-8111-111111111111'
+  const PROJECT_ID = '22222222-2222-4222-8222-222222222222'
+
+  it('binds previously unset Team and Project axes after validating current authority', async () => {
+    mockGetGoalById.mockResolvedValue(DRAFT_GOAL as never)
+    mockNarrowGoalContextSystem.mockResolvedValue({
+      ...DRAFT_GOAL,
+      contextGroupId: TEAM_ID,
+      contextProjectId: PROJECT_ID,
+    } as never)
+    const { app, contextStore } = makeApp({ userId: 'u1', role: 'member' })
+    contextStore.getTeamSystem.mockResolvedValue({
+      id: TEAM_ID,
+      status: 'active',
+      compartmentKey: `team:${TEAM_ID}`,
+    })
+    contextStore.getProjectSystem.mockResolvedValue({ id: PROJECT_ID, status: 'active' })
+
+    const res = await request(app).put('/api/goals/g1/context').send({
+      contextGroupId: TEAM_ID,
+      contextProjectId: PROJECT_ID,
+    })
+
+    expect(res.status).toBe(200)
+    expect(mockNarrowGoalContextSystem).toHaveBeenCalledWith('g1', TEAM_ID, PROJECT_ID)
+    expect(res.body.goal).toMatchObject({
+      contextGroupId: TEAM_ID,
+      contextProjectId: PROJECT_ID,
+    })
+  })
+
+  it('rejects clearing or switching an existing binding before store writes', async () => {
+    mockGetGoalById.mockResolvedValue({ ...DRAFT_GOAL, contextGroupId: TEAM_ID } as never)
+    const { app } = makeApp({ userId: 'u1', role: 'member' })
+
+    const res = await request(app).put('/api/goals/g1/context').send({
+      contextGroupId: null,
+      contextProjectId: null,
+    })
+
+    expect(res.status).toBe(409)
+    expect(res.body.error).toBe('goal_context_cannot_widen')
+    expect(mockNarrowGoalContextSystem).not.toHaveBeenCalled()
+  })
+
+  it('rejects a Team outside the caller effective flat grant', async () => {
+    mockGetGoalById.mockResolvedValue(DRAFT_GOAL as never)
+    const { app, contextStore } = makeApp({ userId: 'u1', role: 'member' })
+    contextStore.getTeamSystem.mockResolvedValue({
+      id: TEAM_ID,
+      status: 'active',
+      compartmentKey: `team:${TEAM_ID}`,
+    })
+    contextStore.resolveMemberTeamPrincipalSystem.mockResolvedValue({
+      role: 'member', mode: 'assigned', grant: [],
+    })
+
+    const res = await request(app).put('/api/goals/g1/context').send({
+      contextGroupId: TEAM_ID,
+      contextProjectId: null,
+    })
+
+    expect(res.status).toBe(404)
+    expect(res.body.error).toBe('context_not_available')
+    expect(mockNarrowGoalContextSystem).not.toHaveBeenCalled()
+  })
+
+  it('keeps strict binding disabled while readiness is red', async () => {
+    mockGetGoalById.mockResolvedValue(DRAFT_GOAL as never)
+    const { app, contextStore } = makeApp({ userId: 'u1', role: 'member', ready: false })
+    contextStore.getProjectSystem.mockResolvedValue({ id: PROJECT_ID, status: 'active' })
+
+    const res = await request(app).put('/api/goals/g1/context').send({
+      contextGroupId: null,
+      contextProjectId: PROJECT_ID,
+    })
+
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({ error: 'context_activation_blocked' })
+    expect(mockNarrowGoalContextSystem).not.toHaveBeenCalled()
+  })
+})
+
 describe('[COMP:api/goals-route] POST /api/goals/:id/abandon — discard', () => {
   it('401 when unauthenticated (never reads or writes the goal)', async () => {
     const { app } = makeApp({ role: 'member' })
@@ -396,6 +499,8 @@ describe('[COMP:api/goals-route] GET /api/goals/:id — drill-down detail', () =
       parentGoalId: null,
       recipeId: null,
       blockerReason: null,
+      contextGroupId: null,
+      contextProjectId: null,
       confirmedAt: NOW.toISOString(),
       hasWorkflow: true,
       createdAt: NOW.toISOString(),

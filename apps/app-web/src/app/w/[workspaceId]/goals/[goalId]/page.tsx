@@ -23,9 +23,19 @@
 
 import { use, useEffect, useState } from "react";
 import { BackButton } from "@/components/ui/back-button";
+import { Button } from "@/components/ui/button";
+import { confirmDialog } from "@/components/ui/confirm-dialog";
+import { ContextScopeChips } from "@/components/context/context-scope-chips";
+import { ContextScopePicker } from "@/components/context/context-scope-picker";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
-import { getGoalDetail, type GoalDetail } from "@/lib/api/goals";
+import { getGoalDetail, updateGoalContext, type GoalDetail } from "@/lib/api/goals";
+import {
+  listContextProjects,
+  listContextTeams,
+  type ContextProject,
+  type ContextTeam,
+} from "@/lib/api/context-scopes";
 import { cn } from "@/lib/utils";
 import { STATUS_BADGE } from "@/components/doc/panels/goal-status-badge";
 import { summariseDoneWhen } from "@/components/doc/panels/goal-done-when";
@@ -44,17 +54,43 @@ export default function GoalDetailPage({
   const listHref = `/w/${workspaceId}/p?panel=goals`;
 
   const [goal, setGoal] = useState<GoalDetail | null | undefined>(undefined);
+  const [teams, setTeams] = useState<ContextTeam[]>([]);
+  const [projects, setProjects] = useState<ContextProject[]>([]);
+  const [draftTeamId, setDraftTeamId] = useState<string | null>(null);
+  const [draftProjectId, setDraftProjectId] = useState<string | null>(null);
+  const [contextSaving, setContextSaving] = useState(false);
+  const [contextError, setContextError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     setGoal(undefined);
     void getGoalDetail(goalId).then((g) => {
-      if (!cancelled) setGoal(g);
+      if (!cancelled) {
+        setGoal(g);
+        setDraftTeamId(g?.contextGroupId ?? null);
+        setDraftProjectId(g?.contextProjectId ?? null);
+      }
     });
     return () => {
       cancelled = true;
     };
   }, [goalId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void Promise.all([
+      listContextTeams(workspaceId),
+      listContextProjects(workspaceId, true),
+    ]).then(([nextTeams, nextProjects]) => {
+      if (!cancelled) {
+        setTeams(nextTeams);
+        setProjects(nextProjects);
+      }
+    }).catch(() => {
+      if (!cancelled) setContextError(t.contextScope.loadFailed);
+    });
+    return () => { cancelled = true; };
+  }, [t.contextScope.loadFailed, workspaceId]);
 
   if (goal === undefined) {
     return (
@@ -90,6 +126,40 @@ export default function GoalDetailPage({
   }
 
   const claim = goal.completionClaim;
+  const contextLocked = Boolean(goal.hasWorkflow)
+    || ["running", "awaiting_approval", "done", "abandoned"].includes(goal.status);
+  const contextChanged = draftTeamId !== goal.contextGroupId
+    || draftProjectId !== goal.contextProjectId;
+
+  async function saveContext() {
+    if (!goal || contextSaving || !contextChanged) return;
+    const confirmed = await confirmDialog({
+      title: labels.contextConfirmTitle,
+      description: labels.contextConfirmDescription,
+      confirmLabel: labels.contextConfirmAction,
+      cancelLabel: t.common.cancel,
+    });
+    if (!confirmed) return;
+    setContextSaving(true);
+    setContextError(null);
+    try {
+      const result = await updateGoalContext(goal.id, {
+        contextGroupId: goal.contextGroupId ?? draftTeamId,
+        contextProjectId: goal.contextProjectId ?? draftProjectId,
+      });
+      if (!result.ok) throw new Error(result.error);
+      const refreshed = await getGoalDetail(goal.id);
+      if (refreshed) {
+        setGoal(refreshed);
+        setDraftTeamId(refreshed.contextGroupId);
+        setDraftProjectId(refreshed.contextProjectId);
+      }
+    } catch (error) {
+      setContextError(error instanceof Error ? error.message : t.contextScope.updateFailed);
+    } finally {
+      setContextSaving(false);
+    }
+  }
 
   return (
     // TODO(goals): a budget-burndown chart (needs the COGS-metering barrier's
@@ -142,6 +212,15 @@ export default function GoalDetailPage({
             : labels.notConfirmed}
         </Field>
 
+        <Field label={labels.contextHeading}>
+          <ContextScopeChips
+            teamId={goal.contextGroupId}
+            projectId={goal.contextProjectId}
+            teams={teams}
+            projects={projects}
+          />
+        </Field>
+
         <Field label={labels.acceptanceHeading}>
           {summariseDoneWhen(goal.doneWhen, labels.acceptance)}
         </Field>
@@ -156,6 +235,39 @@ export default function GoalDetailPage({
           </Field>
         )}
       </dl>
+
+      {(!contextLocked && (goal.contextGroupId === null || goal.contextProjectId === null)) ? (
+        <section className="flex flex-col gap-3 border-t border-border pt-4">
+          <div>
+            <h2 className="text-sm font-medium">{labels.contextEditorTitle}</h2>
+            <p className="mt-1 text-xs text-muted-foreground">{labels.contextEditorDescription}</p>
+          </div>
+          <ContextScopePicker
+            teams={teams}
+            projects={projects}
+            teamId={draftTeamId}
+            projectId={draftProjectId}
+            teamDisabled={goal.contextGroupId !== null}
+            projectDisabled={goal.contextProjectId !== null}
+            disabled={contextSaving}
+            onTeamChange={setDraftTeamId}
+            onProjectChange={setDraftProjectId}
+          />
+          {contextError ? <p className="text-xs text-destructive">{contextError}</p> : null}
+          <Button
+            size="sm"
+            className="self-start"
+            disabled={!contextChanged || contextSaving}
+            onClick={() => void saveContext()}
+          >
+            {contextSaving ? t.contextScope.saving : t.contextScope.saveContext}
+          </Button>
+        </section>
+      ) : (
+        <p className="border-t border-border pt-4 text-xs text-muted-foreground">
+          {labels.contextLocked}
+        </p>
+      )}
 
       {claim && (
         <section className="flex flex-col gap-2 border-t border-border pt-4">

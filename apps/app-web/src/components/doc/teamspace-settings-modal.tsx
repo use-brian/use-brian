@@ -47,6 +47,10 @@ import {
   type TeamspaceSensitivity,
 } from "@/lib/api/teamspaces";
 import { teamspaceErrorCopyKey } from "@/lib/teamspace-errors";
+import {
+  listContextTeams,
+  type ContextTeam,
+} from "@/lib/api/context-scopes";
 import { Button } from "@/components/ui/button";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { EmojiPicker } from "@/components/ui/emoji-picker";
@@ -378,6 +382,10 @@ function GeneralTab({
   const [sensitivity, setSensitivity] = useState<TeamspaceSensitivity>(
     teamspace.sensitivity,
   );
+  const [workspaceGroupId, setWorkspaceGroupId] = useState<string | null>(
+    teamspace.workspaceGroupId,
+  );
+  const [teams, setTeams] = useState<ContextTeam[]>([]);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState("");
@@ -390,11 +398,26 @@ function GeneralTab({
     setIcon(teamspace.icon);
     setDescription(teamspace.description ?? "");
     setSensitivity(teamspace.sensitivity);
+    setWorkspaceGroupId(teamspace.workspaceGroupId);
     setSaving(false);
     setSaved(false);
     setError("");
     // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed by id on purpose (see above)
   }, [teamspaceId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void listContextTeams(teamspace.workspaceId)
+      .then((rows) => {
+        if (!cancelled) setTeams(rows.filter((row) => row.status === "active"));
+      })
+      .catch(() => {
+        if (!cancelled) setTeams([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [teamspace.workspaceId]);
 
   async function save() {
     if (saving) return;
@@ -407,6 +430,9 @@ function GeneralTab({
         ? { description: description.trim() }
         : {}),
       ...(sensitivity !== teamspace.sensitivity ? { sensitivity } : {}),
+      ...(workspaceGroupId !== teamspace.workspaceGroupId
+        ? { workspaceGroupId }
+        : {}),
     };
     if (Object.keys(patch).length === 0) {
       setSaved(true);
@@ -421,6 +447,7 @@ function GeneralTab({
       setIcon(updated.icon);
       setDescription(updated.description ?? "");
       setSensitivity(updated.sensitivity);
+      setWorkspaceGroupId(updated.workspaceGroupId);
       setSaved(true);
       onChanged();
     } catch (err) {
@@ -492,6 +519,39 @@ function GeneralTab({
           />
         </div>
       </div>
+
+      {!teamspace.isDefault && (
+        <div>
+          <div className="text-[13px] font-medium text-foreground">
+            {t.teamspaceLinkedTeamLabel}
+          </div>
+          <p className="mt-0.5 text-[12px] text-muted-foreground">
+            {t.teamspaceLinkedTeamHint}
+          </p>
+          <div className="mt-1.5">
+            <Select
+              value={workspaceGroupId ?? "__unlinked__"}
+              onValueChange={(value) => {
+                setWorkspaceGroupId(value === "__unlinked__" ? null : value);
+                setSaved(false);
+              }}
+              disabled={saving}
+            >
+              <SelectTrigger className="w-full bg-muted/50" aria-label={t.teamspaceLinkedTeamLabel}>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__unlinked__">{t.teamspaceLinkedTeamNone}</SelectItem>
+                {teams.map((team) => (
+                  <SelectItem key={team.id} value={team.id}>
+                    {team.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+      )}
 
       <div>
         <div className="text-[13px] font-medium text-foreground">
@@ -696,6 +756,11 @@ function MembersTab({
 
   return (
     <div className="space-y-4">
+      {teamspace.workspaceGroupId && (
+        <div className="rounded-lg border border-border bg-muted/30 px-3 py-2 text-[12px] text-muted-foreground">
+          {t.teamspaceLinkedRosterHint}
+        </div>
+      )}
       <input
         type="text"
         value={query}
@@ -723,7 +788,9 @@ function MembersTab({
             // Removing OTHERS needs manage clearance; removing yourself
             // (= leaving) is open to any member. Neither on General.
             const removable =
-              !teamspace.isDefault && (self || teamspace.canManage);
+              !teamspace.workspaceGroupId &&
+              !teamspace.isDefault &&
+              (self || teamspace.canManage);
             return (
               <div
                 key={m.userId}
@@ -773,7 +840,7 @@ function MembersTab({
       {/* Add members — workspace members not yet in the teamspace. The
           server re-checks clearance (409 when the target sits below the
           teamspace's sensitivity), surfaced via `teamspaceErrorMessage`. */}
-      {teamspace.canManage && (
+      {teamspace.canManage && !teamspace.workspaceGroupId && (
         <div className="space-y-1.5 border-t border-border pt-4">
           <h3 className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
             {t.teamspaceAddMembersHeading}

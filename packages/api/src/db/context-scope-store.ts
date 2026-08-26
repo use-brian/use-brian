@@ -47,6 +47,20 @@ export type WorkspaceProject = {
   updatedAt: string
 }
 
+export type WorkspaceProjectDetail = WorkspaceProject & {
+  members: Array<{ userId: string; role: 'lead' | 'member'; name: string | null; email: string | null }>
+  assistantIds: string[]
+}
+
+export type AssistantContextConfig = {
+  teamMode: 'legacy' | 'all' | 'assigned'
+  teamIds: string[]
+  defaultGroupId: string | null
+  projectMode: 'all' | 'assigned'
+  projectIds: string[]
+  defaultProjectId: string | null
+}
+
 export type MemberTeamPrincipal = {
   role: 'owner' | 'admin' | 'member'
   mode: 'legacy' | 'assigned'
@@ -101,6 +115,7 @@ export type ContextScopeStore = {
   resolveAssistantPrincipalSystem(assistantId: string, workspaceId: string): Promise<AssistantContextPrincipal | null>
   getTeamSystem(workspaceId: string, groupId: string): Promise<ContextTeam | null>
   getProjectSystem(workspaceId: string, projectId: string): Promise<WorkspaceProject | null>
+  getProjectDetail(userId: string, workspaceId: string, projectId: string): Promise<WorkspaceProjectDetail | null>
   listTeams(userId: string, workspaceId: string): Promise<ContextTeam[]>
   listProjects(userId: string, workspaceId: string, includeArchived?: boolean): Promise<WorkspaceProject[]>
   createProject(userId: string, workspaceId: string, input: {
@@ -109,6 +124,16 @@ export type ContextScopeStore = {
     icon?: string | null
     entityId?: string | null
   }): Promise<WorkspaceProject>
+  updateProject(userId: string, workspaceId: string, projectId: string, input: {
+    name?: string
+    description?: string | null
+    icon?: string | null
+    entityId?: string | null
+    status?: 'active'
+  }): Promise<WorkspaceProject | null>
+  setProjectMember(userId: string, projectId: string, memberUserId: string, role: 'lead' | 'member' | null): Promise<void>
+  setProjectAssistant(userId: string, projectId: string, assistantId: string, enabled: boolean): Promise<void>
+  getAssistantContextConfig(userId: string, workspaceId: string, assistantId: string): Promise<AssistantContextConfig | null>
   setAssistantContext(userId: string, assistantId: string, input: {
     teamMode: 'all' | 'assigned'
     teamIds: string[]
@@ -288,6 +313,50 @@ export function createDbContextScopeStore(): ContextScopeStore {
       return result.rows[0] ? mapProject(result.rows[0]) : null
     },
 
+    async getProjectDetail(userId, workspaceId, projectId) {
+      const project = await queryWithRLS<Parameters<typeof mapProject>[0]>(
+        userId,
+        `SELECT id, workspace_id AS "workspaceId", name,
+                normalized_name AS "normalizedName", description, icon, status,
+                entity_id AS "entityId", created_by AS "createdBy",
+                created_at AS "createdAt", updated_at AS "updatedAt"
+           FROM workspace_projects
+          WHERE id = $1 AND workspace_id = $2`,
+        [projectId, workspaceId],
+      )
+      const row = project.rows[0]
+      if (!row) return null
+      const [members, assistants] = await Promise.all([
+        queryWithRLS<{
+          userId: string
+          role: 'lead' | 'member'
+          name: string | null
+          email: string | null
+        }>(
+          userId,
+          `SELECT pm.user_id AS "userId", pm.role, u.name, u.email
+             FROM workspace_project_members pm
+             LEFT JOIN users u ON u.id = pm.user_id
+            WHERE pm.project_id = $1
+            ORDER BY pm.role, u.name NULLS LAST`,
+          [projectId],
+        ),
+        queryWithRLS<{ assistantId: string }>(
+          userId,
+          `SELECT assistant_id AS "assistantId"
+             FROM assistant_project_grants
+            WHERE project_id = $1
+            ORDER BY assistant_id`,
+          [projectId],
+        ),
+      ])
+      return {
+        ...mapProject(row),
+        members: members.rows,
+        assistantIds: assistants.rows.map((assistant) => assistant.assistantId),
+      }
+    },
+
     async listTeams(userId, workspaceId) {
       const result = await queryWithRLS<{
         id: string
@@ -383,6 +452,103 @@ export function createDbContextScopeStore(): ContextScopeStore {
       }
     },
 
+    async updateProject(userId, workspaceId, projectId, input) {
+      const sets: string[] = []
+      const values: unknown[] = []
+      const add = (column: string, value: unknown) => {
+        values.push(value)
+        sets.push(`${column} = $${values.length}`)
+      }
+      if (input.name !== undefined) {
+        const name = input.name.trim()
+        add('name', name)
+        add('normalized_name', normalizeProjectName(name))
+      }
+      if (input.description !== undefined) add('description', input.description)
+      if (input.icon !== undefined) add('icon', input.icon)
+      if (input.entityId !== undefined) add('entity_id', input.entityId)
+      if (input.status !== undefined) add('status', input.status)
+      if (sets.length === 0) return null
+      values.push(projectId, workspaceId)
+      const result = await queryWithRLS<Parameters<typeof mapProject>[0]>(
+        userId,
+        `UPDATE workspace_projects
+            SET ${sets.join(', ')}, updated_at = now()
+          WHERE id = $${values.length - 1} AND workspace_id = $${values.length}
+          RETURNING id, workspace_id AS "workspaceId", name,
+                    normalized_name AS "normalizedName", description, icon, status,
+                    entity_id AS "entityId", created_by AS "createdBy",
+                    created_at AS "createdAt", updated_at AS "updatedAt"`,
+        values,
+      )
+      return result.rows[0] ? mapProject(result.rows[0]) : null
+    },
+
+    async setProjectMember(userId, projectId, memberUserId, role) {
+      if (role === null) {
+        await queryWithRLS(
+          userId,
+          'DELETE FROM workspace_project_members WHERE project_id = $1 AND user_id = $2',
+          [projectId, memberUserId],
+        )
+        return
+      }
+      await queryWithRLS(
+        userId,
+        `INSERT INTO workspace_project_members (project_id, user_id, role)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (project_id, user_id) DO UPDATE SET role = EXCLUDED.role`,
+        [projectId, memberUserId, role],
+      )
+    },
+
+    async setProjectAssistant(userId, projectId, assistantId, enabled) {
+      if (enabled) {
+        await queryWithRLS(
+          userId,
+          `INSERT INTO assistant_project_grants
+             (assistant_id, project_id, added_by_user_id)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (assistant_id, project_id) DO NOTHING`,
+          [assistantId, projectId, userId],
+        )
+        return
+      }
+      await queryWithRLS(
+        userId,
+        'DELETE FROM assistant_project_grants WHERE assistant_id = $1 AND project_id = $2',
+        [assistantId, projectId],
+      )
+    },
+
+    async getAssistantContextConfig(userId, workspaceId, assistantId) {
+      const result = await queryWithRLS<{
+        teamMode: AssistantContextConfig['teamMode']
+        defaultGroupId: string | null
+        projectMode: AssistantContextConfig['projectMode']
+        defaultProjectId: string | null
+        teamIds: string[]
+        projectIds: string[]
+      }>(
+        userId,
+        `SELECT a.team_scope_mode AS "teamMode",
+                a.default_workspace_group_id AS "defaultGroupId",
+                a.project_scope_mode AS "projectMode",
+                a.default_project_id AS "defaultProjectId",
+                COALESCE(array_agg(DISTINCT ga.group_id)
+                  FILTER (WHERE ga.group_id IS NOT NULL), '{}') AS "teamIds",
+                COALESCE(array_agg(DISTINCT apg.project_id)
+                  FILTER (WHERE apg.project_id IS NOT NULL), '{}') AS "projectIds"
+           FROM assistants a
+           LEFT JOIN workspace_group_assistants ga ON ga.assistant_id = a.id
+           LEFT JOIN assistant_project_grants apg ON apg.assistant_id = a.id
+          WHERE a.id = $1 AND a.workspace_id = $2
+          GROUP BY a.id`,
+        [assistantId, workspaceId],
+      )
+      return result.rows[0] ?? null
+    },
+
     async setAssistantContext(userId, assistantId, input) {
       const client = await getAppPool().connect()
       try {
@@ -436,13 +602,38 @@ export function createDbContextScopeStore(): ContextScopeStore {
     },
 
     async archiveProject(userId, projectId) {
-      const result = await queryWithRLS<{ id: string }>(
-        userId,
-        `UPDATE workspace_projects SET status = 'archived'
-          WHERE id = $1 AND status = 'active' RETURNING id`,
-        [projectId],
-      )
-      return result.rows.length > 0
+      const client = await getAppPool().connect()
+      try {
+        await client.query('BEGIN')
+        await applyRLSGucs(client, userId)
+        const result = await client.query<{ id: string; workspaceId: string }>(
+          `UPDATE workspace_projects SET status = 'archived'
+            WHERE id = $1 AND status = 'active'
+            RETURNING id, workspace_id AS "workspaceId"`,
+          [projectId],
+        )
+        const archived = result.rows[0]
+        if (!archived) {
+          await client.query('ROLLBACK')
+          return false
+        }
+        await client.query(
+          `UPDATE workflows
+              SET enabled = false, paused_reason = 'project_archived', updated_at = now()
+            WHERE workspace_id = $1 AND context_project_id = $2 AND enabled = true`,
+          [archived.workspaceId, projectId],
+        )
+        await client.query(
+          `UPDATE scheduled_jobs
+              SET enabled = false, last_status = 'project_archived', updated_at = now()
+            WHERE context_project_id = $1 AND enabled = true`,
+          [projectId],
+        )
+        await client.query('COMMIT')
+        return true
+      } finally {
+        await rollbackAndRelease(client)
+      }
     },
   }
 }

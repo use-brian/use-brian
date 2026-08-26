@@ -28,7 +28,7 @@
  * [COMP:app-web/studio-ingest-rule-editor]
  */
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { authFetch } from "@/lib/auth-fetch";
 import { useT } from "@/lib/i18n/client";
 import {
@@ -43,6 +43,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { ContextScopePicker } from "@/components/context/context-scope-picker";
+import { ContextScopeChips } from "@/components/context/context-scope-chips";
+import {
+  listContextProjects,
+  listContextTeams,
+  type ContextProject,
+  type ContextTeam,
+} from "@/lib/api/context-scopes";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -56,6 +64,8 @@ export type EditableRule = {
   routingTimezone: string;
   alert: boolean;
   episodeSensitivity: "public" | "internal" | "confidential" | null;
+  contextGroupId: string | null;
+  contextProjectId: string | null;
 };
 
 type DraftRule = {
@@ -66,6 +76,8 @@ type DraftRule = {
   routingTimezone: string;
   alert: boolean;
   episodeSensitivity: "" | "public" | "internal" | "confidential";
+  contextGroupId: string | null;
+  contextProjectId: string | null;
   ruleOrder: string;
 };
 
@@ -74,6 +86,7 @@ type Props = {
   source: string;
   rules: EditableRule[];
   onChange: (next: EditableRule[]) => void;
+  workspaceId: string;
 };
 
 const ROUTING_MODES = ["realtime", "scheduled", "drop"] as const;
@@ -103,6 +116,8 @@ function defaultDraft(suggestedOrder: number): DraftRule {
     routingTimezone: "UTC",
     alert: false,
     episodeSensitivity: "",
+    contextGroupId: null,
+    contextProjectId: null,
     ruleOrder: String(suggestedOrder),
   };
 }
@@ -116,6 +131,8 @@ function ruleToDraft(rule: EditableRule): DraftRule {
     routingTimezone: rule.routingTimezone,
     alert: rule.alert,
     episodeSensitivity: rule.episodeSensitivity ?? "",
+    contextGroupId: rule.contextGroupId,
+    contextProjectId: rule.contextProjectId,
     ruleOrder: String(rule.ruleOrder),
   };
 }
@@ -128,6 +145,9 @@ type DraftPayload = {
   routingTimezone: string;
   alert: boolean;
   episodeSensitivity: "public" | "internal" | "confidential" | null;
+  workspaceId?: string;
+  contextGroupId: string | null;
+  contextProjectId: string | null;
   ruleOrder?: number;
 };
 
@@ -173,6 +193,8 @@ function parseDraft(
       routingTimezone: draft.routingTimezone.trim() || "UTC",
       alert: draft.alert,
       episodeSensitivity: draft.episodeSensitivity === "" ? null : draft.episodeSensitivity,
+      contextGroupId: draft.contextGroupId,
+      contextProjectId: draft.contextProjectId,
       ruleOrder,
     },
   };
@@ -221,11 +243,15 @@ function RuleCard({
   busy,
   onEdit,
   onDelete,
+  teams,
+  projects,
 }: {
   rule: EditableRule;
   busy: boolean;
   onEdit: () => void;
   onDelete: () => void;
+  teams: ContextTeam[];
+  projects: ContextProject[];
 }) {
   const t = useT();
   const ingestCopy = t.studioPage.ingestRules;
@@ -333,11 +359,19 @@ function RuleCard({
           </span>
         )}
       </div>
+      <div className="mt-2 pl-7">
+        <ContextScopeChips
+          teamId={rule.contextGroupId}
+          projectId={rule.contextProjectId}
+          teams={teams}
+          projects={projects}
+        />
+      </div>
     </div>
   );
 }
 
-export function IngestRuleEditor({ instanceId, source, rules, onChange }: Props) {
+export function IngestRuleEditor({ instanceId, source, rules, onChange, workspaceId }: Props) {
   const t = useT();
   const ingestCopy = t.studioPage.ingestRules;
   const copy = ingestCopy.editor;
@@ -352,6 +386,18 @@ export function IngestRuleEditor({ instanceId, source, rules, onChange }: Props)
   const [addingDraft, setAddingDraft] = useState<DraftRule | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [teams, setTeams] = useState<ContextTeam[]>([]);
+  const [projects, setProjects] = useState<ContextProject[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void Promise.all([listContextTeams(workspaceId), listContextProjects(workspaceId)])
+      .then(([nextTeams, nextProjects]) => {
+        if (!cancelled) { setTeams(nextTeams); setProjects(nextProjects); }
+      })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [workspaceId]);
 
   const filterTypeOptions = useMemo(
     () => FILTER_TYPES_BY_SOURCE[source] ?? ["always"],
@@ -414,7 +460,7 @@ export function IngestRuleEditor({ instanceId, source, rules, onChange }: Props)
       const res = await authFetch(`${API_URL}/api/ingest/rules/${editingId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(parsed.value),
+        body: JSON.stringify({ ...parsed.value, workspaceId }),
       });
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { error?: unknown };
@@ -449,7 +495,7 @@ export function IngestRuleEditor({ instanceId, source, rules, onChange }: Props)
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(parsed.value),
+          body: JSON.stringify({ ...parsed.value, workspaceId }),
         },
       );
       if (!res.ok) {
@@ -649,6 +695,16 @@ export function IngestRuleEditor({ instanceId, source, rules, onChange }: Props)
           <span className="text-muted-foreground">{copy.labels.alert}</span>
         </label>
 
+        <ContextScopePicker
+          teams={teams}
+          projects={projects}
+          teamId={current.contextGroupId}
+          projectId={current.contextProjectId}
+          onTeamChange={(contextGroupId) => update({ ...current, contextGroupId })}
+          onProjectChange={(contextProjectId) => update({ ...current, contextProjectId })}
+          disabled={busy}
+        />
+
         <div className="flex items-center gap-2 pt-1">
           <button
             onClick={onSave}
@@ -686,6 +742,8 @@ export function IngestRuleEditor({ instanceId, source, rules, onChange }: Props)
                   busy={busy}
                   onEdit={() => startEdit(rule)}
                   onDelete={() => deleteRule(rule.id)}
+                  teams={teams}
+                  projects={projects}
                 />
               )}
             </li>

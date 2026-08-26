@@ -21,6 +21,8 @@ import { brainKeysRoutes } from '../brain-keys.js'
 
 const WID = '11111111-1111-1111-1111-111111111111'
 const KID = '22222222-2222-2222-2222-222222222222'
+const TEAM_ID = '33333333-3333-4333-8333-333333333333'
+const PROJECT_ID = '44444444-4444-4444-8444-444444444444'
 
 const CREATED: CreatedBrainKey = {
   id: KID,
@@ -30,6 +32,8 @@ const CREATED: CreatedBrainKey = {
   scope: 'read_write',
   status: 'active',
   maxClearance: null,
+  contextGroupId: null,
+  contextProjectId: null,
   createdBy: 'u1',
   createdAt: new Date('2026-07-07T00:00:00.000Z'),
   lastUsedAt: null,
@@ -48,7 +52,17 @@ function makeDeps() {
   const workspaceStore = {
     getRole: vi.fn().mockResolvedValue('owner'),
   } as unknown as WorkspaceStore
-  return { brainKeyStore, workspaceStore }
+  const contextStore = {
+    getTeamSystem: vi.fn().mockResolvedValue({ id: TEAM_ID, status: 'active' }),
+    getProjectSystem: vi.fn().mockResolvedValue({ id: PROJECT_ID, status: 'active' }),
+  }
+  const getContextReadiness = vi.fn().mockResolvedValue({
+    enforcementVersion: 1,
+    readyForActivation: true,
+    checks: [],
+    legacyGeneral: {},
+  })
+  return { brainKeyStore, workspaceStore, contextStore: contextStore as never, getContextReadiness }
 }
 
 function makeApp(deps: ReturnType<typeof makeDeps>, userId?: string) {
@@ -136,6 +150,47 @@ describe('[COMP:api/brain-keys-route] POST / (create)', () => {
       .post(base)
       .send({ name: 'x', maxClearance: 'top_secret' })
     expect(res.status).toBe(400)
+  })
+
+  it('issues a key with stable Team/Project bindings after readiness and active-registry checks', async () => {
+    const deps = makeDeps()
+    deps.brainKeyStore.create = vi.fn().mockResolvedValue({
+      ...CREATED,
+      contextGroupId: TEAM_ID,
+      contextProjectId: PROJECT_ID,
+    })
+    const res = await request(makeApp(deps, 'u1'))
+      .post(base)
+      .send({
+        name: 'Scoped agent',
+        contextGroupId: TEAM_ID,
+        contextProjectId: PROJECT_ID,
+      })
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ contextGroupId: TEAM_ID, contextProjectId: PROJECT_ID })
+    expect(deps.brainKeyStore.create).toHaveBeenCalledWith(expect.objectContaining({
+      contextGroupId: TEAM_ID,
+      contextProjectId: PROJECT_ID,
+    }))
+  })
+
+  it('does not issue a scoped key while readiness is red', async () => {
+    const deps = makeDeps()
+    deps.getContextReadiness.mockResolvedValue({
+      enforcementVersion: 1,
+      readyForActivation: false,
+      checks: [{ id: 'connectors', ready: false, blocking: true, detail: 'missing' }],
+      legacyGeneral: {},
+    })
+    const res = await request(makeApp(deps, 'u1'))
+      .post(base)
+      .send({ name: 'Scoped agent', contextGroupId: TEAM_ID })
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({
+      error: 'context_activation_blocked',
+      failedChecks: ['connectors'],
+    })
+    expect(deps.brainKeyStore.create).not.toHaveBeenCalled()
   })
 })
 

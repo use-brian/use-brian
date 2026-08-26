@@ -360,6 +360,31 @@ export async function updateGoalSystem(
   return result.rows.length === 0 ? null : toRecord(result.rows[0])
 }
 
+/**
+ * Atomically narrow a goal's immutable execution context. An unset axis may
+ * acquire a binding; an existing binding may only be restated. The guarded
+ * WHERE clause prevents a racing request from clearing or switching the scope
+ * selected by another writer.
+ */
+export async function narrowGoalContextSystem(
+  id: string,
+  contextGroupId: string | null,
+  contextProjectId: string | null,
+): Promise<GoalRecord | null> {
+  const result = await query<GoalRow>(
+    `UPDATE goals
+        SET context_group_id = $1,
+            context_project_id = $2,
+            updated_at = now()
+      WHERE id = $3
+        AND (context_group_id IS NULL OR context_group_id = $1)
+        AND (context_project_id IS NULL OR context_project_id = $2)
+      RETURNING ${FULL_SELECT}`,
+    [contextGroupId, contextProjectId, id],
+  )
+  return result.rows.length === 0 ? null : toRecord(result.rows[0])
+}
+
 /** Single-flight claim for the acting loop: atomically flip an `active` goal to
  *  `running`. Returns true iff THIS call claimed it — a no-op update (no row)
  *  means another tick (a re-arm racing an event wake) already owns the goal, so

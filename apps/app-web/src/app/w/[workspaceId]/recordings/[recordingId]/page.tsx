@@ -31,6 +31,7 @@ import { RecordingPlayerBar } from "@/components/recordings/recording-player-bar
 import { TranscriptPane } from "@/components/recordings/transcript-pane";
 import { ActionItemsRail } from "@/components/recordings/action-items-rail";
 import { HashSeek } from "@/components/recordings/recording-chrome";
+import { ReclassifyContextButton } from "@/components/context/reclassify-context-dialog";
 
 export default function RecordingDetailPage() {
   const t = useT();
@@ -77,7 +78,10 @@ export default function RecordingDetailPage() {
         >
           {t.recordings.detailBack}
         </Link>
-        <h1 className="text-xl font-semibold">{title}</h1>
+        <div className="flex items-start justify-between gap-3">
+          <h1 className="text-xl font-semibold">{title}</h1>
+          {rec ? <ReclassifyContextButton workspaceId={params.workspaceId} primitive="recording" rowId={rec.recordingId} /> : null}
+        </div>
 
         {statusNote ? <p className="text-sm text-muted-foreground">{statusNote}</p> : null}
         {rec?.truncated ? (
