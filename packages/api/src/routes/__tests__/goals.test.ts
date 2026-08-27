@@ -24,6 +24,7 @@ function makeApp(opts: {
   role?: string | null
   goals?: unknown[]
   assessClarity?: GoalsRouteOptions['assessClarity']
+  subscribeActivity?: GoalsRouteOptions['subscribeActivity']
   ready?: boolean
 }) {
   const goalStore = {
@@ -47,6 +48,7 @@ function makeApp(opts: {
       goalStore: goalStore as never,
       workspaceStore: workspaceStore as never,
       assessClarity: opts.assessClarity,
+      subscribeActivity: opts.subscribeActivity,
       resolveAssistantId: async () => 'a1',
       contextStore: contextStore as never,
       getReadiness: async () => ({
@@ -450,6 +452,49 @@ describe('[COMP:api/goals-route] POST /api/goals/:id/abandon — discard', () =>
 
     expect(res.status).toBe(409)
     expect(mockSetGoalStatusSystem).not.toHaveBeenCalled()
+  })
+})
+
+describe('[COMP:goals/live-activity] GET /api/goals/:id/stream', () => {
+  it('RLS-gates the goal before opening an SSE stream', async () => {
+    mockGetGoalById.mockResolvedValue(null)
+    const subscribeActivity = vi.fn()
+    const { app } = makeApp({ userId: 'u1', role: 'member', subscribeActivity })
+
+    const res = await request(app).get('/api/goals/missing/stream')
+
+    expect(res.status).toBe(404)
+    expect(subscribeActivity).not.toHaveBeenCalled()
+  })
+
+  it('relays normal activity frames and closes on the terminal event', async () => {
+    mockGetGoalById.mockResolvedValue({
+      ...DRAFT_GOAL,
+      id: 'goal-live',
+      status: 'running',
+      confirmedAt: NOW,
+      means: { workflowId: 'workflow-1' },
+    } as never)
+    const unsubscribe = vi.fn()
+    const subscribeActivity: NonNullable<GoalsRouteOptions['subscribeActivity']> = ({ callback }) => {
+      queueMicrotask(() => {
+        callback({ event: 'reasoning', data: { text: 'Checking the requirements' } })
+        callback({ event: 'tool_start', data: { id: 'tool-1', name: 'webSearch' } })
+        callback({ event: 'done', data: { status: 'done' } })
+      })
+      return unsubscribe
+    }
+    const { app } = makeApp({ userId: 'u1', role: 'member', subscribeActivity })
+
+    const res = await request(app).get('/api/goals/goal-live/stream')
+
+    expect(res.status).toBe(200)
+    expect(res.headers['content-type']).toContain('text/event-stream')
+    expect(res.text).toContain('event: status\ndata: {"status":"running"}')
+    expect(res.text).toContain('event: reasoning\ndata: {"text":"Checking the requirements"}')
+    expect(res.text).toContain('event: tool_start\ndata: {"id":"tool-1","name":"webSearch"}')
+    expect(res.text).toContain('event: done\ndata: {"status":"done"}')
+    expect(unsubscribe).toHaveBeenCalledOnce()
   })
 })
 

@@ -101,6 +101,10 @@ import {
   resolveApiKeyClientPrincipal,
   type ResolvedApiKeyClientPrincipal,
 } from '../routes/client-principal-runtime.js'
+import {
+  goalActivityFramesFromQueryEvent,
+  type GoalActivityFrame,
+} from '../goals/activity.js'
 
 export type CalleeExecutorOptions = {
   provider: LLMProvider
@@ -407,6 +411,12 @@ export type CalleeQueryParams = {
   onDecisionApplication?: (applicationId: string) => void
   /** In-process only: returns internal high-water evidence to the caller. */
   onScopeEvidence?: (evidence: import('@use-brian/core').ScopeEvidence) => void
+  /**
+   * In-process live observability for a goal-owned workflow run. The boot
+   * composition only supplies it after resolving `workflowRunId` back to a
+   * trusted run input carrying `goalId`; ordinary A2A/workflow calls omit it.
+   */
+  onActivity?: (frame: GoalActivityFrame) => void
 }
 
 export type CalleeExecutor = (params: CalleeQueryParams) => Promise<string>
@@ -1875,6 +1885,15 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         confirmationResolver,
         confirmationTimeoutMs: deferredConfirmations ? 300_000 : undefined,
       })) {
+        if (params.onActivity) {
+          for (const frame of goalActivityFramesFromQueryEvent(event)) {
+            try {
+              params.onActivity(frame)
+            } catch (error) {
+              console.warn('[inter-assistant] goal activity callback failed (non-fatal):', error)
+            }
+          }
+        }
         if (event.type === 'text_delta') {
           responseText += event.text
         } else if (event.type === 'error' && isStalledError(event.error)) {

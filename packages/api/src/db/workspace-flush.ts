@@ -184,6 +184,8 @@ export const WORKSPACE_FLUSH_PRESERVED_TABLES = [
   'metered_model_surcharges',
   'daily_usage',
   'usage_tracking',
+  'oss_usage_tracking',
+  'workspace_goal_defaults',
   'usage_sessions',
   'bulk_ingest_surcharges',
   'recording_surcharges',

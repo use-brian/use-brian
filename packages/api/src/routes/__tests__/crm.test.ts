@@ -108,13 +108,17 @@ const WS = 'd126f352-7f5c-48b2-88d0-66694be0c93d'
 const CTX = { userId: 'user-1', workspaceId: WS }
 const CONFIG = { pipelines: [], fields: [] }
 
-function makeApp(role: string | null = 'member', authenticated = true) {
+function makeApp(
+  role: string | null = 'member',
+  authenticated = true,
+  emailDraftStore?: Parameters<typeof crmRoutes>[0]['emailDraftStore'],
+) {
   const workspaceStore = {
     getRole: vi.fn(async (userId: string) => userId === CTX.userId ? role : null),
   }
   return createTestApp(
     '/api/crm',
-    crmRoutes({ workspaceStore: workspaceStore as never }),
+    crmRoutes({ workspaceStore: workspaceStore as never, emailDraftStore }),
     authenticated ? { userId: CTX.userId } : undefined,
   )
 }
@@ -208,6 +212,45 @@ describe('[COMP:api/crm-r2-route] CRM R2 route authority', () => {
     expect(response.status).toBe(200)
     expect(response.body).toEqual(CONFIG)
     expect(getCrmConfig).toHaveBeenCalledWith(CTX.userId, WS, false)
+  })
+
+  it('returns the complete current canonical email draft to workspace members', async () => {
+    const list = vi.fn(async () => [{
+      id: '11111111-1111-4111-8111-111111111111',
+      workspaceId: WS,
+      status: 'draft' as const,
+      revision: 4,
+      from: 'team@example.test',
+      to: ['recipient@example.test'],
+      cc: ['colleague@example.test'],
+      bcc: [],
+      subject: 'Exact draft',
+      body: 'Hello,\n\nThis is the complete canonical body.\n\nRegards',
+      createdByUserId: CTX.userId,
+      createdByAssistantId: 'assistant-1',
+      sourceSessionId: 'session-1',
+      createdAt: new Date('2026-08-27T00:00:00.000Z'),
+      updatedAt: new Date('2026-08-27T00:04:00.000Z'),
+    }])
+    const response = await request(makeApp('member', true, {
+      saveRevision: vi.fn(),
+      getById: vi.fn(),
+      getActiveForSession: vi.fn(),
+      list,
+    }))
+      .get(`/api/crm/${WS}/email-drafts?limit=25`)
+
+    expect(response.status).toBe(200)
+    expect(response.body.drafts).toEqual([expect.objectContaining({
+      id: '11111111-1111-4111-8111-111111111111',
+      revision: 4,
+      body: 'Hello,\n\nThis is the complete canonical body.\n\nRegards',
+    })])
+    expect(list).toHaveBeenCalledWith({
+      userId: CTX.userId,
+      workspaceId: WS,
+      limit: 25,
+    })
   })
 
   it('reserves pipeline configuration for owners and admins', async () => {

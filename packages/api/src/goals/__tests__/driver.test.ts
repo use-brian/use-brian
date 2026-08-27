@@ -435,4 +435,47 @@ describe('[COMP:goals/tick-resilience] tick error resilience + default budget', 
     await authored.driver.kickoffGoal('g1')
     expect(authored.h.ticks).toHaveLength(1) // armed without touching the budget
   })
+
+  it('kickoff copies the workspace default onto a budget-less goal', async () => {
+    const applied: Array<{ goalId: string; budget: unknown }> = []
+    const goal = makeGoal({ budget: {}, outcome: 'workspace default' })
+    const { driver, h } = makeDriver({
+      goal,
+      overrides: {
+        resolveDefaultBudget: async () => ({ maxIterations: 12, maxSpend: 9 }),
+        applyDefaultBudget: async (goalId, budget) => {
+          applied.push({ goalId, budget })
+          return { ...goal, budget }
+        },
+      },
+    })
+
+    await driver.kickoffGoal('g1')
+
+    expect(applied).toEqual([{
+      goalId: 'g1',
+      budget: { maxIterations: 12, maxSpend: 9 },
+    }])
+    expect(h.ticks).toHaveLength(1)
+  })
+
+  it('kickoff falls back to the built-in default when workspace-default lookup fails', async () => {
+    const applied: unknown[] = []
+    const goal = makeGoal({ budget: {}, outcome: 'safe fallback' })
+    const { driver, h } = makeDriver({
+      goal,
+      overrides: {
+        resolveDefaultBudget: async () => { throw new Error('settings lookup unavailable') },
+        applyDefaultBudget: async (_goalId, budget) => {
+          applied.push(budget)
+          return { ...goal, budget }
+        },
+      },
+    })
+
+    await driver.kickoffGoal('g1')
+
+    expect(applied).toEqual([DEFAULT_GOAL_BUDGET])
+    expect(h.ticks).toHaveLength(1)
+  })
 })

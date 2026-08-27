@@ -188,7 +188,7 @@ export function InlineAiPrompt({
       // anchor line (`box` re-measures on scroll/reflow). The focus ring lives
       // HERE (focus-within) — the whole box lights up as one surface, not a
       // stray highlight on the inner textarea.
-      className="fixed z-50 overflow-hidden rounded-xl border border-border bg-popover text-sm shadow-lg transition-shadow focus-within:border-primary/50 focus-within:ring-2 focus-within:ring-primary/30 [&_:focus-visible]:shadow-none"
+      className="fixed z-50 overflow-hidden rounded-xl border border-border bg-popover text-sm shadow-lg transition-shadow focus-within:border-primary/50 [&_:focus-visible]:shadow-none"
       style={{ top: box.top, left: box.left, width: box.width }}
     >
       <div className="p-2">

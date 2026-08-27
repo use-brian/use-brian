@@ -39,6 +39,7 @@ import {
 import { cn } from "@/lib/utils";
 import { STATUS_BADGE } from "@/components/doc/panels/goal-status-badge";
 import { summariseDoneWhen } from "@/components/doc/panels/goal-done-when";
+import { GoalExecutionActivity } from "@/components/chat-app/goal-execution-activity";
 
 export default function GoalDetailPage({
   params,
@@ -189,6 +190,15 @@ export default function GoalDetailPage({
           <p className="text-sm text-red-600 dark:text-red-400">{goal.blockerReason}</p>
         </section>
       )}
+
+      {goal.hasWorkflow && ["active", "running", "awaiting_approval"].includes(goal.status) ? (
+        <section className="rounded-lg border border-border bg-muted/20 px-4 py-3">
+          <h2 className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            {labels.liveActivityHeading}
+          </h2>
+          <GoalExecutionActivity goalId={goal.id} initialStatus={goal.status} />
+        </section>
+      ) : null}
 
       <dl className="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-3 text-sm">
         <Field label={labels.statusHeading}>{t.goalsPage.status[goal.status]}</Field>

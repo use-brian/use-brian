@@ -55,6 +55,7 @@ import {
   ContextActivationBlockedError,
   type ContextReadiness,
 } from '../context-scope/context-readiness.js'
+import type { GoalActivityFrame } from '../goals/activity.js'
 
 export type GoalsRouteOptions = {
   goalStore: GoalStore
@@ -74,6 +75,11 @@ export type GoalsRouteOptions = {
     'getTeamSystem' | 'getProjectSystem' | 'resolveMemberTeamPrincipalSystem'
   >
   getReadiness?: (workspaceId: string) => Promise<ContextReadiness>
+  /** Goal-scoped live activity bus. Optional keeps route unit tests/embedders inert. */
+  subscribeActivity?: (params: {
+    goalId: string
+    callback: (frame: GoalActivityFrame) => void
+  }) => () => void
 }
 
 // Derived from the core registries (single source of truth — no hand-listed
@@ -128,6 +134,91 @@ function projectGoalDetail(g: GoalRecord) {
 export function goalsRoutes(opts: GoalsRouteOptions): Router {
   const router = Router()
   const contextStore = opts.contextStore ?? createDbContextScopeStore()
+
+  // GET /:id/stream — authenticated live activity for one acting goal.
+  // The RLS read is the authority gate; activity itself is ephemeral and
+  // best-effort. A status poll closes the stream even if a terminal NOTIFY is
+  // missed across instances.
+  router.get('/:id/stream', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) {
+      res.status(401).json({ error: 'Unauthorized' })
+      return
+    }
+    const goal = await getGoalById(userId, req.params.id)
+    if (!goal) {
+      res.status(404).json({ error: 'Not found' })
+      return
+    }
+
+    res.setHeader('Content-Type', 'text/event-stream')
+    res.setHeader('Cache-Control', 'no-cache, no-transform')
+    res.setHeader('Connection', 'keep-alive')
+    res.setHeader('X-Accel-Buffering', 'no')
+    res.flushHeaders()
+
+    let closed = false
+    let unsubscribe = () => {}
+    let poll: NodeJS.Timeout | null = null
+    let heartbeat: NodeJS.Timeout | null = null
+    let lastStatus = goal.status
+    const terminal = (status: GoalStatus) =>
+      status === 'done' || status === 'blocked' || status === 'abandoned'
+    const send = (event: string, data: unknown) => {
+      if (closed || res.writableEnded) return
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+    }
+    const close = () => {
+      if (closed) return
+      closed = true
+      if (poll) clearInterval(poll)
+      if (heartbeat) clearInterval(heartbeat)
+      unsubscribe()
+      if (!res.writableEnded) res.end()
+    }
+
+    send('status', { status: goal.status })
+    if (terminal(goal.status)) {
+      send('done', { status: goal.status, reason: goal.blockerReason })
+      close()
+      return
+    }
+
+    const subscribed = opts.subscribeActivity?.({
+      goalId: goal.id,
+      callback: (frame) => {
+        send(frame.event, frame.data)
+        if (frame.event === 'done') close()
+      },
+    }) ?? (() => {})
+    unsubscribe = subscribed
+    if (closed) unsubscribe()
+
+    poll = setInterval(() => {
+      void getGoalById(userId, goal.id).then((current) => {
+        if (!current) {
+          close()
+          return
+        }
+        if (current.status !== lastStatus) {
+          lastStatus = current.status
+          send('status', { status: current.status })
+        }
+        if (terminal(current.status)) {
+          send('done', { status: current.status, reason: current.blockerReason })
+          close()
+        }
+      }).catch(() => {
+        // The next poll retries. Activity delivery never changes goal state.
+      })
+    }, 5_000)
+    poll.unref?.()
+    heartbeat = setInterval(() => {
+      if (!closed && !res.writableEnded) res.write(': ping\n\n')
+    }, 25_000)
+    heartbeat.unref?.()
+    req.on('close', close)
+  })
 
   // GET / — goals for the workspace (RLS-scoped read; board / panel projection).
   router.get('/', async (req, res) => {

@@ -264,8 +264,8 @@ export type PipelineBDeps = {
    * recording lives INSIDE `processEpisode`, next to the only place
    * extraction usage is produced, so no caller can ship an unmetered
    * ingest path. Best-effort: absent store / missing usage skip silently;
-   * failures log and never break ingestion. OSS builds without a usage
-   * store simply omit it.
+   * failures log and never break ingestion. Normal standalone supplies its
+   * local store; bespoke compositions may omit it.
    */
   usage?: UsageStore
   /**

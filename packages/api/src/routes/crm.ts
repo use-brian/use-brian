@@ -13,7 +13,7 @@
 import { Router } from 'express'
 import type { Response } from 'express'
 import { z } from 'zod'
-import type { AccessContext, DealStage, EntityLinksStore } from '@use-brian/core'
+import type { AccessContext, CrmEmailDraftStore, DealStage, EntityLinksStore } from '@use-brian/core'
 import { EntityMergeError, UndoMergeError, mergeEntities, undoMerge } from '@use-brian/core'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 import { resolveWorkspaceViewpoint } from '../db/workspace-viewpoint.js'
@@ -83,6 +83,7 @@ import { notifyBrainInboxChange } from '../brain-stream/notify.js'
 type RouteOptions = {
   workspaceStore: WorkspaceStore
   entityLinks?: EntityLinksStore
+  emailDraftStore?: CrmEmailDraftStore
 }
 
 const CRM_KINDS = new Set<CrmEntityKind>(['person', 'company', 'deal'])
@@ -240,7 +241,7 @@ function sameValue(left: unknown, right: unknown): boolean {
   return JSON.stringify(left ?? null) === JSON.stringify(right ?? null)
 }
 
-export function crmRoutes({ workspaceStore, entityLinks }: RouteOptions): Router {
+export function crmRoutes({ workspaceStore, entityLinks, emailDraftStore }: RouteOptions): Router {
   const router = Router()
   const mergeRepo = createEntityMergeStore()
 
@@ -395,6 +396,46 @@ export function crmRoutes({ workspaceStore, entityLinks }: RouteOptions): Router
       participants: participants ?? [],
     }
   }
+
+  router.get('/:workspaceId/email-drafts', async (req, res) => {
+    const member = await memberContext(req as never, res)
+    if (!member) return
+    if (!emailDraftStore) {
+      res.status(503).json({ error: 'Canonical email drafts are unavailable' })
+      return
+    }
+    try {
+      const requestedLimit = Number(queryText(req.query.limit, 4) ?? '100')
+      if (!Number.isInteger(requestedLimit) || requestedLimit < 1) {
+        res.status(400).json({ error: 'limit must be a positive integer' })
+        return
+      }
+      const drafts = await emailDraftStore.list({
+        userId: member.ctx.userId,
+        workspaceId: member.ctx.workspaceId,
+        limit: Math.min(requestedLimit, 100),
+      })
+      res.json({
+        drafts: drafts.map((draft) => ({
+          id: draft.id,
+          status: draft.status,
+          revision: draft.revision,
+          from: draft.from,
+          to: draft.to,
+          cc: draft.cc,
+          bcc: draft.bcc,
+          subject: draft.subject,
+          body: draft.body,
+          sourceSessionId: draft.sourceSessionId,
+          createdAt: draft.createdAt.toISOString(),
+          updatedAt: draft.updatedAt.toISOString(),
+        })),
+      })
+    } catch (err) {
+      console.error('[crm] email drafts list failed:', err)
+      res.status(500).json({ error: 'Failed to load email drafts' })
+    }
+  })
 
   router.get('/:workspaceId/records', async (req, res) => {
     const member = await memberContext(req as never, res)

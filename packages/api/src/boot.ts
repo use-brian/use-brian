@@ -82,11 +82,13 @@ import {
   createTaskTools,
   createTaskGuardrailTools,
   createGoalTools,
+  createGoalDefaultBudgetTools,
   buildOneStepReminderWorkflow,
   type GoalRecord,
   createWorkspaceTools,
   createTranscriptionPrefTools,
   createCrmTools,
+  createCrmEmailDraftTools,
   createMemoryTools,
   createRetrievalTools,
   createViewTools,
@@ -287,6 +289,8 @@ import { getBranchHead, getRepoTree, getFileContents, compareCommits, getRepoPer
 import { startBrainStreamFanout } from './brain-stream/sse-fanout.js'
 import { brainStreamRoutes } from './routes/brain-stream.js'
 import { getSessionPresence, publishSessionEvent, setSessionTyping, startSessionEventBus, subscribeSessionEvents } from './session-event-bus.js'
+import { publishGoalActivity, subscribeGoalActivity } from './goals/activity-bus.js'
+import { goalOwnsWorkflowRun } from './goals/activity.js'
 import { createDbMcpSettingsStore } from './db/mcp-settings-store.js'
 import { createDbConnectorStore } from './db/connector-store.js'
 import { createConnectorInstanceStore } from './db/connector-instance-store.js'
@@ -371,6 +375,7 @@ import {
   createTaskGuardrailStore,
 } from './db/task-admission-store.js'
 import { createDbGoalStore } from './db/goals-store.js'
+import { createGoalDefaultBudgetStore } from './db/goal-default-budget.js'
 import { createGoalRollupRunner } from './goals/rollup-runner.js'
 import { createGoalDriver, parseGoalTick, GOAL_TICK_KIND, INITIAL_GOAL_LOOP_STATE, type GoalLoopState } from './goals/driver.js'
 import { createGoalStallReaper } from './goals/reaper.js'
@@ -389,7 +394,9 @@ import {
   findEventWaitingGoalsSystem,
 } from './db/goals.js'
 import { goalsRoutes } from './routes/goals.js'
+import { goalDefaultBudgetRoutes } from './routes/goal-default-budget.js'
 import { createDbCrmStore } from './db/crm-store.js'
+import { createDbCrmEmailDraftStore } from './db/crm-email-drafts.js'
 import { createDbWorkspaceFilesStore } from './db/workspace-files-store.js'
 import { createWorkspaceFileUploadsStore } from './db/workspace-file-uploads-store.js'
 import { getWorkspaceFileById } from './db/workspace-files.js'
@@ -811,8 +818,8 @@ export interface EpisodeIngestorDeps {
   analytics: AnalyticsLogger
   /**
    * Usage recorder threaded into Pipeline B so extraction LLM calls land
-   * as `overhead:extraction` rows. Absent in OSS (no usage store) — the
-   * pipeline then skips recording.
+   * as `overhead:extraction` rows. Hosted and normal standalone both inject a
+   * store; a bespoke composition may omit it and skip recording.
    */
   usageStore?: UsageStore
   /**
@@ -834,7 +841,7 @@ export interface OpenApiPorts {
   // ── Billing — open default: allow-all / no-op ──
   /** Real DB credit gate; default allows every turn. */
   checkCreditBudget?: CreditBudgetGate
-  /** Real DB usage recorder; default no-op (covers consolidation + chat). */
+  /** Edition-local DB usage recorder; default no-op for bespoke compositions. */
   usageStore?: UsageStore
   /**
    * Bulk-ingest surcharge hook (0.5-credit bulk-ingest item, priced +
@@ -1438,6 +1445,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // the structural rollup AND the acting-loop driver (no silent termination,
   // goals.md §7).
   const deliverGoalTerminal: GoalDeliver = async (goal, terminal, reason) => {
+    publishGoalActivity(goal.id, {
+      event: 'done',
+      data: { status: terminal, ...(reason ? { reason } : {}) },
+    })
     if (!goal.createdByUserId) return
     // Terminal analytics (goal_done / goal_blocked): this seam is the one place
     // BOTH terminal paths (acting loop + structural rollup) converge, so the
@@ -1483,6 +1494,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
   })
   const crmStore = createDbCrmStore()
+  const crmEmailDraftStore = createDbCrmEmailDraftStore()
   setGlobalMailboxContactImportDeps({ crm: crmStore })
   const workspaceFilesStore = createDbWorkspaceFilesStore()
   const workspaceFileUploadsStore = createWorkspaceFileUploadsStore()
@@ -1957,6 +1969,31 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const workspaceDirectoryStore = createWorkspaceDirectoryStore(workspaceStore)
 
   const workspaceAuditStore = createWorkspaceAuditStore()
+  const rawGoalDefaultBudgetStore = createGoalDefaultBudgetStore()
+  const goalDefaultBudgetStore = {
+    get: rawGoalDefaultBudgetStore.get,
+    async set(
+      userId: string,
+      workspaceId: string,
+      patch: Parameters<typeof rawGoalDefaultBudgetStore.set>[2],
+    ) {
+      const result = await rawGoalDefaultBudgetStore.set(userId, workspaceId, patch)
+      if (result.ok) {
+        void workspaceAuditStore.append({
+          workspaceId,
+          actorUserId: userId,
+          eventType: 'workspace.settings_changed',
+          details: {
+            goalDefaultBudget: result.budget,
+            source: result.source,
+          },
+        }).catch((error) => {
+          console.error('[goal-default-budget] audit append failed:', error)
+        })
+      }
+      return result
+    },
+  }
   const connectionStore = createConnectionStore()
   const chatLinkStore = createChatLinkStore()
   const chatConfirmationStore = createChatConfirmationStore()
@@ -2029,9 +2066,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       tools: new Map([...tools].filter(([_, t]) => t.isReadOnly)),
       // Record worker LLM COGS — the WorkerManager metering gap. COGS-only
       // (source 'included', no userMessageId → not credit-bearing), mirroring
-      // workflow `assistant_call` turns. Guarded on usageStore: absent in OSS →
-      // workers record nothing, which is also the acting-loop metering signal.
-      // Fire-and-forget like every usageStore call.
+      // workflow `assistant_call` turns. Guarded on usageStore for bespoke
+      // compositions; hosted and normal standalone both record. Fire-and-forget
+      // like every usageStore call.
       onUsage: usageStore
         ? (u) => {
             usageStore
@@ -2577,6 +2614,19 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     runConsult: async ({ request }) => {
       let decisionApplicationId: string | null = null
       let scopeEvidence: import('@use-brian/core').ScopeEvidence | undefined
+      let liveGoalId: string | null = null
+      if (request.workflowRunId) {
+        const run = await workflowRunStore.getRunSystem(request.workflowRunId)
+        const candidate = run?.input && typeof run.input === 'object'
+          ? (run.input as Record<string, unknown>).goalId
+          : null
+        if (run && typeof candidate === 'string' && candidate) {
+          const goal = await getGoalByIdSystem(candidate)
+          if (goal && goalOwnsWorkflowRun(goal, run)) {
+            liveGoalId = goal.id
+          }
+        }
+      }
       const text = await calleeExecutor({
         workspaceId: request.target.workspaceId,
         callerAssistantId: request.caller.assistantId,
@@ -2612,6 +2662,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           : undefined,
         onDecisionApplication: (id) => { decisionApplicationId = id },
         onScopeEvidence: (evidence) => { scopeEvidence = evidence },
+        onActivity: liveGoalId
+          ? (frame) => publishGoalActivity(liveGoalId!, frame)
+          : undefined,
       })
       return {
         text,
@@ -2769,6 +2822,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       } else if (event.type === 'workflow.run_failed') {
         details.workflowId = event.workflowId; details.name = event.workflowName
         details.stepId = event.stepId; details.error = event.error
+      } else if (event.type === 'workflow.failure_delivered') {
+        details.workflowId = event.workflowId; details.stepId = event.stepId
+        details.delivery = event.delivery
       } else if (event.type === 'workflow.auto_disabled') {
         details.workflowId = event.workflowId; details.name = event.workflowName
         details.reason = event.reason; details.streak = event.streak
@@ -2926,9 +2982,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // Resolve the workspace plan (system read; fails safe to 'free') and run the
     // injected credit gate: `ok` = under the monthly allowance → proceed,
     // `downgraded`/`blocked` = at/over it → false. The driver only consults this
-    // when metering is live (`Boolean(usageStore)`), so it is inert in OSS.
-    // Wired only when the closed credit gate is injected; absent (open) →
-    // undefined → no cap check (mirrors how `usageStore` is injected). A
+    // when metering is live (`Boolean(usageStore)`). Wired only when the closed
+    // credit gate is injected; absent (open) → undefined → no hosted cap check.
+    // The standalone per-goal dollar cap still accrues through its local store. A
     // billing-lookup error fails OPEN — a transient gate failure must never
     // strand a goal; the per-goal `maxSpend` + the metering barrier remain as
     // backstops. See routes/route-helpers.ts → `checkUsageBudget` for the gate.
@@ -2945,6 +3001,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         }
       : undefined,
     dispatchRun: async ({ goal, runId }) => {
+      publishGoalActivity(goal.id, {
+        event: 'status',
+        data: { phase: 'iteration_started' },
+      })
       let activeRunId = runId
       if (activeRunId) {
         const existing = await workflowRunStore.getRunSystem(activeRunId)
@@ -2982,6 +3042,16 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       }
       const outcome = await advanceWorkflowRun(workflowExecutorDeps, activeRunId)
       const terminal = outcome.kind === 'completed' || outcome.kind === 'failed'
+      publishGoalActivity(goal.id, {
+        event: 'status',
+        data: {
+          phase: outcome.kind === 'paused'
+            ? 'waiting'
+            : outcome.kind === 'failed'
+              ? 'iteration_failed'
+              : 'iteration_completed',
+        },
+      })
       // Did the agent park this goal on an external event this iteration
       // (`waitForEvent`)? Surface the subscriptions so the driver persists the
       // durable `until:event` marker + safety net rather than the paused-run
@@ -2998,7 +3068,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     deliver: deliverGoalTerminal,
     scheduleGoalTick,
     // No unbudgeted autonomy: kickoff persists the default budget when the
-    // author set none (see driver.ts DEFAULT_GOAL_BUDGET).
+    // author set none. Workspace override first, then the built-in fallback.
+    resolveDefaultBudget: async (goal) =>
+      (await goalDefaultBudgetStore.get(goal.workspaceId)).budget,
     applyDefaultBudget: (goalId, budget) => updateGoalSystem(goalId, { budget }),
     // Tick-error observability (the driver handled the error — this is the
     // taxonomy's goal_tick_error, not a failure path).
@@ -3486,6 +3558,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   allTools.set('markGoalComplete', goalWorkTools.markGoalComplete)
   allTools.set('waitForEvent', goalWorkTools.waitForEvent)
 
+  allTools.set(
+    'configureGoalDefaultBudget',
+    createGoalDefaultBudgetTools(goalDefaultBudgetStore).configureGoalDefaultBudget,
+  )
+
   allTools.set('listWorkspaceMembers', createWorkspaceTools(workspaceDirectoryStore).listWorkspaceMembers)
 
   // Workspace transcription preference (migration 332) — the assistant is the
@@ -3534,6 +3611,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   allTools.set('advanceDealStage', crmTools.advanceDealStage)
   allTools.set('listCrmFields', crmTools.listCrmFields)
   allTools.set('setCrmCustomFields', crmTools.setCrmCustomFields)
+  const crmEmailDraftTools = createCrmEmailDraftTools(crmEmailDraftStore)
+  allTools.set('saveEmailDraft', crmEmailDraftTools.saveEmailDraft)
+  allTools.set('getEmailDraft', crmEmailDraftTools.getEmailDraft)
+  allTools.set('listEmailDrafts', crmEmailDraftTools.listEmailDrafts)
 
   // ── Brain-MCP-dedicated tool instances ──
   const brainMemoryTools = createMemoryTools(memoryStore, { entityStore: entitiesStore, entityLinksStore })
@@ -4342,6 +4423,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     sessionResumeStore,
     episodicStore,
     sessionStateStore,
+    crmEmailDraftStore,
     planStore,
     jobStore,
     voiceTranscription,
@@ -5268,7 +5350,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       : undefined,
   }))
 
-  // Goals board — read-only observability over the goal-seeker primitive.
+  // Workspace default budget API must mount before the generic `/:id` goal
+  // routes so "default-budget" is never interpreted as a goal id.
+  app.use(
+    '/api/goals/default-budget',
+    requireAuth(env.JWT_SECRET),
+    goalDefaultBudgetRoutes({ workspaceStore, store: goalDefaultBudgetStore }),
+  )
+
+  // Goals board + acting-goal controls.
   app.use(
     '/api/goals',
     requireAuth(env.JWT_SECRET),
@@ -5277,6 +5367,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       workspaceStore,
       createCompletionWorkflow,
       kickoffGoal: goalDriver.kickoffGoal,
+      subscribeActivity: subscribeGoalActivity,
       assessClarity: goalClarityAssessor,
       resolveAssistantId: async (userId, workspaceId) =>
         (await getWorkspacePrimaryAssistant(userId, workspaceId))?.id,
@@ -6150,6 +6241,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use('/api/crm', requireAuth(env.JWT_SECRET), crmRoutes({
     workspaceStore,
     entityLinks: entityLinksStore,
+    emailDraftStore: crmEmailDraftStore,
   }))
   // Brain inbox (verification surface). Open + hosted share this one mount: the
   // route's deps are all open (brain-inbox-store / entities-store / crm / sessions /
@@ -7032,7 +7124,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // primitivesWithVectorColumn is closed (api-platform/admin). Open uses the
   // default primitive set from the embedding store. `usage` records each
   // committed batch as `overhead:embedding` COGS (workspace-fallback
-  // attribution) — absent in OSS, embedding runs unmetered locally.
+  // attribution). Normal standalone records to its local ledger; a bespoke
+  // composition with no usageStore remains unmetered.
   const embeddingWorker = createEmbeddingWorker({
     store: createDbEmbeddingStore(),
     embedder: sharedEmbedder,
@@ -7724,6 +7817,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             workerManager,
             episodicStore,
             sessionStateStore,
+            crmEmailDraftStore,
             capabilityStore,
             hooks,
           })
@@ -7785,7 +7879,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         knowledgeCaptureRuleStore,
         gdriveFilesStore, workspaceFilesStore, filesApi: filesApi ?? undefined, analytics,
         skillStore, deferredConfirmationStore, episodicStore,
-        sessionStateStore, voiceTranscription, workspaceToolPolicyStore,
+        sessionStateStore, crmEmailDraftStore, voiceTranscription, workspaceToolPolicyStore,
         recordingIngest: channelHosts.recordingIngest,
         ingestChannelMediaRef: channelHosts.telegramIngestChannelMediaRef,
         artifactPromoter, fileStore,
@@ -7801,7 +7895,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         connectorInstanceStore, knowledgeStore, knowledgeCaptureRuleStore, gdriveFilesStore, workspaceFilesStore,
         realtimeThreadTargetStore,
         filesApi: filesApi ?? undefined, analytics, skillStore,
-        deferredConfirmationStore, episodicStore, sessionStateStore, workflowEventDispatcher,
+        deferredConfirmationStore, episodicStore, sessionStateStore, crmEmailDraftStore, workflowEventDispatcher,
         slackWebhookIngestor: channelHosts.slackWebhookIngestor, connectorActionStore, episodesStore,
         buildConnectorActionAudit: ports.buildConnectorActionAudit,
         fileStore,
@@ -7814,7 +7908,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
         connectorInstanceStore, workspaceToolPolicyStore, knowledgeStore, knowledgeCaptureRuleStore, gdriveFilesStore, workspaceFilesStore,
         filesApi: filesApi ?? undefined, analytics, skillStore,
-        episodicStore, sessionStateStore, artifactPromoter, fileStore, workflowEventDispatcher,
+        episodicStore, sessionStateStore, crmEmailDraftStore, artifactPromoter, fileStore, workflowEventDispatcher,
       }))
       // Microsoft Teams — public Bot Framework messaging endpoint, per-channel
       // JWT-verified. No connector app (webhook transport). See
@@ -7827,7 +7921,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
         connectorInstanceStore, knowledgeStore, knowledgeCaptureRuleStore, gdriveFilesStore, workspaceFilesStore,
         analytics, skillStore,
-        episodicStore, sessionStateStore, artifactPromoter,
+        episodicStore, sessionStateStore, crmEmailDraftStore, artifactPromoter,
         msteamsWebhookIngestor: channelHosts.msteamsWebhookIngestor,
         fileStore,
       }))
@@ -7841,7 +7935,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           checkCreditBudget: ports.checkCreditBudget, integrationStore, channelUserStore,
           workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
           connectorInstanceStore, knowledgeStore, knowledgeCaptureRuleStore, gdriveFilesStore, workspaceFilesStore, analytics,
-          skillStore, episodicStore, sessionStateStore, fileStore,
+          skillStore, episodicStore, sessionStateStore, crmEmailDraftStore, fileStore,
         }))
       }
       if (env.WECHAT_CONNECTOR_SECRET) {
@@ -7853,7 +7947,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           checkCreditBudget: ports.checkCreditBudget, integrationStore, channelUserStore,
           workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
           connectorInstanceStore, knowledgeStore, knowledgeCaptureRuleStore, gdriveFilesStore, workspaceFilesStore, analytics,
-          skillStore, episodicStore, sessionStateStore, fileStore,
+          skillStore, episodicStore, sessionStateStore, crmEmailDraftStore, fileStore,
           // Without this the route's staging block is unreachable and every
           // inbound attachment archives as `availability: 'missing'` — the
           // message row lands, the bytes are lost, and nothing says so. iLink
@@ -7900,6 +7994,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           skillStore,
           episodicStore,
           sessionStateStore,
+          crmEmailDraftStore,
           fileStore,
           archiveMedia: chatArchiveLiveMedia,
           voiceTranscription,
@@ -7917,7 +8012,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         checkCreditBudget: ports.checkCreditBudget, integrationStore, customChannelStore, channelUserStore,
         workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
         connectorInstanceStore, knowledgeStore, knowledgeCaptureRuleStore, gdriveFilesStore, workspaceFilesStore, analytics,
-        skillStore, episodicStore, sessionStateStore, fileStore,
+        skillStore, episodicStore, sessionStateStore, crmEmailDraftStore, fileStore,
         archiveMedia: chatArchiveLiveMedia,
         voiceTranscription,
         deferredConfirmationStore,

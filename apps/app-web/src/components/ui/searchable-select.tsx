@@ -77,10 +77,10 @@ export function SearchableSelect({
         aria-label={ariaLabel}
         disabled={disabled}
         className={cn(
-          "group flex h-9 w-full items-center justify-between gap-2 rounded-lg border border-border bg-muted/50 px-3 text-sm text-left transition-colors outline-none",
+          "group flex h-9 w-full items-center justify-between gap-2 rounded-lg border border-border bg-muted/50 px-3 text-sm text-left transition-colors outline-none focus-visible:border-ring focus-visible:shadow-none",
           "hover:bg-muted",
           "disabled:cursor-not-allowed disabled:opacity-50",
-          "data-[popup-open]:ring-2 data-[popup-open]:ring-ring/40",
+          "data-[popup-open]:border-ring",
           className,
         )}
       >

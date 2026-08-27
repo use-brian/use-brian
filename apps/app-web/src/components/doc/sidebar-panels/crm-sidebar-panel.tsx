@@ -30,7 +30,7 @@ import {
   type ApprovalsRefreshDetail,
 } from "@/lib/approvals-events";
 import { listApprovals, type PendingApprovalRow } from "@/lib/api/approvals";
-import { fetchWorkspaceCrm, type CrmData } from "@/lib/api/crm";
+import { fetchCrmEmailDrafts, fetchWorkspaceCrm, type CrmData } from "@/lib/api/crm";
 import { crmEmailApprovalQueue } from "@/lib/crm-r2";
 import {
   crmQuickCounts,
@@ -72,13 +72,16 @@ export function CrmSidebarPanel({ workspaceId }: { workspaceId: string }) {
   // ── Live counts (own fetch; refreshed on the surface's mutate signal) ──
   const [data, setData] = useState<CrmData | null>(null);
   const [approvals, setApprovals] = useState<PendingApprovalRow[]>([]);
+  const [canonicalDraftCount, setCanonicalDraftCount] = useState(0);
   const refresh = useCallback(async () => {
-    const [crm, pending] = await Promise.allSettled([
+    const [crm, pending, drafts] = await Promise.allSettled([
       fetchWorkspaceCrm(workspaceId),
       listApprovals(workspaceId, { throwOnError: true }),
+      fetchCrmEmailDrafts(workspaceId),
     ]);
     setData(crm.status === "fulfilled" ? crm.value : { deals: [], contacts: [], companies: [] });
     if (pending.status === "fulfilled") setApprovals(pending.value);
+    if (drafts.status === "fulfilled") setCanonicalDraftCount(drafts.value.length);
   }, [workspaceId]);
   useEffect(() => {
     setData(null);
@@ -101,8 +104,8 @@ export function CrmSidebarPanel({ workspaceId }: { workspaceId: string }) {
     [data],
   );
   const emailDraftCount = useMemo(
-    () => (data ? crmEmailApprovalQueue(data, approvals).length : 0),
-    [approvals, data],
+    () => canonicalDraftCount + (data ? crmEmailApprovalQueue(data, approvals).length : 0),
+    [approvals, canonicalDraftCount, data],
   );
 
   const view = crmViewFromSearch(searchParams);

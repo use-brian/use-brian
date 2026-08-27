@@ -39,9 +39,11 @@
  * [COMP:workflow/goal-seeker]
  */
 import {
+  BUILTIN_GOAL_DEFAULT_BUDGET,
   processGoalIteration,
   type ActingLoopDeps,
   type EventSubscription,
+  type GoalDefaultBudget,
   type GoalRecord,
   type GoalStatus,
   type GoalStore,
@@ -66,7 +68,7 @@ export type GoalLoopState = {
  *  maxSpend / deadline — an acting goal never runs unbudgeted (a goal whose
  *  workflow completes without meeting `done_when` would otherwise re-arm on
  *  the `now` cadence forever, bounded only by the workspace credit cap). */
-export const DEFAULT_GOAL_BUDGET = { maxIterations: 30, maxSpend: 5 } as const
+export const DEFAULT_GOAL_BUDGET: Readonly<GoalDefaultBudget> = BUILTIN_GOAL_DEFAULT_BUDGET
 
 /** Consecutive errored ticks before the goal gives up loudly (`blocked`,
  *  `tick_error: …`) instead of re-arming another backoff retry. */
@@ -147,8 +149,9 @@ export type GoalDriverDeps = {
   /** Per-run COGS read (R3). Spend for a run = `sessionCostUsd('workflow_run_'
    *  + runId)` — the run's session id is derived, not stored. */
   sessionCostUsd: (sessionId: string) => Promise<number>
-  /** §4.13 — is COGS spend being recorded? `false` in OSS (no `usageStore`) →
-   *  acting goals block on the metering barrier. */
+  /** §4.13 — is COGS spend being recorded? Hosted and the normal standalone
+   *  composition each inject a real store; bespoke/unwired compositions return
+   *  false and acting goals block on the metering barrier. */
   meteringAvailable: () => boolean
   /** Optional workspace-budget gate (hosted): `false` → the goal blocks (the
    *  workspace is over its monthly cap; an autonomous loop must not run a
@@ -170,10 +173,13 @@ export type GoalDriverDeps = {
   /** Drop the event-park marker. Returns true iff a marker was actually cleared
    *  — so an event resume is claimed exactly once under concurrent events. */
   clearAwaitingEvent: (goalId: string) => Promise<boolean>
-  /** Persist `DEFAULT_GOAL_BUDGET` onto a goal arming with an empty budget and
-   *  return the updated record. Optional: absent → arm with whatever the goal
-   *  has (tests / minimal wirings). */
-  applyDefaultBudget?: (goalId: string, budget: typeof DEFAULT_GOAL_BUDGET) => Promise<GoalRecord | null>
+  /** Resolve the workspace override for a budget-less goal. Omitted or failed
+   *  lookups fall back to `DEFAULT_GOAL_BUDGET`. */
+  resolveDefaultBudget?: (goal: GoalRecord) => Promise<GoalDefaultBudget>
+  /** Persist the resolved default onto a goal arming with an empty budget and
+   *  return the updated record. Optional: absent means a minimal/test wiring
+   *  does not apply defaults. */
+  applyDefaultBudget?: (goalId: string, budget: GoalDefaultBudget) => Promise<GoalRecord | null>
   /** Observability hook for a tick that threw: fired after the driver handled
    *  the error (backoff re-arm, or the loud terminal block when `willRetry` is
    *  false). Boot wires a `goal_tick_error` analytics event. Best-effort. */
@@ -416,7 +422,15 @@ export function createGoalDriver(deps: GoalDriverDeps): GoalDriver {
     // (the task-autopilot draft path always arrives with `budget = {}`).
     const b = goal.budget
     if (deps.applyDefaultBudget && b.maxIterations === undefined && b.maxSpend === undefined && !b.deadline) {
-      goal = (await deps.applyDefaultBudget(goal.id, DEFAULT_GOAL_BUDGET)) ?? goal
+      let defaultBudget: GoalDefaultBudget = { ...DEFAULT_GOAL_BUDGET }
+      if (deps.resolveDefaultBudget) {
+        try {
+          defaultBudget = await deps.resolveDefaultBudget(goal)
+        } catch (error) {
+          console.error('[goals] workspace default budget lookup failed, using built-in default:', error)
+        }
+      }
+      goal = (await deps.applyDefaultBudget(goal.id, defaultBudget)) ?? goal
     }
     await deps.scheduleGoalTick(goal, deps.now(), INITIAL_STATE)
   }

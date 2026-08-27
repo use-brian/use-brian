@@ -45,6 +45,16 @@ import {
   joinQueuedInputs,
 } from "@/lib/use-mid-turn-queue";
 import { QueuedInputs } from "@/components/ui/queued-inputs";
+import {
+  SlashCommandIndicator,
+  SlashCommandMenuList,
+  useSlashCommands,
+} from "@/components/chat-app/slash-command-autocomplete";
+import {
+  GoalAcknowledgement,
+  goalAcceptedNoticeFromPayload,
+  type GoalAcceptedNotice,
+} from "@/components/chat-app/goal-acknowledgement";
 import { fetchFeedSessionIdByChannel } from "@/lib/api/feed";
 import { fetchSessionMessages, extractMessageText } from "@/lib/api/sessions";
 import { getUsage } from "@/lib/api/usage";
@@ -263,11 +273,22 @@ export const TuningChatPanel = forwardRef<
 
   const t = useT().feedPage.tuningChat;
   const tChat = useT().chat;
+  const tGoal = useT().chatApp;
   const tQueue = useT().chat.queue;
   const session = useChatSession();
   const stream = useMessageStream();
   const [input, setInput] = useState("");
+  const slashContainerRef = useRef<HTMLDivElement | null>(null);
+  const slashCommands = useSlashCommands({
+    enabled: true,
+    workspaceId: workspaceId ?? null,
+    value: input,
+    onChange: setInput,
+    containerRef: slashContainerRef,
+  });
   const [error, setError] = useState<string | null>(null);
+  const [acceptedGoal, setAcceptedGoal] =
+    useState<GoalAcceptedNotice | null>(null);
   // The server's machine code for the last error. `budget_exhausted` is a
   // billing STATE, not a stream crash, so the host renders it (D18).
   const [errorCode, setErrorCode] = useState<string | null>(null);
@@ -513,6 +534,11 @@ export const TuningChatPanel = forwardRef<
               if (data.sessionId) session.setSession(data.sessionId);
               break;
             }
+            case "goal_accepted": {
+              const notice = goalAcceptedNoticeFromPayload(payload);
+              if (notice) setAcceptedGoal(notice);
+              break;
+            }
             case "status": {
               const data = payload as StatusEvent;
               if (data.message) setStatusMessage(data.message);
@@ -688,12 +714,14 @@ export const TuningChatPanel = forwardRef<
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      slashCommands.handleKeyDown(e);
+      if (e.defaultPrevented) return;
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         void onSend();
       }
     },
-    [onSend],
+    [onSend, slashCommands],
   );
 
   const handleCopy = useCallback(async (messageId: string, text: string) => {
@@ -917,7 +945,37 @@ export const TuningChatPanel = forwardRef<
           </>
         ) : null}
 
-        <div className="rounded-xl border border-border/70 bg-background/60 shadow-sm focus-within:border-primary/50 focus-within:ring-2 focus-within:ring-primary/15 transition-all [&_:focus-visible]:shadow-none">
+        <div
+          ref={slashContainerRef}
+          className="relative rounded-xl border border-border/70 bg-background/60 shadow-sm focus-within:border-primary/50 transition-all [&_:focus-visible]:shadow-none"
+        >
+          <SlashCommandMenuList
+            commands={slashCommands}
+            className="bottom-full left-0 mb-1"
+          />
+          {workspaceId &&
+          acceptedGoal?.sessionId ===
+            (fixedSessionId ?? session.state.sessionId) ? (
+            <GoalAcknowledgement
+              notice={acceptedGoal}
+              workspaceId={workspaceId}
+              labels={{
+                accepted: tGoal.goalAcceptedLabel,
+                executing: tGoal.goalAcceptedStatus,
+                done: tGoal.goalAcceptedDone,
+                blocked: tGoal.goalAcceptedBlocked,
+                abandoned: tGoal.goalAcceptedAbandoned,
+                open: tGoal.goalAcceptedOpen,
+                dismiss: tGoal.goalAcceptedDismiss,
+              }}
+              onDismiss={() => setAcceptedGoal(null)}
+              className="mx-2.5 mt-2.5"
+            />
+          ) : null}
+          <SlashCommandIndicator
+            commands={slashCommands}
+            className="mx-2.5 mt-2.5"
+          />
           <div className="px-3.5 pt-2.5">
             <textarea
               ref={inputRef}

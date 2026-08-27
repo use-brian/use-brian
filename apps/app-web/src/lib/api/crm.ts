@@ -80,6 +80,28 @@ export type CrmData = {
   companies: CrmCompanyRow[];
 };
 
+export type CrmEmailDraft = {
+  id: string;
+  status: "draft" | "discarded";
+  revision: number;
+  from: string | null;
+  to: string[];
+  cc: string[];
+  bcc: string[];
+  subject: string;
+  body: string;
+  sourceSessionId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export async function fetchCrmEmailDrafts(workspaceId: string): Promise<CrmEmailDraft[]> {
+  const body = await jsonRequest<{ drafts: CrmEmailDraft[] }>(
+    `/api/crm/${encodeURIComponent(workspaceId)}/email-drafts`,
+  );
+  return body.drafts;
+}
+
 export type CrmCollectionKind = "deal" | "contact" | "company";
 export type CrmCollectionSort = "updated" | "name" | "amount" | "close";
 type CrmSortDirection = "asc" | "desc";

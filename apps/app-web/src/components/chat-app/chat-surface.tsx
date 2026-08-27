@@ -211,9 +211,15 @@ import {
   useAssistantMentions,
 } from "@/components/chat-app/mention-autocomplete";
 import {
+  SlashCommandIndicator,
   SlashCommandMenuList,
   useSlashCommands,
 } from "@/components/chat-app/slash-command-autocomplete";
+import {
+  GoalAcknowledgement,
+  goalAcceptedNoticeFromPayload,
+  type GoalAcceptedNotice,
+} from "@/components/chat-app/goal-acknowledgement";
 import {
   canEditUserMessage,
   resolveEditDispatch,
@@ -308,6 +314,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     "standard",
   );
   const [researchMode, setResearchMode] = useState(false);
+  const [acceptedGoal, setAcceptedGoal] =
+    useState<GoalAcceptedNotice | null>(null);
   const [researchQuota, setResearchQuota] = useState<{
     used: number;
     quota: number;
@@ -2049,6 +2057,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             }
             break;
           }
+          case "goal_accepted": {
+            const notice = goalAcceptedNoticeFromPayload(payload);
+            if (notice) setAcceptedGoal(notice);
+            break;
+          }
           case "user_message_saved": {
             const id = typeof payload.id === "string" ? payload.id : null;
             if (id) {
@@ -2991,7 +3004,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       <div
         className={cn(
           "rounded-2xl rounded-br-md border border-border bg-background shadow-sm",
-          "focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/35 [&_:focus-visible]:shadow-none",
+          "focus-within:border-ring [&_:focus-visible]:shadow-none",
         )}
       >
         <ChatComposer
@@ -3196,7 +3209,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       ref={mentions.containerRef}
       className={cn(
         "relative rounded-xl border border-border bg-background shadow-sm",
-        "focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/35 [&_:focus-visible]:shadow-none",
+        "focus-within:border-ring [&_:focus-visible]:shadow-none",
       )}
     >
       {/* Mention autocomplete — the merged roster (T-H4/T-H5): the workspace
@@ -3226,7 +3239,10 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             setReplyTo(null);
           }
         }}
-        highlightRanges={mentions.highlightRanges}
+        highlightRanges={[
+          ...slashCommands.highlightRanges,
+          ...mentions.highlightRanges,
+        ]}
         inputWrapClassName="order-1 col-span-3 min-w-0"
         // While a turn streams, Send QUEUES into the running turn and
         // Cmd/Ctrl+Enter steers. Rooms keep the ordinary path — a room message
@@ -3304,6 +3320,27 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         )}
         slotAttachments={
           <>
+            {acceptedGoal?.sessionId === activeSessionId ? (
+              <GoalAcknowledgement
+                notice={acceptedGoal}
+                workspaceId={workspaceId}
+                labels={{
+                  accepted: t.goalAcceptedLabel,
+                  executing: t.goalAcceptedStatus,
+                  done: t.goalAcceptedDone,
+                  blocked: t.goalAcceptedBlocked,
+                  abandoned: t.goalAcceptedAbandoned,
+                  open: t.goalAcceptedOpen,
+                  dismiss: t.goalAcceptedDismiss,
+                }}
+                onDismiss={() => setAcceptedGoal(null)}
+                className="mx-3 mt-2.5"
+              />
+            ) : null}
+            <SlashCommandIndicator
+              commands={slashCommands}
+              className="mx-3 mt-2.5"
+            />
             {/* The pending quote, above the field it belongs to. Dismissible,
                 because arming a reply and then deciding to say something
                 unrelated must not cost a page of scrolling to undo. */}

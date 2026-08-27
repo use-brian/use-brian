@@ -10,10 +10,10 @@ import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
 import { buildPinnedContextBlock } from '../resolve-session-pins.js'
 import { getSelfEntityId } from '../db/memories.js'
 import { getRecording, type Recording } from '../db/recordings-store.js'
-import { queryLoop, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, probePdfPageCount, estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH, filterToolsByCapabilities, modelToCompactionTier, buildWorkspaceFilesContext, buildUploadPolicyBlock, SensitivityAccumulator, CompartmentAccumulator, ContextScopeAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSupervisorSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, parsePresentedDocumentInput, latestWorkflowProposalReceipt, buildTool, parseSlashCommand, buildSlashCommandBlock, type PresentedDocumentInput, type MediaBackend } from '@use-brian/core'
+import { queryLoop, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, probePdfPageCount, estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH, filterToolsByCapabilities, modelToCompactionTier, buildWorkspaceFilesContext, buildUploadPolicyBlock, SensitivityAccumulator, CompartmentAccumulator, ContextScopeAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSupervisorSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, parsePresentedDocumentInput, latestWorkflowProposalReceipt, buildTool, parseSlashCommand, buildSlashCommandBlock, buildEmailDraftAnchorPrompt, formatActiveEmailDraftContext, type PresentedDocumentInput, type MediaBackend } from '@use-brian/core'
 import { deliverTurnInput, registerTurnInbox } from '../turn-inbox.js'
 import { insertClaimProvenance, getClaimsForLatestAssistantMessage } from '../db/claim-provenance-store.js'
-import type { SessionStateStore, SessionStateRecord, PlanStore, AmbientSurface } from '@use-brian/core'
+import type { SessionStateStore, SessionStateRecord, PlanStore, AmbientSurface, CrmEmailDraftStore } from '@use-brian/core'
 import { runProactiveCompaction } from './proactive-compaction.js'
 import { gateSessionRead } from './sessions.js'
 import { renderArtifactManifest } from '../files/artifact-manifest.js'
@@ -48,6 +48,8 @@ import {
   type BrainEntryEditTools,
 } from '../brain-entry-edit-tools.js'
 import { recordExternalCostFromMeta } from '../billing-external.js'
+import { getGoalByIdSystem } from '../db/goals.js'
+import { acceptedGoalIdsFromToolResults } from '../goals/acknowledgement.js'
 // Host-specific seams (the real session-event bus, the placeholder-title helpers,
 // the per-turn extra-tool injector) are NOT imported here — they are injected via
 // WebChatOptions so the chat route depends on no platform-specific code. The
@@ -541,6 +543,8 @@ type WebChatOptions = {
   sessionResumeStore?: SessionResumeStore
   episodicStore?: EpisodicStore
   sessionStateStore?: SessionStateStore
+  /** Canonical CRM email drafts and per-conversation active anchor. */
+  crmEmailDraftStore?: CrmEmailDraftStore
   /** Execution-plan tier store (`# Active plan` block + completeness gate). */
   planStore?: PlanStore
   /**
@@ -4613,6 +4617,20 @@ export function chatRoutes(options: WebChatOptions): Router {
       const userVisibleContextParts: string[] = splitPrompt.userVisibleContext
         ? [splitPrompt.userVisibleContext]
         : []
+      if (options.crmEmailDraftStore && assistant.workspaceId && activeCapabilities.has('crm')) {
+        try {
+          const activeEmailDraft = await options.crmEmailDraftStore.getActiveForSession({
+            userId: user.id,
+            workspaceId: assistant.workspaceId,
+            sessionId: session.id,
+          })
+          if (activeEmailDraft) {
+            userVisibleContextParts.push(formatActiveEmailDraftContext(activeEmailDraft))
+          }
+        } catch (err) {
+          console.error('[chat] active email draft fetch failed:', err)
+        }
+      }
       let updateViewedSkillTool: Tool | null = null
       let brainEntryEditTools: BrainEntryEditTools | null = null
       let scopedBrainEntryActive = false
@@ -5592,6 +5610,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // that can't produce the exact figure escalates to the browser, and
       // zero profiles never blocks a public-site browse.
       fullSystemPrompt += buildBrowserEscalationPrompt(allTools)
+      fullSystemPrompt += buildEmailDraftAnchorPrompt(allTools)
 
       // Dynamic workspace-blueprints section (blueprint output contract):
       // present only when the workspace has blueprints, naming only blueprints
@@ -6482,6 +6501,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         import('@use-brian/core').QueryEvent,
         { type: 'claim_ledger' }
       >['claims'] | null = null
+      const acknowledgedGoalIds = new Set<string>()
 
       /**
        * Atomic flush: walk buffered turns in order, synthesise missing
@@ -7295,6 +7315,20 @@ export function chatRoutes(options: WebChatOptions): Router {
                   analytics: options.analytics,
                 })
               }
+            }
+            for (const goalId of acceptedGoalIdsFromToolResults(
+              event.results,
+              event.metaByToolUseId,
+            )) {
+              if (acknowledgedGoalIds.has(goalId)) continue
+              acknowledgedGoalIds.add(goalId)
+              const goal = await getGoalByIdSystem(goalId).catch(() => null)
+              if (!goal || goal.workspaceId !== assistant.workspaceId) continue
+              sendEvent('goal_accepted', {
+                goalId,
+                outcome: goal.outcome,
+                sessionId: session.id,
+              })
             }
           }
           if (event.type === 'citation') {

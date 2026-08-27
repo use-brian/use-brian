@@ -255,7 +255,7 @@ export function SuggestedView({
           event.preventDefault();
           startPersonalChat();
         }}
-        className="mt-5 flex items-center gap-2 rounded-xl border border-border bg-card px-2.5 py-2 shadow-sm transition-[border-color,box-shadow] focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30 [&_:focus-visible]:shadow-none"
+        className="mt-5 flex items-center gap-2 rounded-xl border border-border bg-card px-2.5 py-2 shadow-sm transition-[border-color,box-shadow] focus-within:border-ring [&_:focus-visible]:shadow-none"
       >
         {selectedAssistant ? (
           assistants.length > 1 ? (

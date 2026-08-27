@@ -54,6 +54,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import {
   fetchCrmDealBoardPages,
+  fetchCrmEmailDrafts,
   fetchCrmLookup,
   fetchCrmRecord,
   fetchCrmRecordPage,
@@ -69,6 +70,7 @@ import {
   type CrmData,
   type CrmDealBoardPages,
   type CrmDealRow,
+  type CrmEmailDraft,
   type CrmFieldDefinition,
   type CrmPipeline,
   type CrmPipelineStage,
@@ -338,6 +340,10 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
       return { contacts: contacts.items, companies: companies.items, deals: deals.items };
     },
   );
+  const emailDraftsResource = useCachedResource<CrmEmailDraft[]>(
+    `${crmKey}:email-drafts`,
+    () => fetchCrmEmailDrafts(workspaceId),
+  );
   const pageData = useMemo(() => dataFromRecords(collectionRecords(collection)), [collection]);
   const mergedData = useMemo(() => mergeCrmData(
     mergeCrmData(directoryData(directoriesResource.data ?? null), emailContextResource.data ?? { deals: [], contacts: [], companies: [] }),
@@ -443,6 +449,15 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
     () => (data ? crmEmailApprovalQueue(data, pendingApprovals) : []),
     [data, pendingApprovals],
   );
+  const canonicalEmailDrafts = emailDraftsResource.data ?? [];
+  const emailDraftIds = useMemo(
+    () => [
+      ...canonicalEmailDrafts.map((draft) => draft.id),
+      ...emailQueue.map((item) => item.approval.id),
+    ],
+    [canonicalEmailDrafts, emailQueue],
+  );
+  const totalEmailDrafts = emailDraftIds.length;
   const companyNames = useMemo(() => companyNameById(allCompanies), [allCompanies]);
   const contactNames = useMemo(() => contactNameById(allContacts), [allContacts]);
   const counts = summaryResource.data?.attention ?? { overdue: 0, stale: 0, noAmount: 0, orphaned: 0 };
@@ -490,11 +505,11 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
     : null;
 
   useEffect(() => {
-    if (view.review !== "email" || approvalsLoading) return;
-    const selectedExists = emailQueue.some((item) => item.approval.id === view.draft);
-    const nextDraft = selectedExists ? view.draft : emailQueue[0]?.approval.id ?? null;
+    if (view.review !== "email" || approvalsLoading || emailDraftsResource.data === undefined) return;
+    const selectedExists = view.draft ? emailDraftIds.includes(view.draft) : false;
+    const nextDraft = selectedExists ? view.draft : emailDraftIds[0] ?? null;
     if (nextDraft !== view.draft) setView({ draft: nextDraft });
-  }, [approvalsLoading, emailQueue, setView, view.draft, view.review]);
+  }, [approvalsLoading, emailDraftIds, emailDraftsResource.data, setView, view.draft, view.review]);
 
   const filteredDeals = useMemo(
     () =>
@@ -1060,15 +1075,15 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
                   onClick={() =>
                     setView({
                       review: "email",
-                      draft: view.draft ?? emailQueue[0]?.approval.id ?? null,
+                      draft: view.draft ?? emailDraftIds[0] ?? null,
                     })
                   }
                 >
                   <Mail className="size-3.5" aria-hidden />
                   <span className="min-w-28 flex-1">{t.r2.emailDrafts}</span>
-                  {!approvalsLoading && emailQueue.length > 0 && (
+                  {!approvalsLoading && emailDraftsResource.data !== undefined && totalEmailDrafts > 0 && (
                     <span className="tabular-nums text-muted-foreground">
-                      {emailQueue.length}
+                      {totalEmailDrafts}
                     </span>
                   )}
                 </DropdownMenuItem>
@@ -1117,7 +1132,7 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
                 onClick={() =>
                   setView({
                     review: "email",
-                    draft: view.draft ?? emailQueue[0]?.approval.id ?? null,
+                    draft: view.draft ?? emailDraftIds[0] ?? null,
                   })
                 }
                 className={cn(
@@ -1129,9 +1144,9 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
               >
                 <Mail className="size-3.5" aria-hidden />
                 <span>{t.r2.emailDrafts}</span>
-                {!approvalsLoading && emailQueue.length > 0 && (
+                {!approvalsLoading && emailDraftsResource.data !== undefined && totalEmailDrafts > 0 && (
                   <span className="rounded-full bg-amber-500/15 px-1.5 text-[10px] font-semibold tabular-nums text-amber-700 dark:text-amber-300">
-                    {emailQueue.length}
+                    {totalEmailDrafts}
                   </span>
                 )}
               </button>
@@ -1309,17 +1324,19 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
               workspaceId={workspaceId}
               data={data}
               items={emailQueue}
+              canonicalDrafts={canonicalEmailDrafts}
               selectedId={view.draft}
-              loading={approvalsLoading}
-              loadError={approvalsError || emailContextResource.error !== undefined || directoriesResource.error !== undefined}
+              loading={approvalsLoading || emailDraftsResource.data === undefined}
+              loadError={approvalsError || emailDraftsResource.error !== undefined || emailContextResource.error !== undefined || directoriesResource.error !== undefined}
               onSelect={(draft) => setView({ review: "email", draft })}
               onReload={() => {
                 void reloadApprovals();
+                void emailDraftsResource.refresh();
                 void emailContextResource.refresh();
                 void directoriesResource.refresh();
               }}
               onResolved={(approvalId) => {
-                const nextDraft = emailQueue.find((item) => item.approval.id !== approvalId)?.approval.id ?? null;
+                const nextDraft = emailDraftIds.find((id) => id !== approvalId) ?? null;
                 setPendingApprovals((current) => current.filter((approval) => approval.id !== approvalId));
                 setView({ draft: nextDraft });
               }}

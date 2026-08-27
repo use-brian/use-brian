@@ -28,6 +28,7 @@ import {
   EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote,
   latestWorkflowProposalReceipt,
   parseSlashCommand, buildSlashCommandBlock,
+  buildEmailDraftAnchorPrompt, formatActiveEmailDraftContext,
 } from '@use-brian/core'
 import type { FilesApi, OutboundAttachment, RealtimeThreadTarget } from '@use-brian/core'
 import { resolveBrandContext } from '../brand/prompt-context.js'
@@ -38,6 +39,10 @@ import { runProactiveCompaction } from './proactive-compaction.js'
 import { notifyBrainWriteIfMatch } from '../brain-stream/notify.js'
 import { recordOverheadUsage } from './_overhead-usage.js'
 import { recordExternalCostFromMeta } from '../billing-external.js'
+import {
+  acceptedGoalIdsFromToolResults,
+  GOAL_ACCEPTED_CHANNEL_MESSAGE,
+} from '../goals/acknowledgement.js'
 import { composeRecoveryMessage } from './_recovery-message.js'
 import {
   CONTEXT_NOT_AVAILABLE_MESSAGE,
@@ -61,7 +66,7 @@ import type {
   AnalyticsLogger, McpSettingsStore, KnowledgeStoreInterface, GDriveFilesStore,
   ConfirmationResolver, Message, TopicClassification, ClassifierRecentTurn,
   EpisodicStore, CapabilityStore, TokenUsage, ToolResultMeta,
-  SessionStateStore, SessionStateRecord,
+  SessionStateStore, SessionStateRecord, CrmEmailDraftStore,
 } from '@use-brian/core'
 
 import { mintActorMediaToken } from '../media-token.js'
@@ -176,6 +181,9 @@ export type ChannelHooks = {
 
   /** Called on `tool_result`. */
   onToolResult?(results: ContentBlock[]): Promise<void>
+
+  /** Called once when a confirmed goal has been armed and kicked off. */
+  onGoalAccepted?(message: string, goalId: string): Promise<void>
 
   /**
    * Called immediately after the inbound user message is persisted to
@@ -527,6 +535,8 @@ export type ChannelPipelineParams = {
   workerManager?: import('@use-brian/core').WorkerManager
   episodicStore?: EpisodicStore
   sessionStateStore?: SessionStateStore
+  /** Canonical CRM email drafts and per-conversation active anchor. */
+  crmEmailDraftStore?: CrmEmailDraftStore
   capabilityStore: CapabilityStore
 
   // ── Channel hooks ──
@@ -1655,9 +1665,25 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
       )
     }
   }
+  let activeEmailDraftContext = ''
+  if (params.crmEmailDraftStore && assistant.workspaceId && !externalGuest && activeCapabilities.has('crm')) {
+    try {
+      const activeEmailDraft = await params.crmEmailDraftStore.getActiveForSession({
+        userId,
+        workspaceId: assistant.workspaceId,
+        sessionId: session.id,
+      })
+      if (activeEmailDraft) {
+        activeEmailDraftContext = formatActiveEmailDraftContext(activeEmailDraft)
+      }
+    } catch (err) {
+      console.error(`[${channelType}] active email draft fetch failed:`, err)
+    }
+  }
   const userVisibleContext = [
     splitPrompt.userVisibleContext,
     params.providerVisibleContext?.trim() ?? '',
+    activeEmailDraftContext,
   ].filter((part) => part.length > 0).join('\n\n')
 
   // ── Uploaded-file save policy ──
@@ -1836,6 +1862,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   }
   fullSystemPrompt += buildUnavailableCapabilitiesPrompt(unavailableCapabilities, allTools)
   fullSystemPrompt += buildBrowserEscalationPrompt(allTools)
+  fullSystemPrompt += buildEmailDraftAnchorPrompt(allTools)
 
   // ── Pre-flight-confirm reply correlation (channel-recording-preflight-confirm §6) ──
   // If a big recording in THIS conversation is awaiting the user's confirmation,
@@ -2082,6 +2109,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     import('@use-brian/core').QueryEvent,
     { type: 'claim_ledger' }
   >['claims'] | null = null
+  const acknowledgedGoalIds = new Set<string>()
 
   // ── Query loop ──
   try {
@@ -2214,6 +2242,21 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
             channelType,
           })
           await hooks.onToolResult?.(event.results)
+          for (const goalId of acceptedGoalIdsFromToolResults(
+            event.results,
+            event.metaByToolUseId,
+          )) {
+            if (acknowledgedGoalIds.has(goalId)) continue
+            acknowledgedGoalIds.add(goalId)
+            // The goal is already running. A transient channel-send failure
+            // must not unwind the durable kickoff or abort the final reply.
+            try {
+              await hooks.onGoalAccepted?.(GOAL_ACCEPTED_CHANNEL_MESSAGE, goalId)
+            } catch {
+              // Best-effort acknowledgement only; the final response still
+              // has its own authoritative delivery/error handling below.
+            }
+          }
           break
         case 'tool_confirmation_required':
           await hooks.onConfirmationRequired(event.request, confirmationResolver)

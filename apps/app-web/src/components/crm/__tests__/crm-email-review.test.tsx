@@ -25,7 +25,7 @@ import { I18nProvider } from "@/lib/i18n/client";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
 import { en } from "@/lib/i18n/dictionaries/en";
 import type { PendingApprovalRow } from "@/lib/api/approvals";
-import type { CrmData } from "@/lib/api/crm";
+import type { CrmData, CrmEmailDraft } from "@/lib/api/crm";
 import type { CrmEmailApprovalQueueItem } from "@/lib/crm-r2";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -96,7 +96,7 @@ async function settle() {
   });
 }
 
-async function mount(overrides: { items?: CrmEmailApprovalQueueItem[]; selectedId?: string | null; loading?: boolean; loadError?: boolean } = {}) {
+async function mount(overrides: { items?: CrmEmailApprovalQueueItem[]; canonicalDrafts?: CrmEmailDraft[]; selectedId?: string | null; loading?: boolean; loadError?: boolean } = {}) {
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -107,6 +107,7 @@ async function mount(overrides: { items?: CrmEmailApprovalQueueItem[]; selectedI
           workspaceId="workspace-1"
           data={data}
           items={overrides.items ?? items}
+          canonicalDrafts={overrides.canonicalDrafts ?? []}
           selectedId={overrides.selectedId === undefined ? approval.id : overrides.selectedId}
           loading={overrides.loading ?? false}
           loadError={overrides.loadError ?? false}
@@ -209,6 +210,36 @@ describe("[COMP:app-web/crm-email-review] dedicated review workspace", () => {
     expect([...container!.querySelectorAll("button")].some(
       (candidate) => candidate.textContent?.trim() === dict.crmPage.r2.approveSend,
     )).toBe(false);
+  });
+
+  it("shows the exact canonical CRM draft without any send action", async () => {
+    const canonical: CrmEmailDraft = {
+      id: "draft-1",
+      status: "draft",
+      revision: 3,
+      from: "Team <team@example.test>",
+      to: ["Jamie Example <jamie@example.test>"],
+      cc: [],
+      bcc: [],
+      subject: "Canonical update",
+      body: "Hello Jamie,\n\nThis is the full anchored draft.\n\nRegards,\nTeam",
+      sourceSessionId: "session-1",
+      createdAt: "2026-08-24T00:00:00.000Z",
+      updatedAt: "2026-08-24T00:01:00.000Z",
+    };
+    await mount({ items: [], canonicalDrafts: [canonical], selectedId: canonical.id });
+
+    expect(container!.querySelector("[data-canonical-email-body]")?.textContent)
+      .toContain("This is the full anchored draft.");
+    expect(container!.textContent).toContain(canonical.id);
+    expect(container!.textContent).toContain(dict.crmPage.r2.canonicalDraftAnchor);
+    expect(container!.textContent).toContain("Jamie Example");
+    expect(container!.querySelector("textarea")).toBeNull();
+    expect(container!.querySelector("[data-email-review-actions]")).toBeNull();
+    expect([...container!.querySelectorAll("button")].some(
+      (candidate) => candidate.textContent?.includes(dict.crmPage.r2.approveSend),
+    )).toBe(false);
+    expect(fetchEmailReviewContext).not.toHaveBeenCalled();
   });
 
   it("resizes the main review surface from the keyboard-accessible divider", async () => {
