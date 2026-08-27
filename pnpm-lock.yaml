@@ -486,6 +486,25 @@ importers:
         specifier: ^3
         version: 3.2.6(@types/debug@4.1.13)(@types/node@20.19.43)(jiti@2.7.0)(jsdom@29.1.1(@noble/hashes@1.8.0))(lightningcss@1.32.0)(tsx@4.22.4)
 
+  apps/outpost-api:
+    dependencies:
+      '@use-brian/api':
+        specifier: workspace:*
+        version: link:../../packages/api
+      dotenv:
+        specifier: ^16
+        version: 16.6.1
+    devDependencies:
+      '@types/node':
+        specifier: ^20.19.39
+        version: 20.19.43
+      typescript:
+        specifier: ^5.7
+        version: 5.9.3
+      vitest:
+        specifier: ^3
+        version: 3.2.6(@types/debug@4.1.13)(@types/node@20.19.43)(jiti@2.7.0)(jsdom@29.1.1(@noble/hashes@1.8.0))(lightningcss@1.32.0)(tsx@4.22.4)
+
   apps/wa-connector:
     dependencies:
       '@google-cloud/storage':
