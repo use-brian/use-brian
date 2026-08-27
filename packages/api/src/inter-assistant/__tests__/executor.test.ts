@@ -308,6 +308,7 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
       workspaceId: 'workspace-1',
       expectedWorkspaceId: 'workspace-1',
       callerChannelType: 'workflow',
+      depth: { maxTurns: 2 },
       externalClientPrincipal: {
         apiKeyId: '00000000-0000-4000-8000-000000000010',
         externalUserId: 'client-17',
@@ -332,6 +333,7 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     }))
     expect(scopedMemory.getWorkspaceIndex).not.toHaveBeenCalled()
     const loopArgs = mockQueryLoop.mock.calls.at(-1)?.[0]
+    expect(loopArgs.maxTurns).toBe(2)
     expect(loopArgs.tools.has('readClientInfo')).toBe(true)
     expect(loopArgs.tools.has('sendClientEmail')).toBe(false)
     expect(loopArgs.tools.has('saveMemory')).toBe(false)
@@ -346,6 +348,24 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
       assistantDefaultCompartments: ['client:client-17'],
     })
     expect(loopArgs.systemPrompt).toContain('External client boundary')
+
+    for (const depth of [
+      { tier: 'deep' as const },
+      { maxToolCalls: 20 },
+      { timeoutMs: 120_000 },
+    ]) {
+      await expect(callee({
+        ...baseParams,
+        workspaceId: 'workspace-1',
+        expectedWorkspaceId: 'workspace-1',
+        callerChannelType: 'workflow',
+        depth,
+        externalClientPrincipal: {
+          apiKeyId: '00000000-0000-4000-8000-000000000010',
+          externalUserId: 'client-17',
+        },
+      })).rejects.toMatchObject({ reason: 'client_principal_surface_forbidden' })
+    }
   })
 
   it('throws when the callee assistant does not exist', async () => {

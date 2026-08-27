@@ -56,7 +56,11 @@ import {
   type GoalAcceptedNotice,
 } from "@/components/chat-app/goal-acknowledgement";
 import { fetchFeedSessionIdByChannel } from "@/lib/api/feed";
-import { fetchSessionMessages, extractMessageText } from "@/lib/api/sessions";
+import {
+  fetchSessionMessages,
+  extractMessageText,
+  stopTurn,
+} from "@/lib/api/sessions";
 import { getUsage } from "@/lib/api/usage";
 import { webAppUrl } from "@/lib/primary-auth";
 import { AssistantAvatar } from "@/components/assistant-avatar";
@@ -1040,8 +1044,23 @@ export const TuningChatPanel = forwardRef<
             {isStreaming && (
               <button
                 onClick={() => {
+                  const sid = fixedSessionId ?? sessionIdRef.current;
                   stream.abort();
-                  flushQueuedInputs();
+                  // The server no longer reads a client close as Stop
+                  // (2026-08-24: a dropped connection keeps the turn running
+                  // so it can be re-attached), so the explicit stop is the
+                  // only thing that ends it. The queued flush waits for it
+                  // to land: a flush racing the still-running turn is
+                  // answered `turn_in_flight`. No session id means nothing
+                  // is running server-side. A failed stop is swallowed (the
+                  // stop is idempotent and the local teardown already ran).
+                  if (!sid) {
+                    flushQueuedInputs();
+                    return;
+                  }
+                  void stopTurn(sid)
+                    .catch(() => {})
+                    .finally(flushQueuedInputs);
                 }}
                 className="p-2 rounded-xl text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors shrink-0"
                 title={t.stop}

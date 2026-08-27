@@ -138,6 +138,8 @@ import {
 import {
   ChatMarkdown,
   ChatComposer,
+  createSSEBuffer,
+  parseSSEStream,
   useChatSession,
   useMessageStream,
   type ChatFileAttachment,
@@ -199,8 +201,10 @@ import {
   fetchLatestSession,
   fetchSessionMessages,
   parseMessageAttachments,
+  stopTurn,
   type MessageAttachmentRef,
 } from "@/lib/api/sessions";
+import { shouldReopenSessionStream } from "@/lib/chat-session-events";
 import { MessageAttachments } from "@/components/doc/message-attachment-card";
 import { fetchPendingQuestion } from "@/lib/api/pending-questions";
 import { PendingQuestionPanel } from "./pending-question-panel";
@@ -264,6 +268,16 @@ type ChatOrigin = "doc" | ChatSurface;
 
 /** Persisted across sessions so the model choice sticks. */
 const MODEL_STORAGE_KEY = "doc-chat-model";
+
+/** `notice.code` while the dock is re-attached to a turn whose POST stream
+ *  died. Keyed so completion clears only this notice, never a later one. */
+const RECONNECT_NOTICE_CODE = "turn_reconnecting";
+/** Bare closes of the reconnect stream reopen after this beat. */
+const RECONNECT_REOPEN_MS = 3_000;
+/** Total time the dock keeps re-attaching before it reports failure. Above
+ *  the Cloud Run request cap (30 min) so a turn that outlives one cut still
+ *  lands; past it the user is told to reload. */
+const RECONNECT_BUDGET_MS = 35 * 60_000;
 type ModelTier = "standard" | "pro" | "max";
 
 /**
@@ -682,6 +696,15 @@ export function FloatingChat({
   // seconds to fire the continuation turn, so we poll session messages
   // for the synthesised reply to land without a manual refresh.
   const [resumePolling, setResumePolling] = useState(false);
+  // Turn reconnect. Set when the direct `POST /api/chat` body closed with no
+  // terminal event (the server no longer reads that close as Stop,
+  // 2026-08-24): the turn is still running, so the dock re-attaches over
+  // `GET /api/sessions/:id/stream` and loads the persisted reply when the
+  // stream reports the turn over. The epoch reopens the stream after a
+  // bare close; `reconnectStartedAtRef` bounds how long it keeps trying.
+  const [reconnectSessionId, setReconnectSessionId] = useState<string | null>(null);
+  const [reconnectEpoch, setReconnectEpoch] = useState(0);
+  const reconnectStartedAtRef = useRef<number | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
@@ -815,6 +838,7 @@ export function FloatingChat({
     session.clearConfirmations();
     setPendingQuestion(null);
     setResumePolling(false);
+    setReconnectSessionId(null);
     setError(null);
     setNotice(null);
   }, [stream, session, midTurn]);
@@ -1184,6 +1208,34 @@ export function FloatingChat({
       void sendMessageRef.current?.(joined);
     }, 0);
   }, [midTurn]);
+  // `midTurn` is a fresh object every render, so `flushQueuedInputs` is too.
+  // Long-lived effects (the reconnect stream) reach it through this ref
+  // rather than listing it as a dep and reopening their stream per render.
+  const flushQueuedInputsRef = useRef(flushQueuedInputs);
+  useEffect(() => {
+    flushQueuedInputsRef.current = flushQueuedInputs;
+  }, [flushQueuedInputs]);
+
+  /**
+   * The user's Stop: tear the local stream down AND tell the server. Since
+   * 2026-08-24 the server no longer reads a client close as Stop (a dropped
+   * connection keeps the turn running so it can be re-attached), so the
+   * explicit `POST /api/chat/stop` is the only thing that ends the turn.
+   * Returns the promise so callers can sequence work after the stop lands;
+   * no session id means nothing is running server-side. Stop is idempotent
+   * server-side and the local teardown already happened, so a failed stop
+   * is swallowed rather than surfaced.
+   */
+  const stopRunningTurn = useCallback((): Promise<void> => {
+    const sessionId = sessionIdRef.current;
+    stream.abort();
+    session.dispatch({ type: "stream/abort" });
+    if (!sessionId) return Promise.resolve();
+    return stopTurn(sessionId).then(
+      () => undefined,
+      () => undefined,
+    );
+  }, [stream, session]);
 
   // ── Live activity mirror to parent + collapsed pill ────────────────────
   const isStreaming = session.state.isStreaming;
@@ -1268,8 +1320,7 @@ export function FloatingChat({
         // closing the panel — matches apps/web's behaviour. Click X to
         // collapse.
         if (stream.inFlight()) {
-          stream.abort();
-          session.dispatch({ type: "stream/abort" });
+          void stopRunningTurn();
           return;
         }
         setExpanded(false);
@@ -1300,7 +1351,7 @@ export function FloatingChat({
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("mousedown", onPointerDown);
     };
-  }, [expanded, stream, session]);
+  }, [expanded, stopRunningTurn, stream]);
 
   // ── Session resume on mount ────────────────────────────────────────────
   //
@@ -1433,6 +1484,130 @@ export function FloatingChat({
       controller.abort();
     };
   }, [resumePolling, session.state.sessionId, session.state.messages.length]);
+
+  // ── Turn reconnect ─────────────────────────────────────────────────────
+  // The direct POST body closed with no `done` / `error`, so the turn is
+  // still running server-side. Follow it over `GET /api/sessions/:id/stream`
+  // (reconnect mode): the first frame is `status`; `snapshot` / `activity`
+  // carry the live turn (ignored here: the dock has no mirror bubble, the
+  // persisted reply lands on completion); `turn_completed` or a `status`
+  // that is not `running` means the turn is over and the server follows with
+  // `done` and closes. The transcript is then re-read from the server, the
+  // same way the askQuestion resume poll above lands its reply. A bare close
+  // (proxy cut, deploy) reopens after a beat; past the budget the dock gives
+  // up and says so. Mirrors `chat-surface.tsx`'s session-stream effect minus
+  // the remote-turn paint.
+  useEffect(() => {
+    const sid = reconnectSessionId;
+    if (!sid) return;
+    let cancelled = false;
+    let sawDone = false;
+    const controller = new AbortController();
+    const epoch = threadEpochRef.current;
+    const narration = t.toolNarration;
+    const clearReconnectNotice = () =>
+      setNotice((current) =>
+        current?.code === RECONNECT_NOTICE_CODE ? null : current,
+      );
+    const onCompleted = () => {
+      if (sawDone) return;
+      sawDone = true;
+      setReconnectSessionId(null);
+      clearReconnectNotice();
+      void fetchSessionMessages(sid)
+        .then((rows) => {
+          // The thread was reset or switched while the fetch was out.
+          if (epoch !== threadEpochRef.current) return;
+          if (sessionIdRef.current !== sid) return;
+          sessionDispatchRef.current({
+            type: "messages/load",
+            messages: mapSessionRows(rows, narration),
+          });
+        })
+        .catch(() => {});
+      // The turn may have suspended on a clarifying question after the
+      // stream died; the dead POST could not report it, so probe.
+      void fetchPendingQuestion(sid)
+        .then((q) => {
+          if (!q || epoch !== threadEpochRef.current) return;
+          setPendingQuestion({
+            approvalId: q.approvalId,
+            question: q.question ?? "",
+            expiresAt: q.expiresAt,
+            sessionId: sid,
+          });
+        })
+        .catch(() => {});
+      if (!isDocOrigin) requestBrainRefresh(workspaceId);
+      // Queued mid-turn input the dead POST never took: the turn is over
+      // now, so it goes out as an ordinary turn (the queue's "client is
+      // the durable holder" fallback).
+      flushQueuedInputsRef.current();
+    };
+    const giveUp = () => {
+      if (sawDone) return;
+      sawDone = true;
+      setReconnectSessionId(null);
+      clearReconnectNotice();
+      setError(t.turnReconnectFailed);
+    };
+
+    void (async () => {
+      try {
+        const res = await authFetch(
+          `${API_URL}/api/sessions/${encodeURIComponent(sid)}/stream`,
+          { signal: controller.signal },
+        );
+        if (cancelled) return;
+        if (!res.ok || !res.body) {
+          // A rejected open is not something a retry fixes.
+          giveUp();
+          return;
+        }
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        const buf = createSSEBuffer();
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done || cancelled) break;
+          for (const ev of parseSSEStream(decoder.decode(value, { stream: true }), buf)) {
+            if (cancelled || sawDone) break;
+            const payload = coercePayload(ev.data);
+            switch (ev.event) {
+              case "status": {
+                if (payload.status !== "running") onCompleted();
+                break;
+              }
+              case "turn_completed":
+              case "done":
+                onCompleted();
+                break;
+              default:
+                // `snapshot` / `activity`: no mirror bubble in the dock.
+                break;
+            }
+          }
+        }
+      } catch {
+        // Transport error / abort: reopen below, or the effect was torn down.
+      } finally {
+        if (shouldReopenSessionStream({ isRoom: false, sawDone, cancelled })) {
+          const startedAt = reconnectStartedAtRef.current ?? Date.now();
+          if (Date.now() - startedAt > RECONNECT_BUDGET_MS) {
+            giveUp();
+          } else {
+            setTimeout(() => {
+              if (!cancelled) setReconnectEpoch((n) => n + 1);
+            }, RECONNECT_REOPEN_MS);
+          }
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [reconnectSessionId, reconnectEpoch, workspaceId, isDocOrigin, t.toolNarration, t.turnReconnectFailed]);
 
   // ── Send + SSE loop ────────────────────────────────────────────────────
 
@@ -2481,6 +2656,29 @@ export function FloatingChat({
             }
           }
         },
+        onDisconnect: () => {
+          // The body closed with no `done` / `error`: a request-timeout cut,
+          // a deploy, a network blip. The server keeps the turn running
+          // (2026-08-24), so drop the live bubble, tell the user, and
+          // re-attach over the session stream; the persisted reply is
+          // loaded when that stream reports the turn over. Queued input is
+          // NOT flushed here: the turn is still running and a re-send
+          // would only be answered `turn_in_flight`.
+          const sid = sessionIdRef.current;
+          session.dispatch({ type: "stream/abort" });
+          resetTurnBuffers();
+          if (!sid) {
+            // No `session` frame ever arrived, so there is nothing to
+            // re-attach to. Report it like any other transport failure.
+            setError(t.streamInterrupted);
+            flushQueuedInputs();
+            return;
+          }
+          reconnectStartedAtRef.current = Date.now();
+          setNotice({ code: RECONNECT_NOTICE_CODE, message: t.turnReconnecting });
+          setReconnectSessionId(sid);
+          setReconnectEpoch((n) => n + 1);
+        },
         onError: (err) => {
           setError(
             isTransportError(err)
@@ -2710,15 +2908,15 @@ export function FloatingChat({
   }, []);
 
   const handleAbort = useCallback(() => {
-    stream.abort();
-    session.dispatch({ type: "stream/abort" });
     // An aborted stream never reaches `onDone`, so the flush has to happen
     // here too. Stopping the current work and still wanting the message you
     // just queued answered is the normal reading of "stop, and here's the
     // thing I actually want" — the queued text is why the user reached for
-    // Stop in the first place.
-    flushQueuedInputs();
-  }, [stream, session, flushQueuedInputs]);
+    // Stop in the first place. It waits for the server-side stop to land,
+    // because a flush racing the still-running turn is answered
+    // `turn_in_flight`.
+    void stopRunningTurn().finally(flushQueuedInputs);
+  }, [stopRunningTurn, flushQueuedInputs]);
 
   const handleConfirmation = useCallback(
     async (
@@ -3168,8 +3366,11 @@ export function FloatingChat({
             />
           ) : null}
 
-          {/* Resume-in-flight indicator while the continuation turn fires. */}
-          {resumePolling ? (
+          {/* Resume-in-flight indicator while the continuation turn fires,
+              and the lightweight "working" state while the dock is
+              re-attached to a turn whose POST stream died (no mirror bubble
+              here; the reply loads on completion). */}
+          {resumePolling || reconnectSessionId ? (
             <ResumingIndicator label={t.pendingQuestion.resuming} />
           ) : null}
 

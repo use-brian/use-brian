@@ -20,11 +20,36 @@ export type StreamOptions = {
   authFetch: AuthFetch
   /** Per-event callback. Caller dispatches reducer actions from here. */
   onEvent: (event: SSEEvent) => void
-  /** Called once when the stream ends (network closed, body drained). */
+  /**
+   * Called once when the stream ends AFTER the server said it was over — a
+   * terminal event (`done` or `error`) was seen before the body closed.
+   *
+   * Compatibility: when `onDisconnect` is not supplied, a body that closes
+   * WITHOUT a terminal event also lands here, exactly as it always did.
+   */
   onDone?: () => void
+  /**
+   * Called when the transport closed with NO terminal event: a request or
+   * proxy timeout, a deploy, a network blip. The turn is very likely still
+   * running on the server — Cloud Run cut every chat stream at its request
+   * cap on 2026-08-24 while the turn kept working, and treating that close
+   * as `onDone` painted a finished turn over a live one. A caller that can
+   * re-attach (the chat surface's session follow stream) does so here.
+   * `lastEvent` is the last event name received, for diagnostics.
+   */
+  onDisconnect?: (info: { lastEvent: string | null }) => void
   /** Called on transport errors. Aborted streams do not call this. */
   onError?: (err: unknown) => void
 }
+
+/**
+ * Event names that mean "the server has finished with this stream". A body
+ * that closes after one of these is a completed turn; a body that closes
+ * before any of them is a disconnect. `error` is terminal because the route
+ * always `res.end()`s right after it (`turn_in_flight`, `pending_question_exists`,
+ * the generic crash banner) — the caller's `onEvent` has already reacted.
+ */
+export const TERMINAL_STREAM_EVENTS: ReadonlySet<string> = new Set(['done', 'error'])
 
 export type StartStream = (opts: StreamOptions) => Promise<void>
 
@@ -52,9 +77,11 @@ export type UseMessageStreamResult = {
 
 /**
  * Run one POST + SSE-parse loop against `signal`. Shared by `start` (which
- * owns the abort registration) and `sideStream` (which has none).
+ * owns the abort registration) and `sideStream` (which has none). Exported
+ * for the hook's tests, which drive it with a fake `authFetch` — the
+ * close-without-`done` distinction is the whole contract and needs no React.
  */
-async function runStream(opts: StreamOptions, signal: AbortSignal): Promise<void> {
+export async function runStream(opts: StreamOptions, signal: AbortSignal): Promise<void> {
   let res: Response
   try {
     res = await opts.authFetch(opts.url, {
@@ -77,6 +104,13 @@ async function runStream(opts: StreamOptions, signal: AbortSignal): Promise<void
   const reader = res.body.getReader()
   const decoder = new TextDecoder()
   const buffer = createSSEBuffer()
+  let lastEvent: string | null = null
+  let sawTerminal = false
+  const deliver = (event: SSEEvent) => {
+    lastEvent = event.event
+    if (TERMINAL_STREAM_EVENTS.has(event.event)) sawTerminal = true
+    opts.onEvent(event)
+  }
 
   try {
     while (true) {
@@ -86,7 +120,7 @@ async function runStream(opts: StreamOptions, signal: AbortSignal): Promise<void
       const chunk = decoder.decode(value, { stream: true })
       for (const event of parseSSEStream(chunk, buffer)) {
         if (signal.aborted) break
-        opts.onEvent(event)
+        deliver(event)
       }
     }
     // Drain any trailing event captured but not yet flushed.
@@ -94,10 +128,18 @@ async function runStream(opts: StreamOptions, signal: AbortSignal): Promise<void
     if (tail) {
       for (const event of parseSSEStream(tail, buffer)) {
         if (signal.aborted) break
-        opts.onEvent(event)
+        deliver(event)
       }
     }
-    if (!signal.aborted) opts.onDone?.()
+    if (signal.aborted) return
+    // The body closed. Only the server's own terminal event makes that a
+    // completed turn; a bare close is the transport giving up on a stream
+    // the server may still be writing to (request-timeout cut, deploy,
+    // network). Hand that to `onDisconnect` when the caller can re-attach;
+    // otherwise keep the historical `onDone` so existing hosts behave as
+    // before.
+    if (sawTerminal || !opts.onDisconnect) opts.onDone?.()
+    else opts.onDisconnect({ lastEvent })
   } catch (err) {
     if (signal.aborted) return
     opts.onError?.(err)

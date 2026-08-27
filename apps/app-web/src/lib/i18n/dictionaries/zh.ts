@@ -240,6 +240,9 @@ export const zh: Dictionary = {
     error: "傳送失敗，請再試一次。",
     streamInterrupted:
       "回覆尚未完成，連線就中斷了。先前所做的頁面變更皆已儲存，再傳送一則訊息即可繼續。",
+    turnReconnecting:
+      "連線已中斷。助理仍在背景繼續處理，完成後就會顯示回覆。",
+    turnReconnectFailed: "無法重新連接到執行中的回合，請重新載入頁面確認。",
     switchAssistant: "切換助理",
     switchAssistantTitle: "對話對象",
     emptyTitle: "向 Use Brian 提問",
@@ -5525,6 +5528,8 @@ export const zh: Dictionary = {
     liveWorkNoProgress: "已有 {minutes} 分鐘沒有進展",
     turnStoppedBy: "{name} 停止了這個回合。",
     turnStoppedByYou: "你已停止這個回合。",
+    turnReconnecting:
+      "連線已中斷。助理仍在繼續處理，完成後回覆會顯示在這裡。",
     turnReclaimed:
       "上一個回合停止回應，系統已將它重設並解除聊天封鎖。訊息都還在，重新傳送即可繼續。",
     pinnedContext: "釘選",

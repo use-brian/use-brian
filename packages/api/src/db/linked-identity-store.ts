@@ -49,7 +49,10 @@ export type LinkedIdentityStore = {
   /**
    * Fail-closed email routing for principal-bound workflows. Returns one
    * external user id only when the exact live API key + assistant pairing is
-   * unique; zero and ambiguous matches both return null.
+   * unique; zero and ambiguous matches both return null. The only compatibility
+   * rule is a historical Studio alias split: one canonical studio-client id
+   * plus legacy studio-demo ids may resolve when every row names the same user
+   * and non-empty contact entity. The lookup never mutates those rows.
    */
   findUniqueVerifiedApiClientByEmail(params: {
     apiKeyId: string
@@ -87,8 +90,12 @@ export function createLinkedIdentityStore(): LinkedIdentityStore {
     },
 
     async findUniqueVerifiedApiClientByEmail(params) {
-      const result = await query<{ providerId: string }>(
-        `SELECT DISTINCT li.provider_id AS "providerId"
+      const result = await query<{ providerId: string | null }>(
+        `WITH eligible AS (
+           SELECT
+             li.user_id,
+             li.provider_id,
+             NULLIF(li.metadata->>'entityId', '') AS entity_id
            FROM api_keys k
            JOIN linked_identities li
              ON li.provider = 'api:' || k.id::text
@@ -98,11 +105,36 @@ export function createLinkedIdentityStore(): LinkedIdentityStore {
             AND k.audience = 'external'
             AND k.scope = 'chat'
             AND lower(li.metadata->>'email') = $3
-          ORDER BY li.provider_id
-          LIMIT 2`,
+         ), decision AS (
+           SELECT
+             COUNT(*) AS match_count,
+             MIN(provider_id) AS single_id,
+             MIN(provider_id) FILTER (WHERE provider_id LIKE 'studio-client:%') AS canonical_id,
+             COUNT(*) FILTER (WHERE provider_id LIKE 'studio-client:%') AS canonical_count,
+             COUNT(*) FILTER (
+               WHERE provider_id NOT LIKE 'studio-client:%'
+                 AND provider_id NOT LIKE 'studio-demo:%'
+             ) AS foreign_count,
+             COUNT(DISTINCT user_id) AS user_count,
+             COUNT(*) FILTER (WHERE entity_id IS NULL) AS missing_entity_count,
+             COUNT(DISTINCT entity_id) AS entity_count
+           FROM eligible
+         )
+         SELECT CASE
+           WHEN match_count = 1 THEN single_id
+           WHEN match_count > 1
+            AND canonical_count = 1
+            AND foreign_count = 0
+            AND user_count = 1
+            AND missing_entity_count = 0
+            AND entity_count = 1
+           THEN canonical_id
+           ELSE NULL
+         END AS "providerId"
+         FROM decision`,
         [params.apiKeyId, params.assistantId, params.email.trim().toLowerCase()],
       )
-      return result.rows.length === 1 ? result.rows[0].providerId : null
+      return result.rows[0]?.providerId ?? null
     },
 
     async upsert(params) {

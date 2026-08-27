@@ -421,6 +421,19 @@ export type CalleeQueryParams = {
 
 export type CalleeExecutor = (params: CalleeQueryParams) => Promise<string>
 
+/**
+ * Principal-bound workflow steps may use the ordinary turn cap exposed by
+ * `assistant_call.maxTurns`. The workflow transport carries that cap through
+ * the shared research-budget shape, but it does not enable research by
+ * itself. Every field that expands the lane beyond a bounded draft remains
+ * forbidden.
+ */
+function hasForbiddenExternalClientDepth(depth: ResearchDepthConfig | undefined): boolean {
+  return depth?.tier !== undefined
+    || depth?.maxToolCalls !== undefined
+    || depth?.timeoutMs !== undefined
+}
+
 export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExecutor {
   return async function executeCalleeQuery(params: CalleeQueryParams): Promise<string> {
     // 1. Look up callee assistant and its billing/actor user.
@@ -458,7 +471,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         || params.pageAnchorId
         || params.skills?.length
         || params.enforcedSkills?.length
-        || params.depth
+        || hasForbiddenExternalClientDepth(params.depth)
         || params.blueprintId
       ) {
         throw Object.assign(
