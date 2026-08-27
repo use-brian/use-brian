@@ -7,7 +7,9 @@ import {
   chunkPagesForVision,
   distillConfigKey,
   distillPdfViaPages,
+  missingPdfPageCompletionMarkers,
   pdfPageCompletionMarker,
+  stripPdfPageCompletionMarkers,
   type VisionCaller,
 } from '../pdf-distill.js'
 import type { RenderedPdfPage, RenderPdfPagesResult } from '../pdf-pages.js'
@@ -46,6 +48,35 @@ const echoCaller: VisionCaller = async (req) => ({
 })
 
 describe('[COMP:files/pdf-distill] chunker', () => {
+  it('recognizes and strips only ordered standalone completion sentinels', () => {
+    const marker = pdfPageCompletionMarker(7)
+    expect(marker).toBe('[[PDF_PAGE_7_COMPLETE]]')
+    expect(marker).not.toContain('<!--')
+    const complete = `## Page 7\n\nbody\n\n${marker}`
+    expect(missingPdfPageCompletionMarkers(complete, [7])).toEqual([])
+    expect(stripPdfPageCompletionMarkers(complete)).toBe('## Page 7\n\nbody')
+
+    const inline = `## Page 7\n\nbody ${marker}`
+    const upfront = `${marker}\n## Page 7\n\ncut off`
+    const nonterminal = `## Page 7\n\n${marker}\ncut off`
+    expect(missingPdfPageCompletionMarkers(inline, [7])).toEqual([7])
+    expect(missingPdfPageCompletionMarkers(upfront, [7])).toEqual([7])
+    expect(missingPdfPageCompletionMarkers(nonterminal, [7])).toEqual([7])
+    expect(stripPdfPageCompletionMarkers(inline)).toBe(inline)
+  })
+
+  it('requires each marker after its page body and before the next page heading', () => {
+    const outOfOrder =
+      '## Page 1\n\nfirst\n\n## Page 2\n\nsecond\n\n' +
+      '[[PDF_PAGE_1_COMPLETE]]\n[[PDF_PAGE_2_COMPLETE]]'
+    expect(missingPdfPageCompletionMarkers(outOfOrder, [1, 2])).toEqual([1])
+
+    const intermediateNonterminal =
+      '## Page 1\n\nfirst\n\n[[PDF_PAGE_1_COMPLETE]]\ncontinued first page\n\n' +
+      '## Page 2\n\nsecond\n\n[[PDF_PAGE_2_COMPLETE]]'
+    expect(missingPdfPageCompletionMarkers(intermediateNonterminal, [1, 2])).toEqual([1])
+  })
+
   it('groups consecutive pages, last chunk short', () => {
     const chunks = chunkPagesForVision(pages(14), 6)
     expect(chunks.map((c) => c.pages.map((p) => p.pageNumber))).toEqual([
@@ -196,6 +227,24 @@ describe('[COMP:files/pdf-distill] distillPdfViaPages', () => {
     expect(caller).toHaveBeenCalledTimes(2)
   })
 
+  it('rejects the retired HTML-comment marker after both bounded attempts', async () => {
+    const caller = vi.fn<VisionCaller>(async () => ({
+      text: '## Page 1\n\nscanned text\n\n<!-- PDF_PAGE_1_COMPLETE -->',
+      usage: null,
+      model: 'fake-vision',
+      truncated: false,
+    }))
+
+    await expect(
+      distillPdfViaPages(Buffer.from('x'), {
+        visionCaller: caller,
+        chunkPages: 1,
+        renderPages: fakeRenderer(1),
+      }),
+    ).rejects.toThrow(/nominally complete turn without the page completion marker/)
+    expect(caller).toHaveBeenCalledTimes(2)
+  })
+
   it('notes failed pages in the output instead of dropping them silently', async () => {
     const caller: VisionCaller = async (req) => {
       if (req.images.some((p) => p.pageNumber === 3)) throw new Error('vision 500')
@@ -294,6 +343,6 @@ describe('[COMP:files/pdf-distill] cache-key fingerprint', () => {
   })
 
   it('carries the engine version so a prompt or stitching change misses the cache', () => {
-    expect(distillConfigKey({ renderWidth: 1120, chunkPages: 6, model: 'm' })).toMatch(/^v\d+:/)
+    expect(distillConfigKey({ renderWidth: 1120, chunkPages: 6, model: 'm' })).toMatch(/^v3:/)
   })
 })

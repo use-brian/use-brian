@@ -1,5 +1,9 @@
 import { PassThrough } from 'node:stream'
 import { describe, expect, it, vi } from 'vitest'
+import {
+  missingPdfPageCompletionMarkers,
+  stripPdfPageCompletionMarkers,
+} from '../../../files/pdf-distill.js'
 import type { Message, StreamChunk, ToolDefinition } from '../../types.js'
 import {
   CodexProviderProtocolError,
@@ -267,6 +271,53 @@ describe('[COMP:providers/codex-app-server] Codex app-server provider bridge', (
         },
       },
     ])
+    harness.peer.close()
+  })
+
+  it('preserves a PDF completion sentinel split across agent-message delta frames', async () => {
+    const harness = createHarness()
+    const provider = createCodexAppServerProvider({
+      transport: { rpc: harness.peer, cwd: '/tmp/brian-codex-test' },
+      models: [MODEL],
+    })
+    const session = provider.createSession({ model: MODEL, systemPrompt: 'Read the scan.' })
+    const streamed = collect(session.send([{
+      role: 'user',
+      content: [
+        { type: 'text', text: 'Transcribe page 1.' },
+        { type: 'image', mimeType: 'image/jpeg', data: 'c2Nhbm5lZC1wYWdl' },
+      ],
+    }]))
+
+    const threadStart = await waitForMethod(harness, 'thread/start')
+    respondToThreadStart(harness, threadStart)
+    const turnStart = await waitForMethod(harness, 'turn/start')
+    respondToTurnStart(harness, turnStart)
+    await new Promise<void>((resolve) => setImmediate(resolve))
+
+    notify(harness, 'item/agentMessage/delta', {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      itemId: 'message-1',
+      delta: '## Page 1\n\nScanned total: 42\n\n[[PDF_PAGE_1_',
+    })
+    notify(harness, 'item/agentMessage/delta', {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      itemId: 'message-1',
+      delta: 'COMPLETE]]',
+    })
+    usage(harness, 'thread-1', 'turn-1')
+    complete(harness, 'thread-1', 'turn-1')
+
+    const text = (await streamed)
+      .filter((chunk): chunk is Extract<StreamChunk, { type: 'text_delta' }> => (
+        chunk.type === 'text_delta'
+      ))
+      .map((chunk) => chunk.text)
+      .join('')
+    expect(missingPdfPageCompletionMarkers(text, [1])).toEqual([])
+    expect(stripPdfPageCompletionMarkers(text)).toBe('## Page 1\n\nScanned total: 42')
     harness.peer.close()
   })
 

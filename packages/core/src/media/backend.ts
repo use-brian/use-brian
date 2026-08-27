@@ -266,7 +266,7 @@ async function runGoogle(
     const pageNumbers = Array.from({ length: pageCount }, (_, index) => index + 1)
     const markerInstruction =
       `\n\nThis PDF has exactly ${pageCount} pages. Start every page with its exact \`## Page N\` heading. ` +
-      'After the COMPLETE transcription of each page, append its exact HTML comment marker. ' +
+      'After the COMPLETE transcription of each page, append its exact plain-text marker on its own line. ' +
       'Never emit a marker before the whole page is complete. Required markers: ' +
       pageNumbers.map(pdfPageCompletionMarker).join(' ')
     try {
