@@ -672,6 +672,128 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
     expect(updated?.finishedAt).toBeInstanceOf(Date)
   })
 
+  it('freezes scoped applicability and carries the exact application into the downstream approval', async () => {
+    const applicationId = '00000000-0000-4000-8000-000000000099'
+    const requests: ConsultRequest[] = []
+    let approval: Parameters<NonNullable<ExecutorDeps['requestApproval']>>[0] | null = null
+    const send = makeFakeTool('imapSendMessage')
+    send.resolveConfirmation = async () => true
+    const deps = makeDeps({
+      consultTransport: {
+        async send(request) {
+          requests.push(request)
+          return {
+            task: {
+              taskId: 'task-1',
+              contextId: 'context-1',
+              status: { state: 'completed', timestamp: new Date().toISOString() },
+              artifacts: [{
+                artifactId: `decision-application:${applicationId}`,
+                name: 'decision-playbook-application',
+                parts: [{ kind: 'data', data: { applicationId } }],
+              }],
+              history: [{
+                messageId: 'message-1',
+                role: 'agent',
+                parts: [{ kind: 'text', text: 'Reviewed draft' }],
+              }],
+            },
+          }
+        },
+      },
+      buildToolRegistry: async () => new Map([['imapSendMessage', send]]),
+      requestApproval: async (params) => { approval = params },
+    })
+    const definition: WorkflowDefinition = {
+      startStepId: 'draft',
+      steps: [
+        {
+          id: 'draft',
+          type: 'assistant_call',
+          target: { assistantId: 'primary' },
+          prompt: 'Draft a reply',
+          storeOutputAs: 'draft',
+        },
+        {
+          id: 'send',
+          type: 'tool_call',
+          toolName: 'imapSendMessage',
+          arguments: {
+            account: 'primary-mailbox',
+            to: ['recipient@example.test'],
+            subject: 'Reply',
+            body: '{{vars.draft}}',
+          },
+        },
+      ],
+    }
+    const { run } = await seedWorkflowAndRun(deps, definition)
+
+    const outcome = await advanceWorkflowRun(deps, run.id)
+
+    expect(outcome).toMatchObject({ kind: 'paused', reason: 'approval' })
+    expect(requests[0].decisionContext).toEqual({
+      operationId: `${run.id}:draft`,
+      externalPrincipal: false,
+      applicability: { kind: 'email', key: 'primary-mailbox' },
+    })
+    expect(approval).toMatchObject({
+      toolName: 'imapSendMessage',
+      decisionApplicationId: applicationId,
+    })
+  })
+
+  it('does not guess operation applicability when an assistant call fans out', async () => {
+    const requests: ConsultRequest[] = []
+    const send = makeFakeTool('imapSendMessage')
+    send.resolveConfirmation = async () => true
+    const deps = makeDeps({
+      consultTransport: {
+        async send(request) {
+          requests.push(request)
+          return makeConsultTransport({ responseText: 'Draft' }).send(request)
+        },
+      },
+      buildToolRegistry: async () => new Map([
+        ['imapSendMessage', send],
+        ['saveMemory', makeFakeTool('saveMemory')],
+      ]),
+      requestApproval: async () => {},
+    })
+    const definition: WorkflowDefinition = {
+      startStepId: 'draft',
+      steps: [
+        {
+          id: 'draft',
+          type: 'assistant_call',
+          target: { assistantId: 'primary' },
+          prompt: 'Draft and archive',
+          nextStepId: ['send', 'archive'],
+        },
+        {
+          id: 'send',
+          type: 'tool_call',
+          toolName: 'imapSendMessage',
+          arguments: { account: 'primary-mailbox', body: 'Draft' },
+          nextStepId: null,
+        },
+        {
+          id: 'archive',
+          type: 'tool_call',
+          toolName: 'saveMemory',
+          arguments: { content: 'Draft' },
+          nextStepId: null,
+        },
+      ],
+    }
+    const { run } = await seedWorkflowAndRun(deps, definition)
+    await advanceWorkflowRun(deps, run.id)
+    expect(requests[0].decisionContext).toEqual({
+      operationId: `${run.id}:draft`,
+      externalPrincipal: false,
+    })
+  })
+
   it("fails the run before any step when workspaceComputeAllowed denies (the hosted paid gate)", async () => {
     // A no-plan ('free') workspace's autonomous compute is blocked on hosted:
     // the injected gate returns false and the run fails with
@@ -1696,6 +1818,130 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
     )
     const outcome = await advanceWorkflowRun(deps, run.id)
     expect(outcome.kind).toBe('completed')
+  })
+})
+
+describe('[COMP:workflow/failure-delivery] terminal workflow notification', () => {
+  it('preserves the terminal result when notification assistant resolution fails', async () => {
+    const stores = makeFakeStores()
+    let resolutions = 0
+    const deps: ExecutorDeps = {
+      workflowStore: stores.workflowStore,
+      runStore: stores.runStore,
+      consultTransport: makeConsultTransport({ fail: 'failed safely' }),
+      resolvePrimary: async () => {
+        resolutions += 1
+        if (resolutions > 1) throw new Error('resolver unavailable')
+        return PRIMARY_ASSISTANT_ID
+      },
+      buildToolRegistry: async () => new Map(),
+      deliverToChannel: async () => {
+        throw new Error('delivery must not be attempted')
+      },
+    }
+    const { run } = await seedWorkflowAndRun(deps, {
+      startStepId: 'collect',
+      steps: [{
+        id: 'collect',
+        type: 'assistant_call',
+        target: { assistantId: 'primary' },
+        prompt: 'collect',
+      }],
+      failureDelivery: { channelType: 'slack', channelId: 'C123' },
+    })
+
+    const outcome = await advanceWorkflowRun(deps, run.id)
+
+    expect(outcome.kind).toBe('failed')
+    expect(stores.runs.get(run.id)?.status).toBe('failed')
+  })
+
+  it('attempts one sanitized notification after a timeout and stays terminal when delivery fails', async () => {
+    const stores = makeFakeStores()
+    const delivered: string[] = []
+    const audits: WorkflowAuditEvent[] = []
+    const deps: ExecutorDeps = {
+      workflowStore: stores.workflowStore,
+      runStore: stores.runStore,
+      consultTransport: {
+        async send() {
+          throw Object.assign(new Error('token=do-not-send'), {
+            reason: 'timeout',
+            partialOutput: 'partial result',
+          })
+        },
+      },
+      resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
+      buildToolRegistry: async () => new Map(),
+      deliverToChannel: async (params) => {
+        expect(stores.runs.get(run.id)?.status).toBe('timeout')
+        delivered.push(params.text)
+        throw new Error('Slack unavailable')
+      },
+      emitAudit: (event) => {
+        audits.push(event)
+      },
+    }
+    const { run } = await seedWorkflowAndRun(deps, {
+      startStepId: 'collect',
+      steps: [{
+        id: 'collect',
+        type: 'assistant_call',
+        target: { assistantId: 'primary' },
+        prompt: 'collect',
+      }],
+      failureDelivery: { channelType: 'slack', channelId: 'C123' },
+    })
+
+    await advanceWorkflowRun(deps, run.id)
+    await advanceWorkflowRun(deps, run.id)
+
+    expect(delivered).toHaveLength(1)
+    expect(delivered[0]).toContain('Failed step: collect')
+    expect(delivered[0]).toContain('Error: timeout')
+    expect(delivered[0]).not.toContain('do-not-send')
+    expect(stores.runs.get(run.id)?.status).toBe('timeout')
+    expect(audits.filter((event) => event.type === 'workflow.failure_delivered')).toHaveLength(1)
+  })
+
+  it('audits one successful notification and never notifies a successful run', async () => {
+    const stores = makeFakeStores()
+    const delivered: string[] = []
+    const audits: WorkflowAuditEvent[] = []
+    const deps: ExecutorDeps = {
+      workflowStore: stores.workflowStore,
+      runStore: stores.runStore,
+      consultTransport: makeConsultTransport({ fail: 'failed safely' }),
+      resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
+      buildToolRegistry: async () => new Map(),
+      deliverToChannel: async (params) => {
+        delivered.push(params.text)
+        return { status: 'delivered', channelType: params.channelType, channelId: params.channelId }
+      },
+      emitAudit: (event) => {
+        audits.push(event)
+      },
+    }
+    const definition: WorkflowDefinition = {
+      startStepId: 'collect',
+      steps: [{
+        id: 'collect',
+        type: 'assistant_call',
+        target: { assistantId: 'primary' },
+        prompt: 'collect',
+      }],
+      failureDelivery: { channelType: 'slack', channelId: 'C123' },
+    }
+    const failed = await seedWorkflowAndRun(deps, definition)
+    await advanceWorkflowRun(deps, failed.run.id)
+    await advanceWorkflowRun(deps, failed.run.id)
+    expect(delivered).toHaveLength(1)
+    expect(audits.filter((event) => event.type === 'workflow.failure_delivered')).toHaveLength(1)
+
+    deps.consultTransport = makeConsultTransport({ responseText: 'ok' })
+    const successful = await seedWorkflowAndRun(deps, definition)
+    await advanceWorkflowRun(deps, successful.run.id)
+    expect(delivered).toHaveLength(1)
   })
 })
 

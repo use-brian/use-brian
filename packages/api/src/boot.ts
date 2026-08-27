@@ -82,11 +82,13 @@ import {
   createTaskTools,
   createTaskGuardrailTools,
   createGoalTools,
+  createGoalDefaultBudgetTools,
   buildOneStepReminderWorkflow,
   type GoalRecord,
   createWorkspaceTools,
   createTranscriptionPrefTools,
   createCrmTools,
+  createCrmEmailDraftTools,
   createMemoryTools,
   createRetrievalTools,
   createViewTools,
@@ -148,6 +150,7 @@ import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTORS, OFFICIAL_CONNECTOR_TOOLS, 
 
 // ── OPEN package imports (@use-brian/api) ──────────────────────────
 import { findAssistantById, findUserById, getWorkspacePrimaryAssistant, isUserBlockedForAssistant, listAccessibleAssistants } from './db/users.js'
+import { resolveTurnScopeSystem } from './context-scope/resolve-turn-scope.js'
 import { getTaskByIdSystem } from './db/tasks.js'
 import { createBrowserSkillsStore } from './db/browser-skills-store.js'
 import { createDbConnectorActionStore } from './db/connector-actions-store.js'
@@ -211,6 +214,7 @@ import { brainRoutes } from './routes/brain.js'
 import { brainInboxRoutes } from './routes/brain-inbox.js'
 import { crmRoutes } from './routes/crm.js'
 import { getCrmEmailReviewContext } from './db/crm-r2.js'
+import { bootstrapHistoricalCrmIdentityState } from './db/crm-identity-store.js'
 import { resolveWorkspaceViewpoint } from './db/workspace-viewpoint.js'
 import { createBrainEntryMutator } from './brain-entry-mutation.js'
 import { taskGuardrailRoutes } from './routes/task-guardrails.js'
@@ -285,6 +289,8 @@ import { getBranchHead, getRepoTree, getFileContents, compareCommits, getRepoPer
 import { startBrainStreamFanout } from './brain-stream/sse-fanout.js'
 import { brainStreamRoutes } from './routes/brain-stream.js'
 import { getSessionPresence, publishSessionEvent, setSessionTyping, startSessionEventBus, subscribeSessionEvents } from './session-event-bus.js'
+import { publishGoalActivity, subscribeGoalActivity } from './goals/activity-bus.js'
+import { goalOwnsWorkflowRun } from './goals/activity.js'
 import { createDbMcpSettingsStore } from './db/mcp-settings-store.js'
 import { createDbConnectorStore } from './db/connector-store.js'
 import { createConnectorInstanceStore } from './db/connector-instance-store.js'
@@ -317,6 +323,7 @@ import { skillApprovalsRoutes } from './routes/skill-approvals.js'
 import { createSkillReviewWorker } from './workers/skill-review-worker.js'
 import { createGeminiSkillReviewLLM } from './workers/skill-review-llm.js'
 import { createPlaybookReflectionWorker } from './workers/playbook-reflection-worker.js'
+import { createDecisionReflectionWorker } from './workers/decision-reflection-worker.js'
 import { buildWorkspaceCuratorScope } from './workers/workspace-curator-scope.js'
 import { loadSkillRegistry } from './registry/load-skill-registry.js'
 import { handleRoutes } from './routes/handles.js'
@@ -368,6 +375,7 @@ import {
   createTaskGuardrailStore,
 } from './db/task-admission-store.js'
 import { createDbGoalStore } from './db/goals-store.js'
+import { createGoalDefaultBudgetStore } from './db/goal-default-budget.js'
 import { createGoalRollupRunner } from './goals/rollup-runner.js'
 import { createGoalDriver, parseGoalTick, GOAL_TICK_KIND, INITIAL_GOAL_LOOP_STATE, type GoalLoopState } from './goals/driver.js'
 import { createGoalStallReaper } from './goals/reaper.js'
@@ -386,7 +394,9 @@ import {
   findEventWaitingGoalsSystem,
 } from './db/goals.js'
 import { goalsRoutes } from './routes/goals.js'
+import { goalDefaultBudgetRoutes } from './routes/goal-default-budget.js'
 import { createDbCrmStore } from './db/crm-store.js'
+import { createDbCrmEmailDraftStore } from './db/crm-email-drafts.js'
 import { createDbWorkspaceFilesStore } from './db/workspace-files-store.js'
 import { createWorkspaceFileUploadsStore } from './db/workspace-file-uploads-store.js'
 import { getWorkspaceFileById } from './db/workspace-files.js'
@@ -449,6 +459,7 @@ import { createWorkflowDependencyPreflight } from './workflow/dependency-preflig
 import { createDeliveryTargetResolver } from './scheduling/delivery-target.js'
 import { viewsRoutes } from './routes/views.js'
 import { teamspacesRoutes } from './routes/teamspaces.js'
+import { contextScopeRoutes } from './routes/context-scopes.js'
 import { createTeamspaceStore } from './db/teamspace-store.js'
 import { createOfficeArtifactStore } from './db/office-artifacts.js'
 import { getBrandStore } from './db/brand-store.js'
@@ -807,8 +818,8 @@ export interface EpisodeIngestorDeps {
   analytics: AnalyticsLogger
   /**
    * Usage recorder threaded into Pipeline B so extraction LLM calls land
-   * as `overhead:extraction` rows. Absent in OSS (no usage store) — the
-   * pipeline then skips recording.
+   * as `overhead:extraction` rows. Hosted and normal standalone both inject a
+   * store; a bespoke composition may omit it and skip recording.
    */
   usageStore?: UsageStore
   /**
@@ -830,7 +841,7 @@ export interface OpenApiPorts {
   // ── Billing — open default: allow-all / no-op ──
   /** Real DB credit gate; default allows every turn. */
   checkCreditBudget?: CreditBudgetGate
-  /** Real DB usage recorder; default no-op (covers consolidation + chat). */
+  /** Edition-local DB usage recorder; default no-op for bespoke compositions. */
   usageStore?: UsageStore
   /**
    * Bulk-ingest surcharge hook (0.5-credit bulk-ingest item, priced +
@@ -1434,6 +1445,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // the structural rollup AND the acting-loop driver (no silent termination,
   // goals.md §7).
   const deliverGoalTerminal: GoalDeliver = async (goal, terminal, reason) => {
+    publishGoalActivity(goal.id, {
+      event: 'done',
+      data: { status: terminal, ...(reason ? { reason } : {}) },
+    })
     if (!goal.createdByUserId) return
     // Terminal analytics (goal_done / goal_blocked): this seam is the one place
     // BOTH terminal paths (acting loop + structural rollup) converge, so the
@@ -1479,6 +1494,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
   })
   const crmStore = createDbCrmStore()
+  const crmEmailDraftStore = createDbCrmEmailDraftStore()
   setGlobalMailboxContactImportDeps({ crm: crmStore })
   const workspaceFilesStore = createDbWorkspaceFilesStore()
   const workspaceFileUploadsStore = createWorkspaceFileUploadsStore()
@@ -1953,6 +1969,31 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const workspaceDirectoryStore = createWorkspaceDirectoryStore(workspaceStore)
 
   const workspaceAuditStore = createWorkspaceAuditStore()
+  const rawGoalDefaultBudgetStore = createGoalDefaultBudgetStore()
+  const goalDefaultBudgetStore = {
+    get: rawGoalDefaultBudgetStore.get,
+    async set(
+      userId: string,
+      workspaceId: string,
+      patch: Parameters<typeof rawGoalDefaultBudgetStore.set>[2],
+    ) {
+      const result = await rawGoalDefaultBudgetStore.set(userId, workspaceId, patch)
+      if (result.ok) {
+        void workspaceAuditStore.append({
+          workspaceId,
+          actorUserId: userId,
+          eventType: 'workspace.settings_changed',
+          details: {
+            goalDefaultBudget: result.budget,
+            source: result.source,
+          },
+        }).catch((error) => {
+          console.error('[goal-default-budget] audit append failed:', error)
+        })
+      }
+      return result
+    },
+  }
   const connectionStore = createConnectionStore()
   const chatLinkStore = createChatLinkStore()
   const chatConfirmationStore = createChatConfirmationStore()
@@ -2025,9 +2066,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       tools: new Map([...tools].filter(([_, t]) => t.isReadOnly)),
       // Record worker LLM COGS — the WorkerManager metering gap. COGS-only
       // (source 'included', no userMessageId → not credit-bearing), mirroring
-      // workflow `assistant_call` turns. Guarded on usageStore: absent in OSS →
-      // workers record nothing, which is also the acting-loop metering signal.
-      // Fire-and-forget like every usageStore call.
+      // workflow `assistant_call` turns. Guarded on usageStore for bespoke
+      // compositions; hosted and normal standalone both record. Fire-and-forget
+      // like every usageStore call.
       onUsage: usageStore
         ? (u) => {
             usageStore
@@ -2289,6 +2330,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     createShell: officeArtifactStore.createShell,
     deleteEmptyShell: officeArtifactStore.deleteEmptyShell,
     getArtifact: officeArtifactStore.get,
+    raiseScope: officeArtifactStore.raiseScope,
     resolveAccess: resolveOfficeAccess,
     createJob: officeGenerationStore.create,
     latestJob: officeGenerationStore.latestForArtifact,
@@ -2570,6 +2612,21 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const { createInProcessTransport } = await import('@use-brian/core')
   const consultTransport = createInProcessTransport({
     runConsult: async ({ request }) => {
+      let decisionApplicationId: string | null = null
+      let scopeEvidence: import('@use-brian/core').ScopeEvidence | undefined
+      let liveGoalId: string | null = null
+      if (request.workflowRunId) {
+        const run = await workflowRunStore.getRunSystem(request.workflowRunId)
+        const candidate = run?.input && typeof run.input === 'object'
+          ? (run.input as Record<string, unknown>).goalId
+          : null
+        if (run && typeof candidate === 'string' && candidate) {
+          const goal = await getGoalByIdSystem(candidate)
+          if (goal && goalOwnsWorkflowRun(goal, run)) {
+            liveGoalId = goal.id
+          }
+        }
+      }
       const text = await calleeExecutor({
         workspaceId: request.target.workspaceId,
         callerAssistantId: request.caller.assistantId,
@@ -2581,6 +2638,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           .join(' '),
         callerSessionId: '',
         sessionKey: request.contextId,
+        contextGroupId: request.contextScope?.groupId,
+        contextProjectId: request.contextScope?.projectId,
         allowedTools: request.allowedTools,
         externalClientPrincipal: request.externalClientPrincipal,
         skills: request.skills,
@@ -2593,8 +2652,33 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         workflowId: request.workflowId,
         blueprintId: request.blueprintId,
         workflowRunId: request.workflowRunId,
+        decisionContext: request.decisionContext
+          ? {
+              actorUserId: request.caller.userId,
+              operationId: request.decisionContext.operationId,
+              externalPrincipal: request.decisionContext.externalPrincipal,
+              applicability: request.decisionContext.applicability,
+            }
+          : undefined,
+        onDecisionApplication: (id) => { decisionApplicationId = id },
+        onScopeEvidence: (evidence) => { scopeEvidence = evidence },
+        onActivity: liveGoalId
+          ? (frame) => publishGoalActivity(liveGoalId!, frame)
+          : undefined,
       })
-      return { text }
+      return {
+        text,
+        scopeEvidence,
+        ...(decisionApplicationId
+          ? {
+              artifacts: [{
+                artifactId: `decision-application:${decisionApplicationId}`,
+                name: 'decision-playbook-application',
+                parts: [{ kind: 'data' as const, data: { applicationId: decisionApplicationId } }],
+              }],
+            }
+          : {}),
+      }
     },
   })
 
@@ -2666,10 +2750,25 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     runStore: workflowRunStore,
     consultTransport,
     resolvePrimary: resolvePrimaryAssistantForWorkspace,
+    resolveRunScope: async ({ userId, assistantId, workspaceId, run }) => {
+      const assistant = await findAssistantById(assistantId)
+      if (!assistant) throw new Error('Workflow assistant not found.')
+      const turnScope = await resolveTurnScopeSystem({
+        userId,
+        assistant,
+        workspaceId,
+        key: {
+          contextGroupId: run.contextGroupId ?? null,
+          contextProjectId: run.contextProjectId ?? null,
+          contextLockedAt: run.startedAt,
+        },
+      })
+      return { turnScope, assistantClearance: assistant.clearance }
+    },
     sendPage: sendPagePort,
     resolveVerifiedClientEmail: ({ apiKeyId, assistantId, email }) =>
       linkedIdentityStore.findUniqueVerifiedApiClientByEmail({ apiKeyId, assistantId, email }),
-    buildToolRegistry: ({ workspaceId, assistantId, userId }) => buildWorkflowToolRegistry(
+    buildToolRegistry: ({ workspaceId, assistantId, userId, turnScope }) => buildWorkflowToolRegistry(
       {
         firstParty: allTools,
         connectorStore,
@@ -2690,7 +2789,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         engineHooks: ports.engineHooks,
         assistantConnectorGrantsStore,
       },
-      { workspaceId, assistantId, userId },
+      { workspaceId, assistantId, userId, turnScope },
     ),
     pauseRunForWait: async ({ runId, stepRunId, workspaceId, triggeredBy, dueAt }) => {
       const primary = await resolvePrimaryAssistantForWorkspace(workspaceId)
@@ -2723,6 +2822,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       } else if (event.type === 'workflow.run_failed') {
         details.workflowId = event.workflowId; details.name = event.workflowName
         details.stepId = event.stepId; details.error = event.error
+      } else if (event.type === 'workflow.failure_delivered') {
+        details.workflowId = event.workflowId; details.stepId = event.stepId
+        details.delivery = event.delivery
       } else if (event.type === 'workflow.auto_disabled') {
         details.workflowId = event.workflowId; details.name = event.workflowName
         details.reason = event.reason; details.streak = event.streak
@@ -2862,6 +2964,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       channelType: 'workflow',
       channelId: goal.id,
       nextRunAt: fireAt,
+      contextGroupId: goal.contextGroupId,
+      contextProjectId: goal.contextProjectId,
     })
   }
 
@@ -2878,9 +2982,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // Resolve the workspace plan (system read; fails safe to 'free') and run the
     // injected credit gate: `ok` = under the monthly allowance → proceed,
     // `downgraded`/`blocked` = at/over it → false. The driver only consults this
-    // when metering is live (`Boolean(usageStore)`), so it is inert in OSS.
-    // Wired only when the closed credit gate is injected; absent (open) →
-    // undefined → no cap check (mirrors how `usageStore` is injected). A
+    // when metering is live (`Boolean(usageStore)`). Wired only when the closed
+    // credit gate is injected; absent (open) → undefined → no hosted cap check.
+    // The standalone per-goal dollar cap still accrues through its local store. A
     // billing-lookup error fails OPEN — a transient gate failure must never
     // strand a goal; the per-goal `maxSpend` + the metering barrier remain as
     // backstops. See routes/route-helpers.ts → `checkUsageBudget` for the gate.
@@ -2897,6 +3001,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         }
       : undefined,
     dispatchRun: async ({ goal, runId }) => {
+      publishGoalActivity(goal.id, {
+        event: 'status',
+        data: { phase: 'iteration_started' },
+      })
       let activeRunId = runId
       if (activeRunId) {
         const existing = await workflowRunStore.getRunSystem(activeRunId)
@@ -2934,6 +3042,16 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       }
       const outcome = await advanceWorkflowRun(workflowExecutorDeps, activeRunId)
       const terminal = outcome.kind === 'completed' || outcome.kind === 'failed'
+      publishGoalActivity(goal.id, {
+        event: 'status',
+        data: {
+          phase: outcome.kind === 'paused'
+            ? 'waiting'
+            : outcome.kind === 'failed'
+              ? 'iteration_failed'
+              : 'iteration_completed',
+        },
+      })
       // Did the agent park this goal on an external event this iteration
       // (`waitForEvent`)? Surface the subscriptions so the driver persists the
       // durable `until:event` marker + safety net rather than the paused-run
@@ -2950,7 +3068,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     deliver: deliverGoalTerminal,
     scheduleGoalTick,
     // No unbudgeted autonomy: kickoff persists the default budget when the
-    // author set none (see driver.ts DEFAULT_GOAL_BUDGET).
+    // author set none. Workspace override first, then the built-in fallback.
+    resolveDefaultBudget: async (goal) =>
+      (await goalDefaultBudgetStore.get(goal.workspaceId)).budget,
     applyDefaultBudget: (goalId, budget) => updateGoalSystem(goalId, { budget }),
     // Tick-error observability (the driver handled the error — this is the
     // taxonomy's goal_tick_error, not a failure path).
@@ -3008,6 +3128,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       assistantId,
       name: isVerify ? 'Work a goal to done' : 'Complete a task',
       instructions,
+      contextGroupId: goal.contextGroupId,
+      contextProjectId: goal.contextProjectId,
       // No wall-clock on a goal iteration (2026-08-19). It used to pin the
       // 900s ceiling because the 90s reminder default clipped real work (a
       // browser-skill run in the cloud sandbox, a research pass, file writes)
@@ -3436,6 +3558,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   allTools.set('markGoalComplete', goalWorkTools.markGoalComplete)
   allTools.set('waitForEvent', goalWorkTools.waitForEvent)
 
+  allTools.set(
+    'configureGoalDefaultBudget',
+    createGoalDefaultBudgetTools(goalDefaultBudgetStore).configureGoalDefaultBudget,
+  )
+
   allTools.set('listWorkspaceMembers', createWorkspaceTools(workspaceDirectoryStore).listWorkspaceMembers)
 
   // Workspace transcription preference (migration 332) — the assistant is the
@@ -3484,6 +3611,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   allTools.set('advanceDealStage', crmTools.advanceDealStage)
   allTools.set('listCrmFields', crmTools.listCrmFields)
   allTools.set('setCrmCustomFields', crmTools.setCrmCustomFields)
+  const crmEmailDraftTools = createCrmEmailDraftTools(crmEmailDraftStore)
+  allTools.set('saveEmailDraft', crmEmailDraftTools.saveEmailDraft)
+  allTools.set('getEmailDraft', crmEmailDraftTools.getEmailDraft)
+  allTools.set('listEmailDrafts', crmEmailDraftTools.listEmailDrafts)
 
   // ── Brain-MCP-dedicated tool instances ──
   const brainMemoryTools = createMemoryTools(memoryStore, { entityStore: entitiesStore, entityLinksStore })
@@ -4292,6 +4423,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     sessionResumeStore,
     episodicStore,
     sessionStateStore,
+    crmEmailDraftStore,
     planStore,
     jobStore,
     voiceTranscription,
@@ -4903,6 +5035,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     workspaceSkillEnablementStore,
     capabilityStore,
     assistantConnectorGrantsStore,
+    analytics,
   }))
   app.use(
     '/api/assistant-connector-grants',
@@ -5011,7 +5144,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   )
 
   app.use('/api/workspaces/:workspaceId/compartments', requireAuth(env.JWT_SECRET), compartmentRoutes({ compartmentStore, workspaceStore }))
-
   app.use('/api/workspaces/:workspaceId/oauth-authorizations', requireAuth(env.JWT_SECRET), oauthAuthorizationsRoutes({
     authorizationStore: oauthAuthorizationStore,
     workspaceStore,
@@ -5165,6 +5297,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use('/api/brain/stream', brainStreamRoutes({ workspaceStore, jwtSecret: env.JWT_SECRET }))
   startBrainStreamFanout()
 
+  app.use('/api', requireAuth(env.JWT_SECRET), contextScopeRoutes({
+    workspaceStore,
+    connectorInstanceStore,
+    connectorGrantStore,
+  }))
+
   app.use('/api', requireAuth(env.JWT_SECRET), workflowApprovalsRoutes({
     approvalsStore: pendingApprovalsStore,
     workspaceStore,
@@ -5212,7 +5350,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       : undefined,
   }))
 
-  // Goals board — read-only observability over the goal-seeker primitive.
+  // Workspace default budget API must mount before the generic `/:id` goal
+  // routes so "default-budget" is never interpreted as a goal id.
+  app.use(
+    '/api/goals/default-budget',
+    requireAuth(env.JWT_SECRET),
+    goalDefaultBudgetRoutes({ workspaceStore, store: goalDefaultBudgetStore }),
+  )
+
+  // Goals board + acting-goal controls.
   app.use(
     '/api/goals',
     requireAuth(env.JWT_SECRET),
@@ -5221,6 +5367,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       workspaceStore,
       createCompletionWorkflow,
       kickoffGoal: goalDriver.kickoffGoal,
+      subscribeActivity: subscribeGoalActivity,
       assessClarity: goalClarityAssessor,
       resolveAssistantId: async (userId, workspaceId) =>
         (await getWorkspacePrimaryAssistant(userId, workspaceId))?.id,
@@ -5392,6 +5539,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // See docs/architecture/features/teamspaces.md.
   app.use('/api', requireAuth(env.JWT_SECRET), teamspacesRoutes({
     teamspaceStore: createTeamspaceStore(),
+    workspaceGroupStore,
   }))
 
   // Internal auto-on-save ingest endpoint — doc-sync POSTs here on a debounced
@@ -5487,11 +5635,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         readOfficeVersionSnapshot(userId, artifactId, versionId),
       ])
       if (!artifact || !loaded) return null
-      const shell = await officeArtifactStore.createShell({ userId, workspaceId: artifact.workspaceId, family: artifact.family, title, templateVersionId: artifact.templateVersionId, capabilityVersion: artifact.capabilityVersion, sensitivity: artifact.sensitivity })
+      const shell = await officeArtifactStore.createShell({ userId, workspaceId: artifact.workspaceId, family: artifact.family, title, templateVersionId: artifact.templateVersionId, capabilityVersion: artifact.capabilityVersion, sensitivity: artifact.sensitivity, requiredCompartments: artifact.compartments, projectIds: artifact.projectIds })
       const snapshot = deriveOfficeSnapshot({ source: loaded.snapshot, artifactId: shell.id, title })
       const bytes = new TextEncoder().encode(JSON.stringify(snapshot))
       const hash = createHash('sha256').update(bytes).digest('hex')
-      const saved = await filesApi.writeBytes({ workspaceId: shell.workspaceId, userId, assistantKind: 'standard', clearance: 'confidential' }, { path: `/office/artifacts/${shell.id}/versions/1-${hash}.json`, bytes, mime: 'application/json', sensitivity: shell.sensitivity })
+      const saved = await filesApi.writeBytes({ workspaceId: shell.workspaceId, userId, assistantKind: 'standard', clearance: 'confidential', writeCompartments: shell.compartments, writeProjectIds: shell.projectIds }, { path: `/office/artifacts/${shell.id}/versions/1-${hash}.json`, bytes, mime: 'application/json', sensitivity: shell.sensitivity })
       if (!saved.ok) throw new Error(`Office version copy save failed: ${saved.error.kind}`)
       const doc = snapshotToYDoc(snapshot)
       const version = await officeArtifactStore.commitVersion({ userId, artifactId: shell.id, expectedVersion: 0, snapshotFileId: saved.value.id, snapshotHash: hash, operationClock: officeStateVector(doc), schemaVersion: snapshot.schemaVersion, capabilityVersion: snapshot.capabilityVersion, origin: 'manual', authorType: 'user', authorUserId: userId, summary: `Copied from version ${versionId}`, checkpointKind: 'named' })
@@ -5612,11 +5760,42 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     appendEvent: officeGenerationStore.appendEvent,
     finish: officeGenerationStore.finish,
   }) : null
-  const commitGeneratedOfficeSnapshot = async (params: { job: import('./db/office-generation.js').OfficeGenerationJobRow; snapshot: OfficeArtifactSnapshot; expectedVersion: number; kind: 'generation' | 'revision' }) => {
+  const commitGeneratedOfficeSnapshot = async (params: { job: import('./db/office-generation.js').OfficeGenerationJobRow; snapshot: OfficeArtifactSnapshot; expectedVersion: number; kind: 'generation' | 'revision'; authority?: import('@use-brian/core').OfficeAuthorityProjection }) => {
     if (!filesApi) throw new Error('Office file storage is unavailable')
     const bytes = new TextEncoder().encode(JSON.stringify(params.snapshot))
     const hash = createHash('sha256').update(bytes).digest('hex')
-    const fileContext = { workspaceId: params.job.workspaceId, userId: params.job.initiatedByUserId, assistantKind: 'standard' as const, clearance: 'confidential' as const }
+    const storedAuthority = params.job.authorityProjection as {
+      sensitivity?: unknown
+      compartments?: unknown
+      projectIds?: unknown
+    }
+    const compartments = params.authority?.compartments ??
+      (Array.isArray(storedAuthority.compartments)
+        ? storedAuthority.compartments.filter((value): value is string => typeof value === 'string')
+        : [])
+    const projectIds = params.authority?.projectIds ??
+      (Array.isArray(storedAuthority.projectIds)
+        ? storedAuthority.projectIds.filter((value): value is string => typeof value === 'string')
+        : [])
+    const sensitivity = params.authority?.sensitivity ??
+      (storedAuthority.sensitivity === 'public' || storedAuthority.sensitivity === 'confidential'
+        ? storedAuthority.sensitivity
+        : 'internal')
+    await officeArtifactStore.raiseScope({
+      userId: params.job.initiatedByUserId,
+      artifactId: params.job.artifactId,
+      sensitivity,
+      compartments,
+      projectIds,
+    })
+    const fileContext = {
+      workspaceId: params.job.workspaceId,
+      userId: params.job.initiatedByUserId,
+      assistantKind: 'standard' as const,
+      clearance: 'confidential' as const,
+      writeCompartments: compartments,
+      writeProjectIds: projectIds,
+    }
     const saved = await filesApi.writeBytes(fileContext, {
       path: `/office/artifacts/${params.job.artifactId}/versions/${params.expectedVersion + 1}-${hash}.json`,
       bytes,
@@ -5662,11 +5841,22 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     buildPipelineDeps(job) {
       return {
         async resolveAuthority() {
-          const projection = job.authorityProjection as { sensitivity?: unknown; visibilityUserIds?: unknown; compartments?: unknown; sourceHandles?: unknown }
+          const projection = job.authorityProjection as { sensitivity?: unknown; visibilityUserIds?: unknown; compartments?: unknown; projectIds?: unknown; compartmentGrant?: unknown; projectGrant?: unknown; sourceHandles?: unknown }
           return {
             sensitivity: projection.sensitivity === 'public' || projection.sensitivity === 'confidential' ? projection.sensitivity : 'internal',
             visibilityUserIds: Array.isArray(projection.visibilityUserIds) ? projection.visibilityUserIds.filter((value): value is string => typeof value === 'string') : [],
             compartments: Array.isArray(projection.compartments) ? projection.compartments.filter((value): value is string => typeof value === 'string') : [],
+            projectIds: Array.isArray(projection.projectIds) ? projection.projectIds.filter((value): value is string => typeof value === 'string') : [],
+            compartmentGrant: projection.compartmentGrant === null
+              ? null
+              : Array.isArray(projection.compartmentGrant)
+                ? projection.compartmentGrant.filter((value): value is string => typeof value === 'string')
+                : null,
+            projectGrant: projection.projectGrant === null
+              ? null
+              : Array.isArray(projection.projectGrant)
+                ? projection.projectGrant.filter((value): value is string => typeof value === 'string')
+                : null,
             sourceHandles: Array.isArray(projection.sourceHandles) ? projection.sourceHandles.filter((value): value is string => typeof value === 'string') : [],
           }
         },
@@ -5682,7 +5872,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             assistantId: brief.assistantId,
             assistantKind: 'app' as const,
             clearance: authority.sensitivity,
-            compartments: authority.compartments,
+            compartments: authority.compartmentGrant ?? null,
+            projectIds: authority.projectGrant ?? null,
           }
           const explicitIds = brief.sourceHandles.flatMap((handle) => {
             const match = handle.match(/^knowledge:([0-9a-f-]{36})$/i)
@@ -5701,6 +5892,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             handle: `knowledge:${entry.id}`,
             excerpt: [entry.title, entry.summary, entry.content].filter(Boolean).join('\n').slice(0, 4_000),
             sensitivity: entry.sensitivity,
+            compartments: entry.compartments,
+            projectIds: entry.projectIds,
           }))
         },
         async inspectUrl(url) {
@@ -5734,8 +5927,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           return read.ok ? { bytes: read.value.bytes, mime: resource.mime } : null
         },
         async cancelled() { return Boolean((await officeGenerationStore.get(job.initiatedByUserId, job.id))?.cancelRequestedAt) },
-        async commit(snapshot) {
-          const committed = await commitGeneratedOfficeSnapshot({ job, snapshot, expectedVersion: 0, kind: 'generation' })
+        async commit(snapshot, { authority }) {
+          const committed = await commitGeneratedOfficeSnapshot({ job, snapshot, expectedVersion: 0, kind: 'generation', authority })
           return { artifactId: job.artifactId, version: committed.version }
         },
       }
@@ -5886,9 +6079,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     sharedSecret: process.env.DOC_SYNC_SECRET,
     async checkpoint(artifactId, expectedVersion, canonicalHash) {
       if (!filesApi) return 'not_found'
-      const raw = await query<{ id: string; workspaceId: string; ownerUserId: string; headVersion: number; headSnapshotHash: string | null }>(`
+      const raw = await query<{ id: string; workspaceId: string; ownerUserId: string; headVersion: number; headSnapshotHash: string | null; compartments: string[]; projectIds: string[] }>(`
         SELECT a.id,a.workspace_id AS "workspaceId",a.owner_user_id AS "ownerUserId",
-               a.head_version::int AS "headVersion",v.snapshot_hash AS "headSnapshotHash"
+               a.head_version::int AS "headVersion",v.snapshot_hash AS "headSnapshotHash",
+               a.compartments, a.project_ids AS "projectIds"
           FROM office_artifacts a
           LEFT JOIN office_artifact_versions v ON v.id=a.head_version_id
          WHERE a.id=$1 AND a.lifecycle_state='active'
@@ -5915,7 +6109,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       // live hash. Otherwise this remains a hard CAS conflict.
       const casVersion = artifact.headVersion === expectedVersion ? expectedVersion : live.baseVersion === artifact.headVersion ? artifact.headVersion : null
       if (casVersion === null) return 'conflict'
-      const fileContext = { workspaceId: artifact.workspaceId, userId: artifact.ownerUserId, assistantKind: 'standard' as const, clearance: 'confidential' as const }
+      const fileContext = { workspaceId: artifact.workspaceId, userId: artifact.ownerUserId, assistantKind: 'standard' as const, clearance: 'confidential' as const, writeCompartments: artifact.compartments, writeProjectIds: artifact.projectIds }
       const saved = await filesApi.writeBytes(fileContext, { path: `/office/artifacts/${artifactId}/versions/${casVersion + 1}-${canonicalHash}.json`, bytes, mime: 'application/json', sensitivity: 'confidential' })
       if (!saved.ok) throw new Error(`Office checkpoint save failed: ${saved.error.kind}`)
       const version = await officeArtifactStore.commitVersion({ userId: artifact.ownerUserId, artifactId, expectedVersion: casVersion, snapshotFileId: saved.value.id, snapshotHash: canonicalHash, operationClock: live.stateVector, schemaVersion: live.snapshot.schemaVersion, capabilityVersion: live.snapshot.capabilityVersion, origin: 'manual', authorType: 'system', summary: 'Collaborative editing checkpoint' })
@@ -6008,11 +6202,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
     createRecord: officeReleaseStore.createRelease,
     async createDerivative({ userId, source, title, sensitivity, selectedObjectIds, visibilityUserIds }) {
-      const shell = await officeArtifactStore.createShell({ userId, workspaceId: source.artifact.workspaceId, family: source.artifact.family, title, templateVersionId: source.artifact.templateVersionId, capabilityVersion: source.artifact.capabilityVersion, sensitivity, visibilityUserIds })
+      const shell = await officeArtifactStore.createShell({ userId, workspaceId: source.artifact.workspaceId, family: source.artifact.family, title, templateVersionId: source.artifact.templateVersionId, capabilityVersion: source.artifact.capabilityVersion, sensitivity, visibilityUserIds, requiredCompartments: source.artifact.compartments, projectIds: source.artifact.projectIds })
       const snapshot = deriveOfficeSnapshot({ source: source.snapshot, artifactId: shell.id, title, selectedObjectIds: selectedObjectIds.length ? selectedObjectIds : undefined })
       const bytes = new TextEncoder().encode(JSON.stringify(snapshot))
       const hash = createHash('sha256').update(bytes).digest('hex')
-      const saved = await filesApi!.writeBytes({ workspaceId: shell.workspaceId, userId, assistantKind: 'standard', clearance: 'confidential' }, { path: `/office/artifacts/${shell.id}/versions/1-${hash}.json`, bytes, mime: 'application/json', sensitivity })
+      const saved = await filesApi!.writeBytes({ workspaceId: shell.workspaceId, userId, assistantKind: 'standard', clearance: 'confidential', writeCompartments: shell.compartments, writeProjectIds: shell.projectIds }, { path: `/office/artifacts/${shell.id}/versions/1-${hash}.json`, bytes, mime: 'application/json', sensitivity })
       if (!saved.ok) throw new Error(`Office derivative snapshot save failed: ${saved.error.kind}`)
       const doc = snapshotToYDoc(snapshot)
       const version = await officeArtifactStore.commitVersion({ userId, artifactId: shell.id, expectedVersion: 0, snapshotFileId: saved.value.id, snapshotHash: hash, operationClock: officeStateVector(doc), schemaVersion: snapshot.schemaVersion, capabilityVersion: snapshot.capabilityVersion, origin: 'manual', authorType: 'user', authorUserId: userId, summary: `Reviewed derivative of ${source.artifact.id}`, checkpointKind: 'release' })
@@ -6047,6 +6241,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use('/api/crm', requireAuth(env.JWT_SECRET), crmRoutes({
     workspaceStore,
     entityLinks: entityLinksStore,
+    emailDraftStore: crmEmailDraftStore,
   }))
   // Brain inbox (verification surface). Open + hosted share this one mount: the
   // route's deps are all open (brain-inbox-store / entities-store / crm / sessions /
@@ -6268,6 +6463,22 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // ════════════════════════════════════════════════════════════════
   // Open background workers
   // ════════════════════════════════════════════════════════════════
+  if (runWorkers) {
+    try {
+      const bootstrapped = await bootstrapHistoricalCrmIdentityState()
+      if (bootstrapped.bindingsCreated > 0 || bootstrapped.separationsCreated > 0
+        || bootstrapped.collisionsSkipped > 0) {
+        console.log(
+          `[decision-learning] CRM bootstrap: bindings=${bootstrapped.bindingsCreated} separations=${bootstrapped.separationsCreated} collisions=${bootstrapped.collisionsSkipped}`,
+        )
+      }
+    } catch (err) {
+      console.error(
+        '[decision-learning] CRM bootstrap failed:',
+        err instanceof Error ? err.message : err,
+      )
+    }
+  }
   const jobExecutor = createJobExecutor({
     jobStore,
     analytics,
@@ -6712,6 +6923,78 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   })
   if (runWorkers) playbookReflectionWorker.start()
 
+  // ── Decision reflection worker (human-decision learning Phase 4) ──
+  // Daily user-scoped projection from minimized, deliberate decision evidence.
+  // The store independently enforces thresholds and prohibited output.
+  const decisionReflectionWorker = createDecisionReflectionWorker({
+    modelCall: async ({ systemPrompt, prompt, maxTokens, attribution }) => {
+      const workspaceId = await workspaceForAssistant(attribution.assistantId)
+      const customRuntime = await resolveBackgroundRuntime(workspaceId)
+      const callProvider = customRuntime?.provider ?? provider
+      const callModel = customRuntime?.selector ?? BACKGROUND_MODEL
+      const response = await collectStream(callProvider.stream({
+        model: callModel,
+        messages: [{ role: 'user', content: prompt }],
+        systemPrompt,
+        maxTokens,
+      }))
+      if (response.usage && usageStore) {
+        const servedModel = response.model || callModel
+        const cost = customRuntime?.providerKeySource === 'user'
+          ? 0
+          : calculateCost(servedModel, response.usage)
+        usageStore.recordUsage({
+          userId: attribution.userId,
+          assistantId: attribution.assistantId,
+          sessionId: null,
+          model: servedModel,
+          modelTier: 'standard',
+          inputTokens: response.usage.inputTokens,
+          outputTokens: response.usage.outputTokens,
+          cacheReadTokens: response.usage.cacheReadTokens,
+          cacheWriteTokens: response.usage.cacheWriteTokens,
+          actualCostUsd: cost,
+          source: 'overhead:playbook-reflection',
+          providerKeySource: customRuntime?.providerKeySource ?? 'platform',
+        }).catch((err) => console.error('[decision-reflection] usage tracking failed:', err))
+      }
+      return response.content
+        .filter((block) => block.type === 'text')
+        .map((block) => block.type === 'text' ? block.text : '')
+        .join('')
+    },
+    onEvent: (event) => {
+      if (event.type === 'subject_processed'
+        && event.activated + event.suggested + event.rejected > 0) {
+        analytics.logEvent({
+          userId: event.actorUserId,
+          actorUserId: event.actorUserId,
+          assistantId: event.assistantId,
+          eventName: 'decision_rule_created',
+          channelType: 'worker',
+          metadata: {
+            activated_count: event.activated,
+            suggested_count: event.suggested,
+            rejected_count: event.rejected,
+            deduped_count: event.deduped,
+          },
+        })
+        console.log(
+          `[decision-reflection] assistant=${event.assistantId} actor=${event.actorUserId} active=${event.activated} suggested=${event.suggested} rejected=${event.rejected} deduped=${event.deduped}`,
+        )
+      } else if (event.type === 'error') {
+        console.error(
+          `[decision-reflection] error assistant=${event.assistantId ?? '<global>'} actor=${event.actorUserId ?? '<global>'}: ${event.error}`,
+        )
+      } else if (event.type === 'tick_complete') {
+        console.log(
+          `[decision-reflection] tick complete: processed=${event.processed} skipped=${event.skipped} errors=${event.errors}`,
+        )
+      }
+    },
+  })
+  if (runWorkers) decisionReflectionWorker.start()
+
   // ── Sandbox lifecycle reaper (computer-use.md §7) — kills tasks idle past
   //    the Take-Over abandonment window + runs the vault's per-plan purge.
   //    Only exists when a sandbox provider is configured. ──
@@ -6841,7 +7124,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // primitivesWithVectorColumn is closed (api-platform/admin). Open uses the
   // default primitive set from the embedding store. `usage` records each
   // committed batch as `overhead:embedding` COGS (workspace-fallback
-  // attribution) — absent in OSS, embedding runs unmetered locally.
+  // attribution). Normal standalone records to its local ledger; a bespoke
+  // composition with no usageStore remains unmetered.
   const embeddingWorker = createEmbeddingWorker({
     store: createDbEmbeddingStore(),
     embedder: sharedEmbedder,
@@ -7533,6 +7817,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             workerManager,
             episodicStore,
             sessionStateStore,
+            crmEmailDraftStore,
             capabilityStore,
             hooks,
           })
@@ -7594,7 +7879,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         knowledgeCaptureRuleStore,
         gdriveFilesStore, workspaceFilesStore, filesApi: filesApi ?? undefined, analytics,
         skillStore, deferredConfirmationStore, episodicStore,
-        sessionStateStore, voiceTranscription, workspaceToolPolicyStore,
+        sessionStateStore, crmEmailDraftStore, voiceTranscription, workspaceToolPolicyStore,
         recordingIngest: channelHosts.recordingIngest,
         ingestChannelMediaRef: channelHosts.telegramIngestChannelMediaRef,
         artifactPromoter, fileStore,
@@ -7610,7 +7895,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         connectorInstanceStore, knowledgeStore, knowledgeCaptureRuleStore, gdriveFilesStore, workspaceFilesStore,
         realtimeThreadTargetStore,
         filesApi: filesApi ?? undefined, analytics, skillStore,
-        deferredConfirmationStore, episodicStore, sessionStateStore, workflowEventDispatcher,
+        deferredConfirmationStore, episodicStore, sessionStateStore, crmEmailDraftStore, workflowEventDispatcher,
         slackWebhookIngestor: channelHosts.slackWebhookIngestor, connectorActionStore, episodesStore,
         buildConnectorActionAudit: ports.buildConnectorActionAudit,
         fileStore,
@@ -7623,7 +7908,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
         connectorInstanceStore, workspaceToolPolicyStore, knowledgeStore, knowledgeCaptureRuleStore, gdriveFilesStore, workspaceFilesStore,
         filesApi: filesApi ?? undefined, analytics, skillStore,
-        episodicStore, sessionStateStore, artifactPromoter, fileStore, workflowEventDispatcher,
+        episodicStore, sessionStateStore, crmEmailDraftStore, artifactPromoter, fileStore, workflowEventDispatcher,
       }))
       // Microsoft Teams — public Bot Framework messaging endpoint, per-channel
       // JWT-verified. No connector app (webhook transport). See
@@ -7636,7 +7921,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
         connectorInstanceStore, knowledgeStore, knowledgeCaptureRuleStore, gdriveFilesStore, workspaceFilesStore,
         analytics, skillStore,
-        episodicStore, sessionStateStore, artifactPromoter,
+        episodicStore, sessionStateStore, crmEmailDraftStore, artifactPromoter,
         msteamsWebhookIngestor: channelHosts.msteamsWebhookIngestor,
         fileStore,
       }))
@@ -7650,7 +7935,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           checkCreditBudget: ports.checkCreditBudget, integrationStore, channelUserStore,
           workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
           connectorInstanceStore, knowledgeStore, knowledgeCaptureRuleStore, gdriveFilesStore, workspaceFilesStore, analytics,
-          skillStore, episodicStore, sessionStateStore, fileStore,
+          skillStore, episodicStore, sessionStateStore, crmEmailDraftStore, fileStore,
         }))
       }
       if (env.WECHAT_CONNECTOR_SECRET) {
@@ -7662,7 +7947,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           checkCreditBudget: ports.checkCreditBudget, integrationStore, channelUserStore,
           workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
           connectorInstanceStore, knowledgeStore, knowledgeCaptureRuleStore, gdriveFilesStore, workspaceFilesStore, analytics,
-          skillStore, episodicStore, sessionStateStore, fileStore,
+          skillStore, episodicStore, sessionStateStore, crmEmailDraftStore, fileStore,
           // Without this the route's staging block is unreachable and every
           // inbound attachment archives as `availability: 'missing'` — the
           // message row lands, the bytes are lost, and nothing says so. iLink
@@ -7709,6 +7994,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           skillStore,
           episodicStore,
           sessionStateStore,
+          crmEmailDraftStore,
           fileStore,
           archiveMedia: chatArchiveLiveMedia,
           voiceTranscription,
@@ -7726,7 +8012,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         checkCreditBudget: ports.checkCreditBudget, integrationStore, customChannelStore, channelUserStore,
         workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
         connectorInstanceStore, knowledgeStore, knowledgeCaptureRuleStore, gdriveFilesStore, workspaceFilesStore, analytics,
-        skillStore, episodicStore, sessionStateStore, fileStore,
+        skillStore, episodicStore, sessionStateStore, crmEmailDraftStore, fileStore,
         archiveMedia: chatArchiveLiveMedia,
         voiceTranscription,
         deferredConfirmationStore,
@@ -7762,6 +8048,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     console.log('Shutting down — flushing analytics...')
     consolidationWorker.stop()
     skillReviewWorker.stop()
+    playbookReflectionWorker.stop()
+    decisionReflectionWorker.stop()
     embeddingWorker.stop()
     pollWorker.stop()
     runQueueWorker.stop()

@@ -1262,8 +1262,10 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
     name: 'noteAlias',
     description:
       'Register an alternate name for an existing entity. After this, ' +
-      'every extraction or chat mention of the alias resolves to the ' +
-      'same entity row — ingest no longer creates a duplicate. ' +
+      'search and duplicate review can rank the entity for that alias. ' +
+      'For people, an alias is never mutation identity and later extraction ' +
+      'still creates a distinct person unless a stable provider binding or ' +
+      'explicit target id supplies authority. ' +
       'Use when the user says "AC is the same as Acme Corp", "tonic ' +
       'is short for acme-labs/tonic", or "acme-labs/gateway ' +
       'is the gateway repo". Aliases are stored lowercase but ' +

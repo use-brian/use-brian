@@ -183,6 +183,9 @@ export type InsertTranscriptSegmentsParams = {
   visibility: { userId: string | null; assistantId: string | null }
   /** Inherited from the recording's Episode (a confidential call -> confidential segments). */
   sensitivity: string
+  /** Trusted Team/Project root scope copied from the recording Episode. */
+  compartments?: string[]
+  projectIds?: string[]
   /** The raw transcript bytes file, when persisted, for UI deep-link. */
   transcriptFileId?: string | null
   segments: TranscriptSegment[]
@@ -215,8 +218,9 @@ export async function insertTranscriptSegments(
         `INSERT INTO transcript_segments (
            workspace_id, recording_id, transcript_file_id, segment_index,
            start_ms, end_ms, speaker, speaker_ids, segment_text, utterance_refs,
-           user_id, assistant_id, source, sensitivity, created_by_user_id
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,'recording',$13,$14)
+           user_id, assistant_id, source, sensitivity, created_by_user_id,
+           compartments, project_ids
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,'recording',$13,$14,$15,$16)
          ON CONFLICT (recording_id, segment_index) DO NOTHING`,
         [
           workspaceId,
@@ -233,6 +237,8 @@ export async function insertTranscriptSegments(
           visibility.assistantId,
           sensitivity,
           createdByUserId,
+          params.compartments ?? [],
+          params.projectIds ?? [],
         ],
       )
       inserted += res.rowCount ?? 0

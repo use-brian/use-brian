@@ -7,6 +7,7 @@ import type { PermissionGrantEvaluator } from '../workflow/permission-grants.js'
 import { alreadyDeclinedToolResult, declinedToolResult, timedOutToolResult } from './decline-copy.js'
 import { canRead, isSensitivity } from '../security/sensitivity.js'
 import { subsetCompartments } from '../security/compartments.js'
+import { scopeGrantContains } from '../security/context-scope.js'
 import { capToolResultTokens } from '../providers/context-budget.js'
 
 // ── Constants ──────────────────────────────────────────────────
@@ -760,6 +761,25 @@ export function createToolExecutor(options: ToolExecutorOptions) {
         return
       }
 
+      const requestedProjectIds = (validated as { projectIds?: unknown } | null)?.projectIds
+      if (
+        Array.isArray(requestedProjectIds) &&
+        requestedProjectIds.every((id): id is string => typeof id === 'string') &&
+        !scopeGrantContains(options.context.assistantProjectIds, requestedProjectIds)
+      ) {
+        if (timer) clearTimeout(timer)
+        t.result = {
+          type: 'tool_result',
+          toolUseId: t.id,
+          name: t.name,
+          content: `ERROR: project_not_granted — "${t.name}" requested Projects [${requestedProjectIds.join(', ')}] outside the assistant's Project grant.`,
+          isError: true,
+        }
+        t.status = 'completed'
+        wake()
+        return
+      }
+
       // Identifier-provenance write-gate (the mechanical half of the
       // workflow anti-fabrication guard). When the run's owner threaded an
       // EvidenceAccumulator and gated this tool, every identifier-shaped
@@ -853,6 +873,10 @@ export function createToolExecutor(options: ToolExecutorOptions) {
       if (timer) clearTimeout(timer)
       options.onToolEnd?.(t.id, t.name, result)
       options.context.progress?.touch(`tool_end:${t.name}`)
+
+      if (result.isError !== true) {
+        options.context.scopeAccumulator?.note(result.scopeEvidence)
+      }
 
       let content = renderToolResultData(result.data, result.isError === true)
 

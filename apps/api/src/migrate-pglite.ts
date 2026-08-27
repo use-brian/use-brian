@@ -47,14 +47,22 @@ function concurrentIndexStatements(sql: string): string[] | null {
  *
  * See the open-core split (repo CLAUDE.md; plan in git history) §12.7.
  */
-export async function migratePglite(db: PGlite, migrationsDir: string): Promise<number> {
+export async function migratePglite(
+  db: PGlite,
+  migrationsDir: string,
+  options?: { through?: string },
+): Promise<number> {
   const previous = migrationRuns.get(db) ?? Promise.resolve()
-  const run = previous.then(() => migratePgliteExclusive(db, migrationsDir))
+  const run = previous.then(() => migratePgliteExclusive(db, migrationsDir, options))
   migrationRuns.set(db, run.then(() => undefined, () => undefined))
   return run
 }
 
-async function migratePgliteExclusive(db: PGlite, migrationsDir: string): Promise<number> {
+async function migratePgliteExclusive(
+  db: PGlite,
+  migrationsDir: string,
+  options?: { through?: string },
+): Promise<number> {
   await db.exec(
     `CREATE TABLE IF NOT EXISTS public._migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
   )
@@ -62,7 +70,10 @@ async function migratePgliteExclusive(db: PGlite, migrationsDir: string): Promis
   // embedded PGLite path is ALWAYS the open edition, so mark it 'oss' for the
   // whole session; the node-pg runner sets the same GUC from MIGRATION_DIRS.
   await db.exec(`SELECT set_config('app.migration_edition', 'oss', false)`)
-  const files = (await readdir(migrationsDir)).filter((f) => f.endsWith('.sql')).sort()
+  const files = (await readdir(migrationsDir))
+    .filter((f) => f.endsWith('.sql'))
+    .sort()
+    .filter((file) => options?.through === undefined || file <= options.through)
 
   let count = 0
   for (const file of files) {

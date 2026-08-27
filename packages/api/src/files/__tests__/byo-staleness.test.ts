@@ -11,6 +11,7 @@ function inst(over: Partial<ConnectorInstance>): ConnectorInstance {
     label: 'GCS', connectedEmail: null, url: null, custom: false, config: {},
     sensitivity: 'internal', connected: false, ingestionEnabled: false, ingestWorkspaceId: null,
     credentialsType: 'none', healthStatus: 'ok', lastError: null, lastCheckedAt: null,
+    compartments: [], projectIds: [],
     createdBy: 'u', createdAt: new Date(NOW), updatedAt: new Date(NOW),
     ...over,
   }

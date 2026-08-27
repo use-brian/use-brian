@@ -16,14 +16,34 @@ let poolRows: Record<string, unknown>[] = []
 let poolRowCount = 0
 let clientInsertRow: Record<string, unknown> | null = null
 
-const fakeClient = {
-  query: vi.fn(async (text: string, values?: unknown[]) => {
-    clientQueries.push({ text, values })
-    if (text.trim().startsWith('INSERT INTO entity_merges')) {
-      return { rows: clientInsertRow ? [clientInsertRow] : [], rowCount: 1 }
+const identityProjection = vi.hoisted(() => ({
+  prepare: vi.fn(),
+  applyMerge: vi.fn(),
+  applyUndo: vi.fn(),
+}))
+
+async function runFakeClientQuery(text: string, values?: unknown[]) {
+  clientQueries.push({ text, values })
+  if (text.includes('SELECT COALESCE($3::uuid')) {
+    return { rows: [{ actorUserId: 'u-1', sensitivity: 'internal' }], rowCount: 1 }
+  }
+  if (text.includes('valid_to AS "validTo"') && text.includes('FOR UPDATE')) {
+    return {
+      rows: [
+        { id: 'e-survivor', validTo: null, supersededBy: null, retractedAt: null },
+        { id: 'e-merged', validTo: NOW, supersededBy: 'e-survivor', retractedAt: null },
+      ],
+      rowCount: 2,
     }
-    return { rows: [], rowCount: 0 }
-  }),
+  }
+  if (text.trim().startsWith('INSERT INTO entity_merges')) {
+    return { rows: clientInsertRow ? [clientInsertRow] : [], rowCount: 1 }
+  }
+  return { rows: [], rowCount: 0 }
+}
+
+const fakeClient = {
+  query: vi.fn(runFakeClientQuery),
   release: vi.fn(),
 }
 
@@ -40,11 +60,34 @@ vi.mock('../client.js', () => ({
   query: (text: string, values?: unknown[]) => fakePool.query(text, values),
 }))
 
+vi.mock('../decision-event-store.js', () => ({
+  appendDecisionEvent: vi.fn(async (event: unknown) => ({
+    event: { id: 'decision-1', ...(event as object), createdAt: new Date() },
+    inserted: true,
+  })),
+  findDecisionEventByIdempotencyKey: vi.fn(async () => ({
+    id: 'decision-original',
+    sensitivity: 'internal',
+  })),
+}))
+
+vi.mock('../decision-provenance-store.js', () => ({
+  appendDecisionDerivation: vi.fn(async () => ({ id: 'derivation-1', inserted: true })),
+}))
+
+vi.mock('../crm-identity-store.js', () => ({
+  prepareCrmMergeIdentityProjection: identityProjection.prepare,
+  applyCrmMergeIdentityProjection: identityProjection.applyMerge,
+  applyCrmUndoIdentityProjection: identityProjection.applyUndo,
+}))
+
 import {
   createEntityMergeStore,
   createSpecializationCascadeStore,
 } from '../entity-merge-store.js'
 import type { ApplyMergeInput, EntityMergeRecord } from '@use-brian/core'
+import { appendDecisionEvent } from '../decision-event-store.js'
+import { appendDecisionDerivation } from '../decision-provenance-store.js'
 
 const repo = createEntityMergeStore()
 const cascade = createSpecializationCascadeStore()
@@ -93,8 +136,21 @@ beforeEach(() => {
   clientInsertRow = null
   fakePool.query.mockClear()
   fakePool.connect.mockClear()
-  fakeClient.query.mockClear()
+  fakeClient.query.mockReset().mockImplementation(runFakeClientQuery)
   fakeClient.release.mockClear()
+  identityProjection.prepare.mockReset().mockResolvedValue({
+    workspaceId: 'ws-1',
+    survivingEntityId: 'e-survivor',
+    mergedEntityId: 'e-merged',
+    mergedDisplayName: 'Acme Corp',
+    survivingAttributes: {},
+    mergedAttributes: { domain: 'acme.com' },
+    sensitivity: 'internal',
+    bindingNamespaces: [],
+    aliasArtifactId: 'e-survivor:acme corp',
+  })
+  identityProjection.applyMerge.mockReset().mockResolvedValue(undefined)
+  identityProjection.applyUndo.mockReset().mockResolvedValue('separation-1')
 })
 
 describe('[COMP:corrections/entity-merge-store] readEntityForMerge', () => {
@@ -165,6 +221,24 @@ describe('[COMP:corrections/entity-merge-store] applyMerge', () => {
     expect(rewrite!.values?.[1]).toBe(JSON.stringify({ domain: 'acme.com' }))
     // 3. insert record
     expect(texts.some((t) => t.includes('INSERT INTO entity_merges'))).toBe(true)
+    expect(appendDecisionEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventKind: 'crm.entities_merged',
+      payload: expect.objectContaining({
+        mergeId: 'm-1',
+        survivingEntityId: 'e-survivor',
+        mergedEntityId: 'e-merged',
+      }),
+    }), fakeClient)
+    expect(appendDecisionDerivation).toHaveBeenCalledWith(expect.objectContaining({
+      artifactKind: 'entity_merge',
+      artifactId: 'm-1',
+      relation: 'supports',
+    }), fakeClient)
+    expect(identityProjection.applyMerge).toHaveBeenCalledWith(
+      fakeClient,
+      expect.objectContaining({ survivingEntityId: 'e-survivor', mergedEntityId: 'e-merged' }),
+      'decision-1',
+    )
     expect(texts[texts.length - 1]).toBe('COMMIT')
     expect(fakeClient.release).toHaveBeenCalledOnce()
   })
@@ -178,6 +252,9 @@ describe('[COMP:corrections/entity-merge-store] applyMerge', () => {
     // Force the INSERT to throw.
     fakeClient.query.mockImplementation(async (text: string, values?: unknown[]) => {
       clientQueries.push({ text, values })
+      if (text.includes('SELECT COALESCE($3::uuid')) {
+        return { rows: [{ actorUserId: 'u-1', sensitivity: 'internal' }], rowCount: 1 }
+      }
       if (text.trim().startsWith('INSERT INTO entity_merges')) {
         throw new Error('insert failed')
       }
@@ -205,6 +282,17 @@ describe('[COMP:corrections/entity-merge-store] applyUndoMerge', () => {
     expect(unSupersede!.values).toEqual(['e-merged', 'ws-1'])
     const stampUndone = clientQueries.find((q) => q.text.includes('UPDATE entity_merges'))
     expect(stampUndone!.values).toEqual(['m-1', NOW, 'u-2', 'mistake', false])
+    expect(appendDecisionEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventKind: 'crm.merge_undone',
+      reversesEventId: 'decision-original',
+    }), fakeClient)
+    expect(identityProjection.applyUndo).toHaveBeenCalledWith(fakeClient, expect.objectContaining({
+      survivingEntityId: 'e-survivor',
+      restoredEntityId: 'e-merged',
+      restoredAttributes: { domain: 'acme.com' },
+      originalDecisionEventId: 'decision-original',
+      undoDecisionEventId: 'decision-1',
+    }))
     expect(clientQueries.map((q) => q.text).pop()).toBe('COMMIT')
   })
 })

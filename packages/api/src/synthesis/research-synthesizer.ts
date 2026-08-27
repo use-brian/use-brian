@@ -86,6 +86,10 @@ export type ResearchSynthesisArgs = {
   assistantId: string
   /** Write/read ceiling for this draft; every `save*` write inherits it. Default `internal`. */
   sensitivity?: string
+  compartments?: string[]
+  projectIds?: string[]
+  compartmentGrant?: string[] | null
+  projectGrant?: string[] | null
   /** Stable correlation handle for the synthetic loop context (the workflow/step key). */
   sourceRef?: string
 }
@@ -206,6 +210,10 @@ export function createResearchSynthesizer(deps: ResearchSynthesizerDeps): Resear
         assistantId: args.assistantId,
         assistantKind: 'standard',
         sensitivity,
+        compartments: args.compartments ?? [],
+        projectIds: args.projectIds ?? [],
+        compartmentGrant: args.compartmentGrant ?? null,
+        projectGrant: args.projectGrant ?? null,
       },
       blueprint,
       {

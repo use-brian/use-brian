@@ -56,6 +56,13 @@ import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 export const WORKSPACE_FLUSH_TABLES = [
   // Automation + approvals
   'pending_approvals',
+  // Human decision learning (provenance first, then domain hard state, event,
+  // application). All five are learned content, never preserved audit shell.
+  'decision_derivations',
+  'crm_identity_bindings',
+  'crm_entity_separations',
+  'decision_events',
+  'decision_applications',
   'workflows',
   'workflow_runs', // cascade-covered by `workflows`; kept explicit for the classifier
   'sandbox_tasks',
@@ -146,6 +153,7 @@ export const WORKSPACE_FLUSH_PRESERVED_TABLES = [
   'workspace_members',
   'workspace_invitations',
   'workspace_groups',
+  'workspace_projects',
   'workspace_compartments',
   'member_compartment_grants',
   'teamspaces',
@@ -176,6 +184,8 @@ export const WORKSPACE_FLUSH_PRESERVED_TABLES = [
   'metered_model_surcharges',
   'daily_usage',
   'usage_tracking',
+  'oss_usage_tracking',
+  'workspace_goal_defaults',
   'usage_sessions',
   'bulk_ingest_surcharges',
   'recording_surcharges',
@@ -184,6 +194,7 @@ export const WORKSPACE_FLUSH_PRESERVED_TABLES = [
   'promo_code_redemptions',
   // Audit + ops telemetry
   'workspace_audit_log',
+  'context_scope_reclassification_events',
   'correction_audit',
   'worker_runs',
 ] as const

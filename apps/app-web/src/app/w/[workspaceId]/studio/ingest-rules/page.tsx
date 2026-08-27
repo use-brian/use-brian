@@ -716,6 +716,7 @@ export default function StudioIngestRulesPage() {
             <div className="text-[13px] font-medium">{copy.rulesTitle}</div>
             <IngestRuleEditor
               instanceId={s.instanceId}
+              workspaceId={workspaceId}
               source={s.source}
               rules={s.rules}
               onChange={(next) => {

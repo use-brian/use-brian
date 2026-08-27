@@ -817,6 +817,7 @@ export type CrmRecordRow = {
   kind: CrmEntityKind
   name: string
   attributes: Record<string, unknown>
+  aliases?: string[]
   archivedAt: string | null
   updatedAt: string
 }
@@ -827,6 +828,7 @@ function entityToCrmRecordRow(entity: EntityRecord): CrmRecordRow {
     kind: entity.kind as CrmEntityKind,
     name: entity.displayName,
     attributes: entity.attributes,
+    aliases: entity.aliases,
     archivedAt: typeof entity.attributes.crm_archived_at === 'string'
       ? entity.attributes.crm_archived_at
       : null,
@@ -864,11 +866,12 @@ async function listRelatedKind(
     kind: CrmEntityKind
     name: string
     attributes: Record<string, unknown> | null
+    aliases: string[] | null
     archivedAt: Date | null
     updatedAt: Date
   }>(
     ctx,
-    `SELECT e.id, e.kind, e.display_name AS name, e.attributes,
+    `SELECT e.id, e.kind, e.display_name AS name, e.attributes, e.aliases,
             NULLIF(e.attributes->>'crm_archived_at','')::timestamptz AS "archivedAt",
             e.updated_at AS "updatedAt"
        FROM entities e
@@ -977,17 +980,22 @@ export async function listCrmR2Records(
     kind: CrmEntityKind
     name: string
     attributes: Record<string, unknown> | null
+    aliases: string[] | null
     archivedAt: Date | null
     updatedAt: Date
   }>(
     ctx,
-    `SELECT e.id, e.kind, e.display_name AS name, e.attributes,
+    `SELECT e.id, e.kind, e.display_name AS name, e.attributes, e.aliases,
             NULLIF(e.attributes->>'crm_archived_at','')::timestamptz AS "archivedAt",
             e.updated_at AS "updatedAt"
        FROM entities e
       WHERE ${ap.sql}
         AND e.kind = ANY($${ap.nextIdx}::text[])
         AND e.valid_to IS NULL AND e.retracted_at IS NULL
+        AND NOT (
+          e.kind = 'person'
+          AND COALESCE((e.attributes->>'self')::boolean, false)
+        )
         ${options.includeArchived ? '' : `AND NOT (e.attributes ? 'crm_archived_at')`}
       ORDER BY e.updated_at DESC
       LIMIT 1500`,
@@ -998,6 +1006,7 @@ export async function listCrmR2Records(
     kind: r.kind,
     name: r.name,
     attributes: r.attributes ?? {},
+    aliases: r.aliases ?? [],
     archivedAt: r.archivedAt?.toISOString() ?? null,
     updatedAt: r.updatedAt.toISOString(),
   }))
@@ -1491,7 +1500,8 @@ export async function validateCrmCustomFieldValues(input: {
     }
     if (definition.fieldType === 'entity_reference' && value !== null && value !== undefined && value !== '') {
       const target = await getEntityById(input.ctx, value as string)
-      if (!target || target.attributes.crm_archived_at || !definition.options.includes(target.kind)) {
+      if (!target || target.attributes.crm_archived_at || !definition.options.includes(target.kind)
+        || (target.kind === 'person' && target.attributes.self === true)) {
         throw new Error(`Reference for custom field '${key}' must be a visible ${definition.options.join(' or ')}`)
       }
     }
@@ -1560,7 +1570,9 @@ export async function listCrmDealParticipants(
        FROM crm_deal_contacts dc
        JOIN entities e ON e.id = dc.contact_id
       WHERE dc.workspace_id = $1 AND dc.deal_id = $2
-        AND e.kind = 'person' AND e.valid_to IS NULL AND ${ap.sql}
+        AND e.kind = 'person' AND e.valid_to IS NULL
+        AND NOT COALESCE((e.attributes->>'self')::boolean, false)
+        AND ${ap.sql}
       ORDER BY dc.is_primary DESC, dc.created_at`,
     [ctx.workspaceId, dealId, ...ap.params],
   )
@@ -1586,7 +1598,8 @@ export async function addCrmDealParticipant(input: {
     getEntityById(input.ctx, input.dealId),
     getEntityById(input.ctx, input.contactId),
   ])
-  if (!deal || deal.kind !== 'deal' || !contact || contact.kind !== 'person') return false
+  if (!deal || deal.kind !== 'deal' || !contact || contact.kind !== 'person'
+    || contact.attributes.self === true) return false
   const client = await getPool().connect()
   try {
     await client.query('BEGIN')
@@ -1622,7 +1635,7 @@ export async function setCrmDealPrimaryContact(input: {
   if (!deal || deal.kind !== 'deal') return false
   if (input.contactId) {
     const contact = await getEntityById(input.ctx, input.contactId)
-    if (!contact || contact.kind !== 'person') return false
+    if (!contact || contact.kind !== 'person' || contact.attributes.self === true) return false
   }
   const client = await getPool().connect()
   try {
@@ -2105,7 +2118,7 @@ export async function deleteCrmSavedView(
 
 export type CrmDuplicateGroup = {
   kind: CrmEntityKind
-  reason: 'email' | 'domain' | 'name'
+  reason: 'email' | 'phone' | 'domain' | 'name' | 'alias'
   value: string
   records: Array<{ id: string; name: string }>
 }
@@ -2114,13 +2127,21 @@ function normalizedName(value: string): string {
   return value.toLowerCase().normalize('NFKD').replace(/[^\p{L}\p{N}]+/gu, '')
 }
 
-export function findCrmDuplicateGroups(rows: readonly CrmRecordRow[]): CrmDuplicateGroup[] {
+export function findCrmDuplicateGroups(
+  rows: readonly CrmRecordRow[],
+  options: { separatedPairs?: ReadonlySet<string>; maxGroups?: number; maxGroupSize?: number } = {},
+): CrmDuplicateGroup[] {
   const buckets = new Map<string, CrmDuplicateGroup>()
   for (const row of rows) {
+    if (row.kind === 'person' && row.attributes.self === true) continue
     const candidates: Array<{ reason: CrmDuplicateGroup['reason']; value: string }> = []
     if (row.kind === 'person') {
       const email = typeof row.attributes.email === 'string' ? bareAddress(row.attributes.email) : ''
       if (email) candidates.push({ reason: 'email', value: email })
+      const phone = typeof row.attributes.phone === 'string'
+        ? row.attributes.phone.replace(/[^0-9+]+/g, '')
+        : ''
+      if (phone) candidates.push({ reason: 'phone', value: phone })
     }
     if (row.kind === 'company') {
       const domain = typeof row.attributes.domain === 'string'
@@ -2138,11 +2159,51 @@ export function findCrmDuplicateGroups(rows: readonly CrmRecordRow[]): CrmDuplic
         value: candidate.value,
         records: [],
       }
-      group.records.push({ id: row.id, name: row.name })
+      if (group.records.length < (options.maxGroupSize ?? 50)) {
+        group.records.push({ id: row.id, name: row.name })
+      }
       buckets.set(key, group)
     }
   }
-  return [...buckets.values()].filter((g) => g.records.length > 1)
+
+  // A confirmed merge alias is useful candidate evidence, but never person
+  // mutation authority. Emit bounded pair groups when one live row's alias is
+  // another row's normalized display name.
+  const byKind = new Map<CrmEntityKind, CrmRecordRow[]>()
+  for (const row of rows) byKind.set(row.kind, [...(byKind.get(row.kind) ?? []), row])
+  for (const [kind, sameKind] of byKind) {
+    for (let i = 0; i < sameKind.length; i++) {
+      for (let j = i + 1; j < sameKind.length; j++) {
+        const left = sameKind[i]
+        const right = sameKind[j]
+        const leftAliases = new Set((left.aliases ?? []).map(normalizedName))
+        const rightAliases = new Set((right.aliases ?? []).map(normalizedName))
+        if (!leftAliases.has(normalizedName(right.name)) && !rightAliases.has(normalizedName(left.name))) continue
+        buckets.set(`alias:${kind}:${left.id}:${right.id}`, {
+          kind,
+          reason: 'alias',
+          value: leftAliases.has(normalizedName(right.name)) ? right.name : left.name,
+          records: [{ id: left.id, name: left.name }, { id: right.id, name: right.name }],
+        })
+      }
+    }
+  }
+
+  const pairKey = (a: string, b: string) => a < b ? `${a}:${b}` : `${b}:${a}`
+  const separated = options.separatedPairs ?? new Set<string>()
+  return [...buckets.values()]
+    .map((group) => ({
+      ...group,
+      records: group.records.filter((record, index, records) =>
+        !records.some((other, otherIndex) =>
+          otherIndex < index && separated.has(pairKey(record.id, other.id))),
+      ),
+    }))
+    .filter((group) => group.records.length > 1)
+    .sort((a, b) => a.kind.localeCompare(b.kind)
+      || a.reason.localeCompare(b.reason)
+      || a.value.localeCompare(b.value))
+    .slice(0, options.maxGroups ?? 200)
 }
 
 export type CrmReport = {

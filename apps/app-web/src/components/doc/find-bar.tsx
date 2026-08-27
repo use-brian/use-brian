@@ -178,11 +178,10 @@ export function DocFindBar({ editor }: { editor: Editor | null }) {
       aria-label={t.label}
       style={box ?? { top: "6rem", right: "1rem" }}
       // Composite-field focus (globals.css → ":focus-visible" convention): the
-      // global ring would otherwise halo the bare INPUT inside this pill as a
-      // sharp-cornered box. The pill frames itself while the input has focus;
-      // the nav/close buttons keep their own rounded halo so a keyboard user
-      // can still see which one they are on.
-      className="fixed z-40 flex items-center gap-1 rounded-lg border border-border bg-popover/95 px-1.5 py-1 shadow-lg backdrop-blur transition-[border-color,box-shadow] has-[input:focus-visible]:border-ring has-[input:focus-visible]:ring-2 has-[input:focus-visible]:ring-ring/35"
+      // pill's existing border turns blue while the input has focus. The
+      // nav/close buttons keep their own rounded halo so a keyboard user can
+      // still see which one they are on.
+      className="fixed z-40 flex items-center gap-1 rounded-lg border border-border bg-popover/95 px-1.5 py-1 shadow-lg backdrop-blur transition-[border-color,box-shadow] has-[input:focus-visible]:border-ring"
     >
       <input
         ref={inputRef}

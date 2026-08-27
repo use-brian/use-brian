@@ -62,6 +62,8 @@ const WORKFLOW_SELECT = `
   lifecycle_reason    AS "lifecycleReason",
   pinned,
   managed_by          AS "managedBy",
+  context_group_id    AS "contextGroupId",
+  context_project_id  AS "contextProjectId",
   created_at          AS "createdAt",
   updated_at          AS "updatedAt"
 `
@@ -87,6 +89,8 @@ type WorkflowRow = {
   lifecycleReason: string | null
   pinned: boolean
   managedBy: string | null
+  contextGroupId: string | null
+  contextProjectId: string | null
   createdAt: Date
   updatedAt: Date
 }
@@ -141,6 +145,8 @@ function rowToWorkflow(row: WorkflowRow): WorkflowRecord {
     lifecycleReason: row.lifecycleReason,
     pinned: row.pinned,
     managedBy: row.managedBy,
+    contextGroupId: row.contextGroupId,
+    contextProjectId: row.contextProjectId,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   }
@@ -161,18 +167,21 @@ export function createDbWorkflowStore(): WorkflowStore {
       maxTurns,
       researchMode,
       managedBy,
+      contextGroupId,
+      contextProjectId,
     }) {
       const result = await queryWithRLS<WorkflowRow>(
         userId,
         `INSERT INTO workflows (
            workspace_id, created_by, name, description, definition, trigger,
            webhook_slug, webhook_secret,
-           model_alias, max_turns, research_mode, managed_by
+           model_alias, max_turns, research_mode, managed_by,
+           context_group_id, context_project_id
          )
          VALUES (
            $1, $2, $3, $4, $5, COALESCE($6::jsonb, '{"kind":"manual"}'::jsonb),
            $7, $8,
-           COALESCE($9, 'pro'), $10, COALESCE($11, false), $12
+           COALESCE($9, 'pro'), $10, COALESCE($11, false), $12, $13, $14
          )
          RETURNING ${WORKFLOW_SELECT}`,
         [
@@ -188,6 +197,8 @@ export function createDbWorkflowStore(): WorkflowStore {
           maxTurns ?? null,
           researchMode ?? null,
           managedBy ?? null,
+          contextGroupId ?? null,
+          contextProjectId ?? null,
         ],
       )
       const record = rowToWorkflow(result.rows[0])
@@ -235,6 +246,8 @@ export function createDbWorkflowStore(): WorkflowStore {
       if (fields.researchMode !== undefined) { sets.push(`research_mode = $${idx}`); values.push(fields.researchMode); idx++ }
       if (fields.nameManuallySet !== undefined) { sets.push(`name_manually_set = $${idx}`); values.push(fields.nameManuallySet); idx++ }
       if (fields.pinned !== undefined) { sets.push(`pinned = $${idx}`); values.push(fields.pinned); idx++ }
+      if (fields.contextGroupId !== undefined) { sets.push(`context_group_id = $${idx}`); values.push(fields.contextGroupId); idx++ }
+      if (fields.contextProjectId !== undefined) { sets.push(`context_project_id = $${idx}`); values.push(fields.contextProjectId); idx++ }
       if (fields.lifecycleState !== undefined) {
         // The user-facing restore path (mig 308). Stamps the transition and
         // clears the sweep's reason so the row reads clean again.
@@ -343,6 +356,10 @@ const RUN_SELECT = `
   current_step_id AS "currentStepId",
   error,
   outcome,
+  context_group_id AS "contextGroupId",
+  context_project_id AS "contextProjectId",
+  context_compartments AS "contextCompartments",
+  context_project_ids AS "contextProjectIds",
   started_at      AS "startedAt",
   finished_at     AS "finishedAt",
   last_active_at  AS "lastActiveAt"
@@ -360,6 +377,10 @@ type RunRow = {
   currentStepId: string | null
   error: Record<string, unknown> | null
   outcome: WorkflowRunOutcome | null
+  contextGroupId: string | null
+  contextProjectId: string | null
+  contextCompartments: string[]
+  contextProjectIds: string[]
   startedAt: Date
   finishedAt: Date | null
   lastActiveAt: Date
@@ -378,6 +399,10 @@ function rowToRun(row: RunRow): WorkflowRunRecord {
     currentStepId: row.currentStepId,
     error: row.error,
     outcome: row.outcome ?? null,
+    contextGroupId: row.contextGroupId,
+    contextProjectId: row.contextProjectId,
+    contextCompartments: row.contextCompartments ?? [],
+    contextProjectIds: row.contextProjectIds ?? [],
     startedAt: row.startedAt,
     finishedAt: row.finishedAt,
     lastActiveAt: row.lastActiveAt,
@@ -458,8 +483,20 @@ export function createDbWorkflowRunStore(): WorkflowRunStore {
       // pageId` — deliberately NOT what we key on. Other sources leave it null.
       const triggerPageId = extractTriggerPageId(input)
       const result = await query<RunRow>(
-        `INSERT INTO workflow_runs (workflow_id, workspace_id, triggered_by, trigger_kind, input, trigger_page_id)
-         VALUES ($1, $2, $3, $4, $5, $6)
+        `INSERT INTO workflow_runs (
+           workflow_id, workspace_id, triggered_by, trigger_kind, input,
+           trigger_page_id, context_group_id, context_project_id,
+           context_compartments, context_project_ids
+         )
+         SELECT $1, $2, $3, $4, $5, $6,
+                w.context_group_id, w.context_project_id,
+                CASE WHEN g.compartment_key IS NULL THEN ARRAY[]::text[]
+                     ELSE ARRAY[g.compartment_key]::text[] END,
+                CASE WHEN w.context_project_id IS NULL THEN ARRAY[]::uuid[]
+                     ELSE ARRAY[w.context_project_id]::uuid[] END
+           FROM workflows w
+           LEFT JOIN workspace_groups g ON g.id = w.context_group_id
+          WHERE w.id = $1 AND w.workspace_id = $2
          RETURNING ${RUN_SELECT}`,
         [
           workflowId,
@@ -487,9 +524,19 @@ export function createDbWorkflowRunStore(): WorkflowRunStore {
       const inserted = await query<RunRow>(
         `INSERT INTO workflow_runs (
            workflow_id, workspace_id, triggered_by, trigger_kind, input,
-           trigger_page_id, webhook_idempotency_key, webhook_body_sha256
+           trigger_page_id, webhook_idempotency_key, webhook_body_sha256,
+           context_group_id, context_project_id, context_compartments,
+           context_project_ids
          )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         SELECT $1, $2, $3, $4, $5, $6, $7, $8,
+                w.context_group_id, w.context_project_id,
+                CASE WHEN g.compartment_key IS NULL THEN ARRAY[]::text[]
+                     ELSE ARRAY[g.compartment_key]::text[] END,
+                CASE WHEN w.context_project_id IS NULL THEN ARRAY[]::uuid[]
+                     ELSE ARRAY[w.context_project_id]::uuid[] END
+           FROM workflows w
+           LEFT JOIN workspace_groups g ON g.id = w.context_group_id
+          WHERE w.id = $1 AND w.workspace_id = $2
          ON CONFLICT (workflow_id, webhook_idempotency_key)
            WHERE webhook_idempotency_key IS NOT NULL
          DO NOTHING

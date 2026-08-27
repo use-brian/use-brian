@@ -947,6 +947,12 @@ export type AssistantRow = {
   clearance: 'public' | 'internal' | 'confidential'
   compartments: string[] | null
   defaultCompartments: string[]
+  /** Team grant mode and new-session defaults (migration 473). */
+  teamScopeMode?: 'legacy' | 'all' | 'assigned'
+  defaultWorkspaceGroupId?: string | null
+  /** Project discovery grant mode and new-session default (migration 473). */
+  projectScopeMode?: 'all' | 'assigned'
+  defaultProjectId?: string | null
   kind: AssistantKind
   appType: AssistantAppType | null
 }
@@ -965,6 +971,10 @@ export async function findAssistantById(
             clearance,
             compartments,
             default_compartments as "defaultCompartments",
+            team_scope_mode as "teamScopeMode",
+            default_workspace_group_id as "defaultWorkspaceGroupId",
+            project_scope_mode as "projectScopeMode",
+            default_project_id as "defaultProjectId",
             kind,
             app_type as "appType"
      FROM assistants WHERE id = $1`,

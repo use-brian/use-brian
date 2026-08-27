@@ -131,6 +131,20 @@ export class FetchStackExhaustedError extends Error {
 
 export type SearchFailureKind = 'bad_key' | 'quota' | 'rate_limit' | 'challenge' | 'server' | 'other'
 
+/**
+ * Convert an HTTP Retry-After value (seconds or an HTTP date) to a bounded
+ * delay. Providers are advisory here: callers still own their total-attempt
+ * ceiling, and a surprising header can never stall a tool indefinitely.
+ */
+export function retryAfterMs(value: string | null | undefined, maxMs = 5_000): number | undefined {
+  if (!value) return undefined
+  const seconds = Number(value)
+  if (Number.isFinite(seconds)) return Math.min(Math.max(seconds * 1_000, 0), maxMs)
+  const at = Date.parse(value)
+  if (!Number.isFinite(at)) return undefined
+  return Math.min(Math.max(at - Date.now(), 0), maxMs)
+}
+
 /** What a non-2xx from a keyed search API means. */
 export function searchStatusMeaning(provider: string, status: number): { kind: SearchFailureKind; meaning: string } {
   if (status === 401 || status === 403) return { kind: 'bad_key', meaning: `the ${provider} API key was rejected — invalid, revoked, or not enabled for this endpoint; a different query cannot fix it` }
@@ -152,7 +166,8 @@ export class SearchProviderError extends Error {
   readonly provider: string
   readonly status?: number
   readonly kind: SearchFailureKind
-  constructor(init: { provider: string; status?: number; kind?: SearchFailureKind; detail?: string; cause?: unknown }) {
+  readonly retryAfterMs?: number
+  constructor(init: { provider: string; status?: number; kind?: SearchFailureKind; detail?: string; retryAfterMs?: number; cause?: unknown }) {
     const fromStatus = init.status !== undefined ? searchStatusMeaning(init.provider, init.status) : undefined
     const kind = init.kind ?? fromStatus?.kind ?? 'other'
     const meaning = init.kind ? SEARCH_KIND_MEANING[init.kind](init.provider) : fromStatus?.meaning
@@ -165,5 +180,6 @@ export class SearchProviderError extends Error {
     this.provider = init.provider
     this.status = init.status
     this.kind = kind
+    this.retryAfterMs = init.retryAfterMs
   }
 }

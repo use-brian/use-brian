@@ -40,6 +40,12 @@ describe("[COMP:app-web/workflow] match chip input", () => {
     expect(parseChipInput(many, "keywords")).toHaveLength(MATCH_CAPS.keywords)
   })
 
+  it("normalizes persistent task tag chips with the task-tag cap", () => {
+    expect(parseChipInput("geo:route:brian, geo:route:brian\ngeo:queued", "currentTags"))
+      .toEqual(["geo:route:brian", "geo:queued"])
+    expect(MATCH_CAPS.currentTags).toBe(64)
+  })
+
   it("returns the same array reference on a no-op append", () => {
     const a = ["alpha"]
     expect(appendChip(a, "alpha", "keywords")).toBe(a) // duplicate

@@ -212,6 +212,9 @@ export function createWhatsappByonRuntime(deps: WhatsappByonRuntimeDeps) {
           await adapter.sendTypingIndicator(input.chatJid).catch(() => {})
           if (ctx.ackReaction) await adapter.sendReaction(input.chatJid, input.messageId, ctx.ackReaction).catch(() => {})
         },
+        onGoalAccepted: async (message) => {
+          await adapter.sendMessage(input.chatJid, { text: message })
+        },
         onConfirmationRequired: async (request, resolver) => {
           pending.set(input.chatJid, { resolver, toolCallId: request.toolCallId })
           await adapter.sendMessage(input.chatJid, {

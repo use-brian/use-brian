@@ -87,13 +87,13 @@ const RECONNECT_BASE_MS = 2000
 const RECONNECT_MAX_MS = 30000
 /**
  * Recency window for `append`-typed messages. `messages.upsert` fires `notify`
- * for new messages from others (the listener's main path) and `append` for
- * messages synced from the owner's OTHER devices — i.e. the owner typing in a
- * group from their primary phone. We ingest those `fromMe` appends so a BYON
- * listener captures the owner's own contributions too, but only when fresh:
- * an initial reconnect can replay older self-messages as `append`, and this
- * window keeps that from flooding the brain. Bulk history arrives on a
- * separate `messaging-history.set` event we don't tap, so this is belt-and-suspenders.
+ * for real-time deliveries and `append` for offline-buffered deliveries. The
+ * companion deliberately stays unavailable so the owner's primary phone keeps
+ * receiving notifications, which means current messages from either direction
+ * can arrive as `append`. We ingest only fresh appends: an initial reconnect
+ * can replay older messages, and this window keeps that history from flooding
+ * the brain. Bulk history arrives on a separate `messaging-history.set` event
+ * we don't tap, so this is belt-and-suspenders.
  */
 const APPEND_MAX_AGE_MS = 5 * 60 * 1000
 const RECONNECT_FACTOR = 1.8
@@ -698,16 +698,12 @@ export function createSocketManager(options: SocketManagerOptions): SocketManage
       logger,
       browser: ['Use Brian', 'wa-connector', '1.0.0'],
       syncFullHistory: false,
-      // `true` keeps the companion presence `available`, so WhatsApp pushes
-      // every message in real time as a `notify` upsert — INCLUDING the owner's
-      // own messages typed from their primary phone (Baileys flags those
-      // `fromMe` and still upserts them). With `false` the companion reports
-      // `unavailable` and messages are buffered/delivered late as offline
-      // `append` batches, which made own-message capture unreliable. The
-      // trade-off is the linked number appears online; we suppress the
-      // accompanying read receipts (no blue ticks) by NOT calling
-      // `sock.readMessages` on inbound — see handleInboundMessage.
-      markOnlineOnConnect: true,
+      // An `available` linked desktop client can suppress notifications on the
+      // owner's primary phone. Stay unavailable and accept fresh `append`
+      // upserts as well as `notify` below so passive delivery still reaches the
+      // archive/listener. Read receipts remain disabled independently — see
+      // handleInboundMessage.
+      markOnlineOnConnect: false,
     })
 
     const managed: ManagedSocket = {
@@ -745,8 +741,10 @@ export function createSocketManager(options: SocketManagerOptions): SocketManage
           console.log(`[socket-manager] Connected: ${channelId} (${phone})`)
           listeners?.onConnected?.(phone)
 
-          // Mark presence as available
-          sock.sendPresenceUpdate('available').catch(() => {})
+          // Baileys also derives this from markOnlineOnConnect, but send it
+          // explicitly after `open` so a restored session cannot remain active
+          // and suppress notifications on the owner's primary phone.
+          sock.sendPresenceUpdate('unavailable').catch(() => {})
         }
 
         if (connection === 'close') {
@@ -795,18 +793,16 @@ export function createSocketManager(options: SocketManagerOptions): SocketManage
 
     // Inbound message handler (ported from OpenClaw inbound/monitor.ts)
     sock.ev.on('messages.upsert', async (upsert: { type?: string; messages?: WAMessage[] }) => {
-      // `notify` = new messages from others (the listener's primary path).
-      // `append` = messages synced from the owner's other devices; we keep only
-      // the owner's OWN recent messages (fromMe + within APPEND_MAX_AGE_MS) so
-      // the listener also captures what the owner types from their phone,
-      // without re-ingesting replayed history. Everything else in `append` is
-      // dropped here before reaching handleInboundMessage.
+      // `notify` = a real-time delivery. `append` = an offline-buffered
+      // delivery; because the companion stays unavailable to preserve primary
+      // phone notifications, a current message from either direction may use
+      // this shape. Keep only fresh appends so reconnect history never floods
+      // the archive/listener. Message-id dedup below handles dual delivery.
       const upsertType = upsert.type
       if (upsertType !== 'notify' && upsertType !== 'append') return
 
       for (const msg of upsert.messages ?? []) {
         if (upsertType === 'append') {
-          if (!msg.key?.fromMe) continue
           const ts = msg.messageTimestamp ? Number(msg.messageTimestamp) * 1000 : 0
           if (!ts || Date.now() - ts > APPEND_MAX_AGE_MS) continue
         }
@@ -970,11 +966,9 @@ export function createSocketManager(options: SocketManagerOptions): SocketManage
       ? null // edits don't carry reply context
       : describeReplyContext(msg.message as import('@whiskeysockets/baileys').proto.IMessage | undefined)
 
-    // Deliberately do NOT mark messages as read. With markOnlineOnConnect:true
-    // the companion is `available`, so a `readMessages` call would send an
-    // *active* read receipt — a blue tick the sender sees, defeating the silent
-    // read-only BYON design. Skipping it keeps the listener invisible (no blue
-    // ticks) while still receiving every message in real time.
+    // Deliberately do NOT mark messages as read. Presence and read receipts are
+    // separate: even an unavailable companion would send a blue tick if it
+    // called `readMessages`, defeating the silent read-only BYON design.
 
     const timestamp = msg.messageTimestamp
       ? Number(msg.messageTimestamp) * 1000

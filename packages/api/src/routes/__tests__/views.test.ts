@@ -1547,13 +1547,16 @@ describe('[COMP:api/views-routes] reparent (page tree)', () => {
       .patch('/api/views/sv-page-1/reparent')
       .send({ nestParentId: PARENT_ID, position: 2 })
     expect(res.status).toBe(200)
-    // Trailing args: writtenBy (undefined = 'user' default) + the mig-313
-    // teamspace destination (undefined = adopt the parent's teamspace).
+    // Trailing args: writtenBy, Teamspace and Project destinations, then the
+    // explicit context-move confirmation. Omitted values preserve/inherit the
+    // current container context.
     expect(stores.savedViewStore.reparent).toHaveBeenCalledWith(
       USER_ID,
       'sv-page-1',
       PARENT_ID,
       2,
+      undefined,
+      undefined,
       undefined,
       undefined,
     )
@@ -1570,7 +1573,16 @@ describe('[COMP:api/views-routes] reparent (page tree)', () => {
       .patch('/api/views/sv-page-1/reparent')
       .send({ nestParentId: null, position: 0 })
     expect(res.status).toBe(200)
-    expect(stores.savedViewStore.reparent).toHaveBeenCalledWith(USER_ID, 'sv-page-1', null, 0, undefined, undefined)
+    expect(stores.savedViewStore.reparent).toHaveBeenCalledWith(
+      USER_ID,
+      'sv-page-1',
+      null,
+      0,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    )
     expect(res.body.nestParentId).toBeNull()
   })
 })

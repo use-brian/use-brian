@@ -29,6 +29,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import {
   SensitivityAccumulator,
+  ContextScopeAccumulator,
   CONFIGURE_CAPABILITY,
   filterToolsByCapabilities,
   type CapabilityStore,
@@ -39,6 +40,10 @@ import { parseAuthToken, verifySecret, type ApiKeyStore } from '../db/api-key-st
 import { findAssistantById } from '../db/users.js'
 import { query } from '../db/client.js'
 import { bridgeCoreTool } from '../brain-mcp/tools.js'
+import {
+  ContextNotAvailableError,
+  resolveTurnScopeSystem,
+} from '../context-scope/resolve-turn-scope.js'
 
 type Options = {
   apiKeyStore: ApiKeyStore
@@ -171,8 +176,32 @@ export function assistantMcpRoutes(opts: Options): Router {
     const activeCapabilities = new Set(await opts.capabilityStore.listActive(assistant.id))
     const configureGranted = activeCapabilities.has(CONFIGURE_CAPABILITY)
     const clearance = assistant.clearance
+    let turnScope
+    try {
+      turnScope = await resolveTurnScopeSystem({
+        userId: ownerUserId,
+        assistant,
+        workspaceId: assistant.workspaceId,
+        // Existing agent keys are explicitly company-wide on the active-context
+        // axis; assistant Team/Project ceilings still apply.
+        key: { contextGroupId: null, contextProjectId: null },
+      })
+    } catch (err) {
+      if (!(err instanceof ContextNotAvailableError)) throw err
+      res.status(409).json({
+        error: err.code,
+        message: err.message,
+        axis: err.axis,
+        reason: err.reason,
+      })
+      return
+    }
     const sensitivity = new SensitivityAccumulator()
     sensitivity.note(clearance)
+    const scopeAccumulator = new ContextScopeAccumulator({
+      compartments: turnScope.writeCompartments,
+      projectIds: turnScope.writeProjectIds,
+    })
     const ctx: ToolContext = {
       userId: ownerUserId,
       assistantId: assistant.id,
@@ -183,12 +212,18 @@ export function assistantMcpRoutes(opts: Options): Router {
       workspaceId: assistant.workspaceId,
       assistantKind: assistant.kind === 'primary' || assistant.kind === 'app' ? assistant.kind : 'standard',
       activeCapabilities,
-      clearance,
+      clearance: turnScope.access.clearance,
       assistantClearance: clearance,
-      compartments: assistant.compartments ?? null,
-      assistantCompartments: assistant.compartments ?? null,
-      assistantDefaultCompartments: assistant.defaultCompartments ?? [],
+      compartments: turnScope.effectiveCompartments,
+      projectIds: turnScope.effectiveProjectIds,
+      activeGroupId: turnScope.activeGroupId,
+      activeProjectId: turnScope.activeProjectId,
+      assistantCompartments: turnScope.effectiveCompartments,
+      assistantDefaultCompartments: turnScope.writeCompartments,
+      assistantProjectIds: turnScope.effectiveProjectIds,
+      assistantDefaultProjectIds: turnScope.writeProjectIds,
       sensitivity,
+      scopeAccumulator,
       abortSignal: new AbortController().signal,
     }
     const resolveCtx = async () => ctx

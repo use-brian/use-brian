@@ -27,6 +27,7 @@ const TS_ROW = {
   icon: null,
   description: null,
   sensitivity: 'internal',
+  workspaceGroupId: null,
   isDefault: false,
   position: 0,
   createdBy: 'u-1',
@@ -123,6 +124,26 @@ describe('[COMP:api/teamspace-store] listForUser', () => {
     expect(userId).toBe('u-1')
     expect(sql).toContain('ORDER BY is_default DESC')
     expect(params).toEqual(['w-1'])
+  })
+})
+
+describe('[COMP:api/teamspace-context] Team-derived roster', () => {
+  it('checks linked access through the effective flat Team grant', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ ok: true }], rowCount: 1 } as never)
+    await expect(store.isMemberSystem('ts-1', 'u-1')).resolves.toBe(true)
+    const sql = mockQuery.mock.calls[0][0] as string
+    expect(sql).toContain('workspace_group_id IS NOT NULL')
+    expect(sql).toContain('effective_member_team_compartments')
+    expect(sql).toContain('sensitivity_rank')
+  })
+
+  it('lists linked readers from workspace membership while retaining the explicit branch', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    await store.listMembersSystem('ts-1')
+    const sql = mockQuery.mock.calls[0][0] as string
+    expect(sql).toContain('t.workspace_group_id IS NULL')
+    expect(sql).toContain('t.workspace_group_id IS NOT NULL')
+    expect(sql).toContain('effective_member_team_compartments')
   })
 })
 

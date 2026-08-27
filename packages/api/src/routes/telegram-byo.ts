@@ -147,6 +147,7 @@ type TelegramByoRouteOptions = {
   deferredConfirmationStore?: DeferredConfirmationStore
   episodicStore?: import('@use-brian/core').EpisodicStore
   sessionStateStore?: import('@use-brian/core').SessionStateStore
+  crmEmailDraftStore?: import('@use-brian/core').CrmEmailDraftStore
   capabilityStore: import('@use-brian/core').CapabilityStore
   /**
    * Voice-message transcription config. Mirrors the official Telegram route —
@@ -1202,6 +1203,7 @@ type ProcessMessageParams = {
   pendingConfResolvers: Map<string, { resolver: ConfirmationResolver; chatId: string }>
   episodicStore?: import('@use-brian/core').EpisodicStore
   sessionStateStore?: import('@use-brian/core').SessionStateStore
+  crmEmailDraftStore?: import('@use-brian/core').CrmEmailDraftStore
   capabilityStore: import('@use-brian/core').CapabilityStore
   voiceTranscription?: {
     enabled: boolean
@@ -1676,6 +1678,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     workerManager: params.workerManager,
     episodicStore: params.episodicStore,
     sessionStateStore: params.sessionStateStore,
+    crmEmailDraftStore: params.crmEmailDraftStore,
     capabilityStore: params.capabilityStore,
     voiceTranscriptionUsage,
     hooks: {
@@ -1707,6 +1710,9 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
           }
         }
         await updateToolStatus()
+      },
+      async onGoalAccepted(message) {
+        await adapter.sendMessage(incoming.channelId, { text: message })
       },
       async onConfirmationRequired(req, resolver) {
         const confKey = `${incoming.channelId}:${req.toolCallId}`

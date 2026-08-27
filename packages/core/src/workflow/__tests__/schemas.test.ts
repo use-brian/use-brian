@@ -562,6 +562,44 @@ describe('[COMP:workflow/schemas] WorkflowDefinitionSchema', () => {
   })
 })
 
+describe('[COMP:workflow/failure-delivery] WorkflowDefinitionSchema', () => {
+  const step = {
+    id: 'collect',
+    type: 'assistant_call' as const,
+    target: { assistantId: 'primary' as const },
+    prompt: 'collect',
+  }
+
+  it('accepts a static Slack failure destination', () => {
+    expect(WorkflowDefinitionSchema.safeParse({
+      startStepId: 'collect',
+      steps: [step],
+      failureDelivery: { channelType: 'slack', channelId: 'C123' },
+    }).success).toBe(true)
+  })
+
+  it('rejects an inert integration id and a dangling thread parent', () => {
+    expect(WorkflowDefinitionSchema.safeParse({
+      startStepId: 'collect',
+      steps: [step],
+      failureDelivery: {
+        channelType: 'slack',
+        channelId: 'C123',
+        channelIntegrationId: '00000000-0000-4000-8000-000000000010',
+      },
+    }).success).toBe(false)
+    expect(WorkflowDefinitionSchema.safeParse({
+      startStepId: 'collect',
+      steps: [step],
+      failureDelivery: {
+        channelType: 'slack',
+        channelId: 'C123',
+        thread: { fromStep: 'missing' },
+      },
+    }).success).toBe(false)
+  })
+})
+
 describe('[COMP:workflow/schemas] Parallel fan-out + layout', () => {
   const callStep = (id: string, nextStepId?: string | string[] | null) => ({
     id,
@@ -896,6 +934,27 @@ describe('[COMP:workflow/schemas] WorkflowTriggerSchema', () => {
   it('rejects an event trigger with an empty sources list', () => {
     const trigger = { kind: 'event', event: { sources: [] } }
     expect(WorkflowTriggerSchema.safeParse(trigger).success).toBe(false)
+  })
+
+  it('[COMP:workflow/task-current-tags] accepts currentTags on task sources only', () => {
+    expect(WorkflowTriggerSchema.safeParse({
+      kind: 'event',
+      event: {
+        sources: [{
+          source: { type: 'task' },
+          match: { inChannels: ['completed'], currentTags: ['geo:route:brian'] },
+        }],
+      },
+    }).success).toBe(true)
+    expect(WorkflowTriggerSchema.safeParse({
+      kind: 'event',
+      event: {
+        sources: [{
+          source: { type: 'channel', channelIntegrationId: 'channel-1', channel: 'slack' },
+          match: { currentTags: ['geo:route:brian'] },
+        }],
+      },
+    }).success).toBe(false)
   })
 
   it('rejects an event source with an unknown type', () => {

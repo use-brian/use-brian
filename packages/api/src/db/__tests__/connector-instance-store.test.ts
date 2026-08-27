@@ -68,6 +68,8 @@ function fakeRow(overrides: Partial<ConnectorInstance> = {}): ConnectorInstance 
     healthStatus: 'ok',
     lastError: null,
     lastCheckedAt: null,
+    compartments: [],
+    projectIds: [],
     createdBy: 'u_1',
     createdAt: new Date(),
     updatedAt: new Date(),

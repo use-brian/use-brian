@@ -787,7 +787,7 @@ function PostPane({
                     onChange={setThreadSegments}
                   />
                 ) : (
-                  <div className="rounded-xl border border-border/60 bg-card p-5 shadow-xs transition focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/25 [&_:focus-visible]:shadow-none">
+                  <div className="rounded-xl border border-border/60 bg-card p-5 shadow-xs transition focus-within:border-ring [&_:focus-visible]:shadow-none">
                     <CaptionEditor
                       value={selected?.text ?? ""}
                       platform={platform}
@@ -1046,7 +1046,7 @@ function ThreadComposer({
       {segments.map((segment, index) => {
         const counter = counterState(segment, "twitter");
         return (
-          <div key={index} className="relative rounded-xl border border-border/60 bg-card p-4 shadow-xs focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/25 [&_:focus-visible]:shadow-none">
+          <div key={index} className="relative rounded-xl border border-border/60 bg-card p-4 shadow-xs focus-within:border-ring [&_:focus-visible]:shadow-none">
             <div className="mb-3 flex items-center justify-between gap-3">
               <span className="text-[11px] font-medium text-muted-foreground">
                 {format(te.threadPostLabel, { n: String(index + 1) })}

@@ -53,6 +53,8 @@ export type WorkspaceFile = {
   relatedIds: string[]
   storageUri: string
   sensitivity: FileSensitivity
+  compartments?: string[]
+  projectIds?: string[]
   metadata: WorkspaceFileMetadata
   // Visibility double (mig 128). Both nullable; (NULL, NULL) means
   // workspace-shared default.
@@ -98,7 +100,7 @@ export function workspaceFileStatus(row: WorkspaceFile): WorkspaceFileRowStatus 
  */
 export type WorkspaceFileIndexRow = Pick<
   WorkspaceFile,
-  'id' | 'workspaceId' | 'path' | 'parentPath' | 'name' | 'title' | 'summary' | 'mime' | 'sizeBytes' | 'tags' | 'sensitivity' | 'updatedAt'
+  'id' | 'workspaceId' | 'path' | 'parentPath' | 'name' | 'title' | 'summary' | 'mime' | 'sizeBytes' | 'tags' | 'sensitivity' | 'compartments' | 'projectIds' | 'updatedAt'
 >
 
 export type WorkspaceFileCreateInput = {
@@ -124,6 +126,7 @@ export type WorkspaceFileCreateInput = {
   sensitivity?: FileSensitivity
   /** Compartment set (MLS category axis) to stamp on the row. Default '{}'. */
   compartments?: string[]
+  projectIds?: string[]
   metadata?: WorkspaceFileMetadata
   /** mig 128 rename — was `createdBy`. */
   createdByUserId?: string | null
@@ -151,6 +154,9 @@ export type WorkspaceFileMetaPatch = {
   relatedIds?: string[]
   sensitivity?: FileSensitivity
   metadata?: WorkspaceFileMetadata
+  /** Internal high-water scope inherited by metadata-only updates. */
+  inheritCompartments?: string[]
+  inheritProjectIds?: string[]
 }
 
 /**
@@ -184,6 +190,9 @@ export type WorkspaceFileSupersedePatch = {
   relatedIds?: string[]
   sensitivity?: FileSensitivity
   metadata?: WorkspaceFileMetadata
+  /** High-water scope unioned with the source row on supersession. */
+  compartments?: string[]
+  projectIds?: string[]
 }
 
 export type WorkspaceFilesStore = {
@@ -215,6 +224,7 @@ export type WorkspaceFilesStore = {
     workspaceId: string,
     id: string,
     sizeBytes: number,
+    scope?: { compartments?: string[]; projectIds?: string[] },
   ): Promise<WorkspaceFile | null>
 
   /** Returns true if a row was deleted. Current-row gated. */

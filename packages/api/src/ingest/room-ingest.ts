@@ -65,6 +65,8 @@ export type RoomPostInput = {
   text: string
   /** The room's `effective_clearance` — the capture ceiling. */
   effectiveClearance: string | null
+  compartments?: string[]
+  projectIds?: string[]
 }
 
 export type RoomIngestor = {
@@ -129,6 +131,8 @@ export function buildRoomIngestEngine(
       routing_timezone: 'UTC',
       alert: false,
       episode_sensitivity: clearance,
+      compartments: [],
+      project_ids: [],
     },
   ]
   return createIngestEngine({
@@ -175,6 +179,8 @@ export function createRoomIngestor(deps: RoomIngestorDeps): RoomIngestor {
       const decision = await engine.ingest(event, {
         workspace_id: input.workspaceId,
         connector_instance_id: input.sessionId,
+        compartments: input.compartments ?? [],
+        project_ids: input.projectIds ?? [],
       })
 
       if (!decision.matched || decision.rule_id === null) return null
@@ -197,6 +203,8 @@ export function createRoomIngestor(deps: RoomIngestorDeps): RoomIngestor {
           firesAt,
           event,
           episodeSensitivity: sensitivity,
+          compartments: input.compartments ?? [],
+          projectIds: input.projectIds ?? [],
         })
         return { episodeId: null }
       }
@@ -217,6 +225,8 @@ export function createRoomIngestor(deps: RoomIngestorDeps): RoomIngestor {
           session_id: input.sessionId,
           room_post: true,
         },
+        compartments: input.compartments ?? [],
+        projectIds: input.projectIds ?? [],
       })
       return { episodeId: null }
     },

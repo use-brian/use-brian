@@ -25,6 +25,7 @@ vi.mock('../../db/teamspace-store.js', async (importOriginal) => {
 import { getWorkspaceMembershipWithClearanceSystem } from '../../db/workspace-store.js'
 import { teamspacesRoutes } from '../teamspaces.js'
 import type { Teamspace, TeamspaceStore } from '../../db/teamspace-store.js'
+import type { WorkspaceGroupStore } from '../../db/workspace-group-store.js'
 
 const NOW = new Date('2026-07-09T00:00:00Z')
 
@@ -36,6 +37,7 @@ function ts(partial: Partial<Teamspace> = {}): Teamspace {
     icon: null,
     description: null,
     sensitivity: 'internal',
+    workspaceGroupId: null,
     isDefault: false,
     position: 0,
     createdBy: 'u-1',
@@ -69,7 +71,17 @@ function member(role: 'owner' | 'admin' | 'member', clearance: 'public' | 'inter
 }
 
 function app(store: TeamspaceStore, userId = 'u-1') {
-  return createTestApp('/api', teamspacesRoutes({ teamspaceStore: store }), { userId })
+  const workspaceGroupStore = {
+    listGroups: vi.fn(async () => []),
+  } as unknown as WorkspaceGroupStore
+  return createTestApp('/api', teamspacesRoutes({ teamspaceStore: store, workspaceGroupStore }), { userId })
+}
+
+function appWithGroups(store: TeamspaceStore, groups: Array<Record<string, unknown>>, userId = 'u-1') {
+  const workspaceGroupStore = {
+    listGroups: vi.fn(async () => groups),
+  } as unknown as WorkspaceGroupStore
+  return createTestApp('/api', teamspacesRoutes({ teamspaceStore: store, workspaceGroupStore }), { userId })
 }
 
 beforeEach(() => {
@@ -125,6 +137,40 @@ describe('[COMP:api/teamspaces-route] teamspace list + create', () => {
 })
 
 describe('[COMP:api/teamspaces-route] manage gate', () => {
+  it('links only an active Team from the same workspace', async () => {
+    member('owner', 'confidential')
+    const store = makeStore({
+      update: vi.fn(async (_id, fields) => ts({ workspaceGroupId: fields.workspaceGroupId ?? null })),
+    })
+    const teamId = '2e9f1b34-0000-4000-8000-000000000099'
+    const res = await request(appWithGroups(store, [{
+      id: teamId,
+      kind: 'team',
+      status: 'active',
+    }]))
+      .patch('/api/teamspaces/ts-1')
+      .send({ workspaceGroupId: teamId })
+    expect(res.status).toBe(200)
+    expect(res.body.workspaceGroupId).toBe(teamId)
+    expect(store.update).toHaveBeenCalledWith('ts-1', { workspaceGroupId: teamId })
+  })
+
+  it('rejects an archived or unavailable Team link', async () => {
+    member('owner', 'confidential')
+    const store = makeStore()
+    const teamId = '2e9f1b34-0000-4000-8000-000000000099'
+    const res = await request(appWithGroups(store, [{
+      id: teamId,
+      kind: 'team',
+      status: 'archived',
+    }]))
+      .patch('/api/teamspaces/ts-1')
+      .send({ workspaceGroupId: teamId })
+    expect(res.status).toBe(409)
+    expect(res.body.error).toBe('teamspace_team_unavailable')
+    expect(store.update).not.toHaveBeenCalled()
+  })
+
   it('404s a non-member of the teamspace (existence is not confirmed to outsiders)', async () => {
     member('member', 'confidential')
     const store = makeStore({ isMemberSystem: vi.fn(async () => false) })
@@ -194,6 +240,27 @@ describe('[COMP:api/teamspaces-route] membership', () => {
       .send({ userId: '2e9f1b34-0000-4000-8000-000000000002' })
     expect(res.status).toBe(201)
     expect(store.addMemberSystem).toHaveBeenCalledWith('ts-1', '2e9f1b34-0000-4000-8000-000000000002')
+  })
+
+  it('refuses direct roster mutation when membership is Team-derived', async () => {
+    member('owner', 'confidential')
+    const store = makeStore({
+      getSystem: vi.fn(async () => ts({
+        workspaceGroupId: '2e9f1b34-0000-4000-8000-000000000099',
+      })),
+    })
+    const add = await request(app(store))
+      .post('/api/teamspaces/ts-1/members')
+      .send({ userId: '2e9f1b34-0000-4000-8000-000000000002' })
+    expect(add.status).toBe(409)
+    expect(add.body.error).toBe('linked_teamspace_roster_is_derived')
+    expect(store.addMemberSystem).not.toHaveBeenCalled()
+
+    const remove = await request(app(store))
+      .delete('/api/teamspaces/ts-1/members/u-1')
+    expect(remove.status).toBe(409)
+    expect(remove.body.error).toBe('linked_teamspace_roster_is_derived')
+    expect(store.removeMemberSystem).not.toHaveBeenCalled()
   })
 
   it('nobody can be removed from (or leave) the default teamspace', async () => {

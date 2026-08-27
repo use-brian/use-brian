@@ -36,6 +36,9 @@ export type GoalRow = {
   parentGoalId: string | null;
   recipeId: string | null;
   blockerReason: string | null;
+  /** Immutable execution-context bindings. null means the company-wide axis. */
+  contextGroupId: string | null;
+  contextProjectId: string | null;
   /** null = a DRAFT (judge-created for a task, unconfirmed). */
   confirmedAt: string | null;
   /** true once a workflow means is set (the goal is being worked / armed). */
@@ -143,6 +146,26 @@ export async function getGoalDetail(goalId: string): Promise<GoalDetail | null> 
   if (!res.ok) return null;
   const data = (await res.json().catch(() => ({}))) as { goal?: GoalDetail };
   return data.goal ?? null;
+}
+
+/** Narrow an unset goal context axis. Existing bindings cannot be cleared or
+ * switched; the server also blocks the write once the acting workflow starts. */
+export async function updateGoalContext(
+  goalId: string,
+  context: { contextGroupId: string | null; contextProjectId: string | null },
+): Promise<GoalActionResult> {
+  const res = await authFetch(`${API_URL}/api/goals/${encodeURIComponent(goalId)}/context`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(context),
+  });
+  const data = (await res.json().catch(() => ({}))) as {
+    ok?: boolean;
+    goal?: GoalRow;
+    error?: string;
+  };
+  if (!res.ok) return { ok: false, error: data.error ?? `Request failed (${res.status})` };
+  return { ok: data.ok === true, goal: data.goal };
 }
 
 type GoalActionResult = {

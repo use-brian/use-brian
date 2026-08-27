@@ -436,24 +436,68 @@
       transparent;
   }
 
-  /* Fluid focus ring instead of jarring solid outline. Applies to every
-     focusable element, so a STANDALONE control (a lone input/textarea/button
-     that is its own bordered box) frames itself correctly.
+  /* Fluid focus ring instead of jarring solid outline. Applies to discrete
+     controls such as buttons, checkboxes, and switches. Text-entry fields use
+     the border-only override below: their EXISTING frame turns blue instead
+     of growing a second frame outside the box.
 
      COMPOSITE FIELD CONVENTION: when a bordered box groups an inner control
      WITH sibling controls (e.g. a comment composer = textarea + attach/mention/
-     send buttons in one box), the ring belongs on the BOX, not the inner
-     control. The box draws it with `focus-within:border-ring
-     focus-within:ring-2 focus-within:ring-ring/35`, and its class suppresses
-     every nested halo with `[&_:focus-visible]:shadow-none` (an individual
-     inner control may use `focus-visible:shadow-none` when the wrapper cannot
-     own that selector).
+     send buttons in one box), the focus border belongs on the BOX, not the
+     inner control. The box draws it with `focus-within:border-ring` and its
+     class suppresses every nested halo with
+     `[&_:focus-visible]:shadow-none` (an individual inner control may use
+     `focus-visible:shadow-none` when the wrapper cannot own that selector).
      References: page-comments.tsx, comment-thread-body.tsx, and the
      ChatComposer usage in empty-page-landing.tsx. */
   :focus-visible {
     outline: none;
     box-shadow: 0 0 0 2px var(--background), 0 0 0 4px color-mix(in srgb, var(--ring) 65%, transparent);
     transition: box-shadow 150ms ease;
+  }
+  /* Text-entry controls are fields, not floating actions. Their own border is
+     the focus indicator. `!important` is intentional: Tailwind focus-ring
+     utilities live in the later utilities layer, and old call sites must not
+     resurrect the outside halo while the app migrates to this one-frame rule.
+     Non-text inputs (checkbox, radio, range, file, color) keep the global
+     keyboard halo above. */
+  :where(
+    input:not([type]),
+    input[type="text"],
+    input[type="email"],
+    input[type="password"],
+    input[type="search"],
+    input[type="url"],
+    input[type="tel"],
+    input[type="number"],
+    input[type="date"],
+    input[type="datetime-local"],
+    input[type="time"],
+    input[type="month"],
+    input[type="week"],
+    textarea
+  ):focus-visible {
+    border-color: var(--ring) !important;
+    box-shadow: none !important;
+    transition: border-color 150ms ease;
+  }
+  :where(
+    input:not([type]),
+    input[type="text"],
+    input[type="email"],
+    input[type="password"],
+    input[type="search"],
+    input[type="url"],
+    input[type="tel"],
+    input[type="number"],
+    input[type="date"],
+    input[type="datetime-local"],
+    input[type="time"],
+    input[type="month"],
+    input[type="week"],
+    textarea
+  ):focus-visible[aria-invalid="true"] {
+    border-color: var(--destructive) !important;
   }
   /* Round the ring to the parent's shape for controls that don't carry their
      own radius — EXCEPT input/textarea. Those are scroll containers, so
@@ -2228,6 +2272,16 @@ html[data-vt-back="true"]::view-transition-new(root) {
 .composer-mention-chip-member {
   background: color-mix(in srgb, var(--muted-foreground) 20%, transparent);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--muted-foreground) 20%, transparent);
+}
+/* A roster-backed `/command` prefix. Stronger primary tint than an assistant
+   mention because it selects the workflow for the WHOLE turn. The persistent
+   Using-command strip carries the readable label; this paint keeps the raw
+   prefix visibly tokenized while the user edits its arguments. */
+.composer-command-chip {
+  background: color-mix(in srgb, var(--primary) 24%, transparent);
+  box-shadow:
+    0 0 0 2px color-mix(in srgb, var(--primary) 24%, transparent),
+    0 0 0 3px color-mix(in srgb, var(--primary) 12%, transparent);
 }
 
 /* Chat activity header — the "what the assistant is doing" status label

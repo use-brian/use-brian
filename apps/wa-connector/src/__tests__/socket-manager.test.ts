@@ -65,6 +65,7 @@ vi.mock('../gcs-auth-state.js', () => ({
 
 import { createSocketManager } from '../socket-manager.js'
 import { listStoredChannels, deleteAuthState } from '../gcs-auth-state.js'
+import { makeWASocket } from '@whiskeysockets/baileys'
 
 const mockListStored = vi.mocked(listStoredChannels)
 const mockDeleteAuth = vi.mocked(deleteAuthState)
@@ -110,6 +111,19 @@ describe('[COMP:wa-connector/socket-manager] connect + connection lifecycle', ()
     fakeSockets[0].ev.emit('connection.update', { connection: 'open' })
     expect(mgr.getStatus('a-1')?.status).toBe('connected')
     expect(onConnected).toHaveBeenCalledWith('15551234567')
+  })
+
+  it('keeps the linked companion unavailable so the primary phone receives notifications', async () => {
+    const mgr = manager()
+    await mgr.connect('a-1')
+
+    expect(vi.mocked(makeWASocket)).toHaveBeenCalledWith(
+      expect.objectContaining({ markOnlineOnConnect: false }),
+    )
+
+    fakeSockets[0].ev.emit('connection.update', { connection: 'open' })
+    expect(fakeSockets[0].sendPresenceUpdate).toHaveBeenCalledWith('unavailable')
+    expect(fakeSockets[0].sendPresenceUpdate).not.toHaveBeenCalledWith('available')
   })
 
   it('ends the previous socket when connect is called again for the same assistant', async () => {
@@ -393,7 +407,7 @@ describe('[COMP:wa-connector/dedup-store] outbound self-echo suppression', () =>
   })
 })
 
-describe('[COMP:wa-connector/socket-manager] append messages (owner self-sends)', () => {
+describe('[COMP:wa-connector/socket-manager] offline-buffered append messages', () => {
   async function connected() {
     const mgr = manager()
     await mgr.connect('a-1')
@@ -408,10 +422,10 @@ describe('[COMP:wa-connector/socket-manager] append messages (owner self-sends)'
   }
 
   /**
-   * Emit one `append`-typed upsert — the path WhatsApp uses to sync messages
-   * the owner typed from their own phone to a companion device. `tsMs` is the
-   * message time; the handler keeps only fromMe appends fresher than
-   * APPEND_MAX_AGE_MS (5 min) so a reconnect history replay can't flood.
+   * Emit one `append`-typed upsert — the path WhatsApp uses for messages
+   * buffered while the companion is unavailable. `tsMs` is the message time;
+   * the handler keeps appends fresher than APPEND_MAX_AGE_MS (5 min) so a
+   * reconnect history replay can't flood.
    */
   async function emitAppend(opts: { id: string; fromMe: boolean; tsMs: number }) {
     fakeSockets[0].ev.emit('messages.upsert', {
@@ -448,7 +462,7 @@ describe('[COMP:wa-connector/socket-manager] append messages (owner self-sends)'
     vi.unstubAllGlobals()
   })
 
-  it('drops a non-fromMe append (not the owner — history/other-device sync)', async () => {
+  it('forwards a recent non-fromMe append while the companion is unavailable', async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true })
     vi.stubGlobal('fetch', fetchMock)
     const t0 = 1_700_000_000_000
@@ -457,7 +471,7 @@ describe('[COMP:wa-connector/socket-manager] append messages (owner self-sends)'
     void mgr
 
     await emitAppend({ id: 'other-append', fromMe: false, tsMs: t0 - 1000 })
-    expect(inboundForwards(fetchMock)).toHaveLength(0)
+    expect(inboundForwards(fetchMock)).toHaveLength(1)
 
     nowSpy.mockRestore()
     vi.unstubAllGlobals()

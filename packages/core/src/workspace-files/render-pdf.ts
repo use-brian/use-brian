@@ -28,6 +28,7 @@ import { z } from 'zod'
 import { buildTool, type Tool } from '../tools/types.js'
 import type { FilesApi } from './api.js'
 import { FILE_SENSITIVITIES, type FileSensitivity } from './types.js'
+import { scopeEvidenceFromRows } from '../security/context-scope.js'
 import {
   applyExplicitLinks,
   explicitLinksField,
@@ -191,12 +192,15 @@ export function createRenderPdfTool(api: FilesApi, opts?: RenderPdfToolOptions):
         sourceId: file.id,
         source: 'user',
         links: input.links,
+        compartments: file.compartments,
+        projectIds: file.projectIds,
       })
       const pages = rendered.pageCount === 1 ? '1 page' : `${rendered.pageCount} pages`
       return {
         data:
           `Rendered ${file.path} (${pages}, ${file.sizeBytes} bytes, application/pdf). id=${file.id}${formatLinksSummary(linksSummary)}` +
           ` To deliver it in the chat, call sendFile with file="${file.id}".`,
+        scopeEvidence: scopeEvidenceFromRows([file]),
       }
     },
   })

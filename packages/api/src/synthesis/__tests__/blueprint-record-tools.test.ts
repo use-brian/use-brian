@@ -48,6 +48,8 @@ function record(over: Partial<BlueprintRecord> = {}): BlueprintRecord {
     sourceKind: 'chat',
     sourceId: 'sess-1',
     sensitivity: 'internal',
+    compartments: [],
+    projectIds: [],
     pageId: null,
     createdBy: 'u-1',
     createdAt: '2026-07-07T00:00:00.000Z',

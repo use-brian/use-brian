@@ -19,6 +19,8 @@ import {
   type ConsultTransport,
 } from '../a2a/index.js'
 import type { Tool, ToolContext } from '../tools/types.js'
+import { ContextScopeAccumulator, type TurnScope } from '../security/context-scope.js'
+import type { Sensitivity } from '../security/sensitivity.js'
 import type {
   AssistantCallStep,
   BranchStep,
@@ -27,6 +29,7 @@ import type {
   ToolCallStep,
   WaitStep,
   WorkflowDefinition,
+  WorkflowDelivery,
   ResolvedExternalClientWorkflowPrincipal,
   WorkflowRecord,
   WorkflowRunOutcome,
@@ -36,7 +39,7 @@ import type {
   WorkflowStore,
 } from './types.js'
 import { evaluateBoolean, JsonLogicEvalError } from './condition.js'
-import { buildReachability, startStepIds } from './graph.js'
+import { buildReachability, startStepIds, stepSuccessors } from './graph.js'
 import { interpolateString, interpolateValue, type InterpolationScope } from './interpolation.js'
 import { reviewedClientReplyViolation } from './schemas.js'
 import type { ResearchDepthConfig } from '../engine/research-depth.js'
@@ -111,6 +114,8 @@ export type BuildToolRegistry = (params: {
   /** The acting assistant — typically the workspace's primary. */
   assistantId: string
   userId: string | null
+  /** Trusted execution scope. Undefined only for authoring-time tool lookup. */
+  turnScope?: TurnScope
 }) => Promise<Map<string, Tool>>
 
 /**
@@ -236,6 +241,16 @@ export type WorkflowAuditEvent =
       error: ExecutorError
     }
   | {
+      /** Best-effort terminal notification for a failed/timed-out run. */
+      type: 'workflow.failure_delivered'
+      workspaceId: string
+      actorUserId: string | null
+      runId: string
+      workflowId: string
+      stepId: string
+      delivery: DeliveryOutcome
+    }
+  | {
       type: 'workflow.auto_disabled'
       workspaceId: string
       actorUserId: string | null
@@ -309,6 +324,13 @@ export type ExecutorDeps = {
   consultTransport: ConsultTransport
   resolvePrimary: ResolvePrimaryAssistant
   buildToolRegistry: BuildToolRegistry
+  /** API-owned trusted resolver for the immutable workflow-run snapshot. */
+  resolveRunScope?: (params: {
+    userId: string
+    assistantId: string
+    workspaceId: string
+    run: WorkflowRunRecord
+  }) => Promise<{ turnScope: TurnScope; assistantClearance: Sensitivity }>
   emitAudit?: EmitAuditEvent
   /**
    * Deterministic page-send port backing `send_page` steps (page-actions
@@ -403,6 +425,8 @@ export type ExecutorDeps = {
     displayLines?: string[]
     deliveryChannel: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams' | 'feishu'
     expiresAt: Date | null
+    /** Exact out-of-band application id from the immediately upstream model step. */
+    decisionApplicationId?: string
   }) => Promise<void>
   /**
    * Page-anchor creation port — backs `assistant_call.page.create`. The API
@@ -460,6 +484,8 @@ const MAX_STEP_EXECUTIONS_PER_RUN = 100
  * `storeOutputAs` forbids the `__` prefix.
  */
 const FRONTIER_VAR = '__frontier'
+/** Persisted run-wide high-water evidence across wait/approval/process resumes. */
+export const WORKFLOW_SCOPE_EVIDENCE_VAR = '__contextScopeEvidence'
 const EXTERNAL_CLIENT_PRINCIPAL_VAR = '__externalClientPrincipal'
 
 function clientPrincipalError(message: string): Error {
@@ -661,7 +687,7 @@ export async function advanceWorkflowRun(
           ? (err as { reason: string }).reason
           : 'client_principal_unresolved',
     }
-    await markRunFailed(deps, run, '<principal>', error)
+    await markRunFailed(deps, run, '<principal>', error, 'failed', undefined, workflow)
     return failOutcome(runId, '<principal>', error, 0)
   }
   if (
@@ -672,7 +698,7 @@ export async function advanceWorkflowRun(
       message: 'An external-client workflow may contain at most one reviewed IMAP reply step.',
       reason: 'client_principal_step_forbidden',
     }
-    await markRunFailed(deps, run, '<principal>', error)
+    await markRunFailed(deps, run, '<principal>', error, 'failed', undefined, workflow)
     return failOutcome(runId, '<principal>', error, 0)
   }
 
@@ -685,7 +711,7 @@ export async function advanceWorkflowRun(
       message: 'This workspace has no active plan, so scheduled and workflow runs are paused. Pick a plan to resume, or self-host the open-source version.',
       reason: 'workspace_compute_blocked',
     }
-    await markRunFailed(deps, run, run.currentStepId ?? '<unknown>', err)
+    await markRunFailed(deps, run, run.currentStepId ?? '<unknown>', err, 'failed', undefined, workflow)
     return failOutcome(runId, run.currentStepId ?? '<unknown>', err, 0)
   }
 
@@ -695,13 +721,41 @@ export async function advanceWorkflowRun(
   const primaryAssistantId = await deps.resolvePrimary(run.workspaceId)
   if (!primaryAssistantId) {
     const err: ExecutorError = { message: 'Workspace has no primary assistant.', reason: 'no_primary_assistant' }
-    await markRunFailed(deps, run, '<unknown>', err)
+    await markRunFailed(deps, run, '<unknown>', err, 'failed', undefined, workflow)
     return failOutcome(runId, '<unknown>', err, 0)
   }
   // Ordinary deterministic tool steps run on the workspace primary. A
   // client-bound workflow's one reviewed reply instead uses the assistant
   // whose API-key boundary and mailbox grants authored the draft.
   const toolAssistantId = workflow.definition.principal?.assistantId ?? primaryAssistantId
+  let runtimeScope: Awaited<ReturnType<NonNullable<ExecutorDeps['resolveRunScope']>>> | undefined
+  if (deps.resolveRunScope) {
+    try {
+      runtimeScope = await deps.resolveRunScope({
+        userId: run.triggeredBy ?? workflow.createdBy,
+        assistantId: toolAssistantId,
+        workspaceId: run.workspaceId,
+        run,
+      })
+    } catch (err) {
+      const error: ExecutorError = {
+        message: err instanceof Error ? err.message : String(err),
+        reason: 'context_not_available',
+      }
+      await markRunFailed(deps, run, '<context>', error, 'failed', undefined, workflow)
+      return failOutcome(runId, '<context>', error, 0)
+    }
+  }
+  const scopeAccumulator = new ContextScopeAccumulator(runtimeScope
+    ? {
+        compartments: runtimeScope.turnScope.writeCompartments,
+        projectIds: runtimeScope.turnScope.writeProjectIds,
+      }
+    : undefined)
+  const persistedScopeEvidence = run.vars[WORKFLOW_SCOPE_EVIDENCE_VAR]
+  if (persistedScopeEvidence && typeof persistedScopeEvidence === 'object') {
+    scopeAccumulator.note(persistedScopeEvidence as import('../security/context-scope.js').ScopeEvidence)
+  }
 
   let toolRegistry: Map<string, Tool>
   try {
@@ -712,13 +766,14 @@ export async function advanceWorkflowRun(
       // back to the workflow's creator so RLS-touching tool resolvers have
       // a real user (matches the pattern used by deliver/consult below).
       userId: run.triggeredBy ?? workflow.createdBy,
+      turnScope: runtimeScope?.turnScope,
     })
   } catch (err) {
     const error: ExecutorError = {
       message: `Failed to build tool registry: ${err instanceof Error ? err.message : String(err)}`,
       reason: 'tool_registry_failed',
     }
-    await markRunFailed(deps, run, '<unknown>', error)
+    await markRunFailed(deps, run, '<unknown>', error, 'failed', undefined, workflow)
     return failOutcome(runId, '<unknown>', error, 0)
   }
 
@@ -809,12 +864,16 @@ export async function advanceWorkflowRun(
   }
 
   const frontierVars = (): Record<string, unknown> => {
+    const persisted: Record<string, unknown> = {
+      ...vars,
+      [WORKFLOW_SCOPE_EVIDENCE_VAR]: scopeAccumulator.evidence,
+    }
     const frontier = [...pending, ...inFlight.keys(), ...parked]
     if (frontier.length === 0) {
-      const { [FRONTIER_VAR]: _dropped, ...rest } = vars
+      const { [FRONTIER_VAR]: _dropped, ...rest } = persisted
       return rest
     }
-    return { ...vars, [FRONTIER_VAR]: frontier }
+    return { ...persisted, [FRONTIER_VAR]: frontier }
   }
 
   /**
@@ -824,7 +883,12 @@ export async function advanceWorkflowRun(
    * settlement handler below, on one settlement at a time. Never throws.
    */
   const executeStep = async (step: WorkflowStep): Promise<SettledStep> => {
-    const interp: InterpolationScope = { vars, input, lastRun }
+    const {
+      [FRONTIER_VAR]: _frontier,
+      [WORKFLOW_SCOPE_EVIDENCE_VAR]: _scopeEvidence,
+      ...interpolatableVars
+    } = vars
+    const interp: InterpolationScope = { vars: interpolatableVars, input, lastRun }
 
     // Pre-flight: wait step in Phase A fails before dispatch. The step-run
     // row is still recorded so getWorkflowRun shows what blew up.
@@ -865,6 +929,8 @@ export async function advanceWorkflowRun(
         toolRegistry,
         consultTransport: deps.consultTransport,
         externalClientPrincipal,
+        runtimeScope,
+        scopeAccumulator,
         scope: interp,
         deps,
       })
@@ -1074,6 +1140,7 @@ export async function advanceWorkflowRun(
       displayLines: result.displayLines,
       deliveryChannel: result.deliveryChannel,
       expiresAt: result.expiresAt,
+      decisionApplicationId: result.decisionApplicationId,
     })
     await deps.runStore.updateRun(runId, {
       status: 'awaiting_input',
@@ -1142,6 +1209,7 @@ export async function advanceWorkflowRun(
       firstFailure.error,
       status,
       composeRunOutcome(vars, runLog, status, new Date(now()), lastOutput, firstFailure.error),
+      workflow,
     )
     await maybeDisableForDeadAnchor(deps, run, workflow, primaryAssistantId, firstFailure.error)
     return failOutcome(
@@ -1212,6 +1280,7 @@ type StepDispatchResult =
       displayLines?: string[]
       deliveryChannel: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams' | 'feishu'
       expiresAt: Date | null
+      decisionApplicationId?: string
     }
 
 type DispatchContext = {
@@ -1223,6 +1292,8 @@ type DispatchContext = {
   toolRegistry: Map<string, Tool>
   consultTransport: ConsultTransport
   externalClientPrincipal?: ResolvedExternalClientWorkflowPrincipal
+  runtimeScope?: { turnScope: TurnScope; assistantClearance: Sensitivity }
+  scopeAccumulator: ContextScopeAccumulator
   scope: InterpolationScope
   /** Phase C — when present, ask-policy tool_calls pause instead of failing. */
   deps: ExecutorDeps
@@ -1502,6 +1573,29 @@ async function dispatchAssistantCall(
     }
   }
 
+  const orderedStepIds = ctx.workflow.definition.steps.map((candidate) => candidate.id)
+  const directSuccessors = stepSuccessors(step, orderedStepIds)
+  const directToolSteps = directSuccessors
+    .map((id) => ctx.workflow.definition.steps.find((candidate) => candidate.id === id))
+    .filter((candidate): candidate is ToolCallStep => candidate?.type === 'tool_call')
+  // Applicability can only be frozen without guessing when exactly one tool
+  // consumes this model step. Fan-out still receives the application id for
+  // exact outcome linkage, but renders only general rules.
+  const directToolStep = directSuccessors.length === 1 && directToolSteps.length === 1
+    ? directToolSteps[0]
+    : null
+  const canonicalDirectToolName = directToolStep?.toolName.split('__', 1)[0] ?? null
+  let reviewedEmailAccountKey: string | null = null
+  if (directToolStep && canonicalDirectToolName === 'imapSendMessage') {
+    const frozenArgs = interpolateValue(directToolStep.arguments, ctx.scope)
+    if (frozenArgs && typeof frozenArgs === 'object' && !Array.isArray(frozenArgs)) {
+      const value = (frozenArgs as Record<string, unknown>).account
+      if (typeof value === 'string' && value.trim() && !value.includes('{{')) {
+        reviewedEmailAccountKey = value.trim().slice(0, 256)
+      }
+    }
+  }
+
   const request: ConsultRequest = {
     target: {
       workspaceId: ctx.run.workspaceId,
@@ -1520,6 +1614,12 @@ async function dispatchAssistantCall(
       step.session === 'persistent'
         ? `workflow:${ctx.workflow.id}:${step.id}`
         : undefined,
+    contextScope: ctx.runtimeScope
+      ? {
+          groupId: ctx.runtimeScope.turnScope.activeGroupId,
+          projectId: ctx.runtimeScope.turnScope.activeProjectId,
+        }
+      : undefined,
     // Per-step tool restriction: a `tools` allow-list rides through to the
     // callee executor, which filters the callee's tool surface to exactly
     // this set. Undefined = the callee's normal tool surface.
@@ -1569,6 +1669,20 @@ async function dispatchAssistantCall(
     // consult stamp source_id=<runId>, which is what the next run's
     // `{{lastRun.output.<key>}}` reads.
     workflowRunId: ctx.run.id,
+    decisionContext: {
+      operationId: `${ctx.run.id}:${step.id}`,
+      externalPrincipal: ctx.externalClientPrincipal !== undefined,
+      ...(directToolStep && canonicalDirectToolName
+        ? {
+            applicability: {
+              kind: canonicalDirectToolName === 'imapSendMessage' ? 'email' as const : 'tool' as const,
+              key: canonicalDirectToolName === 'imapSendMessage'
+                ? reviewedEmailAccountKey
+                : canonicalDirectToolName.slice(0, 256),
+            },
+          }
+        : {}),
+    },
     caller: {
       workspaceId: ctx.run.workspaceId,
       assistantId: ctx.primaryAssistantId,
@@ -1586,10 +1700,29 @@ async function dispatchAssistantCall(
   }
 
   const response = await ctx.consultTransport.send(request)
+  ctx.scopeAccumulator.note(response.scopeEvidence)
   const task = response.task
 
   switch (task.status.state) {
     case 'completed': {
+      const decisionApplicationId = task.artifacts
+        .filter((artifact) => artifact.name === 'decision-playbook-application')
+        .flatMap((artifact) => artifact.parts)
+        .find((part) => part.kind === 'data' && typeof part.data.applicationId === 'string')
+      const applicationId = decisionApplicationId?.kind === 'data'
+        && typeof decisionApplicationId.data.applicationId === 'string'
+        && UUID_RE.test(decisionApplicationId.data.applicationId)
+        ? decisionApplicationId.data.applicationId
+        : null
+      if (applicationId) {
+        varsPatch = {
+          ...varsPatch,
+          ...Object.fromEntries(directSuccessors.map((id) => [
+            `__decisionApplication_${id}`,
+            applicationId,
+          ])),
+        }
+      }
       const lastAgent = (task.history ?? [])
         .slice()
         .reverse()
@@ -1742,6 +1875,21 @@ async function dispatchToolCall(
   }
 
   const interpolatedArgs = interpolateValue(step.arguments, ctx.scope)
+  const runtimeToolScope = ctx.runtimeScope
+    ? {
+        clearance: ctx.runtimeScope.turnScope.access.clearance,
+        compartments: ctx.runtimeScope.turnScope.effectiveCompartments,
+        projectIds: ctx.runtimeScope.turnScope.effectiveProjectIds,
+        activeGroupId: ctx.runtimeScope.turnScope.activeGroupId,
+        activeProjectId: ctx.runtimeScope.turnScope.activeProjectId,
+        assistantClearance: ctx.runtimeScope.assistantClearance,
+        assistantCompartments: ctx.runtimeScope.turnScope.effectiveCompartments,
+        assistantDefaultCompartments: ctx.runtimeScope.turnScope.writeCompartments,
+        assistantProjectIds: ctx.runtimeScope.turnScope.effectiveProjectIds,
+        assistantDefaultProjectIds: ctx.runtimeScope.turnScope.writeProjectIds,
+        scopeAccumulator: ctx.scopeAccumulator,
+      }
+    : { scopeAccumulator: ctx.scopeAccumulator }
 
   // Policy gate. MCP-discovered tools have `resolveConfirmation` set to a
   // closure that reads the user's effective allow/ask policy from
@@ -1763,6 +1911,7 @@ async function dispatchToolCall(
         channelType: 'workflow',
         channelId: ctx.run.id,
         workspaceId: ctx.run.workspaceId,
+        ...runtimeToolScope,
         abortSignal: new AbortController().signal,
       } satisfies ToolContext, interpolatedArgs)
       needsConfirmation = forceConfirmation || resolvedConfirmation
@@ -1784,6 +1933,7 @@ async function dispatchToolCall(
           channelId: ctx.run.id,
           workspaceId: ctx.run.workspaceId,
           assistantKind: ctx.externalClientPrincipal ? 'standard' : 'primary',
+          ...runtimeToolScope,
           abortSignal: new AbortController().signal,
         })
         if (lines?.length) displayLines = lines
@@ -1825,6 +1975,7 @@ async function dispatchToolCall(
     channelId: ctx.run.id,
     workspaceId: ctx.run.workspaceId,
     assistantKind: ctx.externalClientPrincipal ? 'standard' : 'primary',
+    ...runtimeToolScope,
     abortSignal: abortController.signal,
   }
 
@@ -1851,6 +2002,7 @@ async function dispatchToolCall(
       },
     }
   }
+  ctx.scopeAccumulator.note(result.scopeEvidence)
 
   return { kind: 'success', output: result.data }
 }
@@ -1876,6 +2028,11 @@ function askPolicyOutcome(
     const expiresAt = step.approval?.expiresAfterHours
       ? new Date(Date.now() + step.approval.expiresAfterHours * 60 * 60 * 1000)
       : null
+    const linkedApplication = ctx.scope.vars[`__decisionApplication_${step.id}`]
+    const decisionApplicationId = typeof linkedApplication === 'string'
+      && UUID_RE.test(linkedApplication)
+      ? linkedApplication
+      : undefined
     return {
       kind: 'paused_approval',
       approverUserId,
@@ -1885,6 +2042,7 @@ function askPolicyOutcome(
       displayLines,
       deliveryChannel,
       expiresAt,
+      decisionApplicationId,
     }
   }
   // Phase A guard.
@@ -2414,6 +2572,10 @@ async function markRunFailed(
   // the accumulated vars + step log in scope; omitted by pre-loop infra
   // failures (no workflow logic ran, so there is nothing to hand forward).
   outcome?: WorkflowRunOutcome | null,
+  // Definitions loaded before the failure boundary can declare one durable
+  // failure destination. A missing workflow (the workflow_not_found case)
+  // cannot be notified because there is no trusted destination to resolve.
+  workflow?: WorkflowRecord,
 ): Promise<void> {
   const now = new Date()
   await deps.runStore.updateRun(run.id, {
@@ -2433,6 +2595,186 @@ async function markRunFailed(
     stepId,
     error,
   })
+  if (workflow) {
+    await attemptFailureDelivery(deps, run, workflow, stepId, error, status, outcome)
+  }
+}
+
+function normalizedFailureReason(error: ExecutorError): string {
+  const candidate = typeof error.reason === 'string' ? error.reason : 'workflow_error'
+  const normalized = candidate
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 80)
+  return normalized || 'workflow_error'
+}
+
+function failureStateLines(outcome: WorkflowRunOutcome | null | undefined): string[] {
+  const state = outcome?.state
+  const coverage = state?.coverage
+  let coverageLine = 'Coverage: unavailable'
+  if (coverage && typeof coverage === 'object' && !Array.isArray(coverage)) {
+    const record = coverage as Record<string, unknown>
+    const expected = typeof record.expected === 'number' ? record.expected : null
+    const valid = typeof record.valid === 'number' ? record.valid : null
+    const ratio = typeof record.ratio === 'number' ? record.ratio : null
+    if (expected !== null && valid !== null && expected >= 0 && valid >= 0) {
+      const ratioText = ratio !== null && Number.isFinite(ratio)
+        ? ` (${Math.round(Math.max(0, Math.min(1, ratio)) * 100)}%)`
+        : ''
+      coverageLine = `Coverage: ${valid}/${expected}${ratioText}`
+    }
+  }
+  const scorecard = state?.scorecardWritten
+  const scorecardLine = `Scorecard written: ${scorecard === true ? 'yes' : scorecard === false ? 'no' : 'unknown'}`
+  return [coverageLine, scorecardLine]
+}
+
+function failureReplyTarget(
+  run: WorkflowRunRecord,
+  workflow: WorkflowRecord,
+): {
+  channelId: string
+  channelIntegrationId: string
+  actorId: string
+  recipientType: 'individual' | 'group'
+  providerAccountId: string
+  occurredAt: string
+} | null {
+  const trigger = run.input.trigger as {
+    sourceType?: unknown
+    provider?: unknown
+    channelIntegrationId?: unknown
+    channelId?: unknown
+    actorId?: unknown
+    isGroupChat?: unknown
+    providerAccountId?: unknown
+    occurredAt?: unknown
+  } | undefined
+  const event = run.input.event as { from?: unknown; group_id?: unknown } | undefined
+  const integrationId = typeof trigger?.channelIntegrationId === 'string'
+    ? trigger.channelIntegrationId
+    : null
+  const sourceStillConfigured = workflow.trigger.kind === 'event'
+    && integrationId !== null
+    && workflow.trigger.event.sources.some((subscription) =>
+      subscription.source.type === 'channel'
+      && subscription.source.channel === 'whatsapp'
+      && subscription.source.channelIntegrationId === integrationId,
+    )
+  if (
+    run.triggerKind !== 'event'
+    || trigger?.sourceType !== 'channel'
+    || trigger.provider !== 'whatsapp'
+    || integrationId === null
+    || !sourceStillConfigured
+    || typeof trigger.channelId !== 'string'
+    || typeof trigger.actorId !== 'string'
+    || (trigger.isGroupChat === true
+      ? trigger.channelId === trigger.actorId
+        || event?.group_id !== trigger.channelId
+        || event.from !== trigger.actorId
+      : trigger.channelId !== trigger.actorId
+        || (event?.group_id !== undefined && event.group_id !== null)
+        || (event?.from !== undefined && event.from !== trigger.actorId))
+    || typeof trigger.providerAccountId !== 'string'
+    || typeof trigger.occurredAt !== 'string'
+  ) return null
+  return {
+    channelId: trigger.channelId,
+    channelIntegrationId: integrationId,
+    actorId: trigger.actorId,
+    recipientType: trigger.isGroupChat === true ? 'group' : 'individual',
+    providerAccountId: trigger.providerAccountId,
+    occurredAt: trigger.occurredAt,
+  }
+}
+
+/**
+ * One deterministic, sanitized, best-effort notification owned by the
+ * terminal failure boundary. The run is already terminal before this starts,
+ * so delivery can never turn the original failure into a different status.
+ */
+async function attemptFailureDelivery(
+  deps: ExecutorDeps,
+  run: WorkflowRunRecord,
+  workflow: WorkflowRecord,
+  stepId: string,
+  error: ExecutorError,
+  status: 'failed' | 'timeout',
+  outcome?: WorkflowRunOutcome | null,
+): Promise<void> {
+  const target: WorkflowDelivery | undefined = workflow.definition.failureDelivery
+  if (!target || !deps.deliverToChannel) return
+
+  try {
+    const assistantId = await deps.resolvePrimary(run.workspaceId)
+    if (!assistantId) return
+
+    const text = sanitizeDeliveryText([
+      `Workflow "${workflow.name}" ${status}.`,
+      `Failed step: ${stepId}`,
+      `Error: ${normalizedFailureReason(error)}`,
+      ...failureStateLines(outcome),
+      `Run: ${run.id}`,
+    ].join('\n'))
+
+    let delivery: DeliveryOutcome
+    if ('replyToTrigger' in target) {
+      const reply = failureReplyTarget(run, workflow)
+      if (!reply) return
+      delivery = await deps.deliverToChannel({
+        workspaceId: run.workspaceId,
+        assistantId,
+        userId: run.triggeredBy ?? workflow.createdBy,
+        channelType: 'whatsapp',
+        channelId: reply.channelId,
+        channelIntegrationId: reply.channelIntegrationId,
+        text,
+        replyToTrigger: reply,
+      })
+    } else {
+      const parent = target.thread
+        ? run.vars[`__deliveryMsg_${target.thread.fromStep}`]
+        : undefined
+      delivery = await deps.deliverToChannel({
+        workspaceId: run.workspaceId,
+        assistantId,
+        userId: run.triggeredBy ?? workflow.createdBy,
+        channelType: target.channelType,
+        channelId: target.channelId,
+        channelIntegrationId: target.channelIntegrationId,
+        text,
+        threadRef: typeof parent === 'string' ? parent : undefined,
+      })
+    }
+    fireAndForgetAudit(deps, {
+      type: 'workflow.failure_delivered',
+      workspaceId: run.workspaceId,
+      actorUserId: run.triggeredBy,
+      runId: run.id,
+      workflowId: workflow.id,
+      stepId,
+      delivery,
+    })
+  } catch (deliveryError) {
+    fireAndForgetAudit(deps, {
+      type: 'workflow.failure_delivered',
+      workspaceId: run.workspaceId,
+      actorUserId: run.triggeredBy,
+      runId: run.id,
+      workflowId: workflow.id,
+      stepId,
+      delivery: {
+        status: 'failed',
+        channelType: target.channelType,
+        error: 'failure_notification_delivery_failed',
+      },
+    })
+    console.warn('[workflow] failure notification failed:', deliveryError)
+  }
 }
 
 function failOutcome(

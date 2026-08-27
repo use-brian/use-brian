@@ -44,7 +44,8 @@ import {
   type TaskRow,
   type TaskStatus,
 } from "@/lib/api/tasks";
-import { localIsoDay, taskProject, tagsWithProject } from "@/lib/tasks-view";
+import { localIsoDay, taskProject } from "@/lib/tasks-view";
+import type { ContextProject } from "@/lib/api/context-scopes";
 import {
   memberDisplayName,
   resolveAssignee,
@@ -73,18 +74,23 @@ export function TaskRecordDetail({
   roster,
   projects,
   commitField,
+  commitProject,
   onDelete,
   onClose,
 }: {
   workspaceId: string;
   row: TaskRow;
   roster: AssignableMember[] | null;
-  projects: string[];
+  projects: ContextProject[];
   /** The surface's adjust wire (supersession-aware local patch included). */
   commitField: (
     row: TaskRow,
     changes: AdjustMemoryChanges,
     patch: Partial<TaskRow>,
+  ) => Promise<{ ok: boolean; error?: string }>;
+  commitProject: (
+    row: TaskRow,
+    projectId: string | null,
   ) => Promise<{ ok: boolean; error?: string }>;
   /** `reason` is "" when the user deleted without teaching a rule. */
   onDelete: (reason: string) => Promise<{ ok: boolean; error?: string }>;
@@ -123,7 +129,7 @@ export function TaskRecordDetail({
 
   const projectOptions: SelectPropertyOption[] = [
     { value: "__none__", label: tp.noProject },
-    ...projects.map((p) => ({ value: p, label: p })),
+    ...projects.map((project) => ({ value: project.id, label: project.name })),
   ];
 
   const assigneeMember =
@@ -370,13 +376,7 @@ export function TaskRecordDetail({
             label={tp.filterProject}
             value={project ?? "__none__"}
             options={projectOptions}
-            onCommit={(next) => {
-              const tags = tagsWithProject(
-                row.tags,
-                next === "__none__" ? null : next,
-              );
-              return commitField(row, { tags }, { tags });
-            }}
+            onCommit={(next) => commitProject(row, next === "__none__" ? null : next)}
           />
           <StaticProperty
             icon={<Clock3 />}

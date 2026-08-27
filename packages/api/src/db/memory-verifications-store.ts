@@ -21,7 +21,16 @@
  * [COMP:brain/memory-verifications-store]
  */
 
-import { query } from './client.js'
+import type pg from 'pg'
+
+import { getPool, query } from './client.js'
+import { appendDecisionEvent } from './decision-event-store.js'
+import {
+  markVerifiedDirect,
+  updateMemory,
+  type Memory,
+  type MemoryUpdateFields,
+} from './memories.js'
 
 export type MemoryVerificationAction =
   | 'confirm'
@@ -64,6 +73,99 @@ export type RecordVerificationParams = {
   reason?: string
 }
 
+export type VerifyMemoryDecisionResult =
+  | { status: 'verified'; stamped: true }
+  | { status: 'already_verified'; stamped: false }
+  | { status: 'not_found'; stamped: false }
+
+/** Atomic confirm path used by the per-assistant review route. */
+export async function verifyMemoryDecision(params: {
+  memoryId: string
+  workspaceId: string
+  verifiedBy: string
+}): Promise<VerifyMemoryDecisionResult> {
+  const client = await getPool().connect()
+  try {
+    await client.query('BEGIN')
+    const selected = await client.query<{ verifiedByUserId: string | null }>(
+      `SELECT verified_by_user_id AS "verifiedByUserId"
+         FROM memories
+        WHERE id = $1 AND workspace_id = $2 AND valid_to IS NULL
+        FOR UPDATE`,
+      [params.memoryId, params.workspaceId],
+    )
+    if (!selected.rows[0]) {
+      await client.query('COMMIT')
+      return { status: 'not_found', stamped: false }
+    }
+    if (selected.rows[0].verifiedByUserId) {
+      await client.query('COMMIT')
+      return { status: 'already_verified', stamped: false }
+    }
+    await client.query(
+      `UPDATE memories
+          SET verified_by_user_id = $2,
+              verified_at = now(),
+              updated_at = now()
+        WHERE id = $1 AND valid_to IS NULL`,
+      [params.memoryId, params.verifiedBy],
+    )
+    await recordVerification({
+      memoryId: params.memoryId,
+      workspaceId: params.workspaceId,
+      verifiedBy: params.verifiedBy,
+      action: 'confirm',
+    }, client)
+    await client.query('COMMIT')
+    return { status: 'verified', stamped: true }
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw err
+  } finally {
+    client.release()
+  }
+}
+
+/**
+ * Supersede a memory, append every field-level verification/event, and stamp
+ * the new live version in one transaction. Callers compute bounded before /
+ * after values; this writer owns the durable state transition.
+ */
+export async function adjustMemoryDecision(params: {
+  memoryId: string
+  workspaceId: string
+  verifiedBy: string
+  updates: MemoryUpdateFields
+  verifications: Array<Omit<RecordVerificationParams, 'memoryId' | 'workspaceId' | 'verifiedBy'>>
+}): Promise<Memory | null> {
+  const client = await getPool().connect()
+  try {
+    await client.query('BEGIN')
+    const updated = await updateMemory(params.memoryId, params.updates, undefined, client)
+    if (!updated) {
+      await client.query('COMMIT')
+      return null
+    }
+    for (const verification of params.verifications) {
+      await recordVerification({
+        ...verification,
+        memoryId: params.memoryId,
+        workspaceId: params.workspaceId,
+        verifiedBy: params.verifiedBy,
+      }, client)
+    }
+    const stamped = await markVerifiedDirect(updated.id, params.verifiedBy, client)
+    if (!stamped) throw new Error('Superseded memory disappeared before verification stamp')
+    await client.query('COMMIT')
+    return stamped
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw err
+  } finally {
+    client.release()
+  }
+}
+
 /**
  * Append a verification event. One row per logical field change —
  * a single user "adjust" call that changes both scope and sensitivity
@@ -77,25 +179,85 @@ export type RecordVerificationParams = {
  */
 export async function recordVerification(
   params: RecordVerificationParams,
+  transactionClient?: pg.PoolClient,
 ): Promise<MemoryVerification> {
-  const result = await query<MemoryVerification>(
-    `INSERT INTO memory_verifications (
-       memory_id, workspace_id, verified_by, action,
-       model_value, user_value, reason
-     )
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
-     RETURNING ${VERIFICATION_SELECT}`,
-    [
-      params.memoryId,
-      params.workspaceId,
-      params.verifiedBy,
-      params.action,
-      params.modelValue === undefined ? null : JSON.stringify(params.modelValue),
-      params.userValue === undefined ? null : JSON.stringify(params.userValue),
-      params.reason ?? null,
-    ],
-  )
-  return result.rows[0]
+  const ownedClient = transactionClient ? null : await getPool().connect()
+  const client = transactionClient ?? ownedClient!
+  try {
+    if (ownedClient) await client.query('BEGIN')
+    const source = await client.query<{
+      assistantId: string | null
+      sourceSessionId: string | null
+      scope: string
+      sensitivity: 'public' | 'internal' | 'confidential' | 'restricted'
+    }>(
+      `SELECT assistant_id AS "assistantId",
+              source_session_id AS "sourceSessionId",
+              scope,
+              sensitivity
+         FROM memories
+        WHERE id = $1 AND workspace_id = $2`,
+      [params.memoryId, params.workspaceId],
+    )
+    if (!source.rows[0]) throw new Error(`Memory ${params.memoryId} not found for verification`)
+
+    const result = await client.query<MemoryVerification>(
+      `INSERT INTO memory_verifications (
+         memory_id, workspace_id, verified_by, action,
+         model_value, user_value, reason
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING ${VERIFICATION_SELECT}`,
+      [
+        params.memoryId,
+        params.workspaceId,
+        params.verifiedBy,
+        params.action,
+        params.modelValue === undefined ? null : JSON.stringify(params.modelValue),
+        params.userValue === undefined ? null : JSON.stringify(params.userValue),
+        params.reason ?? null,
+      ],
+    )
+    const verification = result.rows[0]
+    await appendDecisionEvent({
+      idempotencyKey: `memory-verification:${verification.id}`,
+      workspaceId: params.workspaceId,
+      actorUserId: params.verifiedBy,
+      assistantId: source.rows[0].assistantId,
+      sessionId: source.rows[0].sourceSessionId,
+      eventKind: 'brain.verification_recorded',
+      schemaVersion: 1,
+      sourceKind: 'memory_verification',
+      sourceId: verification.id,
+      declaredScope: 'instance',
+      visibility: source.rows[0].scope === 'workspace' ? 'workspace' : 'owner',
+      sensitivity: source.rows[0].sensitivity,
+      reason: params.reason,
+      payload: {
+        primitive: 'memory',
+        targetId: params.memoryId,
+        action: params.action,
+        changedFields: verificationChangedFields(params.action),
+      },
+    }, client)
+    if (ownedClient) await client.query('COMMIT')
+    return verification
+  } catch (err) {
+    if (ownedClient) await client.query('ROLLBACK').catch(() => {})
+    throw err
+  } finally {
+    ownedClient?.release()
+  }
+}
+
+function verificationChangedFields(action: MemoryVerificationAction): string[] {
+  switch (action) {
+    case 'adjust_scope': return ['scope']
+    case 'adjust_sensitivity': return ['sensitivity']
+    case 'edit_summary': return ['summary']
+    case 'delete': return ['valid_to']
+    case 'confirm': return []
+  }
 }
 
 /**

@@ -47,6 +47,8 @@ function instance(over: Partial<ConnectorInstance> = {}): ConnectorInstance {
     healthStatus: 'ok',
     lastError: null,
     lastCheckedAt: null,
+    compartments: [],
+    projectIds: [],
     createdBy: 'u1',
     createdAt: new Date(0),
     updatedAt: new Date(0),

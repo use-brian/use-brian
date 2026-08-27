@@ -12,7 +12,8 @@
 
 import { Router } from 'express'
 import type { Response } from 'express'
-import type { AccessContext, DealStage, EntityLinksStore } from '@use-brian/core'
+import { z } from 'zod'
+import type { AccessContext, CrmEmailDraftStore, DealStage, EntityLinksStore } from '@use-brian/core'
 import { EntityMergeError, UndoMergeError, mergeEntities, undoMerge } from '@use-brian/core'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 import { resolveWorkspaceViewpoint } from '../db/workspace-viewpoint.js'
@@ -26,6 +27,11 @@ import {
 } from '../db/crm.js'
 import { getEntityById, updateEntity } from '../db/entities-store.js'
 import { createEntityMergeStore } from '../db/entity-merge-store.js'
+import {
+  keepCrmEntitiesSeparate,
+  listActiveCrmEntitySeparations,
+  retireCrmEntitySeparation,
+} from '../db/crm-identity-store.js'
 import {
   CRM_FIELD_TYPES,
   CRM_PRESET_IDS,
@@ -77,6 +83,7 @@ import { notifyBrainInboxChange } from '../brain-stream/notify.js'
 type RouteOptions = {
   workspaceStore: WorkspaceStore
   entityLinks?: EntityLinksStore
+  emailDraftStore?: CrmEmailDraftStore
 }
 
 const CRM_KINDS = new Set<CrmEntityKind>(['person', 'company', 'deal'])
@@ -87,6 +94,14 @@ const LEGACY_STAGES = new Set<DealStage>([
 const CRM_PAGE_SORTS = new Set(['updated', 'name', 'amount', 'close'])
 const CRM_DIRECTIONS = new Set(['asc', 'desc'])
 const CRM_ATTENTION = new Set(['overdue', 'stale', 'noAmount', 'orphaned'])
+const separationCreateSchema = z.object({
+  leftEntityId: z.string().uuid(),
+  rightEntityId: z.string().uuid(),
+  reason: z.string().trim().max(1000).optional(),
+}).strict()
+const separationRetireSchema = z.object({
+  reason: z.string().trim().max(1000).optional(),
+}).strict()
 
 function text(value: unknown, max = 200): string | null {
   return typeof value === 'string' && value.trim().length > 0
@@ -226,7 +241,7 @@ function sameValue(left: unknown, right: unknown): boolean {
   return JSON.stringify(left ?? null) === JSON.stringify(right ?? null)
 }
 
-export function crmRoutes({ workspaceStore, entityLinks }: RouteOptions): Router {
+export function crmRoutes({ workspaceStore, entityLinks, emailDraftStore }: RouteOptions): Router {
   const router = Router()
   const mergeRepo = createEntityMergeStore()
 
@@ -381,6 +396,46 @@ export function crmRoutes({ workspaceStore, entityLinks }: RouteOptions): Router
       participants: participants ?? [],
     }
   }
+
+  router.get('/:workspaceId/email-drafts', async (req, res) => {
+    const member = await memberContext(req as never, res)
+    if (!member) return
+    if (!emailDraftStore) {
+      res.status(503).json({ error: 'Canonical email drafts are unavailable' })
+      return
+    }
+    try {
+      const requestedLimit = Number(queryText(req.query.limit, 4) ?? '100')
+      if (!Number.isInteger(requestedLimit) || requestedLimit < 1) {
+        res.status(400).json({ error: 'limit must be a positive integer' })
+        return
+      }
+      const drafts = await emailDraftStore.list({
+        userId: member.ctx.userId,
+        workspaceId: member.ctx.workspaceId,
+        limit: Math.min(requestedLimit, 100),
+      })
+      res.json({
+        drafts: drafts.map((draft) => ({
+          id: draft.id,
+          status: draft.status,
+          revision: draft.revision,
+          from: draft.from,
+          to: draft.to,
+          cc: draft.cc,
+          bcc: draft.bcc,
+          subject: draft.subject,
+          body: draft.body,
+          sourceSessionId: draft.sourceSessionId,
+          createdAt: draft.createdAt.toISOString(),
+          updatedAt: draft.updatedAt.toISOString(),
+        })),
+      })
+    } catch (err) {
+      console.error('[crm] email drafts list failed:', err)
+      res.status(500).json({ error: 'Failed to load email drafts' })
+    }
+  })
 
   router.get('/:workspaceId/records', async (req, res) => {
     const member = await memberContext(req as never, res)
@@ -1248,8 +1303,89 @@ export function crmRoutes({ workspaceStore, entityLinks }: RouteOptions): Router
   router.get('/:workspaceId/duplicates', async (req, res) => {
     const member = await memberContext(req as never, res)
     if (!member) return
-    const rows = await listCrmR2Records(member.ctx)
-    res.json({ groups: findCrmDuplicateGroups(rows) })
+    try {
+      const [rows, separations] = await Promise.all([
+        listCrmR2Records(member.ctx),
+        listActiveCrmEntitySeparations(member.ctx.workspaceId),
+      ])
+      const bounded = (['person', 'company', 'deal'] as const)
+        .flatMap((kind) => rows.filter((row) => row.kind === kind).slice(0, 200))
+      const separatedPairs = new Set(separations.map((separation) =>
+        separation.leftEntityId < separation.rightEntityId
+          ? `${separation.leftEntityId}:${separation.rightEntityId}`
+          : `${separation.rightEntityId}:${separation.leftEntityId}`,
+      ))
+      res.json({
+        groups: findCrmDuplicateGroups(bounded, {
+          separatedPairs,
+          maxGroups: 200,
+          maxGroupSize: 50,
+        }),
+      })
+    } catch (err) {
+      console.error('[crm] duplicate review unavailable:', err instanceof Error ? err.message : String(err))
+      res.status(503).json({ error: 'Duplicate review is temporarily unavailable' })
+    }
+  })
+
+  router.get('/:workspaceId/separations', async (req, res) => {
+    const member = await memberContext(req as never, res)
+    if (!member) return
+    try {
+      res.json({ separations: await listActiveCrmEntitySeparations(member.ctx.workspaceId) })
+    } catch (err) {
+      console.error('[crm] separation list unavailable:', err instanceof Error ? err.message : String(err))
+      res.status(503).json({ error: 'Kept-separate records are temporarily unavailable' })
+    }
+  })
+
+  router.post('/:workspaceId/separations', async (req, res) => {
+    const member = await memberContext(req as never, res)
+    if (!member) return
+    const parsed = separationCreateSchema.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid separation' })
+      return
+    }
+    try {
+      const result = await keepCrmEntitiesSeparate({
+        workspaceId: member.ctx.workspaceId,
+        leftEntityId: parsed.data.leftEntityId,
+        rightEntityId: parsed.data.rightEntityId,
+        actorUserId: member.ctx.userId,
+        assistantId: member.ctx.assistantId || null,
+        reason: parsed.data.reason ?? null,
+      })
+      res.status(result.inserted ? 201 : 200).json({
+        separation: result.separation,
+        idempotent: !result.inserted,
+      })
+    } catch (err) {
+      const status = err instanceof EntityMergeError ? 409 : 500
+      res.status(status).json({ error: err instanceof Error ? err.message : String(err) })
+    }
+  })
+
+  router.post('/:workspaceId/separations/:separationId/review-again', async (req, res) => {
+    const member = await memberContext(req as never, res)
+    if (!member) return
+    const parsed = separationRetireSchema.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid request' })
+      return
+    }
+    const separation = await retireCrmEntitySeparation({
+      workspaceId: member.ctx.workspaceId,
+      separationId: req.params.separationId,
+      actorUserId: member.ctx.userId,
+      assistantId: member.ctx.assistantId || null,
+      reason: parsed.data.reason ?? 'Review requested again',
+    })
+    if (!separation) {
+      res.status(409).json({ error: 'This separation is stale or already under review' })
+      return
+    }
+    res.json({ ok: true })
   })
 
   router.post('/:workspaceId/merge', async (req, res) => {

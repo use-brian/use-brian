@@ -28,6 +28,7 @@ import {
   formatClosesSummary,
   formatLinksSummary,
 } from '../entities/explicit-links.js'
+import { resolveWriteScope } from '../security/context-scope.js'
 
 const PROFILE_SCHEMA = z.object({
   // The model passes typed top-level fields. Anything not listed here
@@ -148,6 +149,13 @@ export function createSelfProfileTool(entityStore: EntityStore, entityLinks?: En
       }
 
       try {
+        const writeScope = resolveWriteScope({
+          baseCompartments: context.assistantDefaultCompartments,
+          baseProjectIds: context.assistantDefaultProjectIds,
+          evidence: context.scopeAccumulator,
+          compartmentGrant: context.compartments,
+          projectGrant: context.projectIds,
+        })
         // When the call is links-only, attribute payload is empty —
         // ensure the self entity exists before writing edges so we
         // have a stable entityId to anchor.
@@ -173,6 +181,8 @@ export function createSelfProfileTool(entityStore: EntityStore, entityLinks?: En
           sourceId: entity.id,
           source: 'user',
           links,
+          compartments: writeScope.compartments,
+          projectIds: writeScope.projectIds,
         })
         const closesSummary = await applyExplicitCloses({
           entityLinks,

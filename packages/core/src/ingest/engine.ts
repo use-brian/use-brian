@@ -53,11 +53,16 @@ export type IngestRule = {
    * this tier instead of the source default. NULL = inherit default.
    */
   episode_sensitivity: RuleEpisodeSensitivity | null
+  /** Default classification stamp for every Episode this rule emits. */
+  compartments: string[]
+  project_ids: string[]
 }
 
 export type IngestContext = {
   workspace_id: string
   connector_instance_id: string
+  compartments?: string[]
+  project_ids?: string[]
 }
 
 export type RoutingDecision = {
@@ -75,6 +80,8 @@ export type RoutingDecision = {
    * path so the resulting Episode is stamped at the right tier.
    */
   episode_sensitivity: RuleEpisodeSensitivity | null
+  compartments: string[]
+  project_ids: string[]
 }
 
 // ── Ports ───────────────────────────────────────────────────────────
@@ -95,6 +102,8 @@ export type PendingBatchStore = {
     source: string
     fires_at: Date
     event: IngestEvent
+    compartments: string[]
+    project_ids: string[]
   }): Promise<void>
 }
 
@@ -201,6 +210,8 @@ export function createIngestEngine(deps: IngestEngineDeps): IngestEngine {
           rule_id: null,
           matched: false,
           episode_sensitivity: null,
+          compartments: [],
+          project_ids: [],
         }
       }
 
@@ -212,6 +223,8 @@ export function createIngestEngine(deps: IngestEngineDeps): IngestEngine {
         rule_id: matchedRule.id,
         matched: true,
         episode_sensitivity: matchedRule.episode_sensitivity,
+        compartments: matchedRule.compartments ?? [],
+        project_ids: matchedRule.project_ids ?? [],
       }
 
       // Episode handle for the alert payload. Only the `realtime` mode
@@ -221,7 +234,11 @@ export function createIngestEngine(deps: IngestEngineDeps): IngestEngine {
 
       switch (decision.routing_mode) {
         case 'realtime': {
-          const outcome = await deps.pipelineB.process(event, ctx)
+          const outcome = await deps.pipelineB.process(event, {
+            ...ctx,
+            compartments: decision.compartments,
+            project_ids: decision.project_ids,
+          })
           episodeId = outcome?.episodeId ?? null
           break
         }
@@ -245,6 +262,8 @@ export function createIngestEngine(deps: IngestEngineDeps): IngestEngine {
             source: matchedRule.source,
             fires_at: firesAt,
             event,
+            compartments: decision.compartments,
+            project_ids: decision.project_ids,
           })
           break
         }

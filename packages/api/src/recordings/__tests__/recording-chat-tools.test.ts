@@ -137,7 +137,13 @@ describe('[COMP:recordings/recording-chat-tools] listRecordings', () => {
       CTX,
     )
     expect(listRecordings).toHaveBeenCalledWith(
-      'u-1',
+      expect.objectContaining({
+        userId: 'u-1',
+        workspaceId: 'ws-1',
+        assistantId: 'a-1',
+        clearance: 'internal',
+        compartments: [],
+      }),
       'ws-1',
       expect.objectContaining({
         kind: 'meeting',

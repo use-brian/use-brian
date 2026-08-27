@@ -33,6 +33,7 @@ import {
   unionCompartments,
   buildWorkspaceFilesContext,
   buildSessionStateBlock,
+  ContextScopeAccumulator,
 } from '@use-brian/core'
 import type {
   LLMProvider,
@@ -51,7 +52,7 @@ import type {
 } from '@use-brian/core'
 import type { ContentBlock, EngineHooks } from '@use-brian/core'
 import { sanitizeDeliveryText, resolveCharter, renderCharterBlock } from '@use-brian/shared'
-import { listActivePlaybookRules } from '../db/playbook-store.js'
+import { loadDecisionPlaybookContext } from '../decision-learning/playbook-context.js'
 import { runProactiveCompaction } from './proactive-compaction.js'
 import { notifyBrainWriteIfMatch } from '../brain-stream/notify.js'
 import { applyMcpInjection, buildUnavailableCapabilitiesPrompt, injectSkills } from './route-helpers.js'
@@ -66,8 +67,14 @@ import {
   getConnectorUserId,
   getWorkspaceMembershipSystem,
   getWorkspacePlan,
-  resolveReadCeilingsSystem,
 } from '../db/workspace-store.js'
+import {
+  ContextNotAvailableError,
+  formatActiveWorkspaceContext,
+  noteAutomaticScopeEvidence,
+  resolveTurnScopeSystem,
+} from '../context-scope/resolve-turn-scope.js'
+import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
 import { isExternalPrincipal } from '../db/external-principal.js'
 import { accrueClientPrincipal } from './client-accrual.js'
 import type { ConnectorStore } from '../db/connector-store.js'
@@ -298,6 +305,7 @@ export type PublicApiError =
   | 'link_budget_exhausted'
   | 'assistant_not_found'
   | 'actor_not_member'
+  | 'context_not_available'
   | 'message_not_found'
   | 'budget_exhausted'
   | 'upstream_failed'
@@ -671,6 +679,29 @@ export async function executePublicTurn(
     channelType: 'api',
     channelId,
   })
+  const fullScope = input.contextScope === 'assistant-full'
+  let turnScope
+  try {
+    turnScope = await resolveTurnScopeSystem({
+      userId: user.id,
+      assistant,
+      workspaceId: assistant.workspaceId,
+      session,
+      memberMode: fullScope ? 'assistant' : 'enforce',
+      systemRead: laneReadsSystemSide(input.contextScope) || undefined,
+    })
+  } catch (err) {
+    if (err instanceof ContextNotAvailableError) {
+      return fail(res, 409, err.code, err.message)
+    }
+    throw err
+  }
+  const readClearance = turnScope.access.clearance ?? assistant.clearance
+  const readCompartments = turnScope.effectiveCompartments
+  const scopeAccumulator = new ContextScopeAccumulator({
+    compartments: turnScope.writeCompartments,
+    projectIds: turnScope.writeProjectIds,
+  })
 
   // ── 5b. Retry/edit — destroy-and-regenerate ─────────────
   // Look up the target message FIRST and verify it lives in this
@@ -784,7 +815,6 @@ export async function executePublicTurn(
   // the model would see the tool name in the prompt, find no such tool,
   // hallucinate or thought-burn into empty responses. See
   // docs/architecture/features/public-api.md → "Tools available".
-  const fullScope = input.contextScope === 'assistant-full'
   const activeCapabilities = new Set(
     await deps.capabilityStore.listActive(assistant.id),
   )
@@ -814,14 +844,6 @@ export async function executePublicTurn(
   // one at a `confidential` assistant and that content is readable by anyone
   // holding the URL. The Studio create-link flow states the inherited
   // clearance for that reason — see docs/architecture/features/public-chat-link.md.
-  const { clearance: readClearance, compartments: readCompartments } = fullScope
-    ? { clearance: assistant.clearance, compartments: assistant.compartments }
-    : await resolveReadCeilingsSystem(
-        user.id,
-        assistant.workspaceId ?? null,
-        assistant.clearance,
-        assistant.compartments,
-      )
   const mcpInjection = limitedPublicResearch
     ? {
         enrichConfirmation: async (_toolName: string, toolInput: Record<string, unknown>) => toolInput,
@@ -835,6 +857,7 @@ export async function executePublicTurn(
         tools: baseTools,
         stores: deps,
         engineHooks: deps.engineHooks,
+        contextScope: turnScope,
         // End-user identity on the wire. A consumer serving its own clients
         // points this assistant at a bridge MCP server; the bridge maps
         // `X-UseBrian-Actor-Id` back to its own user record and scopes every
@@ -890,14 +913,8 @@ export async function executePublicTurn(
   // visitor's session into memories either. Withholding the tool is therefore
   // sufficient; there is no second write path to close.
   const memoryViewerCtx = {
-    workspaceId: assistant.workspaceId ?? '',
-    userId: user.id,
-    assistantId: assistant.id,
-    assistantKind: assistant.kind,
-    clearance: readClearance,
-    compartments: readCompartments,
+    ...turnScope.access,
     clientSelfMemory: clientSelfMemory ?? undefined,
-    systemRead: laneReadsSystemSide(input.contextScope) || undefined,
   }
   if (body.clientMemory && clientSelfMemory) {
     await upsertClientMemory({
@@ -905,6 +922,7 @@ export async function executePublicTurn(
       access: {
         ...memoryViewerCtx,
         workspaceId: assistant.workspaceId!,
+        clearance: turnScope.access.clearance ?? assistant.clearance,
         compartments: readCompartments ?? [],
         clientSelfMemory,
       },
@@ -948,6 +966,12 @@ export async function executePublicTurn(
           ? deps.memoryStore.getWorkspaceIndex(memoryViewerCtx)
           : Promise.resolve([]),
       ])
+    noteAutomaticScopeEvidence(scopeAccumulator, [
+      ...identityMemories,
+      ...memoryIndex,
+      ...workspaceIdentityMemories,
+      ...teamMemoryIndex,
+    ])
     memoryContext = buildMemoryContext({
       soul,
       identityMemories: identityMemories.map((m) => ({ id: m.id, summary: m.summary, detail: m.detail })),
@@ -984,10 +1008,12 @@ export async function executePublicTurn(
             assistantKind: assistant.kind,
             clearance: readClearance,
             compartments: readCompartments,
+            projectIds: turnScope.effectiveProjectIds,
             systemRead: laneReadsSystemSide(input.contextScope) || undefined,
           },
           PUBLIC_TURN_FILES_INDEX_CAP,
         )
+        noteAutomaticScopeEvidence(scopeAccumulator, rows)
         workspaceFilesContext = buildWorkspaceFilesContext(rows)
       } catch (err) {
         console.error('[public-turn] workspace-files index fetch failed:', err)
@@ -1058,6 +1084,21 @@ export async function executePublicTurn(
   // model treat its own colleague as an unauthenticated stranger.
   const endUserContext = internalScope ? '' : buildEndUserIdentityContext(body, { isIdentified })
 
+  const decisionPlaybookContext = await loadDecisionPlaybookContext({
+    workspaceId: assistant.workspaceId ?? null,
+    assistantId: assistant.id,
+    actorUserId: user.id,
+    externalPrincipal,
+    operationKind: 'public_turn',
+    operationId: storedUserMsg.id,
+    sourceKind: 'session_message',
+    sourceId: storedUserMsg.id,
+    channelType: 'api',
+    analytics: deps.analytics,
+    logLabel: 'public-turn',
+  })
+  const playbookRules = decisionPlaybookContext.playbookRules
+
   let fullSystemPrompt: string
   // Representations of content the visitor can actually see. Empty on this
   // surface today (no reply quotes, no open page), but the three-way split
@@ -1081,10 +1122,7 @@ export async function executePublicTurn(
     const split = buildSplitSystemPrompt({
       basePrompt: deps.systemPrompt,
       charter: resolveCharter(assistant),
-      playbookRules: await listActivePlaybookRules(assistant.id).catch((err) => {
-        console.error('[public-turn] playbook rules fetch failed:', err)
-        return []
-      }),
+      playbookRules,
       memoryContext: contextBlock,
       workspaceFilesContext,
       brandContext,
@@ -1110,7 +1148,10 @@ export async function executePublicTurn(
       // Empty (and omitted by the builder) on the internal lane.
       preflightContext: endUserContext,
     })
-    const privateBlock = formatPrivateRuntimeContext(split.privateRuntimeContext)
+    const privateBlock = formatPrivateRuntimeContext([
+      split.privateRuntimeContext,
+      formatActiveWorkspaceContext(turnScope),
+    ].filter(Boolean).join('\n\n'))
     fullSystemPrompt = privateBlock
       ? `${split.stablePrompt}\n\n${privateBlock}`
       : split.stablePrompt
@@ -1119,10 +1160,6 @@ export async function executePublicTurn(
     // Same Layer 2 the shared builder renders: the charter block (with
     // admitted playbook rules), not the raw legacy column (which a
     // post-418 write no longer updates).
-    const playbookRules = await listActivePlaybookRules(assistant.id).catch((err) => {
-      console.error('[public-turn] playbook rules fetch failed:', err)
-      return [] as string[]
-    })
     const charterBlock = renderCharterBlock(resolveCharter(assistant), { playbookRules })
     const assistantSystemPrompt = charterBlock
       ? `${deps.systemPrompt}\n\n${charterBlock}`
@@ -1135,7 +1172,10 @@ export async function executePublicTurn(
     // as chat.ts (line 1124).
     const promptWithCapabilities =
       promptWithMemory + buildUnavailableCapabilitiesPrompt(mcpInjection.unavailable, baseTools)
-    const identityBlock = formatPrivateRuntimeContext(endUserContext)
+    const identityBlock = formatPrivateRuntimeContext([
+      endUserContext,
+      formatActiveWorkspaceContext(turnScope),
+    ].filter(Boolean).join('\n\n'))
     fullSystemPrompt = identityBlock
       ? `${promptWithCapabilities}\n\n${identityBlock}`
       : promptWithCapabilities
@@ -1180,6 +1220,8 @@ export async function executePublicTurn(
     analytics: deps.analytics,
     usageStore: deps.usageStore,
     userMessageId: storedUserMsg.id,
+    compartments: turnScope.writeCompartments,
+    projectIds: turnScope.writeProjectIds,
   })
   // Gate on the serving provider (the `model` resolved above) — the strip
   // is Gemini-only and would erase a Qwen turn's tool calls. See tool-pairing.ts.
@@ -1237,6 +1279,11 @@ export async function executePublicTurn(
   let assistantMessageId: string | null = null
 
   try {
+    const scopedTools = bindToolsToAgentAccess(baseTools, {
+      clearance: readClearance,
+      compartments: turnScope.effectiveCompartments,
+      projectIds: turnScope.effectiveProjectIds,
+    })
     for await (const event of queryLoop({
       provider: turnProvider,
       model,
@@ -1244,7 +1291,7 @@ export async function executePublicTurn(
       inputTokenLimit: customLlmRuntime?.inputTokenLimit,
       systemPrompt: fullSystemPrompt,
       messages,
-      tools: baseTools,
+      tools: scopedTools,
       context: {
         userId: user.id,
         assistantId: assistant.id,
@@ -1256,6 +1303,9 @@ export async function executePublicTurn(
         // assistant's own clearance (incident 2026-06-01).
         clearance: readClearance,
         compartments: readCompartments,
+        projectIds: turnScope.effectiveProjectIds,
+        activeGroupId: turnScope.activeGroupId,
+        activeProjectId: turnScope.activeProjectId,
         // Memory-only authenticated-client carve-out. Other tools ignore this
         // field and continue to receive the public/empty general projection.
         clientSelfMemory: clientSelfMemory ?? undefined,
@@ -1264,15 +1314,18 @@ export async function executePublicTurn(
           ? [clientSelfMemory.compartment]
           : undefined,
         assistantClearance: assistant.clearance,
-        assistantCompartments: assistant.compartments,
+        assistantCompartments: turnScope.effectiveCompartments,
         // Every CRM / memory / task / knowledge write on this turn unions this
         // in (`unionCompartments(accumulator, assistantDefaultCompartments)`),
         // so adding the client's compartment here stamps the whole turn from
         // one seam. Empty for a teammate — see client-accrual.ts.
         assistantDefaultCompartments: unionCompartments(
-          assistant.defaultCompartments,
+          turnScope.writeCompartments,
           accrual.compartments,
         ),
+        assistantProjectIds: turnScope.effectiveProjectIds,
+        assistantDefaultProjectIds: turnScope.writeProjectIds,
+        scopeAccumulator,
         workspaceId: assistant.workspaceId ?? undefined,
         workerRuntime: customLlmRuntime
           ? {

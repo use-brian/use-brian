@@ -34,8 +34,10 @@ import {
   listBrainInbox,
   countBrainInbox,
   getBrainInboxRow,
-  markVerifiedGeneric,
-  appendBrainVerification,
+  verifyBrainInboxRow,
+  deleteBrainInboxRow,
+  deleteBrainInboxTasks,
+  applyBrainCorrection,
   pruneDanglingEntityLinks,
   primitiveToTable,
   type BrainInboxPrimitive,
@@ -44,11 +46,6 @@ import {
   createBrainEditSession,
   createInspectionSession,
 } from '../db/sessions.js'
-import {
-  abandonGoalsForHostTaskSystem,
-  GOAL_TERMINAL_STATUSES,
-} from '../db/goals.js'
-import { closeWorkspaceFileSegmentsSystem } from '../db/workspace-files.js'
 import { rejectTask as rejectTaskWithReason } from '../db/task-admission-store.js'
 import {
   reclassifyEntityKind,
@@ -513,41 +510,19 @@ export function brainInboxRoutes({
     const userId = (req as any).userId as string
 
     try {
-      // Validate the row belongs to this workspace before stamping —
-      // primitiveToTable is closed-set so the table name is safe to
-      // interpolate.
-      const ownership = await query<{ workspace_id: string }>(
-        `SELECT workspace_id FROM ${primitiveToTable(primitiveParam)}
-         WHERE id = $1 AND valid_to IS NULL`,
-        [rowId],
-      )
-      if (ownership.rows.length === 0) {
+      const verified = await verifyBrainInboxRow({
+        primitive: primitiveParam,
+        rowId,
+        workspaceId,
+        verifiedByUserId: userId,
+      })
+      if (verified.status === 'not_found') {
         res.status(404).json({ error: 'Row not found' })
         return
       }
-      if (ownership.rows[0].workspace_id !== workspaceId) {
+      if (verified.status === 'wrong_workspace') {
         res.status(403).json({ error: 'Row belongs to a different workspace' })
         return
-      }
-
-      const stamped = await markVerifiedGeneric(primitiveParam, rowId, userId)
-      // Append audit. For memory we ride the existing memory_verifications
-      // shape; for other primitives we use the new polymorphic
-      // brain_verifications.
-      if (primitiveParam === 'memory') {
-        await query(
-          `INSERT INTO memory_verifications (memory_id, workspace_id, verified_by, action)
-           VALUES ($1, $2, $3, 'confirm')`,
-          [rowId, workspaceId, userId],
-        )
-      } else {
-        await appendBrainVerification({
-          targetKind: auditKind(primitiveParam),
-          targetId: rowId,
-          workspaceId,
-          verifiedByUserId: userId,
-          action: 'confirm',
-        })
       }
 
       // Cascade: confirming a `skill → learned_from → assistant` induction
@@ -573,7 +548,7 @@ export function brainInboxRoutes({
       // devices repaint the now-verified row.
       void notifyBrainInboxChange(workspaceId, primitiveParam, rowId, 'update')
 
-      res.json({ ok: true, stamped })
+      res.json({ ok: true, stamped: verified.stamped })
     } catch (err) {
       console.error('[brain-inbox] verify failed:', err)
       res.status(500).json({ error: 'Failed to verify row' })
@@ -666,23 +641,25 @@ export function brainInboxRoutes({
         return
       }
 
-      const updated = await reclassifyEntityKind(userId, entityId, {
-        kind: targetKind,
+      const updated = await applyBrainCorrection({
+        mutate: (client) => reclassifyEntityKind(userId, entityId, {
+          kind: targetKind,
+        }, client),
+        verifications: (result) => result ? [{
+          targetKind: 'entity' as const,
+          targetId: entityId,
+          workspaceId,
+          verifiedByUserId: userId,
+          action: 'reclassify_kind' as const,
+          modelValue: { kind: before.rows[0].kind },
+          userValue: { kind: targetKind },
+          reason: typeof reason === 'string' ? reason.slice(0, 500) : undefined,
+        }] : [],
       })
       if (!updated) {
         res.status(404).json({ error: 'Entity not found' })
         return
       }
-      await appendBrainVerification({
-        targetKind: 'entity',
-        targetId: entityId,
-        workspaceId,
-        verifiedByUserId: userId,
-        action: 'reclassify_kind',
-        modelValue: { kind: before.rows[0].kind },
-        userValue: { kind: targetKind },
-        reason: typeof reason === 'string' ? reason.slice(0, 500) : undefined,
-      })
       // Realtime repaint for the reclassified entity node.
       void notifyBrainInboxChange(workspaceId, 'entity', entityId, 'update')
       res.json({ ok: true, kind: targetKind })
@@ -911,16 +888,18 @@ export function brainInboxRoutes({
         return
       }
 
-      const result = await promoteEntityToCrm(userId, entityId, params)
-      await appendBrainVerification({
-        targetKind: 'entity',
-        targetId: entityId,
-        workspaceId,
-        verifiedByUserId: userId,
-        action: 'promote_to_crm',
-        modelValue: { kind: before.rows[0].kind },
-        userValue: { kind: params.kind, specializationId: result.specializationId },
-        reason: typeof body.reason === 'string' ? body.reason.slice(0, 500) : undefined,
+      const result = await applyBrainCorrection({
+        mutate: (client) => promoteEntityToCrm(userId, entityId, params, client),
+        verifications: (promoted) => [{
+          targetKind: 'entity' as const,
+          targetId: entityId,
+          workspaceId,
+          verifiedByUserId: userId,
+          action: 'promote_to_crm' as const,
+          modelValue: { kind: before.rows[0].kind },
+          userValue: { kind: params.kind, specializationId: promoted.specializationId },
+          reason: typeof body.reason === 'string' ? body.reason.slice(0, 500) : undefined,
+        }],
       })
       // Realtime repaint: the new CRM companion row (a 'create') plus the
       // entity itself whose kind just flipped (an 'update'). `params.kind`
@@ -965,7 +944,8 @@ export function brainInboxRoutes({
   // endpoint (priority merged into each row's live attributes). Reasoned
   // deletes use the same atomic rejection primitive as single-row Delete
   // (tombstone + optional active narrow rule); reasonless deletes close tasks,
-  // retire hosted goals, and audit them in one data-modifying CTE.
+  // retire hosted goals, and append native + normalized evidence in one
+  // store-owned transaction.
   // Per-id outcomes come back so the client can keep failed rows selected.
   // Capped at 200 ids per call.
   //
@@ -1019,40 +999,16 @@ export function brainInboxRoutes({
     // Plain delete is a real set operation: close every owned live task,
     // retire every hosted Assignable / Auto-pilot goal (including a running
     // goal whose driver now loses its guarded status handoff), and append the
-    // audit rows in one statement. Missing / cross-workspace ids simply return
-    // `ok:false`, preserving the endpoint's per-id retry contract.
+    // audit + decision rows in one transaction. Missing / cross-workspace ids
+    // simply return `ok:false`, preserving the endpoint's per-id retry contract.
     if (action === 'delete' && !rejectReason) {
       const taskIds = ids as string[]
       try {
-        const deleted = await query<{ id: string }>(
-          `WITH deleted_tasks AS (
-             UPDATE tasks
-                SET valid_to = now(), updated_at = now()
-              WHERE id = ANY($1::uuid[])
-                AND workspace_id = $2
-                AND valid_to IS NULL
-              RETURNING id
-           ), retired_goals AS (
-             UPDATE goals
-                SET status = 'abandoned',
-                    blocker_reason = 'host_task_deleted',
-                    updated_at = now()
-              WHERE host_type = 'task'
-                AND host_id IN (SELECT id FROM deleted_tasks)
-                AND status <> ALL($3)
-              RETURNING id
-           ), audits AS (
-             INSERT INTO brain_verifications (
-               target_kind, target_id, workspace_id, verified_by, action
-             )
-             SELECT 'task', id, $2, $4, 'delete'
-               FROM deleted_tasks
-             RETURNING target_id
-           )
-           SELECT id::text AS id FROM deleted_tasks`,
-          [taskIds, workspaceId, GOAL_TERMINAL_STATUSES, userId],
-        )
-        const deletedIds = new Set(deleted.rows.map((row) => row.id))
+        const deletedIds = new Set(await deleteBrainInboxTasks({
+          taskIds,
+          workspaceId,
+          deletedByUserId: userId,
+        }))
         const results = taskIds.map((id) => ({ id, ok: deletedIds.has(id) }))
         void notifyBrainInboxChange(workspaceId, 'task', taskIds[0], 'delete')
         res.json({ ok: results.every((row) => row.ok), results })
@@ -1157,18 +1113,12 @@ export function brainInboxRoutes({
             taskId: id,
             reason: rejectReason,
             createRule,
+            recordBrainVerification: true,
           })
           if (!rejected) {
             results.push({ id, ok: false })
             continue
           }
-          await appendBrainVerification({
-            targetKind: 'task',
-            targetId: id,
-            workspaceId,
-            verifiedByUserId: userId,
-            action: 'delete',
-          })
           results.push({
             id,
             ok: true,
@@ -1267,18 +1217,12 @@ export function brainInboxRoutes({
           taskId: rowId,
           reason: rejectReason,
           createRule,
+          recordBrainVerification: true,
         })
         if (!rejected) {
           res.status(404).json({ error: 'Row not found' })
           return
         }
-        await appendBrainVerification({
-          targetKind: auditKind(primitiveParam),
-          targetId: rowId,
-          workspaceId,
-          verifiedByUserId: userId,
-          action: 'delete',
-        })
         void notifyBrainInboxChange(workspaceId, primitiveParam, rowId, 'delete')
         res.json({
           ok: true,
@@ -1289,52 +1233,19 @@ export function brainInboxRoutes({
         return
       }
 
-      // Soft delete.
-      await query(
-        `UPDATE ${primitiveToTable(primitiveParam)}
-            SET valid_to = now(), updated_at = now()
-          WHERE id = $1 AND valid_to IS NULL`,
-        [rowId],
-      )
-
-      // Derived-content cascade (files only): `file_segments` carry their OWN
-      // bi-temporal window and every retrieval predicate reads the segment's
-      // `valid_to`, never the parent file's. Closing `workspace_files` alone
-      // drops the file off the Brain list while leaving its extracted text
-      // fully searchable — so "I deleted that file" and "Brian still quotes it"
-      // were both true at once. See docs/architecture/features/files.md →
-      // "Deleting a file".
-      if (primitiveParam === 'workspace_file') {
-        await closeWorkspaceFileSegmentsSystem(rowId)
+      const deleted = await deleteBrainInboxRow({
+        primitive: primitiveParam,
+        rowId,
+        workspaceId,
+        deletedByUserId: userId,
+      })
+      if (deleted.status === 'not_found') {
+        res.status(404).json({ error: 'Row not found' })
+        return
       }
-
-      // Host-lifecycle cascade (tasks only): `goals.host_id` is not a FK, so
-      // nothing in the DB retires the goals bound to a task the user just
-      // deleted. Left uncascaded, a judge-drafted goal keeps its slot on the
-      // "Tasks assignable" surface and in the home-dock count for a task that no
-      // longer exists — and no other path ever clears it, because a draft is
-      // inert (the rollup skips unconfirmed goals and no tick fires).
-      // See docs/architecture/features/goals.md → "Host-lifecycle cascade".
-      if (primitiveParam === 'task') {
-        await abandonGoalsForHostTaskSystem(rowId, 'host_task_deleted')
-      }
-
-      // Audit. For memory ride memory_verifications.action='delete'; for
-      // others use brain_verifications.action='delete'.
-      if (primitiveParam === 'memory') {
-        await query(
-          `INSERT INTO memory_verifications (memory_id, workspace_id, verified_by, action)
-           VALUES ($1, $2, $3, 'delete')`,
-          [rowId, workspaceId, userId],
-        )
-      } else {
-        await appendBrainVerification({
-          targetKind: auditKind(primitiveParam),
-          targetId: rowId,
-          workspaceId,
-          verifiedByUserId: userId,
-          action: 'delete',
-        })
+      if (deleted.status === 'wrong_workspace') {
+        res.status(403).json({ error: 'Row belongs to a different workspace' })
+        return
       }
 
       // Realtime repaint so the deleted row drops off open /brain pages.

@@ -52,6 +52,45 @@ describe('[COMP:crm/r2-store] deterministic CRM R2 projections', () => {
     expect(groups.some((g) => g.reason === 'name' && g.value === '陳大文')).toBe(true)
   })
 
+  it('uses prior merge aliases as suggestion evidence and honors pair separations', () => {
+    const candidates = [
+      row({ id: 'p1', kind: 'person', name: 'Jordan Kim', aliases: ['jk'], attributes: {} }),
+      row({ id: 'p2', kind: 'person', name: 'JK', attributes: {} }),
+    ]
+    const suggested = findCrmDuplicateGroups(candidates)
+    expect(suggested).toEqual([expect.objectContaining({
+      kind: 'person',
+      reason: 'alias',
+      records: [{ id: 'p1', name: 'Jordan Kim' }, { id: 'p2', name: 'JK' }],
+    })])
+
+    const suppressed = findCrmDuplicateGroups(candidates, {
+      separatedPairs: new Set(['p1:p2']),
+    })
+    expect(suppressed).toEqual([])
+  })
+
+  it('never proposes the workspace self entity as a duplicate', () => {
+    const groups = findCrmDuplicateGroups([
+      row({ id: 'self', kind: 'person', name: 'Workspace owner', attributes: { self: true } }),
+      row({ id: 'contact', kind: 'person', name: 'Workspace owner', attributes: {} }),
+    ])
+    expect(groups).toEqual([])
+  })
+
+  it('caps exact groups and output deterministically', () => {
+    const candidates = Array.from({ length: 60 }, (_, index) => row({
+      id: `person-${String(index).padStart(2, '0')}`,
+      kind: 'person',
+      name: 'Same Name',
+      attributes: {},
+    }))
+    const groups = findCrmDuplicateGroups(candidates, { maxGroupSize: 50, maxGroups: 1 })
+    expect(groups).toHaveLength(1)
+    expect(groups[0].records).toHaveLength(50)
+    expect(groups[0].records[0].id).toBe('person-00')
+  })
+
   it('groups currency totals, weights open value, and refuses to invent velocity', () => {
     const report = buildCrmReport([
       row({ id: 'd1', attributes: { pipeline_stage_id: 'lead-id', amount: 1000, currency_code: 'USD' } }),

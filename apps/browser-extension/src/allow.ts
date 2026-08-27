@@ -5,7 +5,7 @@ const host = params.get('host')
 if (host) {
   const detail = document.getElementById('detail')
   if (detail) {
-    detail.textContent = `Your assistant wants to browse and act in the current tab (${host}) for this task. You can stop it at any time from the extension.`
+    detail.textContent = `Your assistant wants to browse and act in the current tab (${host}) for this task. Chrome labels active browser control as "debugging this browser." Cancel in Chrome's banner or Stop in the extension ends control.`
   }
 }
 

@@ -13,7 +13,7 @@
  */
 
 import type { SearchProvider, SearchResult } from './search-stack.js'
-import { SearchProviderError } from './_fetch-error.js'
+import { retryAfterMs, SearchProviderError } from './_fetch-error.js'
 import { clampResultCount } from './search-stack.js'
 
 const TAVILY_ENDPOINT = 'https://api.tavily.com/search'
@@ -54,7 +54,13 @@ export const tavilyProvider: SearchProvider = {
       signal,
     })
 
-    if (!res.ok) throw new SearchProviderError({ provider: 'Tavily', status: res.status })
+    if (!res.ok) {
+      throw new SearchProviderError({
+        provider: 'Tavily',
+        status: res.status,
+        retryAfterMs: retryAfterMs(res.headers.get('retry-after')),
+      })
+    }
 
     const data = (await res.json()) as TavilyResponse
     const raw = data.results ?? []

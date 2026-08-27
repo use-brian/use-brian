@@ -5,6 +5,7 @@ import type { SessionStateStore } from '../memory/session-state-types.js'
 import type { ConfirmationResolver, ToolConfirmationRequest } from '../mcp/types.js'
 import type { Sensitivity, SensitivityAccumulator } from '../security/sensitivity.js'
 import type { CompartmentAccumulator } from '../security/compartments.js'
+import type { ContextScopeAccumulator, ScopeEvidence } from '../security/context-scope.js'
 import type { EvidenceAccumulator } from '../security/evidence.js'
 import type { AttachmentCollector } from '../workspace-files/attachments.js'
 import type { LLMProvider } from '../providers/types.js'
@@ -284,6 +285,8 @@ export type ToolContext = {
    * See docs/plans/compartment-axis.md.
    */
   compartmentAccumulator?: CompartmentAccumulator
+  /** Canonical Team + Project + sensitivity high-water accumulator. */
+  scopeAccumulator?: ContextScopeAccumulator
   /**
    * Per-run identifier-evidence accumulator (the mechanical anti-fabrication
    * gate for unattended runs). The tool executor `note()`s every tool
@@ -323,6 +326,11 @@ export type ToolContext = {
    * The read-side analogue of `clearance`. See docs/plans/compartment-axis.md.
    */
   compartments?: string[] | null
+  /** Effective Project READ grant. null/undefined is universe; [] is General-only. */
+  projectIds?: string[] | null
+  /** Immutable active context identifiers, resolved outside the model. */
+  activeGroupId?: string | null
+  activeProjectId?: string | null
   /**
    * Authenticated external-client self-memory projection. Memory tools alone
    * thread this onto their AccessContext; every other tool continues to see
@@ -381,6 +389,10 @@ export type ToolContext = {
    * extraction sensitivity. See docs/plans/compartment-axis.md.
    */
   assistantDefaultCompartments?: string[]
+  /** Assistant Project WRITE ceiling. null/undefined is universe. */
+  assistantProjectIds?: string[] | null
+  /** Project requirements automatically stamped on writes for this turn. */
+  assistantDefaultProjectIds?: string[]
 }
 
 // ── Tool result ────────────────────────────────────────────────
@@ -401,6 +413,8 @@ export type ToolResult<T = unknown> = {
   data: T
   isError?: boolean
   meta?: ToolResultMeta
+  /** Internal high-water provenance; stripped before model serialization. */
+  scopeEvidence?: ScopeEvidence
   /**
    * Optional inline images the tool produced for the model to look at. The
    * engine emits these as `image` content blocks appended to the tool-results

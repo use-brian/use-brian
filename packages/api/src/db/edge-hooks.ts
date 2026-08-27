@@ -46,6 +46,8 @@ export type EdgeEmitParams = {
   assistantId?: string | null
   attributes?: Record<string, unknown>
   sourceEpisodeId?: string | null
+  compartments?: string[]
+  projectIds?: string[]
 }
 
 /**
@@ -72,6 +74,8 @@ export async function emitEdgeFireAndForget(
       assistantId: params.assistantId ?? null,
       attributes: params.attributes ?? {},
       sourceEpisodeId: params.sourceEpisodeId ?? null,
+      compartments: params.compartments,
+      projectIds: params.projectIds,
     })
     return link.id
   } catch (err) {
@@ -106,6 +110,8 @@ export async function emitMentionedEdges(
     userId?: string | null
     assistantId?: string | null
     sourceEpisodeId?: string | null
+    compartments?: string[]
+    projectIds?: string[]
   },
 ): Promise<void> {
   await Promise.all(
@@ -121,6 +127,8 @@ export async function emitMentionedEdges(
         userId: params.userId,
         assistantId: params.assistantId,
         sourceEpisodeId: params.sourceEpisodeId,
+        compartments: params.compartments,
+        projectIds: params.projectIds,
       }),
     ),
   )
@@ -149,6 +157,8 @@ export async function emitDependsOnEdges(
     userId?: string | null
     assistantId?: string | null
     sourceEpisodeId?: string | null
+    compartments?: string[]
+    projectIds?: string[]
   },
 ): Promise<void> {
   await Promise.all(
@@ -164,6 +174,8 @@ export async function emitDependsOnEdges(
         userId: params.userId,
         assistantId: params.assistantId,
         sourceEpisodeId: params.sourceEpisodeId,
+        compartments: params.compartments,
+        projectIds: params.projectIds,
       }),
     ),
   )
@@ -187,6 +199,8 @@ export async function emitDocumentedByEdges(
     sourceEpisodeId?: string | null
     /** Commit SHA provenance — stored in the edge's `attributes` JSONB. */
     commitSha?: string
+    compartments?: string[]
+    projectIds?: string[]
   },
 ): Promise<void> {
   const attributes = params.commitSha ? { commit_sha: params.commitSha } : {}
@@ -204,6 +218,8 @@ export async function emitDocumentedByEdges(
         assistantId: params.assistantId,
         attributes,
         sourceEpisodeId: params.sourceEpisodeId,
+        compartments: params.compartments,
+        projectIds: params.projectIds,
       }),
     ),
   )
@@ -229,6 +245,8 @@ export async function emitCrmRelationEdge(
     source: EntitySource
     userId?: string | null
     assistantId?: string | null
+    compartments?: string[]
+    projectIds?: string[]
   },
 ): Promise<string | null> {
   return emitEdgeFireAndForget(entityLinks, actorUserId, {
@@ -241,6 +259,8 @@ export async function emitCrmRelationEdge(
     source: params.source,
     userId: params.userId,
     assistantId: params.assistantId,
+    compartments: params.compartments,
+    projectIds: params.projectIds,
   })
 }
 
@@ -275,6 +295,8 @@ export async function superseedCrmRelationEdge(
     assistantId?: string | null
     /** Optional override for the close timestamp; defaults to now(). */
     closedAt?: Date
+    compartments?: string[]
+    projectIds?: string[]
   },
 ): Promise<{ closed: number; opened: number }> {
   let closed = 0
@@ -287,6 +309,8 @@ export async function superseedCrmRelationEdge(
       workspaceId: params.workspaceId,
       assistantId: params.assistantId ?? '',
       assistantKind: 'standard' as const,
+      compartments: params.compartments,
+      projectIds: params.projectIds,
     }
     const active = await entityLinks.walkOutbound(ctx, 'entity', params.sourceEntityId, {
       edgeTypes: [params.edgeType],
@@ -312,6 +336,8 @@ export async function superseedCrmRelationEdge(
       source: params.source,
       userId: params.userId,
       assistantId: params.assistantId,
+      compartments: params.compartments,
+      projectIds: params.projectIds,
     })
     if (newId) opened = 1
   }

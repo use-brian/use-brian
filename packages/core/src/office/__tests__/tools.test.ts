@@ -54,7 +54,14 @@ describe('[COMP:office/tools] Office tools', () => {
     }
     const tools = new Map(createOfficeTools({ port }).map((tool) => [tool.name, tool]))
     await tools.get('getOfficeArtifact')!.execute({ artifactId: id(1), targetOffset: 1_000 }, context)
-    expect(port.get).toHaveBeenCalledWith({ userId: id(80), artifactId: id(1), targetOffset: 1_000 })
+    expect(port.get).toHaveBeenCalledWith({
+      userId: id(80),
+      artifactId: id(1),
+      targetOffset: 1_000,
+      clearance: undefined,
+      compartmentGrant: null,
+      projectGrant: null,
+    })
   })
 })
 

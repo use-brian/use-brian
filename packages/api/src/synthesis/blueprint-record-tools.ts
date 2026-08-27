@@ -30,6 +30,8 @@ import {
   markdownToBlocks,
   notFoundFailure,
   recordCompleteness,
+  resolveWriteScope,
+  scopeEvidenceFromRows,
   toolFailure,
   validateFieldValue,
   BLUEPRINT_CAPTURE_KINDS,
@@ -232,7 +234,7 @@ export function createBlueprintRecordTools(deps: BlueprintRecordToolDeps): Tool[
             idSource: 'a saveBlueprintRecord, getBlueprintRecord or fillBlueprintFromBrain result',
           })
         }
-        return { data: recordSummary(rec) }
+        return { data: recordSummary(rec), scopeEvidence: scopeEvidenceFromRows([rec]) }
       }
       if (!input.blueprint) {
         return {
@@ -278,7 +280,10 @@ export function createBlueprintRecordTools(deps: BlueprintRecordToolDeps): Tool[
           isError: true,
         }
       }
-      return { data: { blueprint: match.name, ...recordSummary(rec) } }
+      return {
+        data: { blueprint: match.name, ...recordSummary(rec) },
+        scopeEvidence: scopeEvidenceFromRows([rec]),
+      }
     },
   })
 
@@ -352,6 +357,14 @@ export function createBlueprintRecordTools(deps: BlueprintRecordToolDeps): Tool[
       }
 
       const subject = input.subject.trim()
+      const writeScope = resolveWriteScope({
+        sensitivity: 'internal',
+        baseCompartments: context.assistantDefaultCompartments,
+        baseProjectIds: context.assistantDefaultProjectIds,
+        evidence: context.scopeAccumulator,
+        compartmentGrant: context.assistantCompartments,
+        projectGrant: context.assistantProjectIds,
+      })
       // Direct saves MERGE (resetFields:false): a partial save must not wipe
       // fields a prior fill grounded. Same anchor as a generate fill for this
       // (blueprint, subject) — one record per subject across surfaces.
@@ -372,7 +385,9 @@ export function createBlueprintRecordTools(deps: BlueprintRecordToolDeps): Tool[
             ? 'workflow'
             : 'chat',
         sourceId: context.workflowRunId ?? context.sessionId ?? null,
-        sensitivity: 'internal',
+        sensitivity: writeScope.sensitivity,
+        compartments: writeScope.compartments,
+        projectIds: writeScope.projectIds,
         resetFields: false,
       })
       await deps.blueprintRecordStore.mergeFields(context.userId, ensured.id, validated)

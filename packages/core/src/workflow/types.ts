@@ -145,19 +145,7 @@ export type AssistantCallStep = WorkflowStepCommon & {
    * Feishu reply-in-thread; same channel on both steps — schema-enforced).
    * See `docs/architecture/engine/scheduled-jobs.md` → "Channel delivery".
    */
-  deliver?:
-    | {
-        channelType: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams' | 'custom' | 'feishu'
-        channelId: string
-        channelIntegrationId?: string
-        thread?: { fromStep: string }
-        replyToTrigger?: never
-      }
-    | {
-        /** Resolve the exact integration + recipient from a trusted event run. */
-        channelType: 'whatsapp'
-        replyToTrigger: true
-      }
+  deliver?: WorkflowDelivery
   /**
    * Session continuity. `persistent` reuses one durable callee session
    * across fires (recurring-workflow memory); `per_run` (default) is a
@@ -191,6 +179,21 @@ export type AssistantCallStep = WorkflowStepCommon & {
    */
   blueprintId?: string
 }
+
+/** Messaging destination shared by step output and workflow-failure delivery. */
+export type WorkflowDelivery =
+  | {
+      channelType: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams' | 'custom' | 'feishu'
+      channelId: string
+      channelIntegrationId?: string
+      thread?: { fromStep: string }
+      replyToTrigger?: never
+    }
+  | {
+      /** Resolve the exact integration + recipient from a trusted event run. */
+      channelType: 'whatsapp'
+      replyToTrigger: true
+    }
 
 export type ToolCallStep = WorkflowStepCommon & {
   type: 'tool_call'
@@ -335,6 +338,8 @@ export type WorkflowDefinition = {
    */
   startStepId: string | string[]
   steps: WorkflowStep[]
+  /** Best-effort terminal failed/timeout notification. Never runs on success or cancellation. */
+  failureDelivery?: WorkflowDelivery
   /** Optional run-wide external-client authority. */
   principal?: ExternalClientWorkflowPrincipal
   /**
@@ -501,6 +506,11 @@ export type EventMatch = {
    * matches.
    */
   tags?: string[]
+  /**
+   * Current live task tags ∩ list ≠ ∅. Task-only and independent of
+   * `tags`, whose appearance semantics remain unchanged.
+   */
+  currentTags?: string[]
   /** Allow bot-authored events to fire this subscription. Default false. */
   fromBots?: boolean
 }
@@ -687,6 +697,9 @@ export type WorkflowRecord = {
    * the definition. NULL = a normal user-authored workflow.
    */
   managedBy: string | null
+  /** Immutable Team/Project binding used for future run snapshots. */
+  contextGroupId?: string | null
+  contextProjectId?: string | null
   createdAt: Date
   updatedAt: Date
 }
@@ -765,6 +778,11 @@ export type WorkflowRunRecord = {
   error: Record<string, unknown> | null
   /** Mig 279. Cross-run outcome; null until the run terminates. */
   outcome: WorkflowRunOutcome | null
+  /** Scope snapshot fixed when the run row is created. */
+  contextGroupId?: string | null
+  contextProjectId?: string | null
+  contextCompartments?: string[]
+  contextProjectIds?: string[]
   startedAt: Date
   finishedAt: Date | null
   lastActiveAt: Date
@@ -800,6 +818,8 @@ export type WorkflowStore = {
     researchMode?: boolean
     /** Mig 411. Product-feature ownership marker (e.g. `'knowledge'`). */
     managedBy?: string | null
+    contextGroupId?: string | null
+    contextProjectId?: string | null
   }): Promise<WorkflowRecord>
 
   getById(userId: string, id: string): Promise<WorkflowRecord | null>
@@ -849,6 +869,8 @@ export type WorkflowStore = {
       lifecycleState: WorkflowLifecycleState
       /** Mig 308. The auto-archive veto flag. */
       pinned: boolean
+      contextGroupId: string | null
+      contextProjectId: string | null
     }>,
   ): Promise<WorkflowRecord | null>
 

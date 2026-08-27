@@ -10,7 +10,6 @@ import {
   quickFilterCounts,
   searchFromViewState,
   sortRows,
-  tagsWithProject,
   taskProject,
   viewStateFromSearch,
   type TasksViewState,
@@ -39,26 +38,17 @@ function state(over: Partial<TasksViewState> = {}): TasksViewState {
   return { ...DEFAULT_VIEW_STATE, ...over };
 }
 
-describe("[COMP:app-web/tasks-view] project tag facet", () => {
-  it("reads the project off the project: tag namespace", () => {
-    expect(taskProject(task({ tags: ["project:launch", "ops"] }))).toBe("launch");
-    expect(taskProject(task({ tags: ["ops"] }))).toBeNull();
-    expect(taskProject(task({ tags: ["project:"] }))).toBeNull();
-  });
-
-  it("rewrites the project tag without touching other tags", () => {
-    expect(tagsWithProject(["ops", "project:old"], "new")).toEqual([
-      "ops",
-      "project:new",
-    ]);
-    expect(tagsWithProject(["ops", "project:old"], null)).toEqual(["ops"]);
+describe("[COMP:app-web/task-project-context] stable Project facet", () => {
+  it("reads the stable Project id rather than parsing a tag", () => {
+    expect(taskProject(task({ projectId: "project-id", tags: ["ops"] }))).toBe("project-id");
+    expect(taskProject(task({ tags: ["project:legacy"] }))).toBeNull();
   });
 
   it("collects distinct sorted project options", () => {
     const rows = [
-      task({ tags: ["project:beta"] }),
-      task({ tags: ["project:alpha"] }),
-      task({ tags: ["project:beta"] }),
+      task({ projectId: "beta" }),
+      task({ projectId: "alpha" }),
+      task({ projectId: "beta" }),
       task(),
     ];
     expect(projectOptions(rows)).toEqual(["alpha", "beta"]);
@@ -229,7 +219,7 @@ describe("[COMP:app-web/tasks-view] filtering, sorting, grouping", () => {
       task({
         assigneeId: "m1",
         attributes: { priority: "high" },
-        tags: ["project:launch"],
+        projectId: "launch",
         due: "2026-07-01T00:00:00Z", // overdue vs NOW
         title: "Ship the pricing deck",
       }),
@@ -284,9 +274,9 @@ describe("[COMP:app-web/tasks-view] filtering, sorting, grouping", () => {
     ).toEqual(["hi", "ur"]);
 
     const tagged = [
-      task({ id: "l", tags: ["project:launch"] }),
-      task({ id: "o", tags: ["project:ops"] }),
-      task({ id: "x", tags: ["project:other"] }),
+      task({ id: "l", projectId: "launch" }),
+      task({ id: "o", projectId: "ops" }),
+      task({ id: "x", projectId: "other" }),
     ];
     expect(
       applyFilters(tagged, state({ project: ["launch", "ops"] }), NOW).map(
@@ -359,10 +349,10 @@ describe("[COMP:app-web/tasks-view] filtering, sorting, grouping", () => {
 
   it("groups by project with the none-bucket last", () => {
     const rows = [
-      task({ tags: ["project:beta"] }),
+      task({ projectId: "beta" }),
       task(),
-      task({ tags: ["project:beta"] }),
-      task({ tags: ["project:alpha"] }),
+      task({ projectId: "beta" }),
+      task({ projectId: "alpha" }),
     ];
     const groups = groupRows(rows, "project", NOW);
     expect(groups.map((g) => g.key)).toEqual(["beta", "alpha", ""]);

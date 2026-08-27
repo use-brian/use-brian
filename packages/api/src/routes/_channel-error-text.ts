@@ -52,11 +52,21 @@ export const CUSTOM_MODEL_IMAGE_REJECTION =
 export const CUSTOM_MODEL_IMAGE_FALLBACK_NOTICE =
   'This workspace routes its models to an endpoint that cannot read images, so a built-in Brian model answered this message.'
 
+/**
+ * Safe refusal for an immutable channel session whose Team or Project is no
+ * longer selectable. It deliberately names no context id or inaccessible
+ * metadata; the typed server error remains available to API callers while a
+ * person in a messaging channel gets an actionable recovery path.
+ */
+export const CONTEXT_NOT_AVAILABLE_MESSAGE =
+  "This chat's Team or Project context is no longer available. Ask a workspace admin to restore it, or start a new chat in an available context."
+
 export function channelUserErrorText(
   err: Error,
   fallback = 'Something went wrong. Please try again.',
 ): string {
   if (err.message.includes('usage limit')) return err.message
   if (err.message === CUSTOM_MODEL_IMAGE_REJECTION) return err.message
+  if (err.message === CONTEXT_NOT_AVAILABLE_MESSAGE) return err.message
   return fallback
 }

@@ -13,7 +13,7 @@
  */
 
 import type { SearchProvider, SearchResult } from './search-stack.js'
-import { SearchProviderError } from './_fetch-error.js'
+import { retryAfterMs, SearchProviderError } from './_fetch-error.js'
 import { clampResultCount } from './search-stack.js'
 
 const SERPAPI_ENDPOINT = 'https://serpapi.com/search.json'
@@ -52,7 +52,13 @@ export const serpApiProvider: SearchProvider = {
       signal,
     })
 
-    if (!res.ok) throw new SearchProviderError({ provider: 'SerpAPI', status: res.status })
+    if (!res.ok) {
+      throw new SearchProviderError({
+        provider: 'SerpAPI',
+        status: res.status,
+        retryAfterMs: retryAfterMs(res.headers.get('retry-after')),
+      })
+    }
 
     const data = (await res.json()) as SerpApiResponse
     // SerpAPI uses a top-level `error` for both failures and successful empty

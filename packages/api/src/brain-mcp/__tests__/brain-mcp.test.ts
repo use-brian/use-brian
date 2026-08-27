@@ -341,6 +341,8 @@ async function fakeKeyStore(
     scope: opts.scope ?? ('read_write' as const),
     status: opts.status ?? ('active' as const),
     maxClearance: opts.maxClearance ?? null,
+    contextGroupId: null,
+    contextProjectId: null,
     keyHash,
     createdBy: null,
     createdAt: new Date(),

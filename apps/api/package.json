@@ -8,6 +8,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "pglite-server": "tsx src/pglite-server.ts",
+    "test": "node --import tsx --test src/__tests__/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

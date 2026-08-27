@@ -96,8 +96,26 @@ describe('[COMP:api/sessions-route] findOrCreateSession', () => {
     // when the caller omits it. visibility (migration 223) is the 7th
     // (defaults to 'owner'), workspace_id the 8th (defaults to null), and
     // effective_clearance (migration 224) the 9th (defaults to null).
+    // Context bindings are the 10th through 12th parameters. Omitting the
+    // stable Team and Project ids asks the INSERT to inherit the assistant
+    // defaults through the final two boolean parameters.
     // The ON CONFLICT key is still the 5-tuple.
-    expect(params).toEqual(['a_1', 'u_1', 'telegram', 'chat_123', 'Use Brian', null, 'owner', null, null])
+    expect(params).toEqual([
+      'a_1',
+      'u_1',
+      'telegram',
+      'chat_123',
+      'Use Brian',
+      null,
+      'owner',
+      null,
+      null,
+      null,
+      null,
+      null,
+      true,
+      true,
+    ])
   })
 
   it('defaults appId to Use Brian when not provided', async () => {

@@ -26,6 +26,7 @@ export type Teamspace = {
   icon: string | null
   description: string | null
   sensitivity: Sensitivity
+  workspaceGroupId: string | null
   isDefault: boolean
   position: number
   createdBy: string | null
@@ -51,6 +52,8 @@ export type TeamspaceUpdateFields = {
   /** Pass `null` to clear; omit to leave unchanged. */
   description?: string | null
   sensitivity?: Sensitivity
+  /** Link to a first-class Team, or null to restore the legacy roster. */
+  workspaceGroupId?: string | null
 }
 
 const TEAMSPACE_SELECT = `
@@ -60,6 +63,7 @@ const TEAMSPACE_SELECT = `
   icon,
   description,
   sensitivity,
+  workspace_group_id AS "workspaceGroupId",
   is_default   AS "isDefault",
   position,
   created_by   AS "createdBy",
@@ -167,14 +171,32 @@ export function createTeamspaceStore() {
       return result.rows[0] ?? null
     },
 
-    /** Member counts for a set of teamspaces (owner pool — RLS would see 1). */
+    /** Effective audience counts for explicit and Team-derived rosters. */
     async memberCountsSystem(teamspaceIds: string[]): Promise<Map<string, number>> {
       if (teamspaceIds.length === 0) return new Map()
       const result = await query<{ teamspaceId: string; count: string }>(
-        `SELECT teamspace_id AS "teamspaceId", COUNT(*)::text AS count
-           FROM teamspace_members
-          WHERE teamspace_id = ANY($1)
-          GROUP BY teamspace_id`,
+        `SELECT t.id AS "teamspaceId",
+                CASE WHEN t.workspace_group_id IS NULL THEN (
+                  SELECT COUNT(*)::text FROM teamspace_members tm
+                   WHERE tm.teamspace_id = t.id
+                ) ELSE (
+                  SELECT COUNT(*)::text
+                    FROM workspace_members wm
+                    JOIN workspace_groups g ON g.id = t.workspace_group_id
+                   WHERE wm.workspace_id = t.workspace_id
+                     AND sensitivity_rank(t.sensitivity) <= sensitivity_rank(
+                       CASE WHEN wm.role IN ('owner', 'admin')
+                            THEN 'confidential' ELSE wm.clearance END
+                     )
+                     AND (
+                       effective_member_team_compartments(wm.user_id, wm.workspace_id) IS NULL
+                       OR g.compartment_key = ANY(
+                         effective_member_team_compartments(wm.user_id, wm.workspace_id)
+                       )
+                     )
+                ) END AS count
+           FROM teamspaces t
+          WHERE t.id = ANY($1::uuid[])`,
         [teamspaceIds],
       )
       return new Map(result.rows.map((r) => [r.teamspaceId, Number(r.count)]))
@@ -245,6 +267,10 @@ export function createTeamspaceStore() {
         sets.push(`sensitivity = $${idx++}`)
         values.push(fields.sensitivity)
       }
+      if (fields.workspaceGroupId !== undefined) {
+        sets.push(`workspace_group_id = $${idx++}`)
+        values.push(fields.workspaceGroupId)
+      }
       if (sets.length === 0) return this.getSystem(id)
       values.push(id)
       const result = await query<Teamspace>(
@@ -296,7 +322,33 @@ export function createTeamspaceStore() {
 
     async isMemberSystem(teamspaceId: string, userId: string): Promise<boolean> {
       const result = await query<{ ok: true }>(
-        `SELECT true AS ok FROM teamspace_members WHERE teamspace_id = $1 AND user_id = $2`,
+        `SELECT true AS ok
+           FROM teamspaces t
+          WHERE t.id = $1
+            AND (
+              (t.workspace_group_id IS NULL AND EXISTS (
+                SELECT 1 FROM teamspace_members tm
+                 WHERE tm.teamspace_id = t.id AND tm.user_id = $2
+              ))
+              OR
+              (t.workspace_group_id IS NOT NULL AND EXISTS (
+                SELECT 1
+                  FROM workspace_members wm
+                  JOIN workspace_groups g ON g.id = t.workspace_group_id
+                 WHERE wm.user_id = $2
+                   AND wm.workspace_id = t.workspace_id
+                   AND sensitivity_rank(t.sensitivity) <= sensitivity_rank(
+                     CASE WHEN wm.role IN ('owner', 'admin')
+                          THEN 'confidential' ELSE wm.clearance END
+                   )
+                   AND (
+                     effective_member_team_compartments(wm.user_id, wm.workspace_id) IS NULL
+                     OR g.compartment_key = ANY(
+                       effective_member_team_compartments(wm.user_id, wm.workspace_id)
+                     )
+                   )
+              ))
+            )`,
         [teamspaceId, userId],
       )
       return result.rows.length > 0
@@ -308,19 +360,38 @@ export function createTeamspaceStore() {
      */
     async listMembersSystem(teamspaceId: string): Promise<TeamspaceMember[]> {
       const result = await query<TeamspaceMember>(
-        `SELECT tm.user_id AS "userId",
-                u.name,
-                u.email,
-                wm.role,
-                wm.clearance,
-                tm.added_at AS "addedAt"
-           FROM teamspace_members tm
-           JOIN teamspaces t ON t.id = tm.teamspace_id
-           LEFT JOIN users u ON u.id = tm.user_id
+        `WITH target AS (
+           SELECT * FROM teamspaces WHERE id = $1
+         ), audience AS (
+           SELECT tm.user_id, tm.added_at
+             FROM target t
+             JOIN teamspace_members tm ON tm.teamspace_id = t.id
+            WHERE t.workspace_group_id IS NULL
+           UNION ALL
+           SELECT wm.user_id, wm.created_at AS added_at
+             FROM target t
+             JOIN workspace_groups g ON g.id = t.workspace_group_id
+             JOIN workspace_members wm ON wm.workspace_id = t.workspace_id
+            WHERE t.workspace_group_id IS NOT NULL
+              AND sensitivity_rank(t.sensitivity) <= sensitivity_rank(
+                CASE WHEN wm.role IN ('owner', 'admin')
+                     THEN 'confidential' ELSE wm.clearance END
+              )
+              AND (
+                effective_member_team_compartments(wm.user_id, wm.workspace_id) IS NULL
+                OR g.compartment_key = ANY(
+                  effective_member_team_compartments(wm.user_id, wm.workspace_id)
+                )
+              )
+         )
+         SELECT a.user_id AS "userId", u.name, u.email,
+                wm.role, wm.clearance, a.added_at AS "addedAt"
+           FROM audience a
+           JOIN target t ON true
+           LEFT JOIN users u ON u.id = a.user_id
            LEFT JOIN workspace_members wm
-             ON wm.workspace_id = t.workspace_id AND wm.user_id = tm.user_id
-          WHERE tm.teamspace_id = $1
-          ORDER BY tm.added_at ASC`,
+             ON wm.workspace_id = t.workspace_id AND wm.user_id = a.user_id
+          ORDER BY a.added_at ASC`,
         [teamspaceId],
       )
       return result.rows
@@ -351,11 +422,26 @@ export function createTeamspaceStore() {
     async hasMemberBelowSystem(teamspaceId: string, sensitivity: Sensitivity): Promise<boolean> {
       const result = await query<{ ok: true }>(
         `SELECT true AS ok
-           FROM teamspace_members tm
-           JOIN teamspaces t ON t.id = tm.teamspace_id
-           LEFT JOIN workspace_members wm
-             ON wm.workspace_id = t.workspace_id AND wm.user_id = tm.user_id
-          WHERE tm.teamspace_id = $1
+           FROM teamspaces t
+           JOIN workspace_members wm ON wm.workspace_id = t.workspace_id
+          WHERE t.id = $1
+            AND (
+              (t.workspace_group_id IS NULL AND EXISTS (
+                SELECT 1 FROM teamspace_members tm
+                 WHERE tm.teamspace_id = t.id AND tm.user_id = wm.user_id
+              ))
+              OR
+              (t.workspace_group_id IS NOT NULL AND EXISTS (
+                SELECT 1 FROM workspace_groups g
+                 WHERE g.id = t.workspace_group_id
+                   AND (
+                     effective_member_team_compartments(wm.user_id, wm.workspace_id) IS NULL
+                     OR g.compartment_key = ANY(
+                       effective_member_team_compartments(wm.user_id, wm.workspace_id)
+                     )
+                   )
+              ))
+            )
             AND sensitivity_rank(
                   CASE WHEN wm.role IN ('owner', 'admin') THEN 'confidential'
                        ELSE COALESCE(wm.clearance, 'public') END

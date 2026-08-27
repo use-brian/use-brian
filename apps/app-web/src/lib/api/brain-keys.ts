@@ -36,6 +36,8 @@ export type BrainKey = {
    * primary assistant's clearance governs.
    */
   maxClearance: BrainKeyClearance | null;
+  contextGroupId: string | null;
+  contextProjectId: string | null;
   createdAt: string;
   lastUsedAt: string | null;
 };
@@ -56,7 +58,13 @@ export async function listBrainKeys(workspaceId: string): Promise<BrainKey[]> {
 
 export async function createBrainKey(
   workspaceId: string,
-  params: { name: string; scope: BrainKeyScope; maxClearance?: BrainKeyClearance | null },
+  params: {
+    name: string;
+    scope: BrainKeyScope;
+    maxClearance?: BrainKeyClearance | null;
+    contextGroupId?: string | null;
+    contextProjectId?: string | null;
+  },
 ): Promise<CreatedBrainKey> {
   const res = await authFetch(base(workspaceId), {
     method: "POST",

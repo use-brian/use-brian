@@ -168,6 +168,10 @@ export const consultRequestSchema = z.object({
   }),
   message: a2aMessageSchema,
   contextId: z.string().min(1).optional(),
+  contextScope: z.object({
+    groupId: z.string().uuid().nullable(),
+    projectId: z.string().uuid().nullable(),
+  }).strict().optional(),
   allowedTools: z.array(z.string().min(1)).optional(),
   externalClientPrincipal: z.object({
     apiKeyId: z.string().uuid(),
@@ -179,12 +183,25 @@ export const consultRequestSchema = z.object({
   pageAnchorId: z.string().uuid().optional(),
   // Blueprint slug to fill on a research step (structural-synthesis P4).
   blueprintId: z.string().min(1).max(128).optional(),
+  decisionContext: z.object({
+    operationId: z.string().min(1).max(512),
+    externalPrincipal: z.boolean(),
+    applicability: z.object({
+      kind: z.enum(['email', 'tool']),
+      key: z.string().min(1).max(256).nullable().optional(),
+    }).strict().optional(),
+  }).strict().optional(),
   caller: callerIdentitySchema,
   chain: consultChainSchema,
 })
 
 export const consultResponseSchema = z.object({
   task: taskSchema,
+  scopeEvidence: z.object({
+    sensitivity: z.enum(['public', 'internal', 'confidential']).optional(),
+    compartments: z.array(z.string()).optional(),
+    projectIds: z.array(z.string().uuid()).optional(),
+  }).strict().optional(),
 })
 
 // ── Errors ──────────────────────────────────────────────────────────────

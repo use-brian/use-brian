@@ -412,6 +412,60 @@ describe('[COMP:workflow/approval] Phase C — pause + resume', () => {
     expect(stores.runs.get(run.id)?.status).toBe('awaiting_input')
   })
 
+  it('freezes an exact decision application id into the pending approval payload', async () => {
+    const stores = makeStores()
+    const approvals = fakeApprovalsStore()
+    const audit = fakeAuditStore()
+    const executorDeps: ExecutorDeps = {
+      workflowStore: stores.workflowStore,
+      runStore: stores.runStore,
+      consultTransport: FAKE_TRANSPORT,
+      resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
+      buildToolRegistry: async () => new Map(),
+    }
+    const workflow = await stores.workflowStore.create({
+      userId: USER_ID,
+      workspaceId: WORKSPACE_ID,
+      name: 'reviewed send',
+      definition: {
+        startStepId: 'send',
+        steps: [{ id: 'send', type: 'tool_call', toolName: 'imapSendMessage', arguments: {} }],
+      },
+    })
+    const run = await stores.runStore.createRun({
+      workflowId: workflow.id,
+      workspaceId: WORKSPACE_ID,
+      triggeredBy: USER_ID,
+      triggerKind: 'manual',
+    })
+    const requestApproval = makeRequestApproval({
+      approvalsStore: approvals,
+      auditStore: audit,
+      workflowStore: stores.workflowStore,
+      runStore: stores.runStore,
+      buildToolRegistry: executorDeps.buildToolRegistry,
+      resolvePrimary: executorDeps.resolvePrimary,
+      deliveries: async () => {},
+      executorDeps,
+    })
+    const applicationId = '00000000-0000-4000-8000-000000000099'
+
+    await requestApproval({
+      runId: run.id,
+      stepRunId: '00000000-0000-4000-8000-000000000098',
+      workspaceId: WORKSPACE_ID,
+      approverUserId: USER_ID,
+      assistantId: PRIMARY_ASSISTANT_ID,
+      toolName: 'imapSendMessage',
+      arguments: { account: 'primary-mailbox' },
+      deliveryChannel: 'web',
+      expiresAt: null,
+      decisionApplicationId: applicationId,
+    })
+
+    expect(approvals.rows[0].approvalPayload).toEqual({ decisionApplicationId: applicationId })
+  })
+
   it('approval.required forces a frozen approval even when the tool policy is allow', async () => {
     const stores = makeStores()
     const approvals = fakeApprovalsStore()

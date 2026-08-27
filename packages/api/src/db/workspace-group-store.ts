@@ -12,17 +12,37 @@
  * [COMP:api/workspace-group-store]
  */
 
-import { queryWithRLS } from './client.js'
+import { randomUUID } from 'node:crypto'
+import {
+  applyRLSGucs,
+  getAppPool,
+  queryWithRLS,
+  rollbackAndRelease,
+} from './client.js'
 
 export type WorkspaceGroup = {
   id: string
   workspaceId: string
   name: string
+  kind: 'sharing' | 'team'
+  key: string | null
+  description: string | null
+  color: string | null
+  status: 'active' | 'archived'
+  compartmentKey: string | null
+  readAll: boolean
   memberCount: number
   createdAt: string
 }
 
 export type GroupMember = { userId: string; name: string | null; email: string | null }
+
+const TEAM_KEY_RE = /^[a-z0-9][a-z0-9-]{0,38}$/
+
+export function validateTeamKey(key: string): string {
+  if (!TEAM_KEY_RE.test(key)) throw new Error('invalid_team_key')
+  return key
+}
 
 export type WorkspaceGroupStore = {
   createGroup(userId: string, workspaceId: string, name: string): Promise<WorkspaceGroup>
@@ -30,6 +50,27 @@ export type WorkspaceGroupStore = {
   addMember(userId: string, groupId: string, memberUserId: string): Promise<void>
   removeMember(userId: string, groupId: string, memberUserId: string): Promise<boolean>
   listMembers(userId: string, groupId: string): Promise<GroupMember[]>
+  createTeam(userId: string, workspaceId: string, input: {
+    name: string
+    key: string
+    description?: string | null
+    color?: string | null
+    readAll?: boolean
+  }): Promise<WorkspaceGroup>
+  setTeamReadBundle(userId: string, groupId: string, input: {
+    readAll: boolean
+    compartmentKeys: string[]
+  }): Promise<void>
+  setTeamAssistants(userId: string, groupId: string, assistantIds: string[]): Promise<void>
+  setTeamAssistant(userId: string, groupId: string, assistantId: string, enabled: boolean): Promise<void>
+  updateTeam(userId: string, groupId: string, input: {
+    name?: string
+    description?: string | null
+    color?: string | null
+    status?: 'active'
+  }): Promise<WorkspaceGroup | null>
+  activateMemberTeamMode(userId: string, workspaceId: string, memberUserId: string): Promise<boolean>
+  archiveTeam(userId: string, groupId: string): Promise<boolean>
 }
 
 export function createDbWorkspaceGroupStore(): WorkspaceGroupStore {
@@ -47,6 +88,13 @@ export function createDbWorkspaceGroupStore(): WorkspaceGroupStore {
         id: row.id,
         workspaceId: row.workspaceId,
         name: row.name,
+        kind: 'sharing',
+        key: null,
+        description: null,
+        color: null,
+        status: 'active',
+        compartmentKey: null,
+        readAll: false,
         memberCount: 0,
         createdAt: row.createdAt.toISOString(),
       }
@@ -59,9 +107,19 @@ export function createDbWorkspaceGroupStore(): WorkspaceGroupStore {
         name: string
         createdAt: Date
         memberCount: number
+        kind: 'sharing' | 'team'
+        key: string | null
+        description: string | null
+        color: string | null
+        status: 'active' | 'archived'
+        compartmentKey: string | null
+        readAll: boolean
       }>(
         userId,
-        `SELECT g.id, g.workspace_id AS "workspaceId", g.name, g.created_at AS "createdAt",
+        `SELECT g.id, g.workspace_id AS "workspaceId", g.name,
+                g.kind, g.key, g.description, g.color, g.status,
+                g.compartment_key AS "compartmentKey", g.read_all AS "readAll",
+                g.created_at AS "createdAt",
                 COUNT(gm.id)::int AS "memberCount"
            FROM workspace_groups g
            LEFT JOIN workspace_group_members gm ON gm.group_id = g.id
@@ -74,6 +132,13 @@ export function createDbWorkspaceGroupStore(): WorkspaceGroupStore {
         id: row.id,
         workspaceId: row.workspaceId,
         name: row.name,
+        kind: row.kind,
+        key: row.key,
+        description: row.description,
+        color: row.color,
+        status: row.status,
+        compartmentKey: row.compartmentKey,
+        readAll: row.readAll,
         memberCount: Number(row.memberCount),
         createdAt: row.createdAt.toISOString(),
       }))
@@ -109,6 +174,233 @@ export function createDbWorkspaceGroupStore(): WorkspaceGroupStore {
         [groupId],
       )
       return r.rows
+    },
+
+    async createTeam(userId, workspaceId, input) {
+      const client = await getAppPool().connect()
+      const groupId = randomUUID()
+      const compartmentKey = `team:${groupId}`
+      try {
+        await client.query('BEGIN')
+        await applyRLSGucs(client, userId)
+        const created = await client.query<{
+          id: string
+          workspaceId: string
+          name: string
+          kind: 'team'
+          key: string
+          description: string | null
+          color: string | null
+          status: 'active'
+          compartmentKey: string
+          readAll: boolean
+          createdAt: Date
+        }>(
+          `INSERT INTO workspace_groups
+             (id, workspace_id, name, kind, key, description, color, status,
+              compartment_key, read_all, created_by)
+           VALUES ($1, $2, $3, 'team', $4, $5, $6, 'active', $7, $8, $9)
+           RETURNING id, workspace_id AS "workspaceId", name, kind, key,
+                     description, color, status,
+                     compartment_key AS "compartmentKey",
+                     read_all AS "readAll", created_at AS "createdAt"`,
+          [
+            groupId,
+            workspaceId,
+            input.name.trim(),
+            validateTeamKey(input.key),
+            input.description ?? null,
+            input.color ?? null,
+            compartmentKey,
+            input.readAll ?? false,
+            userId,
+          ],
+        )
+        await client.query(
+          `INSERT INTO workspace_compartments
+             (workspace_id, key, label, description, color, created_by,
+              managed_by, managed_ref_id)
+           VALUES ($1, $2, $3, $4, $5, $6, 'team', $7)`,
+          [
+            workspaceId,
+            compartmentKey,
+            input.name.trim(),
+            input.description ?? null,
+            input.color ?? null,
+            userId,
+            groupId,
+          ],
+        )
+        await client.query(
+          `INSERT INTO workspace_group_compartment_grants
+             (group_id, compartment_key, granted_by_user_id)
+           VALUES ($1, $2, $3)`,
+          [groupId, compartmentKey, userId],
+        )
+        await client.query(
+          `INSERT INTO workspace_group_members (group_id, user_id)
+           VALUES ($1, $2) ON CONFLICT (group_id, user_id) DO NOTHING`,
+          [groupId, userId],
+        )
+        await client.query('COMMIT')
+        const row = created.rows[0]
+        return { ...row, memberCount: 1, createdAt: row.createdAt.toISOString() }
+      } finally {
+        await rollbackAndRelease(client)
+      }
+    },
+
+    async setTeamReadBundle(userId, groupId, input) {
+      const client = await getAppPool().connect()
+      try {
+        await client.query('BEGIN')
+        await applyRLSGucs(client, userId)
+        const team = await client.query<{ compartmentKey: string }>(
+          `UPDATE workspace_groups
+              SET read_all = $2
+            WHERE id = $1 AND kind = 'team'
+            RETURNING compartment_key AS "compartmentKey"`,
+          [groupId, input.readAll],
+        )
+        if (!team.rows[0]) throw new Error('context_team_not_found')
+        const required = new Set([team.rows[0].compartmentKey, ...input.compartmentKeys])
+        await client.query(
+          'DELETE FROM workspace_group_compartment_grants WHERE group_id = $1',
+          [groupId],
+        )
+        for (const key of required) {
+          await client.query(
+            `INSERT INTO workspace_group_compartment_grants
+               (group_id, compartment_key, granted_by_user_id)
+             VALUES ($1, $2, $3)`,
+            [groupId, key, userId],
+          )
+        }
+        await client.query('COMMIT')
+      } finally {
+        await rollbackAndRelease(client)
+      }
+    },
+
+    async setTeamAssistants(userId, groupId, assistantIds) {
+      const client = await getAppPool().connect()
+      try {
+        await client.query('BEGIN')
+        await applyRLSGucs(client, userId)
+        await client.query('DELETE FROM workspace_group_assistants WHERE group_id = $1', [groupId])
+        for (const assistantId of [...new Set(assistantIds)]) {
+          await client.query(
+            `INSERT INTO workspace_group_assistants
+               (group_id, assistant_id, added_by_user_id)
+             VALUES ($1, $2, $3)`,
+            [groupId, assistantId, userId],
+          )
+        }
+        await client.query('COMMIT')
+      } finally {
+        await rollbackAndRelease(client)
+      }
+    },
+
+    async setTeamAssistant(userId, groupId, assistantId, enabled) {
+      if (enabled) {
+        await queryWithRLS(
+          userId,
+          `INSERT INTO workspace_group_assistants
+             (group_id, assistant_id, added_by_user_id)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (group_id, assistant_id) DO NOTHING`,
+          [groupId, assistantId, userId],
+        )
+        return
+      }
+      await queryWithRLS(
+        userId,
+        `DELETE FROM workspace_group_assistants
+          WHERE group_id = $1 AND assistant_id = $2`,
+        [groupId, assistantId],
+      )
+    },
+
+    async updateTeam(userId, groupId, input) {
+      const sets: string[] = []
+      const values: unknown[] = []
+      const add = (column: string, value: unknown) => {
+        values.push(value)
+        sets.push(`${column} = $${values.length}`)
+      }
+      if (input.name !== undefined) add('name', input.name.trim())
+      if (input.description !== undefined) add('description', input.description)
+      if (input.color !== undefined) add('color', input.color)
+      if (input.status !== undefined) add('status', input.status)
+      if (sets.length === 0) return null
+      values.push(groupId)
+      const client = await getAppPool().connect()
+      try {
+        await client.query('BEGIN')
+        await applyRLSGucs(client, userId)
+        const result = await client.query<{
+          id: string
+          workspaceId: string
+          name: string
+          kind: 'team'
+          key: string
+          description: string | null
+          color: string | null
+          status: 'active' | 'archived'
+          compartmentKey: string
+          readAll: boolean
+          memberCount: number
+          createdAt: Date
+        }>(
+          `UPDATE workspace_groups g
+              SET ${sets.join(', ')}, updated_at = now()
+            WHERE g.id = $${values.length} AND g.kind = 'team'
+            RETURNING g.id, g.workspace_id AS "workspaceId", g.name, g.kind,
+                      g.key, g.description, g.color, g.status,
+                      g.compartment_key AS "compartmentKey",
+                      g.read_all AS "readAll", g.created_at AS "createdAt",
+                      (SELECT COUNT(*)::int FROM workspace_group_members gm
+                        WHERE gm.group_id = g.id) AS "memberCount"`,
+          values,
+        )
+        const row = result.rows[0]
+        if (!row) return null
+        await client.query(
+          `UPDATE workspace_compartments
+              SET label = $2, description = $3, color = $4
+            WHERE managed_by = 'team' AND managed_ref_id = $1`,
+          [row.id, row.name, row.description, row.color],
+        )
+        await client.query('COMMIT')
+        return { ...row, memberCount: Number(row.memberCount), createdAt: row.createdAt.toISOString() }
+      } finally {
+        await rollbackAndRelease(client)
+      }
+    },
+
+    async activateMemberTeamMode(userId, workspaceId, memberUserId) {
+      const result = await queryWithRLS<{ userId: string }>(
+        userId,
+        `UPDATE workspace_members
+            SET team_scope_mode = 'assigned'
+          WHERE workspace_id = $1 AND user_id = $2
+          RETURNING user_id AS "userId"`,
+        [workspaceId, memberUserId],
+      )
+      return result.rows.length > 0
+    },
+
+    async archiveTeam(userId, groupId) {
+      const result = await queryWithRLS<{ id: string }>(
+        userId,
+        `UPDATE workspace_groups
+            SET status = 'archived'
+          WHERE id = $1 AND kind = 'team' AND status = 'active'
+          RETURNING id`,
+        [groupId],
+      )
+      return result.rows.length > 0
     },
   }
 }

@@ -41,6 +41,7 @@ import { ProvenanceSheet } from "@/components/provenance/provenance-sheet";
 import { cn } from "@/lib/utils";
 import type { ProvenanceRow, ProvenanceSourceKind } from "@/lib/api/provenance";
 import { useWorkspaceContext } from "@/lib/workspace-context";
+import { ReclassifyContextButton } from "@/components/context/reclassify-context-dialog";
 
 function BrainEntityInner({
   workspaceId,
@@ -142,13 +143,16 @@ function BrainEntityInner({
           </div>
           <h1 className="text-2xl font-semibold truncate">{entity.name}</h1>
         </div>
-        <button
-          type="button"
-          onClick={handleOpenProvenance}
-          className="text-xs px-3 py-1.5 rounded border border-border hover:bg-muted shrink-0"
-        >
-          {t.brainPage.entityPanel.viewProvenance}
-        </button>
+        <div className="flex shrink-0 items-center gap-2">
+          <ReclassifyContextButton workspaceId={workspaceId} primitive="entity" rowId={entity.id} />
+          <button
+            type="button"
+            onClick={handleOpenProvenance}
+            className="text-xs px-3 py-1.5 rounded border border-border hover:bg-muted shrink-0"
+          >
+            {t.brainPage.entityPanel.viewProvenance}
+          </button>
+        </div>
       </header>
 
       {entity.pendingChanges.length > 0 && (

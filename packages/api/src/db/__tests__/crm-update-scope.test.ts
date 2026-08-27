@@ -130,4 +130,20 @@ describe('[COMP:crm/update] CRM update-by-id viewer-projection threading', () =>
     expect(updated?.stage).toBe('won')
     expect(vi.mocked(updateEntity).mock.calls[0]![3]).toBe(CTX)
   })
+
+  it('uses the shared correction client for both the attribute read and write', async () => {
+    const client = { query: vi.fn() } as never
+    vi.mocked(getEntityById).mockResolvedValue(
+      entity({ kind: 'deal', attributes: { stage: 'lead', amount: 50000 } }),
+    )
+    vi.mocked(updateEntity).mockResolvedValue(
+      entity({ kind: 'deal', attributes: { stage: 'won', amount: 50000 } }),
+    )
+    await setDealStage('u-viewer', 'e-1', 'won', CTX, client)
+    expect(getEntityById).toHaveBeenCalledWith(CTX, 'e-1', {}, client)
+    expect(vi.mocked(updateEntity).mock.calls[0]![4]).toBe(client)
+    expect(vi.mocked(updateEntity).mock.calls[0]![2]).toMatchObject({
+      attributes: { stage: 'won', amount: 50000 },
+    })
+  })
 })

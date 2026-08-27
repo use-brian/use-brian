@@ -40,8 +40,8 @@ export function createDbWorkspaceFilesStore(): WorkspaceFilesStore {
     updateMeta(userId, workspaceId, id, patch) {
       return updateWorkspaceFileMeta(userId, workspaceId, id, patch)
     },
-    updateSize(userId, workspaceId, id, sizeBytes) {
-      return updateWorkspaceFileSize(userId, workspaceId, id, sizeBytes)
+    updateSize(userId, workspaceId, id, sizeBytes, scope) {
+      return updateWorkspaceFileSize(userId, workspaceId, id, sizeBytes, scope)
     },
     delete(userId, workspaceId, id) {
       return deleteWorkspaceFile(userId, workspaceId, id)

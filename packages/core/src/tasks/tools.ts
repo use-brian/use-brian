@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { extractCitations, formatStamp, type CitationIndex } from '@use-brian/shared'
 import type { AccessContext } from '../security/access-context.js'
-import { unionCompartments } from '../security/compartments.js'
+import { resolveWriteScope, scopeEvidenceFromRows } from '../security/context-scope.js'
 import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
 import { tolerantBoolean, tolerantEnumArray, tolerantInt } from '../tools/schema-tolerance.js'
 import {
@@ -186,6 +186,7 @@ function ctxFor(context: {
   assistantKind?: AccessContext['assistantKind']
   clearance?: AccessContext['clearance']
   compartments?: AccessContext['compartments']
+  projectIds?: AccessContext['projectIds']
 }): AccessContext {
   return {
     workspaceId: context.workspaceId,
@@ -194,6 +195,7 @@ function ctxFor(context: {
     assistantKind: context.assistantKind ?? 'standard',
     clearance: context.clearance,
     compartments: context.compartments,
+    projectIds: context.projectIds,
   }
 }
 
@@ -362,6 +364,7 @@ export function createTaskTools(
       parent_id: idShape.nullable().optional().describe('UUID of an existing same-workspace task to nest this one under. Omit or pass null for a top-level task. The DB rejects cross-workspace parents.'),
       status: statusEnum.optional().describe('Defaults to `todo`. Use `archived` instead of deleting.'),
       external_ref: z.record(z.unknown()).optional().describe('Reserved for sync-engine round-tripping ({provider, id, url}). Leave empty unless the user is asking you to mirror an existing Linear/Asana task.'),
+      projectId: idShape.nullable().optional().describe('Stable Project id for this task. Omit or pass null for Workspace General. This associates the task only; it never changes the current chat context.'),
       attributes: z.record(z.unknown()).optional().describe('Free-form JSONB for user-defined per-task keys — typically sprint estimation / ordering / velocity (e.g. `estimate_days`, `estimate_points`, `order`). Schema is unvalidated; whatever keys the workspace converges on. Use the `description` field rather than a `description` key here. Whole object overwrites on `updateTask` — read with `getTask` first if you only want to change one key.'),
       depends_on: z.array(idShape).max(50).optional().describe('Task ids this task depends on. Each becomes a task→task `depends_on` graph edge — the daily turn topologically reasons over the dependency graph (A depends_on B means "do B before A"). Same-workspace ids only. v1 limitation: append-only — emits new edges but does not remove existing ones. To restructure a dependency graph, soft-delete (`status: archived`) and re-create.'),
       links: explicitLinksField,
@@ -427,6 +430,17 @@ export function createTaskTools(
       }
 
       try {
+        const writeScope = resolveWriteScope({
+          baseCompartments: context.assistantDefaultCompartments,
+          baseProjectIds: context.assistantDefaultProjectIds,
+          explicitProjectIds: input.projectId ? [input.projectId] : undefined,
+          evidence: context.scopeAccumulator ?? {
+            sensitivity: context.sensitivity?.max,
+            compartments: context.compartmentAccumulator?.compartments,
+          },
+          compartmentGrant: context.compartments,
+          projectGrant: context.projectIds,
+        })
         const task = await store.create({
           userId: context.userId,
           workspaceId: context.workspaceId!,
@@ -441,10 +455,8 @@ export function createTaskTools(
             input.description !== undefined
               ? mergeDescription(input.attributes, input.description)
               : input.attributes,
-          compartments: unionCompartments(
-            context.compartmentAccumulator?.compartments,
-            context.assistantDefaultCompartments,
-          ),
+          compartments: writeScope.compartments,
+          projectIds: writeScope.projectIds,
           source: opts?.writeSource,
           // Provenance anchors (mig 316). Extraction runs (writeSource
           // 'extracted') and the programmatic brain-MCP surface carry a
@@ -472,6 +484,8 @@ export function createTaskTools(
           sourceId: task.id,
           source: 'user',
           links: input.links,
+          compartments: writeScope.compartments,
+          projectIds: writeScope.projectIds,
         })
         // Echo the moment back when one was kept, so a model that cited a
         // moment the transcript does not contain sees it was dropped.
@@ -517,13 +531,14 @@ export function createTaskTools(
           assistantKind: context.assistantKind,
           clearance: context.clearance,
           compartments: context.compartments,
+          projectIds: context.projectIds,
         }),
         input.id,
       )
       if (!task || task.workspaceId !== context.workspaceId) {
         return { data: taskNotFoundMessage(input.id), isError: true }
       }
-      return { data: fullRow(task) }
+        return { data: fullRow(task), scopeEvidence: scopeEvidenceFromRows([task]) }
     },
   })
 
@@ -542,6 +557,7 @@ export function createTaskTools(
       due_before: isoDateOrDateTime.optional(),
       due_after: isoDateOrDateTime.optional(),
       tag: z.string().min(1).max(64).optional(),
+      projectId: idShape.nullable().optional().describe('Filter by stable Project id, or null for Workspace General.'),
       parent_id: idShape.optional().describe('Pass a parent task id to fetch its sub-tasks.'),
       include_archived: tolerantBoolean().optional().default(false),
       limit: tolerantInt({ min: 1, max: 100 }).optional().default(25),
@@ -560,6 +576,7 @@ export function createTaskTools(
           assistantKind: context.assistantKind,
           clearance: context.clearance,
           compartments: context.compartments,
+          projectIds: context.projectIds,
         }),
         {
           assigneeId: input.assignee_id,
@@ -567,6 +584,7 @@ export function createTaskTools(
           dueBefore: input.due_before ? new Date(input.due_before) : undefined,
           dueAfter: input.due_after ? new Date(input.due_after) : undefined,
           tag: input.tag,
+          projectId: input.projectId,
           parentId: input.parent_id,
           includeArchived: input.include_archived,
           limit: input.limit,
@@ -574,7 +592,7 @@ export function createTaskTools(
       )
 
       opts?.onEvent?.({ type: 'task_listed', resultCount: rows.length }, eventCtx(context))
-      return { data: rows.map(compactRow) }
+        return { data: rows.map(compactRow), scopeEvidence: scopeEvidenceFromRows(rows) }
     },
   })
 
@@ -599,7 +617,23 @@ export function createTaskTools(
     try {
       // Assistant-mediated write (incl. interactive chat) — the workflow
       // task-event self-loop guard keys on this (fromBots gate).
-      updated = await store.update(context.userId, id, fields, { writtenBy: 'system' })
+      const writeScope = resolveWriteScope({
+        baseCompartments: context.assistantDefaultCompartments,
+        baseProjectIds: context.assistantDefaultProjectIds,
+        evidence: context.scopeAccumulator ?? {
+          sensitivity: context.sensitivity?.max,
+          compartments: context.compartmentAccumulator?.compartments,
+        },
+        compartmentGrant: context.compartments,
+        projectGrant: context.projectIds,
+      })
+      updated = await store.update(context.userId, id, fields, {
+        writtenBy: 'system',
+        scope: {
+          compartments: writeScope.compartments,
+          projectIds: writeScope.projectIds,
+        },
+      })
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       if (msg.includes('parent_id must reference a task in the same workspace')) {
@@ -677,6 +711,13 @@ export function createTaskTools(
       // Field-only path goes through applyUpdate (handles supersession);
       // links-only path requires the gate check + same task id.
       const writeEdgesAndClose = async (taskId: string): Promise<{ linksMsg: string; closesMsg: string }> => {
+        const edgeWriteScope = resolveWriteScope({
+          baseCompartments: context.assistantDefaultCompartments,
+          baseProjectIds: context.assistantDefaultProjectIds,
+          evidence: context.scopeAccumulator,
+          compartmentGrant: context.compartments,
+          projectGrant: context.projectIds,
+        })
         const linksSummary = await applyExplicitLinks({
           entityLinks: opts?.entityLinks,
           workspaceId: context.workspaceId!,
@@ -686,6 +727,8 @@ export function createTaskTools(
           sourceId: taskId,
           source: 'user',
           links: input.links,
+          compartments: edgeWriteScope.compartments,
+          projectIds: edgeWriteScope.projectIds,
         })
         const closesSummary = await applyExplicitCloses({
           entityLinks: opts?.entityLinks,
@@ -814,6 +857,7 @@ export function createTaskTools(
         assistantKind: context.assistantKind,
         clearance: context.clearance,
         compartments: context.compartments,
+        projectIds: context.projectIds,
       }),
       {
         assigneeId: filter.assignee_id,
@@ -846,8 +890,22 @@ export function createTaskTools(
     let failed = 0
     for (const row of rows) {
       try {
+        const writeScope = resolveWriteScope({
+          baseCompartments: context.assistantDefaultCompartments,
+          baseProjectIds: context.assistantDefaultProjectIds,
+          evidence: context.scopeAccumulator ?? {
+            sensitivity: context.sensitivity?.max,
+            compartments: context.compartmentAccumulator?.compartments,
+          },
+          compartmentGrant: context.compartments,
+          projectGrant: context.projectIds,
+        })
         const result = await store.update(context.userId, row.id, fieldsFor(row), {
           writtenBy: 'system',
+          scope: {
+            compartments: writeScope.compartments,
+            projectIds: writeScope.projectIds,
+          },
         })
         if (result) {
           updated++

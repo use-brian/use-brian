@@ -445,7 +445,7 @@ describe('[COMP:api/kb-write-capability] source write-access cache', () => {
     // Body-only: no other column assignments besides updated_at.
     expect(sql).not.toContain('tags =')
     expect(sql).not.toContain('sensitivity =')
-    expect(mockQuery.mock.calls[0][1]).toEqual(['New body', 'e1', 't1'])
+    expect(mockQuery.mock.calls[0][1]).toEqual(['New body', 'e1', 't1', [], []])
   })
 
   it('updateManualEntryContent returns null when the id is not a manual entry in the workspace', async () => {

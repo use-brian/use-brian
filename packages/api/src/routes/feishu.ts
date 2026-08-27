@@ -1037,6 +1037,7 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
       workerManager: options.workerManager,
       episodicStore: options.episodicStore,
       sessionStateStore: options.sessionStateStore,
+      crmEmailDraftStore: options.crmEmailDraftStore,
       capabilityStore: options.capabilityStore,
       hooks: {
         async onProcessingStart() { await setStatus('Thinking...', true) },
@@ -1058,6 +1059,13 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
             if (entry) entry.done = true
           }
           await setStatus(statusText())
+        },
+        async onGoalAccepted(message) {
+          await adapter.sendMessage(
+            incoming.channelId,
+            { text: message },
+            replyTarget ? { threadTs: replyTarget } : undefined,
+          )
         },
         async onConfirmationRequired(request, resolver) {
           pendingConfirmations.set(incoming.channelId, {

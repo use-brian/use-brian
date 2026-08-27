@@ -190,6 +190,7 @@ type SlackRouteOptions = {
   deferredConfirmationStore?: DeferredConfirmationStore
   episodicStore?: import('@use-brian/core').EpisodicStore
   sessionStateStore?: import('@use-brian/core').SessionStateStore
+  crmEmailDraftStore?: import('@use-brian/core').CrmEmailDraftStore
   capabilityStore: import('@use-brian/core').CapabilityStore
   /**
    * Connector-action audit deps. When both are set + the answering
@@ -1248,6 +1249,7 @@ type ProcessMessageParams = {
   activeAbortControllers: Map<string, ActiveSlackTurn>
   episodicStore?: import('@use-brian/core').EpisodicStore
   sessionStateStore?: import('@use-brian/core').SessionStateStore
+  crmEmailDraftStore?: import('@use-brian/core').CrmEmailDraftStore
   capabilityStore: import('@use-brian/core').CapabilityStore
 }
 
@@ -1868,6 +1870,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     workerManager: params.workerManager,
     episodicStore: params.episodicStore,
     sessionStateStore: params.sessionStateStore,
+    crmEmailDraftStore: params.crmEmailDraftStore,
     capabilityStore: params.capabilityStore,
     hooks: {
       async onProcessingStart() {
@@ -1896,6 +1899,9 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
           }
         }
         await updateToolStatus()
+      },
+      async onGoalAccepted(message) {
+        await adapter.sendMessage(incoming.channelId, { text: message }, threadOpts)
       },
       async onConfirmationRequired(req, resolver) {
         params.pendingSlackConfirmations.set(params.sessionChannelId, {

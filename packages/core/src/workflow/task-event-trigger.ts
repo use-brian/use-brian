@@ -159,6 +159,7 @@ function addedTags(event: TaskLifecycleEvent): string[] {
  * `inChannels` as a set); the ADDED tag set rides `tags` (matched by
  * `match.tags` — appearance semantics: a routing-tag subscription fires when
  * the tag appears, never on unrelated edits of an already-tagged task); the
+ * full live tag set rides `currentTags` (persistent-state matching); the
  * current assignee rides `mentions`; `writtenBy` becomes `isBot`. The raw
  * payload is written verbatim to `workflow_runs.input.event` so a step
  * addresses `{{input.event.taskId}}` / `{{input.event.action}}` without a
@@ -180,6 +181,7 @@ export function taskLifecycleToDispatchEvent(
     actions,
     mentions: event.assigneeId !== null ? [event.assigneeId] : [],
     tags: tagsAdded,
+    currentTags: event.tags,
     isBot: event.writtenBy === 'system',
     payload: {
       taskId: event.taskId,

@@ -48,6 +48,7 @@ function row(over: Partial<ViewListRow> & Pick<ViewListRow, "id" | "name">): Vie
     teamspaceId: null,
     nameOrigin: "user",
     ...over,
+    projectId: over.projectId ?? null,
   };
 }
 

@@ -13,7 +13,7 @@
 // in-process tool".
 
 import { z } from 'zod'
-import { buildTool, type Embedder, type RetrievalActor, type Tool } from '@use-brian/core'
+import { buildTool, scopeEvidenceFromRows, type Embedder, type RetrievalActor, type Tool } from '@use-brian/core'
 import {
   searchRecording as searchRecordingFn,
   readRecordingRange,
@@ -93,7 +93,7 @@ export function createSearchRecordingTool(deps: CreateSearchRecordingToolDeps): 
             embedder ? { embedder } : undefined,
           )
         }
-        return { data: hits }
+        return { data: hits, scopeEvidence: scopeEvidenceFromRows(hits) }
       } catch (err) {
         return {
           data: `searchRecording failed: ${err instanceof Error ? err.message : String(err)}`,

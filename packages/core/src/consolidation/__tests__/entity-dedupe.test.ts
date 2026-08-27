@@ -162,6 +162,22 @@ describe('[COMP:brain/entity-dedupe] runEntityDedupe', () => {
     ])
   })
 
+  it('surfaces exact-name people for review without auto-merging them', async () => {
+    const repo = fakeMergeRepo()
+    const result = await runEntityDedupe(
+      deps([cluster('person', 'jordankim', ['person-a', 'person-b'])], repo),
+    )
+
+    expect(repo.calls).toEqual([])
+    expect(result.pairsMerged).toBe(0)
+    expect(result.details).toEqual([expect.objectContaining({
+      kind: 'person',
+      survivorId: 'person-a',
+      suggestedIds: ['person-b'],
+      mergedIds: [],
+    })])
+  })
+
   it('skips singleton clusters defensively without calling merge', async () => {
     const repo = fakeMergeRepo()
     const result = await runEntityDedupe(
@@ -204,6 +220,7 @@ describe('[COMP:brain/entity-dedupe] runEntityDedupe', () => {
         displayNameNormalized: 'belvedere',
         survivorId: 'd-old',
         mergedIds: ['e', 'f'],
+        suggestedIds: [],
         conflictedIds: [],
         erroredIds: [],
       },

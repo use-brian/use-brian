@@ -99,6 +99,8 @@ describe('[COMP:brain/tasks-list-http] GET /api/brain/tasks', () => {
         tags: ['project:launch'],
         parentId: null,
         attributes: { priority: 'high' },
+        projectId: null,
+        contextTeamIds: [],
         updatedAt: '2026-07-20T00:00:00.000Z',
       },
     ])

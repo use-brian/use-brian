@@ -42,6 +42,8 @@ export type IngestRuleRow = {
    * the produced Episode inherits the source default (`internal`).
    */
   episodeSensitivity: 'public' | 'internal' | 'confidential' | null
+  compartments: string[]
+  projectIds: string[]
 }
 
 export type IngestRulesStore = {
@@ -93,7 +95,9 @@ const PUBLIC_COLS = `
   routing_schedule AS "routingSchedule",
   routing_timezone AS "routingTimezone",
   alert,
-  episode_sensitivity AS "episodeSensitivity"
+  episode_sensitivity AS "episodeSensitivity",
+  compartments,
+  project_ids AS "projectIds"
 ` as const
 
 export function createIngestRulesStore(): IngestRulesStore {
@@ -157,8 +161,18 @@ export function createIngestRulesStore(): IngestRulesStore {
         actingUserId,
         `INSERT INTO ingest_rules
            (connector_instance_id, source, rule_order, filter_type,
-            filter_params, routing_mode, routing_schedule, alert)
-         VALUES ${tuples.join(', ')}`,
+            filter_params, routing_mode, routing_schedule, alert,
+            compartments, project_ids)
+         SELECT seeded.connector_instance_id, seeded.source,
+                seeded.rule_order, seeded.filter_type,
+                seeded.filter_params::jsonb, seeded.routing_mode,
+                seeded.routing_schedule, seeded.alert,
+                ci.compartments, ci.project_ids
+           FROM (VALUES ${tuples.join(', ')}) AS seeded(
+             connector_instance_id, source, rule_order, filter_type,
+             filter_params, routing_mode, routing_schedule, alert
+           )
+           JOIN connector_instance ci ON ci.id = seeded.connector_instance_id`,
         values,
       )
       return result.rowCount ?? templates.length

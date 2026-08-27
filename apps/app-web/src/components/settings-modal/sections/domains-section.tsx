@@ -250,7 +250,7 @@ export function SubdomainRow({
       <div className="flex items-center gap-2">
         <Globe className="size-4 shrink-0 text-muted-foreground" aria-hidden />
         {editing ? (
-          <div className="flex min-w-0 flex-1 items-center rounded-md border border-border bg-background transition-[border-color,box-shadow] focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30 [&_:focus-visible]:shadow-none">
+          <div className="flex min-w-0 flex-1 items-center rounded-md border border-border bg-background transition-[border-color,box-shadow] focus-within:border-ring [&_:focus-visible]:shadow-none">
             <input
               value={label}
               onChange={(e) => setLabel(e.target.value)}
@@ -427,7 +427,7 @@ export function SubdomainClaim({
   return (
     <div className="space-y-1.5">
       <div className="flex items-center gap-2">
-        <div className="flex min-w-0 flex-1 items-center rounded-md border border-border bg-background transition-[border-color,box-shadow] focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30 [&_:focus-visible]:shadow-none">
+        <div className="flex min-w-0 flex-1 items-center rounded-md border border-border bg-background transition-[border-color,box-shadow] focus-within:border-ring [&_:focus-visible]:shadow-none">
           <input
             value={label}
             onChange={(e) => setLabel(e.target.value)}

@@ -15,12 +15,13 @@ vi.mock('../../db/goals.js', () => ({
 }))
 
 import { createGoalWorkTools, type GoalWorkToolsDeps } from '../work-tools.js'
-import { getGoalByIdSystem, setGoalAwaitingEventSystem, stampGoalCompletionSystem } from '../../db/goals.js'
+import { getGoalByIdSystem, setGoalAwaitingEventSystem, stampGoalCompletionSystem, updateGoalSystem } from '../../db/goals.js'
 import type { EventSubscription, GoalVerifier } from '@use-brian/core'
 
 const mockGet = vi.mocked(getGoalByIdSystem)
 const mockStamp = vi.mocked(stampGoalCompletionSystem)
 const mockSetAwaiting = vi.mocked(setGoalAwaitingEventSystem)
+const mockUpdate = vi.mocked(updateGoalSystem)
 
 beforeEach(() => vi.clearAllMocks())
 
@@ -303,6 +304,23 @@ describe('[COMP:goals/work-tools] failure copy — misses carry the discovery po
     expect(data).toContain('confirmGoal')
     expect(data).toMatch(/nothing was started/i)
     expect(data).toMatch(/refused the same way/i)
+  })
+
+  it('workTask: emits acceptance metadata only after kickoff succeeds', async () => {
+    mockGet.mockResolvedValue(GOAL as never)
+    mockUpdate.mockResolvedValue({ ...GOAL, means: { workflowId: 'wf-1' } } as never)
+    const createCompletionWorkflow = vi.fn().mockResolvedValue('wf-1')
+    const kickoffGoal = vi.fn().mockResolvedValue(undefined)
+    const { workTask } = createGoalWorkTools({
+      createCompletionWorkflow,
+      kickoffGoal,
+    })
+
+    const result = await workTask.execute({ goal_id: 'g1' }, ctx)
+
+    expect(kickoffGoal).toHaveBeenCalledWith('g1')
+    expect(result.isError).toBeFalsy()
+    expect(result.meta).toEqual({ goal_event: 'accepted', goal_id: 'g1' })
   })
 
   it('the workspace gate names the missing binding and the remedy, not "this context"', async () => {

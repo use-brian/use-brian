@@ -232,15 +232,21 @@ function makeMemory(over: Partial<MemoryRecord> & Pick<MemoryRecord, 'id' | 'sum
 type World = {
   byCanonical: Map<string, EntityRecord[]>
   byName: Map<string, EntityRecord>
+  byId: Map<string, EntityRecord>
 }
 
 function makeWorld(): World {
-  return { byCanonical: new Map(), byName: new Map() }
+  return { byCanonical: new Map(), byName: new Map(), byId: new Map() }
 }
 
 type SpyCrm = {
   store: CrmStore
-  contacts: Array<{ name: string; email: string | null; externalRef: Record<string, unknown> | null }>
+  contacts: Array<{
+    name: string
+    email: string | null
+    externalRef: Record<string, unknown> | null
+    stableIdentity?: { provider: string; providerInstanceKey: string; subjectId: string }
+  }>
   companies: Array<{ name: string; domain: string | null }>
   contactReturns: ContactRecord[]
   companyReturns: CompanyRecord[]
@@ -291,15 +297,16 @@ function spyCrm(world?: World): SpyCrm {
         name: params.name,
         email: params.email ?? null,
         externalRef: params.externalRef ?? null,
+        ...(params.stableIdentity ? { stableIdentity: params.stableIdentity } : {}),
       })
+      const entityId = `ent-con-${c.contacts.length}`
       const rec = makeContact({
-        id: `con-${c.contacts.length}`,
+        id: entityId,
         name: params.name,
         email: params.email ?? null,
       })
       c.contactReturns.push(rec)
       if (world) {
-        const entityId = `ent-con-${c.contacts.length}`
         const entityRow = makeEntity({
           id: entityId,
           kind: 'person',
@@ -309,6 +316,7 @@ function spyCrm(world?: World): SpyCrm {
         })
         if (params.email) world.byCanonical.set(params.email, [entityRow])
         world.byName.set(`${params.name}|person`, entityRow)
+        world.byId.set(entityId, entityRow)
       }
       return rec
     },
@@ -381,8 +389,8 @@ function spyEntities(world?: World): SpyEntities {
         source: params.source,
       })
     },
-    async getById(_ctx, _id: string, _opts?: { asOf?: Date }) {
-      return null
+    async getById(_ctx, id: string, _opts?: { asOf?: Date }) {
+      return world?.byId.get(id) ?? null
     },
     async findByName(_ctx, displayName: string, opts?: { kind?: EntityKind; asOf?: Date }) {
       const key = `${displayName}|${opts?.kind ?? ''}`
@@ -1462,9 +1470,10 @@ describe('[COMP:brain/pipeline-b] processEpisode', () => {
     warn.mockRestore()
   })
 
-  it('dedups entities by canonical_id (skips CRM create when one already exists)', async () => {
-    const crm = spyCrm()
-    const entities = spyEntities()
+  it('does not select an existing person by email-shaped canonical_id', async () => {
+    const world = makeWorld()
+    const crm = spyCrm(world)
+    const entities = spyEntities(world)
     entities.findByCanonicalIdReturns.set('sarah@notion.so', [
       makeEntity({ id: 'ent-existing', kind: 'person', displayName: 'Sarah Lee', canonicalId: 'sarah@notion.so' }),
     ])
@@ -1481,9 +1490,11 @@ describe('[COMP:brain/pipeline-b] processEpisode', () => {
 
     const result = await processEpisode(baseEpisode(), 'follow-up', deps)
 
-    expect(crm.contacts).toEqual([])
+    expect(crm.contacts).toEqual([
+      { name: 'Sarah Lee', email: 'sarah@notion.so', externalRef: null },
+    ])
     expect(result.entitiesWritten).toHaveLength(1)
-    expect(result.entitiesWritten[0].id).toBe('ent-existing')
+    expect(result.entitiesWritten[0].id).toBe('ent-con-1')
   })
 
   it('bi-temporally supersedes an existing entity when re-extraction changes its attributes', async () => {
@@ -1660,6 +1671,11 @@ describe('[COMP:brain/pipeline-b] processEpisode', () => {
         name: 'Dustin Green',
         email: null,
         externalRef: { provider: 'slack', id: 'U0AQT24KHEV', team_id: 'T1' },
+        stableIdentity: {
+          provider: 'slack',
+          providerInstanceKey: 'T1',
+          subjectId: 'U0AQT24KHEV',
+        },
       },
     ])
   })
@@ -1690,14 +1706,10 @@ describe('[COMP:brain/pipeline-b] processEpisode', () => {
     expect(crm.contacts).toEqual([{ name: 'Pat Doe', email: null, externalRef: null }])
   })
 
-  it('dedups entities by (kind, display_name) when canonical_id is missing — skips CRM create on a name hit', async () => {
-    const crm = spyCrm()
-    const entities = spyEntities()
-    // Existing person in the workspace with the same display_name. The
-    // canonical_id dedup pass misses (extraction emits no canonical_id),
-    // but the name+kind dedup pass must hit and short-circuit the CRM
-    // create path. Without this guard a fresh `contacts` row is written
-    // every time the model re-mentions the same name.
+  it('does not select an existing person by display name', async () => {
+    const world = makeWorld()
+    const crm = spyCrm(world)
+    const entities = spyEntities(world)
     entities.findByNameReturns.set('Pat Doe|person', makeEntity({
       id: 'ent-pat',
       kind: 'person',
@@ -1716,7 +1728,7 @@ describe('[COMP:brain/pipeline-b] processEpisode', () => {
 
     await processEpisode(baseEpisode(), 'note', deps)
 
-    expect(crm.contacts).toEqual([])
+    expect(crm.contacts).toEqual([{ name: 'Pat Doe', email: null, externalRef: null }])
     expect(entities.created).toEqual([])
   })
 
