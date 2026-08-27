@@ -13,6 +13,7 @@ import {
   confirmGoal,
   abandonGoal,
   getGoalDetail,
+  updateGoalContext,
   type GoalRow,
   type GoalDetail,
 } from "../goals";
@@ -38,6 +39,8 @@ const SAMPLE: GoalRow = {
   parentGoalId: null,
   recipeId: null,
   blockerReason: null,
+  contextGroupId: null,
+  contextProjectId: null,
   confirmedAt: null,
   hasWorkflow: false,
   createdAt: "2026-06-30T00:00:00.000Z",
@@ -128,6 +131,35 @@ describe("[COMP:app-web/goals-board] abandonGoal", () => {
     const r = await abandonGoal("g1");
     expect(r.ok).toBe(false);
     expect(r.error).toBeTruthy();
+  });
+});
+
+describe("[COMP:app-web/context-scope] goal context binding", () => {
+  it("sends stable Team and Project ids to the narrow-only endpoint", async () => {
+    const scoped = { ...SAMPLE, contextGroupId: "team-1", contextProjectId: "project-1" };
+    mockAuthFetch.mockResolvedValueOnce(json({ ok: true, goal: scoped }));
+
+    const result = await updateGoalContext("g1", {
+      contextGroupId: "team-1",
+      contextProjectId: "project-1",
+    });
+
+    expect(result).toEqual({ ok: true, goal: scoped });
+    const [url, init] = mockAuthFetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain("/api/goals/g1/context");
+    expect(init.method).toBe("PUT");
+    expect(JSON.parse(String(init.body))).toEqual({
+      contextGroupId: "team-1",
+      contextProjectId: "project-1",
+    });
+  });
+
+  it("surfaces an immutable-binding conflict without pretending it saved", async () => {
+    mockAuthFetch.mockResolvedValueOnce(json({ error: "goal_context_cannot_widen" }, 409));
+    await expect(updateGoalContext("g1", {
+      contextGroupId: null,
+      contextProjectId: null,
+    })).resolves.toEqual({ ok: false, error: "goal_context_cannot_widen" });
   });
 });
 

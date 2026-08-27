@@ -2,8 +2,8 @@
  * [COMP:brain/entity-links] Entity-links store — idempotent create (migration 354).
  *
  * Mocks the pg client and verifies the assert-exists contract: `create` inserts
- * with ON CONFLICT DO NOTHING against the active-identity index, and on
- * conflict reads the existing active row back instead of duplicating it.
+ * against the active-identity index, unions immutable context requirements on
+ * conflict, and retains the defensive read-back for an empty conflict result.
  * Regression for the 2026-07-22 incident: the chat-retrieval local-match
  * re-minted the same `mentioned` edge on every recall (one edge 946x; 85% of
  * the table was duplicates) because edge writers are fire-and-forget and no
@@ -68,7 +68,7 @@ beforeEach(() => {
 const store = createDbEntityLinksStore()
 
 describe('[COMP:brain/entity-links] idempotent create (mig 354)', () => {
-  it('fresh edge: single INSERT carrying the active-identity ON CONFLICT clause', async () => {
+  it('fresh edge: single INSERT carrying the active-identity scope-union clause', async () => {
     mockQueryWithRLS.mockResolvedValueOnce({ rows: [ROW], rowCount: 1 } as never)
     const link = await store.create(PARAMS)
     expect(link.id).toBe(ROW.id)
@@ -76,7 +76,9 @@ describe('[COMP:brain/entity-links] idempotent create (mig 354)', () => {
     const [, sql] = mockQueryWithRLS.mock.calls[0] as [string, string]
     expect(sql).toContain('ON CONFLICT (workspace_id, source_kind, source_id, target_kind, target_id, edge_type)')
     expect(sql).toContain('WHERE valid_to IS NULL AND retracted_at IS NULL')
-    expect(sql).toContain('DO NOTHING')
+    expect(sql).toContain('DO UPDATE SET')
+    expect(sql).toContain('entity_links.compartments || EXCLUDED.compartments')
+    expect(sql).toContain('entity_links.project_ids || EXCLUDED.project_ids')
   })
 
   it('duplicate edge: conflict yields no row → the EXISTING active row is read back', async () => {

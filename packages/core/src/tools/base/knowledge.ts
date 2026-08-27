@@ -22,7 +22,7 @@ import type {
 } from '../../knowledge/types.js'
 import { unifiedDiffLines } from '../../knowledge/text-diff.js'
 import { RANK, researchWriteFloor, type Sensitivity } from '../../security/sensitivity.js'
-import { unionCompartments } from '../../security/compartments.js'
+import { resolveWriteScope, scopeEvidenceFromRows } from '../../security/context-scope.js'
 
 export type KnowledgeToolOptions = {
   /** Whether any sync source is connected for this workspace. */
@@ -187,6 +187,7 @@ export function createKnowledgeTools(
             assistantKind: context.assistantKind ?? 'standard',
             clearance: context.clearance,
             compartments: context.compartments,
+            projectIds: context.projectIds,
           },
           input.query,
           10,
@@ -194,7 +195,6 @@ export function createKnowledgeTools(
         if (results.length === 0) {
           return { data: 'No knowledge entries found for this query. Try browseKnowledge to explore the knowledge base structure.' }
         }
-        for (const r of results) context.sensitivity?.note(r.sensitivity)
         return {
           data: results.map((r) => ({
             id: r.id,
@@ -203,6 +203,7 @@ export function createKnowledgeTools(
             summary: r.summary,
             tags: r.tags,
           })),
+          scopeEvidence: scopeEvidenceFromRows(results),
         }
       } catch (err) {
         return toolFailure(err, {
@@ -238,13 +239,13 @@ export function createKnowledgeTools(
             assistantKind: context.assistantKind ?? 'standard',
             clearance: context.clearance,
             compartments: context.compartments,
+            projectIds: context.projectIds,
           },
           input.path ?? '',
         )
         if (entries.length === 0) {
           return { data: input.path ? `No entries found at path "${input.path}".` : 'The knowledge base is empty.' }
         }
-        for (const r of entries) context.sensitivity?.note(r.sensitivity)
         return {
           data: entries.map((r) => ({
             id: r.id,
@@ -252,6 +253,7 @@ export function createKnowledgeTools(
             title: r.title,
             summary: r.summary,
           })),
+          scopeEvidence: scopeEvidenceFromRows(entries),
         }
       } catch (err) {
         return toolFailure(err, {
@@ -287,6 +289,7 @@ export function createKnowledgeTools(
             assistantKind: context.assistantKind ?? 'standard',
             clearance: context.clearance,
             compartments: context.compartments,
+            projectIds: context.projectIds,
           },
           input.id,
         )
@@ -302,7 +305,6 @@ export function createKnowledgeTools(
             isError: true,
           }
         }
-        context.sensitivity?.note(entry.sensitivity)
         return {
           data: {
             path: entry.path,
@@ -312,6 +314,7 @@ export function createKnowledgeTools(
             relatedEntries: entry.relatedIds.length > 0 ? entry.relatedIds : undefined,
             metadata: Object.keys(entry.metadata).length > 0 ? entry.metadata : undefined,
           },
+          scopeEvidence: scopeEvidenceFromRows([entry]),
         }
       } catch (err) {
         return toolFailure(err, {
@@ -333,6 +336,7 @@ export function createKnowledgeTools(
         assistantKind: context.assistantKind ?? 'standard',
         clearance: context.clearance,
         compartments: context.compartments,
+        projectIds: context.projectIds,
       },
       id,
     )
@@ -459,10 +463,21 @@ export function createKnowledgeTools(
         ?? resolvedRule?.defaultSensitivity
         ?? (context.researchMode ? 'public' : 'internal')
       const accumulatorMax: Sensitivity = researchWriteFloor(
-        context.sensitivity?.max,
+        context.scopeAccumulator?.sensitivity ?? context.sensitivity?.max,
         context.researchMode,
       )
-      const stamp: Sensitivity = RANK[accumulatorMax] > RANK[requested] ? accumulatorMax : requested
+      const requestedSensitivity: Sensitivity = RANK[accumulatorMax] > RANK[requested] ? accumulatorMax : requested
+      const writeStamp = resolveWriteScope({
+        sensitivity: requestedSensitivity,
+        baseCompartments: context.assistantDefaultCompartments,
+        baseProjectIds: context.assistantDefaultProjectIds,
+        evidence: context.scopeAccumulator
+          ? { ...context.scopeAccumulator.evidence, sensitivity: undefined }
+          : { compartments: context.compartmentAccumulator?.compartments },
+        compartmentGrant: context.assistantCompartments ?? context.compartments,
+        projectGrant: context.assistantProjectIds ?? context.projectIds,
+      })
+      const stamp = writeStamp.sensitivity
 
       const captureSource = resolvedRule ? sourceForCaptureRule(resolvedRule) : undefined
       const writesManual = resolvedRule?.targetSourceId === null
@@ -498,6 +513,8 @@ export function createKnowledgeTools(
           path: input.path,
           fileContent,
           changeSummary: `add ${input.path}: ${input.title}`,
+          compartments: writeStamp.compartments,
+          projectIds: writeStamp.projectIds,
           requestedBy: { userId: context.userId, label: opts.requesterLabel ?? null },
         })
         if (!result.ok) {
@@ -517,11 +534,6 @@ export function createKnowledgeTools(
         }
       }
 
-      const stampedCompartments = unionCompartments(
-        context.compartmentAccumulator?.compartments,
-        context.assistantDefaultCompartments,
-      )
-
       try {
         const entry = await store.create({
           workspaceId: context.workspaceId,
@@ -530,7 +542,8 @@ export function createKnowledgeTools(
           content: input.content,
           tags: input.tags,
           sensitivity: stamp,
-          compartments: stampedCompartments,
+          compartments: writeStamp.compartments,
+          projectIds: writeStamp.projectIds,
           createdBy: context.userId,
         })
         return { data: { id: entry.id, path: entry.path, sensitivity: stamp, message: 'Knowledge entry created.' } }
@@ -655,7 +668,7 @@ export function createKnowledgeTools(
       // (frontmatter is preserved verbatim), so a turn that drew on
       // higher-tier sources must not write into a lower-tier entry.
       const accumulatorMax: Sensitivity = researchWriteFloor(
-        context.sensitivity?.max,
+        context.scopeAccumulator?.sensitivity ?? context.sensitivity?.max,
         context.researchMode,
       )
       if (RANK[accumulatorMax] > RANK[entry.sensitivity]) {
@@ -664,8 +677,18 @@ export function createKnowledgeTools(
           isError: true,
         }
       }
-      context.sensitivity?.note(entry.sensitivity)
-
+      const successorStamp = resolveWriteScope({
+        sensitivity: entry.sensitivity,
+        baseCompartments: entry.compartments ?? [],
+        baseProjectIds: entry.projectIds ?? [],
+        explicitCompartments: context.assistantDefaultCompartments,
+        explicitProjectIds: context.assistantDefaultProjectIds,
+        evidence: context.scopeAccumulator
+          ? { ...context.scopeAccumulator.evidence, sensitivity: undefined }
+          : { compartments: context.compartmentAccumulator?.compartments },
+        compartmentGrant: context.assistantCompartments ?? context.compartments,
+        projectGrant: context.assistantProjectIds ?? context.projectIds,
+      })
       if (entry.sourceId) {
         // Repo-synced entry — direct commit through the write-back port.
         if (!opts?.repoWriter) {
@@ -682,6 +705,8 @@ export function createKnowledgeTools(
           entry: { id: entry.id, path: entry.path, content: entry.content, sourceId: entry.sourceId },
           newBody: input.content,
           changeSummary: input.changeSummary,
+          compartments: successorStamp.compartments,
+          projectIds: successorStamp.projectIds,
           requestedBy: { userId: context.userId, label: opts.requesterLabel ?? null },
         })
         if (!result.ok) {
@@ -703,7 +728,15 @@ export function createKnowledgeTools(
       // Manual entry — targeted body-only store update (title / tags /
       // sensitivity / compartments / related links untouched).
       try {
-        const updated = await store.updateManualEntryContent(context.workspaceId, entry.id, input.content)
+        const updated = await store.updateManualEntryContent(
+          context.workspaceId,
+          entry.id,
+          input.content,
+          {
+            compartments: successorStamp.compartments,
+            projectIds: successorStamp.projectIds,
+          },
+        )
         if (!updated) {
           return {
             data: notFoundMessage({

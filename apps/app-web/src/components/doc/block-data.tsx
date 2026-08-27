@@ -87,7 +87,12 @@ import {
   type AdjustMemoryChanges,
 } from "@/lib/api/brain-inbox";
 import { fetchWorkspaceTasks, type TaskRow } from "@/lib/api/tasks";
-import { projectOptions } from "@/lib/tasks-view";
+import {
+  listContextProjects,
+  reclassifyContext,
+  type ContextProject,
+} from "@/lib/api/context-scopes";
+import { taskProject } from "@/lib/tasks-view";
 import { loadWorkspaceRoster } from "@/lib/api/workspace-roster";
 import type { AssignableMember } from "@/components/brain/property-edit";
 
@@ -335,6 +340,7 @@ export function BlockData({
   };
 }) {
   const t = useT().docPage;
+  const scopeT = useT().contextScope;
   const workspace = useWorkspaceContext();
   const [rowOverrides, setRowOverrides] = useState<
     Record<string, Record<string, A2UIRowValue>>
@@ -354,6 +360,7 @@ export function BlockData({
   const [peekTaskId, setPeekTaskId] = useState<string | null>(null);
   const [peekTasks, setPeekTasks] = useState<TaskRow[] | null>(null);
   const [peekRoster, setPeekRoster] = useState<AssignableMember[] | null>(null);
+  const [peekProjects, setPeekProjects] = useState<ContextProject[]>([]);
   useEffect(() => {
     if (!peekTaskId) return;
     let cancelled = false;
@@ -377,6 +384,9 @@ export function BlockData({
           if (!cancelled) setPeekRoster([]);
         });
     }
+    listContextProjects(workspace.workspaceId)
+      .then((projects) => { if (!cancelled) setPeekProjects(projects); })
+      .catch(() => { if (!cancelled) setPeekProjects([]); });
     return () => {
       cancelled = true;
     };
@@ -433,6 +443,39 @@ export function BlockData({
       return { ok: true };
     },
     [workspace.workspaceId, peekTaskId, onDataMutated],
+  );
+  const commitPeekProject = useCallback(
+    async (row: TaskRow, projectId: string | null): Promise<{ ok: boolean; error?: string }> => {
+      const widening = taskProject(row) !== null && projectId === null;
+      if (widening) {
+        const confirmed = await confirmDialog({
+          title: scopeT.clearProjectTitle,
+          description: scopeT.clearProjectDescription,
+          confirmLabel: scopeT.clearProjectConfirm,
+          cancelLabel: scopeT.cancel,
+        });
+        if (!confirmed) return { ok: false };
+      }
+      try {
+        await reclassifyContext({
+          workspaceId: workspace.workspaceId,
+          primitive: "task",
+          rowId: row.id,
+          teamIds: row.contextTeamIds ?? [],
+          projectIds: projectId ? [projectId] : [],
+          reason: "Changed task Project in document peek",
+          confirmed: widening,
+        });
+        setPeekTasks((previous) => previous?.map((item) =>
+          item.id === row.id ? { ...item, projectId } : item,
+        ) ?? previous);
+        onDataMutated?.();
+        return { ok: true };
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : scopeT.updateFailed };
+      }
+    },
+    [onDataMutated, scopeT, workspace.workspaceId],
   );
 
   // Apply optimistic overrides + deletions BEFORE rendering so editors
@@ -884,8 +927,9 @@ export function BlockData({
                 workspaceId={workspace.workspaceId}
                 row={peekTask}
                 roster={peekRoster}
-                projects={projectOptions(peekTasks ?? [])}
+                projects={peekProjects}
                 commitField={commitPeekField}
+                commitProject={commitPeekProject}
                 onDelete={deletePeekTask}
                 onClose={() => setPeekTaskId(null)}
               />

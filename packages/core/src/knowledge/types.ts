@@ -21,6 +21,8 @@ export type KnowledgeSearchResult = {
   summary: string | null
   tags: string[]
   sensitivity: Sensitivity
+  compartments?: string[]
+  projectIds?: string[]
 }
 
 export type KnowledgeEntryDetail = {
@@ -32,6 +34,8 @@ export type KnowledgeEntryDetail = {
   tags: string[]
   relatedIds: string[]
   sensitivity: Sensitivity
+  compartments?: string[]
+  projectIds?: string[]
   metadata: Record<string, unknown>
   /** Owning sync source. NULL = manually created (no repo behind it). */
   sourceId: string | null
@@ -50,16 +54,22 @@ export type KnowledgeStoreInterface = {
     sensitivity: Sensitivity
     /** Compartment set (MLS category axis) to stamp on the row. Default '{}'. */
     compartments?: string[]
+    projectIds?: string[]
     createdBy?: string | null
   }): Promise<{ id: string; path: string }>
-  listSummaries(ctx: AccessContext): Promise<Array<{ id: string; path: string; summary: string | null; sensitivity: Sensitivity }>>
+  listSummaries(ctx: AccessContext): Promise<Array<{ id: string; path: string; summary: string | null; sensitivity: Sensitivity; compartments?: string[]; projectIds?: string[] }>>
   /**
    * Body-only update of a MANUAL entry (repo-synced entries go through the
    * `KnowledgeRepoWriter`). The store enforces `source_id IS NULL`; null =
    * not found / not manual. Callers must have read-verified access first
    * (`getById` with the session ctx).
    */
-  updateManualEntryContent(workspaceId: string, id: string, content: string): Promise<{ id: string; path: string } | null>
+  updateManualEntryContent(
+    workspaceId: string,
+    id: string,
+    content: string,
+    scope?: { compartments?: string[]; projectIds?: string[] },
+  ): Promise<{ id: string; path: string } | null>
   hasEntriesForAssistant(assistantId: string): Promise<boolean>
   listSourcesForAssistant(assistantId: string): Promise<Array<{
     id: string
@@ -128,9 +138,18 @@ export type KnowledgeRepoWriter = {
    */
   commitEntryUpdate(params: {
     workspaceId: string
-    entry: { id: string; path: string; content: string; sourceId: string }
+    entry: {
+      id: string
+      path: string
+      content: string
+      sourceId: string
+      compartments?: string[]
+      projectIds?: string[]
+    }
     newBody: string
     changeSummary: string
+    compartments?: string[]
+    projectIds?: string[]
     /**
      * The requesting member: `userId` keys the `kb_repo_write` audit event,
      * `label` (email) lands in the commit-message attribution trailer.
@@ -148,6 +167,8 @@ export type KnowledgeRepoWriter = {
     path: string
     fileContent: string
     changeSummary: string
+    compartments?: string[]
+    projectIds?: string[]
     requestedBy?: { userId: string; label?: string | null } | null
   }): Promise<KnowledgeRepoWriteResult>
 }

@@ -78,6 +78,13 @@ import {
   quietFieldCls,
 } from "@/components/brain/skill-document";
 import { cn } from "@/lib/utils";
+import { ContextScopePicker } from "@/components/context/context-scope-picker";
+import {
+  listContextProjects,
+  listContextTeams,
+  type ContextProject,
+  type ContextTeam,
+} from "@/lib/api/context-scopes";
 
 export default function WorkflowDetailPage({
   params,
@@ -100,6 +107,8 @@ export default function WorkflowDetailPage({
   const [blueprints, setBlueprints] = useState<CustomPageTemplateSummary[]>([]);
   const [skills, setSkills] = useState<WorkspaceSkillSummary[]>([]);
   const [toolGroups, setToolGroups] = useState(() => buildToolCatalog([]));
+  const [contextTeams, setContextTeams] = useState<ContextTeam[]>([]);
+  const [contextProjects, setContextProjects] = useState<ContextProject[]>([]);
   // Origin-aware induction: skills distilled from THIS workflow's runs —
   // derived from the same workspace-skills list the SkillsField uses.
   const learnedSkills = useMemo(
@@ -162,6 +171,19 @@ export default function WorkflowDetailPage({
     return () => {
       cancelled = true;
     };
+  }, [activeId]);
+
+  useEffect(() => {
+    if (!activeId) return;
+    let cancelled = false;
+    Promise.all([listContextTeams(activeId), listContextProjects(activeId)])
+      .then(([teams, projects]) => {
+        if (!cancelled) { setContextTeams(teams); setContextProjects(projects); }
+      })
+      .catch(() => {
+        if (!cancelled) { setContextTeams([]); setContextProjects([]); }
+      });
+    return () => { cancelled = true; };
   }, [activeId]);
 
   // Load only connector tools actually available to this workspace. Official
@@ -505,6 +527,8 @@ export default function WorkflowDetailPage({
       definition,
       enabled: draft.enabled,
       trigger: draft.trigger,
+      contextGroupId: draft.contextGroupId,
+      contextProjectId: draft.contextProjectId,
     });
     setSaving(false);
     if (!result.ok) {
@@ -827,6 +851,22 @@ export default function WorkflowDetailPage({
         )}
       </header>
 
+      <section className="rounded-xl border border-border bg-card p-4">
+        <div className="mb-3">
+          <h2 className="text-sm font-semibold">{t.contextScope.workflowContextTitle}</h2>
+          <p className="text-xs text-muted-foreground">{t.contextScope.workflowContextDescription}</p>
+        </div>
+        <ContextScopePicker
+          teams={contextTeams}
+          projects={contextProjects}
+          teamId={draft.contextGroupId ?? null}
+          projectId={draft.contextProjectId ?? null}
+          onTeamChange={(contextGroupId) => updateDraft({ contextGroupId })}
+          onProjectChange={(contextProjectId) => updateDraft({ contextProjectId })}
+          disabled={Boolean(draft.managedBy)}
+        />
+      </section>
+
       {/* Live activity — visible whenever a run is in flight (Run now,
           schedule, webhook or event), so the user sees which step the
           assistant is working on instead of a silent board. A run paused on
@@ -912,6 +952,13 @@ export default function WorkflowDetailPage({
                 webhookSecret={draft.webhookSecret}
                 onChange={onSaveTrigger}
                 onRotateWebhook={onRotateWebhook}
+                failureDelivery={draft.definition.failureDelivery}
+                onFailureDeliveryChange={(failureDelivery) =>
+                  updateDefinition({ ...draft.definition, failureDelivery })
+                }
+                destinations={destinations}
+                channelOptions={channelOptions}
+                slackChannels={slackChannels}
                 disabled={saving}
               />
             </div>

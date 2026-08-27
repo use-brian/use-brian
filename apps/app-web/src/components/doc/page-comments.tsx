@@ -255,7 +255,7 @@ export function PageComments({
         <div className="flex items-center gap-2.5">
           <div
             {...drop.dropProps}
-            className="relative flex flex-1 flex-col gap-1 rounded-2xl border border-foreground/[0.18] bg-background px-3 py-2 shadow-[0_1px_2px_rgba(0,0,0,0.04)] transition-[border-color,box-shadow] focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30 [&_:focus-visible]:shadow-none"
+            className="relative flex flex-1 flex-col gap-1 rounded-2xl border border-foreground/[0.18] bg-background px-3 py-2 shadow-[0_1px_2px_rgba(0,0,0,0.04)] transition-[border-color,box-shadow] focus-within:border-ring [&_:focus-visible]:shadow-none"
           >
             <FileDropOverlay active={drop.isDragging} />
             {/* The textarea is the input row alone — the attach + send (ArrowUp)

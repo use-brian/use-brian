@@ -22,6 +22,7 @@ const PRIMARY_ASSISTANT_ID = '00000000-0000-0000-0000-000000000002'
 const USER_ID = '00000000-0000-0000-0000-000000000003'
 const DELIVERING_ASSISTANT_ID = '00000000-0000-0000-0000-000000000004'
 const AUTHORING_ASSISTANT_ID = '00000000-0000-0000-0000-000000000005'
+const PROJECT_ID = '00000000-0000-4000-8000-000000000006'
 
 /** Deterministic valid-UUID generator for seeding runs directly into the
  *  fake store's Map (bypassing runWorkflow) — used by the getWorkflowRun
@@ -53,9 +54,10 @@ function fakeStores() {
   const id = () => `00000000-0000-0000-0000-${String(n++).padStart(12, '0')}`
   const workflowStore: WorkflowStore = {
     async create(params) {
+      const projectParams = params as typeof params & { contextProjectId?: string | null }
       const { workspaceId, userId, name, definition, description, trigger, webhookSlug, webhookSecret } = params
       const now = new Date()
-      const r: WorkflowRecord = {
+      const r: WorkflowRecord & { contextProjectId: string | null } = {
         id: id(), workspaceId, createdBy: userId, name, description: description ?? null,
         definition, enabled: true, pausedReason: null,
         trigger: trigger ?? { kind: 'manual' },
@@ -70,6 +72,7 @@ function fakeStores() {
         lifecycleReason: null,
         pinned: false,
         managedBy: null,
+        contextProjectId: projectParams.contextProjectId ?? null,
         createdAt: now, updatedAt: now,
       }
       workflows.set(r.id, r)
@@ -190,7 +193,14 @@ function makeJobStore(overrides: Partial<JobStore> = {}): JobStore & { rows: Sch
   return {
     rows,
     async create(params) {
-      const job: ScheduledJob = {
+      const projectParams = params as typeof params & {
+        contextProjectId?: string | null
+        contextProjectIds?: string[]
+      }
+      const job: ScheduledJob & {
+        contextProjectId: string | null
+        contextProjectIds: string[]
+      } = {
         id: `00000000-0000-0000-0000-${String(n++).padStart(12, '0')}`,
         assistantId: params.assistantId,
         userId: params.userId,
@@ -211,6 +221,8 @@ function makeJobStore(overrides: Partial<JobStore> = {}): JobStore & { rows: Sch
         workflowId: params.workflowId ?? null,
         workflowStepRunId: params.workflowStepRunId ?? null,
         viewId: params.viewId ?? null,
+        contextProjectId: projectParams.contextProjectId ?? null,
+        contextProjectIds: projectParams.contextProjectIds ?? [],
       }
       rows.push(job)
       return job
@@ -769,6 +781,35 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
     expect(data.proposedName).toBe('X')
     expect(data.summary).toContain('echo')
     expect(data.warnings).toEqual([])
+  })
+
+  it('freezes the active Project in the proposal receipt and scheduled workflow', async () => {
+    const { tools, stores, jobStore } = makeAllTools({ allowLegacyDirectWrites: false })
+    const ctx = makeContext() as ToolContext & { activeProjectId: string | null }
+    ctx.activeProjectId = PROJECT_ID
+    const proposed = await tools.proposeWorkflow.execute({
+      name: 'Project-bound weekly check',
+      definition: SIMPLE_DEF,
+      trigger: {
+        kind: 'schedule',
+        schedule: { type: 'weekly', days: ['monday'], time: '09:00' },
+        timezone: 'Asia/Hong_Kong',
+      },
+    }, ctx)
+    expect(proposed.isError).toBeFalsy()
+    expect((proposed.data as { proposedContextProjectId: string }).proposedContextProjectId).toBe(PROJECT_ID)
+
+    // The receipt, not the mutable follow-up context, owns the binding.
+    ctx.activeProjectId = null
+    const created = await tools.createWorkflow.execute({}, ctx)
+    expect(created.isError).toBeFalsy()
+    const workflowId = (created.data as { id: string }).id
+    expect((stores.workflows.get(workflowId) as WorkflowRecord & { contextProjectId?: string | null })
+      ?.contextProjectId).toBe(PROJECT_ID)
+    expect((jobStore.rows[0] as ScheduledJob & { contextProjectId?: string | null })
+      ?.contextProjectId).toBe(PROJECT_ID)
+    expect((jobStore.rows[0] as ScheduledJob & { contextProjectIds?: string[] })
+      ?.contextProjectIds).toEqual([PROJECT_ID])
   })
 
   it('[COMP:api/client-principal-runtime] resolves safe API-key metadata into a receipt-backed reviewed reply', async () => {
@@ -2344,6 +2385,35 @@ describe('[COMP:workflow/tools] external-dependency authoring checks', () => {
     expect((r.data as { ok: boolean }).ok).toBe(true)
   })
 
+  it('[COMP:workflow/failure-delivery] summarizes and preflights the primary assistant failure destination', async () => {
+    const validateDeliveryTarget = vi.fn(async () => ({ ok: true }))
+    const { tools } = makeAllTools({ validateDeliveryTarget })
+    const definition: WorkflowDefinition = {
+      startStepId: 's1',
+      steps: [{
+        id: 's1',
+        type: 'assistant_call',
+        target: { assistantId: DELIVERING_ASSISTANT_ID },
+        prompt: 'Collect.',
+      }],
+      failureDelivery: { channelType: 'slack', channelId: 'C_FAILURES' },
+    }
+    const r = await tools.proposeWorkflow.execute(
+      { name: 'X', definition },
+      makeContext({ assistantId: AUTHORING_ASSISTANT_ID }),
+    )
+    expect(r.isError).toBeFalsy()
+    expect((r.data as { summary: string }).summary).toContain(
+      'Failure notification: slack C_FAILURES',
+    )
+    expect(validateDeliveryTarget).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE_ID,
+      assistantId: PRIMARY_ASSISTANT_ID,
+      channelType: 'slack',
+      channelId: 'C_FAILURES',
+    })
+  })
+
   it('blocks a tool_call against a connector whose preflight fails (the Bad credentials incident)', async () => {
     const preflightConnectorTool = vi.fn(async () => ({
       ok: false,
@@ -2530,6 +2600,8 @@ describe('[COMP:workflow/tools] trigger capability surface (closed-world, derive
     expect(TRIGGER_INPUT_DESCRIPTION).toMatch(/provider: "imap"/)
     expect(TRIGGER_INPUT_DESCRIPTION).toMatch(/\{\{input\.event\.message_id\}\}/)
     expect(TRIGGER_INPUT_DESCRIPTION).toMatch(/inReplyTo/)
+    expect(TRIGGER_INPUT_DESCRIPTION).toMatch(/currentTags/)
+    expect(TRIGGER_INPUT_DESCRIPTION).toMatch(/full live tag set/)
   })
 
   it('createWorkflow accepts and persists an event trigger with a task source (chat-authorable, no web builder needed)', async () => {

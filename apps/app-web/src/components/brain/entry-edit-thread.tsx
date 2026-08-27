@@ -413,7 +413,7 @@ export function EntryEditThread({
       ) : null}
 
       <div className="flex flex-col gap-1.5">
-        <div className="flex items-end gap-2 rounded-lg border border-border bg-muted/30 px-3 py-2 transition-[border-color,box-shadow,background-color] focus-within:border-ring focus-within:bg-background focus-within:ring-2 focus-within:ring-ring/30 [&_:focus-visible]:shadow-none">
+        <div className="flex items-end gap-2 rounded-lg border border-border bg-muted/30 px-3 py-2 transition-[border-color,box-shadow,background-color] focus-within:border-ring focus-within:bg-background [&_:focus-visible]:shadow-none">
           <textarea
             value={draft}
             rows={1}

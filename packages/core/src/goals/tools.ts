@@ -83,6 +83,8 @@ export function createGoalTools(store: GoalStore, opts?: GoalToolOptions): { set
         means: input.workflow_id ? { workflowId: input.workflow_id } : {},
         budget: { maxIterations: input.max_iterations, maxSpend: input.max_spend, deadline: input.deadline ?? null },
         createdByUserId: context.userId,
+        contextGroupId: context.activeGroupId ?? null,
+        contextProjectId: context.activeProjectId ?? null,
       })
       opts?.onEvent?.({ type: 'goal_created', goalId: goal.id }, eventCtx(context))
       // The next-step nudge is load-bearing: a goal without a workflow

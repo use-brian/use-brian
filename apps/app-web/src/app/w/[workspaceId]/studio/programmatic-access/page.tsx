@@ -66,6 +66,14 @@ import {
   revokeOAuthAuthorization,
   type OAuthAuthorization,
 } from "@/lib/api/oauth-authorizations";
+import { ContextScopePicker } from "@/components/context/context-scope-picker";
+import { ContextScopeChips } from "@/components/context/context-scope-chips";
+import {
+  listContextProjects,
+  listContextTeams,
+  type ContextProject,
+  type ContextTeam,
+} from "@/lib/api/context-scopes";
 
 type Mode =
   | { kind: "list" }
@@ -110,6 +118,8 @@ export default function ProgrammaticAccessPage() {
   const { activeId } = useWorkspaces();
   const [keys, setKeys] = useState<BrainKey[] | null>(null);
   const [authorizations, setAuthorizations] = useState<OAuthAuthorization[] | null>(null);
+  const [teams, setTeams] = useState<ContextTeam[]>([]);
+  const [projects, setProjects] = useState<ContextProject[]>([]);
   const [mode, setMode] = useState<Mode>({ kind: "list" });
   const [showRevoked, setShowRevoked] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -120,12 +130,16 @@ export default function ProgrammaticAccessPage() {
     setError(null);
     setAdminOnly(false);
     try {
-      const [loadedKeys, loadedAuths] = await Promise.all([
+      const [loadedKeys, loadedAuths, loadedTeams, loadedProjects] = await Promise.all([
         listBrainKeys(activeId),
         listOAuthAuthorizations(activeId),
+        listContextTeams(activeId),
+        listContextProjects(activeId),
       ]);
       setKeys(loadedKeys);
       setAuthorizations(loadedAuths);
+      setTeams(loadedTeams);
+      setProjects(loadedProjects);
     } catch (err) {
       const message = (err as Error).message;
       // The backend 403s non-admins — show the targeted message, not a
@@ -163,6 +177,8 @@ export default function ProgrammaticAccessPage() {
     return (
       <CreateKeyForm
         workspaceId={activeId}
+        teams={teams}
+        projects={projects}
         onCancel={() => setMode({ kind: "list" })}
         onCreated={(created) => {
           setMode({ kind: "revealed", created });
@@ -231,6 +247,8 @@ export default function ProgrammaticAccessPage() {
                   key={k.id}
                   row={k}
                   t={t}
+                  teams={teams}
+                  projects={projects}
                   onChangeMaxClearance={(next) => changeMaxClearance(k.id, next)}
                   onRevoke={async () => {
                     const ok = await confirmDialog({
@@ -270,7 +288,7 @@ export default function ProgrammaticAccessPage() {
               </summary>
               <ul className="rounded-xl border border-border bg-card divide-y divide-border overflow-hidden mt-3 opacity-80">
                 {revokedKeys.map((k) => (
-                  <KeyRow key={k.id} row={k} t={t} />
+                  <KeyRow key={k.id} row={k} t={t} teams={teams} projects={projects} />
                 ))}
               </ul>
             </details>
@@ -542,11 +560,15 @@ function KeyRow({
   t,
   onRevoke,
   onChangeMaxClearance,
+  teams,
+  projects,
 }: {
   row: BrainKey;
   t: Dictionary;
   onRevoke?: () => void;
   onChangeMaxClearance?: (next: BrainKeyClearance | null) => void;
+  teams: ContextTeam[];
+  projects: ContextProject[];
 }) {
   const isRevoked = row.status === "revoked";
   return (
@@ -582,6 +604,14 @@ function KeyRow({
           )}
         </div>
         <div className="text-[12px] text-muted-foreground mt-0.5 font-mono">{row.prefix}…</div>
+        <div className="mt-1.5">
+          <ContextScopeChips
+            teamId={row.contextGroupId}
+            projectId={row.contextProjectId}
+            teams={teams}
+            projects={projects}
+          />
+        </div>
       </div>
       <MetaCell value={relative(row.lastUsedAt, t)} label={t.programmaticAccess.lastUsedLabel} />
       <MetaCell value={formatDate(row.createdAt)} label={t.programmaticAccess.createdLabel} />
@@ -599,10 +629,14 @@ function KeyRow({
 
 function CreateKeyForm({
   workspaceId,
+  teams,
+  projects,
   onCancel,
   onCreated,
 }: {
   workspaceId: string;
+  teams: ContextTeam[];
+  projects: ContextProject[];
   onCancel: () => void;
   onCreated: (created: CreatedBrainKey) => void;
 }) {
@@ -610,6 +644,8 @@ function CreateKeyForm({
   const [name, setName] = useState("");
   const [scope, setScope] = useState<BrainKeyScope>("read_write");
   const [maxClearance, setMaxClearance] = useState<BrainKeyClearance | null>(null);
+  const [contextGroupId, setContextGroupId] = useState<string | null>(null);
+  const [contextProjectId, setContextProjectId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -620,7 +656,13 @@ function CreateKeyForm({
     setError(null);
     try {
       onCreated(
-        await createBrainKey(workspaceId, { name: name.trim(), scope, maxClearance }),
+        await createBrainKey(workspaceId, {
+          name: name.trim(),
+          scope,
+          maxClearance,
+          contextGroupId,
+          contextProjectId,
+        }),
       );
     } catch (err) {
       setError((err as Error).message);
@@ -722,6 +764,24 @@ function CreateKeyForm({
               <SelectItem value="public">{t.programmaticAccess.clearance.public}</SelectItem>
             </SelectContent>
           </Select>
+        </div>
+
+        <div className="flex flex-col gap-1.5">
+          <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+            {t.programmaticAccess.create.contextLabel}
+          </span>
+          <p className="text-[12px] text-muted-foreground">
+            {t.programmaticAccess.create.contextHint}
+          </p>
+          <ContextScopePicker
+            teams={teams}
+            projects={projects}
+            teamId={contextGroupId}
+            projectId={contextProjectId}
+            onTeamChange={setContextGroupId}
+            onProjectChange={setContextProjectId}
+            disabled={submitting}
+          />
         </div>
 
         {error && (

@@ -26,3 +26,11 @@ export {
   type CrmToolEvent,
   type CrmToolOptions,
 } from './tools.js'
+export {
+  createCrmEmailDraftTools,
+  buildEmailDraftAnchorPrompt,
+  formatActiveEmailDraftContext,
+  type CrmEmailDraft,
+  type CrmEmailDraftStatus,
+  type CrmEmailDraftStore,
+} from './email-drafts.js'

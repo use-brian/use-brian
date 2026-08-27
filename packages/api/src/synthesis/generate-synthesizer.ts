@@ -96,6 +96,10 @@ export type GenerateSynthesisArgs = {
    * clearance and every `save*` write inherits it. Defaults to `internal`.
    */
   sensitivity?: string
+  compartments?: string[]
+  projectIds?: string[]
+  compartmentGrant?: string[] | null
+  projectGrant?: string[] | null
   /**
    * Optional explicit target page (e.g. a workflow-anchored page). When set, the
    * draft fills THAT page; otherwise found-or-created by the subject anchor key.
@@ -193,7 +197,8 @@ export function createGenerateSynthesizer(deps: GenerateSynthesizerDeps): Genera
         assistantId: args.assistantId,
         assistantKind: 'standard',
         clearance: clearanceOf(sensitivity),
-        compartments: null,
+        compartments: args.compartmentGrant ?? null,
+        projectIds: args.projectGrant ?? null,
       },
       storeDeps: deps.embedder ? { embedder: deps.embedder } : undefined,
     })
@@ -247,6 +252,10 @@ export function createGenerateSynthesizer(deps: GenerateSynthesizerDeps): Genera
         assistantId: args.assistantId,
         assistantKind: 'standard',
         sensitivity,
+        compartments: args.compartments ?? [],
+        projectIds: args.projectIds ?? [],
+        compartmentGrant: args.compartmentGrant ?? null,
+        projectGrant: args.projectGrant ?? null,
       },
       blueprint,
       {

@@ -558,6 +558,8 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
         entry: { id: 'e1', path: 'products/vault', content: 'Old body', sourceId: 'src1' },
         newBody: 'New body',
         changeSummary: 'clarify fees',
+        compartments: [],
+        projectIds: [],
         requestedBy: { userId: 'u1', label: 'neal@example.com' },
       })
       expect(result.data).toMatchObject({ id: 'e1', commit: 'abc1234' })
@@ -661,7 +663,12 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
         ctx,
       )
 
-      expect(mockStore.updateManualEntryContent).toHaveBeenCalledWith('t1', 'm1', 'New body')
+      expect(mockStore.updateManualEntryContent).toHaveBeenCalledWith(
+        't1',
+        'm1',
+        'New body',
+        { compartments: [], projectIds: [] },
+      )
       expect(result.data).toMatchObject({ id: 'm1', path: 'products/vault' })
     })
 

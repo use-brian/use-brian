@@ -296,6 +296,10 @@ function makeSession(partial: Partial<Session> = {}): Session {
     mode: partial.mode ?? null,
     visibility: partial.visibility ?? 'owner',
     effectiveClearance: partial.effectiveClearance ?? null,
+    contextGroupId: partial.contextGroupId ?? null,
+    contextProjectId: partial.contextProjectId ?? null,
+    contextCompartments: partial.contextCompartments ?? [],
+    contextLockedAt: partial.contextLockedAt ?? null,
     createdAt: partial.createdAt ?? new Date(),
     lastActiveAt: partial.lastActiveAt ?? new Date(),
   }

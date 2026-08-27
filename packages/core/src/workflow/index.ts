@@ -4,6 +4,7 @@ export {
   WORKFLOW_STEP_RUN_STATUSES,
   type AssistantTargetRef,
   type AssistantCallStep,
+  type WorkflowDelivery,
   type ToolCallStep,
   type WaitStep,
   type WaitDuration,
@@ -66,6 +67,7 @@ export {
 
 export {
   advanceWorkflowRun,
+  WORKFLOW_SCOPE_EVIDENCE_VAR,
   runtimeSuccessors,
   type AdvanceOptions,
   type RunOutcome,

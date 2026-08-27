@@ -45,19 +45,19 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
         },
         entityLinks,
       )
-      return { id: m.id, scope: m.scope, summary: m.summary, detail: m.detail, tags: m.tags, confidence: m.confidence, sensitivity: m.sensitivity, workspaceId: m.workspaceId }
+      return { id: m.id, scope: m.scope, summary: m.summary, detail: m.detail, tags: m.tags, confidence: m.confidence, sensitivity: m.sensitivity, compartments: m.compartments, projectIds: m.projectIds, workspaceId: m.workspaceId }
     },
 
     async update(id, updates, access) {
       const m = await updateMemory(id, updates, access)
       if (!m) return null
-      return { id: m.id, scope: m.scope, summary: m.summary, detail: m.detail, tags: m.tags, confidence: m.confidence, sensitivity: m.sensitivity, workspaceId: m.workspaceId }
+      return { id: m.id, scope: m.scope, summary: m.summary, detail: m.detail, tags: m.tags, confidence: m.confidence, sensitivity: m.sensitivity, compartments: m.compartments, projectIds: m.projectIds, workspaceId: m.workspaceId }
     },
 
     async getById(ctx, id) {
       const m = await getMemoryById(ctx, id)
       if (!m) return null
-      return { id: m.id, scope: m.scope, summary: m.summary, detail: m.detail, tags: m.tags, confidence: m.confidence, sensitivity: m.sensitivity, workspaceId: m.workspaceId }
+      return { id: m.id, scope: m.scope, summary: m.summary, detail: m.detail, tags: m.tags, confidence: m.confidence, sensitivity: m.sensitivity, compartments: m.compartments, projectIds: m.projectIds, workspaceId: m.workspaceId }
     },
 
     async search(ctx, params) {
@@ -70,6 +70,7 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
         return results.map((m) => ({
           id: m.id, scope: m.scope, summary: m.summary,
           detail: m.detail, tags: m.tags, confidence: m.confidence, sensitivity: m.sensitivity,
+          compartments: m.compartments, projectIds: m.projectIds,
         }))
       }
 
@@ -80,6 +81,7 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
       return results.map((m) => ({
         id: m.id, scope: m.scope, summary: m.summary,
         detail: m.detail, tags: m.tags, confidence: m.confidence, sensitivity: m.sensitivity,
+        compartments: m.compartments, projectIds: m.projectIds,
       }))
     },
 
@@ -88,6 +90,7 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
       return results.map((m) => ({
         id: m.id, scope: m.scope, summary: m.summary,
         detail: m.detail, tags: m.tags, confidence: m.confidence, sensitivity: m.sensitivity,
+        compartments: m.compartments, projectIds: m.projectIds,
       }))
     },
 
@@ -102,7 +105,7 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
     async getByIdSystem(id) {
       const m = await getMemoryByIdSystem(id)
       if (!m) return null
-      return { id: m.id, scope: m.scope, summary: m.summary, detail: m.detail, tags: m.tags, confidence: m.confidence, sensitivity: m.sensitivity, workspaceId: m.workspaceId }
+      return { id: m.id, scope: m.scope, summary: m.summary, detail: m.detail, tags: m.tags, confidence: m.confidence, sensitivity: m.sensitivity, compartments: m.compartments, projectIds: m.projectIds, workspaceId: m.workspaceId }
     },
 
     async getIndexRanked(ctx, limit) {

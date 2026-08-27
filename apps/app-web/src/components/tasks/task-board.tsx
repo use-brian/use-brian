@@ -30,6 +30,7 @@ import {
 } from "@/lib/api/tasks";
 import { taskProject } from "@/lib/tasks-view";
 import { STATUS_DOT } from "./task-cells";
+import type { ContextProject } from "@/lib/api/context-scopes";
 
 const LIVE_COLUMNS: readonly TaskStatus[] = ["todo", "in_progress", "in_review", "blocked"];
 const COMPLETED_COLUMNS: readonly TaskStatus[] = ["done", "archived"];
@@ -44,12 +45,14 @@ const PRIORITY_TINT: Record<string, string> = {
 export function TaskBoard({
   rows,
   roster,
+  projects,
   showCompleted,
   onStatusDrop,
   onOpenRecord,
 }: {
   rows: TaskRow[];
   roster: AssignableMember[] | null;
+  projects: ContextProject[];
   /** Reveal the done/archived columns. */
   showCompleted: boolean;
   onStatusDrop: (row: TaskRow, status: TaskStatus) => void;
@@ -110,7 +113,8 @@ export function TaskBoard({
                     ? resolveAssignee(roster, row.assigneeId)
                     : null;
                 const priority = taskPriority(row);
-                const project = taskProject(row);
+                const projectId = taskProject(row);
+                const project = projects.find((item) => item.id === projectId);
                 const icon = taskIcon(row);
                 return (
                   <div
@@ -153,7 +157,7 @@ export function TaskBoard({
                       )}
                       {project && (
                         <span className="truncate rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground border border-border">
-                          {project}
+                          {project.name}
                         </span>
                       )}
                       {row.due && (

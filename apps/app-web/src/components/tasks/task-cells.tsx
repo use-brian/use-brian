@@ -17,6 +17,7 @@
 import { useMemo, useState } from "react";
 import { CalendarDays, ChevronLeft, ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
+import type { ContextProject } from "@/lib/api/context-scopes";
 import { localIsoDay } from "@/lib/tasks-view";
 // Pure Monday-first grid math, shared with `[COMP:app-web/plan-calendar]` —
 // date arithmetic only, no feed types cross the seam.
@@ -492,9 +493,7 @@ export function DueCell({
 }
 
 /**
- * Project cell — popover over the workspace's existing `project:` facets
- * plus a "no project" row and a new-project input (a project is born by
- * naming it — it's a tag namespace, not a primitive; §5).
+ * Project cell backed by the workspace Project registry.
  */
 export function ProjectCell({
   value,
@@ -503,19 +502,16 @@ export function ProjectCell({
   disabled,
 }: {
   value: string | null;
-  /** Existing project names across the workspace's tasks. */
-  projects: string[];
+  projects: ContextProject[];
   onCommit: CellCommit<string | null>;
   disabled?: boolean;
 }) {
   const t = useT().tasksPage;
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [draft, setDraft] = useState("");
 
   function commit(next: string | null) {
     setOpen(false);
-    setDraft("");
     if (next === value) return;
     setBusy(true);
     void onCommit(next).finally(() => setBusy(false));
@@ -530,7 +526,7 @@ export function ProjectCell({
       >
         {value ? (
           <span className="truncate rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground border border-border">
-            {value}
+            {projects.find((project) => project.id === value)?.name ?? value}
           </span>
         ) : (
           <span className="text-muted-foreground/60">{t.noProject}</span>
@@ -547,35 +543,19 @@ export function ProjectCell({
         >
           {t.noProject}
         </button>
-        {projects.map((p) => (
+        {projects.map((project) => (
           <button
-            key={p}
+            key={project.id}
             type="button"
-            onClick={() => commit(p)}
+            onClick={() => commit(project.id)}
             className={cn(
               "flex w-full items-center rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-muted",
-              value === p && "bg-muted/60",
+              value === project.id && "bg-muted/60",
             )}
           >
-            <span className="truncate">{p}</span>
+            <span className="truncate">{project.name}</span>
           </button>
         ))}
-        <div className="mt-1 border-t border-border p-1">
-          <input
-            type="text"
-            value={draft}
-            placeholder={t.newProjectPlaceholder}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                const name = draft.trim();
-                if (name.length > 0) commit(name);
-              }
-            }}
-            className="h-7 w-full rounded-md border border-border bg-background px-2 text-[13px] outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
-          />
-        </div>
       </PopoverContent>
     </Popover>
   );

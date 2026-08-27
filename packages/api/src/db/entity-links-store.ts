@@ -44,6 +44,8 @@ const FULL_SELECT = `
   retracted_reason AS "retractedReason",
   source_episode_id AS "sourceEpisodeId",
   sensitivity,
+  compartments,
+  project_ids AS "projectIds",
   workspace_id AS "workspaceId",
   user_id AS "userId",
   assistant_id AS "assistantId",
@@ -67,6 +69,8 @@ type EntityLinkRow = {
   retractedReason: string | null
   sourceEpisodeId: string | null
   sensitivity: string
+  compartments: string[]
+  projectIds: string[]
   workspaceId: string
   userId: string | null
   assistantId: string | null
@@ -91,6 +95,8 @@ function toLink(row: EntityLinkRow): EntityLinkRecord {
     retractedReason: row.retractedReason,
     sourceEpisodeId: row.sourceEpisodeId,
     sensitivity: row.sensitivity as Sensitivity,
+    compartments: row.compartments ?? [],
+    projectIds: row.projectIds ?? [],
     workspaceId: row.workspaceId,
     userId: row.userId,
     assistantId: row.assistantId,
@@ -133,10 +139,10 @@ export async function createEntityLink(
   // values flow through for past-relationship encoding ("Kinson left
   // DeltaDeFi in August 2025" → validTo set on creation).
   //
-  // Two attempts: insert (ON CONFLICT DO NOTHING → no row on duplicate)
-  // then read the existing active row back. The loop covers the one
-  // race the pair leaves open — a concurrent retract landing between
-  // the conflict and the read-back — by re-inserting.
+  // The retry/read fallback remains for a concurrent retract that can
+  // remove the active row between conflict arbitration and RETURNING.
+  // A duplicate active edge is updated in place so its Team/Project
+  // scope can only narrow by unioning the newly observed evidence.
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const result = await queryWithRLS<EntityLinkRow>(
       actorUserId,
@@ -144,19 +150,27 @@ export async function createEntityLink(
          source_kind, source_id, target_kind, target_id, edge_type,
          attributes, source,
          sensitivity, workspace_id, user_id, assistant_id,
-         source_episode_id,
+         source_episode_id, compartments, project_ids,
          valid_from, valid_to
        )
        VALUES (
          $1, $2, $3, $4, $5,
          $6::jsonb, $7,
          $8, $9, $10, $11,
-         $12,
-         COALESCE($13::timestamptz, now()), $14::timestamptz
+         $12, $13::text[], $14::uuid[],
+         COALESCE($15::timestamptz, now()), $16::timestamptz
        )
        ON CONFLICT (workspace_id, source_kind, source_id, target_kind, target_id, edge_type)
          WHERE valid_to IS NULL AND retracted_at IS NULL
-         DO NOTHING
+         DO UPDATE SET
+           compartments = ARRAY(
+             SELECT DISTINCT unnest(entity_links.compartments || EXCLUDED.compartments)
+             ORDER BY 1
+           ),
+           project_ids = ARRAY(
+             SELECT DISTINCT unnest(entity_links.project_ids || EXCLUDED.project_ids)
+             ORDER BY 1
+           )
        RETURNING ${FULL_SELECT}`,
       [
         params.sourceKind,
@@ -171,6 +185,8 @@ export async function createEntityLink(
         params.userId ?? null,
         params.assistantId ?? null,
         params.sourceEpisodeId ?? null,
+        params.compartments ?? [],
+        params.projectIds ?? [],
         params.validFrom ?? null,
         params.validTo ?? null,
       ],

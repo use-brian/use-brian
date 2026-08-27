@@ -333,6 +333,8 @@ export function createSchedulingTools(deps: SchedulingToolDeps): {
         depth: input.depth,
         modelAlias: input.modelAlias,
         trigger: { kind: 'schedule', schedule, timezone },
+        contextGroupId: context.activeGroupId ?? null,
+        contextProjectId: context.activeProjectId ?? null,
       })
 
       const job = await jobStore.create({
@@ -355,6 +357,12 @@ export function createSchedulingTools(deps: SchedulingToolDeps): {
         nagUntilKeyword: input.nagUntilKeyword ?? null,
         workflowId,
         viewId,
+        contextGroupId: context.activeGroupId ?? null,
+        contextProjectId: context.activeProjectId ?? null,
+        contextCompartments: context.activeGroupId
+          ? (context.assistantDefaultCompartments ?? [])
+          : [],
+        contextProjectIds: context.activeProjectId ? [context.activeProjectId] : [],
       })
 
       // Auto-title the underlying workflow (mig 202). `buildOneStepReminderWorkflow`

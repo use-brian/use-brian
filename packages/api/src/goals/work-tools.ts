@@ -18,6 +18,7 @@
 import { z } from 'zod'
 import { buildTool, EventSubscriptionSchema, notFoundFailure, type GoalClarityAssessor, type GoalRecord, type GoalVerifier, type Tool } from '@use-brian/core'
 import { getGoalByIdSystem, setGoalAwaitingEventSystem, stampGoalCompletionSystem, updateGoalSystem } from '../db/goals.js'
+import { goalAcceptedMeta } from './acknowledgement.js'
 
 export type GoalWorkToolsDeps = {
   /** Build the simple default "complete this task" workflow for a goal's host
@@ -162,7 +163,10 @@ export function createGoalWorkTools(
         )
       }
       await deps.kickoffGoal(updated.id)
-      return { data: `Working the task via goal [${updated.id}] — I'll keep running the workflow until it's done.` }
+      return {
+        data: `Working the task via goal [${updated.id}] — I'll keep running the workflow until it's done.`,
+        meta: goalAcceptedMeta(updated.id),
+      }
     },
   })
 

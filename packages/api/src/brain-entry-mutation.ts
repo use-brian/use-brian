@@ -19,19 +19,18 @@ import { DEAL_STAGES, TASK_STATUSES } from '@use-brian/core'
 import { query } from './db/client.js'
 import type { WorkspaceStore } from './db/workspace-store.js'
 import {
-  appendBrainVerification,
+  applyBrainCorrection,
   getBrainInboxRow,
   listBrainInbox,
   markVerifiedGeneric,
+  type BrainCorrectionVerification,
   type BrainInboxPrimitive,
   type BrainInboxRowDetail,
 } from './db/brain-inbox-store.js'
 import {
-  updateMemory,
   getMemoryByIdSystem,
-  markVerifiedDirect,
 } from './db/memories.js'
-import { recordVerification } from './db/memory-verifications-store.js'
+import { adjustMemoryDecision } from './db/memory-verifications-store.js'
 import { updateEntity } from './db/entities-store.js'
 import {
   setDealStage,
@@ -56,6 +55,8 @@ export const EDITABLE_BRAIN_PRIMITIVES = [
 
 export type EditableBrainPrimitive =
   (typeof EDITABLE_BRAIN_PRIMITIVES)[number]
+
+class BrainMutationTargetMissingError extends Error {}
 
 export const EDITABLE_FIELDS_BY_PRIMITIVE: Record<
   EditableBrainPrimitive,
@@ -352,20 +353,8 @@ export function createBrainEntryMutator(args: {
               ? before.workspaceId
               : undefined
 
-        const updated = await updateMemory(rowId, {
-          scope: nextScope,
-          workspaceId: computedWorkspaceId,
-          sensitivity: nextSensitivity,
-          summary: nextSummary,
-          detail: nextDetail,
-        })
-        if (!updated) {
-          res.status(404).json({ error: 'Memory not found' })
-          return
-        }
-
         const reasonText = typeof reason === 'string' ? reason.slice(0, 500) : undefined
-        const writes: Promise<unknown>[] = []
+        const verifications: Parameters<typeof adjustMemoryDecision>[0]['verifications'] = []
         if (nextScope !== undefined) {
           const modelScope =
             before.scope === 'workspace'
@@ -374,41 +363,32 @@ export function createBrainEntryMutator(args: {
                 ? 'workspace_shared'
                 : 'personal'
           if (modelScope !== scopeUserValue) {
-            writes.push(
-              recordVerification({
-                memoryId: rowId,
-                workspaceId: updated.workspaceId ?? before.workspaceId,
-                verifiedBy: userId,
+            verifications.push(
+              {
                 action: 'adjust_scope',
                 modelValue: modelScope,
                 userValue: scopeUserValue,
                 reason: reasonText,
-              }),
+              },
             )
           }
         }
         if (nextSensitivity !== undefined && nextSensitivity !== before.sensitivity) {
-          writes.push(
-            recordVerification({
-              memoryId: rowId,
-              workspaceId: updated.workspaceId ?? before.workspaceId,
-              verifiedBy: userId,
+          verifications.push(
+            {
               action: 'adjust_sensitivity',
               modelValue: before.sensitivity,
               userValue: nextSensitivity,
               reason: reasonText,
-            }),
+            },
           )
         }
         if (
           (nextSummary !== undefined && nextSummary !== before.summary) ||
           (nextDetail !== undefined && nextDetail !== before.detail)
         ) {
-          writes.push(
-            recordVerification({
-              memoryId: rowId,
-              workspaceId: updated.workspaceId ?? before.workspaceId,
-              verifiedBy: userId,
+          verifications.push(
+            {
               action: 'edit_summary',
               modelValue: { summary: before.summary, detail: before.detail },
               userValue: {
@@ -416,19 +396,33 @@ export function createBrainEntryMutator(args: {
                 detail: nextDetail ?? before.detail,
               },
               reason: reasonText,
-            }),
+            },
           )
         }
-        await Promise.all(writes)
-
-        const stamped = await markVerifiedDirect(updated.id, userId)
+        const stamped = await adjustMemoryDecision({
+          memoryId: rowId,
+          workspaceId: before.workspaceId,
+          verifiedBy: userId,
+          updates: {
+            scope: nextScope,
+            workspaceId: computedWorkspaceId,
+            sensitivity: nextSensitivity,
+            summary: nextSummary,
+            detail: nextDetail,
+          },
+          verifications,
+        })
+        if (!stamped) {
+          res.status(404).json({ error: 'Memory not found' })
+          return
+        }
         void notifyBrainInboxChange(
-          updated.workspaceId ?? before.workspaceId,
+          stamped.workspaceId ?? before.workspaceId,
           'memory',
-          updated.id,
+          stamped.id,
           'update',
         )
-        res.json({ memory: stamped ?? updated })
+        res.json({ memory: stamped })
       } catch (err) {
         console.error('[brain-inbox] workspace memory adjust failed:', err)
         res.status(500).json({ error: 'Failed to adjust memory' })
@@ -500,50 +494,50 @@ export function createBrainEntryMutator(args: {
         }
         const prev = before.rows[0]
 
+        const reasonText = typeof reason === 'string' ? reason.slice(0, 500) : undefined
         // Write under the viewer's workspace projection (primary-reflector
         // shape — the route already verified workspace membership above).
-        const updated = await updateEntity(userId, rowId, {
-          displayName: nextDisplayName,
-          sensitivity: nextSensitivity,
-          verifiedByUserId: userId,
-          verifiedAt: new Date(),
-        }, { workspaceId, userId, assistantId: '', assistantKind: 'primary' })
+        const updated = await applyBrainCorrection({
+          mutate: (client) => updateEntity(userId, rowId, {
+            displayName: nextDisplayName,
+            sensitivity: nextSensitivity,
+            verifiedByUserId: userId,
+            verifiedAt: new Date(),
+          }, { workspaceId, userId, assistantId: '', assistantKind: 'primary' }, client),
+          verifications: (result) => {
+            if (!result) return []
+            const verifications: BrainCorrectionVerification[] = []
+            if (nextDisplayName !== undefined && nextDisplayName !== prev.displayName) {
+              verifications.push({
+                targetKind: 'entity',
+                targetId: rowId,
+                workspaceId,
+                verifiedByUserId: userId,
+                action: 'edit_summary',
+                modelValue: { display_name: prev.displayName },
+                userValue: { display_name: nextDisplayName },
+                reason: reasonText,
+              })
+            }
+            if (nextSensitivity !== undefined && nextSensitivity !== prev.sensitivity) {
+              verifications.push({
+                targetKind: 'entity',
+                targetId: rowId,
+                workspaceId,
+                verifiedByUserId: userId,
+                action: 'adjust_sensitivity',
+                modelValue: prev.sensitivity,
+                userValue: nextSensitivity,
+                reason: reasonText,
+              })
+            }
+            return verifications
+          },
+        })
         if (!updated) {
           res.status(404).json({ error: 'Entity not found' })
           return
         }
-
-        const reasonText = typeof reason === 'string' ? reason.slice(0, 500) : undefined
-        const writes: Promise<unknown>[] = []
-        if (nextDisplayName !== undefined && nextDisplayName !== prev.displayName) {
-          writes.push(
-            appendBrainVerification({
-              targetKind: 'entity',
-              targetId: rowId,
-              workspaceId,
-              verifiedByUserId: userId,
-              action: 'edit_summary',
-              modelValue: { display_name: prev.displayName },
-              userValue: { display_name: nextDisplayName },
-              reason: reasonText,
-            }),
-          )
-        }
-        if (nextSensitivity !== undefined && nextSensitivity !== prev.sensitivity) {
-          writes.push(
-            appendBrainVerification({
-              targetKind: 'entity',
-              targetId: rowId,
-              workspaceId,
-              verifiedByUserId: userId,
-              action: 'adjust_sensitivity',
-              modelValue: prev.sensitivity,
-              userValue: nextSensitivity,
-              reason: reasonText,
-            }),
-          )
-        }
-        await Promise.all(writes)
 
         // Realtime repaint for the adjusted entity row.
         void notifyBrainInboxChange(workspaceId, 'entity', rowId, 'update')
@@ -746,120 +740,104 @@ export function createBrainEntryMutator(args: {
         }
         const prev = before.rows[0]
 
-        // The CRM row IS the entity now — a single updateEntity write
-        // covers display_name + sensitivity.
-        if (prev.entityId && (nextName !== undefined || nextSensitivity !== undefined)) {
-          // Viewer-workspace projection; membership verified above.
-          await updateEntity(userId, prev.entityId, {
-            ...(nextName !== undefined ? { displayName: nextName } : {}),
-            ...(nextSensitivity !== undefined ? { sensitivity: nextSensitivity } : {}),
-            verifiedByUserId: userId,
-            verifiedAt: new Date(),
-          }, { workspaceId, userId, assistantId: '', assistantKind: 'primary' })
-        }
-
-        // Kind-typed fields go through the access-scoped crm.ts helpers —
-        // the target resolves under the same viewer projection as the reads
-        // (the 2026-07-07 write-scope rule), so a projection miss updates
-        // nothing and answers 404 exactly like the read path. In-place
-        // writes: the id is stable, edges stay valid.
-        if (hasTypedChange) {
-          const access = {
-            workspaceId, userId, assistantId: '', assistantKind: 'primary',
-          } as const
-          if (primitiveParam === 'contact') {
-            const updated = await updateContact(userId, rowId, {
-              ...(emailV.value !== undefined ? { email: emailV.value } : {}),
-              ...(phoneV.value !== undefined ? { phone: phoneV.value } : {}),
-              ...(nextCompanyId !== undefined ? { companyId: nextCompanyId } : {}),
-              ...(nextTags !== undefined ? { tags: nextTags } : {}),
-            }, entityLinks, access)
-            if (!updated) {
-              res.status(404).json({ error: 'Row not found' })
-              return
-            }
-          } else if (primitiveParam === 'company') {
-            const updated = await updateCompany(userId, rowId, {
-              ...(domainV.value !== undefined ? { domain: domainV.value } : {}),
-              ...(nextTags !== undefined ? { tags: nextTags } : {}),
-            }, access)
-            if (!updated) {
-              res.status(404).json({ error: 'Row not found' })
-              return
-            }
-          } else {
-            if (nextAmount !== undefined || nextCloseDate !== undefined) {
-              const updated = await updateDeal(userId, rowId, {
-                ...(nextAmount !== undefined ? { amount: nextAmount } : {}),
-                ...(nextCloseDate !== undefined ? { closeDate: nextCloseDate } : {}),
-              }, entityLinks, access)
-              if (!updated) {
-                res.status(404).json({ error: 'Row not found' })
-                return
-              }
-            }
-            // Stage is LAST and only via setDealStage — the canonical
-            // stage-transition verb (crm.md decision 13; never updateDeal).
-            if (nextStage !== undefined) {
-              const updated = await setDealStage(userId, rowId, nextStage, access)
-              if (!updated) {
-                res.status(404).json({ error: 'Row not found' })
-                return
-              }
-            }
-          }
-        }
-
         const reasonText = typeof reason === 'string' ? reason.slice(0, 500) : undefined
-        const writes: Promise<unknown>[] = []
-        if (hasTypedChange) {
-          const beforeAttrs = prev.attributes ?? {}
-          writes.push(
-            appendBrainVerification({
-              targetKind: auditKind(primitiveParam),
-              targetId: rowId,
-              workspaceId,
-              verifiedByUserId: userId,
-              action: 'adjust_attributes',
-              modelValue: Object.fromEntries(
-                sentTyped.map(([k]) => [k, beforeAttrs[k] ?? null]),
-              ),
-              userValue: Object.fromEntries(
-                sentTyped.map(([k, v]) => [k, v ?? null]),
-              ),
-              reason: reasonText,
-            }),
-          )
-        }
-        if (nextName !== undefined && nextName !== prev.name) {
-          writes.push(
-            appendBrainVerification({
-              targetKind: auditKind(primitiveParam),
-              targetId: rowId,
-              workspaceId,
-              verifiedByUserId: userId,
-              action: 'edit_summary',
-              modelValue: { name: prev.name },
-              userValue: { name: nextName },
-              reason: reasonText,
-            }),
-          )
-        }
-        if (nextSensitivity !== undefined && nextSensitivity !== prev.sensitivity) {
-          writes.push(
-            appendBrainVerification({
-              targetKind: auditKind(primitiveParam),
-              targetId: rowId,
-              workspaceId,
-              verifiedByUserId: userId,
-              action: 'adjust_sensitivity',
-              modelValue: prev.sensitivity,
-              userValue: nextSensitivity,
-              reason: reasonText,
-            }),
-          )
-        }
-        await Promise.all(writes)
+        const access = {
+          workspaceId, userId, assistantId: '', assistantKind: 'primary',
+        } as const
+        await applyBrainCorrection({
+          mutate: async (client) => {
+            // The CRM row IS the entity now — a single updateEntity write
+            // covers display_name + sensitivity.
+            if (prev.entityId && (nextName !== undefined || nextSensitivity !== undefined)) {
+              const updated = await updateEntity(userId, prev.entityId, {
+                ...(nextName !== undefined ? { displayName: nextName } : {}),
+                ...(nextSensitivity !== undefined ? { sensitivity: nextSensitivity } : {}),
+                verifiedByUserId: userId,
+                verifiedAt: new Date(),
+              }, access, client)
+              if (!updated) throw new BrainMutationTargetMissingError()
+            }
+
+            // Kind-typed fields go through the access-scoped crm.ts helpers.
+            if (hasTypedChange) {
+              if (primitiveParam === 'contact') {
+                const updated = await updateContact(userId, rowId, {
+                  ...(emailV.value !== undefined ? { email: emailV.value } : {}),
+                  ...(phoneV.value !== undefined ? { phone: phoneV.value } : {}),
+                  ...(nextCompanyId !== undefined ? { companyId: nextCompanyId } : {}),
+                  ...(nextTags !== undefined ? { tags: nextTags } : {}),
+                }, entityLinks, access, client)
+                if (!updated) throw new BrainMutationTargetMissingError()
+              } else if (primitiveParam === 'company') {
+                const updated = await updateCompany(userId, rowId, {
+                  ...(domainV.value !== undefined ? { domain: domainV.value } : {}),
+                  ...(nextTags !== undefined ? { tags: nextTags } : {}),
+                }, access, client)
+                if (!updated) throw new BrainMutationTargetMissingError()
+              } else {
+                if (nextAmount !== undefined || nextCloseDate !== undefined) {
+                  const updated = await updateDeal(userId, rowId, {
+                    ...(nextAmount !== undefined ? { amount: nextAmount } : {}),
+                    ...(nextCloseDate !== undefined ? { closeDate: nextCloseDate } : {}),
+                  }, entityLinks, access, client)
+                  if (!updated) throw new BrainMutationTargetMissingError()
+                }
+                // Stage is LAST and only via setDealStage — the canonical
+                // stage-transition verb (crm.md decision 13; never updateDeal).
+                if (nextStage !== undefined) {
+                  const updated = await setDealStage(userId, rowId, nextStage, access, client)
+                  if (!updated) throw new BrainMutationTargetMissingError()
+                }
+              }
+            }
+            return true
+          },
+          verifications: () => {
+            const verifications: BrainCorrectionVerification[] = []
+            if (hasTypedChange) {
+              const beforeAttrs = prev.attributes ?? {}
+              verifications.push({
+                targetKind: auditKind(primitiveParam),
+                targetId: rowId,
+                workspaceId,
+                verifiedByUserId: userId,
+                action: 'adjust_attributes',
+                modelValue: Object.fromEntries(
+                  sentTyped.map(([k]) => [k, beforeAttrs[k] ?? null]),
+                ),
+                userValue: Object.fromEntries(
+                  sentTyped.map(([k, v]) => [k, v ?? null]),
+                ),
+                reason: reasonText,
+              })
+            }
+            if (nextName !== undefined && nextName !== prev.name) {
+              verifications.push({
+                targetKind: auditKind(primitiveParam),
+                targetId: rowId,
+                workspaceId,
+                verifiedByUserId: userId,
+                action: 'edit_summary',
+                modelValue: { name: prev.name },
+                userValue: { name: nextName },
+                reason: reasonText,
+              })
+            }
+            if (nextSensitivity !== undefined && nextSensitivity !== prev.sensitivity) {
+              verifications.push({
+                targetKind: auditKind(primitiveParam),
+                targetId: rowId,
+                workspaceId,
+                verifiedByUserId: userId,
+                action: 'adjust_sensitivity',
+                modelValue: prev.sensitivity,
+                userValue: nextSensitivity,
+                reason: reasonText,
+              })
+            }
+            return verifications
+          },
+        })
 
         const changedFields = [
           ...(nextName !== undefined ? ['display_name'] : []),
@@ -912,6 +890,10 @@ export function createBrainEntryMutator(args: {
 
         res.json({ ok: true, stamped: true })
       } catch (err) {
+        if (err instanceof BrainMutationTargetMissingError) {
+          res.status(404).json({ error: 'Row not found' })
+          return
+        }
         console.error(`[brain-inbox] ${primitiveParam} adjust failed:`, err)
         // App-layer frozen-v1 constraint violations (crm.ts) are caller
         // errors, not server faults: surface them as 400s.
@@ -987,49 +969,54 @@ export function createBrainEntryMutator(args: {
         }
         const prev = before.rows[0]
 
-        const updated = await updateWorkspaceFileMeta(userId, workspaceId, rowId, {
-          ...(nextSensitivity !== undefined ? { sensitivity: nextSensitivity } : {}),
-          ...(nextTags !== undefined ? { tags: nextTags } : {}),
+        const reasonText = typeof reason === 'string' ? reason.slice(0, 500) : undefined
+        const updated = await applyBrainCorrection({
+          mutate: async (client) => {
+            const result = await updateWorkspaceFileMeta(userId, workspaceId, rowId, {
+              ...(nextSensitivity !== undefined ? { sensitivity: nextSensitivity } : {}),
+              ...(nextTags !== undefined ? { tags: nextTags } : {}),
+            }, client)
+            if (result) {
+              // An explicit edit acknowledges the row and removes it from the
+              // pending queue under the same correction transaction.
+              await markVerifiedGeneric('workspace_file', rowId, userId, client)
+            }
+            return result
+          },
+          verifications: (result) => {
+            if (!result) return []
+            const verifications: BrainCorrectionVerification[] = []
+            if (nextSensitivity !== undefined && nextSensitivity !== prev.sensitivity) {
+              verifications.push({
+                targetKind: 'workspace_file',
+                targetId: rowId,
+                workspaceId,
+                verifiedByUserId: userId,
+                action: 'adjust_sensitivity',
+                modelValue: prev.sensitivity,
+                userValue: nextSensitivity,
+                reason: reasonText,
+              })
+            }
+            if (nextTags !== undefined) {
+              verifications.push({
+                targetKind: 'workspace_file',
+                targetId: rowId,
+                workspaceId,
+                verifiedByUserId: userId,
+                action: 'adjust_attributes',
+                modelValue: { tags: prev.tags },
+                userValue: { tags: nextTags },
+                reason: reasonText,
+              })
+            }
+            return verifications
+          },
         })
         if (!updated) {
           res.status(404).json({ error: 'File not found' })
           return
         }
-        // Stamp verified — an explicit edit is an acknowledgement, so the row
-        // leaves the pending queue (matches the entity / CRM adjust branches).
-        await markVerifiedGeneric('workspace_file', rowId, userId)
-
-        const reasonText = typeof reason === 'string' ? reason.slice(0, 500) : undefined
-        const writes: Promise<unknown>[] = []
-        if (nextSensitivity !== undefined && nextSensitivity !== prev.sensitivity) {
-          writes.push(
-            appendBrainVerification({
-              targetKind: 'workspace_file',
-              targetId: rowId,
-              workspaceId,
-              verifiedByUserId: userId,
-              action: 'adjust_sensitivity',
-              modelValue: prev.sensitivity,
-              userValue: nextSensitivity,
-              reason: reasonText,
-            }),
-          )
-        }
-        if (nextTags !== undefined) {
-          writes.push(
-            appendBrainVerification({
-              targetKind: 'workspace_file',
-              targetId: rowId,
-              workspaceId,
-              verifiedByUserId: userId,
-              action: 'adjust_attributes',
-              modelValue: { tags: prev.tags },
-              userValue: { tags: nextTags },
-              reason: reasonText,
-            }),
-          )
-        }
-        await Promise.all(writes)
 
         void notifyBrainInboxChange(workspaceId, 'workspace_file', rowId, 'update')
         res.json({ ok: true, stamped: true })

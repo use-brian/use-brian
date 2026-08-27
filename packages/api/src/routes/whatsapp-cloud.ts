@@ -92,6 +92,7 @@ export type WhatsAppCloudRouteOptions = {
   skillStore?: import('../db/skill-store.js').SkillStore
   episodicStore?: import('@use-brian/core').EpisodicStore
   sessionStateStore?: import('@use-brian/core').SessionStateStore
+  crmEmailDraftStore?: import('@use-brian/core').CrmEmailDraftStore
   capabilityStore: import('@use-brian/core').CapabilityStore
   /** Best-effort producer for workflows triggered by this channel integration. */
   workflowEventDispatcher?: WorkflowEventDispatcher
@@ -441,8 +442,12 @@ export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router 
       workerManager: options.workerManager,
       episodicStore: options.episodicStore,
       sessionStateStore: options.sessionStateStore,
+      crmEmailDraftStore: options.crmEmailDraftStore,
       capabilityStore: options.capabilityStore,
       hooks: {
+        async onGoalAccepted(message) {
+          await adapter.sendMessage(incoming.channelId, { text: message })
+        },
         async onConfirmationRequired(request, resolver) {
           pending.set(confirmKey, { resolver, toolCallId: request.toolCallId })
           const lines = request.displayLines?.length ? request.displayLines : formatConfirmationInput(request.input)

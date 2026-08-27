@@ -84,9 +84,15 @@ import {
 } from "@/lib/doc-page-url";
 import { DOC_COMMENTS_CHANGED_EVENT } from "@/lib/comment-events";
 import {
+  SlashCommandIndicator,
   SlashCommandMenuList,
   useSlashCommands,
 } from "@/components/chat-app/slash-command-autocomplete";
+import {
+  GoalAcknowledgement,
+  goalAcceptedNoticeFromPayload,
+  type GoalAcceptedNotice,
+} from "@/components/chat-app/goal-acknowledgement";
 import { isHostedEdition } from "@/lib/edition";
 import { modelTierPlanGateApplies } from "@/lib/plan-gate";
 import {
@@ -497,6 +503,7 @@ export function FloatingChat({
   // Doc keeps the page-first affordances; a workspace surface gates them off.
   const isDocOrigin = origin === "doc";
   const t = useT().chat;
+  const tGoal = useT().chatApp;
   // Chat is network/AI — fully unavailable offline. Disable the composer in the
   // bundled app when offline so a turn can't be started (no-op on web/thin).
   const offline = useIsOffline();
@@ -509,6 +516,8 @@ export function FloatingChat({
   const searchParams = useSearchParams();
   const [expanded, setExpanded] = useState(false);
   const [input, setInput] = useState("");
+  const [acceptedGoal, setAcceptedGoal] =
+    useState<GoalAcceptedNotice | null>(null);
   /** Anchors the slash-command popup and scopes its outside-click dismissal
    *  to the composer area. */
   const slashContainerRef = useRef<HTMLDivElement | null>(null);
@@ -1877,6 +1886,11 @@ export function FloatingChat({
                   ? payload.sessionId
                   : null;
               if (id) session.setSession(id);
+              break;
+            }
+            case "goal_accepted": {
+              const notice = goalAcceptedNoticeFromPayload(payload);
+              if (notice) setAcceptedGoal(notice);
               break;
             }
             case "text_delta": {
@@ -3412,6 +3426,8 @@ export function FloatingChat({
             value={input}
             onChange={setInput}
             onKeyDown={slashCommands.handleKeyDown}
+            highlightRanges={slashCommands.highlightRanges}
+            inputWrapClassName="flex-1 min-w-0 rounded-md border border-border bg-background focus-within:border-ring [&_:focus-visible]:shadow-none"
             // While a turn streams, Send QUEUES: the message is handed to the
             // running turn, which takes it at its next safe boundary.
             // Cmd/Ctrl+Enter steers instead — take it as soon as possible.
@@ -3455,6 +3471,27 @@ export function FloatingChat({
             sendLabel={isStreaming ? t.queue.send : t.send}
             slotAttachments={
               <>
+                {acceptedGoal?.sessionId === session.state.sessionId ? (
+                  <GoalAcknowledgement
+                    notice={acceptedGoal}
+                    workspaceId={workspaceId}
+                    labels={{
+                      accepted: tGoal.goalAcceptedLabel,
+                      executing: tGoal.goalAcceptedStatus,
+                      done: tGoal.goalAcceptedDone,
+                      blocked: tGoal.goalAcceptedBlocked,
+                      abandoned: tGoal.goalAcceptedAbandoned,
+                      open: tGoal.goalAcceptedOpen,
+                      dismiss: tGoal.goalAcceptedDismiss,
+                    }}
+                    onDismiss={() => setAcceptedGoal(null)}
+                    className="mb-1.5"
+                  />
+                ) : null}
+                <SlashCommandIndicator
+                  commands={slashCommands}
+                  className="mb-1.5"
+                />
                 {/* Live-recording chrome (expanded mode) — same shared
                     recorder instance as the collapsed pill. */}
                 <DockRecorderRecovery rec={recorder} className="mb-1.5" />
@@ -3566,9 +3603,9 @@ export function FloatingChat({
             // prompt stay fully visible before the box starts scrolling — the
             // old 160px clipped multi-line asks too early.
             textareaClassName={cn(
-              "flex-1 min-w-0 min-h-[36px] max-h-[240px] resize-none overflow-y-auto rounded-md border border-border bg-background",
+              "w-full min-w-0 min-h-[36px] max-h-[240px] resize-none overflow-y-auto bg-transparent",
               "px-3 py-2 text-sm leading-relaxed outline-none",
-              "placeholder:text-muted-foreground",
+              "placeholder:text-muted-foreground focus-visible:shadow-none",
               "disabled:opacity-60",
             )}
           />

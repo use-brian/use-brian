@@ -19,7 +19,9 @@ vi.mock('../../db/memories.js', () => ({
 }))
 
 vi.mock('../../db/memory-verifications-store.js', () => ({
+  adjustMemoryDecision: vi.fn(),
   recordVerification: vi.fn(),
+  verifyMemoryDecision: vi.fn(),
 }))
 
 vi.mock('../../db/memory-recall-events-store.js', () => ({
@@ -74,7 +76,11 @@ import {
 import { query, queryWithRLS } from '../../db/client.js'
 import { resolveAssistantAccess } from '../../db/users.js'
 import { getWorkspaceRoleSystem } from '../../db/workspace-store.js'
-import { recordVerification } from '../../db/memory-verifications-store.js'
+import {
+  adjustMemoryDecision,
+  recordVerification,
+  verifyMemoryDecision,
+} from '../../db/memory-verifications-store.js'
 import { notifyBrainInboxChange } from '../../brain-stream/notify.js'
 import { memoryRoutes } from '../memories.js'
 
@@ -92,6 +98,8 @@ const mockQueryWithRLS = vi.mocked(queryWithRLS)
 const mockResolveAssistantAccess = vi.mocked(resolveAssistantAccess)
 const mockGetTeamRoleSystem = vi.mocked(getWorkspaceRoleSystem)
 const mockRecordVerification = vi.mocked(recordVerification)
+const mockAdjustMemoryDecision = vi.mocked(adjustMemoryDecision)
+const mockVerifyMemoryDecision = vi.mocked(verifyMemoryDecision)
 const mockNotifyBrainInboxChange = vi.mocked(notifyBrainInboxChange)
 
 /** Grant access for the next gate call — one `resolveAssistantAccess` hit. */
@@ -437,29 +445,28 @@ describe('[COMP:api/memories-route] Memory routes', () => {
       expect(mockRecordVerification).not.toHaveBeenCalled()
     })
 
-    it('stamps verified + writes a confirm row on success', async () => {
+    it('stamps verified + writes a confirm row atomically on success', async () => {
       setupAuth()
       mockResolveViewerCtx()
-      mockGetMemoryById.mockResolvedValueOnce(STAGED_MEMORY as never)
-      mockMarkVerifiedDirect.mockResolvedValueOnce({
+      const stamped = {
         ...STAGED_MEMORY,
         verifiedByUserId: 'u_1',
-      } as never)
-      mockRecordVerification.mockResolvedValueOnce({ id: 'ver_1' } as never)
+      }
+      mockGetMemoryById
+        .mockResolvedValueOnce(STAGED_MEMORY as never)
+        .mockResolvedValueOnce(stamped as never)
+      mockVerifyMemoryDecision.mockResolvedValueOnce({ status: 'verified', stamped: true })
 
       const app = createTestApp('/api/assistants/:assistantId/memories', memoryRoutes(), { userId: 'u_1' })
       const res = await request(app).post('/api/assistants/a_1/memories/mem_1/verify').send({})
 
       expect(res.status).toBe(200)
-      expect(mockMarkVerifiedDirect).toHaveBeenCalledWith('mem_1', 'u_1')
-      expect(mockRecordVerification).toHaveBeenCalledWith(
-        expect.objectContaining({
-          memoryId: 'mem_1',
-          workspaceId: 'w_1',
-          verifiedBy: 'u_1',
-          action: 'confirm',
-        }),
-      )
+      expect(mockVerifyMemoryDecision).toHaveBeenCalledWith({
+        memoryId: 'mem_1',
+        workspaceId: 'w_1',
+        verifiedBy: 'u_1',
+      })
+      expect(res.body.memory.verifiedByUserId).toBe('u_1')
       // Realtime: a verify emits an 'update' NOTIFY for the memory row.
       expect(mockNotifyBrainInboxChange).toHaveBeenCalledWith('w_1', 'memory', 'mem_1', 'update')
     })
@@ -526,17 +533,12 @@ describe('[COMP:api/memories-route] Memory routes', () => {
       setupAuth()
       mockResolveViewerCtx()
       mockGetMemoryById.mockResolvedValueOnce(STAGED_MEMORY as never)
-      mockUpdateMemory.mockResolvedValueOnce({
+      mockAdjustMemoryDecision.mockResolvedValueOnce({
         ...STAGED_MEMORY,
         id: 'mem_2',
         scope: 'workspace',
         sensitivity: 'confidential',
         summary: 'Loves espresso',
-      } as never)
-      mockRecordVerification.mockResolvedValue({ id: 'ver' } as never)
-      mockMarkVerifiedDirect.mockResolvedValueOnce({
-        id: 'mem_2',
-        verifiedByUserId: 'u_1',
       } as never)
 
       const app = createTestApp('/api/assistants/:assistantId/memories', memoryRoutes(), { userId: 'u_1' })
@@ -550,26 +552,26 @@ describe('[COMP:api/memories-route] Memory routes', () => {
         })
 
       expect(res.status).toBe(200)
-      // updateMemory supersedes the row.
-      expect(mockUpdateMemory).toHaveBeenCalledWith(
-        'mem_1',
-        expect.objectContaining({
+      const write = mockAdjustMemoryDecision.mock.calls[0][0]
+      expect(write).toMatchObject({
+        memoryId: 'mem_1',
+        workspaceId: 'w_1',
+        verifiedBy: 'u_1',
+        updates: {
           scope: 'workspace',
           sensitivity: 'confidential',
           summary: 'Loves espresso',
-        }),
-      )
+        },
+      })
       // One audit row per changed field — scope, sensitivity, edit_summary.
-      const actions = mockRecordVerification.mock.calls.map((c) => c[0].action)
+      const actions = write.verifications.map((item) => item.action)
       expect(actions).toContain('adjust_scope')
       expect(actions).toContain('adjust_sensitivity')
       expect(actions).toContain('edit_summary')
       // Reason flows through every row.
-      mockRecordVerification.mock.calls.forEach((c) => {
-        expect(c[0].reason).toBe('too narrow')
+      write.verifications.forEach((item) => {
+        expect(item.reason).toBe('too narrow')
       })
-      // The new active row gets the verification stamp.
-      expect(mockMarkVerifiedDirect).toHaveBeenCalledWith('mem_2', 'u_1')
       // Realtime: an adjust supersedes the row, so the NOTIFY carries the new id.
       expect(mockNotifyBrainInboxChange).toHaveBeenCalledWith('w_1', 'memory', 'mem_2', 'update')
     })
@@ -581,15 +583,11 @@ describe('[COMP:api/memories-route] Memory routes', () => {
         ...STAGED_MEMORY,
         sensitivity: 'confidential',
       } as never)
-      mockUpdateMemory.mockResolvedValueOnce({
+      mockAdjustMemoryDecision.mockResolvedValueOnce({
         ...STAGED_MEMORY,
         id: 'mem_2',
         sensitivity: 'confidential',
         summary: 'Loves espresso',
-      } as never)
-      mockRecordVerification.mockResolvedValue({ id: 'ver' } as never)
-      mockMarkVerifiedDirect.mockResolvedValueOnce({
-        id: 'mem_2',
       } as never)
 
       const app = createTestApp('/api/assistants/:assistantId/memories', memoryRoutes(), { userId: 'u_1' })
@@ -603,7 +601,7 @@ describe('[COMP:api/memories-route] Memory routes', () => {
         })
 
       expect(res.status).toBe(200)
-      const actions = mockRecordVerification.mock.calls.map((c) => c[0].action)
+      const actions = mockAdjustMemoryDecision.mock.calls[0][0].verifications.map((item) => item.action)
       expect(actions).not.toContain('adjust_sensitivity')
       expect(actions).toContain('edit_summary')
     })

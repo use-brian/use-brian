@@ -17,6 +17,7 @@ import type {
   RowHistoryInput,
   SearchInput,
 } from './types.js'
+import { scopeEvidenceFromRows } from '../security/context-scope.js'
 
 const LIST_LIMIT_CAP = 100
 
@@ -133,6 +134,7 @@ export function actorFromContext(context: ToolContext): RetrievalActor | Retriev
     assistantKind: context.assistantKind ?? 'standard',
     clearance: context.clearance,
     compartments: context.compartments,
+    projectIds: context.projectIds,
   }
 }
 
@@ -216,7 +218,10 @@ export function createRetrievalTools(
           }
           return { data: body, isError: true }
         }
-        return { data: result satisfies RetrievalResult<unknown> }
+        return {
+          data: result satisfies RetrievalResult<unknown>,
+          scopeEvidence: scopeEvidenceFromRows([result.data]),
+        }
       } catch (err) {
         return retrievalFailure(err, 'getEntity', `entity \`${input.id_or_name}\``)
       }
@@ -246,7 +251,10 @@ export function createRetrievalTools(
           query: input.query,
           resultCount: result.data.length,
         })
-        return { data: result satisfies RetrievalResult<unknown> }
+        return {
+          data: result satisfies RetrievalResult<unknown>,
+          scopeEvidence: scopeEvidenceFromRows(result.data),
+        }
       } catch (err) {
         return retrievalFailure(
           err,
@@ -277,7 +285,10 @@ export function createRetrievalTools(
           resultCount: result.data.length,
           entity: input.entity,
         })
-        return { data: result satisfies RetrievalResult<unknown> }
+        return {
+          data: result satisfies RetrievalResult<unknown>,
+          scopeEvidence: scopeEvidenceFromRows(result.data),
+        }
       } catch (err) {
         return retrievalFailure(err, 'recentEpisodes', input.entity ? `entity \`${input.entity}\`` : 'the recent-episode feed')
       }
@@ -315,7 +326,10 @@ export function createRetrievalTools(
           }
           return { data: body, isError: true }
         }
-        return { data: result satisfies RetrievalResult<unknown> }
+        return {
+          data: result satisfies RetrievalResult<unknown>,
+          scopeEvidence: scopeEvidenceFromRows([result.data]),
+        }
       } catch (err) {
         return retrievalFailure(err, 'provenance', `row ${input.row_id}`)
       }
@@ -372,7 +386,10 @@ export function createRetrievalTools(
           resultCount: result.data.length,
           fn: input.measure.fn,
         })
-        return { data: result satisfies RetrievalResult<unknown> }
+        return {
+          data: result satisfies RetrievalResult<unknown>,
+          scopeEvidence: scopeEvidenceFromRows([result.data]),
+        }
       } catch (err) {
         return retrievalFailure(
           err,
@@ -417,7 +434,10 @@ export function createRetrievalTools(
           }
           return { data: body, isError: true }
         }
-        return { data: result satisfies RetrievalResult<unknown> }
+        return {
+          data: result satisfies RetrievalResult<unknown>,
+          scopeEvidence: scopeEvidenceFromRows([result.data]),
+        }
       } catch (err) {
         return retrievalFailure(
           err,

@@ -205,7 +205,7 @@ describe('[COMP:media/backend] Multimodal backend per adapter', () => {
       const body = JSON.parse(init!.body as string) as { messages: [{ content: unknown[] }] }
       seenPageCounts.push(body.messages[0].content.length - 1) // minus the prompt part
       const prompt = (body.messages[0].content[0] as { text: string }).text
-      const pageNumbers = [...prompt.matchAll(/<!-- PDF_PAGE_(\d+)_COMPLETE -->/g)]
+      const pageNumbers = [...prompt.matchAll(/\[\[PDF_PAGE_(\d+)_COMPLETE\]\]/g)]
         .map((match) => Number(match[1]))
       return new Response(JSON.stringify({
         choices: [{
@@ -270,7 +270,10 @@ describe('[COMP:media/backend] Multimodal backend per adapter', () => {
     // credential, so pages ride ordinary `image` blocks through the chat
     // adapter. Before this the backend chain fell through to a DashScope
     // backend with an empty key and every distill attempt 401'd.
-    const requests: Array<{ model: string; blocks: Array<{ type: string; mimeType?: string }> }> = []
+    const requests: Array<{
+      model: string
+      blocks: Array<{ type: string; mimeType?: string; text?: string }>
+    }> = []
     const provider = {
       name: 'fake',
       models: ['gpt-5.6-luna'],
@@ -278,7 +281,11 @@ describe('[COMP:media/backend] Multimodal backend per adapter', () => {
       stream: (request: { model: string; messages: Array<{ content: unknown }> }) => {
         requests.push({
           model: request.model,
-          blocks: request.messages[0]!.content as Array<{ type: string; mimeType?: string }>,
+          blocks: request.messages[0]!.content as Array<{
+            type: string
+            mimeType?: string
+            text?: string
+          }>,
         })
         return (async function* () {
           yield {
@@ -302,6 +309,7 @@ describe('[COMP:media/backend] Multimodal backend per adapter', () => {
     expect(requests).toHaveLength(1)
     expect(requests[0]!.model).toBe('gpt-5.6-luna')
     expect(requests[0]!.blocks.map((b) => b.type)).toEqual(['text', 'image'])
+    expect(requests[0]!.blocks[0]!.text).toContain('[[PDF_PAGE_1_COMPLETE]]')
     expect(requests[0]!.blocks[1]!.mimeType).toBe('image/jpeg')
     expect(res.text).toContain('Invoice total 42.00')
     expect(res.usage).toEqual({ inputTokens: 900, outputTokens: 120 })

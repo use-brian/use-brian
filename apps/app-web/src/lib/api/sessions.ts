@@ -61,6 +61,9 @@ export type DocSession = {
    * doesn't match the session's, so the Chat app resolves this per thread.
    */
   assistantId?: string;
+  /** Immutable Team/Project binding for this conversation. */
+  contextGroupId?: string | null;
+  contextProjectId?: string | null;
 };
 
 /**
@@ -124,6 +127,8 @@ type RawListRow = {
   channelId: string;
   lastActive: string | Date;
   appOrigin?: string | null;
+  contextGroupId?: string | null;
+  contextProjectId?: string | null;
 };
 
 type RawMessageRow = {
@@ -191,6 +196,8 @@ export async function fetchLatestSession(opts: {
       lastActive: toIso(first.lastActive),
       appOrigin: first.appOrigin ?? null,
       assistantId: opts.assistantId,
+      contextGroupId: first.contextGroupId ?? null,
+      contextProjectId: first.contextProjectId ?? null,
     };
   } catch {
     // Network / abort / parse — treat as no resume.
@@ -233,6 +240,8 @@ async function listSessions(opts: {
       lastActive: toIso(r.lastActive),
       appOrigin: r.appOrigin ?? null,
       assistantId: opts.assistantId,
+      contextGroupId: r.contextGroupId ?? null,
+      contextProjectId: r.contextProjectId ?? null,
     }));
   } catch {
     return [];
@@ -302,6 +311,8 @@ function toWorkspaceSession(r: RawWorkspaceRow): WorkspaceSession {
     startedByName: r.startedByName ?? null,
     startedByAvatarUrl: r.startedByAvatarUrl ?? null,
     ...(r.assistantId ? { assistantId: r.assistantId } : {}),
+    contextGroupId: r.contextGroupId ?? null,
+    contextProjectId: r.contextProjectId ?? null,
   };
 }
 
@@ -340,11 +351,12 @@ export async function createWorkspaceSession(
   /** Bind the room to a specific workspace assistant (default: primary).
    *  The binding is per-room for its lifetime - per-turn routing is P3. */
   assistantId?: string,
+  context?: { contextGroupId: string | null; contextProjectId: string | null },
 ): Promise<WorkspaceSession> {
   const res = await authFetch(`${API_URL}/api/sessions/workspace`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ workspaceId, ...(assistantId ? { assistantId } : {}) }),
+    body: JSON.stringify({ workspaceId, ...(assistantId ? { assistantId } : {}), ...context }),
   });
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { error?: string };

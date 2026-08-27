@@ -33,6 +33,7 @@ import type {
 } from '../entities/types.js'
 import { EDGE_TYPES, LINK_KINDS } from '../entities/types.js'
 import { applyExplicitLinks, explicitLinksField } from '../entities/explicit-links.js'
+import { resolveWriteScope } from '../security/context-scope.js'
 
 /**
  * `attributes` JSONB fields routinely arrive as JSON strings rather
@@ -201,6 +202,13 @@ export function createWorkflowBrainTools(deps: WorkflowBrainToolsDeps): Tool[] {
 
       const workspaceId = context.workspaceId
       if (!workspaceId) return missingWorkspaceFailure('createEntity')
+      const writeScope = resolveWriteScope({
+        baseCompartments: context.assistantDefaultCompartments,
+        baseProjectIds: context.assistantDefaultProjectIds,
+        evidence: context.scopeAccumulator,
+        compartmentGrant: context.compartments,
+        projectGrant: context.projectIds,
+      })
 
       let entity: Awaited<ReturnType<EntityStore['create']>>
       try {
@@ -213,6 +221,8 @@ export function createWorkflowBrainTools(deps: WorkflowBrainToolsDeps): Tool[] {
           userId: context.userId,
           assistantId: context.assistantId,
           source: 'user',
+          compartments: writeScope.compartments,
+          projectIds: writeScope.projectIds,
         })
       } catch (err) {
         return toolFailure(err, {
@@ -234,6 +244,8 @@ export function createWorkflowBrainTools(deps: WorkflowBrainToolsDeps): Tool[] {
           sourceId: entity.id,
           source: 'user',
           links: input.links,
+          compartments: entity.compartments,
+          projectIds: entity.projectIds,
         })
         // `applyExplicitLinks` is fire-and-forget: a rejected edge is counted,
         // logged, and swallowed. `linksFailed: 2` alone told the model a number
@@ -302,6 +314,13 @@ export function createWorkflowBrainTools(deps: WorkflowBrainToolsDeps): Tool[] {
     async execute(input, context) {
       const workspaceId = context.workspaceId
       if (!workspaceId) return missingWorkspaceFailure('createEdge')
+      const writeScope = resolveWriteScope({
+        baseCompartments: context.assistantDefaultCompartments,
+        baseProjectIds: context.assistantDefaultProjectIds,
+        evidence: context.scopeAccumulator,
+        compartmentGrant: context.compartments,
+        projectGrant: context.projectIds,
+      })
 
       try {
         const edge = await deps.entityLinks.create({
@@ -315,6 +334,8 @@ export function createWorkflowBrainTools(deps: WorkflowBrainToolsDeps): Tool[] {
           userId: context.userId,
           assistantId: context.assistantId,
           source: 'user',
+          compartments: writeScope.compartments,
+          projectIds: writeScope.projectIds,
         })
         return { data: { id: edge.id, edgeType: edge.edgeType } }
       } catch (err) {

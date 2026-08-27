@@ -19,10 +19,20 @@ import { Router, type Request, type Response } from 'express'
 import { z } from 'zod'
 import type { BrainKeyStore } from '../db/brain-keys-store.js'
 import type { WorkspaceStore } from '../db/workspace-store.js'
+import {
+  assertContextActivationReady,
+  type ContextReadiness,
+} from '../context-scope/context-readiness.js'
+import {
+  createDbContextScopeStore,
+  type ContextScopeStore,
+} from '../db/context-scope-store.js'
 
 type Options = {
   brainKeyStore: BrainKeyStore
   workspaceStore: WorkspaceStore
+  contextStore?: ContextScopeStore
+  getContextReadiness?: (workspaceId: string) => Promise<ContextReadiness>
 }
 
 const UUID_RE =
@@ -35,6 +45,8 @@ const CreateBody = z
     // Per-key clearance cap (migration 262). Omitted/null = the workspace
     // primary assistant's clearance governs.
     maxClearance: z.enum(['public', 'internal', 'confidential']).nullable().optional(),
+    contextGroupId: z.string().uuid().nullable().optional(),
+    contextProjectId: z.string().uuid().nullable().optional(),
   })
   .strict()
 
@@ -48,6 +60,7 @@ const PatchBody = z
 export function brainKeysRoutes(opts: Options): Router {
   // mergeParams so `:workspaceId` from the mount path is visible here.
   const router = Router({ mergeParams: true })
+  const contextStore = opts.contextStore ?? createDbContextScopeStore()
 
   /**
    * Resolve + admin-gate the workspace from the mount path. On success
@@ -104,11 +117,29 @@ export function brainKeysRoutes(opts: Options): Router {
       return
     }
     try {
+      const contextGroupId = parsed.data.contextGroupId ?? null
+      const contextProjectId = parsed.data.contextProjectId ?? null
+      if (contextGroupId !== null || contextProjectId !== null) {
+        await assertContextActivationReady(workspaceId, opts.getContextReadiness)
+        const [team, project] = await Promise.all([
+          contextGroupId ? contextStore.getTeamSystem(workspaceId, contextGroupId) : null,
+          contextProjectId ? contextStore.getProjectSystem(workspaceId, contextProjectId) : null,
+        ])
+        if (
+          (contextGroupId && (!team || team.status !== 'active'))
+          || (contextProjectId && (!project || project.status !== 'active'))
+        ) {
+          res.status(404).json({ error: 'context_not_available' })
+          return
+        }
+      }
       const created = await opts.brainKeyStore.create({
         workspaceId,
         name: parsed.data.name,
         scope: parsed.data.scope,
         maxClearance: parsed.data.maxClearance ?? null,
+        contextGroupId,
+        contextProjectId,
         actingUserId: req.userId!,
       })
       // `key` (plaintext) is returned ONLY here — never again.
@@ -120,10 +151,19 @@ export function brainKeysRoutes(opts: Options): Router {
         scope: created.scope,
         status: created.status,
         maxClearance: created.maxClearance,
+        contextGroupId: created.contextGroupId,
+        contextProjectId: created.contextProjectId,
         createdAt: created.createdAt,
         lastUsedAt: created.lastUsedAt,
       })
     } catch (err) {
+      if ((err as { code?: string }).code === 'context_activation_blocked') {
+        res.status(409).json({
+          error: 'context_activation_blocked',
+          failedChecks: (err as { failedChecks?: string[] }).failedChecks ?? [],
+        })
+        return
+      }
       console.error('[brain-keys] create failed:', err)
       res.status(500).json({ error: 'Failed to create brain key' })
     }

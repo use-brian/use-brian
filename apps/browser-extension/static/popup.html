@@ -8,6 +8,7 @@
       .row { margin-bottom: 8px; }
       label { display: block; font-weight: 600; margin-bottom: 3px; }
       input { width: 100%; box-sizing: border-box; padding: 6px 8px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 12px; }
+      input:not([type="checkbox"]):focus-visible { outline: none; border-color: #2563eb; box-shadow: none; }
       input[type="checkbox"] { width: 16px; height: 16px; margin: 1px 0 0; accent-color: #111; }
       button { padding: 6px 12px; border-radius: 6px; border: 1px solid #cbd5e1; background: #fff; cursor: pointer; font-size: 12px; }
       button.primary { background: #111; color: #fff; border-color: #111; }
@@ -50,7 +51,7 @@
       <button id="disconnect">Disconnect</button>
       <button id="stop" class="danger">Stop task</button>
     </div>
-    <p class="hint">The assistant only acts within this browser profile's configured tab scope. Stop ends the current task immediately.</p>
+    <p class="hint">The assistant only acts within this browser profile's configured tab scope. Chrome labels active browser control as "debugging this browser." Cancel in that banner or Stop here ends the current task.</p>
     <!-- Which build is loaded. Answering this once cost a SHA256 of the folder
          path Chrome derived the extension id from. -->
     <p class="build" id="build-line"></p>

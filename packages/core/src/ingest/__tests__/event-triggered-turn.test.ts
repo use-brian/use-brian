@@ -53,6 +53,8 @@ const RULE: IngestRule = {
   routing_timezone: 'UTC',
   alert: true,
   episode_sensitivity: null,
+  compartments: [],
+  project_ids: [],
 }
 
 const FIXED_NOW = new Date('2026-05-14T12:00:00Z')

@@ -193,6 +193,11 @@ export type ConsultRequest = {
   message: A2AMessage
   /** Continues an existing context if set; starts a new context if absent. */
   contextId?: string
+  /** Trusted scope inherited from the caller turn/workflow snapshot. */
+  contextScope?: {
+    groupId: string | null
+    projectId: string | null
+  }
   /**
    * Optional per-consult tool allow-list. When set, the destination's query
    * loop is restricted to *only* these tool names — the final filter applied
@@ -296,12 +301,28 @@ export type ConsultRequest = {
    * for ordinary askAssistant consults.
    */
   workflowRunId?: string
+  /**
+   * Internal prompt-attribution context for workflow assistant calls. The
+   * actor stays in `caller.userId`; this envelope carries only operation
+   * identity and an optional frozen email/tool applicability key. It is never
+   * rendered into model text.
+   */
+  decisionContext?: {
+    operationId: string
+    externalPrincipal: boolean
+    applicability?: {
+      kind: 'email' | 'tool'
+      key?: string | null
+    }
+  }
   caller: CallerIdentity
   chain: ConsultChain
 }
 
 export type ConsultResponse = {
   task: Task
+  /** Internal high-water evidence from the callee's surfaced context/tools. */
+  scopeEvidence?: import('../security/context-scope.js').ScopeEvidence
 }
 
 // ── Errors ──────────────────────────────────────────────────────────────

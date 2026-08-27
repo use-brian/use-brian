@@ -6,6 +6,7 @@
 
 import { z } from 'zod'
 import type { FilesContext, FilesError } from './api.js'
+import { resolveWriteScope, type ContextScopeAccumulator } from '../security/context-scope.js'
 
 export const idOrPathShape = z.string().min(1).max(1024)
 
@@ -76,7 +77,18 @@ export function ctxFor(context: {
   assistantKind?: FilesContext['assistantKind']
   clearance?: FilesContext['clearance']
   compartments?: FilesContext['compartments']
+  projectIds?: FilesContext['projectIds']
+  assistantDefaultCompartments?: string[]
+  assistantDefaultProjectIds?: string[]
+  scopeAccumulator?: ContextScopeAccumulator
 }): FilesContext {
+  const writeScope = resolveWriteScope({
+    baseCompartments: context.assistantDefaultCompartments,
+    baseProjectIds: context.assistantDefaultProjectIds,
+    evidence: context.scopeAccumulator,
+    compartmentGrant: context.compartments,
+    projectGrant: context.projectIds,
+  })
   return {
     userId: context.userId,
     workspaceId: context.workspaceId!,
@@ -84,6 +96,9 @@ export function ctxFor(context: {
     assistantKind: context.assistantKind ?? 'standard',
     clearance: context.clearance,
     compartments: context.compartments,
+    projectIds: context.projectIds,
+    writeCompartments: writeScope.compartments,
+    writeProjectIds: writeScope.projectIds,
   }
 }
 

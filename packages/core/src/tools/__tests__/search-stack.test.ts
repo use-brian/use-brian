@@ -308,6 +308,14 @@ describe('[COMP:tools/search] webSearch exact-provider panels', () => {
     expect(webSearchTool.inputSchema.safeParse({ queries: ['one'] }).success).toBe(false)
     expect(webSearchTool.inputSchema.safeParse({ queries: ['one'], provider: 'serper' }).success).toBe(true)
     expect(webSearchTool.inputSchema.safeParse({ queries: ['one'], provider: 'serpapi' }).success).toBe(true)
+    expect(webSearchTool.inputSchema.safeParse({ query: 'one', resultMode: 'measurement' }).success).toBe(false)
+    expect(webSearchTool.inputSchema.safeParse({ query: 'one', trackDomains: ['example.com'] }).success).toBe(false)
+    expect(webSearchTool.inputSchema.safeParse({
+      query: 'one',
+      provider: 'serpapi',
+      resultMode: 'measurement',
+      trackDomains: ['not a domain'],
+    }).success).toBe(false)
   })
 
   it('uses only the selected provider and makes its provenance model-visible', async () => {
@@ -415,6 +423,126 @@ describe('[COMP:tools/search] webSearch exact-provider panels', () => {
     })
   })
 
+  it('[COMP:tools/search-measurement] returns 29 ordered compact rows across the locked two-batch shape', async () => {
+    const queries = Array.from({ length: 29 }, (_, index) => `query-${index + 1}`)
+    fetchSpy.mockImplementation(async (input) => {
+      const query = new URL(String(input)).searchParams.get('q') ?? ''
+      return new Response(JSON.stringify({
+        organic_results: [
+          {
+            title: `${query} primary`,
+            link: `https://www.UseBrian.ai/${query}`,
+            snippet: 'large snippet that must not enter measurement output',
+          },
+          {
+            title: `${query} competitor`,
+            link: `https://competitor.example/${query}`,
+            snippet: 'another omitted snippet',
+          },
+          {
+            title: `${query} studio`,
+            link: `https://studio.usebrian.ai/${query}`,
+            snippet: 'also omitted',
+          },
+        ],
+      }), { status: 200 })
+    })
+
+    const parts = await Promise.all([
+      webSearchTool.execute({
+        queries: queries.slice(0, 25),
+        provider: 'serpapi',
+        maxResults: 10,
+        resultMode: 'measurement',
+        trackDomains: ['https://WWW.usebrian.ai/about', 'studio.usebrian.ai.'],
+      }, ctx),
+      webSearchTool.execute({
+        queries: queries.slice(25),
+        provider: 'serpapi',
+        maxResults: 10,
+        resultMode: 'measurement',
+        trackDomains: ['usebrian.ai', 'studio.usebrian.ai'],
+      }, ctx),
+    ])
+    const rows = parts.flatMap((part) => (part.data as {
+      searches: Array<{
+        query: string
+        results: Array<{ rank: number; title: string; url: string; domain: string; snippet?: string }>
+        trackedDomains: Array<{ domain: string; bestRank: number | null; matchingUrls: string[] }>
+      }>
+    }).searches)
+
+    expect(fetchSpy).toHaveBeenCalledTimes(29)
+    expect(rows.map((row) => row.query)).toEqual(queries)
+    expect(rows).toHaveLength(29)
+    expect(rows[0].results).toEqual([
+      { rank: 1, title: 'query-1 primary', url: 'https://www.UseBrian.ai/query-1', domain: 'usebrian.ai' },
+      { rank: 2, title: 'query-1 competitor', url: 'https://competitor.example/query-1', domain: 'competitor.example' },
+      { rank: 3, title: 'query-1 studio', url: 'https://studio.usebrian.ai/query-1', domain: 'studio.usebrian.ai' },
+    ])
+    expect(rows[0].results.every((result) => !('snippet' in result))).toBe(true)
+    expect(rows[0].trackedDomains).toEqual([
+      { domain: 'usebrian.ai', bestRank: 1, matchingUrls: ['https://www.UseBrian.ai/query-1'] },
+      { domain: 'studio.usebrian.ai', bestRank: 3, matchingUrls: ['https://studio.usebrian.ai/query-1'] },
+    ])
+    expect(parts[0].data).toMatchObject({
+      resultMode: 'measurement',
+      topDomains: [
+        { domain: 'usebrian.ai', appearances: 25, bestRank: 1 },
+        { domain: 'competitor.example', appearances: 25, bestRank: 2 },
+        { domain: 'studio.usebrian.ai', appearances: 25, bestRank: 3 },
+      ],
+    })
+  })
+
+  it('[COMP:tools/search-measurement] honors Retry-After and meters one successful unit after a 429', async () => {
+    vi.useFakeTimers()
+    fetchSpy
+      .mockResolvedValueOnce(new Response('limited', { status: 429, headers: { 'Retry-After': '1' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        organic_results: [{ title: 'served', link: 'https://usebrian.ai/', snippet: 'omitted' }],
+      }), { status: 200 }))
+
+    const resultPromise = webSearchTool.execute({
+      query: 'q',
+      provider: 'serpapi',
+      resultMode: 'measurement',
+      trackDomains: ['usebrian.ai'],
+    }, ctx)
+    await vi.advanceTimersByTimeAsync(999)
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1)
+    const out = await resultPromise
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+    expect(out.isError).toBeUndefined()
+    expect(out.meta).toMatchObject({ searchProviderUnits: 1, externalCost_flatCostUsd: 0.025 })
+    expect(out.data).toMatchObject({ completed: 1, failed: 0 })
+  })
+
+  it('[COMP:tools/search-measurement] exhausts transient retries as one attributable partial row', async () => {
+    fetchSpy.mockResolvedValue(new Response('down', { status: 503 }))
+    const out = await webSearchTool.execute({
+      queries: ['good', 'bad'],
+      provider: 'serpapi',
+      resultMode: 'measurement',
+      trackDomains: ['usebrian.ai'],
+    }, ctx)
+    const data = out.data as {
+      completed: number
+      failed: number
+      searches: Array<{ query: string; status: string; error?: string }>
+    }
+
+    expect(fetchSpy).toHaveBeenCalledTimes(6)
+    expect(out.isError).toBe(true)
+    expect(data).toMatchObject({ completed: 0, failed: 2 })
+    expect(data.searches.map((row) => row.query)).toEqual(['good', 'bad'])
+    expect(data.searches.every((row) => row.error?.includes('SerpAPI HTTP 503'))).toBe(true)
+    expect(out.meta).toMatchObject({ searchProviderUnits: 0 })
+    expect(out.meta).not.toHaveProperty('externalCost_flatCostUsd')
+  })
+
   it('lets a 25-query multi-wave panel exceed 15 seconds without aborting queued work', async () => {
     vi.useFakeTimers()
     const queries = Array.from({ length: 25 }, (_, index) => `q${index + 1}`)
@@ -460,7 +588,7 @@ describe('[COMP:tools/search] webSearch exact-provider panels', () => {
     expect(data.searches.map((search) => search.query)).toEqual(queries)
   })
 
-  it('times out one slow panel query without blocking later queued queries', async () => {
+  it('bounds timeout retries without blocking later queued queries', async () => {
     vi.useFakeTimers()
     fetchSpy.mockImplementation(async (input, init) => {
       const query = new URL(String(input)).searchParams.get('q') ?? ''
@@ -482,7 +610,8 @@ describe('[COMP:tools/search] webSearch exact-provider panels', () => {
       searches: Array<{ query: string; status: string; error?: string }>
     }
 
-    expect(fetchSpy).toHaveBeenCalledTimes(5)
+    // q1 gets the initial attempt plus two bounded retries; q2-q5 succeed once.
+    expect(fetchSpy).toHaveBeenCalledTimes(7)
     expect(data.completed).toBe(4)
     expect(data.failed).toBe(1)
     expect(data.searches.map((search) => [search.query, search.status])).toEqual([

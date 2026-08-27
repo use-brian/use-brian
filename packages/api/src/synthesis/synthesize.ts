@@ -43,6 +43,7 @@ import {
   type Tool,
   type UsageStore,
   DEFAULT_STALL_IDLE_MS,
+  ContextScopeAccumulator,
   isStalledError,
   type ResearchBudget,
 } from '@use-brian/core'
@@ -52,6 +53,7 @@ import type {
   BlueprintRecordCitations,
   BlueprintRecordStore,
 } from '../db/blueprint-records-store.js'
+import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
 
 export type SynthesisSourceKind = 'recording' | 'brain' | 'research'
 
@@ -69,6 +71,12 @@ export type SynthesisSource = {
   assistantKind: AssistantKind
   /** Sensitivity inherited from the source Episode; stamped on the page + every write. */
   sensitivity: string
+  /** Trusted source/root requirements inherited by every derivative. */
+  compartments?: string[]
+  projectIds?: string[]
+  /** Effective assistant/session ceilings for nested reads and writes. */
+  compartmentGrant?: string[] | null
+  projectGrant?: string[] | null
   /**
    * The complete source text, injected into the prompt so the model drafts from
    * ALL of it rather than paging a search tool. For a `recording` this is the
@@ -210,6 +218,11 @@ const RECORDING_SYNTHESIS_BUDGET: ResearchBudget = { maxTurns: 60, maxToolCalls:
 
 function titleFromSlug(slug: string): string {
   return slug.replace(/[-_]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
+}
+
+function clearanceOfSource(sensitivity: string): 'public' | 'internal' | 'confidential' {
+  if (sensitivity === 'private' || sensitivity === 'confidential') return 'confidential'
+  return sensitivity === 'public' ? 'public' : 'internal'
 }
 
 /** Strip confirmation from a tool for an unattended server run (non-mutating). */
@@ -388,6 +401,9 @@ export async function synthesizeFromSource(
   const recordStore = spec ? deps.blueprintRecordStore : undefined
   const recordPath = Boolean(spec && recordStore)
   const renderPage = !recordPath || target.renderPage !== false
+  if (renderPage && (source.projectIds?.length ?? 0) > 1) {
+    throw new Error('A page can carry only one Project; cross-Project synthesis must remain record-only')
+  }
 
   // 0. Record-first (record path): find-or-create the record on the SAME
   //    anchor the page uses, so even a no-op or timed-out run leaves a typed
@@ -403,6 +419,8 @@ export async function synthesizeFromSource(
       sourceKind: source.kind,
       sourceId: source.sourceId,
       sensitivity: source.sensitivity,
+      compartments: source.compartments ?? [],
+      projectIds: source.projectIds ?? [],
       resetFields: true,
     })
   }
@@ -439,6 +457,7 @@ export async function synthesizeFromSource(
           // the default 30-day draft TTL would silently delete work the user
           // paid for. See structural-synthesis.md → "Brief durability".
           state: 'saved',
+          projectId: source.projectIds?.length === 1 ? source.projectIds[0] : null,
         })
         pageId = draft.id
       } catch (err) {
@@ -485,6 +504,16 @@ export async function synthesizeFromSource(
   let truncated = false
   let summary = ''
   let toolCallCount = 0
+  const scopeAccumulator = new ContextScopeAccumulator({
+    sensitivity: clearanceOfSource(source.sensitivity),
+    compartments: source.compartments ?? [],
+    projectIds: source.projectIds ?? [],
+  })
+  const scopedTools = bindToolsToAgentAccess(tools, {
+    clearance: clearanceOfSource(source.sensitivity),
+    compartments: source.compartmentGrant ?? null,
+    projectIds: source.projectGrant ?? null,
+  })
 
   try {
     for await (const event of queryLoop({
@@ -502,7 +531,7 @@ export async function synthesizeFromSource(
       messages: [
         { role: 'user', content: kickoff(source, deps.sourceTool.name, recordPath) },
       ] as Message[],
-      tools,
+      tools: scopedTools,
       context: {
         userId: source.userId,
         assistantId: source.assistantId,
@@ -515,6 +544,15 @@ export async function synthesizeFromSource(
         docViewId: pageId ?? undefined, // pins patchPage / getCurrentPage / renderView (legacy path)
         abortSignal: abort.signal,
         activeCapabilities: new Set(['crm', 'tasks']),
+        clearance: clearanceOfSource(source.sensitivity),
+        compartments: source.compartmentGrant ?? null,
+        projectIds: source.projectGrant ?? null,
+        assistantClearance: clearanceOfSource(source.sensitivity),
+        assistantCompartments: source.compartmentGrant ?? null,
+        assistantDefaultCompartments: source.compartments ?? [],
+        assistantProjectIds: source.projectGrant ?? null,
+        assistantDefaultProjectIds: source.projectIds ?? [],
+        scopeAccumulator,
       },
       maxTurns: budget.maxTurns,
       maxToolCalls: budget.maxToolCalls,

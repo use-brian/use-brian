@@ -83,6 +83,8 @@ export type DispatchEvent = {
    * "Task event source"); for knowledge the entry's frontmatter tags.
    */
   tags?: string[]
+  /** Current full task tag set, matched only by task `EventMatch.currentTags`. */
+  currentTags?: string[]
   /** Whether a bot authored the event — gated by `EventMatch.fromBots`. */
   isBot: boolean
   /** Whether a channel event came from a shared group conversation. */
@@ -340,6 +342,12 @@ export function matchesEvent(
     const eventTags = event.tags ?? []
     const want = m.tags
     if (!eventTags.some((t) => want.includes(t))) return false
+  }
+  if (m.currentTags && m.currentTags.length > 0) {
+    if (event.source.type !== 'task') return false
+    const currentTags = event.currentTags ?? []
+    const want = m.currentTags
+    if (!currentTags.some((tag) => want.includes(tag))) return false
   }
   return true
 }

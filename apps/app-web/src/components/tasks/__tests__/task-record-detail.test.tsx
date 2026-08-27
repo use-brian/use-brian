@@ -115,6 +115,7 @@ describe("[COMP:app-web/tasks-surface] task peek creation audit", () => {
             roster={[]}
             projects={[]}
             commitField={vi.fn().mockResolvedValue({ ok: true })}
+            commitProject={vi.fn().mockResolvedValue({ ok: true })}
             onDelete={vi.fn().mockResolvedValue({ ok: true })}
             onClose={vi.fn()}
           />
@@ -152,6 +153,7 @@ describe("[COMP:app-web/tasks-surface] task peek creation audit", () => {
             roster={[]}
             projects={[]}
             commitField={vi.fn().mockResolvedValue({ ok: true })}
+            commitProject={vi.fn().mockResolvedValue({ ok: true })}
             onDelete={onDelete}
             onClose={onClose}
           />
@@ -194,6 +196,7 @@ describe("[COMP:app-web/tasks-surface] task peek creation audit", () => {
             roster={[]}
             projects={[]}
             commitField={vi.fn().mockResolvedValue({ ok: true })}
+            commitProject={vi.fn().mockResolvedValue({ ok: true })}
             onDelete={onDelete}
             onClose={onClose}
           />
@@ -234,6 +237,7 @@ describe("[COMP:app-web/tasks-surface] task peek creation audit", () => {
             roster={[]}
             projects={[]}
             commitField={vi.fn().mockResolvedValue({ ok: true })}
+            commitProject={vi.fn().mockResolvedValue({ ok: true })}
             onDelete={onDelete}
             onClose={vi.fn()}
           />

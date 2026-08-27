@@ -1,10 +1,10 @@
 /**
  * [COMP:app-web/focus-treatment] One-frame focus treatment.
  *
- * Standalone fields inherit the app-wide `:focus-visible` halo from
- * `app/globals.css`; they must not add a focused border unless they explicitly
- * opt out of that halo. Composite fields put the halo on their `focus-within`
- * wrapper and suppress every nested focus shadow.
+ * Text-entry fields turn their existing border blue through the app-wide
+ * `:focus-visible` override in `app/globals.css`. Composite fields put that
+ * border change on their `focus-within` wrapper and suppress every nested
+ * focus shadow. Outside halos stay reserved for discrete keyboard controls.
  */
 
 import { readdirSync, readFileSync } from "node:fs";
@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest";
 import ts from "typescript";
 
 const SOURCE_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
+const GLOBALS_CSS = readFileSync(new URL("../../../app/globals.css", import.meta.url), "utf8");
 
 function tsxFiles(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
@@ -53,7 +54,34 @@ const appSourceFiles = tsxFiles(SOURCE_ROOT).map((file) => ({
 }));
 
 describe("[COMP:app-web/focus-treatment] source contract", () => {
-  it("keeps standalone fields on one focus treatment", () => {
+  it("turns text-entry borders into the focus frame and suppresses every field halo", () => {
+    expect(GLOBALS_CSS).toMatch(
+      /:where\([\s\S]*?input\[type="text"\][\s\S]*?textarea[\s\S]*?\):focus-visible\s*\{[\s\S]*?border-color:\s*var\(--ring\)\s*!important;[\s\S]*?box-shadow:\s*none\s*!important;/,
+    );
+    expect(GLOBALS_CSS).toMatch(
+      /:where\([\s\S]*?textarea[\s\S]*?\):focus-visible\[aria-invalid="true"\]\s*\{[\s\S]*?border-color:\s*var\(--destructive\)\s*!important;/,
+    );
+  });
+
+  it("uses the dock composer border as its only focus frame", () => {
+    const floatingChat = appSourceFiles.find(({ file }) =>
+      file.endsWith("/components/chrome/floating-chat.tsx"),
+    );
+    const source = floatingChat?.sourceFile.getFullText();
+
+    expect(source).toMatch(
+      /inputWrapClassName="[^"]*focus-within:border-ring[^"]*\[&_:focus-visible\]:shadow-none[^"]*"/,
+    );
+    expect(source).toMatch(
+      /textareaClassName=\{cn\([\s\S]*?focus-visible:shadow-none[\s\S]*?\)\}/,
+    );
+    expect(source).not.toMatch(
+      /textareaClassName=\{cn\([\s\S]*?focus-visible:border-ring[\s\S]*?\)\}/,
+    );
+    expect(source).not.toMatch(/inputWrapClassName="[^"]*focus-within:ring-/);
+  });
+
+  it("uses the existing border on every shared field-like trigger", () => {
     const violations: string[] = [];
 
     for (const { file, sourceFile } of appSourceFiles) {
@@ -62,39 +90,14 @@ describe("[COMP:app-web/focus-treatment] source contract", () => {
         if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
           const tag = node.tagName.getText(sourceFile);
           const fieldClass = classAttribute(node, sourceFile);
-          const delegatedFieldClass = ["textareaClassName", "inputClassName", "fieldClass"]
-            .map((name) => classAttribute(node, sourceFile, name))
-            .join(" ");
-          const classes = `${fieldClass} ${delegatedFieldClass}`;
-          const nativeField = tag === "input" || tag === "textarea";
-          const focusedBorder = /focus(?:-visible)?:border-/.test(classes);
-          const haloOptOut = /focus-visible:shadow-none|focus-visible:ring-0/.test(classes);
-
-          if (nativeField && focusedBorder && !haloOptOut) {
-            violations.push(`${file}:${lineOf(node, sourceFile)} <${tag}>`);
-          }
-
-          if (
-            (tag === "SelectPrimitive.Trigger" || tag === "Combobox.Trigger") &&
-            focusedBorder &&
-            /focus(?:-visible)?:ring-(?!0)/.test(classes)
-          ) {
-            violations.push(`${file}:${lineOf(node, sourceFile)} <${tag}>`);
-          }
-        }
-
-        if (
-          ts.isVariableDeclaration(node) &&
-          ts.isIdentifier(node.name) &&
-          /input|textarea|field/i.test(node.name.text) &&
-          node.initializer
-        ) {
-          const classes = node.initializer.getText(sourceFile);
-          if (
-            /focus(?:-visible)?:border-/.test(classes) &&
-            !/focus-visible:shadow-none|focus-visible:ring-0/.test(classes)
-          ) {
-            violations.push(`${file}:${lineOf(node, sourceFile)} ${node.name.text}`);
+          if (tag === "SelectPrimitive.Trigger" || tag === "Combobox.Trigger") {
+            const ownsBorder = fieldClass.includes("focus-visible:border-ring");
+            const suppressesHalo = fieldClass.includes("focus-visible:shadow-none");
+            const addsFocusRing = /focus-visible:ring-(?!0)/.test(fieldClass);
+            const addsOpenRing = /data-\[popup-open\]:ring-(?!0)/.test(fieldClass);
+            if (!ownsBorder || !suppressesHalo || addsFocusRing || addsOpenRing) {
+              violations.push(`${file}:${lineOf(node, sourceFile)} <${tag}>`);
+            }
           }
         }
 
@@ -107,17 +110,20 @@ describe("[COMP:app-web/focus-treatment] source contract", () => {
     expect(violations).toEqual([]);
   });
 
-  it("makes every focus-within frame suppress nested halos", () => {
+  it("makes every focus-within frame border-only and suppresses nested halos", () => {
     const violations: string[] = [];
 
     for (const { file, sourceFile } of appSourceFiles) {
 
       function visit(node: ts.Node) {
         if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
-          const classes = classAttribute(node, sourceFile);
+          const classes = ["className", "inputWrapClassName"]
+            .map((name) => classAttribute(node, sourceFile, name))
+            .join(" ");
           if (
             /focus-within:(?:border|ring)-/.test(classes) &&
-            !classes.includes("[&_:focus-visible]:shadow-none")
+            (!classes.includes("[&_:focus-visible]:shadow-none") ||
+              /focus-within:ring-(?!0)/.test(classes))
           ) {
             violations.push(
               `${file}:${lineOf(node, sourceFile)} <${node.tagName.getText(sourceFile)}>`,

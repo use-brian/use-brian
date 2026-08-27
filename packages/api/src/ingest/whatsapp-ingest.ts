@@ -243,6 +243,8 @@ function toEngineRule(row: IngestRuleRow): IngestRule {
     routing_timezone: row.routingTimezone,
     alert: row.alert,
     episode_sensitivity: row.episodeSensitivity,
+    compartments: row.compartments ?? [],
+    project_ids: row.projectIds ?? [],
   }
 }
 
@@ -393,6 +395,9 @@ export function createWhatsappIngestor(
     input: WhatsappIngestInput,
     text: string,
     ruleSensitivity: 'public' | 'internal' | 'confidential',
+    ruleId?: string,
+    compartments: string[] = [],
+    projectIds: string[] = [],
   ): Promise<{ episodeId: string }> {
     const window = buildWindow(input, text)
     const envelope = normalizeWhatsappGroup(window, {
@@ -419,7 +424,10 @@ export function createWhatsappIngestor(
 
     const episode = await deps.episodes.createEpisode(ctx.userId, {
       sourceKind: WHATSAPP_SOURCE_KIND,
-      sourceRef: envelope.source_ref,
+      sourceRef: {
+        ...envelope.source_ref,
+        ...(ruleId ? { rule_id: ruleId } : {}),
+      },
       occurredAt: envelope.occurred_at,
       workspaceId: envelope.workspace_id,
       userId: envelope.user_id,
@@ -427,6 +435,8 @@ export function createWhatsappIngestor(
       createdByUserId: envelope.created_by_user_id,
       createdByAssistantId: envelope.created_by_assistant_id,
       sensitivity: episodeRowSensitivity,
+      compartments,
+      projectIds,
       contentRef: { kind: 'manual_paste', text: content },
       status: 'open',
     })
@@ -441,6 +451,8 @@ export function createWhatsappIngestor(
       assistantId: episode.assistantId,
       createdByUserId: episode.createdByUserId,
       createdByAssistantId: episode.createdByAssistantId,
+      compartments: episode.compartments,
+      projectIds: episode.projectIds,
     }
 
     const runtime = await deps.resolveLlm?.(ctx.workspaceId)
@@ -539,12 +551,22 @@ export function createWhatsappIngestor(
           firesAt,
           event,
           episodeSensitivity: decision.episode_sensitivity,
+          compartments: decision.compartments,
+          projectIds: decision.project_ids,
         })
         return null
       }
 
       // realtime — inline single-message `channel_window` Episode.
-      return runRealtimeEpisode(ctx, input, text, decision.episode_sensitivity ?? 'internal')
+      return runRealtimeEpisode(
+        ctx,
+        input,
+        text,
+        decision.episode_sensitivity ?? 'internal',
+        decision.rule_id,
+        decision.compartments,
+        decision.project_ids,
+      )
     },
 
     async ingestResolved(input, context, sensitivity = 'internal') {

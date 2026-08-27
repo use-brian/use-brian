@@ -673,7 +673,12 @@ async function getWorkspaceMembershipWithCeilingsSystem(
       clearance: Sensitivity
       compartments: string[] | null
     }>(
-      `SELECT role, clearance, compartments
+      `SELECT role, clearance,
+              CASE
+                WHEN team_scope_mode = 'assigned'
+                  THEN public.effective_member_team_compartments(user_id, workspace_id)
+                ELSE compartments
+              END AS compartments
          FROM workspace_members
         WHERE workspace_id = $1 AND user_id = $2`,
       [workspaceId, userId],

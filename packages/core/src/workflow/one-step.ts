@@ -146,6 +146,8 @@ export async function buildOneStepReminderWorkflow(
      * `scheduled_jobs` row.
      */
     trigger?: WorkflowTrigger
+    contextGroupId?: string | null
+    contextProjectId?: string | null
   },
 ): Promise<string> {
   const workflow = await store.create({
@@ -161,6 +163,8 @@ export async function buildOneStepReminderWorkflow(
       modelAlias: params.modelAlias,
     }),
     trigger: params.trigger ?? { kind: 'manual' },
+    contextGroupId: params.contextGroupId ?? null,
+    contextProjectId: params.contextProjectId ?? null,
   })
   return workflow.id
 }

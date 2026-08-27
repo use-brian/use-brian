@@ -25,7 +25,12 @@ import type {
   WorkflowStepRunRecord,
   WorkflowStore,
 } from '@use-brian/core'
-import { advanceWorkflowRun, stepSuccessors } from '@use-brian/core'
+import {
+  advanceWorkflowRun,
+  ContextScopeAccumulator,
+  stepSuccessors,
+  WORKFLOW_SCOPE_EVIDENCE_VAR,
+} from '@use-brian/core'
 import type { WorkspaceAuditStore } from '../db/workspace-audit-store.js'
 import type { PendingApprovalsStore, PendingApproval } from '../db/pending-approvals-store.js'
 import type { SessionResumeStore } from '../db/session-resume-store.js'
@@ -78,6 +83,7 @@ export function makeRequestApproval(deps: ApprovalBridgeDeps): NonNullable<Execu
     displayLines,
     deliveryChannel,
     expiresAt,
+    decisionApplicationId,
   }) => {
     // Look up the workflow name for the audit + delivery message.
     const run = await deps.runStore.getRunSystem(runId)
@@ -93,7 +99,10 @@ export function makeRequestApproval(deps: ApprovalBridgeDeps): NonNullable<Execu
       originatingAssistantId: assistantId,
       toolName,
       arguments: args,
-      approvalPayload: displayLines ? { displayLines } : undefined,
+      approvalPayload: {
+        ...(displayLines ? { displayLines } : {}),
+        ...(decisionApplicationId ? { decisionApplicationId } : {}),
+      },
       approverUserId,
       deliveryChannelType: deliveryChannel,
       deliveryChannelId: null, // delivery layer resolves the channel id from approver's preferred channel
@@ -218,12 +227,46 @@ export async function resumeFromApproval(
     ?? workflow.definition.principal?.assistantId
     ?? primaryAssistantId
 
+  let runtimeScope: Awaited<ReturnType<NonNullable<ExecutorDeps['resolveRunScope']>>> | undefined
+  if (deps.executorDeps.resolveRunScope) {
+    try {
+      runtimeScope = await deps.executorDeps.resolveRunScope({
+        userId: run.triggeredBy ?? workflow.createdBy,
+        assistantId: toolAssistantId,
+        workspaceId: run.workspaceId,
+        run,
+      })
+    } catch (err) {
+      await failStep(
+        deps,
+        run,
+        workflow,
+        updated,
+        'context_not_available_after_resume',
+        err instanceof Error ? err.message : String(err),
+      )
+      return { status: 'failed', runId: run.id }
+    }
+  }
+
+  const scopeAccumulator = new ContextScopeAccumulator(runtimeScope
+    ? {
+        compartments: runtimeScope.turnScope.writeCompartments,
+        projectIds: runtimeScope.turnScope.writeProjectIds,
+      }
+    : undefined)
+  const persistedScopeEvidence = run.vars[WORKFLOW_SCOPE_EVIDENCE_VAR]
+  if (persistedScopeEvidence && typeof persistedScopeEvidence === 'object') {
+    scopeAccumulator.note(persistedScopeEvidence)
+  }
+
   let registry: Awaited<ReturnType<ApprovalBridgeDeps['buildToolRegistry']>>
   try {
     registry = await deps.buildToolRegistry({
       workspaceId: run.workspaceId,
       assistantId: toolAssistantId,
       userId: run.triggeredBy ?? workflow.createdBy,
+      turnScope: runtimeScope?.turnScope,
     })
   } catch (err) {
     await failStep(
@@ -263,6 +306,17 @@ export async function resumeFromApproval(
     channelId: run.id,
     workspaceId: run.workspaceId,
     assistantKind: workflow.definition.principal ? 'standard' : 'primary',
+    clearance: runtimeScope?.turnScope.access.clearance,
+    compartments: runtimeScope?.turnScope.effectiveCompartments,
+    projectIds: runtimeScope?.turnScope.effectiveProjectIds,
+    activeGroupId: runtimeScope?.turnScope.activeGroupId,
+    activeProjectId: runtimeScope?.turnScope.activeProjectId,
+    assistantClearance: runtimeScope?.assistantClearance,
+    assistantCompartments: runtimeScope?.turnScope.effectiveCompartments,
+    assistantDefaultCompartments: runtimeScope?.turnScope.writeCompartments,
+    assistantProjectIds: runtimeScope?.turnScope.effectiveProjectIds,
+    assistantDefaultProjectIds: runtimeScope?.turnScope.writeProjectIds,
+    scopeAccumulator,
     abortSignal: new AbortController().signal,
   }
 
@@ -278,6 +332,7 @@ export async function resumeFromApproval(
     await failStep(deps, run, workflow, updated, 'tool_returned_error_after_resume', String(result.data))
     return { status: 'failed', runId: run.id }
   }
+  scopeAccumulator.note(result.scopeEvidence)
 
   // Mark the gated step completed and advance the run past it.
   await deps.runStore.updateStepRun(updated.workflowStepRunId, {
@@ -294,9 +349,12 @@ export async function resumeFromApproval(
     : []
 
   // Optionally store the tool output under storeOutputAs.
-  let nextVars = run.vars
+  let nextVars = {
+    ...run.vars,
+    [WORKFLOW_SCOPE_EVIDENCE_VAR]: scopeAccumulator.evidence,
+  }
   if (stepDef?.storeOutputAs && stepDef.type === 'tool_call') {
-    nextVars = { ...run.vars, [stepDef.storeOutputAs]: result.data }
+    nextVars = { ...nextVars, [stepDef.storeOutputAs]: result.data }
   }
 
   // If this was the terminal step, mark the run completed directly. Calling

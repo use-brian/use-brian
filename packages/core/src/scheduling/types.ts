@@ -125,6 +125,10 @@ export type ScheduledJob = {
    * target".
    */
   viewId: string | null
+  contextGroupId?: string | null
+  contextProjectId?: string | null
+  contextCompartments?: string[]
+  contextProjectIds?: string[]
 }
 
 export type JobStore = {
@@ -146,6 +150,11 @@ export type JobStore = {
     workflowStepRunId?: string | null
     /** Doc page this job maintains (migration 229). Omit/null for non-doc jobs. */
     viewId?: string | null
+    /** Immutable context snapshot inherited from the creating turn/workflow. */
+    contextGroupId?: string | null
+    contextProjectId?: string | null
+    contextCompartments?: string[]
+    contextProjectIds?: string[]
   }): Promise<ScheduledJob>
 
   update(id: string, updates: {
@@ -309,6 +318,8 @@ export type PendingBatch = {
    * instead of joining back to the rule.
    */
   episodeSensitivity: 'public' | 'internal' | 'confidential' | null
+  compartments?: string[]
+  projectIds?: string[]
 }
 
 /**

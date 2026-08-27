@@ -315,7 +315,13 @@ export function approvalsRoutes(opts: UnifiedApprovalRouteOptions): Router {
     // flip the row, then either notify the live in-memory resolver or
     // enqueue a `session_resume` job for the resume worker.
     if (approval.kind === 'tool_invocation' && opts.resumeDeps) {
-      const updated = await opts.approvalsStore.respond(id, decision, userId, reason)
+      const updated = await opts.approvalsStore.respond(
+        id,
+        decision,
+        userId,
+        reason,
+        decision === 'approved' && body.grantAlways === true ? 'always_allow' : undefined,
+      )
       if (!updated) {
         // Lost a race — another path already settled the row.
         const settled = await opts.approvalsStore.getById(userId, id)

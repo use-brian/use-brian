@@ -119,6 +119,20 @@ const pageAnchorSchema = z.union([
   z.object({ fromStep: stepIdSchema }).strict(),
 ])
 
+/** Shared step-output and workflow-failure delivery shape. */
+const workflowDeliverySchema = z.union([
+  z.object({
+    channelType: z.enum(['web', 'telegram', 'slack', 'whatsapp', 'msteams', 'custom', 'feishu']),
+    channelId: z.string().min(1).max(256),
+    channelIntegrationId: z.string().uuid().optional(),
+    thread: z.object({ fromStep: stepIdSchema }).strict().optional(),
+  }).strict(),
+  z.object({
+    channelType: z.literal('whatsapp'),
+    replyToTrigger: z.literal(true),
+  }).strict(),
+])
+
 const assistantCallStepSchema = z.object({
   ...commonSchema,
   type: z.literal('assistant_call'),
@@ -174,18 +188,7 @@ const assistantCallStepSchema = z.object({
    * outcome records `thread: 'parent_missing'`.
    * See docs/architecture/engine/scheduled-jobs.md → "Channel delivery".
    */
-  deliver: z.union([
-    z.object({
-      channelType: z.enum(['web', 'telegram', 'slack', 'whatsapp', 'msteams', 'custom', 'feishu']),
-      channelId: z.string().min(1).max(256),
-      channelIntegrationId: z.string().uuid().optional(),
-      thread: z.object({ fromStep: stepIdSchema }).strict().optional(),
-    }).strict(),
-    z.object({
-      channelType: z.literal('whatsapp'),
-      replyToTrigger: z.literal(true),
-    }).strict(),
-  ]).optional(),
+  deliver: workflowDeliverySchema.optional(),
   /**
    * Session continuity. `per_run` (default) — each fire is a fresh consult.
    * `persistent` — the callee reuses one durable session keyed on the
@@ -211,7 +214,7 @@ const assistantCallStepSchema = z.object({
    * to persist its deliverable as the blueprint's typed record via
    * `saveBlueprintRecord`. Either way the record stamps the run id, which the
    * next run reads as `{{lastRun.output.<key>}}`. The value is a blueprint
-   * slug: a built-in skill id, a workspace skill slug, or a page-template id.
+   * slug: a built-in skill id, workspace skill slug, or page-template id.
    * Absent → the step's output is unbound (free-form). See
    * docs/architecture/brain/structural-synthesis.md → "The record".
    */
@@ -470,6 +473,7 @@ export const WorkflowDefinitionSchema = z
     startStepId: z
       .union([stepIdSchema, z.array(stepIdSchema).min(1).max(MAX_FAN_OUT_WIDTH)]),
     steps: z.array(tolerantStepSchema).min(1).max(50),
+    failureDelivery: workflowDeliverySchema.optional(),
     principal: externalClientWorkflowPrincipalSchema.optional(),
     layout: z.record(nodePositionSchema).optional(),
   })
@@ -752,6 +756,19 @@ export const WorkflowDefinitionSchema = z
         })
       }
     }
+    if (
+      def.failureDelivery &&
+      'channelIntegrationId' in def.failureDelivery &&
+      def.failureDelivery.channelIntegrationId &&
+      def.failureDelivery.channelType !== 'telegram' &&
+      def.failureDelivery.channelType !== 'feishu'
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'failureDelivery.channelIntegrationId is only supported for telegram and feishu delivery.',
+        path: ['failureDelivery', 'channelIntegrationId'],
+      })
+    }
 
     // Bot integrations are part of Telegram and Feishu delivery identity.
     // Reject inert ids on other channel types instead of persisting a
@@ -832,6 +849,44 @@ export const WorkflowDefinitionSchema = z
           code: z.ZodIssueCode.custom,
           message: `step "${step.id}".deliver.thread.fromStep references "${ref}", which delivers to a different channel (${parent.channelType} "${parent.channelId}" vs ${step.deliver.channelType} "${step.deliver.channelId}") — a thread reply must target the same channel as its parent message.`,
           path: ['steps', i, 'deliver', 'thread', 'fromStep'],
+        })
+      }
+    }
+    if (
+      def.failureDelivery &&
+      'thread' in def.failureDelivery &&
+      def.failureDelivery.thread
+    ) {
+      const delivery = def.failureDelivery
+      const thread = delivery.thread
+      if (!thread) return
+      const ref = thread.fromStep
+      const parent = deliverSteps.get(ref)
+      if (
+        delivery.channelType !== 'slack' &&
+        delivery.channelType !== 'telegram' &&
+        delivery.channelType !== 'feishu'
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `failureDelivery.thread is only supported for slack, telegram, and feishu deliveries — ${delivery.channelType} has no threaded replies.`,
+          path: ['failureDelivery', 'thread'],
+        })
+      } else if (!parent) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `failureDelivery.thread.fromStep references "${ref}", which is not an assistant_call step with a deliver target.`,
+          path: ['failureDelivery', 'thread', 'fromStep'],
+        })
+      } else if (
+        parent.channelType !== delivery.channelType ||
+        parent.channelId !== delivery.channelId ||
+        parent.channelIntegrationId !== delivery.channelIntegrationId
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `failureDelivery.thread.fromStep references "${ref}", which delivers to a different channel.`,
+          path: ['failureDelivery', 'thread', 'fromStep'],
         })
       }
     }
@@ -931,6 +986,9 @@ const eventMatchSchema = z.object({
   // set on updates. Only task events carry tags; a `tags` filter on other
   // source kinds never matches.
   tags: z.array(z.string().min(1).max(64)).max(64).optional(),
+  // Task-only persistent tag filter. Unlike `tags`, this reads the task's
+  // complete live tag set on every lifecycle event.
+  currentTags: z.array(z.string().min(1).max(64)).max(64).optional(),
   fromBots: z.boolean().optional(),
 })
 
@@ -982,6 +1040,17 @@ export const EventSubscriptionSchema = z.preprocess(
   z.object({
     source: eventSourceRefSchema,
     match: eventMatchSchema.optional(),
+  }).superRefine((subscription, ctx) => {
+    if (
+      subscription.match?.currentTags?.length &&
+      subscription.source.type !== 'task'
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: '`match.currentTags` is valid only for task event sources.',
+        path: ['match', 'currentTags'],
+      })
+    }
   }),
 )
 

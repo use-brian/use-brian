@@ -36,6 +36,13 @@ describe('[COMP:api/workspace-group-store] createGroup', () => {
       id: 'g1',
       workspaceId: 'w1',
       name: 'Leads',
+      kind: 'sharing',
+      key: null,
+      description: null,
+      color: null,
+      status: 'active',
+      compartmentKey: null,
+      readAll: false,
       memberCount: 0,
       createdAt: '2026-07-07T00:00:00.000Z',
     })

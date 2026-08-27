@@ -118,9 +118,9 @@ export async function distillFileToText(
   }
 
   // Local text-layer fallback for PDFs (unpdf) — no adapter, no model call.
+  let text: string
   try {
-    const text = await extractPdfText(input.buffer)
-    return { text, usage: null, model: 'local-pdf-text' }
+    text = await extractPdfText(input.buffer)
   } catch (fallbackErr) {
     // Both paths are gone. Surface the DISTILLATION error, not the fallback's:
     // a corrupt-PDF exception out of pdf.js names the last thing tried, while
@@ -129,4 +129,10 @@ export async function distillFileToText(
     // failure is the real answer.
     throw distillFailure ?? fallbackErr
   }
+  // A scan normally has no text layer. If visual distillation failed, an
+  // empty local extraction is not a successful fallback: preserve the visual
+  // marker/timeout/provider error so the caller can explain the real failure
+  // instead of collapsing it to "no readable text".
+  if (!text.trim() && distillFailure) throw distillFailure
+  return { text, usage: null, model: 'local-pdf-text' }
 }

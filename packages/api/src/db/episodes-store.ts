@@ -45,6 +45,8 @@ export type EpisodeRecord = {
   summaryText: string | null
   attachments: unknown[]
   sensitivity: EpisodeSensitivity
+  compartments: string[]
+  projectIds: string[]
   userId: string | null
   assistantId: string | null
   workspaceId: string
@@ -71,6 +73,8 @@ export type CreateEpisodeInput = {
   idleThresholdSecs?: number | null
   parentEpisodeId?: string | null
   status?: EpisodeStatus
+  compartments?: string[]
+  projectIds?: string[]
 }
 
 /**
@@ -159,6 +163,8 @@ const FULL_SELECT = `
   summary_text        AS "summaryText",
   attachments,
   sensitivity,
+  compartments,
+  project_ids          AS "projectIds",
   user_id             AS "userId",
   assistant_id        AS "assistantId",
   workspace_id        AS "workspaceId",
@@ -182,6 +188,8 @@ type EpisodeRow = {
   summaryText: string | null
   attachments: unknown[] | null
   sensitivity: string
+  compartments: string[]
+  projectIds: string[]
   userId: string | null
   assistantId: string | null
   workspaceId: string
@@ -206,6 +214,8 @@ function toEpisode(row: EpisodeRow): EpisodeRecord {
     summaryText: row.summaryText,
     attachments: row.attachments ?? [],
     sensitivity: row.sensitivity as EpisodeSensitivity,
+    compartments: row.compartments ?? [],
+    projectIds: row.projectIds ?? [],
     userId: row.userId,
     assistantId: row.assistantId,
     workspaceId: row.workspaceId,
@@ -270,7 +280,7 @@ export async function createEpisode(
        sensitivity,
        user_id, assistant_id, workspace_id,
        created_by_user_id, created_by_assistant_id,
-       parent_episode_id
+       parent_episode_id, compartments, project_ids
      )
      VALUES (
        $1, $2::jsonb,
@@ -280,7 +290,19 @@ export async function createEpisode(
        $9,
        $10, $11, $12,
        $13, $14,
-       $15
+       $15,
+       ARRAY(
+         SELECT DISTINCT unnest(
+           COALESCE((SELECT compartments FROM episodes WHERE id = $15), '{}'::text[])
+           || $16::text[]
+         ) ORDER BY 1
+       ),
+       ARRAY(
+         SELECT DISTINCT unnest(
+           COALESCE((SELECT project_ids FROM episodes WHERE id = $15), '{}'::uuid[])
+           || $17::uuid[]
+         ) ORDER BY 1
+       )
      )
      RETURNING ${FULL_SELECT}`,
     [
@@ -299,6 +321,8 @@ export async function createEpisode(
       input.createdByUserId,
       input.createdByAssistantId ?? null,
       input.parentEpisodeId ?? null,
+      input.compartments ?? [],
+      input.projectIds ?? [],
     ],
   )
   return toEpisode(result.rows[0])

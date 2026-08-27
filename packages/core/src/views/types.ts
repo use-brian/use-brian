@@ -373,6 +373,8 @@ export type SavedView = {
    * and mocks stay valid; the DB rows always carry the column.
    */
   teamspaceId?: string | null
+  /** Stable Project context for this page; null is Workspace General. */
+  projectId?: string | null
   /**
    * The user's *first prompt* — the chat message that created this page
    * (migration 231). Snapshotted at creation by the `renderPage` /
@@ -429,6 +431,7 @@ export type SavedViewListRow = Pick<
   | 'nestParentId'
   | 'position'
   | 'teamspaceId'
+  | 'projectId'
   | 'updatedAt'
 >
 
@@ -466,6 +469,8 @@ export type SavedViewUpdateFields = {
    * can see it. Omit to leave unchanged.
    */
   linkedRecordingId?: string | null
+  /** Internal/canonical Project reclassification. */
+  projectId?: string | null
   binding?: BindingConfig
   /**
    * Per-page "Sync to brain" toggle (migration 001_doc_brain_sync). When true,
@@ -528,6 +533,8 @@ export type CreateDraftInput = {
    *    section's create). See docs/architecture/features/teamspaces.md.
    */
   teamspaceId?: string | null
+  /** Omitted inherits a parent; null selects Workspace General. */
+  projectId?: string | null
   /** Defaults to 30 days. Ignored when `state` is `'saved'` (never prunes). */
   autoPruneDays?: number
   /**
@@ -748,6 +755,10 @@ export type SavedViewStore = {
      * the denormalization stays true.
      */
     teamspaceId?: string | null,
+    /** Project destination for a root drop; children inherit their parent. */
+    projectId?: string | null,
+    /** Required when the move changes Teamspace or Project for a subtree. */
+    contextMoveConfirmed?: boolean,
   ): Promise<boolean>
 
   /**

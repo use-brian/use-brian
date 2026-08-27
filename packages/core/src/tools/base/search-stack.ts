@@ -16,6 +16,7 @@
  */
 
 import { sanitizeDeep } from '../../security/sanitize.js'
+import { SearchProviderError, type SearchFailureKind } from './_fetch-error.js'
 
 // ── Shared search utilities ──────────────────────────────────────
 
@@ -75,7 +76,13 @@ export type SearchStackOutcome = {
    * days and every webSearch silently returned "No results found") from
    * "providers ran and genuinely found nothing".
    */
-  failures: Array<{ provider: string; error: string }>
+  failures: Array<{
+    provider: string
+    error: string
+    status?: number
+    kind?: SearchFailureKind
+    retryAfterMs?: number
+  }>
   /**
    * True when at least one provider whose empties are trustworthy
    * (`trustEmpty !== false`) returned a real empty result set — the
@@ -95,7 +102,7 @@ export function createSearchStack(
   providers: SearchProvider[],
 ): (query: string, maxResults: number, signal?: AbortSignal) => Promise<SearchStackOutcome> {
   return async (query, maxResults, signal) => {
-    const failures: Array<{ provider: string; error: string }> = []
+    const failures: SearchStackOutcome['failures'] = []
     let trustedEmpty = false
     for (const provider of providers) {
       if (!provider.available()) continue
@@ -111,7 +118,17 @@ export function createSearchStack(
         // caller that only sees an empty array cannot tell a total provider
         // outage apart from a genuinely empty result set, and must not
         // report the former as "no results".
-        failures.push({ provider: provider.name, error: err instanceof Error ? err.message : String(err) })
+        failures.push({
+          provider: provider.name,
+          error: err instanceof Error ? err.message : String(err),
+          ...(err instanceof SearchProviderError
+            ? {
+                status: err.status,
+                kind: err.kind,
+                retryAfterMs: err.retryAfterMs,
+              }
+            : {}),
+        })
       }
     }
     return { provider: null, results: [], failures, trustedEmpty }

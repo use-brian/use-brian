@@ -34,6 +34,9 @@ export type OfficeAuthorityProjection = {
   sensitivity: 'public' | 'internal' | 'confidential'
   visibilityUserIds: string[]
   compartments: string[]
+  projectIds?: string[]
+  compartmentGrant?: string[] | null
+  projectGrant?: string[] | null
   sourceHandles: string[]
 }
 
@@ -71,7 +74,7 @@ export type OfficeClaimPlanEntry = {
 }
 
 export type OfficeEvidencePacket = {
-  brain: Array<{ handle: string; excerpt: string; sensitivity: 'public' | 'internal' | 'confidential' }>
+  brain: Array<{ handle: string; excerpt: string; sensitivity: 'public' | 'internal' | 'confidential'; compartments?: string[]; projectIds?: string[] }>
   website: Array<{ url: string; excerpt: string }>
   conflicts: string[]
 }

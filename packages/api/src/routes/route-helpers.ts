@@ -7,7 +7,7 @@
 import { findOrCreateUser, findUserById } from '../db/users.js'
 import { query } from '../db/client.js'
 import { loadBuiltinSkills, formatSkillListing, createUseSkillTool, createReadSkillResourceTool, createSearchSkillResourcesTool, expandSkillPointers, formatSkillInstructions, sha256, parseFileContent, shouldInline, isTabular, profileWorkbook, renderWorkbookProfile } from '@use-brian/core'
-import type { Tool, UsageStore, BudgetStatus, ContentBlock, FileStore, McpSettingsStore, KnowledgeStoreInterface, KnowledgeRepoWriter, GDriveFilesStore, SkillContent, EngineHooks, FilesApi } from '@use-brian/core'
+import type { Tool, UsageStore, BudgetStatus, ContentBlock, FileStore, McpSettingsStore, KnowledgeStoreInterface, KnowledgeRepoWriter, GDriveFilesStore, SkillContent, EngineHooks, FilesApi, TurnScope } from '@use-brian/core'
 import type { ActorIdentity } from '../mcp/auth-headers.js'
 // NOTE: the real DB-backed credit gate (`checkCreditBudget`, closed billing/)
 // is NOT imported here — that would couple this OPEN helper to closed code.
@@ -389,6 +389,8 @@ export type ApplyMcpInjectionParams = {
   allowKnowledgeWrites?: boolean
   /** Newest human turn used by the deterministic capture-rule matcher. */
   knowledgeCaptureText?: string
+  /** Trusted execution scope used to hide connectors with broader exposure. */
+  contextScope?: TurnScope
 }
 
 /**
@@ -442,6 +444,7 @@ export async function applyMcpInjection(
       filesApi: stores.filesApi,
       readCachedFile: stores.readCachedFile,
       introspectionTools: params.introspectionTools,
+      contextScope: params.contextScope,
     })
   } catch (err) {
     console.error(`[${params.scope}] MCP tool injection failed:`, err)

@@ -3,7 +3,7 @@ import type { Classifier } from '../classification/types.js'
 import type { EntityKind } from '../entities/types.js'
 import type { AccessContext } from '../security/access-context.js'
 import { researchWriteFloor } from '../security/sensitivity.js'
-import { unionCompartments } from '../security/compartments.js'
+import { resolveWriteScope, scopeEvidenceFromRows } from '../security/context-scope.js'
 import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
 import { tolerantInt, uuidId } from '../tools/schema-tolerance.js'
 import {
@@ -241,6 +241,7 @@ function ctxFor(context: {
   assistantKind?: AccessContext['assistantKind']
   clearance?: AccessContext['clearance']
   compartments?: AccessContext['compartments']
+  projectIds?: AccessContext['projectIds']
 }): AccessContext {
   return {
     workspaceId: context.workspaceId,
@@ -249,6 +250,7 @@ function ctxFor(context: {
     assistantKind: context.assistantKind ?? 'standard',
     clearance: context.clearance,
     compartments: context.compartments,
+    projectIds: context.projectIds,
   }
 }
 
@@ -274,9 +276,26 @@ function readCtxFor(context: ToolContext): AccessContext {
       assistantKind: context.assistantKind,
       clearance: context.clearance,
       compartments: context.compartments,
+      projectIds: context.projectIds,
     }),
     systemRead: context.systemRead,
   }
+}
+
+function crmWriteScope(context: ToolContext) {
+  return resolveWriteScope({
+    sensitivity: context.researchMode
+      ? researchWriteFloor(context.scopeAccumulator?.sensitivity ?? context.sensitivity?.max, true)
+      : undefined,
+    baseCompartments: context.assistantDefaultCompartments,
+    baseProjectIds: context.assistantDefaultProjectIds,
+    evidence: context.scopeAccumulator ?? {
+      sensitivity: context.sensitivity?.max,
+      compartments: context.compartmentAccumulator?.compartments,
+    },
+    compartmentGrant: context.compartments,
+    projectGrant: context.projectIds,
+  })
 }
 
 function eventCtx(context: { userId: string; assistantId: string; sessionId: string; channelType: string }): CrmToolEventContext {
@@ -302,45 +321,6 @@ function crmSessionAnchor(
   if (opts?.writeSourceEpisodeId || opts?.writeSource === 'extracted') return null
   if (context.channelType === 'programmatic') return null
   return context.sessionId
-}
-
-// ── Dedupe-merge visibility (Tier B, write-gating-decision-brief.md §3) ──
-//
-// saveContact / saveCompany upsert: the store silently dedupe-merges into
-// an existing active row (same email/name) instead of inserting. The tool
-// result must SURFACE that branch so a merge into the wrong record is
-// visible in the turn (no gate — supersede is chain-restorable, but a
-// SILENT merge is the risk). `CrmStore.createContact/createCompany` return
-// a plain record with no merged flag, so we detect the merge tool-side
-// without a store-contract change: snapshot the exact-identity candidate
-// ids the store would dedupe against BEFORE the save (same access
-// projection), then check whether the saved row's id was pre-existing.
-// A fresh insert always mints a new id, so id ∈ snapshot ⇒ merged.
-
-/** Ids of active contacts whose email OR name exactly matches (case-insensitive) — the store's dedupe keys. */
-async function existingContactMatchIds(
-  store: CrmStore,
-  ctx: AccessContext,
-  identity: { name: string; email?: string | null },
-): Promise<Set<string>> {
-  const ids = new Set<string>()
-  const email = identity.email?.trim().toLowerCase()
-  const name = identity.name.trim().toLowerCase()
-  try {
-    // listContacts filters name/email by ILIKE substring — query the exact
-    // term, then keep only exact (case-insensitive) matches on the field the
-    // store dedupes on (email first, else name).
-    if (email) {
-      const byEmail = await store.listContacts(ctx, { query: identity.email!, limit: 100 })
-      for (const r of byEmail) if ((r.email ?? '').trim().toLowerCase() === email) ids.add(r.id)
-    }
-    const byName = await store.listContacts(ctx, { query: identity.name, limit: 100 })
-    for (const r of byName) if (r.name.trim().toLowerCase() === name) ids.add(r.id)
-  } catch {
-    // Best-effort: a failed pre-scan just means we can't prove a merge, so
-    // the result falls back to "Created" — never blocks the save.
-  }
-  return ids
 }
 
 /** Ids of active companies whose name exactly matches (case-insensitive) — the store's dedupe key. */
@@ -565,7 +545,7 @@ export function createCrmTools(
     name: 'saveContact',
     requiresCapability: 'crm',
     description:
-      'Upsert a contact in the current workspace. Dedupes on email first (case-insensitive), falling back to display name — an existing active contact with the same email or name is superseded with merged tags (union), non-empty phone / email / company_id (incoming wins), and external_ref (shallow merge). Dedupe and reads are scoped to entities visible to you: a same-name contact another member keeps private is never merged into — you get your own row. Use updateContact when you have an explicit id and need to patch other fields. ' +
+      'Create a new contact in the current workspace. A name, email, phone, alias, or fuzzy match never selects an existing person: people can legitimately share them. Use updateContact only when you have an explicit contact id. Provider adapters may resolve an existing person through a server-verified stable external identity, but free-form external_ref is metadata and never write authority. ' +
       'When asked to save a contact, call saveContact FIRST with whatever fields you have — name and email alone are enough; company_id is optional. Never let a company lookup or company creation block the contact save: save the contact, then link the company afterwards (via updateContact) once its id is known. ' +
       'If you do pass company_id, it must be an existing company in this workspace (use listCompanies to confirm); cross-workspace links are rejected by the DB. ' +
       'Pass `links` to record relationship edges from this contact (e.g. cofounder_of a company, attended an event, mentioned in a deal). Use the `entityId` returned from prior saveCompany / saveContact / saveDeal / createEntity calls (or read from list*).',
@@ -581,6 +561,7 @@ export function createCrmTools(
     async execute(input, context) {
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
+      const writeScope = crmWriteScope(context)
 
       const suggestions: Array<{ rule_id: string; suggested_value: string; confidence: number; hint: string }> = []
       const reject = runChatToolClassifier(
@@ -602,14 +583,8 @@ export function createCrmTools(
         assistantKind: context.assistantKind,
         clearance: context.clearance,
         compartments: context.compartments,
+        projectIds: context.projectIds,
       })
-      // Snapshot the ids the store's upsert-dedupe would target, BEFORE the
-      // write, so the merge branch is visible in the result (Tier B).
-      const priorMatchIds = await existingContactMatchIds(store, dedupeCtx, {
-        name: input.name,
-        email: input.email ?? null,
-      })
-
       try {
         const contact = await store.createContact({
           userId: context.userId,
@@ -625,13 +600,9 @@ export function createCrmTools(
           externalRef: input.external_ref,
           // Research findings come from the public web — stamp `public`
           // (confidential source seen still floors). Else: store default.
-          sensitivity: context.researchMode
-            ? researchWriteFloor(context.sensitivity?.max, true)
-            : undefined,
-          compartments: unionCompartments(
-            context.compartmentAccumulator?.compartments,
-            context.assistantDefaultCompartments,
-          ),
+          sensitivity: writeScope.sensitivity,
+          compartments: writeScope.compartments,
+          projectIds: writeScope.projectIds,
           source: opts?.writeSource,
           // Provenance anchors (mig 316). Extraction runs and the
           // programmatic brain-MCP surface carry a SYNTHETIC sessionId
@@ -651,12 +622,11 @@ export function createCrmTools(
           sourceId: contact.entityId ?? '',
           source: 'user',
           links: contact.entityId ? input.links : undefined,
+          compartments: contact.compartments,
+          projectIds: contact.projectIds,
         })
         const entitySuffix = contact.entityId ? `, entityId=${contact.entityId}` : ''
-        const merged = priorMatchIds.has(contact.id)
-        const verb = merged
-          ? `Merged into existing contact [${contact.id}${entitySuffix}]: ${contact.name}`
-          : `Created contact [${contact.id}${entitySuffix}]: ${contact.name}`
+        const verb = `Created contact [${contact.id}${entitySuffix}]: ${contact.name}`
         return {
           data:
             verb +
@@ -688,7 +658,7 @@ export function createCrmTools(
       if (!contact || contact.workspaceId !== context.workspaceId) {
         return { data: crmNotFound('Contact', input.id), isError: true }
       }
-      return { data: fullContact(contact) }
+      return { data: fullContact(contact), scopeEvidence: scopeEvidenceFromRows([contact]) }
     },
   })
 
@@ -722,7 +692,7 @@ export function createCrmTools(
       )
 
       opts?.onEvent?.({ type: 'contact_listed', resultCount: rows.length }, eventCtx(context))
-      return { data: rows.map(compactContact) }
+      return { data: rows.map(compactContact), scopeEvidence: scopeEvidenceFromRows(rows) }
     },
   })
 
@@ -746,6 +716,7 @@ export function createCrmTools(
     async execute(input, context) {
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
+      const writeScope = crmWriteScope(context)
 
       const fields: Parameters<CrmStore['updateContact']>[2] = {}
       if (input.name !== undefined) fields.name = input.name
@@ -780,7 +751,9 @@ export function createCrmTools(
               assistantKind: context.assistantKind,
               clearance: context.clearance,
               compartments: context.compartments,
+              projectIds: context.projectIds,
             }),
+            { compartments: writeScope.compartments, projectIds: writeScope.projectIds },
           )
         } catch (err) {
           const translated = translateLinkError(err, input as { company_id?: string | null; contact_id?: string | null })
@@ -797,6 +770,7 @@ export function createCrmTools(
             assistantKind: context.assistantKind,
             clearance: context.clearance,
             compartments: context.compartments,
+            projectIds: context.projectIds,
           }),
           input.id,
         )
@@ -814,6 +788,8 @@ export function createCrmTools(
         sourceId: updated.entityId ?? '',
         source: 'user',
         links: updated.entityId ? input.links : undefined,
+        compartments: updated.compartments,
+        projectIds: updated.projectIds,
       })
       const closesSummary = await applyExplicitCloses({
         entityLinks: opts?.entityLinks,
@@ -844,6 +820,7 @@ export function createCrmTools(
     async execute(input, context) {
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
+      const writeScope = crmWriteScope(context)
 
       const suggestions: Array<{ rule_id: string; suggested_value: string; confidence: number; hint: string }> = []
       const reject = runChatToolClassifier(
@@ -865,6 +842,7 @@ export function createCrmTools(
         assistantKind: context.assistantKind,
         clearance: context.clearance,
         compartments: context.compartments,
+        projectIds: context.projectIds,
       })
       // Snapshot the dedupe-target ids before the write (Tier B merge
       // visibility) — see saveContact.
@@ -881,13 +859,9 @@ export function createCrmTools(
         externalRef: input.external_ref,
         // Research findings come from the public web — stamp `public`
         // (confidential source seen still floors). Else: store default.
-        sensitivity: context.researchMode
-          ? researchWriteFloor(context.sensitivity?.max, true)
-          : undefined,
-        compartments: unionCompartments(
-          context.compartmentAccumulator?.compartments,
-          context.assistantDefaultCompartments,
-        ),
+        sensitivity: writeScope.sensitivity,
+        compartments: writeScope.compartments,
+        projectIds: writeScope.projectIds,
         source: opts?.writeSource,
         // Provenance anchors (mig 316) — see saveContact.
         sourceEpisodeId: opts?.writeSourceEpisodeId ?? null,
@@ -904,6 +878,8 @@ export function createCrmTools(
         sourceId: company.entityId ?? '',
         source: 'user',
         links: company.entityId ? input.links : undefined,
+        compartments: company.compartments,
+        projectIds: company.projectIds,
       })
       const entitySuffix = company.entityId ? `, entityId=${company.entityId}` : ''
       const merged = priorMatchIds.has(company.id)
@@ -936,7 +912,7 @@ export function createCrmTools(
       if (!company || company.workspaceId !== context.workspaceId) {
         return { data: crmNotFound('Company', input.id), isError: true }
       }
-      return { data: fullCompany(company) }
+      return { data: fullCompany(company), scopeEvidence: scopeEvidenceFromRows([company]) }
     },
   })
 
@@ -966,7 +942,7 @@ export function createCrmTools(
       )
 
       opts?.onEvent?.({ type: 'company_listed', resultCount: rows.length }, eventCtx(context))
-      return { data: rows.map(compactCompany) }
+      return { data: rows.map(compactCompany), scopeEvidence: scopeEvidenceFromRows(rows) }
     },
   })
 
@@ -988,6 +964,7 @@ export function createCrmTools(
     async execute(input, context) {
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
+      const writeScope = crmWriteScope(context)
 
       const fields: Parameters<CrmStore['updateCompany']>[2] = {}
       if (input.name !== undefined) fields.name = input.name
@@ -1016,7 +993,9 @@ export function createCrmTools(
             assistantKind: context.assistantKind,
             clearance: context.clearance,
             compartments: context.compartments,
+            projectIds: context.projectIds,
           }),
+          { compartments: writeScope.compartments, projectIds: writeScope.projectIds },
         )
         if (!updated) return { data: crmNotFound('Company', input.id), isError: true }
         opts?.onEvent?.({ type: 'company_updated', companyId: updated.id, fields: Object.keys(fields) }, eventCtx(context))
@@ -1029,6 +1008,7 @@ export function createCrmTools(
             assistantKind: context.assistantKind,
             clearance: context.clearance,
             compartments: context.compartments,
+            projectIds: context.projectIds,
           }),
           input.id,
         )
@@ -1043,6 +1023,8 @@ export function createCrmTools(
         sourceId: updated.entityId ?? '',
         source: 'user',
         links: updated.entityId ? input.links : undefined,
+        compartments: updated.compartments,
+        projectIds: updated.projectIds,
       })
       const closesSummary = await applyExplicitCloses({
         entityLinks: opts?.entityLinks,
@@ -1087,6 +1069,7 @@ export function createCrmTools(
     async execute(input, context) {
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
+      const writeScope = crmWriteScope(context)
 
       try {
         const deal = await store.createDeal({
@@ -1100,13 +1083,9 @@ export function createCrmTools(
           externalRef: input.external_ref,
           // Research findings come from the public web — stamp `public`
           // (confidential source seen still floors). Else: store default.
-          sensitivity: context.researchMode
-            ? researchWriteFloor(context.sensitivity?.max, true)
-            : undefined,
-          compartments: unionCompartments(
-            context.compartmentAccumulator?.compartments,
-            context.assistantDefaultCompartments,
-          ),
+          sensitivity: writeScope.sensitivity,
+          compartments: writeScope.compartments,
+          projectIds: writeScope.projectIds,
           source: opts?.writeSource,
           // Provenance anchors (mig 316) — see saveContact.
           sourceEpisodeId: opts?.writeSourceEpisodeId ?? null,
@@ -1123,6 +1102,8 @@ export function createCrmTools(
           sourceId: deal.entityId ?? '',
           source: 'user',
           links: deal.entityId ? input.links : undefined,
+          compartments: deal.compartments,
+          projectIds: deal.projectIds,
         })
         const summary = `${deal.stage}${deal.amount !== null ? `, $${deal.amount}` : ''}`
         const entitySuffix = deal.entityId ? `, entityId=${deal.entityId}` : ''
@@ -1152,7 +1133,7 @@ export function createCrmTools(
       if (!deal || deal.workspaceId !== context.workspaceId) {
         return { data: crmNotFound('Deal', input.id), isError: true }
       }
-      return { data: fullDeal(deal) }
+      return { data: fullDeal(deal), scopeEvidence: scopeEvidenceFromRows([deal]) }
     },
   })
 
@@ -1185,7 +1166,7 @@ export function createCrmTools(
       )
 
       opts?.onEvent?.({ type: 'deal_listed', resultCount: rows.length }, eventCtx(context))
-      return { data: rows.map(compactDeal) }
+      return { data: rows.map(compactDeal), scopeEvidence: scopeEvidenceFromRows(rows) }
     },
   })
 
@@ -1210,6 +1191,7 @@ export function createCrmTools(
     async execute(input, context) {
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
+      const writeScope = crmWriteScope(context)
 
       const fields: Parameters<CrmStore['updateDeal']>[2] = {}
       if (input.contact_id !== undefined) fields.contactId = input.contact_id
@@ -1240,7 +1222,9 @@ export function createCrmTools(
               assistantKind: context.assistantKind,
               clearance: context.clearance,
               compartments: context.compartments,
+              projectIds: context.projectIds,
             }),
+            { compartments: writeScope.compartments, projectIds: writeScope.projectIds },
           )
         } catch (err) {
           const translated = translateLinkError(err, input as { company_id?: string | null; contact_id?: string | null })
@@ -1258,6 +1242,7 @@ export function createCrmTools(
             assistantKind: context.assistantKind,
             clearance: context.clearance,
             compartments: context.compartments,
+            projectIds: context.projectIds,
           }),
           input.id,
         )
@@ -1272,6 +1257,8 @@ export function createCrmTools(
         sourceId: updated.entityId ?? '',
         source: 'user',
         links: updated.entityId ? input.links : undefined,
+        compartments: updated.compartments,
+        projectIds: updated.projectIds,
       })
       const closesSummary = await applyExplicitCloses({
         entityLinks: opts?.entityLinks,
@@ -1299,6 +1286,7 @@ export function createCrmTools(
     async execute(input, context) {
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
+      const writeScope = crmWriteScope(context)
 
       // Write under the viewer projection (read/write symmetry).
       const updated = await store.setDealStage(
@@ -1312,7 +1300,9 @@ export function createCrmTools(
           assistantKind: context.assistantKind,
           clearance: context.clearance,
           compartments: context.compartments,
+          projectIds: context.projectIds,
         }),
+        { compartments: writeScope.compartments, projectIds: writeScope.projectIds },
       )
       if (!updated) return { data: crmNotFound('Deal', input.id), isError: true }
       opts?.onEvent?.({ type: 'deal_stage_advanced', dealId: updated.id, stage: input.stage }, eventCtx(context))
@@ -1412,6 +1402,7 @@ export function createCrmTools(
             assistantKind: context.assistantKind,
             clearance: context.clearance,
             compartments: context.compartments,
+            projectIds: context.projectIds,
           }),
           input.id,
           input.values,

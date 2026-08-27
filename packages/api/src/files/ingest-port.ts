@@ -14,6 +14,9 @@ export type FileIngestContext = {
   assistantKind?: 'primary' | 'standard' | 'app'
   clearance?: Sensitivity
   compartments?: string[] | null
+  projectIds?: string[] | null
+  writeCompartments?: string[]
+  writeProjectIds?: string[]
 }
 
 export type FileIngestInput = {

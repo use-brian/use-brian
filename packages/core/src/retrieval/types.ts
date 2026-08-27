@@ -92,6 +92,8 @@ export type RetrievalActor = {
    * docs/plans/compartment-axis.md.
    */
   compartments?: string[] | null
+  /** Effective Project discovery grant. null/undefined is universe. */
+  projectIds?: string[] | null
 }
 
 // ── Shared input fragments ───────────────────────────────────────────

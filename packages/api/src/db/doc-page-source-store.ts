@@ -40,6 +40,9 @@ export type DocPageSourceUpsertInput = {
   ownerUserId: string
   /** Page-level clearance mapped to a `kb_chunks.sensitivity` value. */
   sensitivity: string
+  /** Trusted scope inherited from the page root. */
+  compartments?: string[]
+  projectIds?: string[]
   chunks: DocPageSourceChunk[]
 }
 
@@ -60,7 +63,15 @@ function sourcePath(pageId: string, blockId: string): string {
 export function createDbDocPageSourceStore(): DocPageSourceStore {
   return {
     async upsertPageChunks(input) {
-      const { pageId, workspaceId, ownerUserId, sensitivity, chunks } = input
+      const {
+        pageId,
+        workspaceId,
+        ownerUserId,
+        sensitivity,
+        compartments = [],
+        projectIds = [],
+        chunks,
+      } = input
       const keptPaths = chunks.map((c) => sourcePath(pageId, c.blockId))
       const pagePrefix = `${pageId}#%`
 
@@ -71,13 +82,26 @@ export function createDbDocPageSourceStore(): DocPageSourceStore {
         await query(
           `INSERT INTO kb_chunks
              (chunk_text, source, source_path, source_episode_id, content_hash,
-              title, sensitivity, workspace_id, user_id, created_by_user_id)
-           VALUES ($1, 'doc_page', $2, $3, $4, $5, $6, $7, $8, $8)
+              title, sensitivity, workspace_id, user_id, created_by_user_id,
+              compartments, project_ids)
+           VALUES ($1, 'doc_page', $2, $3, $4, $5, $6, $7, $8, $8, $9, $10)
            ON CONFLICT (source_path) WHERE source = 'doc_page'
            DO UPDATE SET
              chunk_text        = EXCLUDED.chunk_text,
              source_episode_id = EXCLUDED.source_episode_id,
              sensitivity       = EXCLUDED.sensitivity,
+             compartments      = ARRAY(
+               SELECT DISTINCT value
+                 FROM unnest(COALESCE(kb_chunks.compartments, '{}') ||
+                             COALESCE(EXCLUDED.compartments, '{}')) AS u(value)
+                ORDER BY value
+             ),
+             project_ids       = ARRAY(
+               SELECT DISTINCT value
+                 FROM unnest(COALESCE(kb_chunks.project_ids, '{}') ||
+                             COALESCE(EXCLUDED.project_ids, '{}')) AS u(value)
+                ORDER BY value
+             ),
              updated_at        = now(),
              embedding         = CASE
                WHEN kb_chunks.content_hash IS DISTINCT FROM EXCLUDED.content_hash
@@ -96,6 +120,8 @@ export function createDbDocPageSourceStore(): DocPageSourceStore {
             sensitivity,
             workspaceId,
             ownerUserId,
+            compartments,
+            projectIds,
           ],
         )
       }

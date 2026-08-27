@@ -66,6 +66,9 @@ const ENTITY_INSTANCE_SELECT = `
   workspace_id    AS "workspaceId",
   data,
   source_app      AS "sourceApp",
+  sensitivity,
+  compartments,
+  project_ids     AS "projectIds",
   created_at      AS "createdAt",
   created_by      AS "createdBy",
   last_edited_at  AS "lastEditedAt",
@@ -89,6 +92,9 @@ type EntityInstanceRow = {
   workspaceId: string
   data: Record<string, CellValue>
   sourceApp: 'doc' | 'chat' | 'import' | 'api'
+  sensitivity: 'public' | 'internal' | 'confidential'
+  compartments: string[]
+  projectIds: string[]
   createdAt: Date
   createdBy: string | null
   lastEditedAt: Date
@@ -115,6 +121,9 @@ function rowToInstance(row: EntityInstanceRow): DocEntityInstance {
     workspaceId: row.workspaceId,
     data: row.data,
     sourceApp: row.sourceApp,
+    sensitivity: row.sensitivity ?? 'internal',
+    compartments: row.compartments ?? [],
+    projectIds: row.projectIds ?? [],
     createdAt: row.createdAt.toISOString(),
     createdBy: row.createdBy,
     lastEditedAt: row.lastEditedAt.toISOString(),
@@ -538,6 +547,9 @@ export function createDbDocEntityStore(): DocEntityStore {
         workspaceId: input.workspaceId,
         data: input.data,
         sourceApp: input.sourceApp,
+        sensitivity: input.sensitivity ?? 'internal',
+        compartments: input.compartments ?? [],
+        projectIds: input.projectIds ?? [],
         createdAt: new Date().toISOString(),
         createdBy: input.createdBy,
         lastEditedAt: new Date().toISOString(),
@@ -547,8 +559,9 @@ export function createDbDocEntityStore(): DocEntityStore {
       const result = await queryWithRLS<EntityInstanceRow>(
         input.createdBy ?? input.workspaceId,
         `INSERT INTO entity_instances
-           (entity_type_id, workspace_id, data, source_app, created_by, last_edited_by)
-         VALUES ($1, $2, $3::jsonb, $4, $5, $6)
+           (entity_type_id, workspace_id, data, source_app, created_by, last_edited_by,
+            sensitivity, compartments, project_ids)
+         VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, $8, $9)
          RETURNING ${ENTITY_INSTANCE_SELECT}`,
         [
           input.entityTypeId,
@@ -557,6 +570,9 @@ export function createDbDocEntityStore(): DocEntityStore {
           input.sourceApp,
           input.createdBy,
           input.lastEditedBy,
+          input.sensitivity ?? 'internal',
+          input.compartments ?? [],
+          input.projectIds ?? [],
         ],
       )
       return rowToInstance(result.rows[0])
@@ -584,6 +600,25 @@ export function createDbDocEntityStore(): DocEntityStore {
       if (patch.lastEditedBy !== undefined) {
         sets.push(`last_edited_by = $${idx++}`)
         values.push(patch.lastEditedBy)
+      }
+      if (patch.sensitivity !== undefined) {
+        sets.push(`sensitivity = CASE
+          WHEN sensitivity_rank(sensitivity) >= sensitivity_rank($${idx}) THEN sensitivity
+          ELSE $${idx} END`)
+        values.push(patch.sensitivity)
+        idx += 1
+      }
+      if (patch.compartments !== undefined) {
+        sets.push(`compartments = ARRAY(
+          SELECT DISTINCT value FROM unnest(compartments || $${idx++}::text[]) AS u(value)
+          ORDER BY value)`)
+        values.push(patch.compartments)
+      }
+      if (patch.projectIds !== undefined) {
+        sets.push(`project_ids = ARRAY(
+          SELECT DISTINCT value FROM unnest(project_ids || $${idx++}::uuid[]) AS u(value)
+          ORDER BY value)`)
+        values.push(patch.projectIds)
       }
 
       // Always bump `last_edited_at` — column has a server-side default

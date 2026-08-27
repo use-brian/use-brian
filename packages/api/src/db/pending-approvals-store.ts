@@ -10,8 +10,9 @@
  * [COMP:api/pending-approvals-store]
  */
 
-import { query, queryWithRLS } from './client.js'
+import { getPool, query, queryWithRLS } from './client.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
+import { appendDecisionEvent } from './decision-event-store.js'
 
 export type PendingApprovalStatus =
   | 'pending'
@@ -25,6 +26,12 @@ export type PendingApprovalStatus =
    * `responded_at` stamped, so the queue UI shows them as history, not work.
    */
   | 'auto_approved'
+
+export type ApprovalDecisionResolution =
+  | 'allow'
+  | 'deny'
+  | 'always_allow'
+  | 'always_deny'
 
 export type ApprovalDeliveryChannel = 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams' | 'feishu'
 
@@ -93,6 +100,8 @@ export type CreateApprovalParams = {
   /** Server-resolved confirmation details displayed by the approvals queue. */
   approvalPayload?: {
     displayLines?: string[]
+    /** Exact learned-rule application frozen before this approval existed. */
+    decisionApplicationId?: string
   }
   approverUserId: string
   deliveryChannelType: ApprovalDeliveryChannel
@@ -123,6 +132,8 @@ export type CreateToolInvocationParams = {
     description?: string
     displayLines?: string[]
     allowPersistentApproval?: boolean
+    /** Exact learned-rule application for this frozen tool invocation. */
+    decisionApplicationId?: string
   }
   deliveryChannelType: ApprovalDeliveryChannel
   deliveryChannelId?: string | null
@@ -525,6 +536,7 @@ export type PendingApprovalsStore = {
     decision: 'approved' | 'rejected',
     responderUserId: string,
     rejectReason?: string,
+    resolution?: ApprovalDecisionResolution,
   ): Promise<PendingApproval | null>
 
   /**
@@ -664,6 +676,54 @@ function rowToApproval(row: Record<string, unknown>): PendingApproval {
     originatingAssistantId: (row.originatingAssistantId as string | null) ?? null,
     answerText: (row.answerText as string | null) ?? null,
   }
+}
+
+function canonicalApprovalToolName(toolName: string): string {
+  return toolName.split('__', 1)[0]
+}
+
+function isReviewedEmailApproval(approval: PendingApproval): boolean {
+  return approval.kind === 'workflow_step'
+    && canonicalApprovalToolName(approval.toolName) === 'imapSendMessage'
+}
+
+function emailRevision(approval: PendingApproval): number {
+  const raw = approval.approvalPayload.emailDraftRevision
+  return typeof raw === 'number' && Number.isInteger(raw) && raw > 0 ? raw : 1
+}
+
+function approvalAccountKey(approval: PendingApproval): string | null {
+  const candidates = [
+    approval.approvalPayload.accountKey,
+    approval.approvalPayload.mailboxAccountKey,
+    approval.arguments.account,
+  ]
+  const key = candidates.find((value) => typeof value === 'string' && value.trim().length > 0)
+  return typeof key === 'string' ? key.trim().slice(0, 256) : null
+}
+
+function approvalSensitivity(
+  approval: PendingApproval,
+): 'public' | 'internal' | 'confidential' | 'restricted' {
+  const value = approval.approvalPayload.sensitivity
+  return value === 'public' || value === 'internal' || value === 'confidential' || value === 'restricted'
+    ? value
+    : 'internal'
+}
+
+function decisionApplicationId(approval: PendingApproval): string | null {
+  const value = approval.approvalPayload.decisionApplicationId
+  return typeof value === 'string'
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+    ? value
+    : null
+}
+
+function approvalScope(
+  approval: PendingApproval,
+): 'instance' | 'account' | 'tool' {
+  if (isReviewedEmailApproval(approval) || approval.kind === 'email_sender') return 'account'
+  return approval.toolName ? 'tool' : 'instance'
 }
 
 export function createPendingApprovalsStore(): PendingApprovalsStore {
@@ -948,6 +1008,9 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
       if (params.approvalPayload.allowPersistentApproval !== undefined) {
         payload.allowPersistentApproval = params.approvalPayload.allowPersistentApproval
       }
+      if (params.approvalPayload.decisionApplicationId !== undefined) {
+        payload.decisionApplicationId = params.approvalPayload.decisionApplicationId
+      }
 
       const result = await query(
         `INSERT INTO pending_approvals (
@@ -1133,8 +1196,11 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
       // reject, expiry, or competing edit won first and no replacement exists.
       // Only `arguments.body` changes. Every authority-bearing field is copied
       // from the frozen source row, never accepted from the HTTP request.
-      const result = await query(
-        `WITH superseded AS (
+      const client = await getPool().connect()
+      try {
+        await client.query('BEGIN')
+        const result = await client.query(
+          `WITH superseded AS (
            UPDATE pending_approvals
            SET status = 'superseded',
                responded_at = now(),
@@ -1169,33 +1235,110 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
            FROM superseded
            RETURNING ${COLS}
          )
-         SELECT * FROM replacement`,
-        [id, body, responderUserId],
-      )
-      if (!result.rows[0]) return null
-      const replacement = rowToApproval(result.rows[0] as Record<string, unknown>)
-      notifyWorkspaceChange(replacement.workspaceId, 'approval', 'update', id)
-      notifyWorkspaceChange(replacement.workspaceId, 'approval', 'create', replacement.id)
-      return replacement
+           SELECT * FROM replacement`,
+          [id, body, responderUserId],
+        )
+        if (!result.rows[0]) {
+          await client.query('COMMIT')
+          return null
+        }
+        const replacement = rowToApproval(result.rows[0] as Record<string, unknown>)
+        const revision = emailRevision(replacement)
+        await appendDecisionEvent({
+          idempotencyKey: `email-revision:${replacement.id}`,
+          workspaceId: replacement.workspaceId,
+          actorUserId: responderUserId,
+          assistantId: replacement.originatingAssistantId,
+          sessionId: replacement.blockingSessionId,
+          eventKind: 'email.draft_revised',
+          schemaVersion: 1,
+          sourceKind: 'pending_approval',
+          sourceId: replacement.id,
+          declaredScope: 'account',
+          visibility: 'owner',
+          sensitivity: approvalSensitivity(replacement),
+          causedByApplicationId: decisionApplicationId(replacement),
+          payload: {
+            previousApprovalId: id,
+            replacementApprovalId: replacement.id,
+            previousRevision: Math.max(1, revision - 1),
+            newRevision: revision,
+            accountKey: approvalAccountKey(replacement),
+          },
+        }, client)
+        await client.query('COMMIT')
+        notifyWorkspaceChange(replacement.workspaceId, 'approval', 'update', id)
+        notifyWorkspaceChange(replacement.workspaceId, 'approval', 'create', replacement.id)
+        return replacement
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => {})
+        throw err
+      } finally {
+        client.release()
+      }
     },
 
-    async respond(id, decision, responderUserId, rejectReason) {
+    async respond(id, decision, responderUserId, rejectReason, resolution) {
       // Atomic: only flip if currently pending. Returns null on second
       // call (idempotent under double-click) or expired/superseded rows.
-      const result = await query(
-        `UPDATE pending_approvals
-         SET status = $2,
-             responded_at = now(),
-             responded_by = $3,
-             reject_reason = $4
-         WHERE id = $1 AND status = 'pending'
-         RETURNING ${COLS}`,
-        [id, decision, responderUserId, rejectReason ?? null],
-      )
-      if (!result.rows[0]) return null
-      const responded = rowToApproval(result.rows[0] as Record<string, unknown>)
-      notifyWorkspaceChange(responded.workspaceId, 'approval', 'update', responded.id)
-      return responded
+      const client = await getPool().connect()
+      try {
+        await client.query('BEGIN')
+        const result = await client.query(
+          `UPDATE pending_approvals
+           SET status = $2,
+               responded_at = now(),
+               responded_by = $3,
+               reject_reason = $4
+           WHERE id = $1 AND status = 'pending'
+           RETURNING ${COLS}`,
+          [id, decision, responderUserId, rejectReason ?? null],
+        )
+        if (!result.rows[0]) {
+          await client.query('COMMIT')
+          return null
+        }
+        const responded = rowToApproval(result.rows[0] as Record<string, unknown>)
+        const fourWay = resolution ?? (decision === 'approved' ? 'allow' : 'deny')
+        if (
+          (decision === 'approved' && (fourWay === 'deny' || fourWay === 'always_deny'))
+          || (decision === 'rejected' && (fourWay === 'allow' || fourWay === 'always_allow'))
+        ) {
+          throw new Error(`Approval resolution ${fourWay} contradicts status ${decision}`)
+        }
+        await appendDecisionEvent({
+          idempotencyKey: `approval:${responded.id}:${fourWay}`,
+          workspaceId: responded.workspaceId,
+          actorUserId: responderUserId,
+          assistantId: responded.originatingAssistantId,
+          sessionId: responded.blockingSessionId,
+          eventKind: 'approval.decided',
+          schemaVersion: 1,
+          sourceKind: 'pending_approval',
+          sourceId: responded.id,
+          declaredScope: approvalScope(responded),
+          visibility: 'owner',
+          sensitivity: approvalSensitivity(responded),
+          reason: decision === 'rejected' ? rejectReason ?? null : null,
+          causedByApplicationId: decisionApplicationId(responded),
+          payload: {
+            approvalId: responded.id,
+            approvalKind: responded.kind,
+            toolName: responded.toolName ? canonicalApprovalToolName(responded.toolName) : null,
+            resolution: fourWay,
+            revision: isReviewedEmailApproval(responded) ? emailRevision(responded) : undefined,
+            accountKey: approvalAccountKey(responded),
+          },
+        }, client)
+        await client.query('COMMIT')
+        notifyWorkspaceChange(responded.workspaceId, 'approval', 'update', responded.id)
+        return responded
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => {})
+        throw err
+      } finally {
+        client.release()
+      }
     },
 
     async expireDue() {

@@ -32,6 +32,27 @@ const GITHUB_ID = '00000000-0000-0000-0000-0000000000a4'
 const WORKSPACE_ID = '00000000-0000-0000-0000-0000000000b1'
 const RULE_ID = '00000000-0000-0000-0000-0000000000d1'
 const SINK_ID = '00000000-0000-0000-0000-0000000000c1'
+const TEAM_ID = '00000000-0000-4000-8000-0000000000e1'
+const PROJECT_ID = '00000000-0000-4000-8000-0000000000e2'
+
+function rule(overrides: Record<string, unknown> = {}) {
+  return {
+    id: RULE_ID,
+    connectorInstanceId: INSTANCE_ID,
+    source: 'calendar',
+    ruleOrder: 0,
+    filterType: 'always',
+    filterParams: {},
+    routingMode: 'realtime',
+    routingSchedule: null,
+    routingTimezone: 'UTC',
+    alert: false,
+    episodeSensitivity: null,
+    compartments: [],
+    projectIds: [],
+    ...overrides,
+  }
+}
 
 function instance(overrides: Partial<ConnectorInstance> = {}): ConnectorInstance {
   return {
@@ -53,6 +74,8 @@ function instance(overrides: Partial<ConnectorInstance> = {}): ConnectorInstance
     healthStatus: 'ok',
     lastError: null,
     lastCheckedAt: null,
+    compartments: [],
+    projectIds: [],
     createdBy: USER_ID,
     createdAt: new Date(),
     updatedAt: new Date(),
@@ -76,7 +99,7 @@ function sink(): IngestExternalSink {
   }
 }
 
-function setup() {
+function setup(ready = true) {
   const connectorInstanceStore = {
     get: vi.fn(),
     update: vi.fn(),
@@ -95,6 +118,19 @@ function setup() {
       ownerUserId: USER_ID,
       isPersonal: true,
     }),
+    getRole: vi.fn().mockResolvedValue('admin'),
+  }
+  const contextStore = {
+    listTeams: vi.fn().mockResolvedValue([{
+      id: TEAM_ID,
+      compartmentKey: `team:${TEAM_ID}`,
+    }]),
+    getTeamSystem: vi.fn().mockResolvedValue({
+      id: TEAM_ID,
+      status: 'active',
+      compartmentKey: `team:${TEAM_ID}`,
+    }),
+    getProjectSystem: vi.fn().mockResolvedValue({ id: PROJECT_ID, status: 'active' }),
   }
   const ingestSinkStore = {
     create: vi.fn().mockResolvedValue(sink()),
@@ -115,8 +151,15 @@ function setup() {
     workspaceStore: workspaceStore as never,
     connectorGrantStore: {} as never,
     ingestSinkStore: ingestSinkStore as never,
+    contextStore: contextStore as never,
+    getReadiness: vi.fn().mockResolvedValue({
+      enforcementVersion: 1,
+      readyForActivation: ready,
+      checks: ready ? [] : [{ id: 'connectors', ready: false, blocking: true, detail: 'missing' }],
+      legacyGeneral: {},
+    }),
   }))
-  return { app, connectorInstanceStore, ingestRulesStore, workspaceStore, ingestSinkStore }
+  return { app, connectorInstanceStore, ingestRulesStore, workspaceStore, ingestSinkStore, contextStore }
 }
 
 beforeEach(() => {
@@ -132,19 +175,7 @@ describe('[COMP:api/ingest-route] OSS ingestion control plane', () => {
       { instance: instance({ id: GITHUB_ID, provider: 'gmail' }), source: 'personal' },
     ])
     const { app, ingestRulesStore } = setup()
-    ingestRulesStore.listByConnectorInstances.mockResolvedValue([{
-      id: RULE_ID,
-      connectorInstanceId: INSTANCE_ID,
-      source: 'calendar',
-      ruleOrder: 0,
-      filterType: 'always',
-      filterParams: {},
-      routingMode: 'realtime',
-      routingSchedule: null,
-      routingTimezone: 'UTC',
-      alert: false,
-      episodeSensitivity: null,
-    }])
+    ingestRulesStore.listByConnectorInstances.mockResolvedValue([rule()])
 
     const response = await request(app).get(`/api/ingest/sources?workspaceId=${WORKSPACE_ID}`)
 
@@ -214,8 +245,8 @@ describe('[COMP:api/ingest-route] OSS ingestion control plane', () => {
 
   it('supports rule create, patch, and delete contracts', async () => {
     const { app } = setup()
-    mocks.addRule.mockResolvedValue({ id: RULE_ID })
-    mocks.updateRule.mockResolvedValue({ id: RULE_ID, alert: true })
+    mocks.addRule.mockResolvedValue(rule())
+    mocks.updateRule.mockResolvedValue(rule({ alert: true }))
 
     const created = await request(app)
       .post(`/api/ingest/sources/${INSTANCE_ID}/rules`)
@@ -233,6 +264,54 @@ describe('[COMP:api/ingest-route] OSS ingestion control plane', () => {
     expect(mocks.updateRule).toHaveBeenCalledWith(USER_ID, { ruleId: RULE_ID, patch: { alert: true } })
     expect(removed.status).toBe(204)
     expect(mocks.deleteRule).toHaveBeenCalledWith(USER_ID, RULE_ID)
+  })
+
+  it('translates stable Team/Project bindings to internal stamps only after readiness is green', async () => {
+    const { app } = setup(true)
+    mocks.addRule.mockResolvedValue(rule({
+      compartments: [`team:${TEAM_ID}`],
+      projectIds: [PROJECT_ID],
+    }))
+
+    const response = await request(app)
+      .post(`/api/ingest/sources/${INSTANCE_ID}/rules`)
+      .send({
+        filterType: 'always',
+        routingMode: 'realtime',
+        workspaceId: WORKSPACE_ID,
+        contextGroupId: TEAM_ID,
+        contextProjectId: PROJECT_ID,
+      })
+
+    expect(response.status).toBe(201)
+    expect(mocks.addRule).toHaveBeenCalledWith(USER_ID, expect.objectContaining({
+      compartments: [`team:${TEAM_ID}`],
+      projectIds: [PROJECT_ID],
+    }))
+    expect(response.body.rule).toMatchObject({
+      contextGroupId: TEAM_ID,
+      contextProjectId: PROJECT_ID,
+    })
+    expect(JSON.stringify(response.body)).not.toContain(`team:${TEAM_ID}`)
+  })
+
+  it('blocks scoped ingest-rule activation while readiness is red', async () => {
+    const { app } = setup(false)
+    const response = await request(app)
+      .post(`/api/ingest/sources/${INSTANCE_ID}/rules`)
+      .send({
+        filterType: 'always',
+        routingMode: 'realtime',
+        workspaceId: WORKSPACE_ID,
+        contextGroupId: TEAM_ID,
+        contextProjectId: null,
+      })
+    expect(response.status).toBe(409)
+    expect(response.body).toEqual({
+      error: 'context_activation_blocked',
+      failedChecks: ['connectors'],
+    })
+    expect(mocks.addRule).not.toHaveBeenCalled()
   })
 
   it('supports sink create, list, patch, and delete without returning secrets', async () => {

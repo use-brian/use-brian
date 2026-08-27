@@ -246,6 +246,14 @@ state machines:
    turn input; earlier bounded persisted history is appended with
    `thread/inject_items` as model-visible Responses items. The Codex thread is
    ephemeral, so Brian's DB remains the durable source of truth.
+   History replay uses a **6 MiB serialized batch budget** beneath the
+   inference process's 8 MiB JSONL frame boundary. Individual text, tool-call,
+   and tool-result fields remain capped at 256 KiB. A prior inline image is
+   replayed only while its complete Responses message still fits the batch;
+   an image that would exceed the budget is replaced with a model-visible note
+   saying its visual contents are unavailable and must be reattached if they
+   are needed. One oversized attachment must never abort every later turn in
+   the chat or surface a raw RPC-boundary error to the user.
 3. Agent-message deltas map to `text_delta`; supported reasoning-summary deltas
    map to `thinking_delta`; token-usage notifications map to `TokenUsage`.
 4. On a `dynamicToolCall` server request, the adapter emits

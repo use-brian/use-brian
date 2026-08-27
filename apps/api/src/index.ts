@@ -4,9 +4,10 @@
  * This is the single-player, one-key local product entrypoint. It imports ZERO
  * closed code: no `@use-brian/api-platform`, no `@use-brian/shared-server`, no
  * `getEnv()`. It reads the handful of values the open composition needs straight
- * from `process.env` (with local defaults), then calls `bootOpenApi()` with no
- * ports — every closed seam falls back to its safe default (allow-all credit
- * gate, no-op usage recorder, inert feed hooks). The brain
+ * from `process.env` (with local defaults), then calls `bootOpenApi()` with
+ * open implementations for the seams standalone needs (including the local
+ * COGS usage recorder). Every closed seam keeps its safe default (allow-all
+ * credit gate, inert feed hooks). The brain
  * still dreams (consolidation runs on the local timer); billing and
  * feed-distribution are simply absent. Connectors and the BYO messaging
  * channels (Telegram / Slack / Discord-with-bridge) ARE part of the open
@@ -25,6 +26,7 @@ import { createBrowserCredentialStore } from '@use-brian/api/db/browser-credenti
 import { createBrowserProfileStore } from '@use-brian/api/db/browser-profile-store.js'
 import { createBrowserSessionVault } from '@use-brian/api/db/browser-session-vault.js'
 import { createBrowserSkillGrantStore } from '@use-brian/api/db/browser-skill-grant-store.js'
+import { createOssUsageStore } from '@use-brian/api/db/oss-usage-store.js'
 import { createSandboxTaskStore } from '@use-brian/api/db/sandbox-task-store.js'
 
 dotenv.config()
@@ -138,6 +140,7 @@ const { start } = await bootOpenApi({
   env,
   runWorkers: true,
   ports: {
+    usageStore: createOssUsageStore(),
     buildEpisodeIngestors,
     buildChannelHosts: buildOpenChannelHosts,
     browserProfileStore: createBrowserProfileStore(),

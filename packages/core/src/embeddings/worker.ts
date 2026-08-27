@@ -244,8 +244,9 @@ export type EmbeddingWorkerOptions = {
   batchLimit?: number
   /**
    * COGS recorder invoked after each successfully committed batch with the
-   * per-(workspace, user) groups. Absent in OSS (no usage store) — embedding
-   * runs unmetered locally. Failures are logged and never fail the drain.
+   * per-(workspace, user) groups. Normal standalone records to its local COGS
+   * store; bespoke embeddings may omit it and still run. Failures are logged
+   * and never fail the drain.
    */
   usage?: EmbeddingUsageRecorder
 }

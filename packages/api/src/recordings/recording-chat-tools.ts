@@ -34,6 +34,7 @@ import {
   type CrmStore,
   type Embedder,
   type Tool,
+  scopeEvidenceFromRows,
 } from '@use-brian/core'
 import {
   listRecordingSpeakerLabels,
@@ -204,7 +205,7 @@ export function createListRecordingsTool(): Tool {
           ...(input.query?.trim() ? { q: input.query.trim() } : {}),
         }
         const rows = await listRecordings(
-          actor.userId,
+          actor,
           actor.workspaceId,
           filters,
           input.limit ? { limit: input.limit } : {},
@@ -222,6 +223,7 @@ export function createListRecordingsTool(): Tool {
             truncated: r.truncated,
             hasTranscript: r.transcriptFileId != null,
           })),
+          scopeEvidence: scopeEvidenceFromRows(rows),
         }
       } catch (err) {
         return {

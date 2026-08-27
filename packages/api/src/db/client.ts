@@ -26,19 +26,61 @@ let appPool: pg.Pool | null = null
 const AGENT_CLEARANCES = ['public', 'internal', 'confidential'] as const
 export type AgentClearance = (typeof AGENT_CLEARANCES)[number]
 
-const agentClearanceStorage = new AsyncLocalStorage<AgentClearance>()
+type AgentAccessContext = {
+  clearance: AgentClearance
+  /** undefined = legacy clearance-only wrap; linked Teams fail closed. */
+  compartments?: string[] | null
+  /** Project is not an ACL, but page/container reads must retain its boundary. */
+  projectIds?: string[] | null
+}
+
+const agentAccessStorage = new AsyncLocalStorage<AgentAccessContext>()
 
 export function runWithAgentClearance<T>(clearance: string | null | undefined, fn: () => T): T {
   const validated = AGENT_CLEARANCES.find((c) => c === clearance)
   // Unknown/absent clearance runs WITHOUT the agent context rather than
   // guessing a tier — the membership model then applies (fail-closed).
   if (!validated) return fn()
-  return agentClearanceStorage.run(validated, fn)
+  return agentAccessStorage.run({ clearance: validated }, fn)
+}
+
+/** Carry both sensitivity and the resolved Team grant for assistant page access. */
+export function runWithAgentAccess<T>(
+  access: {
+    clearance: string | null | undefined
+    compartments: string[] | null | undefined
+    projectIds?: string[] | null | undefined
+  },
+  fn: () => T,
+): T {
+  const clearance = AGENT_CLEARANCES.find((candidate) => candidate === access.clearance)
+  if (!clearance) return fn()
+  return agentAccessStorage.run({
+    clearance,
+    compartments: access.compartments === null
+      ? null
+      : access.compartments === undefined
+        ? undefined
+        : [...new Set(access.compartments)].sort(),
+    projectIds: access.projectIds === null
+      ? null
+      : access.projectIds === undefined
+        ? undefined
+        : [...new Set(access.projectIds)].sort(),
+  }, fn)
 }
 
 /** The active agent clearance, if this code runs inside an assistant execution wrap. */
 export function currentAgentClearance(): AgentClearance | undefined {
-  return agentClearanceStorage.getStore()
+  return agentAccessStorage.getStore()?.clearance
+}
+
+export function currentAgentCompartments(): string[] | null | undefined {
+  return agentAccessStorage.getStore()?.compartments
+}
+
+export function currentAgentProjectIds(): string[] | null | undefined {
+  return agentAccessStorage.getStore()?.projectIds
 }
 
 /**
@@ -343,6 +385,22 @@ export async function applyRLSGucs(
   if (agentClearance) {
     // Values come from the AGENT_CLEARANCES whitelist — no injection surface.
     await client.query(`SET LOCAL app.agent_clearance = '${agentClearance}'`)
+  }
+  const agentCompartments = currentAgentCompartments()
+  if (agentCompartments !== undefined) {
+    // JSON preserves the null=universe / []=General distinction and avoids
+    // PostgreSQL array-string escaping. Policy code consumes this as jsonb.
+    await client.query(
+      `SELECT set_config('app.agent_compartments', $1, true)`,
+      [JSON.stringify(agentCompartments)],
+    )
+  }
+  const agentProjectIds = currentAgentProjectIds()
+  if (agentProjectIds !== undefined) {
+    await client.query(
+      `SELECT set_config('app.agent_project_ids', $1, true)`,
+      [JSON.stringify(agentProjectIds)],
+    )
   }
 }
 

@@ -20,6 +20,8 @@ type BatchRow = {
   events: unknown[]
   created_at: Date
   episode_sensitivity: 'public' | 'internal' | 'confidential' | null
+  compartments: string[]
+  project_ids: string[]
 }
 
 function rowToBatch(row: BatchRow): PendingBatch {
@@ -32,6 +34,8 @@ function rowToBatch(row: BatchRow): PendingBatch {
     events: Array.isArray(row.events) ? row.events : [],
     createdAt: row.created_at,
     episodeSensitivity: row.episode_sensitivity,
+    compartments: row.compartments ?? [],
+    projectIds: row.project_ids ?? [],
   }
 }
 
@@ -43,7 +47,7 @@ export function createDbBatchStore(): BatchStore {
         await client.query('BEGIN')
         const result = await client.query<BatchRow>(
           `SELECT id, workspace_id, rule_id, source, fires_at, events,
-                  created_at, episode_sensitivity
+                  created_at, episode_sensitivity, compartments, project_ids
              FROM pending_ingest_batches
              WHERE fires_at < now() AND processed_at IS NULL
              FOR UPDATE SKIP LOCKED
@@ -126,6 +130,8 @@ export async function appendBatchEvent(
      * NULL = inherit source default.
      */
     episodeSensitivity?: 'public' | 'internal' | 'confidential' | null
+    compartments?: string[]
+    projectIds?: string[]
   },
   pool: QueryablePool = getPool(),
 ): Promise<void> {
@@ -140,18 +146,34 @@ export async function appendBatchEvent(
   let accumulatedChars: number
   if (existing.rows[0]) {
     const updated = await pool.query<{ id: string; chars: number | string }>(
-      `UPDATE pending_ingest_batches SET events = events || $2::jsonb
+      `UPDATE pending_ingest_batches SET
+         events = events || $2::jsonb,
+         compartments = ARRAY(
+           SELECT DISTINCT unnest(compartments || $3::text[]) ORDER BY 1
+         ),
+         project_ids = ARRAY(
+           SELECT DISTINCT unnest(project_ids || $4::uuid[]) ORDER BY 1
+         )
          WHERE id = $1
          RETURNING id, length(events::text) AS chars`,
-      [existing.rows[0].id, eventJson],
+      [existing.rows[0].id, eventJson, input.compartments ?? [], input.projectIds ?? []],
     )
     batchId = updated.rows[0]!.id
     accumulatedChars = Number(updated.rows[0]!.chars)
   } else {
     const inserted = await pool.query<{ id: string; chars: number | string }>(
       `INSERT INTO pending_ingest_batches
-         (workspace_id, rule_id, source, fires_at, events, episode_sensitivity)
-       VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+         (workspace_id, rule_id, source, fires_at, events, episode_sensitivity,
+          compartments, project_ids)
+       VALUES (
+         $1, $2, $3, $4, $5::jsonb, $6,
+         COALESCE($7::text[],
+           (SELECT r.compartments FROM ingest_rules r WHERE r.id = $2),
+           ARRAY[]::text[]),
+         COALESCE($8::uuid[],
+           (SELECT r.project_ids FROM ingest_rules r WHERE r.id = $2),
+           ARRAY[]::uuid[])
+       )
        RETURNING id, length(events::text) AS chars`,
       [
         input.workspaceId,
@@ -160,6 +182,8 @@ export async function appendBatchEvent(
         input.firesAt,
         eventJson,
         input.episodeSensitivity ?? null,
+        input.compartments,
+        input.projectIds,
       ],
     )
     batchId = inserted.rows[0]!.id

@@ -81,6 +81,7 @@ export type DiscordRouteOptions = {
   skillStore?: import('../db/skill-store.js').SkillStore
   episodicStore?: import('@use-brian/core').EpisodicStore
   sessionStateStore?: import('@use-brian/core').SessionStateStore
+  crmEmailDraftStore?: import('@use-brian/core').CrmEmailDraftStore
   /**
    * Route a pulled Discord attachment (CDN URL) through the channel-media intake
    * (audio/video → recording → brain). Boot wires it over `acquireAndIngest`.
@@ -686,6 +687,7 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
       workerManager: options.workerManager,
       episodicStore: options.episodicStore,
       sessionStateStore: options.sessionStateStore,
+      crmEmailDraftStore: options.crmEmailDraftStore,
       capabilityStore: options.capabilityStore,
       hooks: {
         async onProcessingStart() {
@@ -716,6 +718,9 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
             }
           }
           await setStatus(formatToolStatus())
+        },
+        async onGoalAccepted(message) {
+          await adapter.sendMessage(channelId, { text: message })
         },
         async onConfirmationRequired(req, resolver) {
           // Park the resolver so BOTH paths can answer: an atomic button press

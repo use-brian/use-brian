@@ -23,7 +23,9 @@
  * [COMP:recordings/recordings-store]
  */
 
+import type { AccessContext } from '@use-brian/core'
 import { query, queryWithRLS } from './client.js'
+import { buildAccessPredicate } from './access-predicate.js'
 
 export type RecordingKind = 'memo' | 'meeting'
 export type RecordingStatus =
@@ -62,6 +64,8 @@ export type Recording = {
   userId: string | null
   assistantId: string | null
   sensitivity: string
+  compartments: string[]
+  projectIds: string[]
   createdByUserId: string
   createdAt: Date
   updatedAt: Date
@@ -88,6 +92,8 @@ const COLS = `
   user_id            AS "userId",
   assistant_id       AS "assistantId",
   sensitivity,
+  compartments,
+  project_ids         AS "projectIds",
   created_by_user_id AS "createdByUserId",
   created_at         AS "createdAt",
   updated_at         AS "updatedAt"
@@ -165,11 +171,13 @@ export async function getRecordingSystem(id: string): Promise<Recording | null> 
 }
 
 /** Member read — RLS decides visibility. */
-export async function getRecording(userId: string, id: string): Promise<Recording | null> {
+export async function getRecording(ctx: AccessContext | string, id: string): Promise<Recording | null> {
+  const actorUserId = typeof ctx === 'string' ? ctx : ctx.userId
+  const ap = typeof ctx === 'string' ? null : buildAccessPredicate(ctx, { startIdx: 2 })
   const { rows } = await queryWithRLS<Record<string, unknown>>(
-    userId,
-    `SELECT ${COLS} FROM recordings WHERE id = $1`,
-    [id],
+    actorUserId,
+    `SELECT ${COLS} FROM recordings WHERE id = $1${ap ? ` AND ${ap.sql}` : ''}`,
+    [id, ...(ap?.params ?? [])],
   )
   return rows[0] ? toRecording(rows[0]) : null
 }
@@ -194,17 +202,22 @@ export const LIST_RECORDINGS_LIMIT_MAX = 100
  * Newest-first; rides `idx_recordings_ws_created`.
  */
 export async function listRecordings(
-  userId: string,
+  ctx: AccessContext | string,
   workspaceId: string,
   filters: ListRecordingsFilters = {},
   opts: { limit?: number } = {},
 ): Promise<Recording[]> {
+  const ap = typeof ctx === 'string' ? null : buildAccessPredicate(ctx, { startIdx: 2 })
   const where: string[] = [
     'workspace_id = $1',
     'valid_to IS NULL',
     'retracted_at IS NULL',
   ]
   const values: unknown[] = [workspaceId]
+  if (ap) {
+    where.push(ap.sql)
+    values.push(...ap.params)
+  }
 
   if (filters.kind) {
     values.push(filters.kind)
@@ -234,7 +247,7 @@ export async function listRecordings(
   values.push(limit)
 
   const { rows } = await queryWithRLS<Record<string, unknown>>(
-    userId,
+    typeof ctx === 'string' ? ctx : ctx.userId,
     `SELECT ${COLS} FROM recordings
       WHERE ${where.join(' AND ')}
       ORDER BY created_at DESC

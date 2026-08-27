@@ -83,6 +83,8 @@ describe('[COMP:workflows/brain-tools] createWorkflowBrainTools', () => {
       userId: 'u-1',
       assistantId: 'a-1',
       source: 'user',
+      compartments: [],
+      projectIds: [],
     })
     expect(result.data).toEqual({
       id: 'e-1',
@@ -122,6 +124,8 @@ describe('[COMP:workflows/brain-tools] createWorkflowBrainTools', () => {
       userId: 'u-1',
       assistantId: 'a-1',
       source: 'user',
+      compartments: [],
+      projectIds: [],
     })
     expect(result.data).toEqual({ id: 'edge-1', edgeType: 'documented_by' })
   })

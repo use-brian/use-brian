@@ -205,6 +205,8 @@ export function createFileIngestWorker(deps: FileIngestWorkerDeps): FileIngestWo
         occurredAt: new Date(),
         sourceLabel: job.sourceLabel,
         sensitivity: 'internal',
+        compartments: file.compartments,
+        projectIds: file.projectIds,
         sourceKind: 'file_upload',
         sourceRef: { file_id: job.fileId, path: file.path },
         contentRef: {

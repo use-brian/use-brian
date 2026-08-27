@@ -69,6 +69,12 @@ export {
   createGoalTools,
 } from './tools.js'
 export {
+  createGoalDefaultBudgetTools,
+  type GoalDefaultBudgetSnapshot,
+  type GoalDefaultBudgetStorePort,
+  type SetGoalDefaultBudgetResult,
+} from './default-budget-tools.js'
+export {
   GOAL_STATUSES,
   type GoalStatus,
   GOAL_HOST_TYPES,
@@ -76,6 +82,8 @@ export {
   type GoalHostRef,
   type GoalHost,
   type GoalBudget,
+  type GoalDefaultBudget,
+  BUILTIN_GOAL_DEFAULT_BUDGET,
   type GoalPolicy,
   type GoalMeans,
   type GoalRecord,

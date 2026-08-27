@@ -302,4 +302,57 @@ describe('[COMP:brain/permission-predicates] buildAccessPredicate', () => {
       expect(ap.nextIdx).toBe(12)
     })
   })
+
+  describe('Project axis', () => {
+    it('omits the clause for the universe grant', () => {
+      expect(buildAccessPredicate({ ...ctx, projectIds: null }).sql).not.toContain('project_ids')
+    })
+
+    it('appends the all-of uuid-array predicate for a finite grant', () => {
+      const ap = buildAccessPredicate({
+        ...ctx,
+        compartments: ['team:sales'],
+        projectIds: ['00000000-0000-0000-0000-000000000001'],
+      })
+      expect(ap.sql).toContain('AND compartments <@ $5::text[]')
+      expect(ap.sql).toContain('AND project_ids <@ $6::uuid[]')
+      expect(ap.params).toEqual([
+        'ws-1',
+        'u-1',
+        'a-1',
+        'confidential',
+        ['team:sales'],
+        ['00000000-0000-0000-0000-000000000001'],
+      ])
+      expect(ap.nextIdx).toBe(7)
+    })
+
+    it('treats [] as General-only and composes with primary', () => {
+      const ap = buildAccessPredicate({
+        workspaceId: 'ws-1',
+        userId: 'u-1',
+        assistantId: 'a-primary',
+        assistantKind: 'primary',
+        clearance: 'internal',
+        compartments: [],
+        projectIds: [],
+      })
+      expect(ap.sql).not.toContain('assistant_id')
+      expect(ap.sql).toContain('compartments <@ $4::text[]')
+      expect(ap.sql).toContain('project_ids <@ $5::uuid[]')
+      expect(ap.params).toEqual(['ws-1', 'u-1', 'internal', [], []])
+    })
+  })
+})
+
+describe('[COMP:brain/context-scope-predicate] Project access predicate', () => {
+  it('AND-composes finite Team and Project grants after sensitivity', () => {
+    const ap = buildAccessPredicate({
+      ...ctx,
+      compartments: ['team:sales'],
+      projectIds: ['00000000-0000-0000-0000-000000000001'],
+    })
+    expect(ap.sql).toContain('compartments <@ $5::text[]')
+    expect(ap.sql).toContain('project_ids <@ $6::uuid[]')
+  })
 })

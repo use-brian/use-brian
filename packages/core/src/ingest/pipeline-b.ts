@@ -55,6 +55,7 @@ import {
   type EntityStore,
 } from '../entities/types.js'
 import { resolveEntity } from '../entities/resolver.js'
+import { stableExternalIdentityFromCrmRef } from '../decision-learning/types.js'
 import type { MemoryRecord, MemoryStore } from '../memory/types.js'
 import type { TaskStore } from '../tasks/types.js'
 import {
@@ -95,6 +96,9 @@ export type PipelineBEpisode = {
   sourceKind: SourceKind
   occurredAt: Date
   sensitivity: Sensitivity
+  /** Exact Team/Project scope copied from the source Episode. */
+  compartments?: string[]
+  projectIds?: string[]
   workspaceId: string
   userId: string | null
   assistantId: string | null
@@ -141,6 +145,12 @@ export type PipelineBEpisode = {
  * satisfies this shape.
  */
 export type EpisodeUpdaterPort = {
+  /** Optional root hydration used by background adapters that carry only an Episode id. */
+  getEpisodeByIdSystem?(
+    actorUserId: string,
+    id: string,
+    opts?: { asOf?: Date },
+  ): Promise<{ compartments?: string[]; projectIds?: string[] } | null>
   updateCheckpoint(
     actorUserId: string,
     id: string,
@@ -254,8 +264,8 @@ export type PipelineBDeps = {
    * recording lives INSIDE `processEpisode`, next to the only place
    * extraction usage is produced, so no caller can ship an unmetered
    * ingest path. Best-effort: absent store / missing usage skip silently;
-   * failures log and never break ingestion. OSS builds without a usage
-   * store simply omit it.
+   * failures log and never break ingestion. Normal standalone supplies its
+   * local store; bespoke compositions may omit it.
    */
   usage?: UsageStore
   /**
@@ -1420,6 +1430,24 @@ export async function processEpisode(
 ): Promise<PipelineBResult> {
   const actorUserId = episode.createdByUserId
 
+  // Background connector adapters historically projected only the Episode id
+  // and sensitivity. Hydrate the persisted root classification once so every
+  // derived writer receives the same Team/Project scope without requiring
+  // provider-specific code to duplicate the authority contract.
+  if (
+    (episode.compartments === undefined || episode.projectIds === undefined)
+    && deps.episodes.getEpisodeByIdSystem
+  ) {
+    const root = await deps.episodes.getEpisodeByIdSystem(actorUserId, episode.id)
+    if (root) {
+      episode = {
+        ...episode,
+        compartments: root.compartments ?? [],
+        projectIds: root.projectIds ?? [],
+      }
+    }
+  }
+
   // 0. Q20 observation block (WU-4.4). When the episode is tied to both
   // an assistant and a user, and that user is in the assistant's
   // blocklist, archive without extraction. Mirrors the invocation block
@@ -1720,6 +1748,8 @@ export async function processEpisode(
         userId: episode.userId,
         assistantId: episode.assistantId,
         sourceEpisodeId: episode.id,
+        compartments: episode.compartments,
+        projectIds: episode.projectIds,
       })
       edgesWritten.push(link)
     } catch (err) {
@@ -1794,6 +1824,8 @@ export async function processEpisode(
           // human-created row (2026-07-10 source audit).
           source: 'extracted',
           sourceEpisodeId: episode.id,
+          compartments: episode.compartments,
+          projectIds: episode.projectIds,
           createdByAssistantId: episode.createdByAssistantId,
           attributes: quality?.description
             ? { description: quality.description }
@@ -1880,6 +1912,8 @@ export async function processEpisode(
           createdByUserId: episode.createdByUserId,
           createdByAssistantId: episode.createdByAssistantId,
           sourceEpisodeId: episode.id,
+          compartments: episode.compartments,
+          projectIds: episode.projectIds,
         })
         memoriesWritten.push(memory)
       } catch (err) {
@@ -2060,6 +2094,8 @@ async function processEngagementDigest(
           createdByUserId: episode.createdByUserId,
           createdByAssistantId: episode.createdByAssistantId,
           sourceEpisodeId: episode.id,
+          compartments: episode.compartments,
+          projectIds: episode.projectIds,
         })
       } catch (err) {
         console.warn(
@@ -2086,6 +2122,8 @@ async function processEngagementDigest(
           userId: episode.userId,
           assistantId: episode.assistantId,
           sourceEpisodeId: episode.id,
+          compartments: episode.compartments,
+          projectIds: episode.projectIds,
         })
         edgesWritten.push(link)
       } catch (err) {
@@ -2304,6 +2342,36 @@ async function writeEntity(
   deps: PipelineBDeps,
   actorUserId: string,
 ): Promise<EntityRecord | null> {
+  // Person mutation identity is separate from retrieval. Names, email,
+  // aliases, fuzzy scores, and LLM guesses may rank candidates but cannot
+  // select a write target. A source-adapter verified provider subject is the
+  // sole automatic authority; otherwise a distinct person is created.
+  if (ex.kind === 'person') {
+    const email = emailShape(ex.canonical_id) ? ex.canonical_id : null
+    const externalRef = matchPersonExternalRef(episode.personExternalRefs, ex.display_name)
+    const contact = await deps.crm.createContact({
+      userId: actorUserId,
+      workspaceId: episode.workspaceId,
+      name: ex.display_name,
+      email,
+      ...(externalRef ? {
+        externalRef,
+        stableIdentity: stableExternalIdentityFromCrmRef(externalRef) ?? undefined,
+      } : {}),
+      source: 'extracted',
+      sourceEpisodeId: episode.id,
+      createdByAssistantId: episode.createdByAssistantId,
+      compartments: episode.compartments,
+      projectIds: episode.projectIds,
+    })
+    return deps.entities.getById({
+      workspaceId: episode.workspaceId,
+      userId: actorUserId,
+      assistantId: episode.assistantId ?? '',
+      assistantKind: 'primary',
+    }, contact.id)
+  }
+
   // Dedup by canonical_id when present — skip recreating an existing entity.
   // Pipeline-B is a system worker (Privileged-service exception): it
   // must see entities across every viewer in the workspace so the
@@ -2340,6 +2408,8 @@ async function writeEntity(
           attributes: merged,
           // The new row points at the Episode that triggered the change.
           sourceEpisodeId: episode.id,
+          compartments: episode.compartments,
+          projectIds: episode.projectIds,
         },
       )
       // `supersedeAttributes` returns null only when the row is no longer
@@ -2377,6 +2447,8 @@ async function writeEntity(
       {
         attributes: merged,
         sourceEpisodeId: episode.id,
+        compartments: episode.compartments,
+        projectIds: episode.projectIds,
       },
     )
     return superseded ?? existingByName
@@ -2427,38 +2499,18 @@ async function writeEntity(
           const superseded = await deps.entities.supersedeAttributes(
             actorUserId,
             match.id,
-            { attributes: merged, sourceEpisodeId: episode.id },
+            {
+              attributes: merged,
+              sourceEpisodeId: episode.id,
+              compartments: episode.compartments,
+              projectIds: episode.projectIds,
+            },
           )
           return superseded ?? match
         }
       }
       // 'ambiguous' / 'no_match' / non-fuzzy-tier fall through to create.
     }
-  }
-
-  if (ex.kind === 'person') {
-    const email = emailShape(ex.canonical_id) ? ex.canonical_id : null
-    // Stamp the platform id (e.g. Slack user id) the source adapter resolved
-    // for this name as the contact's external_ref — metadata, not the name.
-    const externalRef = matchPersonExternalRef(episode.personExternalRefs, ex.display_name)
-    await deps.crm.createContact({
-      userId: actorUserId,
-      workspaceId: episode.workspaceId,
-      name: ex.display_name,
-      email,
-      ...(externalRef ? { externalRef } : {}),
-      // Extraction provenance — previously omitted, so extracted contacts
-      // landed source='user' with no back-edge (2026-07-10 source audit).
-      // Fresh inserts only; the upsert/merge path keeps the existing row's.
-      source: 'extracted',
-      sourceEpisodeId: episode.id,
-      createdByAssistantId: episode.createdByAssistantId,
-    })
-    // CRM wrapper writes a single `entities` row (kind='person', typed
-    // fields in `attributes`; entity.canonical_id = email when present).
-    // It returns the ContactRecord projection, so look up the entity row
-    // here to give the edge loop an entity id.
-    return resolveCrmEntity(deps, actorUserId, episode.workspaceId, ex.display_name, email, 'person')
   }
 
   if (ex.kind === 'company') {
@@ -2474,6 +2526,8 @@ async function writeEntity(
       source: 'extracted',
       sourceEpisodeId: episode.id,
       createdByAssistantId: episode.createdByAssistantId,
+      compartments: episode.compartments,
+      projectIds: episode.projectIds,
     })
     return resolveCrmEntity(deps, actorUserId, episode.workspaceId, ex.display_name, domain, 'company')
   }
@@ -2491,6 +2545,8 @@ async function writeEntity(
     createdByAssistantId: episode.createdByAssistantId,
     sourceEpisodeId: episode.id,
     sensitivity: episode.sensitivity,
+    compartments: episode.compartments,
+    projectIds: episode.projectIds,
     source: 'extracted',
   })
 }

@@ -56,6 +56,8 @@ export type BlueprintRecord = {
   sourceKind: BlueprintRecordSourceKind
   sourceId: string | null
   sensitivity: string
+  compartments: string[]
+  projectIds: string[]
   /** The page projection, when one was rendered. */
   pageId: string | null
   createdBy: string
@@ -72,6 +74,8 @@ export type EnsureBlueprintRecordInput = {
   sourceKind: BlueprintRecordSourceKind
   sourceId?: string | null
   sensitivity: string
+  compartments?: string[]
+  projectIds?: string[]
   /**
    * True (a fresh fill) wipes prior field values so a re-run never leaves
    * stale keys behind; false (a direct partial save) merges over what exists.
@@ -145,6 +149,8 @@ type Row = {
   source_kind: string
   source_id: string | null
   sensitivity: string
+  compartments: string[]
+  project_ids: string[]
   page_id: string | null
   created_by: string
   created_at: Date
@@ -152,7 +158,7 @@ type Row = {
 }
 
 const SELECT =
-  'id, workspace_id, blueprint_id, spec_snapshot, subject, anchor_key, fields, field_citations, status, missing, source_kind, source_id, sensitivity, page_id, created_by, created_at, updated_at'
+  'id, workspace_id, blueprint_id, spec_snapshot, subject, anchor_key, fields, field_citations, status, missing, source_kind, source_id, sensitivity, compartments, project_ids, page_id, created_by, created_at, updated_at'
 
 function rowToRecord(row: Row): BlueprintRecord {
   return {
@@ -169,6 +175,8 @@ function rowToRecord(row: Row): BlueprintRecord {
     sourceKind: row.source_kind as BlueprintRecordSourceKind,
     sourceId: row.source_id,
     sensitivity: row.sensitivity,
+    compartments: row.compartments ?? [],
+    projectIds: row.project_ids ?? [],
     pageId: row.page_id,
     createdBy: row.created_by,
     createdAt: row.created_at.toISOString(),
@@ -183,19 +191,31 @@ export function createDbBlueprintRecordStore(): BlueprintRecordStore {
         userId,
         `INSERT INTO blueprint_records
            (workspace_id, blueprint_id, spec_snapshot, subject, anchor_key,
-            source_kind, source_id, sensitivity, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            source_kind, source_id, sensitivity, compartments, project_ids, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
          ON CONFLICT (workspace_id, anchor_key) DO UPDATE SET
            blueprint_id = EXCLUDED.blueprint_id,
            spec_snapshot = EXCLUDED.spec_snapshot,
            subject = EXCLUDED.subject,
            source_kind = EXCLUDED.source_kind,
            source_id = EXCLUDED.source_id,
-           sensitivity = EXCLUDED.sensitivity,
-           fields = CASE WHEN $10 THEN '{}'::jsonb ELSE blueprint_records.fields END,
+           sensitivity = CASE
+             WHEN sensitivity_rank(blueprint_records.sensitivity) >= sensitivity_rank(EXCLUDED.sensitivity)
+               THEN blueprint_records.sensitivity ELSE EXCLUDED.sensitivity END,
+           compartments = ARRAY(
+             SELECT DISTINCT value
+               FROM unnest(blueprint_records.compartments || EXCLUDED.compartments) AS u(value)
+              ORDER BY value
+           ),
+           project_ids = ARRAY(
+             SELECT DISTINCT value
+               FROM unnest(blueprint_records.project_ids || EXCLUDED.project_ids) AS u(value)
+              ORDER BY value
+           ),
+           fields = CASE WHEN $12 THEN '{}'::jsonb ELSE blueprint_records.fields END,
            -- Citations reset with the values they describe: a fresh fill that
            -- kept them would attribute new text to the old fill's moments.
-           field_citations = CASE WHEN $10 THEN '{}'::jsonb ELSE blueprint_records.field_citations END,
+           field_citations = CASE WHEN $12 THEN '{}'::jsonb ELSE blueprint_records.field_citations END,
            status = 'incomplete',
            missing = '[]'::jsonb
          RETURNING ${SELECT}`,
@@ -208,6 +228,8 @@ export function createDbBlueprintRecordStore(): BlueprintRecordStore {
           input.sourceKind,
           input.sourceId ?? null,
           input.sensitivity,
+          input.compartments ?? [],
+          input.projectIds ?? [],
           userId,
           input.resetFields,
         ],

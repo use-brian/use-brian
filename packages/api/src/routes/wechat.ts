@@ -97,6 +97,7 @@ export type WechatRouteOptions = {
   skillStore?: import('../db/skill-store.js').SkillStore
   episodicStore?: import('@use-brian/core').EpisodicStore
   sessionStateStore?: import('@use-brian/core').SessionStateStore
+  crmEmailDraftStore?: import('@use-brian/core').CrmEmailDraftStore
   capabilityStore: import('@use-brian/core').CapabilityStore
   archiveMedia?: ChatArchiveLiveMedia
 }
@@ -701,6 +702,7 @@ export function wechatRoutes(options: WechatRouteOptions): Router {
       workerManager: options.workerManager,
       episodicStore: options.episodicStore,
       sessionStateStore: options.sessionStateStore,
+      crmEmailDraftStore: options.crmEmailDraftStore,
       capabilityStore: options.capabilityStore,
       hooks: {
         async onProcessingStart() {
@@ -711,6 +713,9 @@ export function wechatRoutes(options: WechatRouteOptions): Router {
         },
         async onToolResult() {
           await refreshTyping()
+        },
+        async onGoalAccepted(message) {
+          await adapter.sendMessage(peerId, { text: message })
         },
         async onConfirmationRequired(req, resolver) {
           // Text-only confirmation: park the resolver; the peer's next
