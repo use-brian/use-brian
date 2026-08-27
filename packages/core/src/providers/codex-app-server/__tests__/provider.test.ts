@@ -270,6 +270,93 @@ describe('[COMP:providers/codex-app-server] Codex app-server provider bridge', (
     harness.peer.close()
   })
 
+  it('replays a historical inline image above the former 512 KiB item boundary', async () => {
+    const harness = createHarness()
+    const provider = createCodexAppServerProvider({
+      transport: { rpc: harness.peer, cwd: '/tmp/brian-codex-test' },
+      models: [MODEL],
+    })
+    const session = provider.createSession({ model: MODEL, systemPrompt: 'You are Brian.' })
+    const imageData = 'A'.repeat(700 * 1024)
+    const chunks = collect(
+      session.send([
+        {
+          role: 'user',
+          content: [{ type: 'image', mimeType: 'image/png', data: imageData }],
+        },
+        { role: 'user', content: 'What did the earlier image show?' },
+      ]),
+    )
+
+    const threadStart = await waitForMethod(harness, 'thread/start')
+    respondToThreadStart(harness, threadStart)
+    const inject = await waitForMethod(harness, 'thread/inject_items')
+    const injected = (inject.params as {
+      items: Array<{ content: Array<{ type: string; image_url?: string }> }>
+    }).items
+    expect(injected[0]!.content).toEqual([
+      { type: 'input_image', image_url: `data:image/png;base64,${imageData}` },
+    ])
+    expect(Buffer.byteLength(JSON.stringify(inject.params))).toBeGreaterThan(512 * 1024)
+    expect(Buffer.byteLength(JSON.stringify(inject.params))).toBeLessThan(8 * 1024 * 1024)
+    respond(harness, inject, {})
+
+    const turnStart = await waitForMethod(harness, 'turn/start')
+    respondToTurnStart(harness, turnStart)
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    usage(harness, 'thread-1', 'turn-1')
+    complete(harness, 'thread-1', 'turn-1')
+
+    await expect(chunks).resolves.toEqual(expect.arrayContaining([{ type: 'message_start', model: MODEL }]))
+    harness.peer.close()
+  })
+
+  it('replaces an over-budget historical image with an explicit reattachment note', async () => {
+    const harness = createHarness()
+    const provider = createCodexAppServerProvider({
+      transport: { rpc: harness.peer, cwd: '/tmp/brian-codex-test' },
+      models: [MODEL],
+    })
+    const session = provider.createSession({ model: MODEL, systemPrompt: 'You are Brian.' })
+    const chunks = collect(
+      session.send([
+        {
+          role: 'user',
+          content: [
+            { type: 'image', mimeType: 'image/png', data: 'A'.repeat(6 * 1024 * 1024) },
+            { type: 'text', text: 'Earlier image context.' },
+          ],
+        },
+        { role: 'user', content: 'Continue.' },
+      ]),
+    )
+
+    const threadStart = await waitForMethod(harness, 'thread/start')
+    respondToThreadStart(harness, threadStart)
+    const inject = await waitForMethod(harness, 'thread/inject_items')
+    const injected = (inject.params as {
+      items: Array<{ content: Array<{ type: string; text?: string; image_url?: string }> }>
+    }).items
+    expect(injected[0]!.content).toEqual([
+      {
+        type: 'input_text',
+        text: expect.stringContaining('visual contents are not available'),
+      },
+      { type: 'input_text', text: 'Earlier image context.' },
+    ])
+    expect(injected[0]!.content.some((part) => part.type === 'input_image')).toBe(false)
+    respond(harness, inject, {})
+
+    const turnStart = await waitForMethod(harness, 'turn/start')
+    respondToTurnStart(harness, turnStart)
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    usage(harness, 'thread-1', 'turn-1')
+    complete(harness, 'thread-1', 'turn-1')
+
+    await expect(chunks).resolves.toEqual(expect.arrayContaining([{ type: 'message_start', model: MODEL }]))
+    harness.peer.close()
+  })
+
   it('parks a dynamic tool request and resumes the same Codex turn with its result', async () => {
     const harness = createHarness()
     const { session, first } = await startToolTurn(harness)
