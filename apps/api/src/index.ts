@@ -1,7 +1,7 @@
 /**
- * Open standalone entry for the Use Brian HTTP API (`@use-brian/api-open`).
+ * Standalone entry for the OSS and Outpost HTTP API (`@use-brian/api-open`).
  *
- * This is the single-player, one-key local product entrypoint. It imports ZERO
+ * This is the customer-owned product entrypoint. It imports ZERO
  * closed code: no `@use-brian/api-platform`, no `@use-brian/shared-server`, no
  * `getEnv()`. It reads the handful of values the open composition needs straight
  * from `process.env` (with local defaults), then calls `bootOpenApi()` with
@@ -14,7 +14,9 @@
  * composition — bootOpenApi mounts them when CHANNEL_CREDENTIAL_KEY is set
  * (migrations 280 + 307 create their storage in the OSS schema).
  *
- * See the open-core split (repo CLAUDE.md; plan in git history) §12.7 (one-command parity boot).
+ * `USEBRIAN_EDITION=oss` enables the local-owner session. `outpost` disables
+ * that shortcut and enables the multi-user workspace, teammate, invitation,
+ * and dedicated auth-portal paths from the same open composition and schema.
  */
 
 import dotenv from 'dotenv'
@@ -29,6 +31,7 @@ import { createBrowserSkillGrantStore } from '@use-brian/api/db/browser-skill-gr
 import { createOssUsageStore } from '@use-brian/api/db/oss-usage-store.js'
 import { createSandboxTaskStore } from '@use-brian/api/db/sandbox-task-store.js'
 import { parseStrictBoolean } from '@use-brian/api/auth/outpost-auth-config.js'
+import { resolveApiJwtSecret, shouldRunApiWorkers } from './runtime.js'
 
 dotenv.config()
 
@@ -45,7 +48,11 @@ const USEBRIAN_PREFERRED_PROVIDER =
 // JWT_SECRET is auto-generated + persisted by the launcher; for a bare boot we
 // fall back to a process-local random one (sessions don't survive a restart,
 // which is fine for a single-process dev boot).
-const JWT_SECRET = process.env.JWT_SECRET || (await import('node:crypto')).randomUUID()
+const JWT_SECRET = resolveApiJwtSecret(
+  process.env.USEBRIAN_EDITION,
+  process.env.JWT_SECRET,
+  (await import('node:crypto')).randomUUID(),
+)
 
 // Validate before using the mechanically graded default forms below. The
 // canonical expressions keep OSS/hosted defaults visible to `pnpm check`; this
@@ -165,7 +172,7 @@ const browserCredentialEncryptionKey = process.env.BROWSER_CREDENTIAL_ENCRYPTION
 
 const { start } = await bootOpenApi({
   env,
-  runWorkers: true,
+  runWorkers: shouldRunApiWorkers(process.argv),
   ports: {
     usageStore: createOssUsageStore(),
     buildEpisodeIngestors,
