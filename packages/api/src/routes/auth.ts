@@ -9,7 +9,7 @@ import { mergeShadowUser, type LinkedAccountStore } from '../db/linked-accounts.
 import type { MagicLinkConsumed, MagicLinkLocale, MagicLinkStore } from '../db/magic-link-store.js'
 import type { DesktopAuthStore } from '../db/desktop-auth-store.js'
 import type { SmtpClient } from '../email/smtp-client.js'
-import { createHash } from 'node:crypto'
+import { createHash, timingSafeEqual } from 'node:crypto'
 
 /**
  * Fire-and-forget hook invoked after a Telegram identity is successfully
@@ -42,6 +42,14 @@ export type EmailAuthDeps = {
   allowedReturnOrigins?: string[]
 }
 
+export type OidcAuthDeps = {
+  config: {
+    issuer: string
+    bridgeSecret: string
+  }
+  canSignInEmail: (email: string) => Promise<boolean>
+}
+
 /**
  * Auth routes:
  *   POST /auth/google              — Exchange Google OAuth token for JWT
@@ -57,6 +65,7 @@ export function authRoutes(
   notifyTelegramLinked?: NotifyTelegramLinked,
   emailAuth?: EmailAuthDeps,
   desktopAuthStore?: DesktopAuthStore,
+  oidcAuth?: OidcAuthDeps,
 ): Router {
   const router = Router()
 
@@ -225,6 +234,106 @@ export function authRoutes(
       })
     } catch (err) {
       console.error('Google auth error:', err)
+      res.status(500).json({ error: 'Authentication failed' })
+    }
+  })
+
+  router.post('/oidc/session', async (req, res) => {
+    if (!oidcAuth) {
+      res.status(404).json({ error: 'oidc_signin_unavailable' })
+      return
+    }
+
+    const suppliedSecret = req.headers['x-outpost-auth-bridge']
+    if (typeof suppliedSecret !== 'string' || !secretsEqual(suppliedSecret, oidcAuth.config.bridgeSecret)) {
+      res.status(401).json({ error: 'invalid_bridge_secret' })
+      return
+    }
+
+    const parsed = parseOidcSessionBody(req.body)
+    if (!parsed.ok) {
+      res.status(400).json({ error: 'invalid_oidc_session' })
+      return
+    }
+    const identity = parsed.value
+    if (identity.issuer !== oidcAuth.config.issuer) {
+      res.status(401).json({ error: 'invalid_oidc_issuer' })
+      return
+    }
+    if (!identity.emailVerified) {
+      res.status(401).json({ error: 'oidc_email_unverified' })
+      return
+    }
+    if (!(await oidcAuth.canSignInEmail(identity.email))) {
+      res.status(403).json({ error: 'email_enrollment_required' })
+      return
+    }
+
+    try {
+      const providerId = createHash('sha256')
+        .update(identity.issuer)
+        .update('\x00')
+        .update(identity.subject)
+        .digest('base64url')
+      const existing = await findUserByEmail(identity.email)
+      if (existing?.authProvider === 'oidc' && existing.authProviderId !== providerId) {
+        res.status(401).json({ error: 'invalid_oidc_identity' })
+        return
+      }
+      let user: User
+      let isNew = false
+
+      if (existing?.authProvider === 'channel') {
+        await promoteChannelUser(existing.id, {
+          authProvider: 'oidc',
+          authProviderId: providerId,
+          name: identity.name,
+          avatarUrl: identity.avatarUrl,
+        })
+        await backfillOidcTimezone(existing, identity.timezone, '[auth/oidc] shadow tz backfill failed:')
+        user = {
+          ...existing,
+          authProvider: 'oidc',
+          authProviderId: providerId,
+          name: existing.name ?? identity.name ?? null,
+          avatarUrl: existing.avatarUrl ?? identity.avatarUrl ?? null,
+        }
+      } else if (existing) {
+        await backfillUserProfileFromProvider(existing.id, {
+          name: identity.name,
+          avatarUrl: identity.avatarUrl,
+        })
+        await backfillOidcTimezone(existing, identity.timezone, '[auth/oidc] existing tz backfill failed:')
+        user = {
+          ...existing,
+          name: existing.name ?? identity.name ?? null,
+          avatarUrl: existing.avatarUrl ?? identity.avatarUrl ?? null,
+        }
+      } else {
+        const result = await findOrCreateUser({
+          authProvider: 'oidc',
+          authProviderId: providerId,
+          email: identity.email,
+          name: identity.name,
+          avatarUrl: identity.avatarUrl,
+          timezone: identity.timezone,
+        })
+        user = result.user
+        isNew = result.isNew
+      }
+
+      res.json({
+        user: {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          avatarUrl: user.avatarUrl,
+        },
+        isNew,
+        ...createTokens(user.id, jwtSecret),
+      })
+    } catch (err) {
+      console.error('[auth/oidc] session mint error:', err)
       res.status(500).json({ error: 'Authentication failed' })
     }
   })
@@ -806,6 +915,94 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
 function isValidEmail(s: string): boolean {
   return s.length >= 3 && s.length <= 320 && EMAIL_RE.test(s)
+}
+
+type OidcSessionIdentity = {
+  issuer: string
+  subject: string
+  email: string
+  emailVerified: boolean
+  name?: string
+  avatarUrl?: string
+  timezone?: string
+}
+
+const OIDC_SESSION_FIELDS = new Set([
+  'issuer',
+  'subject',
+  'email',
+  'emailVerified',
+  'name',
+  'avatarUrl',
+  'timezone',
+])
+
+function parseOidcSessionBody(body: unknown):
+  | { ok: true; value: OidcSessionIdentity }
+  | { ok: false } {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return { ok: false }
+  const value = body as Record<string, unknown>
+  if (Object.keys(value).some((key) => !OIDC_SESSION_FIELDS.has(key))) return { ok: false }
+
+  const issuer = boundedString(value.issuer, 2048)
+  const subject = boundedString(value.subject, 512)
+  const email = typeof value.email === 'string' ? value.email.trim().toLowerCase() : ''
+  if (!issuer || !subject || /[\x00-\x1f\x7f]/.test(issuer) || /[\x00-\x1f\x7f]/.test(subject)) return { ok: false }
+  if (!isValidEmail(email) || /[\x00-\x1f\x7f]/.test(email)) return { ok: false }
+  if (typeof value.emailVerified !== 'boolean') return { ok: false }
+
+  const name = optionalBoundedString(value.name, 200)
+  if (name === null || (name && /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(name))) return { ok: false }
+  const avatarUrl = optionalBoundedString(value.avatarUrl, 2048)
+  if (avatarUrl === null || (avatarUrl && !isHttpUrl(avatarUrl))) return { ok: false }
+  const timezone = optionalBoundedString(value.timezone, 79)
+  if (timezone === null || (timezone && !isValidTimezone(timezone))) return { ok: false }
+
+  return {
+    ok: true,
+    value: {
+      issuer,
+      subject,
+      email,
+      emailVerified: value.emailVerified,
+      ...(name ? { name } : {}),
+      ...(avatarUrl ? { avatarUrl } : {}),
+      ...(timezone ? { timezone } : {}),
+    },
+  }
+}
+
+function boundedString(value: unknown, maxLength: number): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const trimmed = value.trim()
+  return trimmed.length > 0 && trimmed.length <= maxLength ? trimmed : undefined
+}
+
+function optionalBoundedString(value: unknown, maxLength: number): string | undefined | null {
+  if (value === undefined) return undefined
+  return boundedString(value, maxLength) ?? null
+}
+
+function isHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value)
+    return (url.protocol === 'https:' || url.protocol === 'http:') && !url.username && !url.password
+  } catch {
+    return false
+  }
+}
+
+function secretsEqual(supplied: string, expected: string): boolean {
+  if (supplied.length > 1024) return false
+  const suppliedHash = createHash('sha256').update(supplied).digest()
+  const expectedHash = createHash('sha256').update(expected).digest()
+  return timingSafeEqual(suppliedHash, expectedHash)
+}
+
+async function backfillOidcTimezone(user: User, timezone: string | undefined, errorLabel: string): Promise<void> {
+  if (!timezone || timezone === 'UTC' || (user.timezone && user.timezone !== 'UTC')) return
+  await updateUserTimezone(user.id, timezone).catch((err) => console.error(errorLabel, err))
+  user.timezone = timezone
 }
 
 // `/invite` carries the workspace-invitation accept page (`?token=` resume).

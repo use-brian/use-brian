@@ -28,6 +28,7 @@ import { createBrowserSessionVault } from '@use-brian/api/db/browser-session-vau
 import { createBrowserSkillGrantStore } from '@use-brian/api/db/browser-skill-grant-store.js'
 import { createOssUsageStore } from '@use-brian/api/db/oss-usage-store.js'
 import { createSandboxTaskStore } from '@use-brian/api/db/sandbox-task-store.js'
+import { parseStrictBoolean } from '@use-brian/api/auth/outpost-auth-config.js'
 
 dotenv.config()
 
@@ -46,6 +47,12 @@ const USEBRIAN_PREFERRED_PROVIDER =
 // which is fine for a single-process dev boot).
 const JWT_SECRET = process.env.JWT_SECRET || (await import('node:crypto')).randomUUID()
 
+// Validate before using the mechanically graded default forms below. The
+// canonical expressions keep OSS/hosted defaults visible to `pnpm check`; this
+// guard still rejects every value outside true/false/1/0.
+parseStrictBoolean(process.env.OUTPOST_AUTH_EMAIL_ENABLED, 'OUTPOST_AUTH_EMAIL_ENABLED', true)
+parseStrictBoolean(process.env.OUTPOST_AUTH_OIDC_ENABLED, 'OUTPOST_AUTH_OIDC_ENABLED', false)
+
 const env: OpenApiEnv = {
   GEMINI_API_KEY,
   VERTEX_PROJECT_ID,
@@ -55,7 +62,18 @@ const env: OpenApiEnv = {
   NODE_ENV: process.env.NODE_ENV || 'development',
   API_URL: process.env.API_URL || 'http://localhost:4000',
   APP_URL: process.env.APP_URL || 'http://localhost:3003',
+  AUTHED_APP_URL: process.env.AUTHED_APP_URL,
   AUTH_PORTAL_URL: process.env.AUTH_PORTAL_URL,
+  OUTPOST_AUTH_EMAIL_ENABLED: !['false', '0'].includes(
+    (process.env.OUTPOST_AUTH_EMAIL_ENABLED ?? '').trim().toLowerCase(),
+  ),
+  OUTPOST_AUTH_OIDC_ENABLED: process.env.OUTPOST_AUTH_OIDC_ENABLED === 'true'
+    || process.env.OUTPOST_AUTH_OIDC_ENABLED === '1',
+  OUTPOST_OIDC_ISSUER_URL: process.env.OUTPOST_OIDC_ISSUER_URL,
+  OUTPOST_OIDC_CLIENT_ID: process.env.OUTPOST_OIDC_CLIENT_ID,
+  OUTPOST_OIDC_CLIENT_SECRET: process.env.OUTPOST_OIDC_CLIENT_SECRET,
+  OUTPOST_OIDC_PROVIDER_NAME: process.env.OUTPOST_OIDC_PROVIDER_NAME,
+  OUTPOST_AUTH_BRIDGE_SECRET: process.env.OUTPOST_AUTH_BRIDGE_SECRET,
   GMAIL_SMTP_USER: process.env.GMAIL_SMTP_USER,
   GMAIL_SMTP_APP_PASSWORD: process.env.GMAIL_SMTP_APP_PASSWORD,
   EMAIL_FROM_ADDRESS: process.env.EMAIL_FROM_ADDRESS,

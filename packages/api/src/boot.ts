@@ -153,6 +153,7 @@ import { findAssistantById, findUserByEmail, findUserById, getWorkspacePrimaryAs
 import { resolveTurnScopeSystem } from './context-scope/resolve-turn-scope.js'
 import { deploymentProfile } from './edition.js'
 import { createEmailAdmission, requireOutpostAuthPortal } from './auth/email-admission.js'
+import { validateOutpostAuthConfig } from './auth/outpost-auth-config.js'
 import { getTaskByIdSystem } from './db/tasks.js'
 import { createBrowserSkillsStore } from './db/browser-skills-store.js'
 import { createDbConnectorActionStore } from './db/connector-actions-store.js'
@@ -654,6 +655,13 @@ export interface OpenApiEnv {
   APP_URL: string
   /** Dedicated Outpost auth portal; falls back to APP_URL in other profiles. */
   AUTH_PORTAL_URL?: string
+  OUTPOST_AUTH_EMAIL_ENABLED?: boolean
+  OUTPOST_AUTH_OIDC_ENABLED?: boolean
+  OUTPOST_OIDC_ISSUER_URL?: string
+  OUTPOST_OIDC_CLIENT_ID?: string
+  OUTPOST_OIDC_CLIENT_SECRET?: string
+  OUTPOST_OIDC_PROVIDER_NAME?: string
+  OUTPOST_AUTH_BRIDGE_SECRET?: string
   AUTHED_APP_URL?: string
   FEED_URL?: string
   /**
@@ -1914,6 +1922,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   const profile = deploymentProfile()
   requireOutpostAuthPortal(profile, env.AUTH_PORTAL_URL)
+  const outpostAuthConfig = validateOutpostAuthConfig(profile, env.NODE_ENV, env)
   const outpostBootstrapEmails = (
     (process.env.OUTPOST_AUTH_BOOTSTRAP_EMAILS ?? '')
       .split(',')
@@ -1938,6 +1947,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   })
 
   const emailAuth: EmailAuth =
+    (profile !== 'outpost' || outpostAuthConfig?.emailEnabled) &&
     env.GMAIL_SMTP_USER && env.GMAIL_SMTP_APP_PASSWORD && env.EMAIL_FROM_ADDRESS
       ? {
           magicLinkStore: createDbMagicLinkStore(),
@@ -1964,6 +1974,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       notifyTelegramLinked,
       emailAuth,
       desktopAuthStore,
+      outpostAuthConfig?.oidcEnabled && outpostAuthConfig.oidc
+        ? {
+            config: {
+              issuer: outpostAuthConfig.oidc.issuerUrl,
+              bridgeSecret: outpostAuthConfig.oidc.bridgeSecret,
+            },
+            canSignInEmail: canSignInOutpostEmail,
+          }
+        : undefined,
     ),
   )
 
