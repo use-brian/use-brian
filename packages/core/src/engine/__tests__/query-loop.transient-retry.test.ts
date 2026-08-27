@@ -9,7 +9,7 @@ import type {
   Message,
 } from '../../providers/types.js'
 import { buildTool } from '../../tools/types.js'
-import { queryLoop, type QueryEvent } from '../query-loop.js'
+import { queryLoop, isConnectionDropError, isEndpointUnreachableError, streamErrorCode, streamErrorCodes, type QueryEvent } from '../query-loop.js'
 
 // ── Scripted provider with per-turn behaviour ──────────────────
 //
@@ -161,6 +161,45 @@ describe('[COMP:engine/query-loop] Transient stream retry', () => {
     }
   })
 
+  it('retries when only err.code says ECONNRESET (message is just "aborted")', { timeout: 10_000 }, async () => {
+    // Repro: production incident 2026-08-27 — Node's node:https
+    // ConnResetException has message "aborted" and code ECONNRESET; the
+    // message-only regex never matched, so a custom-LLM connection reset
+    // killed a 5-minute turn without a retry.
+    const resetErr = new Error('aborted') as NodeJS.ErrnoException
+    resetErr.code = 'ECONNRESET'
+    const { provider, calls } = scriptedProvider([
+      { kind: 'throwBefore', error: resetErr },
+      { kind: 'chunks', chunks: textChunks('ok') },
+    ])
+
+    const events = await runLoop(provider)
+    const text = events
+      .filter((e) => e.type === 'text_delta')
+      .map((e) => (e.type === 'text_delta' ? e.text : ''))
+      .join('')
+    expect(text).toBe('ok')
+    expect(calls).toHaveLength(2)
+  })
+
+  it('retries when the socket code is nested in err.cause (undici shape)', { timeout: 10_000 }, async () => {
+    const socketErr = new Error('other side closed') as NodeJS.ErrnoException
+    socketErr.code = 'UND_ERR_SOCKET'
+    const wrapped = new Error('terminated', { cause: socketErr })
+    const { provider, calls } = scriptedProvider([
+      { kind: 'throwBefore', error: wrapped },
+      { kind: 'chunks', chunks: textChunks('ok') },
+    ])
+
+    const events = await runLoop(provider)
+    const text = events
+      .filter((e) => e.type === 'text_delta')
+      .map((e) => (e.type === 'text_delta' ? e.text : ''))
+      .join('')
+    expect(text).toBe('ok')
+    expect(calls).toHaveLength(2)
+  })
+
   it('does not retry after a chunk has streamed to the consumer', async () => {
     // A mid-stream stall AFTER the model already started yielding text:
     // retrying would re-render the same prefix in the UI, so the loop
@@ -263,5 +302,75 @@ describe('[COMP:engine/query-loop] Transient stream retry', () => {
       .join('')
     expect(text).toBe('')
     expect(calls).toHaveLength(2) // initial + one retry, then give up
+  })
+})
+
+describe('[COMP:engine/query-loop] Connection-drop classification', () => {
+  it('streamErrorCode reads the code off the error or its cause chain', () => {
+    const bare = new Error('aborted') as NodeJS.ErrnoException
+    bare.code = 'ECONNRESET'
+    expect(streamErrorCode(bare)).toBe('ECONNRESET')
+
+    const nested = new Error('terminated', {
+      cause: Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' }),
+    })
+    expect(streamErrorCode(nested)).toBe('UND_ERR_SOCKET')
+
+    expect(streamErrorCode(new Error('plain'))).toBeUndefined()
+    expect(streamErrorCode('not an error')).toBeUndefined()
+  })
+
+  it('streamErrorCodes collects the whole chain — an SDK code cannot mask a nested socket code', () => {
+    const wrapper = new Error('request failed', {
+      cause: Object.assign(new Error('aborted'), { code: 'ECONNRESET' }),
+    }) as NodeJS.ErrnoException
+    wrapper.code = 'insufficient_quota'
+    expect(streamErrorCodes(wrapper)).toEqual(['insufficient_quota', 'ECONNRESET'])
+    expect(isConnectionDropError(wrapper)).toBe(true)
+
+    // A plain-object cause counts too — not every thrower wraps in an Error.
+    const plainCause = new Error('terminated', { cause: { code: 'ECONNRESET' } })
+    expect(streamErrorCodes(plainCause)).toEqual(['ECONNRESET'])
+
+    // A cyclic cause chain terminates.
+    const cyclic = new Error('a') as Error & { cause?: unknown }
+    cyclic.cause = cyclic
+    expect(streamErrorCodes(cyclic)).toEqual([])
+  })
+
+  it('isEndpointUnreachableError: ENOTFOUND/ECONNREFUSED are unreachable, not a drop', () => {
+    const dns = new Error('getaddrinfo ENOTFOUND llm.example') as NodeJS.ErrnoException
+    dns.code = 'ENOTFOUND'
+    expect(isEndpointUnreachableError(dns)).toBe(true)
+    expect(isConnectionDropError(dns)).toBe(false)
+
+    const refused = new Error('connect ECONNREFUSED 203.0.113.7:443') as NodeJS.ErrnoException
+    refused.code = 'ECONNREFUSED'
+    expect(isEndpointUnreachableError(refused)).toBe(true)
+    expect(isConnectionDropError(refused)).toBe(false)
+
+    const reset = new Error('aborted') as NodeJS.ErrnoException
+    reset.code = 'ECONNRESET'
+    expect(isEndpointUnreachableError(reset)).toBe(false)
+
+    const userAbort = new Error('Aborted')
+    userAbort.name = 'AbortError'
+    expect(isEndpointUnreachableError(userAbort)).toBe(false)
+  })
+
+  it('isConnectionDropError: socket resets yes, aborts and app errors no', () => {
+    const reset = new Error('aborted') as NodeJS.ErrnoException
+    reset.code = 'ECONNRESET'
+    expect(isConnectionDropError(reset)).toBe(true)
+    expect(isConnectionDropError(new Error('socket hang up'))).toBe(true)
+    expect(isConnectionDropError(new Error('fetch failed'))).toBe(true)
+
+    const userAbort = new Error('Aborted')
+    userAbort.name = 'AbortError'
+    expect(isConnectionDropError(userAbort)).toBe(false)
+    expect(isConnectionDropError(new Error('401 invalid api key'))).toBe(false)
+    // Gateway 5xx is transient (retried) but NOT a connection drop — the
+    // endpoint answered, so "please retry" copy would be misleading there.
+    expect(isConnectionDropError(new Error('503 Service Unavailable'))).toBe(false)
   })
 })

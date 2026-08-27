@@ -1870,13 +1870,48 @@ function appendUserBlock(messages: Message[], block: ContentBlock): Message[] {
   return [...messages, { role: 'user', content: [block] }]
 }
 
+const TRANSIENT_SOCKET_CODES = new Set([
+  'ECONNRESET', 'ETIMEDOUT', 'EPIPE', 'ENETUNREACH', 'ENOTFOUND', 'ECONNREFUSED', 'EAI_AGAIN',
+  'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT',
+])
+
+// The endpoint could not be reached at all (name does not resolve, nothing
+// listening). Still worth the in-loop retry — a restarting endpoint or DNS
+// blip can recover within the backoff — but "please try again" is the wrong
+// user copy when it doesn't: these get "unreachable" copy instead.
+const UNREACHABLE_SOCKET_CODES = new Set(['ENOTFOUND', 'ECONNREFUSED'])
+
+/**
+ * Every `code` along the error's `cause` chain, outermost first (bounded, so
+ * a cyclic chain terminates). Plain-object causes count too — not every
+ * thrower wraps the socket error in an Error.
+ */
+export function streamErrorCodes(err: unknown): string[] {
+  const codes: string[] = []
+  let cur: unknown = err
+  for (let depth = 0; depth < 4 && cur !== null && typeof cur === 'object'; depth++) {
+    const code = (cur as NodeJS.ErrnoException).code
+    if (typeof code === 'string' && code.length > 0) codes.push(code)
+    cur = (cur as Error).cause
+  }
+  return codes
+}
+
+/** The outermost `code` of an error or its `cause` chain (undici nests the socket error there). */
+export function streamErrorCode(err: unknown): string | undefined {
+  return streamErrorCodes(err)[0]
+}
+
 /**
  * Detect transient stream errors worth retrying once. Covers:
  *  - Our own `wrapIdleTimeout` abort ("Stream idle for Nms") when the
  *    upstream provider goes silent for too long.
- *  - Common Node socket errors on a dropped connection (ECONNRESET,
- *    ETIMEDOUT, EPIPE, ENETUNREACH, ENOTFOUND, "socket hang up", "fetch
- *    failed").
+ *  - Common Node socket errors on a dropped connection, matched by
+ *    `err.code` (walking the `cause` chain — undici nests the socket
+ *    error there) as well as by message. The message alone is not
+ *    enough: Node's `node:https` ConnResetException says just
+ *    "aborted" while carrying code ECONNRESET (2026-08-27 custom-LLM
+ *    incident).
  *  - Upstream gateway 5xx (502/503/504) — provider load-balancer hiccups.
  *
  * Returns false for `AbortError` so a user-cancelled request isn't
@@ -1884,6 +1919,7 @@ function appendUserBlock(messages: Message[], block: ContentBlock): Message[] {
  */
 function isTransientStreamError(err: unknown): boolean {
   if (err instanceof Error && err.name === 'AbortError') return false
+  if (streamErrorCodes(err).some((code) => TRANSIENT_SOCKET_CODES.has(code))) return true
   const msg = err instanceof Error ? err.message : String(err)
   return (
     /Stream idle for \d+ms/i.test(msg)
@@ -1891,6 +1927,37 @@ function isTransientStreamError(err: unknown): boolean {
     || /(socket hang up|fetch failed|network (?:error|request failed))/i.test(msg)
     || /\b(502|503|504)\b/.test(msg)
   )
+}
+
+/**
+ * True when the endpoint could not be reached at all (DNS miss, nothing
+ * listening). Distinct from a mid-stream drop because "please try again"
+ * is the wrong remedy — the endpoint has to come back first. Checked
+ * BEFORE isConnectionDropError by consumers: unreachable wins.
+ */
+export function isEndpointUnreachableError(err: unknown): boolean {
+  if (err instanceof Error && err.name === 'AbortError') return false
+  if (streamErrorCodes(err).some((code) => UNREACHABLE_SOCKET_CODES.has(code))) return true
+  const msg = err instanceof Error ? err.message : String(err)
+  return /\b(ENOTFOUND|ECONNREFUSED)\b/.test(msg)
+}
+
+/**
+ * True when a stream error is a dropped-connection class failure — the
+ * kind a user can fix by simply retrying. Used by the chat route to send
+ * a typed `upstream_connection_reset` error code instead of the raw
+ * socket message ("aborted") that Node produces. Unreachable-endpoint
+ * codes are excluded — retry-is-safe copy would mislead there (see
+ * isEndpointUnreachableError). Gateway 5xx is excluded too: the endpoint
+ * answered, so neither sentence fits.
+ */
+export function isConnectionDropError(err: unknown): boolean {
+  if (err instanceof Error && err.name === 'AbortError') return false
+  if (isEndpointUnreachableError(err)) return false
+  if (streamErrorCodes(err).some((code) => TRANSIENT_SOCKET_CODES.has(code))) return true
+  const msg = err instanceof Error ? err.message : String(err)
+  return /(socket hang up|fetch failed|network (?:error|request failed))/i.test(msg)
+    || /\b(ECONNRESET|ETIMEDOUT|EPIPE|ENETUNREACH)\b/.test(msg)
 }
 
 /** Static fail-closed reply when only a terminal turn's closing text was lost. */
