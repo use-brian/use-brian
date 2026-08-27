@@ -479,6 +479,8 @@ function toEngineRule(row: IngestRuleRow): IngestRule {
     routing_timezone: row.routingTimezone,
     alert: row.alert,
     episode_sensitivity: row.episodeSensitivity,
+    compartments: row.compartments ?? [],
+    project_ids: row.projectIds ?? [],
   }
 }
 
@@ -575,6 +577,9 @@ export function createMailboxBrainRouter(deps: MailboxBrainRouterDeps): MailboxB
     message: MailboxIngestMessage,
     ctx: MailboxBrainContext,
     ruleSensitivity: 'public' | 'internal' | 'confidential',
+    ruleId: string,
+    compartments: string[],
+    projectIds: string[],
   ): Promise<{ episodeId: string }> {
     const envelope = normalizeMailboxMessage(message, {
       workspace_id: ctx.workspaceId,
@@ -593,6 +598,7 @@ export function createMailboxBrainRouter(deps: MailboxBrainRouterDeps): MailboxB
         ...envelope.source_ref,
         connector: 'imap',
         channel_ref: ctx.connectorInstanceId,
+        rule_id: ruleId,
       },
       occurredAt: envelope.occurred_at,
       workspaceId: envelope.workspace_id,
@@ -601,6 +607,8 @@ export function createMailboxBrainRouter(deps: MailboxBrainRouterDeps): MailboxB
       createdByUserId: envelope.created_by_user_id,
       createdByAssistantId: envelope.created_by_assistant_id,
       sensitivity: episodeRowSensitivity,
+      compartments,
+      projectIds,
       contentRef: { kind: 'manual_paste', text: content },
       status: 'open',
     })
@@ -616,6 +624,8 @@ export function createMailboxBrainRouter(deps: MailboxBrainRouterDeps): MailboxB
       createdByUserId: episode.createdByUserId,
       createdByAssistantId: episode.createdByAssistantId,
       channelRef: ctx.connectorInstanceId,
+      compartments: episode.compartments,
+      projectIds: episode.projectIds,
     }
     const runtime = await deps.resolveLlm?.(ctx.workspaceId)
     await runExtraction(pipelineEpisode, content, {
@@ -700,13 +710,22 @@ export function createMailboxBrainRouter(deps: MailboxBrainRouterDeps): MailboxB
             },
           },
           episodeSensitivity: decision.episode_sensitivity,
+          compartments: decision.compartments,
+          projectIds: decision.project_ids,
         })
         return null
       }
 
       // Realtime — also the scheduled fallback when no batch drain exists
       // (the WhatsApp OSS posture: better realtime than never-drained).
-      return runRealtime(message, ctx, ruleSensitivity)
+      return runRealtime(
+        message,
+        ctx,
+        ruleSensitivity,
+        decision.rule_id,
+        decision.compartments,
+        decision.project_ids,
+      )
     },
   }
 }

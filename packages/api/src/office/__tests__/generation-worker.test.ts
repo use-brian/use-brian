@@ -11,6 +11,18 @@ import { generatePresentationFromTemplate, materializeOfficeTemplateBundleForGen
 import { generateSpreadsheetFromTemplate, reviseSpreadsheetTargets } from '../spreadsheet-generation.js'
 import type { OfficeGenerationJobRow } from '../../db/office-generation.js'
 
+const GENERAL_OFFICE_SCOPE = {
+  sensitivity: 'internal' as const,
+  compartments: [] as string[],
+  projectIds: [] as string[],
+  compartmentGrant: null,
+  projectGrant: null,
+}
+
+const OFFICE_SCOPE_DEPS = {
+  raiseScope: vi.fn(async () => true),
+}
+
 describe('[COMP:api/office-generation] Office generation worker', () => {
   it('constructs a letter by replacing template fields while preserving the canonical shell', async () => {
     const uid = (n: number) => `30000000-0000-4000-8000-${String(n).padStart(12, '0')}`
@@ -309,6 +321,7 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
   it('removes an empty artifact shell when durable job admission fails', async () => {
     const failure = new Error('job insert failed')
     const deps = {
+      ...OFFICE_SCOPE_DEPS,
       generationAvailable: vi.fn(() => true),
       createShell: vi.fn(async () => ({ id: 'artifact-1' } as never)),
       deleteEmptyShell: vi.fn(async () => true),
@@ -321,12 +334,14 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
       family: 'presentation', outcome: 'Company introduction', audience: 'Public',
       sourceHandles: [], additionalContext: 'Use the supplied launch notes.',
       idempotencyKey: 'request-12345678',
+      ...GENERAL_OFFICE_SCOPE,
     })).rejects.toBe(failure)
     expect(deps.deleteEmptyShell).toHaveBeenCalledWith('user-1', 'artifact-1')
   })
 
   it('rejects creation before writing a shell when no runner is configured', async () => {
     const deps = {
+      ...OFFICE_SCOPE_DEPS,
       generationAvailable: vi.fn(() => false),
       createShell: vi.fn(), deleteEmptyShell: vi.fn(), createJob: vi.fn(),
       getArtifact: vi.fn(), resolveAccess: vi.fn(), latestJob: vi.fn(), getSnapshot: vi.fn(async () => null),
@@ -337,12 +352,14 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
       family: 'presentation', outcome: 'Company introduction', audience: 'Public',
       sourceHandles: [],
       idempotencyKey: 'request-12345678',
+      ...GENERAL_OFFICE_SCOPE,
     })).rejects.toMatchObject({ code: 'office_generation_unavailable' })
     expect(deps.createShell).not.toHaveBeenCalled()
   })
 
   it('removes the speculative shell when an idempotent retry returns the original job', async () => {
     const deps = {
+      ...OFFICE_SCOPE_DEPS,
       generationAvailable: vi.fn(() => true),
       createShell: vi.fn(async () => ({ id: 'new-shell' } as never)),
       deleteEmptyShell: vi.fn(async () => true),
@@ -355,14 +372,16 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
       family: 'document', outcome: 'Board memo', audience: 'Board', sourceHandles: [],
       additionalContext: 'Keep it to one page.',
       idempotencyKey: 'request-12345678',
+      ...GENERAL_OFFICE_SCOPE,
     })).resolves.toEqual({ artifactId: 'original-artifact', jobId: 'original-job' })
     expect(deps.deleteEmptyShell).toHaveBeenCalledWith('user-1', 'new-shell')
   })
 
   it('projects a safe job failure code without internal error detail', async () => {
     const deps = {
+      ...OFFICE_SCOPE_DEPS,
       generationAvailable: vi.fn(() => true), createShell: vi.fn(), deleteEmptyShell: vi.fn(), createJob: vi.fn(),
-      getArtifact: vi.fn(async () => ({ id: 'artifact-1', family: 'presentation', mode: 'artifact', title: 'Company introduction', headVersion: 0, lifecycleState: 'active' } as never)),
+      getArtifact: vi.fn(async () => ({ id: 'artifact-1', family: 'presentation', mode: 'artifact', title: 'Company introduction', headVersion: 0, lifecycleState: 'active', sensitivity: 'internal', compartments: [], projectIds: [] } as never)),
       resolveAccess: vi.fn(async () => ({ role: 'edit' } as never)),
       latestJob: vi.fn(async () => ({ id: 'job-1', status: 'failed', stage: 'failed', errorCode: 'presentation_fit_failed', errorDetail: 'Internal fit diagnostics' } as never)),
       getSnapshot: vi.fn(async () => null),
@@ -371,13 +390,14 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
 
     await expect(service.get({ userId: 'user-1', artifactId: 'artifact-1' })).resolves.toEqual({
       artifactId: 'artifact-1', family: 'presentation', mode: 'artifact', title: 'Company introduction', version: 0,
-      lifecycleState: 'active', role: 'edit', job: { id: 'job-1', status: 'failed', stage: 'failed', errorCode: 'presentation_fit_failed' },
+      lifecycleState: 'active', role: 'edit', scopeEvidence: { sensitivity: 'internal', compartments: [], projectIds: [] }, job: { id: 'job-1', status: 'failed', stage: 'failed', errorCode: 'presentation_fit_failed' },
     })
   })
 
   it('projects bounded semantic target IDs for Brian-native revisions', async () => {
     const snapshot = { schemaVersion: 1, capabilityVersion: 1, artifactId: 'artifact-1', workspaceId: 'workspace-1', family: 'document', locale: 'en-US', defaultLanguage: 'en-US', templateVersionId: null, rootId: 'root-1', title: 'Report', resources: [], accessibility: { title: 'Report' }, sections: [{ id: 'section-1', page: { widthPt: 612, heightPt: 792, marginTopPt: 72, marginRightPt: 72, marginBottomPt: 72, marginLeftPt: 72, orientation: 'portrait' }, header: [], footer: [], showPageNumber: true, nodes: [{ id: 'paragraph-1', kind: 'paragraph', styleName: 'Body', alignment: 'start', runs: [{ id: 'run-1', text: 'Quarterly summary', style: { fontFamily: 'Arial', fontSizePt: 11, bold: false, italic: false, underline: false, strike: false, color: '#111111' } }] }] }] } as never
     const deps = {
+      ...OFFICE_SCOPE_DEPS,
       generationAvailable: vi.fn(() => true), createShell: vi.fn(), deleteEmptyShell: vi.fn(), createJob: vi.fn(),
       getArtifact: vi.fn(async () => ({ id: 'artifact-1', family: 'document', mode: 'artifact', title: 'Report', headVersion: 2, lifecycleState: 'active' } as never)),
       resolveAccess: vi.fn(async () => ({ role: 'edit' } as never)), latestJob: vi.fn(async () => null),
@@ -397,6 +417,7 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
     const nodes = Array.from({ length: 1_005 }, (_, index) => ({ id: `paragraph-${index + 1}`, kind: 'paragraph', styleName: 'Body', alignment: 'start', runs: [{ id: `run-${index + 1}`, text: `Paragraph ${index + 1}`, style: { fontFamily: 'Arial', fontSizePt: 11, bold: false, italic: false, underline: false, strike: false, color: '#111111' } }] }))
     const snapshot = { schemaVersion: 1, capabilityVersion: 1, artifactId: 'artifact-1', workspaceId: 'workspace-1', family: 'document', locale: 'en-US', defaultLanguage: 'en-US', templateVersionId: null, rootId: 'root-1', title: 'Report', resources: [], accessibility: { title: 'Report' }, sections: [{ id: 'section-1', page: { widthPt: 612, heightPt: 792, marginTopPt: 72, marginRightPt: 72, marginBottomPt: 72, marginLeftPt: 72, orientation: 'portrait' }, header: [], footer: [], showPageNumber: true, nodes }] } as never
     const deps = {
+      ...OFFICE_SCOPE_DEPS,
       generationAvailable: vi.fn(() => true), createShell: vi.fn(), deleteEmptyShell: vi.fn(), createJob: vi.fn(),
       getArtifact: vi.fn(async () => ({ id: 'artifact-1', family: 'document', mode: 'artifact', title: 'Report', headVersion: 2, lifecycleState: 'active' } as never)),
       resolveAccess: vi.fn(async () => ({ role: 'edit' } as never)), latestJob: vi.fn(async () => null), getSnapshot: vi.fn(async () => ({ snapshot })),
@@ -413,13 +434,14 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
   it('wakes the durable worker after an explicit @Brian revision is admitted', async () => {
     const wakeGeneration = vi.fn()
     const deps = {
+      ...OFFICE_SCOPE_DEPS,
       generationAvailable: vi.fn(() => true), createShell: vi.fn(), deleteEmptyShell: vi.fn(),
       getArtifact: vi.fn(async () => ({ id: 'artifact-1', workspaceId: 'workspace-1', headVersion: 2 } as never)),
       resolveAccess: vi.fn(async () => ({ canComment: true, canEdit: true } as never)),
       createJob: vi.fn(async () => ({ id: 'revision-job' } as never)), latestJob: vi.fn(), getSnapshot: vi.fn(async () => null), wakeGeneration,
     }
     const service = createOfficeService(deps)
-    await expect(service.revise({ userId: 'user-1', assistantId: 'assistant-1', artifactId: 'artifact-1', instruction: '@Brian shorten this', targetIds: ['target-1'], expectedVersion: 2, idempotencyKey: 'revision-12345678' })).resolves.toEqual({ jobId: 'revision-job', mode: 'direct' })
+    await expect(service.revise({ userId: 'user-1', assistantId: 'assistant-1', artifactId: 'artifact-1', instruction: '@Brian shorten this', targetIds: ['target-1'], expectedVersion: 2, idempotencyKey: 'revision-12345678', ...GENERAL_OFFICE_SCOPE })).resolves.toEqual({ jobId: 'revision-job', mode: 'direct' })
     expect(wakeGeneration).toHaveBeenCalledWith('user-1')
   })
 

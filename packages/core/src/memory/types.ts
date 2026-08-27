@@ -29,6 +29,8 @@ export type MemoryRecord = {
   tags: string[]
   confidence: number
   sensitivity: Sensitivity
+  compartments?: string[]
+  projectIds?: string[]
   workspaceId?: string | null
 }
 
@@ -90,6 +92,7 @@ export type MemoryStore = {
     sensitivity: Sensitivity
     /** Compartment set (MLS category axis) to stamp on the row. Default '{}'. */
     compartments?: string[]
+    projectIds?: string[]
     /**
      * WU-4.5 authorship — every brain-primitive row records who created
      * it. Required at the interface level: the underlying DB helper
@@ -122,6 +125,9 @@ export type MemoryStore = {
     detail?: string
     confidence?: number
     tags?: string[]
+    sensitivity?: Sensitivity
+    compartments?: string[]
+    projectIds?: string[]
   }, access?: AccessContext): Promise<MemoryRecord | null>
 
   getById(ctx: AccessContext, id: string): Promise<MemoryRecord | null>
@@ -143,7 +149,7 @@ export type MemoryStore = {
    * public-api callers, which still surface superseded rows today.
    */
   getIndex(ctx: AccessContext, validOnly?: boolean): Promise<Array<{
-    id: string; summary: string; tags: string[]; sensitivity: Sensitivity
+    id: string; summary: string; tags: string[]; sensitivity: Sensitivity; compartments?: string[]; projectIds?: string[]
   }>>
 
   /**
@@ -152,7 +158,7 @@ export type MemoryStore = {
    * Do not call from chat tools or routes.
    */
   getIndexSystem(assistantId: string, userId: string, validOnly?: boolean): Promise<Array<{
-    id: string; summary: string; tags: string[]; sensitivity: Sensitivity
+    id: string; summary: string; tags: string[]; sensitivity: Sensitivity; compartments?: string[]; projectIds?: string[]
   }>>
 
   /**
@@ -189,6 +195,8 @@ export type MemoryStore = {
       summary: string
       tags: string[]
       sensitivity: Sensitivity
+      compartments?: string[]
+      projectIds?: string[]
       /** When the row was written. Surfaced on index lines so the model
        *  sees stale operational snapshots as visibly old — a row from
        *  "yesterday" is not a live fact. See `buildMemoryContext`. */
@@ -349,7 +357,7 @@ export type MemoryStore = {
    * `getIndex` for the policy split.
    */
   getWorkspaceIndex(ctx: AccessContext, validOnly?: boolean): Promise<Array<{
-    id: string; summary: string; tags: string[]; sensitivity: Sensitivity
+    id: string; summary: string; tags: string[]; sensitivity: Sensitivity; compartments?: string[]; projectIds?: string[]
   }>>
 
   /**
@@ -358,7 +366,7 @@ export type MemoryStore = {
    * exception. Do not call from chat tools or routes.
    */
   getWorkspaceIndexSystem(assistantId: string, workspaceId: string, validOnly?: boolean): Promise<Array<{
-    id: string; summary: string; tags: string[]; sensitivity: Sensitivity
+    id: string; summary: string; tags: string[]; sensitivity: Sensitivity; compartments?: string[]; projectIds?: string[]
   }>>
 
   /**

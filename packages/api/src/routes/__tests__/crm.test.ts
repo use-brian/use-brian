@@ -25,6 +25,11 @@ vi.mock('../../db/entities-store.js', () => ({
 vi.mock('../../db/entity-merge-store.js', () => ({
   createEntityMergeStore: vi.fn(() => ({})),
 }))
+vi.mock('../../db/crm-identity-store.js', () => ({
+  keepCrmEntitiesSeparate: vi.fn(),
+  listActiveCrmEntitySeparations: vi.fn(),
+  retireCrmEntitySeparation: vi.fn(),
+}))
 vi.mock('../../brain-stream/notify.js', () => ({
   notifyBrainInboxChange: vi.fn(),
 }))
@@ -77,12 +82,18 @@ import { resolveWorkspaceViewpoint } from '../../db/workspace-viewpoint.js'
 import { createDeal, updateContact, updateDeal } from '../../db/crm.js'
 import { getEntityById, updateEntity } from '../../db/entities-store.js'
 import {
+  keepCrmEntitiesSeparate,
+  listActiveCrmEntitySeparations,
+  retireCrmEntitySeparation,
+} from '../../db/crm-identity-store.js'
+import {
   appendCrmActivity,
   applyCrmFieldPreset,
   createCrmPipeline,
   getCrmConfig,
   getCrmR2Record,
   getCrmSummary,
+  findCrmDuplicateGroups,
   listCrmDealParticipants,
   listCrmRecordPage,
   listCrmRecordRelationships,
@@ -97,13 +108,17 @@ const WS = 'd126f352-7f5c-48b2-88d0-66694be0c93d'
 const CTX = { userId: 'user-1', workspaceId: WS }
 const CONFIG = { pipelines: [], fields: [] }
 
-function makeApp(role: string | null = 'member', authenticated = true) {
+function makeApp(
+  role: string | null = 'member',
+  authenticated = true,
+  emailDraftStore?: Parameters<typeof crmRoutes>[0]['emailDraftStore'],
+) {
   const workspaceStore = {
     getRole: vi.fn(async (userId: string) => userId === CTX.userId ? role : null),
   }
   return createTestApp(
     '/api/crm',
-    crmRoutes({ workspaceStore: workspaceStore as never }),
+    crmRoutes({ workspaceStore: workspaceStore as never, emailDraftStore }),
     authenticated ? { userId: CTX.userId } : undefined,
   )
 }
@@ -114,6 +129,69 @@ describe('[COMP:api/crm-r2-route] CRM R2 route authority', () => {
     vi.mocked(resolveWorkspaceViewpoint).mockResolvedValue(CTX as never)
     vi.mocked(getCrmConfig).mockResolvedValue(CONFIG)
     vi.mocked(validateCrmCustomFieldValues).mockResolvedValue([])
+    vi.mocked(listActiveCrmEntitySeparations).mockResolvedValue([])
+  })
+
+  it('bounds duplicate input and excludes active Keep separate pairs', async () => {
+    const rows = Array.from({ length: 205 }, (_, index) => ({
+      id: `person-${index}`,
+      kind: 'person',
+    }))
+    vi.mocked(listCrmR2Records).mockResolvedValue(rows as never)
+    vi.mocked(listActiveCrmEntitySeparations).mockResolvedValue([{
+      leftEntityId: 'person-1',
+      rightEntityId: 'person-2',
+    }] as never)
+    vi.mocked(findCrmDuplicateGroups).mockReturnValue([])
+
+    const response = await request(makeApp()).get(`/api/crm/${WS}/duplicates`)
+
+    expect(response.status).toBe(200)
+    expect(findCrmDuplicateGroups).toHaveBeenCalledWith(
+      expect.arrayContaining([expect.objectContaining({ id: 'person-199' })]),
+      expect.objectContaining({
+        maxGroups: 200,
+        maxGroupSize: 50,
+        separatedPairs: new Set(['person-1:person-2']),
+      }),
+    )
+    const bounded = vi.mocked(findCrmDuplicateGroups).mock.calls[0][0]
+    expect(bounded).toHaveLength(200)
+  })
+
+  it('creates an idempotent Keep separate decision and supports Review again', async () => {
+    const separation = {
+      id: '00000000-0000-4000-8000-000000000030',
+      leftEntityId: '00000000-0000-4000-8000-000000000010',
+      rightEntityId: '00000000-0000-4000-8000-000000000011',
+    }
+    vi.mocked(keepCrmEntitiesSeparate).mockResolvedValue({
+      separation,
+      inserted: false,
+    } as never)
+    vi.mocked(retireCrmEntitySeparation).mockResolvedValue(separation as never)
+
+    const kept = await request(makeApp())
+      .post(`/api/crm/${WS}/separations`)
+      .send({ leftEntityId: separation.leftEntityId, rightEntityId: separation.rightEntityId })
+    expect(kept.status).toBe(200)
+    expect(kept.body.idempotent).toBe(true)
+    expect(keepCrmEntitiesSeparate).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: WS,
+      actorUserId: CTX.userId,
+      leftEntityId: separation.leftEntityId,
+      rightEntityId: separation.rightEntityId,
+    }))
+
+    const reviewed = await request(makeApp())
+      .post(`/api/crm/${WS}/separations/${separation.id}/review-again`)
+      .send({})
+    expect(reviewed.status).toBe(200)
+    expect(retireCrmEntitySeparation).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: WS,
+      separationId: separation.id,
+      actorUserId: CTX.userId,
+    }))
   })
 
   it('requires authentication and workspace membership', async () => {
@@ -134,6 +212,45 @@ describe('[COMP:api/crm-r2-route] CRM R2 route authority', () => {
     expect(response.status).toBe(200)
     expect(response.body).toEqual(CONFIG)
     expect(getCrmConfig).toHaveBeenCalledWith(CTX.userId, WS, false)
+  })
+
+  it('returns the complete current canonical email draft to workspace members', async () => {
+    const list = vi.fn(async () => [{
+      id: '11111111-1111-4111-8111-111111111111',
+      workspaceId: WS,
+      status: 'draft' as const,
+      revision: 4,
+      from: 'team@example.test',
+      to: ['recipient@example.test'],
+      cc: ['colleague@example.test'],
+      bcc: [],
+      subject: 'Exact draft',
+      body: 'Hello,\n\nThis is the complete canonical body.\n\nRegards',
+      createdByUserId: CTX.userId,
+      createdByAssistantId: 'assistant-1',
+      sourceSessionId: 'session-1',
+      createdAt: new Date('2026-08-27T00:00:00.000Z'),
+      updatedAt: new Date('2026-08-27T00:04:00.000Z'),
+    }])
+    const response = await request(makeApp('member', true, {
+      saveRevision: vi.fn(),
+      getById: vi.fn(),
+      getActiveForSession: vi.fn(),
+      list,
+    }))
+      .get(`/api/crm/${WS}/email-drafts?limit=25`)
+
+    expect(response.status).toBe(200)
+    expect(response.body.drafts).toEqual([expect.objectContaining({
+      id: '11111111-1111-4111-8111-111111111111',
+      revision: 4,
+      body: 'Hello,\n\nThis is the complete canonical body.\n\nRegards',
+    })])
+    expect(list).toHaveBeenCalledWith({
+      userId: CTX.userId,
+      workspaceId: WS,
+      limit: 25,
+    })
   })
 
   it('reserves pipeline configuration for owners and admins', async () => {

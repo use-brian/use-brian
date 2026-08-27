@@ -141,6 +141,31 @@ describe('[COMP:api/workflows-route] GET / POST /workflows', () => {
     expect(emitAudit).toHaveBeenCalledWith(expect.objectContaining({ type: 'workflow.created' }))
   })
 
+  it('POST /workflows blocks a scoped binding until the readiness matrix is green', async () => {
+    workspaceStore.getRole.mockResolvedValueOnce('admin')
+    const getContextReadiness = vi.fn().mockResolvedValue({
+      enforcementVersion: 1,
+      readyForActivation: false,
+      checks: [{ id: 'connectors', ready: false, blocking: true, detail: 'missing' }],
+      legacyGeneral: {},
+    })
+    const res = await request(app('u-1', { getContextReadiness }))
+      .post('/api/workflows')
+      .send({
+        workspaceId: WS,
+        name: 'Scoped workflow',
+        definition: { steps: [] },
+        contextGroupId: '22222222-2222-4222-8222-222222222222',
+      })
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({
+      error: 'context_activation_blocked',
+      failedChecks: ['connectors'],
+    })
+    expect(workflowStore.create).not.toHaveBeenCalled()
+    expect(mockDefParse).not.toHaveBeenCalled()
+  })
+
   it('POST /workflows returns a non-blocking research-mode advisory in warnings[] (incident 2026-07-08 run 12abd640)', async () => {
     workspaceStore.getRole.mockResolvedValueOnce('admin')
     mockDefParse.mockReturnValueOnce({

@@ -186,6 +186,8 @@ export type ApplyLinksParams = {
   links: readonly ExplicitLinkInput[] | undefined
   /** Episode ref to thread through to `entity_links.source_episode_id`. */
   sourceEpisodeId?: string | null
+  compartments?: string[]
+  projectIds?: string[]
 }
 
 /**
@@ -218,6 +220,8 @@ export async function applyExplicitLinks(
         validFrom: link.validFrom ? new Date(link.validFrom) : undefined,
         validTo: link.validTo ? new Date(link.validTo) : null,
         sourceEpisodeId: params.sourceEpisodeId ?? null,
+        compartments: params.compartments,
+        projectIds: params.projectIds,
       })
       created += 1
     } catch (err) {

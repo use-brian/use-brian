@@ -16,6 +16,8 @@ function fakeStore(over: Partial<GoalStore> = {}): GoalStore {
     policy: {},
     status: 'active',
     blockerReason: null,
+    contextGroupId: null,
+    contextProjectId: null,
     createdByUserId: null,
     confirmedAt: null,
     completionClaim: null,

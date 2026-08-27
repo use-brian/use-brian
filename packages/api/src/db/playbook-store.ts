@@ -17,8 +17,14 @@
  * [COMP:api/assistant-playbook]
  */
 
-import { query } from './client.js'
+import { createHash } from 'node:crypto'
+
+import { z } from 'zod'
+
+import { getPool, query } from './client.js'
 import { excludeExternalPrincipalsSql } from './external-principal.js'
+import { appendDecisionDerivation } from './decision-provenance-store.js'
+import { appendDecisionEvent } from './decision-event-store.js'
 
 export type PlaybookRuleStatus = 'suggested' | 'active' | 'rejected' | 'retired'
 
@@ -29,7 +35,13 @@ export type PlaybookRule = {
   rationale: string | null
   provenance: unknown
   status: PlaybookRuleStatus
-  createdBy: 'reflection' | 'owner'
+  createdBy: 'reflection' | 'owner' | 'decision_reflection'
+  appliesToUserId: string | null
+  applicabilityKind: 'general' | 'email' | 'tool'
+  applicabilityKey: string | null
+  evidenceCount: number
+  semanticKey: string | null
+  decisionSensitivity: 'public' | 'internal' | 'confidential' | 'restricted'
   decidedByUserId: string | null
   decidedAt: string | null
   createdAt: string
@@ -43,6 +55,9 @@ export const MAX_ACTIVE_PLAYBOOK_RULES = 12
  *  assistant at or above this so an unattended inbox never floods. */
 export const MAX_PENDING_PLAYBOOK_SUGGESTIONS = 5
 
+/** Decision-derived active cap per assistant/member pair. */
+export const MAX_ACTIVE_DECISION_PLAYBOOK_RULES = 6
+
 const ROW_COLUMNS = `
   id,
   assistant_id       AS "assistantId",
@@ -51,6 +66,12 @@ const ROW_COLUMNS = `
   provenance,
   status,
   created_by         AS "createdBy",
+  applies_to_user_id AS "appliesToUserId",
+  applicability_kind AS "applicabilityKind",
+  applicability_key  AS "applicabilityKey",
+  evidence_count     AS "evidenceCount",
+  semantic_key       AS "semanticKey",
+  decision_sensitivity AS "decisionSensitivity",
   decided_by_user_id AS "decidedByUserId",
   decided_at         AS "decidedAt",
   created_at         AS "createdAt"
@@ -60,9 +81,81 @@ const ROW_COLUMNS = `
 export async function listPlaybookRules(assistantId: string): Promise<PlaybookRule[]> {
   const result = await query<PlaybookRule>(
     `SELECT ${ROW_COLUMNS} FROM assistant_playbook_rules
-     WHERE assistant_id = $1
+     WHERE assistant_id = $1 AND applies_to_user_id IS NULL
      ORDER BY created_at DESC`,
     [assistantId],
+  )
+  return result.rows
+}
+
+/**
+ * Governance projection for one member. Assistant-wide suggestions and
+ * historical decisions remain owner-only; a member sees only assistant-wide
+ * active rules plus their own decision-reflected suggested/active/retired
+ * rules. No route ever loads another member's scoped rows.
+ */
+export async function listPlaybookRulesForViewer(params: {
+  assistantId: string
+  userId: string
+  isAssistantOwner: boolean
+}): Promise<PlaybookRule[]> {
+  const result = await query<PlaybookRule>(
+    `SELECT ${ROW_COLUMNS} FROM assistant_playbook_rules
+      WHERE assistant_id = $1
+        AND (
+          (
+            applies_to_user_id IS NULL
+            AND ($3::boolean OR status = 'active')
+          )
+          OR (
+            applies_to_user_id = $2
+            AND created_by = 'decision_reflection'
+            AND status IN ('suggested', 'active', 'retired')
+          )
+        )
+      ORDER BY
+        CASE status WHEN 'suggested' THEN 0 WHEN 'active' THEN 1 ELSE 2 END,
+        created_at DESC`,
+    [params.assistantId, params.userId, params.isAssistantOwner],
+  )
+  return result.rows
+}
+
+export type PlaybookPromptRule = Pick<
+  PlaybookRule,
+  | 'id'
+  | 'rule'
+  | 'createdBy'
+  | 'appliesToUserId'
+  | 'applicabilityKind'
+  | 'applicabilityKey'
+  | 'decisionSensitivity'
+>
+
+/** System read for the shared prompt loader; scope filtering happens in SQL. */
+export async function listActivePlaybookRulesForActor(params: {
+  assistantId: string
+  actorUserId: string | null
+  externalPrincipal: boolean
+}): Promise<PlaybookPromptRule[]> {
+  const result = await query<PlaybookPromptRule>(
+    `SELECT id, rule, created_by AS "createdBy",
+            applies_to_user_id AS "appliesToUserId",
+            applicability_kind AS "applicabilityKind",
+            applicability_key AS "applicabilityKey",
+            decision_sensitivity AS "decisionSensitivity"
+       FROM assistant_playbook_rules
+      WHERE assistant_id = $1 AND status = 'active'
+        AND (
+          applies_to_user_id IS NULL
+          OR (
+            $3::boolean = false
+            AND $2::uuid IS NOT NULL
+            AND applies_to_user_id = $2
+          )
+        )
+      ORDER BY decided_at DESC NULLS LAST, created_at DESC`,
+    [params.assistantId, params.actorUserId, params.externalPrincipal],
   )
   return result.rows
 }
@@ -75,7 +168,7 @@ export async function listPlaybookRules(assistantId: string): Promise<PlaybookRu
 export async function listActivePlaybookRules(assistantId: string): Promise<string[]> {
   const result = await query<{ rule: string }>(
     `SELECT rule FROM assistant_playbook_rules
-     WHERE assistant_id = $1 AND status = 'active'
+     WHERE assistant_id = $1 AND applies_to_user_id IS NULL AND status = 'active'
      ORDER BY decided_at DESC NULLS LAST, created_at DESC`,
     [assistantId],
   )
@@ -86,7 +179,7 @@ export async function listActivePlaybookRules(assistantId: string): Promise<stri
 export async function countPendingPlaybookSuggestions(assistantId: string): Promise<number> {
   const result = await query<{ count: string }>(
     `SELECT COUNT(*)::text AS count FROM assistant_playbook_rules
-     WHERE assistant_id = $1 AND status = 'suggested'`,
+     WHERE assistant_id = $1 AND applies_to_user_id IS NULL AND status = 'suggested'`,
     [assistantId],
   )
   return Number(result.rows[0]?.count ?? 0)
@@ -96,7 +189,7 @@ export async function countPendingPlaybookSuggestions(assistantId: string): Prom
 export async function listPlaybookCorpus(assistantId: string): Promise<{ rule: string; status: PlaybookRuleStatus }[]> {
   const result = await query<{ rule: string; status: PlaybookRuleStatus }>(
     `SELECT rule, status FROM assistant_playbook_rules
-     WHERE assistant_id = $1
+     WHERE assistant_id = $1 AND applies_to_user_id IS NULL
      ORDER BY created_at DESC
      LIMIT 100`,
     [assistantId],
@@ -120,7 +213,7 @@ export async function insertPlaybookRules(
 ): Promise<{ activated: number; suggested: number }> {
   const active = await query<{ count: string }>(
     `SELECT COUNT(*)::text AS count FROM assistant_playbook_rules
-     WHERE assistant_id = $1 AND status = 'active'`,
+     WHERE assistant_id = $1 AND applies_to_user_id IS NULL AND status = 'active'`,
     [assistantId],
   )
   let slots = MAX_ACTIVE_PLAYBOOK_RULES - Number(active.rows[0]?.count ?? 0)
@@ -146,40 +239,417 @@ export async function insertPlaybookRules(
   return { activated, suggested }
 }
 
+export const decisionRuleProposalSchema = z.object({
+  rule: z.string().trim().min(1).max(280),
+  applicabilityKind: z.enum(['general', 'email', 'tool']),
+  applicabilityKey: z.string().trim().min(1).max(256).nullable().optional().default(null),
+  sourceEventIds: z.array(z.string().uuid()).min(1).max(30),
+  eligibility: z.enum(['suggestion', 'activation']),
+}).strict()
+
+export type DecisionRuleProposal = z.output<typeof decisionRuleProposalSchema>
+
+const PROHIBITED_DECISION_RULE_PATTERNS = [
+  /\b(?:grant|revoke|elevate|bypass|change|modify|update|set)\b.{0,48}\b(?:permissions?|access|roles?|workspace polic(?:y|ies))\b/i,
+  /\b(?:permissions?|access|roles?|workspace polic(?:y|ies))\b.{0,48}\b(?:grant|revoke|elevate|bypass|change|modify|update|set)\b/i,
+  /\b(?:create|delete|modify|update|install|publish)\b.{0,48}\b(?:skills?|workflows?)\b/i,
+  /\b(?:skills?|workflows?)\b.{0,48}\b(?:create|delete|modify|update|install|publish)\b/i,
+  /\b(?:merge|bind|identify|reassign)\b.{0,48}\b(?:persons?|contacts?|identit(?:y|ies))\b/i,
+  /\b(?:persons?|contacts?|identit(?:y|ies))\b.{0,48}\b(?:merge|bind|identify|reassign)\b/i,
+  /\b(?:task admission|task policy|workspace policy)\b/i,
+]
+
+/** Projector guard: behavioral advice only, never another authority system. */
+export function isProhibitedDecisionRule(rule: string): boolean {
+  return PROHIBITED_DECISION_RULE_PATTERNS.some((pattern) => pattern.test(rule))
+}
+
+export function semanticKeyForDecisionRule(input: {
+  rule: string
+  applicabilityKind: 'general' | 'email' | 'tool'
+  applicabilityKey?: string | null
+}): string {
+  const normalized = input.rule
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim()
+  return createHash('sha256')
+    .update(`${input.applicabilityKind}\u0000${input.applicabilityKey?.trim().toLowerCase() ?? ''}\u0000${normalized}`)
+    .digest('hex')
+}
+
+type DecisionEvidenceRow = {
+  id: string
+  eventKind: 'approval.decided' | 'email.draft_revised'
+  sourceKind: string
+  sourceId: string
+  payload: Record<string, unknown>
+  reason: string | null
+  sensitivity: 'public' | 'internal' | 'confidential' | 'restricted'
+  createdAt: Date
+}
+
+function isReviewedEmailEvidence(row: DecisionEvidenceRow): boolean {
+  return row.eventKind === 'email.draft_revised'
+    || (
+      row.eventKind === 'approval.decided'
+      && row.payload.approvalKind === 'workflow_step'
+      && row.payload.toolName === 'imapSendMessage'
+    )
+}
+
+const DECISION_SENSITIVITY_RANK: Record<DecisionEvidenceRow['sensitivity'], number> = {
+  public: 0,
+  internal: 1,
+  confidential: 2,
+  restricted: 3,
+}
+
+function decisionEvidenceSourceKeys(rows: readonly DecisionEvidenceRow[]): {
+  eventCount: number
+  distinctSources: number
+} {
+  // Approval ids in one revision chain form one normalized example even when
+  // the model cites every event id in that chain.
+  const parent = new Map<string, string>()
+  const find = (value: string): string => {
+    const current = parent.get(value)
+    if (!current || current === value) return value
+    const root = find(current)
+    parent.set(value, root)
+    return root
+  }
+  const union = (left: string, right: string) => {
+    if (!parent.has(left)) parent.set(left, left)
+    if (!parent.has(right)) parent.set(right, right)
+    const leftRoot = find(left)
+    const rightRoot = find(right)
+    if (leftRoot !== rightRoot) {
+      const root = leftRoot < rightRoot ? leftRoot : rightRoot
+      parent.set(leftRoot, root)
+      parent.set(rightRoot, root)
+    }
+  }
+  for (const row of rows) {
+    if (row.eventKind !== 'email.draft_revised') continue
+    const previous = typeof row.payload.previousApprovalId === 'string'
+      ? row.payload.previousApprovalId
+      : null
+    const replacement = typeof row.payload.replacementApprovalId === 'string'
+      ? row.payload.replacementApprovalId
+      : null
+    if (previous && replacement) union(previous, replacement)
+  }
+  const normalizedEvents = new Set<string>()
+  const sources = new Set<string>()
+  for (const row of rows) {
+    if (row.eventKind === 'email.draft_revised') {
+      const previous = typeof row.payload.previousApprovalId === 'string'
+        ? row.payload.previousApprovalId
+        : row.sourceId
+      const key = `email:${find(previous)}`
+      normalizedEvents.add(key)
+      sources.add(key)
+      continue
+    }
+    if (isReviewedEmailEvidence(row)) {
+      const approvalId = typeof row.payload.approvalId === 'string'
+        ? row.payload.approvalId
+        : row.sourceId
+      normalizedEvents.add(`email-decision:${row.id}`)
+      sources.add(`email:${find(approvalId)}`)
+      continue
+    }
+    const approvalId = typeof row.payload.approvalId === 'string'
+      ? row.payload.approvalId
+      : typeof row.payload.toolCallId === 'string'
+        ? row.payload.toolCallId
+        : row.sourceId
+    normalizedEvents.add(`tool-event:${row.id}`)
+    sources.add(`tool:${approvalId}`)
+  }
+  return { eventCount: normalizedEvents.size, distinctSources: sources.size }
+}
+
+function proposalMatchesApplicability(
+  proposal: DecisionRuleProposal,
+  rows: readonly DecisionEvidenceRow[],
+): boolean {
+  if (proposal.applicabilityKind === 'general') return true
+  if (proposal.applicabilityKind === 'email') {
+    if (rows.some((row) => !isReviewedEmailEvidence(row))) return false
+    return proposal.applicabilityKey === null || rows.every((row) =>
+      row.payload.accountKey === proposal.applicabilityKey)
+  }
+  if (rows.some((row) => row.eventKind !== 'approval.decided' || isReviewedEmailEvidence(row))) {
+    return false
+  }
+  return proposal.applicabilityKey === null || rows.every((row) =>
+    row.payload.toolName === proposal.applicabilityKey)
+}
+
+export type InsertDecisionRulesResult = {
+  activated: number
+  suggested: number
+  deduped: number
+  rejected: number
+}
+
+/**
+ * Independently validate model-selected evidence and atomically insert scoped
+ * rules plus canonical derivations. Model eligibility claims are advisory.
+ */
+export async function insertDecisionReflectedRules(params: {
+  assistantId: string
+  actorUserId: string
+  workspaceId: string | null
+  proposals: unknown[]
+}): Promise<InsertDecisionRulesResult> {
+  const result: InsertDecisionRulesResult = {
+    activated: 0,
+    suggested: 0,
+    deduped: 0,
+    rejected: 0,
+  }
+  const parsed: DecisionRuleProposal[] = []
+  for (const candidate of params.proposals.slice(0, 2)) {
+    const proposal = decisionRuleProposalSchema.safeParse(candidate)
+    if (!proposal.success || isProhibitedDecisionRule(
+      proposal.success ? proposal.data.rule : '',
+    )) {
+      result.rejected++
+      continue
+    }
+    parsed.push(proposal.data)
+  }
+  if (parsed.length === 0) return result
+
+  const client = await getPool().connect()
+  try {
+    await client.query('BEGIN')
+    await client.query(
+      `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+      [`decision-playbook:${params.assistantId}:${params.actorUserId}`],
+    )
+    const active = await client.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM assistant_playbook_rules
+        WHERE assistant_id = $1 AND applies_to_user_id = $2
+          AND created_by = 'decision_reflection' AND status = 'active'`,
+      [params.assistantId, params.actorUserId],
+    )
+    let slots = Math.max(
+      0,
+      MAX_ACTIVE_DECISION_PLAYBOOK_RULES - Number(active.rows[0]?.count ?? 0),
+    )
+
+    for (const proposal of parsed) {
+      const eventIds = [...new Set(proposal.sourceEventIds)]
+      const events = await client.query<DecisionEvidenceRow>(
+        `SELECT de.id, de.event_kind AS "eventKind", de.source_kind AS "sourceKind",
+                de.source_id AS "sourceId", de.payload, de.reason,
+                de.sensitivity, de.created_at AS "createdAt"
+           FROM decision_events de
+          WHERE de.id = ANY($1::uuid[])
+            AND de.assistant_id = $2 AND de.actor_user_id = $3
+            AND de.workspace_id IS NOT DISTINCT FROM $4::uuid
+            AND de.created_at >= now() - interval '30 days'
+            AND (
+              de.event_kind = 'email.draft_revised'
+              OR (
+                de.event_kind = 'approval.decided'
+                AND de.payload->>'resolution' IN ('deny', 'always_deny')
+                AND NULLIF(btrim(de.reason), '') IS NOT NULL
+              )
+            )
+            ${excludeExternalPrincipalsSql('de.actor_user_id')}
+          ORDER BY de.created_at, de.id`,
+        [eventIds, params.assistantId, params.actorUserId, params.workspaceId],
+      )
+      if (events.rows.length !== eventIds.length
+        || !proposalMatchesApplicability(proposal, events.rows)) {
+        result.rejected++
+        continue
+      }
+      const counts = decisionEvidenceSourceKeys(events.rows)
+      const qualifiesForActivation = counts.eventCount >= 3 && counts.distinctSources >= 2
+      const status: PlaybookRuleStatus = qualifiesForActivation && slots > 0
+        ? 'active'
+        : 'suggested'
+      const sensitivity = events.rows.reduce<DecisionEvidenceRow['sensitivity']>(
+        (highest, row) => DECISION_SENSITIVITY_RANK[row.sensitivity]
+          > DECISION_SENSITIVITY_RANK[highest] ? row.sensitivity : highest,
+        'public',
+      )
+      const semanticKey = semanticKeyForDecisionRule(proposal)
+      const sourceKinds = [...new Set(events.rows.map((row) =>
+        isReviewedEmailEvidence(row) ? 'reviewed_email' : 'tool_denial'))].sort()
+      const dates = events.rows.map((row) => row.createdAt).sort((a, b) => a.getTime() - b.getTime())
+      const inserted = await client.query<{ id: string }>(
+        `INSERT INTO assistant_playbook_rules (
+           assistant_id, rule, rationale, provenance, status, created_by,
+           applies_to_user_id, applicability_kind, applicability_key,
+           evidence_count, semantic_key, decision_sensitivity, decided_at
+         ) VALUES (
+           $1,$2,NULL,$3::jsonb,$4,'decision_reflection',$5,$6,$7,$8,$9,$10,
+           CASE WHEN $4 = 'active' THEN now() END
+         )
+         ON CONFLICT (assistant_id, applies_to_user_id, semantic_key)
+           WHERE semantic_key IS NOT NULL DO NOTHING
+         RETURNING id`,
+        [
+          params.assistantId,
+          proposal.rule,
+          JSON.stringify({
+            sourceKinds,
+            firstEvidenceAt: dates[0]?.toISOString() ?? null,
+            lastEvidenceAt: dates[dates.length - 1]?.toISOString() ?? null,
+          }),
+          status,
+          params.actorUserId,
+          proposal.applicabilityKind,
+          proposal.applicabilityKey,
+          counts.eventCount,
+          semanticKey,
+          sensitivity,
+        ],
+      )
+      if (!inserted.rows[0]) {
+        result.deduped++
+        continue
+      }
+      for (const eventId of eventIds) {
+        await appendDecisionDerivation({
+          decisionEventId: eventId,
+          artifactKind: 'assistant_playbook_rule',
+          artifactId: inserted.rows[0].id,
+          relation: 'supports',
+        }, client)
+      }
+      if (status === 'active') {
+        result.activated++
+        slots--
+      } else {
+        result.suggested++
+      }
+    }
+    await client.query('COMMIT')
+    return result
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw err
+  } finally {
+    client.release()
+  }
+}
+
 export type PlaybookDecision = 'approve' | 'reject' | 'retire'
 
 /**
- * Apply an owner decision. Returns the updated rule, or null when the rule
- * doesn't exist / doesn't belong to the assistant / isn't in a status the
- * decision applies to (approve+reject act on 'suggested'; retire on
- * 'active'). Approve additionally refuses past MAX_ACTIVE_PLAYBOOK_RULES,
- * returning 'cap' so the route can 409 with a real reason.
+ * Apply one governance decision with its journal event in the same
+ * transaction. Assistant-wide rules remain owner-controlled; a member may
+ * decide only a decision-reflected rule scoped to their own user id.
  */
 export async function decidePlaybookRule(params: {
   assistantId: string
   ruleId: string
   decision: PlaybookDecision
   userId: string
-}): Promise<PlaybookRule | 'cap' | null> {
+  workspaceId: string | null
+  isAssistantOwner: boolean
+}): Promise<PlaybookRule | 'cap' | 'forbidden' | null> {
   const { assistantId, ruleId, decision, userId } = params
-  if (decision === 'approve') {
-    const active = await query<{ count: string }>(
-      `SELECT COUNT(*)::text AS count FROM assistant_playbook_rules
-       WHERE assistant_id = $1 AND status = 'active'`,
-      [assistantId],
+  const client = await getPool().connect()
+  try {
+    await client.query('BEGIN')
+    const selected = await client.query<PlaybookRule>(
+      `SELECT ${ROW_COLUMNS} FROM assistant_playbook_rules
+        WHERE id = $1 AND assistant_id = $2
+        FOR UPDATE`,
+      [ruleId, assistantId],
     )
-    if (Number(active.rows[0]?.count ?? 0) >= MAX_ACTIVE_PLAYBOOK_RULES) return 'cap'
+    const rule = selected.rows[0]
+    if (!rule) {
+      await client.query('COMMIT')
+      return null
+    }
+    const userScoped = rule.createdBy === 'decision_reflection'
+      && rule.appliesToUserId !== null
+    const authorized = userScoped
+      ? rule.appliesToUserId === userId
+      : params.isAssistantOwner && rule.appliesToUserId === null
+    if (!authorized) {
+      await client.query('COMMIT')
+      return 'forbidden'
+    }
+
+    const fromStatus = decision === 'retire' ? 'active' : 'suggested'
+    if (rule.status !== fromStatus) {
+      await client.query('COMMIT')
+      return null
+    }
+    if (decision === 'approve') {
+      const cap = userScoped
+        ? MAX_ACTIVE_DECISION_PLAYBOOK_RULES
+        : MAX_ACTIVE_PLAYBOOK_RULES
+      const active = await client.query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count FROM assistant_playbook_rules
+          WHERE assistant_id = $1 AND status = 'active'
+            AND applies_to_user_id IS NOT DISTINCT FROM $2::uuid`,
+        [assistantId, rule.appliesToUserId],
+      )
+      if (Number(active.rows[0]?.count ?? 0) >= cap) {
+        await client.query('COMMIT')
+        return 'cap'
+      }
+    }
+
+    const toStatus = decision === 'approve'
+      ? 'active'
+      : decision === 'reject'
+        ? 'rejected'
+        : 'retired'
+    const updated = await client.query<PlaybookRule>(
+      `UPDATE assistant_playbook_rules
+          SET status = $1, decided_by_user_id = $2,
+              decided_at = now(), updated_at = now()
+        WHERE id = $3 AND assistant_id = $4 AND status = $5
+        RETURNING ${ROW_COLUMNS}`,
+      [toStatus, userId, ruleId, assistantId, fromStatus],
+    )
+    if (!updated.rows[0]) throw new Error('Playbook decision lost its locked rule')
+
+    const event = await appendDecisionEvent({
+      idempotencyKey: `playbook:${ruleId}:${decision}`,
+      workspaceId: params.workspaceId,
+      actorUserId: userId,
+      assistantId,
+      sessionId: null,
+      eventKind: 'playbook.rule_decided',
+      schemaVersion: 1,
+      sourceKind: 'assistant_playbook_rule',
+      sourceId: ruleId,
+      declaredScope: userScoped ? 'user' : 'assistant',
+      visibility: userScoped ? 'owner' : 'workspace',
+      sensitivity: rule.decisionSensitivity,
+      payload: { ruleId, decision },
+    }, client)
+    if (decision === 'reject' || decision === 'retire') {
+      await appendDecisionDerivation({
+        decisionEventId: event.event.id,
+        artifactKind: 'assistant_playbook_rule',
+        artifactId: ruleId,
+        relation: 'invalidates',
+      }, client)
+    }
+    await client.query('COMMIT')
+    return updated.rows[0]
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw err
+  } finally {
+    client.release()
   }
-  const fromStatus = decision === 'retire' ? 'active' : 'suggested'
-  const toStatus = decision === 'approve' ? 'active' : decision === 'reject' ? 'rejected' : 'retired'
-  const result = await query<PlaybookRule>(
-    `UPDATE assistant_playbook_rules
-     SET status = $1, decided_by_user_id = $2, decided_at = now(), updated_at = now()
-     WHERE id = $3 AND assistant_id = $4 AND status = $5
-     RETURNING ${ROW_COLUMNS}`,
-    [toStatus, userId, ruleId, assistantId, fromStatus],
-  )
-  return result.rows[0] ?? null
 }
 
 /**

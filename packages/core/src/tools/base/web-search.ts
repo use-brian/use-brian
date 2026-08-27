@@ -23,6 +23,8 @@ const providersByName = {
 
 const PANEL_CONCURRENCY = 4
 const SEARCH_REQUEST_TIMEOUT_MS = 15_000
+const MAX_SEARCH_ATTEMPTS = 3
+const MAX_RETRY_DELAY_MS = 5_000
 
 async function withSearchDeadline<T>(
   parentSignal: AbortSignal,
@@ -62,6 +64,43 @@ async function mapPool<T, R>(
   }
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker))
   return results
+}
+
+function normalizeDomain(value: string): string | null {
+  const trimmed = value.trim().toLowerCase()
+  if (!trimmed) return null
+  try {
+    const url = new URL(trimmed.includes('://') ? trimmed : `https://${trimmed}`)
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null
+    const hostname = url.hostname.replace(/^www\./, '').replace(/\.$/, '')
+    if (!hostname || !hostname.includes('.') || !/^[a-z0-9.-]+$/.test(hostname)) return null
+    return hostname
+  } catch {
+    return null
+  }
+}
+
+function domainFromUrl(value: string): string {
+  try {
+    return new URL(value).hostname.toLowerCase().replace(/^www\./, '').replace(/\.$/, '')
+  } catch {
+    return ''
+  }
+}
+
+function waitForRetry(ms: number, signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted) return Promise.resolve(false)
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort)
+      resolve(true)
+    }, Math.min(Math.max(ms, 0), MAX_RETRY_DELAY_MS))
+    const onAbort = () => {
+      clearTimeout(timer)
+      resolve(false)
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
 }
 
 /**
@@ -104,6 +143,18 @@ const webSearchInputSchema = z
         'Exact provider for repeatable measurement. Omit for normal Brave → Serper → SerpAPI → Tavily → DuckDuckGo fallback.',
       ),
     maxResults: z.number().optional().describe('Maximum results per query (default 5, max 10)'),
+    resultMode: z
+      .enum(['full', 'measurement'])
+      .optional()
+      .describe(
+        'Output shape for exact-provider measurements. `measurement` omits snippets and adds normalized domain/rank summaries.',
+      ),
+    trackDomains: z
+      .array(z.string().min(1).max(253))
+      .min(1)
+      .max(20)
+      .optional()
+      .describe('Domains to rank in `measurement` mode, for example usebrian.ai or studio.usebrian.ai.'),
   })
   .superRefine((input, ctx) => {
     const hasQuery = typeof input.query === 'string'
@@ -121,12 +172,35 @@ const webSearchInputSchema = z
         path: ['provider'],
       })
     }
+    if (input.resultMode === 'measurement' && !input.provider) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: '`measurement` requires an exact `provider` so provenance cannot change between queries.',
+        path: ['provider'],
+      })
+    }
+    if (input.trackDomains && input.resultMode !== 'measurement') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: '`trackDomains` is valid only when `resultMode` is `measurement`.',
+        path: ['trackDomains'],
+      })
+    }
+    input.trackDomains?.forEach((domain, index) => {
+      if (!normalizeDomain(domain)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Pass a valid hostname or http(s) URL.',
+          path: ['trackDomains', index],
+        })
+      }
+    })
   })
 
 export const webSearchTool = buildTool({
   name: 'webSearch',
   description:
-    "Search the web for current information. A single `query` normally uses the provider fallback stack. For a repeatable search-index measurement, set an exact `provider`; for a fixed battery, send `queries` with that provider and receive one ordered status/result row per query. Exact-provider calls never fall through to another index. Results contain ranked title, URL, and snippet fields. The result URL and snippet are themselves usable: when the goal is to FIND or CONFIRM a page (a person's profile, a company site, an official link), the matching result URL IS the answer - report that URL and cite its snippet; you do NOT need to read the page first. Call `urlReader` only when you need content from inside a page body (prices, dates, statistics, article text) - read the 1-3 most relevant URLs ALL IN THE SAME RESPONSE so they execute in parallel (do not wait for one to finish before calling the next). Some pages (social-network profiles like LinkedIn, and other login-gated sites) cannot be read without a signed-in session; for those, give the user the result URL plus its snippet rather than reporting that nothing was found. When the results contain specific numbers (prices, dates, statistics), use the EXACT values from the results - never substitute your own knowledge. Always cite the URLs you used.",
+    "Search the web for current information. A single `query` normally uses the provider fallback stack. For a repeatable search-index measurement, set an exact `provider`; for a fixed battery, send `queries` with that provider and receive one ordered status/result row per query. Exact-provider calls never fall through to another index. Set `resultMode: measurement` to omit snippets and receive compact rank/domain rows plus optional `trackDomains` summaries; transient timeouts, 429s, and 5xx responses get at most three total attempts. Full results contain ranked title, URL, and snippet fields. The result URL and snippet are themselves usable: when the goal is to FIND or CONFIRM a page (a person's profile, a company site, an official link), the matching result URL IS the answer - report that URL and cite its snippet; you do NOT need to read the page first. Call `urlReader` only when you need content from inside a page body (prices, dates, statistics, article text) - read the 1-3 most relevant URLs ALL IN THE SAME RESPONSE so they execute in parallel (do not wait for one to finish before calling the next). Some pages (social-network profiles like LinkedIn, and other login-gated sites) cannot be read without a signed-in session; for those, give the user the result URL plus its snippet rather than reporting that nothing was found. When the results contain specific numbers (prices, dates, statistics), use the EXACT values from the results - never substitute your own knowledge. Always cite the URLs you used.",
   inputSchema: webSearchInputSchema,
   isConcurrencySafe: true,
   isReadOnly: true,
@@ -151,13 +225,65 @@ export const webSearchTool = buildTool({
       }
 
       const queries = input.queries ?? [input.query!]
+      const measurement = input.resultMode === 'measurement'
+      const trackedDomains = [...new Set((input.trackDomains ?? []).map(normalizeDomain).filter((domain): domain is string => Boolean(domain)))]
       const strictStack = createSearchStack([selected])
       const searches = await mapPool(queries, PANEL_CONCURRENCY, async (query) => {
-        const { value: outcome, timedOut, cancelled } = await withSearchDeadline(
-          context.abortSignal,
-          (signal) => strictStack(query, maxResults, signal),
-        )
+        let final: {
+          value: Awaited<ReturnType<typeof strictStack>>
+          timedOut: boolean
+          cancelled: boolean
+        } | undefined
+        for (let attempt = 0; ; attempt++) {
+          final = await withSearchDeadline(
+            context.abortSignal,
+            (signal) => strictStack(query, maxResults, signal),
+          )
+          const failure = final.value.failures.at(-1)
+          const retryable =
+            final.timedOut ||
+            failure?.kind === 'rate_limit' ||
+            failure?.kind === 'server' ||
+            failure?.status === 408 ||
+            (failure?.status !== undefined && failure.status >= 500)
+          if (
+            final.cancelled ||
+            context.abortSignal.aborted ||
+            final.value.results.length > 0 ||
+            final.value.trustedEmpty ||
+            !retryable ||
+            attempt + 1 >= MAX_SEARCH_ATTEMPTS
+          ) break
+          const fallbackMs = 250 * 2 ** attempt
+          if (!await waitForRetry(failure?.retryAfterMs ?? fallbackMs, context.abortSignal)) {
+            final = { ...final, timedOut: false, cancelled: true }
+            break
+          }
+        }
+        const { value: outcome, timedOut, cancelled } = final!
         if (outcome.results.length > 0) {
+          if (measurement) {
+            const results = outcome.results.map((result, index) => ({
+              rank: index + 1,
+              title: result.title,
+              url: result.url,
+              domain: domainFromUrl(result.url),
+            }))
+            return {
+              query,
+              status: 'ok' as const,
+              provider: exactProvider,
+              results,
+              trackedDomains: trackedDomains.map((domain) => {
+                const matches = results.filter((result) => result.domain === domain)
+                return {
+                  domain,
+                  bestRank: matches[0]?.rank ?? null,
+                  matchingUrls: matches.map((result) => result.url),
+                }
+              }),
+            }
+          }
           return {
             query,
             status: 'ok' as const,
@@ -171,6 +297,15 @@ export const webSearchTool = buildTool({
             status: 'empty' as const,
             provider: exactProvider,
             results: [],
+            ...(measurement
+              ? {
+                  trackedDomains: trackedDomains.map((domain) => ({
+                    domain,
+                    bestRank: null,
+                    matchingUrls: [],
+                  })),
+                }
+              : {}),
           }
         }
         const error = cancelled
@@ -184,6 +319,15 @@ export const webSearchTool = buildTool({
           provider: exactProvider,
           error,
           results: [],
+          ...(measurement
+            ? {
+                trackedDomains: trackedDomains.map((domain) => ({
+                  domain,
+                  bestRank: null,
+                  matchingUrls: [],
+                })),
+              }
+            : {}),
         }
       })
 
@@ -208,13 +352,34 @@ export const webSearchTool = buildTool({
         ...(failureSummary ? { searchProviderErrors: failureSummary.slice(0, 500) } : {}),
       }
 
+      const topDomains = measurement
+        ? (() => {
+            const domains = new Map<string, { appearances: number; bestRank: number }>()
+            for (const search of searches) {
+              for (const result of search.results) {
+                if (!('domain' in result) || !result.domain) continue
+                const current = domains.get(result.domain)
+                domains.set(result.domain, {
+                  appearances: (current?.appearances ?? 0) + 1,
+                  bestRank: Math.min(current?.bestRank ?? Number.POSITIVE_INFINITY, result.rank),
+                })
+              }
+            }
+            return [...domains.entries()]
+              .map(([domain, metrics]) => ({ domain, ...metrics }))
+              .sort((a, b) => b.appearances - a.appearances || a.bestRank - b.bestRank || a.domain.localeCompare(b.domain))
+          })()
+        : undefined
+
       return {
         data: {
           provider: exactProvider,
+          ...(measurement ? { resultMode: 'measurement' as const } : {}),
           expectedQueries: queries.length,
           completed,
           failed,
           searches,
+          ...(topDomains ? { topDomains } : {}),
         },
         ...(failed === searches.length ? { isError: true } : {}),
         meta,

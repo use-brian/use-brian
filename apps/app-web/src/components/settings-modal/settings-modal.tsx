@@ -33,6 +33,7 @@ import { PrivacySection } from "./sections/privacy-section";
 import { BillingSection } from "./sections/billing-section";
 import { ModelsSection } from "./sections/models-section";
 import { DomainsSection } from "./sections/domains-section";
+import { ProjectsContextSection, TeamsContextSection } from "./sections/context-scopes-section";
 import {
   WorkspaceGeneralSection,
   WorkspaceMembersSection,
@@ -45,6 +46,8 @@ export type SettingsSection =
   | "notifications"
   | "ws-general"
   | "ws-members"
+  | "ws-teams"
+  | "ws-projects"
   | "ws-llm-key"
   | "ws-domains"
   | "ws-plan"
@@ -89,6 +92,8 @@ const ACCOUNT_SECTIONS: SettingsSection[] = [
 const WORKSPACE_SECTIONS: SettingsSection[] = [
   "ws-general",
   "ws-members",
+  "ws-teams",
+  "ws-projects",
   // Provider connections and model routing share the Models section.
   // Domains (custom-domains.md + platform-subdomains.md) — the workspace-level
   // manager for published-page hostnames. Open feature, so OSS keeps it too.
@@ -107,6 +112,8 @@ const WORKSPACE_SECTIONS: SettingsSection[] = [
 const OSS_WORKSPACE_SECTIONS: SettingsSection[] = [
   "ws-general",
   "ws-members",
+  "ws-teams",
+  "ws-projects",
   "ws-models",
   "ws-domains",
 ];
@@ -207,6 +214,8 @@ export function SettingsModal({ open, initialSection = "profile", onClose }: Pro
                   "ws-members": oss
                     ? t.chrome.settingsModal.upgrade.teammatesNav
                     : t.chrome.settingsModal.workspace.members,
+                  "ws-teams": t.contextScope.teamsTitle,
+                  "ws-projects": t.contextScope.projectsTitle,
                   "ws-llm-key": t.chrome.settingsModal.workspace.llmKey,
                   "ws-domains": t.chrome.settingsModal.workspace.domains,
                   "ws-plan": t.chrome.settingsModal.workspace.plan,
@@ -367,6 +376,10 @@ function SectionBody({
       // OSS is single-player: teammates are a hosted-cloud feature, so the
       // Members section pitches the upgrade instead of the live manager.
       return isOssEdition() ? <HostedUpgradeSection /> : <WorkspaceMembersSection />;
+    case "ws-teams":
+      return <TeamsContextSection />;
+    case "ws-projects":
+      return <ProjectsContextSection />;
     case "ws-llm-key":
       // Compatibility for old deep links: provider setup now lives in Models.
       return <ModelsSection />;

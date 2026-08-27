@@ -59,10 +59,10 @@ describe('[COMP:api/blueprint-records-store] blueprint records store', () => {
     expect(sql).toContain('INSERT INTO blueprint_records')
     expect(sql).toContain('ON CONFLICT (workspace_id, anchor_key) DO UPDATE')
     // Fresh fills wipe stale keys; partial saves keep them (the CASE arm).
-    expect(sql).toContain(`fields = CASE WHEN $10 THEN '{}'::jsonb ELSE blueprint_records.fields END`)
+    expect(sql).toContain(`fields = CASE WHEN $12 THEN '{}'::jsonb ELSE blueprint_records.fields END`)
     expect(sql).toContain(`status = 'incomplete'`)
     expect(params[4]).toBe(ROW.anchor_key)
-    expect(params[9]).toBe(true)
+    expect(params[11]).toBe(true)
     expect(rec.id).toBe('r-1')
     expect(rec.status).toBe('incomplete')
     expect(rec.createdAt).toBe('2026-07-07T00:00:00.000Z')
@@ -110,7 +110,7 @@ describe('[COMP:api/blueprint-records-store] blueprint records store', () => {
       resetFields: true,
     })
     const sql = mockQueryWithRLS.mock.calls[0][1] as string
-    expect(sql).toContain("field_citations = CASE WHEN $10 THEN '{}'::jsonb ELSE blueprint_records.field_citations END")
+    expect(sql).toContain("field_citations = CASE WHEN $12 THEN '{}'::jsonb ELSE blueprint_records.field_citations END")
   })
 
   it('finalize stamps status + missing and only overwrites page_id when provided', async () => {

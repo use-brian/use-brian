@@ -254,6 +254,9 @@ export type ProactiveCompactionParams = {
    */
   workspaceId?: string
   chatEpisodeIngestor?: ChatEpisodeIngestor
+  /** Immutable session scope copied to the compaction Episode. */
+  compartments?: string[]
+  projectIds?: string[]
   /**
    * False for conversation-only external guests. Compaction may still replace
    * old turns with a session summary, but it must not extract memories, emit
@@ -571,6 +574,8 @@ export async function runProactiveCompaction(
               compactedRows[0]!.id,
               compactedRows[compactedRows.length - 1]!.id,
             ],
+            compartments: params.compartments,
+            projectIds: params.projectIds,
             llm: {
               provider,
               model: compactionModel,

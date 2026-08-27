@@ -813,6 +813,19 @@ export function brainRoutes(deps: {
         status: [...TASK_RECORD_STATUSES],
         limit: 500,
       })
+      const requiredCompartments = [...new Set(rows.flatMap((task) => task.compartments ?? []))]
+      const teamRows = requiredCompartments.length > 0
+        ? await query<{ id: string; compartmentKey: string }>(
+            `SELECT id, compartment_key AS "compartmentKey"
+               FROM workspace_groups
+              WHERE workspace_id = $1 AND kind = 'team'
+                AND compartment_key = ANY($2::text[])`,
+            [workspaceId, requiredCompartments],
+          )
+        : { rows: [] }
+      const teamIdByCompartment = new Map(
+        teamRows.rows.map((team) => [team.compartmentKey, team.id]),
+      )
       res.status(200).json({
         tasks: rows.map((t) => ({
           id: t.id,
@@ -823,6 +836,10 @@ export function brainRoutes(deps: {
           tags: t.tags,
           parentId: t.parentId,
           attributes: t.attributes,
+          projectId: t.projectIds?.[0] ?? null,
+          contextTeamIds: (t.compartments ?? [])
+            .map((key) => teamIdByCompartment.get(key))
+            .filter((id): id is string => id !== undefined),
           updatedAt: t.updatedAt.toISOString(),
         })),
       })

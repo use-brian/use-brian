@@ -42,6 +42,20 @@ export type GoalBudget = {
   deadline?: string | null
 }
 
+/** Reusable workspace default copied onto a budget-less acting goal at
+ * kickoff. A deadline is intentionally absent: an absolute timestamp cannot
+ * be a durable workspace default without becoming stale. */
+export type GoalDefaultBudget = {
+  maxIterations: number
+  maxSpend: number
+}
+
+/** Safe fallback when a workspace has no persisted override. */
+export const BUILTIN_GOAL_DEFAULT_BUDGET: Readonly<GoalDefaultBudget> = {
+  maxIterations: 30,
+  maxSpend: 5,
+}
+
 export type GoalPolicy = {
   /** May the loop act through connectors, or only our own DB? */
   blastRadius?: 'internal' | 'external'
@@ -89,6 +103,9 @@ export type GoalRecord = {
   policy: GoalPolicy
   status: GoalStatus
   blockerReason: string | null
+  /** Stable Team/Project context inherited by every acting-loop successor. */
+  contextGroupId: string | null
+  contextProjectId: string | null
   /** The acting user — host write-back actor + escalation/delivery default
    *  (the goal speaks as the workspace primary to this user). */
   createdByUserId: string | null
@@ -123,6 +140,9 @@ export type GoalCreateParams = {
   /** Default 'active'. */
   status?: GoalStatus
   createdByUserId?: string | null
+  /** Context selected on the creating turn; immutable for the goal's loop. */
+  contextGroupId?: string | null
+  contextProjectId?: string | null
   /** Default `true` (an explicitly-created goal is confirmed). The auto-draft
    *  hook passes `false` to mint a draft (`confirmed_at` NULL) — see
    *  `task-goal-autopilot.md` §4. */

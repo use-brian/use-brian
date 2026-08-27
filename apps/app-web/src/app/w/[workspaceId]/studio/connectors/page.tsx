@@ -99,6 +99,7 @@ import {
   type CurrentConnectorAuth,
 } from "@/lib/connector-auth-form";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { ConnectorContextBinding } from "@/components/context/connector-context-binding";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 const GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID ?? "";
@@ -2324,6 +2325,12 @@ function ConnectorsList() {
     const wsOwned = cfg.path.startsWith("instances/");
     return (
       <>
+    {sel.connectorInstanceId && (
+      <ConnectorContextBinding
+        workspaceId={workspaceId}
+        instanceId={sel.connectorInstanceId}
+      />
+    )}
     {/* Settings tab — custom connector or built-in config */}
     {sel.custom && wsOwned && (
       <p className="text-[11px] text-muted-foreground">{tc.wsOwnedEditorUnavailable}</p>
@@ -4037,7 +4044,7 @@ function ConnectorsList() {
                       connector, not whether it can be configured. Reads and
                       writes route through `configTarget`, which sends a
                       workspace-owned row to the instance-scoped config pair. */}
-                  {(sel.custom || CONFIGURABLE_CONNECTORS.has(sel.id)) && (
+                  {sel.connectorInstanceId && (
                     <div className="space-y-2">
                       <button
                         type="button"
@@ -5417,7 +5424,7 @@ function ConnectorsList() {
                       >
                         {tc.tabTools}
                       </button>
-                      {(sel.custom || CONFIGURABLE_CONNECTORS.has(sel.id)) && (
+                      {sel.connectorInstanceId && (
                         <button
                           onClick={() => {
                             setExpandTab("settings");

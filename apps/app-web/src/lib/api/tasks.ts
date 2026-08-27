@@ -53,6 +53,10 @@ export type TaskRow = {
   parentId: string | null;
   /** Free-form JSONB; the conventional `priority` key lives here. */
   attributes: Record<string, unknown>;
+  /** Stable Project registry id; a Task belongs to at most one Project. */
+  projectId?: string | null;
+  /** Stable Team ids used only to preserve Team classification on Project edits. */
+  contextTeamIds?: string[];
   /** ISO timestamp. */
   updatedAt: string;
 };

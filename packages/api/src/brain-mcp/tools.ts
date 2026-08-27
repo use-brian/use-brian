@@ -57,6 +57,7 @@ import { z } from 'zod'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import {
   SensitivityAccumulator,
+  ContextScopeAccumulator,
   extractEffectContract,
   formatToolError,
   validateLocalRecording,
@@ -91,7 +92,7 @@ import type {
   ToolContext,
   Embedder,
 } from '@use-brian/core'
-import { query, runWithAgentClearance } from '../db/client.js'
+import { query, runWithAgentAccess } from '../db/client.js'
 import { searchRecording as searchRecordingFn, readRecordingRange, type RecordingSegmentHit } from '../db/retrieval-store.js'
 import { searchFileSegments as searchFileSegmentsFn, readFileSegmentRange, type FileSegmentHit } from '../db/retrieval-store.js'
 import type { BrainKeyScope } from '../db/brain-keys-store.js'
@@ -99,6 +100,10 @@ import type { PageTemplateStore } from '../db/page-templates-store.js'
 import { toEpisodeSensitivity } from '../episode-sensitivity.js'
 import type { BrainEpisodeIngestor } from '../ingest-port.js'
 import { BRAIN_WRITE_TOOL_SIGNALS, notifyBrainChange } from '../brain-stream/notify.js'
+import {
+  ContextNotAvailableError,
+  resolveTurnScopeSystem,
+} from '../context-scope/resolve-turn-scope.js'
 
 /**
  * Best-effort row id extraction from a chat-tool result. Most write tools
@@ -1093,7 +1098,11 @@ function buildDocPageTools(
       const ctx = await resolveCtx()
       if ('error' in ctx) return text(ctx.error, true)
       // resolveCtx caches, so the handler's own resolveCtx() re-read is free.
-      return runWithAgentClearance(ctx.clearance, () => tool.handler(args))
+      return runWithAgentAccess({
+        clearance: ctx.clearance,
+        compartments: ctx.compartments,
+        projectIds: ctx.projectIds,
+      }, () => tool.handler(args))
     },
   })
 
@@ -1371,6 +1380,8 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
             // key's max_clearance), collapsed into the 4-value Episode tier
             // vocabulary (confidential → private).
             sensitivity: toEpisodeSensitivity(ctx.clearance ?? BRAIN_KEY_CLEARANCE),
+            compartments: ctx.assistantDefaultCompartments ?? [],
+            projectIds: ctx.assistantDefaultProjectIds ?? [],
           })
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
@@ -1968,8 +1979,59 @@ export function makeBrainContextResolver(
     }
     const clearance = effectiveBrainClearance(target.clearance, maxClearance)
     const activeCapabilities = await loadActiveCapabilities(target.assistantId)
+    const binding = await query<{
+      contextGroupId: string | null
+      contextProjectId: string | null
+      createdAt: Date
+    }>(
+      `SELECT context_group_id AS "contextGroupId",
+              context_project_id AS "contextProjectId",
+              created_at AS "createdAt"
+         FROM brain_keys
+        WHERE id = $1 AND workspace_id = $2`,
+      [keyId, workspaceId],
+    )
+    let turnScope
+    try {
+      turnScope = await resolveTurnScopeSystem({
+        userId: target.ownerUserId,
+        workspaceId,
+        assistant: {
+          id: target.assistantId,
+          workspaceId,
+          kind: target.kind,
+          clearance,
+          compartments: target.compartments,
+          defaultCompartments: target.defaultCompartments,
+          teamScopeMode: target.teamScopeMode,
+          defaultWorkspaceGroupId: target.defaultWorkspaceGroupId,
+          projectScopeMode: target.projectScopeMode,
+          defaultProjectId: target.defaultProjectId,
+        },
+        // Presence preserves legacy NULL-bound keys as company-wide even if an
+        // assistant receives a default later.
+        key: binding.rows[0]
+          ? { ...binding.rows[0], contextLockedAt: binding.rows[0].createdAt }
+          : { contextGroupId: null, contextProjectId: null },
+      })
+    } catch (err) {
+      if (!(err instanceof ContextNotAvailableError)) throw err
+      cached = {
+        error: JSON.stringify({
+          error: err.code,
+          message: err.message,
+          axis: err.axis,
+          reason: err.reason,
+        }),
+      }
+      return cached
+    }
     const sensitivity = new SensitivityAccumulator()
     sensitivity.note(clearance)
+    const scopeAccumulator = new ContextScopeAccumulator({
+      compartments: turnScope.writeCompartments,
+      projectIds: turnScope.writeProjectIds,
+    })
     cached = {
       userId: target.ownerUserId,
       assistantId: target.assistantId,
@@ -1982,10 +2044,16 @@ export function makeBrainContextResolver(
       activeCapabilities,
       clearance,
       assistantClearance: clearance,
-      compartments: target.compartments,
-      assistantCompartments: target.compartments,
-      assistantDefaultCompartments: target.defaultCompartments,
+      compartments: turnScope.effectiveCompartments,
+      projectIds: turnScope.effectiveProjectIds,
+      activeGroupId: turnScope.activeGroupId,
+      activeProjectId: turnScope.activeProjectId,
+      assistantCompartments: turnScope.effectiveCompartments,
+      assistantDefaultCompartments: turnScope.writeCompartments,
+      assistantProjectIds: turnScope.effectiveProjectIds,
+      assistantDefaultProjectIds: turnScope.writeProjectIds,
       sensitivity,
+      scopeAccumulator,
       abortSignal: new AbortController().signal,
     }
     return cached
@@ -2050,6 +2118,7 @@ export function bridgeCoreTool(
         // the external agent sees the compact, actionable rendering.
         return text(formatToolError(err), true)
       }
+      ctx.scopeAccumulator?.note(result.scopeEvidence)
       const body =
         typeof result.data === 'string' ? result.data : JSON.stringify(result.data, null, 2)
       if (notifySignal && !result.isError) {
@@ -2139,6 +2208,10 @@ export type BrainWriteTarget = {
   /** MLS compartment grant. NULL = universe. */
   compartments: string[] | null
   defaultCompartments: string[]
+  teamScopeMode: 'legacy' | 'all' | 'assigned'
+  defaultWorkspaceGroupId: string | null
+  projectScopeMode: 'all' | 'assigned'
+  defaultProjectId: string | null
 }
 
 /**
@@ -2164,16 +2237,26 @@ export async function resolveWriteTarget(workspaceId: string): Promise<BrainWrit
     kind: string | null
     compartments: string[] | null
     defaultCompartments: string[] | null
+    teamScopeMode: 'legacy' | 'all' | 'assigned'
+    defaultWorkspaceGroupId: string | null
+    projectScopeMode: 'all' | 'assigned'
+    defaultProjectId: string | null
   }>(
     `SELECT w.owner_user_id AS "ownerUserId",
             a.id            AS "assistantId",
             a.clearance     AS "clearance",
             a.kind          AS "kind",
             a.compartments  AS "compartments",
-            a.default_compartments AS "defaultCompartments"
+            a.default_compartments AS "defaultCompartments",
+            a.team_scope_mode AS "teamScopeMode",
+            a.default_workspace_group_id AS "defaultWorkspaceGroupId",
+            a.project_scope_mode AS "projectScopeMode",
+            a.default_project_id AS "defaultProjectId"
      FROM workspaces w
      JOIN LATERAL (
-       SELECT id, clearance, kind, compartments, default_compartments
+       SELECT id, clearance, kind, compartments, default_compartments,
+              team_scope_mode, default_workspace_group_id,
+              project_scope_mode, default_project_id
        FROM assistants
        WHERE workspace_id = w.id
        ORDER BY (kind = 'primary') DESC, created_at ASC
@@ -2193,6 +2276,10 @@ export async function resolveWriteTarget(workspaceId: string): Promise<BrainWrit
     kind: row.kind === 'primary' || row.kind === 'app' ? row.kind : 'standard',
     compartments: row.compartments ?? null,
     defaultCompartments: row.defaultCompartments ?? [],
+    teamScopeMode: row.teamScopeMode,
+    defaultWorkspaceGroupId: row.defaultWorkspaceGroupId,
+    projectScopeMode: row.projectScopeMode,
+    defaultProjectId: row.defaultProjectId,
   }
 }
 

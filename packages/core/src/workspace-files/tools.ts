@@ -23,6 +23,7 @@ import {
 import type { CachedFile } from '../files/types.js'
 import { promoteCachedFile } from './promote.js'
 import type { AccessContext } from '../security/access-context.js'
+import { scopeEvidenceFromRows } from '../security/context-scope.js'
 import { createSendFileTool } from './send-file.js'
 import { createRenderPdfTool, type RenderPdfDocPageReader } from './render-pdf.js'
 import type { PdfRenderer } from '../doc/convert/to-pdf.js'
@@ -292,6 +293,8 @@ export function createFileTools(
         sourceId: file.id,
         source: 'user',
         links: input.links,
+        compartments: file.compartments,
+        projectIds: file.projectIds,
       })
       return {
         data: `Saved ${file.path} (${file.sizeBytes} bytes, ${file.mime}). id=${file.id}${formatLinksSummary(linksSummary)}`,
@@ -325,7 +328,10 @@ export function createFileTools(
         { type: 'file_appended', fileId: file.id, path: file.path, sizeBytes: file.sizeBytes },
         eventCtx(context),
       )
-      return { data: `Appended to ${file.path} (now ${file.sizeBytes} bytes). id=${file.id}` }
+      return {
+        data: `Appended to ${file.path} (now ${file.sizeBytes} bytes). id=${file.id}`,
+        scopeEvidence: scopeEvidenceFromRows([file]),
+      }
     },
   })
 
@@ -364,6 +370,7 @@ export function createFileTools(
             'The file itself can still be delivered: send it to the user in this conversation, or attach it to an email, using its path. ' +
             'Its title, summary, and tags are in the workspace files index if you need to describe it.',
           isError: true,
+          scopeEvidence: scopeEvidenceFromRows([result.value.file]),
         }
       }
       return {
@@ -371,6 +378,7 @@ export function createFileTools(
           file: fullFile(result.value.file),
           content: result.value.content,
         },
+        scopeEvidence: scopeEvidenceFromRows([result.value.file]),
       }
     },
   })
@@ -407,7 +415,7 @@ export function createFileTools(
         { type: 'file_searched', resultCount: rows.length, query: input.query },
         eventCtx(context),
       )
-      return { data: rows.map(compactFile) }
+      return { data: rows.map(compactFile), scopeEvidence: scopeEvidenceFromRows(rows) }
     },
   })
 
@@ -457,6 +465,7 @@ export function createFileTools(
       // updates still need to anchor to the file row).
       let fileId: string
       let filePath: string
+      let scopedFile: WorkspaceFile
       if (hasFieldChange) {
         const result = await api.setMeta(ctxFor(context), input.file, patch)
         if (!result.ok) {
@@ -465,6 +474,7 @@ export function createFileTools(
         const file = result.value
         fileId = file.id
         filePath = file.path
+        scopedFile = file
         opts?.onEvent?.(
           { type: 'file_meta_updated', fileId: file.id, path: file.path, fields },
           eventCtx(context),
@@ -479,6 +489,7 @@ export function createFileTools(
         }
         fileId = result.value.id
         filePath = result.value.path
+        scopedFile = result.value
       }
       const linksSummary = await applyExplicitLinks({
         entityLinks: opts?.entityLinks,
@@ -489,6 +500,8 @@ export function createFileTools(
         sourceId: fileId,
         source: 'user',
         links: input.links,
+        compartments: scopedFile.compartments,
+        projectIds: scopedFile.projectIds,
       })
       const closesSummary = await applyExplicitCloses({
         entityLinks: opts?.entityLinks,
@@ -498,7 +511,10 @@ export function createFileTools(
         closes: input.closeLinks,
       })
       const fieldsPart = hasFieldChange ? `Updated ${fields.join(', ')} on ${filePath}.` : `Linked ${filePath}.`
-      return { data: `${fieldsPart}${formatLinksSummary(linksSummary)}${formatClosesSummary(closesSummary)}` }
+      return {
+        data: `${fieldsPart}${formatLinksSummary(linksSummary)}${formatClosesSummary(closesSummary)}`,
+        scopeEvidence: scopeEvidenceFromRows([scopedFile]),
+      }
     },
   })
 
@@ -587,6 +603,7 @@ export function createFileTools(
         assistantKind: context.assistantKind ?? 'standard',
         clearance: context.clearance,
         compartments: context.compartments,
+        projectIds: context.projectIds,
       })
       if (!cached) {
         return {
@@ -594,6 +611,9 @@ export function createFileTools(
           isError: true,
         }
       }
+
+      const cachedEvidence = scopeEvidenceFromRows([cached])
+      context.scopeAccumulator?.note(cachedEvidence)
 
       const result = await promoteCachedFile(api, ctxFor(context), cached, {
         path: input.path,
@@ -612,6 +632,7 @@ export function createFileTools(
       )
       return {
         data: `Saved "${cached.fileName}" to the workspace brain at ${file.path} (${file.sizeBytes} bytes, ${file.mime}). id=${file.id}. The original file is preserved and searchable.`,
+        scopeEvidence: scopeEvidenceFromRows([cached, file]),
       }
     },
   })
@@ -695,6 +716,8 @@ export function createFileTools(
         sourceId: file.id,
         source: 'user',
         links: input.links,
+        compartments: file.compartments,
+        projectIds: file.projectIds,
       })
       return {
         data: `Saved ${file.path} (${file.sizeBytes} bytes, ${file.mime}). id=${file.id}${formatLinksSummary(linksSummary)}`,

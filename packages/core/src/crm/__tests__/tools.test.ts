@@ -382,40 +382,8 @@ describe('[COMP:tools/crm-contacts] saveContact / getContact / listContacts / up
     expect(store.data.contacts).toHaveLength(1)
   })
 
-  // ── Tier B: dedupe-merge visibility (write-gating-decision-brief.md §3) ──
-  // A fresh insert always mints a new id; a dedupe-merge returns an
-  // EXISTING id. The tool snapshots the pre-existing exact-identity ids
-  // before the save and, when the saved id is one of them, surfaces
-  // "Merged into existing" in the result — so a merge is visible in-turn
-  // without a confirmation gate.
-  //
-  // makeFakeStore always inserts, which can never exercise the merge
-  // branch — this variant's createContact dedupe-merges like the real
-  // store (email first, else case-insensitive name): a match UPDATES the
-  // existing row and returns it, so the saved id lands in the tool's
-  // pre-save snapshot.
-  function makeMergeAwareStore(): ReturnType<typeof makeFakeStore> {
-    const store = makeFakeStore()
-    const plainCreate = store.createContact.bind(store)
-    store.createContact = async (params) => {
-      const email = params.email?.toLowerCase()
-      const name = params.name.toLowerCase()
-      const existing =
-        (email ? store.data.contacts.find((c) => c.email?.toLowerCase() === email) : undefined) ??
-        store.data.contacts.find((c) => c.name.toLowerCase() === name)
-      if (existing) {
-        existing.name = params.name
-        if (params.email) existing.email = params.email
-        if (params.phone) existing.phone = params.phone
-        existing.updatedAt = new Date()
-        return { ...existing }
-      }
-      return plainCreate(params)
-    }
-    return store
-  }
   it('saveContact says "Created" on a fresh insert (no pre-existing match)', async () => {
-    const store = makeMergeAwareStore()
+    const store = makeFakeStore()
     const tools = createCrmTools(store)
     const res = await tools.saveContact.execute({ name: 'Sam Lee', email: 'sam@acme.example' }, ctx)
     expect(res.isError).toBeFalsy()
@@ -423,28 +391,28 @@ describe('[COMP:tools/crm-contacts] saveContact / getContact / listContacts / up
     expect(res.data as string).not.toContain('Merged into existing')
   })
 
-  it('saveContact says "Merged into existing" when the store dedupe-merges by email', async () => {
-    const store = makeMergeAwareStore()
+  it('saveContact keeps weak email matches as distinct people', async () => {
+    const store = makeFakeStore()
     const tools = createCrmTools(store)
     // First save inserts.
     await tools.saveContact.execute({ name: 'Sam Lee', email: 'sam@acme.example' }, ctx)
-    // Second save with the same email hits the merge branch.
     const res = await tools.saveContact.execute(
       { name: 'Samuel Lee', email: 'sam@acme.example' },
       ctx,
     )
     expect(res.isError).toBeFalsy()
-    expect(res.data as string).toContain('Merged into existing contact')
-    expect(store.data.contacts).toHaveLength(1) // no duplicate row
+    expect(res.data as string).toContain('Created contact')
+    expect(store.data.contacts).toHaveLength(2)
   })
 
-  it('saveContact says "Merged into existing" when the store dedupe-merges by name', async () => {
-    const store = makeMergeAwareStore()
+  it('saveContact keeps weak name matches as distinct people', async () => {
+    const store = makeFakeStore()
     const tools = createCrmTools(store)
     await tools.saveContact.execute({ name: 'Sam Lee' }, ctx)
     const res = await tools.saveContact.execute({ name: 'sam lee', phone: '+852 1' }, ctx)
     expect(res.isError).toBeFalsy()
-    expect(res.data as string).toContain('Merged into existing contact')
+    expect(res.data as string).toContain('Created contact')
+    expect(store.data.contacts).toHaveLength(2)
   })
 
   it('getContact returns full record', async () => {

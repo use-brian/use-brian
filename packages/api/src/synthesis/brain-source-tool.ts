@@ -19,7 +19,7 @@
 // → "The three fill modes" (Generate) + "searchRecording as an in-process tool".
 
 import { z } from 'zod'
-import { buildTool, type RetrievalActor, type Tool } from '@use-brian/core'
+import { buildTool, scopeEvidenceFromRows, type RetrievalActor, type Tool } from '@use-brian/core'
 import { search as searchBrain, type RetrievalStoreDeps } from '../db/retrieval-store.js'
 
 export type CreateBrainSourceToolDeps = {
@@ -81,7 +81,7 @@ export function createBrainSourceTool(deps: CreateBrainSourceToolDeps): Tool {
           { query: input.query, scope: input.scope, limit: input.limit },
           storeDeps,
         )
-        return { data: result }
+        return { data: result, scopeEvidence: scopeEvidenceFromRows(result.data) }
       } catch (err) {
         return {
           data: `searchSource failed: ${err instanceof Error ? err.message : String(err)}`,

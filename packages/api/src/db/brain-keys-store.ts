@@ -47,6 +47,8 @@ export type BrainKeyRow = {
    * docs/architecture/integrations/agent-capability-surface.md §12.1).
    */
   maxClearance: Sensitivity | null
+  contextGroupId: string | null
+  contextProjectId: string | null
   createdBy: string | null
   createdAt: Date
   lastUsedAt: Date | null
@@ -114,6 +116,9 @@ export type BrainKeyStore = {
     actingUserId: string
     /** Omitted / null = the workspace primary assistant's clearance governs. */
     maxClearance?: Sensitivity | null
+    /** Optional immutable Team/Project binding for every turn using this key. */
+    contextGroupId?: string | null
+    contextProjectId?: string | null
   }): Promise<CreatedBrainKey>
 
   /** List keys for a workspace. RLS-gated (owner/admin). Plaintext never returned. */
@@ -152,6 +157,8 @@ const COLS_PUBLIC = `
   scope,
   status,
   max_clearance as "maxClearance",
+  context_group_id AS "contextGroupId",
+  context_project_id AS "contextProjectId",
   created_by   as "createdBy",
   created_at   as "createdAt",
   last_used_at as "lastUsedAt"
@@ -167,8 +174,10 @@ export function createDbBrainKeyStore(): BrainKeyStore {
 
       const result = await queryWithRLS<BrainKeyRowWithHash>(
         params.actingUserId,
-        `INSERT INTO brain_keys (id, workspace_id, name, key_hash, key_prefix, scope, max_clearance, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        `INSERT INTO brain_keys
+           (id, workspace_id, name, key_hash, key_prefix, scope,
+            max_clearance, created_by, context_group_id, context_project_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          RETURNING ${COLS_PUBLIC}, key_hash as "keyHash"`,
         [
           id,
@@ -179,6 +188,8 @@ export function createDbBrainKeyStore(): BrainKeyStore {
           params.scope,
           params.maxClearance ?? null,
           params.actingUserId,
+          params.contextGroupId ?? null,
+          params.contextProjectId ?? null,
         ],
       )
       if (result.rows.length === 0) {

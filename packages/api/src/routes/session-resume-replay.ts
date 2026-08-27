@@ -30,6 +30,7 @@ import {
   calculateCost,
   ensureToolResultPairing,
   SensitivityAccumulator,
+  ContextScopeAccumulator,
   type LLMProvider,
   type Tool,
   type ToolContext,
@@ -47,6 +48,12 @@ import {
 import { findAssistantById } from '../db/users.js'
 import type { SessionResumeReplay, ResumeReplayParams } from './chat.js'
 import { MODEL_MAP, chatTierBudget, tierForModel } from '../model-resolution.js'
+import {
+  formatActiveWorkspaceContext,
+  resolveTurnScopeSystem,
+  type ResolvedTurnScope,
+} from '../context-scope/resolve-turn-scope.js'
+import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
 
 export type SessionResumeReplayDeps = {
   provider: LLMProvider
@@ -108,8 +115,17 @@ export function resolveDurableResumePolicy(
 }
 
 /** Build the `ToolContext` shared by the suspended-tool run and the queryLoop turn. */
-function buildContext(session: Session, assistant: AssistantRow): ToolContext {
-  return {
+async function buildContext(
+  session: Session,
+  assistant: AssistantRow,
+): Promise<{ context: ToolContext; turnScope: ResolvedTurnScope }> {
+  const turnScope = await resolveTurnScopeSystem({
+    userId: session.userId,
+    assistant,
+    workspaceId: assistant.workspaceId,
+    session,
+  })
+  return { turnScope, context: {
     userId: session.userId,
     assistantId: assistant.id,
     sessionId: session.id,
@@ -118,10 +134,23 @@ function buildContext(session: Session, assistant: AssistantRow): ToolContext {
     channelId: session.channelId,
     workspaceId: assistant.workspaceId ?? undefined,
     assistantKind: assistant.kind,
-    clearance: assistant.clearance,
+    clearance: turnScope.access.clearance,
+    compartments: turnScope.effectiveCompartments,
+    projectIds: turnScope.effectiveProjectIds,
+    activeGroupId: turnScope.activeGroupId,
+    activeProjectId: turnScope.activeProjectId,
+    assistantClearance: assistant.clearance,
+    assistantCompartments: turnScope.effectiveCompartments,
+    assistantDefaultCompartments: turnScope.writeCompartments,
+    assistantProjectIds: turnScope.effectiveProjectIds,
+    assistantDefaultProjectIds: turnScope.writeProjectIds,
     sensitivity: new SensitivityAccumulator(),
+    scopeAccumulator: new ContextScopeAccumulator({
+      compartments: turnScope.writeCompartments,
+      projectIds: turnScope.writeProjectIds,
+    }),
     abortSignal: new AbortController().signal,
-  }
+  } }
 }
 
 /**
@@ -258,7 +287,7 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
     const assistant = await findAssistantById(session.assistantId)
     if (!assistant) return 'completed'
 
-    const context = buildContext(session, assistant)
+    const { context, turnScope } = await buildContext(session, assistant)
     const policy = resolveDurableResumePolicy(params, model)
     const customLlm = assistant.workspaceId && params.selectedCustomModel && deps.resolveWorkspaceCustomLlm && !params.selectedLegacyByo
       ? await deps.resolveWorkspaceCustomLlm({
@@ -341,7 +370,12 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
     }
 
     // ── 1. Resolve the outcome note (runs the approved tool) ──
-    const outcomeNote = await resolveResumeOutcomeNote(deps.tools, params, context)
+    const scopedTools = bindToolsToAgentAccess(deps.tools, {
+      clearance: turnScope.access.clearance,
+      compartments: turnScope.effectiveCompartments,
+      projectIds: turnScope.effectiveProjectIds,
+    })
+    const outcomeNote = await resolveResumeOutcomeNote(scopedTools, params, context)
 
     // ── 2. Rebuild the conversation, append the outcome note ──
     const dbMessages = await getSessionMessages(sessionId)
@@ -360,9 +394,13 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
     })
 
     // ── 3. Drive the continuation turn ──
-    const systemPrompt = assistant.systemPrompt
+    const baseSystemPrompt = assistant.systemPrompt
       ? `${deps.systemPrompt}\n\n${assistant.systemPrompt}`
       : deps.systemPrompt
+    const activeWorkspaceContext = formatActiveWorkspaceContext(turnScope)
+    const systemPrompt = activeWorkspaceContext
+      ? `${baseSystemPrompt}\n\n${activeWorkspaceContext}`
+      : baseSystemPrompt
 
     for await (const event of queryLoop({
       provider: continuationProvider,
@@ -371,7 +409,7 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
       inputTokenLimit: customLlm?.inputTokenLimit,
       systemPrompt,
       messages,
-      tools: deps.tools,
+      tools: scopedTools,
       // Inject the rehydrated workerManager so Phase 4b sees the
       // pre-populated notifications + any respawned running workers.
       // Absent when worker persistence isn't wired (legacy path).

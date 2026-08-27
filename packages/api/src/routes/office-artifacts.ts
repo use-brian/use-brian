@@ -61,7 +61,17 @@ export function officeArtifactRoutes(deps: OfficeArtifactsRouteDeps): Router {
     const body = CreateSchema.safeParse(req.body)
     if (!body.success) return void res.status(400).json({ error: 'Invalid Office creation request', issues: body.error.issues })
     try {
-      const created = await deps.service.create({ userId, ...body.data })
+      // Direct human creation starts in Workspace General. Assistant-driven
+      // creation uses the trusted turn resolver through the Office tool.
+      const created = await deps.service.create({
+        userId,
+        ...body.data,
+        sensitivity: 'internal',
+        compartments: [],
+        projectIds: [],
+        compartmentGrant: [],
+        projectGrant: null,
+      })
       res.status(202).json(created)
     } catch (cause) {
       if (cause instanceof OfficeGenerationUnavailableError) return void res.status(503).json({ error: cause.code })

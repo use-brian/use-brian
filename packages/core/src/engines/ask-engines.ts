@@ -49,8 +49,10 @@ export const UPSTREAM_TIMEOUT_MS = 45_000
 /** Max questions per batch and samples per question — bounds one call's upstream fan-out. */
 export const MAX_BATCH_QUESTIONS = 25
 export const MAX_SAMPLES = 3
-/** Concurrent upstream calls within one batch (politeness + latency balance). */
-const BATCH_CONCURRENCY = 4
+/** Default concurrent upstream calls within one provider (politeness + latency balance). */
+const DEFAULT_ENGINE_CONCURRENCY = 4
+const MAX_UPSTREAM_ATTEMPTS = 3
+const MAX_RETRY_DELAY_MS = 5_000
 
 export type EnginesEnv = Partial<
   Record<
@@ -216,29 +218,101 @@ async function mapPool<T, R>(items: T[], limit: number, fn: (item: T) => Promise
   return results
 }
 
+type EnginePolicy = {
+  concurrency: number
+  maxAttempts: number
+  retryBaseDelayMs: number
+  maxRetryDelayMs: number
+}
+
+const DEFAULT_ENGINE_POLICY: EnginePolicy = {
+  concurrency: DEFAULT_ENGINE_CONCURRENCY,
+  maxAttempts: MAX_UPSTREAM_ATTEMPTS,
+  retryBaseDelayMs: 250,
+  maxRetryDelayMs: MAX_RETRY_DELAY_MS,
+}
+
+const ENGINE_POLICIES: Record<EngineId, EnginePolicy> = {
+  openai: DEFAULT_ENGINE_POLICY,
+  gemini: DEFAULT_ENGINE_POLICY,
+  // Perplexity applies a comparatively tight account-level request limit.
+  // This process-wide permit is shared across independent panels, so two
+  // workflow branches cannot each believe they are the only serial caller.
+  perplexity: { ...DEFAULT_ENGINE_POLICY, concurrency: 1 },
+  claude: DEFAULT_ENGINE_POLICY,
+}
+
+type PermitState = { active: number; waiters: Array<() => void> }
+const ENGINE_PERMITS = new Map<EngineId, PermitState>()
+
+async function withEnginePermit<T>(engine: EngineId, concurrency: number, run: () => Promise<T>): Promise<T> {
+  const state = ENGINE_PERMITS.get(engine) ?? { active: 0, waiters: [] }
+  ENGINE_PERMITS.set(engine, state)
+  if (state.active < concurrency) {
+    state.active += 1
+  } else {
+    await new Promise<void>((resolve) => state.waiters.push(resolve))
+  }
+  try {
+    return await run()
+  } finally {
+    const next = state.waiters.shift()
+    if (next) next()
+    else state.active -= 1
+  }
+}
+
+function retryAfterMs(value: string | null | undefined, maxMs: number): number | undefined {
+  if (!value) return undefined
+  const seconds = Number(value)
+  if (Number.isFinite(seconds)) return Math.min(Math.max(seconds * 1_000, 0), maxMs)
+  const at = Date.parse(value)
+  if (!Number.isFinite(at)) return undefined
+  return Math.min(Math.max(at - Date.now(), 0), maxMs)
+}
+
+function isTimeoutError(error: unknown): boolean {
+  const name = (error as { name?: unknown } | null)?.name
+  const message = error instanceof Error ? error.message : String(error)
+  return name === 'AbortError' || name === 'TimeoutError' || /timed? ?out/i.test(message)
+}
+
+function waitForRetry(ms: number, maxMs: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, Math.min(Math.max(ms, 0), maxMs)))
+}
+
 async function postJson(
   fetchImpl: typeof fetch,
   url: string,
   headers: Record<string, string>,
   body: unknown,
-  options: { retry429Once?: boolean } = {},
+  policy: EnginePolicy,
 ): Promise<unknown> {
-  const maxAttempts = options.retry429Once ? 2 : 1
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const res = await fetchImpl(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...headers },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
-    })
+  for (let attempt = 0; attempt < policy.maxAttempts; attempt++) {
+    let res: Response
+    try {
+      res = await fetchImpl(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...headers },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+      })
+    } catch (error) {
+      if (isTimeoutError(error) && attempt + 1 < policy.maxAttempts) {
+        await waitForRetry(policy.retryBaseDelayMs * 2 ** attempt, policy.maxRetryDelayMs)
+        continue
+      }
+      throw error
+    }
     const raw = await res.text()
     if (!res.ok) {
-      if (res.status === 429 && attempt + 1 < maxAttempts) {
-        const retryAfter = Number(res.headers?.get?.('retry-after'))
-        const delayMs = Number.isFinite(retryAfter)
-          ? Math.min(Math.max(retryAfter * 1_000, 0), 5_000)
-          : 250
-        await new Promise((resolve) => setTimeout(resolve, delayMs))
+      const transient = res.status === 429 || res.status >= 500
+      if (transient && attempt + 1 < policy.maxAttempts) {
+        await waitForRetry(
+          retryAfterMs(res.headers?.get?.('retry-after'), policy.maxRetryDelayMs) ??
+            policy.retryBaseDelayMs * 2 ** attempt,
+          policy.maxRetryDelayMs,
+        )
         continue
       }
       // Upstream error text stays server-side; the result carries a coded
@@ -252,14 +326,15 @@ async function postJson(
       throw new Error('upstream_error status=unparseable')
     }
   }
-  throw new Error('upstream_error status=429')
+  throw new Error('upstream_error status=retry_exhausted')
 }
 
-type CallOpts = { country?: string }
+type CallOpts = { country?: string; policy: EnginePolicy }
 type AskerSpec = {
   name: string
   engine: EngineId
   model: string
+  policy: EnginePolicy
   description: string
   callOnce: (question: string, opts: CallOpts) => Promise<OneAnswer>
 }
@@ -290,13 +365,14 @@ function makeAsker(spec: AskerSpec): EngineAsker {
       const maxChars = Number(args.answerMaxChars) || 0
       const opts: CallOpts = {
         country: typeof args.country === 'string' ? args.country.toUpperCase() : undefined,
+        policy: spec.policy,
       }
 
       let ceilingNote: string | null = null
       const units = questions.flatMap((q, qi) =>
         Array.from({ length: samples }, (_, si) => ({ q, qi, si })),
       )
-      const unitResults = await mapPool(units, BATCH_CONCURRENCY, async (unit) => {
+      const unitResults = await mapPool(units, spec.policy.concurrency, async (unit) => {
         if (ceilingNote) return { ...unit, error: 'skipped: daily ceiling reached' }
         const capMsg = takeBudget?.() ?? null
         if (capMsg) {
@@ -304,7 +380,9 @@ function makeAsker(spec: AskerSpec): EngineAsker {
           return { ...unit, error: 'skipped: daily ceiling reached' }
         }
         try {
-          const one = await spec.callOnce(unit.q, opts)
+          const one = await withEnginePermit(spec.engine, spec.policy.concurrency, () =>
+            spec.callOnce(unit.q, opts),
+          )
           return { ...unit, one }
         } catch (err) {
           return { ...unit, error: err instanceof Error ? err.message : 'unknown_error' }
@@ -377,6 +455,7 @@ export function createEngineAskers(
         name: 'askOpenAI',
         engine: 'openai',
         model,
+        policy: ENGINE_POLICIES.openai,
         description:
           'Ask OpenAI (web-search-grounded, the closest API proxy to ChatGPT with browsing) bare ' +
           'questions and get ITS answers with citations, as data to inspect. Supports a questions ' +
@@ -401,6 +480,7 @@ export function createEngineAskers(
               ],
               max_output_tokens: MAX_ANSWER_TOKENS,
             },
+            opts.policy,
           )) as {
             output?: Array<{
               content?: Array<{
@@ -434,12 +514,13 @@ export function createEngineAskers(
         name: 'askGemini',
         engine: 'gemini',
         model,
+        policy: ENGINE_POLICIES.gemini,
         description:
           'Ask Google Gemini (search-grounded) bare questions and get ITS answers with citations, as ' +
           'data to inspect. Supports a questions panel, repeat sampling, and server-side term ' +
           'detection (checkFor). Read-only observation of an external engine — distinct from any ' +
           'model powering this assistant. An answer WITHOUT citations is parametric (no search used).',
-        callOnce: async (question) => {
+        callOnce: async (question, opts) => {
           const data = (await postJson(
             fetchImpl,
             `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
@@ -449,6 +530,7 @@ export function createEngineAskers(
               tools: [{ google_search: {} }],
               generationConfig: { maxOutputTokens: MAX_ANSWER_TOKENS },
             },
+            opts.policy,
           )) as {
             candidates?: Array<{
               content?: { parts?: Array<{ text?: string }> }
@@ -478,12 +560,13 @@ export function createEngineAskers(
         name: 'askPerplexity',
         engine: 'perplexity',
         model,
+        policy: ENGINE_POLICIES.perplexity,
         description:
           'Ask Perplexity (Sonar — the consumer-Perplexity proxy) bare questions and get ITS answers ' +
           'with citations, as data to inspect. Supports a questions panel, repeat sampling, and ' +
           'server-side term detection (checkFor). Retrieval-first: every answer is search-grounded. ' +
           'Read-only observation of an external engine.',
-        callOnce: async (question) => {
+        callOnce: async (question, opts) => {
           const data = (await postJson(
             fetchImpl,
             'https://api.perplexity.ai/chat/completions',
@@ -493,7 +576,7 @@ export function createEngineAskers(
               messages: [{ role: 'user', content: question }],
               max_tokens: MAX_ANSWER_TOKENS,
             },
-            { retry429Once: true },
+            opts.policy,
           )) as {
             choices?: Array<{ message?: { content?: string } }>
             citations?: string[]
@@ -522,12 +605,13 @@ export function createEngineAskers(
         name: 'askClaude',
         engine: 'claude',
         model,
+        policy: ENGINE_POLICIES.claude,
         description:
           'Ask Anthropic Claude (web-search-grounded) bare questions and get ITS answers with ' +
           'citations, as data to inspect. Supports a questions panel, repeat sampling, and ' +
           'server-side term detection (checkFor). Read-only observation of an external engine. ' +
           'An answer WITHOUT citations is parametric (no search used).',
-        callOnce: async (question) => {
+        callOnce: async (question, opts) => {
           const data = (await postJson(
             fetchImpl,
             'https://api.anthropic.com/v1/messages',
@@ -541,6 +625,7 @@ export function createEngineAskers(
               messages: [{ role: 'user', content: question }],
               tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 3 }],
             },
+            opts.policy,
           )) as {
             content?: Array<{
               type?: string

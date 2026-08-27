@@ -44,6 +44,7 @@ export type WorkspaceAuditEventType =
   | 'workflow.run_started'
   | 'workflow.run_completed'
   | 'workflow.run_failed'
+  | 'workflow.failure_delivered'
   | 'workflow.step_delivered'
   // Page-anchor dead-anchor circuit breaker (workflow-page-anchor.md §9)
   | 'workflow.auto_disabled'

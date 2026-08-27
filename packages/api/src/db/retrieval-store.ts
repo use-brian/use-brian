@@ -311,6 +311,7 @@ function visibilityPredicate(
         // wiring populates it (undefined today → universe → inert). The else
         // branch below is the system/no-clearance caller, universe by design.
         compartments: actor.compartments,
+        projectIds: actor.projectIds,
       },
       { alias: opts.tableAlias, startIdx: values.length + 1 },
     )
@@ -370,6 +371,7 @@ function episodeVisibilityPredicate(
         // wiring populates it (undefined today → universe → inert). The else
         // branch below is the system/no-clearance caller, universe by design.
         compartments: actor.compartments,
+        projectIds: actor.projectIds,
       },
       { alias: opts.tableAlias, startIdx: values.length + 1 },
     )
@@ -501,6 +503,8 @@ type TrustCols = {
   source: string
   verified_by_user_id: string | null
   retracted_at: Date | null
+  compartments: string[]
+  project_ids: string[]
 }
 
 function scoredRow(args: {
@@ -553,6 +557,8 @@ async function searchMemoriesScope(
     summary: string
     tags: string[]
     sensitivity: string
+    compartments: string[]
+    project_ids: string[]
     valid_from: Date
     rank?: number
   }
@@ -567,7 +573,7 @@ async function searchMemoriesScope(
     const offIdx = values.length
     const result = await queryWithRLS<Row>(
       actor.userId,
-      `SELECT id AS row_id, summary, tags, sensitivity, valid_from,
+      `SELECT id AS row_id, summary, tags, sensitivity, compartments, project_ids, valid_from,
               source, verified_by_user_id, retracted_at,
               ts_rank(search_vector, to_tsquery('simple', $${tsqIdx})) AS rank
          FROM memories
@@ -586,6 +592,8 @@ async function searchMemoriesScope(
             summary: r.summary,
             tags: r.tags,
             sensitivity: r.sensitivity,
+            compartments: r.compartments,
+            project_ids: r.project_ids,
             valid_from: r.valid_from.toISOString(),
           },
           validFrom: r.valid_from,
@@ -607,7 +615,7 @@ async function searchMemoriesScope(
   const offIdx = values.length
   const result = await queryWithRLS<Row>(
     actor.userId,
-    `SELECT id AS row_id, summary, tags, sensitivity, valid_from,
+    `SELECT id AS row_id, summary, tags, sensitivity, compartments, project_ids, valid_from,
             source, verified_by_user_id, retracted_at
        FROM memories
       WHERE ${visibility}${filters}
@@ -624,6 +632,8 @@ async function searchMemoriesScope(
         summary: r.summary,
         tags: r.tags,
         sensitivity: r.sensitivity,
+        compartments: r.compartments,
+        project_ids: r.project_ids,
         valid_from: r.valid_from.toISOString(),
       },
       validFrom: r.valid_from,
@@ -676,7 +686,7 @@ async function searchFilesScope(
     const offIdx = values.length
     const result = await queryWithRLS<Row>(
       actor.userId,
-      `SELECT id AS row_id, title, name, tags, sensitivity, valid_from,
+      `SELECT id AS row_id, title, name, tags, sensitivity, compartments, project_ids, valid_from,
               source, verified_by_user_id, retracted_at,
               ts_rank_cd(search_vector, plainto_tsquery('english', $${qIdx})) AS rank
          FROM workspace_files
@@ -695,6 +705,8 @@ async function searchFilesScope(
             title: r.title ?? r.name,
             tags: r.tags,
             sensitivity: r.sensitivity,
+            compartments: r.compartments,
+            project_ids: r.project_ids,
             valid_from: r.valid_from.toISOString(),
           },
           validFrom: r.valid_from,
@@ -718,7 +730,7 @@ async function searchFilesScope(
   const offIdx = values.length
   const result = await queryWithRLS<Row>(
     actor.userId,
-    `SELECT id AS row_id, title, name, tags, sensitivity, valid_from,
+    `SELECT id AS row_id, title, name, tags, sensitivity, compartments, project_ids, valid_from,
             source, verified_by_user_id, retracted_at
        FROM workspace_files
       WHERE ${visibility}${filters}
@@ -735,6 +747,8 @@ async function searchFilesScope(
         title: r.title ?? r.name,
         tags: r.tags,
         sensitivity: r.sensitivity,
+        compartments: r.compartments,
+        project_ids: r.project_ids,
         valid_from: r.valid_from.toISOString(),
       },
       validFrom: r.valid_from,
@@ -780,7 +794,7 @@ async function searchEntitiesScope(
     // brain (once as an attribute-empty `entity` row, once as the
     // proper `contact`/`company`/`deal` row). Mirrors the inbox
     // listing's filter (`brain-inbox-store.ts` → entity branch).
-    `SELECT id AS row_id, kind, display_name, sensitivity, valid_from,
+    `SELECT id AS row_id, kind, display_name, sensitivity, compartments, project_ids, valid_from,
             source, verified_by_user_id, retracted_at
        FROM entities
       WHERE ${visibility}${filters}
@@ -798,6 +812,8 @@ async function searchEntitiesScope(
         kind: r.kind,
         display_name: r.display_name,
         sensitivity: r.sensitivity,
+        compartments: r.compartments,
+        project_ids: r.project_ids,
         valid_from: r.valid_from.toISOString(),
       },
       validFrom: r.valid_from,
@@ -841,7 +857,7 @@ async function searchContactsScope(
     // typed fields live in `attributes`. Self entity excluded.
     `SELECT id AS row_id, display_name AS name,
             COALESCE(attributes->>'email', canonical_id) AS email,
-            sensitivity, valid_from,
+            sensitivity, compartments, project_ids, valid_from,
             source, verified_by_user_id, retracted_at
        FROM entities
       WHERE ${visibility}${filters}
@@ -860,6 +876,8 @@ async function searchContactsScope(
         name: r.name,
         email: r.email,
         sensitivity: r.sensitivity,
+        compartments: r.compartments,
+        project_ids: r.project_ids,
         valid_from: r.valid_from.toISOString(),
       },
       validFrom: r.valid_from,
@@ -902,7 +920,7 @@ async function searchCompaniesScope(
     // Companies are `entities` of kind=company; domain in attributes.
     `SELECT id AS row_id, display_name AS name,
             COALESCE(attributes->>'domain', canonical_id) AS domain,
-            sensitivity, valid_from,
+            sensitivity, compartments, project_ids, valid_from,
             source, verified_by_user_id, retracted_at
        FROM entities
       WHERE ${visibility}${filters}
@@ -920,6 +938,8 @@ async function searchCompaniesScope(
         name: r.name,
         domain: r.domain,
         sensitivity: r.sensitivity,
+        compartments: r.compartments,
+        project_ids: r.project_ids,
         valid_from: r.valid_from.toISOString(),
       },
       validFrom: r.valid_from,
@@ -962,7 +982,7 @@ async function searchDealsScope(
     actor.userId,
     // Deals are `entities` of kind=deal; stage in attributes.
     `SELECT id AS row_id, COALESCE(attributes->>'stage', 'lead') AS stage,
-            sensitivity, valid_from,
+            sensitivity, compartments, project_ids, valid_from,
             source, verified_by_user_id, retracted_at
        FROM entities
       WHERE ${visibility}${filters}
@@ -978,6 +998,8 @@ async function searchDealsScope(
         row_id: r.row_id,
         stage: r.stage,
         sensitivity: r.sensitivity,
+        compartments: r.compartments,
+        project_ids: r.project_ids,
         valid_from: r.valid_from.toISOString(),
       },
       validFrom: r.valid_from,
@@ -1019,7 +1041,7 @@ async function searchTasksScope(
     }
   >(
     actor.userId,
-    `SELECT id AS row_id, title, status, assignee_id, tags, sensitivity, valid_from,
+    `SELECT id AS row_id, title, status, assignee_id, tags, sensitivity, compartments, project_ids, valid_from,
             source, verified_by_user_id, retracted_at
        FROM tasks
       WHERE ${visibility}${filters}
@@ -1040,6 +1062,8 @@ async function searchTasksScope(
         assignee_id: r.assignee_id,
         tags: r.tags,
         sensitivity: r.sensitivity,
+        compartments: r.compartments,
+        project_ids: r.project_ids,
         valid_from: r.valid_from.toISOString(),
       },
       validFrom: r.valid_from,
@@ -1080,7 +1104,7 @@ async function searchKbChunksScope(
     }
   >(
     actor.userId,
-    `SELECT id AS row_id, title, source_path, tags, sensitivity, valid_from,
+    `SELECT id AS row_id, title, source_path, tags, sensitivity, compartments, project_ids, valid_from,
             source, verified_by_user_id, retracted_at
        FROM kb_chunks
       WHERE ${visibility}${filters}
@@ -1098,6 +1122,8 @@ async function searchKbChunksScope(
         source_path: r.source_path,
         tags: r.tags,
         sensitivity: r.sensitivity,
+        compartments: r.compartments,
+        project_ids: r.project_ids,
         valid_from: r.valid_from.toISOString(),
       },
       validFrom: r.valid_from,
@@ -1168,7 +1194,8 @@ async function searchFileSegmentsScope(
     actor.userId,
     `SELECT * FROM (
        SELECT fs.id AS row_id, fs.file_id, fs.segment_index, fs.heading_path,
-              left(fs.content, 240) AS snippet, fs.tags, fs.sensitivity, fs.valid_from,
+              left(fs.content, 240) AS snippet, fs.tags, fs.sensitivity,
+              fs.compartments, fs.project_ids, fs.valid_from,
               fs.source, fs.verified_by_user_id, fs.retracted_at,
               (SELECT coalesce(wf.title, wf.name) FROM workspace_files wf WHERE wf.id = fs.file_id) AS file_name,
               ROW_NUMBER() OVER (PARTITION BY fs.file_id ORDER BY fs.segment_index) AS grp_rn
@@ -1193,6 +1220,8 @@ async function searchFileSegmentsScope(
         snippet: r.snippet,
         tags: r.tags ?? [],
         sensitivity: r.sensitivity,
+        compartments: r.compartments,
+        project_ids: r.project_ids,
         valid_from: r.valid_from.toISOString(),
       },
       validFrom: r.valid_from,
@@ -1237,6 +1266,18 @@ async function searchEntityInstancesScope(
   values.push(actor.workspaceId)
   const wsIdx = values.length
   const clauses = [`ei.workspace_id = $${wsIdx}`]
+  if (actor.clearance) {
+    values.push(actor.clearance)
+    clauses.push(`sensitivity_rank(ei.sensitivity) <= sensitivity_rank($${values.length})`)
+  }
+  if (actor.compartments !== undefined && actor.compartments !== null) {
+    values.push(actor.compartments)
+    clauses.push(`ei.compartments <@ $${values.length}::text[]`)
+  }
+  if (actor.projectIds !== undefined && actor.projectIds !== null) {
+    values.push(actor.projectIds)
+    clauses.push(`ei.project_ids <@ $${values.length}::uuid[]`)
+  }
 
   const entityTypeId = opts.filters?.entity_type_id
   if (typeof entityTypeId === 'string') {
@@ -1276,6 +1317,9 @@ async function searchEntityInstancesScope(
     title: string | null
     created_at: Date
     source_app: EntityInstanceSearchRow['source_app']
+    sensitivity: string
+    compartments: string[]
+    project_ids: string[]
   }>(
     actor.userId,
     `SELECT ei.id            AS row_id,
@@ -1283,7 +1327,10 @@ async function searchEntityInstancesScope(
             ei.workspace_id   AS workspace_id,
             ${titleExpr}      AS title,
             ei.created_at     AS created_at,
-            ei.source_app     AS source_app
+            ei.source_app     AS source_app,
+            ei.sensitivity    AS sensitivity,
+            ei.compartments   AS compartments,
+            ei.project_ids    AS project_ids
        FROM entity_instances ei
        JOIN entity_types et ON et.id = ei.entity_type_id
       WHERE ${clauses.join(' AND ')}
@@ -1302,6 +1349,9 @@ async function searchEntityInstancesScope(
       ...(r.title != null ? { title: r.title } : {}),
       created_at: r.created_at.toISOString(),
       source_app: r.source_app,
+      sensitivity: r.sensitivity,
+      compartments: r.compartments,
+      project_ids: r.project_ids,
     }
     return scoredRow({
       row,
@@ -1369,7 +1419,8 @@ async function searchTranscriptSegmentsScope(
     actor.userId,
     `SELECT * FROM (
        SELECT ts.id AS row_id, ts.recording_id, ts.segment_index, ts.start_ms, ts.speaker,
-              left(ts.segment_text, 240) AS snippet, ts.tags, ts.sensitivity, ts.valid_from,
+              left(ts.segment_text, 240) AS snippet, ts.tags, ts.sensitivity,
+              ts.compartments, ts.project_ids, ts.valid_from,
               ts.source, ts.verified_by_user_id, ts.retracted_at,
               (SELECT coalesce(r.title, r.file_name) FROM recordings r WHERE r.id = ts.recording_id) AS recording_name,
               ROW_NUMBER() OVER (PARTITION BY ts.recording_id ORDER BY ts.segment_index) AS grp_rn
@@ -1397,6 +1448,8 @@ async function searchTranscriptSegmentsScope(
         snippet: r.snippet,
         tags: r.tags ?? [],
         sensitivity: r.sensitivity,
+        compartments: r.compartments,
+        project_ids: r.project_ids,
         valid_from: r.valid_from.toISOString(),
       },
       validFrom: r.valid_from,
@@ -1648,7 +1701,7 @@ async function runVectorScope(
   // file's 40 segments) keeps at most `cap` nearest candidates in this arm.
   const sql = config.perGroupCap
     ? `SELECT * FROM (
-         SELECT id AS row_id, ${config.projection}, sensitivity, valid_from,
+         SELECT id AS row_id, ${config.projection}, sensitivity, compartments, project_ids, valid_from,
                 source, verified_by_user_id, retracted_at,
                 embedding <=> $${vecIdx}::vector AS distance,
                 ROW_NUMBER() OVER (
@@ -1662,7 +1715,7 @@ async function runVectorScope(
         WHERE sub.grp_rn <= ${config.perGroupCap.cap}
         ORDER BY sub.distance
         LIMIT $${limIdx}`
-    : `SELECT id AS row_id, ${config.projection}, sensitivity, valid_from,
+    : `SELECT id AS row_id, ${config.projection}, sensitivity, compartments, project_ids, valid_from,
             source, verified_by_user_id, retracted_at,
             embedding <=> $${vecIdx}::vector AS distance
        FROM ${config.table}
@@ -1673,6 +1726,8 @@ async function runVectorScope(
   const result = await queryWithRLS<VectorRow>(actor.userId, sql, values)
   return result.rows.map((r) => {
     const { row, tags, groupKey } = config.toRow(r as unknown as Record<string, unknown>)
+    row.compartments = r.compartments
+    row.project_ids = r.project_ids
     return scoredRow({
       row,
       validFrom: r.valid_from,
@@ -2500,11 +2555,14 @@ export async function recentEpisodes(
     source_kind: string
     occurred_at: Date
     sensitivity: string
+    compartments: string[]
+    project_ids: string[]
     source_ref: Record<string, unknown> | null
     summary_text: string | null
   }>(
     actor.userId,
     `SELECT DISTINCT e.id, e.source_kind, e.occurred_at, e.sensitivity,
+            e.compartments, e.project_ids,
             e.source_ref, e.summary_text
        FROM episodes e
        ${joinClause}
@@ -2520,6 +2578,8 @@ export async function recentEpisodes(
     source_kind: r.source_kind,
     occurred_at: r.occurred_at.toISOString(),
     sensitivity: r.sensitivity as RecentEpisodeRow['sensitivity'],
+    compartments: r.compartments,
+    project_ids: r.project_ids,
     source_ref: r.source_ref ?? {},
     summary_text: r.summary_text,
   }))

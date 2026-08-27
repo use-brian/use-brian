@@ -2,13 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   mapCrmCsvRows,
   crmEmailApprovalQueue,
+  crmEmailDraftContacts,
   crmFieldKeyFromLabel,
   linkedContactsForEmailApproval,
   matchingEmailApprovals,
   parseCrmCsv,
   suggestedCrmCsvMapping,
 } from "@/lib/crm-r2";
-import type { CrmFieldDefinition } from "@/lib/api/crm";
+import type { CrmEmailDraft, CrmFieldDefinition } from "@/lib/api/crm";
 
 describe("[COMP:app-web/crm-r2] CRM R2 pure client logic", () => {
   it("parses quoted CSV and previews no more than the cap", () => {
@@ -94,5 +95,24 @@ describe("[COMP:app-web/crm-r2] CRM R2 pure client logic", () => {
       approvals,
     ).map((item) => ({ id: item.approval.id, contacts: item.contacts.map((row) => row.id) })))
       .toEqual([{ id: "a1", contacts: ["c1"] }]);
+  });
+
+  it("links canonical drafts to CRM contacts by exact To or Cc address", () => {
+    const contacts = [
+      { id: "c1", name: "Jane", email: "Jane <jane@example.test>", phone: null, companyId: null, tags: [], updatedAt: new Date().toISOString() },
+      { id: "c2", name: "Sam", email: "sam@example.test", phone: null, companyId: null, tags: [], updatedAt: new Date().toISOString() },
+      { id: "c3", name: "Pat", email: "pat@example.test", phone: null, companyId: null, tags: [], updatedAt: new Date().toISOString() },
+    ];
+    const draft: CrmEmailDraft = {
+      id: "draft-1", status: "draft", revision: 1, from: "team@example.test",
+      to: ["jane@example.test"], cc: ["Sam <sam@example.test>"], bcc: ["pat@example.test"],
+      subject: "Hello", body: "Complete body", sourceSessionId: "session-1",
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    };
+
+    expect(crmEmailDraftContacts(
+      { contacts: [...contacts], companies: [], deals: [] },
+      draft,
+    ).map((contact) => contact.id)).toEqual(["c1", "c2"]);
   });
 });

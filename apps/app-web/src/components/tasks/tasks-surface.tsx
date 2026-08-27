@@ -53,6 +53,7 @@ import { TaskRulesPanel } from "@/components/tasks/task-rules-panel";
 import { format } from "@/lib/i18n/format";
 import { Checkbox } from "@/components/ui/checkbox";
 import { promptDialog } from "@/components/ui/prompt-dialog";
+import { confirmDialog } from "@/components/ui/confirm-dialog";
 import {
   adjustBrainRow,
   deleteBrainRow,
@@ -72,11 +73,9 @@ import {
   applyFilters,
   groupRows,
   isOpenStatus,
-  projectOptions,
   quickFilterCounts,
   searchFromViewState,
   sortRows,
-  tagsWithProject,
   taskProject,
   viewStateFromSearch,
   QUICK_FILTERS,
@@ -85,6 +84,11 @@ import {
   type QuickFilter,
   type TasksViewState,
 } from "@/lib/tasks-view";
+import {
+  listContextProjects,
+  reclassifyContext,
+  type ContextProject,
+} from "@/lib/api/context-scopes";
 import { loadWorkspaceRoster } from "@/lib/api/workspace-roster";
 import {
   memberDisplayName,
@@ -127,6 +131,7 @@ const NONE = "__none__";
 export function TasksSurface({ workspaceId }: { workspaceId: string }) {
   const t = useT().tasksPage;
   const brainT = useT().brainPage;
+  const scopeT = useT().contextScope;
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -147,6 +152,7 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
   // behind a painted list stays quiet.
   const loadError = rows === null && tasks.error !== undefined;
   const [roster, setRoster] = useState<AssignableMember[] | null>(null);
+  const [projects, setProjects] = useState<ContextProject[]>([]);
 
   // Depend on the stable `refresh` callback, NOT the resource object — that
   // object is new every render, so a dep on it re-creates `reload` each time
@@ -169,6 +175,10 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
     loadWorkspaceRoster(workspaceId)
       .then(setRoster)
       .catch(() => setRoster([]));
+  }, [workspaceId]);
+
+  useEffect(() => {
+    listContextProjects(workspaceId).then(setProjects).catch(() => setProjects([]));
   }, [workspaceId]);
 
   // Pending-suggestion count for the tab badge + banner. The Suggestions view
@@ -235,7 +245,6 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
   const now = useMemo(() => new Date(), []);
   const all = rows ?? [];
   const counts = useMemo(() => quickFilterCounts(all, now), [all, now]);
-  const projects = useMemo(() => projectOptions(all), [all]);
   const filtered = useMemo(
     () => sortRows(applyFilters(all, view, now), view.sort),
     [all, view, now],
@@ -367,6 +376,83 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
     },
     [workspaceId, patchRow],
   );
+
+  const commitProject = useCallback(
+    async (row: TaskRow, projectId: string | null): Promise<{ ok: boolean; error?: string }> => {
+      if (taskProject(row) === projectId) return { ok: true };
+      const widening = taskProject(row) !== null && projectId === null;
+      if (widening) {
+        const confirmed = await confirmDialog({
+          title: scopeT.clearProjectTitle,
+          description: scopeT.clearProjectDescription,
+          confirmLabel: scopeT.clearProjectConfirm,
+          cancelLabel: scopeT.cancel,
+        });
+        if (!confirmed) return { ok: false };
+      }
+      try {
+        await reclassifyContext({
+          workspaceId,
+          primitive: "task",
+          rowId: row.id,
+          teamIds: row.contextTeamIds ?? [],
+          projectIds: projectId ? [projectId] : [],
+          reason: "Changed task Project in Tasks",
+          confirmed: widening,
+        });
+        patchRow(row.id, null, { projectId });
+        requestBrainRefresh(workspaceId);
+        return { ok: true };
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : scopeT.updateFailed };
+      }
+    },
+    [patchRow, scopeT, workspaceId],
+  );
+
+  const bulkProject = useCallback(async (projectId: string | null) => {
+    if (bulkBusy || selectedVisible.length === 0) return;
+    const targetRows = selectedVisible
+      .map((id) => (rows ?? []).find((row) => row.id === id))
+      .filter((row): row is TaskRow => row !== undefined);
+    const widening = projectId === null && targetRows.some((row) => taskProject(row) !== null);
+    if (widening) {
+      const confirmed = await confirmDialog({
+        title: scopeT.clearProjectTitle,
+        description: scopeT.clearProjectDescription,
+        confirmLabel: scopeT.clearProjectConfirm,
+        cancelLabel: scopeT.cancel,
+      });
+      if (!confirmed) return;
+    }
+    setBulkBusy(true);
+    const failed: string[] = [];
+    for (const row of targetRows) {
+      try {
+        await reclassifyContext({
+          workspaceId,
+          primitive: "task",
+          rowId: row.id,
+          teamIds: row.contextTeamIds ?? [],
+          projectIds: projectId ? [projectId] : [],
+          reason: "Changed task Project in Tasks",
+          confirmed: widening,
+        });
+        patchRow(row.id, null, { projectId });
+      } catch {
+        failed.push(row.id);
+      }
+    }
+    setSelected(new Set(failed));
+    if (failed.length > 0) {
+      setBulkError(format(t.bulkPartialFail, {
+        failed: String(failed.length),
+        total: String(targetRows.length),
+      }));
+    }
+    setBulkBusy(false);
+    requestBrainRefresh(workspaceId);
+  }, [bulkBusy, patchRow, rows, scopeT, selectedVisible, t, workspaceId]);
 
   /** Run a bulk mutation over the selection. Delete always takes the server
    * lane and disappears in one optimistic paint; failed ids are restored and
@@ -592,7 +678,11 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
       const m = roster ? resolveAssignee(roster, key) : null;
       return (m && memberDisplayName(m)) || t.memberUnknown;
     }
-    if (view.group === "project") return key === "" ? t.noProject : key;
+    if (view.group === "project") {
+      return key === ""
+        ? t.noProject
+        : projects.find((project) => project.id === key)?.name ?? key;
+    }
     if (view.group === "due") return dueBucketLabels[key] ?? key;
     return "";
   }
@@ -659,7 +749,7 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
       label: t.filterProject,
       options: [
         { value: "none", label: t.noProject },
-        ...projects.map((pName) => ({ value: pName, label: pName })),
+        ...projects.map((project) => ({ value: project.id, label: project.name })),
       ],
     },
     {
@@ -872,23 +962,10 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
             label={t.bulkProject}
             items={{
               [NONE]: t.noProject,
-              ...Object.fromEntries(projects.map((p) => [p, p])),
+              ...Object.fromEntries(projects.map((project) => [project.id, project.name])),
             }}
             disabled={bulkBusy}
-            onPick={(p) =>
-              void runBulk({
-                kind: "adjust",
-                // Project is a per-row tags rewrite (tag namespace, §5) —
-                // no uniform server set, so it always takes the client loop.
-                changesFor: (row) => ({
-                  tags: tagsWithProject(row.tags, p === NONE ? null : p),
-                }),
-                patch: (row) => ({
-                  tags: tagsWithProject(row.tags, p === NONE ? null : p),
-                }),
-                serverSet: null,
-              })
-            }
+            onPick={(projectId) => void bulkProject(projectId === NONE ? null : projectId)}
           />
           <button
             type="button"
@@ -1066,6 +1143,7 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
           <TaskBoard
             rows={filtered}
             roster={roster}
+            projects={projects}
             showCompleted={view.completed || view.quick === "doneOpen"}
             onStatusDrop={(row, status) =>
               void commitField(row, { status }, { status })
@@ -1116,6 +1194,7 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
                       onToggle={toggle}
                       onOpen={(r) => setOpenTaskId(r.id)}
                       commitField={commitField}
+                      commitProject={commitProject}
                     />
                   ))}
               </div>
@@ -1145,6 +1224,7 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
             roster={roster}
             projects={projects}
             commitField={commitField}
+            commitProject={commitProject}
             onDelete={async (reason) => {
               // No reason = plain delete: no tombstone, no rule.
               const result = await deleteBrainRow(
@@ -1186,10 +1266,11 @@ function TaskTableRow({
   onToggle,
   onOpen,
   commitField,
+  commitProject,
 }: {
   row: TaskRow;
   roster: AssignableMember[] | null;
-  projects: string[];
+  projects: ContextProject[];
   selected: boolean;
   onToggle: (id: string) => void;
   onOpen: (row: TaskRow) => void;
@@ -1197,6 +1278,10 @@ function TaskTableRow({
     row: TaskRow,
     changes: AdjustMemoryChanges,
     patch: Partial<TaskRow>,
+  ) => Promise<{ ok: boolean; error?: string }>;
+  commitProject: (
+    row: TaskRow,
+    projectId: string | null,
   ) => Promise<{ ok: boolean; error?: string }>;
 }) {
   const t = useT().tasksPage;
@@ -1261,10 +1346,7 @@ function TaskTableRow({
       <ProjectCell
         value={taskProject(row)}
         projects={projects}
-        onCommit={(project) => {
-          const tags = tagsWithProject(row.tags, project);
-          return commitField(row, { tags }, { tags });
-        }}
+        onCommit={(projectId) => commitProject(row, projectId)}
       />
       <DueCell
         value={row.due}

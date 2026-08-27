@@ -23,14 +23,18 @@ import {
   createCrmField,
   downloadCrmCsv,
   fetchCrmDuplicates,
+  fetchCrmSeparations,
   fetchWorkspaceCrm,
   importCrmRecords,
+  keepCrmRecordsSeparate,
   mergeCrmRecords,
+  reviewCrmSeparationAgain,
   setCrmRecordArchived,
   undoCrmMerge,
   type CrmConfig,
   type CrmData,
   type CrmDuplicateGroup,
+  type CrmSeparation,
   type CrmFieldDefinition,
   type CrmFieldType,
 } from "@/lib/api/crm";
@@ -510,7 +514,7 @@ function ImportDialog({ workspaceId, data, config, canCreateField, open, initial
   );
 }
 
-function DuplicatesDialog({ workspaceId, open, onOpenChange, onMerged }: {
+export function DuplicatesDialog({ workspaceId, open, onOpenChange, onMerged }: {
   workspaceId: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -518,17 +522,19 @@ function DuplicatesDialog({ workspaceId, open, onOpenChange, onMerged }: {
 }) {
   const t = useT().crmPage.r2;
   const [groups, setGroups] = useState<CrmDuplicateGroup[]>([]);
+  const [separations, setSeparations] = useState<CrmSeparation[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [loading, setLoading] = useState(false);
   const [lastMerge, setLastMerge] = useState<{ id: string; undoUntil: string } | null>(null);
+  const [lastSeparation, setLastSeparation] = useState<CrmSeparation | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     if (!open || loaded) return;
     setLoaded(true);
     setLoading(true);
     setError(null);
-    void fetchCrmDuplicates(workspaceId)
-      .then(setGroups)
+    void Promise.all([fetchCrmDuplicates(workspaceId), fetchCrmSeparations(workspaceId)])
+      .then(([nextGroups, nextSeparations]) => { setGroups(nextGroups); setSeparations(nextSeparations); })
       .catch((cause) => setError(cause instanceof Error ? cause.message : t.duplicatesLoadFailed))
       .finally(() => setLoading(false));
   }, [open, loaded, workspaceId]);
@@ -554,12 +560,28 @@ function DuplicatesDialog({ workspaceId, open, onOpenChange, onMerged }: {
             })()}>{t.undoMerge}</Button>
           </div>
         )}
+        {lastSeparation && (
+          <div className="flex items-center justify-between gap-3 rounded-xl border border-sky-500/30 bg-sky-500/5 px-3 py-2">
+            <div className="text-xs"><div className="font-medium">{t.keptSeparate}</div><div className="text-muted-foreground">{lastSeparation.leftName} · {lastSeparation.rightName}</div></div>
+            <Button size="xs" variant="outline" onClick={() => void (async () => {
+              setError(null);
+              try {
+                await reviewCrmSeparationAgain(workspaceId, lastSeparation.id);
+                setLastSeparation(null);
+                const [nextGroups, nextSeparations] = await Promise.all([fetchCrmDuplicates(workspaceId), fetchCrmSeparations(workspaceId)]);
+                setGroups(nextGroups); setSeparations(nextSeparations);
+              } catch (cause) {
+                setError(cause instanceof Error ? cause.message : t.reviewAgainFailed);
+              }
+            })()}>{t.reviewAgain}</Button>
+          </div>
+        )}
         {error && <div className="flex items-center justify-between gap-2 text-xs text-destructive"><span>{error}</span><Button size="xs" variant="ghost" onClick={() => { setLoaded(false); setError(null); }}>{t.retry}</Button></div>}
         {loading && <div className="text-sm text-muted-foreground">{t.duplicatesLoading}</div>}
         {groups.map((group) => (
           <div key={`${group.kind}:${group.reason}:${group.value}`} className="rounded-xl border border-border p-3">
             <div className="text-[10px] uppercase tracking-wide text-muted-foreground">{t.duplicateReasons[group.reason]} · {group.value}</div>
-            <div className="mt-2 space-y-1">{group.records.map((record, index) => <div key={record.id} className="flex items-center justify-between text-xs"><span>{record.name}</span>{index === 0 ? <span className="text-muted-foreground">{t.keepRecord}</span> : <Button size="xs" variant="outline" onClick={() => void (async () => {
+            <div className="mt-2 space-y-1">{group.records.map((record, index) => <div key={record.id} className="flex items-center justify-between gap-2 text-xs"><span>{record.name}</span>{index === 0 ? <span className="text-muted-foreground">{t.keepRecord}</span> : <div className="flex items-center gap-1"><Button size="xs" variant="outline" onClick={() => void (async () => {
               const confirmed = await confirmDialog({ title: t.mergeRecords, description: t.mergeDescription.replace("{merged}", record.name).replace("{survivor}", group.records[0].name), confirmLabel: t.merge, cancelLabel: t.cancel });
               if (!confirmed) return;
               setError(null);
@@ -571,10 +593,30 @@ function DuplicatesDialog({ workspaceId, open, onOpenChange, onMerged }: {
               } catch (cause) {
                 setError(cause instanceof Error ? cause.message : t.mergeFailed);
               }
-            })()}><GitMerge aria-hidden />{t.merge}</Button>}</div>)}</div>
+            })()}><GitMerge aria-hidden />{t.merge}</Button><Button size="xs" variant="ghost" onClick={() => void (async () => {
+              setError(null);
+              try {
+                const kept = await keepCrmRecordsSeparate(workspaceId, group.records[0].id, record.id);
+                setLastSeparation(kept.separation);
+                const [nextGroups, nextSeparations] = await Promise.all([fetchCrmDuplicates(workspaceId), fetchCrmSeparations(workspaceId)]);
+                setGroups(nextGroups); setSeparations(nextSeparations);
+              } catch (cause) {
+                setError(cause instanceof Error ? cause.message : t.keepSeparateFailed);
+              }
+            })()}>{t.keepSeparate}</Button></div>}</div>)}</div>
           </div>
         ))}
         {loaded && !loading && !error && groups.length === 0 && <div className="text-sm text-muted-foreground">{t.noDuplicates}</div>}
+        {separations.length > 0 && <details className="rounded-xl border border-border p-3"><summary className="cursor-pointer text-xs font-medium">{t.keptSeparateSection.replace("{count}", String(separations.length))}</summary><div className="mt-2 space-y-2">{separations.map((separation) => <div key={separation.id} className="flex items-center justify-between gap-2 text-xs"><span>{separation.leftName} · {separation.rightName}</span><Button size="xs" variant="ghost" onClick={() => void (async () => {
+          setError(null);
+          try {
+            await reviewCrmSeparationAgain(workspaceId, separation.id);
+            const [nextGroups, nextSeparations] = await Promise.all([fetchCrmDuplicates(workspaceId), fetchCrmSeparations(workspaceId)]);
+            setGroups(nextGroups); setSeparations(nextSeparations);
+          } catch (cause) {
+            setError(cause instanceof Error ? cause.message : t.reviewAgainFailed);
+          }
+        })()}>{t.reviewAgain}</Button></div>)}</div></details>}
       </div>
     </Shell>
   );

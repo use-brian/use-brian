@@ -1905,10 +1905,43 @@ function isTransientStreamError(err: unknown): boolean {
   )
 }
 
-/** Static fail-closed reply for an invalid or failed isolated finalizer. */
+/** Static fail-closed reply when only a terminal turn's closing text was lost. */
 export const FALLBACK_REPLY =
   "Sorry, I couldn't complete that turn. " +
   'Could you try again with a more specific request?'
+
+export const MAX_TURNS_FALLBACK_REPLY =
+  "I couldn't finish because this task reached its maximum turn limit. " +
+  "For a workflow, increase the step's Max turns or turn on Research mode. " +
+  'You can also split the job into smaller, focused steps and try again.'
+
+export const TOOL_BUDGET_FALLBACK_REPLY =
+  "I couldn't finish because this task reached its maximum tool-call limit. " +
+  'For a workflow, turn on Research mode or ask Brian to raise maxToolCalls. ' +
+  'You can also split the job into smaller, focused steps and try again.'
+
+export const TOOL_FAILURE_FALLBACK_REPLY =
+  "I couldn't finish because a tool kept failing. " +
+  "Check the workflow step's tool or connector configuration, " +
+  'or split the job into smaller, focused steps and try again.'
+
+/**
+ * The model-authored finalizer is best-effort, but its fallback diagnosis is
+ * host-owned. Preserve the structural stop reason so a malformed finalizer
+ * never turns a known execution cutoff into an unexplained generic retry.
+ */
+function terminalFallbackReply(stopReason: TerminalStopReason): string {
+  switch (stopReason.code) {
+    case 'max_turns':
+      return MAX_TURNS_FALLBACK_REPLY
+    case 'tool_budget_exhausted':
+      return TOOL_BUDGET_FALLBACK_REPLY
+    case 'tool_failure_limit':
+      return TOOL_FAILURE_FALLBACK_REPLY
+    case 'terminal_tool_turn':
+      return FALLBACK_REPLY
+  }
+}
 
 /**
  * Structural + substring leak detector. The structural check catches
@@ -2156,9 +2189,9 @@ function parseTerminalMessage(raw: string): string | null {
   return message
 }
 
-function fallbackTerminalResponse(): AssistantResponse {
+function fallbackTerminalResponse(message: string): AssistantResponse {
   return {
-    content: [{ type: 'text', text: FALLBACK_REPLY }],
+    content: [{ type: 'text', text: message }],
     stopReason: 'end_turn',
     usage: { inputTokens: 0, outputTokens: 0 },
     model: 'fallback',
@@ -2228,8 +2261,9 @@ async function* finalizeTerminalResponse(params: {
     console.error('[query-loop] isolated terminal finalizer failed; using static fallback:', err)
   }
 
-  const fallback = fallbackTerminalResponse()
-  yield { type: 'text_delta', text: FALLBACK_REPLY }
+  const fallbackReply = terminalFallbackReply(params.stopReason)
+  const fallback = fallbackTerminalResponse(fallbackReply)
+  yield { type: 'text_delta', text: fallbackReply }
   return fallback
 }
 

@@ -71,6 +71,11 @@ import { PageWorkflowRuns } from "./page-workflow-runs";
 import { PageActionButtons } from "./page-action-buttons";
 import { CommentHistory } from "./comment-history";
 import { ShareDialog } from "./share-dialog";
+import { ContextScopeChips } from "@/components/context/context-scope-chips";
+import {
+  listContextProjects,
+  type ContextProject,
+} from "@/lib/api/context-scopes";
 
 type PageHeaderProps = {
   view: ViewMetadata;
@@ -152,6 +157,15 @@ export function PageHeader({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [projects, setProjects] = useState<ContextProject[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void listContextProjects(view.workspaceId, true)
+      .then((rows) => { if (!cancelled) setProjects(rows); })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [view.workspaceId]);
 
   const presence = usePresence(provider);
   const isSaved = view.state === "saved";
@@ -335,6 +349,16 @@ export function PageHeader({
             onNavigate={onNavigate}
             onRenameCurrent={(name) => onRenameValue(view.id, name)}
           />
+          {view.projectId ? (
+            <div className="ml-2 shrink-0">
+              <ContextScopeChips
+                teamId={null}
+                projectId={view.projectId}
+                teams={[]}
+                projects={projects}
+              />
+            </div>
+          ) : null}
           {/* Published badge — the page is live on the web (directly or via a
               published ancestor), so edits here are publicly visible. Links
               to the public view so an editor can see what others see. */}

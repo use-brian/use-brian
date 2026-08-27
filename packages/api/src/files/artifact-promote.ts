@@ -31,6 +31,8 @@ export type ArtifactPromoteInput = {
   workspaceId: string
   actingUserId: string
   assistantId?: string | null
+  compartments?: string[]
+  projectIds?: string[]
   /** Skip chunking (e.g. big PDFs on the silent path — store-only). */
   storeOnly?: boolean
   /** Path prefix; default '/uploads/chat'. Pastes use '/uploads/pastes'. */
@@ -67,6 +69,10 @@ export function createArtifactPromoter(deps: {
         workspaceId: input.workspaceId,
         userId: input.actingUserId,
         ...(input.assistantId ? { assistantId: input.assistantId } : {}),
+        compartments: input.compartments,
+        projectIds: input.projectIds,
+        writeCompartments: input.compartments,
+        writeProjectIds: input.projectIds,
       }
       // Timestamped path: no path-UNIQUE conflicts on re-upload; the artifact
       // is workspace-shared (filesApi default NULL/NULL visibility, decision D4).

@@ -38,7 +38,10 @@ function makeFakePool(opts: { chars: number; existingId?: string }) {
       let rows: unknown[] = []
       if (text.includes('SELECT id FROM pending_ingest_batches')) {
         rows = opts.existingId ? [{ id: opts.existingId }] : []
-      } else if (text.includes('UPDATE pending_ingest_batches SET events')) {
+      } else if (
+        text.includes('UPDATE pending_ingest_batches SET')
+        && text.includes('events = events')
+      ) {
         rows = [{ id: opts.existingId, chars: opts.chars }]
       } else if (text.includes('INSERT INTO pending_ingest_batches')) {
         rows = [{ id: 'batch-new', chars: opts.chars }]
@@ -95,5 +98,23 @@ describe('[COMP:brain/pending-ingest-batches-store] appendBatchEvent early flush
   it('keeps the token bound and char proxy coupled at ~4 chars/token', () => {
     expect(EARLY_FLUSH_TOKENS).toBe(32_000)
     expect(EARLY_FLUSH_CHARS).toBe(EARLY_FLUSH_TOKENS * 4)
+  })
+
+  it('raises an existing batch to the union of every appended Team and Project scope', async () => {
+    const { pool, calls } = makeFakePool({ chars: 10, existingId: 'batch-1' })
+    const compartments = ['team:11111111-1111-4111-8111-111111111111']
+    const projectIds = ['22222222-2222-4222-8222-222222222222']
+
+    await appendBatchEvent({ ...baseInput, compartments, projectIds }, pool)
+
+    const update = calls.find((call) => call.text.includes('events = events'))
+    expect(update?.text).toContain('SELECT DISTINCT unnest(compartments')
+    expect(update?.text).toContain('SELECT DISTINCT unnest(project_ids')
+    expect(update?.params).toEqual([
+      'batch-1',
+      JSON.stringify([baseInput.event]),
+      compartments,
+      projectIds,
+    ])
   })
 })

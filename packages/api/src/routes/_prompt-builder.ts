@@ -128,7 +128,7 @@ export type BuildPromptParams = {
    * Owner-admitted playbook rules (migration 419, growth loop Phase 3),
    * newest-admitted first — rendered as the `## Playbook` section of the
    * `# Charter` block under PLAYBOOK_BLOCK_CHAR_CAP. Callers fetch via
-   * `listActivePlaybookRules()`; empty/undefined omits the section. Rules
+   * `loadDecisionPlaybookContext()`; empty/undefined omits the section. Rules
    * only change on an owner decision, so the block stays in the cacheable
    * stable prefix.
    */

@@ -100,6 +100,8 @@ export async function processOpenRecording(
     createdByUserId: job.actingUserId,
     visibility: { userId: episode.userId, assistantId: episode.assistantId },
     sensitivity: episode.sensitivity,
+    compartments: episode.compartments,
+    projectIds: episode.projectIds,
     segments,
   })
 
@@ -117,6 +119,8 @@ export async function processOpenRecording(
         actingUserId: job.actingUserId,
         assistantId: episode.assistantId,
         sensitivity: episode.sensitivity,
+        compartments: episode.compartments,
+        projectIds: episode.projectIds,
         utterances: transcription.utterances,
         title: recording?.title ?? recording?.fileName ?? null,
       })
@@ -146,6 +150,8 @@ export async function processOpenRecording(
     sourceRef: { connector: 'programmatic', label: 'recording', recording_id: episode.id },
     parentEpisodeId: episode.id,
     sensitivity: episode.sensitivity,
+    compartments: episode.compartments,
+    projectIds: episode.projectIds,
   })
 
   // Blueprint synthesis is opt-in, additive to Pipeline B, and never runs over
@@ -161,6 +167,8 @@ export async function processOpenRecording(
         assistantId: episode.assistantId ?? '',
         sensitivity: episode.sensitivity,
         blueprintSlug,
+        compartments: episode.compartments,
+        projectIds: episode.projectIds,
         parentPageId: job.parentPageId ?? null,
       })
     } catch (err) {

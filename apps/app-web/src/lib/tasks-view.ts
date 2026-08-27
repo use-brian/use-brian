@@ -7,8 +7,7 @@
  *     and the Home dock card (`?filter=stale`) all speak one language;
  *   - the cleanup quick-filter predicates (Stale / Done, not closed /
  *     Unassigned / No due date) shared with their live counts;
- *   - the `project:` tag facet (tasks-operator-surface §5 — projects are a
- *     tag namespace, not a primitive);
+ *   - the stable Project registry-id facet;
  *   - group-by + sort;
  *   - saved views (named filter sets, per-workspace localStorage);
  *   - `multiParam`, the multi-value search-param codec — defined here
@@ -43,19 +42,10 @@ export function localIsoDay(iso: string): string {
   return `${y}-${m}-${day}`;
 }
 
-// ── Project facet (`project:` tag namespace) ────────────────────────────
+// ── Project facet (stable registry id) ─────────────────────────────────
 
-const PROJECT_TAG_PREFIX = "project:";
-
-/** The row's project (first `project:` tag, prefix stripped), or null. */
-export function taskProject(row: Pick<TaskRow, "tags">): string | null {
-  for (const tag of row.tags) {
-    if (tag.startsWith(PROJECT_TAG_PREFIX)) {
-      const name = tag.slice(PROJECT_TAG_PREFIX.length).trim();
-      if (name.length > 0) return name;
-    }
-  }
-  return null;
+export function taskProject(row: Pick<TaskRow, "projectId">): string | null {
+  return row.projectId ?? null;
 }
 
 /** Distinct project names across rows, sorted for the filter dropdown. */
@@ -66,15 +56,6 @@ export function projectOptions(rows: readonly TaskRow[]): string[] {
     if (p) names.add(p);
   }
   return [...names].sort((a, b) => a.localeCompare(b));
-}
-
-/** Replace the row's `project:` tags with the given project (null clears). */
-export function tagsWithProject(
-  tags: readonly string[],
-  project: string | null,
-): string[] {
-  const rest = tags.filter((t) => !t.startsWith(PROJECT_TAG_PREFIX));
-  return project ? [...rest, `${PROJECT_TAG_PREFIX}${project}`] : rest;
 }
 
 // ── Cleanup quick-filters ───────────────────────────────────────────────

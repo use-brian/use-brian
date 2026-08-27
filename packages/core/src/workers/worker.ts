@@ -174,8 +174,8 @@ export type WorkerOptions = {
   onEvent?: (workerId: string, event: QueryEvent) => void
   /** Forward each worker run's accumulated LLM usage (the terminal-once
    *  `turn_complete`) so the api layer records its COGS. Identity-carrying so
-   *  open core stays billing-agnostic; absent in OSS (no usageStore) → workers
-   *  record nothing, which is also the acting-loop metering signal. */
+   *  open core stays billing-agnostic; the normal standalone composition wires
+   *  a local COGS store, while bespoke compositions may omit the callback. */
   onUsage?: (usage: WorkerUsageEvent) => void
 }
 

@@ -34,7 +34,9 @@ describe('[COMP:files/distill] PDF local-text fallback', () => {
       new Response(
         JSON.stringify({
           choices: [{
-            message: { content: `# Native extract\n\n${pdfPageCompletionMarker(1)}` },
+            message: {
+              content: `## Page 1\n\n# Native extract\n\n${pdfPageCompletionMarker(1)}`,
+            },
             finish_reason: 'stop',
           }],
         }),
@@ -48,7 +50,7 @@ describe('[COMP:files/distill] PDF local-text fallback', () => {
     )
 
     expect(result.model).toBe('qwen-vl-max')
-    expect(result.text).toBe('# Native extract')
+    expect(result.text).toBe('## Page 1\n\n# Native extract')
   })
 
   it('surfaces the distillation error, not a pdf.js parse exception, when both paths fail', async () => {

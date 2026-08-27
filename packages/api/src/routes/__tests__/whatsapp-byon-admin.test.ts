@@ -74,6 +74,8 @@ function fakeRule(over: Partial<IngestRuleSummary> = {}): IngestRuleSummary {
     routingTimezone: 'UTC',
     alert: false,
     episodeSensitivity: null,
+    compartments: [],
+    projectIds: [],
     ...over,
   }
 }

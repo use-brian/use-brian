@@ -17,6 +17,7 @@
 
 import type { AccessContext } from '../security/access-context.js'
 import type { Sensitivity } from '../security/sensitivity.js'
+import type { StableExternalIdentity } from '../decision-learning/types.js'
 
 export const DEAL_STAGES = ['lead', 'qualified', 'proposal', 'negotiation', 'won', 'lost'] as const
 export type DealStage = (typeof DEAL_STAGES)[number]
@@ -68,13 +69,16 @@ export type CompanyRecord = {
   domain: string | null
   tags: string[]
   externalRef: CrmExternalRef
+  sensitivity?: Sensitivity
+  compartments?: string[]
+  projectIds?: string[]
   createdAt: Date
   updatedAt: Date
 }
 
 export type CompanyListRow = Pick<
   CompanyRecord,
-  'id' | 'workspaceId' | 'entityId' | 'name' | 'domain' | 'tags' | 'updatedAt'
+  'id' | 'workspaceId' | 'entityId' | 'name' | 'domain' | 'tags' | 'sensitivity' | 'compartments' | 'projectIds' | 'updatedAt'
 >
 
 export type CompanyListFilters = {
@@ -104,13 +108,16 @@ export type ContactRecord = {
   companyId: string | null
   tags: string[]
   externalRef: CrmExternalRef
+  sensitivity?: Sensitivity
+  compartments?: string[]
+  projectIds?: string[]
   createdAt: Date
   updatedAt: Date
 }
 
 export type ContactListRow = Pick<
   ContactRecord,
-  'id' | 'workspaceId' | 'entityId' | 'name' | 'email' | 'phone' | 'companyId' | 'tags' | 'updatedAt'
+  'id' | 'workspaceId' | 'entityId' | 'name' | 'email' | 'phone' | 'companyId' | 'tags' | 'sensitivity' | 'compartments' | 'projectIds' | 'updatedAt'
 >
 
 export type ContactListFilters = {
@@ -148,13 +155,16 @@ export type DealRecord = {
   amount: number | null
   closeDate: Date | null
   externalRef: CrmExternalRef
+  sensitivity?: Sensitivity
+  compartments?: string[]
+  projectIds?: string[]
   createdAt: Date
   updatedAt: Date
 }
 
 export type DealListRow = Pick<
   DealRecord,
-  'id' | 'workspaceId' | 'entityId' | 'name' | 'contactId' | 'companyId' | 'stage' | 'amount' | 'closeDate' | 'updatedAt'
+  'id' | 'workspaceId' | 'entityId' | 'name' | 'contactId' | 'companyId' | 'stage' | 'amount' | 'closeDate' | 'sensitivity' | 'compartments' | 'projectIds' | 'updatedAt'
 >
 
 export type DealListFilters = {
@@ -191,6 +201,7 @@ export type CrmStore = {
     sensitivity?: Sensitivity
     /** Compartment set (MLS category axis) stamped on the fresh entity + specialization pair. Default '{}'. */
     compartments?: string[]
+    projectIds?: string[]
     /** Fresh-insert source; default 'user'; synthesis passes 'extracted' so the row surfaces in Brain Reviews. */
     source?: 'user' | 'extracted'
     /** Extraction provenance anchor — the Episode this row derives from (Pipeline B / compose / synthesis). */
@@ -199,12 +210,7 @@ export type CrmStore = {
     sourceSessionId?: string | null
     /** The assistant that mediated the write. */
     createdByAssistantId?: string | null
-    /**
-     * Viewer projection for the upsert-dedupe scan: candidates are selected
-     * under this access context so the write never merges into a row the
-     * caller cannot read back (read-your-write). Omitted → the store falls
-     * back to the user-axis projection derived from `userId`.
-     */
+    /** Viewer projection for access-scoped company deduplication. */
     access?: AccessContext
   }): Promise<CompanyRecord>
 
@@ -224,6 +230,7 @@ export type CrmStore = {
     id: string,
     fields: CompanyUpdateFields,
     access?: AccessContext,
+    scope?: { compartments: string[]; projectIds: string[] },
   ): Promise<CompanyRecord | null>
 
   // Contacts
@@ -236,10 +243,17 @@ export type CrmStore = {
     companyId?: string | null
     tags?: string[]
     externalRef?: CrmExternalRef
+    /**
+     * Adapter-verified stable provider subject. This is the only automatic
+     * person write authority; free-form `externalRef`, email, phone, name,
+     * aliases, and fuzzy matches remain metadata/candidates.
+     */
+    stableIdentity?: StableExternalIdentity
     /** Fresh-insert sensitivity tier; omitted → store default (`internal`). Research saves pass `public`. */
     sensitivity?: Sensitivity
     /** Compartment set (MLS category axis) stamped on the fresh entity + specialization pair. Default '{}'. */
     compartments?: string[]
+    projectIds?: string[]
     /** Fresh-insert source; default 'user'; synthesis passes 'extracted' so the row surfaces in Brain Reviews. */
     source?: 'user' | 'extracted'
     /** Extraction provenance anchor — the Episode this row derives from (Pipeline B / compose / synthesis). */
@@ -248,12 +262,7 @@ export type CrmStore = {
     sourceSessionId?: string | null
     /** The assistant that mediated the write. */
     createdByAssistantId?: string | null
-    /**
-     * Viewer projection for the upsert-dedupe scan: candidates are selected
-     * under this access context so the write never merges into a row the
-     * caller cannot read back (read-your-write). Omitted → the store falls
-     * back to the user-axis projection derived from `userId`.
-     */
+    /** Viewer projection used when a stable binding resolves an existing row. */
     access?: AccessContext
   }): Promise<ContactRecord>
 
@@ -267,6 +276,7 @@ export type CrmStore = {
     id: string,
     fields: ContactUpdateFields,
     access?: AccessContext,
+    scope?: { compartments: string[]; projectIds: string[] },
   ): Promise<ContactRecord | null>
 
   // Deals
@@ -283,6 +293,7 @@ export type CrmStore = {
     sensitivity?: Sensitivity
     /** Compartment set (MLS category axis) stamped on the fresh entity + specialization pair. Default '{}'. */
     compartments?: string[]
+    projectIds?: string[]
     /** Fresh-insert source; default 'user'; synthesis passes 'extracted' so the row surfaces in Brain Reviews. */
     source?: 'user' | 'extracted'
     /** Extraction provenance anchor — the Episode this row derives from (Pipeline B / compose / synthesis). */
@@ -303,6 +314,7 @@ export type CrmStore = {
     id: string,
     fields: DealUpdateFields,
     access?: AccessContext,
+    scope?: { compartments: string[]; projectIds: string[] },
   ): Promise<DealRecord | null>
 
   /** Stage-only update — sole cut-point for stage transitions. */
@@ -312,6 +324,7 @@ export type CrmStore = {
     id: string,
     stage: DealStage,
     access?: AccessContext,
+    scope?: { compartments: string[]; projectIds: string[] },
   ): Promise<DealRecord | null>
 
   /**

@@ -58,6 +58,30 @@ function admittedReadabilityExemptObjectIds(template: OfficeTemplateBundle): str
   return [...ids]
 }
 
+const SENSITIVITY_RANK = { public: 0, internal: 1, confidential: 2 } as const
+
+function inheritEvidenceAuthority(
+  authority: OfficeAuthorityProjection,
+  brain: OfficeEvidencePacket['brain'],
+): OfficeAuthorityProjection {
+  const compartments = new Set(authority.compartments)
+  const projectIds = new Set(authority.projectIds ?? [])
+  let sensitivity = authority.sensitivity
+  for (const entry of brain) {
+    if (SENSITIVITY_RANK[entry.sensitivity] > SENSITIVITY_RANK[sensitivity]) {
+      sensitivity = entry.sensitivity
+    }
+    for (const value of entry.compartments ?? []) compartments.add(value)
+    for (const value of entry.projectIds ?? []) projectIds.add(value)
+  }
+  return {
+    ...authority,
+    sensitivity,
+    compartments: [...compartments].sort(),
+    projectIds: [...projectIds].sort(),
+  }
+}
+
 async function stage(deps: OfficeGenerationPipelineDeps, checkpoint: OfficeGenerationCheckpoint, code: OfficeGenerationEvent['code'], params: OfficeGenerationEvent['params'] = {}): Promise<boolean> {
   if (await deps.cancelled()) {
     await deps.emit({ stage: 'cancelled', code: 'office.job.cancelled', params: {} })
@@ -100,6 +124,7 @@ export async function runOfficeGenerationPipeline(input: unknown, deps: OfficeGe
     ])
     const website = inspected.flatMap((result) => result.status === 'fulfilled' ? result.value : [])
     const evidence: OfficeEvidencePacket = { brain, website, conflicts: [] }
+    const inheritedAuthority = inheritEvidenceAuthority(authority, brain)
     for (const entry of website) await deps.emit({ stage: 'grounding', code: 'office.job.reference_url_inspected', params: { url: entry.url } })
     if (!await stage(deps, { stage: 'grounding', version: 3, templateVersionId: template.id, evidence }, 'office.job.context_grounded', { sources: brain.length + website.length })) return { status: 'cancelled' }
 
@@ -109,7 +134,7 @@ export async function runOfficeGenerationPipeline(input: unknown, deps: OfficeGe
     if (snapshot.family !== brief.family) return { status: 'failed', code: 'family_mismatch', message: 'The constructor returned the wrong Office artifact family.' }
     if (!await stage(deps, { stage: 'construct', version: 5, templateVersionId: template.id, snapshot, evidence, claims }, 'office.job.objects_constructed', {})) return { status: 'cancelled' }
 
-    snapshot = assertOfficeArtifactSnapshot(await deps.processMedia(snapshot, authority))
+    snapshot = assertOfficeArtifactSnapshot(await deps.processMedia(snapshot, inheritedAuthority))
     if (!await stage(deps, { stage: 'media', version: 6, templateVersionId: template.id, snapshot, evidence, claims }, 'office.job.media_processed', {})) return { status: 'cancelled' }
     const fit = fitOfficeArtifact(snapshot, {
       readabilityExemptObjectIds: admittedReadabilityExemptObjectIds(template),
@@ -124,7 +149,7 @@ export async function runOfficeGenerationPipeline(input: unknown, deps: OfficeGe
     const reopened = snapshot.family === 'document' ? await reparseOfficeDocument(exported.bytes) : snapshot.family === 'presentation' ? await reparseOfficePresentation(exported.bytes) : await reparseOfficeSpreadsheet(exported.bytes)
     if (reopened.semanticHash !== officeSemanticHash(snapshot) || reopened.layoutSerialization !== fit.result.serialization) return { status: 'failed', code: 'export_reparse_mismatch', message: 'The generated Office file did not reopen to the validated semantic/layout identity.' }
     if (!await stage(deps, { stage: 'export_reparse', version: 9, templateVersionId: template.id, snapshot, evidence, claims }, 'office.job.export_reopened', { bytes: exported.bytes.byteLength })) return { status: 'cancelled' }
-    const committed = await deps.commit(snapshot, { authority, templateVersionId: template.id, summary: brief.outcome })
+    const committed = await deps.commit(snapshot, { authority: inheritedAuthority, templateVersionId: template.id, summary: brief.outcome })
     await deps.checkpoint({ stage: 'completed', version: 10, templateVersionId: template.id, snapshot, evidence, claims })
     await deps.emit({ stage: 'completed', code: 'office.job.completed', params: { artifactId: committed.artifactId, version: committed.version } })
     return { status: 'completed', artifactId: committed.artifactId, version: committed.version, exportBytes: exported.bytes, semanticHash: exported.semanticHash }

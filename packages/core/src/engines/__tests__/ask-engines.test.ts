@@ -1,15 +1,16 @@
-import { describe, it, expect, vi } from 'vitest'
+import { afterEach, describe, it, expect, vi } from 'vitest'
 import {
   createEngineAskers,
   EngineInputError,
   type EnginesEnv,
 } from '../ask-engines.js'
 
-function fakeResponse(body: unknown, status = 200) {
+function fakeResponse(body: unknown, status = 200, headers?: Record<string, string>) {
   const raw = typeof body === 'string' ? body : JSON.stringify(body)
   return {
     ok: status >= 200 && status < 300,
     status,
+    headers: new Headers(headers ?? ((status === 429 || status >= 500) ? { 'Retry-After': '0' } : {})),
     text: async () => raw,
     json: async () => JSON.parse(raw) as unknown,
   } as Response
@@ -23,6 +24,8 @@ function perplexityResponse(content: string, urls: string[] = []) {
 }
 
 const PPLX: EnginesEnv = { ENGINES_PERPLEXITY_API_KEY: 'pplx-k' }
+
+afterEach(() => vi.useRealTimers())
 
 describe('[COMP:core/ask-engines] engine ask framework', () => {
   describe('availability', () => {
@@ -93,7 +96,7 @@ describe('[COMP:core/ask-engines] engine ask framework', () => {
       expect(JSON.stringify(run.payload)).not.toContain('quota')
     })
 
-    it('retries one Perplexity 429 inside the same billable unit', async () => {
+    it('retries a Perplexity 429 inside the same billable unit', async () => {
       const fetchMock = vi
         .fn()
         .mockResolvedValueOnce(fakeResponse('You exceeded your quota', 429))
@@ -107,16 +110,54 @@ describe('[COMP:core/ask-engines] engine ask framework', () => {
       expect(JSON.stringify(run.payload)).not.toContain('quota')
     })
 
-    it('stops after the bounded Perplexity 429 retry and reports the unit failed', async () => {
+    it('stops after three total Perplexity attempts and reports the unit failed', async () => {
       const fetchMock = vi.fn().mockResolvedValue(fakeResponse('still limited', 429))
       const [asker] = createEngineAskers(PPLX, fetchMock as unknown as typeof fetch)
       const run = await asker.run({ question: 'q1' })
 
-      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(fetchMock).toHaveBeenCalledTimes(3)
       expect(run.successfulUnits).toBe(0)
       expect(run.allFailed).toBe(true)
       expect(JSON.stringify(run.payload)).toContain('upstream_error status=429')
       expect(JSON.stringify(run.payload)).not.toContain('still limited')
+    })
+
+    it('[COMP:core/answer-engine-pacing] honors Retry-After before retrying', async () => {
+      vi.useFakeTimers()
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(fakeResponse('limited', 429, { 'Retry-After': '1' }))
+        .mockResolvedValueOnce(perplexityResponse('served'))
+      const [asker] = createEngineAskers(PPLX, fetchMock as unknown as typeof fetch)
+
+      const runPromise = asker.run({ question: 'q' })
+      await vi.advanceTimersByTimeAsync(999)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(1)
+      const run = await runPromise
+
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(run.successfulUnits).toBe(1)
+    })
+
+    it('[COMP:core/answer-engine-pacing] retries transient 5xx and timeout failures with one bounded result', async () => {
+      vi.useFakeTimers()
+      const timeout = Object.assign(new Error('request timed out'), { name: 'TimeoutError' })
+      const fetchMock = vi
+        .fn()
+        .mockRejectedValueOnce(timeout)
+        .mockResolvedValueOnce(fakeResponse('down', 503, { 'Retry-After': '0' }))
+        .mockResolvedValueOnce(perplexityResponse('served'))
+      const [asker] = createEngineAskers(PPLX, fetchMock as unknown as typeof fetch)
+
+      const runPromise = asker.run({ question: 'q' })
+      await vi.runAllTimersAsync()
+      const run = await runPromise
+
+      expect(fetchMock).toHaveBeenCalledTimes(3)
+      expect(run.successfulUnits).toBe(1)
+      expect(run.allFailed).toBe(false)
+      expect(run.payload.results[0].answers).toHaveLength(1)
     })
 
     it('reports allFailed with zero billable units when every unit errored', async () => {
@@ -126,6 +167,56 @@ describe('[COMP:core/ask-engines] engine ask framework', () => {
 
       expect(run.successfulUnits).toBe(0)
       expect(run.allFailed).toBe(true)
+    })
+  })
+
+  describe('[COMP:core/answer-engine-pacing] provider concurrency policy', () => {
+    it('serializes Perplexity across independent panels while preserving each panel order', async () => {
+      let active = 0
+      let maxActive = 0
+      const fetchMock = vi.fn().mockImplementation(async (_url, init) => {
+        active += 1
+        maxActive = Math.max(maxActive, active)
+        const question = (JSON.parse(String(init?.body)) as { messages: Array<{ content: string }> }).messages[0].content
+        await new Promise((resolve) => setTimeout(resolve, 5))
+        active -= 1
+        return perplexityResponse(`answer ${question}`)
+      })
+      const [first] = createEngineAskers(PPLX, fetchMock as unknown as typeof fetch)
+      const [second] = createEngineAskers(PPLX, fetchMock as unknown as typeof fetch)
+
+      const [runA, runB] = await Promise.all([
+        first.run({ questions: ['a1', 'a2'] }),
+        second.run({ questions: ['b1', 'b2'] }),
+      ])
+
+      expect(maxActive).toBe(1)
+      expect(fetchMock).toHaveBeenCalledTimes(4)
+      expect(runA.payload.results.map((result) => result.question)).toEqual(['a1', 'a2'])
+      expect(runB.payload.results.map((result) => result.question)).toEqual(['b1', 'b2'])
+    })
+
+    it('keeps the default provider concurrency at four', async () => {
+      let active = 0
+      let maxActive = 0
+      const fetchMock = vi.fn().mockImplementation(async () => {
+        active += 1
+        maxActive = Math.max(maxActive, active)
+        await new Promise((resolve) => setTimeout(resolve, 5))
+        active -= 1
+        return fakeResponse({ output: [{ content: [{ text: 'answer', annotations: [] }] }] })
+      })
+      const [asker] = createEngineAskers(
+        { ENGINES_OPENAI_API_KEY: 'openai-k' },
+        fetchMock as unknown as typeof fetch,
+      )
+
+      const run = await asker.run({ questions: Array.from({ length: 8 }, (_, index) => `q${index}`) })
+
+      expect(maxActive).toBe(4)
+      expect(run.payload.results.map((result) => result.question)).toEqual(
+        Array.from({ length: 8 }, (_, index) => `q${index}`),
+      )
     })
   })
 

@@ -44,6 +44,8 @@ export async function promotePastedText(input: {
   workspaceId: string
   actingUserId: string
   assistantId?: string | null
+  compartments?: string[]
+  projectIds?: string[]
   promote: ArtifactPromoter
   thresholdTokens?: number
 }): Promise<PastePromotionResult | null> {
@@ -59,6 +61,8 @@ export async function promotePastedText(input: {
     workspaceId: input.workspaceId,
     actingUserId: input.actingUserId,
     assistantId: input.assistantId ?? null,
+    compartments: input.compartments,
+    projectIds: input.projectIds,
     pathPrefix: '/uploads/pastes',
   })
   if (!promoted) return null

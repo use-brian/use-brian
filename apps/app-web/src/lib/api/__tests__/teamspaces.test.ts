@@ -40,6 +40,7 @@ const TS: Teamspace = {
   icon: null,
   description: null,
   sensitivity: "internal",
+  workspaceGroupId: null,
   isDefault: false,
   position: 0,
   memberCount: 3,
@@ -73,7 +74,7 @@ describe("[COMP:app-web/teamspaces-sdk] list + create", () => {
   });
 });
 
-describe("[COMP:app-web/teamspaces-sdk] patch + delete", () => {
+describe("[COMP:app-web/teamspace-context] patch + Team binding", () => {
   it("PATCHes only the provided fields", async () => {
     mockAuthFetch.mockResolvedValueOnce(json({ ...TS, name: "Renamed" }));
     await updateTeamspace("ts-1", { name: "Renamed" });
@@ -81,6 +82,13 @@ describe("[COMP:app-web/teamspaces-sdk] patch + delete", () => {
     expect(String(url)).toContain("/api/teamspaces/ts-1");
     expect(init?.method).toBe("PATCH");
     expect(JSON.parse(String(init?.body))).toEqual({ name: "Renamed" });
+  });
+
+  it("links a Teamspace through a stable Team id", async () => {
+    mockAuthFetch.mockResolvedValueOnce(json({ ...TS, workspaceGroupId: "team-1" }));
+    await updateTeamspace("ts-1", { workspaceGroupId: "team-1" });
+    const [, init] = mockAuthFetch.mock.calls[0];
+    expect(JSON.parse(String(init?.body))).toEqual({ workspaceGroupId: "team-1" });
   });
 
   it("DELETEs a teamspace", async () => {

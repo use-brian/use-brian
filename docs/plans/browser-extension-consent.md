@@ -23,6 +23,18 @@ Turning pre-approval off revokes the current idle approval so the next command a
 credentials and the pre-approval preference are independent; disconnecting does not silently change
 the user's preference.
 
+## Chromium control indicator
+
+The Chromium extension drives an allowed tab through `chrome.debugger`, and Chrome unconditionally
+shows its own browser-level indicator while that connection is active. Chrome owns the indicator's
+exact sentence, including the phrase **"debugging this browser"**; the extension can neither rewrite
+that phrase nor suppress the indicator in a normal user-launched browser.
+
+The Chromium Allow window and extension popup therefore explain that Chrome uses "debugging this
+browser" as its label for active browser control. They also state that Cancel in Chrome's indicator
+ends control, matching the `canceled_by_user` consent-revocation behavior. Firefox does not receive
+this Chromium-specific explanation because its native control path does not show that indicator.
+
 ## Accessibility refs and rendered controls
 
 The local browser backend discovers controls through Chromium's accessibility tree and keeps each

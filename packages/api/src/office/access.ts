@@ -99,13 +99,14 @@ export const OFFICE_ACCESS_SQL = `
          a.owner_user_id              AS "ownerUserId",
          a.sensitivity                AS sensitivity,
          a.visibility_user_ids        AS "visibilityUserIds",
-         a.required_compartments      AS "requiredCompartments",
+         a.compartments               AS "requiredCompartments",
          COALESCE(src.eligible, TRUE) AS "sourcesEligible",
          a.default_workspace_role     AS "defaultWorkspaceRole",
          a.lifecycle_state            AS "lifecycleState",
          wm.role                      AS "memberRole",
          wm.clearance                 AS "memberClearance",
-         wm.compartments              AS "memberCompartments",
+         public.effective_member_team_compartments(wm.user_id, wm.workspace_id)
+                                      AS "memberCompartments",
          g.role                       AS "explicitRole",
          g.revoked_at                 AS "grantRevokedAt"
     FROM office_artifacts a
@@ -118,7 +119,11 @@ export const OFFICE_ACCESS_SQL = `
         CASE s.sensitivity WHEN 'public' THEN 0 WHEN 'internal' THEN 1 WHEN 'confidential' THEN 2 ELSE 3 END
           <= CASE wm.clearance WHEN 'public' THEN 0 WHEN 'internal' THEN 1 ELSE 2 END
         AND (cardinality(s.visibility_user_ids)=0 OR $2=ANY(s.visibility_user_ids))
-        AND (wm.compartments IS NULL OR s.required_compartments <@ wm.compartments)
+        AND (
+          public.effective_member_team_compartments(wm.user_id, wm.workspace_id) IS NULL
+          OR s.required_compartments <@
+             public.effective_member_team_compartments(wm.user_id, wm.workspace_id)
+        )
       ) AS eligible
       FROM office_artifact_sources s
       WHERE s.artifact_id=a.id AND s.retracted_at IS NULL

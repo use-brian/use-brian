@@ -10,7 +10,14 @@ import type {
   Message,
 } from '../../providers/types.js'
 import { buildTool } from '../../tools/types.js'
-import { queryLoop, FALLBACK_REPLY, type QueryEvent } from '../query-loop.js'
+import {
+  queryLoop,
+  FALLBACK_REPLY,
+  MAX_TURNS_FALLBACK_REPLY,
+  TOOL_BUDGET_FALLBACK_REPLY,
+  TOOL_FAILURE_FALLBACK_REPLY,
+  type QueryEvent,
+} from '../query-loop.js'
 
 type SendCall = { messages: Message[]; sendOpts?: SendOptions }
 
@@ -98,6 +105,14 @@ const toolUseChunks = (id: string, msg = 'hi'): StreamChunk[] => [
   { type: 'tool_use_delta', id, input: JSON.stringify({ msg }) },
   { type: 'tool_use_end', id },
   { type: 'message_end', stopReason: 'tool_use', usage: { inputTokens: 10, outputTokens: 5 } },
+]
+
+const terminalToolUseChunks = (id: string, msg = 'hi'): StreamChunk[] => [
+  { type: 'message_start', model: 'mock-model' },
+  { type: 'tool_use_start', id, name: 'echo' },
+  { type: 'tool_use_delta', id, input: JSON.stringify({ msg }) },
+  { type: 'tool_use_end', id },
+  { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 10, outputTokens: 5 } },
 ]
 
 const flakyToolUseChunks = (attempt: number): StreamChunk[] => [
@@ -240,8 +255,8 @@ describe('[COMP:engine/query-loop] Isolated terminal finalization', () => {
 
     const events = await runLoop(provider)
 
-    expect(finalText(events)).toBe(FALLBACK_REPLY)
-    expect(streamedText(events)).toBe(FALLBACK_REPLY)
+    expect(finalText(events)).toBe(TOOL_BUDGET_FALLBACK_REPLY)
+    expect(streamedText(events)).toBe(TOOL_BUDGET_FALLBACK_REPLY)
     expect(streamedText(events)).not.toContain('[User Context]')
     expect(streamedText(events)).not.toContain('[Response]')
     expect(sessionCalls).toHaveLength(2)
@@ -295,6 +310,54 @@ describe('[COMP:engine/query-loop] Isolated terminal finalization', () => {
     expect(finalText(events)).toContain('fictional records service')
   })
 
+  it('explains repeated tool failures when that finalizer is invalid', async () => {
+    const { provider } = scriptedProvider({
+      sessionScripts: Array.from({ length: 5 }, (_, index) => flakyToolUseChunks(index + 1)),
+      finalizerScript: textChunks('not-json'),
+    })
+    const events: QueryEvent[] = []
+
+    for await (const event of queryLoop({
+      provider,
+      model: 'mock-model',
+      systemPrompt: PRIVATE_SYSTEM_MARKER,
+      messages: [{ role: 'user', content: 'Check the fictional records service.' }],
+      tools: new Map([['flaky', flakyTool]]),
+      context: baseContext,
+      maxTurns: 10,
+      maxToolCalls: 20,
+    })) {
+      events.push(event)
+    }
+
+    expect(finalText(events)).toBe(TOOL_FAILURE_FALLBACK_REPLY)
+    expect(streamedText(events)).toBe(TOOL_FAILURE_FALLBACK_REPLY)
+  })
+
+  it('retains the generic fallback when only terminal closing text was lost', async () => {
+    const { provider } = scriptedProvider({
+      sessionScripts: [terminalToolUseChunks('t1')],
+      finalizerScript: textChunks('not-json'),
+    })
+    const events: QueryEvent[] = []
+
+    for await (const event of queryLoop({
+      provider,
+      model: 'mock-model',
+      systemPrompt: PRIVATE_SYSTEM_MARKER,
+      messages: [{ role: 'user', content: 'Check the fictional records.' }],
+      tools: new Map([['echo', echoTool]]),
+      context: baseContext,
+      maxTurns: 10,
+      maxToolCalls: 10,
+    })) {
+      events.push(event)
+    }
+
+    expect(finalText(events)).toBe(FALLBACK_REPLY)
+    expect(streamedText(events)).toBe(FALLBACK_REPLY)
+  })
+
   it('uses the isolated finalizer when maxTurns ends on a tool turn', async () => {
     const { provider, sessionCalls, streamCalls } = scriptedProvider({
       sessionScripts: [toolUseChunks('t1')],
@@ -322,6 +385,30 @@ describe('[COMP:engine/query-loop] Isolated terminal finalization', () => {
     }
     expect(payload.stopReason).toEqual({ code: 'max_turns' })
     expect(finalText(events)).toBe(EXPLANATION)
+  })
+
+  it('explains the maximum turn limit when the maxTurns finalizer is invalid', async () => {
+    const { provider } = scriptedProvider({
+      sessionScripts: [toolUseChunks('t1')],
+      finalizerScript: textChunks('not-json'),
+    })
+    const events: QueryEvent[] = []
+
+    for await (const event of queryLoop({
+      provider,
+      model: 'mock-model',
+      systemPrompt: PRIVATE_SYSTEM_MARKER,
+      messages: [{ role: 'user', content: 'Check the fictional records.' }],
+      tools: new Map([['echo', echoTool]]),
+      context: baseContext,
+      maxTurns: 1,
+      maxToolCalls: 10,
+    })) {
+      events.push(event)
+    }
+
+    expect(finalText(events)).toBe(MAX_TURNS_FALLBACK_REPLY)
+    expect(streamedText(events)).toBe(MAX_TURNS_FALLBACK_REPLY)
   })
 
   it('keeps the twelve most recent successful evidence items', async () => {
@@ -366,8 +453,8 @@ describe('[COMP:engine/query-loop] Isolated terminal finalization', () => {
 
     const events = await runLoop(provider)
 
-    expect(finalText(events)).toBe(FALLBACK_REPLY)
-    expect(streamedText(events)).toBe(FALLBACK_REPLY)
+    expect(finalText(events)).toBe(TOOL_BUDGET_FALLBACK_REPLY)
+    expect(streamedText(events)).toBe(TOOL_BUDGET_FALLBACK_REPLY)
   })
 
   it('fails closed when the fresh provider request throws', async () => {
@@ -378,8 +465,8 @@ describe('[COMP:engine/query-loop] Isolated terminal finalization', () => {
 
     const events = await runLoop(provider)
 
-    expect(finalText(events)).toBe(FALLBACK_REPLY)
-    expect(streamedText(events)).toBe(FALLBACK_REPLY)
+    expect(finalText(events)).toBe(TOOL_BUDGET_FALLBACK_REPLY)
+    expect(streamedText(events)).toBe(TOOL_BUDGET_FALLBACK_REPLY)
     expect(sessionCalls).toHaveLength(2)
     expect(streamCalls).toHaveLength(1)
   })

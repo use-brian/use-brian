@@ -12,6 +12,7 @@ import type {
   CrmContactRow,
   CrmData,
   CrmDealRow,
+  CrmEmailDraft,
   CrmFieldDefinition,
 } from "@/lib/api/crm";
 
@@ -254,6 +255,17 @@ export function crmEmailApprovalQueue(
     );
     return contacts.length > 0 ? [{ approval, contacts }] : [];
   });
+}
+
+/** Exact-address relationship context for a canonical chat-authored draft. */
+export function crmEmailDraftContacts(
+  data: CrmData,
+  draft: CrmEmailDraft,
+): CrmContactRow[] {
+  const recipients = new Set([...draft.to, ...draft.cc].map(bareAddress));
+  return data.contacts.filter(
+    (contact) => contact.email && recipients.has(bareAddress(contact.email)),
+  );
 }
 
 function recordContactEmails(record: CrmApprovalRecord, data: CrmData): string[] {

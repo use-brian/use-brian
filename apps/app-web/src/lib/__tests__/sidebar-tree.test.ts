@@ -47,6 +47,7 @@ function row(
     position: opts.position ?? 0,
     icon: null,
     teamspaceId: opts.teamspaceId ?? null,
+    projectId: null,
   };
 }
 

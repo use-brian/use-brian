@@ -38,8 +38,8 @@ import {
   type EmailReviewContext,
   type PendingApprovalRow,
 } from "@/lib/api/approvals";
-import type { CrmData } from "@/lib/api/crm";
-import type { CrmEmailApprovalQueueItem } from "@/lib/crm-r2";
+import type { CrmData, CrmEmailDraft } from "@/lib/api/crm";
+import { crmEmailDraftContacts, type CrmEmailApprovalQueueItem } from "@/lib/crm-r2";
 import { requestApprovalsRefresh } from "@/lib/approvals-events";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
@@ -167,6 +167,7 @@ export function CrmEmailReviewWorkspace({
   workspaceId,
   data,
   items,
+  canonicalDrafts = [],
   selectedId,
   loading,
   loadError,
@@ -179,6 +180,7 @@ export function CrmEmailReviewWorkspace({
   workspaceId: string;
   data: CrmData;
   items: readonly CrmEmailApprovalQueueItem[];
+  canonicalDrafts?: readonly CrmEmailDraft[];
   selectedId: string | null;
   loading: boolean;
   loadError: boolean;
@@ -194,6 +196,10 @@ export function CrmEmailReviewWorkspace({
   const selected = useMemo(
     () => items.find((item) => item.approval.id === selectedId) ?? null,
     [items, selectedId],
+  );
+  const selectedDraft = useMemo(
+    () => canonicalDrafts.find((draft) => draft.id === selectedId) ?? null,
+    [canonicalDrafts, selectedId],
   );
   const row = selected?.approval ?? null;
   const savedBody = typeof row?.arguments.body === "string" ? row.arguments.body : "";
@@ -242,7 +248,10 @@ export function CrmEmailReviewWorkspace({
     : emailT.primaryAccount;
   const dirty = body !== savedBody;
   const revision = row?.approvalPayload.emailDraftRevision ?? 1;
-  const selectedContactIds = new Set(selected?.contacts.map((contact) => contact.id) ?? []);
+  const selectedContacts = selectedDraft
+    ? crmEmailDraftContacts(data, selectedDraft)
+    : selected?.contacts ?? [];
+  const selectedContactIds = new Set(selectedContacts.map((contact) => contact.id));
   const relatedDeals = data.deals.filter(
     (deal) => deal.contactId && selectedContactIds.has(deal.contactId),
   );
@@ -282,7 +291,9 @@ export function CrmEmailReviewWorkspace({
     setOperation(null);
   }
 
-  if (items.length === 0) {
+  const totalDrafts = canonicalDrafts.length + items.length;
+
+  if (totalDrafts === 0) {
     return (
       <div data-email-empty-state className="grid h-full min-h-0 place-items-center bg-muted/10 p-6 text-center">
         <div className="max-w-sm">
@@ -308,11 +319,16 @@ export function CrmEmailReviewWorkspace({
         data-email-context-rail
         className="flex min-h-[24rem] shrink-0 flex-col border-b border-border/70 bg-background lg:min-h-0 lg:min-w-60 lg:flex-1 lg:border-b-0 lg:border-r"
       >
-        {row && selected && (
+        {(selectedDraft || selected) && (
           <div data-email-crm-profile className="shrink-0 border-b border-border/70 px-3 py-3">
             <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{t.crmProfile}</div>
             <div className="mt-2 space-y-2">
-              {selected.contacts.map((contact) => {
+              {selectedContacts.length === 0 && (
+                <p className="rounded-xl border border-border bg-muted/20 p-3 text-[11px] text-muted-foreground">
+                  {t.noLinkedContact}
+                </p>
+              )}
+              {selectedContacts.map((contact) => {
                 const company = contact.companyId
                   ? data.companies.find((candidate) => candidate.id === contact.companyId)
                   : null;
@@ -360,7 +376,7 @@ export function CrmEmailReviewWorkspace({
           <div className="min-w-0">
             <h2 className="text-sm font-semibold">{t.emailDrafts}</h2>
             <p className="mt-0.5 text-[11px] text-muted-foreground">
-              {format(t.emailDraftCount, { count: String(items.length) })}
+              {format(t.emailDraftCount, { count: String(totalDrafts) })}
             </p>
           </div>
           <Button
@@ -382,6 +398,44 @@ export function CrmEmailReviewWorkspace({
 
         <div data-email-draft-list className="min-h-0 flex-1 overflow-y-auto p-2 max-lg:max-h-48">
           <ol className="space-y-1">
+              {canonicalDrafts.map((draft) => {
+                const contacts = crmEmailDraftContacts(data, draft);
+                const active = draft.id === selectedDraft?.id;
+                const switchBlocked = dirty && !active;
+                return (
+                  <li key={draft.id}>
+                    <button
+                      type="button"
+                      disabled={switchBlocked}
+                      aria-pressed={active}
+                      title={switchBlocked ? t.finishDraftBeforeSwitching : undefined}
+                      onClick={() => onSelect(draft.id)}
+                      className={cn(
+                        "group w-full rounded-lg px-2.5 py-2.5 text-left transition-colors",
+                        active ? "bg-foreground text-background shadow-sm" : "hover:bg-muted",
+                        switchBlocked && "cursor-not-allowed opacity-45",
+                      )}
+                    >
+                      <div className="flex items-start gap-2">
+                        <Mail className={cn("mt-0.5 size-3.5 shrink-0", active ? "text-background/75" : "text-sky-600")} aria-hidden />
+                        <div className="min-w-0 flex-1">
+                          <div className="line-clamp-2 text-xs font-medium leading-snug">
+                            {draft.subject || t.reviewDraft}
+                          </div>
+                          <div className={cn("mt-1 truncate text-[11px]", active ? "text-background/65" : "text-muted-foreground")}>
+                            {contacts.length > 0 ? contacts.map((contact) => contact.name).join(", ") : draft.to.join(", ")}
+                          </div>
+                          <div className={cn("mt-1 flex items-center justify-between gap-2 text-[10px]", active ? "text-background/55" : "text-muted-foreground/80")}>
+                            <span>{format(t.draftRevision, { number: draft.revision })}</span>
+                            <time>{new Date(draft.updatedAt).toLocaleDateString()}</time>
+                          </div>
+                        </div>
+                        <ChevronRight className={cn("mt-1 size-3.5 shrink-0 opacity-0 transition-opacity group-hover:opacity-100", active && "opacity-100")} aria-hidden />
+                      </div>
+                    </button>
+                  </li>
+                );
+              })}
               {items.map((item) => {
                 const itemPreview = parseToolPreview(item.approval.toolName, item.approval.arguments);
                 const itemEmail = itemPreview?.kind === "email_send" ? itemPreview.email : null;
@@ -461,7 +515,45 @@ export function CrmEmailReviewWorkspace({
           </div>
         </div>
 
-        {row && selected ? (
+        {selectedDraft ? (
+          <>
+            <header className="shrink-0 border-b border-border/70 px-5 py-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex min-w-0 items-center gap-2 text-[11px] font-medium text-muted-foreground">
+                  <Mail className="size-3.5 shrink-0" aria-hidden />
+                  <span>{t.canonicalDraftAnchor}</span>
+                </div>
+                <span className="shrink-0 rounded-full border border-border bg-muted/50 px-2 py-0.5 text-[10px] text-muted-foreground">
+                  {format(t.draftRevision, { number: selectedDraft.revision })}
+                </span>
+              </div>
+              <h3 className="mt-1 truncate text-sm font-semibold">{selectedDraft.subject || t.reviewDraft}</h3>
+              <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
+                {selectedDraft.from || emailT.primaryAccount} → {selectedDraft.to.join(", ")}
+              </p>
+            </header>
+
+            <section className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+              <div className="rounded-xl border border-sky-500/20 bg-sky-500/5 px-3 py-2.5 text-[11px] leading-relaxed text-muted-foreground">
+                {t.canonicalDraftDescription}
+              </div>
+              <dl className="mt-3 grid grid-cols-[4.5rem_minmax(0,1fr)] gap-x-2 gap-y-1.5 rounded-xl border border-border/70 bg-muted/20 px-3 py-3 text-[11px]">
+                <dt className="text-muted-foreground">{t.draftId}</dt><dd className="break-all font-mono text-[10px]">{selectedDraft.id}</dd>
+                <dt className="text-muted-foreground">{emailT.from}</dt><dd className="break-words">{selectedDraft.from || emailT.primaryAccount}</dd>
+                <dt className="text-muted-foreground">{emailT.to}</dt><dd className="break-words">{selectedDraft.to.join(", ")}</dd>
+                {selectedDraft.cc.length > 0 && <><dt className="text-muted-foreground">{emailT.cc}</dt><dd className="break-words">{selectedDraft.cc.join(", ")}</dd></>}
+                {selectedDraft.bcc.length > 0 && <><dt className="text-muted-foreground">{emailT.bcc}</dt><dd className="break-words">{selectedDraft.bcc.join(", ")}</dd></>}
+                <dt className="text-muted-foreground">{emailT.subject}</dt><dd className="break-words font-medium">{selectedDraft.subject}</dd>
+              </dl>
+              <div className="mt-4 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                {t.replyBody}
+              </div>
+              <pre data-canonical-email-body className="mt-2 min-h-64 whitespace-pre-wrap break-words rounded-xl border border-border bg-background px-4 py-4 font-sans text-[12.5px] leading-6 text-foreground/90">
+                {selectedDraft.body}
+              </pre>
+            </section>
+          </>
+        ) : row && selected ? (
           <>
             <header className="shrink-0 border-b border-border/70 px-5 py-3">
               <div className="flex items-center justify-between gap-3">

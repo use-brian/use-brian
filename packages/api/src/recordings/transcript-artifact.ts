@@ -10,6 +10,8 @@ export type PersistTranscriptInput = {
   actingUserId: string
   assistantId: string | null
   sensitivity: string
+  compartments?: string[]
+  projectIds?: string[]
   utterances: readonly TranscriptLineSource[]
   title?: string | null
 }
@@ -46,6 +48,8 @@ export function createTranscriptArtifactWriter(deps: {
         workspaceId: input.workspaceId,
         userId: input.actingUserId,
         ...(input.assistantId ? { assistantId: input.assistantId } : {}),
+        writeCompartments: input.compartments ?? [],
+        writeProjectIds: input.projectIds ?? [],
       }
       const bytes = Buffer.from(text, 'utf8')
       const stored = await deps.filesApi.writeBytes(ctx, {

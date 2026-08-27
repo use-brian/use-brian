@@ -7,6 +7,12 @@ import { resolveUser } from './route-helpers.js'
 import { getWorkspaceRoleSystem, getWorkspaceMembershipWithClearanceSystem } from '../db/workspace-store.js'
 import { canRead, type Sensitivity } from '@use-brian/core'
 import {
+  ContextNotAvailableError,
+  resolveTurnScopeSystem,
+  type TurnScopeAssistant,
+} from '../context-scope/resolve-turn-scope.js'
+import { assertContextActivationReady } from '../context-scope/context-readiness.js'
+import {
   recordRoomMentionsForMessage,
   reconcileRoomMentionsForEdit,
   fetchRoomMentionRosters,
@@ -111,6 +117,8 @@ export type SessionRouteOptions = {
     senderName: string | null
     text: string
     effectiveClearance: string | null
+    compartments: string[]
+    projectIds: string[]
   }) => void
   /**
    * Room human `@mention` badge signal (docs/plans/room-human-mentions.md
@@ -258,10 +266,13 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       const result = await query<{
         id: string; title: string | null; channelId: string;
         lastActiveAt: Date; status: string; appOrigin: string | null
+        contextGroupId: string | null; contextProjectId: string | null
       }>(
         `SELECT s.id, s.title, s.channel_id as "channelId",
                 s.last_active_at as "lastActiveAt", s.status,
-                s.app_origin as "appOrigin"
+                s.app_origin as "appOrigin",
+                s.context_group_id as "contextGroupId",
+                s.context_project_id as "contextProjectId"
          FROM sessions s
          WHERE s.assistant_id = $1 AND s.user_id = $2
            -- Enumerations list only owner-scoped sessions. Workspace-shared
@@ -289,6 +300,8 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         // splits on it — chat-origin rows are "Chats", the rest are the
         // dock's ambient threads under "Other conversations".
         appOrigin: s.appOrigin,
+        contextGroupId: s.contextGroupId,
+        contextProjectId: s.contextProjectId,
       })))
     } catch (err) {
       console.error('Sessions list error:', err)
@@ -340,12 +353,15 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         lastActiveAt: Date; status: string
         starterUserId: string; effectiveClearance: string | null
         assistantId: string
+        contextGroupId: string | null; contextProjectId: string | null
       }>(
         `SELECT s.id, s.title, s.channel_id AS "channelId",
                 s.last_active_at AS "lastActiveAt", s.status,
                 s.user_id AS "starterUserId",
                 s.effective_clearance AS "effectiveClearance",
-                s.assistant_id AS "assistantId"
+                s.assistant_id AS "assistantId",
+                s.context_group_id AS "contextGroupId",
+                s.context_project_id AS "contextProjectId"
            FROM sessions s
            JOIN assistants a ON a.id = s.assistant_id
           WHERE a.workspace_id = $1
@@ -383,6 +399,8 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         // labels resolve from it (rooms may bind any workspace assistant at
         // creation, not just the primary).
         assistantId: s.assistantId,
+        contextGroupId: s.contextGroupId,
+        contextProjectId: s.contextProjectId,
       })))
     } catch (err) {
       console.error('Workspace sessions list error:', err)
@@ -409,9 +427,11 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       const user = await resolveUser(jwtUserId)
       if (!user) { res.status(401).json({ error: 'Unauthorized' }); return }
 
-      const { workspaceId, assistantId } = req.body as {
+      const { workspaceId, assistantId, contextGroupId, contextProjectId } = req.body as {
         workspaceId?: string
         assistantId?: string
+        contextGroupId?: string | null
+        contextProjectId?: string | null
       }
       if (!workspaceId) {
         res.status(400).json({ error: 'Missing workspaceId' })
@@ -442,16 +462,52 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         return
       }
 
-      const clearanceRow = await query<{ clearance: string | null }>(
-        `SELECT clearance FROM assistants WHERE id = $1`,
+      const clearanceRow = await query<TurnScopeAssistant>(
+        `SELECT id, workspace_id AS "workspaceId", kind, clearance, compartments,
+                default_compartments AS "defaultCompartments",
+                team_scope_mode AS "teamScopeMode",
+                default_workspace_group_id AS "defaultWorkspaceGroupId",
+                project_scope_mode AS "projectScopeMode",
+                default_project_id AS "defaultProjectId"
+           FROM assistants WHERE id = $1`,
         [assistant.id],
       )
+      const scopedAssistant = clearanceRow.rows[0]
+      const requestedContext = contextGroupId !== undefined || contextProjectId !== undefined
+      if (requestedContext) {
+        try {
+          if (contextGroupId || contextProjectId) {
+            await assertContextActivationReady(workspaceId)
+          }
+          if (!scopedAssistant) throw new ContextNotAvailableError('workspace', 'not_found')
+          await resolveTurnScopeSystem({
+            userId: user.id,
+            assistant: scopedAssistant,
+            workspaceId,
+            session: {
+              contextGroupId: contextGroupId ?? null,
+              contextProjectId: contextProjectId ?? null,
+            },
+          })
+        } catch (error) {
+          const code = (error as { code?: string }).code
+          res.status(code === 'context_activation_blocked' ? 409 : 404).json({
+            error: code ?? 'context_not_available',
+            ...((error as { failedChecks?: string[] }).failedChecks
+              ? { failedChecks: (error as { failedChecks: string[] }).failedChecks }
+              : {}),
+          })
+          return
+        }
+      }
 
       const session = await createWorkspaceChatSession({
         assistantId: assistant.id,
         starterUserId: user.id,
         workspaceId,
-        effectiveClearance: clearanceRow.rows[0]?.clearance ?? null,
+        effectiveClearance: scopedAssistant?.clearance ?? null,
+        ...(contextGroupId !== undefined ? { contextGroupId } : {}),
+        ...(contextProjectId !== undefined ? { contextProjectId } : {}),
       })
 
       res.status(201).json({
@@ -462,10 +518,109 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         status: session.status,
         startedByUserId: user.id,
         assistantId: session.assistantId,
+        contextGroupId: session.contextGroupId,
+        contextProjectId: session.contextProjectId,
       })
     } catch (err) {
       console.error('Workspace session create error:', err)
       res.status(500).json({ error: 'Failed to start a workspace chat' })
+    }
+  })
+
+  /**
+   * PUT /api/sessions/:id/context
+   *
+   * The only context mutation path for an existing conversation. It is
+   * intentionally limited to the creator and to sessions with no messages;
+   * after the first message the immutable binding is part of the security
+   * boundary and cannot be changed by a generic session patch.
+   */
+  router.put('/:id/context', async (req, res) => {
+    try {
+      const user = await resolveUser((req as { userId?: string }).userId)
+      if (!user) { res.status(401).json({ error: 'Unauthorized' }); return }
+
+      const { contextGroupId, contextProjectId } = req.body as {
+        contextGroupId?: string | null
+        contextProjectId?: string | null
+      }
+      if (contextGroupId === undefined && contextProjectId === undefined) {
+        res.status(400).json({ error: 'Missing context binding' })
+        return
+      }
+
+      const sessionResult = await query<TurnScopeAssistant & {
+        sessionId: string
+        contextGroupId: string | null
+        contextProjectId: string | null
+        messageCount: number
+      }>(
+        `SELECT s.id AS "sessionId", s.context_group_id AS "contextGroupId",
+                s.context_project_id AS "contextProjectId",
+                (SELECT count(*)::int FROM session_messages sm WHERE sm.session_id = s.id) AS "messageCount",
+                a.id, a.workspace_id AS "workspaceId", a.kind, a.clearance, a.compartments,
+                a.default_compartments AS "defaultCompartments",
+                a.team_scope_mode AS "teamScopeMode",
+                a.default_workspace_group_id AS "defaultWorkspaceGroupId",
+                a.project_scope_mode AS "projectScopeMode",
+                a.default_project_id AS "defaultProjectId"
+           FROM sessions s
+           JOIN assistants a ON a.id = s.assistant_id
+          WHERE s.id = $1 AND s.user_id = $2`,
+        [req.params.id, user.id],
+      )
+      const session = sessionResult.rows[0]
+      if (!session) { res.status(404).json({ error: 'not_found' }); return }
+      if (session.messageCount > 0) {
+        res.status(409).json({ error: 'context_locked' })
+        return
+      }
+
+      const nextGroupId = contextGroupId === undefined ? session.contextGroupId : contextGroupId
+      const nextProjectId = contextProjectId === undefined ? session.contextProjectId : contextProjectId
+      try {
+        if (nextGroupId || nextProjectId) {
+          await assertContextActivationReady(session.workspaceId!)
+        }
+        await resolveTurnScopeSystem({
+          userId: user.id,
+          assistant: session,
+          workspaceId: session.workspaceId,
+          session: {
+            contextGroupId: nextGroupId,
+            contextProjectId: nextProjectId,
+          },
+        })
+      } catch (error) {
+        const code = (error as { code?: string }).code
+        res.status(code === 'context_activation_blocked' ? 409 : 404).json({
+          error: code ?? 'context_not_available',
+          ...((error as { failedChecks?: string[] }).failedChecks
+            ? { failedChecks: (error as { failedChecks: string[] }).failedChecks }
+            : {}),
+        })
+        return
+      }
+
+      const updated = await query<{ contextGroupId: string | null; contextProjectId: string | null }>(
+        `UPDATE sessions
+            SET context_group_id = $3,
+                context_project_id = $4,
+                context_locked_at = CASE
+                  WHEN $3::uuid IS NOT NULL OR $4::uuid IS NOT NULL THEN now()
+                  ELSE NULL
+                END
+          WHERE id = $1 AND user_id = $2
+            AND NOT EXISTS (SELECT 1 FROM session_messages WHERE session_id = sessions.id)
+        RETURNING context_group_id AS "contextGroupId",
+                  context_project_id AS "contextProjectId"`,
+        [session.sessionId, user.id, nextGroupId, nextProjectId],
+      )
+      if (!updated.rows[0]) { res.status(409).json({ error: 'context_locked' }); return }
+      res.json(updated.rows[0])
+    } catch (error) {
+      console.error('Session context update error:', error)
+      res.status(500).json({ error: 'Failed to update session context' })
     }
   })
 
@@ -903,6 +1058,8 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
             senderName: user.name ?? null,
             text,
             effectiveClearance: session.effectiveClearance,
+            compartments: session.contextCompartments,
+            projectIds: session.contextProjectId ? [session.contextProjectId] : [],
           })
         } catch (err) {
           console.error('[sessions] room post capture hook failed:', err)

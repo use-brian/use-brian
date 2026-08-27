@@ -31,6 +31,13 @@ describe('[COMP:skills/slash-command] goal built-in skill', () => {
     expect(body).toMatch(/monitor/i) // setGoal without workTask = monitor
   })
 
+  it('reads the configurable workspace default when the user gives no budget', () => {
+    const body = skill?.content ?? ''
+    expect(body).toMatch(/configureGoalDefaultBudget/)
+    expect(body).toMatch(/defaults do not fill missing siblings/i)
+    expect(body).toMatch(/effective workspace default/i)
+  })
+
   it('teaches that a verify iteration sees only the outcome text', () => {
     const body = skill?.content ?? ''
     expect(body).toMatch(/sees ONLY this text/)

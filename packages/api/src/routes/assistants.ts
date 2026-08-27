@@ -52,8 +52,9 @@ import {
 } from '@use-brian/shared'
 import {
   decidePlaybookRule,
-  listPlaybookRules,
+  listPlaybookRulesForViewer,
   MAX_ACTIVE_PLAYBOOK_RULES,
+  MAX_ACTIVE_DECISION_PLAYBOOK_RULES,
   type PlaybookDecision,
 } from '../db/playbook-store.js'
 import type { SkillStore, WorkspaceSkillStore } from '../db/skill-store.js'
@@ -86,6 +87,7 @@ type AssistantRouteOptions = {
    */
   workspaceSkillStore?: Pick<WorkspaceSkillStore, 'getByIdSystem' | 'listForWorkspace'>
   capabilityStore: CapabilityStore
+  analytics?: import('@use-brian/core').AnalyticsLogger
   /**
    * Per-assistant connector grants store. Reserved for future inline
    * surfaces on this router (e.g. show "grant required" warnings on
@@ -494,8 +496,16 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
     const member = await verifyMembership(req, res)
     if (!member) return
     try {
-      const rules = await listPlaybookRules(req.params.assistantId)
-      res.json({ rules, maxActive: MAX_ACTIVE_PLAYBOOK_RULES })
+      const rules = await listPlaybookRulesForViewer({
+        assistantId: req.params.assistantId,
+        userId: member.userId,
+        isAssistantOwner: member.role === 'owner',
+      })
+      res.json({
+        rules,
+        maxActive: MAX_ACTIVE_PLAYBOOK_RULES,
+        maxActiveDecision: MAX_ACTIVE_DECISION_PLAYBOOK_RULES,
+      })
     } catch (err) {
       console.error('[assistants] playbook list failed:', err)
       res.status(500).json({ error: 'Failed to list playbook rules' })
@@ -507,10 +517,6 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
     async (req, res) => {
       const member = await verifyMembership(req, res)
       if (!member) return
-      if (member.role !== 'owner') {
-        res.status(403).json({ error: 'Only the owner can decide playbook rules' })
-        return
-      }
       const { decision } = req.body as { decision?: string }
       if (decision !== 'approve' && decision !== 'reject' && decision !== 'retire') {
         res.status(400).json({ error: "decision must be 'approve', 'reject', or 'retire'" })
@@ -522,11 +528,17 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
           ruleId: req.params.ruleId,
           decision: decision as PlaybookDecision,
           userId: member.userId,
+          workspaceId: member.workspaceId,
+          isAssistantOwner: member.role === 'owner',
         })
+        if (result === 'forbidden') {
+          res.status(403).json({ error: 'You can decide only your own learned rules' })
+          return
+        }
         if (result === 'cap') {
           res.status(409).json({
             error: 'active_rule_cap',
-            message: `An assistant can hold at most ${MAX_ACTIVE_PLAYBOOK_RULES} active rules. Retire one first.`,
+            message: 'The active rule limit has been reached. Retire one first.',
           })
           return
         }
@@ -534,6 +546,24 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
           res.status(404).json({ error: 'Rule not found or not in a decidable state' })
           return
         }
+        options.analytics?.logEvent({
+          userId: member.userId,
+          actorUserId: member.userId,
+          assistantId: req.params.assistantId,
+          eventName: decision === 'retire'
+            ? 'decision_rule_retired'
+            : 'decision_playbook_rule_decided',
+          channelType: 'web',
+          metadata: {
+            user_scoped: result.appliesToUserId !== null,
+            approved: decision === 'approve',
+            rejected: decision === 'reject',
+            retired: decision === 'retire',
+          },
+        })
+        console.info(
+          `[assistants] playbook decision applied assistant=${req.params.assistantId} scope=${result.appliesToUserId ? 'user' : 'assistant'} status=${result.status}`,
+        )
         res.json({ rule: result })
       } catch (err) {
         console.error('[assistants] playbook decision failed:', err)

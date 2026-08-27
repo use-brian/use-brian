@@ -33,8 +33,12 @@ import {
 } from './protocol.js'
 
 const MAX_SYSTEM_PROMPT_BYTES = 512 * 1024
-const MAX_HISTORY_ITEM_BYTES = 256 * 1024
-const MAX_HISTORY_BATCH_BYTES = 512 * 1024
+const MAX_HISTORY_TEXT_FIELD_BYTES = 256 * 1024
+// Inference app-server peers use an 8 MiB JSONL frame (process.ts). Keep the
+// injected items array below that outer envelope while allowing ordinary
+// screenshots to survive multi-request history replay.
+const MAX_HISTORY_BATCH_BYTES = 6 * 1024 * 1024
+const MAX_HISTORY_MESSAGE_BYTES = MAX_HISTORY_BATCH_BYTES - 2
 const MAX_HISTORY_ITEMS = 2_000
 const MAX_TOOL_CALLS_PER_BATCH = 64
 const MAX_TOOL_OUTPUT_BYTES = 1024 * 1024
@@ -912,7 +916,7 @@ function messagesToUserInput(messages: readonly Message[]): UserInput[] {
         : message.content
     for (const block of blocks) {
       if (block.type === 'text') {
-        input.push({ type: 'text', text: truncateUtf8(block.text, MAX_HISTORY_ITEM_BYTES) })
+        input.push({ type: 'text', text: truncateUtf8(block.text, MAX_HISTORY_TEXT_FIELD_BYTES) })
       } else if (block.type === 'image') {
         const kind = codexInlineMediaKind(block.mimeType)
         if (kind) {
@@ -925,7 +929,7 @@ function messagesToUserInput(messages: readonly Message[]): UserInput[] {
           type: 'text',
           text: truncateUtf8(
             `[Brian tool result: ${block.name}${block.isError ? ' (error)' : ''}]\n${block.content}`,
-            MAX_HISTORY_ITEM_BYTES,
+            MAX_HISTORY_TEXT_FIELD_BYTES,
           ),
         })
       } else {
@@ -933,7 +937,7 @@ function messagesToUserInput(messages: readonly Message[]): UserInput[] {
           type: 'text',
           text: truncateUtf8(
             `[Prior Brian tool call: ${block.name}]\n${JSON.stringify(block.input)}`,
-            MAX_HISTORY_ITEM_BYTES,
+            MAX_HISTORY_TEXT_FIELD_BYTES,
           ),
         })
       }
@@ -947,34 +951,54 @@ function messageToInjectedItems(message: Message): unknown[] {
     typeof message.content === 'string'
       ? [{ type: 'text', text: message.content }]
       : message.content
+  const role = message.role === 'system' ? 'developer' : message.role
   const items: unknown[] = []
   const content: unknown[] = []
+  let messageBytes = Buffer.byteLength(
+    JSON.stringify({ type: 'message', role, content: [] }),
+  )
 
   for (const block of blocks) {
     if (block.type === 'text') {
-      content.push({
-        type: message.role === 'assistant' ? 'output_text' : 'input_text',
-        text: truncateUtf8(block.text, MAX_HISTORY_ITEM_BYTES),
-        ...(message.role === 'assistant' ? { annotations: [] } : {}),
-      })
+      messageBytes = appendBoundedHistoryContent(
+        role,
+        content,
+        messageBytes,
+        injectedTextPart(role, truncateUtf8(block.text, MAX_HISTORY_TEXT_FIELD_BYTES)),
+        HISTORY_CONTENT_OMITTED_NOTE,
+      )
     } else if (block.type === 'image') {
       if (message.role === 'assistant') {
-        content.push({
-          type: 'output_text',
-          text: `[Prior assistant image: ${block.mimeType}]`,
-          annotations: [],
-        })
+        messageBytes = appendBoundedHistoryContent(
+          role,
+          content,
+          messageBytes,
+          injectedTextPart(role, `[Prior assistant image: ${block.mimeType}]`),
+          HISTORY_CONTENT_OMITTED_NOTE,
+        )
       } else if (codexInlineMediaKind(block.mimeType) === 'image') {
-        content.push({
-          type: 'input_image',
-          image_url: `data:${block.mimeType};base64,${block.data}`,
-        })
+        messageBytes = appendBoundedHistoryContent(
+          role,
+          content,
+          messageBytes,
+          {
+            type: 'input_image',
+            image_url: `data:${block.mimeType};base64,${block.data}`,
+          },
+          HISTORY_IMAGE_OMITTED_NOTE,
+        )
       } else {
         // Same guard as `messagesToUserInput`. History replay reaches here, so
         // an undistilled PDF from an older turn degrades to a note rather than
         // a fake image part. Audio has no injected-history part either. The
         // assistant role was already handled above, so this is user/system.
-        content.push({ type: 'input_text', text: undeliverableMediaNote(block.mimeType) })
+        messageBytes = appendBoundedHistoryContent(
+          role,
+          content,
+          messageBytes,
+          injectedTextPart(role, undeliverableMediaNote(block.mimeType)),
+          HISTORY_CONTENT_OMITTED_NOTE,
+        )
       }
     }
   }
@@ -982,7 +1006,7 @@ function messageToInjectedItems(message: Message): unknown[] {
   if (content.length > 0) {
     items.push({
       type: 'message',
-      role: message.role === 'system' ? 'developer' : message.role,
+      role,
       content,
     })
   }
@@ -992,17 +1016,55 @@ function messageToInjectedItems(message: Message): unknown[] {
         type: 'function_call',
         call_id: block.id,
         name: block.name,
-        arguments: truncateUtf8(JSON.stringify(block.input), MAX_HISTORY_ITEM_BYTES),
+        arguments: truncateUtf8(JSON.stringify(block.input), MAX_HISTORY_TEXT_FIELD_BYTES),
       })
     } else if (block.type === 'tool_result') {
       items.push({
         type: 'function_call_output',
         call_id: block.toolUseId,
-        output: truncateUtf8(block.content, MAX_HISTORY_ITEM_BYTES),
+        output: truncateUtf8(block.content, MAX_HISTORY_TEXT_FIELD_BYTES),
       })
     }
   }
   return items
+}
+
+const HISTORY_IMAGE_OMITTED_NOTE =
+  '[An earlier image was omitted from Codex history replay because its inline data exceeded the ' +
+  'bounded provider transport budget. Its visual contents are not available in this turn. Ask the ' +
+  'user to attach it again if those details are needed.]'
+
+const HISTORY_CONTENT_OMITTED_NOTE =
+  '[Additional earlier message content was omitted from Codex history replay because it exceeded ' +
+  'the bounded provider transport budget.]'
+
+function injectedTextPart(role: Message['role'] | 'developer', text: string): unknown {
+  return role === 'assistant'
+    ? { type: 'output_text', text, annotations: [] }
+    : { type: 'input_text', text }
+}
+
+function appendBoundedHistoryContent(
+  role: Message['role'] | 'developer',
+  content: unknown[],
+  currentMessageBytes: number,
+  part: unknown,
+  overflowNote: string,
+): number {
+  const separatorBytes = content.length > 0 ? 1 : 0
+  const partBytes = Buffer.byteLength(JSON.stringify(part))
+  if (currentMessageBytes + separatorBytes + partBytes <= MAX_HISTORY_MESSAGE_BYTES) {
+    content.push(part)
+    return currentMessageBytes + separatorBytes + partBytes
+  }
+
+  const note = injectedTextPart(role, overflowNote)
+  const noteBytes = Buffer.byteLength(JSON.stringify(note))
+  if (currentMessageBytes + separatorBytes + noteBytes <= MAX_HISTORY_MESSAGE_BYTES) {
+    content.push(note)
+    return currentMessageBytes + separatorBytes + noteBytes
+  }
+  return currentMessageBytes
 }
 
 function batchJsonItems(items: readonly unknown[], maxBytes: number): unknown[][] {
@@ -1010,17 +1072,18 @@ function batchJsonItems(items: readonly unknown[], maxBytes: number): unknown[][
   let current: unknown[] = []
   let currentBytes = 2
   for (const item of items) {
-    const itemBytes = Buffer.byteLength(JSON.stringify(item)) + (current.length > 0 ? 1 : 0)
-    if (itemBytes > maxBytes) {
+    const itemBytes = Buffer.byteLength(JSON.stringify(item))
+    if (itemBytes + 2 > maxBytes) {
       throw new CodexProviderProtocolError('One Codex history item exceeds the RPC boundary')
     }
-    if (current.length > 0 && currentBytes + itemBytes > maxBytes) {
+    const separatorBytes = current.length > 0 ? 1 : 0
+    if (current.length > 0 && currentBytes + separatorBytes + itemBytes > maxBytes) {
       batches.push(current)
       current = []
       currentBytes = 2
     }
     current.push(item)
-    currentBytes += itemBytes
+    currentBytes += (current.length > 1 ? 1 : 0) + itemBytes
   }
   if (current.length > 0) batches.push(current)
   return batches

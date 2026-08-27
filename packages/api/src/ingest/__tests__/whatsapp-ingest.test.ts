@@ -44,6 +44,8 @@ function groupRule(
     routingTimezone: 'UTC',
     alert: false,
     episodeSensitivity: null,
+    compartments: [],
+    projectIds: [],
   }
 }
 

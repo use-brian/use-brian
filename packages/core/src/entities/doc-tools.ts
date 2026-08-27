@@ -39,6 +39,7 @@
 
 import { z } from 'zod'
 import { buildTool, type Tool } from '../tools/types.js'
+import { resolveWriteScope, scopeEvidenceFromRows } from '../security/context-scope.js'
 import { isAutonomousToolContext } from '../tools/capability-gate.js'
 import { isBuiltInEntityTypeId } from './doc-built-ins.js'
 import { uuidId } from '../tools/schema-tolerance.js'
@@ -397,7 +398,7 @@ export function createCreateEntityTypeTool(
     isConcurrencySafe: false,
     timeoutMs: 15_000,
 
-    async execute(input) {
+    async execute(input, context) {
       try {
         const entityType = await deps.store.createEntityType({
           workspaceId: input.workspaceId,
@@ -449,7 +450,7 @@ export function createAddPropertyTool(
     isConcurrencySafe: false,
     timeoutMs: 15_000,
 
-    async execute(input) {
+    async execute(input, context) {
       if (isBuiltInEntityTypeId(input.entityTypeId)) {
         return builtInRejection('addProperty', input.entityTypeId)
       }
@@ -712,7 +713,7 @@ export function createCreateEntityTool(
     isConcurrencySafe: false,
     timeoutMs: 15_000,
 
-    async execute(input) {
+    async execute(input, context) {
       if (isBuiltInEntityTypeId(input.entityTypeId)) {
         return builtInRejection('createEntity', input.entityTypeId)
       }
@@ -724,6 +725,14 @@ export function createCreateEntityTool(
           sourceApp: 'chat',
           createdBy: deps.currentUserId,
           lastEditedBy: deps.currentUserId,
+          ...resolveWriteScope({
+            sensitivity: 'internal',
+            baseCompartments: context.assistantDefaultCompartments,
+            baseProjectIds: context.assistantDefaultProjectIds,
+            evidence: context.scopeAccumulator,
+            compartmentGrant: context.assistantCompartments,
+            projectGrant: context.assistantProjectIds,
+          }),
         })
         return { data: { entity } }
       } catch (err) {
@@ -767,7 +776,7 @@ export function createUpdateEntityTool(
     isConcurrencySafe: false,
     timeoutMs: 15_000,
 
-    async execute(input) {
+    async execute(input, context) {
       if (isBuiltInEntityTypeId(input.entityId)) {
         return builtInRejection('updateEntity', input.entityId)
       }
@@ -783,6 +792,7 @@ export function createUpdateEntityTool(
             extra: 'No cells were written. The row may also have been soft-deleted, which reads the same as missing.',
           })
         }
+        context.scopeAccumulator?.note(scopeEvidenceFromRows([current]))
         const mergedData: Record<string, CellValue> = {
           ...current.data,
           ...input.patch,
@@ -790,7 +800,20 @@ export function createUpdateEntityTool(
         const entity = await deps.store.updateEntity(
           input.workspaceId,
           input.entityId,
-          { data: mergedData, lastEditedBy: deps.currentUserId },
+          {
+            data: mergedData,
+            lastEditedBy: deps.currentUserId,
+            ...resolveWriteScope({
+              sensitivity: current.sensitivity ?? 'internal',
+              baseCompartments: context.assistantDefaultCompartments,
+              baseProjectIds: context.assistantDefaultProjectIds,
+              explicitCompartments: current.compartments,
+              explicitProjectIds: current.projectIds,
+              evidence: context.scopeAccumulator,
+              compartmentGrant: context.assistantCompartments,
+              projectGrant: context.assistantProjectIds,
+            }),
+          },
         )
         return { data: { entity } }
       } catch (err) {
@@ -879,7 +902,7 @@ export function createQueryEntitiesTool(
     isConcurrencySafe: true,
     timeoutMs: 30_000,
 
-    async execute(input) {
+    async execute(input, context) {
       if (isBuiltInEntityTypeId(input.entityTypeId)) {
         return builtInRejection('queryEntities', input.entityTypeId)
       }
@@ -892,6 +915,8 @@ export function createQueryEntitiesTool(
           input.limit,
           input.cursor,
         )
+        const scopeEvidence = scopeEvidenceFromRows(result.rows)
+        context.scopeAccumulator?.note(scopeEvidence)
         return {
           data: {
             rows: result.rows,
@@ -899,6 +924,7 @@ export function createQueryEntitiesTool(
               ? { nextCursor: result.nextCursor }
               : {}),
           },
+          scopeEvidence,
         }
       } catch (err) {
         return toolFailure(err, {

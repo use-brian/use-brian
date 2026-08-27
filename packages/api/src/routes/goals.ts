@@ -15,6 +15,8 @@
  *                           `verification` / `approach` edits (§8)
  *   POST /:id/outcome     — edit the goal's outcome text (draft or armed); a
  *                           completed goal is refused (409)
+ *   PUT  /:id/context     — bind an unset Team/Project axis; existing bindings
+ *                           are immutable and can never be widened or switched
  *   POST /:id/work        — spin up the acting loop: set the means (a chosen
  *                           workflow, or the default completion workflow) + kick off
  *   POST /:id/abandon     — discard a goal (drafts / active goals the user no
@@ -24,9 +26,11 @@
  */
 
 import { Router } from 'express'
+import { z } from 'zod'
 import {
   GOAL_HOST_TYPES,
   GOAL_STATUSES,
+  scopeGrantContains,
   type GoalBrief,
   type GoalClarityAssessor,
   type GoalHostType,
@@ -35,8 +39,23 @@ import {
   type GoalStatus,
   type GoalStore,
 } from '@use-brian/core'
-import { getGoalById, setGoalStatusSystem, updateGoalSystem } from '../db/goals.js'
+import {
+  getGoalById,
+  narrowGoalContextSystem,
+  setGoalStatusSystem,
+  updateGoalSystem,
+} from '../db/goals.js'
+import {
+  createDbContextScopeStore,
+  type ContextScopeStore,
+} from '../db/context-scope-store.js'
 import type { WorkspaceStore } from '../db/workspace-store.js'
+import {
+  assertContextActivationReady,
+  ContextActivationBlockedError,
+  type ContextReadiness,
+} from '../context-scope/context-readiness.js'
+import type { GoalActivityFrame } from '../goals/activity.js'
 
 export type GoalsRouteOptions = {
   goalStore: GoalStore
@@ -51,12 +70,26 @@ export type GoalsRouteOptions = {
    *  verify, instead of arming it. Absent (OSS / no provider) → gate skipped. */
   assessClarity?: GoalClarityAssessor
   resolveAssistantId?: (userId: string, workspaceId: string) => Promise<string | undefined>
+  contextStore?: Pick<
+    ContextScopeStore,
+    'getTeamSystem' | 'getProjectSystem' | 'resolveMemberTeamPrincipalSystem'
+  >
+  getReadiness?: (workspaceId: string) => Promise<ContextReadiness>
+  /** Goal-scoped live activity bus. Optional keeps route unit tests/embedders inert. */
+  subscribeActivity?: (params: {
+    goalId: string
+    callback: (frame: GoalActivityFrame) => void
+  }) => () => void
 }
 
 // Derived from the core registries (single source of truth — no hand-listed
 // status / host-type sets that could drift from the Noun definition).
 const STATUS_SET: ReadonlySet<string> = new Set(GOAL_STATUSES)
 const HOST_TYPE_SET: ReadonlySet<string> = new Set(GOAL_HOST_TYPES)
+const goalContextBody = z.object({
+  contextGroupId: z.string().uuid().nullable(),
+  contextProjectId: z.string().uuid().nullable(),
+}).strict()
 
 /** Board / panel projection — drops internal fields; surfaces `confirmedAt`
  *  (draft vs armed) + `hasWorkflow` (armed vs working) so the UI can pick the
@@ -72,6 +105,8 @@ function projectGoal(g: GoalRecord | GoalListRow) {
     parentGoalId: g.parentGoalId,
     recipeId: g.recipeId,
     blockerReason: g.blockerReason,
+    contextGroupId: g.contextGroupId,
+    contextProjectId: g.contextProjectId,
     confirmedAt: g.confirmedAt ? g.confirmedAt.toISOString() : null,
     hasWorkflow: Boolean(g.means.workflowId),
     createdAt: g.createdAt.toISOString(),
@@ -98,6 +133,92 @@ function projectGoalDetail(g: GoalRecord) {
 
 export function goalsRoutes(opts: GoalsRouteOptions): Router {
   const router = Router()
+  const contextStore = opts.contextStore ?? createDbContextScopeStore()
+
+  // GET /:id/stream — authenticated live activity for one acting goal.
+  // The RLS read is the authority gate; activity itself is ephemeral and
+  // best-effort. A status poll closes the stream even if a terminal NOTIFY is
+  // missed across instances.
+  router.get('/:id/stream', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) {
+      res.status(401).json({ error: 'Unauthorized' })
+      return
+    }
+    const goal = await getGoalById(userId, req.params.id)
+    if (!goal) {
+      res.status(404).json({ error: 'Not found' })
+      return
+    }
+
+    res.setHeader('Content-Type', 'text/event-stream')
+    res.setHeader('Cache-Control', 'no-cache, no-transform')
+    res.setHeader('Connection', 'keep-alive')
+    res.setHeader('X-Accel-Buffering', 'no')
+    res.flushHeaders()
+
+    let closed = false
+    let unsubscribe = () => {}
+    let poll: NodeJS.Timeout | null = null
+    let heartbeat: NodeJS.Timeout | null = null
+    let lastStatus = goal.status
+    const terminal = (status: GoalStatus) =>
+      status === 'done' || status === 'blocked' || status === 'abandoned'
+    const send = (event: string, data: unknown) => {
+      if (closed || res.writableEnded) return
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+    }
+    const close = () => {
+      if (closed) return
+      closed = true
+      if (poll) clearInterval(poll)
+      if (heartbeat) clearInterval(heartbeat)
+      unsubscribe()
+      if (!res.writableEnded) res.end()
+    }
+
+    send('status', { status: goal.status })
+    if (terminal(goal.status)) {
+      send('done', { status: goal.status, reason: goal.blockerReason })
+      close()
+      return
+    }
+
+    const subscribed = opts.subscribeActivity?.({
+      goalId: goal.id,
+      callback: (frame) => {
+        send(frame.event, frame.data)
+        if (frame.event === 'done') close()
+      },
+    }) ?? (() => {})
+    unsubscribe = subscribed
+    if (closed) unsubscribe()
+
+    poll = setInterval(() => {
+      void getGoalById(userId, goal.id).then((current) => {
+        if (!current) {
+          close()
+          return
+        }
+        if (current.status !== lastStatus) {
+          lastStatus = current.status
+          send('status', { status: current.status })
+        }
+        if (terminal(current.status)) {
+          send('done', { status: current.status, reason: current.blockerReason })
+          close()
+        }
+      }).catch(() => {
+        // The next poll retries. Activity delivery never changes goal state.
+      })
+    }, 5_000)
+    poll.unref?.()
+    heartbeat = setInterval(() => {
+      if (!closed && !res.writableEnded) res.write(': ping\n\n')
+    }, 25_000)
+    heartbeat.unref?.()
+    req.on('close', close)
+  })
 
   // GET / — goals for the workspace (RLS-scoped read; board / panel projection).
   router.get('/', async (req, res) => {
@@ -157,6 +278,85 @@ export function goalsRoutes(opts: GoalsRouteOptions): Router {
       return
     }
     res.json({ goal: projectGoalDetail(goal) })
+  })
+
+  // PUT /:id/context — a goal may narrow an unset inherited axis before its
+  // acting workflow starts. Clearing or switching an existing binding would
+  // rewrite the audit boundary, so both are rejected. The final write is also
+  // guarded atomically in narrowGoalContextSystem.
+  router.put('/:id/context', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) {
+      res.status(401).json({ error: 'Unauthorized' })
+      return
+    }
+    const parsed = goalContextBody.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_request', issues: parsed.error.issues })
+      return
+    }
+    const existing = await getGoalById(userId, req.params.id)
+    if (!existing) {
+      res.status(404).json({ error: 'Not found' })
+      return
+    }
+    if (
+      existing.means.workflowId
+      || ['running', 'awaiting_approval', 'done', 'abandoned'].includes(existing.status)
+    ) {
+      res.status(409).json({ error: 'goal_context_locked' })
+      return
+    }
+
+    const nextGroupId = parsed.data.contextGroupId
+    const nextProjectId = parsed.data.contextProjectId
+    if (
+      (existing.contextGroupId !== null && nextGroupId !== existing.contextGroupId)
+      || (existing.contextProjectId !== null && nextProjectId !== existing.contextProjectId)
+    ) {
+      res.status(409).json({ error: 'goal_context_cannot_widen' })
+      return
+    }
+
+    const [team, project, principal] = await Promise.all([
+      nextGroupId ? contextStore.getTeamSystem(existing.workspaceId, nextGroupId) : null,
+      nextProjectId ? contextStore.getProjectSystem(existing.workspaceId, nextProjectId) : null,
+      contextStore.resolveMemberTeamPrincipalSystem(userId, existing.workspaceId),
+    ])
+    if (!principal) {
+      res.status(404).json({ error: 'Not found' })
+      return
+    }
+    if (
+      (nextGroupId && (!team || team.status !== 'active'
+        || !scopeGrantContains(principal.grant, [team.compartmentKey])))
+      || (nextProjectId && (!project || project.status !== 'active'))
+    ) {
+      res.status(404).json({ error: 'context_not_available' })
+      return
+    }
+
+    try {
+      if (nextGroupId || nextProjectId) {
+        await assertContextActivationReady(existing.workspaceId, opts.getReadiness)
+      }
+      const goal = await narrowGoalContextSystem(
+        existing.id,
+        nextGroupId,
+        nextProjectId,
+      )
+      if (!goal) {
+        res.status(409).json({ error: 'goal_context_cannot_widen' })
+        return
+      }
+      res.json({ ok: true, goal: projectGoal(goal) })
+    } catch (error) {
+      if (error instanceof ContextActivationBlockedError) {
+        res.status(409).json({ error: error.code, failedChecks: error.failedChecks })
+        return
+      }
+      throw error
+    }
   })
 
   // POST /:id/confirm — arm a draft goal (the user confirms its detail).

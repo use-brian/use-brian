@@ -42,7 +42,18 @@ import type {
   SpecializationCascadeRepository,
   SpecializationPointer,
 } from '@use-brian/core'
+import { EntityMergeError, UndoMergeError } from '@use-brian/core'
 import { getPool, query } from './client.js'
+import {
+  appendDecisionEvent,
+  findDecisionEventByIdempotencyKey,
+} from './decision-event-store.js'
+import { appendDecisionDerivation } from './decision-provenance-store.js'
+import {
+  applyCrmMergeIdentityProjection,
+  applyCrmUndoIdentityProjection,
+  prepareCrmMergeIdentityProjection,
+} from './crm-identity-store.js'
 
 // Specialization tables that can carry a merge cascade. Post CRM↔entity
 // collapse (crm-entity-unification) there are no specialization tables
@@ -151,6 +162,22 @@ export function createEntityMergeStore(): EntityMergeRepository {
       const client = await getPool().connect()
       try {
         await client.query('BEGIN')
+        const identityProjection = await prepareCrmMergeIdentityProjection(client, {
+          workspaceId: input.workspaceId,
+          survivingEntityId: input.survivingId,
+          mergedEntityId: input.mergedId,
+        })
+        if (
+          JSON.stringify(identityProjection.survivingAttributes)
+            !== JSON.stringify(input.survivingAttributesPreMerge.attributes)
+          || JSON.stringify(identityProjection.mergedAttributes)
+            !== JSON.stringify(input.mergedAttributesSnapshot.attributes)
+        ) {
+          throw new EntityMergeError(
+            'entity_inactive',
+            'The records changed while the merge was being reviewed. Refresh and try again.',
+          )
+        }
 
         // 1. Supersede the merged entity → points at the survivor.
         await client.query(
@@ -204,8 +231,36 @@ export function createEntityMergeStore(): EntityMergeRepository {
           ],
         )
 
+        const mergeRecord = rowToMergeRecord(inserted.rows[0] as Record<string, unknown>)
+        const captured = await appendDecisionEvent({
+          idempotencyKey: `merge:${mergeRecord.id}:confirmed`,
+          workspaceId: input.workspaceId,
+          actorUserId: input.mergedBy,
+          eventKind: 'crm.entities_merged',
+          schemaVersion: 1,
+          sourceKind: 'entity_merge',
+          sourceId: mergeRecord.id,
+          declaredScope: 'entity',
+          visibility: 'workspace',
+          sensitivity: identityProjection.sensitivity,
+          reason: input.reason,
+          payload: {
+            mergeId: mergeRecord.id,
+            survivingEntityId: input.survivingId,
+            mergedEntityId: input.mergedId,
+            bindingNamespaces: identityProjection.bindingNamespaces,
+          },
+        }, client)
+        await applyCrmMergeIdentityProjection(client, identityProjection, captured.event.id)
+        await appendDecisionDerivation({
+          decisionEventId: captured.event.id,
+          artifactKind: 'entity_merge',
+          artifactId: mergeRecord.id,
+          relation: 'supports',
+        }, client)
+
         await client.query('COMMIT')
-        return rowToMergeRecord(inserted.rows[0] as Record<string, unknown>)
+        return mergeRecord
       } catch (err) {
         await client.query('ROLLBACK').catch(() => {})
         throw err
@@ -219,6 +274,31 @@ export function createEntityMergeStore(): EntityMergeRepository {
       const client = await getPool().connect()
       try {
         await client.query('BEGIN')
+        const locked = await client.query<{
+          id: string
+          validTo: Date | null
+          supersededBy: string | null
+          retractedAt: Date | null
+        }>(
+          `SELECT id, valid_to AS "validTo", superseded_by AS "supersededBy",
+                  retracted_at AS "retractedAt"
+             FROM entities
+            WHERE workspace_id = $1 AND id = ANY($2::uuid[])
+            ORDER BY id
+            FOR UPDATE`,
+          [mergeRecord.workspaceId, [mergeRecord.survivingId, mergeRecord.mergedId]],
+        )
+        const survivor = locked.rows.find((row) => row.id === mergeRecord.survivingId)
+        const restored = locked.rows.find((row) => row.id === mergeRecord.mergedId)
+        if (
+          !survivor || !restored || survivor.validTo !== null || survivor.retractedAt !== null
+          || restored.supersededBy !== mergeRecord.survivingId
+        ) {
+          throw new UndoMergeError(
+            'survivor_superseded',
+            'The merge participants changed while undo was being reviewed. Refresh and try again.',
+          )
+        }
 
         // 1. Un-supersede the merged entity.
         await client.query(
@@ -262,6 +342,49 @@ export function createEntityMergeStore(): EntityMergeRepository {
             input.cascadeReversed,
           ],
         )
+
+        const original = await findDecisionEventByIdempotencyKey(
+          `merge:${mergeRecord.id}:confirmed`,
+          client,
+        )
+        if (!original) throw new Error(`Decision evidence missing for merge ${mergeRecord.id}`)
+        const captured = await appendDecisionEvent({
+          idempotencyKey: `merge:${mergeRecord.id}:undone`,
+          workspaceId: mergeRecord.workspaceId,
+          actorUserId: input.actorUserId,
+          eventKind: 'crm.merge_undone',
+          schemaVersion: 1,
+          sourceKind: 'entity_merge',
+          sourceId: mergeRecord.id,
+          declaredScope: 'entity',
+          visibility: 'workspace',
+          sensitivity: original.sensitivity,
+          reason: input.reason,
+          reversesEventId: original.id,
+          payload: {
+            mergeId: mergeRecord.id,
+            survivingEntityId: mergeRecord.survivingId,
+            restoredEntityId: mergeRecord.mergedId,
+          },
+        }, client)
+        await applyCrmUndoIdentityProjection(client, {
+          workspaceId: mergeRecord.workspaceId,
+          survivingEntityId: mergeRecord.survivingId,
+          restoredEntityId: mergeRecord.mergedId,
+          restoredDisplayName: mergeRecord.mergedAttributesSnapshot.displayName,
+          restoredAttributes: mergeRecord.mergedAttributesSnapshot.attributes,
+          actorUserId: input.actorUserId,
+          reason: input.reason,
+          originalDecisionEventId: original.id,
+          undoDecisionEventId: captured.event.id,
+          sensitivity: original.sensitivity,
+        })
+        await appendDecisionDerivation({
+          decisionEventId: captured.event.id,
+          artifactKind: 'entity_merge',
+          artifactId: mergeRecord.id,
+          relation: 'invalidates',
+        }, client)
 
         await client.query('COMMIT')
       } catch (err) {
