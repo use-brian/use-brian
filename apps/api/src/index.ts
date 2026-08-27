@@ -52,6 +52,7 @@ const JWT_SECRET = process.env.JWT_SECRET || (await import('node:crypto')).rando
 // guard still rejects every value outside true/false/1/0.
 parseStrictBoolean(process.env.OUTPOST_AUTH_EMAIL_ENABLED, 'OUTPOST_AUTH_EMAIL_ENABLED', true)
 parseStrictBoolean(process.env.OUTPOST_AUTH_OIDC_ENABLED, 'OUTPOST_AUTH_OIDC_ENABLED', false)
+parseStrictBoolean(process.env.OUTPOST_OIDC_SUBJECT_IDENTITY_ENABLED, 'OUTPOST_OIDC_SUBJECT_IDENTITY_ENABLED', false)
 
 const env: OpenApiEnv = {
   GEMINI_API_KEY,
@@ -69,6 +70,10 @@ const env: OpenApiEnv = {
   ),
   OUTPOST_AUTH_OIDC_ENABLED: process.env.OUTPOST_AUTH_OIDC_ENABLED === 'true'
     || process.env.OUTPOST_AUTH_OIDC_ENABLED === '1',
+  OUTPOST_OIDC_SUBJECT_IDENTITY_ENABLED: process.env.OUTPOST_OIDC_SUBJECT_IDENTITY_ENABLED === 'true'
+    || process.env.OUTPOST_OIDC_SUBJECT_IDENTITY_ENABLED === '1',
+  OUTPOST_OIDC_ENROLLMENT_MODE: process.env.OUTPOST_OIDC_ENROLLMENT_MODE,
+  OUTPOST_OIDC_WORKSPACE_MAPPINGS: process.env.OUTPOST_OIDC_WORKSPACE_MAPPINGS,
   OUTPOST_OIDC_ISSUER_URL: process.env.OUTPOST_OIDC_ISSUER_URL,
   OUTPOST_OIDC_CLIENT_ID: process.env.OUTPOST_OIDC_CLIENT_ID,
   OUTPOST_OIDC_CLIENT_SECRET: process.env.OUTPOST_OIDC_CLIENT_SECRET,

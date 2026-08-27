@@ -10,6 +10,7 @@ import type { MagicLinkConsumed, MagicLinkLocale, MagicLinkStore } from '../db/m
 import type { DesktopAuthStore } from '../db/desktop-auth-store.js'
 import type { SmtpClient } from '../email/smtp-client.js'
 import { createHash, timingSafeEqual } from 'node:crypto'
+import { matchedOidcWorkspaceIds, type OidcEnrollmentConfig } from '../auth/outpost-auth-config.js'
 
 /**
  * Fire-and-forget hook invoked after a Telegram identity is successfully
@@ -46,8 +47,13 @@ export type OidcAuthDeps = {
   config: {
     issuer: string
     bridgeSecret: string
+    subjectIdentityEnabled: boolean
+    enrollment: OidcEnrollmentConfig
   }
   canSignInEmail: (email: string) => Promise<boolean>
+  findUserBySubject: (providerId: string) => Promise<User | null>
+  bindUserSubject: (userId: string, providerId: string) => Promise<void>
+  ensureWorkspaceMembership: (userId: string, workspaceIds: string[]) => Promise<void>
 }
 
 /**
@@ -260,22 +266,32 @@ export function authRoutes(
       res.status(401).json({ error: 'invalid_oidc_issuer' })
       return
     }
-    if (!identity.emailVerified) {
+    if (identity.email && !identity.emailVerified) {
       res.status(401).json({ error: 'oidc_email_unverified' })
       return
     }
-    if (!(await oidcAuth.canSignInEmail(identity.email))) {
+    if (!identity.email && !oidcAuth.config.subjectIdentityEnabled) {
+      res.status(401).json({ error: 'oidc_email_required' })
+      return
+    }
+    if (identity.groups && (oidcAuth.config.enrollment.mode !== 'mapped' || identity.groupClaim !== oidcAuth.config.enrollment.groupClaim)) {
+      res.status(401).json({ error: 'invalid_oidc_groups' })
+      return
+    }
+    const providerId = createHash('sha256')
+      .update(identity.issuer)
+      .update('\x00')
+      .update(identity.subject)
+      .digest('base64url')
+    const providerUser = await oidcAuth.findUserBySubject(providerId)
+    const mappedWorkspaceIds = matchedOidcWorkspaceIds(oidcAuth.config.enrollment, identity)
+    if (identity.email && !providerUser && mappedWorkspaceIds.length === 0 && !(await oidcAuth.canSignInEmail(identity.email))) {
       res.status(403).json({ error: 'email_enrollment_required' })
       return
     }
 
     try {
-      const providerId = createHash('sha256')
-        .update(identity.issuer)
-        .update('\x00')
-        .update(identity.subject)
-        .digest('base64url')
-      const existing = await findUserByEmail(identity.email)
+      const existing = providerUser ?? (identity.email ? await findUserByEmail(identity.email) : null)
       if (existing?.authProvider === 'oidc' && existing.authProviderId !== providerId) {
         res.status(401).json({ error: 'invalid_oidc_identity' })
         return
@@ -313,13 +329,21 @@ export function authRoutes(
         const result = await findOrCreateUser({
           authProvider: 'oidc',
           authProviderId: providerId,
-          email: identity.email,
+          ...(identity.email ? { email: identity.email } : {}),
           name: identity.name,
           avatarUrl: identity.avatarUrl,
           timezone: identity.timezone,
         })
         user = result.user
         isNew = result.isNew
+      }
+
+      if (user.authProvider !== 'oidc') {
+        await oidcAuth.bindUserSubject(user.id, providerId)
+      }
+
+      if (mappedWorkspaceIds.length > 0) {
+        await oidcAuth.ensureWorkspaceMembership(user.id, mappedWorkspaceIds)
       }
 
       res.json({
@@ -920,11 +944,13 @@ function isValidEmail(s: string): boolean {
 type OidcSessionIdentity = {
   issuer: string
   subject: string
-  email: string
-  emailVerified: boolean
+  email?: string
+  emailVerified?: boolean
   name?: string
   avatarUrl?: string
   timezone?: string
+  groups?: string[]
+  groupClaim?: string
 }
 
 const OIDC_SESSION_FIELDS = new Set([
@@ -935,6 +961,8 @@ const OIDC_SESSION_FIELDS = new Set([
   'name',
   'avatarUrl',
   'timezone',
+  'groups',
+  'groupClaim',
 ])
 
 function parseOidcSessionBody(body: unknown):
@@ -943,13 +971,15 @@ function parseOidcSessionBody(body: unknown):
   if (!body || typeof body !== 'object' || Array.isArray(body)) return { ok: false }
   const value = body as Record<string, unknown>
   if (Object.keys(value).some((key) => !OIDC_SESSION_FIELDS.has(key))) return { ok: false }
+  if (value.email !== undefined && typeof value.email !== 'string') return { ok: false }
 
   const issuer = boundedString(value.issuer, 2048)
   const subject = boundedString(value.subject, 512)
-  const email = typeof value.email === 'string' ? value.email.trim().toLowerCase() : ''
+  const email = typeof value.email === 'string' ? value.email.trim().toLowerCase() : undefined
   if (!issuer || !subject || /[\x00-\x1f\x7f]/.test(issuer) || /[\x00-\x1f\x7f]/.test(subject)) return { ok: false }
-  if (!isValidEmail(email) || /[\x00-\x1f\x7f]/.test(email)) return { ok: false }
-  if (typeof value.emailVerified !== 'boolean') return { ok: false }
+  if (email !== undefined && (!isValidEmail(email) || /[\x00-\x1f\x7f]/.test(email))) return { ok: false }
+  if (email !== undefined && typeof value.emailVerified !== 'boolean') return { ok: false }
+  if (email === undefined && value.emailVerified !== undefined) return { ok: false }
 
   const name = optionalBoundedString(value.name, 200)
   if (name === null || (name && /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(name))) return { ok: false }
@@ -957,19 +987,36 @@ function parseOidcSessionBody(body: unknown):
   if (avatarUrl === null || (avatarUrl && !isHttpUrl(avatarUrl))) return { ok: false }
   const timezone = optionalBoundedString(value.timezone, 79)
   if (timezone === null || (timezone && !isValidTimezone(timezone))) return { ok: false }
+  const groups = parseOidcGroups(value.groups)
+  if (groups === null) return { ok: false }
+  const groupClaim = optionalBoundedString(value.groupClaim, 200)
+  if (groupClaim === null || (groupClaim && /[\x00-\x1f\x7f]/.test(groupClaim))) return { ok: false }
+  if ((groups === undefined) !== (groupClaim === undefined)) return { ok: false }
 
   return {
     ok: true,
     value: {
       issuer,
       subject,
-      email,
-      emailVerified: value.emailVerified,
+      ...(email !== undefined ? { email, emailVerified: value.emailVerified as boolean } : {}),
       ...(name ? { name } : {}),
       ...(avatarUrl ? { avatarUrl } : {}),
       ...(timezone ? { timezone } : {}),
+      ...(groups !== undefined ? { groups } : {}),
+      ...(groupClaim ? { groupClaim } : {}),
     },
   }
+}
+
+function parseOidcGroups(value: unknown): string[] | undefined | null {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value) || value.length > 64) return null
+  const groups: string[] = []
+  for (const group of value) {
+    if (typeof group !== 'string' || group.length < 1 || group.length > 200 || /[\x00-\x1f\x7f]/.test(group)) return null
+    if (!groups.includes(group)) groups.push(group)
+  }
+  return groups
 }
 
 function boundedString(value: unknown, maxLength: number): string | undefined {

@@ -149,7 +149,7 @@ import {
 import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTORS, OFFICIAL_CONNECTOR_TOOLS, recordingIdFromAnchorKey } from '@use-brian/shared'
 
 // ── OPEN package imports (@use-brian/api) ──────────────────────────
-import { findAssistantById, findUserByEmail, findUserById, getWorkspacePrimaryAssistant, isUserBlockedForAssistant, listAccessibleAssistants } from './db/users.js'
+import { findAssistantById, findUserByAuthProvider, findUserByEmail, findUserById, getWorkspacePrimaryAssistant, isUserBlockedForAssistant, listAccessibleAssistants } from './db/users.js'
 import { resolveTurnScopeSystem } from './context-scope/resolve-turn-scope.js'
 import { deploymentProfile } from './edition.js'
 import { createEmailAdmission, requireOutpostAuthPortal } from './auth/email-admission.js'
@@ -657,6 +657,9 @@ export interface OpenApiEnv {
   AUTH_PORTAL_URL?: string
   OUTPOST_AUTH_EMAIL_ENABLED?: boolean
   OUTPOST_AUTH_OIDC_ENABLED?: boolean
+  OUTPOST_OIDC_SUBJECT_IDENTITY_ENABLED?: boolean
+  OUTPOST_OIDC_ENROLLMENT_MODE?: string
+  OUTPOST_OIDC_WORKSPACE_MAPPINGS?: string
   OUTPOST_OIDC_ISSUER_URL?: string
   OUTPOST_OIDC_CLIENT_ID?: string
   OUTPOST_OIDC_CLIENT_SECRET?: string
@@ -1923,6 +1926,19 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const profile = deploymentProfile()
   requireOutpostAuthPortal(profile, env.AUTH_PORTAL_URL)
   const outpostAuthConfig = validateOutpostAuthConfig(profile, env.NODE_ENV, env)
+  const oidcEnrollmentStore = createWorkspaceStore()
+  if (outpostAuthConfig?.oidc?.enrollment.mode === 'mapped') {
+    const configuredWorkspaceIds = [...new Set(outpostAuthConfig.oidc.enrollment.rules.map((rule) => rule.workspaceId))]
+    const existing = await query<{ id: string }>(
+      'SELECT id FROM workspaces WHERE id = ANY($1::uuid[])',
+      [configuredWorkspaceIds],
+    )
+    const existingIds = new Set(existing.rows.map((row) => row.id))
+    const missing = configuredWorkspaceIds.filter((workspaceId) => !existingIds.has(workspaceId))
+    if (missing.length > 0) {
+      throw new Error(`OUTPOST_OIDC_WORKSPACE_MAPPINGS references missing workspace IDs: ${missing.join(', ')}`)
+    }
+  }
   const outpostBootstrapEmails = (
     (process.env.OUTPOST_AUTH_BOOTSTRAP_EMAILS ?? '')
       .split(',')
@@ -1979,8 +1995,35 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             config: {
               issuer: outpostAuthConfig.oidc.issuerUrl,
               bridgeSecret: outpostAuthConfig.oidc.bridgeSecret,
+              subjectIdentityEnabled: outpostAuthConfig.oidc.subjectIdentityEnabled,
+              enrollment: outpostAuthConfig.oidc.enrollment,
             },
             canSignInEmail: canSignInOutpostEmail,
+            findUserBySubject: async (providerId) => {
+              const linked = await linkedIdentityStore.findByProvider('oidc', providerId)
+              return linked
+                ? findUserById(linked.userId)
+                : findUserByAuthProvider('oidc', providerId)
+            },
+            bindUserSubject: async (userId, providerId) => {
+              const result = await query<{ userId: string }>(
+                `INSERT INTO linked_identities (user_id, provider, provider_id)
+                 VALUES ($1, 'oidc', $2)
+                 ON CONFLICT (provider, provider_id) DO UPDATE SET
+                   provider_id = EXCLUDED.provider_id
+                 WHERE linked_identities.user_id = EXCLUDED.user_id
+                 RETURNING user_id AS "userId"`,
+                [userId, providerId],
+              )
+              if (result.rows[0]?.userId !== userId) {
+                throw new Error('OIDC subject is already bound to another user')
+              }
+            },
+            ensureWorkspaceMembership: async (userId, workspaceIds) => {
+              for (const workspaceId of workspaceIds) {
+                await oidcEnrollmentStore.ensureMemberSystem(workspaceId, userId)
+              }
+            },
           }
         : undefined,
     ),

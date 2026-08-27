@@ -18,6 +18,8 @@ const config: PortalConfig = {
     bridgeSecret: "b".repeat(32),
     allowedEndpointOrigins: ["https://team.cloudflareaccess.com"],
     emailVerification: "claim",
+    subjectIdentityEnabled: false,
+    enrollment: { mode: "invite_only", additionalScopes: [] },
   },
 };
 
@@ -105,6 +107,69 @@ describe("[COMP:app/outpost-auth] OIDC protocol", () => {
     await expect(verifyOidcIdentity(token, metadata, issuerTrusted, "nonce", fetchFn as typeof fetch)).resolves.toMatchObject({
       email: "admin@example.com",
       emailVerified: true,
+    });
+  });
+
+  it("accepts an issuer-subject identity without email only when explicitly enabled", async () => {
+    const { privateKey, publicKey } = await generateKeyPair("RS256");
+    const jwk = { ...await exportJWK(publicKey), kid: "key-1", alg: "RS256", use: "sig" };
+    const token = await new SignJWT({ nonce: "nonce" })
+      .setProtectedHeader({ alg: "RS256", kid: "key-1" })
+      .setIssuer(config.oidc!.issuerUrl)
+      .setAudience(config.oidc!.clientId)
+      .setSubject("directory-user-123")
+      .setIssuedAt()
+      .setExpirationTime("5m")
+      .sign(privateKey);
+    const metadata = {
+      issuer: config.oidc!.issuerUrl,
+      authorization_endpoint: `${config.oidc!.issuerUrl}/authorization`,
+      token_endpoint: `${config.oidc!.issuerUrl}/token`,
+      jwks_uri: `${config.oidc!.issuerUrl}/jwks`,
+    };
+    const fetchFn = async () => new Response(JSON.stringify({ keys: [jwk] }), { status: 200 });
+
+    await expect(verifyOidcIdentity(token, metadata, config, "nonce", fetchFn as typeof fetch)).rejects.toThrow(/email required/);
+    const subjectIdentity = { ...config, oidc: { ...config.oidc!, subjectIdentityEnabled: true } };
+    await expect(verifyOidcIdentity(token, metadata, subjectIdentity, "nonce", fetchFn as typeof fetch)).resolves.toEqual({
+      issuer: config.oidc!.issuerUrl,
+      subject: "directory-user-123",
+    });
+  });
+
+  it("requests configured scopes and forwards only bounded groups from the verified token", async () => {
+    const mapped = { ...config, oidc: { ...config.oidc!, enrollment: {
+      mode: "mapped" as const,
+      groupClaim: "groups",
+      additionalScopes: ["groups"],
+    } } };
+    const authorize = authorizationUrl({
+      issuer: mapped.oidc.issuerUrl,
+      authorization_endpoint: `${mapped.oidc.issuerUrl}/authorization`,
+      token_endpoint: `${mapped.oidc.issuerUrl}/token`,
+      jwks_uri: `${mapped.oidc.issuerUrl}/jwks`,
+    }, mapped, { state: "state", nonce: "nonce", challenge: "challenge" });
+    expect(authorize.searchParams.get("scope")).toBe("openid email profile groups");
+
+    const { privateKey, publicKey } = await generateKeyPair("RS256");
+    const jwk = { ...await exportJWK(publicKey), kid: "key-1", alg: "RS256", use: "sig" };
+    const token = await new SignJWT({ email: "member@example.com", email_verified: true, groups: ["engineering", "ops", "engineering"], nonce: "nonce" })
+      .setProtectedHeader({ alg: "RS256", kid: "key-1" })
+      .setIssuer(mapped.oidc.issuerUrl)
+      .setAudience(mapped.oidc.clientId)
+      .setSubject("subject")
+      .setIssuedAt()
+      .setExpirationTime("5m")
+      .sign(privateKey);
+    const fetchFn = async () => new Response(JSON.stringify({ keys: [jwk] }), { status: 200 });
+    await expect(verifyOidcIdentity(token, {
+      issuer: mapped.oidc.issuerUrl,
+      authorization_endpoint: `${mapped.oidc.issuerUrl}/authorization`,
+      token_endpoint: `${mapped.oidc.issuerUrl}/token`,
+      jwks_uri: `${mapped.oidc.issuerUrl}/jwks`,
+    }, mapped, "nonce", fetchFn as typeof fetch)).resolves.toMatchObject({
+      groups: ["engineering", "ops"],
+      groupClaim: "groups",
     });
   });
 });

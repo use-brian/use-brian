@@ -9,9 +9,13 @@ import { authRoutes, type OidcAuthDeps } from '../auth.js'
 const JWT_SECRET = 'jwt-secret-for-oidc-tests'
 const BRIDGE_SECRET = 'bridge-secret-that-is-at-least-32-chars'
 const ISSUER = 'https://id.example.com/tenant'
+const WORKSPACE_ONE = '11111111-1111-4111-8111-111111111111'
+const WORKSPACE_TWO = '22222222-2222-4222-8222-222222222222'
 
 const findOrCreateUser = vi.fn()
 const findUserByEmail = vi.fn()
+const findUserByAuthProvider = vi.fn()
+const bindUserSubject = vi.fn()
 const promoteChannelUser = vi.fn()
 const updateUserTimezone = vi.fn()
 const backfillUserProfileFromProvider = vi.fn()
@@ -20,6 +24,7 @@ vi.mock('../../db/client.js', () => ({ query: vi.fn(), getPool: vi.fn() }))
 vi.mock('../../db/users.js', () => ({
   findOrCreateUser: (...args: unknown[]) => findOrCreateUser(...args),
   findUserByEmail: (...args: unknown[]) => findUserByEmail(...args),
+  findUserByAuthProvider: (...args: unknown[]) => findUserByAuthProvider(...args),
   promoteChannelUser: (...args: unknown[]) => promoteChannelUser(...args),
   updateUserTimezone: (...args: unknown[]) => updateUserTimezone(...args),
   backfillUserProfileFromProvider: (...args: unknown[]) => backfillUserProfileFromProvider(...args),
@@ -63,8 +68,11 @@ function identity(overrides: Record<string, unknown> = {}) {
 
 function makeApp(overrides: Partial<OidcAuthDeps> = {}) {
   const deps: OidcAuthDeps = {
-    config: { issuer: ISSUER, bridgeSecret: BRIDGE_SECRET },
+    config: { issuer: ISSUER, bridgeSecret: BRIDGE_SECRET, subjectIdentityEnabled: false, enrollment: { mode: 'invite_only' } },
     canSignInEmail: vi.fn(async () => true),
+    findUserBySubject: (providerId) => findUserByAuthProvider('oidc', providerId),
+    bindUserSubject,
+    ensureWorkspaceMembership: vi.fn(async () => undefined),
     ...overrides,
   }
   const app = express()
@@ -80,6 +88,10 @@ function post(app: ReturnType<typeof makeApp>, body = identity(), secret = BRIDG
 beforeEach(() => {
   findOrCreateUser.mockReset()
   findUserByEmail.mockReset()
+  findUserByAuthProvider.mockReset()
+  findUserByAuthProvider.mockResolvedValue(null)
+  bindUserSubject.mockReset()
+  bindUserSubject.mockResolvedValue(undefined)
   promoteChannelUser.mockReset()
   updateUserTimezone.mockReset()
   updateUserTimezone.mockResolvedValue(undefined)
@@ -103,6 +115,7 @@ describe('[COMP:api/auth] POST /auth/oidc/session', () => {
   it('rejects issuer mismatch, unverified email, and unrecognized fields', async () => {
     expect((await post(makeApp(), identity({ issuer: `${ISSUER}/other` }))).body.error).toBe('invalid_oidc_issuer')
     expect((await post(makeApp(), identity({ emailVerified: false }))).body.error).toBe('oidc_email_unverified')
+    expect((await post(makeApp(), identity({ email: 123, emailVerified: undefined }))).status).toBe(400)
     expect((await post(makeApp(), identity({ nextPath: '/brain' }))).status).toBe(400)
     expect((await post(makeApp(), identity({ idToken: 'provider-token' }))).status).toBe(400)
   })
@@ -127,6 +140,10 @@ describe('[COMP:api/auth] POST /auth/oidc/session', () => {
       avatarUrl: 'https://images.example.com/avatar.png',
     })
     expect(updateUserTimezone).toHaveBeenCalledWith('user-1', 'Asia/Tokyo')
+    expect(bindUserSubject).toHaveBeenCalledWith(
+      'user-1',
+      createHash('sha256').update(ISSUER).update('\x00').update('subject-123').digest('base64url'),
+    )
     expect(findOrCreateUser).not.toHaveBeenCalled()
   })
 
@@ -176,5 +193,92 @@ describe('[COMP:api/auth] POST /auth/oidc/session', () => {
     findOrCreateUser.mockClear()
     await post(makeApp())
     expect(findOrCreateUser.mock.calls[0][0].authProviderId).toBe(expectedProviderId)
+  })
+
+  it('admits mapped domains and groups and enrolls the user in each matched workspace', async () => {
+    findUserByEmail.mockResolvedValue(null)
+    findOrCreateUser.mockResolvedValue({ user: user({ id: 'mapped-user', authProvider: 'oidc' }), isNew: true })
+    const canSignInEmail = vi.fn(async () => false)
+    const ensureWorkspaceMembership = vi.fn(async () => undefined)
+    const app = makeApp({
+      config: {
+        issuer: ISSUER,
+        bridgeSecret: BRIDGE_SECRET,
+        subjectIdentityEnabled: false,
+        enrollment: {
+          mode: 'mapped',
+          groupClaim: 'groups',
+          additionalScopes: ['groups'],
+          rules: [
+            { emailDomain: 'example.com', workspaceId: WORKSPACE_ONE },
+            { group: 'engineering', workspaceId: WORKSPACE_TWO },
+            { group: 'engineering', workspaceId: WORKSPACE_ONE },
+          ],
+        },
+      },
+      canSignInEmail,
+      ensureWorkspaceMembership,
+    })
+
+    const response = await post(app, identity({ groups: ['engineering', 'other'], groupClaim: 'groups' }))
+    expect(response.status).toBe(200)
+    expect(canSignInEmail).not.toHaveBeenCalled()
+    expect(ensureWorkspaceMembership).toHaveBeenCalledWith('mapped-user', [WORKSPACE_ONE, WORKSPACE_TWO])
+  })
+
+  it('rejects group evidence bound to a different configured claim', async () => {
+    const response = await post(makeApp({
+      config: {
+        issuer: ISSUER,
+        bridgeSecret: BRIDGE_SECRET,
+        subjectIdentityEnabled: false,
+        enrollment: {
+          mode: 'mapped',
+          groupClaim: 'groups',
+          additionalScopes: [],
+          rules: [{ group: 'engineering', workspaceId: WORKSPACE_ONE }],
+        },
+      },
+    }), identity({ groups: ['engineering'], groupClaim: 'roles' }))
+    expect(response.status).toBe(401)
+    expect(response.body.error).toBe('invalid_oidc_groups')
+  })
+
+  it('resumes an established OIDC subject even when its asserted email is not newly admitted', async () => {
+    const expectedProviderId = createHash('sha256').update(ISSUER).update('\x00').update('subject-123').digest('base64url')
+    findUserByAuthProvider.mockResolvedValue(user({ authProvider: 'oidc', authProviderId: expectedProviderId }))
+    const canSignInEmail = vi.fn(async () => false)
+    const response = await post(makeApp({ canSignInEmail }), identity({ email: 'changed@example.net' }))
+    expect(response.status).toBe(200)
+    expect(canSignInEmail).not.toHaveBeenCalled()
+    expect(findUserByEmail).not.toHaveBeenCalled()
+  })
+
+  it('creates and resumes an email-less user by issuer and subject only when enabled', async () => {
+    const expectedProviderId = createHash('sha256').update(ISSUER).update('\x00').update('subject-123').digest('base64url')
+    const withoutEmail = identity({ email: undefined, emailVerified: undefined })
+    expect((await post(makeApp(), withoutEmail)).body.error).toBe('oidc_email_required')
+
+    const created = user({ id: 'subject-user', authProvider: 'oidc', authProviderId: expectedProviderId, email: null })
+    findOrCreateUser.mockResolvedValue({ user: created, isNew: true })
+    const enabled = makeApp({ config: { issuer: ISSUER, bridgeSecret: BRIDGE_SECRET, subjectIdentityEnabled: true, enrollment: { mode: 'invite_only' } } })
+    const first = await post(enabled, withoutEmail)
+    expect(first.status).toBe(200)
+    expect(first.body.user).toMatchObject({ id: 'subject-user', email: null })
+    expect(findOrCreateUser).toHaveBeenCalledWith(expect.objectContaining({
+      authProvider: 'oidc',
+      authProviderId: expectedProviderId,
+    }))
+    expect(findOrCreateUser.mock.calls[0][0]).not.toHaveProperty('email')
+
+    findOrCreateUser.mockClear()
+    findUserByAuthProvider.mockResolvedValue(created)
+    const resumed = await post(enabled, withoutEmail)
+    expect(resumed.status).toBe(200)
+    expect(resumed.body.isNew).toBe(false)
+    expect(findUserByAuthProvider).toHaveBeenCalledWith('oidc', expectedProviderId)
+    expect(findUserByEmail).not.toHaveBeenCalled()
+    expect(bindUserSubject).not.toHaveBeenCalled()
+    expect(findOrCreateUser).not.toHaveBeenCalled()
   })
 })

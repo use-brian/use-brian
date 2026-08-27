@@ -461,6 +461,26 @@ describe('[COMP:api/workspace-store] createWorkspaceStore', () => {
     })
   })
 
+  describe('ensureMemberSystem', () => {
+    it('preserves an existing role and heals assistant and General teamspace membership', async () => {
+      mockQuery
+        .mockResolvedValueOnce({
+          rows: [{ id: 'tm_1', workspaceId: 't_1', userId: 'u_2', role: 'admin', joinedAt: new Date() }],
+          rowCount: 1,
+        } as never)
+        .mockResolvedValueOnce({ rowCount: 0 } as never)
+        .mockResolvedValueOnce({ rows: [{ id: 'ts_general' }], rowCount: 1 } as never)
+        .mockResolvedValueOnce({ rowCount: 1 } as never)
+
+      const member = await store.ensureMemberSystem('t_1', 'u_2')
+      expect(member.role).toBe('admin')
+      expect(mockQuery.mock.calls[0][0]).toContain('ON CONFLICT (workspace_id, user_id)')
+      expect(mockQuery.mock.calls[0][0]).not.toContain('SET role')
+      expect(mockQuery.mock.calls[1][0]).toContain('INSERT INTO assistant_members')
+      expect(mockQuery.mock.calls[3][0]).toContain('INSERT INTO teamspace_members')
+    })
+  })
+
   describe('updateMemberRole', () => {
     // Clearance tracks the role default: promote → confidential, demote →
     // internal (sensitivity.md → User clearance Q18). The owner row is never

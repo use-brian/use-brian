@@ -82,6 +82,7 @@ function oidcDiagnosticCode(error: unknown): string | null {
     ["OIDC verified email required", "verified_email_missing"],
     ["OIDC email required", "email_missing"],
     ["OIDC subject required", "subject_missing"],
+    ["OIDC groups invalid", "groups_invalid"],
     ["OIDC endpoint origin mismatch", "endpoint_origin_rejected"],
     ["OIDC response too large", "response_too_large"],
     ["Unsupported OIDC client authentication method", "client_auth_unsupported"],

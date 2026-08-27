@@ -315,6 +315,8 @@ export type WorkspaceStore = {
   delete(userId: string, workspaceId: string): Promise<boolean>
   listMembers(userId: string, workspaceId: string): Promise<WorkspaceMember[]>
   addMember(userId: string, workspaceId: string, memberUserId: string, role?: 'admin' | 'member'): Promise<WorkspaceMember>
+  /** System-only JIT enrollment. Existing roles are preserved and fan-out is healed. */
+  ensureMemberSystem(workspaceId: string, memberUserId: string): Promise<WorkspaceMember>
   removeMember(userId: string, workspaceId: string, memberUserId: string): Promise<boolean>
   updateMemberRole(userId: string, workspaceId: string, memberUserId: string, role: 'admin' | 'member'): Promise<boolean>
   /**
@@ -1588,6 +1590,31 @@ export function createWorkspaceStore(cascades: WorkspaceStoreCascades = {}): Wor
         console.error('[workspace-store] default-teamspace join on member add failed:', err)
       }
 
+      return member
+    },
+
+    async ensureMemberSystem(workspaceId, memberUserId) {
+      const result = await query<WorkspaceMember>(
+        `INSERT INTO workspace_members (workspace_id, user_id, role, clearance)
+         VALUES ($1, $2, 'member', 'internal')
+         ON CONFLICT (workspace_id, user_id) DO UPDATE SET user_id = EXCLUDED.user_id
+         RETURNING id, workspace_id AS "workspaceId", user_id AS "userId", role,
+                   can_draft AS "canDraft", clearance, joined_at AS "joinedAt"`,
+        [workspaceId, memberUserId],
+      )
+      const member = result.rows[0]
+      await query(
+        `INSERT INTO assistant_members (assistant_id, user_id, role)
+         SELECT a.id, $1, 'member'
+         FROM assistants a WHERE a.workspace_id = $2
+         ON CONFLICT (assistant_id, user_id) DO NOTHING`,
+        [memberUserId, workspaceId],
+      )
+      try {
+        await joinDefaultTeamspacesSystem(workspaceId, memberUserId)
+      } catch (err) {
+        console.error('[workspace-store] default-teamspace join on JIT enrollment failed:', err)
+      }
       return member
     },
 

@@ -15,10 +15,12 @@ export type OidcMetadata = {
 export type VerifiedOidcIdentity = {
   issuer: string;
   subject: string;
-  email: string;
-  emailVerified: true;
+  email?: string;
+  emailVerified?: true;
   name?: string;
   avatarUrl?: string;
+  groups?: string[];
+  groupClaim?: string;
 };
 
 function boundedString(value: unknown, max: number): string | undefined {
@@ -112,7 +114,7 @@ export function authorizationUrl(
   url.searchParams.set("redirect_uri", oidcCallbackUrl(config));
   url.searchParams.set("response_type", "code");
   url.searchParams.set("response_mode", "query");
-  url.searchParams.set("scope", "openid email profile");
+  url.searchParams.set("scope", ["openid", "email", "profile", ...config.oidc.enrollment.additionalScopes].join(" "));
   url.searchParams.set("state", input.state);
   url.searchParams.set("nonce", input.nonce);
   url.searchParams.set("code_challenge", input.challenge);
@@ -173,18 +175,40 @@ export async function verifyOidcIdentity(
   const subject = boundedString(payload.sub, 512);
   const email = boundedString(payload.email, 320)?.toLowerCase();
   if (!subject) throw new Error("OIDC subject required");
-  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("OIDC email required");
-  if (config.oidc.emailVerification === "claim" && payload.email_verified !== true) throw new Error("OIDC verified email required");
+  if (payload.email !== undefined && (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) {
+    throw new Error("OIDC email required");
+  }
+  if (!email && !config.oidc.subjectIdentityEnabled) throw new Error("OIDC email required");
+  if (email && config.oidc.emailVerification === "claim" && payload.email_verified !== true) {
+    throw new Error("OIDC verified email required");
+  }
   const name = boundedString(payload.name, 200);
   const avatarUrl = boundedString(payload.picture, 2048);
+  const groups = readGroups(payload, config.oidc.enrollment.groupClaim);
   return {
     issuer: config.oidc.issuerUrl,
     subject,
-    email,
-    emailVerified: true,
+    ...(email ? { email, emailVerified: true as const } : {}),
     ...(name ? { name } : {}),
     ...(avatarUrl ? { avatarUrl } : {}),
+    ...(groups.length > 0 ? { groups, groupClaim: config.oidc.enrollment.groupClaim } : {}),
   };
+}
+
+function readGroups(payload: JWTPayload, groupClaim: string | undefined): string[] {
+  if (!groupClaim) return [];
+  const raw = payload[groupClaim];
+  if (raw === undefined) return [];
+  const values = typeof raw === "string" ? [raw] : raw;
+  if (!Array.isArray(values) || values.length > 64) throw new Error("OIDC groups invalid");
+  const groups: string[] = [];
+  for (const value of values) {
+    if (typeof value !== "string" || value.length < 1 || value.length > 200 || /[\x00-\x1f\x7f]/.test(value)) {
+      throw new Error("OIDC groups invalid");
+    }
+    if (!groups.includes(value)) groups.push(value);
+  }
+  return groups;
 }
 
 function validateAuthorizedParty(payload: JWTPayload, clientId: string): void {

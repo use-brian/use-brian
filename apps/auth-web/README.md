@@ -45,8 +45,20 @@ OUTPOST_OIDC_CLIENT_SECRET=client-secret
 OUTPOST_OIDC_PROVIDER_NAME=Cloudflare Access
 OUTPOST_OIDC_ALLOWED_ENDPOINT_ORIGINS=
 OUTPOST_OIDC_EMAIL_VERIFICATION=claim
+OUTPOST_OIDC_SUBJECT_IDENTITY_ENABLED=false
+OUTPOST_OIDC_ENROLLMENT_MODE=invite_only
+OUTPOST_OIDC_WORKSPACE_MAPPINGS=
 OUTPOST_AUTH_BRIDGE_SECRET=<at-least-32-random-characters>
 ```
+
+Set `OUTPOST_OIDC_SUBJECT_IDENTITY_ENABLED=true` only when the provider may
+omit email and its stable `(issuer, sub)` identity should be allowed to create
+an account without email-based bootstrap or invitation admission.
+
+Set enrollment mode to `mapped` to admit verified email domains or exact values
+from a configured ID-token group claim and join matching users to configured
+workspaces as members. The mapping value is versioned JSON; see
+`docs/architecture/platform/auth.md` in the platform repository for its schema.
 
 For Cloudflare, create an Access for SaaS application using OIDC and register
 `$AUTH_PORTAL_URL/api/auth/oidc/callback`. A self-hosted Access application's

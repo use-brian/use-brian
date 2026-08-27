@@ -16,6 +16,12 @@ export type PortalConfig = {
     bridgeSecret: string;
     allowedEndpointOrigins: string[];
     emailVerification: "claim" | "issuer";
+    subjectIdentityEnabled: boolean;
+    enrollment: {
+      mode: "invite_only" | "mapped";
+      groupClaim?: string;
+      additionalScopes: string[];
+    };
   };
 };
 
@@ -102,6 +108,12 @@ export function resolvePortalConfig(
     if (emailVerification !== "claim" && emailVerification !== "issuer") {
       throw new Error("OUTPOST_OIDC_EMAIL_VERIFICATION must be claim or issuer");
     }
+    const subjectIdentityEnabled = strictBoolean(
+      env.OUTPOST_OIDC_SUBJECT_IDENTITY_ENABLED,
+      "OUTPOST_OIDC_SUBJECT_IDENTITY_ENABLED",
+      false,
+    );
+    const enrollment = resolveOidcEnrollment(env);
     oidc = {
       issuerUrl,
       clientId: required(env, "OUTPOST_OIDC_CLIENT_ID"),
@@ -110,6 +122,8 @@ export function resolvePortalConfig(
       bridgeSecret,
       allowedEndpointOrigins,
       emailVerification,
+      subjectIdentityEnabled,
+      enrollment,
     };
   }
 
@@ -122,6 +136,48 @@ export function resolvePortalConfig(
     oidcEnabled,
     ...(rawDomain ? { cookieDomain: rawDomain } : {}),
     ...(oidc ? { oidc } : {}),
+  };
+}
+
+function resolveOidcEnrollment(env: Record<string, string | undefined>): NonNullable<PortalConfig["oidc"]>["enrollment"] {
+  const mode = env.OUTPOST_OIDC_ENROLLMENT_MODE?.trim() || "invite_only";
+  if (mode !== "invite_only" && mode !== "mapped") {
+    throw new Error("OUTPOST_OIDC_ENROLLMENT_MODE must be invite_only or mapped");
+  }
+  if (mode === "invite_only") return { mode, additionalScopes: [] };
+  const raw = required(env, "OUTPOST_OIDC_WORKSPACE_MAPPINGS");
+  if (Buffer.byteLength(raw, "utf8") > 32 * 1024) throw new Error("OUTPOST_OIDC_WORKSPACE_MAPPINGS is too large");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("OUTPOST_OIDC_WORKSPACE_MAPPINGS must be valid JSON");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("OUTPOST_OIDC_WORKSPACE_MAPPINGS has an invalid shape");
+  }
+  const value = parsed as Record<string, unknown>;
+  const allowedKeys = new Set(["version", "groupClaim", "additionalScopes", "rules"]);
+  if (Object.keys(value).some((key) => !allowedKeys.has(key)) || value.version !== 1 || !Array.isArray(value.rules) || value.rules.length < 1 || value.rules.length > 128) {
+    throw new Error("OUTPOST_OIDC_WORKSPACE_MAPPINGS has an invalid shape");
+  }
+  const hasGroupRule = value.rules.some((rule) => !!rule && typeof rule === "object" && !Array.isArray(rule) && "group" in rule);
+  const groupClaim = value.groupClaim;
+  if (groupClaim !== undefined && (typeof groupClaim !== "string" || groupClaim.length < 1 || groupClaim.length > 200 || groupClaim.trim() !== groupClaim || /[\x00-\x1f\x7f]/.test(groupClaim))) {
+    throw new Error("OUTPOST_OIDC_WORKSPACE_MAPPINGS groupClaim is invalid");
+  }
+  if (hasGroupRule && typeof groupClaim !== "string") {
+    throw new Error("OUTPOST_OIDC_WORKSPACE_MAPPINGS groupClaim is required for group rules");
+  }
+  const rawScopes = value.additionalScopes ?? [];
+  if (!Array.isArray(rawScopes) || rawScopes.length > 16 || rawScopes.some((scope) => typeof scope !== "string" || !/^[\x21\x23-\x5b\x5d-\x7e]{1,100}$/.test(scope))) {
+    throw new Error("OUTPOST_OIDC_WORKSPACE_MAPPINGS additionalScopes are invalid");
+  }
+  const additionalScopes = [...new Set(rawScopes as string[])].filter((scope) => !["openid", "email", "profile"].includes(scope));
+  return {
+    mode,
+    ...(typeof groupClaim === "string" ? { groupClaim } : {}),
+    additionalScopes,
   };
 }
 
