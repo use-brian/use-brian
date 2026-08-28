@@ -1,7 +1,7 @@
 /**
  * Built-in connector lifecycle routes — `/api/connectors`.
  *
- * The OSS-open half of the connector surface. The hosted edition mounts a
+ * The standalone OSS and Outpost half of the connector surface. Hosted mounts a
  * richer closed `/api/connectors` route (custom MCP CRUD, Google Drive
  * authorized-files); this open module implements the
  * built-in OAuth/PAT connector lifecycle that the open `apps/app-web` OAuth

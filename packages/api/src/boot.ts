@@ -151,7 +151,7 @@ import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTORS, OFFICIAL_CONNECTOR_TOOLS, 
 // ── OPEN package imports (@use-brian/api) ──────────────────────────
 import { findAssistantById, findUserByAuthProvider, findUserByEmail, findUserById, getWorkspacePrimaryAssistant, isUserBlockedForAssistant, listAccessibleAssistants } from './db/users.js'
 import { resolveTurnScopeSystem } from './context-scope/resolve-turn-scope.js'
-import { deploymentProfile } from './edition.js'
+import { deploymentProfile, usesOpenStandaloneRoutes } from './edition.js'
 import { createEmailAdmission, requireOutpostAuthPortal } from './auth/email-admission.js'
 import { validateOutpostAuthConfig } from './auth/outpost-auth-config.js'
 import { getTaskByIdSystem } from './db/tasks.js'
@@ -4843,10 +4843,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // and developing an idea must never require a credential in either edition.
   app.use('/api/distribution', requireAuth(env.JWT_SECRET), contentIdeasRoutes())
 
-  // OSS content planning reuses the app-web `/api/distribution/*` wire
+  // Standalone content planning reuses the app-web `/api/distribution/*` wire
   // contract but contains no provider integration. Hosted mounts its
   // provider-backed distribution routers later through mountExtraRoutes.
-  if (isOssEdition()) {
+  if (usesOpenStandaloneRoutes(profile)) {
     app.use(
       '/api/distribution',
       requireAuth(env.JWT_SECRET),
@@ -4940,7 +4940,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         : {}),
     }))
   }
-  if (process.env.USEBRIAN_EDITION === 'oss' && filesResolver && filesBlobClient) {
+  if (usesOpenStandaloneRoutes(profile) && filesResolver && filesBlobClient) {
     app.use('/api/recordings', requireAuth(env.JWT_SECRET), openRecordingsRoutes({
       filesResolver,
       getRole: (userId, workspaceId) => workspaceStore.getRole(userId, workspaceId),
@@ -4985,11 +4985,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }))
 
   // Built-in connector lifecycle (list / store-credentials / disconnect /
-  // rename / delete). OSS-only: the hosted edition mounts its own richer closed
-  // `/api/connectors` route, so mounting this open one there would shadow it.
-  // Gated on the same `USEBRIAN_EDITION` flag the launcher sets for the open
-  // single-player edition. See routes/connectors.ts.
-  if (process.env.USEBRIAN_EDITION === 'oss') {
+  // rename / delete). Both standalone profiles own this open route; hosted
+  // mounts its richer closed `/api/connectors` route instead, so mounting this
+  // one there would shadow it. See routes/connectors.ts.
+  if (usesOpenStandaloneRoutes(profile)) {
     app.use('/api/connectors', requireAuth(env.JWT_SECRET), connectorRoutes({
       connectorStore,
       connectorInstanceStore,
@@ -5191,7 +5190,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }))
 
   const workspaceInvitationStore = createWorkspaceInvitationStore()
-  if (process.env.USEBRIAN_EDITION === 'oss') {
+  if (usesOpenStandaloneRoutes(profile)) {
     const connectorInstanceRouteOptions = {
       connectorInstanceStore,
       connectorGrantStore,
@@ -7619,9 +7618,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   })
   if (runWorkers) externalSinkRelay.start()
 
-  // Hosted keeps its platform route; the standalone edition mounts the open
+  // Hosted keeps its platform route; both standalone profiles mount the open
   // implementation against this composition root's shared store instances.
-  if (process.env.USEBRIAN_EDITION === 'oss') {
+  if (usesOpenStandaloneRoutes(profile)) {
     app.use('/api/ingest', requireAuth(env.JWT_SECRET), ingestRoutes({
       connectorInstanceStore,
       ingestRulesStore,
