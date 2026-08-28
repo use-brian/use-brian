@@ -503,7 +503,7 @@ export function FloatingChat({
   // Doc keeps the page-first affordances; a workspace surface gates them off.
   const isDocOrigin = origin === "doc";
   const t = useT().chat;
-  const tGoal = useT().chatApp;
+  const tChatApp = useT().chatApp;
   // Chat is network/AI — fully unavailable offline. Disable the composer in the
   // bundled app when offline so a turn can't be started (no-op on web/thin).
   const offline = useIsOffline();
@@ -2514,6 +2514,26 @@ export function FloatingChat({
                 setResearchExhausted(true);
                 setResearchMode(false);
               }
+              // Dropped provider connection: retrying is safe and usually
+              // enough, so say that instead of the raw socket message.
+              if (payload.code === "upstream_connection_reset") {
+                setError(
+                  payload.customEndpoint === true
+                    ? tChatApp.upstreamConnectionResetCustom
+                    : tChatApp.upstreamConnectionReset,
+                );
+                break;
+              }
+              // Endpoint unreachable: retrying will not help until the
+              // endpoint is back, so the copy points at the settings check.
+              if (payload.code === "upstream_unreachable") {
+                setError(
+                  payload.customEndpoint === true
+                    ? tChatApp.upstreamUnreachableCustom
+                    : tChatApp.upstreamUnreachable,
+                );
+                break;
+              }
               const msg =
                 typeof payload.error === "string" ? payload.error : t.error;
               setError(msg);
@@ -3476,13 +3496,13 @@ export function FloatingChat({
                     notice={acceptedGoal}
                     workspaceId={workspaceId}
                     labels={{
-                      accepted: tGoal.goalAcceptedLabel,
-                      executing: tGoal.goalAcceptedStatus,
-                      done: tGoal.goalAcceptedDone,
-                      blocked: tGoal.goalAcceptedBlocked,
-                      abandoned: tGoal.goalAcceptedAbandoned,
-                      open: tGoal.goalAcceptedOpen,
-                      dismiss: tGoal.goalAcceptedDismiss,
+                      accepted: tChatApp.goalAcceptedLabel,
+                      executing: tChatApp.goalAcceptedStatus,
+                      done: tChatApp.goalAcceptedDone,
+                      blocked: tChatApp.goalAcceptedBlocked,
+                      abandoned: tChatApp.goalAcceptedAbandoned,
+                      open: tChatApp.goalAcceptedOpen,
+                      dismiss: tChatApp.goalAcceptedDismiss,
                     }}
                     onDismiss={() => setAcceptedGoal(null)}
                     className="mb-1.5"
