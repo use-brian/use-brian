@@ -172,6 +172,7 @@ import {
 } from './routes/self-host-feed-cloud.js'
 import { createSelfHostFeedCloudLinkStore } from './db/self-host-feed-cloud-link-store.js'
 import {
+  buildContentPlanningPromptResolver,
   injectContentPlanningTools,
   resolveContentPlanningPrompt,
   resolveContentPlanningSoul,
@@ -1214,14 +1215,22 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     await injectContentPlanningTools(ctx)
     await ports.injectExtraTools?.(ctx)
   }
-  const resolveExtraSystemPrompt = (session: {
+  // The open half is data-backed: plan-mode sessions get the live preset
+  // block (current month brief + open ideas) under the static addendum
+  // (feed-plan-chat-first.md §6). The hosted port stays sync and narrow.
+  const resolveOpenPlanningPrompt = buildContentPlanningPromptResolver()
+  const resolveExtraSystemPrompt = async (session: {
     mode: string | null
     channelType: string
-  }): string | null => {
-    const open = resolveContentPlanningPrompt(session)
+    assistantId?: string
+  }): Promise<string | null> => {
+    const open = await resolveOpenPlanningPrompt(session)
+    const openStatic = resolveContentPlanningPrompt(session)
     const hosted = ports.resolveExtraSystemPrompt?.(session) ?? null
     if (!open) return hosted
-    if (!hosted || hosted === open) return open
+    // A hosted override equal to the static open addendum is the same
+    // fragment, not an addition — keep the data-backed open version.
+    if (!hosted || hosted === open || hosted === openStatic) return open
     return `${open}\n\n${hosted}`
   }
   const resolveAppSoul: ResolveAppSoul = (params) =>

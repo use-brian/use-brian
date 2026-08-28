@@ -59,9 +59,12 @@ function renderRail(
         openIdeasCount={0}
         canEdit
         proposals={[]}
+        briefPatch={null}
         showProposals={false}
         pullingProposals={false}
         acceptingProposalIndex={null}
+        onApplyBriefPatch={vi.fn()}
+        onDismissBriefPatch={vi.fn()}
         quickActions={[
           { key: "fill-empty", label: en.feedPage.plan.quickFillEmpty, run: vi.fn() },
           { key: "plan-week", label: en.feedPage.plan.quickPlanWeek, run: vi.fn() },
@@ -141,5 +144,20 @@ describe("[COMP:app-web/feed-plan-chat] docked plan chat rail", () => {
 
     // Absent until the operator asks or a saved proposal exists.
     expect(renderRail()).not.toContain(en.feedPage.plan.proposedHeading);
+  });
+
+  it("renders the P11 month-brief patch as its own apply-or-dismiss card", () => {
+    const html = renderRail({
+      showProposals: true,
+      briefPatch: { brief: "Hiring-first month", cadencePerWeek: 2 },
+    });
+    expect(html).toContain("data-plan-brief-patch");
+    expect(html).toContain(en.feedPage.plan.briefPatchHeading);
+    expect(html).toContain("Hiring-first month");
+    expect(html).toContain(en.feedPage.plan.applyBriefPatch);
+    // No pending patch, no card.
+    expect(renderRail({ showProposals: true })).not.toContain(
+      "data-plan-brief-patch",
+    );
   });
 });

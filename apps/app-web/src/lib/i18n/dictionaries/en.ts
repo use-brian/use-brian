@@ -6292,6 +6292,8 @@ export const en = {
       acceptAll: "Add all",
       dismissSlot: "Dismiss",
       refreshProposals: "Check again",
+      briefPatchHeading: "Month brief update",
+      applyBriefPatch: "Apply",
       noBriefYet: "(no brief written yet)",
       noCadenceYet: "not set",
       fillEmptyPrompt: "Fill the empty slots I already have for {month}.\n\nThis month's goal:\n{brief}\n\nCadence: {cadence} per week\n\nEmpty slots (carry each slotId back so accepting updates that slot instead of creating a new one):\n{slots}\n\nGive each one a title and a brief. Do not write the caption - I draft those myself.",

@@ -419,7 +419,17 @@ type WebChatOptions = {
   isPlaceholderTitle?: (title: string | null | undefined) => boolean
   getTitleChannelPrefix?: (title: string | null | undefined) => string | null
   injectExtraTools?: InjectExtraTools
-  resolveExtraSystemPrompt?: (session: { mode: string | null; channelType: string }) => string | null
+  /**
+   * May resolve async: the open impl fetches live plan presets (month brief +
+   * open ideas) for `mode='plan'` sessions, keyed by `assistantId`
+   * (feed-plan-chat-first.md §6). Sync impls keep working — the call site
+   * awaits either.
+   */
+  resolveExtraSystemPrompt?: (session: {
+    mode: string | null
+    channelType: string
+    assistantId?: string
+  }) => string | null | Promise<string | null>
   resolveAppSoul?: ResolveAppSoul
   /**
    * Tool-use interception port (remote MCP only), forwarded through
@@ -5029,9 +5039,10 @@ export function chatRoutes(options: WebChatOptions): Router {
       // A host may add a session-specific prompt block (e.g. a draft-session
       // authoring addendum). Open default: none. Pairs with injectExtraTools
       // below so the prompt and the available tools agree.
-      const extraSystemPrompt = options.resolveExtraSystemPrompt?.({
+      const extraSystemPrompt = await options.resolveExtraSystemPrompt?.({
         mode: session.mode,
         channelType: session.channelType,
+        assistantId: assistant.id,
       })
       if (extraSystemPrompt) {
         fullSystemPrompt += `\n\n${extraSystemPrompt}`

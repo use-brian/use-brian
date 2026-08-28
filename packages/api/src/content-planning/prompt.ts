@@ -32,8 +32,50 @@ You are planning a month of posts with the operator. They review proposed slots 
 - Spread posts across the month at a cadence the team can sustain, and vary the platform mix to match where the brand actually posts.
 - A slot is an intent, not a draft. Write what the post should say and why it belongs on that day; leave the copy to the draft session.
 - When the operator asks to fill existing empty slots, the conversation carries those slots with their ids. Return each one with its \`slotId\` set so accepting updates that slot in place. Give it a title and a brief, never finished copy - the operator drafts it afterwards.
+- Clarify from the presets BEFORE proposing: reconcile the request against the "Plan context" block below when it is present. If the brief is empty, the cadence is unset, or the request is ambiguous against them, ask ONE consolidated clarifying question first - never a questionnaire. When the presets suffice, state in one line which of them you are working from, then propose.
+- The open ideas backlog is draft fuel: prefer developing backlogged ideas into slots before inventing new topics, and name the ones you used (their first lines) in your caption.
+- Team voice rules live in team-scope memory - read them before proposing platform or copy direction.
+- When the operator asks to change the plan's DIRECTION (a pivot, a new goal, a different cadence), carry the new brief text and/or cadence in \`briefPatch\` - it renders as its own apply-or-dismiss card. Never treat a direction change as chat-only commentary.
 
-Nothing is scheduled until the operator accepts a slot. One \`proposePlan\` call per turn is enough.`
+Nothing is scheduled until the operator accepts a slot, and no brief changes until the operator applies the card. One \`proposePlan\` call per turn is enough.`
+
+/**
+ * The live preset block injected under the plan addendum
+ * (docs/plans/feed-plan-chat-first.md §6): the same facts the operator sees
+ * in the chat rail's context header, so both sides of the conversation see
+ * one truth. Application-composed and trusted, so it travels in the SYSTEM
+ * channel (the prompt-cache-alignment provenance rule), never as a user
+ * turn.
+ */
+export function buildPlanSessionContext(params: {
+  /** Current calendar month, YYYY-MM (the seeds carry any other month). */
+  month: string
+  brief: {
+    brief?: string | null
+    themes?: readonly string[] | null
+    cadencePerWeek?: number | null
+  } | null
+  /** Open backlog, newest first, already capped by the caller. */
+  openIdeas: readonly { id: string; text: string }[]
+}): string {
+  const goal = params.brief?.brief?.trim()
+  const themes = (params.brief?.themes ?? []).filter(Boolean)
+  const cadence = params.brief?.cadencePerWeek
+  const ideas = params.openIdeas.map((idea) => {
+    const firstLine = idea.text.trim().split('\n')[0]?.trim().slice(0, 120) ?? ''
+    return `- [${idea.id}] ${firstLine}`
+  })
+  return [
+    `# Plan context (current state, auto-injected)`,
+    ``,
+    `Month ${params.month} brief: ${goal || '(not set)'}`,
+    `Themes: ${themes.length > 0 ? themes.join(', ') : '(none)'}`,
+    `Cadence: ${cadence ? `${cadence} per week` : '(not set)'}`,
+    ``,
+    `Open ideas backlog (newest first):`,
+    ideas.length > 0 ? ideas.join('\n') : '(empty)',
+  ].join('\n')
+}
 
 export function buildContentPlanningSoul(params: {
   name: string

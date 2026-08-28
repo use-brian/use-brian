@@ -71,8 +71,10 @@ import {
 } from "@/lib/feed-plan";
 import { requestFeedChatSeed } from "@/lib/feed-chat-seed";
 import {
+  pendingBriefPatch,
   pendingProposedSlots,
   replayPlanProposal,
+  type ProposedBriefPatch,
   type ProposedSlot,
 } from "@/lib/feed-plan-proposal";
 import { useT } from "@/lib/i18n/client";
@@ -179,6 +181,11 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
   // assistant's `proposePlan` cardboard so calendar and rail share one set.
   const [watchToken, setWatchToken] = useState(0);
   const [proposed, setProposed] = useState<ProposedSlot[]>([]);
+  // The P11 brief-patch card rides the same replay; dismissal is local like
+  // a slot's, and applying retires it via the pending diff.
+  const [proposedBriefPatch, setProposedBriefPatch] =
+    useState<ProposedBriefPatch | null>(null);
+  const [briefPatchDismissed, setBriefPatchDismissed] = useState(false);
   const [dismissedProposals, setDismissedProposals] = useState<Set<number>>(
     new Set(),
   );
@@ -253,10 +260,10 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
       }
       const rows = await fetchSessionMessages(sessionId);
       const proposal = replayPlanProposal(rows);
-      setProposed(
-        proposal?.month === month
-          ? pendingProposedSlots(proposal, slots)
-          : [],
+      const sameMonth = proposal?.month === month;
+      setProposed(sameMonth ? pendingProposedSlots(proposal, slots) : []);
+      setProposedBriefPatch(
+        sameMonth ? (proposal?.briefPatch ?? null) : null,
       );
     } finally {
       setPullingProposals(false);
@@ -302,6 +309,8 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
   useEffect(() => {
     setRail({ kind: "chat" });
     setProposed([]);
+    setProposedBriefPatch(null);
+    setBriefPatchDismissed(false);
     setDismissedProposals(new Set());
   }, [month]);
 
@@ -757,7 +766,30 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
     setDismissedProposals((prev) => new Set(prev).add(slot.index));
   }
 
-  const showProposals = watchToken > 0 || visibleProposals.length > 0;
+  // Pending only while it still differs from the saved brief — applying it
+  // retires the card without a dismissal (the slots' "already on the
+  // calendar" rule, one level up).
+  const visibleBriefPatch = useMemo(
+    () =>
+      briefPatchDismissed ? null : pendingBriefPatch(proposedBriefPatch, brief),
+    [briefPatchDismissed, proposedBriefPatch, brief],
+  );
+
+  /** Apply the P11 card: one PATCH through the same saveBrief boundary. */
+  function applyBriefPatch() {
+    if (!visibleBriefPatch) return;
+    void saveBrief({
+      brief: visibleBriefPatch.brief ?? brief?.brief ?? "",
+      themes: brief?.themes ?? [],
+      cadencePerWeek:
+        visibleBriefPatch.cadencePerWeek === undefined
+          ? (brief?.cadencePerWeek ?? null)
+          : visibleBriefPatch.cadencePerWeek,
+    });
+  }
+
+  const showProposals =
+    watchToken > 0 || visibleProposals.length > 0 || visibleBriefPatch !== null;
 
   // P3: the three locked chips. Plain array — each `run` closes over the
   // current month/brief/slots, and the rail re-renders with the board.
@@ -920,10 +952,13 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
                 openIdeasCount={ideas.length}
                 canEdit={canEdit}
                 proposals={visibleProposals}
+                briefPatch={visibleBriefPatch}
                 showProposals={showProposals}
                 pullingProposals={pullingProposals}
                 acceptingProposalIndex={acceptingProposalIndex}
                 quickActions={quickActions}
+                onApplyBriefPatch={applyBriefPatch}
+                onDismissBriefPatch={() => setBriefPatchDismissed(true)}
                 onAcceptProposal={(proposal) => void acceptProposal(proposal)}
                 onAcceptAllProposals={() => void acceptAllProposals()}
                 onDismissProposal={dismissProposal}

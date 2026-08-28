@@ -49,7 +49,10 @@ import {
   type PlanBrief,
   type PlanSlotStatus,
 } from "@/lib/feed-plan";
-import type { ProposedSlot } from "@/lib/feed-plan-proposal";
+import type {
+  ProposedBriefPatch,
+  ProposedSlot,
+} from "@/lib/feed-plan-proposal";
 import {
   FEED_CHAT_OPEN_EVENT,
   FEED_CHAT_SEED_EVENT,
@@ -76,10 +79,13 @@ export function PlanChatRail({
   openIdeasCount,
   canEdit,
   proposals,
+  briefPatch,
   showProposals,
   pullingProposals,
   acceptingProposalIndex,
   quickActions,
+  onApplyBriefPatch,
+  onDismissBriefPatch,
   onAcceptProposal,
   onAcceptAllProposals,
   onDismissProposal,
@@ -100,10 +106,14 @@ export function PlanChatRail({
   canEdit: boolean;
   /** Shared with the Month calendar; neither surface owns a private copy. */
   proposals: readonly ProposedSlot[];
+  /** The P11 apply-or-dismiss month-brief revision, when one is pending. */
+  briefPatch: ProposedBriefPatch | null;
   showProposals: boolean;
   pullingProposals: boolean;
   acceptingProposalIndex: number | null;
   quickActions: readonly PlanQuickAction[];
+  onApplyBriefPatch: () => void;
+  onDismissBriefPatch: () => void;
   onAcceptProposal: (proposal: ProposedSlot) => void;
   onAcceptAllProposals: () => void;
   onDismissProposal: (proposal: ProposedSlot) => void;
@@ -286,7 +296,55 @@ export function PlanChatRail({
             </button>
           </div>
 
-          {proposals.length === 0 ? (
+          {/* Direction change first (P11): the month-brief revision is its
+              own apply-or-dismiss card, same accept-before-write contract. */}
+          {briefPatch ? (
+            <div
+              data-plan-brief-patch
+              className="rounded-lg border border-dashed border-border bg-card/60 p-2"
+            >
+              <div className="text-[11px] font-medium uppercase tracking-[0.12em] text-muted-foreground">
+                {tp.briefPatchHeading}
+              </div>
+              {briefPatch.brief !== undefined ? (
+                <p className="mt-1 line-clamp-4 whitespace-pre-wrap text-[12.5px] leading-relaxed">
+                  {briefPatch.brief}
+                </p>
+              ) : null}
+              {briefPatch.cadencePerWeek !== undefined ? (
+                <div className="mt-1 text-[11px] text-muted-foreground">
+                  {briefPatch.cadencePerWeek === null
+                    ? tp.contextCadenceUnset
+                    : format(tp.contextCadence, {
+                        count: String(briefPatch.cadencePerWeek),
+                      })}
+                </div>
+              ) : null}
+              {canEdit ? (
+                <div className="mt-2 flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={onApplyBriefPatch}
+                    className="inline-flex h-7 flex-1 items-center justify-center gap-1 rounded-md border border-border px-2 text-[11px] font-medium transition-colors hover:bg-accent"
+                  >
+                    <Check className="size-3" aria-hidden />
+                    {tp.applyBriefPatch}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onDismissBriefPatch}
+                    aria-label={tp.dismissSlot}
+                    title={tp.dismissSlot}
+                    className="inline-flex size-7 items-center justify-center rounded-md border border-border text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                  >
+                    <X className="size-3" aria-hidden />
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
+          {proposals.length === 0 && !briefPatch ? (
             <p className="rounded-lg border border-dashed border-border p-2.5 text-[11px] leading-relaxed text-muted-foreground">
               {tp.proposalsPending}
             </p>

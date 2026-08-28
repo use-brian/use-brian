@@ -6020,6 +6020,8 @@ export const zh: Dictionary = {
       acceptAll: "全部添加",
       dismissSlot: "忽略",
       refreshProposals: "再次检查",
+      briefPatchHeading: "月度简报更新",
+      applyBriefPatch: "应用",
       noBriefYet: "(还没有写方针)",
       noCadenceYet: "未设置",
       fillEmptyPrompt: "请填充 {month} 中已有的空档期。\n\n本月目标:\n{brief}\n\n频率: 每周 {cadence} 条\n\n空档期 (请原样带回每个 slotId,这样接受时会更新该档期而不是新建):\n{slots}\n\n为每个档期写出标题和简报。不要写正文 - 我自己来起草。",

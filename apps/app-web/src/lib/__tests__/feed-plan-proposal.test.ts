@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   parseProposePlanInput,
+  pendingBriefPatch,
   pendingProposedSlots,
   replayPlanProposal,
 } from "@/lib/feed-plan-proposal";
@@ -174,5 +175,99 @@ describe("[COMP:app-web/feed-plan-proposal] filling an existing slot (D31)", () 
       ],
     });
     expect(parsed?.slots[0].slotId).toBeUndefined();
+  });
+});
+
+describe("[COMP:app-web/feed-plan-proposal] month-brief patch card (P11)", () => {
+  it("parses a brief-only direction change with zero slots", () => {
+    const parsed = parseProposePlanInput({
+      month: "2026-08",
+      rationale: "Pivot to hiring content.",
+      briefPatch: { brief: "Hiring-first month", cadencePerWeek: 2 },
+      slots: [],
+    });
+    expect(parsed?.slots).toHaveLength(0);
+    expect(parsed?.briefPatch).toEqual({
+      brief: "Hiring-first month",
+      cadencePerWeek: 2,
+    });
+  });
+
+  it("drops a malformed patch and still refuses an empty proposal", () => {
+    const parsed = parseProposePlanInput({
+      month: "2026-08",
+      rationale: "ok",
+      briefPatch: { cadencePerWeek: 99 },
+      slots: [
+        { index: 1, date: "2026-08-04", platform: "threads", title: "A" },
+      ],
+    });
+    expect(parsed?.briefPatch).toBeUndefined();
+    expect(
+      parseProposePlanInput({
+        month: "2026-08",
+        rationale: "nothing",
+        briefPatch: {},
+        slots: [],
+      }),
+    ).toBeNull();
+  });
+
+  it("replays: the newest patch wins, an omitted one carries forward", () => {
+    const replayed = replayPlanProposal([
+      toolUse({
+        month: "2026-08",
+        rationale: "first",
+        briefPatch: { brief: "Old direction" },
+        slots: [
+          { index: 1, date: "2026-08-04", platform: "threads", title: "A" },
+        ],
+      }),
+      toolUse({
+        month: "2026-08",
+        rationale: "revise slot only",
+        slots: [
+          { index: 1, date: "2026-08-05", platform: "threads", title: "A2" },
+        ],
+      }),
+    ]);
+    expect(replayed?.briefPatch).toEqual({ brief: "Old direction" });
+
+    const replaced = replayPlanProposal([
+      toolUse({
+        month: "2026-08",
+        rationale: "first",
+        briefPatch: { brief: "Old direction" },
+        slots: [
+          { index: 1, date: "2026-08-04", platform: "threads", title: "A" },
+        ],
+      }),
+      toolUse({
+        month: "2026-08",
+        rationale: "new direction",
+        briefPatch: { brief: "New direction" },
+        slots: [],
+      }),
+    ]);
+    expect(replaced?.briefPatch).toEqual({ brief: "New direction" });
+  });
+
+  it("pendingBriefPatch retires the card once the saved brief matches", () => {
+    const patch = { brief: "Hiring-first month", cadencePerWeek: 2 };
+    expect(
+      pendingBriefPatch(patch, { brief: "Launch month", cadencePerWeek: 3 }),
+    ).toEqual(patch);
+    // Cadence already matches - only the text is still pending.
+    expect(
+      pendingBriefPatch(patch, { brief: "Launch month", cadencePerWeek: 2 }),
+    ).toEqual({ brief: "Hiring-first month" });
+    // Fully applied (or hand-typed to the same thing) - nothing pending.
+    expect(
+      pendingBriefPatch(patch, {
+        brief: "Hiring-first month",
+        cadencePerWeek: 2,
+      }),
+    ).toBeNull();
+    expect(pendingBriefPatch(null, null)).toBeNull();
   });
 });

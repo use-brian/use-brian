@@ -6070,6 +6070,8 @@ export const ja: Dictionary = {
       acceptAll: "すべて追加",
       dismissSlot: "却下",
       refreshProposals: "もう一度確認",
+      briefPatchHeading: "月次ブリーフの更新",
+      applyBriefPatch: "適用",
       noBriefYet: "(方針はまだありません)",
       noCadenceYet: "未設定",
       fillEmptyPrompt: "{month} の既存の空きスロットを埋めてください。\n\n今月の目標:\n{brief}\n\n頻度: 週 {cadence} 件\n\n空きスロット (各 slotId をそのまま返してください。承認時に新規作成ではなくそのスロットを更新します):\n{slots}\n\nそれぞれにタイトルとブリーフを付けてください。本文は書かないでください - 下書きは自分で作成します。",
