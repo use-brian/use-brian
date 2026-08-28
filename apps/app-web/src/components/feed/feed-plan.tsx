@@ -37,10 +37,12 @@ import {
   PeekResizeHandle,
   usePeekResize,
 } from "@/components/operator/resizable-peek";
+import { PlanCaptureStrip } from "@/components/feed/plan-capture-strip";
 import {
   createFeedIdea,
   createPlanSlot,
   deletePlanSlot,
+  draftFromFeedIdea,
   draftFromPlanSlot,
   ensurePlanSession,
   fetchFeedIdeas,
@@ -527,14 +529,43 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
     );
   }
 
-  async function addIdea(text: string): Promise<boolean> {
+  /** Capture (P5): resolves the saved jot so the strip can offer escalation. */
+  async function addIdea(text: string): Promise<FeedIdea | null> {
     const result = await createFeedIdea(assistantId, { text });
     if (!result.ok) {
       setError(result.error ?? tp.ideaSaveFailed);
-      return false;
+      return null;
     }
     setIdeas((prev) => [result.idea, ...prev]);
-    return true;
+    return result.idea;
+  }
+
+  /**
+   * "Draft now" (P7): the escalation that skips the calendar. The idea's
+   * hint outranks the workspace default; the redirect uses the platform the
+   * server resolved (an already-promoted idea returns its EXISTING session,
+   * possibly on another platform).
+   */
+  async function draftIdea(idea: FeedIdea) {
+    setBusy(true);
+    try {
+      const result = await draftFromFeedIdea(assistantId, idea.id, {
+        platform: idea.platformHint ?? defaultPlatform,
+      });
+      if (!result.ok) {
+        setError(result.error ?? tp.captureDraftFailed);
+        return;
+      }
+      setIdeas((prev) => prev.filter((i) => i.id !== idea.id));
+      router.push(
+        `${feedPath(team.workspaceId, {
+          platform: result.platform,
+          segment: "draft-sessions",
+        })}/${result.sessionId}`,
+      );
+    } finally {
+      setBusy(false);
+    }
   }
 
   /** Optimistic: the card leaves the tray first and snaps back on failure. */
@@ -747,6 +778,18 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
             <h1 className="text-[15px] font-semibold">{t.sections.plan}</h1>
             <p className="text-xs text-muted-foreground">{tp.subtitle}</p>
           </header>
+
+          {/* Capture first (P5): the two entry jobs — log a thought, start
+              writing — before the calendar, with escalation after the jot. */}
+          <PlanCaptureStrip
+            canEdit={canEdit}
+            ideas={ideas}
+            busy={busy}
+            onLogIdea={addIdea}
+            onDraftIdea={(idea) => void draftIdea(idea)}
+            onPlanIdea={planIdea}
+            onDiscardIdea={(idea) => void discardIdea(idea)}
+          />
 
           {error ? (
             <div

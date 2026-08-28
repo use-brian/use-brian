@@ -1,7 +1,7 @@
 /**
- * The Plan rail shares the viewport's bottom-right corner with Feed chat.
- * Both variants reserve the same dock lane. The contextual planning companion
- * keeps repeat-use work in its overview and the monthly form on demand.
+ * The Plan rail's overlays (feed-plan-chat-first.md P9): the extracted
+ * month-brief editor and the slot peek, which open OVER the docked plan
+ * chat and fold back to it. The widget rail they came from is retired.
  */
 
 import { readFileSync } from "node:fs";
@@ -10,12 +10,18 @@ import { renderToString } from "react-dom/server";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
-import { PlanBriefRail } from "../plan-brief-rail";
+import { PlanBriefEditor } from "../plan-brief-editor";
 import { PlanSlotPeek } from "../plan-slot-peek";
 
 const dict = en as unknown as Dictionary;
-const railSource = readFileSync(new URL("../plan-brief-rail.tsx", import.meta.url), "utf8");
-const tooltipSource = readFileSync(new URL("../../ui/tooltip.tsx", import.meta.url), "utf8");
+const editorSource = readFileSync(
+  new URL("../plan-brief-editor.tsx", import.meta.url),
+  "utf8",
+);
+const tooltipSource = readFileSync(
+  new URL("../../ui/tooltip.tsx", import.meta.url),
+  "utf8",
+);
 
 function render(child: React.ReactNode): string {
   return renderToString(
@@ -25,107 +31,50 @@ function render(child: React.ReactNode): string {
   );
 }
 
-function expectDockClearance(html: string) {
-  expect(html).toContain("data-plan-rail-footer");
-  expect(html).toContain("pb-20");
-}
-
-function renderBriefRail({
-  view = "overview",
-  showProposals = false,
-  brief = null,
-}: {
-  view?: "overview" | "brief";
-  showProposals?: boolean;
-  brief?: React.ComponentProps<typeof PlanBriefRail>["brief"];
-} = {}): string {
+function renderBriefEditor(
+  overrides: Partial<React.ComponentProps<typeof PlanBriefEditor>> = {},
+): string {
   return render(
-    <PlanBriefRail
-      view={view}
-      month="2026-08"
-      brief={brief}
-      counts={{ planned: 0, drafting: 0, ready: 0, posted: 0, skipped: 0 }}
+    <PlanBriefEditor
+      brief={null}
       canEdit
       busy={false}
-      proposals={[]}
-      showProposals={showProposals}
-      pullingProposals={false}
-      acceptingProposalIndex={null}
-      ideas={[]}
       onSave={vi.fn()}
-      onRefreshProposals={vi.fn()}
-      onAcceptProposal={vi.fn()}
-      onAcceptAllProposals={vi.fn()}
-      onDismissProposal={vi.fn()}
-      onAddIdea={async () => true}
-      onDiscardIdea={vi.fn()}
-      onPlanIdea={vi.fn()}
-      onOpenBrief={vi.fn()}
-      onCloseBrief={vi.fn()}
+      onBack={vi.fn()}
+      {...overrides}
     />,
   );
 }
 
-describe("[COMP:app-web/plan-brief-rail] contextual planning companion", () => {
-  it("defaults to repeat-use work with only a compact monthly-brief launcher", () => {
-    const html = renderBriefRail();
-
-    const briefAt = html.indexOf(en.feedPage.plan.briefHeading);
-    const ideasAt = html.indexOf(en.feedPage.plan.ideasHeading);
-    const progressAt = html.indexOf(en.feedPage.plan.progressHeading);
-
-    expect(briefAt).toBeGreaterThan(-1);
-    expect(ideasAt).toBeGreaterThan(briefAt);
-    expect(progressAt).toBeGreaterThan(ideasAt);
-    expect(html).toContain("data-plan-brief-launcher");
-    expect(html).toContain(en.feedPage.plan.setUpBrief);
-    expect(html).toContain(en.feedPage.plan.addIdea);
-    expect(html).not.toContain(en.feedPage.plan.goalLabel);
-    expect(html).not.toContain(en.feedPage.plan.themesLabel);
-    expect(html).not.toContain("data-plan-brief-action");
-    expect(html).not.toContain(en.feedPage.plan.proposedHeading);
-  });
-
-  it("opens the monthly form as a separate state", () => {
-    const html = renderBriefRail({ view: "brief" });
+describe("[COMP:app-web/feed-plan-brief-editor] month-brief overlay", () => {
+  it("edits goal, themes, and cadence with an explicit save boundary and a way back to the chat", () => {
+    const html = renderBriefEditor();
 
     expect(html).toContain(en.feedPage.plan.goalLabel);
     expect(html).toContain(en.feedPage.plan.themesLabel);
+    expect(html).toContain(en.feedPage.plan.cadenceLabel);
     expect(html).toContain("data-plan-brief-action");
     expect(html).toContain(en.feedPage.plan.saveBrief);
     expect(html).toContain(en.feedPage.plan.backToBrief);
-    expect(html).not.toContain("data-plan-brief-launcher");
-    expect(html).not.toContain(en.feedPage.plan.ideasHeading);
-    expect(html).not.toContain(en.feedPage.plan.progressHeading);
   });
 
-  it("keeps guidance behind help controls and gives fields one focus layer", () => {
-    const overviewHtml = renderBriefRail();
-    const briefHtml = renderBriefRail({ view: "brief" });
-    const html = `${overviewHtml}${briefHtml}`;
+  it("keeps guidance behind help disclosures and gives fields one focus layer", () => {
+    const html = renderBriefEditor();
     const paragraphText = [...html.matchAll(/<p[^>]*>(.*?)<\/p>/g)]
       .map((match) => match[1].replace(/<[^>]+>/g, ""))
       .join(" ");
 
-    expect(html).toContain('data-plan-section-help="brief"');
-    expect(html).toContain('data-plan-section-help="cadence"');
-    expect(html).toContain('data-plan-section-help="ideas"');
-    expect(html).toContain('data-plan-section-help="progress"');
     expect(paragraphText).not.toContain(en.feedPage.plan.briefDescription);
     expect(paragraphText).not.toContain(en.feedPage.plan.cadenceHint);
-    expect(paragraphText).not.toContain(en.feedPage.plan.ideasDescription);
-    expect(paragraphText).not.toContain(en.feedPage.plan.progressDescription);
-    expect(html).not.toContain(en.feedPage.plan.ideasEmpty);
-    expect(overviewHtml.match(/focus-visible:shadow-none/g)).toHaveLength(1);
-    expect(briefHtml.match(/focus-visible:shadow-none/g)).toHaveLength(3);
+    expect(html.match(/focus-visible:shadow-none/g)).toHaveLength(3);
   });
 
   it("keeps each help tooltip visible when its trigger is clicked", () => {
     // Base UI closes ordinary action tooltips on press. These help buttons are
-    // disclosures, so the rail controls their open state and explicitly keeps
-    // the focused popup visible after the pointer press.
-    expect(railSource).toContain("closeOnClick={false}");
-    expect(railSource).toContain("onClick={() => setOpen(true)}");
+    // disclosures, so the editor controls their open state and explicitly
+    // keeps the focused popup visible after the pointer press.
+    expect(editorSource).toContain("closeOnClick={false}");
+    expect(editorSource).toContain("onClick={() => setOpen(true)}");
     expect(tooltipSource).toContain(
       "open === undefined ? {} : { open, onOpenChange }",
     );
@@ -135,20 +84,9 @@ describe("[COMP:app-web/plan-brief-rail] contextual planning companion", () => {
     expect(tooltipSource).toContain("closeOnClick={closeOnClick}");
   });
 
-  it("reveals assistant proposals only after a planning request", () => {
-    const html = renderBriefRail({ showProposals: true });
-
-    expect(html).toContain(en.feedPage.plan.proposedHeading);
-    expect(html).toContain(en.feedPage.plan.proposedDescription);
-    expect(html).toContain(en.feedPage.plan.proposalsPending);
-    expect(html).toContain(en.feedPage.plan.refreshProposals);
-  });
-
-  it("keeps the scroll body above the collapsed Feed dock", () => {
-    const html = renderBriefRail();
-
-    expect(html).toContain("data-plan-brief-scroll");
-    expect(html).toContain("pb-20");
+  it("hides the save action read-only", () => {
+    const html = renderBriefEditor({ canEdit: false });
+    expect(html).not.toContain("data-plan-brief-action");
   });
 });
 
@@ -178,7 +116,8 @@ describe("[COMP:app-web/plan-slot-peek] dock-safe footer", () => {
       />,
     );
 
-    expectDockClearance(html);
+    expect(html).toContain("data-plan-rail-footer");
+    expect(html).toContain("pb-20");
     expect(html).toContain(en.feedPage.plan.createSlot);
   });
 });
