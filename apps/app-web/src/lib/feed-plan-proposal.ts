@@ -32,10 +32,22 @@ export type ProposedSlot = {
   brief?: string;
 };
 
+/**
+ * A proposed revision of the month brief and/or cadence
+ * (feed-plan-chat-first.md P11) — its own apply-or-dismiss card, same
+ * accept-before-write contract as the slots.
+ */
+export type ProposedBriefPatch = {
+  brief?: string;
+  /** null clears the cadence; absent leaves it alone. */
+  cadencePerWeek?: number | null;
+};
+
 export type PlanProposal = {
   month: string;
   rationale: string;
   slots: ProposedSlot[];
+  briefPatch?: ProposedBriefPatch;
 };
 
 type StoredMessage = { role?: string; content?: unknown };
@@ -56,8 +68,9 @@ export function parseProposePlanInput(raw: unknown): PlanProposal | null {
       ? obj.month
       : null;
   if (!month) return null;
-  const slots = Array.isArray(obj.slots) ? obj.slots : null;
-  if (!slots || slots.length === 0) return null;
+  const briefPatch = parseBriefPatch(obj.briefPatch);
+  const slots = Array.isArray(obj.slots) ? obj.slots : [];
+  if (slots.length === 0 && !briefPatch) return null;
 
   const out: ProposedSlot[] = [];
   for (const entry of slots) {
@@ -93,12 +106,35 @@ export function parseProposePlanInput(raw: unknown): PlanProposal | null {
         : {}),
     });
   }
-  if (out.length === 0) return null;
+  if (out.length === 0 && !briefPatch) return null;
   return {
     month,
     rationale: typeof obj.rationale === "string" ? obj.rationale : "",
     slots: out,
+    ...(briefPatch ? { briefPatch } : {}),
   };
+}
+
+/** Validate a `briefPatch` defensively; a malformed one is simply dropped. */
+function parseBriefPatch(raw: unknown): ProposedBriefPatch | null {
+  if (!raw || typeof raw !== "object") return null;
+  const obj = raw as Record<string, unknown>;
+  const out: ProposedBriefPatch = {};
+  if (typeof obj.brief === "string" && obj.brief.trim()) {
+    out.brief = obj.brief.trim();
+  }
+  if (
+    obj.cadencePerWeek === null ||
+    (typeof obj.cadencePerWeek === "number" &&
+      Number.isInteger(obj.cadencePerWeek) &&
+      obj.cadencePerWeek >= 1 &&
+      obj.cadencePerWeek <= 21)
+  ) {
+    out.cadencePerWeek = obj.cadencePerWeek as number | null;
+  }
+  return out.brief !== undefined || out.cadencePerWeek !== undefined
+    ? out
+    : null;
 }
 
 /**
@@ -127,12 +163,14 @@ export function replayPlanProposal(
       const byIndex = new Map<number, ProposedSlot>();
       for (const slot of previous.slots) byIndex.set(slot.index, slot);
       for (const slot of input.slots) byIndex.set(slot.index, slot);
+      const briefPatch = input.briefPatch ?? previous.briefPatch;
       current = {
         month: input.month,
         rationale: input.rationale || previous.rationale,
         slots: [...byIndex.values()].sort(
           (a, b) => a.date.localeCompare(b.date) || a.index - b.index,
         ),
+        ...(briefPatch ? { briefPatch } : {}),
       };
     }
   }
@@ -158,4 +196,28 @@ export function pendingProposedSlots(
     (s) =>
       !taken.has(`${s.date}|${s.platform}|${s.title.trim().toLowerCase()}`),
   );
+}
+
+/**
+ * The brief-patch card is pending only while it still differs from the
+ * saved brief — applying it (or typing the same thing by hand) retires the
+ * card without a dismissal, the same "already on the calendar" rule
+ * `pendingProposedSlots` applies to slots.
+ */
+export function pendingBriefPatch(
+  patch: ProposedBriefPatch | null | undefined,
+  current: { brief?: string | null; cadencePerWeek?: number | null } | null,
+): ProposedBriefPatch | null {
+  if (!patch) return null;
+  const briefDiffers =
+    patch.brief !== undefined &&
+    patch.brief.trim() !== (current?.brief ?? "").trim();
+  const cadenceDiffers =
+    patch.cadencePerWeek !== undefined &&
+    patch.cadencePerWeek !== (current?.cadencePerWeek ?? null);
+  if (!briefDiffers && !cadenceDiffers) return null;
+  return {
+    ...(briefDiffers ? { brief: patch.brief } : {}),
+    ...(cadenceDiffers ? { cadencePerWeek: patch.cadencePerWeek } : {}),
+  };
 }

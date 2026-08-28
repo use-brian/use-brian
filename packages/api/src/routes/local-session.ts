@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import { createTokens } from '../auth/jwt.js'
 import { findOrCreateUser, type User } from '../db/users.js'
-import { isOssEdition } from '../edition.js'
+import { deploymentCapabilities, isOssEdition } from '../edition.js'
 
 export { isOssEdition } from '../edition.js'
 
@@ -37,7 +37,7 @@ export { isOssEdition } from '../edition.js'
 
 /** OSS single-owner auth is valid in local and production-mode self-hosts. */
 export function isSelfHostedOssEnv(): boolean {
-  return isOssEdition() && !process.env.K_SERVICE
+  return deploymentCapabilities().localOwnerSession && !process.env.K_SERVICE
 }
 
 /** The neutral owner identity. No real email — `@local` is never shown in oss UI. */

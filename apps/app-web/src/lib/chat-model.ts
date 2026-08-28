@@ -17,7 +17,7 @@
 
 import { useEffect, useState } from "react";
 import { authFetch } from "@/lib/auth-fetch";
-import { isHostedEdition } from "@/lib/edition";
+import { deploymentCapabilities } from "@/lib/edition";
 import { modelTierPlanGateApplies } from "@/lib/plan-gate";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
@@ -53,7 +53,7 @@ export function useChatModelTier(
   workspaceId: string,
   defaultTier: ModelTier,
 ): ChatModelState {
-  const edition = isHostedEdition() ? "hosted" : "oss";
+  const capabilities = deploymentCapabilities();
   const [model, setModel] = useState<ModelTier>(
     () => readCachedTier() ?? defaultTier,
   );
@@ -71,7 +71,7 @@ export function useChatModelTier(
 
   // Resolve the workspace plan for tier gating (per-workspace billing).
   useEffect(() => {
-    if (!workspaceId || edition === "oss") return;
+    if (!workspaceId || !capabilities.planEntitlements) return;
     let cancelled = false;
     authFetch(
       `${API_URL}/api/usage?workspace_id=${encodeURIComponent(workspaceId)}`,
@@ -87,14 +87,14 @@ export function useChatModelTier(
     return () => {
       cancelled = true;
     };
-  }, [edition, workspaceId]);
+  }, [capabilities.planEntitlements, workspaceId]);
 
   // Snap an over-tier selection down once the plan resolves.
   useEffect(() => {
-    if (modelTierPlanGateApplies(edition, plan, model)) {
+    if (modelTierPlanGateApplies(capabilities, plan, model)) {
       setModel(model === "max" && plan === "pro" ? "pro" : "standard");
     }
-  }, [edition, plan, model]);
+  }, [capabilities, plan, model]);
 
   // Paid workspaces default to Pro (cost-and-pricing → "Default chat is Pro").
   // The legacy default was Standard, so on the first paid plan-load (once per

@@ -90,6 +90,18 @@ describe('[COMP:api/local-session] isOssEdition gate', () => {
       if (prev.n !== undefined) process.env.NEXT_PUBLIC_USEBRIAN_EDITION = prev.n
     }
   })
+
+  it('does not classify Outpost as OSS or enable the local-owner session', () => {
+    const prev = process.env.USEBRIAN_EDITION
+    try {
+      process.env.USEBRIAN_EDITION = 'outpost'
+      expect(isOssEdition()).toBe(false)
+      expect(isSelfHostedOssEnv()).toBe(false)
+    } finally {
+      if (prev === undefined) delete process.env.USEBRIAN_EDITION
+      else process.env.USEBRIAN_EDITION = prev
+    }
+  })
 })
 
 describe('[COMP:api/local-session] self-host gate', () => {

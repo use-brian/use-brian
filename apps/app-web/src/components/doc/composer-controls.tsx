@@ -35,7 +35,7 @@ import {
 } from "@/components/ui/select";
 import { useChatModelTier, type ModelTier } from "@/lib/chat-model";
 import { webAppUrl } from "@/lib/primary-auth";
-import { isHostedEdition } from "@/lib/edition";
+import { deploymentCapabilities } from "@/lib/edition";
 import { modelTierPlanGateApplies, planGateApplies } from "@/lib/plan-gate";
 
 /** Remaining free-research quota the server reports on a research turn. */
@@ -136,10 +136,10 @@ export function ComposerControls({
   className,
 }: Props) {
   const t = useT().chat;
-  const edition = isHostedEdition() ? "hosted" : "oss";
-  const proDisabled = modelTierPlanGateApplies(edition, plan, "pro");
-  const maxDisabled = modelTierPlanGateApplies(edition, plan, "max");
-  const meteredDisabled = planGateApplies(edition, plan);
+  const capabilities = deploymentCapabilities();
+  const proDisabled = modelTierPlanGateApplies(capabilities, plan, "pro");
+  const maxDisabled = modelTierPlanGateApplies(capabilities, plan, "max");
+  const meteredDisabled = planGateApplies(capabilities, plan);
   const tc = useT().comments;
   // The AI-reply toggle shows only where a host wires it (the comment
   // composers). When the AI won't reply, the research + model controls — which

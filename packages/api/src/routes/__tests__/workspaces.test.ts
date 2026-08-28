@@ -165,6 +165,20 @@ describe('[COMP:api/workspaces-route] POST /', () => {
     expect(mockQuery).not.toHaveBeenCalled()
     expect(workspaceStore.countFreeOwned).not.toHaveBeenCalled()
   })
+
+  it('does not apply the hosted workspace cap in Outpost', async () => {
+    process.env.USEBRIAN_EDITION = 'outpost'
+    mockFindUser.mockResolvedValueOnce({ id: 'u-1' } as never)
+    workspaceStore.create.mockResolvedValueOnce({ id: 'ws-new', name: 'New WS' })
+
+    const res = await request(app('u-1'))
+      .post('/api/workspaces')
+      .send({ name: 'New WS', purpose: LONG_PURPOSE })
+
+    expect(res.status).toBe(201)
+    expect(mockQuery).not.toHaveBeenCalled()
+    expect(workspaceStore.countFreeOwned).not.toHaveBeenCalled()
+  })
 })
 
 describe('[COMP:api/workspaces-route] GET / and GET /:workspaceId', () => {

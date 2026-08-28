@@ -9,6 +9,7 @@ import {
   feedSectionFromPathname,
   getFeedPlatformPick,
   isConnectableFeedPlatform,
+  isFeedPlanIndexPath,
   isFeedPlatform,
   resolveCurrentFeedPlatform,
   setCurrentFeedPlatform,
@@ -76,6 +77,21 @@ describe("[COMP:app-web/feed-nav] feed navigation config", () => {
     expect(feedPlatformFromPathname("/w/w1/feed")).toBeNull();
     expect(feedPlatformFromPathname("/w/w1/brain")).toBeNull();
     expect(feedPlatformFromPathname(null)).toBeNull();
+  });
+
+  it("recognizes ONLY the bare Plan index — where the docked chat rail hosts the plan session (P4)", () => {
+    expect(isFeedPlanIndexPath("/w/w1/feed")).toBe(true);
+    expect(isFeedPlanIndexPath("/w/w1/feed/")).toBe(true);
+    // Deeper feed routes keep the floating dock.
+    expect(isFeedPlanIndexPath("/w/w1/feed/voice")).toBe(false);
+    expect(isFeedPlanIndexPath("/w/w1/feed/posts")).toBe(false);
+    expect(isFeedPlanIndexPath("/w/w1/feed/threads/posts")).toBe(false);
+    expect(isFeedPlanIndexPath("/w/w1/feed/threads/posts/s1")).toBe(false);
+    // Not the feed surface at all.
+    expect(isFeedPlanIndexPath("/w/w1/feedback")).toBe(false);
+    expect(isFeedPlanIndexPath("/w/w1/brain")).toBe(false);
+    expect(isFeedPlanIndexPath(null)).toBe(false);
+    expect(isFeedPlanIndexPath(undefined)).toBe(false);
   });
 
   it("classifies feed sections from pathnames", () => {

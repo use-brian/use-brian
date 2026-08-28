@@ -21,18 +21,31 @@
  */
 
 import { useEffect, useState, type ReactNode } from "react";
-import { usePathname } from "next/navigation";
-import { MessageSquareText } from "lucide-react";
+import { usePathname, useRouter } from "next/navigation";
+import { MessageSquareText, Plus } from "lucide-react";
 import {
   FeedProfilesProvider,
   useFeedWorkspaceState,
 } from "@/contexts/feed-profiles-context";
 import { chatDockSuppression } from "@/lib/chat-dock-suppress";
 import { FeedFloatingChat } from "@/components/feed/feed-floating-chat";
+import { PlatformIcon } from "@/components/feed/platform-icon";
 import { OperatorTopbar } from "@/components/operator/operator-topbar";
 import { useT } from "@/lib/i18n/client";
 import { Button } from "@/components/ui/button";
-import { feedPostIdFromPathname } from "@/lib/feed-nav";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
+  FEED_PLATFORMS,
+  defaultFeedPlatform,
+  feedPath,
+  feedPostIdFromPathname,
+  type FeedPlatform,
+} from "@/lib/feed-nav";
 import { requestFeedChatOpen } from "@/lib/feed-chat-seed";
 
 export function FeedSurfaceShell(props: {
@@ -50,7 +63,15 @@ export function FeedSurfaceShell(props: {
             owns the feed pane's one scroll container; pages with their own
             full-height scroller (Voice, draft detail) fill it with `h-full`
             so the outer never overflows. */}
-        <OperatorTopbar app="feed" right={<FeedChatTopbarAction />} />
+        <OperatorTopbar
+          app="feed"
+          right={
+            <>
+              <FeedNewPostTopbarAction />
+              <FeedChatTopbarAction />
+            </>
+          }
+        />
         <div className="min-h-0 flex-1 overflow-y-auto">
           <FeedReadyGate onRetry={() => setEpoch((e) => e + 1)}>
             {props.children}
@@ -58,6 +79,64 @@ export function FeedSurfaceShell(props: {
         </div>
       </div>
     </FeedProfilesProvider>
+  );
+}
+
+/**
+ * Intent-first authoring from anywhere on the surface
+ * (docs/plans/feed-plan-chat-first.md P12): a platform picker defaulting to
+ * the workspace's last-used platform, routing to the existing new-post form
+ * — so deliberate writing never requires walking the sidebar to a
+ * platform's post list. Thought-first capture stays the Plan strip's job.
+ */
+function FeedNewPostTopbarAction() {
+  const state = useFeedWorkspaceState();
+  const router = useRouter();
+  const t = useT().feedPage;
+  if (state.status !== "ready") return null;
+  const ws = state.value;
+  if (ws.profiles.length === 0 && ws.assistants.length === 0) return null;
+  const preferred = defaultFeedPlatform(
+    ws.workspaceId,
+    ws.profiles.map((p) => p.platform),
+  );
+  // Last-used first; the rest keep the canonical order.
+  const platforms: FeedPlatform[] = [
+    preferred,
+    ...FEED_PLATFORMS.filter((p) => p !== preferred),
+  ];
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        render={
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            aria-label={t.postEditor.newPost}
+            className="h-8 gap-1.5 px-2.5 text-xs text-sidebar-foreground/75 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+          >
+            <Plus className="size-3.5" aria-hidden />
+            <span>{t.postEditor.newPost}</span>
+          </Button>
+        }
+      />
+      <DropdownMenuContent align="end">
+        {platforms.map((platform) => (
+          <DropdownMenuItem
+            key={platform}
+            onClick={() =>
+              router.push(
+                feedPath(ws.workspaceId, { platform, segment: "posts" }),
+              )
+            }
+          >
+            <PlatformIcon platform={platform} className="size-3.5" />
+            {t.platformLabels[platform]}
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 

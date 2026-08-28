@@ -26,7 +26,8 @@ import { createPortal } from "react-dom";
 import { ArrowLeft } from "lucide-react";
 import { format, useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
-import { isOssEdition, HOSTED_UPGRADE_URL } from "@/lib/edition";
+import { deploymentCapabilities, isOssEdition, HOSTED_UPGRADE_URL } from "@/lib/edition";
+import type { DeploymentCapabilities } from "@use-brian/shared/deployment-capabilities";
 import { AccountSection } from "./sections/account-section";
 import { GeneralSection } from "./sections/general-section";
 import { PrivacySection } from "./sections/privacy-section";
@@ -121,14 +122,22 @@ const OSS_WORKSPACE_SECTIONS: SettingsSection[] = [
 const OSS_SOURCE_URL = "https://github.com/use-brian/use-brian";
 const OSS_GIT_COMMIT_SHA = process.env.NEXT_PUBLIC_OSS_GIT_COMMIT_SHA?.trim() ?? "";
 
-export function workspaceSettingsSections(oss: boolean): SettingsSection[] {
-  return oss ? OSS_WORKSPACE_SECTIONS : WORKSPACE_SECTIONS;
+export function workspaceSettingsSections(
+  capabilities: DeploymentCapabilities,
+): SettingsSection[] {
+  return capabilities.billing ? WORKSPACE_SECTIONS : OSS_WORKSPACE_SECTIONS;
+}
+
+export function workspaceMembersSectionKind(
+  capabilities: DeploymentCapabilities,
+): "manage" | "upgrade" {
+  return capabilities.teammateManagement ? "manage" : "upgrade";
 }
 
 export function SettingsModal({ open, initialSection = "profile", onClose }: Props) {
   const t = useT();
   const oss = isOssEdition();
-  const workspaceSections = workspaceSettingsSections(oss);
+  const workspaceSections = workspaceSettingsSections(deploymentCapabilities());
   const [section, setSection] = useState<SettingsSection>(initialSection);
   // Which pane shows below the `sm` breakpoint (no effect from `sm:` up,
   // where both panes render side by side): the modal opens on the section
@@ -373,9 +382,9 @@ function SectionBody({
     case "ws-general":
       return <WorkspaceGeneralSection onWorkspaceDeleted={onClose} />;
     case "ws-members":
-      // OSS is single-player: teammates are a hosted-cloud feature, so the
-      // Members section pitches the upgrade instead of the live manager.
-      return isOssEdition() ? <HostedUpgradeSection /> : <WorkspaceMembersSection />;
+      return workspaceMembersSectionKind(deploymentCapabilities()) === "manage"
+        ? <WorkspaceMembersSection />
+        : <HostedUpgradeSection />;
     case "ws-teams":
       return <TeamsContextSection />;
     case "ws-projects":
@@ -392,12 +401,14 @@ function SectionBody({
       // surface (plan tier, payment method, invoices, upgrade/cancel).
       // OSS has no billing; defensively pitch the upgrade in case something
       // dispatches openWorkspaceSettings('ws-plan') directly (the nav hides it).
-      return isOssEdition() ? <HostedUpgradeSection /> : <BillingSection />;
+      if (deploymentCapabilities().billing) return <BillingSection />;
+      return deploymentCapabilities().hostedUpgradePrompts ? <HostedUpgradeSection /> : null;
     case "ws-usage":
       // Alias: Usage merged into the Plan section ("Plan & usage"). Kept so
       // openWorkspaceSettings("ws-usage") deep links still land somewhere
       // sensible. OSS has no billing; defensive upgrade pitch.
-      return isOssEdition() ? <HostedUpgradeSection /> : <BillingSection />;
+      if (deploymentCapabilities().billing) return <BillingSection />;
+      return deploymentCapabilities().hostedUpgradePrompts ? <HostedUpgradeSection /> : null;
     case "ws-models":
       // Custom endpoint profiles and tier assignments work in both editions.
       // Hosted additionally exposes metered profiles and billing estimates.

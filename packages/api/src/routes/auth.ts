@@ -9,7 +9,8 @@ import { mergeShadowUser, type LinkedAccountStore } from '../db/linked-accounts.
 import type { MagicLinkConsumed, MagicLinkLocale, MagicLinkStore } from '../db/magic-link-store.js'
 import type { DesktopAuthStore } from '../db/desktop-auth-store.js'
 import type { SmtpClient } from '../email/smtp-client.js'
-import { createHash } from 'node:crypto'
+import { createHash, timingSafeEqual } from 'node:crypto'
+import { matchedOidcWorkspaceIds, type OidcEnrollmentConfig } from '../auth/outpost-auth-config.js'
 
 /**
  * Fire-and-forget hook invoked after a Telegram identity is successfully
@@ -36,6 +37,23 @@ export type EmailAuthDeps = {
   smtpClient?: SmtpClient
   /** Used to build the verify URL embedded in the email — e.g. `https://usebrian.ai`. */
   appUrl: string
+  /** Outpost enrollment gate. Omitted in hosted/OSS, which keep their policy. */
+  canSignInEmail?: (email: string) => Promise<boolean>
+  /** Exact customer-owned auth/app origins accepted for absolute continuations. */
+  allowedReturnOrigins?: string[]
+}
+
+export type OidcAuthDeps = {
+  config: {
+    issuer: string
+    bridgeSecret: string
+    subjectIdentityEnabled: boolean
+    enrollment: OidcEnrollmentConfig
+  }
+  canSignInEmail: (email: string) => Promise<boolean>
+  findUserBySubject: (providerId: string) => Promise<User | null>
+  bindUserSubject: (userId: string, providerId: string) => Promise<void>
+  ensureWorkspaceMembership: (userId: string, workspaceIds: string[]) => Promise<void>
 }
 
 /**
@@ -53,6 +71,7 @@ export function authRoutes(
   notifyTelegramLinked?: NotifyTelegramLinked,
   emailAuth?: EmailAuthDeps,
   desktopAuthStore?: DesktopAuthStore,
+  oidcAuth?: OidcAuthDeps,
 ): Router {
   const router = Router()
 
@@ -225,6 +244,124 @@ export function authRoutes(
     }
   })
 
+  router.post('/oidc/session', async (req, res) => {
+    if (!oidcAuth) {
+      res.status(404).json({ error: 'oidc_signin_unavailable' })
+      return
+    }
+
+    const suppliedSecret = req.headers['x-outpost-auth-bridge']
+    if (typeof suppliedSecret !== 'string' || !secretsEqual(suppliedSecret, oidcAuth.config.bridgeSecret)) {
+      res.status(401).json({ error: 'invalid_bridge_secret' })
+      return
+    }
+
+    const parsed = parseOidcSessionBody(req.body)
+    if (!parsed.ok) {
+      res.status(400).json({ error: 'invalid_oidc_session' })
+      return
+    }
+    const identity = parsed.value
+    if (identity.issuer !== oidcAuth.config.issuer) {
+      res.status(401).json({ error: 'invalid_oidc_issuer' })
+      return
+    }
+    if (identity.email && !identity.emailVerified) {
+      res.status(401).json({ error: 'oidc_email_unverified' })
+      return
+    }
+    if (!identity.email && !oidcAuth.config.subjectIdentityEnabled) {
+      res.status(401).json({ error: 'oidc_email_required' })
+      return
+    }
+    if (identity.groups && (oidcAuth.config.enrollment.mode !== 'mapped' || identity.groupClaim !== oidcAuth.config.enrollment.groupClaim)) {
+      res.status(401).json({ error: 'invalid_oidc_groups' })
+      return
+    }
+    const providerId = createHash('sha256')
+      .update(identity.issuer)
+      .update('\x00')
+      .update(identity.subject)
+      .digest('base64url')
+    const providerUser = await oidcAuth.findUserBySubject(providerId)
+    const mappedWorkspaceIds = matchedOidcWorkspaceIds(oidcAuth.config.enrollment, identity)
+    if (identity.email && !providerUser && mappedWorkspaceIds.length === 0 && !(await oidcAuth.canSignInEmail(identity.email))) {
+      res.status(403).json({ error: 'email_enrollment_required' })
+      return
+    }
+
+    try {
+      const existing = providerUser ?? (identity.email ? await findUserByEmail(identity.email) : null)
+      if (existing?.authProvider === 'oidc' && existing.authProviderId !== providerId) {
+        res.status(401).json({ error: 'invalid_oidc_identity' })
+        return
+      }
+      let user: User
+      let isNew = false
+
+      if (existing?.authProvider === 'channel') {
+        await promoteChannelUser(existing.id, {
+          authProvider: 'oidc',
+          authProviderId: providerId,
+          name: identity.name,
+          avatarUrl: identity.avatarUrl,
+        })
+        await backfillOidcTimezone(existing, identity.timezone, '[auth/oidc] shadow tz backfill failed:')
+        user = {
+          ...existing,
+          authProvider: 'oidc',
+          authProviderId: providerId,
+          name: existing.name ?? identity.name ?? null,
+          avatarUrl: existing.avatarUrl ?? identity.avatarUrl ?? null,
+        }
+      } else if (existing) {
+        await backfillUserProfileFromProvider(existing.id, {
+          name: identity.name,
+          avatarUrl: identity.avatarUrl,
+        })
+        await backfillOidcTimezone(existing, identity.timezone, '[auth/oidc] existing tz backfill failed:')
+        user = {
+          ...existing,
+          name: existing.name ?? identity.name ?? null,
+          avatarUrl: existing.avatarUrl ?? identity.avatarUrl ?? null,
+        }
+      } else {
+        const result = await findOrCreateUser({
+          authProvider: 'oidc',
+          authProviderId: providerId,
+          ...(identity.email ? { email: identity.email } : {}),
+          name: identity.name,
+          avatarUrl: identity.avatarUrl,
+          timezone: identity.timezone,
+        })
+        user = result.user
+        isNew = result.isNew
+      }
+
+      if (user.authProvider !== 'oidc') {
+        await oidcAuth.bindUserSubject(user.id, providerId)
+      }
+
+      if (mappedWorkspaceIds.length > 0) {
+        await oidcAuth.ensureWorkspaceMembership(user.id, mappedWorkspaceIds)
+      }
+
+      res.json({
+        user: {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          avatarUrl: user.avatarUrl,
+        },
+        isNew,
+        ...createTokens(user.id, jwtSecret),
+      })
+    } catch (err) {
+      console.error('[auth/oidc] session mint error:', err)
+      res.status(500).json({ error: 'Authentication failed' })
+    }
+  })
+
   // ── Email magic-link sign-in ───────────────────────────────────
   //
   // Two halves: request-link (mints a token, emails the user) and verify
@@ -253,11 +390,11 @@ export function authRoutes(
    */
   router.post('/email/request-link', async (req, res) => {
     if (!emailAuth || !emailAuth.magicLinkStore || !emailAuth.smtpClient) {
-      console.warn('[auth/email] request-link hit but emailAuth not configured (GMAIL_SMTP_* envs missing)')
+      console.warn('[auth/email] request-link hit but emailAuth not configured (SMTP credentials or EMAIL_FROM_ADDRESS missing)')
       res.status(503).json({ error: 'email_signin_unavailable' })
       return
     }
-    const { magicLinkStore, smtpClient, appUrl } = emailAuth
+    const { magicLinkStore, smtpClient, appUrl, canSignInEmail } = emailAuth
 
     const body = req.body as {
       email?: unknown
@@ -278,18 +415,21 @@ export function authRoutes(
     // Validate inputs — but on any validation failure we still return
     // 200 with the same shape, so the response surface doesn't leak
     // whether the email was acceptable.
-    const ok200 = () => res.status(200).json({ ok: true })
+    const requestStartedAt = Date.now()
+    const ok200 = async () => {
+      const remainingMs = 250 - (Date.now() - requestStartedAt)
+      if (remainingMs > 0) await new Promise((r) => setTimeout(r, remainingMs))
+      res.status(200).json({ ok: true })
+    }
 
     const emailRaw = typeof body.email === 'string' ? body.email.trim().toLowerCase() : ''
     if (!isValidEmail(emailRaw)) {
-      // Constant-time-ish: still spend a tiny moment before responding.
-      await new Promise((r) => setTimeout(r, 5))
-      ok200()
+      await ok200()
       return
     }
 
     const nextPath =
-      typeof body.nextPath === 'string' && isAllowedNextPath(body.nextPath)
+      typeof body.nextPath === 'string' && isAllowedNextPath(body.nextPath, emailAuth.allowedReturnOrigins)
         ? body.nextPath
         : undefined
 
@@ -305,13 +445,18 @@ export function authRoutes(
     try {
       const now = new Date()
       const windowStart = new Date(now.getTime() - 60 * 60 * 1000)
-      const [emailCount, ipCount] = await Promise.all([
+      const [admitted, emailCount, ipCount] = await Promise.all([
+        canSignInEmail ? canSignInEmail(emailRaw) : Promise.resolve(true),
         magicLinkStore.countRecentForEmail(emailRaw, windowStart),
         ip ? magicLinkStore.countRecentForIp(ip, windowStart) : Promise.resolve(0),
       ])
+      if (!admitted) {
+        await ok200()
+        return
+      }
       if (emailCount >= 3 || ipCount >= 10) {
         console.warn(`[auth/email] rate-limited: email=${emailRaw} count=${emailCount} ip=${ip ?? 'none'} ipCount=${ipCount} — silently 200ing`)
-        ok200()
+        await ok200()
         return
       }
 
@@ -336,6 +481,7 @@ export function authRoutes(
       // magic-link flow".
       const link =
         `${appUrl.replace(/\/$/, '')}/login/verify?token=${encodeURIComponent(token)}&lang=${locale}` +
+        (nextPath ? `&next=${encodeURIComponent(nextPath)}` : '') +
         (addAccount ? '&addAccount=1' : '')
 
       // Fire-and-forget: we don't block the response on SMTP. If sending
@@ -347,11 +493,11 @@ export function authRoutes(
           console.error('[auth/email] SMTP send failed:', err)
         })
 
-      ok200()
+      await ok200()
     } catch (err) {
       console.error('[auth/email] request-link error:', err)
       // Still 200 — see docstring. The error is logged for ops.
-      ok200()
+      await ok200()
     }
   })
 
@@ -386,6 +532,10 @@ export function authRoutes(
     const consumed = await magicLinkStore.consumeByToken(token)
     if (!consumed) {
       res.status(401).json({ error: 'expired_or_used' })
+      return
+    }
+    if (emailAuth.canSignInEmail && !(await emailAuth.canSignInEmail(consumed.email))) {
+      res.status(403).json({ error: 'email_enrollment_required' })
       return
     }
 
@@ -447,6 +597,10 @@ export function authRoutes(
     }
     if (result.status !== 'ok') {
       res.status(401).json({ error: 'expired_or_used' })
+      return
+    }
+    if (emailAuth.canSignInEmail && !(await emailAuth.canSignInEmail(result.email))) {
+      res.status(403).json({ error: 'email_enrollment_required' })
       return
     }
 
@@ -787,6 +941,117 @@ function isValidEmail(s: string): boolean {
   return s.length >= 3 && s.length <= 320 && EMAIL_RE.test(s)
 }
 
+type OidcSessionIdentity = {
+  issuer: string
+  subject: string
+  email?: string
+  emailVerified?: boolean
+  name?: string
+  avatarUrl?: string
+  timezone?: string
+  groups?: string[]
+  groupClaim?: string
+}
+
+const OIDC_SESSION_FIELDS = new Set([
+  'issuer',
+  'subject',
+  'email',
+  'emailVerified',
+  'name',
+  'avatarUrl',
+  'timezone',
+  'groups',
+  'groupClaim',
+])
+
+function parseOidcSessionBody(body: unknown):
+  | { ok: true; value: OidcSessionIdentity }
+  | { ok: false } {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return { ok: false }
+  const value = body as Record<string, unknown>
+  if (Object.keys(value).some((key) => !OIDC_SESSION_FIELDS.has(key))) return { ok: false }
+  if (value.email !== undefined && typeof value.email !== 'string') return { ok: false }
+
+  const issuer = boundedString(value.issuer, 2048)
+  const subject = boundedString(value.subject, 512)
+  const email = typeof value.email === 'string' ? value.email.trim().toLowerCase() : undefined
+  if (!issuer || !subject || /[\x00-\x1f\x7f]/.test(issuer) || /[\x00-\x1f\x7f]/.test(subject)) return { ok: false }
+  if (email !== undefined && (!isValidEmail(email) || /[\x00-\x1f\x7f]/.test(email))) return { ok: false }
+  if (email !== undefined && typeof value.emailVerified !== 'boolean') return { ok: false }
+  if (email === undefined && value.emailVerified !== undefined) return { ok: false }
+
+  const name = optionalBoundedString(value.name, 200)
+  if (name === null || (name && /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(name))) return { ok: false }
+  const avatarUrl = optionalBoundedString(value.avatarUrl, 2048)
+  if (avatarUrl === null || (avatarUrl && !isHttpUrl(avatarUrl))) return { ok: false }
+  const timezone = optionalBoundedString(value.timezone, 79)
+  if (timezone === null || (timezone && !isValidTimezone(timezone))) return { ok: false }
+  const groups = parseOidcGroups(value.groups)
+  if (groups === null) return { ok: false }
+  const groupClaim = optionalBoundedString(value.groupClaim, 200)
+  if (groupClaim === null || (groupClaim && /[\x00-\x1f\x7f]/.test(groupClaim))) return { ok: false }
+  if ((groups === undefined) !== (groupClaim === undefined)) return { ok: false }
+
+  return {
+    ok: true,
+    value: {
+      issuer,
+      subject,
+      ...(email !== undefined ? { email, emailVerified: value.emailVerified as boolean } : {}),
+      ...(name ? { name } : {}),
+      ...(avatarUrl ? { avatarUrl } : {}),
+      ...(timezone ? { timezone } : {}),
+      ...(groups !== undefined ? { groups } : {}),
+      ...(groupClaim ? { groupClaim } : {}),
+    },
+  }
+}
+
+function parseOidcGroups(value: unknown): string[] | undefined | null {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value) || value.length > 64) return null
+  const groups: string[] = []
+  for (const group of value) {
+    if (typeof group !== 'string' || group.length < 1 || group.length > 200 || /[\x00-\x1f\x7f]/.test(group)) return null
+    if (!groups.includes(group)) groups.push(group)
+  }
+  return groups
+}
+
+function boundedString(value: unknown, maxLength: number): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const trimmed = value.trim()
+  return trimmed.length > 0 && trimmed.length <= maxLength ? trimmed : undefined
+}
+
+function optionalBoundedString(value: unknown, maxLength: number): string | undefined | null {
+  if (value === undefined) return undefined
+  return boundedString(value, maxLength) ?? null
+}
+
+function isHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value)
+    return (url.protocol === 'https:' || url.protocol === 'http:') && !url.username && !url.password
+  } catch {
+    return false
+  }
+}
+
+function secretsEqual(supplied: string, expected: string): boolean {
+  if (supplied.length > 1024) return false
+  const suppliedHash = createHash('sha256').update(supplied).digest()
+  const expectedHash = createHash('sha256').update(expected).digest()
+  return timingSafeEqual(suppliedHash, expectedHash)
+}
+
+async function backfillOidcTimezone(user: User, timezone: string | undefined, errorLabel: string): Promise<void> {
+  if (!timezone || timezone === 'UTC' || (user.timezone && user.timezone !== 'UTC')) return
+  await updateUserTimezone(user.id, timezone).catch((err) => console.error(errorLabel, err))
+  user.timezone = timezone
+}
+
 // `/invite` carries the workspace-invitation accept page (`?token=` resume).
 // The desktop sign-in bridge travels as an absolute app-origin URL through
 // ALLOWED_NEXT_HOSTS below, not this list. Keep in sync with the web verify
@@ -810,7 +1075,7 @@ const ALLOWED_NEXT_HOSTS = new Set<string>([
   'localhost:3003',
 ])
 
-function isAllowedNextPath(s: string): boolean {
+function isAllowedNextPath(s: string, allowedReturnOrigins: string[] = []): boolean {
   if (typeof s !== 'string') return false
   if (s.length > 512) return false
   if (s.startsWith('//')) return false
@@ -824,7 +1089,9 @@ function isAllowedNextPath(s: string): boolean {
   try {
     const u = new URL(s)
     if (u.protocol !== 'https:' && u.protocol !== 'http:') return false
-    return ALLOWED_NEXT_HOSTS.has(u.host)
+    return ALLOWED_NEXT_HOSTS.has(u.host) || allowedReturnOrigins.some((origin) => {
+      try { return new URL(origin).origin === u.origin } catch { return false }
+    })
   } catch {
     return false
   }

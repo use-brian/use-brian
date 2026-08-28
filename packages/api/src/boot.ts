@@ -149,8 +149,11 @@ import {
 import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTORS, OFFICIAL_CONNECTOR_TOOLS, recordingIdFromAnchorKey } from '@use-brian/shared'
 
 // ── OPEN package imports (@use-brian/api) ──────────────────────────
-import { findAssistantById, findUserById, getWorkspacePrimaryAssistant, isUserBlockedForAssistant, listAccessibleAssistants } from './db/users.js'
+import { findAssistantById, findUserByAuthProvider, findUserByEmail, findUserById, getWorkspacePrimaryAssistant, isUserBlockedForAssistant, listAccessibleAssistants } from './db/users.js'
 import { resolveTurnScopeSystem } from './context-scope/resolve-turn-scope.js'
+import { deploymentProfile, usesOpenStandaloneRoutes } from './edition.js'
+import { createEmailAdmission, requireOutpostAuthPortal } from './auth/email-admission.js'
+import { validateOutpostAuthConfig } from './auth/outpost-auth-config.js'
 import { getTaskByIdSystem } from './db/tasks.js'
 import { createBrowserSkillsStore } from './db/browser-skills-store.js'
 import { createDbConnectorActionStore } from './db/connector-actions-store.js'
@@ -172,6 +175,7 @@ import {
 } from './routes/self-host-feed-cloud.js'
 import { createSelfHostFeedCloudLinkStore } from './db/self-host-feed-cloud-link-store.js'
 import {
+  buildContentPlanningPromptResolver,
   injectContentPlanningTools,
   resolveContentPlanningPrompt,
   resolveContentPlanningSoul,
@@ -183,7 +187,7 @@ import {
   isDefaultContentDraftTitle,
 } from './db/content-planning-store.js'
 import { createDbMagicLinkStore } from './db/magic-link-store.js'
-import { createSmtpClient, createWorkspaceSmtpTransport } from './email/smtp-client.js'
+import { createSmtpClient, createSmtpTransport } from './email/smtp-client.js'
 import { chatRoutes, createUpdateViewedSkillTool, runSessionResume, tryResolveLiveToolApproval } from './routes/chat.js'
 import {
   menuForClass,
@@ -650,6 +654,18 @@ export interface OpenApiEnv {
   NODE_ENV: string
   API_URL: string
   APP_URL: string
+  /** Dedicated Outpost auth portal; falls back to APP_URL in other profiles. */
+  AUTH_PORTAL_URL?: string
+  OUTPOST_AUTH_EMAIL_ENABLED?: boolean
+  OUTPOST_AUTH_OIDC_ENABLED?: boolean
+  OUTPOST_OIDC_SUBJECT_IDENTITY_ENABLED?: boolean
+  OUTPOST_OIDC_ENROLLMENT_MODE?: string
+  OUTPOST_OIDC_WORKSPACE_MAPPINGS?: string
+  OUTPOST_OIDC_ISSUER_URL?: string
+  OUTPOST_OIDC_CLIENT_ID?: string
+  OUTPOST_OIDC_CLIENT_SECRET?: string
+  OUTPOST_OIDC_PROVIDER_NAME?: string
+  OUTPOST_AUTH_BRIDGE_SECRET?: string
   AUTHED_APP_URL?: string
   FEED_URL?: string
   /**
@@ -699,6 +715,12 @@ export interface OpenApiEnv {
   GOOGLE_MAPS_SERVER_API_KEY?: string
   CHANNEL_CREDENTIAL_KEY?: string
   TELEGRAM_BOT_TOKEN?: string
+  SMTP_HOST?: string
+  SMTP_PORT?: string | number
+  SMTP_SECURE?: boolean
+  SMTP_USER?: string
+  SMTP_PASSWORD?: string
+  /** Legacy Google Workspace SMTP credentials. */
   GMAIL_SMTP_USER?: string
   GMAIL_SMTP_APP_PASSWORD?: string
   EMAIL_FROM_ADDRESS?: string
@@ -1186,6 +1208,8 @@ type EmailAuth = {
   magicLinkStore: ReturnType<typeof createDbMagicLinkStore>
   smtpClient: ReturnType<typeof createSmtpClient>
   appUrl: string
+  canSignInEmail?: (email: string) => Promise<boolean>
+  allowedReturnOrigins?: string[]
 } | undefined
 
 export interface BootResult {
@@ -1214,14 +1238,22 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     await injectContentPlanningTools(ctx)
     await ports.injectExtraTools?.(ctx)
   }
-  const resolveExtraSystemPrompt = (session: {
+  // The open half is data-backed: plan-mode sessions get the live preset
+  // block (current month brief + open ideas) under the static addendum
+  // (feed-plan-chat-first.md §6). The hosted port stays sync and narrow.
+  const resolveOpenPlanningPrompt = buildContentPlanningPromptResolver()
+  const resolveExtraSystemPrompt = async (session: {
     mode: string | null
     channelType: string
-  }): string | null => {
-    const open = resolveContentPlanningPrompt(session)
+    assistantId?: string
+  }): Promise<string | null> => {
+    const open = await resolveOpenPlanningPrompt(session)
+    const openStatic = resolveContentPlanningPrompt(session)
     const hosted = ports.resolveExtraSystemPrompt?.(session) ?? null
     if (!open) return hosted
-    if (!hosted || hosted === open) return open
+    // A hosted override equal to the static open addendum is the same
+    // fragment, not an addition — keep the data-backed open version.
+    if (!hosted || hosted === open || hosted === openStatic) return open
     return `${open}\n\n${hosted}`
   }
   const resolveAppSoul: ResolveAppSoul = (params) =>
@@ -1906,18 +1938,65 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     return officialBotUsernamePromise
   }
 
+  const profile = deploymentProfile()
+  requireOutpostAuthPortal(profile, env.AUTH_PORTAL_URL)
+  const outpostAuthConfig = validateOutpostAuthConfig(profile, env.NODE_ENV, env)
+  const oidcEnrollmentStore = createWorkspaceStore()
+  if (outpostAuthConfig?.oidc?.enrollment.mode === 'mapped') {
+    const configuredWorkspaceIds = [...new Set(outpostAuthConfig.oidc.enrollment.rules.map((rule) => rule.workspaceId))]
+    const existing = await query<{ id: string }>(
+      'SELECT id FROM workspaces WHERE id = ANY($1::uuid[])',
+      [configuredWorkspaceIds],
+    )
+    const existingIds = new Set(existing.rows.map((row) => row.id))
+    const missing = configuredWorkspaceIds.filter((workspaceId) => !existingIds.has(workspaceId))
+    if (missing.length > 0) {
+      throw new Error(`OUTPOST_OIDC_WORKSPACE_MAPPINGS references missing workspace IDs: ${missing.join(', ')}`)
+    }
+  }
+  const outpostBootstrapEmails = (
+    (process.env.OUTPOST_AUTH_BOOTSTRAP_EMAILS ?? '')
+      .split(',')
+      .map((email) => email.trim().toLowerCase())
+      .filter(Boolean)
+  )
+  const canSignInOutpostEmail = createEmailAdmission({
+    outpost: profile === 'outpost',
+    bootstrapEmails: outpostBootstrapEmails,
+    findUser: findUserByEmail,
+    hasPendingInvitation: async (email) => {
+      const invitation = await query(
+        `SELECT 1 FROM workspace_invitations
+          WHERE lower(email) = $1
+            AND accepted_at IS NULL
+            AND expires_at > now()
+          LIMIT 1`,
+        [email],
+      )
+      return invitation.rows.length > 0
+    },
+  })
+
+  const smtpUser = env.SMTP_USER ?? env.GMAIL_SMTP_USER
+  const smtpPassword = env.SMTP_PASSWORD ?? env.GMAIL_SMTP_APP_PASSWORD
   const emailAuth: EmailAuth =
-    env.GMAIL_SMTP_USER && env.GMAIL_SMTP_APP_PASSWORD && env.EMAIL_FROM_ADDRESS
+    (profile !== 'outpost' || outpostAuthConfig?.emailEnabled) &&
+    smtpUser && smtpPassword && env.EMAIL_FROM_ADDRESS
       ? {
           magicLinkStore: createDbMagicLinkStore(),
           smtpClient: createSmtpClient({
-            transport: createWorkspaceSmtpTransport({
-              user: env.GMAIL_SMTP_USER,
-              appPassword: env.GMAIL_SMTP_APP_PASSWORD,
+            transport: createSmtpTransport({
+              host: env.SMTP_HOST,
+              port: env.SMTP_PORT,
+              secure: env.SMTP_SECURE,
+              user: smtpUser,
+              password: smtpPassword,
             }),
             fromAddress: env.EMAIL_FROM_ADDRESS,
           }),
-          appUrl: env.APP_URL,
+          appUrl: env.AUTH_PORTAL_URL ?? env.APP_URL,
+          canSignInEmail: canSignInOutpostEmail,
+          allowedReturnOrigins: [env.APP_URL, env.AUTHED_APP_URL].filter((origin): origin is string => !!origin),
         }
       : undefined
 
@@ -1931,6 +2010,42 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       notifyTelegramLinked,
       emailAuth,
       desktopAuthStore,
+      outpostAuthConfig?.oidcEnabled && outpostAuthConfig.oidc
+        ? {
+            config: {
+              issuer: outpostAuthConfig.oidc.issuerUrl,
+              bridgeSecret: outpostAuthConfig.oidc.bridgeSecret,
+              subjectIdentityEnabled: outpostAuthConfig.oidc.subjectIdentityEnabled,
+              enrollment: outpostAuthConfig.oidc.enrollment,
+            },
+            canSignInEmail: canSignInOutpostEmail,
+            findUserBySubject: async (providerId) => {
+              const linked = await linkedIdentityStore.findByProvider('oidc', providerId)
+              return linked
+                ? findUserById(linked.userId)
+                : findUserByAuthProvider('oidc', providerId)
+            },
+            bindUserSubject: async (userId, providerId) => {
+              const result = await query<{ userId: string }>(
+                `INSERT INTO linked_identities (user_id, provider, provider_id)
+                 VALUES ($1, 'oidc', $2)
+                 ON CONFLICT (provider, provider_id) DO UPDATE SET
+                   provider_id = EXCLUDED.provider_id
+                 WHERE linked_identities.user_id = EXCLUDED.user_id
+                 RETURNING user_id AS "userId"`,
+                [userId, providerId],
+              )
+              if (result.rows[0]?.userId !== userId) {
+                throw new Error('OIDC subject is already bound to another user')
+              }
+            },
+            ensureWorkspaceMembership: async (userId, workspaceIds) => {
+              for (const workspaceId of workspaceIds) {
+                await oidcEnrollmentStore.ensureMemberSystem(workspaceId, userId)
+              }
+            },
+          }
+        : undefined,
     ),
   )
 
@@ -4737,10 +4852,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // and developing an idea must never require a credential in either edition.
   app.use('/api/distribution', requireAuth(env.JWT_SECRET), contentIdeasRoutes())
 
-  // OSS content planning reuses the app-web `/api/distribution/*` wire
+  // Standalone content planning reuses the app-web `/api/distribution/*` wire
   // contract but contains no provider integration. Hosted mounts its
   // provider-backed distribution routers later through mountExtraRoutes.
-  if (isOssEdition()) {
+  if (usesOpenStandaloneRoutes(profile)) {
     app.use(
       '/api/distribution',
       requireAuth(env.JWT_SECRET),
@@ -4834,7 +4949,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         : {}),
     }))
   }
-  if (process.env.USEBRIAN_EDITION === 'oss' && filesResolver && filesBlobClient) {
+  if (usesOpenStandaloneRoutes(profile) && filesResolver && filesBlobClient) {
     app.use('/api/recordings', requireAuth(env.JWT_SECRET), openRecordingsRoutes({
       filesResolver,
       getRole: (userId, workspaceId) => workspaceStore.getRole(userId, workspaceId),
@@ -4879,11 +4994,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }))
 
   // Built-in connector lifecycle (list / store-credentials / disconnect /
-  // rename / delete). OSS-only: the hosted edition mounts its own richer closed
-  // `/api/connectors` route, so mounting this open one there would shadow it.
-  // Gated on the same `USEBRIAN_EDITION` flag the launcher sets for the open
-  // single-player edition. See routes/connectors.ts.
-  if (process.env.USEBRIAN_EDITION === 'oss') {
+  // rename / delete). Both standalone profiles own this open route; hosted
+  // mounts its richer closed `/api/connectors` route instead, so mounting this
+  // one there would shadow it. See routes/connectors.ts.
+  if (usesOpenStandaloneRoutes(profile)) {
     app.use('/api/connectors', requireAuth(env.JWT_SECRET), connectorRoutes({
       connectorStore,
       connectorInstanceStore,
@@ -5085,7 +5199,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }))
 
   const workspaceInvitationStore = createWorkspaceInvitationStore()
-  if (process.env.USEBRIAN_EDITION === 'oss') {
+  if (usesOpenStandaloneRoutes(profile)) {
     const connectorInstanceRouteOptions = {
       connectorInstanceStore,
       connectorGrantStore,
@@ -5109,7 +5223,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     auditStore: workspaceAuditStore,
     invitationStore: workspaceInvitationStore,
     smtpClient: emailAuth?.smtpClient,
-    appUrl: env.APP_URL,
+    appUrl: env.AUTH_PORTAL_URL ?? env.APP_URL,
     blobClient: filesBlobClient ?? undefined,
     filesResolver: filesResolver ?? undefined,
   })
@@ -7513,9 +7627,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   })
   if (runWorkers) externalSinkRelay.start()
 
-  // Hosted keeps its platform route; the standalone edition mounts the open
+  // Hosted keeps its platform route; both standalone profiles mount the open
   // implementation against this composition root's shared store instances.
-  if (process.env.USEBRIAN_EDITION === 'oss') {
+  if (usesOpenStandaloneRoutes(profile)) {
     app.use('/api/ingest', requireAuth(env.JWT_SECRET), ingestRoutes({
       connectorInstanceStore,
       ingestRulesStore,

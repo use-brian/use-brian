@@ -163,6 +163,20 @@ describe('[COMP:api/auth-email-request] POST /auth/email/request-link', () => {
     expect(smtp.sent).toHaveLength(0)
   })
 
+  it('silently sends nothing when Outpost enrollment rejects the email', async () => {
+    const store = makeStore()
+    const smtp = makeSmtp()
+    const canSignInEmail = vi.fn(async () => false)
+    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://auth.example', canSignInEmail })
+
+    const res = await request(app).post('/auth/email/request-link').send({ email: 'unknown@example.com' })
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ ok: true })
+    expect(canSignInEmail).toHaveBeenCalledWith('unknown@example.com')
+    expect(smtp.sent).toHaveLength(0)
+  })
+
   it('rate-limits at 3 requests per email per hour', async () => {
     const store = makeStore({ countRecentForEmail: async () => 3 })
     const smtp = makeSmtp()
@@ -319,6 +333,29 @@ describe('[COMP:api/auth-email-request] POST /auth/email/request-link', () => {
     expect(calls[2]?.nextPath).toBe('/invite?token=xyz')
   })
 
+  it('accepts an exact customer app origin configured by Outpost', async () => {
+    const calls: Array<Parameters<MagicLinkStore['create']>[0]> = []
+    const store = makeStore({
+      create: async (input) => {
+        calls.push(input)
+        return { token: 't', code: '123456', expiresAt: new Date() }
+      },
+    })
+    const app = makeApp({
+      magicLinkStore: store,
+      smtpClient: makeSmtp().client,
+      appUrl: 'https://auth.customer.example',
+      allowedReturnOrigins: ['https://app.customer.example'],
+    })
+
+    await request(app).post('/auth/email/request-link').send({
+      email: 'a@b.com',
+      nextPath: 'https://app.customer.example/desktop/auth?state=abc',
+    })
+
+    expect(calls[0]?.nextPath).toBe('https://app.customer.example/desktop/auth?state=abc')
+  })
+
   it('does NOT thread addAccount into the verify link by default', async () => {
     const store = makeStore()
     const smtp = makeSmtp()
@@ -439,6 +476,17 @@ describe('[COMP:api/auth-email-verify] POST /auth/email/verify', () => {
     const callArgs = findOrCreateUserMock.mock.calls[0][0]
     expect(callArgs.authProvider).toBe('email')
     expect(callArgs.authProviderId).toBe('new@example.com')
+  })
+
+  it('rejects a consumed link when Outpost enrollment no longer admits the email', async () => {
+    const store = makeStore({ consumeByToken: async () => ({ email: 'removed@example.com', nextPath: null, locale: 'en' }) })
+    const app = makeApp({ magicLinkStore: store, smtpClient: makeSmtp().client, appUrl: 'https://auth.example', canSignInEmail: async () => false })
+
+    const res = await request(app).post('/auth/email/verify').send({ token: 'good-token' })
+
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe('email_enrollment_required')
+    expect(findOrCreateUserMock).not.toHaveBeenCalled()
   })
 
   it('signs into an existing Google user without changing auth_provider', async () => {
@@ -584,6 +632,17 @@ describe('[COMP:api/auth-email-verify-code] POST /auth/email/verify-code', () =>
     expect(res.body.accessToken).toBeTruthy()
     expect(res.body.refreshToken).toBeTruthy()
     expect(res.body.nextPath).toBe('/brain')
+  })
+
+  it('rejects a valid code when Outpost enrollment no longer admits the email', async () => {
+    const store = makeStore({ consumeByCode: async () => ({ status: 'ok', email: 'removed@example.com', nextPath: null, locale: 'en' }) })
+    const app = makeApp({ magicLinkStore: store, smtpClient: makeSmtp().client, appUrl: 'https://auth.example', canSignInEmail: async () => false })
+
+    const res = await request(app).post('/auth/email/verify-code').send({ email: 'removed@example.com', code: '123456' })
+
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe('email_enrollment_required')
+    expect(findOrCreateUserMock).not.toHaveBeenCalled()
   })
 
   it('binds the Telegram identity when a valid tgLinkToken rides with the code', async () => {

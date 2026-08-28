@@ -64,7 +64,7 @@ import {
   type WhatsappBotAccessMode,
   type WhatsappOfficialBinding,
 } from "@/lib/api/whatsapp-ingest";
-import { isHostedEdition } from "@/lib/edition";
+import { deploymentCapabilities, isHostedEdition } from "@/lib/edition";
 import { modelTierPlanGateApplies } from "@/lib/plan-gate";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import {
@@ -1320,9 +1320,9 @@ function RoutingModelPicker({
   const t = useT();
   const { workspaces } = useWorkspaces();
   const plan = workspaces.find((w) => w.id === workspaceId)?.plan ?? "free";
-  const edition = isHostedEdition() ? "hosted" : "oss";
-  const proDisabled = modelTierPlanGateApplies(edition, plan, "pro");
-  const maxDisabled = modelTierPlanGateApplies(edition, plan, "max");
+  const capabilities = deploymentCapabilities();
+  const proDisabled = modelTierPlanGateApplies(capabilities, plan, "pro");
+  const maxDisabled = modelTierPlanGateApplies(capabilities, plan, "max");
   const [saving, setSaving] = useState(false);
   const [value, setValue] = useState<ChannelModelAlias>(routing.modelAlias);
 

@@ -49,6 +49,15 @@ function resolveOssGitCommitSha(): string {
 dotenv.config({ path: resolve(import.meta.dirname, "..", "..", ".env") });
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const APP_DEV_HOST = (() => {
+  const configured = process.env.AUTHED_APP_URL ?? process.env.NEXT_PUBLIC_AUTHED_APP_URL;
+  if (!configured) return null;
+  try {
+    return new URL(configured).hostname;
+  } catch {
+    return null;
+  }
+})();
 const OSS_GIT_COMMIT_SHA = resolveOssGitCommitSha();
 const nextPackagePath = realpathSync(
   createRequire(import.meta.url).resolve("next/package.json"),
@@ -59,6 +68,7 @@ const workspaceRoot = nextPackagePath.slice(
 );
 
 const nextConfig: NextConfig = {
+  ...(APP_DEV_HOST ? { allowedDevOrigins: [APP_DEV_HOST] } : {}),
   // app-web runs both standalone and absorbed into the platform workspace.
   // Follow the physical pnpm store so Turbopack can resolve Next in either.
   turbopack: {

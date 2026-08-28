@@ -12,7 +12,9 @@ import { renderToString } from "react-dom/server";
 vi.mock("next/navigation", () => ({
   useParams: () => ({ workspaceId: "ws-1" }),
 }));
-vi.mock("@/lib/edition", () => ({ isOssEdition: () => false }));
+vi.mock("@/lib/edition", () => ({
+  deploymentCapabilities: () => ({ billing: true }),
+}));
 vi.mock("@/components/settings-modal/settings-modal", () => ({
   openWorkspaceSettings: vi.fn(),
 }));

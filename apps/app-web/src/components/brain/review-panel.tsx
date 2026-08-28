@@ -208,6 +208,16 @@ export function ReviewPanel({
           </h1>
         </header>
 
+        {/* "Already saved" note — the queue reads as an approval gate when it
+            is not one: the row was written at save time, is already in the
+            retrieval index, and Verify only stamps `verified_by_user_id`
+            (a trust-signal ranking boost, `core/src/retrieval/trust-signals.ts`).
+            Users read "pending" as "not saved yet" and re-entered memories by
+            hand. State the invariant on the surface that provokes the question. */}
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          {copy.alreadySaved}
+        </p>
+
         {/* Action row — Verify is THE action; the drawer keeps the rest. */}
         <div className="flex items-center gap-2">
           <Button

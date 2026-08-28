@@ -25,7 +25,7 @@ import {
   type ModelTier,
   type ProviderAvailability,
 } from '@use-brian/shared/model-registry'
-import { isOssEdition } from './edition.js'
+import { deploymentCapabilities } from './edition.js'
 
 /**
  * The background-lane workhorse: extraction / classification / structured
@@ -384,7 +384,7 @@ export const PLAN_ALLOWED_MODELS: Record<string, Set<string>> = {
 const OSS_ALLOWED_MODELS = new Set(['standard', 'pro', 'max', 'research'])
 
 function allowedModelsForPlan(plan: string): Set<string> {
-  if (isOssEdition()) return OSS_ALLOWED_MODELS
+  if (!deploymentCapabilities().planEntitlements) return OSS_ALLOWED_MODELS
   return PLAN_ALLOWED_MODELS[plan] ?? PLAN_ALLOWED_MODELS.free
 }
 

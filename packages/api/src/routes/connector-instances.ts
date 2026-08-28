@@ -1,5 +1,6 @@
 /**
- * OSS connector-instance sharing and workspace-owned connector management.
+ * Standalone OSS and Outpost connector-instance sharing and workspace-owned
+ * connector management.
  * Mounted behind requireAuth by boot.ts.
  * Component tag: [COMP:api/connector-instances-route].
  */

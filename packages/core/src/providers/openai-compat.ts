@@ -20,6 +20,11 @@
  *                                  cached_tokens` decomposes into
  *                                  `cacheReadTokens` + net `inputTokens`
  *                                  (cost-tracker truthfulness depends on it)
+ *   - in-stream `error`          → thrown, exactly like a non-2xx: a 200 that
+ *                                  fails after the headers has nowhere else
+ *                                  to report it, and swallowing it turns an
+ *                                  endpoint outage into "the model said
+ *                                  nothing"
  *
  * Spec: docs/architecture/platform/model-registry.md;
  * docs/architecture/engine/provider-abstraction.md.
@@ -79,6 +84,16 @@ type CCStreamEvent = {
     completion_tokens?: number
     prompt_tokens_details?: { cached_tokens?: number }
   } | null
+  /**
+   * An upstream failure delivered INSIDE a 200 stream. The HTTP status is
+   * committed before the first token, so an endpoint that fails after
+   * accepting the request has nowhere to put the error except a frame —
+   * every gateway in front of a model does this (rate limit, upstream 5xx,
+   * context overflow, content filter). Shape varies: OpenAI's own object,
+   * a bare string, or a nested `{ error: { error: {...} } }` from a proxy
+   * that forwarded a body it did not unwrap.
+   */
+  error?: unknown
 }
 
 // ── Message conversion (engine → chat-completions) ─────────────
@@ -192,6 +207,34 @@ export function extractCCUsage(u: NonNullable<CCStreamEvent['usage']>): TokenUsa
     outputTokens: u.completion_tokens ?? 0,
     ...(cached > 0 ? { cacheReadTokens: cached } : {}),
   }
+}
+
+/**
+ * Pull a human-readable message out of an in-stream `error` frame, or null
+ * when the frame carries no error.
+ *
+ * Returns a STRING even for a shape it does not recognise: the caller's job
+ * is to prove a failure happened, and an unrecognised error object is still
+ * an error. Returning null on an unfamiliar shape would resurrect exactly
+ * the silence this exists to end.
+ */
+export function extractCCStreamError(err: unknown): string | null {
+  if (err === null || err === undefined || err === false) return null
+  if (typeof err === 'string') return err.trim() || null
+  if (typeof err !== 'object') return String(err)
+  const obj = err as Record<string, unknown>
+  // A proxy that forwarded an upstream body without unwrapping it nests the
+  // real object one level down.
+  if (obj.error !== undefined) {
+    const inner = extractCCStreamError(obj.error)
+    if (inner) return inner
+  }
+  const message = typeof obj.message === 'string' ? obj.message.trim() : ''
+  const code = typeof obj.code === 'string' || typeof obj.code === 'number' ? String(obj.code) : ''
+  const type = typeof obj.type === 'string' ? obj.type : ''
+  if (message) return code || type ? `${message} (${code || type})` : message
+  const serialized = JSON.stringify(err)
+  return serialized && serialized !== '{}' ? serialized : null
 }
 
 // ── SSE ────────────────────────────────────────────────────────
@@ -338,8 +381,15 @@ async function* streamCompat(
   let finishReason: string | null | undefined
   let sawToolCalls = false
   let usage: TokenUsage = { inputTokens: 0, outputTokens: 0 }
+  // Did this stream carry ANY model output? Decides whether an error frame
+  // may still be thrown (nothing shipped yet) or only logged (a partial
+  // answer is already in front of the user), and drives the content-free
+  // diagnostic below.
+  let sawContent = false
+  let frames = 0
 
   for await (const payload of sseData(res)) {
+    frames++
     let event: CCStreamEvent
     try {
       event = JSON.parse(payload) as CCStreamEvent
@@ -348,15 +398,49 @@ async function* streamCompat(
       continue
     }
     if (event.usage) usage = extractCCUsage(event.usage)
+    // An error frame used to fall through the `if (!choice) continue` below
+    // and vanish: the loop ended, `message_end` went out with stopReason
+    // `incomplete` and 0/0 usage, and an upstream FAILURE became
+    // indistinguishable from a model that chose to say nothing. The engine
+    // then spent EMPTY_RETRY_PLAN's two retries against a dead endpoint and
+    // told the user "I could not produce a reply", with the one sentence
+    // that explained why already thrown away. Cost a workspace ~8 dead
+    // Telegram turns on 2026-08-25. Treat it the way a non-2xx is treated —
+    // same redaction contract, upstream wording only in `cause`.
+    const upstreamError = extractCCStreamError(event.error)
+    if (upstreamError) {
+      const detail = upstreamError.slice(0, 500)
+      // Log unconditionally. `includeErrorDetail` redacts what a USER may
+      // read, not what an operator may debug; the server log is the one
+      // place today's incident had nothing at all.
+      console.error(`[openai-compat:${cfg.label}] upstream error frame: ${detail}`)
+      if (!sawContent) {
+        throw new Error(
+          `[openai-compat:${cfg.label}] upstream returned an error mid-stream${cfg.includeErrorDetail ? `: ${detail}` : ''}`,
+          { cause: detail },
+        )
+      }
+      // Partial output already reached the caller. Throwing now would discard
+      // it; end the turn as truncated (no finish_reason → `incomplete`) and
+      // let the line above carry the reason.
+      break
+    }
     const choice = event.choices?.[0]
     if (!choice) continue
     if (choice.finish_reason) finishReason = choice.finish_reason
     const delta = choice.delta
     if (!delta) continue
-    if (delta.reasoning_content) yield { type: 'thinking_delta', text: delta.reasoning_content }
-    if (delta.content) yield { type: 'text_delta', text: delta.content }
+    if (delta.reasoning_content) {
+      sawContent = true
+      yield { type: 'thinking_delta', text: delta.reasoning_content }
+    }
+    if (delta.content) {
+      sawContent = true
+      yield { type: 'text_delta', text: delta.content }
+    }
     for (const tc of delta.tool_calls ?? []) {
       sawToolCalls = true
+      sawContent = true
       let call = openCalls.get(tc.index)
       if (!call) {
         call = { id: tc.id ?? `call_${tc.index}`, started: false }
@@ -370,6 +454,20 @@ async function* streamCompat(
         yield { type: 'tool_use_delta', id: call.id, input: tc.function.arguments }
       }
     }
+  }
+
+  // A stream that shipped nothing is not necessarily broken — a model may
+  // legitimately stop with `finish_reason: 'stop'` and no content, which is
+  // what EMPTY_RETRY_PLAN exists to re-prompt. But when there is ALSO no
+  // finish reason and no usage, the endpoint hung up mid-completion and said
+  // nothing about why. Neither case is thrown here; both are named, because
+  // the shape of the frames is the only evidence the next investigation gets.
+  if (!sawContent) {
+    console.warn(
+      `[openai-compat:${cfg.label}] stream produced no content: ${frames} SSE frame(s), ` +
+      `finish_reason=${finishReason ?? 'none'}, usage=${usage.inputTokens}/${usage.outputTokens}` +
+      `${finishReason || usage.inputTokens > 0 ? '' : ' — endpoint closed the stream without completing it'}`,
+    )
   }
 
   for (const call of openCalls.values()) {

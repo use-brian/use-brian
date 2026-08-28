@@ -1,7 +1,7 @@
 /**
- * Open standalone entry for the Use Brian HTTP API (`@use-brian/api-open`).
+ * Standalone entry for the OSS and Outpost HTTP API (`@use-brian/api-open`).
  *
- * This is the single-player, one-key local product entrypoint. It imports ZERO
+ * This is the customer-owned product entrypoint. It imports ZERO
  * closed code: no `@use-brian/api-platform`, no `@use-brian/shared-server`, no
  * `getEnv()`. It reads the handful of values the open composition needs straight
  * from `process.env` (with local defaults), then calls `bootOpenApi()` with
@@ -14,7 +14,9 @@
  * composition — bootOpenApi mounts them when CHANNEL_CREDENTIAL_KEY is set
  * (migrations 280 + 307 create their storage in the OSS schema).
  *
- * See the open-core split (repo CLAUDE.md; plan in git history) §12.7 (one-command parity boot).
+ * `USEBRIAN_EDITION=oss` enables the local-owner session. `outpost` disables
+ * that shortcut and enables the multi-user workspace, teammate, invitation,
+ * and dedicated auth-portal paths from the same open composition and schema.
  */
 
 import dotenv from 'dotenv'
@@ -28,6 +30,8 @@ import { createBrowserSessionVault } from '@use-brian/api/db/browser-session-vau
 import { createBrowserSkillGrantStore } from '@use-brian/api/db/browser-skill-grant-store.js'
 import { createOssUsageStore } from '@use-brian/api/db/oss-usage-store.js'
 import { createSandboxTaskStore } from '@use-brian/api/db/sandbox-task-store.js'
+import { parseStrictBoolean } from '@use-brian/api/auth/outpost-auth-config.js'
+import { resolveApiJwtSecret, shouldRunApiWorkers } from './runtime.js'
 
 dotenv.config()
 
@@ -44,7 +48,18 @@ const USEBRIAN_PREFERRED_PROVIDER =
 // JWT_SECRET is auto-generated + persisted by the launcher; for a bare boot we
 // fall back to a process-local random one (sessions don't survive a restart,
 // which is fine for a single-process dev boot).
-const JWT_SECRET = process.env.JWT_SECRET || (await import('node:crypto')).randomUUID()
+const JWT_SECRET = resolveApiJwtSecret(
+  process.env.USEBRIAN_EDITION,
+  process.env.JWT_SECRET,
+  (await import('node:crypto')).randomUUID(),
+)
+
+// Validate before using the mechanically graded default forms below. The
+// canonical expressions keep OSS/hosted defaults visible to `pnpm check`; this
+// guard still rejects every value outside true/false/1/0.
+parseStrictBoolean(process.env.OUTPOST_AUTH_EMAIL_ENABLED, 'OUTPOST_AUTH_EMAIL_ENABLED', true)
+parseStrictBoolean(process.env.OUTPOST_AUTH_OIDC_ENABLED, 'OUTPOST_AUTH_OIDC_ENABLED', false)
+parseStrictBoolean(process.env.OUTPOST_OIDC_SUBJECT_IDENTITY_ENABLED, 'OUTPOST_OIDC_SUBJECT_IDENTITY_ENABLED', false)
 
 const env: OpenApiEnv = {
   GEMINI_API_KEY,
@@ -55,6 +70,32 @@ const env: OpenApiEnv = {
   NODE_ENV: process.env.NODE_ENV || 'development',
   API_URL: process.env.API_URL || 'http://localhost:4000',
   APP_URL: process.env.APP_URL || 'http://localhost:3003',
+  AUTHED_APP_URL: process.env.AUTHED_APP_URL,
+  AUTH_PORTAL_URL: process.env.AUTH_PORTAL_URL,
+  OUTPOST_AUTH_EMAIL_ENABLED: !['false', '0'].includes(
+    (process.env.OUTPOST_AUTH_EMAIL_ENABLED ?? '').trim().toLowerCase(),
+  ),
+  OUTPOST_AUTH_OIDC_ENABLED: process.env.OUTPOST_AUTH_OIDC_ENABLED === 'true'
+    || process.env.OUTPOST_AUTH_OIDC_ENABLED === '1',
+  OUTPOST_OIDC_SUBJECT_IDENTITY_ENABLED: process.env.OUTPOST_OIDC_SUBJECT_IDENTITY_ENABLED === 'true'
+    || process.env.OUTPOST_OIDC_SUBJECT_IDENTITY_ENABLED === '1',
+  OUTPOST_OIDC_ENROLLMENT_MODE: process.env.OUTPOST_OIDC_ENROLLMENT_MODE,
+  OUTPOST_OIDC_WORKSPACE_MAPPINGS: process.env.OUTPOST_OIDC_WORKSPACE_MAPPINGS,
+  OUTPOST_OIDC_ISSUER_URL: process.env.OUTPOST_OIDC_ISSUER_URL,
+  OUTPOST_OIDC_CLIENT_ID: process.env.OUTPOST_OIDC_CLIENT_ID,
+  OUTPOST_OIDC_CLIENT_SECRET: process.env.OUTPOST_OIDC_CLIENT_SECRET,
+  OUTPOST_OIDC_PROVIDER_NAME: process.env.OUTPOST_OIDC_PROVIDER_NAME,
+  OUTPOST_AUTH_BRIDGE_SECRET: process.env.OUTPOST_AUTH_BRIDGE_SECRET,
+  SMTP_HOST: process.env.SMTP_HOST,
+  SMTP_PORT: process.env.SMTP_PORT,
+  SMTP_SECURE: process.env.SMTP_SECURE === undefined
+    ? undefined
+    : parseStrictBoolean(process.env.SMTP_SECURE, 'SMTP_SECURE', false),
+  SMTP_USER: process.env.SMTP_USER,
+  SMTP_PASSWORD: process.env.SMTP_PASSWORD,
+  GMAIL_SMTP_USER: process.env.GMAIL_SMTP_USER,
+  GMAIL_SMTP_APP_PASSWORD: process.env.GMAIL_SMTP_APP_PASSWORD,
+  EMAIL_FROM_ADDRESS: process.env.EMAIL_FROM_ADDRESS,
   SUPPORT_DIAGNOSTICS_ENABLED: !['false', '0'].includes(
     (process.env.BRIAN_SUPPORT_DIAGNOSTICS_ENABLED ?? '').trim().toLowerCase(),
   ),
@@ -138,7 +179,7 @@ const browserCredentialEncryptionKey = process.env.BROWSER_CREDENTIAL_ENCRYPTION
 
 const { start } = await bootOpenApi({
   env,
-  runWorkers: true,
+  runWorkers: shouldRunApiWorkers(process.argv),
   ports: {
     usageStore: createOssUsageStore(),
     buildEpisodeIngestors,

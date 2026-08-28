@@ -52,7 +52,7 @@
 
 import { useEffect } from "react";
 
-import { getAccessToken } from "@/lib/auth-fetch";
+import { getValidAccessToken } from "@/lib/auth-fetch";
 import { usesGatewayCredentials } from "@/lib/desktop-auth-source";
 import {
   BRAIN_REFRESH_EVENT,
@@ -292,10 +292,84 @@ type WorkspaceStreamHandle = {
 };
 
 /**
+ * How long a tab stays hidden before its stream is released. Long enough
+ * that flipping between tabs never drops the connection; short enough that
+ * a backgrounded tab stops holding a server slot within a minute.
+ */
+const HIDDEN_RELEASE_MS = 60_000;
+
+/**
+ * Visibility-driven connect/release gate for the workspace stream. IO-free —
+ * the caller supplies connect/disconnect + timer hooks (mirroring
+ * `createRefreshFolder`) so tests can drive it deterministically.
+ *
+ * Why release at all: every open EventSource holds one of the API's
+ * per-instance request slots for as long as it lives, and a hidden tab needs
+ * no realtime signal — the reconnect catch-up on `open` (and the
+ * visibilitychange catch-up in the hook) makes release lossless. Restored
+ * browser sessions were holding one stream per background tab and saturated
+ * the instance's slot budget (2026-08-27 outage).
+ */
+export function createVisibilityGate(opts: {
+  graceMs?: number;
+  connect: () => void;
+  disconnect: () => void;
+  setTimer?: (fn: () => void, ms: number) => unknown;
+  clearTimer?: (handle: unknown) => void;
+}): { onVisibility: (state: "visible" | "hidden") => void; dispose: () => void } {
+  const graceMs = opts.graceMs ?? HIDDEN_RELEASE_MS;
+  const setTimer = opts.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
+  const clearTimer =
+    opts.clearTimer ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>));
+  let pending: unknown = null;
+
+  return {
+    onVisibility(state) {
+      if (state === "hidden") {
+        pending ??= setTimer(() => {
+          pending = null;
+          opts.disconnect();
+        }, graceMs);
+      } else {
+        if (pending !== null) {
+          clearTimer(pending);
+          pending = null;
+        }
+        opts.connect();
+      }
+    },
+    dispose() {
+      if (pending !== null) {
+        clearTimer(pending);
+        pending = null;
+      }
+    },
+  };
+}
+
+/**
+ * Delay before a manual reconnect after a FATAL EventSource close (non-200
+ * reconnect response: expired token, 429 shed, 5xx mid-deploy). Exponential
+ * 1s→30s with full jitter so a fleet of tabs stranded by the same outage
+ * does not retry in lockstep. Exported for the unit test only.
+ */
+export function reconnectDelayMs(
+  attempt: number,
+  random: () => number = Math.random,
+): number {
+  const base = Math.min(30_000, 1_000 * 2 ** Math.min(attempt, 5));
+  return Math.round(base / 2 + random() * (base / 2));
+}
+
+/**
  * Open the workspace stream and route every change to its domain event.
- * EventSource auto-reconnects on transport errors; each `open` fires the
- * catch-up dispatches. Module-local: the hook below is the only consumer
- * (re-export it if a non-React shell ever needs to drive it directly).
+ * Transient transport errors ride the browser's own reconnect; a FATAL
+ * close (non-200 on reconnect — per spec the browser gives up: readyState
+ * CLOSED, no retry) is healed by the `error` listener with a backoff
+ * reconnect, or the tab would silently lose realtime until a full reload.
+ * Each `open` fires the catch-up dispatches. Module-local: the hook below
+ * is the only consumer (re-export it if a non-React shell ever needs to
+ * drive it directly).
  */
 function openWorkspaceStream(opts: {
   workspaceId: string;
@@ -303,9 +377,31 @@ function openWorkspaceStream(opts: {
 }): WorkspaceStreamHandle {
   let closed = false;
   let source: EventSource | null = null;
+  let connecting = false;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  let retryAttempt = 0;
 
-  function connect() {
-    if (closed) return;
+  async function connect() {
+    if (closed || source || connecting) return;
+    // Long-lived non-fetch consumer: refresh BEFORE each (re)connect, same
+    // rule as the collab WebSocket (auth-fetch.ts → getValidAccessToken) —
+    // a tab older than the 1h access token would otherwise present a dead
+    // token on every cycle reconnect and fatally 401. The latch resets in
+    // `finally`: a throw here must not wedge connect() forever.
+    connecting = true;
+    let token: string | null;
+    try {
+      token = await getValidAccessToken();
+    } catch {
+      // Transient refresh failure — retry with backoff rather than wedging
+      // (callers are fire-and-forget, so a throw would be unhandled).
+      scheduleReconnect();
+      return;
+    } finally {
+      connecting = false;
+    }
+    if (closed || source) return;
+    if (document.visibilityState === "hidden") return; // released mid-await; the gate reconnects on visible
     // Base is only consulted when API_URL is dev's blanked "" (next.config
     // inlines "" so fetches ride the /api rewrite); an absolute API_URL
     // (prod, desktop bundle) ignores it, so file:// can't leak in.
@@ -314,18 +410,19 @@ function openWorkspaceStream(opts: {
     // Brian auth rides the URL token. A local Electron target additionally
     // includes credentials so a separately hosted API receives its deployment-
     // gateway cookie; the API permits credentials only for allowlisted origins.
-    const token = getAccessToken();
     if (token) url.searchParams.set("access_token", token);
-    source = new EventSource(url.toString(), {
+    const es = new EventSource(url.toString(), {
       withCredentials: usesGatewayCredentials(),
     });
+    source = es;
 
-    source.addEventListener("open", () => {
+    es.addEventListener("open", () => {
+      retryAttempt = 0;
       // First connect AND every auto-reconnect: refetch what we missed.
       for (const d of allDomainDispatches(opts.workspaceId)) opts.onDispatch(d);
     });
 
-    source.addEventListener("brain-change", (ev) => {
+    es.addEventListener("brain-change", (ev) => {
       try {
         const data = JSON.parse(
           (ev as MessageEvent).data,
@@ -335,17 +432,57 @@ function openWorkspaceStream(opts: {
         // Malformed payload — skip silently. The next event will land.
       }
     });
-    // Transport errors: trust the browser's reconnect + backoff; the next
-    // `open` runs catch-up, so nothing is permanently missed.
+
+    es.addEventListener("error", () => {
+      // Transient drops (and the server's `: cycle` lifetime end) leave
+      // readyState CONNECTING and the browser retries by itself. A non-200
+      // reconnect response is FATAL per spec — readyState CLOSED, no
+      // retry — so without this handler the tab silently stops updating
+      // until a full reload.
+      if (closed || source !== es || es.readyState !== EventSource.CLOSED)
+        return;
+      disconnect();
+      scheduleReconnect();
+    });
   }
 
-  connect();
+  function scheduleReconnect() {
+    if (closed || retryTimer !== null) return;
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      // Hidden: stay released; the visibility gate reconnects on visible.
+      if (document.visibilityState !== "hidden") void connect();
+    }, reconnectDelayMs(retryAttempt++));
+  }
+
+  function disconnect() {
+    source?.close();
+    source = null;
+  }
+
+  const gate = createVisibilityGate({ connect: () => void connect(), disconnect });
+  const onVisibilityChange = () => {
+    if (closed) return;
+    gate.onVisibility(document.visibilityState === "hidden" ? "hidden" : "visible");
+  };
+  document.addEventListener("visibilitychange", onVisibilityChange);
+
+  // Connect only when visible. A restored session's background tabs must
+  // not each hold a server request slot even for the grace window — they
+  // connect on first focus, and the reconnect `open` catch-up (plus the
+  // hook's own visibility catch-up) repaints them.
+  if (document.visibilityState !== "hidden") void connect();
 
   return {
     close: () => {
       closed = true;
-      source?.close();
-      source = null;
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      gate.dispose();
+      if (retryTimer !== null) {
+        clearTimeout(retryTimer);
+        retryTimer = null;
+      }
+      disconnect();
     },
   };
 }

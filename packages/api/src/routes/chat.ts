@@ -10,7 +10,7 @@ import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
 import { buildPinnedContextBlock } from '../resolve-session-pins.js'
 import { getSelfEntityId } from '../db/memories.js'
 import { getRecording, type Recording } from '../db/recordings-store.js'
-import { queryLoop, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, probePdfPageCount, estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH, filterToolsByCapabilities, modelToCompactionTier, buildWorkspaceFilesContext, buildUploadPolicyBlock, SensitivityAccumulator, CompartmentAccumulator, ContextScopeAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSupervisorSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, parsePresentedDocumentInput, latestWorkflowProposalReceipt, buildTool, parseSlashCommand, buildSlashCommandBlock, buildEmailDraftAnchorPrompt, formatActiveEmailDraftContext, type PresentedDocumentInput, type MediaBackend } from '@use-brian/core'
+import { queryLoop, isConnectionDropError, isEndpointUnreachableError, streamErrorCode, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, probePdfPageCount, estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH, filterToolsByCapabilities, modelToCompactionTier, buildWorkspaceFilesContext, buildUploadPolicyBlock, SensitivityAccumulator, CompartmentAccumulator, ContextScopeAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSupervisorSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, parsePresentedDocumentInput, latestWorkflowProposalReceipt, buildTool, parseSlashCommand, buildSlashCommandBlock, buildEmailDraftAnchorPrompt, formatActiveEmailDraftContext, type PresentedDocumentInput, type MediaBackend } from '@use-brian/core'
 import { deliverTurnInput, registerTurnInbox } from '../turn-inbox.js'
 import { insertClaimProvenance, getClaimsForLatestAssistantMessage } from '../db/claim-provenance-store.js'
 import type { SessionStateStore, SessionStateRecord, PlanStore, AmbientSurface, CrmEmailDraftStore } from '@use-brian/core'
@@ -93,6 +93,7 @@ import type { PendingApprovalsStore, ApprovalKind } from '../db/pending-approval
 import { appendDecisionEvent } from '../db/decision-event-store.js'
 import type { SessionResumeStore } from '../db/session-resume-store.js'
 import type { WorkspaceSkillStore } from '../db/skill-store.js'
+import { deploymentCapabilities } from '../edition.js'
 
 // Module-level map of active confirmation resolvers, keyed by sessionId.
 // Cleaned up on turn_complete or stream close.
@@ -419,7 +420,17 @@ type WebChatOptions = {
   isPlaceholderTitle?: (title: string | null | undefined) => boolean
   getTitleChannelPrefix?: (title: string | null | undefined) => string | null
   injectExtraTools?: InjectExtraTools
-  resolveExtraSystemPrompt?: (session: { mode: string | null; channelType: string }) => string | null
+  /**
+   * May resolve async: the open impl fetches live plan presets (month brief +
+   * open ideas) for `mode='plan'` sessions, keyed by `assistantId`
+   * (feed-plan-chat-first.md §6). Sync impls keep working — the call site
+   * awaits either.
+   */
+  resolveExtraSystemPrompt?: (session: {
+    mode: string | null
+    channelType: string
+    assistantId?: string
+  }) => string | null | Promise<string | null>
   resolveAppSoul?: ResolveAppSoul
   /**
    * Tool-use interception port (remote MCP only), forwarded through
@@ -912,11 +923,12 @@ export function isAdaptiveResearchEligible(args: {
   workspaceId: string | null | undefined
   userPlan: string
   assistantKind: string | null | undefined
+  researchPlanGate?: boolean
 }): boolean {
   return (
     args.requestedMode === undefined &&
     !!args.workspaceId &&
-    args.userPlan !== 'free' &&
+    (args.researchPlanGate === false || args.userPlan !== 'free') &&
     args.assistantKind !== 'app'
   )
 }
@@ -2581,6 +2593,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           workspaceId: assistant.workspaceId,
           userPlan,
           assistantKind: assistant.kind,
+          researchPlanGate: deploymentCapabilities().researchPlanGate,
         })
       let adaptiveSessionId: string | null = null
       let adaptiveDbMessages: SessionMessage[] = []
@@ -2699,7 +2712,8 @@ export function chatRoutes(options: WebChatOptions): Router {
           return
         }
         const used = await getWorkspaceResearchUsed(assistant.workspaceId)
-        const isPaid = userPlan !== 'free'
+        const researchPlanGate = deploymentCapabilities().researchPlanGate
+        const isPaid = !researchPlanGate || userPlan !== 'free'
         if (!isPaid && used >= FREE_RESEARCH_QUOTA) {
           // 402 Payment Required is the cleanest mapping — the gate is a
           // billing one, not an auth or shape failure. Frontend handles
@@ -5029,9 +5043,10 @@ export function chatRoutes(options: WebChatOptions): Router {
       // A host may add a session-specific prompt block (e.g. a draft-session
       // authoring addendum). Open default: none. Pairs with injectExtraTools
       // below so the prompt and the available tools agree.
-      const extraSystemPrompt = options.resolveExtraSystemPrompt?.({
+      const extraSystemPrompt = await options.resolveExtraSystemPrompt?.({
         mode: session.mode,
         channelType: session.channelType,
+        assistantId: assistant.id,
       })
       if (extraSystemPrompt) {
         fullSystemPrompt += `\n\n${extraSystemPrompt}`
@@ -7602,6 +7617,10 @@ export function chatRoutes(options: WebChatOptions): Router {
                   output_tokens: usage.outputTokens,
                   cost_usd_micro: Math.round(cost * 1_000_000),
                   cache_hits: usage.cacheReadTokens ?? 0,
+                  // Channel-path parity — see channel-pipeline.ts's copy of
+                  // this event for why HOW a turn ended is recorded next to
+                  // what it cost.
+                  stop_reason: sanitize(event.response.stopReason ?? 'unknown'),
                 },
               })
 
@@ -7664,12 +7683,37 @@ export function chatRoutes(options: WebChatOptions): Router {
             }
           }
           if (event.type === 'error') {
-            sendEvent('error', { error: event.error.message })
+            // A dropped provider connection reads as gibberish when relayed
+            // raw (Node's ConnResetException message is just "aborted", the
+            // 2026-08-27 custom-LLM incident). Send a typed code so the
+            // client renders actionable localized copy; everything else
+            // keeps the raw message.
+            if (isEndpointUnreachableError(event.error)) {
+              sendEvent('error', {
+                code: 'upstream_unreachable',
+                error: 'The model endpoint could not be reached.',
+                customEndpoint: Boolean(customLlmRuntime),
+              })
+            } else if (isConnectionDropError(event.error)) {
+              sendEvent('error', {
+                code: 'upstream_connection_reset',
+                error: 'The connection to the model was interrupted. Please try again.',
+                customEndpoint: Boolean(customLlmRuntime),
+              })
+            } else {
+              sendEvent('error', { error: event.error.message })
+            }
             console.error('Query loop error:', event.error)
+            const errorCode = streamErrorCode(event.error)
             options.analytics?.logEvent({
               userId: user.id, assistantId: assistant.id, sessionId: session.id,
               eventName: 'query_loop_error', channelType: 'web',
-              metadata: { error_type: sanitize(event.error.name ?? 'unknown') },
+              metadata: {
+                error_type: sanitize(event.error.name ?? 'unknown'),
+                ...(errorCode !== undefined ? { error_code: sanitize(errorCode) } : {}),
+                error_message: sanitize((event.error.message ?? '').slice(0, 200)),
+                custom_endpoint: Boolean(customLlmRuntime),
+              },
             })
           }
         }

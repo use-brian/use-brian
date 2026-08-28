@@ -1,4 +1,4 @@
-export { queryLoop } from './query-loop.js'
+export { queryLoop, isConnectionDropError, isEndpointUnreachableError, streamErrorCode, streamErrorCodes } from './query-loop.js'
 export type { QueryEvent, QueryLoopOptions, TerminalStopReason } from './query-loop.js'
 export {
   matchesDisputedFigure,

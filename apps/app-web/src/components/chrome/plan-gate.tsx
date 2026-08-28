@@ -21,7 +21,7 @@ import {
   LockIcon,
   SparklesIcon,
 } from "lucide-react";
-import { isHostedEdition } from "@/lib/edition";
+import { deploymentCapabilities } from "@/lib/edition";
 import {
   planGateApplies,
   planGateCheckoutReturn,
@@ -92,7 +92,7 @@ function BrianTrialMascot() {
 
 export function PlanGate({ workspaceId }: { workspaceId: string }) {
   const t = useT();
-  const edition = isHostedEdition() ? ("hosted" as const) : ("oss" as const);
+  const capabilities = deploymentCapabilities();
   const [plan, setPlan] = useState<string | null>(null);
   const [trialEligible, setTrialEligible] = useState(false);
   const [dismissed, setDismissed] = useState(true);
@@ -100,8 +100,7 @@ export function PlanGate({ workspaceId }: { workspaceId: string }) {
   const [checkoutError, setCheckoutError] = useState(false);
 
   useEffect(() => {
-    // OSS builds never fetch — the gate cannot apply there.
-    if (edition === "oss") return;
+    if (!capabilities.billing) return;
     let cancelled = false;
     setDismissed(
       sessionStorage.getItem(planGateDismissKey(workspaceId)) === "1",
@@ -151,9 +150,9 @@ export function PlanGate({ workspaceId }: { workspaceId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [workspaceId, edition]);
+  }, [workspaceId, capabilities.billing]);
 
-  if (!planGateApplies(edition, plan) || dismissed) return null;
+  if (!planGateApplies(capabilities, plan) || dismissed) return null;
 
   const g = t.planGate;
 

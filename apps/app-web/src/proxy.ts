@@ -8,7 +8,7 @@ import {
   appendLegacyHostOnlyClears,
   parseLastCookie,
 } from "@/lib/auth-cookies";
-import { primaryAuthUrl } from "@/lib/primary-auth";
+import { primaryAuthUrl, publicAppUrl } from "@/lib/primary-auth";
 import { computeDocRedirect } from "@/lib/doc-redirect";
 import { isAppHost, isGuardedPath, normalizeHostHeader } from "@/lib/site-hosts";
 import {
@@ -95,6 +95,7 @@ export async function proxy(request: NextRequest) {
   const hasAccess = parseLastCookie(cookieHeader, "access_token");
   const refreshToken = parseLastCookie(cookieHeader, "refresh_token");
   const primary = primaryAuthUrl();
+  const browserUrl = publicAppUrl(request.url);
 
   if (!hasAccess && !refreshToken) {
     // Open edition: no login exists, so a signed-out deep link mints the
@@ -113,10 +114,10 @@ export async function proxy(request: NextRequest) {
       // Cross-origin to the primary's /login. Carries the original URL
       // so post-OAuth lands the user back here.
       const loginUrl = new URL("/login", primary);
-      loginUrl.searchParams.set("next", request.url);
+      loginUrl.searchParams.set("next", browserUrl.toString());
       return NextResponse.redirect(loginUrl);
     }
-    return NextResponse.redirect(new URL("/login", request.url));
+    return NextResponse.redirect(new URL("/login", browserUrl));
   }
 
   if (hasAccess) {
@@ -128,7 +129,7 @@ export async function proxy(request: NextRequest) {
   // dev refresh locally.
   if (primary) {
     const refreshUrl = new URL("/api/auth/refresh-and-return", primary);
-    refreshUrl.searchParams.set("next", request.url);
+    refreshUrl.searchParams.set("next", browserUrl.toString());
     return NextResponse.redirect(refreshUrl);
   }
 
@@ -142,7 +143,7 @@ export async function proxy(request: NextRequest) {
     const res = NextResponse.redirect(
       new URL(
         ossEntry ?? "/login",
-        ossEntry ? ossPublicAppOrigin(request.url) : request.url,
+        ossEntry ? ossPublicAppOrigin(request.url) : browserUrl,
       ),
     );
     applyClearedCookies(res);

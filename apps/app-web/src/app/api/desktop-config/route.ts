@@ -33,7 +33,7 @@
 // Component-map tag: [COMP:app-web/desktop-config-route].
 
 import { NextResponse } from "next/server";
-import { isOssEdition } from "@/lib/edition";
+import { usebrianEdition } from "@/lib/edition";
 
 // The browser-facing API origin. `NEXT_PUBLIC_API_URL` is the one the client
 // bundle uses; `API_URL` is the server-side hop and is only a last resort (it
@@ -53,7 +53,7 @@ export async function GET() {
       // reachable but cannot mint a local-owner session).
       apiUrl: API_URL,
       docSyncUrl: DOC_SYNC_URL,
-      edition: isOssEdition() ? "oss" : "hosted",
+      edition: usebrianEdition(),
     },
     { headers: { "Cache-Control": "no-store" } },
   );

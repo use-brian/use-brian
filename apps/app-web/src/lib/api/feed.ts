@@ -34,7 +34,7 @@ import type {
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
 export type FeedCloudLink = {
-  state: "native" | "unlinked" | "pending" | "linked" | "plan_required" | "error";
+  state: "native" | "disabled" | "unlinked" | "pending" | "linked" | "plan_required" | "error";
   assistantId?: string;
   userCode?: string | null;
   verificationUrl?: string | null;
@@ -1581,5 +1581,46 @@ export async function updateFeedIdea(
     error?: string;
   };
   if (res.ok && data.idea) return { ok: true, idea: data.idea };
+  return { ok: false, error: data.error ?? null };
+}
+
+/**
+ * Draft directly from an idea (`POST .../ideas/:ideaId/draft`,
+ * feed-plan-chat-first.md P7) — the escalation that skips the calendar.
+ * Creates a draft session seeded from the jot and binds `session_id`
+ * (derived status flips to `promoted`); the idea's `platformHint` outranks
+ * the caller's default. Idempotent: an already-promoted idea returns its
+ * existing session, whose platform the redirect must use.
+ */
+export async function draftFromFeedIdea(
+  assistantId: string,
+  ideaId: string,
+  input: { platform: FeedPlatform },
+): Promise<
+  | { ok: true; idea: FeedIdea; sessionId: string; platform: FeedPlatform }
+  | { ok: false; error: string | null }
+> {
+  const res = await authFetch(
+    `${API_URL}/api/distribution/${assistantId}/ideas/${ideaId}/draft`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+  const data = (await res.json().catch(() => ({}))) as {
+    idea?: FeedIdea;
+    sessionId?: string;
+    platform?: FeedPlatform;
+    error?: string;
+  };
+  if (res.ok && data.idea && data.sessionId && data.platform) {
+    return {
+      ok: true,
+      idea: data.idea,
+      sessionId: data.sessionId,
+      platform: data.platform,
+    };
+  }
   return { ok: false, error: data.error ?? null };
 }

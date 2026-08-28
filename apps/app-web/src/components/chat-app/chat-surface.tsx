@@ -2530,6 +2530,26 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
               setError(t.assistantClearanceBlocked);
               break;
             }
+            // Dropped provider connection: retrying is safe and usually
+            // enough, so say that instead of the raw socket message.
+            if (payload.code === "upstream_connection_reset") {
+              setError(
+                payload.customEndpoint === true
+                  ? t.upstreamConnectionResetCustom
+                  : t.upstreamConnectionReset,
+              );
+              break;
+            }
+            // Endpoint unreachable: retrying will not help until the
+            // endpoint is back, so the copy points at the settings check.
+            if (payload.code === "upstream_unreachable") {
+              setError(
+                payload.customEndpoint === true
+                  ? t.upstreamUnreachableCustom
+                  : t.upstreamUnreachable,
+              );
+              break;
+            }
             // Suspended on a question from an earlier turn: restore the
             // answer panel instead of a red error (the dock's recipe).
             if (payload.code === "pending_question_exists") {

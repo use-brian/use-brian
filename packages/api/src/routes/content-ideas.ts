@@ -24,6 +24,10 @@ import {
   type ContentPlanStore,
 } from '../db/content-plan-store.js'
 import {
+  createContentPlanningStore,
+  type ContentPlanningStore,
+} from '../db/content-planning-store.js'
+import {
   resolvePlanningAccess,
   type PlanningAccessContext,
 } from './content-planning.js'
@@ -31,6 +35,8 @@ import {
 export interface ContentIdeasRouteOptions {
   store?: ContentIdeasStore
   planStore?: ContentPlanStore
+  /** Draft-session creation for the direct idea → draft escalation (P7). */
+  planningStore?: ContentPlanningStore
   resolveAccess?: (
     userId: string,
     assistantId: string,
@@ -50,6 +56,7 @@ export function contentIdeasRoutes(
   const router = Router()
   const store = options.store ?? createContentIdeasStore()
   const planStore = options.planStore ?? createContentPlanStore()
+  const planningStore = options.planningStore ?? createContentPlanningStore()
   const resolveAccess = options.resolveAccess ?? resolvePlanningAccess
 
   async function access(
@@ -221,6 +228,95 @@ export function contentIdeasRoutes(
       } catch (error) {
         console.error('[content-ideas] update failed:', error)
         res.status(500).json({ error: 'Failed to update the idea' })
+      }
+    },
+  )
+
+  /**
+   * Draft directly from an idea — the escalation that skips the calendar
+   * (docs/plans/feed-plan-chat-first.md §5/P7): creates a draft session
+   * seeded from the jot and binds `session_id`, which is what derives the
+   * idea `promoted` (migration 384's contract). The idea's `platformHint`
+   * wins over the caller's default; a jot with neither refuses rather than
+   * guessing. Idempotent — an idea already bound returns its session.
+   * A discarded idea refuses (restore it first); `ON DELETE SET NULL`
+   * self-heals a bind whose session died, so a dangling id falls through
+   * to a fresh session rather than erroring.
+   */
+  router.post<{ assistantId: string; ideaId: string }>(
+    '/:assistantId/ideas/:ideaId/draft',
+    async (req, res) => {
+      const ctx = await access(req, res)
+      if (!ctx || !requireDraftPermission(ctx, res)) return
+      const { assistantId, ideaId } = req.params
+      const body = (req.body ?? {}) as Record<string, unknown>
+      if (body.platform !== undefined && !isContentPlanPlatform(body.platform)) {
+        res.status(400).json({ error: 'platform is not a known platform' })
+        return
+      }
+      try {
+        const idea = await store.getIdea(assistantId, ideaId)
+        if (!idea) {
+          res.status(404).json({ error: 'Idea not found' })
+          return
+        }
+        if (idea.discardedAt) {
+          res.status(409).json({ error: 'Idea is discarded; restore it first' })
+          return
+        }
+        if (idea.sessionId) {
+          // Already promoted to a draft — hand back the existing session so a
+          // double-click or a stale tab never forks a second one.
+          const sessions = await planningStore.listSessions({ assistantId })
+          const existing = sessions.find((s) => s.id === idea.sessionId)
+          if (existing) {
+            res.json({
+              idea,
+              sessionId: existing.id,
+              platform: existing.platform,
+            })
+            return
+          }
+          // Bound session no longer exists — treat as unbound and re-draft.
+        }
+        const platform =
+          idea.platformHint ??
+          (isContentPlanPlatform(body.platform) ? body.platform : null)
+        if (!platform) {
+          res.status(400).json({
+            error: 'platform is required for an idea with no platform hint',
+          })
+          return
+        }
+        // Same derivation the slot editor prefill uses: first line titles,
+        // the overflow plus any note travels as the freeform seed brief.
+        const text = idea.text.trim()
+        const firstLine = text.split('\n')[0]?.trim().slice(0, 200) ?? ''
+        const title = firstLine || text.slice(0, 200)
+        const overflow = text.length > title.length ? text : ''
+        const brief = [overflow, idea.note?.trim() ?? '']
+          .filter(Boolean)
+          .join('\n\n')
+        const session = await planningStore.createSession({
+          assistantId,
+          userId: ctx.userId,
+          platform,
+          title,
+          ...(brief ? { seed: { kind: 'freeform' as const, brief } } : {}),
+        })
+        const bound = await store.updateIdea({
+          assistantId,
+          ideaId,
+          patch: { sessionId: session.id },
+        })
+        res.status(201).json({
+          idea: bound ?? idea,
+          sessionId: session.id,
+          platform,
+        })
+      } catch (error) {
+        console.error('[content-ideas] draft from idea failed:', error)
+        res.status(500).json({ error: 'Failed to start drafting this idea' })
       }
     },
   )

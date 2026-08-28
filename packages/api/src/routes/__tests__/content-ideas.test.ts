@@ -7,6 +7,10 @@ import {
   type ContentIdeasStore,
 } from '../../db/content-ideas-store.js'
 import type { ContentPlanStore, PlanSlot } from '../../db/content-plan-store.js'
+import type {
+  ContentDraftSessionSummary,
+  ContentPlanningStore,
+} from '../../db/content-planning-store.js'
 import { contentIdeasRoutes } from '../content-ideas.js'
 import type { PlanningAccessContext } from '../content-planning.js'
 
@@ -87,10 +91,45 @@ function fakePlanStore(
   }
 }
 
+function draftSession(
+  overrides: Partial<ContentDraftSessionSummary> = {},
+): ContentDraftSessionSummary {
+  return {
+    id: 'session-1',
+    platform: 'threads',
+    title: 'Our onboarding horror story as a thread',
+    startedBy: { id: 'user-1', name: null },
+    createdAt: new Date('2026-08-01T01:00:00Z'),
+    lastActiveAt: new Date('2026-08-01T01:00:00Z'),
+    preview: null,
+    replyTarget: null,
+    draftText: null,
+    selectedDraft: null,
+    draftCounts: { pending: 0, ready: 0, posted: 0, rejected: 0 },
+    seedKind: 'freeform',
+    ...overrides,
+  } as ContentDraftSessionSummary
+}
+
+function fakePlanningStore(
+  overrides: Partial<ContentPlanningStore> = {},
+): ContentPlanningStore {
+  return {
+    createSession: vi.fn(async (params: { platform: string; title?: string }) =>
+      draftSession({
+        platform: params.platform as ContentDraftSessionSummary['platform'],
+      }),
+    ),
+    listSessions: vi.fn(async () => []),
+    ...overrides,
+  } as unknown as ContentPlanningStore
+}
+
 function app(
   store: ContentIdeasStore,
   planStore: ContentPlanStore = fakePlanStore(),
   access: PlanningAccessContext = ACCESS,
+  planningStore: ContentPlanningStore = fakePlanningStore(),
 ) {
   const server = express()
   server.use(express.json())
@@ -103,6 +142,7 @@ function app(
     contentIdeasRoutes({
       store,
       planStore,
+      planningStore,
       resolveAccess: async () => access,
     }),
   )
@@ -231,6 +271,134 @@ describe('[COMP:feed/content-ideas-routes] Idea backlog wire contract', () => {
     await request(app(store, fakePlanStore(), readOnly))
       .post('/api/distribution/assistant-1/ideas')
       .send({ text: 'X' })
+      .expect(403)
+  })
+})
+
+describe('[COMP:feed/content-ideas-routes] Draft directly from an idea (P7)', () => {
+  it('creates a draft session seeded from the jot and binds session_id', async () => {
+    const theIdea = idea({
+      text: 'Launch teaser\nWhy the beta list matters',
+      note: 'mention the waitlist',
+      platformHint: 'threads',
+    })
+    const updateIdea = vi.fn(async () =>
+      idea({ ...theIdea, sessionId: 'session-1', status: 'promoted' }),
+    )
+    const createSession = vi.fn(async () => draftSession())
+    const response = await request(
+      app(
+        fakeStore({ getIdea: vi.fn(async () => theIdea), updateIdea }),
+        fakePlanStore(),
+        ACCESS,
+        fakePlanningStore({ createSession }),
+      ),
+    )
+      .post('/api/distribution/assistant-1/ideas/idea-1/draft')
+      .send({ platform: 'twitter' })
+      .expect(201)
+    // The idea's own hint outranks the caller's default platform.
+    expect(createSession).toHaveBeenCalledWith({
+      assistantId: 'assistant-1',
+      userId: 'user-1',
+      platform: 'threads',
+      title: 'Launch teaser',
+      seed: {
+        kind: 'freeform',
+        brief: 'Launch teaser\nWhy the beta list matters\n\nmention the waitlist',
+      },
+    })
+    expect(updateIdea).toHaveBeenCalledWith({
+      assistantId: 'assistant-1',
+      ideaId: 'idea-1',
+      patch: { sessionId: 'session-1' },
+    })
+    expect(response.body.sessionId).toBe('session-1')
+    expect(response.body.platform).toBe('threads')
+  })
+
+  it('falls back to the caller default platform, and refuses with neither', async () => {
+    const createSession = vi.fn(async () => draftSession({ platform: 'twitter' }))
+    await request(
+      app(
+        fakeStore({ getIdea: vi.fn(async () => idea({ platformHint: null })) }),
+        fakePlanStore(),
+        ACCESS,
+        fakePlanningStore({ createSession }),
+      ),
+    )
+      .post('/api/distribution/assistant-1/ideas/idea-1/draft')
+      .send({ platform: 'twitter' })
+      .expect(201)
+    expect(createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ platform: 'twitter' }),
+    )
+
+    await request(
+      app(fakeStore({ getIdea: vi.fn(async () => idea({ platformHint: null })) })),
+    )
+      .post('/api/distribution/assistant-1/ideas/idea-1/draft')
+      .send({})
+      .expect(400)
+  })
+
+  it('refuses a discarded idea', async () => {
+    const createSession = vi.fn(async () => draftSession())
+    await request(
+      app(
+        fakeStore({
+          getIdea: vi.fn(async () =>
+            idea({ discardedAt: new Date('2026-08-02T00:00:00Z') }),
+          ),
+        }),
+        fakePlanStore(),
+        ACCESS,
+        fakePlanningStore({ createSession }),
+      ),
+    )
+      .post('/api/distribution/assistant-1/ideas/idea-1/draft')
+      .send({ platform: 'threads' })
+      .expect(409)
+    expect(createSession).not.toHaveBeenCalled()
+  })
+
+  it('is idempotent: an already-promoted idea returns its existing session', async () => {
+    const createSession = vi.fn(async () => draftSession())
+    const response = await request(
+      app(
+        fakeStore({
+          getIdea: vi.fn(async () =>
+            idea({ sessionId: 'session-9', status: 'promoted' }),
+          ),
+        }),
+        fakePlanStore(),
+        ACCESS,
+        fakePlanningStore({
+          createSession,
+          listSessions: vi.fn(async () => [
+            draftSession({ id: 'session-9', platform: 'xhs' }),
+          ]),
+        }),
+      ),
+    )
+      .post('/api/distribution/assistant-1/ideas/idea-1/draft')
+      .send({ platform: 'threads' })
+      .expect(200)
+    expect(createSession).not.toHaveBeenCalled()
+    expect(response.body.sessionId).toBe('session-9')
+    expect(response.body.platform).toBe('xhs')
+  })
+
+  it('requires draft permission like every other mutation', async () => {
+    const readOnly: PlanningAccessContext = {
+      userId: 'user-1',
+      workspaceId: 'workspace-1',
+      role: 'member',
+      canDraft: false,
+    }
+    await request(app(fakeStore(), fakePlanStore(), readOnly))
+      .post('/api/distribution/assistant-1/ideas/idea-1/draft')
+      .send({ platform: 'threads' })
       .expect(403)
   })
 })

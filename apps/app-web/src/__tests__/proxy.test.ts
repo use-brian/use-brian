@@ -4,6 +4,7 @@ import { proxy } from "@/proxy";
 
 vi.mock("@/lib/edition", () => ({
   isOssEdition: vi.fn(() => true),
+  usebrianEdition: vi.fn(() => "oss"),
 }));
 
 afterEach(() => vi.unstubAllEnvs());
