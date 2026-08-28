@@ -38,6 +38,12 @@ Email defaults on and OIDC off:
 
 ```bash
 OUTPOST_AUTH_EMAIL_ENABLED=true
+SMTP_HOST=smtp.customer.example
+SMTP_PORT=587
+SMTP_SECURE=false
+SMTP_USER=auth@customer.example
+SMTP_PASSWORD=<smtp-password>
+EMAIL_FROM_ADDRESS=auth@customer.example
 OUTPOST_AUTH_OIDC_ENABLED=false
 OUTPOST_OIDC_ISSUER_URL=https://team.cloudflareaccess.com/cdn-cgi/access/sso/oidc/client-id
 OUTPOST_OIDC_CLIENT_ID=client-id
