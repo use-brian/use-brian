@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest'
-import { humanizeToolName, describeToolInput } from '../tool-display-names.js'
+import {
+  buildConfirmationPreview,
+  describeToolInput,
+  formatConfirmationInput,
+  humanizeToolName,
+} from '../tool-display-names.js'
 
 describe('[COMP:shared/tool-display-names] channel tool-status labels', () => {
   describe('describeToolInput names WHICH page for browser tools', () => {
@@ -46,5 +51,39 @@ describe('[COMP:shared/tool-display-names] channel tool-status labels', () => {
 
   it('labels the server-scoped Slack history reader plainly', () => {
     expect(humanizeToolName('readCurrentSlackThread')).toBe('Reading the Slack thread')
+  })
+
+  describe('approval projections', () => {
+    it('projects frozen arguments into labeled fields without mutating them', () => {
+      const input = {
+        taskId: 'internal-1',
+        title: 'Prepare launch',
+        notifyCustomer: false,
+        window: { startAt: '09:00', timezone: 'Asia/Hong_Kong' },
+        recipients: ['ops@example.com', 'owner@example.com'],
+      }
+      const snapshot = structuredClone(input)
+
+      expect(buildConfirmationPreview(input)).toEqual({
+        fields: [
+          { label: 'Title', value: 'Prepare launch' },
+          { label: 'Notify Customer', value: 'No' },
+          { label: 'Window', value: 'Start At: 09:00\nTimezone: Asia/Hong_Kong' },
+          { label: 'Recipients', value: 'ops@example.com, owner@example.com' },
+        ],
+      })
+      expect(input).toEqual(snapshot)
+    })
+
+    it('renders nested channel lines as readable text instead of JSON', () => {
+      const lines = formatConfirmationInput({
+        lineItems: [{ name: 'Widget', quantity: 2 }],
+      })
+
+      expect(lines).toEqual([
+        '• Line Items:\n  1.\n    Name: Widget\n    Quantity: 2',
+      ])
+      expect(lines[0]).not.toContain('{')
+    })
   })
 })

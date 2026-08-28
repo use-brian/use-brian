@@ -212,6 +212,40 @@ describe("[COMP:app-web/chat-confirmation-card] ChatConfirmationCard", () => {
     expect(text).toContain("Memory: office wifi password location");
   });
 
+  it("shows an unrecognised call as readable fields with exact input collapsed", () => {
+    renderCard(
+      confirmation({
+        toolName: "customPublishAction",
+        displayName: "Publish release",
+        input: {
+          releaseTitle: "August update",
+          notifySubscribers: true,
+          destination: { channelName: "Product news", visibility: "Public" },
+        },
+        description: undefined,
+        displayLines: undefined,
+      }),
+    );
+
+    const text = host!.textContent ?? "";
+    expect(text).toContain("Release Title");
+    expect(text).toContain("August update");
+    expect(text).toContain("Notify Subscribers");
+    expect(text).toContain("Yes");
+    expect(text).toContain("Channel Name: Product news");
+    expect(text).toContain("View tool input");
+    expect(host!.querySelector("pre")).toBeNull();
+
+    act(() =>
+      Array.from(host!.querySelectorAll("button"))
+        .find((button) => button.textContent === "View tool input")!
+        .click(),
+    );
+    expect(host!.querySelector("pre")?.textContent).toContain(
+      '"notifySubscribers": true',
+    );
+  });
+
   it("renders an updateKnowledgeEntry diff as a styled monospace block, prose lines intact", () => {
     // The KB update preview: the server appends a unified diff after a
     // `Changes:` marker (knowledge-base.md → "Update previews are diffs").
