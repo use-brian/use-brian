@@ -19,6 +19,8 @@ import { INBOX_REFRESH_EVENT } from "@/lib/inbox-refresh-events";
 import {
   allDomainDispatches,
   createRefreshFolder,
+  createVisibilityGate,
+  reconnectDelayMs,
   routeWorkspaceChange,
   SCHEDULED_JOB_REFRESH_EVENT,
   SKILL_REFRESH_EVENT,
@@ -216,5 +218,95 @@ describe("[COMP:app-web/workspace-events] createRefreshFolder", () => {
     expect(timers.every((t) => t.cleared)).toBe(true);
     fireTimers();
     expect(emitted).toHaveLength(1);
+  });
+});
+
+// Every open EventSource holds one of the API's per-instance request slots;
+// restored browser sessions held one stream per BACKGROUND tab and saturated
+// the slot budget (2026-08-27 outage). The gate releases a hidden tab's
+// stream after a grace window and reconnects on visible — lossless, because
+// reconnect re-runs catch-up on `open`.
+describe("[COMP:app-web/workspace-events] createVisibilityGate", () => {
+  function harness(graceMs = 60_000) {
+    const calls: string[] = [];
+    const timers: Array<{ fn: () => void; ms: number; cleared: boolean }> = [];
+    const gate = createVisibilityGate({
+      graceMs,
+      connect: () => calls.push("connect"),
+      disconnect: () => calls.push("disconnect"),
+      setTimer: (fn, ms) => {
+        const h = { fn, ms, cleared: false };
+        timers.push(h);
+        return h;
+      },
+      clearTimer: (h) => {
+        (h as { cleared: boolean }).cleared = true;
+      },
+    });
+    const fireTimers = () => {
+      for (const t of timers.splice(0)) if (!t.cleared) t.fn();
+    };
+    return { gate, calls, timers, fireTimers };
+  }
+
+  it("releases the stream only after the grace window elapses hidden", () => {
+    const { gate, calls, timers, fireTimers } = harness();
+    gate.onVisibility("hidden");
+    expect(calls).toEqual([]); // grace armed, nothing released yet
+    expect(timers[0].ms).toBe(60_000);
+    fireTimers();
+    expect(calls).toEqual(["disconnect"]);
+  });
+
+  it("a quick tab switch never drops the connection", () => {
+    const { gate, calls, timers, fireTimers } = harness();
+    gate.onVisibility("hidden");
+    gate.onVisibility("visible"); // back before the grace expires
+    expect(timers[0].cleared).toBe(true);
+    fireTimers();
+    expect(calls).toEqual(["connect"]); // reconnect attempt only; no release
+  });
+
+  it("visible after a release reconnects", () => {
+    const { gate, calls, fireTimers } = harness();
+    gate.onVisibility("hidden");
+    fireTimers();
+    gate.onVisibility("visible");
+    expect(calls).toEqual(["disconnect", "connect"]);
+  });
+
+  it("repeated hidden events arm a single grace timer", () => {
+    const { gate, timers } = harness();
+    gate.onVisibility("hidden");
+    gate.onVisibility("hidden");
+    expect(timers).toHaveLength(1);
+  });
+
+  it("dispose clears a pending release without firing it", () => {
+    const { gate, calls, timers, fireTimers } = harness();
+    gate.onVisibility("hidden");
+    gate.dispose();
+    expect(timers[0].cleared).toBe(true);
+    fireTimers();
+    expect(calls).toEqual([]);
+  });
+});
+
+// A non-200 reconnect response (expired token, 429 shed, 5xx mid-deploy) is
+// FATAL to an EventSource per spec — the browser stops retrying — so the
+// stream's error handler schedules its own reconnect. The delay backs off
+// exponentially with full jitter so tabs stranded by one outage don't all
+// retry in lockstep.
+describe("[COMP:app-web/workspace-events] reconnectDelayMs", () => {
+  it("backs off exponentially from 1s and caps at 30s", () => {
+    expect(reconnectDelayMs(0, () => 0)).toBe(500);
+    expect(reconnectDelayMs(0, () => 1)).toBe(1_000);
+    expect(reconnectDelayMs(3, () => 1)).toBe(8_000);
+    expect(reconnectDelayMs(5, () => 1)).toBe(30_000);
+    expect(reconnectDelayMs(50, () => 1)).toBe(30_000); // attempt clamped, no overflow
+  });
+
+  it("jitters across the top half of the window", () => {
+    expect(reconnectDelayMs(2, () => 0.5)).toBe(3_000); // base 4s → 2s + 0.5*2s
   });
 });

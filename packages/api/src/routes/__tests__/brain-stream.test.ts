@@ -39,10 +39,16 @@ function makeWorkspaceStore(role: 'owner' | 'admin' | 'member' | null = 'member'
   return { getRole: vi.fn().mockResolvedValue(role) } as unknown as WorkspaceStore
 }
 
-function makeApp(workspaceStore: WorkspaceStore) {
+function makeApp(
+  workspaceStore: WorkspaceStore,
+  opts?: { maxLifetimeMs?: number; heartbeatMs?: number },
+) {
   const app = express()
   app.use(express.json())
-  app.use('/api/brain/stream', brainStreamRoutes({ workspaceStore, jwtSecret: 'test-secret' }))
+  app.use(
+    '/api/brain/stream',
+    brainStreamRoutes({ workspaceStore, jwtSecret: 'test-secret', ...opts }),
+  )
   return app
 }
 
@@ -141,6 +147,70 @@ describe('[COMP:api/brain-stream-sse] stream open (member)', () => {
       req.on('error', () => {
         // `req.destroy()` above surfaces as an ECONNRESET on some Node
         // versions after we've already resolved — ignore.
+      })
+    })
+  })
+})
+
+describe('[COMP:api/brain-stream-sse] lifetime bound', () => {
+  let server: http.Server
+  let port: number
+  let unsubscribed: boolean
+
+  beforeEach(async () => {
+    mockVerify.mockReturnValue(UID)
+    unsubscribed = false
+    mockSubscribe.mockReturnValue(() => {
+      unsubscribed = true
+    })
+    // 40ms lifetime: the DI seam exists for exactly this test — production
+    // always runs SSE_MAX_LIFETIME_MS.
+    const app = makeApp(makeWorkspaceStore('member'), { maxLifetimeMs: 40 })
+    server = http.createServer(app)
+    await new Promise<void>((resolve) => server.listen(0, resolve))
+    port = (server.address() as { port: number }).port
+  })
+
+  afterEach(() => {
+    server.close()
+  })
+
+  // The stream must end ITSELF: a subscription SSE socket that only the
+  // client (or the platform request timeout) can end holds one of the
+  // instance's request slots for up to the full Cloud Run --timeout, and
+  // enough silently-dead ones saturate the service (2026-08-27 outage).
+  it('server ends the stream cleanly at maxLifetimeMs and unsubscribes', async () => {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('stream did not end at the lifetime bound')),
+        2_000,
+      )
+      const req = http.get(
+        { port, path: `/api/brain/stream?workspaceId=${WID}`, headers: { Authorization: 'Bearer good.jwt' } },
+        (res) => {
+          let body = ''
+          res.on('data', (chunk: Buffer) => {
+            body += chunk.toString()
+          })
+          // `end` fires only when the SERVER finishes the response — the
+          // client side of this test never destroys the request.
+          res.on('end', () => {
+            clearTimeout(timer)
+            try {
+              expect(res.statusCode).toBe(200)
+              expect(body).toContain(': connected')
+              expect(body).toContain(': cycle')
+              expect(unsubscribed).toBe(true)
+              resolve()
+            } catch (err) {
+              reject(err)
+            }
+          })
+        },
+      )
+      req.on('error', (err) => {
+        clearTimeout(timer)
+        reject(err)
       })
     })
   })
