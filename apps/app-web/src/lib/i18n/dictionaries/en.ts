@@ -4228,12 +4228,15 @@ export const en = {
         partialError:
           "{count} items could not be updated. They stay selected so you can retry.",
       },
+      alreadySaved:
+        "Already saved. Your assistant can recall this right now. Confirming marks it correct, so it gets picked first.",
       allClearTitle: "All clear",
-      allClearBody: "Nothing is waiting for your review.",
+      allClearBody:
+        "Nothing left to confirm. Anything your assistant saves is in your brain either way.",
       relationship: {
         heading: "Relationship",
         explainer:
-          "Confirming keeps this connection in your brain, where it shapes what your assistant retrieves. Expand either side to see what it points to.",
+          "This connection is already in your brain, shaping what your assistant retrieves. Confirming marks it correct. Expand either side to see what it points to.",
         source: "Source",
         target: "Target",
         endpointMissing: "No longer exists",
@@ -4588,13 +4591,13 @@ export const en = {
   memoriesReview: {
     title: "Review your memories",
     description:
-      "When your assistant saves something to memory, it shows up here for a quick check. Confirm, adjust, edit, or delete. Your call.",
+      "These are already saved and your assistant is already using them. Reviewing does not save them, it confirms them: a confirmed memory is treated as more reliable and gets picked first. You can also adjust, edit, or delete.",
     loading: "Loading…",
     loadMore: "Load more",
     loadingMore: "Loading…",
-    empty: "No memories pending review.",
+    empty: "No unconfirmed memories.",
     emptyTitle: "Nothing to review",
-    pendingPill: "{count} pending",
+    pendingPill: "{count} unconfirmed",
     confirm: "Looks correct",
     adjust: "Adjust",
     edit: "Edit",

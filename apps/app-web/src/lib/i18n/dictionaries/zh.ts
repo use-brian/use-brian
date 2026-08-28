@@ -3974,12 +3974,15 @@ export const zh: Dictionary = {
         partialError:
           "有 {count} 項無法更新，仍保持選取狀態，可再試一次。",
       },
+      alreadySaved:
+        "已經儲存。助理現在就能取用這筆記憶。確認只是標記它正確，讓它被優先取用。",
       allClearTitle: "全部處理完畢",
-      allClearBody: "目前沒有待審閱的項目。",
+      allClearBody:
+        "沒有待確認的項目。助理儲存的內容，不論你是否確認，都會留在大腦裡。",
       relationship: {
         heading: "關聯",
         explainer:
-          "確認後，此關聯會保留在你的大腦中，影響助理檢索的內容。展開任一端即可查看其指向的對象。",
+          "此關聯已經在你的大腦中，正影響助理檢索的內容。確認只是標記它正確。展開任一端即可查看其指向的對象。",
         source: "來源",
         target: "目標",
         endpointMissing: "已不存在",
@@ -4330,13 +4333,13 @@ export const zh: Dictionary = {
   memoriesReview: {
     title: "審核記憶",
     description:
-      "助理新記下的內容會先在這裡聚集，請你確認、調整、編輯或刪除，由你決定。",
+      "這裡的內容都已經儲存，助理也已經在使用。審核不是儲存，而是確認：確認過的記憶會被視為更可靠，優先被取用。你也可以調整、編輯或刪除。",
     loading: "載入中…",
     loadMore: "載入更多",
     loadingMore: "載入中…",
-    empty: "目前沒有待審核的記憶。",
+    empty: "沒有未確認的記憶。",
     emptyTitle: "沒有待審核的項目",
-    pendingPill: "{count} 個待審核",
+    pendingPill: "{count} 個未確認",
     confirm: "沒問題",
     adjust: "調整",
     edit: "編輯",
