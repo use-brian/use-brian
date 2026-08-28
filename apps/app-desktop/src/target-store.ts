@@ -133,11 +133,24 @@ export function acceptDeclaredApiUrl(rawUrl: string): string | null {
  * something unexpected at that path degrades to today's behavior rather than
  * failing the connect.
  */
-export function parseDesktopConfig(body: unknown): string | null {
+export type DeclaredDesktopConfig = {
+  apiUrl: string
+  auth: TargetAuth
+}
+
+export function parseDesktopConfig(body: unknown): DeclaredDesktopConfig | null {
   if (!body || typeof body !== "object" || Array.isArray(body)) return null;
-  const apiUrl = (body as Record<string, unknown>).apiUrl;
+  const record = body as Record<string, unknown>;
+  const apiUrl = record.apiUrl;
   if (typeof apiUrl !== "string" || !apiUrl.trim()) return null;
-  return acceptDeclaredApiUrl(apiUrl);
+  const accepted = acceptDeclaredApiUrl(apiUrl);
+  if (!accepted) return null;
+  return {
+    apiUrl: accepted,
+    // Outpost and hosted-profile self-hosts use the browser PKCE bridge. Only
+    // explicit OSS has the local-owner session endpoint.
+    auth: record.edition === "oss" ? "local-session" : "pkce",
+  };
 }
 
 /** The deployment self-description endpoint (an app-web route handler). */
@@ -172,6 +185,8 @@ export interface PersistedTarget {
    * back to `deriveLocalApiUrl`.
    */
   readonly apiUrl?: string;
+  /** Auth mode declared by desktop-config. Legacy records default local-session. */
+  readonly auth?: TargetAuth;
 }
 
 /**
@@ -216,6 +231,7 @@ export function cloudTarget(): ResolvedTarget {
 export function localTarget(
   rawUrl: string = DEFAULT_LOCAL_APP_URL,
   declaredApiUrl?: string | null,
+  auth: TargetAuth = "local-session",
 ): ResolvedTarget | null {
   const appUrl = normalizeTargetUrl(rawUrl);
   if (!appUrl) return null;
@@ -224,7 +240,7 @@ export function localTarget(
     kind: "local" as const,
     appUrl,
     apiUrl: declared ?? deriveLocalApiUrl(appUrl),
-    auth: "local-session" as const,
+    auth,
     label: `Local Brain (${new URL(appUrl).host})`,
   });
 }
@@ -251,11 +267,13 @@ export function parsePersistedTarget(raw: string | null | undefined): PersistedT
   // Re-validated on read, not trusted: the cloud-API guard must hold for a
   // hand-edited file and for a record written by any other build too.
   const apiUrl = typeof rec.apiUrl === "string" ? acceptDeclaredApiUrl(rec.apiUrl) : null;
+  const auth = rec.auth === "pkce" || rec.auth === "local-session" ? rec.auth : null;
   return Object.freeze({
     v: 1 as const,
     kind: rec.kind,
     ...(appUrl ? { appUrl } : {}),
     ...(apiUrl ? { apiUrl } : {}),
+    ...(auth ? { auth } : {}),
   });
 }
 
@@ -264,6 +282,7 @@ export function serializePersistedTarget(
   kind: TargetKind,
   appUrl?: string,
   apiUrl?: string | null,
+  auth?: TargetAuth,
 ): string {
   const normalized = appUrl ? normalizeTargetUrl(appUrl) : null;
   const normalizedApi = apiUrl ? acceptDeclaredApiUrl(apiUrl) : null;
@@ -272,6 +291,7 @@ export function serializePersistedTarget(
     kind,
     ...(normalized ? { appUrl: normalized } : {}),
     ...(normalizedApi ? { apiUrl: normalizedApi } : {}),
+    ...(auth ? { auth } : {}),
   });
 }
 
@@ -284,7 +304,11 @@ export function serializePersistedTarget(
 export function resolveTargetFromPersisted(raw: string | null | undefined): ResolvedTarget {
   const rec = parsePersistedTarget(raw);
   if (!rec || rec.kind === "cloud") return cloudTarget();
-  return localTarget(rec.appUrl ?? DEFAULT_LOCAL_APP_URL, rec.apiUrl) ?? cloudTarget();
+  return localTarget(
+    rec.appUrl ?? DEFAULT_LOCAL_APP_URL,
+    rec.apiUrl,
+    rec.auth ?? "local-session",
+  ) ?? cloudTarget();
 }
 
 /**

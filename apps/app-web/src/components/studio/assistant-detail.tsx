@@ -17,6 +17,7 @@ import { ConnectorIcon } from "@/components/connectors/connector-icon";
 import { type ToolPolicy } from "@/components/connectors/connector-tool-list";
 import { ConnectorToolGovernance } from "@/components/connectors/connector-tool-governance";
 import { useT } from "@/lib/i18n/client";
+import { deploymentCapabilities } from "@/lib/edition";
 import type { Dictionary } from "@/lib/i18n";
 import { format } from "@/lib/i18n";
 import { ModelTierRow, isModelAlias, type ModelAlias } from "@/components/studio/model-tier-row";
@@ -2736,7 +2737,7 @@ function SettingsTab({
       <PrimitiveGrantsPanel assistantId={assistantId} />
 
       {/* Cost section — embedded from former CostTab */}
-      <CostTab assistantId={assistantId} />
+      {deploymentCapabilities().billing ? <CostTab assistantId={assistantId} /> : null}
 
       {/* Danger Zone — owner only */}
       {isOwner && (

@@ -81,7 +81,7 @@ describe("[COMP:app-web/desktop-config-route] GET /api/desktop-config", () => {
     expect((await getConfig()).body.docSyncUrl).toBeNull();
   });
 
-  it("reports the edition, so the shell can explain a hosted-edition self-host", async () => {
+  it("reports the deployment profile", async () => {
     // A hosted-edition brain is reachable but cannot mint a local-owner
     // session; the shell surfaces that instead of stranding the user on a 404.
     process.env.NEXT_PUBLIC_USEBRIAN_EDITION = "oss";
@@ -90,6 +90,10 @@ describe("[COMP:app-web/desktop-config-route] GET /api/desktop-config", () => {
     vi.resetModules();
     delete process.env.NEXT_PUBLIC_USEBRIAN_EDITION;
     expect((await getConfig()).body.edition).toBe("hosted");
+
+    vi.resetModules();
+    process.env.NEXT_PUBLIC_USEBRIAN_EDITION = "outpost";
+    expect((await getConfig()).body.edition).toBe("outpost");
   });
 
   it("is uncached — a moved backend must not be served from a stale copy", async () => {

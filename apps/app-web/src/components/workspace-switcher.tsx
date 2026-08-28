@@ -44,6 +44,7 @@ import { authFetch } from "@/lib/auth-fetch";
 import { primaryAuthUrl, webAppUrl } from "@/lib/primary-auth";
 import { getUserInfo } from "@/lib/user";
 import { signOutActiveAccount } from "@/lib/account-logout";
+import { deploymentCapabilities } from "@/lib/edition";
 import { updateWorkspacePickerPreferences } from "@/lib/api/workspaces";
 import {
   organizeWorkspacePicker,
@@ -466,13 +467,13 @@ export function WorkspaceSwitcher() {
         {/* Workspace header — name + plan */}
           <div className="px-1">
             <div className="font-semibold text-sm truncate">{ctx.name}</div>
-            <div className="text-xs text-muted-foreground">
+            {deploymentCapabilities().billing && <div className="text-xs text-muted-foreground">
               {planRaw === null
                 ? ""
                 : planRaw === "free"
                   ? t.noPlanLabel
                   : format(t.planLabel, { plan: formatPlanLabel(planRaw) })}
-            </div>
+            </div>}
           </div>
 
           {/* Settings + Invite members → in-app settings modal */}

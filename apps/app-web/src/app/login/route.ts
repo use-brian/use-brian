@@ -1,8 +1,11 @@
 import { NextResponse } from "next/server";
 import {
   buildDelegatedLoginUrl,
+  primaryAuthUrl,
+  publicAppUrl,
   webAppUrl,
 } from "@/lib/primary-auth";
+import { usebrianEdition } from "@/lib/edition";
 import {
   ossPublicAppOrigin,
   ossSignedOutRedirect,
@@ -47,7 +50,7 @@ export function resolveAppLoginReturn(
 }
 
 export function GET(request: Request): NextResponse {
-  const requestUrl = new URL(request.url);
+  const requestUrl = publicAppUrl(request.url);
   const returnUrl = resolveAppLoginReturn(
     requestUrl,
     requestUrl.searchParams.get("next"),
@@ -63,6 +66,9 @@ export function GET(request: Request): NextResponse {
 
   const rawError = requestUrl.searchParams.get("error");
   const error = rawError && ERROR_RE.test(rawError) ? rawError : null;
+  if (usebrianEdition() === "outpost" && primaryAuthUrl() === null) {
+    return NextResponse.json({ error: "auth_primary_unconfigured" }, { status: 503 });
+  }
   return NextResponse.redirect(
     buildDelegatedLoginUrl(webAppUrl(), returnUrl.toString(), {
       addAccount: requestUrl.searchParams.get("addAccount") === "1",

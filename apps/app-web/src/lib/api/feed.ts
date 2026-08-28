@@ -34,7 +34,7 @@ import type {
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
 export type FeedCloudLink = {
-  state: "native" | "unlinked" | "pending" | "linked" | "plan_required" | "error";
+  state: "native" | "disabled" | "unlinked" | "pending" | "linked" | "plan_required" | "error";
   assistantId?: string;
   userCode?: string | null;
   verificationUrl?: string | null;

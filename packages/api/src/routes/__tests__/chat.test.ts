@@ -361,6 +361,14 @@ describe('[COMP:api/chat-route] isAdaptiveResearchEligible', () => {
     expect(isAdaptiveResearchEligible({ ...base, userPlan: 'free' })).toBe(false)
   })
 
+  it('is eligible when the deployment disables research plan policy', () => {
+    expect(isAdaptiveResearchEligible({
+      ...base,
+      userPlan: 'free',
+      researchPlanGate: false,
+    })).toBe(true)
+  })
+
   it('is not eligible without a workspace (research requires workspace billing)', () => {
     expect(isAdaptiveResearchEligible({ ...base, workspaceId: null })).toBe(false)
     expect(isAdaptiveResearchEligible({ ...base, workspaceId: undefined })).toBe(false)

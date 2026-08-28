@@ -1,13 +1,5 @@
 /**
- * SMTP client — sends auth emails via Google Workspace SMTP.
- *
- * Authenticates as a primary Workspace user using an app password (2FA must
- * be enabled on that user; the password is provisioned at
- * https://myaccount.google.com/apppasswords). The `From:` header is the
- * aliased address (e.g. `auth@usebrian.ai`) — Gmail honors it because the
- * alias is registered as a "Send mail as" identity on the authenticating
- * user. Deliverability depends on SPF/DKIM/DMARC for `usebrian.ai` being set
- * up in Workspace admin.
+ * SMTP client for auth and workspace invitation emails.
  *
  * See docs/architecture/platform/auth.md → "Email magic-link flow".
  * Component tag: [COMP:api/smtp-client].
@@ -65,22 +57,31 @@ export type SmtpClient = {
 // ── Transport construction ─────────────────────────────────────
 
 /**
- * Build a nodemailer transport for Gmail / Google Workspace SMTP.
- *
- * `smtp.gmail.com:587` with STARTTLS is the standard endpoint. App
- * password is the simplest auth — alternatives (OAuth2, IP-allowlisted
- * relay) require more setup and aren't worth it at current volume.
+ * Resolve provider-neutral SMTP settings. The defaults retain the original
+ * Gmail STARTTLS behavior for existing deployments.
  */
-export function createWorkspaceSmtpTransport(opts: {
+export function resolveSmtpTransportOptions(opts: {
+  host?: string
+  port?: string | number
+  secure?: boolean
   user: string
-  appPassword: string
-}): SmtpTransport {
-  const transporter: Transporter = createTransport({
-    host: 'smtp.gmail.com',
-    port: 587,
-    secure: false, // STARTTLS upgrade — not implicit TLS
-    auth: { user: opts.user, pass: opts.appPassword },
-  })
+  password: string
+}) {
+  const rawPort = opts.port ?? 587
+  const port = typeof rawPort === 'number' ? rawPort : Number(rawPort.trim())
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error('SMTP_PORT must be an integer between 1 and 65535')
+  }
+  return {
+    host: opts.host?.trim() || 'smtp.gmail.com',
+    port,
+    secure: opts.secure ?? false,
+    auth: { user: opts.user, pass: opts.password },
+  }
+}
+
+export function createSmtpTransport(opts: Parameters<typeof resolveSmtpTransportOptions>[0]): SmtpTransport {
+  const transporter: Transporter = createTransport(resolveSmtpTransportOptions(opts))
   return {
     async sendMail(o) {
       const result = (await transporter.sendMail(o)) as {

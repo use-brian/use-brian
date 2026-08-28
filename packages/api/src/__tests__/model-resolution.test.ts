@@ -137,6 +137,11 @@ describe('[COMP:api/model-resolution] defaultTierForPlan', () => {
     process.env.USEBRIAN_EDITION = 'oss'
     expect(defaultTierForPlan('free')).toBe('pro')
   })
+
+  it('defaults Outpost to Pro regardless of the persisted workspace plan', () => {
+    process.env.USEBRIAN_EDITION = 'outpost'
+    expect(defaultTierForPlan('free')).toBe('pro')
+  })
 })
 
 describe('[COMP:api/model-resolution] resolveModel', () => {
@@ -163,6 +168,14 @@ describe('[COMP:api/model-resolution] resolveModel', () => {
 
   it('honours every built-in tier in OSS regardless of the persisted plan', () => {
     process.env.USEBRIAN_EDITION = 'oss'
+    expect(resolveModel('standard', 'free')).toBe(STANDARD)
+    expect(resolveModel('pro', 'free')).toBe('gemini-flash-3')
+    expect(resolveModel('max', 'free')).toBe('gemini-3.7-flash')
+    expect(resolveModel('research', 'free')).toBe(RESEARCH)
+  })
+
+  it('honours every built-in tier in Outpost regardless of the persisted plan', () => {
+    process.env.USEBRIAN_EDITION = 'outpost'
     expect(resolveModel('standard', 'free')).toBe(STANDARD)
     expect(resolveModel('pro', 'free')).toBe('gemini-flash-3')
     expect(resolveModel('max', 'free')).toBe('gemini-3.7-flash')

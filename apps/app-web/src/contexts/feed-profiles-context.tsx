@@ -40,7 +40,7 @@ import {
   type FeedCloudLink,
   type FeedProfile,
 } from "@/lib/api/feed";
-import { isHostedEdition } from "@/lib/edition";
+import { deploymentCapabilities } from "@/lib/edition";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -146,6 +146,7 @@ export function FeedProfilesProvider(props: {
   children: ReactNode;
 }) {
   const { workspaceId } = props;
+  const capabilities = deploymentCapabilities();
   const [state, setState] = useState<FeedWorkspaceState>({
     status: "loading",
   });
@@ -164,11 +165,13 @@ export function FeedProfilesProvider(props: {
       // same degrade as profiles: null, and every consumer renders its
       // pre-brand shape.
       fetchWorkspaceBrand(workspaceId).catch(() => null),
-      isHostedEdition()
+      capabilities.managedInfrastructure
         ? Promise.resolve({ state: "native" as const })
-        : fetchFeedCloudLink(workspaceId).catch(
-            () => ({ state: "unlinked" as const }),
-          ),
+        : capabilities.hostedUpgradePrompts
+          ? fetchFeedCloudLink(workspaceId).catch(
+              () => ({ state: "unlinked" as const }),
+            )
+          : Promise.resolve({ state: "disabled" as const }),
     ]);
     setState({
       status: "ready",
@@ -187,7 +190,7 @@ export function FeedProfilesProvider(props: {
         },
       },
     });
-  }, [workspaceId]);
+  }, [capabilities.hostedUpgradePrompts, capabilities.managedInfrastructure, workspaceId]);
 
   useEffect(() => {
     let cancelled = false;

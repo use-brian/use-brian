@@ -77,4 +77,14 @@ describe("[COMP:app-web/login-delegation] GET /login", () => {
     );
     expect(mockedWebAppUrl).not.toHaveBeenCalled();
   });
+
+  it("fails safely when Outpost has no customer auth primary", async () => {
+    vi.stubEnv("NEXT_PUBLIC_USEBRIAN_EDITION", "outpost");
+
+    const res = GET(new Request("https://app.private.example/login"));
+
+    expect(res.status).toBe(503);
+    await expect(res.json()).resolves.toEqual({ error: "auth_primary_unconfigured" });
+    expect(mockedWebAppUrl).not.toHaveBeenCalled();
+  });
 });
