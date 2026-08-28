@@ -11,6 +11,11 @@ export type OutpostAuthConfigInput = {
   OUTPOST_OIDC_CLIENT_SECRET?: string
   OUTPOST_OIDC_PROVIDER_NAME?: string
   OUTPOST_AUTH_BRIDGE_SECRET?: string
+  SMTP_HOST?: string
+  SMTP_PORT?: string | number
+  SMTP_SECURE?: boolean
+  SMTP_USER?: string
+  SMTP_PASSWORD?: string
   GMAIL_SMTP_USER?: string
   GMAIL_SMTP_APP_PASSWORD?: string
   EMAIL_FROM_ADDRESS?: string
@@ -74,11 +79,14 @@ export function validateOutpostAuthConfig(
   }
 
   if (emailEnabled) {
-    requireValues(input, [
-      'GMAIL_SMTP_USER',
-      'GMAIL_SMTP_APP_PASSWORD',
-      'EMAIL_FROM_ADDRESS',
-    ], 'Outpost email authentication')
+    const missing = [
+      hasValue(input.SMTP_USER) || hasValue(input.GMAIL_SMTP_USER) ? undefined : 'SMTP_USER',
+      hasValue(input.SMTP_PASSWORD) || hasValue(input.GMAIL_SMTP_APP_PASSWORD) ? undefined : 'SMTP_PASSWORD',
+      hasValue(input.EMAIL_FROM_ADDRESS) ? undefined : 'EMAIL_FROM_ADDRESS',
+    ].filter((name): name is string => name !== undefined)
+    if (missing.length > 0) {
+      throw new Error(`Outpost email authentication requires ${missing.join(', ')}`)
+    }
   }
 
   if (!oidcEnabled) return { emailEnabled, oidcEnabled }
@@ -250,4 +258,8 @@ function requireValues(
   if (missing.length > 0) {
     throw new Error(`${provider} requires ${missing.join(', ')}`)
   }
+}
+
+function hasValue(value: unknown): value is string {
+  return typeof value === 'string' && value.trim() !== ''
 }

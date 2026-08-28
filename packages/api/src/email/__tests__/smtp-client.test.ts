@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { createSmtpClient, type SmtpTransport } from '../smtp-client.js'
+import { createSmtpClient, resolveSmtpTransportOptions, type SmtpTransport } from '../smtp-client.js'
 import { renderMagicLinkEmail } from '../magic-link-template.js'
 import { renderWorkspaceInviteEmail } from '../workspace-invite-template.js'
 
@@ -12,6 +12,38 @@ function makeFakeTransport() {
   }
   return { transport, calls }
 }
+
+describe('[COMP:api/smtp-client] transport configuration', () => {
+  it('uses a configured SMTP server with implicit TLS', () => {
+    expect(resolveSmtpTransportOptions({
+      host: 'smtp.mail.example',
+      port: '465',
+      secure: true,
+      user: 'mailer@example.com',
+      password: 'secret',
+    })).toEqual({
+      host: 'smtp.mail.example',
+      port: 465,
+      secure: true,
+      auth: { user: 'mailer@example.com', pass: 'secret' },
+    })
+  })
+
+  it('retains the Gmail STARTTLS defaults for existing deployments', () => {
+    expect(resolveSmtpTransportOptions({
+      user: 'mailer@example.com',
+      password: 'secret',
+    })).toMatchObject({ host: 'smtp.gmail.com', port: 587, secure: false })
+  })
+
+  it('rejects invalid SMTP ports', () => {
+    expect(() => resolveSmtpTransportOptions({
+      port: 'not-a-port',
+      user: 'mailer@example.com',
+      password: 'secret',
+    })).toThrow(/SMTP_PORT/)
+  })
+})
 
 describe('[COMP:api/smtp-client] sendMagicLink', () => {
   it('sends from the configured From: address', async () => {

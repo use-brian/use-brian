@@ -390,7 +390,7 @@ export function authRoutes(
    */
   router.post('/email/request-link', async (req, res) => {
     if (!emailAuth || !emailAuth.magicLinkStore || !emailAuth.smtpClient) {
-      console.warn('[auth/email] request-link hit but emailAuth not configured (GMAIL_SMTP_* envs missing)')
+      console.warn('[auth/email] request-link hit but emailAuth not configured (SMTP credentials or EMAIL_FROM_ADDRESS missing)')
       res.status(503).json({ error: 'email_signin_unavailable' })
       return
     }

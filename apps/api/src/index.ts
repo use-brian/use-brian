@@ -86,6 +86,13 @@ const env: OpenApiEnv = {
   OUTPOST_OIDC_CLIENT_SECRET: process.env.OUTPOST_OIDC_CLIENT_SECRET,
   OUTPOST_OIDC_PROVIDER_NAME: process.env.OUTPOST_OIDC_PROVIDER_NAME,
   OUTPOST_AUTH_BRIDGE_SECRET: process.env.OUTPOST_AUTH_BRIDGE_SECRET,
+  SMTP_HOST: process.env.SMTP_HOST,
+  SMTP_PORT: process.env.SMTP_PORT,
+  SMTP_SECURE: process.env.SMTP_SECURE === undefined
+    ? undefined
+    : parseStrictBoolean(process.env.SMTP_SECURE, 'SMTP_SECURE', false),
+  SMTP_USER: process.env.SMTP_USER,
+  SMTP_PASSWORD: process.env.SMTP_PASSWORD,
   GMAIL_SMTP_USER: process.env.GMAIL_SMTP_USER,
   GMAIL_SMTP_APP_PASSWORD: process.env.GMAIL_SMTP_APP_PASSWORD,
   EMAIL_FROM_ADDRESS: process.env.EMAIL_FROM_ADDRESS,

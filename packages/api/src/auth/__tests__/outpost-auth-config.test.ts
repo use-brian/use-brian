@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest'
 import { matchedOidcWorkspaceIds, parseOidcEnrollmentConfig, parseStrictBoolean, validateOutpostAuthConfig } from '../outpost-auth-config.js'
 
 const smtp = {
-  GMAIL_SMTP_USER: 'mailer@example.com',
-  GMAIL_SMTP_APP_PASSWORD: 'app-password',
+  SMTP_USER: 'mailer@example.com',
+  SMTP_PASSWORD: 'smtp-password',
   EMAIL_FROM_ADDRESS: 'auth@example.com',
 }
 
@@ -39,13 +39,21 @@ describe('[COMP:app/outpost-auth] Outpost auth configuration', () => {
     })).toThrow(/at least one/)
     expect(() => validateOutpostAuthConfig('outpost', 'production', {
       OUTPOST_AUTH_EMAIL_ENABLED: true,
-    })).toThrow(/GMAIL_SMTP_USER/)
+    })).toThrow(/SMTP_USER/)
     expect(() => validateOutpostAuthConfig('outpost', 'production', {
       OUTPOST_AUTH_EMAIL_ENABLED: false,
       OUTPOST_AUTH_OIDC_ENABLED: true,
       ...oidc,
       OUTPOST_OIDC_PROVIDER_NAME: '',
     })).toThrow(/OUTPOST_OIDC_PROVIDER_NAME/)
+  })
+
+  it('accepts legacy Gmail credentials for existing deployments', () => {
+    expect(validateOutpostAuthConfig('outpost', 'production', {
+      GMAIL_SMTP_USER: 'mailer@example.com',
+      GMAIL_SMTP_APP_PASSWORD: 'app-password',
+      EMAIL_FROM_ADDRESS: 'auth@example.com',
+    })).toMatchObject({ emailEnabled: true })
   })
 
   it('accepts complete OIDC and requires production HTTPS plus a 32-character bridge secret', () => {

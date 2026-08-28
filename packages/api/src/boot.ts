@@ -186,7 +186,7 @@ import {
   isDefaultContentDraftTitle,
 } from './db/content-planning-store.js'
 import { createDbMagicLinkStore } from './db/magic-link-store.js'
-import { createSmtpClient, createWorkspaceSmtpTransport } from './email/smtp-client.js'
+import { createSmtpClient, createSmtpTransport } from './email/smtp-client.js'
 import { chatRoutes, createUpdateViewedSkillTool, runSessionResume, tryResolveLiveToolApproval } from './routes/chat.js'
 import {
   menuForClass,
@@ -714,6 +714,12 @@ export interface OpenApiEnv {
   GOOGLE_MAPS_SERVER_API_KEY?: string
   CHANNEL_CREDENTIAL_KEY?: string
   TELEGRAM_BOT_TOKEN?: string
+  SMTP_HOST?: string
+  SMTP_PORT?: string | number
+  SMTP_SECURE?: boolean
+  SMTP_USER?: string
+  SMTP_PASSWORD?: string
+  /** Legacy Google Workspace SMTP credentials. */
   GMAIL_SMTP_USER?: string
   GMAIL_SMTP_APP_PASSWORD?: string
   EMAIL_FROM_ADDRESS?: string
@@ -1962,15 +1968,20 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
   })
 
+  const smtpUser = env.SMTP_USER ?? env.GMAIL_SMTP_USER
+  const smtpPassword = env.SMTP_PASSWORD ?? env.GMAIL_SMTP_APP_PASSWORD
   const emailAuth: EmailAuth =
     (profile !== 'outpost' || outpostAuthConfig?.emailEnabled) &&
-    env.GMAIL_SMTP_USER && env.GMAIL_SMTP_APP_PASSWORD && env.EMAIL_FROM_ADDRESS
+    smtpUser && smtpPassword && env.EMAIL_FROM_ADDRESS
       ? {
           magicLinkStore: createDbMagicLinkStore(),
           smtpClient: createSmtpClient({
-            transport: createWorkspaceSmtpTransport({
-              user: env.GMAIL_SMTP_USER,
-              appPassword: env.GMAIL_SMTP_APP_PASSWORD,
+            transport: createSmtpTransport({
+              host: env.SMTP_HOST,
+              port: env.SMTP_PORT,
+              secure: env.SMTP_SECURE,
+              user: smtpUser,
+              password: smtpPassword,
             }),
             fromAddress: env.EMAIL_FROM_ADDRESS,
           }),
