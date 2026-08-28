@@ -30,8 +30,8 @@ import { findAssistantById } from '../db/users.js'
 import { withChatLock } from '../db/chat-lock.js'
 import { resolveChannelUser, type ChannelUserStore } from '../db/channel-user-store.js'
 import { resolveRoutingForSurface, resolveAssistantForSurface, getChannelForWebhook } from '../db/channels-store.js'
-import { parseFileContent } from '@use-brian/core'
-import type { ConfirmationDecision, ConfirmationResolver, ContentBlock } from '@use-brian/core'
+import { interpretConfirmationEvent, parseFileContent } from '@use-brian/core'
+import type { ConfirmationResolver, ContentBlock } from '@use-brian/core'
 import type { LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, McpSettingsStore } from '@use-brian/core'
 import type {
   ChannelIntegrationStore,
@@ -120,15 +120,6 @@ export type MsTeamsRouteOptions = {
    * Absent → ingest degrades to a no-op (OSS, or before the closed impl wires).
    */
   msteamsWebhookIngestor?: MsTeamsWebhookIngestor
-}
-
-// Natural-language → decision mapping for Teams text-based confirmation
-// (no Adaptive Card buttons yet — that is the P5 parity fast-follow).
-const DECISION_MAP: Record<string, ConfirmationDecision> = {
-  yes: 'allow', y: 'allow', allow: 'allow', approve: 'allow', ok: 'allow',
-  no: 'deny', n: 'deny', deny: 'deny', reject: 'deny',
-  always: 'always_allow', 'always allow': 'always_allow',
-  never: 'always_deny', 'always deny': 'always_deny',
 }
 
 const STATUS_THROTTLE_MS = 1200
@@ -277,12 +268,15 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
       //    Card buttons are P5).
       const pending = pendingConfirmations.get(incoming.channelId)
       if (pending) {
-        const decision = DECISION_MAP[incoming.text.trim().toLowerCase()]
+        const confirmation = interpretConfirmationEvent(
+          { kind: 'text', text: incoming.text },
+          pending.toolCallId,
+        )
         pendingConfirmations.delete(incoming.channelId)
-        pending.resolver.resolve(pending.toolCallId, decision ?? 'deny')
-        if (decision) return
-        // Not a decision keyword: we unblocked the parked turn above; fall
-        // through and process this message as a fresh turn.
+        if (confirmation.status === 'decision') {
+          pending.resolver.resolve(pending.toolCallId, confirmation.decision)
+          if (confirmation.consume) return
+        }
       }
 
       // 10. Sequentialize per Teams conversation.

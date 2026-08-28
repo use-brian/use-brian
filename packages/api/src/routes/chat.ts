@@ -12,7 +12,7 @@ import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
 import { buildPinnedContextBlock } from '../resolve-session-pins.js'
 import { getSelfEntityId } from '../db/memories.js'
 import { getRecording, type Recording } from '../db/recordings-store.js'
-import { queryLoop, isConnectionDropError, isEndpointUnreachableError, streamErrorCode, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, probePdfPageCount, estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH, filterToolsByCapabilities, modelToCompactionTier, buildWorkspaceFilesContext, buildUploadPolicyBlock, SensitivityAccumulator, CompartmentAccumulator, ContextScopeAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSupervisorSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, parsePresentedDocumentInput, latestWorkflowProposalReceipt, buildTool, parseSlashCommand, buildSlashCommandBlock, buildEmailDraftAnchorPrompt, formatActiveEmailDraftContext, type PresentedDocumentInput, type MediaBackend } from '@use-brian/core'
+import { queryLoop, isConnectionDropError, isEndpointUnreachableError, streamErrorCode, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, interpretConfirmationEvent, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, probePdfPageCount, estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH, filterToolsByCapabilities, modelToCompactionTier, buildWorkspaceFilesContext, buildUploadPolicyBlock, SensitivityAccumulator, CompartmentAccumulator, ContextScopeAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSupervisorSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, parsePresentedDocumentInput, latestWorkflowProposalReceipt, buildTool, parseSlashCommand, buildSlashCommandBlock, buildEmailDraftAnchorPrompt, formatActiveEmailDraftContext, type PresentedDocumentInput, type MediaBackend } from '@use-brian/core'
 import { deliverTurnInput, registerTurnInbox } from '../turn-inbox.js'
 import { insertClaimProvenance, getClaimsForLatestAssistantMessage } from '../db/claim-provenance-store.js'
 import type { SessionStateStore, SessionStateRecord, PlanStore, AmbientSurface, CrmEmailDraftStore } from '@use-brian/core'
@@ -8550,26 +8550,33 @@ export function chatRoutes(options: WebChatOptions): Router {
 
   // ── POST /confirm — resolve a pending tool confirmation ──────
   router.post('/confirm', async (req, res) => {
-    const { sessionId, toolCallId, decision, comment } = req.body as {
-      sessionId?: string
-      toolCallId?: string
-      decision?: ConfirmationDecision
-      comment?: string
+    const { sessionId, toolCallId: rawToolCallId, decision: rawDecision, comment } = req.body as {
+      sessionId?: unknown
+      toolCallId?: unknown
+      decision?: unknown
+      comment?: unknown
     }
-
-    if (!sessionId || !toolCallId || !decision) {
+    if (typeof sessionId !== 'string' || !sessionId) {
       res.status(400).json({ error: 'Missing sessionId, toolCallId, or decision' })
       return
     }
+    const confirmation = interpretConfirmationEvent({
+      kind: 'decision',
+      toolCallId: rawToolCallId,
+      decision: rawDecision,
+      comment,
+    })
+    if (confirmation.status !== 'decision' || !confirmation.toolCallId) {
+      res.status(400).json({ error: 'Invalid toolCallId, decision, or comment' })
+      return
+    }
+    const { toolCallId, decision } = confirmation
 
     // "Deny with comment" — the user's note travels with the decision to the
     // model-facing `declinedToolResult` so the assistant revises rather than
     // just re-asks. Arbitrary user text, so cap it (mirrors the approvals
     // panel's `reason` slice) before it lands in `session_messages`.
-    const note =
-      typeof comment === 'string' && comment.trim()
-        ? comment.trim().slice(0, 1000)
-        : undefined
+    const note = confirmation.comment?.slice(0, 1000)
 
     const jwtUserId = (req as { userId?: string }).userId
     if (!jwtUserId) { res.status(401).json({ error: 'Unauthorized' }); return }

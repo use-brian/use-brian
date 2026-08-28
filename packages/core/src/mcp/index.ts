@@ -6,3 +6,16 @@ export { wrapMcpTools } from './connector.js'
 export { createMcpGateway } from './gateway.js'
 export { buildToolIndex, createMcpSearchTools, legacyMcpToolName } from './tool-search.js'
 export type { McpToolIndex, ToolSource, RemoteSource, LocalSource } from './tool-search.js'
+export {
+  CONFIRMATION_DECISIONS,
+  buildConfirmationActions,
+  confirmationDecisionLabel,
+  encodeConfirmationAction,
+  interpretConfirmationEvent,
+  isConfirmationDecision,
+} from './confirmation-events.js'
+export type {
+  ConfirmationAction,
+  ConfirmationEventResult,
+  NormalizedConfirmationEvent,
+} from './confirmation-events.js'

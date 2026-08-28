@@ -1,7 +1,6 @@
 import { createWhatsAppAdapter } from '@use-brian/channels'
 import type {
   AnalyticsLogger,
-  ConfirmationDecision,
   ConfirmationResolver,
   CrmStore,
   EntityLinksStore,
@@ -11,6 +10,7 @@ import type {
   TaskStore,
   UsageStore,
 } from '@use-brian/core'
+import { interpretConfirmationEvent } from '@use-brian/core'
 import { getToolDisplayName } from '@use-brian/shared'
 import { query } from '../db/client.js'
 import type { DbEpisodesStore } from '../db/episodes-store.js'
@@ -126,11 +126,6 @@ export function createWhatsappByonRuntime(deps: WhatsappByonRuntimeDeps) {
   }
 
   const pending = new Map<string, { resolver: ConfirmationResolver; toolCallId: string }>()
-  const decisions: Record<string, ConfirmationDecision> = {
-    allow: 'allow', yes: 'allow', y: 'allow', ok: 'allow',
-    deny: 'deny', no: 'deny', n: 'deny',
-    always: 'always_allow', never: 'always_deny',
-  }
 
   const bot = createWhatsappBot({
     resolveBotChannel: async (channelId) => {
@@ -201,11 +196,16 @@ export function createWhatsappByonRuntime(deps: WhatsappByonRuntimeDeps) {
         connectionId: input.channelId,
       })
       const parked = pending.get(input.chatJid)
-      const decision = parked && decisions[input.text.trim().toLowerCase()]
-      if (parked && decision) {
-        parked.resolver.resolve(parked.toolCallId, decision)
+      if (parked) {
+        const confirmation = interpretConfirmationEvent(
+          { kind: 'text', text: input.text },
+          parked.toolCallId,
+        )
         pending.delete(input.chatJid)
-        return
+        if (confirmation.status === 'decision') {
+          parked.resolver.resolve(parked.toolCallId, confirmation.decision)
+          if (confirmation.consume) return
+        }
       }
       const hooks: ChannelHooks = {
         onProcessingStart: async () => {

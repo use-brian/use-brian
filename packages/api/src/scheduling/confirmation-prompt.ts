@@ -17,7 +17,7 @@
  * Component tag: [COMP:scheduling/confirmation-prompt].
  */
 
-import type { ToolConfirmationRequest } from '@use-brian/core'
+import { buildConfirmationActions, type ToolConfirmationRequest } from '@use-brian/core'
 import {
   createSlackAdapter,
   createFeishuAdapter,
@@ -154,16 +154,7 @@ export async function sendConfirmationPrompt(
       }
       {
         const adapter = createTelegramAdapter({ token: botToken })
-        const actions = [
-          { id: 'allow', label: 'Allow', data: `mcp_confirm:${req.toolCallId}:allow` },
-          { id: 'deny', label: 'Deny', data: `mcp_confirm:${req.toolCallId}:deny` },
-        ]
-        if (allowPersist) {
-          actions.push(
-            { id: 'always', label: 'Always Allow', data: `mcp_confirm:${req.toolCallId}:always_allow` },
-            { id: 'never', label: 'Always Deny', data: `mcp_confirm:${req.toolCallId}:always_deny` },
-          )
-        }
+        const actions = buildConfirmationActions(req.toolCallId, allowPersist)
         await adapter.sendMessage(target.channelId, {
           text: `${displayName}${inputSummary}\n\nAllow this action?`,
           actions,
@@ -228,16 +219,7 @@ export async function sendConfirmationPrompt(
         }),
         botOpenId: integration.botUserId ?? undefined,
       })
-      const actions = [
-        { id: 'allow', label: 'Allow', data: `mcp_confirm:${req.toolCallId}:allow` },
-        { id: 'deny', label: 'Deny', data: `mcp_confirm:${req.toolCallId}:deny` },
-      ]
-      if (allowPersist) {
-        actions.push(
-          { id: 'always', label: 'Always Allow', data: `mcp_confirm:${req.toolCallId}:always_allow` },
-          { id: 'never', label: 'Always Deny', data: `mcp_confirm:${req.toolCallId}:always_deny` },
-        )
-      }
+      const actions = buildConfirmationActions(req.toolCallId, allowPersist)
       await adapter.sendMessage(target.channelId, {
         text: `${displayName}${inputSummary}\n\nAllow this action?`,
         actions,

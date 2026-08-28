@@ -9,10 +9,9 @@ import {
   whatsappCloudMediaId,
 } from '@use-brian/channels'
 import type { IncomingMessage } from '@use-brian/channels'
-import { parseFileContent } from '@use-brian/core'
+import { interpretConfirmationEvent, parseFileContent } from '@use-brian/core'
 import type {
   AnalyticsLogger,
-  ConfirmationDecision,
   ConfirmationResolver,
   ContentBlock,
   LLMProvider,
@@ -49,11 +48,6 @@ import {
 export { whatsappCloudUserAllowed } from '../whatsapp/cloud-access.js'
 
 const MAX_MEDIA_BYTES = 25 * 1024 * 1024
-const DECISIONS: Record<string, ConfirmationDecision> = {
-  yes: 'allow', y: 'allow', allow: 'allow', approve: 'allow', ok: 'allow',
-  no: 'deny', n: 'deny', deny: 'deny', reject: 'deny',
-  always: 'always_allow', never: 'always_deny',
-}
 
 export type WhatsAppCloudRouteOptions = {
   backgroundModel?: string
@@ -313,10 +307,15 @@ export function whatsappCloudRoutes(options: WhatsAppCloudRouteOptions): Router 
       const confirmKey = `${conversationKey}:${incoming.userId}`
       const parked = pending.get(confirmKey)
       if (parked) {
-        const decision = DECISIONS[incoming.text.trim().toLowerCase()]
+        const confirmation = interpretConfirmationEvent(
+          { kind: 'text', text: incoming.text },
+          parked.toolCallId,
+        )
         pending.delete(confirmKey)
-        parked.resolver.resolve(parked.toolCallId, decision ?? 'deny')
-        if (decision) return
+        if (confirmation.status === 'decision') {
+          parked.resolver.resolve(parked.toolCallId, confirmation.decision)
+          if (confirmation.consume) return
+        }
       }
 
       await withChatLock(`whatsapp-cloud:${conversationKey}`, () => processMessage({

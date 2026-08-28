@@ -50,11 +50,12 @@ import { resolveAssistantForSurface, resolveRoutingForSurface, getChannelForWebh
 import {
   parseFileContent,
   buildTool,
+  interpretConfirmationEvent,
   resolveRealtimeThreadAddressing,
   sanitize as sanitizeAnalytics,
 } from '@use-brian/core'
 import { z } from 'zod'
-import type { ConfirmationDecision, ConfirmationResolver, ContentBlock } from '@use-brian/core'
+import type { ConfirmationResolver, ContentBlock } from '@use-brian/core'
 import type { LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, McpSettingsStore, WorkflowEventDispatcher } from '@use-brian/core'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 import type { ConnectorStore } from '../db/connector-store.js'
@@ -227,14 +228,6 @@ type SlackRouteOptions = {
    * See docs/architecture/brain/ingest-pipeline.md → "Source adapters".
    */
   slackWebhookIngestor?: SlackWebhookIngestor
-}
-
-// Natural language → decision mapping for Slack text-based confirmation
-const DECISION_MAP: Record<string, ConfirmationDecision> = {
-  yes: 'allow', y: 'allow', allow: 'allow', approve: 'allow', ok: 'allow',
-  no: 'deny', n: 'deny', deny: 'deny', reject: 'deny',
-  always: 'always_allow', 'always allow': 'always_allow',
-  never: 'always_deny', 'always deny': 'always_deny',
 }
 
 /** The in-flight query loop for one Slack channel: its abort handle and the
@@ -752,25 +745,22 @@ export function slackRoutes(options: SlackRouteOptions): Router {
     // ── Check if this message is a confirmation response ──────
     const pendingConf = pendingSlackConfirmations.get(sessionChannelId)
     if (pendingConf) {
-      const normalized = incoming.text.trim().toLowerCase()
-      const decision = DECISION_MAP[normalized]
-      if (decision) {
-        pendingConf.resolver.resolve(pendingConf.toolCallId, decision)
-        pendingSlackConfirmations.delete(sessionChannelId)
-        return
-      }
-      // If the text doesn't match any decision keyword, treat as deny
-      // and process as a new message
-      pendingConf.resolver.resolve(pendingConf.toolCallId, 'deny')
+      const confirmation = interpretConfirmationEvent(
+        { kind: 'text', text: incoming.text },
+        pendingConf.toolCallId,
+      )
       pendingSlackConfirmations.delete(sessionChannelId)
+      if (confirmation.status === 'decision') {
+        pendingConf.resolver.resolve(pendingConf.toolCallId, confirmation.decision)
+        if (confirmation.consume) return
+      }
     } else if (options.deferredConfirmationStore) {
       // Check for a deferred confirmation from a scheduled job
-      const normalized = incoming.text.trim().toLowerCase()
-      const decision = DECISION_MAP[normalized]
-      if (decision) {
+      const confirmation = interpretConfirmationEvent({ kind: 'text', text: incoming.text })
+      if (confirmation.status === 'decision') {
         const deferred = await options.deferredConfirmationStore.findPendingByChannel('slack', incoming.channelId)
-        if (deferred && tryResolveSchedulerConfirmation(deferred.toolCallId, decision)) {
-          options.deferredConfirmationStore.markResolved(deferred.toolCallId, decision)
+        if (deferred && tryResolveSchedulerConfirmation(deferred.toolCallId, confirmation.decision)) {
+          options.deferredConfirmationStore.markResolved(deferred.toolCallId, confirmation.decision)
             .catch((err) => console.error('[slack] deferred confirmation DB update failed:', err))
           return
         }

@@ -48,9 +48,9 @@ import { mergeShadowUser, type LinkedAccountStore } from '../db/linked-accounts.
 import type { LinkCodeStore } from '../db/link-codes.js'
 import { withChatLock } from '../db/chat-lock.js'
 import { buildAlbumFiledReply, buildDocumentFiledReply, buildOversizeDocReply, classifyMedia, summarizeAlbumIntake } from '../ingest/channel-media-intake.js'
-import type { ConfirmationDecision, ConfirmationResolver, ContentBlock } from '@use-brian/core'
+import type { ConfirmationResolver, ContentBlock } from '@use-brian/core'
 import type { LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, McpSettingsStore, KnowledgeStoreInterface, GDriveFilesStore, TokenUsage } from '@use-brian/core'
-import { transcribeFirstAudio, describeTranscriptionFailure, composeVoiceTurnText, TRANSCRIPTION_DISABLED_REASON, sanitize as sanitizeAnalytics, type MediaBackend } from '@use-brian/core'
+import { buildConfirmationActions, confirmationDecisionLabel, interpretConfirmationEvent, transcribeFirstAudio, describeTranscriptionFailure, composeVoiceTurnText, TRANSCRIPTION_DISABLED_REASON, sanitize as sanitizeAnalytics, type MediaBackend } from '@use-brian/core'
 import type { ChannelIntegrationStore, ChannelIntegrationConfig, TelegramCredentials, SeenChat } from '../db/channel-integrations.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
@@ -534,16 +534,12 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
           return
         }
 
-        // Parse: mcp_confirm:<toolCallId>:<decision>
-        if (parts[0] !== 'mcp_confirm' || parts.length < 3) return
-
-        const toolCallId = parts[1]
-        const decision = parts[2] as ConfirmationDecision
+        const confirmation = interpretConfirmationEvent({ kind: 'action', data: query.data })
+        if (confirmation.status !== 'decision' || !confirmation.toolCallId) return
+        const { toolCallId, decision } = confirmation
         const confKey = `${query.chatId}:${toolCallId}`
         const pending = pendingConfResolvers.get(confKey)
-
-        const label = decision === 'allow' ? 'Allowed' : decision === 'deny' ? 'Denied'
-          : decision === 'always_allow' ? 'Always allowed' : 'Always denied'
+        const label = confirmationDecisionLabel(decision)
 
         if (pending) {
           pending.resolver.resolve(toolCallId, decision)
@@ -1728,16 +1724,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
           : formatConfirmationInput(req.input)
         const inputSummary = lines.length > 0 ? '\n\n' + lines.join('\n') : ''
 
-        const actions = [
-          { id: 'allow', label: 'Allow', data: `mcp_confirm:${req.toolCallId}:allow` },
-          { id: 'deny', label: 'Deny', data: `mcp_confirm:${req.toolCallId}:deny` },
-        ]
-        if (req.allowPersistentApproval) {
-          actions.push(
-            { id: 'always', label: 'Always Allow', data: `mcp_confirm:${req.toolCallId}:always_allow` },
-            { id: 'never', label: 'Always Deny', data: `mcp_confirm:${req.toolCallId}:always_deny` },
-          )
-        }
+        const actions = buildConfirmationActions(req.toolCallId, req.allowPersistentApproval)
 
         const displayName = getToolDisplayName(req.toolName)
         await adapter.sendMessage(incoming.channelId, {
