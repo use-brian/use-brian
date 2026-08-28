@@ -1,5 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { createOpenAICompatProvider, extractCCUsage, mapCCStopReason, DASHSCOPE_INTL_BASE_URL } from '../openai-compat.js'
+import {
+  createOpenAICompatProvider,
+  extractCCStreamError,
+  extractCCUsage,
+  mapCCStopReason,
+  DASHSCOPE_INTL_BASE_URL,
+} from '../openai-compat.js'
 import type { StreamChunk } from '../types.js'
 
 /** Build a Response whose body streams the given SSE `data:` payloads. */
@@ -268,6 +274,103 @@ describe('[COMP:providers/openai-compat] pure helpers', () => {
   it('extractCCUsage never goes negative on inconsistent vendor counts', () => {
     expect(extractCCUsage({ prompt_tokens: 100, completion_tokens: 5, prompt_tokens_details: { cached_tokens: 150 } }))
       .toEqual({ inputTokens: 0, outputTokens: 5, cacheReadTokens: 150 })
+  })
+
+  it('extractCCStreamError reads every shape an endpoint puts an error in', () => {
+    expect(extractCCStreamError(undefined)).toBeNull()
+    expect(extractCCStreamError(null)).toBeNull()
+    expect(extractCCStreamError('')).toBeNull()
+    expect(extractCCStreamError('upstream timed out')).toBe('upstream timed out')
+    expect(extractCCStreamError({ message: 'rate limited', code: 'rate_limit_exceeded' }))
+      .toBe('rate limited (rate_limit_exceeded)')
+    expect(extractCCStreamError({ message: 'boom', type: 'server_error' })).toBe('boom (server_error)')
+    // A gateway that forwarded an upstream body without unwrapping it.
+    expect(extractCCStreamError({ error: { message: 'context length exceeded' } }))
+      .toBe('context length exceeded')
+    // Unrecognised shape: still an error. Returning null here would restore
+    // the silence this helper exists to end.
+    expect(extractCCStreamError({ detail: 'weird' })).toBe('{"detail":"weird"}')
+  })
+})
+
+describe('[COMP:providers/openai-compat] in-stream error frames', () => {
+  it('throws when a 200 stream carries an error frame and no content', async () => {
+    // The 2026-08-25 shape: HTTP 200, an error frame, no choices, no usage.
+    // Swallowed, this became `message_end` with 0/0 usage — an upstream
+    // outage wearing the costume of a model that chose to say nothing.
+    fetchMock.mockResolvedValueOnce(sseResponse([
+      { error: { message: 'upstream provider unavailable', type: 'server_error' } },
+      '[DONE]',
+    ]))
+
+    await expect(collect(provider.stream({
+      model: 'qwen-test-model',
+      systemPrompt: 'sys',
+      messages: [{ role: 'user', content: 'hi' }],
+    }))).rejects.toThrow(/upstream returned an error mid-stream/)
+  })
+
+  it('keeps upstream wording out of the message when includeErrorDetail is false', async () => {
+    // Custom workspace endpoints run with includeErrorDetail: false — the
+    // same redaction contract the non-2xx throw already honours. The wording
+    // still travels in `cause`, which never reaches the wire.
+    const customFetch = vi.fn().mockResolvedValueOnce(sseResponse([
+      { error: { message: 'secret-internal-hostname refused the request' } },
+    ]))
+    const custom = createOpenAICompatProvider({
+      apiKey: 'k',
+      baseURL: 'https://endpoint.example/v1',
+      label: 'custom',
+      fetchFn: customFetch,
+      includeErrorDetail: false,
+    })
+
+    const err = await collect(custom.stream({
+      model: 'sol-high',
+      systemPrompt: 'sys',
+      messages: [{ role: 'user', content: 'hi' }],
+    })).then(() => null, (e: Error) => e)
+
+    expect(err).toBeInstanceOf(Error)
+    expect(err!.message).not.toContain('secret-internal-hostname')
+    expect(err!.cause).toContain('secret-internal-hostname')
+  })
+
+  it('keeps partial output and ends truncated when the error arrives mid-answer', async () => {
+    fetchMock.mockResolvedValueOnce(sseResponse([
+      { choices: [{ delta: { content: 'partial ' } }] },
+      { choices: [{ delta: { content: 'answer' } }] },
+      { error: { message: 'connection reset' } },
+    ]))
+
+    const chunks = await collect(provider.stream({
+      model: 'qwen-test-model',
+      systemPrompt: 'sys',
+      messages: [{ role: 'user', content: 'hi' }],
+    }))
+
+    expect(chunks.filter((c) => c.type === 'text_delta').map((c) => (c as { text: string }).text).join(''))
+      .toBe('partial answer')
+    expect(chunks.at(-1)).toMatchObject({ type: 'message_end', stopReason: 'incomplete' })
+  })
+
+  it('names a content-free stream in the log instead of ending silently', async () => {
+    // No error frame at all — the endpoint just hung up. Nothing here is
+    // thrown (a model may legitimately stop with no content), but the frame
+    // shape is the only evidence the next investigation gets.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    fetchMock.mockResolvedValueOnce(sseResponse(['[DONE]']))
+
+    const chunks = await collect(provider.stream({
+      model: 'qwen-test-model',
+      systemPrompt: 'sys',
+      messages: [{ role: 'user', content: 'hi' }],
+    }))
+
+    expect(chunks).toHaveLength(2) // message_start + message_end, nothing between
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('stream produced no content'))
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('closed the stream without completing it'))
+    warn.mockRestore()
   })
 })
 

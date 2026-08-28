@@ -127,15 +127,47 @@ describe('[COMP:engine/query-loop] Truncation recovery', () => {
     },
   )
 
-  it('does not auto-continue an incomplete messaging-channel reply', async () => {
+  // Regression: the 2026-08-25 Telegram truncation. Recovery used to be gated
+  // to web + workflow on the reasoning that an "attended messaging channel may
+  // already have surfaced the partial text". Telegram is a FINAL-ONLY channel
+  // - it leaves `onTextDelta` unimplemented and receives one
+  // `sendResponse(fullText)` at `turn_complete` - so it surfaces nothing early
+  // and had no way to recover. The gate excluded exactly the channels that
+  // needed it. This reply left the user cut off at a half-typed bracket.
+  it.each<StopReason>(['max_tokens', 'incomplete'])(
+    'auto-continues a final-only messaging reply stopped by %s',
+    async (stopReason) => {
+      const { provider, calls } = scriptedProvider([
+        responseChunks('### 3. Delta Life - Kaupunki syntyy suistoon (', stopReason),
+        responseChunks('三角洲之生) is a free outdoor art event.', 'end_turn'),
+      ])
+
+      const events = await runLoop(provider, 'telegram')
+
+      expect(calls).toHaveLength(2)
+      expect(calls[1]).toEqual([{ role: 'user', content: 'Continue from where you left off.' }])
+      expect(
+        events
+          .filter((event) => event.type === 'text_delta')
+          .map((event) => event.type === 'text_delta' ? event.text : '')
+          .join(''),
+      ).toBe('### 3. Delta Life - Kaupunki syntyy suistoon (三角洲之生) is a free outdoor art event.')
+      expect(events.filter((event) => event.type === 'turn_complete')).toHaveLength(1)
+    },
+  )
+
+  // The budget is what keeps a provider that halts every time from looping.
+  // A halt that repeats delivers both fragments and stops asking.
+  it('spends its continuation budget exactly once when the retry also truncates', async () => {
     const { provider, calls } = scriptedProvider([
-      responseChunks('Partial reply', 'incomplete'),
-      responseChunks(' should not be reached', 'end_turn'),
+      responseChunks('First fragment', 'incomplete'),
+      responseChunks(' second fragment', 'incomplete'),
+      responseChunks(' must never be reached', 'end_turn'),
     ])
 
     const events = await runLoop(provider, 'telegram')
 
-    expect(calls).toHaveLength(1)
+    expect(calls).toHaveLength(2)
     expect(events.filter((event) => event.type === 'turn_complete')).toHaveLength(1)
   })
 })

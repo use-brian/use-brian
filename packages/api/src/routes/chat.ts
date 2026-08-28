@@ -7613,6 +7613,10 @@ export function chatRoutes(options: WebChatOptions): Router {
                   output_tokens: usage.outputTokens,
                   cost_usd_micro: Math.round(cost * 1_000_000),
                   cache_hits: usage.cacheReadTokens ?? 0,
+                  // Channel-path parity — see channel-pipeline.ts's copy of
+                  // this event for why HOW a turn ended is recorded next to
+                  // what it cost.
+                  stop_reason: sanitize(event.response.stopReason ?? 'unknown'),
                 },
               })
 
