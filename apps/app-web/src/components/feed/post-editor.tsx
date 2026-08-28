@@ -43,6 +43,10 @@ import { BrandCheck } from "@/components/feed/brand-check";
 import { PostMediaTray } from "@/components/feed/post-media-tray";
 import type { PostMedia } from "@/lib/feed-media";
 import { TuningChatPanel } from "@/components/feed/tuning-chat-panel";
+import {
+  PeekResizeHandle,
+  usePeekResize,
+} from "@/components/operator/resizable-peek";
 import { Button } from "@/components/ui/button";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { webAppUrl } from "@/lib/primary-auth";
@@ -377,6 +381,13 @@ function PostPane({
   const te = t.postEditor;
   const router = useRouter();
   const dockRecorder = useGlobalDockRecorder();
+  // User-adjustable refine-rail width — the shared peek-resize behavior
+  // (drag the left edge, double-click to reset, persisted per key).
+  const {
+    width: railWidth,
+    resizing: railResizing,
+    handleProps: railHandleProps,
+  } = usePeekResize("feed:refine-rail-width");
 
   const [session, setSession] = useState<FeedDraftSessionSummary | null>(null);
   const [drafts, setDrafts] = useState<FeedSavedDraft[]>([]);
@@ -687,7 +698,17 @@ function PostPane({
   }
 
   return (
-    <div className="grid min-h-full lg:h-full lg:min-h-0 lg:grid-cols-[minmax(0,1fr)_390px] 2xl:grid-cols-[minmax(0,1fr)_420px]">
+    <div
+      style={
+        railWidth !== null
+          ? ({ "--feed-refine-rail": `${railWidth}px` } as React.CSSProperties)
+          : undefined
+      }
+      className={cn(
+        "grid min-h-full lg:h-full lg:min-h-0 lg:grid-cols-[minmax(0,1fr)_var(--feed-refine-rail,390px)] 2xl:grid-cols-[minmax(0,1fr)_var(--feed-refine-rail,420px)]",
+        railResizing && "select-none",
+      )}
+    >
       <main className="min-w-0 bg-background lg:overflow-y-auto">
         <div className="min-h-full p-4 sm:p-6 xl:p-8">
           <div className="space-y-6">
@@ -941,8 +962,12 @@ function PostPane({
         </div>
       </main>
 
-      <aside className="h-[min(680px,85dvh)] min-h-[520px] border-t border-border/60 bg-muted/10 lg:h-auto lg:min-h-0 lg:border-l lg:border-t-0">
+      <aside className="relative h-[min(680px,85dvh)] min-h-[520px] border-t border-border/60 lg:h-auto lg:min-h-0 lg:border-l lg:border-t-0">
+        <div className="hidden lg:block">
+          <PeekResizeHandle resizing={railResizing} {...railHandleProps} />
+        </div>
         <TuningChatPanel
+          docked
           assistantId={assistantId}
           assistantName={assistantName}
           iconSeed={assistantIconSeed}
