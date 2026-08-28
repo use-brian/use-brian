@@ -5,22 +5,16 @@
  * it (feed-revamp.md §3.1). Owns the bare `/feed` index (D5), so it also
  * renders the first-run onboarding when the workspace has no brand voice.
  *
- * Layout is calendar + one contextual right rail. Its reusable overview is
- * the default; the once-per-month brief and selected-slot editor open on
- * demand and return to that overview, rather than becoming permanent chrome.
+ * Layout is calendar + the docked plan chat rail
+ * (docs/plans/feed-plan-chat-first.md P1): the right rail hosts the
+ * `channel_id='plan'` master conversation, and the selected-slot editor and
+ * once-per-month brief open as overlays over it, returning to the chat.
  *
  * [COMP:app-web/feed-plan-surface]
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ChevronDown, Sparkles } from "lucide-react";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { useFeedWorkspace } from "@/contexts/feed-profiles-context";
 import { useConnectAccount } from "@/components/feed/connect-account-dialog";
 import { FeedOnboarding } from "@/components/feed/feed-onboarding";
@@ -33,7 +27,16 @@ import {
   planSlotToDraft,
   type PlanSlotDraft,
 } from "@/components/feed/plan-slot-peek";
-import { PlanBriefRail } from "@/components/feed/plan-brief-rail";
+import { PlanBriefEditor } from "@/components/feed/plan-brief-editor";
+import {
+  PlanChatRail,
+  type PlanQuickAction,
+} from "@/components/feed/plan-chat-rail";
+import { useLgViewport } from "@/components/feed/use-lg-viewport";
+import {
+  PeekResizeHandle,
+  usePeekResize,
+} from "@/components/operator/resizable-peek";
 import {
   createFeedIdea,
   createPlanSlot,
@@ -111,8 +114,13 @@ export function FeedPlan() {
   );
 }
 
+/**
+ * The rail's state machine: the chat is the base state (P9), the brief and
+ * slot editors are overlays that fold back to it. The chat rail underneath
+ * stays MOUNTED (hidden + inert) so its stream survives an overlay.
+ */
 type RailView =
-  | { kind: "overview" }
+  | { kind: "chat" }
   | { kind: "brief" }
   | { kind: "slot"; draft: PlanSlotDraft };
 
@@ -128,6 +136,14 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
   const tp = t.plan;
   const router = useRouter();
   const searchParams = useSearchParams();
+  // User-adjustable rail width — the shared peek-resize behavior (drag the
+  // left edge, double-click to reset). Floor below the shared default so the
+  // rail can stay at its compact 320px baseline.
+  const {
+    width: railWidth,
+    resizing: railResizing,
+    handleProps: railHandleProps,
+  } = usePeekResize("feed:plan-rail-width", { minWidth: 280 });
 
   // `today` is captured once per mount. Reading `new Date()` inside the
   // render would make the grid re-derive on every keystroke in the rail.
@@ -156,7 +172,7 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [rail, setRail] = useState<RailView>({ kind: "overview" });
+  const [rail, setRail] = useState<RailView>({ kind: "chat" });
   // Bumped when the operator asks for a plan; the board watches for the
   // assistant's `proposePlan` cardboard so calendar and rail share one set.
   const [watchToken, setWatchToken] = useState(0);
@@ -176,6 +192,23 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
   }, [assistantId]);
 
   const canEdit = team.role !== "member" || team.canDraft;
+
+  // The docked chat rail is live only where it is visible; below `lg` the
+  // floating Feed dock hosts the same session instead (P4).
+  const isLg = useLgViewport();
+
+  // Identity for the chat rail's panel header. A connected profile carries
+  // the avatar seed; an unconnected brand voice has name only.
+  const railAssistant = useMemo(() => {
+    const fromProfile = team.profiles.find(
+      (p) => p.assistant.id === assistantId,
+    )?.assistant;
+    if (fromProfile) {
+      return { name: fromProfile.name, iconSeed: fromProfile.iconSeed };
+    }
+    const fromBrand = team.assistants.find((a) => a.id === assistantId);
+    return { name: fromBrand?.name ?? "", iconSeed: undefined };
+  }, [team.profiles, team.assistants, assistantId]);
 
   const defaultPlatform: FeedPlatform = useMemo(
     () =>
@@ -265,7 +298,7 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
   // previous month into a new calendar is surprising and makes the rail feel
   // permanent rather than tied to what the operator is viewing now.
   useEffect(() => {
-    setRail({ kind: "overview" });
+    setRail({ kind: "chat" });
     setProposed([]);
     setDismissedProposals(new Set());
   }, [month]);
@@ -458,7 +491,7 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
         return;
       }
       setSlots((prev) => prev.filter((s) => s.id !== slot.id));
-      setRail({ kind: "overview" });
+      setRail({ kind: "chat" });
     } finally {
       setBusy(false);
     }
@@ -556,22 +589,59 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
         return;
       }
       setBrief(result.brief);
-      setRail({ kind: "overview" });
+      setRail({ kind: "chat" });
     } finally {
       setBusy(false);
     }
   }
 
-  /** Hand the assistant the month's context and let it propose the gaps. */
-  function planWithAssistant() {
+  /**
+   * Quick actions (P3): the retired header split button's jobs, seeded into
+   * the docked plan chat. Each seeds the composer — the operator reads and
+   * sends — and bumps the proposal watch so the cardboard follows.
+   */
+  function planNextWeek() {
+    const start = isoDay(today);
+    const endDate = new Date(today);
+    endDate.setDate(endDate.getDate() + 7);
+    const end = isoDay(endDate);
     const scheduled = slots
-      .filter((s) => s.status !== "skipped")
+      .filter(
+        (s) =>
+          s.status !== "skipped" &&
+          s.scheduledFor >= start &&
+          s.scheduledFor < end,
+      )
       .map((s) => `- ${s.scheduledFor} (${t.platformLabels[s.platform]}): ${s.title}`)
       .join("\n");
     requestFeedChatSeed({
-      prefill: format(tp.planWithAssistantPrompt, {
+      prefill: format(tp.planWeekPrompt, {
+        start,
+        brief: brief?.brief?.trim() || tp.noBriefYet,
+        scheduled: scheduled || tp.nothingScheduledYet,
+      }),
+    });
+    setWatchToken((n) => n + 1);
+  }
+
+  /**
+   * Review, not fill: hands the assistant the WHOLE month with slot ids so a
+   * proposed change patches the slot in place (the D25 `slotId` idiom)
+   * rather than duplicating beside it.
+   */
+  function reviewMonth() {
+    const scheduled = slots
+      .filter((s) => s.status !== "skipped")
+      .map(
+        (s) =>
+          `- ${s.scheduledFor} (${t.platformLabels[s.platform]}) slotId=${s.id}: ${s.title}`,
+      )
+      .join("\n");
+    requestFeedChatSeed({
+      prefill: format(tp.reviewMonthPrompt, {
         month,
         brief: brief?.brief?.trim() || tp.noBriefYet,
+        cadence: brief?.cadencePerWeek ? String(brief.cadencePerWeek) : tp.noCadenceYet,
         scheduled: scheduled || tp.nothingScheduledYet,
       }),
     });
@@ -658,45 +728,24 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
 
   const showProposals = watchToken > 0 || visibleProposals.length > 0;
 
+  // P3: the three locked chips. Plain array — each `run` closes over the
+  // current month/brief/slots, and the rail re-renders with the board.
+  const quickActions: PlanQuickAction[] = [
+    { key: "fill-empty", label: tp.quickFillEmpty, run: fillEmptySlots },
+    { key: "plan-week", label: tp.quickPlanWeek, run: planNextWeek },
+    { key: "review-month", label: tp.quickReviewMonth, run: reviewMonth },
+  ];
+
   return (
     <div className="flex h-full min-h-0">
       <div className="min-w-0 flex-1 overflow-y-auto px-4 py-5 md:px-6">
         <div className="mx-auto max-w-5xl space-y-4">
-          <header className="flex items-start justify-between gap-4">
-            <div className="space-y-1">
-              <h1 className="text-[15px] font-semibold">{t.sections.plan}</h1>
-              <p className="text-xs text-muted-foreground">{tp.subtitle}</p>
-            </div>
-            {canEdit ? (
-              <div className="flex shrink-0 items-center">
-                <button
-                  type="button"
-                  onClick={planWithAssistant}
-                  className="inline-flex h-8 items-center gap-1.5 rounded-l-lg border border-border px-3 text-[12.5px] font-medium transition-colors hover:bg-accent"
-                >
-                  <Sparkles className="size-3.5" aria-hidden />
-                  {tp.planWithAssistant}
-                </button>
-                <DropdownMenu>
-                  <DropdownMenuTrigger
-                    render={
-                      <button
-                        type="button"
-                        aria-label={tp.planMonthActions}
-                        className="inline-flex h-8 items-center rounded-r-lg border border-l-0 border-border px-1.5 transition-colors hover:bg-accent"
-                      >
-                        <ChevronDown className="size-3.5" aria-hidden />
-                      </button>
-                    }
-                  />
-                  <DropdownMenuContent align="end">
-                    <DropdownMenuItem onClick={fillEmptySlots}>
-                      {tp.fillEmptySlots}
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </div>
-            ) : null}
+          {/* One primary action per surface: the header carries none — the
+              assistant-led verbs live as quick-action chips in the chat rail
+              (P3), and capture owns the primary affordance (P5, phase 2). */}
+          <header className="space-y-1">
+            <h1 className="text-[15px] font-semibold">{t.sections.plan}</h1>
+            <p className="text-xs text-muted-foreground">{tp.subtitle}</p>
           </header>
 
           {error ? (
@@ -796,57 +845,91 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
         </div>
       </div>
 
-      <aside className="hidden w-80 shrink-0 border-l border-border/60 lg:block">
-        {rail.kind === "slot" ? (
-          <PlanSlotPeek
-            draft={rail.draft}
-            slot={selectedSlot}
-            canEdit={canEdit}
-            busy={busy}
-            onChange={(draft) => setRail({ kind: "slot", draft })}
-            onSave={() => void saveSlot()}
-            onDelete={() => selectedSlot && void removeSlot(selectedSlot)}
-            onDraftThis={() => selectedSlot && void startDrafting(selectedSlot)}
-            onOpenDraft={() => selectedSlot && openExistingDraft(selectedSlot)}
-            onToggleSkip={() => selectedSlot && void toggleSkip(selectedSlot)}
-            onDiscuss={() =>
-              selectedSlot &&
-              requestFeedChatSeed({
-                prefill: format(tp.discussSlotPrompt, {
-                  title: selectedSlot.title,
-                  date: selectedSlot.scheduledFor,
-                  platform: t.platformLabels[selectedSlot.platform],
-                  brief: selectedSlot.brief?.trim() || tp.noBriefYet,
-                }),
-              })
-            }
-            onBack={() => setRail({ kind: "overview" })}
-          />
-        ) : (
-          <PlanBriefRail
-            view={rail.kind}
-            month={month}
-            brief={brief}
-            counts={counts}
-            canEdit={canEdit}
-            busy={busy}
-            proposals={visibleProposals}
-            showProposals={showProposals}
-            pullingProposals={pullingProposals}
-            acceptingProposalIndex={acceptingProposalIndex}
-            ideas={ideas}
-            onSave={(next) => void saveBrief(next)}
-            onRefreshProposals={() => void pullProposal()}
-            onAcceptProposal={(proposal) => void acceptProposal(proposal)}
-            onAcceptAllProposals={() => void acceptAllProposals()}
-            onDismissProposal={dismissProposal}
-            onAddIdea={addIdea}
-            onDiscardIdea={(idea) => void discardIdea(idea)}
-            onPlanIdea={planIdea}
-            onOpenBrief={() => setRail({ kind: "brief" })}
-            onCloseBrief={() => setRail({ kind: "overview" })}
-          />
+      <aside
+        style={railWidth !== null ? { width: railWidth } : undefined}
+        className={cn(
+          "relative hidden w-80 shrink-0 border-l border-border/60 lg:block",
+          railResizing && "select-none",
         )}
+      >
+        <PeekResizeHandle resizing={railResizing} {...railHandleProps} />
+        {/* Mount-gated on the same breakpoint that hides the aside: below
+            `lg` the floating Feed dock is the live chat host, and a second
+            mounted panel on the same plan session would double-subscribe
+            its stream (P4). */}
+        {isLg ? (
+          <>
+            {/* The chat rail is the base state and stays MOUNTED under an
+                overlay (hidden + inert) so its stream survives (P9). */}
+            <div
+              className={cn("h-full min-h-0", rail.kind !== "chat" && "hidden")}
+              aria-hidden={rail.kind !== "chat"}
+              inert={rail.kind !== "chat"}
+            >
+              <PlanChatRail
+                assistantId={assistantId}
+                assistantName={railAssistant.name}
+                iconSeed={railAssistant.iconSeed}
+                workspaceId={team.workspaceId}
+                month={month}
+                brief={brief}
+                counts={counts}
+                openIdeasCount={ideas.length}
+                canEdit={canEdit}
+                proposals={visibleProposals}
+                showProposals={showProposals}
+                pullingProposals={pullingProposals}
+                acceptingProposalIndex={acceptingProposalIndex}
+                quickActions={quickActions}
+                onAcceptProposal={(proposal) => void acceptProposal(proposal)}
+                onAcceptAllProposals={() => void acceptAllProposals()}
+                onDismissProposal={dismissProposal}
+                onRefreshProposals={() => void pullProposal()}
+                onOpenBrief={() => setRail({ kind: "brief" })}
+                onTurnComplete={() => void pullProposal()}
+                onActivate={() => setRail({ kind: "chat" })}
+              />
+            </div>
+            {rail.kind === "slot" ? (
+              <div className="absolute inset-0 bg-background">
+                <PlanSlotPeek
+                  draft={rail.draft}
+                  slot={selectedSlot}
+                  canEdit={canEdit}
+                  busy={busy}
+                  onChange={(draft) => setRail({ kind: "slot", draft })}
+                  onSave={() => void saveSlot()}
+                  onDelete={() => selectedSlot && void removeSlot(selectedSlot)}
+                  onDraftThis={() => selectedSlot && void startDrafting(selectedSlot)}
+                  onOpenDraft={() => selectedSlot && openExistingDraft(selectedSlot)}
+                  onToggleSkip={() => selectedSlot && void toggleSkip(selectedSlot)}
+                  onDiscuss={() =>
+                    selectedSlot &&
+                    requestFeedChatSeed({
+                      prefill: format(tp.discussSlotPrompt, {
+                        title: selectedSlot.title,
+                        date: selectedSlot.scheduledFor,
+                        platform: t.platformLabels[selectedSlot.platform],
+                        brief: selectedSlot.brief?.trim() || tp.noBriefYet,
+                      }),
+                    })
+                  }
+                  onBack={() => setRail({ kind: "chat" })}
+                />
+              </div>
+            ) : rail.kind === "brief" ? (
+              <div className="absolute inset-0 bg-background">
+                <PlanBriefEditor
+                  brief={brief}
+                  canEdit={canEdit}
+                  busy={busy}
+                  onSave={(next) => void saveBrief(next)}
+                  onBack={() => setRail({ kind: "chat" })}
+                />
+              </div>
+            ) : null}
+          </>
+        ) : null}
       </aside>
     </div>
   );

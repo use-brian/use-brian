@@ -142,6 +142,25 @@ export function feedPath(
 const FEED_PATH_RE = /^\/w\/[^/]+\/feed(?:\/([^?#]*))?/;
 
 /**
+ * True on the bare Plan index (`/w/<id>/feed`, query/hash ignored) and
+ * nowhere else. The index hosts the docked plan chat rail at `lg`+, which is
+ * where the floating Feed dock stands down (docs/plans/feed-plan-chat-first.md
+ * P4) — every other feed route keeps the dock.
+ */
+export function isFeedPlanIndexPath(
+  pathname: string | null | undefined,
+): boolean {
+  if (!pathname) return false;
+  // Stricter than FEED_PATH_RE: `feed` must end the segment (`/w/x/feedback`
+  // is not the feed surface), and anything after it beyond `/`s means a
+  // deeper route.
+  const m = /^\/w\/[^/]+\/feed(?:\/([^?#]*))?(?:[?#]|$)/.exec(pathname);
+  if (!m) return false;
+  const rest = (m[1] ?? "").split("/").filter(Boolean);
+  return rest.length === 0;
+}
+
+/**
  * The active feed platform from a pathname (`/w/<id>/feed/<platform>/...`),
  * or `null` on team rows / non-feed paths. Drives the sidebar platform pill.
  */

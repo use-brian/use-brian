@@ -41,7 +41,8 @@ import {
 } from "react";
 import { usePathname } from "next/navigation";
 import { useFeedWorkspace } from "@/contexts/feed-profiles-context";
-import { feedPostIdFromPathname } from "@/lib/feed-nav";
+import { feedPostIdFromPathname, isFeedPlanIndexPath } from "@/lib/feed-nav";
+import { useLgViewport } from "@/components/feed/use-lg-viewport";
 import { cn } from "@/lib/utils";
 import {
   TuningChatPanel,
@@ -162,11 +163,17 @@ export function FeedFloatingChat() {
     return [...seen.values()];
   }, [profiles, brandAssistants]);
 
-  // A selected post owns a focused Refine conversation. Everywhere else the
-  // Feed dock is one master control conversation; route changes must never
-  // silently swap its history.
+  // A selected post owns a focused Refine conversation, and at `lg`+ the
+  // Plan index docks the SAME plan session into its rail
+  // (docs/plans/feed-plan-chat-first.md P4) — in both places this dock
+  // stands down so exactly one panel is live per session. Below `lg` the
+  // rail is unmounted, so the dock stays (mobile must not lose chat).
+  // Everywhere else the Feed dock is one master control conversation; route
+  // changes must never silently swap its history.
   const pathname = usePathname() ?? "";
+  const isLg = useLgViewport();
   const postEditorOwnsChat = feedPostIdFromPathname(pathname) !== null;
+  const planIndexOwnsChat = isFeedPlanIndexPath(pathname) && isLg;
 
   const [expanded, setExpanded] = useState(false);
   const [activity, setActivity] = useState<TuningChatActivity>(IDLE_CHAT_ACTIVITY);
@@ -373,7 +380,7 @@ export function FeedFloatingChat() {
 
   // No connected assistant yet — nothing to chat with. The feed home's
   // connect-account onboarding owns the empty state, so render nothing here.
-  if (!activeAssistant || postEditorOwnsChat) return null;
+  if (!activeAssistant || postEditorOwnsChat || planIndexOwnsChat) return null;
 
   return (
     <div

@@ -31,23 +31,30 @@ const MAX_VW = 0.9;
 const PEEK_DEFAULT_WIDTH_CLASS =
   "w-full sm:w-[480px] lg:w-[640px] xl:w-[760px]";
 
-function readStoredWidth(storageKey: string): number | null {
+function readStoredWidth(storageKey: string, minWidth: number): number | null {
   if (typeof window === "undefined") return null;
   try {
     const raw = window.localStorage.getItem(storageKey);
     const n = raw === null ? NaN : Number(raw);
-    return Number.isFinite(n) && n >= MIN_WIDTH ? n : null;
+    return Number.isFinite(n) && n >= minWidth ? n : null;
   } catch {
     return null;
   }
 }
 
-function clampWidth(px: number): number {
-  const max = Math.max(MIN_WIDTH, Math.floor(window.innerWidth * MAX_VW));
-  return Math.min(Math.max(px, MIN_WIDTH), max);
+function clampWidth(px: number, minWidth: number): number {
+  const max = Math.max(minWidth, Math.floor(window.innerWidth * MAX_VW));
+  return Math.min(Math.max(px, minWidth), max);
 }
 
-export function usePeekResize(storageKey: string): {
+export function usePeekResize(
+  storageKey: string,
+  opts?: {
+    /** Inline rails narrower than the record-panel default may lower the
+     *  floor (e.g. the Feed plan rail's 320px). Defaults to 360px. */
+    minWidth?: number;
+  },
+): {
   /** Explicit width in px, or null → render the default width classes. */
   width: number | null;
   /** True while the user is dragging (disable transitions/selection). */
@@ -58,16 +65,17 @@ export function usePeekResize(storageKey: string): {
     onDoubleClick: () => void;
   };
 } {
+  const minWidth = opts?.minWidth ?? MIN_WIDTH;
   const [width, setWidth] = useState<number | null>(() =>
-    readStoredWidth(storageKey),
+    readStoredWidth(storageKey, minWidth),
   );
   const [resizing, setResizing] = useState(false);
   const frame = useRef<number | null>(null);
 
   // Another panel on the same key may have changed it while we were closed.
   useEffect(() => {
-    setWidth(readStoredWidth(storageKey));
-  }, [storageKey]);
+    setWidth(readStoredWidth(storageKey, minWidth));
+  }, [storageKey, minWidth]);
 
   const onPointerDown = useCallback(
     (e: React.PointerEvent<HTMLElement>) => {
@@ -83,7 +91,7 @@ export function usePeekResize(storageKey: string): {
       let latest: number | null = null;
 
       const onMove = (ev: PointerEvent) => {
-        latest = clampWidth(window.innerWidth - ev.clientX);
+        latest = clampWidth(window.innerWidth - ev.clientX, minWidth);
         if (frame.current === null) {
           frame.current = requestAnimationFrame(() => {
             frame.current = null;
@@ -108,7 +116,7 @@ export function usePeekResize(storageKey: string): {
       handle.addEventListener("pointerup", onUp);
       handle.addEventListener("pointercancel", onUp);
     },
-    [storageKey],
+    [storageKey, minWidth],
   );
 
   const onDoubleClick = useCallback(() => {

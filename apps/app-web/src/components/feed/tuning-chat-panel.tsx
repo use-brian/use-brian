@@ -250,6 +250,12 @@ export const TuningChatPanel = forwardRef<
     dockRecorder?: DockRecorderApi;
     /** Route short recorder captures into this visible tuning session. */
     ownsDockRecorderTarget?: boolean;
+    /**
+     * Inline rail chrome: the host aside draws the border, so drop the
+     * floating window's rounding/border/shadow. Default is the floating
+     * shell's chrome (the Feed dock).
+     */
+    docked?: boolean;
   }
 >(function TuningChatPanel(props, ref) {
   const {
@@ -273,6 +279,7 @@ export const TuningChatPanel = forwardRef<
     composerPlaceholder,
     dockRecorder,
     ownsDockRecorderTarget = false,
+    docked = false,
   } = props;
 
   const t = useT().feedPage.tuningChat;
@@ -782,7 +789,12 @@ export const TuningChatPanel = forwardRef<
   return (
     <div
       aria-busy={!ready}
-      className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-border bg-popover shadow-2xl"
+      className={cn(
+        "flex h-full min-h-0 flex-col overflow-hidden",
+        docked
+          ? "bg-background"
+          : "rounded-xl border border-border bg-popover shadow-2xl",
+      )}
     >
       <div className="relative shrink-0 border-b border-border/60 px-4 py-3">
         <div className="flex items-center gap-2.5">
