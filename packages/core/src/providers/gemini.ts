@@ -339,12 +339,46 @@ function extractUsage(meta: NonNullable<GeminiStreamChunk['usageMetadata']>): To
   }
 }
 
-function mapFinishReason(reason?: string): StopReason {
+/**
+ * Map Gemini's raw `finishReason` onto the provider-agnostic `StopReason`.
+ *
+ * The default branch is `'incomplete'`, NOT `'end_turn'`. Gemini's finish-reason
+ * vocabulary is open-ended and keeps growing: besides the three mapped here it
+ * emits `RECITATION`, `OTHER`, `BLOCKLIST`, `PROHIBITED_CONTENT`, `SPII`,
+ * `MALFORMED_FUNCTION_CALL`, `LANGUAGE` and more, and every one of them HALTS
+ * generation part-way through the answer. Reporting an unrecognised halt as a
+ * clean `end_turn` asserted something the provider never said, and left a
+ * cut-off turn structurally indistinguishable from a finished one: the
+ * truncation detector in `engine/query-loop.ts` (Layer 5) only recognises
+ * `'max_tokens'` / `'incomplete'`, so the fragment was persisted and delivered
+ * as if it were the whole answer, with nothing logged anywhere.
+ *
+ * That is the 2026-08-25 Telegram incident. A reply listing Oulu festival
+ * posters stopped dead at `### 3. 《Delta Life ... 》（` and shipped to the user
+ * in that state: 459 output tokens against the profile's 4096 cap (so not the
+ * cap), and no `NO finishReason` error (so a reason WAS supplied) - it was
+ * simply a reason this switch had never heard of.
+ *
+ * This closes the present-but-unrecognised half of the hole that the 2026-08-09
+ * `HKD 600,` fix closed for the absent half (a stream that ends carrying no
+ * `finishReason` at all). Both halves now converge on `'incomplete'`, which is
+ * the one `StopReason` that means exactly "the provider stopped early and we
+ * must not present this as a finished answer".
+ */
+export function mapFinishReason(reason?: string): StopReason {
   switch (reason) {
     case 'STOP': return 'end_turn'
     case 'MAX_TOKENS': return 'max_tokens'
     case 'SAFETY': return 'safety'
-    default: return 'end_turn'
+    default:
+      // Loud on purpose: an unmapped reason is the only record that this halt
+      // happened at all, and it names the vendor string to add to the switch.
+      console.error(
+        `[gemini] Unmapped finishReason=${JSON.stringify(reason)} - reporting ` +
+        `stopReason='incomplete'. The turn is cut mid-output; do not treat it ` +
+        `as a completed answer.`,
+      )
+      return 'incomplete'
   }
 }
 

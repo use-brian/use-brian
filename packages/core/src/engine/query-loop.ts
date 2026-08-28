@@ -1327,17 +1327,29 @@ async function* queryLoopCore(
       }
     }
 
-    // Layer 5: truncation recovery — auto-continue once for web and unattended
-    // workflow assistant calls. A provider output cap (`max_tokens`) and an
-    // SSE EOF without a finish marker (`incomplete`) are the same output-shape
-    // failure: a reply cut off in the middle. Workflow callers assemble final
-    // text only after the consult ends, so they can safely concatenate this
-    // bounded continuation. Attended messaging channels may already have
-    // surfaced the partial text and therefore return normally.
+    // Layer 5: truncation recovery — auto-continue once, on EVERY channel. A
+    // provider output cap (`max_tokens`) and a halt with no usable finish
+    // marker (`incomplete`) are the same output-shape failure: a reply cut off
+    // in the middle. One bounded continuation is shared across both reasons.
+    //
+    // This used to be gated to `web` + `workflow`, on the reasoning that
+    // "attended messaging channels may already have surfaced the partial text
+    // and therefore return normally". That rationale is inverted: Telegram,
+    // Slack, WhatsApp and Feishu/Lark are FINAL-ONLY channels — they leave
+    // `onTextDelta` unimplemented and receive one `sendResponse(fullText)` at
+    // `turn_complete` (`packages/api/src/routes/channel-pipeline.ts` →
+    // "Streaming vs final-only channels"). They surface nothing early, so the
+    // gate excluded exactly the channels that had no way to recover, while
+    // admitting the one channel (web SSE) that genuinely does stream partials.
+    // On 2026-08-25 a Telegram reply cut off mid-sentence shipped that way.
+    //
+    // Continuing is safe on a final-only channel precisely BECAUSE it is
+    // final-only: `assembleDeliverableText` joins the text of every terminal
+    // turn, so the fragment and its continuation leave as one message rather
+    // than two.
     const responseWasTruncated = response.stopReason === 'max_tokens'
       || response.stopReason === 'incomplete'
     if (responseWasTruncated && !hasToolUse
-        && (options.channelType === 'web' || options.channelType === 'workflow')
         && truncationContinuations < 1) {
       truncationContinuations++
       nextMessages = [{ role: 'user', content: 'Continue from where you left off.' }]

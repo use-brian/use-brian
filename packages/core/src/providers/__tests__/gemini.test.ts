@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { normalizeGeminiContents, normalizeGeminiRequestContents, resolveGeminiThinkingLevel, resolveStopReason, stripLeadingEnvelopeLeak, stripLeadingRoleToken, stripNonInputParts } from '../gemini.js'
+import { mapFinishReason, normalizeGeminiContents, normalizeGeminiRequestContents, resolveGeminiThinkingLevel, resolveStopReason, stripLeadingEnvelopeLeak, stripLeadingRoleToken, stripNonInputParts } from '../gemini.js'
 
 type GeminiContent = Parameters<typeof normalizeGeminiContents>[0][number]
 
@@ -105,6 +105,55 @@ describe('[COMP:providers/gemini-normalize] normalizeGeminiContents', () => {
     }
     expect(normalizeGeminiContents([image])).toEqual([image])
     expect(warnSpy).not.toHaveBeenCalled()
+  })
+})
+
+describe('[COMP:providers/gemini-stop-reason] mapFinishReason', () => {
+  let errorSpy: ReturnType<typeof vi.spyOn>
+
+  beforeEach(() => {
+    errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    errorSpy.mockRestore()
+  })
+
+  it('maps the three reasons it knows without complaining', () => {
+    expect(mapFinishReason('STOP')).toBe('end_turn')
+    expect(mapFinishReason('MAX_TOKENS')).toBe('max_tokens')
+    expect(mapFinishReason('SAFETY')).toBe('safety')
+    expect(errorSpy).not.toHaveBeenCalled()
+  })
+
+  // The 2026-08-25 Telegram truncation. Gemini's finish-reason vocabulary is
+  // open-ended; anything outside the three above still HALTED generation, and
+  // reporting the halt as `end_turn` hid it from the truncation detector,
+  // which only recognises `max_tokens` / `incomplete`. The fragment was then
+  // persisted and delivered as though it were the whole answer.
+  it.each(['RECITATION', 'OTHER', 'BLOCKLIST', 'PROHIBITED_CONTENT', 'SPII', 'LANGUAGE', 'MALFORMED_FUNCTION_CALL'])(
+    'reports %s as incomplete rather than a clean end_turn',
+    (reason) => {
+      expect(mapFinishReason(reason)).toBe('incomplete')
+    },
+  )
+
+  it('names the unmapped vendor string so the switch can be extended', () => {
+    mapFinishReason('RECITATION')
+    expect(errorSpy).toHaveBeenCalledTimes(1)
+    expect(String(errorSpy.mock.calls[0]?.[0])).toContain('RECITATION')
+  })
+
+  // A halt reported as `incomplete` is what query-loop Layer 5 acts on, so the
+  // two halves of the fix are wired together here rather than only in prose.
+  it('produces a stop reason the truncation detector recognises', () => {
+    const truncated = (r: string): boolean => {
+      const mapped = mapFinishReason(r)
+      return mapped === 'max_tokens' || mapped === 'incomplete'
+    }
+    expect(truncated('RECITATION')).toBe(true)
+    expect(truncated('MAX_TOKENS')).toBe(true)
+    expect(truncated('STOP')).toBe(false)
   })
 })
 
