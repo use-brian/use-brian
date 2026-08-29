@@ -13,6 +13,7 @@
  * Component tag: [COMP:api/channel-user-store].
  */
 
+import { captureMemoryVersions } from './brain-row-versions.js'
 import { query, getPool } from './client.js'
 import { findUserByEmail, findOrCreateUser, type User } from './users.js'
 import { mergeShadowUser } from './linked-accounts.js'
@@ -605,6 +606,18 @@ async function normalizeShadowAuthProvider(canonicalUserId: string, provider: st
                AND m2.summary = memories.summary
            )`,
         [canonicalUserId, dup.id],
+      )
+      // The duplicates about to vanish are the destructive half of the heal
+      // - capture their before-images (brain-history sidecar) inside this
+      // transaction so the merge stays auditable.
+      const dupMemoryIds = await client.query<{ id: string }>(
+        `SELECT id FROM memories WHERE user_id = $1`,
+        [dup.id],
+      )
+      await captureMemoryVersions(
+        dupMemoryIds.rows.map((r) => r.id),
+        { actor: 'human_edit', reason: 'identity-heal' },
+        client,
       )
       await client.query(`DELETE FROM memories WHERE user_id = $1`, [dup.id])
 

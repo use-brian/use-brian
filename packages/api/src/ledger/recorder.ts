@@ -138,8 +138,8 @@ export function createTurnLedger(ctx: TurnLedgerContext): TurnLedgerHandle {
 
     private writeEvent(kind: TurnEventKind, metadata: Record<string, unknown>, payloadRefs: string[]): void {
       const stepOrdinal = this.ordinal++
-      enqueue(() =>
-        insertTurnEvent({
+      enqueue(async () => {
+        await insertTurnEvent({
           workspaceId: ctx.workspaceId,
           assistantId: ctx.assistantId,
           sessionId: ctx.sessionId,
@@ -150,8 +150,8 @@ export function createTurnLedger(ctx: TurnLedgerContext): TurnLedgerHandle {
           metadata,
           payloadRefs,
           sensitivity: ctx.sensitivity,
-        }),
-      )
+        })
+      })
     }
 
     request(info: { turn: number; messages: Message[]; full: boolean }): void {

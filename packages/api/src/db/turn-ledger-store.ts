@@ -67,12 +67,13 @@ export function payloadScope(workspaceId: string | null | undefined): string {
   return workspaceId ?? 'global'
 }
 
-export async function insertTurnEvent(e: TurnEventInsert): Promise<void> {
-  await query(
+export async function insertTurnEvent(e: TurnEventInsert): Promise<string | null> {
+  const res = await query<{ id: string }>(
     `INSERT INTO turn_events
        (workspace_id, assistant_id, session_id, assistant_message_id, step_ordinal, actor, kind, metadata, payload_refs, sensitivity)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-     ON CONFLICT (assistant_message_id, step_ordinal) DO NOTHING`,
+     ON CONFLICT (assistant_message_id, step_ordinal) DO NOTHING
+     RETURNING id`,
     [
       e.workspaceId ?? null,
       e.assistantId ?? null,
@@ -86,6 +87,7 @@ export async function insertTurnEvent(e: TurnEventInsert): Promise<void> {
       e.sensitivity ?? 'internal',
     ],
   )
+  return res.rows[0]?.id ?? null
 }
 
 /** True when the payload row already exists (object write can be skipped). */

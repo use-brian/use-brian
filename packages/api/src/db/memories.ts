@@ -1,3 +1,4 @@
+import { captureMemoryVersions, type CaptureOpts } from './brain-row-versions.js'
 import type { AccessContext, EntityLinksStore, Sensitivity } from '@use-brian/core'
 import type pg from 'pg'
 import { buildAccessPredicate } from './access-predicate.js'
@@ -871,9 +872,23 @@ export async function listMemories(
 }
 
 /**
- * Delete a single memory by ID.
+ * Delete a single memory by ID. Destructive - the row's before-image is
+ * captured into brain_row_versions first (with a ledger mutation event),
+ * so "what did this memory say" stays answerable after consolidation
+ * prunes, dedup merges, and tool deletes. Pass `version` to attribute the
+ * mutation (defaults to the assistant lane). The operator erasure path
+ * does NOT come through here (retraction-store applyHardPurge).
  */
-export async function deleteMemory(id: string): Promise<boolean> {
+export async function deleteMemory(
+  id: string,
+  version?: Partial<CaptureOpts>,
+): Promise<boolean> {
+  await captureMemoryVersions([id], {
+    actor: version?.actor ?? 'assistant_turn',
+    reason: version?.reason ?? 'delete',
+    workspaceId: version?.workspaceId ?? null,
+    mutationEventId: version?.mutationEventId ?? null,
+  })
   const result = await query(
     `DELETE FROM memories WHERE id = $1`,
     [id],
@@ -1902,6 +1917,14 @@ export async function transferWorkspaceMemories(
   toAssistantId: string,
   workspaceId: string,
 ): Promise<number> {
+  const ids = await query<{ id: string }>(
+    `SELECT id FROM memories WHERE assistant_id = $1 AND workspace_id = $2`,
+    [fromAssistantId, workspaceId],
+  )
+  await captureMemoryVersions(
+    ids.rows.map((r) => r.id),
+    { actor: 'human_edit', reason: 'assistant-transfer', workspaceId },
+  )
   const result = await query(
     `UPDATE memories SET assistant_id = $2, updated_at = now()
      WHERE assistant_id = $1 AND workspace_id = $3`,
@@ -1940,6 +1963,14 @@ export async function supersedeMemoriesByTags(params: {
  * Delete all workspace memories for an assistant. Used when force-detaching.
  */
 export async function deleteWorkspaceMemories(assistantId: string, workspaceId: string): Promise<number> {
+  const ids = await query<{ id: string }>(
+    `SELECT id FROM memories WHERE assistant_id = $1 AND workspace_id = $2`,
+    [assistantId, workspaceId],
+  )
+  await captureMemoryVersions(
+    ids.rows.map((r) => r.id),
+    { actor: 'human_edit', reason: 'workspace-detach', workspaceId },
+  )
   const result = await query(
     `DELETE FROM memories WHERE assistant_id = $1 AND workspace_id = $2`,
     [assistantId, workspaceId],

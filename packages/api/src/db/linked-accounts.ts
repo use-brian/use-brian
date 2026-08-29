@@ -18,6 +18,7 @@
  * Component tag: [COMP:api/linked-accounts-store].
  */
 
+import { captureMemoryVersions } from './brain-row-versions.js'
 import { query, queryWithRLS, getPool } from './client.js'
 
 // ── Types ──────────────────────────────────────────────────────
@@ -207,6 +208,18 @@ export async function mergeShadowUser(
                AND m2.summary = memories.summary
            )`,
         [realUserId, sid],
+      )
+      // The duplicates about to vanish are the destructive half of the heal
+      // - capture their before-images (brain-history sidecar) inside this
+      // transaction so the merge stays auditable.
+      const dupMemoryIds = await client.query<{ id: string }>(
+        `SELECT id FROM memories WHERE user_id = $1`,
+        [sid],
+      )
+      await captureMemoryVersions(
+        dupMemoryIds.rows.map((r) => r.id),
+        { actor: 'human_edit', reason: 'identity-heal' },
+        client,
       )
       await client.query(`DELETE FROM memories WHERE user_id = $1`, [sid])
 
