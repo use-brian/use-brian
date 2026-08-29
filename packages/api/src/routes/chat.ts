@@ -37,6 +37,7 @@ import {
   resolveLayer1Prompt,
 } from './_prompt-builder.js'
 import { type PublishSessionEvent, noopPublishSessionEvent } from '../session-event-port.js'
+import { createTurnStreamPublisher, publishRoomTurnActivity } from '../session-live-publisher.js'
 import { createSessionPinTools } from '../session-pin-tools.js'
 import type { InjectExtraTools, ResolveAppSoul } from '../tool-injection-port.js'
 import type { BuildConnectorActionAudit } from '../connector-action-port.js'
@@ -1677,58 +1678,14 @@ export function mayResolveRoomConfirmation(params: {
 
 /**
  * Mirror one display-level activity event from a live turn onto the shared
- * per-session bus. Keeping the mirror gate, sender attribution, and NOTIFY-size
- * cap in one seam prevents delegated-worker / preflight streams from silently
- * becoming sender-only while the main query-loop stream remains collaborative.
- *
- * `mirror` is the gate. Rooms mirror THROUGHOUT (viewers watch live from the
- * start). Every other session mirrors only once its direct stream is dead
- * (`isRoomSession || clientGone` at the call site, 2026-08-24): a personal
- * turn that outlives its `POST /api/chat` body is followed over
- * `GET /api/sessions/:id/stream`, and that reconnect needs the same activity
- * feed (tool steps, the pending confirmation card) the direct stream carried.
- * While the direct stream is alive the bus is pure overhead, so a healthy
- * personal turn costs no NOTIFY.
- *
- * Tool inputs are the only unbounded activity field. The initiating client
- * still receives the complete input over its direct response; bus subscribers
- * get an empty object when the JSON representation exceeds the bus budget,
- * which makes their UI fall back to the tool's static narration.
+ * per-session bus. Extracted to `../session-live-publisher.ts` (Live §5.2)
+ * so the background lanes share the exact mirror gate + NOTIFY-size cap;
+ * re-exported here because this route is its original home and the room
+ * suites import it from here. `mirror` at the chat call site is
+ * `isRoomSession || clientGone` (rooms mirror throughout; a personal turn
+ * mirrors only once its direct stream is dead, 2026-08-24).
  */
-const ROOM_ACTIVITY_INPUT_CAP = 4_000
-export function publishRoomTurnActivity(params: {
-  mirror: boolean
-  sessionId: string
-  senderUserId: string
-  event: string
-  data: Record<string, unknown>
-  publishSessionEvent: PublishSessionEvent
-}): void {
-  if (!params.mirror) return
-
-  let data = params.data
-  if ('input' in data) {
-    let input: unknown = {}
-    try {
-      input = JSON.stringify(data.input).length > ROOM_ACTIVITY_INPUT_CAP
-        ? {}
-        : data.input
-    } catch {
-      input = {}
-    }
-    data = { ...data, input }
-  }
-
-  params.publishSessionEvent({
-    kind: 'turn_activity',
-    sessionId: params.sessionId,
-    payload: {
-      event: params.event,
-      senderUserId: params.senderUserId,
-      ...data,
-    },
-  })
-}
+export { publishRoomTurnActivity }
 
 /**
  * Turn addresser per live room turn (multiplayer chat T11/D8): the user whose
@@ -6493,35 +6450,20 @@ export function chatRoutes(options: WebChatOptions): Router {
       // gap; published throttled so a streamed reply can't NOTIFY-storm the
       // bus. Rooms also carry the live reasoning tail — viewers fold it
       // through the same reducer the sender's client uses.
-      let liveStreamText = ''
-      let liveStreamActivity: string | null = null
-      let liveStreamReasoning = ''
-      let lastStreamPublishAt = 0
-      const STREAM_PUBLISH_THROTTLE_MS = 150
-      const STREAM_TEXT_CAP = 4_000 // keeps the NOTIFY payload under budget
-      const STREAM_REASONING_CAP = 1_500
-      const publishTurnStream = (force: boolean) => {
-        // Rooms: always. Everything else: only once the direct stream is dead.
-        if (!isRoomSession && (!isBackgroundTurn || !clientGone)) return
-        const now = Date.now()
-        if (!force && now - lastStreamPublishAt < STREAM_PUBLISH_THROTTLE_MS) return
-        lastStreamPublishAt = now
-        publishSessionEvent({
-          kind: 'turn_stream',
-          sessionId: session.id,
-          payload: {
-            text: liveStreamText.slice(-STREAM_TEXT_CAP),
-            activity: liveStreamActivity,
-            ...(isRoomSession
-              ? {
-                  reasoning: liveStreamReasoning.slice(-STREAM_REASONING_CAP),
-                  senderUserId: user.id,
-                  assistantId: assistant.id,
-                }
-              : {}),
-          },
-        })
-      }
+      // The throttle/cap/snapshot machinery lives in the shared publisher
+      // (../session-live-publisher.ts, Live §5.2) — the background lanes
+      // publish through the same discipline. The gates stay HERE and are
+      // evaluated per call (`clientGone` flips long after this line):
+      // rooms publish throughout; everything else only once the direct
+      // stream is dead. Rooms also attribute (reasoning tail + sender +
+      // assistant, T13); personal snapshots stay bare `{text, activity}`.
+      const turnStream = createTurnStreamPublisher({
+        sessionId: session.id,
+        publishSessionEvent,
+        shouldPublish: () => isRoomSession || (isBackgroundTurn && clientGone),
+        attribution: () =>
+          isRoomSession ? { senderUserId: user.id, assistantId: assistant.id } : null,
+      })
 
       // ── Persistence buffer ────────────────────────────────────
       //
@@ -7102,9 +7044,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             // Mirror onto the session bus (throttled) so a reconnected client
             // sees the reply stream after a dropped connection. Off rooms it
             // is a no-op until the direct stream is dead (2026-08-24).
-            liveStreamText += event.text
-            liveStreamActivity = null
-            publishTurnStream(false)
+            turnStream.onTextDelta(event.text)
           }
           // Verbatim model reasoning streamed live (the model's own words
           // about what it's doing). Consumers that don't render it (channels,
@@ -7115,18 +7055,14 @@ export function chatRoutes(options: WebChatOptions): Router {
             // Room viewers get the reasoning tail via the throttled snapshot
             // (T13) — same reducer, snapshot semantics instead of deltas.
             if (isRoomSession) {
-              liveStreamReasoning += event.text
-              publishTurnStream(false)
+              turnStream.onReasoningDelta(event.text)
             }
           }
           if (event.type === 'tool_start') {
             sendActivityEvent('tool_start', { id: event.id, name: event.name })
             // Surface the running tool to a reconnected client before any reply
             // text lands (the raw name; the client maps it to a friendly label).
-            if (!liveStreamText) {
-              liveStreamActivity = event.name
-              publishTurnStream(true)
-            }
+            turnStream.onToolStart(event.name)
           }
           if (event.type === 'tool_input') {
             if (event.name === 'presentDocument') {
