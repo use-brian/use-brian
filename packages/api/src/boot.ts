@@ -410,7 +410,7 @@ import { localFilesTransferRoutes } from './routes/local-files-transfer.js'
 import { openRecordingsRoutes } from './routes/recordings.js'
 import { recordingLiveRoutes } from './routes/recording-live.js'
 import { createDocGateway } from './doc/doc-gateway.js'
-import { createFilesApi, createSingletonFilesClientResolver, type FilesClientResolver } from './files/files-api.js'
+import { createFilesApi, createSingletonFilesClientResolver, storageLimitBytesForPlan, type FilesClientResolver } from './files/files-api.js'
 import { createChunkedFileUploadService, type ChunkedFileUploadService } from './files/chunked-upload.js'
 import { createSearchFileContentTool } from './files/file-artifact-tools.js'
 import {
@@ -3815,16 +3815,22 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       return null
     }
     filesResolver = createCachedByoFilesResolver({ lookup: lookupStorageBinding, fallback: defaultFilesResolver })
+    // One plan-derived storage cap shared by both quota gates (fileWrite /
+    // fileAppend and the chunked Work Bench uploads) so they cannot disagree.
+    const storageLimitBytesFor = async (workspaceId: string) =>
+      storageLimitBytesForPlan(await getWorkspacePlan(workspaceId))
     filesApi = createFilesApi({
       resolver: filesResolver,
       store: workspaceFilesStore,
       auditStore: workspaceAuditStore,
+      storageLimitBytesFor,
     })
     chunkedFileUploads = createChunkedFileUploadService({
       resolver: filesResolver,
       filesStore: workspaceFilesStore,
       uploadsStore: workspaceFileUploadsStore,
       auditStore: workspaceAuditStore,
+      storageLimitBytesFor,
     })
     // Effective allow/ask/block for a files tool — the same L1 (app-level
     // sentinel) + L2 (per-assistant) strictest-wins resolution the Studio /

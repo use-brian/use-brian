@@ -3,7 +3,7 @@
  * (`gcs-client.ts`) and the workspace_files index store
  * (`packages/api/src/db/workspace-files-store.ts`) into the `FilesApi`
  * the chat tools call. Owns:
- *   - quota enforcement (MAX_BYTES_PER_WORKSPACE)
+ *   - quota enforcement (plan-tiered, STORAGE_LIMIT_BYTES_BY_PLAN)
  *   - GCS-then-DB ordering on writes (with best-effort blob rollback on
  *     DB failure)
  *   - audit emission via `workspace_audit_store`
@@ -31,6 +31,7 @@ import type {
 import type { GcsFilesClient } from './gcs-client.js'
 import { buildStorageKey, buildStorageUri, type StorageUriScheme } from './gcs-client.js'
 import type { WorkspaceAuditStore } from '../db/workspace-audit-store.js'
+import type { WorkspacePlan } from '../db/workspace-store.js'
 import { localDirectoryMetadata, storageKeyForWorkspaceFile } from './local-directory-import.js'
 
 /**
@@ -111,8 +112,31 @@ function accessCtx(ctx: FilesContext): AccessContext {
   }
 }
 
-/** 1 GB soft cap per workspace. Bumpable via env in a future ticket. */
-export const MAX_BYTES_PER_WORKSPACE = 1024 * 1024 * 1024
+const GIB = 1024 * 1024 * 1024
+
+/**
+ * Durable-storage soft caps by workspace plan (docs/architecture/platform/
+ * cost-and-pricing.md → "Storage"). Applies only to bytes in OUR bucket —
+ * the check sites exempt BYO-bound workspaces. `enterprise` has no published
+ * tier; 200 GB is its floor until a contract says otherwise.
+ */
+export const STORAGE_LIMIT_BYTES_BY_PLAN: Record<WorkspacePlan, number> = {
+  free: 1 * GIB,
+  pro: 20 * GIB,
+  max_5x: 100 * GIB,
+  max_10x: 200 * GIB,
+  enterprise: 200 * GIB,
+}
+
+/** Free-tier fallback for unknown plans and unwired callers. */
+export const DEFAULT_MAX_BYTES_PER_WORKSPACE = STORAGE_LIMIT_BYTES_BY_PLAN.free
+
+export function storageLimitBytesForPlan(plan: string | null | undefined): number {
+  return (
+    STORAGE_LIMIT_BYTES_BY_PLAN[(plan ?? 'free') as WorkspacePlan] ??
+    DEFAULT_MAX_BYTES_PER_WORKSPACE
+  )
+}
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -177,6 +201,12 @@ function isUniqueViolation(e: unknown): boolean {
 export type CreateFilesApiDeps = {
   store: WorkspaceFilesStore
   auditStore: WorkspaceAuditStore
+  /**
+   * Plan-derived per-workspace durable-storage cap. Boot wires this to
+   * `getWorkspacePlan` → `storageLimitBytesForPlan`; omitting it falls back
+   * to the free-tier limit (unit-test convenience, never the boot path).
+   */
+  storageLimitBytesFor?: (workspaceId: string) => Promise<number>
 } & (
   | {
       /** Per-workspace bytes-client resolver (BYO-aware). */
@@ -201,6 +231,8 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
   const { store, auditStore } = deps
   const resolver: FilesClientResolver =
     deps.resolver ?? createSingletonFilesClientResolver(deps.gcs, deps.bucket)
+  const storageLimitBytesFor =
+    deps.storageLimitBytesFor ?? (async () => DEFAULT_MAX_BYTES_PER_WORKSPACE)
 
   async function resolveByIdOrPath(
     ctx: FilesContext,
@@ -268,12 +300,13 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
     // Soft quota guards bytes that sit in OUR bucket on OUR bill. When a
     // workspace writes to its own BYO bucket, the cap does not apply.
     if (!byo) {
+      const limitBytes = await storageLimitBytesFor(ctx.workspaceId)
       const currentBytes = await store.sumSizeBytes(ac)
-      if (currentBytes + bytes.length > MAX_BYTES_PER_WORKSPACE) {
+      if (currentBytes + bytes.length > limitBytes) {
         return err({
           kind: 'quota_exceeded',
           currentBytes,
-          limitBytes: MAX_BYTES_PER_WORKSPACE,
+          limitBytes,
           attemptedBytes: bytes.length,
         })
       }
@@ -372,12 +405,13 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
       const addBytes = Buffer.from(content, 'utf-8')
       const { byo } = await resolver.forWorkspace(ctx.workspaceId)
       if (!byo) {
+        const limitBytes = await storageLimitBytesFor(ctx.workspaceId)
         const currentBytes = await store.sumSizeBytes(accessCtx(ctx))
-        if (currentBytes + addBytes.length > MAX_BYTES_PER_WORKSPACE) {
+        if (currentBytes + addBytes.length > limitBytes) {
           return err({
             kind: 'quota_exceeded',
             currentBytes,
-            limitBytes: MAX_BYTES_PER_WORKSPACE,
+            limitBytes,
             attemptedBytes: addBytes.length,
           })
         }

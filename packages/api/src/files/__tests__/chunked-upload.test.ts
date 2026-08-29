@@ -172,7 +172,7 @@ describe('[COMP:files/chunked-upload] durable direct upload', () => {
     files = fakeFilesStore()
   })
 
-  function service() {
+  function service(storageLimitBytesFor?: (workspaceId: string) => Promise<number>) {
     return createChunkedFileUploadService({
       resolver: {
         async forWorkspace() { return { gcs, bucket: 'bucket', byo: false } },
@@ -181,8 +181,23 @@ describe('[COMP:files/chunked-upload] durable direct upload', () => {
       filesStore: files,
       uploadsStore: uploads,
       auditStore: { append: vi.fn(), list: vi.fn() },
+      ...(storageLimitBytesFor ? { storageLimitBytesFor } : {}),
     })
   }
+
+  it('gates start() on the injected plan-derived storage limit', async () => {
+    const GIB = 1024 * 1024 * 1024
+    files.sumSizeBytes = async () => 21 * GIB
+    const proUploader = service(async () => 20 * GIB)
+    await expect(
+      proUploader.start(ctx, { fileName: 'big.mov', mime: 'video/quicktime', sizeBytes: 1024 }),
+    ).rejects.toMatchObject({ kind: 'quota_exceeded' })
+    const maxUploader = service(async () => 200 * GIB)
+    const started = await maxUploader.start(ctx, {
+      fileName: 'big.mov', mime: 'video/quicktime', sizeBytes: 1024,
+    })
+    expect(started.uploadId).toBeTruthy()
+  })
 
   it('verifies exact parts, stream-assembles the final object, and removes staging bytes', async () => {
     const uploader = service()
