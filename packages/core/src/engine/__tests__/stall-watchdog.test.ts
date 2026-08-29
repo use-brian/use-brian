@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { NOOP_TURN_LEDGER } from '../turn-ledger.js'
 import { z } from 'zod'
 import {
   createStallWatchdog,
@@ -165,7 +166,7 @@ async function collect(events: AsyncIterable<QueryEvent>): Promise<QueryEvent[]>
 
 describe('[COMP:engine/stall-watchdog] query loop under stallIdleMs', () => {
   it('a provider that goes silent past the idle window ends the loop with a typed StalledError', async () => {
-    const events = await collect(queryLoop({
+    const events = await collect(queryLoop({ ledger: NOOP_TURN_LEDGER,
       provider: hangingProvider(),
       model: 'm',
       systemPrompt: 'sys',
@@ -195,7 +196,7 @@ describe('[COMP:engine/stall-watchdog] query loop under stallIdleMs', () => {
       },
     })
     const started = Date.now()
-    const events = await collect(queryLoop({
+    const events = await collect(queryLoop({ ledger: NOOP_TURN_LEDGER,
       provider: toolCallThenText('stuck'),
       model: 'm',
       systemPrompt: 'sys',
@@ -227,7 +228,7 @@ describe('[COMP:engine/stall-watchdog] query loop under stallIdleMs', () => {
         return { data: 'finished' }
       },
     })
-    const events = await collect(queryLoop({
+    const events = await collect(queryLoop({ ledger: NOOP_TURN_LEDGER,
       provider: toolCallThenText('slow'),
       model: 'm',
       systemPrompt: 'sys',
@@ -264,7 +265,7 @@ describe('[COMP:engine/stall-watchdog] query loop under stallIdleMs', () => {
             throw new Error('stateless only')
           },
         }
-        await collect(queryLoop({
+        await collect(queryLoop({ ledger: NOOP_TURN_LEDGER,
           provider: drip,
           model: 'm',
           systemPrompt: 'child',
@@ -277,7 +278,7 @@ describe('[COMP:engine/stall-watchdog] query loop under stallIdleMs', () => {
         return { data: 'child done' }
       },
     })
-    const events = await collect(queryLoop({
+    const events = await collect(queryLoop({ ledger: NOOP_TURN_LEDGER,
       provider: toolCallThenText('child'),
       model: 'm',
       systemPrompt: 'sys',

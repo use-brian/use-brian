@@ -23,6 +23,8 @@
  * See docs/architecture/channels/inter-assistant.md.
  */
 
+import { createTurnLedger } from '../ledger/recorder.js'
+import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import type {
   LLMProvider,
   Tool,
@@ -1860,6 +1862,13 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     try {
       if (!synthesisHandled)
       for await (const event of queryLoop({
+        ledger: createTurnLedger({
+          workspaceId: calleeAssistant.workspaceId ?? null,
+          assistantId: params.calleeAssistantId,
+          sessionId: session.id,
+          actor: params.callerChannelType === 'workflow' ? 'workflow_step' : 'a2a',
+          payloads: getLedgerPayloadStore(),
+        }).ledger,
         provider: loopProvider,
         model,
         maxTokens: customLlmRuntime?.maxTokens,

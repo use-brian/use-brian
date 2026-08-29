@@ -5,6 +5,8 @@ import { getDefaultAssistant, getUserAssistant, getWorkspacePrimaryAssistant, ge
 import { charterNeedsIntake, createSaveCharterTool, CHARTER_INTAKE_ADDENDUM } from '../intake/charter-intake.js'
 import { resolvePresenceTimezone } from '../auth/client-timezone.js'
 import { findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, toStampedMessages, getSessionMessages, updateSessionStatus, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels, isSharedChatSession, isMultiParticipantSession, coalesceConsecutiveUserMessages, startTurnLease, touchTurnLease, releaseTurnLease, requestTurnCancel, reclaimStaleTurn, isTurnLeaseLive, TURN_HEARTBEAT_INTERVAL_MS, type SessionMessage } from '../db/sessions.js'
+import { createTurnLedger } from '../ledger/recorder.js'
+import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { query } from '../db/client.js'
 import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
 import { buildPinnedContextBlock } from '../resolve-session-pins.js'
@@ -4309,6 +4311,16 @@ export function chatRoutes(options: WebChatOptions): Router {
       //       with the assistant message id once it commits.
       //
       // Constructed once per turn so each request has its own queue.
+      // Turn ledger (plan §4): one recorder per chat turn. Created beside the
+      // recall buffer so context-assembly retrieval provenance (below) can be
+      // recorded before the loop starts; the trace id is minted now and
+      // re-keyed to the persisted assistant message id at the flush site.
+      const turnLedgerHandle = createTurnLedger({
+        workspaceId: assistant.workspaceId ?? null,
+        assistantId: assistant.id,
+        sessionId: session.id,
+        payloads: getLedgerPayloadStore(),
+      })
       const recallBuffer = options.memoryRecallEventsStore && assistant.workspaceId
         ? createMemoryRecallBuffer({
             sink: options.memoryRecallEventsStore,
@@ -4333,6 +4345,18 @@ export function chatRoutes(options: WebChatOptions): Router {
             'index_inject',
           )
         }
+      }
+      // Ledger retrieval provenance (chat-auditing Phase 0 shape): the
+      // automatic context-assembly sets. Tool-driven retrieval is already
+      // captured as tool_call events with full inputs/results.
+      if (rankedIndex.rows.length > 0 || teamMemoryIndex.length > 0) {
+        turnLedgerHandle.recordRetrieval({
+          returnedRows: [
+            ...rankedIndex.rows.map((m) => ({ primitive: 'memory', rowId: m.id })),
+            ...teamMemoryIndex.map((m) => ({ primitive: 'memory', rowId: m.id })),
+          ],
+          source: 'index_inject',
+        })
       }
 
       // CL-8: per-turn skill invocation buffer. Constructed when we have
@@ -6568,6 +6592,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                 : undefined,
           })
           lastAssistantMessageId = storedAssistantMsg.id
+          turnLedgerHandle.bindAssistantMessageId(storedAssistantMsg.id)
 
           // The UI uses `assistant_message_saved` to attach retry/edit/
           // feedback actions to the most recent bubble. Only emit for the
@@ -6772,6 +6797,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           projectIds: turnScope.effectiveProjectIds,
         })
         for await (const event of queryLoop({
+          ledger: turnLedgerHandle.ledger,
           // BYO-aware: when the workspace set its own Gemini key, the main
           // response runs against that provider (else the platform provider).
           provider: turnProvider,

@@ -17,6 +17,7 @@
  * [COMP:evals/capability-probes]
  */
 
+import { NOOP_TURN_LEDGER } from '@use-brian/core'
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -83,6 +84,7 @@ async function runProbeTurn(
   const transcript: Transcript = { text: '', toolCalls: [], toolResults: [] }
   const abort = new AbortController()
   for await (const event of queryLoop({
+    ledger: NOOP_TURN_LEDGER,
     provider,
     model: SUT_MODEL,
     systemPrompt: fixture.systemPrompt,

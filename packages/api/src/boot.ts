@@ -405,6 +405,7 @@ import { createDbWorkspaceFilesStore } from './db/workspace-files-store.js'
 import { createWorkspaceFileUploadsStore } from './db/workspace-file-uploads-store.js'
 import { getWorkspaceFileById } from './db/workspace-files.js'
 import { createGcsFilesClient, type GcsFilesClient } from './files/gcs-client.js'
+import { initLedgerRuntime } from './ledger/runtime.js'
 import { createLocalFilesClient, resolveLocalFilesBaseDir } from './files/local-files-client.js'
 import { localFilesTransferRoutes } from './routes/local-files-transfer.js'
 import { openRecordingsRoutes } from './routes/recordings.js'
@@ -3761,6 +3762,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     const mode = configuredLocalFilesDir ? 'configured self-hosted storage' : 'ephemeral dev fallback'
     console.warn(`[files] GCS_FILES_BUCKET unset — using local-disk file storage at ${localFilesDir} (${mode}).`)
   }
+  // Turn ledger rides the same storage decision as workspace files —
+  // injected here so lanes never re-derive the driver from env.
+  if (filesBlobClient) initLedgerRuntime(filesBlobClient)
   if (localFilesClient) {
     // Signed bearer URLs keep direct browser/connector transfers working without
     // exposing file:// paths. Mount before authenticated /api catch-all guards.

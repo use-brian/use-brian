@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { NOOP_TURN_LEDGER } from '../turn-ledger.js'
 import type {
   LLMProvider,
   Message,
@@ -67,7 +68,7 @@ const baseContext = {
 
 async function runLoop(provider: LLMProvider, channelType: string): Promise<QueryEvent[]> {
   const events: QueryEvent[] = []
-  for await (const event of queryLoop({
+  for await (const event of queryLoop({ ledger: NOOP_TURN_LEDGER,
     provider,
     model: 'mock-model',
     systemPrompt: 'sys',

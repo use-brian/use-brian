@@ -19,6 +19,8 @@
 // isolation, idempotent-by-anchorKey, sensitivity-inherited, COGS-as-overhead):
 // docs/architecture/brain/structural-synthesis.md.
 
+import { createTurnLedger } from '../ledger/recorder.js'
+import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import {
@@ -517,6 +519,12 @@ export async function synthesizeFromSource(
 
   try {
     for await (const event of queryLoop({
+      ledger: createTurnLedger({
+        workspaceId: source.workspaceId ?? null,
+        assistantId: source.assistantId,
+        sessionId,
+        payloads: getLedgerPayloadStore(),
+      }).ledger,
       provider: deps.provider,
       model: deps.model,
       maxTokens: deps.maxTokens,

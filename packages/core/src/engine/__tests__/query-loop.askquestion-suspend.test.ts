@@ -18,6 +18,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest'
+import { NOOP_TURN_LEDGER } from '../turn-ledger.js'
 import { z } from 'zod'
 import type {
   LLMProvider,
@@ -98,7 +99,7 @@ async function runLoop(opts: {
   questionResumeEnabled?: boolean
 }): Promise<QueryEvent[]> {
   const events: QueryEvent[] = []
-  for await (const e of queryLoop({
+  for await (const e of queryLoop({ ledger: NOOP_TURN_LEDGER,
     provider: opts.provider,
     model: 'mock-model',
     systemPrompt: 'sys',

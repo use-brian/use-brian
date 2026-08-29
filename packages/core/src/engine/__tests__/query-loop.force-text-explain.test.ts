@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import { NOOP_TURN_LEDGER } from '../turn-ledger.js'
 import { z } from 'zod'
 import type {
   LLMProvider,
@@ -146,7 +147,7 @@ async function runLoop(provider: LLMProvider, stateless = false): Promise<QueryE
     { role: 'assistant', content: 'Earlier visible reply 5' },
     { role: 'user', content: 'Who is our Example Foundry account manager?' },
   ]
-  for await (const event of queryLoop({
+  for await (const event of queryLoop({ ledger: NOOP_TURN_LEDGER,
     provider,
     model: 'mock-model',
     systemPrompt: PRIVATE_SYSTEM_MARKER,
@@ -288,7 +289,7 @@ describe('[COMP:engine/query-loop] Isolated terminal finalization', () => {
     })
     const events: QueryEvent[] = []
 
-    for await (const event of queryLoop({
+    for await (const event of queryLoop({ ledger: NOOP_TURN_LEDGER,
       provider,
       model: 'mock-model',
       systemPrompt: PRIVATE_SYSTEM_MARKER,
@@ -317,7 +318,7 @@ describe('[COMP:engine/query-loop] Isolated terminal finalization', () => {
     })
     const events: QueryEvent[] = []
 
-    for await (const event of queryLoop({
+    for await (const event of queryLoop({ ledger: NOOP_TURN_LEDGER,
       provider,
       model: 'mock-model',
       systemPrompt: PRIVATE_SYSTEM_MARKER,
@@ -341,7 +342,7 @@ describe('[COMP:engine/query-loop] Isolated terminal finalization', () => {
     })
     const events: QueryEvent[] = []
 
-    for await (const event of queryLoop({
+    for await (const event of queryLoop({ ledger: NOOP_TURN_LEDGER,
       provider,
       model: 'mock-model',
       systemPrompt: PRIVATE_SYSTEM_MARKER,
@@ -365,7 +366,7 @@ describe('[COMP:engine/query-loop] Isolated terminal finalization', () => {
     })
     const events: QueryEvent[] = []
 
-    for await (const event of queryLoop({
+    for await (const event of queryLoop({ ledger: NOOP_TURN_LEDGER,
       provider,
       model: 'mock-model',
       systemPrompt: PRIVATE_SYSTEM_MARKER,
@@ -394,7 +395,7 @@ describe('[COMP:engine/query-loop] Isolated terminal finalization', () => {
     })
     const events: QueryEvent[] = []
 
-    for await (const event of queryLoop({
+    for await (const event of queryLoop({ ledger: NOOP_TURN_LEDGER,
       provider,
       model: 'mock-model',
       systemPrompt: PRIVATE_SYSTEM_MARKER,
@@ -422,7 +423,7 @@ describe('[COMP:engine/query-loop] Isolated terminal finalization', () => {
     })
     const events: QueryEvent[] = []
 
-    for await (const event of queryLoop({
+    for await (const event of queryLoop({ ledger: NOOP_TURN_LEDGER,
       provider,
       model: 'mock-model',
       systemPrompt: PRIVATE_SYSTEM_MARKER,

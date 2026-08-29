@@ -5,6 +5,7 @@ import type { AwaitingApprovalEvent, ConfirmationResolver, ToolConfirmationReque
 import { createAccumulator } from '../providers/accumulator.js'
 import { createStallWatchdog, withStallSignal, type StallWatchdog } from './stall-watchdog.js'
 import { createToolExecutor } from './tool-executor.js'
+import { safeTrace, type TurnLedger, type TurnTrace } from './turn-ledger.js'
 import { createLoopDetector, DEFAULT_HARD_LIMIT } from './loop-detector.js'
 import {
   evaluateClaims,
@@ -214,6 +215,15 @@ export type QueryLoopOptions = {
   messages: Message[]
   tools: Map<string, Tool>
   context: ToolContext
+  /**
+   * Turn-ledger recorder — REQUIRED, deliberately not optional (an optional
+   * param hand-threaded across a dozen call sites is the
+   * channel-custom-llm-wiring failure shape). Production lanes pass the
+   * api recorder (`createTurnLedger`); smoke/eval/test lanes pass
+   * `NOOP_TURN_LEDGER`. Graded by `invariants/turn-ledger-lane-coverage`.
+   * See docs/architecture/engine/turn-ledger.md.
+   */
+  ledger: TurnLedger
   maxTurns?: number
   /**
    * Absolute tool-call cap for this invocation — the loop-detector hard stop.
@@ -549,6 +559,10 @@ export async function* queryLoop(options: QueryLoopOptions): AsyncGenerator<Quer
     : null
   const toolContext: ToolContext = {
     ...options.context,
+    // Nested-loop inheritance: every tool this loop executes sees the
+    // invoking lane's ledger, so a worker or edit-agent loop starts its own
+    // child trace on the same recorder without hand-threading.
+    turnLedger: options.ledger,
     ...(watchdog
       ? {
           abortSignal: withStallSignal(options.context.abortSignal, watchdog),
@@ -638,6 +652,30 @@ async function* queryLoopCore(
     inputTokenLimit: options.inputTokenLimit,
     signal: context.abortSignal,
   })
+
+  // Turn-ledger trace for this invocation. Fire-and-forget by contract; a
+  // recorder failure must never fail the turn (safeTrace + the recorder's
+  // own log-and-continue). See docs/architecture/engine/turn-ledger.md.
+  let ledgerTrace: TurnTrace
+  try {
+    ledgerTrace = options.ledger.startTrace({
+      actor: 'assistant_turn',
+      model,
+      systemPrompt,
+      messages: options.messages,
+    })
+  } catch (err) {
+    console.warn(
+      `[turn-ledger] startTrace threw (recording disabled for this invocation): ${err instanceof Error ? err.message : String(err)}`,
+    )
+    ledgerTrace = {
+      traceId: 'noop',
+      request: () => {},
+      turn: () => {},
+      retrieval: () => {},
+      event: () => {},
+    }
+  }
 
   // Messages to send on each turn. In stateless mode, this accumulates the
   // full conversation history. In stateful mode, only the new turn is sent.
@@ -794,6 +832,16 @@ async function* queryLoopCore(
       const sendOpts: SendOptions | undefined = nextThinkingLevel
         ? { thinkingLevel: nextThinkingLevel }
         : undefined
+      // Ledger: record what is about to go on the wire — the delta in
+      // stateful mode (recorder reconstructs full = start.messages + deltas),
+      // the complete history in stateless mode.
+      safeTrace(ledgerTrace, (t) =>
+        t.request(
+          session
+            ? { turn, messages: nextMessages, full: false }
+            : { turn, messages: statelessHistory, full: true },
+        ),
+      )
       const modelStream = session
         ? session.send(nextMessages, sendOpts)
         : provider.stream({
@@ -1255,6 +1303,13 @@ async function* queryLoopCore(
       response: persistedResponse,
       toolResults: [...persistedToolResults],
     }
+
+    // Ledger: the completed turn — response + matched tool results. This is
+    // the Phase 3b pairing, where tool inputs (tool_use blocks) and outputs
+    // (tool_result blocks) are already correlated.
+    safeTrace(ledgerTrace, (t) =>
+      t.turn({ turn, response: persistedResponse, toolResults: persistedToolResults }),
+    )
 
     // Phase 3 of askQuestion suspend-resume — fire onTurnEnd here, BEFORE
     // the Phase 4 done-check that early-returns on a no-more-tools turn.

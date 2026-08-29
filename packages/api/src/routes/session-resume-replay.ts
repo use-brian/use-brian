@@ -25,6 +25,8 @@
  * [COMP:brain/session-resume-worker]
  */
 
+import { createTurnLedger } from '../ledger/recorder.js'
+import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import {
   queryLoop,
   calculateCost,
@@ -403,6 +405,12 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
       : baseSystemPrompt
 
     for await (const event of queryLoop({
+      ledger: createTurnLedger({
+        workspaceId: runtimeContext.workspaceId ?? null,
+        assistantId: runtimeContext.assistantId,
+        sessionId: runtimeContext.sessionId,
+        payloads: getLedgerPayloadStore(),
+      }).ledger,
       provider: continuationProvider,
       model: customLlm?.selector ?? policy.logicalModel,
       maxTokens: customLlm?.maxTokens,

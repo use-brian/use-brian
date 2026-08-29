@@ -15,6 +15,8 @@
  * See docs/architecture/channels/adapter-pattern.md.
  */
 
+import { createTurnLedger } from '../ledger/recorder.js'
+import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import {
   queryLoop, buildMemoryContext, createMemoryTools, createSessionStateTools,
   buildSessionStateBlock, runSessionStateDiff,
@@ -2160,6 +2162,12 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
       projectIds: turnScope.effectiveProjectIds,
     })
     for await (const event of queryLoop({
+      ledger: createTurnLedger({
+        workspaceId: assistant.workspaceId ?? null,
+        assistantId: assistant.id,
+        sessionId: session.id,
+        payloads: getLedgerPayloadStore(),
+      }).ledger,
       provider: turnProvider, model,
       maxTokens: customLlmRuntime?.maxTokens,
       inputTokenLimit: customLlmRuntime?.inputTokenLimit,

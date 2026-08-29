@@ -7,6 +7,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { NOOP_TURN_LEDGER } from '../engine/turn-ledger.js'
 
 import type { LLMProvider, Message, TokenUsage } from '../providers/types.js'
 import type { Tool, ToolContext } from '../tools/types.js'
@@ -538,6 +539,10 @@ export function createWorkerManager(options: WorkerOptions) {
         let webSearchCalls = 0
 
         for await (const event of queryLoop({
+          // Child trace on the invoking lane's recorder (stamped on the
+          // context by the parent queryLoop). NOOP only reachable when a
+          // worker is driven outside any loop (tests).
+          ledger: context.turnLedger ?? NOOP_TURN_LEDGER,
           provider: workerProvider,
           model,
           maxTokens: context.workerRuntime?.maxTokens,

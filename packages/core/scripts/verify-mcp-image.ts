@@ -15,6 +15,7 @@
  */
 
 import { z } from 'zod'
+import { NOOP_TURN_LEDGER } from '../src/engine/turn-ledger.js'
 import { queryLoop, type QueryEvent } from '../src/engine/query-loop.js'
 import { buildTool } from '../src/tools/types.js'
 import { createGeminiProvider } from '../src/providers/gemini.js'
@@ -50,6 +51,7 @@ const showImage = buildTool({
 async function main(): Promise<void> {
   const events: QueryEvent[] = []
   for await (const event of queryLoop({
+    ledger: NOOP_TURN_LEDGER,
     provider: createGeminiProvider(apiKey!),
     model,
     systemPrompt: 'You are a vision test assistant. Use tools when asked.',

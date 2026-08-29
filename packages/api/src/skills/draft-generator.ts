@@ -29,6 +29,8 @@
  * [COMP:skills/draft-generator]
  */
 
+import { createTurnLedger } from '../ledger/recorder.js'
+import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import {
@@ -383,6 +385,10 @@ async function runResearchTurn(params: {
   let usage: TokenUsage | null = null
   try {
     for await (const event of queryLoop({
+      ledger: createTurnLedger({
+        workspaceId: params.identity?.workspaceId ?? null,
+        payloads: getLedgerPayloadStore(),
+      }).ledger,
       provider: params.provider,
       model: params.model,
       systemPrompt: params.system,

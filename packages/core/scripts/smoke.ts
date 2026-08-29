@@ -14,6 +14,7 @@
  */
 
 import { strict as assert } from 'node:assert'
+import { NOOP_TURN_LEDGER } from '../src/engine/turn-ledger.js'
 import { z } from 'zod'
 import { queryLoop, type QueryEvent } from '../src/engine/query-loop.js'
 import { buildTool } from '../src/tools/types.js'
@@ -100,6 +101,7 @@ async function main(): Promise<void> {
   const events: QueryEvent[] = []
 
   for await (const event of queryLoop({
+    ledger: NOOP_TURN_LEDGER,
     provider: mockProvider(),
     model: 'mock-model',
     systemPrompt: 'You are a smoke test assistant.',

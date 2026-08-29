@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import { NOOP_TURN_LEDGER } from '../turn-ledger.js'
 import dotenv from 'dotenv'
 import { resolve } from 'node:path'
 import { z } from 'zod'
@@ -18,7 +19,7 @@ describeIf('[COMP:engine/query-loop] Query loop (integration)', () => {
     const events: QueryEvent[] = []
     const abortController = new AbortController()
 
-    for await (const event of queryLoop({
+    for await (const event of queryLoop({ ledger: NOOP_TURN_LEDGER,
       provider,
       model: 'gemini-flash',
       systemPrompt: 'You are a test assistant. Be extremely concise.',
@@ -64,7 +65,7 @@ describeIf('[COMP:engine/query-loop] Query loop (integration)', () => {
     const events: QueryEvent[] = []
     const abortController = new AbortController()
 
-    for await (const event of queryLoop({
+    for await (const event of queryLoop({ ledger: NOOP_TURN_LEDGER,
       provider,
       model: 'gemini-flash',
       systemPrompt: 'You are a test assistant. Use tools when needed. Be concise.',

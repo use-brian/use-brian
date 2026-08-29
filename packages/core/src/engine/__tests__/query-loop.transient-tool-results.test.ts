@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { NOOP_TURN_LEDGER } from '../turn-ledger.js'
 import { z } from 'zod'
 import type {
   LLMProvider,
@@ -74,7 +75,7 @@ describe('[COMP:engine/transient-tool-results] query-loop persistence projection
     })
     const events: QueryEvent[] = []
 
-    for await (const event of queryLoop({
+    for await (const event of queryLoop({ ledger: NOOP_TURN_LEDGER,
       provider: providerWithCapturedSends(sent),
       model: 'mock-model',
       systemPrompt: 'system',

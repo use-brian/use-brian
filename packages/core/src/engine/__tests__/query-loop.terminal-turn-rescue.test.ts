@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import { NOOP_TURN_LEDGER } from '../turn-ledger.js'
 import { z } from 'zod'
 import type {
   LLMProvider,
@@ -89,7 +90,7 @@ const SYNTHESIS = 'I checked the merge timestamp and it matches what you already
 
 async function runLoop(provider: LLMProvider): Promise<QueryEvent[]> {
   const events: QueryEvent[] = []
-  for await (const e of queryLoop({
+  for await (const e of queryLoop({ ledger: NOOP_TURN_LEDGER,
     provider,
     model: 'mock-model',
     systemPrompt: 'sys',
@@ -205,7 +206,7 @@ describe('[COMP:engine/query-loop] Invocation finalizers', () => {
     })
     const events: QueryEvent[] = []
 
-    for await (const event of queryLoop({
+    for await (const event of queryLoop({ ledger: NOOP_TURN_LEDGER,
       provider: scriptedProvider([invocationResourceTurn, textChunks('Finished.')]),
       model: 'mock-model',
       systemPrompt: 'sys',
@@ -235,7 +236,7 @@ describe('[COMP:engine/query-loop] Invocation finalizers', () => {
       },
     })
 
-    for await (const event of queryLoop({
+    for await (const event of queryLoop({ ledger: NOOP_TURN_LEDGER,
       provider: scriptedProvider([invocationResourceTurn, textChunks('Finished.')]),
       model: 'mock-model',
       systemPrompt: 'sys',
