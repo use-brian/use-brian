@@ -43,6 +43,7 @@ const SAMPLE: GoalRow = {
   contextProjectId: null,
   confirmedAt: null,
   hasWorkflow: false,
+  originSessionId: null,
   createdAt: "2026-06-30T00:00:00.000Z",
   updatedAt: "2026-06-30T00:00:00.000Z",
 };
