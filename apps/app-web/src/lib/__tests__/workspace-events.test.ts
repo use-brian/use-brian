@@ -20,6 +20,7 @@ import {
   allDomainDispatches,
   createRefreshFolder,
   createVisibilityGate,
+  LIVE_REFRESH_EVENT,
   reconnectDelayMs,
   routeWorkspaceChange,
   SCHEDULED_JOB_REFRESH_EVENT,
@@ -123,6 +124,18 @@ describe("[COMP:app-web/workspace-events] routeWorkspaceChange", () => {
     ]);
   });
 
+  // Live roster liveness (live-work.md §4): a session's turn lifecycle
+  // change rides the spine as a signal; the Live page refetches its tiered
+  // roster, so the payload can never leak content past a tier.
+  it("routes session changes to the live-refresh bus with rowId", () => {
+    expect(routeWorkspaceChange(payload("session", { rowId: "s-1" }))).toEqual([
+      {
+        event: LIVE_REFRESH_EVENT,
+        detail: { workspaceId: "ws-1", rowId: "s-1" },
+      },
+    ]);
+  });
+
   it("ignores unknown primitives — a newer server must never break an older client", () => {
     expect(
       routeWorkspaceChange(
@@ -148,6 +161,8 @@ describe("[COMP:app-web/workspace-events] routeWorkspaceChange", () => {
     expect(events).toContain(WORKSPACE_IDENTITY_REFRESH_EVENT);
     // ...and the Inbox badge, same reasoning (T-H8).
     expect(events).toContain(INBOX_REFRESH_EVENT);
+    // ...and the Live roster (live-work.md §4).
+    expect(events).toContain(LIVE_REFRESH_EVENT);
   });
 });
 

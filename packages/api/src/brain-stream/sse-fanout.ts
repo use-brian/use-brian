@@ -105,6 +105,18 @@ export type BrainPrimitive =
    * docs/architecture/platform/realtime-sync.md.
    */
   | 'inbox'
+  /**
+   * A SESSION's turn lifecycle changed — claimed running, released,
+   * reclaimed, or swept (docs/architecture/features/live-work.md §4). The
+   * Live roster refetches its tiered projection off this signal, so the
+   * payload can never leak content past a tier: `rowId` is the session id,
+   * nothing else travels. Emission is store-seam only (`db/sessions.ts` —
+   * `updateSessionStatus` / `releaseTurnLease` / `reclaimStaleTurn` /
+   * `sweepStuckSessions`): turn lifecycle is human/turn-paced and bounded,
+   * the same reasoning as `workflow_run`. Never per token, never per
+   * heartbeat touch.
+   */
+  | 'session'
 
 /** Alias reflecting the widened, workspace-wide scope. */
 export type WorkspacePrimitive = BrainPrimitive
