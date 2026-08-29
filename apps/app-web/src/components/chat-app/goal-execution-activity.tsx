@@ -22,6 +22,7 @@ import {
 import { describeToolFromInput, type NarrationDict } from "@/lib/tool-narration";
 import { useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
+import { createVisibilityGate } from "@/lib/workspace-events";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -202,23 +203,31 @@ export function GoalExecutionActivity({
   useEffect(() => {
     setState(emptyGoalExecutionActivity(initialStatus));
     if (!enabled || !goalId) return;
-    const controller = new AbortController();
+    // Every open stream holds one of the API's per-instance request slots
+    // (2026-08-27 outage), so a hidden tab releases its subscription after the
+    // grace window and reconnects on return — the reconnect's `status` frame +
+    // the server's 5s status poll make the release lossless for state, and
+    // in-between activity is ephemeral by design. All liveness state lives in
+    // this effect's closure (no ref latch — Strict Mode re-runs get a fresh
+    // one, per the strict-mode-unmount-latch invariant).
+    let disposed = false;
+    let terminal = isTerminal(initialStatus);
+    let inner: AbortController | null = null;
 
-    void (async () => {
-      let terminal = isTerminal(initialStatus);
+    const runStream = async (signal: AbortSignal) => {
       let retryMs = 1_000;
-      while (!controller.signal.aborted && !terminal) {
+      while (!signal.aborted && !terminal) {
         try {
           const response = await authFetch(
             `${API_URL}/api/goals/${encodeURIComponent(goalId)}/stream`,
-            { signal: controller.signal },
+            { signal },
           );
           if (!response.ok || !response.body) throw new Error("goal_activity_unavailable");
           retryMs = 1_000;
           const reader = response.body.getReader();
           const decoder = new TextDecoder();
           const buffer = createSSEBuffer();
-          while (!controller.signal.aborted) {
+          while (!signal.aborted) {
             const { value, done } = await reader.read();
             if (done) break;
             for (const frame of parseSSEStream(decoder.decode(value, { stream: true }), buffer)) {
@@ -236,16 +245,40 @@ export function GoalExecutionActivity({
             }
           }
         } catch {
-          if (controller.signal.aborted) break;
+          if (signal.aborted) break;
         }
-        if (!terminal && !controller.signal.aborted) {
-          await waitForRetry(controller.signal, retryMs);
+        if (!terminal && !signal.aborted) {
+          await waitForRetry(signal, retryMs);
           retryMs = Math.min(10_000, retryMs * 2);
         }
       }
-    })();
+    };
 
-    return () => controller.abort();
+    const connect = () => {
+      if (disposed || terminal || inner) return;
+      const controller = new AbortController();
+      inner = controller;
+      void runStream(controller.signal).finally(() => {
+        if (inner === controller) inner = null;
+      });
+    };
+    const disconnect = () => {
+      inner?.abort();
+      inner = null;
+    };
+
+    const gate = createVisibilityGate({ connect, disconnect });
+    const onVisibility = () =>
+      gate.onVisibility(document.visibilityState === "hidden" ? "hidden" : "visible");
+    document.addEventListener("visibilitychange", onVisibility);
+    onVisibility();
+
+    return () => {
+      disposed = true;
+      document.removeEventListener("visibilitychange", onVisibility);
+      gate.dispose();
+      disconnect();
+    };
   }, [enabled, goalId, initialStatus, t.chat.toolNarration]);
 
   if (!enabled) return null;

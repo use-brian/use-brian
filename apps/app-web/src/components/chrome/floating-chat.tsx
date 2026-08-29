@@ -100,6 +100,10 @@ import {
   type AssistantRefreshDetail,
 } from "@/lib/assistant-events";
 import {
+  readActiveAssistantId,
+  writeActiveAssistantId,
+} from "@/lib/active-assistant";
+import {
   derivePageIcon,
   getAssistantIdentity,
   listWorkspaceAssistants,
@@ -240,6 +244,7 @@ import {
   DockRecorderNotice,
   DockRecorderRecovery,
   DockRecorderStrip,
+  pickCaptureWindow,
 } from "@/components/chrome/dock-recorder";
 import { useFileDrop } from "@/lib/use-file-drop";
 import { AttachmentChips, FileDropOverlay } from "@/components/doc/attachment-chips";
@@ -280,15 +285,10 @@ const RECONNECT_REOPEN_MS = 3_000;
 const RECONNECT_BUDGET_MS = 35 * 60_000;
 type ModelTier = "standard" | "pro" | "max";
 
-/**
- * Per-workspace persisted choice of which assistant this doc chat talks
- * to. Defaults to the workspace primary (passed in as the `assistantId`
- * prop) but the user can switch to any accessible workspace assistant; the
- * selection sticks across reloads.
- */
-function activeAssistantStorageKey(workspaceId: string): string {
-  return `doc-active-assistant-id:${workspaceId}`;
-}
+// Per-workspace persisted choice of which assistant this doc chat talks to
+// (defaults to the workspace primary, switchable to any accessible workspace
+// assistant, sticks across reloads) now lives in `lib/active-assistant.ts` —
+// the landing's draft-assistant picker reads the same key.
 
 /**
  * Persisted floating-dock dimensions (`mode="floating"` only). The user can
@@ -358,6 +358,14 @@ type ViewAttachment = {
 /** Extends chat-ui's Message with the per-message view list. */
 type MessageWithViews = Message & {
   views?: ViewAttachment[];
+  /**
+   * The ANSWERING assistant for this reply (multi-voice doc thread /
+   * migration 390's `sender_assistant_id`). Restored rows carry the
+   * persisted stamp; live turns stamp the addressed assistant at send time.
+   * Null/absent on human rows and pre-390 history — those render as the
+   * active assistant.
+   */
+  senderAssistantId?: string | null;
   /**
    * The user's OWN uploaded attachments (pasted screenshots, picked/dropped
    * files), shown as thumbnail/file cards on their message bubble. On the live
@@ -467,6 +475,10 @@ type FloatingChatProps = {
      * `autoSend` + `docViewId`.
      */
     anchorBlockId?: string;
+    /** Draft-assistant pick (the landing's picker): switch the dock's
+     *  interlocutor to this assistant — the manual switcher's fresh-session
+     *  rule — before the seeded turn fires. */
+    assistantId?: string;
     nonce: number;
   };
   /**
@@ -539,31 +551,13 @@ export function FloatingChat({
   // `selectedAssistantId` is what every chat path below actually uses (resume,
   // send body, identity avatar). The backend still injects doc-editing
   // tools off `appOrigin: "doc"`, so any assistant can edit pages here.
-  const [selectedAssistantId, setSelectedAssistantId] = useState<string>(() => {
-    if (typeof window !== "undefined") {
-      try {
-        const saved = window.localStorage.getItem(
-          activeAssistantStorageKey(workspaceId),
-        );
-        if (saved) return saved;
-      } catch {
-        /* private mode — fall through to the prop default */
-      }
-    }
-    return assistantId;
-  });
+  const [selectedAssistantId, setSelectedAssistantId] = useState<string>(
+    () => readActiveAssistantId(workspaceId) ?? assistantId,
+  );
   // If the prop changes (workspace switch) and no persisted choice exists for
   // the new workspace, follow the new default primary.
   useEffect(() => {
-    let persisted: string | null = null;
-    try {
-      persisted = window.localStorage.getItem(
-        activeAssistantStorageKey(workspaceId),
-      );
-    } catch {
-      /* private mode */
-    }
-    setSelectedAssistantId(persisted ?? assistantId);
+    setSelectedAssistantId(readActiveAssistantId(workspaceId) ?? assistantId);
   }, [assistantId, workspaceId]);
 
   const [switcherOpen, setSwitcherOpen] = useState(false);
@@ -844,26 +838,29 @@ export function FloatingChat({
   }, [stream, session, midTurn]);
 
   // ── Assistant switch ─────────────────────────────────────────────────────
-  // A session is assistant-bound server-side: the backend rejects a turn when
-  // `session.assistantId !== assistant.id`. So switching the interlocutor MUST
-  // start a FRESH session — clear `sessionIdRef.current` (and the reducer's
-  // session id + loaded messages) so the next send mints a new session for the
-  // newly-selected assistant rather than appending to the old one. The
-  // assistant-keyed resume effect then re-runs and pulls THAT assistant's
-  // latest session for this surface, if any.
+  // On the DOC surface a switch is a per-turn re-address, not a thread
+  // reset: the doc dock's personal thread reuses the multi-assistant room
+  // machinery (chat-app.md → "Choosing an assistant" → the doc-dock
+  // bullet), so the next send simply carries the new `assistantId`, the
+  // server runs that turn AS the new assistant and stamps its reply, and
+  // the conversation — including any in-flight turn, which completes as the
+  // assistant that started it — is kept.
+  //
+  // Every other origin keeps the fresh-session rule: those sessions are
+  // strictly assistant-bound server-side (the backend rejects a turn when
+  // `session.assistantId !== assistant.id`), so we clear
+  // `sessionIdRef.current` (and the reducer's session id + loaded messages)
+  // and let the assistant-keyed resume effect pull the new assistant's
+  // latest session for the surface, if any.
   const handleSwitchAssistant = useCallback(
     (id: string) => {
       setSwitcherOpen(false);
       if (id === selectedAssistantId) return;
-      try {
-        window.localStorage.setItem(activeAssistantStorageKey(workspaceId), id);
-      } catch {
-        /* private mode — selection just won't persist across reloads */
-      }
-      resetThread();
+      writeActiveAssistantId(workspaceId, id);
+      if (!isDocOrigin) resetThread();
       setSelectedAssistantId(id);
     },
-    [selectedAssistantId, workspaceId, resetThread],
+    [selectedAssistantId, workspaceId, resetThread, isDocOrigin],
   );
 
   // ── One persistent dock across every tab ─────────────────────────────────
@@ -1177,6 +1174,11 @@ export function FloatingChat({
   const [researchPhase, setResearchPhase] = useState<ResearchPhase | null>(null);
   // Server-assigned assistant message id (from `assistant_message_saved`).
   const assistantIdRef = useRef<string | null>(null);
+  // The assistant ANSWERING this turn — set at send time (the seed's
+  // addressed pick, or the switcher's selection). Stamped onto the committed
+  // streamed message so a mixed-voice doc thread renders the right avatar
+  // per reply, mirroring the persisted rows' `senderAssistantId`.
+  const turnVoiceRef = useRef<string | null>(null);
   // Set when this turn emitted an askQuestion confirmation (the suspend
   // path). The event carries no approvalId, so onDone probes GET /pending
   // to fetch it and surface the answer panel immediately — without making
@@ -1399,7 +1401,14 @@ export function FloatingChat({
 
       const latest = await fetchLatestSession({
         workspaceId,
-        assistantId: selectedAssistantId,
+        // The doc dock resumes SURFACE-scoped, across the workspace's
+        // assistants: its thread is per-turn addressable, so the latest doc
+        // thread is the resume target no matter which assistant is
+        // currently picked (the thread's binding is just whoever founded
+        // it). Other origins stay assistant-keyed.
+        ...(origin === "doc"
+          ? { scope: "workspace" as const }
+          : { assistantId: selectedAssistantId }),
         // Sessions are stamped per-surface — the doc dock resumes its doc
         // thread, a Brain dock its brain thread, and so on.
         appOrigin: origin,
@@ -1670,6 +1679,7 @@ export function FloatingChat({
       role: "assistant",
       text: finalText,
       timestamp: new Date(),
+      ...(turnVoiceRef.current ? { senderAssistantId: turnVoiceRef.current } : {}),
       ...(views.length > 0 ? { views } : {}),
       ...(tools.length > 0 ? { toolsUsed: tools } : {}),
       ...(activityDurationMs != null ? { activityDurationMs } : {}),
@@ -1730,6 +1740,11 @@ export function FloatingChat({
         fileIds?: string[];
         /** Staged recording ids handed in from the seeding surface. */
         attachedRecordingIds?: string[];
+        /** Run THIS turn as this assistant (the landing's draft-assistant
+         *  picker) — the seed effect switches `selectedAssistantId` in the
+         *  same tick, but this closure still holds the old value, so the
+         *  override is what makes the build turn run on the picked assistant. */
+        assistantId?: string;
       },
     ): Promise<boolean> => {
       // Guard block — each early-return reports `false` so callers (the seed
@@ -1795,6 +1810,9 @@ export function FloatingChat({
       session.clearConfirmations();
       session.dispatch({ type: "stream/start" });
       resetTurnBuffers();
+      // Who answers THIS turn — the seed's addressed pick wins over the
+      // switcher's selection (same precedence as the request body below).
+      turnVoiceRef.current = override?.assistantId ?? selectedAssistantId;
 
       await stream.start({
         url: `${API_URL}/api/chat`,
@@ -1831,8 +1849,9 @@ export function FloatingChat({
           // The selected interlocutor (primary by default, or whatever the
           // switcher set). A session is assistant-bound; the switch handler
           // wipes `sessionIdRef` so this turn mints a fresh session when the
-          // assistant changed.
-          assistantId: selectedAssistantId,
+          // assistant changed. A seeded build with a draft-assistant pick
+          // overrides, because the switched state hasn't settled yet.
+          assistantId: override?.assistantId ?? selectedAssistantId,
           // Migrations 187/255 — stamps newly-created sessions with the
           // surface they came from, so threads + Recents scope per-surface.
           appOrigin: origin,
@@ -2777,6 +2796,7 @@ export function FloatingChat({
         (fallbackFileId) => sendMessage("", { fileIds: [fallbackFileId] }),
       ),
     prepareLivePage: liveRecording.prepare,
+    prepareWindowSource: () => pickCaptureWindow(tRecorder),
     streamLiveWindow: liveRecording.streamWindow,
     onMeetingCapture: async (file: File, live?: { pageId: string; sessionId?: string }) => {
       const outcome = await rec.run(file, {
@@ -2831,7 +2851,25 @@ export function FloatingChat({
       if (seedRequest.model) setModel(seedRequest.model);
       if (seedRequest.researchMode !== undefined)
         setResearchMode(seedRequest.researchMode);
+      // The landing's draft-assistant pick: a per-turn RE-ADDRESS, not a
+      // thread reset — the doc thread is per-turn addressable (chat-app.md →
+      // "Choosing an assistant" → the doc-dock bullet), so the build turn
+      // simply runs as the picked assistant inside the same conversation.
+      // Update + persist the selection so follow-ups stay with the pick, and
+      // pass it as a send override since `selectedAssistantId` in this
+      // closure is still the old value. On a retry render (send returned
+      // false) the ids already match and this block no-ops.
+      const seedAssistantId =
+        seedRequest.assistantId &&
+        seedRequest.assistantId !== selectedAssistantId
+          ? seedRequest.assistantId
+          : undefined;
+      if (seedAssistantId) {
+        writeActiveAssistantId(workspaceId, seedAssistantId);
+        setSelectedAssistantId(seedAssistantId);
+      }
       void sendMessage(seedRequest.prefill, {
+        ...(seedAssistantId ? { assistantId: seedAssistantId } : {}),
         ...(seedRequest.docViewId ? { docViewId: seedRequest.docViewId } : {}),
         // Inline Space-for-AI: anchor the generation after the box's block so
         // it lands at that line, not the page end.
@@ -2859,7 +2897,7 @@ export function FloatingChat({
       setInput(seedRequest.prefill);
       seedNonceRef.current = seedRequest.nonce;
     }
-  }, [seedRequest, sendMessage]);
+  }, [seedRequest, sendMessage, selectedAssistantId, workspaceId]);
 
   // ── Retry / Copy / Confirmation handlers ───────────────────────────────
 
@@ -3255,7 +3293,17 @@ export function FloatingChat({
             <MessageBubble
               key={msg.id}
               message={msg}
-              assistant={activeAssistant}
+              // Per-reply voice: a mixed-voice doc thread resolves each
+              // assistant row's avatar from its `senderAssistantId` stamp;
+              // unstamped rows (humans, pre-390 history) fall back to the
+              // active assistant.
+              assistant={
+                (msg.senderAssistantId
+                  ? workspaceAssistants.find(
+                      (a) => a.id === msg.senderAssistantId,
+                    )
+                  : undefined) ?? activeAssistant
+              }
               workspaceId={workspaceId}
               openInDocLabel={t.openInDoc}
               appendedLabel={t.viewAppended}
@@ -3820,6 +3868,9 @@ function mapSessionRows(
             ? stripFollowUps(extractMessageText(m.content))
             : (parsedUser?.text ?? extractMessageText(m.content)),
         timestamp: new Date(m.timestamp),
+        ...(m.role === "assistant" && m.senderAssistantId
+          ? { senderAssistantId: m.senderAssistantId }
+          : {}),
         ...(toolsUsed.length > 0 ? { toolsUsed } : {}),
         ...(m.attachments && m.attachments.length > 0
           ? { fileAttachments: m.attachments }
@@ -4059,10 +4110,12 @@ function MessageBubble({
   citationLabel,
 }: {
   message: MessageWithViews;
-  // The interlocutor whose avatar fronts assistant replies — the active
-  // assistant (switching assistants resets the session, so every assistant
-  // message in a loaded conversation belongs to it). `null` before it
-  // resolves, in which case the avatar degrades to the generic glyph.
+  // The voice whose avatar fronts THIS assistant reply — resolved per
+  // message from `senderAssistantId` (the doc thread is per-turn
+  // addressable, so one loaded conversation can carry several assistants'
+  // replies), falling back to the active assistant for unstamped rows.
+  // `null` before any identity resolves — the avatar degrades to the
+  // generic glyph.
   assistant: Pick<WorkspaceAssistantSummary, "id" | "name" | "iconSeed"> | null;
   workspaceId: string;
   openInDocLabel: string;
@@ -4095,7 +4148,7 @@ function MessageBubble({
             image thumbnails or file cards, right-aligned under the bubble. */}
         {message.userAttachments?.length ? (
           <div className="w-full max-w-[280px]">
-            <MessageAttachments attachments={message.userAttachments} />
+            <MessageAttachments attachments={message.userAttachments} workspaceId={workspaceId} />
           </div>
         ) : null}
         {message.text ? (

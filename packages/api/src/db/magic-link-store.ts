@@ -18,7 +18,7 @@ import { query } from './client.js'
 
 // ── Types ──────────────────────────────────────────────────────
 
-export type MagicLinkLocale = 'en' | 'ja' | 'zh'
+export type MagicLinkLocale = 'en' | 'ja' | 'zh' | 'zh-CN'
 
 export type MagicLinkConsumed = {
   email: string

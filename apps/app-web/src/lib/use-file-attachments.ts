@@ -54,7 +54,10 @@ export type Attachment = {
   fileName: string;
   mimeType: string;
   sizeBytes: number;
-  /** Object URL for image previews; revoked on remove / clear. */
+  /**
+   * Object URL for image thumbnails and image/PDF in-app previews; revoked on
+   * remove / clear (ready chips hand theirs to the sent message on detach).
+   */
   previewUrl?: string;
   status: AttachmentStatus;
   error?: string;
@@ -396,7 +399,10 @@ export function useFileAttachments(
       fileName: f.name,
       mimeType: f.type || "application/octet-stream",
       sizeBytes: f.size,
-      previewUrl: f.type.startsWith("image/") ? URL.createObjectURL(f) : undefined,
+      previewUrl:
+        f.type.startsWith("image/") || f.type === "application/pdf"
+          ? URL.createObjectURL(f)
+          : undefined,
       status: "uploading" as const,
     }));
     setAttachments((prev) => [...prev, ...staged]);

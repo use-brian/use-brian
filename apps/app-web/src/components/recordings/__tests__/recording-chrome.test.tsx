@@ -15,6 +15,7 @@ vi.mock("@/lib/api/recordings", () => ({
 vi.mock("next/link", () => ({ default: ({ children }: { children: unknown }) => <>{children}</> }));
 vi.mock("@/lib/recordings/recording-player-context", () => ({
   useRecordingPlayer: () => ({ transcriptFocus: null, clearTranscriptFocus: vi.fn() }),
+  RecordingVideoStage: () => <div />,
 }));
 vi.mock("../recording-player-bar", () => ({ RecordingPlayerBar: () => <div /> }));
 vi.mock("../transcript-pane", () => ({ TranscriptPane: () => <div /> }));

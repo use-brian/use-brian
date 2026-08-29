@@ -47,6 +47,16 @@ export type FileStore = {
     sensitivity?: 'public' | 'internal' | 'confidential'
     compartments?: string[]
     projectIds?: string[]
+    /**
+     * Original bytes as a base64 data URL, stored beside the parsed text so a
+     * structured document (docx/pptx/xlsx/csv/…) can be rendered as a PDF
+     * preview on demand (migration 487). Deliberately NOT part of `CachedFile`
+     * or the default SELECT — it is multi-MB payload the chat turn never
+     * reads; fetch it through `getOriginalContent`. Inline media (images,
+     * PDFs, audio) already carry their bytes in `content` and leave this
+     * unset.
+     */
+    originalContent?: string
   }): Promise<CachedFile>
 
   /**
@@ -74,4 +84,13 @@ export type FileStore = {
    * the columns (migration 299).
    */
   linkArtifact?(id: string, artifactFileId: string, segmentCount: number): Promise<void>
+
+  /**
+   * The original bytes of a cached upload as a base64 data URL, or null when
+   * none were kept (inline media, legacy rows, non-document uploads). Same
+   * access gating as `get`. Cold path only — the PDF-preview route is the
+   * intended caller. Optional: only the DB store carries the column
+   * (migration 487).
+   */
+  getOriginalContent?(id: string, ctx?: AccessContext): Promise<string | null>
 }

@@ -10,7 +10,7 @@
  * add a locale.
  */
 
-export const LOCALES = ["en", "zh", "ja"] as const;
+export const LOCALES = ["en", "zh", "zh-CN", "ja"] as const;
 export type Locale = (typeof LOCALES)[number];
 
 export const DEFAULT_LOCALE: Locale = "en";
@@ -23,6 +23,7 @@ export const LOCALE_COOKIE_MAX_AGE = 60 * 60 * 24 * 365;
 export const LOCALE_LABELS: Record<Locale, string> = {
   en: "English",
   zh: "繁體中文",
+  "zh-CN": "简体中文",
   ja: "日本語",
 };
 
@@ -31,8 +32,23 @@ export function isLocale(value: string | undefined | null): value is Locale {
 }
 
 /**
+ * Resolve one lowercased `Accept-Language` tag to a supported locale.
+ * Simplified-script tags (`zh-cn`, `zh-sg`, `zh-hans*`) resolve to
+ * `zh-CN`; every other `zh-*` (and bare `zh`) resolves to `zh`, whose
+ * dictionary holds Traditional Chinese.
+ */
+function resolveTag(tag: string): Locale | null {
+  if (tag === "zh-cn" || tag === "zh-sg" || tag.startsWith("zh-hans")) {
+    return "zh-CN";
+  }
+  const primary = tag.split("-")[0];
+  if (primary === "zh") return "zh";
+  return isLocale(primary) ? primary : null;
+}
+
+/**
  * Pick the best locale from an `Accept-Language` header. Honors quality
- * weights, matches on the primary subtag, falls back to
+ * weights, matches per tag via {@link resolveTag}, falls back to
  * {@link DEFAULT_LOCALE}.
  */
 export function matchLocale(acceptLanguage: string | null | undefined): Locale {
@@ -48,8 +64,8 @@ export function matchLocale(acceptLanguage: string | null | undefined): Locale {
     .filter((r) => r.tag)
     .sort((a, b) => b.q - a.q);
   for (const { tag } of ranked) {
-    const primary = tag.split("-")[0];
-    if (isLocale(primary)) return primary;
+    const match = resolveTag(tag);
+    if (match) return match;
   }
   return DEFAULT_LOCALE;
 }

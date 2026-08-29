@@ -518,6 +518,7 @@ import { setKnowledgeEventDispatcher } from './knowledge-event-fanout.js'
 import { setBrandEventDispatcher } from './brand-event-fanout.js'
 import { createRecordingSynthesizer, type RecordingSynthesizeFn } from './synthesis/recording-synthesizer.js'
 import { processOpenRecording } from './recordings/process-recording.js'
+import { createRecordingFrameAnalyzer } from './recordings/frame-analysis.js'
 import { createOpenRecordingProcessWorker } from './recordings/recording-process-worker.js'
 import { getRecording, updateRecording } from './db/recordings-store.js'
 import { mergeEpisodeSourceRef } from './db/episodes-store.js'
@@ -1512,7 +1513,16 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         : reason === 'unconfirmed_needs_clarification'
           ? `I tried to work a task but its goal isn't confirmed yet: "${goal.outcome}". Confirm the goal and I'll proceed.`
           : `Goal blocked${reason ? ` (${reason})` : ''}: ${goal.outcome}`
-    await deliverToChannel({ assistantId, userId: goal.createdByUserId, text, channelType: 'web' })
+    // In-chat pursuit: a goal that originated in a chat session also persists
+    // its terminal line back into that transcript, so the conversation records
+    // how the pursuit ended (the notification-session copy still lands).
+    await deliverToChannel({
+      assistantId,
+      userId: goal.createdByUserId,
+      text,
+      channelType: 'web',
+      ...(goal.originSessionId ? { sessionId: goal.originSessionId } : {}),
+    })
   }
   // Structural goal-seeker rollup: when a sub-task closes, complete any
   // task-hosted goal whose `subtasks` done_when is now met (no acting loop, no
@@ -7442,6 +7452,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             brainIngestor: brainEpisodeIngestor,
             filesApi,
             synthesize: recordingSynthesize,
+            // Video keyframe analysis rides whichever vision-capable media
+            // backend the box holds (google / dashscope / the deployment's own
+            // chat provider). The unavailable fallback is deliberately NOT
+            // used: no vision capability means the step is skipped, not failed.
+            analyzeFrames: createRecordingFrameAnalyzer({
+              backend: () => selectKeyedMediaBackend() ?? providerMediaBackend,
+            }),
           })
           await updateRecording(job.recordingId, {
             status: 'processed',

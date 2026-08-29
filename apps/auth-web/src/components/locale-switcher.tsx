@@ -8,5 +8,6 @@ export function LocaleSwitcher() {
     document.cookie = `locale=${locale}; Path=/; Max-Age=31536000; SameSite=Lax`;
     window.location.reload();
   };
-  return <div className="languages" aria-label={t.common.language}>{["en", "ja", "zh"].map((locale) => <button type="button" key={locale} onClick={() => setLocale(locale)}>{locale.toUpperCase()}</button>)}</div>;
+  const locales: Array<[string, string]> = [["en", "EN"], ["ja", "JA"], ["zh", "繁"], ["zh-CN", "简"]];
+  return <div className="languages" aria-label={t.common.language}>{locales.map(([locale, label]) => <button type="button" key={locale} onClick={() => setLocale(locale)}>{label}</button>)}</div>;
 }

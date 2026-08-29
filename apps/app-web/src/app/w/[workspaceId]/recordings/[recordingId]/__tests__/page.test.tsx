@@ -28,6 +28,7 @@ vi.mock("next/navigation", () => ({
 vi.mock("@/lib/recordings/recording-player-context", () => ({
   RecordingPlayerProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
   useRecordingPlayer: () => ({ seekTo: vi.fn(), recordingId: "rec-1" }),
+  RecordingVideoStage: () => <div data-testid="video-stage" />,
 }));
 
 // The shared pieces are asserted by [COMP:app-web/recording-chrome]; here we

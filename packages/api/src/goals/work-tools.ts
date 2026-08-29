@@ -20,6 +20,10 @@ import { buildTool, EventSubscriptionSchema, notFoundFailure, type GoalClarityAs
 import { getGoalByIdSystem, setGoalAwaitingEventSystem, stampGoalCompletionSystem, updateGoalSystem } from '../db/goals.js'
 import { goalAcceptedMeta } from './acknowledgement.js'
 
+/** Real chat sessions are UUIDs; workflow iterations carry synthetic
+ *  `workflow_run_<uuid>` ids that must never be stamped as a goal's origin. */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
 export type GoalWorkToolsDeps = {
   /** Build the simple default "complete this task" workflow for a goal's host
    *  task, returning its id. Wired in boot to `buildOneStepReminderWorkflow`. */
@@ -155,7 +159,14 @@ export function createGoalWorkTools(
         }
       }
       const workflowId = input.workflow_id ?? (await deps.createCompletionWorkflow(goal, context.userId))
-      const updated = await updateGoalSystem(input.goal_id, { means: { ...goal.means, workflowId } })
+      const updated = await updateGoalSystem(input.goal_id, {
+        means: { ...goal.means, workflowId },
+        // In-chat pursuit anchor (mig 481): the arming chat claims a goal that
+        // was created without one (store-level COALESCE never steals a bound
+        // session). Workflow iterations carry synthetic non-UUID session ids
+        // and stamp nothing.
+        ...(UUID_RE.test(context.sessionId) ? { originSessionId: context.sessionId } : {}),
+      })
       if (!updated) {
         return goalNotFound(
           input.goal_id,

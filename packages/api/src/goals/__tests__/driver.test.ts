@@ -36,6 +36,7 @@ function makeGoal(over: Partial<GoalRecord> = {}): GoalRecord {
     contextGroupId: null,
     contextProjectId: null,
     createdByUserId: 'u1',
+    originSessionId: null,
     confirmedAt: new Date(0), // confirmed → the acting loop may run it
     completionClaim: null,
     brief: null,

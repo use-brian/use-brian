@@ -263,6 +263,18 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       const rawOrigin = typeof req.query.appOrigin === 'string' ? req.query.appOrigin : null
       const appOrigin = rawOrigin && (KNOWN_ORIGINS as readonly string[]).includes(rawOrigin) ? rawOrigin : null
 
+      // `scope=workspace` — list the caller's own sessions across EVERY
+      // assistant in the workspace instead of one assistant's. The doc dock's
+      // resume uses it: its personal thread is per-turn addressable
+      // (chat-app.md → "Choosing an assistant" → the doc-dock bullet), so
+      // the thread's BOUND assistant is just whoever founded it and a
+      // reload must re-attach the latest doc thread regardless of the
+      // current pick. Requires `workspaceId` (the primary resolution above
+      // is the membership check); every other filter below is unchanged —
+      // still owner-visibility, still the caller's own rows.
+      const workspaceScope =
+        req.query.scope === 'workspace' && Boolean(requestedWorkspaceId)
+
       // Hide feed-web's single-thread surfaces from the main web sidebar:
       // post-drafting sessions (`mode='draft'`) and the sticky tuning /
       // per-draft-iteration channels documented in
@@ -275,15 +287,19 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       const result = await query<{
         id: string; title: string | null; channelId: string;
         lastActiveAt: Date; status: string; appOrigin: string | null
+        assistantId: string
         contextGroupId: string | null; contextProjectId: string | null
       }>(
         `SELECT s.id, s.title, s.channel_id as "channelId",
                 s.last_active_at as "lastActiveAt", s.status,
                 s.app_origin as "appOrigin",
+                s.assistant_id as "assistantId",
                 s.context_group_id as "contextGroupId",
                 s.context_project_id as "contextProjectId"
          FROM sessions s
-         WHERE s.assistant_id = $1 AND s.user_id = $2
+         WHERE ${workspaceScope
+           ? `s.assistant_id IN (SELECT a.id FROM assistants a WHERE a.workspace_id = $1)`
+           : `s.assistant_id = $1`} AND s.user_id = $2
            -- Enumerations list only owner-scoped sessions. Workspace-shared
            -- rows (doc threads / drafts, migration 223) are reached by id
            -- via their surface, never by this list — the channel_type filter
@@ -297,7 +313,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
            AND ($3::text IS NULL OR s.app_origin = $3 OR s.app_origin IS NULL)
          ORDER BY s.last_active_at DESC
          LIMIT 50`,
-        [assistant.id, user.id, appOrigin],
+        [workspaceScope ? requestedWorkspaceId : assistant.id, user.id, appOrigin],
       )
 
       res.json(result.rows.map((s) => ({
@@ -309,6 +325,10 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         // splits on it — chat-origin rows are "Chats", the rest are the
         // dock's ambient threads under "Other conversations".
         appOrigin: s.appOrigin,
+        // The session's BOUND assistant. Under `scope=workspace` rows span
+        // assistants, so the caller needs it; on the per-assistant path it
+        // simply echoes the requested id.
+        assistantId: s.assistantId,
         contextGroupId: s.contextGroupId,
         contextProjectId: s.contextProjectId,
       })))

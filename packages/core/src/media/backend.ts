@@ -707,3 +707,55 @@ export async function runMediaUnderstanding(
   if (backend.kind === 'provider') return runProviderBacked(backend, req)
   return runGoogle(backend.transport, req)
 }
+
+// ── Frame batches (video keyframe analysis) ─────────────────────
+
+export type FrameBatchRequest = {
+  /** Ordered frames of ONE batch; index order is the prompt's frame numbering. */
+  frames: Array<{ buffer: Buffer; mime: string }>
+  prompt: string
+  /** Wire model for the google backend. DashScope substitutes its vision model;
+   *  the provider backend uses its own bound model. */
+  model: string
+  maxOutputTokens: number
+  timeoutMs: number
+  fetchFn?: typeof fetch
+  errorLabel: string
+  signal?: AbortSignal
+}
+
+/**
+ * One vision call over a batch of video keyframes, through the same three
+ * `VisionCaller` adapters the PDF page distiller uses (`image_url` data URIs on
+ * DashScope, `inlineData` on Google, `image` ContentBlocks on the deployment's
+ * own chat provider). `runMediaUnderstanding` takes exactly one blob per call,
+ * which is the wrong economics for keyframes — a recording samples dozens, and
+ * per-frame calls would pay the prompt again for every frame. The caller owns
+ * batching, frame numbering inside the prompt, and parsing the reply.
+ */
+export async function runFrameBatchUnderstanding(
+  backend: MediaBackend,
+  req: FrameBatchRequest,
+): Promise<MediaResult> {
+  if (req.frames.length === 0) throw new Error(`${req.errorLabel}: empty frame batch`)
+  const fetchFn = req.fetchFn ?? fetch
+  const caller: VisionCaller =
+    backend.kind === 'dashscope'
+      ? dashScopeVisionCaller(fetchFn, backend, req.errorLabel)
+      : backend.kind === 'provider'
+        ? providerVisionCaller(backend.provider, backend.model)
+        : googleVisionCaller(fetchFn, backend.transport, req.model, req.errorLabel)
+  const result = await caller({
+    images: req.frames.map((frame, i) => ({ pageNumber: i + 1, buffer: frame.buffer, mime: frame.mime })),
+    prompt: req.prompt,
+    maxOutputTokens: req.maxOutputTokens,
+    timeoutMs: req.timeoutMs,
+    ...(req.signal ? { signal: req.signal } : {}),
+  })
+  return {
+    text: result.text,
+    usage: result.usage,
+    model: result.model,
+    ...(result.truncated !== undefined ? { truncated: result.truncated } : {}),
+  }
+}

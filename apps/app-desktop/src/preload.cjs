@@ -38,6 +38,21 @@ const bridge = {
   // Dock recorder capability. The renderer uses this explicit promise instead
   // of guessing from a user agent; old shells omit it and remain mic-only.
   systemAudioCapture: process.platform === "darwin" || process.platform === "win32",
+  // Screen-capture source picker (docs/architecture/media/live-capture.md ->
+  // "Capture sources"): the renderer lists shareable windows and points the
+  // shell's NEXT display-media grant at the picked one. Old shells omit these
+  // and the recorder hides the specific-window option.
+  captureSourcePicker: true,
+  listCaptureSources: (kind) =>
+    ipcRenderer.invoke(
+      "Use Brian:list-capture-sources",
+      kind === "screen" ? "screen" : "window",
+    ),
+  setCaptureSource: (id) =>
+    ipcRenderer.send(
+      "Use Brian:set-capture-source",
+      typeof id === "string" ? id : null,
+    ),
   signIn: () => ipcRenderer.send("Use Brian:sign-in"),
   signOut: () => ipcRenderer.send("Use Brian:sign-out"),
   // The offline landing's "Retry" button asks the shell to reload the app now.

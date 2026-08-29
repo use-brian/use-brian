@@ -1,12 +1,13 @@
 import { cookies, headers } from "next/headers";
-import { en, ja, zh, type Dictionary } from "./dictionaries";
+import { en, ja, zh, zhCN, type Dictionary } from "./dictionaries";
 
-export type Locale = "en" | "ja" | "zh";
-const dictionaries: Record<Locale, Dictionary> = { en, ja, zh };
+export type Locale = "en" | "ja" | "zh" | "zh-CN";
+const dictionaries: Record<Locale, Dictionary> = { en, ja, zh, "zh-CN": zhCN };
 
 export function normalizeLocale(raw: string | null | undefined): Locale {
   const value = raw?.toLowerCase() ?? "";
   if (value.startsWith("ja")) return "ja";
+  if (value.startsWith("zh-cn") || value.startsWith("zh-sg") || value.startsWith("zh-hans")) return "zh-CN";
   if (value.startsWith("zh")) return "zh";
   return "en";
 }

@@ -221,3 +221,110 @@ describe("[COMP:app-web/empty-page-landing] chat-seed bus", () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 });
+
+describe("[COMP:app-web/empty-page-landing] Draft-assistant picker", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const floatingChatSource = readFileSync(
+    fileURLToPath(
+      new URL("../../chrome/floating-chat.tsx", import.meta.url),
+    ),
+    "utf8",
+  );
+
+  it("hides the picker until the roster resolves (SSR renders no chip)", () => {
+    // The roster loads in an effect, so SSR (and hydration) always see an
+    // empty list — the picker must gate on roster length > 1 to degrade to
+    // no control, the dock switcher's single-option rule.
+    const html = wrap(
+      <EmptyPageLanding workspaceId="ws_1" cards={[]} onOpenCard={() => {}} onSubmitPrompt={() => {}} onStartBlank={() => {}} />,
+    );
+    expect(html).not.toContain(dict.docPage.landing.assistantTitle);
+    expect(landingSource).toContain("assistants.length > 1 && draftAssistant");
+  });
+
+  it("defaults through the shared active-assistant lib and repairs via the roster", () => {
+    // The landing must read the SAME persisted key the dock switcher writes
+    // (lib/active-assistant.ts) and resolve it repair-only against the
+    // roster — never invent a second selection store.
+    expect(landingSource).toContain("readActiveAssistantId(workspaceId)");
+    expect(landingSource).toContain("resolveDraftAssistantId({");
+    expect(landingSource).not.toContain("localStorage");
+  });
+
+  it("keeps the roster fresh via the workspace event spine", () => {
+    expect(landingSource).toContain("ASSISTANT_REFRESH_EVENT");
+  });
+
+  it("carries the pick into the build options", () => {
+    expect(landingSource).toContain(
+      "...(draftAssistantId ? { assistantId: draftAssistantId } : {})",
+    );
+  });
+
+  it("rides the chat-seed to the dock", () => {
+    const dispatch = vi.fn();
+    vi.stubGlobal("window", { dispatchEvent: dispatch });
+    vi.stubGlobal(
+      "CustomEvent",
+      class {
+        type: string;
+        detail: unknown;
+        constructor(type: string, init?: { detail?: unknown }) {
+          this.type = type;
+          this.detail = init?.detail;
+        }
+      },
+    );
+    requestChatSeed({ prefill: "make me a board", assistantId: "a_sales" });
+    expect(dispatch.mock.calls[0][0]).toMatchObject({
+      type: CHAT_SEED_EVENT,
+      detail: { prefill: "make me a board", assistantId: "a_sales" },
+    });
+  });
+
+  it("the dock re-addresses a seeded pick per-turn — never a thread reset", () => {
+    // The doc thread is per-turn addressable (chat-app.md → "Choosing an
+    // assistant" → the doc-dock bullet): a seeded pick persists the choice,
+    // updates the selection, and overrides the send (the switched state
+    // hasn't settled in-closure) — inside the SAME conversation. Resetting
+    // here would throw away the drafting context the feature exists to keep.
+    expect(floatingChatSource).toContain(
+      "writeActiveAssistantId(workspaceId, seedAssistantId)",
+    );
+    expect(floatingChatSource).toContain(
+      "...(seedAssistantId ? { assistantId: seedAssistantId } : {})",
+    );
+    expect(floatingChatSource).toContain(
+      "override?.assistantId ?? selectedAssistantId",
+    );
+    // The manual switcher resets only OFF the doc surface; the doc branch
+    // keeps the thread.
+    expect(floatingChatSource).toContain("if (!isDocOrigin) resetThread();");
+  });
+
+  it("the dock resumes the doc thread surface-scoped, not per-assistant", () => {
+    // With per-turn addressing the thread's BOUND assistant is just whoever
+    // founded it — a reload must re-attach the latest doc thread regardless
+    // of the current pick (`GET /api/sessions?scope=workspace`), or a switch
+    // followed by a reload would strand the conversation.
+    expect(floatingChatSource).toContain('? { scope: "workspace" as const }');
+  });
+
+  it("assistant replies carry their answering voice for mixed-voice threads", () => {
+    // Restored rows keep the persisted `sender_assistant_id` stamp; live
+    // turns stamp the addressed assistant at send time — so per-reply
+    // avatars stay truthful once two assistants have answered in one thread.
+    expect(floatingChatSource).toContain(
+      "turnVoiceRef.current = override?.assistantId ?? selectedAssistantId",
+    );
+    expect(floatingChatSource).toContain(
+      "{ senderAssistantId: turnVoiceRef.current }",
+    );
+    expect(floatingChatSource).toContain(
+      "{ senderAssistantId: m.senderAssistantId }",
+    );
+  });
+});

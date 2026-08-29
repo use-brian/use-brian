@@ -46,6 +46,9 @@ export type PendingBuild = {
   attachedRecordingIds?: string[];
   /** Build into this existing draft (empty-draft landing) vs minting a new one. */
   targetViewId?: string;
+  /** Draft-assistant pick from the landing's picker, so the replayed build
+   *  still drafts with the assistant the user chose. */
+  assistantId?: string;
   /** Epoch ms when stashed — drives the freshness TTL. */
   ts: number;
 };

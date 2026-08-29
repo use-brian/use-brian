@@ -41,6 +41,22 @@ export interface DesktopBridge {
    * omit it, preserving microphone-only capture during version skew.
    */
   systemAudioCapture?: boolean;
+  /**
+   * The shell can list window sources for a specific-window screen capture
+   * (`listCaptureSources` + `setCaptureSource`). Old shells omit it and the
+   * recorder hides the window option, keeping entire-screen capture working
+   * through the handler's primary-display default during version skew.
+   */
+  captureSourcePicker?: boolean;
+  /** List the shell's shareable capture sources (windows) for the picker. */
+  listCaptureSources?: (
+    kind: "window" | "screen",
+  ) => Promise<Array<{ id: string; name: string }>>;
+  /**
+   * Point the shell's NEXT display-media grant at a picked source id
+   * (null = revert to the primary-display default).
+   */
+  setCaptureSource?: (id: string | null) => void;
   signIn: () => void;
   /** Local-target marker: include deployment-gateway cookies on API REST/SSE. */
   gatewayCredentials?: boolean;

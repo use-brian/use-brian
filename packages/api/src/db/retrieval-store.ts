@@ -2139,6 +2139,8 @@ export type RecordingSegmentHit = {
   end_ms: number
   speaker: string | null
   segment_text: string
+  /** 'speech' (packed transcription) or 'visual' (frame analysis, migration 480). */
+  kind: 'speech' | 'visual'
 }
 
 const RECORDING_TOPK_DEFAULT = 8
@@ -2150,6 +2152,7 @@ type RecordingRow = {
   end_ms: string | number
   speaker: string | null
   segment_text: string
+  kind?: string | null
   distance?: number | null
 }
 
@@ -2160,6 +2163,7 @@ function toRecordingHit(r: RecordingRow): RecordingSegmentHit {
     end_ms: Number(r.end_ms),
     speaker: r.speaker,
     segment_text: r.segment_text,
+    kind: r.kind === 'visual' ? 'visual' : 'speech',
   }
 }
 
@@ -2189,7 +2193,7 @@ export async function searchRecording(
         const limIdx = values.length
         const res = await queryWithRLS<RecordingRow>(
           actor.userId,
-          `SELECT ts.segment_index, ts.start_ms, ts.end_ms, ts.speaker, ts.segment_text,
+          `SELECT ts.segment_index, ts.start_ms, ts.end_ms, ts.speaker, ts.segment_text, ts.kind,
                   ts.embedding <=> $${vecIdx}::vector AS distance
              FROM transcript_segments ts
             WHERE ${visibility}
@@ -2223,7 +2227,7 @@ export async function searchRecording(
   const fLimIdx = ftsValues.length
   const ftsRes = await queryWithRLS<RecordingRow>(
     actor.userId,
-    `SELECT ts.segment_index, ts.start_ms, ts.end_ms, ts.speaker, ts.segment_text
+    `SELECT ts.segment_index, ts.start_ms, ts.end_ms, ts.speaker, ts.segment_text, ts.kind
        FROM transcript_segments ts
       WHERE ${ftsVisibility}
         AND ts.recording_id = $${fRidIdx}
@@ -2268,7 +2272,7 @@ export async function readRecordingRange(
   const toIdx = values.length
   const res = await queryWithRLS<RecordingRow>(
     actor.userId,
-    `SELECT ts.segment_index, ts.start_ms, ts.end_ms, ts.speaker, ts.segment_text
+    `SELECT ts.segment_index, ts.start_ms, ts.end_ms, ts.speaker, ts.segment_text, ts.kind
        FROM transcript_segments ts
       WHERE ${visibility}
         AND ts.recording_id = $${ridIdx}
@@ -2301,6 +2305,7 @@ export async function listRecordingSpeakerLabels(
         AND ts.recording_id = $${ridIdx}
         AND ts.speaker IS NOT NULL
         AND btrim(ts.speaker) <> ''
+        AND ts.kind = 'speech'
       GROUP BY ts.speaker
       ORDER BY first_index, ts.speaker`,
     values,
@@ -2332,7 +2337,7 @@ export async function readRecordingRangePublic(
   const from = Math.max(0, Math.floor(input.fromIndex))
   const to = Math.max(from, Math.floor(input.toIndex))
   const res = await query<RecordingRow>(
-    `SELECT ts.segment_index, ts.start_ms, ts.end_ms, ts.speaker, ts.segment_text
+    `SELECT ts.segment_index, ts.start_ms, ts.end_ms, ts.speaker, ts.segment_text, ts.kind
        FROM transcript_segments ts
       WHERE ts.workspace_id = $1
         AND ts.recording_id = $2

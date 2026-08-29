@@ -19,6 +19,7 @@ function fakeStore(over: Partial<GoalStore> = {}): GoalStore {
     contextGroupId: null,
     contextProjectId: null,
     createdByUserId: null,
+    originSessionId: null,
     confirmedAt: null,
     completionClaim: null,
     brief: null,
@@ -55,6 +56,28 @@ describe('[COMP:goals/tools] goal chat tools', () => {
       expect.objectContaining({ workspaceId: 'w1', outcome: 'ship it', host: null, createdByUserId: 'u1' }),
     )
     expect(onEvent).toHaveBeenCalledWith({ type: 'goal_created', goalId: 'g1' }, expect.objectContaining({ userId: 'u1' }))
+  })
+
+  it('setGoal stamps originSessionId only for a real (UUID) chat session', async () => {
+    const create = vi.fn(fakeStore().create)
+    const { setGoal } = createGoalTools(fakeStore({ create }))
+    const uuid = '123e4567-e89b-42d3-a456-426614174000'
+    await setGoal.execute(
+      { outcome: 'ship it', done_when: { kind: 'subtasks' } },
+      { ...CTX, sessionId: uuid } as Ctx,
+    )
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({ originSessionId: uuid }),
+    )
+    create.mockClear()
+    // Workflow iterations run with a synthetic session id — never an origin.
+    await setGoal.execute(
+      { outcome: 'ship it', done_when: { kind: 'subtasks' } },
+      { ...CTX, sessionId: `workflow_run_${uuid}` } as Ctx,
+    )
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({ originSessionId: null }),
+    )
   })
 
   it('setGoal binds a host + workflow means when given', async () => {

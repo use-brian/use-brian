@@ -6,7 +6,7 @@
  * doc surface lives entirely in this app.
  *
  * Keep keys grouped per surface so future translators can scan one
- * block per page. Mirror every key in `ja.ts` + `zh.ts` — the `Dictionary`
+ * block per page. Mirror every key in `ja.ts` + `zh.ts` + `zh-cn.ts` - the `Dictionary`
  * type is inferred from this file, so a missing key in another locale is
  * a compile error.
  */
@@ -837,6 +837,11 @@ export const en = {
       // composer as a quiet text button.
       startBlank: "Start with a blank page",
       startFromTemplate: "Start from a template",
+      // Draft-assistant picker in the composer footer: which workspace
+      // assistant drafts the page. `assistantLabel` is the trigger's
+      // aria-label/tooltip; `assistantTitle` heads the popover list.
+      assistantLabel: "Choose the assistant that drafts this page",
+      assistantTitle: "Drafts with",
       // Starter prompts — one tap mints a draft for that prompt. Keep each
       // short enough to read as a chip and to stand alone as a request.
       suggestions: [
@@ -2902,6 +2907,11 @@ export const en = {
       "{fileName} has {pages} pages. Reading it uses credits and can take a minute or two. The result is saved, so asking again about the same file is free.",
     readPdfConfirm: "Read it",
     readPdfCancel: "Don't attach",
+    close: "Close preview",
+    download: "Download",
+    preparing: "Preparing preview…",
+    previewUnavailable:
+      "Preview isn't available for this file. It may have expired: uploads are kept for 7 days. Re-upload the file to preview it again.",
   },
   approvalsPage: {
     title: "Approvals",
@@ -5726,6 +5736,7 @@ export const en = {
   },
   chatApp: {
     newChat: "New chat",
+    voiceNote: "[voice note]",
     searchPlaceholder: "Search chats",
     railAria: "Chats",
     railEmpty: "No chats yet",
@@ -5783,6 +5794,10 @@ export const en = {
     slashEmpty: "No matching commands",
     slashActiveLabel: "Using command",
     slashClearAria: "Remove /{slug} command",
+    slashSentAria: "Ran the /{slug} command",
+    goalPursuitHeading: "Autopilot goal",
+    goalPursuitSticky: "Pursuing goal",
+    goalPursuitJump: "Show goal activity",
     goalAcceptedLabel: "Goal accepted",
     goalAcceptedStatus: "Executing in Autopilot",
     goalAcceptedDone: "Goal completed",
@@ -8763,6 +8778,7 @@ export const en = {
     detailLoadingAudio: "Loading audio...",
     detailAudioError: "We could not load this audio. Refresh the page to try again.",
     detailTranscript: "Transcript",
+    visualMomentLabel: "Screen",
     detailNoTranscript: "This recording has not been transcribed yet.",
     detailTranscriptError: "We could not load the transcript.",
     detailLoadMore: "Load more",
@@ -8791,6 +8807,7 @@ export const en = {
     linkUnlink: "Unlink",
     chatQueuedChip: "Recording queued: {name}",
     chatStagedChip: "Recording attached: {name}",
+    confirmVideoNote: "This is a video: what appears on screen will also be analyzed and added to the notes.",
     linkError: "We could not load your recordings.",
     uploadFailed:
       "The audio could not reach storage, so nothing was processed. Check your connection - the capture is kept on this device and can be saved again from the recorder.",
@@ -8824,6 +8841,18 @@ export const en = {
     start: "Record",
     audioOptions: "Recording audio options",
     includeComputerAudio: "Include computer audio",
+    captureSourceLabel: "Capture",
+    captureSourceMic: "Microphone only",
+    captureSourceScreen: "Entire screen + microphone",
+    captureSourceScreenBrowser: "Screen or window + microphone",
+    captureSourceWindow: "A window + microphone",
+    windowPickerTitle: "Record a window",
+    windowPickerBody: "Choose the window to record. Computer audio is captured for the whole system, not only that app.",
+    windowPickerAction: "Start recording",
+    windowPickerEmpty: "No shareable windows were found.",
+    screenAndMic: "Screen + mic",
+    screenMicComputerAudio: "Screen + mic + computer audio",
+    screenCaptureFailed: "Screen recording could not start. Check screen recording permission in your system settings, then try again.",
     streamToPage: "Stream transcript and notes to a page",
     liveDestinationLabel: "Meeting page destination",
     liveDestinationSearch: "Search pages...",

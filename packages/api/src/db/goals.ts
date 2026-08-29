@@ -28,6 +28,7 @@ const FULL_SELECT = `
   recipe_id as "recipeId", host_type as "hostType", host_id as "hostId",
   outcome, done_when as "doneWhen", means, budget, policy, status,
   blocker_reason as "blockerReason", created_by_user_id as "createdByUserId",
+  origin_session_id as "originSessionId",
   context_group_id as "contextGroupId", context_project_id as "contextProjectId",
   confirmed_at as "confirmedAt", completion_claim as "completionClaim",
   brief, created_at as "createdAt", updated_at as "updatedAt"
@@ -50,6 +51,7 @@ type GoalRow = {
   status: GoalStatus
   blockerReason: string | null
   createdByUserId: string | null
+  originSessionId: string | null
   contextGroupId: string | null
   contextProjectId: string | null
   confirmedAt: Date | null
@@ -76,6 +78,7 @@ function toRecord(row: GoalRow): GoalRecord {
     status: row.status,
     blockerReason: row.blockerReason,
     createdByUserId: row.createdByUserId,
+    originSessionId: row.originSessionId,
     contextGroupId: row.contextGroupId,
     contextProjectId: row.contextProjectId,
     confirmedAt: row.confirmedAt,
@@ -93,9 +96,9 @@ export async function createGoal(params: GoalCreateParams): Promise<GoalRecord> 
     `INSERT INTO goals (
        workspace_id, parent_goal_id, recipe_id, host_type, host_id,
        outcome, done_when, means, budget, policy, status, created_by_user_id,
-       context_group_id, context_project_id, confirmed_at, brief
+       origin_session_id, context_group_id, context_project_id, confirmed_at, brief
      )
-     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, $11, $12, $13, $14, $15, $16::jsonb)
+     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, $11, $12, $13, $14, $15, $16, $17::jsonb)
      RETURNING ${FULL_SELECT}`,
     [
       params.workspaceId,
@@ -110,6 +113,7 @@ export async function createGoal(params: GoalCreateParams): Promise<GoalRecord> 
       JSON.stringify(params.policy ?? {}),
       params.status ?? 'active',
       params.createdByUserId ?? null,
+      params.originSessionId ?? null,
       params.contextGroupId ?? null,
       params.contextProjectId ?? null,
       // Explicitly-created goals are confirmed; the judge-draft path passes
@@ -200,6 +204,11 @@ export async function listGoals(
   if (filters.parentGoalId) {
     wheres.push(`parent_goal_id = $${idx}`)
     values.push(filters.parentGoalId)
+    idx++
+  }
+  if (filters.originSessionId) {
+    wheres.push(`origin_session_id = $${idx}`)
+    values.push(filters.originSessionId)
     idx++
   }
 
@@ -335,12 +344,18 @@ export async function transitionRunningGoalStatusSystem(
  *  gate). */
 export async function updateGoalSystem(
   id: string,
-  fields: { outcome?: string; doneWhen?: DoneWhenNode; means?: GoalMeans; budget?: GoalRecord['budget']; brief?: GoalBrief | null; confirm?: boolean },
+  fields: { outcome?: string; doneWhen?: DoneWhenNode; means?: GoalMeans; budget?: GoalRecord['budget']; brief?: GoalBrief | null; confirm?: boolean; originSessionId?: string },
 ): Promise<GoalRecord | null> {
   const sets: string[] = []
   const values: unknown[] = []
   let idx = 1
   if (fields.outcome !== undefined) { sets.push(`outcome = $${idx++}`); values.push(fields.outcome) }
+  // Backfill-only: an arming turn may claim a goal created elsewhere for its
+  // own chat, but never steals one already bound to a session.
+  if (fields.originSessionId !== undefined) {
+    sets.push(`origin_session_id = COALESCE(origin_session_id, $${idx++})`)
+    values.push(fields.originSessionId)
+  }
   if (fields.budget !== undefined) { sets.push(`budget = $${idx++}::jsonb`); values.push(JSON.stringify(fields.budget)) }
   if (fields.doneWhen !== undefined) { sets.push(`done_when = $${idx++}::jsonb`); values.push(JSON.stringify(fields.doneWhen)) }
   if (fields.means !== undefined) { sets.push(`means = $${idx++}::jsonb`); values.push(JSON.stringify(fields.means)) }

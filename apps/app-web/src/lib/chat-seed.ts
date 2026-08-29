@@ -58,6 +58,15 @@ export type ChatSeed = {
    * add { after }`). Paired with `autoSend` + `docViewId`.
    */
   anchorBlockId?: string;
+  /**
+   * Run this turn as this workspace assistant (the landing's draft-assistant
+   * picker). The dock switches its interlocutor to it — the same
+   * fresh-session rule as the manual switcher, since sessions are
+   * assistant-bound server-side — before the autoSend turn fires, and passes
+   * it as a send override so the turn runs on it ahead of the switched state
+   * settling. Absent → the dock keeps its current interlocutor.
+   */
+  assistantId?: string;
 };
 
 export const CHAT_SEED_EVENT = "doc:chat-seed";

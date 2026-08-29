@@ -1002,6 +1002,9 @@ function CollabEditorInner({
           ? {
               message: payload.body,
               fileIds: payload.fileIds,
+              ...(payload.attachedRecordingIds.length > 0
+                ? { attachedRecordingIds: payload.attachedRecordingIds }
+                : {}),
               model: payload.model,
               researchMode: payload.researchMode,
             }
@@ -1308,6 +1311,7 @@ function CollabEditorInner({
           quote={draftComment.quote}
           workspaceId={ws.workspaceId}
           hasAssistant={!!assistantId}
+          {...(assistantId ? { assistantId } : {})}
           onSubmit={(payload) => void commitDraftComment(payload)}
           onDismiss={dismissDraftComment}
         />

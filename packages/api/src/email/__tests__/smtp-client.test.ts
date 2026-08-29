@@ -159,13 +159,21 @@ describe('[COMP:api/smtp-client] sendWorkspaceInvitation', () => {
 })
 
 describe('[COMP:api/smtp-client] renderMagicLinkEmail', () => {
-  it('produces three distinct localized subjects', () => {
+  it('produces four distinct localized subjects', () => {
     const en = renderMagicLinkEmail('https://x', 'en')
     const ja = renderMagicLinkEmail('https://x', 'ja')
     const zh = renderMagicLinkEmail('https://x', 'zh')
-    expect(en.subject).not.toBe(ja.subject)
-    expect(ja.subject).not.toBe(zh.subject)
-    expect(en.subject).not.toBe(zh.subject)
+    const zhCN = renderMagicLinkEmail('https://x', 'zh-CN')
+    const subjects = [en.subject, ja.subject, zh.subject, zhCN.subject]
+    expect(new Set(subjects).size).toBe(4)
+  })
+
+  it('renders zh-CN in Simplified script (登录, never 登入)', () => {
+    const { subject, html, text } = renderMagicLinkEmail('https://x', 'zh-CN', '123456')
+    expect(subject).toContain('登录')
+    expect(html).toContain('登录')
+    expect(html).not.toContain('登入')
+    expect(text).not.toContain('登入')
   })
 
   it('HTML-escapes the link to prevent injection', () => {

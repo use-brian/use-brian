@@ -48,7 +48,7 @@ function formatResetDate(
   if (!resetsAt) return dict.noUsageYet;
   const reset = new Date(resetsAt);
   if (reset.getTime() - now.getTime() <= 0) return dict.resetting;
-  const intl = locale === "ja" ? "ja-JP" : locale === "zh" ? "zh-Hant" : "en-US";
+  const intl = locale === "ja" ? "ja-JP" : locale === "zh" ? "zh-Hant" : locale === "en" ? "en-US" : locale;
   const dateStr = reset.toLocaleDateString(intl, { month: "short", day: "numeric" });
   return dict.resetsOn.replace("{date}", dateStr);
 }

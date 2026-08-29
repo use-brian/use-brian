@@ -34,6 +34,7 @@ import { CommentComposer } from "@/components/doc/comment-composer";
 import { AttachmentChips, FileDropOverlay } from "@/components/doc/attachment-chips";
 import { useFileAttachments } from "@/lib/use-file-attachments";
 import { useFileDrop } from "@/lib/use-file-drop";
+import { useRecordingUpload } from "@/lib/recordings/use-recording-upload";
 import { isInsideComposerPopup } from "@/lib/comment-dismiss";
 import { type ModelTier } from "@/lib/chat-model";
 import {
@@ -45,6 +46,9 @@ import {
 export type NewCommentSubmit = {
   body: string;
   fileIds: string[];
+  /** Recordings staged for the seeded first turn (video / long audio routed
+   *  to the recording pipeline). Empty with AI reply off. */
+  attachedRecordingIds: string[];
   model?: ModelTier;
   researchMode: boolean;
   /** Whether the assistant should reply (false → a plain teammate comment). */
@@ -62,6 +66,8 @@ type Props = {
   /** Whether a doc assistant backs this page — gates the AI-reply path. With
    *  no assistant the toggle is hidden and every comment is teammate-only. */
   hasAssistant: boolean;
+  /** The doc assistant id — binds a staged recording. Absent → video rejects. */
+  assistantId?: string;
   /** Commit the draft: mint the thread + post the first comment. */
   onSubmit: (payload: NewCommentSubmit) => void;
   /** Dismiss without committing — clears the draft highlight, no backend write. */
@@ -73,11 +79,13 @@ export function NewCommentPopover({
   quote,
   workspaceId,
   hasAssistant,
+  assistantId,
   onSubmit,
   onDismiss,
 }: Props) {
   const t = useT().comments;
   const tAttach = useT().attachments;
+  const tRec = useT().recordings;
   const open = !!anchorEl;
   const panelRef = React.useRef<HTMLDivElement>(null);
   const composerRef = React.useRef<HTMLTextAreaElement>(null);
@@ -95,7 +103,30 @@ export function NewCommentPopover({
   const [busy, setBusy] = React.useState(false);
   // Draft attachments (uploaded to the transient cache, no session yet) — only
   // meaningful on the AI path, so hidden + cleared when AI reply is off.
-  const att = useFileAttachments();
+  // Video / recording-sized audio routes to the recording pipeline and rides
+  // the seeded first turn — only when an assistant exists to bind it to.
+  const rec = useRecordingUpload(workspaceId, assistantId ?? "");
+  const [pendingRecordings, setPendingRecordings] = React.useState<
+    { recordingId: string; title: string }[]
+  >([]);
+  const att = useFileAttachments(
+    undefined,
+    assistantId
+      ? {
+          onRouteMedia: async (files) => {
+            for (const file of files) {
+              const staged = await rec.stage(file);
+              if (staged) {
+                setPendingRecordings((prev) => [
+                  ...prev,
+                  { recordingId: staged.recordingId, title: staged.title },
+                ]);
+              }
+            }
+          },
+        }
+      : undefined,
+  );
   const drop = useFileDrop((files) => void att.upload(files), { disabled: !aiReply });
 
   // Move focus to the input as soon as the composer is placed (one rAF so the
@@ -135,7 +166,12 @@ export function NewCommentPopover({
   }, [open, anchorEl, onDismiss]);
 
   const hasFiles = aiReply && att.hasReady;
-  const canSend = !busy && !att.uploading && (!!draft.trim() || hasFiles);
+  const hasRecordings = aiReply && pendingRecordings.length > 0;
+  const canSend =
+    !busy &&
+    !att.uploading &&
+    rec.status !== "uploading" &&
+    (!!draft.trim() || hasFiles || hasRecordings);
 
   function submit() {
     if (!canSend) return;
@@ -143,6 +179,9 @@ export function NewCommentPopover({
     onSubmit({
       body: draft.trim(),
       fileIds: hasFiles ? att.fileIds() : [],
+      attachedRecordingIds: hasRecordings
+        ? pendingRecordings.map((r) => r.recordingId)
+        : [],
       model: controls.model,
       researchMode: aiReply ? controls.researchMode : false,
       aiReply,
@@ -152,6 +191,8 @@ export function NewCommentPopover({
     setDraft("");
     setMentionIds([]);
     att.clear();
+    setPendingRecordings([]);
+    rec.dismiss();
   }
 
   if (!open || !pos || typeof document === "undefined") return null;
@@ -197,7 +238,22 @@ export function NewCommentPopover({
             className="max-h-32 min-h-[24px] w-full resize-none border-0 bg-transparent p-0 text-[14px] leading-relaxed outline-none focus-visible:shadow-none placeholder:text-muted-foreground/70"
           />
           {aiReply ? (
-            <AttachmentChips attachments={att.attachments} onRemove={att.remove} />
+            <>
+              <AttachmentChips attachments={att.attachments} onRemove={att.remove} />
+              {pendingRecordings.length > 0 ? (
+                <div className="mt-1 flex flex-wrap gap-1.5">
+                  {pendingRecordings.map((r) => (
+                    <span
+                      key={r.recordingId}
+                      className="inline-flex items-center gap-1 rounded border border-border bg-muted/40 px-2 py-0.5 text-xs text-muted-foreground"
+                    >
+                      <span aria-hidden>◉</span>
+                      {tRec.chatStagedChip.replace("{name}", r.title)}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+            </>
           ) : null}
           <div className="mt-1 flex items-center gap-1.5">
             {aiReply ? (

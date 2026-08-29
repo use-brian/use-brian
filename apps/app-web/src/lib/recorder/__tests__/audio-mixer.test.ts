@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  ScreenCaptureCancelledError,
   SystemAudioCaptureError,
   acquireCaptureAudio,
 } from "../audio-mixer";
@@ -139,5 +140,95 @@ describe("[COMP:app-web/recorder-engine] Capture audio mixer", () => {
     expect(endedSystemTrack.stop).toHaveBeenCalledOnce();
     expect(videoTrack.stop).toHaveBeenCalled();
   });
-});
 
+  it("screen capture keeps the video track and rides it with the mixed audio bus", async () => {
+    const micTrack = fakeTrack("audio");
+    const systemTrack = fakeTrack("audio");
+    const videoTrack = fakeTrack("video");
+    const microphone = fakeStream([micTrack]);
+    const display = fakeStream([systemTrack, videoTrack]);
+    const mixedTrack = fakeTrack("audio");
+    const output = fakeStream([mixedTrack]);
+    const { context } = fakeContext(output);
+    const createStream = vi.fn((tracks: MediaStreamTrack[]) => fakeStream(tracks as FakeTrack[]));
+
+    const result = await acquireCaptureAudio({
+      includeSystemAudio: true,
+      captureScreen: true,
+      mediaDevices: {
+        getUserMedia: vi.fn(async () => microphone),
+        getDisplayMedia: vi.fn(async () => display),
+      },
+      createAudioContext: () => context,
+      createStream,
+    });
+
+    expect(videoTrack.stop).not.toHaveBeenCalled();
+    expect(createStream).toHaveBeenCalledWith([videoTrack, mixedTrack]);
+    expect(result.capturesVideo).toBe(true);
+    expect(result.includesSystemAudio).toBe(true);
+  });
+
+  it("browser screen capture treats absent display audio as ordinary (mic + video, no mixer)", async () => {
+    const micTrack = fakeTrack("audio");
+    const videoTrack = fakeTrack("video");
+    const microphone = fakeStream([micTrack]);
+    const display = fakeStream([videoTrack]);
+    const createStream = vi.fn((tracks: MediaStreamTrack[]) => fakeStream(tracks as FakeTrack[]));
+
+    const result = await acquireCaptureAudio({
+      includeSystemAudio: false,
+      captureScreen: true,
+      opportunisticDisplayAudio: true,
+      mediaDevices: {
+        getUserMedia: vi.fn(async () => microphone),
+        getDisplayMedia: vi.fn(async () => display),
+      },
+      createStream,
+    });
+
+    expect(createStream).toHaveBeenCalledWith([videoTrack, micTrack]);
+    expect(result.capturesVideo).toBe(true);
+    expect(result.includesSystemAudio).toBe(false);
+    expect(result.audioContext).toBeNull();
+  });
+
+  it("explicit mic-only screen capture stops display audio that was granted anyway", async () => {
+    const micTrack = fakeTrack("audio");
+    const loopbackTrack = fakeTrack("audio");
+    const videoTrack = fakeTrack("video");
+    const createStream = vi.fn((tracks: MediaStreamTrack[]) => fakeStream(tracks as FakeTrack[]));
+
+    const result = await acquireCaptureAudio({
+      includeSystemAudio: false,
+      captureScreen: true,
+      mediaDevices: {
+        getUserMedia: vi.fn(async () => fakeStream([micTrack])),
+        getDisplayMedia: vi.fn(async () => fakeStream([loopbackTrack, videoTrack])),
+      },
+      createStream,
+    });
+
+    expect(loopbackTrack.stop).toHaveBeenCalledOnce();
+    expect(videoTrack.stop).not.toHaveBeenCalled();
+    expect(result.includesSystemAudio).toBe(false);
+    expect(result.capturesVideo).toBe(true);
+  });
+
+  it("a dismissed screen picker resolves as a cancel, not a failure", async () => {
+    const micTrack = fakeTrack("audio");
+    await expect(
+      acquireCaptureAudio({
+        includeSystemAudio: false,
+        captureScreen: true,
+        mediaDevices: {
+          getUserMedia: vi.fn(async () => fakeStream([micTrack])),
+          getDisplayMedia: vi.fn(async () => {
+            throw new DOMException("denied", "NotAllowedError");
+          }),
+        },
+      }),
+    ).rejects.toBeInstanceOf(ScreenCaptureCancelledError);
+    expect(micTrack.stop).toHaveBeenCalledOnce();
+  });
+});

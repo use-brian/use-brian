@@ -309,6 +309,8 @@ export type TranscriptSegment = {
   end_ms: number;
   speaker: string | null;
   segment_text: string;
+  /** 'visual' = a video keyframe description (migration 480); absent/'speech' = transcription. */
+  kind?: "speech" | "visual";
 };
 
 /**

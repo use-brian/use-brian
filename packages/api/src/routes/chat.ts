@@ -21,7 +21,7 @@ import { gateSessionRead } from './sessions.js'
 import { renderArtifactManifest } from '../files/artifact-manifest.js'
 import { promotePastedText, shouldPromotePaste } from '../files/paste-promotion.js'
 import type { ArtifactPromoter } from '../files/artifact-promote.js'
-import { mayAssistantAnswerInRoom } from './_room-binding.js'
+import { mayAssistantAnswerInRoom, crossAssistantSendPolicy } from './_room-binding.js'
 import { recordRoomMentionsForMessage, type RecordRoomMentionsResult } from '../room-mentions.js'
 import type { Sensitivity } from '@use-brian/core'
 import { resolveMentionSpans } from '@use-brian/shared/mention-matching'
@@ -1705,7 +1705,7 @@ const roomTurnAddressers = new Map<string, string>()
  * (`PATCH /api/sessions/:id/assistant`) applies the identical predicate, and
  * `sessions.ts` cannot import this module without closing an ESM cycle.
  */
-export { mayAssistantAnswerInRoom }
+export { mayAssistantAnswerInRoom, crossAssistantSendPolicy }
 
 /**
  * A refusal raised AFTER the SSE headers are on the wire.
@@ -2831,40 +2831,47 @@ export function chatRoutes(options: WebChatOptions): Router {
       // `assistant.id`; this just stops a user from naming someone else's
       // session under their own assistant context.)
       //
-      // EXCEPTION — multi-assistant rooms (multiplayer chat T9): in a
-      // workspace-shared chat, `@AssistantName` picks which workspace
-      // assistant answers THIS turn, so the requested assistant may differ
-      // from the session's binding — provided it lives in the SAME workspace
-      // as the room's assistant (a stale client id must never route another
-      // workspace's assistant in) and its clearance does not out-rank the
-      // room's read floor (`mayAssistantAnswerInRoom`). The turn then runs
-      // entirely AS that assistant: its soul, memory, tools and clearance.
+      // EXCEPTION — per-turn-addressable sessions (chat-app.md → "Choosing
+      // an assistant"), decided by the shared pure policy
+      // `crossAssistantSendPolicy` (`_room-binding.ts`):
+      //   - multi-assistant rooms (multiplayer chat T9): `@AssistantName`
+      //     picks who answers THIS turn — same workspace as the room's
+      //     assistant (a stale client id must never route another
+      //     workspace's assistant in), capped by the room's read floor;
+      //   - the doc dock's PERSONAL thread: the switcher / landing picker
+      //     re-address the next turn without resetting the thread — same
+      //     workspace, no clearance cap (owner-only audience; the policy's
+      //     doc comment carries the reasoning).
+      // Either way the turn then runs entirely AS the requested assistant:
+      // its soul, memory, tools and clearance.
       if (session.assistantId !== assistant.id) {
-        let roomCrossAssistantOk = false
-        if (isSharedChatSession(session) && assistant.workspaceId) {
+        let sameWorkspace = false
+        if (
+          (isSharedChatSession(session) || isDocSurface(session)) &&
+          assistant.workspaceId
+        ) {
           const boundWs = await query<{ workspaceId: string | null }>(
             `SELECT workspace_id AS "workspaceId" FROM assistants WHERE id = $1`,
             [session.assistantId],
           )
-          if (boundWs.rows[0]?.workspaceId === assistant.workspaceId) {
-            if (
-              mayAssistantAnswerInRoom({
-                assistantClearance: assistant.clearance ?? null,
-                roomClearance: session.effectiveClearance,
-              })
-            ) {
-              roomCrossAssistantOk = true
-            } else {
-              sendEvent('error', {
-                code: 'assistant_clearance_exceeds_room',
-                error: 'That assistant is cleared above this room and cannot answer here.',
-              })
-              res.end()
-              return
-            }
-          }
+          sameWorkspace = boundWs.rows[0]?.workspaceId === assistant.workspaceId
         }
-        if (!roomCrossAssistantOk) {
+        const verdict = crossAssistantSendPolicy({
+          isSharedSession: isSharedChatSession(session),
+          isDocSurfaceSession: isDocSurface(session),
+          sameWorkspace,
+          assistantClearance: assistant.clearance ?? null,
+          sessionClearance: session.effectiveClearance,
+        })
+        if (verdict === 'clearance_refused') {
+          sendEvent('error', {
+            code: 'assistant_clearance_exceeds_room',
+            error: 'That assistant is cleared above this room and cannot answer here.',
+          })
+          res.end()
+          return
+        }
+        if (verdict !== 'allow') {
           sendEvent('error', { error: 'Session does not belong to this assistant' })
           res.end()
           return
@@ -3996,20 +4003,24 @@ export function chatRoutes(options: WebChatOptions): Router {
       // turns — worse for the model, never fatal for the user.
       let sharedSenderNames: Map<string, string> | undefined
       let sharedParticipants: string[] = []
-      /** Multi-assistant rooms (T9): assistant-id → name, for labeling
+      /** Multi-voice sessions — rooms (T9) AND the doc dock's per-turn-
+       *  addressable personal thread: assistant-id → name, for labeling
        *  FOREIGN assistant turns at assembly (`toStampedMessages`
        *  `assistantVoices`) — the answering model must never mistake another
-       *  assistant's words for its own. */
+       *  assistant's words for its own. The human-sender half stays
+       *  rooms-only (a personal doc thread has one human). */
       let roomAssistantVoices: { names: Map<string, string>; currentAssistantId: string } | undefined
-      if (isSharedChatSession(session)) {
+      if (isSharedChatSession(session) || isDocSurface(session)) {
         try {
-          const senderIds = [
-            ...new Set(
-              dbMessages
-                .map((m) => m.senderUserId)
-                .filter((id): id is string => Boolean(id)),
-            ),
-          ]
+          const senderIds = isSharedChatSession(session)
+            ? [
+                ...new Set(
+                  dbMessages
+                    .map((m) => m.senderUserId)
+                    .filter((id): id is string => Boolean(id)),
+                ),
+              ]
+            : []
           if (senderIds.length > 0) {
             const profiles = await getUserProfilesByIds(senderIds)
             sharedSenderNames = new Map(

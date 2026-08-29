@@ -105,12 +105,14 @@ export {
 } from './embeddings/adapters.js'
 export {
   runMediaUnderstanding,
+  runFrameBatchUnderstanding,
   DASHSCOPE_VISION_MODEL,
   DASHSCOPE_ASR_MODEL,
   type MediaBackend,
   type MediaModality,
   type MediaRequest,
   type MediaResult,
+  type FrameBatchRequest,
 } from './media/backend.js'
 
 export {

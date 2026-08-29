@@ -90,6 +90,9 @@ type Props = {
     /** Empty-line "Space for AI" anchor — rides the autoSend turn as
      *  `docAnchorBlockId` (forwarded to `<FloatingChat>` with the seed). */
     anchorBlockId?: string;
+    /** Draft-assistant pick (the landing's picker) — forwarded to
+     *  `<FloatingChat>`, which switches its interlocutor for the turn. */
+    assistantId?: string;
     nonce: number;
   };
   /** Soft double-text guard — forwarded to the inner `<FloatingChat>`. */

@@ -38,6 +38,56 @@ export type TranscriptSegment = {
   speakerIds: string[]
   text: string
   utteranceRefs: Array<{ start_ms: number; end_ms: number; speaker: string | null }>
+  /**
+   * What the segment carries (migration 480): `'speech'` (the default — a
+   * packed transcription segment) or `'visual'` (a video keyframe description
+   * from frame analysis). Visual rows ride the same table so search, range
+   * reads, the synthesis prompt, and `[H:MM:SS]` citations inherit them with
+   * zero new readers; consumers that are speech-only by meaning (participant
+   * label listing) filter on this column.
+   */
+  kind?: 'speech' | 'visual'
+}
+
+/** Speaker label carried by visual (frame-analysis) segments. Presentation
+ *  only — `kind='visual'` is the structural marker; this makes the rendered
+ *  transcript line read `[H:MM:SS] Screen: <description>`. */
+export const VISUAL_SEGMENT_SPEAKER = 'Screen'
+
+/**
+ * Interleave frame-analysis visual moments into packed speech segments,
+ * chronologically, and re-index the merged list. Pure — both orchestrations
+ * (open + hosted) call it between `segmentTranscript` and the insert.
+ *
+ * Ordering: `startMs` ascending; on a tie the visual row sorts FIRST (the
+ * screen state sets the scene for the words spoken over it). Readers order by
+ * `segment_index`, so index order and chronological order must agree — that is
+ * the whole point of merging before insert rather than appending after.
+ */
+export function mergeVisualSegments(
+  speech: TranscriptSegment[],
+  moments: Array<{ tsMs: number; description: string }>,
+): TranscriptSegment[] {
+  if (moments.length === 0) return speech
+  const visual: TranscriptSegment[] = moments
+    .filter((m) => m.description.trim().length > 0)
+    .map((m) => ({
+      segmentIndex: 0, // reassigned below
+      startMs: m.tsMs,
+      endMs: m.tsMs,
+      speaker: VISUAL_SEGMENT_SPEAKER,
+      speakerIds: [],
+      text: m.description.trim(),
+      utteranceRefs: [],
+      kind: 'visual' as const,
+    }))
+  const merged = [...speech, ...visual].sort((a, b) => {
+    if (a.startMs !== b.startMs) return a.startMs - b.startMs
+    const aVisual = a.kind === 'visual' ? 0 : 1
+    const bVisual = b.kind === 'visual' ? 0 : 1
+    return aVisual - bVisual
+  })
+  return merged.map((s, i) => ({ ...s, segmentIndex: i }))
 }
 
 // Packing bounds — see plan §"Segment granularity + timestamp model". Shared
@@ -219,8 +269,8 @@ export async function insertTranscriptSegments(
            workspace_id, recording_id, transcript_file_id, segment_index,
            start_ms, end_ms, speaker, speaker_ids, segment_text, utterance_refs,
            user_id, assistant_id, source, sensitivity, created_by_user_id,
-           compartments, project_ids
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,'recording',$13,$14,$15,$16)
+           compartments, project_ids, kind
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,'recording',$13,$14,$15,$16,$17)
          ON CONFLICT (recording_id, segment_index) DO NOTHING`,
         [
           workspaceId,
@@ -239,6 +289,7 @@ export async function insertTranscriptSegments(
           createdByUserId,
           params.compartments ?? [],
           params.projectIds ?? [],
+          s.kind ?? 'speech',
         ],
       )
       inserted += res.rowCount ?? 0

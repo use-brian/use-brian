@@ -221,6 +221,38 @@ describe("[COMP:app-web/sessions-sdk] parseMessageAttachments", () => {
     ]);
   });
 
+  it("extracts a PDF attachment's preview bytes from its inline media block", () => {
+    const content = [
+      { type: "image", mimeType: "application/pdf", data: "PDFDATA", name: "spec.pdf" },
+      {
+        type: "text",
+        text: '<attached_file id="f4" name="spec.pdf" type="application/pdf">[image]</attached_file>\n\nsummarize',
+      },
+    ];
+    const r = parseMessageAttachments(content);
+    expect(r.text).toBe("summarize");
+    expect(r.attachments[0]).toMatchObject({ id: "f4", name: "spec.pdf", mime: "application/pdf" });
+    expect(r.attachments[0].dataUrl).toBe("data:application/pdf;base64,PDFDATA");
+  });
+
+  it("keeps an image thumbnail on the image when a store-only PDF has no block", () => {
+    // A PDF above the inline threshold has a tag but no media block; positional
+    // zipping would hand the image's block to the PDF. Family/name matching
+    // must keep the assignment on the image.
+    const content = [
+      { type: "image", mimeType: "image/png", data: "IMGDATA", name: "shot.png" },
+      {
+        type: "text",
+        text:
+          '<attached_file id="p" name="big.pdf" type="application/pdf">[image]</attached_file>\n\n' +
+          '<attached_file id="i" name="shot.png" type="image/png">[image]</attached_file>\n\nlook',
+      },
+    ];
+    const r = parseMessageAttachments(content);
+    expect(r.attachments[0].dataUrl).toBeUndefined();
+    expect(r.attachments[1].dataUrl).toBe("data:image/png;base64,IMGDATA");
+  });
+
   it("scrubs a confabulated <comment-thread-reply> wrapper from a persisted assistant row", () => {
     // Pre-fix rows already in session_messages carry the leaked tag; the parser
     // unwraps it so the comment surfaces never render the markers or the UUID.

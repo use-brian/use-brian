@@ -1098,7 +1098,7 @@ function isAllowedNextPath(s: string, allowedReturnOrigins: string[] = []): bool
 }
 
 function isMagicLinkLocale(x: unknown): x is MagicLinkLocale {
-  return x === 'en' || x === 'ja' || x === 'zh'
+  return x === 'en' || x === 'ja' || x === 'zh' || x === 'zh-CN'
 }
 
 function pickLocaleFromHeader(h: string | string[] | undefined): MagicLinkLocale {
@@ -1107,6 +1107,7 @@ function pickLocaleFromHeader(h: string | string[] | undefined): MagicLinkLocale
   // First language tag, lowercased
   const tag = raw.split(',')[0]?.trim().toLowerCase() ?? ''
   if (tag.startsWith('ja')) return 'ja'
+  if (tag.startsWith('zh-cn') || tag.startsWith('zh-sg') || tag.startsWith('zh-hans')) return 'zh-CN'
   if (tag.startsWith('zh')) return 'zh'
   return 'en'
 }

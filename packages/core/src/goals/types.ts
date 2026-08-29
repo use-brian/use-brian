@@ -109,6 +109,12 @@ export type GoalRecord = {
   /** The acting user — host write-back actor + escalation/delivery default
    *  (the goal speaks as the workspace primary to this user). */
   createdByUserId: string | null
+  /** The chat session the goal was created/armed from (mig 481). Advisory
+   *  pointer, not an FK: only UUID-shaped ids from real chat turns are ever
+   *  stamped (workflow iterations carry synthetic `workflow_run_<uuid>` ids
+   *  and stamp nothing). Backs in-chat pursuit: the web transcript lists its
+   *  session's goals and the terminal delivery persists back into it. */
+  originSessionId: string | null
   /** Task-autopilot draft gate (`task-goal-autopilot.md` §4): `null` = a draft
    *  (auto-minted on task create, unconfirmed) — it may NOT act or roll up;
    *  set once the creator confirms the goal detail. Goals created explicitly
@@ -140,6 +146,9 @@ export type GoalCreateParams = {
   /** Default 'active'. */
   status?: GoalStatus
   createdByUserId?: string | null
+  /** The creating chat session (UUID-shaped real sessions only — see
+   *  `GoalRecord.originSessionId`). */
+  originSessionId?: string | null
   /** Context selected on the creating turn; immutable for the goal's loop. */
   contextGroupId?: string | null
   contextProjectId?: string | null
@@ -162,6 +171,8 @@ export type GoalListFilters = {
   /** Draft-vs-armed split (§8): `false` = unconfirmed drafts only (the triage
    *  surface), `true` = confirmed goals only (the Autopilot board). */
   confirmed?: boolean
+  /** Filter to goals originated from one chat session (in-chat pursuit). */
+  originSessionId?: string
   limit?: number
 }
 

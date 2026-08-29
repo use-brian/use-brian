@@ -109,6 +109,8 @@ function projectGoal(g: GoalRecord | GoalListRow) {
     contextProjectId: g.contextProjectId,
     confirmedAt: g.confirmedAt ? g.confirmedAt.toISOString() : null,
     hasWorkflow: Boolean(g.means.workflowId),
+    /** The chat session the goal originated from (in-chat pursuit anchor). */
+    originSessionId: g.originSessionId,
     createdAt: g.createdAt.toISOString(),
     updatedAt: g.updatedAt.toISOString(),
   }
@@ -252,6 +254,11 @@ export function goalsRoutes(opts: GoalsRouteOptions): Router {
     // the Autopilot board lists confirmed=true. Omitted = both (back-compat).
     const confirmed =
       req.query.confirmed === 'true' ? true : req.query.confirmed === 'false' ? false : undefined
+    // In-chat pursuit: the transcript lists the goals born in its session.
+    const originSessionId =
+      typeof req.query.originSessionId === 'string' && req.query.originSessionId.length > 0
+        ? req.query.originSessionId
+        : undefined
 
     const goals = await opts.goalStore.list(userId, workspaceId, {
       status,
@@ -259,6 +266,7 @@ export function goalsRoutes(opts: GoalsRouteOptions): Router {
       hostId,
       includeTerminal,
       confirmed,
+      originSessionId,
     })
     res.json({ goals: goals.map(projectGoal) })
   })

@@ -87,7 +87,7 @@ export function ZoomableVisual({
   );
 }
 
-function VisualLightbox({
+export function VisualLightbox({
   open,
   onOpenChange,
   label,

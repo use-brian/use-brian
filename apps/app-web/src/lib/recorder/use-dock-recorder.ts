@@ -40,7 +40,11 @@ import {
   type CaptureLane,
 } from "./recorder-gesture";
 import { createRecorderEngine, type RecorderEngine } from "./recorder-engine";
-import { SystemAudioCaptureError } from "./audio-mixer";
+import {
+  ScreenCaptureCancelledError,
+  ScreenCaptureError,
+  SystemAudioCaptureError,
+} from "./audio-mixer";
 import {
   LIVE_SESSION_GRACE_MS,
   assembleSpooledBlob,
@@ -248,6 +252,7 @@ export type RecorderNotice =
         | "pauseStopped"
         | "denied"
         | "systemAudioFailed"
+        | "screenCaptureFailed"
         | "failed"
         | "voiceFailed";
     }
@@ -283,6 +288,17 @@ export function handOffVerdict(result: MeetingCaptureOutcome): {
   }
 }
 
+/**
+ * What the next capture records. `'mic'` is the unchanged default. `'screen'`
+ * records the display (desktop: the primary display via the shell handler;
+ * browser: whatever the native picker grants — screen, window, or tab, with
+ * that pick's audio when the user shares it). `'window'` is desktop-only
+ * (needs the shell's source picker) and records one chosen window.
+ * Session-sticky, never persisted: recording pixels is a deliberate
+ * per-session choice, unlike the computer-audio preference.
+ */
+export type RecorderCaptureSource = "mic" | "screen" | "window";
+
 export type DockRecorderApi = {
   phase: RecorderPhase;
   /** True whenever the recorder owns the pill (anything but idle). */
@@ -313,6 +329,15 @@ export type DockRecorderApi = {
   setLivePageEnabled: (enabled: boolean) => void;
   /** Visible trust signal for desktop remote-call capture. */
   includesSystemAudio: () => boolean;
+  /** True when this environment can record a screen at all (getDisplayMedia). */
+  screenCaptureAvailable: boolean;
+  /** True only in a desktop shell that can list windows for a specific-window pick. */
+  windowPickerAvailable: boolean;
+  /** What the next capture records; ignored while a capture runs. */
+  captureSource: RecorderCaptureSource;
+  setCaptureSource: (source: RecorderCaptureSource) => void;
+  /** Visible trust signal: the RUNNING capture records the screen. */
+  capturesScreen: () => boolean;
   recovery: SpoolSessionMeta[];
   saveRecovery: (sessionId: string) => Promise<void>;
   discardRecovery: (sessionId: string) => Promise<void>;
@@ -340,10 +365,16 @@ export function useDockRecorder(opts: {
   ) => Promise<MeetingCaptureOutcome>;
   /** Pre-flight confirm + destination creation; null means the user cancelled. */
   prepareLivePage?: () => Promise<LiveRecordingPage | null>;
+  /**
+   * Desktop specific-window pick: list the shell's window sources and resolve
+   * the chosen source id, or null when the user cancelled. Only consulted
+   * when `captureSource === 'window'`.
+   */
+  prepareWindowSource?: () => Promise<string | null>;
   /** Sequential provisional-window upload. */
   streamLiveWindow?: (window: LiveWindow) => Promise<void>;
 }): DockRecorderApi {
-  const { enabled, workspaceId, assistantId, captureNamePrefix, sendVoiceClip, getSessionId, onMeetingCapture, prepareLivePage, streamLiveWindow } =
+  const { enabled, workspaceId, assistantId, captureNamePrefix, sendVoiceClip, getSessionId, onMeetingCapture, prepareLivePage, prepareWindowSource, streamLiveWindow } =
     opts;
   const [phase, setPhase] = useState<RecorderPhase>(IDLE);
   const [notice, setNotice] = useState<RecorderNotice | null>(null);
@@ -355,6 +386,10 @@ export function useDockRecorder(opts: {
   const [computerAudioAvailable, setComputerAudioAvailable] = useState(false);
   const [includeComputerAudio, setIncludeComputerAudioState] = useState(true);
   const includeComputerAudioRef = useRef(true);
+  const [screenCaptureAvailable, setScreenCaptureAvailable] = useState(false);
+  const [windowPickerAvailable, setWindowPickerAvailable] = useState(false);
+  const [captureSource, setCaptureSourceState] = useState<RecorderCaptureSource>("mic");
+  const captureSourceRef = useRef<RecorderCaptureSource>("mic");
   const [livePageEnabled, setLivePageEnabledState] = useState(false);
   const livePageEnabledRef = useRef(false);
   const livePageRef = useRef<LiveRecordingPage | null>(null);
@@ -383,6 +418,10 @@ export function useDockRecorder(opts: {
     includeComputerAudioRef.current = include;
     setIncludeComputerAudioState(include);
     setComputerAudioAvailable(available);
+    setScreenCaptureAvailable(
+      typeof navigator.mediaDevices?.getDisplayMedia === "function",
+    );
+    setWindowPickerAvailable(desktopBridge()?.captureSourcePicker === true);
   }, []);
 
   const applyPhase = (next: RecorderPhase) => {
@@ -458,7 +497,11 @@ export function useDockRecorder(opts: {
     ): Promise<boolean> => {
       const livePageId = recoveredLive?.pageId ?? livePageRef.current?.pageId;
       const liveSessionId = recoveredLive?.sessionId ?? livePageRef.current?.sessionId;
-      const lane: CaptureLane = livePageId && durationMs >= 2_000 ? "recording" : stopLane(durationMs);
+      // A video capture always takes the recording lane (the voice lane's
+      // file cache is audio-only) — same rule as the dropped-file fork.
+      const isVideo = mime.startsWith("video/");
+      const lane: CaptureLane =
+        livePageId && durationMs >= 2_000 ? "recording" : stopLane(durationMs, undefined, isVideo);
       if (lane === "discard") return true;
       const name = captureFileName(captureNamePrefix, new Date(), mime);
       if (lane === "voice") {
@@ -503,6 +546,32 @@ export function useDockRecorder(opts: {
                 }
                 livePageRef.current = livePage;
               }
+              // A specific-window capture resolves its source BEFORE the
+              // engine opens anything: the shell's next display-media grant
+              // uses the picked id. A cancelled picker is a changed mind —
+              // back to idle, no notice.
+              const source = captureSourceRef.current;
+              if (source === "window") {
+                const sourceId = (await prepareWindowSource?.()) ?? null;
+                if (!sourceId) {
+                  dispatchRef.current({ type: "arm-failed" });
+                  return;
+                }
+                try {
+                  desktopBridge()?.setCaptureSource?.(sourceId);
+                } catch {
+                  // Older shell without the method — the handler falls back
+                  // to the primary display; the strip still says screen.
+                }
+              } else if (source === "screen") {
+                try {
+                  // Clear any stale window pick so the handler grants the
+                  // primary display again.
+                  desktopBridge()?.setCaptureSource?.(null);
+                } catch {
+                  // Older shell without the method.
+                }
+              }
               // The user may slide away while the destination modal or API is
               // open. Never proceed to microphone access for a cancelled arm.
               if (attempt !== armAttemptRef.current || phaseRef.current.kind !== "arming") return;
@@ -515,6 +584,12 @@ export function useDockRecorder(opts: {
                   desktopBridge()?.systemAudioCapture,
                   includeComputerAudioRef.current,
                 ),
+                // Screen capture keeps the display video track. In browsers
+                // (no shell loopback promise) display audio is opportunistic:
+                // mixed when the user's pick grants it, ordinary when absent.
+                captureScreen: source !== "mic",
+                opportunisticDisplayAudio:
+                  source !== "mic" && desktopBridge()?.systemAudioCapture !== true,
                 ...(livePage && streamLiveWindow
                   ? { onLiveWindow: streamLiveWindow }
                   : {}),
@@ -542,14 +617,20 @@ export function useDockRecorder(opts: {
               engineRef.current = armedEngine;
               dispatchRef.current({ type: "armed" });
             } catch (err) {
-              setNotice({
-                kind:
-                  err instanceof SystemAudioCaptureError
-                    ? "systemAudioFailed"
-                    : err instanceof DOMException && err.name === "NotAllowedError"
-                      ? "denied"
-                      : "failed",
-              });
+              // A dismissed screen picker is a changed mind, not a failure —
+              // return to idle silently.
+              if (!(err instanceof ScreenCaptureCancelledError)) {
+                setNotice({
+                  kind:
+                    err instanceof ScreenCaptureError
+                      ? "screenCaptureFailed"
+                      : err instanceof SystemAudioCaptureError
+                        ? "systemAudioFailed"
+                        : err instanceof DOMException && err.name === "NotAllowedError"
+                          ? "denied"
+                          : "failed",
+                });
+              }
               dispatchRef.current({ type: "arm-failed" });
             }
           })();
@@ -651,7 +732,7 @@ export function useDockRecorder(opts: {
           return;
       }
     },
-    [workspaceId, assistantId, handOff, refreshRecovery, prepareLivePage, streamLiveWindow],
+    [workspaceId, assistantId, handOff, refreshRecovery, prepareLivePage, prepareWindowSource, streamLiveWindow],
   );
 
   const dispatch = useCallback(
@@ -851,8 +932,15 @@ export function useDockRecorder(opts: {
     if (phaseRef.current.kind === "idle") {
       pressStartedAtRef.current = Date.now();
       // Live transcription is meeting intent, so it always latches and never
-      // resolves as a walkie-talkie gesture after pre-flight.
-      dispatch({ type: livePageEnabledRef.current ? "auto-start" : "press" });
+      // resolves as a walkie-talkie gesture after pre-flight. A screen/window
+      // capture latches for the same reason: press-and-hold walkie-talkie
+      // makes no sense while a picker dialog resolves.
+      dispatch({
+        type:
+          livePageEnabledRef.current || captureSourceRef.current !== "mic"
+            ? "auto-start"
+            : "press",
+      });
     }
   }, [enabled, dispatch]);
 
@@ -880,6 +968,17 @@ export function useDockRecorder(opts: {
     livePageEnabledRef.current = next;
     setLivePageEnabledState(next);
   }, []);
+
+  const setCaptureSource = useCallback(
+    (source: RecorderCaptureSource) => {
+      if (phaseRef.current.kind !== "idle") return;
+      if (source !== "mic" && !screenCaptureAvailable) return;
+      if (source === "window" && !windowPickerAvailable) return;
+      captureSourceRef.current = source;
+      setCaptureSourceState(source);
+    },
+    [screenCaptureAvailable, windowPickerAvailable],
+  );
 
   const saveRecovery = useCallback(
     async (sessionId: string) => {
@@ -934,6 +1033,14 @@ export function useDockRecorder(opts: {
     setLivePageEnabled,
     includesSystemAudio: useCallback(
       () => engineRef.current?.includesSystemAudio() ?? false,
+      [],
+    ),
+    screenCaptureAvailable,
+    windowPickerAvailable,
+    captureSource,
+    setCaptureSource,
+    capturesScreen: useCallback(
+      () => engineRef.current?.capturesVideo() ?? false,
       [],
     ),
     recovery,

@@ -36,6 +36,7 @@ import {
 import { RecordingPlayerBar } from "./recording-player-bar";
 import { TranscriptPane } from "./transcript-pane";
 import { CitationTranscriptCard, HashSeek } from "./recording-chrome";
+import { RecordingVideoStage } from "@/lib/recordings/recording-player-context";
 
 export function PublicRecordingChrome({
   source,
@@ -68,6 +69,7 @@ export function PublicRecordingChrome({
       <HashSeek />
       {/* Popped by a `[H:MM:SS]` citation in the prose below. */}
       <CitationTranscriptCard recordingId={recording.recordingId} fetchTranscriptPage={fetchTranscriptPage} />
+      <RecordingVideoStage />
       <RecordingPlayerBar title={title} className="sticky top-0 z-10" />
 
       {/* Reference material — one click away, never in front of the brief. */}

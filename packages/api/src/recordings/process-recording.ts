@@ -6,8 +6,14 @@ import { getRecordingSystem, updateRecording } from '../db/recordings-store.js'
 import {
   insertTranscriptSegments,
   linkTranscriptSegmentsFile,
+  mergeVisualSegments,
   segmentTranscript,
 } from '../db/transcript-segments-store.js'
+import {
+  interleaveTranscriptText,
+  type RecordingFrameAnalyzer,
+  type VisualMoment,
+} from './frame-analysis.js'
 import type { FilesClientResolver } from '../files/files-api.js'
 import type { GcsFilesClient } from '../files/gcs-client.js'
 import type { BrainEpisodeIngestor } from '../ingest-port.js'
@@ -42,6 +48,12 @@ export async function processOpenRecording(
     persistTranscript?: (input: PersistTranscriptInput) => Promise<PersistedTranscript | null>
     linkTranscriptFile?: (recordingId: string, transcriptFileId: string) => Promise<void>
     synthesize?: RecordingSynthesizeFn
+    /**
+     * Video keyframe analysis (transcription.md → "Video frame analysis").
+     * Runs only for a `video/*` recording; failure-isolated — a vision outage
+     * degrades the recording to audio-only, it never fails the job.
+     */
+    analyzeFrames?: RecordingFrameAnalyzer
   },
 ): Promise<OpenRecordingProcessResult> {
   if (!deps.transcriber) {
@@ -93,7 +105,22 @@ export async function processOpenRecording(
   }
   if (transcription.utterances.length === 0) throw new Error('transcriber returned an empty transcript')
 
-  const segments = segmentTranscript(transcription.utterances)
+  // Video keyframe analysis — additive and failure-isolated, matching every
+  // other optional step: a vision failure logs and the recording proceeds
+  // audio-only. The mime decides (a video/* upload has frames worth reading;
+  // running ffmpeg's decoder over plain audio is a no-op the analyzer skips).
+  let visualMoments: VisualMoment[] = []
+  const mime = recording?.mime ?? (episode.sourceRef as { mime?: string } | null)?.mime ?? ''
+  if (deps.analyzeFrames && mime.startsWith('video/')) {
+    try {
+      const analysis = await deps.analyzeFrames({ sourceUrl: readUrl, durationMs })
+      if (analysis) visualMoments = analysis.moments
+    } catch (err) {
+      console.error(`[process-recording] frame analysis failed for ${episode.id} (non-fatal):`, err)
+    }
+  }
+
+  const segments = mergeVisualSegments(segmentTranscript(transcription.utterances), visualMoments)
   const segmentsInserted = await (deps.insertSegments ?? insertTranscriptSegments)({
     recordingId: episode.id,
     workspaceId: episode.workspaceId,
@@ -136,9 +163,7 @@ export async function processOpenRecording(
     }
   }
 
-  const text = transcription.utterances
-    .map((utterance) => `${utterance.speaker ? `${utterance.speaker}: ` : ''}${utterance.text}`)
-    .join('\n')
+  const text = interleaveTranscriptText(transcription.utterances, visualMoments)
   await deps.brainIngestor({
     workspaceId: episode.workspaceId,
     userId: job.actingUserId,
