@@ -101,7 +101,14 @@ export function gdriveAuthorizedFilesRoutes(options: GDriveAuthorizedFilesRouteO
       const creds = parsed.data.connectorInstanceId
         ? await options.connectorInstanceStore?.getCredentials(req.userId, parsed.data.connectorInstanceId)
         : await options.connectorStore.getCredentials(req.userId, 'gdrive')
-      if (!creds || creds.client_id !== 'google_refresh' || !creds.client_secret) {
+      // A connected gdrive row's secret is always a Google refresh grant:
+      // `google_refresh` from the hosted store and the BYO callback, or a
+      // legacy BLANK client_id from the open store before it stamped the
+      // discriminator (2026-08-29). Gating on `client_id === 'google_refresh'`
+      // here 409'd every OSS managed Drive connect as "not connected", so the
+      // gate is presence-of-secret only — `unpackGoogleRefreshCredential`
+      // already parses both the BYO envelope and raw refresh-token rows.
+      if (!creds?.client_secret) {
         res.status(409).json({ error: 'gdrive not connected' }); return
       }
       const grant = unpackGoogleRefreshCredential(creds.client_secret)

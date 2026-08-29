@@ -312,7 +312,7 @@ function tabForMime(mimeType: string): GDriveTab {
   return "other";
 }
 
-function GDriveAuthorizedFiles() {
+function GDriveAuthorizedFiles({ connectorInstanceId }: { connectorInstanceId?: string }) {
   const t = useT();
   const gd = t.settings.connectors.gdrivePanel;
   const [files, setFiles] = useState<AuthorizedFile[]>([]);
@@ -431,7 +431,7 @@ function GDriveAuthorizedFiles() {
           <div className="text-[13px] font-medium">{gd.title}</div>
           <div className="text-[11px] text-muted-foreground mt-0.5">{gd.desc}</div>
         </div>
-        <DrivePicker onPicked={handlePicked} onError={(msg) => setError(msg)}>
+        <DrivePicker connectorInstanceId={connectorInstanceId} onPicked={handlePicked} onError={(msg) => setError(msg)}>
           {({ open, isOpening, disabled, disabledReason }) => (
             <button
               onClick={open}
@@ -2489,7 +2489,7 @@ function ConnectorsList() {
             </>
           )}
         </div>
-      ) : <GDriveAuthorizedFiles />
+      ) : <GDriveAuthorizedFiles connectorInstanceId={sel.connectorInstanceId} />
     )}
       </>
     );
@@ -4506,6 +4506,7 @@ function ConnectorsList() {
                   {/* Quick "Add from Drive" picker — only for gdrive when connected. */}
                   {sel.id === "gdrive" && sel.connected && sel.driveAccessMode !== "full_drive_readonly" && (sel.scopeVersion ?? 0) >= (CURRENT_SCOPE_VERSION.gdrive ?? 0) && (
                     <DrivePicker
+                      connectorInstanceId={sel.connectorInstanceId}
                       onPicked={async (picked) => {
                         const res = await authFetch(`${API_URL}/api/connectors/gdrive/authorized-files`, {
                           method: "POST",
