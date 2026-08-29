@@ -3,6 +3,8 @@ import { findOrCreateUser, getDefaultAssistant, getUserAssistant, getUserProfile
 import { addSessionMessage, createWorkspaceChatSession, findSessionByChannel, findSessionById, getSessionMessageById, getSessionMessages, isSharedChatSession, rebindSessionAssistant, renameSession, updateSessionMessageText } from '../db/sessions.js'
 import { mayAssistantAnswerInRoom } from './_room-binding.js'
 import { query } from '../db/client.js'
+import { getTurnTrace } from '../ledger/turn-trace.js'
+import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { resolveUser } from './route-helpers.js'
 import { getWorkspaceRoleSystem, getWorkspaceMembershipWithClearanceSystem } from '../db/workspace-store.js'
 import { canRead, type Sensitivity } from '@use-brian/core'
@@ -854,6 +856,82 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
     } catch (err) {
       console.error('Session delete error:', err)
       res.status(500).json({ error: 'Failed to delete session' })
+    }
+  })
+
+  // ── Turn trace (the audit read model; plan §9) ────────────────
+  // Post-epoch turns resolve their full turn_events trace; pre-epoch
+  // turns compose a best-effort legacy view from session_messages +
+  // usage_tracking (fidelity: 'legacy', permanent - never backfilled).
+  // Read access = session read access (gateSessionRead), and the trace
+  // must belong to the session in the URL - a member of one session can
+  // never walk another session's traces by message-id guessing.
+  router.get('/:id/turns/:messageId/trace', async (req, res) => {
+    try {
+      const jwtUserId = (req as { userId?: string }).userId
+      if (!jwtUserId) {
+        res.status(401).json({ error: 'Unauthorized' })
+        return
+      }
+      const session = await findSessionById(req.params.id)
+      if (!session) {
+        res.status(404).json({ error: 'Session not found' })
+        return
+      }
+      const denied = await gateSessionRead(jwtUserId, session)
+      if (denied) {
+        res.status(denied.status).json({ error: denied.error })
+        return
+      }
+      const trace = await getTurnTrace(req.params.messageId)
+      if (!trace || trace.sessionId !== req.params.id) {
+        res.status(404).json({ error: 'No trace for this turn' })
+        return
+      }
+      res.json(trace)
+    } catch (err) {
+      console.error('[sessions] turn trace failed:', err)
+      res.status(500).json({ error: 'Failed to load turn trace' })
+    }
+  })
+
+  // Ledger payload fetch - the ONLY content path (D1: operators see shape
+  // and pointers; this member-gated route is where bytes come out).
+  router.get('/:id/turns/payloads/:hash', async (req, res) => {
+    try {
+      const jwtUserId = (req as { userId?: string }).userId
+      if (!jwtUserId) {
+        res.status(401).json({ error: 'Unauthorized' })
+        return
+      }
+      const session = await findSessionById(req.params.id)
+      if (!session) {
+        res.status(404).json({ error: 'Session not found' })
+        return
+      }
+      const denied = await gateSessionRead(jwtUserId, session)
+      if (denied) {
+        res.status(denied.status).json({ error: denied.error })
+        return
+      }
+      const ws = await query<{ workspace_id: string | null }>(
+        `SELECT workspace_id FROM assistants WHERE id = $1`,
+        [session.assistantId],
+      )
+      const workspaceId = ws.rows[0]?.workspace_id ?? null
+      const payload = await getLedgerPayloadStore().get(workspaceId, req.params.hash)
+      if (!payload) {
+        res.status(404).json({ error: 'Unknown payload' })
+        return
+      }
+      if ('erased' in payload) {
+        res.status(410).json({ erased: true })
+        return
+      }
+      res.type(payload.mediaType).send(payload.content)
+    } catch (err) {
+      console.error('[sessions] payload fetch failed:', err)
+      res.status(500).json({ error: 'Failed to load payload' })
     }
   })
 
