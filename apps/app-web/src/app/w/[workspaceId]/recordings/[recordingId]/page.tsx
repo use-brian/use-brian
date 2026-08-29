@@ -26,7 +26,7 @@ import { useParams } from "next/navigation";
 import Link from "next/link";
 import { useT } from "@/lib/i18n/client";
 import { getRecording, type RecordingSummary } from "@/lib/api/recordings";
-import { RecordingPlayerProvider } from "@/lib/recordings/recording-player-context";
+import { RecordingPlayerProvider, RecordingVideoStage } from "@/lib/recordings/recording-player-context";
 import { RecordingPlayerBar } from "@/components/recordings/recording-player-bar";
 import { TranscriptPane } from "@/components/recordings/transcript-pane";
 import { ActionItemsRail } from "@/components/recordings/action-items-rail";
@@ -88,6 +88,7 @@ export default function RecordingDetailPage() {
           <p className="text-sm text-muted-foreground">{t.recordings.detailTruncated}</p>
         ) : null}
 
+        <RecordingVideoStage />
         <RecordingPlayerBar title={title} className="sticky top-0 z-10" />
 
         <section>

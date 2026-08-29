@@ -22,6 +22,7 @@ describe('[COMP:shared/home-apps] home-apps config vocabulary', () => {
       'browsers',
       'chat',
       'shopify',
+      'live',
     ])
   })
 
@@ -39,11 +40,11 @@ describe('[COMP:shared/home-apps] home-apps config vocabulary', () => {
     expect(HOME_APPS_MAX).toBe(7)
   })
 
-  it('defaults a never-configured workspace to Page + Office + Chat', () => {
-    expect(DEFAULT_HOME_APPS).toEqual(['page', 'office', 'chat'])
-    expect(normalizeHomeApps([])).toEqual(['page', 'office', 'chat'])
-    expect(normalizeHomeApps(null)).toEqual(['page', 'office', 'chat'])
-    expect(normalizeHomeApps('page,chat')).toEqual(['page', 'office', 'chat'])
+  it('defaults a never-configured workspace to Page + Office + Chat + Live', () => {
+    expect(DEFAULT_HOME_APPS).toEqual(['page', 'office', 'chat', 'live'])
+    expect(normalizeHomeApps([])).toEqual(['page', 'office', 'chat', 'live'])
+    expect(normalizeHomeApps(null)).toEqual(['page', 'office', 'chat', 'live'])
+    expect(normalizeHomeApps('page,chat')).toEqual(['page', 'office', 'chat', 'live'])
   })
 
   it('recognises built-in vs custom entries', () => {
@@ -60,7 +61,7 @@ describe('[COMP:shared/home-apps] home-apps config vocabulary', () => {
   it('filters unknown keys on read instead of failing (additive contract)', () => {
     expect(normalizeHomeApps(['page', 'holodeck', 'chat'])).toEqual(['page', 'chat'])
     // Everything dropped still yields a usable strip, never an empty one.
-    expect(normalizeHomeApps(['holodeck'])).toEqual(['page', 'office', 'chat'])
+    expect(normalizeHomeApps(['holodeck'])).toEqual(['page', 'office', 'chat', 'live'])
   })
 
   it('dedupes, preserves the stored order, and caps at seven', () => {

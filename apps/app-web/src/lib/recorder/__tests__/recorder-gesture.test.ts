@@ -85,4 +85,24 @@ describe("[COMP:app-web/recorder-gesture] Live-capture gesture + fork", () => {
     expect(formatElapsed(3_600_000)).toBe("1:00:00");
     expect(formatElapsed(5_025_000)).toBe("1:23:45");
   });
+
+  it("a video capture always takes the recording lane, whatever its length", () => {
+    expect(stopLane(10_000, undefined, true)).toBe("recording");
+    expect(stopLane(1_000, undefined, true)).toBe("discard"); // stray click still discards
+    expect(captureLabelLane(10_000, undefined, true)).toBe("recording");
+  });
+
+  it("picks a video mime ladder for screen captures", () => {
+    expect(pickRecorderMime((m) => m.startsWith("video/webm"), { video: true })).toBe(
+      "video/webm;codecs=vp9,opus",
+    );
+    expect(pickRecorderMime((m) => m === "video/mp4", { video: true })).toBe("video/mp4");
+    expect(pickRecorderMime(() => false, { video: true })).toBe("");
+  });
+
+  it("names a video/mp4 capture .mp4, never .m4a", () => {
+    expect(extensionForMime("video/mp4")).toBe("mp4");
+    expect(extensionForMime("audio/mp4")).toBe("m4a");
+    expect(extensionForMime("video/webm")).toBe("webm");
+  });
 });

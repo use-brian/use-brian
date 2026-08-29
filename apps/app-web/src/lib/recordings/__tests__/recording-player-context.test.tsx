@@ -21,6 +21,7 @@ vi.mock("@/lib/api/recordings", () => ({
 
 import {
   RecordingPlayerProvider,
+  RecordingVideoStage,
   useRecordingPlayer,
   type RecordingPlayerApi,
 } from "../recording-player-context";
@@ -75,7 +76,7 @@ describe("[COMP:recordings/player] no recording", () => {
       </RecordingPlayerProvider>,
     );
     expect(getRecordingMediaUrl).not.toHaveBeenCalled();
-    expect(document.querySelector("audio")).toBeNull();
+    expect(document.querySelector("video")).toBeNull();
   });
 });
 
@@ -87,7 +88,7 @@ describe("[COMP:recordings/player] playback URL", () => {
       </RecordingPlayerProvider>,
     );
     expect(getRecordingMediaUrl).toHaveBeenCalledWith("rec-1");
-    expect(document.querySelector("audio")?.getAttribute("src")).toBe("https://gcs.example/signed");
+    expect(document.querySelector("video")?.getAttribute("src")).toBe("https://gcs.example/signed");
     expect(api!.recordingId).toBe("rec-1");
   });
 
@@ -121,7 +122,7 @@ describe("[COMP:recordings/player] seek", () => {
         <Probe />
       </RecordingPlayerProvider>,
     );
-    const el = document.querySelector("audio") as HTMLAudioElement;
+    const el = document.querySelector("video") as HTMLVideoElement;
     // jsdom has no media stack — play() is absent, so stub it.
     el.play = vi.fn().mockResolvedValue(undefined);
 
@@ -135,7 +136,7 @@ describe("[COMP:recordings/player] seek", () => {
         <Probe />
       </RecordingPlayerProvider>,
     );
-    const el = document.querySelector("audio") as HTMLAudioElement;
+    const el = document.querySelector("video") as HTMLVideoElement;
     el.play = vi.fn().mockResolvedValue(undefined);
     await act(async () => api!.seekTo(-5000));
     expect(el.currentTime).toBe(0);
@@ -147,10 +148,46 @@ describe("[COMP:recordings/player] seek", () => {
         <Probe />
       </RecordingPlayerProvider>,
     );
-    const el = document.querySelector("audio") as HTMLAudioElement;
+    const el = document.querySelector("video") as HTMLVideoElement;
     el.play = vi.fn().mockRejectedValue(new DOMException("NotAllowedError"));
     await act(async () => api!.seekTo(1000));
     // The seek landed; only the autoplay was refused.
     expect(el.currentTime).toBeCloseTo(1, 0);
+  });
+
+  describe("video stage", () => {
+    it("portals the media element into the stage for a video mime", async () => {
+      getRecordingMediaUrl.mockResolvedValue({
+        url: "https://gcs.example/signed-video",
+        expiresAt: new Date(Date.now() + 6 * 3600_000).toISOString(),
+        mime: "video/webm",
+        durationMs: 60_000,
+      });
+      await mount(
+        <RecordingPlayerProvider recordingId="rec-1">
+          <RecordingVideoStage />
+          <Probe />
+        </RecordingPlayerProvider>,
+      );
+      expect(api?.isVideo).toBe(true);
+      const stage = container!.querySelector(".aspect-video");
+      expect(stage).not.toBeNull();
+      // The staged element IS the seeking element — the citation frame follows.
+      expect(stage!.querySelector("video")).not.toBeNull();
+      expect(document.querySelectorAll("video")).toHaveLength(1);
+    });
+
+    it("keeps the stage hidden and the element chrome-only for audio", async () => {
+      await mount(
+        <RecordingPlayerProvider recordingId="rec-1">
+          <RecordingVideoStage />
+          <Probe />
+        </RecordingPlayerProvider>,
+      );
+      expect(api?.isVideo).toBe(false);
+      expect(container!.querySelector(".aspect-video")).toBeNull();
+      const el = document.querySelector("video");
+      expect(el?.className).toContain("hidden");
+    });
   });
 });

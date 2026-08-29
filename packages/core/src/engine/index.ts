@@ -17,6 +17,14 @@ export type {
   TurnInboxPort,
 } from './turn-inbox.js'
 export { createToolExecutor, formatToolError, NO_TOOL_TIMEOUT } from './tool-executor.js'
+export { NOOP_TURN_LEDGER, safeTrace } from './turn-ledger.js'
+export type {
+  TurnLedger,
+  TurnLedgerActor,
+  TurnRetrievalProvenance,
+  TurnTrace,
+  TurnTraceStart,
+} from './turn-ledger.js'
 export {
   createStallWatchdog,
   withStallSignal,

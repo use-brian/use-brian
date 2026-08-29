@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import { NOOP_TURN_LEDGER } from '../turn-ledger.js'
 import { z } from 'zod'
 import type {
   LLMProvider,
@@ -126,6 +127,7 @@ async function collect(
 }
 
 const baseOptions = (provider: LLMProvider, inbox: TurnInboxPort) => ({
+  ledger: NOOP_TURN_LEDGER,
   provider,
   model: 'mock-model',
   systemPrompt: 'sys',

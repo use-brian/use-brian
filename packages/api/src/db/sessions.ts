@@ -1,5 +1,31 @@
 import type pg from 'pg'
 import { query } from './client.js'
+import { notifyWorkspaceChange } from '../brain-stream/notify.js'
+
+/**
+ * Store-seam emitter for the `session` workspace primitive (Live roster —
+ * docs/architecture/features/live-work.md §4). Fired ONLY at the turn
+ * lifecycle seams (`updateSessionStatus`, `releaseTurnLease`,
+ * `reclaimStaleTurn`, `sweepStuckSessions`) — never per token, never per
+ * heartbeat touch; the 2s coalescer folds bursts per (workspace,
+ * primitive). Resolves the workspace through the owning assistant the way
+ * `job-store.ts#notifyJobChange` does; a personal (non-workspace)
+ * assistant resolves to null and `notifyWorkspaceChange` drops it, so
+ * personal-assistant sessions never signal a workspace. Fire-and-forget:
+ * the write path must never feel a NOTIFY failure.
+ */
+function notifySessionChange(sessionId: string): void {
+  void (async () => {
+    const r = await query<{ workspaceId: string | null }>(
+      `SELECT a.workspace_id AS "workspaceId"
+         FROM sessions s
+         JOIN assistants a ON a.id = s.assistant_id
+        WHERE s.id = $1`,
+      [sessionId],
+    )
+    notifyWorkspaceChange(r.rows[0]?.workspaceId, 'session', 'update', sessionId)
+  })().catch(() => {})
+}
 
 export type Session = {
   id: string
@@ -549,6 +575,7 @@ export async function updateSessionStatus(sessionId: string, status: string): Pr
     `UPDATE sessions SET status = $1, last_active_at = now() WHERE id = $2`,
     [status, sessionId],
   )
+  notifySessionChange(sessionId)
 }
 
 // ── Turn lease (migration 424) ────────────────────────────────────────────
@@ -685,7 +712,9 @@ export async function releaseTurnLease(
       ? [restingStatusFor(reason), reason, sessionId]
       : [restingStatusFor(reason), reason, sessionId, token],
   )
-  return (result.rowCount ?? 0) > 0
+  const released = (result.rowCount ?? 0) > 0
+  if (released) notifySessionChange(sessionId)
+  return released
 }
 
 /**
@@ -718,7 +747,9 @@ export async function reclaimStaleTurn(
               < now() - ($2 || ' milliseconds')::interval`,
     [sessionId, String(staleAfterMs)],
   )
-  return (result.rowCount ?? 0) > 0
+  const reclaimed = (result.rowCount ?? 0) > 0
+  if (reclaimed) notifySessionChange(sessionId)
+  return reclaimed
 }
 
 /**
@@ -785,6 +816,9 @@ export async function sweepStuckSessions(
       RETURNING id, mode, user_id, visibility`,
     [String(staleAfterMs)],
   )
+  // Per-row emission: the coalescer folds a multi-workspace sweep into one
+  // signal per (workspace, primitive) anyway.
+  for (const r of result.rows) notifySessionChange(r.id)
   return result.rows.map((r) => ({
     id: r.id,
     mode: r.mode,

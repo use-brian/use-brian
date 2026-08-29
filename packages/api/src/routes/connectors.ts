@@ -278,10 +278,22 @@ function credentialedConnector(provider: string): ConnectorEntry | null {
  * refresh token for `oauth` providers, PAT for `api_key` providers) lands in
  * `client_secret`, which is what `mcp/inject.ts` reads back. `client_id` is
  * unused at injection time (Google's app client id comes from
- * `getConnectorConfig`), so it is left blank.
+ * `getConnectorConfig`), so it is left blank — EXCEPT for the Google family,
+ * whose secret is a Google refresh grant: those stamp `client_id:
+ * 'google_refresh'`, the discriminator the Drive Picker token route
+ * (`gdrive-authorized-files.ts`) and the hosted edition's store both key on.
+ * The hosted fork has always written `google_refresh` here; leaving it blank
+ * in the open store was the drift that made every OSS managed Drive connect
+ * 409 "not connected" at the Picker while working everywhere else.
  */
-function credentialsFor(secret: string): ConnectorCredentials {
-  return { type: 'oauth', client_id: '', client_secret: secret }
+const GOOGLE_CONNECTORS = new Set(['gcal', 'gmail', 'gdrive'])
+
+function credentialsFor(secret: string, provider: string): ConnectorCredentials {
+  return {
+    type: 'oauth',
+    client_id: GOOGLE_CONNECTORS.has(provider) ? 'google_refresh' : '',
+    client_secret: secret,
+  }
 }
 
 /**
@@ -2734,7 +2746,7 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
         res.status(400).json({ error: 'Missing credential (refreshToken/pat/accessToken/token)' })
         return
       }
-      credentials = credentialsFor(secret)
+      credentials = credentialsFor(secret, provider)
       if (provider === 'gdrive') {
         configPatch = { scopeVersion: 2, driveAccessMode: 'picked_files' }
       }
@@ -2821,7 +2833,7 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
         userId,
         provider,
         fallbackLabel: entry.name,
-        credentials: credentialsFor(minted.secret),
+        credentials: credentialsFor(minted.secret, provider),
         email: minted.email,
         // A fresh account's default nickname (createNew only) — the connected
         // email (Google) or workspace name (Notion). Reconnect/primary keep theirs.

@@ -93,6 +93,9 @@ type RoutedSeed = {
   fileIds?: string[];
   attachedRecordingIds?: string[];
   anchorBlockId?: string;
+  /** Draft-assistant pick (the landing's picker) — the dock switches its
+   *  interlocutor for the seeded turn. */
+  assistantId?: string;
   nonce: number;
   target: "desktop" | "mobile";
 };
@@ -272,6 +275,7 @@ export function WorkspaceChrome({
         fileIds: detail.fileIds,
         attachedRecordingIds: detail.attachedRecordingIds,
         anchorBlockId: detail.anchorBlockId,
+        assistantId: detail.assistantId,
         nonce: seedNonceRef.current,
         target: isDesktop ? "desktop" : "mobile",
       });

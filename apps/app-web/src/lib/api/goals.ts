@@ -43,6 +43,9 @@ export type GoalRow = {
   confirmedAt: string | null;
   /** true once a workflow means is set (the goal is being worked / armed). */
   hasWorkflow: boolean;
+  /** The chat session the goal originated from (in-chat pursuit anchor);
+   *  null for goals created outside a chat transcript. */
+  originSessionId: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -55,6 +58,8 @@ export type ListGoalsOptions = {
   includeTerminal?: boolean;
   /** Draft-vs-armed split (§8): false = triage drafts, true = confirmed. */
   confirmed?: boolean;
+  /** Filter to goals originated from one chat session (in-chat pursuit). */
+  originSessionId?: string;
 };
 
 // ── Goal detail (the board drill-down) ───────────────────────────────────────
@@ -126,6 +131,7 @@ export async function listGoals(
   if (opts.hostId) q.set("hostId", opts.hostId);
   if (opts.includeTerminal) q.set("includeTerminal", "true");
   if (opts.confirmed !== undefined) q.set("confirmed", opts.confirmed ? "true" : "false");
+  if (opts.originSessionId) q.set("originSessionId", opts.originSessionId);
   const res = await authFetch(`${API_URL}/api/goals?${q.toString()}`);
   if (!res.ok) return [];
   const data = (await res.json()) as { goals?: GoalRow[] };

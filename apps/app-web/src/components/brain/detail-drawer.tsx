@@ -59,6 +59,7 @@ import {
   requestBrainRefresh,
 } from "@/lib/brain-events";
 import { authFetch } from "@/lib/auth-fetch";
+import { hasConvertiblePdfPreview } from "@/lib/convertible-preview";
 import {
   type AdjustMemoryChanges,
   type BrainInboxRowDetail,
@@ -1841,6 +1842,7 @@ function FileContentPreview({
   type PreviewState =
     | { kind: "loading" }
     | { kind: "image"; url: string }
+    | { kind: "pdf"; url: string }
     | { kind: "text"; text: string }
     | { kind: "download"; url: string }
     | { kind: "error" };
@@ -1855,25 +1857,54 @@ function FileContentPreview({
       mime === "application/json" ||
       mime === "application/xml" ||
       name.toLowerCase().endsWith(".md");
-    authFetch(brainFileContentUrl(workspaceId, fileId))
-      .then(async (res) => {
-        if (!res.ok) throw new Error(String(res.status));
-        if (mime.startsWith("image/")) {
-          const blob = await res.blob();
-          objectUrl = URL.createObjectURL(blob);
-          if (!cancelled) setState({ kind: "image", url: objectUrl });
-        } else if (isText) {
-          const text = await res.text();
-          if (!cancelled) setState({ kind: "text", text });
-        } else {
-          const blob = await res.blob();
-          objectUrl = URL.createObjectURL(blob);
-          if (!cancelled) setState({ kind: "download", url: objectUrl });
+
+    // The pre-conversion behavior, byte-for-byte: image/pdf/text inline,
+    // anything else a download. Also the fallback when the office→PDF render
+    // is unavailable (no LibreOffice on the deploy, converter failure), so a
+    // failed conversion degrades to exactly the old experience.
+    const loadPlain = async () => {
+      const res = await authFetch(brainFileContentUrl(workspaceId, fileId));
+      if (!res.ok) throw new Error(String(res.status));
+      if (mime.startsWith("image/")) {
+        const blob = await res.blob();
+        objectUrl = URL.createObjectURL(blob);
+        if (!cancelled) setState({ kind: "image", url: objectUrl });
+      } else if (mime === "application/pdf") {
+        const blob = await res.blob();
+        objectUrl = URL.createObjectURL(blob);
+        if (!cancelled) setState({ kind: "pdf", url: objectUrl });
+      } else if (isText) {
+        const text = await res.text();
+        if (!cancelled) setState({ kind: "text", text });
+      } else {
+        const blob = await res.blob();
+        objectUrl = URL.createObjectURL(blob);
+        if (!cancelled) setState({ kind: "download", url: objectUrl });
+      }
+    };
+
+    const run = async () => {
+      // Office/structured documents (docx/pptx/xlsx/csv/…) preview as a
+      // server-rendered PDF (`?as=pdf`, the ONE LibreOffice runner).
+      if (hasConvertiblePdfPreview(mime, name)) {
+        try {
+          const res = await authFetch(`${brainFileContentUrl(workspaceId, fileId)}?as=pdf`);
+          if (res.ok) {
+            const blob = await res.blob();
+            objectUrl = URL.createObjectURL(blob);
+            if (!cancelled) setState({ kind: "pdf", url: objectUrl });
+            return;
+          }
+        } catch {
+          /* fall through to the plain read */
         }
-      })
-      .catch(() => {
-        if (!cancelled) setState({ kind: "error" });
-      });
+      }
+      await loadPlain();
+    };
+
+    run().catch(() => {
+      if (!cancelled) setState({ kind: "error" });
+    });
     return () => {
       cancelled = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
@@ -1894,6 +1925,24 @@ function FileContentPreview({
         alt={name}
         className="max-h-80 w-auto rounded-md border border-border object-contain"
       />
+    );
+  }
+  if (state.kind === "pdf") {
+    return (
+      <div className="flex flex-col gap-2">
+        <iframe
+          src={state.url}
+          title={name}
+          className="h-96 w-full rounded-md border border-border"
+        />
+        <a
+          href={state.url}
+          download={name}
+          className="inline-block w-max text-xs px-3 py-1.5 rounded-md border border-border hover:bg-muted"
+        >
+          {fp.download}
+        </a>
+      </div>
     );
   }
   if (state.kind === "text") {

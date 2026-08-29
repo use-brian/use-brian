@@ -124,6 +124,10 @@ function ThinkingDots() {
 export type CommentSeed = {
   message: string;
   fileIds: string[];
+  /** Recordings staged by the page composer (the band / the selection
+   *  popover) for the seeded first turn — same contract as a reply's own
+   *  `pendingRecordings`. */
+  attachedRecordingIds?: string[];
   model?: ModelTier;
   researchMode?: boolean;
   /** Whether the assistant should answer this seeded comment. Omitted /
@@ -392,6 +396,7 @@ export function CommentThreadBody({
     void sendReply({
       body: s.message,
       fileIds: s.fileIds,
+      ...(s.attachedRecordingIds?.length ? { attachedRecordingIds: s.attachedRecordingIds } : {}),
       model: s.model,
       researchMode: s.researchMode,
       aiReply: s.aiReply,
@@ -520,6 +525,7 @@ export function CommentThreadBody({
   async function sendReply(override?: {
     body: string;
     fileIds: string[];
+    attachedRecordingIds?: string[];
     model?: ModelTier;
     researchMode?: boolean;
     /** Seed hand-off only: whether the assistant should answer. Defaults to
@@ -537,10 +543,13 @@ export function CommentThreadBody({
       !override && quotedReply ? composeQuotedBody(quotedReply, body) : body;
     const fileIds = override ? override.fileIds : att.fileIds();
     const hasFiles = fileIds.length > 0;
-    // Recordings queued for this reply (not on the seed/override path — those
-    // carry no composer state). A recording-only reply is valid: the assistant
-    // acknowledges and links even with no typed body.
-    const attachedRecordingIds = override ? [] : pendingRecordings.map((r) => r.recordingId);
+    // Recordings queued for this reply, or carried by the page composer's
+    // seed hand-off (the band / selection popover stage their own recordings
+    // now). A recording-only reply is valid: the assistant acknowledges and
+    // links even with no typed body.
+    const attachedRecordingIds = override
+      ? override.attachedRecordingIds ?? []
+      : pendingRecordings.map((r) => r.recordingId);
     const hasRecordings = attachedRecordingIds.length > 0;
     const model = override ? override.model : controls.model;
     const researchMode = override ? override.researchMode : controls.researchMode;
@@ -875,7 +884,7 @@ export function CommentThreadBody({
                       <span className="line-clamp-1">{thread.quote}</span>
                     </div>
                   ) : null}
-                  <MessageAttachments attachments={parsed.attachments} />
+                  <MessageAttachments attachments={parsed.attachments} workspaceId={workspaceId} />
                   {rowQuote.quote ? (
                     // The reader quoted an earlier comment in this reply — show
                     // the quoted text as the amber bar above the reply body

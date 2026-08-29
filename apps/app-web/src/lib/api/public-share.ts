@@ -227,6 +227,7 @@ export async function getPublicRecordingTranscript(
     end_ms: number;
     speaker: string | null;
     segment_text: string;
+    kind?: "speech" | "visual";
   }[];
   hasMore: boolean;
   toIndex: number;

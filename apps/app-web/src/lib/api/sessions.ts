@@ -53,12 +53,13 @@ export type DocSession = {
    */
   appOrigin: string | null;
   /**
-   * The assistant the session is bound to. Stamped CLIENT-SIDE from the
-   * per-assistant fetch (`GET /api/sessions` is assistant-scoped and doesn't
-   * echo it); workspace-shared rows echo it server-side (a room binds ANY
-   * workspace assistant at creation, default the primary). Sessions
-   * are assistant-bound: `/api/chat` rejects a send whose `assistantId`
-   * doesn't match the session's, so the Chat app resolves this per thread.
+   * The assistant the session is bound to. `GET /api/sessions` now echoes it
+   * server-side (`assistantId` per row — needed by `scope=workspace`, where
+   * rows span the workspace's assistants); workspace-shared rows echo it
+   * too (a room binds ANY workspace assistant at creation, default the
+   * primary). Sessions are assistant-bound with two per-turn-addressable
+   * exceptions (rooms and the doc dock's thread — chat-app.md → "Choosing
+   * an assistant"), so the Chat app still resolves this per thread.
    */
   assistantId?: string;
   /** Immutable Team/Project binding for this conversation. */
@@ -127,6 +128,9 @@ type RawListRow = {
   channelId: string;
   lastActive: string | Date;
   appOrigin?: string | null;
+  /** The session's bound assistant (echoed per row; spans assistants under
+   *  `scope=workspace`). */
+  assistantId?: string;
   contextGroupId?: string | null;
   contextProjectId?: string | null;
 };
@@ -165,19 +169,27 @@ function toIso(value: string | Date): string {
  */
 export async function fetchLatestSession(opts: {
   workspaceId: string;
-  assistantId: string;
+  /** Required on the per-assistant path; ignored under `scope: 'workspace'`. */
+  assistantId?: string;
   /** The surface scope — the dock's `origin` (`'doc'`, `'brain'`, …). */
   appOrigin: string;
+  /**
+   * `'workspace'` lists the caller's sessions across EVERY assistant in
+   * `workspaceId` instead of one assistant's. The doc dock resumes with it:
+   * its thread is per-turn addressable, so the latest doc thread is the
+   * resume target no matter which assistant is currently picked.
+   */
+  scope?: "workspace";
   signal?: AbortSignal;
 }): Promise<DocSession | null> {
-  // `workspaceId` is currently unused at the wire level — the server
-  // derives workspace from the assistantId — but we accept it so the
-  // caller's intent is explicit and we have a hook for future
-  // multi-assistant workspaces.
-  void opts.workspaceId;
-
   const qs = new URLSearchParams();
-  qs.set("assistantId", opts.assistantId);
+  if (opts.scope === "workspace") {
+    qs.set("workspaceId", opts.workspaceId);
+    qs.set("scope", "workspace");
+  } else {
+    if (!opts.assistantId) return null;
+    qs.set("assistantId", opts.assistantId);
+  }
   qs.set("appOrigin", opts.appOrigin);
 
   try {
@@ -195,7 +207,7 @@ export async function fetchLatestSession(opts: {
       channelId: first.channelId,
       lastActive: toIso(first.lastActive),
       appOrigin: first.appOrigin ?? null,
-      assistantId: opts.assistantId,
+      assistantId: first.assistantId ?? opts.assistantId,
       contextGroupId: first.contextGroupId ?? null,
       contextProjectId: first.contextProjectId ?? null,
     };
@@ -789,18 +801,38 @@ function rawMessageText(content: unknown): string {
     .join("");
 }
 
-/** Image content blocks carried inline in a persisted message (base64). */
-function imageBlocks(content: unknown): Array<{ mimeType: string; data: string }> {
+/** Mimes whose bytes ride the message row and are previewable client-side. */
+function isPreviewableAttachmentMime(mime: string): boolean {
+  return mime.startsWith("image/") || mime === "application/pdf";
+}
+
+/**
+ * Inline media content blocks carried in a persisted message (base64) —
+ * images plus natively-attached PDFs. The chat route pushes both down the
+ * same inline `image` block lane, so a PDF's bytes ride the message row
+ * exactly like an image's do. Store-only files (e.g. a PDF above the inline
+ * threshold) carry no block, which is why matching back to tags is by
+ * name + mime family rather than raw order.
+ */
+function inlineMediaBlocks(
+  content: unknown,
+): Array<{ mimeType: string; data: string; name?: string }> {
   if (!Array.isArray(content)) return [];
-  return content.filter(
-    (b): b is { type: string; mimeType: string; data: string } =>
-      !!b &&
-      typeof b === "object" &&
-      (b as { type?: unknown }).type === "image" &&
-      typeof (b as { mimeType?: unknown }).mimeType === "string" &&
-      typeof (b as { data?: unknown }).data === "string" &&
-      (b as { mimeType: string }).mimeType.startsWith("image/"),
-  );
+  return content
+    .filter(
+      (b): b is { type: string; mimeType: string; data: string; name?: unknown } =>
+        !!b &&
+        typeof b === "object" &&
+        (b as { type?: unknown }).type === "image" &&
+        typeof (b as { mimeType?: unknown }).mimeType === "string" &&
+        typeof (b as { data?: unknown }).data === "string" &&
+        isPreviewableAttachmentMime((b as { mimeType: string }).mimeType),
+    )
+    .map((b) => ({
+      mimeType: b.mimeType,
+      data: b.data,
+      name: typeof b.name === "string" ? b.name : undefined,
+    }));
 }
 
 export type MessageAttachmentRef = {
@@ -808,10 +840,11 @@ export type MessageAttachmentRef = {
   name: string;
   mime: string;
   /**
-   * Data URL for an inline image thumbnail. Sourced from the image block the
-   * message already carries, so it survives past the 7-day upload-cache TTL.
-   * Absent for non-image files (rendered as an icon card) or expired/legacy
-   * image rows.
+   * Data URL for an inline image thumbnail / PDF preview. Sourced from the
+   * media block the message already carries, so it survives past the 7-day
+   * upload-cache TTL. On the live-send path this is instead the composer
+   * chip's `blob:` object URL. Absent for non-previewable files (rendered as
+   * an icon card), store-only rows, and expired/legacy rows.
    */
   dataUrl?: string;
 };
@@ -826,9 +859,12 @@ function tagAttr(attrs: string, key: string): string {
 /**
  * Split a persisted message into its human text and a structured attachment
  * list, so the renderer can show file cards / image thumbnails instead of raw
- * `<attached_file>` markup. Image tags are matched, in order, to the message's
- * inline image blocks for their thumbnail. Returns `attachments: []` and the
- * text unchanged for any message with no attachments.
+ * `<attached_file>` markup. Image / PDF tags are matched to the message's
+ * inline media blocks for their preview bytes — by block name when the block
+ * carries one, else by mime family in order (a store-only file has a tag but
+ * no block, so raw positional zipping would shift every later assignment).
+ * Returns `attachments: []` and the text unchanged for any message with no
+ * attachments.
  */
 export function parseMessageAttachments(content: unknown): {
   text: string;
@@ -838,18 +874,31 @@ export function parseMessageAttachments(content: unknown): {
   if (!raw.includes("<attached_file"))
     return { text: stripCommentThreadReplyTag(raw.trim()), attachments: [] };
 
-  const imgs = imageBlocks(content);
-  let imgIdx = 0;
+  const media = inlineMediaBlocks(content);
+  const used: boolean[] = new Array(media.length).fill(false);
+  const family = (m: string) => (m === "application/pdf" ? "pdf" : "image");
+  const takeBlock = (name: string, mime: string) => {
+    const want = family(mime);
+    let idx = media.findIndex(
+      (b, i) => !used[i] && b.name !== undefined && b.name === name && family(b.mimeType) === want,
+    );
+    if (idx === -1) idx = media.findIndex((b, i) => !used[i] && family(b.mimeType) === want);
+    if (idx === -1) return undefined;
+    used[idx] = true;
+    return media[idx];
+  };
+
   const attachments: MessageAttachmentRef[] = [];
   for (const match of raw.matchAll(ATTACHED_FILE_TAG_RE)) {
     const attrs = match[1] ?? "";
     const mime = tagAttr(attrs, "type");
+    const name = tagAttr(attrs, "name");
     let dataUrl: string | undefined;
-    if (mime.startsWith("image/")) {
-      const block = imgs[imgIdx++];
+    if (isPreviewableAttachmentMime(mime)) {
+      const block = takeBlock(name, mime);
       if (block) dataUrl = `data:${block.mimeType};base64,${block.data}`;
     }
-    attachments.push({ id: tagAttr(attrs, "id"), name: tagAttr(attrs, "name"), mime, dataUrl });
+    attachments.push({ id: tagAttr(attrs, "id"), name, mime, dataUrl });
   }
 
   const text = stripCommentThreadReplyTag(

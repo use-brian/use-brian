@@ -23,7 +23,7 @@ import type {
   WorkspaceFileUploadsStore,
 } from '../db/workspace-file-uploads-store.js'
 import {
-  MAX_BYTES_PER_WORKSPACE,
+  DEFAULT_MAX_BYTES_PER_WORKSPACE,
   type FilesClientResolver,
 } from './files-api.js'
 import { buildStorageKey, buildStorageUri } from './gcs-client.js'
@@ -82,6 +82,12 @@ export type CreateChunkedFileUploadServiceDeps = {
   filesStore: WorkspaceFilesStore
   uploadsStore: WorkspaceFileUploadsStore
   auditStore: WorkspaceAuditStore
+  /**
+   * Plan-derived per-workspace durable-storage cap — same contract as
+   * `CreateFilesApiDeps.storageLimitBytesFor`; boot wires both to one
+   * resolver so the two quota gates can never disagree.
+   */
+  storageLimitBytesFor?: (workspaceId: string) => Promise<number>
   now?: () => Date
 }
 
@@ -139,6 +145,8 @@ export function createChunkedFileUploadService(
   deps: CreateChunkedFileUploadServiceDeps,
 ): ChunkedFileUploadService {
   const now = deps.now ?? (() => new Date())
+  const storageLimitBytesFor =
+    deps.storageLimitBytesFor ?? (async () => DEFAULT_MAX_BYTES_PER_WORKSPACE)
 
   async function getOwned(ctx: FilesContext, uploadId: string): Promise<WorkspaceFileUpload> {
     const upload = await deps.uploadsStore.get(ctx.userId, uploadId)
@@ -184,8 +192,9 @@ export function createChunkedFileUploadService(
 
       const resolved = await deps.resolver.forWorkspace(ctx.workspaceId)
       if (!resolved.byo) {
+        const limitBytes = await storageLimitBytesFor(ctx.workspaceId)
         const currentBytes = await deps.filesStore.sumSizeBytes(ac)
-        if (currentBytes + input.sizeBytes > MAX_BYTES_PER_WORKSPACE) {
+        if (currentBytes + input.sizeBytes > limitBytes) {
           throw new ChunkedUploadError('quota_exceeded', 'Workspace storage quota exceeded')
         }
       }
@@ -280,8 +289,9 @@ export function createChunkedFileUploadService(
           throw new ChunkedUploadError('conflict', 'A file with that name already exists')
         }
         if (!upload.quotaExempt) {
+          const limitBytes = await storageLimitBytesFor(ctx.workspaceId)
           const currentBytes = await deps.filesStore.sumSizeBytes(ac)
-          if (currentBytes + upload.sizeBytes > MAX_BYTES_PER_WORKSPACE) {
+          if (currentBytes + upload.sizeBytes > limitBytes) {
             throw new ChunkedUploadError('quota_exceeded', 'Workspace storage quota exceeded')
           }
         }

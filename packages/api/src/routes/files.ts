@@ -8,9 +8,13 @@ import { findOrCreateSession, findSessionById } from '../db/sessions.js'
 import {
   isStructuredDocument,
   documentMimeType,
+  documentFormatFromMetadata,
+  DOCUMENT_FORMATS,
   parseFileContent,
   shouldInline,
   probePdfPageCount,
+  convertToPdfWithLibreOffice,
+  LibreOfficeError,
   PDF_CONFIRM_PAGE_THRESHOLD,
   type FileStore,
 } from '@use-brian/core'
@@ -120,6 +124,12 @@ export function fileRoutes(
   previewSecret?: string | null,
   /** Large durable-file lane. Metadata crosses the API; exact parts do not. */
   chunkedUploads?: ChunkedFileUploadService | null,
+  /**
+   * Office→PDF converter seam for `/:id/preview-pdf` — tests inject a fake so
+   * no LibreOffice spawn happens; production uses the ONE LibreOffice runner
+   * (`@use-brian/core` `convertToPdfWithLibreOffice`), never a second renderer.
+   */
+  convertPdf: (bytes: Uint8Array, opts: { inputName: string; tempPrefix?: string }) => Promise<Uint8Array> = convertToPdfWithLibreOffice,
 ): Router {
   const router = Router()
 
@@ -205,6 +215,15 @@ export function fileRoutes(
             ? `data:${effectiveMimeType};base64,${file.buffer.toString('base64')}`
             : text
 
+          // A structured document (docx/pptx/xlsx/csv/…) keeps its ORIGINAL
+          // bytes beside the parsed text (migration 487) so `/:id/preview-pdf`
+          // can render it later. Deliberately cache-side (7-day TTL) rather
+          // than promoted: durable promotion would put every attachment on the
+          // workspace storage quota and into brain file listings. `content`
+          // stays the parsed text, so the chat `isTextLike` inline branch is
+          // untouched.
+          const keepOriginalBytes = !isInlineMedia && detectedFormat !== undefined
+
           const cached = await fileStore.cache({
             sessionId: session.id,
             fileName,
@@ -215,6 +234,9 @@ export function fileRoutes(
             workspaceId: fileWorkspaceId,
             userId: user.id,
             sensitivity: 'internal',
+            ...(keepOriginalBytes
+              ? { originalContent: `data:${effectiveMimeType};base64,${file.buffer.toString('base64')}` }
+              : {}),
           })
 
           // ── Silent artifact promotion (large-content-artifacts §Phase 2.3) ──
@@ -823,6 +845,106 @@ export function fileRoutes(
     } catch (err) {
       console.error('File preview error:', err)
       res.status(500).json({ error: 'Failed to load file' })
+    }
+  })
+
+  /**
+   * GET /api/files/:id/preview-pdf?workspaceId=… — render a cached upload as
+   * a PDF for in-app preview. AUTHENTICATED + access-scoped exactly like
+   * `/preview-url` (fileStore.get with the caller's ctx; foreign ids 404,
+   * existence-hiding). Two source shapes:
+   *
+   *  - `application/pdf` whose bytes are inline in `content` → streamed as-is.
+   *  - A structured document (docx/pptx/xlsx/csv/doc/odt/…) whose original
+   *    bytes were kept in `original_content` (migration 487) → converted
+   *    through the ONE LibreOffice runner and streamed.
+   *
+   * A row with no client-servable bytes (store-only big PDF, legacy row from
+   * before 487, or a lapsed cache row) answers 404 `preview_source_unavailable`
+   * — the client renders honest "expired/unavailable" copy, never a spinner.
+   * Conversion failures follow the views-export precedent: timeout → 504,
+   * everything else → 503 `pdf_unavailable`. `Cache-Control: private` lets the
+   * browser cache the rendered PDF so repeat opens skip the conversion.
+   */
+  const PreviewPdfQuery = z.object({ workspaceId: z.string().min(1) })
+  router.get('/:id/preview-pdf', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) {
+      res.status(401).json({ error: 'Unauthorized' })
+      return
+    }
+    const parsed = PreviewPdfQuery.safeParse(req.query)
+    if (!parsed.success) {
+      res.status(400).json({ error: 'workspaceId is required' })
+      return
+    }
+    // Same ctx shape as `/preview-url`: echo userId into assistantId so
+    // workspace-shared rows (assistant_id IS NULL) still match.
+    const ctx = {
+      workspaceId: parsed.data.workspaceId,
+      userId,
+      assistantId: userId,
+      assistantKind: 'standard' as const,
+    }
+
+    const sendPdf = (bytes: Uint8Array) => {
+      res.setHeader('Content-Type', 'application/pdf')
+      res.setHeader('Content-Disposition', 'inline')
+      res.setHeader('Cache-Control', 'private, max-age=3600')
+      res.setHeader('Content-Length', String(bytes.length))
+      res.send(Buffer.from(bytes))
+    }
+
+    try {
+      const file = await fileStore.get(req.params.id, ctx)
+      if (!file) {
+        res.status(404).json({ error: 'File not found or expired' })
+        return
+      }
+
+      // Already a PDF: the inline bytes (≤ the store-only threshold) stream
+      // without conversion. Store-only rows keep no inline bytes → 404 below.
+      if (file.mimeType === 'application/pdf') {
+        const m = file.content.match(/^data:[^;]+;base64,(.+)$/)
+        if (m) {
+          sendPdf(Buffer.from(m[1]!, 'base64'))
+          return
+        }
+        res.status(404).json({ error: 'Preview source unavailable', code: 'preview_source_unavailable' })
+        return
+      }
+
+      const format = documentFormatFromMetadata(file.mimeType, file.fileName)
+      if (!format || format === 'pdf') {
+        res.status(415).json({ error: 'This file type has no PDF preview', code: 'preview_unsupported' })
+        return
+      }
+
+      const original = await fileStore.getOriginalContent?.(req.params.id, ctx)
+      const m = original?.match(/^data:[^;]+;base64,(.+)$/)
+      if (!m) {
+        res.status(404).json({ error: 'Preview source unavailable', code: 'preview_source_unavailable' })
+        return
+      }
+
+      // The runner sniffs the format from the input file's extension alone —
+      // use the format's canonical extension, never the (user-controlled)
+      // upload filename.
+      const ext = DOCUMENT_FORMATS[format].extensions[0]!
+      const pdf = await convertPdf(Buffer.from(m[1]!, 'base64'), {
+        inputName: `attachment.${ext}`,
+        tempPrefix: 'brian-attachment-pdf-',
+      })
+      sendPdf(pdf)
+    } catch (err) {
+      if (err instanceof LibreOfficeError) {
+        // Own-sentence errors only; the vendor text stays server-side (cause).
+        const status = err.code === 'timeout' ? 504 : 503
+        res.status(status).json({ error: 'PDF preview could not be generated', code: 'pdf_unavailable' })
+        return
+      }
+      console.error('File preview-pdf error:', err)
+      res.status(500).json({ error: 'Failed to render preview' })
     }
   })
 

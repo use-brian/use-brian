@@ -9,7 +9,7 @@
  * Spec: docs/architecture/platform/workspaces.md → "Member invitation".
  */
 
-export type WorkspaceInviteLocale = 'en' | 'ja' | 'zh'
+export type WorkspaceInviteLocale = 'en' | 'ja' | 'zh' | 'zh-CN'
 
 export type WorkspaceInviteRole = 'admin' | 'member'
 
@@ -124,6 +124,27 @@ const COPY: Record<
     smallPrint: '如果按鈕無法使用，請將此連結複製並貼到瀏覽器：',
     ignoreLine: '如果您並未預期收到此郵件，可以安全地忽略它。',
     noteLabel: '邀請者的留言：',
+  },
+  'zh-CN': {
+    subject: (inviter, workspace) =>
+      inviter
+        ? `${inviter} 邀请您加入 Use Brian 的“${workspace}”`
+        : `您受邀加入 Use Brian 的“${workspace}”`,
+    preheader: (workspace) => `接受邀请即可加入“${workspace}”，此邀请将于 14 天后失效。`,
+    heading: (workspace) => `加入“${workspace}”`,
+    lead: (inviter, workspace) =>
+      inviter
+        ? `${inviter} 邀请您在 Use Brian 的共享大脑“${workspace}”中协作。`
+        : `您受邀在 Use Brian 的共享大脑“${workspace}”中协作。`,
+    roleLine: (role) => `您将以${role === 'admin' ? '管理员' : '成员'}身份加入。`,
+    roleMember: '成员',
+    roleAdmin: '管理员',
+    cta: '接受邀请',
+    tagline: '您团队的共享大脑',
+    expiry: '此邀请将于 14 天后失效。',
+    smallPrint: '如果按钮无法使用，请将此链接复制并粘贴到浏览器：',
+    ignoreLine: '如果您并未预期收到此邮件，可以放心忽略。',
+    noteLabel: '邀请者的留言：',
   },
 }
 

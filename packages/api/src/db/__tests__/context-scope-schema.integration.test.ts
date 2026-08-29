@@ -144,4 +144,71 @@ describeIf('[COMP:api/context-scope-store] context scope schema integration', ()
       [workspaceA, owner, project],
     )).rejects.toThrow(/Project requirements must stay within/)
   })
+
+  // 474 shipped inherit_file_cache_context_scope() selecting context_project_ids
+  // from sessions — a column that only exists on workflow_runs/scheduled_jobs
+  // (sessions carries the singular context_project_id), so every file_cache
+  // INSERT threw 42703 at trigger time and chat file uploads failed
+  // platform-wide. CREATE FUNCTION never validates a plpgsql body's SQL, so
+  // only an executed insert catches this class. 479 repairs the function; this
+  // pins the insert path plus the scope inheritance it exists to provide.
+  it('inherits a session Project onto file_cache inserts', async () => {
+    const owner = (await client!.query<{ id: string }>(
+      `INSERT INTO users (auth_provider, auth_provider_id)
+       VALUES ('test', 'context-file-' || gen_random_uuid()) RETURNING id`,
+    )).rows[0].id
+    const workspace = (await client!.query<{ id: string }>(
+      `INSERT INTO workspaces (name, purpose, owner_user_id, is_personal)
+       VALUES ('Context files', 'test', $1, false) RETURNING id`,
+      [owner],
+    )).rows[0].id
+    await client!.query(
+      `INSERT INTO workspace_members (workspace_id, user_id, role)
+       VALUES ($1, $2, 'owner')`,
+      [workspace, owner],
+    )
+    const assistant = (await client!.query<{ id: string }>(
+      `INSERT INTO assistants (name, owner_user_id, workspace_id)
+       VALUES ('File assistant', $1, $2) RETURNING id`,
+      [owner, workspace],
+    )).rows[0].id
+    const project = (await client!.query<{ id: string }>(
+      `INSERT INTO workspace_projects
+         (workspace_id, name, normalized_name, created_by)
+       VALUES ($1, 'Files', 'files', $2) RETURNING id`,
+      [workspace, owner],
+    )).rows[0].id
+
+    const cacheInsert = (sessionId: string, name: string) => client!.query<{
+      compartments: string[]
+      project_ids: string[]
+    }>(
+      `INSERT INTO file_cache
+         (session_id, file_name, mime_type, content, size_bytes, expires_at,
+          workspace_id, user_id, assistant_id, sensitivity, compartments, project_ids)
+       VALUES ($1, $2, 'text/plain', 'x', 1, now() + interval '7 days',
+               $3, $4, $5, 'internal', '{}', '{}')
+       RETURNING compartments, project_ids`,
+      [sessionId, name, workspace, owner, assistant],
+    )
+
+    const unscoped = (await client!.query<{ id: string }>(
+      `INSERT INTO sessions (assistant_id, user_id, channel_type, channel_id, workspace_id)
+       VALUES ($1, $2, 'web', 'file-unscoped', $3) RETURNING id`,
+      [assistant, owner, workspace],
+    )).rows[0].id
+    const plain = await cacheInsert(unscoped, 'plain.txt')
+    expect(plain.rows[0].compartments).toEqual([])
+    expect(plain.rows[0].project_ids).toEqual([])
+
+    const scoped = (await client!.query<{ id: string }>(
+      `INSERT INTO sessions
+         (assistant_id, user_id, channel_type, channel_id, workspace_id, context_project_id)
+       VALUES ($1, $2, 'web', 'file-scoped', $3, $4) RETURNING id`,
+      [assistant, owner, workspace, project],
+    )).rows[0].id
+    const inherited = await cacheInsert(scoped, 'scoped.txt')
+    expect(inherited.rows[0].compartments).toEqual([])
+    expect(inherited.rows[0].project_ids).toEqual([project])
+  })
 })

@@ -68,7 +68,7 @@ export function AttachmentChips({
               <Loader2 className="size-3.5 shrink-0 animate-spin text-muted-foreground" />
             ) : isError ? (
               <AlertCircle className="size-3.5 shrink-0" />
-            ) : a.previewUrl ? (
+            ) : a.previewUrl && a.mimeType.startsWith("image/") ? (
               // eslint-disable-next-line @next/next/no-img-element
               <img
                 src={a.previewUrl}

@@ -54,7 +54,14 @@ import {
   removeEntityAlias,
   type PromoteEntityToCrmParams,
 } from '../db/entities-store.js'
-import { SYSTEM_ENTITY_KINDS, TASK_STATUSES } from '@use-brian/core'
+import {
+  SYSTEM_ENTITY_KINDS,
+  TASK_STATUSES,
+  DOCUMENT_FORMATS,
+  documentFormatFromMetadata,
+  convertToPdfWithLibreOffice,
+  LibreOfficeError,
+} from '@use-brian/core'
 import { updateTask } from '../db/tasks.js'
 import type { EntityLinksStore, FilesApi, FilesContext, TaskRecordStatus, TaskUpdateFields } from '@use-brian/core'
 import {
@@ -66,6 +73,12 @@ import { notifyBrainInboxChange } from '../brain-stream/notify.js'
 
 type RouteOptions = {
   workspaceStore: WorkspaceStore
+  /**
+   * Office→PDF converter seam for the content route's `?as=pdf` — tests
+   * inject a fake; production defaults to the ONE LibreOffice runner, never a
+   * second renderer.
+   */
+  convertToPdf?: (bytes: Uint8Array, opts: { inputName: string; tempPrefix?: string }) => Promise<Uint8Array>
   /**
    * Entity-kind classifier — when provided, exposes a `POST
    * /:workspaceId/classify` suggestion endpoint that the web UI can
@@ -161,6 +174,7 @@ export function brainInboxRoutes({
   entityLinks,
   workspaceSkillStore,
   brainEntryMutator,
+  convertToPdf = convertToPdfWithLibreOffice,
 }: RouteOptions): Router {
   const router = Router()
   const entryMutator = brainEntryMutator ?? createBrainEntryMutator({
@@ -472,8 +486,41 @@ export function brainInboxRoutes({
         res.status(404).json({ error: 'File not found' })
         return
       }
-      const { file, bytes } = result.value
-      res.setHeader('Content-Type', file.mime || 'application/octet-stream')
+      let { file, bytes } = result.value
+      let mime = file.mime || 'application/octet-stream'
+
+      // `?as=pdf`: render an office/structured document (docx/pptx/xlsx/csv/…)
+      // to PDF through the ONE LibreOffice runner so the drawer can preview it
+      // inline instead of offering only a download. Already-PDF bytes pass
+      // through; a non-convertible mime 415s so the drawer falls back to its
+      // download affordance. Timeout → 504, other converter failures → 503
+      // (the views-export precedent); vendor text never reaches the wire.
+      if (req.query.as === 'pdf' && mime !== 'application/pdf') {
+        const format = documentFormatFromMetadata(mime, file.name)
+        if (!format || format === 'pdf') {
+          res.status(415).json({ error: 'This file type has no PDF preview', code: 'preview_unsupported' })
+          return
+        }
+        try {
+          const ext = DOCUMENT_FORMATS[format].extensions[0]!
+          bytes = Buffer.from(
+            await convertToPdf(bytes, {
+              inputName: `preview.${ext}`,
+              tempPrefix: 'brian-brainfile-pdf-',
+            }),
+          )
+          mime = 'application/pdf'
+        } catch (err) {
+          if (err instanceof LibreOfficeError) {
+            const status = err.code === 'timeout' ? 504 : 503
+            res.status(status).json({ error: 'PDF preview could not be generated', code: 'pdf_unavailable' })
+            return
+          }
+          throw err
+        }
+      }
+
+      res.setHeader('Content-Type', mime)
       res.setHeader('Content-Length', String(bytes.length))
       res.setHeader('Cache-Control', 'private, max-age=300')
       // Inline so the drawer renders images / text / pdf in place; the

@@ -129,6 +129,16 @@ import {
 import { ChatCodeBlock } from "@/components/chrome/chat-code-block";
 import { ChatFileAttachments } from "@/components/chrome/chat-file-attachment";
 import {
+  DockRecorderButton,
+  DockRecorderNotice,
+  DockRecorderRecovery,
+  DockRecorderStrip,
+} from "@/components/chrome/dock-recorder";
+import {
+  registerDockRecorderChatTarget,
+  useGlobalDockRecorder,
+} from "@/lib/recorder/dock-recorder-bridge";
+import {
   appendReasoning,
   appendStep,
   EMPTY_LOG,
@@ -213,6 +223,8 @@ import {
   useAssistantMentions,
 } from "@/components/chat-app/mention-autocomplete";
 import {
+  isSlashCommandShaped,
+  sentSlashCommandOf,
   SlashCommandIndicator,
   SlashCommandMenuList,
   useSlashCommands,
@@ -222,6 +234,12 @@ import {
   goalAcceptedNoticeFromPayload,
   type GoalAcceptedNotice,
 } from "@/components/chat-app/goal-acknowledgement";
+import {
+  GoalPursuitCard,
+  GoalPursuitSticky,
+  interleaveSessionGoals,
+} from "@/components/chat-app/goal-pursuit";
+import { listGoals, type GoalRow as SessionGoalRow } from "@/lib/api/goals";
 import {
   canEditUserMessage,
   resolveEditDispatch,
@@ -306,6 +324,14 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const pathname = usePathname();
   const searchParams = useSearchParams();
 
+  // The ambient dock is hidden on this route (a second launcher would
+  // duplicate the full-page composer), but its recorder controller stays
+  // mounted. Rehost that ONE controller in this composer — the Feed /
+  // skill-rail recipe — so the record affordance is sticky on every surface
+  // and a capture keeps running across the surface switch. Null until the
+  // dock publishes (primary assistant still resolving).
+  const dockRecorder = useGlobalDockRecorder();
+
   // Model tier (`standard | pro | max`) — the shared seam (`chat-model.ts`):
   // persisted on the SAME localStorage key as the dock so one choice carries
   // across every chat surface, plan-gated (over-tier snaps down; the server
@@ -318,6 +344,18 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const [researchMode, setResearchMode] = useState(false);
   const [acceptedGoal, setAcceptedGoal] =
     useState<GoalAcceptedNotice | null>(null);
+  /** In-chat pursuit: the goals that originated in the open session (mig 481),
+   *  rendered inline in the transcript + as the sticky strip. Repair-driven:
+   *  reloaded on session open and on each live `goal_accepted` signal. */
+  const [sessionGoals, setSessionGoals] = useState<SessionGoalRow[]>([]);
+  /** Live status per goal id, lifted from each inline card's activity stream
+   *  so the sticky strip and the composer receipt share ONE subscription. */
+  const [goalLiveStatuses, setGoalLiveStatuses] = useState<
+    Record<string, string>
+  >({});
+  /** The session the current `sessionGoals` belong to — a stale fetch that
+   *  resolves after a thread switch must not paint the wrong session. */
+  const sessionGoalsForRef = useRef<string | null>(null);
   const [researchQuota, setResearchQuota] = useState<{
     used: number;
     quota: number;
@@ -463,6 +501,35 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
    *  Workspace hero about to create one. Drives the post-vs-ask composer. */
   const paneIsRoom = activeSessionId ? !!activeShared : view === "workspace";
 
+  // ── In-chat goal pursuit (docs/architecture/features/goals.md) ────────────
+  /** Reload the open session's goals. Guarded against thread switches: only
+   *  the session `sessionGoalsForRef` still points at may paint state. */
+  const reloadSessionGoals = useCallback(
+    async (sessionId: string) => {
+      const rows = await listGoals(workspaceId, {
+        originSessionId: sessionId,
+        includeTerminal: true,
+      }).catch(() => [] as SessionGoalRow[]);
+      if (sessionGoalsForRef.current !== sessionId) return;
+      setSessionGoals(rows);
+    },
+    [workspaceId],
+  );
+
+  useEffect(() => {
+    sessionGoalsForRef.current = activeSessionId ?? null;
+    setSessionGoals([]);
+    setGoalLiveStatuses({});
+    if (!activeSessionId) return;
+    void reloadSessionGoals(activeSessionId);
+  }, [activeSessionId, reloadSessionGoals]);
+
+  const handleGoalStatusChange = useCallback((goalId: string, status: string) => {
+    setGoalLiveStatuses((prev) =>
+      prev[goalId] === status ? prev : { ...prev, [goalId]: status },
+    );
+  }, []);
+
   /**
    * `@` autocomplete's roster (T9/T-H4/T-H5): the WHOLE workspace assistant
    * list, merged with this room's clearance-passing members when the pane is
@@ -531,6 +598,19 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
 
   const chat = useChatSession();
   const stream = useMessageStream();
+
+  /** Transcript command rendering needs the roster the composer fetches
+   *  lazily: pull it as soon as history contains a slash-shaped user message,
+   *  so restored `/goal …` turns style as commands without a `/` keystroke. */
+  useEffect(() => {
+    if (slashCommands.roster) return;
+    const hasCommandShaped = (chat.state.messages as SurfaceMessage[]).some(
+      (m) => m.role === "user" && m.text.length > 0 && isSlashCommandShaped(m.text),
+    );
+    if (hasCommandShaped) slashCommands.ensureRoster();
+    // The hook returns a fresh object every render; roster + ensureRoster are
+    // its stable parts, so depending on those (not the object) keeps this quiet.
+  }, [chat.state.messages, slashCommands.roster, slashCommands.ensureRoster]);
   /**
    * Mid-turn input (queue + steer). Personal-view only: a ROOM message is a
    * durable post every member must see the instant it is sent, whether or not
@@ -550,6 +630,23 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
    *  stream can take over, including for turns started by this same user. */
   const directTurnSessionRef = useRef<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  /** Where each session goal's inline card anchors in the transcript (after
+   *  the last message at-or-before its creation — the arming turn). */
+  const goalPlacement = useMemo(
+    () =>
+      interleaveSessionGoals(
+        chat.state.messages as SurfaceMessage[],
+        sessionGoals,
+      ),
+    [chat.state.messages, sessionGoals],
+  );
+
+  const jumpToGoalCard = useCallback((goalId: string) => {
+    scrollRef.current
+      ?.querySelector(`[data-goal-pursuit-id="${CSS.escape(goalId)}"]`)
+      ?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, []);
   /** The id the next turn should resume. Kept in a ref so the send closure
    *  reads the value at send time, not at render time. */
   const sessionIdRef = useRef<string | null>(null);
@@ -1884,6 +1981,10 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   /** Tracks whether the in-flight turn streamed an askQuestion step, so the
    *  settle can fetch the pending row and surface the answer panel. */
   const askedQuestionRef = useRef(false);
+  // Resolves TRUE once the message was dispatched (turn started / room post
+  // landed), FALSE when a disqualifier dropped it — the dock's `sendMessage`
+  // contract, which the recorder's voice-clip hand-off relies on: a `false`
+  // keeps the clip (failure notice + spool) instead of silently dropping it.
   const send = useCallback(async (override?: {
     text?: string;
     fileIds?: string[];
@@ -1914,7 +2015,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       (usesComposerTray && recordingUpload.status === "uploading") ||
       pendingQuestion
     ) {
-      return;
+      return false;
     }
 
     // The room decision (multiplayer chat D1/T3): in a room, send = POST
@@ -1979,7 +2080,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     // Workspace. The create happens before the optimistic paint so a
     // failure leaves the draft in the box instead of a stranded bubble.
     if (view === "workspace" && !sessionIdRef.current) {
-      if (startingShared) return;
+      if (startingShared) return false;
       setStartingShared(true);
       try {
         // Bind the room to the hero's picked interlocutor (default primary).
@@ -1996,7 +2097,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         dispatchChatSessionsRefresh(workspaceId);
       } catch {
         setError(t.newWorkspaceChatFailed);
-        return;
+        return false;
       } finally {
         setStartingShared(false);
       }
@@ -2032,7 +2133,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       } catch {
         setError(t.postFailed);
       }
-      return;
+      return true;
     }
 
     // "New chat" mints a fresh channel id (the §107 spec). The chat route's
@@ -2053,7 +2154,13 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     chat.appendMessage({
       id: localUserId,
       role: "user",
-      text: trimmed,
+      // A recorder voice clip is a files-only send with no visible chip
+      // (override fileIds, empty text) — echo the voice-note marker so the
+      // bubble isn't blank. The wire text stays `trimmed`; the transcript
+      // becomes the durable content server-side.
+      text:
+        trimmed ||
+        (!usesComposerTray && turnFileIds.length > 0 ? t.voiceNote : ""),
       timestamp: new Date(),
       ...(userAttachments.length > 0 ? { userAttachments } : {}),
       ...(reply ? { replyTo: reply } : {}),
@@ -2180,7 +2287,15 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           }
           case "goal_accepted": {
             const notice = goalAcceptedNoticeFromPayload(payload);
-            if (notice) setAcceptedGoal(notice);
+            if (notice) {
+              setAcceptedGoal(notice);
+              // The arming just persisted server-side — pull the session's
+              // goals so the inline pursuit card mounts in the transcript
+              // (the SSE payload is a signal, never the data).
+              if (sessionGoalsForRef.current === notice.sessionId) {
+                void reloadSessionGoals(notice.sessionId);
+              }
+            }
             break;
           }
           case "user_message_saved": {
@@ -2680,8 +2795,23 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     if (isRoom && sourceMessageId && sessionIdRef.current) {
       await loadTranscript(sessionIdRef.current);
     }
+    return true;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [input, activeAssistant, activeSessionId, activeShared, askArmed, model, researchMode, view, workspaceId, pickedContextGroupId, pickedContextProjectId, chat.state.isStreaming, refreshPendingQuestion, reloadShared, resetTurnActivity, selectSession, startingShared, stream, t, tChat.toolNarration, att.attachments, att.uploading, att.fileIds, att.detach, pendingQuestion, pendingRecordings, recordingUpload.status, assistants, applyQueuedInput, buildStreamedTurnMessage, flushQueuedInputs, mentions.reset, setReplyTo]);
+
+  // While this full-page surface is mounted it IS the visible chat, so a
+  // short capture's voice turn must land in the open thread here — never in
+  // the hidden dock chat (the skill-rail / Feed-panel recipe). The target is
+  // read at hand-off time only, so re-registering as `send` recomputes is
+  // harmless.
+  useEffect(
+    () =>
+      registerDockRecorderChatTarget({
+        sendVoiceClip: (fileId) => send({ text: "", fileIds: [fileId] }),
+        getSessionId: () => sessionIdRef.current ?? undefined,
+      }),
+    [send],
+  );
 
   // The mid-turn flush runs inside `send`'s own `onDone`; the ref is the only
   // way to reach the current `send` from there without a stale closure. The
@@ -3392,6 +3522,18 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
    *  (Stop while streaming) right. Rendered in the hero (centered) or the
    *  bottom bar — same node either way. */
   const composerBox = (
+    <>
+      {/* Live-recording chrome — the recovery banner, first-use/error notice,
+          and active recorder strip stack ABOVE the composer box, exactly as
+          they ride above the dock's composer. One node rendered in both the
+          hero and the bottom bar, so a running capture survives the swap. */}
+      {dockRecorder ? (
+        <>
+          <DockRecorderRecovery rec={dockRecorder} className="mb-1.5" />
+          <DockRecorderNotice rec={dockRecorder} className="mb-1.5" />
+          <DockRecorderStrip rec={dockRecorder} className="mb-1.5" />
+        </>
+      ) : null}
     <div
       ref={mentions.containerRef}
       className={cn(
@@ -3507,7 +3649,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         )}
         slotAttachments={
           <>
-            {acceptedGoal?.sessionId === activeSessionId ? (
+            {/* The composer receipt yields to the inline pursuit card once the
+                session-goals fetch lands (one stream, one surface); it still
+                covers the gap between the SSE signal and that fetch. */}
+            {acceptedGoal?.sessionId === activeSessionId &&
+            !sessionGoals.some((goal) => goal.id === acceptedGoal.goalId) ? (
               <GoalAcknowledgement
                 notice={acceptedGoal}
                 workspaceId={workspaceId}
@@ -3623,6 +3769,15 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             >
               <Paperclip className="size-[17px]" aria-hidden />
             </button>
+            {/* The record affordance, beside the paperclip exactly as in the
+                dock's expanded composer. Hides itself while a capture is
+                latched (the strip above the box owns the pill then). */}
+            {dockRecorder ? (
+              <DockRecorderButton
+                rec={dockRecorder}
+                disabled={!!pendingQuestion}
+              />
+            ) : null}
             {interlocutorControl}
             {/* Tier picker (Standard / Pro / Max) — the shared presentational
                 control; without research/metered props it renders just the
@@ -3722,6 +3877,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         }
       />
     </div>
+    </>
   );
 
   return (
@@ -3837,6 +3993,14 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           className="min-h-0 flex-1 overflow-y-auto px-4 py-6"
         >
           <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
+            {/* In-chat pursuit: the always-visible strip while any session
+                goal is still being worked; click jumps to the inline card. */}
+            <GoalPursuitSticky
+              goals={sessionGoals}
+              statuses={goalLiveStatuses}
+              onJump={jumpToGoalCard}
+              className="-mx-1"
+            />
             {activeContextSession && (activeContextSession.contextGroupId || activeContextSession.contextProjectId) ? (
               <ContextScopeChips
                 teamId={activeContextSession.contextGroupId ?? null}
@@ -3876,6 +4040,27 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                   {formatTranscriptTime(m.timestamp, locale)}
                 </time>
               ) : null;
+              // In-chat pursuit cards anchored after this message (the turn
+              // whose tool call armed each goal).
+              const goalCardsHere = goalPlacement.afterMessage.get(m.id);
+              const goalCardsBlock = goalCardsHere?.length
+                ? goalCardsHere.map((goal) => (
+                    <GoalPursuitCard
+                      key={`goal-${goal.id}`}
+                      goal={goal}
+                      workspaceId={workspaceId}
+                      liveStatus={goalLiveStatuses[goal.id] ?? null}
+                      onStatusChange={handleGoalStatusChange}
+                    />
+                  ))
+                : null;
+              // A sent slash command renders as the system action it was, not
+              // a plain sentence — roster-backed exactly like the composer
+              // indicator; an unknown `/word` stays an ordinary bubble.
+              const sentCommand =
+                m.role === "user" && m.text && slashCommands.roster
+                  ? sentSlashCommandOf(m.text, slashCommands.roster)
+                  : null;
               return m.role === "user" ? (
                 <Fragment key={m.id}>
                   {daySeparator}
@@ -3910,6 +4095,28 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                       missed WCAG AA; the brand blue stays on small accents). */}
                   {editingMessageId === m.id ? (
                     messageEditor(m.id)
+                  ) : sentCommand ? (
+                    <div
+                      aria-label={format(t.slashSentAria, {
+                        slug: sentCommand.skill.slug,
+                      })}
+                      className="max-w-[85%] rounded-2xl rounded-br-md border border-primary/25 bg-primary/[0.07] px-3.5 py-2 text-[14px] leading-[1.5] break-words whitespace-pre-wrap shadow-sm"
+                    >
+                      <span className="mr-1.5 inline-flex translate-y-[1px] items-center gap-1">
+                        <Sparkles
+                          className="size-3.5 text-primary"
+                          aria-hidden
+                        />
+                        <code className="rounded bg-primary/15 px-1 py-0.5 text-[13px] font-semibold text-primary">
+                          /{sentCommand.skill.slug}
+                        </code>
+                      </span>
+                      {sentCommand.args ? (
+                        <span className="text-secondary-foreground">
+                          {sentCommand.args}
+                        </span>
+                      ) : null}
+                    </div>
                   ) : m.text ? (
                     <div className="max-w-[85%] rounded-2xl rounded-br-md bg-secondary px-3.5 py-2 text-[14px] leading-[1.5] break-words whitespace-pre-wrap text-secondary-foreground shadow-sm">
                       {m.text}
@@ -3917,7 +4124,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                   ) : null}
                   {m.userAttachments?.length ? (
                     <div className="w-full max-w-[280px]">
-                      <MessageAttachments attachments={m.userAttachments} />
+                      <MessageAttachments attachments={m.userAttachments} workspaceId={workspaceId} />
                     </div>
                   ) : null}
                   {m.text && editingMessageId !== m.id
@@ -3943,6 +4150,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                       )
                     : null}
                 </div>
+                {goalCardsBlock}
                 </Fragment>
               ) : (
                 <Fragment key={m.id}>
@@ -4018,9 +4226,21 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                       : null}
                   </div>
                 </div>
+                {goalCardsBlock}
                 </Fragment>
               );
             })}
+            {/* In-chat pursuit cards newer than every persisted message (the
+                arming turn is still streaming). */}
+            {goalPlacement.trailing.map((goal) => (
+              <GoalPursuitCard
+                key={`goal-${goal.id}`}
+                goal={goal}
+                workspaceId={workspaceId}
+                liveStatus={goalLiveStatuses[goal.id] ?? null}
+                onStatusChange={handleGoalStatusChange}
+              />
+            ))}
             {/* Live turn — the dock's activity feed (shimmer status +
                 reasoning/tool steps) above the streaming reply + caret. */}
             {chat.state.isStreaming && (

@@ -617,6 +617,7 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
           researchMode: boolean;
           fileIds?: string[];
           attachedRecordingIds?: string[];
+          assistantId?: string;
         },
         targetViewId?: string,
         fromResume?: boolean,
@@ -645,6 +646,7 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
         researchMode: pending.researchMode,
         fileIds: pending.fileIds,
         attachedRecordingIds: pending.attachedRecordingIds,
+        assistantId: pending.assistantId,
       },
       pending.targetViewId,
       true,
@@ -970,6 +972,9 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
       researchMode: boolean;
       fileIds?: string[];
       attachedRecordingIds?: string[];
+      /** The landing's draft-assistant pick — rides the seed so the dock
+       *  switches its interlocutor for the build turn. */
+      assistantId?: string;
     },
     targetViewId?: string,
     fromResume = false,
@@ -993,6 +998,7 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
         fileIds: opts.fileIds,
         attachedRecordingIds: opts.attachedRecordingIds,
         targetViewId,
+        assistantId: opts.assistantId,
         ts: Date.now(),
       });
     }
@@ -1019,6 +1025,7 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
         docViewId: pageId,
         model: opts.model,
         researchMode: opts.researchMode,
+        ...(opts.assistantId ? { assistantId: opts.assistantId } : {}),
         ...(opts.fileIds && opts.fileIds.length > 0
           ? { fileIds: opts.fileIds }
           : {}),

@@ -192,6 +192,49 @@ describe('[COMP:api/goals-route] GET /api/goals', () => {
       expect.objectContaining({ confirmed: undefined }),
     )
   })
+
+  it('threads the in-chat pursuit originSessionId filter and projects the field', async () => {
+    const now = new Date('2026-08-29T00:00:00.000Z')
+    const goalRow = {
+      id: 'g1',
+      workspaceId: 'w1',
+      parentGoalId: null,
+      recipeId: null,
+      host: null,
+      outcome: 'fill the billing sheet',
+      doneWhen: { kind: 'verify' },
+      means: { workflowId: 'wf1' },
+      budget: {},
+      policy: {},
+      status: 'running',
+      blockerReason: null,
+      createdByUserId: 'u1',
+      originSessionId: 's-chat-1',
+      createdAt: now,
+      updatedAt: now,
+    }
+    const { app, goalStore } = makeApp({ userId: 'u1', role: 'member', goals: [goalRow] })
+    const res = await request(app).get('/api/goals?workspaceId=w1&originSessionId=s-chat-1')
+
+    expect(res.status).toBe(200)
+    expect(goalStore.list).toHaveBeenLastCalledWith(
+      'u1',
+      'w1',
+      expect.objectContaining({ originSessionId: 's-chat-1' }),
+    )
+    expect(res.body.goals[0]).toMatchObject({
+      id: 'g1',
+      originSessionId: 's-chat-1',
+      hasWorkflow: true,
+    })
+    // An empty param stays undefined (no accidental empty-string filter).
+    await request(app).get('/api/goals?workspaceId=w1&originSessionId=')
+    expect(goalStore.list).toHaveBeenLastCalledWith(
+      'u1',
+      'w1',
+      expect.objectContaining({ originSessionId: undefined }),
+    )
+  })
 })
 
 describe('[COMP:api/goals-route] POST /api/goals/:id/confirm — clarity gate (§12)', () => {

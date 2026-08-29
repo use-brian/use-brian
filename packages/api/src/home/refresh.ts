@@ -14,6 +14,8 @@
  * [COMP:api/home-refresh]
  */
 
+import { createTurnLedger } from '../ledger/recorder.js'
+import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { randomUUID } from 'node:crypto'
 import { createHomeTools, queryLoop, type HomeDockStore, type HomeSignals } from '@use-brian/core'
 
@@ -71,6 +73,11 @@ export async function runHomeRefresh(params: {
   const timer = setTimeout(() => controller.abort(), REFRESH_TIMEOUT_MS)
   try {
     for await (const _event of queryLoop({
+      ledger: createTurnLedger({
+        workspaceId: params.workspaceId ?? null,
+        assistantId: params.assistantId ?? null,
+        payloads: getLedgerPayloadStore(),
+      }).ledger,
       provider: params.provider,
       model: params.model ?? 'gemini-flash',
       systemPrompt: SYSTEM_PROMPT,

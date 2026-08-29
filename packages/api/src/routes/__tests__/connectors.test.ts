@@ -490,7 +490,7 @@ describe('[COMP:api/connectors-route] /api/connectors', () => {
       expect.objectContaining({
         connected: true,
         connectedEmail: 'a@b.com',
-        credentials: { type: 'oauth', client_id: '', client_secret: 'rt' },
+        credentials: { type: 'oauth', client_id: 'google_refresh', client_secret: 'rt' },
       }),
     )
     expect(createUserInstance).not.toHaveBeenCalled()
@@ -582,7 +582,7 @@ describe('[COMP:api/connectors-route] /api/connectors', () => {
     expect(res.status).toBe(200)
     expect(createUserInstance).toHaveBeenCalledWith(expect.objectContaining({
       provider: 'gdrive', connected: true, connectedEmail: 'user@example.com',
-      credentials: { type: 'oauth', client_id: '', client_secret: 'rt-123' },
+      credentials: { type: 'oauth', client_id: 'google_refresh', client_secret: 'rt-123' },
     }))
   })
 
@@ -626,7 +626,7 @@ describe('[COMP:api/connectors-route] /api/connectors', () => {
     const res = await request(app).post('/api/connectors/gcal/exchange-and-store').send({ code: 'c', redirectUri: G_REDIRECT, instanceId: IID })
     expect(res.status).toBe(200)
     expect(update).toHaveBeenCalledWith('u1', IID, expect.objectContaining({
-      credentials: { type: 'oauth', client_id: '', client_secret: 'rt-r' },
+      credentials: { type: 'oauth', client_id: 'google_refresh', client_secret: 'rt-r' },
     }))
   })
 

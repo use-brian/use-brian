@@ -146,8 +146,17 @@ export function TranscriptPane({
   }
 
   // Distinct diarized labels in loaded order — the rename chips' roster.
+  // Visual (frame-analysis) rows are excluded: "Screen" is not a person and
+  // must never be offered for participant binding.
   const speakers = onRenameSpeaker
-    ? [...new Set(segments.map((s) => s.speaker).filter((s): s is string => !!s))]
+    ? [
+        ...new Set(
+          segments
+            .filter((s) => s.kind !== "visual")
+            .map((s) => s.speaker)
+            .filter((s): s is string => !!s),
+        ),
+      ]
     : [];
 
   return (
@@ -193,12 +202,15 @@ export function TranscriptPane({
         onTouchMove={() => setFollow(false)}
       >
         {segments.map((s) => {
-          const active = currentMs >= s.start_ms && currentMs < s.end_ms;
+          // A visual moment is a point in time (start == end); give it a
+          // nominal 10s window so the playhead highlight can land on it.
+          const endMs = s.end_ms > s.start_ms ? s.end_ms : s.start_ms + 10_000;
+          const active = currentMs >= s.start_ms && currentMs < endMs;
           // The line the citation pointed at. Marked independently of `active`:
           // the playhead may be elsewhere (or the audio may not play at all),
           // and the reader still needs to see WHICH line the claim came from.
           const cited =
-            focusMs !== null && focusMs >= s.start_ms && focusMs < s.end_ms;
+            focusMs !== null && focusMs >= s.start_ms && focusMs < endMs;
           return (
             <li
               key={s.segment_index}
@@ -221,14 +233,25 @@ export function TranscriptPane({
                 <span className="shrink-0 tabular-nums text-xs text-muted-foreground">
                   {formatStamp(s.start_ms)}
                 </span>
-                <span>
-                  {s.speaker ? (
-                    <b className="mr-1">
-                      {(participants.find((p) => p.speaker === s.speaker)?.name ?? s.speaker) + ":"}
+                {s.kind === "visual" ? (
+                  // A frame description, not speech: labelled and italicized so
+                  // it reads as "what was on screen", never as a speaker line.
+                  <span className="italic text-muted-foreground">
+                    <b className="mr-1 not-italic font-medium">
+                      {t.recordings.visualMomentLabel + ":"}
                     </b>
-                  ) : null}
-                  {s.segment_text}
-                </span>
+                    {s.segment_text}
+                  </span>
+                ) : (
+                  <span>
+                    {s.speaker ? (
+                      <b className="mr-1">
+                        {(participants.find((p) => p.speaker === s.speaker)?.name ?? s.speaker) + ":"}
+                      </b>
+                    ) : null}
+                    {s.segment_text}
+                  </span>
+                )}
               </button>
             </li>
           );

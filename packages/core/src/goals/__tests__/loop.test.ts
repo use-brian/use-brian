@@ -21,6 +21,7 @@ function goal(over: Partial<GoalRecord> = {}): GoalRecord {
     contextGroupId: null,
     contextProjectId: null,
     createdByUserId: null,
+    originSessionId: null,
     confirmedAt: null,
     completionClaim: null,
     brief: null,

@@ -251,6 +251,8 @@ let connectorServer: Server | null = null;
 let connectorServerTimer: ReturnType<typeof setTimeout> | null = null;
 /** A deep link / auth callback delivered before the window exists (macOS cold-start). */
 let pendingUrl: string | null = null;
+/** Renderer-picked capture source for the NEXT display-media grant (one-shot). */
+let requestedCaptureSourceId: string | null = null;
 /** The isolated, shared-session browser used for an interactive deployment gateway. */
 let gatewayWindow: BrowserWindow | null = null;
 /** One gateway login at a time; concurrent challenged requests wait for this result. */
@@ -2514,6 +2516,24 @@ if (!gotLock) {
     else destroyRecorderOverlay();
   });
 
+  // Screen-capture source picker: the renderer lists shareable windows and
+  // points the NEXT display-media grant at the picked one (null reverts to
+  // the primary-display default). Name + id only — thumbnails stay in main.
+  ipcMain.handle("Use Brian:list-capture-sources", async (_event, kind: unknown) => {
+    const type = kind === "screen" ? "screen" : "window";
+    const sources = await desktopCapturer.getSources({
+      types: [type],
+      thumbnailSize: { width: 0, height: 0 },
+      fetchWindowIcons: false,
+    });
+    return sources
+      .filter((source) => source.name.trim().length > 0)
+      .map((source) => ({ id: source.id, name: source.name }));
+  });
+  ipcMain.on("Use Brian:set-capture-source", (_event, id: unknown) => {
+    requestedCaptureSourceId = typeof id === "string" && id.length > 0 ? id : null;
+  });
+
   // The offline landing's "Retry" button asks the shell to reload the app now
   // (the watcher already auto-retries every few seconds; this is the manual
   // path). Stops the watcher first so the manual load isn't double-fired.
@@ -2793,23 +2813,30 @@ if (!gotLock) {
         callback({});
         return;
       }
+      // A renderer-picked source (the specific-window capture) wins for ONE
+      // grant, then clears — a later computer-audio-only capture must never
+      // silently record last week's picked window.
+      const pickedId = requestedCaptureSourceId;
+      requestedCaptureSourceId = null;
       void desktopCapturer
         .getSources({
-          types: ["screen"],
+          types: pickedId ? ["window", "screen"] : ["screen"],
           thumbnailSize: { width: 0, height: 0 },
           fetchWindowIcons: false,
         })
         .then((sources) => {
-          const source = selectPrimaryDisplaySource(
-            sources,
-            screen.getPrimaryDisplay().id,
-          );
+          const source =
+            (pickedId ? sources.find((candidate) => candidate.id === pickedId) : undefined) ??
+            selectPrimaryDisplaySource(sources, screen.getPrimaryDisplay().id);
           if (!source) {
             callback({});
             return;
           }
           // `loopback` leaves local playback audible. `loopbackWithMute`
           // would make the remote meeting disappear from the user's speakers.
+          // Loopback is WHOLE-SYSTEM output: per-application audio isolation
+          // is not exposed by Chromium/Electron, so a window pick still
+          // carries all computer audio (the renderer copy says so).
           callback({ video: source, audio: "loopback" });
         })
         .catch(() => callback({}));

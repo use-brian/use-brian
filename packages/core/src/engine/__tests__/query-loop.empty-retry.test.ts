@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
+import { NOOP_TURN_LEDGER } from '../turn-ledger.js'
 import { z } from 'zod'
 import type {
   LLMProvider,
@@ -103,7 +104,7 @@ function nudgeTextOf(messages: Message[]): string {
 
 async function runLoop(provider: LLMProvider): Promise<QueryEvent[]> {
   const events: QueryEvent[] = []
-  for await (const e of queryLoop({
+  for await (const e of queryLoop({ ledger: NOOP_TURN_LEDGER,
     provider,
     model: 'mock-model',
     systemPrompt: 'sys',

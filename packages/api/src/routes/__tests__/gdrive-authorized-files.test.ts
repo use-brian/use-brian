@@ -46,6 +46,17 @@ describe('[COMP:api/gdrive-authorized-files-route] Drive Picker authorization', 
       .toEqual({ accessToken: 'token', expiresIn: 3000, pickerAppId: 'app', pickerApiKey: 'key' })
   })
 
+  it('mints a Picker token from a legacy blank-client_id row (pre-stamp open store)', async () => {
+    // The open store wrote `client_id: ''` for managed Google connects until
+    // 2026-08-29; existing self-host rows must keep minting without a reconnect.
+    store.getCredentials.mockResolvedValueOnce({ client_id: '', client_secret: 'raw-refresh-token' })
+    refresh.mockResolvedValueOnce('token')
+    const res = await request(app('u-1')).get('/api/connectors/gdrive/access-token')
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ accessToken: 'token', expiresIn: 3000 })
+    expect(refresh).toHaveBeenCalledWith('raw-refresh-token', 'client', 'secret')
+  })
+
   it('returns 409 when Drive is disconnected', async () => {
     store.getCredentials.mockResolvedValueOnce(null)
     expect((await request(app('u-1')).get('/api/connectors/gdrive/access-token')).status).toBe(409)

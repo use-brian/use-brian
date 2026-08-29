@@ -5,6 +5,8 @@ import { getDefaultAssistant, getUserAssistant, getWorkspacePrimaryAssistant, ge
 import { charterNeedsIntake, createSaveCharterTool, CHARTER_INTAKE_ADDENDUM } from '../intake/charter-intake.js'
 import { resolvePresenceTimezone } from '../auth/client-timezone.js'
 import { findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, toStampedMessages, getSessionMessages, updateSessionStatus, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels, isSharedChatSession, isMultiParticipantSession, coalesceConsecutiveUserMessages, startTurnLease, touchTurnLease, releaseTurnLease, requestTurnCancel, reclaimStaleTurn, isTurnLeaseLive, TURN_HEARTBEAT_INTERVAL_MS, type SessionMessage } from '../db/sessions.js'
+import { createTurnLedger } from '../ledger/recorder.js'
+import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { query } from '../db/client.js'
 import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
 import { buildPinnedContextBlock } from '../resolve-session-pins.js'
@@ -19,7 +21,7 @@ import { gateSessionRead } from './sessions.js'
 import { renderArtifactManifest } from '../files/artifact-manifest.js'
 import { promotePastedText, shouldPromotePaste } from '../files/paste-promotion.js'
 import type { ArtifactPromoter } from '../files/artifact-promote.js'
-import { mayAssistantAnswerInRoom } from './_room-binding.js'
+import { mayAssistantAnswerInRoom, crossAssistantSendPolicy } from './_room-binding.js'
 import { recordRoomMentionsForMessage, type RecordRoomMentionsResult } from '../room-mentions.js'
 import type { Sensitivity } from '@use-brian/core'
 import { resolveMentionSpans } from '@use-brian/shared/mention-matching'
@@ -37,6 +39,7 @@ import {
   resolveLayer1Prompt,
 } from './_prompt-builder.js'
 import { type PublishSessionEvent, noopPublishSessionEvent } from '../session-event-port.js'
+import { createTurnStreamPublisher, publishRoomTurnActivity } from '../session-live-publisher.js'
 import { createSessionPinTools } from '../session-pin-tools.js'
 import type { InjectExtraTools, ResolveAppSoul } from '../tool-injection-port.js'
 import type { BuildConnectorActionAudit } from '../connector-action-port.js'
@@ -1677,58 +1680,14 @@ export function mayResolveRoomConfirmation(params: {
 
 /**
  * Mirror one display-level activity event from a live turn onto the shared
- * per-session bus. Keeping the mirror gate, sender attribution, and NOTIFY-size
- * cap in one seam prevents delegated-worker / preflight streams from silently
- * becoming sender-only while the main query-loop stream remains collaborative.
- *
- * `mirror` is the gate. Rooms mirror THROUGHOUT (viewers watch live from the
- * start). Every other session mirrors only once its direct stream is dead
- * (`isRoomSession || clientGone` at the call site, 2026-08-24): a personal
- * turn that outlives its `POST /api/chat` body is followed over
- * `GET /api/sessions/:id/stream`, and that reconnect needs the same activity
- * feed (tool steps, the pending confirmation card) the direct stream carried.
- * While the direct stream is alive the bus is pure overhead, so a healthy
- * personal turn costs no NOTIFY.
- *
- * Tool inputs are the only unbounded activity field. The initiating client
- * still receives the complete input over its direct response; bus subscribers
- * get an empty object when the JSON representation exceeds the bus budget,
- * which makes their UI fall back to the tool's static narration.
+ * per-session bus. Extracted to `../session-live-publisher.ts` (Live §5.2)
+ * so the background lanes share the exact mirror gate + NOTIFY-size cap;
+ * re-exported here because this route is its original home and the room
+ * suites import it from here. `mirror` at the chat call site is
+ * `isRoomSession || clientGone` (rooms mirror throughout; a personal turn
+ * mirrors only once its direct stream is dead, 2026-08-24).
  */
-const ROOM_ACTIVITY_INPUT_CAP = 4_000
-export function publishRoomTurnActivity(params: {
-  mirror: boolean
-  sessionId: string
-  senderUserId: string
-  event: string
-  data: Record<string, unknown>
-  publishSessionEvent: PublishSessionEvent
-}): void {
-  if (!params.mirror) return
-
-  let data = params.data
-  if ('input' in data) {
-    let input: unknown = {}
-    try {
-      input = JSON.stringify(data.input).length > ROOM_ACTIVITY_INPUT_CAP
-        ? {}
-        : data.input
-    } catch {
-      input = {}
-    }
-    data = { ...data, input }
-  }
-
-  params.publishSessionEvent({
-    kind: 'turn_activity',
-    sessionId: params.sessionId,
-    payload: {
-      event: params.event,
-      senderUserId: params.senderUserId,
-      ...data,
-    },
-  })
-}
+export { publishRoomTurnActivity }
 
 /**
  * Turn addresser per live room turn (multiplayer chat T11/D8): the user whose
@@ -1746,7 +1705,7 @@ const roomTurnAddressers = new Map<string, string>()
  * (`PATCH /api/sessions/:id/assistant`) applies the identical predicate, and
  * `sessions.ts` cannot import this module without closing an ESM cycle.
  */
-export { mayAssistantAnswerInRoom }
+export { mayAssistantAnswerInRoom, crossAssistantSendPolicy }
 
 /**
  * A refusal raised AFTER the SSE headers are on the wire.
@@ -2872,40 +2831,47 @@ export function chatRoutes(options: WebChatOptions): Router {
       // `assistant.id`; this just stops a user from naming someone else's
       // session under their own assistant context.)
       //
-      // EXCEPTION — multi-assistant rooms (multiplayer chat T9): in a
-      // workspace-shared chat, `@AssistantName` picks which workspace
-      // assistant answers THIS turn, so the requested assistant may differ
-      // from the session's binding — provided it lives in the SAME workspace
-      // as the room's assistant (a stale client id must never route another
-      // workspace's assistant in) and its clearance does not out-rank the
-      // room's read floor (`mayAssistantAnswerInRoom`). The turn then runs
-      // entirely AS that assistant: its soul, memory, tools and clearance.
+      // EXCEPTION — per-turn-addressable sessions (chat-app.md → "Choosing
+      // an assistant"), decided by the shared pure policy
+      // `crossAssistantSendPolicy` (`_room-binding.ts`):
+      //   - multi-assistant rooms (multiplayer chat T9): `@AssistantName`
+      //     picks who answers THIS turn — same workspace as the room's
+      //     assistant (a stale client id must never route another
+      //     workspace's assistant in), capped by the room's read floor;
+      //   - the doc dock's PERSONAL thread: the switcher / landing picker
+      //     re-address the next turn without resetting the thread — same
+      //     workspace, no clearance cap (owner-only audience; the policy's
+      //     doc comment carries the reasoning).
+      // Either way the turn then runs entirely AS the requested assistant:
+      // its soul, memory, tools and clearance.
       if (session.assistantId !== assistant.id) {
-        let roomCrossAssistantOk = false
-        if (isSharedChatSession(session) && assistant.workspaceId) {
+        let sameWorkspace = false
+        if (
+          (isSharedChatSession(session) || isDocSurface(session)) &&
+          assistant.workspaceId
+        ) {
           const boundWs = await query<{ workspaceId: string | null }>(
             `SELECT workspace_id AS "workspaceId" FROM assistants WHERE id = $1`,
             [session.assistantId],
           )
-          if (boundWs.rows[0]?.workspaceId === assistant.workspaceId) {
-            if (
-              mayAssistantAnswerInRoom({
-                assistantClearance: assistant.clearance ?? null,
-                roomClearance: session.effectiveClearance,
-              })
-            ) {
-              roomCrossAssistantOk = true
-            } else {
-              sendEvent('error', {
-                code: 'assistant_clearance_exceeds_room',
-                error: 'That assistant is cleared above this room and cannot answer here.',
-              })
-              res.end()
-              return
-            }
-          }
+          sameWorkspace = boundWs.rows[0]?.workspaceId === assistant.workspaceId
         }
-        if (!roomCrossAssistantOk) {
+        const verdict = crossAssistantSendPolicy({
+          isSharedSession: isSharedChatSession(session),
+          isDocSurfaceSession: isDocSurface(session),
+          sameWorkspace,
+          assistantClearance: assistant.clearance ?? null,
+          sessionClearance: session.effectiveClearance,
+        })
+        if (verdict === 'clearance_refused') {
+          sendEvent('error', {
+            code: 'assistant_clearance_exceeds_room',
+            error: 'That assistant is cleared above this room and cannot answer here.',
+          })
+          res.end()
+          return
+        }
+        if (verdict !== 'allow') {
           sendEvent('error', { error: 'Session does not belong to this assistant' })
           res.end()
           return
@@ -4037,20 +4003,24 @@ export function chatRoutes(options: WebChatOptions): Router {
       // turns — worse for the model, never fatal for the user.
       let sharedSenderNames: Map<string, string> | undefined
       let sharedParticipants: string[] = []
-      /** Multi-assistant rooms (T9): assistant-id → name, for labeling
+      /** Multi-voice sessions — rooms (T9) AND the doc dock's per-turn-
+       *  addressable personal thread: assistant-id → name, for labeling
        *  FOREIGN assistant turns at assembly (`toStampedMessages`
        *  `assistantVoices`) — the answering model must never mistake another
-       *  assistant's words for its own. */
+       *  assistant's words for its own. The human-sender half stays
+       *  rooms-only (a personal doc thread has one human). */
       let roomAssistantVoices: { names: Map<string, string>; currentAssistantId: string } | undefined
-      if (isSharedChatSession(session)) {
+      if (isSharedChatSession(session) || isDocSurface(session)) {
         try {
-          const senderIds = [
-            ...new Set(
-              dbMessages
-                .map((m) => m.senderUserId)
-                .filter((id): id is string => Boolean(id)),
-            ),
-          ]
+          const senderIds = isSharedChatSession(session)
+            ? [
+                ...new Set(
+                  dbMessages
+                    .map((m) => m.senderUserId)
+                    .filter((id): id is string => Boolean(id)),
+                ),
+              ]
+            : []
           if (senderIds.length > 0) {
             const profiles = await getUserProfilesByIds(senderIds)
             sharedSenderNames = new Map(
@@ -4352,6 +4322,16 @@ export function chatRoutes(options: WebChatOptions): Router {
       //       with the assistant message id once it commits.
       //
       // Constructed once per turn so each request has its own queue.
+      // Turn ledger (plan §4): one recorder per chat turn. Created beside the
+      // recall buffer so context-assembly retrieval provenance (below) can be
+      // recorded before the loop starts; the trace id is minted now and
+      // re-keyed to the persisted assistant message id at the flush site.
+      const turnLedgerHandle = createTurnLedger({
+        workspaceId: assistant.workspaceId ?? null,
+        assistantId: assistant.id,
+        sessionId: session.id,
+        payloads: getLedgerPayloadStore(),
+      })
       const recallBuffer = options.memoryRecallEventsStore && assistant.workspaceId
         ? createMemoryRecallBuffer({
             sink: options.memoryRecallEventsStore,
@@ -4376,6 +4356,18 @@ export function chatRoutes(options: WebChatOptions): Router {
             'index_inject',
           )
         }
+      }
+      // Ledger retrieval provenance (chat-auditing Phase 0 shape): the
+      // automatic context-assembly sets. Tool-driven retrieval is already
+      // captured as tool_call events with full inputs/results.
+      if (rankedIndex.rows.length > 0 || teamMemoryIndex.length > 0) {
+        turnLedgerHandle.recordRetrieval({
+          returnedRows: [
+            ...rankedIndex.rows.map((m) => ({ primitive: 'memory', rowId: m.id })),
+            ...teamMemoryIndex.map((m) => ({ primitive: 'memory', rowId: m.id })),
+          ],
+          source: 'index_inject',
+        })
       }
 
       // CL-8: per-turn skill invocation buffer. Constructed when we have
@@ -6493,35 +6485,20 @@ export function chatRoutes(options: WebChatOptions): Router {
       // gap; published throttled so a streamed reply can't NOTIFY-storm the
       // bus. Rooms also carry the live reasoning tail — viewers fold it
       // through the same reducer the sender's client uses.
-      let liveStreamText = ''
-      let liveStreamActivity: string | null = null
-      let liveStreamReasoning = ''
-      let lastStreamPublishAt = 0
-      const STREAM_PUBLISH_THROTTLE_MS = 150
-      const STREAM_TEXT_CAP = 4_000 // keeps the NOTIFY payload under budget
-      const STREAM_REASONING_CAP = 1_500
-      const publishTurnStream = (force: boolean) => {
-        // Rooms: always. Everything else: only once the direct stream is dead.
-        if (!isRoomSession && (!isBackgroundTurn || !clientGone)) return
-        const now = Date.now()
-        if (!force && now - lastStreamPublishAt < STREAM_PUBLISH_THROTTLE_MS) return
-        lastStreamPublishAt = now
-        publishSessionEvent({
-          kind: 'turn_stream',
-          sessionId: session.id,
-          payload: {
-            text: liveStreamText.slice(-STREAM_TEXT_CAP),
-            activity: liveStreamActivity,
-            ...(isRoomSession
-              ? {
-                  reasoning: liveStreamReasoning.slice(-STREAM_REASONING_CAP),
-                  senderUserId: user.id,
-                  assistantId: assistant.id,
-                }
-              : {}),
-          },
-        })
-      }
+      // The throttle/cap/snapshot machinery lives in the shared publisher
+      // (../session-live-publisher.ts, Live §5.2) — the background lanes
+      // publish through the same discipline. The gates stay HERE and are
+      // evaluated per call (`clientGone` flips long after this line):
+      // rooms publish throughout; everything else only once the direct
+      // stream is dead. Rooms also attribute (reasoning tail + sender +
+      // assistant, T13); personal snapshots stay bare `{text, activity}`.
+      const turnStream = createTurnStreamPublisher({
+        sessionId: session.id,
+        publishSessionEvent,
+        shouldPublish: () => isRoomSession || (isBackgroundTurn && clientGone),
+        attribution: () =>
+          isRoomSession ? { senderUserId: user.id, assistantId: assistant.id } : null,
+      })
 
       // ── Persistence buffer ────────────────────────────────────
       //
@@ -6626,6 +6603,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                 : undefined,
           })
           lastAssistantMessageId = storedAssistantMsg.id
+          turnLedgerHandle.bindAssistantMessageId(storedAssistantMsg.id)
 
           // The UI uses `assistant_message_saved` to attach retry/edit/
           // feedback actions to the most recent bubble. Only emit for the
@@ -6830,6 +6808,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           projectIds: turnScope.effectiveProjectIds,
         })
         for await (const event of queryLoop({
+          ledger: turnLedgerHandle.ledger,
           // BYO-aware: when the workspace set its own Gemini key, the main
           // response runs against that provider (else the platform provider).
           provider: turnProvider,
@@ -7102,9 +7081,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             // Mirror onto the session bus (throttled) so a reconnected client
             // sees the reply stream after a dropped connection. Off rooms it
             // is a no-op until the direct stream is dead (2026-08-24).
-            liveStreamText += event.text
-            liveStreamActivity = null
-            publishTurnStream(false)
+            turnStream.onTextDelta(event.text)
           }
           // Verbatim model reasoning streamed live (the model's own words
           // about what it's doing). Consumers that don't render it (channels,
@@ -7115,18 +7092,14 @@ export function chatRoutes(options: WebChatOptions): Router {
             // Room viewers get the reasoning tail via the throttled snapshot
             // (T13) — same reducer, snapshot semantics instead of deltas.
             if (isRoomSession) {
-              liveStreamReasoning += event.text
-              publishTurnStream(false)
+              turnStream.onReasoningDelta(event.text)
             }
           }
           if (event.type === 'tool_start') {
             sendActivityEvent('tool_start', { id: event.id, name: event.name })
             // Surface the running tool to a reconnected client before any reply
             // text lands (the raw name; the client maps it to a friendly label).
-            if (!liveStreamText) {
-              liveStreamActivity = event.name
-              publishTurnStream(true)
-            }
+            turnStream.onToolStart(event.name)
           }
           if (event.type === 'tool_input') {
             if (event.name === 'presentDocument') {

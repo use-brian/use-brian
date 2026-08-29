@@ -32,3 +32,47 @@ export function mayAssistantAnswerInRoom(params: {
     c === 'public' ? 0 : c === 'internal' ? 1 : c === 'confidential' ? 2 : fallback
   return rank(params.assistantClearance, 1) <= rank(params.roomClearance, 1)
 }
+
+/**
+ * May a send whose `assistantId` differs from the session's binding run the
+ * turn as that assistant? The single decision behind the chat route's
+ * cross-assistant exception, covering BOTH per-turn-addressable session
+ * kinds (chat-app.md → "Choosing an assistant"):
+ *
+ *   - a workspace-shared room (multiplayer chat T9): allowed same-workspace,
+ *     capped by the room's read floor (`mayAssistantAnswerInRoom`) — an
+ *     assistant cleared above the room would draw on data its readers may
+ *     not see;
+ *   - the doc dock's PERSONAL thread (the room mechanics without the room):
+ *     allowed same-workspace with NO clearance cap — the thread's audience
+ *     is its owner alone, reachability is already `getUserAssistant`-gated,
+ *     and each turn's tool reads run under the ANSWERING assistant's own
+ *     clearance via RLS, so there is no widened reader to protect.
+ *
+ * Everything else — an ordinary personal chat thread, a cross-workspace id —
+ * stays rejected. Pure so `room-mechanics.test.ts` can pin the whole matrix.
+ */
+export function crossAssistantSendPolicy(params: {
+  /** `isSharedChatSession(session)` — a workspace-shared room. */
+  isSharedSession: boolean
+  /** `isDocSurface(session)` — the doc dock's personal thread. */
+  isDocSurfaceSession: boolean
+  /** The requested assistant lives in the SAME workspace as the session's
+   *  bound assistant. */
+  sameWorkspace: boolean
+  assistantClearance: string | null
+  /** The session's `effective_clearance` (rooms; null on personal rows). */
+  sessionClearance: string | null
+}): 'allow' | 'clearance_refused' | 'reject' {
+  if (!params.sameWorkspace) return 'reject'
+  if (params.isSharedSession) {
+    return mayAssistantAnswerInRoom({
+      assistantClearance: params.assistantClearance,
+      roomClearance: params.sessionClearance,
+    })
+      ? 'allow'
+      : 'clearance_refused'
+  }
+  if (params.isDocSurfaceSession) return 'allow'
+  return 'reject'
+}

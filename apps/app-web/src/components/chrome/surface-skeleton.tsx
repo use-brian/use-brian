@@ -57,6 +57,8 @@ export function surfaceSkeletonKind(
     case "studio":
     case "chat":
     case "shopify":
+    // Live is master-detail: narrow roster rail + wide watch pane.
+    case "live":
       return "rail";
     case "workflow":
     case "feed":

@@ -19,6 +19,8 @@
  * [COMP:api/public-turn]
  */
 
+import { createTurnLedger } from '../ledger/recorder.js'
+import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { randomUUID } from 'node:crypto'
 import {
   queryLoop,
@@ -1285,6 +1287,12 @@ export async function executePublicTurn(
       projectIds: turnScope.effectiveProjectIds,
     })
     for await (const event of queryLoop({
+      ledger: createTurnLedger({
+        workspaceId: assistant.workspaceId ?? null,
+        assistantId: assistant.id,
+        sessionId: session.id,
+        payloads: getLedgerPayloadStore(),
+      }).ledger,
       provider: turnProvider,
       model,
       maxTokens: customLlmRuntime?.maxTokens,

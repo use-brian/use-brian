@@ -103,7 +103,8 @@ type WorkspacePrimitive =
   | "scheduled_job"
   | "assistant"
   | "workspace_config"
-  | "inbox";
+  | "inbox"
+  | "session";
 
 export type WorkspaceChangePayload = {
   workspaceId: string;
@@ -114,9 +115,21 @@ export type WorkspaceChangePayload = {
 
 export const SKILL_REFRESH_EVENT = "sidan:skill-refresh";
 export const SCHEDULED_JOB_REFRESH_EVENT = "sidan:scheduled-job-refresh";
+/**
+ * The `session` primitive's domain event (Live roster —
+ * docs/architecture/features/live-work.md §4). The Live page refetches its
+ * tiered roster on it; the signal carries the session rowId and nothing
+ * else, so it can never leak content past a tier.
+ */
+export const LIVE_REFRESH_EVENT = "sidan:live-refresh";
 
 export type SkillRefreshDetail = {
   workspaceId: string | null;
+  rowId?: string;
+};
+
+export type LiveRefreshDetail = {
+  workspaceId: string;
   rowId?: string;
 };
 
@@ -226,6 +239,16 @@ export function routeWorkspaceChange(
           } satisfies InboxRefreshDetail,
         },
       ];
+    case "session":
+      return [
+        {
+          event: LIVE_REFRESH_EVENT,
+          detail: {
+            workspaceId: payload.workspaceId,
+            rowId: payload.rowId,
+          } satisfies LiveRefreshDetail,
+        },
+      ];
     default:
       return [];
   }
@@ -243,6 +266,7 @@ export function allDomainDispatches(workspaceId: string): DomainDispatch[] {
     { event: HOME_APPS_REFRESH_EVENT, detail: { workspaceId } },
     { event: WORKSPACE_IDENTITY_REFRESH_EVENT, detail: { workspaceId } },
     { event: INBOX_REFRESH_EVENT, detail: { workspaceId } },
+    { event: LIVE_REFRESH_EVENT, detail: { workspaceId } },
   ];
 }
 

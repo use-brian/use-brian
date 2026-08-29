@@ -13,9 +13,10 @@ export function createDbFileStore(): FileStore {
       const result = await query<Row>(
         `INSERT INTO file_cache
            (session_id, file_name, mime_type, content, summary, size_bytes, expires_at,
-            workspace_id, user_id, assistant_id, sensitivity, compartments, project_ids)
+            workspace_id, user_id, assistant_id, sensitivity, compartments, project_ids,
+            original_content)
          VALUES ($1, $2, $3, $4, $5, $6, now() + make_interval(days => $7),
-                 $8, $9, $10, COALESCE($11, 'internal'), $12::text[], $13::uuid[])
+                 $8, $9, $10, COALESCE($11, 'internal'), $12::text[], $13::uuid[], $14)
          RETURNING ${SELECT}`,
         [
           params.sessionId, params.fileName, params.mimeType, params.content,
@@ -23,6 +24,7 @@ export function createDbFileStore(): FileStore {
           params.workspaceId ?? null, params.userId ?? null, params.assistantId ?? null,
           params.sensitivity ?? null,
           params.compartments ?? [], params.projectIds ?? [],
+          params.originalContent ?? null,
         ],
       )
       return result.rows[0]
@@ -76,6 +78,27 @@ export function createDbFileStore(): FileStore {
     async sweepExpired() {
       const result = await query(`DELETE FROM file_cache WHERE expires_at <= now()`)
       return result.rowCount ?? 0
+    },
+
+    // Original bytes (data URL) kept beside the parsed text for structured
+    // documents (migration 487). Cold path — deliberately NOT in the default
+    // SELECT so chat turns never haul the multi-MB payload; the PDF-preview
+    // route is the intended caller. Same access predicate as `get`.
+    async getOriginalContent(id, ctx?: AccessContext) {
+      if (ctx) {
+        const ap = buildAccessPredicate(ctx, { startIdx: 1 })
+        const result = await query<{ originalContent: string | null }>(
+          `SELECT original_content as "originalContent" FROM file_cache
+           WHERE ${ap.sql} AND id = $${ap.nextIdx} AND expires_at > now()`,
+          [...ap.params, id],
+        )
+        return result.rows[0]?.originalContent ?? null
+      }
+      const result = await query<{ originalContent: string | null }>(
+        `SELECT original_content as "originalContent" FROM file_cache WHERE id = $1 AND expires_at > now()`,
+        [id],
+      )
+      return result.rows[0]?.originalContent ?? null
     },
 
     // Stamp the durable-artifact link after silent promotion (migration 299).

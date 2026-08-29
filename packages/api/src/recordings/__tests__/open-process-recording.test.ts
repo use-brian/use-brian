@@ -194,4 +194,77 @@ describe('[COMP:recordings/open-process-recording] OSS recording processing', ()
     expect(brainIngestor).toHaveBeenCalled()
     expect(synthesize).not.toHaveBeenCalled()
   })
+
+  it('runs frame analysis for a video mime, merges visual segments, and interleaves the ingest text', async () => {
+    const storage = { signedReadUrl: vi.fn(async () => 'https://signed.example/video') }
+    const brainIngestor = vi.fn(async () => ({}) as never)
+    const insertSegments = vi.fn(async () => 2)
+    const analyzeFrames = vi.fn(async () => ({
+      moments: [{ tsMs: 0, description: 'Title slide.' }],
+      usages: [{ model: 'vision', usage: null }],
+    }))
+    await processOpenRecording(
+      { recordingId: 'rec-v', actingUserId: 'owner-1' },
+      {
+        filesResolver: { forUri: vi.fn(), forWorkspace: vi.fn() },
+        fallbackStorage: storage as never,
+        transcriber: {
+          name: 'test',
+          transcribe: vi.fn(async () => ({
+            utterances: [{ startMs: 500, endMs: 1000, speaker: 'A', text: 'welcome' }],
+            usages: [], windows: 1, truncated: false, degenerateWindows: 0,
+          })),
+        },
+        brainIngestor,
+        getEpisode: vi.fn(async () => ({
+          id: 'rec-v', workspaceId: 'ws-1', userId: null, assistantId: 'assistant-1',
+          sensitivity: 'internal', sourceRef: { gcsKey: 'ws-1/recordings/v' },
+        }) as never),
+        getRecording: vi.fn(async () => ({ mime: 'video/webm', title: 'demo', kind: 'meeting' }) as never),
+        probe: vi.fn(async () => 1000),
+        extract: vi.fn(async () => ({ buffer: Buffer.from('aac'), mime: 'audio/aac' })),
+        insertSegments,
+        analyzeFrames,
+      },
+    )
+    expect(analyzeFrames).toHaveBeenCalledWith({ sourceUrl: 'https://signed.example/video', durationMs: 1000 })
+    const insertArg = (insertSegments.mock.calls as unknown as [[{ segments: Array<{ kind?: string }> }]])[0][0]
+    expect(insertArg.segments.map((seg) => seg.kind ?? 'speech')).toEqual(['visual', 'speech'])
+    const ingestArg = (brainIngestor.mock.calls as unknown as [[{ content: string }]])[0][0]
+    expect(ingestArg.content).toBe('Screen: Title slide.\nA: welcome')
+  })
+
+  it('a frame-analysis failure never fails the video recording', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const storage = { signedReadUrl: vi.fn(async () => 'https://signed.example/video') }
+    const brainIngestor = vi.fn(async () => ({}) as never)
+    const result = await processOpenRecording(
+      { recordingId: 'rec-v2', actingUserId: 'owner-1' },
+      {
+        filesResolver: { forUri: vi.fn(), forWorkspace: vi.fn() },
+        fallbackStorage: storage as never,
+        transcriber: {
+          name: 'test',
+          transcribe: vi.fn(async () => ({
+            utterances: [{ startMs: 0, endMs: 1000, speaker: null, text: 'audio only' }],
+            usages: [], windows: 1, truncated: false, degenerateWindows: 0,
+          })),
+        },
+        brainIngestor,
+        getEpisode: vi.fn(async () => ({
+          id: 'rec-v2', workspaceId: 'ws-1', userId: null, assistantId: 'assistant-1',
+          sensitivity: 'internal', sourceRef: { gcsKey: 'ws-1/recordings/v2', mime: 'video/mp4' },
+        }) as never),
+        getRecording: vi.fn(async () => null),
+        probe: vi.fn(async () => 1000),
+        extract: vi.fn(async () => ({ buffer: Buffer.from('aac'), mime: 'audio/aac' })),
+        insertSegments: vi.fn(async () => 1),
+        analyzeFrames: vi.fn(async () => {
+          throw new Error('vision down')
+        }),
+      },
+    )
+    expect(result.segmentsInserted).toBe(1)
+    expect(brainIngestor).toHaveBeenCalled()
+  })
 })

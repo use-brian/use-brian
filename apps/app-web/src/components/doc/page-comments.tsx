@@ -48,6 +48,7 @@ import { ComposerControls, useComposerControls } from "@/components/doc/composer
 import { AttachmentChips, FileDropOverlay } from "@/components/doc/attachment-chips";
 import { useFileAttachments } from "@/lib/use-file-attachments";
 import { useFileDrop } from "@/lib/use-file-drop";
+import { useRecordingUpload } from "@/lib/recordings/use-recording-upload";
 import { useAutoGrowTextarea } from "@/lib/use-auto-grow-textarea";
 
 type Props = {
@@ -84,12 +85,38 @@ export function PageComments({
 }: Props) {
   const t = useT().comments;
   const tAttach = useT().attachments;
+  const tRec = useT().recordings;
   const [draft, setDraft] = React.useState("");
   const [busy, setBusy] = React.useState(false);
   const composerRef = React.useRef<HTMLTextAreaElement>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const cardRef = React.useRef<HTMLDivElement>(null);
-  const att = useFileAttachments();
+  // Video / recording-sized audio routes to the recording pipeline (staged,
+  // not transcribed) and rides the seeded first turn as attachedRecordingIds —
+  // the same contract a thread reply has. Only wired when the page has a doc
+  // assistant to bind the recording to; without one, video keeps rejecting.
+  const rec = useRecordingUpload(workspaceId, assistantId ?? "");
+  const [pendingRecordings, setPendingRecordings] = React.useState<
+    { recordingId: string; title: string }[]
+  >([]);
+  const att = useFileAttachments(
+    undefined,
+    assistantId
+      ? {
+          onRouteMedia: async (files) => {
+            for (const file of files) {
+              const staged = await rec.stage(file);
+              if (staged) {
+                setPendingRecordings((prev) => [
+                  ...prev,
+                  { recordingId: staged.recordingId, title: staged.title },
+                ]);
+              }
+            }
+          },
+        }
+      : undefined,
+  );
   // Model tier + research toggle for the FIRST comment (the starter) — shared
   // with the floating chat + the in-thread reply composer via <ComposerControls>.
   const controls = useComposerControls(workspaceId);
@@ -163,7 +190,9 @@ export function PageComments({
     // Attachments only feed an AI turn — ignored with AI reply off, where the
     // comment must carry text.
     const hasFiles = aiReply && att.hasReady;
-    if ((!body && !hasFiles) || busy || !aid || att.uploading) return;
+    const attachedRecordingIds = aiReply ? pendingRecordings.map((r) => r.recordingId) : [];
+    const hasRecordings = attachedRecordingIds.length > 0;
+    if ((!body && !hasFiles && !hasRecordings) || busy || !aid || att.uploading || rec.status === "uploading") return;
     const fileIds = hasFiles ? att.fileIds() : [];
     setBusy(true);
     try {
@@ -177,12 +206,15 @@ export function PageComments({
       const built: CommentSeed = {
         message: body,
         fileIds,
+        ...(hasRecordings ? { attachedRecordingIds } : {}),
         model: controls.model,
         researchMode: aiReply ? controls.researchMode : false,
         aiReply,
       };
       setDraft("");
       att.clear();
+      setPendingRecordings([]);
+      rec.dismiss();
       setSeed({ threadId: thread.id, seed: built });
       setExpanded(true);
       // Tell the editor to add the thread to its list so it renders here as the
@@ -291,6 +323,19 @@ export function PageComments({
             {aiReply ? (
               <AttachmentChips attachments={att.attachments} onRemove={att.remove} />
             ) : null}
+            {aiReply && pendingRecordings.length > 0 ? (
+              <div className="mt-1 flex flex-wrap gap-1.5">
+                {pendingRecordings.map((r) => (
+                  <span
+                    key={r.recordingId}
+                    className="inline-flex items-center gap-1 rounded border border-border bg-muted/40 px-2 py-0.5 text-xs text-muted-foreground"
+                  >
+                    <span aria-hidden>◉</span>
+                    {tRec.chatStagedChip.replace("{name}", r.title)}
+                  </span>
+                ))}
+              </div>
+            ) : null}
             <div className="mt-1 flex items-center gap-1.5">
               {aiReply ? (
                 <button
@@ -320,7 +365,12 @@ export function PageComments({
               <button
                 type="button"
                 onClick={() => void post()}
-                disabled={busy || att.uploading || (!draft.trim() && !(aiReply && att.hasReady))}
+                disabled={
+                  busy ||
+                  att.uploading ||
+                  rec.status === "uploading" ||
+                  (!draft.trim() && !(aiReply && (att.hasReady || pendingRecordings.length > 0)))
+                }
                 aria-label={busy ? t.sending : t.send}
                 className="inline-flex size-7 shrink-0 items-center justify-center rounded-full bg-action text-action-foreground transition-colors hover:bg-action/90 disabled:bg-foreground/10 disabled:text-muted-foreground"
               >

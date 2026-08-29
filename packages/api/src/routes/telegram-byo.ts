@@ -94,6 +94,8 @@ type TelegramByoRouteOptions = {
   provider: LLMProvider
   configuredProviders?: import('@use-brian/shared/model-registry').ProviderAvailability
   resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
+  /** Live watch feed (live-work.md §5.2) — threaded by hand at every mount; see ChannelPipelineParams. */
+  publishSessionEvent?: import('../session-event-port.js').PublishSessionEvent
   systemPrompt: string
   tools: Map<string, Tool>
   memoryStore: MemoryStore
@@ -1168,6 +1170,8 @@ type ProcessMessageParams = {
   provider: LLMProvider
   configuredProviders?: import('@use-brian/shared/model-registry').ProviderAvailability
   resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
+  /** Live watch feed (live-work.md §5.2) — threaded by hand at every mount; see ChannelPipelineParams. */
+  publishSessionEvent?: import('../session-event-port.js').PublishSessionEvent
   systemPrompt: string
   tools: Map<string, Tool>
   memoryStore: MemoryStore
@@ -1655,6 +1659,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     provider: params.provider,
     configuredProviders: params.configuredProviders,
     resolveWorkspaceCustomLlm: params.resolveWorkspaceCustomLlm,
+    publishSessionEvent: params.publishSessionEvent,
     systemPrompt: params.systemPrompt,
     tools: params.tools,
     memoryStore: params.memoryStore,

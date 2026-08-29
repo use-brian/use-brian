@@ -25,8 +25,8 @@
  * [COMP:app-web/dock-recorder]
  */
 
-import { useEffect, useId, useRef, useState } from "react";
-import { ChevronDown, Pause, Play, Square, X } from "lucide-react";
+import { createElement, useEffect, useId, useRef, useState } from "react";
+import { Check, ChevronDown, Pause, Play, Square, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
@@ -35,7 +35,13 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Switch } from "@/components/ui/switch";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { captureLabelLane, formatElapsed } from "@/lib/recorder/recorder-gesture";
-import type { DockRecorderApi } from "@/lib/recorder/use-dock-recorder";
+import type { DockRecorderApi, RecorderCaptureSource } from "@/lib/recorder/use-dock-recorder";
+import { useGlobalDockRecorder } from "@/lib/recorder/dock-recorder-bridge";
+import { desktopBridge } from "@/lib/desktop-auth-source";
+import {
+  SearchableSelect,
+  type SearchableSelectItem,
+} from "@/components/ui/searchable-select";
 import type { SpoolSessionMeta } from "@/lib/recorder/recorder-spool";
 
 /** The record-dot glyph — deliberately not a microphone. */
@@ -69,6 +75,78 @@ function LevelMeter({ level }: { level: () => number }) {
       })}
     </span>
   );
+}
+
+/** The window-picker dialog's selection body (the caller reads `onChange`). */
+function WindowSourcePicker({
+  items,
+  initial,
+  onChange,
+  searchPlaceholder,
+}: {
+  items: SearchableSelectItem[];
+  initial: string;
+  onChange: (value: string) => void;
+  searchPlaceholder: string;
+}) {
+  const [value, setValue] = useState(initial);
+  return (
+    <SearchableSelect
+      value={value}
+      onValueChange={(v) => {
+        setValue(v);
+        onChange(v);
+      }}
+      items={items}
+      searchPlaceholder={searchPlaceholder}
+      className="w-full"
+    />
+  );
+}
+
+/**
+ * Desktop specific-window pick: list the shell's shareable windows and let
+ * the user confirm one before the capture arms. Resolves the picked
+ * desktopCapturer source id, or null on cancel / no picker / no windows.
+ * The body copy is deliberately honest about audio scope: Chromium/Electron
+ * loopback is whole-system output, so a window pick still records ALL
+ * computer audio, never only that app's (per-application audio isolation is
+ * not exposed by the platform).
+ */
+export async function pickCaptureWindow(t: {
+  windowPickerTitle: string;
+  windowPickerBody: string;
+  windowPickerAction: string;
+  windowPickerEmpty: string;
+  liveDestinationSearch: string;
+}): Promise<string | null> {
+  const sources = await desktopBridge()
+    ?.listCaptureSources?.("window")
+    .catch(() => null);
+  if (!sources || sources.length === 0) {
+    // Nothing shareable: say so instead of silently doing nothing.
+    await confirmDialog({
+      title: t.windowPickerTitle,
+      description: t.windowPickerEmpty,
+      confirmLabel: t.windowPickerAction,
+    });
+    return null;
+  }
+  let chosen = sources[0].id;
+  const ok = await confirmDialog({
+    title: t.windowPickerTitle,
+    description: t.windowPickerBody,
+    confirmLabel: t.windowPickerAction,
+    content: createElement(WindowSourcePicker, {
+      items: sources.map((source) => ({ value: source.id, label: source.name })),
+      initial: chosen,
+      onChange: (v: string) => {
+        chosen = v;
+      },
+      searchPlaceholder: t.liveDestinationSearch,
+    }),
+  });
+  return ok ? chosen : null;
 }
 
 /**
@@ -185,6 +263,45 @@ export function DockRecorderButton({
             className="w-[240px] p-3"
           >
             <div className="flex flex-col gap-3">
+              {rec.screenCaptureAvailable ? (
+                <div className="flex flex-col gap-1" role="radiogroup" aria-label={t.captureSourceLabel}>
+                  <span className="text-xs text-muted-foreground">{t.captureSourceLabel}</span>
+                  {(
+                    [
+                      { source: "mic" as RecorderCaptureSource, label: t.captureSourceMic },
+                      {
+                        source: "screen" as RecorderCaptureSource,
+                        // A desktop shell records the entire (primary) display;
+                        // a browser opens its own picker, where the user may
+                        // choose a screen, window, or tab.
+                        label: rec.computerAudioAvailable
+                          ? t.captureSourceScreen
+                          : t.captureSourceScreenBrowser,
+                      },
+                      ...(rec.windowPickerAvailable
+                        ? [{ source: "window" as RecorderCaptureSource, label: t.captureSourceWindow }]
+                        : []),
+                    ]
+                  ).map(({ source, label }) => (
+                    <button
+                      key={source}
+                      type="button"
+                      role="radio"
+                      aria-checked={rec.captureSource === source}
+                      onClick={() => rec.setCaptureSource(source)}
+                      className={cn(
+                        "flex items-center justify-between gap-2 rounded px-1.5 py-1 text-left text-sm transition-colors hover:bg-accent",
+                        rec.captureSource === source ? "text-foreground" : "text-muted-foreground",
+                      )}
+                    >
+                      <span className="min-w-0 truncate">{label}</span>
+                      {rec.captureSource === source ? (
+                        <Check className="size-3.5 shrink-0" aria-hidden />
+                      ) : null}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
               {rec.computerAudioAvailable ? (
                 <div className="flex items-center justify-between gap-4">
                   <label
@@ -244,11 +361,20 @@ export function DockRecorderStrip({ rec, className }: { rec: DockRecorderApi; cl
   const finishing = rec.phase.kind === "finishing";
   const paused = rec.phase.kind === "latched" && rec.phase.paused;
   const latched = rec.phase.kind === "latched";
+  const screenCapture = rec.capturesScreen();
   const label = finishing
     ? t.finishing
-    : rec.livePageEnabled || captureLabelLane(elapsed) === "recording"
+    : rec.livePageEnabled || captureLabelLane(elapsed, undefined, screenCapture) === "recording"
       ? t.meetingRecording
       : t.voiceMessage;
+  const systemAudio = rec.includesSystemAudio();
+  const sourceChip = screenCapture
+    ? systemAudio
+      ? t.screenMicComputerAudio
+      : t.screenAndMic
+    : systemAudio
+      ? t.micAndComputerAudio
+      : null;
   return (
     <div
       role="status"
@@ -262,9 +388,9 @@ export function DockRecorderStrip({ rec, className }: { rec: DockRecorderApi; cl
         className={cn("size-2 shrink-0 rounded-full bg-destructive", !paused && !finishing && "animate-pulse")}
       />
       <span className="min-w-0 truncate text-xs text-foreground/80">{label}</span>
-      {rec.includesSystemAudio() ? (
+      {sourceChip ? (
         <span className="hidden shrink-0 text-[10px] text-muted-foreground sm:inline">
-          {t.micAndComputerAudio}
+          {sourceChip}
         </span>
       ) : null}
       {!finishing ? (
@@ -354,9 +480,11 @@ export function DockRecorderNotice({ rec, className }: { rec: DockRecorderApi; c
                 ? t.micDenied
                 : notice.kind === "systemAudioFailed"
                   ? t.systemAudioFailed
-                  : notice.kind === "voiceFailed"
-                    ? t.voiceFailed
-                    : t.captureFailed;
+                  : notice.kind === "screenCaptureFailed"
+                    ? t.screenCaptureFailed
+                    : notice.kind === "voiceFailed"
+                      ? t.voiceFailed
+                      : t.captureFailed;
   return (
     <div
       role="status"
@@ -431,6 +559,36 @@ export function DockRecorderRecovery({ rec, className }: { rec: DockRecorderApi;
           </button>
         </div>
       ))}
+    </div>
+  );
+}
+
+/**
+ * Sticky fallback cluster for surfaces that hide the chat dock WITHOUT
+ * rehosting the recorder in their own chrome (currently the Office editor).
+ * Renders the full recorder stack (recovery banner, notice, live strip,
+ * floating record button) bottom-right off the ONE controller the hidden
+ * dock still owns, so hiding the dock can never cost the workspace its
+ * record affordance. Surfaces with replacement chat chrome (Feed, the Skill
+ * iteration rail, the Chat app composer) integrate the same pieces inline
+ * instead and must NOT also mount this. Renders nothing until the dock
+ * publishes its controller. Every chat-dock suppression holder is held to
+ * one of the two options by `dock-recorder-coverage.test.ts`.
+ */
+export function DockRecorderFallback({ className }: { className?: string }) {
+  const rec = useGlobalDockRecorder();
+  if (!rec) return null;
+  return (
+    <div
+      className={cn(
+        "fixed right-4 bottom-4 z-50 flex flex-col items-end gap-2",
+        className,
+      )}
+    >
+      <DockRecorderRecovery rec={rec} />
+      <DockRecorderNotice rec={rec} />
+      <DockRecorderStrip rec={rec} />
+      <DockRecorderButton rec={rec} variant="floating" />
     </div>
   );
 }

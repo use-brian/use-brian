@@ -28,6 +28,7 @@ import { OfficeTopbar } from "./office-topbar";
 import { cn } from "@/lib/utils";
 import { TemplateRoutingInspector, type TemplateRoutingInspectorState } from "./template-routing-inspector";
 import { chatDockSuppression } from "@/lib/chat-dock-suppress";
+import { DockRecorderFallback } from "@/components/chrome/dock-recorder";
 import { OfficeHistoryControls } from "./office-history-controls";
 import { OfficeHistory } from "./history/office-history";
 import { OfficeSharing } from "./sharing/office-sharing";
@@ -363,6 +364,10 @@ export function OfficeEditorShell({ workspaceId, artifactId }: { workspaceId: st
         </aside>
       </div>
       {presentOpen && live?.snapshot.family === "presentation" ? <PresentationPresenter snapshot={live.snapshot} onClose={() => setPresentOpen(false)} /> : null}
+      {/* This shell suppresses the chat dock and has no replacement chat, so the
+          workspace recorder rides the sticky fallback cluster. Hidden while
+          presenting - the presenter is a deliberately chrome-free surface. */}
+      {!presentOpen ? <DockRecorderFallback /> : null}
     </div>
   );
 }

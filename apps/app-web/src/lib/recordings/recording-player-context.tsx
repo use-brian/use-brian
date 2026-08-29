@@ -28,6 +28,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { createPortal } from "react-dom";
 import { getRecordingMediaUrl } from "@/lib/api/recordings";
 
 export type RecordingPlayerApi = {
@@ -61,6 +62,19 @@ export type RecordingPlayerApi = {
   showTranscriptAt: (ms: number) => void;
   /** Dismiss the transcript card. */
   clearTranscriptFocus: () => void;
+  /**
+   * True once the minted media reports a `video/*` mime. The media element is
+   * ONE `<video>` either way (a video element plays audio-only sources fine);
+   * this tells surfaces whether a visible picture exists to stage.
+   */
+  isVideo: boolean;
+  /**
+   * Register the DOM node the video picture should render INTO (the
+   * `RecordingVideoStage` container). The provider portals its media element
+   * there, so a citation seek moves the SAME element the stage displays — the
+   * frame follows the timestamp by construction. Null unregisters (unmount).
+   */
+  registerVideoStage: (el: HTMLElement | null) => void;
 };
 
 const NOOP: RecordingPlayerApi = {
@@ -75,6 +89,8 @@ const NOOP: RecordingPlayerApi = {
   transcriptFocus: null,
   showTranscriptAt: () => {},
   clearTranscriptFocus: () => {},
+  isVideo: false,
+  registerVideoStage: () => {},
 };
 
 const Ctx = createContext<RecordingPlayerApi>(NOOP);
@@ -106,11 +122,13 @@ export function RecordingPlayerProvider({
    * passes the public source-scoped fetcher instead — same `{url, expiresAt}`
    * contract, so the refresh-before-expiry machinery is shared.
    */
-  mintMediaUrl?: () => Promise<{ url: string; expiresAt: string }>;
+  mintMediaUrl?: () => Promise<{ url: string; expiresAt: string; mime?: string }>;
   children: ReactNode;
 }) {
-  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioRef = useRef<HTMLVideoElement | null>(null);
   const [url, setUrl] = useState<string | null>(null);
+  const [mediaMime, setMediaMime] = useState<string | null>(null);
+  const [videoStage, setVideoStage] = useState<HTMLElement | null>(null);
   const [expiresAt, setExpiresAt] = useState<number | null>(null);
   const [currentMs, setCurrentMs] = useState(0);
   const [mediaDurationMs, setMediaDurationMs] = useState(0);
@@ -127,6 +145,7 @@ export function RecordingPlayerProvider({
         : await getRecordingMediaUrl(recordingId);
       setUrl(media.url);
       setExpiresAt(Date.parse(media.expiresAt));
+      if (media.mime !== undefined) setMediaMime(media.mime);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -183,6 +202,8 @@ export function RecordingPlayerProvider({
     setTranscriptFocus({ ms, nonce: focusNonce.current });
   }, []);
   const clearTranscriptFocus = useCallback(() => setTranscriptFocus(null), []);
+  const registerVideoStage = useCallback((el: HTMLElement | null) => setVideoStage(el), []);
+  const isVideo = mediaMime?.startsWith("video/") ?? false;
 
   const api = useMemo<RecordingPlayerApi>(
     () => ({
@@ -199,6 +220,8 @@ export function RecordingPlayerProvider({
       transcriptFocus,
       showTranscriptAt,
       clearTranscriptFocus,
+      isVideo,
+      registerVideoStage,
     }),
     [
       recordingId,
@@ -213,39 +236,73 @@ export function RecordingPlayerProvider({
       transcriptFocus,
       showTranscriptAt,
       clearTranscriptFocus,
+      isVideo,
+      registerVideoStage,
     ],
   );
 
+  // ONE media element for audio and video alike — a `<video>` element plays an
+  // audio-only source exactly as `<audio>` did, and using one element means a
+  // recording's playhead, seek API, and (for video) its picture can never
+  // disagree. When a surface registers a stage and the media is video, the
+  // element PORTALS into the stage; otherwise it stays hidden chrome.
+  const staged = isVideo && videoStage != null;
+  const media = recordingId ? (
+    <video
+      ref={audioRef}
+      {...(url ? { src: url } : {})}
+      preload="metadata"
+      playsInline
+      className={staged ? "h-full w-full object-contain" : "hidden"}
+      onClick={staged ? togglePlay : undefined}
+      onTimeUpdate={(e) => setCurrentMs(e.currentTarget.currentTime * 1000)}
+      onPlay={() => setIsPlaying(true)}
+      onPause={() => setIsPlaying(false)}
+      onLoadedMetadata={(e) => {
+        const d = e.currentTarget.duration;
+        if (Number.isFinite(d)) setMediaDurationMs(d * 1000);
+        const ms = pendingSeekMs.current;
+        if (ms != null) {
+          pendingSeekMs.current = null;
+          seekTo(ms);
+        }
+      }}
+      onError={() => {
+        // Most likely an expired URL (the token outlived the refresh timer —
+        // e.g. the tab slept). Re-mint once and resume where we were.
+        const at = audioRef.current?.currentTime ?? 0;
+        pendingSeekMs.current = at * 1000;
+        void mint();
+      }}
+    />
+  ) : null;
+
   return (
     <Ctx.Provider value={api}>
-      {recordingId ? (
-        <audio
-          ref={audioRef}
-          {...(url ? { src: url } : {})}
-          preload="metadata"
-          className="hidden"
-          onTimeUpdate={(e) => setCurrentMs(e.currentTarget.currentTime * 1000)}
-          onPlay={() => setIsPlaying(true)}
-          onPause={() => setIsPlaying(false)}
-          onLoadedMetadata={(e) => {
-            const d = e.currentTarget.duration;
-            if (Number.isFinite(d)) setMediaDurationMs(d * 1000);
-            const ms = pendingSeekMs.current;
-            if (ms != null) {
-              pendingSeekMs.current = null;
-              seekTo(ms);
-            }
-          }}
-          onError={() => {
-            // Most likely an expired URL (the token outlived the refresh timer —
-            // e.g. the tab slept). Re-mint once and resume where we were.
-            const at = audioRef.current?.currentTime ?? 0;
-            pendingSeekMs.current = at * 1000;
-            void mint();
-          }}
-        />
-      ) : null}
+      {staged && media && videoStage ? createPortal(media, videoStage) : media}
       {children}
     </Ctx.Provider>
+  );
+}
+
+/**
+ * The visible picture for a video recording — the container the provider
+ * portals its media element into. Renders nothing visible for an audio
+ * recording (and unregisters cleanly on unmount), so every surface can mount
+ * it unconditionally above its player bar. Clicking the picture toggles play;
+ * a `[H:MM:SS]` citation click seeks the same element, so the stage lands on
+ * that exact frame.
+ */
+export function RecordingVideoStage({ className }: { className?: string }) {
+  const { isVideo, registerVideoStage } = useRecordingPlayer();
+  return (
+    <div
+      ref={registerVideoStage}
+      className={
+        isVideo
+          ? `aspect-video w-full overflow-hidden rounded-md border border-border bg-black ${className ?? ""}`
+          : "hidden"
+      }
+    />
   );
 }

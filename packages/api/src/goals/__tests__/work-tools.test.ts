@@ -337,3 +337,41 @@ describe('[COMP:goals/work-tools] failure copy — misses carry the discovery po
     expect(data).not.toMatch(/not available in this context/i)
   })
 })
+
+describe('[COMP:goals/work-tools] workTask origin-session stamp (in-chat pursuit)', () => {
+  const UUID = '123e4567-e89b-42d3-a456-426614174000'
+  const armedCtx = (sessionId: string) =>
+    ({ workspaceId: 'w1', userId: 'u1', assistantId: 'a1', sessionId }) as never
+
+  function makeWorkTools() {
+    return createGoalWorkTools({
+      createCompletionWorkflow: vi.fn().mockResolvedValue('wf1'),
+      kickoffGoal: vi.fn(),
+    })
+  }
+
+  it('stamps a UUID chat session onto the goal when arming', async () => {
+    mockGet.mockResolvedValue({ ...GOAL, means: {} } as never)
+    mockUpdate.mockResolvedValue({ ...GOAL, means: { workflowId: 'wf1' } } as never)
+    const r = await makeWorkTools().workTask.execute({ goal_id: 'g1' }, armedCtx(UUID))
+    expect(r.isError).toBeFalsy()
+    expect(mockUpdate).toHaveBeenCalledWith(
+      'g1',
+      expect.objectContaining({ originSessionId: UUID }),
+    )
+  })
+
+  it('stamps nothing for a synthetic workflow-run session id', async () => {
+    mockGet.mockResolvedValue({ ...GOAL, means: {} } as never)
+    mockUpdate.mockResolvedValue({ ...GOAL, means: { workflowId: 'wf1' } } as never)
+    const r = await makeWorkTools().workTask.execute(
+      { goal_id: 'g1' },
+      armedCtx(`workflow_run_${UUID}`),
+    )
+    expect(r.isError).toBeFalsy()
+    expect(mockUpdate).toHaveBeenCalledWith(
+      'g1',
+      expect.not.objectContaining({ originSessionId: expect.anything() }),
+    )
+  })
+})

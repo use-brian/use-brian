@@ -405,12 +405,13 @@ import { createDbWorkspaceFilesStore } from './db/workspace-files-store.js'
 import { createWorkspaceFileUploadsStore } from './db/workspace-file-uploads-store.js'
 import { getWorkspaceFileById } from './db/workspace-files.js'
 import { createGcsFilesClient, type GcsFilesClient } from './files/gcs-client.js'
+import { initLedgerRuntime } from './ledger/runtime.js'
 import { createLocalFilesClient, resolveLocalFilesBaseDir } from './files/local-files-client.js'
 import { localFilesTransferRoutes } from './routes/local-files-transfer.js'
 import { openRecordingsRoutes } from './routes/recordings.js'
 import { recordingLiveRoutes } from './routes/recording-live.js'
 import { createDocGateway } from './doc/doc-gateway.js'
-import { createFilesApi, createSingletonFilesClientResolver, type FilesClientResolver } from './files/files-api.js'
+import { createFilesApi, createSingletonFilesClientResolver, storageLimitBytesForPlan, type FilesClientResolver } from './files/files-api.js'
 import { createChunkedFileUploadService, type ChunkedFileUploadService } from './files/chunked-upload.js'
 import { createSearchFileContentTool } from './files/file-artifact-tools.js'
 import {
@@ -450,6 +451,7 @@ import {
 import { createApprovalDeliveryDispatcher } from './workflow/approval-deliveries.js'
 import { workflowApprovalsRoutes } from './routes/workflow-approvals.js'
 import { approvalsRoutes } from './routes/approvals.js'
+import { liveWorkRoutes } from './routes/live-work.js'
 import {
   workflowsRoutes,
   createValidatedDefinitionEditor,
@@ -516,6 +518,7 @@ import { setKnowledgeEventDispatcher } from './knowledge-event-fanout.js'
 import { setBrandEventDispatcher } from './brand-event-fanout.js'
 import { createRecordingSynthesizer, type RecordingSynthesizeFn } from './synthesis/recording-synthesizer.js'
 import { processOpenRecording } from './recordings/process-recording.js'
+import { createRecordingFrameAnalyzer } from './recordings/frame-analysis.js'
 import { createOpenRecordingProcessWorker } from './recordings/recording-process-worker.js'
 import { getRecording, updateRecording } from './db/recordings-store.js'
 import { mergeEpisodeSourceRef } from './db/episodes-store.js'
@@ -1103,6 +1106,13 @@ export interface BootContext {
   provider: LLMProvider
   /** Workspace-owned text/tool runtime resolver for closed route consumers. */
   resolveWorkspaceCustomLlm: import('./custom-llm-runtime.js').WorkspaceCustomLlmResolver
+  /**
+   * Session live-event bus publish for closed channel routes
+   * (live-work.md §5.2): every `processChannelMessage` caller must pass it
+   * or that edition's turns are invisible to the Live watch pane — the
+   * same threaded-by-hand obligation as `resolveWorkspaceCustomLlm` above.
+   */
+  publishSessionEvent: import('./session-event-port.js').PublishSessionEvent
   /** Standard/background custom runtime, resolved at execution time. */
   resolveBackgroundRuntime: import('./custom-llm-runtime.js').BackgroundRuntimeResolver
   /** Application-provider background model when no workspace runtime exists. */
@@ -1503,7 +1513,16 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         : reason === 'unconfirmed_needs_clarification'
           ? `I tried to work a task but its goal isn't confirmed yet: "${goal.outcome}". Confirm the goal and I'll proceed.`
           : `Goal blocked${reason ? ` (${reason})` : ''}: ${goal.outcome}`
-    await deliverToChannel({ assistantId, userId: goal.createdByUserId, text, channelType: 'web' })
+    // In-chat pursuit: a goal that originated in a chat session also persists
+    // its terminal line back into that transcript, so the conversation records
+    // how the pursuit ended (the notification-session copy still lands).
+    await deliverToChannel({
+      assistantId,
+      userId: goal.createdByUserId,
+      text,
+      channelType: 'web',
+      ...(goal.originSessionId ? { sessionId: goal.originSessionId } : {}),
+    })
   }
   // Structural goal-seeker rollup: when a sub-task closes, complete any
   // task-hosted goal whose `subtasks` done_when is now met (no acting loop, no
@@ -2661,6 +2680,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const calleeExecutor = createCalleeExecutor({
     provider,
     resolveWorkspaceCustomLlm,
+    publishSessionEvent,
     tools: allTools,
     memoryStore,
     // Session-state bridge: a consult that delivers into a user channel reads
@@ -3752,6 +3772,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     const mode = configuredLocalFilesDir ? 'configured self-hosted storage' : 'ephemeral dev fallback'
     console.warn(`[files] GCS_FILES_BUCKET unset — using local-disk file storage at ${localFilesDir} (${mode}).`)
   }
+  // Turn ledger rides the same storage decision as workspace files —
+  // injected here so lanes never re-derive the driver from env.
+  if (filesBlobClient) initLedgerRuntime(filesBlobClient)
   if (localFilesClient) {
     // Signed bearer URLs keep direct browser/connector transfers working without
     // exposing file:// paths. Mount before authenticated /api catch-all guards.
@@ -3815,16 +3838,22 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       return null
     }
     filesResolver = createCachedByoFilesResolver({ lookup: lookupStorageBinding, fallback: defaultFilesResolver })
+    // One plan-derived storage cap shared by both quota gates (fileWrite /
+    // fileAppend and the chunked Work Bench uploads) so they cannot disagree.
+    const storageLimitBytesFor = async (workspaceId: string) =>
+      storageLimitBytesForPlan(await getWorkspacePlan(workspaceId))
     filesApi = createFilesApi({
       resolver: filesResolver,
       store: workspaceFilesStore,
       auditStore: workspaceAuditStore,
+      storageLimitBytesFor,
     })
     chunkedFileUploads = createChunkedFileUploadService({
       resolver: filesResolver,
       filesStore: workspaceFilesStore,
       uploadsStore: workspaceFileUploadsStore,
       auditStore: workspaceAuditStore,
+      storageLimitBytesFor,
     })
     // Effective allow/ask/block for a files tool — the same L1 (app-level
     // sentinel) + L2 (per-assistant) strictest-wins resolution the Studio /
@@ -5531,6 +5560,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       pageActionsStore.listForWorkflow(actorUserId, workspaceId, workflowId),
   }
   app.use('/api', requireAuth(env.JWT_SECRET), workflowsRoutes(workflowsRouteOptions))
+
+  // Live — the all-activity roster (docs/architecture/features/live-work.md
+  // §3): sessions + workflow runs, tiered server-side per caller. Read-only.
+  app.use('/api', requireAuth(env.JWT_SECRET), liveWorkRoutes())
   // Resolves the late-bound editor the skill-approvals mount above wraps —
   // refinement applies + attach-offer writes now share the builder's exact
   // validation bar (schema, page anchors, dependency preflight).
@@ -7419,6 +7452,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             brainIngestor: brainEpisodeIngestor,
             filesApi,
             synthesize: recordingSynthesize,
+            // Video keyframe analysis rides whichever vision-capable media
+            // backend the box holds (google / dashscope / the deployment's own
+            // chat provider). The unavailable fallback is deliberately NOT
+            // used: no vision capability means the step is skipped, not failed.
+            analyzeFrames: createRecordingFrameAnalyzer({
+              backend: () => selectKeyedMediaBackend() ?? providerMediaBackend,
+            }),
           })
           await updateRecording(job.recordingId, {
             status: 'processed',
@@ -7702,6 +7742,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     app,
     provider,
     resolveWorkspaceCustomLlm,
+    publishSessionEvent,
     resolveBackgroundRuntime,
     get backgroundModel() { return backgroundModelFor(configuredProviders) },
     get extractionModel() {
@@ -7911,6 +7952,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             provider,
             configuredProviders,
             resolveWorkspaceCustomLlm,
+            publishSessionEvent,
             systemPrompt: LAYER_1_SYSTEM_PROMPT,
             tools: allTools,
             memoryStore,
@@ -7980,7 +8022,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     if (integrationStore) {
       app.use('/webhook/telegram', telegramByoRoutes({
         backgroundModel,
-        provider, configuredProviders, resolveWorkspaceCustomLlm, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
+        provider, configuredProviders, resolveWorkspaceCustomLlm, publishSessionEvent, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
         memoryStore, usageStore, checkCreditBudget: ports.checkCreditBudget,
         appUrl: env.APP_URL, apiUrl: env.API_URL, integrationStore,
         linkedAccountStore, ownerPairing: {
@@ -8002,7 +8044,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         backgroundModel,
         ingestChannelMediaRef: channelHosts.slackIngestChannelMediaRef,
         artifactPromoter,
-        provider, configuredProviders, resolveWorkspaceCustomLlm, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
+        provider, configuredProviders, resolveWorkspaceCustomLlm, publishSessionEvent, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
         memoryStore, usageStore, checkCreditBudget: ports.checkCreditBudget,
         integrationStore, channelUserStore, linkedAccountStore, linkCodeStore,
         workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
@@ -8016,7 +8058,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       }))
       app.use('/webhook/whatsapp', whatsappCloudRoutes({
         backgroundModel,
-        provider, configuredProviders, resolveWorkspaceCustomLlm, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
+        provider, configuredProviders, resolveWorkspaceCustomLlm, publishSessionEvent, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
         memoryStore, usageStore, checkCreditBudget: ports.checkCreditBudget,
         integrationStore, channelUserStore,
         workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
@@ -8029,7 +8071,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       // docs/architecture/channels/msteams.md.
       app.use('/webhook/msteams', msteamsRoutes({
         backgroundModel,
-        provider, configuredProviders, resolveWorkspaceCustomLlm, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
+        provider, configuredProviders, resolveWorkspaceCustomLlm, publishSessionEvent, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
         memoryStore, usageStore, checkCreditBudget: ports.checkCreditBudget,
         integrationStore, channelUserStore,
         workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
@@ -8044,7 +8086,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         backgroundModel,
           ingestChannelMediaRef: channelHosts.discordIngestChannelMediaRef,
           artifactPromoter,
-          connectorSecret: env.DISCORD_CONNECTOR_SECRET, provider, configuredProviders, resolveWorkspaceCustomLlm, systemPrompt: LAYER_1_SYSTEM_PROMPT,
+          connectorSecret: env.DISCORD_CONNECTOR_SECRET, provider, configuredProviders, resolveWorkspaceCustomLlm, publishSessionEvent, systemPrompt: LAYER_1_SYSTEM_PROMPT,
           tools: allTools, capabilityStore, memoryStore, usageStore,
           checkCreditBudget: ports.checkCreditBudget, integrationStore, channelUserStore,
           workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
@@ -8056,7 +8098,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         app.use('/internal/wechat', wechatRoutes({
           backgroundModel,
           artifactPromoter,
-          connectorSecret: env.WECHAT_CONNECTOR_SECRET, provider, configuredProviders, resolveWorkspaceCustomLlm, systemPrompt: LAYER_1_SYSTEM_PROMPT,
+          connectorSecret: env.WECHAT_CONNECTOR_SECRET, provider, configuredProviders, resolveWorkspaceCustomLlm, publishSessionEvent, systemPrompt: LAYER_1_SYSTEM_PROMPT,
           tools: allTools, capabilityStore, memoryStore, usageStore,
           checkCreditBudget: ports.checkCreditBudget, integrationStore, channelUserStore,
           workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
@@ -8078,6 +8120,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           provider,
           configuredProviders,
           resolveWorkspaceCustomLlm,
+          publishSessionEvent,
           systemPrompt: LAYER_1_SYSTEM_PROMPT,
           tools: allTools,
           capabilityStore,
@@ -8121,7 +8164,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       app.use('/bridge/v1/channels', customChannelBridgeRoutes({
         backgroundModel,
         artifactPromoter,
-        provider, configuredProviders, resolveWorkspaceCustomLlm, systemPrompt: LAYER_1_SYSTEM_PROMPT,
+        provider, configuredProviders, resolveWorkspaceCustomLlm, publishSessionEvent, systemPrompt: LAYER_1_SYSTEM_PROMPT,
         tools: allTools, capabilityStore, memoryStore, usageStore,
         checkCreditBudget: ports.checkCreditBudget, integrationStore, customChannelStore, channelUserStore,
         workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,

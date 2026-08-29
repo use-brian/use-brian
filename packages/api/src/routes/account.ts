@@ -374,6 +374,15 @@ export function accountRoutes(options: AccountRouteOptions = {}): Router {
     }
 
     try {
+      // Erasure-class path (privacy-controls): the user asked for these
+      // memories GONE, so no brain-history before-image is captured, and
+      // any copies earlier destructive mutations parked in the version
+      // sidecar are wiped to tombstones below (the applyHardPurge rule).
+      const doomedIds = await queryWithRLS<{ id: string }>(
+        userId,
+        `SELECT id FROM memories WHERE user_id = $1`,
+        [userId],
+      )
       // RLS double-scopes by user_id, but we still pass the predicate
       // explicitly so the DELETE is obvious on inspection.
       const mem = await queryWithRLS(
@@ -381,6 +390,14 @@ export function accountRoutes(options: AccountRouteOptions = {}): Router {
         `DELETE FROM memories WHERE user_id = $1`,
         [userId],
       )
+      if (doomedIds.rows.length > 0) {
+        await query(
+          `UPDATE brain_row_versions
+              SET before_image = NULL, erased_at = now()
+            WHERE primitive = 'memory' AND row_id = ANY($1::uuid[]) AND erased_at IS NULL`,
+          [doomedIds.rows.map((r) => r.id)],
+        )
+      }
       const souls = await queryWithRLS(
         userId,
         `DELETE FROM user_souls WHERE user_id = $1`,

@@ -156,6 +156,7 @@ export const WORKSPACE_SURFACES = [
   "recordings",
   "inbox",
   "shopify",
+  "live",
 ] as const;
 
 export type WorkspaceSurface = (typeof WORKSPACE_SURFACES)[number];

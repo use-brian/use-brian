@@ -3,6 +3,8 @@ import { findOrCreateUser, getDefaultAssistant, getUserAssistant, getUserProfile
 import { addSessionMessage, createWorkspaceChatSession, findSessionByChannel, findSessionById, getSessionMessageById, getSessionMessages, isSharedChatSession, rebindSessionAssistant, renameSession, updateSessionMessageText } from '../db/sessions.js'
 import { mayAssistantAnswerInRoom } from './_room-binding.js'
 import { query } from '../db/client.js'
+import { getTurnTrace } from '../ledger/turn-trace.js'
+import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { resolveUser } from './route-helpers.js'
 import { getWorkspaceRoleSystem, getWorkspaceMembershipWithClearanceSystem } from '../db/workspace-store.js'
 import { canRead, type Sensitivity } from '@use-brian/core'
@@ -36,6 +38,7 @@ import {
 } from '../db/session-pins-store.js'
 import { resolveSessionPinLabels } from '../resolve-session-pins.js'
 import { guestAuthorNameForSession, guestSenderProfile } from '../db/guest-comment-store.js'
+import { decideSessionRead } from '../session-read-access.js'
 import { COMMENT_THREAD_CHANNEL_TYPE } from '../db/comment-thread-store.js'
 
 /** A session whose read-access we gate (the subset of fields the gate reads). */
@@ -58,30 +61,36 @@ type GatedSession = {
  * path enforces the same rule as the reads (WS3: `findSessionById` did no
  * per-user check, so a member of a shared primary assistant could resume
  * another member's private session by id).
+ *
+ * The decision itself is the pure `decideSessionRead`
+ * (`../session-read-access.ts`), shared with the Live roster's tiering so
+ * the gate and the roster cannot drift; this wrapper only resolves the
+ * async facts (assistant → workspace, caller → membership clearance).
  */
 export async function gateSessionRead(
   jwtUserId: string,
   session: GatedSession,
 ): Promise<{ status: number; error: string } | null> {
+  let assistantWorkspaceId: string | null = null
+  let membershipClearance: 'public' | 'internal' | 'confidential' | null = null
   if (session.visibility === 'workspace' || session.mode === 'draft') {
     const teamRow = await query<{ workspaceId: string | null }>(
       `SELECT workspace_id AS "workspaceId" FROM assistants WHERE id = $1`,
       [session.assistantId],
     )
-    const workspaceId = teamRow.rows[0]?.workspaceId
-    if (!workspaceId) return { status: 403, error: 'Draft session is not team-owned' }
-    const membership = await getWorkspaceMembershipWithClearanceSystem(jwtUserId, workspaceId)
-    if (!membership) return { status: 403, error: 'Not a member of this team' }
-    if (
-      session.effectiveClearance &&
-      !canRead(membership.clearance, session.effectiveClearance as 'public' | 'internal' | 'confidential')
-    ) {
-      return { status: 403, error: 'Insufficient clearance' }
+    assistantWorkspaceId = teamRow.rows[0]?.workspaceId ?? null
+    if (assistantWorkspaceId) {
+      const membership = await getWorkspaceMembershipWithClearanceSystem(jwtUserId, assistantWorkspaceId)
+      membershipClearance = membership?.clearance ?? null
     }
-    return null
   }
-  if (session.userId !== jwtUserId) return { status: 403, error: 'Forbidden' }
-  return null
+  const decision = decideSessionRead({
+    callerUserId: jwtUserId,
+    session,
+    assistantWorkspaceId,
+    membershipClearance,
+  })
+  return decision.readable ? null : { status: decision.status, error: decision.error }
 }
 
 /**
@@ -254,6 +263,18 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       const rawOrigin = typeof req.query.appOrigin === 'string' ? req.query.appOrigin : null
       const appOrigin = rawOrigin && (KNOWN_ORIGINS as readonly string[]).includes(rawOrigin) ? rawOrigin : null
 
+      // `scope=workspace` — list the caller's own sessions across EVERY
+      // assistant in the workspace instead of one assistant's. The doc dock's
+      // resume uses it: its personal thread is per-turn addressable
+      // (chat-app.md → "Choosing an assistant" → the doc-dock bullet), so
+      // the thread's BOUND assistant is just whoever founded it and a
+      // reload must re-attach the latest doc thread regardless of the
+      // current pick. Requires `workspaceId` (the primary resolution above
+      // is the membership check); every other filter below is unchanged —
+      // still owner-visibility, still the caller's own rows.
+      const workspaceScope =
+        req.query.scope === 'workspace' && Boolean(requestedWorkspaceId)
+
       // Hide feed-web's single-thread surfaces from the main web sidebar:
       // post-drafting sessions (`mode='draft'`) and the sticky tuning /
       // per-draft-iteration channels documented in
@@ -266,15 +287,19 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       const result = await query<{
         id: string; title: string | null; channelId: string;
         lastActiveAt: Date; status: string; appOrigin: string | null
+        assistantId: string
         contextGroupId: string | null; contextProjectId: string | null
       }>(
         `SELECT s.id, s.title, s.channel_id as "channelId",
                 s.last_active_at as "lastActiveAt", s.status,
                 s.app_origin as "appOrigin",
+                s.assistant_id as "assistantId",
                 s.context_group_id as "contextGroupId",
                 s.context_project_id as "contextProjectId"
          FROM sessions s
-         WHERE s.assistant_id = $1 AND s.user_id = $2
+         WHERE ${workspaceScope
+           ? `s.assistant_id IN (SELECT a.id FROM assistants a WHERE a.workspace_id = $1)`
+           : `s.assistant_id = $1`} AND s.user_id = $2
            -- Enumerations list only owner-scoped sessions. Workspace-shared
            -- rows (doc threads / drafts, migration 223) are reached by id
            -- via their surface, never by this list — the channel_type filter
@@ -288,7 +313,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
            AND ($3::text IS NULL OR s.app_origin = $3 OR s.app_origin IS NULL)
          ORDER BY s.last_active_at DESC
          LIMIT 50`,
-        [assistant.id, user.id, appOrigin],
+        [workspaceScope ? requestedWorkspaceId : assistant.id, user.id, appOrigin],
       )
 
       res.json(result.rows.map((s) => ({
@@ -300,6 +325,10 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         // splits on it — chat-origin rows are "Chats", the rest are the
         // dock's ambient threads under "Other conversations".
         appOrigin: s.appOrigin,
+        // The session's BOUND assistant. Under `scope=workspace` rows span
+        // assistants, so the caller needs it; on the per-assistant path it
+        // simply echoes the requested id.
+        assistantId: s.assistantId,
         contextGroupId: s.contextGroupId,
         contextProjectId: s.contextProjectId,
       })))
@@ -847,6 +876,82 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
     } catch (err) {
       console.error('Session delete error:', err)
       res.status(500).json({ error: 'Failed to delete session' })
+    }
+  })
+
+  // ── Turn trace (the audit read model; plan §9) ────────────────
+  // Post-epoch turns resolve their full turn_events trace; pre-epoch
+  // turns compose a best-effort legacy view from session_messages +
+  // usage_tracking (fidelity: 'legacy', permanent - never backfilled).
+  // Read access = session read access (gateSessionRead), and the trace
+  // must belong to the session in the URL - a member of one session can
+  // never walk another session's traces by message-id guessing.
+  router.get('/:id/turns/:messageId/trace', async (req, res) => {
+    try {
+      const jwtUserId = (req as { userId?: string }).userId
+      if (!jwtUserId) {
+        res.status(401).json({ error: 'Unauthorized' })
+        return
+      }
+      const session = await findSessionById(req.params.id)
+      if (!session) {
+        res.status(404).json({ error: 'Session not found' })
+        return
+      }
+      const denied = await gateSessionRead(jwtUserId, session)
+      if (denied) {
+        res.status(denied.status).json({ error: denied.error })
+        return
+      }
+      const trace = await getTurnTrace(req.params.messageId)
+      if (!trace || trace.sessionId !== req.params.id) {
+        res.status(404).json({ error: 'No trace for this turn' })
+        return
+      }
+      res.json(trace)
+    } catch (err) {
+      console.error('[sessions] turn trace failed:', err)
+      res.status(500).json({ error: 'Failed to load turn trace' })
+    }
+  })
+
+  // Ledger payload fetch - the ONLY content path (D1: operators see shape
+  // and pointers; this member-gated route is where bytes come out).
+  router.get('/:id/turns/payloads/:hash', async (req, res) => {
+    try {
+      const jwtUserId = (req as { userId?: string }).userId
+      if (!jwtUserId) {
+        res.status(401).json({ error: 'Unauthorized' })
+        return
+      }
+      const session = await findSessionById(req.params.id)
+      if (!session) {
+        res.status(404).json({ error: 'Session not found' })
+        return
+      }
+      const denied = await gateSessionRead(jwtUserId, session)
+      if (denied) {
+        res.status(denied.status).json({ error: denied.error })
+        return
+      }
+      const ws = await query<{ workspace_id: string | null }>(
+        `SELECT workspace_id FROM assistants WHERE id = $1`,
+        [session.assistantId],
+      )
+      const workspaceId = ws.rows[0]?.workspace_id ?? null
+      const payload = await getLedgerPayloadStore().get(workspaceId, req.params.hash)
+      if (!payload) {
+        res.status(404).json({ error: 'Unknown payload' })
+        return
+      }
+      if ('erased' in payload) {
+        res.status(410).json({ erased: true })
+        return
+      }
+      res.type(payload.mediaType).send(payload.content)
+    } catch (err) {
+      console.error('[sessions] payload fetch failed:', err)
+      res.status(500).json({ error: 'Failed to load payload' })
     }
   })
 

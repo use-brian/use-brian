@@ -32,6 +32,10 @@ export type GoalToolOptions = {
 }
 
 const idShape = z.string().uuid()
+
+/** Real chat sessions are UUIDs; workflow iterations carry synthetic
+ *  `workflow_run_<uuid>` ids that must never be stamped as a goal's origin. */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const hostTypeEnum = z.enum([...GOAL_HOST_TYPES] as [GoalHostType, ...GoalHostType[]])
 const statusEnum = z.enum([...GOAL_STATUSES] as [GoalStatus, ...GoalStatus[]])
 
@@ -83,6 +87,10 @@ export function createGoalTools(store: GoalStore, opts?: GoalToolOptions): { set
         means: input.workflow_id ? { workflowId: input.workflow_id } : {},
         budget: { maxIterations: input.max_iterations, maxSpend: input.max_spend, deadline: input.deadline ?? null },
         createdByUserId: context.userId,
+        // In-chat pursuit anchor (mig 481). Workflow iterations run with a
+        // synthetic `workflow_run_<uuid>` session id — only a real chat
+        // session (UUID-shaped) is a transcript that can render the goal.
+        originSessionId: UUID_RE.test(context.sessionId) ? context.sessionId : null,
         contextGroupId: context.activeGroupId ?? null,
         contextProjectId: context.activeProjectId ?? null,
       })

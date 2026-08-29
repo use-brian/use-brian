@@ -43,7 +43,7 @@ import Link from "next/link";
 import { formatStamp } from "@use-brian/shared";
 import { useT } from "@/lib/i18n/client";
 import { promptDialog } from "@/components/ui/prompt-dialog";
-import { useRecordingPlayer } from "@/lib/recordings/recording-player-context";
+import { RecordingVideoStage, useRecordingPlayer } from "@/lib/recordings/recording-player-context";
 import {
   RECORDING_PARTICIPANTS_UPDATED_EVENT,
   type RecordingParticipantsUpdatedDetail,
@@ -298,6 +298,8 @@ export function RecordingChrome({
         </section>
       ) : (
         <>
+          {/* Visible only for a video recording; citation seeks land on this frame. */}
+          <RecordingVideoStage />
           <RecordingPlayerBar title={title} className="sticky top-0 z-10" />
 
           {/* Always open — the reason someone opens a meeting page. */}

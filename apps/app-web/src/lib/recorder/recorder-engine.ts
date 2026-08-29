@@ -41,6 +41,14 @@ const LIVE_TRANSCRIPT_WINDOW_MS = 30_000;
  */
 const AUDIO_BITS_PER_SECOND = 64_000;
 
+/**
+ * Explicit screen-content video bitrate. VP9 at ~1 Mbps keeps a 1080p
+ * screencast (slides, demos, text) readable while bounding a 2-hour capture
+ * near ~950 MB of spool/upload; camera-quality fidelity is not the goal —
+ * the frames feed visual analysis and a seek-to-moment player.
+ */
+const VIDEO_BITS_PER_SECOND = 1_000_000;
+
 type CaptureResult = { blob: Blob; mime: string; durationMs: number };
 
 export interface RecorderEngine {
@@ -50,6 +58,8 @@ export interface RecorderEngine {
   level(): number;
   /** True when the recorded track contains both mic and computer playback. */
   includesSystemAudio(): boolean;
+  /** True when the capture records a screen/window video track. */
+  capturesVideo(): boolean;
   paused(): boolean;
   pause(): void;
   resume(): void;
@@ -86,6 +96,10 @@ export async function createRecorderEngine(opts?: {
   onUnexpectedEnd?: () => void;
   /** Advertised only by new macOS/Windows desktop shells. */
   includeSystemAudio?: boolean;
+  /** Record the screen/window video track alongside the audio. */
+  captureScreen?: boolean;
+  /** Browser screen capture: mix display audio when granted, absence is ordinary. */
+  opportunisticDisplayAudio?: boolean;
   /** Optional provisional transcript lane; the durable recorder stays authoritative. */
   onLiveWindow?: (window: {
     blob: Blob;
@@ -98,17 +112,28 @@ export async function createRecorderEngine(opts?: {
 }): Promise<RecorderEngine> {
   const captureAudio = await acquireCaptureAudio({
     includeSystemAudio: opts?.includeSystemAudio === true,
+    captureScreen: opts?.captureScreen === true,
+    opportunisticDisplayAudio: opts?.opportunisticDisplayAudio === true,
   });
   const stream = captureAudio.recordingStream;
+  const capturesVideo = captureAudio.capturesVideo;
   const isSupported =
     opts?.isSupported ??
     ((m: string) => typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported(m));
-  const mimeType = pickRecorderMime(isSupported);
+  const mimeType = pickRecorderMime(isSupported, { video: capturesVideo });
+  const fallbackMime = capturesVideo ? "video/webm" : "audio/webm";
+  // The rolling live-transcript recorder stays AUDIO-ONLY even for a screen
+  // capture: its 30-second windows feed the short-audio transcription backend
+  // and the audio-window finalize fallback, both of which consume audio
+  // containers. Video rides only the durable lossless recorder.
+  const liveStream = capturesVideo ? new MediaStream(stream.getAudioTracks()) : stream;
+  const liveMime = capturesVideo ? pickRecorderMime(isSupported) : mimeType;
   let recorder: MediaRecorder;
   try {
     recorder = new MediaRecorder(stream, {
       ...(mimeType ? { mimeType } : {}),
       audioBitsPerSecond: AUDIO_BITS_PER_SECOND,
+      ...(capturesVideo ? { videoBitsPerSecond: VIDEO_BITS_PER_SECOND } : {}),
     });
   } catch (err) {
     captureAudio.inputStreams.forEach((input) => input.getTracks().forEach((track) => track.stop()));
@@ -126,7 +151,9 @@ export async function createRecorderEngine(opts?: {
     if (!closed) opts?.onUnexpectedEnd?.();
   };
   captureAudio.inputStreams.forEach((input) => {
-    input.getAudioTracks().forEach((track) => track.addEventListener("ended", notifyUnexpectedEnd));
+    // ALL tracks: a screen capture dies through its VIDEO track too (the
+    // browser's own "Stop sharing" bar ends it without touching audio).
+    input.getTracks().forEach((track) => track.addEventListener("ended", notifyUnexpectedEnd));
   });
   recorder.onerror = notifyUnexpectedEnd;
 
@@ -186,8 +213,8 @@ export async function createRecorderEngine(opts?: {
     liveParts = [];
     liveWindowStartedAt = elapsedMs();
     liveRemainingMs = opts.liveWindowMs ?? LIVE_TRANSCRIPT_WINDOW_MS;
-    const rolling = new MediaRecorder(stream, {
-      ...(mimeType ? { mimeType } : {}),
+    const rolling = new MediaRecorder(liveStream, {
+      ...(liveMime ? { mimeType: liveMime } : {}),
       audioBitsPerSecond: AUDIO_BITS_PER_SECOND,
     });
     liveRecorder = rolling;
@@ -196,7 +223,7 @@ export async function createRecorderEngine(opts?: {
     };
     rolling.onstop = () => {
       const endMs = elapsedMs();
-      const mime = rolling.mimeType || mimeType || "audio/webm";
+      const mime = rolling.mimeType || liveMime || "audio/webm";
       enqueueLiveWindow(new Blob(liveParts, { type: mime }), mime, liveWindowStartedAt, endMs);
       liveParts = [];
       if (!closed && !liveCancelled) startLiveWindow();
@@ -308,6 +335,7 @@ export async function createRecorderEngine(opts?: {
       return Math.min(1, Math.sqrt(sum / levelBuf.length) * 3);
     },
     includesSystemAudio: () => captureAudio.includesSystemAudio,
+    capturesVideo: () => capturesVideo,
     paused: () => pausedSince !== null,
     pause() {
       if (recorder.state === "recording") {
@@ -344,7 +372,7 @@ export async function createRecorderEngine(opts?: {
       spoolId = meta.id;
       const full: SpoolSessionMeta = {
         ...meta,
-        mime: recorder.mimeType || mimeType || "audio/webm",
+        mime: recorder.mimeType || mimeType || fallbackMime,
         elapsedMs: elapsedMs(),
         chunkCount: 0,
         updatedAt: Date.now(),
@@ -359,7 +387,7 @@ export async function createRecorderEngine(opts?: {
       return new Promise<CaptureResult>((resolve) => {
         const durationMs = elapsedMs();
         const finish = () => {
-          const mime = recorder.mimeType || mimeType || "audio/webm";
+          const mime = recorder.mimeType || mimeType || fallbackMime;
           release();
           resolve({ blob: new Blob(chunks, { type: mime }), mime, durationMs });
         };

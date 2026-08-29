@@ -117,6 +117,16 @@ export function createMemoryRetractionStore(): MemoryRetractionRepository {
           `DELETE FROM memories WHERE id = $1 AND workspace_id = $2`,
           [input.memoryId, input.workspaceId],
         )
+        // Erasure cascade (brain-history §7): a purge must also wipe any
+        // content copies earlier destructive mutations parked in the
+        // version sidecar - rows stay as tombstones (explicit erased
+        // marker), content goes.
+        await client.query(
+          `UPDATE brain_row_versions
+              SET before_image = NULL, erased_at = now()
+            WHERE primitive = 'memory' AND row_id = $1 AND erased_at IS NULL`,
+          [input.memoryId],
+        )
         await client.query('COMMIT')
       } catch (err) {
         await client.query('ROLLBACK').catch(() => {})

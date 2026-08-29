@@ -243,6 +243,35 @@ describe('[COMP:api/auth-email-request] POST /auth/email/request-link', () => {
     expect(calls[0]?.locale).toBe('zh')
   })
 
+  it('accepts zh-CN as an explicit locale and negotiates it from Accept-Language', async () => {
+    const calls: Array<Parameters<MagicLinkStore['create']>[0]> = []
+    const store = makeStore({
+      create: async (input) => {
+        calls.push(input)
+        return { token: 't', code: '123456', expiresAt: new Date() }
+      },
+    })
+    const smtp = makeSmtp()
+    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://usebrian.ai' })
+
+    await request(app)
+      .post('/auth/email/request-link')
+      .send({ email: 'a@b.com', locale: 'zh-CN' })
+    expect(calls[0]?.locale).toBe('zh-CN')
+
+    await request(app)
+      .post('/auth/email/request-link')
+      .set('Accept-Language', 'zh-CN,zh;q=0.9')
+      .send({ email: 'b@b.com' })
+    expect(calls[1]?.locale).toBe('zh-CN')
+
+    await request(app)
+      .post('/auth/email/request-link')
+      .set('Accept-Language', 'zh-TW,zh;q=0.9')
+      .send({ email: 'c@b.com' })
+    expect(calls[2]?.locale).toBe('zh')
+  })
+
   it('rejects an unallowlisted nextPath silently (no error response)', async () => {
     const calls: Array<Parameters<MagicLinkStore['create']>[0]> = []
     const store = makeStore({

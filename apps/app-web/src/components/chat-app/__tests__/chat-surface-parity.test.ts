@@ -81,6 +81,28 @@ describe("[COMP:app-web/chat-parity] Chat surface parity", () => {
     );
   });
 
+  it("rehosts the global dock recorder while the dock is hidden", () => {
+    // The route hides the ambient dock, so the recorder must ride this
+    // composer instead: button beside the paperclip, strip/notice/recovery
+    // above the box, and short-capture delivery into THIS visible thread.
+    expect(source).toContain("useGlobalDockRecorder()");
+    expect(source).toContain("<DockRecorderButton");
+    expect(source).toContain("<DockRecorderStrip");
+    expect(source).toContain("<DockRecorderNotice");
+    expect(source).toContain("<DockRecorderRecovery");
+    expect(source).toContain(
+      'sendVoiceClip: (fileId) => send({ text: "", fileIds: [fileId] })',
+    );
+    // The hand-off relies on send's dispatched/dropped verdict: a dropped
+    // clip must report false so the recorder keeps the audio.
+    expect(source).toMatch(/pendingQuestion\s*\)\s*\{\s*return false;/);
+    // A files-only voice send paints the voice-note marker, never a blank
+    // bubble.
+    expect(source).toContain(
+      "(!usesComposerTray && turnFileIds.length > 0 ? t.voiceNote : \"\")",
+    );
+  });
+
   it("consumes the Home handoff only after Personal-chat roster validation", () => {
     expect(source).toContain("takeChatHandoff(workspaceId, Date.now())");
     expect(source).toContain("resolveChatHandoffAction({");

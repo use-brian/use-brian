@@ -38,10 +38,12 @@
  * [COMP:app-web/empty-page-landing]
  */
 
-import { useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ArrowUp,
   ArrowUpRight,
+  Check,
+  ChevronDown,
   Clock3,
   LayoutTemplate,
   Paperclip,
@@ -50,7 +52,26 @@ import {
   X,
 } from "lucide-react";
 import { ChatComposer } from "@use-brian/chat-ui";
-import { derivePageIcon, type ViewListRow } from "@/lib/api/views";
+import {
+  derivePageIcon,
+  listWorkspaceAssistants,
+  type ViewListRow,
+  type WorkspaceAssistantSummary,
+} from "@/lib/api/views";
+import {
+  ASSISTANT_REFRESH_EVENT,
+  type AssistantRefreshDetail,
+} from "@/lib/assistant-events";
+import {
+  readActiveAssistantId,
+  resolveDraftAssistantId,
+} from "@/lib/active-assistant";
+import { AssistantAvatar } from "@/components/assistant-avatar";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { PageIcon } from "./page-icon";
 import { useChatModelTier, type ModelTier } from "@/lib/chat-model";
 import { ComposerControls } from "@/components/doc/composer-controls";
@@ -75,6 +96,10 @@ type BuildOptions = {
   fileIds: string[];
   /** Uploaded recordings staged without processing, in chip order. */
   attachedRecordingIds: string[];
+  /** Which workspace assistant drafts the page (the footer picker). Rides
+   *  the chat-seed so the dock switches its interlocutor for the build turn.
+   *  Absent while the primary hasn't resolved → the dock's own default. */
+  assistantId?: string;
 };
 
 type Props = {
@@ -168,6 +193,47 @@ export function EmptyPageLanding({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const drop = useFileDrop((files) => void att.upload(files));
 
+  // ── Draft-assistant picker ─────────────────────────────────────────────
+  // Which workspace assistant drafts the page. Defaults to the dock's
+  // persisted per-workspace selection (the same `active-assistant` key the
+  // floating chat's switcher writes), repaired to the primary when that id
+  // has left the roster. A pick here only rides the build seed — the dock
+  // persists it when the build actually fires, so browsing the picker never
+  // yanks the dock's live conversation. Roster kept fresh via the workspace
+  // event spine, same rule as the dock's switcher.
+  const [assistants, setAssistants] = useState<WorkspaceAssistantSummary[]>([]);
+  const [pickedAssistantId, setPickedAssistantId] = useState<string | null>(
+    () => readActiveAssistantId(workspaceId),
+  );
+  const [assistantPickerOpen, setAssistantPickerOpen] = useState(false);
+  const reloadAssistants = useCallback(() => {
+    if (!workspaceId) return;
+    listWorkspaceAssistants(workspaceId)
+      .then((list) => setAssistants(list))
+      .catch(() => {
+        /* picker just stays hidden; the dock's default still drafts */
+      });
+  }, [workspaceId]);
+  useEffect(() => {
+    reloadAssistants();
+  }, [reloadAssistants]);
+  useEffect(() => {
+    const onRefresh = (event: Event) => {
+      const detail = (event as CustomEvent<AssistantRefreshDetail>).detail;
+      if (detail?.workspaceId && detail.workspaceId !== workspaceId) return;
+      reloadAssistants();
+    };
+    window.addEventListener(ASSISTANT_REFRESH_EVENT, onRefresh);
+    return () => window.removeEventListener(ASSISTANT_REFRESH_EVENT, onRefresh);
+  }, [workspaceId, reloadAssistants]);
+  const draftAssistantId = resolveDraftAssistantId({
+    persisted: pickedAssistantId,
+    primary: assistantId ?? null,
+    roster: assistants,
+  });
+  const draftAssistant =
+    assistants.find((a) => a.id === draftAssistantId) ?? null;
+
   function submit(text: string) {
     const trimmed = text.trim();
     // An attachment-only turn is valid once its upload is ready. The chat
@@ -179,6 +245,7 @@ export function EmptyPageLanding({
       researchMode,
       fileIds: att.fileIds(),
       attachedRecordingIds: pendingRecordings.map((recording) => recording.recordingId),
+      ...(draftAssistantId ? { assistantId: draftAssistantId } : {}),
     });
     att.clear();
     setPendingRecordings([]);
@@ -346,6 +413,72 @@ export function EmptyPageLanding({
             >
               <Paperclip className="size-[18px]" aria-hidden />
             </button>
+            {/* Draft-assistant picker — dock-switcher-style chip + popover.
+                Renders only at roster length > 1 (a single option degrades to
+                no control, same rule as the dock's switcher); the pick rides
+                the build seed as `assistantId`. */}
+            {assistants.length > 1 && draftAssistant ? (
+              <Popover
+                open={assistantPickerOpen}
+                onOpenChange={setAssistantPickerOpen}
+              >
+                <PopoverTrigger
+                  className="flex min-w-0 max-w-40 shrink-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  aria-label={t.landing.assistantLabel}
+                  title={t.landing.assistantLabel}
+                >
+                  <AssistantAvatar
+                    id={draftAssistant.id}
+                    name={draftAssistant.name}
+                    iconSeed={draftAssistant.iconSeed ?? undefined}
+                    size="sm"
+                  />
+                  <span className="truncate">{draftAssistant.name}</span>
+                  <ChevronDown
+                    className="size-3.5 shrink-0 text-muted-foreground"
+                    aria-hidden
+                  />
+                </PopoverTrigger>
+                <PopoverContent
+                  align="start"
+                  className="w-60 max-w-[calc(100vw-2rem)] gap-0.5 p-1"
+                >
+                  <p className="px-2 py-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                    {t.landing.assistantTitle}
+                  </p>
+                  {assistants.map((a) => (
+                    <button
+                      key={a.id}
+                      type="button"
+                      onClick={() => {
+                        setAssistantPickerOpen(false);
+                        setPickedAssistantId(a.id);
+                      }}
+                      className={cn(
+                        "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
+                        a.id === draftAssistantId
+                          ? "bg-muted text-foreground"
+                          : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
+                      )}
+                    >
+                      <AssistantAvatar
+                        id={a.id}
+                        name={a.name}
+                        iconSeed={a.iconSeed ?? undefined}
+                        size="sm"
+                      />
+                      <span className="min-w-0 flex-1 truncate">{a.name}</span>
+                      {a.id === draftAssistantId ? (
+                        <Check
+                          className="size-4 shrink-0 text-primary"
+                          aria-hidden
+                        />
+                      ) : null}
+                    </button>
+                  ))}
+                </PopoverContent>
+              </Popover>
+            ) : null}
             <ComposerControls
               model={model}
               onModelChange={setModel}

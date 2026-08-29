@@ -21,6 +21,7 @@ import { readFileSync } from 'node:fs'
 import { describe, it, expect, vi } from 'vitest'
 import {
   buildRoomResponseCoordinationBlock,
+  crossAssistantSendPolicy,
   detectRoomAddress,
   mayAssistantAnswerInRoom,
   mayResolveRoomConfirmation,
@@ -522,5 +523,92 @@ describe('[COMP:api/room-mechanics] Assistant-row attribution (source guard)', (
       .filter((call) => !/senderAssistantId/.test(call))
     // Name the offenders — a bare count tells the next session nothing.
     expect(unstamped.map((c) => c.replace(/\s+/g, ' ').slice(0, 120))).toEqual([])
+  })
+})
+
+describe('[COMP:api/room-mechanics] crossAssistantSendPolicy — per-turn addressing', () => {
+  // The whole cross-assistant matrix behind the chat route's exception
+  // (chat-app.md → "Choosing an assistant"): rooms are addressable capped by
+  // their read floor; the DOC dock's personal thread is addressable with no
+  // cap (owner-only audience); everything else stays strictly bound.
+  const base = {
+    isSharedSession: false,
+    isDocSurfaceSession: false,
+    sameWorkspace: true,
+    assistantClearance: null as string | null,
+    sessionClearance: null as string | null,
+  }
+
+  it('allows a same-workspace pick on the doc thread — no clearance cap', () => {
+    expect(
+      crossAssistantSendPolicy({ ...base, isDocSurfaceSession: true }),
+    ).toBe('allow')
+    // The exact case the room floor would refuse: a confidential-cleared
+    // assistant on a personal (null-clearance) session. The doc thread's
+    // audience is its owner alone, so the switcher must be able to offer
+    // every assistant the user can reach.
+    expect(
+      crossAssistantSendPolicy({
+        ...base,
+        isDocSurfaceSession: true,
+        assistantClearance: 'confidential',
+      }),
+    ).toBe('allow')
+  })
+
+  it('rejects any cross-workspace id, doc and room alike', () => {
+    expect(
+      crossAssistantSendPolicy({
+        ...base,
+        isDocSurfaceSession: true,
+        sameWorkspace: false,
+      }),
+    ).toBe('reject')
+    expect(
+      crossAssistantSendPolicy({
+        ...base,
+        isSharedSession: true,
+        sameWorkspace: false,
+      }),
+    ).toBe('reject')
+  })
+
+  it('keeps the room read-floor cap for shared sessions', () => {
+    expect(
+      crossAssistantSendPolicy({ ...base, isSharedSession: true }),
+    ).toBe('allow')
+    expect(
+      crossAssistantSendPolicy({
+        ...base,
+        isSharedSession: true,
+        assistantClearance: 'confidential',
+        sessionClearance: 'internal',
+      }),
+    ).toBe('clearance_refused')
+  })
+
+  it('a session that is BOTH shared and doc-surface gets the stricter room rule', () => {
+    expect(
+      crossAssistantSendPolicy({
+        ...base,
+        isSharedSession: true,
+        isDocSurfaceSession: true,
+        assistantClearance: 'confidential',
+        sessionClearance: 'internal',
+      }),
+    ).toBe('clearance_refused')
+  })
+
+  it('an ordinary personal thread stays strictly assistant-bound', () => {
+    expect(crossAssistantSendPolicy(base)).toBe('reject')
+  })
+
+  it('the chat route gate actually runs through the policy', () => {
+    // Source guard: the route must feed BOTH per-turn-addressable kinds into
+    // the shared policy rather than re-growing an inline room-only check.
+    const src = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8')
+    expect(src).toContain('crossAssistantSendPolicy({')
+    expect(src).toContain('isDocSurfaceSession: isDocSurface(session)')
+    expect(src).toContain('isSharedSession: isSharedChatSession(session)')
   })
 })

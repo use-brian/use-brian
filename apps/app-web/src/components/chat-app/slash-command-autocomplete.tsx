@@ -88,11 +88,46 @@ export function activeSlashCommandOf(
   return skill ? { skill, end: match[0].length } : null;
 }
 
+/** Whole-message command form — mirrors the server parser's SLASH_COMMAND_RE
+ *  (`packages/core/src/skills/slash-command.ts`), which is what decides
+ *  whether a SENT message was a command. Kept as a client copy because the
+ *  core package is server-side; the two regexes must stay identical. */
+const SENT_COMMAND_RE = /^\/([A-Za-z][A-Za-z0-9-]{0,63})(?:\s+([\s\S]*))?$/;
+
+/** Cheap syntactic probe — "could this sent message be a command?" Used to
+ *  decide whether transcript rendering needs the roster at all. */
+export function isSlashCommandShaped(text: string): boolean {
+  return SENT_COMMAND_RE.test(text.trim());
+}
+
+export type SentSlashCommand = { skill: InvocableSkill; args: string };
+
+/** Resolve a SENT message against the roster: the whole (trimmed) message must
+ *  be `/name [args]` and the name must be a known slug. Roster-backed like the
+ *  composer indicator — an unknown `/word` stays an ordinary bubble, matching
+ *  how the server lets an unresolved command fall through as plain text. */
+export function sentSlashCommandOf(
+  text: string,
+  roster: InvocableSkill[],
+): SentSlashCommand | null {
+  const m = SENT_COMMAND_RE.exec(text.trim());
+  if (!m) return null;
+  const slug = m[1].toLowerCase();
+  const skill = roster.find((entry) => entry.slug.toLowerCase() === slug);
+  return skill ? { skill, args: (m[2] ?? "").trim() } : null;
+}
+
 export type SlashCommands = {
   open: boolean;
   loading: boolean;
   candidates: InvocableSkill[];
   activeCommand: ActiveSlashCommand | null;
+  /** The fetched roster (null until loaded). Transcript rendering reads this
+   *  to style sent command messages; call `ensureRoster` to populate it. */
+  roster: InvocableSkill[] | null;
+  /** Trigger the lazy roster fetch without a `/` keystroke (transcript render
+   *  path). Idempotent per workspace; a failure resolves to an empty roster. */
+  ensureRoster: () => void;
   highlightRanges: Array<{ start: number; end: number; className: string }>;
   selectedIndex: number;
   setSelectedIndex: (index: number) => void;
@@ -147,8 +182,8 @@ export function useSlashCommands(params: {
   // "started" flag survived while the only in-flight result was discarded.
   // Cached per workspace for the component's lifetime; a failure becomes the
   // explicit no-results state (typed commands still reach the server).
-  useEffect(() => {
-    if (query === null || requestedWorkspaceRef.current === workspaceKey) return;
+  const ensureRoster = useCallback(() => {
+    if (requestedWorkspaceRef.current === workspaceKey) return;
     requestedWorkspaceRef.current = workspaceKey;
     void listInvocableSkills(workspaceId)
       .then((skills) => {
@@ -167,7 +202,12 @@ export function useSlashCommands(params: {
           setRoster([]);
         }
       });
-  }, [query, workspaceId, workspaceKey]);
+  }, [workspaceId, workspaceKey]);
+
+  useEffect(() => {
+    if (query === null) return;
+    ensureRoster();
+  }, [query, ensureRoster]);
 
   // A changed query invalidates the dismissal and resets the selection.
   useEffect(() => {
@@ -267,6 +307,8 @@ export function useSlashCommands(params: {
     loading,
     candidates,
     activeCommand,
+    roster,
+    ensureRoster,
     highlightRanges,
     selectedIndex,
     setSelectedIndex,

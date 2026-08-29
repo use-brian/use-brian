@@ -157,7 +157,7 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
     },
 
     async deleteMemory(id) {
-      await deleteMemory(id)
+      await deleteMemory(id, { actor: 'consolidation_run', reason: 'consolidation' })
     },
 
     async listCronContextCandidatesForPrune(assistantId, userId, minAgeDays) {

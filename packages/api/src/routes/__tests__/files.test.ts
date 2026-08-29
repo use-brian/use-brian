@@ -84,6 +84,38 @@ describe('[COMP:api/files-route] File routes', () => {
     expect(res.body.files).toHaveLength(1)
     expect(res.body.files[0].id).toBe('f_1')
     expect(res.body.files[0].summary).toBe('A greeting')
+    // Plain text keeps no original-bytes copy — its text IS the file.
+    expect(fileStore.cache.mock.calls[0][0].originalContent).toBeUndefined()
+  })
+
+  it('keeps a structured document\'s original bytes beside the parsed text (migration 487)', async () => {
+    const app = createTestApp('/api/files', fileRoutes(fileStore as never))
+    mockFindOrCreateUser.mockResolvedValueOnce({ user: { id: 'u_guest' }, isNew: false } as never)
+    mockGetDefaultAssistant.mockResolvedValueOnce({ id: 'a_1' } as never)
+    mockFindOrCreateSession.mockResolvedValueOnce({ id: 's_staging' } as never)
+    mockParseFileContent.mockResolvedValueOnce({
+      text: 'Extracted doc text',
+      summary: 'A doc',
+      detectedFormat: 'docx',
+    } as never)
+    fileStore.cache.mockResolvedValueOnce({ id: 'f_2', fileName: 'plan.docx', sizeBytes: 9 })
+
+    const bytes = Buffer.from('docx-blob')
+    const res = await request(app)
+      .post('/api/files/upload')
+      .attach('files', bytes, {
+        filename: 'plan.docx',
+        contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      })
+
+    expect(res.status).toBe(200)
+    const cached = fileStore.cache.mock.calls[0][0]
+    // `content` stays the parsed text (the chat isTextLike branch reads it);
+    // the original bytes ride the 487 column as a data URL for /preview-pdf.
+    expect(cached.content).toBe('Extracted doc text')
+    expect(cached.originalContent).toBe(
+      `data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,${bytes.toString('base64')}`,
+    )
   })
 
   it('returns error for unsupported MIME type', async () => {
@@ -878,5 +910,137 @@ describe('[COMP:api/files-route] GET /ingest-jobs/:jobId', () => {
     mockGetJob.mockResolvedValue(null as never)
     expect((await request(app()).get('/api/files/ingest-jobs/job-1')).status).toBe(404)
     expect((await request(app(null)).get('/api/files/ingest-jobs/job-1')).status).toBe(401)
+  })
+})
+
+// Office/structured documents render as PDFs server-side (the ONE LibreOffice
+// runner behind an injected seam) from the original bytes migration 487 keeps
+// in the cache row; inline PDFs pass through without conversion. AUTHENTICATED
+// + access-scoped exactly like /preview-url. A row with no servable bytes
+// answers an honest 404, never a hang or a fake success.
+describe('[COMP:api/files-route] PDF preview route', () => {
+  const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+  const fileStore = {
+    cache: vi.fn(),
+    get: vi.fn(),
+    getBySession: vi.fn(),
+    getOriginalContent: vi.fn(),
+  }
+  const convertPdf = vi.fn()
+  const routes = () =>
+    fileRoutes(fileStore as never, null, null, null, null, convertPdf as never)
+
+  beforeEach(() => {
+    vi.resetAllMocks()
+  })
+
+  it('401s without an authenticated user', async () => {
+    const app = createTestApp('/api/files', routes())
+    const res = await request(app).get('/api/files/f_1/preview-pdf?workspaceId=ws_1')
+    expect(res.status).toBe(401)
+  })
+
+  it('400s without a workspaceId scope', async () => {
+    const app = createTestApp('/api/files', routes(), { userId: 'u_1' })
+    const res = await request(app).get('/api/files/f_1/preview-pdf')
+    expect(res.status).toBe(400)
+  })
+
+  it('404s for a foreign or expired id (access-scoped get returns null)', async () => {
+    const app = createTestApp('/api/files', routes(), { userId: 'u_1' })
+    fileStore.get.mockResolvedValueOnce(null)
+    const res = await request(app).get('/api/files/f_1/preview-pdf?workspaceId=ws_1')
+    expect(res.status).toBe(404)
+    expect(fileStore.get).toHaveBeenCalledWith(
+      'f_1',
+      expect.objectContaining({ workspaceId: 'ws_1', userId: 'u_1' }),
+    )
+  })
+
+  it('converts an office document from its kept original bytes', async () => {
+    const app = createTestApp('/api/files', routes(), { userId: 'u_1' })
+    fileStore.get.mockResolvedValueOnce({
+      id: 'f_1',
+      fileName: 'plan.docx',
+      mimeType: DOCX_MIME,
+      content: 'Extracted text',
+    })
+    const original = Buffer.from('docx-bytes')
+    fileStore.getOriginalContent.mockResolvedValueOnce(
+      `data:${DOCX_MIME};base64,${original.toString('base64')}`,
+    )
+    convertPdf.mockResolvedValueOnce(Buffer.from('%PDF-fake'))
+
+    const res = await request(app).get('/api/files/f_1/preview-pdf?workspaceId=ws_1')
+    expect(res.status).toBe(200)
+    expect(res.headers['content-type']).toContain('application/pdf')
+    expect(res.headers['content-disposition']).toBe('inline')
+    expect(res.body.toString()).toBe('%PDF-fake')
+    // The runner sniffs format from the extension of a server-chosen name,
+    // never the user-controlled upload filename.
+    expect(convertPdf).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ inputName: 'attachment.docx' }),
+    )
+  })
+
+  it('404s preview_source_unavailable when no original bytes were kept', async () => {
+    const app = createTestApp('/api/files', routes(), { userId: 'u_1' })
+    fileStore.get.mockResolvedValueOnce({
+      id: 'f_1',
+      fileName: 'plan.docx',
+      mimeType: DOCX_MIME,
+      content: 'Extracted text',
+    })
+    fileStore.getOriginalContent.mockResolvedValueOnce(null)
+    const res = await request(app).get('/api/files/f_1/preview-pdf?workspaceId=ws_1')
+    expect(res.status).toBe(404)
+    expect(res.body.code).toBe('preview_source_unavailable')
+    expect(convertPdf).not.toHaveBeenCalled()
+  })
+
+  it('streams an inline PDF as-is without converting', async () => {
+    const app = createTestApp('/api/files', routes(), { userId: 'u_1' })
+    const pdfBytes = Buffer.from('%PDF-original')
+    fileStore.get.mockResolvedValueOnce({
+      id: 'f_1',
+      fileName: 'doc.pdf',
+      mimeType: 'application/pdf',
+      content: `data:application/pdf;base64,${pdfBytes.toString('base64')}`,
+    })
+    const res = await request(app).get('/api/files/f_1/preview-pdf?workspaceId=ws_1')
+    expect(res.status).toBe(200)
+    expect(res.body.toString()).toBe('%PDF-original')
+    expect(convertPdf).not.toHaveBeenCalled()
+  })
+
+  it('415s for a mime with no PDF rendering', async () => {
+    const app = createTestApp('/api/files', routes(), { userId: 'u_1' })
+    fileStore.get.mockResolvedValueOnce({
+      id: 'f_1',
+      fileName: 'notes.txt',
+      mimeType: 'text/plain',
+      content: 'plain text',
+    })
+    const res = await request(app).get('/api/files/f_1/preview-pdf?workspaceId=ws_1')
+    expect(res.status).toBe(415)
+  })
+
+  it('maps a converter timeout to 504 with its own sentence', async () => {
+    const { LibreOfficeError } = await vi.importActual<typeof import('@use-brian/core')>('@use-brian/core')
+    const app = createTestApp('/api/files', routes(), { userId: 'u_1' })
+    fileStore.get.mockResolvedValueOnce({
+      id: 'f_1',
+      fileName: 'plan.docx',
+      mimeType: DOCX_MIME,
+      content: 'Extracted text',
+    })
+    fileStore.getOriginalContent.mockResolvedValueOnce(
+      `data:${DOCX_MIME};base64,${Buffer.from('x').toString('base64')}`,
+    )
+    convertPdf.mockRejectedValueOnce(new LibreOfficeError('timeout'))
+    const res = await request(app).get('/api/files/f_1/preview-pdf?workspaceId=ws_1')
+    expect(res.status).toBe(504)
+    expect(res.body.code).toBe('pdf_unavailable')
   })
 })

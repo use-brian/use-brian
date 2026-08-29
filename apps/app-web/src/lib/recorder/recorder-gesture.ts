@@ -77,8 +77,17 @@ export type CaptureLane = "discard" | "voice" | "recording";
  * threshold → an inline voice prompt; at/over → the recording ingestion
  * pipeline (cost + blueprint + destination confirm).
  */
-export function stopLane(durationMs: number, forkMs: number = CAPTURE_FORK_MS): CaptureLane {
+export function stopLane(
+  durationMs: number,
+  forkMs: number = CAPTURE_FORK_MS,
+  video = false,
+): CaptureLane {
   if (durationMs < MIN_CAPTURE_MS) return "discard";
+  // A video capture is a recording regardless of length — the same rule the
+  // dropped-file fork applies (`partitionUpload`: video is never probed). The
+  // voice lane's file cache is audio-only, so a short screen capture must
+  // still take the recording pipeline.
+  if (video) return "recording";
   return durationMs < forkMs ? "voice" : "recording";
 }
 
@@ -88,7 +97,12 @@ export function stopLane(durationMs: number, forkMs: number = CAPTURE_FORK_MS): 
  * "meeting recording", so the user always knows which outcome stopping
  * produces before they stop.
  */
-export function captureLabelLane(elapsedMs: number, forkMs: number = CAPTURE_FORK_MS): "voice" | "recording" {
+export function captureLabelLane(
+  elapsedMs: number,
+  forkMs: number = CAPTURE_FORK_MS,
+  video = false,
+): "voice" | "recording" {
+  if (video) return "recording";
   return elapsedMs < forkMs ? "voice" : "recording";
 }
 
@@ -97,14 +111,20 @@ export function captureLabelLane(elapsedMs: number, forkMs: number = CAPTURE_FOR
  * the desktop shell); Safari records AAC-in-mp4. Empty string = let the
  * browser choose. `isSupported` is injected so the ladder tests in node.
  */
-export function pickRecorderMime(isSupported: (mime: string) => boolean): string {
-  const ladder = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
+export function pickRecorderMime(
+  isSupported: (mime: string) => boolean,
+  opts?: { video?: boolean },
+): string {
+  const ladder = opts?.video
+    ? ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm", "video/mp4"]
+    : ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
   return ladder.find((m) => isSupported(m)) ?? "";
 }
 
 /** File extension for a capture mime — the container, not the codec suffix. */
 export function extensionForMime(mime: string): string {
   if (mime.includes("webm")) return "webm";
+  if (mime.startsWith("video/") && mime.includes("mp4")) return "mp4";
   if (mime.includes("mp4")) return "m4a";
   if (mime.includes("ogg")) return "ogg";
   return "webm";

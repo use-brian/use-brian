@@ -65,6 +65,17 @@ const TEMPLATES: Record<MagicLinkLocale, TemplateStrings> = {
     ignoreLine: '若這封信並非由你提出，請安心忽略，你的帳號不會受到任何影響。',
     codeLabel: '或在登入畫面輸入此驗證碼：',
   },
+  'zh-CN': {
+    subject: '您的 Use Brian 登录链接',
+    preheader: '点击登录，链接 15 分钟内有效。',
+    heading: '登录 Use Brian',
+    body: '点击下方按钮完成登录。本链接 15 分钟内有效，仅限使用一次。',
+    cta: '登录',
+    tagline: '你的团队共享大脑',
+    smallPrint: '若按钮无法使用，请将下方网址复制到浏览器：',
+    ignoreLine: '若这封邮件并非由你发起，请放心忽略，你的账号不会受到任何影响。',
+    codeLabel: '或在登录页面输入此验证码：',
+  },
 }
 
 function escapeHtml(s: string): string {

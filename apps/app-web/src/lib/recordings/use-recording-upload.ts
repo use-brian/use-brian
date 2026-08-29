@@ -259,10 +259,16 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
         let destination = DESTINATION_ROOT;
         const minutes = Math.max(1, Math.round(est.durationSeconds / 60));
         const pinnedPage = !!opts?.existingPageId;
+        // A video recording's processing also analyzes sampled frames; the
+        // pre-flight names that so the confirm stays a complete description
+        // of what will run.
+        const videoNote = file.type.startsWith("video/")
+          ? ` ${t.recordings.confirmVideoNote}`
+          : "";
         const ok = await confirmDialog({
           title: t.recordings.confirmTitle,
           description:
-            pinnedPage
+            (pinnedPage
               ? ((est.surchargeCredits > 0
                   ? t.recorder.liveFinalizeBody
                       .replace("{minutes}", String(minutes))
@@ -273,7 +279,7 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
               ? t.recordings.confirmBody
                   .replace("{minutes}", String(minutes))
                   .replace("{credits}", String(est.surchargeCredits))
-              : t.recordings.confirmFree,
+              : t.recordings.confirmFree) + videoNote,
           confirmLabel: t.recordings.confirmAction,
           // The blueprint + destination half of the pre-flight confirm (the
           // hook is a .ts file, so the node is built with createElement, not

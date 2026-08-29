@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest'
-import { segmentTranscript, type Utterance } from '../transcript-segments-store.js'
+import {
+  mergeVisualSegments,
+  segmentTranscript,
+  VISUAL_SEGMENT_SPEAKER,
+  type TranscriptSegment,
+  type Utterance,
+} from '../transcript-segments-store.js'
 
 /**
  * Pure unit tests for the transcript segmenter (recording-to-brain Phase 3).
@@ -87,5 +93,41 @@ describe('[COMP:brain/transcript-segments-store] segmentTranscript', () => {
     const segs = segmentTranscript(u)
     expect(segs).toHaveLength(1)
     expect(segs[0].text).toBe('Real content here.')
+  })
+})
+
+describe('[COMP:brain/transcript-segments-store] mergeVisualSegments', () => {
+  const speech = (i: number, startMs: number, text: string): TranscriptSegment => ({
+    segmentIndex: i,
+    startMs,
+    endMs: startMs + 1000,
+    speaker: 'A',
+    speakerIds: ['A'],
+    text,
+    utteranceRefs: [],
+  })
+
+  it('interleaves chronologically, re-indexes, and marks visual rows', () => {
+    const merged = mergeVisualSegments(
+      [speech(0, 0, 'Hello.'), speech(1, 30_000, 'About the chart.')],
+      [{ tsMs: 30_000, description: 'A revenue chart.' }],
+    )
+    expect(merged.map((s) => [s.segmentIndex, s.kind ?? 'speech', s.text])).toEqual([
+      [0, 'speech', 'Hello.'],
+      [1, 'visual', 'A revenue chart.'], // visual first on the 30s tie
+      [2, 'speech', 'About the chart.'],
+    ])
+    expect(merged[1].speaker).toBe(VISUAL_SEGMENT_SPEAKER)
+    expect(merged[1].startMs).toBe(30_000)
+  })
+
+  it('returns the speech list untouched when there are no moments', () => {
+    const s = [speech(0, 0, 'Hello.')]
+    expect(mergeVisualSegments(s, [])).toBe(s)
+  })
+
+  it('drops blank descriptions rather than inserting empty rows', () => {
+    const merged = mergeVisualSegments([speech(0, 0, 'Hello.')], [{ tsMs: 5_000, description: '   ' }])
+    expect(merged).toHaveLength(1)
   })
 })

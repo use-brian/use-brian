@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import { NOOP_TURN_LEDGER } from '../turn-ledger.js'
 import { z } from 'zod'
 import type {
   LLMProvider,
@@ -100,7 +101,7 @@ describe('[COMP:engine/query-loop] suppressIntermediateText', () => {
     ]
     const events: QueryEvent[] = []
 
-    for await (const event of queryLoop({
+    for await (const event of queryLoop({ ledger: NOOP_TURN_LEDGER,
       provider: scriptedProvider([first, second]),
       model: 'gemini-3.1-pro-preview',
       systemPrompt: 'sp',
@@ -121,7 +122,7 @@ describe('[COMP:engine/query-loop] suppressIntermediateText', () => {
   it('LEAK BASELINE: without the option, pre-spawnWorker text leaks to the consumer', async () => {
     const provider = scriptedProvider([preambleThenSpawn, synthesisAnswer])
     const events: QueryEvent[] = []
-    for await (const ev of queryLoop({
+    for await (const ev of queryLoop({ ledger: NOOP_TURN_LEDGER,
       provider,
       model: 'mock-model',
       systemPrompt: 'sp',
@@ -143,7 +144,7 @@ describe('[COMP:engine/query-loop] suppressIntermediateText', () => {
   it('FIX: with suppressIntermediateText=true, pre-spawnWorker text is dropped from BOTH the stream and the persisted turn', async () => {
     const provider = scriptedProvider([preambleThenSpawn, synthesisAnswer])
     const events: QueryEvent[] = []
-    for await (const ev of queryLoop({
+    for await (const ev of queryLoop({ ledger: NOOP_TURN_LEDGER,
       provider,
       model: 'mock-model',
       systemPrompt: 'sp',

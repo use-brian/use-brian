@@ -13,6 +13,7 @@
  */
 
 import { z } from 'zod'
+import { NOOP_TURN_LEDGER } from '../engine/turn-ledger.js'
 import { queryLoop, type TerminalStopReason } from '../engine/query-loop.js'
 import { DEFAULT_STALL_IDLE_MS, isStalledError } from '../engine/stall-watchdog.js'
 import { NO_TOOL_TIMEOUT } from '../engine/tool-executor.js'
@@ -243,6 +244,7 @@ async function runAttempt(
 
   try {
     for await (const event of queryLoop({
+      ledger: options.context.turnLedger ?? NOOP_TURN_LEDGER,
       provider: options.provider,
       model,
       systemPrompt: options.systemPrompt,

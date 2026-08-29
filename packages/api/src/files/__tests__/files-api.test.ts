@@ -1,6 +1,12 @@
 import { describe, it, expect, vi } from 'vitest'
 import { Writable } from 'node:stream'
-import { createFilesApi, MAX_BYTES_PER_WORKSPACE, type FilesClientResolver } from '../files-api.js'
+import {
+  createFilesApi,
+  DEFAULT_MAX_BYTES_PER_WORKSPACE,
+  STORAGE_LIMIT_BYTES_BY_PLAN,
+  storageLimitBytesForPlan,
+  type FilesClientResolver,
+} from '../files-api.js'
 import { parseStorageBucket } from '../gcs-client.js'
 import type { GcsFilesClient } from '../gcs-client.js'
 import type {
@@ -238,7 +244,7 @@ describe('[COMP:files/api] createFilesApi.write', () => {
       parentPath: '/',
       name: 'big.bin',
       mime: 'application/octet-stream',
-      sizeBytes: MAX_BYTES_PER_WORKSPACE - 10,
+      sizeBytes: DEFAULT_MAX_BYTES_PER_WORKSPACE - 10,
       storageUri: 'gs://b/k',
     })
     const api = createFilesApi({ gcs, store, auditStore: makeFakeAudit(), bucket: 'b' })
@@ -558,6 +564,57 @@ describe('[COMP:files/byo-resolver] per-workspace client routing', () => {
     expect(byoGcs.blobs.size).toBe(0)
   })
 
+  it('maps every plan to its published storage tier and falls back to free', () => {
+    const GIB = 1024 * 1024 * 1024
+    expect(storageLimitBytesForPlan('free')).toBe(1 * GIB)
+    expect(storageLimitBytesForPlan('pro')).toBe(20 * GIB)
+    expect(storageLimitBytesForPlan('max_5x')).toBe(100 * GIB)
+    expect(storageLimitBytesForPlan('max_10x')).toBe(200 * GIB)
+    expect(storageLimitBytesForPlan('enterprise')).toBe(200 * GIB)
+    expect(storageLimitBytesForPlan(null)).toBe(DEFAULT_MAX_BYTES_PER_WORKSPACE)
+    expect(storageLimitBytesForPlan(undefined)).toBe(DEFAULT_MAX_BYTES_PER_WORKSPACE)
+    expect(storageLimitBytesForPlan('not_a_plan')).toBe(DEFAULT_MAX_BYTES_PER_WORKSPACE)
+  })
+
+  it('honors the injected plan-derived limit above the free tier', async () => {
+    const gcs = makeFakeGcs()
+    const store = makeFakeStore()
+    // Well past the free 1 GiB cap, comfortably inside max_10x's 200 GB.
+    await store.create('user_1', {
+      workspaceId: ctx.workspaceId,
+      path: '/big.bin',
+      parentPath: '/',
+      name: 'big.bin',
+      mime: 'application/octet-stream',
+      sizeBytes: 150 * 1024 * 1024 * 1024,
+      storageUri: 'gs://b/k',
+    })
+    const api = createFilesApi({
+      gcs,
+      store,
+      auditStore: makeFakeAudit(),
+      bucket: 'b',
+      storageLimitBytesFor: async () => STORAGE_LIMIT_BYTES_BY_PLAN.max_10x,
+    })
+    const okResult = await api.write(ctx, { path: '/fits.md', content: 'fits on max_10x' })
+    expect(okResult.ok).toBe(true)
+
+    const proApi = createFilesApi({
+      gcs: makeFakeGcs(),
+      store,
+      auditStore: makeFakeAudit(),
+      bucket: 'b',
+      storageLimitBytesFor: async () => STORAGE_LIMIT_BYTES_BY_PLAN.pro,
+    })
+    const overResult = await proApi.write(ctx, { path: '/over.md', content: 'over on pro' })
+    expect(overResult.ok).toBe(false)
+    if (!overResult.ok && overResult.error.kind === 'quota_exceeded') {
+      expect(overResult.error.limitBytes).toBe(STORAGE_LIMIT_BYTES_BY_PLAN.pro)
+    } else {
+      expect.fail('expected quota_exceeded carrying the pro limit')
+    }
+  })
+
   it('lifts the soft quota when the workspace is on BYO storage', async () => {
     const { resolver } = makeRoutingHarness() // forWorkspace().byo === true
     const store = makeFakeStore()
@@ -567,7 +624,7 @@ describe('[COMP:files/byo-resolver] per-workspace client routing', () => {
       parentPath: '/',
       name: 'big.bin',
       mime: 'application/octet-stream',
-      sizeBytes: MAX_BYTES_PER_WORKSPACE - 1,
+      sizeBytes: DEFAULT_MAX_BYTES_PER_WORKSPACE - 1,
       storageUri: 'gs://byo-bucket/k',
     })
     const api = createFilesApi({ resolver, store, auditStore: makeFakeAudit() })

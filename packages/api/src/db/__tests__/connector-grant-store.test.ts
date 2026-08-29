@@ -166,6 +166,8 @@ describe('[COMP:api/connector-grant-store] createConnectorGrantStore', () => {
           targetId: 't_1',
           grantedByUserId: 'u_alice',
           grantedAt: new Date(),
+          compartments: ['c_ops'],
+          projectIds: ['p_1'],
           instance_id: 'ci_1',
           instance_scope: 'user',
           instance_userId: 'u_alice',
@@ -190,7 +192,16 @@ describe('[COMP:api/connector-grant-store] createConnectorGrantStore', () => {
       expect(rows).toHaveLength(1)
       expect(rows[0].instance.provider).toBe('gcal')
       expect(rows[0].instance.label).toBe("Alice's Calendar")
+      // The grant's own scope binding must survive the hand-written SELECT.
+      // Omitting these two columns made every returned grant carry
+      // `undefined` here, which threw `projectIds[0]` in the connector
+      // context GET (500) and would have crashed the exposure gate on any
+      // scoped turn.
+      expect(rows[0].compartments).toEqual(['c_ops'])
+      expect(rows[0].projectIds).toEqual(['p_1'])
       const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]]
+      expect(sql).toContain('cg.compartments')
+      expect(sql).toContain('cg.project_ids AS "projectIds"')
       expect(sql).toContain('JOIN connector_instance ci')
       expect(sql).toContain('ORDER BY cg.granted_at ASC, ci.created_at ASC, ci.id ASC')
       expect(params).toEqual(['workspace', 't_1'])

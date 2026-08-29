@@ -1,4 +1,5 @@
 import type { ProgressClock } from '../engine/stall-watchdog.js'
+import type { TurnLedger } from '../engine/turn-ledger.js'
 import type { z } from 'zod'
 import type { CacheStore } from '../compaction/cache-tool.js'
 import type { SessionStateStore } from '../memory/session-state-types.js'
@@ -28,6 +29,15 @@ export type ToolContext = {
   userId: string
   assistantId: string
   sessionId: string
+  /**
+   * The invoking loop's turn ledger, stamped by `queryLoop` itself onto the
+   * ToolContext it hands every tool — so a NESTED loop (worker, doc
+   * edit-agent) inherits the parent lane's recorder and starts its own
+   * child trace without any hand-threading. Optional only because contexts
+   * are also constructed outside a loop (tests); inside a loop it is
+   * always set. See docs/architecture/engine/turn-ledger.md.
+   */
+  turnLedger?: TurnLedger
   appId: string
   channelType: string
   channelId: string
