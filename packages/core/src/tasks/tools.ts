@@ -797,6 +797,24 @@ export function createTaskTools(
 
   type BulkFilter = z.infer<typeof bulkFilterSchema>
 
+  const bulkSetSchema = z
+    .object({
+      status: statusEnum.optional(),
+      assignee_id: idShape.nullable().optional().describe('workspace_members id; null unassigns.'),
+      due: isoDateOrDateTime.nullable().optional().describe('null clears the due date.'),
+      priority: z
+        .enum(['low', 'medium', 'high', 'urgent'])
+        .nullable()
+        .optional()
+        .describe('Merged into `attributes.priority`; null clears it.'),
+    })
+    .refine((set) => Object.values(set).some((value) => value !== undefined), {
+      message: 'Pass at least one field to set.',
+    })
+
+  const bulkUpdateSchema = z.object({ filter: bulkFilterSchema, set: bulkSetSchema })
+  const archiveTasksSchema = z.object({ filter: bulkFilterSchema })
+
   /** Resolve a bulk filter to its matching live rows (capped). */
   async function resolveBulkRows(
     context: Parameters<Tool['execute']>[1],
@@ -834,6 +852,42 @@ export function createTaskTools(
       rows = rows.filter((r) => wanted.has(r.id))
     }
     return rows
+  }
+
+  function readableTaskStatus(status: TaskRecordStatus): string {
+    const text = status.replace(/_/g, ' ')
+    return text.charAt(0).toUpperCase() + text.slice(1)
+  }
+
+  function bulkTargetLines(verb: string, rows: TaskListRow[]): string[] {
+    if (rows.length === 0) return ['No tasks currently match this filter.']
+    const shown = rows.slice(0, 20)
+    const lines = [
+      `${verb} ${rows.length} task(s):`,
+      ...shown.map((row) => `• ${row.title} (${readableTaskStatus(row.status)})`),
+    ]
+    if (rows.length > shown.length) lines.push(`• ${rows.length - shown.length} more task(s)`)
+    return lines
+  }
+
+  function bulkChangeLines(set: z.infer<typeof bulkSetSchema>): string[] {
+    const lines = ['Changes:']
+    if (set.status !== undefined) lines.push(`• Status: ${readableTaskStatus(set.status)}`)
+    if (set.assignee_id !== undefined) {
+      lines.push(
+        set.assignee_id === null
+          ? '• Assignee: Unassigned'
+          : `• Assignee: workspace member ${set.assignee_id.slice(0, 8)}`,
+      )
+    }
+    if (set.due !== undefined) lines.push(`• Due: ${set.due === null ? 'Clear due date' : set.due}`)
+    if (set.priority !== undefined) {
+      const priority = set.priority === null
+        ? 'Clear priority'
+        : set.priority.charAt(0).toUpperCase() + set.priority.slice(1)
+      lines.push(`• Priority: ${priority}`)
+    }
+    return lines
   }
 
   /** Loop the per-row supersession update over resolved rows. */
@@ -880,23 +934,17 @@ export function createTaskTools(
     description:
       'Update MANY tasks in one confirmed call: everything matching `filter` gets `set` applied (status / assignee / due / priority). The backlog-cleanup verb — e.g. filter `{status: "todo", unassigned: true, updated_before: <30 days ago>}` with set `{status: "archived"}` clears the stale unassigned backlog. ' +
       `Caps at ${BULK_CAP} tasks per call; requires at least one filter field (an empty filter is rejected). For archiving, \`archiveTasks\` is the shorthand. Every update supersedes its row (new task ids).`,
-    inputSchema: z.object({
-      filter: bulkFilterSchema,
-      set: z
-        .object({
-          status: statusEnum.optional(),
-          assignee_id: idShape.nullable().optional().describe('workspace_members id; null unassigns.'),
-          due: isoDateOrDateTime.nullable().optional().describe('null clears the due date.'),
-          priority: z
-            .enum(['low', 'medium', 'high', 'urgent'])
-            .nullable()
-            .optional()
-            .describe('Merged into `attributes.priority`; null clears it.'),
-        })
-        .refine((s) => Object.values(s).some((v) => v !== undefined), {
-          message: 'Pass at least one field to set.',
-        }),
-    }),
+    inputSchema: bulkUpdateSchema,
+    async describeConfirmation(input, context) {
+      if (!context.workspaceId) return null
+      const parsed = bulkUpdateSchema.safeParse(input)
+      if (!parsed.success) return null
+      const rows = await resolveBulkRows(context, parsed.data.filter)
+      return [
+        ...bulkTargetLines('Update', rows),
+        ...bulkChangeLines(parsed.data.set),
+      ]
+    },
     async execute(input, context) {
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
@@ -929,7 +977,18 @@ export function createTaskTools(
     description:
       'Archive MANY tasks in one confirmed call — the soft-delete sweep (`status: "archived"`; archived tasks leave every default list but stay recoverable). Shorthand for `bulkUpdateTasks` with `set: {status: "archived"}`. ' +
       `Same filter shape and ${BULK_CAP}-task cap; requires at least one filter field.`,
-    inputSchema: z.object({ filter: bulkFilterSchema }),
+    inputSchema: archiveTasksSchema,
+    async describeConfirmation(input, context) {
+      if (!context.workspaceId) return null
+      const parsed = archiveTasksSchema.safeParse(input)
+      if (!parsed.success) return null
+      const rows = await resolveBulkRows(context, parsed.data.filter)
+      return [
+        ...bulkTargetLines('Archive', rows),
+        'Changes:',
+        '• Status: Archived',
+      ]
+    },
     async execute(input, context) {
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
