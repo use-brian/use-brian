@@ -846,6 +846,8 @@ export const ja: Dictionary = {
       ingestAddedToBrain: "ブレインに追加しました",
       ingestAdded: "件をブレインに追加",
       ingestFailed: "失敗",
+      ingestTooLarge: "ブレインに追加するには大きすぎます: {size}。1 ファイルあたりの上限は {limit} です。",
+      ingestUnreachable: "アップロードがサーバーに届きませんでした。接続を確認してもう一度お試しください。",
       ingestRemove: "削除",
       ingestClear: "クリア",
       linkedinArchiveAlone: "全行を照合するため、LinkedIn ZIP は単独で追加してください。",

@@ -16,12 +16,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertCircle, Check, FileUp, Loader2, X } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
+import { format } from "@/lib/i18n/format";
 import { cn } from "@/lib/utils";
 import { useFileDrop } from "@/lib/use-file-drop";
 import {
+  MAX_INGEST_FILE_BYTES,
+  formatFileSize,
   getIngestJobStatus,
   ingestFiles,
   ingestLinkedInArchive,
+  partitionByIngestSize,
   totalAdded,
   type IngestFileResult,
 } from "@/lib/api/ingest";
@@ -78,20 +82,35 @@ export function SuggestedFileDrop({ workspaceId }: { workspaceId: string }) {
     };
   }, []);
 
-  const addFiles = useCallback((fileList: FileList | File[]) => {
-    const incoming = Array.from(fileList);
-    if (incoming.length === 0) return;
-    setItems((prev) => {
-      // Keep only unresolved (pending) items plus the new batch, capped.
-      const pending = prev.filter((i) => i.status === "pending");
-      const staged = incoming.map((file) => ({
-        localId: crypto.randomUUID(),
-        file,
-        status: "pending" as const,
-      }));
-      return [...pending, ...staged].slice(0, MAX_FILES);
-    });
-  }, []);
+  const addFiles = useCallback(
+    (fileList: FileList | File[]) => {
+      const incoming = Array.from(fileList);
+      if (incoming.length === 0) return;
+      // Size is checked at DROP time, not at "Add to brain": an oversized body
+      // is dropped by the edge before any handler runs, so the request would
+      // reject with a bare `TypeError: Failed to fetch` that names neither the
+      // size nor the limit. Telling the user here also costs them nothing.
+      const { accepted, tooLarge } = partitionByIngestSize(incoming);
+      const limit = formatFileSize(MAX_INGEST_FILE_BYTES);
+      setItems((prev) => {
+        // Keep only unresolved (pending) items plus the new batch, capped.
+        const pending = prev.filter((i) => i.status === "pending");
+        const rejected = tooLarge.map((file) => ({
+          localId: crypto.randomUUID(),
+          file,
+          status: "error" as const,
+          error: format(t.ingestTooLarge, { size: formatFileSize(file.size), limit }),
+        }));
+        const staged = accepted.map((file) => ({
+          localId: crypto.randomUUID(),
+          file,
+          status: "pending" as const,
+        }));
+        return [...pending, ...rejected, ...staged].slice(0, MAX_FILES);
+      });
+    },
+    [t.ingestTooLarge],
+  );
 
   const drop = useFileDrop(addFiles, { disabled: busy });
 
@@ -177,17 +196,21 @@ export function SuggestedFileDrop({ workspaceId }: { workspaceId: string }) {
       });
       for (const job of queued) void watchJob(job.localId, job.jobId);
     } catch (err) {
+      // `fetch` rejects with a bare `TypeError` for anything that never reached
+      // a handler: offline, DNS, CORS, or a body the edge refused. Its message
+      // ("Failed to fetch", or "Load failed" on Safari) is not something to
+      // show a user, so name the class of failure instead.
+      const message =
+        err instanceof TypeError ? t.ingestUnreachable : (err as Error).message;
       setItems((prev) =>
         prev.map((i) =>
-          pendingIds.has(i.localId)
-            ? { ...i, status: "error", error: (err as Error).message }
-            : i,
+          pendingIds.has(i.localId) ? { ...i, status: "error", error: message } : i,
         ),
       );
     } finally {
       setBusy(false);
     }
-  }, [items, busy, workspaceId, watchJob, t.ingestFailed, t.linkedinArchiveAlone]);
+  }, [items, busy, workspaceId, watchJob, t.ingestFailed, t.ingestUnreachable, t.linkedinArchiveAlone]);
 
   return (
     <section

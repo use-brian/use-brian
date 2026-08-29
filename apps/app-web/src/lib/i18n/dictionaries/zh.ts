@@ -834,6 +834,8 @@ export const zh: Dictionary = {
       ingestAddedToBrain: "已加入大腦",
       ingestAdded: "項已加入大腦",
       ingestFailed: "失敗",
+      ingestTooLarge: "檔案太大，無法加入大腦：{size}。每個檔案上限為 {limit}。",
+      ingestUnreachable: "上傳無法連到伺服器。請檢查網路連線後再試一次。",
       ingestRemove: "移除",
       ingestClear: "清除",
       linkedinArchiveAlone: "請單獨加入 LinkedIn ZIP，以便核對每一列資料。",

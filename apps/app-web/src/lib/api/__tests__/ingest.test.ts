@@ -11,6 +11,8 @@ vi.mock("@/lib/desktop-auth-source", () => ({
 import { authFetch, getValidAccessToken } from "@/lib/auth-fetch";
 import {
   MAX_INGEST_FILE_BYTES,
+  formatFileSize,
+  partitionByIngestSize,
   getIngestJobStatus,
   ingestFiles,
   ingestLinkedInArchive,
@@ -315,5 +317,37 @@ describe("[COMP:app-web/home-file-drop] upload result → chip status", () => {
   it("only turns red when the server actually reported a failure", () => {
     expect(statusForIngestResult({ fileName: "x", ok: false, error: "Unsupported file type" })).toBe("error");
     expect(statusForIngestResult(undefined)).toBe("error");
+  });
+});
+
+describe("[COMP:app-web/home-file-drop] ingest size guard", () => {
+  /** Allocating 62 MB per case is pointless; stub `size` on a 1-byte File. */
+  const sized = (name: string, bytes: number): File => {
+    const file = new File([new Uint8Array(1)], name, { type: "text/plain" });
+    Object.defineProperty(file, "size", { value: bytes });
+    return file;
+  };
+
+  it("accepts a file at the cap and rejects the one byte over it", () => {
+    const at = sized("at.docx", MAX_INGEST_FILE_BYTES);
+    const over = sized("over.docx", MAX_INGEST_FILE_BYTES + 1);
+    const { accepted, tooLarge } = partitionByIngestSize([at, over]);
+    expect(accepted).toEqual([at]);
+    expect(tooLarge).toEqual([over]);
+  });
+
+  it("splits a mixed batch instead of failing all of it", () => {
+    const small = sized("notes.md", 85_000);
+    const huge = sized("guide.docx", 65_790_453);
+    const { accepted, tooLarge } = partitionByIngestSize([small, huge, small]);
+    expect(accepted).toHaveLength(2);
+    expect(tooLarge).toEqual([huge]);
+  });
+
+  it("formats sizes the way a user reads them", () => {
+    // The real 2026-08-29 file, and the limit it exceeded.
+    expect(formatFileSize(65_790_453)).toBe("62.7 MB");
+    expect(formatFileSize(MAX_INGEST_FILE_BYTES)).toBe("30.0 MB");
+    expect(formatFileSize(84_964)).toBe("83 KB");
   });
 });
