@@ -88,6 +88,7 @@ const APP_SEGMENT: Record<OperatorAppKey, WorkspaceSurface> = {
   browsers: "computer",
   chat: "chat",
   shopify: "shopify",
+  live: "live",
 };
 
 /** Surfaces that belong to an operator app (the bar shows on these). */
@@ -100,6 +101,7 @@ const SURFACE_TO_APP: Partial<Record<WorkspaceSurface, OperatorAppKey>> = {
   computer: "browsers",
   chat: "chat",
   shopify: "shopify",
+  live: "live",
 };
 
 /** The BUILT-IN operator app a surface belongs to, or null for Brain/Studio/…
