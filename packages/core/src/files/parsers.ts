@@ -10,6 +10,7 @@ import {
   fileExtension,
   type DocumentFormat,
 } from './document-formats.js'
+import { stripDataUris } from './data-uri.js'
 import { isHtmlFile, parseHtmlToMarkdown } from './html.js'
 import { OfficeArchiveLimitError } from './office-archive-safety.js'
 import { parsePptxToMarkdown } from './pptx.js'
@@ -191,11 +192,8 @@ async function parseModernPptx(buffer: Buffer, fileName: string): Promise<Parsed
   }
 }
 
-/**
- * Parse file content from byte evidence first, with filename/MIME metadata as
- * fallback. Returns `{ text, summary }` for cache storage and inline use.
- */
-export async function parseFileContent(
+/** Format dispatch for `parseFileContent` — byte evidence first, metadata second. */
+async function parseFileContentInner(
   buffer: Buffer,
   mimeType: string,
   fileName: string,
@@ -268,7 +266,11 @@ export async function parseFileContent(
   }
 
   if (mimeType.startsWith('text/') || mimeType === 'application/json') {
-    const text = buffer.toString('utf-8')
+    // Stripped here rather than only in the wrapper below so the `(N chars)`
+    // summary describes the text that came back: a Google Docs Markdown export
+    // is 99.5% image payload, and reporting its raw size describes the file
+    // rather than the document.
+    const text = stripDataUris(buffer.toString('utf-8'))
     return { text, summary: `${fileName} (${text.length} chars)` }
   }
 
@@ -276,6 +278,31 @@ export async function parseFileContent(
     text: `[File: ${fileName}, type: ${mimeType}. Content type not supported for text extraction.]`,
     summary: `File: ${fileName} (${mimeType})`,
   }
+}
+
+/**
+ * Parse file content from byte evidence first, with filename/MIME metadata as
+ * fallback. Returns `{ text, summary }` for cache storage and inline use.
+ *
+ * The bytes → text boundary is also the data-URI boundary: every text lane is
+ * knowledge, and an inline base64 payload never is (./data-uri.ts carries the
+ * two incidents). Guarding here rather than per-branch covers `text/*`, JSON,
+ * CSV, Office and whatever format lands next, and it covers the text Pipeline B
+ * extracts from — not just the text that gets chunked.
+ */
+export async function parseFileContent(
+  buffer: Buffer,
+  mimeType: string,
+  fileName: string,
+): Promise<ParsedFileContent> {
+  const parsed = await parseFileContentInner(buffer, mimeType, fileName)
+  // The media lanes are the exception, and the reason this is a wrapper rather
+  // than a blanket pass: an image or PDF returns its OWN bytes as base64 `text`
+  // for a multimodal model to read. There the payload IS the document, and
+  // stripping it would erase it.
+  if (parsed.mediaMimeType) return parsed
+  const text = stripDataUris(parsed.text)
+  return text === parsed.text ? parsed : { ...parsed, text }
 }
 
 /** Determine whether model-facing text is small enough to inline. */

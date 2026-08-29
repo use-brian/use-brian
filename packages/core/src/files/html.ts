@@ -31,6 +31,8 @@
 import TurndownService from 'turndown'
 import { gfm } from 'turndown-plugin-gfm'
 
+import { stripDataUris } from './data-uri.js'
+
 /**
  * Elements removed outright (tag AND contents). Turndown's default for an
  * element it has no rule for is to emit its *text content* — which is why the
@@ -241,7 +243,11 @@ function stripNonContent(html: string): string {
   // were 2.82 M of the 2.87 M characters that came out — 98% of the "document"
   // was image bytes. The alt text is the part that carries meaning, and it
   // survives; the bytes are not knowledge and are never worth a segment.
-  out = out.replace(/data:([a-z0-9/+.-]+);base64,[A-Za-z0-9+/=]+/gi, 'data:$1')
+  //
+  // Kept here as a size reduction ahead of the DOM parse, not as the guard:
+  // the guard is ./data-uri.ts, called from the boundaries every format
+  // crosses (see that module for why HTML-only was not enough).
+  out = stripDataUris(out)
   return out
 }
 

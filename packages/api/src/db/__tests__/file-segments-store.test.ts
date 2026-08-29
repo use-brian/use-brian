@@ -1,9 +1,14 @@
 import { describe, it, expect } from 'vitest'
+import { stripDataUris } from '@use-brian/core'
 import { chunkFileText, MAX_SEGMENTS_PER_FILE, type FileChunk } from '../file-segments-store.js'
 
-/** Assert the exact-slice invariant over every segment of a chunk result. */
+/**
+ * Assert the exact-slice invariant over every segment of a chunk result.
+ * Offsets are into the NORMALIZED text — CRLF folded and inline base64
+ * payloads dropped, the chunker's two documented normalizations.
+ */
 function expectExactSlices(text: string, segments: FileChunk[]) {
-  const normalized = text.replace(/\r\n/g, '\n')
+  const normalized = stripDataUris(text.replace(/\r\n/g, '\n'))
   for (const s of segments) {
     expect(s.content).toBe(normalized.slice(s.charStart, s.charEnd))
   }
@@ -129,5 +134,28 @@ describe('[COMP:brain/file-segments-store] chunkFileText', () => {
     expect(truncatedAtChar).not.toBeNull()
     expect(truncatedAtChar!).toBeGreaterThan(0)
     expectExactSlices(text, segments)
+  })
+
+  // The backstop half of the 2026-08-28 data-URI fix. `parseFileContent` is the
+  // guard that catches a parsed upload (and the text Pipeline B extracts from);
+  // this is the seam every OTHER segment writer converges on — Drive
+  // enrichment, LinkedIn import, paste promotion — none of which need a parser
+  // to have run.
+  it('drops inline base64 payloads before chunking', () => {
+    const payload = `[image1]: <data:image/png;base64,${'A'.repeat(20_000)}>`
+    const text = `# Guide\n\nOulu has more than 600 km of cycle paths.\n\n${payload}\n`
+    const { segments } = chunkFileText(text)
+    expect(segments).toHaveLength(1)
+    expect(segments[0].content).toContain('600 km of cycle paths')
+    expect(segments[0].content).not.toContain('AAAA')
+    expectExactSlices(text, segments)
+  })
+
+  it('spends no segment on a document that is only image bytes', () => {
+    const text = `[image1]: <data:image/png;base64,${'A'.repeat(200_000)}>`
+    // Nothing but the stub survives, and a stub is not a segment worth having.
+    const { segments } = chunkFileText(text)
+    expect(segments.length).toBeLessThanOrEqual(1)
+    expect(segments.every((s) => !s.content.includes('AAAA'))).toBe(true)
   })
 })
