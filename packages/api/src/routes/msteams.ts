@@ -84,6 +84,8 @@ export type MsTeamsRouteOptions = {
   provider: LLMProvider
   configuredProviders?: import('@use-brian/shared/model-registry').ProviderAvailability
   resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
+  /** Live watch feed (live-work.md §5.2) — threaded by hand at every mount; see ChannelPipelineParams. */
+  publishSessionEvent?: import('../session-event-port.js').PublishSessionEvent
   systemPrompt: string
   tools: Map<string, Tool>
   memoryStore: MemoryStore
@@ -438,6 +440,7 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
       provider: options.provider,
       configuredProviders: options.configuredProviders,
       resolveWorkspaceCustomLlm: options.resolveWorkspaceCustomLlm,
+      publishSessionEvent: options.publishSessionEvent,
       systemPrompt: options.systemPrompt,
       tools: options.tools,
       memoryStore: options.memoryStore,

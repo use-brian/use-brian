@@ -1014,6 +1014,7 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
       provider: options.provider,
       configuredProviders: options.configuredProviders,
       resolveWorkspaceCustomLlm: options.resolveWorkspaceCustomLlm,
+      publishSessionEvent: options.publishSessionEvent,
       systemPrompt: options.systemPrompt,
       tools: turnTools,
       memoryStore: options.memoryStore,

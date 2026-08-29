@@ -68,6 +68,12 @@ import {
 } from '../db/sessions.js'
 import { BACKGROUND_MODEL, MODEL_MAP, tierForModel } from '../model-resolution.js'
 import { notifyBrainWriteIfMatch, BRAIN_WRITE_TOOL_SIGNALS } from '../brain-stream/notify.js'
+import { noopPublishSessionEvent } from '../session-event-port.js'
+import {
+  createTurnStreamPublisher,
+  publishRoomTurnActivity,
+  publishTurnCompleted,
+} from '../session-live-publisher.js'
 import { runProactiveCompaction } from '../routes/proactive-compaction.js'
 import { registerSchedulerResolver, unregisterSchedulerResolver } from '../scheduling/confirmation-registry.js'
 import { sendConfirmationPrompt } from '../scheduling/confirmation-prompt.js'
@@ -110,6 +116,16 @@ export type CalleeExecutorOptions = {
   provider: LLMProvider
   /** OSS workspace custom endpoint default for the callee's final loop. */
   resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
+  /**
+   * Session live-event bus publish — callee turns (`workflow` /
+   * `assistant-call` sessions) mirror onto the bus through the shared
+   * publisher so the Live watch pane streams them (live-work.md §5.2).
+   * Runs execute on brian-api-workers; the bus is LISTEN/NOTIFY
+   * cross-instance, so relays on brian-api receive these. Threaded by
+   * hand at every `createCalleeExecutor` call site — no-op when unset
+   * (unit tests only).
+   */
+  publishSessionEvent?: import('../session-event-port.js').PublishSessionEvent
   /** Base tool set (will be cloned + MCP-injected per callee). */
   tools: Map<string, Tool>
   memoryStore: MemoryStore
@@ -621,6 +637,26 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         ? [turnScope.activeTeam.compartmentKey]
         : [],
     })
+    // ── Live watch feed (live-work.md §5.2) ──
+    // A callee session has no direct client stream, so the bus is the only
+    // live view of this turn — publish unconditionally (D6) through the
+    // shared publisher, same throttle/cap discipline as routes/chat.ts.
+    const publishSessionEvent = options.publishSessionEvent ?? noopPublishSessionEvent
+    const turnStream = createTurnStreamPublisher({
+      sessionId: session.id,
+      publishSessionEvent,
+      attribution: () => ({ senderUserId: calleeActorUserId, assistantId: params.calleeAssistantId }),
+    })
+    const publishCalleeActivity = (event: string, data: Record<string, unknown>): void =>
+      publishRoomTurnActivity({
+        mirror: true,
+        sessionId: session.id,
+        senderUserId: calleeActorUserId,
+        event,
+        data,
+        publishSessionEvent,
+      })
+
     // A persistent session wins over a newly supplied/default binding. Its
     // immutable row is the trusted source on every replay.
     turnScope = await resolveTurnScopeSystem({
@@ -1907,6 +1943,29 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
             }
           }
         }
+        // Live watch mirror (§5.2): snapshots are the full reply-so-far,
+        // never deltas — the terminal-turns-only deliverable rule below is
+        // untouched, this feed exists only behind the gateSessionRead relay.
+        if (event.type === 'text_delta') {
+          turnStream.onTextDelta(event.text)
+        } else if (event.type === 'thinking_delta') {
+          turnStream.onReasoningDelta(event.text)
+        } else if (event.type === 'tool_start') {
+          turnStream.onToolStart(event.name)
+          publishCalleeActivity('tool_start', { id: event.id, name: event.name })
+        } else if (event.type === 'tool_input') {
+          publishCalleeActivity('tool_input', { id: event.id, name: event.name, input: event.input })
+        } else if (event.type === 'tool_result') {
+          for (const block of event.results) {
+            if (block.type === 'tool_result') {
+              publishCalleeActivity('tool_result', {
+                id: block.toolUseId,
+                name: block.name,
+                isError: block.isError ?? false,
+              })
+            }
+          }
+        }
         if (event.type === 'text_delta') {
           responseText += event.text
         } else if (event.type === 'error' && isStalledError(event.error)) {
@@ -2152,6 +2211,13 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       for (const id of registeredToolCallIds) {
         unregisterSchedulerResolver(id)
       }
+      // Watch viewers clear their "Working" card on the terminal bus event —
+      // in the finally, not on the exits we happened to think of.
+      publishTurnCompleted({
+        sessionId: session.id,
+        senderUserId: calleeActorUserId,
+        publishSessionEvent,
+      })
     }
 
     // An empty consult is a FAILURE, not a completion. Papering over it with a

@@ -1104,6 +1104,13 @@ export interface BootContext {
   provider: LLMProvider
   /** Workspace-owned text/tool runtime resolver for closed route consumers. */
   resolveWorkspaceCustomLlm: import('./custom-llm-runtime.js').WorkspaceCustomLlmResolver
+  /**
+   * Session live-event bus publish for closed channel routes
+   * (live-work.md §5.2): every `processChannelMessage` caller must pass it
+   * or that edition's turns are invisible to the Live watch pane — the
+   * same threaded-by-hand obligation as `resolveWorkspaceCustomLlm` above.
+   */
+  publishSessionEvent: import('./session-event-port.js').PublishSessionEvent
   /** Standard/background custom runtime, resolved at execution time. */
   resolveBackgroundRuntime: import('./custom-llm-runtime.js').BackgroundRuntimeResolver
   /** Application-provider background model when no workspace runtime exists. */
@@ -2662,6 +2669,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const calleeExecutor = createCalleeExecutor({
     provider,
     resolveWorkspaceCustomLlm,
+    publishSessionEvent,
     tools: allTools,
     memoryStore,
     // Session-state bridge: a consult that delivers into a user channel reads
@@ -7713,6 +7721,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     app,
     provider,
     resolveWorkspaceCustomLlm,
+    publishSessionEvent,
     resolveBackgroundRuntime,
     get backgroundModel() { return backgroundModelFor(configuredProviders) },
     get extractionModel() {
@@ -7922,6 +7931,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             provider,
             configuredProviders,
             resolveWorkspaceCustomLlm,
+            publishSessionEvent,
             systemPrompt: LAYER_1_SYSTEM_PROMPT,
             tools: allTools,
             memoryStore,
@@ -7991,7 +8001,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     if (integrationStore) {
       app.use('/webhook/telegram', telegramByoRoutes({
         backgroundModel,
-        provider, configuredProviders, resolveWorkspaceCustomLlm, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
+        provider, configuredProviders, resolveWorkspaceCustomLlm, publishSessionEvent, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
         memoryStore, usageStore, checkCreditBudget: ports.checkCreditBudget,
         appUrl: env.APP_URL, apiUrl: env.API_URL, integrationStore,
         linkedAccountStore, ownerPairing: {
@@ -8013,7 +8023,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         backgroundModel,
         ingestChannelMediaRef: channelHosts.slackIngestChannelMediaRef,
         artifactPromoter,
-        provider, configuredProviders, resolveWorkspaceCustomLlm, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
+        provider, configuredProviders, resolveWorkspaceCustomLlm, publishSessionEvent, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
         memoryStore, usageStore, checkCreditBudget: ports.checkCreditBudget,
         integrationStore, channelUserStore, linkedAccountStore, linkCodeStore,
         workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
@@ -8027,7 +8037,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       }))
       app.use('/webhook/whatsapp', whatsappCloudRoutes({
         backgroundModel,
-        provider, configuredProviders, resolveWorkspaceCustomLlm, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
+        provider, configuredProviders, resolveWorkspaceCustomLlm, publishSessionEvent, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
         memoryStore, usageStore, checkCreditBudget: ports.checkCreditBudget,
         integrationStore, channelUserStore,
         workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
@@ -8040,7 +8050,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       // docs/architecture/channels/msteams.md.
       app.use('/webhook/msteams', msteamsRoutes({
         backgroundModel,
-        provider, configuredProviders, resolveWorkspaceCustomLlm, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
+        provider, configuredProviders, resolveWorkspaceCustomLlm, publishSessionEvent, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
         memoryStore, usageStore, checkCreditBudget: ports.checkCreditBudget,
         integrationStore, channelUserStore,
         workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
@@ -8055,7 +8065,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         backgroundModel,
           ingestChannelMediaRef: channelHosts.discordIngestChannelMediaRef,
           artifactPromoter,
-          connectorSecret: env.DISCORD_CONNECTOR_SECRET, provider, configuredProviders, resolveWorkspaceCustomLlm, systemPrompt: LAYER_1_SYSTEM_PROMPT,
+          connectorSecret: env.DISCORD_CONNECTOR_SECRET, provider, configuredProviders, resolveWorkspaceCustomLlm, publishSessionEvent, systemPrompt: LAYER_1_SYSTEM_PROMPT,
           tools: allTools, capabilityStore, memoryStore, usageStore,
           checkCreditBudget: ports.checkCreditBudget, integrationStore, channelUserStore,
           workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
@@ -8067,7 +8077,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         app.use('/internal/wechat', wechatRoutes({
           backgroundModel,
           artifactPromoter,
-          connectorSecret: env.WECHAT_CONNECTOR_SECRET, provider, configuredProviders, resolveWorkspaceCustomLlm, systemPrompt: LAYER_1_SYSTEM_PROMPT,
+          connectorSecret: env.WECHAT_CONNECTOR_SECRET, provider, configuredProviders, resolveWorkspaceCustomLlm, publishSessionEvent, systemPrompt: LAYER_1_SYSTEM_PROMPT,
           tools: allTools, capabilityStore, memoryStore, usageStore,
           checkCreditBudget: ports.checkCreditBudget, integrationStore, channelUserStore,
           workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
@@ -8089,6 +8099,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           provider,
           configuredProviders,
           resolveWorkspaceCustomLlm,
+          publishSessionEvent,
           systemPrompt: LAYER_1_SYSTEM_PROMPT,
           tools: allTools,
           capabilityStore,
@@ -8132,7 +8143,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       app.use('/bridge/v1/channels', customChannelBridgeRoutes({
         backgroundModel,
         artifactPromoter,
-        provider, configuredProviders, resolveWorkspaceCustomLlm, systemPrompt: LAYER_1_SYSTEM_PROMPT,
+        provider, configuredProviders, resolveWorkspaceCustomLlm, publishSessionEvent, systemPrompt: LAYER_1_SYSTEM_PROMPT,
         tools: allTools, capabilityStore, memoryStore, usageStore,
         checkCreditBudget: ports.checkCreditBudget, integrationStore, customChannelStore, channelUserStore,
         workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,

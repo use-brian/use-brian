@@ -71,6 +71,12 @@ import type {
 
 import { mintActorMediaToken } from '../media-token.js'
 import { findUserById } from '../db/users.js'
+import { type PublishSessionEvent, noopPublishSessionEvent } from '../session-event-port.js'
+import {
+  createTurnStreamPublisher,
+  publishRoomTurnActivity,
+  publishTurnCompleted,
+} from '../session-live-publisher.js'
 import {
   findOrCreateSession, addSessionMessage, setSessionMessageChannelId,
   getSessionMessages, updateSessionStatus, getPreferredChannel,
@@ -494,6 +500,19 @@ export type ChannelPipelineParams = {
   configuredProviders?: ProviderAvailability
   /** OSS workspace custom endpoint default for user-facing channel turns. */
   resolveWorkspaceCustomLlm?: import('../custom-llm-runtime.js').WorkspaceCustomLlmResolver
+  /**
+   * Session live-event bus publish — the Live watch pane's feed
+   * (docs/architecture/features/live-work.md §5.2): every channel turn
+   * publishes throttled `turn_stream` snapshots + activity events through
+   * the shared `session-live-publisher`, between the `running`/`idle`
+   * bookends. Optional ONLY for unit tests: like `resolveWorkspaceCustomLlm`
+   * above, this param must be threaded by hand at every
+   * `processChannelMessage` call site AND every mount in both editions'
+   * entrypoints — an omitted optional param degrades by writing nothing
+   * down, the exact `channel-custom-llm-wiring` failure shape. No-op when
+   * unset.
+   */
+  publishSessionEvent?: PublishSessionEvent
   systemPrompt: string
   tools: Map<string, Tool>
   memoryStore: MemoryStore
@@ -904,6 +923,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     capabilityStore,
   } = params
   const externalGuest = params.externalGuest === true
+  const publishSessionEvent = params.publishSessionEvent ?? noopPublishSessionEvent
   const sessionChannelId = params.sessionChannelId ?? channelId
   const externalGuestConnectorTools = externalGuest && params.externalGuestConnectorTools === true
   const connectorToolsAllowed = connectorToolsAllowedForChannelTurn(
@@ -1906,6 +1926,27 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   await updateSessionStatus(session.id, 'running')
   const confirmationResolver = createConfirmationResolver()
 
+  // ── Live watch feed (live-work.md §5.2) ──
+  // Channel turns have no direct client stream, so the session bus is the
+  // ONLY live view of this turn — publish unconditionally (D6), same
+  // throttle/cap discipline as routes/chat.ts via the shared publisher.
+  // The bus is LISTEN/NOTIFY cross-instance, so a watch relay on brian-api
+  // receives turns running here or on brian-api-workers.
+  const turnStream = createTurnStreamPublisher({
+    sessionId: session.id,
+    publishSessionEvent,
+    attribution: () => ({ senderUserId: userId, assistantId: assistant.id }),
+  })
+  const publishChannelActivity = (event: string, data: Record<string, unknown>): void =>
+    publishRoomTurnActivity({
+      mirror: true,
+      sessionId: session.id,
+      senderUserId: userId,
+      event,
+      data,
+      publishSessionEvent,
+    })
+
   // ── Outbound attachments (sendFile) ──
   // Only wired when filesApi is present — without it the pipeline could
   // collect intent it can never resolve to bytes, and `sendFile`'s
@@ -2190,6 +2231,14 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
           // message is NOT built from these chunks — see
           // `assembleDeliverableText`.
           await hooks.onTextDelta?.(event.text)
+          // Live watch mirror: the snapshot is the full reply-so-far, never
+          // these deltas, so the deliverable-assembly rule stays intact.
+          turnStream.onTextDelta(event.text)
+          break
+        case 'thinking_delta':
+          // No channel delivers reasoning; the watch pane folds the live
+          // tail through the same reducer room viewers use (T13).
+          turnStream.onReasoningDelta(event.text)
           break
         case 'grounding_nudge':
           // The buffered draft is superseded — cut it out of the deliverable
@@ -2219,12 +2268,16 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
           break
         case 'status':
           await hooks.onStatus?.(event.message)
+          publishChannelActivity('status', { message: event.message })
           break
         case 'tool_start':
           await hooks.onToolStart?.(event.id, event.name)
+          turnStream.onToolStart(event.name)
+          publishChannelActivity('tool_start', { id: event.id, name: event.name })
           break
         case 'tool_input':
           await hooks.onToolInput?.(event.id, event.name, event.input)
+          publishChannelActivity('tool_input', { id: event.id, name: event.name, input: event.input })
           break
         case 'tool_result':
           recordChannelToolResults({
@@ -2242,6 +2295,15 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
             channelType,
           })
           await hooks.onToolResult?.(event.results)
+          for (const block of event.results) {
+            if (block.type === 'tool_result') {
+              publishChannelActivity('tool_result', {
+                id: block.toolUseId,
+                name: block.name,
+                isError: block.isError ?? false,
+              })
+            }
+          }
           for (const goalId of acceptedGoalIdsFromToolResults(
             event.results,
             event.metaByToolUseId,
@@ -2656,6 +2718,9 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     }
   } finally {
     await hooks.onCleanup?.()
+    // Watch viewers clear their "Working" card on the terminal bus event —
+    // published in the finally, not on the paths we happened to think of.
+    publishTurnCompleted({ sessionId: session.id, senderUserId: userId, publishSessionEvent })
     await updateSessionStatus(session.id, 'idle')
   }
 }
