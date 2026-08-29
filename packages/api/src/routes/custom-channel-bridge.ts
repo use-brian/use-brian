@@ -51,6 +51,7 @@ import {
 import type { IncomingMessage } from '@use-brian/channels'
 import {
   composeVoiceTurnText,
+  interpretConfirmationEvent,
   parseFileContent,
   sanitize as sanitizeAnalytics,
   transcribeFirstAudio,
@@ -58,7 +59,7 @@ import {
   type MediaBackend,
   type TokenUsage,
 } from '@use-brian/core'
-import type { ConfirmationDecision, ConfirmationResolver, ContentBlock } from '@use-brian/core'
+import type { ConfirmationResolver, ContentBlock } from '@use-brian/core'
 import type { LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, McpSettingsStore } from '@use-brian/core'
 import { getToolDisplayName, formatConfirmationInput } from '@use-brian/shared'
 import { findAssistantById } from '../db/users.js'
@@ -136,15 +137,6 @@ export type CustomChannelBridgeRouteOptions = {
   }
   /** Injectable clock/sleep for the long-poll (tests). */
   sleep?: (ms: number) => Promise<void>
-}
-
-// Natural-language → decision mapping for text-based confirmation (a bridge
-// has no buttons — text is the only path). Mirrors routes/wechat.ts.
-const DECISION_MAP: Record<string, ConfirmationDecision> = {
-  yes: 'allow', y: 'allow', allow: 'allow', approve: 'allow', ok: 'allow',
-  no: 'deny', n: 'deny', deny: 'deny', reject: 'deny',
-  always: 'always_allow', 'always allow': 'always_allow',
-  never: 'always_deny', 'always deny': 'always_deny',
 }
 
 /** Long-poll ceiling (ms) — `wait` is clamped to this. */
@@ -740,16 +732,18 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
       const confirmKey = `${channelId}:${peerId}`
       const pending = pendingConfirmations.get(confirmKey)
       if (pending) {
-        const decision = DECISION_MAP[incoming.text.trim().toLowerCase()]
+        const confirmation = interpretConfirmationEvent(
+          { kind: 'text', text: incoming.text },
+          pending.toolCallId,
+        )
         pendingConfirmations.delete(confirmKey)
-        if (decision) {
-          pending.resolver.resolve(pending.toolCallId, decision)
-          return
+        if (confirmation.status === 'decision') {
+          pending.resolver.resolve(pending.toolCallId, confirmation.decision)
+          if (confirmation.consume) return
         }
-        pending.resolver.resolve(pending.toolCallId, 'deny')
       } else {
-        const decision = DECISION_MAP[incoming.text.trim().toLowerCase()]
-        if (decision && options.deferredConfirmationStore) {
+        const confirmation = interpretConfirmationEvent({ kind: 'text', text: incoming.text })
+        if (confirmation.status === 'decision' && options.deferredConfirmationStore) {
           // A custom peer id is only unique inside its routed assistant/channel
           // (many WeChat accounts have the same `filehelper` peer). Scope the
           // DB lookup by assistant, then carry the trusted deferred-row user
@@ -759,12 +753,12 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
             peerId,
             routing.assistantId,
           )
-          if (deferred && tryResolveSchedulerConfirmation(deferred.toolCallId, decision, {
+          if (deferred && tryResolveSchedulerConfirmation(deferred.toolCallId, confirmation.decision, {
             userId: deferred.userId,
             channelType: 'custom',
             channelId: peerId,
           })) {
-            await options.deferredConfirmationStore.markResolved(deferred.toolCallId, decision)
+            await options.deferredConfirmationStore.markResolved(deferred.toolCallId, confirmation.decision)
             return
           }
         }
@@ -1229,7 +1223,7 @@ export function customChannelBridgeRoutes(options: CustomChannelBridgeRouteOptio
         },
         async onConfirmationRequired(req, resolver) {
           // Text-only confirmation: park the resolver; the peer's next
-          // message resolves it via DECISION_MAP (step 7 above).
+          // message resolves it through the shared confirmation interpreter.
           pendingConfirmations.set(confirmKey, { resolver, toolCallId: req.toolCallId })
           const lines = req.displayLines && req.displayLines.length > 0
             ? req.displayLines

@@ -41,8 +41,8 @@ import {
 } from '@use-brian/channels'
 import type { IncomingMessage } from '@use-brian/channels'
 import { z } from 'zod'
-import { parseFileContent } from '@use-brian/core'
-import type { ConfirmationDecision, ConfirmationResolver, ContentBlock } from '@use-brian/core'
+import { interpretConfirmationEvent, parseFileContent } from '@use-brian/core'
+import type { ConfirmationResolver, ContentBlock } from '@use-brian/core'
 import type { LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, McpSettingsStore } from '@use-brian/core'
 import { findAssistantById } from '../db/users.js'
 import { withChatLock } from '../db/chat-lock.js'
@@ -102,15 +102,6 @@ export type WechatRouteOptions = {
   crmEmailDraftStore?: import('@use-brian/core').CrmEmailDraftStore
   capabilityStore: import('@use-brian/core').CapabilityStore
   archiveMedia?: ChatArchiveLiveMedia
-}
-
-// Natural-language → decision mapping for WeChat text-based confirmation
-// (no buttons on this platform — text is the only path).
-const DECISION_MAP: Record<string, ConfirmationDecision> = {
-  yes: 'allow', y: 'allow', allow: 'allow', approve: 'allow', ok: 'allow',
-  no: 'deny', n: 'deny', deny: 'deny', reject: 'deny',
-  always: 'always_allow', 'always allow': 'always_allow',
-  never: 'always_deny', 'always deny': 'always_deny',
 }
 
 // Refuse media downloads above this — matches the document cap elsewhere.
@@ -422,14 +413,15 @@ export function wechatRoutes(options: WechatRouteOptions): Router {
       const confirmKey = `${channelId}:${peerId}`
       const pending = pendingConfirmations.get(confirmKey)
       if (pending) {
-        const decision = DECISION_MAP[incoming.text.trim().toLowerCase()]
-        if (decision) {
-          pendingConfirmations.delete(confirmKey)
-          pending.resolver.resolve(pending.toolCallId, decision)
-          return
-        }
-        pending.resolver.resolve(pending.toolCallId, 'deny')
+        const confirmation = interpretConfirmationEvent(
+          { kind: 'text', text: incoming.text },
+          pending.toolCallId,
+        )
         pendingConfirmations.delete(confirmKey)
+        if (confirmation.status === 'decision') {
+          pending.resolver.resolve(pending.toolCallId, confirmation.decision)
+          if (confirmation.consume) return
+        }
       }
 
       // 7. Sequentialize per DM peer.
@@ -722,7 +714,7 @@ export function wechatRoutes(options: WechatRouteOptions): Router {
         },
         async onConfirmationRequired(req, resolver) {
           // Text-only confirmation: park the resolver; the peer's next
-          // message resolves it via DECISION_MAP (step 6 above).
+          // message resolves it through the shared confirmation interpreter.
           pendingConfirmations.set(confirmKey, { resolver, toolCallId: req.toolCallId })
           const lines = req.displayLines && req.displayLines.length > 0
             ? req.displayLines

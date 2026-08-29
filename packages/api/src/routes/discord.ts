@@ -25,14 +25,20 @@
 import { timingSafeEqual } from 'node:crypto'
 import { Router } from 'express'
 import { createDiscordAdapter, DiscordApiError, respondToInteraction } from '@use-brian/channels'
-import type { IncomingMessage, OutgoingAction } from '@use-brian/channels'
+import type { IncomingMessage } from '@use-brian/channels'
 import { findAssistantById } from '../db/users.js'
 import { withChatLock } from '../db/chat-lock.js'
 import { resolveChannelUser, type ChannelUserStore } from '../db/channel-user-store.js'
 import { resolveRoutingForSurface, getChannelForWebhook } from '../db/channels-store.js'
-import { parseFileContent, buildTool } from '@use-brian/core'
+import {
+  buildConfirmationActions,
+  buildTool,
+  confirmationDecisionLabel,
+  interpretConfirmationEvent,
+  parseFileContent,
+} from '@use-brian/core'
 import { z } from 'zod'
-import type { ConfirmationDecision, ConfirmationResolver, ContentBlock } from '@use-brian/core'
+import type { ConfirmationResolver, ContentBlock } from '@use-brian/core'
 import type { LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, McpSettingsStore } from '@use-brian/core'
 import type { ChannelIntegrationStore, ChannelIntegrationConfig, DiscordCredentials } from '../db/channel-integrations.js'
 import type { ConnectorStore } from '../db/connector-store.js'
@@ -104,20 +110,7 @@ export type DiscordRouteOptions = {
   capabilityStore: import('@use-brian/core').CapabilityStore
 }
 
-// Natural-language → decision mapping for Discord text-based confirmation.
-const DECISION_MAP: Record<string, ConfirmationDecision> = {
-  yes: 'allow', y: 'allow', allow: 'allow', approve: 'allow', ok: 'allow',
-  no: 'deny', n: 'deny', deny: 'deny', reject: 'deny',
-  always: 'always_allow', 'always allow': 'always_allow',
-  never: 'always_deny', 'always deny': 'always_deny',
-}
-
 const STATUS_THROTTLE_MS = 1200
-
-// Decision label shown back in the morphed prompt after a button press.
-const DECISION_LABEL: Record<ConfirmationDecision, string> = {
-  allow: 'Allowed', deny: 'Denied', always_allow: 'Always allowed', always_deny: 'Always denied',
-}
 
 const interactionSchema = z.object({
   // Internal `channels` row id (forwarded for symmetry; resolution keys off the
@@ -391,19 +384,15 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
       //    as a yes/no/always/never decision.
       const pending = pendingConfirmations.get(incoming.channelId)
       if (pending) {
-        const decision = DECISION_MAP[incoming.text.trim().toLowerCase()]
-        if (decision) {
-          pendingConfirmations.delete(incoming.channelId)
-          pending.resolver.resolve(pending.toolCallId, decision)
-          return
-        }
-        // Not a decision keyword: treat as deny so the in-flight turn (which
-        // holds the per-channel chat lock while it waits on this resolver)
-        // unblocks immediately instead of stalling until the 300s timeout —
-        // then fall through to process this message as a fresh turn. Mirrors
-        // slack.ts. Resolving an already-resolved/timed-out call is a no-op.
-        pending.resolver.resolve(pending.toolCallId, 'deny')
+        const confirmation = interpretConfirmationEvent(
+          { kind: 'text', text: incoming.text },
+          pending.toolCallId,
+        )
         pendingConfirmations.delete(incoming.channelId)
+        if (confirmation.status === 'decision') {
+          pending.resolver.resolve(pending.toolCallId, confirmation.decision)
+          if (confirmation.consume) return
+        }
       }
 
       // 7. Sequentialize per Discord channel.
@@ -445,12 +434,9 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
     res.status(200).json({ ok: true })
 
     const { interaction } = parsed.data
-    // custom_id = mcp_confirm:<toolCallId>:<decision>
-    const parts = interaction.customId.split(':')
-    if (parts[0] !== 'mcp_confirm' || parts.length < 3) return
-    const toolCallId = parts[1]
-    const decision = parts[2] as ConfirmationDecision
-    if (!(decision in DECISION_LABEL)) return
+    const confirmation = interpretConfirmationEvent({ kind: 'action', data: interaction.customId })
+    if (confirmation.status !== 'decision' || !confirmation.toolCallId) return
+    const { toolCallId, decision } = confirmation
 
     const pending = pendingConfirmations.get(interaction.channelId)
     const matched = !!pending && pending.toolCallId === toolCallId
@@ -463,7 +449,7 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
       await respondToInteraction(interaction.id, interaction.token, {
         type: 7,
         data: {
-          content: matched ? `Tool action: ${DECISION_LABEL[decision]}` : 'Expired or already handled.',
+          content: matched ? `Tool action: ${confirmationDecisionLabel(decision)}` : 'Expired or already handled.',
           components: [],
           allowed_mentions: { parse: [] },
         },
@@ -728,7 +714,7 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
         async onConfirmationRequired(req, resolver) {
           // Park the resolver so BOTH paths can answer: an atomic button press
           // (relayed back as an INTERACTION_CREATE → POST /interaction) and the
-          // text fallback (the next message on this channel → DECISION_MAP). The
+          // text fallback (the next normalized message on this channel). The
           // key includes toolCallId so a button echoing a stale id is rejected.
           pendingConfirmations.set(channelId, { resolver, toolCallId: req.toolCallId })
           const lines = req.displayLines && req.displayLines.length > 0
@@ -739,16 +725,7 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
 
           // custom_id = mcp_confirm:<toolCallId>:<decision> (≤100 chars, the
           // Discord button limit). Mirrors the Telegram inline-keyboard payload.
-          const actions: OutgoingAction[] = [
-            { id: 'allow', label: 'Allow', data: `mcp_confirm:${req.toolCallId}:allow` },
-            { id: 'deny', label: 'Deny', data: `mcp_confirm:${req.toolCallId}:deny` },
-          ]
-          if (req.allowPersistentApproval) {
-            actions.push(
-              { id: 'always', label: 'Always Allow', data: `mcp_confirm:${req.toolCallId}:always_allow` },
-              { id: 'never', label: 'Always Deny', data: `mcp_confirm:${req.toolCallId}:always_deny` },
-            )
-          }
+          const actions = buildConfirmationActions(req.toolCallId, req.allowPersistentApproval)
           const replyHint = req.allowPersistentApproval
             ? 'Tap a button, or reply: yes / no / always / never'
             : 'Tap a button, or reply: yes / no'

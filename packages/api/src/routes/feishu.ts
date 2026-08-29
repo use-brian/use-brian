@@ -17,16 +17,17 @@ import {
   type FeishuCardAction,
   type FeishuNormalizedMessage,
   type IncomingMessage,
-  type OutgoingAction,
 } from '@use-brian/channels'
 import {
+  buildConfirmationActions,
   buildTool,
+  confirmationDecisionLabel,
   composeVoiceTurnText,
   describeTranscriptionFailure,
+  interpretConfirmationEvent,
   parseFileContent,
   transcribeFirstAudio,
   TRANSCRIPTION_DISABLED_REASON,
-  type ConfirmationDecision,
   type ConfirmationResolver,
   type ContentBlock,
   type MediaBackend,
@@ -111,20 +112,6 @@ export type FeishuRouteOptions = Omit<DiscordRouteOptions, 'ingestChannelMediaRe
     backend?: MediaBackend
     model?: string
   }
-}
-
-const DECISION_MAP: Record<string, ConfirmationDecision> = {
-  yes: 'allow', y: 'allow', allow: 'allow', approve: 'allow', ok: 'allow',
-  no: 'deny', n: 'deny', deny: 'deny', reject: 'deny',
-  always: 'always_allow', 'always allow': 'always_allow',
-  never: 'always_deny', 'always deny': 'always_deny',
-}
-
-const DECISION_LABEL: Record<ConfirmationDecision, string> = {
-  allow: 'Allowed',
-  deny: 'Denied',
-  always_allow: 'Always allowed',
-  always_deny: 'Always denied',
 }
 
 const STATUS_THROTTLE_MS = 1200
@@ -524,9 +511,9 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
     if (!interaction.chatId || !interaction.messageId || !interaction.action) return
     const data = actionData(interaction)
     if (!data) return
-    const [prefix, toolCallId, rawDecision] = data.split(':')
-    if (prefix !== 'mcp_confirm' || !toolCallId || !(rawDecision in DECISION_LABEL)) return
-    const decision = rawDecision as ConfirmationDecision
+    const confirmation = interpretConfirmationEvent({ kind: 'action', data })
+    if (confirmation.status !== 'decision' || !confirmation.toolCallId) return
+    const { toolCallId, decision } = confirmation
     const pending = pendingConfirmations.get(interaction.chatId)
     let matched = !!pending && pending.toolCallId === toolCallId
     if (matched) {
@@ -555,7 +542,7 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
     if (integration) {
       const api = createFeishuApi(credentialsForApi(integration.credentials as FeishuCredentials))
       await api.updateCard(interaction.messageId, {
-        elements: [{ tag: 'markdown', content: matched ? `Tool action: ${DECISION_LABEL[decision]}` : 'Expired or already handled.' }],
+        elements: [{ tag: 'markdown', content: matched ? `Tool action: ${confirmationDecisionLabel(decision)}` : 'Expired or already handled.' }],
       }).catch(() => {})
     }
   }
@@ -616,17 +603,18 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
 
     const pending = pendingConfirmations.get(incoming.channelId)
     if (pending) {
-      const decision = DECISION_MAP[incoming.text.trim().toLowerCase()]
-      if (decision) {
-        pendingConfirmations.delete(incoming.channelId)
-        pending.resolver.resolve(pending.toolCallId, decision)
-        return
-      }
-      pending.resolver.resolve(pending.toolCallId, 'deny')
+      const confirmation = interpretConfirmationEvent(
+        { kind: 'text', text: incoming.text },
+        pending.toolCallId,
+      )
       pendingConfirmations.delete(incoming.channelId)
+      if (confirmation.status === 'decision') {
+        pending.resolver.resolve(pending.toolCallId, confirmation.decision)
+        if (confirmation.consume) return
+      }
     } else if (options.deferredConfirmationStore) {
-      const decision = DECISION_MAP[incoming.text.trim().toLowerCase()]
-      if (decision) {
+      const confirmation = interpretConfirmationEvent({ kind: 'text', text: incoming.text })
+      if (confirmation.status === 'decision') {
         const deferred = await options.deferredConfirmationStore.findPendingByChannel(
           'feishu',
           incoming.channelId,
@@ -634,12 +622,12 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
         )
         if (
           deferred
-          && tryResolveSchedulerConfirmation(deferred.toolCallId, decision, {
+          && tryResolveSchedulerConfirmation(deferred.toolCallId, confirmation.decision, {
             channelType: 'feishu',
             channelId: incoming.channelId,
           })
         ) {
-          await options.deferredConfirmationStore.markResolved(deferred.toolCallId, decision)
+          await options.deferredConfirmationStore.markResolved(deferred.toolCallId, confirmation.decision)
           return
         }
       }
@@ -1076,16 +1064,7 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
           const lines = request.displayLines?.length
             ? request.displayLines
             : formatConfirmationInput(request.input)
-          const actions: OutgoingAction[] = [
-            { id: 'allow', label: 'Allow', data: `mcp_confirm:${request.toolCallId}:allow` },
-            { id: 'deny', label: 'Deny', data: `mcp_confirm:${request.toolCallId}:deny` },
-          ]
-          if (request.allowPersistentApproval) {
-            actions.push(
-              { id: 'always', label: 'Always Allow', data: `mcp_confirm:${request.toolCallId}:always_allow` },
-              { id: 'never', label: 'Always Deny', data: `mcp_confirm:${request.toolCallId}:always_deny` },
-            )
-          }
+          const actions = buildConfirmationActions(request.toolCallId, request.allowPersistentApproval)
           await adapter.sendMessage(incoming.channelId, {
             text: `${getToolDisplayName(request.toolName)}${lines.length ? `\n${lines.join('\n')}` : ''}\n\n${request.allowPersistentApproval ? 'Tap a button, or reply: yes / no / always / never' : 'Tap a button, or reply: yes / no'}`,
             actions,

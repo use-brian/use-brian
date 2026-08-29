@@ -629,7 +629,10 @@ export function createToolExecutor(options: ToolExecutorOptions) {
           options.confirmationTimeoutMs ?? 300_000,
         ).finally(() => options.context.progress?.resume())
 
-        if (decision === 'deny' || decision === 'always_deny') {
+        // Fail closed at the execution boundary. Normalized event handlers
+        // validate decisions before resolving, but an invalid runtime value
+        // from any future caller must never fall through into tool execution.
+        if (decision !== 'allow' && decision !== 'always_allow') {
           deniedTools.add(t.name)
           t.result = {
             type: 'tool_result',
@@ -642,7 +645,7 @@ export function createToolExecutor(options: ToolExecutorOptions) {
           wake()
           return
         }
-        // 'allow' or 'always_allow' — fall through to execution
+        // 'allow' or 'always_allow' - fall through to execution
       } catch {
         // Timeout — treat as deny for this session
         deniedTools.add(t.name)
