@@ -13,7 +13,14 @@ export type SkillMeta = {
   name: string
   description: string
   whenToUse?: string
-  category: 'productivity' | 'communication' | 'research' | 'custom'
+  /**
+   * The library group this skill files under. An OPEN vocabulary, not an
+   * enum: `productivity` / `communication` / `research` / `custom` ship with
+   * translated labels, and any other name is a workspace-defined group shown
+   * verbatim. Normalized on every write by `normalizeSkillGroup`
+   * (`@use-brian/shared/skill-groups`).
+   */
+  category: string
   requiresConnectors: string[]
   /**
    * If set, this skill is only listed for assistants where `app_type` matches.

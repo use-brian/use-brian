@@ -167,15 +167,37 @@ describe('[COMP:api/skill-categorize] POST /api/skills/categorize', () => {
     expect(draftProvider.stream).not.toHaveBeenCalled()
   })
 
-  it('drops model output that names an unknown category or a bad index', async () => {
+  it('keeps a group the model invents and drops a bad index', async () => {
     const draftProvider = providerReturning(
-      '[{"i":1,"category":"sales"},{"i":9,"category":"research"}]',
+      '[{"i":1,"group":"Gym & Training"},{"i":9,"group":"research"}]',
     )
     const res = await request(categorizeApp({ draftProvider })).post('/api/skills/categorize').send({
       workspaceId: 'w-1',
     })
     expect(res.status).toBe(200)
-    expect(res.body.suggestions).toEqual([])
+    expect(res.body.suggestions).toHaveLength(1)
+    expect(res.body.suggestions[0].suggested).toBe('Gym & Training')
+  })
+
+  // The opt-in wider scope. Without it a library filed under the old coarse
+  // buckets could never be improved, because those buckets were chosen.
+  it('includes already-grouped skills when the scope is `all`', async () => {
+    workspaceSkillStore.listForWorkspace.mockResolvedValue([
+      wsSkill({ rowId: 'a', name: 'Log gym workout', category: 'productivity' }),
+      wsSkill({ rowId: 'b', name: 'Archived one', category: 'custom', state: 'archived' }),
+    ])
+    const draftProvider = providerReturning('[{"i":1,"group":"Gym & Training"}]')
+    const res = await request(categorizeApp({ draftProvider }))
+      .post('/api/skills/categorize')
+      .send({ workspaceId: 'w-1', scope: 'all' })
+    expect(res.status).toBe(200)
+    // Archived rows are still out; the scope widens groups, not lifecycle.
+    expect(res.body.considered).toBe(1)
+    expect(res.body.suggestions[0]).toMatchObject({
+      skillRowId: 'a',
+      current: 'productivity',
+      suggested: 'Gym & Training',
+    })
   })
 
   it('503s without a provider and 404s a non-member', async () => {
@@ -255,12 +277,28 @@ describe('[COMP:api/skill-categorize] POST /api/skills/categorize/apply', () => 
     expect(res.body).toEqual({ updated: 1, failed: ['boom'] })
   })
 
-  it('400s an unknown category or an empty batch, and 404s a non-member', async () => {
-    const app = categorizeApp()
-    const badCategory = await request(app)
+  // A group is free text, so the apply route bounds the SHAPE and normalizes
+  // what survives. Rejecting an unfamiliar NAME is what made the old enum
+  // unable to express the group a workspace actually wanted.
+  it('accepts a group it has never seen, normalized', async () => {
+    const res = await request(categorizeApp())
       .post('/api/skills/categorize/apply')
-      .send({ workspaceId: 'w-1', assignments: [{ skillRowId: 'a', category: 'sales' }] })
-    expect(badCategory.status).toBe(400)
+      .send({
+        workspaceId: 'w-1',
+        assignments: [{ skillRowId: 'a', category: '  Gym   &  Training ' }],
+      })
+    expect(res.status).toBe(200)
+    expect(workspaceSkillStore.update).toHaveBeenCalledWith('u-1', 'w-1', 'a', {
+      category: 'Gym & Training',
+    })
+  })
+
+  it('400s a blank group or an empty batch, and 404s a non-member', async () => {
+    const app = categorizeApp()
+    const blankGroup = await request(app)
+      .post('/api/skills/categorize/apply')
+      .send({ workspaceId: 'w-1', assignments: [{ skillRowId: 'a', category: '   ' }] })
+    expect(blankGroup.status).toBe(400)
 
     const empty = await request(app)
       .post('/api/skills/categorize/apply')

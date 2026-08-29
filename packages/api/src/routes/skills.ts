@@ -83,10 +83,12 @@ import {
   IMPORT_MAX_FILE_BYTES,
   type GithubContentsReader,
 } from '../skills/import-service.js'
+import { normalizeSkillGroup } from '@use-brian/shared/skill-groups'
 import {
+  existingGroupsOf,
   selectCategorizableSkills,
   suggestSkillCategories,
-  SKILL_CATEGORIES,
+  type CategorizeScope,
 } from '../skills/categorize.js'
 import {
   validateSupportFile,
@@ -382,7 +384,7 @@ export function skillRoutes({
           description: s.description ?? '',
           whenToUse: s.whenToUse ?? null,
           content: s.content,
-          category: s.category ?? 'custom',
+          category: normalizeSkillGroup(s.category),
           requiresConnectors: s.requiresConnectors ?? [],
           source: s.source ?? 'community',
           authorName: s.authorName,
@@ -437,7 +439,7 @@ export function skillRoutes({
         description: template.description,
         whenToUse: template.whenToUse,
         content: template.content,
-        category: template.category,
+        category: normalizeSkillGroup(template.category),
         requiresConnectors: template.requiresConnectors,
         source: 'community',
         inductionSource: 'authored',
@@ -696,7 +698,10 @@ export function skillRoutes({
       description: description?.trim() || name.trim(),
       whenToUse: whenToUse?.trim(),
       content: content.trim(),
-      category: category ?? 'custom',
+      // Groups are free text, so this NORMALIZES rather than rejects: a
+      // caller sending an over-long or oddly-spaced name gets the folded
+      // form, never a 400 (`@use-brian/shared/skill-groups`).
+      category: normalizeSkillGroup(category),
       requiresConnectors: requiresConnectors ?? [],
       sensitivity: sensitivity as 'public' | 'internal' | 'confidential' | undefined,
       importSource: importSource ?? null,
@@ -1221,7 +1226,9 @@ export function skillRoutes({
       description: description?.trim(),
       whenToUse: whenToUse === null ? null : whenToUse?.trim(),
       content: content?.trim(),
-      category,
+      // `undefined` means "not patching this field"; anything else is a group
+      // name and gets the same normalize-don't-reject treatment as create.
+      category: category === undefined ? undefined : normalizeSkillGroup(category),
       requiresConnectors,
       sensitivity: sensitivity as 'public' | 'internal' | 'confidential' | undefined,
     }
@@ -1423,20 +1430,33 @@ export function skillRoutes({
   //
   // Two routes, deliberately split: `/categorize` PROPOSES and writes nothing,
   // `/categorize/apply` takes the explicit per-skill assignments the user
-  // reviewed. The model is guessing a bucket from a name and a description, so
+  // reviewed. The model is guessing a group from a name and a description, so
   // a bulk write nobody looked at is the failure mode to design out.
+  //
+  // `scope: 'all'` widens the pass to skills that already have a group. It is
+  // an explicit tick in the dialog, and it widens what the user is SHOWN, not
+  // what is written unseen - the review stage is unchanged.
   //
   // Spec: docs/architecture/engine/skill-system.md → "Suggesting groups".
 
-  const categorizeBodySchema = z.object({ workspaceId: z.string().trim().min(1) })
+  const categorizeBodySchema = z.object({
+    workspaceId: z.string().trim().min(1),
+    // `all` re-decides skills that already have a group, and is reachable only
+    // from an explicit tick in the review dialog. Absent means `unsorted`.
+    scope: z.enum(['unsorted', 'all']).optional(),
+  })
 
+  // A group is free text, not an enum: the schema only bounds the SHAPE, and
+  // `normalizeSkillGroup` folds what survives (trim, collapse, cap, built-in
+  // slugs). Rejecting an unknown name here is what made the old four-value
+  // enum unable to express the group a workspace actually wanted.
   const categorizeApplySchema = z.object({
     workspaceId: z.string().trim().min(1),
     assignments: z
       .array(
         z.object({
           skillRowId: z.string().trim().min(1),
-          category: z.enum(SKILL_CATEGORIES),
+          category: z.string().trim().min(1).max(200),
         }),
       )
       .min(1)
@@ -1456,6 +1476,7 @@ export function skillRoutes({
     const parsed = categorizeBodySchema.safeParse(req.body)
     if (!parsed.success) { res.status(400).json({ error: 'workspaceId is required' }); return }
     const { workspaceId } = parsed.data
+    const requestedScope: CategorizeScope = parsed.data.scope ?? 'unsorted'
 
     const role = await workspaceStore.getRole(userId, workspaceId)
     if (!role) { res.status(404).json({ error: 'Not found' }); return }
@@ -1477,9 +1498,8 @@ export function skillRoutes({
         ? await resolveWorkspaceCustomLlm({ workspaceId, requestedTier: 'standard' })
         : null
       const all = await workspaceSkillStore.listForWorkspace(workspaceId, { actingUserId: userId })
-      const candidates = selectCategorizableSkills(
-        all.filter((s) => s.state !== 'archived'),
-      ).map((s) => ({
+      const active = all.filter((s) => s.state !== 'archived')
+      const candidates = selectCategorizableSkills(active, requestedScope).map((s) => ({
         rowId: s.rowId,
         name: s.name,
         description: s.description,
@@ -1494,10 +1514,13 @@ export function skillRoutes({
 
       const suggestions = await suggestSkillCategories({
         provider: customRuntime?.provider ?? draftProvider,
-        // Bucketing a name + description is the cheapest kind of judgement;
+        // Grouping a name + description is the cheapest kind of judgement;
         // it never needs more than the plan's floor tier.
         model: customRuntime?.selector ?? resolveModel('standard', plan, budget.status),
         skills: candidates,
+        // Derived from the WHOLE library, not just the batch: a group the
+        // model should reuse may belong to a skill this pass cannot touch.
+        existingGroups: existingGroupsOf(active),
       })
       res.json({ suggestions, considered: candidates.length })
     } catch (err) {
@@ -1529,7 +1552,9 @@ export function skillRoutes({
     const failed: string[] = []
     for (const { skillRowId, category } of assignments) {
       try {
-        const row = await workspaceSkillStore.update(userId, workspaceId, skillRowId, { category })
+        const row = await workspaceSkillStore.update(userId, workspaceId, skillRowId, {
+          category: normalizeSkillGroup(category),
+        })
         if (row) updated += 1
         else failed.push(skillRowId)
       } catch (err) {
