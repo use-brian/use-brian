@@ -3847,6 +3847,11 @@ export const ja: Dictionary = {
       assistantsHint: "このスキルを提供するアシスタントを選びます。",
       accessUnavailable: "アシスタント別のアクセス設定は現在利用できません。",
       noAssistants: "このワークスペースにはまだアシスタントがいません。",
+      assistantsAllLabel: "新しいアシスタントを含むすべてのアシスタント",
+      assistantsAllHint:
+        "後から作成したアシスタントにも、このスキルが自動的に追加されます。",
+      assistantsFixedHint:
+        "下でオンにしたアシスタントのみ。新しいアシスタントには追加されません。",
       rederivations: "再導出",
       blueprintLabel: "ブループリント",
       blueprintView: "表示",

@@ -625,6 +625,15 @@ export async function injectSkills(opts: InjectSkillsOptions): Promise<InjectSki
   // missing entry as 'public' so they're never gated out.
   const slugToGovernance = new Map<string, SkillGovernance>()
 
+  // mig 445: slugs whose `workspace_skills.all_assistants` is set — offered to
+  // every assistant in the workspace, including ones created after the skill.
+  // Populated from the same `listForWorkspace` read as the two maps above, so
+  // when that read fails this set is empty and those skills fall back to their
+  // materialised rows (i.e. to the pre-445 behaviour). That degrade is
+  // deliberately the restrictive direction: the failure hides a skill rather
+  // than offering one the workspace never granted.
+  const allAssistantsSlugs = new Set<string>()
+
   try {
     const builtinSkills = loadBuiltinSkills()
     // Workspace-scoped skills (the assistant's workspace). This replaces the
@@ -670,6 +679,12 @@ export async function injectSkills(opts: InjectSkillsOptions): Promise<InjectSki
           // scope (incl. the suggested-skill proposer default) lives in the
           // enablement allowlist — see isSkillOfferable's doc comment.
           slugToGovernance.set(ws.slug, { sensitivity: ws.sensitivity })
+          // mig 445: the OTHER half of offering scope. The allowlist can only
+          // name assistants that existed when it was written, so a skill meant
+          // for "everyone, including whoever is created next" carries no rows
+          // at all and says so here instead. Read as an OR beside the rows —
+          // never as a replacement, because a narrowed skill still uses rows.
+          if (ws.allAssistants) allAssistantsSlugs.add(ws.slug)
         }
       } catch (err) {
         console.error(`[${channel}] CL-8 slug map build failed:`, err)
@@ -749,8 +764,16 @@ export async function injectSkills(opts: InjectSkillsOptions): Promise<InjectSki
       if (!s.appliesToAppType) return true
       return opts.assistantAppType === s.appliesToAppType
     }
+    // Offering scope, four independent grants OR'd together. The `disabledSlugs`
+    // veto is applied by `passesGovernance` BEFORE this and still out-ranks all
+    // four. `allAssistantsSlugs` (mig 445) is the only one that survives the
+    // creation of a NEW assistant — the other three name assistants that
+    // already existed when they were written.
     const isEnabled = (s: { id: string; source: string }): boolean =>
-      s.source === 'builtin' || enabledSlugs.has(s.id) || workspaceEnabledSlugs.has(s.id)
+      s.source === 'builtin' ||
+      enabledSlugs.has(s.id) ||
+      workspaceEnabledSlugs.has(s.id) ||
+      allAssistantsSlugs.has(s.id)
     // Use-time clearance gate. Built-in skills have no `workspace_skills`
     // row — treat them as 'public' so they're never gated out.
     const isOfferable = (s: { id: string }): boolean => {

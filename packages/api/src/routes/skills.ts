@@ -60,6 +60,7 @@ import type { SkillStore, WorkspaceSkillStore, WorkspaceSkill } from '../db/skil
 import type { PageTemplateStore } from '../db/page-templates-store.js'
 import { getWorkspacePlan as getWorkspacePlanDb, type WorkspaceStore } from '../db/workspace-store.js'
 import type { WorkspaceSkillEnablementStore } from '../db/workspace-skill-enablement-store.js'
+import { materialiseAllAssistants } from '../skills/all-assistants.js'
 
 // The real DB-backed credit gate (`checkCreditBudget`, closed `billing/`) is
 // injected by the platform via the `checkUsageBudget` option; the open build
@@ -273,6 +274,35 @@ export function skillRoutes({
   const researchLimiter =
     researchRateLimiter ?? createRateLimiter({ maxRequests: 10, windowMs: 3600_000 })
 
+  /**
+   * The assistants a skill is currently offered to, as the client should render
+   * them.
+   *
+   * Two representations answer this question (mig 445) and only one of them is
+   * rows: an `all_assistants` skill is offered to every assistant in the
+   * workspace and carries no `workspace_skill_enablement` row at all. Reading
+   * the allowlist alone therefore reports the most-shared skills in the
+   * workspace as shared with nobody — every toggle off, in a panel whose whole
+   * job is to show who has it.
+   *
+   * Falls back to the raw rows when the workspace assistant list is
+   * unavailable (minimal mounts / tests), which is the pre-445 answer.
+   */
+  async function resolveEnabledAssistantIds(
+    userId: string,
+    skill: WorkspaceSkill,
+  ): Promise<string[]> {
+    if (skill.allAssistants && listWorkspaceAssistants) {
+      const assistants = await listWorkspaceAssistants(userId, skill.workspaceId)
+      return assistants.map((a) => a.id)
+    }
+    if (!workspaceSkillEnablementStore) return []
+    const rows = await workspaceSkillEnablementStore.listForSkill(skill.rowId, {
+      actingUserId: userId,
+    })
+    return rows.map((r) => r.assistantId)
+  }
+
   /** Governance-aware wire projection of a workspace skill — shared by the
    *  workspace list, the workspace-aware create response, and the editor. */
   function projectWorkspaceSkill(
@@ -301,7 +331,15 @@ export function skillRoutes({
       requiresConnectors: s.requiresConnectors,
       blueprintId: s.blueprintId ?? null,
       // Library columns + governance panel (brain-skill-management plan §4).
+      // `enabledAssistantIds` is the RESOLVED set the client renders as
+      // toggles: for an `allAssistants` skill it is every assistant in the
+      // workspace, even though no enablement row exists for any of them.
+      // `allAssistants` rides alongside so the editor can tell "everyone,
+      // including future assistants" from "everyone who happens to exist" —
+      // the two look identical in the id list and behave differently the
+      // moment another assistant is created (mig 445).
       enabledAssistantIds,
+      allAssistants: s.allAssistants,
       lastInvokedAt: s.lastInvokedAt ? s.lastInvokedAt.toISOString() : null,
       invocations: s.invocations,
       succeeded: s.succeeded,
@@ -429,6 +467,12 @@ export function skillRoutes({
     const template = communityRegistry.find((skill) => skill.id === req.params.slug)
     if (!template) { res.status(404).json({ error: 'Catalog skill not found' }); return }
 
+    // mig 445: an omitted / 'all' request is the intent "every assistant,
+    // including ones created later" — stored on the row, not materialised as
+    // one enablement row per assistant that happens to exist right now.
+    const installWantsAllAssistants =
+      body.data.enabledAssistantIds === undefined || body.data.enabledAssistantIds === 'all'
+
     let installed: WorkspaceSkill | null = null
     try {
       installed = await workspaceSkillStore.create(userId, workspaceId, {
@@ -439,6 +483,7 @@ export function skillRoutes({
         content: template.content,
         category: template.category,
         requiresConnectors: template.requiresConnectors,
+        allAssistants: installWantsAllAssistants,
         source: 'community',
         inductionSource: 'authored',
         sensitivity: body.data.sensitivity,
@@ -471,11 +516,17 @@ export function skillRoutes({
         const assistants = await listWorkspaceAssistants(userId, workspaceId)
         const valid = new Set(assistants.map((assistant) => assistant.id))
         const requested = body.data.enabledAssistantIds
-        enabledIds = requested === undefined || requested === 'all'
-          ? assistants.map((assistant) => assistant.id)
-          : requested.filter((id) => valid.has(id))
-        for (const assistantId of enabledIds) {
-          await workspaceSkillEnablementStore.enable(installed.rowId, assistantId, userId)
+        if (requested === undefined || requested === 'all') {
+          // mig 445: "all" is an INTENT, so it rides the flag set at INSERT
+          // above and writes no rows — otherwise the next assistant created in
+          // this workspace would silently not get the skill. The response still
+          // lists today's assistants so the client renders every toggle on.
+          enabledIds = assistants.map((assistant) => assistant.id)
+        } else {
+          enabledIds = requested.filter((id) => valid.has(id))
+          for (const assistantId of enabledIds) {
+            await workspaceSkillEnablementStore.enable(installed.rowId, assistantId, userId)
+          }
         }
       }
 
@@ -550,6 +601,18 @@ export function skillRoutes({
           const list = enabledBySkill.get(row.workspaceSkillId) ?? []
           list.push(row.assistantId)
           enabledBySkill.set(row.workspaceSkillId, list)
+        }
+      }
+      // mig 445: an `all_assistants` skill carries no rows, so the bulk read
+      // above returns nothing for it. Resolve those against the workspace's
+      // assistant list once (not per skill) — otherwise the library renders the
+      // workspace's most-shared skills with an empty assistant count.
+      if (visible.some((s) => s.allAssistants) && listWorkspaceAssistants) {
+        const everyAssistantId = (await listWorkspaceAssistants(userId, workspaceId)).map(
+          (a) => a.id,
+        )
+        for (const s of visible) {
+          if (s.allAssistants) enabledBySkill.set(s.rowId, everyAssistantId)
         }
       }
       // Origin-aware induction provenance: one bulk read of the ACTIVE
@@ -690,6 +753,12 @@ export function skillRoutes({
       res.status(501).json({ error: 'Skill bundle resources are not available on this deployment.' }); return
     }
 
+    // mig 445: an omitted or 'all' request means "every assistant, including
+    // ones created later". That is a property of the SKILL, so it is stored on
+    // the row; only an explicit id list materialises enablement rows.
+    const wantsAllAssistants =
+      enabledAssistantIds === undefined || enabledAssistantIds === 'all'
+
     const input = {
       slug,
       name: name.trim(),
@@ -703,14 +772,15 @@ export function skillRoutes({
       bundleVersion: bundleVersion ?? (validSupportFiles.length > 0 ? 2 : 1),
       sourceDigest: sourceDigest ?? null,
       deferGraphRecompute: validSupportFiles.length > 0,
+      allAssistants: wantsAllAssistants,
     }
 
     try {
       // Workspace-aware branch (brain-skill-management plan §4): create in the
-      // named workspace and write the D4 enablement default — every assistant
-      // the creator can reach, unless an explicit subset was sent. Enablement
-      // is an allowlist; skipping this step would create a skill no assistant
-      // is ever offered.
+      // named workspace and record the default offering scope — every
+      // assistant, including future ones (the `all_assistants` flag), unless an
+      // explicit subset was sent, which materialises rows instead. Enablement
+      // is an allowlist, so a skill with neither is offered to nobody.
       if (workspaceId && workspaceSkillStore && workspaceStore) {
         const role = await workspaceStore.getRole(userId, workspaceId)
         if (!role) { res.status(404).json({ error: 'Not found' }); return }
@@ -770,14 +840,22 @@ export function skillRoutes({
           if (workspaceSkillEnablementStore && listWorkspaceAssistants) {
             const assistants = await listWorkspaceAssistants(userId, workspaceId)
             const valid = new Set(assistants.map((a) => a.id))
-            const wanted =
-              enabledAssistantIds === undefined || enabledAssistantIds === 'all'
-                ? assistants.map((a) => a.id)
-                : enabledAssistantIds.filter((id) => valid.has(id))
-            for (const assistantId of wanted) {
-              await workspaceSkillEnablementStore.enable(skill.rowId, assistantId, userId)
+            if (wantsAllAssistants) {
+              // mig 445 (was D4): "all" is stored as intent on the row at
+              // INSERT, not fanned out into one enablement row per assistant.
+              // The old fan-out was a snapshot — correct on the day it ran and
+              // wrong for every assistant created afterwards. Rows would also
+              // contradict the flag, so this branch writes none.
+              enabledIds = assistants.map((a) => a.id)
+            } else {
+              // `wantsAllAssistants` already absorbed undefined / 'all', so
+              // this branch is the explicit id list.
+              const wanted = (enabledAssistantIds as string[]).filter((id) => valid.has(id))
+              for (const assistantId of wanted) {
+                await workspaceSkillEnablementStore.enable(skill.rowId, assistantId, userId)
+              }
+              enabledIds = wanted
             }
-            enabledIds = wanted
           }
         } catch (err) {
           if (validSupportFiles.length > 0) {
@@ -1235,13 +1313,10 @@ export function skillRoutes({
         if (!updated) { res.status(404).json({ error: 'Skill not found' }); return }
         // Return the Brain projection (rowId-shaped, matching create's 201) —
         // the enablement rows are unchanged by an edit, re-read for the shape.
-        let enabledAssistantIds: string[] = []
-        if (workspaceSkillEnablementStore) {
-          const rows = await workspaceSkillEnablementStore.listForSkill(updated.rowId, {
-            actingUserId: userId,
-          })
-          enabledAssistantIds = rows.map((r) => r.assistantId)
-        }
+        // An `allAssistants` skill carries NO rows, so reading the allowlist
+        // would report it as offered to nobody — resolve it the same way every
+        // other projection does (see `resolveEnabledAssistantIds`).
+        const enabledAssistantIds = await resolveEnabledAssistantIds(userId, updated)
         res.json(projectWorkspaceSkill(updated, enabledAssistantIds))
         return
       }
@@ -1349,15 +1424,20 @@ export function skillRoutes({
     try {
       const ctx = await resolveAccessContext(userId, req.params.id)
       if (!ctx.ok) { res.status(ctx.status).json({ error: ctx.error }); return }
-      const rows = await workspaceSkillEnablementStore!.listForSkill(ctx.skill.rowId, {
-        actingUserId: userId,
-      })
+      // mig 445: the flag answers for every assistant at once and carries no
+      // rows, so the allowlist read is skipped rather than reported as "off".
+      const rows = ctx.skill.allAssistants
+        ? []
+        : await workspaceSkillEnablementStore!.listForSkill(ctx.skill.rowId, {
+            actingUserId: userId,
+          })
       const enabled = new Set(rows.map((r) => r.assistantId))
       res.json({
+        allAssistants: ctx.skill.allAssistants,
         assistants: ctx.assistants.map((a) => ({
           id: a.id,
           name: a.name,
-          enabled: enabled.has(a.id),
+          enabled: ctx.skill.allAssistants || enabled.has(a.id),
         })),
       })
     } catch (err) {
@@ -1370,8 +1450,17 @@ export function skillRoutes({
     const userId = req.userId
     if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
 
-    const { enabledAssistantIds } = (req.body ?? {}) as { enabledAssistantIds?: string[] }
-    if (!Array.isArray(enabledAssistantIds) || enabledAssistantIds.some((id) => typeof id !== 'string')) {
+    const { enabledAssistantIds, allAssistants } = (req.body ?? {}) as {
+      enabledAssistantIds?: string[]
+      allAssistants?: boolean
+    }
+    if (allAssistants !== undefined && typeof allAssistants !== 'boolean') {
+      res.status(400).json({ error: 'allAssistants must be a boolean' }); return
+    }
+    // `allAssistants: true` is self-describing — the id list is redundant and
+    // may legitimately be absent. Every other request still needs one.
+    if (allAssistants !== true
+      && (!Array.isArray(enabledAssistantIds) || enabledAssistantIds.some((id) => typeof id !== 'string'))) {
       res.status(400).json({ error: 'enabledAssistantIds must be an array of assistant ids' }); return
     }
 
@@ -1379,16 +1468,46 @@ export function skillRoutes({
       const ctx = await resolveAccessContext(userId, req.params.id)
       if (!ctx.ok) { res.status(ctx.status).json({ error: ctx.error }); return }
 
+      // ── "All assistants, including future ones" ──────────────────
+      // Stored as intent on the skill row, never as rows: rows can only ever
+      // name assistants that already exist, which is the whole bug (mig 445).
+      // Existing rows are dropped so the two representations cannot disagree.
+      if (allAssistants === true) {
+        await workspaceSkillStore!.setAllAssistants(userId, ctx.skill.workspaceId, ctx.skill.rowId, true)
+        await workspaceSkillEnablementStore!.disableAll(ctx.skill.rowId)
+        res.json({
+          allAssistants: true,
+          assistants: ctx.assistants.map((a) => ({ id: a.id, name: a.name, enabled: true })),
+        })
+        return
+      }
+
       // Desired-state set over the workspace's assistants: enable the missing,
       // disable the removed. Ids outside the workspace are ignored.
       const valid = new Set(ctx.assistants.map((a) => a.id))
-      const wanted = new Set(enabledAssistantIds.filter((id) => valid.has(id)))
+      const wanted = new Set(enabledAssistantIds!.filter((id) => valid.has(id)))
+
+      // Narrowing a flagged skill to an explicit list is a CONVERSION, not a
+      // plain diff: the flag must become rows before it is cleared, or the
+      // skill briefly (or permanently, on a crash) belongs to nobody. The
+      // helper writes rows first and clears the flag second; the diff below
+      // then runs against a normal materialised skill.
+      const conversion = await materialiseAllAssistants({
+        skill: ctx.skill,
+        actingUserId: userId,
+        listAssistantIds: async () => ctx.assistants.map((a) => a.id),
+        enablementStore: workspaceSkillEnablementStore!,
+        workspaceSkillStore: workspaceSkillStore!,
+      })
+
       const current = new Set(
-        (
-          await workspaceSkillEnablementStore!.listForSkill(ctx.skill.rowId, {
-            actingUserId: userId,
-          })
-        ).map((r) => r.assistantId),
+        conversion.converted
+          ? conversion.enabledAssistantIds
+          : (
+              await workspaceSkillEnablementStore!.listForSkill(ctx.skill.rowId, {
+                actingUserId: userId,
+              })
+            ).map((r) => r.assistantId),
       )
       for (const id of wanted) {
         if (!current.has(id)) {
@@ -1401,6 +1520,7 @@ export function skillRoutes({
         }
       }
       res.json({
+        allAssistants: false,
         assistants: ctx.assistants.map((a) => ({
           id: a.id,
           name: a.name,

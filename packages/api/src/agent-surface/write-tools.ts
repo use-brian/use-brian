@@ -51,10 +51,27 @@ import type { ConnectorInstanceStore } from '../db/connector-instance-store.js'
 import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
 import type { PendingApprovalsStore } from '../db/pending-approvals-store.js'
 import type { WorkspaceSkillEnablementStore } from '../db/workspace-skill-enablement-store.js'
+import type { WorkspaceSkillStore } from '../db/skill-store.js'
+import { materialiseAllAssistants } from '../skills/all-assistants.js'
 
 export type AgentWriteToolDeps = {
   approvalsStore: PendingApprovalsStore
   enablementStore: WorkspaceSkillEnablementStore
+  /**
+   * Clears the `all_assistants` flag when `disableSkill` narrows a skill that
+   * applies to every assistant (mig 445). Only `setAllAssistants` is used.
+   */
+  workspaceSkillStore: Pick<WorkspaceSkillStore, 'setAllAssistants'>
+  /**
+   * Every assistant in the workspace — needed only to materialise the
+   * `all_assistants` flag into rows before clearing it. Absent in minimal
+   * mounts, where `disableSkill` refuses that one case loudly instead of
+   * reporting a no-op as success.
+   */
+  listWorkspaceAssistants?: (
+    userId: string,
+    workspaceId: string,
+  ) => Promise<Array<{ id: string; name: string }>>
   mcpSettingsStore: McpSettingsStore
   connectorInstanceStore: ConnectorInstanceStore
   /**
@@ -136,9 +153,10 @@ function requireWorkspace(ctx: ToolContext, tool: string): string | { data: stri
 async function findWorkspaceSkill(
   skillId: string,
   workspaceId: string,
-): Promise<{ name: string; isCurrent: boolean } | null> {
-  const result = await query<{ name: string; isCurrent: boolean }>(
-    `SELECT name, (valid_to IS NULL) AS "isCurrent"
+): Promise<{ name: string; isCurrent: boolean; allAssistants: boolean } | null> {
+  const result = await query<{ name: string; isCurrent: boolean; allAssistants: boolean }>(
+    `SELECT name, (valid_to IS NULL) AS "isCurrent",
+            all_assistants AS "allAssistants"
        FROM workspace_skills
       WHERE id = $1 AND workspace_id = $2
       LIMIT 1`,
@@ -156,7 +174,7 @@ async function resolveSkillOrFailure(
   skillId: string,
   workspaceId: string,
   tool: string,
-): Promise<{ name: string } | { data: string; isError: true }> {
+): Promise<{ name: string; allAssistants: boolean } | { data: string; isError: true }> {
   const skill = await findWorkspaceSkill(skillId, workspaceId)
   if (!skill) {
     return notFoundFailure({
@@ -179,7 +197,7 @@ async function resolveSkillOrFailure(
       isError: true,
     }
   }
-  return { name: skill.name }
+  return { name: skill.name, allAssistants: skill.allAssistants }
 }
 
 /** The acting assistant's write ceiling — the no-escalation bound (§2). */
@@ -268,6 +286,16 @@ export function createAgentWriteTools(deps: AgentWriteToolDeps): Tool[] {
       const skill = await resolveSkillOrFailure(input.skillId, workspaceId, 'enableSkill')
       if ('isError' in skill) return skill
       const assistantId = input.assistantId ?? ctx.assistantId
+      // mig 445: already covered by the workspace-wide flag. Writing a row
+      // would leave the two representations disagreeing for no behaviour
+      // change, so say what is true instead.
+      if (skill.allAssistants) {
+        return {
+          data:
+            `Skill ${input.skillId} ("${skill.name}") is already enabled for assistant ${assistantId} — ` +
+            'it applies to every assistant in the workspace, including ones created later. Nothing to do.',
+        }
+      }
       await deps.enablementStore.enable(input.skillId, assistantId, ctx.userId)
       return { data: `Skill ${input.skillId} ("${skill.name}") enabled for assistant ${assistantId}.` }
     },
@@ -292,6 +320,37 @@ export function createAgentWriteTools(deps: AgentWriteToolDeps): Tool[] {
       const skill = await resolveSkillOrFailure(input.skillId, workspaceId, 'disableSkill')
       if ('isError' in skill) return skill
       const assistantId = input.assistantId ?? ctx.assistantId
+      // mig 445: a skill flagged `all_assistants` holds no enablement row, so
+      // `disable` would delete nothing and return false — which reads as
+      // "already off" and would have the model tell the user the skill is
+      // disabled while every assistant, this one included, keeps being offered
+      // it. Convert the flag into rows for the others first.
+      if (skill.allAssistants) {
+        if (!deps.listWorkspaceAssistants) {
+          return {
+            data:
+              `Skill ${input.skillId} ("${skill.name}") is set to apply to EVERY assistant in the ` +
+              'workspace, and turning it off for one assistant is not available on this deployment. ' +
+              'Nothing was changed. Ask the user to change it in Brain > Skills > Assistant access.',
+            isError: true,
+          }
+        }
+        await materialiseAllAssistants({
+          skill: { rowId: input.skillId, workspaceId, allAssistants: true },
+          actingUserId: ctx.userId,
+          listAssistantIds: async () =>
+            (await deps.listWorkspaceAssistants!(ctx.userId, workspaceId)).map((a) => a.id),
+          enablementStore: deps.enablementStore,
+          workspaceSkillStore: deps.workspaceSkillStore,
+          exclude: [assistantId],
+        })
+        return {
+          data:
+            `Skill ${input.skillId} ("${skill.name}") disabled for assistant ${assistantId}. It applied ` +
+            'to every assistant in the workspace, so it is now enabled on the others individually and ' +
+            'will no longer be added to assistants created later.',
+        }
+      }
       const removed = await deps.enablementStore.disable(input.skillId, assistantId, ctx.userId)
       // The skill EXISTS and is now off either way — an already-off skill is
       // the requested end state, not a failure (tool-executor.md → D7).

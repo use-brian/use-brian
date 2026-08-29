@@ -3810,6 +3810,10 @@ export const zh: Dictionary = {
       assistantsHint: "選擇要提供這個技能給哪些助理。",
       accessUnavailable: "目前無法使用助理層級的存取設定。",
       noAssistants: "這個工作區還沒有任何助理。",
+      assistantsAllLabel: "所有助理，包含新建立的",
+      assistantsAllHint: "之後建立的助理會自動取得這個技能。",
+      assistantsFixedHint:
+        "只有下面開啟的助理。新建立的助理不會取得這個技能。",
       rederivations: "重新推導次數",
       blueprintLabel: "藍圖",
       blueprintView: "查看",

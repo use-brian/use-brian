@@ -58,6 +58,8 @@ import { loadDecisionPlaybookContext } from '../decision-learning/playbook-conte
 import { runProactiveCompaction } from './proactive-compaction.js'
 import { notifyBrainWriteIfMatch } from '../brain-stream/notify.js'
 import { applyMcpInjection, buildUnavailableCapabilitiesPrompt, injectSkills } from './route-helpers.js'
+import { createDbWorkspaceSkillStore } from '../db/skill-store.js'
+import { createDbWorkspaceSkillEnablementStore } from '../db/workspace-skill-enablement-store.js'
 import {
   attachUserVisibleContext,
   buildSplitSystemPrompt,
@@ -161,6 +163,9 @@ export type PublicTurnDeps = {
    * `external-client` turn never injects skills.
    */
   skillStore?: import('../db/skill-store.js').SkillStore
+  /** Workspace-skill surface for `injectSkills` — see the call site (mig 445). */
+  workspaceSkillStore?: import('../db/skill-store.js').WorkspaceSkillStore
+  workspaceSkillEnablementStore?: import('../db/workspace-skill-enablement-store.js').WorkspaceSkillEnablementStore
 }
 
 /**
@@ -1055,6 +1060,15 @@ export async function executePublicTurn(
           channel: 'api',
           assistantKind: assistant.kind,
           workspaceId: assistant.workspaceId ?? undefined,
+          // Same gap the messaging channels had until mig 445: without these
+          // two stores the public API and the `/c/<token>` chat link saw only
+          // the legacy slug-keyed toggles, so a workspace skill enabled
+          // through the allowlist (or flagged `all_assistants`) was never
+          // offered here. Defaulted from the stateless factories to match
+          // `channel-pipeline.ts`; an injected store still wins.
+          workspaceSkillStore: deps.workspaceSkillStore ?? createDbWorkspaceSkillStore(),
+          workspaceSkillEnablementStore:
+            deps.workspaceSkillEnablementStore ?? createDbWorkspaceSkillEnablementStore(),
         })
         skillsFragment = skillResult.promptFragment
       } catch (err) {

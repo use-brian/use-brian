@@ -4469,6 +4469,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     approvalsStore: pendingApprovalsStore,
     writeToolDeps: {
       enablementStore: workspaceSkillEnablementStore,
+      workspaceSkillStore,
+      listWorkspaceAssistants: async (userId, workspaceId) =>
+        (await listAccessibleAssistants(userId, workspaceId)).map((a) => ({
+          id: a.id,
+          name: a.name,
+        })),
       mcpSettingsStore,
       connectorInstanceStore,
       connectorGrantStore,
@@ -5176,6 +5182,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     communitySkills: communitySkillRegistry,
     workspaceSkillStore,
     workspaceSkillEnablementStore,
+    // mig 445: the assistant-side disable has to materialise an
+    // `all_assistants` skill into per-assistant rows before clearing the flag.
+    listWorkspaceAssistants: async (userId, workspaceId) =>
+      (await listAccessibleAssistants(userId, workspaceId)).map((a) => ({
+        id: a.id,
+        name: a.name,
+      })),
     capabilityStore,
     assistantConnectorGrantsStore,
     analytics,

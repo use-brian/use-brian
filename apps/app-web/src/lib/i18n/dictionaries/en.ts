@@ -4061,6 +4061,11 @@ export const en = {
       assistantsHint: "Choose which assistants are offered this skill.",
       accessUnavailable: "Per-assistant access is not available right now.",
       noAssistants: "This workspace has no assistants yet.",
+      assistantsAllLabel: "Every assistant, including new ones",
+      assistantsAllHint:
+        "Assistants you create later get this skill automatically.",
+      assistantsFixedHint:
+        "Only the assistants switched on below. New assistants will not get this skill.",
       rederivations: "Re-derivations",
       blueprintLabel: "Blueprint",
       blueprintView: "View",
