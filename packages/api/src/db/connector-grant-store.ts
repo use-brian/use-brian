@@ -320,6 +320,7 @@ export function createConnectorGrantStore(): ConnectorGrantStore {
            cg.target_type AS "targetType", cg.target_id AS "targetId",
            cg.granted_by_user_id AS "grantedByUserId",
            cg.granted_at AS "grantedAt",
+           cg.compartments, cg.project_ids AS "projectIds",
            ${INSTANCE_COLS_AS}
          FROM connector_grant cg
          JOIN connector_instance ci ON ci.id = cg.connector_instance_id
@@ -357,6 +358,8 @@ export function createConnectorGrantStore(): ConnectorGrantStore {
            ci.health_status AS "healthStatus",
            ci.last_error AS "lastError",
            ci.last_checked_at AS "lastCheckedAt",
+           ci.compartments,
+           ci.project_ids AS "projectIds",
            ci.created_by AS "createdBy",
            ci.created_at AS "createdAt",
            ci.updated_at AS "updatedAt"
