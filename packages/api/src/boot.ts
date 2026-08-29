@@ -450,6 +450,7 @@ import {
 import { createApprovalDeliveryDispatcher } from './workflow/approval-deliveries.js'
 import { workflowApprovalsRoutes } from './routes/workflow-approvals.js'
 import { approvalsRoutes } from './routes/approvals.js'
+import { liveWorkRoutes } from './routes/live-work.js'
 import {
   workflowsRoutes,
   createValidatedDefinitionEditor,
@@ -5537,6 +5538,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       pageActionsStore.listForWorkflow(actorUserId, workspaceId, workflowId),
   }
   app.use('/api', requireAuth(env.JWT_SECRET), workflowsRoutes(workflowsRouteOptions))
+
+  // Live — the all-activity roster (docs/architecture/features/live-work.md
+  // §3): sessions + workflow runs, tiered server-side per caller. Read-only.
+  app.use('/api', requireAuth(env.JWT_SECRET), liveWorkRoutes())
   // Resolves the late-bound editor the skill-approvals mount above wraps —
   // refinement applies + attach-offer writes now share the builder's exact
   // validation bar (schema, page anchors, dependency preflight).

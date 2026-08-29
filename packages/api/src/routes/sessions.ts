@@ -36,6 +36,7 @@ import {
 } from '../db/session-pins-store.js'
 import { resolveSessionPinLabels } from '../resolve-session-pins.js'
 import { guestAuthorNameForSession, guestSenderProfile } from '../db/guest-comment-store.js'
+import { decideSessionRead } from '../session-read-access.js'
 import { COMMENT_THREAD_CHANNEL_TYPE } from '../db/comment-thread-store.js'
 
 /** A session whose read-access we gate (the subset of fields the gate reads). */
@@ -58,30 +59,36 @@ type GatedSession = {
  * path enforces the same rule as the reads (WS3: `findSessionById` did no
  * per-user check, so a member of a shared primary assistant could resume
  * another member's private session by id).
+ *
+ * The decision itself is the pure `decideSessionRead`
+ * (`../session-read-access.ts`), shared with the Live roster's tiering so
+ * the gate and the roster cannot drift; this wrapper only resolves the
+ * async facts (assistant → workspace, caller → membership clearance).
  */
 export async function gateSessionRead(
   jwtUserId: string,
   session: GatedSession,
 ): Promise<{ status: number; error: string } | null> {
+  let assistantWorkspaceId: string | null = null
+  let membershipClearance: 'public' | 'internal' | 'confidential' | null = null
   if (session.visibility === 'workspace' || session.mode === 'draft') {
     const teamRow = await query<{ workspaceId: string | null }>(
       `SELECT workspace_id AS "workspaceId" FROM assistants WHERE id = $1`,
       [session.assistantId],
     )
-    const workspaceId = teamRow.rows[0]?.workspaceId
-    if (!workspaceId) return { status: 403, error: 'Draft session is not team-owned' }
-    const membership = await getWorkspaceMembershipWithClearanceSystem(jwtUserId, workspaceId)
-    if (!membership) return { status: 403, error: 'Not a member of this team' }
-    if (
-      session.effectiveClearance &&
-      !canRead(membership.clearance, session.effectiveClearance as 'public' | 'internal' | 'confidential')
-    ) {
-      return { status: 403, error: 'Insufficient clearance' }
+    assistantWorkspaceId = teamRow.rows[0]?.workspaceId ?? null
+    if (assistantWorkspaceId) {
+      const membership = await getWorkspaceMembershipWithClearanceSystem(jwtUserId, assistantWorkspaceId)
+      membershipClearance = membership?.clearance ?? null
     }
-    return null
   }
-  if (session.userId !== jwtUserId) return { status: 403, error: 'Forbidden' }
-  return null
+  const decision = decideSessionRead({
+    callerUserId: jwtUserId,
+    session,
+    assistantWorkspaceId,
+    membershipClearance,
+  })
+  return decision.readable ? null : { status: decision.status, error: decision.error }
 }
 
 /**
