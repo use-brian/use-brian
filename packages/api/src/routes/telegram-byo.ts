@@ -75,13 +75,28 @@ import { createEpisode } from '../db/episodes-store.js'
 export type ChannelRecordingIngest = {
   /** Credit surcharge quote for a recording of `durationSec`. 0 → transcribe without confirming. */
   surchargeCredits: (durationSec: number) => number
-  /** Transcribe → segment → ingest → charge-on-success. */
+  /**
+   * Store the bytes → index the recording → transcribe → segment → ingest →
+   * charge-on-success.
+   *
+   * INDEXING IS PART OF THE CONTRACT, not an afterthought of the caller. This
+   * route creates only the anchor Episode (below); the implementation owns the
+   * `recordings` row keyed by that same id, the storage pointer on the
+   * Episode's `sourceRef`, and the terminal status. `listRecordings` reads the
+   * ROW and nothing else, so an implementation that transcribes without
+   * writing it produces a recording the assistant can neither list nor
+   * reprocess while still reporting success — which is exactly what shipped
+   * until 2026-08-29. See docs/architecture/media/transcription.md →
+   * "The inline channel lane".
+   */
   run: (input: {
     recordingId: string
     workspaceId: string
     assistantId: string
     userId: string
     audio: { buffer: Buffer; mime: string; durationMs: number }
+    /** Uploaded file name, so the indexed recording has something to be called. */
+    fileName?: string | null
     sensitivity: 'internal'
   }) => Promise<{ surchargeCredits: number; truncated: boolean }>
 }
@@ -241,6 +256,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
     fileId: string
     mime: string
     durationSec: number
+    fileName: string | null
     channelId: string
     assistantId: string
     workspaceId: string
@@ -587,6 +603,10 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       if (!options.recordingIngest) return
       try {
         const dl = await adapter.downloadMedia(rec.fileId, { mimeHint: rec.mime })
+        // The anchor Episode only. `createRecording` (the `recordings` index
+        // row `listRecordings` reads), the storage pointer, and the terminal
+        // status all belong to `recordingIngest.run` — see the port's contract
+        // above before adding a write here.
         const episode = await createEpisode(rec.ownerId, {
           sourceKind: 'recording',
           sourceRef: { channel: 'telegram', durationSec: rec.durationSec },
@@ -603,6 +623,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
           assistantId: rec.assistantId,
           userId: rec.ownerId,
           audio: { buffer: dl.buffer, mime: rec.mime, durationMs: rec.durationSec * 1000 },
+          fileName: rec.fileName,
           sensitivity: 'internal',
         })
         const lines = [
@@ -648,6 +669,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
         fileId,
         mime: incoming.mediaMime ?? 'audio/mpeg',
         durationSec,
+        fileName: incoming.mediaName ?? null,
         channelId: incoming.channelId,
         assistantId,
         workspaceId: assistantWorkspaceId,
