@@ -141,6 +141,15 @@ export async function createMemory(
     createdByUserId: string
     createdByAssistantId?: string
     sourceEpisodeId?: string
+    /**
+     * Retroactive-rebuild shadow write (rebuild §6): target the
+     * `memories_shadow` namespace instead of the live table, stamped with
+     * the run + pipeline version. Shadow writes skip the `mentioned`
+     * edge hook (edges are live-graph rows; shadow derivation diffs
+     * memory content only - entities/knowledge trail per the plan's
+     * deferred-coverage note).
+     */
+    shadow?: { rebuildRunId: string; pipelineVersion: number }
     /** Entity ids this memory mentions — each gets a `mentioned` edge
      *  (WU-1.7). Optional; empty/absent means no edge emission. */
     linkedEntityIds?: readonly string[]
@@ -194,14 +203,15 @@ export async function createMemory(
   //
   // Guard: only null `assistant_id` when `user_id` is set — otherwise the
   // row would be (NULL, NULL), which `memories_visibility_check` blocks.
+  const shadow = params.shadow
   const result = await query<Memory>(
-    `INSERT INTO memories (
+    `INSERT INTO ${shadow ? 'memories_shadow' : 'memories'} (
        assistant_id, user_id, app_id, workspace_id,
        scope, tags, summary, detail,
        confidence, sensitivity, source, source_session_id,
        created_by_user_id, created_by_assistant_id, source_episode_id,
        original_scope, original_sensitivity, original_summary,
-       compartments, project_ids
+       compartments, project_ids${shadow ? ', rebuild_run_id, pipeline_version' : ''}
      )
      VALUES (
              CASE
@@ -214,7 +224,7 @@ export async function createMemory(
              $5, $6, $7, $8,
              $9, $10, $11, $12,
              $13, $14, $15,
-             $16, $17, $18, $19, $20)
+             $16, $17, $18, $19, $20${shadow ? ', $21, $22' : ''})
      RETURNING ${MEMORY_SELECT}`,
     [
       params.assistantId, params.userId, params.appId ?? null, params.workspaceId ?? null,
@@ -230,6 +240,7 @@ export async function createMemory(
       isModelWrite ? params.summary : null,
       params.compartments ?? [],
       params.projectIds ?? [],
+      ...(shadow ? [shadow.rebuildRunId, shadow.pipelineVersion] : []),
     ],
   )
   const memory = result.rows[0]
@@ -239,7 +250,7 @@ export async function createMemory(
   // workspace-partitioned) AND at least one entity id is supplied.
   // `void` — never awaited on the caller's path, never able to throw
   // into the memory save.
-  if (entityLinks && memory.workspaceId && params.linkedEntityIds && params.linkedEntityIds.length > 0) {
+  if (!shadow && entityLinks && memory.workspaceId && params.linkedEntityIds && params.linkedEntityIds.length > 0) {
     // Edge trust source mirrors the memory's: a user-authored memory
     // yields a `'user'` edge, everything else falls back to `'model'`
     // (memory `source` is a free `string`, so it is normalized here to
