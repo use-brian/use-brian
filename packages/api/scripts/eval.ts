@@ -8,6 +8,10 @@
  *   pnpm eval --judge=gemini        run + judge headlessly (gemini-pro) + finalize
  *   pnpm eval --finalize <scores>   merge a scores.json against its run dir and
  *                                   apply the baseline ratchet
+ *   pnpm eval --replay <msgId>      REPLAY CLASS (turn-ledger plan §9): rebuild a
+ *                                   recorded turn's exact inputs from its trace and
+ *                                   re-run them (optionally --replay-model=<variant>),
+ *                                   printing the recorded-vs-replay diff
  *
  * Design + locked decisions: docs/plans/behavioral-evals.md (§1 D1-D4, §3).
  * Probes: src/evals/probes/*.json (transcribed from the WS9 battery).
@@ -319,6 +323,44 @@ async function judgeHeadless(
 
 async function main(): Promise<number> {
   const args = process.argv.slice(2)
+
+  // ── Replay class (turn-ledger plan §9) ──────────────────────────
+  const replayIdx = args.indexOf('--replay')
+  if (replayIdx !== -1) {
+    const messageId = args[replayIdx + 1]
+    if (!messageId) {
+      console.error('--replay requires an assistant message id (the trace key)')
+      return 1
+    }
+    const apiKey = process.env.GEMINI_API_KEY
+    if (!apiKey) {
+      console.error('GEMINI_API_KEY required for a live replay')
+      return 1
+    }
+    const { reconstructTurnInputs, replayTurn } = await import('../src/ledger/replay.js')
+    const { getLedgerPayloadStore } = await import('../src/ledger/runtime.js')
+    const { listTraceEvents } = await import('../src/db/turn-ledger-store.js')
+    const inputs = await reconstructTurnInputs(messageId, {
+      listTraceEvents,
+      payloads: getLedgerPayloadStore(),
+    })
+    if (!inputs) {
+      console.error(`no replayable trace for ${messageId} (pre-epoch turns cannot be replayed - D6)`)
+      return 1
+    }
+    const variant = args.find((a) => a.startsWith('--replay-model='))?.split('=')[1]
+    const result = await replayTurn({
+      inputs,
+      provider: createGeminiProvider(apiKey),
+      ledger: NOOP_TURN_LEDGER,
+      model: variant,
+    })
+    console.log(`recorded (${inputs.model}):\n${result.recordedText}\n`)
+    console.log(`replay (${variant ?? inputs.model}):\n${result.replayText}\n`)
+    console.log(result.changed ? 'CHANGED' : 'UNCHANGED')
+    return 0
+  }
+
   const finalizeIdx = args.indexOf('--finalize')
   if (finalizeIdx !== -1) {
     const scoresPath = args[finalizeIdx + 1]
