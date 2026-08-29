@@ -821,6 +821,7 @@ export const zhCN: Dictionary = {
       ingestFailed: "失败",
       ingestTooLarge: "文件太大，无法加入大脑：{size}。每个文件上限为 {limit}。",
       ingestUnreachable: "上传无法连接到服务器。请检查网络连接后再试一次。",
+      ingestTooManyFiles: "一次最多 {max} 个文件。请在下一批加入这个文件。",
       ingestRemove: "移除",
       ingestClear: "清除",
       linkedinArchiveAlone: "请单独加入 LinkedIn ZIP，以便核对每一列数据。",

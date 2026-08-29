@@ -1995,10 +1995,13 @@ function FileReingestSection({
 }) {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<"queued" | "in_flight" | "failed" | null>(null);
+  /** The server's own sentence for the failure. `labels.failed` is the fallback. */
+  const [failure, setFailure] = useState<string | null>(null);
 
   async function handleReingest() {
     setBusy(true);
     setStatus(null);
+    setFailure(null);
     try {
       let outcome = await reingestStoredFile(workspaceId, fileId);
       if (outcome.status === "requires_confirmation") {
@@ -2014,7 +2017,13 @@ function FileReingestSection({
         outcome = await reingestStoredFile(workspaceId, fileId, { confirm: true });
       }
       setStatus(outcome.status === "queued" ? "queued" : "in_flight");
-    } catch {
+    } catch (err) {
+      // Swallowing this left the user with a bare "Failed" and no cause, for
+      // failures the server had already explained in a sentence (quota
+      // exceeded, unsupported type, file too large). A `TypeError` means the
+      // request never reached a handler, and its wording is about a network
+      // stack, so only that one falls back to the generic label.
+      setFailure(err instanceof TypeError ? null : ((err as Error).message || null));
       setStatus("failed");
     } finally {
       setBusy(false);
@@ -2033,7 +2042,9 @@ function FileReingestSection({
       </button>
       {status === "queued" && <p className="text-xs text-emerald-600 dark:text-emerald-400">{labels.queued}</p>}
       {status === "in_flight" && <p className="text-xs text-muted-foreground">{labels.inFlight}</p>}
-      {status === "failed" && <p className="text-xs text-red-500">{labels.failed}</p>}
+      {status === "failed" && (
+        <p className="text-xs text-red-500">{failure ?? labels.failed}</p>
+      )}
     </div>
   );
 }

@@ -95,21 +95,37 @@ export function SuggestedFileDrop({ workspaceId }: { workspaceId: string }) {
       setItems((prev) => {
         // Keep only unresolved (pending) items plus the new batch, capped.
         const pending = prev.filter((i) => i.status === "pending");
-        const rejected = tooLarge.map((file) => ({
-          localId: crypto.randomUUID(),
-          file,
-          status: "error" as const,
-          error: format(t.ingestTooLarge, { size: formatFileSize(file.size), limit }),
-        }));
-        const staged = accepted.map((file) => ({
+        // The cap bounds what will be UPLOADED, so it is applied to the
+        // accepted files alone and the overflow is told about rather than
+        // dropped. A plain `.slice(MAX_FILES)` over the whole list used to
+        // discard the tail silently: drop eight files and three vanished with
+        // no chip, no message, and nothing to click. Error chips are not
+        // uploads and never evict a file that could still be sent.
+        const room = Math.max(0, MAX_FILES - pending.length);
+        const staged = accepted.slice(0, room).map((file) => ({
           localId: crypto.randomUUID(),
           file,
           status: "pending" as const,
         }));
-        return [...pending, ...rejected, ...staged].slice(0, MAX_FILES);
+        const rejected = [
+          ...tooLarge.map((file) => ({
+            file,
+            error: format(t.ingestTooLarge, { size: formatFileSize(file.size), limit }),
+          })),
+          ...accepted.slice(room).map((file) => ({
+            file,
+            error: format(t.ingestTooManyFiles, { max: String(MAX_FILES) }),
+          })),
+        ].map(({ file, error }) => ({
+          localId: crypto.randomUUID(),
+          file,
+          status: "error" as const,
+          error,
+        }));
+        return [...pending, ...staged, ...rejected];
       });
     },
-    [t.ingestTooLarge],
+    [t.ingestTooLarge, t.ingestTooManyFiles],
   );
 
   const drop = useFileDrop(addFiles, { disabled: busy });

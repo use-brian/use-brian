@@ -427,10 +427,12 @@ export async function ingestLinkedInArchive(
     body: formData,
   });
   const data = (await res.json().catch(() => null)) as
-    | (LinkedInImportResponse & { error?: string })
+    | (LinkedInImportResponse & { error?: string; detail?: string })
     | null;
   if (!res.ok || !data?.run) {
-    throw new Error(data?.error ?? `LinkedIn import failed (HTTP ${res.status})`);
+    throw new Error(
+      data?.detail || data?.error || `LinkedIn import failed (HTTP ${res.status})`,
+    );
   }
   if (data.run.status === "completed" || data.run.status === "failed") {
     return linkedInResult(file, data);
@@ -444,10 +446,14 @@ export async function ingestLinkedInArchive(
       `${API_URL}/api/imports/linkedin/${encodeURIComponent(data.run.id)}`,
     );
     const statusData = (await statusRes.json().catch(() => null)) as
-      | (LinkedInImportResponse & { error?: string })
+      | (LinkedInImportResponse & { error?: string; detail?: string })
       | null;
     if (!statusRes.ok || !statusData?.run) {
-      throw new Error(statusData?.error ?? `LinkedIn import status failed (HTTP ${statusRes.status})`);
+      throw new Error(
+        statusData?.detail ||
+          statusData?.error ||
+          `LinkedIn import status failed (HTTP ${statusRes.status})`,
+      );
     }
     if (statusData.run.status === "completed" || statusData.run.status === "failed") {
       return linkedInResult(file, statusData);
@@ -506,5 +512,8 @@ export async function reingestStoredFile(
     };
   }
   if (res.status === 409 && data?.error === "ingest_in_flight") return { status: "in_flight" };
-  throw new Error(data?.error ?? `Ingest failed (HTTP ${res.status})`);
+  // `error` is a CODE (`file_too_large`, `quota_exceeded`); `detail` is the
+  // sentence written for a person. Showing the code makes the user search
+  // for a phrase that exists nowhere in the product.
+  throw new Error(data?.detail || data?.error || `Ingest failed (HTTP ${res.status})`);
 }

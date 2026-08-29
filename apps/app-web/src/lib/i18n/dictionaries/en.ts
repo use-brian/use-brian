@@ -946,6 +946,8 @@ export const en = {
         "Too large to add to your brain: {size}. The limit is {limit} per file.",
       ingestUnreachable:
         "The upload could not reach the server. Check your connection and try again.",
+      ingestTooManyFiles:
+        "Only {max} files at a time. Add this one in the next batch.",
       ingestRemove: "Remove",
       ingestClear: "Clear",
       linkedinArchiveAlone: "Add a LinkedIn ZIP by itself so every row can be reconciled.",
