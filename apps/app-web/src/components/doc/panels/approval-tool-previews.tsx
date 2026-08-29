@@ -5,17 +5,18 @@
  *
  * `ToolPreview` switches on the parsed preview data from
  * `lib/approval-previews.ts` (the recognition + parsing lives there so it
- * stays unit-testable). One card per preview kind; tools without a card
- * keep the generic raw-input view in `approvals-panel.tsx` — the caller
- * decides the fallback, this component only renders recognised previews.
+ * stays unit-testable). One card per preview kind; tools without a card use
+ * `GenericToolPreview`, while exact input remains behind `ToolInputToggle`.
  *
  * Spec: docs/architecture/features/workflow.md → Unified approvals.
  * [COMP:app-web/approvals]
  */
 
+import { useState } from "react";
 import { Ban, Check, Mail, Paperclip, RotateCcw, X } from "lucide-react";
 import remarkGfm from "remark-gfm";
 import { ChatMarkdown } from "@use-brian/chat-ui";
+import type { ConfirmationPreview } from "@use-brian/shared";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
@@ -29,6 +30,59 @@ import {
 } from "@/lib/approval-previews";
 
 const EMAIL_BODY_REMARK_PLUGINS = [remarkGfm];
+
+export function GenericToolPreview({
+  preview,
+}: {
+  preview: ConfirmationPreview;
+}) {
+  if (preview.fields.length === 0) return null;
+  return (
+    <dl className="w-full max-w-2xl mt-1 rounded-md border border-border bg-background px-3 py-2 space-y-2">
+      {preview.fields.map((field, index) => (
+        <div
+          key={`${field.label}-${index}`}
+          className="grid grid-cols-[7rem_minmax(0,1fr)] gap-2"
+        >
+          <dt className="text-[11px] text-muted-foreground">{field.label}</dt>
+          <dd className="text-xs whitespace-pre-wrap break-words">
+            {field.value}
+          </dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+/** Exact frozen arguments, disclosed for auditing but never used as display copy. */
+export function ToolInputToggle({
+  args,
+  disabled = false,
+}: {
+  args: Record<string, unknown>;
+  disabled?: boolean;
+}) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  if (Object.keys(args).length === 0) return null;
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        disabled={disabled}
+        className="text-xs text-primary hover:underline disabled:opacity-50"
+      >
+        {open ? t.approvalsPage.hideToolInput : t.approvalsPage.viewToolInput}
+      </button>
+      {open && (
+        <pre className="w-full text-[11px] font-mono bg-muted/50 border border-border rounded px-2 py-1.5 max-h-40 overflow-auto whitespace-pre-wrap break-all max-w-2xl">
+          {JSON.stringify(args, null, 2)}
+        </pre>
+      )}
+    </>
+  );
+}
 
 export function ToolPreview({
   preview,
