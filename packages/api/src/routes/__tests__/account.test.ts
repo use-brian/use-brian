@@ -394,8 +394,13 @@ describe('[COMP:api/account-route] Account routes', () => {
 
   // ── DELETE /memories ────────────────────────────────────────
 
-  it('deletes memories and souls via RLS', async () => {
+  it('deletes memories and souls via RLS and tombstones their version-sidecar copies', async () => {
     const app = createTestApp('/api/account', accountRoutes(), { userId: 'u_1' })
+    const doomed = ['m1', 'm2', 'm3', 'm4', 'm5']
+    mockQueryWithRLS.mockResolvedValueOnce({
+      rows: doomed.map((id) => ({ id })),
+      rowCount: doomed.length,
+    } as never) // doomed-id SELECT (erasure cascade)
     mockQueryWithRLS.mockResolvedValueOnce({ rows: [], rowCount: 5 } as never) // memories
     mockQueryWithRLS.mockResolvedValueOnce({ rows: [], rowCount: 2 } as never) // souls
 
@@ -404,10 +409,17 @@ describe('[COMP:api/account-route] Account routes', () => {
     expect(res.body.ok).toBe(true)
     expect(res.body.memoriesDeleted).toBe(5)
     expect(res.body.soulsDeleted).toBe(2)
-    // Both calls should use RLS
-    expect(mockQueryWithRLS).toHaveBeenCalledTimes(2)
+    // All three reads/writes should use RLS
+    expect(mockQueryWithRLS).toHaveBeenCalledTimes(3)
     expect(mockQueryWithRLS.mock.calls[0][0]).toBe('u_1')
     expect(mockQueryWithRLS.mock.calls[1][0]).toBe('u_1')
+    expect(mockQueryWithRLS.mock.calls[2][0]).toBe('u_1')
+    // Erasure cascade: before-images parked in brain_row_versions are tombstoned
+    const tombstone = mockQuery.mock.calls.find(([sql]) =>
+      String(sql).includes('brain_row_versions'),
+    )
+    expect(tombstone).toBeDefined()
+    expect(tombstone?.[1]).toEqual([doomed])
   })
 
   // ── DELETE / (account teardown) ──────────────────────────────
