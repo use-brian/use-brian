@@ -157,8 +157,8 @@ export type AssistantCallStep = WorkflowStepCommon & {
    * Optional research-depth override for this step's agentic loop — a tier
    * preset and/or numeric overrides (`{ tier?, maxTurns?, maxToolCalls?,
    * timeoutMs? }`). Resolved by the callee executor against
-   * `ASSISTANT_CALL_DEFAULT_BUDGET`. Absent = the 5-turn default (90s
-   * wall-clock, `ASSISTANT_CALL_TIMEOUT_MS`-configurable). See
+   * `ASSISTANT_CALL_DEFAULT_BUDGET`. Absent = the 15-turn / 10-tool-call
+   * default with no wall-clock (`ASSISTANT_CALL_TIMEOUT_MS` can opt in). See
    * `packages/core/src/engine/research-depth.ts`.
    */
   depth?: ResearchDepthConfig

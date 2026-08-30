@@ -16,7 +16,7 @@
  *   actually keeps free-mode delegation single-hop.
  * - Full caller-visible tool surface (the destination-side mode filter was
  *   retired 2026-07-24), optionally narrowed by a per-consult allow-list.
- * - Turn-limited: max 5 turns.
+ * - Turn-limited: 15 turns / 10 tool calls by default.
  * - Runs under callee owner's userId for RLS.
  * - MCP tools injected per-callee (owner's credentials).
  *
@@ -343,7 +343,7 @@ export type CalleeQueryParams = {
    * Research-depth override for this consult's agentic loop. Resolved against
    * `ASSISTANT_CALL_DEFAULT_BUDGET`; raises the turn / tool-call caps for a
    * deep-research step (or a scheduled job authored with `depth`) and may arm
-   * an explicit wall-clock (`timeoutMs`). Absent → the 5-turn default, no
+   * an explicit wall-clock (`timeoutMs`). Absent → the 15-turn default, no
    * wall-clock; liveness is the stall watchdog's.
    */
   depth?: ResearchDepthConfig
@@ -1595,7 +1595,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     // Research-depth budget — a step's `depth` (or a scheduled job's, via its
     // one-step workflow) raises the turn / tool-call caps above the modest
     // default and may arm an explicit wall-clock. Absent →
-    // ASSISTANT_CALL_DEFAULT_BUDGET (5 turns, no wall-clock unless
+    // ASSISTANT_CALL_DEFAULT_BUDGET (15 turns, no wall-clock unless
     // `ASSISTANT_CALL_TIMEOUT_MS` sets one).
     const budget = resolveResearchBudget(params.depth, ASSISTANT_CALL_DEFAULT_BUDGET)
     // Raw live-stream accumulation — kept ONLY as the wall-clock-timeout

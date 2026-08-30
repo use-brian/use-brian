@@ -30,7 +30,8 @@
  * the JSON view (`lib/approval-previews.ts` parses, `ToolPreview` in
  * `approval-tool-previews.tsx` renders — first: `gmailSendMessage` as a
  * mail-client-style email card), with the raw input kept one toggle away
- * and the generic view as the fallback for everything else. Reviewed
+ * and a structured human-readable projection as the fallback for everything
+ * else. Reviewed
  * workflow IMAP replies add body-only immutable revision editing and are
  * excluded from batch resolution: every save replaces the pending row,
  * while Approve and send always executes the newest frozen row. Only
@@ -51,6 +52,10 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
+import {
+  buildConfirmationPreview,
+  getToolDisplayName,
+} from "@use-brian/shared";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
 import Link from "next/link";
@@ -98,7 +103,11 @@ import {
   parseToolPreview,
   type ToolPreviewData,
 } from "@/lib/approval-previews";
-import { ToolPreview } from "./approval-tool-previews";
+import {
+  GenericToolPreview,
+  ToolInputToggle,
+  ToolPreview,
+} from "./approval-tool-previews";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
@@ -706,20 +715,25 @@ function ApprovalCard({
     row.kind === "staged_skill_creation"
       ? (row.arguments as { umbrella?: { name?: string } }).umbrella?.name
       : undefined;
+  const toolDisplayName = row.toolName
+    ? getToolDisplayName(row.toolName.split("__", 1)[0]!)
+    : "";
   const headline =
     row.kind === "email_sender"
       ? row.approvalPayload.senderName?.trim() ||
         row.approvalPayload.sender ||
         t.approvalsPage.kind.email_sender
       : row.kind === "staged_write"
-      ? row.toolName
+      ? toolDisplayName
       : row.kind === "staged_skill_creation"
         ? stagedCreationName || t.approvalsPage.kind[row.kind]
         : row.kind === "staged_skill_update"
           ? skillDetail?.targetSkill?.name || t.approvalsPage.kind[row.kind]
           : row.kind === "workflow_refinement"
             ? skillDetail?.targetWorkflow?.name || t.approvalsPage.kind[row.kind]
-            : row.approvalPayload.description?.trim() || row.toolName;
+            : row.kind === "workflow_step" || row.kind === "tool_invocation"
+              ? toolDisplayName
+              : row.approvalPayload.description?.trim() || row.toolName;
 
   // A staged update can only be applied while its target skill exists —
   // block approve (reject stays available) when the snapshot says it's gone
@@ -745,7 +759,7 @@ function ApprovalCard({
   const resolvedAttachStepId = attachStepId ?? attachTo?.stepId ?? null;
 
   // Tool-specific rich preview (an email as an email), for the kinds whose
-  // `arguments` are a frozen tool input. Null → the generic raw-input view.
+  // `arguments` are a frozen tool input. Null → the generic readable projection.
   // When a preview renders, the payload displayLines are suppressed — they
   // narrate the same call the preview already shows.
   const toolPreview: ToolPreviewData | null =
@@ -876,8 +890,8 @@ function ApprovalCard({
               ))}
             {row.kind === "staged_write" && (
               <>
-                {toolPreview ? (
-                  <div className="flex flex-col items-start gap-1">
+                <div className="flex flex-col items-start gap-1">
+                  {toolPreview ? (
                     <ToolPreview
                       preview={toolPreview}
                       attachmentLines={extractAttachmentLines(
@@ -887,13 +901,13 @@ function ApprovalCard({
                         row.approvalPayload.displayLines,
                       )}
                     />
-                    <RawInputToggle args={row.arguments} />
-                  </div>
-                ) : (
-                  <pre className="mt-1.5 text-[11px] font-mono bg-muted/50 border border-border rounded px-2 py-1.5 max-h-40 overflow-auto whitespace-pre-wrap break-all max-w-2xl">
-                    {JSON.stringify(row.arguments, null, 2)}
-                  </pre>
-                )}
+                  ) : row.approvalPayload.displayLines?.length ? null : (
+                    <GenericToolPreview
+                      preview={buildConfirmationPreview(row.arguments)}
+                    />
+                  )}
+                  <ToolInputToggle args={row.arguments} />
+                </div>
                 <div className="text-xs text-muted-foreground mt-1.5">
                   {format(t.approvalsPage.stagedWrite.provenance, {
                     surface: stagedSurface ?? "",
@@ -1217,11 +1231,10 @@ function ToolCallBody({
   preview: ToolPreviewData | null;
 }) {
   const hasInput = Object.keys(row.arguments ?? {}).length > 0;
-  const described = Boolean(row.approvalPayload.description?.trim());
-  if (!(described && row.toolName) && !hasInput) return null;
+  if (!row.toolName && !hasInput) return null;
   return (
     <div className="flex flex-col items-start gap-1 mt-0.5">
-      {described && row.toolName && (
+      {row.toolName && (
         <div className="text-[11px] font-mono text-muted-foreground/80">
           {row.toolName}
         </div>
@@ -1237,32 +1250,11 @@ function ToolCallBody({
           )}
         />
       )}
-      {hasInput && <RawInputToggle args={row.arguments} />}
-    </div>
-  );
-}
-
-/** "View tool input" toggle over the frozen arguments JSON — the ground
- *  truth under every preview, and the whole view when no preview exists. */
-function RawInputToggle({ args }: { args: Record<string, unknown> }) {
-  const t = useT();
-  const [open, setOpen] = useState(false);
-  if (Object.keys(args ?? {}).length === 0) return null;
-  return (
-    <>
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="text-xs text-primary hover:underline"
-      >
-        {open ? t.approvalsPage.hideToolInput : t.approvalsPage.viewToolInput}
-      </button>
-      {open && (
-        <pre className="w-full text-[11px] font-mono bg-muted/50 border border-border rounded px-2 py-1.5 max-h-40 overflow-auto whitespace-pre-wrap break-all max-w-2xl">
-          {JSON.stringify(args, null, 2)}
-        </pre>
+      {!preview && !row.approvalPayload.displayLines?.length && (
+        <GenericToolPreview preview={buildConfirmationPreview(row.arguments)} />
       )}
-    </>
+      {hasInput && <ToolInputToggle args={row.arguments} />}
+    </div>
   );
 }
 

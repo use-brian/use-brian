@@ -19,9 +19,14 @@
 import { useState, type ReactNode } from "react";
 import { TriangleAlert } from "lucide-react";
 import type { PendingConfirmation } from "@use-brian/chat-ui";
+import { buildConfirmationPreview } from "@use-brian/shared";
 import { useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
-import { ToolPreview } from "@/components/doc/panels/approval-tool-previews";
+import {
+  GenericToolPreview,
+  ToolInputToggle,
+  ToolPreview,
+} from "@/components/doc/panels/approval-tool-previews";
 import {
   extractAttachmentLines,
   extractEmailSender,
@@ -182,9 +187,14 @@ export function ChatConfirmationCard({
                 toolName={confirmation.toolName}
                 lines={confirmation.displayLines}
               />
-            ) : null}
+            ) : (
+              <GenericToolPreview
+                preview={buildConfirmationPreview(confirmation.input)}
+              />
+            )}
           </>
         )}
+        <ToolInputToggle args={confirmation.input} disabled={isInFlight} />
         {commenting ? (
           <div className="space-y-2 pt-1">
             <textarea

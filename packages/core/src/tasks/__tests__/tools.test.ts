@@ -934,6 +934,51 @@ describe('[COMP:tasks/tools-bulk] bulkUpdateTasks / archiveTasks', () => {
     ).toBe(true)
   })
 
+  it('previews explicit task ids as titles and readable changes', async () => {
+    const store = makeFakeStore()
+    const { saveTask, bulkUpdateTasks } = createTaskTools(store)
+    await saveTask.execute({ title: 'Prepare release notes' }, ctx)
+    await saveTask.execute({ title: 'Review launch checklist' }, ctx)
+    const ids = store.rows.map((row) => row.id)
+
+    const lines = await bulkUpdateTasks.describeConfirmation!(
+      { filter: { ids }, set: { status: 'in_review' } },
+      ctx,
+    )
+
+    expect(lines).toEqual([
+      'Update 2 task(s):',
+      '• Prepare release notes (Todo)',
+      '• Review launch checklist (Todo)',
+      'Changes:',
+      '• Status: In review',
+    ])
+    expect(lines?.join('\n')).not.toContain(ids[0])
+    expect(lines?.join('\n')).not.toContain(ids[1])
+  })
+
+  it('previews archive targets and says when a filter currently matches nothing', async () => {
+    const store = makeFakeStore()
+    const { saveTask, archiveTasks } = createTaskTools(store)
+    await saveTask.execute({ title: 'Completed migration', status: 'done' }, ctx)
+
+    expect(
+      await archiveTasks.describeConfirmation!({ filter: { status: 'done' } }, ctx),
+    ).toEqual([
+      'Archive 1 task(s):',
+      '• Completed migration (Done)',
+      'Changes:',
+      '• Status: Archived',
+    ])
+    expect(
+      await archiveTasks.describeConfirmation!({ filter: { status: 'blocked' } }, ctx),
+    ).toEqual([
+      'No tasks currently match this filter.',
+      'Changes:',
+      '• Status: Archived',
+    ])
+  })
+
   it('errors without a workspace', async () => {
     const { archiveTasks } = createTaskTools(makeFakeStore())
     const result = await archiveTasks.execute({ filter: { status: 'todo' } }, ctxNoWorkspace)

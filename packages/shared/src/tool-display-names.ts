@@ -410,6 +410,88 @@ const FIELD_LABELS: Record<string, string> = {
   parent: 'Parent',
 }
 
+export type ConfirmationPreviewField = {
+  label: string
+  value: string
+}
+
+/** Human-readable projection of one frozen tool input. Never parsed back. */
+export type ConfirmationPreview = {
+  fields: ConfirmationPreviewField[]
+}
+
+function confirmationFieldLabel(key: string): string {
+  return FIELD_LABELS[key]
+    ?? key
+      .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+      .replace(/[_-]+/g, ' ')
+      .replace(/^./, (c) => c.toUpperCase())
+}
+
+function indent(text: string): string {
+  return text.split('\n').map((line) => `  ${line}`).join('\n')
+}
+
+function confirmationValue(value: unknown, depth = 0): string {
+  if (typeof value === 'string') return value
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No'
+  if (typeof value === 'number' || typeof value === 'bigint') return String(value)
+  if (value === null) return 'None'
+  if (Array.isArray(value)) {
+    if (value.length === 0) return 'None'
+    if (value.every((item) => typeof item === 'string')) return value.join(', ')
+    return value
+      .map((item, index) => {
+        const rendered = confirmationValue(item, depth + 1)
+        return rendered.includes('\n')
+          ? `${index + 1}.\n${indent(rendered)}`
+          : `${index + 1}. ${rendered}`
+      })
+      .join('\n')
+  }
+  if (typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, child]) => child !== undefined)
+    if (entries.length === 0) return 'None'
+    if (depth >= 4) return 'See technical details'
+    return entries
+      .map(([key, child]) => {
+        const rendered = confirmationValue(child, depth + 1)
+        return rendered.includes('\n')
+          ? `${confirmationFieldLabel(key)}:\n${indent(rendered)}`
+          : `${confirmationFieldLabel(key)}: ${rendered}`
+      })
+      .join('\n')
+  }
+  return String(value)
+}
+
+/**
+ * Derive a readable, structured view from exact tool arguments. This is a
+ * one-way presentation projection; callers must retain and execute `input`.
+ */
+export function buildConfirmationPreview(
+  input: Record<string, unknown>,
+): ConfirmationPreview {
+  const entries = Object.entries(input)
+    .filter(([key, value]) => value !== undefined && !HIDDEN_FIELDS.has(key))
+  const priority = ['currentTitle', 'title', 'name', 'summary', 'description', 'status', 'notes']
+  entries.sort((a, b) => {
+    const ai = priority.indexOf(a[0])
+    const bi = priority.indexOf(b[0])
+    if (ai !== -1 && bi !== -1) return ai - bi
+    if (ai !== -1) return -1
+    if (bi !== -1) return 1
+    return 0
+  })
+  return {
+    fields: entries.map(([key, value]) => ({
+      label: confirmationFieldLabel(key),
+      value: confirmationValue(value),
+    })),
+  }
+}
+
 /**
  * Sort and format tool input entries for a confirmation prompt.
  *
@@ -427,28 +509,8 @@ export function formatConfirmationInput(
   input: Record<string, unknown>,
   bullet = '• ',
 ): string[] {
-  const entries = Object.entries(input)
-    .filter(([k, v]) => v !== undefined && v !== null && !HIDDEN_FIELDS.has(k))
-  // Sort: human-readable fields first, then everything else in original order
-  const priority = ['currentTitle', 'title', 'name', 'summary', 'description', 'status', 'notes']
-  entries.sort((a, b) => {
-    const ai = priority.indexOf(a[0])
-    const bi = priority.indexOf(b[0])
-    if (ai !== -1 && bi !== -1) return ai - bi
-    if (ai !== -1) return -1
-    if (bi !== -1) return 1
-    return 0
-  })
-  return entries.map(([k, v]) => {
-    const label = FIELD_LABELS[k] ?? k.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/^./, (c) => c.toUpperCase())
-    // Address lists (to/cc/bcc) and other string arrays read as a comma list,
-    // not a raw JSON blob.
-    const rendered =
-      Array.isArray(v) && v.every((x) => typeof x === 'string')
-        ? (v as string[]).join(', ')
-        : typeof v === 'object'
-          ? JSON.stringify(v)
-          : v
-    return `${bullet}${label}: ${rendered}`
+  return buildConfirmationPreview(input).fields.map(({ label, value }) => {
+    const rendered = value.includes('\n') ? `\n${indent(value)}` : ` ${value}`
+    return `${bullet}${label}:${rendered}`
   })
 }

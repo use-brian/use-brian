@@ -266,3 +266,61 @@ describe('[COMP:files/parsers] Spreadsheet row fidelity', () => {
     expect(result.text).not.toContain('| 1 | 1 |')
   })
 })
+
+describe('[COMP:files/parsers] parseFileContent — inline data URIs', () => {
+  // A Google Docs Markdown export: prose, then every image collected into
+  // reference-style definitions at the end. On 2026-08-28 that shape ingested
+  // the ESN Oulu Survival Guide as 1,280 base64 segments out of 1,387, and
+  // Pipeline B read the blobs as if they were the document.
+  const GUIDE = [
+    '# ESN Oulu Survival Guide',
+    '',
+    '![Toripolliisi][image1]',
+    '',
+    'Oulu is one of the best bicycle cities in Finland.',
+    '',
+    `[image1]: <data:image/png;base64,${'iVBORw0KGgo'.repeat(2_000)}>`,
+    '',
+  ].join('\n')
+
+  it('drops the payload from a Markdown export but keeps the guide', async () => {
+    const buf = Buffer.from(GUIDE, 'utf-8')
+    const result = await parseFileContent(buf, 'text/markdown', 'guide.md')
+    expect(result.text).toContain('best bicycle cities in Finland')
+    expect(result.text).toContain('![Toripolliisi][image1]')
+    expect(result.text).not.toContain('iVBORw0KGgo')
+    expect(result.text).toContain('data:image/png')
+    expect(result.text.length).toBeLessThan(buf.length / 100)
+  })
+
+  it('reports the surviving length in the summary, not the raw file size', async () => {
+    const buf = Buffer.from(GUIDE, 'utf-8')
+    const result = await parseFileContent(buf, 'text/markdown', 'guide.md')
+    expect(result.summary).toContain(`${result.text.length} chars`)
+    expect(result.summary).not.toContain(`${buf.length} chars`)
+  })
+
+  it('strips an inline Markdown image payload too', async () => {
+    const md = `# Notes\n\n![chart](data:image/png;base64,${'A'.repeat(5_000)})\n`
+    const result = await parseFileContent(Buffer.from(md, 'utf-8'), 'text/markdown', 'notes.md')
+    expect(result.text).toBe('# Notes\n\n![chart](data:image/png)\n')
+  })
+
+  it('strips a payload embedded in JSON', async () => {
+    const json = JSON.stringify({ logo: `data:image/png;base64,${'A'.repeat(5_000)}`, name: 'ESN' })
+    const result = await parseFileContent(Buffer.from(json, 'utf-8'), 'application/json', 'brand.json')
+    expect(result.text).toContain('"name":"ESN"')
+    expect(result.text).not.toContain('AAAA')
+  })
+
+  it('leaves a document with no data URI byte-identical', async () => {
+    const text = 'Sitsits are a special kind of student party.\n'
+    const result = await parseFileContent(Buffer.from(text, 'utf-8'), 'text/plain', 'sitsit.txt')
+    expect(result.text).toBe(text)
+  })
+
+  // The media lanes hand their OWN bytes to a multimodal model as base64, and
+  // the guard must never touch those. It structurally cannot: the base64
+  // alphabet has no `:` or `;`, so an encoded payload can never contain a data
+  // URI. The image/PDF cases above are the standing contract for that.
+})

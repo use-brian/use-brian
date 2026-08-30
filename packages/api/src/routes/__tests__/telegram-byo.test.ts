@@ -265,6 +265,12 @@ vi.mock('../../db/sessions.js', () => ({
   findOrCreateSession: vi.fn(async () => ({ id: 'byo_sess_1' })),
 }))
 
+// The recording lane creates the anchor Episode directly; nothing else in this
+// route's import graph reads episodes, so one stub covers the whole file.
+vi.mock('../../db/episodes-store.js', () => ({
+  createEpisode: vi.fn(async () => ({ id: 'episode_rec_1' })),
+}))
+
 // ── Route import (must come after vi.mock calls) ───────────────
 
 import {
@@ -512,6 +518,104 @@ describe('[COMP:api/telegram-byo-route] OSS owner pairing', () => {
     await flushMicrotasks()
 
     expect(linkedAccountStore.upsert).not.toHaveBeenCalled()
+  })
+})
+
+describe('[COMP:api/telegram-byo-route] recording intake', () => {
+  /**
+   * The route creates the anchor Episode and hands everything else to the
+   * `recordingIngest` port. What it hands over is load-bearing: the port owns
+   * the `recordings` index row, and `listRecordings` shows `title ?? fileName`,
+   * so an intake that drops the name produces a nameless entry even once the
+   * row exists. See docs/architecture/media/transcription.md →
+   * "The inline channel lane".
+   */
+  async function runAudioIntake(recordingIngest: {
+    surchargeCredits: ReturnType<typeof vi.fn>
+    run: ReturnType<typeof vi.fn>
+  }) {
+    const { findAssistantById } = await import('../../db/users.js')
+    const prevImpl = vi.mocked(findAssistantById).getMockImplementation()
+    vi.mocked(findAssistantById).mockResolvedValue({
+      id: 'assistant_1',
+      name: 'Test Assistant',
+      ownerUserId: 'owner_1',
+      workspaceId: 'ws_1', // recordings are workspace-scoped
+      defaultModelAlias: 'gemini-flash',
+      systemPrompt: null,
+    } as never)
+    try {
+      const app = createTestApp(
+        '/webhook/telegram-byo',
+        telegramByoRoutes({
+          provider: {} as never,
+          systemPrompt: '',
+          tools: new Map(),
+          memoryStore: {} as never,
+          integrationStore: makeIntegrationStore({ requireMention: false }) as never,
+          capabilityStore: {} as never,
+          apiUrl: 'http://test',
+          recordingIngest: recordingIngest as never,
+        }),
+      )
+      await postUpdate(app, {
+        update_id: 900,
+        message: {
+          message_id: 900,
+          from: { id: 42, first_name: 'Casey', username: 'casey' },
+          chat: { id: 42, type: 'private' },
+          date: Math.floor(Date.now() / 1000),
+          audio: {
+            file_id: 'standup_audio_id',
+            duration: 90, // under the surcharge threshold — transcribes inline
+            mime_type: 'audio/mpeg',
+            file_name: 'standup.mp3',
+            file_size: 1024,
+          },
+        },
+      })
+      await flushMicrotasks()
+      await flushMicrotasks()
+    } finally {
+      vi.mocked(findAssistantById).mockImplementation(prevImpl!)
+    }
+  }
+
+  it('hands the uploaded file name to the ingest port so the recording is nameable', async () => {
+    const recordingIngest = {
+      surchargeCredits: vi.fn(() => 0),
+      run: vi.fn(async () => ({ surchargeCredits: 0, truncated: false })),
+    }
+
+    await runAudioIntake(recordingIngest)
+
+    expect(recordingIngest.run).toHaveBeenCalledTimes(1)
+    expect(recordingIngest.run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        recordingId: 'episode_rec_1',
+        workspaceId: 'ws_1',
+        assistantId: 'assistant_1',
+        fileName: 'standup.mp3',
+      }),
+    )
+    expect(adapterSendCalls.at(-1)?.text).toContain('filed it to the brain')
+  })
+
+  it('reports a port failure instead of claiming the recording was filed', async () => {
+    // The port rejects when it cannot index the recording. Answering "filed it
+    // to the brain" anyway is the incident of 2026-08-29: a true-sounding
+    // success over a recording nothing can find.
+    const recordingIngest = {
+      surchargeCredits: vi.fn(() => 0),
+      run: vi.fn(async () => {
+        throw new Error('gcs unavailable')
+      }),
+    }
+
+    await runAudioIntake(recordingIngest)
+
+    expect(adapterSendCalls.at(-1)?.text).toContain('Something went wrong transcribing')
+    expect(adapterSendCalls.at(-1)?.text).not.toContain('filed it to the brain')
   })
 })
 

@@ -33,7 +33,7 @@ describe('[COMP:engine/research-depth] resolveResearchBudget', () => {
       maxToolCalls: 35,
       timeoutMs: null, // progress-bounded, no wall-clock (2026-08-19)
     })
-    // `standard` from the 5-turn assistant_call fallback is also an upgrade.
+    // `standard` now matches the assistant_call fallback exactly.
     expect(resolveResearchBudget({ tier: 'standard' }, ASSISTANT_CALL_DEFAULT_BUDGET)).toEqual({
       maxTurns: 15,
       maxToolCalls: 10,
@@ -88,9 +88,9 @@ describe('[COMP:engine/research-depth] resolveResearchBudget', () => {
     ).toBeNull()
   })
 
-  it('ASSISTANT_CALL_DEFAULT_BUDGET is the 5-turn step budget with NO default wall-clock', () => {
+  it('ASSISTANT_CALL_DEFAULT_BUDGET matches the 15-turn standard tier with NO default wall-clock', () => {
     expect(ASSISTANT_CALL_DEFAULT_BUDGET).toEqual({
-      maxTurns: 5,
+      maxTurns: 15,
       maxToolCalls: 10,
       timeoutMs: DEFAULT_ASSISTANT_CALL_TIMEOUT_MS,
     })

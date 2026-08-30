@@ -3,14 +3,14 @@
  *
  * The approvals queue renders a rich, tool-specific preview for actions it
  * recognises (an outgoing email as an email, not a JSON blob) and falls
- * back to the generic raw-input view for everything else. This module owns
- * the recognition + argument parsing so it stays unit-testable; the render
- * layer lives in
- * `components/doc/panels/approval-tool-previews.tsx`.
+ * back to the shared generic human-readable projection for everything else,
+ * with exact input retained behind a technical-details toggle. This module
+ * owns the recognition + argument parsing so it stays unit-testable; the
+ * render layer lives in `components/doc/panels/approval-tool-previews.tsx`.
  *
  * Adding a preview for another tool: add its name → kind to
  * `TOOL_PREVIEW_KINDS`, a parse function returning `null` on any
- * unexpected shape (null = degrade to the generic view, never throw), a
+ * unexpected shape (null = degrade to the generic projection, never throw), a
  * branch in `parseToolPreview`, and a card in the render layer.
  *
  * Spec: docs/architecture/features/workflow.md → Unified approvals.
@@ -113,7 +113,7 @@ export type ToolPreviewData =
  * Recognise + parse an approval row's tool call into preview data.
  * Returns `null` when the tool has no specific preview OR its arguments
  * don't match the expected shape — the caller falls back to the generic
- * raw-input view in both cases.
+ * human-readable projection in both cases.
  */
 export function parseToolPreview(
   toolName: string | null | undefined,
