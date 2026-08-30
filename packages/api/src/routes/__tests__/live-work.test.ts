@@ -35,7 +35,12 @@ const CALLER = '22222222-2222-2222-2222-222222222222'
 const TEAMMATE = '33333333-3333-3333-3333-333333333333'
 const ASSISTANT = '44444444-4444-4444-4444-444444444444'
 
-const NOW = new Date('2026-08-29T12:00:00Z')
+// Relative to the real clock: the roster route derives state from `new
+// Date()` at request time, so an absolute fixture date silently crosses
+// TURN_LEASE_STALE_AFTER_MS once the calendar moves on (working -> stalled
+// a day after the fixture was written). The pure derive* tests inject
+// `now: NOW` explicitly and are invariant to what NOW actually is.
+const NOW = new Date()
 const FRESH = new Date(NOW.getTime() - 5_000)
 
 function makeApp() {
@@ -65,7 +70,7 @@ function sessionRow(overrides: Record<string, unknown> = {}) {
     status: 'running',
     effectiveClearance: null,
     title: 'Quarterly recap',
-    createdAt: new Date('2026-08-29T11:00:00Z'),
+    createdAt: new Date(NOW.getTime() - 3_600_000),
     lastActiveAt: FRESH,
     turnHeartbeatAt: FRESH,
     waiting: false,
@@ -81,7 +86,7 @@ function runRow(overrides: Record<string, unknown> = {}) {
     triggerKind: 'schedule',
     status: 'running',
     currentStepId: 'summarize',
-    startedAt: new Date('2026-08-29T11:30:00Z'),
+    startedAt: new Date(NOW.getTime() - 1_800_000),
     lastActiveAt: FRESH,
     ...overrides,
   }

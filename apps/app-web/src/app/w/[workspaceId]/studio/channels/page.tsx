@@ -128,6 +128,7 @@ import {
   type SearchableSelectItem,
 } from "@/components/ui/searchable-select";
 import { StudioTopbarActions } from "@/components/studio/studio-topbar";
+import { ScrollableNav } from "@/components/scrollable-nav";
 import { DISPLAY_API_URL } from "@/lib/display-api-url";
 import {
   Bot,
@@ -151,14 +152,46 @@ import { Dialog } from "@base-ui/react/dialog";
 // (next.config rewrite) and a relative URL would be invalid in the manifest.
 const PLACEHOLDER_SLACK_WEBHOOK_URL = `${DISPLAY_API_URL}/webhook/slack/REPLACE-AFTER-CONNECT`;
 
+/**
+ * Canonical least-privilege Feishu/Lark permission import for Brian's base
+ * channel path. Ambient all-group ingestion intentionally remains a separate
+ * administrator-approved upgrade and is not part of this clipboard value.
+ */
+export const FEISHU_PERMISSION_IMPORT = JSON.stringify(
+  {
+    scopes: {
+      tenant: [
+        "im:message:send_as_bot",
+        "im:message:readonly",
+        "im:message:update",
+        "im:message:recall",
+        "im:message.reactions:write_only",
+        "im:resource",
+        "im:chat:read",
+        "im:chat.members:read",
+        "im:message.group_at_msg:readonly",
+        "im:message.p2p_msg:readonly",
+      ],
+      user: [],
+    },
+  },
+  null,
+  2,
+);
+
+const FEISHU_CHANNEL_EVENTS = [
+  "im.message.receive_v1",
+  "im.message.reaction.created_v1",
+  "im.message.reaction.deleted_v1",
+] as const;
+const FEISHU_CARD_CALLBACK = "card.action.trigger";
+
 // Glyphs for channel types without a dedicated brand mark. WhatsApp was
 // dropped from the product UI; legacy rows still in the backend fall back to a
 // generic glyph rather than rendering blank.
 const PLATFORM_GLYPH: Partial<Record<Channel["channelType"], string>> = {
   slack: "#",
-  feishu: "F",
   email: "@",
-  msteams: "T",
   wechat: "微",
   custom: "∞",
 };
@@ -196,14 +229,17 @@ function DiscordGlyph() {
 }
 
 /**
- * Platform mark for a channel row — Telegram and Discord get brand SVGs,
- * WhatsApp the shared brand icon (`ConnectorIcon`, same as the Events rail),
- * and legacy/unknown types fall back to a dot.
+ * Platform mark for a channel row — Telegram and Discord get brand SVGs;
+ * WhatsApp, Microsoft Teams and Feishu the shared brand icons
+ * (`ConnectorIcon`, same as the Events rail); legacy/unknown types fall
+ * back to a dot.
  */
 function ChannelTypeIcon({ type }: { type: Channel["channelType"] }) {
   if (type === "telegram") return <TelegramGlyph />;
   if (type === "discord") return <DiscordGlyph />;
   if (type === "whatsapp") return <ConnectorIcon connectorId="whatsapp" />;
+  if (type === "msteams") return <ConnectorIcon connectorId="msteams" />;
+  if (type === "feishu") return <ConnectorIcon connectorId="feishu" />;
   return <>{PLATFORM_GLYPH[type] ?? "•"}</>;
 }
 
@@ -2172,7 +2208,7 @@ export function AddChannelDialog({
               <X className="size-4" aria-hidden />
             </Dialog.Close>
           </div>
-          <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-5">
+          <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-5 pb-5">
             {open && <AddChannelForm {...formProps} onClose={onClose} />}
           </div>
         </Dialog.Popup>
@@ -2264,6 +2300,7 @@ export function AddChannelForm({
   const [feishuBrand, setFeishuBrand] = useState<"feishu" | "lark">("feishu");
   const [feishuAppId, setFeishuAppId] = useState("");
   const [feishuAppSecret, setFeishuAppSecret] = useState("");
+  const [feishuPermissionsCopied, setFeishuPermissionsCopied] = useState(false);
   const [msAppId, setMsAppId] = useState("");
   const [msAppPassword, setMsAppPassword] = useState("");
   const [msTenantId, setMsTenantId] = useState("");
@@ -2313,6 +2350,13 @@ export function AddChannelForm({
     void navigator.clipboard.writeText(manifest).then(() => {
       setManifestCopied(true);
       setTimeout(() => setManifestCopied(false), 2000);
+    });
+  }
+
+  function copyFeishuPermissions(): void {
+    void navigator.clipboard.writeText(FEISHU_PERMISSION_IMPORT).then(() => {
+      setFeishuPermissionsCopied(true);
+      setTimeout(() => setFeishuPermissionsCopied(false), 2000);
     });
   }
 
@@ -2496,14 +2540,20 @@ export function AddChannelForm({
     }
   }
 
+  // shrink-0 + nowrap: the strip scrolls instead of squeezing labels onto two
+  // lines. No -mb-px: inside a scroll container the 1px hang can't overlap the
+  // container border anyway - it only creates a spurious 1px vertical overflow.
   const TAB_BASE =
-    "-mb-px inline-flex items-center gap-1.5 border-b-2 px-3 py-1.5 text-sm transition-colors";
+    "inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap border-b-2 px-3 py-1.5 text-sm transition-colors";
   const FIELD_INPUT =
     "text-sm rounded-md border border-border bg-background px-2 py-1.5 font-mono disabled:opacity-50";
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex gap-1 overflow-x-auto border-b border-border">
+      {/* The platform strip outgrows the modal, so it rides ScrollableNav
+          (hidden scrollbar + edge arrows) instead of painting a raw scroll
+          bar between the tabs and their border. */}
+      <ScrollableNav className="flex gap-1 border-b border-border">
         {(
           [
             "slack",
@@ -2535,7 +2585,7 @@ export function AddChannelForm({
             <span>{add.platform[p]}</span>
           </button>
         ))}
-      </div>
+      </ScrollableNav>
 
       {platform === "whatsapp" ? (
         <WhatsappConnectTab
@@ -2857,6 +2907,63 @@ export function AddChannelForm({
               </SelectContent>
             </Select>
           </label>
+          <details
+            open
+            className="rounded-lg border border-border bg-muted/30"
+          >
+            <summary className="cursor-pointer px-3 py-2.5 text-sm font-semibold marker:text-muted-foreground">
+              {add.feishu.guideTitle}
+            </summary>
+            <div className="flex flex-col gap-3 border-t border-border px-3 py-3">
+              <p className="text-xs text-muted-foreground">
+                {add.feishu.guideIntro}
+              </p>
+              <ol className="list-decimal space-y-3 pl-4 text-xs">
+                <li className="pl-1">{add.feishu.guideBot}</li>
+                <li className="space-y-2 pl-1">
+                  <p>{add.feishu.guidePermissions}</p>
+                  <pre className="max-h-52 overflow-auto whitespace-pre-wrap break-all rounded-md border border-border bg-background p-2 font-mono text-[11px] leading-4">
+                    {FEISHU_PERMISSION_IMPORT}
+                  </pre>
+                  <button
+                    type="button"
+                    onClick={copyFeishuPermissions}
+                    className="rounded-md border border-border bg-background px-2 py-1 text-xs font-medium hover:bg-muted"
+                  >
+                    {feishuPermissionsCopied
+                      ? add.feishu.permissionsCopied
+                      : add.feishu.copyPermissions}
+                  </button>
+                </li>
+                <li className="space-y-1.5 pl-1">
+                  <p>{add.feishu.guideEvents}</p>
+                  <div className="flex flex-col items-start gap-1">
+                    {FEISHU_CHANNEL_EVENTS.map((event) => (
+                      <code
+                        key={event}
+                        className="rounded bg-background px-1.5 py-0.5 font-mono text-[11px]"
+                      >
+                        {event}
+                      </code>
+                    ))}
+                  </div>
+                </li>
+                <li className="space-y-1.5 pl-1">
+                  <p>{add.feishu.guideCallback}</p>
+                  <code className="inline-block rounded bg-background px-1.5 py-0.5 font-mono text-[11px]">
+                    {FEISHU_CARD_CALLBACK}
+                  </code>
+                </li>
+                <li className="pl-1">{add.feishu.guidePublish}</li>
+              </ol>
+              <p className="rounded-md bg-amber-500/10 px-2.5 py-2 text-xs text-amber-800 dark:text-amber-200">
+                {add.feishu.guideScopeNote}
+              </p>
+            </div>
+          </details>
+          <p className="text-xs text-muted-foreground">
+            {add.feishu.credentialsHint}
+          </p>
           <label className="flex flex-col gap-1">
             <span className="text-xs font-medium">{add.feishu.appIdLabel}</span>
             <input

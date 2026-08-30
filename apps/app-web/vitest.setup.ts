@@ -66,3 +66,23 @@ if (!isUsable(ambient)) {
     (globalThis as { localStorage?: Storage }).localStorage = storage;
   }
 }
+
+/**
+ * ResizeObserver shim for jsdom.
+ *
+ * jsdom implements no ResizeObserver, so a `@vitest-environment jsdom` test
+ * that renders a component observing its own box (`ScrollableNav`'s
+ * arrow-visibility effect) throws `ResizeObserver is not defined` at effect
+ * commit. Layout never changes under jsdom, so a no-op observer is the
+ * faithful stub: `updateArrows` still runs once synchronously in the effect
+ * body; only the resize-driven re-runs disappear. Installed only when the
+ * ambient global is missing, so it never shadows a real implementation.
+ */
+if (typeof (globalThis as { ResizeObserver?: unknown }).ResizeObserver === "undefined") {
+  class NoopResizeObserver {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  }
+  (globalThis as { ResizeObserver?: unknown }).ResizeObserver = NoopResizeObserver;
+}
