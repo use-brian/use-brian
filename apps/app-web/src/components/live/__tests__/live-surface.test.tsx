@@ -12,6 +12,7 @@ import type { Dictionary } from "@/lib/i18n/dictionaries";
 import type { LiveSessionItem, LiveWorkflowRunItem } from "@/lib/api/live";
 import { LiveOverview, LiveRunOverview } from "../live-surface";
 import { LiveWatchPane } from "../live-watch-pane";
+import { LiveActiveBadge } from "../live-active-badge";
 
 const dict = en as unknown as Dictionary;
 
@@ -58,6 +59,19 @@ function run(overrides: Partial<LiveWorkflowRunItem> = {}): LiveWorkflowRunItem 
 }
 
 describe("[COMP:app-web/live-app] visual overview", () => {
+  it("shows the active-work count with the former Inbox badge grammar", () => {
+    const visible = wrap(<LiveActiveBadge count={7} label="Live, active work: 7" />);
+    expect(visible).toContain('data-live-active-count="7"');
+    expect(visible).toContain('aria-label="Live, active work: 7"');
+    expect(visible).toContain(">7</span>");
+    expect(visible).toContain("motion-safe:animate-pulse");
+    expect(visible).toContain("motion-reduce:animate-none");
+    expect(wrap(<LiveActiveBadge count={0} label="Active work: 0" />)).toBe("");
+    expect(wrap(<LiveActiveBadge count={112} label="Active work: 112" />)).toContain(
+      "99+",
+    );
+  });
+
   it("draws a roster-backed pulse graph with real state counts and reduced-motion fallbacks", () => {
     const html = wrap(
       <LiveOverview

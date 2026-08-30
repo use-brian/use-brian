@@ -29,7 +29,7 @@ import {
   liveItemTitle,
 } from "@/lib/live-roster";
 import { cn } from "@/lib/utils";
-import { useLiveRoster } from "@/components/live/use-live-roster";
+import type { LiveRosterState } from "@/components/live/use-live-roster";
 
 const sectionHeaderCls =
   "text-[10px] font-semibold uppercase tracking-[0.14em] text-sidebar-foreground/40";
@@ -238,17 +238,18 @@ export function LiveRosterList({
 
 export function LiveSidebarPanel({
   workspaceId,
+  roster,
   inboxOpen,
   inboxCount,
   onToggleInbox,
 }: {
   workspaceId: string;
+  roster: LiveRosterState;
   inboxOpen: boolean;
   inboxCount: number;
   onToggleInbox: () => void;
 }) {
   const searchParams = useSearchParams();
-  const roster = useLiveRoster(workspaceId);
   return (
     <LiveRosterList
       workspaceId={workspaceId}

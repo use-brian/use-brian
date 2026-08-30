@@ -4782,6 +4782,7 @@ export const en = {
   // ── Live all-activity watch surface (live-work.md §8) ──
   liveApp: {
     title: "Live",
+    activeWorkBadgeAria: "Live, active work: {count}",
     workingNow: "Now",
     justFinished: "Recent",
     emptyWorking: "Quiet",

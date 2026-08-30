@@ -138,6 +138,9 @@ import { ChatSidebarPanel } from "./sidebar-panels/chat-sidebar-panel";
 import { OfficeSidebarPanel } from "./sidebar-panels/office-sidebar-panel";
 import { ShopifySidebarPanel } from "./sidebar-panels/shopify-sidebar-panel";
 import { LiveSidebarPanel } from "./sidebar-panels/live-sidebar-panel";
+import { LiveActiveBadge } from "@/components/live/live-active-badge";
+import { useLiveRoster } from "@/components/live/use-live-roster";
+import { summarizeRosterItems } from "@/lib/live-roster";
 
 export type SidebarMove = {
   viewId: string;
@@ -283,6 +286,17 @@ export function DocSidebar(props: Props) {
   // landing fetch, so the click lands on work already in flight. See
   // `lib/surface-prefetch.ts`.
   const intentPrefetch = useIntentPrefetch();
+
+  // Live is a persistent workspace signal, not only a destination. Keep its
+  // roster subscription in the never-unmounting chrome so the top-level badge
+  // updates while the user works on any surface. The Live sidebar receives the
+  // same snapshot below instead of starting a second copy of this loader.
+  const liveRoster = useLiveRoster(workspaceId);
+  const liveActiveCount = summarizeRosterItems(liveRoster.items).active;
+  const liveActiveLabel = copy.liveApp.activeWorkBadgeAria.replace(
+    "{count}",
+    String(liveActiveCount),
+  );
 
   // ── Inbox unread badge (pending assistant replies + unread mentions) ──
   // Refetched on mount, on window focus, when the Inbox marks items read
@@ -684,13 +698,17 @@ export function DocSidebar(props: Props) {
           <Link
             href={`/w/${workspaceId}/live`}
             {...intentPrefetch(`/w/${workspaceId}/live`)}
-            aria-label={liveTitle}
-            className={navItemCls(surfaceActive("live"), !utilityPillOpen)}
+            aria-label={liveActiveCount > 0 ? liveActiveLabel : liveTitle}
+            className={navItemCls(surfaceActive("live"), !utilityPillOpen) + " relative"}
           >
             <Activity className="size-[17px] shrink-0" />
             {surfacePill("live") ? (
               <span className="whitespace-nowrap">{liveTitle}</span>
             ) : null}
+            <LiveActiveBadge
+              count={liveActiveCount}
+              label={liveActiveLabel}
+            />
           </Link>
         </Tooltip>
 
@@ -797,6 +815,7 @@ export function DocSidebar(props: Props) {
         ) : sidebarSurface === "live" ? (
           <LiveSidebarPanel
             workspaceId={workspaceId}
+            roster={liveRoster}
             inboxOpen={props.inboxOpen}
             inboxCount={inboxCount}
             onToggleInbox={props.onToggleInbox}

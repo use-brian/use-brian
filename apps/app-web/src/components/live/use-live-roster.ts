@@ -23,11 +23,13 @@ const REFRESH_EVENTS = [
   SCHEDULED_JOB_REFRESH_EVENT,
 ] as const;
 
-export function useLiveRoster(workspaceId: string): {
+export type LiveRosterState = {
   items: LiveWorkItem[];
   loaded: boolean;
   error: boolean;
-} {
+};
+
+export function useLiveRoster(workspaceId: string): LiveRosterState {
   const [items, setItems] = useState<LiveWorkItem[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState(false);
@@ -56,11 +58,13 @@ export function useLiveRoster(workspaceId: string): {
     for (const event of REFRESH_EVENTS) {
       window.addEventListener(event, onRefresh);
     }
+    window.addEventListener("focus", onRefresh);
     return () => {
       cancelledRef.current = true;
       for (const event of REFRESH_EVENTS) {
         window.removeEventListener(event, onRefresh);
       }
+      window.removeEventListener("focus", onRefresh);
     };
   }, [load, workspaceId]);
 

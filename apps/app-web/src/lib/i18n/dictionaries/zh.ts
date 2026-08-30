@@ -4518,6 +4518,7 @@ export const zh: Dictionary = {
   },
   liveApp: {
     title: "即時",
+    activeWorkBadgeAria: "即時，目前進行中的工作：{count} 項",
     workingNow: "現在",
     justFinished: "最近",
     emptyWorking: "暫無活動",
