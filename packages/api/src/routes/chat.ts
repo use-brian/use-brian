@@ -65,7 +65,11 @@ import { isRegistryModelAvailable, registryRow } from '@use-brian/shared/model-r
 import type { ConnectorStore } from '../db/connector-store.js'
 import { getToolDisplayName, stripFollowUps, stripCommentThreadReplyTag, resolveCharter, charterMission, recordingIdFromAnchorKey } from '@use-brian/shared'
 import { loadDecisionPlaybookContext } from '../decision-learning/playbook-context.js'
-import { CUSTOM_MODEL_IMAGE_FALLBACK_NOTICE, CUSTOM_MODEL_IMAGE_REJECTION } from './_channel-error-text.js'
+import {
+  CUSTOM_MODEL_ENDPOINT_FALLBACK_NOTICE,
+  CUSTOM_MODEL_IMAGE_FALLBACK_NOTICE,
+  CUSTOM_MODEL_IMAGE_REJECTION,
+} from './_channel-error-text.js'
 import { decideImageTurnRoute } from '../custom-llm-runtime.js'
 import { resolveUser, buildBrowserEscalationPrompt, buildUnavailableCapabilitiesPrompt, injectSkills, isSkillOfferable, checkUsageBudget, applyMcpInjection, type CreditBudgetGate } from './route-helpers.js'
 import { createDocRunClient } from '../doc/run-presence-client.js'
@@ -7511,6 +7515,26 @@ export function chatRoutes(options: WebChatOptions): Router {
             // Use totalUsage (accumulated across ALL query-loop turns) rather
             // than response.usage (last turn only) so intermediate tool-use
             // turns are included in cost tracking.
+            // Announced, never silent (byo-llm-key.md -> "Endpoint failure
+            // fallback"). Web has a real `notice` lane, so unlike the channel
+            // pipeline this does not have to ride inside the reply text.
+            if (customLlmRuntime?.fallback.used) {
+              sendEvent('notice', {
+                code: 'custom_model_endpoint_fallback',
+                message: CUSTOM_MODEL_ENDPOINT_FALLBACK_NOTICE,
+              })
+              options.analytics?.logEvent({
+                userId: user.id, assistantId: assistant.id, sessionId: session.id,
+                eventName: 'custom_llm_endpoint_fallback', channelType: 'web',
+                metadata: {
+                  reason: sanitize(customLlmRuntime.fallback.reason ?? 'unknown'),
+                  status: customLlmRuntime.fallback.status ?? 0,
+                  endpoint_profile: sanitize(customLlmRuntime.selector),
+                  served_model: sanitize(event.response.model),
+                  model_tier: sanitize(logicalTier),
+                },
+              })
+            }
             const usage = event.totalUsage
             if (options.usageStore && usage) {
               // BYO billing branch: when the turn was served by the workspace's
@@ -7519,7 +7543,14 @@ export function chatRoutes(options: WebChatOptions): Router {
               // which key drove the turn for downstream attribution. This only
               // covers the main_response (LLM) charge; MCP tool calls and
               // memory/brain ops bill exactly as before (untouched).
-              const cost = usedByoKey
+              // A turn the endpoint failed to serve was served by PLATFORM
+              // capacity, so it bills as an ordinary platform turn even though
+              // the tier resolved to a BYO endpoint. Per-turn, not per-call:
+              // `usage` is already aggregated and cannot be split, and
+              // over-attributing to the platform is the only direction that
+              // cannot give away free serving.
+              const turnUsedByoKey = usedByoKey && !customLlmRuntime?.fallback.used
+              const cost = turnUsedByoKey
                 ? 0
                 : calculateCost(event.response.model, usage)
               options.usageStore.recordUsage({
@@ -7536,7 +7567,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                 source: userPlan === 'free' ? 'free' : 'included',
                 userMessageId: storedUserMsg.id,
                 triggerKey: 'main_response',
-                providerKeySource: usedByoKey ? 'user' : 'platform',
+                providerKeySource: turnUsedByoKey ? 'user' : 'platform',
               }).catch((err) => {
                 console.error('Usage tracking failed:', err)
                 options.analytics?.logEvent({

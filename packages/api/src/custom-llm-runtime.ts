@@ -2,7 +2,9 @@
 
 import {
   createOpenAICompatProvider,
+  wrapEndpointFallback,
   wrapProvider,
+  type EndpointFallbackEvent,
   type LLMProvider,
 } from '@use-brian/core'
 import { registryRow } from '@use-brian/shared/model-registry'
@@ -307,9 +309,37 @@ export async function probeCustomLlmVision(
   }
 }
 
+/**
+ * Per-resolution record of whether this turn was actually served by the
+ * endpoint or by the platform fallback.
+ *
+ * The wrapper lives in `packages/core` and has no user, assistant, or
+ * workspace identity, so it cannot log analytics or speak to a user. It
+ * writes here instead, and the turn's owner (channel pipeline, chat route)
+ * reads it AFTER the loop to do three things the spec requires of a
+ * non-silent fallback: tell the user, log the event, and bill the turn as
+ * platform usage rather than as the free BYO lane.
+ *
+ * Mutable on purpose: one object per resolved turn, written at most once.
+ */
+export type CustomLlmFallbackState = {
+  /** The connection's admin opt-in (migration 491). False ⇒ never written. */
+  enabled: boolean
+  /** True once any provider call in this turn was served by the fallback. */
+  used: boolean
+  reason: EndpointFallbackEvent['reason'] | null
+  status: number | null
+  /** Operator-facing. Never rendered to a user. */
+  detail: string | null
+  /** Connection name, for the user-facing note and the analytics event. */
+  endpointName: string
+}
+
 export type ResolvedWorkspaceCustomLlm = {
   provider: LLMProvider
   selector: string
+  /** Live for the duration of this turn - see `CustomLlmFallbackState`. */
+  fallback: CustomLlmFallbackState
   profileId: string | null
   modelTier: import('./db/workspace-custom-llm-endpoints.js').CustomLlmTier
   inputTokenLimit: number
@@ -379,6 +409,10 @@ export type WorkspaceCustomLlmResolver = (params: {
 export type BackgroundRuntimeResolver = (
   workspaceId: string | null | undefined,
 ) => Promise<ResolvedWorkspaceCustomLlm | null>
+
+function inertFallbackState(): CustomLlmFallbackState {
+  return { enabled: false, used: false, reason: null, status: null, detail: null, endpointName: '' }
+}
 
 export function createWorkspaceCustomLlmResolver(
   store: WorkspaceCustomLlmEndpointStore,
@@ -458,6 +492,10 @@ export function createWorkspaceCustomLlmResolver(
       return {
         provider: exactProvider,
         selector: managedModel,
+        // A managed route already IS a platform model: there is nothing to
+        // fall back FROM, and `allowProviderFallback: false` above keeps the
+        // tier exact.
+        fallback: inertFallbackState(),
         profileId: null,
         modelTier,
         inputTokenLimit: row.contextWindow,
@@ -478,6 +516,14 @@ export function createWorkspaceCustomLlmResolver(
       apiKey: selectedProfile.apiKey,
       modelId: selectedProfile.modelId,
     }, fetchFn, selectedProfile.supportsVision))
+    const fallbackState: CustomLlmFallbackState = {
+      enabled: selectedProfile.fallbackToDefaultOnFailure && !!options?.managedProvider,
+      used: false,
+      reason: null,
+      status: null,
+      detail: null,
+      endpointName: selectedProfile.endpointName,
+    }
     const limitedProvider: LLMProvider = {
       ...provider,
       stream: (request) => provider.stream({
@@ -491,9 +537,31 @@ export function createWorkspaceCustomLlmResolver(
         inputTokenLimit: Math.min(sessionOptions.inputTokenLimit ?? selectedProfile.contextWindow, selectedProfile.contextWindow),
       }),
     }
+    // The fallback wraps OUTSIDE the profile clamp on purpose: the clamp
+    // narrows maxTokens / inputTokenLimit to the endpoint's declared window
+    // (often a fraction of the platform model's), and a fallback turn should
+    // be bounded by what the caller actually asked for, not by the window of
+    // the endpoint that just failed.
+    const turnProvider = fallbackState.enabled && options?.managedProvider
+      ? wrapEndpointFallback(limitedProvider, options.managedProvider, {
+          onFallback: (event) => {
+            if (fallbackState.used) return
+            fallbackState.used = true
+            fallbackState.reason = event.reason
+            fallbackState.status = event.status
+            fallbackState.detail = event.detail
+            console.warn(
+              `[custom-llm] endpoint '${fallbackState.endpointName}' failed (${event.reason}` +
+              `${event.status === null ? '' : ` ${event.status}`}) - the platform model served the turn instead: ${event.detail}`,
+            )
+          },
+        })
+      : limitedProvider
+
     return {
-      provider: limitedProvider,
+      provider: turnProvider,
       selector,
+      fallback: fallbackState,
       profileId: selectedProfile.id,
       modelTier,
       inputTokenLimit: selectedProfile.contextWindow,

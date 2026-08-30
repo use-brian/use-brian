@@ -38,6 +38,16 @@ export type WorkspaceCustomLlmEndpoint = {
   name: string
   baseUrl: string
   hasApiKey: boolean
+  /**
+   * Admin opt-in. False (the default, and the only behavior before migration
+   * 491) means a failed turn on this endpoint fails the turn. True re-answers
+   * it on the platform model the tier would otherwise have used - which sends
+   * the turn's content to a provider the admin did not originally select and
+   * bills it as platform usage, so it is a consent flag, never an inference.
+   * Spec: docs/architecture/platform/byo-llm-key.md -> "Endpoint failure
+   * fallback".
+   */
+  fallbackToDefaultOnFailure: boolean
   createdAt: Date
   updatedAt: Date
   profiles: WorkspaceCustomLlmProfile[]
@@ -46,6 +56,8 @@ export type WorkspaceCustomLlmEndpoint = {
 export type WorkspaceCustomLlmProfileRuntime = WorkspaceCustomLlmProfile & {
   endpointName: string
   baseUrl: string
+  /** Inherited from the owning connection - see `WorkspaceCustomLlmEndpoint`. */
+  fallbackToDefaultOnFailure: boolean
   apiKey: string | null
 }
 
@@ -96,6 +108,12 @@ export type WorkspaceCustomLlmEndpointStore = {
   setTierDefault(params: { actingUserId: string; workspaceId: string; tier: CustomLlmTier; profileId: string }): Promise<WorkspaceCustomLlmTierDefault | null>
   setManagedTierRoute(params: { actingUserId: string; workspaceId: string; tier: CustomLlmTier; modelAlias: string }): Promise<WorkspaceModelTierRoute>
   clearTierDefault(params: { actingUserId: string; workspaceId: string; tier: CustomLlmTier }): Promise<void>
+  setFallbackPolicy(params: {
+    actingUserId: string
+    workspaceId: string
+    endpointId: string
+    fallbackToDefaultOnFailure: boolean
+  }): Promise<WorkspaceCustomLlmEndpoint | null>
   getEndpointRuntimeSystem(params: { workspaceId: string; endpointId: string }): Promise<WorkspaceCustomLlmEndpointRuntime | null>
   getRuntimeSystem(params: { workspaceId: string; profileId: string }): Promise<WorkspaceCustomLlmProfileRuntime | null>
   getTierRuntimeSystem(params: { workspaceId: string; tier: CustomLlmTier }): Promise<WorkspaceCustomLlmProfileRuntime | null>
@@ -108,6 +126,7 @@ const ENDPOINT_COLS = `
   name,
   base_url AS "baseUrl",
   (api_key_encrypted IS NOT NULL) AS "hasApiKey",
+  fallback_to_default_on_failure AS "fallbackToDefaultOnFailure",
   created_at AS "createdAt",
   updated_at AS "updatedAt"
 `
@@ -142,6 +161,7 @@ const RUNTIME_PROFILE_COLS = `
   p.updated_at AS "updatedAt",
   e.name AS "endpointName",
   e.base_url AS "baseUrl",
+  e.fallback_to_default_on_failure AS "fallbackToDefaultOnFailure",
   e.api_key_encrypted AS "apiKeyEncrypted"
 `
 
@@ -369,6 +389,29 @@ export function createDbWorkspaceCustomLlmEndpointStore(
         [workspaceId, tier, modelAlias, actingUserId],
       )
       return result.rows[0]!
+    },
+
+    async setFallbackPolicy({ actingUserId, workspaceId, endpointId, fallbackToDefaultOnFailure }) {
+      const result = await queryWithRLS<EndpointRow>(
+        actingUserId,
+        `UPDATE workspace_custom_llm_endpoints
+            SET fallback_to_default_on_failure = $3,
+                updated_at = now()
+          WHERE workspace_id = $1 AND id = $2
+          RETURNING ${ENDPOINT_COLS}`,
+        [workspaceId, endpointId, fallbackToDefaultOnFailure],
+      )
+      const endpoint = result.rows[0]
+      if (!endpoint) return null
+      const profiles = await queryWithRLS<WorkspaceCustomLlmProfile>(
+        actingUserId,
+        `SELECT ${PROFILE_COLS}
+           FROM workspace_custom_llm_profiles
+          WHERE workspace_id = $1 AND endpoint_id = $2
+          ORDER BY lower(name), created_at`,
+        [workspaceId, endpointId],
+      )
+      return { ...endpoint, profiles: profiles.rows }
     },
 
     async clearTierDefault({ actingUserId, workspaceId, tier }) {

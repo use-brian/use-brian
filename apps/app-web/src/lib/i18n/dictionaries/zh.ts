@@ -324,6 +324,7 @@ export const zh: Dictionary = {
     },
     noticeBudgetDowngraded: "本月額度已用罄，重置前將以標準模型運作。",
     noticeCustomModelImageFallback: "此工作區的模型端點無法讀取圖片，因此本則訊息由 Brian 內建模型回答。",
+    noticeCustomModelEndpointFallback: "此工作區的模型端點在本則訊息上失敗，因此改由 Brian 內建模型回答。",
     noticeDismiss: "關閉",
     pendingQuestion: {
       heading: "需要您的補充",
@@ -2619,6 +2620,8 @@ export const zh: Dictionary = {
     deleteCta: "刪除",
     loadFailed: "無法載入自訂端點。",
     saveFailed: "無法更新自訂端點。",
+    fallbackTitle: "此端點失敗時改用 Brian 的預設模型",
+    fallbackDesc: "預設為關閉。開啟後，此端點無法回應的訊息會改由該層級的內建模型回覆，回覆中會註明此事，並以一般 Brian 用量計費。",
   },
   comments: {
     toolbarButton: "向 AI 留言",

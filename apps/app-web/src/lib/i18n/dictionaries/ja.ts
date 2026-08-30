@@ -329,6 +329,8 @@ export const ja: Dictionary = {
       "今月のクレジット枠を使い切ったため、リセットまでスタンダードモデルで動作しています。",
     noticeCustomModelImageFallback:
       "このワークスペースのモデルエンドポイントは画像を読み取れないため、このメッセージには Brian の標準モデルが回答しました。",
+    noticeCustomModelEndpointFallback:
+      "このワークスペースのモデルエンドポイントがこのメッセージで失敗したため、代わりに Brian の組み込みモデルが回答しました。",
     noticeDismiss: "閉じる",
     pendingQuestion: {
       heading: "確認させてください",
@@ -2637,6 +2639,8 @@ export const ja: Dictionary = {
     deleteCta: "削除",
     loadFailed: "カスタムエンドポイントを読み込めませんでした。",
     saveFailed: "カスタムエンドポイントを更新できませんでした。",
+    fallbackTitle: "このエンドポイントが失敗した場合は Brian の既定モデルを使う",
+    fallbackDesc: "既定ではオフです。オンにすると、このエンドポイントが応答できなかったメッセージは該当ティアの組み込みモデルが応答し、その旨が返信に表示され、通常の Brian 利用として課金されます。",
   },
   comments: {
     toolbarButton: "AIにコメント",
