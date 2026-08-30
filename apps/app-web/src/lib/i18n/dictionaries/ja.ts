@@ -4566,6 +4566,7 @@ export const ja: Dictionary = {
   liveApp: {
     title: "ライブ",
     activeWorkBadgeAria: "ライブ、進行中の作業: {count}件",
+    overview: "概要",
     workingNow: "今",
     justFinished: "最近",
     emptyWorking: "待機中",

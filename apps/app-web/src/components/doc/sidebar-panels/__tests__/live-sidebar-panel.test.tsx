@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import { renderToString } from "react-dom/server";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
@@ -56,7 +57,7 @@ function run(overrides: Partial<LiveWorkflowRunItem> = {}): LiveWorkflowRunItem 
 }
 
 describe("[COMP:app-web/live-app] Live sidebar panel", () => {
-  it("nests Inbox before the two roster sections and carries its unread count", () => {
+  it("leads with Overview, then Inbox and the two roster sections", () => {
     const html = wrap(
       <LiveRosterList
         workspaceId="ws-1"
@@ -69,6 +70,9 @@ describe("[COMP:app-web/live-app] Live sidebar panel", () => {
         onToggleInbox={vi.fn()}
       />,
     );
+    expect(html.indexOf(en.liveApp.overview)).toBeLessThan(
+      html.indexOf(en.docPage.iconInbox),
+    );
     expect(html.indexOf(en.docPage.iconInbox)).toBeLessThan(
       html.indexOf(en.liveApp.workingNow),
     );
@@ -76,8 +80,20 @@ describe("[COMP:app-web/live-app] Live sidebar panel", () => {
       html.indexOf(en.liveApp.justFinished),
     );
     expect(html).toContain("4");
+    expect(html).toContain('href="/w/ws-1/live"');
+    expect(html).toContain('aria-current="page"');
     expect(html).toContain(en.liveApp.emptyWorking);
     expect(html).toContain(en.liveApp.emptyFinished);
+  });
+
+  it("restores the shared Suggested for you dock above Live-local navigation", () => {
+    const source = readFileSync(new URL("../../doc-sidebar.tsx", import.meta.url), "utf8");
+    expect(source).toContain(
+      'activeOperatorApp !== null || sidebarSurface === "live"',
+    );
+    expect(source.indexOf("<HomeDock workspaceId={workspaceId} />")).toBeLessThan(
+      source.indexOf("<LiveSidebarPanel"),
+    );
   });
 
   it("links watchable rows through the focus query and marks the active one", () => {

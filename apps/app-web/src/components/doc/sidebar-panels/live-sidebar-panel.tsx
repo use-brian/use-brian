@@ -1,10 +1,11 @@
 "use client";
 
 /**
- * Live surface sidebar panel. Live owns the former top-level Inbox slot; the
- * unchanged Inbox flyout is nested first here, followed by the Working now and
- * Just finished rosters. Focus is URL-addressed so sidebar selection, browser
- * history, reloads, and the full-width watch pane remain one state.
+ * Live surface sidebar panel. The shared Suggested-for-you dock precedes this
+ * panel; Live-local navigation starts with an explicit Overview return, then
+ * the unchanged Inbox flyout, Working now, and Just finished. Focus is
+ * URL-addressed so sidebar selection, browser history, reloads, and the
+ * full-width watch pane remain one state.
  *
  * [COMP:app-web/live-app] / [COMP:app-web/inbox-panel]
  */
@@ -12,6 +13,7 @@
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import {
+  Activity,
   GitBranch,
   Inbox,
   LockKeyhole,
@@ -23,6 +25,7 @@ import { format } from "@/lib/i18n/format";
 import type { LiveWorkItem } from "@/lib/api/live";
 import {
   LIVE_FOCUS_PARAM,
+  canFocusLiveItem,
   groupRosterItems,
   liveItemHref,
   liveItemKey,
@@ -84,6 +87,9 @@ export function LiveRosterList({
   const t = useT();
   const tl = t.liveApp;
   const groups = groupRosterItems(items);
+  const overviewActive = !activeFocus || !items.some(
+    (item) => liveItemKey(item) === activeFocus && canFocusLiveItem(item),
+  );
   const stateLabel: Record<LiveWorkItem["state"], string> = {
     working: tl.stateWorking,
     waiting: tl.stateWaiting,
@@ -180,6 +186,20 @@ export function LiveRosterList({
 
   return (
     <div className="flex flex-col gap-4 px-1 pt-1">
+      <Link
+        href={`/w/${workspaceId}/live`}
+        aria-current={overviewActive ? "page" : undefined}
+        className={cn(
+          "flex h-8 w-full items-center gap-2 rounded-md px-2 text-sm transition-colors",
+          overviewActive
+            ? "doc-nav-active font-medium text-sidebar-accent-foreground"
+            : "text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+        )}
+      >
+        <Activity className="size-4 shrink-0" aria-hidden />
+        <span className="min-w-0 flex-1 truncate">{tl.overview}</span>
+      </Link>
+
       <button
         type="button"
         aria-pressed={inboxOpen}

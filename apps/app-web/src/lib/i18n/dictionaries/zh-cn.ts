@@ -4364,6 +4364,7 @@ export const zhCN: Dictionary = {
   liveApp: {
     title: "实时",
     activeWorkBadgeAria: "实时，当前进行中的工作：{count} 项",
+    overview: "概览",
     workingNow: "当前",
     justFinished: "最近",
     emptyWorking: "暂无活动",

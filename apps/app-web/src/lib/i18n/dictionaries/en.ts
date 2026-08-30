@@ -4783,6 +4783,7 @@ export const en = {
   liveApp: {
     title: "Live",
     activeWorkBadgeAria: "Live, active work: {count}",
+    overview: "Overview",
     workingNow: "Now",
     justFinished: "Recent",
     emptyWorking: "Quiet",
