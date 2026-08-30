@@ -91,6 +91,19 @@ export function currentAgentProjectIds(): string[] | null | undefined {
 const CURRENT_USER_ID_SENTINEL = '00000000-0000-0000-0000-000000000000'
 
 /**
+ * Valid session values for the JSON agent-scope GUCs. `SET LOCAL` reverts to
+ * these after a transaction instead of PostgreSQL's invalid empty-string
+ * custom-GUC fallback.
+ *
+ * They intentionally differ: an absent compartment projection must keep a
+ * legacy clearance-only execution out of linked Teams (`[]` = General only),
+ * while an absent Project projection preserves the legacy no-filter behavior
+ * (`null` = universe).
+ */
+const AGENT_COMPARTMENTS_SESSION_DEFAULT = '[]'
+const AGENT_PROJECT_IDS_SESSION_DEFAULT = 'null'
+
+/**
  * Per-POOL connection cap. Every process opens TWO pools (system + app, below),
  * so a process can hold up to `2 × resolvePoolMax(...)` connections. Prod Cloud
  * SQL is a db-f1-micro with `max_connections = 25`, shared by four services
@@ -295,30 +308,37 @@ export function getAppPool(): pg.Pool {
     }
     appPool = new pg.Pool({ connectionString: appUrl ?? process.env.DATABASE_URL, ...POOL_OPTS })
     attachPoolErrorHandler(appPool, 'app')
-    // Seed the nil-UUID sentinel for app.current_user_id on every app-pool
-    // connection. On this Postgres, `SET LOCAL` of a custom `app.*` GUC reverts
-    // to '' (empty string), not NULL, when the connection has no session-level
-    // default (verified on prod + local). Without the seed, every `queryWithRLS`
-    // commit would leave the connection at `current_user_id=''`, and the next
-    // policy cast `current_setting('app.current_user_id', true)::uuid` -> ''::uuid
-    // throws 22P02. The seed gives `SET LOCAL` a valid value to revert to. The
-    // system pool never evaluates these policies (the owner bypasses RLS), so it
-    // needs no seed.
-    appPool.on('connect', seedCurrentUserIdSentinel)
+    // Seed valid session defaults for every transaction-local app-pool GUC.
+    // On this Postgres, `SET LOCAL` of a custom `app.*` GUC reverts to '' (empty
+    // string), not NULL, when the connection has no session-level default
+    // (verified on prod + local). A later pooled request then fails while
+    // evaluating ''::uuid or ''::jsonb in an RLS policy. The system pool never
+    // evaluates these policies (the owner bypasses RLS), so it needs no seed.
+    appPool.on('connect', seedAppRLSGucDefaults)
   }
   return appPool
 }
 
 /**
- * Wired as the app pool's `connect` handler (see `getAppPool`). Seeds
- * `app.current_user_id` to the nil-UUID sentinel on a freshly connected client so
- * `SET LOCAL` reverts to it instead of `''`. Exported for tests.
+ * Wired as the app pool's `connect` handler (see `getAppPool`). Seeds every GUC
+ * that an RLS policy casts, so transaction-local agent/user scope always
+ * reverts to a valid session value instead of `''`. Exported for tests.
  */
-export function seedCurrentUserIdSentinel(client: pg.PoolClient): void {
+export function seedAppRLSGucDefaults(client: pg.PoolClient): void {
   void client
-    .query(`SET app.current_user_id = '${CURRENT_USER_ID_SENTINEL}'`)
+    .query(
+      `SELECT
+         set_config('app.current_user_id', $1, false),
+         set_config('app.agent_compartments', $2, false),
+         set_config('app.agent_project_ids', $3, false)`,
+      [
+        CURRENT_USER_ID_SENTINEL,
+        AGENT_COMPARTMENTS_SESSION_DEFAULT,
+        AGENT_PROJECT_IDS_SESSION_DEFAULT,
+      ],
+    )
     .catch((err) =>
-      console.error('[db] failed to seed app.current_user_id sentinel on connect:', err),
+      console.error('[db] failed to seed app-pool RLS GUC defaults on connect:', err),
     )
 }
 
@@ -347,9 +367,9 @@ export async function rollbackAndRelease(client: pg.PoolClient): Promise<void> {
  * Runs on the **app pool** inside a transaction with `SET LOCAL
  * app.current_user_id`, so the `*_own` / `*_workspace_member` / clearance
  * policies match the acting user. Enforcement comes from the non-owner role, not
- * from a session flag — there is no bypass GUC to leak. `current_user_id` is
- * `SET LOCAL`, so it reverts at transaction end to the seeded sentinel; no stale
- * UUID survives onto the pooled connection.
+ * from a session flag — there is no bypass GUC to leak. The transaction-local
+ * user and agent values revert at transaction end to valid session defaults;
+ * no stale user or agent scope survives onto the pooled connection.
  */
 export async function queryWithRLS<T extends pg.QueryResultRow>(
   userId: string,

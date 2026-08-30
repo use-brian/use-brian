@@ -25,7 +25,7 @@ import { describe, it, expect, afterAll } from 'vitest'
 // Force a single backend per pool so assertions are deterministic.
 process.env.PG_POOL_MAX = '1'
 
-const { query, queryWithRLS, getPool, getAppPool } = await import('../client.js')
+const { query, queryWithRLS, getPool, getAppPool, runWithAgentAccess } = await import('../client.js')
 
 const UID_A = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
 const UID_B = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
@@ -108,6 +108,131 @@ describe('[COMP:api/db-client] Two-role RLS isolation', () => {
           `INSERT INTO _tworole_probe VALUES (3, '${UID_B}', 'a-forging-b')`,
         ),
       ).rejects.toThrow(/row-level security/i)
+    })
+
+    it('reverts agent JSON GUCs to valid defaults before the next human transaction', async () => {
+      const insideAgent = await runWithAgentAccess(
+        {
+          clearance: 'internal',
+          compartments: ['team:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'],
+          projectIds: ['cccccccc-cccc-cccc-cccc-cccccccccccc'],
+        },
+        () => queryWithRLS<{
+          compartments: string
+          project_ids: string
+        }>(
+          UID_A,
+          `SELECT
+             current_setting('app.agent_compartments', true) AS compartments,
+             current_setting('app.agent_project_ids', true) AS project_ids`,
+        ),
+      )
+      expect(insideAgent.rows[0]).toEqual({
+        compartments: '["team:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"]',
+        project_ids: '["cccccccc-cccc-cccc-cccc-cccccccccccc"]',
+      })
+
+      // PG_POOL_MAX=1 guarantees this is the same backend connection. The
+      // agent transaction's SET LOCAL values must have reverted to type-valid
+      // session defaults before an unrelated human request evaluates RLS.
+      const human = await queryWithRLS<{
+        compartments: string
+        project_ids: string
+        visible_pages: string
+      }>(
+        UID_A,
+        `SELECT
+           current_setting('app.agent_compartments', true) AS compartments,
+           current_setting('app.agent_project_ids', true) AS project_ids,
+           (SELECT count(*) FROM saved_views)::text AS visible_pages`,
+      )
+      expect(human.rows[0]).toMatchObject({
+        compartments: '[]',
+        project_ids: 'null',
+      })
+    })
+
+    it('normalizes a legacy empty JSON GUC at the saved-views policy cast site', async () => {
+      const fixtureUser = await query<{ id: string }>(
+        `INSERT INTO users (id, auth_provider, auth_provider_id)
+         VALUES (gen_random_uuid(), 'test', 'two-role-guc-' || gen_random_uuid())
+         RETURNING id`,
+      )
+      const fixtureUserId = fixtureUser.rows[0].id
+      const fixtureWorkspace = await query<{ id: string }>(
+        `INSERT INTO workspaces (id, name, purpose, owner_user_id, is_personal)
+         VALUES (gen_random_uuid(), 'two-role-guc-test', 'test', $1, false)
+         RETURNING id`,
+        [fixtureUserId],
+      )
+      const fixtureWorkspaceId = fixtureWorkspace.rows[0].id
+
+      try {
+        await query(
+          `INSERT INTO workspace_members (id, workspace_id, user_id, role)
+           VALUES (gen_random_uuid(), $1, $2, 'owner')`,
+          [fixtureWorkspaceId, fixtureUserId],
+        )
+        const fixtureProject = await query<{ id: string }>(
+          `INSERT INTO workspace_projects
+             (id, workspace_id, name, normalized_name, created_by)
+           VALUES (gen_random_uuid(), $1, 'GUC test Project', 'guc test project', $2)
+           RETURNING id`,
+          [fixtureWorkspaceId, fixtureUserId],
+        )
+        await query(
+          `INSERT INTO saved_views
+             (id, workspace_id, created_by, name, entity, view_type, project_id)
+           VALUES (gen_random_uuid(), $1, $2, 'GUC test page', 'tasks', 'table', $3)`,
+          [fixtureWorkspaceId, fixtureUserId, fixtureProject.rows[0].id],
+        )
+
+        const poison = await getAppPool().connect()
+        try {
+          await poison.query(
+            `SELECT
+               set_config('app.agent_clearance', 'internal', false),
+               set_config('app.agent_compartments', '', false),
+               set_config('app.agent_project_ids', '', false)`,
+          )
+        } finally {
+          poison.release()
+        }
+
+        // The non-null Project row forces the saved_views policy through the
+        // agent-project branch that used to cast the poisoned empty string.
+        await expect(
+          queryWithRLS(fixtureUserId, 'SELECT count(*) FROM saved_views'),
+        ).resolves.toBeDefined()
+
+        // The shared predicate consumed both agent JSON GUCs with the same
+        // unsafe guard/cast shape before migration 490.
+        await expect(
+          queryWithRLS(
+            fixtureUserId,
+            `SELECT context_scope_allows_current_principal(
+               $1::uuid, 'internal', '{}'::text[], '{}'::uuid[]
+             )`,
+            [fixtureWorkspaceId],
+          ),
+        ).resolves.toBeDefined()
+      } finally {
+        // Restore the single pooled backend and remove the owner-created row
+        // even if an assertion fails, so no later test inherits either state.
+        const restore = await getAppPool().connect()
+        try {
+          await restore.query(
+            `SELECT
+               set_config('app.agent_clearance', '', false),
+               set_config('app.agent_compartments', '[]', false),
+               set_config('app.agent_project_ids', 'null', false)`,
+          )
+        } finally {
+          restore.release()
+        }
+        await query('DELETE FROM workspaces WHERE id = $1', [fixtureWorkspaceId])
+        await query('DELETE FROM users WHERE id = $1', [fixtureUserId])
+      }
     })
   })
 })

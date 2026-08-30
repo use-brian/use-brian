@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { readFile } from 'node:fs/promises'
 
 // Mock the pg module before importing client
 vi.mock('pg', () => {
@@ -31,7 +32,7 @@ import {
   resolveStatementTimeoutMs,
   INTERACTIVE_STATEMENT_TIMEOUT_MS,
   BACKGROUND_STATEMENT_TIMEOUT_MS,
-  seedCurrentUserIdSentinel,
+  seedAppRLSGucDefaults,
 } from '../client.js'
 import pg from 'pg'
 
@@ -60,26 +61,52 @@ describe('[COMP:api/db-client] Database client', () => {
     expect(getPool()).toBe(getPool())
   })
 
-  it('getAppPool() returns a singleton and seeds current_user_id on connect', () => {
+  it('getAppPool() returns a singleton and seeds every cast RLS GUC on connect', () => {
     const appPool = getAppPool()
     expect(appPool).toBe(getAppPool())
-    // The app pool installs the connect-seed so SET LOCAL has a valid value to
-    // revert to (the Cloud SQL revert-to-'' quirk). The system pool needs none —
-    // the owner bypasses RLS, so it never evaluates the current_user_id cast.
+    // The app pool installs the connect-seed so every SET LOCAL value has a
+    // valid session default to revert to (the Cloud SQL revert-to-'' quirk).
+    // The system pool needs none because the owner bypasses RLS.
     expect((appPool as unknown as { on: ReturnType<typeof vi.fn> }).on).toHaveBeenCalledWith(
       'connect',
-      seedCurrentUserIdSentinel,
+      seedAppRLSGucDefaults,
     )
   })
 
-  it('seedCurrentUserIdSentinel SETs ONLY the nil-UUID current_user_id (no system_bypass GUC anymore)', () => {
+  it('seeds type-valid user, Team, and Project defaults without a bypass GUC', () => {
     const fakeClient = { query: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }) }
-    seedCurrentUserIdSentinel(fakeClient as unknown as Parameters<typeof seedCurrentUserIdSentinel>[0])
-    expect(fakeClient.query).toHaveBeenCalledWith(
-      "SET app.current_user_id = '00000000-0000-0000-0000-000000000000'",
+    seedAppRLSGucDefaults(fakeClient as unknown as Parameters<typeof seedAppRLSGucDefaults>[0])
+
+    expect(fakeClient.query).toHaveBeenCalledTimes(1)
+    const [sql, values] = fakeClient.query.mock.calls[0]
+    expect(sql).toContain("set_config('app.current_user_id', $1, false)")
+    expect(sql).toContain("set_config('app.agent_compartments', $2, false)")
+    expect(sql).toContain("set_config('app.agent_project_ids', $3, false)")
+    expect(values).toEqual([
+      '00000000-0000-0000-0000-000000000000',
+      '[]',
+      'null',
+    ])
+    expect(sql).not.toContain('system_bypass')
+  })
+
+  it('normalizes every agent JSON GUC at the migration cast site', async () => {
+    const migration = await readFile(
+      new URL('../../../migrations/490_agent_scope_guc_hardening.sql', import.meta.url),
+      'utf8',
     )
-    const seeded = fakeClient.query.mock.calls.map((c) => c[0]).join(' ')
-    expect(seeded).not.toContain('system_bypass')
+    expect(migration).toContain(
+      "NULLIF(current_setting('app.agent_compartments', true), '')::jsonb",
+    )
+    expect(migration).toContain(
+      "NULLIF(current_setting('app.agent_project_ids', true), '')::jsonb",
+    )
+    expect(migration).not.toContain(
+      "current_setting('app.agent_compartments', true)::jsonb",
+    )
+    expect(migration).not.toContain(
+      "current_setting('app.agent_project_ids', true)::jsonb",
+    )
   })
 
   // ── resolvePoolMax() — fleet connection budget ──────────────
