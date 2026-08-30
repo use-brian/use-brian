@@ -163,7 +163,7 @@ export type PublicTurnDeps = {
    * `external-client` turn never injects skills.
    */
   skillStore?: import('../db/skill-store.js').SkillStore
-  /** Workspace-skill surface for `injectSkills` — see the call site (mig 445). */
+  /** Workspace-skill surface for `injectSkills` — see the call site (mig 491). */
   workspaceSkillStore?: import('../db/skill-store.js').WorkspaceSkillStore
   workspaceSkillEnablementStore?: import('../db/workspace-skill-enablement-store.js').WorkspaceSkillEnablementStore
 }
@@ -1060,7 +1060,7 @@ export async function executePublicTurn(
           channel: 'api',
           assistantKind: assistant.kind,
           workspaceId: assistant.workspaceId ?? undefined,
-          // Same gap the messaging channels had until mig 445: without these
+          // Same gap the messaging channels had until mig 491: without these
           // two stores the public API and the `/c/<token>` chat link saw only
           // the legacy slug-keyed toggles, so a workspace skill enabled
           // through the allowlist (or flagged `all_assistants`) was never

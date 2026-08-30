@@ -1,4 +1,4 @@
--- 445: workspace_skills.all_assistants — stored intent, not a materialised snapshot.
+-- 491: workspace_skills.all_assistants — stored intent, not a materialised snapshot.
 --
 -- Per-assistant enablement for a workspace skill is an ALLOWLIST
 -- (`workspace_skill_enablement`), and every write path only ever seeded rows

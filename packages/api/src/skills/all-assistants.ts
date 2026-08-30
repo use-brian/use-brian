@@ -2,7 +2,7 @@
  * Converting the `all_assistants` intent back into materialised rows.
  *
  * A workspace skill expresses "who is offered this" in one of two ways
- * (mig 445, `docs/architecture/engine/skill-system.md` → "Per-assistant
+ * (mig 491, `docs/architecture/engine/skill-system.md` → "Per-assistant
  * enablement"):
  *
  *   * `workspace_skills.all_assistants = true` — every assistant in the

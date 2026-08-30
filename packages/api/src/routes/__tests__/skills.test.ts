@@ -355,7 +355,7 @@ describe('[COMP:api/skills-route] POST / — workspace-aware create + D4 enablem
     expect(workspaceSkillStore.create).not.toHaveBeenCalled()
   })
 
-  // mig 445 (replaces the old D4 fan-out). "All assistants" is now stored as
+  // mig 491 (replaces the old D4 fan-out). "All assistants" is now stored as
   // intent on the skill row instead of one enablement row per assistant that
   // happened to exist at creation — which is what made a skill invisible to
   // every assistant created afterwards.

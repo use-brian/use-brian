@@ -59,7 +59,7 @@ export type AgentWriteToolDeps = {
   enablementStore: WorkspaceSkillEnablementStore
   /**
    * Clears the `all_assistants` flag when `disableSkill` narrows a skill that
-   * applies to every assistant (mig 445). Only `setAllAssistants` is used.
+   * applies to every assistant (mig 491). Only `setAllAssistants` is used.
    */
   workspaceSkillStore: Pick<WorkspaceSkillStore, 'setAllAssistants'>
   /**
@@ -286,7 +286,7 @@ export function createAgentWriteTools(deps: AgentWriteToolDeps): Tool[] {
       const skill = await resolveSkillOrFailure(input.skillId, workspaceId, 'enableSkill')
       if ('isError' in skill) return skill
       const assistantId = input.assistantId ?? ctx.assistantId
-      // mig 445: already covered by the workspace-wide flag. Writing a row
+      // mig 491: already covered by the workspace-wide flag. Writing a row
       // would leave the two representations disagreeing for no behaviour
       // change, so say what is true instead.
       if (skill.allAssistants) {
@@ -320,7 +320,7 @@ export function createAgentWriteTools(deps: AgentWriteToolDeps): Tool[] {
       const skill = await resolveSkillOrFailure(input.skillId, workspaceId, 'disableSkill')
       if ('isError' in skill) return skill
       const assistantId = input.assistantId ?? ctx.assistantId
-      // mig 445: a skill flagged `all_assistants` holds no enablement row, so
+      // mig 491: a skill flagged `all_assistants` holds no enablement row, so
       // `disable` would delete nothing and return false — which reads as
       // "already off" and would have the model tell the user the skill is
       // disabled while every assistant, this one included, keeps being offered

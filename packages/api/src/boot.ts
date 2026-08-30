@@ -5213,7 +5213,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     communitySkills: communitySkillRegistry,
     workspaceSkillStore,
     workspaceSkillEnablementStore,
-    // mig 445: the assistant-side disable has to materialise an
+    // mig 491: the assistant-side disable has to materialise an
     // `all_assistants` skill into per-assistant rows before clearing the flag.
     listWorkspaceAssistants: async (userId, workspaceId) =>
       (await listAccessibleAssistants(userId, workspaceId)).map((a) => ({

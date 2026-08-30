@@ -625,7 +625,7 @@ export async function injectSkills(opts: InjectSkillsOptions): Promise<InjectSki
   // missing entry as 'public' so they're never gated out.
   const slugToGovernance = new Map<string, SkillGovernance>()
 
-  // mig 445: slugs whose `workspace_skills.all_assistants` is set — offered to
+  // mig 491: slugs whose `workspace_skills.all_assistants` is set — offered to
   // every assistant in the workspace, including ones created after the skill.
   // Populated from the same `listForWorkspace` read as the two maps above, so
   // when that read fails this set is empty and those skills fall back to their
@@ -679,7 +679,7 @@ export async function injectSkills(opts: InjectSkillsOptions): Promise<InjectSki
           // scope (incl. the suggested-skill proposer default) lives in the
           // enablement allowlist — see isSkillOfferable's doc comment.
           slugToGovernance.set(ws.slug, { sensitivity: ws.sensitivity })
-          // mig 445: the OTHER half of offering scope. The allowlist can only
+          // mig 491: the OTHER half of offering scope. The allowlist can only
           // name assistants that existed when it was written, so a skill meant
           // for "everyone, including whoever is created next" carries no rows
           // at all and says so here instead. Read as an OR beside the rows —
@@ -766,7 +766,7 @@ export async function injectSkills(opts: InjectSkillsOptions): Promise<InjectSki
     }
     // Offering scope, four independent grants OR'd together. The `disabledSlugs`
     // veto is applied by `passesGovernance` BEFORE this and still out-ranks all
-    // four. `allAssistantsSlugs` (mig 445) is the only one that survives the
+    // four. `allAssistantsSlugs` (mig 491) is the only one that survives the
     // creation of a NEW assistant — the other three name assistants that
     // already existed when they were written.
     const isEnabled = (s: { id: string; source: string }): boolean =>

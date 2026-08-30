@@ -69,7 +69,7 @@ export type CreateSkillInput = {
    *  draft came from the GitHub/URL importer. Write-only today. */
   importSource?: Record<string, unknown> | null
   /**
-   * Born offering every assistant, including ones created later (mig 445).
+   * Born offering every assistant, including ones created later (mig 491).
    * The `enabledAssistantIds: 'all'` default sets this INSTEAD of writing an
    * enablement row per assistant, so the intent survives the next assistant.
    * Defaults to false — an explicit id list materialises rows as before, and
@@ -159,7 +159,7 @@ export type WorkspaceSkillRow = {
   blueprint_id: string | null
   bundle_version?: 1 | 2
   source_digest?: string | null
-  // Stored offering intent (mig 445) — see `WorkspaceSkill.allAssistants`.
+  // Stored offering intent (mig 491) — see `WorkspaceSkill.allAssistants`.
   all_assistants: boolean
 }
 
@@ -215,7 +215,7 @@ export type WorkspaceSkill = {
   bundleVersion?: 1 | 2
   sourceDigest?: string
   /**
-   * Offering INTENT (mig 445): true = every assistant in the workspace,
+   * Offering INTENT (mig 491): true = every assistant in the workspace,
    * including ones created later. The `workspace_skill_enablement` allowlist
    * can only ever express the assistants that existed when it was written, so
    * this is the one representation that survives a new assistant.
@@ -340,7 +340,7 @@ export type WorkspaceSkillStore = {
   setBlueprint(userId: string, workspaceId: string, skillId: string, blueprintId: string | null): Promise<void>
   /**
    * Set (or clear) the "offer to every assistant, including future ones"
-   * intent (mig 445). Governance-only — no verify stamp, no `write_origin`
+   * intent (mig 491). Governance-only — no verify stamp, no `write_origin`
    * flip: it changes who is offered the skill, not what the skill says.
    *
    * Callers must NOT clear this on its own to turn one assistant off: that

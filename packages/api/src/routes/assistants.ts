@@ -93,7 +93,7 @@ type AssistantRouteOptions = {
   /**
    * Every assistant in a workspace. Needed only to CONVERT a skill that is
    * flagged `all_assistants` when one assistant is switched off: the flag has
-   * to become a row per remaining assistant before it can be cleared (mig 445).
+   * to become a row per remaining assistant before it can be cleared (mig 491).
    * Absent in minimal mounts, where the conversion is skipped and the disable
    * reports 501 rather than silently doing nothing.
    */
@@ -1818,7 +1818,7 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
               // with no allowlist row, and a legacy `false` vetoes one that
               // has it. Showing allowlist-presence alone would misreport every
               // skill the old personal-workspace toggle enabled — and, since
-              // mig 445, every skill flagged `all_assistants`, which is offered
+              // mig 491, every skill flagged `all_assistants`, which is offered
               // to this assistant while holding no allowlist row at all.
               enabled: settingsMap.get(s.slug) === false
                 ? false
@@ -1945,7 +1945,7 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
       )
       if (!skill) return
 
-      // mig 445: a flagged skill already covers every assistant, so writing a
+      // mig 491: a flagged skill already covers every assistant, so writing a
       // row here would put the two representations in disagreement for no
       // gain. Clearing the legacy veto below is still required — that is what
       // was actually keeping the skill off this assistant.
@@ -1982,7 +1982,7 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
       )
       if (!skill) return
 
-      // mig 445: a skill flagged `all_assistants` holds NO allowlist row, so
+      // mig 491: a skill flagged `all_assistants` holds NO allowlist row, so
       // `disable` alone would delete nothing and report success while the
       // runtime kept offering the skill — the toggle would look off and behave
       // on. Convert first: write a row for every OTHER assistant, then clear
