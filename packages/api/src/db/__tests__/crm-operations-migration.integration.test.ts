@@ -36,4 +36,10 @@ describe('[COMP:crm/operations-store] CRM operations migration contract', () => 
     expect(migration).toContain("source_kind <> 'commerce' AND order_id IS NULL")
     expect(migration).toContain("('commerce','manual','form','workflow','import')")
   })
+
+  it('backfills legacy commerce fingerprints without extension-only hashing', () => {
+    expect(migration).not.toMatch(/\bdigest\s*\(/)
+    expect(migration).toContain("replace(workspace_id::text, '-', '')")
+    expect(migration).toContain("replace(id::text, '-', '')")
+  })
 })

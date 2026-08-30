@@ -245,8 +245,10 @@ ALTER TABLE association_registrations
 UPDATE association_registrations
 SET source_kind = 'commerce',
     source_id = order_line_id::text,
-    request_fingerprint = encode(digest(
-      workspace_id::text || ':' || id::text || ':commerce', 'sha256'), 'hex');
+    -- Legacy commerce rows predate canonical request bytes. The two fixed-width
+    -- UUIDs form an injective 64-hex fingerprint without an extension dependency.
+    request_fingerprint = replace(workspace_id::text, '-', '') ||
+      replace(id::text, '-', '');
 ALTER TABLE association_registrations
   ALTER COLUMN source_kind SET NOT NULL,
   ALTER COLUMN source_id SET NOT NULL,
