@@ -11,7 +11,13 @@
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { Inbox, Lock } from "lucide-react";
+import {
+  GitBranch,
+  Inbox,
+  LockKeyhole,
+  MessageSquare,
+  Radio,
+} from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
 import type { LiveWorkItem } from "@/lib/api/live";
@@ -26,7 +32,25 @@ import { cn } from "@/lib/utils";
 import { useLiveRoster } from "@/components/live/use-live-roster";
 
 const sectionHeaderCls =
-  "px-1 text-[11px] font-semibold uppercase tracking-wide text-sidebar-foreground/45";
+  "text-[10px] font-semibold uppercase tracking-[0.14em] text-sidebar-foreground/40";
+
+function stateDotClass(state: LiveWorkItem["state"]): string {
+  if (state === "working") return "bg-emerald-500";
+  if (state === "waiting") return "bg-amber-500";
+  if (state === "stalled") return "bg-red-500";
+  return "bg-sidebar-foreground/25";
+}
+
+function EmptySignal({ label }: { label: string }) {
+  return (
+    <div className="flex h-9 items-center gap-2 rounded-lg border border-dashed border-sidebar-border/70 px-2.5 text-sidebar-foreground/25">
+      <Radio className="size-3.5" aria-hidden />
+      <span className="sr-only">{label}</span>
+      <span className="h-px flex-1 bg-sidebar-border/60" aria-hidden />
+      <span className="size-1 rounded-full bg-current" aria-hidden />
+    </div>
+  );
+}
 
 function relativeAge(
   iso: string,
@@ -71,53 +95,69 @@ export function LiveRosterList({
     const key = liveItemKey(item);
     const active = key === activeFocus;
     const presence = item.kind === "session" && item.tier === "presence";
-    const subtitle =
-      item.kind === "workflow_run"
-        ? `${tl.runLabel} · ${
-            item.trigger === "scheduled"
-              ? tl.triggerScheduled
-              : item.trigger === "event"
-                ? tl.triggerEvent
-                : tl.triggerManual
-          }`
-        : [item.ownerName, item.assistantName, item.channelType]
-            .filter(Boolean)
-            .join(" · ");
+    const subtitle = item.kind === "workflow_run"
+      ? item.trigger === "scheduled"
+        ? tl.triggerScheduled
+        : item.trigger === "event"
+          ? tl.triggerEvent
+          : tl.triggerManual
+      : presence
+        ? [item.ownerName, item.assistantName].filter(Boolean).join(" · ")
+        : [item.assistantName, item.channelType].filter(Boolean).join(" · ");
+    const KindIcon = presence
+      ? LockKeyhole
+      : item.kind === "workflow_run"
+        ? GitBranch
+        : MessageSquare;
     const className = cn(
-      "flex w-full flex-col gap-0.5 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
+      "group flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left text-sm transition-[background-color,color,box-shadow]",
       active
-        ? "doc-nav-active text-sidebar-accent-foreground"
+        ? "doc-nav-active text-sidebar-accent-foreground shadow-sm"
         : "text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
-      presence && "cursor-default border border-dashed border-sidebar-border hover:bg-transparent",
+      presence && "cursor-default border border-dashed border-sidebar-border/80 hover:bg-transparent",
     );
     const content = (
       <>
-        <span className="flex min-w-0 items-center gap-1.5">
-          {presence ? <Lock className="size-3 shrink-0 opacity-55" aria-hidden /> : null}
-          <span className={cn("min-w-0 flex-1 truncate", !presence && "font-medium")}>
+        <span
+          className={cn(
+            "grid size-7 shrink-0 place-items-center rounded-lg bg-sidebar-accent/75 text-sidebar-foreground/55 transition-colors",
+            active && "bg-background/70 text-sidebar-accent-foreground",
+          )}
+        >
+          <KindIcon className="size-3.5" strokeWidth={1.8} aria-hidden />
+        </span>
+        <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <span className={cn("truncate", !presence && "font-medium")}>
             {liveItemTitle(item)}
           </span>
+          <span className="flex min-w-0 items-center gap-1.5 text-[11px] text-sidebar-foreground/45">
+            <span className="min-w-0 flex-1 truncate">{subtitle}</span>
+            <span className="shrink-0 tabular-nums">
+              {relativeAge(item.lastActiveAt, tl)}
+            </span>
+          </span>
+          {presence ? <span className="sr-only">{tl.presenceHint}</span> : null}
+        </span>
+        <span
+          role="img"
+          aria-label={stateLabel[item.state]}
+          title={stateLabel[item.state]}
+          className="relative flex size-3 shrink-0 items-center justify-center"
+        >
+          {item.state === "working" ? (
+            <span
+              className="absolute size-2.5 rounded-full bg-emerald-500/35 motion-safe:animate-ping motion-reduce:animate-none"
+              aria-hidden
+            />
+          ) : null}
           <span
             className={cn(
-              "shrink-0 rounded-full px-1.5 py-0.5 text-[10px] leading-none",
-              item.state === "working" && "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400",
-              item.state === "waiting" && "bg-amber-500/15 text-amber-700 dark:text-amber-400",
-              item.state === "stalled" && "bg-red-500/15 text-red-700 dark:text-red-400",
-              item.state === "settled" && "bg-sidebar-accent text-sidebar-foreground/55",
+              "relative size-1.5 rounded-full",
+              stateDotClass(item.state),
             )}
-          >
-            {stateLabel[item.state]}
-          </span>
+            aria-hidden
+          />
         </span>
-        <span className="flex min-w-0 items-center gap-1.5 text-[11px] text-sidebar-foreground/50">
-          <span className="min-w-0 flex-1 truncate">{subtitle}</span>
-          <span className="shrink-0">{relativeAge(item.lastActiveAt, tl)}</span>
-        </span>
-        {presence ? (
-          <span className="truncate text-[10px] text-sidebar-foreground/45">
-            {tl.presenceHint}
-          </span>
-        ) : null}
       </>
     );
 
@@ -165,23 +205,29 @@ export function LiveRosterList({
 
       {error ? <p className="px-1 text-xs text-destructive">{tl.loadError}</p> : null}
 
-      <section className="flex flex-col gap-1">
-        <h2 className={sectionHeaderCls}>{tl.workingNow}</h2>
+      <section className="flex flex-col gap-1.5">
+        <div className="flex items-center justify-between gap-2 px-1">
+          <h2 className={sectionHeaderCls}>{tl.workingNow}</h2>
+          <span className="tabular-nums text-[10px] text-sidebar-foreground/35">
+            {groups.working.length}
+          </span>
+        </div>
         {groups.working.length === 0 && loaded ? (
-          <p className="select-none px-2 py-1 text-[12px] text-sidebar-foreground/40">
-            {tl.emptyWorking}
-          </p>
+          <EmptySignal label={tl.emptyWorking} />
         ) : (
           <ul className="flex flex-col gap-0.5">{groups.working.map(renderRow)}</ul>
         )}
       </section>
 
-      <section className="flex flex-col gap-1">
-        <h2 className={sectionHeaderCls}>{tl.justFinished}</h2>
+      <section className="flex flex-col gap-1.5">
+        <div className="flex items-center justify-between gap-2 px-1">
+          <h2 className={sectionHeaderCls}>{tl.justFinished}</h2>
+          <span className="tabular-nums text-[10px] text-sidebar-foreground/35">
+            {groups.finished.length}
+          </span>
+        </div>
         {groups.finished.length === 0 && loaded ? (
-          <p className="select-none px-2 py-1 text-[12px] text-sidebar-foreground/40">
-            {tl.emptyFinished}
-          </p>
+          <EmptySignal label={tl.emptyFinished} />
         ) : (
           <ul className="flex flex-col gap-0.5">{groups.finished.map(renderRow)}</ul>
         )}

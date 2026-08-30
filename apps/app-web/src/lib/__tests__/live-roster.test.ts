@@ -15,6 +15,7 @@ import {
   liveItemHref,
   liveItemKey,
   liveItemTitle,
+  summarizeRosterItems,
   shouldHoldWatchStream,
   WATCH_FEED_CAP,
 } from "@/lib/live-roster";
@@ -62,6 +63,17 @@ describe("[COMP:app-web/live-app] roster grouping + watchability", () => {
     const groups = groupRosterItems(items);
     expect(groups.working.map((i) => i.id)).toEqual(["r-1", "old"]);
     expect(groups.finished.map((i) => i.id)).toEqual(["done"]);
+  });
+
+  it("summarizes only real roster states for the visual pulse", () => {
+    expect(
+      summarizeRosterItems([
+        session(),
+        session({ id: "waiting", state: "waiting" }),
+        session({ id: "stalled", state: "stalled" }),
+        run({ id: "done", state: "settled" }),
+      ]),
+    ).toEqual({ working: 1, waiting: 1, stalled: 1, settled: 1, active: 3 });
   });
 
   it("only full-tier sessions open the watch pane (D7: one stream, §6.1: presence has no affordance)", () => {

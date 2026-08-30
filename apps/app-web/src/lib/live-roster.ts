@@ -28,6 +28,14 @@ export type RosterGroups = {
   finished: LiveWorkItem[];
 };
 
+export type LiveRosterSummary = {
+  working: number;
+  waiting: number;
+  stalled: number;
+  settled: number;
+  active: number;
+};
+
 /** Newest activity first inside each group; settled rows go to `finished`. */
 export function groupRosterItems(items: LiveWorkItem[]): RosterGroups {
   const byNewest = (a: LiveWorkItem, b: LiveWorkItem) =>
@@ -36,6 +44,22 @@ export function groupRosterItems(items: LiveWorkItem[]): RosterGroups {
     working: items.filter((i) => i.state !== "settled").sort(byNewest),
     finished: items.filter((i) => i.state === "settled").sort(byNewest),
   };
+}
+
+/** Exact state counts for the roster-backed visual overview (never fake data). */
+export function summarizeRosterItems(items: LiveWorkItem[]): LiveRosterSummary {
+  const summary: LiveRosterSummary = {
+    working: 0,
+    waiting: 0,
+    stalled: 0,
+    settled: 0,
+    active: 0,
+  };
+  for (const item of items) {
+    summary[item.state] += 1;
+    if (item.state !== "settled") summary.active += 1;
+  }
+  return summary;
 }
 
 /** Query parameter carrying the focused roster row. */
