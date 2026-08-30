@@ -63,6 +63,7 @@ function actorScope(actor: CrmOperationsActor): string {
     case 'intake_key': return `intake_key:${actor.credentialId}`
     case 'home_app': return `home_app:${actor.credentialId}`
     case 'provider': return `provider:${actor.provider}:${actor.eventId}`
+    case 'import': return `import:${actor.jobId}`
   }
 }
 
@@ -609,6 +610,7 @@ export function createCrmOperationsService(
         if (command.kind === 'set_deal_pipeline_stage') {
           const record = await tx.setDealPipelineStage({ ...command, actorUserId: actorUserId(context.actor), actorAssistantId: actorAssistantId(context.actor) })
           if (!record) throw new CrmOperationsError('catalog_key_invalid', 'Deal, pipeline, or stage is unavailable.')
+          if (record.unchanged === true) return result(command.kind, record, { duplicate: true })
           await audit(tx, context.actor, { action: 'crm.deal.stage_changed', subjectKind: 'deal', subjectId: command.dealId, details: { pipelineId: command.pipelineId, stageId: command.stageId } })
           const eventId = await emit(tx, context, {
             eventType: 'crm.deal.stage_changed', eventKey: `crm.deal.stage_changed:${command.dealId}:${String(record.updatedAt)}`,

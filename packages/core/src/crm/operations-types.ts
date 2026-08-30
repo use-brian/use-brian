@@ -65,6 +65,11 @@ export const CrmOperationsActorSchema = z.discriminatedUnion('kind', [
     provider: CrmOperationsStableKeySchema,
     eventId: z.string().trim().min(1).max(200),
   }),
+  z.object({
+    kind: z.literal('import'),
+    jobId: CrmOperationsUuidSchema,
+    userId: CrmOperationsUuidSchema,
+  }),
 ])
 export type CrmOperationsActor = z.infer<typeof CrmOperationsActorSchema>
 
@@ -487,6 +492,8 @@ export function actorAuditIdentity(actor: CrmOperationsActor): {
       return { actorKind: actor.kind, actorCredentialId: actor.credentialId, actingUserId: actor.userId ?? null }
     case 'provider':
       return { actorKind: actor.kind, actorCredentialId: actor.eventId, actingUserId: null }
+    case 'import':
+      return { actorKind: actor.kind, actorCredentialId: actor.jobId, actingUserId: actor.userId }
   }
 }
 

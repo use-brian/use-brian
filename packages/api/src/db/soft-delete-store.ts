@@ -27,6 +27,7 @@
 
 import type { RowSnapshot, SoftDeletePrimitive, SoftDeleteRepository } from '@use-brian/core'
 import { getPool, query } from './client.js'
+import { redactCrmOperationsForContact } from '../crm-operations/privacy.js'
 
 /**
  * Soft-delete primitive → table. The map is the SQL-interpolation allowlist.
@@ -172,6 +173,9 @@ export function createSoftDeleteStore(): SoftDeleteRepository {
             JSON.stringify(input.snapshot),
           ],
         )
+        if (table === 'entities') {
+          await redactCrmOperationsForContact(client, input.workspaceId, input.rowId)
+        }
         await client.query(
           `DELETE FROM ${table} WHERE id = $1 AND workspace_id = $2`,
           [input.rowId, input.workspaceId],

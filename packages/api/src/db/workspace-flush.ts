@@ -81,6 +81,7 @@ export const WORKSPACE_FLUSH_TABLES = [
   // CRM operational imports reference staged workspace files with RESTRICT,
   // so their error/chunk/job rows must leave before workspace_files.
   'crm_import_errors',
+  'crm_import_rows',
   'crm_import_chunks',
   'crm_import_jobs',
   'transcript_segments',

@@ -27,6 +27,7 @@ import {
   type DealRecord,
   type DealStage,
 } from './types.js'
+import type { CrmOperationsServicePort } from './operations-types.js'
 
 /**
  * Tools that let the primary assistant manage workspace-scoped CRM
@@ -107,6 +108,14 @@ export type CrmToolOptions = {
    * only; the upsert/merge path preserves the existing row's provenance.
    */
   writeSourceEpisodeId?: string | null
+  /** Canonical adapter for the six legacy keys on the default pipeline. */
+  legacyPipelineStages?: {
+    resolve(workspaceId: string, stage: DealStage): Promise<{
+      pipelineId: string
+      stageId: string
+    } | null>
+    service: CrmOperationsServicePort
+  }
 }
 
 /**
@@ -1277,8 +1286,8 @@ export function createCrmTools(
     name: 'advanceDealStage',
     requiresCapability: 'crm',
     description:
-      'Move a deal to a new pipeline stage. Valid stages: lead, qualified, proposal, negotiation, won, lost. ' +
-      'This is the canonical verb for stage transitions - use it instead of updateDeal so the brain has a clean cut-point for stage-change events.',
+      'Compatibility move within the workspace default pipeline using one of its legacy keys: lead, qualified, proposal, negotiation, won, or lost. ' +
+      'For custom pipelines or stages, call listCrmPipelines and setDealPipelineStage with returned stable ids.',
     inputSchema: z.object({
       id: idShape,
       stage: stageEnum,
@@ -1287,6 +1296,48 @@ export function createCrmTools(
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
       const writeScope = crmWriteScope(context)
+
+      if (opts?.legacyPipelineStages) {
+        const target = await opts.legacyPipelineStages.resolve(context.workspaceId!, input.stage)
+        if (!target) {
+          return {
+            data: 'The default pipeline does not expose that legacy stage key. Call listCrmPipelines and setDealPipelineStage with a returned pipeline_id and stage_id.',
+            isError: true,
+          }
+        }
+        try {
+          const principal = context.programmaticPrincipal
+          const actor = principal
+            ? principal.kind === 'oauth_token' || principal.kind === 'home_app'
+              ? {
+                kind: principal.kind, credentialId: principal.credentialId,
+                userId: principal.userId,
+              } as const
+              : { kind: principal.kind, credentialId: principal.credentialId } as const
+            : {
+              kind: 'assistant' as const, assistantId: context.assistantId,
+              userId: context.userId, sessionId: context.sessionId,
+            }
+          const moved = await opts.legacyPipelineStages.service.execute({
+            workspaceId: context.workspaceId!,
+            actor,
+            authority: {
+              role: 'member', canWrite: true, canConfigure: false,
+              trustedIdentitySources: [],
+            },
+          }, {
+            kind: 'set_deal_pipeline_stage', dealId: input.id,
+            pipelineId: target.pipelineId, stageId: target.stageId,
+          })
+          opts.onEvent?.({ type: 'deal_stage_advanced', dealId: input.id, stage: input.stage }, eventCtx(context))
+          return { data: moved }
+        } catch (error) {
+          return {
+            data: error instanceof Error ? error.message : String(error),
+            isError: true,
+          }
+        }
+      }
 
       // Write under the viewer projection (read/write symmetry).
       const updated = await store.setDealStage(

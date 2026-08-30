@@ -179,7 +179,7 @@ ALTER TABLE association_consent_events
     CHECK (wording_snapshot IS NULL OR length(wording_snapshot) <= 20000),
   ADD CONSTRAINT association_consent_events_actor_kind_check
     CHECK (actor_kind IS NULL OR actor_kind IN
-      ('user','assistant','workflow','brain_key','oauth_token','intake_key','home_app','provider'));
+      ('user','assistant','workflow','brain_key','oauth_token','intake_key','home_app','provider','import'));
 
 CREATE TABLE crm_suppression_events (
   id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -194,7 +194,7 @@ CREATE TABLE crm_suppression_events (
   source              TEXT NOT NULL CHECK (source ~ '^[a-z][a-z0-9_-]{0,62}$'),
   actor_kind          TEXT NOT NULL CHECK (actor_kind IN
                          ('user','assistant','workflow','brain_key','oauth_token',
-                          'intake_key','home_app','provider')),
+                          'intake_key','home_app','provider','import')),
   actor_credential_id TEXT CHECK (actor_credential_id IS NULL OR length(actor_credential_id) <= 200),
   acting_user_id      UUID REFERENCES users(id) ON DELETE SET NULL,
   provider            TEXT CHECK (provider IS NULL OR provider ~ '^[a-z][a-z0-9_-]{0,62}$'),
@@ -303,7 +303,7 @@ CREATE TABLE crm_domain_event_outbox (
                          CHECK (jsonb_typeof(payload) = 'object' AND pg_column_size(payload) <= 32768),
   actor_kind          TEXT NOT NULL CHECK (actor_kind IN
                          ('user','assistant','workflow','brain_key','oauth_token',
-                          'intake_key','home_app','provider')),
+                          'intake_key','home_app','provider','import')),
   status              TEXT NOT NULL DEFAULT 'pending'
                          CHECK (status IN ('pending','leased','delivered','failed')),
   attempts            INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
@@ -333,6 +333,7 @@ CREATE TABLE crm_import_jobs (
   mapping               JSONB NOT NULL CHECK (jsonb_typeof(mapping) = 'object'
                            AND pg_column_size(mapping) <= 65536),
   mapping_hash          TEXT NOT NULL CHECK (mapping_hash ~ '^[0-9a-f]{64}$'),
+  source_hash           TEXT NOT NULL CHECK (source_hash ~ '^[0-9a-f]{64}$'),
   trusted_identity      BOOLEAN NOT NULL DEFAULT false,
   total_rows            INTEGER NOT NULL CHECK (total_rows >= 0),
   processed_rows        INTEGER NOT NULL DEFAULT 0 CHECK (processed_rows >= 0),
@@ -367,6 +368,27 @@ CREATE TABLE crm_import_chunks (
   FOREIGN KEY (workspace_id, job_id)
     REFERENCES crm_import_jobs(workspace_id, id) ON DELETE CASCADE
 );
+
+-- Durable per-row receipts close the crash window between a canonical CRM
+-- command committing and the enclosing chunk checkpoint. A resumed chunk
+-- first consults this immutable input hash, then either reuses the completed
+-- result or reports a changed-input conflict instead of creating a duplicate.
+CREATE TABLE crm_import_rows (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id    UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  job_id          UUID NOT NULL,
+  row_number      INTEGER NOT NULL CHECK (row_number > 0),
+  input_hash      TEXT NOT NULL CHECK (input_hash ~ '^[0-9a-f]{64}$'),
+  status          TEXT NOT NULL CHECK (status IN ('completed','failed')),
+  entity_id       UUID REFERENCES entities(id) ON DELETE SET NULL,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (job_id, row_number),
+  FOREIGN KEY (workspace_id, job_id)
+    REFERENCES crm_import_jobs(workspace_id, id) ON DELETE CASCADE
+);
+CREATE INDEX crm_import_rows_job
+  ON crm_import_rows(workspace_id, job_id, row_number);
 
 CREATE TABLE crm_import_errors (
   id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -407,7 +429,7 @@ BEGIN
     'crm_intake_credentials', 'crm_intake_credential_definitions',
     'crm_intake_idempotency', 'crm_consent_purposes',
     'crm_suppression_events', 'crm_segments', 'crm_domain_event_outbox',
-    'crm_import_jobs', 'crm_import_chunks', 'crm_import_errors'
+    'crm_import_jobs', 'crm_import_chunks', 'crm_import_rows', 'crm_import_errors'
   ] LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', table_name);
     EXECUTE format(

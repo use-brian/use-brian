@@ -136,6 +136,7 @@ const CRM_TOOLS_STUB: BrainCrmTools = {
   listCrmEntitlements: stubCoreTool('listCrmEntitlements', true),
   listCrmEvents: stubCoreTool('listCrmEvents', true),
   listCrmParticipation: stubCoreTool('listCrmParticipation', true),
+  listCrmPipelines: stubCoreTool('listCrmPipelines', true),
   recordCrmSubmission: stubCoreTool('recordCrmSubmission'),
   updateCrmSubmission: stubCoreTool('updateCrmSubmission'),
   recordCrmConsent: stubCoreTool('recordCrmConsent'),
@@ -146,6 +147,7 @@ const CRM_TOOLS_STUB: BrainCrmTools = {
   updateCrmEntitlement: stubCoreTool('updateCrmEntitlement'),
   recordCrmParticipation: stubCoreTool('recordCrmParticipation'),
   updateCrmParticipation: stubCoreTool('updateCrmParticipation'),
+  setDealPipelineStage: stubCoreTool('setDealPipelineStage'),
 }
 
 const RETRIEVAL_TOOLS_STUB: BrainRetrievalTools = {
@@ -231,6 +233,7 @@ const READ_TOOL_NAMES = [
   'listCrmEntitlements',
   'listCrmEvents',
   'listCrmParticipation',
+  'listCrmPipelines',
   'previewCrmSegment',
   'listTasks',
   'searchBrain',
@@ -273,6 +276,7 @@ const WRITE_TOOL_NAMES = [
   'updateCrmSubmission',
   'updateCrmEntitlement',
   'updateCrmParticipation',
+  'setDealPipelineStage',
   'updateTask',
 ] as const
 

@@ -14,7 +14,7 @@ describe('[COMP:crm/operations-store] CRM operations migration contract', () => 
       'crm_intake_credentials', 'crm_intake_credential_definitions',
       'crm_intake_idempotency', 'crm_consent_purposes', 'crm_suppression_events',
       'crm_segments', 'crm_domain_event_outbox', 'crm_import_jobs',
-      'crm_import_chunks', 'crm_import_errors',
+      'crm_import_chunks', 'crm_import_rows', 'crm_import_errors',
     ]
     for (const table of tables) {
       expect(migration).toContain(`CREATE TABLE ${table}`)

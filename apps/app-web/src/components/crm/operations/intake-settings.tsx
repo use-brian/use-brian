@@ -22,6 +22,7 @@ import {
   type CrmIntakeDefinitionInput,
 } from "@/lib/api/crm";
 import { useT } from "@/lib/i18n/client";
+import { CrmOperationsAuditView } from "./audit-view";
 
 const stableKey = (label: string) => label.trim().toLowerCase()
   .replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 63);
@@ -237,6 +238,7 @@ export function CrmIntakeSettings({ workspaceId }: { workspaceId: string }) {
           {purposes.length === 0 && <div className="text-xs text-muted-foreground">{t.noPurposes}</div>}
         </div>
       </div>
+      <CrmOperationsAuditView workspaceId={workspaceId} />
     </section>
   );
 }

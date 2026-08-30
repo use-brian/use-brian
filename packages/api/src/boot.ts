@@ -222,6 +222,7 @@ import { crmRoutes } from './routes/crm.js'
 import { crmIntakeRoutes } from './routes/crm-intake.js'
 import { crmOperationsRoutes } from './routes/crm-operations.js'
 import { createCrmOperationsService } from './crm-operations/service.js'
+import { createCrmProductionImportService } from './crm-operations/import-service.js'
 import {
   crmWorkflowAdmission,
   createCrmDomainEventWorker,
@@ -3734,6 +3735,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const crmTools = createCrmTools(crmStore, {
     entityLinks: entityLinksStore,
     entityKindClassifier,
+    legacyPipelineStages: {
+      resolve: (workspaceId, stage) => crmIntakeReadStore.resolveLegacyPipelineStage(workspaceId, stage),
+      service: crmOperationsService,
+    },
     onEvent: (evt, ctx) => {
       const base = { userId: ctx.userId, assistantId: ctx.assistantId, sessionId: ctx.sessionId, channelType: ctx.channelType }
       if (evt.type === 'contact_created' || evt.type === 'company_created' || evt.type === 'deal_created') {
@@ -6425,11 +6430,17 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     workspaceStore,
     entityLinks: entityLinksStore,
     emailDraftStore: crmEmailDraftStore,
+    crmOperationsService,
   }))
   app.use('/api/crm', requireAuth(env.JWT_SECRET), crmOperationsRoutes({
     workspaceStore,
     service: crmOperationsService,
     readStore: crmIntakeReadStore,
+    ...(filesApi ? { importService: createCrmProductionImportService({
+      filesApi,
+      operations: crmOperationsService,
+      entityLinks: entityLinksStore,
+    }) } : {}),
   }))
   // Brain inbox (verification surface). Open + hosted share this one mount: the
   // route's deps are all open (brain-inbox-store / entities-store / crm / sessions /

@@ -22,11 +22,23 @@ import {
   UpdateCrmSubmissionCommandSchema,
   UpdateCrmEntitlementCommandSchema,
   UpdateCrmParticipationCommandSchema,
+  SetDealPipelineStageCommandSchema,
   type CrmOperationsContext,
   type CrmOperationsServicePort,
 } from '@use-brian/core'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 import type { DbCrmOperationsReadStore } from '../db/crm-intake-store.js'
+import {
+  CrmImportConfirmSchema,
+  CrmImportPreflightSchema,
+  type CrmProductionImportService,
+} from '../crm-operations/import-service.js'
+import {
+  exportCrmOperationsPrivacy,
+  listCrmEventDelivery,
+  listCrmOperationsAudit,
+  pruneCrmOperationsRetention,
+} from '../crm-operations/privacy.js'
 
 const SaveDefinitionBody = SaveCrmIntakeDefinitionCommandSchema.omit({ kind: true }).strict()
 const CreateCredentialBody = CreateCrmIntakeCredentialCommandSchema.omit({ kind: true }).strict()
@@ -136,11 +148,25 @@ const UpdateEntitlementBody = z.object({
 )
 const RecordParticipationBody = RecordCrmParticipationCommandSchema.omit({ kind: true }).strict()
 const UpdateParticipationBody = UpdateCrmParticipationCommandSchema.omit({ kind: true, participationId: true }).strict()
+const PipelineListQuery = z.object({
+  entityKind: z.literal('deal').default('deal'),
+  includeArchived: z.enum(['true', 'false']).optional(),
+}).strict()
+const SetPipelineStageBody = SetDealPipelineStageCommandSchema
+  .omit({ kind: true, dealId: true }).strict()
+const OperationsLogQuery = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+}).strict()
+const RetentionBody = z.object({
+  before: z.string().datetime({ offset: true }),
+  confirmed: z.literal(true),
+}).strict()
 
 type Options = {
   workspaceStore: WorkspaceStore
   service: CrmOperationsServicePort
   readStore: DbCrmOperationsReadStore
+  importService?: CrmProductionImportService
 }
 
 function writeError(res: Response, error: unknown): void {
@@ -589,6 +615,226 @@ export function crmOperationsRoutes(options: Options): Router {
       res.json(await options.service.execute(ctx, UpdateCrmParticipationCommandSchema.parse({
         kind: 'update_participation', participationId: participationId.data, ...body.data,
       })))
+    } catch (error) { writeError(res, error) }
+  })
+
+  router.get('/:workspaceId/operations/pipelines', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    const filters = PipelineListQuery.safeParse(req.query)
+    if (!filters.success) {
+      res.status(400).json({ error: 'invalid_input', issues: filters.error.issues })
+      return
+    }
+    try {
+      res.json({ pipelines: await options.readStore.listPipelines(ctx.workspaceId, {
+        entityKind: filters.data.entityKind,
+        includeArchived: filters.data.includeArchived === 'true',
+      }) })
+    } catch (error) { writeError(res, error) }
+  })
+
+  router.patch('/:workspaceId/operations/deals/:dealId/pipeline-stage', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    const dealId = CrmOperationsUuidSchema.safeParse(req.params.dealId)
+    const body = SetPipelineStageBody.safeParse(req.body)
+    if (!dealId.success || !body.success) {
+      res.status(400).json({
+        error: 'invalid_input',
+        issues: dealId.success ? body.error?.issues : dealId.error.issues,
+      })
+      return
+    }
+    try {
+      res.json(await options.service.execute(ctx, {
+        kind: 'set_deal_pipeline_stage', dealId: dealId.data, ...body.data,
+      }))
+    } catch (error) { writeError(res, error) }
+  })
+
+  router.post('/:workspaceId/operations/imports/dry-run', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    if (!options.importService) {
+      res.status(503).json({ error: 'import_unavailable' })
+      return
+    }
+    const input = CrmImportPreflightSchema.safeParse(req.body)
+    if (!input.success) {
+      res.status(400).json({ error: 'invalid_input', issues: input.error.issues })
+      return
+    }
+    try {
+      if (ctx.actor.kind !== 'user') throw new Error('Member import requires a user actor.')
+      res.json(await options.importService.dryRun(ctx as CrmOperationsContext & { actor: { kind: 'user'; userId: string } }, input.data))
+    } catch (error) { writeError(res, error) }
+  })
+
+  router.post('/:workspaceId/operations/imports', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    if (!options.importService) {
+      res.status(503).json({ error: 'import_unavailable' })
+      return
+    }
+    const input = CrmImportConfirmSchema.safeParse(req.body)
+    if (!input.success) {
+      res.status(400).json({ error: 'invalid_input', issues: input.error.issues })
+      return
+    }
+    try {
+      if (ctx.actor.kind !== 'user') throw new Error('Member import requires a user actor.')
+      res.status(201).json(await options.importService.confirm(ctx as CrmOperationsContext & { actor: { kind: 'user'; userId: string } }, input.data))
+    } catch (error) { writeError(res, error) }
+  })
+
+  router.get('/:workspaceId/operations/imports', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    if (!options.importService) {
+      res.status(503).json({ error: 'import_unavailable' })
+      return
+    }
+    try {
+      res.json({ jobs: await options.importService.list(ctx.workspaceId) })
+    } catch (error) { writeError(res, error) }
+  })
+
+  router.get('/:workspaceId/operations/imports/:jobId', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    if (!options.importService) {
+      res.status(503).json({ error: 'import_unavailable' })
+      return
+    }
+    const jobId = CrmOperationsUuidSchema.safeParse(req.params.jobId)
+    if (!jobId.success) {
+      res.status(400).json({ error: 'invalid_input', issues: jobId.error.issues })
+      return
+    }
+    try {
+      const job = await options.importService.get(ctx.workspaceId, jobId.data)
+      if (!job) {
+        res.status(404).json({ error: 'not_found' })
+        return
+      }
+      res.json(job)
+    } catch (error) { writeError(res, error) }
+  })
+
+  router.post('/:workspaceId/operations/imports/:jobId/resume', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    if (!options.importService) {
+      res.status(503).json({ error: 'import_unavailable' })
+      return
+    }
+    const jobId = CrmOperationsUuidSchema.safeParse(req.params.jobId)
+    if (!jobId.success) {
+      res.status(400).json({ error: 'invalid_input', issues: jobId.error.issues })
+      return
+    }
+    try {
+      if (ctx.actor.kind !== 'user') throw new Error('Member import requires a user actor.')
+      res.json(await options.importService.resume(ctx as CrmOperationsContext & { actor: { kind: 'user'; userId: string } }, jobId.data))
+    } catch (error) { writeError(res, error) }
+  })
+
+  router.post('/:workspaceId/operations/imports/:jobId/cancel', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    if (!options.importService) {
+      res.status(503).json({ error: 'import_unavailable' })
+      return
+    }
+    const jobId = CrmOperationsUuidSchema.safeParse(req.params.jobId)
+    if (!jobId.success) {
+      res.status(400).json({ error: 'invalid_input', issues: jobId.error.issues })
+      return
+    }
+    try {
+      if (ctx.actor.kind !== 'user') throw new Error('Member import requires a user actor.')
+      res.json(await options.importService.cancel(ctx as CrmOperationsContext & { actor: { kind: 'user'; userId: string } }, jobId.data))
+    } catch (error) { writeError(res, error) }
+  })
+
+  router.get('/:workspaceId/operations/imports/:jobId/errors.csv', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    if (!options.importService) {
+      res.status(503).json({ error: 'import_unavailable' })
+      return
+    }
+    const jobId = CrmOperationsUuidSchema.safeParse(req.params.jobId)
+    if (!jobId.success) {
+      res.status(400).json({ error: 'invalid_input', issues: jobId.error.issues })
+      return
+    }
+    try {
+      const csv = await options.importService.errorsCsv(ctx.workspaceId, jobId.data)
+      if (csv === null) {
+        res.status(404).json({ error: 'not_found' })
+        return
+      }
+      res.type('text/csv').setHeader('Content-Disposition', `attachment; filename="crm-import-${jobId.data}-errors.csv"`)
+      res.send(csv)
+    } catch (error) { writeError(res, error) }
+  })
+
+  router.get('/:workspaceId/operations/audit', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    const filters = OperationsLogQuery.safeParse(req.query)
+    if (!filters.success) {
+      res.status(400).json({ error: 'invalid_input', issues: filters.error.issues })
+      return
+    }
+    try {
+      res.json({ entries: await listCrmOperationsAudit(ctx.workspaceId, filters.data.limit) })
+    } catch (error) { writeError(res, error) }
+  })
+
+  router.get('/:workspaceId/operations/event-delivery', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    const filters = OperationsLogQuery.safeParse(req.query)
+    if (!filters.success) {
+      res.status(400).json({ error: 'invalid_input', issues: filters.error.issues })
+      return
+    }
+    try {
+      res.json({ events: await listCrmEventDelivery(ctx.workspaceId, filters.data.limit) })
+    } catch (error) { writeError(res, error) }
+  })
+
+  router.get('/:workspaceId/operations/privacy-export', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    if (!ctx.authority.canConfigure) {
+      res.status(403).json({ error: 'not_authorized' })
+      return
+    }
+    try {
+      res.setHeader('Content-Disposition', `attachment; filename="crm-operations-${ctx.workspaceId}.json"`)
+      res.json(await exportCrmOperationsPrivacy(ctx.workspaceId))
+    } catch (error) { writeError(res, error) }
+  })
+
+  router.post('/:workspaceId/operations/retention', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    if (!ctx.authority.canConfigure) {
+      res.status(403).json({ error: 'not_authorized' })
+      return
+    }
+    const body = RetentionBody.safeParse(req.body)
+    if (!body.success) {
+      res.status(400).json({ error: 'invalid_input', issues: body.error.issues })
+      return
+    }
+    try {
+      res.json(await pruneCrmOperationsRetention(ctx.workspaceId, new Date(body.data.before)))
     } catch (error) { writeError(res, error) }
   })
 

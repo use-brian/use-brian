@@ -850,15 +850,132 @@ export async function createCrmRecord(
   });
 }
 
-export async function importCrmRecords(
+export type CrmProductionImportKind = "contact" | "company" | "deal" | "operations";
+export type CrmProductionImportMapping = {
+  columns: Record<string, string | null>;
+  trustedIdentitySource?: string;
+};
+export type CrmProductionImportDryRun = {
+  dryRunHash: string;
+  bytes: number;
+  totalRows: number;
+  validRows: number;
+  failedRows: number;
+  headers: string[];
+  sampleErrors: Array<{ row: number; code: string; field?: string; message: string }>;
+};
+export type CrmProductionImportJob = {
+  id: string;
+  status: "ready" | "running" | "paused" | "completed" | "cancelled" | "failed";
+  entityKind: CrmProductionImportKind;
+  totalRows: number;
+  processedRows: number;
+  succeededRows: number;
+  failedRows: number;
+};
+
+export function dryRunCrmImport(
   workspaceId: string,
-  records: Record<string, unknown>[],
-): Promise<{ created: number; failed: number; results: Array<{ row: number; id?: string; error?: string }> }> {
-  return jsonRequest(`/api/crm/${encodeURIComponent(workspaceId)}/import`, {
+  input: { stagedFileId: string; entityKind: CrmProductionImportKind; mapping: CrmProductionImportMapping },
+): Promise<CrmProductionImportDryRun> {
+  return jsonRequest(`/api/crm/${encodeURIComponent(workspaceId)}/operations/imports/dry-run`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ records }),
+    body: JSON.stringify(input),
   });
+}
+
+export function confirmCrmImport(
+  workspaceId: string,
+  input: {
+    stagedFileId: string;
+    entityKind: CrmProductionImportKind;
+    mapping: CrmProductionImportMapping;
+    dryRunHash: string;
+    confirmed: true;
+  },
+): Promise<CrmProductionImportJob> {
+  return jsonRequest(`/api/crm/${encodeURIComponent(workspaceId)}/operations/imports`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+}
+
+export function resumeCrmImport(
+  workspaceId: string,
+  jobId: string,
+): Promise<CrmProductionImportJob> {
+  return jsonRequest(
+    `/api/crm/${encodeURIComponent(workspaceId)}/operations/imports/${encodeURIComponent(jobId)}/resume`,
+    { method: "POST" },
+  );
+}
+
+export function cancelCrmImport(
+  workspaceId: string,
+  jobId: string,
+): Promise<CrmProductionImportJob> {
+  return jsonRequest(
+    `/api/crm/${encodeURIComponent(workspaceId)}/operations/imports/${encodeURIComponent(jobId)}/cancel`,
+    { method: "POST" },
+  );
+}
+
+export async function downloadCrmImportErrors(workspaceId: string, jobId: string): Promise<Blob> {
+  const res = await authFetch(
+    `${API_URL}/api/crm/${encodeURIComponent(workspaceId)}/operations/imports/${encodeURIComponent(jobId)}/errors.csv`,
+  );
+  if (!res.ok) throw new Error(`CRM import error export failed (${res.status})`);
+  return res.blob();
+}
+
+export type CrmOperationsAuditEntry = {
+  id: string;
+  action: string;
+  subjectKind: string;
+  subjectId: string;
+  actorKind: string;
+  occurredAt: string;
+  details: Record<string, unknown>;
+};
+export type CrmEventDeliveryEntry = {
+  id: string;
+  eventType: string;
+  subjectKind: string;
+  subjectId: string;
+  status: "pending" | "leased" | "delivered" | "failed";
+  attempts: number;
+  occurredAt: string;
+  deliveredAt: string | null;
+};
+
+export async function listCrmOperationsAudit(
+  workspaceId: string,
+  limit = 50,
+): Promise<CrmOperationsAuditEntry[]> {
+  const body = await jsonRequest<{ entries: CrmOperationsAuditEntry[] }>(
+    `/api/crm/${encodeURIComponent(workspaceId)}/operations/audit?limit=${limit}`,
+  );
+  return body.entries;
+}
+
+export async function listCrmEventDelivery(
+  workspaceId: string,
+  limit = 50,
+): Promise<CrmEventDeliveryEntry[]> {
+  const body = await jsonRequest<{ events: CrmEventDeliveryEntry[] }>(
+    `/api/crm/${encodeURIComponent(workspaceId)}/operations/event-delivery?limit=${limit}`,
+  );
+  return body.events;
+}
+
+export async function downloadCrmOperationsPrivacyExport(workspaceId: string): Promise<Blob> {
+  const res = await authFetch(
+    `${API_URL}/api/crm/${encodeURIComponent(workspaceId)}/operations/privacy-export`,
+  );
+  if (!res.ok) throw new Error(`CRM operations export failed (${res.status})`);
+  return res.blob();
 }
 
 export async function downloadCrmCsv(
@@ -1213,14 +1330,15 @@ export async function updateCrmCustomFields(
 export async function setCrmPipelineStage(
   workspaceId: string,
   entityId: string,
+  pipelineId: string,
   stageId: string,
 ): Promise<void> {
   await jsonRequest(
-    `/api/crm/${encodeURIComponent(workspaceId)}/records/${encodeURIComponent(entityId)}/pipeline-stage`,
+    `/api/crm/${encodeURIComponent(workspaceId)}/operations/deals/${encodeURIComponent(entityId)}/pipeline-stage`,
     {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ stageId }),
+      body: JSON.stringify({ pipelineId, stageId }),
     },
   );
 }

@@ -1116,8 +1116,11 @@ function createTransaction(client: PoolClient, context: CrmOperationsContext): C
     async setDealPipelineStage(params) {
       const catalog = await client.query<DbRecord>(
         `SELECT p.id AS "pipelineId",p.name AS "pipelineName",
-                s.id AS "stageId",s.name AS "stageName",s.legacy_key AS "stageKey",
-                s.category,s.position
+                p.id::text AS "pipelineKey",
+                s.id AS "stageId",s.name AS "stageName",
+                COALESCE(s.legacy_key,s.id::text) AS "stageKey",
+                s.legacy_key AS "legacyStage",s.category,s.position,
+                s.probability,s.required_fields AS "requiredFields"
            FROM crm_pipelines p
            JOIN crm_pipeline_stages s
              ON s.workspace_id=p.workspace_id AND s.pipeline_id=p.id
@@ -1126,7 +1129,57 @@ function createTransaction(client: PoolClient, context: CrmOperationsContext): C
         [workspaceId, params.pipelineId, params.stageId],
       )
       const stage = catalog.rows[0]
-      if (!stage) return null
+      if (!stage) {
+        const valid = await client.query<DbRecord>(
+          `SELECT p.id AS "pipelineId",p.name AS "pipelineName",
+                  s.id AS "stageId",s.name AS "stageName"
+             FROM crm_pipelines p
+             JOIN crm_pipeline_stages s
+               ON s.workspace_id=p.workspace_id AND s.pipeline_id=p.id
+            WHERE p.workspace_id=$1 AND p.archived_at IS NULL
+              AND s.archived_at IS NULL
+            ORDER BY p.position,s.position,p.id,s.id LIMIT 100`,
+          [workspaceId],
+        )
+        throw new CrmOperationsError(
+          'catalog_key_invalid',
+          'Pipeline and stage must identify the same live workspace catalog entry.',
+          { validValues: valid.rows },
+        )
+      }
+      const current = await client.query<DbRecord>(
+        `SELECT id,display_name AS name,attributes,
+                created_at AS "createdAt",updated_at AS "updatedAt"
+           FROM entities
+          WHERE workspace_id=$1 AND id=$2 AND kind='deal'
+            AND valid_to IS NULL AND retracted_at IS NULL FOR UPDATE`,
+        [workspaceId, params.dealId],
+      )
+      const deal = current.rows[0]
+      if (!deal) return null
+      const custom = deal.attributes.custom_fields
+      const customFields = custom && typeof custom === 'object' && !Array.isArray(custom)
+        ? custom as Record<string, unknown> : {}
+      const requiredFields = Array.isArray(stage.requiredFields)
+        ? stage.requiredFields.filter((value): value is string => typeof value === 'string') : []
+      const missing = requiredFields.filter((key) => {
+        const value = Object.prototype.hasOwnProperty.call(deal.attributes, key)
+          ? deal.attributes[key] : customFields[key]
+        return value === null || value === undefined || value === ''
+      })
+      if (missing.length > 0) {
+        throw new CrmOperationsError(
+          'invalid_transition',
+          'Required deal fields must be completed before moving to this stage.',
+          { missingFields: missing },
+        )
+      }
+      if (deal.attributes.pipeline_id === params.pipelineId
+        && deal.attributes.pipeline_stage_id === params.stageId) {
+        return { ...deal, pipeline: stage, unchanged: true }
+      }
+      const legacyStage = stage.legacyStage
+        ?? (stage.category === 'won' ? 'won' : stage.category === 'lost' ? 'lost' : 'lead')
       const updated = await client.query<DbRecord>(
         `UPDATE entities
             SET attributes=attributes || jsonb_build_object(
@@ -1137,11 +1190,10 @@ function createTransaction(client: PoolClient, context: CrmOperationsContext): C
             AND valid_to IS NULL AND retracted_at IS NULL
          RETURNING id,display_name AS name,attributes,
                    created_at AS "createdAt",updated_at AS "updatedAt"`,
-        [workspaceId, params.dealId, params.pipelineId, params.stageId,
-          stage.stageKey ?? null],
+        [workspaceId, params.dealId, params.pipelineId, params.stageId, legacyStage],
       )
-      const deal = updated.rows[0]
-      if (!deal) return null
+      const updatedDeal = updated.rows[0]
+      if (!updatedDeal) return null
       await client.query(
         `INSERT INTO crm_activities (
            workspace_id,entity_id,activity_type,direction,summary,source_kind,
@@ -1150,9 +1202,13 @@ function createTransaction(client: PoolClient, context: CrmOperationsContext): C
         [workspaceId, params.dealId, `Moved deal to ${String(stage.stageName)}`,
           `${params.pipelineId}:${params.stageId}:${Date.now()}`,
           params.actorUserId, params.actorAssistantId,
-          JSON.stringify({ pipelineId: params.pipelineId, stageId: params.stageId })],
+          JSON.stringify({
+            fromPipelineId: deal.attributes.pipeline_id ?? null,
+            fromStageId: deal.attributes.pipeline_stage_id ?? null,
+            pipelineId: params.pipelineId, stageId: params.stageId,
+          })],
       )
-      return { ...deal, pipeline: stage }
+      return { ...updatedDeal, pipeline: stage }
     },
 
     async appendDomainAudit(params) {

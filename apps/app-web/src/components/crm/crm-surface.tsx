@@ -759,7 +759,7 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
           .find((candidate) => candidate.id === stageId);
         if (!stage) return { ok: false, error: t.r2.stageChangeFailed };
         try {
-          await setCrmPipelineStage(workspaceId, row.id, stageId);
+          await setCrmPipelineStage(workspaceId, row.id, stage.pipelineId, stageId);
           patchDeal(row.id, {
             pipelineId: stage.pipelineId,
             pipelineStageId: stage.id,
@@ -871,7 +871,7 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
       try {
         for (const id of ids) {
           try {
-            await setCrmPipelineStage(workspaceId, id, stageId);
+            await setCrmPipelineStage(workspaceId, id, stage.pipelineId, stageId);
             patchDeal(id, {
               pipelineId: stage.pipelineId,
               pipelineStageId: stage.id,

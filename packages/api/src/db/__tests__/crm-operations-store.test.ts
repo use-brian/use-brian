@@ -89,3 +89,64 @@ describe('[COMP:crm/operations-store] CRM operations PostgreSQL transaction stor
     expect(query).toHaveBeenCalledWith('ROLLBACK')
   })
 })
+
+describe('[COMP:crm/pipeline-tools] catalog-backed deal stages', () => {
+  it('moves a deal to a non-default custom stage and derives its legacy category', async () => {
+    const query = vi.fn().mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM crm_pipelines p') && sql.includes('p.id=$2')) {
+        return { rows: [{
+          pipelineId: 'pipeline-custom', pipelineName: 'Renewals', pipelineKey: 'pipeline-custom',
+          stageId: 'stage-review', stageName: 'Review', stageKey: 'stage-review',
+          legacyStage: null, category: 'open', probability: 45, requiredFields: ['amount'],
+        }], rowCount: 1 }
+      }
+      if (sql.includes('FROM entities') && sql.includes('FOR UPDATE')) {
+        return { rows: [{ attributes: { amount: 1200, pipeline_stage_id: 'old-stage' } }], rowCount: 1 }
+      }
+      if (sql.includes('UPDATE entities')) {
+        return { rows: [{ id: 'deal-1', attributes: { stage: 'lead', pipeline_stage_id: 'stage-review' } }], rowCount: 1 }
+      }
+      return { rows: [], rowCount: 1 }
+    })
+    const pool = { connect: vi.fn().mockResolvedValue({ query, release: vi.fn() }) } as never
+    const store = createDbCrmOperationsStore(pool)
+    const moved = await store.transaction(context, (tx) => tx.setDealPipelineStage({
+      dealId: 'deal-1', pipelineId: 'pipeline-custom', stageId: 'stage-review',
+      actorUserId: USER_ID, actorAssistantId: null,
+    }))
+    expect(moved).toMatchObject({ id: 'deal-1', pipeline: { stageName: 'Review' } })
+    const update = query.mock.calls.find((call) => String(call[0]).includes('UPDATE entities'))
+    expect(update?.[1]).toEqual([
+      WORKSPACE_ID, 'deal-1', 'pipeline-custom', 'stage-review', 'lead',
+    ])
+  })
+
+  it('treats a repeated exact pipeline stage as a replay-safe no-op', async () => {
+    const query = vi.fn().mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM crm_pipelines p') && sql.includes('p.id=$2')) {
+        return { rows: [{
+          pipelineId: 'pipeline-custom', pipelineName: 'Renewals', pipelineKey: 'pipeline-custom',
+          stageId: 'stage-review', stageName: 'Review', stageKey: 'stage-review',
+          legacyStage: null, category: 'open', probability: 45, requiredFields: [],
+        }], rowCount: 1 }
+      }
+      if (sql.includes('FROM entities') && sql.includes('FOR UPDATE')) {
+        return { rows: [{
+          id: 'deal-1', attributes: {
+            pipeline_id: 'pipeline-custom', pipeline_stage_id: 'stage-review',
+          },
+        }], rowCount: 1 }
+      }
+      return { rows: [], rowCount: 1 }
+    })
+    const pool = { connect: vi.fn().mockResolvedValue({ query, release: vi.fn() }) } as never
+    const store = createDbCrmOperationsStore(pool)
+    const moved = await store.transaction(context, (tx) => tx.setDealPipelineStage({
+      dealId: 'deal-1', pipelineId: 'pipeline-custom', stageId: 'stage-review',
+      actorUserId: USER_ID, actorAssistantId: null,
+    }))
+    expect(moved).toMatchObject({ id: 'deal-1', unchanged: true })
+    expect(query.mock.calls.some((call) => String(call[0]).includes('UPDATE entities'))).toBe(false)
+    expect(query.mock.calls.some((call) => String(call[0]).includes('INSERT INTO crm_activities'))).toBe(false)
+  })
+})

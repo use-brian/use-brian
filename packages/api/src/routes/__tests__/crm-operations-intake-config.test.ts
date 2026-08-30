@@ -14,6 +14,9 @@ const PLAN_ID = '77777777-7777-4777-8777-777777777777'
 const ENTITLEMENT_ID = '88888888-8888-4888-8888-888888888888'
 const EVENT_ID = '99999999-9999-4999-8999-999999999999'
 const PARTICIPATION_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+const PIPELINE_ID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+const STAGE_ID = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+const IMPORT_JOB_ID = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
 
 function build(role: 'owner' | 'admin' | 'member' = 'owner') {
   const workspaceStore = { getRole: vi.fn().mockResolvedValue(role) }
@@ -38,12 +41,24 @@ function build(role: 'owner' | 'admin' | 'member' = 'owner') {
     listEntitlements: vi.fn().mockResolvedValue([{ id: ENTITLEMENT_ID, contactId: CONTACT_ID }]),
     listEvents: vi.fn().mockResolvedValue([{ id: EVENT_ID, slug: 'annual-meeting' }]),
     listParticipation: vi.fn().mockResolvedValue([{ id: PARTICIPATION_ID, eventId: EVENT_ID }]),
+    listPipelines: vi.fn().mockResolvedValue([{
+      id: PIPELINE_ID, name: 'Renewals', stages: [{ id: STAGE_ID, name: 'Review' }],
+    }]),
+  }
+  const importService = {
+    dryRun: vi.fn().mockResolvedValue({
+      dryRunHash: 'a'.repeat(64), bytes: 100, totalRows: 1,
+      validRows: 1, failedRows: 0, headers: ['Name'], sampleErrors: [],
+    }),
+    confirm: vi.fn().mockResolvedValue({ id: IMPORT_JOB_ID, status: 'ready', totalRows: 1 }),
+    resume: vi.fn().mockResolvedValue({ id: IMPORT_JOB_ID, status: 'completed', totalRows: 1, processedRows: 1 }),
+    cancel: vi.fn(), list: vi.fn().mockResolvedValue([]), get: vi.fn(), errorsCsv: vi.fn(),
   }
   const app = express()
   app.use(express.json())
   app.use((req, _res, next) => { req.userId = USER_ID; next() })
-  app.use('/api/crm', crmOperationsRoutes({ workspaceStore, service, readStore } as never))
-  return { app, service, readStore }
+  app.use('/api/crm', crmOperationsRoutes({ workspaceStore, service, readStore, importService } as never))
+  return { app, service, readStore, importService }
 }
 
 describe('[COMP:api/crm-operations-route] intake configuration REST adapter', () => {
@@ -177,6 +192,53 @@ describe('[COMP:api/crm-operations-route] intake configuration REST adapter', ()
     expect(member.readStore.listParticipation).toHaveBeenCalledWith(WORKSPACE_ID, {
       eventId: EVENT_ID, sourceKind: 'commerce', limit: 50,
     })
+  })
+
+  it('lists custom pipeline catalogs and moves a deal through the canonical service', async () => {
+    const member = build('member')
+    const listed = await request(member.app)
+      .get(`/api/crm/${WORKSPACE_ID}/operations/pipelines?entityKind=deal`)
+    const moved = await request(member.app)
+      .patch(`/api/crm/${WORKSPACE_ID}/operations/deals/${CONTACT_ID}/pipeline-stage`)
+      .send({ pipelineId: PIPELINE_ID, stageId: STAGE_ID })
+    expect(listed.status).toBe(200)
+    expect(listed.body.pipelines[0]).toMatchObject({ id: PIPELINE_ID, name: 'Renewals' })
+    expect(member.readStore.listPipelines).toHaveBeenCalledWith(WORKSPACE_ID, {
+      entityKind: 'deal', includeArchived: false,
+    })
+    expect(moved.status).toBe(200)
+    expect(member.service.execute).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: WORKSPACE_ID, actor: { kind: 'user', userId: USER_ID },
+    }), {
+      kind: 'set_deal_pipeline_stage', dealId: CONTACT_ID,
+      pipelineId: PIPELINE_ID, stageId: STAGE_ID,
+    })
+  })
+
+  it('keeps dry-run separate from confirmed resumable import processing', async () => {
+    const owner = build()
+    const input = {
+      stagedFileId: DEFINITION_ID,
+      entityKind: 'contact',
+      mapping: { columns: { 0: 'name' } },
+    }
+    const checked = await request(owner.app)
+      .post(`/api/crm/${WORKSPACE_ID}/operations/imports/dry-run`).send(input)
+    const confirmed = await request(owner.app)
+      .post(`/api/crm/${WORKSPACE_ID}/operations/imports`).send({
+        ...input, confirmed: true, dryRunHash: 'a'.repeat(64),
+      })
+    const resumed = await request(owner.app)
+      .post(`/api/crm/${WORKSPACE_ID}/operations/imports/${IMPORT_JOB_ID}/resume`)
+
+    expect(checked.status).toBe(200)
+    expect(confirmed.status).toBe(201)
+    expect(resumed.body.status).toBe('completed')
+    expect(owner.importService.dryRun).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: WORKSPACE_ID, actor: { kind: 'user', userId: USER_ID },
+    }), input)
+    expect(owner.importService.confirm).toHaveBeenCalledTimes(1)
+    expect(owner.importService.resume).toHaveBeenCalledWith(expect.anything(), IMPORT_JOB_ID)
   })
 
   it('routes entitlement and non-commerce participation writes through the canonical service', async () => {

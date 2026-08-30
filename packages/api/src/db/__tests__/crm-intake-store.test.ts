@@ -121,4 +121,20 @@ describe('[COMP:crm/operations-store] CRM operations read model', () => {
       [WORKSPACE_ID, null, DEFINITION_ID, 'commerce', 'registered', 25],
     )
   })
+
+  it('enumerates live custom pipeline stages with stable catalog ids', async () => {
+    query.mockResolvedValue({ rows: [{
+      id: 'pipeline-1', name: 'Renewals', stages: [{ id: 'stage-1', name: 'Review' }],
+    }] })
+    const rows = await createDbCrmIntakeReadStore().listPipelines(WORKSPACE_ID, {
+      entityKind: 'deal', includeArchived: false,
+    })
+    expect(rows).toEqual([{
+      id: 'pipeline-1', name: 'Renewals', stages: [{ id: 'stage-1', name: 'Review' }],
+    }])
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('FROM crm_pipelines p'),
+      [WORKSPACE_ID, false],
+    )
+  })
 })

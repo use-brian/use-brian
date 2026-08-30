@@ -83,6 +83,10 @@ export type CrmOperationsReadPort = {
     sourceKind?: 'commerce' | 'manual' | 'form' | 'workflow' | 'import'
     limit?: number
   }): Promise<Array<Record<string, unknown>>>
+  listPipelines(workspaceId: string, filters?: {
+    entityKind?: 'deal'
+    includeArchived?: boolean
+  }): Promise<Array<Record<string, unknown>>>
 }
 
 export type CrmOperationsTools = {
@@ -98,6 +102,7 @@ export type CrmOperationsTools = {
   listCrmEntitlements: Tool
   listCrmEvents: Tool
   listCrmParticipation: Tool
+  listCrmPipelines: Tool
   recordCrmSubmission: Tool
   updateCrmSubmission: Tool
   recordCrmConsent: Tool
@@ -108,6 +113,7 @@ export type CrmOperationsTools = {
   updateCrmEntitlement: Tool
   recordCrmParticipation: Tool
   updateCrmParticipation: Tool
+  setDealPipelineStage: Tool
 }
 
 const SubmissionFiltersSchema = z.object({
@@ -218,6 +224,12 @@ const RecordParticipationInputSchema = z.object({
 const UpdateParticipationInputSchema = z.object({
   participation_id: CrmOperationsUuidSchema,
   status: ParticipationStatusSchema,
+}).strict()
+
+const SetDealPipelineStageInputSchema = z.object({
+  deal_id: CrmOperationsUuidSchema,
+  pipeline_id: CrmOperationsUuidSchema,
+  stage_id: CrmOperationsUuidSchema,
 }).strict()
 
 function workspaceId(context: ToolContext): string | null {
@@ -476,6 +488,24 @@ export function createCrmOperationsTools(options: {
       } catch (error) { return failure(error) }
     },
   })
+  const listCrmPipelines = buildTool({
+    name: 'listCrmPipelines', requiresCapability: 'crm', isReadOnly: true,
+    description: 'Enumerate the live deal pipeline catalog for this workspace, including stable pipeline and stage ids, keys, labels, categories, order, probability, required fields, and archive state. Call this before moving a deal and never guess a stage from prose.',
+    inputSchema: z.object({
+      entity_kind: z.literal('deal').default('deal'),
+      include_archived: z.boolean().default(false),
+    }).strict(),
+    async execute(input, context) {
+      const workspace = workspaceId(context)
+      if (!workspace) return workspaceError()
+      try {
+        return { data: await options.reads.listPipelines(workspace, {
+          entityKind: input.entity_kind,
+          includeArchived: input.include_archived,
+        }) }
+      } catch (error) { return failure(error) }
+    },
+  })
   const recordCrmSubmission = buildTool({
     name: 'recordCrmSubmission', requiresCapability: 'crm',
     description: 'Atomically record a CRM submission through an existing intake definition. The definition controls identity matching, field mappings, consent, routing, and follow-up. Pass an idempotency_key and a stable definition_key from listCrmIntakeDefinitions.',
@@ -582,16 +612,26 @@ export function createCrmOperationsTools(options: {
       status: input.status,
     } as CrmOperationsCommand)),
   })
+  const setDealPipelineStage = buildTool({
+    name: 'setDealPipelineStage', requiresCapability: 'crm',
+    description: 'Move one deal to an enumerated workspace pipeline stage using stable ids returned by listCrmPipelines. The pipeline_id and stage_id must describe the same live catalog entry.',
+    inputSchema: SetDealPipelineStageInputSchema,
+    execute: write((input) => ({
+      kind: 'set_deal_pipeline_stage', dealId: input.deal_id,
+      pipelineId: input.pipeline_id, stageId: input.stage_id,
+    } as CrmOperationsCommand)),
+  })
 
   return {
     listCrmIntakeDefinitions, listCrmSubmissions, getCrmSubmission,
     listCrmConsentPurposes, getCrmConsent, checkCrmSendability,
     listCrmSegments, previewCrmSegment,
     listCrmEntitlementPlans, listCrmEntitlements, listCrmEvents, listCrmParticipation,
+    listCrmPipelines,
     recordCrmSubmission, updateCrmSubmission, recordCrmConsent, recordCrmSuppression,
     saveCrmSegment, archiveCrmSegment,
     grantCrmEntitlement, updateCrmEntitlement,
-    recordCrmParticipation, updateCrmParticipation,
+    recordCrmParticipation, updateCrmParticipation, setDealPipelineStage,
   }
 }
 

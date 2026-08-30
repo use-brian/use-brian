@@ -426,6 +426,7 @@ const READ_TOOL_NAMES = new Set<string>([
   'listCrmEntitlements',
   'listCrmEvents',
   'listCrmParticipation',
+  'listCrmPipelines',
   // Workspace files (read) — present only when fileTools are wired
   'fileRead',
   'fileSearch',
@@ -1525,10 +1526,12 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
     bridgeCoreTool(opts.crmTools.listCrmEntitlements, resolveCtx, workspaceId),
     bridgeCoreTool(opts.crmTools.listCrmEvents, resolveCtx, workspaceId),
     bridgeCoreTool(opts.crmTools.listCrmParticipation, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.listCrmPipelines, resolveCtx, workspaceId),
     bridgeCoreTool(opts.crmTools.grantCrmEntitlement, resolveCtx, workspaceId),
     bridgeCoreTool(opts.crmTools.updateCrmEntitlement, resolveCtx, workspaceId),
     bridgeCoreTool(opts.crmTools.recordCrmParticipation, resolveCtx, workspaceId),
     bridgeCoreTool(opts.crmTools.updateCrmParticipation, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.setDealPipelineStage, resolveCtx, workspaceId),
   ]
 
   // ── File bridges (workspace filesystem). Present only when a blob client is
@@ -1731,7 +1734,8 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       t.name === 'getCrmConsent' || t.name === 'checkCrmSendability' ||
       t.name === 'listCrmSegments' || t.name === 'previewCrmSegment' ||
       t.name === 'listCrmEntitlementPlans' || t.name === 'listCrmEntitlements' ||
-      t.name === 'listCrmEvents' || t.name === 'listCrmParticipation'
+      t.name === 'listCrmEvents' || t.name === 'listCrmParticipation' ||
+      t.name === 'listCrmPipelines'
     ),
     ...fileBridges.filter((t) => t.name === 'fileRead' || t.name === 'fileSearch'),
     ...brandBridges.filter((t) => t.name === 'getBrand'),
@@ -1757,7 +1761,8 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       t.name === 'recordCrmConsent' || t.name === 'recordCrmSuppression' ||
       t.name === 'saveCrmSegment' || t.name === 'archiveCrmSegment' ||
       t.name === 'grantCrmEntitlement' || t.name === 'updateCrmEntitlement' ||
-      t.name === 'recordCrmParticipation' || t.name === 'updateCrmParticipation'
+      t.name === 'recordCrmParticipation' || t.name === 'updateCrmParticipation' ||
+      t.name === 'setDealPipelineStage'
     ),
     ...fileBridges.filter((t) =>
       t.name === 'fileWrite' || t.name === 'fileAppend' ||

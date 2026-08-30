@@ -49,6 +49,10 @@ export type CrmIntakeReadStore = {
 }
 
 export type DbCrmOperationsReadStore = CrmIntakeReadStore & CrmOperationsReadPort & {
+  resolveLegacyPipelineStage(workspaceId: string, stageKey: string): Promise<{
+    pipelineId: string
+    stageId: string
+  } | null>
   listCrmEventFilterCatalog(workspaceId: string): Promise<{
     eventTypes: string[]
     stableKeys: Array<{ kind: string; key: string; label: string }>
@@ -134,6 +138,21 @@ export function createDbCrmIntakeReadStore(): DbCrmOperationsReadStore {
 
     listDefinitions,
     listIntakeDefinitions: listDefinitions,
+
+    async resolveLegacyPipelineStage(workspaceId, stageKey) {
+      const result = await query<{ pipelineId: string; stageId: string }>(
+        `SELECT p.id AS "pipelineId",s.id AS "stageId"
+           FROM crm_pipelines p
+           JOIN crm_pipeline_stages s
+             ON s.workspace_id=p.workspace_id AND s.pipeline_id=p.id
+          WHERE p.workspace_id=$1 AND p.is_default
+            AND p.archived_at IS NULL AND s.archived_at IS NULL
+            AND s.legacy_key=$2
+          LIMIT 1`,
+        [workspaceId, stageKey],
+      )
+      return result.rows[0] ?? null
+    },
 
     async listCredentials(workspaceId) {
       const result = await query<Record<string, unknown>>(
@@ -339,6 +358,33 @@ export function createDbCrmIntakeReadStore(): DbCrmOperationsReadStore {
          ORDER BY p."createdAt" DESC, p.id DESC LIMIT $6`,
         [workspaceId, filters.contactId ?? null, filters.eventId ?? null,
           filters.sourceKind ?? null, filters.status ?? null, limit],
+      )
+      return result.rows
+    },
+
+    async listPipelines(workspaceId, filters = {}) {
+      const includeArchived = filters.includeArchived ?? false
+      const result = await query<Record<string, unknown>>(
+        `SELECT p.id, p.id::text AS "pipelineKey", 'deal'::text AS "entityKind",
+                p.name, p.is_default AS "isDefault", p.position,
+                p.archived_at AS "archivedAt",
+                COALESCE(jsonb_agg(jsonb_build_object(
+                  'id', s.id, 'pipelineId', s.pipeline_id,
+                  'stageKey', COALESCE(s.legacy_key, s.id::text),
+                  'name', s.name, 'category', s.category, 'position', s.position,
+                  'probability', s.probability, 'requiredFields', s.required_fields,
+                  'archivedAt', s.archived_at
+                ) ORDER BY s.archived_at NULLS FIRST, s.position, s.id)
+                  FILTER (WHERE s.id IS NOT NULL), '[]'::jsonb) AS stages
+           FROM crm_pipelines p
+           LEFT JOIN crm_pipeline_stages s
+             ON s.workspace_id=p.workspace_id AND s.pipeline_id=p.id
+            AND ($2::boolean OR s.archived_at IS NULL)
+          WHERE p.workspace_id=$1 AND ($2::boolean OR p.archived_at IS NULL)
+          GROUP BY p.id
+          ORDER BY p.archived_at NULLS FIRST, p.position, p.id
+          LIMIT 100`,
+        [workspaceId, includeArchived],
       )
       return result.rows
     },

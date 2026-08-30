@@ -46,6 +46,7 @@ const reads: CrmOperationsReadPort = {
   listEntitlements: vi.fn(async () => [{ id: 'entitlement-1', contactId: CONTACT_ID }]),
   listEvents: vi.fn(async () => [{ id: 'event-1', slug: 'annual-meeting' }]),
   listParticipation: vi.fn(async () => [{ id: 'participation-1', contactId: CONTACT_ID }]),
+  listPipelines: vi.fn(async () => [{ id: 'pipeline-1', stages: [{ id: 'stage-1' }] }]),
 }
 const execute = vi.fn<CrmOperationsServicePort['execute']>(async (_ctx, command) => ({
   command: command.kind,
@@ -66,10 +67,12 @@ describe('[COMP:crm/operations-tools] canonical CRM operation tools', () => {
       'listCrmSegments', 'previewCrmSegment',
       'listCrmEntitlementPlans', 'listCrmEntitlements',
       'listCrmEvents', 'listCrmParticipation',
+      'listCrmPipelines',
       'recordCrmSubmission', 'updateCrmSubmission', 'recordCrmConsent',
       'recordCrmSuppression', 'saveCrmSegment', 'archiveCrmSegment',
       'grantCrmEntitlement', 'updateCrmEntitlement',
       'recordCrmParticipation', 'updateCrmParticipation',
+      'setDealPipelineStage',
     ])
     expect(Object.values(tools).every((tool) => tool.requiresCapability === 'crm')).toBe(true)
     expect(tools.listCrmSubmissions.isReadOnly).toBe(true)
@@ -159,5 +162,21 @@ describe('[COMP:crm/operations-tools] canonical CRM operation tools', () => {
       metadata: {},
     })
     expect(invalid.success).toBe(false)
+  })
+
+  it('enumerates custom stages and moves deals only by catalog ids', async () => {
+    await tools.listCrmPipelines.execute({ entity_kind: 'deal', include_archived: false }, context())
+    expect(reads.listPipelines).toHaveBeenCalledWith(WORKSPACE_ID, {
+      entityKind: 'deal', includeArchived: false,
+    })
+    const stageId = '00000000-0000-4000-8000-000000000007'
+    const pipelineId = '00000000-0000-4000-8000-000000000008'
+    await tools.setDealPipelineStage.execute({
+      deal_id: CONTACT_ID, pipeline_id: pipelineId, stage_id: stageId,
+    }, context())
+    expect(execute).toHaveBeenLastCalledWith(expect.anything(), {
+      kind: 'set_deal_pipeline_stage', dealId: CONTACT_ID,
+      pipelineId, stageId,
+    })
   })
 })

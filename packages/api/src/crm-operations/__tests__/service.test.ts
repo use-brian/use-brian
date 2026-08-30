@@ -363,4 +363,57 @@ describe('[COMP:crm/operations-service] canonical CRM operations service', () =>
     expect(JSON.stringify(payloads)).not.toContain('person@example.com')
     expect(JSON.stringify(payloads)).not.toContain('do not emit')
   })
+
+  it('emits one redacted domain event for a custom pipeline stage move', async () => {
+    const pipelineId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+    const stageId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+    const tx = makeTransaction({
+      setDealPipelineStage: vi.fn().mockResolvedValue({
+        id: CONTACT_ID, updatedAt: '2026-08-30T12:00:00.000Z',
+        pipeline: { pipelineName: 'Renewals', stageName: 'Review' },
+      }),
+    })
+    const memberContext: CrmOperationsContext = {
+      workspaceId: WORKSPACE_ID,
+      actor: { kind: 'user', userId: USER_ID },
+      authority: { role: 'member', canWrite: true, canConfigure: false, trustedIdentitySources: [] },
+    }
+    const output = await createCrmOperationsService(makeStore(tx), {
+      now: () => new Date('2026-08-30T12:00:00.000Z'),
+    }).execute(memberContext, {
+      kind: 'set_deal_pipeline_stage', dealId: CONTACT_ID, pipelineId, stageId,
+    })
+    expect(output).toMatchObject({
+      command: 'set_deal_pipeline_stage', emittedEventIds: ['event-1'],
+    })
+    expect(tx.emitDomainEvent).toHaveBeenCalledWith(expect.objectContaining({
+      eventType: 'crm.deal.stage_changed',
+      payload: {
+        dealId: CONTACT_ID, pipelineId, stageId,
+        actorKind: 'user', occurredAt: '2026-08-30T12:00:00.000Z',
+      },
+    }))
+  })
+
+  it('does not duplicate audit or events when the requested stage is already current', async () => {
+    const tx = makeTransaction({
+      setDealPipelineStage: vi.fn().mockResolvedValue({
+        id: CONTACT_ID, unchanged: true,
+        pipeline: { pipelineName: 'Renewals', stageName: 'Review' },
+      }),
+    })
+    const output = await createCrmOperationsService(makeStore(tx)).execute({
+      workspaceId: WORKSPACE_ID,
+      actor: { kind: 'user', userId: USER_ID },
+      authority: { role: 'member', canWrite: true, canConfigure: false, trustedIdentitySources: [] },
+    }, {
+      kind: 'set_deal_pipeline_stage', dealId: CONTACT_ID,
+      pipelineId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      stageId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+    })
+    expect(output.duplicate).toBe(true)
+    expect(tx.appendDomainAudit).not.toHaveBeenCalled()
+    expect(tx.appendWorkspaceAudit).not.toHaveBeenCalled()
+    expect(tx.emitDomainEvent).not.toHaveBeenCalled()
+  })
 })
