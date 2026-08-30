@@ -175,6 +175,7 @@ function makeLatchedTransport(opts?: { failPrompts?: string[] }) {
   const started: string[] = []
   const settledOrder: string[] = []
   const latches = new Map<string, { promise: Promise<void>; release: () => void }>()
+  const settlementWaiters = new Map<string, Set<() => void>>()
   let inFlight = 0
   let maxInFlight = 0
 
@@ -184,6 +185,14 @@ function makeLatchedTransport(opts?: { failPrompts?: string[] }) {
     latches.set(prompt, { promise, release })
   }
   const release = (prompt: string) => latches.get(prompt)?.release()
+  const waitForSettlement = (prompt: string): Promise<void> => {
+    if (settledOrder.includes(prompt)) return Promise.resolve()
+    return new Promise((resolve) => {
+      const waiters = settlementWaiters.get(prompt) ?? new Set<() => void>()
+      waiters.add(resolve)
+      settlementWaiters.set(prompt, waiters)
+    })
+  }
 
   const transport: ConsultTransport = {
     async send(request: ConsultRequest): Promise<ConsultResponse> {
@@ -199,6 +208,8 @@ function makeLatchedTransport(opts?: { failPrompts?: string[] }) {
       else await new Promise((res) => setTimeout(res, 0))
       inFlight--
       settledOrder.push(prompt)
+      for (const resolve of settlementWaiters.get(prompt) ?? []) resolve()
+      settlementWaiters.delete(prompt)
       const taskId = `task_${started.length}`
       if (opts?.failPrompts?.includes(prompt)) {
         const task: Task = {
@@ -224,7 +235,15 @@ function makeLatchedTransport(opts?: { failPrompts?: string[] }) {
     },
   }
 
-  return { transport, started, settledOrder, hold, release, maxParallel: () => maxInFlight }
+  return {
+    transport,
+    started,
+    settledOrder,
+    hold,
+    release,
+    waitForSettlement,
+    maxParallel: () => maxInFlight,
+  }
 }
 
 const call = (id: string, next: string | string[] | null, extra?: Record<string, unknown>) => ({
@@ -345,8 +364,7 @@ describe('[COMP:workflow/executor] Parallel fan-out', () => {
     const { run } = await seed(deps, definition)
     const advancing = advanceWorkflowRun(deps, run.id)
 
-    // Give the scheduler time to run b to completion while c hangs.
-    await new Promise((res) => setTimeout(res, 20))
+    await latched.waitForSettlement('b')
     expect(latched.settledOrder).toContain('b')
     expect(latched.started).not.toContain('j')
 
