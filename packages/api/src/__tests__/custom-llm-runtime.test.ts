@@ -550,6 +550,7 @@ describe('[COMP:api/custom-llm-endpoints] endpoint failure fallback', () => {
     const resolved = await createWorkspaceCustomLlmResolver(store, { fetchFn, managedProvider })({
       workspaceId: runtime.workspaceId,
       requestedModel: customLlmAlias(runtime.id),
+      allowFailureFallback: true,
     })
     if (!resolved) throw new Error('expected a resolved custom provider')
 
@@ -561,9 +562,13 @@ describe('[COMP:api/custom-llm-endpoints] endpoint failure fallback', () => {
     }))).rejects.toThrow('HTTP 530')
     expect(managedSpy).not.toHaveBeenCalled()
     expect(resolved.fallback.used).toBe(false)
+    expect(resolved.providerKeySource).toBe('user')
   })
 
-  it('serves the turn on the platform model once the admin opts in, and records it', async () => {
+  it('stays off for a lane that did not claim it, even with the connection opted in', async () => {
+    // Fail-closed: a lane inherits the fallback only by asking, because the
+    // fallback is only permissible where the reader can be TOLD it happened.
+    // Background classifiers, consolidation and auto-titles have no reader.
     const runtime = fallbackRuntime({ fallbackToDefaultOnFailure: true })
     const store = {
       getRuntimeSystem: vi.fn().mockResolvedValue(runtime),
@@ -580,7 +585,35 @@ describe('[COMP:api/custom-llm-endpoints] endpoint failure fallback', () => {
     })
     if (!resolved) throw new Error('expected a resolved custom provider')
 
+    expect(resolved.fallback.enabled).toBe(false)
+    await expect(drain(resolved.provider.stream({
+      model: 'gemini-max',
+      systemPrompt: '',
+      messages: [{ role: 'user', content: 'hi' }],
+    }))).rejects.toThrow('HTTP 530')
+    expect(managedSpy).not.toHaveBeenCalled()
+  })
+
+  it('serves the turn on the platform model once the admin opts in, and records it', async () => {
+    const runtime = fallbackRuntime({ fallbackToDefaultOnFailure: true })
+    const store = {
+      getRuntimeSystem: vi.fn().mockResolvedValue(runtime),
+      getTierRuntimeSystem: vi.fn(),
+      getTierRouteSystem: vi.fn(),
+    } as unknown as WorkspaceCustomLlmEndpointStore
+    const managedProvider = platformProvider('platform answer')
+    const managedSpy = vi.spyOn(managedProvider, 'stream')
+    const fetchFn = vi.fn().mockResolvedValue(new Response('tunnel down', { status: 530 }))
+
+    const resolved = await createWorkspaceCustomLlmResolver(store, { fetchFn, managedProvider })({
+      workspaceId: runtime.workspaceId,
+      requestedModel: customLlmAlias(runtime.id),
+      allowFailureFallback: true,
+    })
+    if (!resolved) throw new Error('expected a resolved custom provider')
+
     expect(resolved.fallback.enabled).toBe(true)
+    expect(resolved.providerKeySource).toBe('user')
     const seen = await drain(resolved.provider.stream({
       model: 'gemini-max',
       systemPrompt: '',
@@ -593,6 +626,10 @@ describe('[COMP:api/custom-llm-endpoints] endpoint failure fallback', () => {
     expect(managedSpy.mock.calls[0]?.[0]?.model).toBe('gemini-max')
     // What the turn owner reads to announce, log, and bill the turn.
     expect(resolved.fallback).toMatchObject({ used: true, reason: 'http_status', status: 530, endpointName: 'hosted-gateway' })
+    // Derived, so every one of the ~20 usage-recording sites that reads this
+    // field at record time bills the fallback turn as platform capacity. Left
+    // at 'user' it would be free platform serving.
+    expect(resolved.providerKeySource).toBe('platform')
   })
 
   it('stays off when no platform provider is configured to fall back to', async () => {
@@ -607,6 +644,7 @@ describe('[COMP:api/custom-llm-endpoints] endpoint failure fallback', () => {
     const resolved = await createWorkspaceCustomLlmResolver(store, { fetchFn })({
       workspaceId: runtime.workspaceId,
       requestedModel: customLlmAlias(runtime.id),
+      allowFailureFallback: true,
     })
     if (!resolved) throw new Error('expected a resolved custom provider')
 

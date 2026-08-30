@@ -404,6 +404,24 @@ export type WorkspaceCustomLlmResolver = (params: {
   allowDefault?: boolean
   allowAnyDefault?: boolean
   allowManagedRoutes?: boolean
+  /**
+   * Opt this lane in to the connection's endpoint-failure fallback. Default
+   * FALSE, and fail-closed on purpose.
+   *
+   * The fallback is only permissible while BOTH of its promises hold: the
+   * reader is told it happened, and the turn bills as platform usage. Billing
+   * is safe everywhere (`providerKeySource` is derived), but the ANNOUNCEMENT
+   * is not: a background classifier, a consolidation pass, or an auto-title
+   * has no reader to tell, and the many background lanes snapshot their
+   * attribution inside a port before the turn runs. So a lane must claim the
+   * fallback rather than inherit it, and only a lane that can actually
+   * announce may. Today that is the web chat route (an SSE `notice`) and the
+   * channel pipeline (a sentence on the first message the user sees).
+   *
+   * Spec: docs/architecture/platform/byo-llm-key.md -> "Endpoint failure
+   * fallback".
+   */
+  allowFailureFallback?: boolean
 }) => Promise<ResolvedWorkspaceCustomLlm | null>
 
 export type BackgroundRuntimeResolver = (
@@ -430,6 +448,7 @@ export function createWorkspaceCustomLlmResolver(
     allowDefault = true,
     allowAnyDefault = false,
     allowManagedRoutes = true,
+    allowFailureFallback = false,
   }) => {
     const explicitId = customLlmEndpointIdFromAlias(requestedModel)
     let profile: WorkspaceCustomLlmProfileRuntime | null = explicitId
@@ -517,7 +536,9 @@ export function createWorkspaceCustomLlmResolver(
       modelId: selectedProfile.modelId,
     }, fetchFn, selectedProfile.supportsVision))
     const fallbackState: CustomLlmFallbackState = {
-      enabled: selectedProfile.fallbackToDefaultOnFailure && !!options?.managedProvider,
+      enabled: allowFailureFallback
+        && selectedProfile.fallbackToDefaultOnFailure
+        && !!options?.managedProvider,
       used: false,
       reason: null,
       status: null,
@@ -566,7 +587,19 @@ export function createWorkspaceCustomLlmResolver(
       modelTier,
       inputTokenLimit: selectedProfile.contextWindow,
       maxTokens: selectedProfile.maxOutputTokens,
-      providerKeySource: 'user',
+      // DERIVED, not fixed. `providerKeySource: 'user'` is what makes a turn
+      // cost 0 - the workspace pays its own endpoint's bill and Brian does
+      // not repay it. A turn the endpoint FAILED to serve ran on platform
+      // capacity instead, so leaving this at 'user' would be free platform
+      // serving. There are ~20 usage-recording sites reading this field
+      // (chat, every channel, public API, inter-assistant, resume-replay,
+      // and the background lanes), and every one of them reads it when it
+      // records usage, i.e. after the turn - so deriving it here fixes all
+      // of them at once and cannot be forgotten at a new one. See
+      // byo-llm-key.md -> "Endpoint failure fallback".
+      get providerKeySource(): 'user' | 'platform' {
+        return fallbackState.used ? 'platform' : 'user'
+      },
       routeKind: 'custom',
       supportsVision: selectedProfile.supportsVision,
       browserUse: {

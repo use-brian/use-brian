@@ -739,6 +739,10 @@ export async function resolveWorkspaceTurnLlm(params: {
         requestedModel: params.requestedModel,
         requestedTier: params.requestedTier,
         allowDefault: true,
+        // This is the main user-facing web turn, and it has a `notice` lane
+        // to announce a fallback on. Background lanes below must NOT pass
+        // this - see the resolver's `allowFailureFallback` docs.
+        allowFailureFallback: true,
       })
     : null
   if (customRuntime) {
@@ -7543,13 +7547,14 @@ export function chatRoutes(options: WebChatOptions): Router {
               // which key drove the turn for downstream attribution. This only
               // covers the main_response (LLM) charge; MCP tool calls and
               // memory/brain ops bill exactly as before (untouched).
-              // A turn the endpoint failed to serve was served by PLATFORM
-              // capacity, so it bills as an ordinary platform turn even though
-              // the tier resolved to a BYO endpoint. Per-turn, not per-call:
-              // `usage` is already aggregated and cannot be split, and
-              // over-attributing to the platform is the only direction that
-              // cannot give away free serving.
-              const turnUsedByoKey = usedByoKey && !customLlmRuntime?.fallback.used
+              // `usedByoKey` was decided BEFORE the turn ran. A custom
+              // endpoint that then failed had its turn served on platform
+              // capacity, and the resolved runtime's derived
+              // `providerKeySource` already says so - so re-read it here
+              // instead of trusting the pre-turn snapshot, or the turn is
+              // free platform serving.
+              const turnUsedByoKey = usedByoKey
+                && (!customLlmRuntime || customLlmRuntime.providerKeySource === 'user')
               const cost = turnUsedByoKey
                 ? 0
                 : calculateCost(event.response.model, usage)

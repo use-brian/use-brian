@@ -1142,6 +1142,11 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         workspaceId: assistant.workspaceId,
         requestedTier: logicalTier,
         allowDefault: true,
+        // The main user-facing channel turn, and every exit from it goes
+        // through `sendResponseAndStampChannelId`, which is what announces a
+        // fallback. The background lane above must NOT pass this - see the
+        // resolver's `allowFailureFallback` docs.
+        allowFailureFallback: true,
       })
     : null
   // The same policy object the chat route uses, deliberately: one rule about
@@ -2526,15 +2531,11 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
           // docs/architecture/channels/channel-user-identity.md → "Billing split".
           const usage = event.totalUsage
           if (usage) {
-            // A fallback turn ran on PLATFORM capacity, so it is billed like
-            // any other platform turn even though the tier resolved to a BYO
-            // endpoint. The flag is per-turn, not per-call: when part of a
-            // turn fell back, the aggregate `usage` cannot be split, and
-            // over-attributing to the platform is the only direction that
-            // cannot hand out free serving.
-            const turnKeySource: 'user' | 'platform' = customLlmRuntime?.fallback.used
-              ? 'platform'
-              : customLlmRuntime?.providerKeySource ?? 'platform'
+            // `providerKeySource` is DERIVED on the resolved runtime and
+            // already reads 'platform' for a turn the endpoint failed to
+            // serve, because that turn ran on platform capacity. Read it
+            // here, at usage time, rather than caching it earlier.
+            const turnKeySource: 'user' | 'platform' = customLlmRuntime?.providerKeySource ?? 'platform'
             const cost = turnKeySource === 'user'
               ? 0
               : calculateCost(event.response.model, usage)
