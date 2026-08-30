@@ -251,9 +251,11 @@ export function crmSectionCounts(summary: CrmSummary | null | undefined): Record
 export type CrmViewState = {
   section: CrmSection;
   /** Dedicated consequential-action workspace layered over the record lens. */
-  review: "email" | null;
+  review: "email" | "submissions" | null;
   /** Selected pending approval while `review=email`. */
   draft: string | null;
+  /** Selected intake submission while `review=submissions`. */
+  submission: string | null;
   /** Deals presentation — board is the default (pipeline-first, §1.4). */
   view: ViewMode;
   /** Active attention quick-filter, or null. */
@@ -290,6 +292,7 @@ export const DEFAULT_CRM_VIEW: CrmViewState = {
   section: "deals",
   review: null,
   draft: null,
+  submission: null,
   view: "board",
   quick: null,
   pipeline: null,
@@ -343,8 +346,9 @@ export function crmViewFromSearch(
   }
   return {
     section,
-    review: params.get("review") === "email" ? "email" : null,
+    review: oneOf(params.get("review"), ["email", "submissions"] as const),
     draft: params.get("review") === "email" ? params.get("draft") : null,
+    submission: params.get("review") === "submissions" ? params.get("submission") : null,
     view: oneOf(params.get("view"), VIEW_MODES) ?? DEFAULT_CRM_VIEW.view,
     quick,
     pipeline: params.get("pipeline"),
@@ -373,6 +377,10 @@ export function searchFromCrmView(state: CrmViewState): string {
   if (state.review === "email") {
     params.set("review", "email");
     if (state.draft) params.set("draft", state.draft);
+  }
+  if (state.review === "submissions") {
+    params.set("review", "submissions");
+    if (state.submission) params.set("submission", state.submission);
   }
   if (state.view !== DEFAULT_CRM_VIEW.view) params.set("view", state.view);
   if (state.quick) params.set("filter", state.quick);

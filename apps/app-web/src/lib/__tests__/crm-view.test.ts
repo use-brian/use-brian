@@ -165,6 +165,15 @@ describe("[COMP:app-web/crm-view] CRM view logic", () => {
     expect(crmViewFromSearch("draft=orphaned").draft).toBeNull();
   });
 
+  it("round-trips the addressable submission Inbox selection in the CRM URL", () => {
+    const view = crmViewFromSearch("review=submissions&submission=submission-2");
+    expect(view.review).toBe("submissions");
+    expect(view.submission).toBe("submission-2");
+    expect(searchFromCrmView(view)).toContain("review=submissions");
+    expect(searchFromCrmView(view)).toContain("submission=submission-2");
+    expect(crmViewFromSearch("submission=orphaned").submission).toBeNull();
+  });
+
   it("round-trips owner state and applies the same owner filter to every section", () => {
     const view = crmViewFromSearch("owner=user-1,none&section=contacts");
     expect(view.owner).toEqual(["user-1", "none"]);

@@ -12,7 +12,11 @@ import {
   listCrmIntakeCredentials,
   listCrmIntakeDefinitions,
   revokeCrmIntakeCredential,
+  saveCrmConsentPurpose,
   saveCrmIntakeDefinition,
+  listCrmConsentPurposes,
+  type CrmConsentPurpose,
+  type CrmDeliveryChannel,
   type CrmIntakeCredential,
   type CrmIntakeDefinition,
   type CrmIntakeDefinitionInput,
@@ -26,6 +30,7 @@ export function CrmIntakeSettings({ workspaceId }: { workspaceId: string }) {
   const t = useT().crmPage.operations;
   const [definitions, setDefinitions] = useState<CrmIntakeDefinition[]>([]);
   const [credentials, setCredentials] = useState<CrmIntakeCredential[]>([]);
+  const [purposes, setPurposes] = useState<CrmConsentPurpose[]>([]);
   const [definitionLabel, setDefinitionLabel] = useState("");
   const [definitionKey, setDefinitionKey] = useState("");
   const [identityPolicy, setIdentityPolicy] = useState<CrmIntakeDefinition["identityPolicy"]>("trusted_verified_email");
@@ -34,6 +39,11 @@ export function CrmIntakeSettings({ workspaceId }: { workspaceId: string }) {
   const [credentialDefinitionId, setCredentialDefinitionId] = useState("");
   const [oneTimeKey, setOneTimeKey] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [purposeLabel, setPurposeLabel] = useState("");
+  const [purposeKey, setPurposeKey] = useState("");
+  const [wordingVersion, setWordingVersion] = useState("v1");
+  const [wording, setWording] = useState("");
+  const [purposeChannels, setPurposeChannels] = useState<CrmDeliveryChannel[]>(["email"]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -48,12 +58,14 @@ export function CrmIntakeSettings({ workspaceId }: { workspaceId: string }) {
   }, [starterFields]);
 
   async function reload() {
-    const [nextDefinitions, nextCredentials] = await Promise.all([
+    const [nextDefinitions, nextCredentials, nextPurposes] = await Promise.all([
       listCrmIntakeDefinitions(workspaceId),
       listCrmIntakeCredentials(workspaceId),
+      listCrmConsentPurposes(workspaceId, true),
     ]);
     setDefinitions(nextDefinitions);
     setCredentials(nextCredentials);
+    setPurposes(nextPurposes);
     setCredentialDefinitionId((current) => current || nextDefinitions.find((item) => item.active)?.id || "");
   }
 
@@ -101,6 +113,32 @@ export function CrmIntakeSettings({ workspaceId }: { workspaceId: string }) {
       });
       setOneTimeKey(created.key);
       setCredentialLabel("");
+      await reload();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : t.saveFailed);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function createPurpose() {
+    if (!purposeLabel.trim() || !purposeKey.trim() || !wording.trim() || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await saveCrmConsentPurpose(workspaceId, {
+        purposeKey: purposeKey.trim(),
+        label: purposeLabel.trim(),
+        description: "",
+        requiresConsent: true,
+        applicableChannels: purposeChannels,
+        wordingVersion: wordingVersion.trim(),
+        wording: wording.trim(),
+        archived: false,
+      });
+      setPurposeLabel("");
+      setPurposeKey("");
+      setWording("");
       await reload();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : t.saveFailed);
@@ -180,6 +218,23 @@ export function CrmIntakeSettings({ workspaceId }: { workspaceId: string }) {
             {credentials.map((credential) => <div key={credential.id} className="flex items-center justify-between gap-3 rounded-lg bg-muted/30 px-3 py-2 text-xs"><div><div className="font-medium">{credential.label}</div><div className="font-mono text-[10px] text-muted-foreground">{credential.prefix} · {credential.revokedAt ? t.revoked : t.active}</div></div>{!credential.revokedAt && <Button size="icon-xs" variant="ghost" aria-label={t.revoke} disabled={busy} onClick={() => void revoke(credential)}><RotateCcw aria-hidden /></Button>}</div>)}
             {credentials.length === 0 && <div className="text-xs text-muted-foreground">{t.noCredentials}</div>}
           </div>
+        </div>
+      </div>
+
+      <div className="mt-4 rounded-xl border border-border p-3">
+        <h4 className="text-xs font-semibold">{t.purposes}</h4>
+        <p className="mt-1 text-[11px] text-muted-foreground">{t.purposesHelp}</p>
+        <div className="mt-3 grid gap-2 sm:grid-cols-3">
+          <label className="text-xs"><span className="mb-1 block text-muted-foreground">{t.purposeLabel}</span><input className="h-9 w-full rounded-md border border-input bg-transparent px-3" value={purposeLabel} onChange={(event) => { setPurposeLabel(event.target.value); if (!purposeKey) setPurposeKey(stableKey(event.target.value)); }} /></label>
+          <label className="text-xs"><span className="mb-1 block text-muted-foreground">{t.purposeKey}</span><input className="h-9 w-full rounded-md border border-input bg-transparent px-3 font-mono" value={purposeKey} onChange={(event) => setPurposeKey(stableKey(event.target.value))} /></label>
+          <label className="text-xs"><span className="mb-1 block text-muted-foreground">{t.wordingVersion}</span><input className="h-9 w-full rounded-md border border-input bg-transparent px-3" value={wordingVersion} onChange={(event) => setWordingVersion(event.target.value)} /></label>
+          <label className="text-xs sm:col-span-3"><span className="mb-1 block text-muted-foreground">{t.wording}</span><textarea rows={3} className="w-full resize-y rounded-md border border-input bg-transparent px-3 py-2" value={wording} onChange={(event) => setWording(event.target.value)} /></label>
+          <div className="sm:col-span-3"><div className="mb-1 text-xs text-muted-foreground">{t.channels}</div><div className="flex flex-wrap gap-1">{(["email", "sms", "phone", "whatsapp", "telegram", "slack"] as const).map((channel) => <Button key={channel} type="button" size="xs" variant={purposeChannels.includes(channel) ? "secondary" : "outline"} aria-pressed={purposeChannels.includes(channel)} onClick={() => setPurposeChannels((current) => current.includes(channel) ? current.filter((item) => item !== channel) : [...current, channel])}>{t.channelLabels[channel]}</Button>)}</div></div>
+        </div>
+        <Button className="mt-2" size="sm" disabled={busy || !purposeLabel.trim() || !purposeKey.trim() || !wording.trim() || purposeChannels.length === 0} onClick={() => void createPurpose()}><Plus aria-hidden />{t.createPurpose}</Button>
+        <div className="mt-3 grid gap-2 sm:grid-cols-2">
+          {purposes.map((purpose) => <div key={purpose.id} className="rounded-lg bg-muted/30 px-3 py-2 text-xs"><div className="font-medium">{purpose.label}</div><div className="font-mono text-[10px] text-muted-foreground">{purpose.purposeKey} · {purpose.wordingVersion} · {purpose.archivedAt ? t.archived : purpose.applicableChannels.map((channel) => t.channelLabels[channel]).join(", ")}</div></div>)}
+          {purposes.length === 0 && <div className="text-xs text-muted-foreground">{t.noPurposes}</div>}
         </div>
       </div>
     </section>

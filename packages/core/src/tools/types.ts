@@ -42,6 +42,17 @@ export type ToolContext = {
   channelType: string
   channelId: string
   /**
+   * Authenticated principal for a programmatic tool call. Brain MCP fills
+   * this from the credential that actually authenticated the request so
+   * domain services can audit API keys, OAuth grants, and Home apps without
+   * guessing from the channel label or accepting actor data from tool input.
+   */
+  programmaticPrincipal?: {
+    kind: 'brain_key' | 'oauth_token' | 'home_app'
+    credentialId: string
+    userId?: string
+  }
+  /**
    * Session-scoped provider conversation id when it is narrower than the
    * physical delivery channel. Threaded Slack turns use
    * `<channelId>:thread:<threadTs>` here while `channelId` remains the bare

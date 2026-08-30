@@ -88,6 +88,7 @@ import {
   createWorkspaceTools,
   createTranscriptionPrefTools,
   createCrmTools,
+  createCrmOperationsTools,
   createCrmEmailDraftTools,
   createMemoryTools,
   createRetrievalTools,
@@ -3757,6 +3758,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   allTools.set('advanceDealStage', crmTools.advanceDealStage)
   allTools.set('listCrmFields', crmTools.listCrmFields)
   allTools.set('setCrmCustomFields', crmTools.setCrmCustomFields)
+  const crmOperationsTools = createCrmOperationsTools({
+    reads: crmIntakeReadStore,
+    service: crmOperationsService,
+  })
+  for (const tool of Object.values(crmOperationsTools)) allTools.set(tool.name, tool)
   const crmEmailDraftTools = createCrmEmailDraftTools(crmEmailDraftStore)
   allTools.set('saveEmailDraft', crmEmailDraftTools.saveEmailDraft)
   allTools.set('getEmailDraft', crmEmailDraftTools.getEmailDraft)
@@ -4738,7 +4744,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       : {}),
     memoryTools: brainMemoryTools,
     taskTools,
-    crmTools,
+    crmTools: { ...crmTools, ...crmOperationsTools },
     retrievalTools: brainRetrievalTools,
     fileTools: brainFileTools ?? undefined,
     // Brand primitive (D8): `getBrand` on both key scopes, `saveBrandDraft`

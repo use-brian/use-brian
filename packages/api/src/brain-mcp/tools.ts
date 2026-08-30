@@ -91,6 +91,7 @@ import type {
   Sensitivity,
   Tool,
   ToolContext,
+  CrmOperationsTools,
   Embedder,
 } from '@use-brian/core'
 import { query, runWithAgentAccess } from '../db/client.js'
@@ -178,7 +179,7 @@ export type BrainCrmTools = {
   advanceDealStage: Tool
   listCrmFields: Tool
   setCrmCustomFields: Tool
-}
+} & CrmOperationsTools
 
 export type BrainRetrievalTools = {
   search: Tool
@@ -305,6 +306,9 @@ type BuildOpts = {
   scope: BrainKeyScope
   /** The authenticating key's id — recorded as provenance on writes. */
   keyId: string
+  /** Authenticated credential family; used only for server-derived audit attribution. */
+  authKind?: 'api_key' | 'oauth_token' | 'home_app'
+  actingUserId?: string
   /**
    * Per-credential clearance cap from auth (`brain_keys.max_clearance`, or
    * the fixed 'internal' for OAuth tokens). NULL = the bound primary
@@ -410,6 +414,12 @@ const READ_TOOL_NAMES = new Set<string>([
   'getDeal',
   'listDeals',
   'listCrmFields',
+  'listCrmIntakeDefinitions',
+  'listCrmSubmissions',
+  'getCrmSubmission',
+  'listCrmConsentPurposes',
+  'getCrmConsent',
+  'checkCrmSendability',
   // Workspace files (read) — present only when fileTools are wired
   'fileRead',
   'fileSearch',
@@ -1169,7 +1179,15 @@ function buildDocPageTools(
  * is scope-filtered — a `read` key never sees a write tool.
  */
 export function buildBrainTools(opts: BuildOpts): BrainTool[] {
-  const resolveCtx = makeBrainContextResolver(opts.workspaceId, opts.keyId, opts.maxClearance)
+  const principalKind = opts.authKind === 'oauth_token' ? 'oauth_token'
+    : opts.authKind === 'home_app' ? 'home_app' : 'brain_key'
+  const resolveCtx = makeBrainContextResolver(
+    opts.workspaceId,
+    opts.keyId,
+    opts.maxClearance,
+    'programmatic',
+    { kind: principalKind, credentialId: opts.keyId, userId: opts.actingUserId },
+  )
   const workspaceId = opts.workspaceId
 
   // ── Unified read: searchBrain (bridged from createRetrievalTools.search)
@@ -1483,6 +1501,16 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
     bridgeCoreTool(opts.crmTools.advanceDealStage, resolveCtx, workspaceId),
     bridgeCoreTool(opts.crmTools.listCrmFields, resolveCtx, workspaceId),
     bridgeCoreTool(opts.crmTools.setCrmCustomFields, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.listCrmIntakeDefinitions, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.listCrmSubmissions, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.getCrmSubmission, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.listCrmConsentPurposes, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.getCrmConsent, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.checkCrmSendability, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.recordCrmSubmission, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.updateCrmSubmission, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.recordCrmConsent, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.recordCrmSuppression, resolveCtx, workspaceId),
   ]
 
   // ── File bridges (workspace filesystem). Present only when a blob client is
@@ -1679,7 +1707,10 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       t.name === 'getContact' || t.name === 'listContacts' ||
       t.name === 'getCompany' || t.name === 'listCompanies' ||
       t.name === 'getDeal' || t.name === 'listDeals' ||
-      t.name === 'listCrmFields',
+      t.name === 'listCrmFields' ||
+      t.name === 'listCrmIntakeDefinitions' || t.name === 'listCrmSubmissions' ||
+      t.name === 'getCrmSubmission' || t.name === 'listCrmConsentPurposes' ||
+      t.name === 'getCrmConsent' || t.name === 'checkCrmSendability',
     ),
     ...fileBridges.filter((t) => t.name === 'fileRead' || t.name === 'fileSearch'),
     ...brandBridges.filter((t) => t.name === 'getBrand'),
@@ -1700,7 +1731,9 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       t.name === 'saveContact' || t.name === 'updateContact' ||
       t.name === 'saveCompany' || t.name === 'updateCompany' ||
       t.name === 'saveDeal' || t.name === 'updateDeal' ||
-      t.name === 'advanceDealStage' || t.name === 'setCrmCustomFields',
+      t.name === 'advanceDealStage' || t.name === 'setCrmCustomFields' ||
+      t.name === 'recordCrmSubmission' || t.name === 'updateCrmSubmission' ||
+      t.name === 'recordCrmConsent' || t.name === 'recordCrmSuppression',
     ),
     ...fileBridges.filter((t) =>
       t.name === 'fileWrite' || t.name === 'fileAppend' ||
@@ -2014,6 +2047,7 @@ export function makeBrainContextResolver(
   keyId: string,
   maxClearance: Sensitivity | null,
   channelType = 'programmatic',
+  programmaticPrincipal?: ToolContext['programmaticPrincipal'],
 ): () => Promise<ToolContext | { error: string }> {
   let cached: ToolContext | { error: string } | undefined
   return async () => {
@@ -2085,6 +2119,7 @@ export function makeBrainContextResolver(
       appId: target.assistantId,
       channelType,
       channelId: keyId,
+      programmaticPrincipal,
       workspaceId,
       assistantKind: target.kind,
       activeCapabilities,

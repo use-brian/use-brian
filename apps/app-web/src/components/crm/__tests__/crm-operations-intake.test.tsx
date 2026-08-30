@@ -10,8 +10,10 @@ const api = vi.hoisted(() => ({
   createCrmIntakeCredential: vi.fn(),
   listCrmIntakeCredentials: vi.fn(),
   listCrmIntakeDefinitions: vi.fn(),
+  listCrmConsentPurposes: vi.fn(),
   revokeCrmIntakeCredential: vi.fn(),
   saveCrmIntakeDefinition: vi.fn(),
+  saveCrmConsentPurpose: vi.fn(),
 }));
 
 vi.mock("@/lib/api/crm", async (importOriginal) => ({
@@ -69,6 +71,7 @@ beforeEach(async () => {
   vi.clearAllMocks();
   api.listCrmIntakeDefinitions.mockResolvedValue([definition]);
   api.listCrmIntakeCredentials.mockResolvedValue([credential]);
+  api.listCrmConsentPurposes.mockResolvedValue([]);
   api.saveCrmIntakeDefinition.mockResolvedValue({ record: definition, created: true });
   host = document.createElement("div");
   document.body.append(host);

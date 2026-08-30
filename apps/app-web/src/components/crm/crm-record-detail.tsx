@@ -75,6 +75,7 @@ import { ResizablePeek } from "@/components/operator/resizable-peek";
 import { CrmActivityTimeline } from "./crm-activity";
 import { CrmCustomFields } from "./crm-custom-fields";
 import { CrmParticipants } from "./crm-participants";
+import { CrmContactCompliance } from "./operations/contact-compliance";
 
 export type CrmRecordRef =
   | { kind: "deal"; row: CrmDealRow }
@@ -311,6 +312,10 @@ export function CrmRecordDetail({
           data={data}
           onChanged={onChanged}
         />
+
+        {record.kind === "contact" && (
+          <CrmContactCompliance workspaceId={workspaceId} contactId={record.row.id} />
+        )}
 
         {/* From the brain — the rollup's embedded context. */}
         <section className="mt-4 border-t border-border/60 pt-4">

@@ -352,6 +352,62 @@ export type CrmIntakeCredential = {
   createdAt: string;
 };
 
+export type CrmSubmission = {
+  id: string;
+  contactId: string;
+  contactName: string;
+  definitionId: string | null;
+  definitionKey: string | null;
+  definitionLabel: string | null;
+  definitionVersionId?: string | null;
+  definitionSchemaHash?: string | null;
+  definitionSchemaSnapshot?: Record<string, unknown> | null;
+  fields?: Record<string, unknown>;
+  status: "new" | "in_progress" | "resolved" | "spam";
+  queueKey: string;
+  ownerUserId: string | null;
+  followUpTaskId: string | null;
+  submittedAt: string;
+  createdAt: string;
+  updatedAt: string;
+  notes?: Array<{ id: string; body: string; actorKind: string; actingUserId: string | null; createdAt: string }>;
+};
+
+export type CrmConsentPurpose = {
+  id: string;
+  purposeKey: string;
+  label: string;
+  description: string;
+  requiresConsent: boolean;
+  applicableChannels: CrmDeliveryChannel[];
+  wordingVersion: string;
+  wording: string;
+  wordingHash: string;
+  archivedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CrmDeliveryChannel = "email" | "sms" | "phone" | "whatsapp" | "telegram" | "slack";
+export type CrmCompliance = {
+  purposes: CrmConsentPurpose[];
+  events: Array<{
+    id: string; purposeKey: string; action: "granted" | "withdrawn";
+    wordingVersion: string; source: string; occurredAt: string; createdAt: string;
+  }>;
+  suppressions: Array<{
+    id: string; channel: "all" | CrmDeliveryChannel; action: "suppressed" | "released";
+    reasonCode: string; source: string; occurredAt: string; createdAt: string;
+  }>;
+};
+
+export type CrmSendabilityVerdict = {
+  verdict: "allowed" | "blocked" | "unknown";
+  reasons: Array<"contact_method_missing" | "global_suppression" | "channel_suppression" | "consent_withdrawn" | "consent_not_recorded" | "purpose_archived">;
+  effectiveConsentEventId?: string;
+  effectiveSuppressionEventIds: string[];
+};
+
 export type CrmIntakeDefinitionInput = {
   definitionId?: string;
   definitionKey: string;
@@ -423,6 +479,94 @@ export function revokeCrmIntakeCredential(
     `/api/crm/${encodeURIComponent(workspaceId)}/operations/intake-credentials/${encodeURIComponent(credentialId)}`,
     { method: "DELETE" },
   );
+}
+
+export async function listCrmSubmissions(
+  workspaceId: string,
+  filters: { status?: CrmSubmission["status"]; definitionKey?: string; ownerUserId?: string; limit?: number } = {},
+): Promise<CrmSubmission[]> {
+  const params = new URLSearchParams();
+  if (filters.status) params.set("status", filters.status);
+  if (filters.definitionKey) params.set("definitionKey", filters.definitionKey);
+  if (filters.ownerUserId) params.set("ownerUserId", filters.ownerUserId);
+  if (filters.limit) params.set("limit", String(filters.limit));
+  const query = params.toString();
+  const body = await jsonRequest<{ submissions: CrmSubmission[] }>(
+    `/api/crm/${encodeURIComponent(workspaceId)}/operations/submissions${query ? `?${query}` : ""}`,
+  );
+  return body.submissions;
+}
+
+export async function getCrmSubmission(workspaceId: string, submissionId: string): Promise<CrmSubmission> {
+  const body = await jsonRequest<{ submission: CrmSubmission }>(
+    `/api/crm/${encodeURIComponent(workspaceId)}/operations/submissions/${encodeURIComponent(submissionId)}`,
+  );
+  return body.submission;
+}
+
+export function updateCrmSubmission(
+  workspaceId: string,
+  submissionId: string,
+  changes: { status?: CrmSubmission["status"]; queueKey?: string; ownerUserId?: string | null; note?: string },
+): Promise<{ record: CrmSubmission }> {
+  return jsonRequest(
+    `/api/crm/${encodeURIComponent(workspaceId)}/operations/submissions/${encodeURIComponent(submissionId)}`,
+    { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(changes) },
+  );
+}
+
+export async function listCrmConsentPurposes(workspaceId: string, includeArchived = false): Promise<CrmConsentPurpose[]> {
+  const body = await jsonRequest<{ purposes: CrmConsentPurpose[] }>(
+    `/api/crm/${encodeURIComponent(workspaceId)}/operations/consent-purposes${includeArchived ? "?includeArchived=true" : ""}`,
+  );
+  return body.purposes;
+}
+
+export function saveCrmConsentPurpose(
+  workspaceId: string,
+  input: {
+    purposeId?: string; purposeKey: string; label: string; description?: string;
+    requiresConsent?: boolean; applicableChannels?: CrmDeliveryChannel[];
+    wordingVersion: string; wording: string; archived?: boolean;
+  },
+): Promise<{ record: CrmConsentPurpose; created: boolean }> {
+  return jsonRequest(`/api/crm/${encodeURIComponent(workspaceId)}/operations/consent-purposes`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input),
+  });
+}
+
+export function getCrmCompliance(workspaceId: string, contactId: string): Promise<CrmCompliance> {
+  return jsonRequest(`/api/crm/${encodeURIComponent(workspaceId)}/operations/contacts/${encodeURIComponent(contactId)}/compliance`);
+}
+
+export function recordCrmConsent(
+  workspaceId: string,
+  contactId: string,
+  input: { purposeKey: string; action: "granted" | "withdrawn"; source: string },
+): Promise<{ record: Record<string, unknown> }> {
+  return jsonRequest(`/api/crm/${encodeURIComponent(workspaceId)}/operations/contacts/${encodeURIComponent(contactId)}/consent`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input),
+  });
+}
+
+export function recordCrmSuppression(
+  workspaceId: string,
+  contactId: string,
+  input: { channel: "all" | CrmDeliveryChannel; action: "suppressed" | "released"; reasonCode: string; source: string },
+): Promise<{ record: Record<string, unknown> }> {
+  return jsonRequest(`/api/crm/${encodeURIComponent(workspaceId)}/operations/contacts/${encodeURIComponent(contactId)}/suppressions`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input),
+  });
+}
+
+export function checkCrmSendability(
+  workspaceId: string,
+  contactId: string,
+  channel: CrmDeliveryChannel,
+  purposeKey: string,
+): Promise<CrmSendabilityVerdict> {
+  const params = new URLSearchParams({ channel, purposeKey });
+  return jsonRequest(`/api/crm/${encodeURIComponent(workspaceId)}/operations/contacts/${encodeURIComponent(contactId)}/sendability?${params}`);
 }
 
 export function fetchCrmConfig(workspaceId: string, includeArchived = false): Promise<CrmConfig> {

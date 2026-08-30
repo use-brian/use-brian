@@ -69,3 +69,39 @@ describe('[COMP:api/crm-intake-route] CRM intake credential authentication', () 
     expect(verifySecret).not.toHaveBeenCalled()
   })
 })
+
+describe('[COMP:crm/operations-store] CRM operations read model', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  it('workspace-qualifies bounded submission queue reads', async () => {
+    query.mockResolvedValue({ rows: [{ id: 'submission-1' }] })
+    const rows = await createDbCrmIntakeReadStore().listSubmissions(WORKSPACE_ID, {
+      status: 'new', definitionKey: 'contact_form', limit: 25,
+    })
+    expect(rows).toEqual([{ id: 'submission-1' }])
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining('WHERE e.workspace_id=$1'),
+      [WORKSPACE_ID, 'new', 'contact_form', null, 25],
+    )
+  })
+
+  it('derives a fail-closed sendability verdict from catalog and evidence rows', async () => {
+    query
+      .mockResolvedValueOnce({ rows: [{ id: 'purpose-1', archivedAt: null, requiresConsent: true }] })
+      .mockResolvedValueOnce({ rows: [{ email: 'person@example.com', phone: null, providerIdentity: false }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{
+        id: 'suppression-1', channel: 'email', action: 'suppressed',
+        occurredAt: new Date('2026-08-30T00:00:00Z'), createdAt: new Date('2026-08-30T00:00:00Z'),
+      }] })
+    const verdict = await createDbCrmIntakeReadStore().checkSendability(
+      WORKSPACE_ID, DEFINITION_ID, 'email', 'marketing',
+    )
+    expect(verdict).toEqual({
+      verdict: 'blocked',
+      reasons: ['channel_suppression', 'consent_not_recorded'],
+      effectiveSuppressionEventIds: ['suppression-1'],
+    })
+    expect(query.mock.calls.every((call) => call[1]?.[0] === WORKSPACE_ID)).toBe(true)
+  })
+})

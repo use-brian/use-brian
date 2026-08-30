@@ -25,7 +25,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { BarChart3, ChevronDown, ChevronUp, Kanban, Mail, Rows3, Settings2 } from "lucide-react";
+import { BarChart3, ChevronDown, ChevronUp, Inbox, Kanban, Mail, Rows3, Settings2 } from "lucide-react";
 import { OperatorTopbar } from "@/components/operator/operator-topbar";
 import { cn } from "@/lib/utils";
 import { mutateSurfaceCache, useCachedResource } from "@/lib/surface-cache";
@@ -149,6 +149,7 @@ import { CrmReportingDialog } from "./crm-reporting";
 import { CrmSavedViews } from "./crm-saved-views";
 import { CrmEmailReviewWorkspace } from "./crm-email-review";
 import { CrmMobileActions } from "./crm-mobile-actions";
+import { CrmSubmissionInbox } from "./operations/submission-inbox";
 
 const NONE = "__none__";
 const EMPTY_PIPELINE: CrmPipeline = {
@@ -1031,10 +1032,15 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
                 {view.review === "email" && (
                   <Mail className="size-3.5 shrink-0" aria-hidden />
                 )}
+                {view.review === "submissions" && (
+                  <Inbox className="size-3.5 shrink-0" aria-hidden />
+                )}
                 <span className="truncate">
                   {view.review === "email"
                     ? t.r2.emailDrafts
-                    : sectionLabels[view.section]}
+                    : view.review === "submissions"
+                      ? t.operations.submissions
+                      : sectionLabels[view.section]}
                 </span>
                 <ChevronDown
                   className="size-3.5 shrink-0 text-muted-foreground"
@@ -1050,6 +1056,7 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
                         section,
                         review: null,
                         draft: null,
+                        submission: null,
                         quick: null,
                         stages: [],
                         custom: {},
@@ -1071,6 +1078,12 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
                     )}
                   </DropdownMenuItem>
                 ))}
+                <DropdownMenuItem
+                  onClick={() => setView({ review: "submissions", submission: view.submission })}
+                >
+                  <Inbox className="size-3.5" aria-hidden />
+                  <span className="min-w-28 flex-1">{t.operations.submissions}</span>
+                </DropdownMenuItem>
                 <DropdownMenuItem
                   onClick={() =>
                     setView({
@@ -1100,6 +1113,7 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
                       section,
                       review: null,
                       draft: null,
+                      submission: null,
                       quick: null,
                       stages: [],
                       custom: {},
@@ -1125,6 +1139,21 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
                   )}
                 </button>
               ))}
+              <button
+                type="button"
+                aria-label={t.operations.submissions}
+                aria-pressed={view.review === "submissions"}
+                onClick={() => setView({ review: "submissions", submission: view.submission })}
+                className={cn(
+                  "inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12.5px] transition-colors",
+                  view.review === "submissions"
+                    ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                    : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground",
+                )}
+              >
+                <Inbox className="size-3.5" aria-hidden />
+                <span>{t.operations.submissions}</span>
+              </button>
               <button
                 type="button"
                 aria-label={t.r2.emailDrafts}
@@ -1355,6 +1384,12 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
               }}
             />
           )
+        ) : view.review === "submissions" ? (
+          <CrmSubmissionInbox
+            workspaceId={workspaceId}
+            selectedId={view.submission}
+            onSelect={(submission) => setView({ review: "submissions", submission })}
+          />
         ) : (
           <>
 
