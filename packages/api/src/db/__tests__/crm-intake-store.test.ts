@@ -104,4 +104,21 @@ describe('[COMP:crm/operations-store] CRM operations read model', () => {
     })
     expect(query.mock.calls.every((call) => call[1]?.[0] === WORKSPACE_ID)).toBe(true)
   })
+
+  it('maps commerce registrations to canonical participation without hiding their management boundary', async () => {
+    query.mockResolvedValue({ rows: [{
+      id: 'participation-1', status: 'registered', sourceStatus: 'confirmed',
+      sourceKind: 'commerce', commerceManaged: true,
+    }] })
+    const rows = await createDbCrmIntakeReadStore().listParticipation(WORKSPACE_ID, {
+      eventId: DEFINITION_ID, status: 'registered', sourceKind: 'commerce', limit: 25,
+    })
+    expect(rows[0]).toMatchObject({
+      status: 'registered', sourceStatus: 'confirmed', commerceManaged: true,
+    })
+    expect(query).toHaveBeenCalledWith(
+      expect.stringContaining("WHEN 'confirmed' THEN 'registered'"),
+      [WORKSPACE_ID, null, DEFINITION_ID, 'commerce', 'registered', 25],
+    )
+  })
 })

@@ -451,6 +451,73 @@ export type CrmSegmentPreview = {
   snapshotIds: string[];
 };
 
+export type CrmEntitlementStatus = "pending" | "active" | "expired" | "cancelled";
+export type CrmEntitlementPlan = {
+  id: string;
+  planKey: string;
+  name: string;
+  currency: string;
+  feeMinor: string;
+  billingPeriod: string;
+  benefits: string[];
+  published: boolean;
+  provider: string | null;
+  providerPlanId: string | null;
+  commerceManaged: boolean;
+  activeFrom: string | null;
+  activeTo: string | null;
+};
+export type CrmEntitlement = {
+  id: string;
+  contactId: string;
+  contactName: string;
+  planId: string;
+  planKey: string;
+  planName: string;
+  status: CrmEntitlementStatus;
+  startsAt: string;
+  endsAt: string | null;
+  renewalMode: "none" | "manual" | "auto";
+  provider: string | null;
+  providerEntitlementId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+export type CrmEvent = {
+  id: string;
+  slug: string;
+  programmeKey: string | null;
+  title: string;
+  description: string;
+  startsAt: string;
+  endsAt: string;
+  timezone: string;
+  mode: string;
+  venue: string | null;
+  onlineUrl: string | null;
+  capacity: number | null;
+  status: "draft" | "published" | "cancelled" | "completed";
+  commerceManaged: boolean;
+};
+export type CrmParticipationStatus = "registered" | "attended" | "cancelled" | "no_show";
+export type CrmParticipation = {
+  id: string;
+  eventId: string;
+  eventKey: string;
+  eventTitle: string;
+  contactId: string | null;
+  contactName: string | null;
+  attendeeName: string;
+  attendeeEmail: string | null;
+  status: CrmParticipationStatus;
+  sourceStatus: string;
+  sourceKind: "commerce" | "manual" | "form" | "workflow" | "import";
+  sourceId: string;
+  commerceManaged: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type CrmIntakeDefinitionInput = {
   definitionId?: string;
   definitionKey: string;
@@ -658,6 +725,113 @@ export function archiveCrmSegment(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ expectedVersion }),
+  });
+}
+
+export async function listCrmEntitlementPlans(
+  workspaceId: string,
+  filters: { published?: boolean; limit?: number } = {},
+): Promise<CrmEntitlementPlan[]> {
+  const params = new URLSearchParams();
+  if (filters.published !== undefined) params.set("published", String(filters.published));
+  if (filters.limit) params.set("limit", String(filters.limit));
+  const query = params.toString();
+  const body = await jsonRequest<{ plans: CrmEntitlementPlan[] }>(
+    `/api/crm/${encodeURIComponent(workspaceId)}/operations/entitlement-plans${query ? `?${query}` : ""}`,
+  );
+  return body.plans;
+}
+
+export async function listCrmEntitlements(
+  workspaceId: string,
+  filters: { contactId?: string; planId?: string; status?: CrmEntitlementStatus; limit?: number } = {},
+): Promise<CrmEntitlement[]> {
+  const params = new URLSearchParams();
+  if (filters.contactId) params.set("contactId", filters.contactId);
+  if (filters.planId) params.set("planId", filters.planId);
+  if (filters.status) params.set("status", filters.status);
+  if (filters.limit) params.set("limit", String(filters.limit));
+  const query = params.toString();
+  const body = await jsonRequest<{ entitlements: CrmEntitlement[] }>(
+    `/api/crm/${encodeURIComponent(workspaceId)}/operations/entitlements${query ? `?${query}` : ""}`,
+  );
+  return body.entitlements;
+}
+
+export function grantCrmEntitlement(
+  workspaceId: string,
+  input: {
+    contactId: string; planId: string; idempotencyKey: string;
+    status?: CrmEntitlementStatus; startsAt: string; endsAt?: string | null;
+    renewalMode?: "none" | "manual" | "auto";
+  },
+): Promise<{ record: CrmEntitlement; created: boolean }> {
+  return jsonRequest(`/api/crm/${encodeURIComponent(workspaceId)}/operations/entitlements`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input),
+  });
+}
+
+export function updateCrmEntitlement(
+  workspaceId: string,
+  entitlementId: string,
+  changes: { status?: CrmEntitlementStatus; endsAt?: string | null; renewalMode?: "none" | "manual" | "auto" },
+): Promise<{ record: CrmEntitlement }> {
+  return jsonRequest(`/api/crm/${encodeURIComponent(workspaceId)}/operations/entitlements/${encodeURIComponent(entitlementId)}`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(changes),
+  });
+}
+
+export async function listCrmEvents(
+  workspaceId: string,
+  filters: { status?: CrmEvent["status"]; limit?: number } = {},
+): Promise<CrmEvent[]> {
+  const params = new URLSearchParams();
+  if (filters.status) params.set("status", filters.status);
+  if (filters.limit) params.set("limit", String(filters.limit));
+  const query = params.toString();
+  const body = await jsonRequest<{ events: CrmEvent[] }>(
+    `/api/crm/${encodeURIComponent(workspaceId)}/operations/events${query ? `?${query}` : ""}`,
+  );
+  return body.events;
+}
+
+export async function listCrmParticipation(
+  workspaceId: string,
+  filters: { contactId?: string; eventId?: string; status?: CrmParticipationStatus; sourceKind?: CrmParticipation["sourceKind"]; limit?: number } = {},
+): Promise<CrmParticipation[]> {
+  const params = new URLSearchParams();
+  if (filters.contactId) params.set("contactId", filters.contactId);
+  if (filters.eventId) params.set("eventId", filters.eventId);
+  if (filters.status) params.set("status", filters.status);
+  if (filters.sourceKind) params.set("sourceKind", filters.sourceKind);
+  if (filters.limit) params.set("limit", String(filters.limit));
+  const query = params.toString();
+  const body = await jsonRequest<{ participation: CrmParticipation[] }>(
+    `/api/crm/${encodeURIComponent(workspaceId)}/operations/participation${query ? `?${query}` : ""}`,
+  );
+  return body.participation;
+}
+
+export function recordCrmParticipation(
+  workspaceId: string,
+  input: {
+    contactId: string; eventId: string; sourceKind: "manual" | "form" | "workflow" | "import";
+    sourceId: string; status?: CrmParticipationStatus; attendeeName: string;
+    attendeeEmail?: string; metadata?: Record<string, unknown>;
+  },
+): Promise<{ record: CrmParticipation; created: boolean }> {
+  return jsonRequest(`/api/crm/${encodeURIComponent(workspaceId)}/operations/participation`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input),
+  });
+}
+
+export function updateCrmParticipation(
+  workspaceId: string,
+  participationId: string,
+  status: CrmParticipationStatus,
+): Promise<{ record: CrmParticipation }> {
+  return jsonRequest(`/api/crm/${encodeURIComponent(workspaceId)}/operations/participation/${encodeURIComponent(participationId)}`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status }),
   });
 }
 

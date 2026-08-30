@@ -9,15 +9,19 @@ import { z } from 'zod'
 import {
   CreateCrmIntakeCredentialCommandSchema,
   CrmDeliveryChannelSchema,
+  GrantCrmEntitlementCommandSchema,
   CrmOperationsError,
   CrmOperationsStableKeySchema,
   CrmOperationsUuidSchema,
   RecordCrmConsentCommandSchema,
+  RecordCrmParticipationCommandSchema,
   RecordCrmSuppressionCommandSchema,
   SaveCrmIntakeDefinitionCommandSchema,
   SaveCrmConsentPurposeCommandSchema,
   SaveCrmSegmentCommandSchema,
   UpdateCrmSubmissionCommandSchema,
+  UpdateCrmEntitlementCommandSchema,
+  UpdateCrmParticipationCommandSchema,
   type CrmOperationsContext,
   type CrmOperationsServicePort,
 } from '@use-brian/core'
@@ -85,6 +89,53 @@ const SegmentPreviewQuery = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(25),
   snapshotLimit: z.coerce.number().int().min(1).max(10_000).default(1_000),
 }).strict()
+const EntitlementStatus = z.enum(['pending', 'active', 'expired', 'cancelled'])
+const ParticipationStatus = z.enum(['registered', 'attended', 'cancelled', 'no_show'])
+const EntitlementPlansQuery = z.object({
+  published: z.enum(['true', 'false']).transform((value) => value === 'true').optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+}).strict()
+const EntitlementsQuery = z.object({
+  contactId: CrmOperationsUuidSchema.optional(),
+  planId: CrmOperationsUuidSchema.optional(),
+  status: EntitlementStatus.optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+}).strict()
+const EventsQuery = z.object({
+  status: z.enum(['draft', 'published', 'cancelled', 'completed']).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+}).strict()
+const ParticipationQuery = z.object({
+  contactId: CrmOperationsUuidSchema.optional(),
+  eventId: CrmOperationsUuidSchema.optional(),
+  status: ParticipationStatus.optional(),
+  sourceKind: z.enum(['commerce', 'manual', 'form', 'workflow', 'import']).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+}).strict()
+const GrantEntitlementBody = z.object({
+  contactId: CrmOperationsUuidSchema,
+  planId: CrmOperationsUuidSchema,
+  idempotencyKey: z.string().trim().min(1).max(200),
+  status: EntitlementStatus.default('pending'),
+  startsAt: z.string().datetime({ offset: true }),
+  endsAt: z.string().datetime({ offset: true }).nullable().optional(),
+  renewalMode: z.enum(['none', 'manual', 'auto']).default('none'),
+  provider: CrmOperationsStableKeySchema.optional(),
+  providerEntitlementId: z.string().trim().min(1).max(500).optional(),
+}).strict().refine(
+  (value) => (value.provider === undefined) === (value.providerEntitlementId === undefined),
+  'provider and providerEntitlementId must be supplied together',
+).refine((value) => !value.endsAt || value.startsAt < value.endsAt, 'endsAt must be after startsAt')
+const UpdateEntitlementBody = z.object({
+  status: EntitlementStatus.optional(),
+  endsAt: z.string().datetime({ offset: true }).nullable().optional(),
+  renewalMode: z.enum(['none', 'manual', 'auto']).optional(),
+}).strict().refine(
+  (value) => value.status !== undefined || value.endsAt !== undefined || value.renewalMode !== undefined,
+  'at least one entitlement change is required',
+)
+const RecordParticipationBody = RecordCrmParticipationCommandSchema.omit({ kind: true }).strict()
+const UpdateParticipationBody = UpdateCrmParticipationCommandSchema.omit({ kind: true, participationId: true }).strict()
 
 type Options = {
   workspaceStore: WorkspaceStore
@@ -96,7 +147,7 @@ function writeError(res: Response, error: unknown): void {
   if (error instanceof CrmOperationsError) {
     const status = error.code === 'not_found' ? 404
       : error.code === 'not_authorized' ? 403
-        : error.code === 'conflict' ? 409 : 400
+      : error.code === 'conflict' || error.code === 'idempotency_conflict' ? 409 : 400
     res.status(status).json({ error: error.code, message: error.message, ...error.details })
     return
   }
@@ -423,6 +474,121 @@ export function crmOperationsRoutes(options: Options): Router {
         kind: 'archive_segment', segmentId: segmentId.data,
         expectedVersion: body.data.expectedVersion,
       }))
+    } catch (error) { writeError(res, error) }
+  })
+
+  router.get('/:workspaceId/operations/entitlement-plans', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    const filters = EntitlementPlansQuery.safeParse(req.query)
+    if (!filters.success) {
+      res.status(400).json({ error: 'invalid_input', issues: filters.error.issues })
+      return
+    }
+    try {
+      res.json({ plans: await options.readStore.listEntitlementPlans(ctx.workspaceId, filters.data) })
+    } catch (error) { writeError(res, error) }
+  })
+
+  router.get('/:workspaceId/operations/entitlements', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    const filters = EntitlementsQuery.safeParse(req.query)
+    if (!filters.success) {
+      res.status(400).json({ error: 'invalid_input', issues: filters.error.issues })
+      return
+    }
+    try {
+      res.json({ entitlements: await options.readStore.listEntitlements(ctx.workspaceId, filters.data) })
+    } catch (error) { writeError(res, error) }
+  })
+
+  router.post('/:workspaceId/operations/entitlements', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    const body = GrantEntitlementBody.safeParse(req.body)
+    if (!body.success) {
+      res.status(400).json({ error: 'invalid_input', issues: body.error.issues })
+      return
+    }
+    try {
+      const output = await options.service.execute(ctx, GrantCrmEntitlementCommandSchema.parse({
+        kind: 'grant_entitlement', ...body.data,
+      }))
+      res.status(output.created ? 201 : 200).json(output)
+    } catch (error) { writeError(res, error) }
+  })
+
+  router.patch('/:workspaceId/operations/entitlements/:entitlementId', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    const entitlementId = CrmOperationsUuidSchema.safeParse(req.params.entitlementId)
+    const body = UpdateEntitlementBody.safeParse(req.body)
+    if (!entitlementId.success || !body.success) {
+      res.status(400).json({ error: 'invalid_input', issues: entitlementId.success ? body.error?.issues : entitlementId.error.issues })
+      return
+    }
+    try {
+      res.json(await options.service.execute(ctx, UpdateCrmEntitlementCommandSchema.parse({
+        kind: 'update_entitlement', entitlementId: entitlementId.data, ...body.data,
+      })))
+    } catch (error) { writeError(res, error) }
+  })
+
+  router.get('/:workspaceId/operations/events', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    const filters = EventsQuery.safeParse(req.query)
+    if (!filters.success) {
+      res.status(400).json({ error: 'invalid_input', issues: filters.error.issues })
+      return
+    }
+    try { res.json({ events: await options.readStore.listEvents(ctx.workspaceId, filters.data) }) }
+    catch (error) { writeError(res, error) }
+  })
+
+  router.get('/:workspaceId/operations/participation', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    const filters = ParticipationQuery.safeParse(req.query)
+    if (!filters.success) {
+      res.status(400).json({ error: 'invalid_input', issues: filters.error.issues })
+      return
+    }
+    try {
+      res.json({ participation: await options.readStore.listParticipation(ctx.workspaceId, filters.data) })
+    } catch (error) { writeError(res, error) }
+  })
+
+  router.post('/:workspaceId/operations/participation', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    const body = RecordParticipationBody.safeParse(req.body)
+    if (!body.success) {
+      res.status(400).json({ error: 'invalid_input', issues: body.error.issues })
+      return
+    }
+    try {
+      const output = await options.service.execute(ctx, RecordCrmParticipationCommandSchema.parse({
+        kind: 'record_participation', ...body.data,
+      }))
+      res.status(output.created ? 201 : 200).json(output)
+    } catch (error) { writeError(res, error) }
+  })
+
+  router.patch('/:workspaceId/operations/participation/:participationId', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    const participationId = CrmOperationsUuidSchema.safeParse(req.params.participationId)
+    const body = UpdateParticipationBody.safeParse(req.body)
+    if (!participationId.success || !body.success) {
+      res.status(400).json({ error: 'invalid_input', issues: participationId.success ? body.error?.issues : participationId.error.issues })
+      return
+    }
+    try {
+      res.json(await options.service.execute(ctx, UpdateCrmParticipationCommandSchema.parse({
+        kind: 'update_participation', participationId: participationId.data, ...body.data,
+      })))
     } catch (error) { writeError(res, error) }
   })
 

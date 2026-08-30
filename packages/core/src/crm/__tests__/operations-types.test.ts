@@ -7,6 +7,8 @@ import {
   assertCrmOperationsAuthority,
   canonicalCrmRequest,
   crmOperationsSha256,
+  mayTransitionCrmEntitlement,
+  mayTransitionCrmParticipation,
   parseCrmOperationsCommand,
 } from '../operations-types.js'
 
@@ -126,5 +128,13 @@ describe('[COMP:crm/operations-contract] CRM operations contracts', () => {
     })
     expect(actorAuditIdentity({ kind: 'provider', provider: 'mail', eventId: 'evt_123' }))
       .toEqual({ actorKind: 'provider', actorCredentialId: 'evt_123', actingUserId: null })
+  })
+
+  it('keeps entitlement and participation lifecycle transitions closed-world', () => {
+    expect(mayTransitionCrmEntitlement('pending', 'active')).toBe(true)
+    expect(mayTransitionCrmEntitlement('cancelled', 'active')).toBe(false)
+    expect(mayTransitionCrmParticipation('registered', 'no_show')).toBe(true)
+    expect(mayTransitionCrmParticipation('attended', 'registered')).toBe(false)
+    expect(mayTransitionCrmParticipation('made_up', 'attended')).toBe(false)
   })
 })

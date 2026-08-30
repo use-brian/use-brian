@@ -16,6 +16,8 @@ const fields = new Map<string, InternalCatalogEntry>([
   ['tag:tags', { family: 'tag', operators: ['in'], valueType: 'text' }],
   ['custom:audiences', { family: 'custom', operators: ['in'], valueType: 'enum', sqlKind: 'multi_select', validValues: ['partners', 'customers'] }],
   ['consent:newsletter', { family: 'consent', operators: ['eq'], valueType: 'enum', sourceKey: 'newsletter', validValues: ['granted', 'withdrawn', 'none'] }],
+  ['entitlement:member', { family: 'entitlement', operators: ['eq'], valueType: 'enum', sourceKey: 'member', validValues: ['pending', 'active', 'expired', 'cancelled'] }],
+  ['participation:annual_meeting', { family: 'participation', operators: ['eq'], valueType: 'enum', sourceKey: 'annual_meeting', validValues: ['registered', 'attended', 'cancelled', 'no_show'] }],
 ])
 const catalog = { fields } as unknown as CrmSegmentCatalog
 
@@ -69,5 +71,19 @@ describe('[COMP:crm/segments] SQL compiler and collection-query parity', () => {
         details: { issues: [expect.objectContaining({ validValues: expect.arrayContaining(['base:name']) })] },
       })
     }
+  })
+
+  it('maps commerce registration states into canonical participation segment values', () => {
+    const predicate: CrmSegmentPredicate = {
+      type: 'group', combinator: 'and', items: [
+        { type: 'rule', family: 'entitlement', field: 'member', operator: 'eq', value: 'active' },
+        { type: 'rule', family: 'participation', field: 'annual_meeting', operator: 'eq', value: 'registered' },
+      ],
+    }
+    const compiled = compileCrmSegmentPredicate(predicate, catalog)
+    expect(compiled.sql).toContain('association_memberships')
+    expect(compiled.sql).toContain("WHEN 'confirmed' THEN 'registered'")
+    expect(compiled.sql).toContain("WHEN 'checked_in' THEN 'attended'")
+    expect(compiled.params).toEqual(['member', 'active', 'annual_meeting', 'registered'])
   })
 })

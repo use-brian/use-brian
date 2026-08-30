@@ -50,4 +50,42 @@ describe('[COMP:crm/operations-store] CRM operations PostgreSQL transaction stor
     expect(query).not.toHaveBeenCalledWith('COMMIT')
     expect(release).toHaveBeenCalledOnce()
   })
+
+  it('refuses generic lifecycle updates for commerce-managed participation', async () => {
+    const query = vi.fn().mockImplementation(async (sql: string) => {
+      if (sql.includes('SELECT status, source_kind')) {
+        return { rows: [{ status: 'confirmed', sourceKind: 'commerce' }], rowCount: 1 }
+      }
+      return { rows: [], rowCount: 0 }
+    })
+    const release = vi.fn()
+    const pool = { connect: vi.fn().mockResolvedValue({ query, release }) } as never
+    const store = createDbCrmOperationsStore(pool)
+
+    await expect(store.transaction(context, (tx) => tx.updateParticipation(
+      '33333333-3333-4333-8333-333333333333',
+      'attended',
+    ))).rejects.toMatchObject({ code: 'conflict', details: { commerceManaged: true } })
+    expect(query.mock.calls.some((call) => String(call[0]).startsWith('UPDATE association_registrations'))).toBe(false)
+    expect(query).toHaveBeenCalledWith('ROLLBACK')
+  })
+
+  it('rejects invalid entitlement lifecycle reversal inside the transaction', async () => {
+    const query = vi.fn().mockImplementation(async (sql: string) => {
+      if (sql.includes('SELECT status, starts_at')) {
+        return { rows: [{ status: 'cancelled', startsAt: new Date('2026-08-30T00:00:00Z') }], rowCount: 1 }
+      }
+      return { rows: [], rowCount: 0 }
+    })
+    const release = vi.fn()
+    const pool = { connect: vi.fn().mockResolvedValue({ query, release }) } as never
+    const store = createDbCrmOperationsStore(pool)
+
+    await expect(store.transaction(context, (tx) => tx.updateEntitlement(
+      '44444444-4444-4444-8444-444444444444',
+      { status: 'active' },
+    ))).rejects.toMatchObject({ code: 'conflict' })
+    expect(query.mock.calls.some((call) => String(call[0]).startsWith('UPDATE association_memberships'))).toBe(false)
+    expect(query).toHaveBeenCalledWith('ROLLBACK')
+  })
 })

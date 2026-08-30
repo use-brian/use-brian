@@ -42,6 +42,10 @@ const reads: CrmOperationsReadPort = {
   listSegments: vi.fn(async () => ({ segments: [], catalog: [] })),
   getSegment: vi.fn(async () => null),
   previewSegment: vi.fn(async () => ({ rows: [], count: 0, snapshotIds: [] })),
+  listEntitlementPlans: vi.fn(async () => [{ id: 'plan-1', planKey: 'member' }]),
+  listEntitlements: vi.fn(async () => [{ id: 'entitlement-1', contactId: CONTACT_ID }]),
+  listEvents: vi.fn(async () => [{ id: 'event-1', slug: 'annual-meeting' }]),
+  listParticipation: vi.fn(async () => [{ id: 'participation-1', contactId: CONTACT_ID }]),
 }
 const execute = vi.fn<CrmOperationsServicePort['execute']>(async (_ctx, command) => ({
   command: command.kind,
@@ -60,8 +64,12 @@ describe('[COMP:crm/operations-tools] canonical CRM operation tools', () => {
       'listCrmIntakeDefinitions', 'listCrmSubmissions', 'getCrmSubmission',
       'listCrmConsentPurposes', 'getCrmConsent', 'checkCrmSendability',
       'listCrmSegments', 'previewCrmSegment',
+      'listCrmEntitlementPlans', 'listCrmEntitlements',
+      'listCrmEvents', 'listCrmParticipation',
       'recordCrmSubmission', 'updateCrmSubmission', 'recordCrmConsent',
       'recordCrmSuppression', 'saveCrmSegment', 'archiveCrmSegment',
+      'grantCrmEntitlement', 'updateCrmEntitlement',
+      'recordCrmParticipation', 'updateCrmParticipation',
     ])
     expect(Object.values(tools).every((tool) => tool.requiresCapability === 'crm')).toBe(true)
     expect(tools.listCrmSubmissions.isReadOnly).toBe(true)
@@ -123,5 +131,33 @@ describe('[COMP:crm/operations-tools] canonical CRM operation tools', () => {
     await expect(tools.recordCrmSuppression.resolveConfirmation!(context(), {
       contact_id: CONTACT_ID, channel: 'email', action: 'released', reason_code: 'manual_do_not_contact', source: 'manual', metadata: {},
     })).resolves.toBe(true)
+    await expect(tools.updateCrmEntitlement.resolveConfirmation!(context(), {
+      entitlement_id: CONTACT_ID, status: 'cancelled',
+    })).resolves.toBe(true)
+  })
+
+  it('uses stable generic ids and excludes commerce fields from participation writes', async () => {
+    await tools.recordCrmParticipation.execute({
+      contact_id: CONTACT_ID,
+      event_id: '00000000-0000-4000-8000-000000000007',
+      source_kind: 'workflow',
+      source_id: 'run-1',
+      attendee_name: 'Example Person',
+      metadata: {},
+    }, context())
+    expect(execute).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      kind: 'record_participation', contactId: CONTACT_ID,
+      sourceKind: 'workflow', sourceId: 'run-1',
+    }))
+    const invalid = tools.recordCrmParticipation.inputSchema.safeParse({
+      contact_id: CONTACT_ID,
+      event_id: '00000000-0000-4000-8000-000000000007',
+      source_kind: 'commerce',
+      source_id: 'order-line-1',
+      attendee_name: 'Example Person',
+      ticket_id: '00000000-0000-4000-8000-000000000008',
+      metadata: {},
+    })
+    expect(invalid.success).toBe(false)
   })
 })

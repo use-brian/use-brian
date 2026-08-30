@@ -68,6 +68,7 @@ export type AssociationStore = {
   getOrder(workspaceId: string, id: string): Promise<AssociationRecord | null>
   reconcileProviderEvent(workspaceId: string, orderId: string, input: ProviderEventInput, actor: AssociationActor): Promise<MutationResult>
   listEventRegistrations(workspaceId: string, eventId: string, input: AssociationListInput & { status?: RegistrationStatus }): Promise<AssociationPage>
+  getRegistrationManagement(workspaceId: string, id: string): Promise<{ sourceKind: string } | null>
   updateRegistration(workspaceId: string, id: string, input: RegistrationUpdateInput, actor: AssociationActor): Promise<AssociationRecord>
   listNotifications(workspaceId: string, input: AssociationListInput & { status?: string }): Promise<AssociationPage>
 }
@@ -137,7 +138,8 @@ const REGISTRATION_SELECT = `
   attendee_contact_id AS "attendeeContactId", attendee_name AS "attendeeName",
   attendee_email AS "attendeeEmail", attendee_metadata AS "attendeeMetadata",
   status, reservation_expires_at AS "reservationExpiresAt",
-  checked_in_at AS "checkedInAt", created_at AS "createdAt", updated_at AS "updatedAt"`
+  checked_in_at AS "checkedInAt", source_kind AS "sourceKind", source_id AS "sourceId",
+  created_at AS "createdAt", updated_at AS "updatedAt"`
 const NOTIFICATION_SELECT = `
   id, workspace_id AS "workspaceId", source_kind AS "sourceKind",
   source_id AS "sourceId", template_key AS "templateKey",
@@ -1124,6 +1126,15 @@ export function createAssociationStore(pool: Pool = getPool()): AssociationStore
         values,
       )
       return page(result.rows, input.limit)
+    },
+
+    async getRegistrationManagement(workspaceId, id) {
+      const result = await pool.query<{ sourceKind: string }>(
+        `SELECT source_kind AS "sourceKind" FROM association_registrations
+          WHERE workspace_id=$1 AND id=$2`,
+        [workspaceId, id],
+      )
+      return result.rows[0] ?? null
     },
 
     async updateRegistration(workspaceId, id, input, actor) {

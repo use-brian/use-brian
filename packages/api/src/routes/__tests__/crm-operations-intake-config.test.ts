@@ -10,6 +10,10 @@ const DEFINITION_ID = '33333333-3333-4333-8333-333333333333'
 const SUBMISSION_ID = '44444444-4444-4444-8444-444444444444'
 const CONTACT_ID = '55555555-5555-4555-8555-555555555555'
 const SEGMENT_ID = '66666666-6666-4666-8666-666666666666'
+const PLAN_ID = '77777777-7777-4777-8777-777777777777'
+const ENTITLEMENT_ID = '88888888-8888-4888-8888-888888888888'
+const EVENT_ID = '99999999-9999-4999-8999-999999999999'
+const PARTICIPATION_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 
 function build(role: 'owner' | 'admin' | 'member' = 'owner') {
   const workspaceStore = { getRole: vi.fn().mockResolvedValue(role) }
@@ -30,6 +34,10 @@ function build(role: 'owner' | 'admin' | 'member' = 'owner') {
     getSegment: vi.fn().mockResolvedValue({ id: SEGMENT_ID, segmentKey: 'active_people' }),
     previewSegment: vi.fn().mockResolvedValue({ rows: [], count: 0, snapshotIds: [] }),
     listCrmEventFilterCatalog: vi.fn().mockResolvedValue({ eventTypes: ['crm.submission.received'], stableKeys: [] }),
+    listEntitlementPlans: vi.fn().mockResolvedValue([{ id: PLAN_ID, planKey: 'member' }]),
+    listEntitlements: vi.fn().mockResolvedValue([{ id: ENTITLEMENT_ID, contactId: CONTACT_ID }]),
+    listEvents: vi.fn().mockResolvedValue([{ id: EVENT_ID, slug: 'annual-meeting' }]),
+    listParticipation: vi.fn().mockResolvedValue([{ id: PARTICIPATION_ID, eventId: EVENT_ID }]),
   }
   const app = express()
   app.use(express.json())
@@ -151,5 +159,63 @@ describe('[COMP:api/crm-operations-route] intake configuration REST adapter', ()
       .get(`/api/crm/${WORKSPACE_ID}/operations/workflow-event-catalog`)
     expect(response.body).toEqual({ eventTypes: ['crm.submission.received'], stableKeys: [] })
     expect(member.readStore.listCrmEventFilterCatalog).toHaveBeenCalledWith(WORKSPACE_ID)
+  })
+
+  it('lists entitlement and participation state through workspace-qualified read ports', async () => {
+    const member = build('member')
+    const entitlements = await request(member.app)
+      .get(`/api/crm/${WORKSPACE_ID}/operations/entitlements`)
+      .query({ contactId: CONTACT_ID, status: 'active', limit: 25 })
+    const participation = await request(member.app)
+      .get(`/api/crm/${WORKSPACE_ID}/operations/participation`)
+      .query({ eventId: EVENT_ID, sourceKind: 'commerce' })
+    expect(entitlements.status).toBe(200)
+    expect(participation.status).toBe(200)
+    expect(member.readStore.listEntitlements).toHaveBeenCalledWith(WORKSPACE_ID, {
+      contactId: CONTACT_ID, status: 'active', limit: 25,
+    })
+    expect(member.readStore.listParticipation).toHaveBeenCalledWith(WORKSPACE_ID, {
+      eventId: EVENT_ID, sourceKind: 'commerce', limit: 50,
+    })
+  })
+
+  it('routes entitlement and non-commerce participation writes through the canonical service', async () => {
+    const member = build('member')
+    member.service.execute
+      .mockResolvedValueOnce({ command: 'grant_entitlement', record: { id: ENTITLEMENT_ID }, created: true, duplicate: false, emittedEventIds: [] })
+      .mockResolvedValueOnce({ command: 'record_participation', record: { id: PARTICIPATION_ID }, created: true, duplicate: false, emittedEventIds: [] })
+    const entitlement = await request(member.app)
+      .post(`/api/crm/${WORKSPACE_ID}/operations/entitlements`)
+      .send({
+        contactId: CONTACT_ID, planId: PLAN_ID, idempotencyKey: 'grant-1',
+        startsAt: '2026-08-30T00:00:00.000Z', status: 'active',
+      })
+    const participation = await request(member.app)
+      .post(`/api/crm/${WORKSPACE_ID}/operations/participation`)
+      .send({
+        contactId: CONTACT_ID, eventId: EVENT_ID, sourceKind: 'manual',
+        sourceId: 'attendance-1', attendeeName: 'Example Person', status: 'attended',
+      })
+    expect(entitlement.status).toBe(201)
+    expect(participation.status).toBe(201)
+    expect(member.service.execute).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      workspaceId: WORKSPACE_ID, actor: { kind: 'user', userId: USER_ID },
+    }), expect.objectContaining({ kind: 'grant_entitlement', contactId: CONTACT_ID, planId: PLAN_ID }))
+    expect(member.service.execute).toHaveBeenNthCalledWith(2, expect.anything(), expect.objectContaining({
+      kind: 'record_participation', sourceKind: 'manual', sourceId: 'attendance-1',
+    }))
+  })
+
+  it('rejects commerce fields on the generic participation route', async () => {
+    const member = build('member')
+    const response = await request(member.app)
+      .post(`/api/crm/${WORKSPACE_ID}/operations/participation`)
+      .send({
+        contactId: CONTACT_ID, eventId: EVENT_ID, sourceKind: 'manual',
+        sourceId: 'attendance-2', attendeeName: 'Example Person',
+        ticketId: PLAN_ID,
+      })
+    expect(response.status).toBe(400)
+    expect(member.service.execute).not.toHaveBeenCalled()
   })
 })

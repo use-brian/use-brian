@@ -241,6 +241,108 @@ export function createDbCrmIntakeReadStore(): DbCrmOperationsReadStore {
       return { purposes, events, suppressions }
     },
 
+    async listEntitlementPlans(workspaceId, filters = {}) {
+      const limit = Math.min(100, Math.max(1, filters.limit ?? 50))
+      const result = await query<Record<string, unknown>>(
+        `SELECT p.id, p.plan_key AS "planKey", p.name, p.currency,
+                p.fee_minor::text AS "feeMinor", p.billing_period AS "billingPeriod",
+                p.benefits, p.eligibility_note AS "eligibilityNote",
+                p.active_from AS "activeFrom", p.active_to AS "activeTo",
+                p.published, p.provider, p.provider_plan_id AS "providerPlanId",
+                (p.fee_minor > 0 OR p.provider IS NOT NULL) AS "commerceManaged",
+                p.created_at AS "createdAt", p.updated_at AS "updatedAt"
+           FROM association_membership_plans p
+          WHERE p.workspace_id=$1
+            AND ($2::boolean IS NULL OR p.published=$2)
+          ORDER BY p.name, p.id LIMIT $3`,
+        [workspaceId, filters.published ?? null, limit],
+      )
+      return result.rows
+    },
+
+    async listEntitlements(workspaceId, filters = {}) {
+      const limit = Math.min(100, Math.max(1, filters.limit ?? 50))
+      const result = await query<Record<string, unknown>>(
+        `SELECT m.id, m.contact_id AS "contactId", c.display_name AS "contactName",
+                m.plan_id AS "planId", p.plan_key AS "planKey", p.name AS "planName",
+                m.status, m.starts_at AS "startsAt", m.ends_at AS "endsAt",
+                m.renewal_mode AS "renewalMode", m.provider,
+                m.provider_membership_id AS "providerEntitlementId",
+                m.created_at AS "createdAt", m.updated_at AS "updatedAt"
+           FROM association_memberships m
+           JOIN association_membership_plans p
+             ON p.workspace_id=m.workspace_id AND p.id=m.plan_id
+           JOIN entities c
+             ON c.workspace_id=m.workspace_id AND c.id=m.contact_id
+          WHERE m.workspace_id=$1
+            AND ($2::uuid IS NULL OR m.contact_id=$2)
+            AND ($3::uuid IS NULL OR m.plan_id=$3)
+            AND ($4::text IS NULL OR m.status=$4)
+            AND c.valid_to IS NULL AND c.retracted_at IS NULL
+          ORDER BY m.created_at DESC, m.id DESC LIMIT $5`,
+        [workspaceId, filters.contactId ?? null, filters.planId ?? null,
+          filters.status ?? null, limit],
+      )
+      return result.rows
+    },
+
+    async listEvents(workspaceId, filters = {}) {
+      const limit = Math.min(100, Math.max(1, filters.limit ?? 50))
+      const result = await query<Record<string, unknown>>(
+        `SELECT e.id, e.slug, e.programme_key AS "programmeKey", e.title,
+                e.description, e.starts_at AS "startsAt", e.ends_at AS "endsAt",
+                e.timezone, e.mode, e.venue, e.online_url AS "onlineUrl",
+                e.registration_opens_at AS "registrationOpensAt",
+                e.registration_closes_at AS "registrationClosesAt",
+                e.capacity, e.status, e.canonical_url AS "canonicalUrl", e.metadata,
+                EXISTS(SELECT 1 FROM association_ticket_types t
+                  WHERE t.workspace_id=e.workspace_id AND t.event_id=e.id) AS "commerceManaged",
+                e.created_at AS "createdAt", e.updated_at AS "updatedAt"
+           FROM association_events e
+          WHERE e.workspace_id=$1 AND ($2::text IS NULL OR e.status=$2)
+          ORDER BY e.starts_at DESC, e.id DESC LIMIT $3`,
+        [workspaceId, filters.status ?? null, limit],
+      )
+      return result.rows
+    },
+
+    async listParticipation(workspaceId, filters = {}) {
+      const limit = Math.min(100, Math.max(1, filters.limit ?? 50))
+      const result = await query<Record<string, unknown>>(
+        `SELECT p.* FROM (
+           SELECT r.id, r.event_id AS "eventId", e.slug AS "eventKey",
+                  e.title AS "eventTitle", r.attendee_contact_id AS "contactId",
+                  c.display_name AS "contactName", r.attendee_name AS "attendeeName",
+                  r.attendee_email AS "attendeeEmail", r.attendee_metadata AS metadata,
+                  CASE r.status
+                    WHEN 'reserved' THEN 'registered'
+                    WHEN 'confirmed' THEN 'registered'
+                    WHEN 'checked_in' THEN 'attended'
+                    WHEN 'refunded' THEN 'cancelled'
+                    ELSE r.status
+                  END AS status,
+                  r.status AS "sourceStatus", r.source_kind AS "sourceKind",
+                  r.source_id AS "sourceId", (r.source_kind='commerce') AS "commerceManaged",
+                  r.created_at AS "createdAt", r.updated_at AS "updatedAt"
+             FROM association_registrations r
+             JOIN association_events e
+               ON e.workspace_id=r.workspace_id AND e.id=r.event_id
+             LEFT JOIN entities c
+               ON c.workspace_id=r.workspace_id AND c.id=r.attendee_contact_id
+              AND c.valid_to IS NULL AND c.retracted_at IS NULL
+            WHERE r.workspace_id=$1
+              AND ($2::uuid IS NULL OR r.attendee_contact_id=$2)
+              AND ($3::uuid IS NULL OR r.event_id=$3)
+              AND ($4::text IS NULL OR r.source_kind=$4)
+         ) p
+         WHERE ($5::text IS NULL OR p.status=$5)
+         ORDER BY p."createdAt" DESC, p.id DESC LIMIT $6`,
+        [workspaceId, filters.contactId ?? null, filters.eventId ?? null,
+          filters.sourceKind ?? null, filters.status ?? null, limit],
+      )
+      return result.rows
+    },
+
     async checkSendability(workspaceId, contactId, channel, purposeKey) {
       const purpose = await query<{
         id: string

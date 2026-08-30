@@ -4715,6 +4715,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use('/api/association', associationRoutes({
     brainKeyStore,
     authorizationStore: oauthAuthorizationStore,
+    crmService: crmOperationsService,
   }))
 
   app.use('/api/brain/mcp', brainMcpRoutes({

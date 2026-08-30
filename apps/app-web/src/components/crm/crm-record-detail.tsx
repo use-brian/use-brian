@@ -76,6 +76,7 @@ import { CrmActivityTimeline } from "./crm-activity";
 import { CrmCustomFields } from "./crm-custom-fields";
 import { CrmParticipants } from "./crm-participants";
 import { CrmContactCompliance } from "./operations/contact-compliance";
+import { CrmContactLifecycle } from "./operations/contact-lifecycle";
 
 export type CrmRecordRef =
   | { kind: "deal"; row: CrmDealRow }
@@ -314,7 +315,15 @@ export function CrmRecordDetail({
         />
 
         {record.kind === "contact" && (
-          <CrmContactCompliance workspaceId={workspaceId} contactId={record.row.id} />
+          <>
+            <CrmContactCompliance workspaceId={workspaceId} contactId={record.row.id} />
+            <CrmContactLifecycle
+              workspaceId={workspaceId}
+              contactId={record.row.id}
+              contactName={record.row.name}
+              contactEmail={record.row.email}
+            />
+          </>
         )}
 
         {/* From the brain — the rollup's embedded context. */}

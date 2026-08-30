@@ -323,4 +323,44 @@ describe('[COMP:crm/operations-service] canonical CRM operations service', () =>
     })
     expect(tx.saveSegment).not.toHaveBeenCalled()
   })
+
+  it('commits entitlement and participation changes with redacted domain-event pointers', async () => {
+    const tx = makeTransaction({
+      grantEntitlement: vi.fn().mockResolvedValue({
+        created: true,
+        record: { id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', contactId: CONTACT_ID, planId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', status: 'active' },
+      }),
+      recordParticipation: vi.fn().mockResolvedValue({
+        created: true,
+        record: { id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', contactId: CONTACT_ID, eventId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', status: 'registered' },
+      }),
+    })
+    const memberContext: CrmOperationsContext = {
+      workspaceId: WORKSPACE_ID,
+      actor: { kind: 'user', userId: USER_ID },
+      authority: { role: 'member', canWrite: true, canConfigure: false, trustedIdentitySources: [] },
+    }
+    const service = createCrmOperationsService(makeStore(tx), {
+      now: () => new Date('2026-08-30T12:00:00.000Z'),
+    })
+    await service.execute(memberContext, {
+      kind: 'grant_entitlement', contactId: CONTACT_ID,
+      planId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', idempotencyKey: 'grant-1',
+      status: 'active', startsAt: '2026-08-30T00:00:00.000Z', renewalMode: 'none',
+    })
+    await service.execute(memberContext, {
+      kind: 'record_participation', contactId: CONTACT_ID,
+      eventId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', sourceKind: 'manual',
+      sourceId: 'attendance-1', status: 'registered', attendeeName: 'Example Person',
+      attendeeEmail: 'person@example.com', metadata: { privateNote: 'do not emit' },
+    })
+    const payloads = (tx.emitDomainEvent as ReturnType<typeof vi.fn>).mock.calls
+      .map((call) => call[0].payload)
+    expect(payloads).toEqual([
+      expect.objectContaining({ contactId: CONTACT_ID, status: 'active' }),
+      expect.objectContaining({ contactId: CONTACT_ID, status: 'registered' }),
+    ])
+    expect(JSON.stringify(payloads)).not.toContain('person@example.com')
+    expect(JSON.stringify(payloads)).not.toContain('do not emit')
+  })
 })

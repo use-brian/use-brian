@@ -310,6 +310,9 @@ export const GrantCrmEntitlementCommandSchema = z.object({
 }).refine(
   (value) => (value.provider === undefined) === (value.providerEntitlementId === undefined),
   'provider and providerEntitlementId must be supplied together',
+).refine(
+  (value) => !value.endsAt || value.startsAt < value.endsAt,
+  'endsAt must be after startsAt',
 )
 
 export const UpdateCrmEntitlementCommandSchema = z.object({
@@ -341,6 +344,28 @@ export const UpdateCrmParticipationCommandSchema = z.object({
   participationId: CrmOperationsUuidSchema,
   status: z.enum(['registered', 'attended', 'cancelled', 'no_show']),
 })
+
+const CRM_ENTITLEMENT_TRANSITIONS = {
+  pending: new Set(['pending', 'active', 'cancelled']),
+  active: new Set(['active', 'expired', 'cancelled']),
+  expired: new Set(['expired']),
+  cancelled: new Set(['cancelled']),
+} satisfies Record<string, ReadonlySet<string>>
+
+const CRM_PARTICIPATION_TRANSITIONS = {
+  registered: new Set(['registered', 'attended', 'cancelled', 'no_show']),
+  attended: new Set(['attended']),
+  cancelled: new Set(['cancelled']),
+  no_show: new Set(['no_show', 'attended']),
+} satisfies Record<string, ReadonlySet<string>>
+
+export function mayTransitionCrmEntitlement(from: string, to: string): boolean {
+  return CRM_ENTITLEMENT_TRANSITIONS[from as keyof typeof CRM_ENTITLEMENT_TRANSITIONS]?.has(to) ?? false
+}
+
+export function mayTransitionCrmParticipation(from: string, to: string): boolean {
+  return CRM_PARTICIPATION_TRANSITIONS[from as keyof typeof CRM_PARTICIPATION_TRANSITIONS]?.has(to) ?? false
+}
 
 export const SetDealPipelineStageCommandSchema = z.object({
   kind: z.literal('set_deal_pipeline_stage'),

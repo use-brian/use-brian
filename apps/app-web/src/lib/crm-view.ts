@@ -251,13 +251,17 @@ export function crmSectionCounts(summary: CrmSummary | null | undefined): Record
 export type CrmViewState = {
   section: CrmSection;
   /** Dedicated consequential-action workspace layered over the record lens. */
-  review: "email" | "submissions" | "segments" | null;
+  review: "email" | "submissions" | "segments" | "programs" | null;
   /** Selected pending approval while `review=email`. */
   draft: string | null;
   /** Selected intake submission while `review=submissions`. */
   submission: string | null;
   /** Selected shared dynamic segment while `review=segments`. */
   segment: string | null;
+  /** Selected entitlement plan while `review=programs`. */
+  plan: string | null;
+  /** Selected event while `review=programs`. */
+  event: string | null;
   /** Deals presentation — board is the default (pipeline-first, §1.4). */
   view: ViewMode;
   /** Active attention quick-filter, or null. */
@@ -296,6 +300,8 @@ export const DEFAULT_CRM_VIEW: CrmViewState = {
   draft: null,
   submission: null,
   segment: null,
+  plan: null,
+  event: null,
   view: "board",
   quick: null,
   pipeline: null,
@@ -349,10 +355,12 @@ export function crmViewFromSearch(
   }
   return {
     section,
-    review: oneOf(params.get("review"), ["email", "submissions", "segments"] as const),
+    review: oneOf(params.get("review"), ["email", "submissions", "segments", "programs"] as const),
     draft: params.get("review") === "email" ? params.get("draft") : null,
     submission: params.get("review") === "submissions" ? params.get("submission") : null,
     segment: params.get("review") === "segments" ? params.get("segment") : null,
+    plan: params.get("review") === "programs" ? params.get("plan") : null,
+    event: params.get("review") === "programs" ? params.get("event") : null,
     view: oneOf(params.get("view"), VIEW_MODES) ?? DEFAULT_CRM_VIEW.view,
     quick,
     pipeline: params.get("pipeline"),
@@ -389,6 +397,11 @@ export function searchFromCrmView(state: CrmViewState): string {
   if (state.review === "segments") {
     params.set("review", "segments");
     if (state.segment) params.set("segment", state.segment);
+  }
+  if (state.review === "programs") {
+    params.set("review", "programs");
+    if (state.plan) params.set("plan", state.plan);
+    if (state.event) params.set("event", state.event);
   }
   if (state.view !== DEFAULT_CRM_VIEW.view) params.set("view", state.view);
   if (state.quick) params.set("filter", state.quick);

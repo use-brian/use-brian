@@ -227,7 +227,12 @@ function expressionFor(rule: CrmSegmentRule, field: CatalogEntry, state: Compile
   }
   if (rule.family === 'participation') {
     const event = param(state, field.sourceKey)
-    const column = field.sqlKind === 'starts_at' ? 'ae.starts_at' : 'ar.status'
+    const column = field.sqlKind === 'starts_at' ? 'ae.starts_at' : `CASE ar.status
+      WHEN 'reserved' THEN 'registered'
+      WHEN 'confirmed' THEN 'registered'
+      WHEN 'checked_in' THEN 'attended'
+      WHEN 'refunded' THEN 'cancelled'
+      ELSE ar.status END`
     return `(SELECT ${column} FROM association_registrations ar
       JOIN association_events ae ON ae.workspace_id=ar.workspace_id AND ae.id=ar.event_id
       WHERE ar.workspace_id=e.workspace_id AND ar.attendee_contact_id=e.id AND ae.slug=${event}

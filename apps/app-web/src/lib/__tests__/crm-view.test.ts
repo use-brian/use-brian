@@ -183,6 +183,18 @@ describe("[COMP:app-web/crm-view] CRM view logic", () => {
     expect(crmViewFromSearch("submission=orphaned").submission).toBeNull();
   });
 
+  it("round-trips addressable entitlement-plan and event catalog selections", () => {
+    const planView = crmViewFromSearch("review=programs&plan=plan-2");
+    expect(planView.review).toBe("programs");
+    expect(planView.plan).toBe("plan-2");
+    expect(planView.event).toBeNull();
+    expect(searchFromCrmView(planView)).toContain("plan=plan-2");
+
+    const eventView = crmViewFromSearch("review=programs&event=event-2");
+    expect(eventView.event).toBe("event-2");
+    expect(searchFromCrmView(eventView)).toContain("event=event-2");
+  });
+
   it("round-trips owner state and applies the same owner filter to every section", () => {
     const view = crmViewFromSearch("owner=user-1,none&section=contacts");
     expect(view.owner).toEqual(["user-1", "none"]);

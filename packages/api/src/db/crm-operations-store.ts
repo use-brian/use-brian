@@ -8,12 +8,16 @@
  */
 
 import type { Pool, PoolClient, QueryResultRow } from 'pg'
-import type {
-  CrmIntakeDefinitionVersionInput,
-  CrmOperationsActor,
-  CrmOperationsContext,
-  CrmSegmentCatalog,
-  CrmSegmentPredicate,
+import {
+  CrmOperationsError,
+  crmOperationsSha256,
+  mayTransitionCrmEntitlement,
+  mayTransitionCrmParticipation,
+  type CrmIntakeDefinitionVersionInput,
+  type CrmOperationsActor,
+  type CrmOperationsContext,
+  type CrmSegmentCatalog,
+  type CrmSegmentPredicate,
 } from '@use-brian/core'
 import { getPool } from './client.js'
 import { loadCrmSegmentCatalog } from './crm-segment-store.js'
@@ -841,11 +845,26 @@ function createTransaction(client: PoolClient, context: CrmOperationsContext): C
     },
 
     async grantEntitlement(params) {
+      const legacyRequestHash = crmOperationsSha256({
+        contactId: params.contactId,
+        planId: params.planId,
+        idempotencyKey: params.idempotencyKey,
+        status: params.status,
+        startsAt: params.startsAt,
+        endsAt: params.endsAt,
+        renewalMode: params.renewalMode,
+        provider: params.provider,
+        providerMembershipId: params.providerEntitlementId,
+      })
+      const sameRequest = (fingerprint: unknown) => fingerprint === params.requestHash
+        || fingerprint === legacyRequestHash
       const existing = await client.query<DbRecord>(
         `SELECT m.id, m.contact_id AS "contactId", m.plan_id AS "planId",
-                p.plan_key AS "planKey", m.status, m.starts_at AS "startsAt",
+                p.plan_key AS "planKey", p.name AS "planName", m.status, m.starts_at AS "startsAt",
                 m.ends_at AS "endsAt", m.renewal_mode AS "renewalMode",
+                m.idempotency_key AS "idempotencyKey",
                 m.provider, m.provider_membership_id AS "providerEntitlementId",
+                m.request_fingerprint AS "requestFingerprint",
                 m.created_at AS "createdAt", m.updated_at AS "updatedAt"
            FROM association_memberships m
            JOIN association_membership_plans p
@@ -853,26 +872,108 @@ function createTransaction(client: PoolClient, context: CrmOperationsContext): C
           WHERE m.workspace_id=$1 AND m.idempotency_key=$2`,
         [workspaceId, params.idempotencyKey],
       )
-      if (existing.rows[0]) return { record: existing.rows[0], created: false }
-      const result = await client.query<DbRecord>(
+      if (existing.rows[0]) {
+        if (!sameRequest(existing.rows[0].requestFingerprint)) {
+          throw new CrmOperationsError(
+            'idempotency_conflict',
+            'Idempotency key was already used for a different entitlement.',
+          )
+        }
+        const { requestFingerprint: _ignored, ...record } = existing.rows[0]
+        return { record, created: false }
+      }
+      const [contact, plan] = await Promise.all([
+        client.query(
+          `SELECT 1 FROM entities
+            WHERE workspace_id=$1 AND id=$2 AND kind='person'
+              AND valid_to IS NULL AND retracted_at IS NULL`,
+          [workspaceId, params.contactId],
+        ),
+        client.query(
+          `SELECT 1 FROM association_membership_plans
+            WHERE workspace_id=$1 AND id=$2`,
+          [workspaceId, params.planId],
+        ),
+      ])
+      if (!contact.rowCount) throw new CrmOperationsError('not_found', 'CRM contact was not found.')
+      if (!plan.rowCount) throw new CrmOperationsError('not_found', 'Entitlement plan was not found.')
+      const inserted = await client.query<{ id: string }>(
         `INSERT INTO association_memberships (
            workspace_id,contact_id,plan_id,idempotency_key,request_fingerprint,
            status,starts_at,ends_at,renewal_mode,provider,provider_membership_id
          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-         RETURNING id,contact_id AS "contactId",plan_id AS "planId",status,
-                   starts_at AS "startsAt",ends_at AS "endsAt",
-                   renewal_mode AS "renewalMode",provider,
-                   provider_membership_id AS "providerEntitlementId",
-                   created_at AS "createdAt",updated_at AS "updatedAt"`,
+         ON CONFLICT (workspace_id,idempotency_key) DO NOTHING
+         RETURNING id`,
         [workspaceId, params.contactId, params.planId, params.idempotencyKey,
           params.requestHash, params.status, params.startsAt, params.endsAt ?? null,
           params.renewalMode, params.provider ?? null,
           params.providerEntitlementId ?? null],
       )
+      if (!inserted.rows[0]) {
+        const raced = await client.query<DbRecord>(
+          `SELECT m.id, m.contact_id AS "contactId", m.plan_id AS "planId",
+                  p.plan_key AS "planKey", p.name AS "planName", m.status,
+                  m.starts_at AS "startsAt", m.ends_at AS "endsAt",
+                  m.renewal_mode AS "renewalMode", m.provider,
+                  m.idempotency_key AS "idempotencyKey",
+                  m.provider_membership_id AS "providerEntitlementId",
+                  m.request_fingerprint AS "requestFingerprint",
+                  m.created_at AS "createdAt", m.updated_at AS "updatedAt"
+             FROM association_memberships m
+             JOIN association_membership_plans p
+               ON p.workspace_id=m.workspace_id AND p.id=m.plan_id
+            WHERE m.workspace_id=$1 AND m.idempotency_key=$2`,
+          [workspaceId, params.idempotencyKey],
+        )
+        if (!raced.rows[0]) {
+          throw new CrmOperationsError('conflict', 'Entitlement could not be resolved after a concurrent grant.')
+        }
+        if (!sameRequest(raced.rows[0].requestFingerprint)) {
+          throw new CrmOperationsError(
+            'idempotency_conflict',
+            'Idempotency key was already used for a different entitlement.',
+          )
+        }
+        const { requestFingerprint: _ignored, ...record } = raced.rows[0]
+        return { record, created: false }
+      }
+      const result = await client.query<DbRecord>(
+        `SELECT m.id, m.contact_id AS "contactId", m.plan_id AS "planId",
+                p.plan_key AS "planKey", p.name AS "planName", m.status,
+                m.starts_at AS "startsAt", m.ends_at AS "endsAt",
+                m.renewal_mode AS "renewalMode", m.provider,
+                m.idempotency_key AS "idempotencyKey",
+                m.provider_membership_id AS "providerEntitlementId",
+                m.created_at AS "createdAt", m.updated_at AS "updatedAt"
+           FROM association_memberships m
+           JOIN association_membership_plans p
+             ON p.workspace_id=m.workspace_id AND p.id=m.plan_id
+          WHERE m.workspace_id=$1 AND m.id=$2`,
+        [workspaceId, inserted.rows[0]!.id],
+      )
       return { record: first(result), created: true }
     },
 
     async updateEntitlement(entitlementId, changes) {
+      const current = await client.query<{ status: string; startsAt: Date }>(
+        `SELECT status, starts_at AS "startsAt"
+           FROM association_memberships
+          WHERE workspace_id=$1 AND id=$2 FOR UPDATE`,
+        [workspaceId, entitlementId],
+      )
+      const entitlement = current.rows[0]
+      if (!entitlement) return null
+      if (typeof changes.status === 'string'
+        && !mayTransitionCrmEntitlement(entitlement.status, changes.status)) {
+        throw new CrmOperationsError(
+          'conflict',
+          `Entitlement cannot transition from ${entitlement.status} to ${changes.status}.`,
+        )
+      }
+      if (typeof changes.endsAt === 'string'
+        && new Date(changes.endsAt) <= entitlement.startsAt) {
+        throw new CrmOperationsError('conflict', 'endsAt must be after startsAt.')
+      }
       const result = await client.query<DbRecord>(
         `UPDATE association_memberships
             SET status=COALESCE($3,status),
@@ -880,7 +981,12 @@ function createTransaction(client: PoolClient, context: CrmOperationsContext): C
                 renewal_mode=COALESCE($6,renewal_mode),updated_at=now()
           WHERE workspace_id=$1 AND id=$2
          RETURNING id,contact_id AS "contactId",plan_id AS "planId",status,
+                   (SELECT p.plan_key FROM association_membership_plans p
+                     WHERE p.workspace_id=$1 AND p.id=plan_id) AS "planKey",
+                   (SELECT p.name FROM association_membership_plans p
+                     WHERE p.workspace_id=$1 AND p.id=plan_id) AS "planName",
                    starts_at AS "startsAt",ends_at AS "endsAt",
+                   idempotency_key AS "idempotencyKey",
                    renewal_mode AS "renewalMode",provider,
                    provider_membership_id AS "providerEntitlementId",
                    created_at AS "createdAt",updated_at AS "updatedAt"`,
@@ -896,38 +1002,112 @@ function createTransaction(client: PoolClient, context: CrmOperationsContext): C
         `SELECT id,event_id AS "eventId",attendee_contact_id AS "contactId",
                 attendee_name AS "attendeeName",attendee_email AS "attendeeEmail",
                 attendee_metadata AS metadata,status,source_kind AS "sourceKind",
-                source_id AS "sourceId",created_at AS "createdAt",updated_at AS "updatedAt"
+                source_id AS "sourceId",request_fingerprint AS "requestFingerprint",
+                checked_in_at AS "checkedInAt",
+                created_at AS "createdAt",updated_at AS "updatedAt"
            FROM association_registrations
           WHERE workspace_id=$1 AND source_kind=$2 AND source_id=$3`,
         [workspaceId, params.sourceKind, params.sourceId],
       )
-      if (existing.rows[0]) return { record: existing.rows[0], created: false }
+      if (existing.rows[0]) {
+        if (existing.rows[0].requestFingerprint !== params.requestHash) {
+          throw new CrmOperationsError(
+            'idempotency_conflict',
+            'Source identity was already used for different participation.',
+          )
+        }
+        const { requestFingerprint: _ignored, ...record } = existing.rows[0]
+        return { record, created: false }
+      }
+      const [contact, event] = await Promise.all([
+        client.query(
+          `SELECT 1 FROM entities
+            WHERE workspace_id=$1 AND id=$2 AND kind='person'
+              AND valid_to IS NULL AND retracted_at IS NULL`,
+          [workspaceId, params.contactId],
+        ),
+        client.query(
+          `SELECT 1 FROM association_events
+            WHERE workspace_id=$1 AND id=$2`,
+          [workspaceId, params.eventId],
+        ),
+      ])
+      if (!contact.rowCount) throw new CrmOperationsError('not_found', 'CRM contact was not found.')
+      if (!event.rowCount) throw new CrmOperationsError('not_found', 'CRM event was not found.')
       const result = await client.query<DbRecord>(
         `INSERT INTO association_registrations (
            workspace_id,event_id,attendee_contact_id,attendee_name,attendee_email,
            attendee_metadata,status,source_kind,source_id,request_fingerprint
          ) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10)
+         ON CONFLICT DO NOTHING
          RETURNING id,event_id AS "eventId",attendee_contact_id AS "contactId",
                    attendee_name AS "attendeeName",attendee_email AS "attendeeEmail",
                    attendee_metadata AS metadata,status,source_kind AS "sourceKind",
-                   source_id AS "sourceId",created_at AS "createdAt",updated_at AS "updatedAt"`,
+                   source_id AS "sourceId",checked_in_at AS "checkedInAt",
+                   created_at AS "createdAt",updated_at AS "updatedAt"`,
         [workspaceId, params.eventId, params.contactId, params.attendeeName,
           params.attendeeEmail ?? null, JSON.stringify(params.metadata ?? {}), params.status,
           params.sourceKind, params.sourceId, params.requestHash],
       )
+      if (!result.rows[0]) {
+        const raced = await client.query<DbRecord>(
+          `SELECT id,event_id AS "eventId",attendee_contact_id AS "contactId",
+                  attendee_name AS "attendeeName",attendee_email AS "attendeeEmail",
+                  attendee_metadata AS metadata,status,source_kind AS "sourceKind",
+                  source_id AS "sourceId",request_fingerprint AS "requestFingerprint",
+                  checked_in_at AS "checkedInAt",
+                  created_at AS "createdAt",updated_at AS "updatedAt"
+             FROM association_registrations
+            WHERE workspace_id=$1 AND source_kind=$2 AND source_id=$3`,
+          [workspaceId, params.sourceKind, params.sourceId],
+        )
+        if (!raced.rows[0]) {
+          throw new CrmOperationsError('conflict', 'Participation could not be resolved after a concurrent record.')
+        }
+        if (raced.rows[0].requestFingerprint !== params.requestHash) {
+          throw new CrmOperationsError(
+            'idempotency_conflict',
+            'Source identity was already used for different participation.',
+          )
+        }
+        const { requestFingerprint: _ignored, ...record } = raced.rows[0]
+        return { record, created: false }
+      }
       return { record: first(result), created: true }
     },
 
     async updateParticipation(participationId, status) {
+      const current = await client.query<{ status: string; sourceKind: string }>(
+        `SELECT status, source_kind AS "sourceKind"
+           FROM association_registrations
+          WHERE workspace_id=$1 AND id=$2 FOR UPDATE`,
+        [workspaceId, participationId],
+      )
+      const participation = current.rows[0]
+      if (!participation) return null
+      if (participation.sourceKind === 'commerce') {
+        throw new CrmOperationsError(
+          'conflict',
+          'Commerce participation must be changed through Association order or registration operations.',
+          { commerceManaged: true },
+        )
+      }
+      if (!mayTransitionCrmParticipation(participation.status, status)) {
+        throw new CrmOperationsError(
+          'conflict',
+          `Participation cannot transition from ${participation.status} to ${status}.`,
+        )
+      }
       const result = await client.query<DbRecord>(
         `UPDATE association_registrations
             SET status=$3,checked_in_at=CASE WHEN $3='attended'
               THEN COALESCE(checked_in_at,now()) ELSE checked_in_at END,updated_at=now()
-          WHERE workspace_id=$1 AND id=$2 AND source_kind<>'commerce'
+          WHERE workspace_id=$1 AND id=$2
          RETURNING id,event_id AS "eventId",attendee_contact_id AS "contactId",
                    attendee_name AS "attendeeName",attendee_email AS "attendeeEmail",
                    attendee_metadata AS metadata,status,source_kind AS "sourceKind",
-                   source_id AS "sourceId",created_at AS "createdAt",updated_at AS "updatedAt"`,
+                   source_id AS "sourceId",checked_in_at AS "checkedInAt",
+                   created_at AS "createdAt",updated_at AS "updatedAt"`,
         [workspaceId, participationId, status],
       )
       return result.rows[0] ?? null

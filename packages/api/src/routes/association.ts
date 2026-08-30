@@ -10,6 +10,12 @@
 
 import { Router, type Request, type RequestHandler, type Response } from 'express'
 import { z } from 'zod'
+import {
+  CrmOperationsError,
+  type CrmOperationsActor,
+  type CrmOperationsContext,
+  type CrmOperationsServicePort,
+} from '@use-brian/core'
 import { authenticateBrainRequest, type BrainAuth } from '../brain-mcp/auth.js'
 import type { BrainKeyStore } from '../db/brain-keys-store.js'
 import type { OAuthAuthorizationStore } from '../db/oauth-authorization-store.js'
@@ -35,11 +41,14 @@ import {
   type AssociationActor,
 } from '../association/domain.js'
 import { createAssociationStore, type AssociationStore } from '../db/association-store.js'
+import { createDbCrmOperationsStore } from '../db/crm-operations-store.js'
+import { createCrmOperationsService } from '../crm-operations/service.js'
 
 type Options = {
   brainKeyStore: BrainKeyStore
   authorizationStore?: OAuthAuthorizationStore
   store?: AssociationStore
+  crmService?: CrmOperationsServicePort
   authenticate?: (req: Request) => Promise<BrainAuth | null>
 }
 
@@ -55,6 +64,66 @@ function actorFor(auth: BrainAuth): AssociationActor {
     credentialKind: auth.authKind,
     credentialId: auth.keyId,
     ...(auth.actingUserId ? { actingUserId: auth.actingUserId } : {}),
+  }
+}
+
+function crmActorFor(auth: BrainAuth): CrmOperationsActor {
+  if (auth.authKind === 'oauth_token') {
+    return {
+      kind: 'oauth_token', credentialId: auth.keyId,
+      ...(auth.actingUserId ? { userId: auth.actingUserId } : {}),
+    }
+  }
+  if (auth.authKind === 'home_app') {
+    return {
+      kind: 'home_app', credentialId: auth.keyId,
+      ...(auth.actingUserId ? { userId: auth.actingUserId } : {}),
+    }
+  }
+  return { kind: 'brain_key', credentialId: auth.keyId }
+}
+
+function crmContextFor(auth: BrainAuth): CrmOperationsContext {
+  return {
+    workspaceId: auth.workspaceId,
+    actor: crmActorFor(auth),
+    authority: {
+      role: 'system',
+      canWrite: auth.scope === 'read_write',
+      canConfigure: false,
+      trustedIdentitySources: [],
+    },
+  }
+}
+
+function associationMembership(
+  workspaceId: string,
+  record: Record<string, unknown>,
+): Record<string, unknown> {
+  const { providerEntitlementId, ...rest } = record
+  return {
+    workspaceId,
+    ...rest,
+    providerMembershipId: providerEntitlementId ?? null,
+  }
+}
+
+function associationRegistration(
+  workspaceId: string,
+  record: Record<string, unknown>,
+  status: 'cancelled' | 'checked_in',
+): Record<string, unknown> {
+  const { contactId, metadata, ...rest } = record
+  return {
+    workspaceId,
+    ...rest,
+    attendeeContactId: contactId ?? null,
+    attendeeMetadata: metadata ?? {},
+    orderId: null,
+    orderLineId: null,
+    ticketId: null,
+    reservationExpiresAt: null,
+    status,
   }
 }
 
@@ -87,6 +156,13 @@ function listInput(value: unknown, res: Response) {
 }
 
 function errorResponse(error: unknown, res: Response): void {
+  if (error instanceof CrmOperationsError) {
+    const status = error.code === 'not_found' ? 404
+      : error.code === 'conflict' || error.code === 'idempotency_conflict' ? 409
+        : error.code === 'not_authorized' ? 403 : 422
+    res.status(status).json({ error: error.code, message: error.message, details: error.details })
+    return
+  }
   if (error instanceof AssociationError) {
     const status = error.code === 'not_found' ? 404
       : error.code === 'conflict' || error.code === 'invalid_transition' ? 409
@@ -113,6 +189,7 @@ function endpoint(
 export function associationRoutes(opts: Options): Router {
   const router = Router()
   const store = opts.store ?? createAssociationStore()
+  const crmService = opts.crmService ?? createCrmOperationsService(createDbCrmOperationsStore())
   const authenticate = opts.authenticate ?? ((req: Request) =>
     authenticateBrainRequest(req, {
       brainKeyStore: opts.brainKeyStore,
@@ -278,12 +355,22 @@ export function associationRoutes(opts: Options): Router {
   router.post('/memberships', endpoint(async (req, res) => {
     const input = parsed(MembershipInputSchema, req.body, res)
     if (!input) return
-    const result = await store.createMembership(
-      res.locals.associationAuth.workspaceId,
-      input,
-      actorFor(res.locals.associationAuth),
-    )
-    res.status(result.created ? 201 : 200).json({ membership: result.record, created: result.created })
+    const output = await crmService.execute(crmContextFor(res.locals.associationAuth), {
+      kind: 'grant_entitlement',
+      contactId: input.contactId,
+      planId: input.planId,
+      idempotencyKey: input.idempotencyKey,
+      status: input.status,
+      startsAt: input.startsAt,
+      endsAt: input.endsAt,
+      renewalMode: input.renewalMode,
+      provider: input.provider,
+      providerEntitlementId: input.providerMembershipId,
+    })
+    res.status(output.created ? 201 : 200).json({
+      membership: associationMembership(res.locals.associationAuth.workspaceId, output.record),
+      created: output.created,
+    })
   }))
 
   router.get('/contacts/:contactId/memberships', endpoint(async (req, res) => {
@@ -297,13 +384,12 @@ export function associationRoutes(opts: Options): Router {
     const id = parsed(UUID, req.params.id, res)
     const input = parsed(MembershipUpdateSchema, req.body, res)
     if (!id || !input) return
-    const membership = await store.updateMembership(
-      res.locals.associationAuth.workspaceId,
-      id,
-      input,
-      actorFor(res.locals.associationAuth),
-    )
-    res.json({ membership })
+    const output = await crmService.execute(crmContextFor(res.locals.associationAuth), {
+      kind: 'update_entitlement', entitlementId: id, ...input,
+    })
+    res.json({
+      membership: associationMembership(res.locals.associationAuth.workspaceId, output.record),
+    })
   }))
 
   router.post('/events', endpoint(async (req, res) => {
@@ -375,12 +461,27 @@ export function associationRoutes(opts: Options): Router {
     const id = parsed(UUID, req.params.id, res)
     const input = parsed(RegistrationUpdateSchema, req.body, res)
     if (!id || !input) return
-    const registration = await store.updateRegistration(
+    const management = await store.getRegistrationManagement(
       res.locals.associationAuth.workspaceId,
       id,
-      input,
-      actorFor(res.locals.associationAuth),
     )
+    if (!management) throw new AssociationError('not_found', 'registration not found')
+    const registration = management.sourceKind === 'commerce'
+      ? await store.updateRegistration(
+        res.locals.associationAuth.workspaceId,
+        id,
+        input,
+        actorFor(res.locals.associationAuth),
+      )
+      : associationRegistration(
+        res.locals.associationAuth.workspaceId,
+        (await crmService.execute(crmContextFor(res.locals.associationAuth), {
+          kind: 'update_participation',
+          participationId: id,
+          status: input.status === 'checked_in' ? 'attended' : 'cancelled',
+        })).record,
+        input.status,
+      )
     res.json({ registration })
   }))
 
