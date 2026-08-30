@@ -82,6 +82,7 @@ import type {
   Block,
   BrowserSkillRecordingStep,
   BrowserSkillStore,
+  DocGateway,
   DocPageStore,
   Op,
   Page,
@@ -226,8 +227,9 @@ export type BrainFileTools = {
  * singletons the chat-side doc tools use (`createDbSavedViewStore` /
  * `createDbDocPageStore`), so a brain-key page read/edit/delete runs through
  * the identical RLS-gated SQL — `queryWithRLS(userId, …)` keyed on the
- * resolved (owner, primary-assistant) principal — and `editPage` reuses the
- * very CAS + undo-capture path the chat editor's `patchPage` uses.
+ * resolved (owner, primary-assistant) principal. When `docGateway` is wired,
+ * `editPage` applies through the authoritative live Y.Doc; only deployments
+ * without doc-sync use the legacy CAS + undo-capture path.
  *
  *   - `savedViewStore` — `list` (title search + `listPages` enumeration) +
  *     `remove` (RLS delete; the `saved_views` FK cascade drops nested child
@@ -236,11 +238,14 @@ export type BrainFileTools = {
  *     before nesting under it — same parent guard the chat `createSubPage`
  *     tool runs).
  *   - `docPageStore`   — `getVersionedPage` (RLS read → markdown / access
- *     confirm) + `applyPatch` (atomic version CAS + `last_undo` capture).
+ *     confirm) + `applyPatch` (legacy atomic version CAS + `last_undo`).
+ *   - `docGateway`     — optional live Yjs writer. A configured gateway is
+ *     authoritative; its failure is surfaced and never falls through to CAS.
  */
 export type BrainDocTools = {
   savedViewStore: Pick<SavedViewStore, 'list' | 'remove' | 'createDraft' | 'getById'>
   docPageStore: Pick<DocPageStore, 'getVersionedPage' | 'applyPatch'>
+  docGateway?: DocGateway
   /**
    * Custom page templates (migration 281). When wired, `listPageTemplates`
    * also surfaces the workspace's custom templates, `createPageFromTemplate`
@@ -442,9 +447,9 @@ function capPageMarkdown(md: string): string {
  *                    (the `exportPage` / `findPage` page-to-Markdown path).
  *   - `listPages`  → the same RLS-scoped `savedViewStore.list`, filtered by an
  *                    optional case-insensitive `titlePrefix` and recency-ranked.
- *   - `editPage`   → builds an `Op[]` and runs it through `applyOps` +
- *                    `docPageStore.applyPatch` — the same validated CAS +
- *                    `last_undo` capture the chat editor's `patchPage` uses.
+ *   - `editPage`   → builds a validated `Op[]`; a configured `DocGateway`
+ *                    applies it to the authoritative Y.Doc, while deployments
+ *                    without doc-sync use `docPageStore.applyPatch` CAS + undo.
  *   - `deletePage` → confirms RLS-scoped access via `getVersionedPage`, then
  *                    `savedViewStore.remove` (RLS `DELETE`; the `saved_views`
  *                    FK cascade drops nested child pages per migration 210).
@@ -478,7 +483,7 @@ function buildDocPageTools(
   createPageFromTemplate: BrainTool
   createPageTemplate: BrainTool
 } {
-  const { savedViewStore, docPageStore, pageTemplateStore } = docTools
+  const { savedViewStore, docPageStore, docGateway, pageTemplateStore } = docTools
 
   const readPage: BrainTool = {
     name: 'readPage',
@@ -610,11 +615,11 @@ function buildDocPageTools(
       'Edit an existing workspace doc page. Two modes: `mode: "append"` adds ' +
       'your Markdown `content` to the END of the page, `mode: "replace"` ' +
       'replaces the entire page body with `content` (the title is kept). ' +
-      'Content is parsed as Markdown into the page block format. The edit goes ' +
-      'through the same validated, version-checked path the in-app editor uses ' +
-      '(atomic compare-and-swap with single-step undo capture), so a concurrent ' +
-      'edit is detected and reported rather than silently clobbered. Scoped to ' +
-      "the key's workspace and clearance.",
+      'Content is parsed as Markdown into the page block format. On a live ' +
+      'collaborative deployment, the edit goes through the same Yjs document ' +
+      'as the in-app editor and broadcasts to open tabs. Deployments without ' +
+      'doc-sync use an atomic version-checked write with single-step undo. ' +
+      "Scoped to the key's workspace and clearance.",
     inputSchema: {
       pageId: z.string().min(1).max(128).describe('The id of the page to edit.'),
       content: z
@@ -636,8 +641,9 @@ function buildDocPageTools(
       if (!pageId) return text('Provide a `pageId` to edit.', true)
       if (!content.trim()) return text('Provide non-empty `content`.', true)
 
-      // 1. RLS-scoped read confirms access AND gives the CAS base version.
-      //    Never trust the input id without this — a null read is no-access.
+      // 1. RLS-scoped read confirms access and provides the current page (plus
+      //    the CAS base version on the legacy path). Never trust the input id
+      //    without this — a null read is no-access.
       const current = await docPageStore.getVersionedPage(ctx.userId, pageId)
       if (!current) {
         return text(`Page not found: ${pageId}. It may not exist or you may not have access.`, true)
@@ -670,8 +676,48 @@ function buildDocPageTools(
         return text(`Could not apply the edit: ${msg}`, true)
       }
 
-      // 4. Atomic compare-and-swap with undo capture — the legacy `patchPage`
-      //    DB seam. `null` means a concurrent writer bumped the version first.
+      // 4a. Live-doc path. A configured gateway is the authoritative writer,
+      //     even before the first `documents` snapshot is persisted: doc-sync
+      //     opens/seeds the Y.Doc and applies these ops there. Never fall
+      //     through to the legacy writer after a gateway error — doing so would
+      //     recreate the split-brain state this path exists to prevent.
+      if (docGateway) {
+        let liveResult: Awaited<ReturnType<DocGateway['applyOps']>>
+        try {
+          liveResult = await docGateway.applyOps({
+            userId: ctx.userId,
+            pageId,
+            ops,
+          })
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          return text(
+            `Failed to save the live edit: ${msg}. The legacy page was not changed.`,
+            true,
+          )
+        }
+        if ('error' in liveResult) {
+          return text(
+            `Failed to save the live edit: ${liveResult.error}. The legacy page was not changed.`,
+            true,
+          )
+        }
+        const skippedNote =
+          liveResult.skipped.length > 0
+            ? ` ${liveResult.skipped.length} stale operation(s) were skipped after concurrent live edits.`
+            : ''
+        const versionNote =
+          liveResult.version > 0 ? ` Live version ${liveResult.version}.` : ''
+        return text(
+          `Edited page "${current.title}" (${mode === 'replace' ? 'replaced body' : 'appended content'}).` +
+            versionNote +
+            skippedNote,
+        )
+      }
+
+      // 4b. Legacy atomic compare-and-swap with undo capture. This path is
+      //     intentionally reachable only when no doc-sync gateway is wired.
+      //     `null` means a concurrent legacy writer bumped the version first.
       const undo = buildUndoEntry(current.page, ops, {}, current.version + 1)
       let result: { newVersion: number } | null
       try {

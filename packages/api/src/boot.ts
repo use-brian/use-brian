@@ -4736,10 +4736,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // their own Studio, so no approve tool exists on this surface.
     brandTools: { getBrand: brandTools.getBrand, updateBrandDraft: brandTools.updateBrandDraft },
     // Doc-page tools (readPage / editPage / deletePage) reuse the same RLS-gated
-    // saved-views + doc-page stores the chat doc tools use, so a brain-key page
-    // op runs the identical SQL (CAS + undo for edits, cascade delete) as an
-    // in-app edit. See packages/api/src/brain-mcp/tools.ts → buildDocPageTools.
-    docTools: { savedViewStore, docPageStore: createDbDocPageStore(), pageTemplateStore },
+    // stores and live DocGateway as chat. Production edits therefore land in
+    // the authoritative Y.Doc; the legacy CAS remains only for deployments
+    // without doc-sync. See brain-mcp/tools.ts → buildDocPageTools.
+    docTools: { savedViewStore, docPageStore, docGateway, pageTemplateStore },
     ingest: brainEpisodeIngestor,
     agentTools: { reads: agentToolset.reads, writes: agentToolset.writes },
     // Powers the searchRecording tool's vector arm (recording-to-brain).
