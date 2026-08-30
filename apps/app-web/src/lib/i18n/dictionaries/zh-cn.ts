@@ -4360,7 +4360,6 @@ export const zhCN: Dictionary = {
     chat: "对话",
     shopify: "Shopify",
     wordpress: "WordPress",
-    live: "实时",
   },
   liveApp: {
     title: "实时",

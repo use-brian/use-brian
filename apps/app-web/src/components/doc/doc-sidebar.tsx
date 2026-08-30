@@ -10,14 +10,14 @@
  *    `homeHref`; the Home hub's app-bar in the content pane switches between
  *    them, see `operator-app-bar.tsx`), then the SURFACE rows Brain
  *    (→ `/w/[id]/brain`), Studio (→ `/studio`), Workflow (→ `/workflow`),
- *    then the utilities
- *    Inbox (toggles the left-anchored Inbox flyout panel — owned by the chrome —
- *    with an unread-count badge) and Search (toggles a client-side title filter).
+ *    then Live (the all-activity surface, occupying the former Inbox slot) and
+ *    the Home-only Search utility. Inbox itself is nested as the first row of
+ *    Live's surface-aware sidebar panel with its unread-count badge.
  *    Items are icon-only with a hover/focus tooltip (name + ⌘ shortcut); exactly
  *    ONE item at a time expands into a labeled `.doc-nav-active` pill (icon +
  *    name), the way Notion emphasizes the current section. Normally that's the
- *    active surface (`activeSurface`, via `surfaceFromPathname`); when a utility
- *    toggle (Inbox / Search) is open IT owns the pill instead and the surface
+ *    active surface (`activeSurface`, via `surfaceFromPathname`); when Search
+ *    is open it owns the pill instead and the surface
  *    drops to a highlighted icon, so a label can never collide with a second
  *    pill and truncate. Studio shows a dismissable cold-start "Set up" nudge
  *    while the workspace has no connected connector.
@@ -64,11 +64,11 @@ import {
   useSensors,
 } from "@dnd-kit/core";
 import {
+  Activity,
   Brain,
   ChevronRight,
   GitBranch,
   Home,
-  Inbox,
   MoreHorizontal,
   Pencil,
   Plus,
@@ -137,6 +137,7 @@ import { BrowsersSidebarPanel } from "./sidebar-panels/browsers-sidebar-panel";
 import { ChatSidebarPanel } from "./sidebar-panels/chat-sidebar-panel";
 import { OfficeSidebarPanel } from "./sidebar-panels/office-sidebar-panel";
 import { ShopifySidebarPanel } from "./sidebar-panels/shopify-sidebar-panel";
+import { LiveSidebarPanel } from "./sidebar-panels/live-sidebar-panel";
 
 export type SidebarMove = {
   viewId: string;
@@ -245,8 +246,8 @@ function collapseKey(workspaceId: string): string {
  *  - `active && !labeled` -> the active background but still icon-only (the
  *                            highlighted-but-not-the-pill state).
  *
- * Callers enforce a single-pill invariant (see `surfacePill`/`searchPill`/
- * `inboxPill`): at most one item is ever `labeled`, so the one label fits and
+ * Callers enforce a single-pill invariant (see `surfacePill`/`searchPill`):
+ * at most one item is ever `labeled`, so the one label fits and
  * two pills can't collide and truncate. `transition-all` eases the bg/grow.
  */
 function navItemCls(active: boolean, labeled: boolean): string {
@@ -262,7 +263,9 @@ function navItemCls(active: boolean, labeled: boolean): string {
 }
 
 export function DocSidebar(props: Props) {
-  const t = useT().docPage;
+  const copy = useT();
+  const t = copy.docPage;
+  const liveTitle = copy.liveApp.title;
   // Creating a page isn't supported offline (no server id) — disable the entry
   // in the bundled app when offline. No-op on web/thin (gate keeps it false).
   const offline = useIsOffline();
@@ -328,13 +331,11 @@ export function DocSidebar(props: Props) {
 
   // ── One labeled pill at a time (keeps the row inside the ~240px bar) ──
   // The active surface is normally THE pill (Notion-style "current section").
-  // But Inbox / Search are toggles a user opens *while on* a surface, so when
-  // one is open it owns the pill (full label) and the surface drops to a
-  // highlighted icon. Search wins if both are somehow open. So at most one
-  // label ever shows -> two pills can never collide and truncate (the "Sea" bug).
+  // Search is a toggle a user opens while on Home, so it owns the pill (full
+  // label) and Home drops to a highlighted icon. Inbox moved inside Live's
+  // sidebar panel, so it no longer competes for this primary-row label.
   const searchPill = searchOpen;
-  const inboxPill = props.inboxOpen && !searchOpen;
-  const utilityPillOpen = searchPill || inboxPill;
+  const utilityPillOpen = searchPill;
   /** True when surface `s` is the current route. */
   const surfaceActive = (s: WorkspaceSurface) => props.activeSurface === s;
   /** True when surface `s` should render as the labeled pill (no utility owns it). */
@@ -599,12 +600,12 @@ export function DocSidebar(props: Props) {
       {/* Top nav — horizontal icon toolbar (Notion-style). Every item is an icon
           with a hover/focus tooltip (name + ⌘ shortcut); exactly ONE item at a
           time expands into a labeled `.doc-nav-active` pill that spells out its
-          name (see `searchPill`/`inboxPill`/`surfacePill` above) — the way Notion
-          emphasizes the current section. Order: Home / Brain / Studio / Workflow
-          (primary surfaces), then Inbox / Search (utilities). When a utility is
+          name (see `searchPill`/`surfacePill` above) — the way Notion
+          emphasizes the current section. Order: Home / Brain / Studio / Workflow /
+          Live (primary surfaces), then Search (Home-only utility). When a utility is
           open it owns the pill and the current surface stays a highlighted icon,
           so a long label can't collide with a second pill and truncate. `pt-1`
-          keeps the Inbox/Studio corner badges off the top edge.
+          keeps the Studio corner badge off the top edge.
           `data-doc-chrome`: in the desktop shell this whole title-bar zone is an
           OS window-drag handle, so the gaps between icons and the empty space to
           the right of Search drag the window; the icon links/buttons opt back out
@@ -676,6 +677,23 @@ export function DocSidebar(props: Props) {
             ) : null}
           </Link>
         </Tooltip>
+        {/* Live — a top-level workspace surface in the former Inbox slot. Its
+            sidebar body owns the unchanged Inbox flyout trigger, followed by
+            the live roster; it is not a configurable Home mini app. */}
+        <Tooltip label={liveTitle}>
+          <Link
+            href={`/w/${workspaceId}/live`}
+            {...intentPrefetch(`/w/${workspaceId}/live`)}
+            aria-label={liveTitle}
+            className={navItemCls(surfaceActive("live"), !utilityPillOpen)}
+          >
+            <Activity className="size-[17px] shrink-0" />
+            {surfacePill("live") ? (
+              <span className="whitespace-nowrap">{liveTitle}</span>
+            ) : null}
+          </Link>
+        </Tooltip>
+
         {/* Feed has NO top-row icon: it re-parented into the Home operator
             app-bar (Page / Tasks / Feed — `operator-app-bar.tsx`), still
             gated on connected distribution profiles there. The routes stay
@@ -684,30 +702,6 @@ export function DocSidebar(props: Props) {
             home-dock Autopilot card + the Brain task panel are its entry
             points (docs/architecture/features/goals.md). */}
 
-        {/* Utilities — Inbox (toggles the flyout) + Search (client-side filter).
-            Either expands to its full label when open (and owns the single pill). */}
-        <Tooltip label={t.iconInbox}>
-          <button
-            type="button"
-            aria-label={t.iconInboxAria}
-            aria-pressed={props.inboxOpen}
-            onClick={props.onToggleInbox}
-            className={navItemCls(props.inboxOpen, inboxPill) + " relative"}
-          >
-            <Inbox className="size-[17px] shrink-0" />
-            {inboxPill ? (
-              <span className="whitespace-nowrap">{t.iconInbox}</span>
-            ) : null}
-            {inboxCount > 0 ? (
-              <span
-                aria-label={t.iconInboxBadgeAria.replace("{count}", String(inboxCount))}
-                className="absolute -right-0.5 -top-0.5 inline-flex min-w-[15px] items-center justify-center rounded-full bg-primary px-1 text-[9px] font-semibold leading-[15px] text-primary-foreground ring-2 ring-sidebar"
-              >
-                {inboxCount > 99 ? "99+" : inboxCount}
-              </span>
-            ) : null}
-          </button>
-        </Tooltip>
         {/* Search filters the page tree, so it's a Home-only utility. */}
         {sidebarSurface === "p" && (
           <Tooltip label={t.iconSearch}>
@@ -800,6 +794,13 @@ export function DocSidebar(props: Props) {
           <ChatSidebarPanel workspaceId={workspaceId} />
         ) : sidebarSurface === "shopify" ? (
           <ShopifySidebarPanel workspaceId={workspaceId} />
+        ) : sidebarSurface === "live" ? (
+          <LiveSidebarPanel
+            workspaceId={workspaceId}
+            inboxOpen={props.inboxOpen}
+            inboxCount={inboxCount}
+            onToggleInbox={props.onToggleInbox}
+          />
         ) : null}
 
         {sidebarSurface === "p" && (

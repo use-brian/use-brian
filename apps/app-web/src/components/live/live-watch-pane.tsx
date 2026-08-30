@@ -1,7 +1,8 @@
 "use client";
 
 /**
- * Live watch pane — token-by-token view of one focused session
+ * Live watch pane — token-by-token body of one focused session. The parent
+ * Live surface owns the shared top-bar title and Open-in-chat action.
  * (docs/architecture/features/live-work.md §5.1).
  *
  * Reuse, not invention: transcript history loads once through the existing
@@ -18,8 +19,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import Link from "next/link";
-import { ExternalLink, Loader2 } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { createSSEBuffer, parseSSEStream } from "@use-brian/chat-ui";
 import { authFetch } from "@/lib/auth-fetch";
 import { useT } from "@/lib/i18n/client";
@@ -47,13 +47,9 @@ function coercePayload(data: unknown): Record<string, unknown> {
 }
 
 export function LiveWatchPane({
-  workspaceId,
   sessionId,
-  title,
 }: {
-  workspaceId: string;
   sessionId: string;
-  title: string;
 }) {
   const t = useT();
   const tl = t.liveApp;
@@ -143,17 +139,6 @@ export function LiveWatchPane({
 
   return (
     <div className="mx-auto flex max-w-2xl flex-col gap-3">
-      <div className="flex items-center justify-between gap-2">
-        <h2 className="truncate text-base font-semibold">{title}</h2>
-        <Link
-          href={`/w/${workspaceId}/chat?s=${encodeURIComponent(sessionId)}`}
-          className="inline-flex shrink-0 items-center gap-1.5 text-sm text-primary hover:underline"
-        >
-          <ExternalLink className="h-3.5 w-3.5" aria-hidden />
-          {tl.openInChat}
-        </Link>
-      </div>
-
       {history.length > 0 && (
         <div className="flex flex-col gap-2">
           {history.map((m) => {

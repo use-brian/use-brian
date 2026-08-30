@@ -4562,7 +4562,6 @@ export const ja: Dictionary = {
     chat: "チャット",
     shopify: "Shopify",
     wordpress: "WordPress",
-    live: "ライブ",
   },
   liveApp: {
     title: "ライブ",

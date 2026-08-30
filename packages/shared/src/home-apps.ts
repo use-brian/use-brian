@@ -54,12 +54,6 @@ export const BUILTIN_HOME_APP_KEYS = [
   // is noise. It ships discoverable in Studio → Mini apps "Hidden" and the page
   // itself explains what to connect. See docs/architecture/integrations/shopify.md.
   'shopify',
-  // Live — the all-activity watch surface (2026-08-29): every in-flight
-  // assistant turn and workflow run in the workspace, watchable live.
-  // In DEFAULT_HOME_APPS for new workspaces; existing configured strips
-  // pick it up from Studio → Mini apps "Hidden" (additive contract).
-  // Spec: docs/architecture/features/live-work.md.
-  'live',
 ] as const
 
 export type HomeAppKey = (typeof BUILTIN_HOME_APP_KEYS)[number]
@@ -75,7 +69,7 @@ export type HomeAppEntry = HomeAppKey | `${typeof CUSTOM_HOME_APP_PREFIX}${strin
  * Migration 385 grandfathered the original six apps; Office migration 3941
  * appends its reserved key. New rows resolve to the minimal three-app set.
  */
-export const DEFAULT_HOME_APPS: readonly HomeAppEntry[] = ['page', 'office', 'chat', 'live']
+export const DEFAULT_HOME_APPS: readonly HomeAppEntry[] = ['page', 'office', 'chat']
 
 /** Upper bound on the strip. Custom apps count against it (T12). */
 export const HOME_APPS_MAX = 7

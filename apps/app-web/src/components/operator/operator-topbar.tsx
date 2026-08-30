@@ -2,8 +2,8 @@
 
 /**
  * Operator top bar — the ONE shared chrome row every non-Page operator app
- * surface (Tasks / CRM / Feed) opens with, so the four operator apps read as
- * one product under the Page app's top chrome:
+ * surface (plus top-level Live) opens with, so workspace surfaces read as one
+ * product under the Page app's top chrome:
  *
  *   [ ☰ ] [ ‹ ] [ › ]  ▣ Tasks   {center}                {right}
  *    │      │     │     └─ ONE non-closable active tab chip (the app's
@@ -44,6 +44,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Puzzle,
+  type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
@@ -57,6 +58,7 @@ const iconBtnCls =
 
 export function OperatorTopbar({
   app,
+  identity,
   customApp,
   appChipClassName,
   center,
@@ -65,7 +67,10 @@ export function OperatorTopbar({
 }: {
   /** Which built-in operator app the chip names (icon + `operatorBar` label).
    *  Ignored when `customApp` is supplied. */
-  app: OperatorAppKey;
+  app?: OperatorAppKey;
+  /** A top-level surface that reuses this chrome without joining the
+   * configurable Home-app vocabulary (Live is the reference). */
+  identity?: { label: string; icon: LucideIcon };
   /**
    * A CUSTOM (workspace-built) app's identity. Its name and icon are workspace
    * data from the app's manifest, not i18n — so the chip takes them verbatim
@@ -90,8 +95,8 @@ export function OperatorTopbar({
   const router = useRouter();
   const { sidebarCollapsed, setSidebarCollapsed } = useSidebarData();
 
-  const Icon = customApp ? Puzzle : APP_ICON[app];
-  const label = customApp ? customApp.name : t.operatorBar[app];
+  const Icon = identity?.icon ?? (customApp ? Puzzle : app ? APP_ICON[app] : Puzzle);
+  const label = identity?.label ?? (customApp ? customApp.name : app ? t.operatorBar[app] : "");
 
   return (
     <div

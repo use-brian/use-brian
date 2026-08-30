@@ -4778,7 +4778,6 @@ export const en = {
     chat: "Chat",
     shopify: "Shopify",
     wordpress: "WordPress",
-    live: "Live",
   },
   // ── Live all-activity watch surface (live-work.md §8) ──
   liveApp: {

@@ -6,6 +6,8 @@
  *   - `groupRosterItems`: the two §8 roster groups — *Working now* (sessions
  *     and runs interleaved, newest activity first) and *Just finished* (the
  *     server's 30-minute settled window).
+ *   - focus helpers: the URL-addressed `focus=<kind>:<id>` contract shared by
+ *     the persistent sidebar and the content pane.
  *   - `canWatch`: which rows open the watch pane. ONE stream, full-tier
  *     sessions only — presence rows have no affordance at all (§6.1), and
  *     run rows deep-link to the run detail instead of opening a second
@@ -36,6 +38,35 @@ export function groupRosterItems(items: LiveWorkItem[]): RosterGroups {
   };
 }
 
+/** Query parameter carrying the focused roster row. */
+export const LIVE_FOCUS_PARAM = "focus";
+
+/** Stable key used by the roster, URL, and detail lookup. */
+export function liveItemKey(item: LiveWorkItem): string {
+  return `${item.kind}:${item.id}`;
+}
+
+/** A selected row's canonical Live URL. */
+export function liveItemHref(workspaceId: string, item: LiveWorkItem): string {
+  return `/w/${workspaceId}/live?${LIVE_FOCUS_PARAM}=${encodeURIComponent(liveItemKey(item))}`;
+}
+
+/** Resolve only a row the tiered roster actually shipped to this caller. */
+export function focusedLiveItem(
+  items: LiveWorkItem[],
+  focus: string | null | undefined,
+): LiveWorkItem | null {
+  if (!focus) return null;
+  return items.find((item) => liveItemKey(item) === focus) ?? null;
+}
+
+/** One title rule for the sidebar and the top bar. */
+export function liveItemTitle(item: LiveWorkItem): string {
+  return item.kind === "workflow_run"
+    ? item.workflowName
+    : (item.title ?? item.assistantName);
+}
+
 /**
  * Whether focusing this row opens the watch pane's session stream. Full-tier
  * sessions only: presence rows are cards without an open affordance (D4 /
@@ -45,6 +76,11 @@ export function groupRosterItems(items: LiveWorkItem[]): RosterGroups {
  */
 export function canWatch(item: LiveWorkItem): boolean {
   return item.kind === "session" && item.tier === "full";
+}
+
+/** Presence-only rows are visible context, never selectable detail targets. */
+export function canFocusLiveItem(item: LiveWorkItem): boolean {
+  return item.kind === "workflow_run" || canWatch(item);
 }
 
 // ── Watch stream reducer ────────────────────────────────────────────

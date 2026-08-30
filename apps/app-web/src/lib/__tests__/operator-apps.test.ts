@@ -52,6 +52,7 @@ describe("[COMP:app-web/operator-app-bar] operator app registry", () => {
     expect(operatorAppFromSurface("brain")).toBeNull();
     expect(operatorAppFromSurface("studio")).toBeNull();
     expect(operatorAppFromSurface("workflow")).toBeNull();
+    expect(operatorAppFromSurface("live")).toBeNull();
     // Custom apps share the `apps` surface — identity is the id in the path,
     // not the segment, so the surface map deliberately says nothing.
     expect(operatorAppFromSurface("apps")).toBeNull();
@@ -121,6 +122,7 @@ describe("[COMP:app-web/operator-app-bar] operator app registry", () => {
     expect(customAppIdFromPathname(null)).toBeNull();
     expect(homeAppFromPathname("apps", "/w/w1/apps/app-1")).toBe("custom:app-1");
     expect(homeAppFromPathname("chat", "/w/w1/chat")).toBe("chat");
+    expect(homeAppFromPathname("live", "/w/w1/live")).toBeNull();
     expect(homeAppFromPathname("brain", "/w/w1/brain")).toBeNull();
   });
 

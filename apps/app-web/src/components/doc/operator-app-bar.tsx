@@ -44,7 +44,6 @@ import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import { useIntentPrefetch } from "@/lib/surface-prefetch";
 import {
-  Activity,
   CheckSquare,
   FileText,
   Files,
@@ -83,7 +82,6 @@ export const APP_ICON: Record<OperatorAppKey, LucideIcon> = {
   browsers: MonitorPlay,
   chat: MessageSquare,
   shopify: ShoppingBag,
-  live: Activity,
 };
 
 export function OperatorAppBar({
@@ -126,7 +124,6 @@ export function OperatorAppBar({
     crm: t.crm,
     browsers: t.browsers,
     chat: t.chat,
-    live: t.live,
     shopify: t.shopify,
   };
   // Off the family the bar renders nothing (below). A `custom:<id>` entry

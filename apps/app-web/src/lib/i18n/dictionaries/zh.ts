@@ -4515,7 +4515,6 @@ export const zh: Dictionary = {
     chat: "對話",
     shopify: "Shopify",
     wordpress: "WordPress",
-    live: "即時",
   },
   liveApp: {
     title: "即時",

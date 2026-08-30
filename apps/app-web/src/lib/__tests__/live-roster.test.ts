@@ -6,10 +6,15 @@
 import { describe, it, expect } from "vitest";
 import type { LiveSessionItem, LiveWorkflowRunItem } from "@/lib/api/live";
 import {
+  canFocusLiveItem,
   canWatch,
+  focusedLiveItem,
   groupRosterItems,
   initialWatchState,
   reduceWatchEvent,
+  liveItemHref,
+  liveItemKey,
+  liveItemTitle,
   shouldHoldWatchStream,
   WATCH_FEED_CAP,
 } from "@/lib/live-roster";
@@ -63,6 +68,24 @@ describe("[COMP:app-web/live-app] roster grouping + watchability", () => {
     expect(canWatch(session())).toBe(true);
     expect(canWatch(session({ tier: "presence" }))).toBe(false);
     expect(canWatch(run())).toBe(false);
+  });
+
+  it("rejects presence-only rows as detail targets, including deep links", () => {
+    expect(canFocusLiveItem(session())).toBe(true);
+    expect(canFocusLiveItem(session({ tier: "presence" }))).toBe(false);
+    expect(canFocusLiveItem(run())).toBe(true);
+  });
+
+  it("keeps sidebar focus and the detail pane on one URL-addressed key", () => {
+    const item = session({ id: "session/one", title: "Quarterly research" });
+    expect(liveItemKey(item)).toBe("session:session/one");
+    expect(liveItemHref("ws-1", item)).toBe(
+      "/w/ws-1/live?focus=session%3Asession%2Fone",
+    );
+    expect(focusedLiveItem([item], liveItemKey(item))).toBe(item);
+    expect(focusedLiveItem([item], "session:missing")).toBeNull();
+    expect(liveItemTitle(item)).toBe("Quarterly research");
+    expect(liveItemTitle(run())).toBe("Daily digest");
   });
 });
 

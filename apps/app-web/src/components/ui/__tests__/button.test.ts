@@ -41,7 +41,7 @@ describe("[COMP:app-web/button] Button", () => {
     expect(legacyPairs).toEqual([
       'components/brain/filter-strip.tsx:<span className="ml-0.5 min-w-[1.1rem] h-[1.1rem] px-1 inline-flex items-center justify-center rounded-full bg-primary text-primary-foreground text-[10px] font-semibold">',
       'components/chrome/floating-chat.tsx:<span className="inline-flex size-7 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground">',
-      'components/doc/doc-sidebar.tsx:className="absolute -right-0.5 -top-0.5 inline-flex min-w-[15px] items-center justify-center rounded-full bg-primary px-1 text-[9px] font-semibold leading-[15px] text-primary-foreground ring-2 ring-sidebar"',
+      'components/doc/sidebar-panels/live-sidebar-panel.tsx:className="inline-flex min-w-5 items-center justify-center rounded-full bg-primary px-1.5 text-[10px] font-semibold leading-5 text-primary-foreground"',
       'components/ui/user-avatar.tsx:"rounded-full bg-primary text-primary-foreground flex items-center justify-center font-bold shrink-0",',
       'components/workflow/step-editor.tsx:checked ? "border-primary bg-primary text-primary-foreground" : "border-input",',
       'components/workflow/workflow-board.tsx:state === "running" && "bg-primary text-primary-foreground",',
