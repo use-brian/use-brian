@@ -61,7 +61,7 @@ CREATE TABLE crm_intake_credentials (
   workspace_id       UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   label              TEXT NOT NULL CHECK (length(btrim(label)) BETWEEN 1 AND 200),
   secret_prefix      TEXT NOT NULL CHECK (secret_prefix ~ '^sk_intake_[A-Za-z0-9_-]+$'),
-  secret_hash        TEXT NOT NULL CHECK (secret_hash ~ '^[0-9a-f]{64}$'),
+  secret_hash        TEXT NOT NULL CHECK (secret_hash LIKE 'scrypt$%'),
   created_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
   revoked_at         TIMESTAMPTZ,
   last_used_at       TIMESTAMPTZ,

@@ -5760,6 +5760,13 @@ export const zh: Dictionary = {
       pipelineBreakdown: "管線明細", stageColumn: "階段", countColumn: "數量", valueColumn: "價值", velocityColumn: "時間中位數", days: "日",
       sourcePerformance: "來源表現", wonLower: "贏得", dataCoverage: "資料覆蓋", missingOwner: "沒有負責人的商機", missingAmount: "沒有金額的商機",
     },
+    operations: {
+      title: "接收操作", description: "定義受限的接收結構，並為外部後端簽發只寫憑證。",
+      definitions: "接收定義", definitionsHelp: "每個定義會固定欄位對應、身分政策、路由及資料大小上限。", definitionLabel: "定義名稱", definitionKey: "穩定鍵值", identityPolicy: "身分政策", identityTrustedEmail: "以已驗證電郵配對", identityNewReview: "一律新增並等待審閱", fieldSchema: "欄位結構 (JSON)",
+      defaultNameField: "名稱", defaultEmailField: "電郵", defaultMessageField: "訊息", createDefinition: "建立定義", noDefinitions: "尚未有接收定義。",
+      credentials: "接收憑證", credentialsHelp: "憑證只可向已連結的定義提交，不能讀取 CRM 或 Brain 資料。", credentialLabel: "憑證名稱", boundDefinition: "連結定義", pickDefinition: "選擇定義", createCredential: "建立憑證", noCredentials: "尚未有接收憑證。",
+      copyNow: "請立即複製此金鑰，之後不會再次顯示。", copy: "複製", copied: "已複製", active: "使用中", revoked: "已撤銷", revoke: "撤銷", revokeTitle: "撤銷接收憑證？", revokeDescription: "撤銷 {name}？使用此金鑰的外部提交會立即停止。", cancel: "取消", loadFailed: "無法載入接收設定。", saveFailed: "無法更新接收設定。",
+    },
   },
 
   filterBar: {

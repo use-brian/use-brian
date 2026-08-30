@@ -38,6 +38,7 @@ import {
 } from "@/lib/api/crm";
 import { useT } from "@/lib/i18n/client";
 import { crmFieldKeyFromLabel } from "@/lib/crm-r2";
+import { CrmIntakeSettings } from "./operations/intake-settings";
 
 export function CrmConfigDialog({
   workspaceId,
@@ -314,6 +315,7 @@ export function CrmConfigDialog({
                 {config?.fields.length === 0 && <div className="text-xs text-muted-foreground">{t.noFields}</div>}
               </div>
             </section>
+            <CrmIntakeSettings workspaceId={workspaceId} />
           </div>
         </Dialog.Popup>
       </Dialog.Portal>

@@ -308,11 +308,121 @@ export type CrmConfig = {
   fields: CrmFieldDefinition[];
 };
 
+export type CrmIntakeFieldDefinition = {
+  key: string;
+  label: string;
+  type: "text" | "email" | "phone" | "number" | "boolean" | "date" | "string_array";
+  required: boolean;
+  maxLength?: number;
+  options?: string[];
+  mapping:
+    | { kind: "base_field"; field: "name" | "email" | "phone" | "tags" }
+    | { kind: "custom_field"; fieldKey: string }
+    | { kind: "submission_only" };
+};
+
+export type CrmIntakeDefinition = {
+  id: string;
+  definitionKey: string;
+  label: string;
+  active: boolean;
+  currentVersion: number;
+  fields: CrmIntakeFieldDefinition[];
+  identityPolicy: "external_subject" | "trusted_verified_email" | "new_or_review";
+  allowedIdentityProvider?: string | null;
+  consentMappings: Array<{ fieldKey: string; grantedValue: string | boolean | number; purposeKey: string }>;
+  queueKey: string;
+  ownerUserId?: string | null;
+  followUpTaskTemplate?: { title: string; description: string; priority: "low" | "medium" | "high" | "urgent"; tags: string[] } | null;
+  followUpDueMinutes?: number | null;
+  maxPayloadBytes: number;
+  workflowHint?: string | null;
+  schemaHash: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CrmIntakeCredential = {
+  id: string;
+  label: string;
+  prefix: string;
+  definitionIds: string[];
+  revokedAt: string | null;
+  lastUsedAt: string | null;
+  createdAt: string;
+};
+
+export type CrmIntakeDefinitionInput = {
+  definitionId?: string;
+  definitionKey: string;
+  label: string;
+  active?: boolean;
+  expectedVersion?: number;
+  definition: {
+    fields: CrmIntakeFieldDefinition[];
+    identityPolicy: CrmIntakeDefinition["identityPolicy"];
+    allowedIdentityProvider?: string | null;
+    consentMappings?: CrmIntakeDefinition["consentMappings"];
+    queueKey?: string;
+    ownerUserId?: string | null;
+    followUpTaskTemplate?: CrmIntakeDefinition["followUpTaskTemplate"];
+    followUpDueMinutes?: number | null;
+    maxPayloadBytes?: number;
+    workflowHint?: string | null;
+  };
+};
+
 async function jsonRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await authFetch(`${API_URL}${path}`, init);
   const body = (await res.json().catch(() => ({}))) as T & { error?: string };
   if (!res.ok) throw new Error(body.error ?? `CRM request failed (${res.status})`);
   return body;
+}
+
+export async function listCrmIntakeDefinitions(workspaceId: string): Promise<CrmIntakeDefinition[]> {
+  const body = await jsonRequest<{ definitions: CrmIntakeDefinition[] }>(
+    `/api/crm/${encodeURIComponent(workspaceId)}/operations/intake-definitions`,
+  );
+  return body.definitions;
+}
+
+export function saveCrmIntakeDefinition(
+  workspaceId: string,
+  input: CrmIntakeDefinitionInput,
+): Promise<{ record: CrmIntakeDefinition; created: boolean }> {
+  return jsonRequest(`/api/crm/${encodeURIComponent(workspaceId)}/operations/intake-definitions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+}
+
+export async function listCrmIntakeCredentials(workspaceId: string): Promise<CrmIntakeCredential[]> {
+  const body = await jsonRequest<{ credentials: CrmIntakeCredential[] }>(
+    `/api/crm/${encodeURIComponent(workspaceId)}/operations/intake-credentials`,
+  );
+  return body.credentials;
+}
+
+export function createCrmIntakeCredential(
+  workspaceId: string,
+  input: { label: string; definitionIds: string[] },
+): Promise<{ record: CrmIntakeCredential; key: string }> {
+  return jsonRequest(`/api/crm/${encodeURIComponent(workspaceId)}/operations/intake-credentials`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+}
+
+export function revokeCrmIntakeCredential(
+  workspaceId: string,
+  credentialId: string,
+): Promise<{ record: CrmIntakeCredential }> {
+  return jsonRequest(
+    `/api/crm/${encodeURIComponent(workspaceId)}/operations/intake-credentials/${encodeURIComponent(credentialId)}`,
+    { method: "DELETE" },
+  );
 }
 
 export function fetchCrmConfig(workspaceId: string, includeArchived = false): Promise<CrmConfig> {

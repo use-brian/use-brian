@@ -217,6 +217,11 @@ import { saveLocalProviderPreference } from './local-provider-preference.js'
 import { brainRoutes } from './routes/brain.js'
 import { brainInboxRoutes } from './routes/brain-inbox.js'
 import { crmRoutes } from './routes/crm.js'
+import { crmIntakeRoutes } from './routes/crm-intake.js'
+import { crmOperationsRoutes } from './routes/crm-operations.js'
+import { createCrmOperationsService } from './crm-operations/service.js'
+import { createDbCrmOperationsStore } from './db/crm-operations-store.js'
+import { createDbCrmIntakeReadStore } from './db/crm-intake-store.js'
 import { getCrmEmailReviewContext } from './db/crm-r2.js'
 import { bootstrapHistoricalCrmIdentityState } from './db/crm-identity-store.js'
 import { resolveWorkspaceViewpoint } from './db/workspace-viewpoint.js'
@@ -1311,6 +1316,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       req.path === '/api/local-files'
       || (req.method === 'PUT' && /^\/internal\/chat-archive\/media\/[^/]+\/content$/.test(req.path))
       || (req.method === 'POST' && /^\/bridge\/v1\/channels\/[^/]+\/media\/[^/]+$/.test(req.path))
+      // The public CRM intake route owns a tighter 1 MiB parser. Skipping the
+      // global 15 MiB parser is what makes the byte limit apply before JSON
+      // decoding instead of after the body is already resident in memory.
+      || (req.method === 'POST' && /^\/api\/crm\/intake\/[^/]+\/submissions$/.test(req.path))
     ) {
       next()
       return
@@ -1546,6 +1555,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   })
   const crmStore = createDbCrmStore()
   const crmEmailDraftStore = createDbCrmEmailDraftStore()
+  const crmOperationsService = createCrmOperationsService(createDbCrmOperationsStore())
+  const crmIntakeReadStore = createDbCrmIntakeReadStore()
   setGlobalMailboxContactImportDeps({ crm: crmStore })
   const workspaceFilesStore = createDbWorkspaceFilesStore()
   const workspaceFileUploadsStore = createWorkspaceFileUploadsStore()
@@ -5414,6 +5425,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     await ports.mountPublicExtraRoutes(app, { linkedAccountStore, integrationStore, workspaceStore })
   }
 
+  // PUBLIC + self-authenticating `sk_intake_*` route. It must stay before the
+  // bare `/api` JWT guards below and has its own 1 MiB parser because the
+  // global 15 MiB parser deliberately skips this exact path.
+  app.use('/api', crmIntakeRoutes({
+    service: crmOperationsService,
+    readStore: crmIntakeReadStore,
+  }))
+
   // Workflow webhook receiver — PUBLIC + self-authenticating (per-workflow HMAC,
   // not the user JWT). It MUST mount here, before the bare `app.use('/api',
   // requireAuth(...))` guards below: Express runs path-prefix middleware in
@@ -6389,6 +6408,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     workspaceStore,
     entityLinks: entityLinksStore,
     emailDraftStore: crmEmailDraftStore,
+  }))
+  app.use('/api/crm', requireAuth(env.JWT_SECRET), crmOperationsRoutes({
+    workspaceStore,
+    service: crmOperationsService,
+    readStore: crmIntakeReadStore,
   }))
   // Brain inbox (verification surface). Open + hosted share this one mount: the
   // route's deps are all open (brain-inbox-store / entities-store / crm / sessions /

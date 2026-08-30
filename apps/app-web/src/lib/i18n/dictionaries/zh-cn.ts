@@ -5890,6 +5890,13 @@ export const zhCN: Dictionary = {
       missingOwner: "没有负责人的商机",
       missingAmount: "没有金额的商机",
     },
+    operations: {
+      title: "接收操作", description: "定义受限制的接收架构，并为外部后端签发仅写入凭证。",
+      definitions: "接收定义", definitionsHelp: "每项定义都会固定字段映射、身份政策、路由及数据大小上限。", definitionLabel: "定义名称", definitionKey: "稳定键值", identityPolicy: "身份政策", identityTrustedEmail: "以已验证邮件配对", identityNewReview: "一律新增并等候审阅", fieldSchema: "字段架构 (JSON)",
+      defaultNameField: "名称", defaultEmailField: "邮件", defaultMessageField: "消息", createDefinition: "创建定义", noDefinitions: "尚未有接收定义。",
+      credentials: "接收凭证", credentialsHelp: "凭证只能提交至所绑定的定义，不能读取 CRM 或 Brain 数据。", credentialLabel: "凭证名称", boundDefinition: "绑定定义", pickDefinition: "选择定义", createCredential: "创建凭证", noCredentials: "尚未有接收凭证。",
+      copyNow: "请立即复制此密钥，之后不会再次显示。", copy: "复制", copied: "已复制", active: "有效", revoked: "已撤销", revoke: "撤销", revokeTitle: "撤销接收凭证？", revokeDescription: "撤销 {name}？使用此密钥的外部提交会立即停止。", cancel: "取消", loadFailed: "无法加载接收设置。", saveFailed: "无法更新接收设置。",
+    },
   },
   filterBar: {
     filter: "筛选",

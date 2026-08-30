@@ -6029,6 +6029,13 @@ export const en = {
       pipelineBreakdown: "Pipeline breakdown", stageColumn: "Stage", countColumn: "Count", valueColumn: "Value", velocityColumn: "Median time", days: "days",
       sourcePerformance: "Source performance", wonLower: "won", dataCoverage: "Data coverage", missingOwner: "Deals without an owner", missingAmount: "Deals without an amount",
     },
+    operations: {
+      title: "Intake operations", description: "Define bounded intake schemas and issue write-only credentials for external backends.",
+      definitions: "Intake definitions", definitionsHelp: "Each definition fixes field mappings, identity policy, routing, and payload limits.", definitionLabel: "Definition name", definitionKey: "Stable key", identityPolicy: "Identity policy", identityTrustedEmail: "Match verified email", identityNewReview: "Always create for review", fieldSchema: "Field schema (JSON)",
+      defaultNameField: "Name", defaultEmailField: "Email", defaultMessageField: "Message", createDefinition: "Create definition", noDefinitions: "No intake definitions yet.",
+      credentials: "Intake credentials", credentialsHelp: "Credentials can submit only to their bound definitions. They cannot read CRM or Brain data.", credentialLabel: "Credential name", boundDefinition: "Bound definition", pickDefinition: "Pick a definition", createCredential: "Create credential", noCredentials: "No intake credentials yet.",
+      copyNow: "Copy this key now. It will not be shown again.", copy: "Copy", copied: "Copied", active: "Active", revoked: "Revoked", revoke: "Revoke", revokeTitle: "Revoke intake credential?", revokeDescription: "Revoke {name}? External submissions using this key will stop immediately.", cancel: "Cancel", loadFailed: "Could not load intake settings.", saveFailed: "Could not update intake settings.",
+    },
   },
 
   // ── Operator filter bar ([COMP:app-web/operator-filter-bar]) ──

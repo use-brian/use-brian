@@ -193,6 +193,39 @@ describe('[COMP:crm/operations-service] canonical CRM operations service', () =>
     expect(tx.createSubmission).not.toHaveBeenCalled()
   })
 
+  it('serializes concurrent identical replays into one logical submission', async () => {
+    let committed: { submissionId: string; contactId: string; followUpTaskId: string | null } | null = null
+    const tx = makeTransaction({
+      claimIdempotency: vi.fn().mockImplementation(async () => committed
+        ? { kind: 'duplicate', claimId: 'claim-1', ...committed }
+        : { kind: 'claimed', claimId: 'claim-1' }),
+      commitIdempotency: vi.fn().mockImplementation(async (value) => {
+        committed = {
+          submissionId: value.submissionId,
+          contactId: value.contactId,
+          followUpTaskId: value.followUpTaskId,
+        }
+      }),
+    })
+    let tail = Promise.resolve()
+    const serialStore: CrmOperationsStore = {
+      transaction(_context, run) {
+        const work = tail.then(() => run(tx))
+        tail = work.then(() => undefined, () => undefined)
+        return work
+      },
+    }
+    const service = createCrmOperationsService(serialStore)
+    const [left, right] = await Promise.all([
+      service.execute(context, submissionCommand),
+      service.execute(context, submissionCommand),
+    ])
+    expect([left.duplicate, right.duplicate].sort()).toEqual([false, true])
+    expect(left.record).toEqual(right.record)
+    expect(tx.createContact).toHaveBeenCalledOnce()
+    expect(tx.createSubmission).toHaveBeenCalledOnce()
+  })
+
   it('fails closed when an intake credential is not bound to the definition', async () => {
     const tx = makeTransaction({ intakeCredentialMayUse: vi.fn().mockResolvedValue(false) })
     await expect(createCrmOperationsService(makeStore(tx)).execute(context, submissionCommand))
@@ -235,14 +268,15 @@ describe('[COMP:crm/operations-service] canonical CRM operations service', () =>
     const output = await createCrmOperationsService(makeStore(tx), {
       randomCredentialId: () => CREDENTIAL_ID,
       randomSecret: () => 'one-time-material',
+      hashCredentialSecret: async () => 'scrypt$test',
     }).execute(ownerContext, {
       kind: 'create_intake_credential', label: 'Website', definitionIds: [DEFINITION_ID],
     })
     expect(output.oneTimeSecret).toBe(`sk_intake_${CREDENTIAL_ID}_one-time-material`)
     expect(tx.createIntakeCredential).toHaveBeenCalledWith(expect.objectContaining({
       credentialId: CREDENTIAL_ID,
-      secretPrefix: `sk_intake_${CREDENTIAL_ID}`,
-      secretHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+      secretPrefix: 'sk_intake_3333',
+      secretHash: 'scrypt$test',
     }))
     const credentialCalls = (tx.createIntakeCredential as ReturnType<typeof vi.fn>).mock.calls
     expect(JSON.stringify(credentialCalls[0]![0])).not.toContain('one-time-material')

@@ -5807,6 +5807,13 @@ export const ja: Dictionary = {
       pipelineBreakdown: "パイプライン内訳", stageColumn: "ステージ", countColumn: "件数", valueColumn: "金額", velocityColumn: "中央値", days: "日",
       sourcePerformance: "流入元別実績", wonLower: "受注", dataCoverage: "データ充足度", missingOwner: "担当者なしの案件", missingAmount: "金額なしの案件",
     },
+    operations: {
+      title: "受付オペレーション", description: "制限付きの受付スキーマを定義し、外部バックエンド用の書き込み専用認証情報を発行します。",
+      definitions: "受付定義", definitionsHelp: "各定義でフィールド対応、本人確認ポリシー、振り分け、ペイロード上限を固定します。", definitionLabel: "定義名", definitionKey: "固定キー", identityPolicy: "本人確認ポリシー", identityTrustedEmail: "確認済みメールで照合", identityNewReview: "常に新規作成して確認", fieldSchema: "フィールドスキーマ (JSON)",
+      defaultNameField: "名前", defaultEmailField: "メール", defaultMessageField: "メッセージ", createDefinition: "定義を作成", noDefinitions: "受付定義はまだありません。",
+      credentials: "受付認証情報", credentialsHelp: "認証情報は紐付いた定義への送信専用です。CRM や Brain のデータは読み取れません。", credentialLabel: "認証情報名", boundDefinition: "紐付ける定義", pickDefinition: "定義を選択", createCredential: "認証情報を作成", noCredentials: "受付認証情報はまだありません。",
+      copyNow: "このキーを今すぐコピーしてください。再表示はできません。", copy: "コピー", copied: "コピー済み", active: "有効", revoked: "失効済み", revoke: "失効", revokeTitle: "受付認証情報を失効しますか？", revokeDescription: "{name} を失効しますか？このキーを使う外部送信は直ちに停止します。", cancel: "キャンセル", loadFailed: "受付設定を読み込めませんでした。", saveFailed: "受付設定を更新できませんでした。",
+    },
   },
 
   filterBar: {

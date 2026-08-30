@@ -33,6 +33,7 @@ import type {
   CrmOperationsTransaction,
   StoredIntakeDefinition,
 } from '../db/crm-operations-store.js'
+import { hashSecret } from '../db/api-key-store.js'
 
 type ServiceClock = () => Date
 
@@ -40,6 +41,7 @@ export type CrmOperationsServiceOptions = {
   now?: ServiceClock
   randomCredentialId?: () => string
   randomSecret?: () => string
+  hashCredentialSecret?: (secret: string) => Promise<string>
 }
 
 function actorUserId(actor: CrmOperationsActor): string | null {
@@ -418,6 +420,7 @@ export function createCrmOperationsService(
   const clock = options.now ?? (() => new Date())
   const makeCredentialId = options.randomCredentialId ?? randomUUID
   const makeSecret = options.randomSecret ?? (() => randomBytes(32).toString('base64url'))
+  const hashCredentialSecret = options.hashCredentialSecret ?? hashSecret
 
   return {
     async execute(rawContext, rawCommand) {
@@ -449,14 +452,15 @@ export function createCrmOperationsService(
         }
         if (command.kind === 'create_intake_credential') {
           const credentialId = makeCredentialId()
-          const prefix = `sk_intake_${credentialId}`
-          const oneTimeSecret = `${prefix}_${makeSecret()}`
+          const secret = makeSecret()
+          const oneTimeSecret = `sk_intake_${credentialId}_${secret}`
+          const prefix = oneTimeSecret.slice(0, 14)
           const record = await tx.createIntakeCredential({
             credentialId,
             label: command.label,
             definitionIds: command.definitionIds,
             secretPrefix: prefix,
-            secretHash: crmOperationsSha256(oneTimeSecret),
+            secretHash: await hashCredentialSecret(secret),
             createdByUserId: actorUserId(context.actor),
           })
           await audit(tx, context.actor, {
