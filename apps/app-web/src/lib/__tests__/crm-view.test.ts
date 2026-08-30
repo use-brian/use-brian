@@ -165,6 +165,15 @@ describe("[COMP:app-web/crm-view] CRM view logic", () => {
     expect(crmViewFromSearch("draft=orphaned").draft).toBeNull();
   });
 
+  it("round-trips the shared segment workspace and selected stable segment id", () => {
+    const view = crmViewFromSearch("review=segments&segment=segment-2");
+    expect(view.review).toBe("segments");
+    expect(view.segment).toBe("segment-2");
+    const search = searchFromCrmView(view);
+    expect(search).toContain("review=segments");
+    expect(search).toContain("segment=segment-2");
+  });
+
   it("round-trips the addressable submission Inbox selection in the CRM URL", () => {
     const view = crmViewFromSearch("review=submissions&submission=submission-2");
     expect(view.review).toBe("submissions");

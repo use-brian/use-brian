@@ -3428,6 +3428,28 @@ export const ja: Dictionary = {
       eventPageChangedByAdd: "メンバーを追加",
       eventPageChangedByEmpty: "絞り込めるワークスペースメンバーがいません。",
       eventSourceKindTask: "タスク",
+      eventSourceKindCrm: "CRM オペレーション",
+      eventCrmSourceHint:
+        "CRM オペレーションの確定後に起動します。イベントには安定したレコード参照のみが含まれ、個人情報の値は含まれません。",
+      eventCrmCatalogUnavailable:
+        "CRM イベントカタログを取得できません。再接続してもう一度お試しください。",
+      eventCrmTypesLabel: "監視対象",
+      eventCrmTypesHint:
+        "確定済みの CRM イベントを1つ以上選択します。未選択の場合はすべての CRM イベントが対象です。",
+      eventCrmStableKeysLabel: "安定したカタログキー（任意）",
+      eventCrmStableKeysPlaceholder: "定義、目的、プラン、イベント、パイプライン、ステージを追加",
+      eventCrmStableKeysHint:
+        "ワークスペースの CRM カタログから返されたキーのみ選択できます。",
+      eventCrmIncludeAutomated: "アシスタントとシステムによる変更も含める",
+      eventCrmEventLabels: {
+        "crm.submission.received": "送信を受信",
+        "crm.submission.updated": "送信を更新",
+        "crm.consent.changed": "同意を変更",
+        "crm.suppression.changed": "配信停止を変更",
+        "crm.entitlement.changed": "権利を変更",
+        "crm.participation.changed": "参加状況を変更",
+        "crm.deal.stage_changed": "商談ステージを変更",
+      },
       eventTaskSourceHint:
         "このワークスペースのタスクの動きで発火します。下のフィルターで対象のタスクと変更を絞り込めます。",
       eventTaskWatchForLabel: "監視する変更",
@@ -5808,6 +5830,7 @@ export const ja: Dictionary = {
       sourcePerformance: "流入元別実績", wonLower: "受注", dataCoverage: "データ充足度", missingOwner: "担当者なしの案件", missingAmount: "金額なしの案件",
     },
     operations: {
+      yes: "はい", no: "いいえ", archive: "アーカイブ",
       title: "受付オペレーション", description: "制限付きの受付スキーマを定義し、外部バックエンド用の書き込み専用認証情報を発行します。",
       definitions: "受付定義", definitionsHelp: "各定義でフィールド対応、本人確認ポリシー、振り分け、ペイロード上限を固定します。", definitionLabel: "定義名", definitionKey: "固定キー", identityPolicy: "本人確認ポリシー", identityTrustedEmail: "確認済みメールで照合", identityNewReview: "常に新規作成して確認", fieldSchema: "フィールドスキーマ (JSON)",
       defaultNameField: "名前", defaultEmailField: "メール", defaultMessageField: "メッセージ", createDefinition: "定義を作成", noDefinitions: "受付定義はまだありません。",
@@ -5817,6 +5840,7 @@ export const ja: Dictionary = {
       channelLabels: { email: "メール", sms: "SMS", phone: "電話", whatsapp: "WhatsApp", telegram: "Telegram", slack: "Slack" },
       compliance: "同意と送信可否", complianceLoadFailed: "コンプライアンス証跡を読み込めませんでした。", complianceSaveFailed: "コンプライアンス証跡を更新できませんでした。", loading: "読み込み中...", noPurposesForContact: "この連絡先を評価する前にCRM設定で同意目的を作成してください。", pickPurpose: "目的を選択", checking: "送信可否を確認中...", verdictLabels: { allowed: "送信可能", blocked: "ブロック", unknown: "不明 - 送信不可" }, reasonLabels: { contact_method_missing: "連絡先情報なし", global_suppression: "全体で送信停止", channel_suppression: "チャネルで送信停止", consent_withdrawn: "同意撤回済み", consent_not_recorded: "同意記録なし", purpose_archived: "目的はアーカイブ済み" }, grant: "同意を記録", withdraw: "撤回", suppress: "送信停止", release: "停止解除", withdrawTitle: "同意を撤回しますか？", withdrawDescription: "撤回イベントを追加し、この目的に同意が必要な送信を停止します。", releaseTitle: "送信停止を解除しますか？", releaseDescription: "解除イベントを追加します。他の証跡によって送信不可のままになる場合があります。", consentActionLabels: { granted: "同意付与", withdrawn: "同意撤回" }, suppressionActionLabels: { suppressed: "送信停止", released: "停止解除" },
       submissions: "受付一覧", submissionsLoadFailed: "CRM受付を読み込めませんでした。", submissionSaveFailed: "受付を更新できませんでした。", allStatuses: "すべての状態", submissionStatusLabels: { new: "新規", in_progress: "対応中", resolved: "解決済み", spam: "迷惑" }, noSubmissions: "この表示に一致する受付はありません。", legacySubmission: "従来の受付", pickSubmission: "確認する受付を選択してください。", queue: "キュー", followUpTask: "フォローアップタスク", none: "なし", submittedFields: "送信フィールド", addNote: "内部メモを追加", saveNote: "メモを保存",
+      segments: "セグメント", segmentsHelp: "共有動的条件は現在の正規 CRM データに対して評価されます。", segmentNew: "新規セグメント", segmentName: "セグメント名", segmentKey: "安定したキー", segmentDescription: "説明", segmentRules: "条件ルール", segmentSave: "セグメントを保存", noSegments: "このレコード種別のセグメントはまだありません。", pickSegment: "セグメントを選択するか作成してください。", segmentsLoadFailed: "CRM セグメントを読み込めませんでした。", segmentSaveFailed: "セグメントを保存できませんでした。", segmentPreviewFailed: "セグメントをプレビューできませんでした。", segmentArchiveTitle: "セグメントをアーカイブしますか？", segmentArchiveDescription: "{name} をアーカイブしますか？このセグメントを使うワークフローの更新が必要です。", segmentPreview: "現在のメンバー", segmentCount: "一致するレコード {count} 件", segmentPreviewEmpty: "現在一致するレコードはありません。", segmentSnapshot: "安定 ID スナップショット（{count}）", segmentField: "フィールド", segmentValue: "値", segmentValuesPlaceholder: "カンマ区切りの値", segmentNoValue: "値は不要", segmentMatch: "一致条件", segmentAllRules: "すべてのルール", segmentAnyRule: "いずれかのルール", segmentAddRule: "ルールを追加", segmentAddGroup: "グループを追加", segmentRemoveRule: "ルールを削除", segmentRemoveGroup: "グループを削除", segmentEntityLabels: { person: "人", company: "会社", deal: "商談" }, segmentFamilyLabels: { base: "基本フィールド", custom: "カスタムフィールド", tag: "タグ", relationship: "関係", consent: "同意", suppression: "配信停止", entitlement: "権利", participation: "参加", pipeline: "パイプライン" }, segmentOperatorLabels: { eq: "等しい", neq: "等しくない", contains: "含む", not_contains: "含まない", in: "いずれかに一致", not_in: "いずれにも一致しない", gt: "より大きい", gte: "以上", lt: "より小さい", lte: "以下", before: "より前", after: "より後", is_empty: "空", is_not_empty: "空ではない" }, refresh: "更新",
     },
   },
 

@@ -130,10 +130,14 @@ const CRM_TOOLS_STUB: BrainCrmTools = {
   listCrmConsentPurposes: stubCoreTool('listCrmConsentPurposes', true),
   getCrmConsent: stubCoreTool('getCrmConsent', true),
   checkCrmSendability: stubCoreTool('checkCrmSendability', true),
+  listCrmSegments: stubCoreTool('listCrmSegments', true),
+  previewCrmSegment: stubCoreTool('previewCrmSegment', true),
   recordCrmSubmission: stubCoreTool('recordCrmSubmission'),
   updateCrmSubmission: stubCoreTool('updateCrmSubmission'),
   recordCrmConsent: stubCoreTool('recordCrmConsent'),
   recordCrmSuppression: stubCoreTool('recordCrmSuppression'),
+  saveCrmSegment: stubCoreTool('saveCrmSegment'),
+  archiveCrmSegment: stubCoreTool('archiveCrmSegment'),
 }
 
 const RETRIEVAL_TOOLS_STUB: BrainRetrievalTools = {
@@ -214,6 +218,8 @@ const READ_TOOL_NAMES = [
   'listCrmConsentPurposes',
   'listCrmIntakeDefinitions',
   'listCrmSubmissions',
+  'listCrmSegments',
+  'previewCrmSegment',
   'listTasks',
   'searchBrain',
   'searchFileContent',
@@ -236,6 +242,8 @@ const WRITE_TOOL_NAMES = [
   'recordCrmConsent',
   'recordCrmSubmission',
   'recordCrmSuppression',
+  'saveCrmSegment',
+  'archiveCrmSegment',
   'saveCompany',
   'saveContact',
   'saveDeal',

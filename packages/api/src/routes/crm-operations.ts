@@ -16,6 +16,7 @@ import {
   RecordCrmSuppressionCommandSchema,
   SaveCrmIntakeDefinitionCommandSchema,
   SaveCrmConsentPurposeCommandSchema,
+  SaveCrmSegmentCommandSchema,
   UpdateCrmSubmissionCommandSchema,
   type CrmOperationsContext,
   type CrmOperationsServicePort,
@@ -73,6 +74,16 @@ const SubmissionQuery = z.object({
 const SendabilityQuery = z.object({
   channel: CrmDeliveryChannelSchema,
   purposeKey: CrmOperationsStableKeySchema,
+}).strict()
+const SaveSegmentCreateBody = SaveCrmSegmentCommandSchema.omit({ kind: true, segmentId: true }).strict()
+const SaveSegmentUpdateBody = SaveCrmSegmentCommandSchema.omit({ kind: true, segmentId: true }).strict()
+const SegmentListQuery = z.object({
+  entityKind: z.enum(['person', 'company', 'deal']).default('person'),
+  includeArchived: z.enum(['true', 'false']).optional(),
+}).strict()
+const SegmentPreviewQuery = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(25),
+  snapshotLimit: z.coerce.number().int().min(1).max(10_000).default(1_000),
 }).strict()
 
 type Options = {
@@ -313,6 +324,105 @@ export function crmOperationsRoutes(options: Options): Router {
       res.json(await options.readStore.checkSendability(
         ctx.workspaceId, contactId.data, query.data.channel, query.data.purposeKey,
       ))
+    } catch (error) { writeError(res, error) }
+  })
+
+  router.get('/:workspaceId/operations/segments', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    const parsed = SegmentListQuery.safeParse(req.query)
+    if (!parsed.success) {
+      res.status(400).json({ error: 'invalid_input', issues: parsed.error.issues })
+      return
+    }
+    try {
+      res.json(await options.readStore.listSegments(ctx.workspaceId, {
+        entityKind: parsed.data.entityKind,
+        includeArchived: parsed.data.includeArchived === 'true',
+      }))
+    } catch (error) { writeError(res, error) }
+  })
+
+  router.get('/:workspaceId/operations/workflow-event-catalog', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    try { res.json(await options.readStore.listCrmEventFilterCatalog(ctx.workspaceId)) }
+    catch (error) { writeError(res, error) }
+  })
+
+  router.post('/:workspaceId/operations/segments', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    const body = SaveSegmentCreateBody.safeParse(req.body)
+    if (!body.success) {
+      res.status(400).json({ error: 'invalid_input', issues: body.error.issues })
+      return
+    }
+    try {
+      const output = await options.service.execute(ctx, { kind: 'save_segment', ...body.data })
+      res.status(201).json(output)
+    } catch (error) { writeError(res, error) }
+  })
+
+  router.get('/:workspaceId/operations/segments/:segmentId', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    const segmentId = CrmOperationsUuidSchema.safeParse(req.params.segmentId)
+    if (!segmentId.success) {
+      res.status(400).json({ error: 'invalid_input', issues: segmentId.error.issues })
+      return
+    }
+    try {
+      const segment = await options.readStore.getSegment(ctx.workspaceId, segmentId.data)
+      if (!segment) res.status(404).json({ error: 'not_found' })
+      else res.json({ segment })
+    } catch (error) { writeError(res, error) }
+  })
+
+  router.get('/:workspaceId/operations/segments/:segmentId/preview', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    const segmentId = CrmOperationsUuidSchema.safeParse(req.params.segmentId)
+    const query = SegmentPreviewQuery.safeParse(req.query)
+    if (!segmentId.success || !query.success) {
+      res.status(400).json({ error: 'invalid_input', issues: segmentId.success ? query.error?.issues : segmentId.error.issues })
+      return
+    }
+    try {
+      res.json(await options.readStore.previewSegment(ctx.workspaceId, segmentId.data, query.data))
+    } catch (error) { writeError(res, error) }
+  })
+
+  router.patch('/:workspaceId/operations/segments/:segmentId', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    const segmentId = CrmOperationsUuidSchema.safeParse(req.params.segmentId)
+    const body = SaveSegmentUpdateBody.safeParse(req.body)
+    if (!segmentId.success || !body.success) {
+      res.status(400).json({ error: 'invalid_input', issues: segmentId.success ? body.error?.issues : segmentId.error.issues })
+      return
+    }
+    try {
+      res.json(await options.service.execute(ctx, {
+        kind: 'save_segment', segmentId: segmentId.data, ...body.data,
+      }))
+    } catch (error) { writeError(res, error) }
+  })
+
+  router.post('/:workspaceId/operations/segments/:segmentId/archive', async (req, res) => {
+    const ctx = await context(req, res)
+    if (!ctx) return
+    const segmentId = CrmOperationsUuidSchema.safeParse(req.params.segmentId)
+    const body = z.object({ expectedVersion: z.number().int().positive().optional() }).strict().safeParse(req.body)
+    if (!segmentId.success || !body.success) {
+      res.status(400).json({ error: 'invalid_input', issues: segmentId.success ? body.error?.issues : segmentId.error.issues })
+      return
+    }
+    try {
+      res.json(await options.service.execute(ctx, {
+        kind: 'archive_segment', segmentId: segmentId.data,
+        expectedVersion: body.data.expectedVersion,
+      }))
     } catch (error) { writeError(res, error) }
   })
 

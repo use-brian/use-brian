@@ -251,11 +251,13 @@ export function crmSectionCounts(summary: CrmSummary | null | undefined): Record
 export type CrmViewState = {
   section: CrmSection;
   /** Dedicated consequential-action workspace layered over the record lens. */
-  review: "email" | "submissions" | null;
+  review: "email" | "submissions" | "segments" | null;
   /** Selected pending approval while `review=email`. */
   draft: string | null;
   /** Selected intake submission while `review=submissions`. */
   submission: string | null;
+  /** Selected shared dynamic segment while `review=segments`. */
+  segment: string | null;
   /** Deals presentation — board is the default (pipeline-first, §1.4). */
   view: ViewMode;
   /** Active attention quick-filter, or null. */
@@ -293,6 +295,7 @@ export const DEFAULT_CRM_VIEW: CrmViewState = {
   review: null,
   draft: null,
   submission: null,
+  segment: null,
   view: "board",
   quick: null,
   pipeline: null,
@@ -346,9 +349,10 @@ export function crmViewFromSearch(
   }
   return {
     section,
-    review: oneOf(params.get("review"), ["email", "submissions"] as const),
+    review: oneOf(params.get("review"), ["email", "submissions", "segments"] as const),
     draft: params.get("review") === "email" ? params.get("draft") : null,
     submission: params.get("review") === "submissions" ? params.get("submission") : null,
+    segment: params.get("review") === "segments" ? params.get("segment") : null,
     view: oneOf(params.get("view"), VIEW_MODES) ?? DEFAULT_CRM_VIEW.view,
     quick,
     pipeline: params.get("pipeline"),
@@ -381,6 +385,10 @@ export function searchFromCrmView(state: CrmViewState): string {
   if (state.review === "submissions") {
     params.set("review", "submissions");
     if (state.submission) params.set("submission", state.submission);
+  }
+  if (state.review === "segments") {
+    params.set("review", "segments");
+    if (state.segment) params.set("segment", state.segment);
   }
   if (state.view !== DEFAULT_CRM_VIEW.view) params.set("view", state.view);
   if (state.quick) params.set("filter", state.quick);

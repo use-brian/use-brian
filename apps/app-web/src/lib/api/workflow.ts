@@ -74,6 +74,10 @@ type EventSourceRef =
        * ride the task-only `match.tags`.
        */
       type: "task";
+    }
+  | {
+      /** Committed CRM operations; event types and stable keys live in match. */
+      type: "crm";
     };
 
 /**
@@ -107,6 +111,21 @@ export type EventSubscription = {
   source: EventSourceRef;
   match?: EventMatch;
 };
+
+export type CrmWorkflowEventCatalog = {
+  eventTypes: string[];
+  stableKeys: Array<{ kind: string; key: string; label: string }>;
+};
+
+export async function listCrmWorkflowEventCatalog(
+  workspaceId: string,
+): Promise<CrmWorkflowEventCatalog> {
+  const response = await authFetch(
+    `${API_URL}/api/crm/${workspaceId}/operations/workflow-event-catalog`,
+  );
+  if (!response.ok) throw new Error("Failed to load CRM workflow event catalog");
+  return response.json();
+}
 
 export type WorkflowTrigger =
   | { kind: "manual" }

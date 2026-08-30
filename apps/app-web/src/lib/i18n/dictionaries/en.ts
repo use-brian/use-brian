@@ -3638,6 +3638,28 @@ export const en = {
       eventPageChangedByAdd: "Add a member",
       eventPageChangedByEmpty: "No workspace members to filter by.",
       eventSourceKindTask: "Tasks",
+      eventSourceKindCrm: "CRM operations",
+      eventCrmSourceHint:
+        "Fires after a CRM operation commits. Event payloads contain stable record pointers, never personal field values.",
+      eventCrmCatalogUnavailable:
+        "The CRM event catalog is unavailable. Reconnect and try again.",
+      eventCrmTypesLabel: "Watch for",
+      eventCrmTypesHint:
+        "Pick one or more committed CRM event types. Nothing selected means any CRM event.",
+      eventCrmStableKeysLabel: "Stable catalog keys (optional)",
+      eventCrmStableKeysPlaceholder: "Add a definition, purpose, plan, event, pipeline, or stage",
+      eventCrmStableKeysHint:
+        "Only keys returned by the workspace CRM catalog can be selected.",
+      eventCrmIncludeAutomated: "Include assistant and system changes",
+      eventCrmEventLabels: {
+        "crm.submission.received": "Submission received",
+        "crm.submission.updated": "Submission updated",
+        "crm.consent.changed": "Consent changed",
+        "crm.suppression.changed": "Suppression changed",
+        "crm.entitlement.changed": "Entitlement changed",
+        "crm.participation.changed": "Participation changed",
+        "crm.deal.stage_changed": "Deal stage changed",
+      },
       eventTaskSourceHint:
         "Fires on task activity in this workspace. Use the filters below to narrow which tasks and which changes.",
       eventTaskWatchForLabel: "Watch for",
@@ -6030,6 +6052,7 @@ export const en = {
       sourcePerformance: "Source performance", wonLower: "won", dataCoverage: "Data coverage", missingOwner: "Deals without an owner", missingAmount: "Deals without an amount",
     },
     operations: {
+      yes: "Yes", no: "No", archive: "Archive",
       title: "Intake operations", description: "Define bounded intake schemas and issue write-only credentials for external backends.",
       definitions: "Intake definitions", definitionsHelp: "Each definition fixes field mappings, identity policy, routing, and payload limits.", definitionLabel: "Definition name", definitionKey: "Stable key", identityPolicy: "Identity policy", identityTrustedEmail: "Match verified email", identityNewReview: "Always create for review", fieldSchema: "Field schema (JSON)",
       defaultNameField: "Name", defaultEmailField: "Email", defaultMessageField: "Message", createDefinition: "Create definition", noDefinitions: "No intake definitions yet.",
@@ -6039,6 +6062,7 @@ export const en = {
       channelLabels: { email: "Email", sms: "SMS", phone: "Phone", whatsapp: "WhatsApp", telegram: "Telegram", slack: "Slack" },
       compliance: "Consent and sendability", complianceLoadFailed: "Could not load compliance evidence.", complianceSaveFailed: "Could not update compliance evidence.", loading: "Loading...", noPurposesForContact: "Create a consent purpose in CRM settings before evaluating this contact.", pickPurpose: "Pick a purpose", checking: "Checking sendability...", verdictLabels: { allowed: "Allowed", blocked: "Blocked", unknown: "Unknown - do not send" }, reasonLabels: { contact_method_missing: "Contact method missing", global_suppression: "Globally suppressed", channel_suppression: "Channel suppressed", consent_withdrawn: "Consent withdrawn", consent_not_recorded: "Consent not recorded", purpose_archived: "Purpose archived" }, grant: "Record grant", withdraw: "Withdraw", suppress: "Suppress", release: "Release", withdrawTitle: "Withdraw consent?", withdrawDescription: "This appends a withdrawal event and blocks sends that require this purpose.", releaseTitle: "Release suppression?", releaseDescription: "This appends a release event. Sendability may still be blocked by other evidence.", consentActionLabels: { granted: "Consent granted", withdrawn: "Consent withdrawn" }, suppressionActionLabels: { suppressed: "Suppressed", released: "Released" },
       submissions: "Submissions", submissionsLoadFailed: "Could not load CRM submissions.", submissionSaveFailed: "Could not update the submission.", allStatuses: "All statuses", submissionStatusLabels: { new: "New", in_progress: "In progress", resolved: "Resolved", spam: "Spam" }, noSubmissions: "No submissions match this view.", legacySubmission: "Legacy submission", pickSubmission: "Select a submission to review.", queue: "Queue", followUpTask: "Follow-up task", none: "None", submittedFields: "Submitted fields", addNote: "Add an internal note", saveNote: "Save note",
+      segments: "Segments", segmentsHelp: "Shared dynamic predicates are evaluated against current canonical CRM data.", segmentNew: "New segment", segmentName: "Segment name", segmentKey: "Stable key", segmentDescription: "Description", segmentRules: "Predicate rules", segmentSave: "Save segment", noSegments: "No segments for this record type yet.", pickSegment: "Select a segment or create one.", segmentsLoadFailed: "Could not load CRM segments.", segmentSaveFailed: "Could not save the segment.", segmentPreviewFailed: "Could not preview the segment.", segmentArchiveTitle: "Archive segment?", segmentArchiveDescription: "Archive {name}? Workflows using this segment must be updated.", segmentPreview: "Current membership", segmentCount: "{count} matching records", segmentPreviewEmpty: "No records currently match.", segmentSnapshot: "Stable ID snapshot ({count})", segmentField: "Field", segmentValue: "Value", segmentValuesPlaceholder: "Comma-separated values", segmentNoValue: "No value required", segmentMatch: "Match", segmentAllRules: "All rules", segmentAnyRule: "Any rule", segmentAddRule: "Add rule", segmentAddGroup: "Add group", segmentRemoveRule: "Remove rule", segmentRemoveGroup: "Remove group", segmentEntityLabels: { person: "People", company: "Companies", deal: "Deals" }, segmentFamilyLabels: { base: "Base field", custom: "Custom field", tag: "Tag", relationship: "Relationship", consent: "Consent", suppression: "Suppression", entitlement: "Entitlement", participation: "Participation", pipeline: "Pipeline" }, segmentOperatorLabels: { eq: "Equals", neq: "Does not equal", contains: "Contains", not_contains: "Does not contain", in: "Is one of", not_in: "Is not one of", gt: "Greater than", gte: "At least", lt: "Less than", lte: "At most", before: "Before", after: "After", is_empty: "Is empty", is_not_empty: "Is not empty" }, refresh: "Refresh",
     },
   },
 

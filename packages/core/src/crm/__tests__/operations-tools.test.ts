@@ -39,6 +39,9 @@ const reads: CrmOperationsReadPort = {
     reasons: ['consent_not_recorded' as const],
     effectiveSuppressionEventIds: [],
   })),
+  listSegments: vi.fn(async () => ({ segments: [], catalog: [] })),
+  getSegment: vi.fn(async () => null),
+  previewSegment: vi.fn(async () => ({ rows: [], count: 0, snapshotIds: [] })),
 }
 const execute = vi.fn<CrmOperationsServicePort['execute']>(async (_ctx, command) => ({
   command: command.kind,
@@ -52,12 +55,13 @@ const tools = createCrmOperationsTools({ reads, service: { execute } })
 beforeEach(() => vi.clearAllMocks())
 
 describe('[COMP:crm/operations-tools] canonical CRM operation tools', () => {
-  it('registers the closed Phase 3 read/write surface under the CRM capability', () => {
+  it('registers the closed CRM operations surface under the CRM capability', () => {
     expect(Object.keys(tools)).toEqual([
       'listCrmIntakeDefinitions', 'listCrmSubmissions', 'getCrmSubmission',
       'listCrmConsentPurposes', 'getCrmConsent', 'checkCrmSendability',
+      'listCrmSegments', 'previewCrmSegment',
       'recordCrmSubmission', 'updateCrmSubmission', 'recordCrmConsent',
-      'recordCrmSuppression',
+      'recordCrmSuppression', 'saveCrmSegment', 'archiveCrmSegment',
     ])
     expect(Object.values(tools).every((tool) => tool.requiresCapability === 'crm')).toBe(true)
     expect(tools.listCrmSubmissions.isReadOnly).toBe(true)

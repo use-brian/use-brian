@@ -23,6 +23,7 @@ import { format as fmt } from "@/lib/i18n";
 import type {
   EventMatch,
   EventSubscription,
+  CrmWorkflowEventCatalog,
   WorkflowTrigger,
   WorkspaceChannelOption,
   WorkspaceConnectorOption,
@@ -34,6 +35,7 @@ import {
   listWorkspaceConnectorOptions,
   listWorkspaceMemberOptions,
   listWorkspacePageOptions,
+  listCrmWorkflowEventCatalog,
 } from "@/lib/api/workflow";
 import {
   appendChip,
@@ -69,22 +71,27 @@ export function EventTriggerFields({
   const [channels, setChannels] = useState<WorkspaceChannelOption[]>([]);
   const [pages, setPages] = useState<WorkspacePageOption[]>([]);
   const [members, setMembers] = useState<WorkspaceMemberOption[]>([]);
+  const [crmCatalog, setCrmCatalog] = useState<CrmWorkflowEventCatalog>({
+    eventTypes: [], stableKeys: [],
+  });
 
   useEffect(() => {
     if (!workspaceId) return;
     let cancelled = false;
     void (async () => {
-      const [cList, chList, pgList, mList] = await Promise.all([
+      const [cList, chList, pgList, mList, crmList] = await Promise.all([
         listWorkspaceConnectorOptions(workspaceId),
         listWorkspaceChannelOptions(workspaceId),
         listWorkspacePageOptions(workspaceId),
         listWorkspaceMemberOptions(workspaceId),
+        listCrmWorkflowEventCatalog(workspaceId).catch(() => ({ eventTypes: [], stableKeys: [] })),
       ]);
       if (cancelled) return;
       setConnectors(cList);
       setChannels(chList);
       setPages(pgList);
       setMembers(mList);
+      setCrmCatalog(crmList);
     })();
     return () => {
       cancelled = true;
@@ -168,6 +175,7 @@ export function EventTriggerFields({
                 connectors={connectors}
                 channels={channels}
                 pages={pages}
+                crmCatalog={crmCatalog}
                 onChange={(next) => updateSource(idx, next)}
                 onRemove={() => removeSource(idx)}
                 disabled={disabled}
@@ -257,7 +265,18 @@ export function EventTriggerFields({
                   />
                 </>
               )}
-              <MatchEditor
+              {sub.source.type === "crm" && (
+                <CrmWatchFor
+                  match={sub.match ?? {}}
+                  catalog={crmCatalog}
+                  onChange={(next) => updateSource(idx, {
+                    ...sub,
+                    match: anyMatchSet(next) ? next : undefined,
+                  })}
+                  disabled={disabled}
+                />
+              )}
+              {sub.source.type !== "crm" && <MatchEditor
                 match={sub.match ?? {}}
                 onChange={(next) =>
                   updateSource(idx, {
@@ -282,7 +301,7 @@ export function EventTriggerFields({
                   sub.source.type === "page" || sub.source.type === "task"
                 }
                 disabled={disabled}
-              />
+              />}
             </li>
           ))}
         </ul>
@@ -310,6 +329,7 @@ function SourceRow({
   connectors,
   channels,
   pages,
+  crmCatalog,
   onChange,
   onRemove,
   disabled,
@@ -318,6 +338,7 @@ function SourceRow({
   connectors: WorkspaceConnectorOption[];
   channels: WorkspaceChannelOption[];
   pages: WorkspacePageOption[];
+  crmCatalog: CrmWorkflowEventCatalog;
   onChange: (next: EventSubscription) => void;
   onRemove: () => void;
   disabled?: boolean;
@@ -325,7 +346,7 @@ function SourceRow({
   const t = useT();
   const kind = sub.source.type;
 
-  const setKind = (next: "connector" | "channel" | "page" | "task") => {
+  const setKind = (next: "connector" | "channel" | "page" | "task" | "crm") => {
     if (next === kind) return;
     // `inChannels` is kind-specific (channel ids for connector/channel, the
     // lifecycle-action mode for page/task), so reset it on a kind switch;
@@ -346,6 +367,10 @@ function SourceRow({
         // the tags chips refine it.
         match: { ...carriedMatch, inChannels: ["created", "tagged"] },
       });
+      return;
+    }
+    if (next === "crm") {
+      onChange({ source: { type: "crm" }, match: carriedMatch });
       return;
     }
     if (next === "connector") {
@@ -413,6 +438,12 @@ function SourceRow({
           disabled={disabled}
           onClick={() => setKind("task")}
         />
+        <KindPill
+          label={t.workflowPage.builder.eventSourceKindCrm}
+          active={kind === "crm"}
+          disabled={disabled}
+          onClick={() => setKind("crm")}
+        />
         <button
           type="button"
           onClick={onRemove}
@@ -478,6 +509,13 @@ function SourceRow({
       {kind === "task" && (
         <div className="text-[11px] text-muted-foreground/80">
           {t.workflowPage.builder.eventTaskSourceHint}
+        </div>
+      )}
+      {kind === "crm" && (
+        <div className="text-[11px] text-muted-foreground/80">
+          {crmCatalog.eventTypes.length
+            ? t.workflowPage.builder.eventCrmSourceHint
+            : t.workflowPage.builder.eventCrmCatalogUnavailable}
         </div>
       )}
     </div>
@@ -662,6 +700,116 @@ function PagePicker({
           ))}
         </SelectContent>
       </Select>
+    </div>
+  );
+}
+
+function CrmWatchFor({
+  match,
+  catalog,
+  onChange,
+  disabled,
+}: {
+  match: EventMatch;
+  catalog: CrmWorkflowEventCatalog;
+  onChange: (next: EventMatch) => void;
+  disabled?: boolean;
+}) {
+  const t = useT();
+  const selectedTypes = match.inChannels ?? [];
+  const selectedKeys = match.tags ?? [];
+  const remainingKeys = catalog.stableKeys.filter((item) => !selectedKeys.includes(item.key));
+  const items = remainingKeys.map((item) => ({
+    value: item.key,
+    label: `${item.label} (${item.kind})`,
+  }));
+  const toggleType = (eventType: string) => {
+    const next = selectedTypes.includes(eventType)
+      ? selectedTypes.filter((item) => item !== eventType)
+      : [...selectedTypes, eventType];
+    onChange({ ...match, inChannels: next.length ? next : undefined });
+  };
+  return (
+    <div className="flex flex-col gap-3">
+      <div>
+        <div className="text-xs font-medium text-muted-foreground">
+          {t.workflowPage.builder.eventCrmTypesLabel}
+        </div>
+        <div className="mt-1.5 flex flex-wrap gap-1">
+          {catalog.eventTypes.map((eventType) => (
+            <KindPill
+              key={eventType}
+              label={t.workflowPage.builder.eventCrmEventLabels[eventType as keyof typeof t.workflowPage.builder.eventCrmEventLabels] ?? eventType}
+              active={selectedTypes.includes(eventType)}
+              disabled={disabled}
+              onClick={() => toggleType(eventType)}
+            />
+          ))}
+        </div>
+        <p className="mt-1 text-[11px] text-muted-foreground/80">
+          {t.workflowPage.builder.eventCrmTypesHint}
+        </p>
+      </div>
+      <div>
+        <div className="text-xs font-medium text-muted-foreground">
+          {t.workflowPage.builder.eventCrmStableKeysLabel}
+        </div>
+        {selectedKeys.length > 0 && (
+          <ul className="my-1.5 flex flex-wrap gap-1">
+            {selectedKeys.map((key) => (
+              <li key={key} className="flex items-center gap-1 rounded-full border border-primary/20 bg-primary/10 px-2 py-0.5 text-xs text-primary">
+                <span>{catalog.stableKeys.find((item) => item.key === key)?.label ?? key}</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = selectedKeys.filter((item) => item !== key);
+                    onChange({ ...match, tags: next.length ? next : undefined });
+                  }}
+                  disabled={disabled}
+                  aria-label={t.workflowPage.builder.eventMatchChipRemove}
+                >
+                  ×
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        {remainingKeys.length > 0 && (
+          <Select
+            items={items}
+            onValueChange={(value) => {
+              if (typeof value === "string" && value) {
+                onChange({ ...match, tags: [...selectedKeys, value] });
+              }
+            }}
+            disabled={disabled}
+          >
+            <SelectTrigger className="w-full max-w-md text-sm">
+              <SelectValue placeholder={t.workflowPage.builder.eventCrmStableKeysPlaceholder} />
+            </SelectTrigger>
+            <SelectContent>
+              {remainingKeys.map((item) => (
+                <SelectItem key={`${item.kind}:${item.key}`} value={item.key}>
+                  {item.label} ({item.kind})
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
+        <p className="mt-1 text-[11px] text-muted-foreground/80">
+          {t.workflowPage.builder.eventCrmStableKeysHint}
+        </p>
+      </div>
+      <label className="flex items-center gap-2 text-xs text-muted-foreground">
+        <input
+          type="checkbox"
+          checked={match.fromBots === true}
+          onChange={(event) => onChange({ ...match, fromBots: event.target.checked || undefined })}
+          disabled={disabled}
+          className="size-3.5 rounded border-border"
+        />
+        {t.workflowPage.builder.eventCrmIncludeAutomated}
+      </label>
     </div>
   );
 }

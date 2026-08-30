@@ -18,6 +18,7 @@ import {
   assertCrmOperationsAuthority,
   canonicalCrmRequest,
   crmOperationsSha256,
+  validateCrmSegmentCatalog,
   type CrmIntakeFieldDefinition,
   type CrmOperationsActor,
   type CrmOperationsCommand,
@@ -539,6 +540,15 @@ export function createCrmOperationsService(
         if (command.kind === 'save_segment') {
           const predicate = CrmSegmentPredicateSchema.safeParse(command.predicate)
           if (!predicate.success) invalidInput('Segment predicate is invalid.', { issues: predicate.error.issues })
+          const catalog = await tx.getSegmentCatalog(command.entityKind)
+          const catalogIssues = validateCrmSegmentCatalog(predicate.data, catalog)
+          if (catalogIssues.length > 0) {
+            throw new CrmOperationsError(
+              'catalog_key_invalid',
+              'Segment predicate uses unavailable catalog values.',
+              { issues: catalogIssues.slice(0, 100) },
+            )
+          }
           const saved = await tx.saveSegment({ ...command, predicate: predicate.data, actorUserId: actorUserId(context.actor) })
           const id = recordId(saved.record, 'segment')
           await audit(tx, context.actor, { action: saved.created ? 'crm.segment.created' : 'crm.segment.updated', subjectKind: 'segment', subjectId: id })

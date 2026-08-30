@@ -308,7 +308,7 @@ export type CrmConfig = {
   fields: CrmFieldDefinition[];
 };
 
-export type CrmIntakeFieldDefinition = {
+type CrmIntakeFieldDefinition = {
   key: string;
   label: string;
   type: "text" | "email" | "phone" | "number" | "boolean" | "date" | "string_array";
@@ -406,6 +406,49 @@ export type CrmSendabilityVerdict = {
   reasons: Array<"contact_method_missing" | "global_suppression" | "channel_suppression" | "consent_withdrawn" | "consent_not_recorded" | "purpose_archived">;
   effectiveConsentEventId?: string;
   effectiveSuppressionEventIds: string[];
+};
+
+export type CrmSegmentEntityKind = "person" | "company" | "deal";
+export type CrmSegmentOperator =
+  | "eq" | "neq" | "contains" | "not_contains" | "in" | "not_in"
+  | "gt" | "gte" | "lt" | "lte" | "before" | "after"
+  | "is_empty" | "is_not_empty";
+export type CrmSegmentRule = {
+  type: "rule";
+  family: "base" | "custom" | "tag" | "relationship" | "consent" | "suppression" | "entitlement" | "participation" | "pipeline";
+  field: string;
+  operator: CrmSegmentOperator;
+  value?: unknown;
+};
+export type CrmSegmentPredicate = {
+  type: "group";
+  combinator: "and" | "or";
+  items: Array<CrmSegmentPredicate | CrmSegmentRule>;
+};
+export type CrmSegmentCatalogEntry = {
+  family: CrmSegmentRule["family"];
+  field: string;
+  label: string;
+  operators: CrmSegmentOperator[];
+  valueType: "text" | "number" | "date" | "boolean" | "uuid" | "enum";
+  validValues?: string[];
+};
+export type CrmSegment = {
+  id: string;
+  segmentKey: string;
+  name: string;
+  description: string;
+  entityKind: CrmSegmentEntityKind;
+  predicate: CrmSegmentPredicate;
+  version: number;
+  archivedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+export type CrmSegmentPreview = {
+  rows: Array<{ id: string; name: string; kind: string; attributes?: Record<string, unknown> }>;
+  count: number;
+  snapshotIds: string[];
 };
 
 export type CrmIntakeDefinitionInput = {
@@ -567,6 +610,55 @@ export function checkCrmSendability(
 ): Promise<CrmSendabilityVerdict> {
   const params = new URLSearchParams({ channel, purposeKey });
   return jsonRequest(`/api/crm/${encodeURIComponent(workspaceId)}/operations/contacts/${encodeURIComponent(contactId)}/sendability?${params}`);
+}
+
+export async function listCrmSegments(
+  workspaceId: string,
+  entityKind: CrmSegmentEntityKind,
+  includeArchived = false,
+): Promise<{ segments: CrmSegment[]; catalog: CrmSegmentCatalogEntry[] }> {
+  const params = new URLSearchParams({ entityKind });
+  if (includeArchived) params.set("includeArchived", "true");
+  return jsonRequest(`/api/crm/${encodeURIComponent(workspaceId)}/operations/segments?${params}`);
+}
+
+export function previewCrmSegment(workspaceId: string, segmentId: string): Promise<CrmSegmentPreview> {
+  return jsonRequest(`/api/crm/${encodeURIComponent(workspaceId)}/operations/segments/${encodeURIComponent(segmentId)}/preview?limit=25&snapshotLimit=1000`);
+}
+
+export function saveCrmSegment(
+  workspaceId: string,
+  input: {
+    segmentId?: string;
+    segmentKey: string;
+    name: string;
+    description?: string;
+    entityKind: CrmSegmentEntityKind;
+    predicate: CrmSegmentPredicate;
+    expectedVersion?: number;
+  },
+): Promise<{ record: CrmSegment; created: boolean }> {
+  const path = input.segmentId
+    ? `/api/crm/${encodeURIComponent(workspaceId)}/operations/segments/${encodeURIComponent(input.segmentId)}`
+    : `/api/crm/${encodeURIComponent(workspaceId)}/operations/segments`;
+  const { segmentId: _segmentId, ...body } = input;
+  return jsonRequest(path, {
+    method: input.segmentId ? "PATCH" : "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export function archiveCrmSegment(
+  workspaceId: string,
+  segmentId: string,
+  expectedVersion?: number,
+): Promise<{ record: CrmSegment }> {
+  return jsonRequest(`/api/crm/${encodeURIComponent(workspaceId)}/operations/segments/${encodeURIComponent(segmentId)}/archive`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ expectedVersion }),
+  });
 }
 
 export function fetchCrmConfig(workspaceId: string, includeArchived = false): Promise<CrmConfig> {

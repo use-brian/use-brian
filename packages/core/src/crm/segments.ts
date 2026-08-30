@@ -95,7 +95,19 @@ export type CrmSegmentCatalog = {
   fields: ReadonlyMap<string, {
     family: z.infer<typeof CrmSegmentFieldFamilySchema>
     operators: readonly CrmSegmentOperator[]
+    label?: string
+    valueType?: 'text' | 'number' | 'date' | 'boolean' | 'uuid' | 'enum'
+    validValues?: readonly string[]
   }>
+}
+
+export type CrmSegmentCatalogEntry = {
+  family: z.infer<typeof CrmSegmentFieldFamilySchema>
+  field: string
+  label: string
+  operators: CrmSegmentOperator[]
+  valueType: 'text' | 'number' | 'date' | 'boolean' | 'uuid' | 'enum'
+  validValues?: string[]
 }
 
 export type CrmSegmentCatalogIssue = {
@@ -131,6 +143,43 @@ export function validateCrmSegmentCatalog(
           path: `${itemPath}.operator`,
           message: `Operator ${item.operator} is not valid for ${item.family}:${item.field}.`,
           validValues: [...definition.operators],
+        })
+        return
+      }
+      if (item.value === undefined) return
+      const values = item.operator === 'in' || item.operator === 'not_in'
+        ? Array.isArray(item.value) ? item.value : []
+        : [item.value]
+      if ((item.operator === 'in' || item.operator === 'not_in')
+        && (!Array.isArray(item.value) || item.value.length === 0 || item.value.length > 100)) {
+        issues.push({
+          path: `${itemPath}.value`,
+          message: `${item.operator} requires between 1 and 100 values.`,
+          validValues: definition.validValues ? [...definition.validValues] : [],
+        })
+        return
+      }
+      const invalidType = values.some((value) => {
+        if (definition.valueType === 'number') return typeof value !== 'number' || !Number.isFinite(value)
+        if (definition.valueType === 'boolean') return typeof value !== 'boolean'
+        if (definition.valueType === 'date') return typeof value !== 'string' || Number.isNaN(Date.parse(value))
+        if (definition.valueType === 'uuid') return typeof value !== 'string' || !CrmOperationsUuidSchema.safeParse(value).success
+        return typeof value !== 'string' || value.length > 500
+      })
+      if (invalidType) {
+        issues.push({
+          path: `${itemPath}.value`,
+          message: `Value is not valid for ${item.family}:${item.field}.`,
+          validValues: definition.validValues ? [...definition.validValues] : [],
+        })
+        return
+      }
+      if (definition.validValues?.length
+        && values.some((value) => !definition.validValues!.includes(String(value)))) {
+        issues.push({
+          path: `${itemPath}.value`,
+          message: `Value is outside the catalog for ${item.family}:${item.field}.`,
+          validValues: [...definition.validValues],
         })
       }
     })

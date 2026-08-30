@@ -39,22 +39,17 @@
   },
   {
     "id": "wf-crm-deal-won",
-    "bucket": "unsupported-plausible",
+    "bucket": "supported",
     "prompt": "Trigger a workflow whenever a CRM deal moves to Won.",
     "expected": {
-      "verdict": "redirect",
+      "verdict": "act",
+      "mustCallToolOneOf": ["proposeWorkflow"],
       "forbiddenPatterns": [
         "I've (created|set up) (the|a) (deal|CRM)[- ]?(stage|lifecycle) trigger"
       ],
-      "replyMustMentionOneOf": [
-        "schedule",
-        "daily",
-        "digest",
-        "task"
-      ],
       "validateTriggerIfProposed": true
     },
-    "rubricNote": "No CRM-lifecycle event source exists. Honest answer refuses the exact trigger and offers the nearest real route (scheduled digest over listDeals, or a task-tag convention). Any trigger it does propose must still validate."
+    "rubricNote": "CRM deal-stage changes are a committed event source. The proposal must use {source:{type:'crm'},match:{inChannels:['crm.deal.stage_changed'],tags:['<catalog-returned Won stage key>']}} and must not guess the stable stage key."
   },
   {
     "id": "wf-loop-contacts-email",

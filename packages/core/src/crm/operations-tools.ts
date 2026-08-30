@@ -12,6 +12,7 @@ import {
   CrmDeliveryChannelSchema,
   type SendabilityVerdict,
 } from './sendability.js'
+import { CrmSegmentPredicateSchema } from './segments.js'
 import {
   CrmExternalIdentityClaimSchema,
   CrmOperationsError,
@@ -45,6 +46,22 @@ export type CrmOperationsReadPort = {
     channel: z.infer<typeof CrmDeliveryChannelSchema>,
     purposeKey: string,
   ): Promise<SendabilityVerdict>
+  listSegments(workspaceId: string, filters?: {
+    entityKind?: 'person' | 'company' | 'deal'
+    includeArchived?: boolean
+  }): Promise<{
+    segments: Array<Record<string, unknown>>
+    catalog: Array<Record<string, unknown>>
+  }>
+  getSegment(workspaceId: string, segmentId: string): Promise<Record<string, unknown> | null>
+  previewSegment(workspaceId: string, segmentId: string, options?: {
+    limit?: number
+    snapshotLimit?: number
+  }): Promise<{
+    rows: Array<Record<string, unknown>>
+    count: number
+    snapshotIds: string[]
+  }>
 }
 
 export type CrmOperationsTools = {
@@ -54,10 +71,14 @@ export type CrmOperationsTools = {
   listCrmConsentPurposes: Tool
   getCrmConsent: Tool
   checkCrmSendability: Tool
+  listCrmSegments: Tool
+  previewCrmSegment: Tool
   recordCrmSubmission: Tool
   updateCrmSubmission: Tool
   recordCrmConsent: Tool
   recordCrmSuppression: Tool
+  saveCrmSegment: Tool
+  archiveCrmSegment: Tool
 }
 
 const SubmissionFiltersSchema = z.object({
@@ -110,6 +131,16 @@ const RecordSuppressionInputSchema = z.object({
   (value) => (value.provider === undefined) === (value.provider_event_id === undefined),
   'provider and provider_event_id must be supplied together',
 )
+
+const SaveSegmentInputSchema = z.object({
+  segment_id: CrmOperationsUuidSchema.optional(),
+  segment_key: CrmOperationsStableKeySchema,
+  name: z.string().trim().min(1).max(200),
+  description: z.string().trim().max(5_000).default(''),
+  entity_kind: z.enum(['person', 'company', 'deal']),
+  predicate: CrmSegmentPredicateSchema,
+  expected_version: z.number().int().positive().optional(),
+}).strict()
 
 function workspaceId(context: ToolContext): string | null {
   return context.workspaceId ?? null
@@ -261,6 +292,43 @@ export function createCrmOperationsTools(options: {
       catch (error) { return failure(error) }
     },
   })
+  const listCrmSegments = buildTool({
+    name: 'listCrmSegments', requiresCapability: 'crm', isReadOnly: true,
+    description: 'List workspace-shared dynamic CRM segments and their bounded predicates. Optionally filter by entity kind. Returns stable segment ids and keys; use previewCrmSegment to evaluate current membership.',
+    inputSchema: z.object({
+      entity_kind: z.enum(['person', 'company', 'deal']).default('person'),
+      include_archived: z.boolean().default(false),
+    }).strict(),
+    async execute(input, context) {
+      const workspace = workspaceId(context)
+      if (!workspace) return workspaceError()
+      try {
+        return { data: await options.reads.listSegments(workspace, {
+          entityKind: input.entity_kind,
+          includeArchived: input.include_archived,
+        }) }
+      } catch (error) { return failure(error) }
+    },
+  })
+  const previewCrmSegment = buildTool({
+    name: 'previewCrmSegment', requiresCapability: 'crm', isReadOnly: true,
+    description: 'Evaluate one saved CRM segment at read time. Returns a bounded row preview, the complete count, and a bounded stable-id snapshot suitable for workflow input or export. Unknown catalog fields fail closed with valid choices.',
+    inputSchema: z.object({
+      segment_id: CrmOperationsUuidSchema,
+      limit: z.number().int().min(1).max(100).default(25),
+      snapshot_limit: z.number().int().min(1).max(10_000).default(1_000),
+    }).strict(),
+    async execute(input, context) {
+      const workspace = workspaceId(context)
+      if (!workspace) return workspaceError()
+      try {
+        return { data: await options.reads.previewSegment(workspace, input.segment_id, {
+          limit: input.limit,
+          snapshotLimit: input.snapshot_limit,
+        }) }
+      } catch (error) { return failure(error) }
+    },
+  })
   const recordCrmSubmission = buildTool({
     name: 'recordCrmSubmission', requiresCapability: 'crm',
     description: 'Atomically record a CRM submission through an existing intake definition. The definition controls identity matching, field mappings, consent, routing, and follow-up. Pass an idempotency_key and a stable definition_key from listCrmIntakeDefinitions.',
@@ -300,11 +368,37 @@ export function createCrmOperationsTools(options: {
       providerEventId: input.provider_event_id, metadata: input.metadata,
     } as CrmOperationsCommand)),
   })
+  const saveCrmSegment = buildTool({
+    name: 'saveCrmSegment', requiresCapability: 'crm',
+    description: 'Create or version-update a workspace-shared dynamic CRM segment. Use only fields and operators returned by the segment catalog; unknown vocabulary fails closed with bounded valid choices.',
+    inputSchema: SaveSegmentInputSchema,
+    execute: write((input) => ({
+      kind: 'save_segment', segmentId: input.segment_id,
+      segmentKey: input.segment_key, name: input.name,
+      description: input.description, entityKind: input.entity_kind,
+      predicate: input.predicate, expectedVersion: input.expected_version,
+    } as CrmOperationsCommand)),
+  })
+  const archiveCrmSegment = buildTool({
+    name: 'archiveCrmSegment', requiresCapability: 'crm',
+    description: 'Archive a shared CRM segment by stable segment_id. Existing workflow inputs keep their captured stable-id snapshot; future dynamic evaluations stop listing the segment.',
+    inputSchema: z.object({
+      segment_id: CrmOperationsUuidSchema,
+      expected_version: z.number().int().positive().optional(),
+    }).strict(),
+    resolveConfirmation: async () => true,
+    execute: write((input) => ({
+      kind: 'archive_segment', segmentId: input.segment_id,
+      expectedVersion: input.expected_version,
+    } as CrmOperationsCommand)),
+  })
 
   return {
     listCrmIntakeDefinitions, listCrmSubmissions, getCrmSubmission,
     listCrmConsentPurposes, getCrmConsent, checkCrmSendability,
+    listCrmSegments, previewCrmSegment,
     recordCrmSubmission, updateCrmSubmission, recordCrmConsent, recordCrmSuppression,
+    saveCrmSegment, archiveCrmSegment,
   }
 }
 

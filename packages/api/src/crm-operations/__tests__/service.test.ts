@@ -82,6 +82,11 @@ function makeTransaction(overrides: Partial<CrmOperationsTransaction> = {}) {
     createIntakeCredential: vi.fn(),
     revokeIntakeCredential: vi.fn(),
     saveConsentPurpose: vi.fn(),
+    getSegmentCatalog: vi.fn().mockResolvedValue({
+      fields: new Map([
+        ['base:name', { family: 'base', operators: ['contains'], valueType: 'text' }],
+      ]),
+    }),
     saveSegment: vi.fn(),
     archiveSegment: vi.fn(),
     grantEntitlement: vi.fn(),
@@ -280,5 +285,42 @@ describe('[COMP:crm/operations-service] canonical CRM operations service', () =>
     }))
     const credentialCalls = (tx.createIntakeCredential as ReturnType<typeof vi.fn>).mock.calls
     expect(JSON.stringify(credentialCalls[0]![0])).not.toContain('one-time-material')
+  })
+
+  it('validates segment predicates against the transaction catalog before writing', async () => {
+    const saved = { id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', version: 1 }
+    const tx = makeTransaction({ saveSegment: vi.fn().mockResolvedValue({ record: saved, created: true }) })
+    const memberContext: CrmOperationsContext = {
+      workspaceId: WORKSPACE_ID,
+      actor: { kind: 'user', userId: USER_ID },
+      authority: { role: 'member', canWrite: true, canConfigure: false, trustedIdentitySources: [] },
+    }
+    await expect(createCrmOperationsService(makeStore(tx)).execute(memberContext, {
+      kind: 'save_segment', segmentKey: 'named_examples', name: 'Named examples', description: '',
+      entityKind: 'person', predicate: { type: 'group', combinator: 'and', items: [
+        { type: 'rule', family: 'base', field: 'name', operator: 'contains', value: 'Example' },
+      ] },
+    })).resolves.toMatchObject({ command: 'save_segment', created: true, record: saved })
+    expect(tx.getSegmentCatalog).toHaveBeenCalledWith('person')
+    expect(tx.saveSegment).toHaveBeenCalledOnce()
+  })
+
+  it('returns enumerable segment catalog choices instead of guessing unknown fields', async () => {
+    const tx = makeTransaction()
+    const memberContext: CrmOperationsContext = {
+      workspaceId: WORKSPACE_ID,
+      actor: { kind: 'user', userId: USER_ID },
+      authority: { role: 'member', canWrite: true, canConfigure: false, trustedIdentitySources: [] },
+    }
+    await expect(createCrmOperationsService(makeStore(tx)).execute(memberContext, {
+      kind: 'save_segment', segmentKey: 'bad', name: 'Bad', description: '', entityKind: 'person',
+      predicate: { type: 'group', combinator: 'and', items: [
+        { type: 'rule', family: 'base', field: 'made_up', operator: 'contains', value: 'x' },
+      ] },
+    })).rejects.toMatchObject({
+      code: 'catalog_key_invalid',
+      details: { issues: [expect.objectContaining({ validValues: ['base:name'] })] },
+    })
+    expect(tx.saveSegment).not.toHaveBeenCalled()
   })
 })

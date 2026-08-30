@@ -14,6 +14,7 @@ import {
 } from '@use-brian/core'
 import { query } from './client.js'
 import { verifySecret } from './api-key-store.js'
+import { createDbCrmSegmentStore } from './crm-segment-store.js'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const KEY_PREFIX = 'sk_intake_'
@@ -47,9 +48,15 @@ export type CrmIntakeReadStore = {
   listCredentials(workspaceId: string): Promise<Array<Record<string, unknown>>>
 }
 
-export type DbCrmOperationsReadStore = CrmIntakeReadStore & CrmOperationsReadPort
+export type DbCrmOperationsReadStore = CrmIntakeReadStore & CrmOperationsReadPort & {
+  listCrmEventFilterCatalog(workspaceId: string): Promise<{
+    eventTypes: string[]
+    stableKeys: Array<{ kind: string; key: string; label: string }>
+  }>
+}
 
 export function createDbCrmIntakeReadStore(): DbCrmOperationsReadStore {
+  const segmentStore = createDbCrmSegmentStore()
   const listDefinitions = async (workspaceId: string) => {
     const result = await query<Record<string, unknown>>(
       `SELECT d.id, d.definition_key AS "definitionKey", d.label, d.active,
@@ -94,6 +101,7 @@ export function createDbCrmIntakeReadStore(): DbCrmOperationsReadStore {
   }
 
   return {
+    ...segmentStore,
     async authenticate(token, definitionKey) {
       const parsed = parseCrmIntakeToken(token)
       if (!parsed) return null

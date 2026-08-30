@@ -12,9 +12,11 @@ import type {
   CrmIntakeDefinitionVersionInput,
   CrmOperationsActor,
   CrmOperationsContext,
+  CrmSegmentCatalog,
   CrmSegmentPredicate,
 } from '@use-brian/core'
 import { getPool } from './client.js'
+import { loadCrmSegmentCatalog } from './crm-segment-store.js'
 
 export type CrmOperationsRecord = Record<string, unknown>
 
@@ -186,6 +188,7 @@ export type CrmOperationsTransaction = {
     expectedVersion?: number
     actorUserId: string | null
   }): Promise<{ record: CrmOperationsRecord; created: boolean }>
+  getSegmentCatalog(entityKind: 'person' | 'company' | 'deal'): Promise<CrmSegmentCatalog>
   archiveSegment(segmentId: string, expectedVersion?: number): Promise<CrmOperationsRecord | null>
   grantEntitlement(params: CrmOperationsRecord): Promise<{ record: CrmOperationsRecord; created: boolean }>
   updateEntitlement(entitlementId: string, changes: CrmOperationsRecord): Promise<CrmOperationsRecord | null>
@@ -811,6 +814,15 @@ function createTransaction(client: PoolClient, context: CrmOperationsContext): C
           params.entityKind, JSON.stringify(params.predicate), params.actorUserId],
       )
       return { record: first(created), created: true }
+    },
+
+    async getSegmentCatalog(entityKind) {
+      const loaded = await loadCrmSegmentCatalog(
+        (sql, params) => client.query(sql, params),
+        workspaceId,
+        entityKind,
+      )
+      return loaded.catalog
     },
 
     async archiveSegment(segmentId, expectedVersion) {

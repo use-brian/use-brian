@@ -78,6 +78,7 @@ import {
   createWorkflowEventDispatcher,
   createIngestWorkflowTrigger,
   type WorkflowEventDispatcher,
+  type StrictWorkflowEventDispatcher,
   createRunQueueWorker,
   createTaskTools,
   createTaskGuardrailTools,
@@ -221,6 +222,11 @@ import { crmRoutes } from './routes/crm.js'
 import { crmIntakeRoutes } from './routes/crm-intake.js'
 import { crmOperationsRoutes } from './routes/crm-operations.js'
 import { createCrmOperationsService } from './crm-operations/service.js'
+import {
+  crmWorkflowAdmission,
+  createCrmDomainEventWorker,
+  createDbCrmDomainEventOutboxStore,
+} from './crm-operations/domain-event-worker.js'
 import { createDbCrmOperationsStore } from './db/crm-operations-store.js'
 import { createDbCrmIntakeReadStore } from './db/crm-intake-store.js'
 import { getCrmEmailReviewContext } from './db/crm-r2.js'
@@ -3318,6 +3324,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     workflowStore,
     runStore: workflowRunStore,
     executorDeps: workflowExecutorDeps,
+    listCrmWorkflowEventFilterKeys: async (workspaceId) =>
+      (await crmIntakeReadStore.listCrmEventFilterCatalog(workspaceId)).stableKeys.map((item) => item.key),
     validateDeliveryTarget: workflowDependencyPreflight.validateDeliveryTarget,
     preflightConnectorTool: workflowDependencyPreflight.preflightConnectorTool,
     listSlackChannels: workflowDependencyPreflight.listSlackChannels,
@@ -5566,6 +5574,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     runStore: workflowRunStore,
     workspaceStore,
     executorDeps: workflowExecutorDeps,
+    listCrmWorkflowEventFilterKeys: async (workspaceId) =>
+      (await crmIntakeReadStore.listCrmEventFilterCatalog(workspaceId)).stableKeys.map((item) => item.key),
     savedViewStore,
     listTriggerJobs: (workflowId) => jobStore.listFiringJobsForWorkflowSystem(workflowId),
     jobStore,
@@ -6543,7 +6553,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const RUN_STORM_WINDOW_SECONDS = 300
   const RUN_STORM_THRESHOLD = 25
 
-  const workflowEventDispatcher: WorkflowEventDispatcher = createWorkflowEventDispatcher({
+  const workflowEventDispatcher: StrictWorkflowEventDispatcher = createWorkflowEventDispatcher({
     findEventTriggeredWorkflows: ({ workspaceId }) =>
       findEventTriggeredWorkflowsSystem(workspaceId),
     findAdditionalConnectorEventWorkspaces: ({ connectorInstanceId }) =>
@@ -6587,6 +6597,22 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         console.warn('[workflow-event] kb-maintenance guard failed (run proceeds):', err)
       }
       const triggeredBy = await getWorkflowCreatorSystem(workflowId)
+      const crmAdmission = crmWorkflowAdmission(input)
+      if (crmAdmission && workflowRunStore.createWebhookRun) {
+        const admitted = await workflowRunStore.createWebhookRun({
+          workflowId,
+          workspaceId,
+          triggeredBy,
+          triggerKind: 'event',
+          input,
+          ...crmAdmission,
+        })
+        if (admitted.kind === 'conflict') {
+          throw new Error(`CRM domain event ${input.event.domainEventId as string} conflicted with an existing workflow run.`)
+        }
+        runQueueWorker.nudge()
+        return
+      }
       await workflowRunStore.createRun({
         workflowId,
         workspaceId,
@@ -6636,6 +6662,17 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // into on create / draft update / approve / supersede, covering the Studio
   // routes, the `updateBrandDraft` chat tool, and the brain-MCP bridge.
   setBrandEventDispatcher(workflowEventDispatcher)
+
+  const crmDomainEventWorker = createCrmDomainEventWorker({
+    store: createDbCrmDomainEventOutboxStore(),
+    dispatcher: workflowEventDispatcher,
+    workerId: `crm-domain-${process.pid}-${randomUUID()}`,
+    onError: (error, event) => console.warn(
+      `[crm-domain-events] ${event?.id ?? '(tick)'} failed:`,
+      error instanceof Error ? error.message : error,
+    ),
+  })
+  if (runWorkers) crmDomainEventWorker.start()
 
   // ════════════════════════════════════════════════════════════════
   // Open background workers
@@ -8240,6 +8277,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     embeddingWorker.stop()
     pollWorker.stop()
     runQueueWorker.stop()
+    crmDomainEventWorker.stop()
     knowledgeSyncWorker.stop()
     mailboxSyncWorker.stop()
     // Log out every IDLE socket - a SIGTERM must not leave a mailbox connection

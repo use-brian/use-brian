@@ -420,6 +420,8 @@ const READ_TOOL_NAMES = new Set<string>([
   'listCrmConsentPurposes',
   'getCrmConsent',
   'checkCrmSendability',
+  'listCrmSegments',
+  'previewCrmSegment',
   // Workspace files (read) — present only when fileTools are wired
   'fileRead',
   'fileSearch',
@@ -1507,10 +1509,14 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
     bridgeCoreTool(opts.crmTools.listCrmConsentPurposes, resolveCtx, workspaceId),
     bridgeCoreTool(opts.crmTools.getCrmConsent, resolveCtx, workspaceId),
     bridgeCoreTool(opts.crmTools.checkCrmSendability, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.listCrmSegments, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.previewCrmSegment, resolveCtx, workspaceId),
     bridgeCoreTool(opts.crmTools.recordCrmSubmission, resolveCtx, workspaceId),
     bridgeCoreTool(opts.crmTools.updateCrmSubmission, resolveCtx, workspaceId),
     bridgeCoreTool(opts.crmTools.recordCrmConsent, resolveCtx, workspaceId),
     bridgeCoreTool(opts.crmTools.recordCrmSuppression, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.saveCrmSegment, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.crmTools.archiveCrmSegment, resolveCtx, workspaceId),
   ]
 
   // ── File bridges (workspace filesystem). Present only when a blob client is
@@ -1710,7 +1716,8 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       t.name === 'listCrmFields' ||
       t.name === 'listCrmIntakeDefinitions' || t.name === 'listCrmSubmissions' ||
       t.name === 'getCrmSubmission' || t.name === 'listCrmConsentPurposes' ||
-      t.name === 'getCrmConsent' || t.name === 'checkCrmSendability',
+      t.name === 'getCrmConsent' || t.name === 'checkCrmSendability' ||
+      t.name === 'listCrmSegments' || t.name === 'previewCrmSegment'
     ),
     ...fileBridges.filter((t) => t.name === 'fileRead' || t.name === 'fileSearch'),
     ...brandBridges.filter((t) => t.name === 'getBrand'),
@@ -1733,7 +1740,8 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       t.name === 'saveDeal' || t.name === 'updateDeal' ||
       t.name === 'advanceDealStage' || t.name === 'setCrmCustomFields' ||
       t.name === 'recordCrmSubmission' || t.name === 'updateCrmSubmission' ||
-      t.name === 'recordCrmConsent' || t.name === 'recordCrmSuppression',
+      t.name === 'recordCrmConsent' || t.name === 'recordCrmSuppression' ||
+      t.name === 'saveCrmSegment' || t.name === 'archiveCrmSegment'
     ),
     ...fileBridges.filter((t) =>
       t.name === 'fileWrite' || t.name === 'fileAppend' ||

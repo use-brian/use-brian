@@ -3396,6 +3396,25 @@ export const zh: Dictionary = {
       eventPageChangedByAdd: "新增成員",
       eventPageChangedByEmpty: "沒有可篩選的工作空間成員。",
       eventSourceKindTask: "任務",
+      eventSourceKindCrm: "CRM 作業",
+      eventCrmSourceHint:
+        "CRM 作業提交後觸發。事件只包含穩定的記錄指標，不包含個人欄位值。",
+      eventCrmCatalogUnavailable: "無法取得 CRM 事件目錄。請重新連線後再試一次。",
+      eventCrmTypesLabel: "監聽項目",
+      eventCrmTypesHint: "選擇一項或多項已提交的 CRM 事件。未選擇代表任何 CRM 事件。",
+      eventCrmStableKeysLabel: "穩定目錄鍵（選填）",
+      eventCrmStableKeysPlaceholder: "加入定義、目的、方案、活動、管線或階段",
+      eventCrmStableKeysHint: "只能選擇工作空間 CRM 目錄傳回的鍵。",
+      eventCrmIncludeAutomated: "包含助理和系統變更",
+      eventCrmEventLabels: {
+        "crm.submission.received": "收到提交",
+        "crm.submission.updated": "更新提交",
+        "crm.consent.changed": "變更同意",
+        "crm.suppression.changed": "變更抑制",
+        "crm.entitlement.changed": "變更權益",
+        "crm.participation.changed": "變更參與狀態",
+        "crm.deal.stage_changed": "變更交易階段",
+      },
       eventTaskSourceHint:
         "在此工作空間有任務活動時觸發。使用下方的篩選條件縮小要監聽的任務和變更。",
       eventTaskWatchForLabel: "監聽的變更",
@@ -5761,6 +5780,7 @@ export const zh: Dictionary = {
       sourcePerformance: "來源表現", wonLower: "贏得", dataCoverage: "資料覆蓋", missingOwner: "沒有負責人的商機", missingAmount: "沒有金額的商機",
     },
     operations: {
+      yes: "是", no: "否", archive: "封存",
       title: "接收操作", description: "定義受限的接收結構，並為外部後端簽發只寫憑證。",
       definitions: "接收定義", definitionsHelp: "每個定義會固定欄位對應、身分政策、路由及資料大小上限。", definitionLabel: "定義名稱", definitionKey: "穩定鍵值", identityPolicy: "身分政策", identityTrustedEmail: "以已驗證電郵配對", identityNewReview: "一律新增並等待審閱", fieldSchema: "欄位結構 (JSON)",
       defaultNameField: "名稱", defaultEmailField: "電郵", defaultMessageField: "訊息", createDefinition: "建立定義", noDefinitions: "尚未有接收定義。",
@@ -5770,6 +5790,7 @@ export const zh: Dictionary = {
       channelLabels: { email: "電郵", sms: "短訊", phone: "電話", whatsapp: "WhatsApp", telegram: "Telegram", slack: "Slack" },
       compliance: "同意及可傳送性", complianceLoadFailed: "無法載入合規證據。", complianceSaveFailed: "無法更新合規證據。", loading: "載入中...", noPurposesForContact: "請先在CRM設定建立同意目的，再評估此聯絡人。", pickPurpose: "選擇目的", checking: "正在檢查可傳送性...", verdictLabels: { allowed: "允許", blocked: "已封鎖", unknown: "未知 - 不可傳送" }, reasonLabels: { contact_method_missing: "缺少聯絡方式", global_suppression: "已全面停止", channel_suppression: "此頻道已停止", consent_withdrawn: "同意已撤回", consent_not_recorded: "未記錄同意", purpose_archived: "目的已封存" }, grant: "記錄同意", withdraw: "撤回", suppress: "停止傳送", release: "解除停止", withdrawTitle: "撤回同意？", withdrawDescription: "這會新增撤回事件，並封鎖需要此目的同意的傳送。", releaseTitle: "解除停止傳送？", releaseDescription: "這會新增解除事件。其他證據仍可能封鎖傳送。", consentActionLabels: { granted: "已授予同意", withdrawn: "已撤回同意" }, suppressionActionLabels: { suppressed: "已停止", released: "已解除" },
       submissions: "提交收件匣", submissionsLoadFailed: "無法載入CRM提交。", submissionSaveFailed: "無法更新提交。", allStatuses: "所有狀態", submissionStatusLabels: { new: "新提交", in_progress: "處理中", resolved: "已解決", spam: "垃圾" }, noSubmissions: "沒有符合此檢視的提交。", legacySubmission: "舊版提交", pickSubmission: "選擇要審閱的提交。", queue: "佇列", followUpTask: "跟進工作", none: "沒有", submittedFields: "提交欄位", addNote: "新增內部備註", saveNote: "儲存備註",
+      segments: "分群", segmentsHelp: "共享動態條件會依目前的標準 CRM 資料即時評估。", segmentNew: "新增分群", segmentName: "分群名稱", segmentKey: "穩定鍵", segmentDescription: "說明", segmentRules: "條件規則", segmentSave: "儲存分群", noSegments: "此記錄類型尚無分群。", pickSegment: "選擇或建立分群。", segmentsLoadFailed: "無法載入 CRM 分群。", segmentSaveFailed: "無法儲存分群。", segmentPreviewFailed: "無法預覽分群。", segmentArchiveTitle: "封存分群？", segmentArchiveDescription: "封存 {name}？使用此分群的工作流程必須更新。", segmentPreview: "目前成員", segmentCount: "{count} 筆符合的記錄", segmentPreviewEmpty: "目前沒有符合的記錄。", segmentSnapshot: "穩定 ID 快照（{count}）", segmentField: "欄位", segmentValue: "值", segmentValuesPlaceholder: "以逗號分隔值", segmentNoValue: "不需要值", segmentMatch: "符合", segmentAllRules: "所有規則", segmentAnyRule: "任一規則", segmentAddRule: "新增規則", segmentAddGroup: "新增群組", segmentRemoveRule: "移除規則", segmentRemoveGroup: "移除群組", segmentEntityLabels: { person: "人員", company: "公司", deal: "交易" }, segmentFamilyLabels: { base: "基本欄位", custom: "自訂欄位", tag: "標籤", relationship: "關係", consent: "同意", suppression: "抑制", entitlement: "權益", participation: "參與", pipeline: "管線" }, segmentOperatorLabels: { eq: "等於", neq: "不等於", contains: "包含", not_contains: "不包含", in: "是其中之一", not_in: "不是其中之一", gt: "大於", gte: "至少", lt: "小於", lte: "至多", before: "早於", after: "晚於", is_empty: "為空", is_not_empty: "不為空" }, refresh: "重新整理",
     },
   },
 

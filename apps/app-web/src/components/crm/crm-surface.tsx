@@ -25,7 +25,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { BarChart3, ChevronDown, ChevronUp, Inbox, Kanban, Mail, Rows3, Settings2 } from "lucide-react";
+import { BarChart3, ChevronDown, ChevronUp, Inbox, Kanban, Mail, Rows3, Settings2, UsersRound } from "lucide-react";
 import { OperatorTopbar } from "@/components/operator/operator-topbar";
 import { cn } from "@/lib/utils";
 import { mutateSurfaceCache, useCachedResource } from "@/lib/surface-cache";
@@ -150,6 +150,7 @@ import { CrmSavedViews } from "./crm-saved-views";
 import { CrmEmailReviewWorkspace } from "./crm-email-review";
 import { CrmMobileActions } from "./crm-mobile-actions";
 import { CrmSubmissionInbox } from "./operations/submission-inbox";
+import { CrmSegmentsPanel } from "./operations/segments-panel";
 
 const NONE = "__none__";
 const EMPTY_PIPELINE: CrmPipeline = {
@@ -1035,11 +1036,16 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
                 {view.review === "submissions" && (
                   <Inbox className="size-3.5 shrink-0" aria-hidden />
                 )}
+                {view.review === "segments" && (
+                  <UsersRound className="size-3.5 shrink-0" aria-hidden />
+                )}
                 <span className="truncate">
                   {view.review === "email"
                     ? t.r2.emailDrafts
                     : view.review === "submissions"
                       ? t.operations.submissions
+                      : view.review === "segments"
+                        ? t.operations.segments
                       : sectionLabels[view.section]}
                 </span>
                 <ChevronDown
@@ -1083,6 +1089,12 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
                 >
                   <Inbox className="size-3.5" aria-hidden />
                   <span className="min-w-28 flex-1">{t.operations.submissions}</span>
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={() => setView({ review: "segments", segment: view.segment })}
+                >
+                  <UsersRound className="size-3.5" aria-hidden />
+                  <span className="min-w-28 flex-1">{t.operations.segments}</span>
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   onClick={() =>
@@ -1153,6 +1165,21 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
               >
                 <Inbox className="size-3.5" aria-hidden />
                 <span>{t.operations.submissions}</span>
+              </button>
+              <button
+                type="button"
+                aria-label={t.operations.segments}
+                aria-pressed={view.review === "segments"}
+                onClick={() => setView({ review: "segments", segment: view.segment })}
+                className={cn(
+                  "inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12.5px] transition-colors",
+                  view.review === "segments"
+                    ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                    : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground",
+                )}
+              >
+                <UsersRound className="size-3.5" aria-hidden />
+                <span>{t.operations.segments}</span>
               </button>
               <button
                 type="button"
@@ -1389,6 +1416,12 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
             workspaceId={workspaceId}
             selectedId={view.submission}
             onSelect={(submission) => setView({ review: "submissions", submission })}
+          />
+        ) : view.review === "segments" ? (
+          <CrmSegmentsPanel
+            workspaceId={workspaceId}
+            selectedId={view.segment}
+            onSelect={(segment) => setView({ review: "segments", segment })}
           />
         ) : (
           <>
