@@ -244,6 +244,20 @@ beforeEach(() => {
 })
 
 describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
+  it('uses the 15-turn standard assistant-call budget when depth is absent', async () => {
+    yieldsText('done')
+
+    await expect(executor()({
+      ...baseParams,
+      callerChannelType: 'workflow',
+    })).resolves.toBe('done')
+
+    expect(mockQueryLoop.mock.calls.at(-1)?.[0]).toMatchObject({
+      maxTurns: 15,
+      maxToolCalls: 10,
+    })
+  })
+
   it('[COMP:api/client-principal-runtime] reconstructs the API client surface for a workflow consult', async () => {
     const scopedMemory = memoryStore()
     const clientAssistant = {
