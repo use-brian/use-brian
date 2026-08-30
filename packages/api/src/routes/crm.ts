@@ -13,7 +13,13 @@
 import { Router } from 'express'
 import type { Response } from 'express'
 import { z } from 'zod'
-import type { AccessContext, CrmEmailDraftStore, DealStage, EntityLinksStore } from '@use-brian/core'
+import type {
+  AccessContext,
+  CrmEmailDraftStore,
+  CrmOperationsServicePort,
+  DealStage,
+  EntityLinksStore,
+} from '@use-brian/core'
 import { EntityMergeError, UndoMergeError, mergeEntities, undoMerge } from '@use-brian/core'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 import { resolveWorkspaceViewpoint } from '../db/workspace-viewpoint.js'
@@ -84,6 +90,7 @@ type RouteOptions = {
   workspaceStore: WorkspaceStore
   entityLinks?: EntityLinksStore
   emailDraftStore?: CrmEmailDraftStore
+  crmOperationsService?: CrmOperationsServicePort
 }
 
 const CRM_KINDS = new Set<CrmEntityKind>(['person', 'company', 'deal'])
@@ -241,7 +248,12 @@ function sameValue(left: unknown, right: unknown): boolean {
   return JSON.stringify(left ?? null) === JSON.stringify(right ?? null)
 }
 
-export function crmRoutes({ workspaceStore, entityLinks, emailDraftStore }: RouteOptions): Router {
+export function crmRoutes({
+  workspaceStore,
+  entityLinks,
+  emailDraftStore,
+  crmOperationsService,
+}: RouteOptions): Router {
   const router = Router()
   const mergeRepo = createEntityMergeStore()
 
@@ -856,6 +868,33 @@ export function crmRoutes({ workspaceStore, entityLinks, emailDraftStore }: Rout
       return
     }
     try {
+      if (crmOperationsService) {
+        const config = await getCrmConfig(member.ctx.userId, member.ctx.workspaceId)
+        const pipeline = config.pipelines.find((candidate) => candidate.stages.some(
+          (candidateStage) => candidateStage.id === stageId,
+        ))
+        if (!pipeline) {
+          res.status(404).json({ error: 'Deal or stage not found' })
+          return
+        }
+        const output = await crmOperationsService.execute({
+          workspaceId: member.ctx.workspaceId,
+          actor: { kind: 'user', userId: member.ctx.userId },
+          authority: {
+            role: member.role as 'member' | 'admin' | 'owner',
+            canWrite: true,
+            canConfigure: member.role === 'owner' || member.role === 'admin',
+            trustedIdentitySources: [],
+          },
+        }, {
+          kind: 'set_deal_pipeline_stage',
+          dealId: req.params.entityId,
+          pipelineId: pipeline.id,
+          stageId,
+        })
+        res.json({ ok: true, stageId, operation: output })
+        return
+      }
       const changed = await setCrmDealPipelineStage({
         ctx: member.ctx,
         entityId: req.params.entityId,

@@ -157,8 +157,8 @@ export type AssistantCallStep = WorkflowStepCommon & {
    * Optional research-depth override for this step's agentic loop — a tier
    * preset and/or numeric overrides (`{ tier?, maxTurns?, maxToolCalls?,
    * timeoutMs? }`). Resolved by the callee executor against
-   * `ASSISTANT_CALL_DEFAULT_BUDGET`. Absent = the 5-turn default (90s
-   * wall-clock, `ASSISTANT_CALL_TIMEOUT_MS`-configurable). See
+   * `ASSISTANT_CALL_DEFAULT_BUDGET`. Absent = the 15-turn / 10-tool-call
+   * default with no wall-clock (`ASSISTANT_CALL_TIMEOUT_MS` can opt in). See
    * `packages/core/src/engine/research-depth.ts`.
    */
   depth?: ResearchDepthConfig
@@ -472,6 +472,15 @@ export type EventSourceRef =
        */
       type: 'brand'
     }
+  | {
+      /**
+       * Committed CRM operations from `crm_domain_event_outbox`. This source
+       * is workspace-wide and id-less; event types ride `match.inChannels`
+       * and stable definition/purpose/plan/event/pipeline/stage keys ride
+       * `match.tags`.
+       */
+      type: 'crm'
+    }
 
 /**
  * Declarative selectivity on one event subscription. Every present field is
@@ -502,8 +511,8 @@ export type EventMatch = {
    * Event tags ∩ list ≠ ∅. Only `task` and `knowledge` events carry tags —
    * for tasks the full set on `created` and the ADDED set on updates
    * (appearance semantics), for knowledge the entry's current frontmatter
-   * tags. A `tags` filter on a connector / channel / page subscription never
-   * matches.
+   * tags; CRM events carry their closed stable catalog keys. A `tags` filter
+   * on a connector / channel / page subscription never matches.
    */
   tags?: string[]
   /**

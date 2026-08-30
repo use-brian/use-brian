@@ -78,6 +78,12 @@ export const WORKSPACE_FLUSH_TABLES = [
   'page_send_log',
   'page_domains',
   // Files + media
+  // CRM operational imports reference staged workspace files with RESTRICT,
+  // so their error/chunk/job rows must leave before workspace_files.
+  'crm_import_errors',
+  'crm_import_rows',
+  'crm_import_chunks',
+  'crm_import_jobs',
   'transcript_segments',
   'recording_jobs',
   'recordings',
@@ -104,6 +110,16 @@ export const WORKSPACE_FLUSH_TABLES = [
   'memories',
   'consolidation_logs',
   'connector_actions',
+  // CRM operations rows that directly or indirectly reference contacts.
+  'crm_domain_event_outbox',
+  'crm_intake_idempotency',
+  'crm_suppression_events',
+  'crm_intake_credential_definitions',
+  'crm_intake_credentials',
+  'crm_intake_definition_versions',
+  'crm_intake_definitions',
+  'crm_consent_purposes',
+  'crm_segments',
   'episodes',
   // Tasks + goals
   'tasks',

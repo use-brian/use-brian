@@ -308,6 +308,35 @@ function MsTeamsIcon() {
   );
 }
 
+function FeishuIcon() {
+  // Feishu / Lark wing, hand-inlined on the 24px grid like the rest of the
+  // set: the swept bird wing with the brand's cyan-to-blue gradient
+  // (#00D6B9 -> #3370FF), simplified to a single silhouette for 18px
+  // rendering. Fixed gradient id follows the s3-tile-grad convention -
+  // duplicate ids across instances resolve to identical defs.
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+      <defs>
+        <linearGradient
+          id="feishu-wing-grad"
+          x1="4"
+          y1="5"
+          x2="20"
+          y2="17"
+          gradientUnits="userSpaceOnUse"
+        >
+          <stop stopColor="#00D6B9" />
+          <stop offset="1" stopColor="#3370FF" />
+        </linearGradient>
+      </defs>
+      <path
+        d="M2.6 6.9c6.2-1.8 13-.5 18.7 3.8l.7.6c-3 .8-5.7 2.4-7.9 4.6-2.1 2.1-3.7 4.1-4.7 5.6-.3-3.1-1.2-6-2.6-8.6C5.6 10.7 4.2 8.7 2.6 6.9Z"
+        fill="url(#feishu-wing-grad)"
+      />
+    </svg>
+  );
+}
+
 function S3Icon() {
   // Amazon S3, in the official AWS Architecture-icon look: the Storage
   // category's green gradient tile (#1B660F dark corner → #6CAE3E light,
@@ -399,6 +428,9 @@ export function ConnectorIcon({
     // The Graph connector (read + search) and the Teams channel are the same
     // product to a user, so they share the brand mark.
     case "msgraph": return <MsTeamsIcon />;
+    // The Feishu channel; not a connector id, but the channels UI shares
+    // this icon set (same as whatsapp / msteams above).
+    case "feishu": return <FeishuIcon />;
     case "agentmail": return <AgentmailIcon />;
     case "imap": return <ImapMailboxIcon />;
     case "cli": return <CliIcon />;

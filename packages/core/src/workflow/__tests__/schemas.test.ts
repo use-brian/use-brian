@@ -923,6 +923,27 @@ describe('[COMP:workflow/schemas] WorkflowTriggerSchema', () => {
     expect(WorkflowTriggerSchema.safeParse(trigger).success).toBe(true)
   })
 
+  it('accepts only the closed committed CRM event catalog and CRM filter axes', () => {
+    expect(WorkflowTriggerSchema.safeParse({
+      kind: 'event', event: { sources: [{
+        source: { type: 'crm' },
+        match: { inChannels: ['crm.submission.received'], tags: ['website_contact'], fromBots: true },
+      }] },
+    }).success).toBe(true)
+    const guessed = WorkflowTriggerSchema.safeParse({
+      kind: 'event', event: { sources: [{
+        source: { type: 'crm' }, match: { inChannels: ['crm.contact.updated'] },
+      }] },
+    })
+    expect(guessed.success).toBe(false)
+    if (!guessed.success) expect(guessed.error.issues[0]?.message).toContain('crm.submission.received')
+    expect(WorkflowTriggerSchema.safeParse({
+      kind: 'event', event: { sources: [{
+        source: { type: 'crm' }, match: { keywords: ['private value'] },
+      }] },
+    }).success).toBe(false)
+  })
+
   it('rejects a page source whose pageId is not a uuid', () => {
     const trigger = {
       kind: 'event',

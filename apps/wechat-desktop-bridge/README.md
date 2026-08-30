@@ -104,11 +104,15 @@ from your phone are archived, never answered.
 
 ## Posture
 
-This is the operator's own account on the operator's own machine. The
-container approach (desktop-client automation) is outside WeChat's sanctioned
-surfaces: do not run it for third parties, and never from shared
-infrastructure or anything that fronts other tenants. The sanctioned bot
-channel is a different thing (`docs/architecture/channels/wechat.md`).
+The account owner must personally scan the Studio QR and confirm the desktop
+login on their device. The container approach (desktop-client automation) is
+outside WeChat's sanctioned surfaces. An operator may host a stack for another
+consenting owner only as a dedicated instance with separate runtime directory,
+tokens, cursor state, volumes, ports, containers, and service units. Never pool
+credentials or message data, expose the agent-wechat endpoint, or operate this
+as a multi-tenant WeChat service. The sanctioned bot channel is a different
+thing (`docs/architecture/channels/wechat.md`) and is preferred when a separate
+bot contact is acceptable.
 
 ## Development
 

@@ -13,6 +13,7 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToString } from "react-dom/server";
+import { Activity } from "lucide-react";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
@@ -67,6 +68,13 @@ describe("[COMP:app-web/operator-topbar] Operator top bar chrome", () => {
   it("names the chip per app from the operatorBar labels", () => {
     expect(wrap(<OperatorTopbar app="crm" />)).toContain(en.operatorBar.crm);
     expect(wrap(<OperatorTopbar app="feed" />)).toContain(en.operatorBar.feed);
+  });
+
+  it("accepts a top-level surface identity without adding it to Home apps", () => {
+    const html = wrap(
+      <OperatorTopbar identity={{ label: en.liveApp.title, icon: Activity }} />,
+    );
+    expect(html).toContain(en.liveApp.title);
   });
 
   it("has no close ✕ and no new-tab + (doc-tabs stays Page-only)", () => {

@@ -141,6 +141,29 @@ describe('[COMP:api/workflows-route] GET / POST /workflows', () => {
     expect(emitAudit).toHaveBeenCalledWith(expect.objectContaining({ type: 'workflow.created' }))
   })
 
+  it('POST /workflows rejects guessed CRM event keys with the enumerable catalog', async () => {
+    workspaceStore.getRole.mockResolvedValueOnce('admin')
+    mockDefParse.mockReturnValueOnce({ success: true, data: { steps: [] } })
+    mockTriggerParse.mockReturnValueOnce({
+      success: true,
+      data: {
+        kind: 'event', event: { sources: [{
+          source: { type: 'crm' }, match: { tags: ['guessed_stage'] },
+        }] },
+      },
+    })
+    const listCrmWorkflowEventFilterKeys = vi.fn().mockResolvedValue(['won'])
+    const res = await request(app('u-1', { listCrmWorkflowEventFilterKeys }))
+      .post('/api/workflows')
+      .send({
+        workspaceId: WS, name: 'Won follow-up', definition: { steps: [] },
+        trigger: { kind: 'event', event: { sources: [] } },
+      })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toContain('Valid values: won')
+    expect(workflowStore.create).not.toHaveBeenCalled()
+  })
+
   it('POST /workflows blocks a scoped binding until the readiness matrix is green', async () => {
     workspaceStore.getRole.mockResolvedValueOnce('admin')
     const getContextReadiness = vi.fn().mockResolvedValue({

@@ -5,7 +5,8 @@
  * Two navigation tiers (docs/plans/tasks-operator-surface.md §2):
  *
  *   - The TOP icon row (doc-sidebar) is frozen at Home / Brain / Studio /
- *     Workflow — how you shape the brain. It never grows.
+ *     Workflow / Live — how you shape and observe the brain. Live owns the
+ *     former Inbox slot and is intentionally not a Home app key.
  *   - OPERATOR APPS — things you run over the brain (Page, Tasks, CRM,
  *     Feed, Browsers, Chat) — live under Home in the app-bar. Selecting Home
  *     resolves to the workspace's LAST-USED operator app and its last safe
@@ -88,7 +89,6 @@ const APP_SEGMENT: Record<OperatorAppKey, WorkspaceSurface> = {
   browsers: "computer",
   chat: "chat",
   shopify: "shopify",
-  live: "live",
 };
 
 /** Surfaces that belong to an operator app (the bar shows on these). */
@@ -101,7 +101,6 @@ const SURFACE_TO_APP: Partial<Record<WorkspaceSurface, OperatorAppKey>> = {
   computer: "browsers",
   chat: "chat",
   shopify: "shopify",
-  live: "live",
 };
 
 /** The BUILT-IN operator app a surface belongs to, or null for Brain/Studio/…

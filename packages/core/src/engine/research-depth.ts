@@ -111,13 +111,14 @@ export function parseAssistantCallTimeoutMs(raw: string | undefined): number | n
 /**
  * Default budget for a workflow `assistant_call` step — and therefore for a
  * scheduled job, which post the scheduling⇄workflow cutover *is* a one-step
- * `assistant_call` workflow. Tighter than `standard` on turns / tool calls
- * (`maxTurns: 5`); no wall-clock unless `ASSISTANT_CALL_TIMEOUT_MS` sets one.
- * A step with no `depth` keeps this exactly; `depth` is purely opt-in.
+ * `assistant_call` workflow. It matches the standard tier on turns / tool
+ * calls so a tool-heavy unattended step has room to synthesize after its
+ * reads; no wall-clock unless `ASSISTANT_CALL_TIMEOUT_MS` sets one. A step
+ * with no `depth` keeps this exactly; `depth` is purely opt-in.
  */
 export const ASSISTANT_CALL_DEFAULT_BUDGET: ResearchBudget = {
-  maxTurns: 5,
-  maxToolCalls: 10,
+  maxTurns: TIERS.standard.maxTurns,
+  maxToolCalls: TIERS.standard.maxToolCalls,
   timeoutMs: parseAssistantCallTimeoutMs(process.env.ASSISTANT_CALL_TIMEOUT_MS),
 }
 
