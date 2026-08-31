@@ -154,7 +154,7 @@ each is a service you choose to talk to, so nothing turns on by itself.
 
 | Capability | Key(s) to set | What you get |
 |---|---|---|
-| Web search | `BRAVE_SEARCH_API_KEY`, `SERPER_API_KEY`, `SERPAPI_API_KEY`, or `TAVILY_API_KEY` | Upgrade the search tool past the free DuckDuckGo fallback |
+| Web search | `BRAVE_SEARCH_API_KEY`, `SERPER_API_KEY`, `SERPAPI_API_KEY`, `TAVILY_API_KEY`, or `BAIDU_SEARCH_API_KEY` | Upgrade the search tool past the free DuckDuckGo fallback; Baidu adds Chinese-language and mainland-China coverage |
 | Page fetches | `JINA_API_KEY` | Cleaner page reads via Jina Reader (works keyless at lower limits) |
 | Read X / Twitter | `TWITTER_BEARER_TOKEN` | Read x.com permalinks through the official X API v2 |
 | X search | `XAI_API_KEY` | Fall back to xAI Grok and enable the `xSearch` tool |

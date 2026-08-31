@@ -4,6 +4,7 @@ import { braveProvider } from '../base/search-brave.js'
 import { serperProvider } from '../base/search-serper.js'
 import { serpApiProvider } from '../base/search-serpapi.js'
 import { tavilyProvider } from '../base/search-tavily.js'
+import { baiduProvider } from '../base/search-baidu.js'
 import { duckDuckGoProvider } from '../base/search-ddg.js'
 import { webSearchTool } from '../base/web-search.js'
 import type { ToolContext } from '../types.js'
@@ -213,6 +214,16 @@ describe('[COMP:tools/search] Provider availability gates', () => {
     })
   })
 
+  it('baiduProvider gates on BAIDU_SEARCH_API_KEY and serializes exact panels', () => {
+    withEnv('BAIDU_SEARCH_API_KEY', undefined, () => {
+      expect(baiduProvider.available()).toBe(false)
+    })
+    withEnv('BAIDU_SEARCH_API_KEY', 'test-token', () => {
+      expect(baiduProvider.available()).toBe(true)
+    })
+    expect(baiduProvider.panelConcurrency).toBe(1)
+  })
+
   it('duckDuckGoProvider is always available (no-token fallback)', () => {
     expect(duckDuckGoProvider.available()).toBe(true)
   })
@@ -225,7 +236,7 @@ describe('[COMP:tools/search] Provider availability gates', () => {
 // ── webSearch tool: outage vs genuine no-results ─────────────────
 
 describe('[COMP:tools/search] webSearch outage surfacing', () => {
-  const ENV_KEYS = ['BRAVE_SEARCH_API_KEY', 'SERPER_API_KEY', 'SERPAPI_API_KEY', 'TAVILY_API_KEY'] as const
+  const ENV_KEYS = ['BRAVE_SEARCH_API_KEY', 'SERPER_API_KEY', 'SERPAPI_API_KEY', 'TAVILY_API_KEY', 'BAIDU_SEARCH_API_KEY'] as const
   let savedEnv: Record<string, string | undefined>
   let fetchSpy: MockInstance<typeof fetch>
 
@@ -236,6 +247,7 @@ describe('[COMP:tools/search] webSearch outage surfacing', () => {
     delete process.env.BRAVE_SEARCH_API_KEY
     delete process.env.SERPER_API_KEY
     delete process.env.SERPAPI_API_KEY
+    delete process.env.BAIDU_SEARCH_API_KEY
     process.env.TAVILY_API_KEY = 'test-token'
     fetchSpy = vi.spyOn(globalThis, 'fetch') as unknown as MockInstance<typeof fetch>
   })
@@ -277,7 +289,7 @@ describe('[COMP:tools/search] webSearch outage surfacing', () => {
 })
 
 describe('[COMP:tools/search] webSearch exact-provider panels', () => {
-  const ENV_KEYS = ['BRAVE_SEARCH_API_KEY', 'SERPER_API_KEY', 'SERPAPI_API_KEY', 'TAVILY_API_KEY'] as const
+  const ENV_KEYS = ['BRAVE_SEARCH_API_KEY', 'SERPER_API_KEY', 'SERPAPI_API_KEY', 'TAVILY_API_KEY', 'BAIDU_SEARCH_API_KEY'] as const
   let savedEnv: Record<string, string | undefined>
   let fetchSpy: MockInstance<typeof fetch>
 
@@ -289,6 +301,7 @@ describe('[COMP:tools/search] webSearch exact-provider panels', () => {
     process.env.SERPER_API_KEY = 'serper-token'
     process.env.SERPAPI_API_KEY = 'serpapi-token'
     process.env.TAVILY_API_KEY = 'tavily-token'
+    process.env.BAIDU_SEARCH_API_KEY = 'baidu-token'
     fetchSpy = vi.spyOn(globalThis, 'fetch') as unknown as MockInstance<typeof fetch>
   })
 
@@ -308,6 +321,7 @@ describe('[COMP:tools/search] webSearch exact-provider panels', () => {
     expect(webSearchTool.inputSchema.safeParse({ queries: ['one'] }).success).toBe(false)
     expect(webSearchTool.inputSchema.safeParse({ queries: ['one'], provider: 'serper' }).success).toBe(true)
     expect(webSearchTool.inputSchema.safeParse({ queries: ['one'], provider: 'serpapi' }).success).toBe(true)
+    expect(webSearchTool.inputSchema.safeParse({ queries: ['one'], provider: 'baidu' }).success).toBe(true)
     expect(webSearchTool.inputSchema.safeParse({ query: 'one', resultMode: 'measurement' }).success).toBe(false)
     expect(webSearchTool.inputSchema.safeParse({ query: 'one', trackDomains: ['example.com'] }).success).toBe(false)
     expect(webSearchTool.inputSchema.safeParse({
@@ -420,6 +434,45 @@ describe('[COMP:tools/search] webSearch exact-provider panels', () => {
       searchProviderUnits: 2,
       externalCost_model: 'serpapi',
       externalCost_flatCostUsd: 0.05,
+    })
+  })
+
+  it('runs exact Baidu panels serially and records the standard-search cost', async () => {
+    let active = 0
+    let maxActive = 0
+    fetchSpy.mockImplementation(async (input, init) => {
+      expect(String(input)).toBe('https://qianfan.baidubce.com/v2/ai_search/web_search')
+      active += 1
+      maxActive = Math.max(maxActive, active)
+      await Promise.resolve()
+      const query = JSON.parse(String(init?.body)).messages[0].content as string
+      active -= 1
+      return new Response(JSON.stringify({
+        references: [{ type: 'web', title: query, url: `https://${query}.example`, snippet: `${query} result` }],
+      }), { status: 200 })
+    })
+
+    const out = await webSearchTool.execute(
+      { queries: ['q1', 'q2'], provider: 'baidu', maxResults: 10 },
+      ctx,
+    )
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+    expect(maxActive).toBe(1)
+    expect(out.data).toMatchObject({
+      provider: 'baidu',
+      completed: 2,
+      failed: 0,
+      searches: [
+        { query: 'q1', status: 'ok', provider: 'baidu' },
+        { query: 'q2', status: 'ok', provider: 'baidu' },
+      ],
+    })
+    expect(out.meta).toMatchObject({
+      searchProvider: 'baidu',
+      searchProviderUnits: 2,
+      externalCost_model: 'baidu',
+      externalCost_flatCostUsd: 0.01008,
     })
   })
 
@@ -822,6 +875,55 @@ describe('[COMP:tools/search] Provider response parsers', () => {
     await withEnv('TAVILY_API_KEY', 'test-token', async () => {
       const results = await tavilyProvider.search('flights', 5)
       expect(results[0].snippet).toBe('Find cheap flights')
+    })
+  })
+
+  it('baiduProvider posts a standard web-only request and maps references', async () => {
+    fetchSpy.mockImplementationOnce(async (input, init) => {
+      expect(String(input)).toBe('https://qianfan.baidubce.com/v2/ai_search/web_search')
+      expect(init?.method).toBe('POST')
+      expect(init?.headers).toMatchObject({
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      })
+      expect(JSON.parse(String(init?.body))).toEqual({
+        messages: [{ role: 'user', content: '百度千帆' }],
+        edition: 'standard',
+        search_source: 'baidu_search_v2',
+        resource_type_filter: [{ type: 'web', top_k: 5 }],
+      })
+      return new Response(JSON.stringify({
+        references: [
+          {
+            type: 'web',
+            title: '<b>百度千帆</b>',
+            url: 'https://cloud.baidu.com/product-s/qianfan_home',
+            content: '百度智能云<b>千帆平台</b>',
+          },
+          { type: 'image', title: 'skip non-web', url: 'https://example.com/image' },
+          { type: 'web', title: 'skip non-http', url: 'ftp://example.com/result' },
+        ],
+      }), { status: 200 })
+    })
+
+    await withEnv('BAIDU_SEARCH_API_KEY', 'test-token', async () => {
+      const results = await baiduProvider.search('百度千帆', 5)
+      expect(results).toEqual([{
+        title: '百度千帆',
+        url: 'https://cloud.baidu.com/product-s/qianfan_home',
+        snippet: '百度智能云千帆平台',
+      }])
+    })
+  })
+
+  it('baiduProvider treats a structured API error as a failure, not an empty result', async () => {
+    fetchSpy.mockResolvedValueOnce(new Response(JSON.stringify({
+      code: 216003,
+      message: 'Authentication error',
+    }), { status: 200 }))
+
+    await withEnv('BAIDU_SEARCH_API_KEY', 'test-token', async () => {
+      await expect(baiduProvider.search('company brain', 5)).rejects.toThrow(/Baidu: 216003: Authentication error/)
     })
   })
 
