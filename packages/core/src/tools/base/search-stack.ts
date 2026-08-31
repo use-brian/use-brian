@@ -58,6 +58,8 @@ export type SearchProvider = {
    * results, so its empties prove nothing. Defaults to true.
    */
   trustEmpty?: boolean
+  /** Optional provider-specific cap for exact-provider query panels. */
+  panelConcurrency?: number
   /** Execute the search. Should throw on API error so the stack can fall through. */
   search: (query: string, maxResults: number, signal?: AbortSignal) => Promise<SearchResult[]>
 }

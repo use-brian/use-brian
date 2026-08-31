@@ -1335,8 +1335,9 @@ export async function commitPageCreatedEvent(
  * server-side regardless.
  *
  * Maps to `PATCH /api/views/:id/reparent` with body
- * `{ nestParentId, position, teamspaceId? }` → returns the updated
- * `ViewMetadata`.
+ * `{ nestParentId, position, teamspaceId?, contextMoveConfirmed? }` → returns
+ * the updated `ViewMetadata`. A context-changing move sends the confirmation
+ * flag only after the user accepts the sidebar's preflight dialog.
  */
 export async function reparentView(
   viewId: string,
@@ -1344,6 +1345,7 @@ export async function reparentView(
     nestParentId: string | null;
     position: number;
     teamspaceId?: string | null;
+    contextMoveConfirmed?: boolean;
   },
 ): Promise<ViewMetadata> {
   const res = await authFetch(`${API_URL}/api/views/${viewId}/reparent`, {

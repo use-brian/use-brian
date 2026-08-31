@@ -1159,6 +1159,10 @@ export const zh: Dictionary = {
     createDraftFailed: "無法建立草稿：{message}",
     saveFailed: "無法儲存：{message}",
     unsaveFailed: "無法移至草稿：{message}",
+    moveContextConfirmTitle: "要將頁面移至其他內容範圍嗎？",
+    moveContextConfirm:
+      "「{name}」及其所有子頁面將繼承目的地的團隊空間與專案。可存取這些頁面的使用者可能會改變。",
+    moveContextConfirmAction: "移動頁面",
     patchPageFailed: "無法儲存變更：{message}",
     undoFailed: "無法復原：{message}",
     undoUnavailable: "沒有可復原的操作",

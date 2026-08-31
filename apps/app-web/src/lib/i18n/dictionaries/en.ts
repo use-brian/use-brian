@@ -1300,6 +1300,10 @@ export const en = {
     createDraftFailed: "Could not create draft: {message}",
     saveFailed: "Could not save: {message}",
     unsaveFailed: "Could not move to drafts: {message}",
+    moveContextConfirmTitle: "Move page to a different context?",
+    moveContextConfirm:
+      '"{name}" and every page inside it will inherit the destination Teamspace and Project. This can change who can access them.',
+    moveContextConfirmAction: "Move page",
     patchPageFailed: "Could not save change: {message}",
     undoFailed: "Could not undo: {message}",
     undoUnavailable: "Nothing to undo",

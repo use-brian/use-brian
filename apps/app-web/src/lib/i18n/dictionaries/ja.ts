@@ -1173,6 +1173,10 @@ export const ja: Dictionary = {
     createDraftFailed: "下書きの作成に失敗しました: {message}",
     saveFailed: "保存できませんでした: {message}",
     unsaveFailed: "下書きへの移動に失敗しました: {message}",
+    moveContextConfirmTitle: "ページを別のコンテキストへ移動しますか？",
+    moveContextConfirm:
+      "「{name}」とその配下のすべてのページは、移動先のチームスペースとプロジェクトを継承します。アクセスできるユーザーが変わる可能性があります。",
+    moveContextConfirmAction: "ページを移動",
     patchPageFailed: "変更を保存できませんでした: {message}",
     undoFailed: "取り消せませんでした: {message}",
     undoUnavailable: "取り消す操作がありません",
