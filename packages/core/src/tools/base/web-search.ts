@@ -5,12 +5,13 @@ import { braveProvider } from './search-brave.js'
 import { serperProvider } from './search-serper.js'
 import { serpApiProvider } from './search-serpapi.js'
 import { tavilyProvider } from './search-tavily.js'
+import { baiduProvider } from './search-baidu.js'
 import { duckDuckGoProvider } from './search-ddg.js'
 import { encodeExternalCostMeta } from '../../billing/external-cost.js'
 import { flatSearchCostUsd } from '../../billing/search-provider-rates.js'
 import { NO_TOOL_TIMEOUT } from '../../engine/tool-executor.js'
 
-const SEARCH_PROVIDER_NAMES = ['brave', 'serper', 'serpapi', 'tavily', 'duckduckgo'] as const
+const SEARCH_PROVIDER_NAMES = ['brave', 'serper', 'serpapi', 'tavily', 'baidu', 'duckduckgo'] as const
 type SearchProviderName = (typeof SEARCH_PROVIDER_NAMES)[number]
 
 const providersByName = {
@@ -18,6 +19,7 @@ const providersByName = {
   serper: serperProvider,
   serpapi: serpApiProvider,
   tavily: tavilyProvider,
+  baidu: baiduProvider,
   duckduckgo: duckDuckGoProvider,
 } satisfies Record<SearchProviderName, typeof braveProvider>
 
@@ -106,7 +108,7 @@ function waitForRetry(ms: number, signal: AbortSignal): Promise<boolean> {
 /**
  * Web search tool — model-driven search with provider fallback.
  *
- * Provider order: Brave → Serper → SerpAPI → Tavily → DuckDuckGo.
+ * Provider order: Brave → Serper → SerpAPI → Tavily → Baidu → DuckDuckGo.
  *
  * - Brave is first because it's fast, commerce-aware, and cheap.
  * - Serper (Google SERP) is second because Google indexes commercial sites
@@ -115,6 +117,7 @@ function waitForRetry(ms: number, signal: AbortSignal): Promise<boolean> {
  * - SerpAPI is a second Google SERP backend for exact-provider measurements
  *   and fallback when Serper rejects a request.
  * - Tavily follows for AI-optimized research queries.
+ * - Baidu adds a keyed Chinese-language and mainland-China web index.
  * - DuckDuckGo is the no-token fallback for local dev without any env set.
  *
  * This is the explicit `webSearch` tool the model calls. It replaces
@@ -140,7 +143,7 @@ const webSearchInputSchema = z
       .enum(SEARCH_PROVIDER_NAMES)
       .optional()
       .describe(
-        'Exact provider for repeatable measurement. Omit for normal Brave → Serper → SerpAPI → Tavily → DuckDuckGo fallback.',
+        'Exact provider for repeatable measurement. Omit for normal Brave → Serper → SerpAPI → Tavily → Baidu → DuckDuckGo fallback.',
       ),
     maxResults: z.number().optional().describe('Maximum results per query (default 5, max 10)'),
     resultMode: z
@@ -228,7 +231,7 @@ export const webSearchTool = buildTool({
       const measurement = input.resultMode === 'measurement'
       const trackedDomains = [...new Set((input.trackDomains ?? []).map(normalizeDomain).filter((domain): domain is string => Boolean(domain)))]
       const strictStack = createSearchStack([selected])
-      const searches = await mapPool(queries, PANEL_CONCURRENCY, async (query) => {
+      const searches = await mapPool(queries, selected.panelConcurrency ?? PANEL_CONCURRENCY, async (query) => {
         let final: {
           value: Awaited<ReturnType<typeof strictStack>>
           timedOut: boolean
@@ -396,7 +399,7 @@ export const webSearchTool = buildTool({
     )
 
     // `meta.searchProvider` carries the winning provider name (brave / serper /
-    // serpapi / tavily / duckduckgo) back to analytics via ToolResult.meta.
+    // serpapi / tavily / baidu / duckduckgo) back to analytics via ToolResult.meta.
     // `externalCost_*` keys carry the per-call USD so the chat route can
     // write a `usage_tracking` row (flat cost, 0 tokens) per billing policy.
     // Both are omitted when no provider served the call.
