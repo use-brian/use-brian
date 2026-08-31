@@ -100,6 +100,7 @@ describe("[COMP:app-web/live-app] visual overview", () => {
     expect(html).toContain(`${en.liveApp.stateSettled}: 1`);
     expect(html).toContain("Brian");
     expect(html).toContain("web");
+    expect(html).toContain("For Owner");
     expect(html).toContain("Plan the launch");
     expect(html).toContain("Ops");
     expect(html).toContain("telegram");
@@ -125,8 +126,26 @@ describe("[COMP:app-web/live-app] visual overview", () => {
     );
     expect(html).toContain("Research");
     expect(html).toContain("slack");
+    expect(html).toContain("For Owner");
     expect(html).toContain(en.liveApp.presenceHint);
     expect(html).not.toContain("focus=session%3Aprivate-session");
+  });
+
+  it("lets busy zones grow while empty zones contract", () => {
+    const html = wrap(
+      <LiveOverview
+        workspaceId="workspace-1"
+        items={Array.from({ length: 4 }, (_, index) =>
+          session({ id: `working-${index}` }),
+        )}
+      />,
+    );
+    expect(html).toContain('data-live-zone-size="busy"');
+    expect(html).toContain('data-live-zone-size="empty"');
+    expect(html).toContain("flex-grow:2");
+    expect(html).toContain("flex-grow:0.7");
+    expect(html).toContain("sm:basis-[calc(50%_-_0.5rem)]");
+    expect(html).toContain("xl:basis-52");
   });
 
   it("uses the same compact visual language for a focused workflow run", () => {

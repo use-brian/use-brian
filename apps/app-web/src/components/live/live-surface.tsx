@@ -98,10 +98,13 @@ function LiveStatusRow({
       : Bot;
   const primary = item.kind === "session" ? item.assistantName : item.workflowName;
   const channel = item.kind === "session" ? item.channelType : tl.runLabel;
+  const owner = item.kind === "session" && item.ownerName
+    ? format(tl.forPerson, { name: item.ownerName })
+    : null;
   const detail = item.kind === "session"
     ? item.tier === "full" && item.title && item.title !== item.assistantName
       ? item.title
-      : item.ownerName
+      : null
     : [
         item.trigger === "scheduled"
           ? tl.triggerScheduled
@@ -126,7 +129,11 @@ function LiveStatusRow({
             {channel}
           </span>
         </span>
-        <span className="flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground">
+        <span className="flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
+          {owner ? (
+            <span className="shrink-0 font-medium text-foreground/70">{owner}</span>
+          ) : null}
+          {owner && detail ? <span aria-hidden>·</span> : null}
           {detail ? <span className="min-w-0 flex-1 truncate">{detail}</span> : <span className="flex-1" />}
           <span className="shrink-0 tabular-nums">{relativeAge(item.lastActiveAt, tl)}</span>
         </span>
@@ -165,12 +172,18 @@ function LiveStatusZone({
   emptyLabel,
 }: LiveStatusZoneProps) {
   const active = state === "working" && items.length > 0;
+  const density =
+    items.length === 0 ? "empty" : items.length >= 3 ? "busy" : "active";
+  const flexGrow =
+    items.length === 0 ? 0.7 : Math.min(2.25, 1 + items.length * 0.25);
   return (
     <section
       data-live-status-zone={state}
+      data-live-zone-size={density}
       aria-label={`${label}: ${items.length}`}
+      style={{ flexGrow }}
       className={cn(
-        "flex min-h-64 min-w-0 flex-col overflow-hidden rounded-3xl border p-4 shadow-sm sm:p-5",
+        "flex min-w-0 basis-full flex-col overflow-hidden rounded-3xl border p-4 shadow-sm transition-[flex-grow] duration-300 motion-reduce:transition-none sm:basis-[calc(50%_-_0.5rem)] sm:p-5 xl:basis-52",
         tone.panel,
       )}
     >
@@ -206,7 +219,7 @@ function LiveStatusZone({
       ) : (
         <div
           aria-label={emptyLabel}
-          className="mt-4 flex flex-1 items-center gap-3 rounded-2xl border border-dashed border-current/15 px-4 text-current/25"
+          className="mt-4 flex min-h-16 flex-1 items-center gap-3 rounded-2xl border border-dashed border-current/15 px-4 text-current/25"
         >
           <Icon className="size-4" strokeWidth={1.6} aria-hidden />
           <span className="h-px flex-1 bg-current/20" aria-hidden />
@@ -283,7 +296,7 @@ export function LiveOverview({
   return (
     <div
       data-live-overview-active={summary.active}
-      className="mx-auto grid w-full max-w-6xl items-stretch gap-4 md:grid-cols-2"
+      className="mx-auto flex w-full max-w-6xl flex-wrap items-start gap-4"
     >
       {zones.map((zone) => (
         <LiveStatusZone

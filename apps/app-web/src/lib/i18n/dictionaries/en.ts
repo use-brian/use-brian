@@ -4817,6 +4817,7 @@ export const en = {
     stateStalled: "Stalled",
     stateSettled: "Finished",
     presenceHint: "Private chat: details are visible only to its owner.",
+    forPerson: "For {name}",
     runLabel: "Workflow run",
     triggerScheduled: "Scheduled",
     triggerManual: "Manual",

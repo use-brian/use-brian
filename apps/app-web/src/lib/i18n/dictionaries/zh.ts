@@ -4550,6 +4550,7 @@ export const zh: Dictionary = {
     stateStalled: "停滯",
     stateSettled: "已完成",
     presenceHint: "私人對話: 詳細內容僅擁有者可見。",
+    forPerson: "為 {name}",
     runLabel: "工作流程執行",
     triggerScheduled: "排程",
     triggerManual: "手動",

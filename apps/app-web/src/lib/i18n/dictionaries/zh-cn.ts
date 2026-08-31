@@ -4394,6 +4394,7 @@ export const zhCN: Dictionary = {
     stateStalled: "停滞",
     stateSettled: "已完成",
     presenceHint: "私人对话: 详细内容仅所有者可见。",
+    forPerson: "为 {name}",
     runLabel: "工作流运行",
     triggerScheduled: "计划",
     triggerManual: "手动",
