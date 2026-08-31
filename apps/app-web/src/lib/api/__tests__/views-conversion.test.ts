@@ -1,10 +1,21 @@
 /**
- * [COMP:app-web/views-sdk] Format-conversion SDK helpers (the pure parts).
- * Spec: docs/architecture/features/doc-conversion.md.
+ * [COMP:app-web/views-sdk] View SDK request and conversion contracts.
+ * Specs: docs/architecture/features/doc-conversion.md and
+ * docs/architecture/features/teamspaces.md.
  */
 
-import { describe, it, expect } from "vitest";
-import { exportUrl, exportFilename } from "../views";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("@/lib/auth-fetch", () => ({ authFetch: vi.fn() }));
+
+import { authFetch } from "@/lib/auth-fetch";
+import { exportUrl, exportFilename, reparentView } from "../views";
+
+const mockAuthFetch = vi.mocked(authFetch);
+
+beforeEach(() => {
+  mockAuthFetch.mockReset();
+});
 
 describe("[COMP:app-web/views-sdk] export SDK helpers", () => {
   it("builds the export endpoint URL with the format query", () => {
@@ -34,5 +45,36 @@ describe("[COMP:app-web/views-sdk] export SDK helpers", () => {
   it("caps an absurdly long title", () => {
     const name = exportFilename("x".repeat(500), "md");
     expect(name.length).toBeLessThanOrEqual(103); // 100 + ".md"
+  });
+});
+
+describe("[COMP:app-web/views-sdk] reparent request", () => {
+  it("sends the explicit confirmation accepted by a context-changing drag", async () => {
+    mockAuthFetch.mockResolvedValueOnce(
+      new Response(JSON.stringify({ id: "page-1" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    await reparentView("page-1", {
+      nestParentId: null,
+      position: 0,
+      teamspaceId: "teamspace-2",
+      contextMoveConfirmed: true,
+    });
+
+    expect(mockAuthFetch).toHaveBeenCalledWith(
+      expect.stringMatching(/\/api\/views\/page-1\/reparent$/),
+      expect.objectContaining({
+        method: "PATCH",
+        body: JSON.stringify({
+          nestParentId: null,
+          position: 0,
+          teamspaceId: "teamspace-2",
+          contextMoveConfirmed: true,
+        }),
+      }),
+    );
   });
 });

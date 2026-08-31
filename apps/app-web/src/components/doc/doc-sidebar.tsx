@@ -91,7 +91,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { useT } from "@/lib/i18n/client";
+import { format, useT } from "@/lib/i18n/client";
 import { useIsOffline } from "@/lib/offline/use-offline-sync";
 import { useTheme, THEME_PRESETS, currentPresetId } from "@/lib/theme";
 import { useCustomThemes } from "@/lib/custom-themes";
@@ -112,8 +112,10 @@ import { PageIcon } from "./page-icon";
 import type { Teamspace } from "@/lib/api/teamspaces";
 import {
   buildTree,
+  dispatchReparentWithContextConfirmation,
   groupRowsByTeamspace,
   savedAncestorIds,
+  type ContextAwareReparentMove,
   type TreeNode,
 } from "@/lib/sidebar-tree";
 import { parseSectionDropId, sectionDropId } from "@/lib/sidebar-sections";
@@ -142,19 +144,7 @@ import { LiveActiveBadge } from "@/components/live/live-active-badge";
 import { useLiveRoster } from "@/components/live/use-live-roster";
 import { summarizeRosterItems } from "@/lib/live-roster";
 
-export type SidebarMove = {
-  viewId: string;
-  nestParentId: string | null;
-  /** Target sibling index among the new parent's children. */
-  position: number;
-  /**
-   * Target teamspace for a ROOT drop (`nestParentId: null`): a teamspace id
-   * files the page into that section, `null` files it Private, omitted keeps
-   * the current teamspace. Ignored when `nestParentId` is a page — the child
-   * adopts the parent's teamspace server-side.
-   */
-  teamspaceId?: string | null;
-};
+export type SidebarMove = ContextAwareReparentMove;
 
 /** Section-collapse localStorage key (per workspace) — the section analog of
  *  `collapseKey` below. Values: section key → collapsed (default expanded). */
@@ -486,7 +476,25 @@ export function DocSidebar(props: Props) {
     setDraggingId(String(event.active.id));
   }
 
-  function handleDragEnd(event: DragEndEvent) {
+  async function confirmAndMove(move: SidebarMove) {
+    const moved = allRows.find((row) => row.id === move.viewId);
+    await dispatchReparentWithContextConfirmation(
+      allRows,
+      move,
+      () =>
+        confirmDialog({
+          title: t.moveContextConfirmTitle,
+          description: format(t.moveContextConfirm, {
+            name: moved?.name?.trim() || t.breadcrumbUntitled,
+          }),
+          confirmLabel: t.moveContextConfirmAction,
+          cancelLabel: t.cancel,
+        }),
+      props.onMove,
+    );
+  }
+
+  async function handleDragEnd(event: DragEndEvent) {
     setDraggingId(null);
     const { active, over } = event;
     if (!over) return;
@@ -501,7 +509,7 @@ export function DocSidebar(props: Props) {
           r.nestParentId === null &&
           (r.teamspaceId ?? null) === section.teamspaceId,
       );
-      props.onMove({
+      await confirmAndMove({
         viewId: draggedId,
         nestParentId: null,
         position: sectionRoots.length,
@@ -518,7 +526,7 @@ export function DocSidebar(props: Props) {
       // Reparent under the target; append to the end of its children. The
       // child adopts the target's teamspace server-side — no teamspaceId here.
       const siblings = allRows.filter((r) => r.nestParentId === target.nodeId);
-      props.onMove({
+      await confirmAndMove({
         viewId: draggedId,
         nestParentId: target.nodeId,
         position: siblings.length,
@@ -545,7 +553,7 @@ export function DocSidebar(props: Props) {
     const targetIdx = siblings.findIndex((r) => r.id === target.nodeId);
     // Insert after the target. The server re-packs positions, so a
     // 1-based "after" index is a safe target.
-    props.onMove({
+    await confirmAndMove({
       viewId: draggedId,
       nestParentId: parentId,
       position: targetIdx + 1,
