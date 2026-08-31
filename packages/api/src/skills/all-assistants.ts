@@ -23,7 +23,15 @@
  *   2. `POST /api/assistants/:id/workspace-skills/:sid/disable`
  *                                              (assistant-centric, one skill)
  *   3. `skill_manage` disable                  (agent-surface write tool)
- * plus the "disable everywhere" path, which clears the flag AND drops rows.
+ *
+ * Two paths deliberately do NOT convert:
+ *   * `PUT /:id/access` with `{ allAssistants: true }` sets the flag and then
+ *     calls `disableAll` directly — the flag is already the wider grant, so
+ *     dropping the now-redundant rows cannot lose access.
+ *   * Curator archival leaves the flag alone. `listForWorkspaceContent`
+ *     filters `state IN ('active','stale')`, so an archived skill is never
+ *     offered whatever the flag says, and clearing it would destroy the scope
+ *     a restore should bring back.
  *
  * [COMP:api/skill-all-assistants]
  */
@@ -96,28 +104,16 @@ export async function materialiseAllAssistants(
 }
 
 /**
- * "Disable everywhere": drop every row AND clear the flag.
+ * NOTE — there is deliberately no `disableForAllAssistants` helper.
  *
- * `disableAll` alone is not enough — on a flagged skill it deletes zero rows
- * and leaves the flag standing, so the UI reports the skill disabled while the
- * runtime keeps offering it to every assistant. Order is the mirror of the
- * conversion above: clear the FLAG first, so a crash leaves the skill offered
- * to strictly fewer assistants rather than more.
+ * A "drop every row AND clear the flag" operation would be the right shape for
+ * a *user-facing* "disable everywhere" action, but no such surface calls
+ * `disableAll` today: its only two callers are this module's sibling above and
+ * the `allAssistants: true` branch of `PUT /:id/access`, which sets the flag
+ * first and is therefore already correct. Shipping the helper unused would be
+ * a dead export plus a doc that overclaims what the code does.
+ *
+ * If a "disable everywhere" surface is ever added, it must clear the FLAG
+ * first and drop rows second — the mirror of the conversion above, so a crash
+ * leaves the skill offered to strictly fewer assistants rather than more.
  */
-export async function disableForAllAssistants(input: {
-  skill: { rowId: string; workspaceId: string; allAssistants: boolean }
-  actingUserId: string
-  enablementStore: Pick<WorkspaceSkillEnablementStore, 'disableAll'>
-  workspaceSkillStore: Pick<WorkspaceSkillStore, 'setAllAssistants'>
-}): Promise<void> {
-  const { skill, actingUserId, enablementStore, workspaceSkillStore } = input
-  if (skill.allAssistants) {
-    await workspaceSkillStore.setAllAssistants(
-      actingUserId,
-      skill.workspaceId,
-      skill.rowId,
-      false,
-    )
-  }
-  await enablementStore.disableAll(skill.rowId)
-}

@@ -1,8 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import {
-  materialiseAllAssistants,
-  disableForAllAssistants,
-} from '../all-assistants.js'
+import { materialiseAllAssistants } from '../all-assistants.js'
 
 /**
  * The conversion between the `all_assistants` intent and materialised
@@ -96,32 +93,22 @@ describe('[COMP:api/skill-all-assistants] all_assistants conversion', () => {
     expect(h.setAllAssistants).toHaveBeenCalledWith('u-1', 'ws-1', 'row-1', false)
   })
 
-  it('disable-everywhere clears the flag BEFORE dropping rows', async () => {
+  it('materialises nothing when the workspace has one assistant and it is the excluded one', async () => {
     const h = harness(true)
 
-    await disableForAllAssistants({
+    const result = await materialiseAllAssistants({
       skill: h.skill,
       actingUserId: 'u-1',
+      listAssistantIds: async () => ['a-1'],
       enablementStore: h.enablementStore,
       workspaceSkillStore: h.workspaceSkillStore,
+      exclude: ['a-1'],
     })
 
-    // Without the flag write this is the silent-success bug: zero rows to
-    // delete, flag still true, skill still offered to everyone.
-    expect(h.calls).toEqual(['setAllAssistants', 'disableAll'])
-  })
-
-  it('disable-everywhere on an unflagged skill drops rows and writes no flag', async () => {
-    const h = harness(false)
-
-    await disableForAllAssistants({
-      skill: h.skill,
-      actingUserId: 'u-1',
-      enablementStore: h.enablementStore,
-      workspaceSkillStore: h.workspaceSkillStore,
-    })
-
-    expect(h.calls).toEqual(['disableAll'])
-    expect(h.setAllAssistants).not.toHaveBeenCalled()
+    // Offered to nobody is a legitimate end state — the user turned the only
+    // assistant off. What must NOT happen is the flag surviving it.
+    expect(result.enabledAssistantIds).toEqual([])
+    expect(h.enable).not.toHaveBeenCalled()
+    expect(h.calls).toEqual(['setAllAssistants'])
   })
 })
