@@ -9,3 +9,9 @@
 !.env.example
 *.log
 .DS_Store
+.use-brian
+.gstack
+**/coverage
+**/*.tsbuildinfo
+apps/browser-extension/release
+packages/api/eval-results
