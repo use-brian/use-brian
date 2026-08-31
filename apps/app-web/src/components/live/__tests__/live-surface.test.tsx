@@ -1,7 +1,7 @@
 /**
  * [COMP:app-web/live-app] / [COMP:app-web/live-watch-pane] visual structure.
- * SSR pins the roster-backed graph, reduced-motion contract, run card, and
- * wide activity rail without starting a browser stream.
+ * SSR pins the roster-backed four-zone overview, reduced-motion contract,
+ * run card, and wide activity rail without starting a browser stream.
  */
 
 import { describe, expect, it } from "vitest";
@@ -72,24 +72,61 @@ describe("[COMP:app-web/live-app] visual overview", () => {
     );
   });
 
-  it("draws a roster-backed pulse graph with real state counts and reduced-motion fallbacks", () => {
+  it("splits the overview into four roster-backed zones with assistant and channel detail", () => {
     const html = wrap(
       <LiveOverview
+        workspaceId="workspace-1"
         items={[
-          session(),
-          session({ id: "stalled", state: "stalled" }),
+          session({ title: "Plan the launch" }),
+          session({
+            id: "stalled",
+            assistantName: "Ops",
+            channelType: "telegram",
+            state: "stalled",
+          }),
           run(),
           run({ id: "done", state: "settled" }),
         ]}
       />,
     );
-    expect(html).toContain("data-live-activity-graph");
+    expect(html.match(/data-live-status-zone=/g)).toHaveLength(4);
+    expect(html).toContain('data-live-status-zone="working"');
+    expect(html).toContain('data-live-status-zone="waiting"');
+    expect(html).toContain('data-live-status-zone="stalled"');
+    expect(html).toContain('data-live-status-zone="settled"');
     expect(html).toContain(`${en.liveApp.stateWorking}: 1`);
     expect(html).toContain(`${en.liveApp.stateWaiting}: 1`);
     expect(html).toContain(`${en.liveApp.stateStalled}: 1`);
     expect(html).toContain(`${en.liveApp.stateSettled}: 1`);
+    expect(html).toContain("Brian");
+    expect(html).toContain("web");
+    expect(html).toContain("Plan the launch");
+    expect(html).toContain("Ops");
+    expect(html).toContain("telegram");
+    expect(html).toContain(en.liveApp.runLabel);
+    expect(html).toContain("Review output");
     expect(html).toContain("motion-safe:animate-ping");
     expect(html).toContain("motion-reduce:animate-none");
+  });
+
+  it("keeps presence-only assistant/channel rows visible but non-interactive", () => {
+    const html = wrap(
+      <LiveOverview
+        workspaceId="workspace-1"
+        items={[
+          session({
+            id: "private-session",
+            tier: "presence",
+            assistantName: "Research",
+            channelType: "slack",
+          }),
+        ]}
+      />,
+    );
+    expect(html).toContain("Research");
+    expect(html).toContain("slack");
+    expect(html).toContain(en.liveApp.presenceHint);
+    expect(html).not.toContain("focus=session%3Aprivate-session");
   });
 
   it("uses the same compact visual language for a focused workflow run", () => {
