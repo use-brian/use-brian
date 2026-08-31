@@ -478,7 +478,7 @@ describe('[COMP:api/skills-route] POST /catalog/:slug/install', () => {
       }),
       { notify: false },
     )
-    // mig 491: a catalog install with no explicit subset means "every
+    // mig 492: a catalog install with no explicit subset means "every
     // assistant, including future ones", which is stored on the row (see the
     // `allAssistants: true` assertion on the create call) rather than fanned
     // out into rows that would go stale the next time an assistant is created.

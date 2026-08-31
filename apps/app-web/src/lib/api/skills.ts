@@ -76,7 +76,7 @@ export type WorkspaceSkillSummary = {
   requiresConnectors: string[];
   /** Allowlist of assistant ids the skill is offered to (D4 semantics). */
   enabledAssistantIds: string[];
-  /** Applies to every assistant, including ones created later (mig 491). */
+  /** Applies to every assistant, including ones created later (mig 492). */
   allAssistants?: boolean;
   /** ISO timestamp of the most recent invocation; null ⇒ never invoked. */
   lastInvokedAt: string | null;
@@ -322,7 +322,7 @@ export async function getSkillAccess(
  *
  * Sending the full id list is NOT equivalent to `allAssistants: true`: it
  * pins the skill to the assistants that exist today, which is the behaviour
- * mig 491 exists to stop being the default.
+ * mig 492 exists to stop being the default.
  */
 export async function setSkillAccess(
   skillRowId: string,

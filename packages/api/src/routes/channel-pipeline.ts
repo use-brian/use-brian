@@ -557,7 +557,7 @@ export type ChannelPipelineParams = {
   skillStore?: SkillStore
   /**
    * Workspace-skill surface for `injectSkills`. Both were absent here until
-   * mig 491, which meant messaging channels could only see the legacy
+   * mig 492, which meant messaging channels could only see the legacy
    * slug-keyed skill toggles — never the `workspace_skill_enablement`
    * allowlist, and never the `all_assistants` flag. A workspace skill that was
    * plainly enabled in the web app was simply not offered on Telegram.
@@ -1887,7 +1887,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
       // Scope skills to the assistant's workspace (not the owner's personal
       // workspace) — see injectSkills / incident 2026-06-01.
       workspaceId: assistant.workspaceId ?? undefined,
-      // Both stores were missing here until mig 491, so on every messaging
+      // Both stores were missing here until mig 492, so on every messaging
       // channel a workspace skill was gated ONLY by the legacy slug-keyed
       // `assistant_skill_settings` table: the `workspace_skill_enablement`
       // allowlist was invisible, and so was the `all_assistants` flag. The
