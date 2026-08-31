@@ -52,6 +52,81 @@ export type Crumb = {
   nameOrigin: NameOrigin;
 };
 
+export type ContextAwareReparentMove = {
+  viewId: string;
+  nestParentId: string | null;
+  /** Target sibling index among the new parent's children. */
+  position: number;
+  /**
+   * Target teamspace for a root drop: an id files the page into that
+   * Teamspace, `null` files it Private, and omission keeps the current one.
+   */
+  teamspaceId?: string | null;
+  /** Explicit user acceptance when the destination changes access context. */
+  contextMoveConfirmed?: boolean;
+};
+
+/**
+ * Whether a sidebar reparent changes the moved page's Teamspace or Project.
+ *
+ * This is the client-side preflight for the server's authoritative
+ * `contextMoveConfirmed` gate. A page-parent destination inherits both
+ * context ids from that parent. A root destination may explicitly change the
+ * Teamspace; Project stays unchanged because the root-drop UI has no Project
+ * target. Missing/stale rows return false and let the server fail honestly.
+ */
+export function reparentChangesContext(
+  rows: ViewListRow[],
+  move: {
+    viewId: string;
+    nestParentId: string | null;
+    teamspaceId?: string | null;
+  },
+): boolean {
+  const moved = rows.find((row) => row.id === move.viewId);
+  if (!moved) return false;
+
+  const currentTeamspaceId = moved.teamspaceId ?? null;
+  const currentProjectId = moved.projectId ?? null;
+  let destinationTeamspaceId = currentTeamspaceId;
+  let destinationProjectId = currentProjectId;
+
+  if (move.nestParentId !== null) {
+    const parent = rows.find((row) => row.id === move.nestParentId);
+    if (!parent) return false;
+    destinationTeamspaceId = parent.teamspaceId ?? null;
+    destinationProjectId = parent.projectId ?? null;
+  } else if (move.teamspaceId !== undefined) {
+    destinationTeamspaceId = move.teamspaceId;
+  }
+
+  return (
+    destinationTeamspaceId !== currentTeamspaceId ||
+    destinationProjectId !== currentProjectId
+  );
+}
+
+/**
+ * Dispatch a sidebar reparent only after any context change is confirmed.
+ * Keeping the side-effect boundary here makes the three guarantees explicit:
+ * cancel dispatches nothing, accept carries the literal server flag, and a
+ * same-context move bypasses the dialog.
+ */
+export async function dispatchReparentWithContextConfirmation(
+  rows: ViewListRow[],
+  move: ContextAwareReparentMove,
+  confirmContextMove: () => Promise<boolean>,
+  onMove: (move: ContextAwareReparentMove) => void,
+): Promise<void> {
+  if (!reparentChangesContext(rows, move)) {
+    onMove(move);
+    return;
+  }
+
+  if (!(await confirmContextMove())) return;
+  onMove({ ...move, contextMoveConfirmed: true });
+}
+
 /**
  * Sort comparator for siblings: ascending `position`, then `updatedAt`
  * descending as a stable tiebreak (two rows colliding on the same

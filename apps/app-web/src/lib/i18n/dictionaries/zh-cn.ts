@@ -1141,6 +1141,10 @@ export const zhCN: Dictionary = {
     createDraftFailed: "无法创建草稿：{message}",
     saveFailed: "无法保存：{message}",
     unsaveFailed: "无法移至草稿：{message}",
+    moveContextConfirmTitle: "要将页面移至其他内容范围吗？",
+    moveContextConfirm:
+      "“{name}”及其所有子页面将继承目的地的团队空间与项目。可访问这些页面的用户可能会改变。",
+    moveContextConfirmAction: "移动页面",
     patchPageFailed: "无法保存变更：{message}",
     undoFailed: "无法恢复：{message}",
     undoUnavailable: "没有可恢复的操作",
