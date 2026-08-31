@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { Dialog } from "@base-ui/react/dialog";
 import { ArchiveRestore, Download, GitMerge, MoreHorizontal, Plus, Upload, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -25,7 +25,6 @@ import {
   fetchCrmDuplicates,
   fetchCrmSeparations,
   fetchWorkspaceCrm,
-  importCrmRecords,
   keepCrmRecordsSeparate,
   mergeCrmRecords,
   reviewCrmSeparationAgain,
@@ -41,7 +40,6 @@ import {
 import {
   CRM_IMPORT_FIELDS,
   crmFieldKeyFromLabel,
-  mapCrmCsvRows,
   parseCrmCsv,
   suggestedCrmCsvMapping,
   type CrmImportKind,
@@ -49,6 +47,7 @@ import {
 } from "@/lib/crm-r2";
 import { useT } from "@/lib/i18n/client";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+import { CrmProductionImportPanel } from "@/components/crm/operations/import-panel";
 
 export type CrmActionDialog = "create" | "import" | "duplicates" | "archive" | null;
 
@@ -140,7 +139,6 @@ export function CrmActions({
       />
       <ImportDialog
         workspaceId={workspaceId}
-        data={data}
         config={config}
         canCreateField={role === "owner" || role === "admin"}
         open={dialog === "import"}
@@ -320,9 +318,8 @@ function CreateDialog({ workspaceId, data, config, open, initialKind, onOpenChan
   );
 }
 
-function ImportDialog({ workspaceId, data, config, canCreateField, open, initialKind, onOpenChange, onImported }: {
+function ImportDialog({ workspaceId, config, canCreateField, open, initialKind, onOpenChange, onImported }: {
   workspaceId: string;
-  data: CrmData | null;
   config: CrmConfig | null;
   canCreateField: boolean;
   open: boolean;
@@ -332,6 +329,7 @@ function ImportDialog({ workspaceId, data, config, canCreateField, open, initial
 }) {
   const t = useT().crmPage.r2;
   const [kind, setKind] = useState<CrmImportKind>(initialKind);
+  const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<CsvPreview | null>(null);
   const [mapping, setMapping] = useState<Record<number, string | null>>({});
   const [fields, setFields] = useState<CrmFieldDefinition[]>(config?.fields ?? []);
@@ -342,11 +340,6 @@ function ImportDialog({ workspaceId, data, config, canCreateField, open, initial
   const [newReferenceKinds, setNewReferenceKinds] = useState<Array<"person" | "company" | "deal">>(["company"]);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<string | null>(null);
-  const [importErrors, setImportErrors] = useState<Array<{ row: number; error: string }>>([]);
-  const mapped = useMemo(
-    () => preview ? mapCrmCsvRows(preview, kind, mapping, fields, data) : [],
-    [preview, kind, mapping, fields, data],
-  );
   const entityKind = kind === "contact" ? "person" : kind;
   const availableFields = fields.filter((field) => field.entityKind === entityKind);
   const importLabels: Record<string, string> = {
@@ -368,6 +361,10 @@ function ImportDialog({ workspaceId, data, config, canCreateField, open, initial
     setKind(initialKind);
     setFields(config?.fields ?? []);
     setCreateColumn(null);
+    setFile(null);
+    setPreview(null);
+    setMapping({});
+    setResult(null);
   }, [open, initialKind, config]);
 
   async function createMappedField() {
@@ -416,12 +413,12 @@ function ImportDialog({ workspaceId, data, config, canCreateField, open, initial
           onChange={(event) => {
             const file = event.target.files?.[0];
             if (!file) return;
+            setFile(file);
             void file.text().then((source) => {
-              const next = parseCrmCsv(source, 500);
+              const next = parseCrmCsv(source, 50);
               setPreview(next);
               setMapping(suggestedCrmCsvMapping(next.headers, kind, fields));
               setResult(null);
-              setImportErrors([]);
             });
           }}
           className="block w-full rounded-lg border border-border p-2 text-xs file:mr-3 file:rounded-md file:border-0 file:bg-muted file:px-3 file:py-1.5"
@@ -482,33 +479,19 @@ function ImportDialog({ workspaceId, data, config, canCreateField, open, initial
                 </table>
               </div>
             )}
-            <div className="text-xs text-muted-foreground">{t.previewRows.replace("{count}", String(preview.rows.length))}{preview.truncated ? ` ${t.importCapped}` : ""}</div>
+            <div className="text-xs text-muted-foreground">{t.previewRows.replace("{count}", String(preview.rows.length))}{preview.truncated ? ` ${t.importPreviewOnly}` : ""}</div>
           </>
         )}
         {result && <div className="text-xs">{result}</div>}
-        {importErrors.length > 0 && (
-          <div className="max-h-32 space-y-1 overflow-y-auto rounded-lg border border-destructive/30 bg-destructive/5 p-2 text-xs text-destructive">
-            {importErrors.map((failure) => (
-              <div key={`${failure.row}-${failure.error}`}>
-                {t.importRowError.replace("{row}", String(failure.row)).replace("{error}", failure.error)}
-              </div>
-            ))}
-          </div>
-        )}
-        <div className="flex justify-end gap-2"><Button variant="outline" onClick={() => onOpenChange(false)}>{t.cancel}</Button><Button disabled={busy || mapped.length === 0 || !mapped.every((row) => typeof row.name === "string")} onClick={() => void (async () => {
-          setBusy(true);
-          setImportErrors([]);
-          try {
-            const imported = await importCrmRecords(workspaceId, mapped);
-            setResult(t.importResult.replace("{created}", String(imported.created)).replace("{failed}", String(imported.failed)));
-            setImportErrors(imported.results.flatMap((item) => item.error ? [{ row: item.row, error: item.error }] : []));
-            if (imported.failed === 0) onImported();
-          } catch (cause) {
-            setResult(cause instanceof Error ? cause.message : t.importFailed);
-          } finally {
-            setBusy(false);
-          }
-        })()}>{busy ? t.importing : t.importAction}</Button></div>
+        <div className="flex justify-end"><Button variant="outline" onClick={() => onOpenChange(false)}>{t.cancel}</Button></div>
+        <CrmProductionImportPanel
+          workspaceId={workspaceId}
+          file={file}
+          kind={kind}
+          mapping={mapping}
+          ready={!!preview && Object.values(mapping).includes("name")}
+          onImported={onImported}
+        />
       </div>
     </Shell>
   );

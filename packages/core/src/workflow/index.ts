@@ -113,6 +113,7 @@ export {
   type WorkflowEventDispatchError,
   type WorkflowEventDispatcherDeps,
   type WorkflowEventDispatcher,
+  type StrictWorkflowEventDispatcher,
 } from './event-trigger.js'
 
 export {
@@ -150,6 +151,12 @@ export {
   type BrandLifecycleEvent,
   type BrandWriteActor,
 } from './brand-event-trigger.js'
+
+export {
+  redactCrmDomainEventPayload,
+  crmDomainEventToDispatchEvent,
+  type CrmDomainEventEnvelope,
+} from './crm-event-trigger.js'
 
 export {
   createRunQueueWorker,

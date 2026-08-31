@@ -55,6 +55,8 @@ export type WorkflowsRouteOptions = {
   workspaceStore: WorkspaceStore
   /** Executor deps used by the manual-run path; same instance the chat tool uses. */
   executorDeps: ExecutorDeps
+  /** Closed workspace CRM keys accepted by CRM event `match.tags`. */
+  listCrmWorkflowEventFilterKeys?: (workspaceId: string) => Promise<string[]>
   /**
    * Optional emit hook for `workflow.created` / `workflow.deleted` audit
    * events. The chat-tool path already emits `workflow.created` — the REST
@@ -247,6 +249,23 @@ function validationError(
       ? rawIssues.map((i) => ({ ...i, path: [prefix, ...i.path] }))
       : rawIssues,
   })
+}
+
+async function crmTriggerCatalogError(
+  trigger: WorkflowTrigger,
+  workspaceId: string,
+  listKeys: WorkflowsRouteOptions['listCrmWorkflowEventFilterKeys'],
+): Promise<string | null> {
+  if (trigger.kind !== 'event' || !listKeys) return null
+  const requested = [...new Set(trigger.event.sources.flatMap((subscription) =>
+    subscription.source.type === 'crm' ? subscription.match?.tags ?? [] : [],
+  ))]
+  if (requested.length === 0) return null
+  const valid = await listKeys(workspaceId)
+  const unknown = requested.filter((key) => !valid.includes(key))
+  return unknown.length
+    ? `Unknown CRM workflow filter key(s): ${unknown.join(', ')}. Valid values: ${valid.slice(0, 500).join(', ')}.`
+    : null
 }
 const notFound = (res: import('express').Response, what = 'Not found') =>
   void res.status(404).json({ error: what })
@@ -640,6 +659,8 @@ export function workflowsRoutes(opts: WorkflowsRouteOptions): Router {
         return validationError(res, 'trigger', triggerParsed.error)
       }
       trigger = triggerParsed.data
+      const catalogError = await crmTriggerCatalogError(trigger, parsed.data.workspaceId, opts.listCrmWorkflowEventFilterKeys)
+      if (catalogError) return void res.status(400).json({ error: catalogError })
     }
 
     // For webhook triggers, mint slug + secret at creation time. Callers
@@ -775,6 +796,8 @@ export function workflowsRoutes(opts: WorkflowsRouteOptions): Router {
         return validationError(res, 'trigger', triggerParsed.error)
       }
       fields.trigger = triggerParsed.data
+      const catalogError = await crmTriggerCatalogError(triggerParsed.data, existing.workspaceId, opts.listCrmWorkflowEventFilterKeys)
+      if (catalogError) return void res.status(400).json({ error: catalogError })
 
       // Webhook lifecycle:
       //   - changing to/staying on webhook → mint slug+secret on first

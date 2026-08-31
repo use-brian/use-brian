@@ -1,252 +1,336 @@
 "use client";
 
 /**
- * Live — the all-activity watch surface (docs/architecture/features/live-work.md).
+ * Live content pane. The roster lives in the persistent workspace sidebar;
+ * this surface owns the shared top bar and the full-width focused detail.
+ * Focus is URL-addressed by the sidebar (`focus=<kind>:<id>`), so browser
+ * history and reload preserve the same watch target.
  *
- * Master-detail: the tiered roster on the left (*Working now* — sessions and
- * workflow runs interleaved, newest activity first — over *Just finished*,
- * the server's 30-minute window), and the watch pane on the right for the
- * focused item. Read/watch-only v1 (D1): no Stop, no composer — the
- * conversational path is the "Open in chat" deep link (D11), and run rows
- * deep-link to the run detail.
- *
- * Realtime: this page is a normal navigable surface (it REMOUNTS), so
- * mount-fetch + subscribe is correct here — unlike persistent chrome, which
- * must be spine-subscribed (realtime-sync.md). It refetches on
- * `LIVE_REFRESH_EVENT` (the `session` primitive), `WORKFLOW_REFRESH_EVENT`
- * (run rows), and `SCHEDULED_JOB_REFRESH_EVENT` (schedule edits change what
- * is about to fire) — the first listener that event has ever had. Effects
- * follow `strict-mode-unmount-latch`: the cancelled latch resets on the way
- * IN.
- *
- * Presence rows (a teammate's personal session, D4) render compact and
- * visually distinct with NO open affordance — the §6.1 allowlist is all the
- * client ever receives, so there is nothing to open.
+ * Read/watch-only v1: no Stop and no composer. The top bar's right slot owns
+ * the sanctioned handoff to Chat or the workflow-run detail.
  *
  * [COMP:app-web/live-app]
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { Activity, ExternalLink, Lock } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { useSearchParams } from "next/navigation";
+import {
+  Activity,
+  Bot,
+  CheckCircle2,
+  CircleAlert,
+  Clock3,
+  ExternalLink,
+  GitBranch,
+} from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
-import { fetchLiveRoster, type LiveWorkItem } from "@/lib/api/live";
-import { canWatch, groupRosterItems } from "@/lib/live-roster";
+import type { LiveWorkItem, LiveWorkflowRunItem } from "@/lib/api/live";
 import {
-  LIVE_REFRESH_EVENT,
-  SCHEDULED_JOB_REFRESH_EVENT,
-} from "@/lib/workspace-events";
-import { WORKFLOW_REFRESH_EVENT } from "@/lib/workflow-events";
+  LIVE_FOCUS_PARAM,
+  canFocusLiveItem,
+  canWatch,
+  focusedLiveItem,
+  liveItemTitle,
+  summarizeRosterItems,
+  type LiveRosterSummary,
+} from "@/lib/live-roster";
+import { OperatorTopbar } from "@/components/operator/operator-topbar";
 import { LiveWatchPane } from "@/components/live/live-watch-pane";
+import { useLiveRoster } from "@/components/live/use-live-roster";
 
-const REFRESH_EVENTS = [
-  LIVE_REFRESH_EVENT,
-  WORKFLOW_REFRESH_EVENT,
-  SCHEDULED_JOB_REFRESH_EVENT,
-] as const;
+const topbarActionCls =
+  "inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2 text-xs font-medium text-sidebar-foreground/70 transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground";
 
-function itemKey(item: LiveWorkItem): string {
-  return `${item.kind}:${item.id}`;
+type StatusMetricProps = {
+  label: string;
+  count: number;
+  icon: typeof Activity;
+  tone: string;
+};
+
+function StatusMetric({ label, count, icon: Icon, tone }: StatusMetricProps) {
+  return (
+    <div className="flex min-h-28 flex-col justify-between rounded-2xl border border-border/70 bg-card p-4 shadow-sm">
+      <span className={`grid size-8 place-items-center rounded-xl ${tone}`}>
+        <Icon className="size-4" strokeWidth={1.8} aria-hidden />
+      </span>
+      <span>
+        <span className="block text-2xl font-semibold tabular-nums tracking-tight text-foreground">
+          {count}
+        </span>
+        <span className="block text-[11px] font-medium text-muted-foreground">
+          {label}
+        </span>
+      </span>
+    </div>
+  );
 }
 
-function relativeAge(
-  iso: string,
-  t: { justNow: string; minutesAgo: string; hoursAgo: string },
-): string {
-  const ms = Date.now() - new Date(iso).getTime();
-  const minutes = Math.floor(ms / 60_000);
-  if (minutes < 1) return t.justNow;
-  if (minutes < 60) return format(t.minutesAgo, { m: minutes });
-  return format(t.hoursAgo, { h: Math.floor(minutes / 60) });
+function PulseNode({
+  count,
+  label,
+  icon: Icon,
+  className,
+  tone,
+}: StatusMetricProps & { className: string }) {
+  const active = count > 0;
+  return (
+    <span
+      className={`absolute ${className} flex -translate-x-1/2 -translate-y-1/2 flex-col items-center gap-1.5`}
+      aria-label={`${label}: ${count}`}
+    >
+      <span className="relative grid size-12 place-items-center">
+        {active ? (
+          <span
+            className={`absolute inset-1 rounded-2xl opacity-35 motion-safe:animate-ping motion-reduce:animate-none ${tone}`}
+            aria-hidden
+          />
+        ) : null}
+        <span
+          className={`relative grid size-10 place-items-center rounded-2xl border border-border/70 bg-background shadow-md ${
+            active ? tone : "text-muted-foreground/35"
+          }`}
+        >
+          <Icon className="size-[18px]" strokeWidth={1.8} aria-hidden />
+        </span>
+        <span className="absolute -right-1 -top-1 grid min-w-5 place-items-center rounded-full border border-border bg-background px-1 text-[10px] font-semibold tabular-nums text-foreground shadow-sm">
+          {count}
+        </span>
+      </span>
+      <span className="text-[10px] font-medium text-muted-foreground">{label}</span>
+    </span>
+  );
+}
+
+function ActivityTopology({
+  summary,
+  emptyLabel,
+  labels,
+}: {
+  summary: LiveRosterSummary;
+  emptyLabel: string;
+  labels: Pick<
+    ReturnType<typeof useT>["liveApp"],
+    "stateWorking" | "stateWaiting" | "stateStalled" | "stateSettled"
+  >;
+}) {
+  return (
+    <div
+      data-live-activity-graph
+      className="relative min-h-[310px] overflow-hidden rounded-3xl border border-border/70 bg-gradient-to-br from-primary/[0.07] via-card to-violet-500/[0.06] shadow-sm"
+    >
+      <svg
+        viewBox="0 0 620 310"
+        preserveAspectRatio="none"
+        className="absolute inset-0 size-full text-border/80"
+        fill="none"
+        aria-hidden
+      >
+        <path d="M310 155 C235 155 220 72 135 72" stroke="currentColor" />
+        <path d="M310 155 C385 155 400 72 485 72" stroke="currentColor" />
+        <path d="M310 155 C235 155 220 238 135 238" stroke="currentColor" />
+        <path d="M310 155 C385 155 400 238 485 238" stroke="currentColor" />
+      </svg>
+
+      <span className="absolute left-1/2 top-1/2 grid size-20 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-[1.6rem] border border-primary/20 bg-background/90 text-primary shadow-lg backdrop-blur-sm">
+        {summary.active > 0 ? (
+          <span
+            className="absolute inset-2 rounded-[1.15rem] bg-primary/15 motion-safe:animate-pulse motion-reduce:animate-none"
+            aria-hidden
+          />
+        ) : null}
+        <Activity className="relative size-7" strokeWidth={1.7} aria-hidden />
+        <span className="absolute -right-2 -top-2 grid min-w-7 place-items-center rounded-full bg-primary px-1.5 text-[11px] font-bold tabular-nums text-primary-foreground shadow-sm">
+          {summary.active}
+        </span>
+      </span>
+
+      <PulseNode
+        className="left-[22%] top-[23%]"
+        count={summary.working}
+        label={labels.stateWorking}
+        icon={Bot}
+        tone="bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+      />
+      <PulseNode
+        className="left-[78%] top-[23%]"
+        count={summary.waiting}
+        label={labels.stateWaiting}
+        icon={Clock3}
+        tone="bg-amber-500/15 text-amber-600 dark:text-amber-400"
+      />
+      <PulseNode
+        className="left-[22%] top-[77%]"
+        count={summary.stalled}
+        label={labels.stateStalled}
+        icon={CircleAlert}
+        tone="bg-red-500/15 text-red-600 dark:text-red-400"
+      />
+      <PulseNode
+        className="left-[78%] top-[77%]"
+        count={summary.settled}
+        label={labels.stateSettled}
+        icon={CheckCircle2}
+        tone="bg-sky-500/15 text-sky-600 dark:text-sky-400"
+      />
+
+      <span className="absolute inset-x-0 bottom-3 text-center text-[11px] font-medium text-muted-foreground/70">
+        {emptyLabel}
+      </span>
+    </div>
+  );
+}
+
+export function LiveOverview({ items }: { items: LiveWorkItem[] }) {
+  const tl = useT().liveApp;
+  const summary = summarizeRosterItems(items);
+  return (
+    <div className="mx-auto grid w-full max-w-6xl items-stretch gap-4 lg:grid-cols-[minmax(0,1fr)_300px]">
+      <ActivityTopology summary={summary} emptyLabel={tl.watchEmpty} labels={tl} />
+      <div className="grid grid-cols-2 gap-3">
+        <StatusMetric
+          label={tl.stateWorking}
+          count={summary.working}
+          icon={Bot}
+          tone="bg-emerald-500/12 text-emerald-600 dark:text-emerald-400"
+        />
+        <StatusMetric
+          label={tl.stateWaiting}
+          count={summary.waiting}
+          icon={Clock3}
+          tone="bg-amber-500/12 text-amber-600 dark:text-amber-400"
+        />
+        <StatusMetric
+          label={tl.stateStalled}
+          count={summary.stalled}
+          icon={CircleAlert}
+          tone="bg-red-500/12 text-red-600 dark:text-red-400"
+        />
+        <StatusMetric
+          label={tl.stateSettled}
+          count={summary.settled}
+          icon={CheckCircle2}
+          tone="bg-sky-500/12 text-sky-600 dark:text-sky-400"
+        />
+      </div>
+    </div>
+  );
+}
+
+export function LiveRunOverview({ item }: { item: LiveWorkflowRunItem }) {
+  const tl = useT().liveApp;
+  const stateLabel = {
+    working: tl.stateWorking,
+    waiting: tl.stateWaiting,
+    stalled: tl.stateStalled,
+    settled: tl.stateSettled,
+  }[item.state];
+  const active = item.state !== "settled";
+  return (
+    <div
+      data-live-run-overview
+      className="mx-auto grid w-full max-w-4xl overflow-hidden rounded-3xl border border-border/70 bg-card shadow-sm md:grid-cols-[280px_minmax(0,1fr)]"
+    >
+      <div className="relative min-h-56 overflow-hidden border-b border-border/70 bg-gradient-to-br from-violet-500/[0.08] via-background to-primary/[0.06] md:border-b-0 md:border-r">
+        <span className="absolute left-1/2 top-1/2 h-px w-36 -translate-x-1/2 bg-border" aria-hidden />
+        {["left-[25%]", "left-1/2", "left-[75%]"].map((position, index) => (
+          <span
+            key={position}
+            className={`absolute top-1/2 ${position} grid size-9 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-xl border border-border bg-background shadow-sm`}
+          >
+            {active && index === 1 ? (
+              <span className="absolute inset-1 rounded-lg bg-violet-500/20 motion-safe:animate-ping motion-reduce:animate-none" aria-hidden />
+            ) : null}
+            <span className={`relative size-2 rounded-full ${index === 1 ? "bg-violet-500" : "bg-muted-foreground/35"}`} aria-hidden />
+          </span>
+        ))}
+        <span className="absolute left-1/2 top-[22%] grid size-10 -translate-x-1/2 place-items-center rounded-2xl bg-violet-500/12 text-violet-600 dark:text-violet-400">
+          <GitBranch className="size-5" strokeWidth={1.8} aria-hidden />
+        </span>
+      </div>
+      <div className="flex min-w-0 flex-col justify-center gap-4 p-6 sm:p-8">
+        <span className="inline-flex w-fit items-center gap-2 rounded-full border border-border/70 bg-muted/35 px-3 py-1.5 text-xs font-medium text-muted-foreground">
+          <span className={`size-1.5 rounded-full ${active ? "bg-violet-500 motion-safe:animate-pulse motion-reduce:animate-none" : "bg-muted-foreground/40"}`} aria-hidden />
+          {stateLabel}
+        </span>
+        {item.stepSummary ? (
+          <p className="truncate text-lg font-semibold tracking-tight text-foreground">
+            {format(tl.currentStep, { step: item.stepSummary })}
+          </p>
+        ) : null}
+      </div>
+    </div>
+  );
 }
 
 export function LiveSurface({ workspaceId }: { workspaceId: string }) {
   const t = useT();
   const tl = t.liveApp;
-  const [items, setItems] = useState<LiveWorkItem[]>([]);
-  const [loaded, setLoaded] = useState(false);
-  const [error, setError] = useState(false);
-  const [focusedKey, setFocusedKey] = useState<string | null>(null);
-  const cancelledRef = useRef(false);
-
-  const load = useCallback(async () => {
-    try {
-      const roster = await fetchLiveRoster(workspaceId);
-      if (cancelledRef.current) return;
-      setItems(roster);
-      setError(false);
-    } catch {
-      if (!cancelledRef.current) setError(true);
-    } finally {
-      if (!cancelledRef.current) setLoaded(true);
-    }
-  }, [workspaceId]);
-
-  useEffect(() => {
-    if (!workspaceId) return;
-    // Strict Mode runs mount → cleanup → mount: reset the latch on the way
-    // in or the second mount believes it is already gone.
-    cancelledRef.current = false;
-    void load();
-    const onRefresh = () => void load();
-    for (const ev of REFRESH_EVENTS) window.addEventListener(ev, onRefresh);
-    return () => {
-      cancelledRef.current = true;
-      for (const ev of REFRESH_EVENTS) window.removeEventListener(ev, onRefresh);
-    };
-  }, [workspaceId, load]);
-
-  const groups = useMemo(() => groupRosterItems(items), [items]);
-  const focused = useMemo(
-    () => items.find((i) => itemKey(i) === focusedKey) ?? null,
-    [items, focusedKey],
+  const searchParams = useSearchParams();
+  const { items, error } = useLiveRoster(workspaceId);
+  const focusedCandidate = focusedLiveItem(
+    items,
+    searchParams.get(LIVE_FOCUS_PARAM),
   );
+  const focused =
+    focusedCandidate && canFocusLiveItem(focusedCandidate)
+      ? focusedCandidate
+      : null;
 
-  const stateLabel: Record<LiveWorkItem["state"], string> = {
-    working: tl.stateWorking,
-    waiting: tl.stateWaiting,
-    stalled: tl.stateStalled,
-    settled: tl.stateSettled,
-  };
-
-  const renderRow = (item: LiveWorkItem) => {
-    const key = itemKey(item);
-    const isFocused = key === focusedKey;
-    const presence = item.kind === "session" && item.tier === "presence";
-    const openable = !presence;
-    const title =
-      item.kind === "workflow_run"
-        ? item.workflowName
-        : (item.title ?? item.assistantName);
-    const subtitle =
-      item.kind === "workflow_run"
-        ? `${tl.runLabel} · ${
-            item.trigger === "scheduled"
-              ? tl.triggerScheduled
-              : item.trigger === "event"
-                ? tl.triggerEvent
-                : tl.triggerManual
-          }`
-        : [item.ownerName, item.assistantName, item.channelType]
-            .filter(Boolean)
-            .join(" · ");
-    return (
-      <button
-        key={key}
-        type="button"
-        disabled={!openable}
-        onClick={() => (openable ? setFocusedKey(isFocused ? null : key) : undefined)}
-        className={cn(
-          "w-full rounded-md border px-3 py-2 text-left transition-colors",
-          presence
-            ? "cursor-default border-dashed bg-muted/30"
-            : "hover:bg-accent/50",
-          isFocused && "border-primary bg-accent/60",
-        )}
-        aria-pressed={isFocused}
+  const action = focused ? (
+    focused.kind === "workflow_run" ? (
+      <Link
+        href={`/w/${workspaceId}/workflow/${focused.workflowId}/runs/${focused.id}`}
+        className={topbarActionCls}
       >
-        <div className="flex items-center justify-between gap-2">
-          <span className={cn("truncate text-sm", presence ? "text-muted-foreground" : "font-medium")}>
-            {title}
-          </span>
-          <span
-            className={cn(
-              "shrink-0 rounded-full px-2 py-0.5 text-[11px]",
-              item.state === "working" && "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400",
-              item.state === "waiting" && "bg-amber-500/15 text-amber-600 dark:text-amber-400",
-              item.state === "stalled" && "bg-red-500/15 text-red-600 dark:text-red-400",
-              item.state === "settled" && "bg-muted text-muted-foreground",
-            )}
-          >
-            {stateLabel[item.state]}
-          </span>
-        </div>
-        <div className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
-          {presence && <Lock className="h-3 w-3 shrink-0" aria-hidden />}
-          <span className="truncate">{subtitle}</span>
-          <span className="ml-auto shrink-0">
-            {relativeAge(item.lastActiveAt, tl)}
-          </span>
-        </div>
-        {presence && (
-          <div className="mt-0.5 text-[11px] text-muted-foreground/80">{tl.presenceHint}</div>
-        )}
-      </button>
-    );
-  };
+        <ExternalLink className="size-3.5" aria-hidden />
+        {tl.openRun}
+      </Link>
+    ) : (
+      <Link
+        href={`/w/${workspaceId}/chat?s=${encodeURIComponent(focused.id)}`}
+        className={topbarActionCls}
+      >
+        <ExternalLink className="size-3.5" aria-hidden />
+        {tl.openInChat}
+      </Link>
+    )
+  ) : null;
 
   return (
-    <div className="flex h-full min-h-0">
-      {/* Roster */}
-      <div className="flex w-80 shrink-0 flex-col gap-4 overflow-y-auto border-r p-4">
-        <div className="flex items-center gap-2">
-          <Activity className="h-4 w-4 text-muted-foreground" aria-hidden />
-          <h1 className="text-sm font-semibold">{tl.title}</h1>
-        </div>
-        {error && <div className="text-sm text-destructive">{tl.loadError}</div>}
-        <section>
-          <h2 className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            {tl.workingNow}
-          </h2>
-          <div className="flex flex-col gap-1.5">
-            {groups.working.length === 0 && loaded && (
-              <p className="text-sm text-muted-foreground">{tl.emptyWorking}</p>
-            )}
-            {groups.working.map(renderRow)}
-          </div>
-        </section>
-        <section>
-          <h2 className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            {tl.justFinished}
-          </h2>
-          <div className="flex flex-col gap-1.5">
-            {groups.finished.length === 0 && loaded && (
-              <p className="text-sm text-muted-foreground">{tl.emptyFinished}</p>
-            )}
-            {groups.finished.map(renderRow)}
-          </div>
-        </section>
-      </div>
+    <div className="flex h-full min-h-0 flex-col">
+      <OperatorTopbar
+        identity={{ label: tl.title, icon: Activity }}
+        center={
+          focused ? (
+            <span className="truncate text-sm font-medium text-sidebar-foreground/80">
+              {liveItemTitle(focused)}
+            </span>
+          ) : null
+        }
+        right={action}
+      />
 
-      {/* Watch pane */}
-      <div className="min-w-0 flex-1 overflow-y-auto p-4">
-        {!focused && (
-          <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-            {tl.watchEmpty}
+      <div className="min-h-0 flex-1 overflow-y-auto bg-muted/[0.16] p-4 sm:p-6">
+        {error ? (
+          <div className="flex h-full items-center justify-center">
+            <div className="flex max-w-sm items-center gap-3 rounded-2xl border border-destructive/20 bg-card px-4 py-3 text-sm text-destructive shadow-sm">
+              <CircleAlert className="size-4 shrink-0" aria-hidden />
+              {tl.loadError}
+            </div>
           </div>
-        )}
-        {focused && focused.kind === "workflow_run" && (
-          <div className="mx-auto max-w-xl space-y-3">
-            <h2 className="text-base font-semibold">{focused.workflowName}</h2>
-            <p className="text-sm text-muted-foreground">
-              {stateLabel[focused.state]}
-              {focused.stepSummary
-                ? ` · ${format(tl.currentStep, { step: focused.stepSummary })}`
-                : ""}
-            </p>
-            <Link
-              href={`/w/${workspaceId}/workflow/${focused.workflowId}/runs/${focused.id}`}
-              className="inline-flex items-center gap-1.5 text-sm text-primary hover:underline"
-            >
-              <ExternalLink className="h-3.5 w-3.5" aria-hidden />
-              {tl.openRun}
-            </Link>
+        ) : !focused ? (
+          <div className="flex min-h-full items-center justify-center py-4">
+            <LiveOverview items={items} />
           </div>
-        )}
-        {focused && canWatch(focused) && (
-          <LiveWatchPane
-            key={focused.id}
-            workspaceId={workspaceId}
-            sessionId={focused.id}
-            title={
-              focused.kind === "session"
-                ? (focused.title ?? focused.assistantName)
-                : ""
-            }
-          />
-        )}
+        ) : focused.kind === "workflow_run" ? (
+          <div className="flex min-h-full items-center justify-center py-4">
+            <LiveRunOverview item={focused} />
+          </div>
+        ) : canWatch(focused) ? (
+          <LiveWatchPane key={focused.id} sessionId={focused.id} />
+        ) : null}
       </div>
     </div>
   );

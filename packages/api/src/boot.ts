@@ -78,6 +78,7 @@ import {
   createWorkflowEventDispatcher,
   createIngestWorkflowTrigger,
   type WorkflowEventDispatcher,
+  type StrictWorkflowEventDispatcher,
   createRunQueueWorker,
   createTaskTools,
   createTaskGuardrailTools,
@@ -88,6 +89,7 @@ import {
   createWorkspaceTools,
   createTranscriptionPrefTools,
   createCrmTools,
+  createCrmOperationsTools,
   createCrmEmailDraftTools,
   createMemoryTools,
   createRetrievalTools,
@@ -217,6 +219,17 @@ import { saveLocalProviderPreference } from './local-provider-preference.js'
 import { brainRoutes } from './routes/brain.js'
 import { brainInboxRoutes } from './routes/brain-inbox.js'
 import { crmRoutes } from './routes/crm.js'
+import { crmIntakeRoutes } from './routes/crm-intake.js'
+import { crmOperationsRoutes } from './routes/crm-operations.js'
+import { createCrmOperationsService } from './crm-operations/service.js'
+import { createCrmProductionImportService } from './crm-operations/import-service.js'
+import {
+  crmWorkflowAdmission,
+  createCrmDomainEventWorker,
+  createDbCrmDomainEventOutboxStore,
+} from './crm-operations/domain-event-worker.js'
+import { createDbCrmOperationsStore } from './db/crm-operations-store.js'
+import { createDbCrmIntakeReadStore } from './db/crm-intake-store.js'
 import { getCrmEmailReviewContext } from './db/crm-r2.js'
 import { bootstrapHistoricalCrmIdentityState } from './db/crm-identity-store.js'
 import { resolveWorkspaceViewpoint } from './db/workspace-viewpoint.js'
@@ -1311,6 +1324,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       req.path === '/api/local-files'
       || (req.method === 'PUT' && /^\/internal\/chat-archive\/media\/[^/]+\/content$/.test(req.path))
       || (req.method === 'POST' && /^\/bridge\/v1\/channels\/[^/]+\/media\/[^/]+$/.test(req.path))
+      // The public CRM intake route owns a tighter 1 MiB parser. Skipping the
+      // global 15 MiB parser is what makes the byte limit apply before JSON
+      // decoding instead of after the body is already resident in memory.
+      || (req.method === 'POST' && /^\/api\/crm\/intake\/[^/]+\/submissions$/.test(req.path))
     ) {
       next()
       return
@@ -1546,6 +1563,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   })
   const crmStore = createDbCrmStore()
   const crmEmailDraftStore = createDbCrmEmailDraftStore()
+  const crmOperationsService = createCrmOperationsService(createDbCrmOperationsStore())
+  const crmIntakeReadStore = createDbCrmIntakeReadStore()
   setGlobalMailboxContactImportDeps({ crm: crmStore })
   const workspaceFilesStore = createDbWorkspaceFilesStore()
   const workspaceFileUploadsStore = createWorkspaceFileUploadsStore()
@@ -3306,6 +3325,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     workflowStore,
     runStore: workflowRunStore,
     executorDeps: workflowExecutorDeps,
+    listCrmWorkflowEventFilterKeys: async (workspaceId) =>
+      (await crmIntakeReadStore.listCrmEventFilterCatalog(workspaceId)).stableKeys.map((item) => item.key),
     validateDeliveryTarget: workflowDependencyPreflight.validateDeliveryTarget,
     preflightConnectorTool: workflowDependencyPreflight.preflightConnectorTool,
     listSlackChannels: workflowDependencyPreflight.listSlackChannels,
@@ -3714,6 +3735,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const crmTools = createCrmTools(crmStore, {
     entityLinks: entityLinksStore,
     entityKindClassifier,
+    legacyPipelineStages: {
+      resolve: (workspaceId, stage) => crmIntakeReadStore.resolveLegacyPipelineStage(workspaceId, stage),
+      service: crmOperationsService,
+    },
     onEvent: (evt, ctx) => {
       const base = { userId: ctx.userId, assistantId: ctx.assistantId, sessionId: ctx.sessionId, channelType: ctx.channelType }
       if (evt.type === 'contact_created' || evt.type === 'company_created' || evt.type === 'deal_created') {
@@ -3746,6 +3771,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   allTools.set('advanceDealStage', crmTools.advanceDealStage)
   allTools.set('listCrmFields', crmTools.listCrmFields)
   allTools.set('setCrmCustomFields', crmTools.setCrmCustomFields)
+  const crmOperationsTools = createCrmOperationsTools({
+    reads: crmIntakeReadStore,
+    service: crmOperationsService,
+  })
+  for (const tool of Object.values(crmOperationsTools)) allTools.set(tool.name, tool)
   const crmEmailDraftTools = createCrmEmailDraftTools(crmEmailDraftStore)
   allTools.set('saveEmailDraft', crmEmailDraftTools.saveEmailDraft)
   allTools.set('getEmailDraft', crmEmailDraftTools.getEmailDraft)
@@ -4690,6 +4720,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use('/api/association', associationRoutes({
     brainKeyStore,
     authorizationStore: oauthAuthorizationStore,
+    crmService: crmOperationsService,
   }))
 
   app.use('/api/brain/mcp', brainMcpRoutes({
@@ -4727,7 +4758,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       : {}),
     memoryTools: brainMemoryTools,
     taskTools,
-    crmTools,
+    crmTools: { ...crmTools, ...crmOperationsTools },
     retrievalTools: brainRetrievalTools,
     fileTools: brainFileTools ?? undefined,
     // Brand primitive (D8): `getBrand` on both key scopes, `saveBrandDraft`
@@ -4736,10 +4767,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // their own Studio, so no approve tool exists on this surface.
     brandTools: { getBrand: brandTools.getBrand, updateBrandDraft: brandTools.updateBrandDraft },
     // Doc-page tools (readPage / editPage / deletePage) reuse the same RLS-gated
-    // saved-views + doc-page stores the chat doc tools use, so a brain-key page
-    // op runs the identical SQL (CAS + undo for edits, cascade delete) as an
-    // in-app edit. See packages/api/src/brain-mcp/tools.ts → buildDocPageTools.
-    docTools: { savedViewStore, docPageStore: createDbDocPageStore(), pageTemplateStore },
+    // stores and live DocGateway as chat. Production edits therefore land in
+    // the authoritative Y.Doc; the legacy CAS remains only for deployments
+    // without doc-sync. See brain-mcp/tools.ts → buildDocPageTools.
+    docTools: { savedViewStore, docPageStore, docGateway, pageTemplateStore },
     ingest: brainEpisodeIngestor,
     agentTools: { reads: agentToolset.reads, writes: agentToolset.writes },
     // Powers the searchRecording tool's vector arm (recording-to-brain).
@@ -5414,6 +5445,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     await ports.mountPublicExtraRoutes(app, { linkedAccountStore, integrationStore, workspaceStore })
   }
 
+  // PUBLIC + self-authenticating `sk_intake_*` route. It must stay before the
+  // bare `/api` JWT guards below and has its own 1 MiB parser because the
+  // global 15 MiB parser deliberately skips this exact path.
+  app.use('/api', crmIntakeRoutes({
+    service: crmOperationsService,
+    readStore: crmIntakeReadStore,
+  }))
+
   // Workflow webhook receiver — PUBLIC + self-authenticating (per-workflow HMAC,
   // not the user JWT). It MUST mount here, before the bare `app.use('/api',
   // requireAuth(...))` guards below: Express runs path-prefix middleware in
@@ -5541,6 +5580,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     runStore: workflowRunStore,
     workspaceStore,
     executorDeps: workflowExecutorDeps,
+    listCrmWorkflowEventFilterKeys: async (workspaceId) =>
+      (await crmIntakeReadStore.listCrmEventFilterCatalog(workspaceId)).stableKeys.map((item) => item.key),
     savedViewStore,
     listTriggerJobs: (workflowId) => jobStore.listFiringJobsForWorkflowSystem(workflowId),
     jobStore,
@@ -6389,6 +6430,17 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     workspaceStore,
     entityLinks: entityLinksStore,
     emailDraftStore: crmEmailDraftStore,
+    crmOperationsService,
+  }))
+  app.use('/api/crm', requireAuth(env.JWT_SECRET), crmOperationsRoutes({
+    workspaceStore,
+    service: crmOperationsService,
+    readStore: crmIntakeReadStore,
+    ...(filesApi ? { importService: createCrmProductionImportService({
+      filesApi,
+      operations: crmOperationsService,
+      entityLinks: entityLinksStore,
+    }) } : {}),
   }))
   // Brain inbox (verification surface). Open + hosted share this one mount: the
   // route's deps are all open (brain-inbox-store / entities-store / crm / sessions /
@@ -6513,7 +6565,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const RUN_STORM_WINDOW_SECONDS = 300
   const RUN_STORM_THRESHOLD = 25
 
-  const workflowEventDispatcher: WorkflowEventDispatcher = createWorkflowEventDispatcher({
+  const workflowEventDispatcher: StrictWorkflowEventDispatcher = createWorkflowEventDispatcher({
     findEventTriggeredWorkflows: ({ workspaceId }) =>
       findEventTriggeredWorkflowsSystem(workspaceId),
     findAdditionalConnectorEventWorkspaces: ({ connectorInstanceId }) =>
@@ -6557,6 +6609,22 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         console.warn('[workflow-event] kb-maintenance guard failed (run proceeds):', err)
       }
       const triggeredBy = await getWorkflowCreatorSystem(workflowId)
+      const crmAdmission = crmWorkflowAdmission(input)
+      if (crmAdmission && workflowRunStore.createWebhookRun) {
+        const admitted = await workflowRunStore.createWebhookRun({
+          workflowId,
+          workspaceId,
+          triggeredBy,
+          triggerKind: 'event',
+          input,
+          ...crmAdmission,
+        })
+        if (admitted.kind === 'conflict') {
+          throw new Error(`CRM domain event ${input.event.domainEventId as string} conflicted with an existing workflow run.`)
+        }
+        runQueueWorker.nudge()
+        return
+      }
       await workflowRunStore.createRun({
         workflowId,
         workspaceId,
@@ -6606,6 +6674,17 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // into on create / draft update / approve / supersede, covering the Studio
   // routes, the `updateBrandDraft` chat tool, and the brain-MCP bridge.
   setBrandEventDispatcher(workflowEventDispatcher)
+
+  const crmDomainEventWorker = createCrmDomainEventWorker({
+    store: createDbCrmDomainEventOutboxStore(),
+    dispatcher: workflowEventDispatcher,
+    workerId: `crm-domain-${process.pid}-${randomUUID()}`,
+    onError: (error, event) => console.warn(
+      `[crm-domain-events] ${event?.id ?? '(tick)'} failed:`,
+      error instanceof Error ? error.message : error,
+    ),
+  })
+  if (runWorkers) crmDomainEventWorker.start()
 
   // ════════════════════════════════════════════════════════════════
   // Open background workers
@@ -8210,6 +8289,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     embeddingWorker.stop()
     pollWorker.stop()
     runQueueWorker.stop()
+    crmDomainEventWorker.stop()
     knowledgeSyncWorker.stop()
     mailboxSyncWorker.stop()
     // Log out every IDLE socket - a SIGTERM must not leave a mailbox connection

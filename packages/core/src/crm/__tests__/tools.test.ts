@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { createCrmTools, type CrmToolEvent } from '../tools.js'
 import type {
   CompanyRecord, ContactRecord, CrmStore, DealRecord, DealStage,
@@ -613,6 +613,32 @@ describe('[COMP:tools/crm-deals] saveDeal / getDeal / listDeals / updateDeal / a
     expect(res.data as string).toContain('negotiation')
     expect(store.data.deals[0].stage).toBe('negotiation')
     expect(events.find((e) => e.type === 'deal_stage_advanced')).toBeTruthy()
+  })
+
+  it('advanceDealStage delegates the default legacy key to the canonical command service', async () => {
+    const store = makeFakeStore()
+    const execute = vi.fn().mockResolvedValue({
+      command: 'set_deal_pipeline_stage', record: { id: 'deal-1' },
+      created: false, duplicate: false, emittedEventIds: ['event-1'],
+    })
+    const resolve = vi.fn().mockResolvedValue({ pipelineId: 'pipeline-1', stageId: 'stage-1' })
+    const tools = createCrmTools(store, {
+      legacyPipelineStages: { resolve, service: { execute } },
+    })
+    const res = await tools.advanceDealStage.execute({
+      id: '11111111-1111-4111-8111-111111111111', stage: 'negotiation',
+    }, ctx)
+    expect(res.isError).toBeFalsy()
+    expect(resolve).toHaveBeenCalledWith(ctx.workspaceId, 'negotiation')
+    expect(execute).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: ctx.workspaceId,
+      actor: expect.objectContaining({ kind: 'assistant', assistantId: ctx.assistantId }),
+    }), {
+      kind: 'set_deal_pipeline_stage',
+      dealId: '11111111-1111-4111-8111-111111111111',
+      pipelineId: 'pipeline-1', stageId: 'stage-1',
+    })
+    expect(store.data.deals).toHaveLength(0)
   })
 
   it('advanceDealStage Zod-rejects an invalid stage', async () => {

@@ -9,6 +9,7 @@
  */
 
 import { z } from 'zod'
+import { CrmDomainEventTypeSchema } from '../crm/operations-types.js'
 import { WORKFLOW_STEP_TYPES } from './types.js'
 import type { ToolCallStep, WorkflowDefinition } from './types.js'
 import { buildReachability, findCycle, parallelRegionSteps } from './graph.js'
@@ -975,6 +976,11 @@ const eventSourceRefSchema = z.discriminatedUnion('type', [
     // `keywords`.
     type: z.literal('brand'),
   }),
+  z.object({
+    // Id-less committed CRM operation source. Event type uses inChannels;
+    // stable catalog keys use tags.
+    type: z.literal('crm'),
+  }),
 ])
 
 const eventMatchSchema = z.object({
@@ -1050,6 +1056,26 @@ export const EventSubscriptionSchema = z.preprocess(
         message: '`match.currentTags` is valid only for task event sources.',
         path: ['match', 'currentTags'],
       })
+    }
+    if (subscription.source.type === 'crm') {
+      subscription.match?.inChannels?.forEach((eventType, index) => {
+        if (!CrmDomainEventTypeSchema.safeParse(eventType).success) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `Unknown CRM event type. Valid values: ${CrmDomainEventTypeSchema.options.join(', ')}.`,
+            path: ['match', 'inChannels', index],
+          })
+        }
+      })
+      for (const key of ['keywords', 'fromActors', 'mentions', 'currentTags'] as const) {
+        if (subscription.match?.[key]?.length) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `\`match.${key}\` is not supported for CRM event sources. Use inChannels and catalog-backed tags.`,
+            path: ['match', key],
+          })
+        }
+      }
     }
   }),
 )
@@ -1146,6 +1172,7 @@ export const WORKFLOW_EVENT_SOURCE_TYPES = [
   'task',
   'knowledge',
   'brand',
+  'crm',
 ] as const satisfies readonly z.infer<typeof EventSubscriptionSchema>['source']['type'][]
 
 // Compile-time exhaustiveness: `satisfies` (above) rejects a wrong/extra

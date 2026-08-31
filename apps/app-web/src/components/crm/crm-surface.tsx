@@ -25,7 +25,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { BarChart3, ChevronDown, ChevronUp, Kanban, Mail, Rows3, Settings2 } from "lucide-react";
+import { BarChart3, CalendarDays, ChevronDown, ChevronUp, Inbox, Kanban, Mail, Rows3, Settings2, UsersRound } from "lucide-react";
 import { OperatorTopbar } from "@/components/operator/operator-topbar";
 import { cn } from "@/lib/utils";
 import { mutateSurfaceCache, useCachedResource } from "@/lib/surface-cache";
@@ -149,6 +149,9 @@ import { CrmReportingDialog } from "./crm-reporting";
 import { CrmSavedViews } from "./crm-saved-views";
 import { CrmEmailReviewWorkspace } from "./crm-email-review";
 import { CrmMobileActions } from "./crm-mobile-actions";
+import { CrmSubmissionInbox } from "./operations/submission-inbox";
+import { CrmSegmentsPanel } from "./operations/segments-panel";
+import { CrmProgramsPanel } from "./operations/programs-panel";
 
 const NONE = "__none__";
 const EMPTY_PIPELINE: CrmPipeline = {
@@ -756,7 +759,7 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
           .find((candidate) => candidate.id === stageId);
         if (!stage) return { ok: false, error: t.r2.stageChangeFailed };
         try {
-          await setCrmPipelineStage(workspaceId, row.id, stageId);
+          await setCrmPipelineStage(workspaceId, row.id, stage.pipelineId, stageId);
           patchDeal(row.id, {
             pipelineId: stage.pipelineId,
             pipelineStageId: stage.id,
@@ -868,7 +871,7 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
       try {
         for (const id of ids) {
           try {
-            await setCrmPipelineStage(workspaceId, id, stageId);
+            await setCrmPipelineStage(workspaceId, id, stage.pipelineId, stageId);
             patchDeal(id, {
               pipelineId: stage.pipelineId,
               pipelineStageId: stage.id,
@@ -1031,10 +1034,25 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
                 {view.review === "email" && (
                   <Mail className="size-3.5 shrink-0" aria-hidden />
                 )}
+                {view.review === "submissions" && (
+                  <Inbox className="size-3.5 shrink-0" aria-hidden />
+                )}
+                {view.review === "segments" && (
+                  <UsersRound className="size-3.5 shrink-0" aria-hidden />
+                )}
+                {view.review === "programs" && (
+                  <CalendarDays className="size-3.5 shrink-0" aria-hidden />
+                )}
                 <span className="truncate">
                   {view.review === "email"
                     ? t.r2.emailDrafts
-                    : sectionLabels[view.section]}
+                    : view.review === "submissions"
+                      ? t.operations.submissions
+                      : view.review === "segments"
+                        ? t.operations.segments
+                        : view.review === "programs"
+                          ? t.operations.programs
+                      : sectionLabels[view.section]}
                 </span>
                 <ChevronDown
                   className="size-3.5 shrink-0 text-muted-foreground"
@@ -1050,6 +1068,7 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
                         section,
                         review: null,
                         draft: null,
+                        submission: null,
                         quick: null,
                         stages: [],
                         custom: {},
@@ -1071,6 +1090,24 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
                     )}
                   </DropdownMenuItem>
                 ))}
+                <DropdownMenuItem
+                  onClick={() => setView({ review: "submissions", submission: view.submission })}
+                >
+                  <Inbox className="size-3.5" aria-hidden />
+                  <span className="min-w-28 flex-1">{t.operations.submissions}</span>
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={() => setView({ review: "segments", segment: view.segment })}
+                >
+                  <UsersRound className="size-3.5" aria-hidden />
+                  <span className="min-w-28 flex-1">{t.operations.segments}</span>
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={() => setView({ review: "programs", plan: view.plan, event: view.event })}
+                >
+                  <CalendarDays className="size-3.5" aria-hidden />
+                  <span className="min-w-28 flex-1">{t.operations.programs}</span>
+                </DropdownMenuItem>
                 <DropdownMenuItem
                   onClick={() =>
                     setView({
@@ -1100,6 +1137,7 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
                       section,
                       review: null,
                       draft: null,
+                      submission: null,
                       quick: null,
                       stages: [],
                       custom: {},
@@ -1125,6 +1163,51 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
                   )}
                 </button>
               ))}
+              <button
+                type="button"
+                aria-label={t.operations.submissions}
+                aria-pressed={view.review === "submissions"}
+                onClick={() => setView({ review: "submissions", submission: view.submission })}
+                className={cn(
+                  "inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12.5px] transition-colors",
+                  view.review === "submissions"
+                    ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                    : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground",
+                )}
+              >
+                <Inbox className="size-3.5" aria-hidden />
+                <span>{t.operations.submissions}</span>
+              </button>
+              <button
+                type="button"
+                aria-label={t.operations.segments}
+                aria-pressed={view.review === "segments"}
+                onClick={() => setView({ review: "segments", segment: view.segment })}
+                className={cn(
+                  "inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12.5px] transition-colors",
+                  view.review === "segments"
+                    ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                    : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground",
+                )}
+              >
+                <UsersRound className="size-3.5" aria-hidden />
+                <span>{t.operations.segments}</span>
+              </button>
+              <button
+                type="button"
+                aria-label={t.operations.programs}
+                aria-pressed={view.review === "programs"}
+                onClick={() => setView({ review: "programs", plan: view.plan, event: view.event })}
+                className={cn(
+                  "inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12.5px] transition-colors",
+                  view.review === "programs"
+                    ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                    : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground",
+                )}
+              >
+                <CalendarDays className="size-3.5" aria-hidden />
+                <span>{t.operations.programs}</span>
+              </button>
               <button
                 type="button"
                 aria-label={t.r2.emailDrafts}
@@ -1355,6 +1438,26 @@ export function CrmSurface({ workspaceId, routeRecord = null }: {
               }}
             />
           )
+        ) : view.review === "submissions" ? (
+          <CrmSubmissionInbox
+            workspaceId={workspaceId}
+            selectedId={view.submission}
+            onSelect={(submission) => setView({ review: "submissions", submission })}
+          />
+        ) : view.review === "segments" ? (
+          <CrmSegmentsPanel
+            workspaceId={workspaceId}
+            selectedId={view.segment}
+            onSelect={(segment) => setView({ review: "segments", segment })}
+          />
+        ) : view.review === "programs" ? (
+          <CrmProgramsPanel
+            workspaceId={workspaceId}
+            selectedPlanId={view.plan}
+            selectedEventId={view.event}
+            onSelectPlan={(plan) => setView({ review: "programs", plan, event: plan ? null : view.event })}
+            onSelectEvent={(event) => setView({ review: "programs", event, plan: event ? null : view.plan })}
+          />
         ) : (
           <>
 

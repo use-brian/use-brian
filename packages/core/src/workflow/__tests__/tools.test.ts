@@ -313,6 +313,7 @@ function makeAllTools(opts?: {
   >
   listAuthorableSkills?: (userId: string, workspaceId: string) => Promise<Array<{ slug: string; name: string }>>
   listAuthorableClientApiKeys?: WorkflowToolDeps['listAuthorableClientApiKeys']
+  listCrmWorkflowEventFilterKeys?: WorkflowToolDeps['listCrmWorkflowEventFilterKeys']
   resolveViewWorkspace?: (args: { userId: string; viewId: string }) => Promise<string | null>
   allowLegacyDirectWrites?: boolean
 }) {
@@ -344,6 +345,7 @@ function makeAllTools(opts?: {
     listSlackMembers: opts?.listSlackMembers,
     listAuthorableSkills: opts?.listAuthorableSkills,
     listAuthorableClientApiKeys: opts?.listAuthorableClientApiKeys,
+    listCrmWorkflowEventFilterKeys: opts?.listCrmWorkflowEventFilterKeys,
     allowLegacyDirectWrites: opts?.allowLegacyDirectWrites ?? true,
   })
   return { tools, stores, events, jobStore }
@@ -2602,6 +2604,9 @@ describe('[COMP:workflow/tools] trigger capability surface (closed-world, derive
     expect(TRIGGER_INPUT_DESCRIPTION).toMatch(/inReplyTo/)
     expect(TRIGGER_INPUT_DESCRIPTION).toMatch(/currentTags/)
     expect(TRIGGER_INPUT_DESCRIPTION).toMatch(/full live tag set/)
+    expect(TRIGGER_INPUT_DESCRIPTION).toMatch(/crm\.submission\.received/)
+    expect(TRIGGER_INPUT_DESCRIPTION).toMatch(/crm\.deal\.stage_changed/)
+    expect(TRIGGER_INPUT_DESCRIPTION).toMatch(/stable definition\/purpose\/plan\/event\/pipeline\/stage keys/)
   })
 
   it('createWorkflow accepts and persists an event trigger with a task source (chat-authorable, no web builder needed)', async () => {
@@ -2615,6 +2620,39 @@ describe('[COMP:workflow/tools] trigger capability surface (closed-world, derive
     expect(data.triggerKind).toBe('event')
     const persisted = await stores.workflowStore.getById(USER_ID, data.id as string)
     expect(persisted?.trigger.kind).toBe('event')
+  })
+
+  it('proposes a committed CRM event source with closed event and stable-key filters', async () => {
+    const { tools } = makeAllTools({ listCrmWorkflowEventFilterKeys: async () => ['website_contact'] })
+    const result = await tools.proposeWorkflow.execute({
+      name: 'Review website submissions',
+      definition: ASSISTANT_DEF,
+      trigger: {
+        kind: 'event',
+        event: { sources: [{
+          source: { type: 'crm' },
+          match: { inChannels: ['crm.submission.received'], tags: ['website_contact'] },
+        }] },
+      },
+    }, makeContext())
+    expect(result.isError).toBeFalsy()
+    expect(result.data).toMatchObject({ ok: true, proposedTrigger: { kind: 'event' } })
+  })
+
+  it('rejects guessed CRM stable keys with bounded catalog choices', async () => {
+    const { tools } = makeAllTools({ listCrmWorkflowEventFilterKeys: async () => ['website_contact'] })
+    const result = await tools.proposeWorkflow.execute({
+      name: 'Review guessed submissions', definition: ASSISTANT_DEF,
+      trigger: { kind: 'event', event: { sources: [{
+        source: { type: 'crm' },
+        match: { inChannels: ['crm.submission.received'], tags: ['website_form_guess'] },
+      }] } },
+    }, makeContext())
+    expect(result.isError).toBe(true)
+    expect(result.data).toMatchObject({
+      ok: false,
+      errors: [expect.stringContaining('Valid values: website_contact')],
+    })
   })
 
   it('proposes a source-bound reply for a WhatsApp channel event', async () => {

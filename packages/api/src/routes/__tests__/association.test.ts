@@ -5,6 +5,7 @@ import type { BrainAuth } from '../../brain-mcp/auth.js'
 import type { BrainKeyStore } from '../../db/brain-keys-store.js'
 import type { AssociationStore } from '../../db/association-store.js'
 import { AssociationError } from '../../association/domain.js'
+import type { CrmOperationsServicePort } from '@use-brian/core'
 import { associationRoutes } from '../association.js'
 
 const WID = '11111111-1111-4111-8111-111111111111'
@@ -49,17 +50,23 @@ function fakeStore(): AssociationStore {
     getOrder: vi.fn(),
     reconcileProviderEvent: vi.fn(),
     listEventRegistrations: vi.fn(),
+    getRegistrationManagement: vi.fn().mockResolvedValue({ sourceKind: 'commerce' }),
     updateRegistration: vi.fn(),
     listNotifications: vi.fn(),
   }
 }
 
-function makeApp(store: AssociationStore, resolvedAuth: BrainAuth | null = auth()) {
+function makeApp(
+  store: AssociationStore,
+  resolvedAuth: BrainAuth | null = auth(),
+  crmService?: CrmOperationsServicePort,
+) {
   const app = express()
   app.use(express.json())
   app.use('/api/association', associationRoutes({
     brainKeyStore: {} as BrainKeyStore,
     store,
+    ...(crmService ? { crmService } : {}),
     authenticate: vi.fn().mockResolvedValue(resolvedAuth),
   }))
   return app
@@ -192,5 +199,69 @@ describe('[COMP:api/association-route] credential and workspace authority', () =
       { status: 'checked_in' },
       { credentialKind: 'api_key', credentialId: 'brain-key-1' },
     )
+  })
+
+  it('adapts membership writes to the canonical entitlement command without changing the API shape', async () => {
+    const store = fakeStore()
+    const execute = vi.fn<CrmOperationsServicePort['execute']>().mockResolvedValue({
+      command: 'grant_entitlement', created: true, duplicate: false,
+      emittedEventIds: ['event-1'],
+      record: {
+        id: RECORD_ID, contactId: CONTACT_ID,
+        planId: '55555555-5555-4555-8555-555555555555', planKey: 'member',
+        idempotencyKey: 'membership-1',
+        providerEntitlementId: 'provider-member-1', status: 'active',
+      },
+    })
+    const response = await request(makeApp(store, auth(), { execute }))
+      .post('/api/association/memberships')
+      .send({
+        contactId: CONTACT_ID,
+        planId: '55555555-5555-4555-8555-555555555555',
+        idempotencyKey: 'membership-1', status: 'active',
+        startsAt: '2026-08-30T00:00:00.000Z',
+        provider: 'example_provider', providerMembershipId: 'provider-member-1',
+      })
+    expect(response.status).toBe(201)
+    expect(response.body.membership).toMatchObject({
+      id: RECORD_ID, workspaceId: WID, planKey: 'member',
+      idempotencyKey: 'membership-1',
+      providerMembershipId: 'provider-member-1', status: 'active',
+    })
+    expect(response.body.membership).not.toHaveProperty('providerEntitlementId')
+    expect(store.createMembership).not.toHaveBeenCalled()
+    expect(execute).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: WID,
+      actor: { kind: 'brain_key', credentialId: 'brain-key-1' },
+    }), expect.objectContaining({
+      kind: 'grant_entitlement', contactId: CONTACT_ID,
+      providerEntitlementId: 'provider-member-1',
+    }))
+  })
+
+  it('delegates non-commerce registration lifecycle writes to canonical participation commands', async () => {
+    const store = fakeStore()
+    vi.mocked(store.getRegistrationManagement).mockResolvedValue({ sourceKind: 'manual' })
+    const execute = vi.fn<CrmOperationsServicePort['execute']>().mockResolvedValue({
+      command: 'update_participation', created: false, duplicate: false,
+      emittedEventIds: ['event-2'],
+      record: {
+        id: RECORD_ID, contactId: CONTACT_ID, eventId: '55555555-5555-4555-8555-555555555555',
+        attendeeName: 'Example Person', metadata: {}, status: 'attended', sourceKind: 'manual',
+        checkedInAt: '2026-08-30T02:00:00.000Z',
+      },
+    })
+    const response = await request(makeApp(store, auth(), { execute }))
+      .patch(`/api/association/registrations/${RECORD_ID}`)
+      .send({ status: 'checked_in' })
+    expect(response.status).toBe(200)
+    expect(response.body.registration).toMatchObject({
+      id: RECORD_ID, workspaceId: WID, attendeeContactId: CONTACT_ID, status: 'checked_in',
+      checkedInAt: '2026-08-30T02:00:00.000Z', orderId: null, ticketId: null,
+    })
+    expect(store.updateRegistration).not.toHaveBeenCalled()
+    expect(execute).toHaveBeenCalledWith(expect.anything(), {
+      kind: 'update_participation', participationId: RECORD_ID, status: 'attended',
+    })
   })
 })

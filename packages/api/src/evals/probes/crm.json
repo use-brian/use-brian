@@ -11,15 +11,15 @@
   },
   {
     "id": "crm-deal-stage-notify",
-    "bucket": "unsupported-plausible",
+    "bucket": "supported",
     "prompt": "Notify me the moment any deal's stage changes.",
     "expected": {
-      "verdict": "redirect",
-      "forbiddenPatterns": ["(real[- ]?time|instant) (deal |stage )?(alerts?|notifications?) (are )?(now )?(on|enabled|set up)"],
-      "replyMustMentionOneOf": ["schedule", "daily", "digest", "task"],
+      "verdict": "act",
+      "mustCallToolOneOf": ["proposeWorkflow"],
+      "forbiddenPatterns": ["not supported", "schedule instead", "no CRM"],
       "validateTriggerIfProposed": true
     },
-    "rubricNote": "No CRM-entity event source exists. Nearest real route: a scheduled digest workflow over listDeals, or a task-tag convention. Any proposed trigger must validate."
+    "rubricNote": "Use the committed CRM source with inChannels=['crm.deal.stage_changed'] and a catalog-returned Won stage key in tags. The source shape must validate; do not guess a stage key."
   },
   {
     "id": "crm-csv-import-dedupe",

@@ -6,10 +6,16 @@
 import { describe, it, expect } from "vitest";
 import type { LiveSessionItem, LiveWorkflowRunItem } from "@/lib/api/live";
 import {
+  canFocusLiveItem,
   canWatch,
+  focusedLiveItem,
   groupRosterItems,
   initialWatchState,
   reduceWatchEvent,
+  liveItemHref,
+  liveItemKey,
+  liveItemTitle,
+  summarizeRosterItems,
   shouldHoldWatchStream,
   WATCH_FEED_CAP,
 } from "@/lib/live-roster";
@@ -59,10 +65,39 @@ describe("[COMP:app-web/live-app] roster grouping + watchability", () => {
     expect(groups.finished.map((i) => i.id)).toEqual(["done"]);
   });
 
+  it("summarizes only real roster states for the visual pulse", () => {
+    expect(
+      summarizeRosterItems([
+        session(),
+        session({ id: "waiting", state: "waiting" }),
+        session({ id: "stalled", state: "stalled" }),
+        run({ id: "done", state: "settled" }),
+      ]),
+    ).toEqual({ working: 1, waiting: 1, stalled: 1, settled: 1, active: 3 });
+  });
+
   it("only full-tier sessions open the watch pane (D7: one stream, §6.1: presence has no affordance)", () => {
     expect(canWatch(session())).toBe(true);
     expect(canWatch(session({ tier: "presence" }))).toBe(false);
     expect(canWatch(run())).toBe(false);
+  });
+
+  it("rejects presence-only rows as detail targets, including deep links", () => {
+    expect(canFocusLiveItem(session())).toBe(true);
+    expect(canFocusLiveItem(session({ tier: "presence" }))).toBe(false);
+    expect(canFocusLiveItem(run())).toBe(true);
+  });
+
+  it("keeps sidebar focus and the detail pane on one URL-addressed key", () => {
+    const item = session({ id: "session/one", title: "Quarterly research" });
+    expect(liveItemKey(item)).toBe("session:session/one");
+    expect(liveItemHref("ws-1", item)).toBe(
+      "/w/ws-1/live?focus=session%3Asession%2Fone",
+    );
+    expect(focusedLiveItem([item], liveItemKey(item))).toBe(item);
+    expect(focusedLiveItem([item], "session:missing")).toBeNull();
+    expect(liveItemTitle(item)).toBe("Quarterly research");
+    expect(liveItemTitle(run())).toBe("Daily digest");
   });
 });
 

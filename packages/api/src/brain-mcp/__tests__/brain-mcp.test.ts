@@ -124,6 +124,30 @@ const CRM_TOOLS_STUB: BrainCrmTools = {
   advanceDealStage: stubCoreTool('advanceDealStage'),
   listCrmFields: stubCoreTool('listCrmFields', true),
   setCrmCustomFields: stubCoreTool('setCrmCustomFields'),
+  listCrmIntakeDefinitions: stubCoreTool('listCrmIntakeDefinitions', true),
+  listCrmSubmissions: stubCoreTool('listCrmSubmissions', true),
+  getCrmSubmission: stubCoreTool('getCrmSubmission', true),
+  listCrmConsentPurposes: stubCoreTool('listCrmConsentPurposes', true),
+  getCrmConsent: stubCoreTool('getCrmConsent', true),
+  checkCrmSendability: stubCoreTool('checkCrmSendability', true),
+  listCrmSegments: stubCoreTool('listCrmSegments', true),
+  previewCrmSegment: stubCoreTool('previewCrmSegment', true),
+  listCrmEntitlementPlans: stubCoreTool('listCrmEntitlementPlans', true),
+  listCrmEntitlements: stubCoreTool('listCrmEntitlements', true),
+  listCrmEvents: stubCoreTool('listCrmEvents', true),
+  listCrmParticipation: stubCoreTool('listCrmParticipation', true),
+  listCrmPipelines: stubCoreTool('listCrmPipelines', true),
+  recordCrmSubmission: stubCoreTool('recordCrmSubmission'),
+  updateCrmSubmission: stubCoreTool('updateCrmSubmission'),
+  recordCrmConsent: stubCoreTool('recordCrmConsent'),
+  recordCrmSuppression: stubCoreTool('recordCrmSuppression'),
+  saveCrmSegment: stubCoreTool('saveCrmSegment'),
+  archiveCrmSegment: stubCoreTool('archiveCrmSegment'),
+  grantCrmEntitlement: stubCoreTool('grantCrmEntitlement'),
+  updateCrmEntitlement: stubCoreTool('updateCrmEntitlement'),
+  recordCrmParticipation: stubCoreTool('recordCrmParticipation'),
+  updateCrmParticipation: stubCoreTool('updateCrmParticipation'),
+  setDealPipelineStage: stubCoreTool('setDealPipelineStage'),
 }
 
 const RETRIEVAL_TOOLS_STUB: BrainRetrievalTools = {
@@ -193,11 +217,24 @@ const READ_TOOL_NAMES = [
   'getDeal',
   'getEntity',
   'getMemory',
+  'getCrmConsent',
+  'getCrmSubmission',
   'getTask',
+  'checkCrmSendability',
   'listCompanies',
   'listContacts',
   'listDeals',
   'listCrmFields',
+  'listCrmConsentPurposes',
+  'listCrmIntakeDefinitions',
+  'listCrmSubmissions',
+  'listCrmSegments',
+  'listCrmEntitlementPlans',
+  'listCrmEntitlements',
+  'listCrmEvents',
+  'listCrmParticipation',
+  'listCrmPipelines',
+  'previewCrmSegment',
   'listTasks',
   'searchBrain',
   'searchFileContent',
@@ -217,6 +254,13 @@ const WRITE_TOOL_NAMES = [
   'fileWrite',
   'ingestToBrain',
   'reopenTask',
+  'recordCrmConsent',
+  'recordCrmSubmission',
+  'recordCrmSuppression',
+  'saveCrmSegment',
+  'archiveCrmSegment',
+  'grantCrmEntitlement',
+  'recordCrmParticipation',
   'saveCompany',
   'saveContact',
   'saveDeal',
@@ -229,6 +273,10 @@ const WRITE_TOOL_NAMES = [
   'updateCompany',
   'updateContact',
   'updateDeal',
+  'updateCrmSubmission',
+  'updateCrmEntitlement',
+  'updateCrmParticipation',
+  'setDealPipelineStage',
   'updateTask',
 ] as const
 
@@ -984,12 +1032,13 @@ describe('[COMP:api/brain-mcp-page-tools] doc-page tools (readPage / listPages /
   }
 
   /** A spyable BrainDocTools stub. The spies let each test assert the right
-   *  store path ran (read → getVersionedPage, edit → applyPatch, delete →
-   *  remove) without a real database. */
+   *  store path ran (read → getVersionedPage, live edit → docGateway, legacy
+   *  edit → applyPatch, delete → remove) without a real database. */
   function docToolsStub(overrides: Partial<{
     getVersionedPage: (userId: string, pageId: string) => Promise<typeof SAMPLE_PAGE | null>
     list: (...args: unknown[]) => Promise<ReturnType<typeof listRow>[]>
     applyPatch: (...args: unknown[]) => Promise<{ newVersion: number } | null>
+    applyLiveOps: NonNullable<BrainDocTools['docGateway']>['applyOps']
     remove: (...args: unknown[]) => Promise<boolean>
     createDraft: (...args: unknown[]) => Promise<{ id: string }>
     // `createPage`'s parent guard: resolve + workspace-confirm a `parentPageId`.
@@ -1015,6 +1064,9 @@ describe('[COMP:api/brain-mcp-page-tools] doc-page tools (readPage / listPages /
         getVersionedPage: vi.fn(overrides.getVersionedPage ?? (async () => SAMPLE_PAGE)),
         applyPatch: vi.fn(overrides.applyPatch ?? (async () => ({ newVersion: 4 }))),
       } as unknown as BrainDocTools['docPageStore'],
+    }
+    if (overrides.applyLiveOps) {
+      tools.docGateway = { applyOps: vi.fn(overrides.applyLiveOps) }
     }
     if (overrides.templateList || overrides.templateGetById || overrides.templateCreate) {
       tools.pageTemplateStore = {
@@ -1263,6 +1315,44 @@ describe('[COMP:api/brain-mcp-page-tools] doc-page tools (readPage / listPages /
     expect(call.pageId).toBe('p1')
     expect(call.undo).toBeDefined()
     expect(textBody(result)).toMatch(/version 4/i)
+  })
+
+  it('editPage writes Markdown tables through the live Yjs gateway instead of legacy CAS', async () => {
+    const docTools = docToolsStub({
+      // On a collaborative page this version is `documents.seq`, not
+      // `saved_views.version`; it must never be fed to the legacy CAS writer.
+      getVersionedPage: async () => ({ ...SAMPLE_PAGE, version: 17 }),
+      applyLiveOps: async () => ({ idMap: {}, skipped: [], version: 18 }),
+    })
+    const tools = buildBrainTools({ ...BASE, scope: 'read_write', docTools })
+    const editPage = tools.find((t) => t.name === 'editPage')!
+    const result = await editPage.handler({
+      pageId: 'p1',
+      mode: 'replace',
+      content: '| Flow | Priority |\n| --- | --- |\n| Newsletter | P0 |',
+    })
+
+    expect(result.isError).toBeFalsy()
+    expect(docTools.docPageStore.applyPatch).not.toHaveBeenCalled()
+    expect(docTools.docGateway?.applyOps).toHaveBeenCalledTimes(1)
+    const call = (docTools.docGateway!.applyOps as ReturnType<typeof vi.fn>).mock.calls[0][0]
+    expect(call.pageId).toBe('p1')
+    expect(call.ops[0]).toEqual({ op: 'delete', blockId: 'b1' })
+    expect(call.ops[1]).toMatchObject({ op: 'add', block: { kind: 'table' } })
+    expect(textBody(result)).toMatch(/live version 18/i)
+  })
+
+  it('editPage never falls through to legacy CAS when the live gateway fails', async () => {
+    const docTools = docToolsStub({
+      applyLiveOps: async () => ({ error: 'sync apply HTTP 503' }),
+    })
+    const tools = buildBrainTools({ ...BASE, scope: 'read_write', docTools })
+    const editPage = tools.find((t) => t.name === 'editPage')!
+    const result = await editPage.handler({ pageId: 'p1', content: 'x' })
+
+    expect(result.isError).toBe(true)
+    expect(textBody(result)).toMatch(/legacy page was not changed/i)
+    expect(docTools.docPageStore.applyPatch).not.toHaveBeenCalled()
   })
 
   it('editPage surfaces a concurrent-edit conflict when applyPatch returns null', async () => {

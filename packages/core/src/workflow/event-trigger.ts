@@ -19,6 +19,8 @@
  *     write chokepoints — sync worker, assistant write-through, manual edits).
  *   - brand      → `workflow/brand-event-trigger.ts` (the brand store's write
  *     chokepoints — Studio routes, the updateBrandDraft tool, brain MCP).
+ *   - crm        → `workflow/crm-event-trigger.ts` (the committed CRM domain
+ *     event outbox worker).
  * Each producer normalizes its native event into a `DispatchEvent`; the
  * dispatcher never knows whether an event came from a poller, a webhook, or a
  * page write. Every source kind is equally first-class.
@@ -27,7 +29,7 @@
  * package fulfils `findEventTriggeredWorkflows` (a workspace-scoped read of
  * `workflows.trigger`) and `startWorkflowRun` (create run + advance) at boot.
  *
- * Best-effort, never throws. The dispatcher fans out to N workflows as a
+ * `dispatch` is best-effort and never throws. The dispatcher fans out to N workflows as a
  * reactive side-effect: a failed finder or a failed per-workflow start must
  * neither block the producer nor abort the sibling workflows. Every failure
  * routes to the `onError` sink.
@@ -258,6 +260,16 @@ export type WorkflowEventDispatcherDeps = {
 export type WorkflowEventDispatcher = {
   /** Match one event against the workspace's event workflows; start each hit. */
   dispatch(event: DispatchEvent): Promise<void>
+  /**
+   * Same fan-out, but rejects after attempting every subscriber when any
+   * finder/start failed. Durable outbox workers use this to retain retry state;
+   * best-effort inline producers keep using `dispatch`.
+   */
+  dispatchStrict?: (event: DispatchEvent) => Promise<void>
+}
+
+export type StrictWorkflowEventDispatcher = WorkflowEventDispatcher & {
+  dispatchStrict(event: DispatchEvent): Promise<void>
 }
 
 /**
@@ -288,6 +300,10 @@ function sourceMatches(event: EventSourceRef, ref: EventSourceRef): boolean {
     // Id-less source, same reasoning again: a workspace's brand system is one
     // corpus; the slug rides `match.tags` when a subscription needs to narrow
     // to a single brand.
+    return true
+  }
+  if (event.type === 'crm' && ref.type === 'crm') {
+    // Id-less committed domain source; match fields provide selectivity.
     return true
   }
   return false
@@ -403,13 +419,21 @@ function buildInput(event: DispatchEvent): WorkflowEventInput {
       channelId: event.channelId,
       actorId: event.actorId,
     }
-  } else {
+  } else if (src.type === 'brand') {
     trigger = {
       sourceType: 'brand',
       provider: 'brand',
       // For a brand source `channelId` is the lifecycle action; the brand's
       // id + slug live in the payload (`input.event.brandId` /
       // `input.event.slug`).
+      channelId: event.channelId,
+      actorId: event.actorId,
+    }
+  } else {
+    trigger = {
+      sourceType: 'crm',
+      provider: 'crm',
+      // The closed CRM event type is the source sub-channel.
       channelId: event.channelId,
       actorId: event.actorId,
     }
@@ -424,8 +448,8 @@ function buildInput(event: DispatchEvent): WorkflowEventInput {
  */
 export function createWorkflowEventDispatcher(
   deps: WorkflowEventDispatcherDeps,
-): WorkflowEventDispatcher {
-  async function targetEvents(event: DispatchEvent): Promise<DispatchEvent[]> {
+): StrictWorkflowEventDispatcher {
+  async function targetEvents(event: DispatchEvent, failures?: unknown[]): Promise<DispatchEvent[]> {
     const findAdditional = deps.findAdditionalConnectorEventWorkspaces
     if (event.source.type !== 'connector' || !findAdditional) return [event]
 
@@ -440,6 +464,7 @@ export function createWorkflowEventDispatcher(
       // A grant lookup outage must not broaden access, and must not regress
       // that existing target either.
       deps.onError?.(err, { workspaceId: event.workspaceId })
+      failures?.push(err)
       return [event]
     }
 
@@ -455,7 +480,7 @@ export function createWorkflowEventDispatcher(
   // ── Subscriber 1: event-triggered workflows. The original behavior, kept
   //    byte-for-byte — its early returns scope to this helper, never to the
   //    whole dispatch (so they cannot suppress the goal subscriber below). ──
-  async function dispatchToWorkflows(event: DispatchEvent): Promise<void> {
+  async function dispatchToWorkflows(event: DispatchEvent, failures?: unknown[]): Promise<void> {
     let workflows: EventTriggeredWorkflow[]
     try {
       workflows = await deps.findEventTriggeredWorkflows({
@@ -463,6 +488,7 @@ export function createWorkflowEventDispatcher(
       })
     } catch (err) {
       deps.onError?.(err, { workspaceId: event.workspaceId })
+      failures?.push(err)
       return
     }
     if (workflows.length === 0) return
@@ -484,6 +510,7 @@ export function createWorkflowEventDispatcher(
           workspaceId: wf.workspaceId,
           workflowId: wf.workflowId,
         })
+        failures?.push(err)
       }
     }
   }
@@ -493,7 +520,7 @@ export function createWorkflowEventDispatcher(
   //    to workflow-only behavior. Independent of subscriber 1 — runs even when
   //    the workspace has no event workflows, and is isolated per-goal exactly
   //    as the workflow start is isolated per-workflow. ──
-  async function dispatchToGoals(event: DispatchEvent): Promise<void> {
+  async function dispatchToGoals(event: DispatchEvent, failures?: unknown[]): Promise<void> {
     const findGoals = deps.findEventWaitingGoals
     const resumeGoal = deps.resumeEventWaitingGoal
     if (!findGoals || !resumeGoal) return
@@ -503,6 +530,7 @@ export function createWorkflowEventDispatcher(
       goals = await findGoals({ workspaceId: event.workspaceId })
     } catch (err) {
       deps.onError?.(err, { workspaceId: event.workspaceId })
+      failures?.push(err)
       return
     }
 
@@ -514,23 +542,33 @@ export function createWorkflowEventDispatcher(
         await resumeGoal({ goalId: g.goalId, workspaceId: g.workspaceId, event })
       } catch (err) {
         deps.onError?.(err, { workspaceId: g.workspaceId, goalId: g.goalId })
+        failures?.push(err)
       }
     }
   }
 
+  async function run(event: DispatchEvent, strict: boolean): Promise<void> {
+    const failures = strict ? [] as unknown[] : undefined
+    // One physical connector event may target several explicitly exposed
+    // workspaces. Each target still needs its own matching subscription;
+    // merely holding a grant never persists the event or starts a run.
+    const events = await targetEvents(event, failures)
+    for (const targetEvent of events) {
+      // Two independent subscriber fan-outs over one workspace event.
+      // Workflows first, then the optional goal subscriber. Neither
+      // suppresses the other; each isolates failures to `onError`.
+      await dispatchToWorkflows(targetEvent, failures)
+      await dispatchToGoals(targetEvent, failures)
+    }
+    if (failures?.length) {
+      const error = new Error(`Workflow event dispatch failed for ${failures.length} subscriber operation(s).`)
+      ;(error as Error & { causes?: unknown[] }).causes = failures
+      throw error
+    }
+  }
+
   return {
-    async dispatch(event) {
-      // One physical connector event may target several explicitly exposed
-      // workspaces. Each target still needs its own matching subscription;
-      // merely holding a grant never persists the event or starts a run.
-      const events = await targetEvents(event)
-      for (const targetEvent of events) {
-        // Two independent subscriber fan-outs over one workspace event.
-        // Workflows first, then the optional goal subscriber. Neither
-        // suppresses the other; each isolates failures to `onError`.
-        await dispatchToWorkflows(targetEvent)
-        await dispatchToGoals(targetEvent)
-      }
-    },
+    dispatch: (event) => run(event, false),
+    dispatchStrict: (event) => run(event, true),
   }
 }

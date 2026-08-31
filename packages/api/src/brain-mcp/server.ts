@@ -236,6 +236,8 @@ export function brainMcpRoutes(opts: Options): Router {
       workspaceId: auth.workspaceId,
       scope: auth.scope,
       keyId: auth.keyId,
+      authKind: auth.authKind,
+      actingUserId: auth.actingUserId,
       maxClearance: auth.maxClearance,
       memoryTools: opts.memoryTools,
       taskTools: opts.taskTools,
