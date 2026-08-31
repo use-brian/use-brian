@@ -48,6 +48,7 @@ import {
 import { composeRecoveryMessage } from './_recovery-message.js'
 import {
   CONTEXT_NOT_AVAILABLE_MESSAGE,
+  CUSTOM_MODEL_ENDPOINT_FALLBACK_NOTICE,
   CUSTOM_MODEL_IMAGE_FALLBACK_NOTICE,
   CUSTOM_MODEL_IMAGE_REJECTION,
 } from './_channel-error-text.js'
@@ -1141,6 +1142,11 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         workspaceId: assistant.workspaceId,
         requestedTier: logicalTier,
         allowDefault: true,
+        // The main user-facing channel turn, and every exit from it goes
+        // through `sendResponseAndStampChannelId`, which is what announces a
+        // fallback. The background lane above must NOT pass this - see the
+        // resolver's `allowFailureFallback` docs.
+        allowFailureFallback: true,
       })
     : null
   // The same policy object the chat route uses, deliberately: one rule about
@@ -2022,11 +2028,26 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // stamp entirely; a missing `lastFlushedAssistantRowId` (recovery
   // path that never flushed) also skips. Errors during the stamp are
   // logged but don't propagate — the user already saw the message.
+  let endpointFallbackAnnounced = false
   const sendResponseAndStampChannelId = async (text: string, documents?: OutgoingDocument[]): Promise<void> => {
     // A channel has no `notice` lane, so an announced fallback has to travel
     // in the message itself - once, on the first thing the user sees, then
     // cleared so a multi-part reply does not repeat it.
-    const noticed = imageFallbackNotice ? `${imageFallbackNotice}\n\n${text}` : text
+    //
+    // The endpoint-failure fallback is announced from HERE rather than at the
+    // one happy-path send, because the two are decided at different times:
+    // the image fallback is known before the turn starts, while an endpoint
+    // failure is only known once the provider has already been called. Every
+    // exit that speaks to the user goes through this helper, so announcing
+    // here is what keeps the recovery and empty-delivery paths honest too.
+    // The two are mutually exclusive by construction - an image fallback
+    // clears `customLlmRuntime` outright.
+    const endpointNotice = customLlmRuntime?.fallback.used && !endpointFallbackAnnounced
+      ? CUSTOM_MODEL_ENDPOINT_FALLBACK_NOTICE
+      : null
+    if (endpointNotice) endpointFallbackAnnounced = true
+    const pendingNotice = imageFallbackNotice ?? endpointNotice
+    const noticed = pendingNotice ? `${pendingNotice}\n\n${text}` : text
     imageFallbackNotice = null
     const result = await hooks.sendResponse(noticed, documents)
     const channelMessageId = result && typeof result === 'object'
@@ -2510,7 +2531,12 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
           // docs/architecture/channels/channel-user-identity.md → "Billing split".
           const usage = event.totalUsage
           if (usage) {
-            const cost = customLlmRuntime?.providerKeySource === 'user'
+            // `providerKeySource` is DERIVED on the resolved runtime and
+            // already reads 'platform' for a turn the endpoint failed to
+            // serve, because that turn ran on platform capacity. Read it
+            // here, at usage time, rather than caching it earlier.
+            const turnKeySource: 'user' | 'platform' = customLlmRuntime?.providerKeySource ?? 'platform'
+            const cost = turnKeySource === 'user'
               ? 0
               : calculateCost(event.response.model, usage)
             if (usageStore) {
@@ -2532,8 +2558,22 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
                 userMessageId: userMessageRow.id,
                 source: workspacePlan === 'free' ? 'free' : 'included',
                 triggerKey: 'main_response',
-                providerKeySource: customLlmRuntime?.providerKeySource ?? 'platform',
+                providerKeySource: turnKeySource,
               }).catch((err) => console.error(`[${channelType}] Usage tracking failed:`, err))
+            }
+
+            if (customLlmRuntime?.fallback.used) {
+              analytics?.logEvent({
+                userId, assistantId: assistant.id, sessionId: session.id,
+                eventName: 'custom_llm_endpoint_fallback', channelType,
+                metadata: {
+                  reason: sanitizeAnalytics(customLlmRuntime.fallback.reason ?? 'unknown'),
+                  status: customLlmRuntime.fallback.status ?? 0,
+                  endpoint_profile: sanitizeAnalytics(customLlmRuntime.selector),
+                  served_model: sanitizeAnalytics(event.response.model),
+                  model_tier: sanitizeAnalytics(logicalTier),
+                },
+              })
             }
 
             analytics?.logEvent({

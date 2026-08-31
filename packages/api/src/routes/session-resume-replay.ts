@@ -440,6 +440,7 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
         })
         if (deps.usageStore && event.totalUsage) {
           const usage = event.totalUsage
+          const turnKeySource: 'user' | 'platform' = customLlm?.providerKeySource ?? providerKeySource
           void deps.usageStore.recordUsage({
             userId: session.userId,
             assistantId: assistant.id,
@@ -451,12 +452,15 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
             outputTokens: usage.outputTokens,
             cacheReadTokens: usage.cacheReadTokens,
             cacheWriteTokens: usage.cacheWriteTokens,
-            actualCostUsd: providerKeySource === 'user'
+            // Re-read the custom runtime's DERIVED key source: an endpoint
+            // that failed had this turn served on platform capacity, and the
+            // snapshot above was taken before the turn ran.
+            actualCostUsd: turnKeySource === 'user'
               ? 0
               : calculateCost(event.response.model, usage),
             source: 'included',
             triggerKey: 'session_resume',
-            providerKeySource,
+            providerKeySource: turnKeySource,
           }).catch((err) => console.error('[session-resume] usage tracking failed:', err))
         }
       } else if (event.type === 'error') {

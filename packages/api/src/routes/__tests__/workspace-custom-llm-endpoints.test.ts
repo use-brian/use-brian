@@ -28,6 +28,7 @@ const endpoint = {
   name: 'Local gateway',
   baseUrl: 'http://model.example/v1',
   hasApiKey: false,
+  fallbackToDefaultOnFailure: false,
   createdAt: new Date('2026-08-10T00:00:00Z'),
   updatedAt: new Date('2026-08-10T00:00:00Z'),
   profiles: [profile],
@@ -44,6 +45,7 @@ function setup(networkPolicy: CustomLlmNetworkPolicy = 'private-network') {
     deleteProfile: vi.fn().mockResolvedValue(true),
     setTierDefault: vi.fn().mockResolvedValue({ workspaceId, tier: 'max', profileId, updatedAt: new Date() }),
     clearTierDefault: vi.fn().mockResolvedValue(undefined),
+    setFallbackPolicy: vi.fn().mockResolvedValue({ ...endpoint, fallbackToDefaultOnFailure: true }),
     getEndpointRuntimeSystem: vi.fn().mockResolvedValue({
       ...endpoint,
       profiles: undefined,
@@ -210,5 +212,51 @@ describe('[COMP:api/custom-llm-endpoints] custom endpoint route', () => {
       .send({ name: 'x', baseUrl: 'http://model.example/v1', modelId: 'm', contextWindow: 4096, maxOutputTokens: 512 })
       .expect(403)
     expect(probe).not.toHaveBeenCalled()
+  })
+})
+
+// ── Endpoint failure fallback opt-in (migration 491) ───────────
+
+describe('[COMP:api/custom-llm-endpoints] endpoint failure fallback opt-in', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  it('turns the fallback on for one connection and echoes the stored row', async () => {
+    const { app, endpointStore } = setup()
+    const res = await request(app)
+      .patch(`/api/workspaces/${workspaceId}/custom-llm-endpoints/${endpointId}/fallback`)
+      .send({ fallbackToDefaultOnFailure: true })
+      .expect(200)
+    expect(endpointStore.setFallbackPolicy).toHaveBeenCalledWith({
+      actingUserId: 'user-1', workspaceId, endpointId, fallbackToDefaultOnFailure: true,
+    })
+    expect(res.body.endpoint.fallbackToDefaultOnFailure).toBe(true)
+  })
+
+  it('rejects a non-boolean, so a typo cannot silently enable platform serving', async () => {
+    const { app, endpointStore } = setup()
+    await request(app)
+      .patch(`/api/workspaces/${workspaceId}/custom-llm-endpoints/${endpointId}/fallback`)
+      .send({ fallbackToDefaultOnFailure: 'yes' })
+      .expect(400)
+    expect(endpointStore.setFallbackPolicy).not.toHaveBeenCalled()
+  })
+
+  it('is admin-only, like every other write on this router', async () => {
+    const { app, workspaceStore, endpointStore } = setup()
+    vi.mocked(workspaceStore.getRole).mockResolvedValueOnce('member')
+    await request(app)
+      .patch(`/api/workspaces/${workspaceId}/custom-llm-endpoints/${endpointId}/fallback`)
+      .send({ fallbackToDefaultOnFailure: true })
+      .expect(403)
+    expect(endpointStore.setFallbackPolicy).not.toHaveBeenCalled()
+  })
+
+  it('404s for a connection outside the workspace', async () => {
+    const { app, endpointStore } = setup()
+    vi.mocked(endpointStore.setFallbackPolicy).mockResolvedValueOnce(null)
+    await request(app)
+      .patch(`/api/workspaces/${workspaceId}/custom-llm-endpoints/${endpointId}/fallback`)
+      .send({ fallbackToDefaultOnFailure: true })
+      .expect(404)
   })
 })
