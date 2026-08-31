@@ -27,6 +27,7 @@ function session(overrides: Partial<LiveSessionItem> = {}): LiveSessionItem {
     id: "s-1",
     assistantId: "a-1",
     assistantName: "Brian",
+    assistantIconSeed: 42,
     ownerUserId: "u-1",
     ownerName: "Owner",
     channelType: "web",

@@ -4601,6 +4601,7 @@ export const ja: Dictionary = {
     stateSettled: "完了",
     presenceHint: "プライベートチャット: 詳細は所有者のみに表示されます。",
     forPerson: "{name}向け",
+    scrollRoster: "{count} 件 - スクロールしてすべて表示",
     runLabel: "ワークフロー実行",
     triggerScheduled: "スケジュール",
     triggerManual: "手動",

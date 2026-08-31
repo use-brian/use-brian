@@ -31,6 +31,7 @@ function session(overrides: Partial<LiveSessionItem> = {}): LiveSessionItem {
     id: "session-1",
     assistantId: "assistant-1",
     assistantName: "Brian",
+    assistantIconSeed: 42,
     ownerUserId: "user-1",
     ownerName: "Owner",
     channelType: "web",
@@ -101,6 +102,7 @@ describe("[COMP:app-web/live-app] visual overview", () => {
     expect(html).toContain("Brian");
     expect(html).toContain("web");
     expect(html).toContain("For Owner");
+    expect(html).toContain('aria-label="Brian"');
     expect(html).toContain("Plan the launch");
     expect(html).toContain("Ops");
     expect(html).toContain("telegram");
@@ -131,7 +133,7 @@ describe("[COMP:app-web/live-app] visual overview", () => {
     expect(html).not.toContain("focus=session%3Aprivate-session");
   });
 
-  it("lets busy zones grow while empty zones contract", () => {
+  it("packs busy and empty zones into a density-aware wide grid", () => {
     const html = wrap(
       <LiveOverview
         workspaceId="workspace-1"
@@ -142,10 +144,27 @@ describe("[COMP:app-web/live-app] visual overview", () => {
     );
     expect(html).toContain('data-live-zone-size="busy"');
     expect(html).toContain('data-live-zone-size="empty"');
-    expect(html).toContain("flex-grow:2");
-    expect(html).toContain("flex-grow:0.7");
-    expect(html).toContain("sm:basis-[calc(50%_-_0.5rem)]");
-    expect(html).toContain("xl:basis-52");
+    expect(html).toContain("xl:col-span-6");
+    expect(html).toContain("xl:row-span-13");
+    expect(html).toContain("xl:col-span-2");
+    expect(html).toContain("xl:row-span-6");
+    expect(html).toContain("xl:grid-flow-row-dense");
+    expect(html).toContain("xl:grid-cols-12");
+  });
+
+  it("bounds a crowded zone and keeps its full returned count visible", () => {
+    const html = wrap(
+      <LiveOverview
+        workspaceId="workspace-1"
+        items={Array.from({ length: 7 }, (_, index) =>
+          session({ id: `overflow-${index}` }),
+        )}
+      />,
+    );
+    expect(html).toContain("max-h-[26.5rem]");
+    expect(html).toContain("overflow-y-auto");
+    expect(html).toContain("7 items - scroll to view all");
+    expect(html).toContain(`${en.liveApp.stateWorking}: 7`);
   });
 
   it("uses the same compact visual language for a focused workflow run", () => {

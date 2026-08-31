@@ -42,12 +42,42 @@ import {
   summarizeRosterItems,
 } from "@/lib/live-roster";
 import { OperatorTopbar } from "@/components/operator/operator-topbar";
+import { AssistantAvatar } from "@/components/assistant-avatar";
 import { LiveWatchPane } from "@/components/live/live-watch-pane";
 import { useLiveRoster } from "@/components/live/use-live-roster";
 import { cn } from "@/lib/utils";
 
 const topbarActionCls =
   "inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2 text-xs font-medium text-sidebar-foreground/70 transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground";
+const LIVE_ZONE_VISIBLE_ROWS = 6;
+
+function zoneLayoutClass(count: number): string {
+  const columns =
+    count === 0
+      ? "xl:col-span-2"
+      : count === 1
+        ? "xl:col-span-3"
+        : count === 2
+          ? "xl:col-span-4"
+          : count <= 5
+            ? "xl:col-span-6"
+            : "xl:col-span-7";
+  const rows =
+    count <= 1
+      ? "xl:row-span-6"
+      : count === 2
+        ? "xl:row-span-8"
+        : count === 3
+          ? "xl:row-span-10"
+          : count === 4
+            ? "xl:row-span-13"
+            : count === 5
+              ? "xl:row-span-15"
+              : count === 6
+                ? "xl:row-span-17"
+                : "xl:row-span-18";
+  return `${columns} ${rows}`;
+}
 
 type StatusTone = {
   panel: string;
@@ -91,11 +121,6 @@ function LiveStatusRow({
   const tl = useT().liveApp;
   const presence = item.kind === "session" && item.tier === "presence";
   const focusable = canFocusLiveItem(item);
-  const KindIcon = presence
-    ? LockKeyhole
-    : item.kind === "workflow_run"
-      ? GitBranch
-      : Bot;
   const primary = item.kind === "session" ? item.assistantName : item.workflowName;
   const channel = item.kind === "session" ? item.channelType : tl.runLabel;
   const owner = item.kind === "session" && item.ownerName
@@ -117,8 +142,27 @@ function LiveStatusRow({
         .join(" · ");
   const content = (
     <>
-      <span className={cn("grid size-9 shrink-0 place-items-center rounded-xl", rowTone)}>
-        <KindIcon className="size-4" strokeWidth={1.8} aria-hidden />
+      <span
+        className={cn("relative grid size-9 shrink-0 place-items-center rounded-xl", rowTone)}
+        aria-hidden
+      >
+        {item.kind === "session" ? (
+          <>
+            <AssistantAvatar
+              id={item.assistantId}
+              name={item.assistantName}
+              iconSeed={item.assistantIconSeed}
+              size="sm"
+            />
+            {presence ? (
+              <span className="absolute -bottom-0.5 -right-0.5 grid size-4 place-items-center rounded-full border border-border bg-background text-muted-foreground shadow-sm">
+                <LockKeyhole className="size-2.5" strokeWidth={2} />
+              </span>
+            ) : null}
+          </>
+        ) : (
+          <GitBranch className="size-4" strokeWidth={1.8} />
+        )}
       </span>
       <span className="flex min-w-0 flex-1 flex-col gap-1">
         <span className="flex min-w-0 items-center gap-2">
@@ -171,19 +215,19 @@ function LiveStatusZone({
   tone,
   emptyLabel,
 }: LiveStatusZoneProps) {
+  const tl = useT().liveApp;
   const active = state === "working" && items.length > 0;
+  const overflowing = items.length > LIVE_ZONE_VISIBLE_ROWS;
   const density =
     items.length === 0 ? "empty" : items.length >= 3 ? "busy" : "active";
-  const flexGrow =
-    items.length === 0 ? 0.7 : Math.min(2.25, 1 + items.length * 0.25);
   return (
     <section
       data-live-status-zone={state}
       data-live-zone-size={density}
       aria-label={`${label}: ${items.length}`}
-      style={{ flexGrow }}
       className={cn(
-        "flex min-w-0 basis-full flex-col overflow-hidden rounded-3xl border p-4 shadow-sm transition-[flex-grow] duration-300 motion-reduce:transition-none sm:basis-[calc(50%_-_0.5rem)] sm:p-5 xl:basis-52",
+        "col-span-1 flex min-w-0 flex-col overflow-hidden rounded-3xl border p-4 shadow-sm sm:p-5 xl:h-full",
+        zoneLayoutClass(items.length),
         tone.panel,
       )}
     >
@@ -206,7 +250,17 @@ function LiveStatusZone({
       </header>
 
       {items.length > 0 ? (
-        <ul className="mt-4 flex flex-col gap-2">
+        <ul
+          className={cn(
+            "mt-4 flex flex-col gap-2",
+            overflowing &&
+              "max-h-[26.5rem] overflow-y-auto overscroll-contain pr-1 [scrollbar-gutter:stable]",
+          )}
+          tabIndex={overflowing ? 0 : undefined}
+          aria-label={
+            overflowing ? format(tl.scrollRoster, { count: items.length }) : undefined
+          }
+        >
           {items.map((item) => (
             <LiveStatusRow
               key={liveItemKey(item)}
@@ -226,6 +280,11 @@ function LiveStatusZone({
           <span className="size-1.5 rounded-full bg-current/35" aria-hidden />
         </div>
       )}
+      {overflowing ? (
+        <p className="mt-2 text-center text-[10px] font-medium text-muted-foreground">
+          {format(tl.scrollRoster, { count: items.length })}
+        </p>
+      ) : null}
     </section>
   );
 }
@@ -296,7 +355,7 @@ export function LiveOverview({
   return (
     <div
       data-live-overview-active={summary.active}
-      className="mx-auto flex w-full max-w-6xl flex-wrap items-start gap-4"
+      className="mx-auto grid w-full max-w-6xl grid-cols-1 items-start gap-4 md:grid-cols-2 xl:grid-flow-row-dense xl:grid-cols-12 xl:auto-rows-[1rem] xl:items-stretch"
     >
       {zones.map((zone) => (
         <LiveStatusZone

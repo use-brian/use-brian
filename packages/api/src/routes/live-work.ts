@@ -41,6 +41,7 @@ export type LiveSessionItem = {
   id: string
   assistantId: string
   assistantName: string
+  assistantIconSeed: number
   ownerUserId: string | null
   ownerName: string | null
   channelType: string
@@ -121,6 +122,7 @@ type SessionRosterRow = {
   id: string
   assistantId: string
   assistantName: string
+  assistantIconSeed: number
   assistantWorkspaceId: string
   userId: string
   ownerName: string | null
@@ -186,6 +188,7 @@ export function projectSessionRow(
     id: row.id,
     assistantId: row.assistantId,
     assistantName: row.assistantName,
+    assistantIconSeed: row.assistantIconSeed,
     ownerUserId: row.userId,
     ownerName: row.ownerName,
     channelType: row.channelType,
@@ -240,6 +243,7 @@ async function fetchSessionRows(workspaceId: string): Promise<SessionRosterRow[]
     `SELECT s.id,
             s.assistant_id           AS "assistantId",
             a.name                   AS "assistantName",
+            COALESCE(a.icon_seed, 0) AS "assistantIconSeed",
             a.workspace_id           AS "assistantWorkspaceId",
             s.user_id                AS "userId",
             u.name                   AS "ownerName",

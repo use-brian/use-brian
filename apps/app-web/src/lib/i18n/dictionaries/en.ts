@@ -4818,6 +4818,7 @@ export const en = {
     stateSettled: "Finished",
     presenceHint: "Private chat: details are visible only to its owner.",
     forPerson: "For {name}",
+    scrollRoster: "{count} items - scroll to view all",
     runLabel: "Workflow run",
     triggerScheduled: "Scheduled",
     triggerManual: "Manual",
