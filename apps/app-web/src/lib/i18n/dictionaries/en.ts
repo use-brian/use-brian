@@ -1306,6 +1306,12 @@ export const en = {
     deleteConfirmAction: "Delete",
     cancel: "Cancel",
     createDraftFailed: "Could not create draft: {message}",
+    // A landing build turn that died before it streamed anything. The dock
+    // stays collapsed on an autoSend build, so without these the page just
+    // stopped saying "drafting" and the user was told nothing (2026-09-01).
+    buildFailed: "Could not build this page: {message}",
+    buildNeverStarted:
+      "Could not build this page. The request did not start - try sending it again.",
     saveFailed: "Could not save: {message}",
     unsaveFailed: "Could not move to drafts: {message}",
     moveContextConfirmTitle: "Move page to a different context?",
@@ -5812,6 +5818,11 @@ export const en = {
     upstreamConnectionResetCustom: "Your workspace custom model endpoint dropped the connection. Please try again.",
     upstreamUnreachable: "The model endpoint could not be reached. Please try again in a moment.",
     upstreamUnreachableCustom: "Your workspace custom model endpoint could not be reached. Check that it is online in your workspace model settings.",
+    // The dock held a session bound to a different assistant (a resume that
+    // attached a row this surface cannot re-address). We drop that binding
+    // and tell the user to send again, so the fix is one tap, not a reload.
+    sessionRebound:
+      "That conversation belongs to a different assistant. Started a fresh one - send your message again.",
     viewSwitchAria: "Chat scope",
     viewPersonal: "Personal",
     viewWorkspace: "Workspace",
