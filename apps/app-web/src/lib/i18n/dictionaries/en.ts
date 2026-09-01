@@ -942,6 +942,14 @@ export const en = {
       ingestAddedToBrain: "Added to brain",
       ingestAdded: "added to brain",
       ingestFailed: "Failed",
+      // Named BEFORE any request: an oversized body is dropped at the edge,
+      // so the only alternative message is a bare "Failed to fetch".
+      ingestTooLarge:
+        "Too large to add to your brain: {size}. The limit is {limit} per file.",
+      ingestUnreachable:
+        "The upload could not reach the server. Check your connection and try again.",
+      ingestTooManyFiles:
+        "Only {max} files at a time. Add this one in the next batch.",
       ingestRemove: "Remove",
       ingestClear: "Clear",
       linkedinArchiveAlone: "Add a LinkedIn ZIP by itself so every row can be reconciled.",
