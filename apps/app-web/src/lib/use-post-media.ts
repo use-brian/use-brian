@@ -18,7 +18,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { authFetch } from "@/lib/auth-fetch";
 import { resolveDocFileSrc } from "@/components/doc/doc-file-url";
-import { ACCEPTED_MEDIA_MIME, type PostMedia } from "@/lib/feed-media";
+import {
+  ACCEPTED_MEDIA_MIME,
+  postMediaUploadBatches,
+  type PostMedia,
+} from "@/lib/feed-media";
 
 type UploadedFile = {
   id?: string;
@@ -63,34 +67,43 @@ export function usePostMedia(workspaceId: string) {
 
       setUploading(true);
       try {
-        const form = new FormData();
-        for (const file of usable) form.append("files", file);
-        const res = await authFetch(
-          apiUrl(`/api/doc-files/${workspaceId}/upload`),
-          { method: "POST", body: form },
-        );
-        if (!res.ok) {
-          return { media: [], errors: [...rejected, ...usable.map((f) => f.name)] };
-        }
-        const body = (await res.json()) as { files?: UploadedFile[] };
         const media: PostMedia[] = [];
         const errors = [...rejected];
-        for (const entry of body.files ?? []) {
-          // A partial failure is surfaced, never filtered away: an operator
-          // who dropped three images and got two must be told which one is
-          // missing, not left to count thumbnails.
-          if (!entry.id || entry.error) {
-            errors.push(entry.name ?? entry.error ?? "upload failed");
-            continue;
+
+        // The durable upload route is shared with Doc and accepts ten files
+        // per request. Keep that route bounded while supporting platform caps
+        // above ten (LinkedIn allows twenty) through sequential batches.
+        for (const batch of postMediaUploadBatches(usable)) {
+          try {
+            const form = new FormData();
+            for (const file of batch) form.append("files", file);
+            const res = await authFetch(
+              apiUrl(`/api/doc-files/${workspaceId}/upload`),
+              { method: "POST", body: form },
+            );
+            if (!res.ok) {
+              errors.push(...batch.map((f) => f.name));
+              continue;
+            }
+            const body = (await res.json()) as { files?: UploadedFile[] };
+            for (const entry of body.files ?? []) {
+              // A partial failure is surfaced, never filtered away: an
+              // operator who dropped three images and got two must be told
+              // which one is missing, not left to count thumbnails.
+              if (!entry.id || entry.error) {
+                errors.push(entry.name ?? entry.error ?? "upload failed");
+                continue;
+              }
+              media.push({
+                fileId: entry.id,
+                mimeType: entry.mimeType ?? "image/png",
+              });
+            }
+          } catch {
+            errors.push(...batch.map((f) => f.name));
           }
-          media.push({
-            fileId: entry.id,
-            mimeType: entry.mimeType ?? "image/png",
-          });
         }
         return { media, errors };
-      } catch {
-        return { media: [], errors: [...rejected, ...usable.map((f) => f.name)] };
       } finally {
         if (alive.current) setUploading(false);
       }

@@ -48,6 +48,7 @@ import {
 import { composeRecoveryMessage } from './_recovery-message.js'
 import {
   CONTEXT_NOT_AVAILABLE_MESSAGE,
+  CUSTOM_MODEL_ENDPOINT_FALLBACK_NOTICE,
   CUSTOM_MODEL_IMAGE_FALLBACK_NOTICE,
   CUSTOM_MODEL_IMAGE_REJECTION,
 } from './_channel-error-text.js'
@@ -103,6 +104,8 @@ import {
   formatActiveWorkspaceContext,
   noteAutomaticScopeEvidence,
   resolveTurnScopeSystem,
+  type ResolvedTurnScope,
+  type ResolveTurnScopeInput,
 } from '../context-scope/resolve-turn-scope.js'
 import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
 import {
@@ -779,6 +782,37 @@ export function connectorToolsAllowedForChannelTurn(
   return !externalGuest || externalGuestConnectorTools === true
 }
 
+type ConnectorTurnScopeResolver = (
+  input: ResolveTurnScopeInput,
+) => Promise<ResolvedTurnScope>
+
+/**
+ * Keep the channel user's data authority separate from the routed assistant's
+ * explicitly granted connector authority. The resolver parameter is a narrow
+ * test seam for this security boundary; production always uses the canonical
+ * TurnScope resolver.
+ */
+export async function resolveConnectorTurnScopeForChannelTurn(
+  input: {
+    externalGuestConnectorTools: boolean
+    dataTurnScope: ResolvedTurnScope
+    userId: string
+    assistant: ResolveTurnScopeInput['assistant']
+    workspaceId: string | null
+    session: ResolveTurnScopeInput['session']
+  },
+  resolveScope: ConnectorTurnScopeResolver = resolveTurnScopeSystem,
+): Promise<ResolvedTurnScope> {
+  if (!input.externalGuestConnectorTools) return input.dataTurnScope
+  return resolveScope({
+    userId: input.userId,
+    assistant: input.assistant,
+    workspaceId: input.workspaceId,
+    session: input.session,
+    memberMode: 'assistant',
+  })
+}
+
 // ── Pipeline ─────────────────────────────────────────────────────
 
 /**
@@ -975,9 +1009,9 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     channelType,
     channelId: sessionChannelId,
   })
-  let turnScope
+  let dataTurnScope
   try {
-    turnScope = await resolveTurnScopeSystem({
+    dataTurnScope = await resolveTurnScopeSystem({
       userId,
       assistant: {
         ...assistant,
@@ -995,11 +1029,11 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     }
     return
   }
-  const clearance = turnScope.access.clearance ?? assistant.clearance
-  const compartments = turnScope.effectiveCompartments
+  const clearance = dataTurnScope.access.clearance ?? assistant.clearance
+  const compartments = dataTurnScope.effectiveCompartments
   const scopeAccumulator = new ContextScopeAccumulator({
-    compartments: turnScope.writeCompartments,
-    projectIds: turnScope.writeProjectIds,
+    compartments: dataTurnScope.writeCompartments,
+    projectIds: dataTurnScope.writeProjectIds,
   })
 
   // Expose session ID to channel hooks (e.g., WhatsApp confirmation store)
@@ -1153,6 +1187,11 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         workspaceId: assistant.workspaceId,
         requestedTier: logicalTier,
         allowDefault: true,
+        // The main user-facing channel turn, and every exit from it goes
+        // through `sendResponseAndStampChannelId`, which is what announces a
+        // fallback. The background lane above must NOT pass this - see the
+        // resolver's `allowFailureFallback` docs.
+        allowFailureFallback: true,
       })
     : null
   // The same policy object the chat route uses, deliberately: one rule about
@@ -1422,8 +1461,8 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     usageStore,
     userMessageId: userMessageRow.id,
     persistLongTermContext: !externalGuest,
-    compartments: turnScope.writeCompartments,
-    projectIds: turnScope.writeProjectIds,
+    compartments: dataTurnScope.writeCompartments,
+    projectIds: dataTurnScope.writeProjectIds,
   })
   let messages: Message[] = compactionResult.messages
 
@@ -1443,7 +1482,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // docs/architecture/context-engine/memory-system.md → "Index cap".
   let memoryContext = ''
   if (isIdentified) {
-    const viewerCtx = turnScope.access
+    const viewerCtx = dataTurnScope.access
     const [soul, identityMemories, rankedIndex] = await Promise.all([
       memoryStore.getSoul(assistant.id, userId, 'Use Brian'),
       memoryStore.getIdentity(viewerCtx),
@@ -1542,7 +1581,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
           // Read ceiling = min(member, assistant) — see `clearance` above.
           clearance,
           compartments,
-          projectIds: turnScope.effectiveProjectIds,
+          projectIds: dataTurnScope.effectiveProjectIds,
         },
         PER_TURN_FILES_INDEX_CAP,
       )
@@ -1650,7 +1689,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   const privateRuntimeContextParts = splitPrompt.privateRuntimeContext
     ? [splitPrompt.privateRuntimeContext]
     : []
-  const activeWorkspaceContext = formatActiveWorkspaceContext(turnScope)
+  const activeWorkspaceContext = formatActiveWorkspaceContext(dataTurnScope)
   if (activeWorkspaceContext) privateRuntimeContextParts.push(activeWorkspaceContext)
   if (params.realtimeThreadTarget) {
     const bound = params.realtimeThreadTarget.taskIds.length > 0
@@ -1810,6 +1849,22 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
       },
     })
     try {
+      // An external guest keeps the non-member scope resolved above for every
+      // prompt, memory, file, skill, and write path. The owner's explicit
+      // connector opt-in authorizes only the connector surface enabled for the
+      // routed assistant, so resolve that surface independently and never
+      // reuse it outside this injection call.
+      const turnScope = await resolveConnectorTurnScopeForChannelTurn({
+        externalGuestConnectorTools,
+        dataTurnScope,
+        userId,
+        assistant: {
+          ...assistant,
+          compartments: assistant.compartments ?? null,
+        },
+        workspaceId: assistant.workspaceId,
+        session,
+      })
       const injection = await injectMcpTools({
         userId: connectorUserId,
         assistantId: assistant.id,
@@ -2051,11 +2106,26 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // stamp entirely; a missing `lastFlushedAssistantRowId` (recovery
   // path that never flushed) also skips. Errors during the stamp are
   // logged but don't propagate — the user already saw the message.
+  let endpointFallbackAnnounced = false
   const sendResponseAndStampChannelId = async (text: string, documents?: OutgoingDocument[]): Promise<void> => {
     // A channel has no `notice` lane, so an announced fallback has to travel
     // in the message itself - once, on the first thing the user sees, then
     // cleared so a multi-part reply does not repeat it.
-    const noticed = imageFallbackNotice ? `${imageFallbackNotice}\n\n${text}` : text
+    //
+    // The endpoint-failure fallback is announced from HERE rather than at the
+    // one happy-path send, because the two are decided at different times:
+    // the image fallback is known before the turn starts, while an endpoint
+    // failure is only known once the provider has already been called. Every
+    // exit that speaks to the user goes through this helper, so announcing
+    // here is what keeps the recovery and empty-delivery paths honest too.
+    // The two are mutually exclusive by construction - an image fallback
+    // clears `customLlmRuntime` outright.
+    const endpointNotice = customLlmRuntime?.fallback.used && !endpointFallbackAnnounced
+      ? CUSTOM_MODEL_ENDPOINT_FALLBACK_NOTICE
+      : null
+    if (endpointNotice) endpointFallbackAnnounced = true
+    const pendingNotice = imageFallbackNotice ?? endpointNotice
+    const noticed = pendingNotice ? `${pendingNotice}\n\n${text}` : text
     imageFallbackNotice = null
     const result = await hooks.sendResponse(noticed, documents)
     const channelMessageId = result && typeof result === 'object'
@@ -2187,8 +2257,8 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   try {
     const scopedTools = bindToolsToAgentAccess(allTools, {
       clearance,
-      compartments: turnScope.effectiveCompartments,
-      projectIds: turnScope.effectiveProjectIds,
+      compartments: dataTurnScope.effectiveCompartments,
+      projectIds: dataTurnScope.effectiveProjectIds,
     })
     for await (const event of queryLoop({
       ledger: createTurnLedger({
@@ -2237,14 +2307,14 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         // `assistantClearance` is the write ceiling (the assistant's tier).
         clearance,
         compartments,
-        projectIds: turnScope.effectiveProjectIds,
-        activeGroupId: turnScope.activeGroupId,
-        activeProjectId: turnScope.activeProjectId,
+        projectIds: dataTurnScope.effectiveProjectIds,
+        activeGroupId: dataTurnScope.activeGroupId,
+        activeProjectId: dataTurnScope.activeProjectId,
         assistantClearance: assistant.clearance,
-        assistantCompartments: turnScope.effectiveCompartments,
-        assistantDefaultCompartments: turnScope.writeCompartments,
-        assistantProjectIds: turnScope.effectiveProjectIds,
-        assistantDefaultProjectIds: turnScope.writeProjectIds,
+        assistantCompartments: dataTurnScope.effectiveCompartments,
+        assistantDefaultCompartments: dataTurnScope.writeCompartments,
+        assistantProjectIds: dataTurnScope.effectiveProjectIds,
+        assistantDefaultProjectIds: dataTurnScope.writeProjectIds,
       },
       confirmationResolver,
       confirmationTimeoutMs: 300_000,
@@ -2539,7 +2609,12 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
           // docs/architecture/channels/channel-user-identity.md → "Billing split".
           const usage = event.totalUsage
           if (usage) {
-            const cost = customLlmRuntime?.providerKeySource === 'user'
+            // `providerKeySource` is DERIVED on the resolved runtime and
+            // already reads 'platform' for a turn the endpoint failed to
+            // serve, because that turn ran on platform capacity. Read it
+            // here, at usage time, rather than caching it earlier.
+            const turnKeySource: 'user' | 'platform' = customLlmRuntime?.providerKeySource ?? 'platform'
+            const cost = turnKeySource === 'user'
               ? 0
               : calculateCost(event.response.model, usage)
             if (usageStore) {
@@ -2561,8 +2636,22 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
                 userMessageId: userMessageRow.id,
                 source: workspacePlan === 'free' ? 'free' : 'included',
                 triggerKey: 'main_response',
-                providerKeySource: customLlmRuntime?.providerKeySource ?? 'platform',
+                providerKeySource: turnKeySource,
               }).catch((err) => console.error(`[${channelType}] Usage tracking failed:`, err))
+            }
+
+            if (customLlmRuntime?.fallback.used) {
+              analytics?.logEvent({
+                userId, assistantId: assistant.id, sessionId: session.id,
+                eventName: 'custom_llm_endpoint_fallback', channelType,
+                metadata: {
+                  reason: sanitizeAnalytics(customLlmRuntime.fallback.reason ?? 'unknown'),
+                  status: customLlmRuntime.fallback.status ?? 0,
+                  endpoint_profile: sanitizeAnalytics(customLlmRuntime.selector),
+                  served_model: sanitizeAnalytics(event.response.model),
+                  model_tier: sanitizeAnalytics(logicalTier),
+                },
+              })
             }
 
             analytics?.logEvent({

@@ -30,6 +30,7 @@ function session(overrides: Partial<LiveSessionItem> = {}): LiveSessionItem {
     id: "session-1",
     assistantId: "assistant-1",
     assistantName: "Brian",
+    assistantIconSeed: 42,
     ownerUserId: "user-1",
     ownerName: "Owner",
     channelType: "web",
@@ -113,6 +114,7 @@ describe("[COMP:app-web/live-app] Live sidebar panel", () => {
     expect(html).toContain('href="/w/ws-1/live"');
     expect(html).toContain("/w/ws-1/live?focus=workflow_run%3Arun-1");
     expect(html).toContain("Daily digest");
+    expect(html).toContain('aria-label="Brian"');
   });
 
   it("shows presence without an open affordance", () => {

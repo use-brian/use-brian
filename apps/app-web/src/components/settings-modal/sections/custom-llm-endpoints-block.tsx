@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Plus, Server, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { useT } from "@/lib/i18n/client";
 import { useWorkspaceContext } from "@/lib/workspace-context";
@@ -11,6 +12,7 @@ import {
   CustomLlmEndpointsUnavailableError,
   deleteCustomLlmEndpoint,
   listCustomLlmEndpoints,
+  setCustomLlmFallbackPolicy,
   type CustomLlmEndpoint,
 } from "@/lib/api/custom-llm-endpoints";
 
@@ -30,6 +32,7 @@ export function CustomLlmEndpointsBlock({
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [showAddForm, setShowAddForm] = useState(false);
+  const [fallbackSaving, setFallbackSaving] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
@@ -102,7 +105,8 @@ export function CustomLlmEndpointsBlock({
         <>
           <ul className="space-y-2">
             {endpoints.map((endpoint) => (
-              <li key={endpoint.id} className="flex items-center gap-3 rounded-lg border border-border/70 px-3 py-2.5">
+              <li key={endpoint.id} className="rounded-lg border border-border/70 px-3 py-2.5">
+                <div className="flex items-center gap-3">
                 <Server className="size-4 shrink-0 text-muted-foreground" aria-hidden />
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-[13px] font-medium">{endpoint.name}</div>
@@ -131,6 +135,30 @@ export function CustomLlmEndpointsBlock({
                 >
                   <Trash2 className="size-3.5" aria-hidden />
                 </Button>
+                </div>
+                <div className="mt-2.5 flex items-start justify-between gap-3 border-t border-border/60 pt-2.5">
+                  <div className="min-w-0">
+                    <div className="text-[12px] font-medium">{t.fallbackTitle}</div>
+                    <div className="mt-0.5 text-[11px] text-muted-foreground">{t.fallbackDesc}</div>
+                  </div>
+                  <Switch
+                    checked={endpoint.fallbackToDefaultOnFailure}
+                    disabled={fallbackSaving === endpoint.id}
+                    aria-label={t.fallbackTitle}
+                    onCheckedChange={(next) => void (async () => {
+                      if (!workspaceId) return;
+                      setFallbackSaving(endpoint.id);
+                      setError("");
+                      try {
+                        await setCustomLlmFallbackPolicy(workspaceId, endpoint.id, next);
+                        await reload();
+                        await onChanged?.();
+                      } finally {
+                        setFallbackSaving(null);
+                      }
+                    })().catch((err) => setError(err instanceof Error ? err.message : t.saveFailed))}
+                  />
+                </div>
               </li>
             ))}
             {endpoints.length === 0 ? (

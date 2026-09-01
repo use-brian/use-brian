@@ -50,6 +50,7 @@ import {
   deleteSkill,
   getSkillAccess,
   getWorkspaceSkill,
+  listWorkspaceSkills,
   setSkillAccess,
   updateSkill,
   type SkillAccessAssistant,
@@ -58,10 +59,12 @@ import {
 } from "@/lib/api/skills";
 import {
   buildSkillPatch,
-  skillCategoryOf,
+  distinctSkillGroups,
+  normalizeSkillGroup,
+  skillGroupLabel,
+  skillGroupOf,
+  skillGroupOptions,
   skillStatus,
-  SKILL_CATEGORIES,
-  type SkillCategory,
 } from "@/lib/skills-view";
 import { SKILL_BODY_MAX_CHARS } from "@/lib/skill-markdown";
 import { requestBrainRefresh } from "@/lib/brain-events";
@@ -186,9 +189,15 @@ function SkillEditor({
   const [description, setDescription] = useState(skill.description);
   const [whenToUse, setWhenToUse] = useState(skill.whenToUse ?? "");
   const [content, setContent] = useState(skill.content);
-  // Library grouping bucket. Saved by the SAME Save button as the body — a
-  // separate apply-on-change control would give the page two save models.
-  const [category, setCategory] = useState<SkillCategory>(skillCategoryOf(skill));
+  // Library group. Saved by the SAME Save button as the body — a separate
+  // apply-on-change control would give the page two save models.
+  const [category, setCategory] = useState<string>(skillGroupOf(skill));
+  // The groups this library already uses, so the picker offers them before
+  // the user types a near-synonym of one. A free-text field with no idea what
+  // its neighbours are called is how a vocabulary forks. Best-effort: the
+  // picker still works (built-ins + this skill's own group + create) if the
+  // list never arrives.
+  const [libraryGroups, setLibraryGroups] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const editRevisionRef = useRef(0);
@@ -199,9 +208,21 @@ function SkillEditor({
     setDescription(skill.description);
     setWhenToUse(skill.whenToUse ?? "");
     setContent(skill.content);
-    setCategory(skillCategoryOf(skill));
+    setCategory(skillGroupOf(skill));
     setError(null);
   }, [skill]);
+
+  // Mount-scoped: this page remounts per skill route, so an effect is enough
+  // (unlike a surface inside the persistent workspace layout).
+  useEffect(() => {
+    let cancelled = false;
+    void listWorkspaceSkills(workspaceId).then((list) => {
+      if (!cancelled) setLibraryGroups(skillGroupOptions(list));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceId]);
 
   const patch = buildSkillPatch(skill, { name, description, whenToUse, content, category });
   const dirty = Object.keys(patch).length > 0;
@@ -359,6 +380,11 @@ function SkillEditor({
             skill={skill}
             status={status}
             category={category}
+            groupOptions={distinctSkillGroups([
+              ...libraryGroups,
+              ...skillGroupOptions([skill]),
+              category,
+            ])}
             onCategoryChange={(value) => applyLocalEdit(setCategory, value)}
           />
           <AccessGroup
@@ -449,12 +475,15 @@ function AboutGroup({
   skill,
   status,
   category,
+  groupOptions,
   onCategoryChange,
 }: {
   skill: WorkspaceSkillSummary;
   status: ReturnType<typeof skillStatus>;
-  category: SkillCategory;
-  onCategoryChange: (next: SkillCategory) => void;
+  category: string;
+  /** Built-ins + every group the library uses + the current one. */
+  groupOptions: string[];
+  onCategoryChange: (next: string) => void;
 }) {
   const t = useT();
   const locale = useLocale();
@@ -479,21 +508,25 @@ function AboutGroup({
         </span>
       </div>
 
-      {/* Category — the library's grouping bucket, and the ONE editable row
-          in this otherwise read-only card. It saves with the main Save
-          button (it rides `buildSkillPatch`), not on change. */}
+      {/* Group — the library heading this skill files under, and the ONE
+          editable row in this otherwise read-only card. It saves with the
+          main Save button (it rides `buildSkillPatch`), not on change.
+          Creatable, because groups are the workspace's own words: the list
+          offers what the library already uses, and typing anything else
+          names a new one. */}
       <PropRow label={copy.categoryLabel}>
-        <div className="w-40">
+        <div className="w-48">
           <SearchableSelect
             value={category}
-            onValueChange={(next) =>
-              onCategoryChange((next || "custom") as SkillCategory)
-            }
-            items={SKILL_CATEGORIES.map((value) => ({
+            onValueChange={(next) => onCategoryChange(normalizeSkillGroup(next))}
+            onCreate={(name) => onCategoryChange(normalizeSkillGroup(name))}
+            createLabel={(name) => format(copy.categoryCreate, { name })}
+            items={groupOptions.map((value) => ({
               value,
-              label: t.brainPage.skillsLibrary.categories[value],
+              label: skillGroupLabel(value, t.brainPage.skillsLibrary.categories),
             }))}
             placeholder={copy.categoryLabel}
+            searchPlaceholder={copy.categorySearch}
             aria-label={copy.categoryLabel}
           />
         </div>

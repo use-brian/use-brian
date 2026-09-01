@@ -10,6 +10,7 @@
 import { readFileSync, readdirSync } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
+import { normalizeSkillGroup } from '@use-brian/shared/skill-groups'
 import type { SkillContent, SkillMeta } from './types.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -154,9 +155,14 @@ export function parseYamlFrontmatter(yaml: string): Record<string, unknown> {
   return result
 }
 
+/**
+ * A frontmatter `category`, folded onto the shape the library can render.
+ * Groups are an open vocabulary, so a name outside the four built-ins is kept
+ * (trimmed, collapsed, capped) rather than discarded; only a missing or
+ * non-string value falls through to the caller's `custom` default.
+ */
 function validateCategory(v: unknown): SkillMeta['category'] | null {
-  const valid = new Set(['productivity', 'communication', 'research', 'custom'])
-  return typeof v === 'string' && valid.has(v) ? v as SkillMeta['category'] : null
+  return typeof v === 'string' && v.trim() ? normalizeSkillGroup(v) : null
 }
 
 function parseStringArray(v: unknown): string[] {

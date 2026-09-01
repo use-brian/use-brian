@@ -30,7 +30,14 @@
  * [COMP:app-web/views-shell]
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   docPagePath,
@@ -99,6 +106,18 @@ type RoutedSeed = {
   nonce: number;
   target: "desktop" | "mobile";
 };
+
+/**
+ * The one current Home app resolved by the persistent workspace chrome.
+ * Descendant surfaces consume this instead of independently re-reading the
+ * sticky localStorage cache and risking a one-frame disagreement with the
+ * sidebar app bar.
+ */
+const ActiveOperatorAppContext = createContext<HomeAppEntry | null>(null);
+
+export function useActiveOperatorApp(): HomeAppEntry | null {
+  return useContext(ActiveOperatorAppContext);
+}
 
 /** Per-workspace localStorage key for the dismissed Studio cold-start nudge. */
 function studioNudgeDismissedKey(workspaceId: string): string {
@@ -602,9 +621,11 @@ export function WorkspaceChrome({
           animation when the SURFACE changes (not on `/p/<pageId>` swaps, which
           the shell handles in place). It never keys/remounts `children`, so the
           doc shell and its Yjs socket survive every switch. */}
-      <SurfaceTransition className="relative flex h-full min-w-0 flex-1 flex-col">
-        {children}
-      </SurfaceTransition>
+      <ActiveOperatorAppContext.Provider value={activeOperatorApp}>
+        <SurfaceTransition className="relative flex h-full min-w-0 flex-1 flex-col">
+          {children}
+        </SurfaceTransition>
+      </ActiveOperatorAppContext.Provider>
 
       {/* The ONE assistant chat dock — mounted once for EVERY surface so a
           turn keeps streaming across tab switches and the conversation is

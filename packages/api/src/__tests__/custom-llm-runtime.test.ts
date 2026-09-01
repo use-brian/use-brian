@@ -483,3 +483,176 @@ describe('[COMP:api/custom-llm-endpoints] image turn routing policy', () => {
     })).toBe('serve_on_route')
   })
 })
+
+// ── Endpoint failure fallback (migration 491) ──────────────────
+// byo-llm-key.md -> "Endpoint failure fallback". The wrapper's own behavior is
+// covered by [COMP:providers/endpoint-fallback]; what matters here is the
+// WIRING: that the opt-in actually gates it, that the state object the turn
+// owner reads is written, and that the platform provider is only reachable
+// with consent.
+
+function fallbackRuntime(overrides: Record<string, unknown> = {}) {
+  const endpointId = '00000000-0000-4000-8000-000000000031'
+  return {
+    id: endpointId,
+    endpointId,
+    workspaceId: '00000000-0000-4000-8000-000000000030',
+    name: 'Max',
+    endpointName: 'hosted-gateway',
+    baseUrl: 'https://model.example/v1',
+    apiKey: null,
+    modelId: 'sol-high',
+    contextWindow: 32768,
+    maxOutputTokens: 4096,
+    supportsTools: true,
+    supportsVision: false,
+    fallbackToDefaultOnFailure: false,
+    verifiedAt: new Date(),
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    ...overrides,
+  }
+}
+
+function platformProvider(text: string): LLMProvider {
+  return {
+    name: 'platform',
+    models: ['gemini-pro'],
+    async *stream(request: ProviderRequest) {
+      yield { type: 'message_start' as const, model: request.model }
+      yield { type: 'text_delta' as const, text }
+      yield { type: 'message_end' as const, stopReason: 'end_turn' as const, usage: { inputTokens: 1, outputTokens: 1 } }
+    },
+    createSession() {
+      throw new Error('not used')
+    },
+  }
+}
+
+async function drain(stream: AsyncIterable<{ type: string }>): Promise<string[]> {
+  const seen: string[] = []
+  for await (const chunk of stream) seen.push(chunk.type)
+  return seen
+}
+
+describe('[COMP:api/custom-llm-endpoints] endpoint failure fallback', () => {
+  it('fails the turn when the connection has not opted in', async () => {
+    const runtime = fallbackRuntime()
+    const store = {
+      getRuntimeSystem: vi.fn().mockResolvedValue(runtime),
+      getTierRuntimeSystem: vi.fn(),
+      getTierRouteSystem: vi.fn(),
+    } as unknown as WorkspaceCustomLlmEndpointStore
+    const managedProvider = platformProvider('platform answer')
+    const managedSpy = vi.spyOn(managedProvider, 'stream')
+    const fetchFn = vi.fn().mockResolvedValue(new Response('tunnel down', { status: 530 }))
+
+    const resolved = await createWorkspaceCustomLlmResolver(store, { fetchFn, managedProvider })({
+      workspaceId: runtime.workspaceId,
+      requestedModel: customLlmAlias(runtime.id),
+      allowFailureFallback: true,
+    })
+    if (!resolved) throw new Error('expected a resolved custom provider')
+
+    expect(resolved.fallback.enabled).toBe(false)
+    await expect(drain(resolved.provider.stream({
+      model: 'gemini-max',
+      systemPrompt: '',
+      messages: [{ role: 'user', content: 'hi' }],
+    }))).rejects.toThrow('HTTP 530')
+    expect(managedSpy).not.toHaveBeenCalled()
+    expect(resolved.fallback.used).toBe(false)
+    expect(resolved.providerKeySource).toBe('user')
+  })
+
+  it('stays off for a lane that did not claim it, even with the connection opted in', async () => {
+    // Fail-closed: a lane inherits the fallback only by asking, because the
+    // fallback is only permissible where the reader can be TOLD it happened.
+    // Background classifiers, consolidation and auto-titles have no reader.
+    const runtime = fallbackRuntime({ fallbackToDefaultOnFailure: true })
+    const store = {
+      getRuntimeSystem: vi.fn().mockResolvedValue(runtime),
+      getTierRuntimeSystem: vi.fn(),
+      getTierRouteSystem: vi.fn(),
+    } as unknown as WorkspaceCustomLlmEndpointStore
+    const managedProvider = platformProvider('platform answer')
+    const managedSpy = vi.spyOn(managedProvider, 'stream')
+    const fetchFn = vi.fn().mockResolvedValue(new Response('tunnel down', { status: 530 }))
+
+    const resolved = await createWorkspaceCustomLlmResolver(store, { fetchFn, managedProvider })({
+      workspaceId: runtime.workspaceId,
+      requestedModel: customLlmAlias(runtime.id),
+    })
+    if (!resolved) throw new Error('expected a resolved custom provider')
+
+    expect(resolved.fallback.enabled).toBe(false)
+    await expect(drain(resolved.provider.stream({
+      model: 'gemini-max',
+      systemPrompt: '',
+      messages: [{ role: 'user', content: 'hi' }],
+    }))).rejects.toThrow('HTTP 530')
+    expect(managedSpy).not.toHaveBeenCalled()
+  })
+
+  it('serves the turn on the platform model once the admin opts in, and records it', async () => {
+    const runtime = fallbackRuntime({ fallbackToDefaultOnFailure: true })
+    const store = {
+      getRuntimeSystem: vi.fn().mockResolvedValue(runtime),
+      getTierRuntimeSystem: vi.fn(),
+      getTierRouteSystem: vi.fn(),
+    } as unknown as WorkspaceCustomLlmEndpointStore
+    const managedProvider = platformProvider('platform answer')
+    const managedSpy = vi.spyOn(managedProvider, 'stream')
+    const fetchFn = vi.fn().mockResolvedValue(new Response('tunnel down', { status: 530 }))
+
+    const resolved = await createWorkspaceCustomLlmResolver(store, { fetchFn, managedProvider })({
+      workspaceId: runtime.workspaceId,
+      requestedModel: customLlmAlias(runtime.id),
+      allowFailureFallback: true,
+    })
+    if (!resolved) throw new Error('expected a resolved custom provider')
+
+    expect(resolved.fallback.enabled).toBe(true)
+    expect(resolved.providerKeySource).toBe('user')
+    const seen = await drain(resolved.provider.stream({
+      model: 'gemini-max',
+      systemPrompt: '',
+      messages: [{ role: 'user', content: 'hi' }],
+    }))
+
+    expect(seen).toEqual(['message_start', 'text_delta', 'message_end'])
+    // The resolved Brian serving alias travels through untouched, so the
+    // platform side routes the tier it would have served anyway.
+    expect(managedSpy.mock.calls[0]?.[0]?.model).toBe('gemini-max')
+    // What the turn owner reads to announce, log, and bill the turn.
+    expect(resolved.fallback).toMatchObject({ used: true, reason: 'http_status', status: 530, endpointName: 'hosted-gateway' })
+    // Derived, so every one of the ~20 usage-recording sites that reads this
+    // field at record time bills the fallback turn as platform capacity. Left
+    // at 'user' it would be free platform serving.
+    expect(resolved.providerKeySource).toBe('platform')
+  })
+
+  it('stays off when no platform provider is configured to fall back to', async () => {
+    const runtime = fallbackRuntime({ fallbackToDefaultOnFailure: true })
+    const store = {
+      getRuntimeSystem: vi.fn().mockResolvedValue(runtime),
+      getTierRuntimeSystem: vi.fn(),
+      getTierRouteSystem: vi.fn(),
+    } as unknown as WorkspaceCustomLlmEndpointStore
+    const fetchFn = vi.fn().mockResolvedValue(new Response('tunnel down', { status: 530 }))
+
+    const resolved = await createWorkspaceCustomLlmResolver(store, { fetchFn })({
+      workspaceId: runtime.workspaceId,
+      requestedModel: customLlmAlias(runtime.id),
+      allowFailureFallback: true,
+    })
+    if (!resolved) throw new Error('expected a resolved custom provider')
+
+    expect(resolved.fallback.enabled).toBe(false)
+    await expect(drain(resolved.provider.stream({
+      model: 'gemini-max',
+      systemPrompt: '',
+      messages: [{ role: 'user', content: 'hi' }],
+    }))).rejects.toThrow('HTTP 530')
+  })
+})

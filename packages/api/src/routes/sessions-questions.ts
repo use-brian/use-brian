@@ -18,10 +18,10 @@
  *     a final reply that acknowledges the cancellation.
  *
  *   GET /api/sessions/:sessionId/pending
- *     Frontend recovery probe. Called on chat reload to detect that the
- *     session is currently suspended on a question and re-render the
- *     inline answer input. Returns the pending row (`approvalId`,
- *     `question`, `expiresAt`) or `null`.
+ *     Frontend recovery probe. Called on chat reload to detect durable input
+ *     for the current turn: either a question or a generic tool confirmation.
+ *     Tool confirmations are correlated to the session's private turn lease,
+ *     so a stopped/superseded row cannot reappear in a later turn.
  *
  * See docs/architecture/engine/askquestion-suspend-resume.md.
  *
@@ -30,7 +30,11 @@
 
 import { Router } from 'express'
 import type { WorkerRunsStore, WorkerStatus } from '@use-brian/core'
-import { findSessionById, isSharedChatSession } from '../db/sessions.js'
+import {
+  findSessionById,
+  findSessionTurnLeaseState,
+  isSharedChatSession,
+} from '../db/sessions.js'
 import { gateSessionRead } from './sessions.js'
 import { findAssistantById } from '../db/users.js'
 import type { PendingApprovalsStore, PendingApproval } from '../db/pending-approvals-store.js'
@@ -157,10 +161,9 @@ async function resolveQuestionApproval(
 export function sessionQuestionRoutes(opts: SessionQuestionRouteOptions): Router {
   const router = Router({ mergeParams: true })
 
-  // GET /api/sessions/:sessionId/pending — return the pending question
-  // for this session if one exists. Used by the frontend on chat reload
-  // to detect "session suspended on a question" and re-render the inline
-  // answer input.
+  // GET /api/sessions/:sessionId/pending — return durable pending input for
+  // the session's current turn. Questions keep their established `pending`
+  // field; generic tool confirmations use the additive `toolConfirmation`.
   router.get('/:sessionId/pending', async (req, res) => {
     const userId = (req as { userId?: string }).userId
     if (!userId) {
@@ -189,27 +192,60 @@ export function sessionQuestionRoutes(opts: SessionQuestionRouteOptions): Router
       // Pre-workspace assistants can't suspend on a question (the engine
       // requires `assistant.workspaceId` to mint the approval). Return
       // empty rather than 500.
-      res.json({ pending: null })
+      res.json({ pending: null, toolConfirmation: null })
       return
     }
     const pending = await opts.approvalsStore.listPendingForWorkspace(userId, wsId)
-    const match = pending.find(
+    const question = pending.find(
       (r) => r.kind === 'question' && r.blockingSessionId === sessionId,
     )
-    if (!match) {
-      res.json({ pending: null })
-      return
-    }
+    const turnLeaseState = await findSessionTurnLeaseState(sessionId)
+    const currentTurnToken =
+      turnLeaseState?.status === 'running' && typeof turnLeaseState.turnLeaseToken === 'string'
+        ? turnLeaseState.turnLeaseToken
+        : null
+    const now = Date.now()
+    const toolConfirmation = currentTurnToken
+      ? pending.find(
+          (r) =>
+            r.kind === 'tool_invocation' &&
+            r.blockingSessionId === sessionId &&
+            r.approvalPayload.turnLeaseToken === currentTurnToken &&
+            (r.expiresAt === null || r.expiresAt.getTime() > now),
+        )
+      : undefined
     res.json({
-      pending: {
-        approvalId: match.id,
-        question:
-          typeof match.approvalPayload.question === 'string'
-            ? match.approvalPayload.question
-            : null,
-        expiresAt: match.expiresAt,
-        createdAt: match.createdAt,
-      },
+      pending: question
+        ? {
+            approvalId: question.id,
+            question:
+              typeof question.approvalPayload.question === 'string'
+                ? question.approvalPayload.question
+                : null,
+            expiresAt: question.expiresAt,
+            createdAt: question.createdAt,
+          }
+        : null,
+      toolConfirmation: toolConfirmation
+        ? {
+            approvalId: toolConfirmation.id,
+            toolName: toolConfirmation.toolName,
+            input: toolConfirmation.arguments,
+            description:
+              typeof toolConfirmation.approvalPayload.description === 'string'
+                ? toolConfirmation.approvalPayload.description
+                : null,
+            displayLines: Array.isArray(toolConfirmation.approvalPayload.displayLines)
+              ? toolConfirmation.approvalPayload.displayLines.filter(
+                  (line): line is string => typeof line === 'string',
+                )
+              : [],
+            allowPersistentApproval:
+              toolConfirmation.approvalPayload.allowPersistentApproval === true,
+            expiresAt: toolConfirmation.expiresAt,
+            createdAt: toolConfirmation.createdAt,
+          }
+        : null,
     })
   })
 

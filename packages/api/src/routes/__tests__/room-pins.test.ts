@@ -188,7 +188,10 @@ describe('[COMP:api/room-pins] pin CRUD is post-gated and attributed (T14)', () 
 
 import { query } from '../../db/client.js'
 import { listSessionPins, type SessionPin } from '../../db/session-pins-store.js'
-import { buildPinnedContextBlock } from '../../resolve-session-pins.js'
+import {
+  buildPinnedContextBlock,
+  resolvePinnedContext,
+} from '../../resolve-session-pins.js'
 
 const mockQuery = vi.mocked(query)
 const mockListPins = vi.mocked(listSessionPins)
@@ -214,7 +217,7 @@ describe('[COMP:api/room-pins] assembly resolution is an index, not stuffing (T1
     mockQuery.mockReset()
   })
 
-  it('a pinned task renders a compact current-state card; a pinned page renders title + id ONLY', async () => {
+  it('a readable pinned Page renders as an index entry and a validated Chat edit target', async () => {
     mockListPins.mockResolvedValue([
       pin({ kind: 'task', refId: 'aaaaaaaa-0000-0000-0000-000000000001' }),
       pin({ kind: 'page', refId: 'bbbbbbbb-0000-0000-0000-000000000002' }),
@@ -235,19 +238,46 @@ describe('[COMP:api/room-pins] assembly resolution is an index, not stuffing (T1
       return { rows: [], rowCount: 0 } as never
     })
 
-    const block = await buildPinnedContextBlock({
+    const resolved = await resolvePinnedContext({
       sessionId: 's-room',
       workspaceId: 'ws-1',
       clearance: 'internal',
     })
+    const block = resolved.block
     expect(block).toContain('# Pinned context')
     // Task: compact inline card with current state.
     expect(block).toContain('Task "Ship the Q3 deck" (in_progress, due 2026-08-02)')
     // Page: title + reference only — NEVER its body.
     expect(block).toContain('Page "Q3 launch plan" [page id: bbbbbbbb-0000-0000-0000-000000000002]')
     expect(block).toContain('not inlined')
+    expect(resolved.pageTargets).toEqual([
+      {
+        pageId: 'bbbbbbbb-0000-0000-0000-000000000002',
+        title: 'Q3 launch plan',
+      },
+    ])
     // Tool-awareness rule: no tool names in the block.
     expect(block).not.toMatch(/readPage|searchKnowledge|browseKnowledge|getTask/)
+  })
+
+  it('does not grant Chat edit authority for an unavailable Page pin', async () => {
+    mockListPins.mockResolvedValue([
+      pin({ kind: 'page', refId: 'cccccccc-0000-0000-0000-000000000003' }),
+    ])
+    mockQuery.mockResolvedValue({
+      rows: [{ name: 'Restricted plan', clearance: 'confidential' }],
+      rowCount: 1,
+    } as never)
+
+    const resolved = await resolvePinnedContext({
+      sessionId: 's-room',
+      workspaceId: 'ws-1',
+      clearance: 'internal',
+    })
+
+    expect(resolved.block).toContain('unavailable')
+    expect(resolved.block).not.toContain('Restricted plan')
+    expect(resolved.pageTargets).toEqual([])
   })
 
   it('a pin above the session clearance resolves as unavailable, never silently dropped', async () => {

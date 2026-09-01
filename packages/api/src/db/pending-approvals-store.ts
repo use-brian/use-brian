@@ -132,6 +132,8 @@ export type CreateToolInvocationParams = {
     description?: string
     displayLines?: string[]
     allowPersistentApproval?: boolean
+    /** Private current-turn correlation. Never serialize to clients. */
+    turnLeaseToken?: string
     /** Exact learned-rule application for this frozen tool invocation. */
     decisionApplicationId?: string
   }
@@ -1007,6 +1009,9 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
       }
       if (params.approvalPayload.allowPersistentApproval !== undefined) {
         payload.allowPersistentApproval = params.approvalPayload.allowPersistentApproval
+      }
+      if (params.approvalPayload.turnLeaseToken !== undefined) {
+        payload.turnLeaseToken = params.approvalPayload.turnLeaseToken
       }
       if (params.approvalPayload.decisionApplicationId !== undefined) {
         payload.decisionApplicationId = params.approvalPayload.decisionApplicationId

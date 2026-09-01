@@ -42,10 +42,10 @@ export const DOC_MUTATION_TOOLS = new Set([
 const delegateDocEditInputSchema = z
   .object({
     intent: z.enum(['create', 'edit']).describe(
-      'Use edit only for an existing validated open page. Use create only when the user explicitly asked for a new page.',
+      'Use edit for a page id validated by runtime context, including when creating child Pages beneath it. Use create only when the user explicitly asked for a new top-level Page.',
     ),
     pageId: z.string().min(1).optional().describe(
-      'Required for edit: the exact currently-open page id supplied by runtime context. Omit for create.',
+      'Required for edit: one exact page id supplied as an allowed target by runtime context. Omit for create.',
     ),
     instruction: z.string().trim().min(1).max(20_000).describe(
       'Self-contained description of the finished page change. Include relevant facts, citations, and placement constraints. The editor cannot see this conversation.',
@@ -426,22 +426,42 @@ export function toolsForDocEditIntent(
   if (intent === 'create') return tools
   return new Map(
     [...tools].filter(
-      ([name]) => !['renderPage', 'createSubPage', 'importToPage'].includes(name),
+      // Existing-page edits may extend the validated target with real child
+      // Pages. createSubPage is safe here because its parent is pinned by the
+      // same anchor as patchPage. Only unanchored top-level/file creation is
+      // removed from the child surface.
+      ([name]) => !['renderPage', 'importToPage'].includes(name),
     ),
   )
 }
 
 export type CreateDelegateDocEditToolOptions = Omit<
   RunDocEditAgentOptions,
-  'instruction' | 'context'
+  'instruction' | 'context' | 'loadPageContext'
 > & {
-  /** Existing page validated and loaded by the route for this turn. */
+  /** Existing open page validated and loaded by the route for this turn. */
   targetPageId?: string | null
+  /** Every exact existing Page id validated for this turn. Full Chat supplies
+   * freshly resolved readable room pins; Doc supplies its open page. */
+  targetPageIds?: readonly string[]
+  /** Rebuild the isolated tool map with mutations anchored to the selected
+   * target. Create receives `null`; edit receives the validated input id. */
+  toolsForTarget?: (targetPageId: string | null) => Map<string, Tool>
+  /** Load fresh context for the selected target. The optional second argument
+   * is absent only for create. */
+  loadPageContext: (
+    instruction: string,
+    targetPageId?: string | null,
+  ) => Promise<string>
 }
 
 export function createDelegateDocEditTool(
   options: CreateDelegateDocEditToolOptions,
 ): Tool<typeof delegateDocEditInputSchema> {
+  const allowedPageIds = new Set(
+    [options.targetPageId, ...(options.targetPageIds ?? [])]
+      .filter((pageId): pageId is string => Boolean(pageId)),
+  )
   // One gateway instance is minted per parent turn. It runs at most
   // DOC_EDIT_MAX_DELEGATIONS_PER_TURN children, and a second child is admitted
   // ONLY after a `failed` receipt (no mutation landed): the common cause is a
@@ -455,7 +475,7 @@ export function createDelegateDocEditTool(
   return buildTool<typeof delegateDocEditInputSchema>({
     name: DOC_EDIT_GATEWAY_TOOL,
     description:
-      'Apply a requested Doc page, entity, or comment change through a fresh isolated editor. Choose edit only when runtime context supplies an existing open page id; an edit can never create a page. Choose create only when the user explicitly asks for a new page. Submit one self-contained brief after gathering needed evidence. The editor has no search, brain, memory, recording, connector, or web tools and cannot see this conversation: every fact it needs must be pasted into the brief (the text itself, plus source page ids or URLs), never referenced. Questions that do not require a Doc mutation should be answered directly. The receipt status is completed, partial, or failed: partial means the editor applied some changes and was cut off before finishing - relay that honestly (what landed, what did not) and offer to continue in the next turn; never describe a partial result as done. A failed receipt whose summary starts with missing_evidence: names what the brief lacked; gather exactly that and call this tool once more with it pasted in (one retry is allowed after a no-change failure).',
+      'Apply a requested Doc page, entity, or comment change through a fresh isolated editor. Choose edit only when runtime context supplies an exact allowed existing page id (the open Page, or a readable Page pinned in the current full-Chat room). Edit may patch that Page or create real child Pages beneath it, but it cannot create an unrelated top-level Page. When several pinned Pages are allowed and the user did not clearly select one, ask which Page instead of guessing. Choose create only when the user explicitly asks for a new top-level Page. Submit one self-contained brief after gathering needed evidence. The editor has no search, brain, memory, recording, connector, or web tools and cannot see this conversation: every fact it needs must be pasted into the brief (the text itself, plus source page ids or URLs), never referenced. Questions that do not require a Doc mutation should be answered directly. The receipt status is completed, partial, or failed: partial means the editor applied some changes and was cut off before finishing - relay that honestly (what landed, what did not) and offer to continue in the next turn; never describe a partial result as done. A failed receipt whose summary starts with missing_evidence: names what the brief lacked; gather exactly that and call this tool once more with it pasted in (one retry is allowed after a no-change failure).',
     inputSchema: delegateDocEditInputSchema,
     isReadOnly: false,
     isConcurrencySafe: false,
@@ -482,11 +502,11 @@ export function createDelegateDocEditTool(
         }
       }
       if (input.intent === 'edit') {
-        if (!options.targetPageId) {
+        if (allowedPageIds.size === 0) {
           return {
             data: {
               status: 'failed',
-              summary: 'No existing Doc page is open for this edit. Open the page first; no new page was created.',
+              summary: 'No existing Doc Page is validated for this edit. Open the Page or pin it in this Chat room first; no new Page was created.',
               mutationTools: [],
               pageIds: [],
               fallbackUsed: false,
@@ -495,7 +515,7 @@ export function createDelegateDocEditTool(
             isError: true,
           }
         }
-        if (input.pageId !== options.targetPageId) {
+        if (!input.pageId || !allowedPageIds.has(input.pageId)) {
           return {
             data: {
               status: 'failed',
@@ -510,12 +530,25 @@ export function createDelegateDocEditTool(
         }
       }
       delegations += 1
-      const tools = toolsForDocEditIntent(options.tools, input.intent)
+      const selectedPageId = input.intent === 'edit' ? input.pageId! : null
+      const tools = toolsForDocEditIntent(
+        options.toolsForTarget?.(selectedPageId) ?? options.tools,
+        input.intent,
+      )
       const receipt = await runDocEditAgent({
-        ...options,
+        provider: options.provider,
+        model: options.model,
+        fallbackModel: options.fallbackModel,
+        systemPrompt: options.systemPrompt,
         instruction: input.instruction,
         tools,
         context,
+        loadPageContext: (instruction) => options.loadPageContext(instruction, selectedPageId),
+        onUsage: options.onUsage,
+        onToolResult: options.onToolResult,
+        maxTurns: options.maxTurns,
+        maxToolCalls: options.maxToolCalls,
+        stallIdleMs: options.stallIdleMs,
       })
       lastStatus = receipt.status
       const canRetry = receipt.status === 'failed' && delegations < DOC_EDIT_MAX_DELEGATIONS_PER_TURN

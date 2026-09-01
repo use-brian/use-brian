@@ -86,16 +86,23 @@ describe('[COMP:skills/loader] parseSkillMarkdown', () => {
     expect(parseSkillMarkdown(md)!.requiresConnectors).toEqual(['gmail', 'notion'])
   })
 
-  it('falls back to the custom category for an unknown category', () => {
+  // Groups are an open vocabulary, so a name outside the four built-ins is
+  // the group this file declares, not a value to discard.
+  it('keeps a group outside the built-in four, normalized', () => {
     const md = [
       '---',
       'name: x',
       'description: d',
       'metadata:',
-      '  category: bogus-category',
+      '  category: Gym  &  Training',
       '---',
       'body',
     ].join('\n')
+    expect(parseSkillMarkdown(md)!.category).toBe('Gym & Training')
+  })
+
+  it('falls back to the unsorted sink when no category is declared', () => {
+    const md = ['---', 'name: x', 'description: d', '---', 'body'].join('\n')
     expect(parseSkillMarkdown(md)!.category).toBe('custom')
   })
 

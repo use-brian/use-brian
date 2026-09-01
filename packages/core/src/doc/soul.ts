@@ -93,8 +93,8 @@ function workspaceLine(params: {
 
 /**
  * The app-web workspace surfaces the ambient chat dock mounts over. Mirrors
- * `APP_SURFACE_ORIGINS` in `packages/api/src/routes/chat.ts` (the non-doc,
- * non-chat slice of `sessions.app_origin`, migration 255).
+ * `APP_SURFACE_ORIGINS` in `packages/api/src/routes/chat.ts` (the non-doc
+ * slice of `sessions.app_origin`, migration 255).
  */
 export type AmbientSurface =
   | 'brain'
@@ -102,6 +102,7 @@ export type AmbientSurface =
   | 'workflow'
   | 'approvals'
   | 'knowledge-base'
+  | 'chat'
 
 /**
  * One line per surface naming what the user is looking at, so an ambiguous
@@ -121,6 +122,8 @@ const AMBIENT_SURFACE_GLOSS: Record<AmbientSurface, string> = {
     'the **Approvals** surface — assistant actions waiting on human sign-off',
   'knowledge-base':
     "the **Knowledge base** surface — the workspace's curated reference entries",
+  chat:
+    'the **Chat** surface — the full conversation workspace, including any Pages the room has pinned as its working context',
 }
 
 /** Params for the ambient (on-request) variant — no mode split: a workspace
@@ -140,7 +143,7 @@ export type BuildAmbientDocSkillParams = {
 
 /**
  * Ambient page-authoring block for the app-web WORKSPACE surfaces (the
- * Brain / Studio / Workflow / Approvals / Knowledge-base chat docks). The
+ * Brain / Studio / Workflow / Approvals / Knowledge-base / full Chat surfaces). The
  * same read + delegation boundary rides the turn, but the steering is
  * INVERTED from the doc-surface block above: chat-first, author a page only
  * on an explicit ask.
@@ -164,7 +167,7 @@ You are NOT on a doc page here; this is a workspace chat. So:
 
 - **Answer in chat by default.** Questions, lookups, lists, summaries, and data answers are chat replies. Do NOT reach for the page tools just because an answer contains data or structure.
 - **Author a page ONLY on an explicit ask** — the user says "create a page / doc", "draft a document", "make a table / board / view I can keep", "put this on a page", or names an existing page to change. A plain "show me my tasks" on this surface is a chat answer, not a page.
-- **When asked, delegate once.** Choose \`create\` only when the user explicitly requested a new page. Choose \`edit\` only for an existing runtime-validated open page and pass its exact page id; if no page is open, ask the user to open the target instead of creating a replacement. Submit one self-contained brief with the requested outcome, relevant facts, and any placement constraint. The editor cannot see this conversation. Do not prescribe raw block operations; describe the finished result. The user is not looking at the page while you work: after a completed receipt, say so and name the page so they can find it in the sidebar.
+- **When asked, delegate once.** Choose \`create\` only when the user explicitly requested a new page. Choose \`edit\` only for an existing runtime-validated Page and pass its exact page id. Runtime may validate the open Page or a readable Page pinned in the current full-Chat room. If several pinned Pages are available and the user's wording does not clearly select one, ask which Page; never guess from pin order. If no existing Page target is validated, ask the user to open or pin it instead of creating a replacement. Submit one self-contained brief with the requested outcome, relevant facts, and any placement constraint. The editor cannot see this conversation. Do not prescribe raw block operations; describe the finished result. The user is not looking at the page while you work: after a completed receipt, say so and name the Page so they can find it from the link or sidebar.
 - **Link the pages you name.** When you reference a page that exists — one you just authored, or any page a tool returned — make its title a markdown link to \`/p/<pageId>\`, using the \`pageId\` from the tool result (e.g. \`[Q3 Plan](/p/8f3a2c14-...)\`). The chat resolves that into a click-through to the page. Never paste a bare id as the link, guess a URL, or claim a page exists without the tool result that proves it.
 - **Offering is fine, pushing is not.** If the user clearly wants something page-shaped ("I keep losing this list"), you may offer once to put it on a page. Don't volunteer pages beyond that.`
 

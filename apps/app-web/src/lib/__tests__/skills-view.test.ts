@@ -6,7 +6,9 @@ import {
   groupSkillsByCategory,
   hasLibraryFilter,
   partitionSkillsForLanding,
-  skillCategoryOf,
+  skillGroupLabel,
+  skillGroupOf,
+  skillGroupOptions,
   skillRowIdFromPathname,
   skillStatus,
   suggestedSkillCount,
@@ -199,22 +201,39 @@ describe("[COMP:app-web/brain-skills-view] filterSkillsForLibrary", () => {
 });
 
 describe("[COMP:app-web/brain-skills-view] groupSkillsByCategory", () => {
-  it("returns the known categories in a fixed order, skipping empty ones", () => {
+  // Groups are an open vocabulary, so there is no fixed enum order to fall
+  // back on. One rule covers a set nobody can enumerate: alphabetical by the
+  // label the reader sees, unsorted last.
+  it("orders groups alphabetically with the unsorted sink last", () => {
     const groups = groupSkillsByCategory([
       skill({ rowId: "a", name: "Alpha", category: "custom" }),
-      skill({ rowId: "b", name: "Bravo", category: "productivity" }),
-      skill({ rowId: "c", name: "Charlie", category: "research" }),
+      skill({ rowId: "b", name: "Bravo", category: "Nutrition" }),
+      skill({ rowId: "c", name: "Charlie", category: "Gym & Training" }),
+      skill({ rowId: "d", name: "Delta", category: "research" }),
     ]);
     expect(groups.map((g) => g.category)).toEqual([
-      "productivity",
+      "Gym & Training",
+      "Nutrition",
       "research",
       "custom",
     ]);
-    expect(groups.map((g) => g.skills.map((s) => s.rowId))).toEqual([
-      ["b"],
-      ["c"],
-      ["a"],
-    ]);
+  });
+
+  // It sorts the LABEL, not the stored slug, so the order is right in the
+  // reader's own language rather than in English.
+  it("sorts by the translated label when one is given", () => {
+    const labels: Record<string, string> = {
+      research: "Zebra research",
+      productivity: "Alpha productivity",
+    };
+    const groups = groupSkillsByCategory(
+      [
+        skill({ rowId: "a", category: "research" }),
+        skill({ rowId: "b", category: "productivity" }),
+      ],
+      (g) => labels[g] ?? g,
+    );
+    expect(groups.map((g) => g.category)).toEqual(["productivity", "research"]);
   });
 
   it("preserves the incoming order within a group", () => {
@@ -226,28 +245,67 @@ describe("[COMP:app-web/brain-skills-view] groupSkillsByCategory", () => {
     expect(groups[0]!.skills.map((s) => s.rowId)).toEqual(["z", "a"]);
   });
 
-  // `workspace_skills.category` is a TEXT column with no write-side enum
-  // check, so a legacy or third-party row can carry anything. It must still
-  // land in a group the UI has a translated label for.
-  it("folds an unknown or missing category into custom", () => {
+  // Two rows agreeing on `skillGroupKey` are one heading, and the FIRST
+  // spelling wins so the label does not flicker with map insertion order.
+  it("collapses spellings that differ only in case or spacing", () => {
     const groups = groupSkillsByCategory([
-      skill({ rowId: "a", category: "sales-enablement" }),
+      skill({ rowId: "a", category: "Gym & Training" }),
+      skill({ rowId: "b", category: "gym  &  training" }),
+    ]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]!.category).toBe("Gym & Training");
+    expect(groups[0]!.skills.map((s) => s.rowId)).toEqual(["a", "b"]);
+  });
+
+  // A name outside the four built-ins is a workspace's own group now, not a
+  // legacy value to fold away. Only an absent one is unsorted.
+  it("keeps an unrecognized name and folds only a missing one", () => {
+    const groups = groupSkillsByCategory([
+      skill({ rowId: "a", category: "Sales Enablement" }),
       skill({ rowId: "b", category: undefined as unknown as string }),
       skill({ rowId: "c", category: "custom" }),
     ]);
-    expect(groups).toHaveLength(1);
-    expect(groups[0]!.category).toBe("custom");
-    expect(groups[0]!.skills.map((s) => s.rowId)).toEqual(["a", "b", "c"]);
+    expect(groups.map((g) => g.category)).toEqual(["Sales Enablement", "custom"]);
+    expect(groups[1]!.skills.map((s) => s.rowId)).toEqual(["b", "c"]);
   });
 
   it("returns nothing for an empty list", () => {
     expect(groupSkillsByCategory([])).toEqual([]);
   });
 
-  it("normalizes one skill's category on its own", () => {
-    expect(skillCategoryOf({ category: "communication" })).toBe("communication");
-    expect(skillCategoryOf({ category: "nonsense" })).toBe("custom");
-    expect(skillCategoryOf({})).toBe("custom");
+  it("normalizes one skill's group on its own", () => {
+    expect(skillGroupOf({ category: "communication" })).toBe("communication");
+    expect(skillGroupOf({ category: "  Nutrition " })).toBe("Nutrition");
+    expect(skillGroupOf({})).toBe("custom");
+  });
+});
+
+describe("[COMP:app-web/brain-skills-view] Group labels and options", () => {
+  const labels = {
+    productivity: "Productivity",
+    communication: "Communication",
+    research: "Research",
+    custom: "Unsorted",
+  };
+
+  it("translates a built-in and shows a workspace group verbatim", () => {
+    expect(skillGroupLabel("custom", labels)).toBe("Unsorted");
+    expect(skillGroupLabel("Gym & Training", labels)).toBe("Gym & Training");
+  });
+
+  // A picker that cannot see the library's own group names is how a
+  // free-text field forks into near-synonyms.
+  it("offers every built-in plus every group the library uses", () => {
+    const options = skillGroupOptions([
+      { category: "Nutrition" },
+      { category: "nutrition" },
+      { category: "research" },
+    ]);
+    expect(options).toContain("Nutrition");
+    expect(options.filter((o) => o.toLowerCase() === "nutrition")).toHaveLength(1);
+    for (const builtin of ["productivity", "communication", "research", "custom"]) {
+      expect(options).toContain(builtin);
+    }
   });
 });
 
@@ -315,6 +373,20 @@ describe("[COMP:app-web/brain-skill-editor] buildSkillPatch", () => {
         category: "custom",
       }),
     ).toEqual({ whenToUse: "When invoicing" });
+  });
+
+  it("a new group lands in the patch, and re-typing the same one does not", () => {
+    const filed = skill({ ...base, category: "Gym & Training" });
+    const draft = {
+      name: filed.name,
+      description: filed.description,
+      whenToUse: filed.whenToUse ?? "",
+      content: filed.content,
+    };
+    expect(buildSkillPatch(filed, { ...draft, category: "gym  &  training" })).toEqual({});
+    expect(buildSkillPatch(filed, { ...draft, category: "  Nutrition " })).toEqual({
+      category: "Nutrition",
+    });
   });
 
   it("emptied name/content are dropped from the patch (the editor validates separately)", () => {

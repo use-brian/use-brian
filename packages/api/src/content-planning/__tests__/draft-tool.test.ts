@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildProposeDraftsTool,
+  MAX_PROPOSED_DRAFT_CHARS,
   PROPOSE_DRAFTS_TOOL_NAME,
 } from '../draft-tool.js'
 
@@ -42,6 +43,17 @@ describe('[COMP:feed/content-planning-tool] proposeDrafts', () => {
         { index: 1, text: 'B' },
       ],
     })).toThrow(/unique index/i)
+  })
+
+  it('accepts long-form draft bodies beyond 3000 characters within the storage guard', () => {
+    expect(() => tool.inputSchema.parse({
+      rationale: 'One long-form draft.',
+      drafts: [{ index: 1, text: 'L'.repeat(12_000) }],
+    })).not.toThrow()
+    expect(() => tool.inputSchema.parse({
+      rationale: 'Too large.',
+      drafts: [{ index: 1, text: 'L'.repeat(MAX_PROPOSED_DRAFT_CHARS + 1) }],
+    })).toThrow()
   })
 
   it('executes without external or database dependencies', async () => {

@@ -10,6 +10,7 @@ import {
   parseAuthCallback,
   parseLoopbackCallback,
   exchangeCode,
+  mintLocalDesktopSession,
   refreshSession,
   jwtExpSeconds,
   shouldRefreshSession,
@@ -221,6 +222,42 @@ describe("[COMP:app-desktop/desktop-auth] exchangeCode", () => {
   it("throws on a non-OK response", async () => {
     const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status: 400, json: async () => ({}) });
     await expect(exchangeCode("https://api.usebrian.ai", "c", "v", fetchImpl)).rejects.toThrow(/400/);
+  });
+});
+
+describe("[COMP:app-desktop/desktop-auth] bundled local-owner session", () => {
+  const session: DesktopSession = {
+    accessToken: "local-at",
+    refreshToken: "local-rt",
+    accessTokenExpiresIn: 3600,
+    refreshTokenExpiresIn: 2592000,
+    user: { id: "local-owner", name: "You", email: "owner@local" },
+  };
+
+  it("mints tokens directly from the selected local API", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify(session),
+    });
+    await expect(
+      mintLocalDesktopSession("http://localhost:4000", fetchImpl),
+    ).resolves.toEqual(session);
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "http://localhost:4000/auth/local-session",
+      expect.objectContaining({ method: "POST", body: "{}" }),
+    );
+  });
+
+  it("rejects a target that cannot mint the local-owner session", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 403,
+      text: async () => JSON.stringify({ error: "local_session_disabled" }),
+    });
+    await expect(
+      mintLocalDesktopSession("https://brain.example.com", fetchImpl),
+    ).rejects.toThrow(/HTTP 403/);
   });
 });
 

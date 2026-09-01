@@ -53,6 +53,25 @@ export const CUSTOM_MODEL_IMAGE_FALLBACK_NOTICE =
   'This workspace routes its models to an endpoint that cannot read images, so a built-in Brian model answered this message.'
 
 /**
+ * Said when a custom endpoint FAILED and a built-in model answered instead
+ * (migration 491's per-connection opt-in). Sibling of the image notice above
+ * and it exists for the same reason: byo-llm-key.md forbids a SILENT
+ * fallback, not a fallback.
+ *
+ * It differs from the image case in what it tells the reader to DO. An image
+ * refusal is a permanent capability limit, so its wording points at Settings.
+ * This one reports a transient outage the admin has already pre-authorised
+ * Brian to route around, so it stays short: the person reading it needs to
+ * know the answer came from a different model (it may not match the
+ * endpoint's usual voice or knowledge), not to go change a setting. Naming
+ * the endpoint or the upstream error here would leak connection detail into
+ * a room whose members are not necessarily workspace admins; the operator
+ * detail lives in the log line and the `custom_llm_endpoint_fallback` event.
+ */
+export const CUSTOM_MODEL_ENDPOINT_FALLBACK_NOTICE =
+  'This workspace routes its models to a custom endpoint that failed on this message, so a built-in Brian model answered instead.'
+
+/**
  * Safe refusal for an immutable channel session whose Team or Project is no
  * longer selectable. It deliberately names no context id or inaccessible
  * metadata; the typed server error remains available to API callers while a

@@ -7,8 +7,14 @@
  * call must be ignored, never crash the editor.
  */
 
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { compositionHasChanges, replayProposals } from "../post-editor";
+
+const postEditorSource = readFileSync(
+  new URL("../post-editor.tsx", import.meta.url),
+  "utf8",
+);
 
 function turn(drafts: unknown) {
   return {
@@ -125,5 +131,30 @@ describe("[COMP:app-web/feed-post-editor] proposal replay", () => {
         },
       },
     })).toBe(true);
+  });
+
+  it("keeps lifecycle actions in the header above the edit/preview canvas", () => {
+    const header = postEditorSource.indexOf("<header");
+    const copyAction = postEditorSource.indexOf('onClick={() => void copyCaption()}');
+    const canvas = postEditorSource.indexOf('viewMode === "edit"');
+    expect(header).toBeGreaterThan(-1);
+    expect(copyAction).toBeGreaterThan(header);
+    expect(copyAction).toBeLessThan(canvas);
+    expect(postEditorSource).toContain("te.editMode");
+    expect(postEditorSource).toContain("te.previewMode");
+  });
+
+  it("edits the working title in place through the Feed rename route", () => {
+    expect(postEditorSource).toContain("updateFeedDraftSessionTitle");
+    expect(postEditorSource).toContain("aria-label={te.editTitle}");
+    expect(postEditorSource).toContain('event.key === "Enter"');
+    expect(postEditorSource).toContain('event.key === "Escape"');
+    expect(postEditorSource).toContain("notifyFeedPostsChanged()");
+  });
+
+  it("renders portable formatting in Preview and the rich clipboard source", () => {
+    expect(postEditorSource).toContain("<ReactMarkdown");
+    expect(postEditorSource).toContain('"text/html": new Blob');
+    expect(postEditorSource).toContain("ref={richCopyRef}");
   });
 });

@@ -1,11 +1,12 @@
 /**
  * Canvas Desktop — Electron main process (the IO shell).
  *
- * A hardened BrowserWindow loads the deployed canvas web app and adds the
+ * A hardened BrowserWindow loads app-web's locally packaged desktop renderer
+ * (or the deployed web app in development compatibility mode) and adds the
  * native capabilities a browser cannot: a global quick-capture hotkey, a tray,
  * OS-level menus, a `usebrian://` deep-link protocol, and a system-browser
- * sign-in flow (RFC 8252 + PKCE). It owns no UI and no backend — every pixel is
- * served by apps/app-web. All decisions are delegated to the pure helpers
+ * sign-in flow (RFC 8252 + PKCE). It owns no product UI and no backend — every
+ * pixel comes from apps/app-web. All decisions are delegated to the pure helpers
  * (config / window-policy / deep-link / quick-capture / desktop-auth) so this
  * file stays thin and they stay tested.
  *
@@ -111,6 +112,7 @@ import {
   parseAuthCallback,
   parseLoopbackCallback,
   exchangeCode,
+  mintLocalDesktopSession,
   refreshSession,
   shouldRefreshSession,
   SESSION_REFRESH_CHECK_INTERVAL_MS,
@@ -202,7 +204,10 @@ function readPersistedTargetRaw(): string | null {
   }
 }
 
-const cfg = resolveConfig(process.env, readPersistedTargetRaw());
+// Release binaries always prefer the installed renderer. Development keeps
+// the remote shell default for fast iteration; USEBRIAN_BUNDLED explicitly
+// overrides either direction for QA/compatibility.
+const cfg = resolveConfig(process.env, readPersistedTargetRaw(), app.isPackaged);
 const isDev = !app.isPackaged;
 
 const PRELOAD_PATH = join(__dirname, "preload.cjs");
@@ -215,9 +220,9 @@ const SIGNIN_PAGE = join(__dirname, "signin.html");
 const OFFLINE_PAGE = join(__dirname, "offline.html");
 /**
  * The bundled SPA index (Phase 4, docs/plans/canvas-desktop-bundled-offline.md).
- * Present only in a packaged bundled build (the client export is emitted to
- * `renderer/`); absent in dev + the thin shell, so `loadApp` falls back to the
- * remote canvas URL. Combined with `cfg.bundled`, this gates loadFile vs loadURL.
+ * Package scripts rebuild the client export into `renderer/` before
+ * electron-builder. Development may omit it and fall back to the remote app.
+ * Combined with `cfg.bundled`, this gates loadFile vs loadURL.
  */
 const BUNDLE_INDEX = join(__dirname, "..", "renderer", "index.html");
 
@@ -1017,12 +1022,10 @@ function rememberedLocalAuth(): TargetAuth {
 let lastLocalMintAt: number | null = null;
 
 /**
- * Mint the oss local-owner session by loading the app-web trigger route
- * in-window (same-origin: it sets the cookie trio into this jar and 302s into
- * the app — the shell's jar is separate from the system browser's, so the
- * launcher's session can never be reused). Cooldown-guarded: a brain that
- * keeps bouncing back to /login (an edition/gate mismatch) would loop, so
- * within the cooldown the brain-problem landing shows instead.
+ * Mint the OSS local-owner session. Bundled mode calls the selected API and
+ * persists its token pair; thin compatibility mode loads app-web's same-origin
+ * cookie trigger. Cooldown-guarded: an edition/gate mismatch that keeps
+ * returning to login cannot loop indefinitely.
  */
 async function mintLocalSession(): Promise<void> {
   const win = ensureWindow();
@@ -1033,9 +1036,25 @@ async function mintLocalSession(): Promise<void> {
   }
   lastLocalMintAt = now;
   try {
+    if (cfg.bundled) {
+      // The installed renderer has a file:// origin, so the Next trigger's
+      // cookie write cannot authenticate it. Mint the same local-owner pair
+      // directly from the selected API and persist it in safeStorage.
+      const result = await mintLocalDesktopSession(cfg.apiUrl, gatewayProbeFetch);
+      persistSession(result);
+      await loadApp(win);
+      focusWindow(win);
+      return;
+    }
     await win.webContents.loadURL(localMintUrl(cfg.appUrl));
   } catch (err) {
-    console.warn("Local session mint failed:", err); // did-fail-load shows the landing
+    console.warn("Local session mint failed:", err);
+    showLocalDown(
+      win,
+      err instanceof Error && /HTTP (?:400|401|403)/.test(err.message)
+        ? "auth"
+        : "unreachable",
+    );
   }
 }
 
@@ -1126,7 +1145,7 @@ function bundledAvailable(): boolean {
  */
 async function loadApp(
   win: BrowserWindow,
-  opts: { capture?: boolean; record?: boolean } = {},
+  opts: { capture?: boolean; record?: boolean; route?: string } = {},
 ): Promise<void> {
   if (bundledAvailable()) {
     // The bundled renderer loads from file://, so it has no env: hand it the API
@@ -1135,7 +1154,10 @@ async function loadApp(
     const query: Record<string, string> = { api: cfg.apiUrl };
     if (opts.capture) query.capture = "1";
     if (opts.record) query.record = "1";
-    await win.webContents.loadFile(BUNDLE_INDEX, { query });
+    await win.webContents.loadFile(BUNDLE_INDEX, {
+      query,
+      ...(opts.route ? { hash: opts.route } : {}),
+    });
     return;
   }
   if (cfg.target === "local") {
@@ -1146,7 +1168,13 @@ async function loadApp(
     }
   }
   await win.webContents.loadURL(
-    opts.capture ? quickCaptureUrl(cfg.appUrl) : opts.record ? recordTargetUrl(cfg.appUrl) : cfg.appUrl,
+    opts.capture
+      ? quickCaptureUrl(cfg.appUrl)
+      : opts.record
+        ? recordTargetUrl(cfg.appUrl)
+        : opts.route
+          ? new URL(opts.route, cfg.appUrl).toString()
+          : cfg.appUrl,
   );
 }
 
@@ -2306,7 +2334,18 @@ function handleIncomingUrl(rawUrl: string): void {
     }
     const win = ensureWindow();
     focusWindow(win);
-    void win.webContents.loadURL(target);
+    if (cfg.bundled) {
+      if (target === quickCaptureUrl(cfg.appUrl)) {
+        void loadApp(win, { capture: true });
+      } else if (target === recordTargetUrl(cfg.appUrl)) {
+        void loadApp(win, { record: true });
+      } else {
+        const url = new URL(target);
+        void loadApp(win, { route: `${url.pathname}${url.search}${url.hash}` });
+      }
+    } else {
+      void win.webContents.loadURL(target);
+    }
   }
 }
 

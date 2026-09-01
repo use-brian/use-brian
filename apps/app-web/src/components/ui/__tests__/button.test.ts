@@ -43,7 +43,6 @@ describe("[COMP:app-web/button] Button", () => {
       'components/chrome/floating-chat.tsx:<span className="inline-flex size-7 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground">',
       'components/doc/sidebar-panels/live-sidebar-panel.tsx:className="inline-flex min-w-5 items-center justify-center rounded-full bg-primary px-1.5 text-[10px] font-semibold leading-5 text-primary-foreground"',
       'components/live/live-active-badge.tsx:className="absolute -right-0.5 -top-0.5 inline-flex min-w-[15px] items-center justify-center rounded-full bg-primary px-1 text-[9px] font-semibold leading-[15px] text-primary-foreground ring-2 ring-sidebar motion-safe:animate-pulse motion-reduce:animate-none"',
-      'components/live/live-surface.tsx:<span className="absolute -right-2 -top-2 grid min-w-7 place-items-center rounded-full bg-primary px-1.5 text-[11px] font-bold tabular-nums text-primary-foreground shadow-sm">',
       'components/ui/user-avatar.tsx:"rounded-full bg-primary text-primary-foreground flex items-center justify-center font-bold shrink-0",',
       'components/workflow/step-editor.tsx:checked ? "border-primary bg-primary text-primary-foreground" : "border-input",',
       'components/workflow/workflow-board.tsx:state === "running" && "bg-primary text-primary-foreground",',

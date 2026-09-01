@@ -6,11 +6,12 @@ import { resolve } from "node:path";
 import { resolveOssGitCommitSha } from "./build-info.config";
 
 /**
- * Desktop bundle build — "Approach B" of docs/plans/doc-desktop-bundled-offline.md.
+ * Desktop bundle build — "Approach B" of
+ * docs/plans/canvas-desktop-bundled-offline.md.
  *
  * Produces a `file://`-loadable SPA of the doc client, emitted into the
- * Electron shell's `renderer/` dir (where `main.ts`'s `loadFile` loader picks it
- * up under `USEBRIAN_BUNDLED=1`). This is SEPARATE from the Next build — Vite
+ * Electron shell's `renderer/` dir (where packaged builds select it by default;
+ * `USEBRIAN_BUNDLED` remains a QA override). This is SEPARATE from the Next build — Vite
  * only runs when this config is invoked (`pnpm --filter app-web build:desktop`),
  * so the web/SSR build is untouched. The SPA reuses app-web's own `@/`
  * components via the alias below; `next/*` get alias-shimmed (added as the doc

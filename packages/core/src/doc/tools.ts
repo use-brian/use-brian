@@ -477,7 +477,7 @@ const getCurrentPageInputSchema = z.object({
 
 const createSubPageInputSchema = z.object({
   parentPageId: pageIdSchema.describe(
-    'The id of the page this sub-page is filed under (the parent in the sidebar tree). Use the id of the page currently in scope — e.g. the `pageId` from its outline.',
+    'The id of the page this sub-page is filed under (the parent in the sidebar tree). Use the validated Page currently in scope (open or pinned), e.g. the `pageId` from its outline.',
   ),
   title: z
     .string()
@@ -1695,7 +1695,8 @@ export function createCreateSubPageTool(deps: DocToolDeps): Tool {
     name: 'createSubPage',
     description:
       'Create a new page NESTED UNDER an existing doc page — the Notion sub-page primitive. ' +
-      'Use this when the user wants a child page filed under the page currently open (e.g. "add a sub-page for Q3 planning", "break this section out into its own page"). ' +
+      'Use this when the user wants a child page filed under the validated Page currently in scope (open or pinned), e.g. "add a sub-page for Q3 planning" or "break this section out into its own page". ' +
+      'When the server supplies a validated Page anchor, the child is always filed under that Page (or under a Page created earlier in this same edit), even if an older parent id appears in conversation history. ' +
       '\n\n' +
       'The new page shows up indented under its parent in the sidebar tree. Nesting is recorded on the page itself (its `nest_parent_id`), so you do NOT need to also add a block to the parent — though you may insert a `child_page` block (`{ kind: "child_page", id, childPageId }`) into the parent via `patchPage` if you also want an inline clickable link to the sub-page in the parent\'s body. ' +
       '\n\n' +
@@ -1713,16 +1714,27 @@ export function createCreateSubPageTool(deps: DocToolDeps): Tool {
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
 
+      // Sub-page creation is an extension of the validated Page target. Match
+      // patchPage's stale-target defense: an existing Page id recalled from an
+      // older turn cannot become the parent. Pages created in this child run
+      // stay valid so one request can build a multi-level tree deliberately.
+      const parentPageId =
+        deps.anchorPageId &&
+        input.parentPageId !== deps.anchorPageId &&
+        !deps.turnCreatedPageIds?.has(input.parentPageId)
+          ? deps.anchorPageId
+          : input.parentPageId
+
       // Verify the parent page exists + is visible before nesting under it.
       // RLS hides cross-workspace rows, so a null read means "no access /
       // not found" — surface a clean error rather than minting an orphan.
       const parent = await deps.savedViewStore.getById(
         context.userId,
-        input.parentPageId,
+        parentPageId,
       )
       if (!parent) {
         return {
-          data: `Parent page not found: ${input.parentPageId}. It may have been deleted or you may not have access. Create a top-level page with renderPage instead.`,
+          data: `Parent page not found: ${parentPageId}. It may have been deleted or you may not have access. Create a top-level page with renderPage instead.`,
           isError: true,
         }
       }
@@ -1759,7 +1771,7 @@ export function createCreateSubPageTool(deps: DocToolDeps): Tool {
           viewType: legacyBinding.viewType,
           binding: legacyBinding,
           page,
-          nestParentId: input.parentPageId,
+          nestParentId: parentPageId,
           // Snapshot the prompt that triggered this sub-page → History "first
           // prompt" (migration 231). Undefined on turns with no user message.
           originPrompt: context.userMessageText,
@@ -1783,7 +1795,7 @@ export function createCreateSubPageTool(deps: DocToolDeps): Tool {
           {
             type: 'sub_page_created',
             pageId: draft.id,
-            parentPageId: input.parentPageId,
+            parentPageId,
           },
           eventCtx(context),
         )
@@ -1807,7 +1819,7 @@ export function createCreateSubPageTool(deps: DocToolDeps): Tool {
 // ── Aggregate factory ───────────────────────────────────────────────
 
 /**
- * Build all six doc tools at once. The Phase-1 inject site
+ * Build all ten doc tools at once. The inject site
  * (`packages/api/src/doc/inject.ts`, owned by Agent P1I) calls this
  * and merges the result into the per-turn tool map.
  */

@@ -67,6 +67,32 @@ database under `~/.usebrian/`; point `DATABASE_URL` at a local Postgres if you
 prefer a container. Files live in the durable `~/.usebrian/files` directory.
 Every self-host override is documented in [`.env.example`](./.env.example).
 
+### Container images
+
+Prebuilt images for the independently deployable services are published to the
+[GitHub Container Registry](https://github.com/orgs/use-brian/packages). Pull a
+service with:
+
+```bash
+docker pull ghcr.io/use-brian/doc-sync:latest
+```
+
+| Service | Image |
+|---|---|
+| Auth web | `ghcr.io/use-brian/auth-web` |
+| Browser relay | `ghcr.io/use-brian/browser-relay` |
+| Discord connector | `ghcr.io/use-brian/discord-connector` |
+| Document sync | `ghcr.io/use-brian/doc-sync` |
+| Feishu connector | `ghcr.io/use-brian/feishu-connector` |
+| WhatsApp connector | `ghcr.io/use-brian/wa-connector` |
+| WeChat connector | `ghcr.io/use-brian/wechat-connector` |
+| WeChat desktop bridge | `ghcr.io/use-brian/wechat-desktop-bridge` |
+
+Use `latest` for the current `main` build, `develop` for the development branch,
+`v*` tags for releases, or `sha-<commit>` to pin an exact build. These images
+cover the standalone services; use the `pnpm` quick start above to run the full
+self-hosted app locally.
+
 ### Your data stays yours
 
 The brain, the store, and the canvas stay local. Model requests go only to the
@@ -154,7 +180,7 @@ each is a service you choose to talk to, so nothing turns on by itself.
 
 | Capability | Key(s) to set | What you get |
 |---|---|---|
-| Web search | `BRAVE_SEARCH_API_KEY`, `SERPER_API_KEY`, `SERPAPI_API_KEY`, or `TAVILY_API_KEY` | Upgrade the search tool past the free DuckDuckGo fallback |
+| Web search | `BRAVE_SEARCH_API_KEY`, `SERPER_API_KEY`, `SERPAPI_API_KEY`, `TAVILY_API_KEY`, or `BAIDU_SEARCH_API_KEY` | Upgrade the search tool past the free DuckDuckGo fallback; Baidu adds Chinese-language and mainland-China coverage |
 | Page fetches | `JINA_API_KEY` | Cleaner page reads via Jina Reader (works keyless at lower limits) |
 | Read X / Twitter | `TWITTER_BEARER_TOKEN` | Read x.com permalinks through the official X API v2 |
 | X search | `XAI_API_KEY` | Fall back to xAI Grok and enable the `xSearch` tool |

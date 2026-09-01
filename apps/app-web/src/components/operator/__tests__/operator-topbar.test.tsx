@@ -17,6 +17,7 @@ import { Activity } from "lucide-react";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
+import { OPERATOR_APP_KEYS } from "@/lib/operator-apps";
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ back: vi.fn(), forward: vi.fn() }),
@@ -65,9 +66,11 @@ describe("[COMP:app-web/operator-topbar] Operator top bar chrome", () => {
     expect(html).toContain('data-sidebar-collapsed="true"');
   });
 
-  it("names the chip per app from the operatorBar labels", () => {
-    expect(wrap(<OperatorTopbar app="crm" />)).toContain(en.operatorBar.crm);
-    expect(wrap(<OperatorTopbar app="feed" />)).toContain(en.operatorBar.feed);
+  it("names every registered non-Page app chip from operatorBar labels", () => {
+    for (const app of OPERATOR_APP_KEYS) {
+      if (app === "page") continue;
+      expect(wrap(<OperatorTopbar app={app} />)).toContain(en.operatorBar[app]);
+    }
   });
 
   it("accepts a top-level surface identity without adding it to Home apps", () => {

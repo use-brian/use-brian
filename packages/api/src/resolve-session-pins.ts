@@ -46,6 +46,18 @@ type ResolvedPinLine = {
   short: string
   /** Human chip label for the UI (`null` = unavailable at this clearance). */
   label: string | null
+  /** Readable Page pins double as validated full-Chat edit targets. */
+  pageTarget?: ResolvedPinnedPageTarget
+}
+
+export type ResolvedPinnedPageTarget = {
+  pageId: string
+  title: string
+}
+
+export type ResolvedPinnedContext = {
+  block: string | null
+  pageTargets: ResolvedPinnedPageTarget[]
 }
 
 function fmtDate(d: Date | string | null): string | null {
@@ -147,6 +159,7 @@ async function resolvePinLine(
         }
       }
       case 'page': {
+        if (!pin.refId) return unavailable
         const r = await query<{ name: string; clearance: string }>(
           `SELECT name, clearance FROM saved_views
             WHERE id = $1 AND workspace_id = $2`,
@@ -156,7 +169,12 @@ async function resolvePinLine(
         if (!row || !readable(clearance, row.clearance)) return unavailable
         // Title + reference ONLY — the body is read by id on demand (T15).
         const line = `- Page "${row.name}" [page id: ${pin.refId}] (not inlined — read by id when needed)`
-        return { full: line, short: line, label: row.name }
+        return {
+          full: line,
+          short: line,
+          label: row.name,
+          pageTarget: { pageId: pin.refId, title: row.name },
+        }
       }
       case 'file': {
         const r = await query<{ name: string; title: string | null; sensitivity: string }>(
@@ -193,14 +211,14 @@ async function resolvePinLine(
  * session has no pins. Best-effort: any single pin's resolution failure
  * degrades to the "unavailable" line, never the whole block.
  */
-export async function buildPinnedContextBlock(params: {
+export async function resolvePinnedContext(params: {
   sessionId: string
   workspaceId: string
   /** The session's `effective_clearance` — the resolution ceiling. */
   clearance: string | null
-}): Promise<string | null> {
+}): Promise<ResolvedPinnedContext> {
   const pins = await listSessionPins(params.sessionId)
-  if (pins.length === 0) return null
+  if (pins.length === 0) return { block: null, pageTargets: [] }
   const clearance: Clearance =
     params.clearance === 'public' || params.clearance === 'confidential'
       ? params.clearance
@@ -209,6 +227,13 @@ export async function buildPinnedContextBlock(params: {
   const resolved = await Promise.all(
     pins.map((pin) => resolvePinLine(pin, params.workspaceId, clearance)),
   )
+  const pageTargets = [
+    ...new Map(
+      resolved
+        .flatMap((line) => line.pageTarget ? [line.pageTarget] : [])
+        .map((target) => [target.pageId, target] as const),
+    ).values(),
+  ]
 
   const header = [
     '# Pinned context',
@@ -230,7 +255,19 @@ export async function buildPinnedContextBlock(params: {
   }
   if (omitted > 0) lines.unshift(`- (${omitted} older pin(s) omitted for space)`)
 
-  return `${header}\n${lines.join('\n')}`
+  return {
+    block: `${header}\n${lines.join('\n')}`,
+    pageTargets,
+  }
+}
+
+/** Compatibility wrapper for callers that only need the user-visible index. */
+export async function buildPinnedContextBlock(params: {
+  sessionId: string
+  workspaceId: string
+  clearance: string | null
+}): Promise<string | null> {
+  return (await resolvePinnedContext(params)).block
 }
 
 /**

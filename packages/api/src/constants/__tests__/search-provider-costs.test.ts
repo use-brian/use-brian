@@ -17,6 +17,7 @@ describe('[COMP:api/search-provider-costs] estimateSearchCostUsd', () => {
   it('scales the per-1k rate by the call count', () => {
     expect(estimateSearchCostUsd('brave', 1000)).toBeCloseTo(SEARCH_PROVIDER_COST_PER_1K.brave)
     expect(estimateSearchCostUsd('serper', 500)).toBeCloseTo(SEARCH_PROVIDER_COST_PER_1K.serper / 2)
+    expect(estimateSearchCostUsd('baidu', 250)).toBeCloseTo(SEARCH_PROVIDER_COST_PER_1K.baidu / 4)
   })
 
   it('returns 0 for a zero-rate or unknown provider', () => {
@@ -30,6 +31,7 @@ describe('[COMP:api/search-provider-costs] estimateSearchCostUsd', () => {
 
   it('exposes the provider rate table for the cost dashboard', () => {
     expect(SEARCH_PROVIDER_COST_PER_1K.brave).toBeGreaterThan(0)
+    expect(SEARCH_PROVIDER_COST_PER_1K.baidu).toBeGreaterThan(0)
     expect(SEARCH_PROVIDER_COST_PER_1K.duckduckgo).toBe(0)
   })
 })

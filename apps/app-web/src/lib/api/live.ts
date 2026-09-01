@@ -23,6 +23,7 @@ export type LiveSessionItem = {
   id: string;
   assistantId: string;
   assistantName: string;
+  assistantIconSeed: number;
   ownerUserId: string | null;
   ownerName: string | null;
   channelType: string;

@@ -787,6 +787,32 @@ export async function deleteFeedDraftSession(
   return { ok: false, error: data.error ?? null };
 }
 
+/** Rename a draft session while the server preserves its platform prefix. */
+export async function updateFeedDraftSessionTitle(
+  assistantId: string,
+  sessionId: string,
+  title: string,
+): Promise<
+  | { ok: true; title: string }
+  | { ok: false; error: string | null }
+> {
+  const res = await authFetch(
+    `${API_URL}/api/distribution/${assistantId}/draft-sessions/${sessionId}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    },
+  );
+  const data = (await res.json().catch(() => ({}))) as {
+    title?: string;
+    error?: string;
+  };
+  return res.ok && typeof data.title === "string"
+    ? { ok: true, title: data.title }
+    : { ok: false, error: data.error ?? null };
+}
+
 /**
  * The session's saved drafts with resolution status
  * (`GET /:assistantId/draft-sessions/:sessionId/saved-drafts`). Returns

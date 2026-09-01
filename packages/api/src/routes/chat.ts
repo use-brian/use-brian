@@ -9,7 +9,10 @@ import { createTurnLedger } from '../ledger/recorder.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { query } from '../db/client.js'
 import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
-import { buildPinnedContextBlock } from '../resolve-session-pins.js'
+import {
+  resolvePinnedContext,
+  type ResolvedPinnedPageTarget,
+} from '../resolve-session-pins.js'
 import { getSelfEntityId } from '../db/memories.js'
 import { getRecording, type Recording } from '../db/recordings-store.js'
 import { queryLoop, isConnectionDropError, isEndpointUnreachableError, streamErrorCode, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, probePdfPageCount, estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH, filterToolsByCapabilities, modelToCompactionTier, buildWorkspaceFilesContext, buildUploadPolicyBlock, SensitivityAccumulator, CompartmentAccumulator, ContextScopeAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSupervisorSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, parsePresentedDocumentInput, latestWorkflowProposalReceipt, buildTool, parseSlashCommand, buildSlashCommandBlock, buildEmailDraftAnchorPrompt, formatActiveEmailDraftContext, type PresentedDocumentInput, type MediaBackend } from '@use-brian/core'
@@ -65,7 +68,11 @@ import { isRegistryModelAvailable, registryRow } from '@use-brian/shared/model-r
 import type { ConnectorStore } from '../db/connector-store.js'
 import { getToolDisplayName, stripFollowUps, stripCommentThreadReplyTag, resolveCharter, charterMission, recordingIdFromAnchorKey } from '@use-brian/shared'
 import { loadDecisionPlaybookContext } from '../decision-learning/playbook-context.js'
-import { CUSTOM_MODEL_IMAGE_FALLBACK_NOTICE, CUSTOM_MODEL_IMAGE_REJECTION } from './_channel-error-text.js'
+import {
+  CUSTOM_MODEL_ENDPOINT_FALLBACK_NOTICE,
+  CUSTOM_MODEL_IMAGE_FALLBACK_NOTICE,
+  CUSTOM_MODEL_IMAGE_REJECTION,
+} from './_channel-error-text.js'
 import { decideImageTurnRoute } from '../custom-llm-runtime.js'
 import { resolveUser, buildBrowserEscalationPrompt, buildUnavailableCapabilitiesPrompt, injectSkills, isSkillOfferable, checkUsageBudget, applyMcpInjection, type CreditBudgetGate } from './route-helpers.js'
 import { createDocRunClient } from '../doc/run-presence-client.js'
@@ -735,6 +742,10 @@ export async function resolveWorkspaceTurnLlm(params: {
         requestedModel: params.requestedModel,
         requestedTier: params.requestedTier,
         allowDefault: true,
+        // This is the main user-facing web turn, and it has a `notice` lane
+        // to announce a fallback on. Background lanes below must NOT pass
+        // this - see the resolver's `allowFailureFallback` docs.
+        allowFailureFallback: true,
       })
     : null
   if (customRuntime) {
@@ -1081,9 +1092,10 @@ export function mayOfferWorkspaceChatHandoff(
 }
 
 /**
- * The app-web WORKSPACE surfaces — the non-doc origins the shared
- * `SurfaceChatPanel` dock stamps on its sessions (migration 255). Mirrors
- * the non-doc, non-chat slice of `KNOWN_ORIGINS` below — keep in sync.
+ * The app-web WORKSPACE surfaces — the non-doc origins that receive ambient
+ * Page authoring (migration 255). Full Chat is included alongside the
+ * historical SurfaceChatPanel origins. Mirrors the non-doc slice of
+ * `KNOWN_ORIGINS` below — keep in sync.
  */
 const APP_SURFACE_ORIGINS = new Set([
   'brain',
@@ -1091,11 +1103,12 @@ const APP_SURFACE_ORIGINS = new Set([
   'workflow',
   'approvals',
   'knowledge-base',
+  'chat',
 ])
 
 /**
  * Is this turn happening on an app-web WORKSPACE surface (Brain / Studio /
- * Workflow / Approvals / Knowledge-base chat)? These turns get the doc page
+ * Workflow / Approvals / Knowledge-base / full Chat)? These turns get the doc page
  * tools injected AMBIENTLY — same tools as the doc surface, but with the
  * weak `buildAmbientDocSkillBlock` steering (chat-first, author a page only
  * on an explicit ask) instead of the page-first protocol. Coordinator /
@@ -4468,7 +4481,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       const docCtx = onDocSurface
       const docSkillTurn = docCtx
       // The app-web workspace surfaces (Brain / Studio / Workflow / Approvals /
-      // Knowledge-base) get the doc tools too, but with the AMBIENT steering
+      // Knowledge-base / full Chat) get the doc tools too, but with AMBIENT steering
       // (chat-first, author only on an explicit ask). `docToolsTurn` gates the
       // tool injection + the post-turn auto-title pass; every research /
       // coordinator / outline / presence gate stays keyed to the doc-only
@@ -4570,6 +4583,10 @@ export function chatRoutes(options: WebChatOptions): Router {
       let docOutlineBlockCount = 0
       let docPageBlockCount = 0
       let docPageVersion = 0
+      // Full Chat room Page pins become edit authority only after the same
+      // fresh workspace/clearance resolution that renders their index line.
+      // Other surfaces never receive this supplemental target set.
+      let pinnedPageEditTargets: ResolvedPinnedPageTarget[] = []
 
       // Provenance split (2026-08-01): private runtime metadata stays in the
       // trusted system channel. Only representations of content actually
@@ -4594,7 +4611,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             ? (docSkillBlockStr = buildAmbientDocSkillBlock({
                 teamName: workspaceIdentity?.name,
                 teamPurpose: workspaceIdentity?.purpose ?? undefined,
-                // `onAppSurface` guarantees appOrigin is one of the five
+                // `onAppSurface` guarantees appOrigin is one of the ambient
                 // workspace surfaces (APP_SURFACE_ORIGINS) — the line tells
                 // the model which view the dock is mounted over, pairing
                 // with the client's "Asking about <surface>" chip.
@@ -4687,12 +4704,15 @@ export function chatRoutes(options: WebChatOptions): Router {
       // resolver failure costs the block, never the turn.
       if (isRoomSession && assistant.workspaceId) {
         try {
-          const pinBlock = await buildPinnedContextBlock({
+          const pinnedContext = await resolvePinnedContext({
             sessionId: session.id,
             workspaceId: assistant.workspaceId,
             clearance: session.effectiveClearance,
           })
-          if (pinBlock) userVisibleContextParts.push(pinBlock)
+          if (pinnedContext.block) userVisibleContextParts.push(pinnedContext.block)
+          if (session.appOrigin === 'chat') {
+            pinnedPageEditTargets = pinnedContext.pageTargets
+          }
         } catch (err) {
           console.warn('[chat] pinned-context resolution failed:', err)
         }
@@ -5362,6 +5382,12 @@ export function chatRoutes(options: WebChatOptions): Router {
               typeof requestedDocViewId === 'string' && requestedDocViewId
                 ? requestedDocViewId
                 : null,
+            // Full Chat has no open `docViewId`. Readable Page pins from this
+            // exact room are the only existing-page targets the gateway may
+            // admit, and inject.ts re-anchors the child mutation tools to the
+            // selected id after validation.
+            editPageTargets:
+              session.appOrigin === 'chat' ? pinnedPageEditTargets : [],
             anchorBlockId:
               typeof requestedDocAnchorBlockId === 'string' && requestedDocAnchorBlockId
                 ? requestedDocAnchorBlockId
@@ -6913,6 +6939,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                         description,
                         displayLines,
                         allowPersistentApproval,
+                        ...(turnLeaseToken ? { turnLeaseToken } : {}),
                         ...(decisionPlaybookContext.decisionApplicationId
                           ? { decisionApplicationId: decisionPlaybookContext.decisionApplicationId }
                           : {}),
@@ -7432,6 +7459,7 @@ export function chatRoutes(options: WebChatOptions): Router {
 
             sendEvent('tool_confirmation_required', {
               toolCallId: event.request.toolCallId,
+              approvalId: event.request.approvalId,
               toolName: event.request.toolName,
               displayName,
               input: enrichedInput,
@@ -7447,6 +7475,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             // written to the dead socket alone and park for its 24h timeout.
             publishRoomActivity('tool_confirmation_required', {
               toolCallId: event.request.toolCallId,
+              approvalId: event.request.approvalId,
               toolName: event.request.toolName,
               displayName,
               input: enrichedInput,
@@ -7511,6 +7540,26 @@ export function chatRoutes(options: WebChatOptions): Router {
             // Use totalUsage (accumulated across ALL query-loop turns) rather
             // than response.usage (last turn only) so intermediate tool-use
             // turns are included in cost tracking.
+            // Announced, never silent (byo-llm-key.md -> "Endpoint failure
+            // fallback"). Web has a real `notice` lane, so unlike the channel
+            // pipeline this does not have to ride inside the reply text.
+            if (customLlmRuntime?.fallback.used) {
+              sendEvent('notice', {
+                code: 'custom_model_endpoint_fallback',
+                message: CUSTOM_MODEL_ENDPOINT_FALLBACK_NOTICE,
+              })
+              options.analytics?.logEvent({
+                userId: user.id, assistantId: assistant.id, sessionId: session.id,
+                eventName: 'custom_llm_endpoint_fallback', channelType: 'web',
+                metadata: {
+                  reason: sanitize(customLlmRuntime.fallback.reason ?? 'unknown'),
+                  status: customLlmRuntime.fallback.status ?? 0,
+                  endpoint_profile: sanitize(customLlmRuntime.selector),
+                  served_model: sanitize(event.response.model),
+                  model_tier: sanitize(logicalTier),
+                },
+              })
+            }
             const usage = event.totalUsage
             if (options.usageStore && usage) {
               // BYO billing branch: when the turn was served by the workspace's
@@ -7519,7 +7568,15 @@ export function chatRoutes(options: WebChatOptions): Router {
               // which key drove the turn for downstream attribution. This only
               // covers the main_response (LLM) charge; MCP tool calls and
               // memory/brain ops bill exactly as before (untouched).
-              const cost = usedByoKey
+              // `usedByoKey` was decided BEFORE the turn ran. A custom
+              // endpoint that then failed had its turn served on platform
+              // capacity, and the resolved runtime's derived
+              // `providerKeySource` already says so - so re-read it here
+              // instead of trusting the pre-turn snapshot, or the turn is
+              // free platform serving.
+              const turnUsedByoKey = usedByoKey
+                && (!customLlmRuntime || customLlmRuntime.providerKeySource === 'user')
+              const cost = turnUsedByoKey
                 ? 0
                 : calculateCost(event.response.model, usage)
               options.usageStore.recordUsage({
@@ -7536,7 +7593,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                 source: userPlan === 'free' ? 'free' : 'included',
                 userMessageId: storedUserMsg.id,
                 triggerKey: 'main_response',
-                providerKeySource: usedByoKey ? 'user' : 'platform',
+                providerKeySource: turnUsedByoKey ? 'user' : 'platform',
               }).catch((err) => {
                 console.error('Usage tracking failed:', err)
                 options.analytics?.logEvent({
