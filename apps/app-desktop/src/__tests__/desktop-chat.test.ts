@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   desktopChatRoute,
+  parseCompanionState,
   workspaceIdFromDesktopRoute,
 } from "../desktop-chat.js";
 
@@ -16,5 +17,14 @@ describe("[COMP:app-desktop/awake-brian] desktop chat routing", () => {
 
   it("builds the shared live and bundled chat route", () => {
     expect(desktopChatRoute("team one")).toBe("/desktop/chat/team%20one");
+  });
+
+  it("accepts only bounded display-only companion state", () => {
+    expect(parseCompanionState({ phase: "thinking", label: "Searching\nnow" })).toEqual({
+      phase: "thinking",
+      label: "Searching now",
+    });
+    expect(parseCompanionState({ phase: "unknown", label: "no" })).toBeNull();
+    expect(parseCompanionState({ phase: "idle", label: "x".repeat(200) })?.label).toHaveLength(120);
   });
 });

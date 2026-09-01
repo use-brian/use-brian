@@ -237,6 +237,7 @@ import {
   type StagedRecording,
 } from "@/lib/recordings/use-recording-upload";
 import { dispatchRecordingParticipantsUpdated } from "@/lib/recordings/recording-events";
+import { companionChatPhase } from "@/lib/companion-chat-state";
 import { useDockRecorder } from "@/lib/recorder/use-dock-recorder";
 import { useLiveRecordingPage } from "@/lib/recordings/use-live-recording-page";
 import {
@@ -409,6 +410,7 @@ type InlineNotice = {
 export type ChatActivity = {
   isStreaming: boolean;
   streamingText: string;
+  phase: "idle" | "loading" | "thinking" | "responding" | "action-required";
   activeTool: {
     name: string;
     description?: string;
@@ -1268,8 +1270,20 @@ export function FloatingChat({
   const isStreaming = session.state.isStreaming;
   const streamingText = session.state.streamingText;
   const activity = useMemo<ChatActivity>(() => {
+    const requiresAction =
+      Boolean(pendingQuestion) ||
+      session.state.pendingConfirmations.some(
+        (confirmation) =>
+          confirmation.status === "pending" || confirmation.status === "approving",
+      );
+    const phase = companionChatPhase({
+      isStreaming,
+      hasStreamingText: Boolean(streamingText),
+      requiresAction,
+      isLoading: resumePolling,
+    });
     if (!isStreaming) {
-      return { isStreaming: false, streamingText: "", activeTool: null };
+      return { isStreaming: false, streamingText: "", phase, activeTool: null };
     }
     const running = toolTimeline.find((t) => t.status === "running");
     const last =
@@ -1280,6 +1294,7 @@ export function FloatingChat({
     return {
       isStreaming: true,
       streamingText,
+      phase,
       activeTool: last
         ? {
             name: last.name,
@@ -1288,7 +1303,7 @@ export function FloatingChat({
           }
         : null,
     };
-  }, [isStreaming, streamingText, toolTimeline]);
+  }, [isStreaming, pendingQuestion, resumePolling, session.state.pendingConfirmations, streamingText, toolTimeline]);
 
   const onActivityChangeRef = useRef(onActivityChange);
   useEffect(() => {

@@ -123,6 +123,9 @@ const bridge = {
     return () => messageBrianListeners.delete(callback);
   },
   acknowledgeMessageBrian: () => ipcRenderer.send("Use Brian:message-brian-consumed"),
+  // The dedicated chat renderer mirrors its display-only lifecycle onto the
+  // local companion. Main validates both sender identity and payload shape.
+  setCompanionState: (state) => ipcRenderer.send("Use Brian:companion-state", state),
 };
 
 if (process.argv.includes("--usebrian-bundled")) {

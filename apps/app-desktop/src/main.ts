@@ -102,7 +102,9 @@ import { resolveDeepLink } from "./deep-link.js";
 import { quickCaptureUrl, recordTargetUrl } from "./quick-capture.js";
 import {
   desktopChatRoute,
+  parseCompanionState,
   workspaceIdFromDesktopRoute,
+  type CompanionState,
 } from "./desktop-chat.js";
 import {
   isTrustedCaptureOrigin,
@@ -589,6 +591,8 @@ function createWindow(): BrowserWindow {
 const BRIAN_PET_WIDTH = 150;
 const BRIAN_PET_HEIGHT = 154;
 const BRIAN_PET_GUTTER = 18;
+const DESKTOP_CHAT_WIDTH = 436;
+const DESKTOP_CHAT_HEIGHT = 640;
 
 function isAppPage(win: BrowserWindow): boolean {
   try {
@@ -614,6 +618,11 @@ function rememberWorkspace(win: BrowserWindow): void {
 function messageBrian(): void {
   if (!lastWorkspaceId) return;
   if (desktopChatWindow && !desktopChatWindow.isDestroyed()) {
+    if (desktopChatWindow.isVisible()) {
+      desktopChatWindow.hide();
+      return;
+    }
+    positionDesktopChat();
     desktopChatWindow.show();
     desktopChatWindow.focus();
     desktopChatWindow.webContents.focus();
@@ -621,12 +630,19 @@ function messageBrian(): void {
   }
 
   const win = new BrowserWindow({
-    width: 420,
-    height: 640,
-    minWidth: 360,
-    minHeight: 480,
+    width: DESKTOP_CHAT_WIDTH,
+    height: DESKTOP_CHAT_HEIGHT,
     title: "Message Brian",
-    backgroundColor: "#ffffff",
+    frame: false,
+    transparent: true,
+    resizable: false,
+    maximizable: false,
+    minimizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    hasShadow: false,
+    backgroundColor: "#00000000",
     show: false,
     webPreferences: {
       preload: PRELOAD_PATH,
@@ -641,6 +657,10 @@ function messageBrian(): void {
     },
   });
   desktopChatWindow = win;
+  positionDesktopChat();
+  publishCompanionState({ phase: "loading" });
+  win.setAlwaysOnTop(true, "floating");
+  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
 
   win.once("ready-to-show", () => {
     if (win.isDestroyed()) return;
@@ -651,6 +671,12 @@ function messageBrian(): void {
   win.webContents.on("did-finish-load", () => {
     if (!win.webContents.isDestroyed()) {
       void win.webContents.insertCSS(DESKTOP_CHROME_SAFETY_CSS);
+    }
+  });
+  win.webContents.on("before-input-event", (event, input) => {
+    if (input.type === "keyDown" && input.key === "Escape") {
+      event.preventDefault();
+      win.hide();
     }
   });
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -672,12 +698,39 @@ function messageBrian(): void {
   });
   win.on("closed", () => {
     if (desktopChatWindow === win) desktopChatWindow = null;
+    publishCompanionState({ phase: "idle" });
   });
 
   void loadApp(win, { route: desktopChatRoute(lastWorkspaceId) }).catch((error) => {
     console.warn("Failed to open the Brian chat window:", error);
     if (!win.isDestroyed()) win.close();
   });
+}
+
+function publishCompanionState(state: CompanionState): void {
+  if (!brianPetWindow || brianPetWindow.isDestroyed() || brianPetWindow.webContents.isDestroyed()) {
+    return;
+  }
+  brianPetWindow.webContents.send("Use Brian:companion-state", state);
+}
+
+function positionDesktopChat(): void {
+  if (
+    !desktopChatWindow ||
+    desktopChatWindow.isDestroyed() ||
+    !brianPetWindow ||
+    brianPetWindow.isDestroyed()
+  ) {
+    return;
+  }
+  const pet = brianPetWindow.getBounds();
+  const area = screen.getDisplayMatching(pet).workArea;
+  const x = Math.max(area.x, pet.x - DESKTOP_CHAT_WIDTH + 8);
+  const y = Math.max(
+    area.y,
+    Math.min(area.y + area.height - DESKTOP_CHAT_HEIGHT, pet.y + pet.height - DESKTOP_CHAT_HEIGHT),
+  );
+  desktopChatWindow.setPosition(x, y, false);
 }
 
 function positionBrianPet(): void {
@@ -688,6 +741,7 @@ function positionBrianPet(): void {
     area.y + area.height - BRIAN_PET_HEIGHT - BRIAN_PET_GUTTER,
     false,
   );
+  positionDesktopChat();
 }
 
 function showBrianPet(): void {
@@ -729,6 +783,7 @@ function showBrianPet(): void {
   win.once("ready-to-show", () => win.showInactive());
   win.on("closed", () => {
     if (brianPetWindow === win) brianPetWindow = null;
+    if (desktopChatWindow && !desktopChatWindow.isDestroyed()) desktopChatWindow.close();
   });
   void win.loadFile(BRIAN_PET_PAGE);
 }
@@ -753,6 +808,8 @@ function syncAwakeBrianMode(): void {
   stopAwakeBrianBlocker();
   if (brianPetWindow && !brianPetWindow.isDestroyed()) brianPetWindow.destroy();
   brianPetWindow = null;
+  if (desktopChatWindow && !desktopChatWindow.isDestroyed()) desktopChatWindow.close();
+  desktopChatWindow = null;
 }
 
 function toggleKeepBrianAwake(): void {
@@ -2787,6 +2844,17 @@ if (!gotLock) {
     ) {
       messageBrian();
     }
+  });
+  ipcMain.on("Use Brian:companion-state", (event, rawState: unknown) => {
+    if (
+      !desktopChatWindow ||
+      desktopChatWindow.isDestroyed() ||
+      event.sender.id !== desktopChatWindow.webContents.id
+    ) {
+      return;
+    }
+    const state = parseCompanionState(rawState);
+    if (state) publishCompanionState(state);
   });
   // Dock live recording: show/close the floating overlay with the capture.
   ipcMain.on("Use Brian:recording-state", (_event, on: unknown) => {

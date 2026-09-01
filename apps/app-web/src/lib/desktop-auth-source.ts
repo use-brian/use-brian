@@ -112,6 +112,11 @@ export interface DesktopBridge {
   onMessageBrian?: (callback: () => void) => () => void;
   /** Confirm that the workspace composer has consumed the companion intent. */
   acknowledgeMessageBrian?: () => void;
+  /** Mirror the dedicated chat window's display-only lifecycle onto the companion. */
+  setCompanionState?: (state: {
+    phase: "idle" | "loading" | "thinking" | "responding" | "action-required";
+    label?: string;
+  }) => void;
 }
 
 /** The connector-connect handoff payload (see `DesktopBridge.connectConnector`). */
