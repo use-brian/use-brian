@@ -366,3 +366,31 @@ export function parseStorageBucket(storageUri: string): string {
   if (fm) return fm[1]
   throw new Error(`gcs: cannot parse bucket from storage_uri: ${storageUri}`)
 }
+
+/**
+ * Extract the OBJECT KEY from a `gs://`, `s3://`, or `file://` storage URI.
+ *
+ * The counterpart to `parseStorageBucket`, and load-bearing for the same
+ * reason: `workspace_files.storage_uri` is authoritative per file, so a reader
+ * must never re-derive the key from `(workspace_id, file_id)`. Most rows are
+ * written by `writeBytes`, where the two agree — but a row that INDEXES bytes
+ * already sitting somewhere else does not. Recording media is the case that
+ * proved it (`api-platform/src/recordings/media-artifact.ts` indexes
+ * `<workspace_id>/recordings/<uuid>` without copying it): every one of those
+ * rows read back as `not_found` because the reader looked under
+ * `<workspace_id>/<row_id>`, which nothing ever wrote.
+ *
+ * Bucket-relative by construction: the key is the URI minus the scheme and
+ * minus whatever `parseStorageBucket` calls the bucket, so the multi-segment
+ * `file://` root parses the same way a single-segment GCS bucket does.
+ */
+export function parseStorageKey(storageUri: string): string {
+  const bucket = parseStorageBucket(storageUri)
+  const rest = /^(?:gs|s3|file):\/\/(.*)$/.exec(storageUri)?.[1]
+  if (rest === undefined || !rest.startsWith(`${bucket}/`)) {
+    throw new Error(`gcs: cannot parse object key from storage_uri: ${storageUri}`)
+  }
+  const key = rest.slice(bucket.length + 1)
+  if (!key) throw new Error(`gcs: empty object key in storage_uri: ${storageUri}`)
+  return key
+}

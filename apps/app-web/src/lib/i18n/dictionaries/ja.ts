@@ -4320,6 +4320,11 @@ export const ja: Dictionary = {
         queued: "取り込みを開始しました。抽出されたナレッジはまもなく表示されます。",
         inFlight: "このファイルの取り込みはすでに実行中です。",
         failed: "取り込みを開始できませんでした。",
+        mediaAction: "文字起こししてブレインに追加",
+        mediaHint:
+          "音声と動画はレコーディング経路を通ります。Brian がまずファイルを文字起こしし、その文字起こしと抽出した内容をブレインに保存します。開始前に長さと料金が表示されます。",
+        mediaQueued:
+          "文字起こしを開始しました。完了すると文字起こしと抽出された内容が表示されます。",
       },
       authorUser: "あなた",
       authorAssistant: "{name}",
@@ -8672,6 +8677,8 @@ export const ja: Dictionary = {
     chatQueuedChip: "録音をキューに追加: {name}",
     chatStagedChip: "録音を添付: {name}",
     confirmVideoNote: "これは動画です。画面に映った内容も分析され、ノートに追加されます。",
+    confirmAlreadyProcessed:
+      "このレコーディングは一度処理済みです。もう一度実行すると音声を再度文字起こしし、以前抽出したメモリーが重複する可能性があります。",
     linkError: "録音を読み込めませんでした。",
     uploadFailed:
       "音声をストレージに送信できず、処理は開始されていません。接続を確認してください。録音はこの端末に保存されており、レコーダーから再度保存できます。",

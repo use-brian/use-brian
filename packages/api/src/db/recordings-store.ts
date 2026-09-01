@@ -161,6 +161,30 @@ export async function createRecording(input: {
   return toRecording(rows[0]!)
 }
 
+/**
+ * The recording that already OWNS a stored media file, if any.
+ *
+ * System-level (the caller has already gated the file). Exists so the
+ * file → recording handoff is idempotent: a media row reached through the brain
+ * drawer normally names its recording through `source_episode_id`, but a row
+ * whose back-edge was never stamped would otherwise adopt a SECOND recording on
+ * every click. Oldest first, mirroring the firing-row rule: if two ever exist,
+ * the one the user already has transcripts and pages hanging off wins.
+ */
+export async function getRecordingByMediaFileSystem(
+  workspaceId: string,
+  mediaFileId: string,
+): Promise<Recording | null> {
+  const { rows } = await query<Record<string, unknown>>(
+    `SELECT ${COLS} FROM recordings
+      WHERE workspace_id = $1 AND media_file_id = $2 AND valid_to IS NULL
+      ORDER BY created_at ASC
+      LIMIT 1`,
+    [workspaceId, mediaFileId],
+  )
+  return rows[0] ? toRecording(rows[0]) : null
+}
+
 /** System read (worker path — no user context). */
 export async function getRecordingSystem(id: string): Promise<Recording | null> {
   const { rows } = await query<Record<string, unknown>>(
