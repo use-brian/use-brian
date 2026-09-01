@@ -188,7 +188,7 @@ describe('[COMP:doc/soul] doc skill block', () => {
 })
 
 // The AMBIENT variant rides the app-web workspace surfaces (Brain / Studio /
-// Workflow / Approvals / Knowledge-base chat docks): same tools, inverted
+// Workflow / Approvals / Knowledge-base / full Chat): same tools, inverted
 // steering — chat-first, author a page only on an explicit ask. Compact by
 // design: the HOW lives in the tool descriptions injected alongside it.
 describe('[COMP:doc/soul] ambient doc skill block', () => {
@@ -205,7 +205,8 @@ describe('[COMP:doc/soul] ambient doc skill block', () => {
     const out = buildAmbientDocSkillBlock()
     expect(out).toContain('delegateDocEdit')
     expect(out).toContain('Choose `create` only when the user explicitly requested a new page')
-    expect(out).toContain('if no page is open, ask the user to open the target')
+    expect(out).toMatch(/open or pin it/i)
+    expect(out).toMatch(/several pinned Pages.*ask which Page/i)
     expect(out).not.toContain('renderPage')
     expect(out).not.toContain('patchPage')
     expect(out).not.toContain('createSubPage')
@@ -263,10 +264,11 @@ describe('[COMP:doc/soul] ambient doc skill block', () => {
     // Other surfaces' glosses must not leak in.
     expect(out).not.toContain('**Studio**')
     // Every surface value produces its own named line.
-    for (const surface of ['studio', 'workflow', 'approvals', 'knowledge-base'] as const) {
+    for (const surface of ['studio', 'workflow', 'approvals', 'knowledge-base', 'chat'] as const) {
       expect(buildAmbientDocSkillBlock({ surface })).toMatch(/currently looking at/i)
     }
     expect(buildAmbientDocSkillBlock({ surface: 'knowledge-base' })).toContain('**Knowledge base**')
+    expect(buildAmbientDocSkillBlock({ surface: 'chat' })).toContain('**Chat**')
   })
 
   it('omits the surface line entirely when `surface` is absent (byte-identical to the pre-surface block)', () => {

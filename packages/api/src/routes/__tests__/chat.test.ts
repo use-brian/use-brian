@@ -435,15 +435,14 @@ describe('[COMP:api/chat-route] isDocSurface', () => {
 describe('[COMP:api/chat-route] isAppSurface', () => {
   // The app-web workspace surfaces (SurfaceChatPanel origins, mig 255) get
   // the doc tools injected AMBIENTLY — weak on-request steering, not the
-  // page-first protocol. Doc itself and plain chat are NOT app surfaces.
+  // page-first protocol. Full Chat is included; Doc itself is not.
   it('is true for every SurfaceChatPanel origin', () => {
-    for (const origin of ['brain', 'studio', 'workflow', 'approvals', 'knowledge-base']) {
+    for (const origin of ['brain', 'studio', 'workflow', 'approvals', 'knowledge-base', 'chat']) {
       expect(isAppSurface({ appOrigin: origin })).toBe(true)
     }
   })
-  it('is false for doc, chat, and unscoped sessions', () => {
+  it('is false for doc and unscoped sessions', () => {
     expect(isAppSurface({ appOrigin: 'doc' })).toBe(false)
-    expect(isAppSurface({ appOrigin: 'chat' })).toBe(false)
     expect(isAppSurface({ appOrigin: null })).toBe(false)
   })
 })

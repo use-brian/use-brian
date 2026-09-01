@@ -5,12 +5,14 @@
  * `/w/<workspaceId>/chat`, the 6th operator app under Home.
  *
  * NOT a fork of the floating dock (`components/chrome/floating-chat.tsx`).
- * That component is 3.9k lines because it carries every doc-authoring
- * affordance — page anchoring, theme refinement, deck previews and floating
- * panel lifecycle. None of that belongs to a standalone chat, and copying it
- * would mean two divergent chat clients. Ordinary chat affordances DO belong
- * here: attachment pick/drop/paste, research, citations, outbound files,
- * retry/copy, and per-code-block copy all reuse the dock's shared seams.
+ * That component is 3.9k lines because it carries page-surface affordances —
+ * an open-page anchor, theme refinement, deck previews and floating-panel
+ * lifecycle. Those do not belong to standalone Chat. Page authoring itself
+ * DOES: the server injects ambient Page reads plus `delegateDocEdit`, with
+ * workspace-room Page pins as the validated existing-page edit scope. The
+ * client stays a single ordinary chat transport and renders the resulting Page
+ * link in the transcript. Attachment pick/drop/paste, research, citations,
+ * outbound files, retry/copy, and per-code-block copy reuse the dock's shared seams.
  * This surface is built on
  * the `@use-brian/chat-ui` primitives instead (`useChatSession` for state,
  * `useMessageStream` for the SSE-over-POST loop, `ChatComposer`,

@@ -9,7 +9,10 @@ import { createTurnLedger } from '../ledger/recorder.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { query } from '../db/client.js'
 import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
-import { buildPinnedContextBlock } from '../resolve-session-pins.js'
+import {
+  resolvePinnedContext,
+  type ResolvedPinnedPageTarget,
+} from '../resolve-session-pins.js'
 import { getSelfEntityId } from '../db/memories.js'
 import { getRecording, type Recording } from '../db/recordings-store.js'
 import { queryLoop, isConnectionDropError, isEndpointUnreachableError, streamErrorCode, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, probePdfPageCount, estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH, filterToolsByCapabilities, modelToCompactionTier, buildWorkspaceFilesContext, buildUploadPolicyBlock, SensitivityAccumulator, CompartmentAccumulator, ContextScopeAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSupervisorSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, parsePresentedDocumentInput, latestWorkflowProposalReceipt, buildTool, parseSlashCommand, buildSlashCommandBlock, buildEmailDraftAnchorPrompt, formatActiveEmailDraftContext, type PresentedDocumentInput, type MediaBackend } from '@use-brian/core'
@@ -1089,9 +1092,10 @@ export function mayOfferWorkspaceChatHandoff(
 }
 
 /**
- * The app-web WORKSPACE surfaces — the non-doc origins the shared
- * `SurfaceChatPanel` dock stamps on its sessions (migration 255). Mirrors
- * the non-doc, non-chat slice of `KNOWN_ORIGINS` below — keep in sync.
+ * The app-web WORKSPACE surfaces — the non-doc origins that receive ambient
+ * Page authoring (migration 255). Full Chat is included alongside the
+ * historical SurfaceChatPanel origins. Mirrors the non-doc slice of
+ * `KNOWN_ORIGINS` below — keep in sync.
  */
 const APP_SURFACE_ORIGINS = new Set([
   'brain',
@@ -1099,11 +1103,12 @@ const APP_SURFACE_ORIGINS = new Set([
   'workflow',
   'approvals',
   'knowledge-base',
+  'chat',
 ])
 
 /**
  * Is this turn happening on an app-web WORKSPACE surface (Brain / Studio /
- * Workflow / Approvals / Knowledge-base chat)? These turns get the doc page
+ * Workflow / Approvals / Knowledge-base / full Chat)? These turns get the doc page
  * tools injected AMBIENTLY — same tools as the doc surface, but with the
  * weak `buildAmbientDocSkillBlock` steering (chat-first, author a page only
  * on an explicit ask) instead of the page-first protocol. Coordinator /
@@ -4476,7 +4481,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       const docCtx = onDocSurface
       const docSkillTurn = docCtx
       // The app-web workspace surfaces (Brain / Studio / Workflow / Approvals /
-      // Knowledge-base) get the doc tools too, but with the AMBIENT steering
+      // Knowledge-base / full Chat) get the doc tools too, but with AMBIENT steering
       // (chat-first, author only on an explicit ask). `docToolsTurn` gates the
       // tool injection + the post-turn auto-title pass; every research /
       // coordinator / outline / presence gate stays keyed to the doc-only
@@ -4578,6 +4583,10 @@ export function chatRoutes(options: WebChatOptions): Router {
       let docOutlineBlockCount = 0
       let docPageBlockCount = 0
       let docPageVersion = 0
+      // Full Chat room Page pins become edit authority only after the same
+      // fresh workspace/clearance resolution that renders their index line.
+      // Other surfaces never receive this supplemental target set.
+      let pinnedPageEditTargets: ResolvedPinnedPageTarget[] = []
 
       // Provenance split (2026-08-01): private runtime metadata stays in the
       // trusted system channel. Only representations of content actually
@@ -4602,7 +4611,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             ? (docSkillBlockStr = buildAmbientDocSkillBlock({
                 teamName: workspaceIdentity?.name,
                 teamPurpose: workspaceIdentity?.purpose ?? undefined,
-                // `onAppSurface` guarantees appOrigin is one of the five
+                // `onAppSurface` guarantees appOrigin is one of the ambient
                 // workspace surfaces (APP_SURFACE_ORIGINS) — the line tells
                 // the model which view the dock is mounted over, pairing
                 // with the client's "Asking about <surface>" chip.
@@ -4695,12 +4704,15 @@ export function chatRoutes(options: WebChatOptions): Router {
       // resolver failure costs the block, never the turn.
       if (isRoomSession && assistant.workspaceId) {
         try {
-          const pinBlock = await buildPinnedContextBlock({
+          const pinnedContext = await resolvePinnedContext({
             sessionId: session.id,
             workspaceId: assistant.workspaceId,
             clearance: session.effectiveClearance,
           })
-          if (pinBlock) userVisibleContextParts.push(pinBlock)
+          if (pinnedContext.block) userVisibleContextParts.push(pinnedContext.block)
+          if (session.appOrigin === 'chat') {
+            pinnedPageEditTargets = pinnedContext.pageTargets
+          }
         } catch (err) {
           console.warn('[chat] pinned-context resolution failed:', err)
         }
@@ -5370,6 +5382,12 @@ export function chatRoutes(options: WebChatOptions): Router {
               typeof requestedDocViewId === 'string' && requestedDocViewId
                 ? requestedDocViewId
                 : null,
+            // Full Chat has no open `docViewId`. Readable Page pins from this
+            // exact room are the only existing-page targets the gateway may
+            // admit, and inject.ts re-anchors the child mutation tools to the
+            // selected id after validation.
+            editPageTargets:
+              session.appOrigin === 'chat' ? pinnedPageEditTargets : [],
             anchorBlockId:
               typeof requestedDocAnchorBlockId === 'string' && requestedDocAnchorBlockId
                 ? requestedDocAnchorBlockId
