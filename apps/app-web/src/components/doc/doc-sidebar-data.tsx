@@ -774,6 +774,9 @@ export function DocSidebarDataProvider({
           ...(move.teamspaceId !== undefined
             ? { teamspaceId: move.teamspaceId }
             : {}),
+          ...(move.contextMoveConfirmed !== undefined
+            ? { contextMoveConfirmed: move.contextMoveConfirmed }
+            : {}),
         });
         patchActiveView(move.viewId, () => updated);
         reloadSidebar();

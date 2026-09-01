@@ -329,6 +329,7 @@ export const zhCN: Dictionary = {
     },
     noticeBudgetDowngraded: "本月额度已用罄，重置前将以标准模型运作。",
     noticeCustomModelImageFallback: "此工作区的模型端点无法读取图片，因此本则消息由 Brian 内置模型回答。",
+    noticeCustomModelEndpointFallback: "此工作区的模型端点在本条消息上失败，因此改由 Brian 内置模型回答。",
     noticeDismiss: "关闭",
     pendingQuestion: {
       heading: "需要您的补充",
@@ -1141,6 +1142,10 @@ export const zhCN: Dictionary = {
     createDraftFailed: "无法创建草稿：{message}",
     saveFailed: "无法保存：{message}",
     unsaveFailed: "无法移至草稿：{message}",
+    moveContextConfirmTitle: "要将页面移至其他内容范围吗？",
+    moveContextConfirm:
+      "“{name}”及其所有子页面将继承目的地的团队空间与项目。可访问这些页面的用户可能会改变。",
+    moveContextConfirmAction: "移动页面",
     patchPageFailed: "无法保存变更：{message}",
     undoFailed: "无法恢复：{message}",
     undoUnavailable: "没有可恢复的操作",
@@ -2566,6 +2571,8 @@ export const zhCN: Dictionary = {
     deleteCta: "删除",
     loadFailed: "无法加载自定义端点。",
     saveFailed: "无法更新自定义端点。",
+    fallbackTitle: "此端点失败时改用 Brian 的默认模型",
+    fallbackDesc: "默认为关闭。开启后，此端点无法回应的消息会改由该层级的内置模型回复，回复中会注明此事，并以一般 Brian 用量计费。",
   },
   comments: {
     toolbarButton: "向 AI 留言",

@@ -373,6 +373,8 @@ export const en = {
       "You've used this month's credit allowance. Running on the standard model until it resets.",
     noticeCustomModelImageFallback:
       "This workspace's model endpoint can't read images, so a built-in Brian model answered this message.",
+    noticeCustomModelEndpointFallback:
+      "This workspace's model endpoint failed on this message, so a built-in Brian model answered instead.",
     noticeDismiss: "Dismiss",
     // askQuestion suspend-resume — inline answer surface shown when the
     // assistant pauses to ask a clarifying question. See
@@ -1298,6 +1300,10 @@ export const en = {
     createDraftFailed: "Could not create draft: {message}",
     saveFailed: "Could not save: {message}",
     unsaveFailed: "Could not move to drafts: {message}",
+    moveContextConfirmTitle: "Move page to a different context?",
+    moveContextConfirm:
+      '"{name}" and every page inside it will inherit the destination Teamspace and Project. This can change who can access them.',
+    moveContextConfirmAction: "Move page",
     patchPageFailed: "Could not save change: {message}",
     undoFailed: "Could not undo: {message}",
     undoUnavailable: "Nothing to undo",
@@ -2839,6 +2845,8 @@ export const en = {
     deleteCta: "Delete",
     loadFailed: "Couldn't load custom endpoints.",
     saveFailed: "Couldn't update the custom endpoint.",
+    fallbackTitle: "Use Brian's default model if this endpoint fails",
+    fallbackDesc: "Off by default. When on, a message this endpoint cannot answer is answered by the built-in model for that tier, the reply says it happened, and the turn is billed as normal Brian usage.",
   },
   comments: {
     toolbarButton: "Comment for AI",

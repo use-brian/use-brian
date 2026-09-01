@@ -11,11 +11,13 @@
  * src/lib/sidebar-tree.ts header.
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   buildBreadcrumb,
   buildTree,
+  dispatchReparentWithContextConfirmation,
   groupRowsByTeamspace,
+  reparentChangesContext,
   savedAncestorIds,
   type TreeNode,
 } from "../sidebar-tree";
@@ -31,6 +33,7 @@ function row(
     updatedAt?: string;
     state?: "draft" | "saved";
     teamspaceId?: string | null;
+    projectId?: string | null;
   } = {},
 ): ViewListRow {
   return {
@@ -47,9 +50,133 @@ function row(
     position: opts.position ?? 0,
     icon: null,
     teamspaceId: opts.teamspaceId ?? null,
-    projectId: null,
+    projectId: opts.projectId ?? null,
   };
 }
+
+describe("[COMP:app-web/sidebar-tree] reparent context preflight", () => {
+  const rows = [
+    row("moving", { teamspaceId: "general" }),
+    row("same-context-parent", { teamspaceId: "general" }),
+    row("other-teamspace-parent", { teamspaceId: "mali" }),
+    row("other-project-parent", {
+      teamspaceId: "general",
+      projectId: "project-2",
+    }),
+  ];
+
+  it("does not confirm a same-context page reparent", () => {
+    expect(
+      reparentChangesContext(rows, {
+        viewId: "moving",
+        nestParentId: "same-context-parent",
+      }),
+    ).toBe(false);
+  });
+
+  it("confirms a root drop into another Teamspace or Private", () => {
+    expect(
+      reparentChangesContext(rows, {
+        viewId: "moving",
+        nestParentId: null,
+        teamspaceId: "mali",
+      }),
+    ).toBe(true);
+    expect(
+      reparentChangesContext(rows, {
+        viewId: "moving",
+        nestParentId: null,
+        teamspaceId: null,
+      }),
+    ).toBe(true);
+  });
+
+  it("confirms nesting under a different Teamspace or Project", () => {
+    expect(
+      reparentChangesContext(rows, {
+        viewId: "moving",
+        nestParentId: "other-teamspace-parent",
+      }),
+    ).toBe(true);
+    expect(
+      reparentChangesContext(rows, {
+        viewId: "moving",
+        nestParentId: "other-project-parent",
+      }),
+    ).toBe(true);
+  });
+
+  it("leaves stale or context-preserving root moves to the server", () => {
+    expect(
+      reparentChangesContext(rows, {
+        viewId: "missing",
+        nestParentId: null,
+        teamspaceId: "mali",
+      }),
+    ).toBe(false);
+    expect(
+      reparentChangesContext(rows, {
+        viewId: "moving",
+        nestParentId: "missing-parent",
+      }),
+    ).toBe(false);
+    expect(
+      reparentChangesContext(rows, {
+        viewId: "moving",
+        nestParentId: null,
+      }),
+    ).toBe(false);
+  });
+
+  it("dispatches nothing when a context-changing move is cancelled", async () => {
+    const confirm = vi.fn().mockResolvedValue(false);
+    const onMove = vi.fn();
+    const move = {
+      viewId: "moving",
+      nestParentId: null,
+      position: 0,
+      teamspaceId: "mali",
+    };
+
+    await dispatchReparentWithContextConfirmation(rows, move, confirm, onMove);
+
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(onMove).not.toHaveBeenCalled();
+  });
+
+  it("dispatches an accepted context-changing move with the server flag", async () => {
+    const confirm = vi.fn().mockResolvedValue(true);
+    const onMove = vi.fn();
+    const move = {
+      viewId: "moving",
+      nestParentId: "other-teamspace-parent",
+      position: 0,
+    };
+
+    await dispatchReparentWithContextConfirmation(rows, move, confirm, onMove);
+
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(onMove).toHaveBeenCalledWith({
+      ...move,
+      contextMoveConfirmed: true,
+    });
+  });
+
+  it("dispatches a same-context move without opening the dialog", async () => {
+    const confirm = vi.fn().mockResolvedValue(true);
+    const onMove = vi.fn();
+    const move = {
+      viewId: "moving",
+      nestParentId: "same-context-parent",
+      position: 0,
+    };
+
+    await dispatchReparentWithContextConfirmation(rows, move, confirm, onMove);
+
+    expect(confirm).not.toHaveBeenCalled();
+    expect(onMove).toHaveBeenCalledWith(move);
+  });
+});
 
 /** Flatten a tree to `id` strings in DFS pre-order — easy to assert on. */
 function flatten(nodes: TreeNode[]): string[] {

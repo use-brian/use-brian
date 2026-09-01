@@ -2643,6 +2643,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             const code = typeof payload.code === "string" ? payload.code : "";
             if (code === "custom_model_image_fallback") {
               setTurnNotice(tChat.noticeCustomModelImageFallback);
+            } else if (code === "custom_model_endpoint_fallback") {
+              setTurnNotice(tChat.noticeCustomModelEndpointFallback);
             } else if (code === "budget_downgraded") {
               setTurnNotice(tChat.noticeBudgetDowngraded);
             } else if (typeof payload.message === "string") {
