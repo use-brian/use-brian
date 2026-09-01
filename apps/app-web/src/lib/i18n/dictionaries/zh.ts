@@ -4267,6 +4267,11 @@ export const zh: Dictionary = {
         queued: "已開始導入。抽取的知識稍後就會出現。",
         inFlight: "這個檔案的導入已在進行中。",
         failed: "無法開始導入。",
+        mediaAction: "轉錄並加入大腦",
+        mediaHint:
+          "音訊和影片走錄音路徑:Brian 會先把檔案轉成逐字稿,再把逐字稿和從中抽取的內容存進大腦。開始之前你會先看到長度和費用。",
+        mediaQueued:
+          "已開始轉錄。完成後逐字稿和抽取的內容就會出現。",
       },
       authorUser: "你",
       authorAssistant: "{name}",
@@ -8596,6 +8601,8 @@ export const zh: Dictionary = {
     chatQueuedChip: "录音已排队：{name}",
     chatStagedChip: "已附加錄音：{name}",
     confirmVideoNote: "这是一段视频：屏幕上出现的内容也会被分析并加入笔记。",
+    confirmAlreadyProcessed:
+      "这段录音已经处理过一次。再跑一次会重新转录音频，之前抽取的记忆可能会重复。",
     linkError: "无法加载录音。",
     uploadFailed:
       "音频无法上传到存储,尚未开始处理。请检查网络连接。录音已保存在此设备上,可从录音器再次保存。",

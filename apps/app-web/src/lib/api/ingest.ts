@@ -473,6 +473,51 @@ export type ReingestOutcome =
     }
   | { status: "in_flight" };
 
+/** Which recording owns a stored audio/video file. */
+export type RecordingForFile = {
+  recordingId: string;
+  /** The recording rows were created just now; no byte was copied. */
+  adopted: boolean;
+  /** A processing run already completed, so a re-run can duplicate memories. */
+  alreadyProcessed: boolean;
+};
+
+/**
+ * Resolve the recording behind a stored media file —
+ * POST /api/files/:fileId/ingest refuses audio and video by design, because
+ * media is transcribed rather than parsed. This is where that refusal leads:
+ * the same "Re-ingest to brain" click resolves (or adopts) the recording that
+ * owns the bytes, and the caller then runs the ordinary recording flow -
+ * estimate, the cost + blueprint confirmation, process.
+ *
+ * Starts nothing and spends nothing on its own. Spec:
+ * docs/architecture/brain/file-artifacts.md -> "Re-ingest".
+ */
+export async function recordingForStoredFile(
+  workspaceId: string,
+  fileId: string,
+): Promise<RecordingForFile> {
+  const res = await authFetch(
+    `${API_URL}/api/files/${encodeURIComponent(fileId)}/recording`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspaceId }),
+    },
+  );
+  const data = (await res.json().catch(() => null)) as
+    | (Partial<RecordingForFile> & { detail?: string; error?: string })
+    | null;
+  if (!res.ok || !data?.recordingId) {
+    throw new Error(data?.detail ?? data?.error ?? `Could not resolve the recording (HTTP ${res.status})`);
+  }
+  return {
+    recordingId: data.recordingId,
+    adopted: data.adopted === true,
+    alreadyProcessed: data.alreadyProcessed === true,
+  };
+}
+
 /**
  * Deterministic (re-)ingestion of a file ALREADY stored in workspace_files —
  * POST /api/files/:fileId/ingest. The server enforces the double-ingestion

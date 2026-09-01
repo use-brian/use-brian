@@ -34,35 +34,18 @@
  * blueprints".
  */
 
-import { createElement, useState, useCallback } from "react";
-import { MEETING_NOTES_STARTER } from "@use-brian/doc-model";
+import { useState, useCallback } from "react";
 import { useT } from "@/lib/i18n/client";
-import { confirmDialog } from "@/components/ui/confirm-dialog";
 import {
   startRecordingUpload,
   estimateRecording,
-  processRecording,
   linkLiveRecordingPage,
   finalizeLiveRecording,
   RecordingApiError,
   type RecordingQueued,
 } from "@/lib/api/recordings";
-import { listCustomPageTemplates, createCustomPageTemplate, listViews, setPageLinkedRecording } from "@/lib/api/views";
-import { getWorkspaceDefaultBlueprint } from "@/lib/api/workspaces";
-import {
-  buildBlueprintPickerItems,
-  hasNoBlueprints,
-  recordingBlueprintToSlug,
-  seedRecordingBlueprint,
-  starterInstallInput,
-  RECORDING_INGEST_ONLY,
-  RECORDING_INSTALL_STARTER,
-} from "@/lib/blueprints";
-import {
-  RecordingConfirmPicker,
-  DESTINATION_ROOT,
-} from "@/components/recordings/recording-confirm-picker";
-import type { SearchableSelectItem } from "@/components/ui/searchable-select";
+import { setPageLinkedRecording } from "@/lib/api/views";
+import { confirmAndProcessRecording } from "@/lib/recordings/confirm-and-process";
 
 export type RecordingUploadStatus = "idle" | "uploading" | "processing" | "done" | "error";
 
@@ -140,27 +123,6 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
     [workspaceId, assistantId, t],
   );
 
-  /**
-   * Install the meeting starter and return its new blueprint id, or undefined
-   * if the install failed — non-fatal by design: the user already accepted the
-   * cost, so a template-write outage must degrade to ingest-only rather than
-   * cost them the recording.
-   */
-  const installStarter = useCallback(async (): Promise<string | undefined> => {
-    try {
-      const created = await createCustomPageTemplate(
-        workspaceId,
-        starterInstallInput(MEETING_NOTES_STARTER, {
-          name: t.recordings.starterName,
-          description: t.recordings.starterDescription,
-        }),
-      );
-      return created.id;
-    } catch {
-      return undefined;
-    }
-  }, [workspaceId, t]);
-
   const run = useCallback(
     /**
      * @param opts.kind Recording kind for the transcriber-ladder routing.
@@ -187,17 +149,6 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
       let assembled = false;
       try {
         setStatus("uploading");
-        // Blueprint roster + workspace default ride the upload in parallel so
-        // the confirm dialog opens with the picker ready. Either fetch failing
-        // degrades to an ingest-only-capable picker — never blocks the upload.
-        const rosterPromise = listCustomPageTemplates(workspaceId).catch(() => []);
-        const defaultPromise = getWorkspaceDefaultBlueprint(workspaceId)
-          .then((ws) => ws?.defaultRecordingBlueprintId ?? null)
-          .catch(() => null);
-        // Candidate destinations for the brief page. Saved pages only — a
-        // draft parent would drag the brief into the prune sweep with it. A
-        // failed fetch degrades to root-only, never blocks the upload.
-        const pagesPromise = listViews({ workspaceId, state: "saved" }).catch(() => []);
         let recordingId: string;
         try {
           ({ recordingId } = await startRecordingUpload({
@@ -230,97 +181,29 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
           assembled = true;
         }
 
-        // Server-authoritative duration + surcharge → confirm before any model call.
-        stage = "estimate";
-        const est = await estimateRecording(recordingId);
-        const [roster, workspaceDefault, pages] = await Promise.all([
-          rosterPromise,
-          defaultPromise,
-          pagesPromise,
-        ]);
-        const rosterItems = buildBlueprintPickerItems(roster);
-        const items: SearchableSelectItem[] = [
-          { value: RECORDING_INGEST_ONLY, label: t.recordings.blueprintAuto },
-          ...rosterItems,
-          // Only when the workspace has authored nothing: alongside a real
-          // roster the starter is just one more template competing with the
-          // user's own, and the gap it exists to close is not there.
-          ...(hasNoBlueprints(roster)
-            ? [{ value: RECORDING_INSTALL_STARTER, label: t.recordings.starterName }]
-            : []),
-        ];
-        const destinationItems: SearchableSelectItem[] = [
-          { value: DESTINATION_ROOT, label: t.recordings.destinationRoot },
-          ...pages.map((p) => ({ value: p.id, label: p.name })),
-        ];
-        // The user's live in-dialog selections. The picker component owns the
-        // rendered state; these slots are what the hook reads after confirm.
-        let chosen = seedRecordingBlueprint(workspaceDefault);
-        let destination = DESTINATION_ROOT;
-        const minutes = Math.max(1, Math.round(est.durationSeconds / 60));
-        const pinnedPage = !!opts?.existingPageId;
-        // A video recording's processing also analyzes sampled frames; the
-        // pre-flight names that so the confirm stays a complete description
-        // of what will run.
-        const videoNote = file.type.startsWith("video/")
-          ? ` ${t.recordings.confirmVideoNote}`
-          : "";
-        const ok = await confirmDialog({
-          title: t.recordings.confirmTitle,
-          description:
-            (pinnedPage
-              ? ((est.surchargeCredits > 0
-                  ? t.recorder.liveFinalizeBody
-                      .replace("{minutes}", String(minutes))
-                      .replace("{credits}", String(est.surchargeCredits))
-                  : t.recorder.liveFinalizeFree) +
-                  (assembled ? ` ${t.recorder.liveAssembledNote}` : ""))
-              : est.surchargeCredits > 0
-              ? t.recordings.confirmBody
-                  .replace("{minutes}", String(minutes))
-                  .replace("{credits}", String(est.surchargeCredits))
-              : t.recordings.confirmFree) + videoNote,
-          confirmLabel: t.recordings.confirmAction,
-          // The blueprint + destination half of the pre-flight confirm (the
-          // hook is a .ts file, so the node is built with createElement, not
-          // JSX).
-          content: pinnedPage
-            ? undefined
-            : createElement(RecordingConfirmPicker, {
-                items,
-                initial: chosen,
-                onChange: (v: string) => {
-                  chosen = v;
-                },
-                destinationItems,
-                initialDestination: destination,
-                onDestinationChange: (v: string) => {
-                  destination = v;
-                },
-              }),
+        // The pre-flight itself lives in `confirm-and-process.ts` so this hook
+        // and the brain drawer's stored-media button cannot drift apart on what
+        // a transcription costs or which blueprint it uses.
+        const confirmed = await confirmAndProcessRecording({
+          workspaceId,
+          recordingId,
+          t,
+          isVideo: file.type.startsWith("video/"),
+          ...(opts?.existingPageId ? { pinnedPage: true } : {}),
+          ...(assembled ? { assembled: true } : {}),
+          onStage: (s) => {
+            stage = s;
+            // The enqueue is the moment the wording stops being about the
+            // upload, so the inline status turns over with it rather than
+            // after the request settles.
+            if (s === "process") setStatus("processing");
+          },
         });
-        if (!ok) {
+        if (confirmed.outcome === "cancelled") {
           setStatus("idle");
           return { outcome: "cancelled" };
         }
-
-        setStatus("processing");
-        // The starter is a sentinel, not an id — install it and submit the id
-        // it returns. Installing AFTER confirm ties the template write to
-        // demonstrated intent; a failed install falls through to ingest-only.
-        const slug = pinnedPage
-          ? undefined
-          : chosen === RECORDING_INSTALL_STARTER
-            ? await installStarter()
-            : recordingBlueprintToSlug(chosen);
-        // The root sentinel is a UI value, not a page id — send null so the
-        // server files at the workspace root.
-        stage = "process";
-        const res = await processRecording(
-          recordingId,
-          slug,
-          destination === DESTINATION_ROOT ? null : destination,
-        );
+        const res = confirmed.result;
         let liveLinkFailed = false;
         if (opts?.existingPageId) {
           try {
@@ -362,7 +245,7 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
         return { outcome: "failed", message };
       }
     },
-    [workspaceId, assistantId, t, installStarter],
+    [workspaceId, assistantId, t],
   );
 
   /**

@@ -4534,6 +4534,11 @@ export const en = {
         queued: "Ingestion started. Extracted knowledge will appear shortly.",
         inFlight: "An ingest for this file is already running.",
         failed: "Could not start ingestion.",
+        mediaAction: "Transcribe and add to brain",
+        mediaHint:
+          "Audio and video take the recording route: Brian transcribes the file first, then files the transcript and everything it extracts into the brain. You will see the length and the cost before anything starts.",
+        mediaQueued:
+          "Transcription started. The transcript and what Brian extracts from it will appear once it finishes.",
       },
       authorUser: "you",
       authorAssistant: "{name}",
@@ -8904,6 +8909,8 @@ export const en = {
     chatQueuedChip: "Recording queued: {name}",
     chatStagedChip: "Recording attached: {name}",
     confirmVideoNote: "This is a video: what appears on screen will also be analyzed and added to the notes.",
+    confirmAlreadyProcessed:
+      "This recording was already processed once. Running it again re-transcribes the audio and can duplicate the memories it extracted before.",
     linkError: "We could not load your recordings.",
     uploadFailed:
       "The audio could not reach storage, so nothing was processed. Check your connection - the capture is kept on this device and can be saved again from the recorder.",

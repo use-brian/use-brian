@@ -63,6 +63,7 @@ describe('[COMP:files/local-directory-import] imported storage keys', () => {
     expect(storageKeyForWorkspaceFile({
       id: 'file-id',
       workspaceId: WS,
+      storageUri: 'file:///Users/someone/notes/docs/plan.md',
       metadata: {
         localDirectory: {
           connectorInstanceId: 'instance-id',
@@ -72,5 +73,36 @@ describe('[COMP:files/local-directory-import] imported storage keys', () => {
         },
       },
     })).toBe('docs/plan.md')
+  })
+
+  // The recording-media regression (2026-09-01): `media-artifact.ts` indexes an
+  // object that already exists at `<workspace>/recordings/<uuid>` and never
+  // copies it, so re-deriving `<workspace>/<row id>` looked in a place nothing
+  // had ever written and every such read answered not_found.
+  it('reads the object key out of storage_uri rather than re-deriving it', () => {
+    expect(storageKeyForWorkspaceFile({
+      id: 'row-id',
+      workspaceId: WS,
+      storageUri: `gs://bucket-name/${WS}/recordings/media-uuid`,
+      metadata: {},
+    })).toBe(`${WS}/recordings/media-uuid`)
+  })
+
+  it('agrees with the legacy derivation for an ordinary written file', () => {
+    expect(storageKeyForWorkspaceFile({
+      id: 'row-id',
+      workspaceId: WS,
+      storageUri: `gs://bucket-name/${WS}/row-id`,
+      metadata: {},
+    })).toBe(`${WS}/row-id`)
+  })
+
+  it('falls back to the legacy derivation when storage_uri cannot be parsed', () => {
+    expect(storageKeyForWorkspaceFile({
+      id: 'row-id',
+      workspaceId: WS,
+      storageUri: 'not-a-storage-uri',
+      metadata: {},
+    })).toBe(`${WS}/row-id`)
   })
 })

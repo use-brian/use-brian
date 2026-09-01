@@ -19,6 +19,14 @@ vi.mock('../../db/file-ingest-jobs-store.js', () => ({
   enqueueFileIngestJob: vi.fn(),
   getFileIngestJob: vi.fn(),
 }))
+// The resolver itself is exercised in recordings/__tests__/recording-for-file.test.ts
+// against injected stores; here only the route's wiring and gates are under test.
+vi.mock('../../recordings/recording-for-file.js', async () => {
+  const actual = await vi.importActual<typeof import('../../recordings/recording-for-file.js')>(
+    '../../recordings/recording-for-file.js',
+  )
+  return { ...actual, resolveRecordingForFile: vi.fn() }
+})
 vi.mock('../../db/sessions.js', () => ({
   findOrCreateSession: vi.fn(),
   findSessionById: vi.fn(),
@@ -37,6 +45,7 @@ import { findOrCreateUser, getDefaultAssistant, findUserById, findAssistantById,
 import { findOrCreateSession, findSessionById } from '../../db/sessions.js'
 import { getWorkspaceFileById } from '../../db/workspace-files.js'
 import { enqueueFileIngestJob, getFileIngestJob } from '../../db/file-ingest-jobs-store.js'
+import { resolveRecordingForFile } from '../../recordings/recording-for-file.js'
 import { parseFileContent, shouldInline } from '@use-brian/core'
 
 const mockFindOrCreateUser = vi.mocked(findOrCreateUser)
@@ -836,11 +845,14 @@ describe('[COMP:api/files-reingest] POST /:fileId/ingest', () => {
     expect(res.body.error).toBe('ingest_in_flight')
   })
 
-  it('audio/video is refused — recordings own media (400)', async () => {
+  it('audio/video is refused, and the refusal names the recording lane (400)', async () => {
     mockGetFile.mockResolvedValue({ ...FILE, mime: 'video/mp4' } as never)
     const res = await request(app()).post('/api/files/f-1/ingest').send({ workspaceId: 'ws-1' })
     expect(res.status).toBe(400)
     expect(res.body.error).toBe('media_owned_by_recordings')
+    // A dead end is what sent the user in circles: the refusal has to carry the
+    // route that CAN do the work, not just the fact that this one cannot.
+    expect(res.body.handoff).toMatchObject({ kind: 'recording', route: '/api/files/f-1/recording' })
     expect(mockEnqueue).not.toHaveBeenCalled()
   })
 
@@ -854,6 +866,85 @@ describe('[COMP:api/files-reingest] POST /:fileId/ingest', () => {
 
     expect((await request(app(null)).post('/api/files/f-1/ingest').send({ workspaceId: 'ws-1' })).status).toBe(401)
     expect((await request(app()).post('/api/files/f-1/ingest').send({})).status).toBe(400)
+  })
+})
+
+// ── Media handoff (file-artifacts.md §"Re-ingest") ───────────────────────────
+//
+// "Re-ingest to brain" stays on the drawer for every file, media included; for
+// audio/video it resolves the recording that owns the bytes so the caller can
+// run estimate → confirm → process. This route deliberately starts nothing.
+
+describe('[COMP:api/files-recording-handoff] POST /:fileId/recording', () => {
+  const fileStore = { store: vi.fn(), get: vi.fn(), listBySession: vi.fn() }
+  const mockGetPrimary = vi.mocked(getWorkspacePrimaryAssistant)
+  const mockGetFile = vi.mocked(getWorkspaceFileById)
+  const mockResolve = vi.mocked(resolveRecordingForFile)
+
+  const ASSISTANT = {
+    id: 'a-1', kind: 'primary', workspaceId: 'ws-1',
+    clearance: 'internal', compartments: [],
+  }
+  const MEDIA = {
+    id: 'f-1', name: 'memo.opus', mime: 'audio/ogg',
+    sizeBytes: 1_533_659, sourceEpisodeId: 'rec-1',
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockGetPrimary.mockResolvedValue(ASSISTANT as never)
+    mockGetFile.mockResolvedValue(MEDIA as never)
+    mockResolve.mockResolvedValue({ status: 'ok', recordingId: 'rec-1', adopted: false, alreadyProcessed: false })
+  })
+
+  function app(userId: string | null = 'u-1') {
+    return createTestApp('/api/files', fileRoutes(fileStore as never), userId ? { userId } : undefined)
+  }
+
+  it('answers the recording that owns the media', async () => {
+    const res = await request(app()).post('/api/files/f-1/recording').send({ workspaceId: 'ws-1' })
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ recordingId: 'rec-1', adopted: false, alreadyProcessed: false })
+    expect(mockResolve).toHaveBeenCalledWith(expect.objectContaining({ id: 'f-1' }), 'u-1')
+  })
+
+  it('reports an adoption so the caller can say the recording is new', async () => {
+    mockResolve.mockResolvedValue({ status: 'ok', recordingId: 'rec-new', adopted: true, alreadyProcessed: false })
+    const res = await request(app()).post('/api/files/f-1/recording').send({ workspaceId: 'ws-1' })
+    expect(res.body).toMatchObject({ recordingId: 'rec-new', adopted: true })
+  })
+
+  it('reports an already-processed recording so the confirm can warn about duplicates', async () => {
+    mockResolve.mockResolvedValue({ status: 'ok', recordingId: 'rec-1', adopted: false, alreadyProcessed: true })
+    const res = await request(app()).post('/api/files/f-1/recording').send({ workspaceId: 'ws-1' })
+    expect(res.body).toMatchObject({ recordingId: 'rec-1', alreadyProcessed: true })
+  })
+
+  it('refuses a non-media file (400 not_media) without touching the resolver', async () => {
+    mockGetFile.mockResolvedValue({ ...MEDIA, mime: 'text/markdown' } as never)
+    const res = await request(app()).post('/api/files/f-1/recording').send({ workspaceId: 'ws-1' })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe('not_media')
+    expect(mockResolve).not.toHaveBeenCalled()
+  })
+
+  it('surfaces a compartment refusal rather than widening the file (409)', async () => {
+    mockResolve.mockResolvedValue({ status: 'refused', reason: 'compartmented' })
+    const res = await request(app()).post('/api/files/f-1/recording').send({ workspaceId: 'ws-1' })
+    expect(res.status).toBe(409)
+    expect(res.body.error).toBe('compartmented_media')
+  })
+
+  it('mirrors the ingest gates: 404 non-member, 404 invisible file, 401, 400 without workspaceId', async () => {
+    mockGetPrimary.mockResolvedValue(null as never)
+    expect((await request(app()).post('/api/files/f-1/recording').send({ workspaceId: 'ws-1' })).status).toBe(404)
+
+    mockGetPrimary.mockResolvedValue(ASSISTANT as never)
+    mockGetFile.mockResolvedValue(null as never)
+    expect((await request(app()).post('/api/files/f-1/recording').send({ workspaceId: 'ws-1' })).status).toBe(404)
+
+    expect((await request(app(null)).post('/api/files/f-1/recording').send({ workspaceId: 'ws-1' })).status).toBe(401)
+    expect((await request(app()).post('/api/files/f-1/recording').send({})).status).toBe(400)
   })
 })
 
