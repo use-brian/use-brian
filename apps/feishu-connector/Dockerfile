@@ -5,10 +5,12 @@ WORKDIR /app
 RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
+COPY packages/shared/package.json packages/shared/tsconfig.json ./packages/shared/
 COPY packages/channels/package.json packages/channels/tsconfig.json ./packages/channels/
 COPY apps/feishu-connector/package.json apps/feishu-connector/tsconfig.json ./apps/feishu-connector/
 RUN pnpm install --frozen-lockfile
 
+COPY packages/shared/src ./packages/shared/src
 COPY packages/channels/src ./packages/channels/src
 COPY apps/feishu-connector/src ./apps/feishu-connector/src
 RUN pnpm --filter "@use-brian/feishu-connector..." run build
