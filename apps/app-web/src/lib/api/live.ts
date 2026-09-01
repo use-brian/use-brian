@@ -34,6 +34,8 @@ export type LiveSessionItem = {
   visibility?: string | null;
   /** Full tier only. */
   title?: string;
+  /** Full tier only. The running lane owns a turn inbox and can accept steer. */
+  canSteer?: boolean;
 };
 
 export type LiveWorkflowRunItem = {

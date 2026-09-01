@@ -6,12 +6,15 @@
 import { describe, it, expect } from "vitest";
 import type { LiveSessionItem, LiveWorkflowRunItem } from "@/lib/api/live";
 import {
+  appliedInputIdFromWatchActivity,
   canFocusLiveItem,
   canWatch,
+  confirmationFromWatchActivity,
   focusedLiveItem,
   groupRosterItems,
   initialWatchState,
   reduceWatchEvent,
+  resolvedConfirmationIdFromWatchActivity,
   liveItemHref,
   liveItemKey,
   liveItemTitle,
@@ -138,6 +141,43 @@ describe("[COMP:app-web/live-watch-pane] stream reducer", () => {
   it("unknown frames are ignored — a newer relay vocabulary never breaks the pane", () => {
     const state = initialWatchState();
     expect(reduceWatchEvent(state, { event: "presence", data: { viewers: [] } })).toEqual(state);
+  });
+
+  it("rebuilds live confirmation, resolution, and steering acknowledgement controls", () => {
+    expect(
+      confirmationFromWatchActivity(
+        {
+          event: "tool_confirmation_required",
+          toolCallId: "tool-1",
+          approvalId: "approval-1",
+          toolName: "sendEmail",
+          displayName: "Send email",
+          input: { to: "person@example.com" },
+          displayLines: ["To: person@example.com", 42],
+        },
+        "session-1",
+      ),
+    ).toEqual({
+      toolCallId: "tool-1",
+      approvalId: "approval-1",
+      toolName: "sendEmail",
+      displayName: "Send email",
+      input: { to: "person@example.com" },
+      description: undefined,
+      displayLines: ["To: person@example.com"],
+      sessionId: "session-1",
+      status: "pending",
+    });
+    expect(
+      resolvedConfirmationIdFromWatchActivity({
+        event: "tool_confirmation_resolved",
+        toolCallId: "tool-1",
+      }),
+    ).toBe("tool-1");
+    expect(
+      appliedInputIdFromWatchActivity({ event: "input_applied", inputId: "input-1" }),
+    ).toBe("input-1");
+    expect(confirmationFromWatchActivity({ event: "tool_start" }, "session-1")).toBeNull();
   });
 
   it("close rules (§5.1): defocus, presence focus, hidden tab, and done all release the stream", () => {

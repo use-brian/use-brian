@@ -177,8 +177,31 @@ describe("[COMP:app-web/live-app] visual overview", () => {
 
 describe("[COMP:app-web/live-watch-pane] visual structure", () => {
   it("reserves a real activity rail beside the transcript", () => {
-    const html = wrap(<LiveWatchPane sessionId="session-1" />);
+    const html = wrap(
+      <LiveWatchPane
+        sessionId="session-1"
+        workspaceId="workspace-1"
+        sessionState="working"
+        canSteer
+      />,
+    );
     expect(html).toContain("data-live-activity-rail");
+    expect(html).toContain("data-live-interventions");
     expect(html).toContain(en.liveApp.activity);
+    expect(html).toContain(en.liveApp.forceStop);
+    expect(html).toContain(en.liveApp.steerNow);
+  });
+
+  it("does not offer steering when the server says this lane has no turn inbox", () => {
+    const html = wrap(
+      <LiveWatchPane
+        sessionId="session-1"
+        workspaceId="workspace-1"
+        sessionState="waiting"
+        canSteer={false}
+      />,
+    );
+    expect(html).toContain(en.liveApp.forceStop);
+    expect(html).not.toContain(en.liveApp.steerNow);
   });
 });

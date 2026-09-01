@@ -21,6 +21,7 @@
  * [COMP:app-web/live-app] / [COMP:app-web/live-watch-pane]
  */
 
+import type { PendingConfirmation } from "@use-brian/chat-ui";
 import type { LiveWorkItem } from "@/lib/api/live";
 
 export type RosterGroups = {
@@ -144,6 +145,57 @@ export function initialWatchState(): WatchState {
     endReason: null,
     closed: false,
   };
+}
+
+/**
+ * Rebuild the canonical confirmation-card shape from a reconnect relay's
+ * mirrored `tool_confirmation_required` activity. The durable focus probe
+ * covers reloads; this path makes a decision that lands while Live is open
+ * appear immediately.
+ */
+export function confirmationFromWatchActivity(
+  data: Record<string, unknown>,
+  sessionId: string,
+): PendingConfirmation | null {
+  if (data.event !== "tool_confirmation_required") return null;
+  const toolCallId = typeof data.toolCallId === "string" ? data.toolCallId : "";
+  const toolName = typeof data.toolName === "string" ? data.toolName : "";
+  if (!toolCallId || !toolName) return null;
+  return {
+    toolCallId,
+    approvalId: typeof data.approvalId === "string" ? data.approvalId : undefined,
+    toolName,
+    displayName: typeof data.displayName === "string" ? data.displayName : undefined,
+    input:
+      data.input && typeof data.input === "object"
+        ? (data.input as Record<string, unknown>)
+        : {},
+    description: typeof data.description === "string" ? data.description : undefined,
+    displayLines: Array.isArray(data.displayLines)
+      ? data.displayLines.filter((line): line is string => typeof line === "string")
+      : undefined,
+    sessionId,
+    status: "pending",
+  };
+}
+
+/** A mirrored resolution clears only the matching live confirmation card. */
+export function resolvedConfirmationIdFromWatchActivity(
+  data: Record<string, unknown>,
+): string | null {
+  return data.event === "tool_confirmation_resolved" &&
+    typeof data.toolCallId === "string"
+    ? data.toolCallId
+    : null;
+}
+
+/** A mirrored mid-turn acknowledgement retires the client's pending steer. */
+export function appliedInputIdFromWatchActivity(
+  data: Record<string, unknown>,
+): string | null {
+  return data.event === "input_applied" && typeof data.inputId === "string"
+    ? data.inputId
+    : null;
 }
 
 /**

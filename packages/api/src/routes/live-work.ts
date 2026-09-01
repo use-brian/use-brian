@@ -24,7 +24,7 @@
 import { Router } from 'express'
 import { query } from '../db/client.js'
 import { getWorkspaceMembershipWithClearanceSystem } from '../db/workspace-store.js'
-import { TURN_LEASE_STALE_AFTER_MS } from '../db/sessions.js'
+import { isSharedChatSession, TURN_LEASE_STALE_AFTER_MS } from '../db/sessions.js'
 import { liveSessionTier } from '../session-read-access.js'
 
 /** How long a settled item stays on the roster — a read-time window, no stored state (§3.2). */
@@ -52,6 +52,8 @@ export type LiveSessionItem = {
   visibility?: string | null
   /** FULL tier only — content-derived, never on a presence row (§6.1). */
   title?: string
+  /** FULL tier only — true when this active lane owns a turn inbox. */
+  canSteer?: boolean
 }
 
 export type LiveWorkflowRunItem = {
@@ -127,6 +129,7 @@ type SessionRosterRow = {
   userId: string
   ownerName: string | null
   channelType: string
+  appOrigin: string | null
   visibility: string | null
   mode: string | null
   status: string
@@ -198,6 +201,11 @@ export function projectSessionRow(
   }
   if (tier === 'full') {
     base.visibility = row.visibility
+    base.canSteer =
+      (state === 'working' || state === 'waiting') &&
+      row.mode !== 'draft' &&
+      (row.channelType === 'web' || row.channelType === 'doc_thread') &&
+      !isSharedChatSession(row)
     if (row.title) base.title = row.title
   }
   return base
@@ -249,6 +257,7 @@ async function fetchSessionRows(workspaceId: string): Promise<SessionRosterRow[]
             s.user_id                AS "userId",
             u.name                   AS "ownerName",
             s.channel_type           AS "channelType",
+            s.app_origin             AS "appOrigin",
             s.visibility,
             s.mode,
             s.status,

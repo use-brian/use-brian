@@ -2974,6 +2974,26 @@ export function chatRoutes(options: WebChatOptions): Router {
         sendEvent(event, data)
         publishRoomActivity(event, roomData)
       }
+      // Human control events are rare and may originate from a second client
+      // (the focused Live view) while the original chat POST is still open.
+      // Mirror these unconditionally so every authority-checked control
+      // surface observes the decision/acknowledgement. High-volume status,
+      // tool, and token activity keeps the room-or-disconnected gate above.
+      const sendControlActivityEvent = (
+        event: string,
+        data: Record<string, unknown>,
+        relayData: Record<string, unknown> = data,
+      ) => {
+        sendEvent(event, data)
+        publishRoomTurnActivity({
+          mirror: true,
+          sessionId: session.id,
+          senderUserId: user.id,
+          event,
+          data: relayData,
+          publishSessionEvent,
+        })
+      }
 
       // ── Live-turn guard (migration 424 lease) ─────────────────────
       // Before an ordinary send may take the slot, prove nobody alive holds
@@ -7411,7 +7431,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                 // promotes the queued chip to a real user bubble, and starts a
                 // fresh assistant bubble — without it the reply written BEFORE
                 // this message would look like the answer to it.
-                sendEvent('input_applied', {
+                sendControlActivityEvent('input_applied', {
                   inputId: queuedInput.id,
                   mode: event.mode,
                   messageId: storedQueued.id,
@@ -7457,7 +7477,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             const enrichedInput = await enrichConfirmation(event.request.toolName, event.request.input)
             const displayName = getToolDisplayName(event.request.toolName)
 
-            sendEvent('tool_confirmation_required', {
+            const directConfirmation = {
               toolCallId: event.request.toolCallId,
               approvalId: event.request.approvalId,
               toolName: event.request.toolName,
@@ -7466,14 +7486,14 @@ export function chatRoutes(options: WebChatOptions): Router {
               description: event.request.description,
               displayLines: event.request.displayLines,
               allowPersistentApproval: event.request.allowPersistentApproval ?? false,
-            })
+            }
             // Suspended turns are visible in the room (D8/T11): every viewer
             // sees the pending card; the SERVER gates who may act on it (the
             // addresser or a workspace admin — the /confirm check below).
-            // Off rooms the same mirror fires once the direct stream is dead
-            // (2026-08-24): a confirmation raised after the cut used to be
-            // written to the dead socket alone and park for its 24h timeout.
-            publishRoomActivity('tool_confirmation_required', {
+            // Off rooms the control mirror is unconditional: Live can be open
+            // alongside a healthy direct chat stream, and a confirmation
+            // raised there must not remain visible only to the original tab.
+            sendControlActivityEvent('tool_confirmation_required', directConfirmation, {
               toolCallId: event.request.toolCallId,
               approvalId: event.request.approvalId,
               toolName: event.request.toolName,

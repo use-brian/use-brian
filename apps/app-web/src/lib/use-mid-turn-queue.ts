@@ -20,9 +20,11 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
  * **The client is the durable holder.** Nothing is persisted server-side at
  * queue time; an entry becomes part of the transcript only when the turn takes
  * it and the server reports `input_applied`. So the host must call `drain()`
- * on every stream exit (done, error, abort) and send whatever is left as an
- * ordinary turn — that single fallback covers a turn that finished first, a
- * user who hit Stop, a dropped connection, and a lost cross-instance delivery.
+ * on every stream exit (done, error, abort) and resolve whatever is left under
+ * that surface's explicit fallback: conversation clients send an ordinary
+ * turn, while Live restores the intervention text for the operator. That
+ * covers a turn that finished first, a user who hit Stop, a dropped connection,
+ * and a lost cross-instance delivery without silently losing input.
  *
  * Spec: docs/architecture/engine/mid-turn-input.md. `[COMP:app-web/mid-turn-queue]`
  */
@@ -64,8 +66,8 @@ export type MidTurnQueue = {
    */
   take: (inputId: string) => QueuedInput | null;
   /**
-   * The stream ended. Returns everything still waiting and clears — the host
-   * sends it as an ordinary turn.
+   * The stream ended. Returns everything still waiting and clears; the host
+   * applies its surface-specific fallback.
    */
   drain: () => QueuedInput[];
 };

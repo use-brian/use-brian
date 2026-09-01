@@ -480,7 +480,13 @@ export function LiveSurface({ workspaceId }: { workspaceId: string }) {
             <LiveRunOverview item={focused} />
           </div>
         ) : canWatch(focused) ? (
-          <LiveWatchPane key={focused.id} sessionId={focused.id} />
+          <LiveWatchPane
+            key={focused.id}
+            sessionId={focused.id}
+            workspaceId={workspaceId}
+            sessionState={focused.state}
+            canSteer={focused.canSteer === true}
+          />
         ) : null}
       </div>
     </div>
