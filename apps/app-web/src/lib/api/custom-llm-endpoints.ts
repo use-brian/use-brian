@@ -31,6 +31,14 @@ export type CustomLlmEndpoint = {
   name: string;
   baseUrl: string;
   hasApiKey: boolean;
+  /**
+   * Admin opt-in: when this endpoint fails, the turn is answered by the
+   * built-in model the tier would otherwise have used, and the reader is told
+   * it happened. Off by default, because turning it on sends workspace
+   * content to a provider the admin did not originally pick and bills the
+   * fallback turn as ordinary platform usage.
+   */
+  fallbackToDefaultOnFailure: boolean;
   createdAt: string;
   updatedAt: string;
   profiles: CustomLlmProfile[];
@@ -141,6 +149,20 @@ export async function deleteCustomLlmEndpoint(workspaceId: string, endpointId: s
     method: "DELETE",
   });
   if (!res.ok && res.status !== 404) throw await responseError(res, `endpoint delete failed (${res.status})`);
+}
+
+export async function setCustomLlmFallbackPolicy(
+  workspaceId: string,
+  endpointId: string,
+  fallbackToDefaultOnFailure: boolean,
+): Promise<CustomLlmEndpoint> {
+  const res = await authFetch(`${API_URL}/api/workspaces/${workspaceId}/custom-llm-endpoints/${endpointId}/fallback`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ fallbackToDefaultOnFailure }),
+  });
+  if (!res.ok) throw await responseError(res, `fallback update failed (${res.status})`);
+  return ((await res.json()) as { endpoint: CustomLlmEndpoint }).endpoint;
 }
 
 export async function setCustomLlmTierDefault(

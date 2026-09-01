@@ -37,6 +37,8 @@ const EndpointBody = ProfileBody.extend({
 
 const TierBody = z.object({ profileId: z.string().uuid() }).strict()
 
+const FallbackBody = z.object({ fallbackToDefaultOnFailure: z.boolean() }).strict()
+
 type Options = {
   endpointStore: WorkspaceCustomLlmEndpointStore
   workspaceStore: WorkspaceStore
@@ -258,6 +260,41 @@ export function workspaceCustomLlmEndpointsRoutes(opts: Options): Router {
       res.status(204).end()
     } catch (err) {
       sendError(res, err, 'Failed to clear the custom model tier')
+    }
+  })
+
+  // Admin consent switch for endpoint-failure fallback. Kept a separate route
+  // from the endpoint PATCH surface because flipping it on is a decision about
+  // where workspace content may go and who pays for the turn, not a field of
+  // the connection's configuration - see byo-llm-key.md -> "Endpoint failure
+  // fallback".
+  router.patch('/:endpointId/fallback', async (req, res) => {
+    const workspaceId = await gate(req, res)
+    if (!workspaceId) return
+    const endpointId = typeof req.params.endpointId === 'string' ? req.params.endpointId : ''
+    if (!UUID_RE.test(endpointId)) {
+      res.status(400).json({ error: 'Invalid endpoint id', code: 'invalid_input' })
+      return
+    }
+    const parsed = FallbackBody.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Invalid input', code: 'invalid_input', detail: parsed.error.message })
+      return
+    }
+    try {
+      const endpoint = await opts.endpointStore.setFallbackPolicy({
+        actingUserId: req.userId!,
+        workspaceId,
+        endpointId,
+        fallbackToDefaultOnFailure: parsed.data.fallbackToDefaultOnFailure,
+      })
+      if (!endpoint) {
+        res.status(404).json({ error: 'Endpoint not found' })
+        return
+      }
+      res.json({ endpoint: serializeEndpoint(endpoint) })
+    } catch (err) {
+      sendError(res, err, 'Failed to update the endpoint fallback setting')
     }
   })
 
