@@ -53,11 +53,29 @@ UPDATE workspace_skills ws
                 )
        );
 
--- The flag is now the authority for those rows; drop them so the two
--- representations cannot drift, and so the Access panel reads one source.
-DELETE FROM workspace_skill_enablement e
- USING workspace_skills ws
- WHERE e.workspace_skill_id = ws.id
-   AND ws.all_assistants = true;
+-- The backfilled rows are deliberately KEPT, even though the flag now says the
+-- same thing.
+--
+-- Deleting them here would make this migration deploy-ORDER-dependent, and in
+-- the dangerous direction: the running code reads offering scope from
+-- `workspace_skill_enablement` alone until the release that understands the
+-- flag is live. A migration that lands first would therefore delete the only
+-- thing production reads, and every backfilled skill would be offered to NOBODY
+-- until the deploy caught up -- a silent, workspace-wide loss of every shared
+-- skill, in exactly the surface this change exists to repair.
+--
+-- Keeping them costs nothing, because redundancy is benign at every reader:
+-- `injectSkills` ORs the flag with the rows, `GET /:id/access` and the library
+-- projection ignore the rows entirely once the flag is set, and `enable` is
+-- idempotent so `materialiseAllAssistants` re-writing them is a no-op. The
+-- residue also clears itself: the first access edit on a flagged skill either
+-- converts (rows rewritten, flag cleared) or re-asserts the flag through
+-- `PUT /:id/access { allAssistants: true }`, which calls `disableAll`.
+--
+-- So "a flagged skill carries no rows" holds for every skill created or edited
+-- after this migration, and backfilled rows are harmless until then. Do not
+-- "tidy" this into a DELETE without first proving the flag-aware code is live
+-- everywhere -- see docs/architecture/engine/skill-system.md ->
+-- "Rows cannot say 'and future ones'".
 
 COMMIT;

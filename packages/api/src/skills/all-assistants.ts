@@ -13,6 +13,12 @@
  * path only ever seeded the assistants alive at that instant, so an assistant
  * created afterwards silently got nothing.
  *
+ * The two are exclusive for anything created or edited after mig 492. Its
+ * backfill is the exception: it sets the flag WITHOUT deleting the rows, so
+ * the migration stays safe to run before the flag-aware code ships (the old
+ * code reads rows only). Redundant rows are benign here — `enable` is
+ * idempotent, so re-writing one during a conversion is a no-op.
+ *
  * The moment a user turns the skill off for ONE assistant, the flag can no
  * longer say what they mean — so it must be CONVERTED: write a row for every
  * other assistant, then clear the flag. Clearing the flag alone would drop the

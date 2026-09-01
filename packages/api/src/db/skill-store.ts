@@ -220,11 +220,17 @@ export type WorkspaceSkill = {
    * can only ever express the assistants that existed when it was written, so
    * this is the one representation that survives a new assistant.
    *
-   * The two are mutually exclusive by construction: turning the skill off for
-   * a single assistant runs `materialiseAllAssistants`, which writes rows for
-   * everyone else and THEN clears this flag. Read them with the same OR the
-   * runtime uses (`injectSkills`) and never treat row-absence as "off" while
-   * this is true.
+   * The two are mutually exclusive for every skill created or edited after
+   * mig 492: turning the skill off for a single assistant runs
+   * `materialiseAllAssistants`, which writes rows for everyone else and THEN
+   * clears this flag. The ONE exception is mig 492's own backfill, which sets
+   * the flag but deliberately leaves the pre-existing rows in place so the
+   * migration is safe to run before the flag-aware code is deployed. That
+   * residue is benign (every reader either ORs the two or ignores the rows
+   * once the flag is set) and clears on the first access edit.
+   *
+   * Read them with the same OR the runtime uses (`injectSkills`) and never
+   * treat row-absence as "off" while this is true.
    */
   allAssistants: boolean
 }
