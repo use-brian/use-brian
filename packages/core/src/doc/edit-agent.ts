@@ -42,7 +42,7 @@ export const DOC_MUTATION_TOOLS = new Set([
 const delegateDocEditInputSchema = z
   .object({
     intent: z.enum(['create', 'edit']).describe(
-      'Use edit only for an existing page id validated by runtime context. Use create only when the user explicitly asked for a new page.',
+      'Use edit for a page id validated by runtime context, including when creating child Pages beneath it. Use create only when the user explicitly asked for a new top-level Page.',
     ),
     pageId: z.string().min(1).optional().describe(
       'Required for edit: one exact page id supplied as an allowed target by runtime context. Omit for create.',
@@ -426,7 +426,11 @@ export function toolsForDocEditIntent(
   if (intent === 'create') return tools
   return new Map(
     [...tools].filter(
-      ([name]) => !['renderPage', 'createSubPage', 'importToPage'].includes(name),
+      // Existing-page edits may extend the validated target with real child
+      // Pages. createSubPage is safe here because its parent is pinned by the
+      // same anchor as patchPage. Only unanchored top-level/file creation is
+      // removed from the child surface.
+      ([name]) => !['renderPage', 'importToPage'].includes(name),
     ),
   )
 }
@@ -471,7 +475,7 @@ export function createDelegateDocEditTool(
   return buildTool<typeof delegateDocEditInputSchema>({
     name: DOC_EDIT_GATEWAY_TOOL,
     description:
-      'Apply a requested Doc page, entity, or comment change through a fresh isolated editor. Choose edit only when runtime context supplies an exact allowed existing page id (the open Page, or a readable Page pinned in the current full-Chat room); an edit can never create a page. When several pinned Pages are allowed and the user did not clearly select one, ask which Page instead of guessing. Choose create only when the user explicitly asks for a new page. Submit one self-contained brief after gathering needed evidence. The editor has no search, brain, memory, recording, connector, or web tools and cannot see this conversation: every fact it needs must be pasted into the brief (the text itself, plus source page ids or URLs), never referenced. Questions that do not require a Doc mutation should be answered directly. The receipt status is completed, partial, or failed: partial means the editor applied some changes and was cut off before finishing - relay that honestly (what landed, what did not) and offer to continue in the next turn; never describe a partial result as done. A failed receipt whose summary starts with missing_evidence: names what the brief lacked; gather exactly that and call this tool once more with it pasted in (one retry is allowed after a no-change failure).',
+      'Apply a requested Doc page, entity, or comment change through a fresh isolated editor. Choose edit only when runtime context supplies an exact allowed existing page id (the open Page, or a readable Page pinned in the current full-Chat room). Edit may patch that Page or create real child Pages beneath it, but it cannot create an unrelated top-level Page. When several pinned Pages are allowed and the user did not clearly select one, ask which Page instead of guessing. Choose create only when the user explicitly asks for a new top-level Page. Submit one self-contained brief after gathering needed evidence. The editor has no search, brain, memory, recording, connector, or web tools and cannot see this conversation: every fact it needs must be pasted into the brief (the text itself, plus source page ids or URLs), never referenced. Questions that do not require a Doc mutation should be answered directly. The receipt status is completed, partial, or failed: partial means the editor applied some changes and was cut off before finishing - relay that honestly (what landed, what did not) and offer to continue in the next turn; never describe a partial result as done. A failed receipt whose summary starts with missing_evidence: names what the brief lacked; gather exactly that and call this tool once more with it pasted in (one retry is allowed after a no-change failure).',
     inputSchema: delegateDocEditInputSchema,
     isReadOnly: false,
     isConcurrencySafe: false,

@@ -325,6 +325,85 @@ describe('[COMP:api/doc-inject] injectDocTools', () => {
     warn.mockRestore()
   })
 
+  it('keeps createSubPage in an edit and pins its parent to the active Page', async () => {
+    const activePageId = 'active-page-1'
+    const parentReads: string[] = []
+    const nestedUnder: Array<string | null | undefined> = []
+    const activeDocPageStore: DocPageStore = {
+      async getVersionedPage(_userId, pageId) {
+        return pageId === activePageId
+          ? {
+              page: { blocks: [] },
+              version: 1,
+              title: 'Information memorandum',
+              nameOrigin: 'user',
+              icon: null,
+            }
+          : null
+      },
+      async applyPatch(params) {
+        return { newVersion: params.expectedVersion + 1 }
+      },
+    }
+    const activeSavedViewStore = {
+      getById: vi.fn(async (_userId: string, pageId: string) => {
+        parentReads.push(pageId)
+        return { id: pageId } as never
+      }),
+      createDraft: vi.fn(async (params: Parameters<SavedViewStore['createDraft']>[0]) => {
+        nestedUnder.push(params.nestParentId)
+        return { id: 'created-child-1' } as never
+      }),
+    } as unknown as SavedViewStore
+    const provider = providerFrom((_request, call) => (
+      call === 0
+        ? toolTurn('createSubPage', {
+            parentPageId: 'stale-page-from-history',
+            title: 'Executive summary',
+            page: { blocks: [] },
+          })
+        : textTurn('Created the sub-page.')
+    ))
+    const tools = new Map<string, Tool>()
+    await injectDocTools({
+      ...baseOpts,
+      tools,
+      provider,
+      fallbackModel: undefined,
+      pageId: activePageId,
+      docPageStore: activeDocPageStore,
+      savedViewStore: activeSavedViewStore,
+    })
+    const delegate = tools.get('delegateDocEdit')!
+    const context: ToolContext = {
+      userId: 'user-1',
+      assistantId: 'primary-1',
+      sessionId: 'session-1',
+      appId: 'Use Brian',
+      channelType: 'web',
+      channelId: 'channel-1',
+      workspaceId: 'ws-1',
+      docViewId: activePageId,
+      userMessageText: 'Create the actual sub-pages',
+      abortSignal: new AbortController().signal,
+    }
+
+    const result = await delegate.execute({
+      intent: 'edit',
+      pageId: activePageId,
+      instruction: 'Create an Executive summary child Page.',
+    }, context)
+
+    expect(result.isError).toBe(false)
+    expect(result.data).toMatchObject({
+      status: 'completed',
+      mutationTools: ['createSubPage'],
+      pageIds: ['created-child-1'],
+    })
+    expect(parentReads).toEqual([activePageId])
+    expect(nestedUnder).toEqual([activePageId])
+  })
+
   it('no-ops when assistant has no workspaceId', async () => {
     const tools = new Map<string, Tool>()
     const result = await injectDocTools({

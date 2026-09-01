@@ -539,7 +539,7 @@ describe('[COMP:doc/edit-agent] context-clean Doc editor', () => {
     expect(JSON.stringify(requests[0]?.messages)).toContain('pageId=pinned-page-2')
   })
 
-  it('removes every page-creation operation from an existing-page edit', () => {
+  it('retains anchored child-page creation while removing unanchored creation from an edit', () => {
     const tool = (name: string) => ({ name } as Tool)
     const tools = new Map([
       ['renderPage', tool('renderPage')],
@@ -550,6 +550,7 @@ describe('[COMP:doc/edit-agent] context-clean Doc editor', () => {
     ])
 
     expect([...toolsForDocEditIntent(tools, 'edit').keys()]).toEqual([
+      'createSubPage',
       'patchPage',
       'getCurrentPage',
     ])
