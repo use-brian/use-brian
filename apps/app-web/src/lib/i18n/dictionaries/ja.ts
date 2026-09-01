@@ -1174,6 +1174,9 @@ export const ja: Dictionary = {
     deleteConfirmAction: "削除",
     cancel: "キャンセル",
     createDraftFailed: "下書きの作成に失敗しました: {message}",
+    buildFailed: "このページを作成できませんでした: {message}",
+    buildNeverStarted:
+      "このページを作成できませんでした。リクエストが開始されませんでした。もう一度送信してください。",
     saveFailed: "保存できませんでした: {message}",
     unsaveFailed: "下書きへの移動に失敗しました: {message}",
     moveContextConfirmTitle: "ページを別のコンテキストへ移動しますか？",
@@ -5590,6 +5593,8 @@ export const ja: Dictionary = {
     upstreamConnectionResetCustom: "ワークスペースのカスタムモデルエンドポイントとの接続が切断されました。もう一度お試しください。",
     upstreamUnreachable: "モデルのエンドポイントに接続できませんでした。しばらくしてからもう一度お試しください。",
     upstreamUnreachableCustom: "ワークスペースのカスタムモデルエンドポイントに接続できませんでした。ワークスペースのモデル設定でエンドポイントが稼働しているか確認してください。",
+    sessionRebound:
+      "その会話は別のアシスタントのものです。新しい会話を開始しました。メッセージをもう一度送信してください。",
     viewSwitchAria: "チャットの範囲",
     viewPersonal: "個人",
     viewWorkspace: "ワークスペース",

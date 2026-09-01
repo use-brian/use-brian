@@ -45,6 +45,7 @@ const EMPTY: BuildActivity = {
   text: "",
   reasoning: "",
   events: [],
+  error: null,
 };
 
 export function PageBuildIndicator() {

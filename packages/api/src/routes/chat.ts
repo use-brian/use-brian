@@ -2871,16 +2871,45 @@ export function chatRoutes(options: WebChatOptions): Router {
           assistantClearance: assistant.clearance ?? null,
           sessionClearance: session.effectiveClearance,
         })
+        // Both refusals end the turn before ANY state is written, so the
+        // only trace they used to leave was the SSE frame — and an autoSend
+        // build seed renders that nowhere (the dock stays collapsed, doc.md
+        // -> "Building a page from the landing"). On 2026-09-01 a doc dock
+        // that had resumed a `notification` row refused every re-addressed
+        // send for ~50 minutes and NOTHING recorded it: no session, no
+        // message, no event, no log. A pre-turn refusal that writes no state
+        // is exactly the one that has to log, or the incident is invisible
+        // to the user AND to whoever is asked why nothing happened.
+        const logSendRefusal = (errorType: string) => {
+          options.analytics?.logEvent({
+            userId: user.id,
+            assistantId: assistant.id,
+            sessionId: session.id,
+            eventName: 'chat_setup_error', channelType: 'web',
+            metadata: {
+              error_type: sanitize(errorType),
+              stage: sanitize('session_binding'),
+              session_channel_type: sanitize(session.channelType),
+              session_app_origin: sanitize(session.appOrigin ?? ''),
+              session_assistant_id: sanitize(session.assistantId),
+            },
+          })
+        }
         if (verdict === 'clearance_refused') {
           sendEvent('error', {
             code: 'assistant_clearance_exceeds_room',
             error: 'That assistant is cleared above this room and cannot answer here.',
           })
+          logSendRefusal('assistant_clearance_exceeds_room')
           res.end()
           return
         }
         if (verdict !== 'allow') {
-          sendEvent('error', { error: 'Session does not belong to this assistant' })
+          sendEvent('error', {
+            code: 'session_assistant_mismatch',
+            error: 'Session does not belong to this assistant',
+          })
+          logSendRefusal('session_assistant_mismatch')
           res.end()
           return
         }
@@ -2896,7 +2925,24 @@ export function chatRoutes(options: WebChatOptions): Router {
       // session is owner-only. (WS3 session-resume scoping, 2026-07-07.)
       const sessionDenied = await gateSessionRead(user.id, session)
       if (sessionDenied) {
-        sendEvent('error', { error: sessionDenied.error })
+        sendEvent('error', {
+          code: 'session_access_denied',
+          error: sessionDenied.error,
+        })
+        // Same reasoning as the binding refusals above: nothing is written,
+        // so without this the refusal leaves no trace anywhere.
+        options.analytics?.logEvent({
+          userId: user.id,
+          assistantId: assistant.id,
+          sessionId: session.id,
+          eventName: 'chat_setup_error', channelType: 'web',
+          metadata: {
+            error_type: sanitize('session_access_denied'),
+            stage: sanitize('session_binding'),
+            session_channel_type: sanitize(session.channelType),
+            session_app_origin: sanitize(session.appOrigin ?? ''),
+          },
+        })
         res.end()
         return
       }

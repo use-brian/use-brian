@@ -1292,8 +1292,12 @@ export function FloatingChat({
       text: streamingText,
       reasoning: streamingReasoning,
       events: streamingEvents,
+      // A build seeded from the landing runs with this dock collapsed, so an
+      // error rendered HERE is an error nobody sees. Publishing it is what
+      // lets the page body report a build that failed before it streamed.
+      error: error ?? null,
     });
-  }, [isDocOrigin, isStreaming, toolTimeline, streamingText, streamingReasoning, streamingEvents]);
+  }, [isDocOrigin, isStreaming, toolTimeline, streamingText, streamingReasoning, streamingEvents, error]);
 
   // ── Auto-scroll + escape/click-outside ─────────────────────────────────
   useEffect(() => {
@@ -2590,6 +2594,18 @@ export function FloatingChat({
                 );
                 break;
               }
+              // The dock is holding a session this surface cannot re-address
+              // (a resume that attached a row bound to another assistant).
+              // Nothing was written server-side, so the recovery is simply to
+              // drop the binding: the next send mints a fresh session. Doing
+              // it here keeps recovery inside the user's own channel — the
+              // dock has no new-chat control, so otherwise every retry hits
+              // the same refusal and the thread is a dead end.
+              if (payload.code === "session_assistant_mismatch") {
+                resetThread();
+                setError(tChatApp.sessionRebound);
+                break;
+              }
               const msg =
                 typeof payload.error === "string" ? payload.error : t.error;
               setError(msg);
@@ -2771,7 +2787,7 @@ export function FloatingChat({
       // Indicate to the caller (e.g. seed effect) that a stream actually started.
       return true;
     },
-    [selectedAssistantId, workspaceId, origin, isDocOrigin, model, metered, customEndpoint, researchMode, session, stream, t, resetTurnBuffers, pendingQuestion, pendingRecordings, rec.status, att, applyQueuedInput, buildStreamedTurnMessage, flushQueuedInputs],
+    [selectedAssistantId, workspaceId, origin, isDocOrigin, model, metered, customEndpoint, researchMode, session, stream, t, resetTurnBuffers, resetThread, pendingQuestion, pendingRecordings, rec.status, att, applyQueuedInput, buildStreamedTurnMessage, flushQueuedInputs],
   );
 
   useEffect(() => {
