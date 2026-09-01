@@ -101,6 +101,10 @@ import {
 import { resolveDeepLink } from "./deep-link.js";
 import { quickCaptureUrl, recordTargetUrl } from "./quick-capture.js";
 import {
+  desktopChatRoute,
+  workspaceIdFromDesktopRoute,
+} from "./desktop-chat.js";
+import {
   isTrustedCaptureOrigin,
   selectPrimaryDisplaySource,
 } from "./system-audio-policy.js";
@@ -250,9 +254,10 @@ type SwitchResult = { ok: true } | { ok: false; error: "switch" | "reauth" };
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let brianPetWindow: BrowserWindow | null = null;
+let desktopChatWindow: BrowserWindow | null = null;
 let awakeBrianBlockerId: number | null = null;
 let keepBrianAwake = false;
-let pendingMessageBrian = false;
+let lastWorkspaceId: string | null = null;
 /** The PKCE verifier for an in-flight sign-in; held until the callback returns. */
 let pendingVerifier: string | null = null;
 /** Whether the in-flight sign-in adds a second account (stash) vs replaces the active one. */
@@ -493,8 +498,11 @@ function createWindow(): BrowserWindow {
   win.webContents.on("did-finish-load", () => {
     if (!win.webContents.isDestroyed()) void win.webContents.insertCSS(DESKTOP_CHROME_SAFETY_CSS);
     if (cfg.target === "local") void detectLoadedGatewayChallenge(win);
-    flushMessageBrian(win);
+    rememberWorkspace(win);
   });
+
+  win.webContents.on("did-navigate", () => rememberWorkspace(win));
+  win.webContents.on("did-navigate-in-page", () => rememberWorkspace(win));
 
   // §2.3 visible target indicator: a local target suffixes every page title so
   // the two brains can never be mistaken for each other. Cloud keeps titles
@@ -592,17 +600,84 @@ function isAppPage(win: BrowserWindow): boolean {
   }
 }
 
-function flushMessageBrian(win: BrowserWindow): void {
-  if (!pendingMessageBrian || win.isDestroyed() || !isAppPage(win)) return;
-  focusWindow(win);
-  win.webContents.send("Use Brian:message-brian");
+function rememberWorkspace(win: BrowserWindow): void {
+  if (win.isDestroyed() || !isAppPage(win)) return;
+  try {
+    const current = new URL(win.webContents.getURL());
+    const route = current.protocol === "file:" ? current.hash.slice(1) : current.pathname;
+    lastWorkspaceId = workspaceIdFromDesktopRoute(route) ?? lastWorkspaceId;
+  } catch {
+    // A transient blank or malformed navigation cannot replace the last target.
+  }
 }
 
 function messageBrian(): void {
-  pendingMessageBrian = true;
-  const win = ensureWindow();
-  focusWindow(win);
-  flushMessageBrian(win);
+  if (!lastWorkspaceId) return;
+  if (desktopChatWindow && !desktopChatWindow.isDestroyed()) {
+    desktopChatWindow.show();
+    desktopChatWindow.focus();
+    desktopChatWindow.webContents.focus();
+    return;
+  }
+
+  const win = new BrowserWindow({
+    width: 420,
+    height: 640,
+    minWidth: 360,
+    minHeight: 480,
+    title: "Message Brian",
+    backgroundColor: "#ffffff",
+    show: false,
+    webPreferences: {
+      preload: PRELOAD_PATH,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+      additionalArguments: [
+        ...(cfg.bundled ? ["--usebrian-bundled"] : []),
+        ...(cfg.target === "local" ? ["--usebrian-local-target"] : []),
+      ],
+    },
+  });
+  desktopChatWindow = win;
+
+  win.once("ready-to-show", () => {
+    if (win.isDestroyed()) return;
+    win.show();
+    win.focus();
+    win.webContents.focus();
+  });
+  win.webContents.on("did-finish-load", () => {
+    if (!win.webContents.isDestroyed()) {
+      void win.webContents.insertCSS(DESKTOP_CHROME_SAFETY_CSS);
+    }
+  });
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    void shell.openExternal(url);
+    return { action: "deny" };
+  });
+  win.webContents.on("will-navigate", (event, url) => {
+    try {
+      const target = new URL(url);
+      const trusted =
+        target.origin === cfg.appOrigin ||
+        (bundledAvailable() && target.pathname === pathToFileURL(BUNDLE_INDEX).pathname);
+      if (trusted) return;
+    } catch {
+      // Reject malformed navigation below.
+    }
+    event.preventDefault();
+    void shell.openExternal(url);
+  });
+  win.on("closed", () => {
+    if (desktopChatWindow === win) desktopChatWindow = null;
+  });
+
+  void loadApp(win, { route: desktopChatRoute(lastWorkspaceId) }).catch((error) => {
+    console.warn("Failed to open the Brian chat window:", error);
+    if (!win.isDestroyed()) win.close();
+  });
 }
 
 function positionBrianPet(): void {
@@ -2713,12 +2788,6 @@ if (!gotLock) {
       messageBrian();
     }
   });
-  ipcMain.on("Use Brian:message-brian-consumed", (event) => {
-    if (mainWindow && !mainWindow.isDestroyed() && event.sender.id === mainWindow.webContents.id) {
-      pendingMessageBrian = false;
-    }
-  });
-
   // Dock live recording: show/close the floating overlay with the capture.
   ipcMain.on("Use Brian:recording-state", (_event, on: unknown) => {
     if (on === true) showRecorderOverlay();

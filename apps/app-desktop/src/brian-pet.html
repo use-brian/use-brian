@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; style-src 'unsafe-inline'; img-src data:"
+      content="default-src 'none'; style-src 'unsafe-inline'; img-src 'self'"
     />
     <meta name="color-scheme" content="dark" />
     <style>
@@ -85,9 +85,8 @@
         bottom: 5px;
         width: 104px;
         height: 104px;
+        object-fit: contain;
         filter: drop-shadow(0 9px 10px rgba(0, 21, 40, 0.38));
-        transform-origin: 50% 100%;
-        animation: brian-breathe 2.8s steps(2, end) infinite;
       }
 
       .halo {
@@ -102,54 +101,13 @@
         transform: translateX(-50%);
       }
 
-      .eye { animation: brian-blink 4.4s steps(1, end) infinite; }
-
-      button:hover .pet,
-      button:focus-visible .pet {
-        animation: brian-wave 420ms steps(2, end) infinite alternate;
-      }
-
-      button:active .pet { transform: translateY(3px) scale(0.96); }
-
-      @keyframes brian-breathe {
-        0%, 100% { transform: translateY(0); }
-        50% { transform: translateY(-4px); }
-      }
-
-      @keyframes brian-wave {
-        from { transform: translateY(-4px) rotate(-2deg); }
-        to { transform: translateY(-8px) rotate(3deg); }
-      }
-
-      @keyframes brian-blink {
-        0%, 46%, 50%, 100% { opacity: 1; }
-        47%, 49% { opacity: 0; }
-      }
-
-      @media (prefers-reduced-motion: reduce) {
-        .pet, .eye { animation: none; }
-      }
     </style>
   </head>
   <body>
     <button id="message-brian" type="button" aria-label="Message Brian" title="Message Brian">
       <span class="prompt">Message Brian</span>
       <span class="halo" aria-hidden="true"></span>
-      <svg class="pet" viewBox="0 0 7 7" aria-hidden="true" shape-rendering="crispEdges">
-        <g fill="#10d4eb">
-          <rect x="2" y="0" width="3" height="1" />
-          <rect x="1" y="1" width="5" height="1" />
-          <rect x="0" y="2" width="7" height="2" />
-          <rect x="1" y="4" width="5" height="1" />
-          <rect x="2" y="5" width="1" height="1" />
-          <rect x="4" y="5" width="1" height="1" />
-        </g>
-        <g class="eye" fill="#07172b">
-          <rect x="2" y="2" width="0.55" height="0.55" />
-          <rect x="4.45" y="2" width="0.55" height="0.55" />
-        </g>
-        <rect x="3" y="3.35" width="1" height="0.25" fill="#85f4ff" opacity="0.85" />
-      </svg>
+      <img class="pet" src="./brian-logo.png" alt="" aria-hidden="true" />
     </button>
   </body>
 </html>

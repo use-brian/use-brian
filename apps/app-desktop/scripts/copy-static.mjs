@@ -21,3 +21,6 @@ for (const file of [
 ]) {
   copyFileSync(join(pkgRoot, "src", file), join(pkgRoot, "dist", file));
 }
+
+// The companion displays the canonical app mark, not a reconstructed SVG.
+copyFileSync(join(pkgRoot, "build", "icon.original.png"), join(pkgRoot, "dist", "brian-logo.png"));
