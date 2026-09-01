@@ -1369,7 +1369,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       res.header('Access-Control-Allow-Origin', 'null')
       res.header('Vary', 'Origin')
     }
-    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Client-Timezone')
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Content-Range, Authorization, X-Client-Timezone')
     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
     if (req.method === 'OPTIONS') { res.sendStatus(204); return }
     next()

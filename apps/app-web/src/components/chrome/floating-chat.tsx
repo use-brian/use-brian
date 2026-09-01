@@ -253,6 +253,7 @@ import {
 } from "@/components/chrome/dock-recorder";
 import { useFileDrop } from "@/lib/use-file-drop";
 import { AttachmentChips, FileDropOverlay } from "@/components/doc/attachment-chips";
+import { RecordingUploadStatus } from "@/components/recordings/recording-upload-status";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -689,7 +690,7 @@ export function FloatingChat({
   // clarifying question is pending (the composer is replaced by the answer
   // panel then, so there's nothing to attach to).
   const drop = useFileDrop((files) => void att.upload(files), {
-    disabled: !!pendingQuestion,
+    disabled: !!pendingQuestion || rec.busy,
   });
   // Set after the user answers/cancels — the resume worker takes a few
   // seconds to fire the continuation turn, so we poll session messages
@@ -1781,7 +1782,7 @@ export function FloatingChat({
       ) return false;
       if (stream.inFlight()) return false;
       if (att.uploading) return false;
-      if (rec.status === "uploading") return false;
+      if (rec.busy) return false;
       // Suspended on a question — the answer flows through the inline
       // panel (POST /answer), never a fresh chat turn. Guards the Retry
       // path too, which calls sendMessage directly past the disabled composer.
@@ -3142,6 +3143,7 @@ export function FloatingChat({
           and stays open. State (stream, tools, citations) survives toggles. */}
       <div
         aria-hidden={isSidePanel ? undefined : !expanded}
+        aria-busy={rec.status === "uploading"}
         {...drop.dropProps}
         // Floating dock: the open panel anchors flush to the corner (`bottom-0`)
         // so it reaches down to the container's `bottom-4` — the collapsed
@@ -3158,6 +3160,8 @@ export function FloatingChat({
                 "absolute right-0 bottom-0 origin-bottom-right",
                 "max-w-[calc(100vw-2rem)] max-h-[92dvh]",
                 "rounded-xl border border-border bg-popover shadow-2xl",
+                rec.status === "uploading" &&
+                  "border-primary/60 ring-2 ring-primary/25 shadow-[0_0_28px_color-mix(in_srgb,var(--primary)_22%,transparent)]",
                 "transition-[opacity,transform] duration-200 ease-out",
                 expanded
                   ? "opacity-100 scale-100 translate-y-0 pointer-events-auto"
@@ -3555,7 +3559,7 @@ export function FloatingChat({
             // which belongs to a turn of its own. Staged chips stay visible
             // and ride the next turn.
             sendDisabled={
-              rec.status === "uploading" ||
+              rec.busy ||
               (isStreaming && (att.hasReady || pendingRecordings.length > 0))
             }
             allowEmptySend={att.hasReady || pendingRecordings.length > 0}
@@ -3630,22 +3634,12 @@ export function FloatingChat({
                     ))}
                   </div>
                 ) : null}
-                {rec.status !== "idle" ? (
-                  <p
-                    className={
-                      rec.status === "error"
-                        ? "px-1 py-0.5 text-xs text-destructive"
-                        : "px-1 py-0.5 text-xs text-muted-foreground"
-                    }
-                    role="status"
-                  >
-                    {rec.status === "uploading"
-                      ? tRec.uploading
-                      : rec.status === "processing"
-                        ? tRec.processing
-                        : rec.message}
-                  </p>
-                ) : null}
+                <RecordingUploadStatus
+                  status={rec.status}
+                  uploadProgress={rec.uploadProgress}
+                  message={rec.message}
+                  className="px-1"
+                />
               </>
             }
             slotPreInput={
@@ -3654,9 +3648,10 @@ export function FloatingChat({
                   ref={fileInputRef}
                   type="file"
                   multiple
+                  disabled={rec.busy}
                   className="hidden"
                   onChange={(e) => {
-                    if (e.target.files) void att.upload(e.target.files);
+                    if (!rec.busy && e.target.files) void att.upload(e.target.files);
                     e.target.value = "";
                   }}
                 />
@@ -3666,7 +3661,7 @@ export function FloatingChat({
                   onClick={() => fileInputRef.current?.click()}
                   // Staging an attachment mid-stream is fine — it rides the
                   // NEXT send, same as pre-typed text.
-                  disabled={!!pendingQuestion}
+                  disabled={!!pendingQuestion || rec.busy}
                   className={cn(
                     "shrink-0 inline-flex h-9 w-9 items-center justify-center rounded-md",
                     "text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
@@ -3675,7 +3670,7 @@ export function FloatingChat({
                 >
                   <Paperclip className="size-[18px]" aria-hidden />
                 </button>
-                <DockRecorderButton rec={recorder} disabled={!!pendingQuestion} />
+                <DockRecorderButton rec={recorder} disabled={!!pendingQuestion || rec.busy} />
               </>
             }
             // Send stays visible while streaming — it queues into the running
@@ -3779,7 +3774,14 @@ export function FloatingChat({
           the record-dot button rides beside it otherwise. */}
       {!isSidePanel &&
         !((recorder.phase.kind === "latched" || recorder.phase.kind === "finishing") && !expanded) && (
-      <div className="flex items-center gap-2">
+      <div
+        aria-busy={rec.status === "uploading"}
+        className={cn(
+          "flex items-center gap-2 rounded-full transition-[box-shadow] duration-200",
+          rec.status === "uploading" &&
+            "ring-2 ring-primary/35 shadow-[0_0_24px_color-mix(in_srgb,var(--primary)_24%,transparent)]",
+        )}
+      >
       <button
         type="button"
         onClick={() => setExpanded(true)}
@@ -3827,6 +3829,7 @@ export function FloatingChat({
       <DockRecorderButton
         rec={recorder}
         variant="floating"
+        disabled={rec.busy}
         className={cn(
           "transition-[opacity,transform] duration-200 ease-out",
           expanded ? "opacity-0 scale-95 pointer-events-none" : "opacity-100 scale-100",

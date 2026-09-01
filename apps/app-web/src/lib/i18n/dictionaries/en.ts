@@ -8834,6 +8834,9 @@ export const en = {
     starterDescription:
       "Summary, decisions, and action items from a recording, each citing the moment it came from.",
     uploading: "Uploading...",
+    uploadingProgress: "Uploading {percent}%",
+    estimating: "Checking recording...",
+    uploadInProgress: "Another recording is still being prepared.",
     processing: "Transcribing and filing to the brain...",
     confirmTitle: "Transcribe this recording?",
     confirmBody:

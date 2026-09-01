@@ -1,4 +1,5 @@
 import { pipeline } from 'node:stream/promises'
+import { Writable } from 'node:stream'
 import * as path from 'node:path'
 import { Router } from 'express'
 import type { Request, Response } from 'express'
@@ -10,6 +11,7 @@ import {
 } from '../files/local-files-signing.js'
 
 type ByteRange = { start: number; end: number }
+type UploadRange = ByteRange & { total: number }
 
 function isExpectedClientClose(err: unknown): boolean {
   const code = (err as NodeJS.ErrnoException | undefined)?.code
@@ -56,6 +58,27 @@ function parseRange(raw: string | undefined, size: number): ByteRange | null | '
   return { start, end: Math.min(requestedEnd, size - 1) }
 }
 
+function parseUploadRange(raw: string | undefined): UploadRange | null | 'invalid' {
+  if (!raw) return null
+  const match = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(raw.trim())
+  if (!match) return 'invalid'
+  const start = Number(match[1])
+  const end = Number(match[2])
+  const total = Number(match[3])
+  if (
+    !Number.isSafeInteger(start) ||
+    !Number.isSafeInteger(end) ||
+    !Number.isSafeInteger(total) ||
+    start < 0 ||
+    end < start ||
+    total <= 0 ||
+    end >= total
+  ) {
+    return 'invalid'
+  }
+  return { start, end, total }
+}
+
 function grantFromRequest(req: Request): (LocalFileGrant & { signature: string }) | null {
   const action = req.query.action
   const key = req.query.key
@@ -86,6 +109,19 @@ export function localFilesTransferRoutes(opts: {
   signingSecret: string
 }): Router {
   const router = Router()
+  const writeTails = new Map<string, Promise<void>>()
+
+  async function serializeWrite<T>(key: string, operation: () => Promise<T>): Promise<T> {
+    const previous = writeTails.get(key) ?? Promise.resolve()
+    const running = previous.then(operation, operation)
+    const settled = running.then(() => undefined, () => undefined)
+    writeTails.set(key, settled)
+    try {
+      return await running
+    } finally {
+      if (writeTails.get(key) === settled) writeTails.delete(key)
+    }
+  }
 
   function rejectGrant(req: Request, res: Response, expectedAction: LocalFileAction): void {
     const grant = grantFromRequest(req)
@@ -173,21 +209,79 @@ export function localFilesTransferRoutes(opts: {
 
     const mime = grant.mime ?? requestMime ?? 'application/octet-stream'
     const workspaceId = grant.key.split('/', 1)[0] ?? ''
-    try {
-      await pipeline(
-        req,
-        opts.client.writeStream(grant.key, {
-          mime,
-          metadata: { workspaceId, mime },
-        }),
-      )
-      res.status(204).end()
-    } catch (err) {
-      await opts.client.deleteBlob(grant.key).catch(() => {})
-      console.error('[local-files] write failed:', err)
-      if (!res.headersSent) res.status(500).json({ error: 'Failed to write file' })
-      else res.destroy(err instanceof Error ? err : undefined)
+    const uploadRange = parseUploadRange(
+      typeof req.headers['content-range'] === 'string'
+        ? req.headers['content-range']
+        : undefined,
+    )
+    if (uploadRange === 'invalid') {
+      res.status(400).json({ error: 'Invalid Content-Range' })
+      return
     }
+    if (uploadRange) {
+      const contentLength = Number(req.headers['content-length'])
+      const expectedLength = uploadRange.end - uploadRange.start + 1
+      if (Number.isFinite(contentLength) && contentLength !== expectedLength) {
+        res.status(400).json({ error: 'Content-Length does not match Content-Range' })
+        return
+      }
+    }
+
+    await serializeWrite(grant.key, async () => {
+      let replayedRange = false
+      try {
+        if (uploadRange) {
+          const existing = await opts.client.statBlob(grant.key)
+          const durableOffset = existing?.sizeBytes ?? 0
+          if (uploadRange.start !== durableOffset) {
+            // The bytes may be durable even if the browser never received the
+            // acknowledgement (for example, a proxy reset the downstream leg).
+            // Replaying the exact completed range is therefore idempotent.
+            if (durableOffset === uploadRange.end + 1) {
+              replayedRange = true
+            } else {
+              res.status(409).json({
+                error: 'Upload offset does not match the stored bytes',
+                expectedOffset: durableOffset,
+              })
+              return
+            }
+          }
+        }
+
+        await pipeline(
+          req,
+          replayedRange
+            ? new Writable({ write(_chunk, _encoding, callback) { callback() } })
+            : uploadRange
+            ? opts.client.writeRangeStream(grant.key, uploadRange.start, {
+                mime,
+                metadata: { workspaceId, mime },
+              })
+            : opts.client.writeStream(grant.key, {
+                mime,
+                metadata: { workspaceId, mime },
+              }),
+        )
+        if (uploadRange && !replayedRange) {
+          const written = await opts.client.statBlob(grant.key)
+          if (written?.sizeBytes !== uploadRange.end + 1) {
+            throw new Error('Ranged upload wrote an unexpected byte count')
+          }
+        }
+        if (uploadRange) res.setHeader('Upload-Offset', String(uploadRange.end + 1))
+        res.status(204).end()
+      } catch (err) {
+        if (uploadRange && !replayedRange) {
+          await opts.client.truncateBlob(grant.key, uploadRange.start).catch(() => {})
+        } else if (!uploadRange) {
+          await opts.client.deleteBlob(grant.key).catch(() => {})
+        }
+        console.error('[local-files] write failed:', err)
+        if (!res.headersSent) res.status(500).json({ error: 'Failed to write file' })
+        else res.destroy(err instanceof Error ? err : undefined)
+      }
+    })
   })
 
   return router

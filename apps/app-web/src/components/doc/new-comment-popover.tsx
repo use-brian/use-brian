@@ -35,6 +35,7 @@ import { AttachmentChips, FileDropOverlay } from "@/components/doc/attachment-ch
 import { useFileAttachments } from "@/lib/use-file-attachments";
 import { useFileDrop } from "@/lib/use-file-drop";
 import { useRecordingUpload } from "@/lib/recordings/use-recording-upload";
+import { RecordingUploadStatus } from "@/components/recordings/recording-upload-status";
 import { isInsideComposerPopup } from "@/lib/comment-dismiss";
 import { type ModelTier } from "@/lib/chat-model";
 import {
@@ -127,7 +128,9 @@ export function NewCommentPopover({
         }
       : undefined,
   );
-  const drop = useFileDrop((files) => void att.upload(files), { disabled: !aiReply });
+  const drop = useFileDrop((files) => void att.upload(files), {
+    disabled: !aiReply || rec.busy,
+  });
 
   // Move focus to the input as soon as the composer is placed (one rAF so the
   // portal has painted) — the user clicked "Comment" to type, so don't make
@@ -170,7 +173,7 @@ export function NewCommentPopover({
   const canSend =
     !busy &&
     !att.uploading &&
-    rec.status !== "uploading" &&
+    !rec.busy &&
     (!!draft.trim() || hasFiles || hasRecordings);
 
   function submit() {
@@ -253,6 +256,11 @@ export function NewCommentPopover({
                   ))}
                 </div>
               ) : null}
+              <RecordingUploadStatus
+                status={rec.status}
+                uploadProgress={rec.uploadProgress}
+                message={rec.message}
+              />
             </>
           ) : null}
           <div className="mt-1 flex items-center gap-1.5">
@@ -261,7 +269,8 @@ export function NewCommentPopover({
                 type="button"
                 aria-label={tAttach.attach}
                 onClick={() => fileInputRef.current?.click()}
-                className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/70 transition-colors hover:bg-accent hover:text-foreground"
+                disabled={rec.busy}
+                className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/70 transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
               >
                 <Paperclip className="size-[18px]" />
               </button>
@@ -297,9 +306,10 @@ export function NewCommentPopover({
             ref={fileInputRef}
             type="file"
             multiple
+            disabled={rec.busy}
             className="hidden"
             onChange={(e) => {
-              if (e.target.files) void att.upload(e.target.files);
+              if (!rec.busy && e.target.files) void att.upload(e.target.files);
               e.target.value = "";
             }}
           />

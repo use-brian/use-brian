@@ -49,6 +49,7 @@ import { AttachmentChips, FileDropOverlay } from "@/components/doc/attachment-ch
 import { useFileAttachments } from "@/lib/use-file-attachments";
 import { useFileDrop } from "@/lib/use-file-drop";
 import { useRecordingUpload } from "@/lib/recordings/use-recording-upload";
+import { RecordingUploadStatus } from "@/components/recordings/recording-upload-status";
 import { useAutoGrowTextarea } from "@/lib/use-auto-grow-textarea";
 
 type Props = {
@@ -151,7 +152,7 @@ export function PageComments({
 
   const canComment = !!assistantId;
   const drop = useFileDrop((files) => void att.upload(files), {
-    disabled: !canComment || !aiReply,
+    disabled: !canComment || !aiReply || rec.busy,
   });
 
   // Collapse the running thread on Escape / an outside click (mirrors the rail +
@@ -192,7 +193,7 @@ export function PageComments({
     const hasFiles = aiReply && att.hasReady;
     const attachedRecordingIds = aiReply ? pendingRecordings.map((r) => r.recordingId) : [];
     const hasRecordings = attachedRecordingIds.length > 0;
-    if ((!body && !hasFiles && !hasRecordings) || busy || !aid || att.uploading || rec.status === "uploading") return;
+    if ((!body && !hasFiles && !hasRecordings) || busy || !aid || att.uploading || rec.busy) return;
     const fileIds = hasFiles ? att.fileIds() : [];
     setBusy(true);
     try {
@@ -314,9 +315,10 @@ export function PageComments({
               ref={fileInputRef}
               type="file"
               multiple
+              disabled={rec.busy}
               className="hidden"
               onChange={(e) => {
-                if (e.target.files) void att.upload(e.target.files);
+                if (!rec.busy && e.target.files) void att.upload(e.target.files);
                 e.target.value = "";
               }}
             />
@@ -336,13 +338,21 @@ export function PageComments({
                 ))}
               </div>
             ) : null}
+            {aiReply ? (
+              <RecordingUploadStatus
+                status={rec.status}
+                uploadProgress={rec.uploadProgress}
+                message={rec.message}
+              />
+            ) : null}
             <div className="mt-1 flex items-center gap-1.5">
               {aiReply ? (
                 <button
                   type="button"
                   aria-label={tAttach.attach}
                   onClick={() => fileInputRef.current?.click()}
-                  className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/70 transition-colors hover:bg-accent hover:text-foreground"
+                  disabled={rec.busy}
+                  className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/70 transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
                 >
                   <Paperclip className="size-[18px]" />
                 </button>
@@ -368,7 +378,7 @@ export function PageComments({
                 disabled={
                   busy ||
                   att.uploading ||
-                  rec.status === "uploading" ||
+                  rec.busy ||
                   (!draft.trim() && !(aiReply && (att.hasReady || pendingRecordings.length > 0)))
                 }
                 aria-label={busy ? t.sending : t.send}

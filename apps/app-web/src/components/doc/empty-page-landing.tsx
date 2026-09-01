@@ -88,6 +88,7 @@ import {
 import { useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 import { SetupChecklist } from "./setup-checklist";
+import { RecordingUploadStatus } from "@/components/recordings/recording-upload-status";
 
 type BuildOptions = {
   model: ModelTier;
@@ -191,7 +192,7 @@ export function EmptyPageLanding({
         : undefined,
   });
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const drop = useFileDrop((files) => void att.upload(files));
+  const drop = useFileDrop((files) => void att.upload(files), { disabled: rec.busy });
 
   // ── Draft-assistant picker ─────────────────────────────────────────────
   // Which workspace assistant drafts the page. Defaults to the dock's
@@ -239,7 +240,7 @@ export function EmptyPageLanding({
     // An attachment-only turn is valid once its upload is ready. The chat
     // route asks the user what outcome they want before semantic processing.
     if (!trimmed && !att.hasReady && pendingRecordings.length === 0) return;
-    if (att.uploading || rec.status === "uploading") return;
+    if (att.uploading || rec.busy) return;
     onSubmitPrompt(trimmed, {
       model,
       researchMode,
@@ -252,7 +253,7 @@ export function EmptyPageLanding({
   }
 
   function submitComposer() {
-    if (att.uploading || rec.status === "uploading") return;
+    if (att.uploading || rec.busy) return;
     submit(prompt);
     setPrompt("");
   }
@@ -303,9 +304,10 @@ export function EmptyPageLanding({
             ref={fileInputRef}
             type="file"
             multiple
+            disabled={rec.busy}
             className="hidden"
             onChange={(e) => {
-              if (e.target.files) void att.upload(e.target.files);
+              if (!rec.busy && e.target.files) void att.upload(e.target.files);
               e.target.value = "";
             }}
           />
@@ -315,7 +317,7 @@ export function EmptyPageLanding({
             onSend={submitComposer}
             placeholder={t.landing.placeholder}
             allowEmptySend={att.hasReady || pendingRecordings.length > 0}
-            disabled={att.uploading || rec.status === "uploading"}
+            disabled={att.uploading || rec.busy}
             slotAttachments={
               att.attachments.length > 0 || pendingRecordings.length > 0 || rec.status !== "idle" ? (
                 <div className="px-1 pb-2">
@@ -348,23 +350,12 @@ export function EmptyPageLanding({
                       ))}
                     </div>
                   ) : null}
-                  {rec.status !== "idle" ? (
-                    <p
-                      className={cn(
-                        "py-0.5 text-left text-xs",
-                        rec.status === "error"
-                          ? "text-destructive"
-                          : "text-muted-foreground",
-                      )}
-                      role="status"
-                    >
-                      {rec.status === "uploading"
-                        ? tRec.uploading
-                        : rec.status === "processing"
-                          ? tRec.processing
-                          : rec.message}
-                    </p>
-                  ) : null}
+                  <RecordingUploadStatus
+                    status={rec.status}
+                    uploadProgress={rec.uploadProgress}
+                    message={rec.message}
+                    className="text-left"
+                  />
                 </div>
               ) : null
             }
@@ -409,7 +400,8 @@ export function EmptyPageLanding({
               type="button"
               aria-label={tAttach.attach}
               onClick={() => fileInputRef.current?.click()}
-              className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/70 transition-colors hover:bg-accent hover:text-foreground"
+              disabled={rec.busy}
+              className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/70 transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
             >
               <Paperclip className="size-[18px]" aria-hidden />
             </button>
@@ -496,7 +488,7 @@ export function EmptyPageLanding({
               onClick={submitComposer}
               disabled={
                 att.uploading ||
-                rec.status === "uploading" ||
+                rec.busy ||
                 (!prompt.trim() && !att.hasReady && pendingRecordings.length === 0)
               }
               aria-label={t.landing.send}

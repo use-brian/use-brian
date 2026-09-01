@@ -30,6 +30,14 @@ export function resolveLocalFilesBaseDir(configured?: string): string {
 
 export type LocalFilesClient = GcsFilesClient & {
   openReadStream(key: string, range?: { start: number; end: number }): Readable
+  /** Append one verified sequential browser-upload range at `start`. */
+  writeRangeStream(
+    key: string,
+    start: number,
+    opts: { mime: string; metadata?: GcsObjectMetadata },
+  ): Writable
+  /** Roll an interrupted range back to its last acknowledged byte. */
+  truncateBlob(key: string, sizeBytes: number): Promise<void>
 }
 
 export function createLocalFilesClient(opts: {
@@ -123,6 +131,24 @@ export function createLocalFilesClient(opts: {
 
     openReadStream(key, range) {
       return createReadStream(blobPath(key), range)
+    },
+
+    writeRangeStream(key, start, opts) {
+      const p = blobPath(key)
+      mkdirSync(path.dirname(p), { recursive: true })
+      writeFileSync(metaPath(key), JSON.stringify(opts.metadata ?? { workspaceId: '', mime: opts.mime }))
+      return createWriteStream(p, start === 0
+        ? { flags: 'w' }
+        : { flags: 'r+', start })
+    },
+
+    async truncateBlob(key, sizeBytes) {
+      try {
+        await fs.truncate(blobPath(key), sizeBytes)
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT' && sizeBytes === 0) return
+        throw err
+      }
     },
 
     writeStream(key, opts): Writable {

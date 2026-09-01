@@ -8602,6 +8602,9 @@ export const ja: Dictionary = {
     starterDescription:
       "録音から要約・決定事項・アクションアイテムをまとめ、それぞれ該当する箇所を引用します。",
     uploading: "アップロード中...",
+    uploadingProgress: "アップロード中 {percent}%",
+    estimating: "録音を確認しています...",
+    uploadInProgress: "別の録音を準備しています。",
     processing: "文字起こししてブレインに保存しています...",
     confirmTitle: "この録音を文字起こししますか？",
     confirmBody:

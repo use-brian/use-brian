@@ -2,7 +2,7 @@
 
 /**
  * Recording upload flow hook (recording-to-brain). It exposes two boundaries:
- * `stage` drives pick file → direct-to-GCS upload → server estimate and stops;
+ * `stage` drives pick file → signed storage upload → server estimate and stops;
  * `run` continues through confirm-dialog preview → process
  * (ENQUEUE: the worker service transcribes + segments + ingests + charges in
  * the background, so terminal success here means "queued", never
@@ -34,7 +34,7 @@
  * blueprints".
  */
 
-import { createElement, useState, useCallback } from "react";
+import { createElement, useState, useCallback, useRef } from "react";
 import { MEETING_NOTES_STARTER } from "@use-brian/doc-model";
 import { useT } from "@/lib/i18n/client";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
@@ -64,7 +64,13 @@ import {
 } from "@/components/recordings/recording-confirm-picker";
 import type { SearchableSelectItem } from "@/components/ui/searchable-select";
 
-export type RecordingUploadStatus = "idle" | "uploading" | "processing" | "done" | "error";
+export type RecordingUploadStatus =
+  | "idle"
+  | "uploading"
+  | "estimating"
+  | "processing"
+  | "done"
+  | "error";
 
 export type StagedRecording = {
   recordingId: string;
@@ -91,8 +97,13 @@ export type RecordingRunOutcome =
 export function useRecordingUpload(workspaceId: string, assistantId: string) {
   const t = useT();
   const [status, setStatus] = useState<RecordingUploadStatus>("idle");
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [message, setMessage] = useState<string>("");
   const [result, setResult] = useState<RecordingQueued | null>(null);
+  // React state cannot close the same-tick gap between two file-pick/drop
+  // callbacks. Keep ownership synchronous so a second operation cannot reset
+  // the first operation's progress, status, or result while it is in flight.
+  const operationActiveRef = useRef(false);
 
   /**
    * Store a chat attachment and prove its duration, but do not ask for a
@@ -104,16 +115,24 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
       file: File,
       opts?: { kind?: "memo" | "meeting" },
     ): Promise<StagedRecording | null> => {
+      if (operationActiveRef.current) return null;
+      operationActiveRef.current = true;
       setResult(null);
       setMessage("");
+      setUploadProgress(0);
       try {
         setStatus("uploading");
         const { recordingId } = await startRecordingUpload({
           workspaceId,
           assistantId,
           file,
+          onProgress: (progress) => {
+            setUploadProgress((current) => Math.max(current, progress));
+          },
           ...(opts?.kind ? { kind: opts.kind } : {}),
         });
+        setUploadProgress(1);
+        setStatus("estimating");
         const estimate = await estimateRecording(recordingId);
         const staged = {
           recordingId,
@@ -135,6 +154,8 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
               : t.recordings.failed,
         );
         return null;
+      } finally {
+        operationActiveRef.current = false;
       }
     },
     [workspaceId, assistantId, t],
@@ -175,8 +196,13 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
       file: File,
       opts?: { kind?: "memo" | "meeting"; existingPageId?: string; liveSessionId?: string },
     ): Promise<RecordingRunOutcome> => {
+      if (operationActiveRef.current) {
+        return { outcome: "failed", message: t.recordings.uploadInProgress };
+      }
+      operationActiveRef.current = true;
       setResult(null);
       setMessage("");
+      setUploadProgress(0);
       // Which boundary failed decides the copy: a storage-upload failure and a
       // queue failure call for different user action, and the old single
       // generic message ("We could not process that recording") hid which of
@@ -204,6 +230,9 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
             workspaceId,
             assistantId,
             file,
+            onProgress: (progress) => {
+              setUploadProgress((current) => Math.max(current, progress));
+            },
             ...(opts?.kind ? { kind: opts.kind } : {}),
           }));
           // A live meeting page is linked the moment the recording id exists —
@@ -229,6 +258,8 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
           recordingId = fallback.recordingId;
           assembled = true;
         }
+        setUploadProgress(1);
+        setStatus("estimating");
 
         // Server-authoritative duration + surcharge → confirm before any model call.
         stage = "estimate";
@@ -360,6 +391,8 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
                     : t.recordings.processFailed;
         setMessage(message);
         return { outcome: "failed", message };
+      } finally {
+        operationActiveRef.current = false;
       }
     },
     [workspaceId, assistantId, t, installStarter],
@@ -372,10 +405,13 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
    * not say the same thing a second time.
    */
   const dismiss = useCallback(() => {
+    if (operationActiveRef.current) return;
     setStatus("idle");
+    setUploadProgress(0);
     setMessage("");
     setResult(null);
   }, []);
 
-  return { stage, run, dismiss, status, message, result };
+  const busy = status === "uploading" || status === "estimating" || status === "processing";
+  return { stage, run, dismiss, status, busy, uploadProgress, message, result };
 }

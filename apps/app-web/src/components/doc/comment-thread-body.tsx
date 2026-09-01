@@ -46,6 +46,7 @@ import { CommentQuoteReply } from "@/components/doc/comment-quote-reply";
 import { composeQuotedBody, quoteForRow } from "@/components/doc/comment-quote";
 import { useFileAttachments } from "@/lib/use-file-attachments";
 import { useRecordingUpload } from "@/lib/recordings/use-recording-upload";
+import { RecordingUploadStatus } from "@/components/recordings/recording-upload-status";
 import { dispatchRecordingParticipantsUpdated } from "@/lib/recordings/recording-events";
 import { useFileDrop } from "@/lib/use-file-drop";
 
@@ -283,7 +284,7 @@ export function CommentThreadBody({
       }
     },
   });
-  const drop = useFileDrop((files) => void att.upload(files));
+  const drop = useFileDrop((files) => void att.upload(files), { disabled: rec.busy });
   // Model tier + research toggle for the reply turn — shared with the floating
   // chat and the page-comments band via <ComposerControls>.
   const controls = useComposerControls(workspaceId);
@@ -558,7 +559,7 @@ export function CommentThreadBody({
       (!body && !hasFiles && !hasRecordings) ||
       busy ||
       att.uploading ||
-      rec.status === "uploading"
+      rec.busy
     ) return;
     // A reconnected turn is streaming into the bubble (a refresh mid-reply) —
     // block a manual send so the composer can't double-drive it. The seed
@@ -1030,13 +1031,19 @@ export function CommentThreadBody({
               ))}
             </div>
           ) : null}
+          <RecordingUploadStatus
+            status={rec.status}
+            uploadProgress={rec.uploadProgress}
+            message={rec.message}
+          />
           <div className="mt-1 flex items-center gap-1.5">
             {aiReply ? (
               <button
                 type="button"
                 aria-label={tAttach.attach}
                 onClick={() => fileInputRef.current?.click()}
-                className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/70 transition-colors hover:bg-accent hover:text-foreground"
+                disabled={rec.busy}
+                className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/70 transition-colors hover:bg-accent hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
               >
                 <Paperclip className="size-[18px]" />
               </button>
@@ -1064,7 +1071,7 @@ export function CommentThreadBody({
                 busy ||
                 streaming !== null ||
                 att.uploading ||
-                rec.status === "uploading" ||
+                rec.busy ||
                 (!draft.trim() && !(aiReply && (att.hasReady || pendingRecordings.length > 0)))
               }
               aria-label={busy ? t.sending : t.send}
@@ -1077,9 +1084,10 @@ export function CommentThreadBody({
             ref={fileInputRef}
             type="file"
             multiple
+            disabled={rec.busy}
             className="hidden"
             onChange={(e) => {
-              if (e.target.files) void att.upload(e.target.files);
+              if (!rec.busy && e.target.files) void att.upload(e.target.files);
               e.target.value = "";
             }}
           />
