@@ -604,7 +604,7 @@ function createWindow(): BrowserWindow {
   return win;
 }
 
-// ── Awake Brian companion ─────────────────────────────────────
+// ── Brian companion ───────────────────────────────────────────
 
 const BRIAN_PET_WIDTH = 150;
 const BRIAN_PET_HEIGHT = 154;
@@ -879,11 +879,11 @@ function toggleKeepBrianAwake(): void {
   try {
     writeFileSync(awakeBrianFile(), serializeAwakeBrianPreference(next));
   } catch (error) {
-    console.warn("Failed to persist Keep Brian Awake preference:", error);
+    console.warn("Failed to persist Keep Brian Nearby preference:", error);
     refreshAppMenu();
     refreshTrayMenu();
     dialog.showErrorBox(
-      "Could not update Keep Brian Awake",
+      "Could not update Keep Brian Nearby",
       "Use Brian could not save this setting. Check that its application data folder is writable and try again.",
     );
     return;
@@ -2812,7 +2812,7 @@ function buildTrayMenu(): Menu {
     { label: "Quick Capture", click: () => summonAndCapture() },
     { label: "Start Recording", click: () => summonAndRecord() },
     {
-      label: "Keep Brian Awake",
+      label: "Keep Brian Nearby",
       type: "checkbox",
       checked: keepBrianAwake,
       click: () => toggleKeepBrianAwake(),

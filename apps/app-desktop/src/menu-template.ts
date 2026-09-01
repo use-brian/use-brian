@@ -114,7 +114,7 @@ export function buildMenuTemplate(
       click: () => handlers.onRecord(),
     },
     {
-      label: "Keep Brian Awake",
+      label: "Keep Brian Nearby",
       type: "checkbox",
       checked: opts.keepBrianAwake,
       click: () => handlers.onToggleKeepAwake(),

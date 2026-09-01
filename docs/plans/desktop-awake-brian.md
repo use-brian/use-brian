@@ -1,14 +1,14 @@
-# Awake Brian Desktop Companion
+# Brian Companion
 
 ## Goal
 
-The Electron app can keep Brian available while its main window is closed. A user-controlled **Keep Brian Awake** setting keeps the app from being suspended and shows a small Brian companion above normal windows. Clicking the companion opens a dedicated chat-only window backed by the existing workspace chat popup.
+The Electron app can keep Brian available while its main window is closed. A user-controlled **Keep Brian Nearby** setting keeps the app ready in the background and shows a small Brian companion above normal windows. Clicking the companion opens a dedicated chat-only window backed by the existing workspace chat popup.
 
 The companion uses the canonical transparent Use Brian logo image as its base. Small state overlays may blink the eyes, open a mouth, show thinking motion, celebrate a completed response, or call attention to required user action; the underlying mark is never reconstructed or placed on an artificial background. It is not a general pet runtime or a third-party sprite-pack loader.
 
 ## User Contract
 
-- **Keep Brian Awake** is an explicit, persisted checkbox in both the application menu and tray menu. It is off by default.
+- **Keep Brian Nearby** is an explicit, persisted checkbox in both the application menu and tray menu. It is off by default.
 - Enabling it starts Electron's `prevent-app-suspension` power-save blocker. The operating system may still turn off the display; Use Brian must not request `prevent-display-sleep`.
 - While enabled, a transparent, always-on-top Brian companion is visible near the lower-right corner of the primary display. The visible character is the canonical transparent `apps/app-web/public/icon.png` asset copied byte-for-byte into the app bundle. It stays available when the main window is closed and has no black tile behind it.
 - Dragging the companion relocates it without opening chat; a stationary click still toggles chat. The shell persists the position, clamps it to an available display on launch or monitor changes, and keeps the attached panel aligned while dragging.

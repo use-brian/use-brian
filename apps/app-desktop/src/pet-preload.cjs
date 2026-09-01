@@ -61,18 +61,25 @@ window.addEventListener("DOMContentLoaded", () => {
   });
   ipcRenderer.on("Use Brian:companion-state", (_event, next) => {
     if (!next || typeof next !== "object" || !(next.phase in labels)) return;
-    clearTimeout(completionTimer);
     const prior = currentState;
-    currentState = next.phase;
     if (next.phase === "idle" && (prior === "thinking" || prior === "responding")) {
+      clearTimeout(completionTimer);
+      currentState = "complete";
       document.body.dataset.state = "complete";
       if (status) status.textContent = "Ready";
       completionTimer = setTimeout(() => {
+        currentState = "idle";
         document.body.dataset.state = "idle";
         if (status) status.textContent = labels.idle;
       }, 900);
       return;
     }
+    // FloatingChat can publish more than one equivalent idle snapshot while it
+    // clears its stream/tool buffers. Keep the completion reaction visible for
+    // its full duration instead of letting the duplicate erase it immediately.
+    if (next.phase === "idle" && prior === "complete") return;
+    clearTimeout(completionTimer);
+    currentState = next.phase;
     document.body.dataset.state = next.phase;
     if (status) status.textContent = next.label || labels[next.phase];
   });

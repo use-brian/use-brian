@@ -83,7 +83,7 @@ describe("[COMP:app-desktop/menu-template] buildMenuTemplate", () => {
     }
   });
 
-  it("renders Keep Brian Awake as a checked setting and toggles through", () => {
+  it("renders Keep Brian Nearby as a checked setting and toggles through", () => {
     const onToggleKeepAwake = vi.fn();
     for (const isMac of [true, false]) {
       const items = allItems(
@@ -92,7 +92,7 @@ describe("[COMP:app-desktop/menu-template] buildMenuTemplate", () => {
           { ...handlers, onToggleKeepAwake },
         ),
       );
-      const awake = items.find((item) => item.label === "Keep Brian Awake");
+      const awake = items.find((item) => item.label === "Keep Brian Nearby");
       expect(awake?.type).toBe("checkbox");
       expect(awake?.checked).toBe(true);
       (awake?.click as () => void)();
