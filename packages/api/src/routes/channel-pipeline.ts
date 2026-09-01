@@ -101,6 +101,8 @@ import {
   formatActiveWorkspaceContext,
   noteAutomaticScopeEvidence,
   resolveTurnScopeSystem,
+  type ResolvedTurnScope,
+  type ResolveTurnScopeInput,
 } from '../context-scope/resolve-turn-scope.js'
 import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
 import {
@@ -768,6 +770,37 @@ export function connectorToolsAllowedForChannelTurn(
   return !externalGuest || externalGuestConnectorTools === true
 }
 
+type ConnectorTurnScopeResolver = (
+  input: ResolveTurnScopeInput,
+) => Promise<ResolvedTurnScope>
+
+/**
+ * Keep the channel user's data authority separate from the routed assistant's
+ * explicitly granted connector authority. The resolver parameter is a narrow
+ * test seam for this security boundary; production always uses the canonical
+ * TurnScope resolver.
+ */
+export async function resolveConnectorTurnScopeForChannelTurn(
+  input: {
+    externalGuestConnectorTools: boolean
+    dataTurnScope: ResolvedTurnScope
+    userId: string
+    assistant: ResolveTurnScopeInput['assistant']
+    workspaceId: string | null
+    session: ResolveTurnScopeInput['session']
+  },
+  resolveScope: ConnectorTurnScopeResolver = resolveTurnScopeSystem,
+): Promise<ResolvedTurnScope> {
+  if (!input.externalGuestConnectorTools) return input.dataTurnScope
+  return resolveScope({
+    userId: input.userId,
+    assistant: input.assistant,
+    workspaceId: input.workspaceId,
+    session: input.session,
+    memberMode: 'assistant',
+  })
+}
+
 // ── Pipeline ─────────────────────────────────────────────────────
 
 /**
@@ -963,9 +996,9 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     channelType,
     channelId: sessionChannelId,
   })
-  let turnScope
+  let dataTurnScope
   try {
-    turnScope = await resolveTurnScopeSystem({
+    dataTurnScope = await resolveTurnScopeSystem({
       userId,
       assistant: {
         ...assistant,
@@ -983,11 +1016,11 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     }
     return
   }
-  const clearance = turnScope.access.clearance ?? assistant.clearance
-  const compartments = turnScope.effectiveCompartments
+  const clearance = dataTurnScope.access.clearance ?? assistant.clearance
+  const compartments = dataTurnScope.effectiveCompartments
   const scopeAccumulator = new ContextScopeAccumulator({
-    compartments: turnScope.writeCompartments,
-    projectIds: turnScope.writeProjectIds,
+    compartments: dataTurnScope.writeCompartments,
+    projectIds: dataTurnScope.writeProjectIds,
   })
 
   // Expose session ID to channel hooks (e.g., WhatsApp confirmation store)
@@ -1410,8 +1443,8 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     usageStore,
     userMessageId: userMessageRow.id,
     persistLongTermContext: !externalGuest,
-    compartments: turnScope.writeCompartments,
-    projectIds: turnScope.writeProjectIds,
+    compartments: dataTurnScope.writeCompartments,
+    projectIds: dataTurnScope.writeProjectIds,
   })
   let messages: Message[] = compactionResult.messages
 
@@ -1431,7 +1464,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // docs/architecture/context-engine/memory-system.md → "Index cap".
   let memoryContext = ''
   if (isIdentified) {
-    const viewerCtx = turnScope.access
+    const viewerCtx = dataTurnScope.access
     const [soul, identityMemories, rankedIndex] = await Promise.all([
       memoryStore.getSoul(assistant.id, userId, 'Use Brian'),
       memoryStore.getIdentity(viewerCtx),
@@ -1530,7 +1563,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
           // Read ceiling = min(member, assistant) — see `clearance` above.
           clearance,
           compartments,
-          projectIds: turnScope.effectiveProjectIds,
+          projectIds: dataTurnScope.effectiveProjectIds,
         },
         PER_TURN_FILES_INDEX_CAP,
       )
@@ -1638,7 +1671,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   const privateRuntimeContextParts = splitPrompt.privateRuntimeContext
     ? [splitPrompt.privateRuntimeContext]
     : []
-  const activeWorkspaceContext = formatActiveWorkspaceContext(turnScope)
+  const activeWorkspaceContext = formatActiveWorkspaceContext(dataTurnScope)
   if (activeWorkspaceContext) privateRuntimeContextParts.push(activeWorkspaceContext)
   if (params.realtimeThreadTarget) {
     const bound = params.realtimeThreadTarget.taskIds.length > 0
@@ -1798,6 +1831,22 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
       },
     })
     try {
+      // An external guest keeps the non-member scope resolved above for every
+      // prompt, memory, file, skill, and write path. The owner's explicit
+      // connector opt-in authorizes only the connector surface enabled for the
+      // routed assistant, so resolve that surface independently and never
+      // reuse it outside this injection call.
+      const turnScope = await resolveConnectorTurnScopeForChannelTurn({
+        externalGuestConnectorTools,
+        dataTurnScope,
+        userId,
+        assistant: {
+          ...assistant,
+          compartments: assistant.compartments ?? null,
+        },
+        workspaceId: assistant.workspaceId,
+        session,
+      })
       const injection = await injectMcpTools({
         userId: connectorUserId,
         assistantId: assistant.id,
@@ -2158,8 +2207,8 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   try {
     const scopedTools = bindToolsToAgentAccess(allTools, {
       clearance,
-      compartments: turnScope.effectiveCompartments,
-      projectIds: turnScope.effectiveProjectIds,
+      compartments: dataTurnScope.effectiveCompartments,
+      projectIds: dataTurnScope.effectiveProjectIds,
     })
     for await (const event of queryLoop({
       ledger: createTurnLedger({
@@ -2208,14 +2257,14 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         // `assistantClearance` is the write ceiling (the assistant's tier).
         clearance,
         compartments,
-        projectIds: turnScope.effectiveProjectIds,
-        activeGroupId: turnScope.activeGroupId,
-        activeProjectId: turnScope.activeProjectId,
+        projectIds: dataTurnScope.effectiveProjectIds,
+        activeGroupId: dataTurnScope.activeGroupId,
+        activeProjectId: dataTurnScope.activeProjectId,
         assistantClearance: assistant.clearance,
-        assistantCompartments: turnScope.effectiveCompartments,
-        assistantDefaultCompartments: turnScope.writeCompartments,
-        assistantProjectIds: turnScope.effectiveProjectIds,
-        assistantDefaultProjectIds: turnScope.writeProjectIds,
+        assistantCompartments: dataTurnScope.effectiveCompartments,
+        assistantDefaultCompartments: dataTurnScope.writeCompartments,
+        assistantProjectIds: dataTurnScope.effectiveProjectIds,
+        assistantDefaultProjectIds: dataTurnScope.writeProjectIds,
       },
       confirmationResolver,
       confirmationTimeoutMs: 300_000,

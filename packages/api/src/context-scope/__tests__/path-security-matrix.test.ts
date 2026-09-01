@@ -41,6 +41,25 @@ describe('[COMP:api/context-scope-entrypoints] execution entry-point parity', ()
   }
 })
 
+describe('[COMP:api/telegram-byo-route] external guest connector scope', () => {
+  it('keeps the assistant-derived scope inside connector injection', async () => {
+    const content = await source('packages/api/src/routes/channel-pipeline.ts')
+    const connectorStart = content.indexOf('// ── MCP tools')
+    const skillsStart = content.indexOf('// ── Skills', connectorStart)
+    expect(connectorStart).toBeGreaterThan(-1)
+    expect(skillsStart).toBeGreaterThan(connectorStart)
+    const connectorBlock = content.slice(connectorStart, skillsStart)
+    const outsideConnectorBlock = content.slice(0, connectorStart) + content.slice(skillsStart)
+
+    expect(connectorBlock).toContain('resolveConnectorTurnScopeForChannelTurn')
+    expect(connectorBlock).toContain('contextScope: turnScope')
+    expect(outsideConnectorBlock).not.toMatch(/\bturnScope\b/)
+    expect(content).toContain('const viewerCtx = dataTurnScope.access')
+    expect(content).toContain('bindToolsToAgentAccess(allTools, {')
+    expect(content).toContain('compartments: dataTurnScope.effectiveCompartments')
+  })
+})
+
 describe('[COMP:api/session-context] immutable session context', () => {
   it('binds and locks both context axes in storage and transport', async () => {
     await expectAnchors('packages/api/src/db/sessions.ts', [
