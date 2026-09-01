@@ -131,7 +131,7 @@ import {
   takePendingBuild,
 } from "@/lib/pending-build";
 import { PageBuildIndicator } from "./page-build-indicator";
-import { subscribeBuildActivity } from "@/lib/build-activity";
+import { subscribeBuildActivity, buildIndicatorTransition } from "@/lib/build-activity";
 import { offlineWrite } from "@/lib/offline/offline-writes";
 import {
   publishCollabConnected,
@@ -616,14 +616,31 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
     () =>
       subscribeBuildActivity((a) => {
         if (!buildingPageIdRef.current) return;
-        if (a.isStreaming) {
-          buildStartedRef.current = true;
-        } else if (buildStartedRef.current) {
-          buildStartedRef.current = false;
-          setBuildingPageId(null);
+        // A build that FAILS before it streams never flips `isStreaming`, so
+        // "stopped after streaming" cannot end it — the banner used to hang
+        // until a silent 60s timeout wiped it and the user was told nothing at
+        // all (2026-09-01: a refused turn on the doc dock). Report it on the
+        // page, the only surface showing, since an autoSend build keeps the
+        // corner chat collapsed. The three-way decision is the pure
+        // `buildIndicatorTransition` so it can be tested without this tree.
+        switch (buildIndicatorTransition(a, buildStartedRef.current)) {
+          case "fail":
+            buildStartedRef.current = false;
+            setBuildingPageId(null);
+            setTopError(format(t.buildFailed, { message: a.error ?? "" }));
+            return;
+          case "start":
+            buildStartedRef.current = true;
+            return;
+          case "end":
+            buildStartedRef.current = false;
+            setBuildingPageId(null);
+            return;
+          case "wait":
+            return;
         }
       }),
-    [],
+    [t],
   );
 
   // Latest `handleBuildPage`, for the resume effect to call without taking it
@@ -1060,9 +1077,14 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
       // never fires — drop the banner so it can't wedge. No-ops once the
       // build has actually started (the effect owns clearing from there).
       window.setTimeout(() => {
-        if (!buildStartedRef.current) {
-          setBuildingPageId((cur) => (cur === pageId ? null : cur));
-        }
+        if (buildStartedRef.current) return;
+        // Say why. Clearing the banner in silence is what made a refused build
+        // indistinguishable from "the model is still thinking" — the user is
+        // left with an empty page and no account of it. Read the ref rather
+        // than reporting from inside the state updater, which must stay pure.
+        if (buildingPageIdRef.current !== pageId) return;
+        setBuildingPageId(null);
+        setTopError(t.buildNeverStarted);
       }, 60_000);
     } catch (err) {
       // Keep the stash ONLY when the throw is the auth redirect unloading the

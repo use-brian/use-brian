@@ -18,6 +18,7 @@ import type { ToolUsedWithOps } from "@/components/chrome/floating-chat";
 import {
   publishBuildActivity,
   subscribeBuildActivity,
+  buildIndicatorTransition,
   type BuildActivity,
 } from "@/lib/build-activity";
 
@@ -83,10 +84,10 @@ describe("[COMP:app-web/page-build-indicator] Timeline step tone", () => {
 describe("[COMP:app-web/build-activity] Activity bus", () => {
   it("delivers the latest value to a new subscriber, then live updates", () => {
     const seen: BuildActivity[] = [];
-    publishBuildActivity({ isStreaming: true, tools: [], text: "hello", reasoning: "", events: [] });
+    publishBuildActivity({ isStreaming: true, tools: [], text: "hello", reasoning: "", events: [], error: null });
     const unsub = subscribeBuildActivity((a) => seen.push(a));
     // Immediate replay of the latest value.
-    expect(seen.at(-1)).toEqual({ isStreaming: true, tools: [], text: "hello", reasoning: "", events: [] });
+    expect(seen.at(-1)).toEqual({ isStreaming: true, tools: [], text: "hello", reasoning: "", events: [], error: null });
 
     publishBuildActivity({
       isStreaming: true,
@@ -94,12 +95,13 @@ describe("[COMP:app-web/build-activity] Activity bus", () => {
       text: "hello world",
       reasoning: "",
       events: [],
+      error: null,
     });
     expect(seen.at(-1)?.tools[0]?.description).toBe("Updating the page");
     expect(seen.at(-1)?.text).toBe("hello world");
 
     unsub();
-    publishBuildActivity({ isStreaming: false, tools: [], text: "", reasoning: "", events: [] });
+    publishBuildActivity({ isStreaming: false, tools: [], text: "", reasoning: "", events: [], error: null });
     // No further deliveries after unsubscribe.
     expect(seen.at(-1)?.text).toBe("hello world");
   });
@@ -107,7 +109,7 @@ describe("[COMP:app-web/build-activity] Activity bus", () => {
   it("includes reasoning field in published activity", () => {
     const seen: BuildActivity[] = [];
     const unsub = subscribeBuildActivity((a) => seen.push(a));
-    publishBuildActivity({ isStreaming: true, tools: [], text: "", reasoning: "Let me think about this…", events: [] });
+    publishBuildActivity({ isStreaming: true, tools: [], text: "", reasoning: "Let me think about this…", events: [], error: null });
     expect(seen.at(-1)?.reasoning).toBe("Let me think about this…");
     unsub();
   });
@@ -128,9 +130,50 @@ describe("[COMP:app-web/build-activity] Activity bus", () => {
       text: "",
       reasoning: "",
       events: [],
+      error: null,
     });
     const tool = seen.at(-1)?.tools[0] as (typeof seen[0]["tools"][0]) & { opLines?: string[] };
     expect(tool?.opLines).toEqual(["Adding heading \"Overview\"", "Writing a paragraph"]);
     unsub();
+  });
+});
+
+/**
+ * The failure half of the build indicator's lifecycle.
+ *
+ * A landing build runs with the corner dock COLLAPSED (doc.md → "Default-viewer
+ * landing" — the page is the show), so an `error` SSE frame has no visible
+ * consumer. Before this, `DocShell` only ended a build on "stopped AFTER having
+ * streamed", which a turn refused before its first token never reaches: on
+ * 2026-09-01 a doc dock holding a session it could not re-address had every
+ * build refused server-side in ~40 ms, and the page sat on "Use Brian is
+ * drafting this page…" until a silent 60s timeout wiped it — no error, no
+ * explanation, an empty page.
+ *
+ * [COMP:app-web/build-activity]
+ */
+describe("[COMP:app-web/build-activity] buildIndicatorTransition", () => {
+  it("ends the build on a failure that never streamed", () => {
+    expect(
+      buildIndicatorTransition({ isStreaming: false, error: "Session does not belong to this assistant" }, false),
+    ).toBe("fail");
+  });
+
+  it("ends the build on a failure after partial output", () => {
+    // A turn that streamed and then died did not finish either — the page must
+    // not be left claiming a build is still running.
+    expect(buildIndicatorTransition({ isStreaming: true, error: "boom" }, true)).toBe("fail");
+  });
+
+  it("latches the first stream tick and ends only after it", () => {
+    expect(buildIndicatorTransition({ isStreaming: true, error: null }, false)).toBe("start");
+    expect(buildIndicatorTransition({ isStreaming: false, error: null }, true)).toBe("end");
+  });
+
+  it("holds the banner on a pre-stream tick", () => {
+    // The bus replays its latest value on subscribe, so the very first tick a
+    // fresh build sees is `isStreaming: false`. Treating that as an end would
+    // clear the banner in the same frame it was raised.
+    expect(buildIndicatorTransition({ isStreaming: false, error: null }, false)).toBe("wait");
   });
 });

@@ -1292,8 +1292,12 @@ export function FloatingChat({
       text: streamingText,
       reasoning: streamingReasoning,
       events: streamingEvents,
+      // A build seeded from the landing runs with this dock collapsed, so an
+      // error rendered HERE is an error nobody sees. Publishing it is what
+      // lets the page body report a build that failed before it streamed.
+      error: error ?? null,
     });
-  }, [isDocOrigin, isStreaming, toolTimeline, streamingText, streamingReasoning, streamingEvents]);
+  }, [isDocOrigin, isStreaming, toolTimeline, streamingText, streamingReasoning, streamingEvents, error]);
 
   // ── Auto-scroll + escape/click-outside ─────────────────────────────────
   useEffect(() => {
@@ -1420,6 +1424,17 @@ export function FloatingChat({
         signal: controller.signal,
       });
       if (cancelled || !latest) return;
+      // Defence in depth for the doc dock's `scope: "workspace"` resume. That
+      // thread is per-turn addressable (the switcher re-addresses instead of
+      // starting a new thread), so a row we ATTACH must be one the server
+      // will let the current pick ANSWER on — `isDocSurface` in `chat.ts`,
+      // i.e. `app_origin === 'doc'`. Attaching anything else produces a dead
+      // thread: every send after a switch fails "Session does not belong to
+      // this assistant", and the rejection itself bumps `last_active_at`, so
+      // the bad row stays newest and the dock re-attaches it on every load.
+      // The server predicate is the fix (`DOC_DOCK_RESUME_ROW`); this guard
+      // covers an older API still serving the wide list.
+      if (origin === "doc" && latest.appOrigin !== "doc") return;
 
       // Restore whichever durable human input owns the current turn. Generic
       // confirmations re-enter the shared confirmation reducer so the same
@@ -2579,6 +2594,18 @@ export function FloatingChat({
                 );
                 break;
               }
+              // The dock is holding a session this surface cannot re-address
+              // (a resume that attached a row bound to another assistant).
+              // Nothing was written server-side, so the recovery is simply to
+              // drop the binding: the next send mints a fresh session. Doing
+              // it here keeps recovery inside the user's own channel — the
+              // dock has no new-chat control, so otherwise every retry hits
+              // the same refusal and the thread is a dead end.
+              if (payload.code === "session_assistant_mismatch") {
+                resetThread();
+                setError(tChatApp.sessionRebound);
+                break;
+              }
               const msg =
                 typeof payload.error === "string" ? payload.error : t.error;
               setError(msg);
@@ -2760,7 +2787,7 @@ export function FloatingChat({
       // Indicate to the caller (e.g. seed effect) that a stream actually started.
       return true;
     },
-    [selectedAssistantId, workspaceId, origin, isDocOrigin, model, metered, customEndpoint, researchMode, session, stream, t, resetTurnBuffers, pendingQuestion, pendingRecordings, rec.status, att, applyQueuedInput, buildStreamedTurnMessage, flushQueuedInputs],
+    [selectedAssistantId, workspaceId, origin, isDocOrigin, model, metered, customEndpoint, researchMode, session, stream, t, resetTurnBuffers, resetThread, pendingQuestion, pendingRecordings, rec.status, att, applyQueuedInput, buildStreamedTurnMessage, flushQueuedInputs],
   );
 
   useEffect(() => {

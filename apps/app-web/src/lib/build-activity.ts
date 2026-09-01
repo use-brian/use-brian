@@ -46,6 +46,16 @@ export type BuildActivity = {
    * `reasoning` in dedicated sections instead).
    */
   events: BuildEvent[];
+  /**
+   * The turn's terminal failure, or null. A landing build runs with the dock
+   * COLLAPSED (doc.md -> the page is the show), so an `error` SSE frame has no
+   * visible consumer: on 2026-09-01 a build refused before it streamed a byte
+   * left the page saying "drafting" until a silent 60s timeout wiped the
+   * banner, and the user was never told anything. `isStreaming` cannot carry
+   * that — a turn that dies BEFORE streaming never flips it — so failure is
+   * its own field, and the shell clears the indicator on it.
+   */
+  error: string | null;
 };
 
 const EMPTY: BuildActivity = {
@@ -54,6 +64,7 @@ const EMPTY: BuildActivity = {
   text: "",
   reasoning: "",
   events: [],
+  error: null,
 };
 
 type Listener = (activity: BuildActivity) => void;
@@ -77,4 +88,36 @@ export function subscribeBuildActivity(listener: Listener): () => void {
   return () => {
     listeners.delete(listener);
   };
+}
+
+/**
+ * What the page-body build indicator should do with one activity update,
+ * given whether this build has been seen streaming yet.
+ *
+ * Pure, so the three-way decision is unit-testable without mounting the shell
+ * (the same stance as `applyUploadResult` / `partitionUpload`). It exists
+ * because the two-branch version could not end a build that FAILED before it
+ * streamed: `isStreaming` never went true, so the "stopped after streaming"
+ * branch never fired and the banner hung until a silent 60s timeout — the
+ * 2026-09-01 doc-dock refusal, where the user was told nothing at all.
+ *
+ * - `fail` — the turn reported a terminal error. Always wins, streamed or not:
+ *   an error after partial output still means the build did not finish.
+ * - `start` — first stream tick; latch it so a later stop can end the build.
+ * - `end` — stopped after having streamed: the ordinary happy path.
+ * - `wait` — a pre-stream tick. NOT an end: clearing here would drop the
+ *   banner the instant it was raised.
+ *
+ * `error` must be CLEARED before a new turn publishes, or the next build fails
+ * on the previous one's message. The dock does that in `sendMessage`, which
+ * calls `setError(null)` in the same batch as `stream/start` — before any
+ * publish can carry the new turn. Keep that ordering if you touch it.
+ */
+export function buildIndicatorTransition(
+  activity: Pick<BuildActivity, 'isStreaming' | 'error'>,
+  hasStreamed: boolean,
+): 'fail' | 'start' | 'end' | 'wait' {
+  if (activity.error) return 'fail'
+  if (activity.isStreaming) return 'start'
+  return hasStreamed ? 'end' : 'wait'
 }

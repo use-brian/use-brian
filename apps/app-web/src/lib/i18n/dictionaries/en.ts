@@ -1306,6 +1306,12 @@ export const en = {
     deleteConfirmAction: "Delete",
     cancel: "Cancel",
     createDraftFailed: "Could not create draft: {message}",
+    // A landing build turn that died before it streamed anything. The dock
+    // stays collapsed on an autoSend build, so without these the page just
+    // stopped saying "drafting" and the user was told nothing (2026-09-01).
+    buildFailed: "Could not build this page: {message}",
+    buildNeverStarted:
+      "Could not build this page. The request did not start - try sending it again.",
     saveFailed: "Could not save: {message}",
     unsaveFailed: "Could not move to drafts: {message}",
     moveContextConfirmTitle: "Move page to a different context?",
@@ -4539,6 +4545,11 @@ export const en = {
         queued: "Ingestion started. Extracted knowledge will appear shortly.",
         inFlight: "An ingest for this file is already running.",
         failed: "Could not start ingestion.",
+        mediaAction: "Transcribe and add to brain",
+        mediaHint:
+          "Audio and video take the recording route: Brian transcribes the file first, then files the transcript and everything it extracts into the brain. You will see the length and the cost before anything starts.",
+        mediaQueued:
+          "Transcription started. The transcript and what Brian extracts from it will appear once it finishes.",
       },
       authorUser: "you",
       authorAssistant: "{name}",
@@ -5817,6 +5828,11 @@ export const en = {
     upstreamConnectionResetCustom: "Your workspace custom model endpoint dropped the connection. Please try again.",
     upstreamUnreachable: "The model endpoint could not be reached. Please try again in a moment.",
     upstreamUnreachableCustom: "Your workspace custom model endpoint could not be reached. Check that it is online in your workspace model settings.",
+    // The dock held a session bound to a different assistant (a resume that
+    // attached a row this surface cannot re-address). We drop that binding
+    // and tell the user to send again, so the fix is one tap, not a reload.
+    sessionRebound:
+      "That conversation belongs to a different assistant. Started a fresh one - send your message again.",
     viewSwitchAria: "Chat scope",
     viewPersonal: "Personal",
     viewWorkspace: "Workspace",
@@ -8909,6 +8925,8 @@ export const en = {
     chatQueuedChip: "Recording queued: {name}",
     chatStagedChip: "Recording attached: {name}",
     confirmVideoNote: "This is a video: what appears on screen will also be analyzed and added to the notes.",
+    confirmAlreadyProcessed:
+      "This recording was already processed once. Running it again re-transcribes the audio and can duplicate the memories it extracted before.",
     linkError: "We could not load your recordings.",
     uploadFailed:
       "The audio could not reach storage, so nothing was processed. Check your connection - the capture is kept on this device and can be saved again from the recorder.",

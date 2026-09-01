@@ -259,6 +259,13 @@ export async function processRecording(
    * see, so this is a convenience, never the access boundary.
    */
   parentPageId?: string | null,
+  /**
+   * `confirm: true` clears the server's already-processed guard (409
+   * `requiresConfirmation`). Send it ONLY from a surface whose own dialog told
+   * the user that a re-run re-transcribes and can duplicate extracted memories;
+   * a first-time run neither needs it nor should send it.
+   */
+  opts?: { confirm?: boolean },
 ): Promise<RecordingQueued> {
   const res = await authFetch(`${API_URL}/api/recordings/${recordingId}/process`, {
     method: "POST",
@@ -266,6 +273,7 @@ export async function processRecording(
     body: JSON.stringify({
       ...(blueprintSlug ? { blueprintSlug } : {}),
       ...(parentPageId ? { parentPageId } : {}),
+      ...(opts?.confirm ? { confirm: true } : {}),
     }),
   });
   if (!res.ok) throw await asError(res, "Transcription failed");
