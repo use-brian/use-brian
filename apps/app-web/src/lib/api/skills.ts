@@ -53,8 +53,10 @@ export type WorkspaceSkillSummary = {
   whenToUse: string | null;
   /** The skill body (markdown). */
   content: string;
-  /** Library grouping bucket. TEXT server-side, so normalize with
-   *  `skillCategoryOf` before rendering — never trust it to be in the enum. */
+  /** The library group. An OPEN vocabulary: four built-in names carry
+   *  translated labels, anything else is the workspace's own and renders
+   *  verbatim. Normalize with `skillGroupOf` and label it with
+   *  `skillGroupLabel` before rendering. */
   category: string;
   state: SkillLifecycleState;
   confidence: number;
@@ -749,6 +751,8 @@ export type SkillGroupSuggestion = {
  */
 export async function suggestSkillGroups(
   workspaceId: string,
+  /** `all` also re-decides skills that already have a group. Opt-in. */
+  scope: "unsorted" | "all" = "unsorted",
 ): Promise<
   | { ok: true; suggestions: SkillGroupSuggestion[]; considered: number }
   | { ok: false; unavailable: boolean; error: string }
@@ -756,7 +760,7 @@ export async function suggestSkillGroups(
   const res = await authFetch(`${API_URL}/api/skills/categorize`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ workspaceId }),
+    body: JSON.stringify({ workspaceId, scope }),
   });
   if (!res.ok) {
     const data = (await res.json().catch(() => ({}))) as { error?: string };

@@ -27,6 +27,7 @@ export * from './graph-communities.js'
 export * from './assistant-charter.js'
 export * from './assistant-profiles.js'
 export * from './deployment-capabilities.js'
+export * from './skill-groups.js'
 
 /**
  * Sentinel assistant ID used for app-level (L1) tool policies.
