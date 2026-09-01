@@ -10,9 +10,9 @@ directories:
 files:
   - dist/**
   - "!dist/__tests__/**"
-  # The bundled renderer (Phase 4). Today this is the Phase 0 connectivity spike;
-  # the Approach-B Vite SPA build emits to the same path. Loaded via loadFile only
-  # when USEBRIAN_BUNDLED=1, so packaging it is inert for the thin-shell build.
+  # The locally loaded renderer. Every package command rebuilds the Approach-B
+  # Vite SPA into this path before electron-builder; packaged runs select it by
+  # default, so a release never depends on live app-web HTML for navigation.
   - renderer/**
   - package.json
 mac:

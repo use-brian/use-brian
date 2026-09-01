@@ -16,13 +16,16 @@
  * [COMP:app-web/feed-post-versions]
  */
 
-/** Per-platform copy limits, for the editor's character counter. */
+/**
+ * Hard provider-shaped limits enforced by the editor. LinkedIn is omitted:
+ * Feed also serves long-form manual drafting there, so it shows a running
+ * count without blocking at the standard-post threshold.
+ */
 const PLATFORM_LIMITS: Record<string, number> = {
   twitter: 280,
   threads: 500,
   instagram: 2_200,
   xhs: 1_000,
-  linkedin: 3_000,
 };
 
 export type FeedPostFormat = "post" | "thread" | "article";

@@ -136,11 +136,29 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     case 'reply/set':
       return { ...state, replyTo: action.replyTo }
 
-    case 'confirmation/add':
+    case 'confirmation/add': {
+      const existingIndex = state.pendingConfirmations.findIndex((confirmation) =>
+        action.confirmation.approvalId
+          ? confirmation.approvalId === action.confirmation.approvalId
+          : confirmation.toolCallId === action.confirmation.toolCallId,
+      )
+      if (existingIndex === -1) {
+        return {
+          ...state,
+          pendingConfirmations: [...state.pendingConfirmations, action.confirmation],
+        }
+      }
+      const existing = state.pendingConfirmations[existingIndex]
+      // A live SSE card carries the real toolCallId and wins over a recovered
+      // placeholder. A slower reload probe must never replace it in reverse.
+      if (!existing?.restored && action.confirmation.restored) return state
       return {
         ...state,
-        pendingConfirmations: [...state.pendingConfirmations, action.confirmation],
+        pendingConfirmations: state.pendingConfirmations.map((confirmation, index) =>
+          index === existingIndex ? action.confirmation : confirmation,
+        ),
       }
+    }
 
     case 'confirmation/update':
       return {

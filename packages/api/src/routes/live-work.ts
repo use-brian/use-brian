@@ -235,8 +235,9 @@ export function projectRunRow(row: RunRosterRow, now?: Date): LiveWorkflowRunIte
  * structurally excludes teammates' personal assistants — and exclude the
  * callee lanes (`workflow` / `assistant-call`), which never hold the
  * session lock and appear as workflow-run rows instead (D2). The
- * `waiting` flag reads `pending_approvals.blocking_session_id`
- * (unresolved blocking confirmation for that session).
+ * `waiting` flag reads `pending_approvals.blocking_session_id`. Tool
+ * confirmations also have to match the session's current private turn token;
+ * stale rows from stopped/superseded turns cannot classify later work.
  */
 async function fetchSessionRows(workspaceId: string): Promise<SessionRosterRow[]> {
   const result = await query<SessionRosterRow>(
@@ -261,6 +262,13 @@ async function fetchSessionRows(workspaceId: string): Promise<SessionRosterRow[]
                WHERE pa.blocking_session_id = s.id
                  AND pa.status = 'pending'
                  AND (pa.expires_at IS NULL OR pa.expires_at > now())
+                 AND (
+                   pa.kind = 'question'
+                   OR (
+                     pa.kind = 'tool_invocation'
+                     AND pa.approval_payload->>'turnLeaseToken' = s.turn_lease_token::text
+                   )
+                 )
             ) AS "waiting"
        FROM sessions s
        JOIN assistants a ON a.id = s.assistant_id

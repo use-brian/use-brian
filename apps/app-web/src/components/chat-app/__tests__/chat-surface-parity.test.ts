@@ -61,6 +61,13 @@ describe("[COMP:app-web/chat-parity] Chat surface parity", () => {
     expect(source).toContain("retryUserMessage");
   });
 
+  it("restores current-turn tool confirmations and resolves them durably", () => {
+    expect(source).toContain("fetchPendingSessionInput(sessionId)");
+    expect(source).toContain("toRestoredConfirmation(toolConfirmation, sessionId)");
+    expect(source).toContain('{ id: confirmation.approvalId, kind: "tool_invocation" }');
+    expect(source).toContain("respondByKind(");
+  });
+
   it("renders followed room research with the sender's activity chrome", () => {
     expect(source).toContain('kind === "worker_start"');
     expect(source).toContain('phase === "research_starting"');

@@ -11,11 +11,14 @@
 import { z } from 'zod'
 import { buildTool, type Tool } from '@use-brian/core'
 
+/** Long-form manual drafts remain bounded without inheriting a post limit. */
+export const MAX_PROPOSED_DRAFT_CHARS = 100_000
+
 const draftItemSchema = z.object({
   index: z.number().int().min(1).max(99).describe(
     '1-based draft identifier. Reuse an index to revise that alternative.',
   ),
-  text: z.string().min(1).max(4_000).describe(
+  text: z.string().min(1).max(MAX_PROPOSED_DRAFT_CHARS).describe(
     'The exact post body. Do not add an Option N prefix or surrounding quotes.',
   ),
   label: z.string().max(30).optional().describe(

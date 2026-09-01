@@ -164,6 +164,10 @@ export type Session = {
 
 export type PendingConfirmation = {
   toolCallId: string
+  /** Durable pending_approvals row id, when this confirmation was persisted. */
+  approvalId?: string
+  /** True when reconstructed by GET /sessions/:id/pending after re-entry. */
+  restored?: boolean
   toolName: string
   displayName?: string
   input: Record<string, unknown>

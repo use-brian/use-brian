@@ -536,6 +536,24 @@ export async function findSessionById(id: string): Promise<Session | null> {
 }
 
 /**
+ * Internal-only current-turn identity used to correlate durable pending input.
+ * Kept separate from `Session` so ordinary readers cannot accidentally
+ * serialize the private lease token.
+ */
+export async function findSessionTurnLeaseState(id: string): Promise<{
+  status: string
+  turnLeaseToken: string | null
+} | null> {
+  const result = await query<{ status: string; turnLeaseToken: string | null }>(
+    `SELECT status, turn_lease_token AS "turnLeaseToken"
+       FROM sessions
+      WHERE id = $1`,
+    [id],
+  )
+  return result.rows[0] ?? null
+}
+
+/**
  * Record that the downgrade reminder has been delivered for this session.
  * `pinMessageId` is the channel-native message id of the pinned notice
  * (Telegram only). Other channels pass null.

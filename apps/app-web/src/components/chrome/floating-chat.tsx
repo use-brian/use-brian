@@ -210,7 +210,12 @@ import {
 } from "@/lib/api/sessions";
 import { shouldReopenSessionStream } from "@/lib/chat-session-events";
 import { MessageAttachments } from "@/components/doc/message-attachment-card";
-import { fetchPendingQuestion } from "@/lib/api/pending-questions";
+import {
+  fetchPendingQuestion,
+  fetchPendingSessionInput,
+  toRestoredConfirmation,
+} from "@/lib/api/pending-questions";
+import { respondByKind } from "@/lib/api/approvals";
 import { PendingQuestionPanel } from "./pending-question-panel";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { ComposerControls } from "@/components/doc/composer-controls";
@@ -1416,20 +1421,26 @@ export function FloatingChat({
       });
       if (cancelled || !latest) return;
 
-      // askQuestion suspend-resume: restore the inline answer panel if
-      // this session was suspended on a question (e.g. the user reloaded
-      // the page mid-wait — the exact wedge the screenshot showed). The
-      // composer gate + panel let them answer or cancel instead of
-      // hitting `pending_question_exists` on the next message.
-      void fetchPendingQuestion(latest.id)
-        .then((q) => {
-          if (cancelled || !q || epoch !== threadEpochRef.current) return;
-          setPendingQuestion({
-            approvalId: q.approvalId,
-            question: q.question ?? "",
-            expiresAt: q.expiresAt,
-            sessionId: latest.id,
-          });
+      // Restore whichever durable human input owns the current turn. Generic
+      // confirmations re-enter the shared confirmation reducer so the same
+      // card renders after navigation/reload; questions keep their answer UI.
+      void fetchPendingSessionInput(latest.id)
+        .then(({ pending, toolConfirmation }) => {
+          if (cancelled || epoch !== threadEpochRef.current) return;
+          if (pending) {
+            setPendingQuestion({
+              approvalId: pending.approvalId,
+              question: pending.question ?? "",
+              expiresAt: pending.expiresAt,
+              sessionId: latest.id,
+            });
+          }
+          if (toolConfirmation) {
+            sessionDispatchRef.current({
+              type: "confirmation/add",
+              confirmation: toRestoredConfirmation(toolConfirmation, latest.id),
+            });
+          }
         })
         .catch(() => {});
 
@@ -1534,17 +1545,25 @@ export function FloatingChat({
           });
         })
         .catch(() => {});
-      // The turn may have suspended on a clarifying question after the
-      // stream died; the dead POST could not report it, so probe.
-      void fetchPendingQuestion(sid)
-        .then((q) => {
-          if (!q || epoch !== threadEpochRef.current) return;
-          setPendingQuestion({
-            approvalId: q.approvalId,
-            question: q.question ?? "",
-            expiresAt: q.expiresAt,
-            sessionId: sid,
-          });
+      // The dead POST could not report durable input raised around the cut,
+      // so restore the current-turn question or tool confirmation.
+      void fetchPendingSessionInput(sid)
+        .then(({ pending, toolConfirmation }) => {
+          if (epoch !== threadEpochRef.current) return;
+          if (pending) {
+            setPendingQuestion({
+              approvalId: pending.approvalId,
+              question: pending.question ?? "",
+              expiresAt: pending.expiresAt,
+              sessionId: sid,
+            });
+          }
+          if (toolConfirmation) {
+            sessionDispatchRef.current({
+              type: "confirmation/add",
+              confirmation: toRestoredConfirmation(toolConfirmation, sid),
+            });
+          }
         })
         .catch(() => {});
       if (!isDocOrigin) requestBrainRefresh(workspaceId);
@@ -2205,6 +2224,8 @@ export function FloatingChat({
               if (!toolCallId) break;
               const conf: PendingConfirmation = {
                 toolCallId,
+                approvalId:
+                  typeof payload.approvalId === "string" ? payload.approvalId : undefined,
                 toolName:
                   typeof payload.toolName === "string" ? payload.toolName : "",
                 displayName:
@@ -2990,26 +3011,41 @@ export function FloatingChat({
         status: action === "approve" ? "approving" : "denied",
       });
       try {
-        const decision = action === "approve" ? "allow" : "deny";
-        const res = await authFetch(`${API_URL}/api/chat/confirm`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            sessionId: conf.sessionId,
-            toolCallId,
-            decision,
-            // Deny-with-comment: the note rides to the model via
-            // declinedToolResult so the assistant revises, not re-asks.
-            ...(action === "deny" && comment ? { comment } : {}),
-          }),
-        });
-        if (res.ok) {
-          const data = (await res.json().catch(() => ({}))) as {
-            result?: string;
-          };
+        let ok = false;
+        let resultText: string | undefined;
+        if (conf.restored && conf.approvalId) {
+          const result = await respondByKind(
+            { id: conf.approvalId, kind: "tool_invocation" },
+            action === "approve" ? "approved" : "rejected",
+            comment,
+          );
+          ok = result.ok;
+        } else {
+          const decision = action === "approve" ? "allow" : "deny";
+          const res = await authFetch(`${API_URL}/api/chat/confirm`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              sessionId: conf.sessionId,
+              toolCallId,
+              decision,
+              // Deny-with-comment: the note rides to the model via
+              // declinedToolResult so the assistant revises, not re-asks.
+              ...(action === "deny" && comment ? { comment } : {}),
+            }),
+          });
+          ok = res.ok;
+          if (res.ok) {
+            const data = (await res.json().catch(() => ({}))) as {
+              result?: string;
+            };
+            resultText = data.result;
+          }
+        }
+        if (ok) {
           session.updateConfirmation(toolCallId, {
             status: action === "approve" ? "approved" : "denied",
-            result: data.result,
+            result: resultText,
           });
           // Same-tab repair for every approval-backed surface (queue + Home
           // dock). The durable row update also emits the workspace event for

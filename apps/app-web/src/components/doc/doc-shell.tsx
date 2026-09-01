@@ -111,6 +111,13 @@ import { TemplateGallery } from "./template-gallery";
 import { SaveAsTemplateDialog, type SaveAsTemplateInput } from "./save-as-template-dialog";
 import { templateExtractionFromBlocks } from "@/lib/blueprints";
 import { SuggestedView } from "./suggested-view";
+import { OperatorTopbar } from "@/components/operator/operator-topbar";
+import { useActiveOperatorApp } from "./workspace-chrome";
+import {
+  customHomeAppId,
+  isOperatorAppKey,
+  operatorTopbarAppForSuggested,
+} from "@/lib/operator-apps";
 import { ApprovalsPanel } from "./panels/approvals-panel";
 import { AutopilotPanel } from "./panels/autopilot-panel";
 import { TriagePanel } from "./panels/triage-panel";
@@ -199,6 +206,19 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
     setSidebarCollapsed,
     studioSetupIncomplete,
   } = sidebar;
+  const activeOperatorApp = useActiveOperatorApp();
+  const suggestedTopbarApp = operatorTopbarAppForSuggested(
+    activeOperatorApp,
+    suggestedOpen,
+  );
+  const suggestedCustomAppId = suggestedTopbarApp
+    ? customHomeAppId(suggestedTopbarApp)
+    : null;
+  const suggestedCustomApp = suggestedCustomAppId
+    ? sidebar.customApps.find(
+        (app) => app.id === suggestedCustomAppId && app.renderable,
+      ) ?? null
+    : null;
 
   const [activeView, setActiveView] = useState<ViewMetadata | null>(null);
   // Latest `activeView`, read by the active-page bridge's `getActiveView` so the
@@ -1218,10 +1238,11 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
             behind the editor content. Visible only while a run is active. */}
         <AssistantRunClaw run={assistantRun} />
         {/* Top "layer" (Row 1) — persistent across Page states (loaded page,
-            blank tab, empty selection, error) but hidden on the separate
-            Suggested briefing: sidebar toggle, browse-history arrows, and the
-            open-tab strip. The breadcrumb + action navbar (Row 2, PageHeader)
-            sits BELOW it, only when a page is loaded. */}
+            blank tab, empty selection, error). Suggested suspends Page's
+            interactive tab strip, but if it borrowed the pane from a non-Page
+            current app it keeps that app's identity-only OperatorTopbar. The
+            breadcrumb + action navbar (Row 2, PageHeader) sits BELOW this,
+            only when a page is loaded. */}
         {!suggestedOpen && (
           <DocTopBar
             tabs={tabViews}
@@ -1236,6 +1257,16 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
             onNewTab={() => setTabsState(newTab)}
           />
         )}
+        {suggestedTopbarApp && isOperatorAppKey(suggestedTopbarApp) ? (
+          <OperatorTopbar app={suggestedTopbarApp} />
+        ) : suggestedCustomApp ? (
+          <OperatorTopbar
+            customApp={{
+              name: suggestedCustomApp.name,
+              icon: suggestedCustomApp.icon,
+            }}
+          />
+        ) : null}
         {topError && (
           <div className="border-b border-destructive/40 bg-destructive/10 px-4 py-2 text-sm text-destructive">
             {topError}

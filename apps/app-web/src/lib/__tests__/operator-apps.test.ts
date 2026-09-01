@@ -13,6 +13,7 @@ import {
   homePath,
   operatorAppFromSurface,
   operatorAppPath,
+  operatorTopbarAppForSuggested,
   operatorAppStorageKey,
   readOperatorApp,
   readHomeAppLocation,
@@ -69,6 +70,21 @@ describe("[COMP:app-web/operator-app-bar] operator app registry", () => {
     expect(sidebarSurfaceForHome("p", "custom:app-1", true)).toBe("apps");
     // Ordinary routes remain authoritative when the briefing is closed.
     expect(sidebarSurfaceForHome("brain", "page", false)).toBe("brain");
+  });
+
+  it("keeps every registered non-Page app top bar while Suggested owns the pane", () => {
+    for (const app of OPERATOR_APP_KEYS) {
+      expect(operatorTopbarAppForSuggested(app, true)).toBe(
+        app === "page" ? null : app,
+      );
+    }
+    expect(operatorTopbarAppForSuggested("custom:app-1", true)).toBe(
+      "custom:app-1",
+    );
+    // Page's tab strip cannot render truthfully while its URL sync is paused.
+    expect(operatorTopbarAppForSuggested("page", true)).toBeNull();
+    expect(operatorTopbarAppForSuggested("chat", false)).toBeNull();
+    expect(operatorTopbarAppForSuggested(null, true)).toBeNull();
   });
 
   it("builds each app's route", () => {

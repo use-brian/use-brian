@@ -44,6 +44,20 @@ const VALID_SEED_KINDS: readonly ContentDraftSeedKind[] = [
   'freeform-reply',
 ]
 
+export const MAX_DRAFT_SESSION_TITLE_CHARS = 200
+
+/** Strip storage prefixes and validate the operator-visible working title. */
+export function parseContentDraftSessionTitle(value: unknown): string | 'invalid' {
+  if (typeof value !== 'string') return 'invalid'
+  const title = value
+    .trim()
+    .replace(/^\[(?:instagram|threads|twitter|xhs|linkedin)\]\s*/i, '')
+    .trim()
+  return title.length > 0 && title.length <= MAX_DRAFT_SESSION_TITLE_CHARS
+    ? title
+    : 'invalid'
+}
+
 export type PlanningAccessContext = {
   userId: string
   workspaceId: string
@@ -182,6 +196,36 @@ export function contentPlanningRoutes(
       } catch (error) {
         console.error('[content-planning] list sessions failed:', error)
         res.status(500).json({ error: 'Failed to list draft sessions' })
+      }
+    },
+  )
+
+  router.patch<{ assistantId: string; sessionId: string }>(
+    '/:assistantId/draft-sessions/:sessionId',
+    async (req, res) => {
+      const ctx = await access(req, res)
+      if (!ctx || !requireDraftPermission(ctx, res)) return
+      const title = parseContentDraftSessionTitle(
+        (req.body as Record<string, unknown> | undefined)?.title,
+      )
+      if (title === 'invalid') {
+        res.status(400).json({ error: 'title must be between 1 and 200 characters' })
+        return
+      }
+      try {
+        const storedTitle = await store.renameSession({
+          assistantId: req.params.assistantId,
+          sessionId: req.params.sessionId,
+          title,
+        })
+        if (!storedTitle) {
+          res.status(404).json({ error: 'Draft session not found' })
+          return
+        }
+        res.json({ ok: true, title: storedTitle })
+      } catch (error) {
+        console.error('[content-planning] rename session failed:', error)
+        res.status(500).json({ error: 'Failed to rename draft session' })
       }
     },
   )
@@ -677,6 +721,9 @@ export function parseContentDraftSeed(
   }
 }
 
+/** Storage guard for long-form manual drafts; not a provider post limit. */
+export const MAX_CONTENT_DRAFT_CHARS = 100_000
+
 export function parseContentDraftBody(value: unknown):
   | {
       text: string
@@ -703,7 +750,7 @@ export function parseContentDraftBody(value: unknown):
     !isRecord(value)
     || typeof value.text !== 'string'
     || !value.text.trim()
-    || value.text.length > 10_000
+    || value.text.length > MAX_CONTENT_DRAFT_CHARS
     || !isContentPlanningPlatform(value.platform)
   ) {
     return 'invalid'

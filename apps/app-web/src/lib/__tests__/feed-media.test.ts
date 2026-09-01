@@ -4,14 +4,17 @@ import { describe, expect, it } from "vitest";
 import {
   canPublishMedia,
   connectionPublishesMedia,
+  MAX_POST_MEDIA,
   mediaCapFor,
+  postMediaUploadBatches,
 } from "@/lib/feed-media";
 
 describe("[COMP:app-web/feed-media] Per-platform media rules", () => {
   it("caps attachments at what the target actually accepts", () => {
     expect(mediaCapFor("twitter")).toBe(4);
-    expect(mediaCapFor("linkedin")).toBe(1);
+    expect(mediaCapFor("linkedin")).toBe(20);
     expect(mediaCapFor("threads")).toBe(10);
+    expect(MAX_POST_MEDIA).toBe(20);
   });
 
   it("knows which platforms can publish media at all", () => {
@@ -36,5 +39,15 @@ describe("[COMP:app-web/feed-media] Per-platform media rules", () => {
     // Threads post to manual delivery.
     expect(connectionPublishesMedia("threads", undefined)).toBe(true);
     expect(connectionPublishesMedia("instagram", undefined)).toBe(false);
+  });
+});
+
+describe("[COMP:app-web/feed-post-media] Durable media upload batching", () => {
+  it("splits LinkedIn's 20-image allowance across the route's 10-file batches", () => {
+    const files = Array.from({ length: 20 }, (_, index) => index);
+    expect(postMediaUploadBatches(files)).toEqual([
+      files.slice(0, 10),
+      files.slice(10, 20),
+    ]);
   });
 });

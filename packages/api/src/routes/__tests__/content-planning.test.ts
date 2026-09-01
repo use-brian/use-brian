@@ -8,6 +8,7 @@ import type {
 import {
   contentPlanningRoutes,
   parseContentDraftBody,
+  parseContentDraftSessionTitle,
   parseContentDraftSeed,
 } from '../content-planning.js'
 
@@ -49,6 +50,7 @@ function fakeStore(overrides: Partial<ContentPlanningStore> = {}): ContentPlanni
   return {
     createSession: vi.fn(),
     listSessions: vi.fn(async () => []),
+    renameSession: vi.fn(async () => '[threads] Renamed draft'),
     sessionExists: vi.fn(async () => true),
     discardSession: vi.fn(async () => true),
     saveDraft: vi.fn(async () => draft()),
@@ -181,6 +183,20 @@ describe('[COMP:feed/content-planning-routes] OSS planning wire contract', () =>
     })
   })
 
+  it('renames a draft through the assistant-scoped planning store', async () => {
+    const renameSession = vi.fn(async () => '[linkedin] New working title')
+    const response = await request(app(fakeStore({ renameSession })))
+      .patch('/api/distribution/assistant-1/draft-sessions/session-1')
+      .send({ title: '  New working title  ' })
+      .expect(200)
+    expect(response.body).toEqual({ ok: true, title: '[linkedin] New working title' })
+    expect(renameSession).toHaveBeenCalledWith({
+      assistantId: 'assistant-1',
+      sessionId: 'session-1',
+      title: 'New working title',
+    })
+  })
+
   it('does not publish typing presence for a foreign session id', async () => {
     const response = await request(app(fakeStore({
       sessionExists: vi.fn(async () => false),
@@ -193,6 +209,13 @@ describe('[COMP:feed/content-planning-routes] OSS planning wire contract', () =>
 })
 
 describe('[COMP:feed/content-planning-routes] planning input parsing', () => {
+  it('validates a visible draft title and strips storage prefixes', () => {
+    expect(parseContentDraftSessionTitle('  Launch lesson  ')).toBe('Launch lesson')
+    expect(parseContentDraftSessionTitle('[linkedin] Launch lesson')).toBe('Launch lesson')
+    expect(parseContentDraftSessionTitle('   ')).toBe('invalid')
+    expect(parseContentDraftSessionTitle('x'.repeat(201))).toBe('invalid')
+  })
+
   it('accepts an unconnected-platform source-link seed', () => {
     expect(parseContentDraftSeed(
       { kind: 'freeform', link: 'https://example.com/launch' },
@@ -254,6 +277,19 @@ describe('[COMP:feed/content-planning-routes] planning input parsing', () => {
       platform: 'twitter',
       postFormat: 'thread',
       threadSegments: ['中文'.repeat(71), 'A valid second post.'],
+    })).toBe('invalid')
+  })
+
+  it('accepts long-form LinkedIn drafts beyond 3000 characters', () => {
+    expect(parseContentDraftBody({
+      text: 'Long-form paragraph. '.repeat(600),
+      platform: 'linkedin',
+      postFormat: 'post',
+    })).not.toBe('invalid')
+    expect(parseContentDraftBody({
+      text: 'x'.repeat(100_001),
+      platform: 'linkedin',
+      postFormat: 'post',
     })).toBe('invalid')
   })
 

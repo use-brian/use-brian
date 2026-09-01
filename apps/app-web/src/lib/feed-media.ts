@@ -20,7 +20,19 @@ export const ACCEPTED_MEDIA_MIME = [
   "image/gif",
 ] as const;
 
-const MAX_POST_MEDIA = 10;
+/** Shared draft envelope. Individual platforms may impose a lower ceiling. */
+export const MAX_POST_MEDIA = 20;
+
+/** The durable workspace-file route accepts ten files per multipart request. */
+const POST_MEDIA_UPLOAD_BATCH_SIZE = 10;
+
+export function postMediaUploadBatches<T>(items: readonly T[]): T[][] {
+  const batches: T[][] = [];
+  for (let start = 0; start < items.length; start += POST_MEDIA_UPLOAD_BATCH_SIZE) {
+    batches.push(items.slice(start, start + POST_MEDIA_UPLOAD_BATCH_SIZE));
+  }
+  return batches;
+}
 
 /**
  * Per-platform ceilings. These are the PLATFORM's limits, not ours, so a
@@ -31,7 +43,7 @@ const PLATFORM_MEDIA_CAP: Record<FeedPlatform, number> = {
   twitter: 4,
   instagram: 10,
   xhs: 9,
-  linkedin: 1,
+  linkedin: 20,
 };
 
 export function mediaCapFor(platform: FeedPlatform): number {

@@ -193,7 +193,7 @@ describe('[COMP:api/live-work-roster] roster route', () => {
     expect(res.body.items.map((i: { kind: string }) => i.kind)).toEqual(['workflow_run', 'session'])
   })
 
-  it('sessions query scopes by the assistants.workspace_id join and excludes callee lanes (§6-a / D2)', async () => {
+  it('sessions query scopes by workspace, excludes callee lanes, and ignores stale-turn approvals', async () => {
     primeRoster([], [])
     await request(makeApp()).get(`/api/workspaces/${WS}/live`)
     const sessionsSql = mockQuery.mock.calls[0][0] as string
@@ -201,6 +201,9 @@ describe('[COMP:api/live-work-roster] roster route', () => {
     expect(sessionsSql).toContain('COALESCE(a.icon_seed, 0)')
     expect(sessionsSql).toContain('a.workspace_id = $1')
     expect(sessionsSql).toContain(`NOT IN ('workflow', 'assistant-call')`)
+    expect(sessionsSql).toContain(
+      `pa.approval_payload->>'turnLeaseToken' = s.turn_lease_token::text`,
+    )
   })
 })
 

@@ -14,9 +14,10 @@
     "start": "electron dist/bootstrap.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "package": "pnpm run build && electron-builder --mac",
-    "package:win": "pnpm run build && electron-builder --win --x64 --publish never",
-    "package:linux": "pnpm run build && electron-builder --linux AppImage --publish never"
+    "build:renderer": "pnpm --filter app-web build:desktop",
+    "package": "pnpm run build:renderer && pnpm run build && electron-builder --mac",
+    "package:win": "pnpm run build:renderer && pnpm run build && electron-builder --win --x64 --publish never",
+    "package:linux": "pnpm run build:renderer && pnpm run build && electron-builder --linux AppImage --publish never"
   },
   "devDependencies": {
     "@types/node": "^20.19.39",

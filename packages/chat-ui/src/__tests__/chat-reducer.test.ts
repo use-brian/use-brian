@@ -186,6 +186,38 @@ describe('[COMP:chat-ui/chat-reducer] chat reducer', () => {
     expect(cleared.pendingConfirmations).toEqual([])
   })
 
+  it('deduplicates a restored approval and prefers its live SSE card', () => {
+    const restored: PendingConfirmation = {
+      toolCallId: 'approval:ap-1',
+      approvalId: 'ap-1',
+      restored: true,
+      toolName: 'fileWrite',
+      input: { path: 'plan.md' },
+      sessionId: 's1',
+      status: 'pending',
+    }
+    const live: PendingConfirmation = {
+      ...restored,
+      toolCallId: 'tool-call-1',
+      restored: false,
+    }
+    const recovered = chatReducer(initialChatState, {
+      type: 'confirmation/add',
+      confirmation: restored,
+    })
+    const replaced = chatReducer(recovered, {
+      type: 'confirmation/add',
+      confirmation: live,
+    })
+    expect(replaced.pendingConfirmations).toEqual([live])
+
+    const lateRecovery = chatReducer(replaced, {
+      type: 'confirmation/add',
+      confirmation: restored,
+    })
+    expect(lateRecovery).toBe(replaced)
+  })
+
   it('sets and clears reply-to', () => {
     const set = chatReducer(initialChatState, {
       type: 'reply/set',

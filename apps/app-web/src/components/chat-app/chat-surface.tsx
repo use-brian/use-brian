@@ -207,7 +207,12 @@ import {
   type PendingChatHandoff,
 } from "@/lib/chat-handoff";
 import { accelEnterLabel } from "@/lib/surface-shortcuts";
-import { fetchPendingQuestion } from "@/lib/api/pending-questions";
+import {
+  fetchPendingSessionInput,
+  toRestoredConfirmation,
+} from "@/lib/api/pending-questions";
+import { respondByKind } from "@/lib/api/approvals";
+import { requestApprovalsRefresh } from "@/lib/approvals-events";
 import { PendingQuestionPanel } from "@/components/chrome/pending-question-panel";
 import { ChatConfirmationCard } from "@/components/chrome/chat-confirmation-card";
 import { ChatContextPins } from "@/components/chat-app/chat-context-pins";
@@ -304,6 +309,7 @@ function coercePayload(data: unknown): Record<string, unknown> {
  *  off the per-session bus; the server gates who may act on it). */
 type RemoteConfirmation = {
   toolCallId: string;
+  approvalId?: string;
   toolName: string;
   displayName?: string;
   input: Record<string, unknown>;
@@ -1187,6 +1193,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     directTurnSessionRef.current = null;
     stream.abort();
     chat.dispatch({ type: "stream/abort" });
+    chat.dispatch({ type: "confirmation/clear" });
     resetTurnActivity();
     att.clear();
     setError(null);
@@ -1278,24 +1285,29 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     setRemoteStartedAt(null);
   }, []);
 
-  const refreshPendingQuestion = useCallback(
+  const refreshPendingInput = useCallback(
     (sessionId: string) => {
-      void fetchPendingQuestion(sessionId)
-        .then((q) => {
+      void fetchPendingSessionInput(sessionId)
+        .then(({ pending, toolConfirmation }) => {
           setPendingQuestion(
-            q
+            pending
               ? {
-                  approvalId: q.approvalId,
-                  question: q.question ?? "",
-                  expiresAt: q.expiresAt,
+                  approvalId: pending.approvalId,
+                  question: pending.question ?? "",
+                  expiresAt: pending.expiresAt,
                   sessionId,
                 }
               : null,
           );
+          if (toolConfirmation) {
+            chat.addConfirmation(
+              toRestoredConfirmation(toolConfirmation, sessionId),
+            );
+          }
         })
         .catch(() => {});
     },
-    [],
+    [chat.addConfirmation],
   );
 
   // A turn-end explanation belongs to the room it happened in; switching
@@ -1342,7 +1354,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
 
     // A room found suspended on open surfaces its answer panel immediately
     // (any member with read access may answer — D8).
-    refreshPendingQuestion(sessionId);
+    refreshPendingInput(sessionId);
 
     const handleRoomEvent = (event: string, payload: Record<string, unknown>) => {
       const sender = typeof payload.senderUserId === "string" ? payload.senderUserId : null;
@@ -1523,6 +1535,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             // may act on it.
             setRemoteConfirmation({
               toolCallId: typeof payload.toolCallId === "string" ? payload.toolCallId : "",
+              approvalId:
+                typeof payload.approvalId === "string" ? payload.approvalId : undefined,
               toolName: typeof payload.toolName === "string" ? payload.toolName : "",
               displayName:
                 typeof payload.displayName === "string" ? payload.displayName : undefined,
@@ -1628,7 +1642,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           void reloadShared();
           dispatchChatSessionsRefresh(workspaceId);
           if (isSharedOpen) markRoomSeen(workspaceId, sessionId);
-          refreshPendingQuestion(sessionId);
+          refreshPendingInput(sessionId);
           break;
         }
         case "done": {
@@ -1652,7 +1666,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           if (sawRunning && !sawTurnCompleted) {
             void loadTranscript(sessionId);
             dispatchChatSessionsRefresh(workspaceId);
-            refreshPendingQuestion(sessionId);
+            refreshPendingInput(sessionId);
           }
           // The dead POST stream could not report `input_applied` for
           // anything queued mid-turn. Now that the turn is over, whatever
@@ -1719,7 +1733,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       cancelled = true;
       controller.abort();
     };
-    // `resetRemoteTurn` / `refreshPendingQuestion` / `loadTranscript` /
+    // `resetRemoteTurn` / `refreshPendingInput` / `loadTranscript` /
     // `reloadShared` are stable callbacks.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSessionId, isSharedOpen, reconnectSessionId, subscribeEpoch, meId, workspaceId, tChat.toolNarration]);
@@ -1863,6 +1877,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     directTurnSessionRef.current = null;
     stream.abort();
     chat.dispatch({ type: "stream/abort" });
+    chat.dispatch({ type: "confirmation/clear" });
     turnTextRef.current = "";
     resetTurnActivity();
     // An aborted stream never reaches `onDone`, so the flush happens here
@@ -2605,6 +2620,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             if (!toolCallId) break;
             chat.addConfirmation({
               toolCallId,
+              approvalId:
+                typeof payload.approvalId === "string" ? payload.approvalId : undefined,
               toolName: typeof payload.toolName === "string" ? payload.toolName : "",
               displayName:
                 typeof payload.displayName === "string" ? payload.displayName : undefined,
@@ -2719,7 +2736,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         // Suspended on a question this turn — fetch the pending row so the
         // answer panel + composer gate surface immediately (dock recipe).
         if (askedQuestionRef.current && sessionIdRef.current) {
-          refreshPendingQuestion(sessionIdRef.current);
+          refreshPendingInput(sessionIdRef.current);
         }
         if (isRoom && sessionIdRef.current) {
           markRoomSeen(workspaceId, sessionIdRef.current);
@@ -2797,7 +2814,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     }
     return true;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [input, activeAssistant, activeSessionId, activeShared, askArmed, model, researchMode, view, workspaceId, pickedContextGroupId, pickedContextProjectId, chat.state.isStreaming, refreshPendingQuestion, reloadShared, resetTurnActivity, selectSession, startingShared, stream, t, tChat.toolNarration, att.attachments, att.uploading, att.fileIds, att.detach, pendingQuestion, pendingRecordings, recordingUpload.status, assistants, applyQueuedInput, buildStreamedTurnMessage, flushQueuedInputs, mentions.reset, setReplyTo]);
+  }, [input, activeAssistant, activeSessionId, activeShared, askArmed, model, researchMode, view, workspaceId, pickedContextGroupId, pickedContextProjectId, chat.state.isStreaming, refreshPendingInput, reloadShared, resetTurnActivity, selectSession, startingShared, stream, t, tChat.toolNarration, att.attachments, att.uploading, att.fileIds, att.detach, pendingQuestion, pendingRecordings, recordingUpload.status, assistants, applyQueuedInput, buildStreamedTurnMessage, flushQueuedInputs, mentions.reset, setReplyTo]);
 
   // While this full-page surface is mounted it IS the visible chat, so a
   // short capture's voice turn must land in the open thread here — never in
@@ -3473,9 +3490,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
    */
   const resolveConfirmation = useCallback(
     async (toolCallId: string, action: "approve" | "deny", comment?: string) => {
+      const confirmation = chat.state.pendingConfirmations.find(
+        (c) => c.toolCallId === toolCallId,
+      );
       const sessionId =
-        chat.state.pendingConfirmations.find((c) => c.toolCallId === toolCallId)
-          ?.sessionId ??
+        confirmation?.sessionId ??
         activeSessionId ??
         sessionIdRef.current;
       if (!sessionId) return;
@@ -3483,24 +3502,38 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         status: action === "approve" ? "approving" : "denied",
       });
       try {
-        const res = await authFetch(`${API_URL}/api/chat/confirm`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            sessionId,
-            toolCallId,
-            decision: action === "approve" ? "allow" : "deny",
-            ...(action === "deny" && comment ? { comment } : {}),
-          }),
-        });
-        if (res.ok) {
+        let ok = false;
+        let forbidden = false;
+        if (confirmation?.restored && confirmation.approvalId) {
+          const result = await respondByKind(
+            { id: confirmation.approvalId, kind: "tool_invocation" },
+            action === "approve" ? "approved" : "rejected",
+            comment,
+          );
+          ok = result.ok;
+        } else {
+          const res = await authFetch(`${API_URL}/api/chat/confirm`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              sessionId,
+              toolCallId,
+              decision: action === "approve" ? "allow" : "deny",
+              ...(action === "deny" && comment ? { comment } : {}),
+            }),
+          });
+          ok = res.ok;
+          forbidden = res.status === 403;
+        }
+        if (ok) {
           chat.updateConfirmation(toolCallId, {
             status: action === "approve" ? "approved" : "denied",
           });
+          requestApprovalsRefresh(workspaceId);
           if (remoteConfirmation?.toolCallId === toolCallId) {
             setRemoteConfirmation(null);
           }
-        } else if (res.status === 403) {
+        } else if (forbidden) {
           chat.updateConfirmation(toolCallId, { status: "pending" });
           setError(t.confirmNotAllowed);
         } else {
@@ -3512,7 +3545,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     },
     // `chat.updateConfirmation` is a stable callback from the hook.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [activeSessionId, chat.state.pendingConfirmations, remoteConfirmation, t],
+    [activeSessionId, chat.state.pendingConfirmations, remoteConfirmation, t, workspaceId],
   );
 
   /** The composer, styled as the app's composite-control box (globals.css
@@ -4341,10 +4374,17 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                   }
                 />
               ))}
-            {remoteConfirmation && !chat.state.isStreaming && (
+            {remoteConfirmation &&
+              !chat.state.isStreaming &&
+              !chat.state.pendingConfirmations.some(
+                (confirmation) =>
+                  !!remoteConfirmation.approvalId &&
+                  confirmation.approvalId === remoteConfirmation.approvalId,
+              ) && (
               <ChatConfirmationCard
                 confirmation={{
                   toolCallId: remoteConfirmation.toolCallId,
+                  approvalId: remoteConfirmation.approvalId,
                   toolName: remoteConfirmation.toolName,
                   displayName: remoteConfirmation.displayName,
                   input: remoteConfirmation.input,

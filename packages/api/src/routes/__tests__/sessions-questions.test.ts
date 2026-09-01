@@ -23,6 +23,7 @@ vi.mock('../../workflow/approval.js', () => ({
 }))
 vi.mock('../../db/sessions.js', () => ({
   findSessionById: vi.fn(),
+  findSessionTurnLeaseState: vi.fn(),
 }))
 vi.mock('../../db/users.js', () => ({
   findAssistantById: vi.fn(),
@@ -30,12 +31,13 @@ vi.mock('../../db/users.js', () => ({
 
 import { sessionQuestionRoutes } from '../sessions-questions.js'
 import { enqueueToolInvocationResume } from '../../workflow/approval.js'
-import { findSessionById } from '../../db/sessions.js'
+import { findSessionById, findSessionTurnLeaseState } from '../../db/sessions.js'
 import { findAssistantById } from '../../db/users.js'
 import type { PendingApproval } from '../../db/pending-approvals-store.js'
 
 const mockEnqueue = vi.mocked(enqueueToolInvocationResume)
 const mockFindSession = vi.mocked(findSessionById)
+const mockFindTurnLeaseState = vi.mocked(findSessionTurnLeaseState)
 const mockFindAssistant = vi.mocked(findAssistantById)
 
 function makeQuestionRow(over: Partial<PendingApproval> = {}): PendingApproval {
@@ -62,6 +64,25 @@ function makeQuestionRow(over: Partial<PendingApproval> = {}): PendingApproval {
     answerText: null,
     ...over,
   }
+}
+
+function makeToolConfirmationRow(
+  over: Partial<PendingApproval> = {},
+): PendingApproval {
+  return makeQuestionRow({
+    id: 'ap-tool-1',
+    kind: 'tool_invocation',
+    toolName: 'fileWrite',
+    arguments: { path: '/workspace/plan.md', content: '# Plan' },
+    expiresAt: null,
+    approvalPayload: {
+      description: 'Write plan.md',
+      displayLines: ['File: plan.md'],
+      allowPersistentApproval: false,
+      turnLeaseToken: 'lease-current',
+    },
+    ...over,
+  })
 }
 
 type StoreStubs = {
@@ -105,6 +126,8 @@ beforeEach(() => {
   mockEnqueue.mockClear()
   mockEnqueue.mockResolvedValue({ kind: 'enqueued', jobId: 'job-1' })
   mockFindSession.mockReset()
+  mockFindTurnLeaseState.mockReset()
+  mockFindTurnLeaseState.mockResolvedValue(null)
   mockFindAssistant.mockReset()
 })
 
@@ -137,6 +160,57 @@ describe('[COMP:api/pending-questions-resume] GET /:sessionId/pending', () => {
     const { app } = makeApp({ listPendingForWorkspace: vi.fn(async () => []) })
     const res = await request(app).get('/api/sessions/sess-1/pending').expect(200)
     expect(res.body.pending).toBeNull()
+    expect(res.body.toolConfirmation).toBeNull()
+  })
+
+  it('restores a tool confirmation bound to the current running turn', async () => {
+    mockFindSession.mockResolvedValue({
+      id: 'sess-1',
+      assistantId: 'asst-1',
+      userId: 'u-1',
+    } as never)
+    mockFindTurnLeaseState.mockResolvedValue({
+      status: 'running', turnLeaseToken: 'lease-current',
+    })
+    mockFindAssistant.mockResolvedValue({ workspaceId: 'ws-1' } as never)
+    const { app } = makeApp({
+      listPendingForWorkspace: vi.fn(async () => [makeToolConfirmationRow()]),
+    })
+
+    const res = await request(app).get('/api/sessions/sess-1/pending').expect(200)
+    expect(res.body.pending).toBeNull()
+    expect(res.body.toolConfirmation).toMatchObject({
+      approvalId: 'ap-tool-1',
+      toolName: 'fileWrite',
+      input: { path: '/workspace/plan.md', content: '# Plan' },
+      description: 'Write plan.md',
+      displayLines: ['File: plan.md'],
+    })
+    expect(JSON.stringify(res.body)).not.toContain('lease-current')
+  })
+
+  it('does not restore a tool confirmation from an older or idle turn', async () => {
+    mockFindAssistant.mockResolvedValue({ workspaceId: 'ws-1' } as never)
+    const listPendingForWorkspace = vi.fn(async () => [makeToolConfirmationRow()])
+    const { app } = makeApp({ listPendingForWorkspace })
+
+    mockFindSession.mockResolvedValue({
+      id: 'sess-1', assistantId: 'asst-1', userId: 'u-1',
+    } as never)
+    mockFindTurnLeaseState.mockResolvedValue({
+      status: 'running', turnLeaseToken: 'lease-new',
+    })
+    let res = await request(app).get('/api/sessions/sess-1/pending').expect(200)
+    expect(res.body.toolConfirmation).toBeNull()
+
+    mockFindSession.mockResolvedValue({
+      id: 'sess-1', assistantId: 'asst-1', userId: 'u-1',
+    } as never)
+    mockFindTurnLeaseState.mockResolvedValue({
+      status: 'idle', turnLeaseToken: 'lease-current',
+    })
+    res = await request(app).get('/api/sessions/sess-1/pending').expect(200)
+    expect(res.body.toolConfirmation).toBeNull()
   })
 
   it('404s when session is not found or owned by another user', async () => {

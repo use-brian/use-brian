@@ -6913,6 +6913,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                         description,
                         displayLines,
                         allowPersistentApproval,
+                        ...(turnLeaseToken ? { turnLeaseToken } : {}),
                         ...(decisionPlaybookContext.decisionApplicationId
                           ? { decisionApplicationId: decisionPlaybookContext.decisionApplicationId }
                           : {}),
@@ -7432,6 +7433,7 @@ export function chatRoutes(options: WebChatOptions): Router {
 
             sendEvent('tool_confirmation_required', {
               toolCallId: event.request.toolCallId,
+              approvalId: event.request.approvalId,
               toolName: event.request.toolName,
               displayName,
               input: enrichedInput,
@@ -7447,6 +7449,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             // written to the dead socket alone and park for its 24h timeout.
             publishRoomActivity('tool_confirmation_required', {
               toolCallId: event.request.toolCallId,
+              approvalId: event.request.approvalId,
               toolName: event.request.toolName,
               displayName,
               input: enrichedInput,
