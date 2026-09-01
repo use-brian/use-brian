@@ -79,6 +79,8 @@ docker pull ghcr.io/use-brian/doc-sync:latest
 
 | Service | Image |
 |---|---|
+| API + workers | `ghcr.io/use-brian/api` |
+| Authenticated app | `ghcr.io/use-brian/app-web` |
 | Auth web | `ghcr.io/use-brian/auth-web` |
 | Browser relay | `ghcr.io/use-brian/browser-relay` |
 | Discord connector | `ghcr.io/use-brian/discord-connector` |
@@ -89,9 +91,17 @@ docker pull ghcr.io/use-brian/doc-sync:latest
 | WeChat desktop bridge | `ghcr.io/use-brian/wechat-desktop-bridge` |
 
 Use `latest` for the current `main` build, `develop` for the development branch,
-`v*` tags for releases, or `sha-<commit>` to pin an exact build. These images
-cover the standalone services; use the `pnpm` quick start above to run the full
-self-hosted app locally.
+`v*` tags for releases, or `sha-<commit>` to pin an exact build. The API image
+listens on port `4000` and requires a migrated PostgreSQL database. The app image
+listens on port `3003`; set its public API URL when building the image and its
+server-side `API_URL` when running it. Desktop applications, browser extensions,
+and the Firefox native companion remain native installable artifacts rather than
+server containers.
+
+```bash
+docker build --build-arg NEXT_PUBLIC_API_URL=https://api.brian.customer.example \
+  -f apps/app-web/Dockerfile -t use-brian-app-web .
+```
 
 ### Your data stays yours
 

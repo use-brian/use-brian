@@ -68,6 +68,8 @@ const workspaceRoot = nextPackagePath.slice(
 );
 
 const nextConfig: NextConfig = {
+  output: "standalone",
+  outputFileTracingRoot: workspaceRoot,
   ...(APP_DEV_HOST ? { allowedDevOrigins: [APP_DEV_HOST] } : {}),
   // app-web runs both standalone and absorbed into the platform workspace.
   // Follow the physical pnpm store so Turbopack can resolve Next in either.
