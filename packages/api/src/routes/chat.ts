@@ -24,7 +24,7 @@ import { gateSessionRead } from './sessions.js'
 import { renderArtifactManifest } from '../files/artifact-manifest.js'
 import { promotePastedText, shouldPromotePaste } from '../files/paste-promotion.js'
 import type { ArtifactPromoter } from '../files/artifact-promote.js'
-import { mayAssistantAnswerInRoom, crossAssistantSendPolicy } from './_room-binding.js'
+import { mayAssistantAnswerInRoom, crossAssistantSendPolicy, isDocSurface } from './_room-binding.js'
 import { recordRoomMentionsForMessage, type RecordRoomMentionsResult } from '../room-mentions.js'
 import type { Sensitivity } from '@use-brian/core'
 import { resolveMentionSpans } from '@use-brian/shared/mention-matching'
@@ -1059,19 +1059,14 @@ export function buildUnscopedFileAttachmentInstruction(
 }
 
 /**
- * Is this turn happening on the Doc surface? True for a session that
- * originated in `apps/app-web` (`appOrigin='doc'`) or a doc comment
- * thread. This is the surface signal that drives doc-skill injection,
- * decoupled from WHICH assistant is talking (the workspace primary by default,
- * or any assistant the user switched to). Mirrors the surface test in
- * `resolveRunChannel`.
+ * Is this turn happening on the Doc surface?
+ *
+ * Defined in `./_room-binding.js` and re-exported here (see the block below
+ * that re-exports the room predicates): `sessions.ts` builds the doc dock's
+ * resume filter from the same predicate and cannot import this module without
+ * closing an ESM cycle.
  */
-export function isDocSurface(session: {
-  appOrigin: string | null
-  channelType: string
-}): boolean {
-  return session.appOrigin === 'doc' || session.channelType === 'doc_thread'
-}
+export { isDocSurface }
 
 /**
  * Natural-language workspace-room creation is an audience change, so the tool
