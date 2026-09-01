@@ -30,6 +30,15 @@ export function desktopChatRoute(workspaceId: string): string {
   return `/desktop/chat/${encodeURIComponent(workspaceId)}`;
 }
 
+/** A companion click immediately following panel blur is the outside click itself. */
+export function companionClickFollowsChatBlur(
+  nowMs: number,
+  blurredAtMs: number,
+  windowMs = 400,
+): boolean {
+  return blurredAtMs > 0 && nowMs >= blurredAtMs && nowMs - blurredAtMs <= windowMs;
+}
+
 /** Accept only the small display-only state surface sent by the chat renderer. */
 export function parseCompanionState(value: unknown): CompanionState | null {
   if (!value || typeof value !== "object") return null;

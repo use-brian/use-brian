@@ -11,7 +11,8 @@ The companion uses the canonical transparent Use Brian logo image as its base. S
 - **Keep Brian Awake** is an explicit, persisted checkbox in both the application menu and tray menu. It is off by default.
 - Enabling it starts Electron's `prevent-app-suspension` power-save blocker. The operating system may still turn off the display; Use Brian must not request `prevent-display-sleep`.
 - While enabled, a transparent, always-on-top Brian companion is visible near the lower-right corner of the primary display. The visible character is the canonical transparent `apps/app-web/public/icon.png` asset copied byte-for-byte into the app bundle. It stays available when the main window is closed and has no black tile behind it.
-- Clicking or keyboard-activating the companion toggles a frameless chat panel attached to the companion's left edge. The panel must not show, focus, navigate, or recreate the main application window, and must move with the companion when the primary display changes.
+- Dragging the companion relocates it without opening chat; a stationary click still toggles chat. The shell persists the position, clamps it to an available display on launch or monitor changes, and keeps the attached panel aligned while dragging.
+- Clicking or keyboard-activating the companion toggles a frameless chat panel attached to the companion's left edge. Clicking anywhere outside the panel, including the companion itself, hides it. The route clears the global page canvas to transparent while mounted, so no app background or shadow paints outside the rounded panel and its connector. The panel must not show, focus, navigate, or recreate the main application window, and must move with the companion when the primary display changes.
 - The chat window mounts the existing app-web `FloatingChat` in side-panel mode for the last workspace observed by the desktop shell. It does not create a second chat implementation or send an empty message automatically.
 - Closing the chat window leaves the main app and the always-awake companion unchanged. A later companion activation recreates only the chat window.
 - The companion mirrors the chat's real lifecycle: loading while the workspace assistant resolves, thinking before reply text, responding while text streams, action-required while a confirmation or question waits, and a short completion reaction when a response finishes. Active tool descriptions use the same localized narration emitted by `FloatingChat`.
@@ -46,3 +47,5 @@ The shell stores `awake-brian.json` under Electron's `userData` directory:
 ```
 
 Only `{ v: 1, keepAwake: true }` enables the feature. Missing, stale, malformed, and false values resolve to disabled.
+
+The last dragged position is stored separately in `brian-position.json` as `{ "v": 1, "x": number, "y": number }`. Invalid or off-screen values fall back or clamp to an available display.

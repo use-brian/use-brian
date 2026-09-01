@@ -28,6 +28,8 @@
         color: #eaf5ff;
         background: transparent;
         cursor: pointer;
+        touch-action: none;
+        user-select: none;
         -webkit-app-region: no-drag;
       }
       .prompt {
@@ -78,7 +80,13 @@
         filter: drop-shadow(0 9px 10px rgba(0, 21, 40, 0.38));
         transform-origin: 50% 85%;
       }
-      .pet { display: block; width: 100%; height: 100%; object-fit: contain; }
+      .pet {
+        display: block;
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        -webkit-user-drag: none;
+      }
       .lid, .mouth, .thought, .action-badge { position: absolute; pointer-events: none; }
       .lid {
         top: 40%;

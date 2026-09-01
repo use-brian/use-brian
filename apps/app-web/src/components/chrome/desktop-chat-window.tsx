@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useLayoutEffect } from "react";
 import { FloatingChat } from "@/components/chrome/floating-chat";
 import type { ChatActivity } from "@/components/chrome/floating-chat";
 import {
@@ -23,6 +23,27 @@ function DesktopChatContent({ workspaceId }: { workspaceId: string }) {
   const { assistantId } = usePrimaryAssistant();
   const t = useT().chat;
 
+  useLayoutEffect(() => {
+    const elements = [document.documentElement, document.body];
+    const previous = elements.map((element) => ({
+      value: element.style.getPropertyValue("background-color"),
+      priority: element.style.getPropertyPriority("background-color"),
+    }));
+    for (const element of elements) {
+      element.style.setProperty("background-color", "transparent", "important");
+    }
+    return () => {
+      elements.forEach((element, index) => {
+        const prior = previous[index];
+        if (prior?.value) {
+          element.style.setProperty("background-color", prior.value, prior.priority);
+        } else {
+          element.style.removeProperty("background-color");
+        }
+      });
+    };
+  }, []);
+
   useEffect(() => {
     if (!assistantId) desktopBridge()?.setCompanionState?.({ phase: "loading" });
     return () => desktopBridge()?.setCompanionState?.({ phase: "idle" });
@@ -42,7 +63,7 @@ function DesktopChatContent({ workspaceId }: { workspaceId: string }) {
 
   return (
     <main className="relative h-dvh w-full overflow-hidden bg-transparent py-2 pr-4">
-      <section className="h-full overflow-hidden rounded-2xl border border-border bg-background shadow-2xl">
+      <section className="h-full overflow-hidden rounded-2xl border border-border bg-background">
         {assistantId ? (
           <FloatingChat
             workspaceId={workspaceId}

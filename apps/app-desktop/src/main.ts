@@ -53,8 +53,13 @@ import electronUpdater from "electron-updater";
 import { resolveConfig } from "./config.js";
 import {
   AWAKE_BRIAN_FILE_NAME,
+  BRIAN_POSITION_FILE_NAME,
+  clampBrianPosition,
+  parseBrianPosition,
   parseAwakeBrianPreference,
+  serializeBrianPosition,
   serializeAwakeBrianPreference,
+  type BrianPosition,
 } from "./awake-brian.js";
 import {
   DEFAULT_LOCAL_APP_URL,
@@ -101,6 +106,7 @@ import {
 import { resolveDeepLink } from "./deep-link.js";
 import { quickCaptureUrl, recordTargetUrl } from "./quick-capture.js";
 import {
+  companionClickFollowsChatBlur,
   desktopChatRoute,
   parseCompanionState,
   workspaceIdFromDesktopRoute,
@@ -260,6 +266,9 @@ let desktopChatWindow: BrowserWindow | null = null;
 let awakeBrianBlockerId: number | null = null;
 let keepBrianAwake = false;
 let lastWorkspaceId: string | null = null;
+let desktopChatBlurredAt = 0;
+let brianPetPosition: BrianPosition | null = null;
+let brianPetDragOffset: BrianPosition | null = null;
 /** The PKCE verifier for an in-flight sign-in; held until the callback returns. */
 let pendingVerifier: string | null = null;
 /** Whether the in-flight sign-in adds a second account (stash) vs replaces the active one. */
@@ -297,10 +306,19 @@ function awakeBrianFile(): string {
   return join(app.getPath("userData"), AWAKE_BRIAN_FILE_NAME);
 }
 
+function brianPositionFile(): string {
+  return join(app.getPath("userData"), BRIAN_POSITION_FILE_NAME);
+}
+
 try {
   keepBrianAwake = parseAwakeBrianPreference(readFileSync(awakeBrianFile(), "utf8"));
 } catch {
   keepBrianAwake = false;
+}
+try {
+  brianPetPosition = parseBrianPosition(readFileSync(brianPositionFile(), "utf8"));
+} catch {
+  brianPetPosition = null;
 }
 
 /** Electron-session transport: HttpOnly deployment-gateway cookies stay on-device. */
@@ -622,6 +640,7 @@ function messageBrian(): void {
       desktopChatWindow.hide();
       return;
     }
+    if (companionClickFollowsChatBlur(Date.now(), desktopChatBlurredAt)) return;
     positionDesktopChat();
     desktopChatWindow.show();
     desktopChatWindow.focus();
@@ -679,6 +698,11 @@ function messageBrian(): void {
       win.hide();
     }
   });
+  win.on("blur", () => {
+    if (win.isDestroyed() || !win.isVisible()) return;
+    desktopChatBlurredAt = Date.now();
+    win.hide();
+  });
   win.webContents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url);
     return { action: "deny" };
@@ -698,6 +722,7 @@ function messageBrian(): void {
   });
   win.on("closed", () => {
     if (desktopChatWindow === win) desktopChatWindow = null;
+    desktopChatBlurredAt = 0;
     publishCompanionState({ phase: "idle" });
   });
 
@@ -735,13 +760,50 @@ function positionDesktopChat(): void {
 
 function positionBrianPet(): void {
   if (!brianPetWindow || brianPetWindow.isDestroyed()) return;
-  const area = screen.getPrimaryDisplay().workArea;
-  brianPetWindow.setPosition(
-    area.x + area.width - BRIAN_PET_WIDTH - BRIAN_PET_GUTTER,
-    area.y + area.height - BRIAN_PET_HEIGHT - BRIAN_PET_GUTTER,
-    false,
+  const fallbackArea = screen.getPrimaryDisplay().workArea;
+  const desired =
+    brianPetPosition ??
+    {
+      x: fallbackArea.x + fallbackArea.width - BRIAN_PET_WIDTH - BRIAN_PET_GUTTER,
+      y: fallbackArea.y + fallbackArea.height - BRIAN_PET_HEIGHT - BRIAN_PET_GUTTER,
+    };
+  const area = screen.getDisplayMatching({
+    x: desired.x,
+    y: desired.y,
+    width: BRIAN_PET_WIDTH,
+    height: BRIAN_PET_HEIGHT,
+  }).workArea;
+  brianPetPosition = clampBrianPosition(
+    desired,
+    area,
+    { width: BRIAN_PET_WIDTH, height: BRIAN_PET_HEIGHT },
   );
+  brianPetWindow.setPosition(brianPetPosition.x, brianPetPosition.y, false);
   positionDesktopChat();
+}
+
+function moveBrianPet(screenX: number, screenY: number): void {
+  if (!brianPetWindow || brianPetWindow.isDestroyed() || !brianPetDragOffset) return;
+  const display = screen.getDisplayNearestPoint({ x: Math.round(screenX), y: Math.round(screenY) });
+  brianPetPosition = clampBrianPosition(
+    {
+      x: Math.round(screenX - brianPetDragOffset.x),
+      y: Math.round(screenY - brianPetDragOffset.y),
+    },
+    display.workArea,
+    { width: BRIAN_PET_WIDTH, height: BRIAN_PET_HEIGHT },
+  );
+  brianPetWindow.setPosition(brianPetPosition.x, brianPetPosition.y, false);
+  positionDesktopChat();
+}
+
+function persistBrianPetPosition(): void {
+  if (!brianPetPosition) return;
+  try {
+    writeFileSync(brianPositionFile(), serializeBrianPosition(brianPetPosition));
+  } catch (error) {
+    console.warn("Failed to persist Brian companion position:", error);
+  }
 }
 
 function showBrianPet(): void {
@@ -2844,6 +2906,46 @@ if (!gotLock) {
     ) {
       messageBrian();
     }
+  });
+  ipcMain.on("Use Brian:companion-drag", (event, raw: unknown) => {
+    if (
+      !brianPetWindow ||
+      brianPetWindow.isDestroyed() ||
+      event.sender.id !== brianPetWindow.webContents.id ||
+      !raw ||
+      typeof raw !== "object"
+    ) {
+      return;
+    }
+    const input = raw as {
+      phase?: unknown;
+      screenX?: unknown;
+      screenY?: unknown;
+      moved?: unknown;
+    };
+    if (input.phase === "end") {
+      if (input.moved === true) persistBrianPetPosition();
+      brianPetDragOffset = null;
+      return;
+    }
+    if (
+      (input.phase !== "start" && input.phase !== "move") ||
+      typeof input.screenX !== "number" ||
+      typeof input.screenY !== "number" ||
+      !Number.isFinite(input.screenX) ||
+      !Number.isFinite(input.screenY)
+    ) {
+      return;
+    }
+    if (input.phase === "start") {
+      const bounds = brianPetWindow.getBounds();
+      brianPetDragOffset = {
+        x: input.screenX - bounds.x,
+        y: input.screenY - bounds.y,
+      };
+      return;
+    }
+    moveBrianPet(input.screenX, input.screenY);
   });
   ipcMain.on("Use Brian:companion-state", (event, rawState: unknown) => {
     if (

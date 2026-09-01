@@ -14,8 +14,49 @@ let completionTimer;
 
 window.addEventListener("DOMContentLoaded", () => {
   const status = document.getElementById("status");
+  const button = document.getElementById("message-brian");
+  let pointerStart;
+  let dragged = false;
+  let suppressClick = false;
   document.body.dataset.state = currentState;
-  document.getElementById("message-brian")?.addEventListener("click", () => {
+  button?.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    pointerStart = { x: event.screenX, y: event.screenY, id: event.pointerId };
+    dragged = false;
+    button.setPointerCapture(event.pointerId);
+    ipcRenderer.send("Use Brian:companion-drag", {
+      phase: "start",
+      screenX: event.screenX,
+      screenY: event.screenY,
+    });
+  });
+  button?.addEventListener("pointermove", (event) => {
+    if (!pointerStart || event.pointerId !== pointerStart.id) return;
+    if (Math.hypot(event.screenX - pointerStart.x, event.screenY - pointerStart.y) >= 4) {
+      dragged = true;
+    }
+    if (!dragged) return;
+    ipcRenderer.send("Use Brian:companion-drag", {
+      phase: "move",
+      screenX: event.screenX,
+      screenY: event.screenY,
+    });
+  });
+  const finishDrag = (event) => {
+    if (!pointerStart || event.pointerId !== pointerStart.id) return;
+    suppressClick = dragged;
+    ipcRenderer.send("Use Brian:companion-drag", { phase: "end", moved: dragged });
+    pointerStart = undefined;
+    dragged = false;
+    if (button.hasPointerCapture(event.pointerId)) button.releasePointerCapture(event.pointerId);
+  };
+  button?.addEventListener("pointerup", finishDrag);
+  button?.addEventListener("pointercancel", finishDrag);
+  button?.addEventListener("click", () => {
+    if (suppressClick) {
+      suppressClick = false;
+      return;
+    }
     ipcRenderer.send("Use Brian:message-brian");
   });
   ipcRenderer.on("Use Brian:companion-state", (_event, next) => {

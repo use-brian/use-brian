@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  companionClickFollowsChatBlur,
   desktopChatRoute,
   parseCompanionState,
   workspaceIdFromDesktopRoute,
@@ -26,5 +27,11 @@ describe("[COMP:app-desktop/awake-brian] desktop chat routing", () => {
     });
     expect(parseCompanionState({ phase: "unknown", label: "no" })).toBeNull();
     expect(parseCompanionState({ phase: "idle", label: "x".repeat(200) })?.label).toHaveLength(120);
+  });
+
+  it("treats the companion click that caused blur as a close, not a reopen", () => {
+    expect(companionClickFollowsChatBlur(1_250, 1_000)).toBe(true);
+    expect(companionClickFollowsChatBlur(1_500, 1_000)).toBe(false);
+    expect(companionClickFollowsChatBlur(1_000, 0)).toBe(false);
   });
 });
