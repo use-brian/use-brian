@@ -12,7 +12,6 @@ xcodebuild \
   -project "$ROOT/BrianSiri.xcodeproj" \
   -target BrianSiri \
   -configuration Release \
-  -derivedDataPath "$ROOT/build" \
   CONFIGURATION_BUILD_DIR="$ROOT/build/Release" \
   CODE_SIGNING_ALLOWED=NO \
   build
