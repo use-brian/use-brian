@@ -1,3 +1,4 @@
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Workspace realtime events client — ONE EventSource per workspace tab.
  *
@@ -36,11 +37,11 @@
  * event name) keeps bursts and catch-up collisions to one refetch per
  * domain; the server already coalesces per (workspace, primitive) at 2s.
  *
- * Absolute URLs from NEXT_PUBLIC_API_URL when it is set (prod, desktop —
+ * Absolute URLs from runtime public config when set (prod, desktop —
  * so the desktop bundle's file:// origin can't produce an unfetchable URL,
  * same footgun feed-sse.ts documents). `window.location.origin` serves ONLY
- * as the `new URL` base for next-dev, where next.config deliberately blanks
- * NEXT_PUBLIC_API_URL to "" so requests ride the /api rewrite — without the
+ * as the `new URL` base for next-dev, where the public URL is deliberately
+ * empty so requests ride the /api rewrite — without the
  * base, `new URL("/api/…")` throws in dev. Auth rides `?access_token=`
  * because EventSource cannot set headers.
  *
@@ -83,7 +84,7 @@ import {
   type InboxRefreshDetail,
 } from "@/lib/inbox-refresh-events";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 /** Mirrors the server's WorkspacePrimitive union (brain-stream/sse-fanout.ts). */
 type WorkspacePrimitive =

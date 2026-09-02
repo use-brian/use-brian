@@ -12,8 +12,8 @@
  * redirects would mean every login wipes out the local session. We
  * fall back to the sub-app's own OAuth flow when this returns `null`.
  *
- * Production deploys set `NEXT_PUBLIC_PRIMARY_AUTH_URL=https://usebrian.ai`
- * via the app's env config. We default to that when `NODE_ENV` is
+ * Production deploys may set `PUBLIC_PRIMARY_AUTH_URL=https://usebrian.ai`
+ * through runtime public config. We default to that when `NODE_ENV` is
  * `production` so the bare deploy still works without an explicit env
  * override — the override exists for staging deployments under a
  * different apex.
@@ -23,15 +23,15 @@
  */
 
 import { usebrianEdition } from "@/lib/edition";
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 import type { DeploymentProfile } from "@use-brian/shared/deployment-capabilities";
 
-const ENV_PRIMARY_AUTH_URL = process.env.NEXT_PUBLIC_PRIMARY_AUTH_URL;
 const DEFAULT_PROD_PRIMARY_AUTH_URL = "https://usebrian.ai";
 
 export function primaryAuthUrl(): string | null {
   return resolvePrimaryAuthUrl(
     usebrianEdition(),
-    ENV_PRIMARY_AUTH_URL,
+    publicRuntimeConfig().primaryAuthUrl,
     process.env.NODE_ENV,
   );
 }
@@ -43,8 +43,7 @@ export function primaryAuthUrl(): string | null {
  */
 export function publicAppUrl(
   requestUrl: string | URL,
-  configured =
-    process.env.AUTHED_APP_URL ?? process.env.NEXT_PUBLIC_AUTHED_APP_URL,
+  configured = process.env.AUTHED_APP_URL,
 ): URL {
   const request = new URL(requestUrl);
   if (!configured?.trim()) return request;
@@ -73,7 +72,7 @@ export function resolvePrimaryAuthUrl(
  * where deep account/plan config lives. App-web deep-links a few of its routes
  * (e.g. `/plans`).
  *
- * `NEXT_PUBLIC_APP_URL` overrides it; otherwise we reuse `primaryAuthUrl()`
+ * `PUBLIC_APP_URL` overrides it; otherwise we reuse `primaryAuthUrl()`
  * (which resolves to `https://usebrian.ai` in production) before falling back to
  * the dev origin. Routing the default through `primaryAuthUrl()` is what stops
  * an unset prod env var from pointing users at `http://localhost:3000` — the
@@ -81,11 +80,7 @@ export function resolvePrimaryAuthUrl(
  * deep-link must read this, never an inline `?? "http://localhost:3000"`.
  */
 export function webAppUrl(): string {
-  return (
-    process.env.NEXT_PUBLIC_APP_URL ??
-    primaryAuthUrl() ??
-    "http://localhost:3000"
-  );
+  return publicRuntimeConfig().appUrl || primaryAuthUrl() || "http://localhost:3000";
 }
 
 /**

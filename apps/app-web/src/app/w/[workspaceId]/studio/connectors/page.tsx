@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Studio -> Connectors (app-web) — the master-detail connectors surface.
  *
@@ -32,16 +34,11 @@
  *     `@use-brian/shared` dep). Every user-facing string flows through
  *     `useT()`.
  *
- * INFRA NOTE (connector OAuth env): the OAuth connect paths build the provider
- * authorize URL client-side from `NEXT_PUBLIC_GOOGLE_CLIENT_ID` /
- * `NEXT_PUBLIC_NOTION_CLIENT_ID` / `NEXT_PUBLIC_FATHOM_CLIENT_ID` and rely on
- * the server callback routes `/api/auth/callback/{google-connector,notion,
- * fathom}` (workspace-aware via `state`). Each client id must reach the browser
- * bundle as a real `NEXT_PUBLIC_*` build var: Turborepo strict env mode strips
- * bare vars like `GOOGLE_CLIENT_ID`, so the `next.config.ts` env mapping only
- * lands when that var is declared in `use-brian/turbo.json` build.env (or a
- * real `NEXT_PUBLIC_*` var is set in the Vercel project). Missing it ships an
- * empty `client_id` (Google `Error 400: invalid_request`). PAT connectors
+ * INFRA NOTE (connector OAuth env): OAuth connect paths build provider URLs in
+ * the browser from the allowlisted runtime public config and rely on the server
+ * callback routes `/api/auth/callback/{google-connector,notion,fathom}`
+ * (workspace-aware via `state`). Missing metadata produces an empty client id.
+ * PAT connectors
  * (GitHub) and custom MCP servers need no OAuth. See
  * docs/architecture/platform/deployment.md → "Turbo strict env mode".
  *
@@ -101,13 +98,11 @@ import {
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ConnectorContextBinding } from "@/components/context/connector-context-binding";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
-const GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID ?? "";
-const NOTION_CLIENT_ID = process.env.NEXT_PUBLIC_NOTION_CLIENT_ID ?? "";
-const FATHOM_CLIENT_ID = process.env.NEXT_PUBLIC_FATHOM_CLIENT_ID ?? "";
-const FATHOM_AUTHORIZE_URL =
-  process.env.NEXT_PUBLIC_FATHOM_AUTHORIZE_URL ??
-  "https://fathom.video/oauth2/authorize";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
+const GOOGLE_CLIENT_ID = publicRuntimeConfig().googleClientId;
+const NOTION_CLIENT_ID = publicRuntimeConfig().notionClientId;
+const FATHOM_CLIENT_ID = publicRuntimeConfig().fathomClientId;
+const FATHOM_AUTHORIZE_URL = publicRuntimeConfig().fathomAuthorizeUrl;
 // NOTE: there is deliberately no MSGRAPH_CLIENT_ID here either. The Entra app
 // for Microsoft Teams is resolved SERVER-side per workspace (the workspace's
 // own registration first, then deployment config), because a build-time env

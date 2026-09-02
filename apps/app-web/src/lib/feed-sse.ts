@@ -1,3 +1,4 @@
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Browser-side EventSource wrapper for the feed inbox SSE stream
  * (`GET /api/distribution/t/:workspaceId/events` — mounted public server-side
@@ -7,11 +8,11 @@
  * (docs/plans/feed-web-consolidation.md §4). Two extras over bare EventSource:
  *   1. `lastEventId` tracking so a reconnect resumes from the last processed
  *      row instead of replaying the whole initial window.
- *   2. Absolute URL building against `NEXT_PUBLIC_API_URL` when set (prod,
+ *   2. Absolute URL building against the runtime public API URL when set (prod,
  *      desktop — so the desktop bundle's `file://` origin can't produce an
  *      unfetchable URL). `window.location.origin` is passed ONLY as the
- *      `new URL` base for next-dev, where the env is deliberately blanked
- *      to "" so the stream rides the /api rewrite; an absolute API_URL
+ *      `new URL` base for next-dev, where runtime config is deliberately blank
+ *      so the stream rides the /api rewrite; an absolute API_URL
  *      ignores the base.
  *
  * [COMP:app-web/feed-sse]
@@ -20,7 +21,7 @@
 import { getAccessToken } from "@/lib/auth-fetch";
 import { usesGatewayCredentials } from "@/lib/desktop-auth-source";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 export type FeedEventRow = {
   id: string;

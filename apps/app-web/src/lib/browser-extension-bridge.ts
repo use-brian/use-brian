@@ -1,3 +1,5 @@
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
+
 /**
  * One-click pairing: hand the browser extension its relay address and pairing
  * code directly, instead of asking the user to copy two values into the popup
@@ -32,8 +34,7 @@ export const BROWSER_EXTENSION_INSTALL_URL =
  * option's default, and anything wanting a different build passes one. An
  * export would only invite a second opinion on which extension we talk to.
  */
-const EXTENSION_ID =
-  process.env.NEXT_PUBLIC_BROWSER_EXTENSION_ID ?? "nnmbbacnkekaoccmkmlfaghjaamgdpjn";
+const EXTENSION_ID = publicRuntimeConfig().browserExtensionId;
 
 type ChromeRuntime = {
   sendMessage?: (id: string, message: unknown, cb: (response: unknown) => void) => void;

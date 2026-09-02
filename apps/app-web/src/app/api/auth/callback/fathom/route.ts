@@ -1,3 +1,4 @@
+import { INTERNAL_API_URL } from "@/lib/internal-api-url";
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import {
@@ -6,8 +7,10 @@ import {
   verifyConnectorState,
 } from "@/lib/connector-oauth-state";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
-const FATHOM_CLIENT_ID = process.env.NEXT_PUBLIC_FATHOM_CLIENT_ID ?? "";
+const FATHOM_CLIENT_ID =
+  process.env.PUBLIC_FATHOM_CLIENT_ID ??
+  process.env.FATHOM_CLIENT_ID ??
+  "";
 const FATHOM_CLIENT_SECRET = process.env.FATHOM_CLIENT_SECRET ?? "";
 
 const FATHOM_TOKEN_URL = "https://api.fathom.ai/external/v1/oauth2/token";
@@ -25,7 +28,7 @@ const FATHOM_API_BASE = "https://api.fathom.ai/external/v1";
  * `state` (`fathom:<workspaceId>` or `fathom:add:<workspaceId>`). This callback
  * parses the intent + workspace id and redirects to the workspace-scoped route.
  *
- * INFRA (degraded): requires `NEXT_PUBLIC_FATHOM_CLIENT_ID` /
+ * INFRA (degraded): requires runtime public `FATHOM_CLIENT_ID` /
  * `FATHOM_CLIENT_SECRET` and a `app.usebrian.ai/...` redirect_uri allowlisted
  * with Fathom. Doc-web does not set these yet, so the connect button can't
  * reach this callback until that lands.
@@ -122,7 +125,7 @@ export async function GET(request: Request) {
     }
 
     const storeRes = await fetch(
-      `${API_URL}/api/connectors/fathom/store-credentials`,
+      `${INTERNAL_API_URL}/api/connectors/fathom/store-credentials`,
       {
         method: "POST",
         headers: {

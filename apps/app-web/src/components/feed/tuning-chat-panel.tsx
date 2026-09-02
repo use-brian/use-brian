@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Feed chat panel — evolved from
  * `apps/feed-web/src/components/tuning-chat-panel.tsx`
@@ -87,7 +89,7 @@ import {
   type NarrationDict,
 } from "@/lib/tool-narration";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 /**
  * The default sticky channel: one tuning conversation per (assistant,

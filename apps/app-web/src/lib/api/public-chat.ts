@@ -1,3 +1,5 @@
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
+import { INTERNAL_API_URL } from "@/lib/internal-api-url";
 /**
  * Public-chat SDK — anonymous chat with an assistant behind a chat-link
  * token (`/c/[token]`). Like `public-share.ts`, these calls use a PLAIN
@@ -8,17 +10,16 @@
  * [COMP:app-web/public-chat-page]
  */
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 /**
  * Base URL for a fetch that may run on the SERVER (the `/c/[token]` route
  * is an SSR Server Component). A relative URL has no origin to resolve
- * against on the server; `||` (not `??`) because NEXT_PUBLIC_API_URL is
- * the empty string in dev. Mirrors `public-share.ts`.
+ * against on the server. Mirrors `public-share.ts`.
  */
 function fetchApiBase(): string {
   if (typeof window !== "undefined") return API_URL;
-  return process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
+  return INTERNAL_API_URL;
 }
 
 export type PublicChatMeta = {

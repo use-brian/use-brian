@@ -1,3 +1,4 @@
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Workspace detail API client (app-web).
  *
@@ -23,7 +24,7 @@ import { authFetch } from "@/lib/auth-fetch";
 import { getUserInfo } from "@/lib/user";
 import type { WorkspacePickerItem } from "@/lib/workspace-picker";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 /** Mirrors the backend cap on `POST /api/workspaces/:workspaceId/icon`. */
 export const MAX_WORKSPACE_ICON_BYTES = 5 * 1024 * 1024;

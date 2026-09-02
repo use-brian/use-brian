@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Feed connection — the reusable per-platform account lifecycle card.
  * Platform Settings embeds it so account health and Connect/Reconnect/
@@ -29,7 +31,7 @@ import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 export function FeedConnection({ embedded = false }: { embedded?: boolean }) {
   const params = useParams<{ workspaceId: string; platform: string }>();

@@ -1,3 +1,4 @@
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * SDK for the Brain inbox (app-web) — workspace-scoped verification
  * surface across every brain primitive carrying the universal
@@ -6,7 +7,7 @@
  * Ported verbatim from `apps/web/src/lib/api/brain-inbox.ts` as part of
  * the brain surface migration (docs/architecture/features/doc.md
  * §5a). Identical wire contract — only the doc header differs; the
- * imports (`@/lib/auth-fetch`, `NEXT_PUBLIC_API_URL`) already resolve in
+ * imports (`@/lib/auth-fetch`, runtime public API config) already resolve in
  * app-web.
  *
  * Spec: docs/architecture/brain/corrections.md.
@@ -33,7 +34,7 @@ import {
   type BrainContentCacheScope,
 } from "@/lib/offline/brain-content-cache";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 export type BrainPrimitive =
   | "memory"

@@ -1,3 +1,4 @@
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Room pins SDK (multiplayer chat P1b, T14/T16) — the chip row's fetchers
  * over `GET/POST/DELETE /api/sessions/:id/pins`. Labels resolve server-side
@@ -7,7 +8,7 @@
 
 import { authFetch } from "@/lib/auth-fetch";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 export type SessionPinKind =
   | "page"

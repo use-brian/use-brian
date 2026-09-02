@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Floating chat panel for app-web — the ambient "Ask anything…"
  * affordance. It is mounted ONCE in `WorkspaceChrome` (the persistent
@@ -255,7 +257,7 @@ import {
 import { useFileDrop } from "@/lib/use-file-drop";
 import { AttachmentChips, FileDropOverlay } from "@/components/doc/attachment-chips";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 /**
  * The non-doc workspace surfaces this dock can mount over. Each value is

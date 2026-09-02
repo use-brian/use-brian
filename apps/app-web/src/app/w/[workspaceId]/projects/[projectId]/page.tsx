@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /** First-class Project aggregation page. [COMP:app-web/project-detail] */
 import { use, useEffect, useState } from "react";
 import { BackButton } from "@/components/ui/back-button";
@@ -16,7 +18,7 @@ import {
   type ContextProject,
 } from "@/lib/api/context-scopes";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 type Member = { userId: string; userName?: string | null; email?: string | null };
 type Assistant = { id: string; name: string };
 

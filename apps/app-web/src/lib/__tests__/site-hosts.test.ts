@@ -22,7 +22,7 @@ describe("[COMP:app-web/site-route] Custom-domain host classification", () => {
     });
 
     it("unconfigured: dev treats non-local hosts as customer sites", () => {
-      // (test env is not production; NEXT_PUBLIC_APP_HOSTS is unset)
+      // (test env is not production; APP_HOSTS is unset)
       expect(isAppHost("docs.acme.com")).toBe(false);
     });
 
@@ -35,7 +35,7 @@ describe("[COMP:app-web/site-route] Custom-domain host classification", () => {
 
     it("configured: exact entries and .suffix entries classify app origins", async () => {
       await withEnv(
-        { NEXT_PUBLIC_APP_HOSTS: "app.example.com, Example.com, .vercel.app", NODE_ENV: "production" },
+        { APP_HOSTS: "app.example.com, Example.com, .vercel.app", NODE_ENV: "production" },
         (m) => {
           expect(m.isAppHost("app.example.com")).toBe(true);
           expect(m.isAppHost("example.com")).toBe(true);
@@ -50,6 +50,16 @@ describe("[COMP:app-web/site-route] Custom-domain host classification", () => {
         },
       );
     });
+
+    it("includes the runtime app domain without a rebuild", async () => {
+      await withEnv(
+        { APP_DOMAIN: "app.runtime.example", NODE_ENV: "production" },
+        (m) => {
+          expect(m.isAppHost("app.runtime.example")).toBe(true);
+          expect(m.isAppHost("site.runtime.example")).toBe(false);
+        },
+      );
+    });
   });
 
   describe("normalizeHostHeader", () => {
@@ -57,6 +67,7 @@ describe("[COMP:app-web/site-route] Custom-domain host classification", () => {
       expect(normalizeHostHeader("Docs.Acme.com:443")).toBe("docs.acme.com");
       expect(normalizeHostHeader("docs.acme.com, proxy.internal")).toBe("docs.acme.com");
       expect(normalizeHostHeader(" docs.acme.com ")).toBe("docs.acme.com");
+      expect(normalizeHostHeader("[::1]:3003")).toBe("::1");
     });
   });
 

@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Account + workspace switcher for app-web's top-left chrome.
  *
@@ -76,7 +78,7 @@ import {
   type OpenSettingsDetail,
 } from "@/components/settings-modal/settings-modal";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 // `webAppUrl()` (the app→marketing deep-link base) is shared from
 // `@/lib/primary-auth` so billing-section / composer-controls resolve the same

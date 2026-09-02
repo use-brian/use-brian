@@ -1,3 +1,4 @@
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Brain key API client (app-web).
  *
@@ -13,7 +14,7 @@
 import { authFetch } from "@/lib/auth-fetch";
 import { DISPLAY_API_URL } from "@/lib/display-api-url";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 /** The brain MCP endpoint an external client connects to — displayed/copied,
  *  so it uses the absolute origin (see lib/display-api-url.ts). */

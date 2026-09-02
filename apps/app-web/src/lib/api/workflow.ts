@@ -1,3 +1,4 @@
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * SDK for the Workflow builder UI (app-web).
  *
@@ -28,7 +29,7 @@ import { DISPLAY_API_URL } from "@/lib/display-api-url";
 import { OFFICIAL_CONNECTOR_TOOLS } from "@use-brian/shared/builtin-connectors";
 import type { ConnectedToolSource, ToolCatalogItem } from "@/lib/workflow-tools";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 // ── Trigger ───────────────────────────────────────────────────────────────
 

@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Restock campaign builder.
  *
@@ -98,7 +100,7 @@ type UploadedCampaignFile = {
 
 const inputClass = "h-9 w-full rounded-lg border border-border bg-background px-3 text-sm";
 const textAreaClass = "w-full rounded-lg border border-border bg-background px-3 py-2 text-sm";
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 /** `shopifyListProducts` caps a page at 50 rows, so this is the largest page there is. */
 const PRODUCT_PAGE_SIZE = 50;
 const PRODUCT_SEARCH_DEBOUNCE_MS = 300;

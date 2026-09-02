@@ -1,3 +1,4 @@
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Tasks operator-surface SDK — the flat task list behind `/w/[id]/tasks`
  * (`GET /api/brain/tasks`, [COMP:brain/tasks-list-http]) plus the typed
@@ -12,7 +13,7 @@
 
 import { authFetch } from "@/lib/auth-fetch";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 export type TaskStatus =
   | "todo"

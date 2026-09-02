@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Inspection drawer — "Ask about this" surface in the brain inbox.
  *
@@ -29,7 +31,7 @@ import {
   type InspectionSession,
 } from "@/lib/api/brain-inbox";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 type Props = {
   workspaceId: string;

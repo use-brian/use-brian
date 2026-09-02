@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { authFetch } from "@/lib/auth-fetch";
@@ -24,7 +26,7 @@ import { DISPLAY_API_URL } from "@/lib/display-api-url";
  * [COMP:app-web/slack-setup-inline]
  */
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 export function SlackSetupInline({
   assistantId,

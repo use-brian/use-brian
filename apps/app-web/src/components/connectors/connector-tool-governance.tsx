@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Merged per-connector governance table for an assistant (app-web).
  *
@@ -45,7 +47,7 @@ import {
   type ToolPolicy,
 } from "./connector-tool-list";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
+const API_URL = publicRuntimeConfig().apiUrl ?? "";
 
 type Grant = {
   id: string;

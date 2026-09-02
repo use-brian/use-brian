@@ -8,6 +8,10 @@ import { PromptDialogProvider } from "@/components/ui/prompt-dialog";
 import { KindPickerDialogProvider } from "@/components/ui/kind-picker-dialog";
 import { RouteProgress } from "@/components/route-progress";
 import { MACOS_TRAFFIC_LIGHT_CLEARANCE_PX } from "@/lib/desktop-titlebar";
+import {
+  resolveRuntimePublicConfig,
+  runtimePublicConfigScript,
+} from "@/lib/runtime-public-config";
 import "./globals.css";
 
 // Mirror apps/web's font system: `--font-rocknroll` is a CSS variable
@@ -104,6 +108,9 @@ export default async function RootLayout({
   children: React.ReactNode;
 }>) {
   const { locale, dict } = await getServerDictionary();
+  const publicConfigScript = runtimePublicConfigScript(
+    resolveRuntimePublicConfig(process.env),
+  );
   return (
     <html
       lang={locale}
@@ -111,6 +118,11 @@ export default async function RootLayout({
       suppressHydrationWarning
     >
       <head>
+        <script
+          // This allowlisted runtime config must run before client modules.
+          // eslint-disable-next-line react/no-danger
+          dangerouslySetInnerHTML={{ __html: publicConfigScript }}
+        />
         <script
           // eslint-disable-next-line react/no-danger
           dangerouslySetInnerHTML={{ __html: DESKTOP_SHELL_PREPAINT_SCRIPT }}

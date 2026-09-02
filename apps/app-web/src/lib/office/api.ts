@@ -1,8 +1,9 @@
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /** Client-safe Office REST SDK. [COMP:app-web/office-home] */
 import { authFetch } from "@/lib/auth-fetch";
 import type { OfficeArtifactSnapshot, OfficeCommand, OfficeResourceRef, OfficeTemplateRoutingDraft, OfficeTemplateSlideRole } from "@use-brian/office-model";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 const officeResourceObjectUrls = new Map<string, Promise<string>>();
 
 export type OfficeFamily = "document" | "presentation" | "spreadsheet";

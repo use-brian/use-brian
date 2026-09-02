@@ -8207,7 +8207,7 @@ export const zhCN: Dictionary = {
   drivePicker: {
     connectFirst: "请先连接 Google 文档、试算表与演示文稿。",
     noToken: "无法取得云端硬盘访问权杖。",
-    notConfigured: "Google 挑选器尚未设置。请洽管理员设置 GOOGLE_API_KEY 与 GOOGLE_PROJECT_NUMBER，然后重新连接 Google。",
+    notConfigured: "Google 挑选器尚未设置。请洽管理员设置 PUBLIC_GOOGLE_API_KEY 与 GOOGLE_PROJECT_NUMBER，然后重新连接 Google。",
     loading: "Google 挑选器仍在加载，请稍候再试。",
     pickerFailed: "挑选器打开失败",
     notConfiguredDeployment: "此部署尚未设置 Google 挑选器。",

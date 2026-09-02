@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Chat operator app — the full-page, ChatGPT-style chat surface at
  * `/w/<workspaceId>/chat`, the 6th operator app under Home.
@@ -284,7 +286,7 @@ import {
   type ChatSurfaceMessage as SurfaceMessage,
 } from "@/components/chat-app/chat-transcript";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 const REMARK_PLUGINS = [remarkGfm];
 const CHAT_MARKDOWN_COMPONENTS = { pre: ChatCodeBlock };
 

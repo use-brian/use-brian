@@ -1,3 +1,4 @@
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Public-share SDK — anonymous read of an externally shared doc page.
  *
@@ -12,24 +13,22 @@
 
 import type { Metadata } from "next";
 import type { ViewPayload } from "@use-brian/views-renderer";
+import { INTERNAL_API_URL } from "@/lib/internal-api-url";
 
-// Client base: intentionally "" in dev (next.config sets NEXT_PUBLIC_API_URL
-// to "" there) so browser requests stay relative and the Next.js `/api/*`
-// rewrite proxies them to the backend. In prod it's the absolute API origin.
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+// The runtime public URL may intentionally be empty in development so browser
+// requests stay relative and the Next.js `/api/*` rewrite proxies them.
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 /**
  * Base URL for a fetch that may run on the SERVER (the `/share/[token]` route
  * is an SSR Server Component, and its client view also re-fetches). A relative
  * URL has no origin to resolve against on the server, so `fetch("/api/...")`
  * throws there. On the client we keep the relative/proxied base (`API_URL`);
- * on the server we resolve an absolute backend URL. `??` is not enough because
- * `NEXT_PUBLIC_API_URL` is the empty string (not undefined) in dev, so we use
- * `||` to fall through to the localhost default.
+ * on the server we use the private machine-to-machine origin.
  */
 function fetchApiBase(): string {
   if (typeof window !== "undefined") return API_URL;
-  return process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
+  return INTERNAL_API_URL;
 }
 
 /** Loose block shape — the public response mirrors the core Block union. */

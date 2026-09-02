@@ -1,3 +1,4 @@
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * SDK for the Notion-redesign Views surface (apps/web).
  *
@@ -40,7 +41,7 @@ import {
   Workflow,
 } from "lucide-react";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 // ── Wire-format types (mirror `@use-brian/core/src/views/*`) ─────────
 

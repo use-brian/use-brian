@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Self-maintain agent config — the mandatory-field enable form on the focused
  * knowledge source (Studio → Knowledge master-detail, plan D5/D6).
@@ -22,7 +24,7 @@ import { format } from "@/lib/i18n";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { Switch } from "@/components/ui/switch";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 type Sensitivity = "public" | "internal" | "confidential";
 

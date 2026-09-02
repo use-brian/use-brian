@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 // [COMP:app-web/block-bookmark]
 /**
  * Phase 2 media block — `kind: 'bookmark'`.
@@ -24,7 +26,7 @@ import { useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n/client";
 import { authFetch } from "@/lib/auth-fetch";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 type BookmarkMeta = {
   title?: string;

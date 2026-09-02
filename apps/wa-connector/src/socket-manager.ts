@@ -43,16 +43,16 @@ type ContactSyncEntry = {
 }
 import { createHash, randomUUID } from 'node:crypto'
 import { createReadStream, createWriteStream } from 'node:fs'
-import { rm } from 'node:fs/promises'
+import { readdir, rm } from 'node:fs/promises'
 import { pipeline } from 'node:stream/promises'
 import { Transform } from 'node:stream'
 import pino from 'pino'
 
 /**
- * LOCAL DEV ONLY — when `WA_LOCAL_CREDS_DIR` is set, persist Baileys auth
+ * LOCAL FILESYSTEM MODE — when `WA_LOCAL_CREDS_DIR` is set, persist Baileys auth
  * state to the local filesystem (Baileys' `useMultiFileAuthState`) instead of
- * GCS. Lets a developer pair + test without GCP credentials or a GCS
- * emulator. Never set in production (Cloud Run has no durable local disk).
+ * GCS. Local development and single-host Compose mount this path durably;
+ * Cloud Run must leave it unset because its local disk is ephemeral.
  */
 const LOCAL_CREDS_DIR = process.env.WA_LOCAL_CREDS_DIR ?? null
 import {
@@ -252,12 +252,14 @@ export function createSocketManager(options: SocketManagerOptions): SocketManage
       if (pool) await deleteAuthStatePg(pool, channelId)
     } else if (backend === 'gcs') {
       await deleteAuthState(bucket, channelId)
+    } else if (LOCAL_CREDS_DIR) {
+      await rm(join(LOCAL_CREDS_DIR, channelId), { recursive: true, force: true })
     }
-    // 'local' creds are dev-only filesystem dirs; left in place on logout.
   }
 
   /** Drain the pending creds-save queue for a channel on its backend. */
   function drainSaveQueue(channelId: string, backend: CredBackend): Promise<void> {
+    if (backend === 'local') return Promise.resolve()
     return backend === 'postgres'
       ? waitForCredsSaveQueuePg(channelId)
       : waitForCredsSaveQueue(`channels/${channelId}`)
@@ -1066,7 +1068,7 @@ export function createSocketManager(options: SocketManagerOptions): SocketManage
       // Backend defaults to GCS when the socket is already gone — only official
       // (GCS) callers pass deleteCreds today; BYON deletion happens on logout
       // where the live socket carries its backend.
-      const backend: CredBackend = managed?.backend ?? 'gcs'
+      const backend: CredBackend = managed?.backend ?? (LOCAL_CREDS_DIR ? 'local' : 'gcs')
       if (managed) {
         managed.intentionalClose = true
         try {
@@ -1169,8 +1171,8 @@ export function createSocketManager(options: SocketManagerOptions): SocketManage
     },
 
     async restoreAll() {
-      // Official channels (GCS). Local-dev FS mode skips this — official creds
-      // live on ephemeral disk there, so pair fresh via QR.
+      // Official channels use GCS in cloud deployments and one directory per
+      // channel in durable local-filesystem mode.
       if (!LOCAL_CREDS_DIR) {
         const gcsIds = await listStoredChannels(bucket)
         console.log(`[socket-manager] Found ${gcsIds.length} GCS (official) credentials to restore`)
@@ -1183,7 +1185,23 @@ export function createSocketManager(options: SocketManagerOptions): SocketManage
           }
         }
       } else {
-        console.log('[socket-manager] WA_LOCAL_CREDS_DIR set — skipping GCS/FS restore (official)')
+        let localIds: string[] = []
+        try {
+          localIds = (await readdir(LOCAL_CREDS_DIR, { withFileTypes: true }))
+            .filter((entry) => entry.isDirectory())
+            .map((entry) => entry.name)
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+        }
+        console.log(`[socket-manager] Found ${localIds.length} local credentials to restore`)
+        for (const channelId of localIds) {
+          try {
+            console.log(`[socket-manager] Restoring local socket for ${channelId}`)
+            await createSocket(channelId, 'local')
+          } catch (err) {
+            console.error(`[socket-manager] Failed to restore local socket for ${channelId}:`, err)
+          }
+        }
       }
 
       // BYON channels (Postgres). Restored in both dev and prod when a pool is

@@ -5,12 +5,9 @@
       "dependsOn": ["^build"],
       "outputs": ["dist/**", ".next/**"],
       "env": [
-        "GOOGLE_CLIENT_ID",
-        "GOOGLE_API_KEY",
-        "GOOGLE_PROJECT_NUMBER",
         "NODE_ENV",
         "OSS_GIT_COMMIT_SHA",
-        "NEXT_PUBLIC_*"
+        "NEXT_PUBLIC_OSS_GIT_COMMIT_SHA"
       ]
     },
     "dev": {

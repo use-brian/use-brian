@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 // [COMP:app-web/redeem] — see docs/architecture/features/promo-codes.md
 //
 // Client half of the in-app redeem page. The server component
@@ -13,7 +15,7 @@ import { authFetch, refreshUserCookie } from "@/lib/auth-fetch";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 type RedeemResult =
   | { kind: "idle" }

@@ -9,7 +9,8 @@
       classic (non-module) script in <head>, so it executes BEFORE the deferred
       module bundle — app-web's lib code reads `process.env.NEXT_PUBLIC_*` at
       module-init, and there is no Next env injection on file://. The Electron
-      shell passes the backend via `?api=` on the loadFile URL.
+      shell passes the persisted deployment public config plus its validated
+      API override on the loadFile URL.
     -->
     <script>
       (function () {
@@ -18,6 +19,15 @@
           params.get("api") ||
           (window.__DOC_CONFIG__ && window.__DOC_CONFIG__.apiUrl) ||
           "http://localhost:4000";
+        var publicConfig = {};
+        try {
+          publicConfig = JSON.parse(params.get("publicConfig") || "{}");
+        } catch (e) {}
+        window.__USE_BRIAN_PUBLIC_CONFIG__ = Object.assign(
+          {},
+          publicConfig,
+          { apiUrl: api },
+        );
         window.__DOC_CONFIG__ = Object.assign(
           { apiUrl: api },
           window.__DOC_CONFIG__,

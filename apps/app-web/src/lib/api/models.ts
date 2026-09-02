@@ -1,3 +1,4 @@
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * SDK for the model selection surfaces (model-registry.md L10/L15):
  * per-class menus, metered profiles CRUD, and the metered pre-flight
@@ -9,7 +10,7 @@
 
 import { authFetch } from "@/lib/auth-fetch";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 export type MenuModel = {
   alias: string;

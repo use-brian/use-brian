@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Renders a chat/comment message's uploaded attachments as file cards — an
  * image thumbnail (sourced from the base64 the message persists, so it
@@ -31,7 +33,7 @@ import { hasConvertiblePdfPreview } from "@/lib/convertible-preview";
 import { VisualLightbox } from "./visual-lightbox";
 import type { MessageAttachmentRef } from "@/lib/api/sessions";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 /** "image/png" → "PNG", "application/pdf" → "PDF", "text/markdown" → "MARKDOWN". */
 function typeLabel(mime: string): string {

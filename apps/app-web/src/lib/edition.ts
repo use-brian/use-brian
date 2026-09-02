@@ -4,11 +4,10 @@ import {
   type DeploymentCapabilities,
   type DeploymentProfile,
 } from "@use-brian/shared/deployment-capabilities";
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 
 export function usebrianEdition(): DeploymentProfile {
-  return resolveDeploymentProfile(
-    process.env.NEXT_PUBLIC_USEBRIAN_EDITION ?? process.env.USEBRIAN_EDITION,
-  );
+  return resolveDeploymentProfile(publicRuntimeConfig().edition);
 }
 
 export function deploymentCapabilities(): DeploymentCapabilities {

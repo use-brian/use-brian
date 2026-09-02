@@ -49,6 +49,7 @@ import type {
 } from '../types.js'
 import { renderRowValue } from '../render.js'
 import { getCoverImageRef, PROPERTIES } from '../properties/index.js'
+import { runtimePublicApiUrl } from '../properties/files.js'
 
 export type GalleryProps = {
   rows: A2UIRow[]
@@ -197,11 +198,7 @@ function GalleryCard(props: GalleryCardProps): JSX.Element {
  * the signed-URL endpoint lands.
  */
 function previewUrlFor(ref: FileRef): string | null {
-  const env =
-    (typeof process !== 'undefined'
-      ? (process as { env?: Record<string, string | undefined> }).env
-      : undefined) ?? {}
-  const base = env.NEXT_PUBLIC_API_URL ?? ''
+  const base = runtimePublicApiUrl()
   if (ref.bucket === 'file_cache') {
     const prefix = base.length > 0 ? base.replace(/\/+$/, '') : ''
     return `${prefix}/api/files/${encodeURIComponent(ref.path)}/preview`

@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 // Ported from apps/web/src/app/(app)/settings/account/page.tsx
 // (AccountPage → AccountSection). The earlier app-web port was a thinner
 // stub (initials bubble, no name-save, no avatar upload); this gap-fills it
@@ -46,7 +48,7 @@ import { isOssEdition, isHostedEdition } from "@/lib/edition";
 import { useWorkspaceContext } from "@/lib/workspace-context";
 import { primaryAuthUrl } from "@/lib/primary-auth";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 /** A transient status banner: success or error feedback after an action. */
 type Status = { kind: "success" | "error"; text: string } | null;

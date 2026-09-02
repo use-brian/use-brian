@@ -1,3 +1,4 @@
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Durable-file SDK (app-web) — ordinary files either stage with
  * POST /api/files/store or explicitly decompose with POST /api/files/ingest;
@@ -16,7 +17,7 @@
 import { authFetch, getValidAccessToken } from "@/lib/auth-fetch";
 import { usesGatewayCredentials } from "@/lib/desktop-auth-source";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 /** Keep one multipart body below Cloud Run's 32 MiB HTTP/1 request ceiling. */
 export const MAX_INGEST_FILE_BYTES = 30 * 1024 * 1024;

@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 // [COMP:app-web/plan-gate] — see docs/architecture/platform/cost-and-pricing.md
 // → "No free plan: the hosted paid gate (2026-07-10)"
 //
@@ -35,7 +37,7 @@ import { useT } from "@/lib/i18n/client";
 import styles from "./plan-gate.module.css";
 
 const OSS_REPO_URL = "https://github.com/use-brian/use-brian";
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 function BrianTrialMascot() {
   return (

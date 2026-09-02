@@ -74,10 +74,14 @@ COPY --from=build /app/packages/api/dist ./packages/api/dist
 COPY --from=build /app/packages/brian-app/dist ./packages/brian-app/dist
 COPY --from=build /app/packages/doc-model/dist ./packages/doc-model/dist
 COPY --from=build /app/apps/api/dist ./apps/api/dist
+COPY packages/api/scripts ./packages/api/scripts
 COPY packages/api/migrations ./packages/api/migrations
+
+RUN install -d -o node -g node /data /data/files
 
 ENV NODE_ENV=production \
     PORT=4000
+USER node
 EXPOSE 4000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||4000)+'/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"

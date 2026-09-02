@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Studio → Knowledge — the master-detail knowledge-base surface (app-web).
  *
@@ -44,7 +46,7 @@ import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n";
 import { BookOpen, FolderGit2, HardDrive, NotebookPen } from "lucide-react";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 type Sensitivity = "public" | "internal" | "confidential";
 

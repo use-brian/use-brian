@@ -1,3 +1,4 @@
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Typed fetchers for the app-web session-resume flow.
  *
@@ -35,7 +36,7 @@
 import { authFetch } from "@/lib/auth-fetch";
 import type { DocumentAttachment } from "@use-brian/chat-ui";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 /** Sidebar list row — mirrors what /api/sessions returns. */
 export type DocSession = {

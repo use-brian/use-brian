@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Connect-an-account dialog — ported faithfully from
  * `apps/feed-web/src/components/connect-account-dialog.tsx`
@@ -34,7 +36,7 @@ import {
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 const CONNECT_ATTEMPT_TIMEOUT_MS = 15_000;
 
 type DistributionAssistant = { id: string; name: string };

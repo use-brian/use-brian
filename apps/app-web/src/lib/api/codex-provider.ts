@@ -1,3 +1,4 @@
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Local OSS ChatGPT-subscription API client.
  *
@@ -8,7 +9,7 @@
  */
 import { authFetch } from "@/lib/auth-fetch";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 const BASE = `${API_URL}/api/local/codex`;
 
 type CodexAccountStatus = {

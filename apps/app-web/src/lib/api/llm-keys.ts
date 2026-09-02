@@ -1,3 +1,4 @@
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Workspace LLM provider key (BYO) API client (app-web).
  *
@@ -11,7 +12,7 @@
  */
 import { authFetch } from "@/lib/auth-fetch";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 /** Masked key status — the only key info the server ever returns. */
 export type LlmKeyStatus = {

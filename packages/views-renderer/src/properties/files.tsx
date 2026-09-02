@@ -39,17 +39,31 @@ import type { A2UIRowValue, FileRef, FilesWidget } from '../types.js'
 import type { PropertyCellProps, PropertyEditorProps, PropertyModule } from './types.js'
 import { Empty } from './empty.js'
 
-// Default upload endpoint. Host bundles (apps/app-web, apps/web) inject
-// the API origin via the `NEXT_PUBLIC_API_URL` env var; when this package
-// is used inside a chat surface that already proxies `/api/...`, the
-// relative path works without modification.
-function uploadEndpoint(): string {
+/** Public API origin supplied by the host application at runtime. */
+export function runtimePublicApiUrl(): string {
+  const runtime = (
+    globalThis as typeof globalThis & {
+      __USE_BRIAN_PUBLIC_CONFIG__?: { apiUrl?: unknown }
+    }
+  ).__USE_BRIAN_PUBLIC_CONFIG__?.apiUrl
+  if (typeof runtime === 'string') return runtime
+
   const env =
     (typeof process !== 'undefined'
       ? (process as { env?: Record<string, string | undefined> }).env
       : undefined) ?? {}
-  const base = env.NEXT_PUBLIC_API_URL
-  if (typeof base === 'string' && base.length > 0) {
+  return (
+    env.PUBLIC_API_URL ??
+    (env.API_DOMAIN ? `https://${env.API_DOMAIN}` : undefined) ??
+    env.NEXT_PUBLIC_API_URL ??
+    ''
+  )
+}
+
+// Relative paths remain valid for hosts that proxy `/api/*` themselves.
+function uploadEndpoint(): string {
+  const base = runtimePublicApiUrl()
+  if (base.length > 0) {
     return `${base.replace(/\/+$/, '')}/api/files/upload`
   }
   return '/api/files/upload'
@@ -107,11 +121,7 @@ function formatBytes(n: number): string {
  * the signed-URL endpoint lands (P2D).
  */
 function previewUrlFor(ref: FileRef): string | null {
-  const env =
-    (typeof process !== 'undefined'
-      ? (process as { env?: Record<string, string | undefined> }).env
-      : undefined) ?? {}
-  const base = env.NEXT_PUBLIC_API_URL ?? ''
+  const base = runtimePublicApiUrl()
   if (ref.bucket === 'file_cache') {
     const prefix = base.length > 0 ? base.replace(/\/+$/, '') : ''
     return `${prefix}/api/files/${encodeURIComponent(ref.path)}/preview`

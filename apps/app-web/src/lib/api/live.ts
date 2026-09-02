@@ -1,3 +1,4 @@
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * SDK for the Live all-activity roster (docs/architecture/features/live-work.md §3).
  *
@@ -13,7 +14,7 @@
 
 import { authFetch } from "@/lib/auth-fetch";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 export type LiveWorkState = "working" | "waiting" | "stalled" | "settled";
 
