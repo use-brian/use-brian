@@ -4,4 +4,3 @@ dist/
 release/
 renderer/
 node_modules/
-native/siri-companion/build/

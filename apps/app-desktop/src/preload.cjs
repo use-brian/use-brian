@@ -55,9 +55,6 @@ const bridge = {
     ),
   signIn: () => ipcRenderer.send("Use Brian:sign-in"),
   signOut: () => ipcRenderer.send("Use Brian:sign-out"),
-  // One-shot Siri payload. Only the main app renderer can consume the prompt;
-  // app-web routes carry an `ask=1` signal rather than spoken text.
-  takeSiriPrompt: () => ipcRenderer.sendSync("Use Brian:take-siri-prompt"),
   // The offline landing's "Retry" button asks the shell to reload the app now.
   // Present in every mode (like signIn/out); the offline landing is shell-owned.
   retry: () => ipcRenderer.send("Use Brian:retry-load"),

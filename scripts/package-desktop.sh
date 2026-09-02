@@ -157,8 +157,6 @@ else
   pnpm --filter app-web run build:desktop
   echo "==> Building app-desktop (tsc + asset copy)"
   pnpm --filter @use-brian/app-desktop run build
-  echo "==> Building Siri App Intents extension"
-  pnpm --filter @use-brian/app-desktop run build:siri
   echo "==> Packaging + signing + notarizing the app (Apple notary, a few min)"
   pnpm --filter @use-brian/app-desktop exec electron-builder --mac
 fi

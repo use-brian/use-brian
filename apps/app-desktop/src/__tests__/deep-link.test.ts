@@ -1,10 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import {
-  MAX_SIRI_PROMPT_LENGTH,
-  parseAskBrianDeepLink,
-  resolveDeepLink,
-} from "../deep-link.js";
+import { resolveDeepLink } from "../deep-link.js";
 
 const cfg = { appUrl: "https://app.usebrian.ai", protocolScheme: "usebrian" };
 
@@ -47,36 +43,5 @@ describe("[COMP:app-desktop/deep-link] resolveDeepLink", () => {
 
   it("returns null for an unknown command", () => {
     expect(resolveDeepLink("usebrian://wat?path=/x", cfg)).toBeNull();
-  });
-});
-
-describe("[COMP:app-desktop/deep-link] parseAskBrianDeepLink", () => {
-  it("extracts, decodes, and trims a Siri prompt", () => {
-    expect(
-      parseAskBrianDeepLink(
-        "usebrian://ask?prompt=%20Summarize%20my%20tasks%20",
-        "usebrian",
-      ),
-    ).toBe("Summarize my tasks");
-  });
-
-  it("rejects missing, empty, oversized, and unrelated requests", () => {
-    expect(parseAskBrianDeepLink("usebrian://ask", "usebrian")).toBeNull();
-    expect(
-      parseAskBrianDeepLink("usebrian://ask?prompt=%20", "usebrian"),
-    ).toBeNull();
-    expect(
-      parseAskBrianDeepLink(
-        `usebrian://ask?prompt=${"x".repeat(MAX_SIRI_PROMPT_LENGTH + 1)}`,
-        "usebrian",
-      ),
-    ).toBeNull();
-    expect(
-      parseAskBrianDeepLink("usebrian://open?prompt=hello", "usebrian"),
-    ).toBeNull();
-    expect(
-      parseAskBrianDeepLink("evil://ask?prompt=hello", "usebrian"),
-    ).toBeNull();
-    expect(parseAskBrianDeepLink("not a url", "usebrian")).toBeNull();
   });
 });
