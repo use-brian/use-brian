@@ -14,7 +14,18 @@
  * [COMP:app-desktop/window-policy]
  */
 
+import type { TargetAuth } from "./target-store.js";
+
 export type NavDecision = "internal" | "external";
+
+/** The bundled SPA's anonymous screen is not the desktop login experience. */
+export function shouldShowSignInLandingOnLaunch(input: {
+  bundled: boolean;
+  targetAuth: TargetAuth;
+  hasStoredTokens: boolean;
+}): boolean {
+  return input.bundled && input.targetAuth === "pkce" && !input.hasStoredTokens;
+}
 
 /**
  * Decide whether a navigation should load inside the app window

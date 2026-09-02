@@ -95,6 +95,7 @@ import {
   parseRefreshBounce,
   decideLoadFailureAction,
   shouldAttemptLocalMint,
+  shouldShowSignInLandingOnLaunch,
 } from "./window-policy.js";
 import {
   isAllowedGatewayNavigation,
@@ -592,6 +593,16 @@ function createWindow(): BrowserWindow {
     void win.webContents.loadFile(SIGNIN_PAGE, {
       query: { mode: "local-setup", url: cfg.appUrl, reason: "access" },
     });
+  } else if (
+    shouldShowSignInLandingOnLaunch({
+      bundled: cfg.bundled,
+      targetAuth: cfg.targetAuth,
+      hasStoredTokens: readStoredTokens() !== null,
+    })
+  ) {
+    // The SPA's anonymous state is defensive only. Signed-out packaged launches
+    // use the same branded native landing as the existing desktop auth flow.
+    void win.webContents.loadFile(SIGNIN_PAGE);
   } else {
     void loadApp(win);
   }
@@ -2243,8 +2254,8 @@ async function signOut(): Promise<void> {
     // Bundled mode is single-account (Bearer tokens, no saved-account store).
     clearStoredTokens();
     const win = ensureWindow();
+    await win.webContents.loadFile(SIGNIN_PAGE);
     focusWindow(win);
-    await loadApp(win);
     return;
   }
 
