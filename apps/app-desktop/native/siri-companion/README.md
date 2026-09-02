@@ -27,3 +27,13 @@ the same Developer ID identity.
 The Electron app launches the agent once after startup so Launch Services and
 Siri discover its App Shortcuts. No separate installation or App Store listing
 is required.
+
+For a standalone development test, build and launch the ad-hoc-signed agent:
+
+```sh
+open -g -j "apps/app-desktop/native/siri-companion/build/Release/Brian Siri.app"
+```
+
+`Brian Siri` should remain visible in Activity Monitor without showing a Dock
+icon. Restart Shortcuts after the first launch, then search its action library
+for "Ask Brian".

@@ -1,14 +1,23 @@
-import SwiftUI
+import AppKit
 
 @main
-struct BrianSiriApp: App {
-    init() {
+enum BrianSiriApp {
+    private static let appDelegate = BrianSiriAppDelegate()
+
+    static func main() {
+        let application = NSApplication.shared
+        application.setActivationPolicy(.accessory)
+        application.delegate = appDelegate
+        application.run()
+    }
+}
+
+private final class BrianSiriAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
         BrianShortcuts.updateAppShortcutParameters()
     }
 
-    var body: some Scene {
-        Settings {
-            EmptyView()
-        }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
     }
 }

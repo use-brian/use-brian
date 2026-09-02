@@ -13,5 +13,7 @@ xcodebuild \
   -target BrianSiri \
   -configuration Release \
   CONFIGURATION_BUILD_DIR="$ROOT/build/Release" \
-  CODE_SIGNING_ALLOWED=NO \
+  CODE_SIGN_STYLE=Manual \
+  CODE_SIGN_IDENTITY=- \
+  CODE_SIGNING_REQUIRED=YES \
   build
