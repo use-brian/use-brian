@@ -2724,20 +2724,6 @@ function appUrlFromArgv(argv: readonly string[]): string | null {
   return argv.find((arg) => arg.startsWith(`${cfg.protocolScheme}://`)) ?? null;
 }
 
-function launchSiriCompanion(): void {
-  if (process.platform !== "darwin" || !app.isPackaged) return;
-  const companionPath = join(
-    dirname(app.getPath("exe")),
-    "..",
-    "Library",
-    "LoginItems",
-    "Brian Siri.app",
-  );
-  if (!existsSync(companionPath)) return;
-  const child = spawn("/usr/bin/open", ["-g", "-j", companionPath], { stdio: "ignore" });
-  child.on("error", (error) => console.warn("Failed to register the Siri companion:", error));
-}
-
 // ── Menus + tray ───────────────────────────────────────────────
 
 /**
@@ -3172,7 +3158,6 @@ if (!gotLock) {
   }
 
   app.whenReady().then(async () => {
-    launchSiriCompanion();
     if (app.isPackaged) {
       void registerFirefoxNativeHost({
         platform: process.platform,

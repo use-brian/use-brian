@@ -1,7 +1,8 @@
 # Brian Siri companion
 
-This is a windowless macOS App Intents host bundled inside the Electron app. It
-does not have a Dock icon (`LSUIElement`) or a user-facing window.
+This is a macOS App Intents extension bundled inside the Electron app. macOS
+launches it only while an intent runs, so it has no window, Dock icon, login
+item, or persistent process.
 
 The shortcut phrases are "Ask Brian" and "Tell Brian". Siri then asks for the
 request because App Shortcuts only permit `AppEntity` and `AppEnum` parameters,
@@ -20,20 +21,12 @@ pnpm --filter @use-brian/app-desktop run build:siri
 ```
 
 The macOS package command builds the companion automatically and
-electron-builder embeds it at `Use Brian.app/Contents/Library/LoginItems/Brian
-Siri.app`. The parent packaging process signs and notarizes the nested app with
-the same Developer ID identity.
+electron-builder embeds it at `Use Brian.app/Contents/PlugIns/Brian Siri.appex`.
+The `afterPack` hook signs the sandboxed extension with the available Developer
+ID identity before electron-builder signs and notarizes the parent app. Local
+packages use an ad-hoc signature.
 
-The Electron app launches the agent once after startup so Launch Services and
-Siri discover its App Shortcuts. No separate installation or App Store listing
-is required.
-
-For a standalone development test, build and launch the ad-hoc-signed agent:
-
-```sh
-open -g -j "apps/app-desktop/native/siri-companion/build/Release/Brian Siri.app"
-```
-
-`Brian Siri` should remain visible in Activity Monitor without showing a Dock
-icon. Restart Shortcuts after the first launch, then search its action library
-for "Ask Brian".
+Installing and opening the signed parent app lets macOS discover the extension's
+compiled App Intents metadata. The extension is not launched manually and is
+normally visible in Activity Monitor only while Siri or Shortcuts runs it. No
+separate installation or App Store listing is required.
