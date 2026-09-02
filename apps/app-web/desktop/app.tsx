@@ -84,8 +84,6 @@ import { TasksSurface } from "@/components/tasks/tasks-surface";
 import { CrmSurface } from "@/components/crm/crm-surface";
 import WorkflowDetailPage from "@/app/w/[workspaceId]/workflow/[id]/page";
 import WorkflowRunDetailPage from "@/app/w/[workspaceId]/workflow/[id]/runs/[runId]/page";
-import KbGapsPage from "@/app/w/[workspaceId]/knowledge-base/gaps/page";
-import KbNewStubPage from "@/app/w/[workspaceId]/knowledge-base/new/page";
 
 // Feed surface — the ported feed-web operator app
 // (docs/plans/feed-web-consolidation.md §10). The Next routes are thin
@@ -191,7 +189,7 @@ export function App() {
                   feed tuning dock under the chat-dock suppression hold). */}
               <Route path="feed" element={<FeedShell />}>
                 <Route index element={<FeedPlan />} />
-                <Route path="voice" element={<FeedVoice />} />
+                <Route path="voice" element={<FeedVoice scope="company" />} />
                 <Route path=":platform" element={<FeedPlatformGuard />}>
                   {/* No Next page exists at the bare platform root — land on
                       the feed index instead of a dead leaf. */}
@@ -213,10 +211,6 @@ export function App() {
                 path="approvals"
                 element={<WorkspaceRedirect to="p?panel=approvals" />}
               />
-
-              {/* Knowledge-base */}
-              <Route path="knowledge-base/gaps" element={<KbGapsPage />} />
-              <Route path="knowledge-base/new" element={<KbNewStubPage />} />
 
               {/* Legacy URL shims (parity with the Next server redirects). */}
               <Route path="inbox" element={<WorkspaceRedirect to="p" />} />
