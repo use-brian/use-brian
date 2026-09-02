@@ -62,6 +62,7 @@ import { useWorkspaceEvents } from "@/lib/workspace-events";
 import { cn } from "@/lib/utils";
 import { CHAT_SEED_EVENT, type ChatSeed } from "@/lib/chat-seed";
 import { desktopBridge } from "@/lib/desktop-auth-source";
+import { normalizeSiriPrompt } from "@/lib/siri-ask";
 import {
   desktopTitlebarInsetCssPx,
   resolveDesktopZoomFactor,
@@ -225,7 +226,7 @@ export function WorkspaceChrome({
   } | null>(null);
   const [createTeamspaceOpen, setCreateTeamspaceOpen] = useState(false);
   const modalTeamspace = teamspaceModal
-    ? teamspaces.find((ts) => ts.id === teamspaceModal.id) ?? null
+    ? (teamspaces.find((ts) => ts.id === teamspaceModal.id) ?? null)
     : null;
 
   // The active page id is the canonical `/p/<pageId>` path segment — used only
@@ -259,6 +260,7 @@ export function WorkspaceChrome({
   // same event from inside the page surface.)
   const [seed, setSeed] = useState<RoutedSeed | null>(null);
   const seedNonceRef = useRef(0);
+  const siriAskRef = useRef<string | null>(null);
   useEffect(() => {
     if (typeof window === "undefined") return;
     function onSeed(e: Event) {
@@ -283,6 +285,47 @@ export function WorkspaceChrome({
     window.addEventListener(CHAT_SEED_EVENT, onSeed);
     return () => window.removeEventListener(CHAT_SEED_EVENT, onSeed);
   }, []);
+
+  // The native App Intent enters through `?ask=`. Keep the handoff in the
+  // persistent chrome so it survives child-route redirects, targets exactly
+  // one responsive chat instance, and can wait for assistant resolution.
+  useEffect(() => {
+    const raw = searchParams.get("ask");
+    if (raw === null) {
+      siriAskRef.current = null;
+      return;
+    }
+    if (siriAskRef.current === raw) return;
+    siriAskRef.current = raw;
+
+    const prompt = normalizeSiriPrompt(desktopBridge()?.takeSiriPrompt?.());
+    if (prompt) {
+      seedNonceRef.current += 1;
+      setSeed({
+        prefill: prompt,
+        autoSend: true,
+        nonce: seedNonceRef.current,
+        target: window.matchMedia("(min-width: 1024px)").matches
+          ? "desktop"
+          : "mobile",
+      });
+    }
+
+    const next = new URLSearchParams(searchParams.toString());
+    next.delete("ask");
+    const query = next.toString();
+    router.replace(`${pathname}${query ? `?${query}` : ""}`);
+
+    // HashRouter has a second, outer file query. Clear its one-shot signal too
+    // so returning to the workspace picker cannot replay an old Siri request.
+    if (window.location.protocol === "file:") {
+      const outer = new URL(window.location.href);
+      if (outer.searchParams.has("ask")) {
+        outer.searchParams.delete("ask");
+        window.history.replaceState(null, "", outer.toString());
+      }
+    }
+  }, [pathname, router, searchParams]);
 
   // Soft-navigate to a page's canonical URL. On `/p` the shell's URL→tabs effect
   // adopts it into the tab history; from another surface it opens the doc
@@ -335,7 +378,10 @@ export function WorkspaceChrome({
     if (suggestedOpen) return;
     // Only remember an app the workspace actually shows. Persisting a disabled
     // one would make Home resolve to a surface that is not on the strip.
-    if (routedOperatorApp && (homeApps as string[]).includes(routedOperatorApp)) {
+    if (
+      routedOperatorApp &&
+      (homeApps as string[]).includes(routedOperatorApp)
+    ) {
       writeOperatorApp(workspaceId, routedOperatorApp);
       if (pathname) {
         writeHomeAppLocation(workspaceId, routedOperatorApp, pathname);
@@ -559,7 +605,9 @@ export function WorkspaceChrome({
         }}
         onOpenRoom={(sessionId) => {
           routeProgress.start();
-          router.push(`/w/${workspaceId}/chat?s=${encodeURIComponent(sessionId)}`);
+          router.push(
+            `/w/${workspaceId}/chat?s=${encodeURIComponent(sessionId)}`,
+          );
           setInboxOpen(false);
         }}
       />
@@ -634,7 +682,10 @@ export function WorkspaceChrome({
       )}
 
       {chatAssistantId && (
-        <div className={cn(dockSuppressed && "hidden")} aria-hidden={dockSuppressed}>
+        <div
+          className={cn(dockSuppressed && "hidden")}
+          aria-hidden={dockSuppressed}
+        >
           <div className="hidden lg:block">
             <FloatingChat
               workspaceId={workspaceId}

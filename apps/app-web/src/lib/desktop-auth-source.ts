@@ -58,6 +58,8 @@ export interface DesktopBridge {
    */
   setCaptureSource?: (id: string | null) => void;
   signIn: () => void;
+  /** Consume the pending native Siri request once; absent in browsers/old shells. */
+  takeSiriPrompt?: () => string | null;
   /** Local-target marker: include deployment-gateway cookies on API REST/SSE. */
   gatewayCredentials?: boolean;
   /**

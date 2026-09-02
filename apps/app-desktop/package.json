@@ -14,7 +14,8 @@
     "start": "electron dist/bootstrap.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "package": "pnpm --filter app-web build:desktop && pnpm run build && electron-builder --mac",
+    "build:siri": "bash native/siri-companion/build.sh",
+    "package": "pnpm --filter app-web build:desktop && pnpm run build && pnpm run build:siri && electron-builder --mac",
     "package:win": "pnpm --filter app-web build:desktop && pnpm run build && electron-builder --win --x64 --publish never",
     "package:linux": "pnpm --filter app-web build:desktop && pnpm run build && electron-builder --linux AppImage --publish never"
   },
