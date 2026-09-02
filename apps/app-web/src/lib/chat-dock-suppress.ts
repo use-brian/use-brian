@@ -74,3 +74,12 @@ export function useChatDockSuppressed(): boolean {
     chatDockSuppression.getServerSnapshot,
   );
 }
+
+/** The shared dock yields to embedded chats, the Chat app, and Brian Nearby. */
+export function workspaceChatDockSuppressed(
+  embeddedChatSuppressed: boolean,
+  activeSurface: string | null,
+  brianNearby: boolean,
+): boolean {
+  return embeddedChatSuppressed || activeSurface === "chat" || brianNearby;
+}

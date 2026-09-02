@@ -4,7 +4,10 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { chatDockSuppression } from "../chat-dock-suppress";
+import {
+  chatDockSuppression,
+  workspaceChatDockSuppressed,
+} from "../chat-dock-suppress";
 
 describe("[COMP:app-web/chat-dock-suppress] chatDockSuppression", () => {
   it("suppresses while any holder is live and releases when the LAST one lets go", () => {
@@ -49,5 +52,12 @@ describe("[COMP:app-web/chat-dock-suppress] chatDockSuppression", () => {
 
   it("server snapshot is never suppressed", () => {
     expect(chatDockSuppression.getServerSnapshot()).toBe(false);
+  });
+
+  it("hides the shared dock while Brian Nearby owns the chat affordance", () => {
+    expect(workspaceChatDockSuppressed(false, "p", true)).toBe(true);
+    expect(workspaceChatDockSuppressed(false, "p", false)).toBe(false);
+    expect(workspaceChatDockSuppressed(true, "p", false)).toBe(true);
+    expect(workspaceChatDockSuppressed(false, "chat", false)).toBe(true);
   });
 });

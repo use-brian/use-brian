@@ -60,6 +60,12 @@ export interface DesktopBridge {
   signIn: () => void;
   /** Consume the pending native Siri request once; absent in browsers/old shells. */
   takeSiriPrompt?: () => string | null;
+  /** Whether the shell's always-on-top Brian companion is enabled. */
+  isBrianNearby?: () => boolean;
+  /** Subscribe to changes of the Brian Nearby setting. */
+  onBrianNearbyChange?: (callback: (enabled: boolean) => void) => () => void;
+  /** Keep the companion's dedicated chat bound to the resolved interlocutor. */
+  setCompanionContext?: (workspaceId: string, assistantId: string) => void;
   /** Local-target marker: include deployment-gateway cookies on API REST/SSE. */
   gatewayCredentials?: boolean;
   /**

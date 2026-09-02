@@ -49,7 +49,10 @@ import { SurfaceTransition } from "@/components/chrome/surface-transition";
 import { usePrimaryAssistant } from "@/contexts/primary-assistant";
 import { routeProgress } from "@/lib/route-progress";
 import { surfaceShortcutModifierPressed } from "@/lib/surface-shortcuts";
-import { useChatDockSuppressed } from "@/lib/chat-dock-suppress";
+import {
+  useChatDockSuppressed,
+  workspaceChatDockSuppressed,
+} from "@/lib/chat-dock-suppress";
 import {
   DEFAULT_OPERATOR_APP,
   homeAppFromPathname,
@@ -205,7 +208,20 @@ export function WorkspaceChrome({
   // cover the full-page composer's Send action at narrower widths. The hoisted
   // dock HIDES (not unmounts) in both cases, so an in-flight turn survives.
   const embeddedChatSuppressed = useChatDockSuppressed();
-  const dockSuppressed = embeddedChatSuppressed || activeSurface === "chat";
+  const [brianNearby, setBrianNearby] = useState(
+    () => desktopBridge()?.isBrianNearby?.() ?? false,
+  );
+  const dockSuppressed = workspaceChatDockSuppressed(
+    embeddedChatSuppressed,
+    activeSurface,
+    brianNearby,
+  );
+
+  useEffect(() => {
+    const bridge = desktopBridge();
+    setBrianNearby(bridge?.isBrianNearby?.() ?? false);
+    return bridge?.onBrianNearbyChange?.(setBrianNearby);
+  }, []);
   // Page-collab "another member is running on this page" guard, published by
   // `DocShell` (the only place with the page's Yjs provider); null off `/p`.
   const docOthersRun = useDocChatOthersRun();
@@ -273,6 +289,11 @@ export function WorkspaceChrome({
   // surface can read the same value instead of blocking on a second identical
   // fetch of its own. Behaviour here is unchanged: no dock until it lands.
   const { assistantId: chatAssistantId } = usePrimaryAssistant();
+  useEffect(() => {
+    if (chatAssistantId) {
+      desktopBridge()?.setCompanionContext?.(workspaceId, chatAssistantId);
+    }
+  }, [chatAssistantId, workspaceId]);
 
   // Chat-seed routing — the default-viewer landing's chatter / inline AI box
   // hand the user into the dock with a pre-written prompt via the

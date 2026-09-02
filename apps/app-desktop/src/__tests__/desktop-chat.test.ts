@@ -18,6 +18,9 @@ describe("[COMP:app-desktop/awake-brian] desktop chat routing", () => {
 
   it("builds the shared live and bundled chat route", () => {
     expect(desktopChatRoute("team one")).toBe("/desktop/chat/team%20one");
+    expect(desktopChatRoute("team one", "assistant/one")).toBe(
+      "/desktop/chat/team%20one?assistant=assistant%2Fone",
+    );
   });
 
   it("accepts only bounded display-only companion state", () => {

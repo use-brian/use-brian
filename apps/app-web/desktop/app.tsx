@@ -40,6 +40,7 @@ import {
   useParams,
   useNavigate,
   useLocation,
+  useSearchParams,
 } from "react-router-dom";
 
 import { authFetch, getValidAccessToken } from "@/lib/auth-fetch";
@@ -337,7 +338,13 @@ export function App() {
 
 function DesktopChatRoute() {
   const { workspaceId = "" } = useParams();
-  return workspaceId ? <DesktopChatWindow workspaceId={workspaceId} /> : <Navigate to="/" replace />;
+  const [searchParams] = useSearchParams();
+  const assistantId = searchParams.get("assistant") ?? undefined;
+  return workspaceId ? (
+    <DesktopChatWindow workspaceId={workspaceId} assistantId={assistantId} />
+  ) : (
+    <Navigate to="/" replace />
+  );
 }
 
 // ── Boot / workspace picker ────────────────────────────────────

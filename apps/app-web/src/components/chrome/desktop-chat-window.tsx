@@ -11,16 +11,35 @@ import { desktopBridge } from "@/lib/desktop-auth-source";
 import { useT } from "@/lib/i18n/client";
 
 /** Chat-only renderer hosted by the companion's dedicated Electron window. */
-export function DesktopChatWindow({ workspaceId }: { workspaceId: string }) {
+export function DesktopChatWindow({
+  workspaceId,
+  assistantId,
+}: {
+  workspaceId: string;
+  assistantId?: string;
+}) {
+  if (assistantId) {
+    return <DesktopChatContent workspaceId={workspaceId} assistantId={assistantId} />;
+  }
   return (
     <PrimaryAssistantProvider workspaceId={workspaceId}>
-      <DesktopChatContent workspaceId={workspaceId} />
+      <ResolvedDesktopChatContent workspaceId={workspaceId} />
     </PrimaryAssistantProvider>
   );
 }
 
-function DesktopChatContent({ workspaceId }: { workspaceId: string }) {
+function ResolvedDesktopChatContent({ workspaceId }: { workspaceId: string }) {
   const { assistantId } = usePrimaryAssistant();
+  return <DesktopChatContent workspaceId={workspaceId} assistantId={assistantId ?? undefined} />;
+}
+
+function DesktopChatContent({
+  workspaceId,
+  assistantId,
+}: {
+  workspaceId: string;
+  assistantId?: string;
+}) {
   const t = useT().chat;
 
   useLayoutEffect(() => {

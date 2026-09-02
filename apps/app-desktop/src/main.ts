@@ -268,6 +268,7 @@ let desktopChatWindow: BrowserWindow | null = null;
 let awakeBrianBlockerId: number | null = null;
 let keepBrianAwake = false;
 let lastWorkspaceId: string | null = null;
+let lastAssistantId: string | null = null;
 let desktopChatBlurredAt = 0;
 let brianPetPosition: BrianPosition | null = null;
 let brianPetDragOffset: BrianPosition | null = null;
@@ -646,7 +647,11 @@ function rememberWorkspace(win: BrowserWindow): void {
   try {
     const current = new URL(win.webContents.getURL());
     const route = current.protocol === "file:" ? current.hash.slice(1) : current.pathname;
-    lastWorkspaceId = workspaceIdFromDesktopRoute(route) ?? lastWorkspaceId;
+    const workspaceId = workspaceIdFromDesktopRoute(route);
+    if (workspaceId && workspaceId !== lastWorkspaceId) {
+      lastWorkspaceId = workspaceId;
+      lastAssistantId = null;
+    }
   } catch {
     // A transient blank or malformed navigation cannot replace the last target.
   }
@@ -745,7 +750,9 @@ function messageBrian(): void {
     publishCompanionState({ phase: "idle" });
   });
 
-  void loadApp(win, { route: desktopChatRoute(lastWorkspaceId) }).catch((error) => {
+  void loadApp(win, {
+    route: desktopChatRoute(lastWorkspaceId, lastAssistantId ?? undefined),
+  }).catch((error) => {
     console.warn("Failed to open the Brian chat window:", error);
     if (!win.isDestroyed()) win.close();
   });
@@ -877,12 +884,23 @@ function stopAwakeBrianBlocker(): void {
   awakeBrianBlockerId = null;
 }
 
+function publishBrianNearbyState(): void {
+  if (
+    mainWindow &&
+    !mainWindow.isDestroyed() &&
+    !mainWindow.webContents.isDestroyed()
+  ) {
+    mainWindow.webContents.send("Use Brian:brian-nearby-state", keepBrianAwake);
+  }
+}
+
 function syncAwakeBrianMode(): void {
   if (keepBrianAwake) {
     if (awakeBrianBlockerId === null || !powerSaveBlocker.isStarted(awakeBrianBlockerId)) {
       awakeBrianBlockerId = powerSaveBlocker.start("prevent-app-suspension");
     }
     showBrianPet();
+    publishBrianNearbyState();
     return;
   }
 
@@ -891,6 +909,7 @@ function syncAwakeBrianMode(): void {
   brianPetWindow = null;
   if (desktopChatWindow && !desktopChatWindow.isDestroyed()) desktopChatWindow.close();
   desktopChatWindow = null;
+  publishBrianNearbyState();
 }
 
 function toggleKeepBrianAwake(): void {
@@ -3059,6 +3078,37 @@ if (!gotLock) {
     event.returnValue = trustedSender ? pendingSiriPrompt : null;
     if (trustedSender) pendingSiriPrompt = null;
   });
+  ipcMain.on("Use Brian:get-brian-nearby-state", (event) => {
+    event.returnValue =
+      !!mainWindow &&
+      !mainWindow.isDestroyed() &&
+      event.sender.id === mainWindow.webContents.id &&
+      keepBrianAwake;
+  });
+  ipcMain.on(
+    "Use Brian:set-companion-context",
+    (event, workspaceId: unknown, assistantId: unknown) => {
+      if (
+        !mainWindow ||
+        mainWindow.isDestroyed() ||
+        event.sender.id !== mainWindow.webContents.id ||
+        typeof workspaceId !== "string" ||
+        typeof assistantId !== "string" ||
+        !workspaceId ||
+        !assistantId
+      ) {
+        return;
+      }
+      const changed = workspaceId !== lastWorkspaceId || assistantId !== lastAssistantId;
+      lastWorkspaceId = workspaceId;
+      lastAssistantId = assistantId;
+      if (changed && desktopChatWindow && !desktopChatWindow.isDestroyed()) {
+        void loadApp(desktopChatWindow, {
+          route: desktopChatRoute(workspaceId, assistantId),
+        });
+      }
+    },
+  );
   // Dock live recording: show/close the floating overlay with the capture.
   ipcMain.on("Use Brian:recording-state", (_event, on: unknown) => {
     if (on === true) showRecorderOverlay();

@@ -26,8 +26,9 @@ export function workspaceIdFromDesktopRoute(route: string): string | null {
 }
 
 /** Route shared by the live Next app and bundled HashRouter build. */
-export function desktopChatRoute(workspaceId: string): string {
-  return `/desktop/chat/${encodeURIComponent(workspaceId)}`;
+export function desktopChatRoute(workspaceId: string, assistantId?: string): string {
+  const route = `/desktop/chat/${encodeURIComponent(workspaceId)}`;
+  return assistantId ? `${route}?assistant=${encodeURIComponent(assistantId)}` : route;
 }
 
 /** A companion click immediately following panel blur is the outside click itself. */

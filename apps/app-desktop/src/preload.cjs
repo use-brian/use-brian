@@ -23,12 +23,18 @@ const { contextBridge, ipcRenderer, webFrame } = require("electron");
 
 const messageBrianListeners = new Set();
 let messageBrianPending = false;
+const brianNearbyListeners = new Set();
+let brianNearby = ipcRenderer.sendSync("Use Brian:get-brian-nearby-state") === true;
 ipcRenderer.on("Use Brian:message-brian", () => {
   if (messageBrianListeners.size === 0) {
     messageBrianPending = true;
     return;
   }
   for (const listener of messageBrianListeners) listener();
+});
+ipcRenderer.on("Use Brian:brian-nearby-state", (_event, enabled) => {
+  brianNearby = enabled === true;
+  for (const listener of brianNearbyListeners) listener(brianNearby);
 });
 
 /** @type {Record<string, unknown>} */
@@ -68,6 +74,14 @@ const bridge = {
   // One-shot Siri payload. Only the main app renderer can consume the prompt;
   // app-web routes carry an `ask=1` signal rather than spoken text.
   takeSiriPrompt: () => ipcRenderer.sendSync("Use Brian:take-siri-prompt"),
+  isBrianNearby: () => brianNearby,
+  onBrianNearbyChange: (callback) => {
+    if (typeof callback !== "function") return () => {};
+    brianNearbyListeners.add(callback);
+    return () => brianNearbyListeners.delete(callback);
+  },
+  setCompanionContext: (workspaceId, assistantId) =>
+    ipcRenderer.send("Use Brian:set-companion-context", workspaceId, assistantId),
   // The offline landing's "Retry" button asks the shell to reload the app now.
   // Present in every mode (like signIn/out); the offline landing is shell-owned.
   retry: () => ipcRenderer.send("Use Brian:retry-load"),
