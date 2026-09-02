@@ -169,9 +169,9 @@ import {
 import {
   type TokenCipher,
   type StoredTokens,
-  encryptTokens,
   encryptBlob,
   decryptTokens,
+  persistTokens,
   serializeRendererTokens,
 } from "./desktop-token-store.js";
 import {
@@ -1406,7 +1406,9 @@ async function mintLocalSession(): Promise<void> {
       // cookie write cannot authenticate it. Mint the same local-owner pair
       // directly from the selected API and persist it in safeStorage.
       const result = await mintLocalDesktopSession(cfg.apiUrl, gatewayProbeFetch);
-      persistSession(result);
+      if (!persistSession(result)) {
+        throw new Error("The local session could not be stored securely.");
+      }
       await loadApp(win);
       focusWindow(win);
       return;
@@ -1631,9 +1633,19 @@ function writeTokenBlob(blob: Buffer | null): void {
   writeFileSync(tokensFile(), blob);
 }
 
-/** Encrypt + persist a freshly-exchanged session (the sign-in code-exchange path). */
-function persistSession(sess: DesktopSession): void {
-  writeTokenBlob(encryptTokens(tokenCipher, sess, Date.now()));
+/** Encrypt, persist, and verify a freshly-exchanged session before loading the app. */
+function persistSession(sess: DesktopSession): boolean {
+  const persisted = persistTokens(
+    tokenCipher,
+    sess,
+    Date.now(),
+    (blob) => writeFileSync(tokensFile(), blob),
+    () => readFileSync(tokensFile()),
+  );
+  if (!persisted) {
+    console.warn("OS encryption unavailable or token read-back failed; sign-in was not persisted.");
+  }
+  return persisted;
 }
 
 /** Persist tokens handed back by the renderer's client-side refresh (validated). */
@@ -2043,7 +2055,11 @@ async function completeSignIn(code: string): Promise<void> {
     const result = await exchangeCode(cfg.apiUrl, code, verifier);
     if (cfg.bundled) {
       // Bundled (Bearer tokens, not cookies) stays single-account — add replaces.
-      persistSession(result);
+      if (!persistSession(result)) {
+        throw new Error(
+          "Use Brian could not securely store your session in the macOS Keychain. Please restart the app and try again.",
+        );
+      }
     } else {
       // Add-account: stash the active account into the saved-account store before
       // its canonical trio is overwritten with the new account. At capacity we
@@ -2266,8 +2282,8 @@ async function signOut(): Promise<void> {
     // Bundled mode is single-account (Bearer tokens, no saved-account store).
     clearStoredTokens();
     const win = ensureWindow();
+    await win.webContents.loadFile(SIGNIN_PAGE);
     focusWindow(win);
-    await loadApp(win);
     return;
   }
 

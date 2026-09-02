@@ -178,6 +178,21 @@ export function encryptTokens(
   return encryptBlob(cipher, serializeTokens(session, nowMs));
 }
 
+/** Persist a session only when encrypted storage succeeds and can be read back. */
+export function persistTokens(
+  cipher: TokenCipher,
+  session: DesktopSession,
+  nowMs: number,
+  write: (blob: Buffer) => void,
+  read: () => Buffer,
+): boolean {
+  const blob = encryptTokens(cipher, session, nowMs);
+  if (!blob) return false;
+  write(blob);
+  const stored = decryptTokens(cipher, read());
+  return stored?.accessToken === session.accessToken && stored.refreshToken === session.refreshToken;
+}
+
 /**
  * Decrypt + parse a stored blob. Returns `null` on any failure (encryption
  * unavailable, authenticated-decrypt throw on a tampered/foreign blob, or a
