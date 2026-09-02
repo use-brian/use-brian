@@ -2312,6 +2312,11 @@ export function FloatingChat({
                   code,
                   message: t.noticeCustomModelImageFallback,
                 });
+              } else if (code === "custom_model_endpoint_fallback") {
+                setNotice({
+                  code,
+                  message: t.noticeCustomModelEndpointFallback,
+                });
               } else if (typeof payload.message === "string") {
                 setNotice({ code, message: payload.message });
               }

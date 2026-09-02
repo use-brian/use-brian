@@ -616,7 +616,7 @@ export function createContentPlanningStore(): ContentPlanningStore {
           WHERE d.assistant_id = $1
             AND d.session_id = $2
             AND d.removed_at IS NULL
-          ORDER BY d.created_at`,
+          ORDER BY d.created_at DESC`,
         [assistantId, sessionId],
       )
       return result.rows.map(mapDraftRow)

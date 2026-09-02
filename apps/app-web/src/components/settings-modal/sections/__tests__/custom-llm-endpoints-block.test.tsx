@@ -20,4 +20,15 @@ describe("[COMP:app-web/custom-llm-endpoints] endpoint settings block", () => {
     expect(html).toContain(en.customLlmEndpoints.heading);
     expect(html).toContain(en.customLlmEndpoints.loading);
   });
+
+  it("keeps the fallback toggle copy honest about cost and announcement", () => {
+    // The opt-in is the ONLY thing standing between byo-llm-key.md's two
+    // stated objections and a silent swap: an admin flipping this is
+    // consenting to workspace content reaching a provider they did not pick,
+    // and to being billed for the turn. If the copy stops saying both, the
+    // switch stops being informed consent.
+    expect(en.customLlmEndpoints.fallbackDesc).toContain("Off by default");
+    expect(en.customLlmEndpoints.fallbackDesc).toMatch(/billed/i);
+    expect(en.customLlmEndpoints.fallbackDesc).toMatch(/says it happened|the reply says/i);
+  });
 });

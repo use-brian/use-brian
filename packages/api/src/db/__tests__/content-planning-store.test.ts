@@ -1,5 +1,11 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+
+const db = vi.hoisted(() => ({ query: vi.fn() }))
+
+vi.mock('../client.js', () => ({ query: db.query }))
+
 import {
+  createContentPlanningStore,
   defaultContentDraftTitle,
   getContentDraftTitlePrefix,
   isDefaultContentDraftTitle,
@@ -8,6 +14,18 @@ import {
   seedFirstContentDraftMessage,
   withPlatformTitlePrefix,
 } from '../content-planning-store.js'
+
+describe('[COMP:feed/content-planning-store] saved draft ordering', () => {
+  it('returns the newest saved composition first for editor restore', async () => {
+    db.query.mockReset()
+    db.query.mockResolvedValueOnce({ rows: [] })
+
+    await createContentPlanningStore().listSessionDrafts('assistant-1', 'session-1')
+
+    expect(db.query).toHaveBeenCalledOnce()
+    expect(db.query.mock.calls[0]?.[0]).toContain('ORDER BY d.created_at DESC')
+  })
+})
 
 describe('[COMP:feed/content-planning-store] pure planning helpers', () => {
   it('builds and recognizes placeholders for every planning target', () => {
