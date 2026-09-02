@@ -76,6 +76,7 @@ import {
 
 import { isFeedPlatform } from "@/lib/feed-nav";
 import { isOssEdition } from "@/lib/edition";
+import { siriAskSuffix } from "@/lib/siri-ask";
 
 // Route surfaces are local Vite chunks, loaded from disk on first entry. This
 // keeps the startup shell small without reintroducing network navigation.
@@ -345,6 +346,9 @@ type WorkspaceRow = WorkspacePickerItem;
 
 function Boot() {
   const navigate = useNavigate();
+  const askSuffix = siriAskSuffix(
+    new URLSearchParams(window.location.search).get("ask"),
+  );
   const [state, setState] = useState<
     | { k: "boot" }
     | { k: "anon" }
@@ -408,6 +412,12 @@ function Boot() {
     };
   }, [navigate]);
 
+  useEffect(() => {
+    if (askSuffix && state.k === "ready" && state.workspaces.length === 1) {
+      navigate(`/w/${state.workspaces[0].id}/p${askSuffix}`, { replace: true });
+    }
+  }, [askSuffix, navigate, state]);
+
   return (
     <div style={shell}>
       <div style={{ width: 520, padding: 32 }}>
@@ -422,7 +432,7 @@ function Boot() {
         {state.k === "ready" && usesScalableWorkspacePicker(state.workspaces.length) && (
           <WorkspacePicker
             initialWorkspaces={state.workspaces}
-            next="/p"
+            next={`/p${askSuffix}`}
             apiUrl={apiBase()}
           />
         )}
@@ -432,7 +442,7 @@ function Boot() {
               <li key={w.id}>
                 <button
                   type="button"
-                  onClick={() => navigate(`/w/${w.id}/p`)}
+                  onClick={() => navigate(`/w/${w.id}/p${askSuffix}`)}
                   style={{ ...listButton }}
                 >
                   <span style={{ fontWeight: 600 }}>{w.name}</span>

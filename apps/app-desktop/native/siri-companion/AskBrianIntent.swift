@@ -14,10 +14,15 @@ struct AskBrianIntent: AppIntent {
     }
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
+        let prompt = request.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty, prompt.utf16.count <= 8_000 else {
+            throw AskBrianError.invalidRequest
+        }
+
         var components = URLComponents()
         components.scheme = "usebrian"
         components.host = "ask"
-        components.queryItems = [URLQueryItem(name: "prompt", value: request)]
+        components.queryItems = [URLQueryItem(name: "prompt", value: prompt)]
 
         guard let url = components.url else {
             throw AskBrianError.invalidRequest
@@ -30,7 +35,7 @@ struct AskBrianIntent: AppIntent {
             throw AskBrianError.couldNotOpenBrian
         }
 
-        return .result(dialog: "I sent that to Brian.")
+        return .result(dialog: "Opening Brian with your request.")
     }
 }
 
@@ -55,9 +60,9 @@ private enum AskBrianError: Error, CustomLocalizedStringResourceConvertible {
     var localizedStringResource: LocalizedStringResource {
         switch self {
         case .invalidRequest:
-            "I couldn't understand that request."
+            "Please give Brian a request between 1 and 8,000 characters."
         case .couldNotOpenBrian:
-            "I couldn't open Use Brian. Please install or open the app first."
+            "I couldn't open Use Brian. Please install the app in Applications and open it once."
         }
     }
 }

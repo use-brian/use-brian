@@ -105,7 +105,7 @@ import {
   probeExpectedJson,
   type GatewayProbeFetch,
 } from "./gateway-auth.js";
-import { resolveDeepLink } from "./deep-link.js";
+import { parseAskBrianDeepLink, resolveDeepLink } from "./deep-link.js";
 import { quickCaptureUrl, recordTargetUrl } from "./quick-capture.js";
 import {
   companionClickFollowsChatBlur,
@@ -287,6 +287,12 @@ let connectorServer: Server | null = null;
 let connectorServerTimer: ReturnType<typeof setTimeout> | null = null;
 /** A deep link / auth callback delivered before the window exists (macOS cold-start). */
 let pendingUrl: string | null = null;
+/**
+ * Latest spoken Siri payload, kept out of web URLs and consumed once by the
+ * main renderer. A newer invocation while the app is opening supersedes a
+ * request that has not reached chat yet.
+ */
+let pendingSiriPrompt: string | null = null;
 /** Renderer-picked capture source for the NEXT display-media grant (one-shot). */
 let requestedCaptureSourceId: string | null = null;
 /** The isolated, shared-session browser used for an interactive deployment gateway. */
@@ -1551,8 +1557,9 @@ function bundledAvailable(): boolean {
  */
 async function loadApp(
   win: BrowserWindow,
-  opts: { capture?: boolean; record?: boolean; route?: string } = {},
+  opts: { capture?: boolean; record?: boolean; route?: string; ask?: boolean } = {},
 ): Promise<void> {
+  const hasSiriPrompt = opts.ask === true || pendingSiriPrompt !== null;
   if (bundledAvailable()) {
     if (!(await ensureBundledLocalSession(win))) return;
     // The bundled renderer loads from file://, so it has no env: hand it the API
@@ -1561,6 +1568,7 @@ async function loadApp(
     const query: Record<string, string> = { api: cfg.apiUrl };
     if (opts.capture) query.capture = "1";
     if (opts.record) query.record = "1";
+    if (hasSiriPrompt) query.ask = "1";
     await win.webContents.loadFile(BUNDLE_INDEX, {
       query,
       ...(opts.route ? { hash: opts.route } : {}),
@@ -1574,15 +1582,11 @@ async function loadApp(
       return;
     }
   }
-  await win.webContents.loadURL(
-    opts.capture
-      ? quickCaptureUrl(cfg.appUrl)
-      : opts.record
-        ? recordTargetUrl(cfg.appUrl)
-        : opts.route
-          ? new URL(opts.route, cfg.appUrl).toString()
-          : cfg.appUrl,
-  );
+  const targetUrl = new URL(opts.route ?? cfg.appUrl, cfg.appUrl);
+  if (opts.capture) targetUrl.searchParams.set("capture", "1");
+  else if (opts.record) targetUrl.searchParams.set("record", "1");
+  else if (!opts.route && hasSiriPrompt) targetUrl.searchParams.set("ask", "1");
+  await win.webContents.loadURL(targetUrl.toString());
 }
 
 function summonAndCapture(): void {
@@ -2741,6 +2745,14 @@ function handleIncomingUrl(rawUrl: string): void {
     void startFirefoxForControl();
     return;
   }
+  const siriPrompt = parseAskBrianDeepLink(rawUrl, cfg.protocolScheme);
+  if (siriPrompt) {
+    pendingSiriPrompt = siriPrompt;
+    const win = ensureWindow();
+    focusWindow(win);
+    void loadApp(win, { ask: true });
+    return;
+  }
   const auth = parseAuthCallback(rawUrl, cfg.protocolScheme);
   if (auth) {
     if (auth.kind === "code") void completeSignIn(auth.code);
@@ -3038,6 +3050,14 @@ if (!gotLock) {
     }
     const state = parseCompanionState(rawState);
     if (state) publishCompanionState(state);
+  });
+  ipcMain.on("Use Brian:take-siri-prompt", (event) => {
+    const trustedSender =
+      mainWindow &&
+      !mainWindow.isDestroyed() &&
+      event.sender.id === mainWindow.webContents.id;
+    event.returnValue = trustedSender ? pendingSiriPrompt : null;
+    if (trustedSender) pendingSiriPrompt = null;
   });
   // Dock live recording: show/close the floating overlay with the capture.
   ipcMain.on("Use Brian:recording-state", (_event, on: unknown) => {

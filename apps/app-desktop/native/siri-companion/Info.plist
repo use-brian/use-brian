@@ -18,10 +18,10 @@
   <string>$(MARKETING_VERSION)</string>
   <key>CFBundleVersion</key>
   <string>$(CURRENT_PROJECT_VERSION)</string>
-  <key>NSExtension</key>
+  <key>EXAppExtensionAttributes</key>
   <dict>
-    <key>NSExtensionPointIdentifier</key>
-    <string>com.apple.appintents-service</string>
+    <key>EXExtensionPointIdentifier</key>
+    <string>com.apple.appintents-extension</string>
   </dict>
 </dict>
 </plist>

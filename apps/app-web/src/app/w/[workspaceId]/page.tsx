@@ -35,6 +35,7 @@ import { homePath } from "@/lib/operator-apps";
 import { pendingApprovalTotal } from "@/lib/api/home-dock";
 import { homeLandingPath } from "@/lib/suggested-landing";
 import { forwardPlanGateCheckoutReturn } from "@/lib/plan-gate";
+import { siriAskSuffix } from "@/lib/siri-ask";
 
 function WorkspaceRootRedirect() {
   const params = useParams<{ workspaceId: string }>();
@@ -49,6 +50,11 @@ function WorkspaceRootRedirect() {
     const record = searchParams?.get("record") === "1";
     if (capture || record) {
       router.replace(`/w/${workspaceId}/p?${capture ? "capture=1" : "record=1"}`);
+      return;
+    }
+    const askSuffix = siriAskSuffix(searchParams?.get("ask"));
+    if (askSuffix) {
+      router.replace(`/w/${workspaceId}/p${askSuffix}`);
       return;
     }
     if (dockLoading) return;

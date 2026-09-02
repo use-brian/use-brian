@@ -73,6 +73,7 @@ import {
   desktopBridge,
   onDesktopMessageBrian,
 } from "@/lib/desktop-auth-source";
+import { normalizeSiriPrompt } from "@/lib/siri-ask";
 import {
   desktopTitlebarInsetCssPx,
   resolveDesktopZoomFactor,
@@ -287,6 +288,7 @@ export function WorkspaceChrome({
   }>();
   const pendingMessageBrianRef = useRef(false);
   const seedNonceRef = useRef(0);
+  const siriAskRef = useRef<string | null>(null);
   useEffect(() => {
     if (typeof window === "undefined") return;
     function onSeed(e: Event) {
@@ -337,6 +339,47 @@ export function WorkspaceChrome({
       }),
     [dockSuppressed, revealMessageBrian, router, workspaceId],
   );
+
+  // The native App Intent enters through `?ask=`. Keep the handoff in the
+  // persistent chrome so it survives child-route redirects, targets exactly
+  // one responsive chat instance, and can wait for assistant resolution.
+  useEffect(() => {
+    const raw = searchParams.get("ask");
+    if (raw === null) {
+      siriAskRef.current = null;
+      return;
+    }
+    if (siriAskRef.current === raw) return;
+    siriAskRef.current = raw;
+
+    const prompt = normalizeSiriPrompt(desktopBridge()?.takeSiriPrompt?.());
+    if (prompt) {
+      seedNonceRef.current += 1;
+      setSeed({
+        prefill: prompt,
+        autoSend: true,
+        nonce: seedNonceRef.current,
+        target: window.matchMedia("(min-width: 1024px)").matches
+          ? "desktop"
+          : "mobile",
+      });
+    }
+
+    const next = new URLSearchParams(searchParams.toString());
+    next.delete("ask");
+    const query = next.toString();
+    router.replace(`${pathname}${query ? `?${query}` : ""}`);
+
+    // HashRouter has a second, outer file query. Clear its one-shot signal too
+    // so returning to the workspace picker cannot replay an old Siri request.
+    if (window.location.protocol === "file:") {
+      const outer = new URL(window.location.href);
+      if (outer.searchParams.has("ask")) {
+        outer.searchParams.delete("ask");
+        window.history.replaceState(null, "", outer.toString());
+      }
+    }
+  }, [pathname, router, searchParams]);
 
   // Soft-navigate to a page's canonical URL. On `/p` the shell's URL→tabs effect
   // adopts it into the tab history; from another surface it opens the doc
