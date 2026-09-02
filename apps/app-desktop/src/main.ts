@@ -593,6 +593,11 @@ function createWindow(): BrowserWindow {
     void win.webContents.loadFile(SIGNIN_PAGE, {
       query: { mode: "local-setup", url: cfg.appUrl, reason: "access" },
     });
+  } else if (cfg.bundled && cfg.targetAuth === "pkce" && !readStoredTokens()) {
+    // A packaged signed-out launch starts on the branded native landing. The
+    // bundled SPA's minimal anonymous fallback is only a defensive state, not
+    // the desktop login experience.
+    void win.webContents.loadFile(SIGNIN_PAGE);
   } else {
     void loadApp(win);
   }
