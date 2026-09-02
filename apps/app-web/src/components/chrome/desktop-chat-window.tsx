@@ -11,15 +11,27 @@ import { desktopBridge } from "@/lib/desktop-auth-source";
 import { useT } from "@/lib/i18n/client";
 
 /** Chat-only renderer hosted by the companion's dedicated Electron window. */
-export function DesktopChatWindow({ workspaceId }: { workspaceId: string }) {
+export function DesktopChatWindow({
+  workspaceId,
+  initialPrompt,
+}: {
+  workspaceId: string;
+  initialPrompt?: string;
+}) {
   return (
     <PrimaryAssistantProvider workspaceId={workspaceId}>
-      <DesktopChatContent workspaceId={workspaceId} />
+      <DesktopChatContent workspaceId={workspaceId} initialPrompt={initialPrompt} />
     </PrimaryAssistantProvider>
   );
 }
 
-function DesktopChatContent({ workspaceId }: { workspaceId: string }) {
+function DesktopChatContent({
+  workspaceId,
+  initialPrompt,
+}: {
+  workspaceId: string;
+  initialPrompt?: string;
+}) {
   const { assistantId } = usePrimaryAssistant();
   const t = useT().chat;
 
@@ -71,6 +83,11 @@ function DesktopChatContent({ workspaceId }: { workspaceId: string }) {
             mode="side-panel"
             origin="doc"
             messageBrianRequest={1}
+            seedRequest={
+              initialPrompt
+                ? { prefill: initialPrompt, autoSend: true, nonce: 1 }
+                : undefined
+            }
             onActivityChange={mirrorActivity}
           />
         ) : null}

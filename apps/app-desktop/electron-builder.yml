@@ -24,6 +24,9 @@ mac:
   gatekeeperAssess: false
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist
+  extraFiles:
+    - from: native/siri-companion/build/Release/Brian Siri.app
+      to: Library/LoginItems/Brian Siri.app
   # Dock live recording: macOS shows this string on the one-time microphone
   # consent prompt (askForMediaAccess). Without the key the prompt never
   # appears and mic capture silently fails under the hardened runtime.

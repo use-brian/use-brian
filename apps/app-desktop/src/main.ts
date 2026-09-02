@@ -103,7 +103,7 @@ import {
   probeExpectedJson,
   type GatewayProbeFetch,
 } from "./gateway-auth.js";
-import { resolveDeepLink } from "./deep-link.js";
+import { parseAskBrianDeepLink, resolveDeepLink } from "./deep-link.js";
 import { quickCaptureUrl, recordTargetUrl } from "./quick-capture.js";
 import {
   companionClickFollowsChatBlur,
@@ -266,6 +266,7 @@ let desktopChatWindow: BrowserWindow | null = null;
 let awakeBrianBlockerId: number | null = null;
 let keepBrianAwake = false;
 let lastWorkspaceId: string | null = null;
+let pendingSiriPrompt: string | null = null;
 let desktopChatBlurredAt = 0;
 let brianPetPosition: BrianPosition | null = null;
 let brianPetDragOffset: BrianPosition | null = null;
@@ -627,15 +628,32 @@ function rememberWorkspace(win: BrowserWindow): void {
   try {
     const current = new URL(win.webContents.getURL());
     const route = current.protocol === "file:" ? current.hash.slice(1) : current.pathname;
-    lastWorkspaceId = workspaceIdFromDesktopRoute(route) ?? lastWorkspaceId;
+    const workspaceId = workspaceIdFromDesktopRoute(route);
+    if (workspaceId) {
+      lastWorkspaceId = workspaceId;
+      if (pendingSiriPrompt) {
+        const prompt = pendingSiriPrompt;
+        pendingSiriPrompt = null;
+        messageBrian(prompt);
+      }
+    }
   } catch {
     // A transient blank or malformed navigation cannot replace the last target.
   }
 }
 
-function messageBrian(): void {
+function messageBrian(prompt?: string): void {
   if (!lastWorkspaceId) return;
   if (desktopChatWindow && !desktopChatWindow.isDestroyed()) {
+    if (prompt) {
+      void loadApp(desktopChatWindow, {
+        route: desktopChatRoute(lastWorkspaceId, prompt),
+      }).catch((error) => console.warn("Failed to send the Siri request to Brian:", error));
+      positionDesktopChat();
+      desktopChatWindow.show();
+      desktopChatWindow.focus();
+      return;
+    }
     if (desktopChatWindow.isVisible()) {
       desktopChatWindow.hide();
       return;
@@ -726,7 +744,7 @@ function messageBrian(): void {
     publishCompanionState({ phase: "idle" });
   });
 
-  void loadApp(win, { route: desktopChatRoute(lastWorkspaceId) }).catch((error) => {
+  void loadApp(win, { route: desktopChatRoute(lastWorkspaceId, prompt) }).catch((error) => {
     console.warn("Failed to open the Brian chat window:", error);
     if (!win.isDestroyed()) win.close();
   });
@@ -2661,6 +2679,16 @@ function handleIncomingUrl(rawUrl: string): void {
     void startFirefoxForControl();
     return;
   }
+  const siriPrompt = parseAskBrianDeepLink(rawUrl, cfg.protocolScheme);
+  if (siriPrompt) {
+    if (lastWorkspaceId) {
+      messageBrian(siriPrompt);
+    } else {
+      pendingSiriPrompt = siriPrompt;
+      focusWindow(ensureWindow());
+    }
+    return;
+  }
   const auth = parseAuthCallback(rawUrl, cfg.protocolScheme);
   if (auth) {
     if (auth.kind === "code") void completeSignIn(auth.code);
@@ -2694,6 +2722,20 @@ function handleIncomingUrl(rawUrl: string): void {
 /** Pull the first `usebrian://` argument out of a process argv (relaunch). */
 function appUrlFromArgv(argv: readonly string[]): string | null {
   return argv.find((arg) => arg.startsWith(`${cfg.protocolScheme}://`)) ?? null;
+}
+
+function launchSiriCompanion(): void {
+  if (process.platform !== "darwin" || !app.isPackaged) return;
+  const companionPath = join(
+    dirname(app.getPath("exe")),
+    "..",
+    "Library",
+    "LoginItems",
+    "Brian Siri.app",
+  );
+  if (!existsSync(companionPath)) return;
+  const child = spawn("/usr/bin/open", ["-g", "-j", companionPath], { stdio: "ignore" });
+  child.on("error", (error) => console.warn("Failed to register the Siri companion:", error));
 }
 
 // ── Menus + tray ───────────────────────────────────────────────
@@ -3130,6 +3172,7 @@ if (!gotLock) {
   }
 
   app.whenReady().then(async () => {
+    launchSiriCompanion();
     if (app.isPackaged) {
       void registerFirefoxNativeHost({
         platform: process.platform,
