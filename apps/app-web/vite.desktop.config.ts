@@ -42,6 +42,7 @@ export default defineConfig({
       // Shim Next's client APIs onto react-router / DOM so app-web's
       // `"use client"` components run unmodified under Vite. Order: longer/more
       // specific specifiers first.
+      "@/lib/i18n/set-locale": resolve(here, "desktop/shims/set-locale.ts"),
       "next/navigation": resolve(here, "desktop/shims/next-navigation.tsx"),
       "next/link": resolve(here, "desktop/shims/next-link.tsx"),
       "next/image": resolve(here, "desktop/shims/next-image.tsx"),
