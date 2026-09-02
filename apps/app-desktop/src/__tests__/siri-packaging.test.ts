@@ -35,6 +35,8 @@ describe("[COMP:app-desktop/siri] App Intents packaging", () => {
     expect(signer).not.toContain('"PlugIns"');
     expect(signer).toContain("context.packager.codeSigningInfo.value");
     expect(signer).toContain('args.push("--keychain", keychain)');
+    expect(verifier).toContain('"--verify", "--strict", extensionPath');
+    expect(verifier).toContain("releaseSigningConfigured");
     expect(verifier).toContain('"--verify", "--deep", "--strict"');
     expect(verifier).toContain("com.apple.security.app-sandbox");
   });
