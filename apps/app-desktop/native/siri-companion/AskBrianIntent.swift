@@ -39,8 +39,8 @@ struct BrianShortcuts: AppShortcutsProvider {
         AppShortcut(
             intent: AskBrianIntent(),
             phrases: [
-                "Ask \(.applicationName) \(\.$request)",
-                "Tell \(.applicationName) \(\.$request)",
+                "Ask \(.applicationName)",
+                "Tell \(.applicationName)",
             ],
             shortTitle: "Ask Brian",
             systemImageName: "bubble.left.and.text.bubble.right"

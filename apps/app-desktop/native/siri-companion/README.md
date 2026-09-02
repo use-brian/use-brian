@@ -3,12 +3,13 @@
 This is a windowless macOS App Intents host bundled inside the Electron app. It
 does not have a Dock icon (`LSUIElement`) or a user-facing window.
 
-The shortcut phrases are "Ask Brian ..." and "Tell Brian ...". The intent URL
-encodes dictated text as `usebrian://ask?prompt=...`; Electron validates that
-deep link, opens the companion chat for the active workspace, and sends the
-prompt through the existing chat flow. The Swift intent can call a dedicated
-endpoint and return Brian's answer directly once that endpoint contract is
-ready.
+The shortcut phrases are "Ask Brian" and "Tell Brian". Siri then asks for the
+request because App Shortcuts only permit `AppEntity` and `AppEnum` parameters,
+not arbitrary text, inside registered phrases. The intent URL encodes the reply
+as `usebrian://ask?prompt=...`; Electron validates that deep link, opens the
+companion chat for the active workspace, and sends the prompt through the
+existing chat flow. The Swift intent can call a dedicated endpoint and return
+Brian's answer directly once that endpoint contract is ready.
 
 ## Build
 
