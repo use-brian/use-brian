@@ -103,7 +103,7 @@ import {
   probeExpectedJson,
   type GatewayProbeFetch,
 } from "./gateway-auth.js";
-import { parseAskBrianDeepLink, resolveDeepLink } from "./deep-link.js";
+import { resolveDeepLink } from "./deep-link.js";
 import { quickCaptureUrl, recordTargetUrl } from "./quick-capture.js";
 import {
   companionClickFollowsChatBlur,
@@ -169,9 +169,9 @@ import {
 import {
   type TokenCipher,
   type StoredTokens,
+  encryptTokens,
   encryptBlob,
   decryptTokens,
-  persistTokens,
   serializeRendererTokens,
 } from "./desktop-token-store.js";
 import {
@@ -266,7 +266,6 @@ let desktopChatWindow: BrowserWindow | null = null;
 let awakeBrianBlockerId: number | null = null;
 let keepBrianAwake = false;
 let lastWorkspaceId: string | null = null;
-let pendingSiriPrompt: string | null = null;
 let desktopChatBlurredAt = 0;
 let brianPetPosition: BrianPosition | null = null;
 let brianPetDragOffset: BrianPosition | null = null;
@@ -593,11 +592,6 @@ function createWindow(): BrowserWindow {
     void win.webContents.loadFile(SIGNIN_PAGE, {
       query: { mode: "local-setup", url: cfg.appUrl, reason: "access" },
     });
-  } else if (cfg.bundled && cfg.targetAuth === "pkce" && !readStoredTokens()) {
-    // A packaged signed-out launch starts on the branded native landing. The
-    // bundled SPA's minimal anonymous fallback is only a defensive state, not
-    // the desktop login experience.
-    void win.webContents.loadFile(SIGNIN_PAGE);
   } else {
     void loadApp(win);
   }
@@ -633,32 +627,15 @@ function rememberWorkspace(win: BrowserWindow): void {
   try {
     const current = new URL(win.webContents.getURL());
     const route = current.protocol === "file:" ? current.hash.slice(1) : current.pathname;
-    const workspaceId = workspaceIdFromDesktopRoute(route);
-    if (workspaceId) {
-      lastWorkspaceId = workspaceId;
-      if (pendingSiriPrompt) {
-        const prompt = pendingSiriPrompt;
-        pendingSiriPrompt = null;
-        messageBrian(prompt);
-      }
-    }
+    lastWorkspaceId = workspaceIdFromDesktopRoute(route) ?? lastWorkspaceId;
   } catch {
     // A transient blank or malformed navigation cannot replace the last target.
   }
 }
 
-function messageBrian(prompt?: string): void {
+function messageBrian(): void {
   if (!lastWorkspaceId) return;
   if (desktopChatWindow && !desktopChatWindow.isDestroyed()) {
-    if (prompt) {
-      void loadApp(desktopChatWindow, {
-        route: desktopChatRoute(lastWorkspaceId, prompt),
-      }).catch((error) => console.warn("Failed to send the Siri request to Brian:", error));
-      positionDesktopChat();
-      desktopChatWindow.show();
-      desktopChatWindow.focus();
-      return;
-    }
     if (desktopChatWindow.isVisible()) {
       desktopChatWindow.hide();
       return;
@@ -749,7 +726,7 @@ function messageBrian(prompt?: string): void {
     publishCompanionState({ phase: "idle" });
   });
 
-  void loadApp(win, { route: desktopChatRoute(lastWorkspaceId, prompt) }).catch((error) => {
+  void loadApp(win, { route: desktopChatRoute(lastWorkspaceId) }).catch((error) => {
     console.warn("Failed to open the Brian chat window:", error);
     if (!win.isDestroyed()) win.close();
   });
@@ -1406,9 +1383,7 @@ async function mintLocalSession(): Promise<void> {
       // cookie write cannot authenticate it. Mint the same local-owner pair
       // directly from the selected API and persist it in safeStorage.
       const result = await mintLocalDesktopSession(cfg.apiUrl, gatewayProbeFetch);
-      if (!persistSession(result)) {
-        throw new Error("The local session could not be stored securely.");
-      }
+      persistSession(result);
       await loadApp(win);
       focusWindow(win);
       return;
@@ -1633,19 +1608,9 @@ function writeTokenBlob(blob: Buffer | null): void {
   writeFileSync(tokensFile(), blob);
 }
 
-/** Encrypt, persist, and verify a freshly-exchanged session before loading the app. */
-function persistSession(sess: DesktopSession): boolean {
-  const persisted = persistTokens(
-    tokenCipher,
-    sess,
-    Date.now(),
-    (blob) => writeFileSync(tokensFile(), blob),
-    () => readFileSync(tokensFile()),
-  );
-  if (!persisted) {
-    console.warn("OS encryption unavailable or token read-back failed; sign-in was not persisted.");
-  }
-  return persisted;
+/** Encrypt + persist a freshly-exchanged session (the sign-in code-exchange path). */
+function persistSession(sess: DesktopSession): void {
+  writeTokenBlob(encryptTokens(tokenCipher, sess, Date.now()));
 }
 
 /** Persist tokens handed back by the renderer's client-side refresh (validated). */
@@ -2055,11 +2020,7 @@ async function completeSignIn(code: string): Promise<void> {
     const result = await exchangeCode(cfg.apiUrl, code, verifier);
     if (cfg.bundled) {
       // Bundled (Bearer tokens, not cookies) stays single-account — add replaces.
-      if (!persistSession(result)) {
-        throw new Error(
-          "Use Brian could not securely store your session in the macOS Keychain. Please restart the app and try again.",
-        );
-      }
+      persistSession(result);
     } else {
       // Add-account: stash the active account into the saved-account store before
       // its canonical trio is overwritten with the new account. At capacity we
@@ -2282,8 +2243,8 @@ async function signOut(): Promise<void> {
     // Bundled mode is single-account (Bearer tokens, no saved-account store).
     clearStoredTokens();
     const win = ensureWindow();
-    await win.webContents.loadFile(SIGNIN_PAGE);
     focusWindow(win);
+    await loadApp(win);
     return;
   }
 
@@ -2698,16 +2659,6 @@ function startAutoUpdate(): void {
 function handleIncomingUrl(rawUrl: string): void {
   if (rawUrl === `${cfg.protocolScheme}://firefox-control`) {
     void startFirefoxForControl();
-    return;
-  }
-  const siriPrompt = parseAskBrianDeepLink(rawUrl, cfg.protocolScheme);
-  if (siriPrompt) {
-    if (lastWorkspaceId) {
-      messageBrian(siriPrompt);
-    } else {
-      pendingSiriPrompt = siriPrompt;
-      focusWindow(ensureWindow());
-    }
     return;
   }
   const auth = parseAuthCallback(rawUrl, cfg.protocolScheme);
