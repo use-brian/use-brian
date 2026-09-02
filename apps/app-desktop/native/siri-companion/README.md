@@ -15,8 +15,9 @@ electron-builder embeds the result at
 `Use Brian.app/Contents/Extensions/Brian Siri.appex`; its `afterPack` hook signs
 the extension before signing and notarizing the parent app.
 Without Developer ID credentials, local packages ad-hoc sign both the extension
-and parent app, then deep-verify the complete bundle. Release packages use the
-configured Developer ID identity instead.
+and all nested Electron code, restore the extension's sandbox entitlement, seal
+the parent app last, then deep-verify the complete bundle. Release packages use
+the configured Developer ID identity instead.
 
 Install the resulting app in `/Applications` and open it once. Restart
 Shortcuts, then search its action library for "Ask Brian". After replacing a

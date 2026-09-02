@@ -40,6 +40,35 @@ export default async function verifySiriExtension(context) {
       "build",
       "entitlements.mac.plist",
     );
+    const extensionEntitlements = join(
+      __dirname,
+      "..",
+      "native",
+      "siri-companion",
+      "BrianSiri.entitlements",
+    );
+
+    // The stock Electron bundle contains signed nested frameworks. Packaging
+    // changes invalidate their resource seals, so a root-only ad-hoc signature
+    // still fails strict verification. Re-sign nested code first, restore the
+    // extension's dedicated sandbox entitlement, then seal the parent last.
+    execFileSync(
+      "/usr/bin/codesign",
+      ["--force", "--deep", "--sign", "-", appPath],
+      { stdio: "inherit" },
+    );
+    execFileSync(
+      "/usr/bin/codesign",
+      [
+        "--force",
+        "--sign",
+        "-",
+        "--entitlements",
+        extensionEntitlements,
+        extensionPath,
+      ],
+      { stdio: "inherit" },
+    );
     execFileSync(
       "/usr/bin/codesign",
       [
