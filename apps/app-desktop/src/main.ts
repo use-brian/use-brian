@@ -5,8 +5,9 @@
  * (or the deployed web app in development compatibility mode) and adds the
  * native capabilities a browser cannot: a global quick-capture hotkey, a tray,
  * OS-level menus, a `usebrian://` deep-link protocol, and a system-browser
- * sign-in flow (RFC 8252 + PKCE). It owns no product UI and no backend — every
- * pixel comes from apps/app-web. All decisions are delegated to the pure helpers
+ * sign-in flow (RFC 8252 + PKCE). Product UI is served by apps/app-web; the
+ * only shell-owned interactive surface is the bundled ambient Brian companion.
+ * It owns no backend. All decisions are delegated to the pure helpers
  * (config / window-policy / deep-link / quick-capture / desktop-auth) so this
  * file stays thin and they stay tested.
  *
@@ -14,7 +15,7 @@
  * [COMP:app-desktop/main]
  */
 
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { existsSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { spawn } from "node:child_process";
@@ -30,6 +31,7 @@ import {
   safeStorage,
   dialog,
   powerMonitor,
+  powerSaveBlocker,
   screen,
   systemPreferences,
   net,
@@ -49,6 +51,16 @@ import {
 import electronUpdater from "electron-updater";
 
 import { resolveConfig } from "./config.js";
+import {
+  AWAKE_BRIAN_FILE_NAME,
+  BRIAN_POSITION_FILE_NAME,
+  clampBrianPosition,
+  parseBrianPosition,
+  parseAwakeBrianPreference,
+  serializeBrianPosition,
+  serializeAwakeBrianPreference,
+  type BrianPosition,
+} from "./awake-brian.js";
 import {
   DEFAULT_LOCAL_APP_URL,
   TARGET_FILE_NAME,
@@ -93,6 +105,13 @@ import {
 } from "./gateway-auth.js";
 import { resolveDeepLink } from "./deep-link.js";
 import { quickCaptureUrl, recordTargetUrl } from "./quick-capture.js";
+import {
+  companionClickFollowsChatBlur,
+  desktopChatRoute,
+  parseCompanionState,
+  workspaceIdFromDesktopRoute,
+  type CompanionState,
+} from "./desktop-chat.js";
 import {
   isTrustedCaptureOrigin,
   selectPrimaryDisplaySource,
@@ -211,6 +230,8 @@ const cfg = resolveConfig(process.env, readPersistedTargetRaw(), app.isPackaged)
 const isDev = !app.isPackaged;
 
 const PRELOAD_PATH = join(__dirname, "preload.cjs");
+const PET_PRELOAD_PATH = join(__dirname, "pet-preload.cjs");
+const BRIAN_PET_PAGE = join(__dirname, "brian-pet.html");
 const SIGNIN_PAGE = join(__dirname, "signin.html");
 /**
  * The offline landing — shown (instead of the sign-in landing) when a signed-in
@@ -240,6 +261,14 @@ type SwitchResult = { ok: true } | { ok: false; error: "switch" | "reauth" };
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
+let brianPetWindow: BrowserWindow | null = null;
+let desktopChatWindow: BrowserWindow | null = null;
+let awakeBrianBlockerId: number | null = null;
+let keepBrianAwake = false;
+let lastWorkspaceId: string | null = null;
+let desktopChatBlurredAt = 0;
+let brianPetPosition: BrianPosition | null = null;
+let brianPetDragOffset: BrianPosition | null = null;
 /** The PKCE verifier for an in-flight sign-in; held until the callback returns. */
 let pendingVerifier: string | null = null;
 /** Whether the in-flight sign-in adds a second account (stash) vs replaces the active one. */
@@ -272,6 +301,25 @@ let activeAccessGrant: CloudflareAccessGrant | null = null;
 let accessReauthorizationNeeded = false;
 
 const GATEWAY_RECHECK_INTERVAL_MS = 1000;
+
+function awakeBrianFile(): string {
+  return join(app.getPath("userData"), AWAKE_BRIAN_FILE_NAME);
+}
+
+function brianPositionFile(): string {
+  return join(app.getPath("userData"), BRIAN_POSITION_FILE_NAME);
+}
+
+try {
+  keepBrianAwake = parseAwakeBrianPreference(readFileSync(awakeBrianFile(), "utf8"));
+} catch {
+  keepBrianAwake = false;
+}
+try {
+  brianPetPosition = parseBrianPosition(readFileSync(brianPositionFile(), "utf8"));
+} catch {
+  brianPetPosition = null;
+}
 
 /** Electron-session transport: HttpOnly deployment-gateway cookies stay on-device. */
 const gatewayProbeFetch: GatewayProbeFetch = (input, init) => {
@@ -470,7 +518,11 @@ function createWindow(): BrowserWindow {
   win.webContents.on("did-finish-load", () => {
     if (!win.webContents.isDestroyed()) void win.webContents.insertCSS(DESKTOP_CHROME_SAFETY_CSS);
     if (cfg.target === "local") void detectLoadedGatewayChallenge(win);
+    rememberWorkspace(win);
   });
+
+  win.webContents.on("did-navigate", () => rememberWorkspace(win));
+  win.webContents.on("did-navigate-in-page", () => rememberWorkspace(win));
 
   // §2.3 visible target indicator: a local target suffixes every page title so
   // the two brains can never be mistaken for each other. Cloud keeps titles
@@ -550,6 +602,296 @@ function createWindow(): BrowserWindow {
     destroyRecorderOverlay();
   });
   return win;
+}
+
+// ── Brian companion ───────────────────────────────────────────
+
+const BRIAN_PET_WIDTH = 150;
+const BRIAN_PET_HEIGHT = 154;
+const BRIAN_PET_GUTTER = 18;
+const DESKTOP_CHAT_WIDTH = 436;
+const DESKTOP_CHAT_HEIGHT = 640;
+
+function isAppPage(win: BrowserWindow): boolean {
+  try {
+    const current = new URL(win.webContents.getURL());
+    if (current.origin === cfg.appOrigin) return true;
+    return bundledAvailable() && current.pathname === pathToFileURL(BUNDLE_INDEX).pathname;
+  } catch {
+    return false;
+  }
+}
+
+function rememberWorkspace(win: BrowserWindow): void {
+  if (win.isDestroyed() || !isAppPage(win)) return;
+  try {
+    const current = new URL(win.webContents.getURL());
+    const route = current.protocol === "file:" ? current.hash.slice(1) : current.pathname;
+    lastWorkspaceId = workspaceIdFromDesktopRoute(route) ?? lastWorkspaceId;
+  } catch {
+    // A transient blank or malformed navigation cannot replace the last target.
+  }
+}
+
+function messageBrian(): void {
+  if (!lastWorkspaceId) return;
+  if (desktopChatWindow && !desktopChatWindow.isDestroyed()) {
+    if (desktopChatWindow.isVisible()) {
+      desktopChatWindow.hide();
+      return;
+    }
+    if (companionClickFollowsChatBlur(Date.now(), desktopChatBlurredAt)) return;
+    positionDesktopChat();
+    desktopChatWindow.show();
+    desktopChatWindow.focus();
+    desktopChatWindow.webContents.focus();
+    return;
+  }
+
+  const win = new BrowserWindow({
+    width: DESKTOP_CHAT_WIDTH,
+    height: DESKTOP_CHAT_HEIGHT,
+    title: "Message Brian",
+    frame: false,
+    transparent: true,
+    resizable: false,
+    maximizable: false,
+    minimizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    hasShadow: false,
+    backgroundColor: "#00000000",
+    show: false,
+    webPreferences: {
+      preload: PRELOAD_PATH,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+      additionalArguments: [
+        ...(cfg.bundled ? ["--usebrian-bundled"] : []),
+        ...(cfg.target === "local" ? ["--usebrian-local-target"] : []),
+      ],
+    },
+  });
+  desktopChatWindow = win;
+  positionDesktopChat();
+  publishCompanionState({ phase: "loading" });
+  win.setAlwaysOnTop(true, "floating");
+  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+
+  win.once("ready-to-show", () => {
+    if (win.isDestroyed()) return;
+    win.show();
+    win.focus();
+    win.webContents.focus();
+  });
+  win.webContents.on("did-finish-load", () => {
+    if (!win.webContents.isDestroyed()) {
+      void win.webContents.insertCSS(DESKTOP_CHROME_SAFETY_CSS);
+    }
+  });
+  win.webContents.on("before-input-event", (event, input) => {
+    if (input.type === "keyDown" && input.key === "Escape") {
+      event.preventDefault();
+      win.hide();
+    }
+  });
+  win.on("blur", () => {
+    if (win.isDestroyed() || !win.isVisible()) return;
+    desktopChatBlurredAt = Date.now();
+    win.hide();
+  });
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    void shell.openExternal(url);
+    return { action: "deny" };
+  });
+  win.webContents.on("will-navigate", (event, url) => {
+    try {
+      const target = new URL(url);
+      const trusted =
+        target.origin === cfg.appOrigin ||
+        (bundledAvailable() && target.pathname === pathToFileURL(BUNDLE_INDEX).pathname);
+      if (trusted) return;
+    } catch {
+      // Reject malformed navigation below.
+    }
+    event.preventDefault();
+    void shell.openExternal(url);
+  });
+  win.on("closed", () => {
+    if (desktopChatWindow === win) desktopChatWindow = null;
+    desktopChatBlurredAt = 0;
+    publishCompanionState({ phase: "idle" });
+  });
+
+  void loadApp(win, { route: desktopChatRoute(lastWorkspaceId) }).catch((error) => {
+    console.warn("Failed to open the Brian chat window:", error);
+    if (!win.isDestroyed()) win.close();
+  });
+}
+
+function publishCompanionState(state: CompanionState): void {
+  if (!brianPetWindow || brianPetWindow.isDestroyed() || brianPetWindow.webContents.isDestroyed()) {
+    return;
+  }
+  brianPetWindow.webContents.send("Use Brian:companion-state", state);
+}
+
+function positionDesktopChat(): void {
+  if (
+    !desktopChatWindow ||
+    desktopChatWindow.isDestroyed() ||
+    !brianPetWindow ||
+    brianPetWindow.isDestroyed()
+  ) {
+    return;
+  }
+  const pet = brianPetWindow.getBounds();
+  const area = screen.getDisplayMatching(pet).workArea;
+  const x = Math.max(area.x, pet.x - DESKTOP_CHAT_WIDTH + 8);
+  const y = Math.max(
+    area.y,
+    Math.min(area.y + area.height - DESKTOP_CHAT_HEIGHT, pet.y + pet.height - DESKTOP_CHAT_HEIGHT),
+  );
+  desktopChatWindow.setPosition(x, y, false);
+}
+
+function positionBrianPet(): void {
+  if (!brianPetWindow || brianPetWindow.isDestroyed()) return;
+  const fallbackArea = screen.getPrimaryDisplay().workArea;
+  const desired =
+    brianPetPosition ??
+    {
+      x: fallbackArea.x + fallbackArea.width - BRIAN_PET_WIDTH - BRIAN_PET_GUTTER,
+      y: fallbackArea.y + fallbackArea.height - BRIAN_PET_HEIGHT - BRIAN_PET_GUTTER,
+    };
+  const area = screen.getDisplayMatching({
+    x: desired.x,
+    y: desired.y,
+    width: BRIAN_PET_WIDTH,
+    height: BRIAN_PET_HEIGHT,
+  }).workArea;
+  brianPetPosition = clampBrianPosition(
+    desired,
+    area,
+    { width: BRIAN_PET_WIDTH, height: BRIAN_PET_HEIGHT },
+  );
+  brianPetWindow.setPosition(brianPetPosition.x, brianPetPosition.y, false);
+  positionDesktopChat();
+}
+
+function moveBrianPet(screenX: number, screenY: number): void {
+  if (!brianPetWindow || brianPetWindow.isDestroyed() || !brianPetDragOffset) return;
+  const display = screen.getDisplayNearestPoint({ x: Math.round(screenX), y: Math.round(screenY) });
+  brianPetPosition = clampBrianPosition(
+    {
+      x: Math.round(screenX - brianPetDragOffset.x),
+      y: Math.round(screenY - brianPetDragOffset.y),
+    },
+    display.workArea,
+    { width: BRIAN_PET_WIDTH, height: BRIAN_PET_HEIGHT },
+  );
+  brianPetWindow.setPosition(brianPetPosition.x, brianPetPosition.y, false);
+  positionDesktopChat();
+}
+
+function persistBrianPetPosition(): void {
+  if (!brianPetPosition) return;
+  try {
+    writeFileSync(brianPositionFile(), serializeBrianPosition(brianPetPosition));
+  } catch (error) {
+    console.warn("Failed to persist Brian companion position:", error);
+  }
+}
+
+function showBrianPet(): void {
+  if (brianPetWindow && !brianPetWindow.isDestroyed()) {
+    positionBrianPet();
+    brianPetWindow.showInactive();
+    return;
+  }
+
+  const win = new BrowserWindow({
+    width: BRIAN_PET_WIDTH,
+    height: BRIAN_PET_HEIGHT,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    maximizable: false,
+    minimizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    hasShadow: false,
+    show: false,
+    webPreferences: {
+      preload: PET_PRELOAD_PATH,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+      devTools: false,
+      spellcheck: false,
+    },
+  });
+  brianPetWindow = win;
+  positionBrianPet();
+  win.setAlwaysOnTop(true, "floating");
+  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  win.webContents.on("will-navigate", (event) => event.preventDefault());
+  win.once("ready-to-show", () => win.showInactive());
+  win.on("closed", () => {
+    if (brianPetWindow === win) brianPetWindow = null;
+    if (desktopChatWindow && !desktopChatWindow.isDestroyed()) desktopChatWindow.close();
+  });
+  void win.loadFile(BRIAN_PET_PAGE);
+}
+
+function stopAwakeBrianBlocker(): void {
+  if (awakeBrianBlockerId === null) return;
+  if (powerSaveBlocker.isStarted(awakeBrianBlockerId)) {
+    powerSaveBlocker.stop(awakeBrianBlockerId);
+  }
+  awakeBrianBlockerId = null;
+}
+
+function syncAwakeBrianMode(): void {
+  if (keepBrianAwake) {
+    if (awakeBrianBlockerId === null || !powerSaveBlocker.isStarted(awakeBrianBlockerId)) {
+      awakeBrianBlockerId = powerSaveBlocker.start("prevent-app-suspension");
+    }
+    showBrianPet();
+    return;
+  }
+
+  stopAwakeBrianBlocker();
+  if (brianPetWindow && !brianPetWindow.isDestroyed()) brianPetWindow.destroy();
+  brianPetWindow = null;
+  if (desktopChatWindow && !desktopChatWindow.isDestroyed()) desktopChatWindow.close();
+  desktopChatWindow = null;
+}
+
+function toggleKeepBrianAwake(): void {
+  const next = !keepBrianAwake;
+  try {
+    writeFileSync(awakeBrianFile(), serializeAwakeBrianPreference(next));
+  } catch (error) {
+    console.warn("Failed to persist Keep Brian Nearby preference:", error);
+    refreshAppMenu();
+    refreshTrayMenu();
+    dialog.showErrorBox(
+      "Could not update Keep Brian Nearby",
+      "Use Brian could not save this setting. Check that its application data folder is writable and try again.",
+    );
+    return;
+  }
+  keepBrianAwake = next;
+  syncAwakeBrianMode();
+  refreshAppMenu();
+  refreshTrayMenu();
 }
 
 // ── Recorder overlay (docs/architecture/media/live-capture.md) ─────────
@@ -2446,12 +2788,14 @@ function refreshAppMenu(): void {
       onSwitchTarget: () => void switchTargetFromMenu(),
       onUninstall: () => void confirmAndUninstall(),
       onStartFirefoxControl: () => void startFirefoxForControl(),
+      onToggleKeepAwake: toggleKeepBrianAwake,
       isDev,
       update: updateMenuItem(),
       target: { kind: cfg.target, label: cfg.targetLabel },
       // Packaged macOS only: Windows has the NSIS uninstaller; a dev run has
       // no bundle (and its exe lives in node_modules/electron).
       uninstall: process.platform === "darwin" && app.isPackaged,
+      keepBrianAwake,
     }),
   );
 }
@@ -2467,6 +2811,12 @@ function buildTrayMenu(): Menu {
     { label: "Open Use Brian", click: () => focusWindow(ensureWindow()) },
     { label: "Quick Capture", click: () => summonAndCapture() },
     { label: "Start Recording", click: () => summonAndRecord() },
+    {
+      label: "Keep Brian Nearby",
+      type: "checkbox",
+      checked: keepBrianAwake,
+      click: () => toggleKeepBrianAwake(),
+    },
     { label: "Start Firefox for My Browser…", click: () => void startFirefoxForControl() },
   ];
   // A local target has no login — the tray mirrors the app menu (§2.3).
@@ -2548,7 +2898,66 @@ if (!gotLock) {
 
   // The sign-in landing's button asks the main process to start the flow.
   ipcMain.on("Use Brian:sign-in", () => startSignIn());
-
+  ipcMain.on("Use Brian:message-brian", (event) => {
+    if (
+      brianPetWindow &&
+      !brianPetWindow.isDestroyed() &&
+      event.sender.id === brianPetWindow.webContents.id
+    ) {
+      messageBrian();
+    }
+  });
+  ipcMain.on("Use Brian:companion-drag", (event, raw: unknown) => {
+    if (
+      !brianPetWindow ||
+      brianPetWindow.isDestroyed() ||
+      event.sender.id !== brianPetWindow.webContents.id ||
+      !raw ||
+      typeof raw !== "object"
+    ) {
+      return;
+    }
+    const input = raw as {
+      phase?: unknown;
+      screenX?: unknown;
+      screenY?: unknown;
+      moved?: unknown;
+    };
+    if (input.phase === "end") {
+      if (input.moved === true) persistBrianPetPosition();
+      brianPetDragOffset = null;
+      return;
+    }
+    if (
+      (input.phase !== "start" && input.phase !== "move") ||
+      typeof input.screenX !== "number" ||
+      typeof input.screenY !== "number" ||
+      !Number.isFinite(input.screenX) ||
+      !Number.isFinite(input.screenY)
+    ) {
+      return;
+    }
+    if (input.phase === "start") {
+      const bounds = brianPetWindow.getBounds();
+      brianPetDragOffset = {
+        x: input.screenX - bounds.x,
+        y: input.screenY - bounds.y,
+      };
+      return;
+    }
+    moveBrianPet(input.screenX, input.screenY);
+  });
+  ipcMain.on("Use Brian:companion-state", (event, rawState: unknown) => {
+    if (
+      !desktopChatWindow ||
+      desktopChatWindow.isDestroyed() ||
+      event.sender.id !== desktopChatWindow.webContents.id
+    ) {
+      return;
+    }
+    const state = parseCompanionState(rawState);
+    if (state) publishCompanionState(state);
+  });
   // Dock live recording: show/close the floating overlay with the capture.
   ipcMain.on("Use Brian:recording-state", (_event, on: unknown) => {
     if (on === true) showRecorderOverlay();
@@ -2886,6 +3295,10 @@ if (!gotLock) {
     mainWindow = createWindow();
     refreshAppMenu();
     tray = createTray();
+    syncAwakeBrianMode();
+    screen.on("display-added", positionBrianPet);
+    screen.on("display-removed", positionBrianPet);
+    screen.on("display-metrics-changed", positionBrianPet);
 
     const ok = globalShortcut.register(cfg.quickCaptureHotkey, summonAndCapture);
     if (!ok) console.warn(`Failed to register hotkey: ${cfg.quickCaptureHotkey}`);
@@ -2910,7 +3323,10 @@ if (!gotLock) {
     // intentional no-op — stay resident until the user quits explicitly.
   });
 
-  app.on("will-quit", () => globalShortcut.unregisterAll());
+  app.on("will-quit", () => {
+    globalShortcut.unregisterAll();
+    stopAwakeBrianBlocker();
+  });
 }
 
 // Keep the tray reference alive for the GC.

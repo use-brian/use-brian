@@ -15,11 +15,19 @@ const handlers: MenuTemplateHandlers = {
   onSwitchTarget: () => {},
   onUninstall: () => {},
   onStartFirefoxControl: () => {},
+  onToggleKeepAwake: () => {},
 };
 
 /** Default options; spread + override per test. */
 function opts(over: Partial<MenuTemplateOptions> = {}): MenuTemplateOptions {
-  return { isMac: true, isDev: false, appName: "Use Brian", update: null, ...over };
+  return {
+    isMac: true,
+    isDev: false,
+    appName: "Use Brian",
+    update: null,
+    keepBrianAwake: false,
+    ...over,
+  };
 }
 
 /** Collect every `role` string in a template tree (top level + one submenu deep). */
@@ -73,6 +81,23 @@ describe("[COMP:app-desktop/menu-template] buildMenuTemplate", () => {
       const record = allItems(t).find((i) => i.label === "Start Recording");
       expect(record?.accelerator).toBe("CommandOrControl+Shift+R");
     }
+  });
+
+  it("renders Keep Brian Nearby as a checked setting and toggles through", () => {
+    const onToggleKeepAwake = vi.fn();
+    for (const isMac of [true, false]) {
+      const items = allItems(
+        buildMenuTemplate(
+          opts({ isMac, keepBrianAwake: true }),
+          { ...handlers, onToggleKeepAwake },
+        ),
+      );
+      const awake = items.find((item) => item.label === "Keep Brian Nearby");
+      expect(awake?.type).toBe("checkbox");
+      expect(awake?.checked).toBe(true);
+      (awake?.click as () => void)();
+    }
+    expect(onToggleKeepAwake).toHaveBeenCalledTimes(2);
   });
 
   it("starts Firefox browser control from both platform menus", () => {

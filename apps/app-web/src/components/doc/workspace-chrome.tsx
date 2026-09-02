@@ -68,7 +68,11 @@ import { useOfflineSync } from "@/lib/offline/use-offline-sync";
 import { useWorkspaceEvents } from "@/lib/workspace-events";
 import { cn } from "@/lib/utils";
 import { CHAT_SEED_EVENT, type ChatSeed } from "@/lib/chat-seed";
-import { desktopBridge } from "@/lib/desktop-auth-source";
+import {
+  acknowledgeDesktopMessageBrian,
+  desktopBridge,
+  onDesktopMessageBrian,
+} from "@/lib/desktop-auth-source";
 import {
   desktopTitlebarInsetCssPx,
   resolveDesktopZoomFactor,
@@ -277,6 +281,11 @@ export function WorkspaceChrome({
   // (Moved up from `DocShell` with the dock; the publishers still fire the
   // same event from inside the page surface.)
   const [seed, setSeed] = useState<RoutedSeed | null>(null);
+  const [messageBrianRequest, setMessageBrianRequest] = useState<{
+    nonce: number;
+    target: "desktop" | "mobile";
+  }>();
+  const pendingMessageBrianRef = useRef(false);
   const seedNonceRef = useRef(0);
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -302,6 +311,32 @@ export function WorkspaceChrome({
     window.addEventListener(CHAT_SEED_EVENT, onSeed);
     return () => window.removeEventListener(CHAT_SEED_EVENT, onSeed);
   }, []);
+
+  const revealMessageBrian = useCallback(() => {
+    setMessageBrianRequest((current) => ({
+      nonce: (current?.nonce ?? 0) + 1,
+      target: window.matchMedia("(min-width: 1024px)").matches ? "desktop" : "mobile",
+    }));
+  }, []);
+
+  useEffect(() => {
+    if (dockSuppressed || !pendingMessageBrianRef.current) return;
+    pendingMessageBrianRef.current = false;
+    revealMessageBrian();
+  }, [dockSuppressed, revealMessageBrian]);
+
+  useEffect(
+    () =>
+      onDesktopMessageBrian(() => {
+        if (!dockSuppressed) {
+          revealMessageBrian();
+          return;
+        }
+        pendingMessageBrianRef.current = true;
+        router.push(docPagePath(workspaceId));
+      }),
+    [dockSuppressed, revealMessageBrian, router, workspaceId],
+  );
 
   // Soft-navigate to a page's canonical URL. On `/p` the shell's URL→tabs effect
   // adopts it into the tab history; from another surface it opens the doc
@@ -664,6 +699,10 @@ export function WorkspaceChrome({
               origin="doc"
               seedRequest={seed?.target === "desktop" ? seed : undefined}
               othersRun={docOthersRun}
+              messageBrianRequest={
+                messageBrianRequest?.target === "desktop" ? messageBrianRequest.nonce : undefined
+              }
+              onMessageBrianRevealed={acknowledgeDesktopMessageBrian}
             />
           </div>
           <MobileChatDrawer
@@ -672,6 +711,10 @@ export function WorkspaceChrome({
             className="lg:hidden"
             seed={seed?.target === "mobile" ? seed : undefined}
             othersRun={docOthersRun}
+            messageBrianRequest={
+              messageBrianRequest?.target === "mobile" ? messageBrianRequest.nonce : undefined
+            }
+            onMessageBrianRevealed={acknowledgeDesktopMessageBrian}
           />
         </div>
       )}

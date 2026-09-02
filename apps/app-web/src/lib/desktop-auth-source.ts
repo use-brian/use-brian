@@ -108,6 +108,15 @@ export interface DesktopBridge {
    * docs/plans/desktop-connector-oauth-return.md.
    */
   connectConnector?: (req: ConnectConnectorRequest) => void;
+  /** Subscribe to the shell companion's open-composer intent. */
+  onMessageBrian?: (callback: () => void) => () => void;
+  /** Confirm that the workspace composer has consumed the companion intent. */
+  acknowledgeMessageBrian?: () => void;
+  /** Mirror the dedicated chat window's display-only lifecycle onto the companion. */
+  setCompanionState?: (state: {
+    phase: "idle" | "loading" | "thinking" | "responding" | "action-required";
+    label?: string;
+  }) => void;
 }
 
 /** The connector-connect handoff payload (see `DesktopBridge.connectConnector`). */
@@ -143,6 +152,16 @@ declare global {
 export function desktopBridge(): DesktopBridge | undefined {
   if (typeof window === "undefined") return undefined;
   return window.usebrianDesktop ?? window.sidanclawDesktop;
+}
+
+/** Subscribe to companion clicks when hosted by the Electron shell. */
+export function onDesktopMessageBrian(callback: () => void): () => void {
+  return desktopBridge()?.onMessageBrian?.(callback) ?? (() => {});
+}
+
+/** Clear the shell's durable companion intent after the composer is visible. */
+export function acknowledgeDesktopMessageBrian(): void {
+  desktopBridge()?.acknowledgeMessageBrian?.();
 }
 
 /** True only in the thin shell while it fronts a local/self-hosted target. */

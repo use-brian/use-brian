@@ -21,6 +21,16 @@
 //       docs/plans/canvas-desktop-bundled-offline.md → Phase 1 ("Remaining wiring").
 const { contextBridge, ipcRenderer, webFrame } = require("electron");
 
+const messageBrianListeners = new Set();
+let messageBrianPending = false;
+ipcRenderer.on("Use Brian:message-brian", () => {
+  if (messageBrianListeners.size === 0) {
+    messageBrianPending = true;
+    return;
+  }
+  for (const listener of messageBrianListeners) listener();
+});
+
 /** @type {Record<string, unknown>} */
 const bridge = {
   // The host OS, so app-web can gate macOS-only chrome (e.g. the traffic-light
@@ -98,6 +108,24 @@ const bridge = {
   // an RFC 8252 loopback flow and navigates back to the connectors page on done.
   // Spec: docs/plans/desktop-connector-oauth-return.md.
   connectConnector: (req) => ipcRenderer.send("Use Brian:connect-connector", req),
+  // The always-on-top Brian companion asks the already-mounted workspace
+  // chrome to reveal its existing composer. Queue one intent until hydration
+  // subscribes so a cold window can never drop the click.
+  onMessageBrian: (callback) => {
+    if (typeof callback !== "function") return () => {};
+    messageBrianListeners.add(callback);
+    if (messageBrianPending) {
+      messageBrianPending = false;
+      queueMicrotask(() => {
+        callback();
+      });
+    }
+    return () => messageBrianListeners.delete(callback);
+  },
+  acknowledgeMessageBrian: () => ipcRenderer.send("Use Brian:message-brian-consumed"),
+  // The dedicated chat renderer mirrors its display-only lifecycle onto the
+  // local companion. Main validates both sender identity and payload shape.
+  setCompanionState: (state) => ipcRenderer.send("Use Brian:companion-state", state),
 };
 
 if (process.argv.includes("--usebrian-bundled")) {

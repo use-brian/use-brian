@@ -47,6 +47,8 @@ export interface MenuTemplateOptions {
    * Ignored off-mac. See `uninstall.ts`.
    */
   readonly uninstall?: boolean;
+  /** Whether the persisted awake companion mode is currently enabled. */
+  readonly keepBrianAwake: boolean;
 }
 
 export interface MenuTemplateHandlers {
@@ -66,6 +68,8 @@ export interface MenuTemplateHandlers {
   onUninstall: () => void;
   /** Start Firefox with its loopback Remote Agent enabled for My Browser. */
   onStartFirefoxControl: () => void;
+  /** Toggle the persisted power blocker + ambient Brian companion. */
+  onToggleKeepAwake: () => void;
 }
 
 /** Build the platform-appropriate menu template (pure). */
@@ -108,6 +112,12 @@ export function buildMenuTemplate(
       label: "Start Recording",
       accelerator: "CommandOrControl+Shift+R",
       click: () => handlers.onRecord(),
+    },
+    {
+      label: "Keep Brian Nearby",
+      type: "checkbox",
+      checked: opts.keepBrianAwake,
+      click: () => handlers.onToggleKeepAwake(),
     },
     {
       label: "Start Firefox for My Browser…",

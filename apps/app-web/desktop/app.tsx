@@ -57,6 +57,7 @@ import { DocSidebarDataProvider } from "@/components/doc/doc-sidebar-data";
 import { BrainSurfaceProvider } from "@/contexts/brain-surface-context";
 import { PrimaryAssistantProvider } from "@/contexts/primary-assistant";
 import { WorkspaceChrome } from "@/components/doc/workspace-chrome";
+import { DesktopChatWindow } from "@/components/chrome/desktop-chat-window";
 import { WorkspacePicker } from "@/components/workspace-picker";
 import {
   usesScalableWorkspacePicker,
@@ -238,6 +239,7 @@ export function App() {
                 create-workspace affordance yet — that gap is desktop-wide,
                 not introduced by this alias. */}
             <Route path="/teams" element={<Boot />} />
+            <Route path="/desktop/chat/:workspaceId" element={<DesktopChatRoute />} />
             {/* Layout route: WorkspaceShell (providers + persistent chrome)
                 stays mounted across every `/w/[id]/*` surface change — only the
                 `<Outlet/>` swaps — mirroring the Next workspace layout. */}
@@ -330,6 +332,11 @@ export function App() {
       </I18nProvider>
     </ThemeProvider>
   );
+}
+
+function DesktopChatRoute() {
+  const { workspaceId = "" } = useParams();
+  return workspaceId ? <DesktopChatWindow workspaceId={workspaceId} /> : <Navigate to="/" replace />;
 }
 
 // ── Boot / workspace picker ────────────────────────────────────

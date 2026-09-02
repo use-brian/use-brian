@@ -63,6 +63,10 @@ describe('[COMP:chat-ui/chat-composer] ChatComposer disable semantics', () => {
     expect(textareaTag(html)).not.toContain('disabled')
     expect(sendButtonTag(html)).toContain('disabled')
   })
+
+  it('accepts an external focus token without changing static composer markup', () => {
+    expect(textareaTag(render({ focusRequest: 1 }))).toContain('data-testid="chat-composer-input"')
+  })
 })
 
 describe('[COMP:chat-ui/chat-composer] Enter intent', () => {

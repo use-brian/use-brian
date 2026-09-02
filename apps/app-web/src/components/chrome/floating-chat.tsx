@@ -237,6 +237,7 @@ import {
   type StagedRecording,
 } from "@/lib/recordings/use-recording-upload";
 import { dispatchRecordingParticipantsUpdated } from "@/lib/recordings/recording-events";
+import { companionChatPhase } from "@/lib/companion-chat-state";
 import { useDockRecorder } from "@/lib/recorder/use-dock-recorder";
 import { useLiveRecordingPage } from "@/lib/recordings/use-live-recording-page";
 import {
@@ -409,6 +410,7 @@ type InlineNotice = {
 export type ChatActivity = {
   isStreaming: boolean;
   streamingText: string;
+  phase: "idle" | "loading" | "thinking" | "responding" | "action-required";
   activeTool: {
     name: string;
     description?: string;
@@ -493,6 +495,10 @@ type FloatingChatProps = {
    * instruction at the same page. Soft by design — it warns, it doesn't block.
    */
   othersRun?: AssistantRunState | null;
+  /** Reveal and focus the already-mounted composer when this token changes. */
+  messageBrianRequest?: number;
+  /** Called after the requested composer is mounted, visible, and focused. */
+  onMessageBrianRevealed?: () => void;
 };
 
 const CLIENT_TIMEZONE: string | null = (() => {
@@ -513,6 +519,8 @@ export function FloatingChat({
   activePage = null,
   seedRequest,
   othersRun = null,
+  messageBrianRequest,
+  onMessageBrianRevealed,
 }: FloatingChatProps) {
   // 'side-panel' fills its parent column and stays open (no pill); 'floating'
   // is the bottom-right collapsible dock. Drives positioning + the pill below.
@@ -548,6 +556,20 @@ export function FloatingChat({
   const [pendingSurfaceSeed, setPendingSurfaceSeed] =
     useState<SurfaceChatSeed | null>(null);
   const surfaceSeedAttemptRef = useRef<SurfaceChatSeed | null>(null);
+
+  useEffect(() => {
+    if (messageBrianRequest === undefined || isSidePanel) return;
+    setExpanded(true);
+  }, [isSidePanel, messageBrianRequest]);
+
+  const acknowledgedMessageBrianRef = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    if (messageBrianRequest === undefined) return;
+    if (!isSidePanel && !expanded) return;
+    if (acknowledgedMessageBrianRef.current === messageBrianRequest) return;
+    acknowledgedMessageBrianRef.current = messageBrianRequest;
+    onMessageBrianRevealed?.();
+  }, [expanded, isSidePanel, messageBrianRequest, onMessageBrianRevealed]);
 
   // ── Assistant switcher ───────────────────────────────────────────────────
   // The chat talks to the workspace PRIMARY by default (the `assistantId`
@@ -1248,8 +1270,20 @@ export function FloatingChat({
   const isStreaming = session.state.isStreaming;
   const streamingText = session.state.streamingText;
   const activity = useMemo<ChatActivity>(() => {
+    const requiresAction =
+      Boolean(pendingQuestion) ||
+      session.state.pendingConfirmations.some(
+        (confirmation) =>
+          confirmation.status === "pending" || confirmation.status === "approving",
+      );
+    const phase = companionChatPhase({
+      isStreaming,
+      hasStreamingText: Boolean(streamingText),
+      requiresAction,
+      isLoading: resumePolling,
+    });
     if (!isStreaming) {
-      return { isStreaming: false, streamingText: "", activeTool: null };
+      return { isStreaming: false, streamingText: "", phase, activeTool: null };
     }
     const running = toolTimeline.find((t) => t.status === "running");
     const last =
@@ -1260,6 +1294,7 @@ export function FloatingChat({
     return {
       isStreaming: true,
       streamingText,
+      phase,
       activeTool: last
         ? {
             name: last.name,
@@ -1268,7 +1303,7 @@ export function FloatingChat({
           }
         : null,
     };
-  }, [isStreaming, streamingText, toolTimeline]);
+  }, [isStreaming, pendingQuestion, resumePolling, session.state.pendingConfirmations, streamingText, toolTimeline]);
 
   const onActivityChangeRef = useRef(onActivityChange);
   useEffect(() => {
@@ -3564,6 +3599,7 @@ export function FloatingChat({
             onKeyDown={slashCommands.handleKeyDown}
             highlightRanges={slashCommands.highlightRanges}
             inputWrapClassName="flex-1 min-w-0 rounded-md border border-border bg-background focus-within:border-ring [&_:focus-visible]:shadow-none"
+            focusRequest={messageBrianRequest}
             // While a turn streams, Send QUEUES: the message is handed to the
             // running turn, which takes it at its next safe boundary.
             // Cmd/Ctrl+Enter steers instead — take it as soon as possible.
