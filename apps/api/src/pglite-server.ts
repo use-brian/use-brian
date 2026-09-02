@@ -37,6 +37,9 @@ const dataDir = process.env.PGLITE_DATA_DIR || defaultDataDir()
 // Default to a distinctive high port so it never collides with a local Postgres
 // on 5432; the launcher sets PGLITE_PORT explicitly.
 const port = parseInt(process.env.PGLITE_PORT || '54329', 10)
+// Local launch remains loopback-only. A dedicated container opts into 0.0.0.0
+// so API/doc-sync containers can reach the socket over their private network.
+const host = process.env.PGLITE_HOST || '127.0.0.1'
 // Open migrations dir, resolved relative to this file (src/ and dist/ are
 // siblings under use-brian/apps/api, so the path is the same either way).
 const here = dirname(fileURLToPath(import.meta.url))
@@ -47,9 +50,9 @@ await db.waitReady
 const applied = await migratePglite(db, migrationsDir)
 console.log(`[pglite] migrated ${applied} new migration(s); brain at ${dataDir}`)
 
-const server = new PGLiteSocketServer({ db, port, host: '127.0.0.1', maxConnections: 20 })
+const server = new PGLiteSocketServer({ db, port, host, maxConnections: 20 })
 await server.start()
-console.log(`[pglite] embedded brain serving on 127.0.0.1:${port}`)
+console.log(`[pglite] embedded brain serving on ${host}:${port}`)
 
 let shuttingDown = false
 const shutdown = async () => {

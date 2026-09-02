@@ -25,9 +25,15 @@ jobs:
         include:
           - image: api
             dockerfile: apps/api/Dockerfile
+            target: runtime
+            build_args: ""
+          - image: pglite
+            dockerfile: apps/api/Dockerfile
+            target: pglite
             build_args: ""
           - image: app-web
             dockerfile: apps/app-web/Dockerfile
+            target: runtime
             build_args: |
               NEXT_PUBLIC_API_URL=${{ vars.NEXT_PUBLIC_API_URL }}
               NEXT_PUBLIC_DOC_SYNC_URL=${{ vars.NEXT_PUBLIC_DOC_SYNC_URL }}
@@ -76,6 +82,7 @@ jobs:
         with:
           context: .
           file: ${{ matrix.dockerfile }}
+          target: ${{ matrix.target }}
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.metadata.outputs.tags }}
