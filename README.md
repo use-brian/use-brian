@@ -79,6 +79,9 @@ docker pull ghcr.io/use-brian/doc-sync:latest
 
 | Service | Image |
 |---|---|
+| API | `ghcr.io/use-brian/use-brian-api` |
+| App web | `ghcr.io/use-brian/use-brian-app-web` |
+| PGlite | `ghcr.io/use-brian/use-brian-pglite` |
 | Auth web | `ghcr.io/use-brian/auth-web` |
 | Browser relay | `ghcr.io/use-brian/browser-relay` |
 | Discord connector | `ghcr.io/use-brian/discord-connector` |
@@ -88,10 +91,10 @@ docker pull ghcr.io/use-brian/doc-sync:latest
 | WeChat connector | `ghcr.io/use-brian/wechat-connector` |
 | WeChat desktop bridge | `ghcr.io/use-brian/wechat-desktop-bridge` |
 
-Use `latest` for the current `main` build, `develop` for the development branch,
-`v*` tags for releases, or `sha-<commit>` to pin an exact build. These images
-cover the standalone services; use the `pnpm` quick start above to run the full
-self-hosted app locally.
+Every published GitHub release produces native `linux/amd64` and `linux/arm64`
+variants under the release tag. Stable releases also update `latest`;
+prereleases do not. Use the `pnpm` quick start above to run the full self-hosted
+app locally.
 
 ### Your data stays yours
 

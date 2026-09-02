@@ -24,14 +24,20 @@ jobs:
       matrix:
         image:
           - name: api
+            registry_path: ${{ github.repository }}-api
+            context: .
             dockerfile: apps/api/Dockerfile
             target: runtime
             build_args: ""
           - name: pglite
+            registry_path: ${{ github.repository }}-pglite
+            context: .
             dockerfile: apps/api/Dockerfile
             target: pglite
             build_args: ""
           - name: app-web
+            registry_path: ${{ github.repository }}-app-web
+            context: .
             dockerfile: apps/app-web/Dockerfile
             target: runtime
             build_args: |
@@ -39,6 +45,56 @@ jobs:
               NEXT_PUBLIC_DOC_SYNC_URL=${{ vars.NEXT_PUBLIC_DOC_SYNC_URL }}
               NEXT_PUBLIC_USEBRIAN_EDITION=oss
               OSS_GIT_COMMIT_SHA=${{ github.sha }}
+          - name: auth-web
+            registry_path: ${{ github.repository_owner }}/auth-web
+            context: .
+            dockerfile: apps/auth-web/Dockerfile
+            target: ""
+            build_args: ""
+          - name: browser-relay
+            registry_path: ${{ github.repository_owner }}/browser-relay
+            context: .
+            dockerfile: apps/browser-relay/Dockerfile
+            target: ""
+            build_args: ""
+          - name: discord-connector
+            registry_path: ${{ github.repository_owner }}/discord-connector
+            context: .
+            dockerfile: apps/discord-connector/Dockerfile
+            target: ""
+            build_args: ""
+          - name: doc-sync
+            registry_path: ${{ github.repository_owner }}/doc-sync
+            context: .
+            dockerfile: apps/doc-sync/Dockerfile
+            target: ""
+            build_args: ""
+          - name: feishu-connector
+            registry_path: ${{ github.repository_owner }}/feishu-connector
+            context: .
+            dockerfile: apps/feishu-connector/Dockerfile
+            target: ""
+            build_args: ""
+          - name: wa-connector
+            registry_path: ${{ github.repository_owner }}/wa-connector
+            context: .
+            dockerfile: apps/wa-connector/Dockerfile
+            target: ""
+            build_args: ""
+          - name: wechat-connector
+            registry_path: ${{ github.repository_owner }}/wechat-connector
+            context: .
+            dockerfile: apps/wechat-connector/Dockerfile
+            target: ""
+            build_args: ""
+          - name: wechat-desktop-bridge
+            registry_path: ${{ github.repository_owner }}/wechat-desktop-bridge
+            context: apps/wechat-desktop-bridge
+            dockerfile: apps/wechat-desktop-bridge/Dockerfile
+            target: ""
+            build_args: |
+              GIT_SHA=${{ github.sha }}
+              BUILD_TIME=${{ github.event.release.published_at }}
         architecture:
           - name: amd64
             runner: ubuntu-24.04
@@ -76,7 +132,7 @@ jobs:
         id: metadata
         uses: docker/metadata-action@v6
         with:
-          images: ${{ env.REGISTRY }}/${{ github.repository }}-${{ matrix.image.name }}
+          images: ${{ env.REGISTRY }}/${{ matrix.image.registry_path }}
           tags: |
             type=raw,value=${{ github.event.release.tag_name }}
             type=raw,value=latest,enable=${{ !github.event.release.prerelease }}
@@ -85,13 +141,13 @@ jobs:
         id: build
         uses: docker/build-push-action@v7
         with:
-          context: .
+          context: ${{ matrix.image.context }}
           file: ${{ matrix.image.dockerfile }}
           target: ${{ matrix.image.target }}
           platforms: ${{ matrix.architecture.platform }}
           labels: ${{ steps.metadata.outputs.labels }}
           build-args: ${{ matrix.image.build_args }}
-          outputs: type=image,name=${{ env.REGISTRY }}/${{ github.repository }}-${{ matrix.image.name }},push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ matrix.image.registry_path }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=${{ matrix.image.name }}-${{ matrix.architecture.name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image.name }}-${{ matrix.architecture.name }}
           provenance: mode=max
@@ -113,20 +169,42 @@ jobs:
           retention-days: 1
 
   publish:
-    name: Publish ${{ matrix.image }} manifest
+    name: Publish ${{ matrix.image.name }} manifest
     runs-on: ubuntu-24.04
     needs: build
     strategy:
       fail-fast: false
       matrix:
-        image: [api, pglite, app-web]
+        image:
+          - name: api
+            registry_path: ${{ github.repository }}-api
+          - name: pglite
+            registry_path: ${{ github.repository }}-pglite
+          - name: app-web
+            registry_path: ${{ github.repository }}-app-web
+          - name: auth-web
+            registry_path: ${{ github.repository_owner }}/auth-web
+          - name: browser-relay
+            registry_path: ${{ github.repository_owner }}/browser-relay
+          - name: discord-connector
+            registry_path: ${{ github.repository_owner }}/discord-connector
+          - name: doc-sync
+            registry_path: ${{ github.repository_owner }}/doc-sync
+          - name: feishu-connector
+            registry_path: ${{ github.repository_owner }}/feishu-connector
+          - name: wa-connector
+            registry_path: ${{ github.repository_owner }}/wa-connector
+          - name: wechat-connector
+            registry_path: ${{ github.repository_owner }}/wechat-connector
+          - name: wechat-desktop-bridge
+            registry_path: ${{ github.repository_owner }}/wechat-desktop-bridge
 
     steps:
       - name: Download architecture digests
         uses: actions/download-artifact@v8
         with:
           path: ${{ runner.temp }}/digests
-          pattern: digests-${{ matrix.image }}-*
+          pattern: digests-${{ matrix.image.name }}-*
           merge-multiple: true
 
       - name: Set up Docker Buildx
@@ -143,7 +221,7 @@ jobs:
         id: metadata
         uses: docker/metadata-action@v6
         with:
-          images: ${{ env.REGISTRY }}/${{ github.repository }}-${{ matrix.image }}
+          images: ${{ env.REGISTRY }}/${{ matrix.image.registry_path }}
           tags: |
             type=raw,value=${{ github.event.release.tag_name }}
             type=raw,value=latest,enable=${{ !github.event.release.prerelease }}
@@ -151,7 +229,7 @@ jobs:
       - name: Create multi-architecture manifest
         env:
           METADATA_JSON: ${{ steps.metadata.outputs.json }}
-          REGISTRY_IMAGE: ${{ env.REGISTRY }}/${{ github.repository }}-${{ matrix.image }}
+          REGISTRY_IMAGE: ${{ env.REGISTRY }}/${{ matrix.image.registry_path }}
         run: |
           tag_args=()
           while IFS= read -r tag; do
