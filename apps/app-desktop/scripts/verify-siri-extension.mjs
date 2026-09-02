@@ -1,5 +1,8 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export default async function verifySiriExtension(context) {
   if (context.electronPlatformName !== "darwin") return;
@@ -19,10 +22,10 @@ export default async function verifySiriExtension(context) {
     stdio: "inherit",
   });
 
-  // electron-builder permits unsigned local packages when no Developer ID
-  // credentials are configured. In that mode the extension is still ad-hoc
-  // signed and testable, but the modified parent app intentionally has no valid
-  // seal to deep-verify. Release builds must verify the complete bundle.
+  // electron-builder permits local packages when no Developer ID credentials
+  // are configured, but copying the extension invalidates the Electron app's
+  // original resource seal. Ad-hoc sign the parent so Launch Services has a
+  // valid container from which to discover the App Intent.
   const configuredIdentity = context.packager.platformSpecificBuildOptions.identity;
   const releaseSigningConfigured = Boolean(
     process.env.CSC_LINK?.trim() ||
@@ -30,13 +33,33 @@ export default async function verifySiriExtension(context) {
       process.env.CSC_KEYCHAIN?.trim() ||
       (typeof configuredIdentity === "string" && configuredIdentity.trim()),
   );
-  if (releaseSigningConfigured) {
+  if (!releaseSigningConfigured) {
+    const parentEntitlements = join(
+      __dirname,
+      "..",
+      "build",
+      "entitlements.mac.plist",
+    );
     execFileSync(
       "/usr/bin/codesign",
-      ["--verify", "--deep", "--strict", appPath],
+      [
+        "--force",
+        "--sign",
+        "-",
+        "--entitlements",
+        parentEntitlements,
+        "--options",
+        "runtime",
+        appPath,
+      ],
       { stdio: "inherit" },
     );
   }
+  execFileSync(
+    "/usr/bin/codesign",
+    ["--verify", "--deep", "--strict", appPath],
+    { stdio: "inherit" },
+  );
 
   const result = spawnSync(
     "/usr/bin/codesign",
