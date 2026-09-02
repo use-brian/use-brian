@@ -16,22 +16,22 @@ env:
   REGISTRY: ghcr.io
 
 jobs:
-  publish:
-    name: Publish ${{ matrix.image }}
-    runs-on: ubuntu-latest
+  build:
+    name: Build ${{ matrix.image.name }} (${{ matrix.architecture.name }})
+    runs-on: ${{ matrix.architecture.runner }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - image: api
+        image:
+          - name: api
             dockerfile: apps/api/Dockerfile
             target: runtime
             build_args: ""
-          - image: pglite
+          - name: pglite
             dockerfile: apps/api/Dockerfile
             target: pglite
             build_args: ""
-          - image: app-web
+          - name: app-web
             dockerfile: apps/app-web/Dockerfile
             target: runtime
             build_args: |
@@ -39,6 +39,13 @@ jobs:
               NEXT_PUBLIC_DOC_SYNC_URL=${{ vars.NEXT_PUBLIC_DOC_SYNC_URL }}
               NEXT_PUBLIC_USEBRIAN_EDITION=oss
               OSS_GIT_COMMIT_SHA=${{ github.sha }}
+        architecture:
+          - name: amd64
+            runner: ubuntu-24.04
+            platform: linux/amd64
+          - name: arm64
+            runner: ubuntu-24.04-arm
+            platform: linux/arm64
 
     steps:
       - name: Check out release
@@ -47,7 +54,7 @@ jobs:
           ref: ${{ github.event.release.tag_name }}
 
       - name: Validate app-web build configuration
-        if: matrix.image == 'app-web'
+        if: matrix.image.name == 'app-web'
         env:
           NEXT_PUBLIC_API_URL: ${{ vars.NEXT_PUBLIC_API_URL }}
           NEXT_PUBLIC_DOC_SYNC_URL: ${{ vars.NEXT_PUBLIC_DOC_SYNC_URL }}
@@ -55,8 +62,72 @@ jobs:
           : "${NEXT_PUBLIC_API_URL:?Set the NEXT_PUBLIC_API_URL repository variable}"
           : "${NEXT_PUBLIC_DOC_SYNC_URL:?Set the NEXT_PUBLIC_DOC_SYNC_URL repository variable}"
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate image metadata
+        id: metadata
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository }}-${{ matrix.image.name }}
+          tags: |
+            type=raw,value=${{ github.event.release.tag_name }}
+            type=raw,value=latest,enable=${{ !github.event.release.prerelease }}
+
+      - name: Build and push architecture digest
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ matrix.image.dockerfile }}
+          target: ${{ matrix.image.target }}
+          platforms: ${{ matrix.architecture.platform }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          build-args: ${{ matrix.image.build_args }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ github.repository }}-${{ matrix.image.name }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.image.name }}-${{ matrix.architecture.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image.name }}-${{ matrix.architecture.name }}
+          provenance: mode=max
+          sbom: true
+
+      - name: Export digest
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/digests"
+          touch "${RUNNER_TEMP}/digests/${IMAGE_DIGEST#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v7
+        with:
+          name: digests-${{ matrix.image.name }}-${{ matrix.architecture.name }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish ${{ matrix.image }} manifest
+    runs-on: ubuntu-24.04
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [api, pglite, app-web]
+
+    steps:
+      - name: Download architecture digests
+        uses: actions/download-artifact@v8
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-${{ matrix.image }}-*
+          merge-multiple: true
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -77,18 +148,24 @@ jobs:
             type=raw,value=${{ github.event.release.tag_name }}
             type=raw,value=latest,enable=${{ !github.event.release.prerelease }}
 
-      - name: Build and publish image
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: ${{ matrix.dockerfile }}
-          target: ${{ matrix.target }}
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.metadata.outputs.tags }}
-          labels: ${{ steps.metadata.outputs.labels }}
-          build-args: ${{ matrix.build_args }}
-          cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
-          provenance: mode=max
-          sbom: true
+      - name: Create multi-architecture manifest
+        env:
+          METADATA_JSON: ${{ steps.metadata.outputs.json }}
+          REGISTRY_IMAGE: ${{ env.REGISTRY }}/${{ github.repository }}-${{ matrix.image }}
+        run: |
+          tag_args=()
+          while IFS= read -r tag; do
+            tag_args+=(--tag "$tag")
+          done < <(jq -r '.tags[]' <<< "${METADATA_JSON}")
+
+          digest_args=()
+          for digest_file in "${RUNNER_TEMP}"/digests/*; do
+            digest_args+=("${REGISTRY_IMAGE}@sha256:$(basename "$digest_file")")
+          done
+
+          docker buildx imagetools create "${tag_args[@]}" "${digest_args[@]}"
+
+      - name: Inspect published manifest
+        env:
+          METADATA_JSON: ${{ steps.metadata.outputs.json }}
+        run: docker buildx imagetools inspect "$(jq -r '.tags[0]' <<< "${METADATA_JSON}")"
