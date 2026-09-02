@@ -41,7 +41,11 @@ export interface MenuHandlers {
   /** The auto-update item state, or null to omit it (auto-update disabled). */
   update: { readonly label: string; readonly enabled: boolean } | null;
   /** The active target for the indicator + switch items (see menu-template.ts). */
-  target: { readonly kind: "cloud" | "local"; readonly label: string } | null;
+  target: {
+    readonly kind: "cloud" | "local";
+    readonly label: string;
+    readonly auth?: "pkce" | "local-session";
+  } | null;
   /** Whether the persisted awake companion mode is currently enabled. */
   keepBrianAwake: boolean;
 }

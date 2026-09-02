@@ -95,6 +95,7 @@ import {
   parseRefreshBounce,
   decideLoadFailureAction,
   shouldAttemptLocalMint,
+  shouldMintLocalSessionBeforeLoad,
   shouldShowSignInLandingOnLaunch,
 } from "./window-policy.js";
 import {
@@ -170,9 +171,9 @@ import {
 import {
   type TokenCipher,
   type StoredTokens,
-  encryptTokens,
   encryptBlob,
   decryptTokens,
+  persistTokens,
   serializeRendererTokens,
 } from "./desktop-token-store.js";
 import {
@@ -323,13 +324,14 @@ try {
 }
 
 /** Electron-session transport: HttpOnly deployment-gateway cookies stay on-device. */
-const gatewayProbeFetch: GatewayProbeFetch = (input, init) => {
+function authenticatedSessionFetch(input: string, init: RequestInit): Promise<Response> {
   const authorization = accessAuthorizationForUrl(activeAccessGrant, input);
-  if (!authorization) return session.defaultSession.fetch(input, init);
   const headers = new Headers(init.headers);
-  headers.set("Authorization", authorization);
-  return session.defaultSession.fetch(input, { ...init, headers });
-};
+  if (authorization) headers.set("Authorization", authorization);
+  return session.defaultSession.fetch(input, { ...init, headers, credentials: "include" });
+}
+
+const gatewayProbeFetch: GatewayProbeFetch = authenticatedSessionFetch;
 
 /**
  * Authenticate an arbitrary HTTP gateway without knowing its provider, domains,
@@ -1346,6 +1348,9 @@ function persistTargetAndRelaunch(
 ): void {
   try {
     writeFileSync(targetFile(), serializePersistedTarget(kind, appUrl, apiUrl, auth));
+    // Bundled bearer tokens are target-specific. Never send a cloud token to a
+    // local deployment (or vice versa) after switching and relaunching.
+    if (cfg.bundled) clearStoredTokens();
   } catch (err) {
     dialog.showErrorBox("Switch failed", `Could not save the target: ${String(err)}`);
     return;
@@ -1373,6 +1378,58 @@ function rememberedLocalAuth(): TargetAuth {
 }
 
 let lastLocalMintAt: number | null = null;
+let bundledLocalMintInFlight: Promise<boolean> | null = null;
+
+/** Establish the local-owner bearer before a file renderer can make API calls. */
+function ensureBundledLocalSession(win: BrowserWindow): Promise<boolean> {
+  if (
+    !shouldMintLocalSessionBeforeLoad({
+      bundled: cfg.bundled,
+      targetAuth: cfg.targetAuth,
+      hasStoredTokens: readStoredTokens() !== null,
+    })
+  ) {
+    return Promise.resolve(true);
+  }
+  if (bundledLocalMintInFlight) return bundledLocalMintInFlight;
+
+  const run = (async (): Promise<boolean> => {
+    const now = Date.now();
+    if (!shouldAttemptLocalMint(lastLocalMintAt, now)) {
+      showLocalDown(win, "auth");
+      return false;
+    }
+    lastLocalMintAt = now;
+    try {
+      const target = await validateLocalTarget(cfg.appUrl, cfg.apiUrl);
+      if (target.kind !== "ready") {
+        showLocalDown(win, target.kind === "cancelled" ? "gateway-auth" : "unreachable");
+        return false;
+      }
+      const result = await mintLocalDesktopSession(target.value.apiUrl, gatewayProbeFetch);
+      if (!persistSession(result)) {
+        clearStoredTokens();
+        showLocalDown(win, "auth");
+        return false;
+      }
+      return true;
+    } catch (err) {
+      console.warn("Local session mint failed:", err);
+      showLocalDown(
+        win,
+        err instanceof Error && /HTTP (?:400|401|403)/.test(err.message)
+          ? "auth"
+          : "unreachable",
+      );
+      return false;
+    }
+  })();
+  bundledLocalMintInFlight = run;
+  void run.finally(() => {
+    if (bundledLocalMintInFlight === run) bundledLocalMintInFlight = null;
+  });
+  return run;
+}
 
 /**
  * Mint the OSS local-owner session. Bundled mode calls the selected API and
@@ -1380,8 +1437,14 @@ let lastLocalMintAt: number | null = null;
  * cookie trigger. Cooldown-guarded: an edition/gate mismatch that keeps
  * returning to login cannot loop indefinitely.
  */
-async function mintLocalSession(): Promise<void> {
-  const win = ensureWindow();
+async function mintLocalSession(win: BrowserWindow = ensureWindow()): Promise<void> {
+  if (cfg.bundled) {
+    if (await ensureBundledLocalSession(win)) {
+      await loadApp(win);
+      focusWindow(win);
+    }
+    return;
+  }
   const now = Date.now();
   if (!shouldAttemptLocalMint(lastLocalMintAt, now)) {
     showLocalDown(win, "auth");
@@ -1389,16 +1452,6 @@ async function mintLocalSession(): Promise<void> {
   }
   lastLocalMintAt = now;
   try {
-    if (cfg.bundled) {
-      // The installed renderer has a file:// origin, so the Next trigger's
-      // cookie write cannot authenticate it. Mint the same local-owner pair
-      // directly from the selected API and persist it in safeStorage.
-      const result = await mintLocalDesktopSession(cfg.apiUrl, gatewayProbeFetch);
-      persistSession(result);
-      await loadApp(win);
-      focusWindow(win);
-      return;
-    }
     await win.webContents.loadURL(localMintUrl(cfg.appUrl));
   } catch (err) {
     console.warn("Local session mint failed:", err);
@@ -1501,6 +1554,7 @@ async function loadApp(
   opts: { capture?: boolean; record?: boolean; route?: string } = {},
 ): Promise<void> {
   if (bundledAvailable()) {
+    if (!(await ensureBundledLocalSession(win))) return;
     // The bundled renderer loads from file://, so it has no env: hand it the API
     // base (and the capture/record intent) via the query string. The client reads
     // `?api=` to know which backend to call with its Bearer token.
@@ -1619,9 +1673,15 @@ function writeTokenBlob(blob: Buffer | null): void {
   writeFileSync(tokensFile(), blob);
 }
 
-/** Encrypt + persist a freshly-exchanged session (the sign-in code-exchange path). */
-function persistSession(sess: DesktopSession): void {
-  writeTokenBlob(encryptTokens(tokenCipher, sess, Date.now()));
+/** Encrypt, persist, and verify a freshly-exchanged session before app load. */
+function persistSession(sess: DesktopSession): boolean {
+  return persistTokens(
+    tokenCipher,
+    sess,
+    Date.now(),
+    (blob) => writeFileSync(tokensFile(), blob),
+    () => readFileSync(tokensFile()),
+  );
 }
 
 /** Persist tokens handed back by the renderer's client-side refresh (validated). */
@@ -2028,10 +2088,18 @@ async function completeSignIn(code: string): Promise<void> {
   clearPersistedVerifier();
   closeAuthServer(); // idempotent — the loopback path already closed it
   try {
-    const result = await exchangeCode(cfg.apiUrl, code, verifier);
+    const result = await exchangeCode(
+      cfg.apiUrl,
+      code,
+      verifier,
+      cfg.target === "local" ? authenticatedSessionFetch : undefined,
+    );
     if (cfg.bundled) {
       // Bundled (Bearer tokens, not cookies) stays single-account — add replaces.
-      persistSession(result);
+      if (!persistSession(result)) {
+        clearStoredTokens();
+        throw new Error("Use Brian could not securely store your session. Please try again.");
+      }
     } else {
       // Add-account: stash the active account into the saved-account store before
       // its canonical trio is overwritten with the new account. At capacity we
@@ -2254,7 +2322,8 @@ async function signOut(): Promise<void> {
     // Bundled mode is single-account (Bearer tokens, no saved-account store).
     clearStoredTokens();
     const win = ensureWindow();
-    await win.webContents.loadFile(SIGNIN_PAGE);
+    if (cfg.targetAuth === "local-session") await loadApp(win);
+    else await win.webContents.loadFile(SIGNIN_PAGE);
     focusWindow(win);
     return;
   }
@@ -2802,7 +2871,7 @@ function refreshAppMenu(): void {
       onToggleKeepAwake: toggleKeepBrianAwake,
       isDev,
       update: updateMenuItem(),
-      target: { kind: cfg.target, label: cfg.targetLabel },
+      target: { kind: cfg.target, label: cfg.targetLabel, auth: cfg.targetAuth },
       // Packaged macOS only: Windows has the NSIS uninstaller; a dev run has
       // no bundle (and its exe lives in node_modules/electron).
       uninstall: process.platform === "darwin" && app.isPackaged,
@@ -2830,8 +2899,9 @@ function buildTrayMenu(): Menu {
     },
     { label: "Start Firefox for My Browser…", click: () => void startFirefoxForControl() },
   ];
-  // A local target has no login — the tray mirrors the app menu (§2.3).
-  if (cfg.target !== "local") {
+  // Local-owner deployments mint automatically; self-host PKCE still exposes
+  // the standard sign-in controls.
+  if (cfg.targetAuth === "pkce") {
     template.push(
       { type: "separator" },
       { label: "Sign In", click: () => startSignIn() },

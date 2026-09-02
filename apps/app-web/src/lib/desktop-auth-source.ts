@@ -272,6 +272,7 @@ export const desktopAuthSource: AuthSource = {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ refreshToken }),
+        ...(usesGatewayCredentials() ? { credentials: "include" } : {}),
       });
     } catch {
       // A thrown fetch is a network failure (offline, DNS, reset). Keep the

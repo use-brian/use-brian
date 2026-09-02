@@ -151,6 +151,25 @@ describe("[COMP:app-web/desktop-auth-source] desktopAuthSource", () => {
     });
     const [, init] = (globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(JSON.parse(init.body)).toEqual({ refreshToken: "rt" });
+    expect(init.credentials).toBeUndefined();
+  });
+
+  it("includes gateway cookies when refreshing a local or self-hosted target", async () => {
+    setBridge({
+      signIn: () => {},
+      gatewayCredentials: true,
+      getAccessToken: () => "old",
+      getRefreshToken: () => "rt",
+    });
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ accessToken: "newA", refreshToken: "newR" }),
+    }) as unknown as typeof fetch;
+
+    expect(await desktopAuthSource.refresh()).toEqual({ kind: "ok", token: "newA" });
+    const [, init] = (globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(init.credentials).toBe("include");
   });
 
   it("refresh clears and is unauthenticated on a 401 (dead session)", async () => {
