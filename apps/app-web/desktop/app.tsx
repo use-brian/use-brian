@@ -43,7 +43,7 @@ import {
 } from "react-router-dom";
 
 import { authFetch, getValidAccessToken } from "@/lib/auth-fetch";
-import { desktopBridge } from "@/lib/desktop-auth-source";
+import { desktopBridge, desktopSignOut } from "@/lib/desktop-auth-source";
 import { idbGet, idbSet } from "@/lib/offline/idb";
 import { ThemeProvider } from "@/lib/theme";
 import { I18nProvider } from "@/lib/i18n/client";
@@ -382,6 +382,10 @@ function Boot() {
       const token = await tokenPromise;
       if (cancelled) return;
       if (!token) {
+        // A stale safeStorage session can pass the shell's synchronous startup
+        // check but fail refresh here. Clear it through the existing native
+        // sign-out path so the shell restores its branded signin.html landing.
+        if (desktopSignOut()) return;
         if (!usingCache) setState({ k: "anon" });
         return;
       }
