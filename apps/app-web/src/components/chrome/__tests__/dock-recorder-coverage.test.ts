@@ -10,8 +10,8 @@
  *
  *  - every `chatDockSuppression.suppress()` caller must map to a recorder
  *    host file, and that host must actually reference the recorder chrome;
- *  - the one route-driven hide (`activeSurface === "chat"` in
- *    WorkspaceChrome) must pair with the Chat surface's composer rehost.
+ *  - the one route-driven hide (`activeSurface === "chat"` in the shared
+ *    dock policy) must pair with the Chat surface's composer rehost.
  *
  * Adding a new dock-hiding surface fails this test until the surface either
  * rehosts the recorder or mounts `DockRecorderFallback` - then its file is
@@ -86,6 +86,9 @@ describe("[COMP:app-web/dock-recorder] recorder stickiness coverage", () => {
     // WorkspaceChrome hides the dock on the full-page Chat surface without
     // a suppression hold - the pairing is with ChatSurface itself.
     expect(read("components/doc/workspace-chrome.tsx")).toContain(
+      "workspaceChatDockSuppressed(",
+    );
+    expect(read("lib/chat-dock-suppress.ts")).toContain(
       'activeSurface === "chat"',
     );
     const chatSurface = read("components/chat-app/chat-surface.tsx");
