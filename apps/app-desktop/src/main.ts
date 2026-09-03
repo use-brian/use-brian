@@ -225,10 +225,10 @@ function readPersistedTargetRaw(): string | null {
   }
 }
 
-// Release binaries always prefer the installed renderer. Development keeps
-// the remote shell default for fast iteration; USEBRIAN_BUNDLED explicitly
-// overrides either direction for QA/compatibility.
-const cfg = resolveConfig(process.env, readPersistedTargetRaw(), app.isPackaged);
+// Development and packaged releases use the same remote Next renderer. The
+// separate Vite/HashRouter app is an explicit QA/offline experiment only; a
+// packaging operation must not silently change routes, auth, or chat behavior.
+const cfg = resolveConfig(process.env, readPersistedTargetRaw(), false);
 const isDev = !app.isPackaged;
 
 const PRELOAD_PATH = join(__dirname, "preload.cjs");

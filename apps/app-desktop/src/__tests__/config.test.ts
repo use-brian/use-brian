@@ -74,6 +74,8 @@ describe("[COMP:app-desktop/config] resolveConfig", () => {
   });
 
   it("uses the caller default for bundled mode and lets USEBRIAN_BUNDLED override it", () => {
+    // Normal dev and packaged callers both use this default; packaging must not
+    // silently switch auth/router implementations.
     expect(resolveConfig({}).bundled).toBe(false);
     expect(resolveConfig({}, null, true).bundled).toBe(true);
     expect(resolveConfig({ USEBRIAN_BUNDLED: "1" }).bundled).toBe(true);

@@ -12,9 +12,8 @@ directories:
 files:
   - dist/**
   - "!dist/__tests__/**"
-  # The locally loaded renderer. Every package command rebuilds the Approach-B
-  # Vite SPA into this path before electron-builder; packaged runs select it by
-  # default, so a release never depends on live app-web HTML for navigation.
+  # Optional bundled-renderer experiment. Package it for explicit
+  # USEBRIAN_BUNDLED=1 QA, but normal dev and release launches both use app-web.
   - renderer/**
   - package.json
 mac:

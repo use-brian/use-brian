@@ -63,8 +63,8 @@ export interface DesktopConfig {
   /**
    * Bundled mode (Phase 4, docs/plans/canvas-desktop-bundled-offline.md): the
    * shell loads the client bundle from disk and authenticates with a Bearer
-   * token held in `safeStorage` instead of `.usebrian.ai` cookies. Packaged
-   * releases default on; development defaults off. When on, `main.ts`
+   * token held in `safeStorage` instead of `.usebrian.ai` cookies. Every normal
+   * launch defaults off so dev and packaged releases behave identically. When on, `main.ts`
    * passes `--usebrian-bundled` to the preload (which then exposes the token
    * bridge that activates app-web's `desktopAuthSource`) and persists tokens
    * rather than cookies on sign-in.
@@ -98,8 +98,8 @@ export interface DesktopConfig {
  * - `USEBRIAN_QUICK_CAPTURE_HOTKEY` overrides the global hotkey accelerator.
  * - `USEBRIAN_RECORD_HOTKEY` overrides the global start-recording accelerator.
  * - `USEBRIAN_BUNDLED` explicitly overrides bundled mode (`1`/`true` on,
- *   `0`/`false` off). The caller supplies the default: packaged release on,
- *   development off.
+ *   `0`/`false` off). Normal callers keep the default off; tests may inject a
+ *   different default explicitly.
  * - `USEBRIAN_DISABLE_AUTO_UPDATE` (`1`/`true`) turns off the shell's
  *   electron-updater checks (`autoUpdate: false`). On by default.
  *
