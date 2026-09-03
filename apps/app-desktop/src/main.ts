@@ -106,6 +106,10 @@ import {
   type GatewayProbeFetch,
 } from "./gateway-auth.js";
 import { parseAskBrianDeepLink, resolveDeepLink } from "./deep-link.js";
+import {
+  bridgeBundledCorsHeaders,
+  shouldBridgeBundledCors,
+} from "./bundled-cors.js";
 import { quickCaptureUrl, recordTargetUrl } from "./quick-capture.js";
 import {
   companionClickFollowsChatBlur,
@@ -3328,6 +3332,30 @@ if (!gotLock) {
         return;
       }
       callback(true);
+    });
+
+    // A file:// renderer has the opaque Origin `null`. Keep webSecurity enabled,
+    // but bridge CORS only for our bundled windows calling the configured API;
+    // this lets local packages work before the matching API policy is deployed.
+    session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+      const trustedWebContentsIds = [mainWindow, desktopChatWindow]
+        .filter((win): win is BrowserWindow => !!win && !win.isDestroyed())
+        .map((win) => win.webContents.id);
+      if (
+        shouldBridgeBundledCors({
+          bundled: cfg.bundled,
+          requestUrl: details.url,
+          apiUrl: cfg.apiUrl,
+          webContentsId: details.webContentsId,
+          trustedWebContentsIds,
+        })
+      ) {
+        callback({
+          responseHeaders: bridgeBundledCorsHeaders(details.responseHeaders),
+        });
+        return;
+      }
+      callback({});
     });
 
     // The gateway window is an authentication surface, never a download or app
