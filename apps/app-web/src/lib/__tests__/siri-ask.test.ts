@@ -4,6 +4,7 @@ import {
   MAX_SIRI_PROMPT_LENGTH,
   normalizeSiriPrompt,
   siriAskSuffix,
+  siriAskWorkspacePath,
 } from "../siri-ask";
 
 describe("[COMP:app-web/siri-ask] Siri prompt handoff", () => {
@@ -29,5 +30,10 @@ describe("[COMP:app-web/siri-ask] Siri prompt handoff", () => {
     expect(siriAskSuffix("1")).toBe("?ask=1");
     expect(siriAskSuffix("Ask about R&D + sales")).toBe("");
     expect(siriAskSuffix(["1", "1"])).toBe("");
+
+    expect(siriAskWorkspacePath("workspace-1", "1")).toBe(
+      "/w/workspace-1/p?ask=1",
+    );
+    expect(siriAskWorkspacePath("workspace-1", "0")).toBeNull();
   });
 });

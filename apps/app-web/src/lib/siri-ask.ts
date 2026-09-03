@@ -13,3 +13,11 @@ export function normalizeSiriPrompt(raw: unknown): string | null {
 export function siriAskSuffix(raw: unknown): string {
   return raw === "1" ? "?ask=1" : "";
 }
+
+export function siriAskWorkspacePath(
+  workspaceId: string,
+  raw: unknown,
+): string | null {
+  const suffix = siriAskSuffix(raw);
+  return suffix ? `/w/${workspaceId}/p${suffix}` : null;
+}

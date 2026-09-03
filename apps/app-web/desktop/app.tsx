@@ -77,7 +77,7 @@ import {
 
 import { isFeedPlatform } from "@/lib/feed-nav";
 import { isOssEdition } from "@/lib/edition";
-import { siriAskSuffix } from "@/lib/siri-ask";
+import { siriAskSuffix, siriAskWorkspacePath } from "@/lib/siri-ask";
 
 // Route surfaces are local Vite chunks, loaded from disk on first entry. This
 // keeps the startup shell small without reintroducing network navigation.
@@ -353,9 +353,8 @@ type WorkspaceRow = WorkspacePickerItem;
 
 function Boot() {
   const navigate = useNavigate();
-  const askSuffix = siriAskSuffix(
-    new URLSearchParams(window.location.search).get("ask"),
-  );
+  const askSignal = new URLSearchParams(window.location.search).get("ask");
+  const askSuffix = siriAskSuffix(askSignal);
   const [state, setState] = useState<
     | { k: "boot" }
     | { k: "anon" }
@@ -371,7 +370,11 @@ function Boot() {
       // important offline: cached identity can enter the local shell directly
       // instead of adding a picker click to every cold start.
       if (workspaces.length === 1) {
-        navigate(`/w/${workspaces[0].id}`, { replace: true });
+        navigate(
+          siriAskWorkspacePath(workspaces[0].id, askSignal) ??
+            `/w/${workspaces[0].id}`,
+          { replace: true },
+        );
         return;
       }
       setState({ k: "ready", workspaces });
@@ -417,13 +420,7 @@ function Boot() {
     return () => {
       cancelled = true;
     };
-  }, [navigate]);
-
-  useEffect(() => {
-    if (askSuffix && state.k === "ready" && state.workspaces.length === 1) {
-      navigate(`/w/${state.workspaces[0].id}/p${askSuffix}`, { replace: true });
-    }
-  }, [askSuffix, navigate, state]);
+  }, [askSignal, navigate]);
 
   return (
     <div style={shell}>
