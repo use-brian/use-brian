@@ -53,6 +53,7 @@ function skill(over: Partial<WorkspaceSkill> = {}): WorkspaceSkill {
     inductionSource: 'authored',
     sensitivity: 'internal',
     sensitivityOverridden: false,
+    allAssistants: false,
     ...over,
   }
 }

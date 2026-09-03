@@ -645,6 +645,10 @@ function AccessGroup({
   // One PUT in flight at a time — toggles disable while it lands so racing
   // writes can't ship stale sets.
   const [saving, setSaving] = useState(false);
+  // Whether the skill applies to every assistant INCLUDING future ones. Not
+  // derivable from `assistants` — "all of them are on" and "all of them, plus
+  // whoever is created next" render identically today and diverge tomorrow.
+  const [allAssistants, setAllAssistants] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -652,6 +656,7 @@ function AccessGroup({
     void getSkillAccess(skill.rowId).then((result) => {
       if (cancelled) return;
       setAssistants(result.ok ? result.assistants : null);
+      setAllAssistants(result.ok ? result.allAssistants : false);
     });
     return () => {
       cancelled = true;
@@ -672,28 +677,66 @@ function AccessGroup({
     onChanged();
   }
 
-  /** Apply-on-toggle: flip optimistically, PUT the new set, revert + show
-   *  the error if it fails. No separate save button — the switch IS the
-   *  action. */
-  async function toggleAssistant(id: string, checked: boolean) {
-    if (assistants == null) return;
-    const prev = assistants;
-    const next = prev.map((a) => (a.id === id ? { ...a, enabled: checked } : a));
-    setAssistants(next);
+  /** Shared write path for both the master toggle and the per-assistant ones:
+   *  flip optimistically, PUT, revert + show the error if it fails. No save
+   *  button — the switch IS the action. */
+  async function applyAccess(
+    scope: { allAssistants: true } | { enabledAssistantIds: string[] },
+    optimistic: { assistants: SkillAccessAssistant[]; allAssistants: boolean },
+  ) {
+    const prevAssistants = assistants;
+    const prevAll = allAssistants;
+    setAssistants(optimistic.assistants);
+    setAllAssistants(optimistic.allAssistants);
     setSaving(true);
     setError(null);
-    const result = await setSkillAccess(
-      skill.rowId,
-      next.filter((a) => a.enabled).map((a) => a.id),
-    );
+    const result = await setSkillAccess(skill.rowId, scope);
     setSaving(false);
     if (!result.ok) {
-      setAssistants(prev);
+      setAssistants(prevAssistants);
+      setAllAssistants(prevAll);
       setError(result.error);
       return;
     }
     setAssistants(result.assistants);
+    setAllAssistants(result.allAssistants);
     requestBrainRefresh(workspaceId);
+  }
+
+  /** The master toggle. ON stores the intent; OFF pins the skill to the
+   *  assistants that have it right now, which is an explicit list. */
+  async function toggleAllAssistants(checked: boolean) {
+    if (assistants == null) return;
+    if (checked) {
+      await applyAccess(
+        { allAssistants: true },
+        {
+          assistants: assistants.map((a) => ({ ...a, enabled: true })),
+          allAssistants: true,
+        },
+      );
+      return;
+    }
+    await applyAccess(
+      { enabledAssistantIds: assistants.map((a) => a.id) },
+      { assistants, allAssistants: false },
+    );
+  }
+
+  async function toggleAssistant(id: string, checked: boolean) {
+    if (assistants == null) return;
+    const next = assistants.map((a) =>
+      a.id === id ? { ...a, enabled: checked } : a,
+    );
+    // Switching one assistant off while the skill covers everyone is a
+    // CONVERSION, not a subtraction: the server materialises a row for each
+    // remaining assistant and clears the flag. Sending the resulting id list
+    // is exactly that instruction, so nothing special is needed here beyond
+    // dropping the flag locally.
+    await applyAccess(
+      { enabledAssistantIds: next.filter((a) => a.enabled).map((a) => a.id) },
+      { assistants: next, allAssistants: false },
+    );
   }
 
   return (
@@ -760,26 +803,51 @@ function AccessGroup({
         ) : assistants.length === 0 ? (
           <p className="text-xs text-muted-foreground">{copy.noAssistants}</p>
         ) : (
-          <ul className="flex flex-col">
-            {assistants.map((assistant) => (
-              <li
-                key={assistant.id}
-                className="flex items-center justify-between gap-3 rounded-md px-1.5 py-1.5 hover:bg-muted/50"
-              >
-                <span className="min-w-0 flex-1 truncate text-sm">
-                  {assistant.name}
+          <>
+            {/* The master toggle sits above the roster because it decides what
+                the roster MEANS: on, the individual switches are a preview of
+                a rule that also covers assistants nobody has created yet. */}
+            <div className="flex items-center justify-between gap-3 rounded-md border border-border/40 bg-muted/30 px-1.5 py-1.5">
+              <div className="flex min-w-0 flex-1 flex-col">
+                <span className="truncate text-sm">
+                  {copy.assistantsAllLabel}
                 </span>
-                <Switch
-                  checked={assistant.enabled}
-                  onCheckedChange={(checked) =>
-                    void toggleAssistant(assistant.id, checked)
-                  }
-                  disabled={saving}
-                  aria-label={assistant.name}
-                />
-              </li>
-            ))}
-          </ul>
+                <span className="text-[11px] text-muted-foreground/70">
+                  {allAssistants
+                    ? copy.assistantsAllHint
+                    : copy.assistantsFixedHint}
+                </span>
+              </div>
+              <Switch
+                checked={allAssistants}
+                onCheckedChange={(checked) =>
+                  void toggleAllAssistants(checked)
+                }
+                disabled={saving}
+                aria-label={copy.assistantsAllLabel}
+              />
+            </div>
+            <ul className="flex flex-col">
+              {assistants.map((assistant) => (
+                <li
+                  key={assistant.id}
+                  className="flex items-center justify-between gap-3 rounded-md px-1.5 py-1.5 hover:bg-muted/50"
+                >
+                  <span className="min-w-0 flex-1 truncate text-sm">
+                    {assistant.name}
+                  </span>
+                  <Switch
+                    checked={assistant.enabled}
+                    onCheckedChange={(checked) =>
+                      void toggleAssistant(assistant.id, checked)
+                    }
+                    disabled={saving}
+                    aria-label={assistant.name}
+                  />
+                </li>
+              ))}
+            </ul>
+          </>
         )}
       </div>
 
