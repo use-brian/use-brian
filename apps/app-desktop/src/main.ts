@@ -3335,19 +3335,14 @@ if (!gotLock) {
     });
 
     // A file:// renderer has the opaque Origin `null`. Keep webSecurity enabled,
-    // but bridge CORS only for our bundled windows calling the configured API;
-    // this lets local packages work before the matching API policy is deployed.
+    // but bridge CORS only in bundled mode and only for the configured API. A
+    // preflight may not carry a webContentsId, so that field is not a safe gate.
     session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
-      const trustedWebContentsIds = [mainWindow, desktopChatWindow]
-        .filter((win): win is BrowserWindow => !!win && !win.isDestroyed())
-        .map((win) => win.webContents.id);
       if (
         shouldBridgeBundledCors({
           bundled: cfg.bundled,
           requestUrl: details.url,
           apiUrl: cfg.apiUrl,
-          webContentsId: details.webContentsId,
-          trustedWebContentsIds,
         })
       ) {
         callback({

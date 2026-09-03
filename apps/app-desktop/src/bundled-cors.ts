@@ -4,11 +4,8 @@ export function shouldBridgeBundledCors(input: {
   bundled: boolean;
   requestUrl: string;
   apiUrl: string;
-  webContentsId?: number;
-  trustedWebContentsIds: readonly number[];
 }): boolean {
-  if (!input.bundled || input.webContentsId === undefined) return false;
-  if (!input.trustedWebContentsIds.includes(input.webContentsId)) return false;
+  if (!input.bundled) return false;
   try {
     return new URL(input.requestUrl).origin === new URL(input.apiUrl).origin;
   } catch {
