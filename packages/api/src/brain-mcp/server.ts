@@ -25,6 +25,11 @@ import type { BrainKeyStore } from '../db/brain-keys-store.js'
 import type { OAuthAuthorizationStore } from '../db/oauth-authorization-store.js'
 import type { BrainEpisodeIngestor } from '../ingest-port.js'
 import { authenticateBrainRequest } from './auth.js'
+import type { BrainAuth } from './auth.js'
+import type {
+  ProgrammaticCaptureInput,
+  ProgrammaticCaptureResult,
+} from '../ingest/programmatic-capture.js'
 import type { AppStoreScope } from '@use-brian/brian-app'
 import type { Sensitivity } from '@use-brian/core'
 import type { BrainKeyScope } from '../db/brain-keys-store.js'
@@ -82,6 +87,11 @@ type Options = {
    * See programmatic-access.md → "Tool wiring".
    */
   ingest?: BrainEpisodeIngestor
+  /** Deterministic Pipeline-C routing and pooling for routed ingest calls. */
+  programmaticCapture?: (
+    auth: BrainAuth,
+    input: ProgrammaticCaptureInput,
+  ) => Promise<ProgrammaticCaptureResult>
   /**
    * The shared agent capability toolset (agent-facing capability surface) —
    * built at boot via `buildAgentToolset`. Optional: a deploy without it
@@ -247,6 +257,9 @@ export function brainMcpRoutes(opts: Options): Router {
       brandTools: opts.brandTools,
       docTools: opts.docTools,
       ingest: opts.ingest,
+      ...(opts.programmaticCapture
+        ? { routeCapture: (input) => opts.programmaticCapture!(auth, input) }
+        : {}),
       agentTools: opts.agentTools,
       agentActiveCapabilities,
       agentWritesEnabled,

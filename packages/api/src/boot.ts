@@ -38,7 +38,7 @@ import {
   DASHSCOPE_INTL_BASE_URL, DASHSCOPE_INTL_LABEL, wrapProvider,
   createBaseTools, createGoogleMapsTools, GOOGLE_MAPS_GROUNDING_MCP_URL, LAYER_1_SYSTEM_PROMPT,
   createWorkerManager, createWorkerTools,
-  createSchedulingTools, createPollWorker,
+  createSchedulingTools, createPollWorker, createBatchWorker,
   startJitteredInterval, stopJitteredInterval,
   createCacheTool, createReadFileTool, distillFileToText,
   createRateLimiter, sanitizeDeep,
@@ -603,6 +603,13 @@ import { createControlPlaneReader } from './agent-surface/control-plane-reader.j
 import { buildAgentToolset } from './agent-surface/toolset.js'
 import { createDbBrainKeyStore } from './db/brain-keys-store.js'
 import { brainKeysRoutes } from './routes/brain-keys.js'
+import { createProgrammaticCaptureStore } from './db/programmatic-capture-store.js'
+import { createDbProgrammaticBatchStore } from './db/pending-ingest-batches-store.js'
+import {
+  createProgrammaticBatchProcessor,
+  createProgrammaticCaptureRouter,
+} from './ingest/programmatic-capture.js'
+import { programmaticCaptureRoutes } from './routes/programmatic-capture.js'
 import { createDbWorkspaceLlmProviderSettingsStore, loadLlmProviderKeyEncryptionKey } from './db/workspace-llm-provider-settings.js'
 import { workspaceLlmKeysRoutes } from './routes/workspace-llm-keys.js'
 import { createDbWorkspaceCustomLlmEndpointStore } from './db/workspace-custom-llm-endpoints.js'
@@ -1876,6 +1883,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const customChannelStore = createCustomChannelStore()
   const apiKeyStore = createDbApiKeyStore()
   const brainKeyStore = createDbBrainKeyStore()
+  const programmaticCaptureStore = createProgrammaticCaptureStore()
   const llmProviderEncryptionKey = (() => {
     if (!env.LLM_PROVIDER_KEY_ENCRYPTION_KEY) return null
     try {
@@ -2567,6 +2575,22 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const chatEpisodeIngestor: ChatEpisodeIngestor =
     builtIngestors?.chatEpisodeIngestor ?? (async () => {})
   const brainEpisodeIngestor: BrainEpisodeIngestor | undefined = builtIngestors?.brainEpisodeIngestor
+  const programmaticCapture = brainEpisodeIngestor
+    ? createProgrammaticCaptureRouter({
+        store: programmaticCaptureStore,
+        ingest: brainEpisodeIngestor,
+      })
+    : undefined
+  const programmaticBatchWorker = brainEpisodeIngestor
+    ? createBatchWorker({
+        store: createDbProgrammaticBatchStore(),
+        processBatch: createProgrammaticBatchProcessor({
+          store: programmaticCaptureStore,
+          ingest: brainEpisodeIngestor,
+        }),
+      })
+    : null
+  if (runWorkers) programmaticBatchWorker?.start()
   // The message store owns the enrichment ledger — it builds and leases the
   // windows — so this worker pulls work rather than discovering it. That leaves
   // one owner of "which messages have been enriched", and a consumer that dies
@@ -4772,6 +4796,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // without doc-sync. See brain-mcp/tools.ts → buildDocPageTools.
     docTools: { savedViewStore, docPageStore, docGateway, pageTemplateStore },
     ingest: brainEpisodeIngestor,
+    programmaticCapture,
     agentTools: { reads: agentToolset.reads, writes: agentToolset.writes },
     // Powers the searchRecording tool's vector arm (recording-to-brain).
     embedder: sharedEmbedder,
@@ -5303,6 +5328,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use('/api/invitations', optionalAuth(env.JWT_SECRET), invitationRouter)
 
   app.use('/api/workspaces/:workspaceId/brain-keys', requireAuth(env.JWT_SECRET), brainKeysRoutes({ brainKeyStore, workspaceStore }))
+  app.use(
+    '/api/workspaces/:workspaceId/programmatic-capture-profiles',
+    requireAuth(env.JWT_SECRET),
+    programmaticCaptureRoutes({ store: programmaticCaptureStore, workspaceStore }),
+  )
 
   if (llmProviderSettingsStore) {
     app.use('/api/workspaces/:workspaceId/llm-keys', requireAuth(env.JWT_SECRET), workspaceLlmKeysRoutes({ llmProviderSettingsStore, workspaceStore }))
@@ -8288,6 +8318,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     decisionReflectionWorker.stop()
     embeddingWorker.stop()
     pollWorker.stop()
+    programmaticBatchWorker?.stop()
     runQueueWorker.stop()
     crmDomainEventWorker.stop()
     knowledgeSyncWorker.stop()

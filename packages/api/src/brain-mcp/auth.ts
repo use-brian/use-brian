@@ -87,6 +87,11 @@ export type BrainAuth = {
    * install routes must recheck that person's live workspace role.
    */
   actingUserId?: string
+  /** OAuth client identity when available; useful for provenance, never authority. */
+  clientId?: string
+  /** Admin-owned routed-capture binding on this exact credential/grant. */
+  captureAssistantId?: string | null
+  captureProfileId?: string | null
 }
 
 export type BrainAuthOptions = {
@@ -149,6 +154,8 @@ export async function authenticateBrainRequest(
       authKind: 'api_key',
       storeScope: 'none',
       agentScope: 'none',
+      captureAssistantId: row.captureAssistantId ?? null,
+      captureProfileId: row.captureProfileId ?? null,
     }
   }
 
@@ -177,6 +184,9 @@ export async function authenticateBrainRequest(
         storeScope: 'none',
         agentScope: 'none',
         actingUserId: row.userId,
+        clientId: row.clientId,
+        captureAssistantId: row.captureAssistantId ?? null,
+        captureProfileId: row.captureProfileId ?? null,
       }
     }
   }
@@ -217,6 +227,8 @@ export async function authenticateBrainRequest(
         agentScope:
           app.grantedScopes.agent === 'ask' && parsed.payload.agent === 'ask' ? 'ask' : 'none',
         actingUserId: parsed.payload.userId,
+        captureAssistantId: null,
+        captureProfileId: null,
       }
     }
   }

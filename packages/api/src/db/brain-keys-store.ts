@@ -49,6 +49,10 @@ export type BrainKeyRow = {
   maxClearance: Sensitivity | null
   contextGroupId: string | null
   contextProjectId: string | null
+  /** Assistant whose default profile receives routed programmatic capture. */
+  captureAssistantId?: string | null
+  /** Optional connection-level override of the selected assistant's profile. */
+  captureProfileId?: string | null
   createdBy: string | null
   createdAt: Date
   lastUsedAt: Date | null
@@ -119,6 +123,8 @@ export type BrainKeyStore = {
     /** Optional immutable Team/Project binding for every turn using this key. */
     contextGroupId?: string | null
     contextProjectId?: string | null
+    captureAssistantId?: string | null
+    captureProfileId?: string | null
   }): Promise<CreatedBrainKey>
 
   /** List keys for a workspace. RLS-gated (owner/admin). Plaintext never returned. */
@@ -145,6 +151,15 @@ export type BrainKeyStore = {
     maxClearance: Sensitivity | null,
   ): Promise<boolean>
 
+  /** Set the routed-capture assistant and optional profile override. */
+  updateCaptureBinding(
+    actingUserId: string,
+    id: string,
+    workspaceId: string,
+    captureAssistantId: string | null,
+    captureProfileId: string | null,
+  ): Promise<boolean>
+
   /** Fire-and-forget. System-level. */
   touchLastUsedAt(id: string): Promise<void>
 }
@@ -159,6 +174,8 @@ const COLS_PUBLIC = `
   max_clearance as "maxClearance",
   context_group_id AS "contextGroupId",
   context_project_id AS "contextProjectId",
+  capture_assistant_id AS "captureAssistantId",
+  capture_profile_id AS "captureProfileId",
   created_by   as "createdBy",
   created_at   as "createdAt",
   last_used_at as "lastUsedAt"
@@ -176,8 +193,9 @@ export function createDbBrainKeyStore(): BrainKeyStore {
         params.actingUserId,
         `INSERT INTO brain_keys
            (id, workspace_id, name, key_hash, key_prefix, scope,
-            max_clearance, created_by, context_group_id, context_project_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            max_clearance, created_by, context_group_id, context_project_id,
+            capture_assistant_id, capture_profile_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
          RETURNING ${COLS_PUBLIC}, key_hash as "keyHash"`,
         [
           id,
@@ -190,6 +208,8 @@ export function createDbBrainKeyStore(): BrainKeyStore {
           params.actingUserId,
           params.contextGroupId ?? null,
           params.contextProjectId ?? null,
+          params.captureAssistantId ?? null,
+          params.captureProfileId ?? null,
         ],
       )
       if (result.rows.length === 0) {
@@ -247,6 +267,38 @@ export function createDbBrainKeyStore(): BrainKeyStore {
          WHERE id = $1
          RETURNING id`,
         [id, maxClearance],
+      )
+      return result.rows.length > 0
+    },
+
+    async updateCaptureBinding(
+      actingUserId,
+      id,
+      workspaceId,
+      captureAssistantId,
+      captureProfileId,
+    ) {
+      const result = await queryWithRLS<{ id: string }>(
+        actingUserId,
+        `UPDATE brain_keys k
+            SET capture_assistant_id = $3,
+                capture_profile_id = $4
+          WHERE k.id = $1 AND k.workspace_id = $2
+            AND k.status = 'active'
+            AND ($3::uuid IS NOT NULL OR $4::uuid IS NULL)
+            AND (
+              $3::uuid IS NULL
+              OR EXISTS (SELECT 1 FROM assistants a WHERE a.id = $3 AND a.workspace_id = $2)
+            )
+            AND (
+              $4::uuid IS NULL
+              OR EXISTS (
+                SELECT 1 FROM programmatic_capture_profiles p
+                 WHERE p.id = $4 AND p.workspace_id = $2
+              )
+            )
+          RETURNING k.id`,
+        [id, workspaceId, captureAssistantId, captureProfileId],
       )
       return result.rows.length > 0
     },

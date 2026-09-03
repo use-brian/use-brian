@@ -38,6 +38,8 @@ export type BrainKey = {
   maxClearance: BrainKeyClearance | null;
   contextGroupId: string | null;
   contextProjectId: string | null;
+  captureAssistantId: string | null;
+  captureProfileId: string | null;
   createdAt: string;
   lastUsedAt: string | null;
 };
@@ -87,6 +89,23 @@ export async function updateBrainKeyMaxClearance(
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ maxClearance }),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? `HTTP ${res.status}`);
+  }
+}
+
+export async function updateBrainKeyCaptureBinding(
+  workspaceId: string,
+  keyId: string,
+  assistantId: string | null,
+  profileId: string | null,
+): Promise<void> {
+  const res = await authFetch(`${base(workspaceId)}/${encodeURIComponent(keyId)}/capture`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ assistantId, profileId }),
   });
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { error?: string };

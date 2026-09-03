@@ -38,7 +38,8 @@ export type RuleEpisodeSensitivity = 'public' | 'internal' | 'confidential'
  */
 export type IngestRule = {
   id: string
-  connector_instance_id: string
+  /** Null for reusable programmatic capture-profile rules. */
+  connector_instance_id: string | null
   source: string
   rule_order: number
   filter_type: string
@@ -175,57 +176,91 @@ export type IngestEngine = {
 
 // ── Factory ─────────────────────────────────────────────────────────
 
+export type ResolvedIngestRoute = {
+  decision: RoutingDecision
+  rule: IngestRule | null
+}
+
+/**
+ * Resolve one event against an already-loaded ordered rule list without
+ * performing any write or Pipeline-B work. Programmatic capture uses this
+ * seam so its idempotency receipt and durable batch append can commit in one
+ * database transaction after the shared first-match-wins decision is known.
+ */
+export async function resolveIngestRoute(input: {
+  rules: IngestRule[]
+  event: IngestEvent
+  ctx: IngestContext
+  filters: FilterRegistry
+  resolvePlaceholders: PlaceholderResolver
+}): Promise<ResolvedIngestRoute> {
+  const placeholderCache = new Map<string, string[]>()
+  let matchedRule: IngestRule | null = null
+
+  for (const rule of input.rules) {
+    const filterFn = input.filters[rule.filter_type]
+    if (!filterFn) continue
+
+    const resolvedParams = await resolveParams(
+      rule.filter_params,
+      input.ctx,
+      input.resolvePlaceholders,
+      placeholderCache,
+    )
+
+    if (filterFn(input.event, resolvedParams)) {
+      matchedRule = rule
+      break
+    }
+  }
+
+  if (matchedRule === null) {
+    return {
+      rule: null,
+      decision: {
+        routing_mode: 'drop',
+        schedule: null,
+        timezone: 'UTC',
+        alert: false,
+        rule_id: null,
+        matched: false,
+        episode_sensitivity: null,
+        compartments: [],
+        project_ids: [],
+      },
+    }
+  }
+
+  return {
+    rule: matchedRule,
+    decision: {
+      routing_mode: matchedRule.routing_mode,
+      schedule: matchedRule.routing_schedule,
+      timezone: matchedRule.routing_timezone,
+      alert: matchedRule.alert,
+      rule_id: matchedRule.id,
+      matched: true,
+      episode_sensitivity: matchedRule.episode_sensitivity,
+      compartments: matchedRule.compartments ?? [],
+      project_ids: matchedRule.project_ids ?? [],
+    },
+  }
+}
+
 export function createIngestEngine(deps: IngestEngineDeps): IngestEngine {
   return {
     async ingest(event, ctx) {
       const rules = await deps.rules.listByConnectorInstance(ctx.connector_instance_id)
-      const placeholderCache = new Map<string, string[]>()
+      const { decision, rule: matchedRule } = await resolveIngestRoute({
+        rules,
+        event,
+        ctx,
+        filters: deps.filters,
+        resolvePlaceholders: deps.resolvePlaceholders,
+      })
 
-      let matchedRule: IngestRule | null = null
-
-      for (const rule of rules) {
-        const filterFn = deps.filters[rule.filter_type]
-        if (!filterFn) continue // unknown filter_type — skip, do not crash
-
-        const resolvedParams = await resolveParams(
-          rule.filter_params,
-          ctx,
-          deps.resolvePlaceholders,
-          placeholderCache,
-        )
-
-        if (filterFn(event, resolvedParams)) {
-          matchedRule = rule
-          break
-        }
-      }
-
-      if (matchedRule === null) {
-        // Defensive default — no rule matched, drop without a row.
-        return {
-          routing_mode: 'drop',
-          schedule: null,
-          timezone: 'UTC',
-          alert: false,
-          rule_id: null,
-          matched: false,
-          episode_sensitivity: null,
-          compartments: [],
-          project_ids: [],
-        }
-      }
-
-      const decision: RoutingDecision = {
-        routing_mode: matchedRule.routing_mode,
-        schedule: matchedRule.routing_schedule,
-        timezone: matchedRule.routing_timezone,
-        alert: matchedRule.alert,
-        rule_id: matchedRule.id,
-        matched: true,
-        episode_sensitivity: matchedRule.episode_sensitivity,
-        compartments: matchedRule.compartments ?? [],
-        project_ids: matchedRule.project_ids ?? [],
-      }
+      // Defensive default — no rule matched, drop without a row.
+      if (matchedRule === null) return decision
 
       // Episode handle for the alert payload. Only the `realtime` mode
       // produces one at this point — `scheduled` defers Pipeline B to

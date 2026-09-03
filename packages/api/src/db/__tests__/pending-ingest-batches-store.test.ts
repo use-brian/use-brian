@@ -14,6 +14,8 @@
 import { describe, it, expect } from 'vitest'
 import {
   appendBatchEvent,
+  appendProgrammaticBatchEvent,
+  createDbProgrammaticBatchStore,
   EARLY_FLUSH_TOKENS,
   EARLY_FLUSH_CHARS,
 } from '../pending-ingest-batches-store.js'
@@ -116,5 +118,102 @@ describe('[COMP:brain/pending-ingest-batches-store] appendBatchEvent early flush
       compartments,
       projectIds,
     ])
+  })
+})
+
+describe('[COMP:api/programmatic-capture] atomic pooled append', () => {
+  it('commits the idempotency receipt and concurrent-safe batch upsert together', async () => {
+    const calls: Call[] = []
+    const client = {
+      async query<R extends Record<string, unknown>>(text: string, params?: unknown[]) {
+        calls.push({ text, params })
+        if (text.includes('INSERT INTO programmatic_capture_receipts')) {
+          return { rows: [{ id: 'receipt-1' }] as unknown as R[] }
+        }
+        if (text.includes('INSERT INTO pending_ingest_batches')) {
+          return {
+            rows: [{
+              id: 'batch-1',
+              firesAt: new Date('2026-09-03T11:00:00.000Z'),
+              chars: 100,
+            }] as unknown as R[],
+          }
+        }
+        return { rows: [] as R[] }
+      },
+      release() {},
+    }
+    const pool = {
+      async connect() { return client },
+      async query<R extends Record<string, unknown>>() { return { rows: [] as R[] } },
+    }
+
+    const result = await appendProgrammaticBatchEvent({
+      workspaceId: '11111111-1111-4111-8111-111111111111',
+      assistantId: '22222222-2222-4222-8222-222222222222',
+      ruleId: '33333333-3333-4333-8333-333333333333',
+      partitionKey: 'session:draft-42',
+      firesAt: new Date('2026-09-03T11:00:00.000Z'),
+      episodeSensitivity: 'internal',
+      compartments: [],
+      projectIds: [],
+      event: {
+        eventId: 'message-7',
+        content: 'Draft observation',
+        occurredAt: '2026-09-03T10:00:00.000Z',
+        receivedAt: '2026-09-03T10:00:01.000Z',
+        role: 'user',
+        metadata: {},
+        principalKind: 'api_key',
+        principalId: '44444444-4444-4444-8444-444444444444',
+      },
+    }, pool)
+
+    expect(result).toMatchObject({ duplicate: false, status: 'queued', batchId: 'batch-1' })
+    const upsert = calls.find((call) => call.text.includes('INSERT INTO pending_ingest_batches'))
+    expect(upsert?.text).toContain('ON CONFLICT (rule_id, assistant_id, partition_key, fires_at)')
+    expect(upsert?.text).toContain("source = 'programmatic'")
+    expect(calls.map((call) => call.text.trim())).toEqual(expect.arrayContaining([
+      'BEGIN',
+      'COMMIT',
+    ]))
+    expect(calls.findIndex((call) => call.text.trim() === 'COMMIT')).toBeGreaterThan(
+      calls.findIndex((call) => call.text.includes("SET status = 'queued'")),
+    )
+  })
+
+  it('completes every queued receipt in the same transaction that marks a batch processed', async () => {
+    const calls: Call[] = []
+    const client = {
+      async query<R extends Record<string, unknown>>(text: string, params?: unknown[]) {
+        calls.push({ text, params })
+        if (text.includes("source = 'programmatic'")) {
+          return { rows: [{
+            id: 'batch-1', workspace_id: 'ws-1', rule_id: 'rule-1',
+            assistant_id: 'assistant-1', partition_key: 'session:draft-42',
+            source: 'programmatic', fires_at: new Date(), events: [], created_at: new Date(),
+            episode_sensitivity: 'internal', compartments: [], project_ids: [],
+          }] as unknown as R[] }
+        }
+        return { rows: [] as R[] }
+      },
+      release() {},
+    }
+    const store = createDbProgrammaticBatchStore({
+      async connect() { return client },
+      async query<R extends Record<string, unknown>>() { return { rows: [] as R[] } },
+    })
+
+    await store.withClaimedBatches(1, async (batches, markProcessed) => {
+      expect(batches).toHaveLength(1)
+      await markProcessed(batches[0]!.id)
+    })
+
+    const processed = calls.findIndex((call) => call.text.includes('SET processed_at = now()'))
+    const receipts = calls.findIndex((call) => call.text.includes("SET status = 'completed'"))
+    const committed = calls.findIndex((call) => call.text.trim() === 'COMMIT')
+    expect(processed).toBeGreaterThan(-1)
+    expect(receipts).toBeGreaterThan(processed)
+    expect(committed).toBeGreaterThan(receipts)
   })
 })

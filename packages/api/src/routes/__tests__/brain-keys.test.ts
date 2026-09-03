@@ -34,6 +34,8 @@ const CREATED: CreatedBrainKey = {
   maxClearance: null,
   contextGroupId: null,
   contextProjectId: null,
+  captureAssistantId: null,
+  captureProfileId: null,
   createdBy: 'u1',
   createdAt: new Date('2026-07-07T00:00:00.000Z'),
   lastUsedAt: null,
@@ -47,6 +49,7 @@ function makeDeps() {
     getByIdSystem: vi.fn(),
     revoke: vi.fn().mockResolvedValue(true),
     updateMaxClearance: vi.fn().mockResolvedValue(true),
+    updateCaptureBinding: vi.fn().mockResolvedValue(true),
     touchLastUsedAt: vi.fn(),
   } as unknown as BrainKeyStore
   const workspaceStore = {
@@ -229,6 +232,30 @@ describe('[COMP:api/brain-keys-route] PATCH /:keyId (clearance cap)', () => {
       .patch(`${base}/${KID}`)
       .send({ maxClearance: null })
     expect(res.status).toBe(404)
+  })
+})
+
+describe('[COMP:api/programmatic-capture] PUT /:keyId/capture', () => {
+  it('binds a key to an assistant plus optional profile override', async () => {
+    const deps = makeDeps()
+    const assistantId = '55555555-5555-4555-8555-555555555555'
+    const profileId = '66666666-6666-4666-8666-666666666666'
+    const res = await request(makeApp(deps, 'u1'))
+      .put(`${base}/${KID}/capture`)
+      .send({ assistantId, profileId })
+    expect(res.status).toBe(204)
+    expect(deps.brainKeyStore.updateCaptureBinding).toHaveBeenCalledWith(
+      'u1', KID, WID, assistantId, profileId,
+    )
+  })
+
+  it('rejects a profile override without a capture assistant', async () => {
+    const deps = makeDeps()
+    const res = await request(makeApp(deps, 'u1'))
+      .put(`${base}/${KID}/capture`)
+      .send({ assistantId: null, profileId: '66666666-6666-4666-8666-666666666666' })
+    expect(res.status).toBe(400)
+    expect(deps.brainKeyStore.updateCaptureBinding).not.toHaveBeenCalled()
   })
 })
 

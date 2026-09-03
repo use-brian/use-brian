@@ -101,6 +101,10 @@ import type { BrainKeyScope } from '../db/brain-keys-store.js'
 import type { PageTemplateStore } from '../db/page-templates-store.js'
 import { toEpisodeSensitivity } from '../episode-sensitivity.js'
 import type { BrainEpisodeIngestor } from '../ingest-port.js'
+import type {
+  ProgrammaticCaptureInput,
+  ProgrammaticCaptureResult,
+} from '../ingest/programmatic-capture.js'
 import { BRAIN_WRITE_TOOL_SIGNALS, notifyBrainChange } from '../brain-stream/notify.js'
 import {
   ContextNotAvailableError,
@@ -373,6 +377,8 @@ type BuildOpts = {
    * `apps/api/src/index.ts` via `createBrainEpisodeIngestor`.
    */
   ingest?: BrainEpisodeIngestor
+  /** Opt-in Pipeline-C producer used by `captureMode: 'routed'`. */
+  routeCapture?: (input: ProgrammaticCaptureInput) => Promise<ProgrammaticCaptureResult>
   /**
    * Doc-page stores for the `readPage` / `editPage` / `deletePage` surface.
    * Optional — a deploy that omits it exposes no page tools (mirrors
@@ -1374,7 +1380,7 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
   const getMemory = bridgeCoreTool(opts.memoryTools.getMemory, resolveCtx, workspaceId)
   const deleteMemory = bridgeCoreTool(opts.memoryTools.deleteMemory, resolveCtx, workspaceId)
 
-  // ── ingestToBrain — programmatic capture into the brain.
+  // ── ingestToBrain — immediate or rule-routed programmatic capture.
   // Default (`decompose: true`) runs Pipeline B via the injected `opts.ingest`:
   // it materializes an Episode and extracts entities / edges / memories / tasks
   // from the content (the same decomposition the chat + connector paths get),
@@ -1395,7 +1401,11 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       '`sourceLabel`, rather than pasting many unrelated things in one call — ' +
       'extraction quality drops on mixed blobs. Set `decompose: false` to skip ' +
       'extraction and store the content verbatim as a single memory (faster and ' +
-      'cheaper — for a short atomic fact you have already distilled, not a raw document).',
+      'cheaper — for a short atomic fact you have already distilled, not a raw document). ' +
+      'Set `captureMode: "routed"` for message-level capture governed by the ' +
+      'connection\'s assistant capture profile. Routed calls require a stable ' +
+      '`eventId`; a scheduled rule durably queues the event without running an ' +
+      'extraction model, then one pooled window is extracted when it flushes.',
     inputSchema: {
       content: z
         .string()
@@ -1417,6 +1427,42 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
         .describe(
           'Default true — extract entities, edges, memories, and tasks. Set false to store the content as a single memory without extraction.',
         ),
+      captureMode: z
+        .enum(['immediate', 'routed'])
+        .optional()
+        .describe('Default immediate. Use routed to apply the configured assistant capture profile and pooling rules.'),
+      eventId: z
+        .string()
+        .min(1)
+        .max(200)
+        .optional()
+        .describe('Required in routed mode. Stable source-message id used to deduplicate retries for this connection.'),
+      occurredAt: z
+        .string()
+        .datetime({ offset: true })
+        .optional()
+        .describe('Original source-message timestamp as an ISO 8601 value with an offset. Defaults to receipt time.'),
+      sessionId: z
+        .string()
+        .min(1)
+        .max(200)
+        .optional()
+        .describe('Opaque conversation id. Required when the selected profile partitions by session.'),
+      subjectId: z
+        .string()
+        .min(1)
+        .max(200)
+        .optional()
+        .describe('Opaque participant id for routing/provenance. It never grants authority.'),
+      role: z
+        .enum(['user', 'assistant', 'system', 'tool'])
+        .optional()
+        .describe('Message role used by role_match rules and batch boundaries.'),
+      metadata: z
+        .record(z.string().min(1).max(80), z.union([z.string().max(500), z.number(), z.boolean()]))
+        .refine((value) => Object.keys(value).length <= 20, 'metadata accepts at most 20 fields')
+        .optional()
+        .describe('Up to 20 scalar fields used by deterministic metadata_match rules.'),
       title: z
         .string()
         .max(200)
@@ -1431,6 +1477,53 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
         (typeof args.title === 'string' && args.title.trim()) ||
         ''
       const sourceLabel = rawLabel || undefined
+      const captureMode = args.captureMode === 'routed' ? 'routed' : 'immediate'
+
+      if (captureMode === 'routed') {
+        if (args.decompose === false) {
+          return text('`decompose: false` is only valid with `captureMode: "immediate"`.', true)
+        }
+        if (!opts.routeCapture) {
+          return text('Routed capture is unavailable in this deployment.', true)
+        }
+        const eventId = typeof args.eventId === 'string' ? args.eventId.trim() : ''
+        if (!eventId) return text('`eventId` is required with `captureMode: "routed"`.', true)
+        try {
+          const result = await opts.routeCapture({
+            eventId,
+            content,
+            ...(typeof args.occurredAt === 'string'
+              ? { occurredAt: new Date(args.occurredAt) }
+              : {}),
+            ...(typeof args.sessionId === 'string' ? { sessionId: args.sessionId } : {}),
+            ...(typeof args.subjectId === 'string' ? { subjectId: args.subjectId } : {}),
+            ...(typeof args.role === 'string'
+              ? { role: args.role as 'user' | 'assistant' | 'system' | 'tool' }
+              : {}),
+            ...(sourceLabel ? { sourceLabel } : {}),
+            ...(args.metadata && typeof args.metadata === 'object'
+              ? { metadata: args.metadata as Record<string, string | number | boolean> }
+              : {}),
+          })
+          if (result.outcome === 'queued') {
+            return text(
+              `Queued event ${eventId} for pooled capture` +
+                (result.firesAt ? ` (flush by ${result.firesAt.toISOString()})` : '') +
+                `. No extraction model was called for this message.`,
+            )
+          }
+          if (result.outcome === 'dropped') {
+            return text(`Capture profile dropped event ${eventId}.`)
+          }
+          if (result.outcome === 'duplicate') {
+            return text(`Event ${eventId} was already received (status: ${result.receiptStatus}); it was not appended again.`)
+          }
+          return text(formatIngestResult(result.extraction!, sourceLabel))
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          return text(`Routed capture failed: ${msg}`, true)
+        }
+      }
       // Default to the smart path; `decompose: false` opts into the direct save.
       const decompose = args.decompose !== false
 
