@@ -50,7 +50,7 @@ import {
 // main process. Default-import the module object and destructure instead.
 import electronUpdater from "electron-updater";
 
-import { resolveConfig } from "./config.js";
+import { bundledDefaultForRuntime, resolveConfig } from "./config.js";
 import {
   AWAKE_BRIAN_FILE_NAME,
   BRIAN_POSITION_FILE_NAME,
@@ -225,10 +225,14 @@ function readPersistedTargetRaw(): string | null {
   }
 }
 
-// Development and packaged releases use the same remote Next renderer. The
-// separate Vite/HashRouter app is an explicit QA/offline experiment only; a
-// packaging operation must not silently change routes, auth, or chat behavior.
-const cfg = resolveConfig(process.env, readPersistedTargetRaw(), false);
+// Release binaries always prefer the installed renderer. Development keeps
+// the remote shell default for fast iteration; USEBRIAN_BUNDLED explicitly
+// overrides either direction for QA/compatibility.
+const cfg = resolveConfig(
+  process.env,
+  readPersistedTargetRaw(),
+  bundledDefaultForRuntime(app.isPackaged),
+);
 const isDev = !app.isPackaged;
 
 const PRELOAD_PATH = join(__dirname, "preload.cjs");
