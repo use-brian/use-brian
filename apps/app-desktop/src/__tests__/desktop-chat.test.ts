@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   companionClickFollowsChatBlur,
   desktopChatRoute,
+  nativeUseBrianTarget,
   parseCompanionState,
   workspaceIdFromDesktopRoute,
 } from "../desktop-chat.js";
@@ -21,6 +22,13 @@ describe("[COMP:app-desktop/awake-brian] desktop chat routing", () => {
     expect(desktopChatRoute("team one", "assistant/one")).toBe(
       "/desktop/chat/team%20one?assistant=assistant%2Fone",
     );
+  });
+
+  it("routes native Use Brian requests to the one visible chat owner", () => {
+    expect(nativeUseBrianTarget(false, "ws-1")).toBe("main");
+    expect(nativeUseBrianTarget(false, null)).toBe("main");
+    expect(nativeUseBrianTarget(true, "ws-1")).toBe("nearby");
+    expect(nativeUseBrianTarget(true, null)).toBe("nearby-pending");
   });
 
   it("accepts only bounded display-only companion state", () => {

@@ -1556,6 +1556,13 @@ export const ja: Dictionary = {
       regional: "地域",
       timezone: "タイムゾーン",
       language: "言語",
+      siriTitle: "Siri",
+      siriLabel: "Siri で Use Brian を使う",
+      siriDescription:
+        "依頼内容を尋ねて Brian に送信する、設定済みの macOS ショートカットをインストールします。",
+      siriSetupHint:
+        "「Use Brian」アクションを確認し、ショートカットで「ショートカットを追加」をクリックしてください。",
+      siriSetup: "Siri を設定",
     },
     account: {
       profile: "プロフィール",

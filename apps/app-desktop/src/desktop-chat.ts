@@ -12,6 +12,16 @@ export const COMPANION_PHASES = [
 
 export type CompanionPhase = (typeof COMPANION_PHASES)[number];
 export type CompanionState = { phase: CompanionPhase; label?: string };
+export type NativeUseBrianTarget = "main" | "nearby" | "nearby-pending";
+
+/** Select the one renderer that owns a native Use Brian invocation. */
+export function nativeUseBrianTarget(
+  brianNearby: boolean,
+  workspaceId: string | null,
+): NativeUseBrianTarget {
+  if (!brianNearby) return "main";
+  return workspaceId ? "nearby" : "nearby-pending";
+}
 
 /** Extract a workspace id only from a canonical in-app workspace route. */
 export function workspaceIdFromDesktopRoute(route: string): string | null {

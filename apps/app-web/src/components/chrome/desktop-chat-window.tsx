@@ -1,14 +1,18 @@
 "use client";
 
-import { useEffect, useLayoutEffect } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { FloatingChat } from "@/components/chrome/floating-chat";
 import type { ChatActivity } from "@/components/chrome/floating-chat";
 import {
   PrimaryAssistantProvider,
   usePrimaryAssistant,
 } from "@/contexts/primary-assistant";
-import { desktopBridge } from "@/lib/desktop-auth-source";
+import {
+  desktopBridge,
+  onDesktopUseBrian,
+} from "@/lib/desktop-auth-source";
 import { useT } from "@/lib/i18n/client";
+import { normalizeUseBrianPrompt } from "@/lib/siri-use-brian";
 
 /** Chat-only renderer hosted by the companion's dedicated Electron window. */
 export function DesktopChatWindow({
@@ -41,6 +45,30 @@ function DesktopChatContent({
   assistantId?: string;
 }) {
   const t = useT().chat;
+  const useBrianNonceRef = useRef(0);
+  const [useBrianSeed, setUseBrianSeed] = useState<{
+    prefill: string;
+    autoSend: true;
+    nonce: number;
+  }>();
+
+  const runNativeUseBrian = useCallback(() => {
+    const prompt = normalizeUseBrianPrompt(
+      desktopBridge()?.takeUseBrianPrompt?.(),
+    );
+    if (!prompt) return;
+    useBrianNonceRef.current += 1;
+    setUseBrianSeed({
+      prefill: prompt,
+      autoSend: true,
+      nonce: useBrianNonceRef.current,
+    });
+  }, []);
+
+  useEffect(
+    () => onDesktopUseBrian(runNativeUseBrian),
+    [runNativeUseBrian],
+  );
 
   useLayoutEffect(() => {
     const elements = [document.documentElement, document.body];
@@ -89,6 +117,7 @@ function DesktopChatContent({
             assistantId={assistantId}
             mode="side-panel"
             origin="doc"
+            seedRequest={useBrianSeed}
             messageBrianRequest={1}
             onActivityChange={mirrorActivity}
           />

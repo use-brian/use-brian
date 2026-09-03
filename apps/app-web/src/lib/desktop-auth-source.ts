@@ -33,6 +33,8 @@ interface DesktopTokens {
 export interface DesktopBridge {
   /** Host OS reported by Electron (`darwin`, `win32`, or `linux`). */
   platform?: string;
+  /** Open the macOS Shortcuts editor for the one-time Siri workflow setup. */
+  openSiriSetup?: () => Promise<boolean>;
   /** Current Chromium page zoom factor, exposed read-only by the preload. */
   getZoomFactor?: () => number;
   /**
@@ -59,7 +61,9 @@ export interface DesktopBridge {
   setCaptureSource?: (id: string | null) => void;
   signIn: () => void;
   /** Consume the pending native Siri request once; absent in browsers/old shells. */
-  takeSiriPrompt?: () => string | null;
+  takeUseBrianPrompt?: () => string | null;
+  /** Subscribe to one-shot native Use Brian wake-ups. */
+  onUseBrian?: (callback: () => void) => () => void;
   /** Whether the shell's always-on-top Brian companion is enabled. */
   isBrianNearby?: () => boolean;
   /** Subscribe to changes of the Brian Nearby setting. */
@@ -167,9 +171,38 @@ export function onDesktopMessageBrian(callback: () => void): () => void {
   return desktopBridge()?.onMessageBrian?.(callback) ?? (() => {});
 }
 
+/** Subscribe to native Use Brian requests when hosted by the Electron shell. */
+export function onDesktopUseBrian(callback: () => void): () => void {
+  return desktopBridge()?.onUseBrian?.(callback) ?? (() => {});
+}
+
 /** Clear the shell's durable companion intent after the composer is visible. */
 export function acknowledgeDesktopMessageBrian(): void {
   desktopBridge()?.acknowledgeMessageBrian?.();
+}
+
+/** True only when a current macOS Electron shell exposes Siri setup. */
+export function isDesktopSiriSetupAvailable(): boolean {
+  const bridge = desktopBridge();
+  return (
+    bridge?.platform === "darwin" && typeof bridge.openSiriSetup === "function"
+  );
+}
+
+/** Ask the trusted macOS shell to open Apple's shortcut import review. */
+export async function openDesktopSiriSetup(): Promise<boolean> {
+  const bridge = desktopBridge();
+  if (
+    bridge?.platform !== "darwin" ||
+    typeof bridge.openSiriSetup !== "function"
+  ) {
+    return false;
+  }
+  try {
+    return await bridge.openSiriSetup();
+  } catch {
+    return false;
+  }
 }
 
 /** True only in the thin shell while it fronts a local/self-hosted target. */

@@ -72,12 +72,15 @@ import {
   DESKTOP_WORKSPACES_CACHE_KEY,
   desktopWorkspaceCacheKey,
   parseDesktopWorkspaceContext,
-  parseDesktopWorkspaceRows,
+  resolveDesktopWorkspaceBootstrap,
 } from "./offline-bootstrap";
 
 import { isFeedPlatform } from "@/lib/feed-nav";
 import { isOssEdition } from "@/lib/edition";
-import { siriAskSuffix, siriAskWorkspacePath } from "@/lib/siri-ask";
+import {
+  useBrianSuffix,
+  useBrianWorkspacePath,
+} from "@/lib/siri-use-brian";
 
 // Route surfaces are local Vite chunks, loaded from disk on first entry. This
 // keeps the startup shell small without reintroducing network navigation.
@@ -353,8 +356,10 @@ type WorkspaceRow = WorkspacePickerItem;
 
 function Boot() {
   const navigate = useNavigate();
-  const askSignal = new URLSearchParams(window.location.search).get("ask");
-  const askSuffix = siriAskSuffix(askSignal);
+  const useBrianSignal = new URLSearchParams(window.location.search).get(
+    "useBrian",
+  );
+  const useBrianRouteSuffix = useBrianSuffix(useBrianSignal);
   const [state, setState] = useState<
     | { k: "boot" }
     | { k: "anon" }
@@ -371,7 +376,7 @@ function Boot() {
       // instead of adding a picker click to every cold start.
       if (workspaces.length === 1) {
         navigate(
-          siriAskWorkspacePath(workspaces[0].id, askSignal) ??
+          useBrianWorkspacePath(workspaces[0].id, useBrianSignal) ??
             `/w/${workspaces[0].id}`,
           { replace: true },
         );
@@ -380,47 +385,49 @@ function Boot() {
       setState({ k: "ready", workspaces });
     };
     (async () => {
-      // Validate/refresh in parallel with the local read. The saved shell can
-      // paint immediately, while a successful live read quietly revalidates it.
+      // Read cache and validate/refresh in parallel, but do not enter an
+      // interactive cached workspace until the authenticated live probe has
+      // settled. Cache is an offline fallback, never proof of a usable token.
       const tokenPromise = getValidAccessToken();
-      const cached = parseDesktopWorkspaceRows(
-        await idbGet<unknown>(DESKTOP_WORKSPACES_CACHE_KEY),
-      );
+      const cached = await idbGet<unknown>(DESKTOP_WORKSPACES_CACHE_KEY);
       const bridge = desktopBridge();
       const hasStoredSession = Boolean(
         bridge?.getAccessToken?.() || bridge?.getRefreshToken?.(),
       );
-      const usingCache = hasStoredSession && cached.length > 0;
-      if (usingCache) presentWorkspaces(cached);
-
-      const token = await tokenPromise;
+      const result = await resolveDesktopWorkspaceBootstrap({
+        cached,
+        hasStoredSession,
+        authenticate: () => tokenPromise,
+        loadLive: async () => {
+          const res = await authFetch(`${apiBase()}/api/workspaces`);
+          return {
+            status: res.status,
+            ...(res.ok ? { data: await res.json() as unknown } : {}),
+          };
+        },
+      });
       if (cancelled) return;
-      if (!token) {
+      if (result.kind === "unauthenticated") {
         // A stale safeStorage session can pass the shell's synchronous startup
-        // check but fail refresh here. Clear it through the existing native
-        // sign-out path so the shell restores its branded signin.html landing.
+        // check but fail refresh or the live probe. Clear it through the native
+        // path before any cached workspace action becomes interactive.
         if (desktopSignOut()) return;
-        if (!usingCache) setState({ k: "anon" });
+        setState({ k: "anon" });
         return;
       }
-      try {
-        const res = await authFetch(`${apiBase()}/api/workspaces`);
-        const data: unknown = res.ok ? await res.json() : null;
-        if (cancelled) return;
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const workspaces = parseDesktopWorkspaceRows(data);
-        presentWorkspaces(workspaces);
-        void idbSet(DESKTOP_WORKSPACES_CACHE_KEY, workspaces);
-      } catch (e) {
-        if (!cancelled && !usingCache) {
-          setState({ k: "error", detail: e instanceof Error ? e.message : String(e) });
-        }
+      if (result.kind === "error") {
+        setState({ k: "error", detail: result.detail });
+        return;
+      }
+      presentWorkspaces(result.workspaces);
+      if (result.source === "live") {
+        void idbSet(DESKTOP_WORKSPACES_CACHE_KEY, result.workspaces);
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [askSignal, navigate]);
+  }, [navigate, useBrianSignal]);
 
   return (
     <div style={shell}>
@@ -436,7 +443,7 @@ function Boot() {
         {state.k === "ready" && usesScalableWorkspacePicker(state.workspaces.length) && (
           <WorkspacePicker
             initialWorkspaces={state.workspaces}
-            next={`/p${askSuffix}`}
+            next={`/p${useBrianRouteSuffix}`}
             apiUrl={apiBase()}
           />
         )}
@@ -446,7 +453,9 @@ function Boot() {
               <li key={w.id}>
                 <button
                   type="button"
-                  onClick={() => navigate(`/w/${w.id}/p${askSuffix}`)}
+                  onClick={() =>
+                    navigate(`/w/${w.id}/p${useBrianRouteSuffix}`)
+                  }
                   style={{ ...listButton }}
                 >
                   <span style={{ fontWeight: 600 }}>{w.name}</span>

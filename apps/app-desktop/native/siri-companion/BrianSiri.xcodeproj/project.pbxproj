@@ -6,9 +6,9 @@
 	objects = {
 
 		A10000000000000000000001 /* BrianSiriExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000001 /* BrianSiriExtension.swift */; };
-		A10000000000000000000002 /* AskBrianIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000002 /* AskBrianIntent.swift */; };
+		A10000000000000000000002 /* UseBrianIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000002 /* UseBrianIntent.swift */; };
 		A20000000000000000000001 /* BrianSiriExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrianSiriExtension.swift; sourceTree = "<group>"; };
-		A20000000000000000000002 /* AskBrianIntent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AskBrianIntent.swift; sourceTree = "<group>"; };
+		A20000000000000000000002 /* UseBrianIntent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UseBrianIntent.swift; sourceTree = "<group>"; };
 		A20000000000000000000003 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A20000000000000000000004 /* Brian Siri.appex */ = {isa = PBXFileReference; explicitFileType = wrapper.app-extension; includeInIndex = 0; path = "Brian Siri.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
 		A20000000000000000000005 /* BrianSiri.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = BrianSiri.entitlements; sourceTree = "<group>"; };
@@ -16,7 +16,7 @@
 			isa = PBXGroup;
 			children = (
 				A20000000000000000000001 /* BrianSiriExtension.swift */,
-				A20000000000000000000002 /* AskBrianIntent.swift */,
+				A20000000000000000000002 /* UseBrianIntent.swift */,
 				A20000000000000000000003 /* Info.plist */,
 				A20000000000000000000005 /* BrianSiri.entitlements */,
 				A30000000000000000000002 /* Products */,
@@ -49,7 +49,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A10000000000000000000001 /* BrianSiriExtension.swift in Sources */,
-				A10000000000000000000002 /* AskBrianIntent.swift in Sources */,
+				A10000000000000000000002 /* UseBrianIntent.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

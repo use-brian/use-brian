@@ -1,7 +1,7 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { ossSignedOutRedirect } from "@/lib/oss-entry";
-import { siriAskSuffix } from "@/lib/siri-ask";
+import { useBrianSuffix } from "@/lib/siri-use-brian";
 
 // `||` not `??`: an empty-string NEXT_PUBLIC_API_URL (e.g. inlined as "" by the
 // bundler when unset at build) must also fall back, else this server-side fetch
@@ -34,7 +34,7 @@ export default async function HomePage(props: {
   searchParams: Promise<{
     capture?: string | string[];
     record?: string | string[];
-    ask?: string | string[];
+    useBrian?: string | string[];
   }>;
 }) {
   const jar = await cookies();
@@ -49,10 +49,14 @@ export default async function HomePage(props: {
   // `record=1` and auto-starts a latched capture). Multi-workspace users
   // land on the picker (which drops it) — see
   // docs/architecture/features/app-desktop.md.
-  const { capture, record, ask } = await props.searchParams;
-  const askSuffix = siriAskSuffix(ask);
+  const { capture, record, useBrian } = await props.searchParams;
+  const useBrianRouteSuffix = useBrianSuffix(useBrian);
   const intentSuffix =
-    capture === "1" ? "?capture=1" : record === "1" ? "?record=1" : askSuffix;
+    capture === "1"
+      ? "?capture=1"
+      : record === "1"
+        ? "?record=1"
+        : useBrianRouteSuffix;
 
   let teams: Team[] = [];
   try {
@@ -73,6 +77,7 @@ export default async function HomePage(props: {
   if (teams.length === 1) {
     redirect(`/w/${teams[0].id}${intentSuffix}`);
   }
-  if (askSuffix) redirect(`/teams?next=${encodeURIComponent(askSuffix)}`);
+  if (useBrianRouteSuffix)
+    redirect(`/teams?next=${encodeURIComponent(useBrianRouteSuffix)}`);
   redirect("/teams");
 }

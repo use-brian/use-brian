@@ -64,12 +64,55 @@ describe("[COMP:app-desktop/siri] App Intents packaging", () => {
     );
   });
 
-  it("opens the supported bounded ask deep link", () => {
-    const intent = read("../../native/siri-companion/AskBrianIntent.swift");
+  it("opens the supported bounded Use Brian deep link", () => {
+    const intent = read("../../native/siri-companion/UseBrianIntent.swift");
 
+    expect(intent).toContain("struct UseBrianIntent: AppIntent");
+    expect(intent).toContain("intent: UseBrianIntent()");
+    expect(intent).toContain(
+      'static let title: LocalizedStringResource = "Use Brian"',
+    );
+    expect(intent).toContain('Summary("Use Brian \\(\\.$request)")');
+    expect(intent).toContain('shortTitle: "Use Brian"');
+    expect(intent).not.toContain('LocalizedStringResource = "Ask Brian"');
+    expect(intent).not.toContain('Summary("Ask Brian');
+    expect(intent).not.toContain('shortTitle: "Ask Brian"');
     expect(intent).toContain('components.scheme = "usebrian"');
-    expect(intent).toContain('components.host = "ask"');
+    expect(intent).toContain('components.host = "use"');
     expect(intent).toContain("prompt.utf16.count <= 8_000");
     expect(intent).toContain("NSWorkspace.shared.open(url)");
+    expect(intent).toContain("func perform() async throws -> some IntentResult {");
+    expect(intent).toContain("return .result()");
+    expect(intent).not.toContain("ProvidesDialog");
+    expect(intent).not.toContain("Opening Brian with your request.");
+    expect(intent).toContain("struct AskBrianIntent: AppIntent");
+    expect(intent).toContain("static var isDiscoverable: Bool { false }");
+    expect(intent).toContain("try await openUseBrian(request)");
+  });
+
+  it("opens the bundled signed shortcut through a fixed trusted-renderer bridge", () => {
+    const preload = read("../../src/preload.cjs");
+    const main = read("../../src/main.ts");
+    const builder = read("../../electron-builder.yml");
+    const template = readFileSync(
+      new URL("../../native/siri-companion/Use Brian.shortcut", import.meta.url),
+    );
+
+    expect(preload).toContain(
+      'openSiriSetup: () => ipcRenderer.invoke("Use Brian:open-siri-setup")',
+    );
+    expect(preload).toContain('ipcRenderer.on("Use Brian:use-brian"');
+    expect(preload).toContain("onUseBrian: (callback) =>");
+    expect(preload).not.toContain('"Use Brian:ask-brian"');
+    expect(main).toContain('ipcMain.handle("Use Brian:open-siri-setup"');
+    expect(main).toContain('process.platform !== "darwin"');
+    expect(main).toContain("event.sender.id !== mainWindow.webContents.id");
+    expect(main).toContain("siriShortcutTemplatePath()");
+    expect(main).toContain("shell.openPath(templatePath)");
+    expect(main).not.toContain('shell.openExternal("shortcuts://create-shortcut")');
+    expect(main).toContain('SIRI_SHORTCUT_TEMPLATE_NAME = "Use Brian.shortcut"');
+    expect(builder).toContain("from: native/siri-companion/Use Brian.shortcut");
+    expect(builder).toContain("to: siri/Use Brian.shortcut");
+    expect(template.subarray(0, 4).toString("ascii")).toBe("AEA1");
   });
 });

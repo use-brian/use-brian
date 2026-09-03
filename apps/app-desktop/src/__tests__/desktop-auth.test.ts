@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, it, expect, vi } from "vitest";
 
 import {
@@ -278,6 +279,13 @@ describe("[COMP:app-desktop/desktop-auth] session keep-alive decision", () => {
     expect(shouldRefreshSession(jwtWithExp(now + SESSION_REFRESH_MARGIN_SECONDS + 1), now)).toBe(false);
     expect(shouldRefreshSession(jwtWithExp(now + SESSION_REFRESH_MARGIN_SECONDS), now)).toBe(true);
     expect(shouldRefreshSession(jwtWithExp(now - 1), now)).toBe(true); // already expired
+  });
+
+  it("finishes the launch refresh before loading the first app window", () => {
+    const source = readFileSync(new URL("../main.ts", import.meta.url), "utf8");
+    expect(source).toMatch(
+      /await startSessionKeepalive\(\);[\s\S]*mainWindow = createWindow\(\);/,
+    );
   });
 });
 

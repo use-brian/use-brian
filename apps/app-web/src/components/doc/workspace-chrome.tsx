@@ -74,9 +74,10 @@ import { CHAT_SEED_EVENT, type ChatSeed } from "@/lib/chat-seed";
 import {
   acknowledgeDesktopMessageBrian,
   desktopBridge,
+  onDesktopUseBrian,
   onDesktopMessageBrian,
 } from "@/lib/desktop-auth-source";
-import { normalizeSiriPrompt } from "@/lib/siri-ask";
+import { normalizeUseBrianPrompt } from "@/lib/siri-use-brian";
 import {
   desktopTitlebarInsetCssPx,
   resolveDesktopZoomFactor,
@@ -309,7 +310,7 @@ export function WorkspaceChrome({
   }>();
   const pendingMessageBrianRef = useRef(false);
   const seedNonceRef = useRef(0);
-  const siriAskRef = useRef<string | null>(null);
+  const siriUseBrianRef = useRef<string | null>(null);
   useEffect(() => {
     if (typeof window === "undefined") return;
     function onSeed(e: Event) {
@@ -361,33 +362,50 @@ export function WorkspaceChrome({
     [dockSuppressed, revealMessageBrian, router, workspaceId],
   );
 
-  // The native App Intent enters through `?ask=`. Keep the handoff in the
-  // persistent chrome so it survives child-route redirects, targets exactly
-  // one responsive chat instance, and can wait for assistant resolution.
+  const runNativeUseBrian = useCallback(() => {
+    const prompt = normalizeUseBrianPrompt(
+      desktopBridge()?.takeUseBrianPrompt?.(),
+    );
+    if (!prompt) return;
+    const target = window.matchMedia("(min-width: 1024px)").matches
+      ? "desktop"
+      : "mobile";
+    seedNonceRef.current += 1;
+    setSeed({
+      prefill: prompt,
+      autoSend: true,
+      nonce: seedNonceRef.current,
+      target,
+    });
+    if (dockSuppressed) {
+      pendingMessageBrianRef.current = true;
+      router.push(docPagePath(workspaceId));
+    } else {
+      revealMessageBrian();
+    }
+  }, [dockSuppressed, revealMessageBrian, router, workspaceId]);
+
+  useEffect(
+    () => onDesktopUseBrian(runNativeUseBrian),
+    [runNativeUseBrian],
+  );
+
+  // The native App Intent enters through `?useBrian=`. Keep the handoff in the
+  // persistent chrome so the URL fallback for a cold/not-yet-loaded window and
+  // the live preload wake-up share the same open-and-send behavior.
   useEffect(() => {
-    const raw = searchParams.get("ask");
+    const raw = searchParams.get("useBrian");
     if (raw === null) {
-      siriAskRef.current = null;
+      siriUseBrianRef.current = null;
       return;
     }
-    if (siriAskRef.current === raw) return;
-    siriAskRef.current = raw;
+    if (siriUseBrianRef.current === raw) return;
+    siriUseBrianRef.current = raw;
 
-    const prompt = normalizeSiriPrompt(desktopBridge()?.takeSiriPrompt?.());
-    if (prompt) {
-      seedNonceRef.current += 1;
-      setSeed({
-        prefill: prompt,
-        autoSend: true,
-        nonce: seedNonceRef.current,
-        target: window.matchMedia("(min-width: 1024px)").matches
-          ? "desktop"
-          : "mobile",
-      });
-    }
+    runNativeUseBrian();
 
     const next = new URLSearchParams(searchParams.toString());
-    next.delete("ask");
+    next.delete("useBrian");
     const query = next.toString();
     router.replace(`${pathname}${query ? `?${query}` : ""}`);
 
@@ -395,12 +413,12 @@ export function WorkspaceChrome({
     // so returning to the workspace picker cannot replay an old Siri request.
     if (window.location.protocol === "file:") {
       const outer = new URL(window.location.href);
-      if (outer.searchParams.has("ask")) {
-        outer.searchParams.delete("ask");
+      if (outer.searchParams.has("useBrian")) {
+        outer.searchParams.delete("useBrian");
         window.history.replaceState(null, "", outer.toString());
       }
     }
-  }, [pathname, router, searchParams]);
+  }, [pathname, router, runNativeUseBrian, searchParams]);
 
   // Soft-navigate to a page's canonical URL. On `/p` the shell's URL→tabs effect
   // adopts it into the tab history; from another surface it opens the doc

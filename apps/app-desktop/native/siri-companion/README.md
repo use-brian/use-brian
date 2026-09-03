@@ -1,8 +1,10 @@
 # Brian Siri extension
 
-This macOS ExtensionKit App Intents extension exposes the "Ask Brian" and
-"Tell Brian" Siri phrases. Siri asks for the required Request value and opens a
-bounded `usebrian://ask?prompt=...` handoff to the containing Electron app.
+This macOS ExtensionKit App Intents extension exposes the "Use Brian" action to
+Apple Shortcuts. macOS does not automatically install an app-owned Siri phrase,
+so users add this action to a personal shortcut, set Request to Ask Each Time,
+and name the shortcut "Use Brian". The action opens
+a bounded `usebrian://use?prompt=...` handoff to the containing Electron app.
 
 Build it on macOS with:
 
@@ -19,10 +21,18 @@ and all nested Electron code, restore the extension's sandbox entitlement, seal
 the parent app last, then deep-verify the complete bundle. Release packages use
 the configured Developer ID identity instead.
 
-Install the resulting app in `/Applications` and open it once. Restart
-Shortcuts, then search its action library for "Ask Brian". After replacing a
-development build, delete and recreate stale shortcut actions so macOS indexes
-the new intent metadata.
+Install the resulting app in `/Applications` and open it once. Settings →
+Preferences shows "Set up Siri" in the macOS Electron app; it opens the bundled,
+Apple-signed `Use Brian.shortcut` import. The template already contains "Use
+Brian" with Request set to Ask Each Time, so review it and click "Add Shortcut".
+Restart Shortcuts if the action is missing.
+After replacing a development build, delete and recreate stale shortcut actions
+so macOS indexes the new intent metadata.
 
 This extension targets macOS only. It does not make the action runnable on an
 iPhone or iPad through iCloud shortcut sync.
+
+`UseBrianIntent` is the active action and the only discoverable shortcut. A
+non-discoverable `AskBrianIntent` adapter remains solely because the bundled
+Apple-signed template was serialized with that identifier; it forwards to the
+same `openUseBrian` implementation.

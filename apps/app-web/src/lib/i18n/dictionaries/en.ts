@@ -1747,6 +1747,13 @@ export const en = {
       regional: "Regional",
       timezone: "Timezone",
       language: "Language",
+      siriTitle: "Siri",
+      siriLabel: "Use Brian with Siri",
+      siriDescription:
+        "Install a preconfigured macOS shortcut that asks for a request and sends it to Brian.",
+      siriSetupHint:
+        "Review the Use Brian action, then click Add Shortcut in Shortcuts.",
+      siriSetup: "Set up Siri",
     },
     account: {
       profile: "Profile",

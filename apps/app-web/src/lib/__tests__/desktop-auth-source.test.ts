@@ -13,8 +13,11 @@ import {
   desktopSignOut,
   classifyRefreshStatus,
   usesGatewayCredentials,
+  onDesktopUseBrian,
   onDesktopMessageBrian,
   acknowledgeDesktopMessageBrian,
+  isDesktopSiriSetupAvailable,
+  openDesktopSiriSetup,
 } from "../desktop-auth-source";
 
 const realFetch = globalThis.fetch;
@@ -76,6 +79,51 @@ describe("[COMP:app-web/desktop-auth-source] onDesktopMessageBrian", () => {
     setBridge({ signIn: () => {}, acknowledgeMessageBrian });
     acknowledgeDesktopMessageBrian();
     expect(acknowledgeMessageBrian).toHaveBeenCalledOnce();
+  });
+});
+
+describe("[COMP:app-web/desktop-auth-source] onDesktopUseBrian", () => {
+  it("is a no-op outside Electron", () => {
+    expect(onDesktopUseBrian(() => {})).toBeTypeOf("function");
+  });
+
+  it("subscribes through the shell bridge and returns its cleanup", () => {
+    const cleanup = vi.fn();
+    const subscribe = vi.fn(() => cleanup);
+    const callback = vi.fn();
+    setBridge({ signIn: () => {}, onUseBrian: subscribe });
+
+    expect(onDesktopUseBrian(callback)).toBe(cleanup);
+    expect(subscribe).toHaveBeenCalledWith(callback);
+  });
+});
+
+describe("[COMP:app-web/siri-settings] desktop Siri setup bridge", () => {
+  it("is hidden outside a current macOS Electron shell", () => {
+    expect(isDesktopSiriSetupAvailable()).toBe(false);
+    setBridge({ signIn: () => {}, platform: "win32", openSiriSetup: vi.fn() });
+    expect(isDesktopSiriSetupAvailable()).toBe(false);
+    setBridge({ signIn: () => {}, platform: "darwin" });
+    expect(isDesktopSiriSetupAvailable()).toBe(false);
+  });
+
+  it("forwards setup only through the macOS bridge", async () => {
+    const openSiriSetup = vi.fn().mockResolvedValue(true);
+    setBridge({ signIn: () => {}, platform: "darwin", openSiriSetup });
+
+    expect(isDesktopSiriSetupAvailable()).toBe(true);
+    expect(await openDesktopSiriSetup()).toBe(true);
+    expect(openSiriSetup).toHaveBeenCalledOnce();
+  });
+
+  it("returns false when the shell cannot open Shortcuts", async () => {
+    setBridge({
+      signIn: () => {},
+      platform: "darwin",
+      openSiriSetup: vi.fn().mockRejectedValue(new Error("unavailable")),
+    });
+
+    expect(await openDesktopSiriSetup()).toBe(false);
   });
 });
 

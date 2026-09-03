@@ -1541,6 +1541,12 @@ export const zh: Dictionary = {
       regional: "地區設定",
       timezone: "時區",
       language: "語言",
+      siriTitle: "Siri",
+      siriLabel: "使用 Siri 執行 Use Brian",
+      siriDescription: "安裝預先設定的 macOS 捷徑，詢問你的要求並傳送給 Brian。",
+      siriSetupHint:
+        "檢查「Use Brian」動作，然後在「捷徑」中按一下「加入捷徑」。",
+      siriSetup: "設定 Siri",
     },
     account: {
       profile: "個人資料",

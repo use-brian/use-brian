@@ -31,6 +31,9 @@ mac:
   extraFiles:
     - from: native/siri-companion/build/Release/Brian Siri.appex
       to: Extensions/Brian Siri.appex
+  extraResources:
+    - from: native/siri-companion/Use Brian.shortcut
+      to: siri/Use Brian.shortcut
   # Dock live recording: macOS shows this string on the one-time microphone
   # consent prompt (askForMediaAccess). Without the key the prompt never
   # appears and mic capture silently fails under the hardened runtime.

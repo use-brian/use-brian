@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 
 import {
   MAX_SIRI_PROMPT_LENGTH,
-  parseAskBrianDeepLink,
+  parseUseBrianDeepLink,
   resolveDeepLink,
 } from "../deep-link.js";
 
@@ -50,33 +50,33 @@ describe("[COMP:app-desktop/deep-link] resolveDeepLink", () => {
   });
 });
 
-describe("[COMP:app-desktop/deep-link] parseAskBrianDeepLink", () => {
+describe("[COMP:app-desktop/deep-link] parseUseBrianDeepLink", () => {
   it("extracts, decodes, and trims a Siri prompt", () => {
     expect(
-      parseAskBrianDeepLink(
-        "usebrian://ask?prompt=%20Summarize%20my%20tasks%20",
+      parseUseBrianDeepLink(
+        "usebrian://use?prompt=%20Summarize%20my%20tasks%20",
         "usebrian",
       ),
     ).toBe("Summarize my tasks");
   });
 
   it("rejects missing, empty, oversized, and unrelated requests", () => {
-    expect(parseAskBrianDeepLink("usebrian://ask", "usebrian")).toBeNull();
+    expect(parseUseBrianDeepLink("usebrian://use", "usebrian")).toBeNull();
     expect(
-      parseAskBrianDeepLink("usebrian://ask?prompt=%20", "usebrian"),
+      parseUseBrianDeepLink("usebrian://use?prompt=%20", "usebrian"),
     ).toBeNull();
     expect(
-      parseAskBrianDeepLink(
-        `usebrian://ask?prompt=${"x".repeat(MAX_SIRI_PROMPT_LENGTH + 1)}`,
+      parseUseBrianDeepLink(
+        `usebrian://use?prompt=${"x".repeat(MAX_SIRI_PROMPT_LENGTH + 1)}`,
         "usebrian",
       ),
     ).toBeNull();
     expect(
-      parseAskBrianDeepLink("usebrian://open?prompt=hello", "usebrian"),
+      parseUseBrianDeepLink("usebrian://open?prompt=hello", "usebrian"),
     ).toBeNull();
     expect(
-      parseAskBrianDeepLink("evil://ask?prompt=hello", "usebrian"),
+      parseUseBrianDeepLink("evil://use?prompt=hello", "usebrian"),
     ).toBeNull();
-    expect(parseAskBrianDeepLink("not a url", "usebrian")).toBeNull();
+    expect(parseUseBrianDeepLink("not a url", "usebrian")).toBeNull();
   });
 });
