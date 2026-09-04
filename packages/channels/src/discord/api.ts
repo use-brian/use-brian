@@ -66,6 +66,45 @@ export type DiscordAllowedMentions = {
   parse: Array<'users' | 'roles' | 'everyone'>
 }
 
+export type DiscordApplicationCommand = {
+  name: string
+  description: string
+  type: 1
+  options?: Array<{
+    name: string
+    description: string
+    type: 3
+    required?: boolean
+  }>
+}
+
+export const DISCORD_APPLICATION_COMMANDS: readonly DiscordApplicationCommand[] = [
+  {
+    name: 'ask',
+    description: 'Ask Brian anything',
+    type: 1,
+    options: [{ name: 'prompt', description: 'What you want to ask', type: 3, required: true }],
+  },
+  {
+    name: 'skill',
+    description: 'Run a skill by slug',
+    type: 1,
+    options: [
+      { name: 'slug', description: 'Skill slug', type: 3, required: true },
+      { name: 'arguments', description: 'Arguments for the skill', type: 3 },
+    ],
+  },
+  {
+    name: 'workflow',
+    description: 'Run a workflow by ID or exact name',
+    type: 1,
+    options: [
+      { name: 'workflow', description: 'Workflow ID or exact name', type: 3, required: true },
+      { name: 'arguments', description: 'Arguments for the workflow', type: 3 },
+    ],
+  },
+] as const
+
 type DiscordMessageReference = {
   message_id: string
   channel_id?: string
@@ -106,9 +145,14 @@ export type DiscordEditMessageBody = {
 // (UPDATE_MESSAGE) acks and edits the message the button is attached to in the
 // same call. We use type 7 to morph the confirmation prompt into a result line
 // and clear its buttons atomically.
-export const InteractionCallbackType = { DEFERRED_UPDATE_MESSAGE: 6, UPDATE_MESSAGE: 7 } as const
+export const InteractionCallbackType = {
+  CHANNEL_MESSAGE_WITH_SOURCE: 4,
+  DEFERRED_UPDATE_MESSAGE: 6,
+  UPDATE_MESSAGE: 7,
+} as const
 
 export type DiscordInteractionResponse =
+  | { type: 4; data: { content: string; flags?: number } }
   | { type: 6 }
   | {
       type: 7
@@ -167,6 +211,12 @@ export function createDiscordApi(options: DiscordApiOptions) {
   return {
     /** The bot's own user — used for credential validation and self-mention detection. */
     getCurrentUser: () => call<DiscordRestUser>('GET', '/users/@me'),
+
+    /** Replace this application's global slash-command roster. */
+    replaceGlobalApplicationCommands: (
+      applicationId: string,
+      commands: readonly DiscordApplicationCommand[] = DISCORD_APPLICATION_COMMANDS,
+    ) => call<DiscordApplicationCommand[]>('PUT', `/applications/${applicationId}/commands`, commands),
 
     /** POST /channels/{channel.id}/messages — returns the created message (we read `id`). */
     createMessage: (channelId: string, body: DiscordCreateMessageBody) =>

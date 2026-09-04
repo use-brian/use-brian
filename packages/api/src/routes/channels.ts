@@ -30,10 +30,14 @@ import {
   DEFAULT_WHATSAPP_GRAPH_API_VERSION,
   createTelegramApi,
   TELEGRAM_BOT_COMMANDS,
+  createDiscordApi,
+  DISCORD_APPLICATION_COMMANDS,
   createSlackApi,
 } from '@use-brian/channels'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 import type { LinkCodeStore } from '../db/link-codes.js'
+import type { SkillStore } from '../db/skill-store.js'
+import type { WorkflowStore } from '@use-brian/core'
 import type { DiscordConnectorClient } from '../discord/connector-client.js'
 import type { WhatsappConnectorClient } from '../whatsapp/connector-client.js'
 import type { WechatConnectorClient } from '../wechat/connector-client.js'
@@ -75,6 +79,10 @@ import { ensureMsTeamsConnectorInstance } from '../ingest/msteams-connector-inst
 import { ensureFeishuConnectorInstance } from '../ingest/feishu-connector-instance.js'
 import { query, queryWithRLS } from '../db/client.js'
 import { providerChannelIdFromSession } from '../db/sessions.js'
+import {
+  buildWorkspaceNativeSlashCommands,
+  syncChannelNativeSlashCommands,
+} from './native-slash-commands.js'
 
 // Per-integration behavior config accepted by `PATCH .../channels/:id/config`.
 // Mirrors the `ChannelIntegrationConfig` type (db/channel-integrations.ts).
@@ -124,6 +132,8 @@ function normalizeWhatsAppPhoneNumbers(values: string[]): string[] | null {
 
 export type ChannelsRouteOptions = {
   workspaceStore: WorkspaceStore
+  skillStore?: SkillStore
+  workflowStore?: WorkflowStore
   /**
    * Channel-integration store — supplies each channel's per-integration
    * behavior `config` AND backs the workspace-scoped channel connect
@@ -763,6 +773,93 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
     })
   })
 
+  router.get('/workspaces/:workspaceId/slash-commands', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const { workspaceId } = req.params
+
+    const role = await opts.workspaceStore.getRole(userId, workspaceId)
+    if (!role) { res.status(403).json({ error: 'Not a member of this workspace' }); return }
+
+    const catalog = await buildWorkspaceNativeSlashCommands({
+      userId,
+      workspaceId,
+      skillStore: opts.skillStore,
+      workflowStore: opts.workflowStore,
+    })
+    res.json(catalog)
+  })
+
+  router.post('/workspaces/:workspaceId/channels/:channelId/slash-commands/sync', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const { workspaceId, channelId } = req.params
+
+    const role = await opts.workspaceStore.getRole(userId, workspaceId)
+    if (!role) { res.status(403).json({ error: 'Not a member of this workspace' }); return }
+
+    const channel = await loadChannel(userId, workspaceId, channelId, res)
+    if (!channel) return
+    if (channel.channelType !== 'telegram' && channel.channelType !== 'discord') {
+      res.status(400).json({ error: 'Slash command sync is only supported for Telegram and Discord channels' })
+      return
+    }
+    if (!opts.integrationStore) {
+      res.status(503).json({ error: 'Channel integrations are not configured on this server' })
+      return
+    }
+
+    const integrations = await opts.integrationStore.listForWorkspace(userId, workspaceId)
+    const integration = integrations.find((row) =>
+      row.channelId === channelId && row.channelType === channel.channelType)
+    if (!integration) {
+      res.status(404).json({ error: 'Channel integration not found' })
+      return
+    }
+    const withCredentials = await opts.integrationStore.getForUserWithCredentials(userId, integration.id)
+    if (
+      !withCredentials
+      || withCredentials.id !== integration.id
+      || withCredentials.channelId !== channelId
+      || withCredentials.channelType !== channel.channelType
+    ) {
+      res.status(404).json({ error: 'Channel integration credentials not found' })
+      return
+    }
+    const botToken = (withCredentials.credentials as { bot_token?: unknown }).bot_token
+    if (
+      typeof botToken !== 'string'
+      || botToken.length === 0
+      || (channel.channelType === 'discord' && !withCredentials.botUserId)
+    ) {
+      res.status(404).json({ error: 'Channel integration credentials not found' })
+      return
+    }
+
+    const catalog = await buildWorkspaceNativeSlashCommands({
+      userId,
+      workspaceId,
+      skillStore: opts.skillStore,
+      workflowStore: opts.workflowStore,
+    })
+    try {
+      await syncChannelNativeSlashCommands({
+        catalog,
+        integration: withCredentials,
+        credentials: withCredentials.credentials,
+      })
+    } catch (err) {
+      console.error('[channels] slash command sync failed:', err)
+      res.status(502).json({ error: 'Failed to sync slash commands' })
+      return
+    }
+
+    res.json({
+      commandCount: catalog.commands.length,
+      omittedCount: catalog.omitted.length,
+    })
+  })
+
   // GET /workspaces/:workspaceId/channels/:channelId
   router.get('/workspaces/:workspaceId/channels/:channelId', async (req, res) => {
     const userId = (req as { userId?: string }).userId
@@ -1193,9 +1290,6 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
     try {
       const api = createTelegramApi({ token: parsed.data.botToken })
       await api.setWebhook(webhookUrl, webhookSecret)
-      api.upsertMyCommands(TELEGRAM_BOT_COMMANDS).catch((err) => {
-        console.warn('[channels] Telegram command registration failed:', err)
-      })
     } catch (err) {
       res.status(500).json({
         error: 'Failed to register Telegram webhook',
@@ -1219,6 +1313,25 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
       console.error('[channels] telegram integration upsert failed:', err)
       res.status(500).json({ error: 'Failed to save integration' })
       return
+    }
+
+    try {
+      const catalog = await buildWorkspaceNativeSlashCommands({
+        userId,
+        workspaceId,
+        skillStore: opts.skillStore,
+        workflowStore: opts.workflowStore,
+      })
+      const commands = [
+        ...TELEGRAM_BOT_COMMANDS,
+        ...catalog.commands.map(({ name, description }) => ({ command: name, description })),
+      ]
+      await createTelegramApi({ token: parsed.data.botToken }).setMyCommands(commands)
+      if (catalog.omitted.length > 0) {
+        console.warn(`[channels] Telegram command cap omitted ${catalog.omitted.length} workspace command(s)`)
+      }
+    } catch (err) {
+      console.warn('[channels] Telegram command registration failed:', err)
     }
 
     const channel = await getChannelForUser(userId, provisioned.channelId)
@@ -1331,6 +1444,36 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
       console.error('[channels] discord integration upsert failed:', err)
       res.status(500).json({ error: 'Failed to save integration' })
       return
+    }
+
+    try {
+      const catalog = await buildWorkspaceNativeSlashCommands({
+        userId,
+        workspaceId,
+        skillStore: opts.skillStore,
+        workflowStore: opts.workflowStore,
+      })
+      await createDiscordApi({ token: parsed.data.botToken }).replaceGlobalApplicationCommands(
+        info.botId,
+        [
+          ...DISCORD_APPLICATION_COMMANDS,
+          ...catalog.commands.map(({ name, description }) => ({
+            name,
+            description,
+            type: 1 as const,
+            options: [{
+              name: 'arguments',
+              description: 'Arguments for this command',
+              type: 3 as const,
+            }],
+          })),
+        ],
+      )
+      if (catalog.omitted.length > 0) {
+        console.warn(`[channels] Discord command cap omitted ${catalog.omitted.length} workspace command(s)`)
+      }
+    } catch (err) {
+      console.warn('[channels] Discord command registration failed:', err)
     }
 
     // Open the Gateway socket for this bot. Non-fatal on failure: the

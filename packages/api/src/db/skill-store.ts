@@ -515,6 +515,7 @@ async function resolvePrimaryWorkspace(userId: string): Promise<string> {
  */
 export type WorkspaceSkillStoreHooks = {
   onWritten?: (skill: WorkspaceSkill) => void
+  onCommandRosterChanged?: (actingUserId: string, workspaceId: string) => void
 }
 
 export function createDbWorkspaceSkillStore(hooks?: WorkspaceSkillStoreHooks): WorkspaceSkillStore {
@@ -532,6 +533,13 @@ export function createDbWorkspaceSkillStore(hooks?: WorkspaceSkillStoreHooks): W
       }
     } catch (err) {
       console.error(`[skill-store] onWritten hook threw (skill=${skill.rowId}):`, err)
+    }
+  }
+  const fireCommandRosterChanged = (actingUserId: string, workspaceId: string): void => {
+    try {
+      hooks?.onCommandRosterChanged?.(actingUserId, workspaceId)
+    } catch (err) {
+      console.error(`[skill-store] onCommandRosterChanged hook failed (workspace=${workspaceId}):`, err)
     }
   }
 
@@ -623,7 +631,10 @@ export function createDbWorkspaceSkillStore(hooks?: WorkspaceSkillStoreHooks): W
         ],
       )
       const skill = rowToWorkspaceSkill(result.rows[0])
-      if (!input.deferGraphRecompute) fireOnWritten(skill)
+      if (!input.deferGraphRecompute) {
+        fireOnWritten(skill)
+        fireCommandRosterChanged(userId, workspaceId)
+      }
       notifyWorkspaceChange(skill.workspaceId, 'skill', 'create', skill.rowId)
       return skill
     },
@@ -712,6 +723,7 @@ export function createDbWorkspaceSkillStore(hooks?: WorkspaceSkillStoreHooks): W
       if (!result.rows[0]) return null
       const skill = rowToWorkspaceSkill(result.rows[0])
       fireOnWritten(skill)
+      fireCommandRosterChanged(userId, workspaceId)
       notifyWorkspaceChange(skill.workspaceId, 'skill', 'update', skill.rowId)
       return skill
     },
@@ -747,6 +759,7 @@ export function createDbWorkspaceSkillStore(hooks?: WorkspaceSkillStoreHooks): W
       )
       if (!result.rows[0]) return false
       fireOnWritten(rowToWorkspaceSkill(result.rows[0]))
+      fireCommandRosterChanged(userId, workspaceId)
       notifyWorkspaceChange(workspaceId, 'skill', 'delete', skillId)
       return true
     },
@@ -911,7 +924,10 @@ export function createDbWorkspaceSkillStore(hooks?: WorkspaceSkillStoreHooks): W
          RETURNING ${COLS_ALL}`,
         [pinned, skillId, workspaceId],
       )
-      if (result.rows[0]) fireOnWritten(rowToWorkspaceSkill(result.rows[0]))
+      if (result.rows[0]) {
+        fireOnWritten(rowToWorkspaceSkill(result.rows[0]))
+        fireCommandRosterChanged(userId, workspaceId)
+      }
       notifyWorkspaceChange(workspaceId, 'skill', 'update', skillId)
     },
 

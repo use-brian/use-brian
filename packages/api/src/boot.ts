@@ -354,6 +354,7 @@ import { publicChatRoutes } from './routes/public-chat.js'
 import { chatLinkRoutes } from './routes/chat-links.js'
 import { createChatLinkStore } from './db/chat-link-store.js'
 import { channelsRoutes } from './routes/channels.js'
+import { syncWorkspaceNativeSlashCommands } from './routes/native-slash-commands.js'
 import { whatsappByonRoutes } from './routes/whatsapp-byon.js'
 import { whatsappCloudRoutes } from './routes/whatsapp-cloud.js'
 import { whatsappIngestAdminRoutes } from './routes/whatsapp-byon-admin.js'
@@ -1197,6 +1198,9 @@ export interface BootContext {
   workerManager: ReturnType<typeof createWorkerManager>
   workerRunsStore: ReturnType<typeof createDbWorkerRunsStore>
   skillStore: ReturnType<typeof createDbSkillStore>
+  workspaceSkillStore: ReturnType<typeof createDbWorkspaceSkillStore>
+  workspaceSkillEnablementStore: ReturnType<typeof createDbWorkspaceSkillEnablementStore>
+  workspaceSkillFilesStore: ReturnType<typeof createDbWorkspaceSkillFilesStore>
   communitySkillRegistry: ReturnType<typeof loadSkillRegistry>
   jobStore: ReturnType<typeof createDbJobStore>
   linkedAccountStore: ReturnType<typeof createDbLinkedAccountStore>
@@ -1580,7 +1584,25 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   setGlobalMailboxContactImportDeps({ crm: crmStore })
   const workspaceFilesStore = createDbWorkspaceFilesStore()
   const workspaceFileUploadsStore = createWorkspaceFileUploadsStore()
-  const workflowStore = createDbWorkflowStore()
+  let syncNativeSlashCommands:
+    | ((userId: string, workspaceId: string) => Promise<void>)
+    | undefined
+  const nativeSlashSyncTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  const scheduleNativeSlashCommandSync = (userId: string | undefined, workspaceId: string) => {
+    if (!userId || !syncNativeSlashCommands) return
+    const existing = nativeSlashSyncTimers.get(workspaceId)
+    if (existing) clearTimeout(existing)
+    const timer = setTimeout(() => {
+      nativeSlashSyncTimers.delete(workspaceId)
+      void syncNativeSlashCommands?.(userId, workspaceId).catch((err) =>
+        console.warn('[channels] native command sync failed:', err))
+    }, 250)
+    timer.unref?.()
+    nativeSlashSyncTimers.set(workspaceId, timer)
+  }
+  const workflowStore = createDbWorkflowStore({
+    onChanged: (userId, workspaceId) => scheduleNativeSlashCommandSync(userId, workspaceId),
+  })
   const workflowRunStore = createDbWorkflowRunStore()
   const pendingApprovalsStore = createPendingApprovalsStore()
   // `onPageLifecycle` feeds page create / update / move into the workflow
@@ -1860,6 +1882,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     | undefined
   const workspaceSkillStore = createDbWorkspaceSkillStore({
     onWritten: (skill) => recomputeSkillEdgesOnWrite?.(skill),
+    onCommandRosterChanged: (userId, workspaceId) =>
+      scheduleNativeSlashCommandSync(userId, workspaceId),
   })
   const workspaceSkillFilesStore = createDbWorkspaceSkillFilesStore({
     onChanged: (workspaceSkillId, retiredResourceIds) => {
@@ -1883,6 +1907,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const communitySkillRegistry = loadSkillRegistry()
 
   const integrationStore = credKey ? createDbChannelIntegrationStore(credKey) : null
+  syncNativeSlashCommands = integrationStore
+    ? (userId: string, workspaceId: string) => syncWorkspaceNativeSlashCommands({
+        userId,
+        workspaceId,
+        skillStore,
+        workflowStore,
+        integrationStore,
+      })
+    : undefined
   // Custom (bridge-driven) channel state + outbox (migration 450). Internal
   // path, no RLS — reachable only through the bridge token or member routes.
   const customChannelStore = createCustomChannelStore()
@@ -4606,6 +4639,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     knowledgeRepoWriter,
     gdriveFilesStore,
     skillStore,
+    workflowStore,
     workspaceSkillStore,
     workspaceSkillEnablementStore,
     workspaceSkillFilesStore,
@@ -5263,6 +5297,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }))
   app.use('/api/skills', requireAuth(env.JWT_SECRET), skillRoutes({
     skillStore,
+    syncNativeSlashCommands,
     communityRegistry: communitySkillRegistry,
     workspaceSkillStore,
     workspaceStore,
@@ -7900,6 +7935,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     workerManager,
     workerRunsStore,
     skillStore,
+    workspaceSkillStore,
+    workspaceSkillEnablementStore,
+    workspaceSkillFilesStore,
     communitySkillRegistry,
     jobStore,
     linkedAccountStore,
@@ -7971,6 +8009,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // Workspace channels operator surface (Studio → Channels).
     app.use('/api', requireAuth(env.JWT_SECRET), channelsRoutes({
       workspaceStore,
+      skillStore,
+      workflowStore,
       integrationStore: integrationStore ?? undefined,
       apiUrl: env.API_URL,
       discordConnector,
@@ -8074,6 +8114,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             workspaceFilesStore,
             filesApi: filesApi ?? undefined,
             skillStore,
+            workspaceSkillStore,
+            workspaceSkillEnablementStore,
+            workspaceSkillFilesStore,
             workerManager,
             episodicStore,
             sessionStateStore,
@@ -8138,7 +8181,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         assistantConnectorStore, connectorGrantStore, connectorInstanceStore, knowledgeStore,
         knowledgeCaptureRuleStore,
         gdriveFilesStore, workspaceFilesStore, filesApi: filesApi ?? undefined, analytics,
-        skillStore, deferredConfirmationStore, episodicStore,
+        skillStore, workflowStore, workspaceSkillStore, workspaceSkillEnablementStore, workspaceSkillFilesStore,
+        deferredConfirmationStore, episodicStore,
         sessionStateStore, crmEmailDraftStore, voiceTranscription, workspaceToolPolicyStore,
         recordingIngest: channelHosts.recordingIngest,
         ingestChannelMediaRef: channelHosts.telegramIngestChannelMediaRef,
@@ -8155,6 +8199,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         connectorInstanceStore, knowledgeStore, knowledgeCaptureRuleStore, gdriveFilesStore, workspaceFilesStore,
         realtimeThreadTargetStore,
         filesApi: filesApi ?? undefined, analytics, skillStore,
+        workflowStore, workspaceSkillStore, workspaceSkillEnablementStore, workspaceSkillFilesStore,
         deferredConfirmationStore, episodicStore, sessionStateStore, crmEmailDraftStore, workflowEventDispatcher,
         slackWebhookIngestor: channelHosts.slackWebhookIngestor, connectorActionStore, episodesStore,
         buildConnectorActionAudit: ports.buildConnectorActionAudit,
@@ -8168,6 +8213,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
         connectorInstanceStore, workspaceToolPolicyStore, knowledgeStore, knowledgeCaptureRuleStore, gdriveFilesStore, workspaceFilesStore,
         filesApi: filesApi ?? undefined, analytics, skillStore,
+        workflowStore, workspaceSkillStore, workspaceSkillEnablementStore, workspaceSkillFilesStore,
         episodicStore, sessionStateStore, crmEmailDraftStore, artifactPromoter, fileStore, workflowEventDispatcher,
       }))
       // Microsoft Teams — public Bot Framework messaging endpoint, per-channel
@@ -8180,7 +8226,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         integrationStore, channelUserStore,
         workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
         connectorInstanceStore, knowledgeStore, knowledgeCaptureRuleStore, gdriveFilesStore, workspaceFilesStore,
-        analytics, skillStore,
+        analytics, skillStore, workflowStore, workspaceSkillStore, workspaceSkillEnablementStore, workspaceSkillFilesStore,
         episodicStore, sessionStateStore, crmEmailDraftStore, artifactPromoter,
         msteamsWebhookIngestor: channelHosts.msteamsWebhookIngestor,
         fileStore,
@@ -8195,7 +8241,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           checkCreditBudget: ports.checkCreditBudget, integrationStore, channelUserStore,
           workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
           connectorInstanceStore, knowledgeStore, knowledgeCaptureRuleStore, gdriveFilesStore, workspaceFilesStore, analytics,
-          skillStore, episodicStore, sessionStateStore, crmEmailDraftStore, fileStore,
+          skillStore, workflowStore, workspaceSkillStore, workspaceSkillEnablementStore, workspaceSkillFilesStore,
+          episodicStore, sessionStateStore, crmEmailDraftStore, fileStore,
         }))
       }
       if (env.WECHAT_CONNECTOR_SECRET) {
@@ -8207,7 +8254,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           checkCreditBudget: ports.checkCreditBudget, integrationStore, channelUserStore,
           workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
           connectorInstanceStore, knowledgeStore, knowledgeCaptureRuleStore, gdriveFilesStore, workspaceFilesStore, analytics,
-          skillStore, episodicStore, sessionStateStore, crmEmailDraftStore, fileStore,
+          skillStore, workflowStore, workspaceSkillStore, workspaceSkillEnablementStore, workspaceSkillFilesStore,
+          episodicStore, sessionStateStore, crmEmailDraftStore, fileStore,
           // Without this the route's staging block is unreachable and every
           // inbound attachment archives as `availability: 'missing'` — the
           // message row lands, the bytes are lost, and nothing says so. iLink
@@ -8253,6 +8301,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           readCachedFile: (id, access) => fileStore.get(id, access),
           analytics,
           skillStore,
+          workflowStore,
+          workspaceSkillStore,
+          workspaceSkillEnablementStore,
+          workspaceSkillFilesStore,
           episodicStore,
           sessionStateStore,
           crmEmailDraftStore,
@@ -8273,7 +8325,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         checkCreditBudget: ports.checkCreditBudget, integrationStore, customChannelStore, channelUserStore,
         workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
         connectorInstanceStore, knowledgeStore, knowledgeCaptureRuleStore, gdriveFilesStore, workspaceFilesStore, analytics,
-        skillStore, episodicStore, sessionStateStore, crmEmailDraftStore, fileStore,
+        skillStore, workflowStore, workspaceSkillStore, workspaceSkillEnablementStore, workspaceSkillFilesStore,
+        episodicStore, sessionStateStore, crmEmailDraftStore, fileStore,
         archiveMedia: chatArchiveLiveMedia,
         voiceTranscription,
         deferredConfirmationStore,

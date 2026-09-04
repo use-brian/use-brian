@@ -7,17 +7,38 @@
  */
 
 import { describe, expect, it } from "vitest";
+import type { SlashCommand } from "@/lib/api/slash-commands";
 import {
   activeSlashCommandOf,
   filterSlashCommands,
   slashCommandQueryOf,
 } from "../slash-command-autocomplete";
 
-const roster = [
-  { slug: "goal", name: "Goal kickstart", description: "Run a goal to done" },
-  { slug: "help", name: "Help", description: "List commands" },
-  { slug: "workflow-builder", name: "Workflow builder", description: "Automations" },
-  { slug: "doc-architect", name: "Doc architect", description: "Docs" },
+const skill = (slug: string, name: string, description: string): SlashCommand => ({
+  slug,
+  name,
+  description,
+  kind: "skill",
+  target: { kind: "skill", slug, name, description },
+});
+
+const roster: SlashCommand[] = [
+  skill("goal", "Goal kickstart", "Run a goal to done"),
+  skill("help", "Help", "List commands"),
+  skill("workflow-builder", "Workflow builder", "Automations"),
+  skill("doc-architect", "Doc architect", "Docs"),
+  {
+    slug: "workflow_daily_digest",
+    name: "Daily Digest",
+    description: "Send the digest",
+    kind: "workflow",
+    target: {
+      kind: "workflow",
+      workflowId: "workflow-1",
+      name: "Daily Digest",
+      description: "Send the digest",
+    },
+  },
 ];
 
 describe("[COMP:app-web/slash-command-autocomplete] query detection", () => {
@@ -26,6 +47,7 @@ describe("[COMP:app-web/slash-command-autocomplete] query detection", () => {
     expect(slashCommandQueryOf("/go")).toBe("go");
     expect(slashCommandQueryOf("/GoAl")).toBe("goal");
     expect(slashCommandQueryOf("/workflow-bui")).toBe("workflow-bui");
+    expect(slashCommandQueryOf("/workflow_daily")).toBe("workflow_daily");
   });
 
   it("closes once the command word is settled or the draft is anything else", () => {
@@ -45,6 +67,7 @@ describe("[COMP:app-web/slash-command-autocomplete] candidate ranking", () => {
       "help",
       "workflow-builder",
       "doc-architect",
+      "workflow_daily_digest",
     ]);
   });
 
@@ -54,6 +77,9 @@ describe("[COMP:app-web/slash-command-autocomplete] candidate ranking", () => {
     expect(filterSlashCommands(roster, "builder").map((s) => s.slug)).toEqual([
       "workflow-builder",
     ]);
+    expect(filterSlashCommands(roster, "daily").map((s) => s.slug)).toEqual([
+      "workflow_daily_digest",
+    ]);
   });
 
   it("returns nothing on a miss", () => {
@@ -62,9 +88,7 @@ describe("[COMP:app-web/slash-command-autocomplete] candidate ranking", () => {
 
   it("keeps the complete matching roster for the scrollable menu", () => {
     const many = Array.from({ length: 12 }, (_, i) => ({
-      slug: `skill-${i}`,
-      name: `Skill ${i}`,
-      description: "",
+      ...skill(`skill-${i}`, `Skill ${i}`, ""),
     }));
     expect(filterSlashCommands(many, "skill")).toHaveLength(12);
   });
@@ -73,12 +97,16 @@ describe("[COMP:app-web/slash-command-autocomplete] candidate ranking", () => {
 describe("[COMP:app-web/slash-command-autocomplete] selected command", () => {
   it("recognizes a complete roster-backed prefix and its exact range", () => {
     expect(activeSlashCommandOf("/goal ship it", roster)).toEqual({
-      skill: roster[0],
+      command: roster[0],
       end: 5,
     });
     expect(activeSlashCommandOf("/GOAL", roster)).toEqual({
-      skill: roster[0],
+      command: roster[0],
       end: 5,
+    });
+    expect(activeSlashCommandOf("/workflow_daily_digest now", roster)).toEqual({
+      command: roster[4],
+      end: 22,
     });
   });
 

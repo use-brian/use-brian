@@ -7760,6 +7760,12 @@ export const zhCN: Dictionary = {
         ingest: "导入",
       },
       ingestToggle: "将此管道的消息导入大脑",
+      slashCommands: {
+        sync: "同步指令",
+        syncing: "正在同步指令…",
+        success: "已同步 {commandCount} 个指令，省略 {omittedCount} 个。",
+        error: "无法同步指令，请再试一次。",
+      },
       routingTitle: "助理路由",
       routingEmpty: "尚未指派助理，此管道目前无法回应对话。",
       defaultSurface: "管道默认",

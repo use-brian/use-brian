@@ -15,7 +15,7 @@ import {
 } from '../resolve-session-pins.js'
 import { getSelfEntityId } from '../db/memories.js'
 import { getRecording, type Recording } from '../db/recordings-store.js'
-import { queryLoop, isConnectionDropError, isEndpointUnreachableError, streamErrorCode, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, probePdfPageCount, estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH, filterToolsByCapabilities, modelToCompactionTier, buildWorkspaceFilesContext, buildUploadPolicyBlock, SensitivityAccumulator, CompartmentAccumulator, ContextScopeAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSupervisorSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, parsePresentedDocumentInput, latestWorkflowProposalReceipt, buildTool, parseSlashCommand, buildSlashCommandBlock, buildEmailDraftAnchorPrompt, formatActiveEmailDraftContext, type PresentedDocumentInput, type MediaBackend } from '@use-brian/core'
+import { queryLoop, isConnectionDropError, isEndpointUnreachableError, streamErrorCode, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, probePdfPageCount, estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH, filterToolsByCapabilities, modelToCompactionTier, buildWorkspaceFilesContext, buildUploadPolicyBlock, SensitivityAccumulator, CompartmentAccumulator, ContextScopeAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSupervisorSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, parsePresentedDocumentInput, latestWorkflowProposalReceipt, buildTool, prepareSlashCommand, resolveNativeSlashCommand, buildSlashCommandBlock, buildWorkflowSlashCommandBlock, buildEmailDraftAnchorPrompt, formatActiveEmailDraftContext, type PresentedDocumentInput, type MediaBackend } from '@use-brian/core'
 import { deliverTurnInput, registerTurnInbox } from '../turn-inbox.js'
 import { insertClaimProvenance, getClaimsForLatestAssistantMessage } from '../db/claim-provenance-store.js'
 import type { SessionStateStore, SessionStateRecord, PlanStore, AmbientSurface, CrmEmailDraftStore } from '@use-brian/core'
@@ -104,6 +104,7 @@ import { appendDecisionEvent } from '../db/decision-event-store.js'
 import type { SessionResumeStore } from '../db/session-resume-store.js'
 import type { WorkspaceSkillStore } from '../db/skill-store.js'
 import { deploymentCapabilities } from '../edition.js'
+import { buildWorkspaceNativeSlashCommands } from './native-slash-commands.js'
 
 // Module-level map of active confirmation resolvers, keyed by sessionId.
 // Cleaned up on turn_complete or stream close.
@@ -525,6 +526,7 @@ type WebChatOptions = {
   knowledgeCaptureRuleStore?: import('../knowledge/capture-rules.js').KnowledgeCaptureRuleStore
   gdriveFilesStore?: import('@use-brian/core').GDriveFilesStore
   skillStore?: import('../db/skill-store.js').SkillStore
+  workflowStore?: import('@use-brian/core').WorkflowStore
   /**
    * CL-8 workspace-scoped skill counters. Optional today — when set
    * together with `assistant.workspaceId`, the chat route builds a
@@ -5650,6 +5652,21 @@ export function chatRoutes(options: WebChatOptions): Router {
       })
       if (knowledgeCapturePrompt) privateRuntimeContextParts.push(knowledgeCapturePrompt)
 
+      let preparedCommand = message ? prepareSlashCommand(message) : null
+      if (message && assistant.workspaceId && (options.skillStore || options.workflowStore)) {
+        try {
+          const nativeCatalog = await buildWorkspaceNativeSlashCommands({
+            userId: connectorUserId,
+            workspaceId: assistant.workspaceId,
+            skillStore: options.skillStore,
+            workflowStore: options.workflowStore,
+          })
+          preparedCommand = resolveNativeSlashCommand(message, nativeCatalog) ?? preparedCommand
+        } catch (err) {
+          console.warn('[chat] native slash-command resolution failed:', err)
+        }
+      }
+
       // Inject skills — budget-aware listing + useSkill tool
       if (options.skillStore) {
         // Slash command (`/goal register …` as the whole message): the name is
@@ -5658,7 +5675,9 @@ export function chatRoutes(options: WebChatOptions): Router {
         // injectSkills; a name that resolves to nothing enforces nothing and
         // the message falls through as plain text (checked below on the
         // enforcedPromptFragment, never on the parse alone).
-        const slashCommand = message ? parseSlashCommand(message) : null
+        const slashCommand = preparedCommand?.kind === 'skill'
+          ? { name: preparedCommand.name, args: preparedCommand.args }
+          : null
         const skillResult = await injectSkills({
           enforceSlugs: slashCommand ? [slashCommand.name] : undefined,
           skillStore: options.skillStore,
@@ -5689,6 +5708,9 @@ export function chatRoutes(options: WebChatOptions): Router {
           fullSystemPrompt += skillResult.enforcedPromptFragment
           privateRuntimeContextParts.push(buildSlashCommandBlock(slashCommand))
         }
+      }
+      if (preparedCommand?.kind === 'workflow' && allTools.has('runWorkflow')) {
+        privateRuntimeContextParts.push(buildWorkflowSlashCommandBlock(preparedCommand))
       }
 
       // Inject unavailable capabilities so the model doesn't waste turns

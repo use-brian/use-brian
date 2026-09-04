@@ -55,6 +55,12 @@ describe("[COMP:app-web/chat-parity] Chat surface parity", () => {
     expect(source).toContain("...(isRoom && addressed ? { ask: true } : {})");
   });
 
+  it("addresses slash-shaped room messages through the chat turn route", () => {
+    expect(source).toMatch(
+      /const addressed =[\s\S]*isSlashCommandShaped\(trimmed\)[\s\S]*mentioned\.length > 0/,
+    );
+  });
+
   it("shares the dock's research and response affordances", () => {
     expect(source).toContain("showResearch");
     expect(source).toContain('{ mode: "research" as const }');

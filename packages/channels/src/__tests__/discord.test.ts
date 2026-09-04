@@ -1,7 +1,11 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { generateKeyPairSync, sign as cryptoSign, type KeyObject } from 'node:crypto'
 import { createDiscordAdapter } from '../discord/adapter.js'
-import { respondToInteraction } from '../discord/api.js'
+import {
+  createDiscordApi,
+  DISCORD_APPLICATION_COMMANDS,
+  respondToInteraction,
+} from '../discord/api.js'
 import { verifyDiscordSignature, isPingInteraction } from '../discord/verify.js'
 import { markdownToDiscord } from '../discord/markdown.js'
 
@@ -255,12 +259,61 @@ describe('[COMP:channels/discord] createDiscordAdapter parseIncoming (interactio
     expect(result).toMatchObject({ userId: 'USER_2', isGroupChat: false, text: 'hi' })
   })
 
+  it('preserves explicit skill and workflow command namespaces', () => {
+    const base = {
+      application_id: 'APP_1', type: 2, channel_id: 'DM_CHAN',
+      user: { id: 'USER_2', username: 'bob' },
+    }
+    expect(adapter.parseIncoming({
+      ...base, id: '7208',
+      data: { name: 'skill', options: [
+        { name: 'slug', type: 3, value: 'goal' },
+        { name: 'arguments', type: 3, value: 'register it' },
+      ] },
+    })?.text).toBe('/skill goal register it')
+    expect(adapter.parseIncoming({
+      ...base, id: '7209',
+      data: { name: 'workflow', options: [
+        { name: 'workflow', type: 3, value: 'Daily Digest' },
+        { name: 'arguments', type: 3, value: 'region=apac' },
+      ] },
+    })?.text).toBe('/workflow "Daily Digest" region=apac')
+  })
+
+  it('preserves a generated command name for shared dispatch', () => {
+    const result = adapter.parseIncoming({
+      id: '7210',
+      application_id: 'APP_1',
+      type: 2,
+      channel_id: 'DM_CHAN',
+      user: { id: 'USER_2', username: 'bob' },
+      data: {
+        name: 'workflow_daily_digest',
+        options: [{ name: 'arguments', type: 3, value: 'region=apac' }],
+      },
+    })
+    expect(result?.text).toBe('/workflow_daily_digest region=apac')
+  })
+
   it('returns null for a PING interaction (handled by the route, not as a message)', () => {
     expect(adapter.parseIncoming({ id: '1', application_id: 'APP_1', type: 1 })).toBeNull()
   })
 
   it('deduplicates by interaction id', () => {
     expect(adapter.deduplicateId({ id: '7207', application_id: 'APP_1', type: 2 })).toBe('7207')
+  })
+})
+
+describe('[COMP:channels/discord] application command registration', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('replaces global commands with the shared roster', async () => {
+    const calls: CapturedCall[] = []
+    mockFetch(calls, 200, DISCORD_APPLICATION_COMMANDS)
+    await createDiscordApi({ token: 'bot-token' }).replaceGlobalApplicationCommands('APP_1')
+    expect(calls[0].url).toContain('/applications/APP_1/commands')
+    expect(calls[0].init.method).toBe('PUT')
+    expect(JSON.parse(String(calls[0].init.body))).toEqual(DISCORD_APPLICATION_COMMANDS)
   })
 })
 

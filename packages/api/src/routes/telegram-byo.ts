@@ -161,6 +161,10 @@ type TelegramByoRouteOptions = {
   artifactPromoter?: import('@use-brian/api/files/artifact-promote.js').ArtifactPromoter | null
   analytics?: AnalyticsLogger
   skillStore?: import('../db/skill-store.js').SkillStore
+  workflowStore?: import('@use-brian/core').WorkflowStore
+  workspaceSkillStore?: import('../db/skill-store.js').WorkspaceSkillStore
+  workspaceSkillEnablementStore?: import('../db/workspace-skill-enablement-store.js').WorkspaceSkillEnablementStore
+  workspaceSkillFilesStore?: import('../db/workspace-skill-files-store.js').WorkspaceSkillFilesStore
   deferredConfirmationStore?: DeferredConfirmationStore
   episodicStore?: import('@use-brian/core').EpisodicStore
   sessionStateStore?: import('@use-brian/core').SessionStateStore
@@ -1226,6 +1230,10 @@ type ProcessMessageParams = {
   artifactPromoter?: import('@use-brian/api/files/artifact-promote.js').ArtifactPromoter | null
   analytics?: AnalyticsLogger
   skillStore?: import('../db/skill-store.js').SkillStore
+  workflowStore?: import('@use-brian/core').WorkflowStore
+  workspaceSkillStore?: import('../db/skill-store.js').WorkspaceSkillStore
+  workspaceSkillEnablementStore?: import('../db/workspace-skill-enablement-store.js').WorkspaceSkillEnablementStore
+  workspaceSkillFilesStore?: import('../db/workspace-skill-files-store.js').WorkspaceSkillFilesStore
   pendingConfResolvers: Map<string, { resolver: ConfirmationResolver; chatId: string }>
   episodicStore?: import('@use-brian/core').EpisodicStore
   sessionStateStore?: import('@use-brian/core').SessionStateStore
@@ -1702,6 +1710,10 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     readCachedFile: params.fileStore ? (id, ctx) => params.fileStore!.get(id, ctx) : undefined,
     artifactPromoter: params.artifactPromoter ?? null,
     skillStore: params.skillStore,
+    workflowStore: params.workflowStore,
+    workspaceSkillStore: params.workspaceSkillStore,
+    workspaceSkillEnablementStore: params.workspaceSkillEnablementStore,
+    workspaceSkillFilesStore: params.workspaceSkillFilesStore,
     workerManager: params.workerManager,
     episodicStore: params.episodicStore,
     sessionStateStore: params.sessionStateStore,

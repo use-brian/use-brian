@@ -4,9 +4,9 @@
  * The `/` slash-command autocomplete, shared by the full-page chat composer,
  * universal workspace dock, and Feed assistant dock.
  *
- * Discovery UI over the skill system's slash commands: while the draft is a
+ * Discovery UI over the workspace's slash commands: while the draft is a
  * single half-typed command word (`/go…`), a popup offers the invocable
- * skills. Selecting one rewrites the draft to `/<slug> ` and the user types
+ * commands. Selecting one rewrites the draft to `/<slug> ` and the user types
  * the arguments. A roster-backed prefix is then painted as a command token
  * and named in a dismissible strip, so a special invocation never collapses
  * back into indistinguishable prose. The send itself is an ordinary message
@@ -30,15 +30,18 @@ import {
 import { Sparkles, X } from "lucide-react";
 import { useT, format } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
-import { listInvocableSkills, type InvocableSkill } from "@/lib/api/skills";
+import {
+  listSlashCommands,
+  type SlashCommand,
+} from "@/lib/api/slash-commands";
 import {
   acceptsMentionSelection,
   mentionNavigationDelta,
   nextMentionSelectionIndex,
 } from "./multi-assistant-response";
 
-const QUERY_RE = /^\/(?:([A-Za-z][A-Za-z0-9-]{0,63}))?$/;
-const ACTIVE_COMMAND_RE = /^\/([A-Za-z][A-Za-z0-9-]{0,63})(?=\s|$)/;
+const QUERY_RE = /^\/(?:([A-Za-z][A-Za-z0-9_-]{0,63}))?$/;
+const ACTIVE_COMMAND_RE = /^\/([A-Za-z][A-Za-z0-9_-]{0,63})(?=\s|$)/;
 
 /** The half-typed command word, or null once the draft is anything else.
  *  Matches only while the WHOLE draft is `/partial` — after the first space
@@ -51,12 +54,12 @@ export function slashCommandQueryOf(value: string): string | null {
 /** Prefix matches on the slug first (the thing being typed), then substring
  *  matches on slug or name — both alphabetical within their tier. */
 export function filterSlashCommands(
-  entries: InvocableSkill[],
+  entries: SlashCommand[],
   query: string,
-): InvocableSkill[] {
+): SlashCommand[] {
   const q = query.toLowerCase();
-  const prefix: InvocableSkill[] = [];
-  const loose: InvocableSkill[] = [];
+  const prefix: SlashCommand[] = [];
+  const loose: SlashCommand[] = [];
   for (const entry of entries) {
     if (entry.slug.startsWith(q)) prefix.push(entry);
     else if (
@@ -69,7 +72,7 @@ export function filterSlashCommands(
 }
 
 export type ActiveSlashCommand = {
-  skill: InvocableSkill;
+  command: SlashCommand;
   /** End of the `/<slug>` prefix in the controlled draft. */
   end: number;
 };
@@ -79,20 +82,20 @@ export type ActiveSlashCommand = {
  *  the final invocation decision when the message is sent. */
 export function activeSlashCommandOf(
   value: string,
-  entries: InvocableSkill[],
+  entries: SlashCommand[],
 ): ActiveSlashCommand | null {
   const match = ACTIVE_COMMAND_RE.exec(value);
   if (!match) return null;
   const slug = match[1].toLowerCase();
-  const skill = entries.find((entry) => entry.slug.toLowerCase() === slug);
-  return skill ? { skill, end: match[0].length } : null;
+  const command = entries.find((entry) => entry.slug.toLowerCase() === slug);
+  return command ? { command, end: match[0].length } : null;
 }
 
 /** Whole-message command form — mirrors the server parser's SLASH_COMMAND_RE
  *  (`packages/core/src/skills/slash-command.ts`), which is what decides
  *  whether a SENT message was a command. Kept as a client copy because the
  *  core package is server-side; the two regexes must stay identical. */
-const SENT_COMMAND_RE = /^\/([A-Za-z][A-Za-z0-9-]{0,63})(?:\s+([\s\S]*))?$/;
+const SENT_COMMAND_RE = /^\/([A-Za-z][A-Za-z0-9_-]{0,63})(?:\s+([\s\S]*))?$/;
 
 /** Cheap syntactic probe — "could this sent message be a command?" Used to
  *  decide whether transcript rendering needs the roster at all. */
@@ -100,7 +103,7 @@ export function isSlashCommandShaped(text: string): boolean {
   return SENT_COMMAND_RE.test(text.trim());
 }
 
-export type SentSlashCommand = { skill: InvocableSkill; args: string };
+export type SentSlashCommand = { command: SlashCommand; args: string };
 
 /** Resolve a SENT message against the roster: the whole (trimmed) message must
  *  be `/name [args]` and the name must be a known slug. Roster-backed like the
@@ -108,23 +111,23 @@ export type SentSlashCommand = { skill: InvocableSkill; args: string };
  *  how the server lets an unresolved command fall through as plain text. */
 export function sentSlashCommandOf(
   text: string,
-  roster: InvocableSkill[],
+  roster: SlashCommand[],
 ): SentSlashCommand | null {
   const m = SENT_COMMAND_RE.exec(text.trim());
   if (!m) return null;
   const slug = m[1].toLowerCase();
-  const skill = roster.find((entry) => entry.slug.toLowerCase() === slug);
-  return skill ? { skill, args: (m[2] ?? "").trim() } : null;
+  const command = roster.find((entry) => entry.slug.toLowerCase() === slug);
+  return command ? { command, args: (m[2] ?? "").trim() } : null;
 }
 
 export type SlashCommands = {
   open: boolean;
   loading: boolean;
-  candidates: InvocableSkill[];
+  candidates: SlashCommand[];
   activeCommand: ActiveSlashCommand | null;
   /** The fetched roster (null until loaded). Transcript rendering reads this
    *  to style sent command messages; call `ensureRoster` to populate it. */
-  roster: InvocableSkill[] | null;
+  roster: SlashCommand[] | null;
   /** Trigger the lazy roster fetch without a `/` keystroke (transcript render
    *  path). Idempotent per workspace; a failure resolves to an empty roster. */
   ensureRoster: () => void;
@@ -150,7 +153,7 @@ export function useSlashCommands(params: {
   containerRef: RefObject<HTMLElement | null>;
 }): SlashCommands {
   const { enabled, workspaceId, value, onChange, containerRef } = params;
-  const [roster, setRoster] = useState<InvocableSkill[] | null>(null);
+  const [roster, setRoster] = useState<SlashCommand[] | null>(null);
   const [selectedIndex, setSelectedIndex] = useState(0);
   /** The query the user Escape-dismissed; reopen only once it changes. */
   const [dismissedQuery, setDismissedQuery] = useState<string | null>(null);
@@ -185,13 +188,13 @@ export function useSlashCommands(params: {
   const ensureRoster = useCallback(() => {
     if (requestedWorkspaceRef.current === workspaceKey) return;
     requestedWorkspaceRef.current = workspaceKey;
-    void listInvocableSkills(workspaceId)
-      .then((skills) => {
+    void listSlashCommands(workspaceId)
+      .then((commands) => {
         if (
           mountedRef.current &&
           requestedWorkspaceRef.current === workspaceKey
         ) {
-          setRoster(skills);
+          setRoster(commands);
         }
       })
       .catch(() => {
@@ -349,19 +352,19 @@ export function SlashCommandMenuList(props: {
           {t.slashEmpty}
         </div>
       ) : null}
-      {commands.candidates.map((skill, index) => (
+      {commands.candidates.map((command, index) => (
         <button
-          key={skill.slug}
+          key={`${command.kind}:${command.slug}`}
           type="button"
           role="option"
           aria-selected={index === commands.selectedIndex}
           onMouseDown={(event) => {
             // mousedown, not click — keep the text field focused.
             event.preventDefault();
-            commands.insert(skill.slug);
+            commands.insert(command.slug);
           }}
           onMouseEnter={() => commands.setSelectedIndex(index)}
-          aria-label={format(t.slashInsertAria, { slug: skill.slug })}
+          aria-label={format(t.slashInsertAria, { slug: command.slug })}
           className={cn(
             "flex w-full flex-col gap-0.5 px-2.5 py-2 text-left hover:bg-accent",
             index === commands.selectedIndex && "bg-accent",
@@ -369,15 +372,15 @@ export function SlashCommandMenuList(props: {
         >
           <span className="flex min-w-0 items-baseline gap-2">
             <code className="shrink-0 rounded bg-primary/10 px-1.5 py-0.5 text-xs font-semibold text-primary">
-              /{skill.slug}
+              /{command.slug}
             </code>
             <span className="truncate text-sm font-medium text-foreground">
-              {skill.name}
+              {command.name}
             </span>
           </span>
-          {skill.description ? (
+          {command.description ? (
             <span className="line-clamp-1 text-xs text-muted-foreground">
-              {skill.description}
+              {command.description}
             </span>
           ) : null}
         </button>
@@ -409,15 +412,15 @@ export function SlashCommandIndicator(props: {
         <div className="flex min-w-0 items-center gap-1.5 text-xs">
           <span className="font-medium text-primary">{t.slashActiveLabel}</span>
           <code className="shrink-0 rounded bg-primary/10 px-1 py-0.5 font-semibold text-primary">
-            /{active.skill.slug}
+            /{active.command.slug}
           </code>
           <span className="truncate font-medium text-foreground">
-            {active.skill.name}
+            {active.command.name}
           </span>
         </div>
-        {active.skill.description ? (
+        {active.command.description ? (
           <p className="mt-0.5 line-clamp-1 text-[11px] leading-relaxed text-muted-foreground">
-            {active.skill.description}
+            {active.command.description}
           </p>
         ) : null}
       </div>
@@ -425,8 +428,8 @@ export function SlashCommandIndicator(props: {
         type="button"
         onMouseDown={(event) => event.preventDefault()}
         onClick={props.commands.clearActiveCommand}
-        aria-label={format(t.slashClearAria, { slug: active.skill.slug })}
-        title={format(t.slashClearAria, { slug: active.skill.slug })}
+        aria-label={format(t.slashClearAria, { slug: active.command.slug })}
+        title={format(t.slashClearAria, { slug: active.command.slug })}
         className="inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-primary/10 hover:text-foreground"
       >
         <X className="size-3.5" aria-hidden />

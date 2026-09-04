@@ -256,13 +256,26 @@ export function createDiscordAdapter(options: DiscordAdapterOptions): ChannelAda
     const user = interaction.member?.user ?? interaction.user
     if (!user || !interaction.channel_id) return null
 
-    // Concatenate string option values (e.g. the `/ask <question>` text). Option
-    // type 3 is STRING; we accept any string-valued option for robustness.
-    const text = (interaction.data?.options ?? [])
-      .map((o) => o.value)
-      .filter((v): v is string => typeof v === 'string')
-      .join(' ')
-      .trim()
+    const commandName = interaction.data?.name?.toLowerCase()
+    const values = new Map(
+      (interaction.data?.options ?? [])
+        .filter((o): o is typeof o & { value: string } => typeof o.value === 'string')
+        .map((o) => [o.name, o.value.trim()]),
+    )
+    let text = ''
+    if (commandName === 'ask') {
+      text = values.get('prompt') ?? [...values.values()].join(' ')
+    } else if (commandName === 'skill') {
+      text = ['/skill', values.get('slug'), values.get('arguments')].filter(Boolean).join(' ')
+    } else if (commandName === 'workflow') {
+      const target = values.get('workflow')
+      text = target
+        ? ['/workflow', JSON.stringify(target), values.get('arguments')].filter(Boolean).join(' ')
+        : ''
+    } else if (commandName) {
+      text = [`/${commandName}`, ...values.values()].join(' ')
+    }
+    text = text.trim()
     if (!text) return null
 
     return {

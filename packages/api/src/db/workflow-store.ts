@@ -152,7 +152,18 @@ function rowToWorkflow(row: WorkflowRow): WorkflowRecord {
   }
 }
 
-export function createDbWorkflowStore(): WorkflowStore {
+export type WorkflowStoreHooks = {
+  onChanged?: (userId: string, workspaceId: string) => void
+}
+
+export function createDbWorkflowStore(hooks?: WorkflowStoreHooks): WorkflowStore {
+  const fireChanged = (userId: string, workspaceId: string): void => {
+    try {
+      hooks?.onChanged?.(userId, workspaceId)
+    } catch (err) {
+      console.error(`[workflow-store] onChanged hook failed (workspace=${workspaceId}):`, err)
+    }
+  }
   return {
     async create({
       userId,
@@ -203,6 +214,7 @@ export function createDbWorkflowStore(): WorkflowStore {
       )
       const record = rowToWorkflow(result.rows[0])
       notifyWorkspaceChange(record.workspaceId, 'workflow', 'create', record.id)
+      fireChanged(userId, record.workspaceId)
       return record
     },
     async getById(userId, id) {
@@ -283,6 +295,7 @@ export function createDbWorkflowStore(): WorkflowStore {
       if (!result.rows[0]) return null
       const record = rowToWorkflow(result.rows[0])
       notifyWorkspaceChange(record.workspaceId, 'workflow', 'update', record.id)
+      fireChanged(userId, record.workspaceId)
       return record
     },
     async updateAutoName(userId, id, name) {
@@ -300,7 +313,10 @@ export function createDbWorkflowStore(): WorkflowStore {
           RETURNING workspace_id AS "workspaceId"`,
         [id, name],
       )
-      if (result.rows[0]) notifyWorkspaceChange(result.rows[0].workspaceId, 'workflow', 'update', id)
+      if (result.rows[0]) {
+        notifyWorkspaceChange(result.rows[0].workspaceId, 'workflow', 'update', id)
+        fireChanged(userId, result.rows[0].workspaceId)
+      }
       return (result.rowCount ?? 0) > 0
     },
     async delete(userId, id) {
@@ -309,7 +325,10 @@ export function createDbWorkflowStore(): WorkflowStore {
         `DELETE FROM workflows WHERE id = $1 RETURNING workspace_id AS "workspaceId"`,
         [id],
       )
-      if (result.rows[0]) notifyWorkspaceChange(result.rows[0].workspaceId, 'workflow', 'delete', id)
+      if (result.rows[0]) {
+        notifyWorkspaceChange(result.rows[0].workspaceId, 'workflow', 'delete', id)
+        fireChanged(userId, result.rows[0].workspaceId)
+      }
       return result.rowCount !== null && result.rowCount > 0
     },
     async findByWebhookSlugSystem(slug) {

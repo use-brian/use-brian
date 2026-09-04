@@ -112,6 +112,7 @@ const SENSITIVITIES = new Set(['public', 'internal', 'confidential'])
 
 type SkillRouteOptions = {
   skillStore: SkillStore
+  syncNativeSlashCommands?: (userId: string, workspaceId: string) => Promise<void>
   communityRegistry?: SkillContent[]
   /**
    * V2 workspace-aware store — backs the Brain procedural-primitive surface
@@ -262,12 +263,17 @@ export function skillRoutes({
   connectorGrantStore,
   workspaceSkillFilesStore,
   fetchRawImport,
+  syncNativeSlashCommands,
   githubReaderFor = (pat) => ({
     getFileContents: (owner, repo, path, ref) => getFileContents(pat, owner, repo, path, ref),
   }),
   listReposFor = (pat) => listAffiliatedRepos(pat),
 }: SkillRouteOptions): Router {
   const router = Router()
+  const refreshNativeCommands = (userId: string, workspaceId: string) => {
+    void syncNativeSlashCommands?.(userId, workspaceId).catch((err) =>
+      console.warn('[skills] native command sync failed:', err))
+  }
   // One model call per draft turn — keep a per-user lid on it (plan §10).
   // In-memory is fine: the limit is an abuse backstop, not a billing meter,
   // and the route runs single-service.
@@ -534,6 +540,7 @@ export function skillRoutes({
 
       workspaceSkillFilesStore.notifyChanged(installed.rowId)
 
+      refreshNativeCommands(userId, workspaceId)
       res.status(201).json(projectWorkspaceSkill(installed, enabledIds))
     } catch (err: any) {
       if (installed) {
@@ -869,6 +876,7 @@ export function skillRoutes({
           throw err
         }
         if (validSupportFiles.length > 0) workspaceSkillFilesStore?.notifyChanged(skill.rowId)
+        if (validSupportFiles.length > 0) refreshNativeCommands(userId, workspaceId)
         res.status(201).json(projectWorkspaceSkill(skill, enabledIds))
         return
       }

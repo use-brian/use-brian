@@ -7636,6 +7636,12 @@ export const zh: Dictionary = {
         ingest: "匯入",
       },
       ingestToggle: "將此管道的訊息匯入大腦",
+      slashCommands: {
+        sync: "同步指令",
+        syncing: "正在同步指令…",
+        success: "已同步 {commandCount} 個指令，省略 {omittedCount} 個。",
+        error: "無法同步指令，請再試一次。",
+      },
       routingTitle: "助理路由",
       routingEmpty: "尚未指派助理，此管道目前無法回應對話。",
       defaultSurface: "管道預設",

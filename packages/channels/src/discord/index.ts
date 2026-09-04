@@ -1,7 +1,19 @@
 export { createDiscordAdapter } from './adapter.js'
 export type { DiscordAdapterOptions, DiscordAdapterConfig } from './adapter.js'
-export { createDiscordApi, DiscordApiError, respondToInteraction, InteractionCallbackType } from './api.js'
-export type { DiscordApi, DiscordActionRow, DiscordButton, DiscordInteractionResponse } from './api.js'
+export {
+  createDiscordApi,
+  DiscordApiError,
+  respondToInteraction,
+  InteractionCallbackType,
+  DISCORD_APPLICATION_COMMANDS,
+} from './api.js'
+export type {
+  DiscordApi,
+  DiscordActionRow,
+  DiscordButton,
+  DiscordInteractionResponse,
+  DiscordApplicationCommand,
+} from './api.js'
 export {
   verifyDiscordSignature,
   isPingInteraction,
