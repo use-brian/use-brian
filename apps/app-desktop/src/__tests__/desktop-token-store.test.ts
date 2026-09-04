@@ -6,6 +6,7 @@ import {
   parseStoredTokens,
   encryptTokens,
   encryptBlob,
+  persistTokens,
   decryptTokens,
   decodeAccessTokenExpiryMs,
   serializeRendererTokens,
@@ -125,6 +126,25 @@ describe("[COMP:app-desktop/token-store] encrypt + decrypt", () => {
 
   it("returns null when authenticated decrypt rejects a tampered/foreign blob", () => {
     expect(decryptTokens(tamperingCipher(), Buffer.from("garbage"))).toBeNull();
+  });
+
+  it("persists only when the encrypted session reads back intact", () => {
+    let stored: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+    expect(
+      persistTokens(
+        fakeCipher(),
+        session(),
+        NOW,
+        (blob) => {
+          stored = blob;
+        },
+        () => stored,
+      ),
+    ).toBe(true);
+    expect(persistTokens(fakeCipher(false), session(), NOW, () => {}, () => stored)).toBe(false);
+    expect(
+      persistTokens(fakeCipher(), session(), NOW, () => {}, () => Buffer.from("invalid")),
+    ).toBe(false);
   });
 });
 

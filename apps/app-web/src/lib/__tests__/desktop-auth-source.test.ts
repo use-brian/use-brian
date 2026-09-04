@@ -13,8 +13,11 @@ import {
   desktopSignOut,
   classifyRefreshStatus,
   usesGatewayCredentials,
+  onDesktopUseBrian,
   onDesktopMessageBrian,
   acknowledgeDesktopMessageBrian,
+  isDesktopSiriSetupAvailable,
+  openDesktopSiriSetup,
 } from "../desktop-auth-source";
 
 const realFetch = globalThis.fetch;
@@ -76,6 +79,51 @@ describe("[COMP:app-web/desktop-auth-source] onDesktopMessageBrian", () => {
     setBridge({ signIn: () => {}, acknowledgeMessageBrian });
     acknowledgeDesktopMessageBrian();
     expect(acknowledgeMessageBrian).toHaveBeenCalledOnce();
+  });
+});
+
+describe("[COMP:app-web/desktop-auth-source] onDesktopUseBrian", () => {
+  it("is a no-op outside Electron", () => {
+    expect(onDesktopUseBrian(() => {})).toBeTypeOf("function");
+  });
+
+  it("subscribes through the shell bridge and returns its cleanup", () => {
+    const cleanup = vi.fn();
+    const subscribe = vi.fn(() => cleanup);
+    const callback = vi.fn();
+    setBridge({ signIn: () => {}, onUseBrian: subscribe });
+
+    expect(onDesktopUseBrian(callback)).toBe(cleanup);
+    expect(subscribe).toHaveBeenCalledWith(callback);
+  });
+});
+
+describe("[COMP:app-web/siri-settings] desktop Siri setup bridge", () => {
+  it("is hidden outside a current macOS Electron shell", () => {
+    expect(isDesktopSiriSetupAvailable()).toBe(false);
+    setBridge({ signIn: () => {}, platform: "win32", openSiriSetup: vi.fn() });
+    expect(isDesktopSiriSetupAvailable()).toBe(false);
+    setBridge({ signIn: () => {}, platform: "darwin" });
+    expect(isDesktopSiriSetupAvailable()).toBe(false);
+  });
+
+  it("forwards setup only through the macOS bridge", async () => {
+    const openSiriSetup = vi.fn().mockResolvedValue(true);
+    setBridge({ signIn: () => {}, platform: "darwin", openSiriSetup });
+
+    expect(isDesktopSiriSetupAvailable()).toBe(true);
+    expect(await openDesktopSiriSetup()).toBe(true);
+    expect(openSiriSetup).toHaveBeenCalledOnce();
+  });
+
+  it("returns false when the shell cannot open Shortcuts", async () => {
+    setBridge({
+      signIn: () => {},
+      platform: "darwin",
+      openSiriSetup: vi.fn().mockRejectedValue(new Error("unavailable")),
+    });
+
+    expect(await openDesktopSiriSetup()).toBe(false);
   });
 });
 
@@ -151,6 +199,25 @@ describe("[COMP:app-web/desktop-auth-source] desktopAuthSource", () => {
     });
     const [, init] = (globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(JSON.parse(init.body)).toEqual({ refreshToken: "rt" });
+    expect(init.credentials).toBeUndefined();
+  });
+
+  it("includes gateway cookies when refreshing a local or self-hosted target", async () => {
+    setBridge({
+      signIn: () => {},
+      gatewayCredentials: true,
+      getAccessToken: () => "old",
+      getRefreshToken: () => "rt",
+    });
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ accessToken: "newA", refreshToken: "newR" }),
+    }) as unknown as typeof fetch;
+
+    expect(await desktopAuthSource.refresh()).toEqual({ kind: "ok", token: "newA" });
+    const [, init] = (globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(init.credentials).toBe("include");
   });
 
   it("refresh clears and is unauthenticated on a 401 (dead session)", async () => {

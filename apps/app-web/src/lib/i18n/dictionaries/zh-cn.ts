@@ -1515,6 +1515,12 @@ export const zhCN: Dictionary = {
       regional: "地区设置",
       timezone: "时区",
       language: "语言",
+      siriTitle: "Siri",
+      siriLabel: "使用 Siri 运行 Use Brian",
+      siriDescription: "安装预配置的 macOS 快捷指令，询问你的要求并发送给 Brian。",
+      siriSetupHint:
+        "检查“Use Brian”操作，然后在“快捷指令”中点按“添加快捷指令”。",
+      siriSetup: "设置 Siri",
     },
     account: {
       profile: "个人数据",

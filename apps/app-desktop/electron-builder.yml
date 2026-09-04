@@ -4,6 +4,8 @@ productName: Use Brian
 # fixed "latest" URL (see apps/web/src/lib/desktop-download.ts and
 # docs/architecture/features/app-desktop.md → "Distribution & download").
 artifactName: usebrian.${ext}
+afterPack: scripts/sign-siri-extension.mjs
+afterSign: scripts/verify-siri-extension.mjs
 directories:
   output: release
   buildResources: build
@@ -24,6 +26,14 @@ mac:
   gatekeeperAssess: false
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist
+  signIgnore:
+    - "Contents/Extensions/Brian Siri\\.appex"
+  extraFiles:
+    - from: native/siri-companion/build/Release/Brian Siri.appex
+      to: Extensions/Brian Siri.appex
+  extraResources:
+    - from: native/siri-companion/Use Brian.shortcut
+      to: siri/Use Brian.shortcut
   # Dock live recording: macOS shows this string on the one-time microphone
   # consent prompt (askForMediaAccess). Without the key the prompt never
   # appears and mic capture silently fails under the hardened runtime.

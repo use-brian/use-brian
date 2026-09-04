@@ -184,8 +184,12 @@ describe("[COMP:app-desktop/menu-template] buildMenuTemplate", () => {
 });
 
 describe("[COMP:app-desktop/menu-template] target indicator + switch (§2.1/§2.3)", () => {
-  const CLOUD = { kind: "cloud" as const, label: "Use Brian Cloud" };
-  const LOCAL = { kind: "local" as const, label: "Local Brain (localhost:3003)" };
+  const CLOUD = { kind: "cloud" as const, label: "Use Brian Cloud", auth: "pkce" as const };
+  const LOCAL = {
+    kind: "local" as const,
+    label: "Local Brain (localhost:3003)",
+    auth: "local-session" as const,
+  };
 
   it("omits every target item when no target is passed (pre-dual-target menu)", () => {
     for (const isMac of [true, false]) {
@@ -214,6 +218,15 @@ describe("[COMP:app-desktop/menu-template] target indicator + switch (§2.1/§2.
       const indicator = items.find((i) => i.label === "Target: Local Brain (localhost:3003)");
       expect(indicator?.enabled).toBe(false);
       expect(items.find((i) => i.label === "Switch to Use Brian Cloud")).toBeDefined();
+    }
+  });
+
+  it("self-host PKCE target keeps Sign In/Out", () => {
+    const target = { kind: "local" as const, label: "Team Brain", auth: "pkce" as const };
+    for (const isMac of [true, false]) {
+      const items = allItems(buildMenuTemplate(opts({ isMac, target }), handlers));
+      expect(items.find((i) => i.label === "Sign In")).toBeDefined();
+      expect(items.find((i) => i.label === "Sign Out")).toBeDefined();
     }
   });
 

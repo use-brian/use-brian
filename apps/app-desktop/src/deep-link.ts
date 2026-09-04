@@ -9,6 +9,7 @@
  *   usebrian://open?path=/w/<ws>/p/<page>  -> ${appUrl}/w/<ws>/p/<page>
  *   usebrian://capture                      -> quickCaptureUrl(appUrl)
  *   usebrian://record                       -> recordTargetUrl(appUrl)
+ *   usebrian://use?prompt=<text>            -> handled by the Siri bridge
  *
  * Spec: docs/architecture/features/app-desktop.md → "deep-link.ts"
  * [COMP:app-desktop/deep-link]
@@ -19,6 +20,26 @@ import { quickCaptureUrl, recordTargetUrl } from "./quick-capture.js";
 interface DeepLinkConfig {
   readonly appUrl: string;
   readonly protocolScheme: string;
+}
+
+export const MAX_SIRI_PROMPT_LENGTH = 8_000;
+
+/** Return a bounded Siri prompt only from the dedicated `use` deep link. */
+export function parseUseBrianDeepLink(
+  rawUrl: string,
+  protocolScheme: string,
+): string | null {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== `${protocolScheme}:` || url.hostname !== "use")
+    return null;
+  const prompt = url.searchParams.get("prompt")?.trim();
+  if (!prompt || prompt.length > MAX_SIRI_PROMPT_LENGTH) return null;
+  return prompt;
 }
 
 /**

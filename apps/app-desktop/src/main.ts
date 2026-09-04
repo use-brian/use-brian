@@ -50,7 +50,7 @@ import {
 // main process. Default-import the module object and destructure instead.
 import electronUpdater from "electron-updater";
 
-import { resolveConfig } from "./config.js";
+import { bundledDefaultForRuntime, resolveConfig } from "./config.js";
 import {
   AWAKE_BRIAN_FILE_NAME,
   BRIAN_POSITION_FILE_NAME,
@@ -95,6 +95,8 @@ import {
   parseRefreshBounce,
   decideLoadFailureAction,
   shouldAttemptLocalMint,
+  shouldMintLocalSessionBeforeLoad,
+  shouldShowSignInLandingOnLaunch,
 } from "./window-policy.js";
 import {
   isAllowedGatewayNavigation,
@@ -103,11 +105,16 @@ import {
   probeExpectedJson,
   type GatewayProbeFetch,
 } from "./gateway-auth.js";
-import { resolveDeepLink } from "./deep-link.js";
+import { parseUseBrianDeepLink, resolveDeepLink } from "./deep-link.js";
+import {
+  bridgeBundledCorsHeaders,
+  shouldBridgeBundledCors,
+} from "./bundled-cors.js";
 import { quickCaptureUrl, recordTargetUrl } from "./quick-capture.js";
 import {
   companionClickFollowsChatBlur,
   desktopChatRoute,
+  nativeUseBrianTarget,
   parseCompanionState,
   workspaceIdFromDesktopRoute,
   type CompanionState,
@@ -169,9 +176,9 @@ import {
 import {
   type TokenCipher,
   type StoredTokens,
-  encryptTokens,
   encryptBlob,
   decryptTokens,
+  persistTokens,
   serializeRendererTokens,
 } from "./desktop-token-store.js";
 import {
@@ -203,6 +210,19 @@ import {
 const { autoUpdater } = electronUpdater;
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const SIRI_SHORTCUT_TEMPLATE_NAME = "Use Brian.shortcut";
+
+function siriShortcutTemplatePath(): string {
+  return app.isPackaged
+    ? join(process.resourcesPath, "siri", SIRI_SHORTCUT_TEMPLATE_NAME)
+    : join(
+        __dirname,
+        "..",
+        "native",
+        "siri-companion",
+        SIRI_SHORTCUT_TEMPLATE_NAME,
+      );
+}
 
 /**
  * The persisted target record (§2.1 of docs/plans/consumer-local-experience.md;
@@ -226,7 +246,11 @@ function readPersistedTargetRaw(): string | null {
 // Release binaries always prefer the installed renderer. Development keeps
 // the remote shell default for fast iteration; USEBRIAN_BUNDLED explicitly
 // overrides either direction for QA/compatibility.
-const cfg = resolveConfig(process.env, readPersistedTargetRaw(), app.isPackaged);
+const cfg = resolveConfig(
+  process.env,
+  readPersistedTargetRaw(),
+  bundledDefaultForRuntime(app.isPackaged),
+);
 const isDev = !app.isPackaged;
 
 const PRELOAD_PATH = join(__dirname, "preload.cjs");
@@ -266,6 +290,7 @@ let desktopChatWindow: BrowserWindow | null = null;
 let awakeBrianBlockerId: number | null = null;
 let keepBrianAwake = false;
 let lastWorkspaceId: string | null = null;
+let lastAssistantId: string | null = null;
 let desktopChatBlurredAt = 0;
 let brianPetPosition: BrianPosition | null = null;
 let brianPetDragOffset: BrianPosition | null = null;
@@ -285,6 +310,14 @@ let connectorServer: Server | null = null;
 let connectorServerTimer: ReturnType<typeof setTimeout> | null = null;
 /** A deep link / auth callback delivered before the window exists (macOS cold-start). */
 let pendingUrl: string | null = null;
+/**
+ * Latest spoken Siri payload, kept out of web URLs and consumed once by the
+ * main renderer. A newer invocation while the app is opening supersedes a
+ * request that has not reached chat yet.
+ */
+let pendingUseBrianPrompt: string | null = null;
+/** A Nearby Use Brian request waiting for trusted workspace context. */
+let pendingNearbyUseBrian = false;
 /** Renderer-picked capture source for the NEXT display-media grant (one-shot). */
 let requestedCaptureSourceId: string | null = null;
 /** The isolated, shared-session browser used for an interactive deployment gateway. */
@@ -322,13 +355,14 @@ try {
 }
 
 /** Electron-session transport: HttpOnly deployment-gateway cookies stay on-device. */
-const gatewayProbeFetch: GatewayProbeFetch = (input, init) => {
+function authenticatedSessionFetch(input: string, init: RequestInit): Promise<Response> {
   const authorization = accessAuthorizationForUrl(activeAccessGrant, input);
-  if (!authorization) return session.defaultSession.fetch(input, init);
   const headers = new Headers(init.headers);
-  headers.set("Authorization", authorization);
-  return session.defaultSession.fetch(input, { ...init, headers });
-};
+  if (authorization) headers.set("Authorization", authorization);
+  return session.defaultSession.fetch(input, { ...init, headers, credentials: "include" });
+}
+
+const gatewayProbeFetch: GatewayProbeFetch = authenticatedSessionFetch;
 
 /**
  * Authenticate an arbitrary HTTP gateway without knowing its provider, domains,
@@ -463,7 +497,7 @@ const DESKTOP_CHROME_SAFETY_CSS = `
   }
 `;
 
-function createWindow(): BrowserWindow {
+function createWindow(initialLoad: { useBrian?: boolean } = {}): BrowserWindow {
   const win = new BrowserWindow({
     width: 1280,
     height: 860,
@@ -592,8 +626,18 @@ function createWindow(): BrowserWindow {
     void win.webContents.loadFile(SIGNIN_PAGE, {
       query: { mode: "local-setup", url: cfg.appUrl, reason: "access" },
     });
+  } else if (
+    shouldShowSignInLandingOnLaunch({
+      bundled: cfg.bundled,
+      targetAuth: cfg.targetAuth,
+      hasStoredTokens: readStoredTokens() !== null,
+    })
+  ) {
+    // The SPA's anonymous state is defensive only. Signed-out packaged launches
+    // use the same branded native landing as the existing desktop auth flow.
+    void win.webContents.loadFile(SIGNIN_PAGE);
   } else {
-    void loadApp(win);
+    void loadApp(win, initialLoad);
   }
   win.on("closed", () => {
     mainWindow = null;
@@ -627,24 +671,56 @@ function rememberWorkspace(win: BrowserWindow): void {
   try {
     const current = new URL(win.webContents.getURL());
     const route = current.protocol === "file:" ? current.hash.slice(1) : current.pathname;
-    lastWorkspaceId = workspaceIdFromDesktopRoute(route) ?? lastWorkspaceId;
+    const workspaceId = workspaceIdFromDesktopRoute(route);
+    if (workspaceId && workspaceId !== lastWorkspaceId) {
+      lastWorkspaceId = workspaceId;
+      lastAssistantId = null;
+    }
   } catch {
     // A transient blank or malformed navigation cannot replace the last target.
   }
 }
 
-function messageBrian(): void {
-  if (!lastWorkspaceId) return;
+function notifyUseBrian(win: BrowserWindow): void {
+  if (!win.isDestroyed() && !win.webContents.isDestroyed()) {
+    win.webContents.send("Use Brian:use-brian");
+  }
+}
+
+function messageBrian(opts: { forceOpen?: boolean; useBrian?: boolean } = {}): void {
+  if (!lastWorkspaceId) {
+    if (opts.useBrian) pendingNearbyUseBrian = true;
+    return;
+  }
   if (desktopChatWindow && !desktopChatWindow.isDestroyed()) {
-    if (desktopChatWindow.isVisible()) {
+    if (desktopChatWindow.isVisible() && !opts.forceOpen) {
       desktopChatWindow.hide();
       return;
     }
-    if (companionClickFollowsChatBlur(Date.now(), desktopChatBlurredAt)) return;
+    if (
+      !opts.forceOpen &&
+      companionClickFollowsChatBlur(Date.now(), desktopChatBlurredAt)
+    ) {
+      return;
+    }
     positionDesktopChat();
     desktopChatWindow.show();
     desktopChatWindow.focus();
     desktopChatWindow.webContents.focus();
+    if (opts.useBrian) {
+      notifyUseBrian(desktopChatWindow);
+      if (desktopChatWindow.webContents.isLoadingMainFrame()) {
+        desktopChatWindow.webContents.once("did-finish-load", () => {
+          if (
+            desktopChatWindow &&
+            !desktopChatWindow.isDestroyed() &&
+            pendingUseBrianPrompt !== null
+          ) {
+            notifyUseBrian(desktopChatWindow);
+          }
+        });
+      }
+    }
     return;
   }
 
@@ -690,6 +766,7 @@ function messageBrian(): void {
   win.webContents.on("did-finish-load", () => {
     if (!win.webContents.isDestroyed()) {
       void win.webContents.insertCSS(DESKTOP_CHROME_SAFETY_CSS);
+      if (opts.useBrian && pendingUseBrianPrompt !== null) notifyUseBrian(win);
     }
   });
   win.webContents.on("before-input-event", (event, input) => {
@@ -726,7 +803,9 @@ function messageBrian(): void {
     publishCompanionState({ phase: "idle" });
   });
 
-  void loadApp(win, { route: desktopChatRoute(lastWorkspaceId) }).catch((error) => {
+  void loadApp(win, {
+    route: desktopChatRoute(lastWorkspaceId, lastAssistantId ?? undefined),
+  }).catch((error) => {
     console.warn("Failed to open the Brian chat window:", error);
     if (!win.isDestroyed()) win.close();
   });
@@ -858,12 +937,23 @@ function stopAwakeBrianBlocker(): void {
   awakeBrianBlockerId = null;
 }
 
+function publishBrianNearbyState(): void {
+  if (
+    mainWindow &&
+    !mainWindow.isDestroyed() &&
+    !mainWindow.webContents.isDestroyed()
+  ) {
+    mainWindow.webContents.send("Use Brian:brian-nearby-state", keepBrianAwake);
+  }
+}
+
 function syncAwakeBrianMode(): void {
   if (keepBrianAwake) {
     if (awakeBrianBlockerId === null || !powerSaveBlocker.isStarted(awakeBrianBlockerId)) {
       awakeBrianBlockerId = powerSaveBlocker.start("prevent-app-suspension");
     }
     showBrianPet();
+    publishBrianNearbyState();
     return;
   }
 
@@ -872,6 +962,20 @@ function syncAwakeBrianMode(): void {
   brianPetWindow = null;
   if (desktopChatWindow && !desktopChatWindow.isDestroyed()) desktopChatWindow.close();
   desktopChatWindow = null;
+  publishBrianNearbyState();
+}
+
+function useBrianInMainWindow(): void {
+  pendingNearbyUseBrian = false;
+  const needsWindow = !mainWindow || mainWindow.isDestroyed();
+  const win = ensureWindow({ useBrian: true });
+  focusWindow(win);
+  if (needsWindow) return;
+  if (isAppPage(win) && !win.webContents.isLoadingMainFrame()) {
+    notifyUseBrian(win);
+    return;
+  }
+  void loadApp(win, { useBrian: true });
 }
 
 function toggleKeepBrianAwake(): void {
@@ -890,6 +994,13 @@ function toggleKeepBrianAwake(): void {
   }
   keepBrianAwake = next;
   syncAwakeBrianMode();
+  if (
+    !keepBrianAwake &&
+    pendingNearbyUseBrian &&
+    pendingUseBrianPrompt !== null
+  ) {
+    useBrianInMainWindow();
+  }
   refreshAppMenu();
   refreshTrayMenu();
 }
@@ -1335,6 +1446,9 @@ function persistTargetAndRelaunch(
 ): void {
   try {
     writeFileSync(targetFile(), serializePersistedTarget(kind, appUrl, apiUrl, auth));
+    // Bundled bearer tokens are target-specific. Never send a cloud token to a
+    // local deployment (or vice versa) after switching and relaunching.
+    if (cfg.bundled) clearStoredTokens();
   } catch (err) {
     dialog.showErrorBox("Switch failed", `Could not save the target: ${String(err)}`);
     return;
@@ -1362,6 +1476,58 @@ function rememberedLocalAuth(): TargetAuth {
 }
 
 let lastLocalMintAt: number | null = null;
+let bundledLocalMintInFlight: Promise<boolean> | null = null;
+
+/** Establish the local-owner bearer before a file renderer can make API calls. */
+function ensureBundledLocalSession(win: BrowserWindow): Promise<boolean> {
+  if (
+    !shouldMintLocalSessionBeforeLoad({
+      bundled: cfg.bundled,
+      targetAuth: cfg.targetAuth,
+      hasStoredTokens: readStoredTokens() !== null,
+    })
+  ) {
+    return Promise.resolve(true);
+  }
+  if (bundledLocalMintInFlight) return bundledLocalMintInFlight;
+
+  const run = (async (): Promise<boolean> => {
+    const now = Date.now();
+    if (!shouldAttemptLocalMint(lastLocalMintAt, now)) {
+      showLocalDown(win, "auth");
+      return false;
+    }
+    lastLocalMintAt = now;
+    try {
+      const target = await validateLocalTarget(cfg.appUrl, cfg.apiUrl);
+      if (target.kind !== "ready") {
+        showLocalDown(win, target.kind === "cancelled" ? "gateway-auth" : "unreachable");
+        return false;
+      }
+      const result = await mintLocalDesktopSession(target.value.apiUrl, gatewayProbeFetch);
+      if (!persistSession(result)) {
+        clearStoredTokens();
+        showLocalDown(win, "auth");
+        return false;
+      }
+      return true;
+    } catch (err) {
+      console.warn("Local session mint failed:", err);
+      showLocalDown(
+        win,
+        err instanceof Error && /HTTP (?:400|401|403)/.test(err.message)
+          ? "auth"
+          : "unreachable",
+      );
+      return false;
+    }
+  })();
+  bundledLocalMintInFlight = run;
+  void run.finally(() => {
+    if (bundledLocalMintInFlight === run) bundledLocalMintInFlight = null;
+  });
+  return run;
+}
 
 /**
  * Mint the OSS local-owner session. Bundled mode calls the selected API and
@@ -1369,8 +1535,14 @@ let lastLocalMintAt: number | null = null;
  * cookie trigger. Cooldown-guarded: an edition/gate mismatch that keeps
  * returning to login cannot loop indefinitely.
  */
-async function mintLocalSession(): Promise<void> {
-  const win = ensureWindow();
+async function mintLocalSession(win: BrowserWindow = ensureWindow()): Promise<void> {
+  if (cfg.bundled) {
+    if (await ensureBundledLocalSession(win)) {
+      await loadApp(win);
+      focusWindow(win);
+    }
+    return;
+  }
   const now = Date.now();
   if (!shouldAttemptLocalMint(lastLocalMintAt, now)) {
     showLocalDown(win, "auth");
@@ -1378,16 +1550,6 @@ async function mintLocalSession(): Promise<void> {
   }
   lastLocalMintAt = now;
   try {
-    if (cfg.bundled) {
-      // The installed renderer has a file:// origin, so the Next trigger's
-      // cookie write cannot authenticate it. Mint the same local-owner pair
-      // directly from the selected API and persist it in safeStorage.
-      const result = await mintLocalDesktopSession(cfg.apiUrl, gatewayProbeFetch);
-      persistSession(result);
-      await loadApp(win);
-      focusWindow(win);
-      return;
-    }
     await win.webContents.loadURL(localMintUrl(cfg.appUrl));
   } catch (err) {
     console.warn("Local session mint failed:", err);
@@ -1448,9 +1610,9 @@ function switchTargetFromMenu(): void {
 }
 
 /** Return the live window, recreating it if it was closed (tray app model). */
-function ensureWindow(): BrowserWindow {
+function ensureWindow(initialLoad: { useBrian?: boolean } = {}): BrowserWindow {
   if (!mainWindow || mainWindow.isDestroyed()) {
-    mainWindow = createWindow();
+    mainWindow = createWindow(initialLoad);
   }
   return mainWindow;
 }
@@ -1487,15 +1649,24 @@ function bundledAvailable(): boolean {
  */
 async function loadApp(
   win: BrowserWindow,
-  opts: { capture?: boolean; record?: boolean; route?: string } = {},
+  opts: {
+    capture?: boolean;
+    record?: boolean;
+    route?: string;
+    useBrian?: boolean;
+  } = {},
 ): Promise<void> {
+  const hasUseBrianPrompt =
+    opts.useBrian === true || pendingUseBrianPrompt !== null;
   if (bundledAvailable()) {
+    if (!(await ensureBundledLocalSession(win))) return;
     // The bundled renderer loads from file://, so it has no env: hand it the API
     // base (and the capture/record intent) via the query string. The client reads
     // `?api=` to know which backend to call with its Bearer token.
     const query: Record<string, string> = { api: cfg.apiUrl };
     if (opts.capture) query.capture = "1";
     if (opts.record) query.record = "1";
+    if (hasUseBrianPrompt) query.useBrian = "1";
     await win.webContents.loadFile(BUNDLE_INDEX, {
       query,
       ...(opts.route ? { hash: opts.route } : {}),
@@ -1509,15 +1680,12 @@ async function loadApp(
       return;
     }
   }
-  await win.webContents.loadURL(
-    opts.capture
-      ? quickCaptureUrl(cfg.appUrl)
-      : opts.record
-        ? recordTargetUrl(cfg.appUrl)
-        : opts.route
-          ? new URL(opts.route, cfg.appUrl).toString()
-          : cfg.appUrl,
-  );
+  const targetUrl = new URL(opts.route ?? cfg.appUrl, cfg.appUrl);
+  if (opts.capture) targetUrl.searchParams.set("capture", "1");
+  else if (opts.record) targetUrl.searchParams.set("record", "1");
+  else if (!opts.route && hasUseBrianPrompt)
+    targetUrl.searchParams.set("useBrian", "1");
+  await win.webContents.loadURL(targetUrl.toString());
 }
 
 function summonAndCapture(): void {
@@ -1608,9 +1776,15 @@ function writeTokenBlob(blob: Buffer | null): void {
   writeFileSync(tokensFile(), blob);
 }
 
-/** Encrypt + persist a freshly-exchanged session (the sign-in code-exchange path). */
-function persistSession(sess: DesktopSession): void {
-  writeTokenBlob(encryptTokens(tokenCipher, sess, Date.now()));
+/** Encrypt, persist, and verify a freshly-exchanged session before app load. */
+function persistSession(sess: DesktopSession): boolean {
+  return persistTokens(
+    tokenCipher,
+    sess,
+    Date.now(),
+    (blob) => writeFileSync(tokensFile(), blob),
+    () => readFileSync(tokensFile()),
+  );
 }
 
 /** Persist tokens handed back by the renderer's client-side refresh (validated). */
@@ -2017,10 +2191,18 @@ async function completeSignIn(code: string): Promise<void> {
   clearPersistedVerifier();
   closeAuthServer(); // idempotent — the loopback path already closed it
   try {
-    const result = await exchangeCode(cfg.apiUrl, code, verifier);
+    const result = await exchangeCode(
+      cfg.apiUrl,
+      code,
+      verifier,
+      cfg.target === "local" ? authenticatedSessionFetch : undefined,
+    );
     if (cfg.bundled) {
       // Bundled (Bearer tokens, not cookies) stays single-account — add replaces.
-      persistSession(result);
+      if (!persistSession(result)) {
+        clearStoredTokens();
+        throw new Error("Use Brian could not securely store your session. Please try again.");
+      }
     } else {
       // Add-account: stash the active account into the saved-account store before
       // its canonical trio is overwritten with the new account. At capacity we
@@ -2243,8 +2425,9 @@ async function signOut(): Promise<void> {
     // Bundled mode is single-account (Bearer tokens, no saved-account store).
     clearStoredTokens();
     const win = ensureWindow();
+    if (cfg.targetAuth === "local-session") await loadApp(win);
+    else await win.webContents.loadFile(SIGNIN_PAGE);
     focusWindow(win);
-    await loadApp(win);
     return;
   }
 
@@ -2508,9 +2691,15 @@ async function resumeAfterRefresh(
   promptSignIn();
 }
 
-/** Keep the thin shell's session alive across access-token expiries. */
-function startSessionKeepalive(): void {
-  if (cfg.bundled) return; // bundled mode: the renderer owns Bearer-token refresh
+/**
+ * Keep the thin shell's session alive across access-token expiries.
+ *
+ * The returned promise is the launch tick. Startup awaits it before the first
+ * app navigation so the renderer cannot issue a mutation with an expired token
+ * while a healthy refresh is still rotating the cookie jar.
+ */
+function startSessionKeepalive(): Promise<void> {
+  if (cfg.bundled) return Promise.resolve(); // renderer owns Bearer-token refresh
   const tick = async (): Promise<void> => {
     try {
       if (!(await readJarCookie("refresh_token"))) return; // signed out — nothing to keep alive
@@ -2532,10 +2721,8 @@ function startSessionKeepalive(): void {
   setInterval(() => void tick(), SESSION_REFRESH_CHECK_INTERVAL_MS);
   // Timers don't run during sleep, so a wake can land past the token's exp.
   powerMonitor.on("resume", () => void tick());
-  // Heal a stale session at launch. Runs concurrently with the first load —
-  // if the load's proxy bounce gets intercepted, both paths share the same
-  // single-flight refresh.
-  void tick();
+  // Heal a stale session at launch before exposing an interactive renderer.
+  return tick();
 }
 
 // ── Auto-update (shell binary) ─────────────────────────────────
@@ -2659,6 +2846,23 @@ function startAutoUpdate(): void {
 function handleIncomingUrl(rawUrl: string): void {
   if (rawUrl === `${cfg.protocolScheme}://firefox-control`) {
     void startFirefoxForControl();
+    return;
+  }
+  const useBrianPrompt = parseUseBrianDeepLink(rawUrl, cfg.protocolScheme);
+  if (useBrianPrompt) {
+    pendingUseBrianPrompt = useBrianPrompt;
+    switch (nativeUseBrianTarget(keepBrianAwake, lastWorkspaceId)) {
+      case "nearby":
+        pendingNearbyUseBrian = false;
+        messageBrian({ forceOpen: true, useBrian: true });
+        break;
+      case "nearby-pending":
+        pendingNearbyUseBrian = true;
+        break;
+      case "main":
+        useBrianInMainWindow();
+        break;
+    }
     return;
   }
   const auth = parseAuthCallback(rawUrl, cfg.protocolScheme);
@@ -2791,7 +2995,7 @@ function refreshAppMenu(): void {
       onToggleKeepAwake: toggleKeepBrianAwake,
       isDev,
       update: updateMenuItem(),
-      target: { kind: cfg.target, label: cfg.targetLabel },
+      target: { kind: cfg.target, label: cfg.targetLabel, auth: cfg.targetAuth },
       // Packaged macOS only: Windows has the NSIS uninstaller; a dev run has
       // no bundle (and its exe lives in node_modules/electron).
       uninstall: process.platform === "darwin" && app.isPackaged,
@@ -2819,8 +3023,9 @@ function buildTrayMenu(): Menu {
     },
     { label: "Start Firefox for My Browser…", click: () => void startFirefoxForControl() },
   ];
-  // A local target has no login — the tray mirrors the app menu (§2.3).
-  if (cfg.target !== "local") {
+  // Local-owner deployments mint automatically; self-host PKCE still exposes
+  // the standard sign-in controls.
+  if (cfg.targetAuth === "pkce") {
     template.push(
       { type: "separator" },
       { label: "Sign In", click: () => startSignIn() },
@@ -2883,9 +3088,12 @@ if (!gotLock) {
 } else {
   pendingUrl = appUrlFromArgv(process.argv);
   app.on("second-instance", (_event, argv) => {
-    focusWindow(ensureWindow());
     const url = appUrlFromArgv(argv);
-    if (url) handleIncomingUrl(url);
+    if (url) {
+      handleIncomingUrl(url);
+      return;
+    }
+    focusWindow(ensureWindow());
   });
 
   // macOS delivers deep links + the auth callback via open-url; before the
@@ -2898,6 +3106,38 @@ if (!gotLock) {
 
   // The sign-in landing's button asks the main process to start the flow.
   ipcMain.on("Use Brian:sign-in", () => startSignIn());
+  // macOS does not install an app-owned Siri phrase automatically. Settings
+  // opens the fixed Apple-signed shortcut template bundled with this app; only
+  // the trusted main renderer may invoke it, and Shortcuts owns confirmation.
+  ipcMain.handle("Use Brian:open-siri-setup", async (event) => {
+    if (
+      process.platform !== "darwin" ||
+      !mainWindow ||
+      mainWindow.isDestroyed() ||
+      event.sender.id !== mainWindow.webContents.id
+    ) {
+      return false;
+    }
+    try {
+      const templatePath = siriShortcutTemplatePath();
+      if (!existsSync(templatePath)) {
+        console.warn("Could not find the bundled Use Brian shortcut template.");
+        return false;
+      }
+      const errorMessage = await shell.openPath(templatePath);
+      if (errorMessage) {
+        console.warn(
+          "Could not open the Use Brian shortcut template:",
+          errorMessage,
+        );
+        return false;
+      }
+      return true;
+    } catch (err) {
+      console.warn("Could not open Shortcuts for Siri setup:", err);
+      return false;
+    }
+  });
   ipcMain.on("Use Brian:message-brian", (event) => {
     if (
       brianPetWindow &&
@@ -2958,6 +3198,70 @@ if (!gotLock) {
     const state = parseCompanionState(rawState);
     if (state) publishCompanionState(state);
   });
+  ipcMain.on("Use Brian:take-use-brian-prompt", (event) => {
+    const trustedSender =
+      (!!mainWindow &&
+        !mainWindow.isDestroyed() &&
+        event.sender.id === mainWindow.webContents.id) ||
+      (!!desktopChatWindow &&
+        !desktopChatWindow.isDestroyed() &&
+        event.sender.id === desktopChatWindow.webContents.id);
+    event.returnValue = trustedSender ? pendingUseBrianPrompt : null;
+    if (trustedSender) pendingUseBrianPrompt = null;
+  });
+  ipcMain.on("Use Brian:get-brian-nearby-state", (event) => {
+    event.returnValue =
+      !!mainWindow &&
+      !mainWindow.isDestroyed() &&
+      event.sender.id === mainWindow.webContents.id &&
+      keepBrianAwake;
+  });
+  ipcMain.on(
+    "Use Brian:set-companion-context",
+    (event, workspaceId: unknown, assistantId: unknown) => {
+      if (
+        !mainWindow ||
+        mainWindow.isDestroyed() ||
+        event.sender.id !== mainWindow.webContents.id ||
+        typeof workspaceId !== "string" ||
+        typeof assistantId !== "string" ||
+        !workspaceId ||
+        !assistantId
+      ) {
+        return;
+      }
+      const changed = workspaceId !== lastWorkspaceId || assistantId !== lastAssistantId;
+      lastWorkspaceId = workspaceId;
+      lastAssistantId = assistantId;
+      if (
+        pendingNearbyUseBrian &&
+        keepBrianAwake &&
+        pendingUseBrianPrompt !== null
+      ) {
+        pendingNearbyUseBrian = false;
+        if (changed && desktopChatWindow && !desktopChatWindow.isDestroyed()) {
+          positionDesktopChat();
+          desktopChatWindow.show();
+          desktopChatWindow.focus();
+          void loadApp(desktopChatWindow, {
+            route: desktopChatRoute(workspaceId, assistantId),
+          }).then(() => {
+            if (desktopChatWindow && !desktopChatWindow.isDestroyed()) {
+              notifyUseBrian(desktopChatWindow);
+            }
+          });
+          return;
+        }
+        messageBrian({ forceOpen: true, useBrian: true });
+        return;
+      }
+      if (changed && desktopChatWindow && !desktopChatWindow.isDestroyed()) {
+        void loadApp(desktopChatWindow, {
+          route: desktopChatRoute(workspaceId, assistantId),
+        });
+      }
+    },
+  );
   // Dock live recording: show/close the floating overlay with the capture.
   ipcMain.on("Use Brian:recording-state", (_event, on: unknown) => {
     if (on === true) showRecorderOverlay();
@@ -3156,7 +3460,7 @@ if (!gotLock) {
     await prepareAccessForStartup();
     installAccessRequestHook();
     startAccessGrantKeepalive();
-    startSessionKeepalive();
+    await startSessionKeepalive();
 
     // Chromium-level media (mic) permission: grant to the app's own origin
     // only, so the dock recorder's `getUserMedia` never shows a browser-style
@@ -3173,6 +3477,25 @@ if (!gotLock) {
         return;
       }
       callback(true);
+    });
+
+    // A file:// renderer has the opaque Origin `null`. Keep webSecurity enabled,
+    // but bridge CORS only in bundled mode and only for the configured API. A
+    // preflight may not carry a webContentsId, so that field is not a safe gate.
+    session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+      if (
+        shouldBridgeBundledCors({
+          bundled: cfg.bundled,
+          requestUrl: details.url,
+          apiUrl: cfg.apiUrl,
+        })
+      ) {
+        callback({
+          responseHeaders: bridgeBundledCorsHeaders(details.responseHeaders),
+        });
+        return;
+      }
+      callback({});
     });
 
     // The gateway window is an authentication surface, never a download or app

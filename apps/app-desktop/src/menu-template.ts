@@ -37,10 +37,14 @@ export interface MenuTemplateOptions {
   /**
    * The active target (docs/plans/consumer-local-experience.md §2.1/§2.3):
    * renders a disabled `Target: <label>` indicator plus the switch item, and
-   * hides Sign In/Out for a local target (a local brain has no login).
+   * hides Sign In/Out only for a target that declares local-owner auth.
    * Omit/null to keep the pre-dual-target menu.
    */
-  readonly target?: { readonly kind: "cloud" | "local"; readonly label: string } | null;
+  readonly target?: {
+    readonly kind: "cloud" | "local";
+    readonly label: string;
+    readonly auth?: "pkce" | "local-session";
+  } | null;
   /**
    * Show "Uninstall <appName>…" in the macOS app menu. Packaged macOS builds
    * only: Windows has the NSIS uninstaller, dev runs have no bundle to remove.
@@ -124,9 +128,9 @@ export function buildMenuTemplate(
       click: () => handlers.onStartFirefoxControl(),
     },
   ];
-  // A local target has no login (the shell mints the local-owner session), so
-  // Sign In/Out only render for the cloud target.
-  if (opts.target?.kind !== "local") {
+  // Local-owner deployments mint automatically. A self-host that declares
+  // PKCE still needs the same explicit Sign In/Out controls as hosted cloud.
+  if (!opts.target || opts.target.kind === "cloud" || opts.target.auth === "pkce") {
     appActions.push(
       { type: "separator" },
       { label: "Sign In", click: () => handlers.onSignIn() },

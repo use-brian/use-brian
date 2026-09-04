@@ -15,6 +15,53 @@ import type { WorkspaceContextValue } from "@/lib/workspace-context";
 
 export const DESKTOP_WORKSPACES_CACHE_KEY = "desktop:workspaces:v1";
 
+export type DesktopWorkspaceBootstrapResult =
+  | {
+      kind: "ready";
+      source: "live" | "cache";
+      workspaces: WorkspacePickerItem[];
+    }
+  | { kind: "unauthenticated" }
+  | { kind: "error"; detail: string };
+
+/**
+ * Resolve the packaged app's startup workspace list without treating cached
+ * identity as authentication. The live probe must settle first: only a
+ * transient failure may fall back to cache, while a server 401 returns to the
+ * shell-owned sign-in flow before interactive workspace chrome is mounted.
+ */
+export async function resolveDesktopWorkspaceBootstrap(input: {
+  cached: unknown;
+  hasStoredSession: boolean;
+  authenticate: () => Promise<string | null>;
+  loadLive: () => Promise<{ status: number; data?: unknown }>;
+}): Promise<DesktopWorkspaceBootstrapResult> {
+  const cached = parseDesktopWorkspaceRows(input.cached);
+  const token = await input.authenticate();
+  if (!token) return { kind: "unauthenticated" };
+
+  try {
+    const live = await input.loadLive();
+    if (live.status === 401) return { kind: "unauthenticated" };
+    if (live.status < 200 || live.status >= 300) {
+      throw new Error(`HTTP ${live.status}`);
+    }
+    return {
+      kind: "ready",
+      source: "live",
+      workspaces: parseDesktopWorkspaceRows(live.data),
+    };
+  } catch (error) {
+    if (input.hasStoredSession && cached.length > 0) {
+      return { kind: "ready", source: "cache", workspaces: cached };
+    }
+    return {
+      kind: "error",
+      detail: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 export function desktopWorkspaceCacheKey(workspaceId: string): string {
   return `desktop:workspace:v1:${workspaceId}`;
 }

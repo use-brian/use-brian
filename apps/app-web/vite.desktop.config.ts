@@ -29,6 +29,16 @@ export default defineConfig({
     // Tailwind v4 (the Next build uses @tailwindcss/postcss; the Vite build needs
     // the Vite plugin). Processes `@import "tailwindcss"` in globals.css.
     tailwindcss(),
+    {
+      name: "reject-next-server-runtime",
+      generateBundle(_options, bundle) {
+        for (const output of Object.values(bundle)) {
+          if (output.type === "chunk" && output.code.includes("next.rootSpanId")) {
+            this.error("Next's server tracing runtime was included in the desktop renderer");
+          }
+        }
+      },
+    },
   ],
   root: resolve(here, "desktop"),
   // Relative asset URLs so the bundle resolves correctly from a file:// origin.
@@ -42,6 +52,7 @@ export default defineConfig({
       // Shim Next's client APIs onto react-router / DOM so app-web's
       // `"use client"` components run unmodified under Vite. Order: longer/more
       // specific specifiers first.
+      "@/lib/i18n/set-locale": resolve(here, "desktop/shims/set-locale.ts"),
       "next/navigation": resolve(here, "desktop/shims/next-navigation.tsx"),
       "next/link": resolve(here, "desktop/shims/next-link.tsx"),
       "next/image": resolve(here, "desktop/shims/next-image.tsx"),
