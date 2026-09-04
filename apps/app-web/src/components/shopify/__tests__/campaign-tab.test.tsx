@@ -454,7 +454,7 @@ describe("[COMP:app-web/shopify-campaign] Campaign tab", () => {
     await settle();
 
     expect(authFetch).toHaveBeenCalledWith(
-      `http://localhost:4000/api/doc-files/${WORKSPACE}/upload`,
+      `/api/doc-files/${WORKSPACE}/upload`,
       expect.objectContaining({ method: "POST", body: expect.any(FormData) }),
     );
     const preview = container!.querySelector('[aria-label="Message preview"]')!;

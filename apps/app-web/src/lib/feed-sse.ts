@@ -61,7 +61,9 @@ export function openFeedStream(opts: {
     // `window` read so the module is safe under SSR / node (tests) where an
     // absolute API_URL makes the base irrelevant anyway.
     const base =
-      typeof window !== "undefined" ? window.location.origin : undefined;
+      typeof window !== "undefined"
+        ? window.location.origin
+        : "http://localhost:4000";
     const url = new URL(
       `${API_URL}/api/distribution/t/${opts.workspaceId}/events`,
       base,

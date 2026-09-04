@@ -40,4 +40,16 @@ describe("[COMP:app-web/feed-connect-account] connect-account helper", () => {
     expect(parsed.searchParams.get("return_to")).toContain("/w/ws-9/feed");
     expect(parsed.searchParams.get("return_to")).not.toContain("/t/");
   });
+
+  it("uses the app origin when the API is same-origin", () => {
+    const url = buildAuthorizeUrl({
+      apiUrl: "",
+      platform: "twitter",
+      assistantId: "a-2",
+      origin: "https://app.example.com",
+      workspaceId: "ws-9",
+    });
+
+    expect(new URL(url).origin).toBe("https://app.example.com");
+  });
 });

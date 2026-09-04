@@ -33,7 +33,7 @@ export function buildAuthorizeUrl(params: {
 }): string {
   const { apiUrl, platform, assistantId, origin, workspaceId } = params;
   const returnTo = `${origin}/w/${workspaceId}/feed?connected=${platform}`;
-  const url = new URL(`${apiUrl}${OAUTH_PATH[platform]}`);
+  const url = new URL(`${apiUrl}${OAUTH_PATH[platform]}`, origin);
   url.searchParams.set("assistantId", assistantId);
   url.searchParams.set("return_to", returnTo);
   return url.toString();
