@@ -17,12 +17,19 @@ const composerSources = [
   "../../doc/page-comments.tsx",
 ].map((relative) => readFileSync(fileURLToPath(new URL(relative, import.meta.url)), "utf8"));
 
-describe("[COMP:web/recording-upload] floating composer upload highlight", () => {
-  it("ties both expanded and collapsed emphasis to the recording upload state", () => {
-    expect(source.match(/rec\.status === "uploading"/g)?.length).toBeGreaterThanOrEqual(4);
-    expect(source).toContain("border-primary/60 ring-2 ring-primary/25");
-    expect(source).toContain("ring-2 ring-primary/35");
+describe("[COMP:web/recording-upload] floating composer upload progress", () => {
+  it("keeps the expanded frame neutral and gives the status row breathing room", () => {
+    expect(source).not.toContain("border-primary/60 ring-2 ring-primary/25");
+    expect(source).toContain('className="space-y-2 px-1 py-2"');
+  });
+
+  it("renders determinate progress around only the collapsed text launcher", () => {
+    expect(source).not.toContain("ring-2 ring-primary/35");
+    expect(source).toContain("data-upload-progress-ring");
+    expect(source).toContain("conic-gradient(from -90deg");
+    expect(source).toContain("uploadProgressPercent");
     expect(source).toContain('aria-busy={rec.status === "uploading"}');
+    expect(source).toContain('<div className="flex items-center gap-2">');
   });
 
   it("renders shared byte progress in every recording-capable composer", () => {

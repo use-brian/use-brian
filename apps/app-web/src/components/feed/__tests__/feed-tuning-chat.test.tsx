@@ -141,7 +141,7 @@ function renderDock(profiles: FeedProfile[]): string {
     setLivePageEnabled: vi.fn(),
     includesSystemAudio: () => false,
     screenCaptureAvailable: false,
-    windowPickerAvailable: false,
+    capturePickerAvailable: false,
     captureSource: "mic" as const,
     setCaptureSource: () => {},
     capturesScreen: () => false,

@@ -263,8 +263,8 @@ describe("[COMP:app-web/block-drag-handle] refineContainerTarget", () => {
 });
 
 describe("[COMP:app-web/block-drag-handle] gripReferenceRect", () => {
-  // jsdom has no layout, so stub the geometry: a list item's text box is
-  // indented past its parent list's left (where the bullet/number marker sits).
+  // jsdom has no layout, so stub the geometry: a nested block's text box is
+  // indented past its structural parent's marker column.
   const stubRect = (el: Element, left: number, right = left + 100) => {
     el.getBoundingClientRect = () =>
       ({
@@ -290,6 +290,17 @@ describe("[COMP:app-web/block-drag-handle] gripReferenceRect", () => {
     stubRect(p, 64); // the text box, indented past the marker
     // Anchored to the list edge (40), NOT the indented text box (64), so the
     // grip lands left of the bullet/number instead of on top of it.
+    expect(gripReferenceRect(p).left).toBe(40);
+  });
+
+  it("anchors a child block to its quote's left (clears the full-height rule)", () => {
+    const quote = document.createElement("blockquote");
+    const p = document.createElement("p");
+    quote.appendChild(p);
+    stubRect(quote, 40); // quote rule
+    stubRect(p, 56); // text box, inset by border + quote padding
+    // Anchoring to the paragraph would centre the 20px grip over the rule.
+    // Use the quote edge so tippy's 8px gap leaves the rule unobstructed.
     expect(gripReferenceRect(p).left).toBe(40);
   });
 

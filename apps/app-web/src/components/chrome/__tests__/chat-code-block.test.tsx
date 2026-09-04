@@ -83,6 +83,19 @@ describe("[COMP:app-web/chat-code-block] ChatCodeBlock", () => {
     );
   });
 
+  it("preserves Chinese text exactly through render and copy", async () => {
+    const text = "# 表達出來\n林北（对着镜子，声音发抖）：我是不是死了。";
+    render(
+      <ChatMarkdown
+        text={`\`\`\`text\n${text}\n\`\`\``}
+        components={chatMarkdownCodeComponents}
+      />,
+    );
+    expect(host!.querySelector("pre")?.textContent).toBe(`${text}\n`);
+    await clickCopy();
+    expect(writeText).toHaveBeenCalledExactlyOnceWith(text);
+  });
+
   it("flips to the copied state after a successful write", async () => {
     render(
       <ChatCodeBlock>

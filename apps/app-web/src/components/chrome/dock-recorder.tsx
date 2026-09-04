@@ -26,7 +26,7 @@
  */
 
 import { createElement, useEffect, useId, useRef, useState } from "react";
-import { Check, ChevronDown, Pause, Play, Square, X } from "lucide-react";
+import { AppWindow, Check, ChevronDown, Monitor, Pause, Play, Square, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
@@ -38,10 +38,6 @@ import { captureLabelLane, formatElapsed } from "@/lib/recorder/recorder-gesture
 import type { DockRecorderApi, RecorderCaptureSource } from "@/lib/recorder/use-dock-recorder";
 import { useGlobalDockRecorder } from "@/lib/recorder/dock-recorder-bridge";
 import { desktopBridge } from "@/lib/desktop-auth-source";
-import {
-  SearchableSelect,
-  type SearchableSelectItem,
-} from "@/components/ui/searchable-select";
 import type { SpoolSessionMeta } from "@/lib/recorder/recorder-spool";
 
 /** The record-dot glyph — deliberately not a microphone. */
@@ -77,73 +73,200 @@ function LevelMeter({ level }: { level: () => number }) {
   );
 }
 
-/** The window-picker dialog's selection body (the caller reads `onChange`). */
-function WindowSourcePicker({
-  items,
+type DesktopCaptureKind = Exclude<RecorderCaptureSource, "mic">;
+type DesktopCaptureSource = { id: string; name: string };
+
+export type DesktopCaptureSelection = {
+  source: DesktopCaptureKind;
+  id: string;
+};
+
+/** Meet-style source cards hosted inside the app's themed confirm dialog. */
+function CaptureSourcePicker({
+  sources,
   initial,
+  labels,
   onChange,
-  searchPlaceholder,
 }: {
-  items: SearchableSelectItem[];
-  initial: string;
-  onChange: (value: string) => void;
-  searchPlaceholder: string;
+  sources: Record<DesktopCaptureKind, DesktopCaptureSource[]>;
+  initial: DesktopCaptureSelection;
+  labels: {
+    screenTab: string;
+    windowTab: string;
+    screenList: string;
+    windowList: string;
+    screenEmpty: string;
+    windowEmpty: string;
+  };
+  onChange: (value: DesktopCaptureSelection | null) => void;
 }) {
-  const [value, setValue] = useState(initial);
+  const [kind, setKind] = useState<DesktopCaptureKind>(initial.source);
+  const [selected, setSelected] = useState<Record<DesktopCaptureKind, string | null>>({
+    screen: initial.source === "screen" ? initial.id : sources.screen[0]?.id ?? null,
+    window: initial.source === "window" ? initial.id : sources.window[0]?.id ?? null,
+  });
+  const visibleSources = sources[kind];
+  const selectedId = selected[kind];
+
+  const selectKind = (next: DesktopCaptureKind) => {
+    setKind(next);
+    const nextId = selected[next] ?? sources[next][0]?.id ?? null;
+    if (selected[next] !== nextId) {
+      setSelected((current) => ({ ...current, [next]: nextId }));
+    }
+    onChange(nextId ? { source: next, id: nextId } : null);
+  };
+
   return (
-    <SearchableSelect
-      value={value}
-      onValueChange={(v) => {
-        setValue(v);
-        onChange(v);
-      }}
-      items={items}
-      searchPlaceholder={searchPlaceholder}
-      className="w-full"
-    />
+    <div className="space-y-3">
+      <div
+        role="tablist"
+        className="grid grid-cols-2 rounded-lg bg-muted p-1"
+      >
+        {(
+          [
+            { source: "screen" as const, label: labels.screenTab, icon: Monitor },
+            { source: "window" as const, label: labels.windowTab, icon: AppWindow },
+          ]
+        ).map(({ source, label, icon: Icon }) => (
+          <button
+            key={source}
+            type="button"
+            role="tab"
+            aria-selected={kind === source}
+            onClick={() => selectKind(source)}
+            className={cn(
+              "flex items-center justify-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+              kind === source
+                ? "bg-background text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground",
+            )}
+          >
+            <Icon className="size-4" aria-hidden />
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {visibleSources.length > 0 ? (
+        <div
+          role="radiogroup"
+          aria-label={kind === "screen" ? labels.screenList : labels.windowList}
+          className="grid max-h-64 grid-cols-2 gap-2 overflow-y-auto pr-1"
+        >
+          {visibleSources.map((source) => {
+            const active = selectedId === source.id;
+            const Icon = kind === "screen" ? Monitor : AppWindow;
+            return (
+              <button
+                key={source.id}
+                type="button"
+                role="radio"
+                aria-checked={active}
+                onClick={() => {
+                  setSelected((current) => ({ ...current, [kind]: source.id }));
+                  onChange({ source: kind, id: source.id });
+                }}
+                className={cn(
+                  "relative flex min-h-24 min-w-0 flex-col items-center justify-center gap-2 rounded-xl border p-3 text-center transition-colors",
+                  active
+                    ? "border-primary bg-primary/5 text-foreground ring-1 ring-primary"
+                    : "border-border text-muted-foreground hover:border-foreground/30 hover:bg-accent hover:text-foreground",
+                )}
+              >
+                <span className="flex size-9 items-center justify-center rounded-lg bg-muted">
+                  <Icon className="size-5" aria-hidden />
+                </span>
+                <span className="w-full truncate text-xs font-medium" title={source.name}>
+                  {source.name}
+                </span>
+                {active ? (
+                  <span className="absolute right-2 top-2 flex size-4 items-center justify-center rounded-full border border-primary bg-background text-primary">
+                    <Check className="size-3" aria-hidden />
+                  </span>
+                ) : null}
+              </button>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="flex min-h-32 items-center justify-center rounded-xl border border-dashed border-border px-6 text-center text-sm text-muted-foreground">
+          {kind === "screen" ? labels.screenEmpty : labels.windowEmpty}
+        </div>
+      )}
+    </div>
   );
 }
 
 /**
- * Desktop specific-window pick: list the shell's shareable windows and let
- * the user confirm one before the capture arms. Resolves the picked
- * desktopCapturer source id, or null on cancel / no picker / no windows.
+ * Desktop display pick: list the shell's shareable screens and windows and
+ * require an explicit selection before the capture arms. Resolves the picked
+ * desktopCapturer source id + kind, or null on cancel / no picker / no sources.
+ * Source ids and names are the whole renderer boundary: the shell deliberately
+ * does not send live thumbnails of every open window.
  * The body copy is deliberately honest about audio scope: Chromium/Electron
  * loopback is whole-system output, so a window pick still records ALL
  * computer audio, never only that app's (per-application audio isolation is
  * not exposed by the platform).
  */
-export async function pickCaptureWindow(t: {
-  windowPickerTitle: string;
-  windowPickerBody: string;
-  windowPickerAction: string;
-  windowPickerEmpty: string;
-  liveDestinationSearch: string;
-}): Promise<string | null> {
-  const sources = await desktopBridge()
-    ?.listCaptureSources?.("window")
-    .catch(() => null);
-  if (!sources || sources.length === 0) {
+export async function pickCaptureSource(
+  initialSource: DesktopCaptureKind,
+  t: {
+    capturePickerTitle: string;
+    capturePickerBody: string;
+    capturePickerAction: string;
+    capturePickerEmpty: string;
+    capturePickerScreenTab: string;
+    capturePickerWindowTab: string;
+    capturePickerScreenList: string;
+    capturePickerWindowList: string;
+    capturePickerScreenEmpty: string;
+    capturePickerWindowEmpty: string;
+  },
+): Promise<DesktopCaptureSelection | null> {
+  const bridge = desktopBridge();
+  if (!bridge?.listCaptureSources) return null;
+  const [screens, windows] = await Promise.all([
+    bridge.listCaptureSources("screen").catch(() => []),
+    bridge.listCaptureSources("window").catch(() => []),
+  ]);
+  if (screens.length === 0 && windows.length === 0) {
     // Nothing shareable: say so instead of silently doing nothing.
     await confirmDialog({
-      title: t.windowPickerTitle,
-      description: t.windowPickerEmpty,
-      confirmLabel: t.windowPickerAction,
+      title: t.capturePickerTitle,
+      description: t.capturePickerEmpty,
+      confirmLabel: t.capturePickerAction,
     });
     return null;
   }
-  let chosen = sources[0].id;
+  const sources = { screen: screens, window: windows };
+  const startingSource = sources[initialSource].length > 0
+    ? initialSource
+    : initialSource === "screen"
+      ? "window"
+      : "screen";
+  let chosen: DesktopCaptureSelection | null = {
+    source: startingSource,
+    id: sources[startingSource][0].id,
+  };
   const ok = await confirmDialog({
-    title: t.windowPickerTitle,
-    description: t.windowPickerBody,
-    confirmLabel: t.windowPickerAction,
-    content: createElement(WindowSourcePicker, {
-      items: sources.map((source) => ({ value: source.id, label: source.name })),
+    title: t.capturePickerTitle,
+    description: t.capturePickerBody,
+    confirmLabel: t.capturePickerAction,
+    content: createElement(CaptureSourcePicker, {
+      sources,
       initial: chosen,
-      onChange: (v: string) => {
-        chosen = v;
+      labels: {
+        screenTab: t.capturePickerScreenTab,
+        windowTab: t.capturePickerWindowTab,
+        screenList: t.capturePickerScreenList,
+        windowList: t.capturePickerWindowList,
+        screenEmpty: t.capturePickerScreenEmpty,
+        windowEmpty: t.capturePickerWindowEmpty,
       },
-      searchPlaceholder: t.liveDestinationSearch,
+      onChange: (selection: DesktopCaptureSelection | null) => {
+        chosen = selection;
+      },
     }),
   });
   return ok ? chosen : null;
@@ -278,7 +401,7 @@ export function DockRecorderButton({
                           ? t.captureSourceScreen
                           : t.captureSourceScreenBrowser,
                       },
-                      ...(rec.windowPickerAvailable
+                      ...(rec.capturePickerAvailable
                         ? [{ source: "window" as RecorderCaptureSource, label: t.captureSourceWindow }]
                         : []),
                     ]
@@ -369,9 +492,13 @@ export function DockRecorderStrip({ rec, className }: { rec: DockRecorderApi; cl
       : t.voiceMessage;
   const systemAudio = rec.includesSystemAudio();
   const sourceChip = screenCapture
-    ? systemAudio
-      ? t.screenMicComputerAudio
-      : t.screenAndMic
+    ? rec.captureSource === "window"
+      ? systemAudio
+        ? t.windowMicComputerAudio
+        : t.windowAndMic
+      : systemAudio
+        ? t.screenMicComputerAudio
+        : t.screenAndMic
     : systemAudio
       ? t.micAndComputerAudio
       : null;

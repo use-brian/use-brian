@@ -249,7 +249,7 @@ import {
   DockRecorderNotice,
   DockRecorderRecovery,
   DockRecorderStrip,
-  pickCaptureWindow,
+  pickCaptureSource,
 } from "@/components/chrome/dock-recorder";
 import { useFileDrop } from "@/lib/use-file-drop";
 import { AttachmentChips, FileDropOverlay } from "@/components/doc/attachment-chips";
@@ -2823,7 +2823,7 @@ export function FloatingChat({
         (fallbackFileId) => sendMessage("", { fileIds: [fallbackFileId] }),
       ),
     prepareLivePage: liveRecording.prepare,
-    prepareWindowSource: () => pickCaptureWindow(tRecorder),
+    prepareCaptureSource: (initialSource) => pickCaptureSource(initialSource, tRecorder),
     streamLiveWindow: liveRecording.streamWindow,
     onMeetingCapture: async (file: File, live?: { pageId: string; sessionId?: string }) => {
       const outcome = await rec.run(file, {
@@ -3124,6 +3124,13 @@ export function FloatingChat({
       collapseToOneLine(activity.streamingText) ??
       t.thinking
     : null;
+  const uploadProgressPercent = Math.round(
+    Math.min(1, Math.max(0, rec.uploadProgress)) * 100,
+  );
+  const uploadProgressLabel = tRec.uploadingProgress.replace(
+    "{percent}",
+    String(uploadProgressPercent),
+  );
 
   return (
     <div
@@ -3160,8 +3167,6 @@ export function FloatingChat({
                 "absolute right-0 bottom-0 origin-bottom-right",
                 "max-w-[calc(100vw-2rem)] max-h-[92dvh]",
                 "rounded-xl border border-border bg-popover shadow-2xl",
-                rec.status === "uploading" &&
-                  "border-primary/60 ring-2 ring-primary/25 shadow-[0_0_28px_color-mix(in_srgb,var(--primary)_22%,transparent)]",
                 "transition-[opacity,transform] duration-200 ease-out",
                 expanded
                   ? "opacity-100 scale-100 translate-y-0 pointer-events-auto"
@@ -3638,7 +3643,7 @@ export function FloatingChat({
                   status={rec.status}
                   uploadProgress={rec.uploadProgress}
                   message={rec.message}
-                  className="px-1"
+                  className="space-y-2 px-1 py-2"
                 />
               </>
             }
@@ -3773,70 +3778,90 @@ export function FloatingChat({
           mounted through arming/holding — it anchors the live press gesture);
           the record-dot button rides beside it otherwise. */}
       {!isSidePanel &&
-        !((recorder.phase.kind === "latched" || recorder.phase.kind === "finishing") && !expanded) && (
-      <div
-        aria-busy={rec.status === "uploading"}
-        className={cn(
-          "flex items-center gap-2 rounded-full transition-[box-shadow] duration-200",
-          rec.status === "uploading" &&
-            "ring-2 ring-primary/35 shadow-[0_0_24px_color-mix(in_srgb,var(--primary)_24%,transparent)]",
-        )}
-      >
-      <button
-        type="button"
-        onClick={() => setExpanded(true)}
-        aria-hidden={expanded}
-        aria-live={isActive ? "polite" : undefined}
-        tabIndex={expanded ? -1 : 0}
-        className={cn(
-          "inline-flex items-center gap-2 rounded-full py-1.5 pl-1.5 pr-3.5 shadow-lg backdrop-blur",
-          "max-w-[min(260px,calc(100vw-3rem))] text-left text-sm",
-          "transition-[opacity,transform,background-color,box-shadow] duration-200 ease-out",
-          isActive
-            ? "border border-primary/40 bg-primary/10 text-foreground ring-2 ring-primary/20"
-            : "border border-border bg-background/90 text-foreground/80 hover:bg-accent hover:text-foreground",
-          expanded
-            ? "opacity-0 scale-95 pointer-events-none"
-            : "opacity-100 scale-100",
-        )}
-      >
-        {assistant ? (
-          <span
-            aria-hidden
-            className="inline-flex size-7 shrink-0 overflow-hidden rounded-full ring-1 ring-black/10 dark:ring-white/15"
-          >
-            <AssistantAvatar
-              id={assistant.id}
-              name={assistant.name}
-              iconSeed={assistant.iconSeed ?? undefined}
-              size="sm"
+        !(
+          (recorder.phase.kind === "latched" || recorder.phase.kind === "finishing") &&
+          !expanded
+        ) && (
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setExpanded(true)}
+              aria-hidden={expanded}
+              aria-busy={rec.status === "uploading"}
+              aria-label={
+                rec.status === "uploading"
+                  ? `${idlePlaceholder}. ${uploadProgressLabel}`
+                  : undefined
+              }
+              aria-live={isActive ? "polite" : undefined}
+              tabIndex={expanded ? -1 : 0}
+              className={cn(
+                "relative inline-flex items-center gap-2 rounded-full py-1.5 pl-1.5 pr-3.5 shadow-lg backdrop-blur",
+                "max-w-[min(260px,calc(100vw-3rem))] text-left text-sm",
+                "transition-[opacity,transform,background-color,box-shadow] duration-200 ease-out",
+                isActive
+                  ? "border border-primary/40 bg-primary/10 text-foreground ring-2 ring-primary/20"
+                  : "border border-border bg-background/90 text-foreground/80 hover:bg-accent hover:text-foreground",
+                expanded
+                  ? "opacity-0 scale-95 pointer-events-none"
+                  : "opacity-100 scale-100",
+              )}
+            >
+              {rec.status === "uploading" ? (
+                <span
+                  aria-hidden
+                  data-upload-progress-ring
+                  className="pointer-events-none absolute -inset-[3px] rounded-full p-[2px]"
+                  style={{
+                    background: `conic-gradient(from -90deg, var(--primary) 0% ${uploadProgressPercent}%, transparent ${uploadProgressPercent}% 100%)`,
+                    WebkitMask:
+                      "linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0)",
+                    WebkitMaskComposite: "xor",
+                    maskComposite: "exclude",
+                    filter:
+                      "drop-shadow(0 0 5px color-mix(in srgb, var(--primary) 38%, transparent))",
+                  }}
+                />
+              ) : null}
+              {assistant ? (
+                <span
+                  aria-hidden
+                  className="inline-flex size-7 shrink-0 overflow-hidden rounded-full ring-1 ring-black/10 dark:ring-white/15"
+                >
+                  <AssistantAvatar
+                    id={assistant.id}
+                    name={assistant.name}
+                    iconSeed={assistant.iconSeed ?? undefined}
+                    size="sm"
+                  />
+                </span>
+              ) : (
+                <span className="inline-flex size-7 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground">
+                  <MessageSquare className="size-3.5" aria-hidden />
+                </span>
+              )}
+              <span
+                className={cn(
+                  "min-w-0 truncate",
+                  isActive ? "text-foreground" : "text-muted-foreground",
+                )}
+              >
+                {isActive ? activeLabel : idlePlaceholder}
+              </span>
+            </button>
+            <DockRecorderButton
+              rec={recorder}
+              variant="floating"
+              disabled={rec.busy}
+              className={cn(
+                "transition-[opacity,transform] duration-200 ease-out",
+                expanded
+                  ? "opacity-0 scale-95 pointer-events-none"
+                  : "opacity-100 scale-100",
+              )}
             />
-          </span>
-        ) : (
-          <span className="inline-flex size-7 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground">
-            <MessageSquare className="size-3.5" aria-hidden />
-          </span>
+          </div>
         )}
-        <span
-          className={cn(
-            "min-w-0 truncate",
-            isActive ? "text-foreground" : "text-muted-foreground",
-          )}
-        >
-          {isActive ? activeLabel : idlePlaceholder}
-        </span>
-      </button>
-      <DockRecorderButton
-        rec={recorder}
-        variant="floating"
-        disabled={rec.busy}
-        className={cn(
-          "transition-[opacity,transform] duration-200 ease-out",
-          expanded ? "opacity-0 scale-95 pointer-events-none" : "opacity-100 scale-100",
-        )}
-      />
-      </div>
-      )}
     </div>
   );
 }
