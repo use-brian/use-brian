@@ -7705,6 +7705,12 @@ export const ja: Dictionary = {
         ingest: "取り込み",
       },
       ingestToggle: "このチャネルのメッセージをブレインに取り込む",
+      slashCommands: {
+        sync: "コマンドを同期",
+        syncing: "コマンドを同期中…",
+        success: "{commandCount} 件のコマンドを同期しました。{omittedCount} 件を省略しました。",
+        error: "コマンドを同期できませんでした。もう一度お試しください。",
+      },
       routingTitle: "アシスタントの振り分け",
       routingEmpty: "アシスタントが未割り当てです。このチャネルはまだチャットに応答できません。",
       defaultSurface: "チャネルの既定",

@@ -181,6 +181,53 @@ export async function updateChannelConfig(
   return data.channel;
 }
 
+export type SyncChannelSlashCommandsResult = {
+  commandCount: number;
+  omittedCount: number;
+};
+
+/** Register this workspace's current commands with the channel's chat provider. */
+export async function syncChannelSlashCommands(
+  workspaceId: string,
+  channelId: string,
+): Promise<SyncChannelSlashCommandsResult> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/channels/${encodeURIComponent(channelId)}/slash-commands/sync`,
+    { method: "POST" },
+  );
+  if (!res.ok) {
+    const data = (await res.json().catch(() => null)) as {
+      error?: unknown;
+      detail?: unknown;
+    } | null;
+    const detail =
+      typeof data?.detail === "string" ? data.detail.trim() : "";
+    const error = typeof data?.error === "string" ? data.error.trim() : "";
+    throw new Error(
+      detail || error || `Slash command sync failed (${res.status})`,
+    );
+  }
+
+  const data = (await res.json().catch(() => null)) as Partial<
+    SyncChannelSlashCommandsResult
+  > | null;
+  if (
+    !data ||
+    typeof data.commandCount !== "number" ||
+    !Number.isInteger(data.commandCount) ||
+    data.commandCount < 0 ||
+    typeof data.omittedCount !== "number" ||
+    !Number.isInteger(data.omittedCount) ||
+    data.omittedCount < 0
+  ) {
+    throw new Error("Slash command sync returned an invalid response");
+  }
+  return {
+    commandCount: data.commandCount,
+    omittedCount: data.omittedCount,
+  };
+}
+
 /**
  * Disconnect (delete) a channel. Cascades to its `channel_integrations` row
  * and `channel_assistants` routing on the server.

@@ -93,16 +93,38 @@ describe("[COMP:app-web/goal-pursuit] card placement", () => {
 
 describe("[COMP:app-web/goal-pursuit] sent-command matching", () => {
   const roster = [
-    { slug: "goal", name: "Goal kickstart", description: "Run a goal to done" },
-    { slug: "help", name: "Help", description: "List commands" },
+    {
+      slug: "goal",
+      name: "Goal kickstart",
+      description: "Run a goal to done",
+      kind: "skill" as const,
+      target: {
+        kind: "skill" as const,
+        slug: "goal",
+        name: "Goal kickstart",
+        description: "Run a goal to done",
+      },
+    },
+    {
+      slug: "workflow_daily_digest",
+      name: "Daily Digest",
+      description: "Send a digest",
+      kind: "workflow" as const,
+      target: {
+        kind: "workflow" as const,
+        workflowId: "workflow-1",
+        name: "Daily Digest",
+        description: "Send a digest",
+      },
+    },
   ];
 
   it("resolves a whole-message roster-backed command with args", () => {
     const hit = sentSlashCommandOf("/goal fill the billing sheet", roster);
-    expect(hit?.skill.slug).toBe("goal");
+    expect(hit?.command.slug).toBe("goal");
     expect(hit?.args).toBe("fill the billing sheet");
-    expect(sentSlashCommandOf("/GOAL x", roster)?.skill.slug).toBe("goal");
-    expect(sentSlashCommandOf("  /help  ", roster)?.args).toBe("");
+    expect(sentSlashCommandOf("/GOAL x", roster)?.command.slug).toBe("goal");
+    expect(sentSlashCommandOf("  /workflow_daily_digest  ", roster)?.args).toBe("");
   });
 
   it("an unknown slug, prose, or a path stays an ordinary message", () => {
@@ -115,6 +137,7 @@ describe("[COMP:app-web/goal-pursuit] sent-command matching", () => {
   it("the syntactic probe matches the same shapes the parser accepts", () => {
     expect(isSlashCommandShaped("/goal something")).toBe(true);
     expect(isSlashCommandShaped("/help")).toBe(true);
+    expect(isSlashCommandShaped("/workflow_daily_digest region=apac")).toBe(true);
     expect(isSlashCommandShaped("plain text")).toBe(false);
     expect(isSlashCommandShaped("/usr/bin")).toBe(false);
   });

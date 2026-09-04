@@ -7944,6 +7944,12 @@ export const en = {
         ingest: "Ingest",
       },
       ingestToggle: "Feed this channel's messages into the brain",
+      slashCommands: {
+        sync: "Sync commands",
+        syncing: "Syncing commands…",
+        success: "Synced {commandCount} commands. {omittedCount} omitted.",
+        error: "Couldn't sync commands. Try again.",
+      },
       routingTitle: "Assistant routing",
       routingEmpty: "No assistant attached. This channel can't answer chats yet.",
       defaultSurface: "Channel default",

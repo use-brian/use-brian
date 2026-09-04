@@ -13,6 +13,8 @@ import {
   TELEGRAM_BOT_COMMANDS,
 } from '@use-brian/channels'
 import type {
+  ChannelCredentials,
+  ChannelIntegration,
   ChannelIntegrationStore,
   DiscordCredentials,
   TelegramCredentials,
@@ -64,6 +66,48 @@ export async function buildWorkspaceNativeSlashCommands(params: {
   return prepareNativeSlashCommands([...targets.values()])
 }
 
+/** Replace the native command roster for one exact provider integration. */
+export async function syncChannelNativeSlashCommands(params: {
+  catalog: NativeSlashCommandCatalog
+  integration: ChannelIntegration
+  credentials: ChannelCredentials
+}): Promise<void> {
+  const { catalog, integration } = params
+  if (integration.channelType === 'telegram') {
+    const credentials = params.credentials as TelegramCredentials
+    await createTelegramApi({ token: credentials.bot_token }).setMyCommands([
+      ...TELEGRAM_BOT_COMMANDS,
+      ...catalog.commands.map(({ name, description }) => ({ command: name, description })),
+    ])
+    return
+  }
+
+  if (integration.channelType !== 'discord') {
+    throw new Error(`Native slash commands are not supported for ${integration.channelType}`)
+  }
+  if (!integration.botUserId) {
+    throw new Error('Discord integration is missing its application ID')
+  }
+
+  const credentials = params.credentials as DiscordCredentials
+  await createDiscordApi({ token: credentials.bot_token }).replaceGlobalApplicationCommands(
+    integration.botUserId,
+    [
+      ...DISCORD_APPLICATION_COMMANDS,
+      ...catalog.commands.map(({ name, description }) => ({
+        name,
+        description,
+        type: 1 as const,
+        options: [{
+          name: 'arguments',
+          description: 'Arguments for this command',
+          type: 3 as const,
+        }],
+      })),
+    ],
+  )
+}
+
 /** Reconcile every active native-command-capable integration in a workspace. */
 export async function syncWorkspaceNativeSlashCommands(params: {
   userId: string
@@ -82,33 +126,11 @@ export async function syncWorkspaceNativeSlashCommands(params: {
     .map(async (integration) => {
       const row = await params.integrationStore.getForUserWithCredentials(params.userId, integration.id)
       if (!row) return
-      if (integration.channelType === 'telegram') {
-        const credentials = row.credentials as TelegramCredentials
-        await createTelegramApi({ token: credentials.bot_token }).setMyCommands([
-          ...TELEGRAM_BOT_COMMANDS,
-          ...catalog.commands.map(({ name, description }) => ({ command: name, description })),
-        ])
-        return
-      }
-
-      const credentials = row.credentials as DiscordCredentials
-      if (!integration.botUserId) return
-      await createDiscordApi({ token: credentials.bot_token }).replaceGlobalApplicationCommands(
-        integration.botUserId,
-        [
-          ...DISCORD_APPLICATION_COMMANDS,
-          ...catalog.commands.map(({ name, description }) => ({
-            name,
-            description,
-            type: 1 as const,
-            options: [{
-              name: 'arguments',
-              description: 'Arguments for this command',
-              type: 3 as const,
-            }],
-          })),
-        ],
-      )
+      await syncChannelNativeSlashCommands({
+        catalog,
+        integration: row,
+        credentials: row.credentials,
+      })
     }))
 
   if (catalog.omitted.length > 0) {

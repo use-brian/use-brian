@@ -79,7 +79,10 @@ import { ensureMsTeamsConnectorInstance } from '../ingest/msteams-connector-inst
 import { ensureFeishuConnectorInstance } from '../ingest/feishu-connector-instance.js'
 import { query, queryWithRLS } from '../db/client.js'
 import { providerChannelIdFromSession } from '../db/sessions.js'
-import { buildWorkspaceNativeSlashCommands } from './native-slash-commands.js'
+import {
+  buildWorkspaceNativeSlashCommands,
+  syncChannelNativeSlashCommands,
+} from './native-slash-commands.js'
 
 // Per-integration behavior config accepted by `PATCH .../channels/:id/config`.
 // Mirrors the `ChannelIntegrationConfig` type (db/channel-integrations.ts).
@@ -767,6 +770,93 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
     const integrations = await loadIntegrations(userId, workspaceId)
     res.json({
       channels: channels.map((c) => serializeChannel(c, integrations.get(c.id))),
+    })
+  })
+
+  router.get('/workspaces/:workspaceId/slash-commands', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const { workspaceId } = req.params
+
+    const role = await opts.workspaceStore.getRole(userId, workspaceId)
+    if (!role) { res.status(403).json({ error: 'Not a member of this workspace' }); return }
+
+    const catalog = await buildWorkspaceNativeSlashCommands({
+      userId,
+      workspaceId,
+      skillStore: opts.skillStore,
+      workflowStore: opts.workflowStore,
+    })
+    res.json(catalog)
+  })
+
+  router.post('/workspaces/:workspaceId/channels/:channelId/slash-commands/sync', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const { workspaceId, channelId } = req.params
+
+    const role = await opts.workspaceStore.getRole(userId, workspaceId)
+    if (!role) { res.status(403).json({ error: 'Not a member of this workspace' }); return }
+
+    const channel = await loadChannel(userId, workspaceId, channelId, res)
+    if (!channel) return
+    if (channel.channelType !== 'telegram' && channel.channelType !== 'discord') {
+      res.status(400).json({ error: 'Slash command sync is only supported for Telegram and Discord channels' })
+      return
+    }
+    if (!opts.integrationStore) {
+      res.status(503).json({ error: 'Channel integrations are not configured on this server' })
+      return
+    }
+
+    const integrations = await opts.integrationStore.listForWorkspace(userId, workspaceId)
+    const integration = integrations.find((row) =>
+      row.channelId === channelId && row.channelType === channel.channelType)
+    if (!integration) {
+      res.status(404).json({ error: 'Channel integration not found' })
+      return
+    }
+    const withCredentials = await opts.integrationStore.getForUserWithCredentials(userId, integration.id)
+    if (
+      !withCredentials
+      || withCredentials.id !== integration.id
+      || withCredentials.channelId !== channelId
+      || withCredentials.channelType !== channel.channelType
+    ) {
+      res.status(404).json({ error: 'Channel integration credentials not found' })
+      return
+    }
+    const botToken = (withCredentials.credentials as { bot_token?: unknown }).bot_token
+    if (
+      typeof botToken !== 'string'
+      || botToken.length === 0
+      || (channel.channelType === 'discord' && !withCredentials.botUserId)
+    ) {
+      res.status(404).json({ error: 'Channel integration credentials not found' })
+      return
+    }
+
+    const catalog = await buildWorkspaceNativeSlashCommands({
+      userId,
+      workspaceId,
+      skillStore: opts.skillStore,
+      workflowStore: opts.workflowStore,
+    })
+    try {
+      await syncChannelNativeSlashCommands({
+        catalog,
+        integration: withCredentials,
+        credentials: withCredentials.credentials,
+      })
+    } catch (err) {
+      console.error('[channels] slash command sync failed:', err)
+      res.status(502).json({ error: 'Failed to sync slash commands' })
+      return
+    }
+
+    res.json({
+      commandCount: catalog.commands.length,
+      omittedCount: catalog.omitted.length,
     })
   })
 

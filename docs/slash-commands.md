@@ -28,7 +28,17 @@ An incoming native command therefore resolves to the exact skill slug or
 workflow UUID before the model runs; adapters only preserve command text and do
 not make authorization decisions.
 
+Web chat autocomplete reads the same workspace catalog. Skills retain their
+direct slash form while enabled workflows appear under their generated
+`workflow_` command names, including underscore-aware selection and transcript
+rendering.
+
 Connecting a Telegram or Discord bot publishes the current catalog immediately.
 Skill and workflow store write hooks schedule the same reconciliation after
 creates, edits, renames, workflow enablement changes, and deletions, including
 mutations originating from assistant tools rather than only REST routes.
+
+Telegram and Discord channel details also expose a manual **Sync commands**
+action. It reconciles one selected integration by replacing the provider roster
+with the current catalog. Repeating it is idempotent, and replacement removes
+commands for skills or workflows that no longer exist or are no longer enabled.

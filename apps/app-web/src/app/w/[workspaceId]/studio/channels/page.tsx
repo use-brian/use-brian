@@ -72,6 +72,7 @@ import {
   listChannels,
   updateChannel,
   updateChannelConfig,
+  syncChannelSlashCommands,
   deleteChannel,
   connectSlackChannel,
   connectTelegramChannel,
@@ -700,6 +701,11 @@ export function ChannelDetail({
   const [attachError, setAttachError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState(false);
+  const slashCommandSyncInFlight = useRef(false);
+  const [slashCommandSyncState, setSlashCommandSyncState] = useState<
+    | { status: "idle" | "pending" | "error" }
+    | { status: "success"; commandCount: number; omittedCount: number }
+  >({ status: "idle" });
 
   async function onDisconnect(): Promise<void> {
     const dc = t.studioPage.channels.disconnect;
@@ -819,6 +825,20 @@ export function ChannelDetail({
       onRoutingChanged();
     } catch {
       // Non-fatal — the routing list simply won't refresh.
+    }
+  }
+
+  async function onSyncSlashCommands(): Promise<void> {
+    if (slashCommandSyncInFlight.current) return;
+    slashCommandSyncInFlight.current = true;
+    setSlashCommandSyncState({ status: "pending" });
+    try {
+      const result = await syncChannelSlashCommands(workspaceId, channel.id);
+      setSlashCommandSyncState({ status: "success", ...result });
+    } catch {
+      setSlashCommandSyncState({ status: "error" });
+    } finally {
+      slashCommandSyncInFlight.current = false;
     }
   }
 
@@ -994,6 +1014,34 @@ export function ChannelDetail({
           </span>
         ) : null}
       </div>
+
+      {(channel.channelType === "telegram" || channel.channelType === "discord") &&
+        channel.integrationId && (
+          <div className="flex flex-wrap items-center gap-3 rounded-lg border border-border px-4 py-3">
+            <button
+              type="button"
+              onClick={() => void onSyncSlashCommands()}
+              disabled={slashCommandSyncState.status === "pending"}
+              className="rounded-md border border-border px-3 py-1.5 text-xs font-medium transition-colors hover:bg-muted disabled:pointer-events-none disabled:opacity-50"
+            >
+              {slashCommandSyncState.status === "pending"
+                ? t.studioPage.channels.slashCommands.syncing
+                : t.studioPage.channels.slashCommands.sync}
+            </button>
+            {slashCommandSyncState.status === "success" ? (
+              <span className="text-xs text-muted-foreground" role="status">
+                {format(t.studioPage.channels.slashCommands.success, {
+                  commandCount: slashCommandSyncState.commandCount,
+                  omittedCount: slashCommandSyncState.omittedCount,
+                })}
+              </span>
+            ) : slashCommandSyncState.status === "error" ? (
+              <span className="text-xs text-destructive" role="alert">
+                {t.studioPage.channels.slashCommands.error}
+              </span>
+            ) : null}
+          </div>
+        )}
 
       {channel.channelType === "slack" && (
         <label className="flex items-center gap-2 text-sm">

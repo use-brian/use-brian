@@ -2079,6 +2079,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     const addressed =
       !isRoom ||
       askArmed ||
+      isSlashCommandShaped(trimmed) ||
       mentioned.length > 0 ||
       reply?.role === "assistant" ||
       turnFileIds.length > 0 ||
@@ -4135,7 +4136,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                   ) : sentCommand ? (
                     <div
                       aria-label={format(t.slashSentAria, {
-                        slug: sentCommand.skill.slug,
+                        slug: sentCommand.command.slug,
                       })}
                       className="max-w-[85%] rounded-2xl rounded-br-md border border-primary/25 bg-primary/[0.07] px-3.5 py-2 text-[14px] leading-[1.5] break-words whitespace-pre-wrap shadow-sm"
                     >
@@ -4145,7 +4146,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                           aria-hidden
                         />
                         <code className="rounded bg-primary/15 px-1 py-0.5 text-[13px] font-semibold text-primary">
-                          /{sentCommand.skill.slug}
+                          /{sentCommand.command.slug}
                         </code>
                       </span>
                       {sentCommand.args ? (

@@ -21,19 +21,41 @@ import {
   useSlashCommands,
 } from "../slash-command-autocomplete";
 
-const { listInvocableSkillsMock } = vi.hoisted(() => ({
-  listInvocableSkillsMock: vi.fn(),
+const { listSlashCommandsMock } = vi.hoisted(() => ({
+  listSlashCommandsMock: vi.fn(),
 }));
 
-vi.mock("@/lib/api/skills", () => ({
-  listInvocableSkills: listInvocableSkillsMock,
+vi.mock("@/lib/api/slash-commands", () => ({
+  listSlashCommands: listSlashCommandsMock,
 }));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const roster = [
-  { slug: "goal", name: "Goal", description: "Run a durable objective" },
-  { slug: "help", name: "Help", description: "List available commands" },
+  {
+    slug: "goal",
+    name: "Goal",
+    description: "Run a durable objective",
+    kind: "skill" as const,
+    target: {
+      kind: "skill" as const,
+      slug: "goal",
+      name: "Goal",
+      description: "Run a durable objective",
+    },
+  },
+  {
+    slug: "workflow_daily_digest",
+    name: "Daily Digest",
+    description: "Send the daily digest",
+    kind: "workflow" as const,
+    target: {
+      kind: "workflow" as const,
+      workflowId: "workflow-1",
+      name: "Daily Digest",
+      description: "Send the daily digest",
+    },
+  },
 ];
 
 function Harness() {
@@ -93,7 +115,7 @@ async function type(text: string) {
 }
 
 beforeEach(() => {
-  listInvocableSkillsMock.mockReset();
+  listSlashCommandsMock.mockReset();
 });
 
 afterEach(() => {
@@ -106,7 +128,7 @@ afterEach(() => {
 describe("[COMP:app-web/slash-command-autocomplete] visible command UX", () => {
   it("opens immediately with loading feedback, then renders the roster", async () => {
     let resolveRoster!: (value: typeof roster) => void;
-    listInvocableSkillsMock.mockReturnValue(
+    listSlashCommandsMock.mockReturnValue(
       new Promise<typeof roster>((resolve) => {
         resolveRoster = resolve;
       }),
@@ -120,12 +142,12 @@ describe("[COMP:app-web/slash-command-autocomplete] visible command UX", () => {
     await act(async () => resolveRoster(roster));
     expect(container!.querySelectorAll('[role="option"]')).toHaveLength(2);
     expect(container!.textContent).toContain("/goal");
-    expect(container!.textContent).toContain("/help");
+    expect(container!.textContent).toContain("/workflow_daily_digest");
   });
 
   it("keeps the lazy roster request alive while the command is typed", async () => {
     let resolveRoster!: (value: typeof roster) => void;
-    listInvocableSkillsMock.mockReturnValue(
+    listSlashCommandsMock.mockReturnValue(
       new Promise<typeof roster>((resolve) => {
         resolveRoster = resolve;
       }),
@@ -142,7 +164,7 @@ describe("[COMP:app-web/slash-command-autocomplete] visible command UX", () => {
   });
 
   it("shows no-match feedback instead of silently closing", async () => {
-    listInvocableSkillsMock.mockResolvedValue(roster);
+    listSlashCommandsMock.mockResolvedValue(roster);
     await mount();
 
     await type("/missing");
@@ -153,7 +175,7 @@ describe("[COMP:app-web/slash-command-autocomplete] visible command UX", () => {
   });
 
   it("turns a pick into a command strip and removes only its prefix", async () => {
-    listInvocableSkillsMock.mockResolvedValue(roster);
+    listSlashCommandsMock.mockResolvedValue(roster);
     await mount();
     await type("/go");
     await act(async () => {});
@@ -186,5 +208,28 @@ describe("[COMP:app-web/slash-command-autocomplete] visible command UX", () => {
     expect(
       container!.querySelector('[data-testid="slash-command-indicator"]'),
     ).toBeNull();
+  });
+
+  it("selects and renders a generated workflow command", async () => {
+    listSlashCommandsMock.mockResolvedValue(roster);
+    await mount();
+    await type("/workflow_daily");
+    await act(async () => {});
+
+    const workflow = container!.querySelector<HTMLButtonElement>(
+      '[role="option"][aria-label="Run /workflow_daily_digest"]',
+    )!;
+    expect(workflow).toBeTruthy();
+    expect(workflow.textContent).toContain("Daily Digest");
+    await act(async () => {
+      workflow.dispatchEvent(
+        new MouseEvent("mousedown", { bubbles: true, cancelable: true }),
+      );
+    });
+
+    expect(input().value).toBe("/workflow_daily_digest ");
+    expect(
+      container!.querySelector(".composer-command-chip")?.textContent,
+    ).toBe("/workflow_daily_digest");
   });
 });
