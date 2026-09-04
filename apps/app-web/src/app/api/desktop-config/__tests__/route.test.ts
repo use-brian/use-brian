@@ -8,9 +8,7 @@
  * `localhost`, an `api.` sibling, and same-host `:4000` — a reverse-proxied
  * self-host serving its API on 443 under an unrelated name was unreachable).
  *
- * The module reads its env at import time (module-scope consts, mirroring how
- * Next inlines `NEXT_PUBLIC_*` at build), so every case re-imports under
- * `vi.resetModules()` with the env set first.
+ * The route resolves runtime environment on every uncached request.
  *
  * Spec: docs/architecture/features/app-desktop.md → "The declared API".
  */
@@ -19,6 +17,8 @@ import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 
 const ENV_KEYS = [
   "NEXT_PUBLIC_API_URL",
+  "PUBLIC_API_URL",
+  "API_DOMAIN",
   "API_URL",
   "NEXT_PUBLIC_DOC_SYNC_URL",
   "NEXT_PUBLIC_USEBRIAN_EDITION",
@@ -42,7 +42,6 @@ afterEach(() => {
   }
 });
 
-/** Import the route fresh so its module-scope env reads re-evaluate. */
 async function getConfig(): Promise<{ status: number; body: Record<string, unknown> }> {
   const { GET } = await import("../route");
   const res = await GET();
@@ -63,13 +62,13 @@ describe("[COMP:app-web/desktop-config-route] GET /api/desktop-config", () => {
     expect(body.apiUrl).toBe("https://backend.example.com");
   });
 
-  it("falls back to the server-side API_URL when only that is set", async () => {
+  it("never exposes the private server-side API_URL", async () => {
     process.env.API_URL = "https://api.example.com";
-    expect((await getConfig()).body.apiUrl).toBe("https://api.example.com");
+    expect((await getConfig()).body.apiUrl).toBe("");
   });
 
-  it("falls back to the local dev API when neither is set", async () => {
-    expect((await getConfig()).body.apiUrl).toBe("http://localhost:4000");
+  it("returns an empty public base when none is declared", async () => {
+    expect((await getConfig()).body.apiUrl).toBe("");
   });
 
   it("reports the doc-sync origin when pinned, else null", async () => {
@@ -78,7 +77,7 @@ describe("[COMP:app-web/desktop-config-route] GET /api/desktop-config", () => {
 
     vi.resetModules();
     delete process.env.NEXT_PUBLIC_DOC_SYNC_URL;
-    expect((await getConfig()).body.docSyncUrl).toBeNull();
+    expect((await getConfig()).body.docSyncUrl).toBe("");
   });
 
   it("reports the deployment profile", async () => {
@@ -104,6 +103,8 @@ describe("[COMP:app-web/desktop-config-route] GET /api/desktop-config", () => {
   it("discloses only the public origins the client bundle already carries", async () => {
     process.env.NEXT_PUBLIC_API_URL = "https://api.example.com";
     const { body } = await getConfig();
-    expect(Object.keys(body).sort()).toEqual(["apiUrl", "docSyncUrl", "edition"]);
+    expect(body).toMatchObject({ apiUrl: "https://api.example.com" });
+    expect(body).not.toHaveProperty("internalApiUrl");
+    expect(body).not.toHaveProperty("databaseUrl");
   });
 });

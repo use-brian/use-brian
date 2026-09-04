@@ -1,3 +1,4 @@
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Desktop auth source — the Bearer-token half of the auth seam.
  *
@@ -210,7 +211,7 @@ export function usesGatewayCredentials(): boolean {
   return desktopBridge()?.gatewayCredentials === true;
 }
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "";
+const API_BASE = publicRuntimeConfig().apiUrl ?? "";
 
 /**
  * True when running inside a bundled desktop app whose bridge exposes the token

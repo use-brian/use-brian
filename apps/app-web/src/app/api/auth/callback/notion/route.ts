@@ -1,3 +1,4 @@
+import { INTERNAL_API_URL } from "@/lib/internal-api-url";
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import {
@@ -7,8 +8,10 @@ import {
 } from "@/lib/connector-oauth-state";
 import { parseDesktopConnectorState, buildLoopbackForwardUrl } from "@/lib/connector-oauth-desktop";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
-const NOTION_CLIENT_ID = process.env.NOTION_CLIENT_ID ?? "";
+const NOTION_CLIENT_ID =
+  process.env.PUBLIC_NOTION_CLIENT_ID ??
+  process.env.NOTION_CLIENT_ID ??
+  "";
 const NOTION_CLIENT_SECRET = process.env.NOTION_CLIENT_SECRET ?? "";
 
 /**
@@ -25,7 +28,7 @@ const NOTION_CLIENT_SECRET = process.env.NOTION_CLIENT_SECRET ?? "";
  *
  * INFRA (degraded): requires `NOTION_CLIENT_ID` / `NOTION_CLIENT_SECRET` and a
  * `app.usebrian.ai/...` redirect_uri allowlisted in the Notion OAuth app.
- * Doc-web does not set `NEXT_PUBLIC_NOTION_CLIENT_ID` yet, so the connect
+ * Deployments without a runtime public `NOTION_CLIENT_ID` leave the connect
  * button can't reach this callback until that lands.
  *
  * See docs/architecture/integrations/notion.md.
@@ -121,7 +124,7 @@ export async function GET(request: Request) {
 
     // Send Notion access token to Express backend to store encrypted
     const storeRes = await fetch(
-      `${API_URL}/api/connectors/notion/store-credentials`,
+      `${INTERNAL_API_URL}/api/connectors/notion/store-credentials`,
       {
         method: "POST",
         headers: {

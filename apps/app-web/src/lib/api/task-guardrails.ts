@@ -1,3 +1,4 @@
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Task guardrails SDK — the suggestions tray, workspace rules, and the
  * rejection log behind `/api/task-guardrails`.
@@ -9,7 +10,7 @@
 import { authFetch } from "@/lib/auth-fetch";
 import type { TaskRow } from "@/lib/api/tasks";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 type TaskLane = "extracted" | "assistant";
 

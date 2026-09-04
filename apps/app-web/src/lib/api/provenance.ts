@@ -1,3 +1,4 @@
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * SDK for the provenance side-sheet (app-web).
  *
@@ -16,7 +17,7 @@
 import { authFetch } from "@/lib/auth-fetch";
 import type { Sensitivity } from "@/lib/api/brain";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 export type ProvenanceSourceKind =
   | "memory"

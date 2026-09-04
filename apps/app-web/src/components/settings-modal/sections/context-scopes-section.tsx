@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /** Workspace Team/Project registry and readiness UI. [COMP:app-web/context-scope] */
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
@@ -32,7 +34,7 @@ import {
   type ContextTeam,
 } from "@/lib/api/context-scopes";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 type RosterMember = { userId: string; userName?: string | null; email?: string | null };
 type RosterAssistant = { id: string; name: string };
 

@@ -136,6 +136,47 @@ export function acceptDeclaredApiUrl(rawUrl: string): string | null {
 export type DeclaredDesktopConfig = {
   apiUrl: string
   auth: TargetAuth
+  publicConfig: DesktopPublicConfig
+}
+
+export type DesktopPublicConfig = {
+  apiUrl: string
+  displayApiUrl: string
+  docSyncUrl: string
+  edition: "hosted" | "oss" | "outpost"
+  appUrl: string
+  primaryAuthUrl: string
+  browserExtensionId: string
+  googleClientId: string
+  googleApiKey: string
+  googleProjectNumber: string
+  notionClientId: string
+  fathomClientId: string
+  fathomAuthorizeUrl: string
+}
+
+function parsePublicConfig(record: Record<string, unknown>): DesktopPublicConfig | null {
+  const apiUrl = record.apiUrl
+  const edition = record.edition
+  if (typeof apiUrl !== "string") return null
+  if (edition !== "hosted" && edition !== "oss" && edition !== "outpost") return null
+  const text = (key: keyof DesktopPublicConfig): string =>
+    typeof record[key] === "string" ? record[key] : ""
+  return {
+    apiUrl,
+    displayApiUrl: text("displayApiUrl"),
+    docSyncUrl: text("docSyncUrl"),
+    edition,
+    appUrl: text("appUrl"),
+    primaryAuthUrl: text("primaryAuthUrl"),
+    browserExtensionId: text("browserExtensionId"),
+    googleClientId: text("googleClientId"),
+    googleApiKey: text("googleApiKey"),
+    googleProjectNumber: text("googleProjectNumber"),
+    notionClientId: text("notionClientId"),
+    fathomClientId: text("fathomClientId"),
+    fathomAuthorizeUrl: text("fathomAuthorizeUrl"),
+  }
 }
 
 export function parseDesktopConfig(body: unknown): DeclaredDesktopConfig | null {
@@ -145,11 +186,14 @@ export function parseDesktopConfig(body: unknown): DeclaredDesktopConfig | null 
   if (typeof apiUrl !== "string" || !apiUrl.trim()) return null;
   const accepted = acceptDeclaredApiUrl(apiUrl);
   if (!accepted) return null;
+  const publicConfig = parsePublicConfig(record)
+  if (!publicConfig) return null
   return {
     apiUrl: accepted,
     // Outpost and hosted-profile self-hosts use the browser PKCE bridge. Only
     // explicit OSS has the local-owner session endpoint.
     auth: record.edition === "oss" ? "local-session" : "pkce",
+    publicConfig: { ...publicConfig, apiUrl: accepted },
   };
 }
 
@@ -166,6 +210,7 @@ export interface ResolvedTarget {
   /** The paired backend (no trailing slash). */
   readonly apiUrl: string;
   readonly auth: TargetAuth;
+  readonly publicConfig: DesktopPublicConfig;
   /** Human indicator for the menu/tray/title, e.g. `Local Brain (localhost:3003)`. */
   readonly label: string;
 }
@@ -187,6 +232,7 @@ export interface PersistedTarget {
   readonly apiUrl?: string;
   /** Auth mode declared by desktop-config. Legacy records default local-session. */
   readonly auth?: TargetAuth;
+  readonly publicConfig?: DesktopPublicConfig;
 }
 
 /**
@@ -216,6 +262,21 @@ export function cloudTarget(): ResolvedTarget {
     appUrl: CLOUD_APP_URL,
     apiUrl: CLOUD_API_URL,
     auth: "pkce" as const,
+    publicConfig: {
+      apiUrl: CLOUD_API_URL,
+      displayApiUrl: CLOUD_API_URL,
+      docSyncUrl: "wss://doc-sync.usebrian.ai",
+      edition: "hosted",
+      appUrl: "https://usebrian.ai",
+      primaryAuthUrl: "https://usebrian.ai",
+      browserExtensionId: "nnmbbacnkekaoccmkmlfaghjaamgdpjn",
+      googleClientId: "",
+      googleApiKey: "",
+      googleProjectNumber: "",
+      notionClientId: "",
+      fathomClientId: "",
+      fathomAuthorizeUrl: "https://fathom.video/oauth2/authorize",
+    } satisfies DesktopPublicConfig,
     label: "Use Brian Cloud",
   });
 }
@@ -232,6 +293,7 @@ export function localTarget(
   rawUrl: string = DEFAULT_LOCAL_APP_URL,
   declaredApiUrl?: string | null,
   auth: TargetAuth = "local-session",
+  publicConfig?: DesktopPublicConfig | null,
 ): ResolvedTarget | null {
   const appUrl = normalizeTargetUrl(rawUrl);
   if (!appUrl) return null;
@@ -241,6 +303,15 @@ export function localTarget(
     appUrl,
     apiUrl: declared ?? deriveLocalApiUrl(appUrl),
     auth,
+    publicConfig: publicConfig ?? ({
+      ...cloudTarget().publicConfig,
+      apiUrl: declared ?? deriveLocalApiUrl(appUrl),
+      displayApiUrl: declared ?? deriveLocalApiUrl(appUrl),
+      docSyncUrl: "",
+      edition: auth === "local-session" ? "oss" : "hosted",
+      appUrl: "",
+      primaryAuthUrl: "",
+    } satisfies DesktopPublicConfig),
     label: `Local Brain (${new URL(appUrl).host})`,
   });
 }
@@ -268,12 +339,17 @@ export function parsePersistedTarget(raw: string | null | undefined): PersistedT
   // hand-edited file and for a record written by any other build too.
   const apiUrl = typeof rec.apiUrl === "string" ? acceptDeclaredApiUrl(rec.apiUrl) : null;
   const auth = rec.auth === "pkce" || rec.auth === "local-session" ? rec.auth : null;
+  const publicConfig =
+    rec.publicConfig && typeof rec.publicConfig === "object" && !Array.isArray(rec.publicConfig)
+      ? parsePublicConfig(rec.publicConfig as Record<string, unknown>)
+      : null
   return Object.freeze({
     v: 1 as const,
     kind: rec.kind,
     ...(appUrl ? { appUrl } : {}),
     ...(apiUrl ? { apiUrl } : {}),
     ...(auth ? { auth } : {}),
+    ...(publicConfig ? { publicConfig } : {}),
   });
 }
 
@@ -283,6 +359,7 @@ export function serializePersistedTarget(
   appUrl?: string,
   apiUrl?: string | null,
   auth?: TargetAuth,
+  publicConfig?: DesktopPublicConfig | null,
 ): string {
   const normalized = appUrl ? normalizeTargetUrl(appUrl) : null;
   const normalizedApi = apiUrl ? acceptDeclaredApiUrl(apiUrl) : null;
@@ -292,6 +369,7 @@ export function serializePersistedTarget(
     ...(normalized ? { appUrl: normalized } : {}),
     ...(normalizedApi ? { apiUrl: normalizedApi } : {}),
     ...(auth ? { auth } : {}),
+    ...(publicConfig ? { publicConfig } : {}),
   });
 }
 
@@ -308,6 +386,7 @@ export function resolveTargetFromPersisted(raw: string | null | undefined): Reso
     rec.appUrl ?? DEFAULT_LOCAL_APP_URL,
     rec.apiUrl,
     rec.auth ?? "local-session",
+    rec.publicConfig,
   ) ?? cloudTarget();
 }
 

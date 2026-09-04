@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { usePathname } from "next/navigation";
 import {
@@ -23,7 +25,7 @@ import { promptDialog } from "@/components/ui/prompt-dialog";
 import { Button } from "@/components/ui/button";
 import { SiriSetupCard } from "./siri-setup-card";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 export function GeneralSection() {
   const t = useT();

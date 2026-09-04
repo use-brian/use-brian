@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Connect-a-knowledge-source modal (Studio → Knowledge, plan D1).
  *
@@ -23,7 +25,7 @@ import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 export type ConnectorInstanceOption = {
   id: string;

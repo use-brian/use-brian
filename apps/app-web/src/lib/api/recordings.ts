@@ -1,3 +1,4 @@
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Recordings SDK (app-web) — the 3-step long-recording upload flow
  * (recording-to-brain). Mirrors the backend route `routes/recordings.ts`:
@@ -15,7 +16,7 @@
 
 import { authFetch } from "@/lib/auth-fetch";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 export type RecordingEstimate = {
   recordingId: string;

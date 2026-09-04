@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * API keys tab for the assistant detail page (app-web).
  *
@@ -40,7 +42,7 @@ import { ModelTierRow, isModelAlias, type ModelAlias } from "@/components/studio
 
 const DOCS_HREF = `${webAppUrl()}/docs/api`;
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 type ApiKeyScope = "chat" | "agent";
 type ApiKeyAudience = "external" | "internal";

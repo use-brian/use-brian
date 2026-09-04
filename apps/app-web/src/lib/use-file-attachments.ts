@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Shared chat-attachment state for every doc surface where a human chats
  * with the AI: the side-panel / mobile `FloatingChat` and the comment
@@ -30,7 +32,7 @@ import { authFetch } from "@/lib/auth-fetch";
 import { useT } from "@/lib/i18n/client";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 /**
  * Client-side upload ceiling. Mirrors the backend `MAX_FILE_SIZE` in

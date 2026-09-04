@@ -1,3 +1,4 @@
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * SDK for the Brain page (app-web).
  *
@@ -7,7 +8,7 @@
  * `authFetch` with typed signatures over the company-brain retrieval
  * routes (docs/architecture/brain/retrieval-layer.md). The wire contract
  * is identical to apps/web; this file diverges only in its import paths
- * (`@/lib/auth-fetch`, `NEXT_PUBLIC_API_URL`), the same convention as
+ * (`@/lib/auth-fetch`, runtime public API config), the same convention as
  * `lib/api/views.ts` / `lib/api/approvals.ts`.
  */
 
@@ -25,7 +26,7 @@ import type {
   BrainPrimitive as InboxPrimitive,
 } from "@/lib/api/brain-inbox";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 export type EntityKind =
   | "person"

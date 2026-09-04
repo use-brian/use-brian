@@ -8370,7 +8370,7 @@ export const en = {
   drivePicker: {
     connectFirst: "Connect Google Docs, Sheets & Slides first.",
     noToken: "Could not obtain a Drive access token.",
-    notConfigured: "Google Picker isn't configured yet. Ask an admin to set GOOGLE_API_KEY and GOOGLE_PROJECT_NUMBER, then reconnect Google.",
+    notConfigured: "Google Picker isn't configured yet. Ask an admin to set PUBLIC_GOOGLE_API_KEY and GOOGLE_PROJECT_NUMBER, then reconnect Google.",
     loading: "The Google Picker is still loading. Try again in a moment.",
     pickerFailed: "Picker failed to open",
     notConfiguredDeployment: "Google Picker isn't configured yet on this deployment.",

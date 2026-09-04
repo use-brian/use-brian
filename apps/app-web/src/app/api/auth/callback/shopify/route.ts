@@ -13,7 +13,7 @@ import {
 } from "@/lib/shopify-oauth";
 import { normalizeShopifyShopDomain } from "@/lib/shopify-domain";
 // SERVER-side hop to the API — must be INTERNAL_API_URL, never the browser's
-// NEXT_PUBLIC_API_URL. next.config inlines that one as "" in development so the
+// runtime public API URL. It is empty in development so the
 // browser goes through the /api rewrite; a Route Handler runs in Node, where a
 // relative URL has no origin and fetch throws ERR_INVALID_URL. That is why the
 // Shopify connect died at store-credentials on 2026-07-29 AFTER a fully
@@ -23,7 +23,7 @@ import { normalizeShopifyShopDomain } from "@/lib/shopify-domain";
 // lib/internal-api-url.ts.
 import { INTERNAL_API_URL as API_URL } from "@/lib/internal-api-url";
 const SHOPIFY_CLIENT_ID =
-  process.env.SHOPIFY_CLIENT_ID ?? process.env.NEXT_PUBLIC_SHOPIFY_CLIENT_ID ?? "";
+  process.env.SHOPIFY_CLIENT_ID ?? "";
 const SHOPIFY_CLIENT_SECRET = process.env.SHOPIFY_CLIENT_SECRET ?? "";
 
 // Keep in sync with SHOPIFY_API_VERSION in packages/api/src/shopify/client.ts

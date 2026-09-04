@@ -1,3 +1,4 @@
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Resolvers for the inline `@`-mention popup (people + pages tabs).
  *
@@ -24,7 +25,7 @@ import type {
   PersonMentionItem,
 } from "@/components/doc/mentions/mention-popup";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 /** How many rows the popup shows for an empty query (the "recent" cue). */
 const EMPTY_QUERY_CAP = 8;

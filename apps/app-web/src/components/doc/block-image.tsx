@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 // [COMP:app-web/block-image]
 /**
  * Phase 2 media block — `kind: 'image'`.
@@ -42,7 +44,7 @@ import {
 } from "./doc-file-url";
 import { UploadSpinner } from "./upload-spinner";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 type ImageBlock = {
   kind: "image";

@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Comment thread body — the expanded thread content shared by the two shells
  * that can host it: the on-content overlay (`comment-thread-popover.tsx`, used
@@ -49,7 +51,7 @@ import { useRecordingUpload } from "@/lib/recordings/use-recording-upload";
 import { dispatchRecordingParticipantsUpdated } from "@/lib/recordings/recording-events";
 import { useFileDrop } from "@/lib/use-file-drop";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 // The presentational atoms (`Avatar`, `AuthorAvatar`, `ThreadGutter`,
 // `relativeTime`, and the `CommentAuthor` type) now live in

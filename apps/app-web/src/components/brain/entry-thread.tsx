@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * EntryThread — the entry page's inline Q&A thread (the Notion "Comments"
  * analog for a brain entry). Renders as the last section of the
@@ -71,7 +73,7 @@ import {
   type InspectionSession,
 } from "@/lib/api/brain-inbox";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 /**
  * Model-facing context block prefixed to the thread's first message.

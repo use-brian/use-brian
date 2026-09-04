@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Feed first run — extracted from `feed-home.tsx`'s `EmptyHome` when the home
  * dashboard was retired (feed-revamp.md §8). It renders at the surface index
@@ -38,7 +40,7 @@ import { useT, format } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 export function FeedOnboarding({
   canCreateBrand,

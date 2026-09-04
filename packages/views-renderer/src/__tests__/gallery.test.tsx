@@ -141,6 +141,23 @@ describe('[COMP:views/gallery] cover image', () => {
     expect(html).toMatch(/aspect-\[16\/9\]/)
   })
 
+  it('uses the host runtime API origin for cover previews', () => {
+    const host = globalThis as typeof globalThis & {
+      __USE_BRIAN_PUBLIC_CONFIG__?: { apiUrl: string }
+    }
+    host.__USE_BRIAN_PUBLIC_CONFIG__ = { apiUrl: 'https://api.example.com' }
+    try {
+      const html = renderToStaticMarkup(
+        Gallery({ rows: [row({})], columns: [TITLE_COL, COVER_COL] }) as ReactElement,
+      )
+      expect(html).toContain(
+        'src="https://api.example.com/api/files/img-cover.png/preview"',
+      )
+    } finally {
+      delete host.__USE_BRIAN_PUBLIC_CONFIG__
+    }
+  })
+
   it('renders the placeholder gradient when no image is present', () => {
     const html = renderToStaticMarkup(
       Gallery({

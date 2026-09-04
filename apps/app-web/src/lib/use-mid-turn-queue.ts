@@ -1,12 +1,14 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { UseMessageStreamResult } from "@use-brian/chat-ui";
 import { authFetch } from "./auth-fetch";
 
 // Same resolution every chat host uses for its own turns — kept local rather
 // than imported so this hook has no dependency on which host mounted it.
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 /**
  * Mid-turn input, client side — "send while the assistant is working".

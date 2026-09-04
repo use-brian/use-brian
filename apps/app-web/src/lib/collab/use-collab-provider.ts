@@ -20,11 +20,12 @@ import * as Y from "yjs";
 import { HocuspocusProvider } from "@hocuspocus/provider";
 import type { IndexeddbPersistence } from "y-indexeddb";
 import { getValidAccessToken } from "@/lib/auth-fetch";
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 import { hasLoadedState } from "@/lib/collab/doc-empty";
 
 /**
  * Resolve the sync server URL for this page session. Order:
- *   1. `NEXT_PUBLIC_DOC_SYNC_URL` if set — explicit override (staging,
+ *   1. Runtime public doc-sync URL if set — explicit override (staging,
  *      local-against-prod, a future host move).
  *   2. Otherwise derive it from where the app is served: only the prod doc
  *      host dials the prod sync host. Previews (`*.vercel.app`) and local dev
@@ -34,8 +35,8 @@ import { hasLoadedState } from "@/lib/collab/doc-empty";
  *      localhost if that build var isn't exposed.
  */
 function resolveSyncUrl(): string {
-  if (process.env.NEXT_PUBLIC_DOC_SYNC_URL)
-    return process.env.NEXT_PUBLIC_DOC_SYNC_URL;
+  if (publicRuntimeConfig().docSyncUrl)
+    return publicRuntimeConfig().docSyncUrl;
   if (
     typeof window !== "undefined" &&
     window.location.hostname === "app.usebrian.ai"

@@ -11,10 +11,12 @@
 
 import {
   CLOUD_APP_URL,
+  cloudTarget,
   deriveApiUrl,
   resolveTargetFromPersisted,
   type TargetAuth,
   type TargetKind,
+  type DesktopPublicConfig,
 } from "./target-store.js";
 
 /** The custom URL scheme the app registers for deep links + the auth callback. */
@@ -49,6 +51,8 @@ export interface DesktopConfig {
   readonly target: TargetKind;
   /** The target's auth strategy: system-browser PKCE (cloud) or the local-owner session mint. */
   readonly targetAuth: TargetAuth;
+  /** Public deployment metadata injected before the bundled renderer starts. */
+  readonly publicConfig: DesktopPublicConfig;
   /** Human indicator for the menu/tray/title, e.g. `Local Brain (localhost:3003)`. */
   readonly targetLabel: string;
   /**
@@ -142,6 +146,7 @@ export function resolveConfig(
     apiUrl,
     target: target?.kind ?? "cloud",
     targetAuth: target?.auth ?? "pkce",
+    publicConfig: target?.publicConfig ?? cloudTarget().publicConfig,
     targetLabel: envAppUrl
       ? `Dev override (${new URL(appUrl).host})`
       : target?.label ?? "Use Brian Cloud",

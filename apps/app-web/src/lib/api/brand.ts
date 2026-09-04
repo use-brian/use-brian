@@ -1,3 +1,4 @@
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * The Feed's read-only window onto the workspace brand.
  *
@@ -8,7 +9,7 @@ import { authFetch } from "@/lib/auth-fetch";
 import type { BrandRecord } from "@use-brian/shared/brand";
 
 const apiUrl = (path: string) =>
-  `${process.env.NEXT_PUBLIC_API_URL ?? ""}${path}`;
+  `${publicRuntimeConfig().apiUrl ?? ""}${path}`;
 
 /**
  * The workspace's default brand, or null.

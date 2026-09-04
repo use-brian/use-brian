@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Studio shell (app-web) — the doc-style `StudioTopbar`, a `<md` mobile
  * section strip, and the section page pane, in one scroll container.
@@ -36,7 +38,7 @@ import { StudioTopbar } from "@/components/studio/studio-topbar";
 import { useWorkspaceFetch } from "@/contexts/workspace-context";
 import { STUDIO_GROUPS } from "@/lib/studio-nav";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 export default function StudioLayout({ children }: { children: React.ReactNode }) {
   const t = useT();

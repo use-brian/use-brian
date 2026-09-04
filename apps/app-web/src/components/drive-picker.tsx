@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Google Drive Picker (app-web).
  *
@@ -10,8 +12,8 @@
  * the caller via `onPicked`; the caller is responsible for POSTing them to
  * `/api/connectors/gdrive/authorized-files`.
  *
- * Managed connections use `NEXT_PUBLIC_GOOGLE_API_KEY` and
- * `NEXT_PUBLIC_GOOGLE_PROJECT_NUMBER`. BYO connections receive the matching
+ * Managed connections use the runtime public Google API key and project number.
+ * BYO connections receive the matching
  * customer Picker key + app id from the exact-instance access-token response.
  *
  * See docs/architecture/integrations/mcp.md → "The `gdrive` connector".
@@ -24,9 +26,9 @@ import Script from "next/script";
 import { authFetch } from "@/lib/auth-fetch";
 import { useT } from "@/lib/i18n/client";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
-const GOOGLE_API_KEY = process.env.NEXT_PUBLIC_GOOGLE_API_KEY ?? "";
-const GOOGLE_PROJECT_NUMBER = process.env.NEXT_PUBLIC_GOOGLE_PROJECT_NUMBER ?? "";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
+const GOOGLE_API_KEY = publicRuntimeConfig().googleApiKey;
+const GOOGLE_PROJECT_NUMBER = publicRuntimeConfig().googleProjectNumber;
 
 export type PickedFile = {
   id: string;

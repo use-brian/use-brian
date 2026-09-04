@@ -1,3 +1,4 @@
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * SDK for the Feed surface — thin typed wrappers around the shared
  * `/api/distribution/*` wire contract (open content planning plus hosted
@@ -31,7 +32,7 @@ import type {
   FeedPostFormat,
 } from "@/lib/feed-post-versions";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 export type FeedCloudLink = {
   state: "native" | "disabled" | "unlinked" | "pending" | "linked" | "plan_required" | "error";
@@ -104,8 +105,8 @@ export async function unlinkFeedCloud(workspaceId: string): Promise<void> {
 /**
  * Build an `/api/...` URL with query params.
  *
- * `new URL()` cannot be used here: in development `next.config.ts` sets
- * `NEXT_PUBLIC_API_URL` to `""` on purpose so the browser goes through the
+ * `new URL()` cannot be used here: in development runtime config uses an empty
+ * API URL on purpose so the browser goes through the
  * `/api` rewrite, and `new URL("/api/…")` throws `Invalid URL` without a base.
  * That threw inside the SDK before any fetch fired, so callers saw a bare
  * "failed to load" with NO request in the network tab - which is exactly how

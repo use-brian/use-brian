@@ -1,3 +1,4 @@
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Voice-clip hand-off — the SHORT lane of the live-capture fork
  * (docs/architecture/media/live-capture.md → "The short lane").
@@ -19,7 +20,7 @@
 
 import { authFetch } from "@/lib/auth-fetch";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 /**
  * Upload the clip to the chat file cache. Returns the `fileId` to ride the

@@ -8131,7 +8131,7 @@ export const ja: Dictionary = {
   drivePicker: {
     connectFirst: "先に Google ドキュメント・スプレッドシート・スライドを接続してください。",
     noToken: "ドライブのアクセストークンを取得できませんでした。",
-    notConfigured: "Google ピッカーがまだ設定されていません。管理者に GOOGLE_API_KEY と GOOGLE_PROJECT_NUMBER の設定を依頼し、Google を再接続してください。",
+    notConfigured: "Google ピッカーがまだ設定されていません。管理者に PUBLIC_GOOGLE_API_KEY と GOOGLE_PROJECT_NUMBER の設定を依頼し、Google を再接続してください。",
     loading: "Google ピッカーを読み込み中です。少し待ってからもう一度お試しください。",
     pickerFailed: "ピッカーを開けませんでした",
     notConfiguredDeployment: "このデプロイでは Google ピッカーがまだ設定されていません。",

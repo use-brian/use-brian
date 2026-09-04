@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Follow one acting goal's authenticated SSE feed and fold its background
  * callee events through the normal chat reasoning/tool activity UI.
@@ -24,7 +26,7 @@ import { useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 import { createVisibilityGate } from "@/lib/workspace-events";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 export type GoalExecutionActivityState = {
   status: string | null;

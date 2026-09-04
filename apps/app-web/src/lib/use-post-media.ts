@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Upload and resolve images for a post (feed-revamp-depth D33).
  *
@@ -38,7 +40,7 @@ export type MediaUploadResult = {
 };
 
 const apiUrl = (path: string) =>
-  `${process.env.NEXT_PUBLIC_API_URL ?? ""}${path}`;
+  `${publicRuntimeConfig().apiUrl ?? ""}${path}`;
 
 export function usePostMedia(workspaceId: string) {
   const [uploading, setUploading] = useState(false);

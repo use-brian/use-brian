@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Ask & update KB — the embedded chat panel on the focused knowledge source
  * (Studio → Knowledge master-detail, plan D4).
@@ -42,7 +44,7 @@ import { listWorkspaceAssistants } from "@/lib/api/views";
 import { pickPrimaryAssistant } from "@/lib/primary-assistant";
 import { ArrowUp, Square } from "lucide-react";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 export type KbChatScope =
   | { kind: "source"; sourceId: string }

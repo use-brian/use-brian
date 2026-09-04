@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 // [COMP:app-web/settings-privacy-section] — see docs/architecture/features/privacy-controls.md
 // Ported from apps/web/src/app/(app)/settings/privacy/page.tsx (PrivacyPage → PrivacySection).
 
@@ -22,7 +24,7 @@ import {
   type SupportDiagnosticStatus,
 } from "@/lib/support-diagnostics";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 type ConflictAssistant = { id: string; name: string; memberCount: number };
 type ConflictTeam = { id: string; name: string; memberCount?: number };

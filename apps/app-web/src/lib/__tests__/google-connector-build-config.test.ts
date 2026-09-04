@@ -9,17 +9,22 @@ function read(relativeUrl: string): string {
 describe("[COMP:app-web/connector-oauth-callbacks] Google connector deployment configuration", () => {
   it("keeps the OAuth secret runtime-only while exposing public browser metadata", () => {
     const nextConfig = read("../../../next.config.ts");
+    const runtimeConfig = read("../runtime-public-config.ts");
     const callback = read("../../app/api/auth/callback/google-connector/route.ts");
     const turbo = JSON.parse(read("../../../../../turbo.json")) as {
       tasks: { build: { env: string[] } };
     };
 
-    expect(nextConfig).toContain("process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID");
-    expect(nextConfig).toContain("process.env.NEXT_PUBLIC_GOOGLE_API_KEY");
-    expect(nextConfig).toContain("process.env.NEXT_PUBLIC_GOOGLE_PROJECT_NUMBER");
+    expect(runtimeConfig).toContain("env.GOOGLE_CLIENT_ID");
+    expect(runtimeConfig).toContain("env.PUBLIC_GOOGLE_API_KEY");
+    expect(runtimeConfig).toContain("env.GOOGLE_PROJECT_NUMBER");
+    expect(nextConfig).not.toContain("NEXT_PUBLIC_GOOGLE_CLIENT_ID:");
+    expect(nextConfig).not.toContain("NEXT_PUBLIC_GOOGLE_API_KEY:");
+    expect(nextConfig).not.toContain("NEXT_PUBLIC_GOOGLE_PROJECT_NUMBER:");
     expect(nextConfig).not.toContain("GOOGLE_CLIENT_SECRET");
     expect(turbo.tasks.build.env).not.toContain("GOOGLE_CLIENT_SECRET");
-    expect(callback).toContain('process.env.GOOGLE_CLIENT_ID ?? ""');
+    expect(callback).toContain("process.env.PUBLIC_GOOGLE_CLIENT_ID");
+    expect(callback).toContain("process.env.GOOGLE_CLIENT_ID");
     expect(callback).toContain('process.env.GOOGLE_CLIENT_SECRET ?? ""');
   });
 

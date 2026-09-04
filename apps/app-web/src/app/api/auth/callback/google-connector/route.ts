@@ -1,3 +1,4 @@
+import { INTERNAL_API_URL } from "@/lib/internal-api-url";
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import {
@@ -8,8 +9,10 @@ import {
 import { parseDesktopConnectorState, buildLoopbackForwardUrl } from "@/lib/connector-oauth-desktop";
 import { isOssEdition } from "@/lib/edition";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID ?? "";
+const GOOGLE_CLIENT_ID =
+  process.env.PUBLIC_GOOGLE_CLIENT_ID ??
+  process.env.GOOGLE_CLIENT_ID ??
+  "";
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET ?? "";
 
 /**
@@ -96,7 +99,7 @@ export async function GET(request: Request) {
 
     try {
       const redirectUri = `${appOrigin}/api/auth/callback/google-connector`;
-      const exchangeRes = await fetch(`${API_URL}/api/connectors/gdrive/oauth-callback`, {
+      const exchangeRes = await fetch(`${INTERNAL_API_URL}/api/connectors/gdrive/oauth-callback`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -201,7 +204,7 @@ export async function GET(request: Request) {
     // onto their own account. `createNew` ("Add another") mints a FRESH
     // instance (the connected email doubles as its nickname). The two are
     // mutually exclusive; reconnect wins.
-    const storeRes = await fetch(`${API_URL}/api/connectors/${connector}/store-credentials`, {
+    const storeRes = await fetch(`${INTERNAL_API_URL}/api/connectors/${connector}/store-credentials`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

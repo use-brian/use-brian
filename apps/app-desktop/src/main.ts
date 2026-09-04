@@ -73,6 +73,7 @@ import {
   serializePersistedTarget,
   targetWindowTitle,
   type DeclaredDesktopConfig,
+  type DesktopPublicConfig,
   type TargetAuth,
   type TargetKind,
 } from "./target-store.js";
@@ -1397,6 +1398,7 @@ async function validateLocalTarget(
   apiUrl: string
   declaredApiUrl: string | null
   auth: TargetAuth
+  publicConfig: DesktopPublicConfig | null
 }>> {
   console.log(`[gateway-auth] validating app ${appUrl}`);
   const config = await probeWithVisibleGatewayFallback(
@@ -1412,6 +1414,7 @@ async function validateLocalTarget(
     appUrl,
     config.value?.apiUrl,
     config.value?.auth ?? "local-session",
+    config.value?.publicConfig,
   ) ?? localTarget(appUrl);
   const apiUrl = target?.apiUrl ?? fallbackApiUrl;
   const health = await probeWithVisibleGatewayFallback(
@@ -1429,6 +1432,7 @@ async function validateLocalTarget(
       apiUrl,
       declaredApiUrl: config.value?.apiUrl ?? null,
       auth: target?.auth ?? "local-session",
+      publicConfig: config.value?.publicConfig ?? null,
     },
   };
 }
@@ -1443,9 +1447,13 @@ function persistTargetAndRelaunch(
   appUrl?: string,
   apiUrl?: string | null,
   auth?: TargetAuth,
+  publicConfig?: DesktopPublicConfig | null,
 ): void {
   try {
-    writeFileSync(targetFile(), serializePersistedTarget(kind, appUrl, apiUrl, auth));
+    writeFileSync(
+      targetFile(),
+      serializePersistedTarget(kind, appUrl, apiUrl, auth, publicConfig),
+    );
     // Bundled bearer tokens are target-specific. Never send a cloud token to a
     // local deployment (or vice versa) after switching and relaunching.
     if (cfg.bundled) clearStoredTokens();
@@ -1460,6 +1468,10 @@ function persistTargetAndRelaunch(
 /** The last local address ever used (remembered across a switch to cloud). */
 function rememberedLocalAppUrl(): string {
   return parsePersistedTarget(readPersistedTargetRaw())?.appUrl ?? DEFAULT_LOCAL_APP_URL;
+}
+
+function rememberedLocalPublicConfig(): DesktopPublicConfig | null {
+  return parsePersistedTarget(readPersistedTargetRaw())?.publicConfig ?? null;
 }
 
 /**
@@ -1600,6 +1612,7 @@ function switchTargetFromMenu(): void {
       rememberedLocalAppUrl(),
       rememberedLocalApiUrl(),
       rememberedLocalAuth(),
+      rememberedLocalPublicConfig(),
     );
     return;
   }
@@ -1663,7 +1676,10 @@ async function loadApp(
     // The bundled renderer loads from file://, so it has no env: hand it the API
     // base (and the capture/record intent) via the query string. The client reads
     // `?api=` to know which backend to call with its Bearer token.
-    const query: Record<string, string> = { api: cfg.apiUrl };
+    const query: Record<string, string> = {
+      api: cfg.apiUrl,
+      publicConfig: JSON.stringify(cfg.publicConfig),
+    };
     if (opts.capture) query.capture = "1";
     if (opts.record) query.record = "1";
     if (hasUseBrianPrompt) query.useBrian = "1";
@@ -3377,6 +3393,7 @@ if (!gotLock) {
       normalized.appUrl,
       declaredApiUrl,
       declaredConfig?.auth ?? "local-session",
+      declaredConfig?.publicConfig,
     ) ?? normalized;
     pendingLocalGatewayUrl = target.appUrl;
     const validation = await validateLocalTarget(target.appUrl, target.apiUrl).finally(() => {
@@ -3394,6 +3411,7 @@ if (!gotLock) {
       target.appUrl,
       resolvedDeclaredApiUrl,
       validation.value.auth,
+      validation.value.publicConfig,
     ) ?? target;
     // A short delay (not setImmediate) so the ok-reply actually flushes to the
     // renderer and the landing paints "Restarting..." before the process dies.
@@ -3404,6 +3422,7 @@ if (!gotLock) {
         resolvedTarget.appUrl,
         resolvedDeclaredApiUrl,
         resolvedTarget.auth,
+        validation.value.publicConfig,
       ),
       150,
     );
@@ -3415,6 +3434,7 @@ if (!gotLock) {
       rememberedLocalAppUrl(),
       rememberedLocalApiUrl(),
       rememberedLocalAuth(),
+      rememberedLocalPublicConfig(),
     ),
   );
 

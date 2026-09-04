@@ -1,8 +1,7 @@
+import { INTERNAL_API_URL } from "@/lib/internal-api-url";
 import { cookies } from "next/headers";
 import { notFound, redirect } from "next/navigation";
 import { resolveLegacyPath } from "@/lib/legacy-paths";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
 type Team = { id: string; name: string };
 
@@ -56,7 +55,7 @@ export default async function LegacyPathPage(props: {
 
   let teams: Team[] = [];
   try {
-    const res = await fetch(`${API_URL}/api/workspaces`, {
+    const res = await fetch(`${INTERNAL_API_URL}/api/workspaces`, {
       method: "GET",
       headers: { Authorization: `Bearer ${accessToken}` },
       cache: "no-store",

@@ -79,6 +79,8 @@ docker pull ghcr.io/use-brian/doc-sync:latest
 
 | Service | Image |
 |---|---|
+| API + workers | `ghcr.io/use-brian/api` |
+| Authenticated app | `ghcr.io/use-brian/app-web` |
 | Auth web | `ghcr.io/use-brian/auth-web` |
 | Browser relay | `ghcr.io/use-brian/browser-relay` |
 | Discord connector | `ghcr.io/use-brian/discord-connector` |
@@ -89,9 +91,51 @@ docker pull ghcr.io/use-brian/doc-sync:latest
 | WeChat desktop bridge | `ghcr.io/use-brian/wechat-desktop-bridge` |
 
 Use `latest` for the current `main` build, `develop` for the development branch,
-`v*` tags for releases, or `sha-<commit>` to pin an exact build. These images
-cover the standalone services; use the `pnpm` quick start above to run the full
-self-hosted app locally.
+`v*` tags for releases, or `sha-<commit>` to pin an exact build. The API image
+listens on port `4000` and requires a migrated PostgreSQL database. The app image
+listens on port `3003`. Configure it at container startup with `API_DOMAIN`,
+`DOC_SYNC_DOMAIN`, `APP_DOMAIN`, and `USEBRIAN_EDITION`; use `API_URL` separately
+for its private server-to-server API address. The server injects the allowlisted
+public values into the initial HTML, so changing domains requires recreating the
+container and reloading the page, not rebuilding the image. Desktop applications,
+browser extensions, and the Firefox native companion remain native installable
+artifacts rather than server containers.
+
+```yaml
+app-web:
+  image: ghcr.io/use-brian/app-web:latest
+  environment:
+    APP_DOMAIN: app.brian.customer.example
+    API_DOMAIN: api.brian.customer.example
+    DOC_SYNC_DOMAIN: docs.brian.customer.example
+    API_URL: http://api:4000
+    USEBRIAN_EDITION: oss
+```
+
+Public runtime options are allowlisted before they reach browser JavaScript:
+
+| Variable | Purpose |
+|---|---|
+| `APP_DOMAIN` | Public app hostname and default app-host classification |
+| `API_DOMAIN` | Public HTTPS API hostname |
+| `DOC_SYNC_DOMAIN` | Public WSS document-sync hostname |
+| `APP_HOSTS` | Additional comma-separated app hostnames or `.suffix` matchers |
+| `USEBRIAN_EDITION` | `hosted`, `oss`, or `outpost` UI capabilities |
+| `PUBLIC_APP_URL` | Marketing and primary web application URL override |
+| `PUBLIC_API_URL` | Explicit public API URL override, including scheme |
+| `PUBLIC_DISPLAY_API_URL` | Absolute API URL rendered in copied configuration |
+| `PUBLIC_DOC_SYNC_URL` | Explicit public document-sync URL override |
+| `PUBLIC_PRIMARY_AUTH_URL` | Public primary authentication origin |
+| `PUBLIC_BROWSER_EXTENSION_ID` | Browser extension id override |
+| `GOOGLE_CLIENT_ID` | Public Google OAuth client id |
+| `PUBLIC_GOOGLE_API_KEY` | Referrer-restricted Google browser API key |
+| `GOOGLE_PROJECT_NUMBER` | Google Drive Picker project number |
+| `NOTION_CLIENT_ID` | Public Notion OAuth client id |
+| `FATHOM_CLIENT_ID` | Public Fathom OAuth client id |
+| `PUBLIC_FATHOM_AUTHORIZE_URL` | Fathom authorization endpoint override |
+
+Only these public values are serialized. Database URLs, OAuth client secrets,
+JWTs, connector secrets, and encryption keys remain server-only.
 
 ### Your data stays yours
 

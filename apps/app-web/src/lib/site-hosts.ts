@@ -11,7 +11,7 @@
 
 /**
  * The deployment's own origins — the ONLY config that decides app vs
- * customer-site routing. Comma-separated, inlined at build time; entries are
+ * customer-site routing. Comma-separated runtime entries are
  * exact hosts (`app.example.com`) or `.suffix` matchers (`.vercel.app` for
  * platform previews). No product hostname lives in code.
  *
@@ -21,7 +21,12 @@
  * site renderer. Dev (no config) falls back to "localhost family = app,
  * anything else = customer site" so local testing needs no setup.
  */
-const APP_HOSTS = (process.env.NEXT_PUBLIC_APP_HOSTS ?? "")
+const APP_HOSTS = [
+  process.env.APP_HOSTS,
+  process.env.APP_DOMAIN,
+]
+  .filter((value): value is string => Boolean(value))
+  .join(",")
   .split(",")
   .map((h) => h.trim().toLowerCase())
   .filter(Boolean);
@@ -54,7 +59,12 @@ export function isAppHost(host: string): boolean {
 
 /** Lowercased hostname without port from a raw Host / X-Forwarded-Host value. */
 export function normalizeHostHeader(raw: string): string {
-  return raw.split(",")[0].trim().toLowerCase().replace(/:\d+$/, "");
+  const host = raw.split(",")[0].trim().toLowerCase();
+  if (host.startsWith("[")) {
+    const bracket = host.indexOf("]");
+    if (bracket > 0) return host.slice(1, bracket);
+  }
+  return host.replace(/:\d+$/, "");
 }
 
 /** The auth-guarded operator prefixes — mirrors the pre-custom-domain

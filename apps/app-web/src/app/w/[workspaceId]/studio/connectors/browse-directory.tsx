@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * BrowseDirectory (app-web) — the add-connector / browse-skills modal.
  *
@@ -11,11 +13,8 @@
  *     instead of `@use-brian/shared` (app-web does not depend on shared).
  *
  * INFRA NOTE (connector OAuth env): the OAuth "Connect" path builds the Google
- * authorize URL client-side from `NEXT_PUBLIC_GOOGLE_CLIENT_ID`, which must
- * reach the browser bundle as a real `NEXT_PUBLIC_*` build var — Turborepo
- * strict env mode strips bare `GOOGLE_CLIENT_ID` unless it's declared in
- * `use-brian/turbo.json` build.env, which `next.config.ts` maps to it; missing
- * either ships an empty `client_id`. Non-OAuth connectors ("Add" → backend
+ * authorize URL from the allowlisted runtime public config. Missing metadata
+ * produces an empty `client_id`. Non-OAuth connectors ("Add" → backend
  * connect) and the skills tab work regardless. See the connectors page header
  * and docs/architecture/platform/deployment.md → "Turbo strict env mode".
  *
@@ -37,8 +36,8 @@ import {
 } from "@/components/ui/select";
 import { useT } from "@/lib/i18n/client";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
-const GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID ?? "";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
+const GOOGLE_CLIENT_ID = publicRuntimeConfig().googleClientId;
 
 type DirectoryEntry = {
   id: string;

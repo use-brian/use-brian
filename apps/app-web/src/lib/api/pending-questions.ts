@@ -1,3 +1,4 @@
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * SDK for durable current-turn input recovery — app-web port.
  *
@@ -19,7 +20,7 @@
 import type { PendingConfirmation } from "@use-brian/chat-ui";
 import { authFetch } from "@/lib/auth-fetch";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 export type PendingQuestion = {
   approvalId: string;

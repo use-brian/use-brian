@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Teamspace settings modal + "New teamspace" dialog
  * (docs/architecture/features/teamspaces.md → UI).
@@ -62,7 +64,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 export type TeamspaceSettingsTab = "general" | "members";
 

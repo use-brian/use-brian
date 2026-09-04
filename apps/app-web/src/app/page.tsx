@@ -1,12 +1,8 @@
+import { INTERNAL_API_URL } from "@/lib/internal-api-url";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { ossSignedOutRedirect } from "@/lib/oss-entry";
 import { useBrianSuffix } from "@/lib/siri-use-brian";
-
-// `||` not `??`: an empty-string NEXT_PUBLIC_API_URL (e.g. inlined as "" by the
-// bundler when unset at build) must also fall back, else this server-side fetch
-// gets the relative "/api/workspaces" and throws ERR_INVALID_URL.
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
 
 type Team = { id: string; name: string };
 
@@ -60,7 +56,7 @@ export default async function HomePage(props: {
 
   let teams: Team[] = [];
   try {
-    const res = await fetch(`${API_URL}/api/workspaces`, {
+    const res = await fetch(`${INTERNAL_API_URL}/api/workspaces`, {
       method: "GET",
       headers: { Authorization: `Bearer ${accessToken}` },
       cache: "no-store",

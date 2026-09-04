@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Shared doc chat model-tier state: the `standard | pro | max` choice,
  * persisted to one `localStorage` key so every surface (the floating dock,
@@ -20,7 +22,7 @@ import { authFetch } from "@/lib/auth-fetch";
 import { deploymentCapabilities } from "@/lib/edition";
 import { modelTierPlanGateApplies } from "@/lib/plan-gate";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 export type ModelTier = "standard" | "pro" | "max";
 

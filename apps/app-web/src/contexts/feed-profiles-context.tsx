@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Feed workspace context — the app-web replacement for feed-web's
  * `TeamContextProvider` (`apps/feed-web/src/lib/workspace-context.tsx`).
@@ -42,7 +44,7 @@ import {
 } from "@/lib/api/feed";
 import { deploymentCapabilities } from "@/lib/edition";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 export type FeedWorkspaceValue = {
   workspaceId: string;

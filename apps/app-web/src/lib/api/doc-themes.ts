@@ -1,3 +1,4 @@
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * SDK for the doc custom-themes routes (`packages/api/src/routes/doc-themes.ts`,
  * migration 225). Thin typed wrappers over `authFetch` so token refresh is
@@ -15,7 +16,7 @@
 import { authFetch } from "@/lib/auth-fetch";
 import type { DocThemeTokens } from "@/lib/theme";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 type ThemeMoodSeed = "light" | "dark" | "vivid" | "muted";
 export type ThemeAppearance = "light" | "dark";

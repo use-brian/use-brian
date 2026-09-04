@@ -76,7 +76,7 @@ describe("[COMP:app-desktop/target-store] deriveLocalApiUrl", () => {
 describe("[COMP:app-desktop/target-store] targets", () => {
   it("cloudTarget is the shipped default (PKCE auth)", () => {
     const t = cloudTarget();
-    expect(t).toEqual({
+    expect(t).toMatchObject({
       kind: "cloud",
       appUrl: CLOUD_APP_URL,
       apiUrl: CLOUD_API_URL,
@@ -88,7 +88,7 @@ describe("[COMP:app-desktop/target-store] targets", () => {
 
   it("localTarget defaults to the launcher address and derives the paired API + label", () => {
     const t = localTarget();
-    expect(t).toEqual({
+    expect(t).toMatchObject({
       kind: "local",
       appUrl: DEFAULT_LOCAL_APP_URL,
       apiUrl: "http://localhost:4000",
@@ -215,13 +215,15 @@ describe("[COMP:app-desktop/target-store] declared API (GET /api/desktop-config)
   });
 
   it("parses the declared apiUrl out of a config body, tolerating junk", () => {
-    expect(parseDesktopConfig({ apiUrl: PROXIED_API, edition: "oss" })).toEqual({
+    expect(parseDesktopConfig({ apiUrl: PROXIED_API, edition: "oss" })).toMatchObject({
       apiUrl: PROXIED_API,
       auth: "local-session",
+      publicConfig: { apiUrl: PROXIED_API, edition: "oss" },
     });
-    expect(parseDesktopConfig({ apiUrl: PROXIED_API, edition: "outpost" })).toEqual({
+    expect(parseDesktopConfig({ apiUrl: PROXIED_API, edition: "outpost" })).toMatchObject({
       apiUrl: PROXIED_API,
       auth: "pkce",
+      publicConfig: { apiUrl: PROXIED_API, edition: "outpost" },
     });
     expect(parseDesktopConfig({})).toBeNull();
     expect(parseDesktopConfig({ apiUrl: "" })).toBeNull();
@@ -242,6 +244,33 @@ describe("[COMP:app-desktop/target-store] declared API (GET /api/desktop-config)
       apiUrl: PROXIED_API,
     });
     expect(resolveTargetFromPersisted(raw).apiUrl).toBe(PROXIED_API);
+  });
+
+  it("persists the complete public config for the bundled renderer", () => {
+    const declared = parseDesktopConfig({
+      apiUrl: PROXIED_API,
+      displayApiUrl: "https://display.example.com",
+      docSyncUrl: "wss://docs.example.com",
+      edition: "oss",
+      appUrl: "https://www.example.com",
+      primaryAuthUrl: "",
+      browserExtensionId: "extension-id",
+      googleClientId: "google-id",
+      googleApiKey: "picker-key",
+      googleProjectNumber: "123",
+      notionClientId: "notion-id",
+      fathomClientId: "fathom-id",
+      fathomAuthorizeUrl: "https://fathom.example.com/authorize",
+    });
+    expect(declared).not.toBeNull();
+    const raw = serializePersistedTarget(
+      "local",
+      PROXIED_APP,
+      PROXIED_API,
+      declared!.auth,
+      declared!.publicConfig,
+    );
+    expect(resolveTargetFromPersisted(raw).publicConfig).toEqual(declared!.publicConfig);
   });
 
   it("round-trips Outpost PKCE auth through the persisted local target", () => {

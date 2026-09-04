@@ -1,3 +1,4 @@
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Account SDK (app-web) — profile name + avatar.
  *
@@ -19,7 +20,7 @@
 
 import { authFetch } from "@/lib/auth-fetch";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 /** 5 MB — mirrors the backend cap on `POST /api/account/avatar`. */
 export const MAX_AVATAR_BYTES = 5 * 1024 * 1024;

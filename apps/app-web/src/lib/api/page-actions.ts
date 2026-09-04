@@ -1,3 +1,4 @@
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * SDK for page-action buttons (mig 321) — the page-header button strip and
  * the blueprint editor's Actions section.
@@ -14,7 +15,7 @@
 
 import { authFetch } from "@/lib/auth-fetch";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 /** Mirrors `PageActionSpec` in `packages/core/src/doc/page-action-types.ts`. */
 export type PageActionSpec =

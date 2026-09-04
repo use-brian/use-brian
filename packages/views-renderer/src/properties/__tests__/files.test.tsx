@@ -17,7 +17,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
 import type { A2UIRowValue, FileRef } from '../../types.js'
 import { PROPERTIES } from '../index.js'
-import { FilesProperty, getCoverImageRef } from '../files.js'
+import { FilesProperty, getCoverImageRef, runtimePublicApiUrl } from '../files.js'
 import type { PropertyEditorProps } from '../types.js'
 
 function elName(el: ReactElement): string {
@@ -76,6 +76,31 @@ describe('[COMP:views/property-files] files property — registry', () => {
 
   it('declares kind="files"', () => {
     expect(FilesProperty.kind).toBe('files')
+  })
+})
+
+describe('[COMP:views/property-files] files property — runtime API URL', () => {
+  it('uses the host runtime config without a package rebuild', () => {
+    const host = globalThis as typeof globalThis & {
+      __USE_BRIAN_PUBLIC_CONFIG__?: { apiUrl: string }
+    }
+    host.__USE_BRIAN_PUBLIC_CONFIG__ = { apiUrl: 'https://api.example.com' }
+    try {
+      expect(runtimePublicApiUrl()).toBe('https://api.example.com')
+    } finally {
+      delete host.__USE_BRIAN_PUBLIC_CONFIG__
+    }
+  })
+
+  it('derives the SSR origin from API_DOMAIN', () => {
+    const previous = process.env.API_DOMAIN
+    process.env.API_DOMAIN = 'api.runtime.example'
+    try {
+      expect(runtimePublicApiUrl()).toBe('https://api.runtime.example')
+    } finally {
+      if (previous === undefined) delete process.env.API_DOMAIN
+      else process.env.API_DOMAIN = previous
+    }
   })
 })
 

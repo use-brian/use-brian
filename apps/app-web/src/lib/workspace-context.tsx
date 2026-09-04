@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 import {
   createContext,
   useContext,
@@ -15,7 +17,7 @@ import {
 } from "@/lib/workspace-identity-events";
 import { updateWorkspacePickerPreferences } from "@/lib/api/workspaces";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 export type WorkspaceContextValue = {
   workspaceId: string;

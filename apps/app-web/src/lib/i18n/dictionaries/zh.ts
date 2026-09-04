@@ -8060,7 +8060,7 @@ export const zh: Dictionary = {
   drivePicker: {
     connectFirst: "請先連接 Google 文件、試算表與簡報。",
     noToken: "無法取得雲端硬碟存取權杖。",
-    notConfigured: "Google 挑選器尚未設定。請洽管理員設定 GOOGLE_API_KEY 與 GOOGLE_PROJECT_NUMBER，然後重新連接 Google。",
+    notConfigured: "Google 挑選器尚未設定。請洽管理員設定 PUBLIC_GOOGLE_API_KEY 與 GOOGLE_PROJECT_NUMBER，然後重新連接 Google。",
     loading: "Google 挑選器仍在載入，請稍候再試。",
     pickerFailed: "挑選器開啟失敗",
     notConfiguredDeployment: "此部署尚未設定 Google 挑選器。",

@@ -1,3 +1,4 @@
+import { INTERNAL_API_URL } from "@/lib/internal-api-url";
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import {
@@ -5,8 +6,6 @@ import {
   parseConnectorState,
   verifyConnectorState,
 } from "@/lib/connector-oauth-state";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
 /**
  * Microsoft Graph OAuth callback for the `msgraph` (Microsoft Teams) connector.
@@ -69,7 +68,7 @@ export async function GET(request: Request) {
     // as anything about the code.
     const redirectUri = `${new URL(request.url).origin}/api/auth/callback/msgraph`;
 
-    const exchangeRes = await fetch(`${API_URL}/api/connectors/msgraph/oauth-callback`, {
+    const exchangeRes = await fetch(`${INTERNAL_API_URL}/api/connectors/msgraph/oauth-callback`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

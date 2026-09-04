@@ -1,3 +1,4 @@
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * SDK for skills as a procedural-brain primitive (app-web).
  *
@@ -27,7 +28,7 @@
 import { authFetch } from "@/lib/auth-fetch";
 import { BrainContentHttpError } from "@/lib/offline/brain-content-cache";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 /** Where a skill came from — drives the provenance tier + the induction-source
  *  chip. `authored` = a human wrote it; `self` = induced from the team's own

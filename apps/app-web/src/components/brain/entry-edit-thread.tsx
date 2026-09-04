@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Temporary, row-bound conversational editor for one Brain Review entry.
  * Separate from EntryThread: this surface receives exactly one confirmed write
@@ -29,7 +31,7 @@ import { requestBrainRefresh } from "@/lib/brain-events";
 import { useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 type Props = {
   workspaceId: string;

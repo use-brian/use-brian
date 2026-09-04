@@ -1,5 +1,7 @@
 "use client";
 
+
+import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /**
  * Inline editor for one connector instance's `ingest_rules` rows.
  *
@@ -52,7 +54,7 @@ import {
   type ContextTeam,
 } from "@/lib/api/context-scopes";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 export type EditableRule = {
   id: string;
