@@ -27,6 +27,7 @@ function draftRow(revision = 1) {
     bcc: [],
     subject: 'Exact draft',
     body: revision === 1 ? 'Complete body one' : 'Complete body two',
+    attachments: ['/travel/receipt.pdf'],
     createdByUserId: 'user-1',
     createdByAssistantId: 'assistant-1',
     sourceSessionId: 'session-1',
@@ -46,6 +47,7 @@ const baseParams = {
   bcc: [],
   subject: 'Exact draft',
   body: 'Complete body one',
+  attachments: ['/travel/receipt.pdf'],
 }
 
 beforeEach(() => {
@@ -71,7 +73,7 @@ describe('[COMP:crm/email-drafts] database store', () => {
     vi.mocked(getAppPool).mockReturnValue({ connect: async () => client } as never)
 
     await expect(createDbCrmEmailDraftStore().saveRevision(baseParams))
-      .resolves.toMatchObject({ id: DRAFT_ID, revision: 1, body: 'Complete body one' })
+      .resolves.toMatchObject({ id: DRAFT_ID, revision: 1, body: 'Complete body one', attachments: ['/travel/receipt.pdf'] })
 
     expect(issued[0]?.text).toBe('BEGIN')
     expect(applyRLSGucs).toHaveBeenCalledWith(client, 'user-1')
@@ -81,7 +83,7 @@ describe('[COMP:crm/email-drafts] database store', () => {
     expect(client.release).toHaveBeenCalledOnce()
   })
 
-  it('increments the locked revision and preserves the full replacement body', async () => {
+  it('increments the locked revision and preserves the full replacement body and attachments', async () => {
     const issued: Array<{ text: string; values?: unknown[] }> = []
     const client = {
       query: vi.fn(async (text: string, values?: unknown[]) => {
@@ -102,12 +104,13 @@ describe('[COMP:crm/email-drafts] database store', () => {
       ...baseParams,
       draftId: DRAFT_ID,
       body: 'Complete body two',
+      attachments: ['/travel/receipt.pdf', '/travel/itinerary.pdf'],
     })).resolves.toMatchObject({ id: DRAFT_ID, revision: 2, body: 'Complete body two' })
 
     const update = issued.find((entry) => entry.text.includes('UPDATE crm_email_drafts'))!
-    expect(update.values).toEqual(expect.arrayContaining([2, 'Complete body two']))
+    expect(update.values).toEqual(expect.arrayContaining([2, 'Complete body two', ['/travel/receipt.pdf', '/travel/itinerary.pdf']]))
     const version = issued.find((entry) => entry.text.includes('INSERT INTO crm_email_draft_versions'))!
-    expect(version.values).toEqual(expect.arrayContaining([DRAFT_ID, 2, 'Complete body two']))
+    expect(version.values).toEqual(expect.arrayContaining([DRAFT_ID, 2, 'Complete body two', ['/travel/receipt.pdf', '/travel/itinerary.pdf']]))
     expect(issued.at(-1)?.text).toBe('COMMIT')
   })
 

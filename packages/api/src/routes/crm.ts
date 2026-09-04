@@ -438,6 +438,7 @@ export function crmRoutes({
           bcc: draft.bcc,
           subject: draft.subject,
           body: draft.body,
+          attachments: draft.attachments,
           sourceSessionId: draft.sourceSessionId,
           createdAt: draft.createdAt.toISOString(),
           updatedAt: draft.updatedAt.toISOString(),

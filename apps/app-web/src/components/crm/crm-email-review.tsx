@@ -24,13 +24,14 @@ import {
   Clock3,
   Mail,
   Phone,
+  Paperclip,
   RefreshCw,
   Tags,
   UserRound,
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { extractEmailSender, parseToolPreview } from "@/lib/approval-previews";
+import { attachmentDisplayName, extractEmailSender, parseToolPreview } from "@/lib/approval-previews";
 import {
   fetchEmailReviewContext,
   respondByKind,
@@ -545,6 +546,31 @@ export function CrmEmailReviewWorkspace({
                 {selectedDraft.bcc.length > 0 && <><dt className="text-muted-foreground">{emailT.bcc}</dt><dd className="break-words">{selectedDraft.bcc.join(", ")}</dd></>}
                 <dt className="text-muted-foreground">{emailT.subject}</dt><dd className="break-words font-medium">{selectedDraft.subject}</dd>
               </dl>
+              <div
+                aria-label={emailT.attachments}
+                className="mt-3 flex flex-wrap items-center gap-1.5 rounded-xl border border-border/70 bg-muted/20 px-3 py-2 text-[11px]"
+              >
+                <span className="mr-0.5 inline-flex items-center gap-1.5 text-muted-foreground">
+                  <Paperclip className="size-3.5 shrink-0" aria-hidden />
+                  {emailT.attachments}
+                </span>
+                {selectedDraft.attachments.length > 0 ? (
+                  selectedDraft.attachments.map((attachment, index) => {
+                    const name = attachmentDisplayName(attachment);
+                    return (
+                      <span
+                        key={`${attachment}-${index}`}
+                        className="max-w-[16rem] truncate rounded-md border border-border bg-background px-2 py-0.5 font-mono"
+                        title={attachment}
+                      >
+                        {name}
+                      </span>
+                    );
+                  })
+                ) : (
+                  <span className="text-muted-foreground">{emailT.noAttachments}</span>
+                )}
+              </div>
               <div className="mt-4 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                 {t.replyBody}
               </div>

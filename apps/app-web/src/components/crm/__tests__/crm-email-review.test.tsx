@@ -223,6 +223,7 @@ describe("[COMP:app-web/crm-email-review] dedicated review workspace", () => {
       bcc: [],
       subject: "Canonical update",
       body: "Hello Jamie,\n\nThis is the full anchored draft.\n\nRegards,\nTeam",
+      attachments: ["/travel/receipt.pdf"],
       sourceSessionId: "session-1",
       createdAt: "2026-08-24T00:00:00.000Z",
       updatedAt: "2026-08-24T00:01:00.000Z",
@@ -234,6 +235,8 @@ describe("[COMP:app-web/crm-email-review] dedicated review workspace", () => {
     expect(container!.textContent).toContain(canonical.id);
     expect(container!.textContent).toContain(dict.crmPage.r2.canonicalDraftAnchor);
     expect(container!.textContent).toContain("Jamie Example");
+    expect(container!.textContent).toContain("receipt.pdf");
+    expect(container!.querySelector(`[aria-label="${dict.approvalsPage.emailPreview.attachments}"]`)).not.toBeNull();
     expect(container!.querySelector("textarea")).toBeNull();
     expect(container!.querySelector("[data-email-review-actions]")).toBeNull();
     expect([...container!.querySelectorAll("button")].some(
