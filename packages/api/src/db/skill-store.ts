@@ -68,6 +68,14 @@ export type CreateSkillInput = {
    *  `{ kind, owner?, repo?, path?, ref?, sha?, url? }`, stamped when the
    *  draft came from the GitHub/URL importer. Write-only today. */
   importSource?: Record<string, unknown> | null
+  /**
+   * Born offering every assistant, including ones created later (mig 492).
+   * The `enabledAssistantIds: 'all'` default sets this INSTEAD of writing an
+   * enablement row per assistant, so the intent survives the next assistant.
+   * Defaults to false — an explicit id list materialises rows as before, and
+   * the curator's proposer-only seeding must never set it.
+   */
+  allAssistants?: boolean
   /** Native Agent Skills bundle contract. New folder/catalog imports use v2;
    * legacy authored rows default to v1 for Mustache compatibility. */
   bundleVersion?: 1 | 2
@@ -151,6 +159,8 @@ export type WorkspaceSkillRow = {
   blueprint_id: string | null
   bundle_version?: 1 | 2
   source_digest?: string | null
+  // Stored offering intent (mig 492) — see `WorkspaceSkill.allAssistants`.
+  all_assistants: boolean
 }
 
 /** App-shape view returned by curator / lifecycle methods. */
@@ -204,6 +214,25 @@ export type WorkspaceSkill = {
   blueprintId?: string
   bundleVersion?: 1 | 2
   sourceDigest?: string
+  /**
+   * Offering INTENT (mig 492): true = every assistant in the workspace,
+   * including ones created later. The `workspace_skill_enablement` allowlist
+   * can only ever express the assistants that existed when it was written, so
+   * this is the one representation that survives a new assistant.
+   *
+   * The two are mutually exclusive for every skill created or edited after
+   * mig 492: turning the skill off for a single assistant runs
+   * `materialiseAllAssistants`, which writes rows for everyone else and THEN
+   * clears this flag. The ONE exception is mig 492's own backfill, which sets
+   * the flag but deliberately leaves the pre-existing rows in place so the
+   * migration is safe to run before the flag-aware code is deployed. That
+   * residue is benign (every reader either ORs the two or ignores the rows
+   * once the flag is set) and clears on the first access edit.
+   *
+   * Read them with the same OR the runtime uses (`injectSkills`) and never
+   * treat row-absence as "off" while this is true.
+   */
+  allAssistants: boolean
 }
 
 // ── Mappers ────────────────────────────────────────────────────────
@@ -286,6 +315,10 @@ function rowToWorkspaceSkill(row: WorkspaceSkillRow): WorkspaceSkill {
     blueprintId: row.blueprint_id ?? undefined,
     bundleVersion: row.bundle_version ?? 1,
     sourceDigest: row.source_digest ?? undefined,
+    // `?? false` so a row read through a pre-445 projection (or a test fixture
+    // that predates the column) degrades to the materialised-rows behaviour
+    // rather than silently offering the skill to every assistant.
+    allAssistants: row.all_assistants ?? false,
   }
 }
 
@@ -311,6 +344,17 @@ export type WorkspaceSkillStore = {
    * fills. Side-effect-free (no verify stamp / write_origin flip) — it records a
    * structural pairing, not a substance edit. */
   setBlueprint(userId: string, workspaceId: string, skillId: string, blueprintId: string | null): Promise<void>
+  /**
+   * Set (or clear) the "offer to every assistant, including future ones"
+   * intent (mig 492). Governance-only — no verify stamp, no `write_origin`
+   * flip: it changes who is offered the skill, not what the skill says.
+   *
+   * Callers must NOT clear this on its own to turn one assistant off: that
+   * drops the skill for everyone. Route the whole operation through
+   * `materialiseAllAssistants` (`../skills/all-assistants.js`), which writes
+   * the per-assistant rows first and clears the flag second.
+   */
+  setAllAssistants(userId: string, workspaceId: string, skillId: string, value: boolean): Promise<void>
   /** Bi-temporal close. Sets `valid_to = now()` rather than DELETE. */
   delete(userId: string, workspaceId: string, skillId: string): Promise<boolean>
 
@@ -545,10 +589,10 @@ export function createDbWorkspaceSkillStore(hooks?: WorkspaceSkillStoreHooks): W
            induction_source, confidence, activated_at,
            verified_by_user_id, verified_at,
            sensitivity, sensitivity_overridden, import_source,
-           bundle_version, source_digest
+           bundle_version, source_digest, all_assistants
          )
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
-                 ${bornVer ? 'now()' : 'NULL'},$18,$19,$20,$21,$22)
+                 ${bornVer ? 'now()' : 'NULL'},$18,$19,$20,$21,$22,$23)
          RETURNING ${COLS_ALL}`,
         [
           input.slug,
@@ -575,6 +619,7 @@ export function createDbWorkspaceSkillStore(hooks?: WorkspaceSkillStoreHooks): W
           input.importSource ? JSON.stringify(input.importSource) : null,
           input.bundleVersion ?? 1,
           input.sourceDigest ?? null,
+          input.allAssistants ?? false,
         ],
       )
       const skill = rowToWorkspaceSkill(result.rows[0])
@@ -677,6 +722,16 @@ export function createDbWorkspaceSkillStore(hooks?: WorkspaceSkillStoreHooks): W
         `UPDATE workspace_skills SET blueprint_id = $1, updated_at = now()
           WHERE id = $2 AND workspace_id = $3`,
         [blueprintId, skillId, workspaceId],
+      )
+      if ((result.rowCount ?? 0) > 0) notifyWorkspaceChange(workspaceId, 'skill', 'update', skillId)
+    },
+
+    async setAllAssistants(userId, workspaceId, skillId, value) {
+      const result = await queryWithRLS(
+        userId,
+        `UPDATE workspace_skills SET all_assistants = $1, updated_at = now()
+          WHERE id = $2 AND workspace_id = $3`,
+        [value, skillId, workspaceId],
       )
       if ((result.rowCount ?? 0) > 0) notifyWorkspaceChange(workspaceId, 'skill', 'update', skillId)
     },

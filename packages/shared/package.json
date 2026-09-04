@@ -61,6 +61,10 @@
     "./mention-matching": {
       "types": "./dist/mention-matching.d.ts",
       "default": "./dist/mention-matching.js"
+    },
+    "./skill-groups": {
+      "types": "./dist/skill-groups.d.ts",
+      "default": "./dist/skill-groups.js"
     }
   },
   "scripts": {

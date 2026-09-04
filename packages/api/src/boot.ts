@@ -29,6 +29,7 @@ import type http from 'node:http'
 
 import express, { type Express } from 'express'
 import { createTelegramApi } from '@use-brian/channels'
+import { isOpaqueDesktopBearerRequest } from './cors-policy.js'
 import {
   vertexTransport, resolveVertexTokenSource, aiStudioTransport,
   createEmbedderForAdapter, type EmbedderAdapterConfig, type GoogleTransport, type MediaBackend,
@@ -1359,7 +1360,17 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       res.header('Access-Control-Allow-Origin', origin)
       res.header('Access-Control-Allow-Credentials', 'true')
       res.header('Vary', 'Origin')
-    } else if (origin === 'null' && isHomeAppBridgePath(req.path)) {
+    } else if (
+      origin === 'null'
+      && (
+        isHomeAppBridgePath(req.path)
+        || isOpaqueDesktopBearerRequest({
+          path: req.path,
+          authorization: req.headers.authorization,
+          requestedHeaders: req.headers['access-control-request-headers'],
+        })
+      )
+    ) {
       // A custom Home app runs in a sandbox with no `allow-same-origin`, so
       // its fetches carry `Origin: null`. Without this the bridge is
       // unreachable from the only place it is ever called — the browser
@@ -1371,8 +1382,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       // bridge authenticates by BEARER TOKEN, which an attacker's frame does
       // not have — the app's token is minted per app, per viewer, per grant.
       //
-      // Scoped to the bridge paths for the same reason: everything else here
-      // is session-authed, and none of it should answer an opaque origin.
+      // The installed file:// renderer is admitted only when the request
+      // carries bearer auth (or preflights it), plus the explicit-token refresh
+      // endpoint. Never enable credentials for an opaque origin.
       res.header('Access-Control-Allow-Origin', 'null')
       res.header('Vary', 'Origin')
     }
@@ -4523,6 +4535,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     approvalsStore: pendingApprovalsStore,
     writeToolDeps: {
       enablementStore: workspaceSkillEnablementStore,
+      workspaceSkillStore,
+      listWorkspaceAssistants: async (userId, workspaceId) =>
+        (await listAccessibleAssistants(userId, workspaceId)).map((a) => ({
+          id: a.id,
+          name: a.name,
+        })),
       mcpSettingsStore,
       connectorInstanceStore,
       connectorGrantStore,
@@ -5232,6 +5250,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     communitySkills: communitySkillRegistry,
     workspaceSkillStore,
     workspaceSkillEnablementStore,
+    // mig 492: the assistant-side disable has to materialise an
+    // `all_assistants` skill into per-assistant rows before clearing the flag.
+    listWorkspaceAssistants: async (userId, workspaceId) =>
+      (await listAccessibleAssistants(userId, workspaceId)).map((a) => ({
+        id: a.id,
+        name: a.name,
+      })),
     capabilityStore,
     assistantConnectorGrantsStore,
     analytics,

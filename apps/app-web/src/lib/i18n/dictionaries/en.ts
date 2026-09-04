@@ -942,6 +942,14 @@ export const en = {
       ingestAddedToBrain: "Added to brain",
       ingestAdded: "added to brain",
       ingestFailed: "Failed",
+      // Named BEFORE any request: an oversized body is dropped at the edge,
+      // so the only alternative message is a bare "Failed to fetch".
+      ingestTooLarge:
+        "Too large to add to your brain: {size}. The limit is {limit} per file.",
+      ingestUnreachable:
+        "The upload could not reach the server. Check your connection and try again.",
+      ingestTooManyFiles:
+        "Only {max} files at a time. Add this one in the next batch.",
       ingestRemove: "Remove",
       ingestClear: "Clear",
       linkedinArchiveAlone: "Add a LinkedIn ZIP by itself so every row can be reconciled.",
@@ -1298,6 +1306,12 @@ export const en = {
     deleteConfirmAction: "Delete",
     cancel: "Cancel",
     createDraftFailed: "Could not create draft: {message}",
+    // A landing build turn that died before it streamed anything. The dock
+    // stays collapsed on an autoSend build, so without these the page just
+    // stopped saying "drafting" and the user was told nothing (2026-09-01).
+    buildFailed: "Could not build this page: {message}",
+    buildNeverStarted:
+      "Could not build this page. The request did not start - try sending it again.",
     saveFailed: "Could not save: {message}",
     unsaveFailed: "Could not move to drafts: {message}",
     moveContextConfirmTitle: "Move page to a different context?",
@@ -1733,6 +1747,13 @@ export const en = {
       regional: "Regional",
       timezone: "Timezone",
       language: "Language",
+      siriTitle: "Siri",
+      siriLabel: "Use Brian with Siri",
+      siriDescription:
+        "Install a preconfigured macOS shortcut that asks for a request and sends it to Brian.",
+      siriSetupHint:
+        "Review the Use Brian action, then click Add Shortcut in Shortcuts.",
+      siriSetup: "Set up Siri",
     },
     account: {
       profile: "Profile",
@@ -3911,7 +3932,7 @@ export const en = {
         productivity: "Productivity",
         communication: "Communication",
         research: "Research",
-        custom: "Custom",
+        custom: "Unsorted",
       },
       countOne: "1 skill",
       countMany: "{count} skills",
@@ -4080,7 +4101,9 @@ export const en = {
       saveConfirm: "Save & confirm",
       saveConfirmHint:
         "Saving your edit certifies this skill and sets its confidence to 100%.",
-      categoryLabel: "Category",
+      categoryLabel: "Group",
+      categoryCreate: "Create “{name}”",
+      categorySearch: "Find or name a group...",
       aboutHeading: "About",
       usageLabel: "Usage",
       usageSummary: "{runs} runs · {ok} ok · {corrected} corrected",
@@ -4091,6 +4114,11 @@ export const en = {
       assistantsHint: "Choose which assistants are offered this skill.",
       accessUnavailable: "Per-assistant access is not available right now.",
       noAssistants: "This workspace has no assistants yet.",
+      assistantsAllLabel: "Every assistant, including new ones",
+      assistantsAllHint:
+        "Assistants you create later get this skill automatically.",
+      assistantsFixedHint:
+        "Only the assistants switched on below. New assistants will not get this skill.",
       rederivations: "Re-derivations",
       blueprintLabel: "Blueprint",
       blueprintView: "View",
@@ -4173,6 +4201,11 @@ export const en = {
       done: "Done",
       close: "Close",
       cancel: "Cancel",
+      scopeAllLabel: "Also re-sort skills that already have a group",
+      scopeAllHint: "Brian will look at every skill, not just the ungrouped ones. You still review every move before anything changes.",
+      intentBodyAll: "{count} skills in this library. Brian can read their names and descriptions and propose a group for each.",
+      createGroup: "Create “{name}”",
+      groupSearch: "Find or name a group...",
     },
     skillFiles: {
       heading: "Files",
@@ -4519,6 +4552,11 @@ export const en = {
         queued: "Ingestion started. Extracted knowledge will appear shortly.",
         inFlight: "An ingest for this file is already running.",
         failed: "Could not start ingestion.",
+        mediaAction: "Transcribe and add to brain",
+        mediaHint:
+          "Audio and video take the recording route: Brian transcribes the file first, then files the transcript and everything it extracts into the brain. You will see the length and the cost before anything starts.",
+        mediaQueued:
+          "Transcription started. The transcript and what Brian extracts from it will appear once it finishes.",
       },
       authorUser: "you",
       authorAssistant: "{name}",
@@ -5810,6 +5848,11 @@ export const en = {
     upstreamConnectionResetCustom: "Your workspace custom model endpoint dropped the connection. Please try again.",
     upstreamUnreachable: "The model endpoint could not be reached. Please try again in a moment.",
     upstreamUnreachableCustom: "Your workspace custom model endpoint could not be reached. Check that it is online in your workspace model settings.",
+    // The dock held a session bound to a different assistant (a resume that
+    // attached a row this surface cannot re-address). We drop that binding
+    // and tell the user to send again, so the fix is one tap, not a reload.
+    sessionRebound:
+      "That conversation belongs to a different assistant. Started a fresh one - send your message again.",
     viewSwitchAria: "Chat scope",
     viewPersonal: "Personal",
     viewWorkspace: "Workspace",
@@ -8955,6 +8998,8 @@ export const en = {
     chatQueuedChip: "Recording queued: {name}",
     chatStagedChip: "Recording attached: {name}",
     confirmVideoNote: "This is a video: what appears on screen will also be analyzed and added to the notes.",
+    confirmAlreadyProcessed:
+      "This recording was already processed once. Running it again re-transcribes the audio and can duplicate the memories it extracted before.",
     linkError: "We could not load your recordings.",
     uploadFailed:
       "The audio could not reach storage, so nothing was processed. Check your connection - the capture is kept on this device and can be saved again from the recorder.",

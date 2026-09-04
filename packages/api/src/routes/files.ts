@@ -3,6 +3,7 @@ import multer, { MulterError } from 'multer'
 import { z } from 'zod'
 import { getDefaultAssistant, findAssistantById, getWorkspacePrimaryAssistant } from '../db/users.js'
 import { getWorkspaceFileById } from '../db/workspace-files.js'
+import { isMediaMime, resolveRecordingForFile } from '../recordings/recording-for-file.js'
 import { enqueueFileIngestJob, getFileIngestJob } from '../db/file-ingest-jobs-store.js'
 import { findOrCreateSession, findSessionById } from '../db/sessions.js'
 import {
@@ -672,10 +673,18 @@ export function fileRoutes(
       res.status(404).json({ error: 'Not found' })
       return
     }
-    if (file.mime.startsWith('audio/') || file.mime.startsWith('video/')) {
+    if (isMediaMime(file.mime)) {
+      // Still refused here — media is transcribed, not parsed — but the answer
+      // now names the lane that CAN do it. A client that reaches this without
+      // checking the mime first can follow `handoff` rather than dead-ending on
+      // a red line, which is exactly what the brain drawer used to do.
       res.status(400).json({
         error: 'media_owned_by_recordings',
-        detail: 'Audio/video ingests through the recording pipeline, not file ingest.',
+        handoff: { kind: 'recording', route: `/api/files/${file.id}/recording` },
+        detail:
+          'Audio and video are transcribed through the recording pipeline, not file ingest. ' +
+          `Resolve the recording with POST /api/files/${file.id}/recording, then run the ` +
+          'recording estimate → confirm → process flow.',
       })
       return
     }
@@ -708,6 +717,87 @@ export function fileRoutes(
       return
     }
     res.status(202).json({ fileId: file.id, status: 'queued', jobId })
+  })
+
+  /**
+   * POST /api/files/:fileId/recording — the media half of "Re-ingest to brain".
+   *
+   * Answers WHICH recording owns this stored audio/video, adopting one when the
+   * file has never had a recording. Body: { workspaceId }. Answers
+   * `200 { recordingId, adopted, alreadyProcessed }` - the last so the caller's
+   * single confirmation can carry the duplicate-memory warning alongside the
+   * cost, instead of discovering it as a 409 after the user already agreed.
+   *
+   * This route starts nothing and spends nothing: it neither probes the audio
+   * nor enqueues a job. The caller continues through the ordinary recording
+   * flow — `POST /api/recordings/:id/estimate` for the server-authoritative
+   * duration and surcharge, the cost + blueprint confirmation, then
+   * `POST /api/recordings/:id/process`. Keeping the enqueue out of here is what
+   * preserves the pre-flight-confirmation invariant: a click that resolves a
+   * recording must not also be a click that buys a transcription.
+   *
+   * Same gate and actor as `/:fileId/ingest`, so an invisible file 404s
+   * identically. Non-media is refused (`not_media`) rather than adopted — a PDF
+   * has no audio to transcribe and belongs on the ingest lane next door.
+   *
+   * Spec: docs/architecture/brain/file-artifacts.md → "Re-ingest", and
+   * docs/architecture/media/transcription.md → "Re-processing".
+   */
+  router.post('/:fileId/recording', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) {
+      res.status(401).json({ error: 'Unauthorized' })
+      return
+    }
+    const body = (req.body ?? {}) as { workspaceId?: string }
+    if (!body.workspaceId || typeof body.workspaceId !== 'string') {
+      res.status(400).json({ error: 'workspaceId is required' })
+      return
+    }
+
+    const assistant = await getWorkspacePrimaryAssistant(userId, body.workspaceId)
+    if (!assistant || !assistant.workspaceId) {
+      res.status(404).json({ error: 'Not found' })
+      return
+    }
+    const file = await getWorkspaceFileById(
+      {
+        workspaceId: assistant.workspaceId,
+        userId,
+        assistantId: assistant.id,
+        assistantKind: assistant.kind,
+        clearance: assistant.clearance,
+        compartments: assistant.compartments,
+      },
+      req.params.fileId,
+    )
+    if (!file) {
+      res.status(404).json({ error: 'Not found' })
+      return
+    }
+    if (!isMediaMime(file.mime)) {
+      res.status(400).json({
+        error: 'not_media',
+        detail: 'Only audio and video files are handled by the recording pipeline.',
+      })
+      return
+    }
+
+    const resolved = await resolveRecordingForFile(file, userId)
+    if (resolved.status === 'refused') {
+      res.status(409).json({
+        error: 'compartmented_media',
+        detail:
+          'This file is restricted to a compartment, and recordings do not carry compartments yet, ' +
+          'so transcribing it here would widen who can read it.',
+      })
+      return
+    }
+    res.json({
+      recordingId: resolved.recordingId,
+      adopted: resolved.adopted,
+      alreadyProcessed: resolved.alreadyProcessed,
+    })
   })
 
   /**

@@ -1,9 +1,18 @@
 import { describe, it, expect } from "vitest";
 
-import { resolveConfig, PROTOCOL_SCHEME } from "../config.js";
+import {
+  bundledDefaultForRuntime,
+  resolveConfig,
+  PROTOCOL_SCHEME,
+} from "../config.js";
 import { serializePersistedTarget } from "../target-store.js";
 
 describe("[COMP:app-desktop/config] resolveConfig", () => {
+  it("selects bundled rendering only for packaged runtime by default", () => {
+    expect(bundledDefaultForRuntime(false)).toBe(false);
+    expect(bundledDefaultForRuntime(true)).toBe(true);
+  });
+
   it("defaults to the production app + API URLs with no env override", () => {
     const cfg = resolveConfig({});
     // Post-consolidation default: the authenticated app is app.usebrian.ai

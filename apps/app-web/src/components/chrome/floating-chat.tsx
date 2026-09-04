@@ -237,6 +237,7 @@ import {
   type StagedRecording,
 } from "@/lib/recordings/use-recording-upload";
 import { dispatchRecordingParticipantsUpdated } from "@/lib/recordings/recording-events";
+import { companionChatPhase } from "@/lib/companion-chat-state";
 import { useDockRecorder } from "@/lib/recorder/use-dock-recorder";
 import { useLiveRecordingPage } from "@/lib/recordings/use-live-recording-page";
 import {
@@ -410,6 +411,7 @@ type InlineNotice = {
 export type ChatActivity = {
   isStreaming: boolean;
   streamingText: string;
+  phase: "idle" | "loading" | "thinking" | "responding" | "action-required";
   activeTool: {
     name: string;
     description?: string;
@@ -494,6 +496,10 @@ type FloatingChatProps = {
    * instruction at the same page. Soft by design — it warns, it doesn't block.
    */
   othersRun?: AssistantRunState | null;
+  /** Reveal and focus the already-mounted composer when this token changes. */
+  messageBrianRequest?: number;
+  /** Called after the requested composer is mounted, visible, and focused. */
+  onMessageBrianRevealed?: () => void;
 };
 
 const CLIENT_TIMEZONE: string | null = (() => {
@@ -514,6 +520,8 @@ export function FloatingChat({
   activePage = null,
   seedRequest,
   othersRun = null,
+  messageBrianRequest,
+  onMessageBrianRevealed,
 }: FloatingChatProps) {
   // 'side-panel' fills its parent column and stays open (no pill); 'floating'
   // is the bottom-right collapsible dock. Drives positioning + the pill below.
@@ -549,6 +557,20 @@ export function FloatingChat({
   const [pendingSurfaceSeed, setPendingSurfaceSeed] =
     useState<SurfaceChatSeed | null>(null);
   const surfaceSeedAttemptRef = useRef<SurfaceChatSeed | null>(null);
+
+  useEffect(() => {
+    if (messageBrianRequest === undefined || isSidePanel) return;
+    setExpanded(true);
+  }, [isSidePanel, messageBrianRequest]);
+
+  const acknowledgedMessageBrianRef = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    if (messageBrianRequest === undefined) return;
+    if (!isSidePanel && !expanded) return;
+    if (acknowledgedMessageBrianRef.current === messageBrianRequest) return;
+    acknowledgedMessageBrianRef.current = messageBrianRequest;
+    onMessageBrianRevealed?.();
+  }, [expanded, isSidePanel, messageBrianRequest, onMessageBrianRevealed]);
 
   // ── Assistant switcher ───────────────────────────────────────────────────
   // The chat talks to the workspace PRIMARY by default (the `assistantId`
@@ -1249,8 +1271,20 @@ export function FloatingChat({
   const isStreaming = session.state.isStreaming;
   const streamingText = session.state.streamingText;
   const activity = useMemo<ChatActivity>(() => {
+    const requiresAction =
+      Boolean(pendingQuestion) ||
+      session.state.pendingConfirmations.some(
+        (confirmation) =>
+          confirmation.status === "pending" || confirmation.status === "approving",
+      );
+    const phase = companionChatPhase({
+      isStreaming,
+      hasStreamingText: Boolean(streamingText),
+      requiresAction,
+      isLoading: resumePolling,
+    });
     if (!isStreaming) {
-      return { isStreaming: false, streamingText: "", activeTool: null };
+      return { isStreaming: false, streamingText: "", phase, activeTool: null };
     }
     const running = toolTimeline.find((t) => t.status === "running");
     const last =
@@ -1261,6 +1295,7 @@ export function FloatingChat({
     return {
       isStreaming: true,
       streamingText,
+      phase,
       activeTool: last
         ? {
             name: last.name,
@@ -1269,7 +1304,7 @@ export function FloatingChat({
           }
         : null,
     };
-  }, [isStreaming, streamingText, toolTimeline]);
+  }, [isStreaming, pendingQuestion, resumePolling, session.state.pendingConfirmations, streamingText, toolTimeline]);
 
   const onActivityChangeRef = useRef(onActivityChange);
   useEffect(() => {
@@ -1293,8 +1328,12 @@ export function FloatingChat({
       text: streamingText,
       reasoning: streamingReasoning,
       events: streamingEvents,
+      // A build seeded from the landing runs with this dock collapsed, so an
+      // error rendered HERE is an error nobody sees. Publishing it is what
+      // lets the page body report a build that failed before it streamed.
+      error: error ?? null,
     });
-  }, [isDocOrigin, isStreaming, toolTimeline, streamingText, streamingReasoning, streamingEvents]);
+  }, [isDocOrigin, isStreaming, toolTimeline, streamingText, streamingReasoning, streamingEvents, error]);
 
   // ── Auto-scroll + escape/click-outside ─────────────────────────────────
   useEffect(() => {
@@ -1421,6 +1460,17 @@ export function FloatingChat({
         signal: controller.signal,
       });
       if (cancelled || !latest) return;
+      // Defence in depth for the doc dock's `scope: "workspace"` resume. That
+      // thread is per-turn addressable (the switcher re-addresses instead of
+      // starting a new thread), so a row we ATTACH must be one the server
+      // will let the current pick ANSWER on — `isDocSurface` in `chat.ts`,
+      // i.e. `app_origin === 'doc'`. Attaching anything else produces a dead
+      // thread: every send after a switch fails "Session does not belong to
+      // this assistant", and the rejection itself bumps `last_active_at`, so
+      // the bad row stays newest and the dock re-attaches it on every load.
+      // The server predicate is the fix (`DOC_DOCK_RESUME_ROW`); this guard
+      // covers an older API still serving the wide list.
+      if (origin === "doc" && latest.appOrigin !== "doc") return;
 
       // Restore whichever durable human input owns the current turn. Generic
       // confirmations re-enter the shared confirmation reducer so the same
@@ -2580,6 +2630,18 @@ export function FloatingChat({
                 );
                 break;
               }
+              // The dock is holding a session this surface cannot re-address
+              // (a resume that attached a row bound to another assistant).
+              // Nothing was written server-side, so the recovery is simply to
+              // drop the binding: the next send mints a fresh session. Doing
+              // it here keeps recovery inside the user's own channel — the
+              // dock has no new-chat control, so otherwise every retry hits
+              // the same refusal and the thread is a dead end.
+              if (payload.code === "session_assistant_mismatch") {
+                resetThread();
+                setError(tChatApp.sessionRebound);
+                break;
+              }
               const msg =
                 typeof payload.error === "string" ? payload.error : t.error;
               setError(msg);
@@ -2761,7 +2823,7 @@ export function FloatingChat({
       // Indicate to the caller (e.g. seed effect) that a stream actually started.
       return true;
     },
-    [selectedAssistantId, workspaceId, origin, isDocOrigin, model, metered, customEndpoint, researchMode, session, stream, t, resetTurnBuffers, pendingQuestion, pendingRecordings, rec.status, att, applyQueuedInput, buildStreamedTurnMessage, flushQueuedInputs],
+    [selectedAssistantId, workspaceId, origin, isDocOrigin, model, metered, customEndpoint, researchMode, session, stream, t, resetTurnBuffers, resetThread, pendingQuestion, pendingRecordings, rec.status, att, applyQueuedInput, buildStreamedTurnMessage, flushQueuedInputs],
   );
 
   useEffect(() => {
@@ -3546,6 +3608,7 @@ export function FloatingChat({
             onKeyDown={slashCommands.handleKeyDown}
             highlightRanges={slashCommands.highlightRanges}
             inputWrapClassName="flex-1 min-w-0 rounded-md border border-border bg-background focus-within:border-ring [&_:focus-visible]:shadow-none"
+            focusRequest={messageBrianRequest}
             // While a turn streams, Send QUEUES: the message is handed to the
             // running turn, which takes it at its next safe boundary.
             // Cmd/Ctrl+Enter steers instead — take it as soon as possible.

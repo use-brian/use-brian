@@ -96,6 +96,7 @@ function makeToolset(allToolNames: string[] = ['createWorkflow', 'runWorkflow', 
     approvalsStore: approvals as unknown as PendingApprovalsStore,
     writeToolDeps: {
       enablementStore: { enable: vi.fn(), disable: vi.fn() } as never,
+      workspaceSkillStore: { setAllAssistants: vi.fn() } as never,
       mcpSettingsStore: { setPolicy: vi.fn() } as never,
       connectorInstanceStore: { createUserInstance: vi.fn(), createWorkspaceInstance: vi.fn(), update: vi.fn() } as never,
       connectorGrantStore: { create: vi.fn() } as never,
@@ -226,6 +227,7 @@ describe('[COMP:agent-surface/write-tools] addPatConnector — personal + grant'
     const deps = {
       approvalsStore: {} as never,
       enablementStore: {} as never,
+      workspaceSkillStore: { setAllAssistants: vi.fn() } as never,
       mcpSettingsStore: {} as never,
       connectorInstanceStore: { createUserInstance, createWorkspaceInstance, update: vi.fn() } as never,
       connectorGrantStore: { create: grantCreate } as never,
@@ -364,6 +366,7 @@ describe('[COMP:agent-surface/write-tools] workspace gate — one canonical, act
     const tools = createAgentWriteTools({
       approvalsStore: {} as never,
       enablementStore: {} as never,
+      workspaceSkillStore: { setAllAssistants: vi.fn() } as never,
       mcpSettingsStore: {} as never,
       connectorInstanceStore: {} as never,
       connectorGrantStore: {} as never,
@@ -422,6 +425,7 @@ describe('[COMP:agent-surface/write-tools] enableSkill / disableSkill — the sk
     const tools = createAgentWriteTools({
       approvalsStore: {} as never,
       enablementStore: { enable, disable } as never,
+      workspaceSkillStore: { setAllAssistants: vi.fn() } as never,
       mcpSettingsStore: {} as never,
       connectorInstanceStore: {} as never,
       connectorGrantStore: {} as never,
@@ -506,6 +510,7 @@ describe('[COMP:agent-surface/write-tools] id misses ship the discovery pointer'
     const tools = createAgentWriteTools({
       approvalsStore: {} as never,
       enablementStore: {} as never,
+      workspaceSkillStore: { setAllAssistants: vi.fn() } as never,
       mcpSettingsStore: {} as never,
       connectorInstanceStore: { update: vi.fn(async () => null) } as never,
       connectorGrantStore: {} as never,
@@ -526,6 +531,7 @@ describe('[COMP:agent-surface/write-tools] id misses ship the discovery pointer'
     const tools = createAgentWriteTools({
       approvalsStore: {} as never,
       enablementStore: {} as never,
+      workspaceSkillStore: { setAllAssistants: vi.fn() } as never,
       mcpSettingsStore: {} as never,
       connectorInstanceStore: {} as never,
       connectorGrantStore: {} as never,

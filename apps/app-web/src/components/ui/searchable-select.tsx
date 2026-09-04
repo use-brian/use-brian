@@ -6,8 +6,11 @@
  * Ported from `apps/web/src/components/ui/searchable-select.tsx` as part of
  * the app consolidation (docs/architecture/features/doc.md §5a
  * "Foundation" / Phase 0 — the shared UI primitives surfaces depend on).
- * Identical API and `@base-ui/react/combobox` base; the theme tokens
- * (`border`, `muted`, `popover`, `accent`, `ring`) resolve against
+ * Same `@base-ui/react/combobox` base, and the API was identical until the
+ * app-web copy grew the optional CREATABLE props (`onCreate` / `createLabel`,
+ * for the skill-group pickers). `apps/web` does not have them; add them there
+ * only if a surface needs one, rather than assuming the two are in sync. The
+ * theme tokens (`border`, `muted`, `popover`, `accent`, `ring`) resolve against
  * app-web's palette the same way the existing `select.tsx` does.
  *
  * The workflow surface's per-step delivery-destination picker is the first
@@ -47,7 +50,20 @@ type SearchableSelectProps = {
   popupClassName?: string;
   id?: string;
   "aria-label"?: string;
+  /**
+   * Makes the select CREATABLE: typing a value no item matches offers a
+   * create row, and picking it calls this instead of `onValueChange`. The
+   * created item is injected into the list rather than rendered beside it, so
+   * base-ui's own highlight and Enter-to-select handle it like any other row
+   * (the pattern base-ui documents for creatable comboboxes).
+   */
+  onCreate?: (value: string) => void;
+  /** Label for the create row, e.g. `(q) => \`Create "\${q}"\``. */
+  createLabel?: (query: string) => string;
 };
+
+/** Marks the injected create row; never a real item value. */
+const CREATE_VALUE_PREFIX = "__create__:";
 
 export function SearchableSelect({
   value,
@@ -61,16 +77,49 @@ export function SearchableSelect({
   popupClassName,
   id,
   "aria-label": ariaLabel,
+  onCreate,
+  createLabel,
 }: SearchableSelectProps) {
+  const [query, setQuery] = React.useState("");
+
+  // The create row is a real item so base-ui highlights and selects it like
+  // any other; its label contains the query, so the built-in filter keeps it.
+  const typed = query.trim();
+  const alreadyExists = items.some(
+    (i) => i.label.trim().toLocaleLowerCase() === typed.toLocaleLowerCase(),
+  );
+  const itemsForView =
+    onCreate && createLabel && typed !== "" && !alreadyExists
+      ? [
+          ...items,
+          { value: `${CREATE_VALUE_PREFIX}${typed}`, label: createLabel(typed) },
+        ]
+      : items;
+
   const selected = items.find((i) => i.value === value) ?? null;
 
   return (
     <Combobox.Root
-      items={items}
+      items={itemsForView}
       itemToStringLabel={(item: SearchableSelectItem) => item.label}
       itemToStringValue={(item: SearchableSelectItem) => item.value}
       value={selected}
-      onValueChange={(next) => onValueChange(next ? (next as SearchableSelectItem).value : "")}
+      inputValue={query}
+      onInputValueChange={setQuery}
+      // Controlling `inputValue` means the query is ours to clear: without
+      // this the popup reopens still filtered by the last search.
+      onOpenChange={(open: boolean) => {
+        if (!open) setQuery("");
+      }}
+      onValueChange={(next) => {
+        const picked = next ? (next as SearchableSelectItem).value : "";
+        setQuery("");
+        if (onCreate && picked.startsWith(CREATE_VALUE_PREFIX)) {
+          onCreate(picked.slice(CREATE_VALUE_PREFIX.length));
+          return;
+        }
+        onValueChange(picked);
+      }}
     >
       <Combobox.Trigger
         id={id}

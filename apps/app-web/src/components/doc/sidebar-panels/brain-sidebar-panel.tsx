@@ -17,10 +17,11 @@
  *     page), then a COMPACT filter (`CompactFilterBar`): one row of the
  *     shared `search` input + a `Filter` popover over the status options
  *     (All / Active / Suggested / Stale) bound to the context
- *     `skillStatusFilter` the SkillsLibrary pane also reads, then the flat
- *     skill quick-list (suggested-first; rows link to the editor). The body's
- *     job is to LIST the skills — the collapsed filter keeps as many rows
- *     above the fold as possible.
+ *     `skillStatusFilter` the SkillsLibrary pane also reads, then the skill
+ *     quick-list GROUPED by library group (the same `groupSkillsByCategory`
+ *     the pane uses; suggested-first within a group; rows link to the
+ *     editor). The body's job is to LIST the skills — the collapsed filter
+ *     keeps as many rows above the fold as possible.
  *   - Reviews — the same COMPACT filter (`CompactFilterBar`): search + a
  *     `Filter` popover whose rows are `REVIEW_FILTERS` — the inbox-mappable
  *     primitive kinds PLUS a `Relationships` chip for `entity_link` graph
@@ -92,6 +93,8 @@ import {
 } from "@/lib/review-queue";
 import {
   filterSkillsForLibrary,
+  groupSkillsByCategory,
+  skillGroupLabel,
   skillStatus,
   type SkillStatus,
 } from "@/lib/skills-view";
@@ -613,38 +616,64 @@ export function BrainSidebarPanel({ workspaceId }: { workspaceId: string }) {
             ]}
           />
 
-          {/* Flat quick-list — status dot + name, rows link to the editor. */}
-          <ul className="flex flex-col gap-0.5">
-            {panelSkills.map((skill) => {
-              const href = `${brainRoot}/skills/${skill.rowId}`;
-              const status = skillStatus(skill);
-              return (
-                <li key={skill.rowId}>
-                  <Link
-                    href={href}
-                    onClick={(event) => {
-                      if (!offline) return;
-                      event.preventDefault();
-                      brain.setSection("skills");
-                      ensureBrainRoot();
-                    }}
-                    className={rowCls(pathname === href)}
-                  >
-                    <span
-                      aria-hidden
-                      className={cn(
-                        "inline-block h-2 w-2 shrink-0 rounded-full",
-                        status === "active" && "bg-emerald-500",
-                        status === "suggested" && "bg-amber-500",
-                        status === "stale" && "bg-muted-foreground/40",
-                      )}
-                    />
-                    <span className="min-w-0 flex-1 truncate">{skill.name}</span>
-                  </Link>
-                </li>
-              );
-            })}
-          </ul>
+          {/* Quick-list, GROUPED by library group — the same headings the
+              library pane renders, from the same `groupSkillsByCategory`, so
+              the two surfaces cannot disagree about where a skill lives. A
+              flat list here made the sidebar and the pane read as two
+              different libraries once groups became a workspace's own words.
+
+              Order within a group stays the incoming (suggested, then name)
+              order rather than being re-sorted: the amber dot is what carries
+              "needs review", and a suggested skill is easier to find under
+              the heading it belongs to than at the top of one long stack. */}
+          {groupSkillsByCategory(panelSkills, (g) =>
+            skillGroupLabel(g, t.brainPage.skillsLibrary.categories),
+          ).map((group) => (
+            <div key={group.category} className="flex flex-col gap-0.5">
+              <h4 className="px-2 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-sidebar-foreground/45">
+                {skillGroupLabel(
+                  group.category,
+                  t.brainPage.skillsLibrary.categories,
+                )}
+                <span className="ml-1.5 font-normal tabular-nums opacity-70">
+                  {group.skills.length}
+                </span>
+              </h4>
+              <ul className="flex flex-col gap-0.5">
+                {group.skills.map((skill) => {
+                  const href = `${brainRoot}/skills/${skill.rowId}`;
+                  const status = skillStatus(skill);
+                  return (
+                    <li key={skill.rowId}>
+                      <Link
+                        href={href}
+                        onClick={(event) => {
+                          if (!offline) return;
+                          event.preventDefault();
+                          brain.setSection("skills");
+                          ensureBrainRoot();
+                        }}
+                        className={rowCls(pathname === href)}
+                      >
+                        <span
+                          aria-hidden
+                          className={cn(
+                            "inline-block h-2 w-2 shrink-0 rounded-full",
+                            status === "active" && "bg-emerald-500",
+                            status === "suggested" && "bg-amber-500",
+                            status === "stale" && "bg-muted-foreground/40",
+                          )}
+                        />
+                        <span className="min-w-0 flex-1 truncate">
+                          {skill.name}
+                        </span>
+                      </Link>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          ))}
         </>
       )}
 

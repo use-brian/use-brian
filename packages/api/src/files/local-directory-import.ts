@@ -13,6 +13,7 @@ import { promises as fs } from 'node:fs'
 import * as path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import type { WorkspaceFile } from '@use-brian/core'
+import { parseStorageKey } from './gcs-client.js'
 
 export const LOCAL_DIRECTORY_IMPORT_LIMIT = 100_000
 export const LOCAL_DIRECTORY_METADATA_KEY = 'localDirectory'
@@ -112,9 +113,38 @@ export function isSafeLocalStorageKey(value: string): boolean {
   return parts.every((part) => part.length > 0 && part !== '.' && part !== '..')
 }
 
-export function storageKeyForWorkspaceFile(file: Pick<WorkspaceFile, 'id' | 'workspaceId' | 'metadata'>): string {
+/**
+ * The object key a stored file's bytes ACTUALLY live at.
+ *
+ * Three sources, in descending authority:
+ *
+ * 1. A local-directory import points at bytes on disk that Brian never wrote,
+ *    so its `relativePath` metadata is the key (and its `storage_uri` is a
+ *    `file://` path to the original, not a bucket URI).
+ * 2. Otherwise the row's own `storage_uri` is authoritative. Most rows come
+ *    from `writeBytes`, where the key and `<workspace_id>/<file_id>` agree —
+ *    but a row that INDEXES bytes already sitting elsewhere does not. Recording
+ *    media is the case that proved it: `media-artifact.ts` indexes
+ *    `<workspace_id>/recordings/<uuid>` without copying it, so every recording
+ *    media row read back `not_found` while the audio sat untouched one key
+ *    away (2026-09-01; 11 of 11 such rows in production).
+ * 3. Only when the URI cannot be parsed do we fall back to re-deriving the
+ *    legacy key, so a malformed `storage_uri` degrades to today's behaviour
+ *    instead of failing the read outright.
+ */
+export function storageKeyForWorkspaceFile(
+  file: Pick<WorkspaceFile, 'id' | 'workspaceId' | 'metadata' | 'storageUri'>,
+): string {
   const imported = localDirectoryMetadata(file)
-  return imported?.relativePath ?? `${file.workspaceId}/${file.id}`
+  if (imported) return imported.relativePath
+  if (file.storageUri) {
+    try {
+      return parseStorageKey(file.storageUri)
+    } catch {
+      // Fall through to the legacy derivation below.
+    }
+  }
+  return `${file.workspaceId}/${file.id}`
 }
 
 export async function scanLocalDirectory(input: {

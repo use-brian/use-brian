@@ -4,8 +4,9 @@
 // (ask the main process to start the system-browser sign-in flow) and
 // `signOut()` (ask the main process to clear this shell's own session — cookies
 // in the thin shell, the safeStorage token in bundled mode — and reload to the
-// sign-in landing). These are the only privileged surfaces the web/landing
-// content can reach. In **bundled mode** (main passes `--usebrian-bundled` via
+// sign-in landing). The bridge also exposes fixed native actions such as
+// macOS Siri setup; arbitrary setup URLs never cross this boundary. In
+// **bundled mode** (main passes `--usebrian-bundled` via
 // webPreferences.additionalArguments) it additionally exposes the Bearer-token
 // bridge that activates app-web's `desktopAuthSource` (lib/desktop-auth-source.ts).
 // The thin remote shell does NOT pass that flag, so the token methods stay absent
@@ -20,6 +21,31 @@
 // Spec: docs/architecture/features/app-desktop.md → "Sign-in landing" + "Sign-out";
 //       docs/plans/canvas-desktop-bundled-offline.md → Phase 1 ("Remaining wiring").
 const { contextBridge, ipcRenderer, webFrame } = require("electron");
+
+const messageBrianListeners = new Set();
+let messageBrianPending = false;
+const useBrianListeners = new Set();
+let useBrianPending = false;
+const brianNearbyListeners = new Set();
+let brianNearby = ipcRenderer.sendSync("Use Brian:get-brian-nearby-state") === true;
+ipcRenderer.on("Use Brian:message-brian", () => {
+  if (messageBrianListeners.size === 0) {
+    messageBrianPending = true;
+    return;
+  }
+  for (const listener of messageBrianListeners) listener();
+});
+ipcRenderer.on("Use Brian:use-brian", () => {
+  if (useBrianListeners.size === 0) {
+    useBrianPending = true;
+    return;
+  }
+  for (const listener of useBrianListeners) listener();
+});
+ipcRenderer.on("Use Brian:brian-nearby-state", (_event, enabled) => {
+  brianNearby = enabled === true;
+  for (const listener of brianNearbyListeners) listener(brianNearby);
+});
 
 /** @type {Record<string, unknown>} */
 const bridge = {
@@ -55,6 +81,33 @@ const bridge = {
     ),
   signIn: () => ipcRenderer.send("Use Brian:sign-in"),
   signOut: () => ipcRenderer.send("Use Brian:sign-out"),
+  // macOS Settings -> Preferences uses this fixed, argument-free action to
+  // open the bundled shortcut import. app-web hides it on every other OS.
+  openSiriSetup: () => ipcRenderer.invoke("Use Brian:open-siri-setup"),
+  // One-shot native Ask payload. Only the selected trusted app renderer can
+  // consume the prompt; app-web routes carry at most a `useBrian=1` signal.
+  takeUseBrianPrompt: () =>
+    ipcRenderer.sendSync("Use Brian:take-use-brian-prompt"),
+  // Fixed wake-up event for a native Use Brian request. The prompt itself
+  // stays main-process-only until the trusted renderer consumes it above.
+  // Queue one event so a window load cannot outrun React hydration.
+  onUseBrian: (callback) => {
+    if (typeof callback !== "function") return () => {};
+    useBrianListeners.add(callback);
+    if (useBrianPending) {
+      useBrianPending = false;
+      queueMicrotask(() => callback());
+    }
+    return () => useBrianListeners.delete(callback);
+  },
+  isBrianNearby: () => brianNearby,
+  onBrianNearbyChange: (callback) => {
+    if (typeof callback !== "function") return () => {};
+    brianNearbyListeners.add(callback);
+    return () => brianNearbyListeners.delete(callback);
+  },
+  setCompanionContext: (workspaceId, assistantId) =>
+    ipcRenderer.send("Use Brian:set-companion-context", workspaceId, assistantId),
   // The offline landing's "Retry" button asks the shell to reload the app now.
   // Present in every mode (like signIn/out); the offline landing is shell-owned.
   retry: () => ipcRenderer.send("Use Brian:retry-load"),
@@ -98,6 +151,24 @@ const bridge = {
   // an RFC 8252 loopback flow and navigates back to the connectors page on done.
   // Spec: docs/plans/desktop-connector-oauth-return.md.
   connectConnector: (req) => ipcRenderer.send("Use Brian:connect-connector", req),
+  // The always-on-top Brian companion asks the already-mounted workspace
+  // chrome to reveal its existing composer. Queue one intent until hydration
+  // subscribes so a cold window can never drop the click.
+  onMessageBrian: (callback) => {
+    if (typeof callback !== "function") return () => {};
+    messageBrianListeners.add(callback);
+    if (messageBrianPending) {
+      messageBrianPending = false;
+      queueMicrotask(() => {
+        callback();
+      });
+    }
+    return () => messageBrianListeners.delete(callback);
+  },
+  acknowledgeMessageBrian: () => ipcRenderer.send("Use Brian:message-brian-consumed"),
+  // The dedicated chat renderer mirrors its display-only lifecycle onto the
+  // local companion. Main validates both sender identity and payload shape.
+  setCompanionState: (state) => ipcRenderer.send("Use Brian:companion-state", state),
 };
 
 if (process.argv.includes("--usebrian-bundled")) {

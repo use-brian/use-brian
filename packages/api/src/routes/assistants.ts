@@ -59,6 +59,7 @@ import {
 } from '../db/playbook-store.js'
 import type { SkillStore, WorkspaceSkillStore } from '../db/skill-store.js'
 import type { WorkspaceSkillEnablementStore } from '../db/workspace-skill-enablement-store.js'
+import { materialiseAllAssistants } from '../skills/all-assistants.js'
 
 type AssistantParams = { assistantId: string }
 
@@ -85,7 +86,21 @@ type AssistantRouteOptions = {
    * Resolves a workspace skill row UUID to its owning workspace, for the
    * cross-workspace guard on the workspace-skill toggle routes.
    */
-  workspaceSkillStore?: Pick<WorkspaceSkillStore, 'getByIdSystem' | 'listForWorkspace'>
+  workspaceSkillStore?: Pick<
+    WorkspaceSkillStore,
+    'getByIdSystem' | 'listForWorkspace' | 'setAllAssistants'
+  >
+  /**
+   * Every assistant in a workspace. Needed only to CONVERT a skill that is
+   * flagged `all_assistants` when one assistant is switched off: the flag has
+   * to become a row per remaining assistant before it can be cleared (mig 492).
+   * Absent in minimal mounts, where the conversion is skipped and the disable
+   * reports 501 rather than silently doing nothing.
+   */
+  listWorkspaceAssistants?: (
+    userId: string,
+    workspaceId: string,
+  ) => Promise<Array<{ id: string; name: string }>>
   capabilityStore: CapabilityStore
   analytics?: import('@use-brian/core').AnalyticsLogger
   /**
@@ -1802,10 +1817,12 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
               // allowlist: a legacy `enabled = true` row offers the skill even
               // with no allowlist row, and a legacy `false` vetoes one that
               // has it. Showing allowlist-presence alone would misreport every
-              // skill the old personal-workspace toggle enabled.
+              // skill the old personal-workspace toggle enabled — and, since
+              // mig 492, every skill flagged `all_assistants`, which is offered
+              // to this assistant while holding no allowlist row at all.
               enabled: settingsMap.get(s.slug) === false
                 ? false
-                : allowed.has(s.rowId) || settingsMap.get(s.slug) === true,
+                : s.allAssistants || allowed.has(s.rowId) || settingsMap.get(s.slug) === true,
               starred: starredSet.has(s.slug),
             })
           }
@@ -1893,7 +1910,9 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
     workspaceSkillId: string,
     assistantWorkspaceId: string | null,
     res: import('express').Response,
-  ): Promise<{ rowId: string; slug: string } | null> {
+  ): Promise<
+    { rowId: string; slug: string; workspaceId: string; allAssistants: boolean } | null
+  > {
     if (!options.workspaceSkillStore || !options.workspaceSkillEnablementStore) {
       res.status(501).json({ error: 'Workspace skill access is not available' })
       return null
@@ -1903,7 +1922,14 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
       res.status(404).json({ error: 'Skill not found' })
       return null
     }
-    return { rowId: skill.rowId, slug: skill.slug }
+    // `workspaceId` + `allAssistants` ride along for the mig-445 conversion on
+    // the disable path — see `materialiseAllAssistants`.
+    return {
+      rowId: skill.rowId,
+      slug: skill.slug,
+      workspaceId: skill.workspaceId,
+      allAssistants: skill.allAssistants,
+    }
   }
 
   router.post('/:assistantId/workspace-skills/:workspaceSkillId/enable', async (req, res) => {
@@ -1919,7 +1945,13 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
       )
       if (!skill) return
 
-      await options.workspaceSkillEnablementStore!.enable(skill.rowId, assistantId, member.userId)
+      // mig 492: a flagged skill already covers every assistant, so writing a
+      // row here would put the two representations in disagreement for no
+      // gain. Clearing the legacy veto below is still required — that is what
+      // was actually keeping the skill off this assistant.
+      if (!skill.allAssistants) {
+        await options.workspaceSkillEnablementStore!.enable(skill.rowId, assistantId, member.userId)
+      }
       // Clear a stale slug-keyed veto so the toggle actually takes effect.
       // DELETE, never `setEnabled(false)` on the disable path — see the store
       // docstring and skill-system.md → "The Workspace toggle reconciles the
@@ -1950,7 +1982,32 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
       )
       if (!skill) return
 
-      await options.workspaceSkillEnablementStore!.disable(skill.rowId, assistantId, member.userId)
+      // mig 492: a skill flagged `all_assistants` holds NO allowlist row, so
+      // `disable` alone would delete nothing and report success while the
+      // runtime kept offering the skill — the toggle would look off and behave
+      // on. Convert first: write a row for every OTHER assistant, then clear
+      // the flag, after which row-absence means "off" again for this one.
+      if (skill.allAssistants) {
+        if (!options.listWorkspaceAssistants) {
+          res.status(501).json({
+            error: 'Per-assistant skill access is not available on this deployment.',
+          })
+          return
+        }
+        await materialiseAllAssistants({
+          skill,
+          actingUserId: member.userId,
+          listAssistantIds: async () =>
+            (await options.listWorkspaceAssistants!(member.userId, skill.workspaceId)).map(
+              (a) => a.id,
+            ),
+          enablementStore: options.workspaceSkillEnablementStore!,
+          workspaceSkillStore: options.workspaceSkillStore!,
+          exclude: [assistantId],
+        })
+      } else {
+        await options.workspaceSkillEnablementStore!.disable(skill.rowId, assistantId, member.userId)
+      }
       // A legacy `enabled = true` row would keep offering the skill after the
       // allowlist row is gone, so it has to go too. Deleting (rather than
       // writing `false`) avoids minting a veto row that would silently defeat

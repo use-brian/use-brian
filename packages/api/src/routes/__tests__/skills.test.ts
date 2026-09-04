@@ -98,6 +98,7 @@ function wsSkill(overrides: Record<string, unknown> = {}) {
     invocations: 0,
     succeeded: 0,
     userCorrectedAfter: 0,
+    allAssistants: false,
     ...overrides,
   }
 }
@@ -354,9 +355,15 @@ describe('[COMP:api/skills-route] POST / — workspace-aware create + D4 enablem
     expect(workspaceSkillStore.create).not.toHaveBeenCalled()
   })
 
-  it('creates in the workspace and enables ALL assistants by default (D4)', async () => {
+  // mig 492 (replaces the old D4 fan-out). "All assistants" is now stored as
+  // intent on the skill row instead of one enablement row per assistant that
+  // happened to exist at creation — which is what made a skill invisible to
+  // every assistant created afterwards.
+  it('creates in the workspace with the all-assistants FLAG and writes no enablement rows', async () => {
     workspaceStore.getRole.mockResolvedValueOnce('member')
-    workspaceSkillStore.create.mockResolvedValueOnce(wsSkill({ rowId: 'row-9' }))
+    workspaceSkillStore.create.mockResolvedValueOnce(
+      wsSkill({ rowId: 'row-9', allAssistants: true }),
+    )
     listWorkspaceAssistants.mockResolvedValueOnce([
       { id: 'a-1', name: 'Gm' },
       { id: 'a-2', name: 'Doc' },
@@ -368,12 +375,21 @@ describe('[COMP:api/skills-route] POST / — workspace-aware create + D4 enablem
     expect(workspaceSkillStore.create).toHaveBeenCalledWith(
       'u-1',
       'w-1',
-      expect.objectContaining({ slug: 'recap', name: 'Recap', content: '# body' }),
+      expect.objectContaining({
+        slug: 'recap',
+        name: 'Recap',
+        content: '# body',
+        allAssistants: true,
+      }),
     )
-    expect(enablementStore.enable).toHaveBeenCalledTimes(2)
-    expect(enablementStore.enable).toHaveBeenCalledWith('row-9', 'a-1', 'u-1')
-    expect(enablementStore.enable).toHaveBeenCalledWith('row-9', 'a-2', 'u-1')
-    expect(res.body).toMatchObject({ rowId: 'row-9', enabledAssistantIds: ['a-1', 'a-2'] })
+    // The rows are the bug, not the feature: none may be written.
+    expect(enablementStore.enable).not.toHaveBeenCalled()
+    // The response still names today's assistants so every toggle renders on.
+    expect(res.body).toMatchObject({
+      rowId: 'row-9',
+      allAssistants: true,
+      enabledAssistantIds: ['a-1', 'a-2'],
+    })
   })
 
   it('honors an explicit assistant subset and drops ids outside the workspace', async () => {

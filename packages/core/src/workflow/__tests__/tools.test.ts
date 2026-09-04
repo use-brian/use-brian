@@ -2979,3 +2979,133 @@ describe('[COMP:workflow/tools] authoring failures carry the vocabulary and a fo
     }
   })
 })
+
+/**
+ * The 2026-09-01 GymBro incident: `trigger.delivery` captures the destination
+ * from the authoring session, but the delivery credential is resolved from the
+ * step's execute-as assistant. With the `workflow-builder` default of
+ * `'primary'` — an assistant that usually has no channel routing — the probe
+ * fell through to the shared platform bot, which is not in the user's BYO
+ * group, and the reminder was rejected with `chat not found` for the very chat
+ * it was authored in.
+ */
+describe('[COMP:workflow/tools] session-captured delivery retargets the terminal step', () => {
+  const TOPIC_CHAT = '-1004393075094:topic:222'
+  const primaryStepDef: WorkflowDefinition = {
+    startStepId: 's1',
+    steps: [
+      { id: 's1', type: 'assistant_call', target: { assistantId: 'primary' }, prompt: "Today's events." },
+    ],
+  }
+  const dailyTelegram = {
+    kind: 'schedule' as const,
+    schedule: { type: 'daily' as const, time: '10:00' },
+    delivery: { channel: 'telegram' as const },
+  }
+  const terminalStep = (stores: ReturnType<typeof fakeStores>, id: string) =>
+    stores.workflows.get(id)!.definition.steps[0] as {
+      target: { assistantId: string }
+      deliver?: { channelType: string; channelId: string }
+    }
+
+  it('probes and persists the SESSION assistant when the sugar captures the session chat', async () => {
+    const validateDeliveryTarget = vi.fn(async () => ({ ok: true }))
+    const { tools, stores } = makeAllTools({ validateDeliveryTarget })
+    const r = await tools.createWorkflow.execute(
+      { name: 'UniMove daily', definition: primaryStepDef, trigger: dailyTelegram },
+      makeContext({
+        assistantId: AUTHORING_ASSISTANT_ID,
+        channelType: 'telegram',
+        channelId: TOPIC_CHAT,
+      }),
+    )
+    expect(r.isError).toBeFalsy()
+    // The probe must ask the assistant the persist path will stamp — asking
+    // `primary` here is what produced the false `chat not found`.
+    expect(validateDeliveryTarget).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE_ID,
+      assistantId: AUTHORING_ASSISTANT_ID,
+      channelType: 'telegram',
+      channelId: TOPIC_CHAT,
+    })
+    const step = terminalStep(stores, (r.data as { id: string }).id)
+    expect(step.target.assistantId).toBe(AUTHORING_ASSISTANT_ID)
+    expect(step.deliver).toEqual({ channelType: 'telegram', channelId: TOPIC_CHAT })
+  })
+
+  it('keeps the durable `primary` sentinel when the session assistant IS the primary', async () => {
+    const validateDeliveryTarget = vi.fn(async () => ({ ok: true }))
+    const { tools, stores } = makeAllTools({ validateDeliveryTarget })
+    const r = await tools.createWorkflow.execute(
+      { name: 'Morning brief', definition: primaryStepDef, trigger: dailyTelegram },
+      makeContext({ channelType: 'telegram', channelId: 'tg-chat-1' }),
+    )
+    expect(r.isError).toBeFalsy()
+    expect(terminalStep(stores, (r.data as { id: string }).id).target.assistantId).toBe('primary')
+    expect(validateDeliveryTarget).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE_ID,
+      assistantId: PRIMARY_ASSISTANT_ID,
+      channelType: 'telegram',
+      channelId: 'tg-chat-1',
+    })
+  })
+
+  it('does not retarget when the destination is not the session chat', async () => {
+    const validateDeliveryTarget = vi.fn(async () => ({ ok: true }))
+    const { tools, stores } = makeAllTools({ validateDeliveryTarget })
+    const r = await tools.createWorkflow.execute(
+      { name: 'Elsewhere', definition: primaryStepDef, trigger: dailyTelegram },
+      makeContext({
+        assistantId: AUTHORING_ASSISTANT_ID,
+        preferredChannel: { channelType: 'telegram', channelId: 'tg-elsewhere' },
+      }),
+    )
+    expect(r.isError).toBeFalsy()
+    expect(terminalStep(stores, (r.data as { id: string }).id).target.assistantId).toBe('primary')
+    expect(validateDeliveryTarget).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE_ID,
+      assistantId: PRIMARY_ASSISTANT_ID,
+      channelType: 'telegram',
+      channelId: 'tg-elsewhere',
+    })
+  })
+
+  it('keeps an explicitly named assistant, and blames the step rather than the chat', async () => {
+    const validateDeliveryTarget = vi.fn(async () => ({
+      ok: false,
+      reason: 'Telegram: chat not found (-1004393075094)',
+    }))
+    const { tools } = makeAllTools({ validateDeliveryTarget })
+    const def: WorkflowDefinition = {
+      startStepId: 's1',
+      steps: [{
+        id: 's1',
+        type: 'assistant_call',
+        target: { assistantId: DELIVERING_ASSISTANT_ID },
+        prompt: 'Brief.',
+        deliver: { channelType: 'telegram', channelId: TOPIC_CHAT },
+      }],
+    }
+    const r = await tools.proposeWorkflow.execute(
+      { name: 'X', definition: def },
+      makeContext({
+        assistantId: AUTHORING_ASSISTANT_ID,
+        channelType: 'telegram',
+        channelId: TOPIC_CHAT,
+      }),
+    )
+    expect(r.isError).toBe(true)
+    expect(validateDeliveryTarget).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE_ID,
+      assistantId: DELIVERING_ASSISTANT_ID,
+      channelType: 'telegram',
+      channelId: TOPIC_CHAT,
+      channelIntegrationId: undefined,
+    })
+    const errors = (r.data as { errors: string[] }).errors.join('\n')
+    expect(errors).toContain('target.assistantId')
+    expect(errors).toContain(AUTHORING_ASSISTANT_ID)
+    // The old copy told the user to do the one thing they had already done.
+    expect(errors).not.toContain('Author from inside the Telegram chat')
+  })
+})

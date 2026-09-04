@@ -848,6 +848,9 @@ export const ja: Dictionary = {
       ingestAddedToBrain: "ブレインに追加しました",
       ingestAdded: "件をブレインに追加",
       ingestFailed: "失敗",
+      ingestTooLarge: "ブレインに追加するには大きすぎます: {size}。1 ファイルあたりの上限は {limit} です。",
+      ingestUnreachable: "アップロードがサーバーに届きませんでした。接続を確認してもう一度お試しください。",
+      ingestTooManyFiles: "一度に追加できるのは {max} ファイルまでです。このファイルは次のバッチで追加してください。",
       ingestRemove: "削除",
       ingestClear: "クリア",
       linkedinArchiveAlone: "全行を照合するため、LinkedIn ZIP は単独で追加してください。",
@@ -1171,6 +1174,9 @@ export const ja: Dictionary = {
     deleteConfirmAction: "削除",
     cancel: "キャンセル",
     createDraftFailed: "下書きの作成に失敗しました: {message}",
+    buildFailed: "このページを作成できませんでした: {message}",
+    buildNeverStarted:
+      "このページを作成できませんでした。リクエストが開始されませんでした。もう一度送信してください。",
     saveFailed: "保存できませんでした: {message}",
     unsaveFailed: "下書きへの移動に失敗しました: {message}",
     moveContextConfirmTitle: "ページを別のコンテキストへ移動しますか？",
@@ -1550,6 +1556,13 @@ export const ja: Dictionary = {
       regional: "地域",
       timezone: "タイムゾーン",
       language: "言語",
+      siriTitle: "Siri",
+      siriLabel: "Siri で Use Brian を使う",
+      siriDescription:
+        "依頼内容を尋ねて Brian に送信する、設定済みの macOS ショートカットをインストールします。",
+      siriSetupHint:
+        "「Use Brian」アクションを確認し、ショートカットで「ショートカットを追加」をクリックしてください。",
+      siriSetup: "Siri を設定",
     },
     account: {
       profile: "プロフィール",
@@ -3699,7 +3712,7 @@ export const ja: Dictionary = {
         productivity: "生産性",
         communication: "コミュニケーション",
         research: "リサーチ",
-        custom: "カスタム",
+        custom: "未分類",
       },
       countOne: "1 件のスキル",
       countMany: "{count} 件のスキル",
@@ -3866,7 +3879,9 @@ export const ja: Dictionary = {
       saveConfirm: "保存して承認",
       saveConfirmHint:
         "編集を保存すると、このスキルは確認済みとなり、信頼度が100%になります。",
-      categoryLabel: "カテゴリ",
+      categoryLabel: "グループ",
+      categoryCreate: "「{name}」を作成",
+      categorySearch: "グループを検索または入力...",
       aboutHeading: "概要",
       usageLabel: "利用状況",
       usageSummary: "実行 {runs} · 成功 {ok} · 修正 {corrected}",
@@ -3877,6 +3892,11 @@ export const ja: Dictionary = {
       assistantsHint: "このスキルを提供するアシスタントを選びます。",
       accessUnavailable: "アシスタント別のアクセス設定は現在利用できません。",
       noAssistants: "このワークスペースにはまだアシスタントがいません。",
+      assistantsAllLabel: "新しいアシスタントを含むすべてのアシスタント",
+      assistantsAllHint:
+        "後から作成したアシスタントにも、このスキルが自動的に追加されます。",
+      assistantsFixedHint:
+        "下でオンにしたアシスタントのみ。新しいアシスタントには追加されません。",
       rederivations: "再導出",
       blueprintLabel: "ブループリント",
       blueprintView: "表示",
@@ -3959,6 +3979,11 @@ export const ja: Dictionary = {
       done: "完了",
       close: "閉じる",
       cancel: "キャンセル",
+      scopeAllLabel: "すでにグループがあるスキルも整理し直す",
+      scopeAllHint: "未分類のスキルだけでなく、すべてのスキルを対象にします。変更前にすべての移動を確認できます。",
+      intentBodyAll: "このライブラリには{count}件のスキルがあります。名前と説明を読んで、それぞれにグループを提案します。",
+      createGroup: "「{name}」を作成",
+      groupSearch: "グループを検索または入力...",
     },
     skillFiles: {
       heading: "ファイル",
@@ -4307,6 +4332,11 @@ export const ja: Dictionary = {
         queued: "取り込みを開始しました。抽出されたナレッジはまもなく表示されます。",
         inFlight: "このファイルの取り込みはすでに実行中です。",
         failed: "取り込みを開始できませんでした。",
+        mediaAction: "文字起こししてブレインに追加",
+        mediaHint:
+          "音声と動画はレコーディング経路を通ります。Brian がまずファイルを文字起こしし、その文字起こしと抽出した内容をブレインに保存します。開始前に長さと料金が表示されます。",
+        mediaQueued:
+          "文字起こしを開始しました。完了すると文字起こしと抽出された内容が表示されます。",
       },
       authorUser: "あなた",
       authorAssistant: "{name}",
@@ -5593,6 +5623,8 @@ export const ja: Dictionary = {
     upstreamConnectionResetCustom: "ワークスペースのカスタムモデルエンドポイントとの接続が切断されました。もう一度お試しください。",
     upstreamUnreachable: "モデルのエンドポイントに接続できませんでした。しばらくしてからもう一度お試しください。",
     upstreamUnreachableCustom: "ワークスペースのカスタムモデルエンドポイントに接続できませんでした。ワークスペースのモデル設定でエンドポイントが稼働しているか確認してください。",
+    sessionRebound:
+      "その会話は別のアシスタントのものです。新しい会話を開始しました。メッセージをもう一度送信してください。",
     viewSwitchAria: "チャットの範囲",
     viewPersonal: "個人",
     viewWorkspace: "ワークスペース",
@@ -8721,6 +8753,8 @@ export const ja: Dictionary = {
     chatQueuedChip: "録音をキューに追加: {name}",
     chatStagedChip: "録音を添付: {name}",
     confirmVideoNote: "これは動画です。画面に映った内容も分析され、ノートに追加されます。",
+    confirmAlreadyProcessed:
+      "このレコーディングは一度処理済みです。もう一度実行すると音声を再度文字起こしし、以前抽出したメモリーが重複する可能性があります。",
     linkError: "録音を読み込めませんでした。",
     uploadFailed:
       "音声をストレージに送信できず、処理は開始されていません。接続を確認してください。録音はこの端末に保存されており、レコーダーから再度保存できます。",

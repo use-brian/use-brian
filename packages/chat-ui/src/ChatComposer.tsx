@@ -185,6 +185,11 @@ export type ChatComposerProps = {
    * image paste and let a plain text paste fall through untouched.
    */
   onPaste?: (event: ClipboardEvent<HTMLTextAreaElement>) => void
+  /**
+   * Focus the textarea whenever this token changes. Hosts use this when an
+   * already-mounted composer is revealed by an external launcher.
+   */
+  focusRequest?: string | number
 }
 
 /**
@@ -281,6 +286,11 @@ export function ChatComposer(props: ChatComposerProps) {
     ro.observe(el)
     return () => ro.disconnect()
   }, [])
+
+  useEffect(() => {
+    if (props.focusRequest === undefined) return
+    textareaRef.current?.focus()
+  }, [props.focusRequest])
 
   const handleChange = useCallback(
     (event: ChangeEvent<HTMLTextAreaElement>) => {

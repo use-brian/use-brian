@@ -49,7 +49,10 @@ import { SurfaceTransition } from "@/components/chrome/surface-transition";
 import { usePrimaryAssistant } from "@/contexts/primary-assistant";
 import { routeProgress } from "@/lib/route-progress";
 import { surfaceShortcutModifierPressed } from "@/lib/surface-shortcuts";
-import { useChatDockSuppressed } from "@/lib/chat-dock-suppress";
+import {
+  useChatDockSuppressed,
+  workspaceChatDockSuppressed,
+} from "@/lib/chat-dock-suppress";
 import {
   DEFAULT_OPERATOR_APP,
   homeAppFromPathname,
@@ -68,7 +71,13 @@ import { useOfflineSync } from "@/lib/offline/use-offline-sync";
 import { useWorkspaceEvents } from "@/lib/workspace-events";
 import { cn } from "@/lib/utils";
 import { CHAT_SEED_EVENT, type ChatSeed } from "@/lib/chat-seed";
-import { desktopBridge } from "@/lib/desktop-auth-source";
+import {
+  acknowledgeDesktopMessageBrian,
+  desktopBridge,
+  onDesktopUseBrian,
+  onDesktopMessageBrian,
+} from "@/lib/desktop-auth-source";
+import { normalizeUseBrianPrompt } from "@/lib/siri-use-brian";
 import {
   desktopTitlebarInsetCssPx,
   resolveDesktopZoomFactor,
@@ -200,7 +209,20 @@ export function WorkspaceChrome({
   // cover the full-page composer's Send action at narrower widths. The hoisted
   // dock HIDES (not unmounts) in both cases, so an in-flight turn survives.
   const embeddedChatSuppressed = useChatDockSuppressed();
-  const dockSuppressed = embeddedChatSuppressed || activeSurface === "chat";
+  const [brianNearby, setBrianNearby] = useState(
+    () => desktopBridge()?.isBrianNearby?.() ?? false,
+  );
+  const dockSuppressed = workspaceChatDockSuppressed(
+    embeddedChatSuppressed,
+    activeSurface,
+    brianNearby,
+  );
+
+  useEffect(() => {
+    const bridge = desktopBridge();
+    setBrianNearby(bridge?.isBrianNearby?.() ?? false);
+    return bridge?.onBrianNearbyChange?.(setBrianNearby);
+  }, []);
   // Page-collab "another member is running on this page" guard, published by
   // `DocShell` (the only place with the page's Yjs provider); null off `/p`.
   const docOthersRun = useDocChatOthersRun();
@@ -268,6 +290,11 @@ export function WorkspaceChrome({
   // surface can read the same value instead of blocking on a second identical
   // fetch of its own. Behaviour here is unchanged: no dock until it lands.
   const { assistantId: chatAssistantId } = usePrimaryAssistant();
+  useEffect(() => {
+    if (chatAssistantId) {
+      desktopBridge()?.setCompanionContext?.(workspaceId, chatAssistantId);
+    }
+  }, [chatAssistantId, workspaceId]);
 
   // Chat-seed routing — the default-viewer landing's chatter / inline AI box
   // hand the user into the dock with a pre-written prompt via the
@@ -277,7 +304,13 @@ export function WorkspaceChrome({
   // (Moved up from `DocShell` with the dock; the publishers still fire the
   // same event from inside the page surface.)
   const [seed, setSeed] = useState<RoutedSeed | null>(null);
+  const [messageBrianRequest, setMessageBrianRequest] = useState<{
+    nonce: number;
+    target: "desktop" | "mobile";
+  }>();
+  const pendingMessageBrianRef = useRef(false);
   const seedNonceRef = useRef(0);
+  const siriUseBrianRef = useRef<string | null>(null);
   useEffect(() => {
     if (typeof window === "undefined") return;
     function onSeed(e: Event) {
@@ -302,6 +335,90 @@ export function WorkspaceChrome({
     window.addEventListener(CHAT_SEED_EVENT, onSeed);
     return () => window.removeEventListener(CHAT_SEED_EVENT, onSeed);
   }, []);
+
+  const revealMessageBrian = useCallback(() => {
+    setMessageBrianRequest((current) => ({
+      nonce: (current?.nonce ?? 0) + 1,
+      target: window.matchMedia("(min-width: 1024px)").matches ? "desktop" : "mobile",
+    }));
+  }, []);
+
+  useEffect(() => {
+    if (dockSuppressed || !pendingMessageBrianRef.current) return;
+    pendingMessageBrianRef.current = false;
+    revealMessageBrian();
+  }, [dockSuppressed, revealMessageBrian]);
+
+  useEffect(
+    () =>
+      onDesktopMessageBrian(() => {
+        if (!dockSuppressed) {
+          revealMessageBrian();
+          return;
+        }
+        pendingMessageBrianRef.current = true;
+        router.push(docPagePath(workspaceId));
+      }),
+    [dockSuppressed, revealMessageBrian, router, workspaceId],
+  );
+
+  const runNativeUseBrian = useCallback(() => {
+    const prompt = normalizeUseBrianPrompt(
+      desktopBridge()?.takeUseBrianPrompt?.(),
+    );
+    if (!prompt) return;
+    const target = window.matchMedia("(min-width: 1024px)").matches
+      ? "desktop"
+      : "mobile";
+    seedNonceRef.current += 1;
+    setSeed({
+      prefill: prompt,
+      autoSend: true,
+      nonce: seedNonceRef.current,
+      target,
+    });
+    if (dockSuppressed) {
+      pendingMessageBrianRef.current = true;
+      router.push(docPagePath(workspaceId));
+    } else {
+      revealMessageBrian();
+    }
+  }, [dockSuppressed, revealMessageBrian, router, workspaceId]);
+
+  useEffect(
+    () => onDesktopUseBrian(runNativeUseBrian),
+    [runNativeUseBrian],
+  );
+
+  // The native App Intent enters through `?useBrian=`. Keep the handoff in the
+  // persistent chrome so the URL fallback for a cold/not-yet-loaded window and
+  // the live preload wake-up share the same open-and-send behavior.
+  useEffect(() => {
+    const raw = searchParams.get("useBrian");
+    if (raw === null) {
+      siriUseBrianRef.current = null;
+      return;
+    }
+    if (siriUseBrianRef.current === raw) return;
+    siriUseBrianRef.current = raw;
+
+    runNativeUseBrian();
+
+    const next = new URLSearchParams(searchParams.toString());
+    next.delete("useBrian");
+    const query = next.toString();
+    router.replace(`${pathname}${query ? `?${query}` : ""}`);
+
+    // HashRouter has a second, outer file query. Clear its one-shot signal too
+    // so returning to the workspace picker cannot replay an old Siri request.
+    if (window.location.protocol === "file:") {
+      const outer = new URL(window.location.href);
+      if (outer.searchParams.has("useBrian")) {
+        outer.searchParams.delete("useBrian");
+        window.history.replaceState(null, "", outer.toString());
+      }
+    }
+  }, [pathname, router, runNativeUseBrian, searchParams]);
 
   // Soft-navigate to a page's canonical URL. On `/p` the shell's URL→tabs effect
   // adopts it into the tab history; from another surface it opens the doc
@@ -664,6 +781,10 @@ export function WorkspaceChrome({
               origin="doc"
               seedRequest={seed?.target === "desktop" ? seed : undefined}
               othersRun={docOthersRun}
+              messageBrianRequest={
+                messageBrianRequest?.target === "desktop" ? messageBrianRequest.nonce : undefined
+              }
+              onMessageBrianRevealed={acknowledgeDesktopMessageBrian}
             />
           </div>
           <MobileChatDrawer
@@ -672,6 +793,10 @@ export function WorkspaceChrome({
             className="lg:hidden"
             seed={seed?.target === "mobile" ? seed : undefined}
             othersRun={docOthersRun}
+            messageBrianRequest={
+              messageBrianRequest?.target === "mobile" ? messageBrianRequest.nonce : undefined
+            }
+            onMessageBrianRevealed={acknowledgeDesktopMessageBrian}
           />
         </div>
       )}

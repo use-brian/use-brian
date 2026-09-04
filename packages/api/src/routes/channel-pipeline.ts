@@ -93,6 +93,8 @@ import type { SkillStore } from '../db/skill-store.js'
 import { injectMcpTools } from '../mcp/inject.js'
 import { createKnowledgeRepoWriter } from '../knowledge/repo-writer.js'
 import { createDbKnowledgeStore } from '../db/knowledge-store.js'
+import { createDbWorkspaceSkillStore } from '../db/skill-store.js'
+import { createDbWorkspaceSkillEnablementStore } from '../db/workspace-skill-enablement-store.js'
 import { createSyncCredentialProvider } from '../knowledge/sync-credentials.js'
 import { buildBrowserEscalationPrompt, buildUnavailableCapabilitiesPrompt, injectSkills, checkUsageBudget } from './route-helpers.js'
 import type { CreditBudgetGate } from './route-helpers.js'
@@ -556,6 +558,15 @@ export type ChannelPipelineParams = {
    */
   artifactPromoter?: ArtifactPromoter | null
   skillStore?: SkillStore
+  /**
+   * Workspace-skill surface for `injectSkills`. Both were absent here until
+   * mig 492, which meant messaging channels could only see the legacy
+   * slug-keyed skill toggles — never the `workspace_skill_enablement`
+   * allowlist, and never the `all_assistants` flag. A workspace skill that was
+   * plainly enabled in the web app was simply not offered on Telegram.
+   */
+  workspaceSkillStore?: import('../db/skill-store.js').WorkspaceSkillStore
+  workspaceSkillEnablementStore?: import('../db/workspace-skill-enablement-store.js').WorkspaceSkillEnablementStore
   workerManager?: import('@use-brian/core').WorkerManager
   episodicStore?: EpisodicStore
   sessionStateStore?: SessionStateStore
@@ -950,7 +961,8 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     modelAlias, adaptiveResearchEnabled, abortController,
     provider, systemPrompt, tools, memoryStore, usageStore,
     analytics, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore, connectorInstanceStore, workspaceToolPolicyStore,
-    knowledgeStore, knowledgeCaptureRuleStore, gdriveFilesStore, skillStore, workerManager,
+    knowledgeStore, knowledgeCaptureRuleStore, gdriveFilesStore, skillStore,
+    workspaceSkillStore, workspaceSkillEnablementStore, workerManager,
     episodicStore, sessionStateStore, workspaceFilesStore, filesApi, readCachedFile,
     replyToMessageId, replyRaw, incomingChannelMessageId,
     voiceTranscriptionUsage,
@@ -1930,6 +1942,23 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
       // Scope skills to the assistant's workspace (not the owner's personal
       // workspace) — see injectSkills / incident 2026-06-01.
       workspaceId: assistant.workspaceId ?? undefined,
+      // Both stores were missing here until mig 492, so on every messaging
+      // channel a workspace skill was gated ONLY by the legacy slug-keyed
+      // `assistant_skill_settings` table: the `workspace_skill_enablement`
+      // allowlist was invisible, and so was the `all_assistants` flag. The
+      // result was a skill that worked in web chat and silently did not on
+      // Telegram / Slack / WhatsApp / Discord — with every layer looking
+      // correct and only the user able to tell.
+      //
+      // Defaulted from the factories rather than threaded, because nine
+      // channel routes each re-declare and forward the pipeline's stores by
+      // hand; a store one of them forgot is exactly the silent per-channel gap
+      // being fixed here. Both factories are stateless (they close over
+      // `query`), same as `createDbKnowledgeStore` above. An injected store
+      // still wins, so tests keep their fakes.
+      workspaceSkillStore: workspaceSkillStore ?? createDbWorkspaceSkillStore(),
+      workspaceSkillEnablementStore:
+        workspaceSkillEnablementStore ?? createDbWorkspaceSkillEnablementStore(),
     })
     fullSystemPrompt += skillResult.promptFragment
     if (slashCommand && skillResult.enforcedPromptFragment) {

@@ -10,10 +10,71 @@ import {
   decideLoginRecoveryAction,
   decideRedirectAction,
   shouldAttemptLocalMint,
+  shouldMintLocalSessionBeforeLoad,
+  shouldShowSignInLandingOnLaunch,
   LOCAL_MINT_COOLDOWN_MS,
 } from "../window-policy.js";
 
 const CANVAS_ORIGIN = "https://app.usebrian.ai";
+
+describe("[COMP:app-desktop/window-policy] bundled local startup", () => {
+  it("mints only when a bundled local target has no stored bearer", () => {
+    expect(
+      shouldMintLocalSessionBeforeLoad({
+        bundled: true,
+        targetAuth: "local-session",
+        hasStoredTokens: false,
+      }),
+    ).toBe(true);
+    expect(
+      shouldMintLocalSessionBeforeLoad({
+        bundled: true,
+        targetAuth: "local-session",
+        hasStoredTokens: true,
+      }),
+    ).toBe(false);
+    expect(
+      shouldMintLocalSessionBeforeLoad({
+        bundled: false,
+        targetAuth: "local-session",
+        hasStoredTokens: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldMintLocalSessionBeforeLoad({
+        bundled: true,
+        targetAuth: "pkce",
+        hasStoredTokens: false,
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("[COMP:app-desktop/window-policy] packaged sign-in landing", () => {
+  it("uses the native landing only for a signed-out bundled PKCE target", () => {
+    expect(
+      shouldShowSignInLandingOnLaunch({
+        bundled: true,
+        targetAuth: "pkce",
+        hasStoredTokens: false,
+      }),
+    ).toBe(true);
+    expect(
+      shouldShowSignInLandingOnLaunch({
+        bundled: true,
+        targetAuth: "pkce",
+        hasStoredTokens: true,
+      }),
+    ).toBe(false);
+    expect(
+      shouldShowSignInLandingOnLaunch({
+        bundled: true,
+        targetAuth: "local-session",
+        hasStoredTokens: false,
+      }),
+    ).toBe(false);
+  });
+});
 
 /** A Google connector-connect OAuth URL (Drive/Gmail/Calendar) — redirect_uri at the connector callback. */
 function connectorOAuthUrl(redirectOrigin = CANVAS_ORIGIN): string {

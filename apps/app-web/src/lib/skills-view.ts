@@ -9,6 +9,16 @@
  * [COMP:app-web/brain-skills-view]
  */
 
+import {
+  BUILTIN_SKILL_GROUPS,
+  UNSORTED_SKILL_GROUP,
+  distinctSkillGroups,
+  isBuiltinSkillGroup,
+  normalizeSkillGroup,
+  skillGroupKey,
+  type BuiltinSkillGroup,
+} from "@use-brian/shared/skill-groups";
+
 import type {
   SkillInductionSource,
   SkillSensitivity,
@@ -123,58 +133,95 @@ export function partitionSkillsForLanding(
   };
 }
 
-// ── Category grouping ────────────────────────────────────────────
+// ── Groups ───────────────────────────────────────────────────────
 //
-// `workspace_skills.category` has been in the schema and the skill format
-// since the beginning but nothing ever grouped by it, so the library was one
-// undifferentiated stack. The column is TEXT with no write-side enum check,
-// so anything a legacy or third-party row carries has to normalize onto a
-// bucket the UI has a translated label for.
+// `workspace_skills.category` is the library's GROUP, and it is an open
+// vocabulary rather than an enum: four built-in names carry translated labels
+// and anything else is a workspace-defined group displayed verbatim, the way
+// a skill's own name is. `@use-brian/shared/skill-groups` owns the shape
+// (normalize, fold, dedupe) so the client, the API and the skill loader
+// cannot drift apart the way three hand-mirrored enums did.
 
-/** The closed set the skill format documents, in library display order. */
-export const SKILL_CATEGORIES = [
-  "productivity",
-  "communication",
-  "research",
-  "custom",
-] as const;
+// Re-exported so a component reaches for one import (`@/lib/skills-view`)
+// rather than two. Only what a surface actually uses - the rest stays behind
+// `@use-brian/shared/skill-groups`.
+export {
+  UNSORTED_SKILL_GROUP,
+  distinctSkillGroups,
+  normalizeSkillGroup,
+  type BuiltinSkillGroup,
+} from "@use-brian/shared/skill-groups";
 
-export type SkillCategory = (typeof SKILL_CATEGORIES)[number];
+/** One skill's group, in its stored display form. */
+export function skillGroupOf(skill: { category?: string }): string {
+  return normalizeSkillGroup(skill.category);
+}
 
-const KNOWN_CATEGORIES = new Set<string>(SKILL_CATEGORIES);
-
-/** One skill's category, folded onto the known set (`custom` is the sink). */
-export function skillCategoryOf(skill: { category?: string }): SkillCategory {
-  const value = skill.category;
-  return typeof value === "string" && KNOWN_CATEGORIES.has(value)
-    ? (value as SkillCategory)
-    : "custom";
+/**
+ * How a group renders. A built-in resolves through the dictionary; anything
+ * else is user data and shows exactly as it was written - untranslated, for
+ * the same reason a skill's name is.
+ */
+export function skillGroupLabel(
+  group: string,
+  labels: Record<BuiltinSkillGroup, string>,
+): string {
+  return isBuiltinSkillGroup(group) ? labels[group] : group;
 }
 
 export type SkillCategoryGroup = {
-  category: SkillCategory;
+  category: string;
   skills: WorkspaceSkillSummary[];
 };
 
 /**
- * Bucket skills by category in the fixed `SKILL_CATEGORIES` order, dropping
- * empty buckets. Order WITHIN a bucket is the incoming order, so whatever
- * `filterSkillsForLibrary` sorted by (status, then name) still holds.
+ * Bucket skills by group, dropping empty buckets.
+ *
+ * Order is ALPHABETICAL by the label the reader sees, with the unsorted sink
+ * always last - one rule for a set nobody can enumerate in advance, and it
+ * sorts in the reader's own language because it sorts the translated label.
+ * (The old fixed enum order died with the enum: privileging three legacy
+ * names above a workspace's own groups would have been arbitrary.) Order
+ * WITHIN a bucket is the incoming order, so whatever `filterSkillsForLibrary`
+ * sorted by - status, then name - still holds.
+ *
+ * `labelOf` resolves a group to its display label; pass nothing when the
+ * caller has no dictionary and the stored form is the label.
  */
 export function groupSkillsByCategory(
   skills: WorkspaceSkillSummary[],
+  labelOf: (group: string) => string = (group) => group,
 ): SkillCategoryGroup[] {
-  const buckets = new Map<SkillCategory, WorkspaceSkillSummary[]>();
+  const buckets = new Map<string, SkillCategoryGroup>();
   for (const skill of skills) {
-    const category = skillCategoryOf(skill);
-    const bucket = buckets.get(category);
-    if (bucket) bucket.push(skill);
-    else buckets.set(category, [skill]);
+    const category = skillGroupOf(skill);
+    const key = skillGroupKey(category);
+    const bucket = buckets.get(key);
+    if (bucket) bucket.skills.push(skill);
+    else buckets.set(key, { category, skills: [skill] });
   }
-  return SKILL_CATEGORIES.flatMap((category) => {
-    const bucket = buckets.get(category);
-    return bucket && bucket.length > 0 ? [{ category, skills: bucket }] : [];
+  return [...buckets.values()].sort((a, b) => {
+    const aUnsorted = a.category === UNSORTED_SKILL_GROUP;
+    const bUnsorted = b.category === UNSORTED_SKILL_GROUP;
+    if (aUnsorted !== bUnsorted) return aUnsorted ? 1 : -1;
+    return labelOf(a.category).localeCompare(labelOf(b.category));
   });
+}
+
+/**
+ * The groups a picker offers: every built-in, plus every group the library
+ * already uses, in the order `groupSkillsByCategory` renders them. Offering
+ * what the library already has is what keeps a free-text field from forking
+ * into near-synonyms - typing a new name stays possible, but reusing one is
+ * the shorter path.
+ */
+export function skillGroupOptions(
+  skills: Pick<WorkspaceSkillSummary, "category">[],
+): string[] {
+  const inUse = groupSkillsByCategory(
+    skills as WorkspaceSkillSummary[],
+  ).map((g) => g.category);
+  return distinctSkillGroups([...BUILTIN_SKILL_GROUPS, ...inUse]);
 }
 
 /** The editor's Instructions drafts — always strings (inputs), trimmed on
@@ -184,7 +231,8 @@ export type SkillInstructionsDraft = {
   description: string;
   whenToUse: string;
   content: string;
-  category: SkillCategory;
+  /** The group, free text. Normalized on save by `buildSkillPatch`. */
+  category: string;
 };
 
 /** How many skills are awaiting confirmation — the Brain topbar's amber
@@ -236,8 +284,12 @@ export function buildSkillPatch(
   if (whenToUse !== (skill.whenToUse ?? "")) patch.whenToUse = whenToUse;
   const content = draft.content.trim();
   if (content && content !== skill.content) patch.content = content;
-  // Compared against the NORMALIZED current value, so a row carrying a legacy
-  // out-of-enum category doesn't read as "already custom" and swallow the fix.
-  if (draft.category !== skillCategoryOf(skill)) patch.category = draft.category;
+  // Compared through `skillGroupKey`, so re-typing a group with different
+  // capitalisation is not a change, while a genuinely different group is. The
+  // stored form is the draft's, normalized - the user's spelling wins.
+  const category = normalizeSkillGroup(draft.category);
+  if (skillGroupKey(category) !== skillGroupKey(skillGroupOf(skill))) {
+    patch.category = category;
+  }
   return patch;
 }

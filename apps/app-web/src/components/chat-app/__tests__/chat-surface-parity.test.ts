@@ -19,6 +19,10 @@ const workspaceChromeSource = readFileSync(
   fileURLToPath(new URL("../../doc/workspace-chrome.tsx", import.meta.url)),
   "utf8",
 );
+const dockSuppressionSource = readFileSync(
+  fileURLToPath(new URL("../../../lib/chat-dock-suppress.ts", import.meta.url)),
+  "utf8",
+);
 
 describe("[COMP:app-web/chat-parity] Chat surface parity", () => {
   it("composes the shared pick, drop, paste, and upload-chip affordances", () => {
@@ -83,7 +87,8 @@ describe("[COMP:app-web/chat-parity] Chat surface parity", () => {
     expect(source).toContain('inputWrapClassName="order-1 col-span-2 min-w-0"');
     expect(source).toContain("w-full max-h-[240px] min-w-0 resize-none");
     expect(source).not.toContain('rowClassName="flex flex-wrap');
-    expect(workspaceChromeSource).toContain(
+    expect(workspaceChromeSource).toContain("workspaceChatDockSuppressed(");
+    expect(dockSuppressionSource).toContain(
       'embeddedChatSuppressed || activeSurface === "chat"',
     );
   });

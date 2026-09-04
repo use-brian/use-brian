@@ -20,6 +20,11 @@ import {
 /** The custom URL scheme the app registers for deep links + the auth callback. */
 export const PROTOCOL_SCHEME = "usebrian";
 
+/** Packaged releases use the offline-capable renderer; dev keeps live HMR. */
+export function bundledDefaultForRuntime(isPackaged: boolean): boolean {
+  return isPackaged;
+}
+
 // The authenticated product is served at `app.usebrian.ai`. `deriveApiUrl`
 // (target-store.ts) maps the `app.` host to the sibling `api.` backend (the
 // legacy `canvas.` prefix is kept as a tolerant fallback). `USEBRIAN_APP_URL`

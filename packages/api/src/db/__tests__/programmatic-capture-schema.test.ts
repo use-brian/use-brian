@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises'
 import { describe, expect, it } from 'vitest'
 
 const migration = () => readFile(
-  new URL('../../../migrations/492_programmatic_capture_profiles.sql', import.meta.url),
+  new URL('../../../migrations/494_programmatic_capture_profiles.sql', import.meta.url),
   'utf8',
 )
 

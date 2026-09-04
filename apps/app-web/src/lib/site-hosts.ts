@@ -74,6 +74,7 @@ const GUARDED_PREFIXES = [
   "/knowledge-base",
   "/memories",
   "/cloud-link",
+  "/desktop/chat",
 ];
 
 export function isGuardedPath(pathname: string): boolean {
