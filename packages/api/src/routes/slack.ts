@@ -189,6 +189,10 @@ type SlackRouteOptions = {
   }) => Promise<import('../ingest/channel-media-intake.js').ChannelMediaIntakeResult>
   analytics?: AnalyticsLogger
   skillStore?: import('../db/skill-store.js').SkillStore
+  workflowStore?: import('@use-brian/core').WorkflowStore
+  workspaceSkillStore?: import('../db/skill-store.js').WorkspaceSkillStore
+  workspaceSkillEnablementStore?: import('../db/workspace-skill-enablement-store.js').WorkspaceSkillEnablementStore
+  workspaceSkillFilesStore?: import('../db/workspace-skill-files-store.js').WorkspaceSkillFilesStore
   deferredConfirmationStore?: DeferredConfirmationStore
   episodicStore?: import('@use-brian/core').EpisodicStore
   sessionStateStore?: import('@use-brian/core').SessionStateStore
@@ -1249,6 +1253,10 @@ type ProcessMessageParams = {
   fileStore?: import('@use-brian/core').FileStore
   analytics?: AnalyticsLogger
   skillStore?: import('../db/skill-store.js').SkillStore
+  workflowStore?: import('@use-brian/core').WorkflowStore
+  workspaceSkillStore?: import('../db/skill-store.js').WorkspaceSkillStore
+  workspaceSkillEnablementStore?: import('../db/workspace-skill-enablement-store.js').WorkspaceSkillEnablementStore
+  workspaceSkillFilesStore?: import('../db/workspace-skill-files-store.js').WorkspaceSkillFilesStore
   pendingSlackConfirmations: Map<string, { resolver: ConfirmationResolver; toolCallId: string }>
   activeAbortControllers: Map<string, ActiveSlackTurn>
   episodicStore?: import('@use-brian/core').EpisodicStore
@@ -1872,6 +1880,10 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     filesApi: params.filesApi,
     artifactPromoter: params.artifactPromoter ?? null,
     skillStore: params.skillStore,
+    workflowStore: params.workflowStore,
+    workspaceSkillStore: params.workspaceSkillStore,
+    workspaceSkillEnablementStore: params.workspaceSkillEnablementStore,
+    workspaceSkillFilesStore: params.workspaceSkillFilesStore,
     workerManager: params.workerManager,
     episodicStore: params.episodicStore,
     sessionStateStore: params.sessionStateStore,

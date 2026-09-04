@@ -20,7 +20,13 @@
  */
 
 import { WebSocket } from 'ws'
-import { createDiscordAdapter, createDedupBuffer, type IncomingMessage } from '@use-brian/channels'
+import {
+  createDiscordAdapter,
+  createDedupBuffer,
+  respondToInteraction,
+  InteractionCallbackType,
+  type IncomingMessage,
+} from '@use-brian/channels'
 import {
   DISCORD_GATEWAY_URL,
   GatewayOp,
@@ -73,14 +79,22 @@ type ForwardedInteraction = {
 type GatewayInteraction = {
   id: string
   token: string
+  application_id?: string
   type?: number
   channel_id?: string
   message?: { id?: string }
   member?: { user?: { id?: string } }
   user?: { id?: string }
-  data?: { custom_id?: string; component_type?: number }
+  data?: {
+    id?: string
+    name?: string
+    custom_id?: string
+    component_type?: number
+    options?: Array<{ name: string; type: number; value?: string | number | boolean }>
+  }
 }
 
+const INTERACTION_TYPE_APPLICATION_COMMAND = 2
 const INTERACTION_TYPE_MESSAGE_COMPONENT = 3
 const COMPONENT_TYPE_BUTTON = 2
 
@@ -328,9 +342,20 @@ class Connection {
     }
     if (payload.t === 'INTERACTION_CREATE') {
       const d = payload.d as GatewayInteraction
-      // Only button presses (MESSAGE_COMPONENT / button) carry a confirmation
-      // decision. Slash commands and other interaction types are ignored here —
-      // free-form chat is the MESSAGE_CREATE path. Dedup by interaction id so a
+      if (d?.type === INTERACTION_TYPE_APPLICATION_COMMAND && d.channel_id) {
+        if (this.dedup.isDuplicate(`i:${d.id}`)) return
+        // Discord requires an acknowledgement within three seconds. The actual
+        // answer is delivered through the normal channel pipeline.
+        void respondToInteraction(d.id, d.token, {
+          type: InteractionCallbackType.CHANNEL_MESSAGE_WITH_SOURCE,
+          data: { content: 'Brian is working on that command.' },
+        }).catch((err: unknown) => console.error('[discord-gateway] command acknowledgement failed:', err))
+        const msg = this.adapter.parseIncoming(d)
+        if (msg) this.onMessage(msg)
+        return
+      }
+      // Button presses (MESSAGE_COMPONENT / button) carry a confirmation
+      // decision. Dedup by interaction id so a
       // RESUME replay never double-acks (a second callback errors 40060).
       if (
         d?.type === INTERACTION_TYPE_MESSAGE_COMPONENT &&

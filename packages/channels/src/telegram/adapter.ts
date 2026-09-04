@@ -353,18 +353,23 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
     )
   }
 
-  function parseAskCommand(msg: TelegramMessage): { length: number; rejected: boolean } | null {
+  function parseBotCommand(msg: TelegramMessage): {
+    length: number
+    name: string
+    rejected: boolean
+  } | null {
     const content = msg.text ?? msg.caption
     const entities = msg.text !== undefined ? msg.entities : msg.caption_entities
     if (!content || !entities) return null
     const entity = entities.find((e) => e.type === 'bot_command' && e.offset === 0)
     if (!entity) return null
     const token = content.slice(0, entity.length)
-    const match = token.match(/^\/ask(?:@([a-z0-9_]+))?$/i)
+    const match = token.match(/^\/([a-z][a-z0-9_]{0,31})(?:@([a-z0-9_]+))?$/i)
     if (!match) return null
-    const target = match[1]
+    const target = match[2]
     return {
       length: entity.length,
+      name: match[1].toLowerCase(),
       rejected: Boolean(
         target && (!options.botUsername || target.toLowerCase() !== options.botUsername.toLowerCase()),
       ),
@@ -420,8 +425,8 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
     const isGroup = isGroupChat(msg)
     const mentioned = isBotMentioned(msg)
     const repliedToBot = isReplyToBot(msg)
-    const askCommand = parseAskCommand(msg)
-    const invokedByAsk = askCommand !== null && !askCommand.rejected
+    const botCommand = parseBotCommand(msg)
+    const invokedByCommand = botCommand !== null && !botCommand.rejected
 
     const chatIdStr = String(msg.chat.id)
     const topicId = (msg.chat.is_forum === true && msg.message_thread_id != null)
@@ -480,7 +485,7 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
 
     // ── Addressing gate ──
     // In groups, answer when @mentioned, replying to this bot, or explicitly
-    // invoked through /ask. Exact identity checks prevent co-resident bots
+    // invoked through a bot command. Exact identity checks prevent co-resident bots
     // from answering each other's commands or reply threads.
     //
     // An unaddressed message that carried media is NOT dropped — it returns
@@ -490,10 +495,10 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
     // empty context and invented upload instructions for a thing the user had
     // already done. See docs/architecture/channels/adapter-pattern.md →
     // "Unaddressed group media".
-    const addressedToAnotherBot = askCommand?.rejected === true
+    const addressedToAnotherBot = botCommand?.rejected === true
     const unaddressed =
       addressedToAnotherBot ||
-      (isGroup && requireMention && !mentioned && !repliedToBot && !invokedByAsk)
+      (isGroup && requireMention && !mentioned && !repliedToBot && !invokedByCommand)
     // Only media a route can actually persist earns the capture-only exit.
     // Photos are outside the brain intake's scope (images are not filed), so a
     // capture-only photo would run no turn AND file nothing — a no-op dressed
@@ -518,8 +523,12 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
 
     // Strip the addressing prefix from the model-facing text.
     let cleanText = text
-    if (askCommand && !askCommand.rejected) {
-      cleanText = cleanText.slice(askCommand.length).trim() || '/ask'
+    if (botCommand && !botCommand.rejected && botCommand.name === 'ask') {
+      cleanText = cleanText.slice(botCommand.length).trim() || '/ask'
+    } else if (botCommand && !botCommand.rejected) {
+      // Strip only an optional @bot suffix. Keeping the command name lets the
+      // shared pipeline resolve `/skill`, `/workflow`, and direct skill slugs.
+      cleanText = `/${botCommand.name}${cleanText.slice(botCommand.length)}`.trim()
     } else if (options.botUsername) {
       cleanText = cleanText.replace(new RegExp(`@${options.botUsername}\\b`, 'gi'), '').trim()
     }
@@ -546,7 +555,7 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
       mediaSizeBytes,
       replyToMessageId: msg.reply_to_message ? String(msg.reply_to_message.message_id) : undefined,
       isGroupChat: isGroup,
-      isMentioned: mentioned || repliedToBot || invokedByAsk,
+      isMentioned: mentioned || repliedToBot || invokedByCommand,
       ...(unaddressed ? { captureOnly: true as const } : {}),
       timestamp: msg.date * 1000,
       raw: msg,

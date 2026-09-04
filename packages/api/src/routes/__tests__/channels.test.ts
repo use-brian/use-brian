@@ -34,7 +34,9 @@ vi.mock('@use-brian/channels', () => ({
   subscribeWhatsAppCloudApp: vi.fn(),
   DEFAULT_WHATSAPP_GRAPH_API_VERSION: 'v26.0',
   TELEGRAM_BOT_COMMANDS: [{ command: 'ask', description: 'Ask Brian anything' }],
+  DISCORD_APPLICATION_COMMANDS: [{ name: 'ask', description: 'Ask Brian anything', type: 1 }],
   createTelegramApi: vi.fn(),
+  createDiscordApi: vi.fn(),
   createSlackApi: vi.fn(),
   // The workspace channels route doesn't construct an adapter, but the
   // channels package re-exports some types/values the rest of the import
@@ -81,6 +83,7 @@ import {
   validateWhatsAppCloudCredentials,
   subscribeWhatsAppCloudApp,
   createTelegramApi,
+  createDiscordApi,
   createSlackApi,
 } from '@use-brian/channels'
 import { channelsRoutes, normalizeWhatsAppPhoneNumber } from '../channels.js'
@@ -133,6 +136,8 @@ function buildApp(
     }
     customChannelStore?: CustomChannelStore
     whatsappCloudManagedGroupStore?: WhatsAppCloudManagedGroupStore
+    skillStore?: import('../../db/skill-store.js').SkillStore
+    workflowStore?: import('@use-brian/core').WorkflowStore
   } = {},
 ) {
   const role = opts.role === undefined ? 'admin' : opts.role
@@ -142,6 +147,8 @@ function buildApp(
     '/api',
     channelsRoutes({
       workspaceStore,
+      skillStore: opts.skillStore,
+      workflowStore: opts.workflowStore,
       integrationStore: opts.integrationStore,
       apiUrl: opts.apiUrl,
       discordConnector: opts.discordConnector,
@@ -217,6 +224,9 @@ function makeManagedGroupStore(over: Partial<WhatsAppCloudManagedGroupStore> = {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  vi.mocked(createDiscordApi).mockReturnValue({
+    replaceGlobalApplicationCommands: vi.fn().mockResolvedValue([]),
+  } as never)
 })
 
 describe('[COMP:api/channels-route] GET channels', () => {
@@ -889,8 +899,8 @@ describe('[COMP:api/channels-route] workspace-driven connect', () => {
       reused: false,
     })
     const setWebhook = vi.fn().mockResolvedValue(undefined)
-    const upsertMyCommands = vi.fn().mockResolvedValue(undefined)
-    vi.mocked(createTelegramApi).mockReturnValue({ setWebhook, upsertMyCommands } as never)
+    const setMyCommands = vi.fn().mockResolvedValue(undefined)
+    vi.mocked(createTelegramApi).mockReturnValue({ setWebhook, setMyCommands } as never)
     vi.mocked(getChannelForUser).mockResolvedValue(
       makeChannel({
         id: 'chan-tg',
@@ -909,9 +919,25 @@ describe('[COMP:api/channels-route] workspace-driven connect', () => {
         }),
       ]),
     } as unknown as ChannelIntegrationStore
-    const res = await request(
-      buildApp({ integrationStore, apiUrl: 'https://api.example.com' }),
-    )
+    const skillStore = {
+      listForWorkspaceContent: vi.fn().mockResolvedValue([{
+        id: 'custom-digest', name: 'Custom Digest', description: 'Build a digest',
+      }]),
+    } as never
+    const workflowStore = {
+      list: vi.fn().mockResolvedValue([{
+        id: '11111111-2222-4333-8444-555555555555',
+        name: 'Daily Digest',
+        description: 'Send the digest',
+        enabled: true,
+      }]),
+    } as never
+    const res = await request(buildApp({
+      integrationStore,
+      apiUrl: 'https://api.example.com',
+      skillStore,
+      workflowStore,
+    }))
       .post('/api/workspaces/ws-1/channels/telegram')
       .send({ botToken: '12345:ABC-token' })
     expect(res.status).toBe(201)
@@ -921,9 +947,11 @@ describe('[COMP:api/channels-route] workspace-driven connect', () => {
       'https://api.example.com/webhook/telegram/chan-tg',
       expect.any(String),
     )
-    expect(upsertMyCommands).toHaveBeenCalledWith([
+    expect(setMyCommands).toHaveBeenCalledWith(expect.arrayContaining([
       { command: 'ask', description: 'Ask Brian anything' },
-    ])
+      { command: 'custom_digest', description: 'Skill: Custom Digest - Build a digest' },
+      { command: 'workflow_daily_digest', description: 'Workflow: Daily Digest - Send the digest' },
+    ]))
     expect(res.body.pairingCode).toBeNull()
   })
 
@@ -947,7 +975,7 @@ describe('[COMP:api/channels-route] workspace-driven connect', () => {
     })
     vi.mocked(createTelegramApi).mockReturnValue({
       setWebhook: vi.fn().mockResolvedValue(undefined),
-      upsertMyCommands: vi.fn().mockResolvedValue(undefined),
+      setMyCommands: vi.fn().mockResolvedValue(undefined),
     } as never)
     vi.mocked(getChannelForUser).mockResolvedValue(
       makeChannel({ id: 'chan-tg', channelType: 'telegram' }),
@@ -990,7 +1018,7 @@ describe('[COMP:api/channels-route] workspace-driven connect', () => {
     vi.mocked(resolveRoutingForSurface).mockResolvedValue(null)
     vi.mocked(createTelegramApi).mockReturnValue({
       setWebhook: vi.fn().mockResolvedValue(undefined),
-      upsertMyCommands: vi.fn().mockResolvedValue(undefined),
+      setMyCommands: vi.fn().mockResolvedValue(undefined),
     } as never)
     vi.mocked(getChannelForUser).mockResolvedValue(
       makeChannel({ id: 'chan-tg', channelType: 'telegram' }),
@@ -1064,7 +1092,15 @@ describe('[COMP:api/channels-route] workspace-driven connect', () => {
     const connect = vi.fn().mockResolvedValue({ channelId: 'chan-dc', status: 'connecting' })
     const discordConnector = { connect } as unknown as DiscordConnectorClient
 
-    const res = await request(buildApp({ integrationStore, discordConnector }))
+    const workflowStore = {
+      list: vi.fn().mockResolvedValue([{
+        id: '11111111-2222-4333-8444-555555555555',
+        name: 'Daily Digest',
+        description: 'Send the digest',
+        enabled: true,
+      }]),
+    } as never
+    const res = await request(buildApp({ integrationStore, discordConnector, workflowStore }))
       .post('/api/workspaces/ws-1/channels/discord')
       .send({ botToken: 'discord-bot-token', defaultAssistantId: ASSISTANT_UUID })
 
@@ -1084,6 +1120,16 @@ describe('[COMP:api/channels-route] workspace-driven connect', () => {
       botToken: 'discord-bot-token',
       botUserId: '987654321',
     })
+    expect(createDiscordApi).toHaveBeenCalledWith({ token: 'discord-bot-token' })
+    expect(
+      vi.mocked(createDiscordApi).mock.results.at(-1)?.value.replaceGlobalApplicationCommands,
+    ).toHaveBeenCalledWith(
+      '987654321',
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'ask' }),
+        expect.objectContaining({ name: 'workflow_daily_digest' }),
+      ]),
+    )
   })
 
   it('POST /discord still 201s but reports connectorError when the socket open fails', async () => {

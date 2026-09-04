@@ -202,6 +202,14 @@ describe('[COMP:api/skill-store] WorkspaceSkillStore — onWritten hook', () => 
     expect(onWritten.mock.calls[0][0]).toMatchObject({ rowId: 'sk-uuid-1', workspaceId: 'ws-1' })
   })
 
+  it('fires the command-roster hook with the acting user and workspace', async () => {
+    const onCommandRosterChanged = vi.fn()
+    const ws = createDbWorkspaceSkillStore({ onCommandRosterChanged })
+    mockRls.mockResolvedValueOnce({ rows: [skillRow()], rowCount: 1 } as never)
+    await ws.create('u-1', 'ws-1', { slug: 'my-skill', name: 'My Skill', description: 'd', content: 'c' })
+    expect(onCommandRosterChanged).toHaveBeenCalledWith('u-1', 'ws-1')
+  })
+
   it('defers the create hook while a native bundle batch is incomplete', async () => {
     const onWritten = vi.fn()
     const ws = createDbWorkspaceSkillStore({ onWritten })

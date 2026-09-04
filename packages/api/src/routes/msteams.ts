@@ -111,6 +111,10 @@ export type MsTeamsRouteOptions = {
   artifactPromoter?: import('@use-brian/api/files/artifact-promote.js').ArtifactPromoter | null
   analytics?: AnalyticsLogger
   skillStore?: import('../db/skill-store.js').SkillStore
+  workflowStore?: import('@use-brian/core').WorkflowStore
+  workspaceSkillStore?: import('../db/skill-store.js').WorkspaceSkillStore
+  workspaceSkillEnablementStore?: import('../db/workspace-skill-enablement-store.js').WorkspaceSkillEnablementStore
+  workspaceSkillFilesStore?: import('../db/workspace-skill-files-store.js').WorkspaceSkillFilesStore
   episodicStore?: import('@use-brian/core').EpisodicStore
   sessionStateStore?: import('@use-brian/core').SessionStateStore
   crmEmailDraftStore?: import('@use-brian/core').CrmEmailDraftStore
@@ -458,6 +462,10 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
       workspaceFilesStore: options.workspaceFilesStore,
       artifactPromoter: options.artifactPromoter ?? null,
       skillStore: options.skillStore,
+      workflowStore: options.workflowStore,
+      workspaceSkillStore: options.workspaceSkillStore,
+      workspaceSkillEnablementStore: options.workspaceSkillEnablementStore,
+      workspaceSkillFilesStore: options.workspaceSkillFilesStore,
       workerManager: options.workerManager,
       episodicStore: options.episodicStore,
       sessionStateStore: options.sessionStateStore,

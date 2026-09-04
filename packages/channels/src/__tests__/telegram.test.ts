@@ -317,6 +317,54 @@ describe('[COMP:channels/telegram] createTelegramAdapter', () => {
     expect(msg).toMatchObject({ text: 'what time is it?', isMentioned: true })
   })
 
+  it('accepts skill and workflow commands as explicit group invocations', () => {
+    for (const text of ['/skill goal register it', '/workflow daily-digest now']) {
+      const result = adapter.parseIncoming({
+        update_id: 200 + text.length,
+        message: {
+          message_id: 200 + text.length,
+          from: { id: 42, first_name: 'Alice' },
+          chat: { id: -100, type: 'group' },
+          date: 1700000000,
+          text,
+          entities: [{ type: 'bot_command', offset: 0, length: text.indexOf(' ') }],
+        },
+      })
+      expect(result?.text).toBe(text)
+      expect(result?.isMentioned).toBe(true)
+    }
+  })
+
+  it('preserves a direct skill command while removing its bot suffix', () => {
+    const result = adapter.parseIncoming({
+      update_id: 299,
+      message: {
+        message_id: 299,
+        from: { id: 42, first_name: 'Alice' },
+        chat: { id: -100, type: 'group' },
+        date: 1700000000,
+        text: '/goal@TestBot register it',
+        entities: [{ type: 'bot_command', offset: 0, length: 13 }],
+      },
+    })
+    expect(result?.text).toBe('/goal register it')
+  })
+
+  it('preserves a generated native workflow command for shared dispatch', () => {
+    const result = adapter.parseIncoming({
+      update_id: 300,
+      message: {
+        message_id: 300,
+        from: { id: 42, first_name: 'Alice' },
+        chat: { id: -100, type: 'group' },
+        date: 1700000000,
+        text: '/workflow_daily_digest@TestBot region=apac',
+        entities: [{ type: 'bot_command', offset: 0, length: 30 }],
+      },
+    })
+    expect(result?.text).toBe('/workflow_daily_digest region=apac')
+  })
+
   it('rejects /ask addressed to another bot even when mention filtering is off', () => {
     const openAdapter = createTelegramAdapter({
       token: 'test-token',
@@ -1149,6 +1197,8 @@ describe('[COMP:channels/telegram] api command registration', () => {
         commands: [
           { command: 'start', description: 'Start the bot' },
           { command: 'ask', description: 'Ask Brian anything' },
+          { command: 'skill', description: 'Run a skill by slug' },
+          { command: 'workflow', description: 'Run a workflow by ID or name' },
         ],
       })
     } finally {

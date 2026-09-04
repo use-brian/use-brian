@@ -30,10 +30,14 @@ import {
   DEFAULT_WHATSAPP_GRAPH_API_VERSION,
   createTelegramApi,
   TELEGRAM_BOT_COMMANDS,
+  createDiscordApi,
+  DISCORD_APPLICATION_COMMANDS,
   createSlackApi,
 } from '@use-brian/channels'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 import type { LinkCodeStore } from '../db/link-codes.js'
+import type { SkillStore } from '../db/skill-store.js'
+import type { WorkflowStore } from '@use-brian/core'
 import type { DiscordConnectorClient } from '../discord/connector-client.js'
 import type { WhatsappConnectorClient } from '../whatsapp/connector-client.js'
 import type { WechatConnectorClient } from '../wechat/connector-client.js'
@@ -75,6 +79,7 @@ import { ensureMsTeamsConnectorInstance } from '../ingest/msteams-connector-inst
 import { ensureFeishuConnectorInstance } from '../ingest/feishu-connector-instance.js'
 import { query, queryWithRLS } from '../db/client.js'
 import { providerChannelIdFromSession } from '../db/sessions.js'
+import { buildWorkspaceNativeSlashCommands } from './native-slash-commands.js'
 
 // Per-integration behavior config accepted by `PATCH .../channels/:id/config`.
 // Mirrors the `ChannelIntegrationConfig` type (db/channel-integrations.ts).
@@ -124,6 +129,8 @@ function normalizeWhatsAppPhoneNumbers(values: string[]): string[] | null {
 
 export type ChannelsRouteOptions = {
   workspaceStore: WorkspaceStore
+  skillStore?: SkillStore
+  workflowStore?: WorkflowStore
   /**
    * Channel-integration store — supplies each channel's per-integration
    * behavior `config` AND backs the workspace-scoped channel connect
@@ -1193,9 +1200,6 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
     try {
       const api = createTelegramApi({ token: parsed.data.botToken })
       await api.setWebhook(webhookUrl, webhookSecret)
-      api.upsertMyCommands(TELEGRAM_BOT_COMMANDS).catch((err) => {
-        console.warn('[channels] Telegram command registration failed:', err)
-      })
     } catch (err) {
       res.status(500).json({
         error: 'Failed to register Telegram webhook',
@@ -1219,6 +1223,25 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
       console.error('[channels] telegram integration upsert failed:', err)
       res.status(500).json({ error: 'Failed to save integration' })
       return
+    }
+
+    try {
+      const catalog = await buildWorkspaceNativeSlashCommands({
+        userId,
+        workspaceId,
+        skillStore: opts.skillStore,
+        workflowStore: opts.workflowStore,
+      })
+      const commands = [
+        ...TELEGRAM_BOT_COMMANDS,
+        ...catalog.commands.map(({ name, description }) => ({ command: name, description })),
+      ]
+      await createTelegramApi({ token: parsed.data.botToken }).setMyCommands(commands)
+      if (catalog.omitted.length > 0) {
+        console.warn(`[channels] Telegram command cap omitted ${catalog.omitted.length} workspace command(s)`)
+      }
+    } catch (err) {
+      console.warn('[channels] Telegram command registration failed:', err)
     }
 
     const channel = await getChannelForUser(userId, provisioned.channelId)
@@ -1331,6 +1354,36 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
       console.error('[channels] discord integration upsert failed:', err)
       res.status(500).json({ error: 'Failed to save integration' })
       return
+    }
+
+    try {
+      const catalog = await buildWorkspaceNativeSlashCommands({
+        userId,
+        workspaceId,
+        skillStore: opts.skillStore,
+        workflowStore: opts.workflowStore,
+      })
+      await createDiscordApi({ token: parsed.data.botToken }).replaceGlobalApplicationCommands(
+        info.botId,
+        [
+          ...DISCORD_APPLICATION_COMMANDS,
+          ...catalog.commands.map(({ name, description }) => ({
+            name,
+            description,
+            type: 1 as const,
+            options: [{
+              name: 'arguments',
+              description: 'Arguments for this command',
+              type: 3 as const,
+            }],
+          })),
+        ],
+      )
+      if (catalog.omitted.length > 0) {
+        console.warn(`[channels] Discord command cap omitted ${catalog.omitted.length} workspace command(s)`)
+      }
+    } catch (err) {
+      console.warn('[channels] Discord command registration failed:', err)
     }
 
     // Open the Gateway socket for this bot. Non-fatal on failure: the

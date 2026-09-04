@@ -105,6 +105,19 @@ describe('[COMP:api/workflow-store] createDbWorkflowStore', () => {
     expect(params?.[4]).toBe(JSON.stringify({ steps: [] }))
   })
 
+  it('fires the command-roster hook after a workflow write', async () => {
+    const onChanged = vi.fn()
+    const hooked = createDbWorkflowStore({ onChanged })
+    mockRls.mockResolvedValueOnce({ rows: [workflowRow()], rowCount: 1 } as never)
+    await hooked.create({
+      userId: 'u-1',
+      workspaceId: 'ws-1',
+      name: 'My Workflow',
+      definition: { steps: [] },
+    } as unknown as Parameters<typeof hooked.create>[0])
+    expect(onChanged).toHaveBeenCalledWith('u-1', 'ws-1')
+  })
+
   it('getById maps the row, defaulting a null trigger to manual', async () => {
     mockRls.mockResolvedValueOnce({ rows: [workflowRow({ trigger: null })], rowCount: 1 } as never)
     const out = await wf.getById('u-1', 'wf-1')

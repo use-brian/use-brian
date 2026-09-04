@@ -17,6 +17,8 @@ export const TELEGRAM_BOT_DOWNLOAD_LIMIT_BYTES = 20 * 1024 * 1024
 
 export const TELEGRAM_BOT_COMMANDS = [
   { command: 'ask', description: 'Ask Brian anything' },
+  { command: 'skill', description: 'Run a skill by slug' },
+  { command: 'workflow', description: 'Run a workflow by ID or name' },
 ] as const
 
 // Retry tuning — see docs/architecture/channels/adapter-pattern.md § "Transient retry".

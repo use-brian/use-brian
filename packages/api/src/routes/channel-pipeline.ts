@@ -29,7 +29,8 @@ import {
   buildWorkspaceFilesContext, buildUploadPolicyBlock, AttachmentCollector,
   EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote,
   latestWorkflowProposalReceipt,
-  parseSlashCommand, buildSlashCommandBlock,
+  prepareSlashCommand, resolveNativeSlashCommand,
+  buildSlashCommandBlock, buildWorkflowSlashCommandBlock,
   buildEmailDraftAnchorPrompt, formatActiveEmailDraftContext,
 } from '@use-brian/core'
 import type { FilesApi, OutboundAttachment, RealtimeThreadTarget } from '@use-brian/core'
@@ -89,7 +90,7 @@ import {
 import { resolveChatModelSelection, wouldBudgetDowngradeAffectModel, chatTierBudget, BACKGROUND_MODEL, backgroundModelFor } from '../model-resolution.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
-import type { SkillStore } from '../db/skill-store.js'
+import type { SkillStore, WorkspaceSkillStore } from '../db/skill-store.js'
 import { injectMcpTools } from '../mcp/inject.js'
 import { createKnowledgeRepoWriter } from '../knowledge/repo-writer.js'
 import { createDbKnowledgeStore } from '../db/knowledge-store.js'
@@ -118,6 +119,7 @@ import type { ArtifactPromoter } from '../files/artifact-promote.js'
 import { appendInboundChatArchive, appendOutboundChatArchive, persistInboundChatArchive } from '../chat-archive/live-writer.js'
 import { isRegistryModelAvailable, registryRow } from '@use-brian/shared/model-registry'
 import type { ProviderAvailability } from '@use-brian/shared/model-registry'
+import { buildWorkspaceNativeSlashCommands } from './native-slash-commands.js'
 
 /**
  * Per-turn memory index cap — see chat.ts for the rationale and
@@ -565,8 +567,11 @@ export type ChannelPipelineParams = {
    * allowlist, and never the `all_assistants` flag. A workspace skill that was
    * plainly enabled in the web app was simply not offered on Telegram.
    */
-  workspaceSkillStore?: import('../db/skill-store.js').WorkspaceSkillStore
+  workflowStore?: import('@use-brian/core').WorkflowStore
+  workspaceSkillStore?: WorkspaceSkillStore
   workspaceSkillEnablementStore?: import('../db/workspace-skill-enablement-store.js').WorkspaceSkillEnablementStore
+  workspaceSkillFilesStore?: import('../db/workspace-skill-files-store.js').WorkspaceSkillFilesStore
+  invocationBuffer?: import('@use-brian/core').SkillInvocationBuffer
   workerManager?: import('@use-brian/core').WorkerManager
   episodicStore?: EpisodicStore
   sessionStateStore?: SessionStateStore
@@ -1919,6 +1924,21 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     }
   }
 
+  let preparedCommand = prepareSlashCommand(messageText)
+  if (assistant.workspaceId && (skillStore || params.workflowStore)) {
+    try {
+      const nativeCatalog = await buildWorkspaceNativeSlashCommands({
+        userId: connectorUserId,
+        workspaceId: assistant.workspaceId,
+        skillStore,
+        workflowStore: params.workflowStore,
+      })
+      preparedCommand = resolveNativeSlashCommand(messageText, nativeCatalog) ?? preparedCommand
+    } catch (err) {
+      console.warn(`[${channelType}] native slash-command resolution failed:`, err)
+    }
+  }
+
   // ── Skills ──
   if (skillStore && !externalGuest) {
     // Slash command (`/goal register …` as the whole message) — same seam as
@@ -1926,7 +1946,9 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     // governance gates apply inside injectSkills, and an unresolved name
     // enforces nothing so the message stays plain text. This is what makes
     // `/goal` work identically from Telegram / Slack / any adapter.
-    const slashCommand = parseSlashCommand(messageText)
+    const slashCommand = preparedCommand?.kind === 'skill'
+      ? { name: preparedCommand.name, args: preparedCommand.args }
+      : null
     const skillResult = await injectSkills({
       enforceSlugs: slashCommand ? [slashCommand.name] : undefined,
       skillStore,
@@ -1959,12 +1981,17 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
       workspaceSkillStore: workspaceSkillStore ?? createDbWorkspaceSkillStore(),
       workspaceSkillEnablementStore:
         workspaceSkillEnablementStore ?? createDbWorkspaceSkillEnablementStore(),
+      workspaceSkillFilesStore: params.workspaceSkillFilesStore,
+      invocationBuffer: params.invocationBuffer,
     })
     fullSystemPrompt += skillResult.promptFragment
     if (slashCommand && skillResult.enforcedPromptFragment) {
       fullSystemPrompt += skillResult.enforcedPromptFragment
       privateRuntimeContextParts.push(buildSlashCommandBlock(slashCommand))
     }
+  }
+  if (preparedCommand?.kind === 'workflow' && allTools.has('runWorkflow')) {
+    privateRuntimeContextParts.push(buildWorkflowSlashCommandBlock(preparedCommand))
   }
   fullSystemPrompt += buildUnavailableCapabilitiesPrompt(unavailableCapabilities, allTools)
   fullSystemPrompt += buildBrowserEscalationPrompt(allTools)
