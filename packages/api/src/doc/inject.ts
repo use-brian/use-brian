@@ -58,9 +58,10 @@
  * data view authored via `renderView` would be invisible on doc. Doc
  * the isolated editor authors data views via `renderPage` / `patchPage`, which
  * route to the live Yjs doc through the `DocGateway`. `renderView` remains a
- * global tool for NON-doc surfaces (standard chat, `apps/web`, the
- * "+ New draft" flow) where there is no live Yjs doc and `saved_views.page`
- * IS the correct target. See `docs/architecture/features/doc.md`.
+ * global tool only for clients/surfaces that receive no Doc tools (legacy
+ * `apps/web`, Telegram/Slack), where there is no live Yjs doc and
+ * `saved_views.page` IS the correct target. See
+ * `docs/architecture/features/doc.md`.
  */
 
 import type {
@@ -128,7 +129,7 @@ export type InjectDocToolsOptions = {
    * surface (`session.appOrigin='doc'`) — the workspace primary by default,
    * or any assistant the user switched to — OR on an app-web workspace
    * surface (`isAppSurface` in chat.ts: brain / studio / workflow /
-   * approvals / knowledge-base), where the tools ride AMBIENTLY (the chat
+   * approvals / knowledge-base / chat), where the tools ride AMBIENTLY (the chat
    * route pairs them with the weak `buildAmbientDocSkillBlock` steering
    * instead of the page-first protocol). This is the ONLY gate for doc
    * tools (doc is a skill, not an app type): when true, reads + the gateway
@@ -148,6 +149,14 @@ export type InjectDocToolsOptions = {
    * to create a fresh one).
    */
   pageId?: string | null
+  /** Existing Pages the route freshly validated as editable for this turn.
+   * Full Chat supplies readable Page pins from the current workspace room.
+   * These supplement `pageId` for the gateway allowlist without becoming
+   * parent-prompt body context. */
+  editPageTargets?: readonly {
+    pageId: string
+    title: string
+  }[]
   expectedVersion?: number | null
   /** Cursor block the user targeted. Included in the freshly loaded child
    * context so the parent can delegate placement intent without authoring ops. */
@@ -393,7 +402,7 @@ export async function injectDocTools(
   const docGateway =
     options.docGateway ?? createDocGateway()
 
-  const pageTools = createDocTools({
+  const buildPageTools = (anchorPageId: string | null) => createDocTools({
     savedViewStore,
     docPageStore,
     docGateway,
@@ -403,13 +412,18 @@ export async function injectDocTools(
     workspaceDirectory,
     onOpApplied: options.onOpApplied,
     onEvent: options.onEvent,
-    // Pin patchPage to the page the user is looking at; allow same-turn-created
-    // pages (renderPage / createSubPage register themselves in this set).
-    anchorPageId: options.pageId ?? null,
+    // Pin patchPage to the exact Page selected by the validated gateway.
+    // Same-turn-created pages remain patchable through this isolated set.
+    anchorPageId,
     turnCreatedPageIds: new Set<string>(),
     // Cached-file store for `importToPage` (faithful AI import).
     fileStore: options.fileStore,
   })
+
+  // Conversational reads keep the open-page anchor. The isolated editor gets
+  // a separately selected anchor below so a readable full-Chat Page pin never
+  // falls back to an unanchored mutation tool.
+  const pageTools = buildPageTools(options.pageId ?? null)
 
   // Build the 9 entity tools. Built-ins come from `listBuiltInEntityTypes`
   // exported by the core barrel — injected (rather than statically
@@ -432,31 +446,38 @@ export async function injectDocTools(
   const getCommentThread = createGetCommentThreadTool({ commentThreadStore })
 
   // The exact child tool surface. The conversational model never receives
-  // this array directly; it is captured by the one delegation gateway below.
-  const childTools: Tool[] = [
-    pageTools.renderPage,
-    pageTools.patchPage,
-    pageTools.getBlock,
-    pageTools.queryDataBlock,
-    pageTools.getCurrentPage,
-    pageTools.getSection,
-    pageTools.getBlockRange,
-    pageTools.createSubPage,
-    pageTools.exportPage,
-    pageTools.importToPage,
-    entityTools.listEntityTypes,
-    entityTools.createEntityType,
-    entityTools.addProperty,
-    entityTools.removeProperty,
-    entityTools.renameProperty,
-    entityTools.createEntity,
-    entityTools.updateEntity,
-    entityTools.deleteEntity,
-    entityTools.queryEntities,
-    postComment,
-    resolveComment,
-    getCommentThread,
-  ]
+  // this map directly; the gateway asks for one only after it has validated
+  // the selected Page id, and every page mutation is built with that anchor.
+  const childToolsForTarget = (targetPageId: string | null): Map<string, Tool> => {
+    const targetPageTools = targetPageId === (options.pageId ?? null)
+      ? pageTools
+      : buildPageTools(targetPageId)
+    const childTools: Tool[] = [
+      targetPageTools.renderPage,
+      targetPageTools.patchPage,
+      targetPageTools.getBlock,
+      targetPageTools.queryDataBlock,
+      targetPageTools.getCurrentPage,
+      targetPageTools.getSection,
+      targetPageTools.getBlockRange,
+      targetPageTools.createSubPage,
+      targetPageTools.exportPage,
+      targetPageTools.importToPage,
+      entityTools.listEntityTypes,
+      entityTools.createEntityType,
+      entityTools.addProperty,
+      entityTools.removeProperty,
+      entityTools.renameProperty,
+      entityTools.createEntity,
+      entityTools.updateEntity,
+      entityTools.deleteEntity,
+      entityTools.queryEntities,
+      postComment,
+      resolveComment,
+      getCommentThread,
+    ]
+    return new Map(childTools.map((tool) => [tool.name, tool]))
+  }
 
   // Narrow reads stay in the conversational loop so it can answer questions,
   // inspect the requested section, and assemble a precise edit brief without
@@ -473,8 +494,11 @@ export async function injectDocTools(
     getCommentThread,
   ]
 
-  const loadPageContext = async (instruction: string): Promise<string> => {
-    const pageId = options.pageId
+  const loadPageContext = async (
+    instruction: string,
+    selectedPageId?: string | null,
+  ): Promise<string> => {
+    const pageId = selectedPageId ?? null
     if (!pageId) {
       return [
         'No page is currently open.',
@@ -499,7 +523,7 @@ export async function injectDocTools(
       title: current.title,
     })
     const lines = renderActivePageOutline(pageForOutline, outline, instruction)
-    const anchorLine = options.anchorBlockId
+    const anchorLine = pageId === options.pageId && options.anchorBlockId
       ? `\nCursor anchor: block ${options.anchorBlockId}. Place new content at or immediately after this block unless the brief says otherwise.`
       : ''
 
@@ -516,8 +540,12 @@ export async function injectDocTools(
     model: options.backgroundModel,
     fallbackModel: options.fallbackModel,
     systemPrompt: buildDocEditAgentPrompt({ mode: options.editMode ?? 'page' }),
-    tools: new Map(childTools.map((tool) => [tool.name, tool])),
-    targetPageId: options.pageId ?? null,
+    tools: childToolsForTarget(options.pageId ?? null),
+    toolsForTarget: childToolsForTarget,
+    targetPageIds: [
+      ...(options.pageId ? [options.pageId] : []),
+      ...(options.editPageTargets ?? []).map((target) => target.pageId),
+    ],
     loadPageContext,
     onUsage: options.onEditUsage,
     onToolResult: options.onChildToolResult,

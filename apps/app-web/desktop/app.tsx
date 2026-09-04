@@ -30,7 +30,7 @@
  * with no fallback and unmounts the whole tree (React #482), leaving only the
  * blank "Use Brian" boot frame.
  */
-import { useEffect, useMemo, useState, Suspense } from "react";
+import { lazy, useEffect, useMemo, useState, Suspense, type ReactNode } from "react";
 import {
   HashRouter,
   Routes,
@@ -40,9 +40,12 @@ import {
   useParams,
   useNavigate,
   useLocation,
+  useSearchParams,
 } from "react-router-dom";
 
 import { authFetch, getValidAccessToken } from "@/lib/auth-fetch";
+import { desktopBridge, desktopSignOut } from "@/lib/desktop-auth-source";
+import { idbGet, idbSet } from "@/lib/offline/idb";
 import { ThemeProvider } from "@/lib/theme";
 import { I18nProvider } from "@/lib/i18n/client";
 import { getDictionary } from "@/lib/i18n/dictionaries";
@@ -55,55 +58,92 @@ import { DocSidebarDataProvider } from "@/components/doc/doc-sidebar-data";
 import { BrainSurfaceProvider } from "@/contexts/brain-surface-context";
 import { PrimaryAssistantProvider } from "@/contexts/primary-assistant";
 import { WorkspaceChrome } from "@/components/doc/workspace-chrome";
+import { DesktopChatWindow } from "@/components/chrome/desktop-chat-window";
 import { WorkspacePicker } from "@/components/workspace-picker";
 import {
   usesScalableWorkspacePicker,
   type WorkspacePickerItem,
 } from "@/lib/workspace-picker";
+import {
+  OPERATOR_APP_KEYS,
+  type OperatorAppKey,
+} from "@/lib/operator-apps";
+import {
+  DESKTOP_WORKSPACES_CACHE_KEY,
+  desktopWorkspaceCacheKey,
+  parseDesktopWorkspaceContext,
+  resolveDesktopWorkspaceBootstrap,
+} from "./offline-bootstrap";
 
-// Surface layouts + pages — reused verbatim from the Next route tree so the
-// desktop SPA renders the SAME surface under each `/w/[id]/*` path and the two
-// builds can't drift. (Vite resolves the bracketed `[workspaceId]` segment as a
-// literal file path via the `@` alias.)
-import DocSurfaceLayout from "@/app/w/[workspaceId]/p/layout";
-import BrainPage from "@/app/w/[workspaceId]/brain/page";
-import BrainEntityPage from "@/app/w/[workspaceId]/brain/[entityId]/page";
-import BrainSkillEditorPage from "@/app/w/[workspaceId]/brain/skills/[skillRowId]/page";
-import BrainEntryReaderPage from "@/app/w/[workspaceId]/brain/entry/[kind]/[id]/page";
-import StudioLayout from "@/app/w/[workspaceId]/studio/layout";
-import StudioAssistantsPage from "@/app/w/[workspaceId]/studio/assistants/page";
-import StudioChannelsPage from "@/app/w/[workspaceId]/studio/channels/page";
-import ConnectorsPage from "@/app/w/[workspaceId]/studio/connectors/page";
-import StudioIngestRulesPage from "@/app/w/[workspaceId]/studio/ingest-rules/page";
-import StudioKnowledgePage from "@/app/w/[workspaceId]/studio/knowledge/page";
-import ProgrammaticAccessPage from "@/app/w/[workspaceId]/studio/programmatic-access/page";
-import WorkflowPage from "@/app/w/[workspaceId]/workflow/page";
-// Tasks + CRM operator surfaces — thin Next wrappers by design (feed-port
-// rule); the SPA imports the client components directly.
-import { TasksSurface } from "@/components/tasks/tasks-surface";
-import { CrmSurface } from "@/components/crm/crm-surface";
-import WorkflowDetailPage from "@/app/w/[workspaceId]/workflow/[id]/page";
-import WorkflowRunDetailPage from "@/app/w/[workspaceId]/workflow/[id]/runs/[runId]/page";
-import KbGapsPage from "@/app/w/[workspaceId]/knowledge-base/gaps/page";
-import KbNewStubPage from "@/app/w/[workspaceId]/knowledge-base/new/page";
-
-// Feed surface — the ported feed-web operator app
-// (docs/plans/feed-web-consolidation.md §10). The Next routes are thin
-// wrappers by design so the SPA imports the client components directly;
-// `FeedSurfaceShell` reproduces `feed/layout.tsx` (profiles context + gate)
-// and the `:platform` guard reproduces `feed/[platform]/layout.tsx`.
-import { FeedSurfaceShell } from "@/components/feed/feed-surface-shell";
-import { FeedPlan } from "@/components/feed/feed-plan";
-import { FeedVoice } from "@/components/feed/feed-voice";
-import { FeedInsights } from "@/components/feed/feed-insights";
-import { FeedInspiration } from "@/components/feed/feed-inspiration";
-import { DraftSessionsList } from "@/components/feed/draft-sessions-list";
-import { FeedConnection } from "@/components/feed/feed-connection";
-import { FeedPolicy } from "@/components/feed/feed-policy";
-import { FeedSettings } from "@/components/feed/feed-settings";
-import { FeedSettingsMembers } from "@/components/feed/feed-settings-members";
 import { isFeedPlatform } from "@/lib/feed-nav";
 import { isOssEdition } from "@/lib/edition";
+import {
+  useBrianSuffix,
+  useBrianWorkspacePath,
+} from "@/lib/siri-use-brian";
+
+// Route surfaces are local Vite chunks, loaded from disk on first entry. This
+// keeps the startup shell small without reintroducing network navigation.
+const DocSurfaceLayout = lazy(() => import("@/app/w/[workspaceId]/p/layout"));
+const BrainPage = lazy(() => import("@/app/w/[workspaceId]/brain/page"));
+const BrainEntityPage = lazy(() => import("@/app/w/[workspaceId]/brain/[entityId]/page"));
+const BrainSkillEditorPage = lazy(() => import("@/app/w/[workspaceId]/brain/skills/[skillRowId]/page"));
+const BrainEntryReaderPage = lazy(() => import("@/app/w/[workspaceId]/brain/entry/[kind]/[id]/page"));
+const StudioLayout = lazy(() => import("@/app/w/[workspaceId]/studio/layout"));
+const StudioAssistantsPage = lazy(() => import("@/app/w/[workspaceId]/studio/assistants/page"));
+const StudioChannelsPage = lazy(() => import("@/app/w/[workspaceId]/studio/channels/page"));
+const ConnectorsPage = lazy(() => import("@/app/w/[workspaceId]/studio/connectors/page"));
+const StudioIngestRulesPage = lazy(() => import("@/app/w/[workspaceId]/studio/ingest-rules/page"));
+const StudioKnowledgePage = lazy(() => import("@/app/w/[workspaceId]/studio/knowledge/page"));
+const ProgrammaticAccessPage = lazy(() => import("@/app/w/[workspaceId]/studio/programmatic-access/page"));
+const StudioBrandPage = lazy(() => import("@/app/w/[workspaceId]/studio/brand/page"));
+const StudioMiniAppsPage = lazy(() => import("@/app/w/[workspaceId]/studio/mini-apps/page"));
+const WorkflowPage = lazy(() => import("@/app/w/[workspaceId]/workflow/page"));
+const WorkflowDetailPage = lazy(() => import("@/app/w/[workspaceId]/workflow/[id]/page"));
+const WorkflowRunDetailPage = lazy(() => import("@/app/w/[workspaceId]/workflow/[id]/runs/[runId]/page"));
+const OfficePage = lazy(() => import("@/app/w/[workspaceId]/office/page"));
+const NewOfficePage = lazy(() => import("@/app/w/[workspaceId]/office/new/page"));
+const OfficeArtifactPage = lazy(() => import("@/app/w/[workspaceId]/office/[artifactId]/page"));
+const OfficeTemplatesPage = lazy(() => import("@/app/w/[workspaceId]/office/templates/page"));
+const OfficeTemplatePage = lazy(() => import("@/app/w/[workspaceId]/office/templates/[templateId]/page"));
+const CrmRecordPage = lazy(() => import("@/app/w/[workspaceId]/crm/[kind]/[recordId]/page"));
+const ChatPage = lazy(() => import("@/app/w/[workspaceId]/chat/page"));
+const ShopifyPage = lazy(() => import("@/app/w/[workspaceId]/shopify/page"));
+const CustomHomeAppPage = lazy(() => import("@/app/w/[workspaceId]/apps/[appId]/page"));
+const ComputerLayout = lazy(() => import("@/app/w/[workspaceId]/computer/layout"));
+const BrowsersIndexPage = lazy(() => import("@/app/w/[workspaceId]/computer/page"));
+const ComputerTakeoverPage = lazy(() => import("@/app/w/[workspaceId]/computer/[sessionId]/page"));
+const LivePage = lazy(() => import("@/app/w/[workspaceId]/live/page"));
+
+const TasksSurface = lazy(async () => ({
+  default: (await import("@/components/tasks/tasks-surface")).TasksSurface,
+}));
+const CrmSurface = lazy(async () => ({
+  default: (await import("@/components/crm/crm-surface")).CrmSurface,
+}));
+const BrowserProfilesSection = lazy(async () => ({
+  default: (await import("@/components/computer/browser-profiles-section")).BrowserProfilesSection,
+}));
+const FeedSurfaceShell = lazy(async () => ({
+  default: (await import("@/components/feed/feed-surface-shell")).FeedSurfaceShell,
+}));
+const FeedPlan = lazy(async () => ({ default: (await import("@/components/feed/feed-plan")).FeedPlan }));
+const FeedVoice = lazy(async () => ({ default: (await import("@/components/feed/feed-voice")).FeedVoice }));
+const FeedInsights = lazy(async () => ({ default: (await import("@/components/feed/feed-insights")).FeedInsights }));
+const FeedInspiration = lazy(async () => ({ default: (await import("@/components/feed/feed-inspiration")).FeedInspiration }));
+const DraftSessionsList = lazy(async () => ({ default: (await import("@/components/feed/draft-sessions-list")).DraftSessionsList }));
+const FeedConnection = lazy(async () => ({ default: (await import("@/components/feed/feed-connection")).FeedConnection }));
+const FeedPolicy = lazy(async () => ({ default: (await import("@/components/feed/feed-policy")).FeedPolicy }));
+const FeedSettings = lazy(async () => ({ default: (await import("@/components/feed/feed-settings")).FeedSettings }));
+const FeedSettingsMembers = lazy(async () => ({ default: (await import("@/components/feed/feed-settings-members")).FeedSettingsMembers }));
+const FeedLegacyDraftsPage = lazy(() => import("@/app/w/[workspaceId]/feed/drafts/page"));
+const FeedLegacyInboxPage = lazy(() => import("@/app/w/[workspaceId]/feed/inbox/page"));
+const FeedLegacyPostsPage = lazy(() => import("@/app/w/[workspaceId]/feed/posts/page"));
+const FeedLegacyReadyPage = lazy(() => import("@/app/w/[workspaceId]/feed/ready/page"));
+const FeedPlatformVoicePage = lazy(() => import("@/app/w/[workspaceId]/feed/[platform]/voice/page"));
+const FeedPlatformPostsPage = lazy(() => import("@/app/w/[workspaceId]/feed/[platform]/posts/page"));
+const FeedPostPage = lazy(() => import("@/app/w/[workspaceId]/feed/[platform]/posts/[sessionId]/page"));
+const FeedLegacyDraftSessionPage = lazy(() => import("@/app/w/[workspaceId]/feed/[platform]/draft-sessions/[sessionId]/page"));
 
 declare global {
   interface Window {
@@ -118,6 +158,74 @@ function apiBase(): string {
     "http://localhost:4000"
   );
 }
+
+/**
+ * Complete local route families for the shared built-in Home mini-app
+ * vocabulary. Keeping this as a typed record is the drift guard: adding a new
+ * `OPERATOR_APP_KEYS` entry fails the desktop build until its installed route
+ * family is supplied here.
+ */
+const OPERATOR_ROUTE_ELEMENTS: Record<OperatorAppKey, ReactNode> = {
+  page: (
+    <Route key="page" element={<DocSurface />}>
+      <Route path="p" element={<PageLeaf />} />
+      <Route path="p/:pageId" element={<PageLeaf />} />
+    </Route>
+  ),
+  office: (
+    <Route key="office" path="office" element={<Outlet />}>
+      <Route index element={<OfficePage />} />
+      <Route path="new" element={<NewOfficePage />} />
+      <Route path="templates" element={<OfficeTemplatesPage />} />
+      <Route path="templates/:templateId" element={<OfficeTemplatePage />} />
+      <Route path=":artifactId" element={<OfficeArtifactPage />} />
+    </Route>
+  ),
+  tasks: <Route key="tasks" path="tasks" element={<TasksRoute />} />,
+  crm: (
+    <Route key="crm" path="crm" element={<Outlet />}>
+      <Route index element={<CrmRoute />} />
+      <Route path=":kind/:recordId" element={<CrmRecordPage />} />
+    </Route>
+  ),
+  feed: (
+    <Route key="feed" path="feed" element={<FeedShell />}>
+      <Route index element={<FeedPlan />} />
+      <Route path="voice" element={<FeedVoice scope="company" />} />
+      <Route path="drafts" element={<FeedLegacyDraftsPage />} />
+      <Route path="inbox" element={<FeedLegacyInboxPage />} />
+      <Route path="posts" element={<FeedLegacyPostsPage />} />
+      <Route path="ready" element={<FeedLegacyReadyPage />} />
+      <Route path=":platform" element={<FeedPlatformGuard />}>
+        <Route index element={<WorkspaceRedirect to="feed" />} />
+        <Route path="voice" element={<FeedPlatformVoicePage />} />
+        <Route path="insights" element={<FeedInsights />} />
+        <Route path="inspiration" element={<FeedInspiration />} />
+        <Route path="posts" element={<FeedPlatformPostsPage />} />
+        <Route path="posts/:sessionId" element={<FeedPostPage />} />
+        <Route path="draft-sessions" element={<DraftSessionsList />} />
+        <Route
+          path="draft-sessions/:sessionId"
+          element={<FeedLegacyDraftSessionPage />}
+        />
+        <Route path="connection" element={<FeedConnection />} />
+        <Route path="policy" element={<FeedPolicy />} />
+        <Route path="settings" element={<FeedSettings />} />
+        <Route path="settings/members" element={<FeedSettingsMembers />} />
+      </Route>
+      <Route path="*" element={<WorkspaceRedirect to="feed" />} />
+    </Route>
+  ),
+  browsers: (
+    <Route key="browsers" path="computer" element={<ComputerShell />}>
+      <Route index element={<BrowsersIndexPage />} />
+      <Route path="profiles" element={<BrowserProfilesRoute />} />
+      <Route path=":sessionId" element={<ComputerTakeoverRoute />} />
+    </Route>
+  ),
+  chat: <Route key="chat" path="chat" element={<ChatPage />} />,
+  shopify: <Route key="shopify" path="shopify" element={<ShopifyPage />} />,
+};
 
 export function App() {
   // No SSR locale negotiation on file://; default to English (a stored pref can
@@ -136,17 +244,21 @@ export function App() {
                 create-workspace affordance yet — that gap is desktop-wide,
                 not introduced by this alias. */}
             <Route path="/teams" element={<Boot />} />
+            <Route path="/desktop/chat/:workspaceId" element={<DesktopChatRoute />} />
             {/* Layout route: WorkspaceShell (providers + persistent chrome)
                 stays mounted across every `/w/[id]/*` surface change — only the
                 `<Outlet/>` swaps — mirroring the Next workspace layout. */}
             <Route path="/w/:workspaceId" element={<WorkspaceShell />}>
-              {/* Doc surface — DocShell persists across `p` ↔ `p/:pageId`, so
-                  opening a page is a soft swap (the shell reads the id off the
-                  path), not a remount. Mirrors Next's `p/layout.tsx`. */}
-              <Route element={<DocSurface />}>
-                <Route path="p" element={<PageLeaf />} />
-                <Route path="p/:pageId" element={<PageLeaf />} />
-              </Route>
+              {/* Every shared built-in Home mini app is a local route family.
+                  The typed record above is exhaustive against
+                  OPERATOR_APP_KEYS, while these elements remain direct Route
+                  children as required by react-router. */}
+              {OPERATOR_APP_KEYS.map((app) => OPERATOR_ROUTE_ELEMENTS[app])}
+
+              {/* Workspace-built custom mini apps share one local host route;
+                  the app's own static bundle still comes from its scoped API
+                  session and therefore needs connectivity when uncached. */}
+              <Route path="apps/:appId/*" element={<CustomHomeAppPage />} />
 
               {/* Brain */}
               <Route path="brain" element={<BrainPage />} />
@@ -163,6 +275,12 @@ export function App() {
                 <Route path="ingest-rules" element={<StudioIngestRulesPage />} />
                 <Route path="knowledge" element={<StudioKnowledgePage />} />
                 <Route path="programmatic-access" element={<ProgrammaticAccessPage />} />
+                <Route path="brand" element={<StudioBrandPage />} />
+                <Route path="mini-apps" element={<StudioMiniAppsPage />} />
+                <Route
+                  path="task-rules"
+                  element={<WorkspaceRedirect to="tasks?task-settings=rules" />}
+                />
                 {/* Legacy URL — the Next page is a server redirect to the
                     Brain's Skills view; the SPA mirrors it client-side. */}
                 <Route
@@ -170,12 +288,6 @@ export function App() {
                   element={<WorkspaceRedirect to="brain?view=skills" />}
                 />
               </Route>
-
-              {/* Tasks — the Tasks operator surface (Home app-bar). */}
-              <Route path="tasks" element={<TasksRoute />} />
-
-              {/* CRM — the CRM operator surface (Home app-bar, 4th slot). */}
-              <Route path="crm" element={<CrmRoute />} />
 
               {/* Workflow */}
               <Route path="workflow" element={<WorkflowPage />} />
@@ -185,26 +297,9 @@ export function App() {
                 element={<WorkflowRunRoute />}
               />
 
-              {/* Feed — the ported feed-web operator surface. FeedShell
-                  (below) mirrors `feed/layout.tsx`: OSS-edition gate +
-                  FeedSurfaceShell (profiles context, readiness gate, the
-                  feed tuning dock under the chat-dock suppression hold). */}
-              <Route path="feed" element={<FeedShell />}>
-                <Route index element={<FeedPlan />} />
-                <Route path="voice" element={<FeedVoice />} />
-                <Route path=":platform" element={<FeedPlatformGuard />}>
-                  {/* No Next page exists at the bare platform root — land on
-                      the feed index instead of a dead leaf. */}
-                  <Route index element={<WorkspaceRedirect to="feed" />} />
-                  <Route path="insights" element={<FeedInsights />} />
-                  <Route path="inspiration" element={<FeedInspiration />} />
-                  <Route path="draft-sessions" element={<DraftSessionsList />} />
-                  <Route path="connection" element={<FeedConnection />} />
-                  <Route path="policy" element={<FeedPolicy />} />
-                  <Route path="settings" element={<FeedSettings />} />
-                  <Route path="settings/members" element={<FeedSettingsMembers />} />
-                </Route>
-              </Route>
+              {/* Live is primary workspace navigation rather than a
+                  configurable Home mini app, but it is still locally routed. */}
+              <Route path="live" element={<LivePage />} />
 
               {/* Approvals — on web the Next route is a 307 into the
                   doc-shell panel tab (`/p?panel=approvals`); the SPA mirrors
@@ -213,10 +308,6 @@ export function App() {
                 path="approvals"
                 element={<WorkspaceRedirect to="p?panel=approvals" />}
               />
-
-              {/* Knowledge-base */}
-              <Route path="knowledge-base/gaps" element={<KbGapsPage />} />
-              <Route path="knowledge-base/new" element={<KbNewStubPage />} />
 
               {/* Legacy URL shims (parity with the Next server redirects). */}
               <Route path="inbox" element={<WorkspaceRedirect to="p" />} />
@@ -248,12 +339,27 @@ export function App() {
   );
 }
 
+function DesktopChatRoute() {
+  const { workspaceId = "" } = useParams();
+  const [searchParams] = useSearchParams();
+  const assistantId = searchParams.get("assistant") ?? undefined;
+  return workspaceId ? (
+    <DesktopChatWindow workspaceId={workspaceId} assistantId={assistantId} />
+  ) : (
+    <Navigate to="/" replace />
+  );
+}
+
 // ── Boot / workspace picker ────────────────────────────────────
 
 type WorkspaceRow = WorkspacePickerItem;
 
 function Boot() {
   const navigate = useNavigate();
+  const useBrianSignal = new URLSearchParams(window.location.search).get(
+    "useBrian",
+  );
+  const useBrianRouteSuffix = useBrianSuffix(useBrianSignal);
   const [state, setState] = useState<
     | { k: "boot" }
     | { k: "anon" }
@@ -263,56 +369,65 @@ function Boot() {
 
   useEffect(() => {
     let cancelled = false;
-    (async () => {
-      const token = await getValidAccessToken();
+    const presentWorkspaces = (workspaces: WorkspaceRow[]) => {
       if (cancelled) return;
-      if (!token) return setState({ k: "anon" });
-      try {
-        const res = await authFetch(`${apiBase()}/api/workspaces`);
-        const data: unknown = res.ok ? await res.json() : null;
-        if (cancelled) return;
-        if (!res.ok) return setState({ k: "error", detail: `HTTP ${res.status}` });
-        const arr = Array.isArray(data)
-          ? data
-          : Array.isArray((data as { workspaces?: unknown[] })?.workspaces)
-            ? (data as { workspaces: unknown[] }).workspaces
-            : [];
-        const workspaces = arr
-          .map((w): WorkspaceRow | null => {
-            const o = (w ?? {}) as Record<string, unknown>;
-            const id = typeof o.id === "string" ? o.id : null;
-            return id
-              ? {
-                  id,
-                  name: typeof o.name === "string" ? o.name : id,
-                  role:
-                    o.role === "owner" || o.role === "admin" || o.role === "member"
-                      ? o.role
-                      : undefined,
-                  iconSeed: typeof o.iconSeed === "number" ? o.iconSeed : null,
-                  iconUrl: typeof o.iconUrl === "string" ? o.iconUrl : null,
-                  plan: typeof o.plan === "string" ? o.plan : null,
-                  pickerPinnedAt:
-                    typeof o.pickerPinnedAt === "string" ? o.pickerPinnedAt : null,
-                  pickerHiddenAt:
-                    typeof o.pickerHiddenAt === "string" ? o.pickerHiddenAt : null,
-                  pickerLastOpenedAt:
-                    typeof o.pickerLastOpenedAt === "string"
-                      ? o.pickerLastOpenedAt
-                      : null,
-                }
-              : null;
-          })
-          .filter((w): w is WorkspaceRow => w !== null);
-        setState({ k: "ready", workspaces });
-      } catch (e) {
-        if (!cancelled) setState({ k: "error", detail: e instanceof Error ? e.message : String(e) });
+      // Match the web root's one-workspace fast path. This is especially
+      // important offline: cached identity can enter the local shell directly
+      // instead of adding a picker click to every cold start.
+      if (workspaces.length === 1) {
+        navigate(
+          useBrianWorkspacePath(workspaces[0].id, useBrianSignal) ??
+            `/w/${workspaces[0].id}`,
+          { replace: true },
+        );
+        return;
+      }
+      setState({ k: "ready", workspaces });
+    };
+    (async () => {
+      // Read cache and validate/refresh in parallel, but do not enter an
+      // interactive cached workspace until the authenticated live probe has
+      // settled. Cache is an offline fallback, never proof of a usable token.
+      const tokenPromise = getValidAccessToken();
+      const cached = await idbGet<unknown>(DESKTOP_WORKSPACES_CACHE_KEY);
+      const bridge = desktopBridge();
+      const hasStoredSession = Boolean(
+        bridge?.getAccessToken?.() || bridge?.getRefreshToken?.(),
+      );
+      const result = await resolveDesktopWorkspaceBootstrap({
+        cached,
+        hasStoredSession,
+        authenticate: () => tokenPromise,
+        loadLive: async () => {
+          const res = await authFetch(`${apiBase()}/api/workspaces`);
+          return {
+            status: res.status,
+            ...(res.ok ? { data: await res.json() as unknown } : {}),
+          };
+        },
+      });
+      if (cancelled) return;
+      if (result.kind === "unauthenticated") {
+        // A stale safeStorage session can pass the shell's synchronous startup
+        // check but fail refresh or the live probe. Clear it through the native
+        // path before any cached workspace action becomes interactive.
+        if (desktopSignOut()) return;
+        setState({ k: "anon" });
+        return;
+      }
+      if (result.kind === "error") {
+        setState({ k: "error", detail: result.detail });
+        return;
+      }
+      presentWorkspaces(result.workspaces);
+      if (result.source === "live") {
+        void idbSet(DESKTOP_WORKSPACES_CACHE_KEY, result.workspaces);
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [navigate, useBrianSignal]);
 
   return (
     <div style={shell}>
@@ -328,7 +443,7 @@ function Boot() {
         {state.k === "ready" && usesScalableWorkspacePicker(state.workspaces.length) && (
           <WorkspacePicker
             initialWorkspaces={state.workspaces}
-            next="/p"
+            next={`/p${useBrianRouteSuffix}`}
             apiUrl={apiBase()}
           />
         )}
@@ -338,7 +453,9 @@ function Boot() {
               <li key={w.id}>
                 <button
                   type="button"
-                  onClick={() => navigate(`/w/${w.id}/p`)}
+                  onClick={() =>
+                    navigate(`/w/${w.id}/p${useBrianRouteSuffix}`)
+                  }
                   style={{ ...listButton }}
                 >
                   <span style={{ fontWeight: 600 }}>{w.name}</span>
@@ -390,32 +507,26 @@ function WorkspaceShell() {
     if (!workspaceId) return;
     let cancelled = false;
     (async () => {
+      const cached = parseDesktopWorkspaceContext(
+        workspaceId,
+        await idbGet<unknown>(desktopWorkspaceCacheKey(workspaceId)),
+      );
+      if (!cancelled && cached) {
+        setCtx({ k: "ready", value: cached });
+      }
       try {
         const res = await authFetch(`${apiBase()}/api/workspaces/${workspaceId}`);
         if (!res.ok) throw new Error(`workspace HTTP ${res.status}`);
-        const team = (await res.json()) as {
-          name?: string;
-          iconSeed?: number | null;
-          iconUrl?: string | null;
-          role?: WorkspaceContextValue["role"];
-          clearance?: WorkspaceContextValue["clearance"];
-          me?: { id?: string };
-        };
+        const team = await res.json() as unknown;
+        const value = parseDesktopWorkspaceContext(workspaceId, team);
+        if (!value) throw new Error("workspace response invalid");
         if (cancelled) return;
-        setCtx({
-          k: "ready",
-          value: {
-            workspaceId,
-            name: team.name ?? "Workspace",
-            iconSeed: team.iconSeed ?? null,
-            iconUrl: team.iconUrl ?? null,
-            role: team.role ?? "member",
-            clearance: team.clearance ?? "internal",
-            me: { id: team.me?.id ?? "" },
-          },
-        });
+        setCtx({ k: "ready", value });
+        void idbSet(desktopWorkspaceCacheKey(workspaceId), value);
       } catch (e) {
-        if (!cancelled) setCtx({ k: "error", detail: e instanceof Error ? e.message : String(e) });
+        if (!cancelled && !cached) {
+          setCtx({ k: "error", detail: e instanceof Error ? e.message : String(e) });
+        }
       }
     })();
     return () => {
@@ -489,6 +600,42 @@ function TasksRoute() {
 function CrmRoute() {
   const { workspaceId = "" } = useParams<{ workspaceId: string }>();
   return <CrmSurface workspaceId={workspaceId} />;
+}
+
+/** Browsers route family — mirrors `computer/layout.tsx` around local leaves. */
+function ComputerShell() {
+  return (
+    <ComputerLayout>
+      <Outlet />
+    </ComputerLayout>
+  );
+}
+
+/** Client analogue of the Next async profiles page's search-param unwrap. */
+function BrowserProfilesRoute() {
+  const location = useLocation();
+  const search = useMemo(() => new URLSearchParams(location.search), [location.search]);
+  return (
+    <div className="h-full overflow-y-auto px-3 py-4 sm:px-4 sm:py-5 lg:px-5">
+      <BrowserProfilesSection
+        selectedProfileId={search.get("profile") ?? undefined}
+        creating={search.get("new") === "1"}
+      />
+    </div>
+  );
+}
+
+/** Promise-param adapter for the Next browser take-over page. */
+function ComputerTakeoverRoute() {
+  const { workspaceId = "", sessionId = "" } = useParams<{
+    workspaceId: string;
+    sessionId: string;
+  }>();
+  const params = useMemo(
+    () => Promise.resolve({ workspaceId, sessionId }),
+    [workspaceId, sessionId],
+  );
+  return <ComputerTakeoverPage params={params} />;
 }
 
 /** Studio surface — its grouped sub-nav layout wraps the section `<Outlet/>`. */

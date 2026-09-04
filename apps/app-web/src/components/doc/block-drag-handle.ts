@@ -358,7 +358,7 @@ export function deepestRowCoordsRight(
   return null;
 }
 
-// ── Grip anchor (list-aware, first-line vertical band) ─────────────────────
+// ── Grip anchor (marker-aware, first-line vertical band) ───────────────────
 /**
  * Resolve a computed `line-height` string to pixels. `getComputedStyle` returns
  * a px value ("36.4px"), the `normal` keyword, an empty string (an unstyled
@@ -436,12 +436,13 @@ const CALLOUT_INNER_CLASS = "doc-callout";
 const TABLE_NODE_DOM_CLASS = "node-table";
 
 /**
- * The client rect tippy anchors the grip to. A bulleted/numbered list item's
- * marker (and a task list's checkbox) lives in the parent list's leading column,
- * LEFT of the block's text box — so anchoring to the block's own rect drops the
- * `⠿` grip right on top of the marker. For a block inside a list, anchor to the
- * parent `<ul>`/`<ol>`'s left edge instead (left of that whole marker column).
- * Every other block anchors to its own box.
+ * The client rect tippy anchors the grip to. Structural marker columns live
+ * LEFT of a nested block's own text box: a bulleted/numbered list has its marker
+ * (or task checkbox) in the parent list's leading column, and a quote has its
+ * full-height rule on the parent blockquote's left edge. Anchoring to the nested
+ * block's rect drops the `⠿` grip on top of those markers. Anchor to the nearest
+ * marker-bearing `<ul>`/`<ol>`/`<blockquote>` instead; every other block uses
+ * its own box.
  *
  * **Geometry only** — deliberately a bare `getBoundingClientRect`, because tippy
  * calls this on every scroll / resize / raf while the grip is shown. The vertical
@@ -452,11 +453,13 @@ const TABLE_NODE_DOM_CLASS = "node-table";
  */
 export function gripReferenceRect(dom: HTMLElement): DOMRect {
   const rect = dom.getBoundingClientRect();
-  const list = dom.closest("ul, ol");
-  const left = list ? list.getBoundingClientRect().left : rect.left;
+  const markerContainer = dom.closest("ul, ol, blockquote");
+  const left = markerContainer
+    ? markerContainer.getBoundingClientRect().left
+    : rect.left;
   // Plain literal (not the raw rect / `new DOMRect`) — normalises `x`/`y` and, for
-  // a list item, moves only the left edge to the list's marker column. Values are
-  // otherwise the block's real box; tippy reads these fields and the DOMRect
+  // a nested block, moves only the left edge to its nearest marker column. Values
+  // are otherwise the block's real box; tippy reads these fields and the DOMRect
   // constructor isn't guaranteed in every test env.
   return {
     left,

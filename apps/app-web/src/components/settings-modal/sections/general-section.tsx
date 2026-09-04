@@ -21,6 +21,7 @@ import { RefineThemeDialog } from "@/components/doc/refine-theme-dialog";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { promptDialog } from "@/components/ui/prompt-dialog";
 import { Button } from "@/components/ui/button";
+import { SiriSetupCard } from "./siri-setup-card";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -136,6 +137,8 @@ export function GeneralSection() {
           </Select>
         </Row>
       </Section>
+
+      <SiriSetupCard />
     </div>
   );
 }

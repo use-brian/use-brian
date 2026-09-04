@@ -124,6 +124,7 @@ describe('[COMP:api/pending-approvals-store] createToolInvocation', () => {
         description: 'Send the proposal email',
         displayLines: ['To: x@y.z'],
         allowPersistentApproval: true,
+        turnLeaseToken: 'lease-current',
         decisionApplicationId: '00000000-0000-4000-8000-000000000099',
       },
       deliveryChannelType: 'web',
@@ -133,6 +134,7 @@ describe('[COMP:api/pending-approvals-store] createToolInvocation', () => {
     const [sql] = mockQuery.mock.calls[0]
     expect(sql).toContain("'tool_invocation'")
     expect(JSON.parse(mockQuery.mock.calls[0][1]?.[6] as string)).toMatchObject({
+      turnLeaseToken: 'lease-current',
       decisionApplicationId: '00000000-0000-4000-8000-000000000099',
     })
   })

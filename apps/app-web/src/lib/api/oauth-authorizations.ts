@@ -25,6 +25,8 @@ export type OAuthAuthorization = {
   status: "active" | "revoked";
   createdAt: string;
   lastUsedAt: string | null;
+  captureAssistantId: string | null;
+  captureProfileId: string | null;
 };
 
 function base(workspaceId: string): string {
@@ -48,4 +50,21 @@ export async function revokeOAuthAuthorization(
     method: "DELETE",
   });
   if (!res.ok && res.status !== 404) throw new Error(`HTTP ${res.status}`);
+}
+
+export async function updateOAuthCaptureBinding(
+  workspaceId: string,
+  id: string,
+  assistantId: string | null,
+  profileId: string | null,
+): Promise<void> {
+  const res = await authFetch(`${base(workspaceId)}/${encodeURIComponent(id)}/capture`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ assistantId, profileId }),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? `HTTP ${res.status}`);
+  }
 }

@@ -57,6 +57,14 @@ const PatchBody = z
   })
   .strict()
 
+const CaptureBindingBody = z.object({
+  assistantId: z.string().uuid().nullable(),
+  profileId: z.string().uuid().nullable(),
+}).strict().refine((value) => value.assistantId !== null || value.profileId === null, {
+  message: 'A profile override requires a capture assistant',
+  path: ['profileId'],
+})
+
 export function brainKeysRoutes(opts: Options): Router {
   // mergeParams so `:workspaceId` from the mount path is visible here.
   const router = Router({ mergeParams: true })
@@ -153,6 +161,8 @@ export function brainKeysRoutes(opts: Options): Router {
         maxClearance: created.maxClearance,
         contextGroupId: created.contextGroupId,
         contextProjectId: created.contextProjectId,
+        captureAssistantId: created.captureAssistantId,
+        captureProfileId: created.captureProfileId,
         createdAt: created.createdAt,
         lastUsedAt: created.lastUsedAt,
       })
@@ -166,6 +176,36 @@ export function brainKeysRoutes(opts: Options): Router {
       }
       console.error('[brain-keys] create failed:', err)
       res.status(500).json({ error: 'Failed to create brain key' })
+    }
+  })
+
+  // ── PUT /:keyId/capture — set the routed-capture target/override ──
+  router.put('/:keyId/capture', async (req, res) => {
+    const workspaceId = await gate(req, res)
+    if (!workspaceId) return
+    const rawKeyId = req.params.keyId
+    const keyId = typeof rawKeyId === 'string' ? rawKeyId : ''
+    const parsed = CaptureBindingBody.safeParse(req.body)
+    if (!UUID_RE.test(keyId) || !parsed.success) {
+      res.status(400).json({ error: 'Invalid input' })
+      return
+    }
+    try {
+      const ok = await opts.brainKeyStore.updateCaptureBinding(
+        req.userId!,
+        keyId,
+        workspaceId,
+        parsed.data.assistantId,
+        parsed.data.profileId,
+      )
+      if (!ok) {
+        res.status(404).json({ error: 'Brain key, assistant, or capture profile not found' })
+        return
+      }
+      res.status(204).end()
+    } catch (err) {
+      console.error('[brain-keys] capture binding update failed:', err)
+      res.status(500).json({ error: 'Failed to update capture binding' })
     }
   })
 

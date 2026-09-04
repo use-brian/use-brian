@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
 import { appAssistantForbidsResearch, appAssistantForbidsCoordinator, isAdaptiveResearchEligible, isUserBlocked, sanitizeTitle, buildActivePageInstruction, buildActiveRecordingInstruction, recordingParticipantsUpdatedReceipt, buildViewingSkillBlock, createUpdateViewedSkillTool, workspaceSkillRevision, resolveStickyChannelId, isDocSurface, isAppSurface, attachUserVisibleContext, settleInlineToolApproval, buildAttachedRecordingContext, buildUnscopedFileAttachmentInstruction, mayOfferWorkspaceChatHandoff, turnInputAdmission, liveTurnAdmission, SSE_KEEPALIVE_INTERVAL_MS, filterBrainSurfaceTools } from '../chat.js'
 import type { ConfirmationResolver, Message, Tool, ToolContext } from '@use-brian/core'
 import type { PendingApproval, PendingApprovalsStore } from '../../db/pending-approvals-store.js'
@@ -435,15 +436,14 @@ describe('[COMP:api/chat-route] isDocSurface', () => {
 describe('[COMP:api/chat-route] isAppSurface', () => {
   // The app-web workspace surfaces (SurfaceChatPanel origins, mig 255) get
   // the doc tools injected AMBIENTLY — weak on-request steering, not the
-  // page-first protocol. Doc itself and plain chat are NOT app surfaces.
+  // page-first protocol. Full Chat is included; Doc itself is not.
   it('is true for every SurfaceChatPanel origin', () => {
-    for (const origin of ['brain', 'studio', 'workflow', 'approvals', 'knowledge-base']) {
+    for (const origin of ['brain', 'studio', 'workflow', 'approvals', 'knowledge-base', 'chat']) {
       expect(isAppSurface({ appOrigin: origin })).toBe(true)
     }
   })
-  it('is false for doc, chat, and unscoped sessions', () => {
+  it('is false for doc and unscoped sessions', () => {
     expect(isAppSurface({ appOrigin: 'doc' })).toBe(false)
-    expect(isAppSurface({ appOrigin: 'chat' })).toBe(false)
     expect(isAppSurface({ appOrigin: null })).toBe(false)
   })
 })
@@ -984,5 +984,19 @@ describe('[COMP:api/chat-route] mid-turn input admission', () => {
     expect(turnInputAdmission({ ...midTurn, mode: 'draft' })).toBe('reject')
     // ...but an ordinary send into a draft is unaffected.
     expect(turnInputAdmission({ ...ordinary, mode: 'draft' })).toBe('run')
+  })
+
+  it('mirrors rare control events so Live can intervene beside an open chat stream', () => {
+    const source = readFileSync(new URL('../chat.ts', import.meta.url), 'utf8')
+    const inputBranch = source.slice(
+      source.indexOf("if (event.type === 'turn_input')"),
+      source.indexOf("if (event.type === 'assistant_turn')"),
+    )
+    const confirmationBranch = source.slice(
+      source.indexOf("if (event.type === 'tool_confirmation_required')"),
+      source.indexOf("if (event.type === 'awaiting_approval')"),
+    )
+    expect(inputBranch).toContain("sendControlActivityEvent('input_applied'")
+    expect(confirmationBranch).toContain("sendControlActivityEvent('tool_confirmation_required'")
   })
 })

@@ -1123,7 +1123,13 @@ async function dependencyIssues(
         } else if (resolved.channelType !== 'web') {
           targets.push({
             location: `Step "${termStep.id}"`,
-            assistantTarget: termStep.target.assistantId,
+            // Probe the assistant the PERSIST path will stamp, not the one the
+            // model authored — otherwise create validates `primary` and then
+            // persists the session assistant. Same helper on both sides; see
+            // `sessionCapturedDeliveryAssistant`.
+            assistantTarget:
+              (await sessionCapturedDeliveryAssistant(def, resolved, context, deps.resolvePrimary))
+              ?? termStep.target.assistantId,
             channelType: resolved.channelType as 'telegram' | 'slack' | 'whatsapp' | 'feishu',
             channelId: resolved.channelId,
           })
@@ -1154,13 +1160,24 @@ async function dependencyIssues(
           channelIntegrationId: t.channelIntegrationId,
         })
         if (!res.ok) {
-          const guidance = t.channelType === 'slack'
-            ? ' Call `listSlackChannels` to get a real channel id and set it on the terminal step\'s `deliver` as `{ "channelType": "slack", "channelId": "<id>" }` (the internal id from `listChannels` is not a Slack channel id). Or author the workflow from inside the Slack channel you want the result posted to.'
-            : t.channelType === 'telegram'
-              ? /chat not found/i.test(res.reason ?? '')
-                ? ' Author from inside the Telegram chat you want the result delivered to so the correct destination is captured.'
-                : ''
-              : ' Author from inside the chat you want the result delivered to so the correct channel is captured.'
+          // The destination IS the chat this workflow is being authored from,
+          // yet the step executes as some OTHER assistant. A messaging chat is
+          // reachable only by the bot bound to the assistant that serves it, so
+          // the probe found no usable token, fell through to the shared
+          // platform bot, and reported the CHAT as missing. Telling the user to
+          // "author from inside the chat" there names the one thing they had
+          // already done (2026-09-01).
+          const authoredHere =
+            t.channelType === context.channelType && t.channelId === context.channelId
+          const guidance = authoredHere && assistantId !== context.assistantId
+            ? ` This IS the chat the workflow is being authored from, so the destination is correct. The problem is the step: it executes as a different assistant, and a ${t.channelType} chat can only be reached by the bot bound to the assistant that serves it. Set this step's \`target.assistantId\` to "${context.assistantId}" (the assistant hosting this chat), or point \`deliver\` at a chat the step's own assistant is connected to.`
+            : t.channelType === 'slack'
+              ? ' Call `listSlackChannels` to get a real channel id and set it on the terminal step\'s `deliver` as `{ "channelType": "slack", "channelId": "<id>" }` (the internal id from `listChannels` is not a Slack channel id). Or author the workflow from inside the Slack channel you want the result posted to.'
+              : t.channelType === 'telegram'
+                ? /chat not found/i.test(res.reason ?? '')
+                  ? ' Author from inside the Telegram chat you want the result delivered to so the correct destination is captured.'
+                  : ''
+                : ' Author from inside the chat you want the result delivered to so the correct channel is captured.'
           errors.push(
             `${t.location} delivers to the ${t.channelType} channel "${t.channelId}", which is not reachable: ${
               res.reason ?? 'channel check failed'
@@ -1400,10 +1417,16 @@ function staticPageAnchorId(def: WorkflowDefinition): string | null {
  * Turns the schedule trigger's type-only `delivery` sugar into the concrete
  * `assistant_call.deliver` the executor reads. Returns a NEW definition (no
  * mutation); `null` when there is no assistant_call step to deliver from.
+ *
+ * `retargetAssistantId` (from `sessionCapturedDeliveryAssistant`) rewrites
+ * that same step's `target.assistantId`, because the bot that can reach a
+ * captured chat belongs to the assistant serving it, not to whichever
+ * assistant the model named.
  */
 function stampTerminalDeliver(
   def: WorkflowDefinition,
   deliver: { channelType: 'telegram' | 'slack' | 'whatsapp' | 'feishu'; channelId: string },
+  retargetAssistantId?: string | null,
 ): WorkflowDefinition | null {
   let idx = -1
   for (let i = def.steps.length - 1; i >= 0; i--) {
@@ -1413,7 +1436,13 @@ function stampTerminalDeliver(
     }
   }
   if (idx === -1) return null
-  const steps = def.steps.map((s, i) => (i === idx ? { ...(s as AssistantCallStep), deliver } : s))
+  const steps = def.steps.map((s, i) => {
+    if (i !== idx) return s
+    const step = { ...(s as AssistantCallStep), deliver }
+    return retargetAssistantId
+      ? { ...step, target: { ...step.target, assistantId: retargetAssistantId } }
+      : step
+  })
   return { ...def, steps }
 }
 
@@ -1434,6 +1463,73 @@ function terminalExplicitDeliverId(
   if (termStep?.type !== 'assistant_call') return null
   const d = termStep.deliver
   return d && 'channelId' in d && d.channelType === channel && d.channelId ? d.channelId : null
+}
+
+/**
+ * The assistant a session-captured delivery must execute as — `null` when no
+ * retarget applies.
+ *
+ * `trigger.delivery` captures the destination from the AUTHORING SESSION (the
+ * documented per-group / per-topic capture contract), but neither the
+ * authoring reachability probe nor the runtime push resolves the bot token
+ * from the chat: both ask the step's execute-as assistant for it
+ * (`getCredentialsForAssistantSystem`). Those are different entities the
+ * moment a workspace runs several BYO bots in one group — and the only
+ * assistant provably routed to the captured chat is the session's own,
+ * because the authoring message arrived through that assistant's bot.
+ *
+ * The `workflow-builder` skill tells the model to default
+ * `target.assistantId` to `'primary'`, and a workspace's primary assistant
+ * commonly has no channel routing at all. So the probe found no BYO token,
+ * fell through to the shared platform bot, and `getChat` answered `chat not
+ * found` for a group that bot is not in. On 2026-09-01 that rejected a daily
+ * reminder authored inside a Telegram forum topic in a ten-bot workspace,
+ * while telling the user to author from inside the chat they were already in;
+ * had it persisted, delivery would have failed identically on every fire.
+ *
+ * So when the sugar resolves to the session's OWN chat and the terminal step
+ * still carries the blind `'primary'` default, the step is retargeted to the
+ * session assistant — restoring what the legacy `createScheduledJob` path
+ * always did (`scheduling/tools.ts` stamps `context.assistantId`). An
+ * explicitly named assistant is the author's choice and is never overridden:
+ * that case is reported instead, naming the assistant that does serve the
+ * chat (see the `authoredHere` guidance in `dependencyIssues`).
+ *
+ * Retargeting changes which assistant EXECUTES the step, not just which bot
+ * delivers it — persona, tools and clearance come with it. That is the
+ * intended reading of "remind me from this chat", and it is what the reminder
+ * path did before workflows absorbed scheduling.
+ *
+ * `'primary'` is a DURABLE sentinel (it follows the workspace's primary
+ * assistant), so when the session assistant already IS the primary the
+ * sentinel is kept rather than frozen to today's id — there is nothing to
+ * repair in that case anyway. When the primary cannot be resolved the
+ * retarget still applies: a frozen id is a smaller failure than a reminder
+ * that can never deliver.
+ *
+ * See docs/architecture/engine/scheduled-jobs.md → "Channel delivery".
+ */
+async function sessionCapturedDeliveryAssistant(
+  def: WorkflowDefinition,
+  resolved: { channelType: string; channelId: string },
+  context: { assistantId?: string; channelType: string; channelId: string; workspaceId?: string | null },
+  resolvePrimary?: (workspaceId: string) => Promise<string | null>,
+): Promise<string | null> {
+  if (!context.assistantId) return null
+  if (resolved.channelType !== context.channelType) return null
+  if (resolved.channelId !== context.channelId) return null
+  const termId = terminalAssistantCallId(def)
+  const termStep = termId ? def.steps.find((s) => s.id === termId) : undefined
+  if (termStep?.type !== 'assistant_call') return null
+  if (termStep.target.assistantId !== 'primary') return null
+  if (context.workspaceId && resolvePrimary) {
+    try {
+      if ((await resolvePrimary(context.workspaceId)) === context.assistantId) return null
+    } catch (err) {
+      console.warn('[workflow/sessionCapturedDeliveryAssistant] resolvePrimary threw:', err)
+    }
+  }
+  return context.assistantId
 }
 
 /**
@@ -2184,11 +2280,15 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
         // (a channel the model picked from another session, e.g. via
         // listSlackChannels) — keep it as-is; dependencyIssues validated it.
         if (!terminalExplicitDeliverId(definition, channel)) {
-          const { channelId } = resolveDeliveryChannel(context, channel)
-          if (!channelId) {
+          const resolved = resolveDeliveryChannel(context, channel)
+          if (!resolved.channelId) {
             return { data: { ok: false, errors: [unresolvedDeliveryError(channel)] }, isError: true }
           }
-          const stamped = stampTerminalDeliver(definition, { channelType: channel, channelId })
+          const stamped = stampTerminalDeliver(
+            definition,
+            { channelType: channel, channelId: resolved.channelId },
+            await sessionCapturedDeliveryAssistant(definition, resolved, context, deps.resolvePrimary),
+          )
           if (!stamped) {
             return {
               data: {
@@ -2406,11 +2506,15 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
         const channel = trigger.delivery.channel
         // Explicit terminal `deliver.channelId` wins over the sugar (see createWorkflow).
         if (!terminalExplicitDeliverId(base, channel)) {
-          const { channelId } = resolveDeliveryChannel(context, channel)
-          if (!channelId) {
+          const resolved = resolveDeliveryChannel(context, channel)
+          if (!resolved.channelId) {
             return { data: { ok: false, errors: [unresolvedDeliveryError(channel)] }, isError: true }
           }
-          const stamped = stampTerminalDeliver(base, { channelType: channel, channelId })
+          const stamped = stampTerminalDeliver(
+            base,
+            { channelType: channel, channelId: resolved.channelId },
+            await sessionCapturedDeliveryAssistant(base, resolved, context, deps.resolvePrimary),
+          )
           if (!stamped) {
             return {
               data: { ok: false, errors: ['trigger.delivery is set but the workflow has no assistant_call step to deliver from.'] },

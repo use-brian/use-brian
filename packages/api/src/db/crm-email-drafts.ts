@@ -23,6 +23,7 @@ type DraftRow = {
   bcc: string[]
   subject: string
   body: string
+  attachments: string[]
   createdByUserId: string | null
   createdByAssistantId: string | null
   sourceSessionId: string | null
@@ -41,6 +42,7 @@ const DRAFT_COLUMNS = `
   d.bcc_addresses AS "bcc",
   d.subject,
   d.body,
+  d.attachment_refs AS "attachments",
   d.created_by_user_id AS "createdByUserId",
   d.created_by_assistant_id AS "createdByAssistantId",
   d.source_session_id AS "sourceSessionId",
@@ -54,6 +56,7 @@ function toDraft(row: DraftRow): CrmEmailDraft {
     to: row.to ?? [],
     cc: row.cc ?? [],
     bcc: row.bcc ?? [],
+    attachments: row.attachments ?? [],
   }
 }
 
@@ -89,25 +92,26 @@ export function createDbCrmEmailDraftStore(): CrmEmailDraftStore {
                bcc_addresses = $7,
                subject = $8,
                body = $9,
-               created_by_assistant_id = $10,
-               source_session_id = $11,
+               attachment_refs = $10,
+               created_by_assistant_id = $11,
+               source_session_id = $12,
                updated_at = now()
              WHERE d.workspace_id = $1 AND d.id = $2`,
             [params.workspaceId, draftId, revision, params.from ?? null,
               params.to, params.cc ?? [], params.bcc ?? [], params.subject,
-              params.body, params.assistantId, params.sessionId],
+              params.body, params.attachments ?? [], params.assistantId, params.sessionId],
           )
         } else {
           const inserted = await client.query<{ id: string }>(
             `INSERT INTO crm_email_drafts
                (workspace_id, revision, from_address, to_addresses, cc_addresses,
-                bcc_addresses, subject, body, created_by_user_id,
+                bcc_addresses, subject, body, attachment_refs, created_by_user_id,
                 created_by_assistant_id, source_session_id)
-             VALUES ($1,1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+             VALUES ($1,1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
              RETURNING id`,
             [params.workspaceId, params.from ?? null, params.to, params.cc ?? [],
-              params.bcc ?? [], params.subject, params.body, params.userId,
-              params.assistantId, params.sessionId],
+              params.bcc ?? [], params.subject, params.body, params.attachments ?? [],
+              params.userId, params.assistantId, params.sessionId],
           )
           draftId = inserted.rows[0].id
         }
@@ -115,12 +119,12 @@ export function createDbCrmEmailDraftStore(): CrmEmailDraftStore {
         await client.query(
           `INSERT INTO crm_email_draft_versions
              (workspace_id, draft_id, revision, from_address, to_addresses,
-              cc_addresses, bcc_addresses, subject, body, created_by_user_id,
+              cc_addresses, bcc_addresses, subject, body, attachment_refs, created_by_user_id,
               created_by_assistant_id, source_session_id)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
           [params.workspaceId, draftId, revision, params.from ?? null, params.to,
             params.cc ?? [], params.bcc ?? [], params.subject, params.body,
-            params.userId, params.assistantId, params.sessionId],
+            params.attachments ?? [], params.userId, params.assistantId, params.sessionId],
         )
         await client.query(
           `INSERT INTO crm_email_draft_session_anchors

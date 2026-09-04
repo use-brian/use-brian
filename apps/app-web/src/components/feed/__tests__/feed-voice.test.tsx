@@ -4,13 +4,13 @@
  * vitest in app-web is node-only — `renderToString` + module mocks (the
  * feed-inbox test shape). Effects never run under SSR, so the memories
  * fetch stays dormant and the page paints its loading state: header
- * (Voice title, rule-count badge, subtitle, admin-gated "Inject rule") +
+ * (Voice title, rule-count badge, subtitle, admin-gated build controls) +
  * the card skeleton list. The zero-profile branch renders the
  * no-voice state whose CTA links to the feed home (feed-web's /onboarding
  * is not ported — §5 route map). The pure helpers (`parseTags`,
- * `buildDiscussPrompt`) are asserted directly — they carry the tag-split
- * and Discuss-seed contracts. CRUD forms, filters, and the discuss seed
- * dispatch are web-QA.
+ * `buildDiscussPrompt`, `parseVoiceDetail`, `adjacentVoiceId`) are asserted
+ * directly; the selected-rule render covers structured detail and persistent
+ * refine controls. CRUD forms, filters, and seed dispatch are browser QA.
  */
 
 import { describe, expect, it, vi } from "vitest";
@@ -34,7 +34,14 @@ import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
 import type { FeedProfile } from "@/lib/api/feed";
-import { FeedVoice, buildDiscussPrompt, parseTags } from "../feed-voice";
+import {
+  FeedVoice,
+  VoiceRuleDetail,
+  adjacentVoiceId,
+  buildDiscussPrompt,
+  parseTags,
+  parseVoiceDetail,
+} from "../feed-voice";
 
 const dict = en as unknown as Dictionary;
 
@@ -84,23 +91,25 @@ describe("[COMP:app-web/feed-voice] FeedVoice", () => {
     // The scope rail is retired: the sidebar owns scope now (D13), so the
     // pane states its scope in the subtitle instead.
     expect(html).toContain("on top of the baseline");
-    // Admin sees the Inject rule button even while loading. (Anchor on the
-    // closing tag — the subtitle prose also contains "Inject rule".)
+    // Admin sees the add-rule button even while loading. Anchor on the
+    // closing tag because the empty-state prose also contains its label.
     expect(html).toContain(`${en.feedPage.voice.injectRule}</button>`);
-    // Admin also sees both import entries: paste-in and X-handle
-    // (feed-import-account.md D8).
-    expect(html).toContain(`${en.feedPage.voice.importSamples}</button>`);
-    expect(html).toContain(`${en.feedPage.voice.importHandle}</button>`);
+    // Admin sees the import menu trigger and the guided build action. The two
+    // import items live in a closed Base UI portal, so their interaction is
+    // browser QA (feed-import-account.md D8).
+    expect(html).toContain(en.feedPage.voice.importMenu);
+    expect(html).toContain(en.feedPage.voice.buildWithChat);
     // Loading: skeleton cards, no empty state.
     expect(html).toContain("skeleton");
     expect(html).not.toContain(en.feedPage.voice.emptyTitle);
   });
 
-  it("hides the Inject rule button from non-admin members", () => {
+  it("hides voice-building controls from non-admin members", () => {
     const html = render(workspace([profile("acme")], "member"));
     expect(html).toContain("Threads voice");
     expect(html).not.toContain(`${en.feedPage.voice.injectRule}</button>`);
-    expect(html).not.toContain(`${en.feedPage.voice.importHandle}</button>`);
+    expect(html).not.toContain(en.feedPage.voice.importMenu);
+    expect(html).not.toContain(en.feedPage.voice.buildWithChat);
   });
 
   it("zero profiles: renders the no-voice state with a CTA into the feed home", () => {
@@ -139,5 +148,66 @@ describe("[COMP:app-web/feed-voice] FeedVoice", () => {
     );
     expect(buildDiscussPrompt(t, { summary: "   ", tags: ["x"] })).toBeNull();
     expect(buildDiscussPrompt(t, { summary: null, tags: null })).toBeNull();
+  });
+
+  it("turns imported plain-text detail into readable headings and lists", () => {
+    expect(
+      parseVoiceDetail(
+        "Positioning:\n- Lead with firsthand experience\n- Prefer concrete examples\n\nKeep the tone understated.\nAvoid hype.",
+      ),
+    ).toEqual([
+      { kind: "heading", text: "Positioning" },
+      {
+        kind: "list",
+        ordered: false,
+        items: ["Lead with firsthand experience", "Prefer concrete examples"],
+      },
+      {
+        kind: "paragraph",
+        text: "Keep the tone understated. Avoid hype.",
+      },
+    ]);
+  });
+
+  it("steps through visible rules without wrapping", () => {
+    const items = [{ id: "one" }, { id: "two" }, { id: "three" }];
+    expect(adjacentVoiceId(items, "two", -1)).toBe("one");
+    expect(adjacentVoiceId(items, "two", 1)).toBe("three");
+    expect(adjacentVoiceId(items, "one", -1)).toBeNull();
+    expect(adjacentVoiceId(items, "three", 1)).toBeNull();
+  });
+
+  it("renders one selected rule as structured prose with persistent refine controls", () => {
+    const html = renderToString(
+      <I18nProvider locale="en" dict={dict}>
+        <VoiceRuleDetail
+          memory={{
+            id: "voice-1",
+            type: "voice",
+            summary: "Write like an experienced operator",
+            detail: "Principles:\n- Use concrete examples\n- Name the tradeoff",
+            tags: ["linkedin", "tone"],
+            sensitivity: "public",
+            updatedAt: "2026-08-30T00:00:00.000Z",
+          }}
+          isAdmin
+          deleting={false}
+          position={1}
+          total={3}
+          previousId={null}
+          nextId="voice-2"
+          onSelect={() => {}}
+          onEdit={() => {}}
+          onDelete={() => {}}
+          onDiscuss={() => {}}
+        />
+      </I18nProvider>,
+    );
+
+    expect(html).toContain("Write like an experienced operator");
+    expect(html).toContain("<ul");
+    expect(html).toContain("Use concrete examples");
+    expect(html).toContain(en.feedPage.voice.refineInChat);
+    expect(html).toContain(en.feedPage.voice.nextRule);
   });
 });

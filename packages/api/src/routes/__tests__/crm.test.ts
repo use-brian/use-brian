@@ -226,6 +226,7 @@ describe('[COMP:api/crm-r2-route] CRM R2 route authority', () => {
       bcc: [],
       subject: 'Exact draft',
       body: 'Hello,\n\nThis is the complete canonical body.\n\nRegards',
+      attachments: ['/travel/receipt.pdf'],
       createdByUserId: CTX.userId,
       createdByAssistantId: 'assistant-1',
       sourceSessionId: 'session-1',
@@ -245,6 +246,7 @@ describe('[COMP:api/crm-r2-route] CRM R2 route authority', () => {
       id: '11111111-1111-4111-8111-111111111111',
       revision: 4,
       body: 'Hello,\n\nThis is the complete canonical body.\n\nRegards',
+      attachments: ['/travel/receipt.pdf'],
     })])
     expect(list).toHaveBeenCalledWith({
       userId: CTX.userId,

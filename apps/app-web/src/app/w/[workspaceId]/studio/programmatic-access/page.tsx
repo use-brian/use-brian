@@ -31,9 +31,12 @@ import {
   AppWindow,
   Check,
   Copy,
+  Database,
   KeyRound,
+  Plus,
   Plug,
   ShieldCheck,
+  Trash2,
   TriangleAlert,
 } from "lucide-react";
 import { useWorkspaces } from "@/contexts/workspace-context";
@@ -55,6 +58,7 @@ import {
   createBrainKey,
   listBrainKeys,
   revokeBrainKey,
+  updateBrainKeyCaptureBinding,
   updateBrainKeyMaxClearance,
   type BrainKey,
   type BrainKeyClearance,
@@ -64,6 +68,7 @@ import {
 import {
   listOAuthAuthorizations,
   revokeOAuthAuthorization,
+  updateOAuthCaptureBinding,
   type OAuthAuthorization,
 } from "@/lib/api/oauth-authorizations";
 import { ContextScopePicker } from "@/components/context/context-scope-picker";
@@ -74,6 +79,20 @@ import {
   type ContextProject,
   type ContextTeam,
 } from "@/lib/api/context-scopes";
+import { listAssistants, type StudioAssistantSummary } from "@/lib/api/studio";
+import {
+  addCaptureRule,
+  createCaptureProfile,
+  deleteCaptureProfile,
+  deleteCaptureRule,
+  listCaptureProfiles,
+  setAssistantCaptureProfile,
+  updateCaptureProfile,
+  type CaptureFilterType,
+  type CapturePartition,
+  type CaptureProfile,
+  type CaptureRoutingMode,
+} from "@/lib/api/programmatic-capture";
 
 type Mode =
   | { kind: "list" }
@@ -82,6 +101,8 @@ type Mode =
 
 /** Select sentinel for "no cap" — base-ui Select values must be strings. */
 const CLEARANCE_FOLLOWS_PRIMARY = "primary";
+const CAPTURE_NONE = "capture-none";
+const CAPTURE_INHERIT = "capture-inherit";
 
 function formatDate(iso: string | null): string {
   if (!iso) return "-";
@@ -120,6 +141,8 @@ export default function ProgrammaticAccessPage() {
   const [authorizations, setAuthorizations] = useState<OAuthAuthorization[] | null>(null);
   const [teams, setTeams] = useState<ContextTeam[]>([]);
   const [projects, setProjects] = useState<ContextProject[]>([]);
+  const [assistants, setAssistants] = useState<StudioAssistantSummary[]>([]);
+  const [captureProfiles, setCaptureProfiles] = useState<CaptureProfile[]>([]);
   const [mode, setMode] = useState<Mode>({ kind: "list" });
   const [showRevoked, setShowRevoked] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -130,16 +153,20 @@ export default function ProgrammaticAccessPage() {
     setError(null);
     setAdminOnly(false);
     try {
-      const [loadedKeys, loadedAuths, loadedTeams, loadedProjects] = await Promise.all([
+      const [loadedKeys, loadedAuths, loadedTeams, loadedProjects, loadedAssistants, loadedProfiles] = await Promise.all([
         listBrainKeys(activeId),
         listOAuthAuthorizations(activeId),
         listContextTeams(activeId),
         listContextProjects(activeId),
+        listAssistants(activeId),
+        listCaptureProfiles(activeId),
       ]);
       setKeys(loadedKeys);
       setAuthorizations(loadedAuths);
       setTeams(loadedTeams);
       setProjects(loadedProjects);
+      setAssistants(loadedAssistants);
+      setCaptureProfiles(loadedProfiles);
     } catch (err) {
       const message = (err as Error).message;
       // The backend 403s non-admins — show the targeted message, not a
@@ -148,6 +175,7 @@ export default function ProgrammaticAccessPage() {
       else setError(message);
       setKeys([]);
       setAuthorizations([]);
+      setCaptureProfiles([]);
     }
   }, [activeId]);
 
@@ -212,6 +240,16 @@ export default function ProgrammaticAccessPage() {
         </div>
       )}
 
+      {!adminOnly && activeId && (
+        <CaptureProfilesSection
+          workspaceId={activeId}
+          assistants={assistants}
+          profiles={captureProfiles}
+          onProfilesChange={setCaptureProfiles}
+          onError={setError}
+        />
+      )}
+
       {!adminOnly && (
         <section className="flex flex-col gap-3">
           {/* Section header carries the one primary action, mirroring the
@@ -249,6 +287,20 @@ export default function ProgrammaticAccessPage() {
                   t={t}
                   teams={teams}
                   projects={projects}
+                  assistants={assistants}
+                  captureProfiles={captureProfiles}
+                  onChangeCaptureBinding={async (assistantId, profileId) => {
+                    if (!activeId) return;
+                    setKeys((prev) => prev?.map((row) => row.id === k.id
+                      ? { ...row, captureAssistantId: assistantId, captureProfileId: profileId }
+                      : row) ?? null);
+                    try {
+                      await updateBrainKeyCaptureBinding(activeId, k.id, assistantId, profileId);
+                    } catch (err) {
+                      setError((err as Error).message);
+                      load();
+                    }
+                  }}
                   onChangeMaxClearance={(next) => changeMaxClearance(k.id, next)}
                   onRevoke={async () => {
                     const ok = await confirmDialog({
@@ -288,7 +340,15 @@ export default function ProgrammaticAccessPage() {
               </summary>
               <ul className="rounded-xl border border-border bg-card divide-y divide-border overflow-hidden mt-3 opacity-80">
                 {revokedKeys.map((k) => (
-                  <KeyRow key={k.id} row={k} t={t} teams={teams} projects={projects} />
+                  <KeyRow
+                    key={k.id}
+                    row={k}
+                    t={t}
+                    teams={teams}
+                    projects={projects}
+                    assistants={assistants}
+                    captureProfiles={captureProfiles}
+                  />
                 ))}
               </ul>
             </details>
@@ -299,6 +359,20 @@ export default function ProgrammaticAccessPage() {
       {!adminOnly && (
         <ConnectedAppsSection
           authorizations={authorizations}
+          assistants={assistants}
+          captureProfiles={captureProfiles}
+          onChangeCaptureBinding={async (auth, assistantId, profileId) => {
+            if (!activeId) return;
+            setAuthorizations((prev) => prev?.map((row) => row.id === auth.id
+              ? { ...row, captureAssistantId: assistantId, captureProfileId: profileId }
+              : row) ?? null);
+            try {
+              await updateOAuthCaptureBinding(activeId, auth.id, assistantId, profileId);
+            } catch (err) {
+              setError((err as Error).message);
+              load();
+            }
+          }}
           onRevoke={async (auth) => {
             const ok = await confirmDialog({
               title: t.programmaticAccess.connectedApps.confirmRevokeTitle,
@@ -329,9 +403,19 @@ export default function ProgrammaticAccessPage() {
 
 function ConnectedAppsSection({
   authorizations,
+  assistants,
+  captureProfiles,
+  onChangeCaptureBinding,
   onRevoke,
 }: {
   authorizations: OAuthAuthorization[] | null;
+  assistants: StudioAssistantSummary[];
+  captureProfiles: CaptureProfile[];
+  onChangeCaptureBinding: (
+    auth: OAuthAuthorization,
+    assistantId: string | null,
+    profileId: string | null,
+  ) => void;
   onRevoke: (auth: OAuthAuthorization) => void;
 }) {
   const t = useT();
@@ -361,7 +445,15 @@ function ConnectedAppsSection({
       ) : (
         <ul className="rounded-xl border border-border bg-card divide-y divide-border overflow-hidden">
           {active.map((auth) => (
-            <ConnectedAppRow key={auth.id} auth={auth} onRevoke={() => onRevoke(auth)} />
+            <ConnectedAppRow
+              key={auth.id}
+              auth={auth}
+              assistants={assistants}
+              captureProfiles={captureProfiles}
+              onChangeCaptureBinding={(assistantId, profileId) =>
+                onChangeCaptureBinding(auth, assistantId, profileId)}
+              onRevoke={() => onRevoke(auth)}
+            />
           ))}
         </ul>
       )}
@@ -371,15 +463,21 @@ function ConnectedAppsSection({
 
 function ConnectedAppRow({
   auth,
+  assistants,
+  captureProfiles,
+  onChangeCaptureBinding,
   onRevoke,
 }: {
   auth: OAuthAuthorization;
+  assistants: StudioAssistantSummary[];
+  captureProfiles: CaptureProfile[];
+  onChangeCaptureBinding: (assistantId: string | null, profileId: string | null) => void;
   onRevoke: () => void;
 }) {
   const t = useT();
   const name = auth.clientName ?? t.programmaticAccess.connectedApps.unnamedClient;
   return (
-    <li className="px-4 py-3.5 flex items-center gap-3">
+    <li className="px-4 py-3.5 flex flex-wrap lg:flex-nowrap items-center gap-3">
       <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
         <AppWindow className="h-4 w-4" />
       </div>
@@ -394,6 +492,13 @@ function ConnectedAppRow({
           </div>
         )}
       </div>
+      <CaptureBindingControl
+        assistantId={auth.captureAssistantId}
+        profileId={auth.captureProfileId}
+        assistants={assistants}
+        profiles={captureProfiles}
+        onChange={onChangeCaptureBinding}
+      />
       <MetaCell value={relative(auth.lastUsedAt, t)} label={t.programmaticAccess.lastUsedLabel} />
       <MetaCell value={formatDate(auth.createdAt)} label={t.programmaticAccess.createdLabel} />
       <button
@@ -555,6 +660,385 @@ function ClearanceCapControl({
   );
 }
 
+function CaptureBindingControl({
+  assistantId,
+  profileId,
+  assistants,
+  profiles,
+  onChange,
+}: {
+  assistantId: string | null;
+  profileId: string | null;
+  assistants: StudioAssistantSummary[];
+  profiles: CaptureProfile[];
+  onChange?: (assistantId: string | null, profileId: string | null) => void;
+}) {
+  const t = useT();
+  if (!onChange) {
+    const assistant = assistants.find((row) => row.id === assistantId);
+    const profile = profiles.find((row) => row.id === profileId);
+    if (!assistant) return null;
+    return (
+      <div className="hidden lg:block max-w-44 text-right text-[11px] text-muted-foreground">
+        <div className="truncate">{assistant.name}</div>
+        <div className="truncate">{profile?.name ?? t.programmaticAccess.capture.inherit}</div>
+      </div>
+    );
+  }
+  const assistantItems = Object.fromEntries([
+    [CAPTURE_NONE, t.programmaticAccess.capture.noCapture],
+    ...assistants.map((assistant) => [assistant.id, assistant.name]),
+  ]);
+  const profileItems = Object.fromEntries([
+    [CAPTURE_INHERIT, t.programmaticAccess.capture.inherit],
+    ...profiles.map((profile) => [profile.id, profile.name]),
+  ]);
+  return (
+    <div className="order-last flex w-full shrink-0 flex-col gap-1 pl-12 lg:order-none lg:w-48 lg:pl-0">
+      <Select
+        value={assistantId ?? CAPTURE_NONE}
+        items={assistantItems}
+        onValueChange={(value) => {
+          if (!value) return;
+          onChange(value === CAPTURE_NONE ? null : value, value === CAPTURE_NONE ? null : profileId);
+        }}
+      >
+        <SelectTrigger size="sm" aria-label={t.programmaticAccess.capture.connectionAssistant}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value={CAPTURE_NONE}>{t.programmaticAccess.capture.noCapture}</SelectItem>
+          {assistants.map((assistant) => (
+            <SelectItem key={assistant.id} value={assistant.id}>{assistant.name}</SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      <Select
+        value={profileId ?? CAPTURE_INHERIT}
+        items={profileItems}
+        disabled={!assistantId}
+        onValueChange={(value) => {
+          if (!value || !assistantId) return;
+          onChange(assistantId, value === CAPTURE_INHERIT ? null : value);
+        }}
+      >
+        <SelectTrigger size="sm" aria-label={t.programmaticAccess.capture.connectionProfile}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value={CAPTURE_INHERIT}>{t.programmaticAccess.capture.inherit}</SelectItem>
+          {profiles.map((profile) => (
+            <SelectItem key={profile.id} value={profile.id}>{profile.name}</SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
+  );
+}
+
+function CaptureProfilesSection({
+  workspaceId,
+  assistants,
+  profiles,
+  onProfilesChange,
+  onError,
+}: {
+  workspaceId: string;
+  assistants: StudioAssistantSummary[];
+  profiles: CaptureProfile[];
+  onProfilesChange: (profiles: CaptureProfile[]) => void;
+  onError: (error: string | null) => void;
+}) {
+  const t = useT();
+  const [name, setName] = useState("");
+  const [partitionBy, setPartitionBy] = useState<CapturePartition>("session");
+  const [saving, setSaving] = useState(false);
+
+  async function refresh() {
+    onProfilesChange(await listCaptureProfiles(workspaceId));
+  }
+
+  async function run(operation: () => Promise<void>) {
+    setSaving(true);
+    onError(null);
+    try {
+      await operation();
+      await refresh();
+    } catch (err) {
+      onError((err as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const partitionItems = {
+    connection: t.programmaticAccess.capture.partitionConnection,
+    user: t.programmaticAccess.capture.partitionUser,
+    session: t.programmaticAccess.capture.partitionSession,
+    subject: t.programmaticAccess.capture.partitionSubject,
+  };
+  const profileItems = Object.fromEntries([
+    [CAPTURE_NONE, t.programmaticAccess.capture.noDefault],
+    ...profiles.map((profile) => [profile.id, profile.name]),
+  ]);
+
+  return (
+    <section className="flex flex-col gap-3">
+      <header>
+        <h2 className="text-[13px] font-semibold tracking-tight uppercase text-muted-foreground">
+          {t.programmaticAccess.capture.title}
+        </h2>
+        <p className="text-[13px] text-muted-foreground mt-1 max-w-2xl">
+          {t.programmaticAccess.capture.description}
+        </p>
+      </header>
+
+      <div className="rounded-xl border border-border bg-card p-4 flex flex-col gap-3">
+        <div className="grid gap-2 sm:grid-cols-[1fr_180px_auto]">
+          <input
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            placeholder={t.programmaticAccess.capture.profileNamePlaceholder}
+            maxLength={120}
+            className="bg-muted/50 border border-border rounded-lg px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-primary/30"
+          />
+          <Select value={partitionBy} items={partitionItems} onValueChange={(value) => value && setPartitionBy(value as CapturePartition)}>
+            <SelectTrigger aria-label={t.programmaticAccess.capture.partitionLabel}><SelectValue /></SelectTrigger>
+            <SelectContent>
+              {Object.entries(partitionItems).map(([value, label]) => (
+                <SelectItem key={value} value={value}>{label}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Button
+            disabled={!name.trim() || saving}
+            onClick={() => run(async () => {
+              await createCaptureProfile(workspaceId, { name: name.trim(), partitionBy, enabled: true });
+              setName("");
+            })}
+          >
+            <Plus className="h-3.5 w-3.5" />
+            {t.programmaticAccess.capture.createProfile}
+          </Button>
+        </div>
+        <p className="text-[12px] text-muted-foreground">{t.programmaticAccess.capture.poolingHint}</p>
+      </div>
+
+      {profiles.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-border px-5 py-8 text-center text-[13px] text-muted-foreground">
+          {t.programmaticAccess.capture.empty}
+        </div>
+      ) : profiles.map((profile) => (
+        <div key={profile.id} className="rounded-xl border border-border bg-card overflow-hidden">
+          <div className="flex items-center gap-3 px-4 py-3 border-b border-border">
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
+              <Database className="h-4 w-4" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="text-[14px] font-medium truncate">{profile.name}</div>
+              <div className="text-[11px] text-muted-foreground">
+                {format(t.programmaticAccess.capture.profileMeta, {
+                  partition: partitionItems[profile.partitionBy],
+                  count: profile.rules.length,
+                })}
+              </div>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={saving}
+              onClick={() => run(async () => {
+                await updateCaptureProfile(workspaceId, { ...profile, enabled: !profile.enabled });
+              })}
+            >
+              {profile.enabled ? t.programmaticAccess.capture.disable : t.programmaticAccess.capture.enable}
+            </Button>
+            <button
+              type="button"
+              title={t.programmaticAccess.capture.deleteProfile}
+              className="text-muted-foreground hover:text-destructive p-1.5"
+              onClick={async () => {
+                const ok = await confirmDialog({
+                  title: t.programmaticAccess.capture.deleteProfileTitle,
+                  description: format(t.programmaticAccess.capture.deleteProfileBody, { name: profile.name }),
+                  confirmLabel: t.programmaticAccess.capture.deleteProfile,
+                  variant: "destructive",
+                });
+                if (ok) await run(() => deleteCaptureProfile(workspaceId, profile.id));
+              }}
+            >
+              <Trash2 className="h-4 w-4" />
+            </button>
+          </div>
+
+          <div className="p-4 flex flex-col gap-3">
+            <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+              {t.programmaticAccess.capture.orderedRules}
+            </div>
+            {profile.rules.length === 0 ? (
+              <p className="text-[12px] text-muted-foreground">{t.programmaticAccess.capture.noRules}</p>
+            ) : (
+              <ol className="flex flex-col gap-1.5">
+                {profile.rules.map((rule, index) => (
+                  <li key={rule.id} className="flex items-center gap-2 rounded-lg bg-muted/50 px-3 py-2 text-[12px]">
+                    <span className="text-muted-foreground tabular-nums">{index + 1}.</span>
+                    <span className="font-medium">{t.programmaticAccess.capture.filters[rule.filterType]}</span>
+                    <span className="text-muted-foreground truncate flex-1">{JSON.stringify(rule.filterParams)}</span>
+                    <span className="rounded-full bg-background px-2 py-0.5">{t.programmaticAccess.capture.routing[rule.routingMode]}</span>
+                    <button
+                      type="button"
+                      title={t.programmaticAccess.capture.deleteRule}
+                      className="text-muted-foreground hover:text-destructive"
+                      onClick={() => run(() => deleteCaptureRule(workspaceId, profile.id, rule.id))}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </li>
+                ))}
+              </ol>
+            )}
+            <NewRuleForm
+              disabled={saving}
+              onAdd={(rule) => run(async () => {
+                await addCaptureRule(workspaceId, profile.id, {
+                  ...rule,
+                  ruleOrder: Math.max(-1, ...profile.rules.map((entry) => entry.ruleOrder)) + 1,
+                  episodeSensitivity: null,
+                  compartments: [],
+                  projectIds: [],
+                });
+              })}
+            />
+          </div>
+        </div>
+      ))}
+
+      {assistants.length > 0 && (
+        <div className="rounded-xl border border-border bg-card p-4 flex flex-col gap-3">
+          <div>
+            <div className="text-[13px] font-medium">{t.programmaticAccess.capture.assistantDefaults}</div>
+            <p className="text-[12px] text-muted-foreground">{t.programmaticAccess.capture.assistantDefaultsHint}</p>
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2">
+            {assistants.map((assistant) => {
+              const selected = profiles.find((profile) => profile.assistantIds.includes(assistant.id))?.id ?? CAPTURE_NONE;
+              return (
+                <div key={assistant.id} className="flex items-center gap-2">
+                  <span className="min-w-0 flex-1 truncate text-[13px]">{assistant.name}</span>
+                  <Select
+                    value={selected}
+                    items={profileItems}
+                    onValueChange={(value) => value && run(() =>
+                      setAssistantCaptureProfile(workspaceId, assistant.id, value === CAPTURE_NONE ? null : value))}
+                  >
+                    <SelectTrigger size="sm" className="w-44" aria-label={t.programmaticAccess.capture.assistantDefaultProfile}>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={CAPTURE_NONE}>{t.programmaticAccess.capture.noDefault}</SelectItem>
+                      {profiles.map((profile) => (
+                        <SelectItem key={profile.id} value={profile.id}>{profile.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function NewRuleForm({
+  disabled,
+  onAdd,
+}: {
+  disabled: boolean;
+  onAdd: (rule: {
+    filterType: CaptureFilterType;
+    filterParams: Record<string, unknown>;
+    routingMode: CaptureRoutingMode;
+    routingSchedule: string | null;
+    routingTimezone: string;
+  }) => void;
+}) {
+  const t = useT();
+  const [filterType, setFilterType] = useState<CaptureFilterType>("always");
+  const [filterValue, setFilterValue] = useState("");
+  const [routingMode, setRoutingMode] = useState<CaptureRoutingMode>("scheduled");
+  const [schedule, setSchedule] = useState("0 * * * *");
+
+  const filterItems = t.programmaticAccess.capture.filters;
+  const routingItems = t.programmaticAccess.capture.routing;
+  const needsValue = filterType !== "always";
+
+  function filterParams(): Record<string, unknown> | null {
+    const values = filterValue.split(",").map((value) => value.trim()).filter(Boolean);
+    if (filterType === "always") return {};
+    if (filterType === "keyword_match") return values.length > 0 ? { keywords: values } : null;
+    if (filterType === "actor_match" || filterType === "role_match") {
+      return values.length > 0 ? { values } : null;
+    }
+    const separator = filterValue.indexOf("=");
+    if (separator < 1) return null;
+    return {
+      key: filterValue.slice(0, separator).trim(),
+      value: filterValue.slice(separator + 1).trim(),
+    };
+  }
+
+  const params = filterParams();
+  return (
+    <div className="grid gap-2 lg:grid-cols-[160px_1fr_140px_160px_auto]">
+      <Select value={filterType} items={filterItems} onValueChange={(value) => value && setFilterType(value as CaptureFilterType)}>
+        <SelectTrigger size="sm" aria-label={t.programmaticAccess.capture.filterLabel}><SelectValue /></SelectTrigger>
+        <SelectContent>
+          {Object.entries(filterItems).map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}
+        </SelectContent>
+      </Select>
+      <input
+        value={filterValue}
+        onChange={(event) => setFilterValue(event.target.value)}
+        disabled={!needsValue}
+        placeholder={filterType === "metadata_match"
+          ? t.programmaticAccess.capture.metadataPlaceholder
+          : t.programmaticAccess.capture.valuesPlaceholder}
+        className="bg-muted/50 border border-border rounded-lg px-3 py-1.5 text-[12px] disabled:opacity-50"
+      />
+      <Select value={routingMode} items={routingItems} onValueChange={(value) => value && setRoutingMode(value as CaptureRoutingMode)}>
+        <SelectTrigger size="sm" aria-label={t.programmaticAccess.capture.routingLabel}><SelectValue /></SelectTrigger>
+        <SelectContent>
+          {Object.entries(routingItems).map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}
+        </SelectContent>
+      </Select>
+      <input
+        value={schedule}
+        onChange={(event) => setSchedule(event.target.value)}
+        disabled={routingMode !== "scheduled"}
+        placeholder="0 * * * *"
+        aria-label={t.programmaticAccess.capture.scheduleLabel}
+        className="bg-muted/50 border border-border rounded-lg px-3 py-1.5 font-mono text-[12px] disabled:opacity-50"
+      />
+      <Button
+        size="sm"
+        variant="outline"
+        disabled={disabled || !params || (routingMode === "scheduled" && !schedule.trim())}
+        onClick={() => onAdd({
+          filterType,
+          filterParams: params ?? {},
+          routingMode,
+          routingSchedule: routingMode === "scheduled" ? schedule.trim() : null,
+          routingTimezone: "UTC",
+        })}
+      >
+        {t.programmaticAccess.capture.addRule}
+      </Button>
+    </div>
+  );
+}
+
 function KeyRow({
   row,
   t,
@@ -562,6 +1046,9 @@ function KeyRow({
   onChangeMaxClearance,
   teams,
   projects,
+  assistants,
+  captureProfiles,
+  onChangeCaptureBinding,
 }: {
   row: BrainKey;
   t: Dictionary;
@@ -569,10 +1056,13 @@ function KeyRow({
   onChangeMaxClearance?: (next: BrainKeyClearance | null) => void;
   teams: ContextTeam[];
   projects: ContextProject[];
+  assistants: StudioAssistantSummary[];
+  captureProfiles: CaptureProfile[];
+  onChangeCaptureBinding?: (assistantId: string | null, profileId: string | null) => void;
 }) {
   const isRevoked = row.status === "revoked";
   return (
-    <li className="px-4 py-3.5 flex items-center gap-3">
+    <li className="px-4 py-3.5 flex flex-wrap lg:flex-nowrap items-center gap-3">
       <div
         className={cn(
           "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg",
@@ -613,6 +1103,13 @@ function KeyRow({
           />
         </div>
       </div>
+      <CaptureBindingControl
+        assistantId={row.captureAssistantId}
+        profileId={row.captureProfileId}
+        assistants={assistants}
+        profiles={captureProfiles}
+        onChange={isRevoked ? undefined : onChangeCaptureBinding}
+      />
       <MetaCell value={relative(row.lastUsedAt, t)} label={t.programmaticAccess.lastUsedLabel} />
       <MetaCell value={formatDate(row.createdAt)} label={t.programmaticAccess.createdLabel} />
       {!isRevoked && onRevoke && (

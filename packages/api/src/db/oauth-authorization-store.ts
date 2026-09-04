@@ -48,6 +48,8 @@ export type OAuthAuthorizationRow = {
   revokedAt: Date | null
   accessTokenExpiresAt: Date | null
   refreshTokenExpiresAt: Date | null
+  captureAssistantId?: string | null
+  captureProfileId?: string | null
 }
 
 /** Row joined with the client display fields — what the Studio UI lists. */
@@ -134,6 +136,15 @@ export type OAuthAuthorizationStore = {
 
   /** Studio UI: revoke a grant. RLS-gated. Idempotent. */
   revoke(actingUserId: string, id: string): Promise<boolean>
+
+  /** Configure routed programmatic capture for this exact OAuth grant. */
+  updateCaptureBinding(
+    actingUserId: string,
+    id: string,
+    workspaceId: string,
+    captureAssistantId: string | null,
+    captureProfileId: string | null,
+  ): Promise<boolean>
 }
 
 const COLS_ROW = `
@@ -146,7 +157,9 @@ const COLS_ROW = `
   last_used_at             AS "lastUsedAt",
   revoked_at               AS "revokedAt",
   access_token_expires_at  AS "accessTokenExpiresAt",
-  refresh_token_expires_at AS "refreshTokenExpiresAt"
+  refresh_token_expires_at AS "refreshTokenExpiresAt",
+  capture_assistant_id     AS "captureAssistantId",
+  capture_profile_id       AS "captureProfileId"
 `
 
 const COLS_WITH_SECRETS = `
@@ -363,6 +376,8 @@ export function createDbOAuthAuthorizationStore(): OAuthAuthorizationStore {
                 a.revoked_at               AS "revokedAt",
                 a.access_token_expires_at  AS "accessTokenExpiresAt",
                 a.refresh_token_expires_at AS "refreshTokenExpiresAt",
+                a.capture_assistant_id     AS "captureAssistantId",
+                a.capture_profile_id       AS "captureProfileId",
                 c.client_name              AS "clientName",
                 c.client_uri               AS "clientUri"
          FROM oauth_authorizations a
@@ -385,6 +400,38 @@ export function createDbOAuthAuthorizationStore(): OAuthAuthorizationStore {
          WHERE id = $1 AND revoked_at IS NULL
          RETURNING id`,
         [id],
+      )
+      return result.rows.length > 0
+    },
+
+    async updateCaptureBinding(
+      actingUserId,
+      id,
+      workspaceId,
+      captureAssistantId,
+      captureProfileId,
+    ) {
+      const result = await queryWithRLS<{ id: string }>(
+        actingUserId,
+        `UPDATE oauth_authorizations oa
+            SET capture_assistant_id = $3,
+                capture_profile_id = $4
+          WHERE oa.id = $1 AND oa.workspace_id = $2
+            AND oa.revoked_at IS NULL
+            AND ($3::uuid IS NOT NULL OR $4::uuid IS NULL)
+            AND (
+              $3::uuid IS NULL
+              OR EXISTS (SELECT 1 FROM assistants a WHERE a.id = $3 AND a.workspace_id = $2)
+            )
+            AND (
+              $4::uuid IS NULL
+              OR EXISTS (
+                SELECT 1 FROM programmatic_capture_profiles p
+                 WHERE p.id = $4 AND p.workspace_id = $2
+              )
+            )
+          RETURNING oa.id`,
+        [id, workspaceId, captureAssistantId, captureProfileId],
       )
       return result.rows.length > 0
     },

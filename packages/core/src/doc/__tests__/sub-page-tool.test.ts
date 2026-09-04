@@ -19,6 +19,8 @@ import { outlineSchema } from '../page-schemas.js'
 const WORKSPACE_ID = '00000000-0000-0000-0000-000000000010'
 const USER_ID = '00000000-0000-0000-0000-000000000020'
 const PARENT_ID = '00000000-0000-0000-0000-0000000000a1'
+const STALE_PARENT_ID = '00000000-0000-0000-0000-0000000000b2'
+const CREATED_PARENT_ID = '00000000-0000-0000-0000-0000000000c3'
 
 function ctx(overrides: { workspaceId?: string | null } = {}) {
   return {
@@ -156,7 +158,7 @@ function deps(over: Partial<DocToolDeps> = {}): DocToolDeps {
 
 describe('[COMP:doc/sub-page-tool] createSubPage happy path', () => {
   it('persists a draft nested under the parent and returns pageId/version/outline', async () => {
-    const d = deps()
+    const d = deps({ anchorPageId: PARENT_ID })
     const tool = createCreateSubPageTool(d)
     const res = await tool.execute(
       { parentPageId: PARENT_ID, title: 'Q3 Planning' },
@@ -227,6 +229,48 @@ describe('[COMP:doc/sub-page-tool] createSubPage guards', () => {
     const res = await tool.execute({ parentPageId: PARENT_ID, title: 'X' }, ctx())
     expect(res.isError).toBe(true)
     expect(d.savedViewStore.createDraft).not.toHaveBeenCalled()
+  })
+
+  it('redirects a stale parent id to the validated Page anchor', async () => {
+    const onEvent = vi.fn()
+    const d = deps({ anchorPageId: PARENT_ID, onEvent })
+    const tool = createCreateSubPageTool(d)
+
+    const res = await tool.execute(
+      { parentPageId: STALE_PARENT_ID, title: 'Anchored child' },
+      ctx(),
+    )
+
+    expect(res.isError).toBeUndefined()
+    expect(d.savedViewStore.getById).toHaveBeenCalledWith(USER_ID, PARENT_ID)
+    expect(d.savedViewStore.createDraft).toHaveBeenCalledWith(
+      expect.objectContaining({ nestParentId: PARENT_ID }),
+    )
+    expect(onEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'sub_page_created', parentPageId: PARENT_ID }),
+      expect.anything(),
+    )
+  })
+
+  it('allows a Page created in the same turn to parent a deeper descendant', async () => {
+    const turnCreatedPageIds = new Set([CREATED_PARENT_ID])
+    const d = deps({ anchorPageId: PARENT_ID, turnCreatedPageIds })
+    vi.mocked(d.savedViewStore.getById).mockResolvedValue(
+      makeSavedView({ id: CREATED_PARENT_ID, name: 'Created parent' }),
+    )
+    const tool = createCreateSubPageTool(d)
+
+    const res = await tool.execute(
+      { parentPageId: CREATED_PARENT_ID, title: 'Grandchild' },
+      ctx(),
+    )
+
+    expect(res.isError).toBeUndefined()
+    expect(d.savedViewStore.getById).toHaveBeenCalledWith(USER_ID, CREATED_PARENT_ID)
+    expect(d.savedViewStore.createDraft).toHaveBeenCalledWith(
+      expect.objectContaining({ nestParentId: CREATED_PARENT_ID }),
+    )
+    expect(turnCreatedPageIds.has('sv-child')).toBe(true)
   })
 })
 

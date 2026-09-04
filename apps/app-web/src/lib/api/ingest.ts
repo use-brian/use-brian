@@ -25,6 +25,44 @@ export const MAX_STORED_FILE_BYTES = 1024 * 1024 * 1024;
 /** A transfer above this size needs an explicit pre-flight confirmation. */
 export const LARGE_FILE_CONFIRM_BYTES = 100 * 1024 * 1024;
 
+/**
+ * Human-readable size for user-facing copy ("62.7 MB").
+ * MB not MiB: the number a user reads next to a limit should match the number
+ * their file manager showed them, and no user is served by the distinction.
+ */
+export function formatFileSize(bytes: number): string {
+  const mb = bytes / (1024 * 1024);
+  if (mb >= 1) return `${mb.toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+
+/**
+ * Split a batch against the multipart ceiling BEFORE anything is POSTed.
+ *
+ * This has to happen client-side because an oversized body never becomes an
+ * HTTP error the caller can read: Cloud Run drops the connection at the edge,
+ * past the CDN, before Express or multer sees a byte. `fetch` then rejects
+ * with a bare `TypeError: Failed to fetch`, which is indistinguishable from
+ * being offline and says nothing about size. A user who exported a 62.7 MB
+ * .docx (2026-08-29) had no way to learn a limit existed.
+ *
+ * The 20 MB transient-attachment lane has guarded this way since it shipped
+ * (`use-file-attachments.ts` -> `partitionUpload`); the durable ingest lane
+ * simply never got the same treatment.
+ */
+export function partitionByIngestSize(
+  files: File[],
+  maxBytes: number = MAX_INGEST_FILE_BYTES,
+): { accepted: File[]; tooLarge: File[] } {
+  const accepted: File[] = [];
+  const tooLarge: File[] = [];
+  for (const file of files) {
+    if (file.size > maxBytes) tooLarge.push(file);
+    else accepted.push(file);
+  }
+  return { accepted, tooLarge };
+}
+
 export type IngestCounts = {
   entities: number;
   edges: number;
@@ -389,10 +427,12 @@ export async function ingestLinkedInArchive(
     body: formData,
   });
   const data = (await res.json().catch(() => null)) as
-    | (LinkedInImportResponse & { error?: string })
+    | (LinkedInImportResponse & { error?: string; detail?: string })
     | null;
   if (!res.ok || !data?.run) {
-    throw new Error(data?.error ?? `LinkedIn import failed (HTTP ${res.status})`);
+    throw new Error(
+      data?.detail || data?.error || `LinkedIn import failed (HTTP ${res.status})`,
+    );
   }
   if (data.run.status === "completed" || data.run.status === "failed") {
     return linkedInResult(file, data);
@@ -406,10 +446,14 @@ export async function ingestLinkedInArchive(
       `${API_URL}/api/imports/linkedin/${encodeURIComponent(data.run.id)}`,
     );
     const statusData = (await statusRes.json().catch(() => null)) as
-      | (LinkedInImportResponse & { error?: string })
+      | (LinkedInImportResponse & { error?: string; detail?: string })
       | null;
     if (!statusRes.ok || !statusData?.run) {
-      throw new Error(statusData?.error ?? `LinkedIn import status failed (HTTP ${statusRes.status})`);
+      throw new Error(
+        statusData?.detail ||
+          statusData?.error ||
+          `LinkedIn import status failed (HTTP ${statusRes.status})`,
+      );
     }
     if (statusData.run.status === "completed" || statusData.run.status === "failed") {
       return linkedInResult(file, statusData);
@@ -428,6 +472,51 @@ export type ReingestOutcome =
       detail: string;
     }
   | { status: "in_flight" };
+
+/** Which recording owns a stored audio/video file. */
+export type RecordingForFile = {
+  recordingId: string;
+  /** The recording rows were created just now; no byte was copied. */
+  adopted: boolean;
+  /** A processing run already completed, so a re-run can duplicate memories. */
+  alreadyProcessed: boolean;
+};
+
+/**
+ * Resolve the recording behind a stored media file —
+ * POST /api/files/:fileId/ingest refuses audio and video by design, because
+ * media is transcribed rather than parsed. This is where that refusal leads:
+ * the same "Re-ingest to brain" click resolves (or adopts) the recording that
+ * owns the bytes, and the caller then runs the ordinary recording flow -
+ * estimate, the cost + blueprint confirmation, process.
+ *
+ * Starts nothing and spends nothing on its own. Spec:
+ * docs/architecture/brain/file-artifacts.md -> "Re-ingest".
+ */
+export async function recordingForStoredFile(
+  workspaceId: string,
+  fileId: string,
+): Promise<RecordingForFile> {
+  const res = await authFetch(
+    `${API_URL}/api/files/${encodeURIComponent(fileId)}/recording`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspaceId }),
+    },
+  );
+  const data = (await res.json().catch(() => null)) as
+    | (Partial<RecordingForFile> & { detail?: string; error?: string })
+    | null;
+  if (!res.ok || !data?.recordingId) {
+    throw new Error(data?.detail ?? data?.error ?? `Could not resolve the recording (HTTP ${res.status})`);
+  }
+  return {
+    recordingId: data.recordingId,
+    adopted: data.adopted === true,
+    alreadyProcessed: data.alreadyProcessed === true,
+  };
+}
 
 /**
  * Deterministic (re-)ingestion of a file ALREADY stored in workspace_files —
@@ -468,5 +557,8 @@ export async function reingestStoredFile(
     };
   }
   if (res.status === 409 && data?.error === "ingest_in_flight") return { status: "in_flight" };
-  throw new Error(data?.error ?? `Ingest failed (HTTP ${res.status})`);
+  // `error` is a CODE (`file_too_large`, `quota_exceeded`); `detail` is the
+  // sentence written for a person. Showing the code makes the user search
+  // for a phrase that exists nowhere in the product.
+  throw new Error(data?.detail || data?.error || `Ingest failed (HTTP ${res.status})`);
 }

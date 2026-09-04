@@ -4,15 +4,17 @@ productName: Use Brian
 # fixed "latest" URL (see apps/web/src/lib/desktop-download.ts and
 # docs/architecture/features/app-desktop.md → "Distribution & download").
 artifactName: usebrian.${ext}
+afterPack: scripts/sign-siri-extension.mjs
+afterSign: scripts/verify-siri-extension.mjs
 directories:
   output: release
   buildResources: build
 files:
   - dist/**
   - "!dist/__tests__/**"
-  # The bundled renderer (Phase 4). Today this is the Phase 0 connectivity spike;
-  # the Approach-B Vite SPA build emits to the same path. Loaded via loadFile only
-  # when USEBRIAN_BUNDLED=1, so packaging it is inert for the thin-shell build.
+  # The locally loaded renderer. Every package command rebuilds the Approach-B
+  # Vite SPA into this path before electron-builder; packaged runs select it by
+  # default, so a release never depends on live app-web HTML for navigation.
   - renderer/**
   - package.json
 mac:
@@ -24,6 +26,14 @@ mac:
   gatekeeperAssess: false
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist
+  signIgnore:
+    - "Contents/Extensions/Brian Siri\\.appex"
+  extraFiles:
+    - from: native/siri-companion/build/Release/Brian Siri.appex
+      to: Extensions/Brian Siri.appex
+  extraResources:
+    - from: native/siri-companion/Use Brian.shortcut
+      to: siri/Use Brian.shortcut
   # Dock live recording: macOS shows this string on the one-time microphone
   # consent prompt (askForMediaAccess). Without the key the prompt never
   # appears and mic capture silently fails under the hardened runtime.

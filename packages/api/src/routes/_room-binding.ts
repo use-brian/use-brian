@@ -76,3 +76,48 @@ export function crossAssistantSendPolicy(params: {
   if (params.isDocSurfaceSession) return 'allow'
   return 'reject'
 }
+
+/**
+ * Is this turn happening on the Doc surface? True for a session that
+ * originated in `apps/app-web` (`appOrigin='doc'`) or a doc comment
+ * thread. This is the surface signal that drives doc-skill injection,
+ * decoupled from WHICH assistant is talking (the workspace primary by default,
+ * or any assistant the user switched to). Mirrors the surface test in
+ * `resolveRunChannel`.
+ *
+ * Lives here rather than in `chat.ts` because `sessions.ts` needs the SAME
+ * predicate to decide what the doc dock's resume may return (see
+ * `DOC_DOCK_RESUME_ROW`) and cannot import `chat.ts` without closing an ESM
+ * cycle. `chat.ts` re-exports it, so existing importers are unchanged.
+ */
+export function isDocSurface(session: {
+  appOrigin: string | null
+  channelType: string
+}): boolean {
+  return session.appOrigin === 'doc' || session.channelType === 'doc_thread'
+}
+
+/**
+ * The ONLY session shape the doc dock's `scope=workspace` resume may return
+ * (`GET /api/sessions?scope=workspace&appOrigin=doc`, `routes/sessions.ts`).
+ *
+ * The dock's thread is per-turn addressable: switching the assistant in the
+ * header does NOT start a new thread, it re-addresses the next turn on the
+ * current one. So a row the resume can ATTACH must also be a row
+ * `crossAssistantSendPolicy` will let another workspace assistant ANSWER on —
+ * i.e. it must satisfy `isDocSurface`. When the two drifted apart the dock
+ * latched onto rows it could never re-address (2026-09-01: the workspace's
+ * newest owner row was the `channel_id='notifications'` inbox thread —
+ * `app_origin IS NULL`, `channel_type='notification'` — so every send after an
+ * assistant switch died on "Session does not belong to this assistant", with
+ * no way out: the dock has no new-chat control and each rejected send bumped
+ * `last_active_at`, keeping the unusable row at the top of the resume).
+ *
+ * The list query is BUILT from these values rather than hard-coding them, and
+ * `sessions-list-scope.test.ts` asserts `isDocSurface(DOC_DOCK_RESUME_ROW)` —
+ * so widening the resume without widening the policy fails the test.
+ */
+export const DOC_DOCK_RESUME_ROW = {
+  appOrigin: 'doc',
+  channelType: 'web',
+} as const

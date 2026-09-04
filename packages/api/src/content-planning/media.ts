@@ -19,8 +19,8 @@
 
 import type { PostMedia } from '../db/content-planning-store.js'
 
-/** Per-post ceiling. Threads carousels top out at 20; nobody needs more. */
-export const MAX_POST_MEDIA = 10
+/** Shared per-post envelope. The composer applies lower platform ceilings. */
+export const MAX_POST_MEDIA = 20
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i

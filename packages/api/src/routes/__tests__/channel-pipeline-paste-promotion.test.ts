@@ -9,7 +9,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { ContentBlock } from '@use-brian/core'
 import type { ArtifactPromoter } from '../../files/artifact-promote.js'
+import type { ResolvedTurnScope } from '../../context-scope/resolve-turn-scope.js'
+import { connectorExposureAllowed } from '../../context-scope/connector-exposure.js'
 import {
+  resolveConnectorTurnScopeForChannelTurn,
   connectorToolsAllowedForChannelTurn,
   promoteChannelPaste,
 } from '../channel-pipeline.js'
@@ -187,6 +190,32 @@ describe('[COMP:api/channel-paste-promotion] Channel paste promotion', () => {
 })
 
 describe('[COMP:api/telegram-byo-route] External guest connector access', () => {
+  const projectId = '11111111-1111-4111-8111-111111111111'
+  const dataTurnScope = {
+    access: { compartments: [], projectIds: [] },
+    effectiveCompartments: [],
+    effectiveProjectIds: [],
+  } as unknown as ResolvedTurnScope
+  const assistantTurnScope = {
+    access: { compartments: ['team:sales'], projectIds: [projectId] },
+    effectiveCompartments: ['team:sales'],
+    effectiveProjectIds: [projectId],
+  } as unknown as ResolvedTurnScope
+  const scopeInput = {
+    dataTurnScope,
+    userId: 'guest-1',
+    assistant: {
+      id: 'assistant-1',
+      workspaceId: 'workspace-1',
+      kind: 'standard' as const,
+      clearance: 'confidential' as const,
+      compartments: ['team:sales'],
+      projectScopeMode: 'assigned' as const,
+    },
+    workspaceId: 'workspace-1',
+    session: { contextGroupId: null, contextProjectId: null },
+  }
+
   it('keeps connectors available for ordinary channel turns', () => {
     expect(connectorToolsAllowedForChannelTurn(false, undefined)).toBe(true)
   })
@@ -198,5 +227,42 @@ describe('[COMP:api/telegram-byo-route] External guest connector access', () => 
 
   it('enables connectors only after the explicit guest opt-in', () => {
     expect(connectorToolsAllowedForChannelTurn(true, true)).toBe(true)
+  })
+
+  it('keeps the guest data scope when connector access is not opted in', async () => {
+    const resolveScope = vi.fn()
+
+    const resolved = await resolveConnectorTurnScopeForChannelTurn({
+      ...scopeInput,
+      externalGuestConnectorTools: false,
+    }, resolveScope)
+
+    expect(resolved).toBe(dataTurnScope)
+    expect(resolveScope).not.toHaveBeenCalled()
+  })
+
+  it('resolves assistant-only connector authority and preserves finite Calendar bounds', async () => {
+    const resolveScope = vi.fn().mockResolvedValue(assistantTurnScope)
+
+    const resolved = await resolveConnectorTurnScopeForChannelTurn({
+      ...scopeInput,
+      externalGuestConnectorTools: true,
+    }, resolveScope)
+
+    expect(resolved).toBe(assistantTurnScope)
+    expect(resolveScope).toHaveBeenCalledWith(expect.objectContaining({
+      userId: 'guest-1',
+      workspaceId: 'workspace-1',
+      memberMode: 'assistant',
+      session: scopeInput.session,
+    }))
+
+    const calendarGrant = {
+      provider: 'gcal',
+      compartments: ['team:sales'],
+      projectIds: [projectId],
+    }
+    expect(connectorExposureAllowed(dataTurnScope, calendarGrant)).toBe(false)
+    expect(connectorExposureAllowed(resolved, calendarGrant)).toBe(true)
   })
 })

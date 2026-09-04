@@ -6,11 +6,12 @@ import { resolve } from "node:path";
 import { resolveOssGitCommitSha } from "./build-info.config";
 
 /**
- * Desktop bundle build — "Approach B" of docs/plans/doc-desktop-bundled-offline.md.
+ * Desktop bundle build — "Approach B" of
+ * docs/plans/canvas-desktop-bundled-offline.md.
  *
  * Produces a `file://`-loadable SPA of the doc client, emitted into the
- * Electron shell's `renderer/` dir (where `main.ts`'s `loadFile` loader picks it
- * up under `USEBRIAN_BUNDLED=1`). This is SEPARATE from the Next build — Vite
+ * Electron shell's `renderer/` dir (where packaged builds select it by default;
+ * `USEBRIAN_BUNDLED` remains a QA override). This is SEPARATE from the Next build — Vite
  * only runs when this config is invoked (`pnpm --filter app-web build:desktop`),
  * so the web/SSR build is untouched. The SPA reuses app-web's own `@/`
  * components via the alias below; `next/*` get alias-shimmed (added as the doc
@@ -28,6 +29,16 @@ export default defineConfig({
     // Tailwind v4 (the Next build uses @tailwindcss/postcss; the Vite build needs
     // the Vite plugin). Processes `@import "tailwindcss"` in globals.css.
     tailwindcss(),
+    {
+      name: "reject-next-server-runtime",
+      generateBundle(_options, bundle) {
+        for (const output of Object.values(bundle)) {
+          if (output.type === "chunk" && output.code.includes("next.rootSpanId")) {
+            this.error("Next's server tracing runtime was included in the desktop renderer");
+          }
+        }
+      },
+    },
   ],
   root: resolve(here, "desktop"),
   // Relative asset URLs so the bundle resolves correctly from a file:// origin.
@@ -41,6 +52,7 @@ export default defineConfig({
       // Shim Next's client APIs onto react-router / DOM so app-web's
       // `"use client"` components run unmodified under Vite. Order: longer/more
       // specific specifiers first.
+      "@/lib/i18n/set-locale": resolve(here, "desktop/shims/set-locale.ts"),
       "next/navigation": resolve(here, "desktop/shims/next-navigation.tsx"),
       "next/link": resolve(here, "desktop/shims/next-link.tsx"),
       "next/image": resolve(here, "desktop/shims/next-image.tsx"),

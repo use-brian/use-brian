@@ -19,9 +19,10 @@
  *    so every cleared viewer renders the SAME feed the sender sees;
  *    oversized tool inputs degrade to `{}` (the client falls back to its
  *    static label). The `mirror` gate is evaluated by the CALLER per
- *    call (rooms mirror throughout; personal chat turns only once their
- *    direct stream is dead; background lanes always — they have no
- *    direct stream at all).
+ *    call (rooms mirror throughout; personal-chat high-volume activity only
+ *    once the direct stream is dead; rare human-control activity mirrors
+ *    throughout so a parallel Live client can intervene; background lanes
+ *    always — they have no direct stream at all).
  *
  * Publishing is unconditionally safe: the bus is server-side and the only
  * exits are the `gateSessionRead`-gated relays. Do NOT add a "publish

@@ -13,13 +13,18 @@ import request from 'supertest'
 
 vi.mock('../../workflow/approval.js', () => ({
   resumeFromApproval: vi.fn(async () => ({ status: 'completed', runId: 'run-1' })),
+  enqueueToolInvocationResume: vi.fn(async () => ({ kind: 'enqueued', jobId: 'job-1' })),
 }))
 
 import { approvalsRoutes } from '../approvals.js'
-import { resumeFromApproval } from '../../workflow/approval.js'
+import {
+  enqueueToolInvocationResume,
+  resumeFromApproval,
+} from '../../workflow/approval.js'
 import type { PendingApproval } from '../../db/pending-approvals-store.js'
 
 const mockResume = vi.mocked(resumeFromApproval)
+const mockToolResume = vi.mocked(enqueueToolInvocationResume)
 
 function makeApproval(over: Partial<PendingApproval> = {}): PendingApproval {
   return {
@@ -50,14 +55,17 @@ function makeApproval(over: Partial<PendingApproval> = {}): PendingApproval {
 type Stores = {
   listPendingForWorkspace: ReturnType<typeof vi.fn>
   getById: ReturnType<typeof vi.fn>
+  respond: ReturnType<typeof vi.fn>
   reviseWorkflowEmailBody: ReturnType<typeof vi.fn>
   getRole: ReturnType<typeof vi.fn>
   emailReviewContext: ReturnType<typeof vi.fn>
+  withResumeDeps: boolean
 }
 
 function makeApp(stores: Partial<Stores> = {}) {
   const listPendingForWorkspace = stores.listPendingForWorkspace ?? vi.fn(async () => [])
   const getById = stores.getById ?? vi.fn(async () => null)
+  const respond = stores.respond ?? vi.fn(async () => null)
   const reviseWorkflowEmailBody =
     stores.reviseWorkflowEmailBody ?? vi.fn(async () => null)
   const getRole = stores.getRole ?? vi.fn(async () => 'member')
@@ -75,17 +83,20 @@ function makeApp(stores: Partial<Stores> = {}) {
       approvalsStore: {
         listPendingForWorkspace,
         getById,
+        respond,
         reviseWorkflowEmailBody,
       } as never,
       workspaceStore: { getRole } as never,
       bridgeDeps: {} as never,
       emailReviewContext,
+      ...(stores.withResumeDeps ? { resumeDeps: {} as never } : {}),
     }),
   )
   return {
     app,
     listPendingForWorkspace,
     getById,
+    respond,
     reviseWorkflowEmailBody,
     getRole,
     emailReviewContext,
@@ -95,6 +106,8 @@ function makeApp(stores: Partial<Stores> = {}) {
 beforeEach(() => {
   mockResume.mockClear()
   mockResume.mockResolvedValue({ status: 'completed', runId: 'run-1' })
+  mockToolResume.mockClear()
+  mockToolResume.mockResolvedValue({ kind: 'enqueued', jobId: 'job-1' })
 })
 
 describe('[COMP:api/unified-approvals-route] GET /', () => {
@@ -116,7 +129,10 @@ describe('[COMP:api/unified-approvals-route] GET /', () => {
           id: 'ap-2',
           kind: 'tool_invocation',
           blockingSessionId: 'sess-9',
-          approvalPayload: { description: 'Send the proposal' },
+          approvalPayload: {
+            description: 'Send the proposal',
+            turnLeaseToken: 'private-lease-token',
+          },
         }),
       ]),
     })
@@ -126,6 +142,7 @@ describe('[COMP:api/unified-approvals-route] GET /', () => {
     expect(res.body.approvals[1].kind).toBe('tool_invocation')
     expect(res.body.approvals[1].blockingSessionId).toBe('sess-9')
     expect(res.body.approvals[1].approvalPayload).toEqual({ description: 'Send the proposal' })
+    expect(JSON.stringify(res.body)).not.toContain('private-lease-token')
     expect(typeof res.body.approvals[0].createdAt).toBe('string')
   })
 })
@@ -384,6 +401,38 @@ describe('[COMP:api/unified-approvals-route] POST /:id/respond', () => {
     expect(res.body.nativeSurface).toBe('chat')
     expect(res.body.blockingSessionId).toBe('sess-9')
     expect(mockResume).not.toHaveBeenCalled()
+  })
+
+  it('resolves a recovered tool_invocation by approval id when resume is wired', async () => {
+    const pending = makeApproval({
+      kind: 'tool_invocation',
+      blockingSessionId: 'sess-9',
+    })
+    const updated = makeApproval({
+      kind: 'tool_invocation',
+      blockingSessionId: 'sess-9',
+      status: 'approved',
+    })
+    const respond = vi.fn(async () => updated)
+    const { app } = makeApp({
+      getById: vi.fn(async () => pending),
+      respond,
+      withResumeDeps: true,
+    })
+    const res = await request(app)
+      .post('/api/approvals/ap-1/respond')
+      .send({ decision: 'approved' })
+      .expect(200)
+    expect(res.body).toMatchObject({
+      kind: 'tool_invocation',
+      status: 'approved',
+      resume: { kind: 'enqueued', jobId: 'job-1' },
+    })
+    expect(respond).toHaveBeenCalledWith('ap-1', 'approved', 'u-1', undefined, undefined)
+    expect(mockToolResume).toHaveBeenCalledWith(
+      expect.anything(),
+      { approval: updated, decision: 'approved', reason: undefined },
+    )
   })
 
   it('422s a distribution_draft respond, pointing at the feed surface', async () => {

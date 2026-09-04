@@ -41,7 +41,8 @@ import Markdown from "react-markdown";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
-import { reingestStoredFile } from "@/lib/api/ingest";
+import { reingestStoredFile, recordingForStoredFile } from "@/lib/api/ingest";
+import { confirmAndProcessRecording } from "@/lib/recordings/confirm-and-process";
 import { originClue } from "./source-origin";
 import {
   type BrainRow,
@@ -1976,12 +1977,14 @@ function FileReingestSection({
   workspaceId,
   fileId,
   fileName,
+  mime,
   labels,
   cancelLabel,
 }: {
   workspaceId: string;
   fileId: string;
   fileName: string;
+  mime: string;
   labels: {
     action: string;
     confirmTitle: string;
@@ -1990,31 +1993,72 @@ function FileReingestSection({
     queued: string;
     inFlight: string;
     failed: string;
+    mediaAction: string;
+    mediaHint: string;
+    mediaQueued: string;
   };
   cancelLabel: string;
 }) {
+  const t = useT();
+  // Audio and video are transcribed, not parsed, so this button drives a
+  // different pipeline for them. It is NOT hidden: "get this file into the
+  // brain" is the same user intent either way, and hiding the affordance for
+  // media would leave a stored recording with no route into the brain at all.
+  const isMedia = mime.startsWith("audio/") || mime.startsWith("video/");
   const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState<"queued" | "in_flight" | "failed" | null>(null);
+  const [status, setStatus] = useState<"queued" | "media_queued" | "in_flight" | "failed" | null>(null);
+  /** The server's own sentence for the failure. `labels.failed` is the fallback. */
+  const [failure, setFailure] = useState<string | null>(null);
+
+  /**
+   * Media route: resolve the recording that owns these bytes, then run the same
+   * estimate → cost + blueprint confirm → process flow every other
+   * transcription runs. Nothing is spent before the confirm.
+   */
+  async function handleTranscribe() {
+    const { recordingId, alreadyProcessed } = await recordingForStoredFile(workspaceId, fileId);
+    const outcome = await confirmAndProcessRecording({
+      workspaceId,
+      recordingId,
+      t,
+      isVideo: mime.startsWith("video/"),
+      ...(alreadyProcessed ? { alreadyProcessed: true } : {}),
+    });
+    // A cancelled cost confirm is not a failure and must not read as one.
+    setStatus(outcome.outcome === "queued" ? "media_queued" : null);
+  }
+
+  async function handleFileIngest() {
+    let outcome = await reingestStoredFile(workspaceId, fileId);
+    if (outcome.status === "requires_confirmation") {
+      const ok = await confirmDialog({
+        title: labels.confirmTitle,
+        description: format(labels.confirmBody, {
+          name: outcome.fileName || fileName,
+        }),
+        confirmLabel: labels.confirmAction,
+        cancelLabel,
+      });
+      if (!ok) return;
+      outcome = await reingestStoredFile(workspaceId, fileId, { confirm: true });
+    }
+    setStatus(outcome.status === "queued" ? "queued" : "in_flight");
+  }
 
   async function handleReingest() {
     setBusy(true);
     setStatus(null);
+    setFailure(null);
     try {
-      let outcome = await reingestStoredFile(workspaceId, fileId);
-      if (outcome.status === "requires_confirmation") {
-        const ok = await confirmDialog({
-          title: labels.confirmTitle,
-          description: format(labels.confirmBody, {
-            name: outcome.fileName || fileName,
-          }),
-          confirmLabel: labels.confirmAction,
-          cancelLabel,
-        });
-        if (!ok) return;
-        outcome = await reingestStoredFile(workspaceId, fileId, { confirm: true });
-      }
-      setStatus(outcome.status === "queued" ? "queued" : "in_flight");
-    } catch {
+      if (isMedia) await handleTranscribe();
+      else await handleFileIngest();
+    } catch (err) {
+      // Swallowing this left the user with a bare "Failed" and no cause, for
+      // failures the server had already explained in a sentence (quota
+      // exceeded, unsupported type, file too large). A `TypeError` means the
+      // request never reached a handler, and its wording is about a network
+      // stack, so only that one falls back to the generic label.
+      setFailure(err instanceof TypeError ? null : ((err as Error).message || null));
       setStatus("failed");
     } finally {
       setBusy(false);
@@ -2029,11 +2073,20 @@ function FileReingestSection({
         onClick={handleReingest}
         className="self-start text-xs px-3 py-1.5 rounded-md border border-border text-foreground hover:bg-accent disabled:opacity-50"
       >
-        {labels.action}
+        {isMedia ? labels.mediaAction : labels.action}
       </button>
+      {/* Say what the button will actually do before it is pressed - a
+          recording takes a different route through the product, and the cost
+          confirm that follows makes more sense once that is stated. */}
+      {isMedia && <p className="text-xs text-muted-foreground">{labels.mediaHint}</p>}
       {status === "queued" && <p className="text-xs text-emerald-600 dark:text-emerald-400">{labels.queued}</p>}
+      {status === "media_queued" && (
+        <p className="text-xs text-emerald-600 dark:text-emerald-400">{labels.mediaQueued}</p>
+      )}
       {status === "in_flight" && <p className="text-xs text-muted-foreground">{labels.inFlight}</p>}
-      {status === "failed" && <p className="text-xs text-red-500">{labels.failed}</p>}
+      {status === "failed" && (
+        <p className="text-xs text-red-500">{failure ?? labels.failed}</p>
+      )}
     </div>
   );
 }
@@ -2630,6 +2683,7 @@ function PrimitiveSection({
             workspaceId={workspaceId}
             fileId={detail.id}
             fileName={String(detail.body.name ?? "file")}
+            mime={String(detail.body.mime_type ?? "")}
             labels={labels.fileReingest}
             cancelLabel={review.cancel}
           />

@@ -130,6 +130,21 @@ export function sidebarSurfaceForHome(
   return isOperatorAppKey(activeApp) ? APP_SEGMENT[activeApp] : routedSurface;
 }
 
+/**
+ * Identity chrome to retain while Suggested temporarily owns the Page pane.
+ *
+ * Page is deliberately excluded: its top bar is an interactive tab strip, and
+ * Suggested suspends the URL sync that makes those tabs truthful. Every other
+ * operator app uses the single-chip `OperatorTopbar`, whose identity-only form
+ * can safely remain above the briefing without duplicating surface controls.
+ */
+export function operatorTopbarAppForSuggested(
+  activeApp: HomeAppEntry | null,
+  suggestedOpen: boolean,
+): HomeAppEntry | null {
+  return suggestedOpen && activeApp !== "page" ? activeApp : null;
+}
+
 /** Route for a built-in operator app (`/w/<id>/p`, `/w/<id>/tasks`, …). */
 export function operatorAppPath(
   workspaceId: string,

@@ -20,6 +20,11 @@ import {
 /** The custom URL scheme the app registers for deep links + the auth callback. */
 export const PROTOCOL_SCHEME = "usebrian";
 
+/** Packaged releases use the offline-capable renderer; dev keeps live HMR. */
+export function bundledDefaultForRuntime(isPackaged: boolean): boolean {
+  return isPackaged;
+}
+
 // The authenticated product is served at `app.usebrian.ai`. `deriveApiUrl`
 // (target-store.ts) maps the `app.` host to the sibling `api.` backend (the
 // legacy `canvas.` prefix is kept as a tolerant fallback). `USEBRIAN_APP_URL`
@@ -63,8 +68,8 @@ export interface DesktopConfig {
   /**
    * Bundled mode (Phase 4, docs/plans/canvas-desktop-bundled-offline.md): the
    * shell loads the client bundle from disk and authenticates with a Bearer
-   * token held in `safeStorage` instead of `.usebrian.ai` cookies. Off by default —
-   * the shipped thin remote shell keeps the cookie path. When on, `main.ts`
+   * token held in `safeStorage` instead of `.usebrian.ai` cookies. Packaged
+   * releases default on; development defaults off. When on, `main.ts`
    * passes `--usebrian-bundled` to the preload (which then exposes the token
    * bridge that activates app-web's `desktopAuthSource`) and persists tokens
    * rather than cookies on sign-in.
@@ -97,9 +102,9 @@ export interface DesktopConfig {
  *   *same* API — a mismatch is a 404.
  * - `USEBRIAN_QUICK_CAPTURE_HOTKEY` overrides the global hotkey accelerator.
  * - `USEBRIAN_RECORD_HOTKEY` overrides the global start-recording accelerator.
- * - `USEBRIAN_BUNDLED` (`1`/`true`) turns on bundled mode (Bearer/`safeStorage`
- *   auth + the preload token bridge). Off by default — the thin shell stays on
- *   cookies.
+ * - `USEBRIAN_BUNDLED` explicitly overrides bundled mode (`1`/`true` on,
+ *   `0`/`false` off). The caller supplies the default: packaged release on,
+ *   development off.
  * - `USEBRIAN_DISABLE_AUTO_UPDATE` (`1`/`true`) turns off the shell's
  *   electron-updater checks (`autoUpdate: false`). On by default.
  *
@@ -109,6 +114,7 @@ export interface DesktopConfig {
 export function resolveConfig(
   env: NodeJS.ProcessEnv = process.env,
   persistedTargetRaw: string | null = null,
+  bundledDefault = false,
 ): DesktopConfig {
   const envAppUrl = env.USEBRIAN_APP_URL?.trim() || "";
   // The env override wins the WHOLE target and keeps today's cloud/dev
@@ -124,7 +130,9 @@ export function resolveConfig(
     env.USEBRIAN_QUICK_CAPTURE_HOTKEY?.trim() || DEFAULT_QUICK_CAPTURE_HOTKEY;
   const recordHotkey = env.USEBRIAN_RECORD_HOTKEY?.trim() || DEFAULT_RECORD_HOTKEY;
   const bundledFlag = env.USEBRIAN_BUNDLED?.trim().toLowerCase();
-  const bundled = bundledFlag === "1" || bundledFlag === "true";
+  const bundled = bundledFlag
+    ? bundledFlag === "1" || bundledFlag === "true"
+    : bundledDefault;
   const noUpdateFlag = env.USEBRIAN_DISABLE_AUTO_UPDATE?.trim().toLowerCase();
   const autoUpdate = !(noUpdateFlag === "1" || noUpdateFlag === "true");
 

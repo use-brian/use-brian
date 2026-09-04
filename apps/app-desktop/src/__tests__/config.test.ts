@@ -1,9 +1,18 @@
 import { describe, it, expect } from "vitest";
 
-import { resolveConfig, PROTOCOL_SCHEME } from "../config.js";
+import {
+  bundledDefaultForRuntime,
+  resolveConfig,
+  PROTOCOL_SCHEME,
+} from "../config.js";
 import { serializePersistedTarget } from "../target-store.js";
 
 describe("[COMP:app-desktop/config] resolveConfig", () => {
+  it("selects bundled rendering only for packaged runtime by default", () => {
+    expect(bundledDefaultForRuntime(false)).toBe(false);
+    expect(bundledDefaultForRuntime(true)).toBe(true);
+  });
+
   it("defaults to the production app + API URLs with no env override", () => {
     const cfg = resolveConfig({});
     // Post-consolidation default: the authenticated app is app.usebrian.ai
@@ -73,12 +82,15 @@ describe("[COMP:app-desktop/config] resolveConfig", () => {
     expect(cfg.quickCaptureHotkey).toBe("CommandOrControl+Shift+Space");
   });
 
-  it("defaults bundled mode off and reads USEBRIAN_BUNDLED (1/true, case-insensitive)", () => {
+  it("uses the caller default for bundled mode and lets USEBRIAN_BUNDLED override it", () => {
     expect(resolveConfig({}).bundled).toBe(false);
+    expect(resolveConfig({}, null, true).bundled).toBe(true);
     expect(resolveConfig({ USEBRIAN_BUNDLED: "1" }).bundled).toBe(true);
     expect(resolveConfig({ USEBRIAN_BUNDLED: "true" }).bundled).toBe(true);
     expect(resolveConfig({ USEBRIAN_BUNDLED: "TRUE" }).bundled).toBe(true);
     expect(resolveConfig({ USEBRIAN_BUNDLED: "0" }).bundled).toBe(false);
+    expect(resolveConfig({ USEBRIAN_BUNDLED: "0" }, null, true).bundled).toBe(false);
+    expect(resolveConfig({ USEBRIAN_BUNDLED: "false" }, null, true).bundled).toBe(false);
     expect(resolveConfig({ USEBRIAN_BUNDLED: "no" }).bundled).toBe(false);
   });
 

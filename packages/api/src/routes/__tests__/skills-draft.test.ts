@@ -478,7 +478,16 @@ describe('[COMP:api/skills-route] POST /catalog/:slug/install', () => {
       }),
       { notify: false },
     )
-    expect(workspaceSkillEnablementStore.enable).toHaveBeenCalledTimes(2)
+    // mig 492: a catalog install with no explicit subset means "every
+    // assistant, including future ones", which is stored on the row (see the
+    // `allAssistants: true` assertion on the create call) rather than fanned
+    // out into rows that would go stale the next time an assistant is created.
+    expect(workspaceSkillEnablementStore.enable).not.toHaveBeenCalled()
+    expect(workspaceSkillStore.create).toHaveBeenCalledWith(
+      'u-1',
+      'w-1',
+      expect.objectContaining({ allAssistants: true }),
+    )
     expect(workspaceSkillFilesStore.notifyChanged).toHaveBeenCalledWith('skill-row-1')
     expect(res.body).toMatchObject({ rowId: 'skill-row-1', bundleVersion: 2 })
   })

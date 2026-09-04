@@ -69,6 +69,7 @@ describe("[COMP:app-web/site-route] Custom-domain host classification", () => {
       expect(isGuardedPath("/settings/profile")).toBe(true);
       expect(isGuardedPath("/knowledge-base/x")).toBe(true);
       expect(isGuardedPath("/cloud-link")).toBe(true);
+      expect(isGuardedPath("/desktop/chat/ws-1")).toBe(true);
     });
 
     it("passes public and auth paths through unguarded", () => {

@@ -1,11 +1,13 @@
 /**
  * Canvas Desktop — Electron main process (the IO shell).
  *
- * A hardened BrowserWindow loads the deployed canvas web app and adds the
+ * A hardened BrowserWindow loads app-web's locally packaged desktop renderer
+ * (or the deployed web app in development compatibility mode) and adds the
  * native capabilities a browser cannot: a global quick-capture hotkey, a tray,
  * OS-level menus, a `usebrian://` deep-link protocol, and a system-browser
- * sign-in flow (RFC 8252 + PKCE). It owns no UI and no backend — every pixel is
- * served by apps/app-web. All decisions are delegated to the pure helpers
+ * sign-in flow (RFC 8252 + PKCE). Product UI is served by apps/app-web; the
+ * only shell-owned interactive surface is the bundled ambient Brian companion.
+ * It owns no backend. All decisions are delegated to the pure helpers
  * (config / window-policy / deep-link / quick-capture / desktop-auth) so this
  * file stays thin and they stay tested.
  *
@@ -13,7 +15,7 @@
  * [COMP:app-desktop/main]
  */
 
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { existsSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { spawn } from "node:child_process";
@@ -29,6 +31,7 @@ import {
   safeStorage,
   dialog,
   powerMonitor,
+  powerSaveBlocker,
   screen,
   systemPreferences,
   net,
@@ -47,7 +50,17 @@ import {
 // main process. Default-import the module object and destructure instead.
 import electronUpdater from "electron-updater";
 
-import { resolveConfig } from "./config.js";
+import { bundledDefaultForRuntime, resolveConfig } from "./config.js";
+import {
+  AWAKE_BRIAN_FILE_NAME,
+  BRIAN_POSITION_FILE_NAME,
+  clampBrianPosition,
+  parseBrianPosition,
+  parseAwakeBrianPreference,
+  serializeBrianPosition,
+  serializeAwakeBrianPreference,
+  type BrianPosition,
+} from "./awake-brian.js";
 import {
   DEFAULT_LOCAL_APP_URL,
   TARGET_FILE_NAME,
@@ -82,6 +95,8 @@ import {
   parseRefreshBounce,
   decideLoadFailureAction,
   shouldAttemptLocalMint,
+  shouldMintLocalSessionBeforeLoad,
+  shouldShowSignInLandingOnLaunch,
 } from "./window-policy.js";
 import {
   isAllowedGatewayNavigation,
@@ -90,8 +105,20 @@ import {
   probeExpectedJson,
   type GatewayProbeFetch,
 } from "./gateway-auth.js";
-import { resolveDeepLink } from "./deep-link.js";
+import { parseUseBrianDeepLink, resolveDeepLink } from "./deep-link.js";
+import {
+  bridgeBundledCorsHeaders,
+  shouldBridgeBundledCors,
+} from "./bundled-cors.js";
 import { quickCaptureUrl, recordTargetUrl } from "./quick-capture.js";
+import {
+  companionClickFollowsChatBlur,
+  desktopChatRoute,
+  nativeUseBrianTarget,
+  parseCompanionState,
+  workspaceIdFromDesktopRoute,
+  type CompanionState,
+} from "./desktop-chat.js";
 import {
   isTrustedCaptureOrigin,
   selectPrimaryDisplaySource,
@@ -111,6 +138,7 @@ import {
   parseAuthCallback,
   parseLoopbackCallback,
   exchangeCode,
+  mintLocalDesktopSession,
   refreshSession,
   shouldRefreshSession,
   SESSION_REFRESH_CHECK_INTERVAL_MS,
@@ -148,9 +176,9 @@ import {
 import {
   type TokenCipher,
   type StoredTokens,
-  encryptTokens,
   encryptBlob,
   decryptTokens,
+  persistTokens,
   serializeRendererTokens,
 } from "./desktop-token-store.js";
 import {
@@ -182,6 +210,19 @@ import {
 const { autoUpdater } = electronUpdater;
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const SIRI_SHORTCUT_TEMPLATE_NAME = "Use Brian.shortcut";
+
+function siriShortcutTemplatePath(): string {
+  return app.isPackaged
+    ? join(process.resourcesPath, "siri", SIRI_SHORTCUT_TEMPLATE_NAME)
+    : join(
+        __dirname,
+        "..",
+        "native",
+        "siri-companion",
+        SIRI_SHORTCUT_TEMPLATE_NAME,
+      );
+}
 
 /**
  * The persisted target record (§2.1 of docs/plans/consumer-local-experience.md;
@@ -202,10 +243,19 @@ function readPersistedTargetRaw(): string | null {
   }
 }
 
-const cfg = resolveConfig(process.env, readPersistedTargetRaw());
+// Release binaries always prefer the installed renderer. Development keeps
+// the remote shell default for fast iteration; USEBRIAN_BUNDLED explicitly
+// overrides either direction for QA/compatibility.
+const cfg = resolveConfig(
+  process.env,
+  readPersistedTargetRaw(),
+  bundledDefaultForRuntime(app.isPackaged),
+);
 const isDev = !app.isPackaged;
 
 const PRELOAD_PATH = join(__dirname, "preload.cjs");
+const PET_PRELOAD_PATH = join(__dirname, "pet-preload.cjs");
+const BRIAN_PET_PAGE = join(__dirname, "brian-pet.html");
 const SIGNIN_PAGE = join(__dirname, "signin.html");
 /**
  * The offline landing — shown (instead of the sign-in landing) when a signed-in
@@ -215,9 +265,9 @@ const SIGNIN_PAGE = join(__dirname, "signin.html");
 const OFFLINE_PAGE = join(__dirname, "offline.html");
 /**
  * The bundled SPA index (Phase 4, docs/plans/canvas-desktop-bundled-offline.md).
- * Present only in a packaged bundled build (the client export is emitted to
- * `renderer/`); absent in dev + the thin shell, so `loadApp` falls back to the
- * remote canvas URL. Combined with `cfg.bundled`, this gates loadFile vs loadURL.
+ * Package scripts rebuild the client export into `renderer/` before
+ * electron-builder. Development may omit it and fall back to the remote app.
+ * Combined with `cfg.bundled`, this gates loadFile vs loadURL.
  */
 const BUNDLE_INDEX = join(__dirname, "..", "renderer", "index.html");
 
@@ -235,6 +285,15 @@ type SwitchResult = { ok: true } | { ok: false; error: "switch" | "reauth" };
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
+let brianPetWindow: BrowserWindow | null = null;
+let desktopChatWindow: BrowserWindow | null = null;
+let awakeBrianBlockerId: number | null = null;
+let keepBrianAwake = false;
+let lastWorkspaceId: string | null = null;
+let lastAssistantId: string | null = null;
+let desktopChatBlurredAt = 0;
+let brianPetPosition: BrianPosition | null = null;
+let brianPetDragOffset: BrianPosition | null = null;
 /** The PKCE verifier for an in-flight sign-in; held until the callback returns. */
 let pendingVerifier: string | null = null;
 /** Whether the in-flight sign-in adds a second account (stash) vs replaces the active one. */
@@ -251,6 +310,14 @@ let connectorServer: Server | null = null;
 let connectorServerTimer: ReturnType<typeof setTimeout> | null = null;
 /** A deep link / auth callback delivered before the window exists (macOS cold-start). */
 let pendingUrl: string | null = null;
+/**
+ * Latest spoken Siri payload, kept out of web URLs and consumed once by the
+ * main renderer. A newer invocation while the app is opening supersedes a
+ * request that has not reached chat yet.
+ */
+let pendingUseBrianPrompt: string | null = null;
+/** A Nearby Use Brian request waiting for trusted workspace context. */
+let pendingNearbyUseBrian = false;
 /** Renderer-picked capture source for the NEXT display-media grant (one-shot). */
 let requestedCaptureSourceId: string | null = null;
 /** The isolated, shared-session browser used for an interactive deployment gateway. */
@@ -268,14 +335,34 @@ let accessReauthorizationNeeded = false;
 
 const GATEWAY_RECHECK_INTERVAL_MS = 1000;
 
+function awakeBrianFile(): string {
+  return join(app.getPath("userData"), AWAKE_BRIAN_FILE_NAME);
+}
+
+function brianPositionFile(): string {
+  return join(app.getPath("userData"), BRIAN_POSITION_FILE_NAME);
+}
+
+try {
+  keepBrianAwake = parseAwakeBrianPreference(readFileSync(awakeBrianFile(), "utf8"));
+} catch {
+  keepBrianAwake = false;
+}
+try {
+  brianPetPosition = parseBrianPosition(readFileSync(brianPositionFile(), "utf8"));
+} catch {
+  brianPetPosition = null;
+}
+
 /** Electron-session transport: HttpOnly deployment-gateway cookies stay on-device. */
-const gatewayProbeFetch: GatewayProbeFetch = (input, init) => {
+function authenticatedSessionFetch(input: string, init: RequestInit): Promise<Response> {
   const authorization = accessAuthorizationForUrl(activeAccessGrant, input);
-  if (!authorization) return session.defaultSession.fetch(input, init);
   const headers = new Headers(init.headers);
-  headers.set("Authorization", authorization);
-  return session.defaultSession.fetch(input, { ...init, headers });
-};
+  if (authorization) headers.set("Authorization", authorization);
+  return session.defaultSession.fetch(input, { ...init, headers, credentials: "include" });
+}
+
+const gatewayProbeFetch: GatewayProbeFetch = authenticatedSessionFetch;
 
 /**
  * Authenticate an arbitrary HTTP gateway without knowing its provider, domains,
@@ -410,7 +497,7 @@ const DESKTOP_CHROME_SAFETY_CSS = `
   }
 `;
 
-function createWindow(): BrowserWindow {
+function createWindow(initialLoad: { useBrian?: boolean } = {}): BrowserWindow {
   const win = new BrowserWindow({
     width: 1280,
     height: 860,
@@ -465,7 +552,11 @@ function createWindow(): BrowserWindow {
   win.webContents.on("did-finish-load", () => {
     if (!win.webContents.isDestroyed()) void win.webContents.insertCSS(DESKTOP_CHROME_SAFETY_CSS);
     if (cfg.target === "local") void detectLoadedGatewayChallenge(win);
+    rememberWorkspace(win);
   });
+
+  win.webContents.on("did-navigate", () => rememberWorkspace(win));
+  win.webContents.on("did-navigate-in-page", () => rememberWorkspace(win));
 
   // §2.3 visible target indicator: a local target suffixes every page title so
   // the two brains can never be mistaken for each other. Cloud keeps titles
@@ -535,8 +626,18 @@ function createWindow(): BrowserWindow {
     void win.webContents.loadFile(SIGNIN_PAGE, {
       query: { mode: "local-setup", url: cfg.appUrl, reason: "access" },
     });
+  } else if (
+    shouldShowSignInLandingOnLaunch({
+      bundled: cfg.bundled,
+      targetAuth: cfg.targetAuth,
+      hasStoredTokens: readStoredTokens() !== null,
+    })
+  ) {
+    // The SPA's anonymous state is defensive only. Signed-out packaged launches
+    // use the same branded native landing as the existing desktop auth flow.
+    void win.webContents.loadFile(SIGNIN_PAGE);
   } else {
-    void loadApp(win);
+    void loadApp(win, initialLoad);
   }
   win.on("closed", () => {
     mainWindow = null;
@@ -545,6 +646,363 @@ function createWindow(): BrowserWindow {
     destroyRecorderOverlay();
   });
   return win;
+}
+
+// ── Brian companion ───────────────────────────────────────────
+
+const BRIAN_PET_WIDTH = 150;
+const BRIAN_PET_HEIGHT = 154;
+const BRIAN_PET_GUTTER = 18;
+const DESKTOP_CHAT_WIDTH = 436;
+const DESKTOP_CHAT_HEIGHT = 640;
+
+function isAppPage(win: BrowserWindow): boolean {
+  try {
+    const current = new URL(win.webContents.getURL());
+    if (current.origin === cfg.appOrigin) return true;
+    return bundledAvailable() && current.pathname === pathToFileURL(BUNDLE_INDEX).pathname;
+  } catch {
+    return false;
+  }
+}
+
+function rememberWorkspace(win: BrowserWindow): void {
+  if (win.isDestroyed() || !isAppPage(win)) return;
+  try {
+    const current = new URL(win.webContents.getURL());
+    const route = current.protocol === "file:" ? current.hash.slice(1) : current.pathname;
+    const workspaceId = workspaceIdFromDesktopRoute(route);
+    if (workspaceId && workspaceId !== lastWorkspaceId) {
+      lastWorkspaceId = workspaceId;
+      lastAssistantId = null;
+    }
+  } catch {
+    // A transient blank or malformed navigation cannot replace the last target.
+  }
+}
+
+function notifyUseBrian(win: BrowserWindow): void {
+  if (!win.isDestroyed() && !win.webContents.isDestroyed()) {
+    win.webContents.send("Use Brian:use-brian");
+  }
+}
+
+function messageBrian(opts: { forceOpen?: boolean; useBrian?: boolean } = {}): void {
+  if (!lastWorkspaceId) {
+    if (opts.useBrian) pendingNearbyUseBrian = true;
+    return;
+  }
+  if (desktopChatWindow && !desktopChatWindow.isDestroyed()) {
+    if (desktopChatWindow.isVisible() && !opts.forceOpen) {
+      desktopChatWindow.hide();
+      return;
+    }
+    if (
+      !opts.forceOpen &&
+      companionClickFollowsChatBlur(Date.now(), desktopChatBlurredAt)
+    ) {
+      return;
+    }
+    positionDesktopChat();
+    desktopChatWindow.show();
+    desktopChatWindow.focus();
+    desktopChatWindow.webContents.focus();
+    if (opts.useBrian) {
+      notifyUseBrian(desktopChatWindow);
+      if (desktopChatWindow.webContents.isLoadingMainFrame()) {
+        desktopChatWindow.webContents.once("did-finish-load", () => {
+          if (
+            desktopChatWindow &&
+            !desktopChatWindow.isDestroyed() &&
+            pendingUseBrianPrompt !== null
+          ) {
+            notifyUseBrian(desktopChatWindow);
+          }
+        });
+      }
+    }
+    return;
+  }
+
+  const win = new BrowserWindow({
+    width: DESKTOP_CHAT_WIDTH,
+    height: DESKTOP_CHAT_HEIGHT,
+    title: "Message Brian",
+    frame: false,
+    transparent: true,
+    resizable: false,
+    maximizable: false,
+    minimizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    hasShadow: false,
+    backgroundColor: "#00000000",
+    show: false,
+    webPreferences: {
+      preload: PRELOAD_PATH,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+      additionalArguments: [
+        ...(cfg.bundled ? ["--usebrian-bundled"] : []),
+        ...(cfg.target === "local" ? ["--usebrian-local-target"] : []),
+      ],
+    },
+  });
+  desktopChatWindow = win;
+  positionDesktopChat();
+  publishCompanionState({ phase: "loading" });
+  win.setAlwaysOnTop(true, "floating");
+  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+
+  win.once("ready-to-show", () => {
+    if (win.isDestroyed()) return;
+    win.show();
+    win.focus();
+    win.webContents.focus();
+  });
+  win.webContents.on("did-finish-load", () => {
+    if (!win.webContents.isDestroyed()) {
+      void win.webContents.insertCSS(DESKTOP_CHROME_SAFETY_CSS);
+      if (opts.useBrian && pendingUseBrianPrompt !== null) notifyUseBrian(win);
+    }
+  });
+  win.webContents.on("before-input-event", (event, input) => {
+    if (input.type === "keyDown" && input.key === "Escape") {
+      event.preventDefault();
+      win.hide();
+    }
+  });
+  win.on("blur", () => {
+    if (win.isDestroyed() || !win.isVisible()) return;
+    desktopChatBlurredAt = Date.now();
+    win.hide();
+  });
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    void shell.openExternal(url);
+    return { action: "deny" };
+  });
+  win.webContents.on("will-navigate", (event, url) => {
+    try {
+      const target = new URL(url);
+      const trusted =
+        target.origin === cfg.appOrigin ||
+        (bundledAvailable() && target.pathname === pathToFileURL(BUNDLE_INDEX).pathname);
+      if (trusted) return;
+    } catch {
+      // Reject malformed navigation below.
+    }
+    event.preventDefault();
+    void shell.openExternal(url);
+  });
+  win.on("closed", () => {
+    if (desktopChatWindow === win) desktopChatWindow = null;
+    desktopChatBlurredAt = 0;
+    publishCompanionState({ phase: "idle" });
+  });
+
+  void loadApp(win, {
+    route: desktopChatRoute(lastWorkspaceId, lastAssistantId ?? undefined),
+  }).catch((error) => {
+    console.warn("Failed to open the Brian chat window:", error);
+    if (!win.isDestroyed()) win.close();
+  });
+}
+
+function publishCompanionState(state: CompanionState): void {
+  if (!brianPetWindow || brianPetWindow.isDestroyed() || brianPetWindow.webContents.isDestroyed()) {
+    return;
+  }
+  brianPetWindow.webContents.send("Use Brian:companion-state", state);
+}
+
+function positionDesktopChat(): void {
+  if (
+    !desktopChatWindow ||
+    desktopChatWindow.isDestroyed() ||
+    !brianPetWindow ||
+    brianPetWindow.isDestroyed()
+  ) {
+    return;
+  }
+  const pet = brianPetWindow.getBounds();
+  const area = screen.getDisplayMatching(pet).workArea;
+  const x = Math.max(area.x, pet.x - DESKTOP_CHAT_WIDTH + 8);
+  const y = Math.max(
+    area.y,
+    Math.min(area.y + area.height - DESKTOP_CHAT_HEIGHT, pet.y + pet.height - DESKTOP_CHAT_HEIGHT),
+  );
+  desktopChatWindow.setPosition(x, y, false);
+}
+
+function positionBrianPet(): void {
+  if (!brianPetWindow || brianPetWindow.isDestroyed()) return;
+  const fallbackArea = screen.getPrimaryDisplay().workArea;
+  const desired =
+    brianPetPosition ??
+    {
+      x: fallbackArea.x + fallbackArea.width - BRIAN_PET_WIDTH - BRIAN_PET_GUTTER,
+      y: fallbackArea.y + fallbackArea.height - BRIAN_PET_HEIGHT - BRIAN_PET_GUTTER,
+    };
+  const area = screen.getDisplayMatching({
+    x: desired.x,
+    y: desired.y,
+    width: BRIAN_PET_WIDTH,
+    height: BRIAN_PET_HEIGHT,
+  }).workArea;
+  brianPetPosition = clampBrianPosition(
+    desired,
+    area,
+    { width: BRIAN_PET_WIDTH, height: BRIAN_PET_HEIGHT },
+  );
+  brianPetWindow.setPosition(brianPetPosition.x, brianPetPosition.y, false);
+  positionDesktopChat();
+}
+
+function moveBrianPet(screenX: number, screenY: number): void {
+  if (!brianPetWindow || brianPetWindow.isDestroyed() || !brianPetDragOffset) return;
+  const display = screen.getDisplayNearestPoint({ x: Math.round(screenX), y: Math.round(screenY) });
+  brianPetPosition = clampBrianPosition(
+    {
+      x: Math.round(screenX - brianPetDragOffset.x),
+      y: Math.round(screenY - brianPetDragOffset.y),
+    },
+    display.workArea,
+    { width: BRIAN_PET_WIDTH, height: BRIAN_PET_HEIGHT },
+  );
+  brianPetWindow.setPosition(brianPetPosition.x, brianPetPosition.y, false);
+  positionDesktopChat();
+}
+
+function persistBrianPetPosition(): void {
+  if (!brianPetPosition) return;
+  try {
+    writeFileSync(brianPositionFile(), serializeBrianPosition(brianPetPosition));
+  } catch (error) {
+    console.warn("Failed to persist Brian companion position:", error);
+  }
+}
+
+function showBrianPet(): void {
+  if (brianPetWindow && !brianPetWindow.isDestroyed()) {
+    positionBrianPet();
+    brianPetWindow.showInactive();
+    return;
+  }
+
+  const win = new BrowserWindow({
+    width: BRIAN_PET_WIDTH,
+    height: BRIAN_PET_HEIGHT,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    maximizable: false,
+    minimizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    hasShadow: false,
+    show: false,
+    webPreferences: {
+      preload: PET_PRELOAD_PATH,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+      devTools: false,
+      spellcheck: false,
+    },
+  });
+  brianPetWindow = win;
+  positionBrianPet();
+  win.setAlwaysOnTop(true, "floating");
+  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  win.webContents.on("will-navigate", (event) => event.preventDefault());
+  win.once("ready-to-show", () => win.showInactive());
+  win.on("closed", () => {
+    if (brianPetWindow === win) brianPetWindow = null;
+    if (desktopChatWindow && !desktopChatWindow.isDestroyed()) desktopChatWindow.close();
+  });
+  void win.loadFile(BRIAN_PET_PAGE);
+}
+
+function stopAwakeBrianBlocker(): void {
+  if (awakeBrianBlockerId === null) return;
+  if (powerSaveBlocker.isStarted(awakeBrianBlockerId)) {
+    powerSaveBlocker.stop(awakeBrianBlockerId);
+  }
+  awakeBrianBlockerId = null;
+}
+
+function publishBrianNearbyState(): void {
+  if (
+    mainWindow &&
+    !mainWindow.isDestroyed() &&
+    !mainWindow.webContents.isDestroyed()
+  ) {
+    mainWindow.webContents.send("Use Brian:brian-nearby-state", keepBrianAwake);
+  }
+}
+
+function syncAwakeBrianMode(): void {
+  if (keepBrianAwake) {
+    if (awakeBrianBlockerId === null || !powerSaveBlocker.isStarted(awakeBrianBlockerId)) {
+      awakeBrianBlockerId = powerSaveBlocker.start("prevent-app-suspension");
+    }
+    showBrianPet();
+    publishBrianNearbyState();
+    return;
+  }
+
+  stopAwakeBrianBlocker();
+  if (brianPetWindow && !brianPetWindow.isDestroyed()) brianPetWindow.destroy();
+  brianPetWindow = null;
+  if (desktopChatWindow && !desktopChatWindow.isDestroyed()) desktopChatWindow.close();
+  desktopChatWindow = null;
+  publishBrianNearbyState();
+}
+
+function useBrianInMainWindow(): void {
+  pendingNearbyUseBrian = false;
+  const needsWindow = !mainWindow || mainWindow.isDestroyed();
+  const win = ensureWindow({ useBrian: true });
+  focusWindow(win);
+  if (needsWindow) return;
+  if (isAppPage(win) && !win.webContents.isLoadingMainFrame()) {
+    notifyUseBrian(win);
+    return;
+  }
+  void loadApp(win, { useBrian: true });
+}
+
+function toggleKeepBrianAwake(): void {
+  const next = !keepBrianAwake;
+  try {
+    writeFileSync(awakeBrianFile(), serializeAwakeBrianPreference(next));
+  } catch (error) {
+    console.warn("Failed to persist Keep Brian Nearby preference:", error);
+    refreshAppMenu();
+    refreshTrayMenu();
+    dialog.showErrorBox(
+      "Could not update Keep Brian Nearby",
+      "Use Brian could not save this setting. Check that its application data folder is writable and try again.",
+    );
+    return;
+  }
+  keepBrianAwake = next;
+  syncAwakeBrianMode();
+  if (
+    !keepBrianAwake &&
+    pendingNearbyUseBrian &&
+    pendingUseBrianPrompt !== null
+  ) {
+    useBrianInMainWindow();
+  }
+  refreshAppMenu();
+  refreshTrayMenu();
 }
 
 // ── Recorder overlay (docs/architecture/media/live-capture.md) ─────────
@@ -988,6 +1446,9 @@ function persistTargetAndRelaunch(
 ): void {
   try {
     writeFileSync(targetFile(), serializePersistedTarget(kind, appUrl, apiUrl, auth));
+    // Bundled bearer tokens are target-specific. Never send a cloud token to a
+    // local deployment (or vice versa) after switching and relaunching.
+    if (cfg.bundled) clearStoredTokens();
   } catch (err) {
     dialog.showErrorBox("Switch failed", `Could not save the target: ${String(err)}`);
     return;
@@ -1015,17 +1476,73 @@ function rememberedLocalAuth(): TargetAuth {
 }
 
 let lastLocalMintAt: number | null = null;
+let bundledLocalMintInFlight: Promise<boolean> | null = null;
+
+/** Establish the local-owner bearer before a file renderer can make API calls. */
+function ensureBundledLocalSession(win: BrowserWindow): Promise<boolean> {
+  if (
+    !shouldMintLocalSessionBeforeLoad({
+      bundled: cfg.bundled,
+      targetAuth: cfg.targetAuth,
+      hasStoredTokens: readStoredTokens() !== null,
+    })
+  ) {
+    return Promise.resolve(true);
+  }
+  if (bundledLocalMintInFlight) return bundledLocalMintInFlight;
+
+  const run = (async (): Promise<boolean> => {
+    const now = Date.now();
+    if (!shouldAttemptLocalMint(lastLocalMintAt, now)) {
+      showLocalDown(win, "auth");
+      return false;
+    }
+    lastLocalMintAt = now;
+    try {
+      const target = await validateLocalTarget(cfg.appUrl, cfg.apiUrl);
+      if (target.kind !== "ready") {
+        showLocalDown(win, target.kind === "cancelled" ? "gateway-auth" : "unreachable");
+        return false;
+      }
+      const result = await mintLocalDesktopSession(target.value.apiUrl, gatewayProbeFetch);
+      if (!persistSession(result)) {
+        clearStoredTokens();
+        showLocalDown(win, "auth");
+        return false;
+      }
+      return true;
+    } catch (err) {
+      console.warn("Local session mint failed:", err);
+      showLocalDown(
+        win,
+        err instanceof Error && /HTTP (?:400|401|403)/.test(err.message)
+          ? "auth"
+          : "unreachable",
+      );
+      return false;
+    }
+  })();
+  bundledLocalMintInFlight = run;
+  void run.finally(() => {
+    if (bundledLocalMintInFlight === run) bundledLocalMintInFlight = null;
+  });
+  return run;
+}
 
 /**
- * Mint the oss local-owner session by loading the app-web trigger route
- * in-window (same-origin: it sets the cookie trio into this jar and 302s into
- * the app — the shell's jar is separate from the system browser's, so the
- * launcher's session can never be reused). Cooldown-guarded: a brain that
- * keeps bouncing back to /login (an edition/gate mismatch) would loop, so
- * within the cooldown the brain-problem landing shows instead.
+ * Mint the OSS local-owner session. Bundled mode calls the selected API and
+ * persists its token pair; thin compatibility mode loads app-web's same-origin
+ * cookie trigger. Cooldown-guarded: an edition/gate mismatch that keeps
+ * returning to login cannot loop indefinitely.
  */
-async function mintLocalSession(): Promise<void> {
-  const win = ensureWindow();
+async function mintLocalSession(win: BrowserWindow = ensureWindow()): Promise<void> {
+  if (cfg.bundled) {
+    if (await ensureBundledLocalSession(win)) {
+      await loadApp(win);
+      focusWindow(win);
+    }
+    return;
+  }
   const now = Date.now();
   if (!shouldAttemptLocalMint(lastLocalMintAt, now)) {
     showLocalDown(win, "auth");
@@ -1035,7 +1552,13 @@ async function mintLocalSession(): Promise<void> {
   try {
     await win.webContents.loadURL(localMintUrl(cfg.appUrl));
   } catch (err) {
-    console.warn("Local session mint failed:", err); // did-fail-load shows the landing
+    console.warn("Local session mint failed:", err);
+    showLocalDown(
+      win,
+      err instanceof Error && /HTTP (?:400|401|403)/.test(err.message)
+        ? "auth"
+        : "unreachable",
+    );
   }
 }
 
@@ -1087,9 +1610,9 @@ function switchTargetFromMenu(): void {
 }
 
 /** Return the live window, recreating it if it was closed (tray app model). */
-function ensureWindow(): BrowserWindow {
+function ensureWindow(initialLoad: { useBrian?: boolean } = {}): BrowserWindow {
   if (!mainWindow || mainWindow.isDestroyed()) {
-    mainWindow = createWindow();
+    mainWindow = createWindow(initialLoad);
   }
   return mainWindow;
 }
@@ -1126,16 +1649,28 @@ function bundledAvailable(): boolean {
  */
 async function loadApp(
   win: BrowserWindow,
-  opts: { capture?: boolean; record?: boolean } = {},
+  opts: {
+    capture?: boolean;
+    record?: boolean;
+    route?: string;
+    useBrian?: boolean;
+  } = {},
 ): Promise<void> {
+  const hasUseBrianPrompt =
+    opts.useBrian === true || pendingUseBrianPrompt !== null;
   if (bundledAvailable()) {
+    if (!(await ensureBundledLocalSession(win))) return;
     // The bundled renderer loads from file://, so it has no env: hand it the API
     // base (and the capture/record intent) via the query string. The client reads
     // `?api=` to know which backend to call with its Bearer token.
     const query: Record<string, string> = { api: cfg.apiUrl };
     if (opts.capture) query.capture = "1";
     if (opts.record) query.record = "1";
-    await win.webContents.loadFile(BUNDLE_INDEX, { query });
+    if (hasUseBrianPrompt) query.useBrian = "1";
+    await win.webContents.loadFile(BUNDLE_INDEX, {
+      query,
+      ...(opts.route ? { hash: opts.route } : {}),
+    });
     return;
   }
   if (cfg.target === "local") {
@@ -1145,9 +1680,12 @@ async function loadApp(
       return;
     }
   }
-  await win.webContents.loadURL(
-    opts.capture ? quickCaptureUrl(cfg.appUrl) : opts.record ? recordTargetUrl(cfg.appUrl) : cfg.appUrl,
-  );
+  const targetUrl = new URL(opts.route ?? cfg.appUrl, cfg.appUrl);
+  if (opts.capture) targetUrl.searchParams.set("capture", "1");
+  else if (opts.record) targetUrl.searchParams.set("record", "1");
+  else if (!opts.route && hasUseBrianPrompt)
+    targetUrl.searchParams.set("useBrian", "1");
+  await win.webContents.loadURL(targetUrl.toString());
 }
 
 function summonAndCapture(): void {
@@ -1238,9 +1776,15 @@ function writeTokenBlob(blob: Buffer | null): void {
   writeFileSync(tokensFile(), blob);
 }
 
-/** Encrypt + persist a freshly-exchanged session (the sign-in code-exchange path). */
-function persistSession(sess: DesktopSession): void {
-  writeTokenBlob(encryptTokens(tokenCipher, sess, Date.now()));
+/** Encrypt, persist, and verify a freshly-exchanged session before app load. */
+function persistSession(sess: DesktopSession): boolean {
+  return persistTokens(
+    tokenCipher,
+    sess,
+    Date.now(),
+    (blob) => writeFileSync(tokensFile(), blob),
+    () => readFileSync(tokensFile()),
+  );
 }
 
 /** Persist tokens handed back by the renderer's client-side refresh (validated). */
@@ -1647,10 +2191,18 @@ async function completeSignIn(code: string): Promise<void> {
   clearPersistedVerifier();
   closeAuthServer(); // idempotent — the loopback path already closed it
   try {
-    const result = await exchangeCode(cfg.apiUrl, code, verifier);
+    const result = await exchangeCode(
+      cfg.apiUrl,
+      code,
+      verifier,
+      cfg.target === "local" ? authenticatedSessionFetch : undefined,
+    );
     if (cfg.bundled) {
       // Bundled (Bearer tokens, not cookies) stays single-account — add replaces.
-      persistSession(result);
+      if (!persistSession(result)) {
+        clearStoredTokens();
+        throw new Error("Use Brian could not securely store your session. Please try again.");
+      }
     } else {
       // Add-account: stash the active account into the saved-account store before
       // its canonical trio is overwritten with the new account. At capacity we
@@ -1873,8 +2425,9 @@ async function signOut(): Promise<void> {
     // Bundled mode is single-account (Bearer tokens, no saved-account store).
     clearStoredTokens();
     const win = ensureWindow();
+    if (cfg.targetAuth === "local-session") await loadApp(win);
+    else await win.webContents.loadFile(SIGNIN_PAGE);
     focusWindow(win);
-    await loadApp(win);
     return;
   }
 
@@ -2138,9 +2691,15 @@ async function resumeAfterRefresh(
   promptSignIn();
 }
 
-/** Keep the thin shell's session alive across access-token expiries. */
-function startSessionKeepalive(): void {
-  if (cfg.bundled) return; // bundled mode: the renderer owns Bearer-token refresh
+/**
+ * Keep the thin shell's session alive across access-token expiries.
+ *
+ * The returned promise is the launch tick. Startup awaits it before the first
+ * app navigation so the renderer cannot issue a mutation with an expired token
+ * while a healthy refresh is still rotating the cookie jar.
+ */
+function startSessionKeepalive(): Promise<void> {
+  if (cfg.bundled) return Promise.resolve(); // renderer owns Bearer-token refresh
   const tick = async (): Promise<void> => {
     try {
       if (!(await readJarCookie("refresh_token"))) return; // signed out — nothing to keep alive
@@ -2162,10 +2721,8 @@ function startSessionKeepalive(): void {
   setInterval(() => void tick(), SESSION_REFRESH_CHECK_INTERVAL_MS);
   // Timers don't run during sleep, so a wake can land past the token's exp.
   powerMonitor.on("resume", () => void tick());
-  // Heal a stale session at launch. Runs concurrently with the first load —
-  // if the load's proxy bounce gets intercepted, both paths share the same
-  // single-flight refresh.
-  void tick();
+  // Heal a stale session at launch before exposing an interactive renderer.
+  return tick();
 }
 
 // ── Auto-update (shell binary) ─────────────────────────────────
@@ -2291,6 +2848,23 @@ function handleIncomingUrl(rawUrl: string): void {
     void startFirefoxForControl();
     return;
   }
+  const useBrianPrompt = parseUseBrianDeepLink(rawUrl, cfg.protocolScheme);
+  if (useBrianPrompt) {
+    pendingUseBrianPrompt = useBrianPrompt;
+    switch (nativeUseBrianTarget(keepBrianAwake, lastWorkspaceId)) {
+      case "nearby":
+        pendingNearbyUseBrian = false;
+        messageBrian({ forceOpen: true, useBrian: true });
+        break;
+      case "nearby-pending":
+        pendingNearbyUseBrian = true;
+        break;
+      case "main":
+        useBrianInMainWindow();
+        break;
+    }
+    return;
+  }
   const auth = parseAuthCallback(rawUrl, cfg.protocolScheme);
   if (auth) {
     if (auth.kind === "code") void completeSignIn(auth.code);
@@ -2306,7 +2880,18 @@ function handleIncomingUrl(rawUrl: string): void {
     }
     const win = ensureWindow();
     focusWindow(win);
-    void win.webContents.loadURL(target);
+    if (cfg.bundled) {
+      if (target === quickCaptureUrl(cfg.appUrl)) {
+        void loadApp(win, { capture: true });
+      } else if (target === recordTargetUrl(cfg.appUrl)) {
+        void loadApp(win, { record: true });
+      } else {
+        const url = new URL(target);
+        void loadApp(win, { route: `${url.pathname}${url.search}${url.hash}` });
+      }
+    } else {
+      void win.webContents.loadURL(target);
+    }
   }
 }
 
@@ -2407,12 +2992,14 @@ function refreshAppMenu(): void {
       onSwitchTarget: () => void switchTargetFromMenu(),
       onUninstall: () => void confirmAndUninstall(),
       onStartFirefoxControl: () => void startFirefoxForControl(),
+      onToggleKeepAwake: toggleKeepBrianAwake,
       isDev,
       update: updateMenuItem(),
-      target: { kind: cfg.target, label: cfg.targetLabel },
+      target: { kind: cfg.target, label: cfg.targetLabel, auth: cfg.targetAuth },
       // Packaged macOS only: Windows has the NSIS uninstaller; a dev run has
       // no bundle (and its exe lives in node_modules/electron).
       uninstall: process.platform === "darwin" && app.isPackaged,
+      keepBrianAwake,
     }),
   );
 }
@@ -2428,10 +3015,17 @@ function buildTrayMenu(): Menu {
     { label: "Open Use Brian", click: () => focusWindow(ensureWindow()) },
     { label: "Quick Capture", click: () => summonAndCapture() },
     { label: "Start Recording", click: () => summonAndRecord() },
+    {
+      label: "Keep Brian Nearby",
+      type: "checkbox",
+      checked: keepBrianAwake,
+      click: () => toggleKeepBrianAwake(),
+    },
     { label: "Start Firefox for My Browser…", click: () => void startFirefoxForControl() },
   ];
-  // A local target has no login — the tray mirrors the app menu (§2.3).
-  if (cfg.target !== "local") {
+  // Local-owner deployments mint automatically; self-host PKCE still exposes
+  // the standard sign-in controls.
+  if (cfg.targetAuth === "pkce") {
     template.push(
       { type: "separator" },
       { label: "Sign In", click: () => startSignIn() },
@@ -2494,9 +3088,12 @@ if (!gotLock) {
 } else {
   pendingUrl = appUrlFromArgv(process.argv);
   app.on("second-instance", (_event, argv) => {
-    focusWindow(ensureWindow());
     const url = appUrlFromArgv(argv);
-    if (url) handleIncomingUrl(url);
+    if (url) {
+      handleIncomingUrl(url);
+      return;
+    }
+    focusWindow(ensureWindow());
   });
 
   // macOS delivers deep links + the auth callback via open-url; before the
@@ -2509,7 +3106,162 @@ if (!gotLock) {
 
   // The sign-in landing's button asks the main process to start the flow.
   ipcMain.on("Use Brian:sign-in", () => startSignIn());
-
+  // macOS does not install an app-owned Siri phrase automatically. Settings
+  // opens the fixed Apple-signed shortcut template bundled with this app; only
+  // the trusted main renderer may invoke it, and Shortcuts owns confirmation.
+  ipcMain.handle("Use Brian:open-siri-setup", async (event) => {
+    if (
+      process.platform !== "darwin" ||
+      !mainWindow ||
+      mainWindow.isDestroyed() ||
+      event.sender.id !== mainWindow.webContents.id
+    ) {
+      return false;
+    }
+    try {
+      const templatePath = siriShortcutTemplatePath();
+      if (!existsSync(templatePath)) {
+        console.warn("Could not find the bundled Use Brian shortcut template.");
+        return false;
+      }
+      const errorMessage = await shell.openPath(templatePath);
+      if (errorMessage) {
+        console.warn(
+          "Could not open the Use Brian shortcut template:",
+          errorMessage,
+        );
+        return false;
+      }
+      return true;
+    } catch (err) {
+      console.warn("Could not open Shortcuts for Siri setup:", err);
+      return false;
+    }
+  });
+  ipcMain.on("Use Brian:message-brian", (event) => {
+    if (
+      brianPetWindow &&
+      !brianPetWindow.isDestroyed() &&
+      event.sender.id === brianPetWindow.webContents.id
+    ) {
+      messageBrian();
+    }
+  });
+  ipcMain.on("Use Brian:companion-drag", (event, raw: unknown) => {
+    if (
+      !brianPetWindow ||
+      brianPetWindow.isDestroyed() ||
+      event.sender.id !== brianPetWindow.webContents.id ||
+      !raw ||
+      typeof raw !== "object"
+    ) {
+      return;
+    }
+    const input = raw as {
+      phase?: unknown;
+      screenX?: unknown;
+      screenY?: unknown;
+      moved?: unknown;
+    };
+    if (input.phase === "end") {
+      if (input.moved === true) persistBrianPetPosition();
+      brianPetDragOffset = null;
+      return;
+    }
+    if (
+      (input.phase !== "start" && input.phase !== "move") ||
+      typeof input.screenX !== "number" ||
+      typeof input.screenY !== "number" ||
+      !Number.isFinite(input.screenX) ||
+      !Number.isFinite(input.screenY)
+    ) {
+      return;
+    }
+    if (input.phase === "start") {
+      const bounds = brianPetWindow.getBounds();
+      brianPetDragOffset = {
+        x: input.screenX - bounds.x,
+        y: input.screenY - bounds.y,
+      };
+      return;
+    }
+    moveBrianPet(input.screenX, input.screenY);
+  });
+  ipcMain.on("Use Brian:companion-state", (event, rawState: unknown) => {
+    if (
+      !desktopChatWindow ||
+      desktopChatWindow.isDestroyed() ||
+      event.sender.id !== desktopChatWindow.webContents.id
+    ) {
+      return;
+    }
+    const state = parseCompanionState(rawState);
+    if (state) publishCompanionState(state);
+  });
+  ipcMain.on("Use Brian:take-use-brian-prompt", (event) => {
+    const trustedSender =
+      (!!mainWindow &&
+        !mainWindow.isDestroyed() &&
+        event.sender.id === mainWindow.webContents.id) ||
+      (!!desktopChatWindow &&
+        !desktopChatWindow.isDestroyed() &&
+        event.sender.id === desktopChatWindow.webContents.id);
+    event.returnValue = trustedSender ? pendingUseBrianPrompt : null;
+    if (trustedSender) pendingUseBrianPrompt = null;
+  });
+  ipcMain.on("Use Brian:get-brian-nearby-state", (event) => {
+    event.returnValue =
+      !!mainWindow &&
+      !mainWindow.isDestroyed() &&
+      event.sender.id === mainWindow.webContents.id &&
+      keepBrianAwake;
+  });
+  ipcMain.on(
+    "Use Brian:set-companion-context",
+    (event, workspaceId: unknown, assistantId: unknown) => {
+      if (
+        !mainWindow ||
+        mainWindow.isDestroyed() ||
+        event.sender.id !== mainWindow.webContents.id ||
+        typeof workspaceId !== "string" ||
+        typeof assistantId !== "string" ||
+        !workspaceId ||
+        !assistantId
+      ) {
+        return;
+      }
+      const changed = workspaceId !== lastWorkspaceId || assistantId !== lastAssistantId;
+      lastWorkspaceId = workspaceId;
+      lastAssistantId = assistantId;
+      if (
+        pendingNearbyUseBrian &&
+        keepBrianAwake &&
+        pendingUseBrianPrompt !== null
+      ) {
+        pendingNearbyUseBrian = false;
+        if (changed && desktopChatWindow && !desktopChatWindow.isDestroyed()) {
+          positionDesktopChat();
+          desktopChatWindow.show();
+          desktopChatWindow.focus();
+          void loadApp(desktopChatWindow, {
+            route: desktopChatRoute(workspaceId, assistantId),
+          }).then(() => {
+            if (desktopChatWindow && !desktopChatWindow.isDestroyed()) {
+              notifyUseBrian(desktopChatWindow);
+            }
+          });
+          return;
+        }
+        messageBrian({ forceOpen: true, useBrian: true });
+        return;
+      }
+      if (changed && desktopChatWindow && !desktopChatWindow.isDestroyed()) {
+        void loadApp(desktopChatWindow, {
+          route: desktopChatRoute(workspaceId, assistantId),
+        });
+      }
+    },
+  );
   // Dock live recording: show/close the floating overlay with the capture.
   ipcMain.on("Use Brian:recording-state", (_event, on: unknown) => {
     if (on === true) showRecorderOverlay();
@@ -2708,7 +3460,7 @@ if (!gotLock) {
     await prepareAccessForStartup();
     installAccessRequestHook();
     startAccessGrantKeepalive();
-    startSessionKeepalive();
+    await startSessionKeepalive();
 
     // Chromium-level media (mic) permission: grant to the app's own origin
     // only, so the dock recorder's `getUserMedia` never shows a browser-style
@@ -2725,6 +3477,25 @@ if (!gotLock) {
         return;
       }
       callback(true);
+    });
+
+    // A file:// renderer has the opaque Origin `null`. Keep webSecurity enabled,
+    // but bridge CORS only in bundled mode and only for the configured API. A
+    // preflight may not carry a webContentsId, so that field is not a safe gate.
+    session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+      if (
+        shouldBridgeBundledCors({
+          bundled: cfg.bundled,
+          requestUrl: details.url,
+          apiUrl: cfg.apiUrl,
+        })
+      ) {
+        callback({
+          responseHeaders: bridgeBundledCorsHeaders(details.responseHeaders),
+        });
+        return;
+      }
+      callback({});
     });
 
     // The gateway window is an authentication surface, never a download or app
@@ -2847,6 +3618,10 @@ if (!gotLock) {
     mainWindow = createWindow();
     refreshAppMenu();
     tray = createTray();
+    syncAwakeBrianMode();
+    screen.on("display-added", positionBrianPet);
+    screen.on("display-removed", positionBrianPet);
+    screen.on("display-metrics-changed", positionBrianPet);
 
     const ok = globalShortcut.register(cfg.quickCaptureHotkey, summonAndCapture);
     if (!ok) console.warn(`Failed to register hotkey: ${cfg.quickCaptureHotkey}`);
@@ -2871,7 +3646,10 @@ if (!gotLock) {
     // intentional no-op — stay resident until the user quits explicitly.
   });
 
-  app.on("will-quit", () => globalShortcut.unregisterAll());
+  app.on("will-quit", () => {
+    globalShortcut.unregisterAll();
+    stopAwakeBrianBlocker();
+  });
 }
 
 // Keep the tray reference alive for the GC.

@@ -48,11 +48,16 @@ describe('[COMP:feed/post-media-parse] Draft media payload', () => {
     expect(parsePostMedia('nope').ok).toBe(false)
     expect(parsePostMedia([{ fileId: FILE_A, mimeType: 'video/mp4' }]).ok).toBe(false)
     expect(parsePostMedia([{ fileId: FILE_A, mimeType: 'image/png', alt: 7 }]).ok).toBe(false)
-    const tooMany = Array.from({ length: MAX_POST_MEDIA + 1 }, (_, i) => ({
-      fileId: `1111111${i}-1111-4111-8111-11111111111${i % 10}`,
+    const atLimit = Array.from({ length: MAX_POST_MEDIA }, (_, i) => ({
+      fileId: `${i.toString(16).padStart(8, '0')}-1111-4111-8111-111111111111`,
       mimeType: 'image/png',
     }))
-    expect(parsePostMedia(tooMany).ok).toBe(false)
+    expect(MAX_POST_MEDIA).toBe(20)
+    expect(parsePostMedia(atLimit).ok).toBe(true)
+    expect(parsePostMedia([
+      ...atLimit,
+      { fileId: 'ffffffff-1111-4111-8111-111111111111', mimeType: 'image/png' },
+    ]).ok).toBe(false)
   })
 
   it('rejects the same file twice', () => {

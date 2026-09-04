@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import { findOrCreateUser, getDefaultAssistant, getUserAssistant, getUserProfilesByIds, getWorkspacePrimaryAssistant } from '../db/users.js'
 import { addSessionMessage, createWorkspaceChatSession, findSessionByChannel, findSessionById, getSessionMessageById, getSessionMessages, isSharedChatSession, rebindSessionAssistant, renameSession, updateSessionMessageText } from '../db/sessions.js'
-import { mayAssistantAnswerInRoom } from './_room-binding.js'
+import { mayAssistantAnswerInRoom, DOC_DOCK_RESUME_ROW } from './_room-binding.js'
 import { query } from '../db/client.js'
 import { getTurnTrace } from '../ledger/turn-trace.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
@@ -275,6 +275,25 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       const workspaceScope =
         req.query.scope === 'workspace' && Boolean(requestedWorkspaceId)
 
+      // …and because that thread is per-turn ADDRESSABLE, the resume may only
+      // return rows another workspace assistant is allowed to answer on —
+      // `isDocSurface`, the same predicate `crossAssistantSendPolicy` applies
+      // in `chat.ts`. Built from `DOC_DOCK_RESUME_ROW` so the two cannot
+      // drift; the surrounding filters (owner visibility, the caller's own
+      // rows, the feed-surface exclusions) are unchanged.
+      //
+      // This deliberately drops TWO shapes the generic list still accepts:
+      // `channel_type='notification'` (the notifications inbox thread) and
+      // the `app_origin IS NULL` pre-migration-187 back-compat. Neither
+      // satisfies `isDocSurface`, so the dock could attach them but never
+      // re-address them — the 2026-09-01 dead-thread bug. Losing them costs
+      // only same-assistant continuation of a legacy NULL-origin thread; the
+      // dock mints a fresh doc row on the next send instead.
+      const surfaceFilter = workspaceScope
+        ? `AND s.channel_type = $3 AND s.app_origin = $4`
+        : `AND s.channel_type IN ('web', 'notification')
+           AND ($3::text IS NULL OR s.app_origin = $3 OR s.app_origin IS NULL)`
+
       // Hide feed-web's single-thread surfaces from the main web sidebar:
       // post-drafting sessions (`mode='draft'`) and the sticky tuning /
       // per-draft-iteration channels documented in
@@ -306,14 +325,20 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
            -- already excludes them, but the visibility predicate makes the
            -- intent explicit and survives future channel_type changes.
            AND s.visibility = 'owner'
-           AND s.channel_type IN ('web', 'notification')
            AND s.mode IS DISTINCT FROM 'draft'
            AND s.channel_id <> 'tuning'
            AND s.channel_id NOT LIKE 'draft-iter:%'
-           AND ($3::text IS NULL OR s.app_origin = $3 OR s.app_origin IS NULL)
+           ${surfaceFilter}
          ORDER BY s.last_active_at DESC
          LIMIT 50`,
-        [workspaceScope ? requestedWorkspaceId : assistant.id, user.id, appOrigin],
+        workspaceScope
+          ? [
+              requestedWorkspaceId,
+              user.id,
+              DOC_DOCK_RESUME_ROW.channelType,
+              DOC_DOCK_RESUME_ROW.appOrigin,
+            ]
+          : [assistant.id, user.id, appOrigin],
       )
 
       res.json(result.rows.map((s) => ({

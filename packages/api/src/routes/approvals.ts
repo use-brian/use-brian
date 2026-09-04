@@ -466,13 +466,17 @@ function isReviewedImapReply(approval: PendingApproval): approval is ReviewedIma
 }
 
 function serializeApproval(r: PendingApproval) {
+  // The current-turn token binds reload recovery to one running lease. It is
+  // server-internal authority metadata, not approval presentation data.
+  const { turnLeaseToken: _turnLeaseToken, ...publicApprovalPayload } =
+    r.approvalPayload
   return {
     id: r.id,
     kind: r.kind,
     status: r.status,
     toolName: r.toolName,
     arguments: r.arguments,
-    approvalPayload: r.approvalPayload,
+    approvalPayload: publicApprovalPayload,
     approverUserId: r.approverUserId,
     originatingAssistantId: r.originatingAssistantId,
     blockingSessionId: r.blockingSessionId,

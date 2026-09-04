@@ -24,7 +24,7 @@
 import { Router } from 'express'
 import { query } from '../db/client.js'
 import { getWorkspaceMembershipWithClearanceSystem } from '../db/workspace-store.js'
-import { TURN_LEASE_STALE_AFTER_MS } from '../db/sessions.js'
+import { isSharedChatSession, TURN_LEASE_STALE_AFTER_MS } from '../db/sessions.js'
 import { liveSessionTier } from '../session-read-access.js'
 
 /** How long a settled item stays on the roster — a read-time window, no stored state (§3.2). */
@@ -41,6 +41,7 @@ export type LiveSessionItem = {
   id: string
   assistantId: string
   assistantName: string
+  assistantIconSeed: number
   ownerUserId: string | null
   ownerName: string | null
   channelType: string
@@ -51,6 +52,8 @@ export type LiveSessionItem = {
   visibility?: string | null
   /** FULL tier only — content-derived, never on a presence row (§6.1). */
   title?: string
+  /** FULL tier only — true when this active lane owns a turn inbox. */
+  canSteer?: boolean
 }
 
 export type LiveWorkflowRunItem = {
@@ -121,10 +124,12 @@ type SessionRosterRow = {
   id: string
   assistantId: string
   assistantName: string
+  assistantIconSeed: number
   assistantWorkspaceId: string
   userId: string
   ownerName: string | null
   channelType: string
+  appOrigin: string | null
   visibility: string | null
   mode: string | null
   status: string
@@ -186,6 +191,7 @@ export function projectSessionRow(
     id: row.id,
     assistantId: row.assistantId,
     assistantName: row.assistantName,
+    assistantIconSeed: row.assistantIconSeed,
     ownerUserId: row.userId,
     ownerName: row.ownerName,
     channelType: row.channelType,
@@ -195,6 +201,11 @@ export function projectSessionRow(
   }
   if (tier === 'full') {
     base.visibility = row.visibility
+    base.canSteer =
+      (state === 'working' || state === 'waiting') &&
+      row.mode !== 'draft' &&
+      (row.channelType === 'web' || row.channelType === 'doc_thread') &&
+      !isSharedChatSession(row)
     if (row.title) base.title = row.title
   }
   return base
@@ -232,18 +243,21 @@ export function projectRunRow(row: RunRosterRow, now?: Date): LiveWorkflowRunIte
  * structurally excludes teammates' personal assistants — and exclude the
  * callee lanes (`workflow` / `assistant-call`), which never hold the
  * session lock and appear as workflow-run rows instead (D2). The
- * `waiting` flag reads `pending_approvals.blocking_session_id`
- * (unresolved blocking confirmation for that session).
+ * `waiting` flag reads `pending_approvals.blocking_session_id`. Tool
+ * confirmations also have to match the session's current private turn token;
+ * stale rows from stopped/superseded turns cannot classify later work.
  */
 async function fetchSessionRows(workspaceId: string): Promise<SessionRosterRow[]> {
   const result = await query<SessionRosterRow>(
     `SELECT s.id,
             s.assistant_id           AS "assistantId",
             a.name                   AS "assistantName",
+            COALESCE(a.icon_seed, 0) AS "assistantIconSeed",
             a.workspace_id           AS "assistantWorkspaceId",
             s.user_id                AS "userId",
             u.name                   AS "ownerName",
             s.channel_type           AS "channelType",
+            s.app_origin             AS "appOrigin",
             s.visibility,
             s.mode,
             s.status,
@@ -257,6 +271,13 @@ async function fetchSessionRows(workspaceId: string): Promise<SessionRosterRow[]
                WHERE pa.blocking_session_id = s.id
                  AND pa.status = 'pending'
                  AND (pa.expires_at IS NULL OR pa.expires_at > now())
+                 AND (
+                   pa.kind = 'question'
+                   OR (
+                     pa.kind = 'tool_invocation'
+                     AND pa.approval_payload->>'turnLeaseToken' = s.turn_lease_token::text
+                   )
+                 )
             ) AS "waiting"
        FROM sessions s
        JOIN assistants a ON a.id = s.assistant_id

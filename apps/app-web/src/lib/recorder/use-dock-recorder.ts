@@ -298,6 +298,10 @@ export function handOffVerdict(result: MeetingCaptureOutcome): {
  * per-session choice, unlike the computer-audio preference.
  */
 export type RecorderCaptureSource = "mic" | "screen" | "window";
+export type PreparedCaptureSource = {
+  source: Exclude<RecorderCaptureSource, "mic">;
+  id: string;
+};
 
 export type DockRecorderApi = {
   phase: RecorderPhase;
@@ -331,8 +335,8 @@ export type DockRecorderApi = {
   includesSystemAudio: () => boolean;
   /** True when this environment can record a screen at all (getDisplayMedia). */
   screenCaptureAvailable: boolean;
-  /** True only in a desktop shell that can list windows for a specific-window pick. */
-  windowPickerAvailable: boolean;
+  /** True only in a desktop shell that can list screens/windows for an explicit pick. */
+  capturePickerAvailable: boolean;
   /** What the next capture records; ignored while a capture runs. */
   captureSource: RecorderCaptureSource;
   setCaptureSource: (source: RecorderCaptureSource) => void;
@@ -365,16 +369,14 @@ export function useDockRecorder(opts: {
   ) => Promise<MeetingCaptureOutcome>;
   /** Pre-flight confirm + destination creation; null means the user cancelled. */
   prepareLivePage?: () => Promise<LiveRecordingPage | null>;
-  /**
-   * Desktop specific-window pick: list the shell's window sources and resolve
-   * the chosen source id, or null when the user cancelled. Only consulted
-   * when `captureSource === 'window'`.
-   */
-  prepareWindowSource?: () => Promise<string | null>;
+  /** Desktop screen/window chooser; null means the user cancelled. */
+  prepareCaptureSource?: (
+    initialSource: Exclude<RecorderCaptureSource, "mic">,
+  ) => Promise<PreparedCaptureSource | null>;
   /** Sequential provisional-window upload. */
   streamLiveWindow?: (window: LiveWindow) => Promise<void>;
 }): DockRecorderApi {
-  const { enabled, workspaceId, assistantId, captureNamePrefix, sendVoiceClip, getSessionId, onMeetingCapture, prepareLivePage, prepareWindowSource, streamLiveWindow } =
+  const { enabled, workspaceId, assistantId, captureNamePrefix, sendVoiceClip, getSessionId, onMeetingCapture, prepareLivePage, prepareCaptureSource, streamLiveWindow } =
     opts;
   const [phase, setPhase] = useState<RecorderPhase>(IDLE);
   const [notice, setNotice] = useState<RecorderNotice | null>(null);
@@ -387,7 +389,7 @@ export function useDockRecorder(opts: {
   const [includeComputerAudio, setIncludeComputerAudioState] = useState(true);
   const includeComputerAudioRef = useRef(true);
   const [screenCaptureAvailable, setScreenCaptureAvailable] = useState(false);
-  const [windowPickerAvailable, setWindowPickerAvailable] = useState(false);
+  const [capturePickerAvailable, setCapturePickerAvailable] = useState(false);
   const [captureSource, setCaptureSourceState] = useState<RecorderCaptureSource>("mic");
   const captureSourceRef = useRef<RecorderCaptureSource>("mic");
   const [livePageEnabled, setLivePageEnabledState] = useState(false);
@@ -421,7 +423,7 @@ export function useDockRecorder(opts: {
     setScreenCaptureAvailable(
       typeof navigator.mediaDevices?.getDisplayMedia === "function",
     );
-    setWindowPickerAvailable(desktopBridge()?.captureSourcePicker === true);
+    setCapturePickerAvailable(desktopBridge()?.captureSourcePicker === true);
   }, []);
 
   const applyPhase = (next: RecorderPhase) => {
@@ -546,27 +548,40 @@ export function useDockRecorder(opts: {
                 }
                 livePageRef.current = livePage;
               }
-              // A specific-window capture resolves its source BEFORE the
-              // engine opens anything: the shell's next display-media grant
-              // uses the picked id. A cancelled picker is a changed mind —
-              // back to idle, no notice.
-              const source = captureSourceRef.current;
-              if (source === "window") {
-                const sourceId = (await prepareWindowSource?.()) ?? null;
-                if (!sourceId) {
+              // A new desktop shell resolves every video source BEFORE the
+              // engine opens anything. The chooser can switch between screen
+              // and window; its confirmed type becomes the running trust
+              // signal, while the confirmed id owns the shell's next one-shot
+              // display-media grant. Cancel is a changed mind: idle, no notice.
+              let source = captureSourceRef.current;
+              if (
+                source !== "mic" &&
+                desktopBridge()?.captureSourcePicker === true &&
+                prepareCaptureSource
+              ) {
+                const selection = await prepareCaptureSource(source);
+                if (!selection) {
                   dispatchRef.current({ type: "arm-failed" });
                   return;
                 }
+                source = selection.source;
+                captureSourceRef.current = selection.source;
+                setCaptureSourceState(selection.source);
                 try {
-                  desktopBridge()?.setCaptureSource?.(sourceId);
-                } catch {
-                  // Older shell without the method — the handler falls back
-                  // to the primary display; the strip still says screen.
+                  const grantSource = desktopBridge()?.setCaptureSource;
+                  if (!grantSource) {
+                    throw new Error("The desktop capture-source grant is unavailable");
+                  }
+                  grantSource(selection.id);
+                } catch (cause) {
+                  throw new ScreenCaptureError("The selected source could not be granted", {
+                    cause,
+                  });
                 }
               } else if (source === "screen") {
                 try {
-                  // Clear any stale window pick so the handler grants the
-                  // primary display again.
+                  // Version-skew fallback: an old shell grants its primary
+                  // display. Clear any stale selection first.
                   desktopBridge()?.setCaptureSource?.(null);
                 } catch {
                   // Older shell without the method.
@@ -732,7 +747,7 @@ export function useDockRecorder(opts: {
           return;
       }
     },
-    [workspaceId, assistantId, handOff, refreshRecovery, prepareLivePage, prepareWindowSource, streamLiveWindow],
+    [workspaceId, assistantId, handOff, refreshRecovery, prepareLivePage, prepareCaptureSource, streamLiveWindow],
   );
 
   const dispatch = useCallback(
@@ -973,11 +988,11 @@ export function useDockRecorder(opts: {
     (source: RecorderCaptureSource) => {
       if (phaseRef.current.kind !== "idle") return;
       if (source !== "mic" && !screenCaptureAvailable) return;
-      if (source === "window" && !windowPickerAvailable) return;
+      if (source === "window" && !capturePickerAvailable) return;
       captureSourceRef.current = source;
       setCaptureSourceState(source);
     },
-    [screenCaptureAvailable, windowPickerAvailable],
+    [screenCaptureAvailable, capturePickerAvailable],
   );
 
   const saveRecovery = useCallback(
@@ -1036,7 +1051,7 @@ export function useDockRecorder(opts: {
       [],
     ),
     screenCaptureAvailable,
-    windowPickerAvailable,
+    capturePickerAvailable,
     captureSource,
     setCaptureSource,
     capturesScreen: useCallback(

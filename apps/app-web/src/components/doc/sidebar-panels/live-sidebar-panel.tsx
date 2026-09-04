@@ -17,9 +17,9 @@ import {
   GitBranch,
   Inbox,
   LockKeyhole,
-  MessageSquare,
   Radio,
 } from "lucide-react";
+import { AssistantAvatar } from "@/components/assistant-avatar";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
 import type { LiveWorkItem } from "@/lib/api/live";
@@ -110,11 +110,6 @@ export function LiveRosterList({
       : presence
         ? [item.ownerName, item.assistantName].filter(Boolean).join(" · ")
         : [item.assistantName, item.channelType].filter(Boolean).join(" · ");
-    const KindIcon = presence
-      ? LockKeyhole
-      : item.kind === "workflow_run"
-        ? GitBranch
-        : MessageSquare;
     const className = cn(
       "group flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left text-sm transition-[background-color,color,box-shadow]",
       active
@@ -124,14 +119,30 @@ export function LiveRosterList({
     );
     const content = (
       <>
-        <span
-          className={cn(
-            "grid size-7 shrink-0 place-items-center rounded-lg bg-sidebar-accent/75 text-sidebar-foreground/55 transition-colors",
-            active && "bg-background/70 text-sidebar-accent-foreground",
-          )}
-        >
-          <KindIcon className="size-3.5" strokeWidth={1.8} aria-hidden />
-        </span>
+        {item.kind === "session" ? (
+          <span className="relative shrink-0" aria-hidden>
+            <AssistantAvatar
+              id={item.assistantId}
+              name={item.assistantName}
+              iconSeed={item.assistantIconSeed}
+              size="sm"
+            />
+            {presence ? (
+              <span className="absolute -bottom-0.5 -right-0.5 grid size-3.5 place-items-center rounded-full border border-sidebar-border bg-sidebar text-sidebar-foreground/55 shadow-sm">
+                <LockKeyhole className="size-2" strokeWidth={2} />
+              </span>
+            ) : null}
+          </span>
+        ) : (
+          <span
+            className={cn(
+              "grid size-7 shrink-0 place-items-center rounded-lg bg-sidebar-accent/75 text-sidebar-foreground/55 transition-colors",
+              active && "bg-background/70 text-sidebar-accent-foreground",
+            )}
+          >
+            <GitBranch className="size-3.5" strokeWidth={1.8} aria-hidden />
+          </span>
+        )}
         <span className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className={cn("truncate", !presence && "font-medium")}>
             {liveItemTitle(item)}

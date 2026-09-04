@@ -49,6 +49,7 @@ import {
   groupSkillsByCategory,
   hasLibraryFilter,
   partitionSkillsForLanding,
+  skillGroupLabel,
   skillStatus,
 } from "@/lib/skills-view";
 import { useBrainSurface } from "@/contexts/brain-surface-context";
@@ -210,10 +211,12 @@ export function SkillsLibrary({
                 ever grouped by it, so the pane was one undifferentiated
                 stack. A single group renders its heading too, so the pane
                 never silently changes shape as a workspace grows. */}
-            {groupSkillsByCategory(list).map((group) => (
+            {groupSkillsByCategory(list, (g) =>
+              skillGroupLabel(g, categoryCopy),
+            ).map((group) => (
               <section key={group.category}>
                 <h2 className="px-4 pt-3 pb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                  {categoryCopy[group.category]}
+                  {skillGroupLabel(group.category, categoryCopy)}
                   <span className="ml-1.5 font-normal tabular-nums opacity-70">
                     {group.skills.length}
                   </span>

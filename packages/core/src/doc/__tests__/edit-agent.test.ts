@@ -436,6 +436,48 @@ describe('[COMP:doc/edit-agent] context-clean Doc editor', () => {
     expect(requests).toHaveLength(0)
   })
 
+  it('allows an explicit new-Page create without any existing target', async () => {
+    const requests: ProviderRequest[] = []
+    const loadedTargets: Array<string | null | undefined> = []
+    const renderPage = buildTool({
+      name: 'renderPage',
+      description: 'Create a Page.',
+      inputSchema: z.object({ title: z.string() }),
+      async execute() {
+        return { data: { pageId: 'new-page-1', version: 1 } }
+      },
+    })
+    const provider = providerFrom((_request, call) => (
+      call === 0
+        ? toolTurn('renderPage', { title: 'Launch plan' })
+        : textTurn('Created the Page.')
+    ), requests)
+    const tool = createDelegateDocEditTool({
+      provider,
+      model: 'cheap',
+      systemPrompt: 'isolated editor protocol',
+      tools: new Map([['renderPage', renderPage]]),
+      async loadPageContext(_instruction, targetPageId) {
+        loadedTargets.push(targetPageId)
+        return 'No page is currently open.'
+      },
+    })
+
+    const result = await tool.execute({
+      intent: 'create',
+      instruction: 'Create a new launch plan Page.',
+    }, parentContext)
+
+    expect(result.isError).toBe(false)
+    expect(result.data).toMatchObject({
+      status: 'completed',
+      mutationTools: ['renderPage'],
+      pageIds: ['new-page-1'],
+    })
+    expect(loadedTargets).toEqual([null])
+    expect(requests).toHaveLength(2)
+  })
+
   it('fails a mismatched page target before the child runs', async () => {
     const requests: ProviderRequest[] = []
     const provider = providerFrom(() => textTurn('must not run'), requests)
@@ -459,7 +501,45 @@ describe('[COMP:doc/edit-agent] context-clean Doc editor', () => {
     expect(requests).toHaveLength(0)
   })
 
-  it('removes every page-creation operation from an existing-page edit', () => {
+  it('admits an exact pinned Page target and binds both context and tools to it', async () => {
+    const requests: ProviderRequest[] = []
+    const selectedTargets: Array<string | null> = []
+    const loadedTargets: Array<string | null | undefined> = []
+    const provider = providerFrom((_request, call) => (
+      call === 0
+        ? toolTurn('patchPage', { pageId: 'pinned-page-2' })
+        : textTurn('Updated the pinned Page.')
+    ), requests)
+    const tool = createDelegateDocEditTool({
+      provider,
+      model: 'cheap',
+      systemPrompt: 'isolated editor protocol',
+      tools: new Map(),
+      targetPageIds: ['pinned-page-1', 'pinned-page-2'],
+      toolsForTarget(targetPageId) {
+        selectedTargets.push(targetPageId)
+        return new Map([['patchPage', patchTool([])]])
+      },
+      async loadPageContext(_instruction, targetPageId) {
+        loadedTargets.push(targetPageId)
+        return `pageId=${targetPageId} version=1`
+      },
+    })
+
+    const result = await tool.execute({
+      intent: 'edit',
+      pageId: 'pinned-page-2',
+      instruction: 'Update the second pinned Page.',
+    }, parentContext)
+
+    expect(result.isError).toBe(false)
+    expect(result.data).toMatchObject({ status: 'completed', mutationTools: ['patchPage'] })
+    expect(selectedTargets).toEqual(['pinned-page-2'])
+    expect(loadedTargets).toEqual(['pinned-page-2'])
+    expect(JSON.stringify(requests[0]?.messages)).toContain('pageId=pinned-page-2')
+  })
+
+  it('retains anchored child-page creation while removing unanchored creation from an edit', () => {
     const tool = (name: string) => ({ name } as Tool)
     const tools = new Map([
       ['renderPage', tool('renderPage')],
@@ -470,6 +550,7 @@ describe('[COMP:doc/edit-agent] context-clean Doc editor', () => {
     ])
 
     expect([...toolsForDocEditIntent(tools, 'edit').keys()]).toEqual([
+      'createSubPage',
       'patchPage',
       'getCurrentPage',
     ])

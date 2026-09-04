@@ -1,6 +1,7 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { ossSignedOutRedirect } from "@/lib/oss-entry";
+import { useBrianSuffix } from "@/lib/siri-use-brian";
 
 // `||` not `??`: an empty-string NEXT_PUBLIC_API_URL (e.g. inlined as "" by the
 // bundler when unset at build) must also fall back, else this server-side fetch
@@ -30,7 +31,11 @@ type Team = { id: string; name: string };
  * and a Google button that can never complete.
  */
 export default async function HomePage(props: {
-  searchParams: Promise<{ capture?: string; record?: string }>;
+  searchParams: Promise<{
+    capture?: string | string[];
+    record?: string | string[];
+    useBrian?: string | string[];
+  }>;
 }) {
   const jar = await cookies();
   const accessToken = jar.get("access_token")?.value;
@@ -44,8 +49,14 @@ export default async function HomePage(props: {
   // `record=1` and auto-starts a latched capture). Multi-workspace users
   // land on the picker (which drops it) — see
   // docs/architecture/features/app-desktop.md.
-  const { capture, record } = await props.searchParams;
-  const captureSuffix = capture === "1" ? "?capture=1" : record === "1" ? "?record=1" : "";
+  const { capture, record, useBrian } = await props.searchParams;
+  const useBrianRouteSuffix = useBrianSuffix(useBrian);
+  const intentSuffix =
+    capture === "1"
+      ? "?capture=1"
+      : record === "1"
+        ? "?record=1"
+        : useBrianRouteSuffix;
 
   let teams: Team[] = [];
   try {
@@ -64,7 +75,9 @@ export default async function HomePage(props: {
   }
 
   if (teams.length === 1) {
-    redirect(`/w/${teams[0].id}${captureSuffix}`);
+    redirect(`/w/${teams[0].id}${intentSuffix}`);
   }
+  if (useBrianRouteSuffix)
+    redirect(`/teams?next=${encodeURIComponent(useBrianRouteSuffix)}`);
   redirect("/teams");
 }

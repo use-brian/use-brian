@@ -53,8 +53,10 @@ export type WorkspaceSkillSummary = {
   whenToUse: string | null;
   /** The skill body (markdown). */
   content: string;
-  /** Library grouping bucket. TEXT server-side, so normalize with
-   *  `skillCategoryOf` before rendering — never trust it to be in the enum. */
+  /** The library group. An OPEN vocabulary: four built-in names carry
+   *  translated labels, anything else is the workspace's own and renders
+   *  verbatim. Normalize with `skillGroupOf` and label it with
+   *  `skillGroupLabel` before rendering. */
   category: string;
   state: SkillLifecycleState;
   confidence: number;
@@ -76,6 +78,8 @@ export type WorkspaceSkillSummary = {
   requiresConnectors: string[];
   /** Allowlist of assistant ids the skill is offered to (D4 semantics). */
   enabledAssistantIds: string[];
+  /** Applies to every assistant, including ones created later (mig 492). */
+  allAssistants?: boolean;
   /** ISO timestamp of the most recent invocation; null ⇒ never invoked. */
   lastInvokedAt: string | null;
   /** CL-8 counters — outcome telemetry over the skill's invocations. */
@@ -266,7 +270,18 @@ export type SkillAccessAssistant = {
 };
 
 export type SkillAccessResult =
-  | { ok: true; assistants: SkillAccessAssistant[] }
+  | {
+      ok: true;
+      assistants: SkillAccessAssistant[];
+      /**
+       * True = the skill applies to every assistant in the workspace,
+       * INCLUDING ones created later, and holds no per-assistant rows. The
+       * two states look identical in `assistants` (all enabled) and differ
+       * the moment another assistant exists, so the flag is what the master
+       * toggle reflects.
+       */
+      allAssistants: boolean;
+    }
   | { ok: false; status: number; error: string };
 
 /** Which assistants this skill is enabled for. Backed by
@@ -286,22 +301,41 @@ export async function getSkillAccess(
       error: data.error ?? "Failed to load skill access",
     };
   }
-  const data = (await res.json()) as { assistants?: SkillAccessAssistant[] };
-  return { ok: true, assistants: data.assistants ?? [] };
+  const data = (await res.json()) as {
+    assistants?: SkillAccessAssistant[];
+    allAssistants?: boolean;
+  };
+  return {
+    ok: true,
+    assistants: data.assistants ?? [],
+    allAssistants: data.allAssistants ?? false,
+  };
 }
 
-/** Replace the skill's enablement allowlist. Backed by
- *  `PUT /api/skills/:id/access`; returns the updated assistant list. */
+/**
+ * Replace the skill's offering scope. Backed by `PUT /api/skills/:id/access`.
+ *
+ * Two shapes, and they are not interchangeable:
+ *   * `{ allAssistants: true }` — every assistant, including future ones.
+ *     Stored as intent; drops any per-assistant rows.
+ *   * `{ enabledAssistantIds: [...] }` — exactly these. If the skill was
+ *     previously `allAssistants`, the server converts the flag into rows
+ *     before applying the list.
+ *
+ * Sending the full id list is NOT equivalent to `allAssistants: true`: it
+ * pins the skill to the assistants that exist today, which is the behaviour
+ * mig 492 exists to stop being the default.
+ */
 export async function setSkillAccess(
   skillRowId: string,
-  enabledAssistantIds: string[],
+  scope: { allAssistants: true } | { enabledAssistantIds: string[] },
 ): Promise<SkillAccessResult> {
   const res = await authFetch(
     `${API_URL}/api/skills/${encodeURIComponent(skillRowId)}/access`,
     {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ enabledAssistantIds }),
+      body: JSON.stringify(scope),
     },
   );
   if (!res.ok) {
@@ -312,8 +346,15 @@ export async function setSkillAccess(
       error: data.error ?? "Failed to update skill access",
     };
   }
-  const data = (await res.json()) as { assistants?: SkillAccessAssistant[] };
-  return { ok: true, assistants: data.assistants ?? [] };
+  const data = (await res.json()) as {
+    assistants?: SkillAccessAssistant[];
+    allAssistants?: boolean;
+  };
+  return {
+    ok: true,
+    assistants: data.assistants ?? [],
+    allAssistants: data.allAssistants ?? false,
+  };
 }
 
 // ── Creator + editor chat: conversational draft turns + templates ────
@@ -749,6 +790,8 @@ export type SkillGroupSuggestion = {
  */
 export async function suggestSkillGroups(
   workspaceId: string,
+  /** `all` also re-decides skills that already have a group. Opt-in. */
+  scope: "unsorted" | "all" = "unsorted",
 ): Promise<
   | { ok: true; suggestions: SkillGroupSuggestion[]; considered: number }
   | { ok: false; unavailable: boolean; error: string }
@@ -756,7 +799,7 @@ export async function suggestSkillGroups(
   const res = await authFetch(`${API_URL}/api/skills/categorize`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ workspaceId }),
+    body: JSON.stringify({ workspaceId, scope }),
   });
   if (!res.ok) {
     const data = (await res.json().catch(() => ({}))) as { error?: string };

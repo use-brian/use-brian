@@ -338,6 +338,9 @@ describe('[COMP:api/brain-mcp] buildBrainTools — scope gating', () => {
     expect(ingestToBrain.description).toMatch(/decompose/i)
     expect(Object.keys(ingestToBrain.inputSchema)).toContain('decompose')
     expect(Object.keys(ingestToBrain.inputSchema)).toContain('sourceLabel')
+    expect(Object.keys(ingestToBrain.inputSchema)).toContain('captureMode')
+    expect(Object.keys(ingestToBrain.inputSchema)).toContain('eventId')
+    expect(Object.keys(ingestToBrain.inputSchema)).toContain('occurredAt')
   })
 
   it('omits every file tool when no fileTools are wired (files-less deployment)', () => {
@@ -412,6 +415,9 @@ async function fakeKeyStore(
     async updateMaxClearance() {
       return false
     },
+    async updateCaptureBinding() {
+      return false
+    },
     async touchLastUsedAt() {
       /* noop */
     },
@@ -437,6 +443,8 @@ describe('[COMP:api/brain-mcp] authenticateBrainRequest', () => {
       authKind: 'api_key',
       storeScope: 'none',
       agentScope: 'none',
+      captureAssistantId: null,
+      captureProfileId: null,
     })
   })
 
@@ -523,6 +531,9 @@ describe('[COMP:api/brain-mcp] authenticateBrainRequest', () => {
       storeScope: 'none',
       agentScope: 'none',
       actingUserId: 'user-1',
+      clientId: 'client-1',
+      captureAssistantId: null,
+      captureProfileId: null,
     })
   })
 })
@@ -755,6 +766,65 @@ describe('[COMP:api/brain-mcp] buildBrainTools — bridged ToolContext shape', (
     expect(capturedInput!.scope).toBe('team')
     expect(capturedInput!.detail).toBe('a distilled fact')
     expect(capturedInput!.summary).toBe('fact')
+  })
+
+  it('ingestToBrain routed mode delegates one message to the capture router without calling immediate ingest', async () => {
+    const ingest = vi.fn(async () => PIPELINE_B_RESULT)
+    const routeCapture = vi.fn(async () => ({
+      outcome: 'queued' as const,
+      receiptStatus: 'queued' as const,
+      batchId: '33333333-3333-4333-8333-333333333333',
+      firesAt: new Date('2026-09-03T11:00:00.000Z'),
+    }))
+    const tools = buildBrainTools({
+      workspaceId: '33333333-3333-3333-3333-333333333333',
+      scope: 'read_write',
+      keyId: '982d4a41-c568-4a5d-8614-833c7594bc1a',
+      maxClearance: null,
+      ...ALL_STUBS,
+      ingest,
+      routeCapture,
+    })
+    const result = await tools.find((tool) => tool.name === 'ingestToBrain')!.handler({
+      captureMode: 'routed',
+      eventId: 'story-session-42-message-7',
+      occurredAt: '2026-09-03T10:59:00+00:00',
+      sessionId: 'story-session-42',
+      subjectId: 'writer-7',
+      role: 'user',
+      metadata: { stage: 'outline' },
+      content: 'Try the protagonist from another point of view.',
+    })
+
+    expect(result.isError).toBeFalsy()
+    expect(textBody(result)).toContain('No extraction model was called')
+    expect(routeCapture).toHaveBeenCalledWith(expect.objectContaining({
+      eventId: 'story-session-42-message-7',
+      occurredAt: new Date('2026-09-03T10:59:00.000Z'),
+      sessionId: 'story-session-42',
+      subjectId: 'writer-7',
+      role: 'user',
+      metadata: { stage: 'outline' },
+    }))
+    expect(ingest).not.toHaveBeenCalled()
+  })
+
+  it('ingestToBrain routed mode fails before routing when eventId is missing', async () => {
+    const routeCapture = vi.fn()
+    const tools = buildBrainTools({
+      workspaceId: '33333333-3333-3333-3333-333333333333',
+      scope: 'read_write',
+      keyId: '982d4a41-c568-4a5d-8614-833c7594bc1a',
+      maxClearance: null,
+      ...ALL_STUBS,
+      routeCapture,
+    })
+    const result = await tools.find((tool) => tool.name === 'ingestToBrain')!.handler({
+      captureMode: 'routed',
+      content: 'A message without a stable id.',
+    })
+    expect(result.isError).toBe(true)
+    expect(routeCapture).not.toHaveBeenCalled()
   })
 
   it('a bridged file write receives the resolved workspace + programmatic context at the key clearance', async () => {

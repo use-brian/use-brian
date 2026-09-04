@@ -15,6 +15,7 @@
  */
 
 import { Router, type Request, type Response } from 'express'
+import { z } from 'zod'
 import type { OAuthAuthorizationStore } from '../db/oauth-authorization-store.js'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 
@@ -25,6 +26,14 @@ type Options = {
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+const CaptureBindingBody = z.object({
+  assistantId: z.string().uuid().nullable(),
+  profileId: z.string().uuid().nullable(),
+}).strict().refine((value) => value.assistantId !== null || value.profileId === null, {
+  message: 'A profile override requires a capture assistant',
+  path: ['profileId'],
+})
 
 export function oauthAuthorizationsRoutes(opts: Options): Router {
   const router = Router({ mergeParams: true })
@@ -69,11 +78,43 @@ export function oauthAuthorizationsRoutes(opts: Options): Router {
           status: r.revokedAt ? 'revoked' : 'active',
           createdAt: r.createdAt,
           lastUsedAt: r.lastUsedAt,
+          captureAssistantId: r.captureAssistantId,
+          captureProfileId: r.captureProfileId,
         })),
       })
     } catch (err) {
       console.error('[oauth-authorizations] list failed:', err)
       res.status(500).json({ error: 'Failed to list connected apps' })
+    }
+  })
+
+  // ── PUT /:id/capture — set the routed-capture target/override ──
+  router.put('/:id/capture', async (req, res) => {
+    const workspaceId = await gate(req, res)
+    if (!workspaceId) return
+    const rawId = req.params.id
+    const id = typeof rawId === 'string' ? rawId : ''
+    const parsed = CaptureBindingBody.safeParse(req.body)
+    if (!UUID_RE.test(id) || !parsed.success) {
+      res.status(400).json({ error: 'Invalid input' })
+      return
+    }
+    try {
+      const ok = await opts.authorizationStore.updateCaptureBinding(
+        req.userId!,
+        id,
+        workspaceId,
+        parsed.data.assistantId,
+        parsed.data.profileId,
+      )
+      if (!ok) {
+        res.status(404).json({ error: 'Authorization, assistant, or capture profile not found' })
+        return
+      }
+      res.status(204).end()
+    } catch (err) {
+      console.error('[oauth-authorizations] capture binding update failed:', err)
+      res.status(500).json({ error: 'Failed to update capture binding' })
     }
   })
 

@@ -192,12 +192,21 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   // attribute (+ custom tokens) — we just align React state with what's in the DOM.
   useEffect(() => {
     const storedMode = readStoredMode();
+    const resolvedMode = resolveMode(storedMode);
     setModeState(storedMode);
-    setResolved(resolveMode(storedMode));
+    setResolved(resolvedMode);
+    applyResolved(resolvedMode);
     const storedPalette = readStoredPalette();
     setPaletteState(storedPalette);
+    applyPalette(storedPalette);
     if (storedPalette === "custom") {
       setCustomThemeId(window.localStorage.getItem(CUSTOM_ID_KEY));
+      try {
+        const cached = window.localStorage.getItem(CUSTOM_TOKENS_KEY);
+        if (cached) applyCustomThemeStyle(JSON.parse(cached) as DocThemeTokens);
+      } catch {
+        removeCustomThemeStyle();
+      }
     }
   }, []);
 

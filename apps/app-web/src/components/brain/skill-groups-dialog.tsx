@@ -45,9 +45,12 @@ import {
   type WorkspaceSkillSummary,
 } from "@/lib/api/skills";
 import {
-  skillCategoryOf,
-  SKILL_CATEGORIES,
-  type SkillCategory,
+  distinctSkillGroups,
+  normalizeSkillGroup,
+  skillGroupLabel,
+  skillGroupOf,
+  skillGroupOptions,
+  UNSORTED_SKILL_GROUP,
 } from "@/lib/skills-view";
 
 type Props = {
@@ -61,7 +64,7 @@ type Props = {
   onApplied: () => void;
 };
 
-type Row = SkillGroupSuggestion & { chosen: SkillCategory; checked: boolean };
+type Row = SkillGroupSuggestion & { chosen: string; checked: boolean };
 
 export function SkillGroupsDialog({
   workspaceId,
@@ -78,10 +81,26 @@ export function SkillGroupsDialog({
   const [error, setError] = React.useState<string | null>(null);
   const [rows, setRows] = React.useState<Row[] | null>(null);
   const [applied, setApplied] = React.useState<{ updated: number; failed: number } | null>(null);
+  /** The opt-in wider scope: re-decide groups somebody already chose. */
+  const [resortAll, setResortAll] = React.useState(false);
 
   const unsorted = React.useMemo(
-    () => skills.filter((s) => skillCategoryOf(s) === "custom").length,
+    () => skills.filter((s) => skillGroupOf(s) === UNSORTED_SKILL_GROUP).length,
     [skills],
+  );
+  /** What the pass would actually look at, which the scope tick changes. */
+  const inScope = resortAll ? skills.length : unsorted;
+
+  // Groups the pickers offer: every built-in, every group the library uses,
+  // and every group this pass proposed - a name the model just coined has to
+  // be reusable on the row below it, or the override forks it immediately.
+  const groupOptions = React.useMemo(
+    () =>
+      distinctSkillGroups([
+        ...skillGroupOptions(skills),
+        ...(rows ?? []).map((r) => r.chosen),
+      ]),
+    [skills, rows],
   );
 
   // Reopening starts clean — a stale review list would apply decisions the
@@ -92,13 +111,14 @@ export function SkillGroupsDialog({
       setError(null);
       setRows(null);
       setApplied(null);
+      setResortAll(false);
     }
   }, [open]);
 
   async function runSuggest() {
     setBusy(true);
     setError(null);
-    const res = await suggestSkillGroups(workspaceId);
+    const res = await suggestSkillGroups(workspaceId, resortAll ? "all" : "unsorted");
     setBusy(false);
     if (!res.ok) {
       setError(res.error);
@@ -107,7 +127,7 @@ export function SkillGroupsDialog({
     setRows(
       res.suggestions.map((s) => ({
         ...s,
-        chosen: (s.suggested as SkillCategory) ?? "custom",
+        chosen: normalizeSkillGroup(s.suggested),
         checked: true,
       })),
     );
@@ -164,14 +184,39 @@ export function SkillGroupsDialog({
             /* ── Intent: name the scope before spending anything ── */
             <div className="mt-4">
               <p className="text-sm leading-relaxed text-muted-foreground">
-                {unsorted === 0
+                {inScope === 0
                   ? copy.nothingToGroup
-                  : format(copy.intentBody, { count: unsorted })}
+                  : resortAll
+                    ? format(copy.intentBodyAll, { count: inScope })
+                    : format(copy.intentBody, { count: inScope })}
               </p>
-              {unsorted > 0 && (
+              {inScope > 0 && !resortAll && (
                 <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
                   {copy.intentHint}
                 </p>
+              )}
+              {/* The scope tick. Default OFF, because a group somebody chose
+                  is an intent, and widening the pass is the user's call - but
+                  without it a library filed under the old coarse buckets
+                  could never be improved, since those buckets were,
+                  technically, chosen. Review still gates every write. */}
+              {skills.length > unsorted && (
+                <label className="mt-4 flex cursor-pointer items-start gap-2.5">
+                  <input
+                    type="checkbox"
+                    checked={resortAll}
+                    onChange={(e) => setResortAll(e.target.checked)}
+                    className="mt-0.5 size-4 shrink-0 accent-primary"
+                  />
+                  <span className="min-w-0">
+                    <span className="block text-xs text-foreground">
+                      {copy.scopeAllLabel}
+                    </span>
+                    <span className="mt-0.5 block text-xs leading-relaxed text-muted-foreground">
+                      {copy.scopeAllHint}
+                    </span>
+                  </span>
+                </label>
               )}
               {error && (
                 <p role="alert" className="mt-3 text-xs leading-relaxed text-red-500">
@@ -182,7 +227,7 @@ export function SkillGroupsDialog({
                 <Button variant="outline" size="sm" onClick={onClose}>
                   {copy.cancel}
                 </Button>
-                {unsorted > 0 && (
+                {inScope > 0 && (
                   <Button variant="default" size="sm" disabled={busy} onClick={() => void runSuggest()}>
                     {busy ? (
                       <>
@@ -249,22 +294,36 @@ export function SkillGroupsDialog({
                         <p className="truncate text-xs text-muted-foreground">{row.rationale}</p>
                       )}
                     </div>
-                    <div className="w-40 shrink-0">
+                    <div className="w-48 shrink-0">
+                      {/* Creatable: the model's answer is a proposal, and the
+                          override has to be able to say a name it did not
+                          think of. Existing groups are offered first so the
+                          short path is reuse, not a new near-synonym. */}
                       <SearchableSelect
                         value={row.chosen}
                         onValueChange={(next) => {
                           const updated = [...rows];
                           updated[i] = {
                             ...row,
-                            chosen: (next || "custom") as SkillCategory,
+                            chosen: normalizeSkillGroup(next),
                           };
                           setRows(updated);
                         }}
-                        items={SKILL_CATEGORIES.map((value) => ({
+                        onCreate={(name) => {
+                          const updated = [...rows];
+                          updated[i] = {
+                            ...row,
+                            chosen: normalizeSkillGroup(name),
+                          };
+                          setRows(updated);
+                        }}
+                        createLabel={(name) => format(copy.createGroup, { name })}
+                        items={groupOptions.map((value) => ({
                           value,
-                          label: categoryCopy[value],
+                          label: skillGroupLabel(value, categoryCopy),
                         }))}
                         placeholder={copy.groupLabel}
+                        searchPlaceholder={copy.groupSearch}
                         aria-label={format(copy.groupAria, { name: row.name })}
                       />
                     </div>

@@ -9,7 +9,10 @@ import { createTurnLedger } from '../ledger/recorder.js'
 import { getLedgerPayloadStore } from '../ledger/runtime.js'
 import { query } from '../db/client.js'
 import { bindToolsToAgentAccess } from '../context-scope/agent-access-tools.js'
-import { buildPinnedContextBlock } from '../resolve-session-pins.js'
+import {
+  resolvePinnedContext,
+  type ResolvedPinnedPageTarget,
+} from '../resolve-session-pins.js'
 import { getSelfEntityId } from '../db/memories.js'
 import { getRecording, type Recording } from '../db/recordings-store.js'
 import { queryLoop, isConnectionDropError, isEndpointUnreachableError, streamErrorCode, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, probePdfPageCount, estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH, filterToolsByCapabilities, modelToCompactionTier, buildWorkspaceFilesContext, buildUploadPolicyBlock, SensitivityAccumulator, CompartmentAccumulator, ContextScopeAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSupervisorSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, parsePresentedDocumentInput, latestWorkflowProposalReceipt, buildTool, parseSlashCommand, buildSlashCommandBlock, buildEmailDraftAnchorPrompt, formatActiveEmailDraftContext, type PresentedDocumentInput, type MediaBackend } from '@use-brian/core'
@@ -21,7 +24,7 @@ import { gateSessionRead } from './sessions.js'
 import { renderArtifactManifest } from '../files/artifact-manifest.js'
 import { promotePastedText, shouldPromotePaste } from '../files/paste-promotion.js'
 import type { ArtifactPromoter } from '../files/artifact-promote.js'
-import { mayAssistantAnswerInRoom, crossAssistantSendPolicy } from './_room-binding.js'
+import { mayAssistantAnswerInRoom, crossAssistantSendPolicy, isDocSurface } from './_room-binding.js'
 import { recordRoomMentionsForMessage, type RecordRoomMentionsResult } from '../room-mentions.js'
 import type { Sensitivity } from '@use-brian/core'
 import { resolveMentionSpans } from '@use-brian/shared/mention-matching'
@@ -1056,19 +1059,14 @@ export function buildUnscopedFileAttachmentInstruction(
 }
 
 /**
- * Is this turn happening on the Doc surface? True for a session that
- * originated in `apps/app-web` (`appOrigin='doc'`) or a doc comment
- * thread. This is the surface signal that drives doc-skill injection,
- * decoupled from WHICH assistant is talking (the workspace primary by default,
- * or any assistant the user switched to). Mirrors the surface test in
- * `resolveRunChannel`.
+ * Is this turn happening on the Doc surface?
+ *
+ * Defined in `./_room-binding.js` and re-exported here (see the block below
+ * that re-exports the room predicates): `sessions.ts` builds the doc dock's
+ * resume filter from the same predicate and cannot import this module without
+ * closing an ESM cycle.
  */
-export function isDocSurface(session: {
-  appOrigin: string | null
-  channelType: string
-}): boolean {
-  return session.appOrigin === 'doc' || session.channelType === 'doc_thread'
-}
+export { isDocSurface }
 
 /**
  * Natural-language workspace-room creation is an audience change, so the tool
@@ -1089,9 +1087,10 @@ export function mayOfferWorkspaceChatHandoff(
 }
 
 /**
- * The app-web WORKSPACE surfaces — the non-doc origins the shared
- * `SurfaceChatPanel` dock stamps on its sessions (migration 255). Mirrors
- * the non-doc, non-chat slice of `KNOWN_ORIGINS` below — keep in sync.
+ * The app-web WORKSPACE surfaces — the non-doc origins that receive ambient
+ * Page authoring (migration 255). Full Chat is included alongside the
+ * historical SurfaceChatPanel origins. Mirrors the non-doc slice of
+ * `KNOWN_ORIGINS` below — keep in sync.
  */
 const APP_SURFACE_ORIGINS = new Set([
   'brain',
@@ -1099,11 +1098,12 @@ const APP_SURFACE_ORIGINS = new Set([
   'workflow',
   'approvals',
   'knowledge-base',
+  'chat',
 ])
 
 /**
  * Is this turn happening on an app-web WORKSPACE surface (Brain / Studio /
- * Workflow / Approvals / Knowledge-base chat)? These turns get the doc page
+ * Workflow / Approvals / Knowledge-base / full Chat)? These turns get the doc page
  * tools injected AMBIENTLY — same tools as the doc surface, but with the
  * weak `buildAmbientDocSkillBlock` steering (chat-first, author a page only
  * on an explicit ask) instead of the page-first protocol. Coordinator /
@@ -2871,16 +2871,45 @@ export function chatRoutes(options: WebChatOptions): Router {
           assistantClearance: assistant.clearance ?? null,
           sessionClearance: session.effectiveClearance,
         })
+        // Both refusals end the turn before ANY state is written, so the
+        // only trace they used to leave was the SSE frame — and an autoSend
+        // build seed renders that nowhere (the dock stays collapsed, doc.md
+        // -> "Building a page from the landing"). On 2026-09-01 a doc dock
+        // that had resumed a `notification` row refused every re-addressed
+        // send for ~50 minutes and NOTHING recorded it: no session, no
+        // message, no event, no log. A pre-turn refusal that writes no state
+        // is exactly the one that has to log, or the incident is invisible
+        // to the user AND to whoever is asked why nothing happened.
+        const logSendRefusal = (errorType: string) => {
+          options.analytics?.logEvent({
+            userId: user.id,
+            assistantId: assistant.id,
+            sessionId: session.id,
+            eventName: 'chat_setup_error', channelType: 'web',
+            metadata: {
+              error_type: sanitize(errorType),
+              stage: sanitize('session_binding'),
+              session_channel_type: sanitize(session.channelType),
+              session_app_origin: sanitize(session.appOrigin ?? ''),
+              session_assistant_id: sanitize(session.assistantId),
+            },
+          })
+        }
         if (verdict === 'clearance_refused') {
           sendEvent('error', {
             code: 'assistant_clearance_exceeds_room',
             error: 'That assistant is cleared above this room and cannot answer here.',
           })
+          logSendRefusal('assistant_clearance_exceeds_room')
           res.end()
           return
         }
         if (verdict !== 'allow') {
-          sendEvent('error', { error: 'Session does not belong to this assistant' })
+          sendEvent('error', {
+            code: 'session_assistant_mismatch',
+            error: 'Session does not belong to this assistant',
+          })
+          logSendRefusal('session_assistant_mismatch')
           res.end()
           return
         }
@@ -2896,7 +2925,24 @@ export function chatRoutes(options: WebChatOptions): Router {
       // session is owner-only. (WS3 session-resume scoping, 2026-07-07.)
       const sessionDenied = await gateSessionRead(user.id, session)
       if (sessionDenied) {
-        sendEvent('error', { error: sessionDenied.error })
+        sendEvent('error', {
+          code: 'session_access_denied',
+          error: sessionDenied.error,
+        })
+        // Same reasoning as the binding refusals above: nothing is written,
+        // so without this the refusal leaves no trace anywhere.
+        options.analytics?.logEvent({
+          userId: user.id,
+          assistantId: assistant.id,
+          sessionId: session.id,
+          eventName: 'chat_setup_error', channelType: 'web',
+          metadata: {
+            error_type: sanitize('session_access_denied'),
+            stage: sanitize('session_binding'),
+            session_channel_type: sanitize(session.channelType),
+            session_app_origin: sanitize(session.appOrigin ?? ''),
+          },
+        })
         res.end()
         return
       }
@@ -2968,6 +3014,26 @@ export function chatRoutes(options: WebChatOptions): Router {
       ) => {
         sendEvent(event, data)
         publishRoomActivity(event, roomData)
+      }
+      // Human control events are rare and may originate from a second client
+      // (the focused Live view) while the original chat POST is still open.
+      // Mirror these unconditionally so every authority-checked control
+      // surface observes the decision/acknowledgement. High-volume status,
+      // tool, and token activity keeps the room-or-disconnected gate above.
+      const sendControlActivityEvent = (
+        event: string,
+        data: Record<string, unknown>,
+        relayData: Record<string, unknown> = data,
+      ) => {
+        sendEvent(event, data)
+        publishRoomTurnActivity({
+          mirror: true,
+          sessionId: session.id,
+          senderUserId: user.id,
+          event,
+          data: relayData,
+          publishSessionEvent,
+        })
       }
 
       // ── Live-turn guard (migration 424 lease) ─────────────────────
@@ -4476,7 +4542,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       const docCtx = onDocSurface
       const docSkillTurn = docCtx
       // The app-web workspace surfaces (Brain / Studio / Workflow / Approvals /
-      // Knowledge-base) get the doc tools too, but with the AMBIENT steering
+      // Knowledge-base / full Chat) get the doc tools too, but with AMBIENT steering
       // (chat-first, author only on an explicit ask). `docToolsTurn` gates the
       // tool injection + the post-turn auto-title pass; every research /
       // coordinator / outline / presence gate stays keyed to the doc-only
@@ -4578,6 +4644,10 @@ export function chatRoutes(options: WebChatOptions): Router {
       let docOutlineBlockCount = 0
       let docPageBlockCount = 0
       let docPageVersion = 0
+      // Full Chat room Page pins become edit authority only after the same
+      // fresh workspace/clearance resolution that renders their index line.
+      // Other surfaces never receive this supplemental target set.
+      let pinnedPageEditTargets: ResolvedPinnedPageTarget[] = []
 
       // Provenance split (2026-08-01): private runtime metadata stays in the
       // trusted system channel. Only representations of content actually
@@ -4602,7 +4672,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             ? (docSkillBlockStr = buildAmbientDocSkillBlock({
                 teamName: workspaceIdentity?.name,
                 teamPurpose: workspaceIdentity?.purpose ?? undefined,
-                // `onAppSurface` guarantees appOrigin is one of the five
+                // `onAppSurface` guarantees appOrigin is one of the ambient
                 // workspace surfaces (APP_SURFACE_ORIGINS) — the line tells
                 // the model which view the dock is mounted over, pairing
                 // with the client's "Asking about <surface>" chip.
@@ -4695,12 +4765,15 @@ export function chatRoutes(options: WebChatOptions): Router {
       // resolver failure costs the block, never the turn.
       if (isRoomSession && assistant.workspaceId) {
         try {
-          const pinBlock = await buildPinnedContextBlock({
+          const pinnedContext = await resolvePinnedContext({
             sessionId: session.id,
             workspaceId: assistant.workspaceId,
             clearance: session.effectiveClearance,
           })
-          if (pinBlock) userVisibleContextParts.push(pinBlock)
+          if (pinnedContext.block) userVisibleContextParts.push(pinnedContext.block)
+          if (session.appOrigin === 'chat') {
+            pinnedPageEditTargets = pinnedContext.pageTargets
+          }
         } catch (err) {
           console.warn('[chat] pinned-context resolution failed:', err)
         }
@@ -5370,6 +5443,12 @@ export function chatRoutes(options: WebChatOptions): Router {
               typeof requestedDocViewId === 'string' && requestedDocViewId
                 ? requestedDocViewId
                 : null,
+            // Full Chat has no open `docViewId`. Readable Page pins from this
+            // exact room are the only existing-page targets the gateway may
+            // admit, and inject.ts re-anchors the child mutation tools to the
+            // selected id after validation.
+            editPageTargets:
+              session.appOrigin === 'chat' ? pinnedPageEditTargets : [],
             anchorBlockId:
               typeof requestedDocAnchorBlockId === 'string' && requestedDocAnchorBlockId
                 ? requestedDocAnchorBlockId
@@ -6921,6 +7000,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                         description,
                         displayLines,
                         allowPersistentApproval,
+                        ...(turnLeaseToken ? { turnLeaseToken } : {}),
                         ...(decisionPlaybookContext.decisionApplicationId
                           ? { decisionApplicationId: decisionPlaybookContext.decisionApplicationId }
                           : {}),
@@ -7392,7 +7472,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                 // promotes the queued chip to a real user bubble, and starts a
                 // fresh assistant bubble — without it the reply written BEFORE
                 // this message would look like the answer to it.
-                sendEvent('input_applied', {
+                sendControlActivityEvent('input_applied', {
                   inputId: queuedInput.id,
                   mode: event.mode,
                   messageId: storedQueued.id,
@@ -7438,23 +7518,25 @@ export function chatRoutes(options: WebChatOptions): Router {
             const enrichedInput = await enrichConfirmation(event.request.toolName, event.request.input)
             const displayName = getToolDisplayName(event.request.toolName)
 
-            sendEvent('tool_confirmation_required', {
+            const directConfirmation = {
               toolCallId: event.request.toolCallId,
+              approvalId: event.request.approvalId,
               toolName: event.request.toolName,
               displayName,
               input: enrichedInput,
               description: event.request.description,
               displayLines: event.request.displayLines,
               allowPersistentApproval: event.request.allowPersistentApproval ?? false,
-            })
+            }
             // Suspended turns are visible in the room (D8/T11): every viewer
             // sees the pending card; the SERVER gates who may act on it (the
             // addresser or a workspace admin — the /confirm check below).
-            // Off rooms the same mirror fires once the direct stream is dead
-            // (2026-08-24): a confirmation raised after the cut used to be
-            // written to the dead socket alone and park for its 24h timeout.
-            publishRoomActivity('tool_confirmation_required', {
+            // Off rooms the control mirror is unconditional: Live can be open
+            // alongside a healthy direct chat stream, and a confirmation
+            // raised there must not remain visible only to the original tab.
+            sendControlActivityEvent('tool_confirmation_required', directConfirmation, {
               toolCallId: event.request.toolCallId,
+              approvalId: event.request.approvalId,
               toolName: event.request.toolName,
               displayName,
               input: enrichedInput,

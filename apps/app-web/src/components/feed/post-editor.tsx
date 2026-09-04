@@ -19,12 +19,15 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   Check,
   Copy,
   Heart,
   Link2,
   MessageCircle,
+  Pencil,
   Plus,
   Repeat2,
   Trash2,
@@ -59,6 +62,7 @@ import {
   markFeedReadyPostPosted,
   rejectFeedDraft,
   saveFeedSessionDraft,
+  updateFeedDraftSessionTitle,
   type FeedDraftSessionSummary,
   type FeedSavedDraft,
 } from "@/lib/api/feed";
@@ -396,6 +400,10 @@ function PostPane({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
+  const [titleDirty, setTitleDirty] = useState(false);
+  const [titleSaving, setTitleSaving] = useState(false);
+  const [viewMode, setViewMode] = useState<"edit" | "preview">("edit");
   const [postFormat, setPostFormat] = useState<FeedPostFormat>("post");
   const [privateBrief, setPrivateBrief] = useState("");
   const [threadSegments, setThreadSegments] = useState<string[]>(["", ""]);
@@ -405,6 +413,8 @@ function PostPane({
     description: "",
   });
   const compositionLoadedRef = useRef(false);
+  const richCopyRef = useRef<HTMLDivElement>(null);
+  const cancelTitleBlurRef = useRef(false);
 
   // The operator's fork. Null until they diverge from a proposal (D17).
   const [ownText, setOwnText] = useState<string | null>(null);
@@ -456,6 +466,11 @@ function PostPane({
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    setTitleDraft("");
+    setTitleDirty(false);
+  }, [sessionId]);
 
   const committed = useMemo(
     () =>
@@ -619,6 +634,41 @@ function PostPane({
     }
   }
 
+  async function saveTitle() {
+    if (!session || !titleDirty || titleSaving) return;
+    const title = titleDraft.trim();
+    const persisted = displayPostTitle(session.title);
+    if (!title) {
+      setTitleDraft(persisted);
+      setTitleDirty(false);
+      return;
+    }
+    if (title === persisted) {
+      setTitleDraft(title);
+      setTitleDirty(false);
+      return;
+    }
+    setTitleSaving(true);
+    setError(null);
+    try {
+      const result = await updateFeedDraftSessionTitle(
+        assistantId,
+        sessionId,
+        title,
+      );
+      if (!result.ok) {
+        setError(result.error ?? te.actionFailed);
+        return;
+      }
+      setSession((current) => current ? { ...current, title: result.title } : current);
+      setTitleDraft(displayPostTitle(result.title));
+      setTitleDirty(false);
+      notifyFeedPostsChanged();
+    } finally {
+      setTitleSaving(false);
+    }
+  }
+
   async function copyCaption() {
     const copy = postFormat === "thread"
       ? threadSegments
@@ -629,7 +679,23 @@ function PostPane({
         : selected?.text ?? "";
     if (!copy) return;
     try {
-      await navigator.clipboard.writeText(copy);
+      const richHtml = postFormat === "thread"
+        ? null
+        : richCopyRef.current?.innerHTML ?? null;
+      if (
+        richHtml
+        && typeof ClipboardItem !== "undefined"
+        && typeof navigator.clipboard.write === "function"
+      ) {
+        await navigator.clipboard.write([
+          new ClipboardItem({
+            "text/plain": new Blob([copy], { type: "text/plain" }),
+            "text/html": new Blob([richHtml], { type: "text/html" }),
+          }),
+        ]);
+      } else {
+        await navigator.clipboard.writeText(copy);
+      }
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch {
@@ -712,15 +778,54 @@ function PostPane({
       <main className="min-w-0 bg-background lg:overflow-y-auto">
         <div className="min-h-full p-4 sm:p-6 xl:p-8">
           <div className="space-y-6">
-            <header className="flex flex-wrap items-start gap-3 border-b border-border/60 pb-5">
+            <header className="flex flex-wrap items-center gap-3 border-b border-border/60 pb-4">
               <div className="flex min-w-0 flex-1 items-center gap-2.5">
                 <span className="inline-flex size-8 items-center justify-center rounded-xl border border-border/60 bg-muted/40">
                   <PlatformIcon platform={platform} className="size-4" />
                 </span>
-                <div className="min-w-0">
-                  <h1 className="truncate text-[15px] font-semibold">
-                    {session ? displayPostTitle(session.title) : te.newPost}
-                  </h1>
+                <div className="min-w-0 flex-1">
+                  {session ? (
+                    <div className="group/title flex min-w-0 items-center gap-1.5">
+                      <input
+                        type="text"
+                        value={titleDirty ? titleDraft : displayPostTitle(session.title)}
+                        maxLength={200}
+                        disabled={titleSaving}
+                        aria-label={te.editTitle}
+                        title={te.editTitle}
+                        onFocus={() => {
+                          if (!titleDirty) setTitleDraft(displayPostTitle(session.title));
+                        }}
+                        onChange={(event) => {
+                          setTitleDraft(event.target.value);
+                          setTitleDirty(true);
+                        }}
+                        onBlur={() => {
+                          if (cancelTitleBlurRef.current) {
+                            cancelTitleBlurRef.current = false;
+                            return;
+                          }
+                          void saveTitle();
+                        }}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            event.preventDefault();
+                            event.currentTarget.blur();
+                          } else if (event.key === "Escape") {
+                            event.preventDefault();
+                            cancelTitleBlurRef.current = true;
+                            setTitleDraft(displayPostTitle(session.title));
+                            setTitleDirty(false);
+                            event.currentTarget.blur();
+                          }
+                        }}
+                        className="h-7 min-w-0 w-full truncate rounded-md border border-transparent bg-transparent px-1 text-[15px] font-semibold outline-none transition-colors hover:border-border/70 focus:border-border focus:bg-background disabled:opacity-60"
+                      />
+                      <Pencil className="size-3 shrink-0 text-muted-foreground/70" aria-hidden />
+                    </div>
+                  ) : (
+                    <h1 className="truncate text-[15px] font-semibold">{te.newPost}</h1>
+                  )}
                   <p className="mt-0.5 text-[11px] text-muted-foreground">
                     {session?.replyTarget
                       ? format(te.replyingTo, { handle: session.replyTarget.authorHandle })
@@ -728,7 +833,88 @@ function PostPane({
                   </p>
                 </div>
               </div>
+              <div
+                role="group"
+                aria-label={te.viewModeAria}
+                className="inline-flex h-8 items-center rounded-lg border border-border/70 bg-muted/35 p-0.5"
+              >
+                {(["edit", "preview"] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setViewMode(mode)}
+                    aria-pressed={viewMode === mode}
+                    className={cn(
+                      "h-7 rounded-md px-2.5 text-[11px] font-medium transition-colors",
+                      viewMode === mode
+                        ? "bg-background text-foreground shadow-xs"
+                        : "text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    {mode === "edit" ? te.editMode : te.previewMode}
+                  </button>
+                ))}
+              </div>
               <StatusLabel status={status} label={t.posts.status[status]} />
+              <div className="flex flex-wrap items-center justify-end gap-1.5">
+                {status === "drafting" ? (
+                  <Button
+                    size="sm"
+                    type="button"
+                    onClick={() => void commitVersion()}
+                    disabled={busy || !compositionValid}
+                    className="bg-foreground text-background !shadow-none [background-image:none] hover:bg-foreground/90 hover:!shadow-none"
+                  >
+                    {te.useThisVersion}
+                  </Button>
+                ) : status === "review" ? (
+                  <>
+                    {compositionDirty ? (
+                      <Button
+                        size="sm"
+                        type="button"
+                        onClick={() => void commitVersion()}
+                        disabled={busy || !compositionValid}
+                        className="bg-foreground text-background !shadow-none [background-image:none] hover:bg-foreground/90 hover:!shadow-none"
+                      >
+                        {te.saveChanges}
+                      </Button>
+                    ) : null}
+                    <Button
+                      size="sm"
+                      type="button"
+                      onClick={() => void act("approve")}
+                      disabled={busy || compositionDirty}
+                      title={compositionDirty ? te.saveBeforeApprove : undefined}
+                      className="bg-foreground text-background !shadow-none [background-image:none] hover:bg-foreground/90 hover:!shadow-none"
+                    >
+                      <Check className="size-3.5" aria-hidden />
+                      {te.approve}
+                    </Button>
+                    <Button size="sm" variant="outline" type="button" onClick={() => void act("reject")} disabled={busy}>
+                      <X className="size-3.5" aria-hidden />
+                      {te.reject}
+                    </Button>
+                  </>
+                ) : status === "ready" ? (
+                  <Button
+                    size="sm"
+                    type="button"
+                    onClick={() => void act("posted")}
+                    disabled={busy}
+                    className="bg-foreground text-background !shadow-none [background-image:none] hover:bg-foreground/90 hover:!shadow-none"
+                  >
+                    {te.markPosted}
+                  </Button>
+                ) : null}
+                <Button size="sm" variant="outline" type="button" onClick={() => void copyCaption()} disabled={!compositionText}>
+                  {copied ? <Check className="size-3.5" aria-hidden /> : <Copy className="size-3.5" aria-hidden />}
+                  {copied ? te.copied : te.copyCaption}
+                </Button>
+                <Button variant="outline" size="icon" type="button" onClick={() => void removePost()} disabled={busy} aria-label={te.delete} title={te.delete} className="size-8 text-muted-foreground hover:text-destructive">
+                  <Trash2 className="size-3.5" aria-hidden />
+                </Button>
+              </div>
             </header>
 
             {error ? (
@@ -751,8 +937,9 @@ function PostPane({
               </section>
             ) : null}
 
-            <div className="grid min-w-0 gap-6 2xl:grid-cols-[minmax(420px,1fr)_minmax(320px,0.72fr)]">
-              <section className="min-w-0 space-y-4">
+            <section className="min-w-0 space-y-4">
+              {viewMode === "edit" ? (
+                <>
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <span className="text-[11px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
                     {te.editorLabel}
@@ -878,86 +1065,36 @@ function PostPane({
                     });
                   }}
                 />
-
-                <div className="flex flex-wrap items-center gap-2 border-t border-border/60 pt-4">
-                  {status === "drafting" ? (
-                    <Button
-                      type="button"
-                      onClick={() => void commitVersion()}
-                      disabled={busy || !compositionValid}
-                      className="bg-foreground text-background !shadow-none [background-image:none] hover:bg-foreground/90 hover:!shadow-none"
-                    >
-                      {te.useThisVersion}
-                    </Button>
-                  ) : status === "review" ? (
-                    <>
-                      {compositionDirty ? (
-                        <Button
-                          type="button"
-                          onClick={() => void commitVersion()}
-                          disabled={busy || !compositionValid}
-                          className="bg-foreground text-background !shadow-none [background-image:none] hover:bg-foreground/90 hover:!shadow-none"
-                        >
-                          {te.saveChanges}
-                        </Button>
-                      ) : null}
-                      <Button
-                        type="button"
-                        onClick={() => void act("approve")}
-                        disabled={busy || compositionDirty}
-                        title={compositionDirty ? te.saveBeforeApprove : undefined}
-                        className="bg-foreground text-background !shadow-none [background-image:none] hover:bg-foreground/90 hover:!shadow-none"
-                      >
-                        <Check className="size-3.5" aria-hidden />
-                        {te.approve}
-                      </Button>
-                      <Button variant="outline" type="button" onClick={() => void act("reject")} disabled={busy}>
-                        <X className="size-3.5" aria-hidden />
-                        {te.reject}
-                      </Button>
-                    </>
-                  ) : status === "ready" ? (
-                    <Button
-                      type="button"
-                      onClick={() => void act("posted")}
-                      disabled={busy}
-                      className="bg-foreground text-background !shadow-none [background-image:none] hover:bg-foreground/90 hover:!shadow-none"
-                    >
-                      {te.markPosted}
-                    </Button>
-                  ) : null}
-
-                  <Button variant="outline" type="button" onClick={() => void copyCaption()} disabled={!compositionText}>
-                    {copied ? <Check className="size-3.5" aria-hidden /> : <Copy className="size-3.5" aria-hidden />}
-                    {copied ? te.copied : te.copyCaption}
-                  </Button>
-                  <div className="flex-1" />
-                  <Button variant="outline" size="icon" type="button" onClick={() => void removePost()} disabled={busy} aria-label={te.delete} title={te.delete} className="text-muted-foreground hover:text-destructive">
-                    <Trash2 className="size-3.5" aria-hidden />
-                  </Button>
+                </>
+              ) : (
+                <div className="mx-auto w-full max-w-4xl space-y-3">
+                  <div className="flex items-center justify-between text-[11px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
+                    <span>{te.previewLabel}</span>
+                    <span className="normal-case tracking-normal">
+                      {postFormat === "post" && connected
+                        ? te.connectedDelivery
+                        : te.manualDelivery}
+                    </span>
+                  </div>
+                  <PlatformPostPreview
+                    platform={platform}
+                    postFormat={postFormat}
+                    text={selected?.text ?? ""}
+                    threadSegments={threadSegments}
+                    article={article}
+                    accountName={assistantName || te.previewAccount}
+                    brand={workspace.brand}
+                  />
                 </div>
-              </section>
+              )}
 
-              <aside className="min-w-0 space-y-3 2xl:sticky 2xl:top-0 2xl:self-start">
-                <div className="flex items-center justify-between text-[11px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
-                  <span>{te.previewLabel}</span>
-                  <span className="normal-case tracking-normal">
-                    {postFormat === "post" && connected
-                      ? te.connectedDelivery
-                      : te.manualDelivery}
-                  </span>
-                </div>
-                <PlatformPostPreview
-                  platform={platform}
-                  postFormat={postFormat}
-                  text={selected?.text ?? ""}
-                  threadSegments={threadSegments}
-                  article={article}
-                  accountName={assistantName || te.previewAccount}
-                  brand={workspace.brand}
-                />
-              </aside>
-            </div>
+              <div ref={richCopyRef} className="hidden" aria-hidden>
+                <RichPostBody text={selected?.text ?? ""} />
+                {postFormat === "article" && article.sourceUrl ? (
+                  <p><a href={article.sourceUrl}>{article.sourceUrl}</a></p>
+                ) : null}
+              </div>
+            </section>
           </div>
         </div>
       </main>
@@ -1236,9 +1373,16 @@ function PlatformPostPreview({
                   <span className="truncate text-[12px] text-muted-foreground">@{handle}</span>
                 ) : null}
               </div>
-              <p className={cn("mt-1.5 whitespace-pre-wrap break-words text-[14px] leading-relaxed", !part && "text-muted-foreground/60")}>
-                {part || te.previewEmpty}
-              </p>
+              {part ? (
+                <RichPostBody
+                  text={part}
+                  className="mt-1.5 break-words text-[14px] leading-relaxed"
+                />
+              ) : (
+                <p className="mt-1.5 text-[14px] leading-relaxed text-muted-foreground/60">
+                  {te.previewEmpty}
+                </p>
+              )}
               {postFormat === "article" && index === 0 ? (
                 <div className="mt-3 overflow-hidden rounded-xl border border-border/70 bg-muted/25">
                   <div className="flex aspect-[2.2/1] items-center justify-center border-b border-border/60 bg-muted/50 text-muted-foreground">
@@ -1264,6 +1408,39 @@ function PlatformPostPreview({
           </article>
         ))}
       </div>
+    </div>
+  );
+}
+
+/**
+ * The portable styling surface shared by Preview and rich clipboard copy.
+ * The allowlist matches the four toolbar controls; unsupported Markdown is
+ * unwrapped to readable text instead of becoming provider-shaped HTML.
+ */
+function RichPostBody({
+  text,
+  className,
+}: {
+  text: string;
+  className?: string;
+}) {
+  return (
+    <div
+      className={cn(
+        "whitespace-pre-wrap",
+        "[&_p:not(:first-child)]:mt-3 [&_strong]:font-semibold [&_em]:italic",
+        "[&_ul]:my-3 [&_ul]:list-disc [&_ul]:space-y-1 [&_ul]:pl-5",
+        "[&_ol]:my-3 [&_ol]:list-decimal [&_ol]:space-y-1 [&_ol]:pl-5",
+        className,
+      )}
+    >
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        allowedElements={["p", "strong", "em", "ul", "ol", "li", "br"]}
+        unwrapDisallowed
+      >
+        {text}
+      </ReactMarkdown>
     </div>
   );
 }

@@ -83,7 +83,7 @@ describe("[COMP:app-web/feed-post-versions] post version model", () => {
   it("knows each platform's copy limit", () => {
     expect(platformLimit("twitter")).toBe(280);
     expect(platformLimit("threads")).toBe(500);
-    expect(platformLimit("linkedin")).toBe(3000);
+    expect(platformLimit("linkedin")).toBeNull();
     expect(platformLimit("mastodon")).toBeNull();
   });
 
@@ -134,6 +134,12 @@ describe("[COMP:app-web/feed-post-versions] post version model", () => {
     });
     // No known limit: never over, never near.
     expect(counterState("x".repeat(9_000), "mastodon")).toMatchObject({
+      limit: null,
+      over: false,
+      near: false,
+    });
+    expect(counterState("x".repeat(9_000), "linkedin")).toMatchObject({
+      count: 9_000,
       limit: null,
       over: false,
       near: false,

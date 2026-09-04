@@ -29,6 +29,7 @@ import type http from 'node:http'
 
 import express, { type Express } from 'express'
 import { createTelegramApi } from '@use-brian/channels'
+import { isOpaqueDesktopBearerRequest } from './cors-policy.js'
 import {
   vertexTransport, resolveVertexTokenSource, aiStudioTransport,
   createEmbedderForAdapter, type EmbedderAdapterConfig, type GoogleTransport, type MediaBackend,
@@ -38,7 +39,7 @@ import {
   DASHSCOPE_INTL_BASE_URL, DASHSCOPE_INTL_LABEL, wrapProvider,
   createBaseTools, createGoogleMapsTools, GOOGLE_MAPS_GROUNDING_MCP_URL, LAYER_1_SYSTEM_PROMPT,
   createWorkerManager, createWorkerTools,
-  createSchedulingTools, createPollWorker,
+  createSchedulingTools, createPollWorker, createBatchWorker,
   startJitteredInterval, stopJitteredInterval,
   createCacheTool, createReadFileTool, distillFileToText,
   createRateLimiter, sanitizeDeep,
@@ -603,6 +604,13 @@ import { createControlPlaneReader } from './agent-surface/control-plane-reader.j
 import { buildAgentToolset } from './agent-surface/toolset.js'
 import { createDbBrainKeyStore } from './db/brain-keys-store.js'
 import { brainKeysRoutes } from './routes/brain-keys.js'
+import { createProgrammaticCaptureStore } from './db/programmatic-capture-store.js'
+import { createDbProgrammaticBatchStore } from './db/pending-ingest-batches-store.js'
+import {
+  createProgrammaticBatchProcessor,
+  createProgrammaticCaptureRouter,
+} from './ingest/programmatic-capture.js'
+import { programmaticCaptureRoutes } from './routes/programmatic-capture.js'
 import { createDbWorkspaceLlmProviderSettingsStore, loadLlmProviderKeyEncryptionKey } from './db/workspace-llm-provider-settings.js'
 import { workspaceLlmKeysRoutes } from './routes/workspace-llm-keys.js'
 import { createDbWorkspaceCustomLlmEndpointStore } from './db/workspace-custom-llm-endpoints.js'
@@ -1352,7 +1360,17 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       res.header('Access-Control-Allow-Origin', origin)
       res.header('Access-Control-Allow-Credentials', 'true')
       res.header('Vary', 'Origin')
-    } else if (origin === 'null' && isHomeAppBridgePath(req.path)) {
+    } else if (
+      origin === 'null'
+      && (
+        isHomeAppBridgePath(req.path)
+        || isOpaqueDesktopBearerRequest({
+          path: req.path,
+          authorization: req.headers.authorization,
+          requestedHeaders: req.headers['access-control-request-headers'],
+        })
+      )
+    ) {
       // A custom Home app runs in a sandbox with no `allow-same-origin`, so
       // its fetches carry `Origin: null`. Without this the bridge is
       // unreachable from the only place it is ever called — the browser
@@ -1364,12 +1382,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       // bridge authenticates by BEARER TOKEN, which an attacker's frame does
       // not have — the app's token is minted per app, per viewer, per grant.
       //
-      // Scoped to the bridge paths for the same reason: everything else here
-      // is session-authed, and none of it should answer an opaque origin.
+      // The installed file:// renderer is admitted only when the request
+      // carries bearer auth (or preflights it), plus the explicit-token refresh
+      // endpoint. Never enable credentials for an opaque origin.
       res.header('Access-Control-Allow-Origin', 'null')
       res.header('Vary', 'Origin')
     }
-    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Client-Timezone')
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Content-Range, Authorization, X-Client-Timezone')
     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
     if (req.method === 'OPTIONS') { res.sendStatus(204); return }
     next()
@@ -1876,6 +1895,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const customChannelStore = createCustomChannelStore()
   const apiKeyStore = createDbApiKeyStore()
   const brainKeyStore = createDbBrainKeyStore()
+  const programmaticCaptureStore = createProgrammaticCaptureStore()
   const llmProviderEncryptionKey = (() => {
     if (!env.LLM_PROVIDER_KEY_ENCRYPTION_KEY) return null
     try {
@@ -2567,6 +2587,22 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const chatEpisodeIngestor: ChatEpisodeIngestor =
     builtIngestors?.chatEpisodeIngestor ?? (async () => {})
   const brainEpisodeIngestor: BrainEpisodeIngestor | undefined = builtIngestors?.brainEpisodeIngestor
+  const programmaticCapture = brainEpisodeIngestor
+    ? createProgrammaticCaptureRouter({
+        store: programmaticCaptureStore,
+        ingest: brainEpisodeIngestor,
+      })
+    : undefined
+  const programmaticBatchWorker = brainEpisodeIngestor
+    ? createBatchWorker({
+        store: createDbProgrammaticBatchStore(),
+        processBatch: createProgrammaticBatchProcessor({
+          store: programmaticCaptureStore,
+          ingest: brainEpisodeIngestor,
+        }),
+      })
+    : null
+  if (runWorkers) programmaticBatchWorker?.start()
   // The message store owns the enrichment ledger — it builds and leases the
   // windows — so this worker pulls work rather than discovering it. That leaves
   // one owner of "which messages have been enriched", and a consumer that dies
@@ -4499,6 +4535,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     approvalsStore: pendingApprovalsStore,
     writeToolDeps: {
       enablementStore: workspaceSkillEnablementStore,
+      workspaceSkillStore,
+      listWorkspaceAssistants: async (userId, workspaceId) =>
+        (await listAccessibleAssistants(userId, workspaceId)).map((a) => ({
+          id: a.id,
+          name: a.name,
+        })),
       mcpSettingsStore,
       connectorInstanceStore,
       connectorGrantStore,
@@ -4772,6 +4814,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // without doc-sync. See brain-mcp/tools.ts → buildDocPageTools.
     docTools: { savedViewStore, docPageStore, docGateway, pageTemplateStore },
     ingest: brainEpisodeIngestor,
+    programmaticCapture,
     agentTools: { reads: agentToolset.reads, writes: agentToolset.writes },
     // Powers the searchRecording tool's vector arm (recording-to-brain).
     embedder: sharedEmbedder,
@@ -5207,6 +5250,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     communitySkills: communitySkillRegistry,
     workspaceSkillStore,
     workspaceSkillEnablementStore,
+    // mig 492: the assistant-side disable has to materialise an
+    // `all_assistants` skill into per-assistant rows before clearing the flag.
+    listWorkspaceAssistants: async (userId, workspaceId) =>
+      (await listAccessibleAssistants(userId, workspaceId)).map((a) => ({
+        id: a.id,
+        name: a.name,
+      })),
     capabilityStore,
     assistantConnectorGrantsStore,
     analytics,
@@ -5303,6 +5353,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use('/api/invitations', optionalAuth(env.JWT_SECRET), invitationRouter)
 
   app.use('/api/workspaces/:workspaceId/brain-keys', requireAuth(env.JWT_SECRET), brainKeysRoutes({ brainKeyStore, workspaceStore }))
+  app.use(
+    '/api/workspaces/:workspaceId/programmatic-capture-profiles',
+    requireAuth(env.JWT_SECRET),
+    programmaticCaptureRoutes({ store: programmaticCaptureStore, workspaceStore }),
+  )
 
   if (llmProviderSettingsStore) {
     app.use('/api/workspaces/:workspaceId/llm-keys', requireAuth(env.JWT_SECRET), workspaceLlmKeysRoutes({ llmProviderSettingsStore, workspaceStore }))
@@ -8288,6 +8343,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     decisionReflectionWorker.stop()
     embeddingWorker.stop()
     pollWorker.stop()
+    programmaticBatchWorker?.stop()
     runQueueWorker.stop()
     crmDomainEventWorker.stop()
     knowledgeSyncWorker.stop()

@@ -1,5 +1,5 @@
 /**
- * SDK for the askQuestion suspend-resume routes — app-web port.
+ * SDK for durable current-turn input recovery — app-web port.
  *
  *   GET  /api/sessions/:sessionId/pending
  *   POST /api/sessions/:sessionId/answer/:approvalId
@@ -9,12 +9,14 @@
  * separate copy the same way the `/api/views/*` SDK is duplicated — see
  * apps/app-web/CLAUDE.md). The floating doc chat remains visually compact;
  * Chat's shared-room Work Bench consumes the worker summary to show the
- * delegated assistants that are currently active.
+ * delegated assistants that are currently active. The additive
+ * `toolConfirmation` response restores generic approval cards on re-entry.
  *
  * Spec: docs/architecture/engine/askquestion-suspend-resume.md.
  * [COMP:app-web/pending-questions]
  */
 
+import type { PendingConfirmation } from "@use-brian/chat-ui";
 import { authFetch } from "@/lib/auth-fetch";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
@@ -25,6 +27,39 @@ export type PendingQuestion = {
   expiresAt: string | null;
   createdAt: string | null;
 };
+
+export type PendingToolConfirmation = {
+  approvalId: string;
+  toolName: string;
+  input: Record<string, unknown>;
+  description: string | null;
+  displayLines: string[];
+  allowPersistentApproval: boolean;
+  expiresAt: string | null;
+  createdAt: string | null;
+};
+
+export type PendingSessionInput = {
+  pending: PendingQuestion | null;
+  toolConfirmation: PendingToolConfirmation | null;
+};
+
+export function toRestoredConfirmation(
+  row: PendingToolConfirmation,
+  sessionId: string,
+): PendingConfirmation {
+  return {
+    toolCallId: `approval:${row.approvalId}`,
+    approvalId: row.approvalId,
+    restored: true,
+    toolName: row.toolName,
+    input: row.input,
+    description: row.description ?? undefined,
+    displayLines: row.displayLines.length > 0 ? row.displayLines : undefined,
+    sessionId,
+    status: "pending",
+  };
+}
 
 export type WorkerRunSummary = {
   total: number;
@@ -55,15 +90,24 @@ export async function fetchWorkerRunSummary(
   return body.summary ?? EMPTY_WORKER_RUN_SUMMARY;
 }
 
-export async function fetchPendingQuestion(
+export async function fetchPendingSessionInput(
   sessionId: string,
-): Promise<PendingQuestion | null> {
+): Promise<PendingSessionInput> {
   const res = await authFetch(
     `${API_URL}/api/sessions/${encodeURIComponent(sessionId)}/pending`,
   );
-  if (!res.ok) return null;
-  const body = (await res.json()) as { pending: PendingQuestion | null };
-  return body.pending;
+  if (!res.ok) return { pending: null, toolConfirmation: null };
+  const body = (await res.json()) as Partial<PendingSessionInput>;
+  return {
+    pending: body.pending ?? null,
+    toolConfirmation: body.toolConfirmation ?? null,
+  };
+}
+
+export async function fetchPendingQuestion(
+  sessionId: string,
+): Promise<PendingQuestion | null> {
+  return (await fetchPendingSessionInput(sessionId)).pending;
 }
 
 export type SubmitAnswerResult =

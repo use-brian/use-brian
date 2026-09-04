@@ -5,8 +5,8 @@
  * `apps/feed-web/src/app/w/[workspaceId]/voice/page.tsx`
  * (docs/plans/feed-web-consolidation.md §7.3): the team-scope memories that
  * shape draft tone and content, with admin-gated add/edit/delete forms, a
- * per-type filter strip, and a per-card "Discuss" that seeds the floating
- * tuning chat with the rule quoted in the composer.
+ * per-type filter strip, a compact rule navigator, and a readable selected
+ * rule whose refine action seeds the floating tuning chat.
  *
  * Port deltas (disposition rules §6):
  *   - `useWorkspaceContext()` → `useFeedWorkspace()`.
@@ -18,7 +18,8 @@
  *   - The form's native `<select>`s → `@/components/ui/select` (the repo's
  *     no-native-dialogs rule); fixed enum options get label maps with a
  *     raw-value fallback for arbitrary server data.
- *   - "Discuss" seeds the FEED bus (`requestFeedChatSeed`, `feed-chat-seed`).
+ *   - Guided build and refine actions seed the FEED bus
+ *     (`requestFeedChatSeed`, `feed-chat-seed`).
  *   - The no-assistant state's CTA links to the feed home (`feedPath`) —
  *     feed-web's `/onboarding` route is not ported (§5 route map).
  *   - All copy via `useT().feedPage.voice`.
@@ -42,6 +43,12 @@ import { feedPath } from "@/lib/feed-nav";
 import { CardSkeletonList } from "@/components/skeleton";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   Select,
   SelectContent,
@@ -95,6 +102,81 @@ export function parseTags(raw: string): string[] {
     .split(",")
     .map((t) => t.trim())
     .filter(Boolean);
+}
+
+export type VoiceDetailBlock =
+  | { kind: "heading"; text: string }
+  | { kind: "paragraph"; text: string }
+  | { kind: "list"; ordered: boolean; items: string[] };
+
+/**
+ * Turn the plain-text memory detail into readable prose without pretending it
+ * is trusted Markdown. Imported voice analyses commonly contain short
+ * headings and dash/number lists; preserving that structure is the difference
+ * between a useful rule and one dense, raw text blob.
+ */
+export function parseVoiceDetail(raw: string): VoiceDetailBlock[] {
+  const blocks: VoiceDetailBlock[] = [];
+  let paragraph: string[] = [];
+  let list: Extract<VoiceDetailBlock, { kind: "list" }> | null = null;
+
+  const flushParagraph = () => {
+    const text = paragraph.join(" ").trim();
+    if (text) blocks.push({ kind: "paragraph", text });
+    paragraph = [];
+  };
+  const flushList = () => {
+    if (list && list.items.length > 0) blocks.push(list);
+    list = null;
+  };
+
+  for (const rawLine of raw.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) {
+      flushParagraph();
+      flushList();
+      continue;
+    }
+
+    const unordered = line.match(/^[-*]\s+(.+)$/);
+    const ordered = line.match(/^\d+[.)]\s+(.+)$/);
+    const item = unordered?.[1] ?? ordered?.[1];
+    if (item) {
+      flushParagraph();
+      const isOrdered = Boolean(ordered);
+      if (!list || list.ordered !== isOrdered) {
+        flushList();
+        list = { kind: "list", ordered: isOrdered, items: [] };
+      }
+      list.items.push(item.trim());
+      continue;
+    }
+
+    flushList();
+    if (line.endsWith(":") && line.length <= 80) {
+      flushParagraph();
+      blocks.push({ kind: "heading", text: line.slice(0, -1) });
+      continue;
+    }
+    paragraph.push(line);
+  }
+
+  flushParagraph();
+  flushList();
+  return blocks;
+}
+
+/** Resolve the previous/next rule without wrapping past the list ends. */
+export function adjacentVoiceId(
+  items: Pick<FeedVoiceMemory, "id">[],
+  currentId: string,
+  direction: -1 | 1,
+): string | null {
+  const index = items.findIndex((item) => item.id === currentId);
+  const adjacent = index + direction;
+  return index >= 0 && adjacent >= 0 && adjacent < items.length
+    ? items[adjacent]!.id
+    : null;
 }
 
 /**
@@ -230,6 +312,7 @@ export function FeedVoice({ scope }: { scope: VoiceScope }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<string>("all");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
 
   // Scope comes from the ROUTE now (feed-revamp.md D13): `/feed/voice` is
   // company-wide, `/feed/<platform>/voice` is that platform. The sidebar
@@ -380,6 +463,16 @@ export function FeedVoice({ scope }: { scope: VoiceScope }) {
     requestFeedChatSeed({ prefill: prompt });
   }
 
+  function buildVoiceInChat() {
+    const label =
+      voicePlatform === "company"
+        ? t.baselineLabel
+        : feedT.platformLabels[voicePlatform];
+    requestFeedChatSeed({
+      prefill: format(t.buildPrompt, { scope: label }),
+    });
+  }
+
   const types = useMemo(() => {
     const set = new Set<string>();
     for (const it of items) if (it.type) set.add(it.type);
@@ -412,43 +505,30 @@ export function FeedVoice({ scope }: { scope: VoiceScope }) {
     [voicePlatform, baselineRules, scopedRules],
   );
 
+  // Keep a real selection as filters, edits, and deletes reshape the list.
+  // The derived fallback avoids a blank detail pane during the effect tick.
+  const selectedMemory =
+    visible.find((memory) => memory.id === selectedId) ?? visible[0] ?? null;
+  const selectedIndex = selectedMemory
+    ? visible.findIndex((memory) => memory.id === selectedMemory.id)
+    : -1;
 
-  // One rule row — shared by the flat "All" grid and the platform view's
-  // two sections; the in-place edit card swaps in for the row being edited.
-  const renderRule = (m: FeedVoiceMemory) =>
-    editingId === m.id ? (
-      <li key={m.id} className="rounded-xl border border-border bg-card p-4 space-y-4 shadow-xs xl:col-span-2">
-        <div className="flex items-center justify-between">
-          <span className="text-sm font-medium">{t.editTitle}</span>
-          <button
-            type="button"
-            onClick={() => { setEditingId(null); setEditError(null); }}
-            className="text-muted-foreground hover:text-foreground"
-          >
-            <XIcon />
-          </button>
-        </div>
-        <VoiceForm
-          form={editForm}
-          onChange={setEditForm}
-          error={editError}
-          busy={editBusy}
-          onSubmit={submitEdit}
-          onCancel={() => { setEditingId(null); setEditError(null); }}
-          submitLabel={t.saveChanges}
-        />
-      </li>
-    ) : (
-      <MemoryCard
-        key={m.id}
-        memory={m}
-        isAdmin={isAdmin}
-        deleting={deletingId === m.id}
-        onEdit={() => startEdit(m)}
-        onDelete={() => void deleteMemory(m.id)}
-        onDiscuss={() => discussMemory(m)}
-      />
-    );
+  useEffect(() => {
+    if (!selectedMemory) {
+      setSelectedId(null);
+      return;
+    }
+    if (selectedId !== selectedMemory.id) setSelectedId(selectedMemory.id);
+  }, [selectedId, selectedMemory]);
+
+  const renderRuleListItem = (m: FeedVoiceMemory) => (
+    <VoiceRuleListItem
+      key={m.id}
+      memory={m}
+      selected={m.id === selectedMemory?.id}
+      onSelect={() => setSelectedId(m.id)}
+    />
+  );
 
   if (!primaryAssistant) {
     return (
@@ -477,7 +557,7 @@ export function FeedVoice({ scope }: { scope: VoiceScope }) {
   return (
     <div className="flex h-full min-h-0">
       <div className="min-w-0 flex-1 overflow-y-auto">
-        <div className="w-full max-w-6xl space-y-5 px-4 py-5 md:px-6 lg:px-8">
+        <div className="mx-auto w-full max-w-[1480px] space-y-5 px-4 py-5 md:px-6 lg:px-8">
           <header className="flex flex-wrap items-start justify-between gap-4 border-b border-border/60 pb-5">
             <div className="space-y-1.5">
               <div className="flex items-center gap-2">
@@ -494,29 +574,30 @@ export function FeedVoice({ scope }: { scope: VoiceScope }) {
                   : format(t.platformScopeSubtitle, { platform: scopeLabel })}
               </p>
             </div>
-            <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+            <div className="flex w-full flex-wrap items-center gap-1.5 sm:w-auto sm:justify-end">
               {isAdmin ? (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  type="button"
-                  onClick={() => void importFromHandle()}
-                >
-                  {t.importHandle}
-                </Button>
-              ) : null}
-              {isAdmin ? (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  type="button"
-                  onClick={() => void importFromSamples()}
-                >
-                  {t.importSamples}
-                </Button>
+                <DropdownMenu>
+                  <DropdownMenuTrigger
+                    render={
+                      <Button variant="outline" size="sm" type="button">
+                        {t.importMenu}
+                        <ChevronDownIcon />
+                      </Button>
+                    }
+                  />
+                  <DropdownMenuContent>
+                    <DropdownMenuItem onClick={() => void importFromHandle()}>
+                      {t.importHandle}
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => void importFromSamples()}>
+                      {t.importSamples}
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
               ) : null}
               {isAdmin && !showAdd ? (
                 <Button
+                  variant="outline"
                   size="sm"
                   type="button"
                   onClick={() => {
@@ -528,10 +609,20 @@ export function FeedVoice({ scope }: { scope: VoiceScope }) {
                     });
                     setShowAdd(true);
                   }}
-                  className="bg-foreground text-background shadow-none hover:bg-foreground/90"
                 >
                   <PlusIcon />
                   {t.injectRule}
+                </Button>
+              ) : null}
+              {isAdmin ? (
+                <Button
+                  size="sm"
+                  type="button"
+                  onClick={buildVoiceInChat}
+                  className="w-full sm:w-auto"
+                >
+                  <ChatBubbleSmallIcon />
+                  {t.buildWithChat}
                 </Button>
               ) : null}
             </div>
@@ -662,53 +753,113 @@ export function FeedVoice({ scope }: { scope: VoiceScope }) {
                 {t.emptyBodyBefore} <strong>{t.injectRule}</strong> {t.emptyBodyAfter}
               </p>
             </div>
-          ) : visible.length === 0 && filter !== "all" ? (
+          ) : visible.length === 0 ? (
             <div className="rounded-xl border border-dashed border-border bg-card/40 p-8 text-center text-xs text-muted-foreground">
-              {t.typeEmptyBefore} <strong>{typeLabel(t, filter)}</strong> {t.typeEmptyAfter}
+              {filter !== "all" ? (
+                <>
+                  {t.typeEmptyBefore} <strong>{typeLabel(t, filter)}</strong> {t.typeEmptyAfter}
+                </>
+              ) : voicePlatform === "company" ? (
+                t.baselineSectionEmpty
+              ) : (
+                format(t.platformSectionEmpty, {
+                  platform: feedT.platformLabels[voicePlatform],
+                })
+              )}
             </div>
-          ) : voicePlatform === "company" ? (
-            baselineRules.length > 0 ? (
-              <ul className="grid grid-cols-1 gap-3 pb-4 xl:grid-cols-2">
-                {baselineRules.map(renderRule)}
-              </ul>
-            ) : (
-              <p className="rounded-xl border border-dashed border-border bg-card/40 p-5 text-center text-xs text-muted-foreground">
-                {t.baselineSectionEmpty}
-              </p>
-            )
           ) : (
-            // This platform's own rules first, then the baseline it inherits.
-            // Own-before-inherited is the point of the surface: it answers
-            // "what makes this platform sound different" at a glance.
-            <div className="space-y-5 pb-4">
-              <section className="space-y-2">
-                <h2 className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                  {format(t.platformSection, {
-                    platform: feedT.platformLabels[voicePlatform],
-                  })}
-                </h2>
-                {scopedRules.length > 0 ? (
-                  <ul className="grid grid-cols-1 gap-3 xl:grid-cols-2">
-                    {scopedRules.map(renderRule)}
-                  </ul>
-                ) : (
-                  <p className="rounded-xl border border-dashed border-border bg-card/40 p-5 text-center text-xs text-muted-foreground">
-                    {format(t.platformSectionEmpty, {
-                      platform: feedT.platformLabels[voicePlatform],
-                    })}
-                  </p>
-                )}
+            <div className="grid items-start gap-4 pb-4 lg:grid-cols-[minmax(280px,360px)_minmax(0,1fr)] xl:gap-6">
+              <nav
+                aria-label={t.ruleNavigatorAria}
+                className="max-h-[50vh] space-y-5 overflow-y-auto pr-1 lg:sticky lg:top-5 lg:max-h-none lg:overflow-visible lg:pr-0"
+              >
+                {voicePlatform !== "company" ? (
+                  <section className="space-y-2">
+                    <h2 className="px-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                      {format(t.platformSection, {
+                        platform: feedT.platformLabels[voicePlatform],
+                      })}
+                    </h2>
+                    {scopedRules.length > 0 ? (
+                      <ul className="space-y-2">
+                        {scopedRules.map(renderRuleListItem)}
+                      </ul>
+                    ) : (
+                      <p className="rounded-xl border border-dashed border-border bg-card/40 p-4 text-xs leading-relaxed text-muted-foreground">
+                        {format(t.platformSectionEmpty, {
+                          platform: feedT.platformLabels[voicePlatform],
+                        })}
+                      </p>
+                    )}
+                  </section>
+                ) : null}
+
+                {baselineRules.length > 0 ? (
+                  <section className="space-y-2">
+                    <h2 className="px-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                      {voicePlatform === "company"
+                        ? t.baselineSection
+                        : t.inheritedSection}
+                    </h2>
+                    <ul className="space-y-2">
+                      {baselineRules.map(renderRuleListItem)}
+                    </ul>
+                  </section>
+                ) : null}
+              </nav>
+
+              <section className="min-w-0 overflow-hidden rounded-2xl border border-border/70 bg-card shadow-xs">
+                {selectedMemory && editingId === selectedMemory.id ? (
+                  <div className="space-y-5 p-5 md:p-7">
+                    <div className="flex items-center justify-between gap-3 border-b border-border/60 pb-4">
+                      <div>
+                        <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                          {t.ruleEditorEyebrow}
+                        </p>
+                        <h2 className="mt-1 text-base font-semibold">{t.editTitle}</h2>
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        type="button"
+                        aria-label={t.cancel}
+                        onClick={() => {
+                          setEditingId(null);
+                          setEditError(null);
+                        }}
+                      >
+                        <XIcon />
+                      </Button>
+                    </div>
+                    <VoiceForm
+                      form={editForm}
+                      onChange={setEditForm}
+                      error={editError}
+                      busy={editBusy}
+                      onSubmit={submitEdit}
+                      onCancel={() => {
+                        setEditingId(null);
+                        setEditError(null);
+                      }}
+                      submitLabel={t.saveChanges}
+                    />
+                  </div>
+                ) : selectedMemory ? (
+                  <VoiceRuleDetail
+                    memory={selectedMemory}
+                    isAdmin={isAdmin}
+                    deleting={deletingId === selectedMemory.id}
+                    position={selectedIndex + 1}
+                    total={visible.length}
+                    previousId={adjacentVoiceId(visible, selectedMemory.id, -1)}
+                    nextId={adjacentVoiceId(visible, selectedMemory.id, 1)}
+                    onSelect={setSelectedId}
+                    onEdit={() => startEdit(selectedMemory)}
+                    onDelete={() => void deleteMemory(selectedMemory.id)}
+                    onDiscuss={() => discussMemory(selectedMemory)}
+                  />
+                ) : null}
               </section>
-              {baselineRules.length > 0 ? (
-                <section className="space-y-2">
-                  <h2 className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                    {t.inheritedSection}
-                  </h2>
-                  <ul className="grid grid-cols-1 gap-3 xl:grid-cols-2">
-                    {baselineRules.map(renderRule)}
-                  </ul>
-                </section>
-              ) : null}
             </div>
           )}
         </div>
@@ -883,12 +1034,72 @@ function VoiceForm({
   );
 }
 
-// ── Memory card ──────────────────────────────────────────────────────────
+// ── Rule navigator + readable detail ─────────────────────────────────────
 
-function MemoryCard({
+function VoiceRuleListItem({
+  memory: m,
+  selected,
+  onSelect,
+}: {
+  memory: FeedVoiceMemory;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  const feedT = useT().feedPage;
+  const t = feedT.voice;
+  const platformLabels = feedT.platformLabels;
+  const platformTags = (m.tags ?? []).filter(isFeedPlatform);
+  return (
+    <li>
+      <button
+        type="button"
+        aria-current={selected ? "true" : undefined}
+        onClick={onSelect}
+        className={cn(
+          "group w-full rounded-xl border px-3.5 py-3 text-left transition-all",
+          selected
+            ? "border-foreground/20 bg-foreground/[0.045] shadow-xs ring-1 ring-foreground/5"
+            : "border-border/60 bg-card hover:border-border hover:bg-muted/35",
+        )}
+      >
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <span className="rounded-full bg-muted/70 px-2 py-0.5 text-[9px] font-medium uppercase tracking-[0.12em] text-muted-foreground">
+              {typeLabel(t, m.type)}
+            </span>
+            {platformTags.map((p) => (
+              <span
+                key={p}
+                className="rounded-full border border-border px-2 py-0.5 text-[9px] font-medium text-muted-foreground"
+              >
+                {platformLabels[p]}
+              </span>
+            ))}
+          </div>
+          <ChevronRightIcon />
+        </div>
+        <p className="mt-2 line-clamp-2 text-[13px] font-medium leading-5 text-foreground">
+          {m.summary || t.untitledRule}
+        </p>
+        {m.detail && m.detail !== m.summary ? (
+          <p className="mt-1 line-clamp-2 text-[11.5px] leading-[1.1rem] text-muted-foreground">
+            {m.detail}
+          </p>
+        ) : null}
+      </button>
+    </li>
+  );
+}
+
+export function VoiceRuleDetail({
   memory: m,
   isAdmin,
   deleting,
+  position,
+  total,
+  previousId,
+  nextId,
+  onSelect,
   onEdit,
   onDelete,
   onDiscuss,
@@ -896,6 +1107,11 @@ function MemoryCard({
   memory: FeedVoiceMemory;
   isAdmin: boolean;
   deleting: boolean;
+  position: number;
+  total: number;
+  previousId: string | null;
+  nextId: string | null;
+  onSelect: (id: string) => void;
   onEdit: () => void;
   onDelete: () => void;
   onDiscuss: () => void;
@@ -903,88 +1119,151 @@ function MemoryCard({
   const feedT = useT().feedPage;
   const t = feedT.voice;
   const platformLabels = feedT.platformLabels;
-  return (
-    <li className="group relative flex h-full flex-col rounded-xl border border-border/60 bg-card p-4 space-y-2 shadow-xs transition-colors">
+  const platformTags = (m.tags ?? []).filter(isFeedPlatform);
+  const descriptiveTags = (m.tags ?? []).filter((tag) => !isFeedPlatform(tag));
+  const detailBlocks = parseVoiceDetail(m.detail ?? "");
 
-      <div className="relative flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
-          <span className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground rounded-full bg-muted/60 px-2 py-0.5">
-            {typeLabel(t, m.type)}
-          </span>
-          {m.sensitivity && m.sensitivity !== "internal" ? (
-            <span className="rounded-full border border-border px-2 py-0.5 text-[10px] text-muted-foreground">
-              {sensitivityLabel(t, m.sensitivity)}
-            </span>
-          ) : null}
-          {/* Platform scope — a platform tag narrows the rule to that
-              platform's drafts (per-platform voice); no badge = general. */}
-          {(m.tags ?? []).filter(isFeedPlatform).map((p) => (
-            <span
-              key={p}
-              className="rounded-full border border-border px-2 py-0.5 text-[10px] font-medium text-muted-foreground"
-            >
-              {platformLabels[p]}
-            </span>
-          ))}
-        </div>
-        <div className="flex items-center gap-1">
-          <span className="text-[11px] text-muted-foreground mr-1 tabular-nums">
+  return (
+    <div className="flex min-h-[430px] flex-col">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/60 px-5 py-3 md:px-7">
+        <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+          <span>{format(t.rulePosition, { current: position, total })}</span>
+          <span aria-hidden>·</span>
+          <span className="tabular-nums">
             {new Date(m.updatedAt).toLocaleDateString()}
           </span>
-          <div className="flex items-center gap-0.5 opacity-0 -translate-x-1 group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-200">
-            <button
-              type="button"
-              onClick={onDiscuss}
-              className="inline-flex items-center gap-1 rounded-lg px-2 h-7 text-[11px] font-medium text-primary bg-primary/10 hover:bg-primary/15 transition-colors"
-              aria-label={t.discussAria}
-              title={t.discussAria}
-            >
-              <ChatBubbleSmallIcon />
-              <span>{t.discuss}</span>
-            </button>
-            {isAdmin ? (
-              <>
-                <button
-                  type="button"
-                  onClick={onEdit}
-                  className="inline-flex items-center justify-center w-7 h-7 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent transition-colors"
-                  aria-label={t.edit}
-                >
-                  <PencilIcon />
-                </button>
-                <button
-                  type="button"
-                  onClick={onDelete}
-                  disabled={deleting}
-                  className="inline-flex items-center justify-center w-7 h-7 rounded-lg text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors disabled:opacity-40"
-                  aria-label={t.delete}
-                >
-                  <TrashIcon />
-                </button>
-              </>
-            ) : null}
-          </div>
+        </div>
+        <div className="flex items-center gap-1">
+          <Button
+            variant="ghost"
+            size="sm"
+            type="button"
+            disabled={!previousId}
+            onClick={() => previousId && onSelect(previousId)}
+          >
+            <ChevronLeftIcon />
+            {t.previousRule}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            type="button"
+            disabled={!nextId}
+            onClick={() => nextId && onSelect(nextId)}
+          >
+            {t.nextRule}
+            <ChevronRightIcon />
+          </Button>
         </div>
       </div>
-      {m.summary ? (
-        <div className="relative text-sm font-medium leading-snug">{m.summary}</div>
-      ) : null}
-      {m.detail && m.detail !== m.summary ? (
-        <div className="relative text-sm text-muted-foreground whitespace-pre-wrap leading-relaxed">{m.detail}</div>
-      ) : null}
-      {m.tags && m.tags.length > 0 ? (
-        <div className="relative flex flex-wrap gap-1.5 pt-1">
-          {m.tags.map((tag) => (
-            <span
-              key={tag}
-              className="rounded-full border border-border bg-background px-2 py-0.5 text-[11px] text-muted-foreground"
-            >
-              {tag}
+
+      <div className="flex-1 px-5 py-6 md:px-7 md:py-8">
+        <div className="mx-auto max-w-3xl">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="rounded-full bg-muted/70 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.12em] text-muted-foreground">
+              {typeLabel(t, m.type)}
             </span>
-          ))}
+            {m.sensitivity && m.sensitivity !== "internal" ? (
+              <span className="rounded-full border border-border px-2 py-0.5 text-[10px] text-muted-foreground">
+                {sensitivityLabel(t, m.sensitivity)}
+              </span>
+            ) : null}
+            {platformTags.map((p) => (
+              <span
+                key={p}
+                className="rounded-full border border-border px-2 py-0.5 text-[10px] font-medium text-muted-foreground"
+              >
+                {platformLabels[p]}
+              </span>
+            ))}
+          </div>
+
+          <h2 className="mt-4 text-xl font-semibold leading-7 tracking-[-0.01em] text-foreground md:text-2xl md:leading-8">
+            {m.summary || t.untitledRule}
+          </h2>
+
+          {detailBlocks.length > 0 ? (
+            <div className="mt-6 space-y-4 text-[14px] leading-7 text-foreground/75">
+              {detailBlocks.map((block, index) => {
+                if (block.kind === "heading") {
+                  return (
+                    <h3
+                      key={`${block.kind}-${index}`}
+                      className="pt-2 text-[13px] font-semibold uppercase tracking-wide text-foreground"
+                    >
+                      {block.text}
+                    </h3>
+                  );
+                }
+                if (block.kind === "list") {
+                  const List = block.ordered ? "ol" : "ul";
+                  return (
+                    <List
+                      key={`${block.kind}-${index}`}
+                      className={cn(
+                        "space-y-1 pl-5 marker:text-muted-foreground",
+                        block.ordered ? "list-decimal" : "list-disc",
+                      )}
+                    >
+                      {block.items.map((item, itemIndex) => (
+                        <li key={`${item}-${itemIndex}`} className="pl-1">
+                          {item}
+                        </li>
+                      ))}
+                    </List>
+                  );
+                }
+                return <p key={`${block.kind}-${index}`}>{block.text}</p>;
+              })}
+            </div>
+          ) : null}
+
+          {descriptiveTags.length > 0 ? (
+            <div className="mt-6 flex flex-wrap gap-1.5 border-t border-border/60 pt-4">
+              {descriptiveTags.map((tag) => (
+                <span
+                  key={tag}
+                  className="rounded-full border border-border bg-background px-2 py-0.5 text-[11px] text-muted-foreground"
+                >
+                  {tag}
+                </span>
+              ))}
+            </div>
+          ) : null}
         </div>
-      ) : null}
-    </li>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border/60 bg-muted/15 px-5 py-3 md:px-7">
+        <p className="text-[11px] leading-relaxed text-muted-foreground">
+          {t.refineHint}
+        </p>
+        <div className="flex items-center gap-1.5">
+          {isAdmin ? (
+            <>
+              <Button variant="ghost" size="sm" type="button" onClick={onEdit}>
+                <PencilIcon />
+                {t.edit}
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                type="button"
+                onClick={onDelete}
+                disabled={deleting}
+                className="text-muted-foreground hover:text-destructive"
+                aria-label={t.delete}
+              >
+                <TrashIcon />
+              </Button>
+            </>
+          ) : null}
+          <Button size="sm" type="button" onClick={onDiscuss}>
+            <ChatBubbleSmallIcon />
+            {t.refineInChat}
+          </Button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -995,6 +1274,27 @@ function PlusIcon() {
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
       <line x1="12" y1="5" x2="12" y2="19" />
       <line x1="5" y1="12" x2="19" y2="12" />
+    </svg>
+  );
+}
+function ChevronDownIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <polyline points="6 9 12 15 18 9" />
+    </svg>
+  );
+}
+function ChevronLeftIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <polyline points="15 18 9 12 15 6" />
+    </svg>
+  );
+}
+function ChevronRightIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className="text-muted-foreground" aria-hidden>
+      <polyline points="9 18 15 12 9 6" />
     </svg>
   );
 }

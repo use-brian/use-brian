@@ -307,6 +307,10 @@ export type PendingBatch = {
   id: string
   workspaceId: string
   ruleId: string
+  /** Present for assistant-addressed programmatic capture batches. */
+  assistantId?: string | null
+  /** Trusted partition selected by the capture profile. */
+  partitionKey?: string
   source: string
   firesAt: Date
   events: unknown[]

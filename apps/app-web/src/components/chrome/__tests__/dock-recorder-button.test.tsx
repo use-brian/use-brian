@@ -5,13 +5,28 @@
  * capability-gated and only changes the next-capture preference.
  */
 
-import { act } from "react";
+import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DockRecorderApi } from "@/lib/recorder/use-dock-recorder";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean })
   .IS_REACT_ACT_ENVIRONMENT = true;
+
+const pickerMocks = vi.hoisted(() => ({
+  listCaptureSources: vi.fn(),
+  confirmDialog: vi.fn(),
+}));
+
+vi.mock("@/lib/desktop-auth-source", () => ({
+  desktopBridge: () => ({
+    listCaptureSources: pickerMocks.listCaptureSources,
+  }),
+}));
+
+vi.mock("@/components/ui/confirm-dialog", () => ({
+  confirmDialog: (...args: unknown[]) => pickerMocks.confirmDialog(...args),
+}));
 
 vi.mock("@/lib/i18n/client", () => ({
   useT: () => ({
@@ -74,7 +89,10 @@ vi.mock("@/components/ui/switch", async () => {
   };
 });
 
-import { DockRecorderButton } from "../dock-recorder";
+import {
+  DockRecorderButton,
+  pickCaptureSource,
+} from "../dock-recorder";
 
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
@@ -85,6 +103,8 @@ afterEach(() => {
   root = null;
   container = null;
   vi.clearAllMocks();
+  pickerMocks.listCaptureSources.mockReset();
+  pickerMocks.confirmDialog.mockReset();
 });
 
 function recorder(overrides: Partial<DockRecorderApi> = {}): DockRecorderApi {
@@ -108,7 +128,7 @@ function recorder(overrides: Partial<DockRecorderApi> = {}): DockRecorderApi {
     setLivePageEnabled: vi.fn(),
     includesSystemAudio: () => false,
     screenCaptureAvailable: false,
-    windowPickerAvailable: false,
+    capturePickerAvailable: false,
     captureSource: "mic" as const,
     setCaptureSource: () => {},
     capturesScreen: () => false,
@@ -180,5 +200,87 @@ describe("[COMP:app-web/dock-recorder] DockRecorderButton", () => {
     expect(toggle.getAttribute("aria-checked")).toBe("false");
     act(() => toggle.click());
     expect(setLivePageEnabled).toHaveBeenCalledWith(true);
+  });
+});
+
+const pickerCopy = {
+  capturePickerTitle: "Choose what to record",
+  capturePickerBody: "Choose a screen or window.",
+  capturePickerAction: "Start recording",
+  capturePickerEmpty: "No shareable screens or windows were found.",
+  capturePickerScreenTab: "Screen",
+  capturePickerWindowTab: "Window",
+  capturePickerScreenList: "Available screens",
+  capturePickerWindowList: "Available windows",
+  capturePickerScreenEmpty: "No shareable screens were found.",
+  capturePickerWindowEmpty: "No shareable windows were found.",
+};
+
+describe("[COMP:app-web/dock-recorder] desktop capture-source picker", () => {
+  it("shows screen and window cards, then returns the explicitly confirmed source", async () => {
+    pickerMocks.listCaptureSources.mockImplementation(async (kind: "screen" | "window") =>
+      kind === "screen"
+        ? [{ id: "screen:1", name: "Built-in Display" }]
+        : [
+            { id: "window:1", name: "Browser" },
+            { id: "window:2", name: "Editor" },
+          ],
+    );
+    pickerMocks.confirmDialog.mockImplementation(
+      async (options: {
+        title?: string;
+        description: string;
+        confirmLabel?: string;
+        content?: ReactNode;
+      }) => {
+        expect(options).toMatchObject({
+          title: "Choose what to record",
+          description: "Choose a screen or window.",
+          confirmLabel: "Start recording",
+        });
+        const dialogHost = document.createElement("div");
+        document.body.appendChild(dialogHost);
+        const dialogRoot = createRoot(dialogHost);
+        act(() => dialogRoot.render(options.content));
+
+        const screenTab = dialogHost.querySelector('[role="tab"][aria-selected="true"]');
+        expect(screenTab?.textContent).toContain("Screen");
+        expect(dialogHost.querySelector('[role="radiogroup"]')?.getAttribute("aria-label"))
+          .toBe("Available screens");
+
+        const windowTab = Array.from(dialogHost.querySelectorAll('[role="tab"]')).find(
+          (button) => button.textContent?.includes("Window"),
+        ) as HTMLButtonElement;
+        act(() => windowTab.click());
+        expect(dialogHost.querySelector('[role="radiogroup"]')?.getAttribute("aria-label"))
+          .toBe("Available windows");
+
+        const editor = Array.from(dialogHost.querySelectorAll('[role="radio"]')).find(
+          (button) => button.textContent?.includes("Editor"),
+        ) as HTMLButtonElement;
+        act(() => editor.click());
+        expect(editor.getAttribute("aria-checked")).toBe("true");
+
+        act(() => dialogRoot.unmount());
+        dialogHost.remove();
+        return true;
+      },
+    );
+
+    await expect(pickCaptureSource("screen", pickerCopy)).resolves.toEqual({
+      source: "window",
+      id: "window:2",
+    });
+    expect(pickerMocks.listCaptureSources).toHaveBeenCalledWith("screen");
+    expect(pickerMocks.listCaptureSources).toHaveBeenCalledWith("window");
+  });
+
+  it("returns to idle semantics when the chooser is dismissed", async () => {
+    pickerMocks.listCaptureSources.mockImplementation(async (kind: "screen" | "window") =>
+      kind === "screen" ? [{ id: "screen:1", name: "Display" }] : [],
+    );
+    pickerMocks.confirmDialog.mockResolvedValue(false);
+
+    await expect(pickCaptureSource("screen", pickerCopy)).resolves.toBeNull();
   });
 });

@@ -29,6 +29,11 @@ import type {
   WorkflowRunStore,
   WorkspaceDirectoryStore,
   LLMProvider,
+  Message,
+  ProviderRequest,
+  ProviderSession,
+  StreamChunk,
+  ToolContext,
 } from '@use-brian/core'
 
 // ── Minimal store stubs ─────────────────────────────────────────────
@@ -45,6 +50,52 @@ function noopStore<T>(): T {
       get: () => vi.fn(),
     },
   ) as T
+}
+
+function toolTurn(name: string, input: Record<string, unknown>): StreamChunk[] {
+  return [
+    { type: 'message_start', model: 'fake-model' },
+    { type: 'tool_use_start', id: 'call-1', name },
+    { type: 'tool_use_delta', id: 'call-1', input: JSON.stringify(input) },
+    { type: 'tool_use_end', id: 'call-1' },
+    {
+      type: 'message_end',
+      stopReason: 'tool_use',
+      usage: { inputTokens: 20, outputTokens: 5 },
+    },
+  ]
+}
+
+function textTurn(text: string): StreamChunk[] {
+  return [
+    { type: 'message_start', model: 'fake-model' },
+    { type: 'text_delta', text },
+    {
+      type: 'message_end',
+      stopReason: 'end_turn',
+      usage: { inputTokens: 10, outputTokens: text.length },
+    },
+  ]
+}
+
+function providerFrom(
+  respond: (request: ProviderRequest, call: number) => StreamChunk[],
+): LLMProvider {
+  let call = 0
+  return {
+    name: 'fake',
+    models: ['cheap-doc-editor'],
+    async *stream(request) {
+      yield* respond(request, call++)
+    },
+    createSession(): ProviderSession {
+      return {
+        async *send(_messages: Message[]) {
+          throw new Error('Doc editor must use the stateless stream path')
+        },
+      }
+    },
+  }
 }
 
 const docPageStore = noopStore<DocPageStore>()
@@ -201,6 +252,156 @@ describe('[COMP:api/doc-inject] injectDocTools', () => {
     expect(result.injected).toBe(true)
     expect(result.injectedCount).toBe(10)
     expect(tools.has('delegateDocEdit')).toBe(true)
+  })
+
+  it('loads and mutation-anchors an allowed full-Chat Page pin to the selected id', async () => {
+    const pinnedPageId = 'pinned-page-1'
+    const readPageIds: string[] = []
+    const appliedPageIds: string[] = []
+    const pinnedDocPageStore: DocPageStore = {
+      async getVersionedPage(_userId, pageId) {
+        readPageIds.push(pageId)
+        return {
+          page: { blocks: [] },
+          version: 1,
+          title: 'Pinned launch plan',
+          nameOrigin: 'user',
+          icon: null,
+        }
+      },
+      async applyPatch(params) {
+        appliedPageIds.push(params.pageId)
+        return { newVersion: params.expectedVersion + 1 }
+      },
+    }
+    const provider = providerFrom((_request, call) => (
+      call === 0
+        ? toolTurn('patchPage', {
+            // The child tries a stale id. The dynamically rebuilt page tools
+            // must redirect it to the validated pinned target.
+            pageId: 'stale-page-from-history',
+            expectedVersion: 1,
+            ops: [{ op: 'setTitle', title: 'Updated launch plan' }],
+          })
+        : textTurn('Updated the pinned Page.')
+    ))
+    const tools = new Map<string, Tool>()
+    await injectDocTools({
+      ...baseOpts,
+      tools,
+      provider,
+      fallbackModel: undefined,
+      pageId: null,
+      editPageTargets: [{ pageId: pinnedPageId, title: 'Pinned launch plan' }],
+      docPageStore: pinnedDocPageStore,
+    })
+    const delegate = tools.get('delegateDocEdit')!
+    const context: ToolContext = {
+      userId: 'user-1',
+      assistantId: 'primary-1',
+      sessionId: 'session-1',
+      appId: 'Use Brian',
+      channelType: 'web',
+      channelId: 'channel-1',
+      workspaceId: 'ws-1',
+      userMessageText: 'Update the pinned Page',
+      abortSignal: new AbortController().signal,
+    }
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    const result = await delegate.execute({
+      intent: 'edit',
+      pageId: pinnedPageId,
+      instruction: 'Rename the pinned launch plan.',
+    }, context)
+
+    expect(result.isError).toBe(false)
+    expect(result.data).toMatchObject({ status: 'completed', mutationTools: ['patchPage'] })
+    expect(readPageIds).toEqual([pinnedPageId, pinnedPageId])
+    expect(appliedPageIds).toEqual([pinnedPageId])
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining(`stale-page-from-history -> anchor ${pinnedPageId}`),
+    )
+    warn.mockRestore()
+  })
+
+  it('keeps createSubPage in an edit and pins its parent to the active Page', async () => {
+    const activePageId = 'active-page-1'
+    const parentReads: string[] = []
+    const nestedUnder: Array<string | null | undefined> = []
+    const activeDocPageStore: DocPageStore = {
+      async getVersionedPage(_userId, pageId) {
+        return pageId === activePageId
+          ? {
+              page: { blocks: [] },
+              version: 1,
+              title: 'Information memorandum',
+              nameOrigin: 'user',
+              icon: null,
+            }
+          : null
+      },
+      async applyPatch(params) {
+        return { newVersion: params.expectedVersion + 1 }
+      },
+    }
+    const activeSavedViewStore = {
+      getById: vi.fn(async (_userId: string, pageId: string) => {
+        parentReads.push(pageId)
+        return { id: pageId } as never
+      }),
+      createDraft: vi.fn(async (params: Parameters<SavedViewStore['createDraft']>[0]) => {
+        nestedUnder.push(params.nestParentId)
+        return { id: 'created-child-1' } as never
+      }),
+    } as unknown as SavedViewStore
+    const provider = providerFrom((_request, call) => (
+      call === 0
+        ? toolTurn('createSubPage', {
+            parentPageId: 'stale-page-from-history',
+            title: 'Executive summary',
+            page: { blocks: [] },
+          })
+        : textTurn('Created the sub-page.')
+    ))
+    const tools = new Map<string, Tool>()
+    await injectDocTools({
+      ...baseOpts,
+      tools,
+      provider,
+      fallbackModel: undefined,
+      pageId: activePageId,
+      docPageStore: activeDocPageStore,
+      savedViewStore: activeSavedViewStore,
+    })
+    const delegate = tools.get('delegateDocEdit')!
+    const context: ToolContext = {
+      userId: 'user-1',
+      assistantId: 'primary-1',
+      sessionId: 'session-1',
+      appId: 'Use Brian',
+      channelType: 'web',
+      channelId: 'channel-1',
+      workspaceId: 'ws-1',
+      docViewId: activePageId,
+      userMessageText: 'Create the actual sub-pages',
+      abortSignal: new AbortController().signal,
+    }
+
+    const result = await delegate.execute({
+      intent: 'edit',
+      pageId: activePageId,
+      instruction: 'Create an Executive summary child Page.',
+    }, context)
+
+    expect(result.isError).toBe(false)
+    expect(result.data).toMatchObject({
+      status: 'completed',
+      mutationTools: ['createSubPage'],
+      pageIds: ['created-child-1'],
+    })
+    expect(parentReads).toEqual([activePageId])
+    expect(nestedUnder).toEqual([activePageId])
   })
 
   it('no-ops when assistant has no workspaceId', async () => {

@@ -15,11 +15,19 @@ const handlers: MenuTemplateHandlers = {
   onSwitchTarget: () => {},
   onUninstall: () => {},
   onStartFirefoxControl: () => {},
+  onToggleKeepAwake: () => {},
 };
 
 /** Default options; spread + override per test. */
 function opts(over: Partial<MenuTemplateOptions> = {}): MenuTemplateOptions {
-  return { isMac: true, isDev: false, appName: "Use Brian", update: null, ...over };
+  return {
+    isMac: true,
+    isDev: false,
+    appName: "Use Brian",
+    update: null,
+    keepBrianAwake: false,
+    ...over,
+  };
 }
 
 /** Collect every `role` string in a template tree (top level + one submenu deep). */
@@ -73,6 +81,23 @@ describe("[COMP:app-desktop/menu-template] buildMenuTemplate", () => {
       const record = allItems(t).find((i) => i.label === "Start Recording");
       expect(record?.accelerator).toBe("CommandOrControl+Shift+R");
     }
+  });
+
+  it("renders Keep Brian Nearby as a checked setting and toggles through", () => {
+    const onToggleKeepAwake = vi.fn();
+    for (const isMac of [true, false]) {
+      const items = allItems(
+        buildMenuTemplate(
+          opts({ isMac, keepBrianAwake: true }),
+          { ...handlers, onToggleKeepAwake },
+        ),
+      );
+      const awake = items.find((item) => item.label === "Keep Brian Nearby");
+      expect(awake?.type).toBe("checkbox");
+      expect(awake?.checked).toBe(true);
+      (awake?.click as () => void)();
+    }
+    expect(onToggleKeepAwake).toHaveBeenCalledTimes(2);
   });
 
   it("starts Firefox browser control from both platform menus", () => {
@@ -159,8 +184,12 @@ describe("[COMP:app-desktop/menu-template] buildMenuTemplate", () => {
 });
 
 describe("[COMP:app-desktop/menu-template] target indicator + switch (§2.1/§2.3)", () => {
-  const CLOUD = { kind: "cloud" as const, label: "Use Brian Cloud" };
-  const LOCAL = { kind: "local" as const, label: "Local Brain (localhost:3003)" };
+  const CLOUD = { kind: "cloud" as const, label: "Use Brian Cloud", auth: "pkce" as const };
+  const LOCAL = {
+    kind: "local" as const,
+    label: "Local Brain (localhost:3003)",
+    auth: "local-session" as const,
+  };
 
   it("omits every target item when no target is passed (pre-dual-target menu)", () => {
     for (const isMac of [true, false]) {
@@ -189,6 +218,15 @@ describe("[COMP:app-desktop/menu-template] target indicator + switch (§2.1/§2.
       const indicator = items.find((i) => i.label === "Target: Local Brain (localhost:3003)");
       expect(indicator?.enabled).toBe(false);
       expect(items.find((i) => i.label === "Switch to Use Brian Cloud")).toBeDefined();
+    }
+  });
+
+  it("self-host PKCE target keeps Sign In/Out", () => {
+    const target = { kind: "local" as const, label: "Team Brain", auth: "pkce" as const };
+    for (const isMac of [true, false]) {
+      const items = allItems(buildMenuTemplate(opts({ isMac, target }), handlers));
+      expect(items.find((i) => i.label === "Sign In")).toBeDefined();
+      expect(items.find((i) => i.label === "Sign Out")).toBeDefined();
     }
   });
 

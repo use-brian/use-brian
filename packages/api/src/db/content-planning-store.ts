@@ -267,6 +267,11 @@ export interface ContentPlanningStore {
     assistantId: string
     platform?: ContentPlanningPlatform
   }): Promise<ContentDraftSessionSummary[]>
+  renameSession(params: {
+    assistantId: string
+    sessionId: string
+    title: string
+  }): Promise<string | null>
   sessionExists(assistantId: string, sessionId: string): Promise<boolean>
   discardSession(params: {
     assistantId: string
@@ -522,6 +527,29 @@ export function createContentPlanningStore(): ContentPlanningStore {
           },
         }
       })
+    },
+
+    async renameSession(params) {
+      const current = await query<{ title: string | null }>(
+        `SELECT title FROM sessions
+          WHERE id = $1 AND assistant_id = $2 AND mode = 'draft'`,
+        [params.sessionId, params.assistantId],
+      )
+      const row = current.rows[0]
+      if (!row) return null
+      const title = withPlatformTitlePrefix(
+        platformFromContentDraftTitle(row.title),
+        params.title,
+      )
+      const updated = await query<{ title: string }>(
+        `UPDATE sessions
+            SET title = $3,
+                title_manually_set = true
+          WHERE id = $1 AND assistant_id = $2 AND mode = 'draft'
+          RETURNING title`,
+        [params.sessionId, params.assistantId, title],
+      )
+      return updated.rows[0]?.title ?? null
     },
 
     async sessionExists(assistantId, sessionId) {

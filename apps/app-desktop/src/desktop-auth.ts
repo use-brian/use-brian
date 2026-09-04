@@ -226,6 +226,12 @@ type FetchLike = (input: string, init: {
   body: string;
 }) => Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }>;
 
+type LocalSessionFetchLike = (input: string, init: RequestInit) => Promise<{
+  ok: boolean;
+  status: number;
+  text: () => Promise<string>;
+}>;
+
 /**
  * Exchange a single-use code + PKCE verifier for the JWT pair, over TLS,
  * directly with the API. Throws on a non-OK response.
@@ -245,6 +251,27 @@ export async function exchangeCode(
     throw new Error(`Desktop exchange failed (HTTP ${res.status})`);
   }
   return (await res.json()) as DesktopSession;
+}
+
+/**
+ * Mint the OSS local-owner token pair directly for the bundled renderer.
+ * The thin shell still visits app-web's cookie-setting trigger route; a
+ * `file://` renderer has no app-origin cookie jar, so it persists this response
+ * through the same safeStorage path as a PKCE exchange instead.
+ */
+export async function mintLocalDesktopSession(
+  apiUrl: string,
+  fetchImpl: LocalSessionFetchLike = fetch as unknown as LocalSessionFetchLike,
+): Promise<DesktopSession> {
+  const res = await fetchImpl(`${apiUrl}/auth/local-session`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  if (!res.ok) {
+    throw new Error(`Local desktop session failed (HTTP ${res.status})`);
+  }
+  return JSON.parse(await res.text()) as DesktopSession;
 }
 
 // ── Session keep-alive ─────────────────────────────────────────

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, it, expect, vi } from "vitest";
 
 import {
@@ -10,6 +11,7 @@ import {
   parseAuthCallback,
   parseLoopbackCallback,
   exchangeCode,
+  mintLocalDesktopSession,
   refreshSession,
   jwtExpSeconds,
   shouldRefreshSession,
@@ -224,6 +226,42 @@ describe("[COMP:app-desktop/desktop-auth] exchangeCode", () => {
   });
 });
 
+describe("[COMP:app-desktop/desktop-auth] bundled local-owner session", () => {
+  const session: DesktopSession = {
+    accessToken: "local-at",
+    refreshToken: "local-rt",
+    accessTokenExpiresIn: 3600,
+    refreshTokenExpiresIn: 2592000,
+    user: { id: "local-owner", name: "You", email: "owner@local" },
+  };
+
+  it("mints tokens directly from the selected local API", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify(session),
+    });
+    await expect(
+      mintLocalDesktopSession("http://localhost:4000", fetchImpl),
+    ).resolves.toEqual(session);
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "http://localhost:4000/auth/local-session",
+      expect.objectContaining({ method: "POST", body: "{}" }),
+    );
+  });
+
+  it("rejects a target that cannot mint the local-owner session", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 403,
+      text: async () => JSON.stringify({ error: "local_session_disabled" }),
+    });
+    await expect(
+      mintLocalDesktopSession("https://brain.example.com", fetchImpl),
+    ).rejects.toThrow(/HTTP 403/);
+  });
+});
+
 describe("[COMP:app-desktop/desktop-auth] session keep-alive decision", () => {
   it("decodes a JWT exp and returns 0 for garbage", () => {
     expect(jwtExpSeconds(jwtWithExp(12345))).toBe(12345);
@@ -241,6 +279,13 @@ describe("[COMP:app-desktop/desktop-auth] session keep-alive decision", () => {
     expect(shouldRefreshSession(jwtWithExp(now + SESSION_REFRESH_MARGIN_SECONDS + 1), now)).toBe(false);
     expect(shouldRefreshSession(jwtWithExp(now + SESSION_REFRESH_MARGIN_SECONDS), now)).toBe(true);
     expect(shouldRefreshSession(jwtWithExp(now - 1), now)).toBe(true); // already expired
+  });
+
+  it("finishes the launch refresh before loading the first app window", () => {
+    const source = readFileSync(new URL("../main.ts", import.meta.url), "utf8");
+    expect(source).toMatch(
+      /await startSessionKeepalive\(\);[\s\S]*mainWindow = createWindow\(\);/,
+    );
   });
 });
 

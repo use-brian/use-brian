@@ -210,7 +210,12 @@ import {
 } from "@/lib/api/sessions";
 import { shouldReopenSessionStream } from "@/lib/chat-session-events";
 import { MessageAttachments } from "@/components/doc/message-attachment-card";
-import { fetchPendingQuestion } from "@/lib/api/pending-questions";
+import {
+  fetchPendingQuestion,
+  fetchPendingSessionInput,
+  toRestoredConfirmation,
+} from "@/lib/api/pending-questions";
+import { respondByKind } from "@/lib/api/approvals";
 import { PendingQuestionPanel } from "./pending-question-panel";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { ComposerControls } from "@/components/doc/composer-controls";
@@ -232,6 +237,7 @@ import {
   type StagedRecording,
 } from "@/lib/recordings/use-recording-upload";
 import { dispatchRecordingParticipantsUpdated } from "@/lib/recordings/recording-events";
+import { companionChatPhase } from "@/lib/companion-chat-state";
 import { useDockRecorder } from "@/lib/recorder/use-dock-recorder";
 import { useLiveRecordingPage } from "@/lib/recordings/use-live-recording-page";
 import {
@@ -244,10 +250,11 @@ import {
   DockRecorderNotice,
   DockRecorderRecovery,
   DockRecorderStrip,
-  pickCaptureWindow,
+  pickCaptureSource,
 } from "@/components/chrome/dock-recorder";
 import { useFileDrop } from "@/lib/use-file-drop";
 import { AttachmentChips, FileDropOverlay } from "@/components/doc/attachment-chips";
+import { RecordingUploadStatus } from "@/components/recordings/recording-upload-status";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -404,6 +411,7 @@ type InlineNotice = {
 export type ChatActivity = {
   isStreaming: boolean;
   streamingText: string;
+  phase: "idle" | "loading" | "thinking" | "responding" | "action-required";
   activeTool: {
     name: string;
     description?: string;
@@ -488,6 +496,10 @@ type FloatingChatProps = {
    * instruction at the same page. Soft by design — it warns, it doesn't block.
    */
   othersRun?: AssistantRunState | null;
+  /** Reveal and focus the already-mounted composer when this token changes. */
+  messageBrianRequest?: number;
+  /** Called after the requested composer is mounted, visible, and focused. */
+  onMessageBrianRevealed?: () => void;
 };
 
 const CLIENT_TIMEZONE: string | null = (() => {
@@ -508,6 +520,8 @@ export function FloatingChat({
   activePage = null,
   seedRequest,
   othersRun = null,
+  messageBrianRequest,
+  onMessageBrianRevealed,
 }: FloatingChatProps) {
   // 'side-panel' fills its parent column and stays open (no pill); 'floating'
   // is the bottom-right collapsible dock. Drives positioning + the pill below.
@@ -543,6 +557,20 @@ export function FloatingChat({
   const [pendingSurfaceSeed, setPendingSurfaceSeed] =
     useState<SurfaceChatSeed | null>(null);
   const surfaceSeedAttemptRef = useRef<SurfaceChatSeed | null>(null);
+
+  useEffect(() => {
+    if (messageBrianRequest === undefined || isSidePanel) return;
+    setExpanded(true);
+  }, [isSidePanel, messageBrianRequest]);
+
+  const acknowledgedMessageBrianRef = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    if (messageBrianRequest === undefined) return;
+    if (!isSidePanel && !expanded) return;
+    if (acknowledgedMessageBrianRef.current === messageBrianRequest) return;
+    acknowledgedMessageBrianRef.current = messageBrianRequest;
+    onMessageBrianRevealed?.();
+  }, [expanded, isSidePanel, messageBrianRequest, onMessageBrianRevealed]);
 
   // ── Assistant switcher ───────────────────────────────────────────────────
   // The chat talks to the workspace PRIMARY by default (the `assistantId`
@@ -684,7 +712,7 @@ export function FloatingChat({
   // clarifying question is pending (the composer is replaced by the answer
   // panel then, so there's nothing to attach to).
   const drop = useFileDrop((files) => void att.upload(files), {
-    disabled: !!pendingQuestion,
+    disabled: !!pendingQuestion || rec.busy,
   });
   // Set after the user answers/cancels — the resume worker takes a few
   // seconds to fire the continuation turn, so we poll session messages
@@ -1243,8 +1271,20 @@ export function FloatingChat({
   const isStreaming = session.state.isStreaming;
   const streamingText = session.state.streamingText;
   const activity = useMemo<ChatActivity>(() => {
+    const requiresAction =
+      Boolean(pendingQuestion) ||
+      session.state.pendingConfirmations.some(
+        (confirmation) =>
+          confirmation.status === "pending" || confirmation.status === "approving",
+      );
+    const phase = companionChatPhase({
+      isStreaming,
+      hasStreamingText: Boolean(streamingText),
+      requiresAction,
+      isLoading: resumePolling,
+    });
     if (!isStreaming) {
-      return { isStreaming: false, streamingText: "", activeTool: null };
+      return { isStreaming: false, streamingText: "", phase, activeTool: null };
     }
     const running = toolTimeline.find((t) => t.status === "running");
     const last =
@@ -1255,6 +1295,7 @@ export function FloatingChat({
     return {
       isStreaming: true,
       streamingText,
+      phase,
       activeTool: last
         ? {
             name: last.name,
@@ -1263,7 +1304,7 @@ export function FloatingChat({
           }
         : null,
     };
-  }, [isStreaming, streamingText, toolTimeline]);
+  }, [isStreaming, pendingQuestion, resumePolling, session.state.pendingConfirmations, streamingText, toolTimeline]);
 
   const onActivityChangeRef = useRef(onActivityChange);
   useEffect(() => {
@@ -1287,8 +1328,12 @@ export function FloatingChat({
       text: streamingText,
       reasoning: streamingReasoning,
       events: streamingEvents,
+      // A build seeded from the landing runs with this dock collapsed, so an
+      // error rendered HERE is an error nobody sees. Publishing it is what
+      // lets the page body report a build that failed before it streamed.
+      error: error ?? null,
     });
-  }, [isDocOrigin, isStreaming, toolTimeline, streamingText, streamingReasoning, streamingEvents]);
+  }, [isDocOrigin, isStreaming, toolTimeline, streamingText, streamingReasoning, streamingEvents, error]);
 
   // ── Auto-scroll + escape/click-outside ─────────────────────────────────
   useEffect(() => {
@@ -1415,21 +1460,38 @@ export function FloatingChat({
         signal: controller.signal,
       });
       if (cancelled || !latest) return;
+      // Defence in depth for the doc dock's `scope: "workspace"` resume. That
+      // thread is per-turn addressable (the switcher re-addresses instead of
+      // starting a new thread), so a row we ATTACH must be one the server
+      // will let the current pick ANSWER on — `isDocSurface` in `chat.ts`,
+      // i.e. `app_origin === 'doc'`. Attaching anything else produces a dead
+      // thread: every send after a switch fails "Session does not belong to
+      // this assistant", and the rejection itself bumps `last_active_at`, so
+      // the bad row stays newest and the dock re-attaches it on every load.
+      // The server predicate is the fix (`DOC_DOCK_RESUME_ROW`); this guard
+      // covers an older API still serving the wide list.
+      if (origin === "doc" && latest.appOrigin !== "doc") return;
 
-      // askQuestion suspend-resume: restore the inline answer panel if
-      // this session was suspended on a question (e.g. the user reloaded
-      // the page mid-wait — the exact wedge the screenshot showed). The
-      // composer gate + panel let them answer or cancel instead of
-      // hitting `pending_question_exists` on the next message.
-      void fetchPendingQuestion(latest.id)
-        .then((q) => {
-          if (cancelled || !q || epoch !== threadEpochRef.current) return;
-          setPendingQuestion({
-            approvalId: q.approvalId,
-            question: q.question ?? "",
-            expiresAt: q.expiresAt,
-            sessionId: latest.id,
-          });
+      // Restore whichever durable human input owns the current turn. Generic
+      // confirmations re-enter the shared confirmation reducer so the same
+      // card renders after navigation/reload; questions keep their answer UI.
+      void fetchPendingSessionInput(latest.id)
+        .then(({ pending, toolConfirmation }) => {
+          if (cancelled || epoch !== threadEpochRef.current) return;
+          if (pending) {
+            setPendingQuestion({
+              approvalId: pending.approvalId,
+              question: pending.question ?? "",
+              expiresAt: pending.expiresAt,
+              sessionId: latest.id,
+            });
+          }
+          if (toolConfirmation) {
+            sessionDispatchRef.current({
+              type: "confirmation/add",
+              confirmation: toRestoredConfirmation(toolConfirmation, latest.id),
+            });
+          }
         })
         .catch(() => {});
 
@@ -1534,17 +1596,25 @@ export function FloatingChat({
           });
         })
         .catch(() => {});
-      // The turn may have suspended on a clarifying question after the
-      // stream died; the dead POST could not report it, so probe.
-      void fetchPendingQuestion(sid)
-        .then((q) => {
-          if (!q || epoch !== threadEpochRef.current) return;
-          setPendingQuestion({
-            approvalId: q.approvalId,
-            question: q.question ?? "",
-            expiresAt: q.expiresAt,
-            sessionId: sid,
-          });
+      // The dead POST could not report durable input raised around the cut,
+      // so restore the current-turn question or tool confirmation.
+      void fetchPendingSessionInput(sid)
+        .then(({ pending, toolConfirmation }) => {
+          if (epoch !== threadEpochRef.current) return;
+          if (pending) {
+            setPendingQuestion({
+              approvalId: pending.approvalId,
+              question: pending.question ?? "",
+              expiresAt: pending.expiresAt,
+              sessionId: sid,
+            });
+          }
+          if (toolConfirmation) {
+            sessionDispatchRef.current({
+              type: "confirmation/add",
+              confirmation: toRestoredConfirmation(toolConfirmation, sid),
+            });
+          }
         })
         .catch(() => {});
       if (!isDocOrigin) requestBrainRefresh(workspaceId);
@@ -1762,7 +1832,7 @@ export function FloatingChat({
       ) return false;
       if (stream.inFlight()) return false;
       if (att.uploading) return false;
-      if (rec.status === "uploading") return false;
+      if (rec.busy) return false;
       // Suspended on a question — the answer flows through the inline
       // panel (POST /answer), never a fresh chat turn. Guards the Retry
       // path too, which calls sendMessage directly past the disabled composer.
@@ -2205,6 +2275,8 @@ export function FloatingChat({
               if (!toolCallId) break;
               const conf: PendingConfirmation = {
                 toolCallId,
+                approvalId:
+                  typeof payload.approvalId === "string" ? payload.approvalId : undefined,
                 toolName:
                   typeof payload.toolName === "string" ? payload.toolName : "",
                 displayName:
@@ -2558,6 +2630,18 @@ export function FloatingChat({
                 );
                 break;
               }
+              // The dock is holding a session this surface cannot re-address
+              // (a resume that attached a row bound to another assistant).
+              // Nothing was written server-side, so the recovery is simply to
+              // drop the binding: the next send mints a fresh session. Doing
+              // it here keeps recovery inside the user's own channel — the
+              // dock has no new-chat control, so otherwise every retry hits
+              // the same refusal and the thread is a dead end.
+              if (payload.code === "session_assistant_mismatch") {
+                resetThread();
+                setError(tChatApp.sessionRebound);
+                break;
+              }
               const msg =
                 typeof payload.error === "string" ? payload.error : t.error;
               setError(msg);
@@ -2739,7 +2823,7 @@ export function FloatingChat({
       // Indicate to the caller (e.g. seed effect) that a stream actually started.
       return true;
     },
-    [selectedAssistantId, workspaceId, origin, isDocOrigin, model, metered, customEndpoint, researchMode, session, stream, t, resetTurnBuffers, pendingQuestion, pendingRecordings, rec.status, att, applyQueuedInput, buildStreamedTurnMessage, flushQueuedInputs],
+    [selectedAssistantId, workspaceId, origin, isDocOrigin, model, metered, customEndpoint, researchMode, session, stream, t, resetTurnBuffers, resetThread, pendingQuestion, pendingRecordings, rec.status, att, applyQueuedInput, buildStreamedTurnMessage, flushQueuedInputs],
   );
 
   useEffect(() => {
@@ -2801,7 +2885,7 @@ export function FloatingChat({
         (fallbackFileId) => sendMessage("", { fileIds: [fallbackFileId] }),
       ),
     prepareLivePage: liveRecording.prepare,
-    prepareWindowSource: () => pickCaptureWindow(tRecorder),
+    prepareCaptureSource: (initialSource) => pickCaptureSource(initialSource, tRecorder),
     streamLiveWindow: liveRecording.streamWindow,
     onMeetingCapture: async (file: File, live?: { pageId: string; sessionId?: string }) => {
       const outcome = await rec.run(file, {
@@ -2995,26 +3079,41 @@ export function FloatingChat({
         status: action === "approve" ? "approving" : "denied",
       });
       try {
-        const decision = action === "approve" ? "allow" : "deny";
-        const res = await authFetch(`${API_URL}/api/chat/confirm`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            sessionId: conf.sessionId,
-            toolCallId,
-            decision,
-            // Deny-with-comment: the note rides to the model via
-            // declinedToolResult so the assistant revises, not re-asks.
-            ...(action === "deny" && comment ? { comment } : {}),
-          }),
-        });
-        if (res.ok) {
-          const data = (await res.json().catch(() => ({}))) as {
-            result?: string;
-          };
+        let ok = false;
+        let resultText: string | undefined;
+        if (conf.restored && conf.approvalId) {
+          const result = await respondByKind(
+            { id: conf.approvalId, kind: "tool_invocation" },
+            action === "approve" ? "approved" : "rejected",
+            comment,
+          );
+          ok = result.ok;
+        } else {
+          const decision = action === "approve" ? "allow" : "deny";
+          const res = await authFetch(`${API_URL}/api/chat/confirm`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              sessionId: conf.sessionId,
+              toolCallId,
+              decision,
+              // Deny-with-comment: the note rides to the model via
+              // declinedToolResult so the assistant revises, not re-asks.
+              ...(action === "deny" && comment ? { comment } : {}),
+            }),
+          });
+          ok = res.ok;
+          if (res.ok) {
+            const data = (await res.json().catch(() => ({}))) as {
+              result?: string;
+            };
+            resultText = data.result;
+          }
+        }
+        if (ok) {
           session.updateConfirmation(toolCallId, {
             status: action === "approve" ? "approved" : "denied",
-            result: data.result,
+            result: resultText,
           });
           // Same-tab repair for every approval-backed surface (queue + Home
           // dock). The durable row update also emits the workspace event for
@@ -3087,6 +3186,13 @@ export function FloatingChat({
       collapseToOneLine(activity.streamingText) ??
       t.thinking
     : null;
+  const uploadProgressPercent = Math.round(
+    Math.min(1, Math.max(0, rec.uploadProgress)) * 100,
+  );
+  const uploadProgressLabel = tRec.uploadingProgress.replace(
+    "{percent}",
+    String(uploadProgressPercent),
+  );
 
   return (
     <div
@@ -3106,6 +3212,7 @@ export function FloatingChat({
           and stays open. State (stream, tools, citations) survives toggles. */}
       <div
         aria-hidden={isSidePanel ? undefined : !expanded}
+        aria-busy={rec.status === "uploading"}
         {...drop.dropProps}
         // Floating dock: the open panel anchors flush to the corner (`bottom-0`)
         // so it reaches down to the container's `bottom-4` — the collapsed
@@ -3501,6 +3608,7 @@ export function FloatingChat({
             onKeyDown={slashCommands.handleKeyDown}
             highlightRanges={slashCommands.highlightRanges}
             inputWrapClassName="flex-1 min-w-0 rounded-md border border-border bg-background focus-within:border-ring [&_:focus-visible]:shadow-none"
+            focusRequest={messageBrianRequest}
             // While a turn streams, Send QUEUES: the message is handed to the
             // running turn, which takes it at its next safe boundary.
             // Cmd/Ctrl+Enter steers instead — take it as soon as possible.
@@ -3519,7 +3627,7 @@ export function FloatingChat({
             // which belongs to a turn of its own. Staged chips stay visible
             // and ride the next turn.
             sendDisabled={
-              rec.status === "uploading" ||
+              rec.busy ||
               (isStreaming && (att.hasReady || pendingRecordings.length > 0))
             }
             allowEmptySend={att.hasReady || pendingRecordings.length > 0}
@@ -3594,22 +3702,12 @@ export function FloatingChat({
                     ))}
                   </div>
                 ) : null}
-                {rec.status !== "idle" ? (
-                  <p
-                    className={
-                      rec.status === "error"
-                        ? "px-1 py-0.5 text-xs text-destructive"
-                        : "px-1 py-0.5 text-xs text-muted-foreground"
-                    }
-                    role="status"
-                  >
-                    {rec.status === "uploading"
-                      ? tRec.uploading
-                      : rec.status === "processing"
-                        ? tRec.processing
-                        : rec.message}
-                  </p>
-                ) : null}
+                <RecordingUploadStatus
+                  status={rec.status}
+                  uploadProgress={rec.uploadProgress}
+                  message={rec.message}
+                  className="space-y-2 px-1 py-2"
+                />
               </>
             }
             slotPreInput={
@@ -3618,9 +3716,10 @@ export function FloatingChat({
                   ref={fileInputRef}
                   type="file"
                   multiple
+                  disabled={rec.busy}
                   className="hidden"
                   onChange={(e) => {
-                    if (e.target.files) void att.upload(e.target.files);
+                    if (!rec.busy && e.target.files) void att.upload(e.target.files);
                     e.target.value = "";
                   }}
                 />
@@ -3630,7 +3729,7 @@ export function FloatingChat({
                   onClick={() => fileInputRef.current?.click()}
                   // Staging an attachment mid-stream is fine — it rides the
                   // NEXT send, same as pre-typed text.
-                  disabled={!!pendingQuestion}
+                  disabled={!!pendingQuestion || rec.busy}
                   className={cn(
                     "shrink-0 inline-flex h-9 w-9 items-center justify-center rounded-md",
                     "text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
@@ -3639,7 +3738,7 @@ export function FloatingChat({
                 >
                   <Paperclip className="size-[18px]" aria-hidden />
                 </button>
-                <DockRecorderButton rec={recorder} disabled={!!pendingQuestion} />
+                <DockRecorderButton rec={recorder} disabled={!!pendingQuestion || rec.busy} />
               </>
             }
             // Send stays visible while streaming — it queues into the running
@@ -3742,62 +3841,90 @@ export function FloatingChat({
           mounted through arming/holding — it anchors the live press gesture);
           the record-dot button rides beside it otherwise. */}
       {!isSidePanel &&
-        !((recorder.phase.kind === "latched" || recorder.phase.kind === "finishing") && !expanded) && (
-      <div className="flex items-center gap-2">
-      <button
-        type="button"
-        onClick={() => setExpanded(true)}
-        aria-hidden={expanded}
-        aria-live={isActive ? "polite" : undefined}
-        tabIndex={expanded ? -1 : 0}
-        className={cn(
-          "inline-flex items-center gap-2 rounded-full py-1.5 pl-1.5 pr-3.5 shadow-lg backdrop-blur",
-          "max-w-[min(260px,calc(100vw-3rem))] text-left text-sm",
-          "transition-[opacity,transform,background-color,box-shadow] duration-200 ease-out",
-          isActive
-            ? "border border-primary/40 bg-primary/10 text-foreground ring-2 ring-primary/20"
-            : "border border-border bg-background/90 text-foreground/80 hover:bg-accent hover:text-foreground",
-          expanded
-            ? "opacity-0 scale-95 pointer-events-none"
-            : "opacity-100 scale-100",
-        )}
-      >
-        {assistant ? (
-          <span
-            aria-hidden
-            className="inline-flex size-7 shrink-0 overflow-hidden rounded-full ring-1 ring-black/10 dark:ring-white/15"
-          >
-            <AssistantAvatar
-              id={assistant.id}
-              name={assistant.name}
-              iconSeed={assistant.iconSeed ?? undefined}
-              size="sm"
+        !(
+          (recorder.phase.kind === "latched" || recorder.phase.kind === "finishing") &&
+          !expanded
+        ) && (
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setExpanded(true)}
+              aria-hidden={expanded}
+              aria-busy={rec.status === "uploading"}
+              aria-label={
+                rec.status === "uploading"
+                  ? `${idlePlaceholder}. ${uploadProgressLabel}`
+                  : undefined
+              }
+              aria-live={isActive ? "polite" : undefined}
+              tabIndex={expanded ? -1 : 0}
+              className={cn(
+                "relative inline-flex items-center gap-2 rounded-full py-1.5 pl-1.5 pr-3.5 shadow-lg backdrop-blur",
+                "max-w-[min(260px,calc(100vw-3rem))] text-left text-sm",
+                "transition-[opacity,transform,background-color,box-shadow] duration-200 ease-out",
+                isActive
+                  ? "border border-primary/40 bg-primary/10 text-foreground ring-2 ring-primary/20"
+                  : "border border-border bg-background/90 text-foreground/80 hover:bg-accent hover:text-foreground",
+                expanded
+                  ? "opacity-0 scale-95 pointer-events-none"
+                  : "opacity-100 scale-100",
+              )}
+            >
+              {rec.status === "uploading" ? (
+                <span
+                  aria-hidden
+                  data-upload-progress-ring
+                  className="pointer-events-none absolute -inset-[3px] rounded-full p-[2px]"
+                  style={{
+                    background: `conic-gradient(from -90deg, var(--primary) 0% ${uploadProgressPercent}%, transparent ${uploadProgressPercent}% 100%)`,
+                    WebkitMask:
+                      "linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0)",
+                    WebkitMaskComposite: "xor",
+                    maskComposite: "exclude",
+                    filter:
+                      "drop-shadow(0 0 5px color-mix(in srgb, var(--primary) 38%, transparent))",
+                  }}
+                />
+              ) : null}
+              {assistant ? (
+                <span
+                  aria-hidden
+                  className="inline-flex size-7 shrink-0 overflow-hidden rounded-full ring-1 ring-black/10 dark:ring-white/15"
+                >
+                  <AssistantAvatar
+                    id={assistant.id}
+                    name={assistant.name}
+                    iconSeed={assistant.iconSeed ?? undefined}
+                    size="sm"
+                  />
+                </span>
+              ) : (
+                <span className="inline-flex size-7 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground">
+                  <MessageSquare className="size-3.5" aria-hidden />
+                </span>
+              )}
+              <span
+                className={cn(
+                  "min-w-0 truncate",
+                  isActive ? "text-foreground" : "text-muted-foreground",
+                )}
+              >
+                {isActive ? activeLabel : idlePlaceholder}
+              </span>
+            </button>
+            <DockRecorderButton
+              rec={recorder}
+              variant="floating"
+              disabled={rec.busy}
+              className={cn(
+                "transition-[opacity,transform] duration-200 ease-out",
+                expanded
+                  ? "opacity-0 scale-95 pointer-events-none"
+                  : "opacity-100 scale-100",
+              )}
             />
-          </span>
-        ) : (
-          <span className="inline-flex size-7 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground">
-            <MessageSquare className="size-3.5" aria-hidden />
-          </span>
+          </div>
         )}
-        <span
-          className={cn(
-            "min-w-0 truncate",
-            isActive ? "text-foreground" : "text-muted-foreground",
-          )}
-        >
-          {isActive ? activeLabel : idlePlaceholder}
-        </span>
-      </button>
-      <DockRecorderButton
-        rec={recorder}
-        variant="floating"
-        className={cn(
-          "transition-[opacity,transform] duration-200 ease-out",
-          expanded ? "opacity-0 scale-95 pointer-events-none" : "opacity-100 scale-100",
-        )}
-      />
-      </div>
-      )}
     </div>
   );
 }

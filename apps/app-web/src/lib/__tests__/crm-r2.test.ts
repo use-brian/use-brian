@@ -106,7 +106,7 @@ describe("[COMP:app-web/crm-r2] CRM R2 pure client logic", () => {
     const draft: CrmEmailDraft = {
       id: "draft-1", status: "draft", revision: 1, from: "team@example.test",
       to: ["jane@example.test"], cc: ["Sam <sam@example.test>"], bcc: ["pat@example.test"],
-      subject: "Hello", body: "Complete body", sourceSessionId: "session-1",
+      subject: "Hello", body: "Complete body", attachments: [], sourceSessionId: "session-1",
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
     };
 

@@ -3,7 +3,7 @@
  * (recording-to-brain). Mirrors the backend route `routes/recordings.ts`:
  *
  *   1. POST /api/recordings/upload-url  → mint a signed PUT URL + Episode anchor.
- *   2. PUT the bytes DIRECT to GCS (never through the API).
+ *   2. PUT the bytes to the signed storage URL.
  *   3. POST /api/recordings/:id/estimate → server-probed duration + surcharge.
  *   4. POST /api/recordings/:id/process  → transcribe + segment + ingest + bill.
  *
@@ -187,15 +187,79 @@ async function asError(res: Response, fallback: string): Promise<RecordingApiErr
   return new RecordingApiError(body.detail ?? body.error ?? fallback, res.status, body.error);
 }
 
+const LOCAL_RECORDING_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
+const LOCAL_RECORDING_UPLOAD_ATTEMPTS = 3;
+
+function isLocalFileTransferUrl(raw: string): boolean {
+  try {
+    return new URL(raw).pathname.endsWith("/api/local-files");
+  } catch {
+    return false;
+  }
+}
+
+async function putWithUploadProgress(input: {
+  uploadUrl: string;
+  body: Blob;
+  mime: string;
+  contentRange?: string;
+  onProgress: (loadedBytes: number) => void;
+}): Promise<number> {
+  return new Promise<number>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", input.uploadUrl);
+    xhr.setRequestHeader("Content-Type", input.mime);
+    if (input.contentRange) xhr.setRequestHeader("Content-Range", input.contentRange);
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable && event.total > 0) {
+        input.onProgress(Math.min(input.body.size, event.loaded));
+      }
+    };
+    xhr.onload = () => resolve(xhr.status);
+    xhr.onerror = () => reject(new RecordingApiError("Upload to storage failed (network error)", 0));
+    xhr.onabort = () => reject(new RecordingApiError("Upload to storage was cancelled", 0));
+    xhr.send(input.body);
+  });
+}
+
+async function putLocalRecordingRange(input: {
+  uploadUrl: string;
+  body: Blob;
+  mime: string;
+  contentRange: string;
+  onProgress: (loadedBytes: number) => void;
+}): Promise<void> {
+  let lastError: RecordingApiError | null = null;
+  for (let attempt = 1; attempt <= LOCAL_RECORDING_UPLOAD_ATTEMPTS; attempt += 1) {
+    try {
+      const status = await putWithUploadProgress(input);
+      if (status >= 200 && status < 300) return;
+      lastError = new RecordingApiError(`Upload to storage failed (${status})`, status);
+      if (status >= 400 && status < 500) throw lastError;
+    } catch (error) {
+      lastError = error instanceof RecordingApiError
+        ? error
+        : new RecordingApiError("Upload to storage failed (network error)", 0);
+      if (lastError.status >= 400 && lastError.status < 500) throw lastError;
+    }
+    if (attempt < LOCAL_RECORDING_UPLOAD_ATTEMPTS) {
+      await new Promise((resolve) => globalThis.setTimeout(resolve, attempt * 250));
+    }
+  }
+  throw lastError ?? new RecordingApiError("Upload to storage failed", 0);
+}
+
 /**
- * Create the recording, then PUT the file straight to GCS via the signed URL.
+ * Create the recording, then PUT the file straight to storage via the signed URL.
  * Resolves the `recordingId` for the estimate/process steps. `onProgress` (0..1)
- * tracks the GCS upload.
+ * tracks the storage upload.
  */
 export async function startRecordingUpload(params: {
   workspaceId: string;
   assistantId: string;
   file: File;
+  /** Fraction of the signed PUT body transferred, from 0 through 1. */
+  onProgress?: (progress: number) => void;
   /**
    * Caller-declared recording kind — routes the transcriber ladder
    * (`recordings.kind`, default 'memo'). The dock live recorder passes
@@ -221,14 +285,58 @@ export async function startRecordingUpload(params: {
     uploadUrl: string;
   };
 
-  // PUT bytes direct to GCS. The Content-Type must match what the signed URL was
-  // minted with. (Not authFetch — this goes to GCS, not our API.)
-  const put = await fetch(uploadUrl, {
-    method: "PUT",
-    headers: { "Content-Type": mime },
-    body: params.file,
-  });
-  if (!put.ok) throw new RecordingApiError(`Upload to storage failed (${put.status})`, put.status);
+  // PUT bytes direct to storage. The Content-Type must match what the signed URL was
+  // minted with. `fetch` has no request-body progress, so callers that surface
+  // progress opt into XHR in the browser. Non-browser/test callers keep the
+  // existing fetch transport.
+  if (params.onProgress && typeof XMLHttpRequest !== "undefined") {
+    // The local-disk self-host exposes this signed URL through its API origin.
+    // One large PUT can outlive a reverse proxy's origin-response timeout,
+    // because the transfer route correctly answers only after the whole body is
+    // durable. Sequential ranges make each request bounded and resumable at the
+    // last acknowledged byte. Real GCS/S3 signed URLs keep one direct PUT.
+    if (isLocalFileTransferUrl(uploadUrl) && params.file.size > 0) {
+      for (let offset = 0; offset < params.file.size; offset += LOCAL_RECORDING_UPLOAD_CHUNK_BYTES) {
+        const end = Math.min(params.file.size, offset + LOCAL_RECORDING_UPLOAD_CHUNK_BYTES);
+        const body = params.file.slice(offset, end, mime);
+        await putLocalRecordingRange({
+          uploadUrl,
+          body,
+          mime,
+          contentRange: `bytes ${offset}-${end - 1}/${params.file.size}`,
+          onProgress: (loadedBytes) => {
+            params.onProgress?.(Math.min(1, (offset + loadedBytes) / params.file.size));
+          },
+        });
+        params.onProgress(Math.min(1, end / params.file.size));
+      }
+    } else {
+      const status = await putWithUploadProgress({
+        uploadUrl,
+        body: params.file,
+        mime,
+        onProgress: (loadedBytes) => {
+          if (params.file.size > 0) {
+            params.onProgress?.(Math.min(1, loadedBytes / params.file.size));
+          }
+        },
+      });
+      if (status < 200 || status >= 300) {
+        throw new RecordingApiError(`Upload to storage failed (${status})`, status);
+      }
+    }
+    params.onProgress(1);
+  } else {
+    const put = await fetch(uploadUrl, {
+      method: "PUT",
+      headers: { "Content-Type": mime },
+      body: params.file,
+    });
+    if (!put.ok) {
+      throw new RecordingApiError(`Upload to storage failed (${put.status})`, put.status);
+    }
+    params.onProgress?.(1);
+  }
 
   return { recordingId };
 }
@@ -259,6 +367,13 @@ export async function processRecording(
    * see, so this is a convenience, never the access boundary.
    */
   parentPageId?: string | null,
+  /**
+   * `confirm: true` clears the server's already-processed guard (409
+   * `requiresConfirmation`). Send it ONLY from a surface whose own dialog told
+   * the user that a re-run re-transcribes and can duplicate extracted memories;
+   * a first-time run neither needs it nor should send it.
+   */
+  opts?: { confirm?: boolean },
 ): Promise<RecordingQueued> {
   const res = await authFetch(`${API_URL}/api/recordings/${recordingId}/process`, {
     method: "POST",
@@ -266,6 +381,7 @@ export async function processRecording(
     body: JSON.stringify({
       ...(blueprintSlug ? { blueprintSlug } : {}),
       ...(parentPageId ? { parentPageId } : {}),
+      ...(opts?.confirm ? { confirm: true } : {}),
     }),
   });
   if (!res.ok) throw await asError(res, "Transcription failed");

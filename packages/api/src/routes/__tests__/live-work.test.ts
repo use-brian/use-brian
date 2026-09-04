@@ -61,10 +61,12 @@ function sessionRow(overrides: Record<string, unknown> = {}) {
     id: '55555555-5555-5555-5555-555555555555',
     assistantId: ASSISTANT,
     assistantName: 'Brian',
+    assistantIconSeed: 42,
     assistantWorkspaceId: WS,
     userId: CALLER,
     ownerName: 'Caller',
     channelType: 'web',
+    appOrigin: null,
     visibility: 'owner',
     mode: null,
     status: 'running',
@@ -121,6 +123,7 @@ describe('[COMP:api/live-work-roster] roster route', () => {
     expect(item.tier).toBe('full')
     expect(item.title).toBe('Quarterly recap')
     expect(item.state).toBe('working')
+    expect(item.canSteer).toBe(true)
   })
 
   it("teammate's personal session carries EXACTLY the §6.1 presence allowlist", async () => {
@@ -130,6 +133,7 @@ describe('[COMP:api/live-work-roster] roster route', () => {
     expect(item.tier).toBe('presence')
     // Negative space pinned: no title, no visibility, nothing content-derived.
     expect(Object.keys(item).sort()).toEqual([
+      'assistantIconSeed',
       'assistantId',
       'assistantName',
       'channelType',
@@ -144,6 +148,7 @@ describe('[COMP:api/live-work-roster] roster route', () => {
     ])
     expect(item).not.toHaveProperty('title')
     expect(item).not.toHaveProperty('visibility')
+    expect(item.assistantIconSeed).toBe(42)
   })
 
   it('above-clearance workspace session id appears in NO tier (D5)', async () => {
@@ -168,6 +173,19 @@ describe('[COMP:api/live-work-roster] roster route', () => {
     expect(res.body.items[0].tier).toBe('full')
   })
 
+  it('offers steering only on active turn-inbox-backed personal chat lanes', () => {
+    expect(projectSessionRow(sessionRow(), CALLER, 'internal', NOW)?.canSteer).toBe(true)
+    expect(projectSessionRow(sessionRow({ channelType: 'doc_thread' }), CALLER, 'internal', NOW)?.canSteer).toBe(true)
+    expect(projectSessionRow(sessionRow({ mode: 'draft' }), CALLER, 'internal', NOW)?.canSteer).toBe(false)
+    expect(projectSessionRow(sessionRow({ channelType: 'telegram' }), CALLER, 'internal', NOW)?.canSteer).toBe(false)
+    expect(projectSessionRow(sessionRow({
+      visibility: 'workspace',
+      appOrigin: 'chat',
+    }), CALLER, 'internal', NOW)?.canSteer).toBe(false)
+    expect(projectSessionRow(sessionRow({ status: 'idle' }), CALLER, 'internal', NOW)?.canSteer).toBe(false)
+    expect(projectSessionRow(sessionRow({ turnHeartbeatAt: new Date('2026-01-01T00:00:00.000Z') }), CALLER, 'internal', NOW)?.canSteer).toBe(false)
+  })
+
   it('workflow runs merge in with mapped trigger + state', async () => {
     primeRoster([], [runRow(), runRow({ id: '88888888-8888-8888-8888-888888888888', status: 'awaiting_input', triggerKind: 'manual' })])
     const res = await request(makeApp()).get(`/api/workspaces/${WS}/live`)
@@ -190,13 +208,18 @@ describe('[COMP:api/live-work-roster] roster route', () => {
     expect(res.body.items.map((i: { kind: string }) => i.kind)).toEqual(['workflow_run', 'session'])
   })
 
-  it('sessions query scopes by the assistants.workspace_id join and excludes callee lanes (§6-a / D2)', async () => {
+  it('sessions query scopes by workspace, excludes callee lanes, and ignores stale-turn approvals', async () => {
     primeRoster([], [])
     await request(makeApp()).get(`/api/workspaces/${WS}/live`)
     const sessionsSql = mockQuery.mock.calls[0][0] as string
     expect(sessionsSql).toContain('JOIN assistants a ON a.id = s.assistant_id')
+    expect(sessionsSql).toContain('COALESCE(a.icon_seed, 0)')
+    expect(sessionsSql).toContain('s.app_origin')
     expect(sessionsSql).toContain('a.workspace_id = $1')
     expect(sessionsSql).toContain(`NOT IN ('workflow', 'assistant-call')`)
+    expect(sessionsSql).toContain(
+      `pa.approval_payload->>'turnLeaseToken' = s.turn_lease_token::text`,
+    )
   })
 })
 
