@@ -13,7 +13,9 @@ import {
   createDocTools,
   createMemoryTools,
   createTaskTools,
+  findStarterBlueprint,
   loadBuiltinSkills,
+  starterExtractionSpec,
   type CrmStore,
   type DocPageStore,
   type Embedder,
@@ -187,6 +189,22 @@ export function createRecordingSynthesizer(deps: RecordingSynthesizerDeps): Reco
           slug: args.blueprintSlug,
           body: ws.body,
           title: titleFor(args.blueprintSlug, ws.title),
+        }
+      }
+    }
+    // Compatibility: older/outpost defaults can still carry the starter id
+    // (`meeting-notes`) before a workspace-owned page-template row is minted.
+    // Resolve it directly instead of falling through to a UUID lookup.
+    if (!blueprint) {
+      const starter = findStarterBlueprint(args.blueprintSlug)
+      const spec = starter ? starterExtractionSpec(starter) : null
+      if (starter && spec) {
+        blueprint = {
+          kind: 'document',
+          slug: starter.id,
+          body: extractionToBlueprintBody(starter.name, spec),
+          title: starter.name,
+          spec,
         }
       }
     }

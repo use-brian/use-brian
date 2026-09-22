@@ -160,6 +160,21 @@ describe('[COMP:api/recording-synthesizer] createRecordingSynthesizer', () => {
     })
   })
 
+  it('resolves the meeting-notes starter without querying page templates as UUIDs', async () => {
+    const pageTemplateStore = { getById: vi.fn() }
+
+    await createRecordingSynthesizer(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      deps({ pageTemplateStore: pageTemplateStore as any }),
+    )({ ...ARGS, blueprintSlug: 'meeting-notes' })
+
+    expect(pageTemplateStore.getById).not.toHaveBeenCalled()
+    const bp = synthesizeMock.mock.calls[0][1]
+    expect(bp).toMatchObject({ kind: 'document', slug: 'meeting-notes', title: 'Meeting notes' })
+    expect(bp.body).toContain('### 1. Summary')
+    expect(bp.spec.fields.some((f: { key: string }) => f.key === 'action-items')).toBe(true)
+  })
+
   it('resolves a document blueprint from a page template with an extraction spec', async () => {
     loadBuiltinSkillsMock.mockReturnValue([]) // no builtin / no workspace skill
     const pageTemplateStore = {
