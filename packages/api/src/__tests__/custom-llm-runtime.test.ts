@@ -7,6 +7,7 @@ import {
   decideImageTurnRoute,
   probeCustomLlmEndpoint,
   probeCustomLlmVision,
+  turnHasInlineImage,
 } from '../custom-llm-runtime.js'
 import type { WorkspaceCustomLlmEndpointStore } from '../db/workspace-custom-llm-endpoints.js'
 import type { LLMProvider, ProviderRequest } from '@use-brian/core'
@@ -441,6 +442,86 @@ describe('[COMP:api/custom-llm-endpoints] endpoint vision probe', () => {
     const messages = JSON.stringify(JSON.parse(init.body as string).messages)
     expect(messages).toContain('image_url')
     expect(messages).not.toContain('text-only model cannot inspect it')
+  })
+})
+
+describe('[COMP:api/custom-llm-endpoints] attached PDFs on a custom route', () => {
+  const profileId = '00000000-0000-4000-8000-000000000041'
+  const runtime = {
+    id: profileId,
+    endpointId: profileId,
+    workspaceId: '00000000-0000-4000-8000-000000000040',
+    name: 'Text only',
+    endpointName: 'Gateway',
+    baseUrl: 'http://model.example/v1',
+    apiKey: null,
+    modelId: 'text-local',
+    contextWindow: 32768,
+    maxOutputTokens: 4096,
+    supportsTools: true,
+    supportsVision: false,
+    verifiedAt: new Date(),
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  }
+  const pdfTurn: ProviderRequest = {
+    model: customLlmAlias(profileId),
+    systemPrompt: '',
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'image', mimeType: 'application/pdf', data: 'JVBERi0xLjY=', name: 'reading-guide.pdf' },
+        { type: 'text', text: 'Summarise this for class tomorrow.' },
+      ],
+    }],
+  }
+
+  async function sentMessages(options: Parameters<typeof createWorkspaceCustomLlmResolver>[1]) {
+    const store = {
+      getRuntimeSystem: vi.fn().mockResolvedValue(runtime),
+      getTierRuntimeSystem: vi.fn(),
+      getTierRouteSystem: vi.fn(),
+    } as unknown as WorkspaceCustomLlmEndpointStore
+    const fetchFn = vi.fn().mockResolvedValue(textSse())
+    const resolved = await createWorkspaceCustomLlmResolver(store, { ...options, fetchFn })({
+      workspaceId: runtime.workspaceId,
+      requestedModel: customLlmAlias(profileId),
+    })
+    if (!resolved) throw new Error('expected a resolved custom provider')
+    for await (const _chunk of resolved.provider.stream(pdfTurn)) {
+      // Drain so the request body can be inspected.
+    }
+    const [, init] = fetchFn.mock.calls[0] as [string, RequestInit]
+    return JSON.stringify(JSON.parse(init.body as string).messages)
+  }
+
+  // 2026-09-22: a Telegram user on a BYO endpoint attached a reading guide
+  // twice and was told both times that the assistant could not read it. The
+  // custom route bypassed the routing provider, so the PDF never reached the
+  // distiller and the adapter swapped it for a "cannot be read" note.
+  it('hands the endpoint the distilled text of an attached PDF', async () => {
+    const distill = vi.fn().mockResolvedValue({ text: 'Week 7: close reading of chapter two.', model: 'distiller' })
+    const messages = await sentMessages({
+      documentAdaptation: { distill: { configKey: 'test', distill } },
+    })
+    expect(distill).toHaveBeenCalledTimes(1)
+    expect(messages).toContain('distilled=\\"true\\"')
+    expect(messages).toContain('Week 7: close reading of chapter two.')
+    expect(messages).not.toContain('cannot be read inline by this model')
+  })
+
+  it('tells the model plainly when no distiller is configured', async () => {
+    const messages = await sentMessages({})
+    expect(messages).toContain('no attachment-distillation backend configured')
+    expect(messages).not.toContain('JVBERi0xLjY=')
+  })
+
+  // Reading a PDF needs no vision, so a PDF turn must stay on the workspace's
+  // own endpoint instead of triggering the built-in image fallback.
+  it('does not count a PDF as an image for the image routing policy', () => {
+    expect(turnHasInlineImage([{ type: 'image', mimeType: 'application/pdf', data: 'x' }])).toBe(false)
+    expect(turnHasInlineImage([{ type: 'image', mimeType: 'image/png', data: 'x' }])).toBe(true)
+    expect(turnHasInlineImage([{ type: 'text', text: 'hi' }])).toBe(false)
   })
 })
 

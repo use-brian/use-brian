@@ -2,8 +2,12 @@
 
 import {
   createOpenAICompatProvider,
+  wrapDocumentAdaptation,
   wrapEndpointFallback,
   wrapProvider,
+  type ContentBlock,
+  type DistillateCachePort,
+  type DocumentDistillPort,
   type EndpointFallbackEvent,
   type LLMProvider,
 } from '@use-brian/core'
@@ -383,6 +387,19 @@ export type ResolvedWorkspaceCustomLlm = {
  */
 export type ImageTurnRouteDecision = 'serve_on_route' | 'fall_back_to_builtin' | 'refuse'
 
+/**
+ * The `turnHasImage` input to `decideImageTurnRoute`, shared by both callers.
+ *
+ * Counts only `image/*` blocks. A PDF also travels as an `image` block (the
+ * engine's contract for Gemini's native reader), but reading one needs no
+ * vision: the resolver wraps every custom route in `wrapDocumentAdaptation`,
+ * which hands the endpoint the PDF's distilled text. Counting PDFs here would
+ * move a readable PDF turn off the workspace's own endpoint for no reason.
+ */
+export function turnHasInlineImage(blocks: readonly ContentBlock[]): boolean {
+  return blocks.some((block) => block.type === 'image' && block.mimeType.startsWith('image/'))
+}
+
 export function decideImageTurnRoute(params: {
   /** The resolved workspace route, or null when none applies. */
   route: { supportsVision: boolean } | null
@@ -438,6 +455,19 @@ export function createWorkspaceCustomLlmResolver(
     networkPolicy?: CustomLlmNetworkPolicy
     fetchFn?: typeof fetch
     managedProvider?: LLMProvider
+    /**
+     * Ports for `wrapDocumentAdaptation`, the same pair the routing provider
+     * receives. A custom route is built here, not by `createRoutingProvider`,
+     * so it never passed through that wrapper: an attached PDF reached the
+     * OpenAI-compatible adapter as raw bytes and was replaced by a "cannot be
+     * read" note, and the assistant told the user it could not read the file.
+     * Omitted => the endpoint receives the honest "no distillation backend"
+     * note instead.
+     */
+    documentAdaptation?: {
+      distill?: DocumentDistillPort
+      cache?: DistillateCachePort
+    }
   },
 ): WorkspaceCustomLlmResolver {
   const networkPolicy = options?.networkPolicy ?? 'private-network'
@@ -529,12 +559,25 @@ export function createWorkspaceCustomLlmResolver(
     const selectedProfile = profile
     const selector = customLlmAlias(selectedProfile.id)
     const fetchFn = options?.fetchFn ?? (networkPolicy === 'public-only' ? createPublicCustomLlmFetch() : fetch)
-    const provider = wrapProvider(providerFor({
+    // Document adaptation is applied here, not inside `providerFor`: the
+    // connection probes call `providerFor` too and must hit the endpoint raw.
+    // An OpenAI-compatible endpoint never reads a PDF natively, so PDFs are
+    // always distilled. Images are deliberately NOT adapted here (`vision:
+    // true` means "pass through"): a new image turn on a sightless endpoint is
+    // already moved to a built-in model by `decideImageTurnRoute`, and a
+    // replayed one is degraded to a note by the adapter (`supportsVision`
+    // above), so distilling it would bill platform vision on every BYO turn.
+    const provider = wrapDocumentAdaptation(wrapProvider(providerFor({
       profileId: selectedProfile.id,
       baseUrl: selectedProfile.baseUrl,
       apiKey: selectedProfile.apiKey,
       modelId: selectedProfile.modelId,
-    }, fetchFn, selectedProfile.supportsVision))
+    }, fetchFn, selectedProfile.supportsVision)), {
+      nativePdf: false,
+      vision: true,
+      ...(options?.documentAdaptation?.distill ? { distill: options.documentAdaptation.distill } : {}),
+      ...(options?.documentAdaptation?.cache ? { cache: options.documentAdaptation.cache } : {}),
+    })
     const fallbackState: CustomLlmFallbackState = {
       enabled: allowFailureFallback
         && selectedProfile.fallbackToDefaultOnFailure

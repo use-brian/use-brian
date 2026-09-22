@@ -54,7 +54,7 @@ import {
   CUSTOM_MODEL_IMAGE_FALLBACK_NOTICE,
   CUSTOM_MODEL_IMAGE_REJECTION,
 } from './_channel-error-text.js'
-import { decideImageTurnRoute } from '../custom-llm-runtime.js'
+import { decideImageTurnRoute, turnHasInlineImage } from '../custom-llm-runtime.js'
 import { resolveReplyText } from './_reply-context.js'
 import {
   attachUserVisibleContext,
@@ -1207,7 +1207,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // here is only ever the nothing-to-fall-back-to case.
   const imageRoute = decideImageTurnRoute({
     route: resolvedCustomLlm,
-    turnHasImage: userContentBlocks.some((block) => block.type === 'image'),
+    turnHasImage: turnHasInlineImage(userContentBlocks),
     explicitCustomSelection: false,
     builtInServable: !params.configuredProviders
       || (() => {

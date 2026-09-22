@@ -79,7 +79,7 @@ import {
   CUSTOM_MODEL_IMAGE_FALLBACK_NOTICE,
   CUSTOM_MODEL_IMAGE_REJECTION,
 } from './_channel-error-text.js'
-import { decideImageTurnRoute } from '../custom-llm-runtime.js'
+import { decideImageTurnRoute, turnHasInlineImage } from '../custom-llm-runtime.js'
 import { resolveUser, buildBrowserEscalationPrompt, buildUnavailableCapabilitiesPrompt, injectSkills, isSkillOfferable, checkUsageBudget, applyMcpInjection, type CreditBudgetGate } from './route-helpers.js'
 import { createDocRunClient } from '../doc/run-presence-client.js'
 import type { AssistantRunChannel } from '@use-brian/doc-model'
@@ -6009,7 +6009,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         // provider would trade a clear sentence for a mid-stream crash.
         const imageRoute = decideImageTurnRoute({
           route: resolvedTurnLlm.customRuntime,
-          turnHasImage: userContentBlocks.some((block) => block.type === 'image'),
+          turnHasImage: turnHasInlineImage(userContentBlocks),
           explicitCustomSelection: Boolean(explicitCustomSelector),
           builtInServable: !options.configuredProviders
             || (() => {

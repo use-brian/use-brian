@@ -2130,6 +2130,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const resolveWorkspaceCustomLlm = createWorkspaceCustomLlmResolver(customLlmEndpointStore, {
     networkPolicy: customLlmNetworkPolicy,
     managedProvider: provider,
+    documentAdaptation: { distill: documentDistill, cache: distillateCache },
   })
   const resolveBackgroundRuntime = async (workspaceId: string | null | undefined) =>
     workspaceId
