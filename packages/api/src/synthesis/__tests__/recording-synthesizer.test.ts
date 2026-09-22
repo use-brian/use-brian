@@ -159,11 +159,27 @@ describe('[COMP:api/recording-synthesizer] createRecordingSynthesizer', () => {
     })
   })
 
+  it('resolves the meeting-notes starter without querying page templates as UUIDs', async () => {
+    const pageTemplateStore = { getById: vi.fn() }
+
+    await createRecordingSynthesizer(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      deps({ pageTemplateStore: pageTemplateStore as any }),
+    )({ ...ARGS, blueprintSlug: 'meeting-notes' })
+
+    expect(pageTemplateStore.getById).not.toHaveBeenCalled()
+    const bp = synthesizeMock.mock.calls[0][1]
+    expect(bp).toMatchObject({ kind: 'document', slug: 'meeting-notes', title: 'Meeting notes' })
+    expect(bp.body).toContain('### 1. Summary')
+    expect(bp.spec.fields.some((f: { key: string }) => f.key === 'action-items')).toBe(true)
+  })
+
   it('resolves a document blueprint from a page template with an extraction spec', async () => {
     loadBuiltinSkillsMock.mockReturnValue([]) // no builtin / no workspace skill
+    const templateId = '11111111-1111-4111-8111-111111111111'
     const pageTemplateStore = {
       getById: vi.fn().mockResolvedValue({
-        id: 'tmpl-1',
+        id: templateId,
         name: 'QBR',
         // The real store normalizes stored JSONB to the typed v2 contract on
         // read — the mock hands back what `getById` actually returns.
@@ -185,10 +201,10 @@ describe('[COMP:api/recording-synthesizer] createRecordingSynthesizer', () => {
     await createRecordingSynthesizer(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       deps({ pageTemplateStore: pageTemplateStore as any }),
-    )({ ...ARGS, blueprintSlug: 'tmpl-1' })
-    expect(pageTemplateStore.getById).toHaveBeenCalledWith('u-1', 'tmpl-1')
+    )({ ...ARGS, blueprintSlug: templateId })
+    expect(pageTemplateStore.getById).toHaveBeenCalledWith('u-1', templateId)
     const bp = synthesizeMock.mock.calls[0][1]
-    expect(bp).toMatchObject({ kind: 'document', slug: 'tmpl-1', title: 'QBR' })
+    expect(bp).toMatchObject({ kind: 'document', slug: templateId, title: 'QBR' })
     expect(bp.body).toContain('### 1. Account health')
     // The typed contract rides on the blueprint so the engine runs record-first.
     expect(bp.spec.fields[0].key).toBe('account-health')

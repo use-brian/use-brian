@@ -13,7 +13,9 @@ import {
   createDocTools,
   createMemoryTools,
   createTaskTools,
+  findStarterBlueprint,
   loadBuiltinSkills,
+  starterExtractionSpec,
   type CrmStore,
   type DocPageStore,
   type Embedder,
@@ -41,6 +43,8 @@ import {
 import { extractionToBlueprintBody } from './blueprint-from-template.js'
 import type { BlueprintRecordStore } from '../db/blueprint-records-store.js'
 import type { PageTemplateStore } from '../db/page-templates-store.js'
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 export type RecordingSynthesizerDeps = {
   provider: LLMProvider
@@ -189,9 +193,26 @@ export function createRecordingSynthesizer(deps: RecordingSynthesizerDeps): Reco
         }
       }
     }
+    // Compatibility: older/outpost defaults can still carry the starter id
+    // (`meeting-notes`) before a workspace-owned page-template row is minted.
+    // Resolve it directly instead of falling through to a UUID lookup.
+    if (!blueprint) {
+      const starter = findStarterBlueprint(args.blueprintSlug)
+      const spec = starter ? starterExtractionSpec(starter) : null
+      if (starter && spec) {
+        blueprint = {
+          kind: 'document',
+          slug: starter.id,
+          body: extractionToBlueprintBody(starter.name, spec),
+          title: starter.name,
+          spec,
+        }
+      }
+    }
     // A page template carrying an `extraction` spec is a "document" blueprint:
     // rendered to a recipe body and run by the SAME engine. The slug is its id.
-    if (!blueprint && deps.pageTemplateStore) {
+    // Page-template ids are UUIDs; do not pass starter ids/slugs to Postgres.
+    if (!blueprint && deps.pageTemplateStore && UUID_RE.test(args.blueprintSlug)) {
       const tmpl = await deps.pageTemplateStore.getById(args.userId, args.blueprintSlug)
       if (tmpl?.extraction) {
         blueprint = {
