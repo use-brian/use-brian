@@ -259,3 +259,101 @@ describe('[COMP:providers/endpoint-fallback] createSession', () => {
     expect(chunks).toEqual(textRun('from platform', 'gemini-pro'))
   })
 })
+
+// ── Session lane: mid-turn fallback (2026-09-23) ───────────────
+// A provider session is incremental: after the first send it receives only
+// the new messages. An endpoint reset its socket on the 12th send of a
+// calendar turn, and the fallback session was handed a lone tool result.
+
+function toolRun(id: string, model: string): StreamChunk[] {
+  return [
+    { type: 'message_start', model },
+    { type: 'tool_use_start', id, name: 'mcp_call' },
+    { type: 'tool_use_delta', id, input: '{"tool":"googleCalendarUpdateEvent"}' },
+    { type: 'tool_use_end', id },
+    { type: 'message_end', stopReason: 'tool_use', usage: { inputTokens: 3, outputTokens: 4 } },
+  ]
+}
+
+/** A session provider whose Nth send replays script[N], recording what each send received. */
+function sessionScripted(name: string, sends: (StreamChunk | Error)[][]) {
+  const received: Message[][] = []
+  const provider: LLMProvider = {
+    name,
+    models: [`${name}-model`],
+    stream: () => { throw new Error('stateless lane not used') },
+    createSession(): ProviderSession {
+      return {
+        send(messages: Message[]) {
+          const script = sends[received.length] ?? []
+          received.push(messages)
+          return (async function* () {
+            for (const step of script) {
+              if (step instanceof Error) throw step
+              yield step
+            }
+          })()
+        },
+      }
+    },
+  }
+  return { provider, received }
+}
+
+function connReset(): Error {
+  return Object.assign(new Error('aborted'), { code: 'ECONNRESET' })
+}
+
+describe('[COMP:providers/endpoint-fallback] createSession mid-turn fallback', () => {
+  const userTurn: Message = { role: 'user', content: 'add the room to every lesson' }
+  const toolResult: Message = {
+    role: 'user',
+    content: [{ type: 'tool_result', toolUseId: 'call_1', name: 'mcp_call', content: '{"ok":true}' }],
+  }
+
+  it('seeds the fallback with the whole transcript, not the latest delta', async () => {
+    const endpoint = sessionScripted('endpoint', [toolRun('call_1', 'endpoint-model'), [START, connReset()]])
+    const platform = sessionScripted('platform', [textRun('Done: rooms added.', 'gemini-pro')])
+    const events: EndpointFallbackEvent[] = []
+    const session = wrapEndpointFallback(endpoint.provider, platform.provider, { onFallback: (e) => events.push(e) })
+      .createSession({ model: 'gemini-pro', systemPrompt: 'x' })
+
+    await collect(session.send([userTurn]))
+    const chunks = await collect(session.send([toolResult]))
+
+    expect(chunks).toEqual(textRun('Done: rooms added.', 'gemini-pro'))
+    expect(events).toEqual([{ reason: 'network', status: null, detail: 'aborted' }])
+    expect(platform.received).toEqual([[
+      userTurn,
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'call_1', name: 'mcp_call', input: { tool: 'googleCalendarUpdateEvent' } }] },
+      toolResult,
+    ]])
+  })
+
+  it('keeps later sends on the fallback once it has served one', async () => {
+    const endpoint = sessionScripted('endpoint', [[connReset()], textRun('never reached', 'endpoint-model')])
+    const platform = sessionScripted('platform', [toolRun('call_2', 'gemini-pro'), textRun('done', 'gemini-pro')])
+    const session = wrapEndpointFallback(endpoint.provider, platform.provider)
+      .createSession({ model: 'gemini-pro', systemPrompt: 'x' })
+
+    await collect(session.send([userTurn]))
+    const chunks = await collect(session.send([toolResult]))
+
+    expect(chunks).toEqual(textRun('done', 'gemini-pro'))
+    expect(endpoint.received).toHaveLength(1)
+    expect(platform.received).toEqual([[userTurn], [toolResult]])
+  })
+
+  // The fallback in the incident answered `message_start` + `message_end` and
+  // nothing else, and was still announced and billed as having served.
+  it('does not announce a fallback that answered nothing, and rethrows the endpoint error', async () => {
+    const endpoint = sessionScripted('endpoint', [[connReset()]])
+    const platform = sessionScripted('platform', [[{ type: 'message_start', model: 'gemini-pro' }, END]])
+    const events: EndpointFallbackEvent[] = []
+    const session = wrapEndpointFallback(endpoint.provider, platform.provider, { onFallback: (e) => events.push(e) })
+      .createSession({ model: 'gemini-pro', systemPrompt: 'x' })
+
+    await expect(collect(session.send([userTurn]))).rejects.toThrow('aborted')
+    expect(events).toEqual([])
+  })
+})

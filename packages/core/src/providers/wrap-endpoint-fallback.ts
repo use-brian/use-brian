@@ -68,6 +68,7 @@ import type {
   SessionOptions,
   StreamChunk,
 } from './types.js'
+import { createAccumulator } from './accumulator.js'
 import { extractStatus } from './wrap-fallback.js'
 
 export type EndpointFallbackReason = 'http_status' | 'network' | 'stream_error' | 'empty_stream'
@@ -175,13 +176,23 @@ export function wrapEndpointFallback(
   fallback: LLMProvider,
   opts?: WrapEndpointFallbackOptions,
 ): LLMProvider {
+  /**
+   * `onServed` fires once the attempt finished cleanly, naming the side whose
+   * chunks were yielded. The session lane uses it to keep its transcript.
+   */
   async function* attempt(
     runPrimaryStream: () => AsyncIterable<StreamChunk>,
     runFallbackStream: () => AsyncIterable<StreamChunk>,
+    onServed?: (side: 'primary' | 'fallback', chunks: StreamChunk[]) => void,
   ): AsyncGenerator<StreamChunk> {
     const result = await runPrimary(runPrimaryStream())
     if (result.kind === 'committed') {
-      yield* replay(result.buffered, result.rest)
+      const served: StreamChunk[] = []
+      for await (const chunk of replay(result.buffered, result.rest)) {
+        served.push(chunk)
+        yield chunk
+      }
+      onServed?.('primary', served)
       return
     }
 
@@ -197,34 +208,36 @@ export function wrapEndpointFallback(
       return
     }
 
-    let fallbackStarted = false
-    try {
-      for await (const chunk of runFallbackStream()) {
-        if (!fallbackStarted) {
-          fallbackStarted = true
-          opts?.onFallback?.(decision)
-        }
+    // The fallback is held to the same commit point as the endpoint: its
+    // `message_start` is bookkeeping, not an answer. Announcing on the first
+    // chunk of ANY kind is how a fallback that answered nothing (2026-09-23:
+    // `message_start` + `message_end` in 15ms) got reported as having served
+    // the turn, flipping its billing to platform and telling the user a
+    // built-in model had answered.
+    const fallbackResult = await runPrimary(runFallbackStream())
+    if (fallbackResult.kind === 'committed') {
+      opts?.onFallback?.(decision)
+      const served: StreamChunk[] = []
+      for await (const chunk of replay(fallbackResult.buffered, fallbackResult.rest)) {
+        served.push(chunk)
         yield chunk
       }
-    } catch (fallbackErr) {
-      // Both sides failed. Rethrow the ENDPOINT's error: it is the root
-      // cause, and the caller's error handling already knows that shape.
-      // A fallback that died after emitting is not retried again.
-      if (fallbackStarted) throw fallbackErr
-      if (result.kind === 'failed') throw result.error
-      throw new Error(
-        `[endpoint-fallback] endpoint produced no output and the fallback failed: ${errorDetail(fallbackErr)}`,
-        { cause: fallbackErr },
-      )
+      onServed?.('fallback', served)
+      return
     }
 
-    if (!fallbackStarted) {
-      // Fallback returned an empty stream too. Report the endpoint failure
-      // rather than an empty success, so the engine's empty-response
-      // handling is not fed a silently-swapped provider.
-      if (result.kind === 'failed') throw result.error
-      yield* replay(result.buffered)
+    // Both sides failed, or the fallback produced nothing either. Report the
+    // ENDPOINT's failure: it is the root cause, and the caller's error
+    // handling already knows that shape. An empty fallback is not fed to the
+    // engine as a silently-swapped empty success.
+    if (result.kind === 'failed') throw result.error
+    if (fallbackResult.kind === 'failed') {
+      throw new Error(
+        `[endpoint-fallback] endpoint produced no output and the fallback failed: ${errorDetail(fallbackResult.error)}`,
+        { cause: fallbackResult.error },
+      )
     }
+    yield* replay(result.buffered)
   }
 
   return {
@@ -240,14 +253,55 @@ export function wrapEndpointFallback(
 
     createSession(sessionOpts: SessionOptions): ProviderSession {
       const primarySession = primary.createSession(sessionOpts)
+      // A provider session is incremental: after its first send it receives
+      // only the new messages (usually tool results) and holds the rest of
+      // the conversation privately. A fallback session created on a LATER
+      // send therefore knew nothing but that delta. On 2026-09-23 an endpoint
+      // reset its socket on the 12th send of a calendar turn; Gemini was
+      // handed a lone tool result, dropped it as an orphan, and answered
+      // nothing. So the wrapper keeps the transcript itself and seeds a new
+      // fallback session with all of it.
+      const transcript: Message[] = []
       let fallbackSession: ProviderSession | null = null
+      // Once the fallback has served a send, it keeps the session. The
+      // endpoint's own history never saw the fallback's reply, so the next
+      // delta (results for the FALLBACK's tool calls) would be a tool result
+      // with no matching call there.
+      let stickToFallback = false
+
+      function record(sent: Message[], chunks: StreamChunk[]): void {
+        const acc = createAccumulator()
+        for (const chunk of chunks) acc.push(chunk)
+        const response = acc.finish()
+        transcript.push(...sent)
+        if (response.content.length > 0) transcript.push({ role: 'assistant', content: response.content })
+      }
+
       return {
         send(messages: Message[], sendOpts?: SendOptions): AsyncIterable<StreamChunk> {
+          if (stickToFallback && fallbackSession) {
+            const session = fallbackSession
+            return (async function* () {
+              const served: StreamChunk[] = []
+              for await (const chunk of session.send(messages, sendOpts)) {
+                served.push(chunk)
+                yield chunk
+              }
+              record(messages, served)
+            })()
+          }
           return attempt(
             () => primarySession.send(messages, sendOpts),
             () => {
-              fallbackSession ??= fallback.createSession(sessionOpts)
-              return fallbackSession.send(messages, sendOpts)
+              // Always a fresh session here: a previous fallback that failed
+              // may have left partial state, and only a session that has
+              // SERVED (sticky, above) is known to hold the transcript.
+              fallbackSession = fallback.createSession(sessionOpts)
+              return fallbackSession.send([...transcript, ...messages], sendOpts)
+            },
+            (side, chunks) => {
+              record(messages, chunks)
+              if (side === 'fallback') stickToFallback = true
             },
           )
         },
