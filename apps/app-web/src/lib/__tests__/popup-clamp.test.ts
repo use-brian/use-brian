@@ -16,6 +16,7 @@ import {
   clampPopupRect,
   measureViewport,
   onViewportChange,
+  positionSuggestionPopup,
 } from "@/lib/popup-clamp";
 
 const PHONE = { top: 0, left: 0, width: 360, height: 640 };
@@ -121,5 +122,34 @@ describe("[COMP:app-web/popup-clamp] viewport measurement (SSR-safe)", () => {
       removeEventListener: () => {},
     };
     expect(measureViewport()).toEqual({ top: 0, left: 0, width: 1280, height: 800 });
+  });
+
+  it("makes a block renderer wrapper shrink-to-fit before measuring its popup", () => {
+    g.window = {
+      innerWidth: 1440,
+      innerHeight: 900,
+      scrollX: 0,
+      scrollY: 0,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    };
+
+    const style = {} as CSSStyleDeclaration;
+    const el = {
+      style,
+      // ReactRenderer creates a block-level wrapper. Before it becomes
+      // absolutely positioned that wrapper fills the viewport; afterwards it
+      // shrink-wraps the 288px menu rendered inside it.
+      get offsetWidth() {
+        return style.position === "absolute" ? 288 : 1440;
+      },
+      offsetHeight: 320,
+    } as HTMLElement;
+
+    const placed = positionSuggestionPopup(el, caret(100, 600));
+
+    expect(placed.left).toBe(600);
+    expect(style.position).toBe("absolute");
+    expect(style.left).toBe("600px");
   });
 });

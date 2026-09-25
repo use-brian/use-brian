@@ -76,6 +76,7 @@ import {
   parseDesktopWorkspaceContext,
   resolveDesktopWorkspaceBootstrap,
 } from "./offline-bootstrap";
+import { resolveRedeemWorkspace } from "@/app/redeem/resolve-workspace";
 
 import { isFeedPlatform } from "@/lib/feed-nav";
 import {
@@ -116,6 +117,9 @@ const ComputerLayout = lazy(() => import("@/app/w/[workspaceId]/computer/layout"
 const BrowsersIndexPage = lazy(() => import("@/app/w/[workspaceId]/computer/page"));
 const ComputerTakeoverPage = lazy(() => import("@/app/w/[workspaceId]/computer/[sessionId]/page"));
 const LivePage = lazy(() => import("@/app/w/[workspaceId]/live/page"));
+const RedeemForm = lazy(async () => ({
+  default: (await import("@/app/redeem/redeem-form")).RedeemForm,
+}));
 
 const TasksSurface = lazy(async () => ({
   default: (await import("@/components/tasks/tasks-surface")).TasksSurface,
@@ -247,6 +251,7 @@ export function App() {
                 create-workspace affordance yet — that gap is desktop-wide,
                 not introduced by this alias. */}
             <Route path="/teams" element={<Boot />} />
+            <Route path="/redeem" element={<DesktopRedeemRoute />} />
             <Route path="/desktop/chat/:workspaceId" element={<DesktopChatRoute />} />
             {/* Layout route: WorkspaceShell (providers + persistent chrome)
                 stays mounted across every `/w/[id]/*` surface change — only the
@@ -341,6 +346,68 @@ export function App() {
         <DesktopLinkRecovery />
       </I18nProvider>
     </ThemeProvider>
+  );
+}
+
+/**
+ * Bundled-desktop counterpart of the Next `/redeem` Server Component.
+ *
+ * The billing settings link uses `next/link`, which Vite aliases to the
+ * HashRouter-aware shim. A plain anchor would resolve `/redeem` against the
+ * bundle's `file://` URL; Electron correctly blocks that off-app navigation,
+ * leaving the click looking inert. The desktop route resolves the requested
+ * workspace through the same pure selector as the web page before rendering
+ * the shared form.
+ */
+function DesktopRedeemRoute() {
+  const [searchParams] = useSearchParams();
+  const requestedWorkspaceId = searchParams.get("ws");
+  const prefilledCode = searchParams.get("code") ?? "";
+  const [targetWorkspaceId, setTargetWorkspaceId] = useState<string | null | undefined>(
+    undefined,
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    void authFetch(`${apiBase()}/api/workspaces`)
+      .then(async (res) => {
+        if (!res.ok) return [];
+        const data = (await res.json()) as {
+          workspaces?: Array<{ id: string; name: string }>;
+        };
+        return data.workspaces ?? [];
+      })
+      .then((workspaces) => {
+        if (!cancelled) {
+          setTargetWorkspaceId(
+            resolveRedeemWorkspace(workspaces, requestedWorkspaceId),
+          );
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setTargetWorkspaceId(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [requestedWorkspaceId]);
+
+  if (targetWorkspaceId === undefined) {
+    return (
+      <div
+        aria-busy="true"
+        className="flex min-h-dvh items-center justify-center bg-background px-4"
+      >
+        <div className="h-64 w-full max-w-sm animate-pulse rounded-xl bg-muted" />
+      </div>
+    );
+  }
+
+  return (
+    <RedeemForm
+      targetWorkspaceId={targetWorkspaceId}
+      prefilledCode={prefilledCode}
+    />
   );
 }
 
