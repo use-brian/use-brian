@@ -1,7 +1,7 @@
 import { Router, type Request, type Response, type NextFunction } from 'express'
 import multer, { MulterError } from 'multer'
 import { z } from 'zod'
-import { getDefaultAssistant, findAssistantById, getWorkspacePrimaryAssistant } from '../db/users.js'
+import { getDefaultAssistant, getUserAssistant, findAssistantById, getWorkspacePrimaryAssistant } from '../db/users.js'
 import { getWorkspaceFileById } from '../db/workspace-files.js'
 import { isMediaMime, resolveRecordingForFile } from '../recordings/recording-for-file.js'
 import { enqueueFileIngestJob, getFileIngestJob } from '../db/file-ingest-jobs-store.js'
@@ -23,6 +23,9 @@ import { FileIngestError } from '../files/ingest-error.js'
 import type { FileIngestor } from '../files/ingest-port.js'
 import type { ArtifactPromoter } from '../files/artifact-promote.js'
 import { resolveUser } from './route-helpers.js'
+import { gateSessionRead } from './sessions.js'
+import { ContextNotAvailableError, resolveTurnScopeSystem } from '../context-scope/resolve-turn-scope.js'
+import { assertContextActivationReady } from '../context-scope/context-readiness.js'
 import { mintFilePreviewToken, verifyFilePreviewToken } from './file-preview-token.js'
 import {
   ChunkedUploadError,
@@ -58,6 +61,23 @@ function memoryUpload(maxFileSize: number) {
 const cacheUpload = memoryUpload(MAX_CACHE_FILE_SIZE)
 const ingestUpload = memoryUpload(MAX_INGEST_FILE_SIZE)
 
+// Multipart cannot carry JSON null: the literal "null" preserves the chat
+// request's explicit company-wide selection rather than inheriting defaults.
+const UploadContextId = z.preprocess(
+  (value) => value === 'null' ? null : value,
+  z.string().uuid().nullable().optional(),
+)
+const UploadSessionFields = z.object({
+  sessionId: z.string().min(1).optional(),
+  assistantId: z.string().min(1).optional(),
+  workspaceId: z.string().min(1).optional(),
+  channelId: z.string().min(1).optional(),
+  appOrigin: z.string().optional(),
+  contextGroupId: UploadContextId,
+  contextProjectId: UploadContextId,
+})
+const UPLOAD_ORIGINS = new Set(['brain', 'studio', 'workflow', 'doc', 'chat', 'approvals', 'knowledge-base'])
+
 /**
  * Multipart upload allowlist — shared between the transient chat-attachment
  * upload (`/api/files`) and the durable doc-block upload
@@ -87,7 +107,10 @@ export function isAllowedMime(mime: string, fileName?: string): boolean {
  * POST /api/files/upload (multipart, field "files")
  *   - Body field "sessionId" (optional). If absent, file is cached against
  *     a fresh session that the chat endpoint will adopt later.
- *   - Returns: [{ id, fileName, mimeType, sizeBytes, summary }]
+ *   - Optional assistantId/workspaceId select the assistant; channelId is a
+ *     stable fresh-pane key. appOrigin and contextGroupId/contextProjectId
+ *     are persisted on creation. Existing sessionId must be readable.
+ *   - Returns: { sessionId, files: [{ id, fileName, mimeType, sizeBytes, summary }] }
  *
  * POST /api/files/ingest (multipart, field "files")
  *   - Body field "workspaceId" (required). The authenticated user must be a
@@ -148,38 +171,98 @@ export function fileRoutes(
       const user = await resolveUser(jwtUserId)
       if (!user) { res.status(401).json({ error: 'User not found' }); return }
 
-      const assistant = await getDefaultAssistant(user.id)
+      const parsed = UploadSessionFields.safeParse(req.body ?? {})
+      if (!parsed.success) {
+        res.status(400).json({ error: 'Invalid upload session fields' })
+        return
+      }
+      const fields = parsed.data
+      let session
+      if (fields.sessionId) {
+        session = await findSessionById(fields.sessionId)
+        if (!session) {
+          res.status(404).json({ error: 'Session not found' })
+          return
+        }
+        const denied = await gateSessionRead(user.id, session)
+        if (denied) {
+          res.status(denied.status).json({ error: denied.error })
+          return
+        }
+      }
+
+      // Legacy existing-session callers need not select an assistant again.
+      const assistant = fields.assistantId
+        ? await getUserAssistant(user.id, fields.assistantId)
+        : fields.workspaceId
+          ? await getWorkspacePrimaryAssistant(user.id, fields.workspaceId)
+          : session
+            ? await findAssistantById(session.assistantId)
+            : await getDefaultAssistant(user.id)
       if (!assistant) {
-        res.status(500).json({ error: 'No assistant found' })
+        res.status(fields.assistantId || fields.workspaceId || session ? 404 : 500)
+          .json({ error: 'No assistant found' })
+        return
+      }
+      if (fields.workspaceId && assistant.workspaceId !== fields.workspaceId) {
+        res.status(400).json({ error: 'assistant_workspace_mismatch' })
+        return
+      }
+      if (session && session.assistantId !== assistant.id) {
+        res.status(400).json({ error: 'session_assistant_mismatch' })
         return
       }
 
-      // Resolve session — try requested ID first, else create staging session
-      // The frontend may send sessionId from `bodyData` if available.
-      const requestedSessionId = (req.body?.sessionId as string | undefined) ?? undefined
-      let session
-      if (requestedSessionId) {
-        session = await findSessionById(requestedSessionId)
+      const requestedContext = fields.contextGroupId !== undefined || fields.contextProjectId !== undefined
+      if (requestedContext) {
+        try {
+          if (fields.contextGroupId || fields.contextProjectId) {
+            if (!assistant.workspaceId) throw new ContextNotAvailableError('workspace', 'not_found')
+            await assertContextActivationReady(assistant.workspaceId)
+          }
+          await resolveTurnScopeSystem({
+            userId: user.id,
+            assistant,
+            workspaceId: assistant.workspaceId,
+            session: {
+              contextGroupId: fields.contextGroupId ?? null,
+              contextProjectId: fields.contextProjectId ?? null,
+            },
+          })
+        } catch (error) {
+          const { code, failedChecks } = error as { code?: string; failedChecks?: string[] }
+          res.status(code === 'context_activation_blocked' ? 409 : 403).json({
+            code: code ?? 'context_not_available',
+            error: code === 'context_activation_blocked'
+              ? 'Scoped context is not ready to activate.'
+              : 'That Team or Project context is not available.',
+            ...(failedChecks ? { failedChecks } : {}),
+          })
+          return
+        }
       }
       if (!session) {
-        // Create a fresh session — the chat endpoint will reuse this if the user
-        // sends their first message immediately after upload.
+        // Atomic upsert: retries and multiple attachments from a fresh pane
+        // bind to the same session, which the client adopts for its first turn.
         session = await findOrCreateSession({
           assistantId: assistant.id,
           userId: user.id,
           channelType: 'web',
-          channelId: crypto.randomUUID(),
+          channelId: fields.channelId ?? crypto.randomUUID(),
+          appOrigin: fields.appOrigin && UPLOAD_ORIGINS.has(fields.appOrigin) ? fields.appOrigin : null,
+          ...(fields.contextGroupId !== undefined ? { contextGroupId: fields.contextGroupId } : {}),
+          ...(fields.contextProjectId !== undefined ? { contextProjectId: fields.contextProjectId } : {}),
         })
       }
+      // An upsert may return an existing binding; never silently re-scope it.
+      if ((fields.contextGroupId !== undefined && fields.contextGroupId !== session.contextGroupId)
+        || (fields.contextProjectId !== undefined && fields.contextProjectId !== session.contextProjectId)) {
+        res.status(409).json({ error: 'context_locked' })
+        return
+      }
 
-      // Clearance scoping (audit #3, Option B): the cached file is partitioned
-      // to the session's workspace and made user-private to the uploader, so a
-      // gated read (chat fileIds / readFileContent) from another workspace or
-      // another user is filtered out by `buildAccessPredicate`. Default
-      // sensitivity 'internal'. Resolve the workspace from the session's
-      // assistant (the workspace the read will run in).
-      const fileWorkspaceId =
-        (await findAssistantById(session.assistantId))?.workspaceId ?? assistant.workspaceId ?? null
+      // User-private cache partition, also used by durable artifact promotion.
+      const fileWorkspaceId = assistant.workspaceId ?? null
 
       // Parse + cache each file
       const results = []
