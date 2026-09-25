@@ -22,7 +22,7 @@
  * toggle's alternate). This file is the list/overview the toggle returns to.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { entityColorVar } from "@/lib/brain-colors";
@@ -35,6 +35,10 @@ import type {
   BrainRow,
 } from "@/lib/api/brain";
 import { BrainFallbackCard } from "@/components/brain/file-segment-card";
+import { brainKindToInboxPrimitive } from "@/lib/brain-row-target";
+import { verifyBrainRow, deleteBrainRow } from "@/lib/api/brain-inbox";
+import { requestBrainRefresh } from "@/lib/brain-events";
+import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { Checkbox } from "@/components/ui/checkbox";
 import { UserAvatar } from "@/components/ui/user-avatar";
 import { loadWorkspaceRoster } from "@/lib/api/workspace-roster";
@@ -366,6 +370,11 @@ export function BrainGroupedView({
   const completedCount = completedTasks?.length ?? 0;
 
   const { activeId: workspaceId } = useWorkspaces();
+  const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
+  const currentWorkspace = useRef(workspaceId);
+  currentWorkspace.current = workspaceId;
+  const [outcome, setOutcome] = useState<{ workspaceId: string; succeeded: number; failed: number } | null>(null);
   const selectableKeys = useMemo(
     () =>
       new Set(
@@ -393,6 +402,64 @@ export function BrainGroupedView({
     setSelection({ workspaceId, keys: selectedKeys });
   }
   const setSelectedKeys = (keys: Set<string>) => setSelection({ workspaceId, keys });
+  const selectedRows = [...rows, ...(showCompletedTasks ? completedTasks ?? [] : [])]
+    .filter((row) => selectedKeys.has(`${row.kind}:${row.id}`));
+  const eligibleRows = (action: "confirm" | "delete") => selectedRows.filter(
+    (row) => row.id && brainKindToInboxPrimitive(row.kind) && (action === "delete" || row.hasPending),
+  );
+  async function runBulk(action: "confirm" | "delete") {
+    if (busyRef.current || !workspaceId) return;
+    const eligible = eligibleRows(action);
+    if (!eligible.length) return;
+    // Freeze the exact row identities before awaiting the dialog. Graph name
+    // matching is decoration ONLY and must never determine a mutation target.
+    busyRef.current = true;
+    setBusy(true);
+    setOutcome(null);
+    const succeeded = new Set<string>();
+    let failed = 0;
+    try {
+      if (action === "delete") {
+        const ok = await confirmDialog({
+          title: t.memoriesReview.delete,
+          description: `${format(t.brainPage.groupedView.deleteScope, { count: eligible.length, selected: selectedKeys.size })} ${t.memoriesReview.deleteConfirmBody}`,
+          confirmLabel: t.memoriesReview.deleteConfirmAction,
+          cancelLabel: t.memoriesReview.cancel,
+          variant: "destructive",
+        });
+        if (!ok || currentWorkspace.current !== workspaceId) return;
+      }
+      // CRM aliases and singular entity kinds can refer to the same physical
+      // entity. Coalesce those requests, while accounting for every selected row.
+      const targets = new Map<string, { row: BrainRow; keys: string[] }>();
+      for (const row of eligible) {
+        const primitive = brainKindToInboxPrimitive(row.kind)!;
+        const identityKind = ["contact", "company", "deal"].includes(primitive) ? "entity" : primitive;
+        const key = `${identityKind}:${row.id}`;
+        const target = targets.get(key) ?? { row, keys: [] };
+        target.keys.push(`${row.kind}:${row.id}`);
+        targets.set(key, target);
+      }
+      for (const { row, keys } of targets.values()) {
+        try {
+          const primitive = brainKindToInboxPrimitive(row.kind)!;
+          const result = await (action === "confirm" ? verifyBrainRow : deleteBrainRow)(workspaceId, primitive, row.id);
+          if (result.ok) keys.forEach((key) => succeeded.add(key));
+          else failed += keys.length;
+        } catch {
+          failed += keys.length;
+        }
+      }
+      setSelection((previous) => previous.workspaceId === workspaceId
+        ? { ...previous, keys: new Set([...previous.keys].filter((key) => !succeeded.has(key))) }
+        : previous);
+      if (currentWorkspace.current === workspaceId) setOutcome({ workspaceId, succeeded: succeeded.size, failed });
+      if (succeeded.size) requestBrainRefresh(workspaceId);
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+    }
+  }
   const allSelected =
     selectableKeys.size > 0 && selectedKeys.size === selectableKeys.size;
   const selectionBox = (row: BrainRow) => {
@@ -402,6 +469,7 @@ export function BrainGroupedView({
         <Checkbox
           aria-label={format(t.brainPage.groupedView.selectRow, { name: row.name })}
           checked={selectedKeys.has(key)}
+          disabled={busy}
           onCheckedChange={(checked) => {
             const next = new Set(selectedKeys);
             if (checked) next.add(key);
@@ -558,7 +626,7 @@ export function BrainGroupedView({
             aria-label={t.brainPage.groupedView.selectAll}
             checked={allSelected}
             indeterminate={selectedKeys.size > 0 && !allSelected}
-            disabled={selectableKeys.size === 0}
+            disabled={busy || selectableKeys.size === 0}
             onCheckedChange={(checked) =>
               setSelectedKeys(checked ? new Set(selectableKeys) : new Set())
             }
@@ -572,12 +640,27 @@ export function BrainGroupedView({
         </span>
         <button
           type="button"
-          disabled={selectedKeys.size === 0}
+          disabled={busy || selectedKeys.size === 0}
           onClick={() => setSelectedKeys(new Set())}
           className="min-h-11 px-2 rounded-md hover:bg-muted/40 disabled:opacity-50"
         >
           {t.brainPage.groupedView.clearSelection}
         </button>
+        <button type="button" disabled={busy || !workspaceId || eligibleRows("confirm").length === 0}
+          onClick={() => void runBulk("confirm")}
+          className="min-h-11 px-2 rounded-md hover:bg-muted/40 disabled:opacity-50">
+          {format(t.brainPage.groupedView.bulkConfirm, { count: eligibleRows("confirm").length })}
+        </button>
+        <button type="button" disabled={busy || !workspaceId || eligibleRows("delete").length === 0}
+          onClick={() => void runBulk("delete")}
+          className="min-h-11 px-2 rounded-md text-destructive hover:bg-muted/40 disabled:opacity-50">
+          {format(t.brainPage.groupedView.bulkDelete, { count: eligibleRows("delete").length })}
+        </button>
+        {busy && <span role="status">{t.brainPage.groupedView.bulkBusy}</span>}
+        {outcome?.workspaceId === workspaceId && <span role="status">
+          {format(t.brainPage.groupedView.bulkResult, { succeeded: outcome.succeeded, failed: outcome.failed })}
+        </span>}
+
       </div>
       {presentLegend.length > 1 && (
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2 border-b border-border text-[11px] text-muted-foreground">
@@ -640,6 +723,7 @@ export function BrainGroupedView({
                         {selectionBox(row)}
                         <button
                           type="button"
+                          disabled={busy}
                           onClick={() => onSelect(row)}
                           className={cn(
                             "min-w-0 min-h-11 flex-1 text-left flex items-center gap-3 pr-3 py-2 rounded-md",
@@ -727,6 +811,7 @@ export function BrainGroupedView({
                 <div className="mt-0.5">
                   <button
                     type="button"
+                    disabled={busy}
                     onClick={onToggleCompletedTasks}
                     aria-expanded={showCompletedTasks}
                     className="inline-flex items-center gap-1 px-1 py-0.5 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
@@ -753,6 +838,7 @@ export function BrainGroupedView({
                             {KNOWN_ROW_KINDS.has(row.kind) && selectionBox(row)}
                             <button
                               type="button"
+                              disabled={busy}
                               onClick={() => onSelect(row)}
                               className={cn(
                                 "min-w-0 min-h-11 flex-1 text-left flex items-center gap-3 pr-3 py-2 rounded-md opacity-60",

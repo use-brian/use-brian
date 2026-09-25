@@ -4988,6 +4988,12 @@ export const ja: Dictionary = {
       graphAria: "グラフ表示に切り替え",
     },
     groupedView: {
+      bulkConfirm: "確認（{count}）",
+      bulkDelete: "削除（{count}）",
+      deleteScope: "選択した読み込み済みの {selected} 件のうち {count} 件を削除しますか？対象外の行は削除されません。",
+      bulkBusy: "処理中…",
+      bulkResult: "成功 {succeeded} 件、失敗 {failed} 件。失敗した行は再試行のため選択されたままです。",
+
       selectRow: "{name} を選択",
       selectAll: "読み込み済みの行をすべて選択",
       selectedCount: "{count} 件選択中",
