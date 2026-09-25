@@ -82,7 +82,7 @@ export async function POST(request: Request) {
             id: data.user.id,
             name: data.user.name,
             email: data.user.email,
-            ...(data.user.avatarUrl ? { avatarUrl: data.user.avatarUrl } : {}),
+            avatarUrl: data.user.avatarUrl ?? null,
           }),
         ),
       );

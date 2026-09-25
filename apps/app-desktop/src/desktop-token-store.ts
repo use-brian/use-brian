@@ -32,7 +32,13 @@ export interface StoredTokens {
   refreshToken: string;
   /** Unix ms at which the access token expires. */
   accessTokenExpiresAt: number;
-  user?: { id: string; name: string; email: string; plan?: string };
+  user?: {
+    id: string;
+    name: string;
+    email: string;
+    avatarUrl?: string | null;
+    plan?: string;
+  };
 }
 
 /**
@@ -58,6 +64,11 @@ function normalizeUser(raw: unknown): StoredTokens["user"] | undefined {
     id: u.id,
     name: u.name,
     email: u.email,
+    ...(
+      typeof u.avatarUrl === "string" || u.avatarUrl === null
+        ? { avatarUrl: u.avatarUrl }
+        : {}
+    ),
     ...(typeof u.plan === "string" ? { plan: u.plan } : {}),
   };
 }

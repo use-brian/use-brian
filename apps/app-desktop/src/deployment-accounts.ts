@@ -17,7 +17,13 @@ const targetSchema = z.object({
 const tokensSchema = z.object({
   accessToken: z.string().min(1), refreshToken: z.string().min(1),
   accessTokenExpiresAt: z.number().finite(),
-  user: z.object({ id: z.string(), name: z.string(), email: z.string(), plan: z.string().optional() }).optional(),
+  user: z.object({
+    id: z.string(),
+    name: z.string(),
+    email: z.string(),
+    avatarUrl: z.string().url().nullable().optional(),
+    plan: z.string().optional(),
+  }).optional(),
 });
 const entrySchema = z.object({ target: targetSchema, tokens: tokensSchema });
 const storeSchema = z.object({ version: z.literal(1), entries: z.array(entrySchema), active: z.record(z.string()) });
@@ -29,7 +35,7 @@ export type DeploymentAccountSnapshot = Readonly<{
 }>;
 type AccountStore = z.infer<typeof storeSchema>;
 export type DeploymentAccountRow = {
-  key: string; id: string; name: string; email: string;
+  key: string; id: string; name: string; email: string; avatarUrl?: string | null;
   deployment: "cloud" | "local" | "self-hosted"; appUrl: string; active: boolean;
 };
 const empty = (): AccountStore => ({ version: 1, entries: [], active: {} });
@@ -101,7 +107,8 @@ export class DeploymentAccounts {
     return store.entries.map((entry) => {
       const key = deploymentAccountKey(entry);
       return { key, id: entry.tokens.user?.id ?? "", name: entry.tokens.user?.name ?? "",
-        email: entry.tokens.user?.email ?? "", appUrl: entry.target.appUrl,
+        email: entry.tokens.user?.email ?? "", avatarUrl: entry.tokens.user?.avatarUrl,
+        appUrl: entry.target.appUrl,
         deployment: deploymentKind(entry.target), active: key === currentKey };
     });
   }

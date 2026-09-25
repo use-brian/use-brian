@@ -3134,7 +3134,12 @@ async function stashCurrentAccount(next: DesktopSession): Promise<boolean> {
       await readAccountDirFromJar(),
       prev,
       {
-        account: { id: next.user.id, name: next.user.name, email: next.user.email },
+        account: {
+          id: next.user.id,
+          name: next.user.name,
+          email: next.user.email,
+          avatarUrl: next.user.avatarUrl,
+        },
         refreshToken: next.refreshToken,
       },
     );
@@ -3194,7 +3199,12 @@ async function switchAccount(accountId: string): Promise<SwitchResult> {
     }
 
     const switchedAccount: AccountDirEntry = result.user
-      ? { id: result.user.id, name: result.user.name, email: result.user.email }
+      ? {
+          id: result.user.id,
+          name: result.user.name,
+          email: result.user.email,
+          avatarUrl: result.user.avatarUrl,
+        }
       : dir.find((e) => e.id === accountId) ?? { id: accountId, name: "", email: "" };
     const rotated = applySwitchRotation(store, dir, prevActive, {
       account: switchedAccount,
@@ -3262,7 +3272,12 @@ async function signOut(): Promise<void> {
         continue;
       }
       const switched: AccountDirEntry = result.user
-        ? { id: result.user.id, name: result.user.name, email: result.user.email }
+        ? {
+            id: result.user.id,
+            name: result.user.name,
+            email: result.user.email,
+            avatarUrl: result.user.avatarUrl,
+          }
         : dir.find((e) => e.id === nextId) ?? { id: nextId, name: "", email: "" };
       store[switched.id] = result.refreshToken; // R1 for the now-active account
       dir = upsertAccountDir(dir, switched);

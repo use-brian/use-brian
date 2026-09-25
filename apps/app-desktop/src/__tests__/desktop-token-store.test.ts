@@ -28,7 +28,13 @@ function session(overrides: Partial<DesktopSession> = {}): DesktopSession {
     refreshToken: "refresh-xyz",
     accessTokenExpiresIn: 3600,
     refreshTokenExpiresIn: 60 * 60 * 24 * 30,
-    user: { id: "u1", name: "Ada", email: "ada@example.com", plan: "pro" },
+    user: {
+      id: "u1",
+      name: "Ada",
+      email: "ada@example.com",
+      avatarUrl: "https://cdn.example/avatar.png",
+      plan: "pro",
+    },
     ...overrides,
   };
 }
@@ -65,7 +71,13 @@ describe("[COMP:app-desktop/token-store] serialize + parse", () => {
       accessToken: "access-abc",
       refreshToken: "refresh-xyz",
       accessTokenExpiresAt: NOW + 3600 * 1000,
-      user: { id: "u1", name: "Ada", email: "ada@example.com", plan: "pro" },
+      user: {
+        id: "u1",
+        name: "Ada",
+        email: "ada@example.com",
+        avatarUrl: "https://cdn.example/avatar.png",
+        plan: "pro",
+      },
     });
   });
 
@@ -102,6 +114,14 @@ describe("[COMP:app-desktop/token-store] serialize + parse", () => {
     );
     expect(parsed?.user).toBeUndefined();
     expect(parsed?.accessToken).toBe("a");
+  });
+
+  it("preserves an explicit missing-photo marker for migrated sessions", () => {
+    const raw = serializeTokens(
+      session({ user: { id: "u1", name: "Ada", email: "ada@example.com", avatarUrl: null } }),
+      NOW,
+    );
+    expect(parseStoredTokens(raw)?.user?.avatarUrl).toBeNull();
   });
 });
 
@@ -172,7 +192,17 @@ describe("[COMP:app-desktop/token-store] serializeRendererTokens", () => {
   it("serializes a renderer payload, reading expiry from the access-token JWT", () => {
     const jwt = makeJwt({ exp: 1_700_003_600 });
     const raw = serializeRendererTokens(
-      { accessToken: jwt, refreshToken: "r", user: { id: "u1", name: "Ada", email: "a@e.com", plan: "pro" } },
+      {
+        accessToken: jwt,
+        refreshToken: "r",
+        user: {
+          id: "u1",
+          name: "Ada",
+          email: "a@e.com",
+          avatarUrl: "https://cdn.example/avatar.png",
+          plan: "pro",
+        },
+      },
       NOW,
     );
     expect(raw).not.toBeNull();
@@ -180,7 +210,13 @@ describe("[COMP:app-desktop/token-store] serializeRendererTokens", () => {
       accessToken: jwt,
       refreshToken: "r",
       accessTokenExpiresAt: 1_700_003_600_000,
-      user: { id: "u1", name: "Ada", email: "a@e.com", plan: "pro" },
+      user: {
+        id: "u1",
+        name: "Ada",
+        email: "a@e.com",
+        avatarUrl: "https://cdn.example/avatar.png",
+        plan: "pro",
+      },
     });
   });
 

@@ -85,6 +85,7 @@ export async function GET(request: Request) {
         id: string;
         email: string | null;
         name: string | null;
+        avatarUrl?: string | null;
       };
     };
 
@@ -100,6 +101,7 @@ export async function GET(request: Request) {
           id: data.user.id,
           name: data.user.name,
           email: data.user.email,
+          avatarUrl: data.user.avatarUrl ?? null,
         }),
       ),
     );

@@ -95,7 +95,12 @@ export function DesktopAccounts(props: {
               onClick={() => void select(account)}
               className="flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded px-2 py-1.5 text-left hover:bg-muted"
             >
-              <UserAvatar size={24} name={account.name} email={account.email} />
+              <UserAvatar
+                size={24}
+                name={account.name}
+                email={account.email}
+                avatarUrl={account.avatarUrl}
+              />
               <span className="min-w-0 flex-1">
                 <span className="flex min-w-0 items-center gap-1.5">
                   <span className="truncate text-xs">{account.email || account.name || label}</span>

@@ -313,6 +313,13 @@ export async function authFetch(
  * critical path.
  */
 export async function refreshUserCookie(): Promise<void> {
+  // The packaged desktop has no `user` cookie. Refreshing through the native
+  // bridge updates its encrypted full-profile record and the preload cache.
+  if (isDesktopAuth()) {
+    await desktopAuthSource.refresh();
+    getUserInfo();
+    return;
+  }
   // Production sub-apps can't refresh `.usebrian.ai` cookies in place.
   if (primaryAuthUrl()) return;
   try {

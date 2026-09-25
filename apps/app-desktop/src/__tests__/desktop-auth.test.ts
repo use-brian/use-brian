@@ -205,7 +205,13 @@ describe("[COMP:app-desktop/desktop-auth] exchangeCode", () => {
     refreshToken: "rt",
     accessTokenExpiresIn: 3600,
     refreshTokenExpiresIn: 2592000,
-    user: { id: "u1", name: "A", email: "a@b.com", plan: "pro" },
+    user: {
+      id: "u1",
+      name: "A",
+      email: "a@b.com",
+      avatarUrl: "https://cdn.example/avatar.png",
+      plan: "pro",
+    },
   };
 
   it("POSTs code + verifier to the exchange endpoint and returns the session", async () => {
@@ -340,7 +346,13 @@ describe("[COMP:app-desktop/desktop-auth] buildSessionCookies", () => {
     refreshToken: "rt",
     accessTokenExpiresIn: 3600,
     refreshTokenExpiresIn: 2592000,
-    user: { id: "u1", name: "A", email: "a@b.com", plan: "pro" },
+    user: {
+      id: "u1",
+      name: "A",
+      email: "a@b.com",
+      avatarUrl: "https://cdn.example/avatar.png",
+      plan: "pro",
+    },
   };
 
   it("mirrors the web's three cookies with the right flags + expiries", () => {
@@ -362,6 +374,7 @@ describe("[COMP:app-desktop/desktop-auth] buildSessionCookies", () => {
     expect(JSON.parse(byName.user.value)).toMatchObject({
       id: "u1",
       email: "a@b.com",
+      avatarUrl: "https://cdn.example/avatar.png",
       plan: "pro",
       effectivePlan: "pro",
     });

@@ -1,5 +1,10 @@
-import { describe, it, expect } from "vitest";
-import { selectActiveUser, getInitials } from "@/lib/user";
+import { afterEach, describe, it, expect, vi } from "vitest";
+import { getUserInfo, selectActiveUser, setUserInfoCache, getInitials } from "@/lib/user";
+
+afterEach(() => {
+  setUserInfoCache(null);
+  vi.unstubAllGlobals();
+});
 
 /**
  * Build a JWT-shaped access token whose payload carries `sub` + `exp`. Only the
@@ -96,5 +101,40 @@ describe("[COMP:app-web/user] getInitials", () => {
   });
   it("falls back to ? for empty input", () => {
     expect(getInitials("")).toBe("?");
+  });
+});
+
+describe("[COMP:app-web/user] packaged desktop identity", () => {
+  it("uses the native account profile instead of an unrelated browser cookie", () => {
+    const native = {
+      id: "viewer-1",
+      name: "Sample Viewer",
+      email: "viewer@example.com",
+      avatarUrl: "https://cdn.example/avatar.png",
+    };
+    vi.stubGlobal("window", {
+      sidanclawDesktop: { getCurrentUser: () => native },
+    });
+    vi.stubGlobal("document", {
+      cookie: `user=${userCookie({ id: "browser-1", name: "Browser User", email: "browser@example.com" })}`,
+    });
+
+    expect(getUserInfo()).toEqual(native);
+  });
+
+  it("clears the cached profile when the native session is gone", () => {
+    setUserInfoCache({
+      id: "viewer-1",
+      name: "Sample Viewer",
+      email: "viewer@example.com",
+    });
+    vi.stubGlobal("window", {
+      sidanclawDesktop: { getCurrentUser: () => null },
+    });
+    vi.stubGlobal("document", {
+      cookie: `user=${userCookie({ id: "browser-1", name: "Browser User", email: "browser@example.com" })}`,
+    });
+
+    expect(getUserInfo()).toBeNull();
   });
 });

@@ -25,6 +25,7 @@ type RefreshResult = {
     id: string;
     name: string;
     email: string;
+    avatarUrl?: string | null;
   };
 };
 
@@ -174,6 +175,7 @@ export async function proxy(request: NextRequest) {
           id: refreshed.user.id,
           name: refreshed.user.name,
           email: refreshed.user.email,
+          avatarUrl: refreshed.user.avatarUrl ?? null,
         }),
       ),
     );

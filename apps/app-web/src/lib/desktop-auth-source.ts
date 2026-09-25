@@ -19,11 +19,20 @@ import { publicRuntimeConfig } from "@/lib/runtime-public-config";
  * [COMP:app-web/desktop-auth-source]
  */
 
+/** Display identity handed to the bundled renderer separately from credentials. */
+interface DesktopUser {
+  id: string;
+  name: string;
+  email: string;
+  avatarUrl?: string | null;
+  plan?: string;
+}
+
 /** Tokens handed back by the desktop refresh exchange / stored by the shell. */
 interface DesktopTokens {
   accessToken: string;
   refreshToken: string;
-  user?: { id: string; name: string; email: string; plan?: string };
+  user?: DesktopUser;
 }
 
 /** Native refresh keeps deployment transport and durable session writes in the shell. */
@@ -42,6 +51,7 @@ export interface DesktopAccount {
   id: string;
   name: string;
   email: string;
+  avatarUrl?: string | null;
   deployment: "cloud" | "local" | "self-hosted";
   appUrl: string;
   active: boolean;
@@ -160,6 +170,8 @@ export interface DesktopBridge {
   ) => Promise<{ ok: true } | { ok: false; error: "switch" | "reauth" }>;
   getAccessToken?: () => string | null;
   getRefreshToken?: () => string | null;
+  /** Current display identity from the encrypted native session. */
+  getCurrentUser?: () => DesktopUser | null;
   /** Active stored identity for local cache namespaces; absent in older shells. */
   getUserId?: () => string | null;
   /** Optional for compatibility with older bundled shells that refresh directly. */
