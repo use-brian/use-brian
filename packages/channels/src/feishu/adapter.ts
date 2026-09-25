@@ -230,16 +230,16 @@ export function createFeishuAdapter(options: FeishuAdapterOptions): ChannelAdapt
         await options.api.updateCard(messageId, buildFeishuCard(response.text, response.actions))
         return
       }
+      if (response.format === 'markdown') {
+        throw new Error('Feishu Markdown messages must be sent as rich-text posts, not text edits')
+      }
       const chunks = chunkText(response.text, FEISHU_MAX_MESSAGE_LENGTH)
         .filter((chunk) => chunk.trim())
       if (chunks.length === 0) return
       await options.api.editMessage(messageId, chunks[0])
       const apiOpts = sendOptions(opts?.threadTs)
       for (const chunk of chunks.slice(1)) {
-        const input = response.format === 'markdown'
-          ? { markdown: chunk }
-          : { text: chunk }
-        await options.api.send(channelId, input, apiOpts)
+        await options.api.send(channelId, { text: chunk }, apiOpts)
       }
     },
 

@@ -1137,21 +1137,23 @@ export function feishuRoutes(options: FeishuRouteOptions): Router {
         async sendResponse(text, documents) {
           const reply = text.replace(/[\u200B-\u200D\uFEFF]/g, '').trim()
             || (documents?.length ? '' : "I couldn't generate a reply. Please rephrase or try again.")
-          let channelMessageId: string | undefined
-          if (statusMessageId && !documents?.length && reply.length <= 4000) {
-            await adapter.editMessage(incoming.channelId, statusMessageId, { text: reply, format: 'markdown' })
-            channelMessageId = statusMessageId
-            statusMessageId = undefined
-          } else {
-            if (statusMessageId) {
-              await adapter.clearStatus?.(incoming.channelId, { messageId: statusMessageId }).catch(() => {})
-              statusMessageId = undefined
-            }
-            channelMessageId = await adapter.sendMessage(
+          // The SDK's editMessage path always writes msg_type=text. Replacing
+          // the status with Markdown would therefore expose markers such as
+          // **bold** instead of rendering a Feishu rich-text post. Keep the
+          // status visible until the rich send succeeds so a provider failure
+          // cannot make the turn disappear entirely.
+          const progressMessageId = statusMessageId
+          const channelMessageId = await adapter.sendMessage(
+            incoming.channelId,
+            { text: reply, format: 'markdown', documents },
+            replyTarget ? { threadTs: replyTarget } : undefined,
+          )
+          if (progressMessageId) {
+            await adapter.clearStatus?.(
               incoming.channelId,
-              { text: reply, format: 'markdown', documents },
-              replyTarget ? { threadTs: replyTarget } : undefined,
-            )
+              { messageId: progressMessageId },
+            ).catch(() => {})
+            if (statusMessageId === progressMessageId) statusMessageId = undefined
           }
           return { channelMessageId }
         },
