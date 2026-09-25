@@ -64,6 +64,7 @@ describe('[COMP:shared/connector-registry] Official connector registry', () => {
       oauth_required: false,
     })
     expect(OFFICIAL_CONNECTOR_TOOLS.office?.map((tool) => tool.name)).toEqual([
+      'proposeOfficeEvidenceFill',
       'createOfficeArtifact',
       'getOfficeArtifact',
       'reviseOfficeArtifact',

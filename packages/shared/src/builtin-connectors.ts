@@ -288,6 +288,10 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
   // names here in sync with the tool factories in
   // packages/core/src/workspace-files/tools.ts.
   files: [
+    { name: 'listDocumentExtractionConnectors', description: 'List authorized custom bearer connector candidates for structured PDF extraction', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'prepareDocumentExtraction', description: 'Preflight a workspace PDF with a selected private OCR MCP connector', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'startDocumentExtraction', description: 'Queue prepared structured PDF extraction', classification: 'write', defaultPolicy: 'ask' },
+    { name: 'readDocumentExtraction', description: 'Read bounded source-linked extraction records, entities and context', classification: 'read', defaultPolicy: 'allow' },
     { name: 'fileWrite',   description: 'Create or overwrite a file in the workspace',                  classification: 'write',       defaultPolicy: 'ask' },
     { name: 'fileAppend',  description: 'Append content to an existing workspace file',                  classification: 'write',       defaultPolicy: 'ask' },
     { name: 'fileRead',    description: 'Read a workspace file',                                         classification: 'read',        defaultPolicy: 'allow' },
@@ -317,6 +321,7 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'updateBrandDraft', description: 'Propose a change to the brand draft (an owner or admin approves it in Studio)', classification: 'write', defaultPolicy: 'ask' },
   ],
   office: [
+    { name: 'proposeOfficeEvidenceFill', description: 'Propose source-linked values for selected worksheet cells; human acceptance required', classification: 'write', defaultPolicy: 'allow' },
     { name: 'createOfficeArtifact', description: 'Start a durable Brian-native Document or Presentation job', classification: 'write', defaultPolicy: 'allow' },
     { name: 'getOfficeArtifact', description: 'Read an Office artifact and its current generation state', classification: 'read', defaultPolicy: 'allow' },
     { name: 'reviseOfficeArtifact', description: 'Start an undoable Office revision or proposal job', classification: 'write', defaultPolicy: 'allow' },
@@ -612,6 +617,10 @@ export const GDRIVE_BYO_OAUTH_SCOPES: readonly string[] = [
  */
 export const BOOT_INJECTED_BUILTIN_TOOLS: Record<string, readonly string[]> = {
   files: [
+    'listDocumentExtractionConnectors',
+    'prepareDocumentExtraction',
+    'startDocumentExtraction',
+    'readDocumentExtraction',
     'fileWrite',
     'fileAppend',
     'fileRead',
@@ -623,6 +632,7 @@ export const BOOT_INJECTED_BUILTIN_TOOLS: Record<string, readonly string[]> = {
     'fileDelete',
   ],
   office: [
+    'proposeOfficeEvidenceFill',
     'createOfficeArtifact',
     'getOfficeArtifact',
     'reviseOfficeArtifact',

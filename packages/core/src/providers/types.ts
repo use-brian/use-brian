@@ -145,7 +145,12 @@ export type SessionOptions = {
   signal?: AbortSignal
 }
 
+/** Internal admission coordination; never emitted as stream content. */
+export type HttpRetryWindow = { deadline: number; rateLimited: boolean }
+
 export type SendOptions = {
+  signal?: AbortSignal
+  httpRetryWindow?: HttpRetryWindow
   /** Per-call thinking-level override. Falls back to the session default. */
   thinkingLevel?: ThinkingLevel
 }
@@ -165,6 +170,7 @@ export type ProviderSession = {
 
 /** Legacy stateless interface — still useful for single-turn calls */
 export type ProviderRequest = {
+  httpRetryWindow?: HttpRetryWindow
   model: string
   /** See `SessionOptions.allowProviderFallback`. */
   allowProviderFallback?: boolean

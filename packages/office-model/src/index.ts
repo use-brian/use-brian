@@ -10,3 +10,4 @@ export * from './presentation-editing.js'
 export * from './numbering.js'
 
 export * from './spreadsheet-tables.js'
+export { officeSnapshotPreconditionHash } from './snapshot-hash.js'

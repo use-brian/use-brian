@@ -46,8 +46,8 @@ import {
 import { bridgeConnection } from './ws-bridge.js'
 import { createRunRegistry, type RunRegistry } from './run-registry.js'
 import { parseSyncDocumentName } from './document-router.js'
-import { loadOfficeUpdate, replaceLiveOfficeSnapshot, storeOfficeSnapshot } from './office-collab.js'
-import { OfficeArtifactSnapshotSchema, OfficeCommandSchema, applyDocumentCommand } from '@use-brian/office-model'
+import { loadOfficeUpdate, readOfficeSuggestionStatus, replaceLiveOfficeSnapshot, storeOfficeSnapshot } from './office-collab.js'
+import { OfficeArtifactSnapshotSchema, OfficeUuidSchema, OfficeCommandSchema, applyOfficeSuggestion } from '@use-brian/office-model'
 
 // Local dev: load the monorepo-root .env (the service runs from
 // apps/doc-sync, so the default cwd .env isn't where the shared
@@ -458,6 +458,23 @@ async function handleInternalOfficeReplace(
 }
 
 /** Apply an accepted Document suggestion exactly once in the authoritative room. */
+async function handleInternalOfficeSuggestionStatus(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (!isInternalAuthorized(req)) { res.writeHead(401); res.end(); return }
+  let payload: { artifactId?: unknown; suggestionId?: unknown }
+  try { payload = await readJsonBody(req) as typeof payload } catch {
+    res.writeHead(400); res.end(); return
+  }
+  const artifactId = OfficeUuidSchema.safeParse(payload?.artifactId)
+  const suggestionId = OfficeUuidSchema.safeParse(payload?.suggestionId)
+  if (!artifactId.success || !suggestionId.success) { res.writeHead(400); res.end(); return }
+  const applied = await readOfficeSuggestionStatus({
+    artifactId: artifactId.data, suggestionId: suggestionId.data, query: sysQuery,
+    liveDocument: () => hocuspocus.documents.get(`office:${artifactId.data}`) as Y.Doc | undefined,
+  })
+  res.writeHead(200, { 'Content-Type': 'application/json' })
+  res.end(JSON.stringify({ applied }))
+}
+
 async function handleInternalOfficeSuggestion(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (!isInternalAuthorized(req)) { res.writeHead(401); res.end(); return }
   let payload: { artifactId?: unknown; suggestionId?: unknown; command?: unknown }
@@ -472,7 +489,7 @@ async function handleInternalOfficeSuggestion(req: IncomingMessage, res: ServerR
   try {
     try {
       await connection.transact((doc) => {
-        applyDocumentCommand(doc as unknown as Y.Doc, command.data, 'suggestion', payload.suggestionId as string)
+        applyOfficeSuggestion(doc as unknown as Y.Doc, command.data, payload.suggestionId as string)
       })
     } catch {
       res.writeHead(409, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'suggestion_conflict' })); return
@@ -588,7 +605,14 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
     })
     return
   }
-  if (req.method === 'POST' && req.url && req.url.startsWith('/internal/office/suggestion')) {
+  if (req.method === 'POST' && req.url === '/internal/office/suggestion-status') {
+    handleInternalOfficeSuggestionStatus(req, res).catch(() => {
+      if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'Office suggestion status failed' }))
+    })
+    return
+  }
+  if (req.method === 'POST' && req.url === '/internal/office/suggestion') {
     handleInternalOfficeSuggestion(req, res).catch((err) => {
       console.error('[doc-sync] /internal/office/suggestion error', err)
       if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'application/json' })

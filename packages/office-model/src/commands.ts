@@ -1,3 +1,4 @@
+import { officeSnapshotPreconditionHash } from './snapshot-hash.js'
 import { z } from 'zod'
 import {
   DocumentFlowNodeSchema,
@@ -74,7 +75,7 @@ const AtomicOfficeCommandSchema = z.discriminatedUnion('kind', [
 ])
 export const OfficeCommandSchema = z.union([
   AtomicOfficeCommandSchema,
-  CommandBaseSchema.extend({ kind: z.literal('batch'), commands: z.array(AtomicOfficeCommandSchema).min(1).max(1_000) }).strict(),
+  CommandBaseSchema.extend({ kind: z.literal('batch'), expectedSnapshotHash: z.string().regex(/^[a-f0-9]{64}$/).optional(), commands: z.array(AtomicOfficeCommandSchema).min(1).max(1_000) }).strict(),
 ])
 export type OfficeCommand = z.infer<typeof OfficeCommandSchema>
 type AtomicOfficeCommand = z.infer<typeof AtomicOfficeCommandSchema>
@@ -257,6 +258,7 @@ function applySingleMutable(next: OfficeArtifactSnapshot, command: AtomicOfficeC
 
 export function applyOfficeCommand(snapshot: OfficeArtifactSnapshot, input: OfficeCommand): OfficeArtifactSnapshot {
   const command = OfficeCommandSchema.parse(input)
+  if (command.kind === 'batch' && command.expectedSnapshotHash && officeSnapshotPreconditionHash(snapshot) !== command.expectedSnapshotHash) throw new Error('Office snapshot precondition changed')
   if (command.kind === 'replaceTextRange' && command.to < command.from) throw new Error('Range end must not precede range start')
   const next = clone(snapshot) as OfficeArtifactSnapshot
   if (command.kind !== 'batch') applySingleMutable(next, command)
