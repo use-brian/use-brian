@@ -5215,6 +5215,12 @@ export const en = {
       graphAria: "Show graph view",
     },
     groupedView: {
+      bulkConfirm: "Confirm ({count})",
+      bulkDelete: "Delete ({count})",
+      deleteScope: "Delete {count} of {selected} selected loaded rows? Unsupported rows will not be deleted.",
+      bulkBusy: "Action in progress…",
+      bulkResult: "{succeeded} succeeded; {failed} failed. Failed rows remain selected for retry.",
+
       selectRow: "Select {name}",
       selectAll: "Select all loaded rows",
       selectedCount: "{count} selected",

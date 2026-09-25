@@ -4948,6 +4948,12 @@ export const zh: Dictionary = {
       graphAria: "切換至圖譜檢視",
     },
     groupedView: {
+      bulkConfirm: "確認（{count}）",
+      bulkDelete: "刪除（{count}）",
+      deleteScope: "要刪除已選取且已載入的 {selected} 筆中的 {count} 筆嗎？不支援的項目不會被刪除。",
+      bulkBusy: "處理中…",
+      bulkResult: "{succeeded} 筆成功，{failed} 筆失敗。失敗項目保持選取，可重試。",
+
       selectRow: "選取 {name}",
       selectAll: "選取所有已載入的列",
       selectedCount: "已選取 {count} 項",

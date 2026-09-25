@@ -4839,6 +4839,12 @@ export const zhCN: Dictionary = {
       graphAria: "切换至图谱查看",
     },
     groupedView: {
+      bulkConfirm: "确认（{count}）",
+      bulkDelete: "删除（{count}）",
+      deleteScope: "要删除已选择且已加载的 {selected} 条中的 {count} 条吗？不支持的项目不会被删除。",
+      bulkBusy: "处理中…",
+      bulkResult: "{succeeded} 条成功，{failed} 条失败。失败项目保持选中，可重试。",
+
       selectRow: "选择 {name}",
       selectAll: "选择所有已加载的行",
       selectedCount: "已选择 {count} 项",
