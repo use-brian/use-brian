@@ -37,6 +37,7 @@ import {
   createEmbedderForAdapter, type EmbedderAdapterConfig, type GoogleTransport, type MediaBackend,
   createGeminiProvider, createAnthropicProvider, createOpenAICompatProvider, createRoutingProvider,
   wrapCredentialPoolProvider, type ExternalCredentialPool,
+  documentModelForMediaBackend,
   distillConfigKey, DASHSCOPE_RENDER_WIDTH, DASHSCOPE_CHUNK_PAGES, PROVIDER_RENDER_WIDTH, PROVIDER_CHUNK_PAGES,
   type DocumentDistillPort, type DistillateCachePort,
   DASHSCOPE_INTL_BASE_URL, DASHSCOPE_INTL_LABEL, wrapProvider,
@@ -1958,7 +1959,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       return distillConfigKey({
         renderWidth: backend.kind === 'dashscope' ? DASHSCOPE_RENDER_WIDTH : PROVIDER_RENDER_WIDTH,
         chunkPages: backend.kind === 'dashscope' ? DASHSCOPE_CHUNK_PAGES : PROVIDER_CHUNK_PAGES,
-        model: backend.kind === 'provider' ? backend.model : backend.kind,
+        model: documentModelForMediaBackend(backend),
       })
     },
     distill: async ({ buffer, mime }) => {

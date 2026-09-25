@@ -31,11 +31,11 @@ describe('[COMP:files/distill] distillFileToText', () => {
     )
 
     expect(result.text).toBe('## Page 1\n\n# Heading\n\nbody')
-    expect(result.model).toBe('gemini-2.5-flash')
+    expect(result.model).toBe('gemini-3.8-flash')
     expect(result.usage).toEqual({ inputTokens: 50, outputTokens: 20 })
     expect(result.pageCount).toBe(1)
 
-    expect(captured.url).toContain('/models/gemini-2.5-flash:generateContent')
+    expect(captured.url).toContain('/models/gemini-3.8-flash:generateContent')
     const headers = captured.init?.headers as Record<string, string>
     expect(headers['x-goog-api-key']).toBe('test-key')
 
@@ -44,7 +44,8 @@ describe('[COMP:files/distill] distillFileToText', () => {
     expect(parts[0].text).toMatch(/markdown/i)
     expect(parts[1].inlineData.mimeType).toBe('application/pdf')
     expect(parts[1].inlineData.data).toBe(buffer.toString('base64'))
-    expect(body.generationConfig.temperature).toBe(0)
+    expect(body.generationConfig.maxOutputTokens).toBe(8192)
+    expect(body.generationConfig.temperature).toBeUndefined()
   })
 
   it('returns empty text (NOT an error) when the document yields nothing', async () => {

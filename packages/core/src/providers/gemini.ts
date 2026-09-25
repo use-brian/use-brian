@@ -307,7 +307,7 @@ export function normalizeGeminiRequestContents(
   return cleaned.slice(0, end)
 }
 
-function usesGemini36RequestContract(modelId: string): boolean {
+export function usesGemini36RequestContract(modelId: string): boolean {
   const match = modelId.toLowerCase().match(/(?:^|\/)gemini-(\d+)(?:\.(\d+))?-/)
   if (!match) return false
   const major = Number(match[1])

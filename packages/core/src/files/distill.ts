@@ -30,7 +30,7 @@
 
 import type { TokenUsage } from '../providers/types.js'
 import type { MediaBackend } from '../media/backend.js'
-import { runMediaUnderstanding } from '../media/backend.js'
+import { GEMINI_VISION_MODEL, runMediaUnderstanding } from '../media/backend.js'
 import { aiStudioTransport } from '../providers/google-transport.js'
 import { extractPdfText } from './pdf-text.js'
 
@@ -39,7 +39,7 @@ export type DistillOptions = {
   apiKey?: string
   /** Explicit adapter backend; takes precedence over `apiKey`. */
   backend?: MediaBackend
-  /** Gemini model id. Default: `gemini-2.5-flash` (ignored by DashScope, which picks Qwen-VL). */
+  /** Gemini model id. Defaults to `GEMINI_VISION_MODEL` (ignored by DashScope, which picks Qwen-VL). */
   model?: string
   /** Instruction to the model. Default: a faithful full-content extraction directive. */
   prompt?: string
@@ -61,7 +61,6 @@ export type DistillResult = {
   failedPages?: number[]
 }
 
-const DEFAULT_MODEL = 'gemini-2.5-flash'
 const DEFAULT_PROMPT =
   'Extract the full textual content of the attached document as clean, faithful Markdown. ' +
   'Preserve headings, lists, and tables. Transcribe the real content verbatim — do NOT ' +
@@ -91,7 +90,7 @@ export async function distillFileToText(
       mime: input.mime,
       prompt: options.prompt ?? DEFAULT_PROMPT,
       modality: 'document',
-      model: options.model ?? DEFAULT_MODEL,
+      model: options.model ?? GEMINI_VISION_MODEL,
       maxOutputTokens: options.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
       timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       errorLabel: 'file distillation',

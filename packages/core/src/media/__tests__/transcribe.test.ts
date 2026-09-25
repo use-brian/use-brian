@@ -39,7 +39,8 @@ describe('[COMP:media/transcribe] transcribeAudio', () => {
     expect(parts[0].text).toMatch(/transcribe/i)
     expect(parts[1].inlineData.mimeType).toBe('audio/ogg; codecs=opus')
     expect(parts[1].inlineData.data).toBe(buffer.toString('base64'))
-    expect(body.generationConfig.temperature).toBe(0)
+    expect(body.generationConfig.maxOutputTokens).toBe(2048)
+    expect(body.generationConfig.temperature).toBeUndefined()
   })
 
   it('honors custom model and prompt', async () => {

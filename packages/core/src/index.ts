@@ -108,6 +108,8 @@ export {
 export {
   runMediaUnderstanding,
   runFrameBatchUnderstanding,
+  documentModelForMediaBackend,
+  GEMINI_VISION_MODEL,
   DASHSCOPE_VISION_MODEL,
   DASHSCOPE_ASR_MODEL,
   type MediaBackend,
