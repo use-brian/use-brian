@@ -6,6 +6,7 @@ import { createTestApp } from './helpers.js'
 vi.mock('../../db/users.js', () => ({
   findOrCreateUser: vi.fn(),
   getDefaultAssistant: vi.fn(),
+  getUserAssistant: vi.fn(),
   findUserById: vi.fn(),
   // Upload resolves the file's workspace from the session's assistant (audit
   // #3 clearance scoping). Default undefined → workspace falls back to null.
@@ -40,8 +41,18 @@ vi.mock('@use-brian/core', async () => {
   }
 })
 
+vi.mock('../sessions.js', () => ({ gateSessionRead: vi.fn() }))
+vi.mock('../../context-scope/resolve-turn-scope.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../context-scope/resolve-turn-scope.js')>(),
+  resolveTurnScopeSystem: vi.fn(),
+}))
+vi.mock('../../context-scope/context-readiness.js', () => ({ assertContextActivationReady: vi.fn() }))
+
+import { gateSessionRead } from '../sessions.js'
+import { resolveTurnScopeSystem } from '../../context-scope/resolve-turn-scope.js'
+import { assertContextActivationReady } from '../../context-scope/context-readiness.js'
 import { fileRoutes } from '../files.js'
-import { findOrCreateUser, getDefaultAssistant, findUserById, findAssistantById, getWorkspacePrimaryAssistant } from '../../db/users.js'
+import { findOrCreateUser, getDefaultAssistant, getUserAssistant, findUserById, findAssistantById, getWorkspacePrimaryAssistant } from '../../db/users.js'
 import { findOrCreateSession, findSessionById } from '../../db/sessions.js'
 import { getWorkspaceFileById } from '../../db/workspace-files.js'
 import { enqueueFileIngestJob, getFileIngestJob } from '../../db/file-ingest-jobs-store.js'
@@ -480,7 +491,8 @@ describe('[COMP:api/files-route] File routes', () => {
     const app = createTestApp('/api/files', fileRoutes(fileStore as never), { userId: 'u_1' })
     mockFindUserById.mockResolvedValueOnce({ id: 'u_1' } as never)
     mockGetDefaultAssistant.mockResolvedValueOnce({ id: 'a_1' } as never)
-    mockFindSessionById.mockResolvedValueOnce({ id: 's_existing' } as never)
+    mockFindSessionById.mockResolvedValueOnce({ id: 's_existing', assistantId: 'a_1' } as never)
+    vi.mocked(findAssistantById).mockResolvedValueOnce({ id: 'a_1' } as never)
     mockParseFileContent.mockResolvedValueOnce({ text: 'data', summary: 'Data file' })
     fileStore.cache.mockResolvedValueOnce({
       id: 'f_2',
@@ -666,6 +678,169 @@ describe('[COMP:api/files-route] Signed preview URLs', () => {
     // Replay f_a's sig against f_b.
     const res = await request(mintApp).get(`/api/files/f_b/preview?sig=${encodeURIComponent(sig)}`)
     expect(res.status).toBe(403)
+  })
+})
+
+describe('[COMP:api/files-route] upload session routing and authorization', () => {
+  const group = '11111111-1111-4111-8111-111111111111'
+  const project = '22222222-2222-4222-8222-222222222222'
+  const assistant = { id: 'a_team', workspaceId: 'ws_team' }
+  const fileStore = { cache: vi.fn(), get: vi.fn(), getBySession: vi.fn() }
+  const promoter = vi.fn()
+  const upload = (fields: Record<string, string> = {}) => {
+    const app = createTestApp('/api/files', fileRoutes(fileStore as never, null, promoter), { userId: 'u_1' })
+    const req = request(app).post('/api/files/upload')
+    for (const [key, value] of Object.entries(fields)) req.field(key, value)
+    return req.attach('files', Buffer.from('hello'), { filename: 'hello.txt', contentType: 'text/plain' })
+  }
+  const noWrites = () => {
+    expect(fileStore.cache).not.toHaveBeenCalled()
+    expect(promoter).not.toHaveBeenCalled()
+    expect(mockParseFileContent).not.toHaveBeenCalled()
+  }
+  beforeEach(() => {
+    vi.resetAllMocks()
+    mockFindUserById.mockResolvedValue({ id: 'u_1' } as never)
+    vi.mocked(getUserAssistant).mockResolvedValue(assistant as never)
+    vi.mocked(getWorkspacePrimaryAssistant).mockResolvedValue(assistant as never)
+    mockFindOrCreateSession.mockResolvedValue({ id: 's_team', assistantId: assistant.id } as never)
+    mockParseFileContent.mockResolvedValue({ text: 'hello', summary: 'Greeting' })
+    fileStore.cache.mockResolvedValue({ id: 'f_1', fileName: 'hello.txt' })
+  })
+
+  it('upserts a stable pane channel with selected assistant, origin and validated Team/Project context', async () => {
+    mockFindOrCreateSession.mockResolvedValue({
+      id: 's_team', assistantId: assistant.id, contextGroupId: group, contextProjectId: project,
+    } as never)
+    const fields = {
+      assistantId: assistant.id, workspaceId: assistant.workspaceId, channelId: 'pane-stable',
+      appOrigin: 'chat', contextGroupId: group, contextProjectId: project,
+    }
+    const first = await upload(fields)
+    const second = await upload(fields)
+    expect(first.status).toBe(200)
+    expect(second.body.sessionId).toBe(first.body.sessionId)
+    expect(first.body.sessionId).toBe('s_team')
+    expect(getUserAssistant).toHaveBeenCalledWith('u_1', assistant.id)
+    expect(mockGetDefaultAssistant).not.toHaveBeenCalled()
+    expect(mockFindOrCreateSession).toHaveBeenCalledTimes(2)
+    expect(mockFindOrCreateSession).toHaveBeenCalledWith({
+      assistantId: assistant.id, userId: 'u_1', channelType: 'web', channelId: 'pane-stable',
+      appOrigin: 'chat', contextGroupId: group, contextProjectId: project,
+    })
+    expect(assertContextActivationReady).toHaveBeenCalledWith('ws_team')
+    expect(resolveTurnScopeSystem).toHaveBeenCalledWith({
+      userId: 'u_1', assistant, workspaceId: 'ws_team',
+      session: { contextGroupId: group, contextProjectId: project },
+    })
+    expect(vi.mocked(resolveTurnScopeSystem).mock.invocationCallOrder[0])
+      .toBeLessThan(mockFindOrCreateSession.mock.invocationCallOrder[0]!)
+    expect(fileStore.cache).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: 's_team', workspaceId: 'ws_team', userId: 'u_1',
+    }))
+  })
+
+  it('parses literal null context IDs as explicit unscoped selections, not inherited defaults', async () => {
+    mockFindOrCreateSession.mockResolvedValue({
+      id: 's_team', assistantId: assistant.id, contextGroupId: null, contextProjectId: null,
+    } as never)
+    const res = await upload({
+      assistantId: assistant.id, contextGroupId: 'null', contextProjectId: 'null',
+    })
+    expect(res.status).toBe(200)
+    expect(res.body.sessionId).toBe('s_team')
+    expect(resolveTurnScopeSystem).toHaveBeenCalledWith(expect.objectContaining({
+      session: { contextGroupId: null, contextProjectId: null },
+    }))
+    // Explicit null keys prevent the session store from inheriting defaults.
+    expect(mockFindOrCreateSession).toHaveBeenCalledWith(expect.objectContaining({
+      contextGroupId: null, contextProjectId: null,
+    }))
+    expect(assertContextActivationReady).not.toHaveBeenCalled()
+    expect(fileStore.cache).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 's_team' }))
+  })
+
+  it('leaves omitted context IDs absent so session defaults still apply', async () => {
+    expect((await upload({ assistantId: assistant.id })).status).toBe(200)
+    const fields = mockFindOrCreateSession.mock.calls[0][0]
+    expect(fields).not.toHaveProperty('contextGroupId')
+    expect(fields).not.toHaveProperty('contextProjectId')
+    expect(resolveTurnScopeSystem).not.toHaveBeenCalled()
+  })
+
+  it('uses workspace primary without an explicit assistant and coerces unknown origin to null', async () => {
+    expect((await upload({ workspaceId: 'ws_team', appOrigin: 'invalid' })).status).toBe(200)
+    expect(getWorkspacePrimaryAssistant).toHaveBeenCalledWith('u_1', 'ws_team')
+    expect(mockFindOrCreateSession).toHaveBeenCalledWith(expect.objectContaining({
+      assistantId: assistant.id, appOrigin: null,
+    }))
+    expect(mockGetDefaultAssistant).not.toHaveBeenCalled()
+  })
+
+  it.each(['assistant', 'workspace'])('rejects inaccessible %s without writes', async (selection) => {
+    vi.mocked(getUserAssistant).mockResolvedValue(null)
+    vi.mocked(getWorkspacePrimaryAssistant).mockResolvedValue(null)
+    expect((await upload(selection === 'assistant' ? { assistantId: 'foreign' } : { workspaceId: 'foreign' })).status).toBe(404)
+    expect(mockFindOrCreateSession).not.toHaveBeenCalled()
+    noWrites()
+  })
+
+  it('rejects assistant/workspace mismatch before creating or writing', async () => {
+    const res = await upload({ assistantId: assistant.id, workspaceId: 'ws_other' })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe('assistant_workspace_mismatch')
+    expect(mockFindOrCreateSession).not.toHaveBeenCalled()
+    noWrites()
+  })
+
+  it('does not replace a missing persisted session', async () => {
+    mockFindSessionById.mockResolvedValue(null)
+    expect((await upload({ sessionId: 'missing' })).status).toBe(404)
+    expect(mockFindOrCreateSession).not.toHaveBeenCalled()
+    noWrites()
+  })
+
+  it('gates existing sessions before any writes or assistant lookup', async () => {
+    const session = { id: 'foreign', assistantId: 'a_other', userId: 'u_other' }
+    mockFindSessionById.mockResolvedValue(session as never)
+    vi.mocked(gateSessionRead).mockResolvedValue({ status: 403, error: 'Forbidden' })
+    expect((await upload({ sessionId: 'foreign' })).status).toBe(403)
+    expect(gateSessionRead).toHaveBeenCalledWith('u_1', session)
+    expect(getUserAssistant).not.toHaveBeenCalled()
+    expect(mockFindOrCreateSession).not.toHaveBeenCalled()
+    noWrites()
+  })
+
+  it('rejects an otherwise readable session from another assistant/workspace', async () => {
+    mockFindSessionById.mockResolvedValue({ id: 's_other', assistantId: 'a_other' } as never)
+    expect((await upload({ sessionId: 's_other', workspaceId: 'ws_team' })).status).toBe(400)
+    expect(mockFindOrCreateSession).not.toHaveBeenCalled()
+    noWrites()
+  })
+
+  it.each(['context_not_available', 'context_activation_blocked'])('rejects %s before session creation', async (code) => {
+    const error = Object.assign(new Error('denied'), { code })
+    if (code === 'context_activation_blocked') vi.mocked(assertContextActivationReady).mockRejectedValue(error)
+    else vi.mocked(resolveTurnScopeSystem).mockRejectedValue(error)
+    const res = await upload({ assistantId: assistant.id, contextGroupId: group, contextProjectId: project })
+    expect(res.status).toBe(code === 'context_activation_blocked' ? 409 : 403)
+    expect(res.body.code).toBe(code)
+    expect(mockFindOrCreateSession).not.toHaveBeenCalled()
+    noWrites()
+  })
+
+  it('rejects conflicting context returned by a stable-channel upsert', async () => {
+    mockFindOrCreateSession.mockResolvedValue({ id: 's_team', contextGroupId: null } as never)
+    const res = await upload({ assistantId: assistant.id, channelId: 'pane-stable', contextGroupId: group })
+    expect(res.status).toBe(409)
+    expect(res.body.error).toBe('context_locked')
+    noWrites()
+  })
+
+  it('rejects malformed context before creating a session', async () => {
+    expect((await upload({ contextProjectId: 'invalid' })).status).toBe(400)
+    expect(mockFindOrCreateSession).not.toHaveBeenCalled()
+    noWrites()
   })
 })
 

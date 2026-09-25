@@ -196,6 +196,11 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   createOfficeArtifact: 'Create an Office artifact',
   getOfficeArtifact: 'Read an Office artifact',
   reviseOfficeArtifact: 'Revise an Office artifact',
+  listDocumentExtractionConnectors: 'List structured PDF connectors',
+  prepareDocumentExtraction: 'Prepare structured PDF extraction',
+  startDocumentExtraction: 'Start structured PDF extraction',
+  readDocumentExtraction: 'Read structured PDF evidence',
+  proposeOfficeEvidenceFill: 'Propose source-linked worksheet values',
 
   // Brand (docs/architecture/features/brand.md)
   getBrand: 'Read the brand record',

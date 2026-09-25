@@ -1,3 +1,6 @@
+import { filterCoordinatorTools, COORDINATOR_DOCUMENT_WORKFLOW_ADDENDUM } from './chat-coordinator-tools.js'
+import { debugDocumentFlow, summarizeProviderError } from '@use-brian/core'
+import { closeProviderError } from './chat-provider-error.js'
 import type { FeedGenerationService } from '../content-planning/generation.js'
 import { resolveFeedTurnContext, formatFeedTurnContext } from '../content-planning/collaboration-service.js'
 import { loadFeedReviewContext, recordFeedContextApplication } from '../content-planning/review-context.js'
@@ -2378,6 +2381,11 @@ export function chatRoutes(options: WebChatOptions): Router {
     let turnLeaseToken: string | null = null
     let leaseSessionId: string | null = null
     let leaseHeartbeat: ReturnType<typeof setInterval> | null = null
+    // Invalidate in-flight ticks as well as stopping future ticks BEFORE release.
+    const stopLeaseHeartbeat = () => {
+      if (leaseHeartbeat) clearInterval(leaseHeartbeat)
+      leaseHeartbeat = null
+    }
     let sseKeepalive: ReturnType<typeof setInterval> | null = null
     // The token this turn registered in `activeTurnAborts`, kept SEPARATE from
     // `turnLeaseToken` because the success and catch paths null that one once
@@ -3764,6 +3772,8 @@ export function chatRoutes(options: WebChatOptions): Router {
       if (userMessageText) {
         userContentBlocks.push({ type: 'text', text: userMessageText })
       }
+
+      debugDocumentFlow('chat_input', { sessionId: session.id, model: requestedModel, messages: [{ role: 'user', content: userContentBlocks }] })
 
       // Truncate from a given message (for retry/edit — destroy-and-regenerate).
       // Preserve the signal: log what was retried so we have history AND inject
@@ -6423,7 +6433,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // When preflight has already researched: also strip research tools —
       // the context is injected, main agent should synthesize not re-research.
       // If it genuinely needs more info, it can still use spawnWorker.
-      // The coordinator gets only delegation + memory tools.
+      // The coordinator keeps delegation + memory and a narrow native document workflow.
       // No research tools (structurally forces delegation), no task/notes
       // (coordinator shouldn't do bookkeeping — workers are the tasks).
       //
@@ -6442,36 +6452,6 @@ export function chatRoutes(options: WebChatOptions): Router {
       // continuing without their input — that's the production failure
       // mode 5/26 22:24 fixed: 3× askQuestion mid-flow with the user
       // unable to interject.
-      const COORDINATOR_ALLOWED_TOOLS_BASE = new Set([
-        'spawnWorker', 'sendWorkerMessage', 'stopWorker',
-        'saveMemory', 'getMemory', 'askQuestion',
-        // Present only on app-web surfaces. Keeps the ambient prompt/tool
-        // contract valid after research workers drain: the coordinator hands
-        // their compact findings to the isolated Doc editor.
-        'delegateDocEdit',
-      ])
-      const COORDINATOR_RESEARCH_EXTRA_TOOLS = new Set([
-        // Write tools — for ingesting research findings.
-        'updateSelfProfile', 'saveContact', 'saveCompany', 'saveDeal',
-        'setCrmCustomFields', 'createEntity',
-        // Update + edge tools — required for the "link existing
-        // entities" case ("save all edges with current brain entities
-        // according to researches above"). Without these the
-        // coordinator has no execution path and falls back to prose,
-        // confabulating that the work was done. listing/getting reads
-        // the entity ids the model needs to chain into createEdge or
-        // updateContact({ links: [...] }).
-        'updateContact', 'updateCompany', 'updateDeal',
-        'listContacts', 'listCompanies', 'listDeals', 'listCrmFields',
-        'getContact', 'getCompany', 'getDeal',
-        'createEdge',
-      ])
-      const coordinatorAllowedTools = researchMode
-        ? new Set([...COORDINATOR_ALLOWED_TOOLS_BASE, ...COORDINATOR_RESEARCH_EXTRA_TOOLS])
-        : COORDINATOR_ALLOWED_TOOLS_BASE
-      const RESEARCH_TOOLS = new Set([
-        'webSearch', 'urlReader',
-      ])
       // `createEdge` stays available — it's the only path for the
       // "link existing entities" case (the model can't call `links`
       // on save tools after the rows already exist without an
@@ -6495,11 +6475,9 @@ export function chatRoutes(options: WebChatOptions): Router {
         scopedOpenEntry: scopedBrainEntryActive,
         allowBrainUpdate: scopedBrainUpdateAllowed,
       })
-      const loopTools = coordinatorMode
-        ? new Map([...brainSurfaceTools].filter(([name]) => coordinatorAllowedTools.has(name)))
-        : preflightContext
-          ? new Map([...brainSurfaceTools].filter(([name]) => !RESEARCH_TOOLS.has(name)))
-          : brainSurfaceTools
+      const loopTools = filterCoordinatorTools(brainSurfaceTools, {
+        coordinatorMode, researchMode, hasPreflightContext: Boolean(preflightContext),
+      })
 
       // Coordinator-mode addendum. The base wording covers "spawn 2-3 workers,
       // synthesize, done" — adequate for the splitter-triggered parallel-research
@@ -6514,7 +6492,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // Preflight findings are hidden runtime metadata, so they also stay in
       // the trusted channel inside the private-runtime suffix.
       let runtimeSystemContext = coordinatorMode
-        ? `${systemAddenda}\n\n${researchMode ? coordinatorResearchAddendum : coordinatorBaseAddendum}`
+        ? `${systemAddenda}\n\n${researchMode ? coordinatorResearchAddendum : coordinatorBaseAddendum}\n\n${COORDINATOR_DOCUMENT_WORKFLOW_ADDENDUM}`
         : systemAddenda
       if (!coordinatorMode && preflightContext) {
         privateRuntimeContextParts.push(
@@ -6654,6 +6632,9 @@ export function chatRoutes(options: WebChatOptions): Router {
       const pendingAssistantTurns: PendingTurn[] = []
       let lastAssistantMessageId: string | null = null
       let flushed = false
+      let queryLoopError: Error | null = null
+      let queryLoopErrorEvent: Record<string, unknown> | null = null
+      let hasDeliveredText = false
       // Grounding-gate claim ledger — stashed from the claim_ledger event,
       // persisted once the final assistant message id is known. See
       // docs/architecture/engine/grounding-gate.md → "Claim ledger".
@@ -6911,6 +6892,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         leaseHeartbeat = setInterval(() => {
           void touchTurnLease(session.id, heldToken)
             .then(({ held, cancelRequested }) => {
+              if (!leaseHeartbeat || turnLeaseToken !== heldToken) return
               if (!held) {
                 // Our lease was reclaimed while we were away. We are an orphan:
                 // another turn may already own this session, so stop before we
@@ -7215,6 +7197,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           if (abortController.signal.aborted) break
 
           if (event.type === 'text_delta') {
+            if (event.text.trim()) hasDeliveredText = true
             sendEvent('text_delta', { text: event.text })
             // Mirror onto the session bus (throttled) so a reconnected client
             // sees the reply stream even when a proxy hides the disconnect.
@@ -7230,6 +7213,9 @@ export function chatRoutes(options: WebChatOptions): Router {
             turnStream.onReasoningDelta(event.text)
           }
           if (event.type === 'tool_start') {
+            // Clients clear tool narration from the answer when a tool starts.
+            // It must not suppress a closing message after a later timeout.
+            hasDeliveredText = false
             sendActivityEvent('tool_start', { id: event.id, name: event.name })
             // Surface the running tool to a reconnected client before any reply
             // text lands (the raw name; the client maps it to a friendly label).
@@ -7822,35 +7808,23 @@ export function chatRoutes(options: WebChatOptions): Router {
             }
           }
           if (event.type === 'error') {
-            // A dropped provider connection reads as gibberish when relayed
-            // raw (Node's ConnResetException message is just "aborted", the
-            // 2026-08-27 custom-LLM incident). Send a typed code so the
-            // client renders actionable localized copy; everything else
-            // keeps the raw message.
-            if (isEndpointUnreachableError(event.error)) {
-              sendEvent('error', {
-                code: 'upstream_unreachable',
-                error: 'The model endpoint could not be reached.',
-                customEndpoint: Boolean(customLlmRuntime),
-              })
-            } else if (isConnectionDropError(event.error)) {
-              sendEvent('error', {
-                code: 'upstream_connection_reset',
-                error: 'The connection to the model was interrupted. Please try again.',
-                customEndpoint: Boolean(customLlmRuntime),
-              })
-            } else {
-              sendEvent('error', { error: event.error.message })
-            }
-            console.error('Query loop error:', event.error)
+            // `error` terminalizes SSE consumers. Defer it until evidence is
+            // flushed and the deterministic closing response has had a chance
+            // to be persisted/delivered; never stream an invisible reply after it.
+            queryLoopError = event.error
+            queryLoopErrorEvent = isEndpointUnreachableError(event.error)
+              ? { code: 'upstream_unreachable', error: 'The model endpoint could not be reached.', customEndpoint: Boolean(customLlmRuntime) }
+              : isConnectionDropError(event.error)
+                ? { code: 'upstream_connection_reset', error: 'The connection to the model was interrupted. Please try again.', customEndpoint: Boolean(customLlmRuntime) }
+                : { error: event.error.message }
             const errorCode = streamErrorCode(event.error)
+            console.error('[chat] query loop failed', { sessionId: session.id, ...summarizeProviderError(event.error) })
             options.analytics?.logEvent({
               userId: user.id, assistantId: assistant.id, sessionId: session.id,
               eventName: 'query_loop_error', channelType: 'web',
               metadata: {
                 error_type: sanitize(event.error.name ?? 'unknown'),
                 ...(errorCode !== undefined ? { error_code: sanitize(errorCode) } : {}),
-                error_message: sanitize((event.error.message ?? '').slice(0, 200)),
                 custom_endpoint: Boolean(customLlmRuntime),
               },
             })
@@ -7867,8 +7841,69 @@ export function chatRoutes(options: WebChatOptions): Router {
             : '[Tool did not return a result. Treat as failed and do not retry.]',
         )
 
-        // CL-8: bump `succeeded` for every skill picked this turn. The
-        // happy-path flush above has already committed the assistant
+        if (queryLoopError && !recoveryDelivered) {
+          let closingPersisted = false
+          let closingMirrored = false
+          let closingDelivered = false
+          try {
+            recoveryDelivered = await closeProviderError({
+              error: queryLoopError,
+              turns: pendingAssistantTurns,
+              hasDeliveredText,
+              alreadyDelivered: recoveryDelivered,
+              signal: abortController.signal,
+              canWrite: async () => {
+                if (!turnLeaseToken) return false
+                const { held, cancelRequested } = await touchTurnLease(session.id, turnLeaseToken)
+                if (!held || cancelRequested) abortController.abort()
+                return held && !cancelRequested
+              },
+              persist: async (text) => {
+                const saved = await addSessionMessage({
+                  sessionId: session.id,
+                  role: 'assistant',
+                  content: [{ type: 'text', text }],
+                  senderAssistantId: assistant.id,
+                })
+                closingPersisted = true
+                lastAssistantMessageId = saved.id
+                sendEvent('assistant_message_saved', { id: saved.id })
+                publishSessionEvent({
+                  kind: 'assistant_message_saved', sessionId: session.id,
+                  payload: { id: saved.id, sequenceNum: saved.sequenceNum, content: saved.content },
+                })
+                closingMirrored = true
+              },
+              deliver: (text) => {
+                const delta = hasDeliveredText ? `\n\n${text}` : text
+                sendEvent('text_delta', { text: delta })
+                turnStream.onTextDelta(delta)
+                closingDelivered = true
+              },
+            })
+          } finally {
+            console.info('[chat] provider-error closing outcome', {
+              sessionId: session.id,
+              bufferedTurns: pendingAssistantTurns.length,
+              hadStreamedText: hasDeliveredText,
+              persisted: closingPersisted,
+              mirrored: closingMirrored,
+              delivered: closingDelivered,
+              directStreamOpen: !clientGone && !res.writableEnded,
+              aborted: abortController.signal.aborted,
+              outcome: closingDelivered ? 'closed' : closingPersisted ? 'persisted_not_delivered' : abortController.signal.aborted ? 'cancelled_or_lease_lost' : 'failed',
+            })
+          }
+          // A persisted partial-failure reply finishes with the normal `done`,
+          // not an error banner inviting a blind retry of completed actions.
+          if (!recoveryDelivered && !abortController.signal.aborted) {
+            sendEvent('error', queryLoopErrorEvent)
+          }
+        }
+
+        // CL-8: emitted provider errors are failures too (the loop returns
+        // rather than throwing). Otherwise bump `succeeded` for picked skills.
+        // The happy-path flush above has already committed the assistant
         // message; an abort still counts as success because the model
         // did finish its tool work (only the executor was interrupted)
         // — the user is the one who pulled the plug, not the skill.
@@ -7880,7 +7915,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         // the buffer's `getNextUserMessage` hook for a follow-up patch.
         if (skillInvocationBuffer) {
           try {
-            await skillInvocationBuffer.flush('success')
+            await skillInvocationBuffer.flush(queryLoopError ? 'error' : 'success')
           } catch (err) {
             console.error('[chat] CL-8 skill invocation buffer flush failed:', err)
           }
@@ -7998,14 +8033,11 @@ export function chatRoutes(options: WebChatOptions): Router {
             contentBlocks: t.content.length,
             contentTypes: t.content.map((b) => b.type),
             toolResultCount: t.toolResults.length,
-            textPreview: t.content
-              .filter((b): b is { type: 'text'; text: string } => b.type === 'text' && 'text' in b)
-              .map((b) => b.text.slice(0, 100))
-              .join(' | '),
+            textChars: t.content.reduce((n, b) => n + (b.type === 'text' ? b.text.length : 0), 0),
           })),
         )
 
-        if (finalTurn) {
+        if (finalTurn && !queryLoopError && !abortController.signal.aborted && !recoveryDelivered) {
           const hasText = finalTurn.content.some(
             (b) => b.type === 'text' && 'text' in b && b.text.trim().length > 0,
           )
@@ -8125,12 +8157,13 @@ export function chatRoutes(options: WebChatOptions): Router {
         // mode after tool calls). Best-effort; if Flash hiccups we
         // fall through to the outer catch's generic `error` event.
         try {
-          const recovered = await composeRecoveryMessage({
-            provider: backgroundProvider,
-            pendingAssistantTurns,
-            userText: userMessageText,
-            channelType: 'web',
-          })
+          const recovered = !queryLoopError && !abortController.signal.aborted && !recoveryDelivered
+            ? await composeRecoveryMessage({
+                provider: backgroundProvider,
+                pendingAssistantTurns,
+                userText: userMessageText,
+                channelType: 'web',
+              }) : null
           if (recovered) {
             sendEvent('text_delta', { text: recovered.text })
             // Persist as a real assistant message so the recovery is
@@ -8175,6 +8208,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // was reclaimed mid-turn this is a no-op rather than an unlock of
       // whoever owns the session now. The `finally` is idempotent behind this.
       if (turnLeaseToken) {
+        stopLeaseHeartbeat()
         await releaseTurnLease(session.id, 'completed', turnLeaseToken)
         turnLeaseToken = null
       } else {
@@ -8512,6 +8546,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         // by the concurrent-turn guard. Token-guarded when we hold a lease.
         try {
           if (turnLeaseToken) {
+            stopLeaseHeartbeat()
             await releaseTurnLease(sessionIdForError, 'completed', turnLeaseToken)
             turnLeaseToken = null
           } else {

@@ -537,6 +537,8 @@ import { officeArtifactRoutes } from './routes/office-artifacts.js'
 import { officeJobRoutes } from './routes/office-jobs.js'
 import { officeTemplateRoutes } from './routes/office-templates.js'
 import { officeCollaborationRoutes } from './routes/office-collaboration.js'
+import { createStructuredDocumentRuntime } from './structured-documents/runtime.js'
+import { createStructuredOcrConnectorResolver } from './structured-documents/connector.js'
 import { officeImportRoutes } from './routes/office-imports.js'
 import { createOfficeImportWorker } from './office/import-worker.js'
 import { createOfficeTemplateCompileWorker } from './office/template-compile-worker.js'
@@ -547,7 +549,7 @@ import { generatePresentationFromTemplate, materializeOfficeTemplateBundleForGen
 import { generateSpreadsheetFromTemplate } from './office/spreadsheet-generation.js'
 import { generateAssistantOfficeCommands } from './office/command-revision.js'
 import { runOfficeEdit } from '@use-brian/core'
-import { applyLiveOfficeSuggestion, replaceLiveOfficeSnapshot } from './office/live-sync.js'
+import { applyLiveOfficeSuggestion, replaceLiveOfficeSnapshot, officeSuggestionApplied } from './office/live-sync.js'
 import { officeReleaseRoutes } from './routes/office-releases.js'
 import { officeLifecycleRoutes } from './routes/office-lifecycle.js'
 import { officeOfflineRoutes } from './routes/office-offline.js'
@@ -2728,6 +2730,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const officeGenerationStore = createOfficeGenerationStore()
   const officeCommentStore = createOfficeCommentStore()
   const officeLiveStore = createOfficeLiveStore()
+  let structuredDocumentRuntime: ReturnType<typeof createStructuredDocumentRuntime> | null = null
   const officeReleaseStore = createOfficeReleaseStore()
   const officeLifecycleWorker = createOfficeLifecycleWorker({
     async sweep() {
@@ -4261,6 +4264,44 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     allTools.set('saveFileToBrain', fileTools.saveFileToBrain)
     allTools.set('sendFile', fileTools.sendFile)
     allTools.set('renderPdf', fileTools.renderPdf)
+    {
+      structuredDocumentRuntime = createStructuredDocumentRuntime({
+        connectors: createStructuredOcrConnectorResolver({
+          instanceStore: connectorInstanceStore, grantStore: connectorGrantStore,
+          assistantStore: assistantConnectorStore, settingsStore: mcpSettingsStore, workspacePolicyStore: workspaceToolPolicyStore,
+        }), files: filesApi, tools: allTools,
+        async resolveContext(saved) {
+          if (!saved.assistantId || !await workspaceStore.getRole(saved.userId, saved.workspaceId)) throw new Error('Source authority unavailable')
+          const assistant = await findAssistantById(saved.assistantId)
+          if (!assistant || assistant.workspaceId !== saved.workspaceId || assistant.kind !== saved.assistantKind ||
+              !(await listAccessibleAssistants(saved.userId)).some(a => a.id === assistant.id) ||
+              !(await capabilityStore.listActive(assistant.id)).includes('files') ||
+              await resolveFilesToolPolicy('startDocumentExtraction', { userId: saved.userId, assistantId: assistant.id }) === 'block') throw new Error('Source authority unavailable')
+          const scope = await resolveTurnScopeSystem({ userId: saved.userId, assistant, workspaceId: saved.workspaceId,
+            key: { contextGroupId: null, contextProjectId: null } })
+          // Service intersects these fresh ceilings with the immutable turn grants.
+          return { userId: saved.userId, workspaceId: saved.workspaceId, assistantId: assistant.id, assistantKind: assistant.kind,
+            clearance: scope.access.clearance, compartments: scope.effectiveCompartments, projectIds: scope.effectiveProjectIds }
+        },
+        resolvePolicy: (name, context) => name === 'proposeOfficeEvidenceFill'
+          ? resolveOfficeToolPolicy(name, context) : resolveFilesToolPolicy(name, context),
+        async getOffice(userId, artifactId) {
+          const [artifact, access, live] = await Promise.all([
+            officeArtifactStore.get(userId, artifactId), resolveOfficeAccess(userId, artifactId), officeLiveStore.get(userId, artifactId),
+          ])
+          return artifact && access && live ? { artifact, access, live } : null
+        },
+        async pendingActors() {
+          const result = await query<{ userId: string }>(`SELECT user_id AS "userId" FROM structured_document_extractions
+            WHERE status IN ('queued','submitting','running','archiving') AND next_attempt_at <= now()
+              AND (lease_expires_at IS NULL OR lease_expires_at <= now())
+            GROUP BY user_id ORDER BY min(next_attempt_at) LIMIT 20`)
+          return result.rows.map(row => row.userId)
+        },
+        warn: () => console.warn('[structured-documents] Worker scheduling failed; no source content logged.'),
+      })
+      if (runWorkers) structuredDocumentRuntime.start()
+    }
     // Archive media retrieval needs BOTH seams: the store (bytes) and the
     // file layer (where sendFile and the web Files view can reach them) —
     // which is why it registers here and not with the read-only archive
@@ -6173,6 +6214,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use('/api', requireAuth(env.JWT_SECRET), docEntitiesRoutes({ docEntityStore, workspaceStore }))
 
   app.use('/api', requireAuth(env.JWT_SECRET), docThemesRoutes({
+    blobClient: filesBlobClient ?? undefined,
+    filesResolver: filesResolver ?? undefined,
     docThemesStore,
     workspaceStore,
     provider,
@@ -6684,6 +6727,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     detachMissingTargets: officeCommentStore.detachMissingTargets,
     listSuggestions: officeCommentStore.listSuggestions,
     getSuggestion: officeCommentStore.getSuggestion,
+    verifyEvidenceSuggestion: async (userId, suggestionId, command) =>
+      await structuredDocumentRuntime?.verifySuggestion(userId, suggestionId, command) ?? false,
+    suggestionAlreadyApplied: (artifactId, suggestionId) => officeSuggestionApplied(artifactId, suggestionId),
     createSuggestion: officeCommentStore.createSuggestion,
     decideSuggestion: officeCommentStore.decideSuggestion,
     async applySuggestion({ artifactId, suggestionId, command }) {
@@ -8812,6 +8858,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     chatArchiveEnrichmentWorker?.stop()
     stuckSessionSweeper.stop()
     fileIngestWorker?.stop()
+    structuredDocumentRuntime?.stop()
     gdriveEnrichmentWorker?.stop()
     gdriveCatalogWorker?.stop()
     linkedinImportWorker?.stop()

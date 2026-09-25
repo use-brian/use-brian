@@ -27,6 +27,7 @@ const statsList: Field = { kind: "list", key: "stats", label: "stats", item: sta
 
 const person: Field[] = [
   { kind: "text", key: "id", label: "id" }, { kind: "text", key: "name", label: "name" }, { kind: "text", key: "honorific", label: "honorific", optional: true },
+  { kind: "localized", key: "localizedName", label: "localizedName", optional: true },
   { kind: "localized", key: "role", label: "role", optional: true }, { kind: "localized", key: "affiliation", label: "affiliation", optional: true },
   { kind: "localized", key: "specialties", label: "specialties", optional: true }, { kind: "text", key: "admittedOn", label: "admittedOn", optional: true, type: "date" },
   { kind: "image", key: "image", label: "image", optional: true }, { kind: "localized", key: "bio", label: "bio", optional: true, multiline: true },
@@ -64,6 +65,7 @@ export const COLLECTION_FIELDS: Record<SiteContentCollection, Field[]> = {
   news: [{ kind: "list", key: "items", label: "items", itemTitle: item => `${item.date ?? ""} · ${en(item.title)}`, blank: () => ({ id: "", sites: ["oasa"], kind: "newsletter", date: "", locales: ["en", "zh-Hant", "zh-Hans"], title: L() }), item: [
     { kind: "text", key: "id", label: "id" }, { kind: "sites", key: "sites", label: "sites" }, { kind: "select", key: "kind", label: "kind", values: ["newsletter", "press", "article", "publication"] },
     { kind: "text", key: "date", label: "date", type: "date" }, { kind: "locales", key: "locales", label: "locales" }, { kind: "localized", key: "title", label: "title", anyLanguage: true }, { kind: "localized", key: "summary", label: "summary", optional: true, multiline: true, anyLanguage: true },
+    { kind: "localized", key: "category", label: "category", optional: true },
     { kind: "text", key: "href", label: "href", optional: true }, { kind: "media", key: "fileId", label: "fileId", optional: true }, { kind: "image", key: "image", label: "image", optional: true },
   ] }],
   "home-oasa": [

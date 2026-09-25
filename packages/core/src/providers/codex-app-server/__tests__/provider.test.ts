@@ -1,5 +1,6 @@
+import { withDocumentFlowDebug } from '../../../engine/document-flow-debug.js'
 import { PassThrough } from 'node:stream'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   missingPdfPageCompletionMarkers,
   stripPdfPageCompletionMarkers,
@@ -11,6 +12,18 @@ import {
   createCodexAppServerProvider,
 } from '../provider.js'
 import { CodexRpcPeer } from '../rpc.js'
+
+afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks() })
+
+function captureDocumentFlow() {
+  vi.stubEnv('BRIAN_DEBUG_DOCUMENT_FLOW', '1')
+  const spy = vi.spyOn(console, 'info').mockImplementation(() => {})
+  return () => spy.mock.calls.filter(([prefix]) => prefix === '[document-flow-debug]').map(([, line]) => JSON.parse(line as string))
+}
+
+async function collectScoped(stream: AsyncIterable<StreamChunk>): Promise<StreamChunk[]> {
+  return collect(withDocumentFlowDebug('private-session-id', (async function* () { yield* stream })()))
+}
 
 type RpcFrame = {
   id?: number | string
@@ -161,7 +174,7 @@ async function startToolTurn(
     systemPrompt: 'You are Brian.',
     tools: [ECHO_TOOL],
   })
-  const first = collect(session.send(messages))
+  const first = collectScoped(session.send(messages))
   const threadStart = await waitForMethod(harness, 'thread/start')
   respondToThreadStart(harness, threadStart)
   const turnStart = await waitForMethod(harness, 'turn/start')
@@ -416,6 +429,7 @@ describe('[COMP:providers/codex-app-server] Codex app-server provider bridge', (
   })
 
   it('parks a dynamic tool request and resumes the same Codex turn with its result', async () => {
+    const logs = captureDocumentFlow()
     const harness = createHarness()
     const { session, first } = await startToolTurn(harness)
 
@@ -445,7 +459,7 @@ describe('[COMP:providers/codex-app-server] Codex app-server provider bridge', (
       },
     ])
 
-    const second = collect(
+    const second = collectScoped(
       session.send([
         {
           role: 'user',
@@ -490,6 +504,13 @@ describe('[COMP:providers/codex-app-server] Codex app-server provider bridge', (
       },
     ])
     expect(harness.outbound.filter((frame) => frame.method === 'turn/start')).toHaveLength(1)
+    const wire = logs().filter(row => row.event === 'codex_turn_wire' || row.event === 'codex_tool_wire')
+    expect(wire).toHaveLength(2)
+    expect(wire[1]).toMatchObject({ event: 'codex_tool_wire', summary: { toolResult: 1 }, codex: { textParts: 1, pdfDataUrls: 0 } })
+    expect(wire[1].session).toBe(wire[0].session)
+    expect(wire[0].session).toMatch(/^[a-f0-9]{16}$/)
+    expect(JSON.stringify(logs())).not.toContain('echoed hello')
+    expect(JSON.stringify(logs())).not.toContain('private-session-id')
     harness.peer.close()
   })
 
@@ -790,13 +811,14 @@ describe('[COMP:providers/codex-app-server] Codex app-server provider bridge', (
     // `data:application/pdf;base64,…` under an image part is accepted by the
     // app-server and undecodable by GPT, so the turn proceeds as if the
     // document had been read. See docs/architecture/engine/file-handling.md.
+    const logs = captureDocumentFlow()
     const harness = createHarness()
     const provider = createCodexAppServerProvider({
       transport: { rpc: harness.peer, cwd: '/tmp/brian-codex-test' },
       models: [MODEL],
     })
     const session = provider.createSession({ model: MODEL, systemPrompt: 'You are Brian.' })
-    const chunks = collect(
+    const chunks = collectScoped(
       session.send([
         // History replay path (`thread/inject_items`).
         {
@@ -844,6 +866,12 @@ describe('[COMP:providers/codex-app-server] Codex app-server provider bridge', (
     complete(harness, 'thread-1', 'turn-1')
 
     await chunks
+    const wire = logs().filter(row => row.event === 'codex_history_wire' || row.event === 'codex_turn_wire')
+    expect(wire).toHaveLength(2)
+    expect(wire[0]).toMatchObject({ event: 'codex_history_wire', summary: { pdf: 1 }, codex: { pdfDataUrls: 0, imageParts: 0 } })
+    expect(wire[1]).toMatchObject({ event: 'codex_turn_wire', summary: { pdf: 1, png: 1 }, codex: { pdfDataUrls: 0, imageParts: 1 } })
+    expect(wire[1].session).toBe(wire[0].session)
+    for (const secret of ['JVBERi0xLjQK', 'iVBORw0KGgo=', 'Earlier attachment.', 'Read this.', 'private-session-id']) expect(JSON.stringify(logs())).not.toContain(secret)
     harness.peer.close()
   })
 })

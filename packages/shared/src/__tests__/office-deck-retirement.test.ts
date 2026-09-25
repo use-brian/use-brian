@@ -17,11 +17,13 @@ describe('[COMP:office/deck-retirement] Legacy Deck retirement', () => {
 
   it('advertises only the canonical Office replacement tools', () => {
     expect(OFFICIAL_CONNECTOR_TOOLS.office.map((tool) => tool.name)).toEqual([
+      'proposeOfficeEvidenceFill',
       'createOfficeArtifact',
       'getOfficeArtifact',
       'reviseOfficeArtifact',
     ])
     expect(BOOT_INJECTED_BUILTIN_TOOLS.office).toEqual([
+      'proposeOfficeEvidenceFill',
       'createOfficeArtifact',
       'getOfficeArtifact',
       'reviseOfficeArtifact',

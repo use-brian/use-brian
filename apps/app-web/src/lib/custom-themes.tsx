@@ -37,6 +37,7 @@ import {
   renameDocTheme,
   themeAppearance,
   type DocTheme,
+  type CreateDocThemeInput,
 } from "@/lib/api/doc-themes";
 
 type CustomThemesContextValue = {
@@ -45,7 +46,7 @@ type CustomThemesContextValue = {
   /** True while a generation request is in flight. */
   generating: boolean;
   /** Generate, save, and apply a theme from a prompt. Throws DocThemeError. */
-  createTheme: (prompt: string) => Promise<DocTheme>;
+  createTheme: (input: CreateDocThemeInput) => Promise<DocTheme>;
   /** Refine an existing theme by a follow-up instruction (in place). Re-applies
    *  if it's the active theme. Throws DocThemeError. */
   refineTheme: (id: string, instruction: string) => Promise<DocTheme>;
@@ -116,10 +117,10 @@ export function CustomThemesProvider({
   }, [applyCustomTheme]);
 
   const createTheme = useCallback(
-    async (prompt: string) => {
+    async (input: CreateDocThemeInput) => {
       setGenerating(true);
       try {
-        const theme = await createDocTheme(workspaceId, prompt);
+        const theme = await createDocTheme(workspaceId, input);
         setThemes((prev) => [...prev, theme]);
         // Generation is a user-initiated apply: honour the theme's light/dark
         // intent so "fancy dark theme" actually renders dark.

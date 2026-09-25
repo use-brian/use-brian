@@ -104,10 +104,9 @@ type UploadResponse = {
 
 /**
  * Fold an upload response back into the attachment list. The response files
- * are in the same order as the staged batch, so we walk the list and consume
- * one response per staged chip — flipping each to `done` (with its `fileId`)
- * or `error`. Other (already-resolved, or concurrently-staged) chips are left
- * untouched.
+ * are in the insertion order of stagedLocalIds, not the remaining tray order:
+ * a chip may be removed while its batch uploads. Match by original local ID
+ * so removing one file never assigns its response to a different attachment.
  */
 export function applyUploadResult(
   prev: Attachment[],
@@ -115,10 +114,11 @@ export function applyUploadResult(
   responseFiles: ReadonlyArray<{ id?: string; error?: string }>,
 ): Attachment[] {
   const next = [...prev];
-  let idx = 0;
+  const byLocalId = new Map(
+    [...stagedLocalIds].map((id, index) => [id, responseFiles[index]]),
+  );
   for (let i = 0; i < next.length; i++) {
-    if (!stagedLocalIds.has(next[i].localId)) continue;
-    const result = responseFiles[idx++];
+    const result = byLocalId.get(next[i].localId);
     if (!result) continue;
     next[i] =
       result.error || !result.id
@@ -351,10 +351,21 @@ export function imageFilesFromClipboard(
  */
 export function useFileAttachments(
   getSessionId?: () => string | undefined,
-  opts?: { maxBytes?: number; onRouteMedia?: (files: File[]) => void | Promise<void> },
+  opts?: {
+    maxBytes?: number;
+    onRouteMedia?: (files: File[]) => void | Promise<void>;
+    /** Snapshot the fresh pane's routing and adoption callback for this upload. */
+    getUploadContext?: () => {
+      fields: Record<string, string>;
+      onSessionReady: (sessionId: string) => void;
+    } | undefined;
+  },
 ): FileAttachmentsApi {
   const t = useT();
   const [attachments, setAttachments] = React.useState<Attachment[]>([]);
+  const generation = React.useRef(0);
+  const pendingChips = React.useRef(new Set<string>());
+  React.useEffect(() => () => { generation.current += 1; }, []);
 
   // Keep accessors/config in refs so `upload` stays referentially stable.
   const sessionIdRef = React.useRef(getSessionId);
@@ -367,6 +378,7 @@ export function useFileAttachments(
   const upload = React.useCallback(async (fileList: FileList | File[]) => {
     const all = Array.from(fileList);
     if (all.length === 0) return;
+    const startedGeneration = generation.current;
 
     const { attach, media, rejected } = await partitionUpload(all, {
       maxBytes: optsRef.current?.maxBytes ?? MAX_ATTACHMENT_BYTES,
@@ -377,6 +389,8 @@ export function useFileAttachments(
     // recording chips; wait for it so Send cannot race ahead of the returned
     // recording ids.
     if (media.length > 0) await optsRef.current?.onRouteMedia?.(media);
+
+    if (startedGeneration !== generation.current) return;
 
     // Guard: rejected files never POST; they surface as clear error chips so the
     // user gets a message instead of an opaque 413 / silent failure.
@@ -407,6 +421,7 @@ export function useFileAttachments(
           : undefined,
       status: "uploading" as const,
     }));
+    for (const chip of staged) pendingChips.current.add(chip.localId);
     setAttachments((prev) => [...prev, ...staged]);
 
     const formData = new FormData();
@@ -415,6 +430,10 @@ export function useFileAttachments(
     if (sid) formData.append("sessionId", sid);
 
     try {
+      const context = optsRef.current?.getUploadContext?.();
+      for (const [key, value] of Object.entries(context?.fields ?? {})) {
+        formData.set(key, value);
+      }
       // Don't set Content-Type — the browser adds the multipart boundary.
       const res = await authFetch(`${API_URL}/api/files/upload`, {
         method: "POST",
@@ -422,6 +441,10 @@ export function useFileAttachments(
       });
       if (!res.ok) throw new Error("upload failed");
       const data = (await res.json()) as UploadResponse;
+      // An old upload must not adopt its session into a different pane.
+      if (startedGeneration !== generation.current ||
+          !staged.some((chip) => pendingChips.current.has(chip.localId))) return;
+      if (data.sessionId) context?.onSessionReady(data.sessionId);
       const stagedIds = new Set(staged.map((s) => s.localId));
       setAttachments((prev) => applyUploadResult(prev, stagedIds, data.files));
 
@@ -447,12 +470,16 @@ export function useFileAttachments(
         }
       }
     } catch (err) {
+      if (startedGeneration !== generation.current) return;
       const stagedIds = new Set(staged.map((s) => s.localId));
       setAttachments((prev) => markStagedError(prev, stagedIds, (err as Error).message));
+    } finally {
+      for (const chip of staged) pendingChips.current.delete(chip.localId);
     }
   }, []);
 
   const remove = React.useCallback((localId: string) => {
+    pendingChips.current.delete(localId);
     setAttachments((prev) => {
       const removed = prev.find((a) => a.localId === localId);
       if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
@@ -461,6 +488,8 @@ export function useFileAttachments(
   }, []);
 
   const clear = React.useCallback(() => {
+    generation.current += 1;
+    pendingChips.current.clear();
     setAttachments((prev) => {
       for (const a of prev) if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
       return [];
@@ -468,6 +497,8 @@ export function useFileAttachments(
   }, []);
 
   const detach = React.useCallback(() => {
+    generation.current += 1;
+    pendingChips.current.clear();
     setAttachments((prev) => {
       // Keep the handed-off (ready) chips' object URLs alive — the sent message
       // now owns them. Revoke only the chips being dropped (uploading/errored).

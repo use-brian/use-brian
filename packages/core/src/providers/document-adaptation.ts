@@ -1,3 +1,4 @@
+import { debugDocumentFlow } from '../engine/document-flow-debug.js'
 /**
  * Document adaptation — the one seam where inline media becomes readable text
  * for a model that cannot read it natively.
@@ -279,6 +280,7 @@ export function wrapDocumentAdaptation(
       // the generator — the first `next()` awaits it before anything dispatches.
       return (async function* () {
         const messages = await adapt(request.messages)
+        debugDocumentFlow('document_adaptation', { model: request.model, before: request.messages, messages })
         yield* provider.stream(messages === request.messages ? request : { ...request, messages })
       })()
     },
@@ -288,7 +290,9 @@ export function wrapDocumentAdaptation(
       return {
         send(messages: Message[], opts?: SendOptions): AsyncIterable<StreamChunk> {
           return (async function* () {
-            yield* inner.send(await adapt(messages), opts)
+            const adapted = await adapt(messages)
+            debugDocumentFlow('document_adaptation', { model: sessionOptions.model, before: messages, messages: adapted })
+            yield* inner.send(adapted, opts)
           })()
         },
       }
