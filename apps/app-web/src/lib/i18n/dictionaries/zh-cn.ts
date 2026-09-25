@@ -4839,6 +4839,10 @@ export const zhCN: Dictionary = {
       graphAria: "切换至图谱查看",
     },
     groupedView: {
+      selectRow: "选择 {name}",
+      selectAll: "选择所有已加载的行",
+      selectedCount: "已选择 {count} 项",
+      clearSelection: "清除选择",
       showCompleted: "显示已完成 ({count})",
       hideCompleted: "隐藏已完成 ({count})",
     },

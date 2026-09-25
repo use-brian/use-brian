@@ -4948,6 +4948,10 @@ export const zh: Dictionary = {
       graphAria: "切換至圖譜檢視",
     },
     groupedView: {
+      selectRow: "選取 {name}",
+      selectAll: "選取所有已載入的列",
+      selectedCount: "已選取 {count} 項",
+      clearSelection: "清除選取",
       showCompleted: "顯示已完成 ({count})",
       hideCompleted: "隱藏已完成 ({count})",
     },

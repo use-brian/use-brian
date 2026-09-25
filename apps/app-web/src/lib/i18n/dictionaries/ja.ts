@@ -4988,6 +4988,10 @@ export const ja: Dictionary = {
       graphAria: "グラフ表示に切り替え",
     },
     groupedView: {
+      selectRow: "{name} を選択",
+      selectAll: "読み込み済みの行をすべて選択",
+      selectedCount: "{count} 件選択中",
+      clearSelection: "選択を解除",
       showCompleted: "完了を表示 ({count})",
       hideCompleted: "完了を非表示 ({count})",
     },
