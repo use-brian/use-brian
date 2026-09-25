@@ -3631,6 +3631,8 @@ export const zh: Dictionary = {
       wsReconnectOauthNote: "此連接器透過其提供者登入。重新連接會以你自己的帳戶為整個工作區重新授權。",
       wsReconnectError: "無法重新連接。請檢查權杖後重試。",
       wsManageError: "無法更新此連接器。請重試。",
+      wsToolLoadError: "無法探索此連接器的工具。",
+      wsToolRetry: "重試",
       wsToolPolicyTitle: "工作空間工具權限",
       wsToolPolicyDesc: "為整個工作空間允許、詢問或封鎖每個工具。團隊助理會遵循這些設定。",
       backToList: "所有連接器",

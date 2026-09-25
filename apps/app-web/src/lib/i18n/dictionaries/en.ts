@@ -3858,6 +3858,8 @@ export const en = {
       wsReconnectOauthNote: "This connector signs in through its provider. Reconnecting re-authorizes it with your own account, for the whole workspace.",
       wsReconnectError: "Could not reconnect. Check the token and try again.",
       wsManageError: "Could not update this connector. Try again.",
+      wsToolLoadError: "Could not discover tools from this connector.",
+      wsToolRetry: "Try again",
       wsToolPolicyTitle: "Workspace tool permissions",
       wsToolPolicyDesc: "Allow, ask, or block each tool for the whole workspace. The team assistant follows these settings.",
       backToList: "All connectors",

@@ -10,6 +10,7 @@ import {
   ALL_EXACT_INSTANCE_GOVERNANCE_CONNECTOR_IDS,
   MULTI_INSTANCE_CONNECTOR_IDS,
 } from '@use-brian/shared'
+import { classifyTool } from '@use-brian/core'
 import {
   connectorInstanceGovernanceId,
   type ConnectorInstance,
@@ -24,6 +25,7 @@ import {
 } from '../db/workspace-store.js'
 import type { WorkspaceAuditStore } from '../db/workspace-audit-store.js'
 import type { WorkspaceToolPolicyStore } from '../db/workspace-tool-policy-store.js'
+import { buildConnectorAuthHeaders } from '../mcp/auth-headers.js'
 
 type Membership = Awaited<ReturnType<typeof getWorkspaceMembershipWithClearanceSystem>>
 
@@ -211,19 +213,50 @@ export function workspaceConnectorInstanceRoutes(opts: ConnectorInstanceRouteOpt
   router.get('/:instanceId/tool-policies', async (req, res) => {
     const gate = await requireConnectorClearance(req, res)
     if (!gate) return
-    const workspaceId = (req.params as Record<string, string>).workspaceId
-    const policies = await opts.workspaceToolPolicyStore.listForWorkspace(workspaceId)
-    const governanceId = await governanceIdForInstance(gate.userId, workspaceId, gate.instance)
-    // Legacy provider rows seed an account until that concrete instance has an
-    // explicit row. Exact rows overwrite by tool, so sibling edits stay split.
-    const byTool = new Map<string, (typeof policies)[number]>()
-    for (const policy of policies) {
-      if (policy.serverName === gate.instance.provider) byTool.set(policy.toolName, policy)
+    try {
+      const workspaceId = (req.params as Record<string, string>).workspaceId
+      const policies = await opts.workspaceToolPolicyStore.listForWorkspace(workspaceId)
+      const governanceId = await governanceIdForInstance(gate.userId, workspaceId, gate.instance)
+      // Legacy provider rows seed an account until that concrete instance has an
+      // explicit row. Exact rows overwrite by tool, so sibling edits stay split.
+      const byTool = new Map<string, (typeof policies)[number]>()
+      for (const policy of policies) {
+        if (policy.serverName === gate.instance.provider) byTool.set(policy.toolName, policy)
+      }
+      for (const policy of policies) {
+        if (policy.serverName === governanceId) byTool.set(policy.toolName, policy)
+      }
+
+      // A transferred custom MCP no longer belongs to the caller's personal
+      // ConnectorStore projection, so the generic /api/connectors/:provider/tools
+      // route cannot discover it. This clearance-gated instance route owns that
+      // lookup: read the preserved workspace credential only after the gate and
+      // return the live catalog alongside its shared policy rows.
+      let tools: Array<{
+        name: string
+        description: string
+        classification: 'read' | 'write' | 'destructive' | 'unknown'
+      }> = []
+      if (gate.instance.custom && gate.instance.url) {
+        const credentials = await opts.connectorInstanceStore.getAuthCredentials(gate.userId, gate.instance.id)
+        const { discoverMcpServer } = await import('../mcp/client.js')
+        const server = await discoverMcpServer(
+          gate.instance.url,
+          gate.instance.label,
+          buildConnectorAuthHeaders(credentials),
+        )
+        tools = server.tools.map((tool) => ({
+          name: tool.name,
+          description: tool.description,
+          classification: classifyTool(tool.name, tool.description),
+        }))
+      }
+
+      res.json({ policies: [...byTool.values()], tools })
+    } catch (error) {
+      console.error('[workspace-connector] tool catalog discovery failed:', error)
+      res.status(502).json({ error: 'Failed to discover connector tools' })
     }
-    for (const policy of policies) {
-      if (policy.serverName === governanceId) byTool.set(policy.toolName, policy)
-    }
-    res.json({ policies: [...byTool.values()] })
   })
 
   router.put('/:instanceId/tools/:toolName/policy', async (req, res) => {

@@ -3585,6 +3585,8 @@ export const zhCN: Dictionary = {
       wsReconnectOauthNote: "此连接器透过其提供者登录。重新连接会以你自己的账户为整个工作区重新授权。",
       wsReconnectError: "无法重新连接。请检查权杖后重试。",
       wsManageError: "无法更新此连接器。请重试。",
+      wsToolLoadError: "无法发现此连接器的工具。",
+      wsToolRetry: "重试",
       wsToolPolicyTitle: "工作空间工具权限",
       wsToolPolicyDesc: "为整个工作空间允许、询问或阻止每个工具。团队助理会遵循这些设置。",
       backToList: "所有连接器",

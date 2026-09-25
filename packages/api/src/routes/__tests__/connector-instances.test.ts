@@ -11,6 +11,11 @@ import {
   workspaceConnectorInstanceRoutes,
 } from '../connector-instances.js'
 
+const mockDiscoverMcpServer = vi.hoisted(() => vi.fn())
+vi.mock('../../mcp/client.js', () => ({
+  discoverMcpServer: (...args: unknown[]) => mockDiscoverMcpServer(...args),
+}))
+
 const WS = '11111111-1111-4111-8111-111111111111'
 const IID = '22222222-2222-4222-8222-222222222222'
 const IID_EXTRA = '44444444-4444-4444-8444-444444444444'
@@ -51,6 +56,7 @@ function makeApp(options: { userId?: string; clearance?: 'public' | 'internal' |
     listByWorkspace: vi.fn().mockResolvedValue([instance()]),
     listForTargetSystem: vi.fn().mockResolvedValue([]),
     get: vi.fn().mockResolvedValue(instance()),
+    getAuthCredentials: vi.fn().mockResolvedValue(null),
     update: vi.fn().mockResolvedValue(instance()),
     deleteInstance: vi.fn().mockResolvedValue(true),
     transferToWorkspace: vi.fn().mockResolvedValue(instance()),
@@ -66,6 +72,7 @@ function makeApp(options: { userId?: string; clearance?: 'public' | 'internal' |
     connectorInstanceStore: {
       listByWorkspace: mocks.listByWorkspace,
       get: mocks.get,
+      getAuthCredentials: mocks.getAuthCredentials,
       update: mocks.update,
       delete: mocks.deleteInstance,
       transferToWorkspace: mocks.transferToWorkspace,
@@ -93,7 +100,10 @@ function makeApp(options: { userId?: string; clearance?: 'public' | 'internal' |
 }
 
 describe('[COMP:api/connector-instances-route] connector instance routes', () => {
-  beforeEach(() => vi.clearAllMocks())
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockDiscoverMcpServer.mockReset()
+  })
 
   it('lists the caller grants for the Studio contract', async () => {
     const { app, listByGrantor } = makeApp()
@@ -162,6 +172,63 @@ describe('[COMP:api/connector-instances-route] connector instance routes', () =>
       .send({ policy: 'allow', classification: 'write' })
     expect(updated.status).toBe(200)
     expect(setPolicy).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: WS, serverName: 'github', toolName: 'issues', updatedBy: 'u1' }))
+  })
+
+  it('live-discovers tools for a transferred custom connector with its workspace credential', async () => {
+    const { app, get, getAuthCredentials } = makeApp()
+    get.mockResolvedValue(instance({
+      provider: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      label: 'Workspace MCP',
+      url: 'https://mcp.example/mcp',
+      custom: true,
+      credentialsType: 'bearer',
+    }))
+    getAuthCredentials.mockResolvedValue({ type: 'bearer', token: 'test-token' })
+    mockDiscoverMcpServer.mockResolvedValue({
+      name: 'Workspace MCP',
+      url: 'https://mcp.example/mcp',
+      tools: [{ name: 'listWidgets', description: 'List available widgets' }],
+    })
+
+    const response = await request(app)
+      .get(`/api/workspaces/${WS}/connectors/${IID}/tool-policies`)
+
+    expect(response.status).toBe(200)
+    expect(response.body.policies).toEqual([])
+    expect(response.body.tools).toEqual([
+      expect.objectContaining({ name: 'listWidgets', description: 'List available widgets' }),
+    ])
+    expect(getAuthCredentials).toHaveBeenCalledWith('u1', IID)
+    expect(mockDiscoverMcpServer).toHaveBeenCalledWith(
+      'https://mcp.example/mcp',
+      'Workspace MCP',
+      { Authorization: 'Bearer test-token' },
+    )
+    expect(JSON.stringify(response.body)).not.toContain('test-token')
+  })
+
+  it.each([
+    ['a member below the connector clearance', { membership: true, status: 404 }],
+    ['a non-member', { membership: false, status: 403 }],
+  ])('does not read credentials or discover tools for %s', async (_label, access) => {
+    const { app, get, getMembership, getAuthCredentials } = makeApp({
+      userId: 'u1',
+      clearance: 'public',
+    })
+    get.mockResolvedValue(instance({
+      provider: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      url: 'https://mcp.example/mcp',
+      custom: true,
+      sensitivity: 'confidential',
+    }))
+    if (!access.membership) getMembership.mockResolvedValue(null)
+
+    const response = await request(app)
+      .get(`/api/workspaces/${WS}/connectors/${IID}/tool-policies`)
+
+    expect(response.status).toBe(access.status)
+    expect(getAuthCredentials).not.toHaveBeenCalled()
+    expect(mockDiscoverMcpServer).not.toHaveBeenCalled()
   })
 
   it('uses an exact policy key for an additional workspace-owned account', async () => {

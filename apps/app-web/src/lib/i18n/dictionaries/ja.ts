@@ -3651,6 +3651,8 @@ export const ja: Dictionary = {
       wsReconnectOauthNote: "このコネクターはプロバイダー経由でサインインします。再接続すると、あなた自身のアカウントでワークスペース全体に対して再認可されます。",
       wsReconnectError: "再接続できませんでした。トークンを確認してもう一度お試しください。",
       wsManageError: "このコネクターを更新できませんでした。もう一度お試しください。",
+      wsToolLoadError: "このコネクターのツールを検出できませんでした。",
+      wsToolRetry: "もう一度試す",
       wsToolPolicyTitle: "ワークスペースのツール権限",
       wsToolPolicyDesc: "各ツールをワークスペース全体で許可、確認、またはブロックします。チームアシスタントはこの設定に従います。",
       backToList: "すべてのコネクター",

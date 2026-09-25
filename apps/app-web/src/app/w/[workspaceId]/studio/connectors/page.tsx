@@ -207,6 +207,8 @@ type ToolPermission = {
   policy: "allow" | "ask" | "block";
 };
 
+type WorkspaceToolCatalogItem = Omit<ToolPermission, "policy">;
+
 /** Connector visibility clearance tier — mirrors the server's SensitivityTier. */
 type SensitivityTier = "public" | "internal" | "confidential";
 
@@ -1282,8 +1284,13 @@ function ConnectorsList() {
   // "cleared to manage" and no extra clearance signal is needed here.
   // instanceId -> current sensitivity, for the Edit form.
   const [wsOwnedSensitivity, setWsOwnedSensitivity] = useState<Record<string, SensitivityTier>>({});
-  // instanceId -> shared per-tool policy (toolName -> allow/ask/block).
-  const [wsToolPolicies, setWsToolPolicies] = useState<Record<string, { policies: Record<string, ToolPolicy>; loading: boolean }>>({});
+  // instanceId -> shared per-tool policy plus the live custom-MCP catalog.
+  const [wsToolPolicies, setWsToolPolicies] = useState<Record<string, {
+    policies: Record<string, ToolPolicy>;
+    tools: WorkspaceToolCatalogItem[];
+    loading: boolean;
+    error: boolean;
+  }>>({});
   // The workspace-owned instance whose Edit / Reconnect form is open.
   const [wsEditingId, setWsEditingId] = useState<string | null>(null);
   const [wsEditLabel, setWsEditLabel] = useState("");
@@ -1436,19 +1443,40 @@ function ConnectorsList() {
   // when rendered against the tool catalog.
   const loadWsToolPolicies = useCallback(async (instanceId: string) => {
     if (!workspaceId) return;
-    setWsToolPolicies((prev) => ({ ...prev, [instanceId]: { policies: prev[instanceId]?.policies ?? {}, loading: true } }));
+    setWsToolPolicies((prev) => ({
+      ...prev,
+      [instanceId]: {
+        policies: prev[instanceId]?.policies ?? {},
+        tools: prev[instanceId]?.tools ?? [],
+        loading: true,
+        error: false,
+      },
+    }));
     try {
       const res = await authFetch(
         `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/connectors/${instanceId}/tool-policies`,
       );
+      if (!res.ok) throw new Error("Failed to load workspace connector tools");
       const map: Record<string, ToolPolicy> = {};
-      if (res.ok) {
-        const data = (await res.json()) as { policies?: Array<{ toolName: string; policy: ToolPolicy }> };
-        for (const p of data.policies ?? []) map[p.toolName] = p.policy;
-      }
-      setWsToolPolicies((prev) => ({ ...prev, [instanceId]: { policies: map, loading: false } }));
+      const data = (await res.json()) as {
+        policies?: Array<{ toolName: string; policy: ToolPolicy }>;
+        tools?: WorkspaceToolCatalogItem[];
+      };
+      for (const p of data.policies ?? []) map[p.toolName] = p.policy;
+      setWsToolPolicies((prev) => ({
+        ...prev,
+        [instanceId]: { policies: map, tools: data.tools ?? [], loading: false, error: false },
+      }));
     } catch {
-      setWsToolPolicies((prev) => ({ ...prev, [instanceId]: { policies: prev[instanceId]?.policies ?? {}, loading: false } }));
+      setWsToolPolicies((prev) => ({
+        ...prev,
+        [instanceId]: {
+          policies: prev[instanceId]?.policies ?? {},
+          tools: prev[instanceId]?.tools ?? [],
+          loading: false,
+          error: true,
+        },
+      }));
     }
   }, [workspaceId]);
 
@@ -3567,7 +3595,7 @@ function ConnectorsList() {
   // reloading on failure. Writes the WORKSPACE policy, not the per-user one.
   async function handleWsToolPolicy(instanceId: string, toolName: string, policy: ToolPolicy, classification?: string) {
     setWsToolPolicies((prev) => {
-      const entry = prev[instanceId] ?? { policies: {}, loading: false };
+      const entry = prev[instanceId] ?? { policies: {}, tools: [], loading: false, error: false };
       return { ...prev, [instanceId]: { ...entry, policies: { ...entry.policies, [toolName]: policy } } };
     });
     try {
@@ -3693,11 +3721,12 @@ function ConnectorsList() {
     setWsReconnectId(null);
     setWsReconnectSecret("");
     setWsManageError(null);
-    if (sel.readonly && sel.source === "team_native" && sel.connectorInstanceId) {
+    const workspaceOwned = sel.readonly && sel.source === "team_native" && Boolean(sel.connectorInstanceId);
+    if (workspaceOwned && sel.connectorInstanceId) {
       loadWsToolPolicies(sel.connectorInstanceId);
     }
     const toolKey = sel.id === "cli" ? sel.connectorInstanceId : sel.id;
-    if ((sel.connected || isBuiltinPrimitive(sel)) && toolKey && !toolsMap[toolKey]) {
+    if (!workspaceOwned && (sel.connected || isBuiltinPrimitive(sel)) && toolKey && !toolsMap[toolKey]) {
       loadTools(sel.id, sel.id === "cli" ? sel.connectorInstanceId : undefined);
     }
     if (sel.custom) {
@@ -3950,10 +3979,12 @@ function ConnectorsList() {
               const sensitivity = wsOwnedSensitivity[iid] ?? "internal";
               const polEntry = wsToolPolicies[iid];
               const policyMap = polEntry?.policies ?? {};
-              // Tool catalog: the built-in registry (names + descriptions +
-              // classification), plus any governed tool not in the registry (a
-              // custom MCP's tools only surface once they carry a policy).
-              const catalog = OFFICIAL_CONNECTOR_TOOLS[sel.id] ?? [];
+              // Built-ins use the registry; a custom workspace-owned MCP is
+              // live-discovered by the clearance-gated policy endpoint with the
+              // credential that survived its transfer.
+              const catalog = polEntry?.tools.length
+                ? polEntry.tools
+                : (OFFICIAL_CONNECTOR_TOOLS[sel.id] ?? []);
               const extraTools = Object.keys(policyMap)
                 .filter((name) => !catalog.some((tool) => tool.name === name))
                 .map((name) => ({ name, description: "", classification: "unknown" as const }));
@@ -4202,19 +4233,32 @@ function ConnectorsList() {
                         {tc.wsToolPolicyTitle}
                       </div>
                       <p className="text-[11px] text-muted-foreground">{tc.wsToolPolicyDesc}</p>
-                      <ConnectorToolList
-                        connectorId={sel.id}
-                        loading={polEntry?.loading}
-                        tools={toolItems}
-                        onPolicyChange={(toolName, policy) =>
-                          handleWsToolPolicy(
-                            iid,
-                            toolName,
-                            policy,
-                            catalog.find((tool) => tool.name === toolName)?.classification,
-                          )
-                        }
-                      />
+                      {polEntry?.error ? (
+                        <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-xs text-destructive">
+                          <p>{tc.wsToolLoadError}</p>
+                          <button
+                            type="button"
+                            onClick={() => loadWsToolPolicies(iid)}
+                            className="mt-2 min-h-11 rounded-lg border border-destructive/30 px-3 py-1 font-medium hover:bg-destructive/10 sm:min-h-0"
+                          >
+                            {tc.wsToolRetry}
+                          </button>
+                        </div>
+                      ) : (
+                        <ConnectorToolList
+                          connectorId={sel.id}
+                          loading={polEntry?.loading}
+                          tools={toolItems}
+                          onPolicyChange={(toolName, policy) =>
+                            handleWsToolPolicy(
+                              iid,
+                              toolName,
+                              policy,
+                              catalog.find((tool) => tool.name === toolName)?.classification,
+                            )
+                          }
+                        />
+                      )}
                     </div>
                   )}
                 </div>
