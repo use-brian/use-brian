@@ -1,3 +1,4 @@
+import { debugDocumentFlow } from './document-flow-debug.js'
 import { missingToolCapability } from '../tools/capability-gate.js'
 import type { Tool, ToolContext, ToolResult, ToolResultMeta } from '../tools/types.js'
 import type { ContentBlock } from '../providers/types.js'
@@ -884,8 +885,11 @@ export function createToolExecutor(options: ToolExecutorOptions) {
 
       let content = renderToolResultData(result.data, result.isError === true)
 
+      const debugInputChars = content.length
+      let debugTruncated = false
       // Layer 3: per-tool char cap — truncate oversized non-cacheable results
       if (toolDef.maxResultSizeChars && content.length > toolDef.maxResultSizeChars) {
+        debugTruncated = true
         content = content.slice(0, toolDef.maxResultSizeChars) + '\n\n[Result truncated]'
       }
 
@@ -895,8 +899,11 @@ export function createToolExecutor(options: ToolExecutorOptions) {
       // `slice(0, BUDGET * 4)` would leak ~4× past budget on 1-char/token
       // CJK content) and a no-op under budget. `isError` stays as the tool
       // reported — this is a capacity guard, not a failure.
-      content = capToolResultTokens(content)
+      const cappedContent = capToolResultTokens(content)
+      debugTruncated ||= cappedContent !== content
+      content = cappedContent
 
+      debugDocumentFlow('tool_completion', { toolName: t.name, sessionId: options.context.sessionId, inputChars: debugInputChars, outputChars: content.length, truncated: debugTruncated, timeout: timeoutController.signal.aborted, error: result.isError === true })
       t.result = { type: 'tool_result', toolUseId: t.id, name: t.name, content, isError: result.isError }
       // Feed the identifier-evidence sets with exactly what the model will
       // see (post-cap content) — identifiers observed here become fair game
@@ -926,6 +933,7 @@ export function createToolExecutor(options: ToolExecutorOptions) {
       // signal a soft failure via result.isError without throwing).
       options.loopDetector.recordOutcome(t.name, result.isError === true)
     } catch (err) {
+      debugDocumentFlow('tool_completion', { toolName: t.name, sessionId: options.context.sessionId, error: true, timeout: timeoutController.signal.aborted, aborted: mergedSignal.aborted })
       if (timer) clearTimeout(timer)
       // Same cap as the success path — a thrown error is tool-produced,
       // unbounded content too. The pathological case is a `ZodError` (from

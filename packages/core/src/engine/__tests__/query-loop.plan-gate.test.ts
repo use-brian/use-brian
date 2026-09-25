@@ -1,4 +1,7 @@
 import { describe, it, expect } from 'vitest'
+import { createPlanTools } from '../../memory/plan-tools.js'
+import type { PlanStore } from '../../memory/plan-types.js'
+import type { Tool } from '../../tools/types.js'
 import { NOOP_TURN_LEDGER } from '../turn-ledger.js'
 import type {
   LLMProvider,
@@ -27,7 +30,7 @@ function scriptedProvider(scripts: StreamChunk[][]): {
   }
   const session: ProviderSession = {
     send(messages: Message[], _opts?: SendOptions) {
-      calls.push({ messages })
+      calls.push({ messages: structuredClone(messages) })
       return streamNext()
     },
   }
@@ -36,7 +39,10 @@ function scriptedProvider(scripts: StreamChunk[][]): {
     provider: {
       name: 'scripted',
       models: ['mock-model'],
-      stream: () => streamNext(),
+      stream: (options) => {
+        calls.push({ messages: structuredClone(options.messages) })
+        return streamNext()
+      },
       createSession: (_o: SessionOptions) => session,
     },
   }
@@ -75,7 +81,7 @@ type GateStatus =
 async function run(
   provider: LLMProvider,
   planGate: { status: (sid: string) => Promise<GateStatus> } | undefined,
-  opts: { maxTurns?: number; planNudgeCap?: number } = {},
+  opts: { maxTurns?: number; planNudgeCap?: number; tools?: Map<string, Tool>; stateless?: boolean } = {},
 ): Promise<QueryEvent[]> {
   const events: QueryEvent[] = []
   for await (const e of queryLoop({ ledger: NOOP_TURN_LEDGER,
@@ -83,7 +89,8 @@ async function run(
     model: 'mock-model',
     systemPrompt: 'sys',
     messages: [{ role: 'user', content: 'do the multi-step task' }],
-    tools: new Map(),
+    tools: opts.tools ?? new Map([['updatePlanStep', createPlanTools({} as PlanStore).updatePlanStep]]),
+    stateless: opts.stateless,
     context: baseContext,
     maxTurns: opts.maxTurns ?? 10,
     planGate,
@@ -113,10 +120,38 @@ describe('[COMP:plan/gate] Completeness gate', () => {
     // Gate forced a second turn instead of stopping after the first.
     expect(calls).toHaveLength(2)
     // The continuation nudge lists the open step, with its description.
+    expect(lastUserText(calls[1].messages)).toContain('call updatePlanStep')
     expect(lastUserText(calls[1].messages)).toContain('still open')
     expect(lastUserText(calls[1].messages)).toContain('step:verify')
     expect(lastUserText(calls[1].messages)).toContain('check the sources')
     expect(events.find((e) => e.type === 'turn_complete')).toBeDefined()
+  })
+
+  it.each(['absent', 'hidden', 'denied', 'stateless'] as const)('hands off once when updater is %s without changing the plan', async kind => {
+    const { provider, calls } = scriptedProvider([textTurn('Results recorded; plan unresolved.')])
+    const tool = createPlanTools({} as PlanStore).updatePlanStep
+    if (kind === 'hidden') tool.hiddenFromModel = true
+    if (kind === 'denied') tool.requiresCapability = 'plan-test-grant'
+    const tools = new Map<string, Tool>()
+    if (kind === 'hidden' || kind === 'denied') tools.set(tool.name, tool)
+    const status = { open: 1, total: 1, openSteps: [{ key: 'step:verify', description: 'verify results' }] }
+    const original = structuredClone(status)
+    const events = await run(provider, { status: async () => status }, { tools, stateless: kind === 'stateless' })
+    expect(calls).toHaveLength(2)
+    const handoff = lastUserText(calls[1].messages)
+    expect(handoff).toContain('Plan updates are unavailable')
+    expect(handoff).toContain('remain recorded as open')
+    expect(handoff).toContain('Do not claim unfinished work is done')
+    expect(handoff).not.toContain('call updatePlanStep')
+    expect(status).toEqual(original)
+    expect(events.some(e => e.type === 'turn_complete')).toBe(true)
+  })
+
+  it('finishes without impossible nudges when no handoff budget remains', async () => {
+    const { provider, calls } = scriptedProvider([textTurn('Incomplete; cannot update the plan.')])
+    await run(provider, { status: async () => ({ open: 1, total: 1, openSteps: [] }) },
+      { tools: new Map(), maxTurns: 1 })
+    expect(calls).toHaveLength(1)
   })
 
   it('is a no-op when there is no active plan', async () => {

@@ -1,3 +1,4 @@
+import { debugDocumentFlow } from '../engine/document-flow-debug.js'
 /**
  * OpenAI-compatible chat-completions provider.
  *
@@ -348,6 +349,7 @@ async function* streamCompat(
       : {}),
   }
 
+  debugDocumentFlow('openai_wire', { model: recordedModel, messages, wire: ccMessages })
   const res = await (cfg.fetchFn ?? fetch)(`${cfg.baseURL}/chat/completions`, {
     method: 'POST',
     headers: {
