@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Brain grouped view (app-web) — the DEFAULT brain browse surface.
+ * Brain grouped view (app-web) — the List tab of the brain browse surface.
  *
  * Replaces the former flat `EntityRow` dump (every primitive in one
  * undifferentiated stack). Renders every visible brain row — entities
@@ -35,6 +35,7 @@ import type {
   BrainRow,
 } from "@/lib/api/brain";
 import { BrainFallbackCard } from "@/components/brain/file-segment-card";
+import { Checkbox } from "@/components/ui/checkbox";
 import { UserAvatar } from "@/components/ui/user-avatar";
 import { loadWorkspaceRoster } from "@/lib/api/workspace-roster";
 import {
@@ -364,11 +365,62 @@ export function BrainGroupedView({
   const filters = t.brainPage.filters;
   const completedCount = completedTasks?.length ?? 0;
 
-  // Workspace roster for the task rows' assignee avatars — fetched once per
-  // workspace (module cache in lib/api/workspace-roster.ts) and only when an
-  // assigned task is actually visible. Best-effort: a failed fetch just
-  // renders rows without avatars.
   const { activeId: workspaceId } = useWorkspaces();
+  const selectableKeys = useMemo(
+    () =>
+      new Set(
+        [...rows, ...(showCompletedTasks ? completedTasks ?? [] : [])]
+          .filter((row) => KNOWN_ROW_KINDS.has(row.kind))
+          .map((row) => `${row.kind}:${row.id}`),
+      ),
+    [rows, completedTasks, showCompletedTasks],
+  );
+  const [selection, setSelection] = useState(() => ({
+    workspaceId,
+    keys: new Set<string>(),
+  }));
+  // Reconcile before committing children: hidden keys must not resurrect when
+  // a filter/disclosure is undone, or leak across workspaces with identical ids.
+  const selectedKeys = new Set(
+    selection.workspaceId === workspaceId
+      ? [...selection.keys].filter((key) => selectableKeys.has(key))
+      : [],
+  );
+  if (
+    selection.workspaceId !== workspaceId ||
+    selectedKeys.size !== selection.keys.size
+  ) {
+    setSelection({ workspaceId, keys: selectedKeys });
+  }
+  const setSelectedKeys = (keys: Set<string>) => setSelection({ workspaceId, keys });
+  const allSelected =
+    selectableKeys.size > 0 && selectedKeys.size === selectableKeys.size;
+  const selectionBox = (row: BrainRow) => {
+    const key = `${row.kind}:${row.id}`;
+    return (
+      <label className="flex min-h-11 min-w-11 shrink-0 cursor-pointer items-center justify-center">
+        <Checkbox
+          aria-label={format(t.brainPage.groupedView.selectRow, { name: row.name })}
+          checked={selectedKeys.has(key)}
+          onCheckedChange={(checked) => {
+            const next = new Set(selectedKeys);
+            if (checked) next.add(key);
+            else next.delete(key);
+            setSelectedKeys(next);
+          }}
+        />
+      </label>
+    );
+  };
+  const selectionClass = (row: BrainRow) =>
+    cn(
+      "flex items-center rounded-md border transition-colors",
+      selectedKeys.has(`${row.kind}:${row.id}`)
+        ? "border-primary/50 bg-primary/10"
+        : "border-border bg-card",
+    );
+
+  // Best-effort workspace roster for task assignee decoration.
   const hasAssignedTask = useMemo(
     () =>
       rows.some((r) => r.kind === "tasks" && r.assigneeId) ||
@@ -500,6 +552,33 @@ export function BrainGroupedView({
     // pb-28: clear the fixed chat dock the chrome floats over the surface's
     // bottom-right, so the last entry row isn't trapped behind it.
     <div className="relative flex-1 min-h-0 overflow-y-auto bg-background pb-28">
+      <div className="flex flex-wrap items-center gap-x-3 px-4 py-2 border-b border-border text-sm">
+        <label className="flex min-h-11 cursor-pointer items-center gap-2">
+          <Checkbox
+            aria-label={t.brainPage.groupedView.selectAll}
+            checked={allSelected}
+            indeterminate={selectedKeys.size > 0 && !allSelected}
+            disabled={selectableKeys.size === 0}
+            onCheckedChange={(checked) =>
+              setSelectedKeys(checked ? new Set(selectableKeys) : new Set())
+            }
+          />
+          {t.brainPage.groupedView.selectAll}
+        </label>
+        <span role="status" className="text-muted-foreground">
+          {format(t.brainPage.groupedView.selectedCount, {
+            count: selectedKeys.size,
+          })}
+        </span>
+        <button
+          type="button"
+          disabled={selectedKeys.size === 0}
+          onClick={() => setSelectedKeys(new Set())}
+          className="min-h-11 px-2 rounded-md hover:bg-muted/40 disabled:opacity-50"
+        >
+          {t.brainPage.groupedView.clearSelection}
+        </button>
+      </div>
       {presentLegend.length > 1 && (
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2 border-b border-border text-[11px] text-muted-foreground">
           {presentLegend.map((g) => (
@@ -557,81 +636,84 @@ export function BrainGroupedView({
                       key={`${row.kind}:${row.id}`}
                       {...chunkAnim(`${row.kind}:${row.id}`)}
                     >
-                      <button
-                        type="button"
-                        onClick={() => onSelect(row)}
-                        className={cn(
-                          "w-full text-left flex items-center gap-3 px-3 py-2 rounded-md border border-border bg-card",
-                          "hover:border-primary/50 hover:bg-muted/40 transition-colors",
-                        )}
-                      >
-                        <span
-                          aria-hidden
-                          className="inline-block h-2.5 w-2.5 shrink-0 rounded-full"
-                          style={{ backgroundColor: groupColor(group.key) }}
-                        />
-                        <span className="flex-1 min-w-0 text-sm font-medium truncate">
-                          {row.name}
-                        </span>
-
-                        {row.hasPending && (
+                      <div className={selectionClass(row)}>
+                        {selectionBox(row)}
+                        <button
+                          type="button"
+                          onClick={() => onSelect(row)}
+                          className={cn(
+                            "min-w-0 min-h-11 flex-1 text-left flex items-center gap-3 pr-3 py-2 rounded-md",
+                            "hover:border-primary/50 hover:bg-muted/40 transition-colors",
+                          )}
+                        >
                           <span
-                            className="shrink-0 px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide font-medium bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-500/20"
-                            aria-label="Pending review"
-                          >
-                            Pending
+                            aria-hidden
+                            className="inline-block h-2.5 w-2.5 shrink-0 rounded-full"
+                            style={{ backgroundColor: groupColor(group.key) }}
+                          />
+                          <span className="flex-1 min-w-0 text-sm font-medium truncate">
+                            {row.name}
                           </span>
-                        )}
 
-                        {isEntity ? (
-                          <>
-                            {degree > 0 && (
-                              <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
-                                {degree}
-                              </span>
-                            )}
-                            {kinds.length > 0 && (
-                              <span className="hidden sm:flex shrink-0 items-center gap-1">
-                                {kinds.map((k) => (
-                                  <span
-                                    key={k}
-                                    aria-hidden
-                                    title={legend[k]}
-                                    className="inline-block h-2 w-2 rounded-full opacity-70"
-                                    style={{ backgroundColor: kindColor(k) }}
-                                  />
-                                ))}
-                              </span>
-                            )}
-                          </>
-                        ) : (
-                          <>
-                            {group.key === "tasks" && (
-                              <TaskRowMeta row={row} roster={roster} />
-                            )}
-                            {group.key === "tasks" && row.status && (
-                              <TaskStatusChip status={row.status} />
-                            )}
-                            {row.sensitivity && (
-                              <span
-                                className={cn(
-                                  "shrink-0 px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide font-medium border",
-                                  row.sensitivity === "confidential" &&
-                                    "bg-red-500/10 text-red-700 dark:text-red-400 border-red-500/20",
-                                  row.sensitivity === "restricted" &&
-                                    "bg-red-700/10 text-red-800 dark:text-red-300 border-red-700/30",
-                                  row.sensitivity === "internal" &&
-                                    "bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/20",
-                                  row.sensitivity === "public" &&
-                                    "bg-green-500/10 text-green-700 dark:text-green-400 border-green-500/20",
-                                )}
-                              >
-                                {row.sensitivity}
-                              </span>
-                            )}
-                          </>
-                        )}
-                      </button>
+                          {row.hasPending && (
+                            <span
+                              className="shrink-0 px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide font-medium bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-500/20"
+                              aria-label="Pending review"
+                            >
+                              Pending
+                            </span>
+                          )}
+
+                          {isEntity ? (
+                            <>
+                              {degree > 0 && (
+                                <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
+                                  {degree}
+                                </span>
+                              )}
+                              {kinds.length > 0 && (
+                                <span className="hidden sm:flex shrink-0 items-center gap-1">
+                                  {kinds.map((k) => (
+                                    <span
+                                      key={k}
+                                      aria-hidden
+                                      title={legend[k]}
+                                      className="inline-block h-2 w-2 rounded-full opacity-70"
+                                      style={{ backgroundColor: kindColor(k) }}
+                                    />
+                                  ))}
+                                </span>
+                              )}
+                            </>
+                          ) : (
+                            <>
+                              {group.key === "tasks" && (
+                                <TaskRowMeta row={row} roster={roster} />
+                              )}
+                              {group.key === "tasks" && row.status && (
+                                <TaskStatusChip status={row.status} />
+                              )}
+                              {row.sensitivity && (
+                                <span
+                                  className={cn(
+                                    "shrink-0 px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide font-medium border",
+                                    row.sensitivity === "confidential" &&
+                                      "bg-red-500/10 text-red-700 dark:text-red-400 border-red-500/20",
+                                    row.sensitivity === "restricted" &&
+                                      "bg-red-700/10 text-red-800 dark:text-red-300 border-red-700/30",
+                                    row.sensitivity === "internal" &&
+                                      "bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/20",
+                                    row.sensitivity === "public" &&
+                                      "bg-green-500/10 text-green-700 dark:text-green-400 border-green-500/20",
+                                  )}
+                                >
+                                  {row.sensitivity}
+                                </span>
+                              )}
+                            </>
+                          )}
+                        </button>
+                      </div>
                     </li>
                   );
                 })}
@@ -666,26 +748,29 @@ export function BrainGroupedView({
                   {showCompletedTasks && (
                     <ul className="mt-1 flex flex-col gap-1">
                       {(completedTasks ?? []).map((row) => (
-                        <li key={`completed-task:${row.id}`}>
-                          <button
-                            type="button"
-                            onClick={() => onSelect(row)}
-                            className={cn(
-                              "w-full text-left flex items-center gap-3 px-3 py-2 rounded-md border border-border bg-card opacity-60",
-                              "transition-all hover:opacity-100 hover:border-primary/50 hover:bg-muted/40",
-                            )}
-                          >
-                            <span
-                              aria-hidden
-                              className="inline-block h-2.5 w-2.5 shrink-0 rounded-full"
-                              style={{ backgroundColor: groupColor("tasks") }}
-                            />
-                            <span className="flex-1 min-w-0 text-sm font-medium truncate line-through decoration-muted-foreground/40">
-                              {row.name}
-                            </span>
-                            <TaskRowMeta row={row} roster={roster} />
-                            {row.status && <TaskStatusChip status={row.status} />}
-                          </button>
+                        <li key={`${row.kind}:${row.id}`}>
+                          <div className={selectionClass(row)}>
+                            {KNOWN_ROW_KINDS.has(row.kind) && selectionBox(row)}
+                            <button
+                              type="button"
+                              onClick={() => onSelect(row)}
+                              className={cn(
+                                "min-w-0 min-h-11 flex-1 text-left flex items-center gap-3 pr-3 py-2 rounded-md opacity-60",
+                                "transition-all hover:opacity-100 hover:border-primary/50 hover:bg-muted/40",
+                              )}
+                            >
+                              <span
+                                aria-hidden
+                                className="inline-block h-2.5 w-2.5 shrink-0 rounded-full"
+                                style={{ backgroundColor: groupColor("tasks") }}
+                              />
+                              <span className="flex-1 min-w-0 text-sm font-medium truncate line-through decoration-muted-foreground/40">
+                                {row.name}
+                              </span>
+                              <TaskRowMeta row={row} roster={roster} />
+                              {row.status && <TaskStatusChip status={row.status} />}
+                            </button>
+                          </div>
                         </li>
                       ))}
                     </ul>

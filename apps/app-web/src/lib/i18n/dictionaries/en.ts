@@ -5215,6 +5215,10 @@ export const en = {
       graphAria: "Show graph view",
     },
     groupedView: {
+      selectRow: "Select {name}",
+      selectAll: "Select all loaded rows",
+      selectedCount: "{count} selected",
+      clearSelection: "Clear selection",
       showCompleted: "Show completed ({count})",
       hideCompleted: "Hide completed ({count})",
     },
