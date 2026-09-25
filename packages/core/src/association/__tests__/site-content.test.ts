@@ -35,6 +35,17 @@ describe('[COMP:crm/site-content] schemas', () => {
     expect(news.items[1].locales).toEqual(['en', 'zh-Hant', 'zh-Hans'])
     expect(siteContentPublicationIssues('news', news)).toEqual(['News item bad needs a title for en'])
   })
+
+  it('carries a translated display name per person and a category per news item', () => {
+    const people = parseSiteContent('people', { schemaVersion: 1, groups: [{ key: 'directors', sites: ['sea'], title: L('Directors'), order: 0,
+      members: [{ id: 'karen-li', name: 'Karen Li', localizedName: L('Karen Li', { 'zh-Hant': '李簡鳳玲', 'zh-Hans': '李简凤玲' }), role: L('Honourary Treasurer', { 'zh-Hant': '名譽司庫' }) }] }] })
+    expect(people.groups[0].members[0].localizedName?.['zh-Hant']).toBe('李簡鳳玲')
+    const news = parseSiteContent('news', { schemaVersion: 1, items: [
+      { id: 'report', sites: ['sea'], kind: 'publication', date: '2026-06-30', title: L('Industry outlook'), category: L('Industry Report', { 'zh-Hant': '行業報告' }) }] })
+    expect(news.items[0].category?.en).toBe('Industry Report')
+    expect(() => parseSiteContent('news', { schemaVersion: 1, items: [
+      { id: 'x', sites: ['sea'], kind: 'article', date: '2026-06-30', title: L('X'), category: { 'zh-Hant': '只有中文' } }] })).toThrow()
+  })
 })
 
 describe('[COMP:crm/site-content] publication issues', () => {
