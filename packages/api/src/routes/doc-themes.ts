@@ -37,6 +37,10 @@ import {
   type GeneratedTheme,
 } from '../doc/theme-generator.js'
 import { brandThemeSeed, buildThemeTokens } from '@use-brian/shared'
+import { getWorkspaceIconPointer } from '../db/workspace-icon.js'
+import type { GcsFilesClient } from '../files/gcs-client.js'
+import type { FilesClientResolver } from '../files/files-api.js'
+import { MAX_WORKSPACE_ICON_BYTES } from './workspace-icon.js'
 import { getBrandStore } from '../db/brand-store.js'
 
 export type DocThemesRouteOptions = {
@@ -46,11 +50,15 @@ export type DocThemesRouteOptions = {
   provider?: LLMProvider
   /** Servable background-lane model, resolved at boot. */
   backgroundModel?: string
+  blobClient?: GcsFilesClient
+  filesResolver?: FilesClientResolver
   resolveBackgroundRuntime?: import('../custom-llm-runtime.js').BackgroundRuntimeResolver
 }
 
 /**
- * Two ways to create a theme. `{ prompt }` asks a model to invent the anchor
+ * Three ways to create a theme. Uploaded icons supply image-grounded colours;
+ * the optional prompt steers the result. No client-supplied image is accepted.
+ * `{ prompt }` asks a model to invent the anchor
  * colours; `{ fromBrand: true }` takes them from the workspace's approved
  * brand record — no model, no cost, exact brand values. A workspace that has
  * decided its colours should not have them guessed at.
@@ -58,6 +66,7 @@ export type DocThemesRouteOptions = {
 const createSchema = z.union([
   z.object({ prompt: z.string().trim().min(1).max(600) }).strict(),
   z.object({ fromBrand: z.literal(true) }).strict(),
+  z.object({ fromIcon: z.literal(true), prompt: z.string().trim().min(1).max(600).optional() }).strict(),
 ])
 const renameSchema = z.object({ name: z.string().trim().min(1).max(40) })
 const refineSchema = z.object({ instruction: z.string().trim().min(1).max(600) })
@@ -146,12 +155,44 @@ export function docThemesRoutes(opts: DocThemesRouteOptions): Router {
       generated = { name: seed.name, description: seed.description ?? null, seed, tokens: buildThemeTokens(seed) }
       prompt = `Derived from the ${record.naming.name} brand record`
     } else {
-      prompt = (parsed.data as { prompt: string }).prompt
+      const fromIcon = 'fromIcon' in parsed.data
+      let image: { mimeType: string; data: string } | undefined
+      if (fromIcon) {
+        // Read the server-owned pointer only AFTER membership validation. Never
+        // fetch iconUrl (or a caller's URL): the proxy host is not a trust anchor.
+        const pointer = await getWorkspaceIconPointer(workspaceId)
+        if (!pointer?.iconStorageKey) {
+          return res.status(409).json({ error: 'Upload a workspace icon first to generate a theme from it.', code: 'no_workspace_icon' })
+        }
+        if (!opts.blobClient || !opts.filesResolver) {
+          return res.status(503).json({ error: 'Workspace icon storage is not configured' })
+        }
+        const client = pointer.iconStorageUri
+          ? await opts.filesResolver.forUri(workspaceId, pointer.iconStorageUri)
+          : opts.blobClient
+        const supported = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
+        const stat = await client.statBlob(pointer.iconStorageKey)
+        if (!stat || stat.sizeBytes <= 0 || stat.sizeBytes > MAX_WORKSPACE_ICON_BYTES || !supported.has(stat.mime.toLowerCase())) {
+          return res.status(422).json({ error: 'Use a PNG, JPEG, WebP, or GIF workspace icon up to 5 MB.', code: 'unusable_workspace_icon' })
+        }
+        const blob = await client.readBlob(pointer.iconStorageKey)
+        if (!blob || !blob.bytes.length || blob.bytes.length > MAX_WORKSPACE_ICON_BYTES || !supported.has(blob.mime.toLowerCase())) {
+          return res.status(422).json({ error: 'The workspace icon could not be read. Upload it again.', code: 'unusable_workspace_icon' })
+        }
+        image = { mimeType: blob.mime.toLowerCase(), data: blob.bytes.toString('base64') }
+      }
+      prompt = fromIcon
+        ? `Derived from workspace icon${'prompt' in parsed.data && parsed.data.prompt ? `: ${parsed.data.prompt}` : ''}`
+        : (parsed.data as { prompt: string }).prompt
       try {
         const runtime = await opts.resolveBackgroundRuntime?.(workspaceId)
+        if (image && runtime && !runtime.supportsVision) {
+          return res.status(422).json({ error: 'The workspace background model does not support images. Configure a vision-capable model or generate from a description.', code: 'theme_model_no_vision' })
+        }
         generated = await generateCustomTheme({
           provider: runtime?.provider ?? opts.provider!,
-          prompt,
+          prompt: fromIcon ? ((parsed.data as { prompt?: string }).prompt ?? '') : prompt,
+          image,
           model: runtime?.selector ?? opts.backgroundModel,
         })
       } catch (err) {

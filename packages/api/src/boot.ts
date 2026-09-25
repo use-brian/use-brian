@@ -6172,6 +6172,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use('/api', requireAuth(env.JWT_SECRET), docEntitiesRoutes({ docEntityStore, workspaceStore }))
 
   app.use('/api', requireAuth(env.JWT_SECRET), docThemesRoutes({
+    blobClient: filesBlobClient ?? undefined,
+    filesResolver: filesResolver ?? undefined,
     docThemesStore,
     workspaceStore,
     provider,
