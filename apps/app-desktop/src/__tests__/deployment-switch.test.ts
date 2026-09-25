@@ -65,7 +65,7 @@ vi.mock("electron", async () => {
     isMinimized() { return false; }
     getBounds() { return this.bounds; }
     setBounds(value: any) { this.bounds = value; }
-    show() {} focus() {} setTitle() {}
+    show() {} focus() {} setTitle() {} setAlwaysOnTop() {} setVisibleOnAllWorkspaces() {}
     close() { if (this.preventClose) this.webContents.emit("will-prevent-unload", {}); else { this.destroyed = true; this.emit("closed"); } }
   }
   return { app, BrowserWindow: Window, ipcMain: { on: (name: string, fn: Function) => state.handlers.set(name, fn), handle: (name: string, fn: Function) => state.handlers.set(name, fn) },
@@ -73,7 +73,9 @@ vi.mock("electron", async () => {
     session: { defaultSession: makeSession(), fromPartition: (key: string) => { if (!state.partitions.has(key)) state.partitions.set(key, makeSession()); return state.partitions.get(key); } },
     Menu: { buildFromTemplate: (template: unknown) => template, setApplicationMenu: vi.fn() },
     dialog: { showErrorBox: vi.fn() }, net: { fetch: vi.fn(), request: state.request, isOnline: () => true },
-    powerMonitor: new EventEmitter(), powerSaveBlocker: {}, globalShortcut: {}, shell: {}, screen: {}, systemPreferences: {}, Tray: class {}, Notification: class {}, nativeImage: {}, desktopCapturer: {},
+    powerMonitor: new EventEmitter(), powerSaveBlocker: {}, globalShortcut: {}, shell: {},
+    screen: { getPrimaryDisplay: () => ({ workArea: { x: 0, y: 0, width: 1440, height: 900 } }) },
+    systemPreferences: {}, Tray: class {}, Notification: class {}, nativeImage: {}, desktopCapturer: {},
   };
 });
 const local: AccountTarget = { kind: "local", appUrl: "http://localhost:3003", apiUrl: "http://localhost:4000", auth: "pkce" };
@@ -106,6 +108,15 @@ afterEach(() => { vi.unstubAllEnvs(); });
 const sender = () => ({ sender: state.windows.at(-1).webContents, senderFrame: state.windows.at(-1).webContents.mainFrame });
 
 describe("[COMP:app-desktop/main] deployment switching", () => {
+  it("keeps the recorder overlay in the active deployment session", () => {
+    const main = state.windows[0];
+    state.handlers.get("Use Brian:recording-state")!({}, true);
+    const overlay = state.windows[1];
+
+    expect(overlay.options.webPreferences.session).toBe(main.options.webPreferences.session);
+    expect(overlay.webContents.loadURL).toHaveBeenCalledWith(`${local.appUrl}/recorder-overlay`);
+  });
+
   it("switches local to cloud and back without restarting, preserving sessions and isolated caches", async () => {
     const first = state.windows[0];
     const key = deploymentAccountKey({ target: cloud, tokens: tokens("cloud") });

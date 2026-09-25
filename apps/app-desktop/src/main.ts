@@ -1209,6 +1209,7 @@ function showRecorderOverlay(): void {
     alwaysOnTop: true,
     show: false,
     webPreferences: {
+      session: targetSession(),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
