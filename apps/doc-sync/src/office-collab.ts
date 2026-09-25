@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto'
 import * as Y from 'yjs'
 import {
   encodeOfficeState,
+  documentSuggestionWasApplied,
   officeStateVector,
   preflightOfficeCandidate,
   replaceOfficeSnapshot,
@@ -72,4 +73,25 @@ export async function storeOfficeSnapshot(params: {
     ],
   )
   return { snapshot, hash, baseVersion: rows[0]?.baseVersion ?? 0 }
+}
+
+/** Receipt lookup never opens/disconnects a writer connection or persists state. */
+export async function readOfficeSuggestionStatus(params: {
+  artifactId: string
+  suggestionId: string
+  liveDocument: () => Y.Doc | undefined
+  query: SysQuery
+}): Promise<boolean> {
+  const live = params.liveDocument()
+  if (live) return documentSuggestionWasApplied(live, params.suggestionId)
+  const update = await loadOfficeUpdate(params)
+  // A live document may have appeared while the durable read was in flight.
+  const current = params.liveDocument()
+  if (current) return documentSuggestionWasApplied(current, params.suggestionId)
+  if (!update) return false
+  const restored = new Y.Doc()
+  try {
+    Y.applyUpdate(restored, update)
+    return documentSuggestionWasApplied(restored, params.suggestionId)
+  } finally { restored.destroy() }
 }

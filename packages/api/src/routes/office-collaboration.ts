@@ -34,6 +34,9 @@ export type OfficeCollaborationRouteDeps = {
   createSuggestion(params: { userId: string; workspaceId: string; artifactId: string; threadId?: string; baseVersionId: string; proposedByType: 'user' | 'assistant'; proposedByAssistantId?: string; commandBatch: unknown; affectedObjectIds: string[] }): Promise<{ id: string }>
   decideSuggestion(params: { userId: string; suggestionId: string; decision: 'accepted' | 'rejected' | 'conflicted'; expectedStatus?: 'open' | 'conflicted' }): Promise<boolean>
   applySuggestion(params: { artifactId: string; suggestionId: string; command: z.infer<typeof OfficeCommandSchema> }): Promise<'applied' | 'conflict'>
+  /** Source-backed batches fail closed when their evidence verifier is absent. */
+  verifyEvidenceSuggestion?(userId: string, suggestionId: string, command: z.infer<typeof OfficeCommandSchema>): Promise<boolean>
+  suggestionAlreadyApplied?(artifactId: string, suggestionId: string): Promise<boolean>
   service: OfficeToolPort
 }
 
@@ -193,7 +196,18 @@ export function officeCollaborationRoutes(deps: OfficeCollaborationRouteDeps): R
     if (body.data.decision === 'accepted') {
       const command = OfficeCommandSchema.safeParse(suggestion.commandBatch)
       if (!command.success) return void res.status(409).json({ error: 'suggestion_invalid' })
-      const applied = await deps.applySuggestion({ artifactId: suggestion.artifactId, suggestionId, command: command.data })
+      let alreadyApplied = false
+      if (command.data.kind === 'batch' && command.data.expectedSnapshotHash) {
+        let verified = false
+        try { verified = await deps.verifyEvidenceSuggestion?.(userId, suggestionId, command.data) ?? false } catch { /* Fail closed; never expose source or provider details. */ }
+        if (!verified) {
+          // Repair a lost acceptance acknowledgement without authorizing another
+          // write against changed or revoked evidence. This query cannot mutate.
+          try { alreadyApplied = await deps.suggestionAlreadyApplied?.(suggestion.artifactId, suggestionId) ?? false } catch { /* No receipt is not permission to apply. */ }
+          if (!alreadyApplied) return void res.status(409).json({ error: 'suggestion_evidence_unavailable' })
+        }
+      }
+      const applied = alreadyApplied ? 'applied' : await deps.applySuggestion({ artifactId: suggestion.artifactId, suggestionId, command: command.data })
       if (applied === 'conflict') {
         await deps.decideSuggestion({ userId, suggestionId, decision: 'conflicted', expectedStatus: suggestion.status })
         return void res.status(409).json({ error: 'suggestion_conflict' })

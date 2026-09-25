@@ -1,9 +1,9 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import * as Y from 'yjs'
 import type { DocumentSnapshot } from '@use-brian/office-model'
-import { applyDocumentCommand, getDocumentFragment, yDocToSnapshot } from '@use-brian/office-model'
+import { applyOfficeSuggestion, officeSnapshotPreconditionHash, SpreadsheetSnapshotSchema, documentSuggestionWasApplied, getDocumentFragment, yDocToSnapshot } from '@use-brian/office-model'
 import { parseSyncDocumentName } from '../document-router.js'
-import { loadOfficeUpdate, officeSnapshotUpdate, replaceLiveOfficeSnapshot, storeOfficeSnapshot } from '../office-collab.js'
+import { loadOfficeUpdate, readOfficeSuggestionStatus, officeSnapshotUpdate, replaceLiveOfficeSnapshot, storeOfficeSnapshot } from '../office-collab.js'
 import type { SysQuery } from '../persistence.js'
 
 const id = (suffix: number): string => `00000000-0000-4000-8000-${suffix.toString().padStart(12, '0')}`
@@ -24,6 +24,54 @@ const snapshot: DocumentSnapshot = {
 }
 
 describe('[COMP:doc-sync/office-collab] Generic Office collaboration routing', () => {
+  it('accepts and persists a spreadsheet suggestion and its applied receipt together', async () => {
+    const { sections: _sections, ...common } = snapshot
+    const sheet = SpreadsheetSnapshotSchema.parse({ ...common, family: 'spreadsheet', activeSheetId: id(30), worksheets: [{
+      id: id(30), name: 'Evidence', cells: [{ id: id(31), address: 'A1', valueType: 'string', value: '', style: {}, locked: false }],
+      merges: [], rowDimensions: [], columnDimensions: [], freeze: { rows: 0, columns: 0 }, images: [], validations: [], conditionalFormats: [],
+      print: { margins: { leftIn: 0, rightIn: 0, topIn: 0, bottomIn: 0, headerIn: 0, footerIn: 0 } },
+    }] })
+    const doc = new Y.Doc()
+    Y.applyUpdate(doc, officeSnapshotUpdate(sheet))
+    const envelope = { artifactId: sheet.artifactId, baseVersion: 0, actor: { type: 'assistant' as const, id: id(20) }, origin: 'ai' as const }
+    const command = { ...envelope, kind: 'batch' as const, commandId: id(32), expectedSnapshotHash: officeSnapshotPreconditionHash(sheet), commands: [{ ...envelope, kind: 'setSpreadsheetCell' as const, commandId: id(33), sheetId: id(30), cellId: id(31), address: 'A1', valueType: 'string' as const, value: '00123' }] }
+    applyOfficeSuggestion(doc, command, id(34))
+    let stored: Buffer | undefined
+    const query: SysQuery = async (_sql, params) => { stored = params[2] as Buffer; return [{ baseVersion: 0 }] as never[] }
+    const receipt = await storeOfficeSnapshot({ artifactId: sheet.artifactId, ydoc: doc, query })
+    expect(receipt.snapshot).toMatchObject({ worksheets: [{ cells: [{ value: '00123' }] }] })
+    const restored = new Y.Doc()
+    Y.applyUpdate(restored, stored!)
+    expect(documentSuggestionWasApplied(restored, id(34))).toBe(true)
+    const before = Y.encodeStateAsUpdate(restored)
+    applyOfficeSuggestion(restored, command, id(34))
+    expect(Y.encodeStateAsUpdate(restored)).toEqual(before)
+    expect(() => applyOfficeSuggestion(restored, { ...command, commandId: id(36) }, id(35))).toThrow(/precondition changed/)
+    expect(Y.encodeStateAsUpdate(restored)).toEqual(before)
+  })
+
+  it('reads receipt status without transactions, updates, or writes; prefers live state', async () => {
+    const doc = new Y.Doc()
+    const before = Y.encodeStateAsUpdate(doc)
+    const shared = doc.share.size
+    const updates = vi.fn()
+    doc.on('update', updates)
+    const query = vi.fn(async () => { throw new Error('must not query with live state') })
+    expect(await readOfficeSuggestionStatus({ artifactId: id(1), suggestionId: id(34), liveDocument: () => doc, query })).toBe(false)
+    expect(doc.share.size).toBe(shared)
+    expect(Y.encodeStateAsUpdate(doc)).toEqual(before)
+    expect(query).not.toHaveBeenCalled()
+    doc.getMap<boolean>('appliedSuggestionIds').set(id(34), true)
+    updates.mockClear()
+    const accepted = Y.encodeStateAsUpdate(doc)
+    expect(await readOfficeSuggestionStatus({ artifactId: id(1), suggestionId: id(34), liveDocument: () => doc, query })).toBe(true)
+    expect(updates).not.toHaveBeenCalled()
+    expect(Y.encodeStateAsUpdate(doc)).toEqual(accepted)
+    const durable: SysQuery = async (sql) => { expect(sql).toMatch(/^SELECT /); return [{ ydoc: Buffer.from(accepted) }] as never[] }
+    expect(await readOfficeSuggestionStatus({ artifactId: id(1), suggestionId: id(34), liveDocument: () => undefined, query: durable })).toBe(true)
+    expect(Y.encodeStateAsUpdate(doc)).toEqual(accepted)
+  })
+
   it('keeps historical bare page names and recognizes explicit namespaces', () => {
     expect(parseSyncDocumentName('page-id')).toEqual({ kind: 'page', id: 'page-id', legacyBareName: true })
     expect(parseSyncDocumentName('page:page-id')).toEqual({ kind: 'page', id: 'page-id', legacyBareName: false })
@@ -89,7 +137,7 @@ describe('[COMP:doc-sync/office-collab] Generic Office collaboration routing', (
     const secondClient = new Y.Doc()
     Y.applyUpdate(firstClient, Y.encodeStateAsUpdate(authoritative))
     Y.applyUpdate(secondClient, Y.encodeStateAsUpdate(authoritative))
-    applyDocumentCommand(authoritative, {
+    applyOfficeSuggestion(authoritative, {
       artifactId: snapshot.artifactId,
       baseVersion: 0,
       actor: { type: 'assistant', id: id(20) },
@@ -99,7 +147,7 @@ describe('[COMP:doc-sync/office-collab] Generic Office collaboration routing', (
       sectionId: id(5),
       index: 0,
       node: { id: id(22), kind: 'paragraph', styleName: 'Body', alignment: 'start', runs: [{ id: id(23), text: 'Accepted once', style: { fontFamily: 'Arial', fontSizePt: 11, bold: false, italic: false, underline: false, strike: false, color: '#111111' } }] },
-    }, 'suggestion', id(24))
+    }, id(24))
     Y.applyUpdate(firstClient, Y.encodeStateAsUpdate(authoritative, Y.encodeStateVector(firstClient)))
     Y.applyUpdate(secondClient, Y.encodeStateAsUpdate(authoritative, Y.encodeStateVector(secondClient)))
     expect(yDocToSnapshot(firstClient)).toEqual(yDocToSnapshot(authoritative))
