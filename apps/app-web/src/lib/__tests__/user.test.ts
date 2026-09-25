@@ -1,5 +1,11 @@
 import { afterEach, describe, it, expect, vi } from "vitest";
-import { getUserInfo, selectActiveUser, setUserInfoCache, getInitials } from "@/lib/user";
+import {
+  getInitials,
+  getUserInfo,
+  selectActiveUser,
+  setUserInfoCache,
+  subscribeUserInfo,
+} from "@/lib/user";
 
 afterEach(() => {
   setUserInfoCache(null);
@@ -136,5 +142,23 @@ describe("[COMP:app-web/user] packaged desktop identity", () => {
     });
 
     expect(getUserInfo()).toBeNull();
+  });
+
+  it("notifies mounted surfaces when a refreshed profile gains its photo", () => {
+    const listener = vi.fn();
+    const unsubscribe = subscribeUserInfo(listener);
+    const refreshed = {
+      id: "viewer-1",
+      name: "Sample Viewer",
+      email: "viewer@example.com",
+      avatarUrl: "https://cdn.example/avatar.png",
+    };
+
+    setUserInfoCache(refreshed);
+    expect(listener).toHaveBeenCalledWith(refreshed);
+
+    unsubscribe();
+    setUserInfoCache(null);
+    expect(listener).toHaveBeenCalledOnce();
   });
 });

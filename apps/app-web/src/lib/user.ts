@@ -20,6 +20,7 @@ export type UserInfo = {
 };
 
 let cachedUser: UserInfo | null = null;
+const userInfoListeners = new Set<(info: UserInfo | null) => void>();
 
 export function getUserInfo(): UserInfo | null {
   const bridge = desktopBridge();
@@ -141,10 +142,19 @@ function decodeJwtClaims(token: string): { exp?: number; sub?: string } | null {
 
 export function setUserInfoCache(info: UserInfo | null): void {
   cachedUser = info;
+  for (const listener of userInfoListeners) listener(info);
 }
 
 export function getCachedUserInfo(): UserInfo | null {
   return cachedUser;
+}
+
+/** Subscribe UI that must repaint when a profile refresh replaces the cache. */
+export function subscribeUserInfo(
+  listener: (info: UserInfo | null) => void,
+): () => void {
+  userInfoListeners.add(listener);
+  return () => userInfoListeners.delete(listener);
 }
 
 export function getInitials(nameOrEmail: string): string {

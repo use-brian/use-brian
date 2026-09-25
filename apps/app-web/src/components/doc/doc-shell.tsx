@@ -76,7 +76,7 @@ import {
   type NameOrigin,
   type ViewMetadata,
 } from "@/lib/api/views";
-import { getUserInfo } from "@/lib/user";
+import { getUserInfo, subscribeUserInfo } from "@/lib/user";
 import { loadSurfaceCache, readSurfaceCache } from "@/lib/surface-cache";
 import { docPageCacheKey } from "@/lib/surface-prefetch";
 import { buildBreadcrumb } from "@/lib/sidebar-tree";
@@ -306,15 +306,19 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
   // longer flashes an empty "Loading…" pane or rebuilds the editor from blank.
   const pageView = activeView && activeView.id === urlViewId ? activeView : null;
 
-  // Local user identity for the collaboration cursor + presence avatar.
+  // Local user identity for the collaboration cursor + presence avatar. The
+  // subscription matters for upgraded desktop sessions: Settings refreshes an
+  // older native profile to recover its uploaded photo after this shell has
+  // mounted, and the live presence face must repaint without an app restart.
+  const [currentUserInfo, setCurrentUserInfo] = useState(getUserInfo);
+  useEffect(() => subscribeUserInfo(setCurrentUserInfo), []);
   const user = useMemo(() => {
-    const info = getUserInfo();
     return {
-      id: info?.id ?? "me",
-      name: info?.name?.trim() || info?.email || "You",
-      avatarUrl: info?.avatarUrl,
+      id: currentUserInfo?.id ?? "me",
+      name: currentUserInfo?.name?.trim() || currentUserInfo?.email || "You",
+      avatarUrl: currentUserInfo?.avatarUrl,
     };
-  }, []);
+  }, [currentUserInfo]);
 
   // Desktop sidebar collapse (`sidebarCollapsed` / `setSidebarCollapsed`) lives
   // in the hoisted provider — the sidebar it sizes is now in `WorkspaceChrome`,
