@@ -685,6 +685,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   /** The id the next turn should resume. Kept in a ref so the send closure
    *  reads the value at send time, not at render time. */
   const sessionIdRef = useRef<string | null>(null);
+  // Upload and first send share this identity until the server ID is adopted.
+  const freshChannelIdRef = useRef<string | null>(null);
   /** The thread currently painted. Guards the hydrate effect from re-fetching
    *  (and wiping a live stream) when WE are the ones who just put the id in
    *  the URL — a fresh session adopts its server id mid-turn. */
@@ -862,7 +864,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const seededRef = useRef<ChatLocation | null>(null);
 
   const selectSession = useCallback(
-    (id: string | null, nextView: ChatView = view) => {
+    (id: string | null, nextView: ChatView = view, preserveUpload = false) => {
+      // Navigation intent wins immediately, before the URL render catches up.
+      if (!preserveUpload) freshChannelIdRef.current = null;
       // A user-driven move always outranks a restore still catching up.
       seededRef.current = null;
       setRestoring(null);
@@ -1075,6 +1079,33 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const att = useFileAttachments(
     () => sessionIdRef.current ?? undefined,
     {
+      getUploadContext: () => {
+        if (sessionIdRef.current || view !== "personal") return undefined;
+        if (!activeAssistant) throw new Error(t.errorGeneric);
+        const assistantId = activeAssistant.id;
+        const channelId = freshChannelIdRef.current ??= crypto.randomUUID();
+        return {
+          fields: {
+            workspaceId,
+            assistantId,
+            channelId,
+            appOrigin: APP_ORIGIN,
+            // Explicit null means company-wide, not assistant-default scope.
+            contextGroupId: pickedContextGroupId ?? "null",
+            contextProjectId: pickedContextProjectId ?? "null",
+          },
+          onSessionReady: (id: string) => {
+            if (freshChannelIdRef.current !== channelId) return;
+            // Adopt before routing so hydration does NOT clear the draft/tray.
+            sessionIdRef.current = id;
+            hydratedRef.current = id;
+            sessionAssistantRef.current.set(id, assistantId);
+            chat.setSession(id);
+            selectSession(id, "personal", true);
+            dispatchChatSessionsRefresh(workspaceId);
+          },
+        };
+      },
       onRouteMedia: activeAssistant
         ? async (files) => {
             for (const file of files) {
@@ -1085,6 +1116,10 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         : undefined,
     },
   );
+  useEffect(() => {
+    freshChannelIdRef.current = null;
+    att.clear();
+  }, [workspaceId, view, att.clear]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const drop = useFileDrop((files) => void att.upload(files), {
     disabled: !!pendingQuestion || recordingUpload.busy,
@@ -1212,6 +1247,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     // moves the id, so nothing else clears this.
     setReplyTo(null);
     setSelectionQuote(null);
+    freshChannelIdRef.current = null;
     hydratedRef.current = activeSessionId;
     sessionIdRef.current = activeSessionId;
     // A personal session opened from the outside (deep link, rail row,
@@ -1837,6 +1873,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     stream.abort();
     hydratedRef.current = null;
     sessionIdRef.current = null;
+    freshChannelIdRef.current = null;
     setError(null);
     setInput("");
     setOpenDocument(null);
@@ -2233,7 +2270,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     // sticky-channel fallback reunites every later turn of this conversation
     // on the row that first turn creates, even if the `session` event is
     // dropped — so we never fragment one chat across several rail rows.
-    const channelId = sessionIdRef.current ? undefined : crypto.randomUUID();
+    const channelId = sessionIdRef.current
+      ? undefined
+      : (freshChannelIdRef.current ??= crypto.randomUUID());
 
     const localUserId = `local-${Date.now()}`;
     const userAttachments: MessageAttachmentRef[] = usesComposerTray
@@ -3528,7 +3567,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
    *  single-assistant workspace degrades to the static label. */
   const interlocutorControl =
     activeAssistant &&
-    (isAssistantPickerLive({
+    (!att.uploading && isAssistantPickerLive({
       hasOpenSession: !!activeSessionId,
       paneIsRoom,
       rosterSize: assistants.length,
@@ -4119,6 +4158,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 projectId={pickedContextProjectId}
                 onTeamChange={setPickedContextGroupId}
                 onProjectChange={setPickedContextProjectId}
+                disabled={att.uploading}
               />
             </div>
             <div className="w-full">{composerBox}</div>

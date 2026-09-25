@@ -46,6 +46,41 @@ describe("[COMP:app-web/chat-parity] Chat surface parity", () => {
     expect(source).toContain("attachedRecordingIds: turnRecordingIds");
   });
 
+  it("routes fresh uploads with the same stable identity as the first send", () => {
+    const upload = source.slice(source.indexOf("getUploadContext: () =>"), source.indexOf("onRouteMedia: activeAssistant"));
+    expect(upload).toContain('if (sessionIdRef.current || view !== "personal") return undefined');
+    expect(upload).toContain("if (!activeAssistant) throw new Error(t.errorGeneric)");
+    expect(upload).toContain("const channelId = freshChannelIdRef.current ??= crypto.randomUUID()");
+    for (const field of ["workspaceId,", "assistantId,", "channelId,", "appOrigin: APP_ORIGIN", "contextGroupId: pickedContextGroupId", "contextProjectId: pickedContextProjectId"]) {
+      expect(upload).toContain(field);
+    }
+    expect(source).toMatch(/const channelId = sessionIdRef\.current\s*\? undefined\s*:\s*\(freshChannelIdRef\.current \?\?= crypto\.randomUUID\(\)\)/);
+  });
+
+  it("adopts upload sessions before navigation without rehydrating away the draft", () => {
+    const adoption = source.slice(source.indexOf("onSessionReady: (id: string) =>"), source.indexOf("onRouteMedia: activeAssistant"));
+    expect(adoption).toMatch(/if \(freshChannelIdRef\.current !== channelId\) return;[\s\S]*sessionIdRef\.current = id;[\s\S]*hydratedRef\.current = id;[\s\S]*sessionAssistantRef\.current\.set\(id, assistantId\);[\s\S]*chat\.setSession\(id\);[\s\S]*selectSession\(id, "personal", true\);[\s\S]*dispatchChatSessionsRefresh\(workspaceId\)/);
+    expect(source).toMatch(/if \(activeSessionId === hydratedRef\.current\) return;[\s\S]*att\.clear\(\)/);
+  });
+
+  it("invalidates the upload channel synchronously on user navigation unless preservation is explicit", () => {
+    const navigation = source.slice(source.indexOf("const selectSession = useCallback("), source.indexOf("const restoreAttemptedRef"));
+    expect(navigation).toContain("(id: string | null, nextView: ChatView = view, preserveUpload = false)");
+    expect(navigation).toMatch(/if \(!preserveUpload\) freshChannelIdRef\.current = null;[\s\S]*router\.replace\(buildHref\(id, nextView\)/);
+  });
+
+  it("invalidates pending uploads on pane changes and freezes routing picks while uploading", () => {
+    expect(source).toMatch(/useEffect\(\(\) => \{\s*freshChannelIdRef\.current = null;\s*att\.clear\(\);\s*\}, \[workspaceId, view, att\.clear\]\)/);
+    const navigation = source.slice(source.indexOf("if (activeSessionId === hydratedRef.current) return;"), source.indexOf("const cached = readCachedTranscript<SurfaceMessage>"));
+    expect(navigation).toContain("att.clear()");
+    expect(navigation).toContain("freshChannelIdRef.current = null");
+    const reset = source.slice(source.indexOf("const resetPane = useCallback("), source.indexOf("const startNewChat = useCallback("));
+    expect(reset).toContain("freshChannelIdRef.current = null");
+    expect(reset).toContain("att.clear()");
+    expect(source).toContain("!att.uploading && isAssistantPickerLive({");
+    expect(source).toMatch(/onTeamChange=\{setPickedContextGroupId\}\s*onProjectChange=\{setPickedContextProjectId\}\s*disabled=\{att\.uploading\}/);
+  });
+
   it("carries ready files and previews through a turn and restored history", () => {
     expect(source).toContain("const turnFileIds = override?.fileIds ?? att.fileIds()");
     expect(source).toContain("{ fileIds: turnFileIds }");
