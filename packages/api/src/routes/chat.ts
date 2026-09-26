@@ -5419,6 +5419,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             // Connector-action audit — built once above, shared with the MCP
             // inject (Gmail audit). See `connector-actions.md`.
             connectorActionAudit,
+            ...(feedTurnContext ? {feedDraft:{revision:feedTurnContext.reference.revision,wholePost:!feedTurnContext.reference.target||feedTurnContext.reference.target.kind==='post'}} : {}),
           })
         } catch (err) {
           console.error('[chat] extra tool injection failed:', err)

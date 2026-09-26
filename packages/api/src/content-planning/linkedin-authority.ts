@@ -12,3 +12,7 @@ export async function assertFeedLinkedInDestination(actor: FeedActor, scope: Fee
 let publish:((actor:FeedActor,previewHash:string)=>Promise<unknown>)|undefined
 export function setFeedLinkedInPublisher(port:NonNullable<typeof publish>){publish=port}
 export function feedLinkedInPublisher(){return publish}
+type Recovery = {status(actor:FeedActor):Promise<unknown>;reconcile(actor:FeedActor,input:{expectedRevision:number;deliveryId:string;url:string}):Promise<unknown>}
+let recovery:Recovery|undefined
+export function setFeedLinkedInRecovery(port:Recovery){recovery=port}
+export function feedLinkedInRecovery(){return recovery}

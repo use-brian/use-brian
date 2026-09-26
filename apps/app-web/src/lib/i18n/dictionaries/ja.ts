@@ -2,6 +2,20 @@ import type { Dictionary } from "./en";
 
 export const ja: Dictionary = {
   feedLinkedIn: {
+    help: {
+      "media_link_conflict": "リンク投稿にはサムネイルを1枚指定できます。添付画像を削除するか「投稿」を選択してください。",
+      "article_fields": "投稿の詳細に有効な記事URLとタイトルを入力してください。",
+      "newsletter_fields": "ニュースレター名、URL、記事タイトルを入力してください。",
+      "text_limit": "投稿を表示文字数3,000文字以内にしてください。",
+      "unfinished_slot": "すべての未完了スロットを完成または削除してください。",
+      "empty_post": "テキストまたは画像を追加してください。",
+      "media_limit": "画像を20枚以内にしてください。",
+      "duplicate_media": "重複する画像を削除してください。",
+      "unsupported_node": "未対応の内容を置き換えてください。",
+      "unsafe_url": "認証情報を含まない有効なHTTPまたはHTTPSリンクを使用してください。",
+      "invalid_thread": "LinkedInは1つの投稿セグメントに対応します。",
+      "inactive": "この投稿者のAPI公開は有効になっていません。手動の準備は利用できます。"
+},
     "title": "LinkedIn",
     "mode": "形式",
     "post": "投稿",

@@ -121,7 +121,7 @@ import { DraftCommentPanel, type FeedCommentComposer } from './draft-comment-pan
 import { FeedReview, useFeedReviewActions } from './feed-review';
 import { FeedLearnedDecisions, useFeedLearningActions } from './feed-learned-decisions';
 import { useFeedLearning, useFeedCollaboration } from '@/lib/feed-collaboration';
-import { createFeedAnchor, feedCompositionHtml, projectFeed } from '@use-brian/doc-model';
+import { createFeedAnchor, feedCompositionHtml, projectFeed, projectFeedLinkedIn } from '@use-brian/doc-model';
 import type { FeedCommand, FeedEdit } from '@use-brian/shared';
 import { queueFeedCommands, flushFeedWorkingCopies } from '@/lib/offline/feed-offline';
 
@@ -811,7 +811,11 @@ function PostPane({
                 permalink.trim() ? { permalink: permalink.trim() } : {},
               );
       if (!result.ok) {
-        setError(result.error ?? te.actionFailed);
+        if(platform==='linkedin'){
+          const code='code' in result&&typeof result.code==='string'?result.code:result.error;
+          setError(code==='delivery_ambiguous'?linkedinCopy.unknownOutcome:code==='reconnect_required'?linkedinCopy.reconnect:['page_access_lost','capability_unavailable'].includes(code??'')?linkedinCopy.denied:linkedinCopy.failed);
+          notifyFeedPostsChanged();
+        }else setError(result.error ?? te.actionFailed);
         return;
       }
       if ("error" in result && typeof result.error === "string") {
@@ -819,6 +823,9 @@ function PostPane({
       }
       notifyFeedPostsChanged();
       await load();
+    } catch(error) {
+      if(platform!=='linkedin')throw error;
+      setError(linkedinCopy.unknownOutcome);notifyFeedPostsChanged();
     } finally {
       setBusy(false);
     }
@@ -937,12 +944,13 @@ function PostPane({
   }
   const canonicalProjection = localPost?.content.composition ? projectFeed(localPost.content.composition) : null;
   const missingSlots = canonicalProjection?.missingSlots ?? [];
-  const compositionValid = postFormat === "thread"
+  const linkedinProjection=platform==='linkedin'&&localPost?.content.composition?projectFeedLinkedIn(localPost.content.composition,localPost.content.linkedin,localPost.content):null;
+  const compositionValid = linkedinProjection ? linkedinProjection.blockers.length===0 : postFormat === "thread"
     ? threadValid
     : postFormat === "article"
       ? Boolean(compositionText.trim() && ((canonicalProjection?.inlineImages.length ?? 0) > 0 || articleUrlValid && article.title.trim()))
       : Boolean(compositionText.trim() && !counterState(compositionText, platform).over);
-  const compositionDirty = compositionHasChanges({
+  const compositionDirty = platform==='linkedin'&&structured&&committed?.canonicalRevision!==undefined ? committed.canonicalRevision!==localPost?.revision : compositionHasChanges({
     format: postFormat,
     text: compositionText,
     threadSegments,
@@ -1144,7 +1152,7 @@ function PostPane({
               </section>
             ) : null}
 
-            {platform==='linkedin' && structured && localPost ? <LinkedInPublishing workspaceId={workspaceId} assistantId={assistantId} sessionId={sessionId} revision={localPost.revision} content={localPost.content} ready={status==='ready'} disabled={Boolean(remoteBlocked)||readOnly||busy} onCommand={runCommands} onPreview={setLinkedinPreview} onRefresh={()=>{void collaboration.refresh();void load();}} onPromotion={async url=>{
+            {platform==='linkedin' && structured && localPost ? <LinkedInPublishing workspaceId={workspaceId} workspaceName={workspace.name} assistantId={assistantId} sessionId={sessionId} revision={localPost.revision} content={localPost.content} ready={status==='ready'} readOnly={readOnly} disabled={Boolean(remoteBlocked)||!workspace.canDraft||busy} onCommand={runCommands} onPreview={setLinkedinPreview} onRefresh={()=>{void collaboration.refresh();void load();}} onPromotion={async url=>{
               const result=await linkedinRequest<{sessionId:string}>(`${linkedinDraftPath(assistantId,sessionId)}/linkedin-promotion`,{expectedRevision:localPost.revision,sessionId:crypto.randomUUID()});
               router.push(feedPostPath(workspaceId,'linkedin',result.sessionId));
             }}/> : null}

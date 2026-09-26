@@ -298,6 +298,9 @@ export function selfHostFeedManagedDistributionRoutes(
     res.status(response.status).json(responseBody)
   }
 
+  const linkedinActor=(req:Request)=>({userId:req.userId!,assistantId:String(req.params.assistantId),sessionId:String(req.params.sessionId),kind:'user' as const})
+  router.get('/:assistantId/draft-sessions/:sessionId/linkedin-deliveries',async(req,res)=>{try{if(!req.userId){res.sendStatus(401);return}res.json(await createLocalLinkedInCloud(options).status(linkedinActor(req)))}catch{res.status(409).json({code:'capability_unavailable'})}})
+  router.post('/:assistantId/draft-sessions/:sessionId/linkedin-reconcile',async(req,res)=>{try{if(!req.userId){res.sendStatus(401);return}res.json(await createLocalLinkedInCloud(options).reconcile(linkedinActor(req),req.body))}catch{res.status(409).json({code:'capability_unavailable'})}})
   const manageLinkedIn=async(req:Request,res:Response)=>{if(!req.userId){res.sendStatus(401);return}try{const assistantId=String(req.params.assistantId),assistant=await findAssistantById(assistantId);if(!assistant?.workspaceId||!(await requireWorkspaceMember(req.userId,assistant.workspaceId,res,true)))return;res.json(await createLocalLinkedInCloud(options).manage(assistant.workspaceId,assistantId,req.body,req.method==='DELETE'?String(req.params.destinationId):undefined))}catch{res.status(409).json({code:'capability_unavailable'})}}
   router.post('/:assistantId/linkedin/destinations',manageLinkedIn)
   router.delete('/:assistantId/linkedin/destinations/:destinationId',manageLinkedIn)

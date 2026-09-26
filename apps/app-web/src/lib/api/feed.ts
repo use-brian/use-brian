@@ -674,6 +674,7 @@ export type FeedDraftSessionSummary = {
  * (`GET /:assistantId/draft-sessions/:sessionId/saved-drafts`).
  */
 export type FeedSavedDraft = {
+  canonicalRevision?: number;
   id: string;
   /** Images bound to this draft (feed-revamp-depth D32). */
   media?: PostMedia[];

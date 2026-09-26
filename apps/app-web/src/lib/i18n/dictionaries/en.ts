@@ -15,6 +15,20 @@ import type { BuiltinToolGroupId } from "@use-brian/shared/builtin-connectors";
 
 export const en = {
   feedLinkedIn: {
+    help: {
+      "media_link_conflict": "A link post supports one thumbnail, not image attachments. Remove the attachments or choose Post.",
+      "article_fields": "Add a valid article URL and title in the post details.",
+      "newsletter_fields": "Add the newsletter name, URL and edition title.",
+      "text_limit": "Shorten the post to 3,000 visible characters.",
+      "unfinished_slot": "Complete or remove every unfinished slot before preparing this edition.",
+      "empty_post": "Add text or an image.",
+      "media_limit": "Reduce the image count to 20.",
+      "duplicate_media": "Remove duplicate image attachments.",
+      "unsupported_node": "Replace unsupported content before publishing.",
+      "unsafe_url": "Use valid HTTP or HTTPS links without embedded credentials.",
+      "invalid_thread": "LinkedIn requires one post segment.",
+      "inactive": "API publishing is not enabled for this author. Manual preparation remains available."
+},
     "title": "LinkedIn",
     "mode": "Format",
     "post": "Post",

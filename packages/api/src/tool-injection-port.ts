@@ -36,6 +36,8 @@ export interface ExtraToolContext {
    * connector actions casts it to its own deps type.
    */
   connectorActionAudit?: unknown
+  /** Resolved canonical Feed selection; absent outside a structured draft turn. */
+  feedDraft?: { revision: number; wholePost: boolean }
 }
 
 /** Inject extra tools for a turn. Composition root wires the host impl; open = unset. */

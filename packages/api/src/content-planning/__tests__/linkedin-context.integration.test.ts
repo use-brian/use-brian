@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { afterAll, describe, expect, it } from 'vitest'
+import { afterAll, describe, expect, it, vi } from 'vitest'
 import type { FeedLinkedInContext } from '@use-brian/shared'
 import { getPool } from '../../db/client.js'
 import { postWorkingCopiesStore } from '../../db/post-working-copies.js'
@@ -72,5 +72,28 @@ describe('[COMP:feed/linkedin-context] real manual edition completion',()=>{
   expect((await readLinkedInManualReceipt(f.actor))?.verification).toBe('operator_confirmed')
   const next=await createLinkedInPromotion(f.actor,3,randomUUID()),copy=(await getFeedCollaboration({...f.actor,sessionId:next.sessionId})).copy!
   expect(next.sessionId).not.toBe(f.actor.sessionId);expect(copy.content.linkedin?.mode).toBe('link_post');expect(copy.content.article?.sourceUrl).toBe(input.url);expect(await listFeedConfirmations({...f.actor,sessionId:next.sessionId})).toEqual([])
+ })
+})
+
+
+import {createLocalLinkedInCloud} from '../linkedin-cloud.js'
+import {readLinkedInPreview} from '../linkedin-payload.js'
+import type {SelfHostFeedCloudLinkStore} from '../../db/self-host-feed-cloud-link-store.js'
+describe('[COMP:feed/linkedin-cloud-link] local ambiguous receipt boundary',()=>{
+ it('leaves the ready draft unresolved when the cloud create outcome is unknown',async()=>{
+  const f=await fixture(),destinationId=randomUUID(),reservationId=randomUUID()
+  const target={destinationId,authorUrn:'urn:li:person:fixture',displayName:'Writer',authorKind:'person',canPublishAs:true,capabilities:{post:true,link_post:true,newsletter_edition:false}}
+  const fetcher=vi.fn(async(input:Parameters<typeof fetch>[0])=>{const url=String(input);if(url.endsWith('/targets'))return Response.json([target]);if(url.endsWith('/reserve'))return Response.json({reservationId,state:'reserved'});throw new Error('connection reset after create')})
+  const store={getWithCredential:async()=>({link:{status:'linked',assistantId:f.actor.assistantId,cloudBaseUrl:'https://cloud.example'},credential:{accessToken:'fixture'}})} as unknown as SelfHostFeedCloudLinkStore
+  const cloud=createLocalLinkedInCloud({store,fetchImpl:fetcher})
+  setFeedLinkedInTargetAuthority(cloud.authorize)
+  await executeFeedCommands(f.actor,{expectedRevision:2,mutationId:randomUUID(),commands:[{kind:'linkedin',metadata:{version:1,mode:'post',destinationId,authorKind:'person'}}]})
+  const preview=await readLinkedInPreview(f.actor,3)
+  await confirmFeedPost(f.actor,{expectedRevision:3,mutationId:randomUUID(),locale:'en',linkedinPreviewHash:preview.hash})
+  await executeFeedCommands(f.actor,{expectedRevision:3,mutationId:randomUUID(),commands:[{kind:'release',audience:'public'}]})
+  await pool.query("INSERT INTO content_planning_drafts(assistant_id,session_id,platform,draft_text,status,created_by) VALUES($1,$2,'linkedin','Approved text','ready',$3)",[f.actor.assistantId,f.actor.sessionId,f.actor.userId])
+  await expect(cloud.publish(f.actor,preview.hash)).rejects.toMatchObject({code:'delivery_ambiguous'})
+  expect((await pool.query('SELECT status,posted_permalink FROM content_planning_drafts WHERE session_id=$1',[f.actor.sessionId])).rows[0]).toEqual({status:'ready',posted_permalink:null})
+  expect(fetcher.mock.calls.filter(([url])=>String(url).endsWith('/publish'))).toHaveLength(1)
  })
 })

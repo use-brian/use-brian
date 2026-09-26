@@ -2,6 +2,20 @@ import type { Dictionary } from "./en";
 
 export const zh: Dictionary = {
   feedLinkedIn: {
+    help: {
+      "media_link_conflict": "連結貼文只支援一張縮圖。請移除附件圖片或選擇「貼文」。",
+      "article_fields": "請在貼文詳情中加入有效的文章網址和標題。",
+      "newsletter_fields": "請填寫電子報名稱、網址和文章標題。",
+      "text_limit": "請將貼文縮短至3,000個顯示字元以內。",
+      "unfinished_slot": "請完成或移除所有未完成的欄位。",
+      "empty_post": "請加入文字或圖片。",
+      "media_limit": "請將圖片減至20張以內。",
+      "duplicate_media": "請移除重複圖片。",
+      "unsupported_node": "請替換不支援的內容。",
+      "unsafe_url": "請使用不含內嵌憑證的有效HTTP或HTTPS連結。",
+      "invalid_thread": "LinkedIn需要單一貼文段落。",
+      "inactive": "此身分尚未啟用API發佈。仍可使用手動準備。"
+},
     "title": "LinkedIn",
     "mode": "格式",
     "post": "貼文",

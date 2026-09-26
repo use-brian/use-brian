@@ -2,7 +2,7 @@ import { buildLinkedInPayload, type LinkedInPayload } from './linkedin-payload.j
 /** Atomic editorial finish; provider delivery is a subsequent boundary. [COMP:feed/confirmation-learning] */
 import { randomUUID } from 'node:crypto'
 import type pg from 'pg'
-import { feedConfirmationRequestSchema, type FeedConfirmationRequest, type FeedConfirmationSummary, type FeedLearningScope } from '@use-brian/shared'
+import { feedLinkedInFileIds, feedConfirmationRequestSchema, type FeedConfirmationRequest, type FeedConfirmationSummary, type FeedLearningScope } from '@use-brian/shared'
 import { canonicalFeedValue, walkFeed } from '@use-brian/doc-model'
 import { withFeedTransaction, readFeedCopy, requireFeedComposition, assertFeedFiles, FeedCollaborationError, type FeedActor, type FeedScope, type StructuredFeedContent } from '../db/feed-collaboration-store.js'
 import { appendDecisionEvent } from '../db/decision-event-store.js'
@@ -92,7 +92,7 @@ export async function confirmFeedPost(actor: FeedActor, raw: FeedConfirmationReq
           FROM session_messages m WHERE m.id=ANY($1::uuid[])
         UNION ALL SELECT 'proposal:'||p.id,encode(sha256(convert_to(jsonb_build_object('edits',p.edits,'rationale',p.rationale)::text,'UTF8')),'hex')
           FROM feed_draft_suggestions p WHERE p.id=ANY($2::uuid[])`, [history.messageIds, history.proposals.map(item => item.id)])).rows.map(row => [row.key, row.hash]))
-      const files = [...new Set(revisions.flatMap(row => row.content.schemaVersion === 2 && row.content.composition ? walkFeed(row.content.composition).flatMap(({ node }) => node.type === 'image' ? [node.attrs.fileId] : node.type === 'generationPlaceholder' ? node.attrs.references.flatMap(ref => 'fileId' in ref ? [ref.fileId] : []) : []) : []))]
+      const files = [...new Set([...revisions.flatMap(row=>feedLinkedInFileIds(row.content.linkedin)), ...revisions.flatMap(row => row.content.schemaVersion === 2 && row.content.composition ? walkFeed(row.content.composition).flatMap(({ node }) => node.type === 'image' ? [node.attrs.fileId] : node.type === 'generationPlaceholder' ? node.attrs.references.flatMap(ref => 'fileId' in ref ? [ref.fileId] : []) : []) : [])])]
       history.fileIds = files
       const sourceScopes = (await client.query<{ sensitivity: FeedLearningScope['sensitivity']; compartments: string[]; project_ids: string[] }>('SELECT sensitivity,compartments,project_ids FROM workspace_files WHERE workspace_id=$1 AND id=ANY($2::uuid[])', [access.workspaceId, files])).rows
       const ranks: FeedLearningScope['sensitivity'][] = ['public', 'internal', 'confidential', 'restricted']

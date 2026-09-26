@@ -13,6 +13,20 @@ import type { Dictionary } from "./en";
 
 export const zhCN: Dictionary = {
   feedLinkedIn: {
+    help: {
+      "media_link_conflict": "链接帖子只支持一张缩略图。请移除附件图片或选择“帖子”。",
+      "article_fields": "请在帖子详情中添加有效的文章网址和标题。",
+      "newsletter_fields": "请填写通讯名称、网址和文章标题。",
+      "text_limit": "请将帖子缩短至3,000个显示字符以内。",
+      "unfinished_slot": "请完成或移除所有未完成的字段。",
+      "empty_post": "请添加文字或图片。",
+      "media_limit": "请将图片减少至20张以内。",
+      "duplicate_media": "请移除重复图片。",
+      "unsupported_node": "请替换不支持的内容。",
+      "unsafe_url": "请使用不含嵌入凭据的有效HTTP或HTTPS链接。",
+      "invalid_thread": "LinkedIn需要单个帖子段落。",
+      "inactive": "此身份尚未启用API发布。仍可使用手动准备。"
+},
     "title": "LinkedIn",
     "mode": "格式",
     "post": "帖子",

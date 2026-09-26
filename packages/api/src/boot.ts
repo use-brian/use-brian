@@ -1,5 +1,5 @@
 import {createLocalLinkedInCloud} from './content-planning/linkedin-cloud.js'
-import {setFeedLinkedInTargetAuthority,setFeedLinkedInPublisher} from './content-planning/linkedin-authority.js'
+import {setFeedLinkedInTargetAuthority,setFeedLinkedInPublisher,setFeedLinkedInRecovery} from './content-planning/linkedin-authority.js'
 import { createFeedReviewContextLoader } from './content-planning/review-context.js'
 /**
  * bootOpenApi — the OPEN composition root for the Use Brian HTTP API.
@@ -5309,6 +5309,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     const linkedinCloud = createLocalLinkedInCloud({store:feedCloudStore})
     setFeedLinkedInTargetAuthority(linkedinCloud.authorize)
     setFeedLinkedInPublisher(linkedinCloud.publish)
+    setFeedLinkedInRecovery(linkedinCloud)
     feedCloudPublisher = createSelfHostFeedCloudPublisher({ store: feedCloudStore })
     app.use(
       '/api/self-host-feed',

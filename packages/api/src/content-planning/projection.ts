@@ -103,6 +103,7 @@ export async function exportFeedArticle(actor: FeedActor, expectedRevision: numb
     const block=walkFeed(saved.content.composition).find(r=>r.node.type==='image'&&r.node.attrs.fileId===media.fileId)
     manifest.push({fileId:media.fileId,path:assetPath(media.fileId,media.mimeType),alt:media.alt??'',blockId:block?.node.attrs.id,placement:block?.node.type==='image'?block.node.attrs.placement:'attachment'})
   }
+  if(cover&&!manifest.some(asset=>asset.placement==='cover')){const body=manifest.find(asset=>asset.fileId===cover);if(body)manifest.unshift({...body,alt:saved.content.linkedin?.newsletter?.coverCaption??'',placement:'cover',blockId:undefined})}
   // Recheck after potentially slow byte reads before exposing the archive.
   await withFeedTransaction(actor, async (client, scope) => {const current=await readFeedCopy(client,actor.sessionId);if(current?.revision!==expectedRevision)throw new FeedCollaborationError(409,'revision_conflict');await assertFeedFiles(client, actor, scope, saved.content.composition, [], saved.content.linkedin)}, false)
   const html = feedCompositionHtml(saved.content.composition, assetPath)

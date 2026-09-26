@@ -867,6 +867,7 @@ export function parseContentDraftBody(value: unknown):
 function toSavedDraftWire(draft: SavedContentDraft) {
   return {
     id: draft.id,
+    canonicalRevision: isRecord(draft.formatData.feedCanonical) ? draft.formatData.feedCanonical.revision : undefined,
     platform: draft.platform,
     platformReplyId: draft.replyExternalId,
     draftText: draft.draftText,
