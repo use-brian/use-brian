@@ -298,6 +298,9 @@ export function selfHostFeedManagedDistributionRoutes(
     res.status(response.status).json(responseBody)
   }
 
+  const manageLinkedIn=async(req:Request,res:Response)=>{if(!req.userId){res.sendStatus(401);return}try{const assistantId=String(req.params.assistantId),assistant=await findAssistantById(assistantId);if(!assistant?.workspaceId||!(await requireWorkspaceMember(req.userId,assistant.workspaceId,res,true)))return;res.json(await createLocalLinkedInCloud(options).manage(assistant.workspaceId,assistantId,req.body,req.method==='DELETE'?String(req.params.destinationId):undefined))}catch{res.status(409).json({code:'capability_unavailable'})}}
+  router.post('/:assistantId/linkedin/destinations',manageLinkedIn)
+  router.delete('/:assistantId/linkedin/destinations/:destinationId',manageLinkedIn)
   router.get('/:assistantId/linkedin/destinations',async(req,res)=>{if(!req.userId){res.sendStatus(401);return}try{const actor={userId:req.userId,assistantId:req.params.assistantId,sessionId:'',kind:'user' as const};const assistant=await findAssistantById(actor.assistantId);if(!assistant?.workspaceId||!(await requireWorkspaceMember(req.userId,assistant.workspaceId,res)))return;const data=await createLocalLinkedInCloud(options).targets(actor,{workspaceId:assistant.workspaceId} as never);res.json(data)}catch{res.status(409).json({code:'cloud_unavailable'})}})
   router.get('/team/:workspaceId/profiles', forward)
   router.get('/:assistantId', forward)
@@ -316,7 +319,7 @@ export function selfHostFeedManagedDistributionRoutes(
 }
 
 export function selfHostFeedOAuthRelayRoutes(
-  platform: 'threads' | 'twitter',
+  platform: 'threads' | 'twitter' | 'linkedin',
   options: Pick<SelfHostFeedCloudRouteOptions, 'store' | 'fetchImpl'>,
 ): Router {
   const router = Router()
@@ -336,6 +339,7 @@ export function selfHostFeedOAuthRelayRoutes(
     const url = new URL(`/api/self-host-feed/gateway/${platform}-oauth/authorize`, record.link.cloudBaseUrl)
     url.searchParams.set('assistantId', assistantId)
     if (returnTo) url.searchParams.set('return_to', returnTo)
+    if(platform==='linkedin'){url.searchParams.set('mode',String(req.query.mode??''));url.searchParams.set('consent',String(req.query.consent??''))}
     const response = await fetchImpl(url, {
       headers: { authorization: `Bearer ${record.credential.accessToken}` },
       signal: AbortSignal.timeout(10_000),

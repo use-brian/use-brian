@@ -17,6 +17,7 @@ export function FeedPostWorkflow(props: {
   onReview?: (anchor: HTMLButtonElement) => void;
   onCommit: () => void;
   onApprove: () => void;
+  approveLabel?: string;
   onPosted: () => void;
 }) {
   const t = useT();
@@ -39,7 +40,7 @@ export function FeedPostWorkflow(props: {
         className="min-h-11 md:min-h-9 whitespace-normal bg-foreground text-background !shadow-none [background-image:none] hover:bg-foreground/90"
         onClick={committing ? props.onCommit : props.status === 'review' ? props.onApprove : props.onPosted}>
         {props.status === 'review' && !props.hasEdits ? <Check className="size-4 shrink-0" aria-hidden /> : null}
-        {props.status === 'drafting' ? te.submitForApproval : committing ? te.saveChanges : props.status === 'review' ? te.approve : te.markPosted}
+        {props.status === 'drafting' ? te.submitForApproval : committing ? te.saveChanges : props.status === 'review' ? props.approveLabel ?? te.approve : te.markPosted}
       </Button> : null}
     </div>
   </div>;

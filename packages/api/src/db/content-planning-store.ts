@@ -730,6 +730,8 @@ export function createContentPlanningStore(): ContentPlanningStore {
     },
 
     async markPosted(params) {
+      const target=(await query('SELECT format_data FROM content_planning_drafts WHERE id=$1 AND assistant_id=$2',[params.draftId,params.assistantId])).rows[0]
+      if(target?.format_data?.feedCanonical?.content?.linkedin?.mode==='newsletter_edition')throw new FeedCollaborationError(409,'linkedin_manual_completion_required')
       const result = await query(
         `UPDATE content_planning_drafts
             SET status = 'posted',

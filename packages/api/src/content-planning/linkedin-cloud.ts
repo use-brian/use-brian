@@ -11,13 +11,13 @@ export function createLocalLinkedInCloud(options:{store:SelfHostFeedCloudLinkSto
   if(!record?.credential.accessToken||record.link.status!=='linked'||record.link.assistantId!==assistantId)throw new FeedCollaborationError(409,'cloud_link_unavailable')
   let response:Response
   try{response=await fetcher(`${record.link.cloudBaseUrl}/api/self-host-feed/gateway/linkedin${path}`,{...init,headers:{...init.headers,authorization:`Bearer ${record.credential.accessToken}`},redirect:'error',signal:AbortSignal.timeout(120000)})}catch{throw new FeedCollaborationError(409,'delivery_ambiguous')}
-  const data=await response.json().catch(()=>({}))
+  const data=await response.json().catch(()=>({})) as Record<string,unknown>
   if(response.status===402)await options.store.markPlanRequired(workspaceId)
   if(!response.ok)throw new FeedCollaborationError(response.status,typeof data.code==='string'?data.code:'cloud_unavailable')
   return data
  }
- async function targets(actor:FeedActor,scope:FeedScope){return request(scope.workspaceId,actor.assistantId,'/targets') as Promise<Array<{destinationId:string;authorKind:'person'|'organization';authorUrn:string;displayName:string;connectionStatus:string;canPublishAs:boolean;capabilities:{post:boolean;link_post:boolean;newsletter_edition:false}}>>}
- return {targets,async authorize(actor:FeedActor,scope:FeedScope,context:FeedLinkedInContext){const target=(await targets(actor,scope)).find(d=>d.destinationId===context.destinationId);if(!target||!target.canPublishAs||target.authorKind!==context.authorKind)throw new FeedCollaborationError(403,'linkedin_destination_unavailable');return target},
+ async function targets(actor:FeedActor,scope:FeedScope){return request(scope.workspaceId,actor.assistantId,'/targets') as unknown as Promise<Array<{destinationId:string;authorKind:'person'|'organization';authorUrn:string;displayName:string;connectionStatus:string;canPublishAs:boolean;capabilities:{post:boolean;link_post:boolean;newsletter_edition:false}}>>}
+ return {targets,manage(workspaceId:string,assistantId:string,body:unknown,alias?:string){return request(workspaceId,assistantId,alias?`/targets/${encodeURIComponent(alias)}`:'/targets',{method:alias?'DELETE':'POST',headers:{'content-type':'application/json'},body:alias?undefined:JSON.stringify(body)})},async authorize(actor:FeedActor,scope:FeedScope,context:FeedLinkedInContext){const target=(await targets(actor,scope)).find(d=>d.destinationId===context.destinationId);if(!target||!target.canPublishAs||target.authorKind!==context.authorKind)throw new FeedCollaborationError(403,'linkedin_destination_unavailable');return target},
  async publish(actor:FeedActor,previewHash:string){
   const prepare=()=>withFeedTransaction(actor,async(client,scope)=>{
    const copy=await readFeedCopy(client,actor.sessionId);if(!copy)throw new FeedCollaborationError(404,'draft_not_found');const content=requireFeedComposition(copy.content)

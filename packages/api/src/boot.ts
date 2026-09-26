@@ -5319,6 +5319,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         store: feedCloudStore,
       }),
     )
+    app.use('/api/linkedin-oauth',requireAuth(env.JWT_SECRET),selfHostFeedOAuthRelayRoutes('linkedin',{store:feedCloudStore}))
     app.use(
       '/api/threads-oauth',
       requireAuth(env.JWT_SECRET),

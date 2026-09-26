@@ -57,3 +57,20 @@ describe('[COMP:feed/linkedin-context] canonical context authority', () => {
     await expect(executeFeedCommands(f.actor,{expectedRevision:4,mutationId:randomUUID(),commands:[{kind:'undo',revision:3}]})).rejects.toMatchObject({code:'preimage_conflict'})
   })
 })
+
+import {completeLinkedInManual,createLinkedInPromotion,readLinkedInManualReceipt} from '../linkedin-newsletter.js'
+describe('[COMP:feed/linkedin-context] real manual edition completion',()=>{
+ it('persists a revision-bound operator receipt once and creates a separate unconfirmed promotion',async()=>{
+  const f=await fixture()
+  await executeFeedCommands(f.actor,{expectedRevision:2,mutationId:randomUUID(),commands:[{kind:'linkedin',metadata:{version:1,mode:'newsletter_edition',destinationId:null,authorKind:'organization',authorDisplay:'Orchard fixture',newsletter:{name:'Field notes',url:'https://www.linkedin.com/newsletters/123',editionTitle:'Edition one',launchCommentary:'Read the edition'}}}]})
+  const confirmation=await confirmFeedPost(f.actor,{expectedRevision:3,mutationId:randomUUID(),locale:'en'})
+  const input={mutationId:randomUUID(),expectedRevision:3,confirmationId:confirmation.confirmation.id,url:'https://www.linkedin.com/pulse/fictional-edition'}
+  await expect(completeLinkedInManual(f.actor,input)).rejects.toMatchObject({code:'public_release_required'})
+  await executeFeedCommands(f.actor,{expectedRevision:3,mutationId:randomUUID(),commands:[{kind:'release',audience:'public'}]})
+  const receipt=await completeLinkedInManual(f.actor,input)
+  expect(await completeLinkedInManual(f.actor,{...input,mutationId:randomUUID()})).toEqual(receipt)
+  expect((await readLinkedInManualReceipt(f.actor))?.verification).toBe('operator_confirmed')
+  const next=await createLinkedInPromotion(f.actor,3,randomUUID()),copy=(await getFeedCollaboration({...f.actor,sessionId:next.sessionId})).copy!
+  expect(next.sessionId).not.toBe(f.actor.sessionId);expect(copy.content.linkedin?.mode).toBe('link_post');expect(copy.content.article?.sourceUrl).toBe(input.url);expect(await listFeedConfirmations({...f.actor,sessionId:next.sessionId})).toEqual([])
+ })
+})

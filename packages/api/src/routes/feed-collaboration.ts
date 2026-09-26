@@ -1,3 +1,4 @@
+import {createLinkedInPromotion,completeLinkedInManual,readLinkedInManualReceipt,linkedinManualCommand} from '../content-planning/linkedin-newsletter.js'
 import { readLinkedInPreview } from '../content-planning/linkedin-payload.js'
 import { readFeedSelectedSources } from '../content-planning/source-authority.js'
 import type { FeedReviewContextLoader } from '../content-planning/review-context.js'
@@ -44,6 +45,9 @@ export function feedCollaborationRoutes(options: { generation?: FeedGenerationSe
     }
     catch (error) { replyError(res, error) }
   })
+  router.post(`${base}/linkedin-promotion`,async(req,res)=>{try{const input=z.object({expectedRevision:z.number().int().nonnegative(),sessionId:uuid}).strict().parse(req.body);res.json(await createLinkedInPromotion({userId:req.userId!,assistantId:req.params.assistantId,sessionId:req.params.sessionId,kind:'user'},input.expectedRevision,input.sessionId))}catch(error){replyError(res,error)}})
+  router.get(`${base}/linkedin-receipt`,async(req,res)=>{try{res.json({receipt:await readLinkedInManualReceipt({userId:req.userId!,assistantId:req.params.assistantId,sessionId:req.params.sessionId,kind:'user'})??null})}catch(error){replyError(res,error)}})
+  router.post(`${base}/linkedin-published`,async(req,res)=>{try{res.json({receipt:await completeLinkedInManual({userId:req.userId!,assistantId:req.params.assistantId,sessionId:req.params.sessionId,kind:'user'},linkedinManualCommand.parse(req.body))})}catch(error){replyError(res,error)}})
   router.get(`${base}/learning`, async (req, res) => {
     try { res.json(await readFeedLearnedDecisions({ userId: req.userId!, assistantId: req.params.assistantId, sessionId: req.params.sessionId, kind: 'user' })) }
     catch (error) { replyError(res, error) }

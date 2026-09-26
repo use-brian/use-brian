@@ -322,11 +322,11 @@ async function postFeedApprovalAction(
 export async function approveFeedDraft(
   assistantId: string,
   eventId: string,
-  opts: { text?: string } = {},
+  opts: { text?: string; linkedinPreviewHash?: string } = {},
 ): Promise<FeedApprovalActionResult> {
   return postFeedApprovalAction(
     `${API_URL}/api/distribution/${assistantId}/approvals/${eventId}/approve`,
-    opts.text !== undefined ? { text: opts.text } : {},
+    {...opts},
   );
 }
 

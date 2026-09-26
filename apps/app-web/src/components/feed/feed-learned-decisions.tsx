@@ -12,7 +12,7 @@ import { confirmDialog } from '@/components/ui/confirm-dialog';
 import { ListSurfaceSkeleton } from '@/components/chrome/surface-skeleton';
 const control = buttonVariants({ variant: 'outline', size: 'sm', className: 'min-h-11 md:min-h-8 whitespace-normal text-left' });
 type Command = FeedLearningCommandRequest['command'];
-export function useFeedLearningActions(assistantId: string, sessionId: string, revision: number, refresh: () => void) {
+export function useFeedLearningActions(assistantId: string, sessionId: string, revision: number, refresh: () => void, linkedinPreviewHash?: string) {
   const locale = useLocale(); const [busy, setBusy] = useState(false); const [error, setError] = useState(false);
   const retained = useRef<{ key: string; mutationId: string } | null>(null);
   async function request(suffix: string, value: Record<string, unknown>, identity = true): Promise<boolean> {
@@ -26,7 +26,7 @@ export function useFeedLearningActions(assistantId: string, sessionId: string, r
       retained.current = null; refresh(); return true;
     } catch { setError(true); refresh(); return false; } finally { setBusy(false); }
   }
-  return { busy, error, confirm: (reviewRunId?: string) => request('/confirmation', { expectedRevision: revision, locale, reviewRunId }), command: (confirmationId: string, command: Command) => request('/learning/commands', { expectedRevision: revision, confirmationId, command }), retry: (runId: string) => request(`/runs/${runId}/retry`, {}, false) };
+  return { busy, error, confirm: (reviewRunId?: string) => request('/confirmation', { expectedRevision: revision, locale, reviewRunId, linkedinPreviewHash }), command: (confirmationId: string, command: Command) => request('/learning/commands', { expectedRevision: revision, confirmationId, command }), retry: (runId: string) => request(`/runs/${runId}/retry`, {}, false) };
 }
 export type FeedLearningActions = ReturnType<typeof useFeedLearningActions>;
 type Editor = { confirmationId: string; kind: 'remember' | 'editRule' | 'editSummary' | 'editVoice'; id?: string; text: string; detail: string };

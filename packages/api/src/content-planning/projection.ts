@@ -75,22 +75,40 @@ export async function exportFeedArticle(actor: FeedActor, expectedRevision: numb
     if (!copy || copy.revision !== expectedRevision) throw new FeedCollaborationError(409, 'revision_conflict')
     const content = requireFeedComposition(copy.content); await assertFeedFiles(client, actor, scope, content.composition, [], content.linkedin)
     const projection = projectFeed(content.composition)
+    if (content.linkedin?.mode === 'newsletter_edition' && projectFeedLinkedIn(content.composition,content.linkedin,content).blockers.length) throw new FeedCollaborationError(409,'newsletter_not_ready')
     if (projection.missingSlots.length && !acknowledgeOmissions) throw new FeedCollaborationError(409, 'acknowledge_omitted_slots')
     return { content, projection, scope }
   }, false)
   const zip = new JSZip(); const date = new Date('1980-01-01T00:00:00Z'); const assetPath = (id: string, mime: string) => `assets/${id}.${extension(mime)}`
   let total = 0
-  for (const media of saved.projection.media) {
+  const manifest: Array<{fileId:string;path:string;alt:string;blockId?:string;placement:string}> = []
+  const allMedia = [...saved.projection.media]
+  const cover = saved.content.linkedin?.newsletter?.coverFileId
+  if (cover && !allMedia.some(m=>m.fileId===cover)) {
+    if(!files)throw new FeedCollaborationError(503,'image_storage_unavailable')
+    const row=await files.readBytes({workspaceId:saved.scope.workspaceId,userId:actor.userId,assistantId:actor.assistantId,assistantKind:'app',clearance:saved.scope.memberClearance as 'public'|'internal'|'confidential',compartments:saved.scope.memberCompartments},cover)
+    if(!row.ok)throw new FeedCollaborationError(403,'file_unavailable')
+    total+=row.value.bytes.length
+    if(total>100*1024*1024)throw new FeedCollaborationError(413,'article_assets_too_large')
+    zip.file(assetPath(cover,row.value.file.mime),row.value.bytes,{date})
+    manifest.push({fileId:cover,path:assetPath(cover,row.value.file.mime),alt:saved.content.linkedin?.newsletter?.coverCaption??'',placement:'cover'})
+  }
+  for (const media of allMedia) {
     if (!files) throw new FeedCollaborationError(503, 'image_storage_unavailable')
     const result = await files.readBytes({ workspaceId: saved.scope.workspaceId, userId: actor.userId, assistantId: actor.assistantId, assistantKind: 'app', clearance: saved.scope.memberClearance as 'public' | 'internal' | 'confidential', compartments: saved.scope.memberCompartments }, media.fileId)
     if (!result.ok || result.value.file.mime !== media.mimeType) throw new FeedCollaborationError(403, 'file_unavailable')
     total += result.value.bytes.length
     if (total > 100 * 1024 * 1024) throw new FeedCollaborationError(413, 'article_assets_too_large')
     zip.file(assetPath(media.fileId, media.mimeType), result.value.bytes, { date })
+    const block=walkFeed(saved.content.composition).find(r=>r.node.type==='image'&&r.node.attrs.fileId===media.fileId)
+    manifest.push({fileId:media.fileId,path:assetPath(media.fileId,media.mimeType),alt:media.alt??'',blockId:block?.node.attrs.id,placement:block?.node.type==='image'?block.node.attrs.placement:'attachment'})
   }
   // Recheck after potentially slow byte reads before exposing the archive.
-  await withFeedTransaction(actor, (client, scope) => assertFeedFiles(client, actor, scope, saved.content.composition, [], saved.content.linkedin), false)
+  await withFeedTransaction(actor, async (client, scope) => {const current=await readFeedCopy(client,actor.sessionId);if(current?.revision!==expectedRevision)throw new FeedCollaborationError(409,'revision_conflict');await assertFeedFiles(client, actor, scope, saved.content.composition, [], saved.content.linkedin)}, false)
   const html = feedCompositionHtml(saved.content.composition, assetPath)
   zip.file('article.html', `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Article</title><style>body{max-width:72ch;margin:2rem auto;padding:0 1rem;font:18px/1.6 system-ui}img{max-width:100%;height:auto}</style></head><body>${html}</body></html>`, { date })
+  const context=saved.content.linkedin
+  zip.file('article.txt',projectFeedLinkedIn(saved.content.composition,context,saved.content).text,{date})
+  zip.file('manifest.json',JSON.stringify({version:1,revision:expectedRevision,title:context?.newsletter?.editionTitle??saved.content.title,author:{kind:context?.authorKind??'person',display:context?.authorDisplay??'',destinationId:context?.destinationId??null},newsletter:context?.newsletter??null,assets:manifest},null,2)+'\n',{date})
   return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE', compressionOptions: { level: 6 }, platform: 'UNIX' })
 }

@@ -1,4 +1,6 @@
 "use client";
+import { LinkedInPublishing, type LinkedInPreviewState } from './linkedin-publishing';
+import { linkedinRequest,linkedinDraftPath } from '@/lib/api/feed-linkedin';
 import { FeedSources } from './feed-sources';
 
 /**
@@ -422,6 +424,8 @@ function PostPane({
 }) {
   // PostPane always renders inside FeedSurfaceShell's provider, so the brand
   // read is a context lookup rather than another prop threaded through.
+  const [linkedinPreview,setLinkedinPreview]=useState<LinkedInPreviewState>({hash:null,blocked:false});
+  const linkedinCopy=useT().feedLinkedIn;
   const workspace = useFeedWorkspace();
   const t = useT().feedPage;
   const te = t.postEditor;
@@ -489,7 +493,7 @@ function PostPane({
   const collaboration = useFeedCollaboration(workspaceId, assistantId, sessionId, structured && !localPost?.newSession);
   const review = useFeedReviewActions(assistantId, sessionId, localPost?.revision ?? 0, () => void collaboration.refresh());
   const learning = useFeedLearning(workspaceId, assistantId, sessionId, structured && !localPost?.newSession);
-  const learningActions = useFeedLearningActions(assistantId, sessionId, localPost?.revision ?? 0, () => { void learning.refresh(); void collaboration.refresh(); });
+  const learningActions = useFeedLearningActions(assistantId, sessionId, localPost?.revision ?? 0, () => { void learning.refresh(); void collaboration.refresh(); }, linkedinPreview.hash ?? undefined);
 
   const [localSaving, setLocalSaving] = useState(0);
   const persist = useCallback(async (patch: Partial<FeedWorkingContent>) => {
@@ -756,7 +760,11 @@ function PostPane({
       });
       if (!ok) return;
     }
-    if (kind === 'approve' && platform !== 'email' && localPost?.content.sourceSensitivity && localPost.content.sourceSensitivity !== 'public') {
+    if(kind==='approve'&&platform==='linkedin'&&localPost?.content.linkedin?.destinationId&&localPost.content.linkedin.mode!=='newsletter_edition'){
+      if(!linkedinPreview.hash||linkedinPreview.blocked){setError(linkedinCopy.blocked);return;}
+      if(!await confirmDialog({title:linkedinCopy.publish,description:linkedinCopy.publishBody,confirmLabel:linkedinCopy.publish}))return;
+    }
+    if (kind === 'approve' && platform !== 'email' && (platform==='linkedin'||localPost?.content.sourceSensitivity && localPost.content.sourceSensitivity !== 'public')) {
       const confirmed = await confirmDialog({ title: te.releaseTitle, description: te.releaseBody, confirmLabel: te.releaseConfirm });
       if (!confirmed || !await runCommands([{ kind: 'release', audience: 'public' }])) return;
     }
@@ -785,9 +793,16 @@ function PostPane({
     setBusy(true);
     setError(null);
     try {
+      if(kind==='posted'&&platform==='linkedin'&&localPost?.content.linkedin?.mode==='newsletter_edition'){
+        if(!await runCommands([{kind:'release',audience:'public'}]))return;
+        const path=linkedinDraftPath(assistantId,sessionId);
+        const confirmed=await linkedinRequest<{confirmationId:string}>(`${path}/confirmation`,{mutationId:crypto.randomUUID(),expectedRevision:localPost.revision,locale:'en'});
+        await linkedinRequest(`${path}/linkedin-published`,{mutationId:crypto.randomUUID(),expectedRevision:localPost.revision,confirmationId:confirmed.confirmationId,url:permalink});
+        notifyFeedPostsChanged();await load();return;
+      }
       const result =
         kind === "approve"
-          ? await approveFeedDraft(assistantId, target.id)
+          ? await approveFeedDraft(assistantId, target.id,{linkedinPreviewHash:localPost?.content.linkedin?.destinationId&&localPost.content.linkedin.mode!=='newsletter_edition'?linkedinPreview.hash??undefined:undefined})
           : kind === "reject"
             ? await rejectFeedDraft(assistantId, target.id)
             : await markFeedReadyPostPosted(
@@ -1096,8 +1111,8 @@ function PostPane({
                 </DropdownMenu>
                 <Tooltip label={isLg && !chatCollapsed ? tc.hideChat : tc.showChat}><Button type="button" variant="ghost" size="icon" className="size-11 md:size-9" aria-label={isLg && !chatCollapsed ? tc.hideChat : tc.showChat} aria-expanded={isLg ? !chatCollapsed : refineOpen} onClick={() => { setEditorPanel(null); if (isLg) setChatCollapsed(value => !value); else setRefineOpen(true); }}>{isLg && !chatCollapsed ? <PanelRightClose className="size-4" aria-hidden /> : <PanelRightOpen className="size-4" aria-hidden />}</Button></Tooltip>
               </div>
-              <FeedPostWorkflow status={status} hasEdits={compositionDirty}
-                actionDisabled={Boolean(busy || remoteBlocked || !workspace.canDraft || ((status === 'drafting' || (status === 'review' && compositionDirty)) && !compositionValid) || (status === 'review' && !compositionDirty && missingSlots.length > 0))}
+              <FeedPostWorkflow approveLabel={platform==='linkedin'?localPost?.content.linkedin?.mode==='newsletter_edition'?linkedinCopy.prepare:localPost?.content.linkedin?.destinationId?linkedinCopy.publish:undefined:undefined} status={status} hasEdits={compositionDirty}
+                actionDisabled={Boolean(busy || remoteBlocked || !workspace.canDraft || ((status === 'drafting' || (status === 'review' && compositionDirty)) && !compositionValid) || (status === 'review' && !compositionDirty && (missingSlots.length > 0 || platform==='linkedin'&&(linkedinPreview.blocked||localPost?.content.linkedin?.destinationId&&localPost.content.linkedin.mode!=='newsletter_edition'&&!linkedinPreview.hash))))}
                 reviewOpen={editorPanel === 'review'}
                 onReview={structured ? anchor => showPanel('review', anchor) : undefined}
                 onCommit={() => void commitVersion()} onApprove={() => void act('approve')} onPosted={() => void act('posted')} />
@@ -1129,6 +1144,10 @@ function PostPane({
               </section>
             ) : null}
 
+            {platform==='linkedin' && structured && localPost ? <LinkedInPublishing workspaceId={workspaceId} assistantId={assistantId} sessionId={sessionId} revision={localPost.revision} content={localPost.content} ready={status==='ready'} disabled={Boolean(remoteBlocked)||readOnly||busy} onCommand={runCommands} onPreview={setLinkedinPreview} onRefresh={()=>{void collaboration.refresh();void load();}} onPromotion={async url=>{
+              const result=await linkedinRequest<{sessionId:string}>(`${linkedinDraftPath(assistantId,sessionId)}/linkedin-promotion`,{expectedRevision:localPost.revision,sessionId:crypto.randomUUID()});
+              router.push(feedPostPath(workspaceId,'linkedin',result.sessionId));
+            }}/> : null}
             {structured && localPost ? <FeedSources workspaceId={workspaceId} assistantId={assistantId} sessionId={sessionId} selected={localPost.content.selectedMemoryIds ?? []} disabled={Boolean(remoteBlocked) || readOnly} onCommand={runCommands} /> : null}
             {missingSlots.length ? <div role="status" className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground"><span>{tg.draftSlots}</span>{missingSlots.map((id, index) => <button key={id} className="min-h-11 rounded-md px-2 text-xs underline decoration-dotted underline-offset-4 hover:bg-muted" onClick={() => { setViewMode('edit'); requestAnimationFrame(() => { const target = document.querySelector<HTMLElement>(`[data-placeholder-id="${id}"]`); target?.scrollIntoView({ block: 'center' }); target?.querySelector<HTMLInputElement>('input')?.focus(); }); }}>{tg.openSlot} {index + 1}</button>)}</div> : null}
 
@@ -1270,8 +1289,8 @@ function PostPane({
           <div hidden={panelMode !== 'details'} inert={panelMode !== 'details'} className="space-y-5" data-feed-details>
             <StatusLabel status={status} label={t.posts.status[status]} />
             {privateBrief ? <section className="space-y-2"><h3 className="text-sm font-semibold">{te.privateBriefBadge}</h3><p className="text-xs text-muted-foreground">{te.privateBriefNotice}</p><p className="whitespace-pre-wrap text-sm leading-relaxed">{privateBrief}</p></section> : null}
-            {!readOnly ? <FormatPicker platform={platform} value={postFormat} onChange={next => { setPostFormat(next); void persist({ postFormat: next }); if (next === 'thread' && threadSegments.every(part => !part)) { const parts = [selected?.text ?? '', '']; setThreadSegments(parts); void persist({ threadSegments: parts }); } }} /> : null}
-                {postFormat === "article" ? (
+            {!readOnly && platform!=='linkedin' ? <FormatPicker platform={platform} value={postFormat} onChange={next => { setPostFormat(next); void persist({ postFormat: next }); if (next === 'thread' && threadSegments.every(part => !part)) { const parts = [selected?.text ?? '', '']; setThreadSegments(parts); void persist({ threadSegments: parts }); } }} /> : null}
+                {postFormat === "article" && localPost?.content.linkedin?.mode!=='newsletter_edition' ? (
                   <ArticleFields
                     value={article}
                     readOnly={readOnly}
