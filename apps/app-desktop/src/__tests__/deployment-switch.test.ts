@@ -108,6 +108,18 @@ afterEach(() => { vi.unstubAllEnvs(); });
 const sender = () => ({ sender: state.windows.at(-1).webContents, senderFrame: state.windows.at(-1).webContents.mainFrame });
 
 describe("[COMP:app-desktop/main] deployment switching", () => {
+  it("allows presentation changes only from a current main frame without changing sessions", async () => {
+    const key = deploymentAccountKey({ target: local, tokens: tokens("local") });
+    const update = state.handlers.get("Use Brian:update-account-presentation")!;
+    const move = state.handlers.get("Use Brian:move-account")!;
+    expect(await update({ ...sender(), senderFrame: {} }, key, { displayName: "Studio", icon: "🏡" })).toEqual({ ok: false });
+    expect(await update({ sender: { id: -1 }, senderFrame: {} }, key, { displayName: "Studio", icon: "🏡" })).toEqual({ ok: false });
+    expect(await update(sender(), key, { displayName: "Studio", icon: "🏡" })).toMatchObject({ ok: true });
+    expect(await move(sender(), key, "up")).toMatchObject({ ok: true, accounts: [expect.objectContaining({ key, displayName: "Studio", icon: "🏡" }), expect.anything()] });
+    expect(store.current(local)?.user?.name).toBe("local");
+    expect(state.windows).toHaveLength(1);
+    expect(await move(sender(), key, "sideways")).toEqual({ ok: false });
+  });
   it("keeps the recorder overlay in the active deployment session", () => {
     const main = state.windows[0];
     state.handlers.get("Use Brian:recording-state")!({}, true);

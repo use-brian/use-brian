@@ -47,6 +47,8 @@ type DesktopRefreshResult =
  * by the bundled app.
  */
 export interface DesktopAccount {
+  displayName?: string;
+  icon?: string;
   key: string;
   id: string;
   name: string;
@@ -140,6 +142,12 @@ export interface DesktopBridge {
   addAccount?: () => void;
   /** Saved identities across deployments; credentials stay in the shell. */
   listAccounts?: () => Promise<{ accounts: DesktopAccount[]; canSwitch: boolean; localAppUrl?: string }>;
+  updateAccountPresentation?: (key: string, presentation: { displayName: string; icon: string }) => Promise<
+    { ok: true; accounts: DesktopAccount[] } | { ok: false }
+  >;
+  moveAccount?: (key: string, direction: "up" | "down") => Promise<
+    { ok: true; accounts: DesktopAccount[] } | { ok: false }
+  >;
   selectAccount?: (key: string) => Promise<{ ok: true } | { ok: false; error: "switch" | "reauth" }>;
   /** Remove one inactive saved connection from secure storage and its target cookie partition. */
   removeAccount?: (key: string) => Promise<

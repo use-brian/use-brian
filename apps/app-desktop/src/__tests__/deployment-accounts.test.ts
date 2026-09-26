@@ -20,7 +20,7 @@ function setup(available = true) {
   let disk: Buffer = Buffer.alloc(0);
   const cipher = { isAvailable: () => available, encryptString: (text: string) => Buffer.from(text).reverse(), decryptString: (blob: Buffer) => Buffer.from(blob).reverse().toString() };
   const store = new DeploymentAccounts(cipher, () => disk, (blob) => { disk = blob; });
-  return { store, bytes: () => disk };
+  return { store, bytes: () => disk, reopen: () => new DeploymentAccounts(cipher, () => disk, (blob) => { disk = blob; }) };
 }
 
 describe("[COMP:app-desktop/deployment-accounts] saved sessions", () => {
@@ -36,6 +36,58 @@ describe("[COMP:app-desktop/deployment-accounts] saved sessions", () => {
     expect(JSON.stringify(rows)).not.toContain("secret");
     expect(bytes().toString()).not.toContain("cloud-secret");
     expect(store.current(cloud)?.refreshToken).toBe("cloud-secret");
+  });
+  it("defaults Cloud to the top and keeps a custom order, names, and icons through refresh and restart", () => {
+    const { store, reopen } = setup();
+    store.put(local, tokens("same"));
+    store.put(cloud, tokens("same"));
+    const [cloudRow, localRow] = store.rows(local);
+    expect(cloudRow.deployment).toBe("cloud");
+    expect(store.updatePresentation(localRow.key, { displayName: "  Studio  ", icon: "🧑🏽‍💻" })).toBe(true);
+    expect(store.move(localRow.key, "up")).toBe(true);
+    store.put(local, tokens("same", "rotated"));
+    store.put(cloud, tokens("same", "cloud-rotated"));
+    const restored = reopen().rows(local);
+    expect(restored.map((row) => row.key)).toEqual([localRow.key, cloudRow.key]);
+    expect(restored[0]).toMatchObject({ displayName: "Studio", icon: "🧑🏽‍💻", active: true });
+    expect(restored[1].displayName).toBeUndefined();
+    expect(reopen().current(local)?.refreshToken).toBe("rotated");
+    store.put(local, tokens("new"), false);
+    expect(store.rows(local).map((row) => row.id)).toEqual(["same", "same", "new"]);
+    expect(store.updatePresentation(localRow.key, { displayName: "", icon: "" })).toBe(true);
+    expect(store.rows(local)[0]).toMatchObject({ displayName: "", icon: "" });
+    store.remove(localRow.key);
+    store.put(local, tokens("same"));
+    expect(store.rows(local).at(-1)?.displayName).toBeUndefined();
+  });
+  it("preserves legacy stores, stable defaults, and credentials on invalid customization", () => {
+    const { store, bytes } = setup();
+    store.put(local, tokens("one"));
+    store.put(local, tokens("two"));
+    store.put(cloud, tokens("one"));
+    const [cloudRow, first] = store.rows(local);
+    store.put(local, tokens("one", "rotated"), false);
+    expect(store.rows(local).map((row) => row.id)).toEqual(["one", "one", "two"]);
+    const before = bytes();
+    for (const input of [{ displayName: "a".repeat(81), icon: "" }, { displayName: "X", icon: "https://example.com" },
+      { displayName: "X", icon: "🏡", tokens: {} }, null]) {
+      expect(store.updatePresentation(first.key, input)).toBe(false);
+    }
+    expect(store.updatePresentation("missing", { displayName: "X", icon: "🏡" })).toBe(false);
+    expect(store.move("missing", "up")).toBe(false);
+    expect(store.move(cloudRow.key, "up")).toBe(false);
+    expect(store.move(first.key, "sideways")).toBe(false);
+    expect(bytes()).toEqual(before);
+    expect(store.current(local)?.user?.id).toBe("two");
+  });
+  it("reports persistence failure without claiming customization succeeded", () => {
+    const { store, bytes } = setup();
+    store.put(local, tokens("one"));
+    const failing = new DeploymentAccounts({ isAvailable: () => true,
+      encryptString: (text) => Buffer.from(text).reverse(), decryptString: (blob) => Buffer.from(blob).reverse().toString() },
+      bytes, () => { throw new Error("disk full"); });
+    expect(failing.updatePresentation(store.rows(local)[0].key, { displayName: "Studio", icon: "🏡" })).toBe(false);
+    expect(store.rows(local)[0].displayName).toBeUndefined();
   });
   it("retains each saved deployment's public runtime configuration", () => {
     const { store } = setup();

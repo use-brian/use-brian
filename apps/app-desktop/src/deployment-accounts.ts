@@ -25,8 +25,14 @@ const tokensSchema = z.object({
     plan: z.string().optional(),
   }).optional(),
 });
-const entrySchema = z.object({ target: targetSchema, tokens: tokensSchema });
-const storeSchema = z.object({ version: z.literal(1), entries: z.array(entrySchema), active: z.record(z.string()) });
+const presentationSchema = z.object({
+  displayName: z.string().trim().max(80),
+  icon: z.string().trim().max(32).refine((value) => value === "" ||
+    (/^[\p{Extended_Pictographic}\p{Regional_Indicator}\p{Emoji_Modifier}\uFE0F\u200D\u{E0020}-\u{E007F}0-9#*\u20E3]+$/u.test(value) &&
+      /[\p{Extended_Pictographic}\p{Regional_Indicator}\u20E3]/u.test(value))),
+}).strict();
+const entrySchema = z.object({ target: targetSchema, tokens: tokensSchema, presentation: presentationSchema.optional() });
+const storeSchema = z.object({ version: z.literal(1), entries: z.array(entrySchema), active: z.record(z.string()), order: z.array(z.string()).optional() });
 export type AccountTarget = { kind: TargetKind; appUrl: string; apiUrl: string; auth: TargetAuth; publicConfig?: DesktopPublicConfig | null };
 export type SavedDeploymentAccount = z.infer<typeof entrySchema>;
 export type DeploymentAccountSnapshot = Readonly<{
@@ -35,6 +41,7 @@ export type DeploymentAccountSnapshot = Readonly<{
 }>;
 type AccountStore = z.infer<typeof storeSchema>;
 export type DeploymentAccountRow = {
+  displayName?: string; icon?: string;
   key: string; id: string; name: string; email: string; avatarUrl?: string | null;
   deployment: "cloud" | "local" | "self-hosted"; appUrl: string; active: boolean;
 };
@@ -88,25 +95,53 @@ export class DeploymentAccounts {
     const store = this.load();
     const entry = { target, tokens };
     const key = deploymentAccountKey(entry);
-    store.entries = store.entries.filter((saved) => deploymentAccountKey(saved) !== key);
-    store.entries.push(entry);
+    const index = store.entries.findIndex((saved) => deploymentAccountKey(saved) === key);
+    if (index === -1) store.entries.push(entry);
+    else store.entries[index] = { ...store.entries[index], ...entry };
     if (activate) store.active[deploymentKey(target)] = key;
     return this.save(store);
   }
   remove(key: string): boolean {
     const store = this.load();
     store.entries = store.entries.filter((entry) => deploymentAccountKey(entry) !== key);
+    if (store.order) store.order = store.order.filter((saved) => saved !== key);
     for (const [target, active] of Object.entries(store.active)) {
       if (active === key) delete store.active[target];
     }
     return this.save(store);
   }
+  updatePresentation(key: string, input: unknown): boolean {
+    const presentation = presentationSchema.safeParse(input);
+    if (!presentation.success) return false;
+    const store = this.load();
+    const entry = store.entries.find((saved) => deploymentAccountKey(saved) === key);
+    if (!entry) return false;
+    entry.presentation = presentation.data;
+    return this.save(store);
+  }
+  private orderedEntries(store: AccountStore): SavedDeploymentAccount[] {
+    const ranks = new Map(store.order?.map((key, index) => [key, index]));
+    return [...store.entries].sort((a, b) => store.order
+      ? (ranks.get(deploymentAccountKey(a)) ?? ranks.size) - (ranks.get(deploymentAccountKey(b)) ?? ranks.size)
+      : Number(b.target.kind === "cloud") - Number(a.target.kind === "cloud"));
+  }
+  move(key: string, direction: unknown): boolean {
+    if (direction !== "up" && direction !== "down") return false;
+    const store = this.load();
+    const order = this.orderedEntries(store).map(deploymentAccountKey);
+    const index = order.indexOf(key);
+    const next = index + (direction === "up" ? -1 : 1);
+    if (index < 0 || next < 0 || next >= order.length) return false;
+    [order[index], order[next]] = [order[next], order[index]];
+    store.order = order;
+    return this.save(store);
+  }
   rows(target: AccountTarget): DeploymentAccountRow[] {
     const store = this.load();
     const currentKey = store.active[deploymentKey(target)];
-    return store.entries.map((entry) => {
+    return this.orderedEntries(store).map((entry) => {
       const key = deploymentAccountKey(entry);
-      return { key, id: entry.tokens.user?.id ?? "", name: entry.tokens.user?.name ?? "",
+      return { ...entry.presentation, key, id: entry.tokens.user?.id ?? "", name: entry.tokens.user?.name ?? "",
         email: entry.tokens.user?.email ?? "", avatarUrl: entry.tokens.user?.avatarUrl,
         appUrl: entry.target.appUrl,
         deployment: deploymentKind(entry.target), active: key === currentKey };

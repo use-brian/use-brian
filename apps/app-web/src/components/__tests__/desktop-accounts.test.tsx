@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act } from "react";
+import { act, cloneElement, type ReactElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "@/lib/i18n/client";
@@ -9,6 +9,10 @@ import type { DesktopAccount } from "@/lib/desktop-auth-source";
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const confirm = vi.hoisted(() => vi.fn());
 vi.mock("@/components/ui/confirm-dialog", () => ({ confirmDialog: confirm }));
+vi.mock("@/components/ui/emoji-picker", () => ({
+  EmojiPicker: ({ trigger, onPick }: { trigger: ReactElement<{ onClick?: () => void }>; onPick: (icon: string) => void }) =>
+    cloneElement(trigger, { onClick: () => onPick("🏡") }),
+}));
 const rows: DesktopAccount[] = [
   { key: "cloud:one", id: "one", name: "Example User", email: "person@example.com", avatarUrl: "https://cdn.example/avatar.png", appUrl: "https://app.usebrian.ai", deployment: "cloud", active: false },
   { key: "local:one", id: "one", name: "Example User", email: "person@example.com", appUrl: "http://localhost:3003", deployment: "local", active: true },
@@ -30,6 +34,59 @@ async function render() {
 }
 
 describe("[COMP:app-web/desktop-accounts] account provenance and switching", () => {
+  it("customizes a saved identity and reorders without switching accounts", async () => {
+    let current = rows.map((row) => ({ ...row }));
+    const update = vi.fn(async (key: string, presentation: { displayName: string; icon: string }) => {
+      current = current.map((row) => row.key === key ? { ...row, ...presentation } : row);
+      return { ok: true as const, accounts: current };
+    });
+    const move = vi.fn(async () => ({ ok: true as const, accounts: [current[1], current[0], current[2]] }));
+    window.usebrianDesktop!.updateAccountPresentation = update;
+    window.usebrianDesktop!.moveAccount = move;
+    await render();
+    const clickText = async (text: string) => act(async () => [...host.querySelectorAll("button")].find((b) => b.textContent === text)!.click());
+    await clickText(en.workspaceSwitcher.customizeAccounts);
+    expect(host.querySelector<HTMLButtonElement>('[aria-label="Move person@example.com up"]')!.disabled).toBe(true);
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Edit person@example.com"]')!.click());
+    const input = host.querySelector("input")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "Work cloud");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await clickText(en.workspaceSwitcher.accountIcon);
+    await act(async () => host.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    expect(update).toHaveBeenCalledWith("cloud:one", { displayName: "Work cloud", icon: "🏡" });
+    expect(host.textContent).toContain("Work cloud");
+    expect(host.textContent).toContain("🏡");
+    expect(host.textContent).toContain("https://app.usebrian.ai");
+    expect(host.querySelector('img[src="https://cdn.example/avatar.png"]')).toBeNull();
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Move Work cloud down"]')!.click());
+    expect(move).toHaveBeenCalledWith("cloud:one", "down");
+    expect(host.querySelector<HTMLButtonElement>('button[role="menuitem"]')!.getAttribute("aria-label")).toContain("Local");
+    expect(select).not.toHaveBeenCalled();
+    await clickText(en.workspaceSwitcher.customizeDone);
+    expect(host.querySelector('[aria-label="Edit Work cloud"]')).toBeNull();
+  });
+  it("keeps the name draft and existing rows on failed customization", async () => {
+    window.usebrianDesktop!.updateAccountPresentation = vi.fn().mockResolvedValue({ ok: false });
+    window.usebrianDesktop!.moveAccount = vi.fn().mockRejectedValue(new Error("IPC disconnected"));
+    await render();
+    await act(async () => [...host.querySelectorAll("button")].find((b) => b.textContent === en.workspaceSwitcher.customizeAccounts)!.click());
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Edit person@example.com"]')!.click());
+    await act(async () => host.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    expect(host.querySelector("form")).not.toBeNull();
+    expect(host.querySelector('[role="alert"]')?.textContent).toBe(en.workspaceSwitcher.customizeError);
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="Move person@example.com down"]')!.click());
+    expect(host.querySelector<HTMLButtonElement>('button[role="menuitem"]')!.getAttribute("aria-label")).toContain("Cloud");
+    expect(host.querySelector('[aria-busy]')?.getAttribute("aria-busy")).toBe("false");
+  });
+  it("hides customization on older shells and gives Cloud its own badge color", async () => {
+    await render();
+    expect(host.textContent).not.toContain(en.workspaceSwitcher.customizeAccounts);
+    const badges = [...host.querySelectorAll("span[title]")].filter((node) => node.textContent === "Cloud" || node.textContent === "Local");
+    expect(badges[0].className).toContain("text-blue-700");
+    expect(badges[1].className).not.toContain("text-blue-700");
+  });
   it("distinguishes matching emails by chips and visible deployment addresses", async () => {
     await render();
     expect(host.textContent).toContain("Self-hosted");

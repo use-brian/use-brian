@@ -4341,6 +4341,16 @@ if (!gotLock) {
     isCurrentAccountSender(event.sender.id) && event.senderFrame === event.sender.mainFrame && typeof key === "string"
       ? removeDeploymentAccount(key)
       : { ok: false, error: "remove" });
+  for (const action of ["update-account-presentation", "move-account"] as const) {
+    ipcMain.handle(`Use Brian:${action}`, (event, key: unknown, input: unknown) => {
+      if (!isCurrentAccountSender(event.sender.id) || event.senderFrame !== event.sender.mainFrame ||
+        changingTarget || selectingAccount || connectingDeployment || removingAccount || typeof key !== "string") return { ok: false };
+      const ok = action === "move-account"
+        ? deploymentAccounts.move(key, input)
+        : deploymentAccounts.updatePresentation(key, input);
+      return ok ? { ok: true, accounts: deploymentAccounts.rows(accountTarget()) } : { ok: false };
+    });
+  }
   ipcMain.handle("Use Brian:select-cloud", async (event) => {
     const ok = isCurrentAccountSender(event.sender.id) && await useCloud();
     const pendingLink = linkNavigation.state();
