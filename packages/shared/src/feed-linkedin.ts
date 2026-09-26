@@ -31,3 +31,10 @@ export type FeedLinkedInProjection = {
 export function feedLinkedInFileIds(context?: FeedLinkedInContext | null): string[] {
   return [...new Set([context?.thumbnailFileId, context?.newsletter?.coverFileId].filter((id): id is string => !!id))]
 }
+
+/** Token-free account metadata; absence on legacy Threads/X rows is expected. */
+export type FeedLinkedInConnectionSummary = {
+  destinationId?: string; authorKind?: 'person' | 'organization'; authorUrn?: string;
+  connectionStatus?: string; canPublishAs?: boolean;
+  capabilities?: { post: boolean; link_post: boolean; newsletter_edition: false };
+}
