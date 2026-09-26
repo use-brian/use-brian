@@ -42,14 +42,14 @@ export async function confirmFeedPost(actor: FeedActor, raw: FeedConfirmationReq
       if (priorReceipt.actor_user_id !== actor.userId || priorReceipt.actor_kind !== actor.kind || priorReceipt.fingerprint !== fingerprint) throw new FeedCollaborationError(409, 'mutation_id_reused')
       const confirmation = await readFeedConfirmation(client, actor.sessionId, priorReceipt.receipt.confirmationId)
       if (await isFeedConfirmationRevoked(client, confirmation.id)) throw new FeedCollaborationError(409, 'revoked_confirmation_requires_revision')
-      await assertFeedFiles(client, actor, access, confirmation.content.composition)
+      await assertFeedFiles(client, actor, access, confirmation.content.composition, [], confirmation.content.linkedin)
       return { confirmation, runId: priorReceipt.receipt.runId as string }
     }
     const copy = await readFeedCopy(client, actor.sessionId)
     if (!copy || copy.revision !== input.expectedRevision) throw new FeedCollaborationError(409, 'revision_conflict')
     const content = requireFeedComposition(copy.content)
     if (options.source && (options.source.canonical.revision !== copy.revision || canonicalFeedValue(options.source.canonical.content) !== canonicalFeedValue(content))) throw new FeedCollaborationError(409, 'saved_composition_conflict')
-    await assertFeedFiles(client, actor, access, content.composition)
+    await assertFeedFiles(client, actor, access, content.composition, [], content.linkedin)
     const session = (await client.query('SELECT title,context_compartments,context_project_id FROM sessions WHERE id=$1', [actor.sessionId])).rows[0]
     const platform = options.source?.platform ?? /^\[([^\]]+)\]/.exec(session.title)?.[1] ?? 'threads'
     const projection = feedOutputProjection(content, platform)

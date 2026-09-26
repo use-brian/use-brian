@@ -43,3 +43,5 @@ export * from './feed-composition.js'
 export * from './feed-capabilities.js'
 export * from './feed-copy.js'
 export * from './campaigns.js'
+
+export * from './feed-linkedin.js'

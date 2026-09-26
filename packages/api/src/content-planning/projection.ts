@@ -1,13 +1,21 @@
 /** Shared accepted-content, readiness and manual delivery boundary. [COMP:feed/draft-projection] */
 import JSZip from 'jszip'
-import { FEED_MEDIA_CAPS, FEED_TEXT_CAPS, type FeedComposition, type FeedTarget } from '@use-brian/shared'
-import { projectFeed, walkFeed, feedCompositionHtml, feedText, canonicalFeedValue } from '@use-brian/doc-model'
+import { FEED_MEDIA_CAPS, FEED_TEXT_CAPS, type FeedComposition, type FeedTarget, type FeedLinkedInIssue } from '@use-brian/shared'
+import { projectFeedLinkedIn, projectFeed, walkFeed, feedCompositionHtml, feedText, canonicalFeedValue } from '@use-brian/doc-model'
 import type { FilesApi } from '@use-brian/core'
 import { withFeedTransaction, readFeedCopy, requireFeedComposition, assertFeedFiles, FeedCollaborationError, type FeedActor, type StructuredFeedContent } from '../db/feed-collaboration-store.js'
 import { query } from '../db/client.js'
-export type FeedReadinessIssue = { code: 'unfinished_slot' | 'empty_post' | 'text_limit' | 'media_limit' | 'duplicate_media' | 'unsupported_format' | 'invalid_thread' | 'article_fields'; target: FeedTarget }
+export type FeedReadinessIssue = { code: FeedLinkedInIssue['code'] | 'unfinished_slot' | 'empty_post' | 'text_limit' | 'media_limit' | 'duplicate_media' | 'unsupported_format' | 'invalid_thread' | 'article_fields'; target: FeedTarget }
 export function feedOutputProjection(content: StructuredFeedContent, platform: string) {
   const projection = projectFeed(content.composition); const issues: FeedReadinessIssue[] = []
+  if (platform === 'linkedin') {
+    const linkedin = projectFeedLinkedIn(content.composition, content.linkedin, content)
+    const missing = walkFeed(content.composition).filter(r => r.node.type === 'generationPlaceholder').map(r => ({ kind: 'block' as const, segmentId: r.segmentId, blockId: r.node.attrs.id }))
+    return { ...projection, text: linkedin.text, plainText: linkedin.text, threadSegments: [linkedin.text], html: feedCompositionHtml(content.composition),
+      issues: linkedin.blockers.map(issue => ({ code: issue.code, target: { kind: 'post' as const } })), missing,
+      manualArticle: linkedin.mode === 'newsletter_edition' || linkedin.mode === 'legacy_article', platform,
+      postFormat: content.postFormat, article: content.article, linkedin }
+  }
   const format = content.postFormat ?? 'post'; const rows = walkFeed(content.composition)
   const missing = rows.filter(item => item.node.type === 'generationPlaceholder').map(item => ({ kind: 'block' as const, segmentId: item.segmentId, blockId: item.node.attrs.id }))
   issues.push(...missing.map(target => ({ code: 'unfinished_slot' as const, target })))
@@ -25,7 +33,7 @@ export function feedOutputProjection(content: StructuredFeedContent, platform: s
   }
   if (projection.media.length > (FEED_MEDIA_CAPS[platform] ?? 1)) issues.push({ code: 'media_limit', target: { kind: 'post' } })
   if (new Set(projection.media.map(item => item.fileId)).size !== projection.media.length) issues.push({ code: 'duplicate_media', target: { kind: 'post' } })
-  return { ...projection, plainText: plainSegments.join('\n\n'), html: feedCompositionHtml(content.composition), issues, missing, manualArticle, platform, postFormat: format, article: content.article }
+  return { ...projection, linkedin: undefined, plainText: plainSegments.join('\n\n'), html: feedCompositionHtml(content.composition), issues, missing, manualArticle, platform, postFormat: format, article: content.article }
 }
 export function feedXLength(text: string): number {
   const points = (value: string) => [...value].reduce((sum, char) => { const p = char.codePointAt(0)!; return sum + (p <= 4351 || p >= 8192 && p <= 8205 || p >= 8208 && p <= 8223 || p >= 8242 && p <= 8247 ? 1 : 2) }, 0)
@@ -42,7 +50,7 @@ export async function readFeedSaveProjection(actor: FeedActor, expectedRevision:
   return withFeedTransaction(actor, async (client, scope) => {
     const copy = await readFeedCopy(client, actor.sessionId)
     if (!copy || !Number.isSafeInteger(expectedRevision) || copy.revision !== expectedRevision) throw new FeedCollaborationError(409, 'revision_conflict')
-    const content = requireFeedComposition(copy.content); await assertFeedFiles(client, actor, scope, content.composition)
+    const content = requireFeedComposition(copy.content); await assertFeedFiles(client, actor, scope, content.composition, [], content.linkedin)
     return { projection: feedOutputProjection(content, platform), canonical: { revision: copy.revision, content } satisfies FeedSavedCanonical }
   })
 }
@@ -65,7 +73,7 @@ export async function exportFeedArticle(actor: FeedActor, expectedRevision: numb
   const saved = await withFeedTransaction(actor, async (client, scope) => {
     const copy = await readFeedCopy(client, actor.sessionId)
     if (!copy || copy.revision !== expectedRevision) throw new FeedCollaborationError(409, 'revision_conflict')
-    const content = requireFeedComposition(copy.content); await assertFeedFiles(client, actor, scope, content.composition)
+    const content = requireFeedComposition(copy.content); await assertFeedFiles(client, actor, scope, content.composition, [], content.linkedin)
     const projection = projectFeed(content.composition)
     if (projection.missingSlots.length && !acknowledgeOmissions) throw new FeedCollaborationError(409, 'acknowledge_omitted_slots')
     return { content, projection, scope }
@@ -81,7 +89,7 @@ export async function exportFeedArticle(actor: FeedActor, expectedRevision: numb
     zip.file(assetPath(media.fileId, media.mimeType), result.value.bytes, { date })
   }
   // Recheck after potentially slow byte reads before exposing the archive.
-  await withFeedTransaction(actor, (client, scope) => assertFeedFiles(client, actor, scope, saved.content.composition), false)
+  await withFeedTransaction(actor, (client, scope) => assertFeedFiles(client, actor, scope, saved.content.composition, [], saved.content.linkedin), false)
   const html = feedCompositionHtml(saved.content.composition, assetPath)
   zip.file('article.html', `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Article</title><style>body{max-width:72ch;margin:2rem auto;padding:0 1rem;font:18px/1.6 system-ui}img{max-width:100%;height:auto}</style></head><body>${html}</body></html>`, { date })
   return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE', compressionOptions: { level: 6 }, platform: 'UNIX' })

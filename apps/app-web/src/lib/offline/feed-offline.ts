@@ -1,5 +1,5 @@
 import { applyFeedEdits, importLegacyFeed, projectFeed, diffFeedComposition, duplicateFeedNode, feedParagraph, proposeFeedReplacement, walkFeed } from '@use-brian/doc-model';
-import { feedMediaSchema, type FeedComposition, type FeedCommand, type FeedCommandRequest, type FeedEdit, type FeedCollaborationReceipt } from '@use-brian/shared';
+import { feedMediaSchema, type FeedLinkedInContext, type FeedComposition, type FeedCommand, type FeedCommandRequest, type FeedEdit, type FeedCollaborationReceipt } from '@use-brian/shared';
 /** Durable Feed working copies and reconnect replay. [COMP:app-web/feed-offline] */
 import { authFetch } from "@/lib/auth-fetch";
 import type { FeedDraftSessionSummary } from "@/lib/api/feed";
@@ -14,6 +14,7 @@ export const FEED_LOCAL_CHANGED = "feed:local-changed";
 export type FeedWorkingContent = {
   sourceSensitivity?: 'public' | 'internal' | 'confidential'; selectedMemoryIds?: string[];
   sourceCompartments?: string[]; sourceProjectIds?: string[]; sourceFileIds?: string[]; sourceMemoryIds?: string[];
+  linkedin?: FeedLinkedInContext;
   schemaVersion?: 2; composition?: FeedComposition; goalId?: string | null; reviewMonth?: string;
   title: string; privateBrief: string; text: string; textEdited?: boolean; postFormat: FeedPostFormat;
   threadSegments: string[]; article: FeedArticleFields; media: PostMedia[];
@@ -334,6 +335,8 @@ function applyQueuedFeedCommands(current: LocalFeedPost, commands: FeedCommand[]
       } else if (command.kind === 'edit') {
         if (!content.composition) throw new Error('Upgrade required');
         content = { ...content, composition: applyFeedEdits(content.composition, command.edits).composition };
+      } else if (command.kind === 'linkedin') {
+        content = { ...content, linkedin: command.metadata ?? undefined, postFormat: command.metadata?.mode === 'post' ? 'post' : command.metadata ? 'article' : content.postFormat };
       } else if (command.kind === 'context') {
         const { kind: _kind, ...patch } = command; content = { ...content, ...patch };
       }

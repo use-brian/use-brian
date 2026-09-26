@@ -97,10 +97,11 @@ export function buildFeedCollaborationTools(context: FeedTurnContext, sourceMess
       async execute(input) {
         const current = await live()
         for (const command of input.commands) {
+          if (command.kind === 'linkedin' && context.reference.target && context.reference.target.kind !== 'post') throw new FeedCollaborationError(403, 'selection_scope_mismatch')
           if (command.kind === 'release') throw new FeedCollaborationError(403, 'dedicated_release_required')
           if (command.kind === 'edit' || command.kind === 'propose') selectedEdits(context, command.edits)
           if (command.kind === 'decide') { const suggestion = current.suggestions.find(s => s.id === command.suggestionId); if (!suggestion) throw new FeedCollaborationError(404, 'suggestion_not_found'); selectedEdits(context, suggestion.edits) }
-          if (context.reference.target?.kind === 'range' && ['undo', 'context', 'upgrade'].includes(command.kind)) throw new FeedCollaborationError(403, 'selection_scope_mismatch')
+          if (context.reference.target?.kind === 'range' && ['undo', 'context', 'upgrade', 'linkedin'].includes(command.kind)) throw new FeedCollaborationError(403, 'selection_scope_mismatch')
         }
         return { data: await feedCommand({ ...context.actor, kind: 'user' }, { ...input, commands: input.commands.map(command => command.kind === 'edit' || command.kind === 'propose' ? { ...command, applicationId: context.applicationId } : command) }) }
       } }),

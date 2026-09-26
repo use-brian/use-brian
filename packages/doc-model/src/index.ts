@@ -152,3 +152,5 @@ export {
 
 // Feed owns its composition domain; no Page or Office artifact is required.
 export * from './feed/model.js'
+
+export * from './feed/linkedin.js'
