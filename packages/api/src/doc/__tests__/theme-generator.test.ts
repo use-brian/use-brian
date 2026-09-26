@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import type { LLMProvider, StreamChunk } from '@use-brian/core'
 import { CORE_TOKENS } from '@use-brian/shared'
 
@@ -32,6 +32,22 @@ const VALID_SEED =
   '{"name":"Deep Focus","description":"Calm oceanic blues.","primary":"#0EA5E9","accent":"#14B8A6","neutral":"#0F2A3A","mood":"muted"}'
 
 describe('[COMP:doc/theme-generator] generateCustomTheme', () => {
+  it.each(['', 'make it dark'])('sends icon bytes as an image with direction %s', async (prompt) => {
+    const provider = mockProvider(VALID_SEED)
+    const stream = vi.spyOn(provider, 'stream')
+    const image = { mimeType: 'image/png', data: 'aWNvbg==' }
+    const result = await generateCustomTheme({ provider, prompt, image, model: 'vision' })
+    expect(stream).toHaveBeenCalledWith(expect.objectContaining({
+      model: 'vision',
+      messages: [{ role: 'user', content: [
+        { type: 'text', text: expect.stringContaining(prompt || 'None') },
+        { type: 'image', ...image },
+      ] }],
+    }))
+    expect(result.seed.primary).toBe('#0EA5E9')
+    expect(Object.keys(result.tokens.light).sort()).toEqual([...CORE_TOKENS].sort())
+  })
+
   it('parses a seed and builds full light+dark tokens', async () => {
     const result = await generateCustomTheme({
       provider: mockProvider(VALID_SEED),

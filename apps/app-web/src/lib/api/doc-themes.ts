@@ -62,6 +62,9 @@ export type DocThemeErrorCode =
   | "limit_reached"
   | "generation_failed"
   | "unavailable"
+  | "no_workspace_icon"
+  | "unusable_workspace_icon"
+  | "theme_model_no_vision"
   | "unknown";
 
 export class DocThemeError extends Error {
@@ -74,6 +77,7 @@ export class DocThemeError extends Error {
 }
 
 function errorCodeForStatus(status: number, body: { code?: string }): DocThemeErrorCode {
+  if (body.code === "no_workspace_icon" || body.code === "unusable_workspace_icon" || body.code === "theme_model_no_vision") return body.code;
   if (status === 409 || body.code === "theme_limit_reached") return "limit_reached";
   if (status === 422) return "generation_failed";
   if (status === 503) return "unavailable";
@@ -104,16 +108,18 @@ export async function listDocThemes(workspaceId: string): Promise<DocTheme[]> {
   return body.themes;
 }
 
+export type CreateDocThemeInput = string | { fromIcon: true; prompt?: string };
+
 export async function createDocTheme(
   workspaceId: string,
-  prompt: string,
+  input: CreateDocThemeInput,
 ): Promise<DocTheme> {
   const res = await authFetch(
     `${API_URL}/api/workspaces/${workspaceId}/doc-themes`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ prompt }),
+      body: JSON.stringify(typeof input === "string" ? { prompt: input } : input),
     },
   );
   const body = await readJson<{ theme: DocTheme }>(res);

@@ -8,6 +8,7 @@ import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 // embedded UsageSection block (the old standalone ws-usage entry).
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import {
   CreditCardIcon,
   SparklesIcon,
@@ -707,12 +708,12 @@ export function BillingSection() {
       <div className="border-t border-border pt-6">
         <p className="text-sm text-muted-foreground">
           {t.settings.billing.promoPrompt}{" "}
-          <a
+          <Link
             href={`/redeem?ws=${encodeURIComponent(workspaceId)}`}
             className="text-foreground underline hover:no-underline"
           >
             {t.settings.billing.promoCta}
-          </a>
+          </Link>
           .
         </p>
       </div>

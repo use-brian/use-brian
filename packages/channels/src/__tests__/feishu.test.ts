@@ -189,16 +189,29 @@ describe('[COMP:channels/feishu] outbound delivery', () => {
     expect(api.send.mock.calls[2][1]).toEqual({ text: 'Could not attach report.txt.' })
   })
 
-  it('edits the first chunk and sends overflow as new reply chunks', async () => {
+  it('edits plain-text progress and sends overflow as plain reply chunks', async () => {
     const api = makeApi()
     const adapter = createFeishuAdapter({ api })
     await adapter.editMessage('oc_chat', 'om_status', {
       text: `${'x'.repeat(3995)}\n${'y'.repeat(30)}`,
-      format: 'markdown',
+      format: 'plain',
     }, { threadTs: 'om_trigger' })
     expect(api.editMessage).toHaveBeenCalledTimes(1)
     expect(api.send).toHaveBeenCalledTimes(1)
+    expect(api.send.mock.calls[0][1]).toEqual({ text: 'y'.repeat(30) })
     expect(api.send.mock.calls[0][2]).toMatchObject({ replyTo: 'om_trigger' })
+  })
+
+  it('refuses to flatten Markdown into Feishu plain-text edits', async () => {
+    const api = makeApi()
+    const adapter = createFeishuAdapter({ api })
+
+    await expect(adapter.editMessage('oc_chat', 'om_status', {
+      text: '**Formatted answer**',
+      format: 'markdown',
+    })).rejects.toThrow('rich-text posts')
+    expect(api.editMessage).not.toHaveBeenCalled()
+    expect(api.send).not.toHaveBeenCalled()
   })
 
   it('uses editable status, recall, delete, and reactions', async () => {

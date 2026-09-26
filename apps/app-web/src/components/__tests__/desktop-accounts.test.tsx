@@ -10,7 +10,7 @@ import type { DesktopAccount } from "@/lib/desktop-auth-source";
 const confirm = vi.hoisted(() => vi.fn());
 vi.mock("@/components/ui/confirm-dialog", () => ({ confirmDialog: confirm }));
 const rows: DesktopAccount[] = [
-  { key: "cloud:one", id: "one", name: "Example User", email: "person@example.com", appUrl: "https://app.usebrian.ai", deployment: "cloud", active: false },
+  { key: "cloud:one", id: "one", name: "Example User", email: "person@example.com", avatarUrl: "https://cdn.example/avatar.png", appUrl: "https://app.usebrian.ai", deployment: "cloud", active: false },
   { key: "local:one", id: "one", name: "Example User", email: "person@example.com", appUrl: "http://localhost:3003", deployment: "local", active: true },
   { key: "remote:one", id: "one", name: "Example User", email: "person@example.com", appUrl: "https://brain.example.com", deployment: "self-hosted", active: false },
 ];
@@ -33,6 +33,7 @@ describe("[COMP:app-web/desktop-accounts] account provenance and switching", () 
   it("distinguishes matching emails by chips and visible deployment addresses", async () => {
     await render();
     expect(host.textContent).toContain("Self-hosted");
+    expect(host.querySelector<HTMLImageElement>('img[src="https://cdn.example/avatar.png"]')).not.toBeNull();
     const accountButtons = [...host.querySelectorAll("button")].filter((button) => button.getAttribute("aria-label")?.startsWith("person@example.com"));
     expect(accountButtons).toHaveLength(3);
     expect(accountButtons.map((button) => button.getAttribute("aria-current"))).toEqual([null, "true", null]);

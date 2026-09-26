@@ -108,6 +108,8 @@ export {
 export {
   runMediaUnderstanding,
   runFrameBatchUnderstanding,
+  documentModelForMediaBackend,
+  GEMINI_VISION_MODEL,
   DASHSCOPE_VISION_MODEL,
   DASHSCOPE_ASR_MODEL,
   type MediaBackend,
@@ -148,3 +150,8 @@ export * from './association/programme-catalogue.js'
 
 export { askQuestionSchema, formatAssistantQuestion, type AssistantQuestion } from './tools/base/ask-question.js'
 export * from './association/site-content.js'
+
+// Temporary opt-in, content-free document extraction diagnostics.
+export { debugDocumentFlow } from './engine/document-flow-debug.js'
+
+export { summarizeProviderError, type ProviderErrorCategory, type ProviderErrorSummary } from './providers/provider-error-summary.js'

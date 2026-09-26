@@ -53,6 +53,7 @@ import { format } from "@/lib/i18n/format";
 import { isOssEdition, isHostedEdition } from "@/lib/edition";
 import { useWorkspaceContext } from "@/lib/workspace-context";
 import { primaryAuthUrl } from "@/lib/primary-auth";
+import { desktopAuthSource, isDesktopAuth } from "@/lib/desktop-auth-source";
 
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
@@ -76,6 +77,13 @@ export function AccountSection() {
       setUserInfo(info);
       setName(info.name ?? "");
     }
+    // Existing packaged sessions predate the native avatar field. One
+    // background refresh upgrades that encrypted record and repaints this
+    // section without requiring a sign-out/reinstall. `null` means the account
+    // intentionally has no photo; `undefined` means the old record never knew.
+    if (isDesktopAuth() && (!info || info.avatarUrl === undefined)) {
+      void refreshUserInfo().catch(() => {});
+    }
   }, []);
 
   const displayLabel = userInfo?.name || userInfo?.email || "";
@@ -86,6 +94,17 @@ export function AccountSection() {
    * dev/OSS refresh in place, then sync the module cache + local state.
    */
   async function refreshUserInfo(): Promise<UserInfo | null> {
+    if (isDesktopAuth()) {
+      const outcome = await desktopAuthSource.refresh();
+      if (outcome.kind !== "ok") throw new Error("profile_refresh_failed");
+      const info = getUserInfo();
+      if (!info) throw new Error("profile_refresh_failed");
+      setUserInfoCache(info);
+      setUserInfo(info);
+      setName(info.name ?? "");
+      return info;
+    }
+
     if (typeof window !== "undefined") {
       const plan = planProfileRefresh(primaryAuthUrl(), window.location.href);
       if (plan.kind === "redirect") {

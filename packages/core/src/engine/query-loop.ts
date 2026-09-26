@@ -1,3 +1,4 @@
+import { debugDocumentFlow, withDocumentFlowDebug } from './document-flow-debug.js'
 import { askQuestionSchema } from '../tools/base/ask-question.js'
 import { filterToolsByCapabilities } from '../tools/capability-gate.js'
 import { getHeapStatistics } from 'node:v8'
@@ -582,7 +583,10 @@ export async function* queryLoop(options: QueryLoopOptions): AsyncGenerator<Quer
   }
 
   try {
-    yield* queryLoopCore({ ...options, tools: filterToolsByCapabilities(options.tools, toolContext.activeCapabilities ?? new Set()), context: toolContext, stallWatchdog: watchdog ?? undefined })
+    debugDocumentFlow('tool_availability', { sessionId: options.context.sessionId, phase: 'before_filter', declarations: options.tools.values() })
+    const filteredTools = filterToolsByCapabilities(options.tools, toolContext.activeCapabilities ?? new Set())
+    debugDocumentFlow('tool_availability', { sessionId: options.context.sessionId, phase: 'after_filter', declarations: filteredTools.values() })
+    yield* withDocumentFlowDebug(options.context.sessionId, queryLoopCore({ ...options, tools: filteredTools, context: toolContext, stallWatchdog: watchdog ?? undefined }))
   } finally {
     watchdog?.dispose()
     const results = await Promise.allSettled(
@@ -851,6 +855,7 @@ async function* queryLoopCore(
             : { turn, messages: statelessHistory, full: true },
         ),
       )
+      debugDocumentFlow('request', { sessionId: context.sessionId, model, turn, mode: session ? 'stateful_delta' : 'stateless_full', messages: session ? nextMessages : statelessHistory })
       const modelStream = session
         ? session.send(nextMessages, sendOpts)
         : provider.stream({
@@ -977,6 +982,7 @@ async function* queryLoopCore(
         if (completed.blocks.length > 0) {
           noteTransientResults(completed.metaByToolUseId)
           allToolResults.push(...completed.blocks)
+          debugDocumentFlow('tool_result', { sessionId: context.sessionId, turn, messages: [{ role: 'user', content: completed.blocks }] })
           yield { type: 'tool_result', id: '', results: completed.blocks, metaByToolUseId: completed.metaByToolUseId }
           const citations = extractCitationsFromToolResults(completed.blocks)
           if (citations.length > 0) {
@@ -1005,6 +1011,7 @@ async function* queryLoopCore(
         }
       }
     } catch (err) {
+      debugDocumentFlow('stream_error', { sessionId: context.sessionId, model, turn, error: true, providerError: stallWatchdog?.error ?? err, timeout: !!stallWatchdog?.error, aborted: context.abortSignal?.aborted })
       // Layer 4: reactive compact on context overflow — compact and retry once
       if (isContextOverflowError(err) && !hasAttemptedReactiveCompact && options.compactModel) {
         hasAttemptedReactiveCompact = true
@@ -1016,6 +1023,7 @@ async function* queryLoopCore(
             messages: nextMessages,
             systemPrompt: renderSystemContext({ systemPrompt, runtimeSystemContext }),
           })
+          debugDocumentFlow('compaction', { sessionId: context.sessionId, model, turn, before: nextMessages, messages: [compactResult.boundaryMessage] })
           nextMessages = [compactResult.boundaryMessage]
           if (options.stateless) statelessHistory = [compactResult.boundaryMessage]
           continue // retry the API call with compacted messages
@@ -1099,6 +1107,7 @@ async function* queryLoopCore(
     }
 
     const response = accumulator.finish()
+    debugDocumentFlow('response', { sessionId: context.sessionId, model: response.model, turn, messages: [{ role: 'assistant', content: response.content }], stopReason: response.stopReason, usage: response.usage, truncated: response.stopReason === 'max_tokens' || response.stopReason === 'incomplete' })
     addUsage(totalUsage, response.usage, response.model)
 
     // ── Turn-boundary instruction-leak sanitiser ────────────────
@@ -1162,6 +1171,7 @@ async function* queryLoopCore(
       if (results.blocks.length > 0) {
         noteTransientResults(results.metaByToolUseId)
         allToolResults.push(...results.blocks)
+        debugDocumentFlow('tool_result', { sessionId: context.sessionId, turn, messages: [{ role: 'user', content: results.blocks }] })
         yield { type: 'tool_result', id: '', results: results.blocks, metaByToolUseId: results.metaByToolUseId }
         const citations = extractCitationsFromToolResults(results.blocks)
         if (citations.length > 0) {
@@ -1636,11 +1646,14 @@ async function* queryLoopCore(
         if (planSt && planSt.open > 0) {
           const cap = options.planNudgeCap ?? 3
           const toolsLeft = loopDetector.totalToolCalls < maxToolCalls
+          // `tools` has already passed the model visibility/capability gate.
+          // A persisted plan is not authorization to restore its updater.
+          const canUpdatePlan = tools.has('updatePlanStep')
           const list = planSt.openSteps
             .slice(0, 10)
             .map((s) => (s.description ? `${s.key} (${s.description})` : s.key))
             .join('; ')
-          if (!planHandoffDone && planNudges < cap && turn + 2 < maxTurns && toolsLeft) {
+          if (canUpdatePlan && !planHandoffDone && planNudges < cap && turn + 2 < maxTurns && toolsLeft) {
             planNudges++
             suppressText = false
             nextMessages = [{
@@ -1662,9 +1675,14 @@ async function* queryLoopCore(
             nextMessages = [{
               role: 'user',
               content:
-                `Budget for this task is nearly spent and ${planSt.open} step(s) remain (${list}). ` +
-                `Stop working now and tell the user, in their language: what you finished, what is ` +
-                `still open, and that they can reply "continue" to finish the rest. Keep it brief.`,
+                !canUpdatePlan
+                  ? `Plan updates are unavailable in this turn; ${planSt.open} step(s) remain recorded as open (${list}). ` +
+                    `Do not call unavailable tools or claim the plan was updated. Stop working and give a brief, honest handoff: ` +
+                    `report verified results, distinguish completed work from unresolved plan status, and explain what remains ` +
+                    `and that continuing plan updates requires an authorized tool surface. Do not claim unfinished work is done.`
+                  : `Budget for this task is nearly spent and ${planSt.open} step(s) remain (${list}). ` +
+                    `Stop working now and tell the user, in their language: what you finished, what is ` +
+                    `still open, and that they can reply "continue" to finish the rest. Keep it brief.`,
             }]
             if (options.stateless) {
               statelessHistory.push({ role: 'assistant', content: response.content })

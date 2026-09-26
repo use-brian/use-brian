@@ -5,7 +5,17 @@ import type { StoredTokens } from "../desktop-token-store.js";
 
 const cloud: AccountTarget = { kind: "cloud", appUrl: "https://app.usebrian.ai", apiUrl: "https://api.usebrian.ai", auth: "pkce" };
 const local: AccountTarget = { kind: "local", appUrl: "http://localhost:3003", apiUrl: "http://localhost:4000", auth: "local-session" };
-const tokens = (id: string, refreshToken = "refresh"): StoredTokens => ({ accessToken: "access", refreshToken, accessTokenExpiresAt: 1000, user: { id, name: "Example User", email: "person@example.com" } });
+const tokens = (id: string, refreshToken = "refresh"): StoredTokens => ({
+  accessToken: "access",
+  refreshToken,
+  accessTokenExpiresAt: 1000,
+  user: {
+    id,
+    name: "Example User",
+    email: "person@example.com",
+    avatarUrl: "https://cdn.example/avatar.png",
+  },
+});
 function setup(available = true) {
   let disk: Buffer = Buffer.alloc(0);
   const cipher = { isAvailable: () => available, encryptString: (text: string) => Buffer.from(text).reverse(), decryptString: (blob: Buffer) => Buffer.from(blob).reverse().toString() };
@@ -22,6 +32,7 @@ describe("[COMP:app-desktop/deployment-accounts] saved sessions", () => {
     expect(rows).toHaveLength(2);
     expect(rows.map((row) => row.active)).toEqual([false, true]);
     expect(new Set(rows.map((row) => row.key)).size).toBe(2);
+    expect(rows.every((row) => row.avatarUrl === "https://cdn.example/avatar.png")).toBe(true);
     expect(JSON.stringify(rows)).not.toContain("secret");
     expect(bytes().toString()).not.toContain("cloud-secret");
     expect(store.current(cloud)?.refreshToken).toBe("cloud-secret");

@@ -106,6 +106,7 @@ describe('[COMP:recordings/frame-analysis] frame analysis', () => {
       })
       const result = await analyze({ sourceUrl: 'https://x.example/v', durationMs: 150_000 })
       expect(runBatch).toHaveBeenCalledTimes(2) // 12 + 3
+      expect(runBatch.mock.calls[0][1].model).toBe('gemini-3.8-flash')
       expect(result?.usages).toHaveLength(2)
       // Batch 2's "Frame 3" is batch-local: frames[12 + 2] = 140s.
       expect(result?.moments).toEqual([

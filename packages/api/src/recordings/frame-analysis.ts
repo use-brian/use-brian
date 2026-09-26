@@ -19,6 +19,7 @@
 // Spec: docs/architecture/media/transcription.md -> "Video frame analysis".
 
 import {
+  GEMINI_VISION_MODEL,
   runFrameBatchUnderstanding,
   type FrameBatchRequest,
   type MediaBackend,
@@ -50,8 +51,6 @@ export type RecordingFrameAnalyzer = (args: {
 /** Frames per vision call. Descriptions stay short, so 12 frames fit well
  *  inside one call's output budget and keep a failed batch's blast radius small. */
 const FRAMES_PER_BATCH = 12
-/** Mirrors the media distiller's default (`files/distill.ts` DEFAULT_MODEL). */
-const FRAME_VISION_MODEL = 'gemini-2.5-flash'
 const BATCH_MAX_OUTPUT_TOKENS = 2048
 const BATCH_TIMEOUT_MS = 120_000
 
@@ -171,7 +170,7 @@ export function createRecordingFrameAnalyzer(deps: CreateFrameAnalyzerDeps): Rec
       const result = await runBatch(backend, {
         frames: batch.map((f) => ({ buffer: f.buffer, mime: f.mime })),
         prompt: buildFrameBatchPrompt(batch, language ? { language } : undefined),
-        model: deps.model ?? FRAME_VISION_MODEL,
+        model: deps.model ?? GEMINI_VISION_MODEL,
         maxOutputTokens: BATCH_MAX_OUTPUT_TOKENS,
         timeoutMs: BATCH_TIMEOUT_MS,
         errorLabel: 'recording frame analysis',

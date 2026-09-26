@@ -56,10 +56,16 @@ describe("[COMP:app-desktop/desktop-accounts] cookie parsing", () => {
       id: "u1",
       name: "Ada",
       email: "ada@x.io",
+      avatarUrl: "https://cdn.example/avatar.png",
       plan: "max_5x",
       effectivePlan: "max_5x",
     });
-    expect(parseUserCookieValue(raw)).toEqual({ id: "u1", name: "Ada", email: "ada@x.io" });
+    expect(parseUserCookieValue(raw)).toEqual({
+      id: "u1",
+      name: "Ada",
+      email: "ada@x.io",
+      avatarUrl: "https://cdn.example/avatar.png",
+    });
   });
 
   it("rejects a user cookie with no id or email (legacy / malformed)", () => {

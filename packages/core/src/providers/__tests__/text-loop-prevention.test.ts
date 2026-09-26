@@ -216,12 +216,12 @@ describe('[COMP:providers/text-loop] Text loop prevention', () => {
     expect(looping).toBe(false)
   })
 
-  it('converts a token-capped restart loop into a clean end_turn (the prod incident)', async () => {
+  it('marks a token-capped restart loop incomplete (the prod incident)', async () => {
     // Reproduces session abab9918: the model restarted its whole answer until
     // the output-token cap and the stream ended on `max_tokens` mid-sentence.
     // The repeat period (~65 words) exceeds the 100-word n-gram window, so only
     // the block-restart detector fires. With it, the wrapper aborts the loop and
-    // synthesizes a clean `end_turn` instead of passing the truncated cap through.
+    // marks the truncated output `incomplete`.
     const answer =
       'I found the issue with the failing workflow configuration after a careful review. ' +
       'The steps were pointed at an assistant name instead of a valid identifier, which ' +
@@ -248,8 +248,8 @@ describe('[COMP:providers/text-loop] Text loop prevention', () => {
     }))
 
     // Pre-fix this passed straight through as `max_tokens`; the block-restart
-    // detector fires (both attempts loop) and synthesizes a clean terminus.
-    expect(response.stopReason).toBe('end_turn')
+    // detector fires and reports the incomplete prefix.
+    expect(response.stopReason).toBe('incomplete')
     const text = response.content
       .filter((b) => b.type === 'text')
       .map((b) => b.type === 'text' ? b.text : '')
@@ -358,7 +358,7 @@ describe('[COMP:providers/text-loop] Text loop prevention', () => {
     // Truncated: the emitted prefix survives, the loop tail does not.
     expect(text.startsWith('Status:')).toBe(true)
     expect(text.length).toBeLessThan(answer.length)
-    expect(response.stopReason).toBe('end_turn')
+    expect(response.stopReason).toBe('incomplete')
   })
 
   it('truncates rather than duplicating once text is downstream', async () => {
@@ -389,7 +389,7 @@ describe('[COMP:providers/text-loop] Text loop prevention', () => {
     expect(text).toContain('honest summary')
     expect(text.match(/honest summary/g)).toHaveLength(1)
     expect(text.startsWith(opening)).toBe(true)
-    expect(response.stopReason).toBe('end_turn')
+    expect(response.stopReason).toBe('incomplete')
   })
 
   it('still retries when the loop starts before anything is emitted', async () => {
@@ -495,5 +495,102 @@ describe('[COMP:providers/text-loop] Layout runs of rule characters are not loop
     const text = 'Result: ' + 'a'.repeat(40)
     const out = await passThrough(text, 2)
     expect(out.length).toBeLessThan('Result: '.length + 12)
+  })
+})
+
+describe('[COMP:providers/text-loop] OCR comparison tables', () => {
+  const header = '| Field name | Template value | Document value | Comparison status |\n| --- | --- | --- | --- |\n'
+  const fields = ['Account holder', 'Account number', 'Bank name', 'Branch address', 'Currency', 'Signature']
+  const table = (count: number, account = 1) => header + Array.from({ length: count }, (_, i) =>
+    `| ${fields[i] ?? `Additional field ${i}`} | Account ${account} value ${i} | Pending OCR | Pending OCR |\n`).join('')
+
+  it.each([1, 7, 83, 100000])('preserves six and 58 differing fields, chunk size %s', async size => {
+    for (const count of [6, 58]) {
+      const text = table(count)
+      expect(await passThrough(text, size)).toBe(text)
+    }
+  })
+
+  it.each([1, 31, 100000])('preserves shared headers and field names across varied accounts (%s)', async size => {
+    const text = [1, 2, 3, 4].map(account => table(6, account)).join('\n')
+    expect(await passThrough(text, size)).toBe(text)
+  })
+
+  it('supports omitted outer pipes, incomplete last rows and both fence styles', async () => {
+    for (const fence of ['', '```markdown\n', '~~~markdown\n']) {
+      const body = table(6).split('\n').map(line => line.replace(/^\| /, '').replace(/ \|$/, '')).join('\n')
+      const text = fence + body + (fence ? fence.slice(0, 3) + '\n' : '') + 'Done.'
+      expect(await passThrough(text, 1)).toBe(text)
+    }
+    const partial = table(6) + '| Another field | Pending OCR | Pending OCR'
+    expect(await passThrough(partial, 1)).toBe(partial)
+  })
+
+  it('keeps a long stream of distinct rows intact across the detection window', async () => {
+    const text = table(1200)
+    expect(text.length).toBeGreaterThan(64 * 1024)
+    expect(await passThrough(text, 4096)).toBe(text)
+    const noOuterPipes = text.replace(/^\| /gm, '').replace(/ \|$/gm, '')
+    expect(await passThrough(noOuterPipes, 4096)).toBe(noOuterPipes)
+  })
+
+  it.each([1, 19, 100000])('detects identical complete rows and table blocks (%s), without replay', async size => {
+    for (const text of [
+      header + '| Account number | Pending OCR | Pending OCR | Pending OCR |\n'.repeat(12),
+      (table(6) + '\n').repeat(4),
+      'Comparison results:\n\n' + (table(58) + '\n').repeat(4),
+      '```markdown\n' + '| Same row | Pending OCR |\n'.repeat(12) + '```',
+      'A prose introduction. ' + 'the same phrase again '.repeat(20),
+      table(6) + 'the same phrase again '.repeat(20),
+    ]) {
+      let attempts = 0
+      const inner: StreamFn = async function* () {
+        attempts++
+        yield* mockStream(textChunks(['Opening.\n', ...charChunks(text, size)]))({ model: 'test', messages: [], systemPrompt: '' })
+      }
+      const response = await collectStream(composeWrappers(inner, wrapTextLoopPrevention())({ model: 'test', messages: [], systemPrompt: '' }))
+      const output = response.content.flatMap(b => b.type === 'text' ? [b.text] : []).join('')
+      expect(response.stopReason).toBe('incomplete')
+      expect(attempts).toBe(1)
+      expect(output.length).toBeLessThan(text.length + 'Opening.\n'.length)
+      expect(output.match(/Opening\./g)).toHaveLength(1)
+    }
+  })
+})
+
+describe('[COMP:providers/text-loop] Incomplete output contract', () => {
+  it('does not retry an already-emitted tool call when the first text delta loops', async () => {
+    let attempts = 0
+    const inner: StreamFn = async function* () {
+      attempts++
+      yield { type: 'message_start', model: 'test' }
+      yield { type: 'tool_use_start', id: 'call_1', name: 'write' }
+      yield { type: 'tool_use_delta', id: 'call_1', input: '{}' }
+      yield { type: 'tool_use_end', id: 'call_1' }
+      yield { type: 'text_delta', text: '\b'.repeat(12) }
+      yield { type: 'message_end', stopReason: 'tool_use', usage: { inputTokens: 12, outputTokens: 34 } }
+    }
+    const response = await collectStream(composeWrappers(inner, wrapTextLoopPrevention())({ model: 'test', messages: [], systemPrompt: '' }))
+    expect(attempts).toBe(1)
+    expect(response.stopReason).toBe('incomplete')
+    expect(response.content.filter(b => b.type === 'tool_use')).toHaveLength(1)
+    expect(response.usage).toMatchObject({ inputTokens: 12, outputTokens: 34 })
+  })
+
+  it('marks exhaustion of the safe pre-emission retry incomplete', async () => {
+    let attempts = 0
+    const inner: StreamFn = async function* () {
+      attempts++
+      yield* mockStream(textChunks(['\b'.repeat(12)]))({ model: 'test', messages: [], systemPrompt: '' })
+    }
+    const response = await collectStream(composeWrappers(inner, wrapTextLoopPrevention())({ model: 'test', messages: [], systemPrompt: '' }))
+    expect(attempts).toBe(2)
+    expect(response.stopReason).toBe('incomplete')
+  })
+
+  it('checks the complete final row at EOF without a newline', async () => {
+    const text = '| Field | Value |\n| --- | --- |\n' + Array(3).fill('| Account | Pending OCR |').join('\n')
+    const response = await collectStream(composeWrappers(mockStream(textChunks([...text])), wrapTextLoopPrevention())({ model: 'test', messages: [], systemPrompt: '' }))
+    expect(response.stopReason).toBe('incomplete')
   })
 })

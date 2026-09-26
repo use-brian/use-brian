@@ -1,7 +1,7 @@
 /** Push a committed Office snapshot into doc-sync's authoritative in-memory
  * Y.Doc so connected editors and immutable history cannot diverge.
  * [COMP:api/office-live-sync] */
-import type { OfficeArtifactSnapshot, OfficeCommand } from '@use-brian/office-model'
+import { OfficeUuidSchema, type OfficeArtifactSnapshot, type OfficeCommand } from '@use-brian/office-model'
 import { resolveDocSyncHttp, type DocGatewayOptions } from '../doc/doc-gateway.js'
 
 export async function replaceLiveOfficeSnapshot(
@@ -61,4 +61,30 @@ export async function applyLiveOfficeSuggestion(
   } finally {
     clearTimeout(timer)
   }
+}
+
+/** Read-only retry repair: failure/disabled never authorizes an acceptance. */
+export async function officeSuggestionApplied(
+  artifactId: string,
+  suggestionId: string,
+  options: DocGatewayOptions = {},
+): Promise<boolean> {
+  if (!OfficeUuidSchema.safeParse(artifactId).success || !OfficeUuidSchema.safeParse(suggestionId).success) return false
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    const resolved = resolveDocSyncHttp(options)
+    if (!resolved) return false
+    const { httpBase, syncSecret, doFetch, timeoutMs } = resolved
+    const controller = new AbortController()
+    timer = setTimeout(() => controller.abort(), timeoutMs)
+    const response = await doFetch(`${httpBase}/internal/office/suggestion-status`, {
+      method: 'POST', redirect: 'error',
+      headers: { 'content-type': 'application/json', 'x-doc-sync-secret': syncSecret },
+      body: JSON.stringify({ artifactId, suggestionId }), signal: controller.signal,
+    })
+    if (!response.ok) return false
+    const result: unknown = await response.json()
+    return typeof result === 'object' && result !== null && !Array.isArray(result) &&
+      Object.keys(result).length === 1 && 'applied' in result && result.applied === true
+  } catch { return false } finally { if (timer) clearTimeout(timer) }
 }

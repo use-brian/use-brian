@@ -129,12 +129,17 @@ export function positionSuggestionPopup(
   anchor: PopupAnchor,
   fallback: PopupSize = { width: 288, height: 320 },
 ): PopupPlacement {
+  // ReactRenderer gives us a plain block-level wrapper. While it is still in
+  // normal flow, `offsetWidth` is the viewport width rather than the width of
+  // the popup rendered inside it, which makes the first clamp pin the popup to
+  // the far-left margin. Absolutely position it first so CSS shrink-to-fit
+  // sizing is in effect before we measure.
+  el.style.position = "absolute";
   const size = {
     width: el.offsetWidth || fallback.width,
     height: el.offsetHeight || fallback.height,
   };
   const placed = clampPopupRect(anchor, size, measureViewport());
-  el.style.position = "absolute";
   el.style.top = `${placed.top + window.scrollY}px`;
   el.style.left = `${placed.left + window.scrollX}px`;
   return placed;

@@ -1,10 +1,13 @@
 /**
- * Read the current user from the `user` cookie. Cloned from
- * apps/web/src/lib/user.ts. The module-level cache survives React
- * remounts so the UI doesn't flash "Guest" on every navigation.
+ * Read the current user from the active auth source. The packaged desktop
+ * renderer has no app-domain cookies, so its encrypted native identity wins;
+ * web and the thin shell keep using the `user` cookie. The module-level cache
+ * survives React remounts so the UI doesn't flash "Guest" on every navigation.
  *
  * [COMP:app-web/user]
  */
+
+import { desktopBridge } from "@/lib/desktop-auth-source";
 
 export type UserInfo = {
   id?: string;
@@ -13,12 +16,19 @@ export type UserInfo = {
   /** Profile photo URL, carried on the shared `.usebrian.ai` `user` cookie. A
    *  hot-linked Google photo or our own avatar-proxy URL; absent → initials.
    *  See `docs/architecture/platform/user-profile.md`. */
-  avatarUrl?: string;
+  avatarUrl?: string | null;
 };
 
 let cachedUser: UserInfo | null = null;
+const userInfoListeners = new Set<(info: UserInfo | null) => void>();
 
 export function getUserInfo(): UserInfo | null {
+  const bridge = desktopBridge();
+  if (bridge?.getCurrentUser) {
+    const native = bridge.getCurrentUser();
+    cachedUser = native;
+    return native;
+  }
   if (typeof document === "undefined") return cachedUser;
   const info = selectActiveUser(document.cookie);
   if (info) cachedUser = info;
@@ -132,10 +142,19 @@ function decodeJwtClaims(token: string): { exp?: number; sub?: string } | null {
 
 export function setUserInfoCache(info: UserInfo | null): void {
   cachedUser = info;
+  for (const listener of userInfoListeners) listener(info);
 }
 
 export function getCachedUserInfo(): UserInfo | null {
   return cachedUser;
+}
+
+/** Subscribe UI that must repaint when a profile refresh replaces the cache. */
+export function subscribeUserInfo(
+  listener: (info: UserInfo | null) => void,
+): () => void {
+  userInfoListeners.add(listener);
+  return () => userInfoListeners.delete(listener);
 }
 
 export function getInitials(nameOrEmail: string): string {

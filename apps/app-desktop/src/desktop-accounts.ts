@@ -33,6 +33,7 @@ export interface AccountDirEntry {
   id: string;
   name: string;
   email: string;
+  avatarUrl?: string | null;
 }
 
 /** A `(directory entry, refresh token)` pair — an account plus the credential to revive it. */
@@ -98,13 +99,22 @@ export function parseAccountDir(raw: string | null | undefined): AccountDirEntry
  * when it is absent / malformed / id-less. Mirrors the web's
  * `parsePrevUserCookie` — a legacy cookie predating the `id` field can't be
  * stashed (no stable key) and is skipped (re-added on its next sign-in). The
- * shell writes `user` as `{ id, name, email, plan, effectivePlan }`
+ * shell writes `user` as `{ id, name, email, avatarUrl, plan, effectivePlan }`
  * (`buildSessionCookies`); we keep only the directory fields.
  */
 export function parseUserCookieValue(raw: string | null | undefined): AccountDirEntry | null {
   const parsed = parseJsonCookie<Partial<AccountDirEntry>>(raw, {} as Partial<AccountDirEntry>);
   if (!parsed.id || !parsed.email) return null;
-  return { id: parsed.id, name: parsed.name ?? parsed.email, email: parsed.email };
+  return {
+    id: parsed.id,
+    name: parsed.name ?? parsed.email,
+    email: parsed.email,
+    ...(
+      typeof parsed.avatarUrl === "string" || parsed.avatarUrl === null
+        ? { avatarUrl: parsed.avatarUrl }
+        : {}
+    ),
+  };
 }
 
 /** Insert or replace (by id) an entry in the directory; returns a new array (mirrors `upsertAccountDir`). */

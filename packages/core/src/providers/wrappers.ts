@@ -1,3 +1,4 @@
+import { debugDocumentFlow } from '../engine/document-flow-debug.js'
 import type { LLMProvider, ProviderSession, SessionOptions, SendOptions, Message, StreamChunk, StreamFn, TokenUsage } from './types.js'
 import { fitMessagesToBudget, resolveInputTokenLimit, isContextOverflowError, MODEL_CONTEXT_FIT_RATIO } from './context-budget.js'
 
@@ -33,6 +34,7 @@ export function wrapContextBudget(): StreamWrapper {
     const inputLimit = request.inputTokenLimit ?? resolveInputTokenLimit(request.model)
     const budget = Math.floor(inputLimit * MODEL_CONTEXT_FIT_RATIO)
     const fitted = fitMessagesToBudget(request.messages, budget)
+    debugDocumentFlow('context_fit', { model: request.model, before: request.messages, messages: fitted.messages, truncated: fitted.trimmed })
     const primaryReq = fitted.trimmed ? { ...request, messages: fitted.messages } : request
 
     let emitted = false
@@ -44,6 +46,7 @@ export function wrapContextBudget(): StreamWrapper {
     } catch (err) {
       if (!emitted && isContextOverflowError(err)) {
         const harder = fitMessagesToBudget(request.messages, Math.floor(budget / 2))
+        debugDocumentFlow('context_fit', { model: request.model, before: request.messages, messages: harder.messages, truncated: harder.trimmed })
         for await (const chunk of inner({ ...request, messages: harder.messages })) {
           yield chunk
         }
@@ -103,7 +106,11 @@ export const DEFAULT_FIRST_CHUNK_MS = 90_000
  */
 export function wrapIdleTimeout(timeoutMs: number, firstChunkTimeoutMs?: number): StreamWrapper {
   return (inner) => async function* (request) {
-    const stream = inner(request)
+    const controller = new AbortController()
+    const signal = request.signal ? AbortSignal.any([request.signal, controller.signal]) : controller.signal
+    // Admission retries share this window; they cannot extend it or become idle replays.
+    const httpRetryWindow = { deadline: Date.now() + (firstChunkTimeoutMs ?? timeoutMs), rateLimited: false }
+    const stream = inner({ ...request, signal, httpRetryWindow })
     const iterator = stream[Symbol.asyncIterator]()
     let timer: ReturnType<typeof setTimeout> | undefined
     let sawFirstDeliverableChunk = false
@@ -116,14 +123,19 @@ export function wrapIdleTimeout(timeoutMs: number, firstChunkTimeoutMs?: number)
         : sawReasoningChunk
           ? ' (reasoning window — no deliverable chunk)'
           : ' (no deliverable chunk — prefill window)'
+      httpRetryWindow.deadline = Date.now() + windowMs
       return new Promise<never>((_, reject) => {
         timer = setTimeout(
-          () =>
-            reject(
-              new Error(
-                `Stream idle for ${windowMs}ms${phase}`,
-              ),
-            ),
+          () => {
+            if (!httpRetryWindow.rateLimited) {
+              debugDocumentFlow('stream_error', { model: request.model, error: true, timeout: true, providerReason: 'idle_timeout' })
+            }
+            const error = httpRetryWindow.rateLimited
+              ? new Error('Gemini API error 429: rate limit admission deadline exhausted')
+              : new Error(`Stream idle for ${windowMs}ms${phase}`)
+            controller.abort(error)
+            reject(error)
+          },
           windowMs,
         )
       })
@@ -142,12 +154,14 @@ export function wrapIdleTimeout(timeoutMs: number, firstChunkTimeoutMs?: number)
           sawReasoningChunk = true
         } else if (result.value.type !== 'message_start') {
           sawFirstDeliverableChunk = true
+          httpRetryWindow.rateLimited = false
         }
         yield result.value
       }
     } finally {
       if (timer) clearTimeout(timer)
-      iterator.return?.()
+      controller.abort()
+      void iterator.return?.().catch(() => {})
     }
   }
 }
@@ -302,23 +316,65 @@ const NGRAM_SIZE = 4
 const NGRAM_REPEAT_THRESHOLD = 3
 const WINDOW_SIZE = 100 // words
 
-/**
- * Markdown table scaffolding — cell separators (`|`) and delimiter cells
- * (`---`, `:---`, `:---:`). Excluded from the token stream because they are
- * layout, not content, and they repeat by construction.
- *
- * A 4-column delimiter row — `| :--- | :--- | :--- | :--- |` — tokenizes to
- * `| :--- | :---` three times over, hitting NGRAM_REPEAT_THRESHOLD on its own.
- * Every table with 4+ columns therefore read as a loop and was truncated at
- * the delimiter row. Prod 2026-07-19 (session `b8e567d6`): a Telegram answer
- * comparing three card tiers died at `| :---` on every attempt.
- *
- * Dropping the separators also lets each row's distinct label break up runs of
- * repeated cell values (`| A | Yes | Yes |` / `| B | Yes | Yes |`), so ordinary
- * tables stop reading as loops — while a genuinely identical row repeated 3×
- * still trips, because its content tokens still align.
- */
+/** Layout-only tokens outside tables are not prose. */
 const TABLE_SCAFFOLD_TOKEN = /^[|:-]+$/
+
+type TextSpan = { start: number; end: number }
+
+/**
+ * Recognize pipe-led rows immediately (including an unfinished streaming row).
+ * Tables without outer pipes become recognizable at their delimiter line.
+ * Only complete rows participate in structural repetition checks. Blank lines
+ * may separate repeated table blocks; headings/prose break the row sequence.
+ * All storage and scans are bounded by TEXT_BUFFER_WINDOW.
+ */
+function tableLayout(text: string, detectLoops = false, initialActive = false): { spans: TextSpan[]; cleanEnd?: number; active: boolean } {
+  const spans: TextSpan[] = []
+  let rows: Array<{ key: string; end: number }> = []
+  let active = initialActive
+  let offset = 0
+  let previous: TextSpan | undefined
+  let cleanEnd: number | undefined
+  const lines = text.split('\n')
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    const complete = i < lines.length - 1
+    const end = offset + line.length + (complete ? 1 : 0)
+    const cells = line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim())
+    const delimiter = cells.length > 1 && cells.every(c => /^:?-{3,}:?$/.test(c))
+    const row = /^\s*\|/.test(line) || delimiter || (active && line.includes('|'))
+    if (delimiter && previous && !spans.some(span => span.start === previous!.start)) {
+      spans.push(previous)
+    }
+    if (row) {
+      spans.push({ start: offset, end })
+      active = true
+      if (complete && row) {
+        rows.push({ key: JSON.stringify(cells), end })
+        // Bound structural work too, even for a window full of tiny rows.
+        if (rows.length > 512) rows = rows.slice(-512)
+        if (detectLoops && !delimiter && cleanEnd === undefined) {
+          const n = rows.length
+          // Three adjacent identical rows OR multi-row blocks. Compare whole
+          // rows, never repeated cells; changing a field/account breaks equality.
+          for (let period = 1; period * 3 <= n; period++) {
+            let equal = true
+            for (let j = n - period * 2; j < n; j++) {
+              if (rows[j].key !== rows[j - period].key) { equal = false; break }
+            }
+            if (equal) { cleanEnd = rows[n - period * 2 - 1].end; break }
+          }
+        }
+      }
+    } else if (line.trim()) {
+      active = false
+      rows = []
+    }
+    previous = { start: offset, end }
+    offset = end
+  }
+  return { spans, cleanEnd, active }
+}
 
 /**
  * Fenced code blocks (``` ... ```) are excluded from n-gram counting entirely.
@@ -354,18 +410,19 @@ function endsInsideFence(text: string): boolean {
 
 function fencedSpans(text: string): Array<{ start: number; end: number }> {
   const spans: Array<{ start: number; end: number }> = []
-  let from = 0
-  for (;;) {
-    const open = text.indexOf('```', from)
-    if (open === -1) break
-    const close = text.indexOf('```', open + 3)
-    if (close === -1) {
-      spans.push({ start: open, end: text.length })
-      break
+  const markers = /^ {0,3}(`{3,}|~{3,})[^\n]*$/gm
+  let open: { start: number; marker: string } | undefined
+  for (const match of text.matchAll(markers)) {
+    const marker = match[1]
+    if (!open) {
+      open = { start: match.index!, marker }
+    } else if (marker[0] === open.marker[0] && marker.length >= open.marker.length
+      && match[0].trim() === marker) {
+      spans.push({ start: open.start, end: match.index! + match[0].length })
+      open = undefined
     }
-    spans.push({ start: open, end: close + 3 })
-    from = close + 3
   }
+  if (open) spans.push({ start: open.start, end: text.length })
   return spans
 }
 
@@ -377,8 +434,8 @@ type Token = { text: string; end: number }
  * recovered it with `fullText.indexOf(word)`, which could resolve to an
  * earlier identical word and trim to the wrong place.
  */
-function tokenize(text: string): Token[] {
-  const fences = fencedSpans(text)
+function tokenize(text: string, tableSpans: TextSpan[]): Token[] {
+  const fences = [...fencedSpans(text), ...tableSpans].sort((a, b) => a.start - b.start)
   let f = 0
   const tokens: Token[] = []
   const re = /\S+/g
@@ -394,8 +451,8 @@ function tokenize(text: string): Token[] {
   return tokens
 }
 
-function detectNgramRepetition(text: string): { looping: boolean; cleanEnd: number } {
-  const tokens = tokenize(text)
+function detectNgramRepetition(text: string, tableSpans: TextSpan[]): { looping: boolean; cleanEnd: number } {
+  const tokens = tokenize(text, tableSpans)
   // Sliding window of the last WINDOW_SIZE tokens (or all of them if shorter).
   const window = tokens.length < WINDOW_SIZE ? tokens : tokens.slice(-WINDOW_SIZE)
   return checkNgrams(window, text)
@@ -446,7 +503,7 @@ function checkNgrams(tokens: Token[], fullText: string): { looping: boolean; cle
 const RESTART_ANCHOR_CHARS = 48 // opening fingerprint length
 const RESTART_MIN_BUFFER = 200 // don't fingerprint a tiny prefix
 
-export function detectBlockRestart(buffer: string): { looping: boolean; cleanEnd: number } {
+export function detectBlockRestart(buffer: string, tableSpans = tableLayout(buffer).spans): { looping: boolean; cleanEnd: number } {
   if (buffer.length < RESTART_MIN_BUFFER) return { looping: false, cleanEnd: buffer.length }
   // Skip leading whitespace so the fingerprint is dense text, not indentation.
   let start = 0
@@ -457,6 +514,11 @@ export function detectBlockRestart(buffer: string): { looping: boolean; cleanEnd
   if (anchor.length < RESTART_ANCHOR_CHARS) return { looping: false, cleanEnd: buffer.length }
   // A verbatim reappearance of the opening fingerprint, searched past its own
   // span, means the model restarted its answer. Trim to the first clean copy.
+  // A table header is not an answer fingerprint: separate account tables
+  // legitimately share it. Complete-row/block detection handles table loops.
+  if (tableSpans.some(span => span.start < start + RESTART_ANCHOR_CHARS && span.end > start)) {
+    return { looping: false, cleanEnd: buffer.length }
+  }
   const second = buffer.indexOf(anchor, start + RESTART_ANCHOR_CHARS)
   if (second === -1) return { looping: false, cleanEnd: buffer.length }
   return { looping: true, cleanEnd: second }
@@ -465,13 +527,13 @@ export function detectBlockRestart(buffer: string): { looping: boolean; cleanEnd
 // ── Text loop prevention wrapper ───────────────────────────────
 
 type RepetitionDetected = {
-  type: 'degenerate' | 'ngram' | 'restart'
+  type: 'degenerate' | 'ngram' | 'table' | 'restart'
   cleanText: string
   /**
-   * Whether this attempt already yielded a `text_delta` downstream. Once it
+   * Whether this attempt already yielded text or tool content downstream. Once it
    * has, the attempt's text is unretractable — see `wrapTextLoopPrevention`.
    */
-  emittedText: boolean
+  emittedContent: boolean
   /** Last usage seen before the stream was aborted. */
   lastUsage?: TokenUsage
 }
@@ -516,16 +578,16 @@ export function wrapTextLoopPrevention(): StreamWrapper {
 
     // Already downstream — truncate rather than duplicate. Close the message
     // ourselves: `drainForUsage` consumed the inner stream's `message_end`.
-    // Say so: the closed message reads as a clean `end_turn` to every caller
-    // (a compaction summary persisted this way looks complete), so this line
-    // is the only evidence a later investigation gets.
-    if (result.emittedText) {
+    // Mark the prefix incomplete, not a successful answer. The query loop may
+    // continue once (never replay this prefix); tool-bearing turns do not use
+    // that recovery path. The wrapper itself must never retry after emission.
+    if (result.emittedContent) {
       console.warn(
         `[text-loop] truncated an already-emitted stream (detector=${result.type}, kept=${result.cleanText.length} chars, model=${request.model})`,
       )
       yield {
         type: 'message_end' as const,
-        stopReason: 'end_turn' as const,
+        stopReason: 'incomplete' as const,
         usage: result.lastUsage ?? { inputTokens: 0, outputTokens: 0 },
       }
       return
@@ -546,7 +608,7 @@ export function wrapTextLoopPrevention(): StreamWrapper {
 
     // Both attempts looped. The retry's text is downstream only if it emitted;
     // otherwise nothing has been delivered and we emit the better clean prefix.
-    if (!retryResult.emittedText) {
+    if (!retryResult.emittedContent) {
       const useRetry = retryResult.cleanText.length >= result.cleanText.length
       const cleanText = useRetry ? retryResult.cleanText : result.cleanText
       if (cleanText.length > 0) {
@@ -556,7 +618,7 @@ export function wrapTextLoopPrevention(): StreamWrapper {
 
     yield {
       type: 'message_end' as const,
-      stopReason: 'end_turn' as const,
+      stopReason: 'incomplete' as const,
       usage: combineUsage(result.lastUsage, retryResult.lastUsage),
     }
   }
@@ -622,8 +684,8 @@ async function* streamWithDetection(
   request: Parameters<StreamFn>[0],
 ): AsyncGenerator<StreamChunk, RepetitionDetected | null> {
   let textBuffer = ''
-  let inTextMode = false
-  let emittedText = false
+  let tableAtWindowStart = false
+  let emittedContent = false
 
   // Structured fields legitimately repeat names, addresses and style objects.
   // Only bounded, tool-free JSON requests skip the prose phrase detector.
@@ -637,11 +699,16 @@ async function* streamWithDetection(
   for await (const chunk of stream) {
     // Only check text_delta chunks for repetition
     if (chunk.type === 'text_delta') {
-      inTextMode = true
       textBuffer += chunk.text
       // Sliding window cap to prevent O(n²) allocation churn (5/27 OOM).
       if (textBuffer.length > TEXT_BUFFER_WINDOW) {
-        textBuffer = textBuffer.slice(-TEXT_BUFFER_WINDOW)
+        const cutoff = textBuffer.length - TEXT_BUFFER_WINDOW
+        // Keep line boundaries and carry table context when its delimiter has
+        // left the window (notably tables without outer pipes).
+        const newline = textBuffer.indexOf('\n', cutoff)
+        const trim = newline === -1 ? cutoff : newline + 1
+        tableAtWindowStart = tableLayout(textBuffer.slice(0, trim), false, tableAtWindowStart).active
+        textBuffer = textBuffer.slice(trim)
       }
 
       // Check for degenerate tokens (control char spam, single-char repeat).
@@ -652,40 +719,59 @@ async function* streamWithDetection(
         || (!endsInsideFence(textBuffer) && detectSingleTokenRepeat(textBuffer))) {
         const clean = textBuffer.replace(/[\x08\u200B\u200C\u200D\uFEFF]+$/, '').trimEnd()
         const lastUsage = await drainForUsage(stream)
-        return { type: 'degenerate', cleanText: clean, emittedText, lastUsage }
+        return { type: 'degenerate', cleanText: clean, emittedContent, lastUsage }
+      }
+
+      const layout = tableLayout(textBuffer, !boundedJson && chunk.text.includes('\n'), tableAtWindowStart)
+      if (!boundedJson) {
+        const { cleanEnd } = layout
+        if (cleanEnd !== undefined) {
+          const lastUsage = await drainForUsage(stream)
+          return { type: 'table', cleanText: textBuffer.slice(0, cleanEnd), emittedContent, lastUsage }
+        }
       }
 
       // Check for n-gram repetition (only after enough text). The word-count
       // gate is allocation-free; detection runs on the bounded window above.
       if (!boundedJson && approxWordCount(textBuffer) >= 20) {
-        const { looping, cleanEnd } = detectNgramRepetition(textBuffer)
+        const { looping, cleanEnd } = detectNgramRepetition(textBuffer, layout.spans)
         if (looping) {
           const lastUsage = await drainForUsage(stream)
-          return { type: 'ngram', cleanText: textBuffer.slice(0, cleanEnd), emittedText, lastUsage }
+          return { type: 'ngram', cleanText: textBuffer.slice(0, cleanEnd), emittedContent, lastUsage }
         }
       }
 
       // Check for whole-answer restarts (loops longer than the n-gram window).
       if (textBuffer.length >= RESTART_MIN_BUFFER) {
-        const restart = detectBlockRestart(textBuffer)
+        const restart = detectBlockRestart(textBuffer, layout.spans)
         if (restart.looping) {
           const lastUsage = await drainForUsage(stream)
           return {
             type: 'restart',
             cleanText: textBuffer.slice(0, restart.cleanEnd),
-            emittedText,
+            emittedContent,
             lastUsage,
           }
         }
       }
 
       yield chunk
-      emittedText = true
+      emittedContent = true
     } else {
+      // EOF completes a final row even without a trailing newline.
+      if (chunk.type === 'message_end' && !boundedJson) {
+        const { cleanEnd } = tableLayout(textBuffer + '\n', true, tableAtWindowStart)
+        if (cleanEnd !== undefined) {
+          return { type: 'table', cleanText: textBuffer.slice(0, cleanEnd), emittedContent, lastUsage: chunk.usage }
+        }
+      }
       if (chunk.type !== 'message_start' && chunk.type !== 'message_end') {
+        // Tool content is also unretractable: never replay an emitted call on
+        // the wrapper's retry path, even if it preceded all visible text.
+        emittedContent = true
         // Non-text chunk (tool use) — reset text detection
-        inTextMode = false
         textBuffer = ''
+        tableAtWindowStart = false
       }
       yield chunk
     }
@@ -767,7 +853,7 @@ export function wrapProvider(
           // successful stream — see gemini.ts), so re-sending trimmed messages
           // on the budget wrapper's retry is safe. The other wrappers don't
           // touch `req.messages`, so this is a no-op for them.
-          const adaptedFn: StreamFn = (req) => inner.send(req.messages, sendOpts)
+          const adaptedFn: StreamFn = (req) => inner.send(req.messages, { ...sendOpts, signal: req.signal, httpRetryWindow: req.httpRetryWindow })
           const wrapped = composeWrappers(adaptedFn, ...wrappers)
           return wrapped({
             model: sessionOpts.model,

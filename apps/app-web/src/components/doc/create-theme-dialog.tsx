@@ -21,6 +21,8 @@ import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import { useCustomThemes } from "@/lib/custom-themes";
 import { DocThemeError } from "@/lib/api/doc-themes";
+import { useWorkspaceContext } from "@/lib/workspace-context";
+import { Checkbox } from "../ui/checkbox";
 import { Button } from "../ui/button";
 
 export function CreateThemeDialog({
@@ -32,6 +34,10 @@ export function CreateThemeDialog({
 }) {
   const t = useT();
   const { createTheme, generating } = useCustomThemes();
+  const { iconUrl } = useWorkspaceContext();
+  const [fromIcon, setFromIcon] = React.useState(false);
+  const useIcon = Boolean(iconUrl) && fromIcon;
+  const iconOptionId = React.useId();
   const [value, setValue] = React.useState("");
   const [error, setError] = React.useState<string | null>(null);
 
@@ -39,23 +45,30 @@ export function CreateThemeDialog({
   React.useEffect(() => {
     if (open) {
       setValue("");
+      setFromIcon(false);
       setError(null);
     }
   }, [open]);
 
   async function submit() {
     const prompt = value.trim();
-    if (!prompt || generating) return;
+    if ((!prompt && !useIcon) || generating) return;
     setError(null);
     try {
-      await createTheme(prompt);
+      await createTheme(useIcon ? { fromIcon: true, ...(prompt ? { prompt } : {}) } : prompt);
       onOpenChange(false);
     } catch (err) {
       const code = err instanceof DocThemeError ? err.code : "unknown";
       setError(
         code === "limit_reached"
           ? t.settings.general.customThemeLimitReached
-          : t.settings.general.customThemeGenerateFailed,
+          : code === "no_workspace_icon"
+            ? t.settings.general.customThemeNoIcon
+            : code === "unusable_workspace_icon"
+              ? t.settings.general.customThemeUnusableIcon
+              : code === "theme_model_no_vision"
+                ? t.settings.general.customThemeNoVision
+                : t.settings.general.customThemeGenerateFailed,
       );
     }
   }
@@ -90,11 +103,19 @@ export function CreateThemeDialog({
           <Dialog.Description className="mt-2 text-sm leading-relaxed text-muted-foreground">
             {t.settings.general.customThemeDialogDesc}
           </Dialog.Description>
+          {iconUrl ? (
+            <label htmlFor={iconOptionId} className="mt-4 flex min-h-11 cursor-pointer items-center gap-3 text-sm">
+              <Checkbox id={iconOptionId} checked={useIcon} disabled={generating}
+                onCheckedChange={(checked) => { setFromIcon(checked); setError(null); }} />
+              {t.settings.general.customThemeFromIcon}
+            </label>
+          ) : null}
           <textarea
             autoFocus
             rows={3}
             value={value}
-            placeholder={t.settings.general.customThemePlaceholder}
+            aria-label={useIcon ? t.settings.general.customThemeIconPrompt : t.settings.general.customThemeDialogDesc}
+            placeholder={useIcon ? t.settings.general.customThemeIconPrompt : t.settings.general.customThemePlaceholder}
             disabled={generating}
             onChange={(e) => setValue(e.target.value)}
             onKeyDown={(e) => {
@@ -107,12 +128,13 @@ export function CreateThemeDialog({
             className="mt-4 w-full resize-none rounded-md border border-border bg-background px-3 py-2 text-[16px] text-foreground outline-none placeholder:text-muted-foreground disabled:opacity-60 md:text-sm"
           />
           {error ? (
-            <p className="mt-2 text-sm text-destructive">{error}</p>
+            <p role="alert" className="mt-2 text-sm text-destructive">{error}</p>
           ) : null}
           <div className="mt-6 flex justify-end gap-2">
             <Button
               variant="outline"
               size="sm"
+              className="min-h-11 md:min-h-0"
               disabled={generating}
               onClick={() => onOpenChange(false)}
             >
@@ -121,7 +143,8 @@ export function CreateThemeDialog({
             <Button
               variant="default"
               size="sm"
-              disabled={generating || !value.trim()}
+              className="min-h-11 md:min-h-0"
+              disabled={generating || (!useIcon && !value.trim())}
               onClick={() => void submit()}
             >
               {generating

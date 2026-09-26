@@ -165,6 +165,7 @@ export function WorkspaceSwitcher() {
               id: user.id ?? "",
               name: user.name,
               email: user.email,
+              ...(user.avatarUrl ? { avatarUrl: user.avatarUrl } : {}),
             },
           ]
         : [];

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { applyLiveOfficeSuggestion, replaceLiveOfficeSnapshot } from '../live-sync.js'
+import { applyLiveOfficeSuggestion, officeSuggestionApplied, replaceLiveOfficeSnapshot } from '../live-sync.js'
 
 const snapshot = { artifactId: 'artifact-1', family: 'spreadsheet' } as never
 
@@ -42,5 +42,34 @@ describe('[COMP:api/office-live-sync] Office live snapshot bridge', () => {
     expect(url).toBe('http://localhost:8080/internal/office/suggestion')
     expect(JSON.parse(init.body as string)).toEqual({ artifactId: 'artifact-1', suggestionId: 'suggestion-1', command })
     await expect(applyLiveOfficeSuggestion('artifact-1', 'suggestion-1', command, { syncUrl: 'ws://localhost:8080', syncSecret: 'secret', fetchImpl: vi.fn(async () => new Response('{}', { status: 409 })) as unknown as typeof fetch })).resolves.toBe('conflict')
+  })
+})
+
+
+describe('[COMP:api/office-live-sync] read-only suggestion receipt bridge', () => {
+  const artifactId = '00000000-0000-4000-8000-000000000001'
+  const suggestionId = '00000000-0000-4000-8000-000000000002'
+  const options = { syncUrl: 'ws://localhost:8080', syncSecret: 'secret' }
+  it('sends only UUIDs with the existing secret, timeout and redirect protection', async () => {
+    const fetchImpl = vi.fn(async () => new Response('{"applied":true}'))
+    expect(await officeSuggestionApplied(artifactId, suggestionId, { ...options, fetchImpl })).toBe(true)
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toBe('http://localhost:8080/internal/office/suggestion-status')
+    expect(init).toMatchObject({ method: 'POST', redirect: 'error', headers: { 'x-doc-sync-secret': 'secret' } })
+    expect(init.signal).toBeInstanceOf(AbortSignal)
+    expect(JSON.parse(init.body as string)).toEqual({ artifactId, suggestionId })
+  })
+  it.each(['{"applied":false}', '{"applied":"true"}', '{"applied":true,"extra":1}', 'null', 'invalid'])('fails closed for response %s', async (body) => {
+    expect(await officeSuggestionApplied(artifactId, suggestionId, { ...options, fetchImpl: vi.fn(async () => new Response(body)) })).toBe(false)
+  })
+  it('fails closed on disabled transport, invalid IDs, HTTP errors, timeout or network errors', async () => {
+    const fetchImpl = vi.fn(async () => { throw new Error('unavailable') })
+    expect(await officeSuggestionApplied(artifactId, suggestionId, { syncUrl: '', syncSecret: '', fetchImpl })).toBe(false)
+    expect(await officeSuggestionApplied('bad', suggestionId, { ...options, fetchImpl })).toBe(false)
+    expect(fetchImpl).not.toHaveBeenCalled()
+    expect(await officeSuggestionApplied(artifactId, suggestionId, { ...options, fetchImpl })).toBe(false)
+    expect(await officeSuggestionApplied(artifactId, suggestionId, { ...options, fetchImpl: vi.fn(async () => new Response('{}', { status: 500 })) })).toBe(false)
+    const aborting = vi.fn((_url: string | URL | Request, init?: RequestInit) => new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener('abort', () => reject(new Error('aborted')))))
+    expect(await officeSuggestionApplied(artifactId, suggestionId, { ...options, timeoutMs: 1, fetchImpl: aborting })).toBe(false)
   })
 })

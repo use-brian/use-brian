@@ -2,7 +2,14 @@ import { describe, it, expect, vi } from 'vitest'
 import { aiStudioTransport, vertexTransport, AI_STUDIO_BASE_URL } from '../google-transport.js'
 import { cachedTokenSource, metadataTokenSource, serviceAccountTokenSource } from '../google-auth.js'
 import { createGeminiProvider } from '../gemini.js'
-import { runMediaUnderstanding, DASHSCOPE_VISION_MODEL, DASHSCOPE_ASR_MODEL, DASHSCOPE_LONG_MODEL } from '../../media/backend.js'
+import {
+  documentModelForMediaBackend,
+  GEMINI_VISION_MODEL,
+  runMediaUnderstanding,
+  DASHSCOPE_VISION_MODEL,
+  DASHSCOPE_ASR_MODEL,
+  DASHSCOPE_LONG_MODEL,
+} from '../../media/backend.js'
 import { createVertexEmbedder, createDashScopeEmbedder, VERTEX_EMBEDDING_MODEL_ID } from '../../embeddings/adapters.js'
 import { GEMINI_EMBEDDING_MODEL_ID } from '../../embeddings/embedder.js'
 import { stripUnsignedToolUses, modelRequiresToolSignatures } from '../../engine/tool-pairing.js'
@@ -96,6 +103,17 @@ describe('[COMP:media/backend] Multimodal backend per adapter', () => {
   const req = (over: Record<string, unknown>) => ({
     prompt: 'p', model: 'gemini-2.5-flash', maxOutputTokens: 100,
     timeoutMs: 5000, errorLabel: 'test call', ...over,
+  })
+
+  it('uses exact document model ids for cache identity', () => {
+    expect(documentModelForMediaBackend({ kind: 'google', transport: aiStudioTransport('k') }))
+      .toBe(GEMINI_VISION_MODEL)
+    expect(documentModelForMediaBackend({
+      kind: 'dashscope',
+      apiKey: 'k',
+      baseUrl: 'https://ds.test/v1',
+      visionModel: 'qwen-vl-custom',
+    })).toBe('qwen-vl-custom')
   })
 
   it('routes Google requests through the transport (so Vertex works unchanged) with billing-accurate usage', async () => {

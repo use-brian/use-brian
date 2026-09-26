@@ -1,3 +1,4 @@
+import type { HttpRetryWindow } from './types.js'
 /**
  * Gemini provider using REST API directly (not the SDK).
  *
@@ -6,10 +7,12 @@
  * calling. We hit the REST API and preserve raw response parts (including
  * thoughtSignature) in session history.
  */
+import { debugDocumentFlow } from '../engine/document-flow-debug.js'
 import { providerAliasMap, recordedAliasIds, providerModelIds } from '@use-brian/shared/model-registry'
 import type { LLMProvider, ProviderRequest, ProviderSession, SendOptions, SessionOptions, StreamChunk, Message, ContentBlock, ThinkingLevel, ToolDefinition, StopReason, TokenUsage } from './types.js'
 import type { GoogleTransport } from './google-transport.js'
 import { aiStudioTransport } from './google-transport.js'
+import { createGeminiHttpRetry } from './gemini-http-retry.js'
 import { systemContextParts, extractHistorySystemContext } from './system-context.js'
 
 /** Alias → real Google model id, derived from the model registry (each
@@ -307,7 +310,7 @@ export function normalizeGeminiRequestContents(
   return cleaned.slice(0, end)
 }
 
-function usesGemini36RequestContract(modelId: string): boolean {
+export function usesGemini36RequestContract(modelId: string): boolean {
   const match = modelId.toLowerCase().match(/(?:^|\/)gemini-(\d+)(?:\.(\d+))?-/)
   if (!match) return false
   const major = Number(match[1])
@@ -469,10 +472,14 @@ async function* streamGeminiSSE(
   modelId: string,
   request: GeminiRequest,
   signal?: AbortSignal,
+  mode?: 'stateful_delta' | 'stateless_full',
+  httpRetryWindow?: HttpRetryWindow,
 ): AsyncGenerator<GeminiStreamChunk> {
   // AI Studio and Vertex speak the same wire format; only host + auth differ,
   // and the injected transport owns both. Everything below here is identical.
   const url = transport.endpoint(modelId, 'streamGenerateContent', { alt: 'sse' })
+  const retryHttp = createGeminiHttpRetry(signal, { transport: transport.kind, model: modelId, window: httpRetryWindow })
+  signal?.throwIfAborted()
   const headers = await transport.headers()
 
   // `signal` is plumbed all the way to `fetch` and survives onto the response
@@ -481,13 +488,16 @@ async function* streamGeminiSSE(
   // abort, and Cloud Run truncates the response at the 300s cap with the
   // session still in `status='running'`. See docs/architecture/feed/
   // stuck-session-sweeper.md for the recovery path.
-  const send = (body: GeminiRequest) =>
-    fetch(url, {
+  const send = (body: GeminiRequest) => {
+    const serialized = JSON.stringify(body)
+    debugDocumentFlow('gemini_wire', { model: modelId, mode, gemini: body })
+    return retryHttp(attemptSignal => fetch(url, {
       method: 'POST',
       headers,
-      body: JSON.stringify(body),
-      signal,
-    })
+      body: serialized,
+      signal: attemptSignal,
+    }))
+  }
 
   let response = await send(request)
 
@@ -504,10 +514,10 @@ async function* streamGeminiSSE(
     'responseSchema' in request.generationConfig
   ) {
     const detail = await response.text()
+    debugDocumentFlow('stream_error', { model: modelId, error: true, providerError: new Error(`Gemini API error 400: ${detail}`) })
     console.error(
       `[gemini] responseSchema REJECTED (400) for model=${modelId} — retrying without it. ` +
-      `Output is no longer decoder-constrained for this call; fix the schema to restore the guarantee. ` +
-      `Detail: ${detail.slice(0, 500)}`,
+      `Output is no longer decoder-constrained for this call; fix the schema to restore the guarantee.`,
     )
     const { responseSchema: _dropped, ...generationConfig } = request.generationConfig
     response = await send({ ...request, generationConfig })
@@ -515,11 +525,15 @@ async function* streamGeminiSSE(
 
   if (!response.ok) {
     const body = await response.text()
-    throw new Error(`Gemini API error ${response.status}: ${body}`)
+    const error = new Error(`Gemini API error ${response.status}: ${body}`)
+    debugDocumentFlow('stream_error', { model: modelId, error: true, providerError: error })
+    throw error
   }
 
   if (!response.body) {
-    throw new Error('No response body from Gemini API')
+    const error = new Error('No response body from Gemini API')
+    debugDocumentFlow('stream_error', { model: modelId, error: true, providerError: error })
+    throw error
   }
 
   const reader = response.body.getReader()
@@ -786,6 +800,7 @@ async function* convertStreamChunks(
   }
 
   if (!sawFinishReason && !hasToolCalls) {
+    debugDocumentFlow('stream_error', { model: modelId, error: true, providerReason: 'incomplete_stream' })
     // Loud on purpose: this is the shape that used to be indistinguishable from
     // a clean stop. Whatever consumed this turn got a partial answer.
     console.error(
@@ -842,7 +857,7 @@ export function createGeminiProvider(keyOrTransport: string | GoogleTransport | 
         { ...request, historySystemContext: extractHistorySystemContext(request.messages) },
         modelId,
       )
-      const sseStream = streamGeminiSSE(transport, modelId, geminiRequest, request.signal)
+      const sseStream = streamGeminiSSE(transport, modelId, geminiRequest, request.signal, 'stateless_full', request.httpRetryWindow)
 
       for await (const { chunk } of convertStreamChunks(sseStream, recordId, toolCallCounter)) {
         yield chunk
@@ -913,7 +928,7 @@ export function createGeminiProvider(keyOrTransport: string | GoogleTransport | 
           // letting it run to Cloud Run's 300s timeout.
           yield { type: 'message_start', model: recordId }
 
-          const sseStream = streamGeminiSSE(transport, modelId, geminiRequest, options.signal)
+          const sseStream = streamGeminiSSE(transport, modelId, geminiRequest, sendOpts?.signal ?? options.signal, 'stateful_delta', sendOpts?.httpRetryWindow)
 
           // A finish reason arrives on Gemini's final SSE chunk. Until that
           // chunk is observed the stream is incomplete, not a clean end_turn.
@@ -1020,6 +1035,7 @@ export function createGeminiProvider(keyOrTransport: string | GoogleTransport | 
           }
 
           if (!sawFinishReason && !hasToolCalls) {
+            debugDocumentFlow('stream_error', { model: modelId, error: true, providerReason: 'incomplete_stream' })
             console.error(
               `[gemini] Stateful stream ended with NO finishReason after ${chunkCount} chunk(s) ` +
               `(model=${modelId}, hasContent=${hasAnyContent}) — reporting stopReason='incomplete'. ` +

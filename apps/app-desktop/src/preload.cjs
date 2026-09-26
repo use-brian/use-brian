@@ -246,6 +246,10 @@ if (process.argv.includes("--usebrian-bundled")) {
 
   bridge.getAccessToken = () => (cache && cache.accessToken) || null;
   bridge.getRefreshToken = () => (cache && cache.refreshToken) || null;
+  // The file: renderer has no app-domain `user` cookie. Expose only the
+  // display identity from the encrypted token record so app-web can use the
+  // same name/email/photo as the browser without exposing any extra credential.
+  bridge.getCurrentUser = () => (cache && cache.user) || null;
   // Local authored caches use the active native identity, not file:// cookies.
   bridge.getUserId = () => (cache && cache.user && cache.user.id) || null;
   bridge.refreshTokens = async () => {

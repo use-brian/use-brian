@@ -1,3 +1,4 @@
+import { debugDocumentFlow } from '../../engine/document-flow-debug.js'
 import { Buffer } from 'node:buffer'
 import { renderSystemContext } from '../system-context.js'
 import { z } from 'zod'
@@ -391,6 +392,7 @@ class CodexProviderSession implements ProviderSession {
     if (input.length === 0) {
       throw new TypeError('Codex provider turn input cannot be empty')
     }
+    debugDocumentFlow('codex_turn_wire', { model: this.#options.model, messages: currentMessages, codex: input })
     const thinkingLevel = opts.thinkingLevel ?? this.#options.thinkingLevel
     const params = {
       threadId: this.#threadId,
@@ -494,6 +496,7 @@ class CodexProviderSession implements ProviderSession {
         `Codex history exceeds the ${MAX_HISTORY_ITEMS}-item provider boundary`,
       )
     }
+    debugDocumentFlow('codex_history_wire', { model: this.#options.model, messages, codex: items })
     const batches = batchJsonItems(items, MAX_HISTORY_BATCH_BYTES)
     for (const batch of batches) {
       await this.#transport.rpc.request(
@@ -639,6 +642,7 @@ class CodexProviderSession implements ProviderSession {
           text: truncateUtf8(`Brian guidance:\n${guidance.join('\n\n')}`, MAX_TOOL_OUTPUT_BYTES),
         })
       }
+      debugDocumentFlow('codex_tool_wire', { model: this.#options.model, toolName: result.name, messages: [{ role: 'user', content: [result] }], codex: contentItems, error: result.isError === true, truncated: contentItems[0]?.type === 'inputText' && contentItems[0].text !== result.content })
       entry.resolve(
         DynamicToolCallResponseSchema.parse({
           success: result.isError !== true,

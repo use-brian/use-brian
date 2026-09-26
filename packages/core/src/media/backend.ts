@@ -45,6 +45,7 @@ import {
   authorizeGoogleRequest,
   type GoogleTransport,
 } from '../providers/google-transport.js'
+import { usesGemini36RequestContract } from '../providers/gemini.js'
 import {
   DASHSCOPE_CHUNK_PAGES,
   DASHSCOPE_RENDER_WIDTH,
@@ -141,10 +142,21 @@ async function withTimeout<T>(
   }
 }
 
-/** DashScope substitutes these — a Gemini model id is meaningless there. */
+/** Dedicated media defaults. They are wire ids, never chat-tier aliases. */
+export const GEMINI_VISION_MODEL = 'gemini-3.8-flash'
 export const DASHSCOPE_VISION_MODEL = 'qwen-vl-max'
 export const DASHSCOPE_ASR_MODEL = 'qwen3-asr-flash'
 export const DASHSCOPE_LONG_MODEL = 'qwen-long'
+
+/** Exact document model identity for cache fingerprints and observability. */
+export function documentModelForMediaBackend(
+  backend: MediaBackend,
+  googleModel: string = GEMINI_VISION_MODEL,
+): string {
+  if (backend.kind === 'google') return googleModel
+  if (backend.kind === 'dashscope') return backend.visionModel ?? DASHSCOPE_VISION_MODEL
+  return backend.model
+}
 
 // DashScope's OpenAI-compatible endpoint rejects request bodies around 10 MB.
 // Leave room for base64 expansion and JSON/prompt overhead rather than relying
@@ -219,7 +231,12 @@ async function googleGenerate(
     headers: authorization.headers,
     body: JSON.stringify({
       contents: [{ role: 'user', parts }],
-      generationConfig: { temperature: 0, maxOutputTokens },
+      generationConfig: {
+        maxOutputTokens,
+        // Gemini 3.6+ deprecates sampling overrides and future generations
+        // may reject them. Keep deterministic decoding only for older models.
+        ...(!usesGemini36RequestContract(model) ? { temperature: 0 } : {}),
+      },
     }),
     signal,
   })

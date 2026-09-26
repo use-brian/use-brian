@@ -216,6 +216,7 @@ export interface DesktopSession {
     id: string;
     name: string;
     email: string;
+    avatarUrl?: string | null;
     plan?: string;
   };
 }
@@ -277,7 +278,16 @@ function localCookieSession(response: LocalSessionResponse, requireUser: boolean
       const parsed = JSON.parse(decodeURIComponent(userValue));
       if (typeof parsed.id === "string" && parsed.id && typeof parsed.name === "string" &&
           (typeof parsed.email === "string" || parsed.email === null)) {
-        user = { id: parsed.id, name: parsed.name, email: parsed.email ?? "" };
+        user = {
+          id: parsed.id,
+          name: parsed.name,
+          email: parsed.email ?? "",
+          ...(
+            typeof parsed.avatarUrl === "string" || parsed.avatarUrl === null
+              ? { avatarUrl: parsed.avatarUrl }
+              : {}
+          ),
+        };
       }
     } catch { /* An incomplete mint must never adopt old jar data. */ }
   }
@@ -428,6 +438,7 @@ export function buildSessionCookies(
     id: session.user?.id ?? "",
     name: session.user?.name ?? "",
     email: session.user?.email ?? "",
+    avatarUrl: session.user?.avatarUrl ?? null,
     plan: session.user?.plan ?? "free",
     effectivePlan: session.user?.plan ?? "free",
   });

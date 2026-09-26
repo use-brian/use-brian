@@ -1,4 +1,6 @@
-import { describe, it, expect } from 'vitest'
+import { wrapProvider } from '../../providers/wrappers.js'
+import { createGeminiProvider } from '../../providers/gemini.js'
+import { describe, it, expect, vi } from 'vitest'
 import { NOOP_TURN_LEDGER } from '../turn-ledger.js'
 import { z } from 'zod'
 import type {
@@ -374,4 +376,22 @@ describe('[COMP:engine/query-loop] Connection-drop classification', () => {
     // endpoint answered, so "please retry" copy would be misleading there.
     expect(isConnectionDropError(new Error('503 Service Unavailable'))).toBe(false)
   })
+})
+
+it.each([false, true])('does not amplify wrapped Gemini HTTP 429 retries into query-loop replays (late=%s)', async late => {
+  vi.useFakeTimers()
+  const fetch = vi.fn(async () => {
+    if (late) await new Promise(resolve => setTimeout(resolve, 85_000))
+    return new Response('{}', { status: 429 })
+  })
+  vi.stubGlobal('fetch', fetch)
+  try {
+    const result = runLoop(wrapProvider(createGeminiProvider('key')))
+    await vi.runAllTimersAsync()
+    const events = await result
+    expect(events.some(e => e.type === 'error' && String(e.error).includes('429'))).toBe(true)
+    expect(events.some(e => e.type === 'status' && e.message === 'Connection stalled, retrying...')).toBe(false)
+    expect(fetch).toHaveBeenCalledTimes(late ? 1 : 4)
+    expect(vi.getTimerCount()).toBe(0)
+  } finally { vi.useRealTimers(); vi.unstubAllGlobals() }
 })

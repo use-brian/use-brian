@@ -44,6 +44,8 @@ export const SiteLinkSchema = z.object({ label: LocalizedShortSchema, href }).st
 // ── people ─────────────────────────────────────────────────────────────────
 export const SitePersonSchema = z.object({
   id, name: short, honorific: short.default(''),
+  /** Display name per language (e.g. a Chinese name on the Chinese pages); `name` stays the stable roll name. */
+  localizedName: LocalizedShortSchema.optional(),
   role: LocalizedShortSchema.optional(), affiliation: LocalizedShortSchema.optional(), specialties: LocalizedShortSchema.optional(),
   admittedOn: date.optional(), image: SiteImageSchema.optional(), bio: LocalizedTextSchema.optional(),
 }).strict()
@@ -95,6 +97,8 @@ export const NewsDocumentSchema = z.object({
     /** Which site languages list the item. Chinese-language coverage is often listed on the Chinese pages only. */
     locales: z.array(z.enum(SITE_CONTENT_LOCALES)).min(1).max(3).default([...SITE_CONTENT_LOCALES]),
     title: newsTitle, summary: newsText.optional(),
+    /** Editorial label shown on the card, e.g. "Association News" or "Policy Paper". */
+    category: LocalizedShortSchema.optional(),
     href: href.optional(), fileId: z.string().uuid().optional(), image: SiteImageSchema.optional(),
   }).strict()).max(1000),
 }).strict()

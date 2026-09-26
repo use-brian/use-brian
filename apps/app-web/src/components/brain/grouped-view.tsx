@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Brain grouped view (app-web) — the DEFAULT brain browse surface.
+ * Brain grouped view (app-web) — the List tab of the brain browse surface.
  *
  * Replaces the former flat `EntityRow` dump (every primitive in one
  * undifferentiated stack). Renders every visible brain row — entities
@@ -22,7 +22,7 @@
  * toggle's alternate). This file is the list/overview the toggle returns to.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { entityColorVar } from "@/lib/brain-colors";
@@ -35,6 +35,11 @@ import type {
   BrainRow,
 } from "@/lib/api/brain";
 import { BrainFallbackCard } from "@/components/brain/file-segment-card";
+import { brainKindToInboxPrimitive } from "@/lib/brain-row-target";
+import { verifyBrainRow, deleteBrainRow } from "@/lib/api/brain-inbox";
+import { requestBrainRefresh } from "@/lib/brain-events";
+import { confirmDialog } from "@/components/ui/confirm-dialog";
+import { Checkbox } from "@/components/ui/checkbox";
 import { UserAvatar } from "@/components/ui/user-avatar";
 import { loadWorkspaceRoster } from "@/lib/api/workspace-roster";
 import {
@@ -364,11 +369,126 @@ export function BrainGroupedView({
   const filters = t.brainPage.filters;
   const completedCount = completedTasks?.length ?? 0;
 
-  // Workspace roster for the task rows' assignee avatars — fetched once per
-  // workspace (module cache in lib/api/workspace-roster.ts) and only when an
-  // assigned task is actually visible. Best-effort: a failed fetch just
-  // renders rows without avatars.
   const { activeId: workspaceId } = useWorkspaces();
+  const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
+  const currentWorkspace = useRef(workspaceId);
+  currentWorkspace.current = workspaceId;
+  const [outcome, setOutcome] = useState<{ workspaceId: string; succeeded: number; failed: number } | null>(null);
+  const selectableKeys = useMemo(
+    () =>
+      new Set(
+        [...rows, ...(showCompletedTasks ? completedTasks ?? [] : [])]
+          .filter((row) => KNOWN_ROW_KINDS.has(row.kind))
+          .map((row) => `${row.kind}:${row.id}`),
+      ),
+    [rows, completedTasks, showCompletedTasks],
+  );
+  const [selection, setSelection] = useState(() => ({
+    workspaceId,
+    keys: new Set<string>(),
+  }));
+  // Reconcile before committing children: hidden keys must not resurrect when
+  // a filter/disclosure is undone, or leak across workspaces with identical ids.
+  const selectedKeys = new Set(
+    selection.workspaceId === workspaceId
+      ? [...selection.keys].filter((key) => selectableKeys.has(key))
+      : [],
+  );
+  if (
+    selection.workspaceId !== workspaceId ||
+    selectedKeys.size !== selection.keys.size
+  ) {
+    setSelection({ workspaceId, keys: selectedKeys });
+  }
+  const setSelectedKeys = (keys: Set<string>) => setSelection({ workspaceId, keys });
+  const selectedRows = [...rows, ...(showCompletedTasks ? completedTasks ?? [] : [])]
+    .filter((row) => selectedKeys.has(`${row.kind}:${row.id}`));
+  const eligibleRows = (action: "confirm" | "delete") => selectedRows.filter(
+    (row) => row.id && brainKindToInboxPrimitive(row.kind) && (action === "delete" || row.hasPending),
+  );
+  async function runBulk(action: "confirm" | "delete") {
+    if (busyRef.current || !workspaceId) return;
+    const eligible = eligibleRows(action);
+    if (!eligible.length) return;
+    // Freeze the exact row identities before awaiting the dialog. Graph name
+    // matching is decoration ONLY and must never determine a mutation target.
+    busyRef.current = true;
+    setBusy(true);
+    setOutcome(null);
+    const succeeded = new Set<string>();
+    let failed = 0;
+    try {
+      if (action === "delete") {
+        const ok = await confirmDialog({
+          title: t.memoriesReview.delete,
+          description: `${format(t.brainPage.groupedView.deleteScope, { count: eligible.length, selected: selectedKeys.size })} ${t.memoriesReview.deleteConfirmBody}`,
+          confirmLabel: t.memoriesReview.deleteConfirmAction,
+          cancelLabel: t.memoriesReview.cancel,
+          variant: "destructive",
+        });
+        if (!ok || currentWorkspace.current !== workspaceId) return;
+      }
+      // CRM aliases and singular entity kinds can refer to the same physical
+      // entity. Coalesce those requests, while accounting for every selected row.
+      const targets = new Map<string, { row: BrainRow; keys: string[] }>();
+      for (const row of eligible) {
+        const primitive = brainKindToInboxPrimitive(row.kind)!;
+        const identityKind = ["contact", "company", "deal"].includes(primitive) ? "entity" : primitive;
+        const key = `${identityKind}:${row.id}`;
+        const target = targets.get(key) ?? { row, keys: [] };
+        target.keys.push(`${row.kind}:${row.id}`);
+        targets.set(key, target);
+      }
+      for (const { row, keys } of targets.values()) {
+        try {
+          const primitive = brainKindToInboxPrimitive(row.kind)!;
+          const result = await (action === "confirm" ? verifyBrainRow : deleteBrainRow)(workspaceId, primitive, row.id);
+          if (result.ok) keys.forEach((key) => succeeded.add(key));
+          else failed += keys.length;
+        } catch {
+          failed += keys.length;
+        }
+      }
+      setSelection((previous) => previous.workspaceId === workspaceId
+        ? { ...previous, keys: new Set([...previous.keys].filter((key) => !succeeded.has(key))) }
+        : previous);
+      if (currentWorkspace.current === workspaceId) setOutcome({ workspaceId, succeeded: succeeded.size, failed });
+      if (succeeded.size) requestBrainRefresh(workspaceId);
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+    }
+  }
+  const allSelected =
+    selectableKeys.size > 0 && selectedKeys.size === selectableKeys.size;
+  const selectionBox = (row: BrainRow) => {
+    const key = `${row.kind}:${row.id}`;
+    return (
+      <label className="flex min-h-11 min-w-11 shrink-0 cursor-pointer items-center justify-center">
+        <Checkbox
+          aria-label={format(t.brainPage.groupedView.selectRow, { name: row.name })}
+          checked={selectedKeys.has(key)}
+          disabled={busy}
+          onCheckedChange={(checked) => {
+            const next = new Set(selectedKeys);
+            if (checked) next.add(key);
+            else next.delete(key);
+            setSelectedKeys(next);
+          }}
+        />
+      </label>
+    );
+  };
+  const selectionClass = (row: BrainRow) =>
+    cn(
+      "flex items-center rounded-md border transition-colors",
+      selectedKeys.has(`${row.kind}:${row.id}`)
+        ? "border-primary/50 bg-primary/10"
+        : "border-border bg-card",
+    );
+
+  // Best-effort workspace roster for task assignee decoration.
   const hasAssignedTask = useMemo(
     () =>
       rows.some((r) => r.kind === "tasks" && r.assigneeId) ||
@@ -500,6 +620,48 @@ export function BrainGroupedView({
     // pb-28: clear the fixed chat dock the chrome floats over the surface's
     // bottom-right, so the last entry row isn't trapped behind it.
     <div className="relative flex-1 min-h-0 overflow-y-auto bg-background pb-28">
+      <div className="flex flex-wrap items-center gap-x-3 px-4 py-2 border-b border-border text-sm">
+        <label className="flex min-h-11 cursor-pointer items-center gap-2">
+          <Checkbox
+            aria-label={t.brainPage.groupedView.selectAll}
+            checked={allSelected}
+            indeterminate={selectedKeys.size > 0 && !allSelected}
+            disabled={busy || selectableKeys.size === 0}
+            onCheckedChange={(checked) =>
+              setSelectedKeys(checked ? new Set(selectableKeys) : new Set())
+            }
+          />
+          {t.brainPage.groupedView.selectAll}
+        </label>
+        <span role="status" className="text-muted-foreground">
+          {format(t.brainPage.groupedView.selectedCount, {
+            count: selectedKeys.size,
+          })}
+        </span>
+        <button
+          type="button"
+          disabled={busy || selectedKeys.size === 0}
+          onClick={() => setSelectedKeys(new Set())}
+          className="min-h-11 px-2 rounded-md hover:bg-muted/40 disabled:opacity-50"
+        >
+          {t.brainPage.groupedView.clearSelection}
+        </button>
+        <button type="button" disabled={busy || !workspaceId || eligibleRows("confirm").length === 0}
+          onClick={() => void runBulk("confirm")}
+          className="min-h-11 px-2 rounded-md hover:bg-muted/40 disabled:opacity-50">
+          {format(t.brainPage.groupedView.bulkConfirm, { count: eligibleRows("confirm").length })}
+        </button>
+        <button type="button" disabled={busy || !workspaceId || eligibleRows("delete").length === 0}
+          onClick={() => void runBulk("delete")}
+          className="min-h-11 px-2 rounded-md text-destructive hover:bg-muted/40 disabled:opacity-50">
+          {format(t.brainPage.groupedView.bulkDelete, { count: eligibleRows("delete").length })}
+        </button>
+        {busy && <span role="status">{t.brainPage.groupedView.bulkBusy}</span>}
+        {outcome?.workspaceId === workspaceId && <span role="status">
+          {format(t.brainPage.groupedView.bulkResult, { succeeded: outcome.succeeded, failed: outcome.failed })}
+        </span>}
+
+      </div>
       {presentLegend.length > 1 && (
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2 border-b border-border text-[11px] text-muted-foreground">
           {presentLegend.map((g) => (
@@ -557,81 +719,85 @@ export function BrainGroupedView({
                       key={`${row.kind}:${row.id}`}
                       {...chunkAnim(`${row.kind}:${row.id}`)}
                     >
-                      <button
-                        type="button"
-                        onClick={() => onSelect(row)}
-                        className={cn(
-                          "w-full text-left flex items-center gap-3 px-3 py-2 rounded-md border border-border bg-card",
-                          "hover:border-primary/50 hover:bg-muted/40 transition-colors",
-                        )}
-                      >
-                        <span
-                          aria-hidden
-                          className="inline-block h-2.5 w-2.5 shrink-0 rounded-full"
-                          style={{ backgroundColor: groupColor(group.key) }}
-                        />
-                        <span className="flex-1 min-w-0 text-sm font-medium truncate">
-                          {row.name}
-                        </span>
-
-                        {row.hasPending && (
+                      <div className={selectionClass(row)}>
+                        {selectionBox(row)}
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => onSelect(row)}
+                          className={cn(
+                            "min-w-0 min-h-11 flex-1 text-left flex items-center gap-3 pr-3 py-2 rounded-md",
+                            "hover:border-primary/50 hover:bg-muted/40 transition-colors",
+                          )}
+                        >
                           <span
-                            className="shrink-0 px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide font-medium bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-500/20"
-                            aria-label="Pending review"
-                          >
-                            Pending
+                            aria-hidden
+                            className="inline-block h-2.5 w-2.5 shrink-0 rounded-full"
+                            style={{ backgroundColor: groupColor(group.key) }}
+                          />
+                          <span className="flex-1 min-w-0 text-sm font-medium truncate">
+                            {row.name}
                           </span>
-                        )}
 
-                        {isEntity ? (
-                          <>
-                            {degree > 0 && (
-                              <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
-                                {degree}
-                              </span>
-                            )}
-                            {kinds.length > 0 && (
-                              <span className="hidden sm:flex shrink-0 items-center gap-1">
-                                {kinds.map((k) => (
-                                  <span
-                                    key={k}
-                                    aria-hidden
-                                    title={legend[k]}
-                                    className="inline-block h-2 w-2 rounded-full opacity-70"
-                                    style={{ backgroundColor: kindColor(k) }}
-                                  />
-                                ))}
-                              </span>
-                            )}
-                          </>
-                        ) : (
-                          <>
-                            {group.key === "tasks" && (
-                              <TaskRowMeta row={row} roster={roster} />
-                            )}
-                            {group.key === "tasks" && row.status && (
-                              <TaskStatusChip status={row.status} />
-                            )}
-                            {row.sensitivity && (
-                              <span
-                                className={cn(
-                                  "shrink-0 px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide font-medium border",
-                                  row.sensitivity === "confidential" &&
-                                    "bg-red-500/10 text-red-700 dark:text-red-400 border-red-500/20",
-                                  row.sensitivity === "restricted" &&
-                                    "bg-red-700/10 text-red-800 dark:text-red-300 border-red-700/30",
-                                  row.sensitivity === "internal" &&
-                                    "bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/20",
-                                  row.sensitivity === "public" &&
-                                    "bg-green-500/10 text-green-700 dark:text-green-400 border-green-500/20",
-                                )}
-                              >
-                                {row.sensitivity}
-                              </span>
-                            )}
-                          </>
-                        )}
-                      </button>
+                          {row.hasPending && (
+                            <span
+                              className="shrink-0 px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide font-medium bg-amber-500/10 text-amber-700 dark:text-amber-400 border border-amber-500/20"
+                              aria-label="Pending review"
+                            >
+                              Pending
+                            </span>
+                          )}
+
+                          {isEntity ? (
+                            <>
+                              {degree > 0 && (
+                                <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
+                                  {degree}
+                                </span>
+                              )}
+                              {kinds.length > 0 && (
+                                <span className="hidden sm:flex shrink-0 items-center gap-1">
+                                  {kinds.map((k) => (
+                                    <span
+                                      key={k}
+                                      aria-hidden
+                                      title={legend[k]}
+                                      className="inline-block h-2 w-2 rounded-full opacity-70"
+                                      style={{ backgroundColor: kindColor(k) }}
+                                    />
+                                  ))}
+                                </span>
+                              )}
+                            </>
+                          ) : (
+                            <>
+                              {group.key === "tasks" && (
+                                <TaskRowMeta row={row} roster={roster} />
+                              )}
+                              {group.key === "tasks" && row.status && (
+                                <TaskStatusChip status={row.status} />
+                              )}
+                              {row.sensitivity && (
+                                <span
+                                  className={cn(
+                                    "shrink-0 px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide font-medium border",
+                                    row.sensitivity === "confidential" &&
+                                      "bg-red-500/10 text-red-700 dark:text-red-400 border-red-500/20",
+                                    row.sensitivity === "restricted" &&
+                                      "bg-red-700/10 text-red-800 dark:text-red-300 border-red-700/30",
+                                    row.sensitivity === "internal" &&
+                                      "bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/20",
+                                    row.sensitivity === "public" &&
+                                      "bg-green-500/10 text-green-700 dark:text-green-400 border-green-500/20",
+                                  )}
+                                >
+                                  {row.sensitivity}
+                                </span>
+                              )}
+                            </>
+                          )}
+                        </button>
+                      </div>
                     </li>
                   );
                 })}
@@ -645,6 +811,7 @@ export function BrainGroupedView({
                 <div className="mt-0.5">
                   <button
                     type="button"
+                    disabled={busy}
                     onClick={onToggleCompletedTasks}
                     aria-expanded={showCompletedTasks}
                     className="inline-flex items-center gap-1 px-1 py-0.5 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
@@ -666,26 +833,30 @@ export function BrainGroupedView({
                   {showCompletedTasks && (
                     <ul className="mt-1 flex flex-col gap-1">
                       {(completedTasks ?? []).map((row) => (
-                        <li key={`completed-task:${row.id}`}>
-                          <button
-                            type="button"
-                            onClick={() => onSelect(row)}
-                            className={cn(
-                              "w-full text-left flex items-center gap-3 px-3 py-2 rounded-md border border-border bg-card opacity-60",
-                              "transition-all hover:opacity-100 hover:border-primary/50 hover:bg-muted/40",
-                            )}
-                          >
-                            <span
-                              aria-hidden
-                              className="inline-block h-2.5 w-2.5 shrink-0 rounded-full"
-                              style={{ backgroundColor: groupColor("tasks") }}
-                            />
-                            <span className="flex-1 min-w-0 text-sm font-medium truncate line-through decoration-muted-foreground/40">
-                              {row.name}
-                            </span>
-                            <TaskRowMeta row={row} roster={roster} />
-                            {row.status && <TaskStatusChip status={row.status} />}
-                          </button>
+                        <li key={`${row.kind}:${row.id}`}>
+                          <div className={selectionClass(row)}>
+                            {KNOWN_ROW_KINDS.has(row.kind) && selectionBox(row)}
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() => onSelect(row)}
+                              className={cn(
+                                "min-w-0 min-h-11 flex-1 text-left flex items-center gap-3 pr-3 py-2 rounded-md opacity-60",
+                                "transition-all hover:opacity-100 hover:border-primary/50 hover:bg-muted/40",
+                              )}
+                            >
+                              <span
+                                aria-hidden
+                                className="inline-block h-2.5 w-2.5 shrink-0 rounded-full"
+                                style={{ backgroundColor: groupColor("tasks") }}
+                              />
+                              <span className="flex-1 min-w-0 text-sm font-medium truncate line-through decoration-muted-foreground/40">
+                                {row.name}
+                              </span>
+                              <TaskRowMeta row={row} roster={roster} />
+                              {row.status && <TaskStatusChip status={row.status} />}
+                            </button>
+                          </div>
                         </li>
                       ))}
                     </ul>
