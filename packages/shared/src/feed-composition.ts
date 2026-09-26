@@ -209,6 +209,7 @@ export type FeedGenerationEstimate = {
 
 /** Editorial confirmation is distinct from saving a version or delivery. */
 export const feedConfirmationRequestSchema = z.object({
+  linkedinPreviewHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   mutationId: feedIdSchema, expectedRevision: revision,
   reviewRunId: feedIdSchema.optional(), locale: z.enum(['en', 'ja', 'zh', 'zh-cn']).default('en'),
 }).strict()

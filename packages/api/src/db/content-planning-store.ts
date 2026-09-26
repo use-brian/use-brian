@@ -323,6 +323,7 @@ export interface ContentPlanningStore {
     draftId: string
     userId: string
     finalText?: string
+    linkedinPreviewHash?: string
   }): Promise<boolean>
   reject(params: {
     assistantId: string
@@ -702,7 +703,7 @@ export function createContentPlanningStore(): ContentPlanningStore {
           return withFeedTransaction(actor, async (client, scope) => {
             const pending = (await client.query("SELECT format_data FROM content_planning_drafts WHERE id=$1 AND assistant_id=$2 AND session_id=$3 AND status='pending' AND removed_at IS NULL FOR UPDATE", [params.draftId, params.assistantId, row.session_id])).rows[0]
             if (!pending) return false
-            await confirmFeedPost(actor, { mutationId: randomUUID(), expectedRevision: saved.canonical.revision, locale: 'en' }, { source: { canonical: pending.format_data.feedCanonical, platform: row.platform }, transaction: { client, scope } })
+            await confirmFeedPost(actor, { mutationId: randomUUID(), expectedRevision: saved.canonical.revision, locale: 'en', linkedinPreviewHash: params.linkedinPreviewHash }, { source: { canonical: pending.format_data.feedCanonical, platform: row.platform }, transaction: { client, scope } })
             await client.query("UPDATE content_planning_drafts SET status='ready',final_text=$3,resolved_by=$4,resolved_at=now(),updated_at=now() WHERE id=$1 AND assistant_id=$2", [params.draftId, params.assistantId, params.finalText ?? saved.projection.text, params.userId])
             return true
           })

@@ -1,3 +1,5 @@
+import {createLocalLinkedInCloud} from '../content-planning/linkedin-cloud.js'
+import {withFeedTransaction} from '../db/feed-collaboration-store.js'
 /**
  * Local API for linking an OSS Feed to paid hosted provider capabilities.
  *
@@ -296,6 +298,7 @@ export function selfHostFeedManagedDistributionRoutes(
     res.status(response.status).json(responseBody)
   }
 
+  router.get('/:assistantId/linkedin/destinations',async(req,res)=>{if(!req.userId){res.sendStatus(401);return}try{const actor={userId:req.userId,assistantId:req.params.assistantId,sessionId:'',kind:'user' as const};const assistant=await findAssistantById(actor.assistantId);if(!assistant?.workspaceId||!(await requireWorkspaceMember(req.userId,assistant.workspaceId,res)))return;const data=await createLocalLinkedInCloud(options).targets(actor,{workspaceId:assistant.workspaceId} as never);res.json(data)}catch{res.status(409).json({code:'cloud_unavailable'})}})
   router.get('/team/:workspaceId/profiles', forward)
   router.get('/:assistantId', forward)
   router.patch(['/:assistantId/threads', '/:assistantId/twitter'], forward)
@@ -357,7 +360,9 @@ export function createSelfHostFeedCloudPublisher(options: {
   const resolveAssistant = options.resolveAssistant ?? findAssistantById
   return async (
     draft: SavedContentDraft,
+    context?: {userId:string;linkedinPreviewHash?:string},
   ): Promise<{ status: 'posted'; permalink?: string } | { status: 'manual'; reason: string }> => {
+    if(draft.platform==='linkedin' && context?.linkedinPreviewHash)return createLocalLinkedInCloud(options).publish({userId:context.userId,assistantId:draft.assistantId,sessionId:draft.sessionId,kind:'user'},context.linkedinPreviewHash)
     if (draft.platform !== 'threads' && draft.platform !== 'twitter') {
       return { status: 'manual', reason: 'platform_manual_only' }
     }

@@ -80,6 +80,7 @@ export interface ContentPlanningRouteOptions {
   /** Optional managed delivery after local approval. Unsupported drafts stay ready. */
   publishApproved?: (
     draft: SavedContentDraft,
+    context?: {userId:string;linkedinPreviewHash?:string},
   ) => Promise<
     | { status: 'posted'; permalink?: string }
     | { status: 'manual'; reason?: string }
@@ -335,6 +336,7 @@ export function contentPlanningRoutes(
         draftId: req.params.eventId,
         userId: ctx.userId,
         finalText: text || undefined,
+        linkedinPreviewHash: req.body?.linkedinPreviewHash,
       })
       if (!updated) {
         res.status(409).json({
@@ -348,7 +350,7 @@ export function contentPlanningRoutes(
         : null
       if (draft && options.publishApproved) {
         try {
-          const delivery = await options.publishApproved(draft)
+          const delivery = await options.publishApproved(draft,{userId:ctx.userId,linkedinPreviewHash:req.body?.linkedinPreviewHash})
           if (delivery.status === 'posted') {
             await store.markPosted({
               assistantId: req.params.assistantId,

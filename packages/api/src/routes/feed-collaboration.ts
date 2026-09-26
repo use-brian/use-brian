@@ -1,3 +1,4 @@
+import { readLinkedInPreview } from '../content-planning/linkedin-payload.js'
 import { readFeedSelectedSources } from '../content-planning/source-authority.js'
 import type { FeedReviewContextLoader } from '../content-planning/review-context.js'
 /** Authenticated shared Feed collaboration routes. [COMP:feed/draft-comments] */
@@ -103,6 +104,10 @@ export function feedCollaborationRoutes(options: { generation?: FeedGenerationSe
       const actor: FeedActor = { userId: req.userId!, assistantId: req.params.assistantId, sessionId: req.params.sessionId, kind: 'user' }
       res.json(await withFeedTransaction(actor, async client => { const copy = await readFeedCopy(client, actor.sessionId); if (!copy) throw new FeedCollaborationError(404, 'working_copy_required'); const session = (await client.query('SELECT title FROM sessions WHERE id=$1', [actor.sessionId])).rows[0]; return { revision: copy.revision, ...feedOutputProjection(requireFeedComposition(copy.content), /^\[([^\]]+)\]/.exec(session.title)?.[1] ?? 'threads') } }, false))
     } catch (error) { replyError(res, error) }
+  })
+  router.get(`${base}/linkedin-preview`, async (req, res) => {
+    try { res.json(await readLinkedInPreview({ userId: req.userId!, assistantId: req.params.assistantId, sessionId: req.params.sessionId, kind: 'user' }, z.coerce.number().int().nonnegative().parse(req.query.revision))) }
+    catch (error) { replyError(res, error) }
   })
   router.post(`${base}/export`, async (req, res) => {
     try {

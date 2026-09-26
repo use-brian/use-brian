@@ -1,3 +1,5 @@
+import {createLocalLinkedInCloud} from './content-planning/linkedin-cloud.js'
+import {setFeedLinkedInTargetAuthority,setFeedLinkedInPublisher} from './content-planning/linkedin-authority.js'
 import { createFeedReviewContextLoader } from './content-planning/review-context.js'
 /**
  * bootOpenApi — the OPEN composition root for the Use Brian HTTP API.
@@ -188,6 +190,7 @@ import { createFeedGenerationPort } from './content-planning/generation-port.js'
 import { createFeedGenerationService } from './content-planning/generation.js'
 import { createFeedReviewHandler } from './content-planning/review.js'
 import { createFeedEditorialWorker } from './workers/feed-editorial-worker.js'
+import { configureFeedLinkedInFiles } from './content-planning/linkedin-payload.js'
 import { feedCollaborationRoutes } from './routes/feed-collaboration.js'
 import {
   selfHostFeedCloudRoutes,
@@ -5303,6 +5306,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   let feedCloudPublisher: ContentPlanningRouteOptions['publishApproved']
   if (isOssEdition() && env.MANAGED_FEED_CLOUD_URL && credKey) {
     const feedCloudStore = createSelfHostFeedCloudLinkStore(credKey)
+    const linkedinCloud = createLocalLinkedInCloud({store:feedCloudStore})
+    setFeedLinkedInTargetAuthority(linkedinCloud.authorize)
+    setFeedLinkedInPublisher(linkedinCloud.publish)
     feedCloudPublisher = createSelfHostFeedCloudPublisher({ store: feedCloudStore })
     app.use(
       '/api/self-host-feed',
@@ -5341,6 +5347,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // and developing an idea must never require a credential in either edition.
   app.use('/api/distribution', requireAuth(env.JWT_SECRET), contentIdeasRoutes())
   app.use('/api/distribution', requireAuth(env.JWT_SECRET), postWorkingCopiesRoutes())
+  configureFeedLinkedInFiles(filesApi ?? undefined)
   app.use('/api/distribution', requireAuth(env.JWT_SECRET), feedCollaborationRoutes({ generation: feedGeneration, reviewContext: feedReviewContext, files: filesApi ?? undefined }))
   app.use('/api/campaigns', requireAuth(env.JWT_SECRET), campaignRoutes({
     emailService: campaignEmailService,

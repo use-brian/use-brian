@@ -45,3 +45,4 @@ export * from './feed-copy.js'
 export * from './campaigns.js'
 
 export * from './feed-linkedin.js'
+export { feedLinkedInPayloadSchema, feedLinkedInCloudRequestSchema, type FeedLinkedInCloudRequest } from './feed-linkedin-cloud.js'

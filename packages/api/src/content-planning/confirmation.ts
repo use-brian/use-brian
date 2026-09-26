@@ -1,3 +1,4 @@
+import { buildLinkedInPayload, type LinkedInPayload } from './linkedin-payload.js'
 /** Atomic editorial finish; provider delivery is a subsequent boundary. [COMP:feed/confirmation-learning] */
 import { randomUUID } from 'node:crypto'
 import type pg from 'pg'
@@ -19,7 +20,7 @@ export type FeedConfirmationHistory = {
 }
 export type FeedConfirmation = {
   id: string; workspaceId: string; assistantId: string; sessionId: string; revision: number;
-  actorUserId: string; content: StructuredFeedContent; projection: ReturnType<typeof feedOutputProjection>;
+  actorUserId: string; content: StructuredFeedContent; projection: ReturnType<typeof feedOutputProjection> & { linkedinPayload?: LinkedInPayload };
   history: FeedConfirmationHistory; historyCutoff: Date; scope: FeedLearningScope;
   priorConfirmationId: string | null; reviewRunId: string | null; createdAt: Date;
 }
@@ -52,7 +53,12 @@ export async function confirmFeedPost(actor: FeedActor, raw: FeedConfirmationReq
     await assertFeedFiles(client, actor, access, content.composition, [], content.linkedin)
     const session = (await client.query('SELECT title,context_compartments,context_project_id FROM sessions WHERE id=$1', [actor.sessionId])).rows[0]
     const platform = options.source?.platform ?? /^\[([^\]]+)\]/.exec(session.title)?.[1] ?? 'threads'
-    const projection = feedOutputProjection(content, platform)
+    const projection: FeedConfirmation['projection'] = feedOutputProjection(content, platform)
+    if (platform === 'linkedin' && content.linkedin?.destinationId && content.linkedin.mode !== 'newsletter_edition') {
+      const prepared = await buildLinkedInPayload(actor, access, content, copy.revision)
+      if (input.linkedinPreviewHash !== prepared.hash) throw new FeedCollaborationError(409, 'linkedin_preview_required')
+      projection.linkedinPayload = prepared.payload
+    }
     if (projection.issues.length) throw new FeedCollaborationError(409, projection.issues[0]!.code)
     const existing = (await client.query<FeedConfirmation>(`SELECT ${columns} FROM feed_post_confirmations WHERE session_id=$1 AND source_revision=$2`, [actor.sessionId, copy.revision])).rows[0]
     let confirmation = existing

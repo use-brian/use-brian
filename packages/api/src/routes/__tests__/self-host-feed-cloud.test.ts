@@ -162,3 +162,17 @@ describe('[COMP:api/self-host-feed-cloud-link] local managed delivery', () => {
     expect(fetchImpl).not.toHaveBeenCalled()
   })
 })
+
+import {createLocalLinkedInCloud} from '../../content-planning/linkedin-cloud.js'
+describe('[COMP:feed/linkedin-cloud-link] local target and capability boundary',()=>{
+ it('refuses an unlinked target without provider traffic',async()=>{
+  const local=store();vi.mocked(local.getWithCredential).mockResolvedValue(null);const fetcher=vi.fn()
+  await expect(createLocalLinkedInCloud({store:local,fetchImpl:fetcher}).authorize({userId:'fixture',assistantId:ASSISTANT_ID,sessionId:'fixture',kind:'user'},{workspaceId:WORKSPACE_ID} as never,{version:1,mode:'post',destinationId:WORKSPACE_ID,authorKind:'person'})).rejects.toMatchObject({code:'cloud_link_unavailable'});expect(fetcher).not.toHaveBeenCalled()
+ })
+ it('refuses foreign target aliases and preserves personal publishing denial',async()=>{
+  const fetcher=vi.fn(async()=>Response.json([{destinationId:WORKSPACE_ID,authorUrn:'urn:li:person:writer',authorKind:'person',canPublishAs:false}]))
+  const cloud=createLocalLinkedInCloud({store:store(),fetchImpl:fetcher}),actor={userId:'fixture',assistantId:ASSISTANT_ID,sessionId:'fixture',kind:'user' as const}
+  await expect(cloud.authorize(actor,{workspaceId:WORKSPACE_ID} as never,{version:1,mode:'post',destinationId:WORKSPACE_ID,authorKind:'person'})).rejects.toMatchObject({code:'linkedin_destination_unavailable'})
+  await expect(cloud.authorize(actor,{workspaceId:WORKSPACE_ID} as never,{version:1,mode:'post',destinationId:ASSISTANT_ID,authorKind:'person'})).rejects.toMatchObject({code:'linkedin_destination_unavailable'})
+ })
+})

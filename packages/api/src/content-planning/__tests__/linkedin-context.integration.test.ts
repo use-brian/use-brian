@@ -45,7 +45,7 @@ describe('[COMP:feed/linkedin-context] canonical context authority', () => {
   })
   it('rejects unauthorized targets and cover references without changing the revision', async () => {
     const f = await fixture()
-    setFeedLinkedInTargetAuthority(async (_actor, scope, target) => { if(scope.workspaceId!==f.workspaceId || target.destinationId) throw new Error('destination_scope_mismatch') })
+    setFeedLinkedInTargetAuthority(async (_actor, scope, target) => { if(scope.workspaceId!==f.workspaceId || target.destinationId) throw new Error('destination_scope_mismatch'); return {authorUrn:'urn:li:person:fixture',displayName:'Fixture'} })
     await expect(executeFeedCommands(f.actor,{expectedRevision:2,mutationId:randomUUID(),commands:[{kind:'linkedin',metadata:{...metadata,destinationId:randomUUID()}}]})).rejects.toThrow('destination_scope_mismatch')
     await expect(executeFeedCommands(f.actor,{expectedRevision:2,mutationId:randomUUID(),commands:[{kind:'linkedin',metadata:{...metadata,mode:'newsletter_edition',newsletter:{name:'Orchard',url:'https://www.linkedin.com/newsletters/123456789',editionTitle:'Story',coverFileId:randomUUID()}}}]})).rejects.toMatchObject({code:'file_not_available_to_draft'})
     expect((await getFeedCollaboration(f.actor)).copy!.revision).toBe(2)
