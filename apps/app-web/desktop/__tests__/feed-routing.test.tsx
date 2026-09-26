@@ -32,13 +32,16 @@ vi.mock("@/components/chrome/desktop-chat-window", () => ({ DesktopChatWindow: (
 vi.mock("@/components/workspace-picker", () => ({ WorkspacePicker: () => null }));
 vi.mock("@/components/doc/workspace-chrome", async () => {
   const { Link } = await import("react-router-dom");
-  return { WorkspaceChrome: ({ children }: { children: ReactNode }) => <><Link to="/w/workspace-one/feed">Feed</Link>{children}</> };
+  return { WorkspaceChrome: ({ children }: { children: ReactNode }) => <><Link to="/w/workspace-one/feed">Feed</Link><Link to="/w/workspace-one/feed/campaigns">Campaigns</Link>{children}</> };
 });
 vi.mock("@/app/w/[workspaceId]/p/layout", () => ({ default: () => <main data-page>Page</main> }));
 vi.mock("@/components/feed/feed-surface-shell", () => ({
   FeedSurfaceShell: ({ workspaceId, children }: { workspaceId: string; children: ReactNode }) => <main data-feed-workspace={workspaceId}>{children}</main>,
 }));
 vi.mock("@/components/feed/feed-plan", () => ({ FeedPlan: () => <h1>Feed Plan</h1> }));
+vi.mock("@/components/feed/feed-campaigns", () => ({
+  FeedCampaigns: ({ workspaceId }: { workspaceId: string }) => <h1 data-campaign-workspace={workspaceId}>Campaigns</h1>,
+}));
 vi.mock("@/components/feed/feed-voice", () => ({ FeedVoice: () => <h1>Company Voice</h1> }));
 vi.mock("@/app/w/[workspaceId]/feed/[platform]/posts/page", () => ({ default: () => <h1>Platform Posts</h1> }));
 vi.mock("@/app/w/[workspaceId]/feed/[platform]/posts/[sessionId]/page", () => ({ default: () => <h1>Post Editor</h1> }));
@@ -80,6 +83,22 @@ describe("[COMP:app-web/desktop-spa] Feed routes in both editions", () => {
     expect(host.querySelector("[data-feed-workspace]")?.getAttribute("data-feed-workspace")).toBe("workspace-one");
     expect(host.querySelector("h1")?.textContent).toBe("Feed Plan");
     expect(host.querySelector("[data-page]")).toBeNull();
+  });
+
+  it.each(["oss", "hosted"] as const)("opens Campaigns from Plan in %s without redirecting", async (edition) => {
+    await mount(edition, "/w/workspace-one/feed");
+    await act(async () => host.querySelector<HTMLAnchorElement>('a[href$="/feed/campaigns"]')!.click());
+    await act(async () => { await vi.dynamicImportSettled(); });
+    expect(window.location.hash).toBe("#/w/workspace-one/feed/campaigns");
+    expect(host.querySelector("h1")?.textContent).toBe("Campaigns");
+    expect(host.querySelector("[data-campaign-workspace]")?.getAttribute("data-campaign-workspace")).toBe("workspace-one");
+  });
+
+  it.each(["oss", "hosted"] as const)("opens a Campaigns deep link in %s with its workspace", async (edition) => {
+    await mount(edition, "/w/workspace-two/feed/campaigns");
+    expect(window.location.hash).toBe("#/w/workspace-two/feed/campaigns");
+    expect(host.querySelector("h1")?.textContent).toBe("Campaigns");
+    expect(host.querySelector("[data-campaign-workspace]")?.getAttribute("data-campaign-workspace")).toBe("workspace-two");
   });
 
   it.each([

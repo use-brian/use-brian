@@ -134,6 +134,7 @@ const FeedSurfaceShell = lazy(async () => ({
   default: (await import("@/components/feed/feed-surface-shell")).FeedSurfaceShell,
 }));
 const FeedPlan = lazy(async () => ({ default: (await import("@/components/feed/feed-plan")).FeedPlan }));
+const FeedCampaigns = lazy(async () => ({ default: (await import("@/components/feed/feed-campaigns")).FeedCampaigns }));
 const FeedVoice = lazy(async () => ({ default: (await import("@/components/feed/feed-voice")).FeedVoice }));
 const FeedInsights = lazy(async () => ({ default: (await import("@/components/feed/feed-insights")).FeedInsights }));
 const FeedInspiration = lazy(async () => ({ default: (await import("@/components/feed/feed-inspiration")).FeedInspiration }));
@@ -197,6 +198,7 @@ const OPERATOR_ROUTE_ELEMENTS: Record<OperatorAppKey, ReactNode> = {
   feed: (
     <Route key="feed" path="feed" element={<FeedShell />}>
       <Route index element={<FeedPlan />} />
+      <Route path="campaigns" element={<FeedCampaignsRoute />} />
       <Route path="voice" element={<FeedVoice scope="company" />} />
       <Route path="drafts" element={<FeedLegacyDraftsPage />} />
       <Route path="inbox" element={<FeedLegacyInboxPage />} />
@@ -719,6 +721,11 @@ function FeedShell() {
       <Outlet />
     </FeedSurfaceShell>
   );
+}
+
+function FeedCampaignsRoute() {
+  const { workspaceId = "" } = useParams<{ workspaceId: string }>();
+  return <FeedCampaigns workspaceId={workspaceId} />;
 }
 
 /**
