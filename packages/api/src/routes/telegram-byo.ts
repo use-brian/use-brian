@@ -1,3 +1,4 @@
+import { createTelegramDiscussionStore, observeTelegramDiscussion, telegramDiscussionContext, type TelegramDiscussionStore, type DiscussionMessage } from '../telegram-discussion-context.js'
 import { createChannelQuestionStore, handleChannelQuestionReply, type ChannelQuestionStore } from '../workflow/channel-questions.js'
 import { dispatchQuestionResponse } from '../workflow/question-response.js'
 import { buildWorkflowToolRegistry } from '../workflow/mcp-bridge.js'
@@ -108,6 +109,7 @@ export type ChannelRecordingIngest = {
 // getConnectorUserId now used inside channel-pipeline.ts
 
 type TelegramByoRouteOptions = {
+  discussionStore?: TelegramDiscussionStore
   questionStore?: ChannelQuestionStore
   /** Servable background-lane model, resolved at boot; forwarded to the
    * channel pipeline so its background calls work without a Google key. */
@@ -458,6 +460,15 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
     // drop rather than merge an unknown thread into the room session.
     const threadUpdate = req.body as { message?: RawTelegramGroupMessage; channel_post?: RawTelegramGroupMessage; callback_query?: { message?: RawTelegramGroupMessage } }
     const threadMessage = threadUpdate.message ?? threadUpdate.channel_post ?? threadUpdate.callback_query?.message
+    const discussionStore = options.discussionStore ?? createTelegramDiscussionStore()
+    // Persist before suppression/address gates, including privacy-mode reply snapshots.
+    // A storage failure drops the update, never silently fabricates source context.
+    try {
+      await observeTelegramDiscussion(discussionStore, integration.id, req.body)
+    } catch (err) {
+      console.error('[telegram-byo] discussion context persistence failed:', err)
+      return
+    }
     const discussionChatIds: string[] = []
     if (threadMessage?.chat?.type === 'supergroup' && !threadMessage.chat.is_forum && threadMessage.message_thread_id != null) {
       try {
@@ -1206,6 +1217,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
           pendingConfResolvers,
           questions,
           integrationId: boundIntegration.id,
+          discussionStore,
         })
       })
     }
@@ -1314,6 +1326,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
 // ── Per-message handler ─────────────────────────────────────────
 
 type ProcessMessageParams = {
+  discussionStore: TelegramDiscussionStore
   questions: TelegramQuestions
   integrationId: string
   /** Servable background-lane model, threaded from the route options. */
@@ -1799,6 +1812,13 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
   // users with no @username). Same raw access as the allowlist check above.
   const sender = incoming.raw as { from?: { username?: string }; sender_chat?: unknown; chat?: { type?: string } }
   const byoUsername = sender.sender_chat || sender.chat?.type === 'channel' ? undefined : sender.from?.username
+  const providerVisibleContext = await telegramDiscussionContext(params.discussionStore, params.integrationId, incoming.channelId)
+  const rawReply = incoming.raw as DiscussionMessage
+  // The generic quote resolver treats bot-authored quotes as assistant replies.
+  // An automatic forward is neither a human comment nor our assistant answer;
+  // supply it only through the source-labelled provider context, once per turn.
+  const replyRaw = providerVisibleContext && rawReply.reply_to_message?.is_automatic_forward
+    ? { ...rawReply, reply_to_message: undefined } : incoming.raw
   await processChannelMessage({
     backgroundModel: params.backgroundModel,
     userId: channelUserId,
@@ -1812,11 +1832,14 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     actorChannelId: byoUsername ? `@${byoUsername}` : null,
     messageText: combinedText,
     userContentBlocks,
+    // Rebuilt once per invocation, not stored as a human message or consumed by
+    // an injection marker. Retries and compacted sessions retain the context.
+    providerVisibleContext,
     // Raw paste (pre-attachment-context) for the large-paste intercept.
     rawUserText: incoming.text ?? '',
     isGroupChat: incoming.isGroupChat,
     replyToMessageId: incoming.replyToMessageId ?? null,
-    replyRaw: incoming.raw,
+    replyRaw,
     incomingChannelMessageId: incoming.messageId ?? null,
     archiveIncoming: incoming,
     archiveConnectorInstanceId: params.archiveConnectorInstanceId,
