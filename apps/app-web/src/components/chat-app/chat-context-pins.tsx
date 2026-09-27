@@ -148,21 +148,19 @@ type WorkBenchTool = {
   workerId?: string;
 };
 
-export function ChatContextPins({
-  sessionId,
-  workspaceId,
-  refreshKey,
-  startedByName,
-  assistant = null,
-  turnActive = false,
-  waitingForInput = false,
-  currentStep = null,
-  tools = [],
-  lastProgressAt = null,
-  onStopTurn,
-  expanded,
-  onExpandedChange,
-}: {
+// Own the identity boundary here: callers need not remember a React key.
+// This resets drafts, filters, errors, uploads and stop state before a new
+// room paints, including A -> B -> A and workspace changes.
+export function ChatContextPins(props: ChatContextPinsProps) {
+  return (
+    <SessionContextPins
+      key={JSON.stringify([props.workspaceId, props.sessionId])}
+      {...props}
+    />
+  );
+}
+
+type ChatContextPinsProps = {
   sessionId: string;
   workspaceId: string;
   refreshKey: number;
@@ -184,7 +182,33 @@ export function ChatContextPins({
   onStopTurn?: () => Promise<void> | void;
   expanded: boolean;
   onExpandedChange: (expanded: boolean) => void;
-}) {
+};
+
+function SessionContextPins({
+  sessionId,
+  workspaceId,
+  refreshKey,
+  startedByName,
+  assistant = null,
+  turnActive = false,
+  waitingForInput = false,
+  currentStep = null,
+  tools = [],
+  lastProgressAt = null,
+  onStopTurn,
+  expanded,
+  onExpandedChange,
+}: ChatContextPinsProps) {
+  const mounted = useRef(false);
+  const pinRead = useRef(0);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      ++pinRead.current;
+    };
+  }, []);
+
   const dictionary = useT();
   const chatT = dictionary.chatApp;
   const t = chatT.pins;
@@ -238,9 +262,7 @@ export function ChatContextPins({
     try {
       await onStopTurn();
     } finally {
-      // Left true on success too: the turn_completed that follows unmounts
-      // this card, and the effect above clears it if it does not.
-      setStopping(false);
+      if (mounted.current) setStopping(false);
     }
   }, [onStopTurn, stopping]);
 
@@ -253,8 +275,12 @@ export function ChatContextPins({
   }, [expanded, onExpandedChange]);
 
   const refresh = useCallback(async () => {
+    if (!mounted.current) return;
+    const request = ++pinRead.current;
     try {
-      setPins(await listSessionPins(sessionId));
+      const rows = await listSessionPins(sessionId);
+      // Stream signals and mutation completions can overlap in the same room.
+      if (mounted.current && request === pinRead.current) setPins(rows);
     } catch {
       // Keep the last known row — a transient failure must not empty it.
     }
@@ -361,15 +387,16 @@ export function ChatContextPins({
       setError(null);
       try {
         await addSessionPin(sessionId, pin);
+        if (!mounted.current) return;
         setAddOpen(false);
         setSearch("");
         setUrlValue("");
         setInstructionValue("");
         await refresh();
       } catch {
-        setError(t.addFailed);
+        if (mounted.current) setError(t.addFailed);
       } finally {
-        setBusy(false);
+        if (mounted.current) setBusy(false);
       }
     },
     [busy, refresh, sessionId, t],
@@ -389,6 +416,7 @@ export function ChatContextPins({
           | { progress: number }
           | null,
       ) => {
+        if (!mounted.current) return;
         setFileUploads((current) =>
           current.flatMap((item) => {
             if (item.id !== id) return [item];
@@ -405,6 +433,7 @@ export function ChatContextPins({
           maxBytes: MAX_STORED_FILE_BYTES,
           canRouteMedia: false,
         });
+        if (!mounted.current) return;
         const confirmed: File[] = [];
         for (const file of attach) {
           if (file.size > LARGE_FILE_CONFIRM_BYTES) {
@@ -418,6 +447,7 @@ export function ChatContextPins({
               confirmLabel: t.largeFileConfirm,
               cancelLabel: t.largeFileCancel,
             });
+            if (!mounted.current) return;
             if (!ok) continue;
           }
           confirmed.push(file);
@@ -467,6 +497,9 @@ export function ChatContextPins({
           },
         });
         for (let index = 0; index < uploads.length; index += 1) {
+          // Storage already in flight may finish, but navigation must not
+          // start any further pin/ingest work for the abandoned editor.
+          if (!mounted.current) return;
           const upload = uploads[index];
           const result = results[index];
           if (!result?.ok || !result.fileId) {
@@ -497,6 +530,7 @@ export function ChatContextPins({
           // pipeline owns media. `requires_confirmation` means the file is
           // already in the brain and `in_flight` means the work is already
           // running; both are the desired end state, not failures.
+          if (!mounted.current) return;
           const sourceFile = confirmed[index];
           const isMedia =
             sourceFile.type.startsWith("audio/") ||
@@ -516,7 +550,7 @@ export function ChatContextPins({
           updateUpload(upload.id, null);
         }
         if (anyPinned) await refresh();
-        if (!anyFailed) setAddOpen(false);
+        if (mounted.current && !anyFailed) setAddOpen(false);
       } catch {
         for (const upload of uploads) {
           updateUpload(upload.id, {
@@ -525,7 +559,7 @@ export function ChatContextPins({
           });
         }
       } finally {
-        setFileBusy(false);
+        if (mounted.current) setFileBusy(false);
       }
     },
     [fileBusy, refresh, sessionId, t, workspaceId],
@@ -542,7 +576,7 @@ export function ChatContextPins({
         await removeSessionPin(sessionId, pinId);
         await refresh();
       } catch {
-        setError(t.removeFailed);
+        if (mounted.current) setError(t.removeFailed);
       }
     },
     [refresh, sessionId, t],
