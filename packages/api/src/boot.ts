@@ -4704,6 +4704,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   allTools.set('browserClick', computerTools.browserClick)
   allTools.set('browserType', computerTools.browserType)
   if (protectedFill) allTools.set('browserFillReference', computerTools.browserFillReference)
+  allTools.set('browserFillForm', computerTools.browserFillForm)
   allTools.set('browserCurrentUrl', computerTools.browserCurrentUrl)
   // Research read-browse (computer-use.md §12): browserReadPage is
   // deliberately NOT in allTools — interactive turns have the full flat

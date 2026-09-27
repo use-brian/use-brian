@@ -1,3 +1,5 @@
+import { settleBeforeSnapshot } from './dom-settle.js'
+import { parseFormFields, formFieldOperation, type FillFormResult } from './fill-form.js'
 /**
  * CDP executor (P1.5/P1.6): implements the discrete browser ops against the
  * one user-allowed tab via chrome.debugger. Refs resolve against the LATEST
@@ -6,7 +8,7 @@
  */
 import { buildSnapshot, type BuiltSnapshot, type CdpAXNode } from './snapshot.js'
 import { RESTRICTED_TAB_MESSAGE } from './tab-eligibility.js'
-import { buildActionCursorArmExpression, type ActionCursorKind } from './action-cursor.js'
+import { ACTION_CURSOR_BEFORE_CAPTURE, buildActionCursorArmExpression, type ActionCursorKind } from './action-cursor.js'
 
 export class ExecutorError extends Error {
   constructor(
@@ -171,6 +173,7 @@ function parsedTabUrl(url: string): URL | null {
 
 export class TabExecutor {
   private attachedTabId: number | null = null
+  private attachmentId = ''
   private lastSnapshot: BuiltSnapshot | null = null
   private takeoverPointer: { x: number; y: number } | null = null
 
@@ -241,6 +244,7 @@ export class TabExecutor {
       throw attachError(err)
     }
     this.attachedTabId = tabId
+    this.attachmentId = crypto.randomUUID()
     await this.cdp(tabId, 'Accessibility.enable')
   }
 
@@ -320,6 +324,20 @@ export class TabExecutor {
       expression: buildActionCursorArmExpression(kind),
       returnByValue: true,
     }).catch(() => undefined)
+  }
+
+  /** Scroll before focus; direct feedback also covers an already-focused control. */
+  private async focusActionTarget(tabId: number, backendNodeId: number): Promise<void> {
+    const quad = await this.targetBox(tabId, backendNodeId)
+    await this.cdp(tabId, 'DOM.focus', { backendNodeId })
+    if (quad) {
+      const x = (quad[0] + quad[4]) / 2
+      const y = (quad[1] + quad[5]) / 2
+      await this.cdp(tabId, 'Runtime.evaluate', {
+        expression: `(() => { const cursor = window[Symbol.for("use-brian.action-cursor.v1")]; if (cursor) { cursor.target = null; cursor.show(${JSON.stringify(x)}, ${JSON.stringify(y)}, true); } })()`,
+        returnByValue: true,
+      }).catch(() => undefined)
+    }
   }
 
   /** Accessible name of a ref from the latest snapshot (approval previews ride this server-side too). */
@@ -508,6 +526,7 @@ export class TabExecutor {
       throw new ExecutorError(`Ref ${ref} is no longer attached to the page. Take a fresh browserSnapshot.`, 'stale_ref')
     }
     try {
+      await this.armActionCursor(tabId, 'typing')
       const outcome = await this.cdp<{ result?: { value?: unknown } }>(tabId, 'Runtime.callFunctionOn', {
         objectId: optionObjectId,
         objectGroup,
@@ -519,6 +538,10 @@ export class TabExecutor {
           const disabled = this.disabled || select.disabled ||
             (group && group.tagName === 'OPTGROUP' && group.disabled);
           if (disabled) return { outcome: 'disabled' };
+          select.scrollIntoView?.({ block: 'center', inline: 'nearest', behavior: 'instant' });
+          if (typeof select.focus === 'function') select.focus({ preventScroll: true });
+          if (!this.isConnected || !select.isConnected || this.closest('select') !== select || this.disabled || select.disabled) return { outcome: 'no_select' };
+          try { window[Symbol.for('use-brian.action-cursor.v1')]?.showTarget(select); } catch {}
           const label = this.label || this.text || this.value;
           if (select.multiple) {
             const before = this.selected;
@@ -527,7 +550,6 @@ export class TabExecutor {
             select.dispatchEvent(new Event('change', { bubbles: true }));
             return { outcome: this.selected === !before ? 'selected' : 'unchanged', label, multiple: true, selected: this.selected };
           }
-          if (typeof select.focus === 'function') select.focus();
           this.selected = true;
           select.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
           select.dispatchEvent(new Event('change', { bubbles: true }));
@@ -566,12 +588,45 @@ export class TabExecutor {
     return { url: tab.url ?? url }
   }
 
-  async snapshot(mode: 'interactive' | 'full' = 'interactive'): Promise<{ url: string; title: string; nodes: BuiltSnapshot['nodes'] }> {
+  async snapshot(mode: 'interactive' | 'full' = 'interactive'): Promise<{ url: string; title: string; documentId?: string; nodes: BuiltSnapshot['nodes'] }> {
     const tabId = this.mustTab()
-    const res = await this.cdp<{ nodes: CdpAXNode[] }>(tabId, 'Accessibility.getFullAXTree')
-    this.lastSnapshot = buildSnapshot(res.nodes ?? [], mode)
-    const tab = await chrome.tabs.get(tabId)
-    return { url: tab.url ?? '', title: tab.title ?? '', nodes: this.lastSnapshot.nodes }
+    const attachmentId = this.attachmentId
+    const documentRoot = async () => {
+      try {
+        const res = await this.cdp<{ root?: { backendNodeId?: number } }>(tabId, 'DOM.getDocument', { depth: 0 })
+        const id = res.root?.backendNodeId
+        return typeof id === 'number' && Number.isSafeInteger(id) && id > 0 ? id : undefined
+      } catch (error) {
+        if (isDetachedError(error)) throw error
+        // Identity is optional, never substitute URL/AX ids for DOM identity.
+        return undefined
+      }
+    }
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let detachedDuringSettle: unknown
+      await settleBeforeSnapshot(expression => this.cdp(tabId, 'Runtime.evaluate', {
+        expression, awaitPromise: true, returnByValue: true,
+      }).catch(error => {
+        if (isDetachedError(error)) detachedDuringSettle = error
+        throw error
+      }))
+      // Optional settling must not mask the authoritative loss of control.
+      if (detachedDuringSettle) throw detachedDuringSettle
+      const before = await documentRoot()
+      const res = await this.cdp<{ nodes: CdpAXNode[] }>(tabId, 'Accessibility.getFullAXTree')
+      const tab = await chrome.tabs.get(tabId)
+      const after = await documentRoot()
+      if (this.attachedTabId !== tabId || this.attachmentId !== attachmentId) break
+      if (before !== undefined && after !== undefined && before !== after) {
+        this.lastSnapshot = null
+        continue // Discard the old AX tree; never label it with the new document id.
+      }
+      this.lastSnapshot = buildSnapshot(res.nodes ?? [], mode)
+      const documentId = before !== undefined && before === after ? `${tabId}:${attachmentId}:${before}` : undefined
+      return { url: tab.url ?? '', title: tab.title ?? '', ...(documentId ? { documentId } : {}), nodes: this.lastSnapshot.nodes }
+    }
+    this.lastSnapshot = null
+    throw new ExecutorError('Document changed while taking the snapshot. Take a fresh browserSnapshot.', 'stale_ref')
   }
 
   async click(ref: string): Promise<void> {
@@ -589,7 +644,8 @@ export class TabExecutor {
         // drive or even see, and which stays open on the user's screen. The
         // options are already in the snapshot: focus the control and let the
         // caller click an option ref.
-        await this.cdp(tabId, 'DOM.focus', { backendNodeId })
+        await this.armActionCursor(tabId, 'typing')
+        await this.focusActionTarget(tabId, backendNodeId)
         return
       }
     }
@@ -627,7 +683,7 @@ export class TabExecutor {
     }
     await this.armActionCursor(tabId, 'typing')
     try {
-      await this.cdp(tabId, 'DOM.focus', { backendNodeId })
+      await this.focusActionTarget(tabId, backendNodeId)
     } catch (err) {
       if (isDetachedError(err)) throw err
       const associated = await this.resolveAssociatedTarget(tabId, backendNodeId, 'type')
@@ -639,7 +695,7 @@ export class TabExecutor {
         )
       }
       try {
-        await this.cdp(tabId, 'DOM.focus', { backendNodeId: associated })
+        await this.focusActionTarget(tabId, associated)
       } catch (associatedErr) {
         if (isDetachedError(associatedErr)) throw associatedErr
         throw new ExecutorError(
@@ -650,6 +706,81 @@ export class TabExecutor {
       }
     }
     await this.cdp(tabId, 'Input.insertText', { text })
+  }
+
+  async fillForm(args: unknown): Promise<FillFormResult> {
+    const fields = parseFormFields(args)
+    const tabId = this.mustTab()
+    const snapshot = this.lastSnapshot
+    const url = (await this.currentUrl()).url
+    const objectGroup = 'use-brian-fill-form'
+    const objects: string[] = []
+    const selectedValues = new Map<number, string>()
+    const result: FillFormResult = { fields: fields.map(f => ({ ref: f.ref, status: 'skipped' })) }
+    let index = 0
+    const guard = async () => {
+      if (this.attachedTabId !== tabId || this.lastSnapshot !== snapshot || (await this.currentUrl()).url !== url) {
+        throw new Error('Page changed during filling; take a fresh snapshot.')
+      }
+    }
+    const run = async (i: number, mode: 'validate' | 'set' | 'verify') => {
+      await guard()
+      const response = await this.cdp<{ result?: { value?: unknown }; exceptionDetails?: unknown }>(tabId, 'Runtime.callFunctionOn', {
+        objectId: objects[i], objectGroup, returnByValue: true,
+        functionDeclaration: formFieldOperation.toString(),
+        arguments: [{ value: fields[i] }, { value: mode }, ...(selectedValues.has(i) ? [{ value: selectedValues.get(i) }] : [])],
+      })
+      const value = response.result?.value
+      if (!response.exceptionDetails && mode === 'set' && fields[i]!.action === 'select' && value && typeof value === 'object' && 'selectedValue' in value && typeof value.selectedValue === 'string') {
+        selectedValues.set(i, value.selectedValue)
+        return
+      }
+      if (response.exceptionDetails || value !== null) {
+        throw new Error(typeof value === 'string' ? value : 'Target is unavailable; take a fresh snapshot.')
+      }
+    }
+    try {
+      // Resolve and validate EVERY target before any mutation; retain object identity.
+      for (index = 0; index < fields.length; index++) {
+        const backendNodeId = this.resolveRef(fields[index]!.ref)
+        const resolved = await this.cdp<{ object?: { objectId?: string } }>(tabId, 'DOM.resolveNode', { backendNodeId, objectGroup })
+        if (!resolved.object?.objectId) throw new Error('Target is unavailable; take a fresh snapshot.')
+        objects.push(resolved.object.objectId)
+        await run(index, 'validate')
+      }
+      for (index = 0; index < fields.length; index++) {
+        // 'set' validates this retained target immediately before mutation in
+        // the same page-side call. Do not revalidate all remaining fields (O(n²)).
+        await this.armActionCursor(tabId, 'typing')
+        await run(index, 'set')
+        await new Promise(resolve => setTimeout(resolve, 0))
+        await run(index, 'verify')
+        result.fields[index]!.status = 'success'
+      }
+    } catch (error) {
+      result.fields[index] = { ref: fields[index]!.ref, status: 'failed', error: error instanceof Error ? error.message : 'Form filling failed.' }
+    } finally {
+      // Let asynchronous event handlers settle before verifying retained objects.
+      // Snapshot settling happens too late to determine per-field success.
+      if (result.fields.some(field => field.status === 'success')) {
+        await settleBeforeSnapshot(expression => this.cdp(tabId, 'Runtime.evaluate', {
+          expression, awaitPromise: true, returnByValue: true,
+        }))
+      }
+      // Later events (notably radio-group changes) can undo earlier successes.
+      // Verify every completed field, even after a partial failure, without
+      // retrying writes or abandoning verification at the first mismatch.
+      for (let completed = 0; completed < fields.length; completed++) {
+        if (result.fields[completed]!.status !== 'success') continue
+        try {
+          await run(completed, 'verify')
+        } catch (error) {
+          result.fields[completed] = { ref: fields[completed]!.ref, status: 'failed', error: error instanceof Error ? error.message : 'Final verification failed.' }
+        }
+      }
+      await this.cdp(tabId, 'Runtime.releaseObjectGroup', { objectGroup }).catch(() => undefined)
+    }
+    return result
   }
 
   async currentUrl(): Promise<{ url: string; title: string }> {
@@ -714,6 +845,17 @@ export class TabExecutor {
     const width = Math.max(1, viewport?.clientWidth ?? 1280)
     const height = Math.max(1, viewport?.clientHeight ?? 720)
     const scale = Math.min(1, 1280 / width)
+    let paintDeadline: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        this.cdp(tabId, 'Runtime.evaluate', {
+          expression: ACTION_CURSOR_BEFORE_CAPTURE, awaitPromise: true, returnByValue: true,
+        }).catch(() => undefined),
+        new Promise<void>(resolve => { paintDeadline = setTimeout(resolve, 150) }),
+      ])
+    } finally {
+      clearTimeout(paintDeadline)
+    }
     const frame = await this.cdp<{ data?: string }>(tabId, 'Page.captureScreenshot', {
       format: 'jpeg',
       quality: 55,

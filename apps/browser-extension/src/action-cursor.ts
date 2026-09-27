@@ -19,6 +19,13 @@ const ACTION_CURSOR_FUNCTION = String.raw`(kind) => {
       ring: root.querySelector(".ring"),
       cleanup: null,
       hideTimer: null,
+      target: null,
+      showTarget(target) {
+        if (!target || !target.isConnected) return;
+        this.target = target;
+        const rect = target.getBoundingClientRect();
+        this.show(rect.left + rect.width / 2, rect.top + rect.height / 2, true);
+      },
       show(x, y, pulse) {
         const px = Math.max(0, Math.min(window.innerWidth - 1, Number(x) || 0));
         const py = Math.max(0, Math.min(window.innerHeight - 1, Number(y) || 0));
@@ -30,10 +37,20 @@ const ACTION_CURSOR_FUNCTION = String.raw`(kind) => {
           this.ring.classList.add("on");
         }
         clearTimeout(this.hideTimer);
-        this.hideTimer = setTimeout(() => { host.style.opacity = "0"; }, 1100);
+        this.hideTimer = setTimeout(() => {
+          if (typeof this.cleanup === "function") this.cleanup();
+          host.remove();
+          delete window[key];
+        }, 4000);
       },
     };
     Object.defineProperty(window, key, { value: state, configurable: true });
+    // Failed/no-op actions must not leave presentation DOM behind either.
+    state.hideTimer = setTimeout(() => {
+      if (typeof state.cleanup === "function") state.cleanup();
+      host.remove();
+      delete window[key];
+    }, 4000);
   }
 
   if (typeof state.cleanup === "function") state.cleanup();
@@ -51,7 +68,7 @@ const ACTION_CURSOR_FUNCTION = String.raw`(kind) => {
   state.cleanup = cleanup;
 
   if (kind === "pointer") {
-    const move = (event) => state.show(event.clientX, event.clientY, false);
+    const move = (event) => { state.target = null; state.show(event.clientX, event.clientY, false); };
     const down = (event) => {
       state.show(event.clientX, event.clientY, true);
       cleanup();
@@ -64,8 +81,7 @@ const ACTION_CURSOR_FUNCTION = String.raw`(kind) => {
     const focus = (event) => {
       const target = event.target;
       if (!target || typeof target.getBoundingClientRect !== "function") return;
-      const rect = target.getBoundingClientRect();
-      state.show(rect.left + rect.width / 2, rect.top + rect.height / 2, true);
+      state.showTarget(target);
       cleanup();
     };
     on("focusin", focus);
@@ -79,3 +95,21 @@ const ACTION_CURSOR_FUNCTION = String.raw`(kind) => {
 export function buildActionCursorArmExpression(kind: ActionCursorKind): string {
   return `(${ACTION_CURSOR_FUNCTION})(${JSON.stringify(kind)})`
 }
+
+/** Finish only our overlay's transition before CDP captures the composited page.
+ * Bounded fallback also works when requestAnimationFrame is throttled in a hidden tab.
+ */
+export const ACTION_CURSOR_BEFORE_CAPTURE = `(() => {
+  const state = window[Symbol.for("use-brian.action-cursor.v1")];
+  if (!state || !state.host.isConnected) return;
+  if (state.target) {
+    if (!state.target.isConnected) { state.host.style.opacity = "0"; return; }
+    const rect = state.target.getBoundingClientRect();
+    state.host.style.transform = "translate3d(" + Math.max(0, Math.min(innerWidth - 1, rect.left + rect.width / 2)) + "px," + Math.max(0, Math.min(innerHeight - 1, rect.top + rect.height / 2)) + "px,0)";
+  }
+  for (const animation of state.host.getAnimations()) animation.finish();
+  return new Promise(resolve => {
+    const timer = setTimeout(resolve, 100);
+    requestAnimationFrame(() => requestAnimationFrame(() => { clearTimeout(timer); resolve(); }));
+  });
+})()`

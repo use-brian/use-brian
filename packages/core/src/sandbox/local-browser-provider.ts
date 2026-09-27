@@ -10,6 +10,8 @@
 import { STALE_EXTENSION_REMEDY } from '@use-brian/shared'
 import {
   BrowserBackendError,
+  BrowserFormFieldsSchema,
+  BrowserFillFormResultSchema,
   BROWSER_BACKEND_ERROR_CODES,
   BrowserCaptureResultSchema,
   BrowserNavigateResultSchema,
@@ -119,6 +121,10 @@ export function createLocalBrowserProvider(deps: {
     },
     async type(ctx, ref, text) {
       await send(ctx, 'type', { ref, text })
+    },
+    async fillForm(ctx, fields) {
+      const validated = BrowserFormFieldsSchema.parse(fields)
+      return BrowserFillFormResultSchema.parse(await send(ctx, 'fillForm', { fields: validated }))
     },
     async currentUrl(ctx) {
       return BrowserUrlResultSchema.parse(await send(ctx, 'currentUrl'))
