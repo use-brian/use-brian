@@ -103,3 +103,5 @@ export {
   type CreateComputerToolsOptions,
   type ResolveComputerToolPolicy,
 } from './tools.js'
+
+export { createProtectedFillService, ProtectedFillDenied, PROTECTED_FILL_ERROR, isProtectedFillOrigin, type ProtectedFillScope, type ProtectedFillSource, type ProtectedFillItem, type ProtectedFillService } from './protected-fill.js'

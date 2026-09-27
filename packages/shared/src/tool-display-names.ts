@@ -214,6 +214,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   browserCloseTab: 'Close a browser tab',
   browserSnapshot: 'Look at the browser page',
   browserClick: 'Click in the browser',
+  browserFillReference: 'Protected browser fill',
   browserType: 'Type in the browser',
   browserCurrentUrl: 'Check the browser address',
   browserReadPage: 'Read a page in the browser',

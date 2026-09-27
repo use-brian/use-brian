@@ -1,3 +1,9 @@
+import { supportsProtectedFill } from './sandbox/relay-transport.js'
+import { createProtectedFillService, type ProtectedFillScope } from '@use-brian/core'
+import { protectedBrowserFillRoutes } from './routes/protected-browser-fill.js'
+import { createProtectedCrmSource } from './sandbox/protected-fill-crm.js'
+import { getEntityById as getProtectedFillEntity } from './db/entities-store.js'
+import { resolveWorkspaceViewpoint as protectedFillViewpoint } from './db/workspace-viewpoint.js'
 import { createFeedReviewContextLoader } from './content-planning/review-context.js'
 /**
  * bootOpenApi — the OPEN composition root for the Use Brian HTTP API.
@@ -864,6 +870,8 @@ export interface OpenApiEnv {
   // the browser-relay's HTTP base + shared secret. Unset (open default) →
   // the local browser backend reports not_configured.
   BROWSER_RELAY_URL?: string
+  PROTECTED_BROWSER_FILL_SINGLE_INSTANCE?: string
+  PROTECTED_BROWSER_FILL_EXTENSION_ORIGINS?: string
   BROWSER_RELAY_SECRET?: string
   // Computer-use cloud mode (§5): E2B Cloud credentials + the pre-baked
   // sandbox template (agent-browser + python3 + unshare). Unset → the cloud
@@ -1433,6 +1441,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // ── CORS ──
   const allowedOrigins = new Set([env.APP_URL, env.FEED_URL, env.AUTHED_APP_URL].filter(Boolean) as string[])
   app.use((req, res, next) => {
+    // Resolution/completion/recovery own their extension-only CORS, including preflight.
+    if (/^\/api\/protected-browser-fill\/(resolve|complete|recover)$/.test(req.path)) { next(); return }
     const origin = req.headers.origin
     if (origin && allowedOrigins.has(origin)) {
       res.header('Access-Control-Allow-Origin', origin)
@@ -4351,11 +4361,42 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const browserRelayUrl =
     env.BROWSER_RELAY_URL ||
     (env.NODE_ENV === 'development' ? 'http://localhost:8080' : undefined)
+  const localComputerTasks = createInMemoryLocalComputerTaskStore()
+  const protectedFillEnabled = env.PROTECTED_BROWSER_FILL_SINGLE_INSTANCE === 'true' &&
+    Boolean(browserRelayUrl && env.BROWSER_RELAY_SECRET && ports.browserProfileStore)
+  const protectedExtensionOrigins = new Set((env.PROTECTED_BROWSER_FILL_EXTENSION_ORIGINS ?? '')
+    .split(',').map(origin => origin.trim()).filter(origin => /^chrome-extension:\/\/[a-p]{32}$/.test(origin)))
+  const authorizeProtectedIdentity = async (scope: Pick<ProtectedFillScope, 'userId' | 'workspaceId' | 'browserProfileId'>) => {
+    const profile = await ports.browserProfileStore?.get(scope.browserProfileId)
+    return Boolean(profile && profile.ownerUserId === scope.userId && profile.workspaceId === scope.workspaceId &&
+      await workspaceStore.getMembership(scope.userId, scope.workspaceId))
+  }
+  const protectedBrowserSupported = async (userId: string, browserProfileId: string) => {
+    if (!browserRelayUrl || !env.BROWSER_RELAY_SECRET) return false
+    const status = await relayExtensionStatus({ relayUrl: browserRelayUrl, relaySecret: env.BROWSER_RELAY_SECRET,
+      userId, browserProfileId })
+    return supportsProtectedFill(status, protectedExtensionOrigins)
+  }
+  const authorizeProtectedFill = async (scope: ProtectedFillScope) => {
+    if (!await authorizeProtectedIdentity(scope) || !await protectedBrowserSupported(scope.userId, scope.browserProfileId)) return false
+    const task = localComputerTasks.getActiveBySession(scope.sessionId)
+    return Boolean(task && task.userId === scope.userId && task.workspaceId === scope.workspaceId &&
+      task.taskId === scope.taskId && task.profileId === scope.browserProfileId && task.destinationOrigin === scope.destinationOrigin)
+  }
+  const protectedFill = protectedFillEnabled && protectedExtensionOrigins.size > 0
+    ? createProtectedFillService({
+        authorize: authorizeProtectedFill,
+        // Cleanup remains possible after idle task retirement; exact lock identity is still checked by the authority.
+        authorizeCompletion: authorizeProtectedIdentity,
+        authorizeRecovery: authorizeProtectedIdentity,
+        ...createProtectedCrmSource({ viewpoint: protectedFillViewpoint, entity: getProtectedFillEntity }),
+      }) : null
   const browserRelayTransport =
     browserRelayUrl && env.BROWSER_RELAY_SECRET
       ? createRelayCommandTransport({
           relayUrl: browserRelayUrl,
           relaySecret: env.BROWSER_RELAY_SECRET,
+          protectedFill,
           resolveLocalControlMode: async (browserProfileId) =>
             (await ports.browserProfileStore?.get(browserProfileId))?.localControlMode ?? 'task_tabs',
         })
@@ -4554,9 +4595,25 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       return 'public'
     }
   }
-  const localComputerTasks = createInMemoryLocalComputerTaskStore()
-  const localBrowserProvider = createLocalBrowserProvider({ transport: browserRelayTransport })
+  const localBrowserProvider = createLocalBrowserProvider({
+    transport: browserRelayTransport,
+    onDestination: (ctx, origin) => {
+      if (!ctx.profileId || protectedFill?.isLocked({ userId: ctx.userId, browserProfileId: ctx.profileId })) return
+      localComputerTasks.touch(ctx, origin ? new URL(origin).hostname : undefined, origin)
+    },
+  })
   const computerTools = createComputerTools({
+    protectedFill: protectedFill ? {
+      blocked: (ctx, profileId) => protectedFill.isSessionLocked(ctx.userId, ctx.sessionId) ||
+        Boolean(profileId && protectedFill.isLocked({ userId: ctx.userId, browserProfileId: profileId })),
+      scope: async (ctx, profileId, destinationOrigin) => {
+        const task = localComputerTasks.getActiveBySession(ctx.sessionId)
+        if (!task || !ctx.workspaceId) return null
+        const scope = { userId: ctx.userId, workspaceId: ctx.workspaceId, sessionId: ctx.sessionId,
+          taskId: task.taskId, browserProfileId: profileId, destinationOrigin }
+        return await authorizeProtectedFill(scope) ? scope : null
+      },
+    } : undefined,
     local: localBrowserProvider,
     cloud: createCloudBrowserProvider({
       provider: sandboxProvider,
@@ -4646,6 +4703,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   allTools.set('browserSnapshot', computerTools.browserSnapshot)
   allTools.set('browserClick', computerTools.browserClick)
   allTools.set('browserType', computerTools.browserType)
+  if (protectedFill) allTools.set('browserFillReference', computerTools.browserFillReference)
   allTools.set('browserCurrentUrl', computerTools.browserCurrentUrl)
   // Research read-browse (computer-use.md §12): browserReadPage is
   // deliberately NOT in allTools — interactive turns have the full flat
@@ -5779,7 +5837,17 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     : null
   // Take-Over live view + backend toggle + Profile-Management
   // (computer-use.md §5, §7; R2-3/R2-4).
+  if (protectedFill) {
+    app.use('/api/protected-browser-fill', protectedBrowserFillRoutes({
+      service: protectedFill, jwtSecret: env.JWT_SECRET, userAuth: requireAuth(env.JWT_SECRET),
+      extensionOrigins: protectedExtensionOrigins,
+      onComplete: async (sessionId) => { localComputerTasks.complete(sessionId); computerTools.clearSessionTrace(sessionId) },
+    }))
+  }
   app.use('/api/computer', requireAuth(env.JWT_SECRET), computerRoutes({
+    protectedFillEnabled: Boolean(protectedFill),
+    protectedBrowserSupported,
+    protectedFillBlocked: (userId, sessionId) => protectedFill?.isSessionLocked(userId, sessionId) ?? false,
     orchestrator: sandboxOrchestrator,
     provider: sandboxProvider,
     localProvider: localBrowserProvider,

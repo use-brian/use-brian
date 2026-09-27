@@ -929,3 +929,87 @@ describe('[COMP:sandbox/browser-tools] capability tag', () => {
     )
   })
 })
+
+describe('protected browser fill tool', () => {
+  const input = { destinationOrigin: 'https://example.com', items: [
+    { referenceId: 'a'.repeat(43), ref: '@e1' }, { referenceId: 'b'.repeat(43), ref: '@e2' },
+  ] }
+  it('passes one batch with trusted scope, records no fill and blocks observations/raw actions after disclosure', async () => {
+    let locked = false
+    const local = fakeProvider('local')
+    let fills = 0
+    local.fillReference = async (scope, items) => {
+      expect(scope.userId).toBe('user-1')
+      expect(scope.taskId).toBe('server-task')
+      expect(items).toEqual(input.items)
+      fills++
+      locked = true
+    }
+    const tools = createComputerTools({ local, cloud: fakeProvider('cloud'), profiles: await profilesWith([{ name: 'Local', defaultBackend: 'local' }]),
+      protectedFill: { blocked: () => locked, scope: async (ctx, browserProfileId, destinationOrigin) => ({
+        userId: ctx.userId, workspaceId: ctx.workspaceId!, sessionId: ctx.sessionId, browserProfileId, destinationOrigin, taskId: 'server-task',
+      }) },
+    })
+    await run(tools.browserNavigate, { url: 'https://example.com' })
+    const traceBefore = tools.getSessionTrace('sess-1')
+    const result = await run(tools.browserFillReference, input)
+    expect(result.isError).not.toBe(true)
+    expect(fills).toBe(1)
+    expect(tools.getSessionTrace('sess-1')).toEqual(traceBefore)
+    const calls = local.calls.length
+    for (const [tool, args] of [
+      [tools.browserSnapshot, {}], [tools.browserCurrentUrl, {}], [tools.browserListTabs, {}],
+      [tools.browserNavigate, { url: 'https://example.com' }], [tools.browserType, { ref: '@e1', text: 'raw' }],
+      [tools.browserClick, { ref: '@e1' }], [tools.browserFillReference, input],
+    ] as [Tool, Record<string, unknown>][]) expect((await run(tool, args)).isError).toBe(true)
+    expect(local.calls.length).toBe(calls)
+  })
+  it('refuses missing integration and sanitizes provider exceptions', async () => {
+    const local = fakeProvider('local')
+    const cloud = fakeProvider('cloud')
+    const disabled = createComputerTools({ local, cloud })
+    expect((await run(disabled.browserFillReference, input)).isError).toBe(true)
+    local.fillReference = async () => { throw new Error('SECRET_SENTINEL') }
+    const tools = createComputerTools({ local, cloud, profiles: await profilesWith([{ name: 'Local', defaultBackend: 'local' }]),
+      protectedFill: { blocked: () => false, scope: async (ctx, browserProfileId, destinationOrigin) => ({ userId: ctx.userId,
+        workspaceId: ctx.workspaceId!, sessionId: ctx.sessionId, browserProfileId, destinationOrigin, taskId: 'server-task' }) },
+    })
+    await run(tools.browserNavigate, { url: 'https://example.com' })
+    const result = await run(tools.browserFillReference, input)
+    expect(result.isError).toBe(true)
+    expect(JSON.stringify(result)).not.toContain('SECRET_SENTINEL')
+  })
+})
+
+
+describe('protected fill live assistant/profile scope', () => {
+  it('rechecks assistant enablement after navigation and refuses stale profile grants', async () => {
+    const local = fakeProvider('local')
+    let fills = 0
+    local.fillReference = async () => { fills++ }
+    const profiles = await profilesWith([{ name: 'Local', defaultBackend: 'local' }])
+    const tools = createComputerTools({ local, cloud: fakeProvider('cloud'), profiles,
+      protectedFill: { blocked: () => false, scope: async (ctx, browserProfileId, destinationOrigin) => ({
+        userId: ctx.userId, workspaceId: ctx.workspaceId!, sessionId: ctx.sessionId, taskId: 'task', browserProfileId, destinationOrigin,
+      }) },
+    })
+    await run(tools.browserNavigate, { url: 'https://example.com' })
+    const profile = (await profiles.store.list({ workspaceId: 'ws-1' }))[0]!
+    await profiles.store.update(profile.id, { enabledAssistantIds: [] })
+    expect((await run(tools.browserFillReference, { destinationOrigin: 'https://example.com', items: [{ referenceId: 'a'.repeat(43), ref: '@e1' }] })).isError).toBe(true)
+    expect(fills).toBe(0)
+  })
+  it.each(['userId', 'workspaceId', 'sessionId', 'browserProfileId', 'destinationOrigin'])('refuses a mismatched runtime %s before dispatch', async field => {
+    const local = fakeProvider('local')
+    let fills = 0
+    local.fillReference = async () => { fills++ }
+    const tools = createComputerTools({ local, cloud: fakeProvider('cloud'), profiles: await profilesWith([{ name: 'Local', defaultBackend: 'local' }]),
+      protectedFill: { blocked: () => false, scope: async (ctx, browserProfileId, destinationOrigin) => ({
+        userId: ctx.userId, workspaceId: ctx.workspaceId!, sessionId: ctx.sessionId, taskId: 'task', browserProfileId, destinationOrigin, [field]: 'other',
+      }) },
+    })
+    await run(tools.browserNavigate, { url: 'https://example.com' })
+    expect((await run(tools.browserFillReference, { destinationOrigin: 'https://example.com', items: [{ referenceId: 'a'.repeat(43), ref: '@e1' }] })).isError).toBe(true)
+    expect(fills).toBe(0)
+  })
+})
