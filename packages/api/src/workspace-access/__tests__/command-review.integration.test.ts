@@ -28,6 +28,35 @@ const apply=(review:DepartmentCommandReview)=>({type:'access.command.apply' as c
 function appFor(userId:string){const app=express();app.use(express.json());app.use((req,_res,next)=>{req.userId=userId;next()});app.use('/api',workspaceAccessRoutes());app.use('/api',contextScopeRoutes({workspaceStore:createWorkspaceStore()}));return app}
 describe('[COMP:api/workspace-access] immutable command review and application',()=>{
   afterAll(async()=>{await getAppPool().end();await pool.end()})
+  it('reviews assistant clearance atomically with session/thread denormalization and idempotent replay',async()=>{
+    const f=await fixture(),assistantId=randomUUID(),sessionId=randomUUID(),pageId=randomUUID();
+    await pool.query("INSERT INTO assistants(id,workspace_id,name,clearance) VALUES($1,$2,'Review assistant','internal')",[assistantId,f.workspaceId]);
+    await pool.query("INSERT INTO sessions(id,assistant_id,user_id,channel_type,channel_id,workspace_id,visibility,effective_clearance) VALUES($1,$2,$3,'web','fixture',$4,'workspace','internal')",[sessionId,assistantId,f.member,f.workspaceId]);
+    await pool.query("INSERT INTO saved_views(id,workspace_id,created_by,name,entity,view_type) VALUES($1,$2,$3,'Review page','tasks','table')",[pageId,f.workspaceId,f.owner]);
+    await pool.query("INSERT INTO comment_threads(page_id,workspace_id,session_id,anchor_kind,created_by,effective_clearance) VALUES($1,$2,$3,'ai_block',$4,'internal')",[pageId,f.workspaceId,sessionId,f.member]);
+    const command={type:'assistant.clearance.set' as const,assistantId,clearance:'public' as const};
+    const review=await prepareDepartmentCommand(f.workspaceId,f.owner,await f.intent(command));
+    expect(review.changes).toContainEqual({field:'clearance',before:[{kind:'code',value:'internal'}],after:[{kind:'code',value:'public'}]});
+    const read=async()=> (await pool.query(`SELECT a.clearance,s.effective_clearance AS session,ct.effective_clearance AS thread FROM assistants a JOIN sessions s ON s.assistant_id=a.id JOIN comment_threads ct ON ct.session_id=s.id WHERE a.id=$1`,[assistantId])).rows[0];
+    expect(await read()).toEqual({clearance:'internal',session:'internal',thread:'internal'});
+    const applied=await applyDepartmentCommand(f.workspaceId,f.owner,apply(review));
+    expect(await read()).toEqual({clearance:'public',session:'public',thread:'public'});
+    expect(BigInt(applied.policyRevision)).toBeGreaterThan(BigInt(review.policyRevision));
+    expect((await applyDepartmentCommand(f.workspaceId,f.owner,apply(review))).commandReceipt?.replayed).toBe(true);
+    expect((await pool.query("SELECT 1 FROM workspace_access_events WHERE workspace_id=$1 AND kind='assistant.clearance.set'",[f.workspaceId])).rows).toHaveLength(1);
+  });
+  it('requires live direct owner membership and refuses ownership revoked after clearance review',async()=>{
+    const f=await fixture(),assistantId=randomUUID();
+    await pool.query("INSERT INTO assistants(id,workspace_id,name,clearance) VALUES($1,$2,'Owned fixture','internal')",[assistantId,f.workspaceId]);
+    const command={type:'assistant.clearance.set' as const,assistantId,clearance:'public' as const};
+    await expect(prepareDepartmentCommand(f.workspaceId,f.member,await f.intent(command))).rejects.toMatchObject({code:'admin_required'});
+    await pool.query("INSERT INTO assistant_members(assistant_id,user_id,role) VALUES($1,$2,'owner')",[assistantId,f.member]);
+    const review=await prepareDepartmentCommand(f.workspaceId,f.member,await f.intent(command));
+    await pool.query('DELETE FROM assistant_members WHERE assistant_id=$1 AND user_id=$2',[assistantId,f.member]);
+    await expect(applyDepartmentCommand(f.workspaceId,f.member,apply(review))).rejects.toMatchObject({code:'admin_required'});
+    expect((await pool.query('SELECT clearance FROM assistants WHERE id=$1',[assistantId])).rows[0].clearance).toBe('internal');
+    await expect(prepareDepartmentCommand(f.workspaceId,f.owner,await f.intent({...command,assistantId:randomUUID()}))).rejects.toMatchObject({code:'not_found'});
+  });
   it('requires review proof on every legacy Team and assistant writer',async()=>{
     const f=await fixture(),app=appFor(f.owner),created=await executeDepartmentAccessCommand(f.workspaceId,f.owner,create),teamId=created.appliedCommand!.subjectId
     const base=`/api/workspaces/${f.workspaceId}/groups/${teamId}`

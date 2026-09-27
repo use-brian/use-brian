@@ -28,6 +28,7 @@ export type OrganizationCommand =
   | { type: 'org.placement.remove'; id: string; expectedVersion: string }
 
 export type DepartmentAccessCommand =
+  | {type:'assistant.clearance.set';assistantId:string;clearance:'public'|'internal'|'confidential'}
   | {type:'member.access.set';userId:string;clearance:'public'|'internal'|'confidential';teamScopeMode:'legacy'|'assigned';expectedPolicyRevision:string}
   | {type:'assistant.audience.set';assistantId:string;teamMode:'all'|'assigned';teamIds:string[];defaultGroupId:string|null;projectMode:'all'|'assigned';projectIds:string[];defaultProjectId:string|null}
   | {type:'department.create';name:string;key:string;description?:string|null;color?:string|null;readAll?:boolean}

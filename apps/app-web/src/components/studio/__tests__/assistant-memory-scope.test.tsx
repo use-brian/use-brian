@@ -6,6 +6,7 @@ import {I18nProvider} from '@/lib/i18n/client'
 import {en} from '@/lib/i18n/dictionaries/en'
 import type {Dictionary} from '@/lib/i18n/dictionaries'
 
+vi.mock('@/lib/workspace-context',()=>({useWorkspaceContext:()=>({workspaceId:'workspace-1',me:{id:'fixture-actor'}})}))
 vi.mock('next/navigation',()=>({useRouter:()=>({push:vi.fn()}),useSearchParams:()=>new URLSearchParams(),useParams:()=>({workspaceId:'workspace-1'})}))
 vi.mock('@/lib/surface-cache',()=>({useCachedResource:()=>({data:{assistant:{id:'assistant-1',name:'Fixture assistant',role:'Assistant',workspaceId:'workspace-1'},workspaceRole:'owner',workspaceName:'Fixture workspace'}}),mutateSurfaceCache:vi.fn()}))
 vi.mock('@/components/ui/confirm-dialog',()=>({confirmDialog:vi.fn(async()=>true)}))

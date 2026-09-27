@@ -161,6 +161,7 @@ async function attachApproval(client:PoolClient,p:Principal,r:RequestRow,all:Tea
 
 /** Canonical before/after audit, never a model-written account of the change. */
 async function auditState(client:PoolClient,workspaceId:string,command:DepartmentAccessCommand,createdId?:string):Promise<unknown> {
+  if(command.type==='assistant.clearance.set')return (await client.query('SELECT id,clearance FROM assistants WHERE workspace_id=$1 AND id=$2',[workspaceId,command.assistantId])).rows[0]??null
   if(command.type==='member.access.set')return (await client.query('SELECT user_id,role,clearance,team_scope_mode FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[workspaceId,command.userId])).rows[0]??null
   if(command.type==='assistant.audience.set')return (await client.query(`SELECT a.id,a.team_scope_mode,a.default_workspace_group_id,a.project_scope_mode,a.default_project_id,
     ARRAY(SELECT group_id FROM workspace_group_assistants WHERE assistant_id=a.id ORDER BY group_id) AS team_ids,
@@ -192,7 +193,19 @@ export async function executeDepartmentAccessInTransaction(client:PoolClient,wor
     const p=await principal(client,workspaceId,userId,true),all=await teams(client,p)
     const before=await auditState(client,workspaceId,command)
     let subjectId:string
-    if(command.type==='member.access.set') {
+    if(command.type==='assistant.clearance.set') {
+      const target=(await client.query('SELECT id FROM assistants WHERE workspace_id=$1 AND id=$2 FOR UPDATE',[workspaceId,command.assistantId])).rows[0]
+      if(!target)throw new WorkspaceAccessError('not_found',404)
+      if(!isAccessAdmin(p.role)){
+        const ownership=(await client.query<{role:string}>('SELECT role FROM assistant_members WHERE assistant_id=$1 AND user_id=$2 FOR SHARE',[command.assistantId,userId])).rows[0]
+        if(ownership?.role!=='owner')throw new WorkspaceAccessError('admin_required')
+      }
+      await client.query('UPDATE assistants SET clearance=$3,updated_at=now() WHERE workspace_id=$1 AND id=$2',[workspaceId,command.assistantId,command.clearance])
+      await client.query("UPDATE sessions SET effective_clearance=$2 WHERE assistant_id=$1 AND visibility='workspace'",[command.assistantId,command.clearance])
+      await client.query('UPDATE comment_threads ct SET effective_clearance=$2 FROM sessions s WHERE s.id=ct.session_id AND s.assistant_id=$1',[command.assistantId,command.clearance])
+      await client.query('UPDATE workspace_access_policies SET revision=revision+1,updated_at=now() WHERE workspace_id=$1',[workspaceId])
+      subjectId=command.assistantId
+    }else if(command.type==='member.access.set') {
       admin(p)
       const target=(await client.query<{role:WorkspaceAccessRole;teamScopeMode:string}>('SELECT role,team_scope_mode AS "teamScopeMode" FROM workspace_members WHERE workspace_id=$1 AND user_id=$2 FOR UPDATE',[workspaceId,command.userId])).rows[0]
       if(!target)throw new WorkspaceAccessError('not_found',404)

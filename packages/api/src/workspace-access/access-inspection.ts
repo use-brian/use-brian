@@ -112,7 +112,8 @@ export async function getWorkspaceAccessEvents(workspaceId:string,userId:string,
       (e.kind LIKE 'access.request.%' AND EXISTS(SELECT 1 FROM workspace_access_requests r WHERE r.id=e.subject_id AND r.workspace_id=$1 AND r.target_team_id=ANY($4::uuid[]) AND can_view_department_request(r.id,$2))) OR
       (e.kind='access.grant.revoke' AND EXISTS(SELECT 1 FROM workspace_access_grants g WHERE g.id=e.subject_id AND g.workspace_id=$1 AND g.target_team_id=ANY($4::uuid[]) AND can_view_department_request(g.request_id,$2))) OR
       (e.actor_user_id=$2 AND e.kind LIKE 'department.%' AND e.subject_id=ANY($4::uuid[])) OR
-      (e.kind='member.access.set' AND e.subject_id=$2::uuid))`
+      (e.kind='member.access.set' AND e.subject_id=$2::uuid) OR
+      (e.kind='assistant.clearance.set' AND e.actor_user_id=$2 AND EXISTS(SELECT 1 FROM assistants a JOIN assistant_members am ON am.assistant_id=a.id WHERE a.workspace_id=$1 AND a.id=e.subject_id AND am.user_id=$2 AND am.role='owner')))`
     const args:unknown[]=[workspaceId,userId,view.canAdminister,view.teams.map(team=>team.id)]
     let anchor:string|undefined
     if(selection.after){anchor=(await client.query<{created:string}>(`SELECT e.created_at::text AS created FROM workspace_access_events e WHERE ${predicate} AND e.id=$5::uuid`,[...args,selection.after])).rows[0]?.created;if(!anchor)throw new WorkspaceAccessError('access_history_changed',409)}
