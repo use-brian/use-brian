@@ -71,6 +71,17 @@ export function formFieldOperation(
   if (mode === 'validate') return null
   const property = field.action === 'check' ? 'checked' : 'value'
   if (mode === 'set') {
+    // Preflight/verification never scroll, focus, or install presentation DOM.
+    // Instant scrolling avoids a site's smooth-scroll CSS racing the write.
+    el.scrollIntoView?.({ block: 'center', inline: 'nearest', behavior: 'instant' });
+    el.focus({ preventScroll: true });
+    // Focus handlers may replace or disable the retained node. Never retarget.
+    const invalid = formFieldOperation.call(el, field, 'validate', resolvedSelectValue);
+    if (invalid !== null) return invalid;
+    try {
+      const cursor = (win as unknown as Record<symbol, { showTarget(target: Element): void } | undefined>)[Symbol.for('use-brian.action-cursor.v1')];
+      cursor?.showTarget(el);
+    } catch { /* Cosmetic feedback must not prevent a native operation. */ }
     if (field.action === 'check') {
       if ((el as HTMLInputElement).checked !== field.checked) win.HTMLElement.prototype.click.call(el)
     } else {

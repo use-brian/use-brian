@@ -11,7 +11,7 @@
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { TabExecutor, ExecutorError, isDetachedError, retryableAfterReattach, hostMatchesSite } from '../executor.js'
-import { ACTION_CURSOR_MARKER } from '../action-cursor.js'
+import { ACTION_CURSOR_BEFORE_CAPTURE, ACTION_CURSOR_MARKER } from '../action-cursor.js'
 
 type Stub = {
   attach: ReturnType<typeof vi.fn>
@@ -212,6 +212,7 @@ describe('[COMP:ext/agent] Native dropdown option clicks', () => {
     let selected = false
     let selectedIndex = 0
     class HTMLSelectElement {
+      isConnected = true
       multiple = opts.multiple ?? false
       disabled = false
       focused = false
@@ -220,6 +221,7 @@ describe('[COMP:ext/agent] Native dropdown option clicks', () => {
       dispatchEvent(event: { type: string }) { events.push(event.type); return true }
     }
     class HTMLOptionElement {
+      isConnected = true
       index = 3
       label = '18'
       text = '18'
@@ -434,6 +436,28 @@ describe('[COMP:sandbox/action-cursor] Chromium My Browser action cursor', () =>
     )
   })
 
+  it('scrolls an off-screen typing target before measuring/focusing it, without clicking', async () => {
+    installActionTarget()
+    const original = dbg.sendCommand.getMockImplementation()!
+    let scrolled = false
+    dbg.sendCommand.mockImplementation(async (target, method, params) => {
+      if (method === 'DOM.scrollIntoViewIfNeeded') {
+        expect(params?.backendNodeId).toBe(9)
+        scrolled = true
+      }
+      if (method === 'DOM.getBoxModel' || method === 'DOM.focus') expect(scrolled).toBe(true)
+      return original(target, method, params)
+    })
+    const executor = new TabExecutor()
+    await executor.attach(42)
+    const snapshot = await executor.snapshot()
+    await executor.type(snapshot.nodes[0]!.ref, 'hello')
+    const calls = dbg.sendCommand.mock.calls
+    expect(calls.some(call => call[1] === 'Input.dispatchMouseEvent')).toBe(false)
+    expect(calls.findIndex(call => call[1] === 'DOM.focus')).toBeLessThan(calls.findIndex(call => call[1] === 'Input.insertText'))
+    expect(calls.some(call => String(call[2]?.expression).includes('cursor.show(110, 40, true)'))).toBe(true)
+  })
+
   it('still performs the real click when cosmetic injection fails', async () => {
     installActionTarget()
     const implementation = dbg.sendCommand.getMockImplementation()!
@@ -551,6 +575,11 @@ describe('[COMP:ext/agent] Local Take-Over', () => {
       data: 'jpeg-data',
       mimeType: 'image/jpeg',
     })
+    const captureCalls = dbg.sendCommand.mock.calls
+    const paint = captureCalls.findIndex(call => call[1] === 'Runtime.evaluate' && call[2]?.expression === ACTION_CURSOR_BEFORE_CAPTURE)
+    expect(paint).toBeGreaterThanOrEqual(0)
+    expect(captureCalls[paint]?.[2]?.awaitPromise).toBe(true)
+    expect(paint).toBeLessThan(captureCalls.findIndex(call => call[1] === 'Page.captureScreenshot'))
     await executor.takeoverInput({ kind: 'click', x: 100, y: 50, frameW: 200, frameH: 100 })
 
     const mouse = dbg.sendCommand.mock.calls.filter((call) => call[1] === 'Input.dispatchMouseEvent')

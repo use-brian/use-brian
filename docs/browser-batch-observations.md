@@ -74,6 +74,20 @@ timers or evaluation failures. This is best-effort settling, not network idle,
 a guarantee that the application has finished, or a transaction boundary.
 Continuously updating pages therefore cannot block observations indefinitely.
 
+## Watching browser actions
+
+Chromium scrolls actionable fields into view before typing or batch edits and
+shows a temporary cursor/focus pulse in captured frames. The overlay is excluded
+from accessibility content and removed automatically. Screenshots stay serialized
+with browser operations to preserve protected-fill privacy: a fast batch may show
+only its final field in the viewer, rather than every intermediate edit. No
+per-field animation delay is added to batch execution.
+
+The viewer polls more frequently after delivered input; see
+[Takeover API polling](../apps/app-web/docs/takeover-polling.md). Cloud WS/SSE
+streams retain their existing streaming behavior; these cursor enhancements are
+for the Chromium extension.
+
 This reduces repeated LLM context; the extension still scans the accessibility
 tree locally. It does not prune observations already in conversation history.
 Use `observation: "full"` to recover a baseline after history compaction or when

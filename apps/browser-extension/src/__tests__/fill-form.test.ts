@@ -238,9 +238,10 @@ describe('batch executor', () => {
     expect(sendCommand).not.toHaveBeenCalled()
   })
   it('does not mutate anything if prevalidation fails', async () => {
-    const { executor, calls } = await executorFixture({ index: 2, mode: 'validate' })
+    const { executor, calls, sendCommand } = await executorFixture({ index: 2, mode: 'validate' })
     expect((await executor.fillForm({ fields })).fields.map(f => f.status)).toEqual(['skipped', 'failed', 'skipped'])
     expect(calls.some(c => c[1] === 'set')).toBe(false)
+    expect(sendCommand.mock.calls.some(call => call[1] === 'Runtime.evaluate')).toBe(false)
   })
   it('preserves partial progress and skips the rest after verification failure', async () => {
     const { executor, calls } = await executorFixture({ index: 2, mode: 'verify' })

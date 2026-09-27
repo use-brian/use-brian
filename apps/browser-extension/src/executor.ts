@@ -8,7 +8,7 @@ import { parseFormFields, formFieldOperation, type FillFormResult } from './fill
  */
 import { buildSnapshot, type BuiltSnapshot, type CdpAXNode } from './snapshot.js'
 import { RESTRICTED_TAB_MESSAGE } from './tab-eligibility.js'
-import { buildActionCursorArmExpression, type ActionCursorKind } from './action-cursor.js'
+import { ACTION_CURSOR_BEFORE_CAPTURE, buildActionCursorArmExpression, type ActionCursorKind } from './action-cursor.js'
 
 export class ExecutorError extends Error {
   constructor(
@@ -326,6 +326,20 @@ export class TabExecutor {
     }).catch(() => undefined)
   }
 
+  /** Scroll before focus; direct feedback also covers an already-focused control. */
+  private async focusActionTarget(tabId: number, backendNodeId: number): Promise<void> {
+    const quad = await this.targetBox(tabId, backendNodeId)
+    await this.cdp(tabId, 'DOM.focus', { backendNodeId })
+    if (quad) {
+      const x = (quad[0] + quad[4]) / 2
+      const y = (quad[1] + quad[5]) / 2
+      await this.cdp(tabId, 'Runtime.evaluate', {
+        expression: `(() => { const cursor = window[Symbol.for("use-brian.action-cursor.v1")]; if (cursor) { cursor.target = null; cursor.show(${JSON.stringify(x)}, ${JSON.stringify(y)}, true); } })()`,
+        returnByValue: true,
+      }).catch(() => undefined)
+    }
+  }
+
   /** Accessible name of a ref from the latest snapshot (approval previews ride this server-side too). */
   refName(ref: string): string | null {
     return this.lastSnapshot?.refToName.get(ref) ?? null
@@ -512,6 +526,7 @@ export class TabExecutor {
       throw new ExecutorError(`Ref ${ref} is no longer attached to the page. Take a fresh browserSnapshot.`, 'stale_ref')
     }
     try {
+      await this.armActionCursor(tabId, 'typing')
       const outcome = await this.cdp<{ result?: { value?: unknown } }>(tabId, 'Runtime.callFunctionOn', {
         objectId: optionObjectId,
         objectGroup,
@@ -523,6 +538,10 @@ export class TabExecutor {
           const disabled = this.disabled || select.disabled ||
             (group && group.tagName === 'OPTGROUP' && group.disabled);
           if (disabled) return { outcome: 'disabled' };
+          select.scrollIntoView?.({ block: 'center', inline: 'nearest', behavior: 'instant' });
+          if (typeof select.focus === 'function') select.focus({ preventScroll: true });
+          if (!this.isConnected || !select.isConnected || this.closest('select') !== select || this.disabled || select.disabled) return { outcome: 'no_select' };
+          try { window[Symbol.for('use-brian.action-cursor.v1')]?.showTarget(select); } catch {}
           const label = this.label || this.text || this.value;
           if (select.multiple) {
             const before = this.selected;
@@ -531,7 +550,6 @@ export class TabExecutor {
             select.dispatchEvent(new Event('change', { bubbles: true }));
             return { outcome: this.selected === !before ? 'selected' : 'unchanged', label, multiple: true, selected: this.selected };
           }
-          if (typeof select.focus === 'function') select.focus();
           this.selected = true;
           select.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
           select.dispatchEvent(new Event('change', { bubbles: true }));
@@ -626,7 +644,8 @@ export class TabExecutor {
         // drive or even see, and which stays open on the user's screen. The
         // options are already in the snapshot: focus the control and let the
         // caller click an option ref.
-        await this.cdp(tabId, 'DOM.focus', { backendNodeId })
+        await this.armActionCursor(tabId, 'typing')
+        await this.focusActionTarget(tabId, backendNodeId)
         return
       }
     }
@@ -664,7 +683,7 @@ export class TabExecutor {
     }
     await this.armActionCursor(tabId, 'typing')
     try {
-      await this.cdp(tabId, 'DOM.focus', { backendNodeId })
+      await this.focusActionTarget(tabId, backendNodeId)
     } catch (err) {
       if (isDetachedError(err)) throw err
       const associated = await this.resolveAssociatedTarget(tabId, backendNodeId, 'type')
@@ -676,7 +695,7 @@ export class TabExecutor {
         )
       }
       try {
-        await this.cdp(tabId, 'DOM.focus', { backendNodeId: associated })
+        await this.focusActionTarget(tabId, associated)
       } catch (associatedErr) {
         if (isDetachedError(associatedErr)) throw associatedErr
         throw new ExecutorError(
@@ -732,6 +751,7 @@ export class TabExecutor {
       for (index = 0; index < fields.length; index++) {
         // 'set' validates this retained target immediately before mutation in
         // the same page-side call. Do not revalidate all remaining fields (O(n²)).
+        await this.armActionCursor(tabId, 'typing')
         await run(index, 'set')
         await new Promise(resolve => setTimeout(resolve, 0))
         await run(index, 'verify')
@@ -825,6 +845,17 @@ export class TabExecutor {
     const width = Math.max(1, viewport?.clientWidth ?? 1280)
     const height = Math.max(1, viewport?.clientHeight ?? 720)
     const scale = Math.min(1, 1280 / width)
+    let paintDeadline: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        this.cdp(tabId, 'Runtime.evaluate', {
+          expression: ACTION_CURSOR_BEFORE_CAPTURE, awaitPromise: true, returnByValue: true,
+        }).catch(() => undefined),
+        new Promise<void>(resolve => { paintDeadline = setTimeout(resolve, 150) }),
+      ])
+    } finally {
+      clearTimeout(paintDeadline)
+    }
     const frame = await this.cdp<{ data?: string }>(tabId, 'Page.captureScreenshot', {
       format: 'jpeg',
       quality: 55,
