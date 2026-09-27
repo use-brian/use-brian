@@ -9,5 +9,4 @@ ALTER TABLE meeting_tag_state ENABLE ROW LEVEL SECURITY;
 CREATE POLICY meeting_tag_page_access ON meeting_tag_state
   USING (EXISTS (SELECT 1 FROM saved_views WHERE id = meeting_tag_state.page_id))
   WITH CHECK (EXISTS (SELECT 1 FROM saved_views WHERE id = meeting_tag_state.page_id));
-GRANT SELECT, INSERT, UPDATE, DELETE ON meeting_tag_state TO app_user;
 COMMIT;
