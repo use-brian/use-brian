@@ -466,6 +466,7 @@ import { createLocalFilesClient, resolveLocalFilesBaseDir } from './files/local-
 import { azureBlobOptionsFromEnv, createAzureBlobFilesClient } from './files/azure-blob-client.js'
 import { localFilesTransferRoutes } from './routes/local-files-transfer.js'
 import { openRecordingsRoutes } from './routes/recordings.js'
+import { createMeetingTagsTool } from './recordings/meeting-tags-tool.js'
 import { recordingLiveRoutes } from './routes/recording-live.js'
 import { createDocGateway } from './doc/doc-gateway.js'
 import { createFilesApi, createSingletonFilesClientResolver, storageLimitBytesForPlan, type FilesClientResolver } from './files/files-api.js'
@@ -2571,6 +2572,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       createChatSearchRecordingTool({ embedder: sharedEmbedder }),
     )
     tools.set('listRecordings', createListRecordingsTool())
+    tools.set('manageMeetingTags', createMeetingTagsTool(savedViewStore))
     tools.set(
       'assignRecordingSpeakers',
       createAssignRecordingSpeakersTool({

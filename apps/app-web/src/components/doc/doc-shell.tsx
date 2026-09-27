@@ -35,6 +35,7 @@
  * [COMP:app-web/views-shell]
  */
 
+import { MeetingTagsPanel } from "@/components/recordings/meeting-tags-panel";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
@@ -1501,6 +1502,9 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
                       <div className="size-12" />
                       <div className="h-9 w-2/3 animate-pulse rounded bg-muted md:h-10" />
                     </div>
+                  )}
+                  {pageView && (pageView.anchorKey === "meeting-notes-folder" || pageView.nestParentId) && (
+                    <MeetingTagsPanel workspaceId={workspaceId} pageId={pageView.id} />
                   )}
                   <RecordingPlayerProvider
                     // Two ways a page gets a recording: a synthesis brief's

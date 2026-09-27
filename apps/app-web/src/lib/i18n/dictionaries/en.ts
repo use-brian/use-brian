@@ -3473,6 +3473,7 @@ export const en = {
       siriSetup: "Set up Siri",
     },
     account: {
+      profileLoadError: "We couldn't load your profile. Please try again.",
       profile: "Profile",
       displayName: "Display name",
       email: "Email",
@@ -11213,6 +11214,27 @@ export const en = {
   },
   // Dock live recording (docs/architecture/media/live-capture.md): the
   // record button + live strip + crash-recovery banner on the chat dock.
+  meetingTags: {
+    title: "Meeting tags",
+    help: "No tags are added by default. Set tags yourself or define a rule for future live notes.",
+    tags: "Tags on this meeting",
+    commaSeparated: "Separate with commas",
+    save: "Save tags",
+    rules: "Folder rules",
+    noRules: "No active rules. Meetings stay untagged until you add tags or a rule.",
+    match: "When title or notes contain every phrase: {phrases}",
+    remove: "Remove rule",
+    ruleTag: "Tag to apply",
+    rulePhrases: "Required phrases (all must match)",
+    addRule: "Add rule",
+    suggestions: "Suggested rules",
+    learning: "Repeated manual tags can suggest a phrase rule. Suggestions never activate without your acceptance.",
+    example: "Example {number}",
+    accept: "Accept rule",
+    dismiss: "Dismiss",
+    failed: "Could not load or save meeting tags. Check your access and try again.",
+    retry: "Retry",
+  },
   recorder: {
     start: "Record",
     audioOptions: "Recording audio options",

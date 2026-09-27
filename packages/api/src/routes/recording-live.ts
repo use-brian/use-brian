@@ -13,6 +13,8 @@
  * prefix is how the doc shell knows a page has a live capture surface.
  */
 
+import { createMeetingTagsService } from '../recordings/meeting-tags-service.js'
+import { meetingTagRoutes } from './meeting-tags.js'
 import { randomUUID } from 'node:crypto'
 import { Router, type NextFunction, type Request, type Response } from 'express'
 import multer from 'multer'
@@ -329,6 +331,8 @@ function notesBlocksOf(markdown: string): Block[] {
 
 export function recordingLiveRoutes(deps: RecordingLiveRouteDeps): Router {
   const router = Router()
+  const meetingTags = createMeetingTagsService(deps.savedViewStore)
+  router.use(meetingTagRoutes(meetingTags, deps.getRole))
   const upload = multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: LIVE_WINDOW_MAX_BYTES, files: 1 },
@@ -430,6 +434,8 @@ export function recordingLiveRoutes(deps: RecordingLiveRouteDeps): Router {
         resolvedPageId = created.id
       }
 
+      try { await meetingTags.apply(userId, workspaceId, resolvedPageId) }
+      catch (error) { console.error('[recording-live] initial meeting tagging failed:', error) }
       res.status(201).json({
         pageId: resolvedPageId,
         title: resolvedTitle,
@@ -580,6 +586,9 @@ export function recordingLiveRoutes(deps: RecordingLiveRouteDeps): Router {
       const ops = notesRegionOps(current, notesHeadingId, markerBlockId, notesBlocksOf(notes.text))
       if (ops) await applyPageOps(deps, userId, pageId, ops)
       notesText = notes.text
+      // Tagging failures must not interrupt the lossless capture or its notes.
+      try { await meetingTags.apply(userId, workspaceId, pageId, notes.text) }
+      catch (error) { console.error('[recording-live] meeting tagging failed:', error) }
       void recordUsage(deps, {
         userId, workspaceId, assistantId,
         model: notes.model,

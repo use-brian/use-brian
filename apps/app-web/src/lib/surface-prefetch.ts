@@ -954,3 +954,6 @@ export function workspaceAccessHistoryCacheKey(workspaceId:string,userId:string,
 export function workspaceAccessInspectionCacheKey(workspaceId:string,userId:string,kind:'explain'|'events',revision:string,selection:string):string {
   return `${workspaceAccessCacheKey(workspaceId,userId)}:${kind}:${revision}:${selection}`;
 }
+
+/** Meeting tags share workspace/page cache identity across the doc panel. */
+export const meetingTagsCacheKey = (workspaceId: string, pageId: string): string => `meeting-tags:${workspaceId}:${pageId}`;
