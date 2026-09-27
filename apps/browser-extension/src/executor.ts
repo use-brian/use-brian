@@ -174,6 +174,60 @@ export class TabExecutor {
   private lastSnapshot: BuiltSnapshot | null = null
   private takeoverPointer: { x: number; y: number } | null = null
 
+  /** Keep node/document handles in an isolated world; never read field values. */
+  async prepareProtectedFill(origin: string, refs: string[]): Promise<(items: Array<{ref: string; value: string}>) => Promise<void>> {
+    const tabId = this.attachedTabId
+    if (tabId == null) throw new Error('denied')
+    const tree = await sendCdp<{frameTree: {frame: {id: string}}}>(tabId, 'Page.getFrameTree')
+    const world = await sendCdp<{executionContextId: number}>(tabId, 'Page.createIsolatedWorld', {
+      frameId: tree.frameTree.frame.id, worldName: 'use-brian-protected-fill',
+    })
+    const objects: string[] = []
+    for (const ref of refs) {
+      const node = await sendCdp<{object: {objectId?: string}}>(tabId, 'DOM.resolveNode', {
+        backendNodeId: this.resolveRef(ref), executionContextId: world.executionContextId,
+      })
+      if (!node.object.objectId) throw new Error('denied')
+      objects.push(node.object.objectId)
+    }
+    const prepared = await sendCdp<{result: {objectId?: string}; exceptionDetails?: unknown}>(tabId, 'Runtime.callFunctionOn', {
+      executionContextId: world.executionContextId,
+      functionDeclaration: `function(origin, ...nodes) {
+        const valid = n => n.ownerDocument === document && n.isConnected && !n.disabled && !n.readOnly &&
+          !n.closest('[inert]') && n.getClientRects().length > 0 && getComputedStyle(n).visibility === 'visible' &&
+          (n instanceof HTMLTextAreaElement || (n instanceof HTMLInputElement && ['text','email','tel','url','search'].includes(n.type)));
+        if (window !== top || location.origin !== origin || !nodes.every(valid) || new Set(nodes).size !== nodes.length) throw 0;
+        return { doc: document, origin, nodes, valid };
+      }`,
+      arguments: [{value: origin}, ...objects.map(objectId => ({objectId}))],
+    })
+    const objectId = prepared.result.objectId
+    if (!objectId || prepared.exceptionDetails) throw new Error('denied')
+    return async items => {
+      const checked = await sendCdp<{result: {value?: unknown}; exceptionDetails?: unknown}>(tabId, 'Runtime.callFunctionOn', {
+        objectId, functionDeclaration: `function() { return this.doc === document && location.origin === this.origin && window === top && this.nodes.every(this.valid); }`, returnByValue:true,
+      })
+      if (this.attachedTabId !== tabId || checked.exceptionDetails || checked.result.value !== true) throw new Error('denied')
+      for (let i = 0; i < items.length; i++) {
+        if (this.attachedTabId !== tabId || items[i].ref !== refs[i]) throw new Error('denied')
+        const assigned = await sendCdp<{result: {value?: unknown}; exceptionDetails?: unknown}>(tabId, 'Runtime.callFunctionOn', {
+          objectId,
+          functionDeclaration: `function(index, value) {
+            if (this.doc !== document || location.origin !== this.origin || window !== top || !this.nodes.every(this.valid)) return false;
+            const n = this.nodes[index];
+            const proto = n instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+            Object.getOwnPropertyDescriptor(proto, 'value').set.call(n, value);
+            n.dispatchEvent(new Event('input', {bubbles:true}));
+            n.dispatchEvent(new Event('change', {bubbles:true}));
+            return true;
+          }`,
+          arguments: [{value:i}, {value:items[i].value}], returnByValue: true,
+        })
+        if (assigned.exceptionDetails || assigned.result.value !== true) throw new Error('denied')
+      }
+    }
+  }
+
   async attach(tabId: number): Promise<void> {
     if (this.attachedTabId === tabId) return
     await this.detach()

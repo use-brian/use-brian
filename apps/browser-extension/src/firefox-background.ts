@@ -110,6 +110,9 @@ async function handleCommand(cmd: { id: string; op: string; args: Record<string,
 }
 
 async function executeOp(op: string, args: Record<string, unknown>): Promise<unknown> {
+  if (op === 'browserFillReference' || (op !== 'stop' && (await chrome.storage.local.get('protectedDisclosureLock')).protectedDisclosureLock)) {
+    throw new FirefoxNativeError('Protected fill unavailable', 'protected_fill_denied')
+  }
   if (op === 'stop') {
     gate.stop()
     boundTabId = null
