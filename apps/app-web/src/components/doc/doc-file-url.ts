@@ -18,58 +18,43 @@ export type FileRef = {
   name: string;
 };
 
-/** Read durable media without handing a provider capability to the browser. */
-export async function fetchDocFileBlob(workspaceId: string, fileId: string): Promise<Blob> {
-  const res = await authFetch(
-    `${API_URL}/api/doc-files/${encodeURIComponent(workspaceId)}/${encodeURIComponent(fileId)}?redirect=0`,
-    { cache: "no-store" },
-  );
-  if (!res.ok) throw new Error(`doc file fetch failed: HTTP ${res.status}`);
-  return res.blob();
-}
-
-/** Callers revoke the object URL when its view is replaced or unmounted. */
-export async function resolveDocFileSrc(workspaceId: string, fileId: string): Promise<string> {
-  return URL.createObjectURL(await fetchDocFileBlob(workspaceId, fileId));
-}
-
-export type DocMediaProjection = ProtectedProjection<{url:string;validForMs:number}>;
-
-/** Cached displays require a server lifetime; ordinary one-shot downloads don't. */
-export async function fetchDocMediaProjection(workspaceId:string,fileId:string):Promise<DocMediaProjection> {
-  const started=performance.now();
+/** One admission for bytes and their lifetime, including the body transfer. */
+async function readDocMedia(workspaceId: string, fileId: string) {
+  const started = performance.now();
   try {
-    const res=await authFetch(`${API_URL}/api/doc-files/${encodeURIComponent(workspaceId)}/${encodeURIComponent(fileId)}?redirect=0`,{cache:'no-store'});
-    if(!res.ok)throw new Error(`doc file fetch failed: HTTP ${res.status}`);
-    const header=res.headers.get('X-Brian-Media-Valid-For-Ms');
-    const validForMs=header===null?NaN:Number(header);
-    if(!Number.isFinite(validForMs)||validForMs<=0)throw new Error('media_lifetime_missing_or_expired');
-    const blob=await res.blob();
-    // Validate expiry before creating a resource that would need disposal.
-    const projection=protectProjection({validForMs},started);
-    return {...projection,url:URL.createObjectURL(blob)};
-  } catch(error) {
-    throw error instanceof SurfaceCacheEvictionError?error:new SurfaceCacheEvictionError(error);
+    const res = await authFetch(`${API_URL}/api/doc-files/${encodeURIComponent(workspaceId)}/${encodeURIComponent(fileId)}?redirect=0`, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`doc file fetch failed: HTTP ${res.status}`);
+    const header = res.headers.get('X-Brian-Media-Valid-For-Ms');
+    const validForMs = header === null ? NaN : Number(header);
+    if (!Number.isFinite(validForMs) || validForMs <= 0) throw new Error('media_lifetime_missing_or_expired');
+    const blob = await res.blob();
+    return { blob, ...protectProjection({ validForMs }, started) };
+  } catch (error) {
+    throw error instanceof SurfaceCacheEvictionError ? error : new SurfaceCacheEvictionError(error);
   }
 }
 
+/** Byte-only validation; display/download consumers use the protected hooks. */
+export async function fetchDocFileBlob(workspaceId: string, fileId: string): Promise<Blob> {
+  return (await readDocMedia(workspaceId, fileId)).blob;
+}
+
+export type DocMediaProjection = ProtectedProjection<{ url: string; mimeType: string; validForMs: number }>;
+
+/** Create a cache-owned URL only after the whole byte read is admitted. */
+export async function fetchDocMediaProjection(workspaceId: string, fileId: string): Promise<DocMediaProjection> {
+  const { blob, ...projection } = await readDocMedia(workspaceId, fileId);
+  return { ...projection, mimeType: blob.type, url: URL.createObjectURL(blob) };
+}
+
 /**
- * Resolve any supported `FileRef` to a browser-loadable URL. Both branches
- * require an authenticated round-trip; returns null when the ref's bucket
- * is unknown or the read fails (caller shows "preview unavailable").
+ * Resolve legacy cache references only. Durable references require the
+ * identity-bound protected media hook, never an unmanaged URL.
  */
 export async function resolveFileRefUrl(
   ref: FileRef,
   workspaceId: string,
 ): Promise<string | null> {
-  if (ref.bucket === "workspace_files") {
-    try {
-      return await resolveDocFileSrc(workspaceId, ref.path);
-    } catch {
-      return null;
-    }
-  }
-
   if (ref.bucket === "file_cache") {
     try {
       const res = await authFetch(

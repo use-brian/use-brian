@@ -2,7 +2,7 @@
 import {describe,it,expect,vi,beforeEach,afterEach} from 'vitest';
 const {mockAuthFetch}=vi.hoisted(()=>({mockAuthFetch:vi.fn()}));
 vi.mock('@/lib/auth-fetch',()=>({authFetch:mockAuthFetch}));
-import {fetchDocMediaProjection,fetchDocFileBlob,resolveDocFileSrc,resolveFileRefUrl,type FileRef} from '../doc-file-url';
+import {fetchDocMediaProjection,fetchDocFileBlob,resolveFileRefUrl,type FileRef} from '../doc-file-url';
 const durableRef:FileRef={bucket:'workspace_files',path:'wf_1',mimeType:'image/png',sizeBytes:3,name:'fixture.png'};
 describe('[COMP:app-web/doc-file-url] authenticated media bytes',()=>{
   const directFetch=vi.fn(),create=vi.fn(()=> 'blob:fixture');
@@ -10,23 +10,23 @@ describe('[COMP:app-web/doc-file-url] authenticated media bytes',()=>{
   afterEach(()=>vi.unstubAllGlobals());
   it.each(['image/png','application/json','text/plain'])('preserves %s content with no provider fetch',async mime=>{
     const blob=new Blob(['{"url":"https://storage.example/must-not-fetch"}'],{type:mime});
-    mockAuthFetch.mockResolvedValue({ok:true,blob:async()=>blob});
+    mockAuthFetch.mockResolvedValue({ok:true,headers:new Headers({'X-Brian-Media-Valid-For-Ms':'30000'}),blob:async()=>blob});
     expect(await fetchDocFileBlob('ws_1','wf_1')).toBe(blob);
     expect(mockAuthFetch).toHaveBeenCalledWith(expect.stringContaining('/api/doc-files/ws_1/wf_1?redirect=0'),{cache:'no-store'});
     expect(directFetch).not.toHaveBeenCalled();
   });
   it('creates a local object URL after the authorized read',async()=>{
-    const blob=new Blob(['fixture']);mockAuthFetch.mockResolvedValue({ok:true,blob:async()=>blob});
-    expect(await resolveDocFileSrc('ws_1','wf_1')).toBe('blob:fixture');expect(create).toHaveBeenCalledWith(blob);expect(directFetch).not.toHaveBeenCalled();
+    const blob=new Blob(['fixture']);mockAuthFetch.mockResolvedValue({ok:true,headers:new Headers({'X-Brian-Media-Valid-For-Ms':'30000'}),blob:async()=>blob});
+    expect((await fetchDocMediaProjection('ws_1','wf_1')).url).toBe('blob:fixture');expect(create).toHaveBeenCalledWith(blob);expect(directFetch).not.toHaveBeenCalled();
   });
   it.each([401,403,404])('withholds media on HTTP %s',async status=>{
     mockAuthFetch.mockResolvedValue({ok:false,status});
-    await expect(fetchDocFileBlob('ws_1','wf_1')).rejects.toThrow(`HTTP ${status}`);
+    await expect(fetchDocFileBlob('ws_1','wf_1')).rejects.toMatchObject({cause:expect.objectContaining({message:`doc file fetch failed: HTTP ${status}`})});
     expect(await resolveFileRefUrl(durableRef,'ws_1')).toBeNull();expect(create).not.toHaveBeenCalled();expect(directFetch).not.toHaveBeenCalled();
   });
-  it('routes durable references through the same byte reader',async()=>{
-    mockAuthFetch.mockResolvedValue({ok:true,blob:async()=>new Blob(['fixture'])});
-    expect(await resolveFileRefUrl(durableRef,'ws_1')).toBe('blob:fixture');
+  it('refuses unmanaged durable URL resolution',async()=>{
+    mockAuthFetch.mockResolvedValue({ok:true,headers:new Headers({'X-Brian-Media-Valid-For-Ms':'30000'}),blob:async()=>new Blob(['fixture'])});
+    expect(await resolveFileRefUrl(durableRef,'ws_1')).toBeNull();expect(mockAuthFetch).not.toHaveBeenCalled();
   });
   it.each([null,'','0','-1','NaN','Infinity'])('refuses an absent or invalid display lifetime (%s)',async lifetime=>{
     const headers=new Headers();if(lifetime!==null)headers.set('X-Brian-Media-Valid-For-Ms',lifetime);
@@ -42,7 +42,7 @@ describe('[COMP:app-web/doc-file-url] authenticated media bytes',()=>{
     const now=vi.spyOn(performance,'now').mockReturnValueOnce(100).mockReturnValue(160);
     mockAuthFetch.mockResolvedValue({ok:true,headers:new Headers({'X-Brian-Media-Valid-For-Ms':'60000'}),blob:async()=>new Blob(['protected'])});
     const projection=await fetchDocMediaProjection('ws_1','wf_1');
-    expect(projection.projectionMonotonicDeadline).toBe(30100);expect(projection.url).toBe('blob:fixture');now.mockRestore();
+    expect(projection.projectionMonotonicDeadline).toBe(30100);expect(projection.url).toBe('blob:fixture');expect(projection.mimeType).toBe('');now.mockRestore();
   });
 
 });

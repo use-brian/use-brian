@@ -14,7 +14,7 @@ vi.mock('@/lib/i18n/client',()=>({useT:()=>en,useLocale:()=> 'ja'}));
 vi.mock('@/lib/api/feed-linkedin',()=>({linkedinRequest:mocks.request,linkedinDraftPath:()=> 'fixture'}));
 vi.mock('@/lib/api/feed',()=>({exportFeedSessionArticle:vi.fn(async()=>new Blob(['archive']))}));
 import {exportFeedSessionArticle} from '@/lib/api/feed';
-vi.mock('@/components/doc/doc-file-url',()=>({resolveDocFileSrc:mocks.resolve}));
+vi.mock('@/lib/use-doc-media',()=>({useDocMediaSrc:()=>'/fixture.png'}));
 vi.mock('@/components/ui/confirm-dialog',()=>({confirmDialog:mocks.confirm}));
 vi.mock('@/lib/feed-posts-events',()=>({notifyFeedPostsChanged:vi.fn()}));
 vi.mock('@/components/ui/searchable-select',()=>({SearchableSelect:(p:any)=><div aria-label={p['aria-label']}>{p.items.map((item:any)=><button key={item.value} disabled={p.disabled} onClick={()=>p.onValueChange(item.value)}>{item.label}</button>)}</div>}));

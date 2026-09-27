@@ -113,7 +113,7 @@ export function BlockImage({ block, workspaceId, readOnly, onChange }: Props) {
         throw new Error(first?.error ?? t.mediaBlock.uploadFailed);
       }
       // The /api/doc-files route writes to the permanent `workspace_files`
-      // GCS-backed store; encode that sink in `bucket` so `resolveFileRefUrl()`
+      // GCS-backed store; encode that sink in `bucket` so `useFileRefSrc()`
       // resolves it through the protected byte projection.
       onChange?.({
         ref: {

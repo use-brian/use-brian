@@ -23,7 +23,8 @@ import {
   RefreshCw,
   Sparkles,
 } from "lucide-react";
-import { fetchDocFileBlob, resolveDocFileSrc } from "@/components/doc/doc-file-url";
+import { useDocMedia, useDocMediaDownload } from "@/lib/use-doc-media";
+import { fetchDocFileBlob } from "@/components/doc/doc-file-url";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { SearchableSelect } from "@/components/ui/searchable-select";
@@ -197,7 +198,7 @@ export function CampaignTab({
   const [history, setHistory] = useState<CampaignHistoryItem[]>([]);
   const [busy, setBusy] = useState<"load" | "audience" | "copy" | "prepare" | null>("load");
   const [photoBusy, setPhotoBusy] = useState<"upload" | "download" | null>(null);
-  const [uploadedPhotoSrc, setUploadedPhotoSrc] = useState<string | null>(null);
+  const downloadPhoto = useDocMediaDownload(workspaceId);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
@@ -348,28 +349,10 @@ export function CampaignTab({
     ? draft.selectedImage.fileId
     : null;
 
+  const {url:uploadedPhotoSrc,error:uploadedPhotoError} = useDocMedia(workspaceId, uploadedPhotoId);
   useEffect(() => {
-    let cancelled = false;
-    let objectUrl: string | null = null;
-    setUploadedPhotoSrc(null);
-    if (!uploadedPhotoId) return;
-    void resolveDocFileSrc(workspaceId, uploadedPhotoId)
-      .then((src) => {
-        if (cancelled) {
-          if (src.startsWith("blob:")) URL.revokeObjectURL(src);
-          return;
-        }
-        objectUrl = src.startsWith("blob:") ? src : null;
-        setUploadedPhotoSrc(src);
-      })
-      .catch(() => {
-        if (!cancelled) setError(t.shopifyApp.campaignOwnPhotoUnavailable);
-      });
-    return () => {
-      cancelled = true;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-    };
-  }, [t.shopifyApp.campaignOwnPhotoUnavailable, uploadedPhotoId, workspaceId]);
+    if (uploadedPhotoError) setError(t.shopifyApp.campaignOwnPhotoUnavailable);
+  }, [uploadedPhotoError, t.shopifyApp.campaignOwnPhotoUnavailable]);
 
   const prepared = !!draft?.segment && !!draft?.discount;
   const audienceLocked = !!draft?.segment;
@@ -485,15 +468,7 @@ export function CampaignTab({
     setPhotoBusy("download");
     setError(null);
     try {
-      const blob = await fetchDocFileBlob(workspaceId, image.fileId);
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = `restock-campaign-photo.${campaignImageExtension(image.mimeType)}`;
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      URL.revokeObjectURL(url);
+      await downloadPhoto(image.fileId, `restock-campaign-photo.${campaignImageExtension(image.mimeType)}`);
     } catch {
       setError(t.shopifyApp.campaignDownloadPhotoFailed);
     } finally {
@@ -670,8 +645,7 @@ Reply with ONLY one JSON object, no prose:
       if (working.includeProductImage && working.selectedImage?.kind === "upload") {
         refreshedImage = working.selectedImage;
         try {
-          const src = await resolveDocFileSrc(workspaceId, refreshedImage.fileId);
-          if (src.startsWith("blob:")) URL.revokeObjectURL(src);
+          await fetchDocFileBlob(workspaceId, refreshedImage.fileId);
         } catch {
           throw new Error(t.shopifyApp.campaignOwnPhotoUnavailable);
         }

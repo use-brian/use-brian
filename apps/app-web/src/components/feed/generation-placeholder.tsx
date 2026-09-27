@@ -18,6 +18,7 @@ import { SearchableSelect } from '@/components/ui/searchable-select';
 import { useCachedResource } from '@/lib/surface-cache';
 import { type BrainRow } from '@/lib/api/brain';
 import { feedOwner } from '@/lib/offline/feed-cache';
+import { useDocMedia } from '@/lib/use-doc-media';
 import { fetchDocFileBlob } from '@/components/doc/doc-file-url';
 const inputClass = 'min-h-11 w-full rounded-md border bg-background p-2 text-base';
 export type FeedGenerationControls = { workspaceId: string; assistantId: string; sessionId: string; revision: number; offline: boolean; pending: boolean; readOnly: boolean; article: boolean; snapshot?: FeedCollaborationSnapshot | null; onCommand: (commands: FeedCommand[]) => Promise<boolean>; onRefresh: () => void };
@@ -273,11 +274,10 @@ function FeedImageCandidateCarousel(props: { controls: FeedGenerationControls; r
 }
 const IMAGE_FILE_NAME = /\.(?:avif|gif|jpe?g|png|webp)$/i;
 function FeedGenerationFileChoice({ controls: c, file, index, total, onPick }: { controls: FeedGenerationControls; file: BrainRow; index: number; total: number; onPick: (id: string) => Promise<void> }) {
-  const t = useT().feedGeneration; const imageNamed = IMAGE_FILE_NAME.test(file.name); const [preview, setPreview] = useState<string | null>(null); const [kind, setKind] = useState<'loading' | 'image' | 'file' | 'failed'>('loading');
-  useEffect(() => { let disposed = false; let objectUrl: string | null = null; setPreview(null); setKind('loading');
-    void fetchDocFileBlob(c.workspaceId, file.id).then(blob => { if (disposed) return; if (!blob.type.startsWith('image/')) { setKind('file'); return; } objectUrl = URL.createObjectURL(blob); setPreview(objectUrl); setKind('image'); }).catch(() => { if (!disposed) setKind('failed'); });
-    return () => { disposed = true; if (objectUrl) URL.revokeObjectURL(objectUrl); };
-  }, [c.workspaceId, file.id]);
+  const t = useT().feedGeneration; const imageNamed = IMAGE_FILE_NAME.test(file.name);
+  const media = useDocMedia(c.workspaceId, file.id);
+  const kind = media.mimeType?.startsWith('image/') ? 'image' : media.error ? 'failed' : media.loading ? 'loading' : 'file';
+  const preview = kind === 'image' ? media.url : null;
   const imageLabel = format(t.imageOptionPosition, { current: index + 1, total }); const imageLike = imageNamed || kind === 'image';
   return <button type="button" className="flex min-h-24 min-w-0 items-center justify-center overflow-hidden rounded-md border bg-background p-2 text-left text-sm" aria-label={imageLike ? imageLabel : file.name} onClick={() => void onPick(file.id)}>
     {preview ? <img src={preview} alt="" className="h-24 w-full rounded object-cover" /> : kind === 'loading' ? <span role="status" className="text-muted-foreground">{t.loading}</span> : imageLike ? <span className="text-muted-foreground">{t.imageUnavailable}</span> : <span className="min-w-0 break-words">{file.name}</span>}
@@ -340,10 +340,7 @@ export function FeedDetachedGenerationResults({ controls: c }: { controls: FeedG
 
 /** Authenticated durable bytes; object URLs never become composition content. */
 export function FeedGenerationImage({ workspaceId, fileId, alt, className }: { workspaceId: string; fileId: string; alt: string; className?: string }) {
-  const t = useT().feedGeneration; const [url, setUrl] = useState<string | null>(null); const [failed, setFailed] = useState(false);
-  useEffect(() => { let disposed = false; let objectUrl: string | null = null; setUrl(null); setFailed(false);
-    void fetchDocFileBlob(workspaceId, fileId).then(blob => { if (disposed) return; objectUrl = URL.createObjectURL(blob); setUrl(objectUrl); }).catch(() => { if (!disposed) setFailed(true); });
-    return () => { disposed = true; if (objectUrl) URL.revokeObjectURL(objectUrl); };
-  }, [workspaceId, fileId]);
-  return url ? <img src={url} alt={alt} className={className ?? 'max-h-96 max-w-full rounded-lg object-contain'} /> : <p role="status" className="min-h-11 text-sm">{failed ? t.imageUnavailable : t.loading}{alt ? `: ${alt}` : ''}</p>;
+  const t = useT().feedGeneration;
+  const {url,error} = useDocMedia(workspaceId, fileId);
+  return url ? <img src={url} alt={alt} className={className ?? 'max-h-96 max-w-full rounded-lg object-contain'} /> : <p role="status" className="min-h-11 text-sm">{error ? t.imageUnavailable : t.loading}{alt ? `: ${alt}` : ''}</p>;
 }

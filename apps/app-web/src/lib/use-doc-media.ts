@@ -1,9 +1,9 @@
 "use client";
 
 /** Protected durable media shares the surface cache. [COMP:app-web/doc-file-url] */
-import {useEffect,useLayoutEffect,useRef,useState} from 'react';
+import {useCallback,useEffect,useLayoutEffect,useMemo,useRef,useState} from 'react';
 import {fetchDocMediaProjection,resolveFileRefUrl,type FileRef,type DocMediaProjection} from '@/components/doc/doc-file-url';
-import {invalidateSurfaceCache,useCachedResource} from './surface-cache';
+import {invalidateSurfaceCache,loadSurfaceCache,readSurfaceCache,useCachedResource} from './surface-cache';
 import {docMediaCacheKey} from './surface-prefetch';
 import {useProtectedProjection} from './use-protected-projection';
 import {useOptionalWorkspaceContext} from './workspace-context';
@@ -13,7 +13,7 @@ const lifecycle={
   expiresInMs:(value:DocMediaProjection)=>Math.min(value.projectionDeadline-Date.now(),value.projectionMonotonicDeadline-performance.now()),
 };
 
-export function useDocMediaSrc(workspaceId:string|null,fileId:string|null):string|null {
+export function useDocMedia(workspaceId:string|null,fileId:string|null) {
   const workspace=useOptionalWorkspaceContext();
   const key=workspaceId&&fileId&&workspace?.workspaceId===workspaceId&&workspace.me.id
     ?docMediaCacheKey(workspaceId,workspace.me.id,fileId):null;
@@ -24,7 +24,50 @@ export function useDocMediaSrc(workspaceId:string|null,fileId:string|null):strin
   },[key]);
   const cache=useCachedResource(key,()=>fetchDocMediaProjection(workspaceId!,fileId!),lifecycle);
   const projection=useProtectedProjection(key??'doc-media:disabled',cache.data,()=>{},cache.refresh);
-  return projection?.url??null;
+  return {url:projection?.url??null,mimeType:projection?.mimeType??null,
+    loading:!!key&&!projection&&!cache.error,error:cache.error};
+}
+
+export function useDocMediaSrc(workspaceId:string|null,fileId:string|null):string|null {
+  return useDocMedia(workspaceId,fileId).url;
+}
+
+/** A deliberate download must still belong to its initiating viewer on arrival. */
+export function useDocMediaDownload(workspaceId:string) {
+  const workspace=useOptionalWorkspaceContext();
+  const prefix=workspace?.workspaceId===workspaceId&&workspace.me.id
+    ?docMediaCacheKey(workspaceId,workspace.me.id,''):null;
+  const owner=useMemo(()=>({prefix,active:false,pending:new Set<string>()}),[prefix]);
+  const current=useRef(owner);current.current=owner;
+  const previous=useRef(prefix);
+  useLayoutEffect(()=>{
+    if(previous.current&&previous.current!==prefix)invalidateSurfaceCache(previous.current);
+    previous.current=prefix;
+    owner.active=true;
+    const cancel=()=>{for(const key of owner.pending)invalidateSurfaceCache(key);};
+    const visible=()=>{if(document.visibilityState==='visible')cancel();};
+    window.addEventListener('focus',cancel);
+    document.addEventListener('visibilitychange',visible);
+    return()=>{
+      owner.active=false;cancel();
+      window.removeEventListener('focus',cancel);
+      document.removeEventListener('visibilitychange',visible);
+    };
+  },[prefix,owner]);
+  return useCallback(async(fileId:string,name:string)=>{
+    if(!owner.prefix||!owner.active||current.current!==owner)throw new Error('media_identity_changed');
+    const key=owner.prefix+fileId;
+    owner.pending.add(key);
+    try {
+      const value=await loadSurfaceCache(key,()=>fetchDocMediaProjection(workspaceId,fileId),lifecycle);
+      if(!value||!owner.active||current.current!==owner||readSurfaceCache(key).data!==value||lifecycle.expiresInMs(value)<=0)
+        throw new Error('media_download_no_longer_authorized');
+      const anchor=document.createElement('a');
+      anchor.href=value.url;anchor.download=name;
+      document.body.appendChild(anchor);
+      try {anchor.click();} finally {anchor.remove();}
+    } finally {owner.pending.delete(key);}
+  },[owner,workspaceId]);
 }
 
 /** Legacy cache previews remain separately audited; never reuse a prior source. */
