@@ -147,8 +147,8 @@ function OfficeTemplateLibraryForViewer({ workspaceId, templateId }: { workspace
       invalidateOfficeList(workspaceId);
       const draftId = templates?.find((template) => template.id === templateId)?.draftArtifactId;
       if (draftId) {
-        invalidateSurfaceCache(officeArtifactCacheKey(draftId));
-        invalidateSurfaceCache(officeSnapshotCacheKey(draftId));
+        invalidateSurfaceCache(officeArtifactCacheKey(workspaceId, draftId, viewerId));
+        invalidateSurfaceCache(officeSnapshotCacheKey(workspaceId, draftId, viewerId));
       }
       if (mutationScope.current !== scope) return;
       setPurgeConfirmation("");

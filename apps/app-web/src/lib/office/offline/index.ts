@@ -1,7 +1,10 @@
 /** Device-encrypted Office packages and durable offline command journal.
  * [COMP:app-web/office-offline] */
+import { getUserInfo } from "@/lib/user";
 import type { OfficeCommand } from "@use-brian/office-model";
 import type { OfficeArtifact, OfficeCommentThread, OfficeLiveSnapshot } from "../api";
+
+export type OfficeOfflineOwner = Readonly<{userId: string; workspaceId: string}>;
 
 export type OfficeOfflineStatus = "saved_device" | "offline" | "syncing" | "synced" | "needs_attention" | "sync_failed";
 export type EncryptedOfficePackage = { artifactId: string; version: number; manifestHash: string; iv: string; ciphertext: string; pinned: boolean; savedAt: string };
@@ -89,19 +92,20 @@ export async function decryptOfficePackage<T>(record: EncryptedOfficePackage, de
 }
 
 const DB_NAME = "use-brian-office-offline-v1";
-const PACKAGE_STORE = "packages";
-const JOURNAL_STORE = "journal";
+const PACKAGE_STORE = "viewer-packages";
+const JOURNAL_STORE = "viewer-journal";
 const KEY_STORE = "keys";
 
 type EncryptedJournalEntry = { artifactId: string; seq: number; iv: string; ciphertext: string };
 
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, 2);
+    const request = indexedDB.open(DB_NAME, 3);
     request.onupgradeneeded = () => {
       const db = request.result;
-      if (!db.objectStoreNames.contains(PACKAGE_STORE)) db.createObjectStore(PACKAGE_STORE, { keyPath: "artifactId" });
-      if (!db.objectStoreNames.contains(JOURNAL_STORE)) db.createObjectStore(JOURNAL_STORE, { keyPath: ["artifactId", "seq"] });
+      // Legacy artifact-only stores/root remain encrypted quarantine, never adopted.
+      if (!db.objectStoreNames.contains(PACKAGE_STORE)) db.createObjectStore(PACKAGE_STORE, { keyPath: ["workspaceId", "userId", "artifactId"] });
+      if (!db.objectStoreNames.contains(JOURNAL_STORE)) db.createObjectStore(JOURNAL_STORE, { keyPath: ["workspaceId", "userId", "artifactId", "seq"] });
       if (!db.objectStoreNames.contains(KEY_STORE)) db.createObjectStore(KEY_STORE);
     };
     request.onsuccess = () => resolve(request.result);
@@ -109,23 +113,78 @@ function openDb(): Promise<IDBDatabase> {
   });
 }
 
-/** Non-extractable HKDF root, structured-cloned by IndexedDB and never placed
- * in localStorage/cookies. A device/OS credential vault can replace this seam
- * in the bundled client without changing package ciphertext. */
-async function getOrCreateOfficeDeviceKey(): Promise<CryptoKey> {
+function assertOwner(owner: OfficeOfflineOwner): void {
+  if (!owner.userId || !owner.workspaceId || getUserInfo()?.id !== owner.userId) throw new Error("office_offline_owner_changed");
+}
+
+function captureOwner(owner: OfficeOfflineOwner): OfficeOfflineOwner {
+  const captured = {userId: owner.userId, workspaceId: owner.workspaceId};
+  assertOwner(captured);
+  return captured;
+}
+
+function recordKey(owner: OfficeOfflineOwner, artifactId: string): IDBValidKey[] {
+  return [owner.workspaceId, owner.userId, artifactId];
+}
+
+async function readRecord<T>(store: string, key: IDBValidKey | IDBKeyRange, all = false): Promise<T> {
   const db = await openDb();
-  const read = db.transaction(KEY_STORE, "readonly").objectStore(KEY_STORE).get("root");
-  const existing = await new Promise<CryptoKey | undefined>((resolve, reject) => {
-    read.onsuccess = () => resolve(read.result as CryptoKey | undefined);
-    read.onerror = () => reject(read.error ?? new Error("office_offline_key_read_failed"));
-  });
-  if (existing) { db.close(); return existing; }
-  const root = await crypto.subtle.importKey("raw", crypto.getRandomValues(new Uint8Array(32)), "HKDF", false, ["deriveKey"]);
-  const transaction = db.transaction(KEY_STORE, "readwrite");
-  transaction.objectStore(KEY_STORE).put(root, "root");
-  await transactionDone(transaction);
-  db.close();
-  return root;
+  try {
+    const source = db.transaction(store, "readonly").objectStore(store);
+    const request = all ? source.getAll(key) : source.get(key);
+    return await new Promise<T>((resolve, reject) => {
+      request.onsuccess = () => resolve(request.result as T);
+      request.onerror = () => reject(request.error ?? new Error("office_offline_read_failed"));
+    });
+  } finally { db.close(); }
+}
+
+async function writeRecord(owner: OfficeOfflineOwner, name: string, write: (store: IDBObjectStore) => void): Promise<void> {
+  const db = await openDb();
+  try {
+    assertOwner(owner);
+    const transaction = db.transaction(name, "readwrite");
+    const done = transactionDone(transaction);
+    try { write(transaction.objectStore(name)); }
+    catch (error) { transaction.abort(); await done.catch(() => undefined); throw error; }
+    await done;
+    assertOwner(owner);
+  } finally { db.close(); }
+}
+
+/** Atomic get-or-create: concurrent first writes must encrypt under the SAME root. */
+async function ownerValue<T>(owner: OfficeOfflineOwner, kind: string, candidate: T): Promise<T> {
+  const db = await openDb();
+  try {
+    assertOwner(owner);
+    const transaction = db.transaction(KEY_STORE, "readwrite");
+    const done = transactionDone(transaction);
+    const store = transaction.objectStore(KEY_STORE);
+    const key = [kind, owner.workspaceId, owner.userId];
+    const request = store.get(key);
+    let selected: T | undefined;
+    let refusal: unknown;
+    request.onsuccess = () => {
+      try {
+        assertOwner(owner);
+        selected = request.result ?? candidate;
+        if (request.result === undefined) store.put(selected, key);
+      } catch (error) { refusal = error; transaction.abort(); }
+    };
+    try { await done; } catch (error) { throw refusal ?? error; }
+    assertOwner(owner);
+    if (selected === undefined) throw new Error("office_offline_key_missing");
+    return selected;
+  } finally { db.close(); }
+}
+
+/** Non-extractable HKDF roots are separate for each viewer/workspace. */
+async function getOrCreateOfficeDeviceKey(owner: OfficeOfflineOwner): Promise<CryptoKey> {
+  assertOwner(owner);
+  const candidate = await crypto.subtle.importKey("raw", crypto.getRandomValues(new Uint8Array(32)), "HKDF", false, ["deriveKey"]);
+  const key = await ownerValue(owner, "root", candidate);
+  if (key.type !== "secret" || key.extractable || key.algorithm.name !== "HKDF") throw new Error("office_offline_key_invalid");
+  return key;
 }
 
 function transactionDone(transaction: IDBTransaction): Promise<void> {
@@ -136,50 +195,41 @@ function transactionDone(transaction: IDBTransaction): Promise<void> {
   });
 }
 
-export async function loadOfflinePackage(artifactId: string): Promise<LoadedOfficeOfflinePackage | null> {
-  const db = await openDb();
-  const request = db.transaction(PACKAGE_STORE, "readonly").objectStore(PACKAGE_STORE).get(artifactId);
-  const record = await new Promise<EncryptedOfficePackage | undefined>((resolve, reject) => {
-    request.onsuccess = () => resolve(request.result as EncryptedOfficePackage | undefined);
-    request.onerror = () => reject(request.error ?? new Error("office_offline_package_read_failed"));
-  });
-  db.close();
+function assertPackageScope(value: OfficeOfflinePackage, owner: OfficeOfflineOwner, artifactId: string): void {
+  if (value.payload?.artifact?.artifactId !== artifactId || value.payload?.snapshot?.workspaceId !== owner.workspaceId || value.payload?.snapshot?.artifactId !== artifactId) throw new Error("office_offline_scope_mismatch");
+}
+
+export async function loadOfflinePackage(artifactId: string, expectedOwner: OfficeOfflineOwner): Promise<LoadedOfficeOfflinePackage | null> {
+  const owner = captureOwner(expectedOwner);
+  const record = await readRecord<(EncryptedOfficePackage & OfficeOfflineOwner) | undefined>(PACKAGE_STORE, recordKey(owner, artifactId));
+  assertOwner(owner);
   if (!record) return null;
-  const decrypted = await decryptOfficePackage<OfficeOfflinePackage>(record, await getOrCreateOfficeDeviceKey());
+  if (record.userId !== owner.userId || record.workspaceId !== owner.workspaceId || record.artifactId !== artifactId) throw new Error("office_offline_scope_mismatch");
+  const decrypted = await decryptOfficePackage<OfficeOfflinePackage>(record, await getOrCreateOfficeDeviceKey(owner));
+  assertOwner(owner);
+  assertPackageScope(decrypted, owner, artifactId);
+  await validateOfficeOfflinePackage(decrypted);
+  assertOwner(owner);
+  if (decrypted.payload.artifact.version !== record.version) throw new Error("office_offline_manifest_identity_mismatch");
   return { ...decrypted, savedAt: record.savedAt };
 }
 
-export async function removeOfflinePackage(artifactId: string): Promise<void> {
-  const db = await openDb();
-  const transaction = db.transaction(PACKAGE_STORE, "readwrite");
-  transaction.objectStore(PACKAGE_STORE).delete(artifactId);
-  await transactionDone(transaction);
-  db.close();
+export async function removeOfflinePackage(artifactId: string, expectedOwner: OfficeOfflineOwner): Promise<void> {
+  const owner = captureOwner(expectedOwner);
+  await writeRecord(owner, PACKAGE_STORE, store => {store.delete(recordKey(owner, artifactId));});
 }
 
-export async function officeOfflineDeviceId(): Promise<string> {
-  const db = await openDb();
-  const request = db.transaction(KEY_STORE, "readonly").objectStore(KEY_STORE).get("device-id");
-  const existing = await new Promise<string | undefined>((resolve, reject) => {
-    request.onsuccess = () => resolve(typeof request.result === "string" ? request.result : undefined);
-    request.onerror = () => reject(request.error ?? new Error("office_offline_device_id_read_failed"));
-  });
-  if (existing) { db.close(); return existing; }
-  const deviceId = crypto.randomUUID();
-  const transaction = db.transaction(KEY_STORE, "readwrite");
-  transaction.objectStore(KEY_STORE).put(deviceId, "device-id");
-  await transactionDone(transaction);
-  db.close();
-  return deviceId;
+export async function officeOfflineDeviceId(expectedOwner: OfficeOfflineOwner): Promise<string> {
+  const owner = captureOwner(expectedOwner);
+  return ownerValue(owner, "device-id", crypto.randomUUID());
 }
 
-export async function persistOfficeOfflinePackage(params: { artifactId: string; version: number; manifest: unknown; payload: unknown; signature: string; pinned: boolean }): Promise<void> {
-  const encrypted = await encryptOfficePackage({ ...params, deviceSecret: await getOrCreateOfficeDeviceKey() });
-  const db = await openDb();
-  const transaction = db.transaction(PACKAGE_STORE, "readwrite");
-  transaction.objectStore(PACKAGE_STORE).put(encrypted);
-  await transactionDone(transaction);
-  db.close();
+export async function persistOfficeOfflinePackage(params: { artifactId: string; version: number; manifest: unknown; payload: unknown; signature: string; pinned: boolean }, expectedOwner: OfficeOfflineOwner): Promise<void> {
+  const owner = captureOwner(expectedOwner);
+  assertPackageScope(params as OfficeOfflinePackage, owner, params.artifactId);
+  const encrypted = await encryptOfficePackage({ ...params, deviceSecret: await getOrCreateOfficeDeviceKey(owner) });
+  assertOwner(owner);
+  await writeRecord(owner, PACKAGE_STORE, store => {store.put({...encrypted, ...owner});});
 }
 
 export async function encryptOfflineJournalEntry(entry: OfflineJournalEntry, deviceKey: CryptoKey | Uint8Array): Promise<EncryptedJournalEntry> {
@@ -197,33 +247,47 @@ export async function decryptOfflineJournalEntry(record: EncryptedJournalEntry, 
   return JSON.parse(decoder.decode(plaintext)) as OfflineJournalEntry;
 }
 
-export async function appendOfflineCommand(entry: OfflineJournalEntry): Promise<void> {
-  const encrypted = await encryptOfflineJournalEntry(entry, await getOrCreateOfficeDeviceKey());
-  const db = await openDb();
-  const transaction = db.transaction(JOURNAL_STORE, "readwrite");
-  transaction.objectStore(JOURNAL_STORE).put(encrypted);
-  await transactionDone(transaction);
-  db.close();
+function assertCommandOwner(command: OfficeCommand, owner: OfficeOfflineOwner, artifactId: string): void {
+  if (command.actor.type !== "user" || command.actor.id !== owner.userId || command.artifactId !== artifactId) throw new Error("office_offline_scope_mismatch");
+  if (command.kind === "batch") for (const child of command.commands) assertCommandOwner(child, owner, artifactId);
 }
 
-export async function listOfflineJournal(artifactId: string): Promise<OfflineJournalEntry[]> {
-  const db = await openDb();
-  const request = db.transaction(JOURNAL_STORE, "readonly").objectStore(JOURNAL_STORE).getAll();
-  const all = await new Promise<EncryptedJournalEntry[]>((resolve, reject) => {
-    request.onsuccess = () => resolve(request.result as EncryptedJournalEntry[]);
-    request.onerror = () => reject(request.error ?? new Error("office_offline_journal_read_failed"));
-  });
-  db.close();
-  const deviceKey = await getOrCreateOfficeDeviceKey();
-  return Promise.all(all.filter((entry) => entry.artifactId === artifactId).sort((a, b) => a.seq - b.seq).map((entry) => decryptOfflineJournalEntry(entry, deviceKey)));
+function assertJournalOwner(entry: OfflineJournalEntry, owner: OfficeOfflineOwner): void {
+  if (!entry.artifactId || !Number.isSafeInteger(entry.seq) || entry.seq < 0) throw new Error("office_offline_journal_identity_invalid");
+  if (entry.kind !== "comment") assertCommandOwner(entry.command, owner, entry.artifactId);
 }
 
-export async function removeOfflineJournalEntry(entry: OfflineJournalEntry): Promise<void> {
-  const db = await openDb();
-  const transaction = db.transaction(JOURNAL_STORE, "readwrite");
-  transaction.objectStore(JOURNAL_STORE).delete([entry.artifactId, entry.seq]);
-  await transactionDone(transaction);
-  db.close();
+export async function appendOfflineCommand(entry: OfflineJournalEntry, expectedOwner: OfficeOfflineOwner): Promise<void> {
+  const owner = captureOwner(expectedOwner);
+  assertJournalOwner(entry, owner);
+  const encrypted = await encryptOfflineJournalEntry(entry, await getOrCreateOfficeDeviceKey(owner));
+  assertOwner(owner);
+  await writeRecord(owner, JOURNAL_STORE, store => {store.put({...encrypted, ...owner});});
+}
+
+export async function listOfflineJournal(artifactId: string, expectedOwner: OfficeOfflineOwner): Promise<OfflineJournalEntry[]> {
+  const owner = captureOwner(expectedOwner);
+  const range = IDBKeyRange.bound([...recordKey(owner, artifactId), 0], [...recordKey(owner, artifactId), Number.MAX_SAFE_INTEGER]);
+  const rows = await readRecord<Array<EncryptedJournalEntry & OfficeOfflineOwner>>(JOURNAL_STORE, range, true);
+  assertOwner(owner);
+  if (!rows.length) return [];
+  const key = await getOrCreateOfficeDeviceKey(owner);
+  const entries = await Promise.all(rows.map(async record => {
+    if (record.userId !== owner.userId || record.workspaceId !== owner.workspaceId || record.artifactId !== artifactId) throw new Error("office_offline_scope_mismatch");
+    const entry = await decryptOfflineJournalEntry(record, key);
+    assertOwner(owner);
+    assertJournalOwner(entry, owner);
+    if (entry.artifactId !== artifactId || entry.seq !== record.seq) throw new Error("office_offline_journal_identity_invalid");
+    return entry;
+  }));
+  assertOwner(owner);
+  return entries.sort((a,b) => a.seq-b.seq);
+}
+
+export async function removeOfflineJournalEntry(entry: OfflineJournalEntry, expectedOwner: OfficeOfflineOwner): Promise<void> {
+  const owner = captureOwner(expectedOwner);
+  assertJournalOwner(entry, owner);
+  await writeRecord(owner, JOURNAL_STORE, store => {store.delete([...recordKey(owner, entry.artifactId), entry.seq]);});
 }
 
 export function classifyOfficeReconnect(result: { status?: string; reason?: string; quarantine?: boolean }): { status: OfficeOfflineStatus; quarantine: boolean; conflict: boolean } {

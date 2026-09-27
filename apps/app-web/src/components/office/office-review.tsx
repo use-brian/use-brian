@@ -1,10 +1,11 @@
 "use client";
 
-import { useId, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import { Download, Eye, MonitorPlay, Trash2, Undo2, X } from "lucide-react";
 import { columnIndexToName, parseCellAddress, type OfficeArtifactSnapshot, type SpreadsheetSnapshot } from "@use-brian/office-model";
 import type { OfficeArtifact } from "@/lib/office/api";
 import { readOfficeReleasedFile, releaseOfficeArtifact, requestOfficeOfflinePackage, reviewOfficeRelease, transitionOfficeLifecycle, type OfficeReleaseInput, type OfficeReleaseReceipt } from "@/lib/office/api";
+import { useOptionalWorkspaceContext } from "@/lib/workspace-context";
 import { useT } from "@/lib/i18n/client";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
 import { officeOfflineDeviceId, persistOfficeOfflinePackage } from "@/lib/office/offline";
@@ -27,7 +28,16 @@ export function officeReleaseIssueMessage(issue: { code: string; message: string
 
 /** Focused file actions. Advanced release/derivative/offline machinery remains
  * behind the API contract, but the editor exposes only the normal file tasks. */
-export function OfficeReview({ artifact, artifactId, workspaceId, snapshot, onLifecycle, onPresent, offlineCopy = false }: { artifact: OfficeArtifact; artifactId: string; workspaceId: string; snapshot?: OfficeArtifactSnapshot; selectedObjectIds: string[]; onLifecycle(artifact: OfficeArtifact): void; onPresent?(): void; offlineCopy?: boolean }) {
+type OfficeReviewProps = { artifact: OfficeArtifact; artifactId: string; workspaceId: string; snapshot?: OfficeArtifactSnapshot; selectedObjectIds: string[]; onLifecycle(artifact: OfficeArtifact): void; onPresent?(): void; offlineCopy?: boolean };
+
+export function OfficeReview(props: OfficeReviewProps) {
+  const workspace = useOptionalWorkspaceContext();
+  const viewerId = workspace?.workspaceId === props.workspaceId ? workspace.me.id : "";
+  return <OfficeReviewContent key={`${props.workspaceId}:${viewerId}:${props.artifactId}`} {...props} viewerId={viewerId} />;
+}
+
+function OfficeReviewContent({ artifact, artifactId, workspaceId, snapshot, onLifecycle, onPresent, offlineCopy = false, viewerId }: OfficeReviewProps & {viewerId: string}) {
+  const offlineOwner = useMemo(() => ({workspaceId, userId: viewerId}), [workspaceId, viewerId]);
   const t = useT().office;
   const [receipt, setReceipt] = useState<OfficeReleaseReceipt | null>(null);
   const [busy, setBusy] = useState(false);
@@ -77,8 +87,8 @@ export function OfficeReview({ artifact, artifactId, workspaceId, snapshot, onLi
   async function saveOffline() {
     setBusy(true);
     try {
-      const response = await requestOfficeOfflinePackage(artifactId, await officeOfflineDeviceId(), artifact.version);
-      await persistOfficeOfflinePackage({ artifactId, version: artifact.version, manifest: response.manifest, payload: response.payload, signature: response.signature, pinned: true });
+      const response = await requestOfficeOfflinePackage(artifactId, await officeOfflineDeviceId(offlineOwner), artifact.version);
+      await persistOfficeOfflinePackage({ artifactId, version: artifact.version, manifest: response.manifest, payload: response.payload, signature: response.signature, pinned: true }, offlineOwner);
       setOfflineSaved(true);
     } finally { setBusy(false); }
   }

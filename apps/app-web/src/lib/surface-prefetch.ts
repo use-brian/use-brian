@@ -636,12 +636,12 @@ export function invalidateOfficeList(workspaceId: string | null | undefined): vo
  * row-then-snapshot waterfall, and can paint the chrome from the row (or
  * the home's list row) while the snapshot is still in flight.
  */
-export function officeArtifactCacheKey(artifactId: string): string {
-  return `office-artifact:${artifactId}`;
+export function officeArtifactCacheKey(workspaceId: string, artifactId: string, viewerId = getUserInfo()?.id ?? ""): string {
+  return `office-artifact:${workspaceId}:${viewerId}:${artifactId}`;
 }
 
-export function officeSnapshotCacheKey(artifactId: string): string {
-  return `office-snapshot:${artifactId}`;
+export function officeSnapshotCacheKey(workspaceId: string, artifactId: string, viewerId = getUserInfo()?.id ?? ""): string {
+  return `office-snapshot:${workspaceId}:${viewerId}:${artifactId}`;
 }
 
 /**

@@ -1,14 +1,16 @@
 "use client";
 
 /** Author and review stored Office suggestions without speculative canonical mutation. [COMP:app-web/office-suggestions] */
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { documentRangePreimageHash, type OfficeCommand } from "@use-brian/office-model";
 import { decideOfficeSuggestion, listOfficeSuggestions, submitOfficeCommand, type OfficeSuggestion } from "@/lib/office/api";
+import { useOptionalWorkspaceContext } from "@/lib/workspace-context";
 import { useT } from "@/lib/i18n/client";
 import type { DocumentSuggestionRange } from "../document/comment-anchor";
 import { appendOfflineCommand } from "@/lib/office/offline";
 
 type OfficeSuggestionsProps = {
+  workspaceId: string;
   artifactId: string;
   canDecide: boolean;
   canSuggest?: boolean;
@@ -21,7 +23,14 @@ type OfficeSuggestionsProps = {
   onSuggestionsChange?(suggestions: OfficeSuggestion[]): void;
 };
 
-export function OfficeSuggestions({ artifactId, canDecide, canSuggest = false, actorId, baseVersion = 0, expectedSeq = 1, proposal, onApplied, offline = false, onSuggestionsChange }: OfficeSuggestionsProps) {
+export function OfficeSuggestions(props: OfficeSuggestionsProps) {
+  const workspace = useOptionalWorkspaceContext();
+  const viewerId = workspace?.workspaceId === props.workspaceId ? workspace.me.id : "";
+  return <OfficeSuggestionsContent key={`${props.workspaceId}:${viewerId}:${props.artifactId}`} {...props} viewerId={viewerId} />;
+}
+
+function OfficeSuggestionsContent({ workspaceId, artifactId, canDecide, canSuggest = false, actorId, baseVersion = 0, expectedSeq = 1, proposal, onApplied, offline = false, onSuggestionsChange, viewerId }: OfficeSuggestionsProps & {viewerId: string}) {
+  const offlineOwner = useMemo(() => ({workspaceId, userId: viewerId}), [workspaceId, viewerId]);
   const t = useT().office;
   const [items, setItems] = useState<OfficeSuggestion[]>([]);
   const [filter, setFilter] = useState<"open" | "all">("open");
@@ -52,7 +61,7 @@ export function OfficeSuggestions({ artifactId, canDecide, canSuggest = false, a
     setBusy("create"); setSubmitError(false);
     try {
       if (offline) {
-        await appendOfflineCommand({ artifactId, seq: Date.now() * 1_000 + Math.floor(Math.random() * 1_000), kind: "suggestion", expectedSeq, command: { ...command, origin: "offline" }, createdAt: new Date().toISOString() });
+        await appendOfflineCommand({ artifactId, seq: Date.now() * 1_000 + Math.floor(Math.random() * 1_000), kind: "suggestion", expectedSeq, command: { ...command, origin: "offline" }, createdAt: new Date().toISOString() }, offlineOwner);
       } else {
         await submitOfficeCommand(artifactId, expectedSeq, command, "suggest");
         await reload();

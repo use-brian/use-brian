@@ -397,9 +397,9 @@ describe("[COMP:app-web/office-surface-cache] Office cache keys", () => {
   });
 
   it("keys the open artifact's row and snapshot separately so the shell fetches them in parallel (N7)", () => {
-    expect(officeArtifactCacheKey("a1")).toBe("office-artifact:a1");
-    expect(officeSnapshotCacheKey("a1")).toBe("office-snapshot:a1");
-    expect(officeArtifactCacheKey("a1")).not.toBe(officeSnapshotCacheKey("a1"));
+    expect(officeArtifactCacheKey("w1", "a1", "u1")).toBe("office-artifact:w1:u1:a1");
+    expect(officeSnapshotCacheKey("w1", "a1", "u1")).toBe("office-snapshot:w1:u1:a1");
+    expect(officeArtifactCacheKey("w1", "a1", "u1")).not.toBe(officeSnapshotCacheKey("w1", "a1", "u1"));
   });
 
   it("the Office warm fills the active list the home reads through the same builder", () => {
@@ -411,8 +411,8 @@ describe("[COMP:app-web/office-surface-cache] Office cache keys", () => {
     expect(home).toContain("officeListCacheKey(workspaceId, view, viewerId)");
     expect(home).toContain('from "@/lib/surface-prefetch"');
     const shell = readFileSync(resolve(process.cwd(), "src", "components/office/office-editor-shell.tsx"), "utf8");
-    expect(shell).toContain("officeArtifactCacheKey(artifactId)");
-    expect(shell).toContain("officeSnapshotCacheKey(artifactId)");
+    expect(shell).toContain("officeArtifactCacheKey(workspaceId, artifactId, viewerId)");
+    expect(shell).toContain("officeSnapshotCacheKey(workspaceId, artifactId, viewerId)");
   });
 
   it("invalidateOfficeList is a no-op without a workspace id (the store round trip lives in the jsdom office test)", () => {

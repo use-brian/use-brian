@@ -8,7 +8,7 @@
  * offline package is the cold seed for the snapshot when one is present.
  * [COMP:app-web/office-editor-shell] [COMP:app-web/office-surface-cache]
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { APP_LEVEL_ASSISTANT_ID } from "@use-brian/shared";
 import { FileCheck2, FileSpreadsheet, FileText, History, ListChecks, MessageSquare, MoreHorizontal, PanelRightClose, PanelRightOpen, Presentation, Redo2, Route, Share2, Sparkles, Undo2 } from "lucide-react";
@@ -32,7 +32,8 @@ import { useCollabProvider } from "@/lib/collab/use-collab-provider";
 import { usePresence, usePublishPresenceActivity, usePublishPresenceIdentity } from "@/lib/collab/use-presence";
 import { getUserInfo } from "@/lib/user";
 import { appendOfficeCommand, applyOfficeUpdate, createOfficeUndoManager, officeCommandIds, yDocToSnapshot } from "@use-brian/office-model";
-import { appendOfflineCommand, classifyOfficeReconnect, listOfflineJournal, loadOfflinePackage, removeOfflineJournalEntry, removeOfflinePackage, type LoadedOfficeOfflinePackage, type OfficeOfflineStatus, type OfflineJournalEntry } from "@/lib/office/offline";
+import { useOptionalWorkspaceContext } from "@/lib/workspace-context";
+import { appendOfflineCommand, classifyOfficeReconnect, listOfflineJournal, loadOfflinePackage, removeOfflineJournalEntry, removeOfflinePackage, type OfficeOfflineOwner, type LoadedOfficeOfflinePackage, type OfficeOfflineStatus, type OfflineJournalEntry } from "@/lib/office/offline";
 import { handleOfficeHistoryShortcut, observeOfficeHistory, observeOfficeHistoryReadiness } from "@/lib/office/editor-history";
 import { OfficeTopbar } from "./office-topbar";
 import { cn } from "@/lib/utils";
@@ -55,23 +56,33 @@ function packageLive(pkg: LoadedOfficeOfflinePackage): OfficeLiveSnapshot {
 }
 
 export function OfficeEditorShell({ workspaceId, artifactId }: { workspaceId: string; artifactId: string }) {
-  // Keyed per artifact: every piece of working state below (live snapshot,
-  // offline copy, denial, open panel) belongs to ONE artifact and must start
-  // clean for the next id - a remount is the reset, never an effect.
-  return <OfficeArtifactShell key={artifactId} workspaceId={workspaceId} artifactId={artifactId} />;
+  const workspace = useOptionalWorkspaceContext();
+  const viewerId = workspace?.workspaceId === workspaceId ? workspace.me.id : "";
+  const previous = useRef({workspaceId, artifactId, viewerId});
+  useLayoutEffect(() => {
+    const old = previous.current;
+    if (old.workspaceId !== workspaceId || old.viewerId !== viewerId) {
+      invalidateSurfaceCache(officeArtifactCacheKey(old.workspaceId, old.artifactId, old.viewerId));
+      invalidateSurfaceCache(officeSnapshotCacheKey(old.workspaceId, old.artifactId, old.viewerId));
+    }
+    previous.current = {workspaceId, artifactId, viewerId};
+  }, [workspaceId, artifactId, viewerId]);
+  // All local state and callbacks belong to the viewer that opened this artifact.
+  return <OfficeArtifactShell key={`${workspaceId}:${viewerId}:${artifactId}`} workspaceId={workspaceId} artifactId={artifactId} viewerId={viewerId} />;
 }
 
-function OfficeArtifactShell({ workspaceId, artifactId }: { workspaceId: string; artifactId: string }) {
+function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceId: string; artifactId: string; viewerId: string }) {
+  const offlineOwner = useMemo<OfficeOfflineOwner>(() => ({workspaceId, userId: viewerId}), [workspaceId, viewerId]);
   const t = useT().office;
   const router = useRouter();
   const templateId = useSearchParams().get("templateId");
-  const artifactKey = officeArtifactCacheKey(artifactId);
-  const snapshotKey = officeSnapshotCacheKey(artifactId);
+  const artifactKey = officeArtifactCacheKey(workspaceId, artifactId, viewerId);
+  const snapshotKey = officeSnapshotCacheKey(workspaceId, artifactId, viewerId);
   // An authoritative 401 / 403 / 404 evicts and stops both hooks (key null);
   // it never falls back to a cached or offline copy (N2).
   const [denied, setDenied] = useState(false);
-  const artifactEntry = useCachedResource<OfficeArtifact>(denied ? null : artifactKey, () => getOfficeArtifact(artifactId));
-  const snapshotEntry = useCachedResource<OfficeLiveSnapshot>(denied ? null : snapshotKey, () => getOfficeSnapshot(artifactId));
+  const artifactEntry = useCachedResource<OfficeArtifact>(denied || !viewerId ? null : artifactKey, () => getOfficeArtifact(artifactId));
+  const snapshotEntry = useCachedResource<OfficeLiveSnapshot>(denied || !viewerId ? null : snapshotKey, () => getOfficeSnapshot(artifactId));
   useOfficeCacheRevalidation([artifactKey, snapshotKey]);
   // Full offline mode: the network failed and a pinned package took over.
   const [offline, setOffline] = useState<LoadedOfficeOfflinePackage | null>(null);
@@ -132,9 +143,9 @@ function OfficeArtifactShell({ workspaceId, artifactId }: { workspaceId: string;
   useEffect(() => {
     if (readSurfaceCache<OfficeLiveSnapshot>(snapshotKey).data !== undefined) return;
     let active = true;
-    void loadOfflinePackage(artifactId).then((pkg) => { if (active && pkg) setSeed(pkg); }).catch(() => undefined);
+    void loadOfflinePackage(artifactId, offlineOwner).then((pkg) => { if (active && pkg) setSeed(pkg); }).catch(() => undefined);
     return () => { active = false; };
-  }, [artifactId, snapshotKey]);
+  }, [artifactId, snapshotKey, offlineOwner]);
 
   // A fetched row is authoritative: leave offline mode, reset the per-load
   // flags, and drop a package the lifecycle no longer allows.
@@ -145,8 +156,8 @@ function OfficeArtifactShell({ workspaceId, artifactId }: { workspaceId: string;
     setCachedComments(null);
     setReconnectStatus("synced");
     setTemplateDraftFailed(false);
-    if (artifactRow.lifecycleState !== "active") void removeOfflinePackage(artifactId).catch(() => undefined);
-  }, [artifactId, artifactRow]);
+    if (artifactRow.lifecycleState !== "active") void removeOfflinePackage(artifactId, offlineOwner).catch(() => undefined);
+  }, [artifactId, artifactRow, offlineOwner]);
 
   useEffect(() => {
     if (artifact?.role) setSuggestMode(artifact.role === "comment");
@@ -161,11 +172,11 @@ function OfficeArtifactShell({ workspaceId, artifactId }: { workspaceId: string;
       setDenied(true);
       invalidateSurfaceCache(artifactKey);
       invalidateSurfaceCache(snapshotKey);
-      void removeOfflinePackage(artifactId).catch(() => undefined);
+      void removeOfflinePackage(artifactId, offlineOwner).catch(() => undefined);
       return;
     }
     let active = true;
-    void loadOfflinePackage(artifactId).catch(() => null).then((cached) => {
+    void loadOfflinePackage(artifactId, offlineOwner).catch(() => null).then((cached) => {
       if (!active) return;
       if (!cached) { setOfflineLookup("missing"); return; }
       setOffline(cached);
@@ -174,7 +185,7 @@ function OfficeArtifactShell({ workspaceId, artifactId }: { workspaceId: string;
       setReconnectStatus("offline");
     });
     return () => { active = false; };
-  }, [artifactEntry.error, artifactEntry.revalidating, artifactId, artifactKey, artifactRow, denied, snapshotKey]);
+  }, [artifactEntry.error, artifactEntry.revalidating, artifactId, artifactKey, artifactRow, denied, snapshotKey, offlineOwner]);
 
   // Snapshot fetch failed: an uninitialized template draft is initialized
   // into the same cache slot; a still-running generation / import job polls
@@ -246,15 +257,19 @@ function OfficeArtifactShell({ workspaceId, artifactId }: { workspaceId: string;
   }, [artifact?.family, artifact?.mode, templateId]);
   useEffect(() => {
     if (collab.status !== "connected" || !collab.synced) return;
-    void listOfflineJournal(artifactId).then(async (entries) => {
+    let active = true;
+    const current = () => active && getUserInfo()?.id === viewerId;
+    void listOfflineJournal(artifactId, offlineOwner).then(async (entries) => {
+      if (!current()) return;
       const commands = entries.filter((entry): entry is Extract<(typeof entries)[number], { kind: "command" }> => entry.kind === "command");
       if (commands.length > 0) {
         const result = await syncOfficeOfflineCommands(artifactId, commands[0].expectedSeq, commands.map((entry) => entry.command));
+        if (!current()) return;
         const classified = classifyOfficeReconnect(result);
         setReconnectStatus(classified.status);
-        if (result.status === "synced") await Promise.all(commands.map(removeOfflineJournalEntry));
+        if (result.status === "synced") await Promise.all(commands.map(entry => removeOfflineJournalEntry(entry, offlineOwner)));
         if (classified.quarantine) {
-          await removeOfflinePackage(artifactId).catch(() => undefined);
+          await removeOfflinePackage(artifactId, offlineOwner).catch(() => undefined);
           invalidateSurfaceCache(artifactKey);
           invalidateSurfaceCache(snapshotKey);
           setDenied(true);
@@ -265,11 +280,13 @@ function OfficeArtifactShell({ workspaceId, artifactId }: { workspaceId: string;
       }
       const suggestions = entries.filter((entry): entry is Extract<(typeof entries)[number], { kind: "suggestion" }> => entry.kind === "suggestion");
       for (const entry of suggestions) {
+        if (!current()) return;
         await submitOfficeCommand(artifactId, entry.expectedSeq, entry.command, "suggest");
-        await removeOfflineJournalEntry(entry);
+        await removeOfflineJournalEntry(entry, offlineOwner);
       }
     }).catch(() => undefined);
-  }, [artifactId, artifactKey, collab.status, collab.synced, snapshotKey]);
+    return () => {active = false;};
+  }, [artifactId, artifactKey, collab.status, collab.synced, snapshotKey, offlineOwner, viewerId]);
   useEffect(() => {
     const doc = collab.doc;
     if (!doc || artifact?.lifecycleState !== "active" || artifact.role !== "edit" || suggestMode) return;
@@ -305,18 +322,18 @@ function OfficeArtifactShell({ workspaceId, artifactId }: { workspaceId: string;
     offlineHistoryQueue.current = offlineHistoryQueue.current.then(async () => {
       if (action === "undo") {
         const changedSet = new Set(changedIds);
-        const entries = await listOfflineJournal(artifactId);
+        const entries = await listOfflineJournal(artifactId, offlineOwner);
         for (const entry of entries) {
           if (entry.kind !== "command" || !changedSet.has(entry.command.commandId)) continue;
           offlineUndoneCommands.current.set(entry.command.commandId, entry);
-          await removeOfflineJournalEntry(entry);
+          await removeOfflineJournalEntry(entry, offlineOwner);
         }
         return;
       }
       for (const commandId of changedIds) {
         const entry = offlineUndoneCommands.current.get(commandId);
         if (!entry) continue;
-        await appendOfflineCommand(entry);
+        await appendOfflineCommand(entry, offlineOwner);
         offlineUndoneCommands.current.delete(commandId);
       }
     }).catch(() => undefined);
@@ -348,7 +365,7 @@ function OfficeArtifactShell({ workspaceId, artifactId }: { workspaceId: string;
     if (!suggestMode && artifact!.role === "edit" && collab.doc && (collab.synced || offlineCopyAt)) {
       if (collab.status === "disconnected" || offlineCopyAt) {
         const offlineCommand = { ...command, origin: "offline" as const };
-        await appendOfflineCommand({ artifactId, seq: Date.now() * 1_000 + Math.floor(Math.random() * 1_000), kind: "command", expectedSeq: live.seq, command: offlineCommand, createdAt: new Date().toISOString() });
+        await appendOfflineCommand({ artifactId, seq: Date.now() * 1_000 + Math.floor(Math.random() * 1_000), kind: "command", expectedSeq: live.seq, command: offlineCommand, createdAt: new Date().toISOString() }, offlineOwner);
         appendOfficeCommand(collab.doc, offlineCommand);
       } else appendOfficeCommand(collab.doc, command);
       return;
@@ -457,7 +474,7 @@ function OfficeArtifactShell({ workspaceId, artifactId }: { workspaceId: string;
           {panelOpen ? <>
             {panel === "activity" ? <OfficeJobActivity jobId={artifact.job?.id} snapshot={live?.snapshot} targetIds={targets} canRequestRevision={canRequestBrianRevision} requestDisabledReason={brianRevisionDisabledReason} onRequestRevision={requestBrianRevision} onRevisionCompleted={refreshArtifact} /> : null}
             {panel === "comments" ? <div className="p-3"><OfficeComments artifactId={artifactId} workspaceId={workspaceId} version={artifact.version} targetIds={targets} selectionAnchor={artifact.family === "document" ? commentAnchor : null} anchorKind={artifact.family === "document" ? "block" : artifact.family === "spreadsheet" ? "table_cell" : "object"} canComment={artifact.role !== "view"} offline={collab.status === "disconnected" || Boolean(offlineCopyAt)} initialThreads={cachedComments ?? undefined} onRevisionCompleted={refreshArtifact} onThreadsChange={setCommentThreads} /></div> : null}
-            {panel === "suggestions" ? <div className="p-3"><OfficeSuggestions artifactId={artifactId} canDecide={artifact.role === "edit" && artifact.lifecycleState === "active" && !offlineCopyAt} canSuggest={artifact.family === "document" && artifact.role !== "view" && artifact.lifecycleState === "active" && suggestMode} actorId={currentUser?.id} baseVersion={live?.baseVersion} expectedSeq={live?.seq} proposal={suggestionRange} offline={collab.status === "disconnected" || Boolean(offlineCopyAt)} onApplied={refreshArtifact} onSuggestionsChange={setSuggestions} /></div> : null}
+            {panel === "suggestions" ? <div className="p-3"><OfficeSuggestions workspaceId={workspaceId} artifactId={artifactId} canDecide={artifact.role === "edit" && artifact.lifecycleState === "active" && !offlineCopyAt} canSuggest={artifact.family === "document" && artifact.role !== "view" && artifact.lifecycleState === "active" && suggestMode} actorId={currentUser?.id} baseVersion={live?.baseVersion} expectedSeq={live?.seq} proposal={suggestionRange} offline={collab.status === "disconnected" || Boolean(offlineCopyAt)} onApplied={refreshArtifact} onSuggestionsChange={setSuggestions} /></div> : null}
             {panel === "history" ? <div className="p-3"><OfficeHistory artifactId={artifactId} artifactTitle={artifact.title} currentVersion={artifact.version} canEdit={artifact.role === "edit" && artifact.lifecycleState === "active" && !offlineCopyAt} onRestored={refreshArtifact} onCopied={(copiedId) => { invalidateOfficeList(workspaceId); router.push(`/w/${workspaceId}/office/${copiedId}`); }} /></div> : null}
             {panel === "sharing" ? <div className="p-3"><OfficeSharing artifactId={artifactId} /></div> : null}
             {panel === "review" ? <OfficeReview artifact={artifact} artifactId={artifactId} workspaceId={workspaceId} snapshot={live?.snapshot ?? undefined} selectedObjectIds={targets} onLifecycle={onLifecycle} onPresent={() => setPresentOpen(true)} offlineCopy={Boolean(offlineCopyAt)} /> : null}

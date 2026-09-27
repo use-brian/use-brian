@@ -1,9 +1,11 @@
 "use client";
 
 /** Semantic/spatial Office comments with range anchors and task workflows. [COMP:app-web/office-comments] */
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { APP_LEVEL_ASSISTANT_ID } from "@use-brian/shared";
 import { createOfficeComment, listOfficeComments, reactOfficeComment, replyOfficeComment, resolveOfficeComment, updateOfficeCommentThread, waitForOfficeJob, type OfficeCommentThread } from "@/lib/office/api";
+import { useOptionalWorkspaceContext } from "@/lib/workspace-context";
+import { getUserInfo } from "@/lib/user";
 import { useT } from "@/lib/i18n/client";
 import { appendOfflineCommand, listOfflineJournal, removeOfflineJournalEntry } from "@/lib/office/offline";
 import { CommentComposer } from "@/components/doc/comment-composer";
@@ -24,7 +26,14 @@ type OfficeCommentsProps = {
   onThreadsChange?(threads: OfficeCommentThread[]): void;
 };
 
-export function OfficeComments({ artifactId, workspaceId, version, targetIds, selectionAnchor, anchorKind = "object", canComment, offline = false, initialThreads, onRevisionCompleted, onThreadsChange }: OfficeCommentsProps) {
+export function OfficeComments(props: OfficeCommentsProps) {
+  const workspace = useOptionalWorkspaceContext();
+  const viewerId = workspace?.workspaceId === props.workspaceId ? workspace.me.id : "";
+  return <OfficeCommentsContent key={`${props.workspaceId}:${viewerId}:${props.artifactId}`} {...props} viewerId={viewerId} />;
+}
+
+function OfficeCommentsContent({ artifactId, workspaceId, version, targetIds, selectionAnchor, anchorKind = "object", canComment, offline = false, initialThreads, onRevisionCompleted, onThreadsChange, viewerId }: OfficeCommentsProps & {viewerId: string}) {
+  const offlineOwner = useMemo(() => ({workspaceId, userId: viewerId}), [workspaceId, viewerId]);
   const t = useT().office;
   const [threads, setThreads] = useState<OfficeCommentThread[]>(initialThreads ?? []);
   const [body, setBody] = useState("");
@@ -41,15 +50,18 @@ export function OfficeComments({ artifactId, workspaceId, version, targetIds, se
   useEffect(() => { void listWorkspaceMembers(workspaceId).then((rows) => setMemberItems(rows.map((member) => ({ value: member.id, label: member.name, hint: member.email ?? undefined })))); }, [workspaceId]);
   useEffect(() => {
     if (offline) return;
-    void listOfflineJournal(artifactId).then(async (entries) => {
+    let active = true;
+    void listOfflineJournal(artifactId, offlineOwner).then(async (entries) => {
       for (const entry of entries) {
+        if (!active || getUserInfo()?.id !== viewerId) return;
         if (entry.kind !== "comment") continue;
         await createOfficeComment({ artifactId, anchor: entry.anchor as OfficeCommentThread["anchor"], body: entry.body, mentions: entry.mentions, invokeBrian: entry.invokeBrian });
-        await removeOfflineJournalEntry(entry);
+        await removeOfflineJournalEntry(entry, offlineOwner);
       }
-      if (entries.some((entry) => entry.kind === "comment")) await reload();
+      if (active && getUserInfo()?.id === viewerId && entries.some((entry) => entry.kind === "comment")) await reload();
     }).catch(() => undefined);
-  }, [artifactId, offline]);
+    return () => {active = false;};
+  }, [artifactId, offline, offlineOwner, viewerId]);
 
   const anchor = selectionAnchor ?? (targetIds.length ? { kind: anchorKind, targetIds } : null);
 
@@ -62,7 +74,7 @@ export function OfficeComments({ artifactId, workspaceId, version, targetIds, se
       if (offline) {
         const createdAt = new Date().toISOString();
         const seq = Date.now() * 1_000 + Math.floor(Math.random() * 1_000);
-        await appendOfflineCommand({ artifactId, seq, kind: "comment", anchor, body: body.trim(), mentions, invokeBrian, createdAt });
+        await appendOfflineCommand({ artifactId, seq, kind: "comment", anchor, body: body.trim(), mentions, invokeBrian, createdAt }, offlineOwner);
         setThreads((current) => [...current, { id: `offline:${seq}`, artifactVersionId: String(version), anchorKind: anchor.kind, anchor, status: "open", messages: [{ id: `offline-message:${seq}`, authorType: "user", body: body.trim(), mentions, createdAt }] }]);
       } else {
         const created = await createOfficeComment({ artifactId, anchor, body: body.trim(), mentions, invokeBrian });
