@@ -7,8 +7,8 @@
  * `allowed_updates` set and installs the `/ask` command at the same time.
  *
  * Context: packages/channels/src/telegram/api.ts → setWebhook() now asks
- * Telegram to send membership-change updates in addition to messages and
- * callback queries. Telegram only honors whatever `allowed_updates` value
+ * Telegram to send channel posts and membership-change updates in addition
+ * to messages and callback queries. Edited posts remain excluded. Telegram only honors whatever `allowed_updates` value
  * was last sent, so existing BYO integrations keep the old narrow set
  * until this script runs.
  *

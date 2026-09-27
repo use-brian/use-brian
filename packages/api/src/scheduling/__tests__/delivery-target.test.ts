@@ -64,6 +64,12 @@ describe('[COMP:scheduling/delivery-target] createDeliveryTargetResolver', () =>
     expect(r).toEqual({ label: 'Telegram · chat -100123 · topic #42', topicId: 42 })
   })
 
+  it('labels discussion roots separately from forum topics', async () => {
+    const resolve = createDeliveryTargetResolver(undefined)
+    expect(await resolve({ assistantId: 'a1', channelType: 'telegram', channelId: '-10020:discussion:30' }))
+      .toEqual({ label: 'Telegram · chat -10020 · discussion #30' })
+  })
+
   it('labels web, slack, Feishu/Lark, and whatsapp targets', async () => {
     const resolve = createDeliveryTargetResolver(fakeStore(async () => null))
     expect(await resolve({ assistantId: 'a1', channelType: 'web', channelId: 'web_sess' })).toEqual({ label: 'Web chat' })

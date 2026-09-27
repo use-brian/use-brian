@@ -240,7 +240,7 @@ export function createTelegramApi(options: TelegramApiOptions) {
       chat_id: chatId,
       text,
       parse_mode: opts?.parseMode,
-      reply_to_message_id: opts?.replyToMessageId,
+      reply_parameters: opts?.replyToMessageId == null ? undefined : { message_id: opts.replyToMessageId, allow_sending_without_reply: false },
       reply_markup: opts?.replyMarkup,
       message_thread_id: opts?.messageThreadId,
     }),
@@ -277,7 +277,7 @@ export function createTelegramApi(options: TelegramApiOptions) {
           form.append('message_thread_id', String(opts.messageThreadId))
         }
         if (opts?.replyToMessageId !== undefined) {
-          form.append('reply_to_message_id', String(opts.replyToMessageId))
+          form.append('reply_parameters', JSON.stringify({ message_id: opts.replyToMessageId, allow_sending_without_reply: false }))
         }
         return { method: 'POST', body: form }
       }),
@@ -306,7 +306,7 @@ export function createTelegramApi(options: TelegramApiOptions) {
         // feedback signal that feeds reflection consolidation. See
         // docs/architecture/brain/corrections.md → "Emoji reactions
         // as feedback signal".
-        allowed_updates: ['message', 'callback_query', 'my_chat_member', 'message_reaction'],
+        allowed_updates: ['message', 'channel_post', 'callback_query', 'my_chat_member', 'message_reaction'],
       }),
 
     setMyCommands: (commands: ReadonlyArray<{ command: string; description: string }>) =>
@@ -344,6 +344,7 @@ export function createTelegramApi(options: TelegramApiOptions) {
       call<{
         id: number
         type: 'private' | 'group' | 'supergroup' | 'channel'
+        linked_chat_id?: number
         title?: string
         username?: string
         first_name?: string

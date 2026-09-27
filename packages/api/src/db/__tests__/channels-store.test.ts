@@ -63,6 +63,17 @@ describe('[COMP:channels/store] pickAssistantForSurface', () => {
       .toBe('asst-forum')
   })
 
+  it('routes discussion roots independently, inheriting the linked group, not the broadcast channel', () => {
+    const rows = [
+      row('default', null), row('broadcast', '-10010'), row('group', '-10020'),
+      row('comments', '-10020:discussion:30'), row('forum', '-10020:topic:30'),
+    ]
+    expect(pickTelegramRoutingForSurface(rows, '-10020:discussion:30')?.assistantId).toBe('comments')
+    expect(pickTelegramRoutingForSurface(rows, '-10020:discussion:40')?.assistantId).toBe('group')
+    expect(pickTelegramRoutingForSurface(rows, '-10020:topic:30')?.assistantId).toBe('forum')
+    expect(pickTelegramRoutingForSurface([row('group', '-10020')], '-10020:discussion:30')?.assistantId).toBe('group')
+  })
+
   it('prefers an exact Telegram topic route over base-chat and default routes', () => {
     const rows = [
       row('asst-default', null),

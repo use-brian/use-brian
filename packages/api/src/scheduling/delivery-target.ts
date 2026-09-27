@@ -31,7 +31,7 @@ export function createDeliveryTargetResolver(
     if (channelType === 'web') return { label: 'Web chat' }
 
     if (channelType === 'telegram') {
-      const { chatId, messageThreadId } = parseTopicChannelId(channelId)
+      const { chatId, messageThreadId, discussionRootId } = parseTopicChannelId(channelId)
       let chatTitle: string | null = null
       let topicName: string | null = null
       if (integrationStore) {
@@ -50,6 +50,7 @@ export function createDeliveryTargetResolver(
         }
       }
       const groupPart = chatTitle ? `group "${chatTitle}"` : `chat ${chatId}`
+      if (discussionRootId != null) return { label: `Telegram · ${groupPart} · discussion #${discussionRootId}` }
       if (messageThreadId == null) return { label: `Telegram · ${groupPart}` }
       const topicPart = topicName ? `topic "${topicName}"` : `topic #${messageThreadId}`
       return { label: `Telegram · ${groupPart} · ${topicPart}`, topicId: messageThreadId }
