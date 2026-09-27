@@ -986,3 +986,8 @@ export function officeMediaCacheKey(workspaceId:string,userId:string,artifactId:
 export function officePreviewCacheKey(workspaceId: string, viewerId: string, artifactId: string, version: number): string {
   return `office-preview:${workspaceId}:${viewerId}:${artifactId}:${version}`;
 }
+
+/** Routing drafts never share read ownership across workspaces or viewers. */
+export function officeRoutingCacheKey(workspaceId: string, viewerId: string, templateId: string): string {
+  return `office-routing:${workspaceId}:${viewerId}:${templateId}`;
+}

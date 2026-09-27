@@ -226,7 +226,7 @@ describe("[COMP:app-web/office-template-routing] live editor integration", () =>
     if (snapshot.family === "document") snapshot.sections[0]!.header[0]!.text = "{{NAME}}";
     else snapshot.worksheets[0]!.cells[0]!.value = "{{NAME}}";
     let persisted: OfficeTemplateRoutingDraft = { source: "upload", fields: [], slideRecipes: [] };
-    api.getOfficeTemplateRouting.mockImplementation(async () => structuredClone(persisted));
+    api.getOfficeTemplateRouting.mockImplementation(async () => bounded(persisted));
     api.saveOfficeTemplateRouting.mockImplementation(async (_id: string, value: OfficeTemplateRoutingDraft) => { persisted = structuredClone(value); return persisted; });
     navigation.search = "templateId=template-1";
     await loadSurfaceCache(officeArtifactCacheKey(ARTIFACT), async () => ({ ...ROW, family: snapshot.family, mode: "template" }));
@@ -264,12 +264,13 @@ describe("[COMP:app-web/office-template-routing] live editor integration", () =>
     await act(async () => save().click());
     expect(persisted.fields.map((field) => field.name)).toEqual(["RENAMED"]);
     expect(publish().disabled).toBe(false);
-    // A route remount reloads what was saved, not the old inferred defaults.
+    expect(api.getOfficeTemplateRouting).toHaveBeenCalledTimes(3); // Initial read and two post-save readbacks.
+    // A route remount reuses the bounded saved read, not inferred defaults.
     act(() => root.render(null));
     render(<OfficeEditorShell workspaceId={WORKSPACE} artifactId={ARTIFACT} />);
     await act(async () => { await settle(); });
     expect(publish().disabled).toBe(false);
-    expect(api.getOfficeTemplateRouting).toHaveBeenCalledTimes(2);
+    expect(api.getOfficeTemplateRouting).toHaveBeenCalledTimes(3);
   });
 });
 

@@ -13,7 +13,12 @@ import { TemplateRoutingInspector } from "../template-routing-inspector";
 import { reconcileTokenRouting } from "../token-template-routing";
 import { documentFixture, spreadsheetFixture, uid } from "./editor-fixtures";
 
-vi.mock("@/lib/office/api", () => ({ getOfficeTemplateRouting: vi.fn(), saveOfficeTemplateRouting: vi.fn() }));
+import { attachOfficeMetadata } from "@/lib/office/metadata";
+import { resetSurfaceCache } from "@/lib/surface-cache";
+vi.mock("@/lib/office/api", async original => ({ ...await original<Record<string, unknown>>(), getOfficeTemplateRouting: vi.fn(), saveOfficeTemplateRouting: vi.fn() }));
+vi.mock("@/lib/workspace-context", () => ({useOptionalWorkspaceContext: () => ({workspaceId: "workspace", me: {id: "viewer"}})}));
+const bounded = (value: OfficeTemplateRoutingDraft) => attachOfficeMetadata(structuredClone(value), 30_000, performance.now(), "viewer");
+let serverRouting: OfficeTemplateRoutingDraft;
 const empty: OfficeTemplateRoutingDraft = { source: "upload", fields: [], slideRecipes: [] };
 function documentTemplate() {
   const snapshot = documentFixture();
@@ -32,13 +37,15 @@ let root: Root;
 const onState = vi.fn();
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  vi.clearAllMocks();
+  vi.resetAllMocks(); resetSurfaceCache(); serverRouting = empty;
+  vi.mocked(getOfficeTemplateRouting).mockImplementation(async () => bounded(serverRouting));
   host = document.createElement("div"); document.body.append(host); root = createRoot(host);
-  vi.mocked(saveOfficeTemplateRouting).mockImplementation(async (_id, value) => value);
+  vi.mocked(saveOfficeTemplateRouting).mockImplementation(async (_id, value) => { serverRouting = value; return value; });
 });
-afterEach(() => { act(() => root.unmount()); host.remove(); vi.unstubAllGlobals(); });
+afterEach(() => { act(() => root.unmount()); host.remove(); resetSurfaceCache(); vi.unstubAllGlobals(); });
 async function render(snapshot: OfficeArtifactSnapshot, initialRouting?: OfficeTemplateRoutingDraft, templateId = uid(99)) {
-  await act(async () => root.render(<I18nProvider locale="en" dict={en}><TemplateRoutingInspector templateId={templateId} snapshot={snapshot} selectedTargetIds={[uid(5), uid(91)]} initialRouting={initialRouting} onStateChange={onState} /></I18nProvider>));
+  if (initialRouting) serverRouting = initialRouting;
+  await act(async () => root.render(<I18nProvider locale="en" dict={en}><TemplateRoutingInspector templateId={templateId} snapshot={snapshot} selectedTargetIds={[uid(5), uid(91)]} initialRouting={initialRouting ? bounded(initialRouting) : undefined} onStateChange={onState} /></I18nProvider>));
 }
 function input(label: string) {
   const found = [...host.querySelectorAll("label")].find((item) => item.querySelector("span")?.textContent === label)?.querySelector("input,textarea");
@@ -81,7 +88,7 @@ describe("[COMP:app-web/office-template-routing] DOCX/XLSX token configuration",
 
   it.each([documentTemplate, spreadsheetTemplate])("loads, edits and saves all field metadata through existing routing APIs", async (fixture) => {
     const snapshot = fixture();
-    vi.mocked(getOfficeTemplateRouting).mockResolvedValue(empty);
+    vi.mocked(getOfficeTemplateRouting).mockResolvedValueOnce(bounded(empty));
     await render(snapshot);
     expect(getOfficeTemplateRouting).toHaveBeenCalledWith(uid(99));
     expect(host.textContent).toContain("{{NAME}}");
@@ -150,7 +157,7 @@ describe("[COMP:app-web/office-template-routing] DOCX/XLSX token configuration",
 
   it("retries load and save errors without dropping pending edits", async () => {
     const snapshot = documentTemplate();
-    vi.mocked(getOfficeTemplateRouting).mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce(empty);
+    vi.mocked(getOfficeTemplateRouting).mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce(bounded(empty));
     await render(snapshot);
     expect(host.textContent).toContain(en.office.routingLoadFailed);
     await act(async () => host.querySelector("button")!.click());

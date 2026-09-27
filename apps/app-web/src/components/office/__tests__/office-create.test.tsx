@@ -6,6 +6,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 
+import { attachOfficeMetadata } from "@/lib/office/metadata";
+import { resetSurfaceCache } from "@/lib/surface-cache";
+vi.mock("@/lib/workspace-context", () => ({useOptionalWorkspaceContext: () => ({workspaceId: "workspace", me: {id: "viewer"}})}));
 const mocks = vi.hoisted(() => ({ create: vi.fn(), push: vi.fn() }));
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: mocks.push }),
@@ -15,13 +18,13 @@ vi.mock("../office-topbar", () => ({ OfficeTopbar: () => null }));
 vi.mock("@/lib/office/api", async (original) => ({
   ...await original<Record<string, unknown>>(),
   getOfficeCapabilities: async () => ({ generationAvailable: true, generationFamilies: ["document"] }),
-  listOfficeTemplates: async () => [{ id: "template", currentVersionId: "version", lifecycleState: "admitted", family: "document", name: "Contract" }],
+  listOfficeTemplates: async () => attachOfficeMetadata([{ id: "template", currentVersionId: "version", lifecycleState: "admitted", family: "document", name: "Contract" }], 30_000, performance.now(), "viewer"),
   createOfficeArtifact: mocks.create,
 }));
 import { OfficeCreate } from "../office-create";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-afterEach(() => vi.clearAllMocks());
+afterEach(() => { vi.clearAllMocks(); resetSurfaceCache(); });
 
 describe("[COMP:app-web/office-navigation] Office create validation", () => {
   it.each([
