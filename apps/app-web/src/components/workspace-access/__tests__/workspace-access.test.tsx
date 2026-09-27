@@ -31,6 +31,24 @@ async function click(label:string){const button=[...host.querySelectorAll<HTMLBu
 beforeEach(()=>{mocks.history.mockReset();mocks.viewer.me.id='member-fixture';mocks.fetch.mockReset().mockResolvedValue(fixture());mocks.save.mockReset().mockResolvedValue(fixture());mocks.prepare.mockReset().mockImplementation(async(_workspaceId,command)=>({id:'review-fixture',payloadHash:'a'.repeat(64),command,changes:[],expiresAt:'2030-01-01T00:00:00Z',validForMs:30000,policyRevision:'15'}));mocks.confirm.mockReset().mockResolvedValue(true);mocks.settings.mockReset();invalidateSurfaceCache('workspace-access:');host=document.createElement('div');document.body.append(host);root=createRoot(host);});
 afterEach(async()=>{await act(async()=>root.unmount());host.remove();invalidateSurfaceCache('workspace-access:');});
 describe('[COMP:app-web/workspace-access] request and administration paths',()=>{
+  it('renews through a separately confirmed request and leaves the existing grant unchanged',async()=>{
+    const data=fixture();data.grants=[{id:'original-grant',requestId:'original-request',targetTeamId:'research',targetTeamName:'Research',beneficiaryKind:'member',beneficiaryId:'member-fixture',beneficiaryName:'Riley',startsAt:'2026-01-01',expiresAt:'2026-01-31',revokedAt:null,approvedBy:'independent-approver',canRevoke:true,status:'expired'}];
+    const original=structuredClone(data.grants);mocks.fetch.mockResolvedValue(data);await render();await click(t.requestRenewal);
+    expect(host.textContent).toContain(t.renewalHint);await click(t.close);expect(mocks.prepare).not.toHaveBeenCalled();
+    await click(t.requestRenewal);
+    const reason=host.querySelector('textarea')!;
+    await act(async()=>{Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value')!.set!.call(reason,'Continue requirements review');reason.dispatchEvent(new Event('input',{bubbles:true}));});
+    await act(async()=>host.querySelector('form')!.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));
+    expect(mocks.prepare).toHaveBeenCalledWith('workspace-fixture',{type:'access.request.create',targetTeamId:'research',beneficiaryKind:'member',beneficiaryId:'member-fixture',reason:'Continue requirements review',days:30,ongoing:false},'15',expect.any(String));
+    expect(mocks.save).toHaveBeenCalledWith('workspace-fixture',{type:'access.command.apply',reviewId:'review-fixture',payloadHash:'a'.repeat(64)});
+    expect(data.grants).toEqual(original);
+  });
+  it('withholds renewal for another beneficiary and while readiness is incomplete',async()=>{
+    const data=fixture();data.grants=[{id:'grant',requestId:'request',targetTeamId:'research',targetTeamName:'Research',beneficiaryKind:'team',beneficiaryId:'delivery',beneficiaryName:'Delivery',startsAt:'2026-01-01',expiresAt:null,revokedAt:null,approvedBy:'approver',canRevoke:false,status:'active'}];
+    mocks.fetch.mockResolvedValue(data);await render();expect(host.textContent).not.toContain(t.requestRenewal);
+    data.canAdminister=true;data.readiness.ready=false;await act(async()=>invalidateSurfaceCache('workspace-access:'));expect(host.textContent).not.toContain(t.requestRenewal);
+    data.readiness.ready=true;await act(async()=>invalidateSurfaceCache('workspace-access:'));expect(host.textContent).toContain(t.requestRenewal);
+  });
   it('pages requests independently, returns to newest and reviews an older request',async()=>{
     const data=fixture();data.nextRequestCursor='request-anchor';data.nextGrantCursor='grant-anchor'
     const older={...fixture(),kind:'requests',nextCursor:null,requests:[{id:'older',targetTeamId:'research',targetTeamName:'Research',requesterUserId:'member-fixture',beneficiaryKind:'member',beneficiaryId:'member-fixture',beneficiaryName:'Riley',reason:'Older request fixture',startsAt:'2020-01-01',expiresAt:null,requestExpiresAt:'2030-01-01',status:'pending',version:'1',payloadHash:'a'.repeat(64),approvalId:null,canDecide:false,canCancel:true}]}

@@ -147,6 +147,12 @@ export const en = {
     "unknown": "Unknown"
 },
   workspaceAccess: {
+    requestRenewal: "Request renewal",
+    renewalHint: "Renewal creates a new request requiring independent approval. The original grant stays unchanged.",
+    editReach: "Editing scope",
+    managementEligibility: "Management eligibility",
+    managementHint: "These are the human’s management capabilities. Each request still requires its own eligibility checks; an assistant does not inherit management authority.",
+    noManagement: "No department management capabilities.",
     resetExample: "Reset example",
     explainAccess: "Explain access",
     accessAudit: "Access audit",

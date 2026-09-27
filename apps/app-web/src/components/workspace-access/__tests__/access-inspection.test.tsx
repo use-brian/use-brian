@@ -35,13 +35,18 @@ describe('[COMP:app-web/workspace-access] explanation and audit projections',()=
   it('shows independent paths and scope limitations without interpreting read access as edit authority',async()=>{
     await render();expect(mocks.explain).toHaveBeenCalledWith('fixture-workspace',{memberId:'fixture-member',expectedPolicyRevision:'5'});
     expect(host.textContent).toContain(t.resourceCheckRequired);expect(host.textContent?.split(t.pathGrant)).toHaveLength(3);
-    expect(host.textContent).toContain(`${t.membershipReach}: ${t.generalOnly}`);
+    expect(host.textContent).toContain(`${t.editReach}: ${t.generalOnly}`);
     let finish!:(value:unknown)=>void;mocks.explain.mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve}));
     await click(`${t.exampleAction}: ${t.editAction}`);
     expect(mocks.explain).toHaveBeenLastCalledWith('fixture-workspace',expect.objectContaining({action:'edit'}));
     expect(host.textContent).not.toContain(t.scopeMatches);
     await act(async()=>finish(protectProjection({...explanation(),example:{...explanation().example,action:'edit',matchesScope:false}},performance.now())));
     expect(host.textContent).toContain(t.scopeDenied);
+  });
+  it('keeps management eligibility separate from read and edit reach',async()=>{
+    mocks.explain.mockImplementation(async()=>protectProjection({...explanation(),management:[{teamId:'research',canManageMembers:true,canApprove:false}]},performance.now()));
+    await render();expect(host.textContent).toContain(t.managementHint);expect(host.textContent).toContain(t.manageMembers);
+    expect(host.textContent).not.toContain(t.approveRequests);expect(host.textContent).toContain(`${t.editReach}: ${t.generalOnly}`);
   });
   it('does not restore a late privileged response after viewer changes',async()=>{
     let finish!:(value:unknown)=>void;mocks.explain.mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve}));

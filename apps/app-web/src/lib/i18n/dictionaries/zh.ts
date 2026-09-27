@@ -134,6 +134,12 @@ export const zh: Dictionary = {
     "unknown": "未知"
 },
   workspaceAccess: {
+    requestRenewal: "申請續期",
+    renewalHint: "續期會建立需要獨立審批的新申請，原有授權維持不變。",
+    editReach: "編輯範圍",
+    managementEligibility: "管理資格",
+    managementHint: "這是使用者的管理權限。每項申請仍須個別核實審批資格，助手不會繼承管理權限。",
+    noManagement: "沒有部門管理權限。",
     resetExample: "重設範例",
     explainAccess: "說明存取權限",
     accessAudit: "存取稽核",

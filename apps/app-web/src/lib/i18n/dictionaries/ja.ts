@@ -134,6 +134,12 @@ export const ja: Dictionary = {
     "unknown": "不明"
 },
   workspaceAccess: {
+    requestRenewal: "更新を申請",
+    renewalHint: "更新は独立した承認が必要な新規申請を作成します。元の付与は変更されません。",
+    editReach: "編集範囲",
+    managementEligibility: "管理権限",
+    managementHint: "これは本人の管理権限です。各申請の承認資格は個別に確認され、アシスタントには管理権限を継承しません。",
+    noManagement: "部署の管理権限はありません。",
     resetExample: "例をリセット",
     explainAccess: "アクセスの説明",
     accessAudit: "アクセス監査",

@@ -145,6 +145,12 @@ export const zhCN: Dictionary = {
     "unknown": "未知"
 },
   workspaceAccess: {
+    requestRenewal: "申请续期",
+    renewalHint: "续期会创建需要独立审批的新申请，原有授权保持不变。",
+    editReach: "编辑范围",
+    managementEligibility: "管理资格",
+    managementHint: "这是用户的管理权限。每项申请仍须单独核实审批资格，助手不会继承管理权限。",
+    noManagement: "没有部门管理权限。",
     resetExample: "重置示例",
     explainAccess: "说明访问权限",
     accessAudit: "访问审计",

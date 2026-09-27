@@ -2,7 +2,7 @@
 
 /** Explicit permissions, separate from the organization directory. [COMP:app-web/workspace-access] */
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
-import type { DepartmentAccessCommand, DepartmentAccessTeam, WorkspaceAccessOverview, WorkspaceAccessHistory } from '@use-brian/shared';
+import type { DepartmentAccessCommand, DepartmentAccessTeam, WorkspaceAccessOverview, WorkspaceAccessHistory, DepartmentReadGrant } from '@use-brian/shared';
 import { useProtectedProjection } from '@/lib/use-protected-projection';
 import { useWorkspaceContext } from '@/lib/workspace-context';
 import { useT } from '@/lib/i18n/client';
@@ -94,11 +94,12 @@ function Interval({starts,expires}:{starts:string;expires:string|null}) {
   const t=useT().workspaceAccess;
   return <p className="text-sm text-muted-foreground">{t.starts}: <time dateTime={starts}>{new Date(starts).toLocaleString()}</time> · {t.expires}: {expires?<time dateTime={expires}>{new Date(expires).toLocaleString()}</time>:t.ongoing}</p>;
 }
-function AccessRequestForm({data,team,viewerId,busy,save,close}:{data:WorkspaceAccessOverview;team:DepartmentAccessTeam;viewerId:string;busy:boolean;save:Save;close:()=>void}) {
+function AccessRequestForm({data,team,viewerId,busy,save,close,renewal}:{renewal?:DepartmentReadGrant;data:WorkspaceAccessOverview;team:DepartmentAccessTeam;viewerId:string;busy:boolean;save:Save;close:()=>void}) {
   const t=useT().workspaceAccess;
-  const [kind,setKind]=useState<'member'|'team'>('member'),[beneficiary,setBeneficiary]=useState(viewerId),[duration,setDuration]=useState('30'),[days,setDays]=useState('30'),[reason,setReason]=useState('');
+  const [kind,setKind]=useState<'member'|'team'>(renewal?.beneficiaryKind??'member'),[beneficiary,setBeneficiary]=useState(renewal?.beneficiaryId??viewerId),[duration,setDuration]=useState('30'),[days,setDays]=useState('30'),[reason,setReason]=useState('');
   async function submit(event:FormEvent){event.preventDefault();if(await save({type:'access.request.create',targetTeamId:team.id,beneficiaryKind:kind,beneficiaryId:beneficiary,reason,days:duration==='custom'?Number(days):duration==='ongoing'?30:Number(duration),ongoing:duration==='ongoing'},`${t.requestAccess}: ${team.name}. ${(kind==='member'?data.people:data.teams).find(p=>p.id===beneficiary)?.name??t.unnamed}. ${reason}. ${t.duration}: ${duration==='ongoing'?t.ongoing:duration==='custom'?days:duration}. ${t.readOnly} ${kind==='team'?t.futureMembers:''}`))close();}
   return <form onSubmit={submit} className="grid gap-3 border-t border-border pt-3">
+    {renewal?<p role="status" className="text-sm">{t.renewalHint}</p>:null}
     {data.canAdminister?<><Picker label={t.requestFor} value={kind} onChange={value=>{setKind(value as 'member'|'team');setBeneficiary(value==='member'?viewerId:data.teams[0]?.id??'');}} items={[{value:'member',label:t.individual},{value:'team',label:t.team}]} disabled={busy}/><Picker label={kind==='member'?t.member:t.team} value={beneficiary} onChange={setBeneficiary} items={kind==='member'?data.people.map(p=>({value:p.id,label:p.name||t.unnamed})):data.teams.map(p=>({value:p.id,label:p.name}))} disabled={busy}/></>:null}
     <Picker label={t.duration} value={duration} onChange={setDuration} items={[{value:'7',label:t.days7},{value:'30',label:t.days30},{value:'custom',label:t.custom},...(data.canAdminister?[{value:'ongoing',label:t.ongoing}]:[])]} disabled={busy}/>
     {duration==='custom'?<label className="grid gap-1 text-sm">{t.days}<input className={fieldClass} type="number" min="1" max="90" step="1" required value={days} disabled={busy} onChange={e=>setDays(e.target.value)}/></label>:null}
@@ -167,7 +168,8 @@ function AccessHistoryPage({kind,after,revision,reset,render}:{kind:'requests'|'
   </section>;
 }
 function AccessHistoryContent({kind,history,data,busy,save,controls}:{kind:'requests'|'grants';history:Pick<WorkspaceAccessHistory,'requests'|'grants'>;data:WorkspaceAccessOverview;busy:boolean;save:Save;controls:ReactNode}) {
-  const t=useT().workspaceAccess;
+  const t=useT().workspaceAccess,{me}=useWorkspaceContext();
+  const [renewal,setRenewal]=useState<string|null>(null);
   return <section className="space-y-3"><h2 className="font-semibold">{kind==='requests'?t.requests:t.grants}</h2>
     {kind==='requests'?<>{!history.requests.length?<p className="text-sm text-muted-foreground">{t.emptyRequests}</p>:null}
       {history.requests.map(request=><article key={request.id} className="space-y-2 rounded-xl border border-border p-4"><h3 className="font-medium">{request.targetTeamName} · {t[request.status]}</h3><p className="break-words text-sm">{request.beneficiaryName??t.unnamed} · {request.reason}</p><Interval starts={request.startsAt} expires={request.expiresAt}/><p className="text-sm text-muted-foreground">{t.readOnly}</p>{request.beneficiaryKind==='team'?<p className="text-sm">{t.futureMembers}</p>:null}
@@ -178,7 +180,8 @@ function AccessHistoryContent({kind,history,data,busy,save,controls}:{kind:'requ
           {data.canAdminister&&request.status==='pending'?<Button variant="outline" className="min-h-11" disabled={busy} onClick={()=>void save({type:'access.request.assign',requestId:request.id},`${t.assign}: ${request.targetTeamName}`)}>{t.assign}</Button>:null}
         </div></article>)}
     </>:<>{!history.grants.length?<p className="text-sm text-muted-foreground">{t.emptyGrants}</p>:null}
-      {history.grants.map(grant=><article key={grant.id} className="space-y-2 rounded-xl border border-border p-4"><h3 className="font-medium">{grant.targetTeamName} · {t[grant.status]}</h3><p className="text-sm">{grant.beneficiaryName??t.unnamed}</p><Interval starts={grant.startsAt} expires={grant.expiresAt}/><p className="text-sm text-muted-foreground">{t.readOnly}</p>{grant.canRevoke?<Button variant="outline" className="min-h-11" disabled={busy} onClick={()=>void save({type:'access.grant.revoke',grantId:grant.id,reason:t.revoke},`${t.revoke}: ${grant.targetTeamName}`)}>{t.revoke}</Button>:null}</article>)}
+      {history.grants.map(grant=><article key={grant.id} className="space-y-2 rounded-xl border border-border p-4"><h3 className="font-medium">{grant.targetTeamName} · {t[grant.status]}</h3><p className="text-sm">{grant.beneficiaryName??t.unnamed}</p><Interval starts={grant.startsAt} expires={grant.expiresAt}/><p className="text-sm text-muted-foreground">{t.readOnly}</p>{grant.canRevoke?<Button variant="outline" className="min-h-11" disabled={busy} onClick={()=>void save({type:'access.grant.revoke',grantId:grant.id,reason:t.revoke},`${t.revoke}: ${grant.targetTeamName}`)}>{t.revoke}</Button>:null}{data.readiness?.ready===true&&(data.canAdminister||(grant.beneficiaryKind==='member'&&grant.beneficiaryId===me.id))&&data.teams.some(team=>team.id===grant.targetTeamId&&(team.requestable||data.canAdminister))?<Button variant="outline" className="min-h-11" disabled={busy} onClick={()=>setRenewal(grant.id)}>{t.requestRenewal}</Button>:null}
+        {renewal===grant.id&&data.readiness?.ready===true?<AccessRequestForm key={grant.id} renewal={grant} data={data} team={data.teams.find(team=>team.id===grant.targetTeamId)!} viewerId={me.id} busy={busy} save={save} close={()=>setRenewal(null)}/>:null}</article>)}
     </>}
     {controls}
   </section>;
