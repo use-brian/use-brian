@@ -17,10 +17,9 @@ import { publicRuntimeConfig } from "@/lib/runtime-public-config";
  *
  * Download flow: the filled-state pill is an anchor pointing at the resolved
  * read URL with the `download` attribute set. A `workspace_files` ref
- * resolves through the authenticated `?redirect=0` mint to a short-lived
- * signed storage URL (the read route is Bearer-only, so its own URL 401s as
- * a plain href — see `doc-file-url.ts`); the `file_cache` preview route is
- * kept only as a legacy fallback.
+ * resolves through authenticated bytes with a server-bounded display lifetime.
+ * The shared surface cache owns and revokes its object URL. Legacy file_cache
+ * previews remain a separately audited transport.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -28,9 +27,9 @@ import { useT, format } from "@/lib/i18n/client";
 import { authFetch } from "@/lib/auth-fetch";
 import { hasPendingMediaUpload, takeMediaUpload } from "./doc-media-uploads";
 import {
-  resolveFileRefUrl,
   type FileRef,
 } from "./doc-file-url";
+import { useFileRefSrc } from "@/lib/use-doc-media";
 import { UploadSpinner } from "./upload-spinner";
 
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
@@ -104,27 +103,7 @@ export function BlockFile({ block, workspaceId, readOnly, onChange }: Props) {
   const [uploading, setUploading] = useState(() => hasPendingMediaUpload(block.id));
   const [uploadingName, setUploadingName] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // Resolved download URL. Both ref kinds resolve through an authenticated
-  // mint round-trip (`resolveFileRefUrl`): durable `workspace_files` refs
-  // yield the short-lived signed storage URL — the read route is Bearer-only,
-  // so its URL can never be used as a plain anchor href (no Authorization
-  // header → 401) — and legacy `file_cache` refs yield the signed preview
-  // URL (WS3 #8). Guarded against out-of-order settles + unmount.
-  const [resolvedUrl, setResolvedUrl] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!block.ref) {
-      setResolvedUrl(null);
-      return;
-    }
-    let cancelled = false;
-    void resolveFileRefUrl(block.ref, workspaceId).then((url) => {
-      if (!cancelled) setResolvedUrl(url);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [block.ref, workspaceId]);
+  const resolvedUrl = useFileRefSrc(block.ref, workspaceId);
 
   // Drag-drop / paste hand-off: `doc-media-paste.ts` inserts this empty block
   // and stashes the dropped file under `block.id`. Claim it on mount and run

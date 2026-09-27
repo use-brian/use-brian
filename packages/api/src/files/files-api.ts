@@ -239,6 +239,13 @@ class FilePublicationUncertainError extends Error {
   constructor() { super('The file update could not be confirmed. Inspect the file before retrying.') }
 }
 
+/** Snapshot primitive fields before I/O, including mutable adapter results. */
+export const workspaceFileReadRevision = (file: WorkspaceFile): string => JSON.stringify([
+  file.id, file.workspaceId, file.storageUri, file.scopeVersion, file.updatedAt,
+  file.userId, file.assistantId, file.sensitivity, file.compartments, file.projectIds,
+  file.validTo, file.retractedAt, file.supersededBy,
+])
+
 export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
   const { store, auditStore } = deps
   const resolver: FilesClientResolver =
@@ -259,11 +266,7 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
 
   // Snapshot primitive fields before I/O: even a mutable adapter must not hide
   // a source or classification change by mutating the same object in place.
-  const readRevision = (file: WorkspaceFile) => JSON.stringify([
-    file.id, file.workspaceId, file.storageUri, file.scopeVersion, file.updatedAt,
-    file.userId, file.assistantId, file.sensitivity, file.compartments, file.projectIds,
-    file.validTo, file.retractedAt, file.supersededBy,
-  ])
+  const readRevision = workspaceFileReadRevision
 
   async function readCurrentBytes(ctx: FilesContext, idOrPath: string): Promise<FilesResult<FilesReadBytesResult>> {
     const unavailable = () => err<FilesReadBytesResult>({ kind: 'not_found', reference: idOrPath })

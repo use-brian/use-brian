@@ -13,6 +13,7 @@ function makeDeps(over: Partial<DocFilesDeps> = {}): DocFilesDeps {
     } as unknown as DocFilesDeps['filesApi'],
     // Member by default (internal clearance); override per-test for the 403 path.
     membership: vi.fn().mockResolvedValue({ clearance: 'internal' }),
+    readProjection: vi.fn().mockResolvedValue({file:{id:'wf_1',mime:'image/png'},validForMs:5000}),
     ...over,
   }
 }
@@ -91,6 +92,9 @@ describe('[COMP:api/doc-files] Doc-block media routes', () => {
     expect(res.status).toBe(200)
     expect(res.headers['content-type']).toBe('image/png')
     expect(res.headers['cache-control']).toBe('private, no-store')
+    expect(Number(res.headers['x-brian-media-valid-for-ms'])).toBeGreaterThan(0)
+    expect(Number(res.headers['x-brian-media-valid-for-ms'])).toBeLessThanOrEqual(5000)
+    expect(res.headers['access-control-expose-headers']).toContain('X-Brian-Media-Valid-For-Ms')
     expect(res.headers.location).toBeUndefined()
     expect(Buffer.from(res.body)).toEqual(Buffer.from([1,2,3]))
     expect(deps.filesApi.readBytes).toHaveBeenCalledWith({workspaceId:'ws_1',userId:'u_1',assistantId:null,clearance:'internal'},'wf_1')
@@ -98,7 +102,7 @@ describe('[COMP:api/doc-files] Doc-block media routes', () => {
 
   it('returns JSON media as file content, not signed-read instructions', async () => {
     const deps=makeDeps()
-    vi.mocked(deps.filesApi.readBytes).mockResolvedValue({ok:true,value:{file:{mime:'application/json'},bytes:Buffer.from('{"report":"fixture"}')}} as never)
+    vi.mocked(deps.filesApi.readBytes).mockResolvedValue({ok:true,value:{file:{id:'wf_1',mime:'application/json'},bytes:Buffer.from('{"report":"fixture"}')}} as never)
     const res=await request(createTestApp('/api/doc-files',docFilesRoutes(deps),{userId:'u_1'})).get('/api/doc-files/ws_1/wf_1?redirect=0')
     expect(res.status).toBe(200);expect(res.body).toEqual({report:'fixture'});expect(res.headers.location).toBeUndefined()
   })
@@ -115,4 +119,12 @@ describe('[COMP:api/doc-files] Doc-block media routes', () => {
     const res=await request(createTestApp('/api/doc-files',docFilesRoutes(deps),{userId:'outsider'})).get('/api/doc-files/ws_1/wf_1')
     expect(res.status).toBe(403);expect(deps.filesApi.readBytes).not.toHaveBeenCalled()
   })
+  it.each(['missing','expired','changed'] as const)('withholds bytes when final projection is %s',async reason=>{
+    const deps=makeDeps()
+    vi.mocked(deps.filesApi.readBytes).mockResolvedValue({ok:true,value:{file:{id:'wf_1'},bytes:Buffer.from('protected')}} as never)
+    vi.mocked(deps.readProjection).mockResolvedValue(reason==='missing'?null:{file:{id:'wf_1',scopeVersion:reason==='changed'?'2':undefined},validForMs:reason==='expired'?0:5000} as never)
+    const res=await request(createTestApp('/api/doc-files',docFilesRoutes(deps),{userId:'u_1'})).get('/api/doc-files/ws_1/wf_1')
+    expect(res.status).toBe(404);expect(res.text).not.toContain('protected');expect(res.headers['x-brian-media-valid-for-ms']).toBeUndefined()
+  })
+
 })

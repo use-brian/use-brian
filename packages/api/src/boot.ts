@@ -459,7 +459,7 @@ import { createDbCrmStore } from './db/crm-store.js'
 import { createDbCrmEmailDraftStore } from './db/crm-email-drafts.js'
 import { createDbWorkspaceFilesStore } from './db/workspace-files-store.js'
 import { createWorkspaceFileUploadsStore } from './db/workspace-file-uploads-store.js'
-import { getWorkspaceFileById } from './db/workspace-files.js'
+import { getWorkspaceFileById, getWorkspaceFileReadProjection } from './db/workspace-files.js'
 import { createGcsFilesClient, type GcsFilesClient } from './files/gcs-client.js'
 import { initLedgerRuntime } from './ledger/runtime.js'
 import { createLocalFilesClient, resolveLocalFilesBaseDir } from './files/local-files-client.js'
@@ -5429,6 +5429,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     app.use('/api/doc-files', requireAuth(env.JWT_SECRET), docFilesRoutes({
       filesApi,
       membership: getWorkspaceMembershipWithClearanceSystem,
+      readProjection: getWorkspaceFileReadProjection,
     }))
   }
   // Custom Home app bundles + bridge KV. Mounted HERE, well before the bare

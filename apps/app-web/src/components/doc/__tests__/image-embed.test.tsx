@@ -3,7 +3,11 @@ import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { I18nProvider } from "@/lib/i18n/client";
+import { WorkspaceContextProvider } from "@/lib/workspace-context";
+import { resetSurfaceCache } from "@/lib/surface-cache";
 import { en } from "@/lib/i18n/dictionaries/en";
+
+(globalThis as {IS_REACT_ACT_ENVIRONMENT?:boolean}).IS_REACT_ACT_ENVIRONMENT=true;
 
 // Durable refs return authenticated bytes; legacy file_cache refs retain
 // the separately signed preview lane. No real network is used.
@@ -11,6 +15,8 @@ const mockAuthFetch = vi.fn();
 vi.mock("@/lib/auth-fetch", () => ({
   authFetch: (...args: unknown[]) => mockAuthFetch(...args),
 }));
+
+vi.mock("@/lib/api/workspaces",()=>({updateWorkspacePickerPreferences:vi.fn(async()=>{})}));
 
 import { BlockImage } from "../block-image";
 import { BlockFile } from "../block-file";
@@ -23,14 +29,13 @@ describe("[COMP:app-web/image-embed] Durable image/file embed render", () => {
   let root: Root;
 
   beforeEach(() => {
-    mockAuthFetch.mockReset();
+    resetSurfaceCache();mockAuthFetch.mockReset();
     vi.stubGlobal("URL", class extends URL {static createObjectURL=()=>"blob:fixture"; static revokeObjectURL=vi.fn();});
   });
 
   afterEach(() => {
-    vi.unstubAllGlobals();
     act(() => root.unmount());
-    container.remove();
+    container.remove();resetSurfaceCache();vi.unstubAllGlobals();
   });
 
   function mount(node: React.ReactNode) {
@@ -40,7 +45,7 @@ describe("[COMP:app-web/image-embed] Durable image/file embed render", () => {
     act(() =>
       root.render(
         <I18nProvider locale="en" dict={en}>
-          {node}
+          <WorkspaceContextProvider value={{workspaceId:"ws_1",name:"Fixture",role:"member",clearance:"internal",me:{id:"viewer"}}}>{node}</WorkspaceContextProvider>
         </I18nProvider>,
       ),
     );
@@ -69,6 +74,7 @@ describe("[COMP:app-web/image-embed] Durable image/file embed render", () => {
   it("renders an image at a local object URL after an authorized byte read", async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: true,
+      headers: new Headers({"X-Brian-Media-Valid-For-Ms":"30000"}),
       blob: async () => new Blob(["fixture"], {type:"image/png"}),
     });
     mount(
@@ -94,6 +100,7 @@ describe("[COMP:app-web/image-embed] Durable image/file embed render", () => {
   it("renders a download link at a local object URL for a file block", async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: true,
+      headers: new Headers({"X-Brian-Media-Valid-For-Ms":"30000"}),
       blob: async () => new Blob(["fixture"], {type:"application/pdf"}),
     });
     mount(

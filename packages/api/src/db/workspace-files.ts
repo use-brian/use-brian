@@ -328,6 +328,17 @@ export async function getWorkspaceFileByPath(
   return result.rows.length === 0 ? null : toRecord(result.rows[0])
 }
 
+/** Current source and browser display lifetime from the same RLS snapshot. */
+export async function getWorkspaceFileReadProjection(ctx: AccessContext, id: string): Promise<{file:WorkspaceFile;validForMs:number}|null> {
+  const ap=buildAccessPredicate(ctx,{startIdx:1})
+  const result=await queryWithRLS<FileRow & {validForMs:number}>(ctx.userId,
+    `SELECT ${FULL_SELECT}, department_media_valid_for_ms(workspace_files.workspace_id) AS "validForMs"
+     FROM workspace_files WHERE ${ap.sql} AND id=$${ap.nextIdx} AND valid_to IS NULL`,
+    [...ap.params,id])
+  const row=result.rows[0]
+  return row?{file:toRecord(row),validForMs:row.validForMs}:null
+}
+
 export async function updateWorkspaceFileMeta(
   userId: string,
   workspaceId: string,

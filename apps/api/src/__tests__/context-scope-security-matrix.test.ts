@@ -240,6 +240,19 @@ after(async () => {
 })
 
 describe('[COMP:api/context-scope-security-matrix] cross-path security matrix', () => {
+  it('bounds member media lifetime and refuses a different workspace after fresh migration replay',async()=>{
+    await db.query('INSERT INTO users(id,auth_provider_id) VALUES($1,$2)',[USER_ID,'media-fixture'])
+    await db.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Media fixture',$2)",[WORKSPACE_ID,USER_ID])
+    await db.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'owner')",[WORKSPACE_ID,USER_ID])
+    await db.query("SELECT set_config('app.current_user_id',$1,false)",[USER_ID])
+    const allowed=await db.query<{ttl:number}>('SELECT department_media_valid_for_ms($1) AS ttl',[WORKSPACE_ID])
+    assert.ok(allowed.rows[0].ttl>0&&allowed.rows[0].ttl<=30000)
+    const denied=await db.query<{ttl:number}>('SELECT department_media_valid_for_ms($1) AS ttl',['00000000-0000-4000-8000-000000000099'])
+    assert.equal(denied.rows[0].ttl,0)
+    await db.query("SELECT set_config('app.current_user_id','',false)")
+    assert.equal((await db.query<{ttl:number}>('SELECT department_media_valid_for_ms($1) AS ttl',[WORKSPACE_ID])).rows[0].ttl,0)
+  })
+
   for (const [principal, scope] of Object.entries(SCOPES)) {
     it(`${principal} receives the exact same row set through every discovery shape`, async () => {
       const expected = [...EXPECTED[principal]].sort()
@@ -383,5 +396,27 @@ describe('[COMP:tasks/project-context] legacy Project-tag backfill', () => {
     } finally {
       await legacyDb.close()
     }
+  })
+})
+
+
+describe('[COMP:api/context-scope-security-matrix] media lifetime upgrade',()=>{
+  it('upgrades the preceding open schema through the real migrator and preserves existing membership',async()=>{
+    const previous=new PGlite({extensions:{vector,pg_trgm}})
+    const directory=fileURLToPath(new URL('../../../../packages/api/migrations',import.meta.url))
+    try {
+      await previous.waitReady
+      await migratePglite(previous,directory,{through:'592_meeting_tag_state.sql'})
+      await previous.query('INSERT INTO users(id,auth_provider_id) VALUES($1,$2)',[USER_ID,'media-upgrade-fixture'])
+      await previous.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Media upgrade fixture',$2)",[WORKSPACE_ID,USER_ID])
+      await previous.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'owner')",[WORKSPACE_ID,USER_ID])
+      assert.equal((await previous.query<{name:string|null}>("SELECT to_regprocedure('department_media_valid_for_ms(uuid)')::text AS name")).rows[0].name,null)
+      assert.equal(await migratePglite(previous,directory),1)
+      assert.equal(await migratePglite(previous,directory),0)
+      await previous.query("SELECT set_config('app.current_user_id',$1,false)",[USER_ID])
+      const ttl=(await previous.query<{ttl:number}>('SELECT department_media_valid_for_ms($1) AS ttl',[WORKSPACE_ID])).rows[0].ttl
+      assert.ok(ttl>0&&ttl<=30000)
+      assert.deepEqual((await previous.query<{role:string}>('SELECT role FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[WORKSPACE_ID,USER_ID])).rows,[{role:'owner'}])
+    } finally {await previous.close()}
   })
 })

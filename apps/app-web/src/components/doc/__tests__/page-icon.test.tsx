@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-/** Page icons consume authenticated file bytes, retaining their current shared
- * cache behavior. Cache invalidation is a separate departmental boundary.
+/** Page icons consume authenticated file bytes, with identity-scoped
+ * expiry and current-authority invalidation.
  * [COMP:app-web/page-icon]
  */
 
@@ -11,6 +11,13 @@ import { FileText } from "lucide-react";
 
 const { mockAuthFetch } = vi.hoisted(() => ({ mockAuthFetch: vi.fn() }));
 vi.mock("@/lib/auth-fetch", () => ({ authFetch: mockAuthFetch }));
+
+import { WorkspaceContextProvider } from "@/lib/workspace-context";
+import { resetSurfaceCache,readSurfaceCache } from "@/lib/surface-cache";
+import { applySpineEventToSurfaceCache } from "@/lib/surface-cache-invalidation";
+import { WORKSPACE_IDENTITY_REFRESH_EVENT } from "@/lib/workspace-identity-events";
+import { docMediaCacheKey } from "@/lib/surface-prefetch";
+vi.mock("@/lib/api/workspaces",()=>({updateWorkspacePickerPreferences:vi.fn(async()=>{})}));
 
 import { PageIcon } from "../page-icon";
 
@@ -23,7 +30,7 @@ const token = (tail: string) =>
 
 const bytesResponse = () => ({
   ok: true,
-  headers: new Headers({ "content-type": "image/png" }),
+  headers: new Headers({ "content-type": "image/png", "X-Brian-Media-Valid-For-Ms":"30000" }),
   blob: async () => new Blob([new Uint8Array([1, 2, 3])], { type: "image/png" }),
 });
 
@@ -33,7 +40,9 @@ describe("[COMP:app-web/page-icon] PageIcon", () => {
   const mockFetch = vi.fn();
 
   beforeEach(() => {
+    resetSurfaceCache();
     mockAuthFetch.mockReset();
+    vi.stubGlobal("URL",class extends URL {static createObjectURL=vi.fn(()=>`blob:${Math.random()}`);static revokeObjectURL=vi.fn();});
     mockFetch.mockReset();
     vi.stubGlobal("fetch", mockFetch);
     if (!URL.createObjectURL) {
@@ -44,18 +53,20 @@ describe("[COMP:app-web/page-icon] PageIcon", () => {
   });
 
   afterEach(() => {
-    vi.unstubAllGlobals();
     if (root) act(() => root!.unmount());
     root = null;
     container?.remove();
     container = null;
+    resetSurfaceCache();vi.useRealTimers();vi.unstubAllGlobals();
   });
+
+  const view=(node:React.ReactNode,userId="viewer")=><WorkspaceContextProvider value={{workspaceId:WS,name:"Fixture",role:"member",clearance:"internal",me:{id:userId}}}>{node}</WorkspaceContextProvider>;
 
   async function mount(node: React.ReactNode) {
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
-    await act(async () => root!.render(node));
+    await act(async () => root!.render(view(node)));
     await act(async () => {});
   }
 
@@ -139,4 +150,61 @@ describe("[COMP:app-web/page-icon] PageIcon", () => {
     expect(container!.querySelector("img")).toBeNull();
     expect(container!.querySelector("svg")).not.toBeNull();
   });
+  it('shares a single current read across simultaneous icons',async()=>{
+    mockAuthFetch.mockResolvedValue(bytesResponse());const t=token('0005');
+    await mount(<><PageIcon icon={t} fallback={FileText}/><PageIcon icon={t} fallback={FileText}/></>);
+    expect(mockAuthFetch).toHaveBeenCalledTimes(1);expect(container!.querySelectorAll('img')).toHaveLength(2);
+    const sources=[...container!.querySelectorAll('img')].map(img=>img.src);expect(sources[0]).toBe(sources[1]);
+  });
+
+  it('purges displayed content on authority loss and rejects a late detached response',async()=>{
+    mockAuthFetch.mockResolvedValueOnce(bytesResponse());const t=token('0006');
+    await mount(<PageIcon icon={t} fallback={FileText}/>);
+    const old=container!.querySelector('img')!.src;
+    let finish!:(value:unknown)=>void;
+    mockAuthFetch.mockImplementationOnce(()=>new Promise(r=>{finish=r;}));
+    await act(async()=>applySpineEventToSurfaceCache(WORKSPACE_IDENTITY_REFRESH_EVENT,{workspaceId:WS},WS));
+    expect(container!.querySelector('img')).toBeNull();expect(URL.revokeObjectURL).toHaveBeenCalledWith(old);
+    mockAuthFetch.mockResolvedValue({ok:false,status:404});
+    await act(async()=>applySpineEventToSurfaceCache(WORKSPACE_IDENTITY_REFRESH_EVENT,{workspaceId:WS},WS));
+    await act(async()=>finish(bytesResponse()));
+    expect(container!.querySelector('img')).toBeNull();
+    expect(URL.revokeObjectURL).toHaveBeenCalledTimes(2);
+  });
+
+  it('never paints a previous viewer or source while the next read is pending',async()=>{
+    mockAuthFetch.mockResolvedValueOnce(bytesResponse());const t=token('0007');
+    await mount(<PageIcon icon={t} fallback={FileText}/>);
+    const old=container!.querySelector('img')!.src;
+    mockAuthFetch.mockImplementation(()=>new Promise(()=>{}));
+    await act(async()=>root!.render(view(<PageIcon icon={t} fallback={FileText}/>,'next-viewer')));
+    expect(container!.querySelector('img')).toBeNull();expect(URL.revokeObjectURL).toHaveBeenCalledWith(old);
+    expect(readSurfaceCache(docMediaCacheKey(WS,'viewer',t.split('/')[1])).data).toBeUndefined();
+  });
+
+  it.each(['focus','visibilitychange'])('purges before a fresh read on %s',async event=>{
+    mockAuthFetch.mockResolvedValueOnce(bytesResponse());await mount(<PageIcon icon={token('0008')} fallback={FileText}/>);
+    const old=container!.querySelector('img')!.src;mockAuthFetch.mockImplementation(()=>new Promise(()=>{}));
+    Object.defineProperty(document,'visibilityState',{configurable:true,value:'visible'});
+    await act(async()=>{(event==='focus'?window:document).dispatchEvent(new Event(event));});
+    expect(container!.querySelector('img')).toBeNull();expect(URL.revokeObjectURL).toHaveBeenCalledWith(old);
+  });
+
+  it('removes expired mounted content and disposes cached unmounted content',async()=>{
+    vi.useFakeTimers({toFake:['setTimeout','clearTimeout','Date','performance']});
+    const response=bytesResponse();response.headers.set('X-Brian-Media-Valid-For-Ms','500');
+    mockAuthFetch.mockResolvedValueOnce(response);await mount(<PageIcon icon={token('0009')} fallback={FileText}/>);
+    expect(container!.querySelector('img')).not.toBeNull();
+    mockAuthFetch.mockImplementation(()=>new Promise(()=>{}));
+    await act(async()=>{await vi.advanceTimersByTimeAsync(501);});
+    expect(container!.querySelector('img')).toBeNull();expect(URL.revokeObjectURL).toHaveBeenCalledTimes(1);
+  });
+
+  it('purges a mounted icon on logout reset',async()=>{
+    mockAuthFetch.mockResolvedValueOnce(bytesResponse());await mount(<PageIcon icon={token('0010')} fallback={FileText}/>);
+    mockAuthFetch.mockImplementation(()=>new Promise(()=>{}));
+    await act(async()=>resetSurfaceCache());
+    expect(container!.querySelector('img')).toBeNull();expect(URL.revokeObjectURL).toHaveBeenCalledTimes(1);
+  });
+
 });

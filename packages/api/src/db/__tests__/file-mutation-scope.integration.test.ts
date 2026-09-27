@@ -1,15 +1,16 @@
 import request from 'supertest'
+import {readFile} from 'node:fs/promises'
 import {docFilesRoutes} from '../../routes/doc-files.js'
 import {createTestApp} from '../../routes/__tests__/helpers.js'
 import {getWorkspaceMembershipWithClearanceSystem} from '../workspace-store.js'
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import type { AccessContext, FilesContext } from '@use-brian/core'
-import { getAppPool, getPool } from '../client.js'
+import { getAppPool, getPool, queryWithRLS } from '../client.js'
 import { createDbWorkspaceFilesStore } from '../workspace-files-store.js'
 import { createDbWorkspaceGroupStore } from '../workspace-group-store.js'
 import { applyBrainCorrection } from '../brain-inbox-store.js'
-import { updateWorkspaceFileMeta } from '../workspace-files.js'
+import { getWorkspaceFileReadProjection, updateWorkspaceFileMeta } from '../workspace-files.js'
 import { createFilesApi } from '../../files/files-api.js'
 import type { GcsFilesClient } from '../../files/gcs-client.js'
 import { parseStorageKey } from '../../files/gcs-client.js'
@@ -51,18 +52,18 @@ async function fixture() {
 
 // Approved fixture records exercise the real grant/RLS boundary without
 // pretending this incomplete binary may activate new workspace delegation.
-async function deliveryFixture() {
+async function deliveryFixture(expiresInMs=86_400_000) {
   const f=await fixture(),member=randomUUID(),requestId=randomUUID()
   const team=await createDbWorkspaceGroupStore().createTeam(f.userId,f.workspaceId,{name:'Delivery fixture',key:'delivery-fixture'})
   await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[member])
   await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role,team_scope_mode) VALUES($1,$2,'member','assigned')",[f.workspaceId,member])
   await pool.query('UPDATE workspace_files SET compartments=$2,project_ids=ARRAY[]::uuid[] WHERE id=$1',[f.file.id,[team.compartmentKey!]])
   await pool.query(`INSERT INTO workspace_access_requests(id,workspace_id,requester_user_id,beneficiary_kind,beneficiary_id,target_team_id,reason,starts_at,expires_at,payload_hash,policy_revision,status,decided_by,decided_at)
-    VALUES($1,$2,$3,'member',$3,$4,'Fixture delivery',now()-interval '1 day',now()+interval '1 day',$5,1,'approved',$6,now())`,[requestId,f.workspaceId,member,team.id,'a'.repeat(64),f.userId])
+    VALUES($1,$2,$3,'member',$3,$4,'Fixture delivery',now()-interval '1 day',now()+$7*interval '1 millisecond',$5,1,'approved',$6,now())`,[requestId,f.workspaceId,member,team.id,'a'.repeat(64),f.userId,expiresInMs])
   const grant=(await pool.query<{id:string}>(`INSERT INTO workspace_access_grants(workspace_id,request_id,beneficiary_kind,beneficiary_id,target_team_id,starts_at,expires_at,approved_by)
     SELECT workspace_id,id,beneficiary_kind,beneficiary_id,target_team_id,starts_at,expires_at,decided_by FROM workspace_access_requests WHERE id=$1 RETURNING id`,[requestId])).rows[0]
   const reader:FilesContext={workspaceId:f.workspaceId,userId:member,assistantId:null,clearance:'internal'}
-  const app=createTestApp('/api/doc-files',docFilesRoutes({filesApi:f.api,membership:getWorkspaceMembershipWithClearanceSystem}),{userId:member})
+  const app=createTestApp('/api/doc-files',docFilesRoutes({filesApi:f.api,membership:getWorkspaceMembershipWithClearanceSystem,readProjection:getWorkspaceFileReadProjection}),{userId:member})
   return {...f,member,grant,reader,app}
 }
 
@@ -77,6 +78,67 @@ describe('[COMP:api/file-mutation-scope] immutable file publication and canonica
     expect(res.status).toBe(200);expect(res.text).toBe('original');expect(res.headers['cache-control']).toBe('private, no-store');expect(res.headers.location).toBeUndefined()
     expect(await f.store.updateMeta(f.member,f.workspaceId,f.file.id,{title:'Denied'})).toBeNull()
     expect(await f.raw()).toMatchObject([{title:null,valid_to:null}])
+  })
+
+
+
+  it('keeps raw grant rows private while the caller-bound lifetime admits only a current member',async()=>{
+    const f=await deliveryFixture(),outsider=randomUUID()
+    const raw=await queryWithRLS(f.member,'SELECT id FROM workspace_access_grants WHERE workspace_id=$1',[f.workspaceId])
+    expect(raw.rows).toEqual([])
+    const ttl=async(actor:string,workspace:string)=>Number((await queryWithRLS(actor,'SELECT department_media_valid_for_ms($1) AS ttl',[workspace])).rows[0].ttl)
+    expect(await ttl(f.member,f.workspaceId)).toBeGreaterThan(0)
+    expect(await ttl(outsider,f.workspaceId)).toBe(0)
+    expect(await ttl(f.member,randomUUID())).toBe(0)
+    await pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[f.workspaceId,f.member])
+    expect(await ttl(f.member,f.workspaceId)).toBe(0)
+  })
+
+  it('adds the lifetime function to the predecessor schema without changing existing data or RLS',async()=>{
+    const f=await deliveryFixture(),before=await f.raw()
+    const sql=await readFile(new URL('../../../migrations/594_department_media_projection_lifetime.sql',import.meta.url),'utf8')
+    await pool.query('DROP FUNCTION department_media_valid_for_ms(uuid)')
+    try{await pool.query(sql)}catch(error){await pool.query('ROLLBACK');throw error}
+    expect(await f.raw()).toEqual(before)
+    const res=await request(f.app).get(`/api/doc-files/${f.workspaceId}/${f.file.id}`)
+    expect(res.status).toBe(200);expect(res.text).toBe('original')
+    expect((await queryWithRLS(f.member,'SELECT id FROM workspace_access_grants WHERE workspace_id=$1',[f.workspaceId])).rows).toEqual([])
+  })
+
+  it('bounds display by a current grant expiry and refuses the expired grant',async()=>{
+    const f=await deliveryFixture(2000)
+    const res=await request(f.app).get(`/api/doc-files/${f.workspaceId}/${f.file.id}`)
+    expect(res.status).toBe(200);expect(res.text).toBe('original')
+    expect(Number(res.headers['x-brian-media-valid-for-ms'])).toBeGreaterThan(0)
+    expect(Number(res.headers['x-brian-media-valid-for-ms'])).toBeLessThanOrEqual(2000)
+    await pool.query('SELECT pg_sleep(2.1)')
+    const denied=await request(f.app).get(`/api/doc-files/${f.workspaceId}/${f.file.id}`)
+    expect(denied.status).toBe(404);expect(denied.text).not.toContain('original')
+  })
+
+  it.each(['revoked','revised'] as const)('refuses a %s source between the byte read and display projection',async change=>{
+    const f=await deliveryFixture(),read=f.api.readBytes.bind(f.api)
+    f.api.readBytes=async(...args)=>{
+      const result=await read(...args)
+      if(change==='revoked')await pool.query('UPDATE workspace_access_grants SET revoked_at=now(),revoked_by=$2 WHERE id=$1',[f.grant.id,f.userId])
+      else await pool.query("UPDATE workspace_files SET sensitivity='public' WHERE id=$1",[f.file.id])
+      return result
+    }
+    const res=await request(f.app).get(`/api/doc-files/${f.workspaceId}/${f.file.id}`)
+    expect(res.status).toBe(404);expect(res.text).not.toContain('original')
+    expect(res.headers['x-brian-media-valid-for-ms']).toBeUndefined()
+  })
+
+  it('preserves authorized media after one of two independent grants is revoked',async()=>{
+    const f=await deliveryFixture(),requestId=randomUUID()
+    await pool.query(`INSERT INTO workspace_access_requests(id,workspace_id,requester_user_id,beneficiary_kind,beneficiary_id,target_team_id,reason,starts_at,expires_at,payload_hash,policy_revision,status,decided_by,decided_at)
+      SELECT $2,workspace_id,requester_user_id,beneficiary_kind,beneficiary_id,target_team_id,'Independent fixture',starts_at,expires_at,repeat('b',64),policy_revision,status,decided_by,decided_at FROM workspace_access_requests WHERE id=(SELECT request_id FROM workspace_access_grants WHERE id=$1)`,[f.grant.id,requestId])
+    await pool.query(`INSERT INTO workspace_access_grants(workspace_id,request_id,beneficiary_kind,beneficiary_id,target_team_id,starts_at,expires_at,approved_by)
+      SELECT workspace_id,id,beneficiary_kind,beneficiary_id,target_team_id,starts_at,expires_at,decided_by FROM workspace_access_requests WHERE id=$1`,[requestId])
+    await pool.query('UPDATE workspace_access_grants SET revoked_at=now(),revoked_by=$2 WHERE id=$1',[f.grant.id,f.userId])
+    const res=await request(f.app).get(`/api/doc-files/${f.workspaceId}/${f.file.id}`)
+    expect(res.status).toBe(200);expect(res.text).toBe('original')
+    expect(Number(res.headers['x-brian-media-valid-for-ms'])).toBeGreaterThan(0)
   })
 
   it.each(['grant','membership','clearance','private','holding','revision','supersession'] as const)('withholds fetched bytes when %s changes during storage I/O',async change=>{

@@ -83,6 +83,19 @@ type Listener = () => void;
 const store = new Map<string, CacheEntry<unknown>>();
 const inflight = new Map<string, Promise<unknown>>();
 const listeners = new Map<string, Set<Listener>>();
+const disposals = new Map<string, () => void>();
+
+/** Resource values (for example blob URLs) share this cache's ownership. */
+export type CacheLifecycle<T> = {
+  dispose?: (value: T) => void;
+  expiresInMs?: (value: T) => number;
+};
+
+function disposeEntry(key: string): void {
+  const dispose = disposals.get(key);
+  disposals.delete(key);
+  dispose?.();
+}
 
 const isBrowser = () => typeof window !== "undefined";
 
@@ -123,6 +136,7 @@ export function isSurfaceCacheStale(
 export function loadSurfaceCache<T>(
   key: string,
   fetcher: () => Promise<T>,
+  lifecycle?: CacheLifecycle<T>,
 ): Promise<T | undefined> {
   if (!isBrowser()) return Promise.resolve(undefined);
   const existing = inflight.get(key) as Promise<T | undefined> | undefined;
@@ -131,7 +145,23 @@ export function loadSurfaceCache<T>(
   put(key, { revalidating: true });
   const request = fetcher()
     .then((data) => {
-      if (inflight.get(key) !== request) return undefined;
+      if (inflight.get(key) !== request) {
+        lifecycle?.dispose?.(data);
+        return undefined;
+      }
+      disposeEntry(key);
+      const ttl = lifecycle?.expiresInMs?.(data);
+      if (ttl !== undefined && (!Number.isFinite(ttl) || ttl <= 0)) {
+        lifecycle?.dispose?.(data);
+        throw new SurfaceCacheEvictionError(new Error("cache_resource_expired"));
+      }
+      const timer = ttl === undefined ? undefined : setTimeout(() => invalidateSurfaceCache(key), Math.ceil(ttl));
+      if (timer !== undefined || lifecycle?.dispose) {
+        disposals.set(key, () => {
+          if (timer !== undefined) clearTimeout(timer);
+          lifecycle?.dispose?.(data);
+        });
+      }
       const now = Date.now();
       put(key, {
         data,
@@ -144,6 +174,7 @@ export function loadSurfaceCache<T>(
     })
     .catch((error: unknown) => {
       if (inflight.get(key) !== request) return undefined;
+      if (error instanceof SurfaceCacheEvictionError) disposeEntry(key);
       // Keep the last good value: a failed refresh should not blank a surface
       // the user is reading. Consumers decide whether to surface `error`.
       // `attemptedAt` closes the stale window for this attempt, so the hook
@@ -219,6 +250,7 @@ export function invalidateSurfaceCache(prefix: string): void {
   for (const key of dropped) {
     // Detach old reads: their completion must not repopulate an invalidated key.
     inflight.delete(key);
+    disposeEntry(key);
     store.delete(key);
     emit(key);
   }
@@ -257,8 +289,11 @@ export function markSurfaceCacheStale(prefix: string): void {
  * device should not keep the previous account's rows in memory either.
  */
 export function resetSurfaceCache(): void {
+  const keys = [...store.keys()];
+  for (const key of keys) disposeEntry(key);
   store.clear();
   inflight.clear();
+  for (const key of keys) emit(key);
 }
 
 /**
@@ -301,11 +336,13 @@ export type UseCachedResource<T> = CacheEntry<T> & {
 export function useCachedResource<T>(
   key: string | null,
   fetcher: () => Promise<T>,
-  options?: { staleMs?: number },
+  options?: { staleMs?: number } & CacheLifecycle<T>,
 ): UseCachedResource<T> {
   const staleMs = options?.staleMs ?? DEFAULT_STALE_MS;
   const fetcherRef = useRef(fetcher);
   fetcherRef.current = fetcher;
+  const lifecycleRef = useRef(options);
+  lifecycleRef.current = options;
 
   const entry = useSyncExternalStore(
     useCallback(
@@ -334,12 +371,12 @@ export function useCachedResource<T>(
     if (entry.revalidating) return;
     if (entry.data === undefined && entry.error !== undefined) return;
     if (entry.data !== undefined && !isSurfaceCacheStale(key, staleMs)) return;
-    void loadSurfaceCache(key, () => fetcherRef.current());
+    void loadSurfaceCache(key, () => fetcherRef.current(), lifecycleRef.current);
   }, [key, staleMs, entry]);
 
   const refresh = useCallback(async () => {
     if (!key) return undefined;
-    return loadSurfaceCache<T>(key, () => fetcherRef.current());
+    return loadSurfaceCache<T>(key, () => fetcherRef.current(), lifecycleRef.current);
   }, [key]);
 
   return {

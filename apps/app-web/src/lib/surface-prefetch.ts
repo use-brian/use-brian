@@ -962,3 +962,7 @@ export const meetingTagsCacheKey = (workspaceId: string, pageId: string): string
 export function workspaceDepartmentRegistryCacheKey(workspaceId:string,userId:string):string {
   return `${workspaceAccessCacheKey(workspaceId,userId)}:registry`;
 }
+
+export function docMediaCacheKey(workspaceId:string,userId:string,fileId:string):string {
+  return `doc-media:${workspaceId}:${userId}:${fileId}`;
+}

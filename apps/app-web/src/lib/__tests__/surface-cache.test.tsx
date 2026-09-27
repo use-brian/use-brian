@@ -381,3 +381,38 @@ describe("[COMP:app-web/surface-cache] useCachedResource", () => {
     expect(container!.textContent).toBe("empty");
   });
 });
+
+
+describe('[COMP:app-web/surface-cache] disposable protected resources',()=>{
+  beforeEach(()=>{resetSurfaceCache();vi.useFakeTimers();});
+  afterEach(()=>{resetSurfaceCache();vi.useRealTimers();});
+  it('expires and disposes unmounted entries without a subscriber',async()=>{
+    const dispose=vi.fn();await loadSurfaceCache('media',async()=>'blob:first',{dispose,expiresInMs:()=>500});
+    expect(readSurfaceCache('media').data).toBe('blob:first');
+    await vi.advanceTimersByTimeAsync(501);
+    expect(readSurfaceCache('media').data).toBeUndefined();expect(dispose).toHaveBeenCalledExactlyOnceWith('blob:first');
+  });
+  it('disposes replacement, denial and reset resources exactly once',async()=>{
+    const dispose=vi.fn(),options={dispose,expiresInMs:()=>1000};
+    await loadSurfaceCache('media',async()=>'first',options);
+    await loadSurfaceCache('media',async()=>'second',options);
+    expect(dispose.mock.calls).toEqual([['first']]);
+    await loadSurfaceCache('media',async()=>{throw new SurfaceCacheEvictionError(new Error('403'));},options);
+    expect(dispose.mock.calls).toEqual([['first'],['second']]);
+    await loadSurfaceCache('media',async()=>'third',options);resetSurfaceCache();
+    await vi.advanceTimersByTimeAsync(1001);
+    expect(dispose.mock.calls).toEqual([['first'],['second'],['third']]);
+  });
+  it.each(['invalidate','reset'])('disposes late responses detached by %s without replacing a newer read',async action=>{
+    const dispose=vi.fn();let resolve!:(value:string)=>void;
+    const pending=loadSurfaceCache('media',()=>new Promise<string>(r=>{resolve=r;}),{dispose});
+    if(action==='reset')resetSurfaceCache();else invalidateSurfaceCache('media');
+    await loadSurfaceCache('media',async()=>'new',{dispose});
+    resolve('old');await pending;
+    expect(readSurfaceCache('media').data).toBe('new');expect(dispose.mock.calls).toEqual([['old']]);
+  });
+  it('rejects expired resources without retaining their URL',async()=>{
+    const dispose=vi.fn();await loadSurfaceCache('media',async()=>'expired',{dispose,expiresInMs:()=>0});
+    expect(readSurfaceCache('media').data).toBeUndefined();expect(dispose).toHaveBeenCalledExactlyOnceWith('expired');
+  });
+});

@@ -29,6 +29,8 @@ import type {
   FilesContext,
 } from '@use-brian/core'
 import { isAllowedMime } from './files.js'
+import type { getWorkspaceFileReadProjection } from '../db/workspace-files.js'
+import { workspaceFileReadRevision } from '../files/files-api.js'
 
 const MAX_FILE_SIZE = 20 * 1024 * 1024 // 20 MB
 const MAX_FILES_PER_REQUEST = 10
@@ -56,6 +58,7 @@ export type DocFilesMembership = (
 export type DocFilesDeps = {
   filesApi: FilesApi
   membership: DocFilesMembership
+  readProjection: typeof getWorkspaceFileReadProjection
 }
 
 /**
@@ -187,6 +190,16 @@ export function docFilesRoutes(deps: DocFilesDeps): Router {
         res.status(404).json({ error: 'File not found' })
         return
       }
+      const revision=workspaceFileReadRevision(result.value.file)
+      const projectionStarted=performance.now()
+      const projection=await deps.readProjection({workspaceId,userId,assistantId:userId,assistantKind:'standard',clearance:member.clearance},id)
+      const validForMs=Math.floor((projection?.validForMs??0)-(performance.now()-projectionStarted))
+      if(!projection||!Number.isFinite(validForMs)||validForMs<=0||workspaceFileReadRevision(projection.file)!==revision){
+        res.status(404).json({error:'File not found'})
+        return
+      }
+      res.setHeader('X-Brian-Media-Valid-For-Ms',String(Math.min(30_000,validForMs)))
+      res.append('Access-Control-Expose-Headers','X-Brian-Media-Valid-For-Ms')
       res.setHeader('Content-Type', result.value.file.mime)
       res.setHeader('Content-Length', String(result.value.bytes.length))
       res.send(result.value.bytes)

@@ -2,7 +2,7 @@
 import {describe,it,expect,vi,beforeEach,afterEach} from 'vitest';
 const {mockAuthFetch}=vi.hoisted(()=>({mockAuthFetch:vi.fn()}));
 vi.mock('@/lib/auth-fetch',()=>({authFetch:mockAuthFetch}));
-import {fetchDocFileBlob,resolveDocFileSrc,resolveFileRefUrl,type FileRef} from '../doc-file-url';
+import {fetchDocMediaProjection,fetchDocFileBlob,resolveDocFileSrc,resolveFileRefUrl,type FileRef} from '../doc-file-url';
 const durableRef:FileRef={bucket:'workspace_files',path:'wf_1',mimeType:'image/png',sizeBytes:3,name:'fixture.png'};
 describe('[COMP:app-web/doc-file-url] authenticated media bytes',()=>{
   const directFetch=vi.fn(),create=vi.fn(()=> 'blob:fixture');
@@ -28,4 +28,21 @@ describe('[COMP:app-web/doc-file-url] authenticated media bytes',()=>{
     mockAuthFetch.mockResolvedValue({ok:true,blob:async()=>new Blob(['fixture'])});
     expect(await resolveFileRefUrl(durableRef,'ws_1')).toBe('blob:fixture');
   });
+  it.each([null,'','0','-1','NaN','Infinity'])('refuses an absent or invalid display lifetime (%s)',async lifetime=>{
+    const headers=new Headers();if(lifetime!==null)headers.set('X-Brian-Media-Valid-For-Ms',lifetime);
+    mockAuthFetch.mockResolvedValue({ok:true,headers,blob:async()=>new Blob(['protected'])});
+    await expect(fetchDocMediaProjection('ws_1','wf_1')).rejects.toThrow();expect(create).not.toHaveBeenCalled();
+  });
+  it('subtracts body transfer time and rejects bytes arriving after expiry',async()=>{
+    const now=vi.spyOn(performance,'now').mockReturnValueOnce(100).mockReturnValue(201);
+    mockAuthFetch.mockResolvedValue({ok:true,headers:new Headers({'X-Brian-Media-Valid-For-Ms':'100'}),blob:async()=>new Blob(['protected'])});
+    await expect(fetchDocMediaProjection('ws_1','wf_1')).rejects.toThrow();expect(create).not.toHaveBeenCalled();now.mockRestore();
+  });
+  it('caps a display lifetime and preserves a conservatively shortened deadline',async()=>{
+    const now=vi.spyOn(performance,'now').mockReturnValueOnce(100).mockReturnValue(160);
+    mockAuthFetch.mockResolvedValue({ok:true,headers:new Headers({'X-Brian-Media-Valid-For-Ms':'60000'}),blob:async()=>new Blob(['protected'])});
+    const projection=await fetchDocMediaProjection('ws_1','wf_1');
+    expect(projection.projectionMonotonicDeadline).toBe(30100);expect(projection.url).toBe('blob:fixture');now.mockRestore();
+  });
+
 });

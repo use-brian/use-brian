@@ -244,3 +244,8 @@ export function useWorkspaceContext(): WorkspaceContextValue {
   }
   return value;
 }
+
+/** Decorative media outside an authenticated workspace must not invent an identity. */
+export function useOptionalWorkspaceContext(): WorkspaceContextValue | null {
+  return useContext(WorkspaceContext);
+}
