@@ -14,6 +14,33 @@
 import type { BuiltinToolGroupId } from "@use-brian/shared/builtin-connectors";
 
 export const en = {
+  protectedFill: {
+    "title": "Protected fill",
+    "destination": "Destination site",
+    "profile": "Browser profile",
+    "unavailable": "Unavailable",
+    "record": "Select CRM contact",
+    "search": "Search contacts",
+    "empty": "No contacts found",
+    "fields": "Scalar fields",
+    "name": "Name",
+    "email": "Email",
+    "phone": "Phone",
+    "company": "Company",
+    "jobTitle": "Job title",
+    "address": "Address",
+    "website": "Website",
+    "disclosure": "The destination website will receive the selected values. They are not sent to assistant chat. Browser observation is locked after disclosure, including uncertain failures.",
+    "approve": "I approve sharing these fields with this exact site and profile.",
+    "issue": "Create protected references",
+    "error": "Protected fill unavailable. Refresh the task and try again.",
+    "bindingRequired": "This task needs a connected local profile and an authoritative HTTPS origin from the server. No origin is inferred from a hostname or chat.",
+    "copy": "Copy safe references",
+    "copied": "Copied",
+    "handoff": "References expire after two minutes. Copy these references into the assistant chat that started this task, and ask it to match the field labels to target refs from its pre-fill snapshot. Never paste CRM values.",
+    "expired": "References expired. Create new references.",
+    "completion": "Pending human completion after filling: finish and submit manually in the browser. Then use the extension completion control. All controlled task tabs and any full-browser tabs that received protected values must be closed and detached before unlocking. This panel cannot unlock the browser."
+},
   internalLinks: {
     recoveryTitle: "Open shared page",
     received: "Preparing this link...",

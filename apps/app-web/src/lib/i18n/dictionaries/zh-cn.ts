@@ -12,6 +12,33 @@
 import type { Dictionary } from "./en";
 
 export const zhCN: Dictionary = {
+  protectedFill: {
+    "title": "受保护填写",
+    "destination": "目标网站",
+    "profile": "浏览器配置文件",
+    "unavailable": "不可用",
+    "record": "选择 CRM 联系人",
+    "search": "搜索联系人",
+    "empty": "未找到联系人",
+    "fields": "标量字段",
+    "name": "姓名",
+    "email": "电子邮件",
+    "phone": "电话",
+    "company": "公司",
+    "jobTitle": "职位",
+    "address": "地址",
+    "website": "网站",
+    "disclosure": "目标网站将收到所选值，但不会发送到助手聊天。披露后将锁定浏览器观察，包括结果不确定的失败。",
+    "approve": "我同意向此确切网站及配置文件分享这些字段。",
+    "issue": "创建受保护引用",
+    "error": "受保护填写不可用。请刷新任务后重试。",
+    "bindingRequired": "此任务需要已连接的本地配置文件及服务器确认的 HTTPS 源。不会从主机名或聊天推测来源。",
+    "copy": "复制安全引用",
+    "copied": "已复制",
+    "handoff": "引用将在两分钟后过期。请复制到启动此任务的助手聊天，要求根据填写前快照将字段标签匹配到目标引用。切勿粘贴 CRM 值。",
+    "expired": "引用已过期。请创建新引用。",
+    "completion": "填写后等待人工完成：请在浏览器手动完成并提交，再使用扩展程序的完成控件。解锁前必须关闭所有受控任务标签页，以及完整浏览器模式中收到受保护值的标签页，并解除控制。此面板无法解锁。"
+},
   internalLinks: {
     recoveryTitle: "打开共享页面",
     received: "正在准备链接...",
