@@ -28,7 +28,7 @@ export type OfficeTemplateCompileWorkerDeps = {
   getDraftRouting(userId: string, templateId: string): Promise<unknown | null>
   saveDraftRouting(params: { userId: string; templateId: string; routing: unknown }): Promise<boolean>
   saveBundle(params: { userId: string; workspaceId: string; templateId: string; hash: string; bytes: Uint8Array }): Promise<string>
-  addVersion(params: { userId: string; templateId: string; workspaceId: string; bundleFileId: string; bundleHash: string; capabilityVersion: number; locales: string[]; tags: string[]; whenToUse: string[]; whenNotToUse: string[]; exampleRequests: string[]; fieldSchema: unknown; admissionReceipt: OfficeTemplateAdmissionReceipt; provenance: unknown; status: 'draft' | 'admitted' }): Promise<unknown>
+  addVersion(params: { userId: string; templateId: string; workspaceId: string; bundleFileId: string; bundleHash: string; capabilityVersion: number; locales: string[]; tags: string[]; whenToUse: string[]; whenNotToUse: string[]; exampleRequests: string[]; fieldSchema: unknown; admissionReceipt: OfficeTemplateAdmissionReceipt; provenance: unknown; resourceIds: string[]; status: 'draft' | 'admitted' }): Promise<unknown>
   appendEvent(params: { userId: string; jobId: string; workspaceId: string; code: string; values: Record<string, string | number | boolean>; actorType: 'system'; safeNarration: string }): Promise<unknown>
   finish(params: { userId: string; jobId: string; leaseToken: string; status: 'completed' | 'failed'; stage: string; errorCode?: string; errorDetail?: string }): Promise<boolean>
   leaseMs?: number
@@ -156,6 +156,7 @@ export function createOfficeTemplateCompileWorker(deps: OfficeTemplateCompileWor
         workspaceId: job.workspaceId,
         bundleFileId,
         bundleHash,
+        resourceIds: live.snapshot.resources.map(resource => resource.id),
         capabilityVersion: live.snapshot.capabilityVersion,
         locales: draft.locales,
         tags: draft.tags,

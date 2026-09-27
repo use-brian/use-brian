@@ -505,4 +505,50 @@ describe('[COMP:api/context-scope-security-matrix] temporary preview upgrade',()
     } finally {await previous.close()}
   })
 
+  it('upgrades 596 Office library metadata through 597 and enforces current file holding under the app role',async()=>{
+    const previous=new PGlite({extensions:{vector,pg_trgm}})
+    const directory=fileURLToPath(new URL('../../../../packages/api/migrations',import.meta.url))
+    const template='60000000-0000-4000-8000-000000000001',version='60000000-0000-4000-8000-000000000002'
+    const file='60000000-0000-4000-8000-000000000003',resource='60000000-0000-4000-8000-000000000004'
+    try {
+      await previous.waitReady
+      await migratePglite(previous,directory,{through:'596_office_operation_scope.sql'})
+      await previous.query('INSERT INTO users(id,auth_provider_id) VALUES($1,$2)',[USER_ID,'library-upgrade-fixture'])
+      await previous.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Library upgrade fixture',$2)",[WORKSPACE_ID,USER_ID])
+      await previous.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'owner')",[WORKSPACE_ID,USER_ID])
+      await previous.query("INSERT INTO workspace_files(id,workspace_id,path,name,storage_uri) VALUES($1,$2,'/library.bin','library.bin','fixture://library')",[file,WORKSPACE_ID])
+      await previous.query("INSERT INTO office_templates(id,workspace_id,family,name,owner_user_id,sensitivity) VALUES($1,$2,'document','Existing library template',$3,'internal')",[template,WORKSPACE_ID,USER_ID])
+      await previous.query("INSERT INTO office_resources(id,workspace_id,kind,name,file_id,content_hash,mime,sensitivity,created_by) VALUES($1,$2,'brand_media','Existing image',$3,$4,'image/png','internal',$5)",[resource,WORKSPACE_ID,file,'a'.repeat(64),USER_ID])
+      await previous.query("INSERT INTO office_template_versions(id,template_id,workspace_id,version,bundle_file_id,bundle_hash,capability_version,locales,when_to_use,when_not_to_use,example_requests,field_schema,admission_receipt,provenance,status,created_by) VALUES($1,$2,$3,1,$4,$5,1,'{en}','[]','[]','[]','{}','{}','{}','admitted',$6)",[version,template,WORKSPACE_ID,file,'a'.repeat(64),USER_ID])
+      await previous.query("INSERT INTO office_template_resource_refs(template_version_id,resource_id,workspace_id,usage) VALUES($1,$2,$3,'bundle')",[version,resource,WORKSPACE_ID])
+      await previous.query('UPDATE office_templates SET current_version_id=$2 WHERE id=$1',[template,version])
+      const foreignWorkspace='60000000-0000-4000-8000-000000000005',invalidResource='60000000-0000-4000-8000-000000000006'
+      await previous.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Legacy reference fixture',$2)",[foreignWorkspace,USER_ID])
+      await previous.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'owner')",[foreignWorkspace,USER_ID])
+      // The predecessor admitted this FK-valid but cross-workspace file link.
+      await previous.query("INSERT INTO office_resources(id,workspace_id,kind,name,file_id,content_hash,mime,sensitivity,created_by) VALUES($1,$2,'brand_media','Legacy mismatched reference',$3,$4,'image/png','internal',$5)",[invalidResource,foreignWorkspace,file,'a'.repeat(64),USER_ID])
+      const before=(await previous.query('SELECT * FROM office_template_versions WHERE id=$1',[version])).rows
+      assert.equal(await migratePglite(previous,directory,{through:'597_office_library_scope.sql'}),1)
+      assert.equal(await migratePglite(previous,directory,{through:'597_office_library_scope.sql'}),0)
+      assert.deepEqual((await previous.query('SELECT * FROM office_template_versions WHERE id=$1',[version])).rows,before)
+      await previous.exec('SET row_security=on; CREATE ROLE office_library_fixture NOSUPERUSER NOBYPASSRLS; GRANT USAGE ON SCHEMA public TO office_library_fixture; GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA public TO office_library_fixture; SET ROLE office_library_fixture')
+      await previous.query("SELECT set_config('app.current_user_id',$1,false)",[USER_ID])
+      assert.deepEqual((await previous.query('SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user')).rows,[{rolsuper:false,rolbypassrls:false}])
+      assert.deepEqual((await previous.query('SELECT id FROM office_resources WHERE id=$1',[invalidResource])).rows,[])
+      const tables=['office_templates','office_template_versions','office_resources','office_template_resource_refs']
+      for(const table of tables)assert.equal((await previous.query(`SELECT * FROM ${table} WHERE workspace_id=$1`,[WORKSPACE_ID])).rows.length,1)
+      await previous.exec('RESET ROLE')
+      await previous.query('UPDATE workspace_files SET scope_held=true WHERE id=$1',[file])
+      await previous.exec('SET ROLE office_library_fixture')
+      for(const table of tables) {
+        assert.deepEqual((await previous.query(`SELECT * FROM ${table} WHERE workspace_id=$1`,[WORKSPACE_ID])).rows,[])
+        assert.deepEqual((await previous.query(`UPDATE ${table} SET workspace_id=workspace_id WHERE workspace_id=$1 RETURNING *`,[WORKSPACE_ID])).rows,[])
+      }
+      await previous.exec('RESET ROLE')
+      await previous.query('UPDATE workspace_files SET scope_held=false WHERE id=$1',[file])
+      await previous.exec('SET ROLE office_library_fixture')
+      assert.deepEqual((await previous.query('SELECT name FROM office_templates WHERE id=$1',[template])).rows,[{name:'Existing library template'}])
+    } finally {await previous.close()}
+  })
+
 })

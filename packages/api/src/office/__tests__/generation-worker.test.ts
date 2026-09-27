@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
+import * as brandStore from '../../db/brand-store.js'
+import {documentSnapshot,completePresentationSnapshot,resolveFixtureResource,id} from '../../../../core/src/office/__tests__/fixtures.js'
 import { exportOfficePresentation, type Message } from '@use-brian/core'
 import type { DocumentSnapshot, PresentationSnapshot, SpreadsheetSnapshot } from '@use-brian/office-model'
 import { createOfficeGenerationWorker } from '../generation-worker.js'
@@ -643,6 +645,24 @@ describe('[COMP:api/office-generation] Office generation worker', () => {
     expect(deps.addVersion).not.toHaveBeenCalled()
     expect(deps.finish).toHaveBeenCalledWith(expect.objectContaining({ status: 'completed' }))
   })
+  it('publishes every declared resource dependency with the compiled template version',async()=>{
+    const source=documentSnapshot()
+    const node=source.sections[0]!.nodes.find(node=>node.id===id(9))!
+    if(node.kind!=='paragraph')throw new Error('Invalid fixture paragraph')
+    node.runs[0]!.text='Summary: {{SUMMARY}}'
+    source.resources=completePresentationSnapshot().resources.slice(0,1)
+    const admissions=await Promise.all(source.resources.map(async ref=>({id:ref.id,hash:ref.hash,...(await resolveFixtureResource(ref.id))!,licence:{name:'Fixture media'},embeddingRights:'allowed' as const})))
+    const templateId=id(800),userId=id(801)
+    const job={id:id(802),workspaceId:source.workspaceId,artifactId:source.artifactId,initiatedByUserId:userId,assistantId:null,jobKind:'template_compile',brief:{templateId,source:{kind:'publish'}}} as OfficeGenerationJobRow
+    const brand=vi.spyOn(brandStore,'getBrandStore').mockReturnValue({get:vi.fn(async()=>null)} as never)
+    const deps={claim:vi.fn(async()=>job),getSnapshot:vi.fn(async()=>({snapshot:source})),getTemplate:vi.fn(async()=>({id:templateId,workspaceId:source.workspaceId,family:'document' as const,name:'Library fixture',description:'Fixture document',sensitivity:'internal' as const,draftArtifactId:source.artifactId})),readSource:vi.fn(),initialize:vi.fn(),saveImportedResource:vi.fn(),loadResourceAdmissions:vi.fn(async()=>admissions),getDraftRouting:vi.fn(async()=>null),saveDraftRouting:vi.fn(async()=>true),saveBundle:vi.fn(async()=>id(803)),addVersion:vi.fn(async()=>({id:id(804),version:1})),appendEvent:vi.fn(),finish:vi.fn(async()=>true)}
+    try {
+      await createOfficeTemplateCompileWorker(deps)(userId)
+      expect(deps.addVersion).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({status:'admitted',resourceIds:source.resources.map(resource=>resource.id)}))
+      expect(deps.finish).toHaveBeenCalledWith(expect.objectContaining({status:'completed'}))
+    } finally {brand.mockRestore()}
+  })
+
 })
 
 function revisionFixture(artifactId: string, targetId: string): import('@use-brian/office-model').DocumentSnapshot {
