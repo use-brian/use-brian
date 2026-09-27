@@ -21,6 +21,7 @@ const dict: QueuedInputsDict = {
 };
 
 const input = (over: Partial<QueuedInput> & { text: string }): QueuedInput => ({
+  sessionId: over.sessionId ?? "session-a",
   inputId: over.inputId ?? "in-1",
   steer: over.steer ?? false,
   text: over.text,
