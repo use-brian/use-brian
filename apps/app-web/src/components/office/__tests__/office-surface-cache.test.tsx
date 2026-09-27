@@ -48,8 +48,8 @@ vi.mock("@/lib/office/api", async (importOriginal) => {
     listOfficeArtifacts: (...args: unknown[]) => api.listOfficeArtifacts(...(args as [])).then((value) => bounded(value as object)),
     getOfficeArtifact: (...args: unknown[]) => api.getOfficeArtifact(...(args as [])),
     getOfficeSnapshot: (...args: unknown[]) => api.getOfficeSnapshot(...(args as [])),
-    listOfficeComments: vi.fn(async () => []),
-    listOfficeSuggestions: vi.fn(async () => []),
+    listOfficeComments: vi.fn(async () => bounded([])),
+    listOfficeSuggestions: vi.fn(async () => bounded([])),
     detachMissingOfficeComments: vi.fn(async () => 0),
   };
 });

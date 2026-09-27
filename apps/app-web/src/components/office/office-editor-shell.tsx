@@ -8,7 +8,7 @@
  * offline package is the cold seed for the snapshot when one is present.
  * [COMP:app-web/office-editor-shell] [COMP:app-web/office-surface-cache]
  */
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { APP_LEVEL_ASSISTANT_ID } from "@use-brian/shared";
 import { FileCheck2, FileSpreadsheet, FileText, History, ListChecks, MessageSquare, MoreHorizontal, PanelRightClose, PanelRightOpen, Presentation, Redo2, Route, Share2, Sparkles, Undo2 } from "lucide-react";
@@ -45,9 +45,13 @@ import { OfficeHistory } from "./history/office-history";
 import { OfficeSharing } from "./sharing/office-sharing";
 import { ReclassifyContextButton } from "@/components/context/reclassify-context-dialog";
 import { invalidateSurfaceCache, loadSurfaceCache, mutateSurfaceCache, readSurfaceCache, useCachedResource } from "@/lib/surface-cache";
-import { invalidateOfficeList, officeArtifactCacheKey, officeSnapshotCacheKey } from "@/lib/surface-prefetch";
-import { officeArtifactFromListCache, useOfficeCacheRevalidation } from "@/lib/office/surface-cache";
+import { invalidateOfficeList, officeArtifactCacheKey, officeSnapshotCacheKey, officePanelCacheKey, officePanelCachePrefix } from "@/lib/surface-prefetch";
+import { officeArtifactFromListCache, useOfficeCacheRevalidation, useOfficeMetadataResource } from "@/lib/office/surface-cache";
+import { officeMetadataRemaining } from "@/lib/office/metadata";
 import { isPhoneViewport } from "@/lib/viewport";
+
+const EMPTY_COMMENTS: OfficeCommentThread[] = [];
+const EMPTY_SUGGESTIONS: OfficeSuggestion[] = [];
 
 type Panel = "activity" | "comments" | "suggestions" | "history" | "sharing" | "review" | "routing";
 
@@ -64,6 +68,7 @@ export function OfficeEditorShell({ workspaceId, artifactId }: { workspaceId: st
     if (old.workspaceId !== workspaceId || old.viewerId !== viewerId) {
       invalidateSurfaceCache(officeArtifactCacheKey(old.workspaceId, old.artifactId, old.viewerId));
       invalidateSurfaceCache(officeSnapshotCacheKey(old.workspaceId, old.artifactId, old.viewerId));
+      invalidateSurfaceCache(officePanelCachePrefix(old.workspaceId, old.viewerId));
     }
     previous.current = {workspaceId, artifactId, viewerId};
   }, [workspaceId, artifactId, viewerId]);
@@ -103,8 +108,8 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
   const [templateCompileState, setTemplateCompileState] = useState<"idle" | "queued" | "failed">("idle");
   const [cachedUpdate, setCachedUpdate] = useState<Uint8Array | null>(null);
   const [cachedComments, setCachedComments] = useState<OfficeCommentThread[] | null>(null);
-  const [commentThreads, setCommentThreads] = useState<OfficeCommentThread[]>([]);
-  const [suggestions, setSuggestions] = useState<OfficeSuggestion[]>([]);
+  const [queuedCommentThreads, setQueuedCommentThreads] = useState<OfficeCommentThread[]>(EMPTY_COMMENTS);
+  const receiveQueuedComments = useCallback((threads: OfficeCommentThread[]) => setQueuedCommentThreads(threads), []);
   const [reconnectStatus, setReconnectStatus] = useState<OfficeOfflineStatus>("synced");
   const [recoveryState, setRecoveryState] = useState<"idle" | "moving" | "failed">("idle");
   const [templateDraftFailed, setTemplateDraftFailed] = useState(false);
@@ -131,6 +136,17 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
   const snapshotPending = !denied && !offline && snapshotEntry.data === undefined && snapshotEntry.error === undefined;
   const offlineCopyAt = offline?.savedAt ?? null;
   const collab = useCollabProvider(artifact && live && artifact.lifecycleState === "active" && !isOfficeStartFailed(artifact) ? `office:${artifactId}` : null);
+  const offlineDiscussion = collab.status === "disconnected" || Boolean(offlineCopyAt);
+  const discussionPrefix = viewerId && artifact?.family === "document" && !offlineCopyAt ? officePanelCachePrefix(workspaceId, viewerId) : null;
+  const commentsKey = officePanelCacheKey(discussionPrefix, "comments", artifactId);
+  const suggestionsKey = officePanelCacheKey(discussionPrefix, "suggestions", artifactId);
+  const commentsEntry = useOfficeMetadataResource(commentsKey, viewerId, () => listOfficeComments(artifactId));
+  const suggestionsEntry = useOfficeMetadataResource(suggestionsKey, viewerId, () => listOfficeSuggestions(artifactId));
+  const serverComments = offlineCopyAt ? cachedComments ?? EMPTY_COMMENTS : commentsEntry.data ?? EMPTY_COMMENTS;
+  const commentThreads = useMemo(() => offlineDiscussion ? [...serverComments, ...queuedCommentThreads] : serverComments, [offlineDiscussion, serverComments, queuedCommentThreads]);
+  const suggestions = offlineCopyAt ? EMPTY_SUGGESTIONS : suggestionsEntry.data ?? EMPTY_SUGGESTIONS;
+  const commentsReady = Boolean(commentsEntry.data);
+  useEffect(() => {if (!offlineDiscussion) setQueuedCommentThreads(EMPTY_COMMENTS);}, [offlineDiscussion]);
   const currentUser = getUserInfo();
   useEffect(() => chatDockSuppression.suppress(), []);
   usePublishPresenceIdentity(collab.provider, currentUser);
@@ -237,18 +253,23 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
     return () => doc.off("update", refresh);
   }, [collab.doc, collab.synced, offlineCopyAt]);
   useEffect(() => {
-    if (!artifact || artifact.family !== "document" || offlineCopyAt) return;
-    void Promise.all([listOfficeComments(artifactId), listOfficeSuggestions(artifactId)]).then(([threads, nextSuggestions]) => { setCommentThreads(threads); setSuggestions(nextSuggestions); }).catch(() => undefined);
-  }, [artifact?.family, artifactId, offlineCopyAt]);
-  useEffect(() => {
-    if (!artifact || artifact.family !== "document" || artifact.role !== "edit" || offlineCopyAt || !live) return;
+    if (!commentsKey || !commentsReady || !artifact || artifact.family !== "document" || artifact.role !== "edit" || artifact.lifecycleState !== "active" || offlineCopyAt || !live) return;
+    let active = true;
+    const startingRead = readSurfaceCache<OfficeCommentThread[]>(commentsKey).data;
+    const current = () => active && getUserInfo()?.id === viewerId && officeMetadataRemaining(startingRead, viewerId) > 0 && officeMetadataRemaining(readSurfaceCache(commentsKey).data, viewerId) > 0;
     const timeout = window.setTimeout(() => {
-      void detachMissingOfficeComments(artifactId).then((detached) => {
-        if (detached > 0) void listOfficeComments(artifactId).then(setCommentThreads);
-      }).catch(() => undefined);
+      if (!current()) return;
+      void detachMissingOfficeComments(artifactId).then(async detached => {
+        if (!current() || detached <= 0) return;
+        // Drain a read already in flight so the mutation gets a fresh readback.
+        if (readSurfaceCache(commentsKey).revalidating) {await commentsEntry.refresh();if (!current()) return;}
+        await commentsEntry.refresh();
+      }).catch(error => {
+        if (current() && error instanceof OfficeApiError && [401,403,404].includes(error.status)) invalidateSurfaceCache(commentsKey);
+      });
     }, 750);
-    return () => window.clearTimeout(timeout);
-  }, [artifact?.family, artifact?.role, artifactId, live?.snapshot, offlineCopyAt]);
+    return () => {active = false;window.clearTimeout(timeout);};
+  }, [artifact?.family, artifact?.role, artifact?.lifecycleState, artifactId, live?.snapshot, offlineCopyAt, commentsKey, commentsReady, commentsEntry.refresh, viewerId]);
   useEffect(() => {
     if (artifact?.mode === "template" && templateId) {
       setPanel("routing");
@@ -473,8 +494,8 @@ function OfficeArtifactShell({ workspaceId, artifactId, viewerId }: { workspaceI
           {showTemplateRouting && live && templateId ? <div className={panelOpen && panel === "routing" ? "block" : "hidden"}><TemplateRoutingInspector templateId={templateId} snapshot={live.snapshot} selectedTargetIds={targets} onStateChange={setTemplateRoutingState} /></div> : null}
           {panelOpen ? <>
             {panel === "activity" ? <OfficeJobActivity jobId={artifact.job?.id} snapshot={live?.snapshot} targetIds={targets} canRequestRevision={canRequestBrianRevision} requestDisabledReason={brianRevisionDisabledReason} onRequestRevision={requestBrianRevision} onRevisionCompleted={refreshArtifact} /> : null}
-            {panel === "comments" ? <div className="p-3"><OfficeComments artifactId={artifactId} workspaceId={workspaceId} version={artifact.version} targetIds={targets} selectionAnchor={artifact.family === "document" ? commentAnchor : null} anchorKind={artifact.family === "document" ? "block" : artifact.family === "spreadsheet" ? "table_cell" : "object"} canComment={artifact.role !== "view"} offline={collab.status === "disconnected" || Boolean(offlineCopyAt)} initialThreads={cachedComments ?? undefined} onRevisionCompleted={refreshArtifact} onThreadsChange={setCommentThreads} /></div> : null}
-            {panel === "suggestions" ? <div className="p-3"><OfficeSuggestions workspaceId={workspaceId} artifactId={artifactId} canDecide={artifact.role === "edit" && artifact.lifecycleState === "active" && !offlineCopyAt} canSuggest={artifact.family === "document" && artifact.role !== "view" && artifact.lifecycleState === "active" && suggestMode} actorId={currentUser?.id} baseVersion={live?.baseVersion} expectedSeq={live?.seq} proposal={suggestionRange} offline={collab.status === "disconnected" || Boolean(offlineCopyAt)} onApplied={refreshArtifact} onSuggestionsChange={setSuggestions} /></div> : null}
+            {panel === "comments" ? <div className="p-3"><OfficeComments artifactId={artifactId} workspaceId={workspaceId} version={artifact.version} targetIds={targets} selectionAnchor={artifact.family === "document" ? commentAnchor : null} anchorKind={artifact.family === "document" ? "block" : artifact.family === "spreadsheet" ? "table_cell" : "object"} canComment={artifact.role !== "view"} offline={collab.status === "disconnected" || Boolean(offlineCopyAt)} initialThreads={serverComments} initialQueuedThreads={queuedCommentThreads} onQueuedThreadsChange={receiveQueuedComments} onRevisionCompleted={refreshArtifact} /></div> : null}
+            {panel === "suggestions" ? <div className="p-3"><OfficeSuggestions workspaceId={workspaceId} artifactId={artifactId} canDecide={artifact.role === "edit" && artifact.lifecycleState === "active" && !offlineCopyAt} canSuggest={artifact.family === "document" && artifact.role !== "view" && artifact.lifecycleState === "active" && suggestMode} actorId={currentUser?.id} baseVersion={live?.baseVersion} expectedSeq={live?.seq} proposal={suggestionRange} offline={collab.status === "disconnected" || Boolean(offlineCopyAt)} onApplied={refreshArtifact} /></div> : null}
             {panel === "history" ? <div className="p-3"><OfficeHistory artifactId={artifactId} artifactTitle={artifact.title} currentVersion={artifact.version} canEdit={artifact.role === "edit" && artifact.lifecycleState === "active" && !offlineCopyAt} onRestored={refreshArtifact} onCopied={(copiedId) => { invalidateOfficeList(workspaceId); router.push(`/w/${workspaceId}/office/${copiedId}`); }} /></div> : null}
             {panel === "sharing" ? <div className="p-3"><OfficeSharing artifactId={artifactId} /></div> : null}
             {panel === "review" ? <OfficeReview artifact={artifact} artifactId={artifactId} workspaceId={workspaceId} snapshot={live?.snapshot ?? undefined} selectedObjectIds={targets} onLifecycle={onLifecycle} onPresent={() => setPresentOpen(true)} offlineCopy={Boolean(offlineCopyAt)} /> : null}

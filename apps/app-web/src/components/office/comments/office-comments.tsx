@@ -27,6 +27,8 @@ type OfficeCommentsProps = {
   canComment: boolean;
   offline?: boolean;
   initialThreads?: OfficeCommentThread[];
+  initialQueuedThreads?: OfficeCommentThread[];
+  onQueuedThreadsChange?(threads: OfficeCommentThread[]): void;
   onRevisionCompleted?(): void | Promise<void>;
   onThreadsChange?(threads: OfficeCommentThread[]): void;
 };
@@ -46,10 +48,11 @@ export function OfficeComments(props: OfficeCommentsProps) {
   return <OfficeCommentsContent key={`${cacheKey}:${Boolean(props.offline)}`} {...props} viewerId={viewerId} sourceThreads={threads} cacheKey={cacheKey} refresh={read.refresh} />;
 }
 
-function OfficeCommentsContent({ artifactId, workspaceId, version, targetIds, selectionAnchor, anchorKind = "object", canComment, offline = false, onRevisionCompleted, onThreadsChange, viewerId, sourceThreads, cacheKey, refresh }: OfficeCommentsProps & {viewerId: string; sourceThreads: OfficeCommentThread[]; cacheKey: string | null; refresh: () => Promise<OfficeCommentThread[] | undefined>}) {
+function OfficeCommentsContent({ artifactId, workspaceId, version, targetIds, selectionAnchor, anchorKind = "object", canComment, offline = false, initialQueuedThreads, onQueuedThreadsChange, onRevisionCompleted, onThreadsChange, viewerId, sourceThreads, cacheKey, refresh }: OfficeCommentsProps & {viewerId: string; sourceThreads: OfficeCommentThread[]; cacheKey: string | null; refresh: () => Promise<OfficeCommentThread[] | undefined>}) {
   const offlineOwner = useMemo(() => ({workspaceId, userId: viewerId}), [workspaceId, viewerId]);
   const t = useT().office;
-  const [queuedThreads, setQueuedThreads] = useState<OfficeCommentThread[]>([]);
+  const [queuedThreads, setQueuedThreads] = useState<OfficeCommentThread[]>(initialQueuedThreads ?? EMPTY_THREADS);
+  useLayoutEffect(() => {if (offline) onQueuedThreadsChange?.(queuedThreads);}, [offline, queuedThreads, onQueuedThreadsChange]);
   const threads = useMemo(() => offline ? [...sourceThreads, ...queuedThreads] : sourceThreads, [offline, sourceThreads, queuedThreads]);
   useLayoutEffect(() => {onThreadsChange?.(threads); return () => onThreadsChange?.(EMPTY_THREADS);}, [threads, onThreadsChange]);
   const [body, setBody] = useState("");
