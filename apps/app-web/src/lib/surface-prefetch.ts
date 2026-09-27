@@ -949,3 +949,8 @@ export function useIntentPrefetch(): (href: string) => {
 export function workspaceAccessHistoryCacheKey(workspaceId:string,userId:string,kind:'requests'|'grants',revision:string,after:string):string {
   return `${workspaceAccessCacheKey(workspaceId,userId)}:history:${kind}:${revision}:${after}`;
 }
+
+
+export function workspaceAccessInspectionCacheKey(workspaceId:string,userId:string,kind:'explain'|'events',revision:string,selection:string):string {
+  return `${workspaceAccessCacheKey(workspaceId,userId)}:${kind}:${revision}:${selection}`;
+}

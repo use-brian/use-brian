@@ -17,6 +17,7 @@ import { useDepartmentChange } from './use-department-change';
 import { SurfaceSkeletonFor } from '@/components/chrome/surface-skeleton';
 import { openWorkspaceSettings } from '@/lib/workspace-settings-events';
 import { ScopeReviewPanel } from './scope-review';
+import {AccessExplanationPanel,AccessEventsPanel} from './access-inspection';
 
 const fieldClass='min-h-11 w-full rounded-lg border border-border bg-background px-3 text-[16px] md:text-sm';
 type Save=(command:DepartmentAccessCommand,description:string)=>Promise<boolean>;
@@ -36,12 +37,13 @@ function WorkspaceAccessPanel() {
   const change=useDepartmentChange(workspaceId);
   const {busy,error,retryAvailable}=change;
   const [reviewOpen,setReviewOpen]=useState(false);
-  const data=useProtectedProjection(key,resource.data,()=>{change.cancelReview();setRequestTeam(null);setEditTeam(null);setEditPerson(null);},resource.refresh);
+  const [inspection,setInspection]=useState<{memberId:string}|'events'|null>(null);
+  const data=useProtectedProjection(key,resource.data,()=>{change.cancelReview();setRequestTeam(null);setEditTeam(null);setEditPerson(null);setInspection(null);},resource.refresh);
   useEffect(()=>{
     const purge=(event:Event)=>{
       const detail=(event as CustomEvent<{workspaceId?:string}>).detail;
       if(detail?.workspaceId&&detail.workspaceId!==workspaceId)return;
-      change.cancelReview();setRequestTeam(null);setEditTeam(null);setEditPerson(null);invalidateSurfaceCache(`workspace-access:${workspaceId}:`);
+      change.cancelReview();setRequestTeam(null);setEditTeam(null);setEditPerson(null);setInspection(null);invalidateSurfaceCache(`workspace-access:${workspaceId}:`);
     };
     window.addEventListener(ORGANIZATION_CHANGED_EVENT,purge);
     window.addEventListener(WORKSPACE_IDENTITY_REFRESH_EVENT,purge);
@@ -57,6 +59,8 @@ function WorkspaceAccessPanel() {
     {data.readiness?.ready!==true?<p role="status" className="rounded-lg border border-border bg-muted/30 p-3 text-sm">{t.notReady}</p>:null}
     {data.canAdminister?<Button variant="outline" className="min-h-11" onClick={()=>setReviewOpen(true)}>{t.reviewData}</Button>:null}
     <nav className="flex flex-wrap gap-2"><Button variant="outline" className="min-h-11" onClick={()=>openWorkspaceSettings('ws-organization')}>{t.organization}</Button>{data.canAdminister?<Button variant="outline" className="min-h-11" onClick={()=>openWorkspaceSettings('ws-teams')}>{t.configureTeams}</Button>:null}<Button variant="ghost" className="min-h-11" onClick={()=>{change.clearError();invalidateSurfaceCache(key);}}>{t.reload}</Button></nav>
+    <Button variant="outline" className="min-h-11" onClick={()=>setInspection('events')}>{t.accessAudit}</Button>
+    {inspection==='events'?<AccessEventsPanel key={data.policyRevision} data={data} close={()=>setInspection(null)}/>:inspection?<AccessExplanationPanel key={`${inspection.memberId}:${data.policyRevision}`} data={data} memberId={inspection.memberId} close={()=>setInspection(null)}/>:null}
     {error||resource.error?<p role="alert" className="text-sm text-destructive">{error||t.loadError}</p>:null}
     {retryAvailable?<Button variant="outline" className="min-h-11" disabled={busy} onClick={()=>void change.retry()}>{t.retryChange}</Button>:null}
     <section className="space-y-3"><h2 className="font-semibold">{t.people}</h2><p className="text-sm text-muted-foreground">{t.peopleHint}</p>
@@ -69,6 +73,7 @@ function WorkspaceAccessPanel() {
         <p className="text-sm">{t.readReach}: {reachLabel(person.access!.readTeamIds,person.access!.hasUnlistedReadScope,data,t)}</p>
         <p className="text-sm">{t.membershipReach}: {reachLabel(person.access!.membershipTeamIds,person.access!.hasUnlistedMembershipScope,data,t)}</p>
         {person.role!=='member'?<p className="text-sm text-muted-foreground">{t.adminHint}</p>:person.access!.teamScopeMode==='legacy'?<p className="text-sm text-muted-foreground">{t.legacyHint}</p>:null}
+        <Button variant="outline" className="min-h-11" onClick={()=>setInspection({memberId:person.id})}>{t.explainAccess}</Button>
         {data.canAdminister&&person.role==='member'?<Button variant="outline" className="min-h-11" disabled={busy} onClick={()=>setEditPerson(person.id)}>{t.editPerson}</Button>:null}
         {data.canAdminister&&editPerson===person.id?<PersonAccessEditor key={`${person.id}:${data.policyRevision}`} data={data} person={person} busy={busy} save={save} close={()=>setEditPerson(null)}/>:null}
       </article>)}

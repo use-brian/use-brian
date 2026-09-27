@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { DepartmentChangeFeedback, useDepartmentChange } from "@/components/workspace-access/use-department-change";
+import {AssistantAccessExplanation} from "@/components/workspace-access/access-inspection";
 import { ContextScopePicker } from "./context-scope-picker";
 import { useT } from "@/lib/i18n/client";
 import {
@@ -83,6 +84,7 @@ export function AssistantContextSettings({
   return (
     <div className="px-5 py-4 space-y-5">
       <DepartmentChangeFeedback change={change}/>
+      <AssistantAccessExplanation assistantId={assistantId}/>
       <div className="grid gap-3 sm:grid-cols-2">
         <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
           {t.teamAccessMode}

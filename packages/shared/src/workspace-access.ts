@@ -145,6 +145,7 @@ export type WorkspaceAccessExplanation = {
   workspaceId:string;policyRevision:string;validForMs:number
   memberId:string;assistantId:string|null;contextTeamId:string|null;contextProjectId:string|null
   clearance:'public'|'internal'|'confidential'
+  choices:{assistants:Array<{id:string;name:string}>;projects:Array<{id:string;name:string}>}
   readTeamIds:string[]|null;mutationTeamIds:string[]|null
   projectIds:string[]|null
   paths:Array<{kind:'trusted_role'|'legacy'|'membership'|'read_grant'|'team_read_grant';sourceTeamId:string|null;targetTeamIds:string[]|null;grantId:string|null;expiresAt:string|null}>

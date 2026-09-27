@@ -62,7 +62,7 @@ describe('[COMP:api/workspace-access] current authority explanations and audit',
   it('preserves trusted role and sensitivity gates, without claiming resource permission',async()=>{
     const f=await fixture()
     const owner=await explainWorkspaceAccess(f.workspaceId,f.owner,{targetTeamId:f.team.id,action:'edit',sensitivity:'confidential'})
-    expect(owner.readTeamIds).toBeNull();expect(owner.example.matchesScope).toBe(true)
+    expect(owner.readTeamIds).toBeNull();expect(owner.mutationTeamIds).toBeNull();expect(owner.example.matchesScope).toBe(true)
     expect(owner.paths.map(path=>path.kind)).toEqual(['trusted_role'])
     await f.grant()
     const member=await explainWorkspaceAccess(f.workspaceId,f.member,{targetTeamId:f.team.id,sensitivity:'confidential'})
@@ -76,7 +76,9 @@ describe('[COMP:api/workspace-access] current authority explanations and audit',
     for(const input of [{memberId:f.owner},{memberId:randomUUID()},{targetTeamId:hidden.id},{targetTeamId:randomUUID()},{contextTeamId:hidden.id},{assistantId},{assistantId:randomUUID()},{contextProjectId:randomUUID()}]){
       await expect(explainWorkspaceAccess(f.workspaceId,f.member,input)).rejects.toMatchObject({code:'not_found',status:404})
     }
-    expect(JSON.stringify(await explainWorkspaceAccess(f.workspaceId,f.member,{}))).not.toContain(hidden.id)
+    const projection=await explainWorkspaceAccess(f.workspaceId,f.member,{})
+    expect(JSON.stringify(projection)).not.toContain(hidden.id)
+    expect(projection.choices.assistants).not.toContainEqual(expect.objectContaining({id:assistantId}))
     expect((await explainWorkspaceAccess(f.workspaceId,f.owner,{memberId:f.member})).memberId).toBe(f.member)
   })
   it('intersects the selected assistant and context with the human without owner substitution',async()=>{
@@ -84,6 +86,7 @@ describe('[COMP:api/workspace-access] current authority explanations and audit',
     const assistantId=randomUUID()
     await pool.query("INSERT INTO assistants(id,workspace_id,owner_user_id,name,clearance,team_scope_mode,compartments) VALUES($1,$2,$3,'Fixture assistant','confidential','assigned',NULL)",[assistantId,f.workspaceId,f.owner])
     let explanation=await explainWorkspaceAccess(f.workspaceId,f.owner,{memberId:f.member,assistantId,targetTeamId:f.team.id})
+    expect(explanation.choices.assistants).toContainEqual({id:assistantId,name:'Fixture assistant'})
     expect(explanation.readTeamIds).toEqual([]);expect(explanation.example.matchesScope).toBe(false)
     await execute(f.workspaceId,f.owner,{type:'department.assistant.set',teamId:f.team.id,assistantId,enabled:true})
     explanation=await explainWorkspaceAccess(f.workspaceId,f.owner,{memberId:f.member,assistantId,contextTeamId:f.team.id,targetTeamId:f.team.id})

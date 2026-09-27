@@ -39,11 +39,11 @@ export async function explainWorkspaceAccess(workspaceId:string,userId:string,in
       SELECT g.id,g.compartment_key AS compartment,g.read_all AS "readAll",
         ARRAY(SELECT compartment_key FROM workspace_group_compartment_grants WHERE group_id=g.id) AS bundle
       FROM workspace_groups g WHERE g.workspace_id=$1 AND g.id=ANY($2::uuid[])`,[workspaceId,visibleIds])).rows
-    const projectRows=(await client.query<{id:string}>('SELECT id FROM workspace_projects WHERE workspace_id=$1',[workspaceId])).rows
+    const projectRows=(await client.query<{id:string;name:string}>("SELECT id,name FROM workspace_projects WHERE workspace_id=$1 AND status='active' ORDER BY name,id",[workspaceId])).rows
+    const directory=await getOrganizationChartInTransaction(client,workspaceId,userId,false)
     if(selection.contextProjectId&&!projectRows.some(row=>row.id===selection.contextProjectId))throw new WorkspaceAccessError('not_found',404)
     let assistant:TurnScopeAssistant={id:memberId,workspaceId,kind:'standard',clearance:'confidential',compartments:null,teamScopeMode:'all',projectScopeMode:'all'}
     if(selection.assistantId){
-      const directory=await getOrganizationChartInTransaction(client,workspaceId,userId,false)
       if(!directory.subjects.some(subject=>subject.kind==='assistant'&&subject.id===selection.assistantId))throw new WorkspaceAccessError('not_found',404)
       const row=(await client.query<TurnScopeAssistant>(`SELECT id,workspace_id AS "workspaceId",kind,clearance,compartments,
         team_scope_mode AS "teamScopeMode",project_scope_mode AS "projectScopeMode",
@@ -94,7 +94,8 @@ export async function explainWorkspaceAccess(workspaceId:string,userId:string,in
     const subjectView=memberId===userId?view:await getWorkspaceAccessInTransaction(client,workspaceId,memberId)
     return {workspaceId,policyRevision:view.policyRevision,validForMs:Math.min(view.validForMs,subjectView.validForMs),memberId,
       assistantId:selection.assistantId??null,contextTeamId:selection.contextTeamId??null,contextProjectId:selection.contextProjectId??null,
-      clearance:scope.access.clearance!,readTeamIds:teamIds(scope.access.compartments??null),mutationTeamIds:teamIds(scope.access.mutationCompartments??[]),
+      choices:{assistants:directory.subjects.filter(subject=>subject.kind==='assistant').map(({id,name})=>({id,name})),projects:projectRows},
+      clearance:scope.access.clearance!,readTeamIds:teamIds(scope.access.compartments),mutationTeamIds:teamIds(scope.access.mutationCompartments),
       projectIds:scope.effectiveProjectIds===null?null:projectRows.filter(row=>scope.effectiveProjectIds!.includes(row.id)).map(row=>row.id),paths,
       management:subjectView.teams.filter(team=>visibleIds.includes(team.id)).map(team=>({teamId:team.id,canManageMembers:team.canManageMembers,canApprove:team.canApprove})),
       example:{targetTeamId:target?.id??null,action,sensitivity,matchesScope:canRead(scope.access.clearance!,sensitivity)&&scopeGrantContains(grant===undefined?[]:grant,target?[target.compartment]:[]),resourceAuthorizationRequired:true}}
