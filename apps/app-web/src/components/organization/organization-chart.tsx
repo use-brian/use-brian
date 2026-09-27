@@ -19,7 +19,7 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { DepartmentChangeFeedback } from '@/components/workspace-access/use-department-change';
 import { useOrganizationChange } from './use-organization-change';
 import { SurfaceSkeletonFor } from '@/components/chrome/surface-skeleton';
-import { openWorkspaceSettings } from '@/lib/workspace-settings-events';
+import { organizationHref } from '@/lib/organization-navigation';
 import { OrganizationInitialization } from './organization-initialization';
 
 type Editor = {kind:'unit';unit?:OrganizationUnit} | {kind:'subject';subject:OrganizationSubject;placement?:OrganizationPlacement};
@@ -56,8 +56,8 @@ function OrganizationWorkspace() {
   // Selection stores only viewer-scoped data and is never reused after a scope switch.
   useEffect(()=>{setEditor(null);setQuery('');},[key]);
   const title=<div className="flex flex-wrap items-center justify-between gap-3">
-    <div><h1 className="flex items-center gap-2 text-xl font-semibold"><Network className="size-5"/>{t.title}</h1><p className="mt-1 text-sm text-muted-foreground">{t.description}</p></div>
-    <Button variant="outline" className="min-h-11" onClick={()=>openWorkspaceSettings('ws-access')}><Settings2 className="size-4"/>{t.departments}</Button>
+    <div><h2 className="flex items-center gap-2 text-lg font-semibold"><Network className="size-5"/>{t.structureTab}</h2><p className="mt-1 text-sm text-muted-foreground">{t.description}</p></div>
+    <Link className="flex min-h-11 items-center gap-2 rounded-lg border border-border px-3 text-sm" href={organizationHref(workspaceId,'departments')}><Settings2 className="size-4"/>{t.departments}</Link>
   </div>;
   if(resource.error && !chart) return <main className="space-y-4 p-4 md:p-6">{title}<p role="alert">{t.loadError}</p><Button className="min-h-11" onClick={()=>void resource.refresh()}>{t.retry}</Button></main>;
   if(!chart) return <SurfaceSkeletonFor surface="organization"/>;
@@ -141,7 +141,7 @@ function OrganizationEditor({chart,editor,close,change}:{chart:OrganizationChart
   }
   return <aside aria-label={t.details} className="min-w-0 rounded-xl border border-border bg-card p-4 lg:sticky lg:top-4">
     <div className="mb-3 flex items-center justify-between gap-2"><h2 ref={heading} tabIndex={-1} className="break-words font-semibold">{subject?.name||(editor.kind==='unit'?(unit?t.editUnit:t.addUnit):t.details)}</h2><Button variant="ghost" className="min-h-11" onClick={close}>{t.close}</Button></div>
-    {subject?<div className="mb-4 flex flex-wrap gap-2">{subject.kind==='assistant'?<Link className="flex min-h-11 items-center text-sm text-primary underline" href={`/w/${chart.workspaceId}/studio/assistants?assistant=${subject.id}`}>{t.openAssistant}</Link>:<Button variant="outline" className="min-h-11" onClick={()=>openWorkspaceSettings('ws-members',{workspaceId:chart.workspaceId,memberId:subject.id})}>{t.openMember}</Button>}</div>:null}
+    {subject?<div className="mb-4 flex flex-wrap gap-2">{subject.kind==='assistant'?<Link className="flex min-h-11 items-center text-sm text-primary underline" href={`/w/${chart.workspaceId}/studio/assistants?assistant=${subject.id}`}>{t.openAssistant}</Link>:<Link className="flex min-h-11 items-center text-sm text-primary underline" href={organizationHref(chart.workspaceId,'people',subject.id)}>{t.openMember}</Link>}</div>:null}
     <form onSubmit={submit} className="space-y-4">
       {editor.kind==='unit'?<>
         <label className="grid gap-1 text-sm">{t.unitName}<input required maxLength={120} value={name} onChange={e=>setName(e.target.value)} className={inputClass} disabled={busy||!chart.canManage}/></label>

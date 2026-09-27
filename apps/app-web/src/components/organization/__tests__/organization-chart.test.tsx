@@ -71,8 +71,8 @@ describe('[COMP:app-web/organization-chart] directory and configuration UX',()=>
     expect(host.querySelector('select')).toBeNull();
     await click('Research assistant');
     expect(document.activeElement?.textContent).toBe('Research assistant');
-    expect(host.querySelector('a')?.getAttribute('href')).toBe('/w/workspace-fixture/studio/assistants?assistant=assistant-fixture');
-    await click(en.organization.departments);expect(mocks.settings).toHaveBeenCalledWith('ws-access');
+    expect(host.querySelector('aside a')?.getAttribute('href')).toBe('/w/workspace-fixture/studio/assistants?assistant=assistant-fixture');
+    expect(host.querySelector('a')?.getAttribute('href')).toBe('/w/workspace-fixture/organization?section=departments');
   });
   it('nests a human direct report and their assistant under the manager within a unit',async()=>{
     const chart=fixture();chart.placements.push({id:'report-placement',unitId:'unit-1',userId:'unassigned-fixture',assistantId:null,isPrimary:true,reportsToUserId:'member-fixture',accountableUserId:null,version:'1'});
@@ -115,7 +115,7 @@ describe('[COMP:app-web/organization-chart] directory and configuration UX',()=>
     expect(host.textContent).not.toContain(en.organization.adminHint);
     expect(host.textContent).not.toContain(en.organization.addUnit);
     await click('Riley');expect(host.textContent).not.toContain(en.organization.save);
-    await click(en.organization.openMember);expect(mocks.settings).toHaveBeenCalledWith('ws-members',{workspaceId:'workspace-fixture',memberId:'member-fixture'});
+    expect(host.querySelector('aside a')?.getAttribute('href')).toBe('/w/workspace-fixture/organization?section=people&member=member-fixture');
     expect(mocks.save).not.toHaveBeenCalled();
   });
   it('searches only projected data and supports clearing the search',async()=>{

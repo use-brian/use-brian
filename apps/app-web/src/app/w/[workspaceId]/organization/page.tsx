@@ -1,2 +1,2 @@
-import { OrganizationChartView } from '@/components/organization/organization-chart';
-export default function OrganizationPage() { return <OrganizationChartView />; }
+import { OrganizationHub } from '@/components/organization/organization-hub';
+export default function OrganizationPage() { return <OrganizationHub />; }

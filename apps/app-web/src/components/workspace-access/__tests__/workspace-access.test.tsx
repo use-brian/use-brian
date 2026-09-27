@@ -159,7 +159,6 @@ describe('[COMP:app-web/workspace-access] request and administration paths',()=>
     expect(button(t.reject).disabled).toBe(false);expect(button(t.cancel).disabled).toBe(false)
     expect(button(t.revoke).disabled).toBe(false)
     await click(t.requestAccess);expect(host.querySelector('form')).toBeNull();expect(mocks.save).not.toHaveBeenCalled()
-    await click(t.organization);expect(mocks.settings).toHaveBeenCalledWith('ws-organization')
     await click(t.revoke);expect(mocks.prepare).toHaveBeenCalledWith('workspace-fixture',{type:'access.grant.revoke',grantId:'grant',reason:t.revoke},'15',expect.any(String))
   });
   it('explains a server readiness refusal after a previously ready review',async()=>{
@@ -176,10 +175,9 @@ describe('[COMP:app-web/workspace-access] request and administration paths',()=>
     expect(mocks.prepare).toHaveBeenCalledWith('workspace-fixture',{type:'access.request.create',targetTeamId:'research',beneficiaryKind:'member',beneficiaryId:'member-fixture',reason:'Review launch requirements',days:30,ongoing:false},'15',expect.any(String));
     expect(mocks.confirm).toHaveBeenCalledWith(expect.objectContaining({description:expect.stringContaining(t.readOnly)}));
   });
-  it('links administrators to department setup and the organization chart',async()=>{
+  it('links administrators to department setup in the same home',async()=>{
     mocks.fetch.mockResolvedValue({...fixture(),canAdminister:true});await render();expect(host.textContent).toContain(t.adminHint);
-    await click(t.configureTeams);expect(mocks.settings).toHaveBeenCalledWith('ws-teams');
-    await click(t.organization);expect(mocks.settings).toHaveBeenCalledWith('ws-organization');
+    expect(host.querySelector('a')?.getAttribute('href')).toBe('/w/workspace-fixture/organization?section=departments');
     await click(t.edit);expect(host.textContent).toContain(t.managerSave);expect(host.textContent).toContain(t.manageMembers);
   });
   it('submits the exact reviewed request version and policy revision, and explains stale reviews',async()=>{

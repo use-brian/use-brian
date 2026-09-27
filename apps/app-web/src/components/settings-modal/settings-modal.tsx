@@ -20,6 +20,9 @@
  */
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import { useWorkspaceContext } from "@/lib/workspace-context";
+import { organizationSettingsHref } from "@/lib/organization-navigation";
 import { createPortal } from "react-dom";
 import {
   Select,
@@ -38,12 +41,9 @@ import { PrivacySection } from "./sections/privacy-section";
 import { BillingSection } from "./sections/billing-section";
 import { ModelsSection } from "./sections/models-section";
 import { DomainsSection } from "./sections/domains-section";
-import { ProjectsContextSection, TeamsContextSection } from "./sections/context-scopes-section";
-import { WorkspaceAccessView } from "@/components/workspace-access/workspace-access";
-import { OrganizationChartView } from "@/components/organization/organization-chart";
+import { ProjectsContextSection } from "./sections/context-scopes-section";
 import {
   WorkspaceGeneralSection,
-  WorkspaceMembersSection,
 } from "./workspace-sections";
 
 import type { SettingsSection } from '@/lib/workspace-settings-events';
@@ -68,10 +68,7 @@ const ACCOUNT_SECTIONS: SettingsSection[] = [
 ];
 const WORKSPACE_SECTIONS: SettingsSection[] = [
   "ws-organization",
-  "ws-access",
   "ws-general",
-  "ws-members",
-  "ws-teams",
   "ws-projects",
   // Provider connections and model routing share the Models section.
   // Domains (custom-domains.md + platform-subdomains.md) — the workspace-level
@@ -85,15 +82,12 @@ const WORKSPACE_SECTIONS: SettingsSection[] = [
   "ws-plan",
 ];
 // The OSS single-player edition has no billing: drop the Plan + Usage sections
-// entirely. Members stays (relabeled "Teammates"), routed to the hosted-upgrade
-// pitch instead of the live members manager. Browser profiles live in the
+// entirely. People and department administration share the Organization shortcut.
+// Browser profiles live in the
 // Browsers mini app in both editions.
 const OSS_WORKSPACE_SECTIONS: SettingsSection[] = [
   "ws-organization",
-  "ws-access",
   "ws-general",
-  "ws-members",
-  "ws-teams",
   "ws-projects",
   "ws-models",
   "ws-domains",
@@ -108,14 +102,10 @@ export function workspaceSettingsSections(
   return capabilities.billing ? WORKSPACE_SECTIONS : OSS_WORKSPACE_SECTIONS;
 }
 
-export function workspaceMembersSectionKind(
-  capabilities: DeploymentCapabilities,
-): "manage" | "upgrade" {
-  return capabilities.teammateManagement ? "manage" : "upgrade";
-}
-
 export function SettingsModal({ open, initialSection = "profile", initialMemberTarget, onClose }: Props) {
   const t = useT();
+  const router = useRouter();
+  const { workspaceId } = useWorkspaceContext();
   const oss = isOssEdition();
   const workspaceSections = workspaceSettingsSections(deploymentCapabilities());
   const [section, setSection] = useState<SettingsSection>(initialSection);
@@ -164,6 +154,13 @@ export function SettingsModal({ open, initialSection = "profile", initialMemberT
     }
   }
 
+  const organizationDestination = organizationSettingsHref(workspaceId, section, memberTarget);
+  useEffect(() => {
+    if (!open || !organizationDestination) return;
+    router.push(organizationDestination);
+    onClose();
+  }, [open, organizationDestination, router, onClose]);
+
   const selectSection = (s: SettingsSection) => {
     setMemberTarget(undefined);
     setSection(s);
@@ -188,7 +185,7 @@ export function SettingsModal({ open, initialSection = "profile", initialMemberT
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
 
-  if (!open || !mounted) return null;
+  if (!open || !mounted || organizationDestination) return null;
 
   // Portal to <body> so the fixed overlay escapes the sidebar's transformed
   // ancestor (the chrome wrapper carries `md:translate-x-0`, which would
@@ -262,7 +259,7 @@ export function SettingsModal({ open, initialSection = "profile", initialMemberT
           </div>
 
           <div key={activeSection} className="min-h-0 min-w-0 flex-1 overflow-y-auto p-4 sm:p-6">
-            <SectionBody section={section} onClose={onClose} memberTarget={memberTarget} clearMember={()=>setMemberTarget(undefined)} />
+            <SectionBody section={section} onClose={onClose} />
             {oss && <div className="sm:hidden"><OssVersionFooter /></div>}
           </div>
 
@@ -364,13 +361,9 @@ function SectionGroup({
 function SectionBody({
   section,
   onClose,
-  memberTarget,
-  clearMember,
 }: {
   section: SettingsSection;
   onClose: () => void;
-  memberTarget?:SettingsMemberTarget;
-  clearMember:()=>void;
 }) {
   switch (section) {
     case "profile":
@@ -384,15 +377,11 @@ function SectionBody({
     case "ws-general":
       return <WorkspaceGeneralSection onWorkspaceDeleted={onClose} />;
     case "ws-members":
-      return memberTarget || workspaceMembersSectionKind(deploymentCapabilities()) === "manage"
-        ? <WorkspaceMembersSection memberTarget={memberTarget} clearMember={clearMember} managementEnabled={deploymentCapabilities().teammateManagement} />
-        : <HostedUpgradeSection />;
     case "ws-teams":
-      return <TeamsContextSection />;
     case "ws-access":
-      return <WorkspaceAccessView />;
     case "ws-organization":
-      return <OrganizationChartView />;
+      // The modal redirects these compatibility entries to the canonical hub.
+      return null;
     case "ws-projects":
       return <ProjectsContextSection />;
     case "ws-llm-key":

@@ -172,10 +172,10 @@ export function TeamsContextSection() {
         <p className="mt-1 text-sm text-muted-foreground">{t.teamsDescription}</p>
       </div>
       {canManage ? (
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <input value={name} onChange={(event) => setName(event.target.value)} placeholder={t.teamNamePlaceholder}
-            className="h-9 flex-1 rounded-lg border border-border bg-background px-3 text-[16px] outline-none focus-visible:border-ring md:text-sm" />
-          <Button onClick={() => void create()} disabled={change.busy || !name.trim()}><Plus className="size-4" />{t.createTeam}</Button>
+            aria-label={t.teamNameLabel} className="min-h-11 min-w-0 flex-1 rounded-lg border border-border bg-background px-3 text-[16px] outline-none focus-visible:border-ring md:text-sm" />
+          <Button className="min-h-11" onClick={() => void create()} disabled={change.busy || !name.trim()}><Plus className="size-4" />{t.createTeam}</Button>
         </div>
       ) : null}
       <DepartmentChangeFeedback change={change}/>
@@ -193,19 +193,19 @@ export function TeamsContextSection() {
                   <label className="grid gap-1 text-xs text-muted-foreground">
                     {t.teamNameLabel}
                     <input value={editName} onChange={(event) => setEditName(event.target.value)}
-                      className="h-9 rounded-lg border border-border bg-background px-3 text-[16px] text-foreground outline-none focus-visible:border-ring md:text-sm" />
+                      className="min-h-11 min-w-0 rounded-lg border border-border bg-background px-3 text-[16px] text-foreground outline-none focus-visible:border-ring md:text-sm" />
                   </label>
                   <label className="grid gap-1 text-xs text-muted-foreground">
                     {t.teamColorLabel}
                     <input value={editColor} onChange={(event) => setEditColor(event.target.value)} placeholder={t.teamColorPlaceholder}
-                      className="h-9 rounded-lg border border-border bg-background px-3 text-[16px] text-foreground outline-none focus-visible:border-ring md:text-sm" />
+                      className="min-h-11 min-w-0 rounded-lg border border-border bg-background px-3 text-[16px] text-foreground outline-none focus-visible:border-ring md:text-sm" />
                   </label>
                   <label className="grid gap-1 text-xs text-muted-foreground sm:col-span-2">
                     {t.teamDescriptionLabel}
                     <input value={editDescription} onChange={(event) => setEditDescription(event.target.value)}
-                      className="h-9 rounded-lg border border-border bg-background px-3 text-[16px] text-foreground outline-none focus-visible:border-ring md:text-sm" />
+                      className="min-h-11 min-w-0 rounded-lg border border-border bg-background px-3 text-[16px] text-foreground outline-none focus-visible:border-ring md:text-sm" />
                   </label>
-                  <Button size="sm" variant="outline" className="self-start" onClick={() => void saveTeamDetails()} disabled={change.busy || !editName.trim()}>
+                  <Button size="sm" variant="outline" className="min-h-11 self-start" onClick={() => void saveTeamDetails()} disabled={change.busy || !editName.trim()}>
                     <Check className="size-4" />{t.saveTeamDetails}
                   </Button>
                 </div>
@@ -277,8 +277,8 @@ export function TeamsContextSection() {
                   </div>
                 </div>
               </div>
-              {canManage ? <Button size="sm" disabled={change.busy} onClick={() => void saveGrants()}><Check className="size-4" />{t.saveAccess}</Button> : null}
-              {canManage && selected.status === "active" ? <Button variant="ghost" size="sm" disabled={change.busy} onClick={() => void archive()}><Archive className="size-4" />{t.archiveTeam}</Button> : null}
+              {canManage ? <Button size="sm" className="min-h-11" disabled={change.busy} onClick={() => void saveGrants()}><Check className="size-4" />{t.saveAccess}</Button> : null}
+              {canManage && selected.status === "active" ? <Button variant="ghost" size="sm" className="min-h-11" disabled={change.busy} onClick={() => void archive()}><Archive className="size-4" />{t.archiveTeam}</Button> : null}
             </div>
           ) : null}
         </div>

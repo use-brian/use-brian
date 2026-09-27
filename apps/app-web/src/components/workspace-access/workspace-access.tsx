@@ -15,7 +15,8 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { SearchableSelect } from '@/components/ui/searchable-select';
 import { useDepartmentChange } from './use-department-change';
 import { SurfaceSkeletonFor } from '@/components/chrome/surface-skeleton';
-import { openWorkspaceSettings } from '@/lib/workspace-settings-events';
+import Link from 'next/link';
+import { organizationHref } from '@/lib/organization-navigation';
 import { ScopeReviewPanel } from './scope-review';
 import {AccessExplanationPanel,AccessEventsPanel} from './access-inspection';
 
@@ -50,7 +51,7 @@ function WorkspaceAccessPanel() {
     return()=>{window.removeEventListener(ORGANIZATION_CHANGED_EVENT,purge);window.removeEventListener(WORKSPACE_IDENTITY_REFRESH_EVENT,purge);};
   },[workspaceId]);
   const save:Save=async(command,description)=>data?Boolean(await change.save(command,description,data.policyRevision)):false;
-  const header=<header className="space-y-2"><h1 className="text-xl font-semibold">{t.title}</h1><p className="text-sm text-muted-foreground">{t.description}</p><p className="rounded-lg border border-border bg-muted/30 p-3 text-sm">{t.boundaryHint}{data?.canAdminister?` ${t.adminHint}`:''}</p></header>;
+  const header=<header className="space-y-2"><h2 className="text-lg font-semibold">{t.title}</h2><p className="text-sm text-muted-foreground">{t.description}</p><p className="rounded-lg border border-border bg-muted/30 p-3 text-sm">{t.boundaryHint}{data?.canAdminister?` ${t.adminHint}`:''}</p></header>;
   // Review owns its independently expiring administrator projection. A refresh
   // of the parent must not discard an in-progress saved-review selection.
   if(reviewOpen)return <ScopeReviewPanel teams={data?.canAdminister?data.teams:[]} close={()=>setReviewOpen(false)}/>;
@@ -58,7 +59,7 @@ function WorkspaceAccessPanel() {
   return <main className="min-w-0 space-y-6 p-4 md:p-6">{header}
     {data.readiness?.ready!==true?<p role="status" className="rounded-lg border border-border bg-muted/30 p-3 text-sm">{t.notReady}</p>:null}
     {data.canAdminister?<Button variant="outline" className="min-h-11" onClick={()=>setReviewOpen(true)}>{t.reviewData}</Button>:null}
-    <nav className="flex flex-wrap gap-2"><Button variant="outline" className="min-h-11" onClick={()=>openWorkspaceSettings('ws-organization')}>{t.organization}</Button>{data.canAdminister?<Button variant="outline" className="min-h-11" onClick={()=>openWorkspaceSettings('ws-teams')}>{t.configureTeams}</Button>:null}<Button variant="ghost" className="min-h-11" onClick={()=>{change.clearError();invalidateSurfaceCache(key);}}>{t.reload}</Button></nav>
+    <nav className="flex flex-wrap gap-2">{data.canAdminister?<Link className="flex min-h-11 items-center rounded-lg border border-border px-3 text-sm" href={organizationHref(workspaceId,'departments')}>{t.configureTeams}</Link>:null}<Button variant="ghost" className="min-h-11" onClick={()=>{change.clearError();invalidateSurfaceCache(key);}}>{t.reload}</Button></nav>
     <Button variant="outline" className="min-h-11" onClick={()=>setInspection('events')}>{t.accessAudit}</Button>
     {inspection==='events'?<AccessEventsPanel key={data.policyRevision} data={data} close={()=>setInspection(null)}/>:inspection?<AccessExplanationPanel key={`${inspection.memberId}:${data.policyRevision}`} data={data} memberId={inspection.memberId} close={()=>setInspection(null)}/>:null}
     {error||resource.error?<p role="alert" className="text-sm text-destructive">{error||t.loadError}</p>:null}

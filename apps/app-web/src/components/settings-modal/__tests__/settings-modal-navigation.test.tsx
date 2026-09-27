@@ -11,6 +11,9 @@ import { resetSurfaceCache } from '@/lib/surface-cache';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
+const navigation = vi.hoisted(() => ({ push: vi.fn() }));
+vi.mock("next/navigation", () => ({ useRouter: () => navigation }));
+
 const edition = vi.hoisted(() => ({ teammateManagement: true }));
 
 vi.mock("@/lib/edition", async (importOriginal) => ({
@@ -56,6 +59,7 @@ beforeEach(() => {
   edition.teammateManagement = true;
   resetSurfaceCache();
   onClose.mockClear();
+  navigation.push.mockClear();
   host = document.createElement("div");
   document.body.append(host);
   root = createRoot(host);
@@ -66,7 +70,7 @@ afterEach(async () => {
   host.remove();
 });
 
-async function render(open = true, initialSection: SettingsSection = "ws-members", initialMemberTarget?:SettingsMemberTarget) {
+async function render(open = true, initialSection: SettingsSection = "profile", initialMemberTarget?:SettingsMemberTarget) {
   await act(async () => root.render(
     <I18nProvider locale="en" dict={en}>
       {/* jsdom does not build Tailwind; supply its base phone visibility rule. */}
@@ -101,44 +105,24 @@ async function choose(label: string) {
 }
 
 describe("[COMP:app-web/settings-modal] mobile section navigation", () => {
-  it('opens the exact selected person and offers a path back to the full roster',async()=>{
-    await render(true,'ws-members',{workspaceId:'workspace-1',memberId:'user-2'});
-    expect(document.body.textContent).toContain('Casey');expect(document.body.textContent).not.toContain('Riley');
-    expect(document.querySelector('textarea')).toBeNull();
-    const showAll=[...document.querySelectorAll<HTMLButtonElement>('button')].find(b=>b.textContent===en.organization.showAllMembers)!;
-    await act(async()=>showAll.click());
-    expect(document.body.textContent).toContain('Riley');expect(document.querySelector('textarea')).not.toBeNull();
-  });
-  it('shows read-only focused person details in self-hosted without management controls',async()=>{
-    edition.teammateManagement=false;
-    await render(true,'ws-members',{workspaceId:'workspace-1',memberId:'user-2'});
-    expect(document.querySelector('h2')?.textContent).toBe(en.organization.memberDetails);
-    expect(document.body.textContent).toContain('Casey');
-    expect(document.body.textContent).not.toContain('Riley');
-    expect(document.querySelector('textarea')).toBeNull();
-    expect([...document.querySelectorAll('button')].some(b=>b.textContent===en.organization.showAllMembers)).toBe(false);
-    expect([...document.querySelectorAll('button')].some(b=>b.textContent===en.workspaceAccess.organization)).toBe(true);
-  });
   it.each([
-    {workspaceId:'workspace-1',memberId:'missing'},
-    {workspaceId:'another-workspace',memberId:'user-2'},
-  ])('never substitutes another person for an unavailable scoped target',async target=>{
-    await render(true,'ws-members',target);
-    expect(document.body.textContent).toContain(en.organization.memberUnavailable);
-    expect(document.body.textContent).not.toContain('Casey');expect(document.body.textContent).not.toContain('Riley');
+    ['ws-organization', '/w/workspace-1/organization'],
+    ['ws-teams', '/w/workspace-1/organization?section=departments'],
+    ['ws-access', '/w/workspace-1/organization?section=access'],
+    ['ws-members', '/w/workspace-1/organization?section=people'],
+  ] as const)('redirects %s to its single Organization home', async (section, href) => {
+    await render(true, section); expect(navigation.push).toHaveBeenCalledWith(href); expect(onClose).toHaveBeenCalled();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
   });
-  it('updates the selected person while settings remain open',async()=>{
-    await render(true,'ws-members',{workspaceId:'workspace-1',memberId:'user-2'});
-    expect(document.body.textContent).toContain('Casey');
-    await render(true,'ws-members',{workspaceId:'workspace-1',memberId:'user-1'});
-    expect(document.body.textContent).toContain('Riley');expect(document.body.textContent).not.toContain('Casey');
+  it('preserves a selected person only within the originating workspace', async () => {
+    await render(true, 'ws-members', {workspaceId:'workspace-1', memberId:'user-2'});
+    expect(navigation.push).toHaveBeenLastCalledWith('/w/workspace-1/organization?section=people&member=user-2');
+    await render(true, 'ws-members', {workspaceId:'another-workspace', memberId:'user-2'});
+    expect(navigation.push).toHaveBeenLastCalledWith('/w/workspace-1/organization');
   });
-  it("shows the invite form immediately when opened at Members", async () => {
-    await render(false);
-    await render();
-    expectVisible(document.querySelector(`textarea[placeholder="${en.workspaceDetailInline.inviteEmailsPlaceholder}"]`));
-    expect(picker().textContent).toContain(en.chrome.settingsModal.workspace.members);
-    expect(picker().getAttribute("aria-expanded")).toBe("false");
+  it('opens Organization from the compact Settings picker', async () => {
+    await render(); await choose(en.organization.title);
+    expect(navigation.push).toHaveBeenCalledWith('/w/workspace-1/organization'); expect(onClose).toHaveBeenCalled();
   });
 
   it("switches sections through the compact picker and resets on reopening", async () => {
@@ -150,8 +134,8 @@ describe("[COMP:app-web/settings-modal] mobile section navigation", () => {
     expect(onClose).not.toHaveBeenCalled();
     await render(false);
     await render();
-    expectVisible(document.querySelector("textarea"));
-    expect(picker().textContent).toContain(en.chrome.settingsModal.workspace.members);
+    expectVisible(document.querySelector("h2"));
+    expect(picker().textContent).toContain(en.chrome.settingsModal.account.profile);
   });
 
   it("dismisses the open picker with Escape before closing settings", async () => {
