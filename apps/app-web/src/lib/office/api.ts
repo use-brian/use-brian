@@ -266,10 +266,12 @@ export async function getOfficeJob(jobId: string): Promise<OfficeJob> {
   return metadata<OfficeJob, {job: OfficeJob}>(`jobs/${encodeURIComponent(jobId)}`, "office_job_failed", body => body.job);
 }
 
-export async function waitForOfficeJob(jobId: string, timeoutMs = 180_000): Promise<OfficeJob> {
+export async function waitForOfficeJob(jobId: string, timeoutMs = 180_000, isCurrent: () => boolean = () => true): Promise<OfficeJob> {
   const deadline = Date.now() + timeoutMs;
   while (true) {
+    if (!isCurrent()) throw new Error("office_job_owner_expired");
     const job = await getOfficeJob(jobId);
+    if (!isCurrent()) throw new Error("office_job_owner_expired");
     if (["completed", "failed", "cancelled", "needs_input"].includes(job.status)) return job;
     if (Date.now() >= deadline) throw new Error("office_job_timeout");
     await new Promise((resolve) => setTimeout(resolve, 750));

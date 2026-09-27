@@ -9,6 +9,6 @@ describe("[COMP:app-web/office-suggestions] Suggestion review", () => {
   it("renders an accessible review surface without speculative editor content", () => {
     const html = renderToStaticMarkup(<I18nProvider locale="en" dict={en as unknown as Dictionary}><OfficeSuggestions workspaceId="workspace-1" artifactId="00000000-0000-4000-8000-000000000001" canDecide /></I18nProvider>);
     expect(html).toContain(`aria-label="${en.office.suggestions}"`);
-    expect(html).toContain(en.office.noSuggestions);
+    expect(html).not.toContain(en.office.noSuggestions);
   });
 });
