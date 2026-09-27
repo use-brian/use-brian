@@ -1,7 +1,7 @@
 "use client";
 
 /** Explicit legacy classification with persisted previews. [COMP:app-web/scope-review] */
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ScopeReview, ScopeReviewAction, ScopeReviewCommand, ScopeReviewKind } from '@use-brian/shared';
 import { useWorkspaceContext } from '@/lib/workspace-context';
 import { useT } from '@/lib/i18n/client';
@@ -19,32 +19,53 @@ import { SurfaceSkeletonFor } from '@/components/chrome/surface-skeleton';
 const fieldClass='min-h-11 w-full rounded-lg border border-border bg-background px-3 text-[16px] md:text-sm';
 const knownImpact=(job:ScopeReview)=>[...new Map(job.items.flatMap(item=>item.impact?.descendants??[]).map(row=>[row.resourceId,row])).values()];
 export function ScopeReviewPanel({teams,close}:{teams:Array<{id:string;name:string}>;close:()=>void}) {
+  const {workspaceId,me}=useWorkspaceContext();
+  return <ScopeReviewWorkspace key={`${workspaceId}:${me.id}`} teams={teams} close={close}/>;
+}
+function ScopeReviewWorkspace({teams,close}:{teams:Array<{id:string;name:string}>;close:()=>void}) {
   const {workspaceId,me}=useWorkspaceContext(),t=useT().scopeReview,a=useT().workspaceAccess;
   const [kind,setKind]=useState<ScopeReviewKind>('memory'),[after,setAfter]=useState(''),[reviewId,setReviewId]=useState(''),[reviewAfter,setReviewAfter]=useState('');
   const [selected,setSelected]=useState<string[]>([]),[action,setAction]=useState<ScopeReviewAction>('confirm_general'),[team,setTeam]=useState(''),[reason,setReason]=useState('');
   const [busy,setBusy]=useState(false),[error,setError]=useState('');
+  const operation=useRef<{controller:AbortController;submitted:boolean}|null>(null);
+  const cancelConfirmation=useCallback(()=>{if(!operation.current?.submitted)operation.current?.controller.abort();},[]);
   const key=scopeReviewCacheKey(workspaceId,me.id,kind,after,reviewId,reviewAfter);
   const resource=useCachedResource(key,()=>fetchScopeReview(workspaceId,kind,after||undefined,reviewId||undefined,reviewAfter||undefined));
-  const data=useProtectedProjection(key,resource.data,()=>setSelected([]),resource.refresh);
+  const data=useProtectedProjection(key,resource.data,()=>{cancelConfirmation();setSelected([]);},resource.refresh);
   useEffect(()=>{
-    const purge=(event:Event)=>{const w=(event as CustomEvent<{workspaceId?:string}>).detail?.workspaceId;if(w&&w!==workspaceId)return;setSelected([]);invalidateSurfaceCache(`scope-review:${workspaceId}:`);};
+    const purge=(event:Event)=>{const w=(event as CustomEvent<{workspaceId?:string}>).detail?.workspaceId;if(w&&w!==workspaceId)return;if(event.type===WORKSPACE_IDENTITY_REFRESH_EVENT)operation.current?.controller.abort();else cancelConfirmation();setSelected([]);invalidateSurfaceCache(`scope-review:${workspaceId}:`);};
+    const visible=()=>{if(document.visibilityState==='visible')cancelConfirmation();};
     window.addEventListener(ORGANIZATION_CHANGED_EVENT,purge);window.addEventListener(WORKSPACE_IDENTITY_REFRESH_EVENT,purge);
-    return()=>{window.removeEventListener(ORGANIZATION_CHANGED_EVENT,purge);window.removeEventListener(WORKSPACE_IDENTITY_REFRESH_EVENT,purge);};
-  },[workspaceId]);
+    window.addEventListener('focus',cancelConfirmation);document.addEventListener('visibilitychange',visible);
+    return()=>{operation.current?.controller.abort();window.removeEventListener(ORGANIZATION_CHANGED_EVENT,purge);window.removeEventListener(WORKSPACE_IDENTITY_REFRESH_EVENT,purge);window.removeEventListener('focus',cancelConfirmation);document.removeEventListener('visibilitychange',visible);};
+  },[workspaceId,cancelConfirmation]);
   const save=async(command:ScopeReviewCommand)=>{
-    if(busy)return;
+    if(operation.current||!data)return;
     const job=data?.selectedReview;
     if(command.type!=='scope.review.preview'){
       if(!job||job.id!==command.reviewId||job.version!==command.expectedVersion||job.payloadHash!==command.payloadHash)return;
       if(command.type==='scope.review.apply'&&job.items.some(item=>!item.impact))return;
+    }
+    const active={controller:new AbortController(),submitted:false};
+    operation.current=active;setBusy(true);setError('');
+    const remaining=()=>Math.min(data.projectionDeadline-Date.now(),data.projectionMonotonicDeadline-performance.now());
+    let timeout:ReturnType<typeof setTimeout>|undefined;
+    try{
+      if(!Number.isFinite(remaining())||remaining()<=0)return;
+      timeout=setTimeout(()=>active.controller.abort(),Math.ceil(remaining()));
+      if(command.type!=='scope.review.preview'&&job){
       const target=job.targetTeamId?teams.find(team=>team.id===job.targetTeamId)?.name??job.targetCompartment:t.general;
       const impact=knownImpact(job);
-      if(!await confirmDialog({title:t.confirmTitle,description:`${t[job.action]}: ${target}. ${job.reason}. ${job.items.filter(item=>item.status==='pending').length} ${t.pending}. ${command.type==='scope.review.cancel'?t.cancelHint:`${t.applyHint} ${t.impactCount}: ${impact.length}. ${t.alreadyHeld}: ${impact.filter(row=>row.held).length}. ${t.impactHint}`} ${t.generalHint} ${t.coverage}`,confirmLabel:a.confirm,cancelLabel:a.cancel}))return;
+      if(!await confirmDialog({signal:active.controller.signal,title:t.confirmTitle,description:`${t[job.action]}: ${target}. ${job.reason}. ${job.items.filter(item=>item.status==='pending').length} ${t.pending}. ${command.type==='scope.review.cancel'?t.cancelHint:`${t.applyHint} ${t.impactCount}: ${impact.length}. ${t.alreadyHeld}: ${impact.filter(row=>row.held).length}. ${t.impactHint}`} ${t.generalHint} ${t.coverage}`,confirmLabel:a.confirm,cancelLabel:a.cancel}))return;
+      }
+      if(active.controller.signal.aborted||remaining()<=0)return;
+      clearTimeout(timeout);timeout=undefined;active.submitted=true;
+      const result=await saveScopeReview(workspaceId,command);
+      if(active.controller.signal.aborted)return;
+      setReviewId(result.id);setSelected([]);invalidateSurfaceCache(`scope-review:${workspaceId}:`);
     }
-    setBusy(true);setError('');
-    try{const result=await saveScopeReview(workspaceId,command);setReviewId(result.id);setSelected([]);invalidateSurfaceCache(`scope-review:${workspaceId}:`);}
-    catch(error){setError(error instanceof Error&&error.message==='scope_review_impact_too_large'?t.impactTooLarge:error instanceof Error&&error.message==='scope_review_impact_missing'?t.impactMissing:t.saveError);invalidateSurfaceCache(key);}
-    finally{setBusy(false);}
+    catch(error){if(!active.controller.signal.aborted){setError(error instanceof Error&&error.message==='scope_review_impact_too_large'?t.impactTooLarge:error instanceof Error&&error.message==='scope_review_impact_missing'?t.impactMissing:t.saveError);invalidateSurfaceCache(key);}}
+    finally{clearTimeout(timeout);if(operation.current===active){operation.current=null;setBusy(false);}}
   };
   const sensitivityLabel=(value:string)=>value==='public'?t.public:value==='internal'?t.internal:value==='confidential'?t.confidential:t.unknown;
   const picker=(label:string,value:string,onChange:(v:string)=>void,items:Array<{value:string;label:string}>)=><label className="grid min-w-0 gap-1 text-sm"><span>{label}</span><SearchableSelect aria-label={label} placeholder={label} value={value} onValueChange={onChange} items={items} disabled={busy} className="min-h-11 min-w-0 max-w-full" searchPlaceholder={a.search} emptyMessage={a.noResults}/></label>;

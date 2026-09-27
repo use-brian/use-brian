@@ -14,7 +14,8 @@ import { WORKSPACE_IDENTITY_REFRESH_EVENT } from '@/lib/workspace-identity-event
 
 (globalThis as {IS_REACT_ACT_ENVIRONMENT?:boolean}).IS_REACT_ACT_ENVIRONMENT=true;
 const mocks=vi.hoisted(()=>({fetch:vi.fn(),save:vi.fn(),confirm:vi.fn(),close:vi.fn()}));
-vi.mock('@/lib/workspace-context',()=>({useWorkspaceContext:()=>({workspaceId:'review-workspace',me:{id:'admin'}})}));
+const viewer=vi.hoisted(()=>({workspaceId:'review-workspace',me:{id:'admin'}}));
+vi.mock('@/lib/workspace-context',()=>({useWorkspaceContext:()=>viewer}));
 vi.mock('@/lib/surface-prefetch',()=>({scopeReviewCacheKey:(...parts:string[])=>`scope-review:${parts.join(':')}`}));
 vi.mock('@/lib/api/workspace-access',()=>({fetchScopeReview:mocks.fetch,saveScopeReview:mocks.save,ORGANIZATION_CHANGED_EVENT:'brian:organization-changed'}));
 vi.mock('@/components/ui/confirm-dialog',()=>({confirmDialog:mocks.confirm}));
@@ -30,8 +31,8 @@ async function render(){await act(async()=>root.render(<I18nProvider locale="en"
 async function click(label:string){const button=[...host.querySelectorAll<HTMLButtonElement>('button')].find(b=>b.textContent?.trim()===label);expect(button).toBeDefined();await act(async()=>button!.click());}
 async function select(id:string){await act(async()=>host.querySelector<HTMLButtonElement>(`[role="checkbox"][aria-label="${t.select} ${id}"]`)!.click());}
 async function reason(){await act(async()=>{const input=host.querySelector('textarea')!;Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value')!.set!.call(input,'Classify selected source');input.dispatchEvent(new Event('input',{bubbles:true}));});}
-beforeEach(()=>{invalidateSurfaceCache('scope-review:');mocks.fetch.mockReset().mockImplementation(async()=>protectedData(fixture()));mocks.save.mockReset().mockResolvedValue(protectedData(job()));mocks.confirm.mockReset().mockResolvedValue(true);mocks.close.mockReset();host=document.createElement('div');document.body.append(host);root=createRoot(host);});
-afterEach(async()=>{await act(async()=>root.unmount());host.remove();invalidateSurfaceCache('scope-review:');});
+beforeEach(()=>{viewer.workspaceId='review-workspace';viewer.me={id:'admin'};invalidateSurfaceCache('scope-review:');mocks.fetch.mockReset().mockImplementation(async()=>protectedData(fixture()));mocks.save.mockReset().mockResolvedValue(protectedData(job()));mocks.confirm.mockReset().mockResolvedValue(true);mocks.close.mockReset();host=document.createElement('div');document.body.append(host);root=createRoot(host);});
+afterEach(async()=>{await act(async()=>root.unmount());host.remove();invalidateSurfaceCache('scope-review:');vi.useRealTimers();});
 
 describe('[COMP:app-web/scope-review] explicit administrator review path',()=>{
   it('shows coverage and retained protections and previews only explicitly selected records',async()=>{
@@ -61,6 +62,61 @@ describe('[COMP:app-web/scope-review] explicit administrator review path',()=>{
   it('does not apply when confirmation is cancelled',async()=>{
     const saved=job();mocks.fetch.mockResolvedValue(protectedData({...fixture(),selectedReview:saved}));mocks.confirm.mockResolvedValue(false)
     await render();await click(t.apply);expect(mocks.save).not.toHaveBeenCalled()
+  })
+  it('opens one confirmation and submits once for same-tick repeated apply',async()=>{
+    mocks.fetch.mockResolvedValue(protectedData({...fixture(),selectedReview:job()}));
+    let confirm!:(answer:boolean)=>void;
+    mocks.confirm.mockImplementation(()=>new Promise<boolean>(resolve=>{confirm=resolve;}));
+    await render();
+    const apply=[...host.querySelectorAll<HTMLButtonElement>('button')].find(b=>b.textContent===t.apply)!;
+    await act(async()=>{apply.click();apply.click();});
+    expect(mocks.confirm).toHaveBeenCalledTimes(1);expect(mocks.save).not.toHaveBeenCalled();
+    await act(async()=>confirm(true));
+    expect(mocks.save).toHaveBeenCalledTimes(1);
+  })
+  it.each(['permission','focus','organization','viewer','workspace','unmount'] as const)('cancels a pending confirmation on %s and refuses a late answer',async change=>{
+    mocks.fetch.mockResolvedValue(protectedData({...fixture(),selectedReview:job()}));
+    let confirm!:(answer:boolean)=>void;
+    mocks.confirm.mockImplementation(()=>new Promise<boolean>(resolve=>{confirm=resolve;}));
+    await render();await click(t.apply);
+    const signal=mocks.confirm.mock.calls[0][0].signal as AbortSignal;
+    expect(signal.aborted).toBe(false);
+    if(change==='viewer'){viewer.me={id:'another-viewer'};await render();}
+    else if(change==='workspace'){viewer.workspaceId='another-workspace';await render();}
+    else if(change==='unmount')await act(async()=>root.render(null));
+    else await act(async()=>window.dispatchEvent(change==='focus'?new Event('focus'):new CustomEvent(change==='permission'?WORKSPACE_IDENTITY_REFRESH_EVENT:'brian:organization-changed',{detail:{workspaceId:'review-workspace'}})));
+    expect(signal.aborted).toBe(true);
+    await act(async()=>confirm(true));
+    expect(mocks.save).not.toHaveBeenCalled();
+  })
+  it('expires confirmation on the original projection deadline even if its answer arrives late',async()=>{
+    vi.useFakeTimers();
+    mocks.fetch.mockResolvedValue({...protectedData({...fixture(),selectedReview:job()}),projectionDeadline:Date.now()+100,projectionMonotonicDeadline:performance.now()+100});
+    let confirm!:(answer:boolean)=>void;
+    mocks.confirm.mockImplementation(()=>new Promise<boolean>(resolve=>{confirm=resolve;}));
+    await render();await click(t.apply);
+    mocks.fetch.mockImplementation(()=>new Promise(()=>{}));
+    await act(async()=>{vi.advanceTimersByTime(101);});
+    expect(mocks.confirm.mock.calls[0][0].signal.aborted).toBe(true);
+    await act(async()=>confirm(true));
+    expect(mocks.save).not.toHaveBeenCalled();
+  })
+  it('does not select an old mutation result after the viewer changes',async()=>{
+    mocks.fetch.mockResolvedValue(protectedData({...fixture(),selectedReview:job()}));
+    let complete!:(value:ReturnType<typeof protectedData<ScopeReview>>)=>void;
+    mocks.save.mockImplementation(()=>new Promise(resolve=>{complete=resolve;}));
+    await render();await click(t.apply);
+    viewer.me={id:'another-viewer'};mocks.fetch.mockResolvedValue(protectedData(fixture()));await render();
+    mocks.fetch.mockClear();
+    await act(async()=>complete(protectedData({...job(),id:'old-viewer-review'})));
+    expect(mocks.fetch.mock.calls.some(call=>call[3]==='old-viewer-review')).toBe(false);
+    expect(host.textContent).not.toContain('Explicit review');
+  })
+  it('opens its saved preview after the successful API change notification',async()=>{
+    mocks.save.mockImplementation(async()=>{window.dispatchEvent(new CustomEvent('brian:organization-changed',{detail:{workspaceId:'review-workspace'}}));return protectedData(job());});
+    await render();await select('record-one');await reason();
+    await act(async()=>host.querySelector('form')!.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));
+    expect(mocks.fetch).toHaveBeenLastCalledWith('review-workspace','memory',undefined,'saved-review',undefined);
   })
   it('shows a unique impact count and includes it in the concrete confirmation',async()=>{
     const saved=job();saved.items[0].impact={version:1,descendants:[{resourceId:'derived-one',version:'1',held:false},{resourceId:'derived-two',version:'2',held:true}]};
