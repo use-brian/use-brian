@@ -1,9 +1,12 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { spawnSync, spawn } from 'node:child_process'
+import { readFileSync, mkdtempSync, rmSync } from 'node:fs'
+import {tmpdir} from 'node:os'
+import {join} from 'node:path'
+import {once} from 'node:events'
 import { fileURLToPath } from 'node:url'
-import { ADMIN_DATABASE_URL, ADMIN_APP_DATABASE_URL, adminRigEnvironment, adminRuntimeNodeOptions } from '../rig-admin.mjs'
+import { ADMIN_DATABASE_URL, ADMIN_APP_DATABASE_URL, adminRigEnvironment, adminRuntimeNodeOptions, recordAdminGroups, stopOwnedAdminGroups } from '../rig-admin.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 describe('[COMP:platform/local-rig] no-paid administrative fixture', () => {
@@ -77,5 +80,34 @@ describe('[COMP:platform/local-rig] no-paid administrative fixture', () => {
     assert.match(api, /if \(!adminOnly\) dotenv.config/)
     const boot = source('../../packages/api/src/boot.ts')
     assert.match(boot, /isSelfHostedOssEnv\(\) && opts.startLocalSubscriptionProvider !== false/)
+  })
+})
+
+
+describe('[COMP:platform/local-rig] persistent runtime process ownership',()=>{
+  it('checks every group member before signaling any group and refuses reused ownership',()=>{
+    const directory=mkdtempSync(join(tmpdir(),'admin-group-test-')),runId='a'.repeat(32),signals=[]
+    try{
+      recordAdminGroups(directory,runId,[100,200])
+      const execute=(_cmd,args)=>args[0]==='-axo'?'101 1 100\n201 1 200\n':args[2]==='101'?`node USEBRIAN_ADMIN_RUN_ID=${runId}`:'node USEBRIAN_ADMIN_RUN_ID=another-run'
+      assert.throws(()=>stopOwnedAdminGroups(directory,execute,(...args)=>signals.push(args)),/unverified member/)
+      assert.deepEqual(signals,[])
+      assert.equal(stopOwnedAdminGroups(directory,(_cmd,args)=>args[0]==='-axo'?'101 1 100\n201 1 200\n':`node USEBRIAN_ADMIN_RUN_ID=${runId}`,(...args)=>signals.push(args)),2)
+      assert.deepEqual(signals,[[-100,'SIGTERM'],[-200,'SIGTERM']])
+      signals.length=0
+      assert.equal(stopOwnedAdminGroups(directory,(_cmd,args)=>args[0]==='-axo'?'101 1 100\n102 101 100\n':args[2]==='101'?`node USEBRIAN_ADMIN_RUN_ID=${runId}`:'renamed-node',(...args)=>signals.push(args)),1)
+      assert.deepEqual(signals,[[-100,'SIGTERM']])
+    }finally{rmSync(directory,{recursive:true,force:true})}
+  })
+  it('stops a real owned runtime even when no launcher is recorded',{timeout:10000},async()=>{
+    const directory=mkdtempSync(join(tmpdir(),'admin-group-test-')),runId='b'.repeat(32)
+    const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:true,stdio:'ignore',env:{...process.env,USEBRIAN_ADMIN_RUN_ID:runId}})
+    const exited=once(child,'exit')
+    try{
+      await once(child,'spawn');recordAdminGroups(directory,runId,[child.pid])
+      assert.equal(stopOwnedAdminGroups(directory),1)
+      await exited
+      assert.equal(stopOwnedAdminGroups(directory),0)
+    }finally{try{process.kill(-child.pid,'SIGKILL')}catch{}rmSync(directory,{recursive:true,force:true})}
   })
 })

@@ -103,7 +103,16 @@ if [ -f "$PIDFILE" ]; then
   fi
   rm -f "$PIDFILE"
 else
-  say "no launcher pid recorded — sweeping the rig ports anyway."
+  if [ "$ADMIN_ONLY" = 1 ]; then
+    say "no launcher pid recorded; checking persisted administrative runtime ownership."
+  else
+    say "no launcher pid recorded — sweeping the rig ports anyway."
+  fi
+fi
+
+if [ "$ADMIN_ONLY" = 1 ]; then
+  node "$ROOT/scripts/rig-admin.mjs" --stop-owned "$ROOT"
+  sleep 1
 fi
 
 # The launcher SIGTERMs its own children, but it spawns them through pnpm, which

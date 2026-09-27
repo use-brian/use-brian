@@ -46,14 +46,15 @@ import { createInterface } from 'node:readline/promises'
 import { resolveMessageStoreLaunch } from './message-store-launch.mjs'
 import { bridgeEnv } from './bridge-env.mjs'
 import { resolveApiPort } from './launch-ports.mjs'
-import { adminRigEnvironment, adminRuntimeNodeOptions } from './rig-admin.mjs'
+import { adminRigEnvironment, adminRuntimeNodeOptions, recordAdminGroups } from './rig-admin.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const adminOnly = process.argv.includes('--admin-only')
+const adminRunId = adminOnly ? randomBytes(16).toString('hex') : null
 if (adminOnly) {
   const clean = adminRigEnvironment(ROOT, process.env)
   for (const key of Object.keys(process.env)) delete process.env[key]
-  Object.assign(process.env, clean)
+  Object.assign(process.env, clean, {USEBRIAN_ADMIN_RUN_ID:adminRunId})
 }
 const CONFIG_DIR = adminOnly ? process.env.USEBRIAN_CONFIG_DIR : join(homedir(), '.usebrian')
 const LEGACY_CONFIG_DIR = join(homedir(), '.sidanclaw')
@@ -352,6 +353,7 @@ function run(label, cmd, args, extraEnv = {}, cwd = ROOT) {
     if (!shuttingDown && code) { console.error(`[launch] ${label} exited with code ${code}; shutting down.`); shutdown(1) }
   })
   children.push(child)
+  if(adminOnly)recordAdminGroups(ROOT,adminRunId,children.map(item=>item.pid).filter(Boolean))
   return child
 }
 function waitForPort(port, label, timeoutMs = 60_000) {
