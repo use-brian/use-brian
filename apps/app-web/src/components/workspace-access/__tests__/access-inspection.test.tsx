@@ -75,6 +75,6 @@ describe('[COMP:app-web/workspace-access] explanation and audit projections',()=
     expect(host.textContent).not.toContain(t.auditGrant);expect(host.textContent).toContain(t.historyChanged);
   });
   it.each([{dict:en,locale:'en'},{dict:ja,locale:'ja'},{dict:zh,locale:'zh'},{dict:zhCN,locale:'zh-CN'}] as const)('renders inspection labels in $locale',async({dict,locale})=>{
-    await render('explain',dict,locale);expect(host.textContent).toContain(dict.workspaceAccess.resourceCheckRequired);expect(host.textContent).toContain(dict.workspaceAccess.accessPaths);
+    await render('explain',dict,locale);expect(host.textContent).toContain(dict.workspaceAccess.currentPreviewHint);expect(host.textContent).toContain(dict.workspaceAccess.resourceCheckRequired);expect(host.textContent).toContain(dict.workspaceAccess.accessPaths);
   });
 });

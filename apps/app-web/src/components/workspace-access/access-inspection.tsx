@@ -48,6 +48,7 @@ function AccessExplanationContent({data,memberId,assistantId,close}:Props&{membe
       <h3 className="font-medium">{t.managementEligibility}</h3><p className="text-sm text-muted-foreground">{t.managementHint}</p>
       {explanation.management.some(row=>row.canManageMembers||row.canApprove)?<ul className="space-y-2">{explanation.management.filter(row=>row.canManageMembers||row.canApprove).map(row=><li key={row.teamId} className="text-sm"><span>{data.teams.find(team=>team.id===row.teamId)?.name??t.unlistedScope}</span>: {[row.canManageMembers?t.manageMembers:null,row.canApprove?t.approveRequests:null].filter(Boolean).join(', ')}</li>)}</ul>:<p className="text-sm">{t.noManagement}</p>}
       <p role="status" className="rounded-lg bg-muted p-3 text-sm">{explanation.example.matchesScope?t.scopeMatches:t.scopeDenied}</p>
+      <p className="text-sm text-muted-foreground">{t.currentPreviewHint}</p>
       <p className="text-sm text-muted-foreground">{t.resourceCheckRequired}</p>
       <h3 className="font-medium">{t.accessPaths}</h3><p className="text-sm text-muted-foreground">{t.scopePathHint}</p>
       {!explanation.paths.length?<p className="text-sm">{t.noAccessPaths}</p>:<ul className="space-y-2">{explanation.paths.map((path,index)=><li key={`${path.kind}:${path.grantId??path.sourceTeamId??index}`} className="rounded-lg border border-border p-3 text-sm">

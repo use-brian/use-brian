@@ -1,6 +1,8 @@
 import {randomUUID} from 'node:crypto'
 import {afterAll,describe,expect,it,vi} from 'vitest'
 import type {ToolContext} from '@use-brian/core'
+import {runWithAgentAccess} from '../../db/agent-access-context.js'
+import {executeOrganizationCommand} from '../../db/org-chart-store.js'
 import {getPool,getAppPool} from '../../db/client.js'
 import {createDbWorkspaceGroupStore} from '../../db/workspace-group-store.js'
 import {executeDepartmentAccessCommand as execute} from '../service.js'
@@ -124,6 +126,30 @@ describe('[COMP:api/workspace-access] current authority explanations and audit',
     const older=await getWorkspaceAccessEvents(f.workspaceId,f.owner,{after:admin.nextCursor!,expectedPolicyRevision:admin.policyRevision})
     expect(older.events.length).toBeGreaterThan(0);expect(older.events.some(event=>admin.events.some(a=>a.id===event.id))).toBe(false)
     for(const after of [secretEvent,randomUUID()])await expect(getWorkspaceAccessEvents(f.workspaceId,f.member,{after,expectedPolicyRevision:member.policyRevision})).rejects.toMatchObject({code:'access_history_changed'})
+  })
+  it('intersects native inspection with the running ceiling and current authority independently',async()=>{
+    const f=await fixture(),tool=createWorkspaceAccessTools()[0],assistantId=randomUUID()
+    await execute(f.workspaceId,f.owner,{type:'department.member.set',teamId:f.team.id,userId:f.member,enabled:true})
+    await pool.query("INSERT INTO assistants(id,workspace_id,name,clearance,team_scope_mode,project_scope_mode) VALUES($1,$2,'Broad inspection fixture','confidential','all','all')",[assistantId,f.workspaceId])
+    await pool.query("INSERT INTO assistant_members(assistant_id,user_id,role) VALUES($1,$2,'member')",[assistantId,f.member])
+    // Directory visibility is independent of assistant membership/content scope.
+    const chart=await executeOrganizationCommand(f.workspaceId,f.owner,{type:'org.unit.save',name:'Published fixture',parentId:null,teamId:null,directoryVisibility:'workspace',position:0})
+    await executeOrganizationCommand(f.workspaceId,f.owner,{type:'org.placement.save',unitId:chart.units[0].id,userId:null,assistantId,isPrimary:true,reportsToUserId:null,accountableUserId:null})
+    const context={workspaceId:f.workspaceId,workspaceActorUserId:f.member,userId:f.owner} as ToolContext
+    const ceiling={workspaceId:f.workspaceId,userId:f.member,clearance:'public',compartments:[f.team.compartmentKey!],mutationCompartments:[],projectIds:[]}
+    const inspect=(selection:Record<string,unknown>)=>runWithAgentAccess(ceiling,()=>tool.execute({explain:{assistantId,...selection}},context))
+    const allowed=await inspect({targetTeamId:f.team.id,sensitivity:'public'})
+    expect(allowed.data).toMatchObject({clearance:'public',readTeamIds:[f.team.id],mutationTeamIds:[],projectIds:[],example:{matchesScope:true}})
+    expect((await inspect({targetTeamId:f.team.id,sensitivity:'internal'})).data).toMatchObject({example:{matchesScope:false}})
+    expect((await inspect({targetTeamId:f.team.id,sensitivity:'public',action:'edit'})).data).toMatchObject({example:{matchesScope:false}})
+    // A new grant changes current human permissions without widening this turn.
+    const other=await f.groups.createTeam(f.owner,f.workspaceId,{name:'Operations',key:'operations'})
+    await execute(f.workspaceId,f.owner,{type:'department.member.set',teamId:other.id,userId:f.member,enabled:true})
+    expect((await explainWorkspaceAccess(f.workspaceId,f.member,{assistantId,targetTeamId:other.id})).example.matchesScope).toBe(true)
+    expect((await inspect({targetTeamId:other.id,sensitivity:'public'})).data).toMatchObject({readTeamIds:[f.team.id],example:{matchesScope:false}})
+    // Conversely, the retained starting ceiling cannot restore a removed path.
+    await execute(f.workspaceId,f.owner,{type:'department.member.set',teamId:f.team.id,userId:f.member,enabled:false})
+    expect((await inspect({targetTeamId:f.team.id,sensitivity:'public'})).data).toMatchObject({readTeamIds:[],mutationTeamIds:[],example:{matchesScope:false}})
   })
   it('uses the same live projections from native tools and refuses programmatic actors',async()=>{
     const f=await fixture(),tool=createWorkspaceAccessTools()[0]

@@ -150,6 +150,7 @@ export const zh: Dictionary = {
     scopeMatches: "此範例符合所選範圍。",
     scopeDenied: "此範例不在所選範圍內。",
     resourceCheckRequired: "範圍相符不代表可以操作特定資源。仍須符合私人可見性、資源權限及發佈檢查。",
+    currentPreviewHint: "此預覽依據目前權限。現有對話的存取範圍可能更窄。",
     assistantCeiling: "助理權限上限",
     contextDepartment: "部門情境",
     contextProject: "專案情境",

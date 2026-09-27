@@ -150,6 +150,7 @@ export const ja: Dictionary = {
     scopeMatches: "この例は選択した範囲に含まれます。",
     scopeDenied: "この例は選択した範囲外です。",
     resourceCheckRequired: "範囲が一致しても、個々のリソースへの操作は許可されません。非公開設定、リソース権限、公開時の確認も適用されます。",
+    currentPreviewHint: "このプレビューは現在の権限に基づきます。既存の会話には、さらに狭い制限が適用される場合があります。",
     assistantCeiling: "アシスタントの上限",
     contextDepartment: "部門コンテキスト",
     contextProject: "プロジェクトコンテキスト",

@@ -163,6 +163,7 @@ export const en = {
     scopeMatches: "The example matches the selected scope.",
     scopeDenied: "The example is outside the selected scope.",
     resourceCheckRequired: "A matching scope does not authorize a specific resource. Private visibility, resource permissions and publishing checks still apply.",
+    currentPreviewHint: "This preview uses current permissions. Existing conversations can have narrower limits.",
     assistantCeiling: "Assistant ceiling",
     contextDepartment: "Department context",
     contextProject: "Project context",
