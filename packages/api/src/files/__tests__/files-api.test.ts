@@ -799,3 +799,23 @@ describe('[COMP:files/api] departmental publication boundaries', () => {
     expect([...f.gcs.blobs.values()].map(value => value.toString())).toEqual(['original', 'original restricted'])
   })
 })
+
+
+describe('[COMP:files/api] current authority after storage I/O', () => {
+  it.each(['read','readBytes'] as const)('rechecks the execution lease before returning %s content', async method => {
+    const store=makeFakeStore(),gcs=makeFakeGcs(),api=createFilesApi({store,gcs,bucket:'fixture',auditStore:makeFakeAudit()})
+    await api.write(ctx,{path:'/guarded.txt',content:'restricted'})
+    const starting=pinAccessCeiling({...ctx,assistantKind:'primary',clearance:'confidential',compartments:null,mutationCompartments:null,projectIds:null})
+    let current:typeof starting|null=starting
+    const lease=createAuthorityLease(starting,async()=>current),read=gcs.readBlob.bind(gcs)
+    gcs.readBlob=async key=>{const blob=await read(key);current=null;return blob}
+    await expect(runWithAuthorityLease(lease,()=>api[method](ctx,'/guarded.txt'))).rejects.toMatchObject({reason:'authority_changed'})
+  })
+  it.each(['revision','storage','retraction'] as const)('withholds bytes after a %s change even when an adapter mutates in place', async change => {
+    const store=makeFakeStore(),gcs=makeFakeGcs(),api=createFilesApi({store,gcs,bucket:'fixture',auditStore:makeFakeAudit()})
+    await api.write(ctx,{path:'/guarded.txt',content:'restricted'})
+    const read=gcs.readBlob.bind(gcs)
+    gcs.readBlob=async key=>{const blob=await read(key);const row=[...store.rows.values()][0];if(change==='revision')row.scopeVersion='2';else if(change==='storage')row.storageUri='gs://fixture/replaced';else row.retractedAt=new Date();return blob}
+    expect(await api.readBytes(ctx,'/guarded.txt')).toMatchObject({ok:false,error:{kind:'not_found'}})
+  })
+})

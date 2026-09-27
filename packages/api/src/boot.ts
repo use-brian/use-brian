@@ -5428,9 +5428,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   if (filesApi && filesBlobClient) {
     app.use('/api/doc-files', requireAuth(env.JWT_SECRET), docFilesRoutes({
       filesApi,
-      store: workspaceFilesStore,
-      gcs: filesBlobClient,
-      resolver: filesResolver ?? undefined,
       membership: getWorkspaceMembershipWithClearanceSystem,
     }))
   }

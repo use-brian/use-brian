@@ -257,6 +257,29 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
     return store.getByPath(ac, normalizePath(idOrPath))
   }
 
+  // Snapshot primitive fields before I/O: even a mutable adapter must not hide
+  // a source or classification change by mutating the same object in place.
+  const readRevision = (file: WorkspaceFile) => JSON.stringify([
+    file.id, file.workspaceId, file.storageUri, file.scopeVersion, file.updatedAt,
+    file.userId, file.assistantId, file.sensitivity, file.compartments, file.projectIds,
+    file.validTo, file.retractedAt, file.supersededBy,
+  ])
+
+  async function readCurrentBytes(ctx: FilesContext, idOrPath: string): Promise<FilesResult<FilesReadBytesResult>> {
+    const unavailable = () => err<FilesReadBytesResult>({ kind: 'not_found', reference: idOrPath })
+    const file = await executeWithCurrentAuthority(() => resolveByIdOrPath(ctx, idOrPath))
+    if (!file || file.validTo || file.retractedAt || file.supersededBy) return unavailable()
+    const revision = readRevision(file)
+    const gcs = await resolver.forUri(ctx.workspaceId, file.storageUri)
+    const blob = await gcs.readBlob(storageKeyForWorkspaceFile(file))
+    if (!blob) return unavailable()
+    return executeWithCurrentAuthority(async () => {
+      const current = await resolveByIdOrPath(ctx, idOrPath)
+      if (!current || readRevision(current) !== revision) return unavailable()
+      return ok({ file: current, bytes: blob.bytes })
+    })
+  }
+
   function mutationAllowed(ctx: FilesContext, file?: WorkspaceFile, sensitivity: WorkspaceFile['sensitivity'] = file?.sensitivity ?? 'internal'): boolean {
     const access = accessCtx(ctx)
     const source = file ? { ...file, compartments: file.compartments ?? [], projectIds: file.projectIds ?? [] } : undefined
@@ -481,31 +504,13 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
     },
 
     async read(ctx, idOrPath): Promise<FilesResult<FilesReadResult>> {
-      const file = await resolveByIdOrPath(ctx, idOrPath)
-      if (!file) return err({ kind: 'not_found', reference: idOrPath })
-
-      const gcs = await resolver.forUri(ctx.workspaceId, file.storageUri)
-      const blob = await gcs.readBlob(storageKeyForWorkspaceFile(file))
-      if (!blob) {
-        // Row exists but bytes are missing — orphaned row. Surface as
-        // not_found; ops can investigate via storage_uri.
-        return err({ kind: 'not_found', reference: idOrPath })
-      }
-      return ok({ file, content: blob.bytes.toString('utf-8') })
+      const result = await readCurrentBytes(ctx, idOrPath)
+      if (!result.ok) return result
+      return ok({ file: result.value.file, content: Buffer.from(result.value.bytes).toString('utf-8') })
     },
 
     async readBytes(ctx, idOrPath): Promise<FilesResult<FilesReadBytesResult>> {
-      // Byte-preserving read — the read mirror of `writeBytes`. Backs
-      // outbound document delivery (adapter-pattern.md → "Outbound documents").
-      const file = await resolveByIdOrPath(ctx, idOrPath)
-      if (!file) return err({ kind: 'not_found', reference: idOrPath })
-
-      const gcs = await resolver.forUri(ctx.workspaceId, file.storageUri)
-      const blob = await gcs.readBlob(storageKeyForWorkspaceFile(file))
-      if (!blob) {
-        return err({ kind: 'not_found', reference: idOrPath })
-      }
-      return ok({ file, bytes: blob.bytes })
+      return readCurrentBytes(ctx, idOrPath)
     },
 
     async search(ctx, params: FilesSearchParams): Promise<WorkspaceFileIndexRow[]> {

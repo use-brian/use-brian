@@ -1,3 +1,7 @@
+import request from 'supertest'
+import {docFilesRoutes} from '../../routes/doc-files.js'
+import {createTestApp} from '../../routes/__tests__/helpers.js'
+import {getWorkspaceMembershipWithClearanceSystem} from '../workspace-store.js'
 import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import type { AccessContext, FilesContext } from '@use-brian/core'
@@ -45,8 +49,52 @@ async function fixture() {
   return { workspaceId, userId, assistantId, projectId, ctx, access, blobs, gcs, store, api, file, raw, patch }
 }
 
+// Approved fixture records exercise the real grant/RLS boundary without
+// pretending this incomplete binary may activate new workspace delegation.
+async function deliveryFixture() {
+  const f=await fixture(),member=randomUUID(),requestId=randomUUID()
+  const team=await createDbWorkspaceGroupStore().createTeam(f.userId,f.workspaceId,{name:'Delivery fixture',key:'delivery-fixture'})
+  await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[member])
+  await pool.query("INSERT INTO workspace_members(workspace_id,user_id,role,team_scope_mode) VALUES($1,$2,'member','assigned')",[f.workspaceId,member])
+  await pool.query('UPDATE workspace_files SET compartments=$2,project_ids=ARRAY[]::uuid[] WHERE id=$1',[f.file.id,[team.compartmentKey!]])
+  await pool.query(`INSERT INTO workspace_access_requests(id,workspace_id,requester_user_id,beneficiary_kind,beneficiary_id,target_team_id,reason,starts_at,expires_at,payload_hash,policy_revision,status,decided_by,decided_at)
+    VALUES($1,$2,$3,'member',$3,$4,'Fixture delivery',now()-interval '1 day',now()+interval '1 day',$5,1,'approved',$6,now())`,[requestId,f.workspaceId,member,team.id,'a'.repeat(64),f.userId])
+  const grant=(await pool.query<{id:string}>(`INSERT INTO workspace_access_grants(workspace_id,request_id,beneficiary_kind,beneficiary_id,target_team_id,starts_at,expires_at,approved_by)
+    SELECT workspace_id,id,beneficiary_kind,beneficiary_id,target_team_id,starts_at,expires_at,decided_by FROM workspace_access_requests WHERE id=$1 RETURNING id`,[requestId])).rows[0]
+  const reader:FilesContext={workspaceId:f.workspaceId,userId:member,assistantId:null,clearance:'internal'}
+  const app=createTestApp('/api/doc-files',docFilesRoutes({filesApi:f.api,membership:getWorkspaceMembershipWithClearanceSystem}),{userId:member})
+  return {...f,member,grant,reader,app}
+}
+
 describe('[COMP:api/file-mutation-scope] immutable file publication and canonical writers', () => {
   afterAll(async () => { await getAppPool().end(); await pool.end() })
+
+  it('delivers current read-only grant bytes through the real authenticated route without authorizing edits',async()=>{
+    const f=await deliveryFixture()
+    expect(await f.api.read(f.reader,f.file.id)).toMatchObject({ok:true,value:{content:'original'}})
+    expect(await f.api.readBytes(f.reader,f.file.id)).toMatchObject({ok:true,value:{bytes:Buffer.from('original')}})
+    const res=await request(f.app).get(`/api/doc-files/${f.workspaceId}/${f.file.id}?redirect=0`)
+    expect(res.status).toBe(200);expect(res.text).toBe('original');expect(res.headers['cache-control']).toBe('private, no-store');expect(res.headers.location).toBeUndefined()
+    expect(await f.store.updateMeta(f.member,f.workspaceId,f.file.id,{title:'Denied'})).toBeNull()
+    expect(await f.raw()).toMatchObject([{title:null,valid_to:null}])
+  })
+
+  it.each(['grant','membership','clearance','private','holding','revision','supersession'] as const)('withholds fetched bytes when %s changes during storage I/O',async change=>{
+    const f=await deliveryFixture(),read=f.gcs.readBlob.bind(f.gcs)
+    f.gcs.readBlob=async key=>{
+      const blob=await read(key)
+      if(change==='grant')await pool.query('UPDATE workspace_access_grants SET revoked_at=now(),revoked_by=$2 WHERE id=$1',[f.grant.id,f.userId])
+      else if(change==='membership')await pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[f.workspaceId,f.member])
+      else if(change==='clearance')await pool.query("UPDATE workspace_members SET clearance='public' WHERE workspace_id=$1 AND user_id=$2",[f.workspaceId,f.member])
+      else if(change==='private')await pool.query('UPDATE workspace_files SET user_id=$2 WHERE id=$1',[f.file.id,f.userId])
+      else if(change==='holding')await pool.query('UPDATE workspace_files SET scope_held=true WHERE id=$1',[f.file.id])
+      else if(change==='revision')await pool.query("UPDATE workspace_files SET sensitivity='public' WHERE id=$1",[f.file.id])
+      else await pool.query('UPDATE workspace_files SET valid_to=now() WHERE id=$1',[f.file.id])
+      return blob
+    }
+    const res=await request(f.app).get(`/api/doc-files/${f.workspaceId}/${f.file.id}?redirect=0`)
+    expect(res.status).toBe(404);expect(res.body).toEqual({error:'File not found'});expect(res.text).not.toContain('original');expect(res.headers.location).toBeUndefined()
+  })
 
   it.each(['none', 'explicit', 'ambient'] as const)('checks current-member file authority with %s execution context', async mode => {
     const f = await fixture(), member = randomUUID(), groups = createDbWorkspaceGroupStore()
