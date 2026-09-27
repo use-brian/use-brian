@@ -28,6 +28,7 @@ vi.mock('../../db/workspace-flush.js', () => {
     WorkspaceFlushNotOwnerError,
   }
 })
+vi.mock('../../db/workspace-member-directory.js',()=>({readWorkspaceMemberDirectory:vi.fn()}))
 // Partial mock: only the transcription-prefs setter is stubbed (the route
 // calls it as a free function, not via the injected store); everything else
 // (InvalidRecordingBlueprintError, the free helper functions) stays real.
@@ -44,12 +45,14 @@ import {
   setWorkspaceTranscriptionPrefs,
 } from '../../db/workspace-store.js'
 import { flushWorkspaceData, WorkspaceFlushNotOwnerError } from '../../db/workspace-flush.js'
+import {readWorkspaceMemberDirectory} from '../../db/workspace-member-directory.js'
 import { CrmOperationsError } from '@use-brian/core'
 
 const mockQuery = vi.mocked(query)
 const mockRls = vi.mocked(queryWithRLS)
 const mockFindUser = vi.mocked(findUserById)
 const mockSetTranscriptionPrefs = vi.mocked(setWorkspaceTranscriptionPrefs)
+const mockMemberDirectory=vi.mocked(readWorkspaceMemberDirectory)
 
 const workspaceStore = {
   getRole: vi.fn(),
@@ -214,6 +217,33 @@ describe('[COMP:api/workspaces-route] GET / and GET /:workspaceId', () => {
     expect(res.status).toBe(200)
     expect(res.body.role).toBe('member')
     expect(res.body.primaryAssistantId).toBe('a-1')
+  })
+})
+
+describe('[COMP:api/workspace-member-directory] GET /:workspaceId/member-directory',()=>{
+  const workspaceId='00000000-0000-4000-8000-000000000010'
+  it('requires authentication and hides malformed workspace identities',async()=>{
+    expect((await request(app()).get(`/api/workspaces/${workspaceId}/member-directory`)).status).toBe(401)
+    expect((await request(app('00000000-0000-4000-8000-000000000001')).get('/api/workspaces/not-a-uuid/member-directory')).status).toBe(404)
+    expect(mockMemberDirectory).not.toHaveBeenCalled()
+  })
+  it('publishes only the bounded reader response without HTTP caching',async()=>{
+    const viewerId='00000000-0000-4000-8000-000000000001'
+    mockMemberDirectory.mockResolvedValueOnce({status:200,body:{workspaceId,viewerId,validForMs:12_000,members:[{userId:viewerId,name:'Ari Example',email:'ari@example.com',avatarUrl:null}]}})
+    const res=await request(app(viewerId)).get(`/api/workspaces/${workspaceId}/member-directory`)
+    expect(res.status).toBe(200)
+    expect(res.headers['cache-control']).toBe('private, no-store')
+    expect(res.headers.etag).toBeUndefined()
+    expect(res.body).toMatchObject({workspaceId,viewerId,validForMs:12_000})
+    expect(mockMemberDirectory).toHaveBeenCalledWith(viewerId,workspaceId)
+  })
+  it.each([
+    {status:404 as const,body:{error:'member_directory_unavailable' as const}},
+    {status:409 as const,body:{error:'member_directory_changed' as const}},
+  ])('forwards a generic $status refusal',async reply=>{
+    mockMemberDirectory.mockResolvedValueOnce(reply)
+    const res=await request(app('00000000-0000-4000-8000-000000000001')).get(`/api/workspaces/${workspaceId}/member-directory`)
+    expect(res.status).toBe(reply.status);expect(res.body).toEqual(reply.body)
   })
 })
 

@@ -1,3 +1,4 @@
+import { readWorkspaceMemberDirectory } from '../db/workspace-member-directory.js'
 import { resolveWorkspaceViewpoint } from '../db/workspace-viewpoint.js'
 /**
  * Workspace management routes.
@@ -261,6 +262,23 @@ export function workspaceRoutes({
   })
 
   // ── GET /:workspaceId — get workspace details + members ────────────────
+
+  // Human mention/assignment roster, separate from the broad workspace detail.
+  router.get('/:workspaceId/member-directory', async (req, res) => {
+    res.setHeader('Cache-Control', 'private, no-store')
+    const send = (status: number, body: unknown) => res.status(status).type('json').end(JSON.stringify(body))
+    if (!req.userId) { send(401, { error: 'Unauthorized' }); return }
+    if (!z.string().uuid().safeParse(req.params.workspaceId).success) {
+      send(404, { error: 'member_directory_unavailable' }); return
+    }
+    try {
+      const reply = await readWorkspaceMemberDirectory(req.userId, req.params.workspaceId)
+      send(reply.status, reply.body)
+    } catch (error) {
+      console.error('[workspaces] member directory failed:', error)
+      send(500, { error: 'member_directory_unavailable' })
+    }
+  })
 
   router.get('/:workspaceId', async (req, res) => {
     const userId = req.userId

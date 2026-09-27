@@ -14,8 +14,9 @@ import { invalidateSurfaceCache, readSurfaceCache } from "@/lib/surface-cache";
 import { useT } from "@/lib/i18n/client";
 import { appendOfflineCommand, listOfflineJournal, removeOfflineJournalEntry } from "@/lib/office/offline";
 import { CommentComposer } from "@/components/doc/comment-composer";
-import { listWorkspaceMembers } from "@/lib/api/mentions";
-import { SearchableSelect, type SearchableSelectItem } from "@/components/ui/searchable-select";
+import { isCurrentDirectoryPerson } from "@/lib/api/mentions";
+import { useWorkspaceDirectory } from "@/lib/use-workspace-directory";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 
 type OfficeCommentsProps = {
   artifactId: string;
@@ -62,7 +63,8 @@ function OfficeCommentsContent({ artifactId, workspaceId, version, targetIds, se
   const [replyMentions, setReplyMentions] = useState<string[]>([]);
   useEffect(() => {if (replying && !threads.some(thread => thread.id === replying)) {setReplying(null);setReplyBody("");setReplyMentions([]);}}, [threads, replying]);
   const [filter, setFilter] = useState<"open" | "resolved">("open");
-  const [memberItems, setMemberItems] = useState<SearchableSelectItem[]>([]);
+  const members = useWorkspaceDirectory(workspaceId);
+  const memberItems = members.map(member => ({value: member.id, label: member.name, hint: member.email ?? undefined}));
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
   const lifetime = useRef<symbol | null>(null);
@@ -103,11 +105,6 @@ function OfficeCommentsContent({ artifactId, workspaceId, version, targetIds, se
       await reload(current);
     });
   }
-  useEffect(() => {
-    let active = true;
-    void listWorkspaceMembers(workspaceId).then(rows => {if (active && owned()) setMemberItems(rows.map(member => ({value: member.id, label: member.name, hint: member.email ?? undefined})));}).catch(() => undefined);
-    return () => {active = false;};
-  }, [workspaceId]);
   useEffect(() => {
     if (offline || !canComment) return;
     let active = true;
@@ -164,6 +161,7 @@ function OfficeCommentsContent({ artifactId, workspaceId, version, targetIds, se
   }
 
   async function assign(thread: OfficeCommentThread, value: string) {
+    if (value !== "brian" && value !== "unassigned" && !isCurrentDirectoryPerson(workspaceId, value)) return;
     await mutateThread(thread.id, () => updateOfficeCommentThread(thread.id, {assignedUserId: value !== "brian" && value !== "unassigned" ? value : null, assignedToBrian: value === "brian", dueAt: thread.dueAt ?? null}));
   }
 

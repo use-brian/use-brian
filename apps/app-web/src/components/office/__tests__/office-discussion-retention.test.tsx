@@ -12,7 +12,7 @@ import {officePanelCacheKey,officePanelCachePrefix} from '@/lib/surface-prefetch
 import {applySpineEventToSurfaceCache} from '@/lib/surface-cache-invalidation';
 import {WORKSPACE_IDENTITY_REFRESH_EVENT} from '@/lib/workspace-identity-events';
 const state=vi.hoisted(()=>({canAct:true,viewer:'viewer-a',workspace:'workspace-a',fetch:vi.fn(),journal:vi.fn<(...args:unknown[])=>Promise<OfflineJournalEntry[]>>(async()=>[])}));
-vi.mock('@/lib/user',()=>({getUserInfo:()=>({id:state.viewer})}));
+vi.mock('@/lib/user',()=>({getUserInfo:()=>({id:state.viewer}),subscribeUserInfo:()=>()=>{}}));
 vi.mock('@/lib/auth-fetch',()=>({authFetch:(...args:unknown[])=>state.fetch(...args)}));
 vi.mock('@/lib/workspace-context',()=>({useOptionalWorkspaceContext:()=>({workspaceId:state.workspace,me:{id:state.viewer}})}));
 vi.mock('@/lib/office/offline',()=>({listOfflineJournal:(...args:unknown[])=>state.journal(...args),removeOfflineJournalEntry:vi.fn(async()=>{}),appendOfflineCommand:vi.fn(async()=>{})}));
@@ -28,7 +28,7 @@ const changed=vi.fn(),applied=vi.fn();
 beforeEach(()=>{vi.useFakeTimers();resetSurfaceCache();vi.clearAllMocks();state.journal.mockResolvedValue([]);state.canAct=true;state.viewer='viewer-a';state.workspace='workspace-a';host=document.createElement('div');document.body.append(host);root=createRoot(host);});
 afterEach(()=>{act(()=>root.unmount());host.remove();resetSurfaceCache();vi.useRealTimers();});
 async function render(kind:Kind,offline=false){await act(async()=>root.render(<I18nProvider locale="en" dict={en}>{kind==='comments'?<OfficeComments artifactId="artifact-a" workspaceId={state.workspace} version={1} targetIds={['block-a']} canComment={state.canAct} offline={offline} onThreadsChange={changed} onRevisionCompleted={applied}/>:<OfficeSuggestions workspaceId={state.workspace} artifactId="artifact-a" canDecide={state.canAct} canSuggest={state.canAct} actorId={state.viewer} proposal={proposal} offline={offline} onSuggestionsChange={changed} onApplied={applied}/>}</I18nProvider>));}
-function setup(ttl='800'){state.fetch.mockImplementation(async(url:string)=>url.includes('/api/workspaces/')?response({members:[]}):url.endsWith('/comments')?response({threads},ttl):response({suggestions},ttl));}
+function setup(ttl='800'){state.fetch.mockImplementation(async(url:string)=>url.includes('/api/workspaces/')?response({workspaceId:state.workspace,viewerId:state.viewer,validForMs:Number(ttl),members:[]}):url.endsWith('/comments')?response({threads},ttl):response({suggestions},ttl));}
 function input(value:string,index=0){act(()=>{const element=host.querySelectorAll('textarea')[index]!;Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value')!.set!.call(element,value);element.dispatchEvent(new Event('input',{bubbles:true}));});}
 async function click(label:string,last=false){await act(async()=>{const matches=[...host.querySelectorAll('button')].filter(row=>row.textContent===label&&!row.disabled);const button=last?matches.at(-1):matches[0];expect(button,`button ${label}`).toBeDefined();button!.click();});}
 const posts=()=>state.fetch.mock.calls.filter(([,init])=>init?.method==='POST');
@@ -96,7 +96,7 @@ describe('[COMP:app-web/office-comments] replay ownership',()=>{
   it('stops replaying after its collection expires and removes only the acknowledged entry',async()=>{
     const entries: OfflineJournalEntry[] = [1,2].map(seq=>({artifactId:'artifact-a',seq,kind:'comment',anchor:{kind:'block',targetIds:['block-a']},body:`Queued comment ${seq}`,createdAt:'2026-01-01T00:00:00Z'}));
     state.journal.mockResolvedValue(entries);let finish!:(response:Response)=>void;
-    state.fetch.mockImplementation(async(url:string,init:RequestInit)=>init?.method==='POST'?new Promise(resolve=>{finish=resolve;}):url.includes('/workspaces/')?response({members:[]}):response({threads},'800'));
+    state.fetch.mockImplementation(async(url:string,init:RequestInit)=>init?.method==='POST'?new Promise(resolve=>{finish=resolve;}):url.includes('/workspaces/')?response({workspaceId:state.workspace,viewerId:state.viewer,validForMs:800,members:[]}):response({threads},'800'));
     await render('comments');expect(posts()).toHaveLength(1);
     state.fetch.mockImplementation(pending);await act(async()=>vi.advanceTimersByTime(801));await act(async()=>finish(response({})));
     expect(posts()).toHaveLength(1);expect(removeOfflineJournalEntry).toHaveBeenCalledTimes(1);expect(removeOfflineJournalEntry).toHaveBeenCalledWith(entries[0],{workspaceId:state.workspace,userId:state.viewer});

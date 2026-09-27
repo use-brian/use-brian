@@ -13,7 +13,7 @@ import {WORKSPACE_IDENTITY_REFRESH_EVENT} from '@/lib/workspace-identity-events'
 import {appendOfflineCommand} from '@/lib/office/offline';
 import type {OfficeCommentThread,OfficeSuggestion} from '@/lib/office/api';
 const state=vi.hoisted(()=>({viewer:'viewer-a',workspace:'workspace-a',status:'connected',role:'view',fetch:vi.fn()}));
-vi.mock('@/lib/user',()=>({getUserInfo:()=>({id:state.viewer})}));
+vi.mock('@/lib/user',()=>({getUserInfo:()=>({id:state.viewer}),subscribeUserInfo:()=>()=>{}}));
 vi.mock('@/lib/auth-fetch',()=>({authFetch:(...args:unknown[])=>state.fetch(...args)}));
 vi.mock('@/lib/workspace-context',()=>({useOptionalWorkspaceContext:()=>({workspaceId:state.workspace,me:{id:state.viewer}})}));
 vi.mock('next/navigation',()=>({useRouter:()=>({push:vi.fn(),replace:vi.fn(),back:vi.fn(),forward:vi.fn(),prefetch:vi.fn()}),usePathname:()=>'/office',useSearchParams:()=>new URLSearchParams()}));

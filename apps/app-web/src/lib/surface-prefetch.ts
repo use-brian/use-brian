@@ -999,3 +999,8 @@ export function officePanelCachePrefix(workspaceId: string, viewerId: string): s
 export function officePanelCacheKey(prefix: string | null, kind: "job" | "job-events" | "versions" | "comments" | "suggestions", id: string | undefined): string | null {
   return prefix && id ? `${prefix}${kind}:${id}` : null;
 }
+
+/** Bounded human roster shared by mentions and person assignment controls. */
+export function workspaceMemberDirectoryCacheKey(workspaceId: string, viewerId: string): string {
+  return `workspace-member-directory:${workspaceId}:${viewerId}`;
+}

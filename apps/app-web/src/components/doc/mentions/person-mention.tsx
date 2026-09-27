@@ -1,5 +1,7 @@
 "use client";
 
+import { isCurrentDirectoryPerson } from "@/lib/api/mentions";
+
 // [COMP:app-web/person-mention]
 /**
  * Phase 4 — `@person` mention extension.
@@ -189,6 +191,7 @@ export function createPersonMentionExtension(
           allowSpaces: true,
           startOfLine: false,
           command: ({ editor, range, props }) => {
+            if (props.kind === "person" && !isCurrentDirectoryPerson(workspaceId, props)) return;
             // Strip the `@<query>` from the editor before inserting the
             // typed node, then route by `kind`.
             const tr = editor.state.tr.deleteRange(range.from, range.to);
@@ -257,6 +260,8 @@ export function createPersonMentionExtension(
                   {
                     props: {
                       people,
+                      peopleWorkspaceId: workspaceId,
+                      query: props.query,
                       pages,
                       initialTab: "people",
                       onSelect: (item: MentionItem) => props.command(item),
@@ -275,6 +280,8 @@ export function createPersonMentionExtension(
                 const { people, pages } = splitItems(props.items);
                 component?.updateProps({
                   people,
+                  peopleWorkspaceId: workspaceId,
+                  query: props.query,
                   pages,
                   onSelect: (item: MentionItem) => props.command(item),
                   labels: popupLabels,
