@@ -4,14 +4,21 @@ import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
 
-const navigation = vi.hoisted(() => ({ search: "" }));
+const navigation = vi.hoisted(() => ({ search: "", workspaceId: "" }));
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ back: vi.fn(), forward: vi.fn(), prefetch: vi.fn(), replace: vi.fn() }),
   useSearchParams: () => new URLSearchParams(navigation.search),
 }));
 vi.mock("@/components/doc/doc-sidebar-data", () => ({ useSidebarData: () => ({ sidebarCollapsed: false, setSidebarCollapsed: vi.fn() }) }));
-import { OfficeHome } from "../office-home";
+import { OfficeHome as RealOfficeHome } from "../office-home";
+import { attachOfficeMetadata } from "@/lib/office/metadata";
+import type { OfficeArtifact } from "@/lib/office/api";
+vi.mock("@/lib/workspace-context", () => ({useOptionalWorkspaceContext: () => ({workspaceId: navigation.workspaceId, me: {id: "fixture-viewer"}})}));
+function OfficeHome(props: {workspaceId: string; initialArtifacts?: OfficeArtifact[]}) {
+  navigation.workspaceId = props.workspaceId;
+  return <RealOfficeHome {...props} initialArtifacts={attachOfficeMetadata(props.initialArtifacts ?? [],30_000,performance.now(),"fixture-viewer")} />;
+}
 
 describe("[COMP:app-web/office-home] Office home", () => {
   beforeEach(() => {

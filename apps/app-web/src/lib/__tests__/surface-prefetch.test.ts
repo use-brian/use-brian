@@ -227,7 +227,7 @@ describe("[COMP:app-web/surface-prefetch] every warm key is a key its surface re
     // lifecycle view through the same builder.
     office: {
       source: "components/office/office-home.tsx",
-      builder: "officeListCacheKey(workspaceId, view)",
+      builder: "officeListCacheKey(workspaceId, view, viewerId)",
     },
     // The Feed icon warms the shell gate's record; the provider (and the
     // sidebar post list) read it through the same builder.
@@ -408,7 +408,7 @@ describe("[COMP:app-web/office-surface-cache] Office cache keys", () => {
     expect(target.key).toBe(officeListCacheKey("w1", "active"));
     expect(typeof target.fetch).toBe("function");
     const home = readFileSync(resolve(process.cwd(), "src", "components/office/office-home.tsx"), "utf8");
-    expect(home).toContain("officeListCacheKey(workspaceId, view)");
+    expect(home).toContain("officeListCacheKey(workspaceId, view, viewerId)");
     expect(home).toContain('from "@/lib/surface-prefetch"');
     const shell = readFileSync(resolve(process.cwd(), "src", "components/office/office-editor-shell.tsx"), "utf8");
     expect(shell).toContain("officeArtifactCacheKey(artifactId)");

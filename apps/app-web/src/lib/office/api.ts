@@ -3,6 +3,9 @@ import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 import { authFetch } from "@/lib/auth-fetch";
 import type { OfficeArtifactSnapshot, OfficeCommand, OfficeResourceRef, OfficeTemplateRoutingDraft, OfficeTemplateSlideRole } from "@use-brian/office-model";
 
+import { getUserInfo } from "@/lib/user";
+import { attachOfficeMetadata, type OfficeMetadata } from "./metadata";
+
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 export type OfficeFamily = "document" | "presentation" | "spreadsheet";
@@ -97,16 +100,25 @@ async function json<T>(response: Response, fallback: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+/** SQL GET metadata is bounded independently of the HTTP cache. */
+async function metadata<T extends object, B = T>(path: string, fallback: string, select: (body: B) => T = value => value as unknown as T): Promise<OfficeMetadata<T>> {
+  const started = performance.now(), viewerId = getUserInfo()?.id;
+  const response = await authFetch(`${API_URL}/api/office/${path}`, {cache: "no-store"});
+  const body = await json<B>(response, fallback);
+  const header = response.headers.get("X-Brian-Projection-Valid-For-Ms");
+  try {
+    if (!viewerId || getUserInfo()?.id !== viewerId) throw new Error("office_viewer_changed");
+    return attachOfficeMetadata(select(body), header === null ? NaN : Number(header), started, viewerId);
+  }
+  catch { throw new OfficeApiError("office_projection_expired", 409); }
+}
+
 export async function listOfficeArtifacts(
   workspaceId: string,
   view: "active" | "archived" | "trash" | "retained" = "active",
 ): Promise<OfficeArtifact[]> {
   const query = new URLSearchParams({ workspaceId, view });
-  const body = await json<{ artifacts: OfficeArtifact[] }>(
-    await authFetch(`${API_URL}/api/office/artifacts?${query}`),
-    "office_list_failed",
-  );
-  return body.artifacts;
+  return metadata<OfficeArtifact[], {artifacts: OfficeArtifact[]}>(`artifacts?${query}`, "office_list_failed", body => body.artifacts);
 }
 
 export async function createOfficeArtifact(input: {
@@ -138,15 +150,11 @@ export async function getOfficeCapabilities(): Promise<{ generationAvailable: bo
 }
 
 export async function getOfficeArtifact(artifactId: string): Promise<OfficeArtifact> {
-  const body = await json<{ artifact: OfficeArtifact }>(
-    await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}`),
-    "office_get_failed",
-  );
-  return body.artifact;
+  return metadata<OfficeArtifact, {artifact: OfficeArtifact}>(`artifacts/${encodeURIComponent(artifactId)}`, "office_get_failed", body => body.artifact);
 }
 
 export async function getOfficeSnapshot(artifactId: string): Promise<OfficeLiveSnapshot> {
-  return json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/snapshot`), "office_snapshot_failed");
+  return metadata<OfficeLiveSnapshot>(`artifacts/${encodeURIComponent(artifactId)}/snapshot`, "office_snapshot_failed");
 }
 
 export async function admitOfficeImageResource(artifactId: string, workspaceId: string, file: File): Promise<{ resource: OfficeResourceRef; widthPx: number; heightPx: number }> {
@@ -168,8 +176,7 @@ export async function submitOfficeCommand(artifactId: string, expectedSeq: numbe
 }
 
 export async function listOfficeComments(artifactId: string): Promise<OfficeCommentThread[]> {
-  const body = await json<{ threads: OfficeCommentThread[] }>(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/comments`), "office_comments_failed");
-  return body.threads;
+  return metadata<OfficeCommentThread[], {threads: OfficeCommentThread[]}>(`artifacts/${encodeURIComponent(artifactId)}/comments`, "office_comments_failed", body => body.threads);
 }
 
 export async function detachMissingOfficeComments(artifactId: string): Promise<number> {
@@ -210,8 +217,7 @@ export async function reactOfficeComment(messageId: string, reaction: "thumbs_up
 }
 
 export async function listOfficeSuggestions(artifactId: string): Promise<OfficeSuggestion[]> {
-  const body = await json<{ suggestions: OfficeSuggestion[] }>(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/suggestions`), "office_suggestions_failed");
-  return body.suggestions;
+  return metadata<OfficeSuggestion[], {suggestions: OfficeSuggestion[]}>(`artifacts/${encodeURIComponent(artifactId)}/suggestions`, "office_suggestions_failed", body => body.suggestions);
 }
 
 export async function decideOfficeSuggestion(suggestionId: string, decision: "accepted" | "rejected"): Promise<void> {
@@ -219,8 +225,7 @@ export async function decideOfficeSuggestion(suggestionId: string, decision: "ac
 }
 
 export async function listOfficeVersions(artifactId: string): Promise<OfficeVersion[]> {
-  const body = await json<{ versions: OfficeVersion[] }>(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/versions`), "office_versions_failed");
-  return body.versions;
+  return metadata<OfficeVersion[], {versions: OfficeVersion[]}>(`artifacts/${encodeURIComponent(artifactId)}/versions`, "office_versions_failed", body => body.versions);
 }
 
 export async function previewOfficeVersion(artifactId: string, versionId: string): Promise<OfficeArtifactSnapshot> {
@@ -258,11 +263,7 @@ export async function setOfficeDefaultRole(artifactId: string, defaultWorkspaceR
 }
 
 export async function getOfficeJob(jobId: string): Promise<OfficeJob> {
-  const body = await json<{ job: OfficeJob }>(
-    await authFetch(`${API_URL}/api/office/jobs/${encodeURIComponent(jobId)}`),
-    "office_job_failed",
-  );
-  return body.job;
+  return metadata<OfficeJob, {job: OfficeJob}>(`jobs/${encodeURIComponent(jobId)}`, "office_job_failed", body => body.job);
 }
 
 export async function waitForOfficeJob(jobId: string, timeoutMs = 180_000): Promise<OfficeJob> {
@@ -276,11 +277,7 @@ export async function waitForOfficeJob(jobId: string, timeoutMs = 180_000): Prom
 }
 
 export async function listOfficeJobEvents(jobId: string, afterSeq = 0): Promise<OfficeJobEvent[]> {
-  const body = await json<{ events: OfficeJobEvent[] }>(
-    await authFetch(`${API_URL}/api/office/jobs/${encodeURIComponent(jobId)}/events?afterSeq=${afterSeq}`),
-    "office_events_failed",
-  );
-  return body.events;
+  return metadata<OfficeJobEvent[], {events: OfficeJobEvent[]}>(`jobs/${encodeURIComponent(jobId)}/events?afterSeq=${afterSeq}`, "office_events_failed", body => body.events);
 }
 
 export async function steerOfficeJob(jobId: string, instruction: string): Promise<void> {
@@ -295,11 +292,7 @@ export async function steerOfficeJob(jobId: string, instruction: string): Promis
 }
 
 export async function listOfficeTemplates(workspaceId: string): Promise<OfficeTemplate[]> {
-  const body = await json<{ templates: OfficeTemplate[] }>(
-    await authFetch(`${API_URL}/api/office/templates?workspaceId=${encodeURIComponent(workspaceId)}`),
-    "office_templates_failed",
-  );
-  return body.templates;
+  return metadata<OfficeTemplate[], {templates: OfficeTemplate[]}>(`templates?workspaceId=${encodeURIComponent(workspaceId)}`, "office_templates_failed", body => body.templates);
 }
 
 export async function createOfficeTemplate(input: { workspaceId: string; family: OfficeFamily; name: string; description: string; creationMethod: "guided" | "upload"; canonicalWebsite?: string; companyHasNoWebsite?: boolean }): Promise<{ id: string; draftArtifactId: string }> {
@@ -315,11 +308,7 @@ export async function initializeOfficeTemplateDraft(input: { templateId: string;
 }
 
 export async function getOfficeTemplateRouting(templateId: string): Promise<OfficeTemplateRoutingDraft> {
-  const body = await json<{ routing: OfficeTemplateRoutingDraft }>(
-    await authFetch(`${API_URL}/api/office/templates/${encodeURIComponent(templateId)}/routing`),
-    "office_template_routing_failed",
-  );
-  return body.routing;
+  return metadata<OfficeTemplateRoutingDraft, {routing: OfficeTemplateRoutingDraft}>(`templates/${encodeURIComponent(templateId)}/routing`, "office_template_routing_failed", body => body.routing);
 }
 
 export async function saveOfficeTemplateRouting(templateId: string, routing: OfficeTemplateRoutingDraft): Promise<OfficeTemplateRoutingDraft> {

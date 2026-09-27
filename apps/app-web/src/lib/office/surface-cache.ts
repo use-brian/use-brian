@@ -1,30 +1,65 @@
 /**
- * Office-side helpers over the ONE surface cache (`lib/surface-cache.ts`).
- *
- * Office has no workspace-event spine primitive (`realtime-sync.md`: the
- * spine covers pages, tasks, CRM, approvals, workflows, assistants, skills,
- * live and inbox - not office artifacts), so the two surfaces cannot rely on
- * `useSurfaceCacheInvalidation` to go stale when a teammate edits. Their
- * revalidation triggers are therefore the other two the instant-navigation
- * contract names (N3): mount, and the tab coming back to the foreground.
- * `useOfficeCacheRevalidation` is the second one - it MARKS stale, never
- * invalidates, so the list or editor keeps painting while it refetches.
- *
- * `officeArtifactFromListCache` is what lets the editor paint its chrome
- * (title, family) on the first frame after a tap on a home card: the home
- * just rendered that row from `office:<wid>:…`, so the shell reads it back
- * while the artifact row and snapshot are still in flight.
- *
- * Spec: docs/architecture/features/perceived-performance.md ->
- * "Instant-navigation contract". [COMP:app-web/office-surface-cache]
+ * Office readers share the ONE surface cache. Collection/preview reads carry
+ * viewer-bound deadlines and hard invalidation. Legacy editor helpers below
+ * retain their existing interface until the editor-retention adapter lands.
+ * Spec: docs/architecture/features/perceived-performance.md.
+ * [COMP:app-web/office-surface-cache]
  */
 
-import { useEffect } from "react";
-import type { OfficeArtifact } from "@/lib/office/api";
-import { markSurfaceCacheStale, readSurfaceCache } from "@/lib/surface-cache";
+import { useEffect, useLayoutEffect, useRef } from "react";
+import { OfficeApiError, type OfficeArtifact } from "@/lib/office/api";
+import { invalidateSurfaceCache, loadSurfaceCache, useCachedResource, SurfaceCacheEvictionError, markSurfaceCacheStale, readSurfaceCache } from "@/lib/surface-cache";
 import { officeListCacheKey, type OfficeListView } from "@/lib/surface-prefetch";
 
 /** Every lifecycle view the home lists, in the order a tap most likely came from. */
+import { officeMetadataRemaining } from './metadata';
+
+/** Bounded Office reads reuse the shared cache's generation and expiry ownership. */
+export function useOfficeMetadataResource<T>(key: string | null, viewerId: string, fetcher: () => Promise<T>, seed?: T) {
+  // A seed enters cache ownership once. Invalidation must never resurrect it
+  // merely because a parent still holds the original initial-data prop.
+  const seedOwner = useRef({key, unused: true});
+  const initialSeed = seedOwner.current.key === key && seedOwner.current.unused && officeMetadataRemaining(seed, viewerId) > 0 ? seed : undefined;
+  useLayoutEffect(() => {
+    if (seedOwner.current.key !== key || !seedOwner.current.unused) return;
+    seedOwner.current.unused = false;
+    if (key && initialSeed && readSurfaceCache(key).data === undefined && readSurfaceCache(key).error === undefined)
+      void loadSurfaceCache(key, async () => initialSeed, {expiresInMs: value => officeMetadataRemaining(value, viewerId)});
+  }, [key, initialSeed, viewerId]);
+  const previous = useRef(key);
+  useLayoutEffect(() => {
+    if (previous.current && previous.current !== key) invalidateSurfaceCache(previous.current);
+    previous.current = key;
+  }, [key]);
+  const cache = useCachedResource(key, async () => {
+    try { return await fetcher(); }
+    catch (error) {
+      if (error instanceof OfficeApiError && ([401,403,404].includes(error.status) || ['office_projection_changed','office_projection_expired'].includes(error.message)))
+        throw new SurfaceCacheEvictionError(error);
+      throw error;
+    }
+  }, {expiresInMs: value => officeMetadataRemaining(value, viewerId)});
+  const retained = cache.data ?? (cache.error === undefined ? initialSeed : undefined);
+  useEffect(() => {
+    if (!key) return;
+    const purge = () => invalidateSurfaceCache(key);
+    const visible = () => {if (document.visibilityState === 'visible') purge();};
+    window.addEventListener('focus', purge);
+    document.addEventListener('visibilitychange', visible);
+    return () => {window.removeEventListener('focus', purge);document.removeEventListener('visibilitychange', visible);};
+  }, [key]);
+  useEffect(() => {
+    if (!key || !retained) return;
+    const ttl = officeMetadataRemaining(retained, viewerId);
+    if (ttl <= 0) {invalidateSurfaceCache(key);return;}
+    // Also owns expiry for an already warm entry. A refresh failure cannot extend it.
+    const expiry = setTimeout(() => invalidateSurfaceCache(key), Math.ceil(ttl));
+    const renew = ttl > 1000 ? setTimeout(() => {void cache.refresh();}, Math.max(500, ttl - Math.min(5000, ttl / 2))) : undefined;
+    return () => {clearTimeout(expiry);clearTimeout(renew);};
+  }, [key, viewerId, retained, cache.refresh]);
+  return {...cache, data: officeMetadataRemaining(retained, viewerId) > 0 ? retained : undefined};
+}
+
 const OFFICE_LIST_VIEWS: readonly OfficeListView[] = ["active", "archived", "trash", "retained"];
 
 /**

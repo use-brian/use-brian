@@ -40,6 +40,8 @@ import { getUserInfo } from "@/lib/user";
 import { getView, listWorkspaceAssistants } from "@/lib/api/views";
 import { listWorkflows } from "@/lib/api/workflow";
 import { fetchConnectorsList } from "@/lib/api/connectors";
+import { officeMetadataRemaining } from "@/lib/office/metadata";
+import type { CacheLifecycle } from "@/lib/surface-cache";
 import { listOfficeArtifacts } from "@/lib/office/api";
 import { listTools as listShopifyTools } from "@/lib/api/shopify";
 import { fetchLiveRoster } from "@/lib/api/live";
@@ -593,8 +595,8 @@ export function sidebarTreeCacheKey(workspaceId: string): string {
 export type OfficeListView = "active" | "archived" | "trash" | "retained";
 
 /** Permission-filtered template registry, memory-only like Office files. */
-export function officeTemplateListCacheKey(workspaceId: string): string {
-  return `office-templates:${workspaceId}${viewerSuffix()}`;
+export function officeTemplateListCacheKey(workspaceId: string, viewerId = getUserInfo()?.id): string {
+  return `office-templates:${workspaceId}:${viewerId ?? ""}`;
 }
 
 /**
@@ -606,8 +608,8 @@ export function officeTemplateListCacheKey(workspaceId: string): string {
  * shared with one teammate must never paint for another on a shared device).
  * Memory tier only (plan section 6.4: Office lists stay off IndexedDB).
  */
-export function officeListCacheKey(workspaceId: string, view: OfficeListView): string {
-  return `office:${workspaceId}${viewerSuffix()}:${view}`;
+export function officeListCacheKey(workspaceId: string, view: OfficeListView, viewerId = getUserInfo()?.id): string {
+  return `office:${workspaceId}:${viewerId ?? ""}:${view}`;
 }
 
 /** Every list key of one workspace: the prefix `invalidateOfficeList` drops. */
@@ -791,6 +793,7 @@ export type WarmTarget = {
   /** The exact key the destination surface reads on mount. */
   key: string;
   fetch: () => Promise<unknown>;
+  lifecycle?: CacheLifecycle<unknown>;
 };
 
 /**
@@ -860,6 +863,7 @@ export function warmTargetFor(
       return {
         key: officeListCacheKey(workspaceId, "active"),
         fetch: () => listOfficeArtifacts(workspaceId, "active"),
+        lifecycle: {expiresInMs: officeMetadataRemaining},
       };
     case "shopify":
       // The reachability answer gates everything the surface renders (the
@@ -904,7 +908,7 @@ function warmSurfaceData(
 ): void {
   if (!surface || !workspaceId || !WARMABLE.has(surface)) return;
   const target = warmTargetFor(surface as WarmableSurface, workspaceId);
-  warmSurfaceCache(target.key, target.fetch);
+  warmSurfaceCache(target.key, target.fetch, undefined, target.lifecycle);
 }
 
 /** The workspace id in a `/w/<id>/...` path, or null. */
@@ -976,4 +980,9 @@ export function fileCacheMediaCacheKey(workspaceId:string,userId:string,fileId:s
 /** Office bytes are owned by one viewer, artifact and exact resource set. */
 export function officeMediaCacheKey(workspaceId:string,userId:string,artifactId:string,resourceIds:readonly string[]):string {
   return `office-media:${workspaceId}:${userId}:${artifactId}:${JSON.stringify([...new Set(resourceIds)].sort())}`;
+}
+
+/** SQL metadata previews are partitioned by the authenticated shell viewer. */
+export function officePreviewCacheKey(workspaceId: string, viewerId: string, artifactId: string, version: number): string {
+  return `office-preview:${workspaceId}:${viewerId}:${artifactId}:${version}`;
 }

@@ -206,11 +206,12 @@ export function warmSurfaceCache<T>(
   key: string | null,
   fetcher: () => Promise<T>,
   staleMs: number = DEFAULT_STALE_MS,
+  lifecycle?: CacheLifecycle<T>,
 ): void {
   if (!key || !isBrowser()) return;
   if (inflight.has(key)) return;
   if (!isSurfaceCacheStale(key, staleMs)) return;
-  void loadSurfaceCache(key, fetcher);
+  void loadSurfaceCache(key, fetcher, lifecycle);
 }
 
 /**
