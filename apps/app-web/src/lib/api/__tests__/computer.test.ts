@@ -81,6 +81,17 @@ describe('[COMP:app-web/sandbox-takeover] Take-Over live view SDK', () => {
     expect(await getComputerTask('sess-1')).toBeNull()
   })
 
+  it('passes cancellation through both independent viewer polling requests', async () => {
+    const controller = new AbortController()
+    await getComputerFrame('sess-1', controller.signal)
+    await getComputerTask('sess-1', controller.signal)
+    expect(mockFetch.mock.calls[0][1]?.signal).toBe(controller.signal)
+    expect(mockFetch.mock.calls[1][1]?.signal).toBe(controller.signal)
+    controller.abort()
+    expect(mockFetch.mock.calls[0][1]?.signal?.aborted).toBe(true)
+    expect(mockFetch.mock.calls[1][1]?.signal?.aborted).toBe(true)
+  })
+
   it('resumes on arrival, polls frames, and forwards scaled input events', async () => {
     await resumeComputerTask('sess-1')
     expect(String(mockFetch.mock.calls[0][0])).toContain('/tasks/sess-1/resume')

@@ -14,7 +14,7 @@
  *      down, JSON input up — sub-second, damage-driven, hover relay).
  *   2. SSE frames + per-event POST input against the same bridge (older
  *      backend or a WS-hostile network).
- *   3. The ~1 fps API frame poll + API input relay (bridge unreachable) —
+ *   3. The adaptive API frame poll + API input relay (bridge unreachable) —
  *      shown as "Delayed view", with periodic re-mint attempts to climb
  *      back up the ladder.
  *
@@ -48,6 +48,7 @@ import { confirmDialog } from "@/components/ui/confirm-dialog";
 import {
   canSwitchSessionBackend,
   createFrameGate,
+  createTakeoverPoller,
   createWheelForwarder,
   mapClickToFrame,
   normalizeCaptureSite,
@@ -86,7 +87,6 @@ import {
   type TakeoverStreamSession,
 } from "@/lib/api/computer";
 
-const FRAME_INTERVAL_MS = 1_200;
 const MOVE_THROTTLE_MS = 50;
 const DRAG_THROTTLE_MS = 80;
 const REMINT_INTERVAL_MS = 20_000;
@@ -180,6 +180,9 @@ export default function ComputerTakeoverPage(props: {
     frameW: number;
     frameH: number;
   } | null>(null);
+  const pollerRef = useRef<ReturnType<typeof createTakeoverPoller> | null>(null);
+  const polledTaskId = task && task !== "loading" ? task.taskId : null;
+  const polledBackend = task && task !== "loading" ? task.backend : null;
   const wsRef = useRef<WebSocket | null>(null);
   const inputQueueRef = useRef<Promise<void>>(Promise.resolve());
   const pointerDeliveryFailed = useRef(false);
@@ -336,29 +339,33 @@ export default function ComputerTakeoverPage(props: {
     };
   }, [task, sessionId, mode, stream]);
 
-  // Rung 3 - the API frame poll (bridge unreachable).
+  // Rung 3: fast frames after delivered input, independent ~1s task/lock
+  // refresh. Key by identity, not metadata, so origin/status updates cannot
+  // restart an in-flight frame or reset the interaction burst.
   useEffect(() => {
-    if (!task || task === "loading" || mode !== "poll") return;
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const tick = async () => {
-      const frame = await getComputerFrame(sessionId).catch(() => null);
-      if (cancelled) return;
-      if (frame) {
-        gateRef.current?.push(`data:${frame.mimeType};base64,${frame.data}`);
-        setStalled(false);
-      } else {
-        setStalled(true);
-      }
-      // Local origin/lock changes matter even while frames are arriving.
-      if (!frame || task.backend === "local") {
-        const active = await getComputerTask(sessionId).catch(() => undefined);
-        if (cancelled) return;
+    if (!polledTaskId || mode !== "poll") return;
+    const hidden = () => document.hidden;
+    const frames = createTakeoverPoller({
+      hidden,
+      poll: async (signal) => {
+        const frame = await getComputerFrame(sessionId, signal).catch(() => null);
+        if (signal.aborted) return;
+        if (frame) gateRef.current?.push(`data:${frame.mimeType};base64,${frame.data}`);
+        setStalled(!frame);
+      },
+    });
+    // Never tie protected-fill binding freshness to successful frame arrival.
+    // Metadata stays single-flight and slow even during typing/scroll bursts.
+    const metadata = createTakeoverPoller({
+      hidden,
+      poll: async (signal) => {
+        const active = await getComputerTask(sessionId, signal).catch(() => undefined);
+        if (signal.aborted) return;
         if (active === null) {
+          frames.dispose();
+          metadata.dispose();
           setTask(null);
-          return;
-        }
-        if (active) {
+        } else if (active) {
           setTask((current) =>
             current && current !== "loading" &&
               current.connectionState === active.connectionState &&
@@ -372,15 +379,21 @@ export default function ComputerTakeoverPage(props: {
               : active,
           );
         }
-      }
-      timer = setTimeout(() => void tick(), FRAME_INTERVAL_MS);
+      },
+    });
+    pollerRef.current = frames;
+    const visibilityChanged = () => {
+      frames.visibilityChanged();
+      metadata.visibilityChanged();
     };
-    void tick();
+    document.addEventListener("visibilitychange", visibilityChanged);
     return () => {
-      cancelled = true;
-      if (timer) clearTimeout(timer);
+      pollerRef.current = null;
+      frames.dispose();
+      metadata.dispose();
+      document.removeEventListener("visibilitychange", visibilityChanged);
     };
-  }, [task, sessionId, mode]);
+  }, [polledTaskId, polledBackend, sessionId, mode]);
 
   // While polled, periodically try to climb back up the ladder - a bridge
   // that was mid-restart (or a flaky hop) should not demote the whole visit.
@@ -420,6 +433,7 @@ export default function ComputerTakeoverPage(props: {
       setInputStatus(event.kind === "pointer" && event.action === "move" ? "holding" : "sending");
       // HTTP requests have no ordering guarantee. Serialize them so a quick
       // pointer-up can never overtake pointer-down and leave the remote mouse stuck.
+      const poller = pollerRef.current;
       const queued = inputQueueRef.current
         .catch(() => {})
         .then(async () => {
@@ -431,6 +445,7 @@ export default function ComputerTakeoverPage(props: {
           } catch {
             delivered = false;
           }
+          if (delivered) poller?.inputDelivered();
           if (!delivered && event.kind === "pointer") pointerDeliveryFailed.current = true;
           if (!delivered || (event.kind === "pointer" && pointerDeliveryFailed.current)) {
             setInputStatus("failed");
