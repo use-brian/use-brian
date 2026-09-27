@@ -1,4 +1,16 @@
-import {randomUUID} from 'node:crypto'
+import {randomUUID,createHash} from 'node:crypto'
+import request from 'supertest'
+import type {DocumentSnapshot} from '@use-brian/office-model'
+import {createOfficeLiveStore} from '../office-live.js'
+import {createFilesApi} from '../../files/files-api.js'
+import type {GcsFilesClient} from '../../files/gcs-client.js'
+import {createDbWorkspaceFilesStore} from '../workspace-files-store.js'
+import {getWorkspaceFileReadProjection} from '../workspace-files.js'
+import {getWorkspaceMembershipWithClearanceSystem} from '../workspace-store.js'
+import {createOfficeResourceReader} from '../../office/resource-read.js'
+import {resolveOfficeAccess} from '../../office/access.js'
+import {officeResourceRoutes} from '../../routes/office-resources.js'
+import {createTestApp} from '../../routes/__tests__/helpers.js'
 import {afterAll,describe,expect,it} from 'vitest'
 import {getPool,getAppPool,queryWithRLS} from '../client.js'
 import {createOfficeArtifactStore} from '../office-artifacts.js'
@@ -11,7 +23,7 @@ await assertLocalFixture()
 const pool=getPool(),artifacts=createOfficeArtifactStore(),templates=createOfficeTemplateStore(),groups=createDbWorkspaceGroupStore()
 const hash='a'.repeat(64)
 const tables=['office_templates','office_template_versions','office_resources','office_template_resource_refs'] as const
-async function fixture() {
+async function fixture(grantLifetimeMs=86_400_000) {
   const workspaceId=randomUUID(),owner=randomUUID(),reader=randomUUID(),editor=randomUUID()
   for(const id of [owner,reader,editor])await pool.query('INSERT INTO users(id,auth_provider_id) VALUES($1::uuid,$1::text)',[id])
   await pool.query("INSERT INTO workspaces(id,name,owner_user_id) VALUES($1,'Library scope fixture',$2)",[workspaceId,owner])
@@ -33,13 +45,13 @@ async function fixture() {
   async function grant() {
     const request=randomUUID()
     await pool.query(`INSERT INTO workspace_access_requests(id,workspace_id,requester_user_id,beneficiary_kind,beneficiary_id,target_team_id,reason,starts_at,expires_at,payload_hash,policy_revision,status,decided_by,decided_at)
-      VALUES($1,$2,$3,'member',$3,$4,'Library fixture',now()-interval '1 day',now()+interval '1 day',$5,1,'approved',$6,now())`,[request,workspaceId,reader,team.id,hash,owner])
+      VALUES($1,$2,$3,'member',$3,$4,'Library fixture',now()-interval '1 day',now()+$7*interval '1 millisecond',$5,1,'approved',$6,now())`,[request,workspaceId,reader,team.id,hash,owner,grantLifetimeMs])
     return (await pool.query<{id:string}>(`INSERT INTO workspace_access_grants(workspace_id,request_id,beneficiary_kind,beneficiary_id,target_team_id,starts_at,expires_at,approved_by)
       SELECT workspace_id,id,beneficiary_kind,beneficiary_id,target_team_id,starts_at,expires_at,decided_by FROM workspace_access_requests WHERE id=$1 RETURNING id`,[request])).rows[0]!.id
   }
   const grantId=await grant()
   const revoke=(id=grantId)=>pool.query('UPDATE workspace_access_grants SET revoked_at=now(),revoked_by=$2 WHERE id=$1',[id,owner])
-  return {workspaceId,owner,reader,editor,team,artifact,template,file,bundleFileId,resourceFileId,resource,resourceParams,version,versionParams,grant,revoke}
+  return {workspaceId,owner,reader,editor,team,artifact,template,file,bundleFileId,resourceFileId,resource,resourceParams,version,versionParams,grantId,grant,revoke}
 }
 afterAll(async()=>{await getAppPool().end();await pool.end()})
 
@@ -169,4 +181,68 @@ describe('[COMP:api/office-access] current Office library scopes (PG18)',()=>{
     expect(await runWithAgentAccess({...scope,visibilityAssistantIds:[assistant]},()=>templates.getResource(f.owner,f.resource.id))).toBeNull()
   })
 
+})
+
+async function resourceDeliveryFixture(grantLifetimeMs=86_400_000) {
+  const f=await fixture(grantLifetimeMs),bytes=Buffer.from('Office image fixture'),contentHash=createHash('sha256').update(bytes).digest('hex')
+  await pool.query("UPDATE workspace_files SET storage_uri=$2,mime='image/png' WHERE id=$1",[f.resourceFileId,`gs://fixture-bucket/${f.workspaceId}/${f.resourceFileId}`])
+  await pool.query('UPDATE office_resources SET content_hash=$2 WHERE id=$1',[f.resource.id,contentHash])
+  const snapshot:DocumentSnapshot={schemaVersion:1,capabilityVersion:1,artifactId:f.artifact.id,workspaceId:f.workspaceId,family:'document',locale:'en',defaultLanguage:'en',templateVersionId:null,rootId:randomUUID(),title:'Resource fixture',accessibility:{title:'Resource fixture'},
+    resources:[{id:f.resource.id,kind:'image',hash:contentHash,mime:'image/png',sensitivity:'internal'}],
+    sections:[{id:randomUUID(),page:{widthPt:612,heightPt:792,marginTopPt:72,marginRightPt:72,marginBottomPt:72,marginLeftPt:72,orientation:'portrait'},header:[],footer:[],showPageNumber:false,nodes:[{id:randomUUID(),kind:'image',resourceId:f.resource.id,altText:'Fixture',decorative:false,widthPt:100,heightPt:80}]}]}
+  const live=createOfficeLiveStore();await live.initialize({userId:f.owner,artifactId:f.artifact.id,snapshot})
+  const gcs={readBlob:async()=>({bytes,mime:'image/png',metadata:{}})} as unknown as GcsFilesClient
+  const api=createFilesApi({gcs,store:createDbWorkspaceFilesStore(),auditStore:{append:async()=>{}} as never,bucket:'fixture-bucket'})
+  const read=createOfficeResourceReader({filesApi:api,getResource:templates.getResource,membership:getWorkspaceMembershipWithClearanceSystem,readProjection:getWorkspaceFileReadProjection})
+  const load=async(userId:string,artifactId:string)=>{
+    const [artifact,access,current]=await Promise.all([artifacts.get(userId,artifactId),resolveOfficeAccess(userId,artifactId),live.get(userId,artifactId)])
+    return artifact&&access&&current?{artifact,access,snapshot:current.snapshot}:null
+  }
+  const app=(userId=f.reader)=>createTestApp('/api/office',officeResourceRoutes({load,readResource:read,
+    readUpload:async()=>{throw new Error('not an admission test')},persistImage:async()=>{throw new Error('not an admission test')}}),{userId})
+  return {...f,bytes,gcs,api,read,live,snapshot,app,url:`/api/office/artifacts/${f.artifact.id}/resources/${f.resource.id}`}
+}
+
+describe('[COMP:api/office-resources] real current resource delivery (PG18)',()=>{
+  it('serves current read-only grant bytes, bounds lifetime, ignores stale validators and preserves independent access',async()=>{
+    const f=await resourceDeliveryFixture(3000)
+    const res=await request(f.app()).get(f.url).set('If-None-Match','*').expect(200)
+    expect(Buffer.from(res.body)).toEqual(f.bytes);expect(res.headers['cache-control']).toBe('private, no-store')
+    expect(res.headers.etag).toBeUndefined();expect(Number(res.headers['x-brian-media-valid-for-ms'])).toBeGreaterThan(0)
+    expect(Number(res.headers['x-brian-media-valid-for-ms'])).toBeLessThanOrEqual(3000)
+    expect((await resolveOfficeAccess(f.reader,f.artifact.id))?.canEdit).toBe(false)
+    const other=await f.grant();await f.revoke();await request(f.app()).get(f.url).expect(200)
+    await f.revoke(other);const denied=await request(f.app()).get(f.url).expect(404)
+    expect(denied.text).not.toContain(f.bytes.toString());expect(denied.headers['x-brian-media-valid-for-ms']).toBeUndefined()
+  })
+  it('normalizes administrator clearance without bypassing private file visibility',async()=>{
+    const f=await resourceDeliveryFixture()
+    await pool.query("UPDATE workspace_files SET sensitivity='confidential' WHERE id=$1",[f.resourceFileId])
+    await pool.query("UPDATE office_resources SET sensitivity='confidential' WHERE id=$1",[f.resource.id])
+    await request(f.app(f.owner)).get(f.url).expect(200)
+    await pool.query('UPDATE workspace_files SET user_id=$2 WHERE id=$1',[f.resourceFileId,f.editor])
+    await request(f.app(f.owner)).get(f.url).expect(404)
+  })
+  it.each(['grant','membership','holding','file revision','resource binding','resource sensitivity','artifact deny','reference removal'] as const)('withholds fetched bytes after %s changes during I/O',async change=>{
+    const f=await resourceDeliveryFixture(),original=f.gcs.readBlob.bind(f.gcs)
+    f.gcs.readBlob=async key=>{
+      const result=await original(key)
+      if(change==='grant')await f.revoke()
+      if(change==='membership')await pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[f.workspaceId,f.reader])
+      if(change==='holding')await pool.query('UPDATE workspace_files SET scope_held=true WHERE id=$1',[f.resourceFileId])
+      if(change==='file revision')await pool.query("UPDATE workspace_files SET sensitivity='public' WHERE id=$1",[f.resourceFileId])
+      if(change==='resource binding')await pool.query('UPDATE office_resources SET file_id=$2 WHERE id=$1',[f.resource.id,await f.file()])
+      if(change==='resource sensitivity')await pool.query("UPDATE office_resources SET sensitivity='confidential' WHERE id=$1",[f.resource.id])
+      if(change==='artifact deny')await pool.query("INSERT INTO office_artifact_grants(artifact_id,workspace_id,user_id,role,granted_by) VALUES($1,$2,$3,'deny',$4)",[f.artifact.id,f.workspaceId,f.reader,f.owner])
+      if(change==='reference removal')await f.live.initialize({userId:f.owner,artifactId:f.artifact.id,snapshot:{...f.snapshot,resources:[],sections:f.snapshot.sections.map(section=>({...section,nodes:[]}))}})
+      return result
+    }
+    const res=await request(f.app()).get(f.url).expect(404)
+    expect(res.text).not.toContain(f.bytes.toString());expect(res.headers['x-brian-media-valid-for-ms']).toBeUndefined()
+  })
+  it('does not project bytes into a different requested workspace',async()=>{
+    const f=await resourceDeliveryFixture()
+    await request(f.app()).get(f.url+'?workspaceId='+randomUUID()).expect(404)
+    await request(f.app()).get(f.url+'?workspaceId='+f.workspaceId).expect(200)
+  })
 })

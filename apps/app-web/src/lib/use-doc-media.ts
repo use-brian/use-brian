@@ -2,9 +2,9 @@
 
 /** Protected durable media shares the surface cache. [COMP:app-web/doc-file-url] */
 import {useCallback,useLayoutEffect,useMemo,useRef} from 'react';
-import {fetchDocMediaProjection,fetchCachedMediaProjection,type FileRef,type DocMediaProjection} from '@/components/doc/doc-file-url';
-import {invalidateSurfaceCache,loadSurfaceCache,readSurfaceCache,useCachedResource} from './surface-cache';
-import {docMediaCacheKey,fileCacheMediaCacheKey} from './surface-prefetch';
+import {fetchDocMediaProjection,fetchCachedMediaProjection,fetchOfficeMediaProjection,type FileRef,type DocMediaProjection} from '@/components/doc/doc-file-url';
+import {invalidateSurfaceCache,loadSurfaceCache,readSurfaceCache,useCachedResource,SurfaceCacheEvictionError} from './surface-cache';
+import {docMediaCacheKey,fileCacheMediaCacheKey,officeMediaCacheKey} from './surface-prefetch';
 import {useProtectedProjection} from './use-protected-projection';
 import {useOptionalWorkspaceContext} from './workspace-context';
 
@@ -82,4 +82,38 @@ export function useDocMediaDownload(workspaceId:string) {
 export function useFileRefSrc(ref:FileRef|null,workspaceId:string):string|null {
   const known=ref?.bucket==='workspace_files'||ref?.bucket==='file_cache';
   return useProtectedMedia(workspaceId,known?ref!.path:null,ref?.bucket==='workspace_files'?'durable':'original').url;
+}
+
+/** All Office renderers use cache-owned URLs with the same protected lifetime. */
+export function useOfficeResourceUrls(artifactId:string|null,resourceIds:readonly string[]) {
+  const workspace=useOptionalWorkspaceContext();
+  const ids=[...new Set(resourceIds)].sort();
+  const key=workspace?.workspaceId&&workspace.me.id&&artifactId&&ids.length
+    ?officeMediaCacheKey(workspace.workspaceId,workspace.me.id,artifactId,ids):null;
+  const previous=useRef(key);
+  useLayoutEffect(()=>{
+    if(previous.current&&previous.current!==key)invalidateSurfaceCache(previous.current);
+    previous.current=key;
+  },[key]);
+  const cache=useCachedResource(key,async()=>{
+    const results=await Promise.allSettled(ids.map(id=>fetchOfficeMediaProjection(workspace!.workspaceId,artifactId!,id)));
+    const admitted=results.flatMap((result,index)=>result.status==='fulfilled'?[{id:ids[index],value:result.value}]:[]);
+    // A partial image set is allowed, but failed or expired entries retain no URL.
+    const usable=admitted.filter(({value})=>lifecycle.expiresInMs(value)>0);
+    for(const entry of admitted)if(!usable.includes(entry))lifecycle.dispose(entry.value);
+    if(!usable.length)throw new SurfaceCacheEvictionError(new Error('office_resources_unavailable'));
+    return {urls:Object.fromEntries(usable.map(({id,value})=>[id,value.url])),
+      projectionDeadline:Math.min(...usable.map(({value})=>value.projectionDeadline)),
+      projectionMonotonicDeadline:Math.min(...usable.map(({value})=>value.projectionMonotonicDeadline))};
+  },{
+    dispose:value=>{for(const url of Object.values(value.urls))URL.revokeObjectURL(url);},
+    expiresInMs:value=>Math.min(value.projectionDeadline-Date.now(),value.projectionMonotonicDeadline-performance.now()),
+  });
+  const projection=useProtectedProjection(key??'office-media:disabled',cache.data,()=>{},cache.refresh);
+  return {urls:projection?.urls??{},error:cache.error};
+}
+
+export function useOfficeResourceMedia(artifactId:string|null,resourceId:string|null) {
+  const result=useOfficeResourceUrls(artifactId,resourceId?[resourceId]:[]);
+  return {url:resourceId?result.urls[resourceId]??null:null,error:result.error};
 }

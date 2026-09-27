@@ -563,6 +563,7 @@ import { officeReleaseRoutes } from './routes/office-releases.js'
 import { officeLifecycleRoutes } from './routes/office-lifecycle.js'
 import { officeOfflineRoutes } from './routes/office-offline.js'
 import { officeResourceRoutes } from './routes/office-resources.js'
+import { createOfficeResourceReader } from './office/resource-read.js'
 import { internalOfficeCheckpointRoutes } from './routes/internal-office-checkpoint.js'
 import { assertOfficeArtifactSnapshot, encodeOfficeState, officeStateVector, snapshotToYDoc, type OfficeArtifactSnapshot } from '@use-brian/office-model'
 import { publicShareRoutes } from './routes/public-share.js'
@@ -6841,19 +6842,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       return { version: version.version }
     },
   }))
-  const readOfficeResource = async (userId: string, workspaceId: string, resourceId: string) => {
-    if (!filesApi) return null
-    const [resource, membership] = await Promise.all([
-      officeTemplateStore.getResource(userId, resourceId),
-      query<{ clearance: 'public' | 'internal' | 'confidential' }>(`SELECT clearance FROM workspace_members WHERE workspace_id=$1 AND user_id=$2`, [workspaceId, userId]),
-    ])
-    if (!resource?.fileId || resource.workspaceId !== workspaceId) return null
-    const clearance = membership.rows[0]?.clearance
-    const rank = { public: 0, internal: 1, confidential: 2 } as const
-    if (!clearance || rank[clearance] < rank[resource.sensitivity]) return null
-    const read = await filesApi.readBytes({ workspaceId, userId, assistantKind: 'standard', clearance }, resource.fileId)
-    return read.ok ? { bytes: read.value.bytes, mime: resource.mime, hash: resource.hash } : null
-  }
+  const readOfficeResource = filesApi ? createOfficeResourceReader({
+    filesApi, getResource: officeTemplateStore.getResource,
+    membership: getWorkspaceMembershipWithClearanceSystem,
+    readProjection: getWorkspaceFileReadProjection,
+  }) : async () => null
   if (filesApi) app.use('/api/office', requireAuth(env.JWT_SECRET), officeResourceRoutes({
     async load(userId, artifactId) {
       const [artifact, access, live] = await Promise.all([

@@ -59,3 +59,9 @@ export async function fetchCachedMediaProjection(workspaceId:string,fileId:strin
   const {blob,...projection}=await readMedia(`${API_URL}/api/files/${encodeURIComponent(fileId)}/${endpoint}?workspaceId=${encodeURIComponent(workspaceId)}`);
   return {...projection,mimeType:blob.type,url:URL.createObjectURL(blob)};
 }
+
+/** Office references require both the current artifact and durable-file authority. */
+export async function fetchOfficeMediaProjection(workspaceId:string,artifactId:string,resourceId:string):Promise<DocMediaProjection> {
+  const {blob,...projection}=await readMedia(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/resources/${encodeURIComponent(resourceId)}?workspaceId=${encodeURIComponent(workspaceId)}`);
+  return {...projection,mimeType:blob.type,url:URL.createObjectURL(blob)};
+}

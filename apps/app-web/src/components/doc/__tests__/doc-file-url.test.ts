@@ -2,7 +2,7 @@
 import {describe,it,expect,vi,beforeEach,afterEach} from 'vitest';
 const {mockAuthFetch}=vi.hoisted(()=>({mockAuthFetch:vi.fn()}));
 vi.mock('@/lib/auth-fetch',()=>({authFetch:mockAuthFetch}));
-import {fetchDocMediaProjection,fetchDocFileBlob,fetchCachedMediaProjection} from '../doc-file-url';
+import {fetchDocMediaProjection,fetchDocFileBlob,fetchCachedMediaProjection,fetchOfficeMediaProjection} from '../doc-file-url';
 describe('[COMP:app-web/doc-file-url] authenticated media bytes',()=>{
   const directFetch=vi.fn(),create=vi.fn(()=> 'blob:fixture');
   beforeEach(()=>{mockAuthFetch.mockReset();directFetch.mockReset();create.mockClear();vi.stubGlobal('fetch',directFetch);vi.stubGlobal('URL',class extends URL {static createObjectURL=create;});});
@@ -45,6 +45,12 @@ describe('[COMP:app-web/doc-file-url] authenticated media bytes',()=>{
     mockAuthFetch.mockResolvedValue({ok:true,headers:new Headers({'X-Brian-Media-Valid-For-Ms':'60000'}),blob:async()=>new Blob(['protected'])});
     const projection=await fetchDocMediaProjection('ws_1','wf_1');
     expect(projection.projectionMonotonicDeadline).toBe(30100);expect(projection.url).toBe('blob:fixture');expect(projection.mimeType).toBe('');now.mockRestore();
+  });
+
+  it('uses artifact-scoped no-store Office admission with the initiating workspace',async()=>{
+    mockAuthFetch.mockResolvedValue({ok:true,headers:new Headers({'X-Brian-Media-Valid-For-Ms':'30000'}),blob:async()=>new Blob(['fixture'],{type:'image/png'})});
+    expect((await fetchOfficeMediaProjection('workspace','artifact','resource')).url).toBe('blob:fixture');
+    expect(mockAuthFetch).toHaveBeenCalledWith(expect.stringContaining('/api/office/artifacts/artifact/resources/resource?workspaceId=workspace'),{cache:'no-store'});
   });
 
 });

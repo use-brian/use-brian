@@ -302,7 +302,7 @@ describe('[COMP:api/office-routes] Office artifact resources', () => {
       artifact: { id: ARTIFACT, workspaceId: WORKSPACE },
       snapshot: { resources: [{ id: RESOURCE, hash, mime: 'image/png' }] },
     } as never))
-    const readResource = vi.fn(async () => ({ bytes, hash, mime: 'image/png' }))
+    const readResource = vi.fn(async () => ({ bytes, hash, mime: 'image/png', validForMs: 30_000 }))
     const server = express()
     server.use((req, _res, next) => { (req as { userId?: string }).userId = USER; next() })
     server.use('/api/office', officeResourceRoutes({
@@ -314,7 +314,7 @@ describe('[COMP:api/office-routes] Office artifact resources', () => {
 
     const response = await request(server).get(`/api/office/artifacts/${ARTIFACT}/resources/${RESOURCE}`).expect(200)
     expect(response.headers['content-type']).toMatch(/^image\/png/)
-    expect(response.headers['cache-control']).toBe('private, max-age=31536000, immutable')
+    expect(response.headers['cache-control']).toBe('private, no-store')
     expect(Buffer.from(response.body)).toEqual(Buffer.from(bytes))
     expect(readResource).toHaveBeenCalledWith(USER, WORKSPACE, RESOURCE)
 
@@ -327,8 +327,8 @@ describe('[COMP:api/office-routes] Office artifact resources', () => {
     const server = express()
     server.use((req, _res, next) => { (req as { userId?: string }).userId = USER; next() })
     server.use('/api/office', officeResourceRoutes({
-      load: vi.fn(async () => ({ artifact: { workspaceId: WORKSPACE }, snapshot: { resources: [{ id: RESOURCE, hash: expectedHash, mime: 'image/png' }] } } as never)),
-      readResource: vi.fn(async () => ({ bytes: new Uint8Array([9]), hash: expectedHash, mime: 'image/png' })),
+      load: vi.fn(async () => ({ artifact: { workspaceId: WORKSPACE }, snapshot: { resources: [{ id: RESOURCE, hash: expectedHash, mime: 'image/png', validForMs: 30_000 }] } } as never)),
+      readResource: vi.fn(async () => ({ bytes: new Uint8Array([9]), hash: expectedHash, mime: 'image/png', validForMs: 30_000 })),
       readUpload: vi.fn(),
       persistImage: vi.fn(),
     } as never))

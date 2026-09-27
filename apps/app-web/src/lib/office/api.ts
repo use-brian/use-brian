@@ -4,7 +4,6 @@ import { authFetch } from "@/lib/auth-fetch";
 import type { OfficeArtifactSnapshot, OfficeCommand, OfficeResourceRef, OfficeTemplateRoutingDraft, OfficeTemplateSlideRole } from "@use-brian/office-model";
 
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
-const officeResourceObjectUrls = new Map<string, Promise<string>>();
 
 export type OfficeFamily = "document" | "presentation" | "spreadsheet";
 export type { OfficeTemplateRoutingDraft, OfficeTemplateSlideRole };
@@ -148,26 +147,6 @@ export async function getOfficeArtifact(artifactId: string): Promise<OfficeArtif
 
 export async function getOfficeSnapshot(artifactId: string): Promise<OfficeLiveSnapshot> {
   return json(await authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/snapshot`), "office_snapshot_failed");
-}
-
-export function getOfficeResourceObjectUrl(artifactId: string, resourceId: string): Promise<string> {
-  const key = `${artifactId}:${resourceId}`;
-  const cached = officeResourceObjectUrls.get(key);
-  if (cached) return cached;
-  const pending = authFetch(`${API_URL}/api/office/artifacts/${encodeURIComponent(artifactId)}/resources/${encodeURIComponent(resourceId)}`)
-    .then(async (response) => {
-      if (!response.ok) {
-        const body = await response.clone().json().catch(() => null) as { error?: unknown } | null;
-        throw new OfficeApiError(typeof body?.error === "string" ? body.error : "office_resource_failed", response.status);
-      }
-      return URL.createObjectURL(await response.blob());
-    })
-    .catch((error) => {
-      officeResourceObjectUrls.delete(key);
-      throw error;
-    });
-  officeResourceObjectUrls.set(key, pending);
-  return pending;
 }
 
 export async function admitOfficeImageResource(artifactId: string, workspaceId: string, file: File): Promise<{ resource: OfficeResourceRef; widthPx: number; heightPx: number }> {

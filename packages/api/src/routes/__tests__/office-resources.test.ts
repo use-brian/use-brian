@@ -19,7 +19,7 @@ function server(overrides: Partial<OfficeResourceRouteDeps> = {}, authenticated 
     readUpload: vi.fn(async () => ({ bytes, sensitivity: 'internal' as const })),
     normalizeImage: vi.fn(async () => image),
     persistImage: vi.fn(async () => ({ id: RESOURCE })),
-    readResource: vi.fn(async () => ({ bytes, mime: image.mime, hash: image.hash })),
+    readResource: vi.fn(async () => ({ bytes, mime: image.mime, hash: image.hash, validForMs: 30_000 })),
     ...overrides,
   }
   const app = express(); app.use(express.json()); if (authenticated) app.use((req, _res, next) => { (req as { userId?: string }).userId = USER; next() }); app.use('/api/office', officeResourceRoutes(deps))
@@ -80,6 +80,18 @@ describe('[COMP:api/office-resources] Office image admission', () => {
     vi.mocked(test.deps.load).mockResolvedValue({ artifact: { workspaceId: WORKSPACE }, snapshot: { resources: [{ id: RESOURCE, hash: test.image.hash, mime: test.image.mime }] } } as never)
     const response = await request(test.app).get(`/api/office/artifacts/${ARTIFACT}/resources/${RESOURCE}`).expect(200)
     expect(Buffer.from(response.body)).toEqual(Buffer.from(test.image.bytes))
-    await request(server({ readResource: vi.fn(async () => ({ bytes: new Uint8Array([9]), mime: test.image.mime, hash: test.image.hash })), load: vi.fn(async () => ({ artifact: { workspaceId: WORKSPACE }, snapshot: { resources: [{ id: RESOURCE, hash: test.image.hash, mime: test.image.mime }] } } as never)) }).app).get(`/api/office/artifacts/${ARTIFACT}/resources/${RESOURCE}`).expect(409, { error: 'office_resource_incomplete', resourceId: RESOURCE })
+    await request(server({ readResource: vi.fn(async () => ({ bytes: new Uint8Array([9]), mime: test.image.mime, hash: test.image.hash, validForMs: 30_000 })), load: vi.fn(async () => ({ artifact: { workspaceId: WORKSPACE }, snapshot: { resources: [{ id: RESOURCE, hash: test.image.hash, mime: test.image.mime }] } } as never)) }).app).get(`/api/office/artifacts/${ARTIFACT}/resources/${RESOURCE}`).expect(409, { error: 'office_resource_incomplete', resourceId: RESOURCE })
   })
+  it.each([undefined,NaN,0,-1])('refuses missing or expired byte display authority (%s)',async validForMs=>{
+    const test=server();vi.mocked(test.deps.load).mockResolvedValue({artifact:{workspaceId:WORKSPACE},snapshot:{resources:[{id:RESOURCE,hash:test.image.hash,mime:test.image.mime}]}} as never)
+    vi.mocked(test.deps.readResource).mockResolvedValue({...test.image,validForMs} as never)
+    const response=await request(test.app).get(`/api/office/artifacts/${ARTIFACT}/resources/${RESOURCE}`).expect(404)
+    expect(response.headers['cache-control']).toBe('private, no-store');expect(response.headers['x-brian-media-valid-for-ms']).toBeUndefined()
+  })
+  it('withholds a reference removed while bytes are being read',async()=>{
+    const test=server();vi.mocked(test.deps.load).mockResolvedValueOnce({artifact:{workspaceId:WORKSPACE},snapshot:{resources:[{id:RESOURCE,hash:test.image.hash,mime:test.image.mime}]}} as never)
+      .mockResolvedValue({artifact:{workspaceId:WORKSPACE},snapshot:{resources:[]}} as never)
+    await request(test.app).get(`/api/office/artifacts/${ARTIFACT}/resources/${RESOURCE}`).expect(404)
+  })
+
 })

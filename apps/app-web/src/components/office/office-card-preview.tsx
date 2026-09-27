@@ -5,7 +5,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { FileSpreadsheet, FileText, Presentation } from "lucide-react";
 import type { OfficeArtifactSnapshot } from "@use-brian/office-model";
 import { layoutOfficeArtifact, renderOfficePreviewSvg } from "@use-brian/office-renderer";
-import { getOfficeResourceObjectUrl, getOfficeSnapshot, type OfficeArtifact } from "@/lib/office/api";
+import { getOfficeSnapshot, type OfficeArtifact } from "@/lib/office/api";
+import { useOfficeResourceUrls } from "@/lib/use-doc-media";
 import { PresentationSlideVisual } from "./presentation-slide-visual";
 
 export function OfficeCardPreview({ artifact }: { artifact: OfficeArtifact }) {
@@ -90,25 +91,7 @@ function SpreadsheetCardPreview({ snapshot }: { snapshot: Extract<OfficeArtifact
     return pages.find((candidate) => candidate.id === snapshot.activeSheetId) ?? pages[0];
   }, [snapshot]);
   const resourceIds = useMemo(() => [...new Set(page.primitives.flatMap((primitive) => primitive.kind === "image" && primitive.resourceId ? [primitive.resourceId] : []))], [page]);
-  const [resourceUrls, setResourceUrls] = useState<Record<string, string>>({});
-
-  useEffect(() => {
-    let active = true;
-    setResourceUrls({});
-    void Promise.all(resourceIds.map(async (resourceId) => {
-      try {
-        return [resourceId, await getOfficeResourceObjectUrl(snapshot.artifactId, resourceId)] as const;
-      } catch {
-        return null;
-      }
-    })).then((entries) => {
-      if (!active) return;
-      const urls: Record<string, string> = {};
-      for (const entry of entries) if (entry) urls[entry[0]] = entry[1];
-      setResourceUrls(urls);
-    });
-    return () => { active = false; };
-  }, [snapshot.artifactId, resourceIds]);
+  const {urls:resourceUrls} = useOfficeResourceUrls(snapshot.artifactId,resourceIds);
 
   const svg = useMemo(() => renderOfficePreviewSvg(page, { resourceUrls }), [page, resourceUrls]);
   return (
@@ -121,25 +104,7 @@ function SpreadsheetCardPreview({ snapshot }: { snapshot: Extract<OfficeArtifact
 function DocumentCardPreview({ snapshot }: { snapshot: Extract<OfficeArtifactSnapshot, { family: "document" }> }) {
   const page = useMemo(() => layoutOfficeArtifact(snapshot).pages[0], [snapshot]);
   const resourceIds = useMemo(() => [...new Set(page.primitives.flatMap((primitive) => primitive.kind === "image" && primitive.resourceId ? [primitive.resourceId] : []))], [page]);
-  const [resourceUrls, setResourceUrls] = useState<Record<string, string>>({});
-
-  useEffect(() => {
-    let active = true;
-    setResourceUrls({});
-    void Promise.all(resourceIds.map(async (resourceId) => {
-      try {
-        return [resourceId, await getOfficeResourceObjectUrl(snapshot.artifactId, resourceId)] as const;
-      } catch {
-        return null;
-      }
-    })).then((entries) => {
-      if (!active) return;
-      const urls: Record<string, string> = {};
-      for (const entry of entries) if (entry) urls[entry[0]] = entry[1];
-      setResourceUrls(urls);
-    });
-    return () => { active = false; };
-  }, [snapshot.artifactId, resourceIds]);
+  const {urls:resourceUrls} = useOfficeResourceUrls(snapshot.artifactId,resourceIds);
 
   const svg = useMemo(() => renderOfficePreviewSvg(page, { resourceUrls }), [page, resourceUrls]);
 

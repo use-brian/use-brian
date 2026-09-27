@@ -74,7 +74,7 @@ export function DocumentEditor({ snapshot, role, suggestMode, doc, provider, cur
   const fragment = fragmentReady ? getDocumentFragment(activeDoc) : getDocumentFragment(localDoc);
   const extensions = useMemo(() => {
     const configured = [
-      ...officeDocumentEditorExtensions(),
+      ...officeDocumentEditorExtensions(snapshot.artifactId),
       Collaboration.configure({ fragment }),
     ];
     if (provider) configured.push(CollaborationCursor.configure({
@@ -86,7 +86,7 @@ export function DocumentEditor({ snapshot, role, suggestMode, doc, provider, cur
       },
     }));
     return configured;
-  }, [currentUser?.email, currentUser?.id, currentUser?.name, fragment, provider, t.collaborator]);
+  }, [currentUser?.email, currentUser?.id, currentUser?.name, fragment, provider, t.collaborator, snapshot.artifactId]);
 
   const editable = fragmentReady && role === "edit" && !suggestMode;
   const editor = useEditor({

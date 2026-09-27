@@ -972,3 +972,8 @@ export function docMediaCacheKey(workspaceId:string,userId:string,fileId:string)
 export function fileCacheMediaCacheKey(workspaceId:string,userId:string,fileId:string,representation:'original'|'pdf'):string {
   return `file-cache-media:${workspaceId}:${userId}:${fileId}:${representation}`;
 }
+
+/** Office bytes are owned by one viewer, artifact and exact resource set. */
+export function officeMediaCacheKey(workspaceId:string,userId:string,artifactId:string,resourceIds:readonly string[]):string {
+  return `office-media:${workspaceId}:${userId}:${artifactId}:${JSON.stringify([...new Set(resourceIds)].sort())}`;
+}

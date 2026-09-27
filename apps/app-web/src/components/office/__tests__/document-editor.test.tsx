@@ -14,10 +14,9 @@ import { documentPageStartIds, measureDocumentPaginationBlocks } from "../docume
 import { documentFixture } from "./editor-fixtures";
 import { documentSnapshotToEditorJson, officeCapabilityManifest, snapshotToYDoc, yDocToSnapshot, getDocumentFragment } from "@use-brian/office-model";
 
-vi.mock("@/lib/office/api", async () => {
-  const actual = await vi.importActual<typeof import("@/lib/office/api")>("@/lib/office/api");
-  return { ...actual, getOfficeResourceObjectUrl: vi.fn().mockResolvedValue("blob:office-header-image") };
-});
+vi.mock("@/lib/use-doc-media", () => ({
+  useOfficeResourceMedia: () => ({url:"blob:office-header-image",error:null}),
+}));
 
 const coveredCapabilities = ["richText", "hyperlink", "table", "image", "chart", "video", "namedStyles", "heading", "nestedList", "pageSetup", "pageBreak", "sectionBreak", "headerFooter", "pageNumber"].sort();
 

@@ -32,7 +32,7 @@ export type OfficeResourceRouteDeps = {
     sensitivity: OfficeArtifactRow['sensitivity']
     image: NormalizedOfficeImage
   }): Promise<{ id: string; sensitivity?: OfficeArtifactRow['sensitivity'] }>
-  readResource(userId: string, workspaceId: string, resourceId: string): Promise<{ bytes: Uint8Array; mime: string; hash: string } | null>
+  readResource(userId: string, workspaceId: string, resourceId: string): Promise<{ bytes: Uint8Array; mime: string; hash: string; validForMs: number } | null>
 }
 
 const Admission = z.object({ fileId: z.string().uuid(), kind: z.literal('image') }).strict()
@@ -41,27 +41,37 @@ export function officeResourceRoutes(deps: OfficeResourceRouteDeps): Router {
   const router = Router()
 
   router.get('/artifacts/:artifactId/resources/:resourceId', async (req, res) => {
+    res.setHeader('Cache-Control', 'private, no-store')
     const userId = (req as { userId?: string }).userId
     if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
     const artifactId = String(req.params.artifactId)
     const resourceId = String(req.params.resourceId)
     const context = await deps.load(userId, artifactId)
-    if (!context) return void res.status(404).json({ error: 'Office resource not found' })
+    if (!context || (req.query.workspaceId !== undefined && req.query.workspaceId !== context.artifact.workspaceId)) return void res.status(404).json({ error: 'Office resource not found' })
     const ref = context.snapshot.resources.find((resource) => resource.id === resourceId)
     if (!ref) return void res.status(404).json({ error: 'Office resource not found' })
+    const referenceRevision = JSON.stringify(ref)
+    const started = performance.now()
     const resource = await deps.readResource(userId, context.artifact.workspaceId, resourceId)
-    const bytesHash = resource ? createHash('sha256').update(resource.bytes).digest('hex') : null
-    if (!resource || resource.hash !== ref.hash || bytesHash !== ref.hash) {
+    const current = await deps.load(userId, artifactId)
+    const currentRef = current?.snapshot.resources.find((entry) => entry.id === resourceId)
+    if (!resource || !current || current.artifact.workspaceId !== context.artifact.workspaceId ||
+      !currentRef || JSON.stringify(currentRef) !== referenceRevision) {
+      return void res.status(404).json({ error: 'Office resource not found' })
+    }
+    const validForMs = Math.floor(Math.min(30_000, resource.validForMs) - (performance.now() - started))
+    if (!Number.isFinite(validForMs) || validForMs <= 0) return void res.status(404).json({ error: 'Office resource not found' })
+    const bytesHash = createHash('sha256').update(resource.bytes).digest('hex')
+    if (resource.hash !== ref.hash || bytesHash !== ref.hash || resource.mime !== ref.mime) {
       return void res.status(409).json({ error: 'office_resource_incomplete', resourceId })
     }
-    const etag = `"${ref.hash}"`
-    res.setHeader('Cache-Control', 'private, max-age=31536000, immutable')
+    res.setHeader('X-Brian-Media-Valid-For-Ms', String(validForMs))
+    res.append('Access-Control-Expose-Headers', 'X-Brian-Media-Valid-For-Ms')
     res.setHeader('Content-Type', ref.mime)
     res.setHeader('Content-Length', resource.bytes.byteLength)
-    res.setHeader('ETag', etag)
     res.setHeader('X-Content-Type-Options', 'nosniff')
-    if (req.headers['if-none-match'] === etag) return void res.status(304).end()
-    res.send(Buffer.from(resource.bytes))
+    // Bypass Express's automatic ETag/304 handling for protected bytes.
+    res.end(Buffer.from(resource.bytes))
   })
 
   router.post('/artifacts/:artifactId/resources', async (req, res) => {
