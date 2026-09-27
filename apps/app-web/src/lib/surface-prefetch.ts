@@ -991,3 +991,11 @@ export function officePreviewCacheKey(workspaceId: string, viewerId: string, art
 export function officeRoutingCacheKey(workspaceId: string, viewerId: string, templateId: string): string {
   return `office-routing:${workspaceId}:${viewerId}:${templateId}`;
 }
+
+export function officePanelCachePrefix(workspaceId: string, viewerId: string): string {
+  return `office-panel:${workspaceId}:${viewerId}:`;
+}
+
+export function officePanelCacheKey(prefix: string | null, kind: "job" | "job-events" | "versions", id: string | undefined): string | null {
+  return prefix && id ? `${prefix}${kind}:${id}` : null;
+}

@@ -1,5 +1,5 @@
 /**
- * Office readers share the ONE surface cache. Collection/preview reads carry
+ * Office readers share the ONE surface cache. Collection, preview and panel reads carry
  * viewer-bound deadlines and hard invalidation. Legacy editor helpers below
  * retain their existing interface until the editor-retention adapter lands.
  * Spec: docs/architecture/features/perceived-performance.md.
@@ -9,9 +9,10 @@
 import { useEffect, useLayoutEffect, useRef } from "react";
 import { OfficeApiError, type OfficeArtifact } from "@/lib/office/api";
 import { invalidateSurfaceCache, loadSurfaceCache, useCachedResource, SurfaceCacheEvictionError, markSurfaceCacheStale, readSurfaceCache } from "@/lib/surface-cache";
-import { officeListCacheKey, type OfficeListView } from "@/lib/surface-prefetch";
+import { officePanelCachePrefix, officeListCacheKey, type OfficeListView } from "@/lib/surface-prefetch";
 
 /** Every lifecycle view the home lists, in the order a tap most likely came from. */
+import { useOptionalWorkspaceContext } from "@/lib/workspace-context";
 import { officeMetadataRemaining } from './metadata';
 
 /** Bounded Office reads reuse the shared cache's generation and expiry ownership. */
@@ -94,4 +95,17 @@ export function useOfficeCacheRevalidation(prefixes: readonly string[]): void {
     document.addEventListener("visibilitychange", onVisibility);
     return () => document.removeEventListener("visibilitychange", onVisibility);
   }, [joined]);
+}
+
+/** Panel caches share one viewer/workspace owner even while their tabs unmount. */
+export function useOfficePanelIdentity() {
+  const workspace = useOptionalWorkspaceContext();
+  const viewerId = workspace?.me.id ?? "";
+  const prefix = workspace && viewerId ? officePanelCachePrefix(workspace.workspaceId, viewerId) : null;
+  const previous = useRef(prefix);
+  useLayoutEffect(() => {
+    if (previous.current && previous.current !== prefix) invalidateSurfaceCache(previous.current);
+    previous.current = prefix;
+  }, [prefix]);
+  return { prefix, viewerId };
 }

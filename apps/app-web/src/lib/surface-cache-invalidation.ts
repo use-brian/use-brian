@@ -209,6 +209,7 @@ export function applySpineEventToSurfaceCache(
     invalidateSurfaceCache(`office:${workspaceId}:`);
     invalidateSurfaceCache(`office-templates:${workspaceId}:`);
     invalidateSurfaceCache(`office-routing:${workspaceId}:`);
+    invalidateSurfaceCache(`office-panel:${workspaceId}:`);
   }
   if (event === WORKSPACE_IDENTITY_REFRESH_EVENT) {
     // Authority changes purge even an unmounted directory/access surface.
@@ -223,6 +224,7 @@ export function applySpineEventToSurfaceCache(
     invalidateSurfaceCache(`office:${workspaceId}:`);
     invalidateSurfaceCache(`office-templates:${workspaceId}:`);
     invalidateSurfaceCache(`office-routing:${workspaceId}:`);
+    invalidateSurfaceCache(`office-panel:${workspaceId}:`);
   }
   for (const prefix of staleMarksFor(event, workspaceId)) {
     markSurfaceCacheStale(prefix);
