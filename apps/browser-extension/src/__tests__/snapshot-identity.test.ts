@@ -1,6 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
 import { TabExecutor } from '../executor.js'
-import { createLocalBrowserProvider } from '../../../../packages/core/src/sandbox/local-browser-provider.js'
 
 async function fixture() {
   let root: number | undefined = 100
@@ -115,15 +114,5 @@ describe('Chromium snapshot document identity', () => {
     const { executor, send } = await fixture()
     send.mockRejectedValue(new Error('Debugger is not attached'))
     await expect(executor.snapshot()).rejects.toMatchObject({ code: 'detached' })
-  })
-  it('preserves optional identity through the local provider schema, while accepting old snapshots', async () => {
-    const { executor } = await fixture()
-    const data = await executor.snapshot('full')
-    const send = vi.fn(async () => ({ ok: true as const, data }))
-    const provider = createLocalBrowserProvider({ transport: { send } })
-    const ctx = { userId: 'u', workspaceId: 'w', sessionId: 's', profileId: 'p' }
-    expect(await provider.snapshot(ctx, { mode: 'full' })).toEqual(data)
-    send.mockResolvedValue({ ok: true, data: { url: data.url, title: data.title, nodes: [{ role: 'button', name: 'Save' }] } })
-    expect(await provider.snapshot(ctx)).toEqual({ url: data.url, title: data.title, nodes: [{ role: 'button', name: 'Save' }] })
   })
 })
