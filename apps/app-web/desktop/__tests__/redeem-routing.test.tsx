@@ -119,3 +119,29 @@ describe("[COMP:app-web/redeem] bundled desktop routing", () => {
     ).toBe("workspace-one");
   });
 });
+
+describe("[COMP:app-web/dock-recorder] bundled overlay route", () => {
+  it("renders outside workspace boot, receives the timer and sends controls", async () => {
+    const channel = { onmessage: null as null | ((event: { data: unknown }) => void), postMessage: vi.fn(), close: vi.fn() };
+    vi.stubGlobal("BroadcastChannel", class { constructor() { return channel; } });
+    try {
+      window.history.replaceState(null, "", "/#/recorder-overlay");
+      await act(async () => root.render(<App />));
+      await settle();
+      expect(testMocks.authFetch).not.toHaveBeenCalled();
+      expect(host.textContent).toContain("0:00");
+      await act(async () => channel.onmessage?.({ data: {
+        type: "state", capturing: true, elapsedMs: 125_000, paused: false, level: 0.5,
+      } }));
+      expect(host.textContent).toContain("2:05");
+      const stop = host.querySelector<HTMLButtonElement>('button[aria-label="Stop"]')!;
+      expect(stop.disabled).toBe(false);
+      await act(async () => stop.click());
+      expect(channel.postMessage).toHaveBeenCalledWith({ type: "command", action: "stop" });
+    } finally {
+      await act(async () => root.unmount());
+      root = createRoot(host);
+      vi.unstubAllGlobals();
+    }
+  });
+});

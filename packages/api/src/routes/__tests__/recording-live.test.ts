@@ -34,9 +34,10 @@ function view(id: string, page: Page, workspaceId = WORKSPACE_ID): SavedView {
 function harness(options: { role?: string | null; enabled?: boolean; withFiles?: boolean } = {}) {
   const pages = new Map<string, Page>()
   const views = new Map<string, SavedView>()
-  const createDraft = vi.fn(async (input: { page: Page; workspaceId: string; name: string }) => {
-    const created = view('page-new', input.page, input.workspaceId)
+  const createDraft = vi.fn(async (input: { page: Page; workspaceId: string; name: string; anchorKey?: string }) => {
+    const created = view(input.anchorKey ? 'folder-new' : 'page-new', input.page, input.workspaceId)
     created.name = input.name
+    created.anchorKey = input.anchorKey ?? null
     pages.set(created.id, input.page)
     views.set(created.id, created)
     return created
@@ -102,9 +103,13 @@ function harness(options: { role?: string | null; enabled?: boolean; withFiles?:
     buffer: Buffer.concat(buffers),
     mime: 'audio/mp4',
   }))
+  const findIdByAnchorKey = vi.fn(async (_userId: string, workspaceId: string, key: string) =>
+    [...views.values()].find((row) => row.workspaceId === workspaceId && row.anchorKey === key)?.id ?? null,
+  )
   const deps = {
     getRole: vi.fn().mockResolvedValue('role' in options ? options.role : 'member'),
     savedViewStore: {
+      findIdByAnchorKey,
       createDraft,
       getById: vi.fn(async (_userId: string, id: string) => views.get(id) ?? null),
       getPage: vi.fn(async (_userId: string, id: string) => pages.get(id) ?? null),
@@ -132,7 +137,7 @@ function harness(options: { role?: string | null; enabled?: boolean; withFiles?:
   })
   app.use('/api/recordings', recordingLiveRoutes(deps as never))
   return {
-    app, pages, views, createDraft, updatePage, update,
+    app, pages, views, createDraft, updatePage, update, findIdByAnchorKey,
     transcribeWindow, reviseNotes, recordUsage,
     liveWindows, windowRows, gcs, blobs, createEpisode, createRecording, concatWindows,
   }
@@ -173,6 +178,54 @@ function chunkRequest(
 }
 
 describe('[COMP:recordings/live-page-route]', () => {
+  it('creates one localized folder, preserves a rename and nests later meetings under it', async () => {
+    const h = harness()
+    const start = () => request(h.app).post('/api/recordings/live/start')
+      .send({ workspaceId: WORKSPACE_ID, destination: 'meeting-notes', folderName: '会議メモ' })
+    expect((await start()).status).toBe(201)
+    expect(h.createDraft).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      name: '会議メモ', icon: '📁', anchorKey: 'meeting-notes-folder', state: 'saved',
+    }))
+    expect(h.createDraft).toHaveBeenNthCalledWith(2, expect.objectContaining({ nestParentId: 'folder-new' }))
+    h.views.get('folder-new')!.name = 'Team meetings'
+    expect((await start()).status).toBe(201)
+    expect(h.createDraft).toHaveBeenCalledTimes(3)
+    expect(h.createDraft).toHaveBeenLastCalledWith(expect.objectContaining({ nestParentId: 'folder-new' }))
+    expect(h.views.get('folder-new')!.name).toBe('Team meetings')
+  })
+
+  it('converges on the visible folder when another start wins creation', async () => {
+    const h = harness()
+    h.findIdByAnchorKey.mockResolvedValueOnce(null).mockResolvedValueOnce('winner')
+    h.views.set('winner', view('winner', { blocks: [] }))
+    h.createDraft.mockRejectedValueOnce({ code: '23505' })
+    const response = await request(h.app).post('/api/recordings/live/start')
+      .send({ workspaceId: WORKSPACE_ID, destination: 'meeting-notes' })
+    expect(response.status).toBe(201)
+    expect(h.createDraft).toHaveBeenLastCalledWith(expect.objectContaining({ nestParentId: 'winner' }))
+  })
+
+  it('does not bypass a hidden folder or fall back to a flat note', async () => {
+    const h = harness()
+    h.createDraft.mockRejectedValueOnce({ code: '23505' })
+    const response = await request(h.app).post('/api/recordings/live/start')
+      .send({ workspaceId: WORKSPACE_ID, destination: 'meeting-notes' })
+    expect(response.status).toBe(503)
+    expect(h.createDraft).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not create a folder for non-members or explicit root destinations', async () => {
+    const denied = harness({ role: null })
+    expect((await request(denied.app).post('/api/recordings/live/start')
+      .send({ workspaceId: WORKSPACE_ID, destination: 'meeting-notes' })).status).toBe(403)
+    expect(denied.createDraft).not.toHaveBeenCalled()
+    const h = harness()
+    await startLive(h)
+    expect(h.findIdByAnchorKey).not.toHaveBeenCalled()
+    expect(h.createDraft).toHaveBeenCalledOnce()
+    expect(h.createDraft).toHaveBeenCalledWith(expect.objectContaining({ nestParentId: null }))
+  })
+
   it('creates a saved meeting page carrying the live marker and no transcript blocks', async () => {
     const h = harness()
     h.views.set('parent', view('parent', { blocks: [] }))

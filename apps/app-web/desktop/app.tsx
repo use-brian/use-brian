@@ -87,6 +87,7 @@ import {
 // Route surfaces are local Vite chunks, loaded from disk on first entry. This
 // keeps the startup shell small without reintroducing network navigation.
 const DocSurfaceLayout = lazy(() => import("@/app/w/[workspaceId]/p/layout"));
+const RecorderOverlay = lazy(() => import("@/app/recorder-overlay/page"));
 const BrainPage = lazy(() => import("@/app/w/[workspaceId]/brain/page"));
 const BrainEntityPage = lazy(() => import("@/app/w/[workspaceId]/brain/[entityId]/page"));
 const BrainSkillEditorPage = lazy(() => import("@/app/w/[workspaceId]/brain/skills/[skillRowId]/page"));
@@ -245,6 +246,7 @@ export function App() {
       <I18nProvider locale="en" dict={dict}>
         <HashRouter>
           <Routes>
+            <Route path="/recorder-overlay" element={<Suspense fallback={null}><RecorderOverlay /></Suspense>} />
             <Route path="/" element={<Boot />} />
             {/* Web's /teams picker maps onto Boot here so in-app
                 `router.push("/teams")` (e.g. the workspace-switcher's
