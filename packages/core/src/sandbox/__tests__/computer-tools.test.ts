@@ -130,12 +130,12 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
     expect(tools.browserCloseTab.requiresConfirmation).toBe(true)
     expect(local.calls).toEqual([
       'navigate:https://first.example/',
-      'snapshot',
+      'snapshot:full',
       'openTab:https://second.example/',
-      'snapshot',
+      'snapshot:full',
       'listTabs',
       'switchTab:tab-2',
-      'snapshot',
+      'snapshot:full',
       'closeTab:tab-2',
     ])
   })
@@ -181,7 +181,7 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
 
     await run(tools.browserNavigate, { url: 'https://www.linkedin.com/messaging/' })
     // Navigate carries its own follow-up snapshot (one model turn per step).
-    expect(local.calls).toEqual(['navigate:https://www.linkedin.com/messaging/', 'snapshot'])
+    expect(local.calls).toEqual(['navigate:https://www.linkedin.com/messaging/', 'snapshot:full'])
     expect(cloud.calls).toEqual([])
   })
 
@@ -190,7 +190,7 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
     const cloud = fakeProvider('cloud')
     const tools = createComputerTools({ local, cloud, cloudAvailable: () => true })
     await run(tools.browserNavigate, { url: 'https://news.ycombinator.com/' })
-    expect(cloud.calls).toEqual(['navigate:https://news.ycombinator.com/', 'snapshot'])
+    expect(cloud.calls).toEqual(['navigate:https://news.ycombinator.com/', 'snapshot:full'])
     expect(local.calls).toEqual([])
   })
 
@@ -257,7 +257,7 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
     })
     tools.setSessionBackendOverride('sess-1', 'local')
     await run(tools.browserNavigate, { url: 'https://news.ycombinator.com/' })
-    expect(local.calls).toEqual(['navigate:https://news.ycombinator.com/', 'snapshot'])
+    expect(local.calls).toEqual(['navigate:https://news.ycombinator.com/', 'snapshot:full'])
     expect(cloud.calls).toEqual([])
     expect(tools.getSessionBackend('sess-1')).toBe('local')
   })
@@ -283,7 +283,7 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
 
     const named = await run(tools.browserNavigate, { url: 'https://www.instagram.com/', profile: 'Personal IG' })
     expect(named.isError ?? false).toBe(false)
-    expect(local.calls).toEqual(['navigate:https://www.instagram.com/', 'snapshot'])
+    expect(local.calls).toEqual(['navigate:https://www.instagram.com/', 'snapshot:full'])
   })
 
   it('keeps follow-up ops on the backend the last navigation picked', async () => {
@@ -296,11 +296,13 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
       profiles: await profilesWith([{ name: 'Personal', defaultBackend: 'local' }]),
     })
     await run(tools.browserNavigate, { url: 'https://www.linkedin.com/messaging/' })
-    await run(tools.browserSnapshot, {})
-    await run(tools.browserType, { ref: '@e1', text: 'hello' })
+    const latest = await run(tools.browserSnapshot, {})
+    const ref = String(latest.data).match(/(@e\d+) textbox "Write a message"/)?.[1]
+    expect(ref).toBeDefined()
+    expect((await run(tools.browserType, { ref, text: 'hello' })).isError).toBeUndefined()
     expect(local.calls).toEqual([
       'navigate:https://www.linkedin.com/messaging/',
-      'snapshot', // navigate's inline snapshot
+      'snapshot:full', // navigate's inline snapshot
       'snapshot',
       'type:@e1:hello',
     ])
@@ -337,8 +339,10 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
       profiles: await profilesWith([{ name: 'Personal', defaultBackend: 'local' }]),
     })
     await run(tools.browserNavigate, { url: 'https://www.linkedin.com/messaging/' })
-    await run(tools.browserSnapshot, {})
-    await run(tools.browserType, { ref: '@e1', text: 'hi there' })
+    const latest = await run(tools.browserSnapshot, {})
+    const ref = String(latest.data).match(/(@e\d+) button "Send"/)?.[1]
+    expect(ref).toBeDefined()
+    expect((await run(tools.browserType, { ref, text: 'hi there' })).isError).toBeUndefined()
     await run(tools.browserCurrentUrl, {})
     expect(sent.map((s) => s.op)).toEqual(['navigate', 'snapshot', 'snapshot', 'type', 'currentUrl'])
     expect(sent[0]).toMatchObject({

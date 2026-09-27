@@ -351,6 +351,7 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'browserClick', description: 'Click an element by ref (send-like clicks require approval)', classification: 'write', defaultPolicy: 'allow' },
     { name: 'browserFillReference', description: 'Fill user-approved opaque references without revealing values to the assistant', classification: 'write', defaultPolicy: 'allow' },
     { name: 'browserType', description: 'Type text into an element by ref', classification: 'write', defaultPolicy: 'allow' },
+    { name: 'browserFillForm', description: 'Fill multiple form fields by ref (Chromium local browser only; no submitting)', classification: 'write', defaultPolicy: 'allow' },
     { name: 'browserCurrentUrl', description: 'Get the current URL and title of the controlled tab', classification: 'read', defaultPolicy: 'allow' },
     // browserReadPage is the sends-forbidden reader research workers use
     // (cloud-only, identity-less, no click/type surface at all). It is not
@@ -657,6 +658,7 @@ export const BOOT_INJECTED_BUILTIN_TOOLS: Record<string, readonly string[]> = {
     'browserClick',
     'browserFillReference',
     'browserType',
+    'browserFillForm',
     'browserCurrentUrl',
     'browserReadPage',
     'runBrowserSkill',
