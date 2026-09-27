@@ -349,6 +349,7 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'browserCloseTab', description: 'Close an allowed local-browser tab after confirmation', classification: 'write', defaultPolicy: 'allow' },
     { name: 'browserSnapshot', description: 'List the interactive elements of the current page as refs', classification: 'read', defaultPolicy: 'allow' },
     { name: 'browserClick', description: 'Click an element by ref (send-like clicks require approval)', classification: 'write', defaultPolicy: 'allow' },
+    { name: 'browserFillReference', description: 'Fill user-approved opaque references without revealing values to the assistant', classification: 'write', defaultPolicy: 'allow' },
     { name: 'browserType', description: 'Type text into an element by ref', classification: 'write', defaultPolicy: 'allow' },
     { name: 'browserCurrentUrl', description: 'Get the current URL and title of the controlled tab', classification: 'read', defaultPolicy: 'allow' },
     // browserReadPage is the sends-forbidden reader research workers use
@@ -654,6 +655,7 @@ export const BOOT_INJECTED_BUILTIN_TOOLS: Record<string, readonly string[]> = {
     'browserCloseTab',
     'browserSnapshot',
     'browserClick',
+    'browserFillReference',
     'browserType',
     'browserCurrentUrl',
     'browserReadPage',

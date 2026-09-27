@@ -1,6 +1,33 @@
 import type { Dictionary } from "./en";
 
 export const zh: Dictionary = {
+  protectedFill: {
+    "title": "受保護填寫",
+    "destination": "目標網站",
+    "profile": "瀏覽器設定檔",
+    "unavailable": "無法使用",
+    "record": "選擇 CRM 聯絡人",
+    "search": "搜尋聯絡人",
+    "empty": "找不到聯絡人",
+    "fields": "純量欄位",
+    "name": "姓名",
+    "email": "電子郵件",
+    "phone": "電話",
+    "company": "公司",
+    "jobTitle": "職稱",
+    "address": "地址",
+    "website": "網站",
+    "disclosure": "目標網站將收到所選值，但不會傳送至助理聊天。揭露後將鎖定瀏覽器觀察，包括結果不確定的失敗。",
+    "approve": "我同意向此確切網站及設定檔分享這些欄位。",
+    "issue": "建立受保護參照",
+    "error": "無法使用受保護填寫。請重新整理任務後再試。",
+    "bindingRequired": "此任務需要已連線的本機設定檔及伺服器確認的 HTTPS 來源。不會從主機名稱或聊天推測來源。",
+    "copy": "複製安全參照",
+    "copied": "已複製",
+    "handoff": "參照將在兩分鐘後到期。請複製到啟動此任務的助理聊天，要求依填寫前快照將欄位標籤配對到目標參照。切勿貼上 CRM 值。",
+    "expired": "參照已到期。請建立新參照。",
+    "completion": "填寫後等待人工完成：請在瀏覽器手動完成並提交，再使用擴充功能的完成控制。解鎖前須關閉所有受控任務分頁，以及完整瀏覽器模式中收到受保護值的分頁，並解除控制。此面板無法解鎖。"
+},
   internalLinks: {
     recoveryTitle: "開啟共享頁面",
     received: "正在準備連結...",

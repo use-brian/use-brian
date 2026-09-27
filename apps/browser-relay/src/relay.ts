@@ -42,6 +42,8 @@ type Pending = {
 }
 
 type Connection = {
+  protectedFillV1: boolean
+  extensionOrigin: string | null
   socket: RelaySocket
   userId: string
   workspaceId: string
@@ -148,6 +150,8 @@ export class BrowserRelay {
     terminalEvent: 'stopped' | 'tab_closed' | null
     build: string | null
     staleBuild: boolean
+    extensionOrigin?: string
+    capabilities?: { protectedFillV1: true }
   } {
     const connections = options.browserProfileId
       ? [this.byConnection.get(connectionKey(userId, options.browserProfileId))].filter(
@@ -164,6 +168,8 @@ export class BrowserRelay {
       : null
     return {
       connected: connections.length > 0,
+      ...(connection?.extensionOrigin ? { extensionOrigin: connection.extensionOrigin } : {}),
+      ...(connection?.protectedFillV1 ? { capabilities: { protectedFillV1: true as const } } : {}),
       terminalEvent:
         connection?.terminalEvent ?? (terminalKey ? this.terminalByConnection.get(terminalKey) : null) ?? null,
       // Aggregate status deliberately omits a build when several profile
@@ -178,7 +184,7 @@ export class BrowserRelay {
    * Handle one inbound WebSocket frame. The first frame must be a valid
    * `hello` — anything else (or a bad token) gets `error` + close (4401).
    */
-  handleMessage(socket: RelaySocket, raw: string | Buffer): void {
+  handleMessage(socket: RelaySocket, raw: string | Buffer, extensionOrigin?: string): void {
     let parsed: unknown
     try {
       parsed = JSON.parse(typeof raw === 'string' ? raw : raw.toString('utf8'))
@@ -235,6 +241,9 @@ export class BrowserRelay {
       const build = msg.data.build ?? null
       const staleBuild = isExtensionBuildStale(build)
       const fresh: Connection = {
+        protectedFillV1: msg.data.capabilities?.protectedFillV1 === true,
+        // Taken from HTTP upgrade headers, never from a model command or hello body.
+        extensionOrigin: extensionOrigin ?? null,
         socket,
         userId: identity.userId,
         workspaceId: identity.workspaceId,
@@ -365,8 +374,14 @@ export class BrowserRelay {
       return NO_EXTENSION_RESPONSE
     }
 
+    if (params.op === 'browserFillReference' && (!conn.protectedFillV1 || !/^chrome-extension:\/\/[a-p]{32}$/.test(conn.extensionOrigin ?? ''))) {
+      return { ok: false, error: 'Protected fill unavailable', code: 'protected_fill_denied' }
+    }
     const id = randomUUID()
-    const timeoutMs = params.timeoutMs ?? this.commandTimeoutMs
+    // Protected fill waits for explicit human approval (extension: 90s), then
+    // a bounded direct resolution request. The generic 30s budget would report
+    // failure while a still-live approval could subsequently disclose values.
+    const timeoutMs = params.timeoutMs ?? (params.op === 'browserFillReference' ? 120_000 : this.commandTimeoutMs)
 
     return new Promise<InternalCommandResponse>((resolve) => {
       const timer = setTimeout(() => {

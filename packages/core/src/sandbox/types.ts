@@ -1,3 +1,4 @@
+import type { ProtectedFillScope, ProtectedFillItem } from './protected-fill.js'
 /**
  * Computer-use provider seams — the two interfaces everything else programs
  * against. Spec: docs/architecture/engine/computer-use.md (§1 "Seams").
@@ -133,6 +134,7 @@ export const BROWSER_BACKEND_ERROR_CODES = [
   'firefox_companion_missing', // Firefox extension cannot reach the installed desktop host
   'firefox_restart_required', // Firefox was not started with its loopback Remote Agent
   'unsupported_browser', // local browser control is unavailable on this platform
+  'protected_fill_denied', // protected disclosure lock / unsupported resolution
   'stale_ref',      // ref is not from the latest snapshot
   'backend_error',  // anything else the backend reported
 ] as const
@@ -170,6 +172,7 @@ export const NO_EXTENSION_MESSAGE = `No Use Brian browser extension is connected
  */
 export interface BrowserProvider {
   readonly kind: 'local' | 'cloud'
+  fillReference?(scope: ProtectedFillScope, items: ProtectedFillItem[]): Promise<void>
   navigate(ctx: BrowserCallContext, url: string): Promise<BrowserNavigateResult>
   snapshot(ctx: BrowserCallContext, options?: BrowserSnapshotOptions): Promise<BrowserSnapshot>
   click(ctx: BrowserCallContext, ref: string): Promise<void>

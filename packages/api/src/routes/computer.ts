@@ -119,6 +119,7 @@ export type LocalComputerTaskRecord = {
   status: 'running'
   profileId: string | null
   injectedSite: string | null
+  destinationOrigin?: string | null
   createdAt: number
   lastActivityAt: number
 }
@@ -132,6 +133,7 @@ export type LocalComputerTaskStore = {
       profileId?: string | null
     },
     site?: string | null,
+    destinationOrigin?: string | null,
   ): void
   getActiveBySession(sessionId: string): LocalComputerTaskRecord | null
   listActiveByWorkspace(workspaceId: string): LocalComputerTaskRecord[]
@@ -148,7 +150,7 @@ export function createInMemoryLocalComputerTaskStore(now: () => number = Date.no
     for (const [sessionId, task] of tasks) if (!active(task)) tasks.delete(sessionId)
   }
   return {
-    touch(context, site) {
+    touch(context, site, destinationOrigin) {
       if (!context.workspaceId) return
       prune()
       const profileId = context.profileId ?? null
@@ -163,15 +165,18 @@ export function createInMemoryLocalComputerTaskStore(now: () => number = Date.no
           tasks.delete(sessionId)
         }
       }
-      const existing = tasks.get(context.sessionId)
+      const previous = tasks.get(context.sessionId)
+      const existing = previous?.profileId === profileId && previous.userId === context.userId &&
+        previous.workspaceId === context.workspaceId ? previous : undefined
       tasks.set(context.sessionId, {
-        taskId: existing?.taskId ?? `local-${context.sessionId}`,
+        taskId: existing?.taskId ?? `local-${randomUUID()}`,
         userId: context.userId,
         workspaceId: context.workspaceId,
         sessionId: context.sessionId,
         status: 'running',
         profileId,
         injectedSite: site ?? existing?.injectedSite ?? null,
+        destinationOrigin: destinationOrigin === undefined ? existing?.destinationOrigin ?? null : destinationOrigin,
         createdAt: existing?.createdAt ?? now(),
         lastActivityAt: now(),
       })
@@ -221,6 +226,9 @@ const SaveCredentialSchema = z.object({
 export function computerRoutes(deps: {
   orchestrator: SandboxOrchestrator | null
   provider: SandboxProvider | null
+  protectedFillEnabled?: boolean
+  protectedBrowserSupported?: (userId: string, browserProfileId: string) => Promise<boolean>
+  protectedFillBlocked?: (userId: string, sessionId: string) => boolean
   localProvider?: BrowserProvider | null
   localTasks?: LocalComputerTaskStore | null
   /** Null means relay status was unavailable, never that the extension disconnected. */
@@ -245,6 +253,14 @@ export function computerRoutes(deps: {
   setSessionBackend?: (sessionId: string, backend: 'local' | 'cloud' | null) => void
 }): Router {
   const router = Router()
+  // Task lifecycle/backend toggles are not an escape hatch from disclosure.
+  router.use(['/tasks/:sessionId', '/sessions/:sessionId'], (req, res, next) => {
+    if (req.method !== 'GET' && deps.protectedFillBlocked?.(req.userId as string, String(req.params.sessionId))) {
+      res.status(403).json({ error: 'Protected fill unavailable', code: 'protected_fill_denied' })
+      return
+    }
+    next()
+  })
 
   async function ownedTask(
     sessionId: string,
@@ -338,6 +354,10 @@ export function computerRoutes(deps: {
       status: task.task.status,
       profileId: task.task.profileId,
       injectedSite: task.task.injectedSite,
+      ...(task.backend === 'local' && deps.protectedFillEnabled && task.task.profileId &&
+        await deps.protectedBrowserSupported?.(req.userId as string, task.task.profileId) &&
+        !deps.protectedFillBlocked?.(req.userId as string, req.params.sessionId)
+        ? { destinationOrigin: task.task.destinationOrigin ?? null } : {}),
       workspaceId: task.task.workspaceId,
       createdAt: task.task.createdAt,
       backend: task.backend,

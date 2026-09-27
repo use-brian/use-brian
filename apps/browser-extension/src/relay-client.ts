@@ -4,7 +4,7 @@
  * construction and token storage are injected so the state machine is
  * unit-testable outside Chrome.
  */
-import { parseRelayMessage, type ExtensionToRelay, type LocalControlMode } from './protocol.js'
+import { parseRelayMessage, type ExtensionToRelay, type LocalControlMode, type ExtensionCapabilities } from './protocol.js'
 
 export type WebSocketLike = {
   readyState: number
@@ -24,6 +24,8 @@ export type RelayClientDeps = {
   getToken: () => Promise<string | null>
   /** Source fingerprint to report in hello; null when this build predates the stamp. */
   getBuild?: () => Promise<string | null>
+  /** Opt-in only: unsupported implementations (Firefox) must omit this. */
+  capabilities?: ExtensionCapabilities
   /** Persist the session token the relay hands back in ready. */
   onSessionToken: (token: string) => Promise<void>
   onCommand: (cmd: {
@@ -171,7 +173,7 @@ export class RelayClient {
     this.ws = ws
 
     ws.onopen = () => {
-      ws.send(JSON.stringify({ type: 'hello', pairingToken: token, ...(build ? { build } : {}) }))
+      ws.send(JSON.stringify({ type: 'hello', pairingToken: token, ...(build ? { build } : {}), ...(this.deps.capabilities ? { capabilities: this.deps.capabilities } : {}) }))
     }
     ws.onmessage = (ev) => {
       const msg = parseRelayMessage(ev.data)

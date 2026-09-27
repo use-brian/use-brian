@@ -39,6 +39,7 @@
  * [COMP:app-web/sandbox-takeover] — spec: docs/architecture/engine/computer-use.md §5.
  */
 
+import { ProtectedFillPanel } from "@/components/computer/protected-fill-panel";
 import { use as usePromise, useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Keyboard } from "lucide-react";
@@ -347,6 +348,10 @@ export default function ComputerTakeoverPage(props: {
         gateRef.current?.push(`data:${frame.mimeType};base64,${frame.data}`);
         setStalled(false);
       } else {
+        setStalled(true);
+      }
+      // Local origin/lock changes matter even while frames are arriving.
+      if (!frame || task.backend === "local") {
         const active = await getComputerTask(sessionId).catch(() => undefined);
         if (cancelled) return;
         if (active === null) {
@@ -355,12 +360,18 @@ export default function ComputerTakeoverPage(props: {
         }
         if (active) {
           setTask((current) =>
-            current && current !== "loading" && current.connectionState === active.connectionState
+            current && current !== "loading" &&
+              current.connectionState === active.connectionState &&
+              current.taskId === active.taskId &&
+              current.workspaceId === active.workspaceId &&
+              current.profileId === active.profileId &&
+              current.backend === active.backend &&
+              current.status === active.status &&
+              current.destinationOrigin === active.destinationOrigin
               ? current
               : active,
           );
         }
-        setStalled(true);
       }
       timer = setTimeout(() => void tick(), FRAME_INTERVAL_MS);
     };
@@ -856,6 +867,8 @@ export default function ComputerTakeoverPage(props: {
           {t.computer.stopTask}
         </button>
       </div>
+
+      {view.backend === "local" && <ProtectedFillPanel task={view} workspaceId={workspaceId} sessionId={sessionId} />}
 
       {canSwitchSessionBackend(view, loginFlow.isLogin) ? (
         <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-muted/20 px-3 py-2">

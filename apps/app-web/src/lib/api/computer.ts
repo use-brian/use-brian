@@ -31,6 +31,8 @@ import { authFetch } from "@/lib/auth-fetch";
 const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
 
 export type ComputerTask = {
+  /** Authoritative exact HTTPS origin for protected fill, never inferred from injectedSite. */
+  destinationOrigin?: string | null;
   taskId: string;
   status: "running" | "paused" | "completed" | "failed";
   profileId: string | null;

@@ -1,3 +1,4 @@
+import { isProtectedFillOrigin, type ProtectedFillScope } from './protected-fill.js'
 /**
  * The computer-use tool surface (spec §3): discrete browser tools over
  * the `BrowserProvider` seam, browsing AS a profile (R2-4/R2-10), backend
@@ -31,6 +32,7 @@ import {
   registrableSiteOf,
 } from './orchestrator.js'
 import {
+  canUseProfile,
   describeProfileDenials,
   describeProfileResolution,
   resolveProfileForCall,
@@ -144,6 +146,10 @@ export type ComputerToolProfiles = {
 }
 
 export type CreateComputerToolsOptions = {
+  protectedFill?: {
+    scope: (context: ToolContext, profileId: string, origin: string) => Promise<ProtectedFillScope | null>
+    blocked: (context: ToolContext, profileId: string | null) => boolean
+  }
   local: BrowserProvider
   cloud: BrowserProvider
   /** Whether a cloud sandbox backend is configured (the toggle's default). */
@@ -234,6 +240,7 @@ export type ComputerTools = {
   browserCloseTab: Tool
   browserSnapshot: Tool
   browserClick: Tool
+  browserFillReference: Tool
   browserType: Tool
   browserCurrentUrl: Tool
   /**
@@ -451,7 +458,11 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     if (autonomous) return { error: autonomous }
     const blocked = await policyBlockGate(toolName, context)
     if (blocked) return { error: blocked }
-    return { state: sessionState(context) }
+    const state = sessionState(context)
+    if (opts.protectedFill?.blocked(context, state.profileId)) return {
+      error: { data: 'Protected fill requires human completion in the browser extension.', isError: true },
+    }
+    return { state }
   }
 
   /** The action/wall-clock fuse protects cloud work; watched local browsing is exempt. */
@@ -1113,6 +1124,45 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     },
   })
 
+  const browserFillReference = buildTool({
+    name: 'browserFillReference', requiresCapability: 'computer',
+    description: 'Fill a batch of text fields using opaque references created by the user in the Protected fill panel. Never read CRM raw values for this path. Use a pre-fill snapshot for target refs. The extension asks the user to approve; after disclosure all browser actions stop until the human finishes and closes protected tabs in the extension. Never submit the page.',
+    inputSchema: z.object({
+      destinationOrigin: z.string().refine(isProtectedFillOrigin),
+      items: z.array(z.object({ referenceId: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+        ref: z.string().regex(/^@e[1-9][0-9]{0,8}$/) }).strict()).min(1).max(20),
+    }).strict(),
+    isReadOnly: false, isConcurrencySafe: false, requiresConfirmation: false,
+    resolveConfirmation: policyAsk('browserFillReference'), timeoutMs: 140_000,
+    async execute(input, context) {
+      const gate = await gates('browserFillReference', context)
+      if ('error' in gate) return gate.error
+      const { state } = gate
+      if (isAutonomousToolContext(context) || state.backend !== 'local' || !state.profileId ||
+        !opts.protectedFill || !opts.local.fillReference) {
+        return { data: 'Protected fill unavailable', isError: true }
+      }
+      try {
+        const profile = await opts.profiles?.store.get(state.profileId)
+        if (!profile || profile.workspaceId !== context.workspaceId || !opts.profiles || !canUseProfile(profile, {
+          userId: context.userId, workspaceId: context.workspaceId ?? '', assistantId: context.assistantId,
+          assistantClearance: await opts.profiles.assistantClearance(context),
+        }).ok) return { data: 'Protected fill unavailable', isError: true }
+        const scope = await opts.protectedFill.scope(context, state.profileId, input.destinationOrigin)
+        if (!scope || scope.userId !== context.userId || scope.workspaceId !== context.workspaceId ||
+          scope.sessionId !== context.sessionId || scope.browserProfileId !== state.profileId ||
+          scope.destinationOrigin !== input.destinationOrigin || !scope.taskId) {
+          return { data: 'Protected fill unavailable', isError: true }
+        }
+        // This operation is deliberately absent from LocalTraceStep/recordings.
+        state.refLabels.clear()
+        state.lastTyped = null
+        await opts.local.fillReference(scope, input.items)
+        return { data: 'Protected fields filled. The user must finish in the browser and complete cleanup in the extension. Browser observations and actions are blocked.' }
+      } catch { return { data: 'Protected fill unavailable. Complete cleanup in the browser extension before continuing.', isError: true } }
+    },
+  })
+
   // ── browserType ──────────────────────────────────────────────
 
   const browserType = buildTool({
@@ -1372,6 +1422,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
   })
 
   return {
+    browserFillReference,
     browserNavigate,
     browserOpenTab,
     browserListTabs,

@@ -444,3 +444,21 @@ describe('[COMP:ext/agent] Relay client (P1.2 connection lifecycle)', () => {
     expect(sockets).toHaveLength(0)
   })
 })
+
+describe('protected-fill capability handshake', () => {
+  it.each([true,false])('advertises protectedFillV1 only with explicit implementation opt-in (%s)', async supported => {
+    const {sockets,connect}=fakeWsFactory()
+    const client=new RelayClient({
+      getUrl:async()=> 'wss://relay.test/ext', getToken:async()=> 'session-token',
+      getBuild:async()=> 'build-fingerprint', connect,
+      ...(supported ? {capabilities:{protectedFillV1:true as const}} : {}),
+      onSessionToken:async()=>{}, onCommand:()=>{},
+    })
+    client.start(); await flush()
+    sockets[0].onopen?.()
+    const hello=JSON.parse(sockets[0].sentFrames[0])
+    expect(hello).toEqual({type:'hello',pairingToken:'session-token',build:'build-fingerprint',
+      ...(supported?{capabilities:{protectedFillV1:true}}:{})})
+    client.stop()
+  })
+})

@@ -11,7 +11,8 @@
  * existed omits it, and the relay's frames are non-strict `z.object`, so no
  * coordinated deploy is needed in either order.
  */
-type HelloMessage = { type: 'hello'; pairingToken: string; build?: string }
+export type ExtensionCapabilities = { protectedFillV1: true }
+type HelloMessage = { type: 'hello'; pairingToken: string; build?: string; capabilities?: ExtensionCapabilities }
 type ResultMessage = {
   type: 'result'
   id: string
