@@ -14,3 +14,8 @@ export async function query(sql, params) {
 }
 export function queryWithRLS() { throw new Error('No user database in this fixture') }
 export function getPool() { throw new Error('No pool in this fixture') }
+// Office metadata publication shares the import graph, but this document-only
+// runtime fixture must never open a user transaction or provide RLS authority.
+export function getAppPool() { throw new Error('No app pool in this fixture') }
+export function applyRLSGucs() { throw new Error('No RLS transaction in this fixture') }
+export function rollbackAndRelease() { throw new Error('No transaction to release in this fixture') }

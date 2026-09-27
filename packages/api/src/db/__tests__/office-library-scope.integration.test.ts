@@ -1,5 +1,6 @@
 import {randomUUID,createHash} from 'node:crypto'
 import request from 'supertest'
+import {Router} from 'express'
 import type {DocumentSnapshot} from '@use-brian/office-model'
 import {createOfficeLiveStore} from '../office-live.js'
 import {createFilesApi} from '../../files/files-api.js'
@@ -13,7 +14,15 @@ import {officeResourceRoutes} from '../../routes/office-resources.js'
 import {createTestApp} from '../../routes/__tests__/helpers.js'
 import {afterAll,describe,expect,it} from 'vitest'
 import {getPool,getAppPool,queryWithRLS} from '../client.js'
-import {createOfficeArtifactStore} from '../office-artifacts.js'
+import {createOfficeArtifactStore,defaultOfficeDbQuery,type OfficeDbQuery} from '../office-artifacts.js'
+import {readOfficeProjection,officeProjectionQuery} from '../office-read-projection.js'
+import {createOfficeCommentStore} from '../office-comments.js'
+import {createOfficeGenerationStore} from '../office-generation.js'
+import {createOfficeService} from '../../office/service.js'
+import {officeArtifactRoutes,type OfficeArtifactsRouteDeps} from '../../routes/office-artifacts.js'
+import {officeCollaborationRoutes,type OfficeCollaborationRouteDeps} from '../../routes/office-collaboration.js'
+import {officeTemplateRoutes,type OfficeTemplatesRouteDeps} from '../../routes/office-templates.js'
+import {officeJobRoutes} from '../../routes/office-jobs.js'
 import {createOfficeTemplateStore} from '../office-templates.js'
 import {createDbWorkspaceGroupStore} from '../workspace-group-store.js'
 import {runWithAgentAccess} from '../agent-access-context.js'
@@ -244,5 +253,164 @@ describe('[COMP:api/office-resources] real current resource delivery (PG18)',()=
     const f=await resourceDeliveryFixture()
     await request(f.app()).get(f.url+'?workspaceId='+randomUUID()).expect(404)
     await request(f.app()).get(f.url+'?workspaceId='+f.workspaceId).expect(200)
+  })
+})
+
+
+// These handlers use the real stores, canonical access resolver and non-owner
+// application pool. The only injection schedules a concurrent fixture change.
+async function metadataFixture() {
+  const f=await resourceDeliveryFixture(),comments=createOfficeCommentStore(),jobs=createOfficeGenerationStore()
+  // Ordinary artifact collections deliberately exclude template-mode drafts.
+  const listedArtifact=await artifacts.createShell({userId:f.owner,workspaceId:f.workspaceId,family:'document',title:'Listed department document',
+    templateVersionId:null,capabilityVersion:1,sensitivity:'internal',requiredCompartments:[f.team.compartmentKey!]})
+  const version=await artifacts.commitVersion({userId:f.owner,artifactId:f.artifact.id,snapshotTitle:f.snapshot.title,expectedVersion:0,
+    snapshotFileId:f.bundleFileId,snapshotHash:hash,operationClock:new Uint8Array(),schemaVersion:1,capabilityVersion:1,
+    origin:'manual',authorType:'user',authorUserId:f.owner,summary:'Metadata fixture version'})
+  const thread=await comments.createThread({userId:f.owner,workspaceId:f.workspaceId,artifactId:f.artifact.id,artifactVersionId:version!.id,
+    anchor:{kind:'block',targetIds:[f.snapshot.sections[0]!.nodes[0]!.id]},body:'Department comment'})
+  const suggestion=await comments.createSuggestion({userId:f.owner,workspaceId:f.workspaceId,artifactId:f.artifact.id,baseVersionId:version!.id,
+    proposedByType:'user',commandBatch:[],affectedObjectIds:[]})
+  const job=await jobs.create({userId:f.owner,workspaceId:f.workspaceId,artifactId:f.artifact.id,assistantId:null,jobKind:'create',
+    brief:{outcome:'Department outcome'},authorityProjection:{},idempotencyKey:randomUUID()})
+  await jobs.appendEvent({userId:f.owner,jobId:job.id,workspaceId:f.workspaceId,code:'office.job.queued',values:{},actorType:'user',actorUserId:f.owner})
+  await pool.query("UPDATE office_templates SET lifecycle_state='draft',draft_routing=NULL WHERE id=$1",[f.template.id])
+  const service=createOfficeService({generationAvailable:()=>false,createShell:artifacts.createShell,deleteEmptyShell:artifacts.deleteEmptyShell,
+    getArtifact:artifacts.get,raiseScope:artifacts.raiseScope,resolveAccess:resolveOfficeAccess,createJob:jobs.create,latestJob:jobs.latestForArtifact,getSnapshot:f.live.get})
+  let change:(()=>Promise<unknown>)|undefined
+  const after=async<T>(pending:Promise<T>):Promise<T>=>{const result=await pending;const fn=change;change=undefined;await fn?.();return result}
+  const router=Router()
+  router.use(officeArtifactRoutes({service:{...service,get:params=>after(service.get(params))},generationAvailable:()=>false,
+    list:async(userId,workspaceId,view)=>{
+      const rows=await artifacts.list(userId,workspaceId,view)
+      const projections=await Promise.all(rows.map(row=>service.get({userId,artifactId:row.id})))
+      return after(Promise.resolve(projections.filter((row):row is NonNullable<typeof row>=>row!==null)))
+    },getArtifact:artifacts.get,resolveAccess:resolveOfficeAccess,listVersions:(...args)=>after(artifacts.listVersions(...args))} as OfficeArtifactsRouteDeps))
+  router.use(officeCollaborationRoutes({getArtifact:artifacts.get,resolveAccess:resolveOfficeAccess,
+    getSnapshot:(...args)=>after(f.live.get(...args)),listThreads:(...args)=>after(comments.listThreads(...args)),
+    listSuggestions:(...args)=>after(comments.listSuggestions(...args))} as OfficeCollaborationRouteDeps))
+  router.use(officeTemplateRoutes({list:(...args)=>after(templates.list(...args)),getTemplate:templates.get,getSnapshot:f.live.get,
+    getDraftRouting:(...args)=>after(templates.getDraftRouting(...args))} as OfficeTemplatesRouteDeps))
+  router.use(officeJobRoutes({get:(...args)=>after(jobs.get(...args)),events:(...args)=>after(jobs.listEvents(...args)),steer:jobs.steer,cancel:jobs.cancel}))
+  const paths={
+    artifacts:`/artifacts?workspaceId=${f.workspaceId}`,artifact:`/artifacts/${f.artifact.id}`,versions:`/artifacts/${f.artifact.id}/versions`,
+    snapshot:`/artifacts/${f.artifact.id}/snapshot`,comments:`/artifacts/${f.artifact.id}/comments`,suggestions:`/artifacts/${f.artifact.id}/suggestions`,
+    templates:`/templates?workspaceId=${f.workspaceId}`,routing:`/templates/${f.template.id}/routing`,job:`/jobs/${job.id}`,events:`/jobs/${job.id}/events`,
+  }
+  return {...f,listedArtifact,comments,jobs,job,thread,suggestion,version,paths,change:(fn:()=>Promise<unknown>)=>{change=fn},
+    metadataApp:(userId:string|undefined=f.reader)=>createTestApp('/api/office',router,{userId})}
+}
+const metadataPaths=['artifacts','artifact','versions','snapshot','comments','suggestions','templates','routing','job','events'] as const
+
+describe('[COMP:api/office-routes] real bounded Office metadata publication (PG18)',()=>{
+  it('serves every SQL metadata surface with bounded no-store responses and no conditional 304',async()=>{
+    const f=await metadataFixture(),app=f.metadataApp()
+    const bodies:Record<string,any>={}
+    for(const name of metadataPaths){
+      const res=await request(app).get('/api/office'+f.paths[name]).set('If-None-Match','*').expect(200)
+      expect(res.headers['cache-control'],name).toBe('private, no-store')
+      expect(res.headers.etag,name).toBeUndefined()
+      expect(Number(res.headers['x-brian-projection-valid-for-ms']),name).toBeGreaterThan(0)
+      expect(Number(res.headers['x-brian-projection-valid-for-ms']),name).toBeLessThanOrEqual(30_000)
+      bodies[name]=res.body
+    }
+    expect(bodies.artifacts.artifacts).toHaveLength(1)
+    expect(bodies.artifacts.artifacts[0].artifactId).toBe(f.listedArtifact.id)
+    expect(bodies.artifact.artifact).toMatchObject({artifactId:f.artifact.id,role:'view'})
+    expect(bodies.versions.versions).toHaveLength(1)
+    expect(bodies.snapshot.snapshot).toMatchObject({artifactId:f.artifact.id,title:f.snapshot.title})
+    expect(bodies.comments.threads[0].messages[0].body).toBe('Department comment')
+    expect(bodies.suggestions.suggestions[0].id).toBe(f.suggestion.id)
+    expect(bodies.templates.templates[0].id).toBe(f.template.id)
+    expect(bodies.routing.routing).toBeDefined()
+    expect(await templates.getDraftRouting(f.owner,f.template.id)).toBeNull()
+    expect(bodies.job.job.id).toBe(f.job.id);expect(bodies.events.events).toHaveLength(1)
+    const independent=await f.grant();await f.revoke()
+    await request(app).get('/api/office'+f.paths.artifact).expect(200)
+    await f.revoke(independent)
+    for(const name of metadataPaths){
+      const res=await request(app).get('/api/office'+f.paths[name])
+      if(name==='artifacts'||name==='templates'){
+        expect(res.status).toBe(200);expect(res.body[name]).toEqual([])
+      }else{expect(res.status,name).toBe(404);expect(res.headers['x-brian-projection-valid-for-ms']).toBeUndefined()}
+      expect(res.text,name).not.toContain(f.artifact.id);expect(res.text,name).not.toContain('Department comment')
+    }
+  })
+  it.each(metadataPaths)('withholds %s when authority changes after its real store read',async name=>{
+    const f=await metadataFixture();f.change(()=>f.revoke())
+    const res=await request(f.metadataApp()).get('/api/office'+f.paths[name]).expect(409)
+    expect(res.body).toEqual({error:'office_projection_changed'})
+    expect(res.headers['x-brian-projection-valid-for-ms']).toBeUndefined()
+    expect(res.headers['cache-control']).toBe('private, no-store')
+  })
+  it.each(['title','private','membership','file'] as const)('detects a concurrent %s change without a policy revision bump',async change=>{
+    const f=await metadataFixture()
+    f.change(()=>change==='title'?pool.query("UPDATE office_artifacts SET title='Changed title' WHERE id=$1",[f.artifact.id])
+      :change==='private'?pool.query('UPDATE office_artifacts SET visibility_user_ids=$2 WHERE id=$1',[f.artifact.id,[f.owner]])
+      :change==='membership'?pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[f.workspaceId,f.reader])
+      :pool.query('UPDATE workspace_files SET scope_held=true WHERE id=$1',[f.bundleFileId]))
+    const res=await request(f.metadataApp()).get('/api/office'+(change==='file'?f.paths.templates:f.paths.artifact)).expect(409)
+    expect(res.body).toEqual({error:'office_projection_changed'})
+  })
+  it('uses a consistent initial snapshot, detects a changed live document, and allows the next fresh read',async()=>{
+    const f=await metadataFixture()
+    const reply=await readOfficeProjection(f.reader,async()=>{
+      const before=await f.live.get(f.reader,f.artifact.id)
+      await pool.query("UPDATE office_collab_documents SET seq=seq+1 WHERE artifact_id=$1",[f.artifact.id])
+      expect(await f.live.get(f.reader,f.artifact.id)).toEqual(before)
+      return {workspaceId:f.workspaceId,body:before}
+    })
+    expect(reply).toEqual({status:409,body:{error:'office_projection_changed'}})
+    await request(f.metadataApp()).get('/api/office'+f.paths.snapshot).expect(200)
+  })
+  it('does not invalidate a projection when an independent grant still authorizes it',async()=>{
+    const f=await metadataFixture();await f.grant();f.change(()=>f.revoke())
+    await request(f.metadataApp()).get('/api/office'+f.paths.artifact).expect(200)
+  })
+  it('retains the trusted execution ceiling on both read snapshots',async()=>{
+    const f=await fixture()
+    const scope={workspaceId:f.workspaceId,userId:f.owner,clearance:'confidential',compartments:[f.team.compartmentKey!],mutationCompartments:[],projectIds:null}
+    const read=()=>readOfficeProjection(f.owner,async()=>({workspaceId:f.workspaceId,body:await artifacts.get(f.owner,f.artifact.id)}))
+    const allowed=await runWithAgentAccess(scope,read)
+    expect(allowed.body).toMatchObject({id:f.artifact.id});expect(allowed.validForMs).toBeGreaterThan(0)
+    const narrowed=await runWithAgentAccess({...scope,compartments:[]},read)
+    expect(narrowed.body).toBeNull()
+  })
+  it('returns an unauthenticated no-store response before executing a store read',async()=>{
+    const jobs=createOfficeGenerationStore()
+    const app=createTestApp('/api/office',officeJobRoutes({get:jobs.get,events:jobs.listEvents,steer:jobs.steer,cancel:jobs.cancel}))
+    const res=await request(app).get('/api/office/jobs/'+randomUUID()).expect(401)
+    expect(res.body).toEqual({error:'Unauthorized'});expect(res.headers['cache-control']).toBe('private, no-store')
+    expect(res.headers.etag).toBeUndefined();expect(res.headers['x-brian-projection-valid-for-ms']).toBeUndefined()
+  })
+  it('bounds lifetime by grant expiry and withholds a read completed after expiry',async()=>{
+    const f=await fixture(1500)
+    const first=await readOfficeProjection(f.reader,async()=>({workspaceId:f.workspaceId,body:await artifacts.get(f.reader,f.artifact.id)}))
+    expect(first.validForMs).toBeGreaterThan(0);expect(first.validForMs).toBeLessThan(1500)
+    const expired=await readOfficeProjection(f.reader,async()=>{
+      const body=await artifacts.get(f.reader,f.artifact.id)
+      await pool.query('SELECT pg_sleep(1.6)')
+      return {workspaceId:f.workspaceId,body}
+    })
+    expect(expired).toEqual({status:409,body:{error:'office_projection_changed'}})
+  })
+  it('rejects writes, nested reads, a different actor/ceiling, missing SQL and retained context use; releases on error',async()=>{
+    const f=await fixture()
+    await expect(readOfficeProjection(f.owner,async()=>{
+      await defaultOfficeDbQuery(f.owner,"UPDATE office_artifacts SET title='Forbidden' WHERE id=$1",[f.artifact.id])
+      return {workspaceId:f.workspaceId,body:{}}
+    })).rejects.toMatchObject({code:'25006'})
+    await expect(readOfficeProjection(f.owner,()=>readOfficeProjection(f.owner,async()=>({body:{}})))).rejects.toThrow('office_projection_nested')
+    await expect(readOfficeProjection(f.owner,async()=>({workspaceId:f.workspaceId,body:await artifacts.get(f.reader,f.artifact.id)}))).rejects.toThrow('office_projection_context_mismatch')
+    await expect(readOfficeProjection(f.owner,()=>runWithAgentAccess({clearance:'public',compartments:[]},async()=>({workspaceId:f.workspaceId,body:await artifacts.get(f.owner,f.artifact.id)})))).rejects.toThrow('office_projection_context_mismatch')
+    await expect(readOfficeProjection(f.owner,async()=>({workspaceId:f.workspaceId,body:{}}))).rejects.toThrow('office_projection_unbound')
+    let retained:OfficeDbQuery|undefined
+    const reply=await readOfficeProjection(f.owner,async()=>{
+      retained=officeProjectionQuery(f.owner)
+      return {workspaceId:f.workspaceId,body:await artifacts.get(f.owner,f.artifact.id)}
+    })
+    expect(reply.validForMs).toBeGreaterThan(0)
+    await expect(retained!(f.owner,'SELECT 1',[])).rejects.toThrow('office_projection_context_mismatch')
+    expect((await artifacts.get(f.owner,f.artifact.id))?.title).toBe('Library draft')
   })
 })

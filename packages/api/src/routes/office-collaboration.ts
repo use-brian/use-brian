@@ -1,5 +1,6 @@
 /** Office commands, snapshots, comments, suggestions and explicit @Brian revisions. [COMP:api/office-routes] */
 import { Router } from 'express'
+import {officeMetadataRoute} from './office-metadata.js'
 import { z } from 'zod'
 import { OfficeCommandSchema } from '@use-brian/office-model'
 import type { OfficeArtifactRow } from '../db/office-artifacts.js'
@@ -42,15 +43,14 @@ export type OfficeCollaborationRouteDeps = {
 
 export function officeCollaborationRoutes(deps: OfficeCollaborationRouteDeps): Router {
   const router = Router()
-  router.get('/artifacts/:artifactId/snapshot', async (req, res) => {
-    const userId = (req as { userId?: string }).userId
-    if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
+  router.get('/artifacts/:artifactId/snapshot', officeMetadataRoute(async (req, userId) => {
     const artifactId = String(req.params.artifactId)
-    if (!await deps.resolveAccess(userId, artifactId)) return void res.status(404).json({ error: 'Office artifact not found' })
+    const access = await deps.resolveAccess(userId, artifactId)
+    if (!access) return {status:404,body:{ error: 'Office artifact not found' }}
     const live = await deps.getSnapshot(userId, artifactId)
-    if (!live) return void res.status(409).json({ error: 'artifact_not_ready' })
-    res.json(live)
-  })
+    if (!live) return {status:409,body:{ error: 'artifact_not_ready' }}
+    return {workspaceId:access.workspaceId,body:live}
+  }))
 
   router.post('/artifacts/:artifactId/commands', async (req, res) => {
     const userId = (req as { userId?: string }).userId
@@ -76,13 +76,12 @@ export function officeCollaborationRoutes(deps: OfficeCollaborationRouteDeps): R
     res.json(result)
   })
 
-  router.get('/artifacts/:artifactId/comments', async (req, res) => {
-    const userId = (req as { userId?: string }).userId
-    if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
+  router.get('/artifacts/:artifactId/comments', officeMetadataRoute(async (req, userId) => {
     const artifactId = String(req.params.artifactId)
-    if (!await deps.resolveAccess(userId, artifactId)) return void res.status(404).json({ error: 'Office artifact not found' })
-    res.json({ threads: await deps.listThreads(userId, artifactId) })
-  })
+    const access = await deps.resolveAccess(userId, artifactId)
+    if (!access) return {status:404,body:{ error: 'Office artifact not found' }}
+    return {workspaceId:access.workspaceId,body:{ threads: await deps.listThreads(userId, artifactId) }}
+  }))
 
   router.post('/artifacts/:artifactId/comments/detach-missing', async (req, res) => {
     const userId = (req as { userId?: string }).userId
@@ -174,13 +173,12 @@ export function officeCollaborationRoutes(deps: OfficeCollaborationRouteDeps): R
     res.json({ ok: true })
   })
 
-  router.get('/artifacts/:artifactId/suggestions', async (req, res) => {
-    const userId = (req as { userId?: string }).userId
-    if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
+  router.get('/artifacts/:artifactId/suggestions', officeMetadataRoute(async (req, userId) => {
     const artifactId = String(req.params.artifactId)
-    if (!await deps.resolveAccess(userId, artifactId)) return void res.status(404).json({ error: 'Office artifact not found' })
-    res.json({ suggestions: await deps.listSuggestions(userId, artifactId) })
-  })
+    const access = await deps.resolveAccess(userId, artifactId)
+    if (!access) return {status:404,body:{ error: 'Office artifact not found' }}
+    return {workspaceId:access.workspaceId,body:{ suggestions: await deps.listSuggestions(userId, artifactId) }}
+  }))
 
   router.post('/suggestions/:suggestionId/decision', async (req, res) => {
     const userId = (req as { userId?: string }).userId

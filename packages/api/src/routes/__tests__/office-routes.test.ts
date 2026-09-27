@@ -13,6 +13,12 @@ import { OfficeGenerationUnavailableError } from '../../office/service.js'
 import { guidedTemplateSnapshot } from '../office-templates.js'
 import { OfficeArtifactSnapshotSchema, preflightOfficeCandidate } from '@use-brian/office-model'
 
+// Transport fixtures only; real transaction/RLS proof lives in office-library-scope.integration.
+vi.mock('../../db/office-read-projection.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../../db/office-read-projection.js')>(),
+  readOfficeProjection: async (_user: string, read: () => Promise<import('../../db/office-read-projection.js').OfficeMetadataReply>) => ({...await read(), validForMs: 30_000}),
+}))
+
 const USER = '20000000-0000-4000-8000-000000000001'
 const WORKSPACE = '20000000-0000-4000-8000-000000000002'
 const ASSISTANT = '20000000-0000-4000-8000-000000000003'

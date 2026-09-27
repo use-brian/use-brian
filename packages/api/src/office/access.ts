@@ -5,7 +5,7 @@
  *
  * [COMP:api/office-access]
  */
-import { queryWithRLS } from '../db/client.js'
+import { defaultOfficeDbQuery } from '../db/office-artifacts.js'
 
 export type OfficeRole = 'view' | 'comment' | 'edit'
 export type OfficeLifecycleState = 'active' | 'archived' | 'trash' | 'retained' | 'purged'
@@ -125,7 +125,7 @@ export async function resolveOfficeAccess(
   userId: string,
   artifactId: string,
 ): Promise<ResolvedOfficeAccess | null> {
-  const result = await queryWithRLS<OfficeAccessProjection>(userId, OFFICE_ACCESS_SQL, [artifactId, userId])
+  const result = await defaultOfficeDbQuery<OfficeAccessProjection>(userId, OFFICE_ACCESS_SQL, [artifactId, userId])
   const row = result.rows[0]
   return row ? resolveOfficeAccessProjection(userId, row) : null
 }

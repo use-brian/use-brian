@@ -1,10 +1,13 @@
 /** Office artifact/version/source/grant/audit persistence. [COMP:api/office-store] */
 import { queryWithRLS } from './client.js'
 import type { QueryResultRow } from 'pg'
+import {officeProjectionQuery} from './office-read-projection.js'
 
 export type OfficeDbQuery = <T>(userId: string, sql: string, params: unknown[]) => Promise<{ rows: T[] }>
 
 export const defaultOfficeDbQuery: OfficeDbQuery = async <T>(userId: string, sql: string, params: unknown[]) => {
+  const projection=officeProjectionQuery(userId)
+  if(projection)return projection<T>(userId,sql,params)
   const result = await queryWithRLS<T & QueryResultRow>(userId, sql, params)
   return { rows: result.rows as T[] }
 }

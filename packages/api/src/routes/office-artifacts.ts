@@ -1,5 +1,6 @@
 /** Authenticated Office artifact routes. [COMP:api/office-routes] */
 import { Router } from 'express'
+import {officeMetadataRoute} from './office-metadata.js'
 import { z } from 'zod'
 import type { OfficeArtifactRow } from '../db/office-artifacts.js'
 import type { OfficeArtifactToolProjection, OfficeToolPort } from '@use-brian/core'
@@ -46,14 +47,12 @@ export function officeArtifactRoutes(deps: OfficeArtifactsRouteDeps): Router {
     res.json({ generationAvailable: generationFamilies.length > 0, generationFamilies })
   })
 
-  router.get('/artifacts', async (req, res) => {
-    const userId = (req as { userId?: string }).userId
-    if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
+  router.get('/artifacts', officeMetadataRoute(async (req, userId) => {
     const workspaceId = z.string().uuid().safeParse(req.query.workspaceId)
     const view = z.enum(['active', 'archived', 'trash', 'retained']).catch('active').parse(req.query.view)
-    if (!workspaceId.success) return void res.status(400).json({ error: 'workspaceId must be a UUID' })
-    res.json({ artifacts: await deps.list(userId, workspaceId.data, view) })
-  })
+    if (!workspaceId.success) return {status:400,body:{ error: 'workspaceId must be a UUID' }}
+    return {workspaceId:workspaceId.data,body:{ artifacts: await deps.list(userId, workspaceId.data, view) }}
+  }))
 
   router.post('/artifacts', async (req, res) => {
     const userId = (req as { userId?: string }).userId
@@ -79,21 +78,20 @@ export function officeArtifactRoutes(deps: OfficeArtifactsRouteDeps): Router {
     }
   })
 
-  router.get('/artifacts/:artifactId', async (req, res) => {
-    const userId = (req as { userId?: string }).userId
-    if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
+  router.get('/artifacts/:artifactId', officeMetadataRoute(async (req, userId) => {
     const artifact = await deps.service.get({ userId, artifactId: String(req.params.artifactId) })
-    if (!artifact) return void res.status(404).json({ error: 'Office artifact not found' })
-    res.json({ artifact })
-  })
+    if (!artifact) return {status:404,body:{ error: 'Office artifact not found' }}
+    const root = await deps.getArtifact(userId, String(req.params.artifactId))
+    if (!root) return {status:404,body:{error:'Office artifact not found'}}
+    return {workspaceId:root.workspaceId,body:{artifact}}
+  }))
 
-  router.get('/artifacts/:artifactId/versions', async (req, res) => {
-    const userId = (req as { userId?: string }).userId
-    if (!userId) return void res.status(401).json({ error: 'Unauthorized' })
+  router.get('/artifacts/:artifactId/versions', officeMetadataRoute(async (req, userId) => {
     const artifactId = String(req.params.artifactId)
-    if (!await deps.resolveAccess(userId, artifactId)) return void res.status(404).json({ error: 'Office artifact not found' })
-    res.json({ versions: await deps.listVersions(userId, artifactId) })
-  })
+    const access = await deps.resolveAccess(userId, artifactId)
+    if (!access) return {status:404,body:{ error: 'Office artifact not found' }}
+    return {workspaceId:access.workspaceId,body:{ versions: await deps.listVersions(userId, artifactId) }}
+  }))
 
   router.get('/artifacts/:artifactId/versions/:versionId/preview', async (req, res) => {
     const userId = (req as { userId?: string }).userId
