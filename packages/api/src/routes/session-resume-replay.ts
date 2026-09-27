@@ -33,6 +33,7 @@ import {
   ensureToolResultPairing,
   SensitivityAccumulator,
   ContextScopeAccumulator,
+  INTERACTIVE_CHANNEL_TYPES,
   type LLMProvider,
   type Tool,
   type ToolContext,
@@ -129,6 +130,7 @@ async function buildContext(
   })
   return { turnScope, context: {
     userId: session.userId,
+    workspaceActorUserId: INTERACTIVE_CHANNEL_TYPES.has(session.channelType) ? session.userId : undefined,
     assistantId: assistant.id,
     sessionId: session.id,
     appId: 'Use Brian',
@@ -138,6 +140,7 @@ async function buildContext(
     assistantKind: assistant.kind,
     clearance: turnScope.access.clearance,
     compartments: turnScope.effectiveCompartments,
+    mutationCompartments: turnScope.access.mutationCompartments,
     projectIds: turnScope.effectiveProjectIds,
     activeGroupId: turnScope.activeGroupId,
     activeProjectId: turnScope.activeProjectId,
@@ -375,6 +378,7 @@ export function createSessionResumeReplay(deps: SessionResumeReplayDeps): Sessio
     const scopedTools = bindToolsToAgentAccess(deps.tools, {
       clearance: turnScope.access.clearance,
       compartments: turnScope.effectiveCompartments,
+      mutationCompartments: turnScope.access.mutationCompartments,
       projectIds: turnScope.effectiveProjectIds,
     })
     const outcomeNote = await resolveResumeOutcomeNote(scopedTools, params, context)

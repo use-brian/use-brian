@@ -5,6 +5,9 @@
  * [COMP:api/context-scope-routes]
  */
 
+import { getDepartmentalReadinessSystem } from '../workspace-access/readiness.js'
+import { departmentRouteReview, executeReviewedDepartmentRoute } from '../workspace-access/reviewed-route.js'
+import { WorkspaceAccessError } from '../workspace-access/policy.js'
 import { Router, type Request, type Response } from 'express'
 import { z } from 'zod'
 import { scopeGrantContains, type ScopeGrant } from '@use-brian/core'
@@ -63,7 +66,7 @@ const readGrantsBody = z.object({
 }).strict()
 
 const memberBody = z.object({
-  activateAssigned: z.boolean().default(true),
+  activateAssigned: z.boolean().default(false),
 }).strict()
 
 const createProjectBody = z.object({
@@ -115,6 +118,8 @@ const connectorContextBody = z.object({
 type WorkspaceRole = 'owner' | 'admin' | 'member'
 
 export type ContextScopeRouteOptions = {
+  executeAccessCommand?: typeof executeReviewedDepartmentRoute
+  getDepartmentalReadiness?: typeof getDepartmentalReadinessSystem
   workspaceStore: Pick<WorkspaceStore, 'getRole'>
   groupStore?: WorkspaceGroupStore
   contextStore?: ContextScopeStore
@@ -268,6 +273,8 @@ export function contextScopeRoutes(options: ContextScopeRouteOptions): Router {
   const reclassificationStore = options.reclassificationStore
     ?? createDbContextReclassificationStore()
   const getReadiness = options.getReadiness ?? getContextReadinessSystem
+  const executeAccess = (req:Request,workspaceId:string,userId:string,command:unknown) =>
+    (options.executeAccessCommand ?? executeReviewedDepartmentRoute)(workspaceId,userId,command,departmentRouteReview(req))
 
   async function gate(
     req: Request,
@@ -326,13 +333,9 @@ export function contextScopeRoutes(options: ContextScopeRouteOptions): Router {
     if (!access) return
     const parsed = createTeamBody.safeParse(req.body)
     if (!parsed.success) return invalid(res, parsed)
-    try {
-      const group = await groupStore.createTeam(access.userId, access.workspaceId, parsed.data)
-      res.status(201).json({ group: teamProjection(group, []) })
-    } catch (error) {
-      const message = (error as Error).message
-      res.status(message === 'invalid_team_key' ? 400 : 409).json({ error: message })
-    }
+    const result=await executeAccess(req,access.workspaceId,access.userId,{type:'department.create',...parsed.data})
+    const group=(await teamRows(access.userId,access.workspaceId)).find(row=>row.id===result.appliedCommand?.subjectId)
+    res.status(201).json({group})
   })
 
   router.get('/workspaces/:workspaceId/groups/:groupId', async (req, res) => {
@@ -363,88 +366,49 @@ export function contextScopeRoutes(options: ContextScopeRouteOptions): Router {
     if (!access) return
     const parsed = updateTeamBody.safeParse(req.body)
     if (!parsed.success) return invalid(res, parsed)
-    const group = await groupStore.updateTeam(access.userId, req.params.groupId, parsed.data)
-    if (!group || group.workspaceId !== access.workspaceId) {
-      return void res.status(404).json({ error: 'not_found' })
-    }
-    res.json({ group: teamProjection(group, []) })
+    await executeAccess(req,access.workspaceId,access.userId,{type:'department.update',teamId:req.params.groupId,...parsed.data})
+    const group=(await teamRows(access.userId,access.workspaceId)).find(row=>row.id===req.params.groupId)
+    res.json({group})
   })
 
-  router.put('/workspaces/:workspaceId/groups/:groupId/members/:userId', async (req, res) => {
-    const access = await gate(req, res, true)
-    if (!access) return
-    const parsed = memberBody.safeParse(req.body ?? {})
-    if (!parsed.success) return invalid(res, parsed)
-    if (!UUID.safeParse(req.params.userId).success) {
-      return void res.status(400).json({ error: 'invalid_request' })
-    }
-    const team = await contextStore.getTeamSystem(access.workspaceId, req.params.groupId)
-    if (!team || team.status !== 'active') return void res.status(404).json({ error: 'not_found' })
-    if (parsed.data.activateAssigned) {
-      await assertContextActivationReady(access.workspaceId, getReadiness)
-    }
-    await groupStore.addMember(access.userId, team.id, req.params.userId)
-    if (parsed.data.activateAssigned) {
-      await groupStore.activateMemberTeamMode(access.userId, access.workspaceId, req.params.userId)
-    }
+  router.put('/workspaces/:workspaceId/groups/:groupId/members/:userId', async (req,res) => {
+    const access=await gate(req,res)
+    if(!access)return
+    const parsed=memberBody.safeParse(req.body??{})
+    if(!parsed.success)return invalid(res,parsed)
+    await executeAccess(req,access.workspaceId,access.userId,{type:'department.member.set',teamId:req.params.groupId,userId:req.params.userId,enabled:true,activateAssigned:parsed.data.activateAssigned})
     res.status(204).end()
   })
-
-  router.delete('/workspaces/:workspaceId/groups/:groupId/members/:userId', async (req, res) => {
-    const access = await gate(req, res, true)
-    if (!access) return
-    const team = await contextStore.getTeamSystem(access.workspaceId, req.params.groupId)
-    if (!team) return void res.status(404).json({ error: 'not_found' })
-    await groupStore.removeMember(access.userId, team.id, req.params.userId)
+  router.delete('/workspaces/:workspaceId/groups/:groupId/members/:userId', async (req,res) => {
+    const access=await gate(req,res)
+    if(!access)return
+    await executeAccess(req,access.workspaceId,access.userId,{type:'department.member.set',teamId:req.params.groupId,userId:req.params.userId,enabled:false})
     res.status(204).end()
   })
-
-  router.put('/workspaces/:workspaceId/groups/:groupId/assistants/:assistantId', async (req, res) => {
-    const access = await gate(req, res, true)
-    if (!access) return
-    await assertContextActivationReady(access.workspaceId, getReadiness)
-    const team = await contextStore.getTeamSystem(access.workspaceId, req.params.groupId)
-    if (!team || team.status !== 'active') return void res.status(404).json({ error: 'not_found' })
-    await groupStore.setTeamAssistant(access.userId, team.id, req.params.assistantId, true)
+  router.put('/workspaces/:workspaceId/groups/:groupId/assistants/:assistantId', async (req,res) => {
+    const access=await gate(req,res,true)
+    if(!access)return
+    await executeAccess(req,access.workspaceId,access.userId,{type:'department.assistant.set',teamId:req.params.groupId,assistantId:req.params.assistantId,enabled:true})
     res.status(204).end()
   })
-
-  router.delete('/workspaces/:workspaceId/groups/:groupId/assistants/:assistantId', async (req, res) => {
-    const access = await gate(req, res, true)
-    if (!access) return
-    const team = await contextStore.getTeamSystem(access.workspaceId, req.params.groupId)
-    if (!team) return void res.status(404).json({ error: 'not_found' })
-    await groupStore.setTeamAssistant(access.userId, team.id, req.params.assistantId, false)
+  router.delete('/workspaces/:workspaceId/groups/:groupId/assistants/:assistantId', async (req,res) => {
+    const access=await gate(req,res,true)
+    if(!access)return
+    await executeAccess(req,access.workspaceId,access.userId,{type:'department.assistant.set',teamId:req.params.groupId,assistantId:req.params.assistantId,enabled:false})
     res.status(204).end()
   })
-
-  router.put('/workspaces/:workspaceId/groups/:groupId/read-grants', async (req, res) => {
-    const access = await gate(req, res, true)
-    if (!access) return
-    const parsed = readGrantsBody.safeParse(req.body)
-    if (!parsed.success) return invalid(res, parsed)
-    const teams = await contextStore.listTeams(access.userId, access.workspaceId)
-    const byId = new Map(teams.map((team) => [team.id, team]))
-    const target = byId.get(req.params.groupId)
-    const selected = parsed.data.groupIds.map((id) => byId.get(id))
-    if (!target || selected.some((team) => !team || team.status !== 'active')) {
-      return void res.status(404).json({ error: 'not_found' })
-    }
-    await groupStore.setTeamReadBundle(access.userId, target.id, {
-      readAll: parsed.data.readAll,
-      compartmentKeys: selected
-        .filter((team): team is ContextTeam => team !== undefined)
-        .map((team) => team.compartmentKey),
-    })
+  router.put('/workspaces/:workspaceId/groups/:groupId/read-grants', async (req,res) => {
+    const access=await gate(req,res,true)
+    if(!access)return
+    const parsed=readGrantsBody.safeParse(req.body)
+    if(!parsed.success)return invalid(res,parsed)
+    await executeAccess(req,access.workspaceId,access.userId,{type:'department.read_bundle.set',teamId:req.params.groupId,...parsed.data})
     res.status(204).end()
   })
-
-  router.post('/workspaces/:workspaceId/groups/:groupId/archive', async (req, res) => {
-    const access = await gate(req, res, true)
-    if (!access) return
-    const team = await contextStore.getTeamSystem(access.workspaceId, req.params.groupId)
-    if (!team) return void res.status(404).json({ error: 'not_found' })
-    await groupStore.archiveTeam(access.userId, team.id)
+  router.post('/workspaces/:workspaceId/groups/:groupId/archive', async (req,res) => {
+    const access=await gate(req,res,true)
+    if(!access)return
+    await executeAccess(req,access.workspaceId,access.userId,{type:'department.archive',teamId:req.params.groupId})
     res.status(204).end()
   })
 
@@ -652,17 +616,8 @@ export function contextScopeRoutes(options: ContextScopeRouteOptions): Router {
     if (!access) return
     const parsed = assistantContextBody.safeParse(req.body)
     if (!parsed.success) return invalid(res, parsed)
-    const strict = parsed.data.teamMode === 'assigned'
-      || parsed.data.projectMode === 'assigned'
-      || parsed.data.defaultGroupId !== null
-      || parsed.data.defaultProjectId !== null
-    if (strict) await assertContextActivationReady(access.workspaceId, getReadiness)
-    try {
-      await contextStore.setAssistantContext(access.userId, req.params.assistantId, parsed.data)
-      res.status(204).end()
-    } catch (error) {
-      res.status(409).json({ error: (error as Error).message })
-    }
+    await executeAccess(req,access.workspaceId,access.userId,{type:'assistant.audience.set',assistantId:req.params.assistantId,...parsed.data})
+    res.status(204).end()
   })
 
   async function effective(req: Request, res: Response) {
@@ -761,7 +716,9 @@ export function contextScopeRoutes(options: ContextScopeRouteOptions): Router {
   router.get('/workspaces/:workspaceId/context/readiness', async (req, res) => {
     const access = await gate(req, res, true)
     if (!access) return
-    res.json(await getReadiness(access.workspaceId))
+    const [context,departmental]=await Promise.all([getReadiness(access.workspaceId),(options.getDepartmentalReadiness??getDepartmentalReadinessSystem)(access.workspaceId)])
+    res.json({...context,readyForActivation:context.readyForActivation&&departmental.ready,
+      checks:[...context.checks.filter(check=>check.id!=='delegation'),{id:'delegation',ready:departmental.ready,blocking:true,detail:'Departmental access readiness',missing:departmental.missingCapabilities}],departmental})
   })
 
   router.post('/workspaces/:workspaceId/context/reclassify', async (req, res) => {
@@ -810,6 +767,7 @@ export function contextScopeRoutes(options: ContextScopeRouteOptions): Router {
   })
 
   router.use((error: unknown, _req: Request, res: Response, next: (error?: unknown) => void) => {
+    if (error instanceof WorkspaceAccessError) { res.status(error.status).json({error:error.code}); return }
     if (error instanceof ContextActivationBlockedError) {
       res.status(409).json({ error: error.code, failedChecks: error.failedChecks })
       return

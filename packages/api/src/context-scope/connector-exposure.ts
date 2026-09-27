@@ -10,7 +10,8 @@
  * [COMP:api/connector-context]
  */
 
-import { scopeGrantContains, type ScopeGrant } from '@use-brian/core'
+import { intersectScopeGrants, scopeGrantContains, type ScopeGrant } from '@use-brian/core'
+import { currentAgentAccess } from '../db/agent-access-context.js'
 
 export type ConnectorContextBinding = {
   compartments: readonly string[]
@@ -20,6 +21,8 @@ export type ConnectorContextBinding = {
 export type ConnectorTurnGrant = {
   effectiveCompartments: ScopeGrant
   effectiveProjectIds: ScopeGrant
+  /** Present on the canonical TurnScope. Missing preserves legacy membership reach. */
+  access?: { mutationCompartments?: ScopeGrant }
 }
 
 function axisExposureAllowed(
@@ -35,10 +38,25 @@ export function connectorExposureAllowed(
   turn: ConnectorTurnGrant | null | undefined,
   binding: ConnectorContextBinding,
 ): boolean {
-  // Compatibility for non-model/admin callers. The graded entry-point check
-  // requires every execution overlay to pass the trusted TurnScope.
-  if (!turn) return true
-  return axisExposureAllowed(turn.effectiveCompartments, binding.compartments)
-    && axisExposureAllowed(turn.effectiveProjectIds, binding.projectIds)
+  const ambient = currentAgentAccess()
+  // Only non-agent administrative callers may omit a trusted execution scope.
+  if (!turn && !ambient) return true
+  const read = intersectScopeGrants(
+    turn?.effectiveCompartments ?? null,
+    // A clearance-only agent wrapper is not authority to access live connectors.
+    ambient ? ambient.compartments === undefined ? [] : ambient.compartments : null,
+  )
+  const mutation = intersectScopeGrants(
+    read,
+    turn?.access?.mutationCompartments === undefined
+      ? turn?.effectiveCompartments ?? null : turn.access.mutationCompartments,
+    ambient ? ambient.mutationCompartments === undefined
+      ? ambient.compartments === undefined ? [] : ambient.compartments : ambient.mutationCompartments : null,
+  )
+  const projects = intersectScopeGrants(
+    turn?.effectiveProjectIds ?? null,
+    ambient ? ambient.projectIds === undefined ? [] : ambient.projectIds : null,
+  )
+  return axisExposureAllowed(mutation, binding.compartments)
+    && axisExposureAllowed(projects, binding.projectIds)
 }
-

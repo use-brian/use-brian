@@ -1518,11 +1518,13 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   let memoryContext = ''
   if (isIdentified) {
     const viewerCtx = dataTurnScope.access
-    const [soul, identityMemories, rankedIndex] = await Promise.all([
-      memoryStore.getSoul(assistant.id, userId, 'Use Brian'),
+    const [soulContext, identityMemories, rankedIndex] = await Promise.all([
+      (memoryStore.getSoulContext?.(viewerCtx, 'Use Brian') ?? Promise.resolve({ content: null, evidence: {} })),
       memoryStore.getIdentity(viewerCtx),
       memoryStore.getIndexRanked(viewerCtx, PER_TURN_INDEX_CAP),
     ])
+    const soul = soulContext.content
+    scopeAccumulator.note(soulContext.evidence)
     noteAutomaticScopeEvidence(scopeAccumulator, [...identityMemories, ...rankedIndex.rows])
     for (const m of identityMemories) sensitivityAccumulator.note(m.sensitivity)
     for (const r of rankedIndex.rows) sensitivityAccumulator.note(r.sensitivity)
@@ -2322,6 +2324,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     const scopedTools = bindToolsToAgentAccess(allTools, {
       clearance,
       compartments: dataTurnScope.effectiveCompartments,
+      mutationCompartments: dataTurnScope.access.mutationCompartments,
       projectIds: dataTurnScope.effectiveProjectIds,
     })
     for await (const event of queryLoop({
@@ -2339,6 +2342,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
       messages, tools: scopedTools,
       context: {
         userId, assistantId: assistant.id, sessionId: session.id,
+        workspaceActorUserId: isIdentified ? userId : undefined,
         appId: 'Use Brian', channelType, channelId,
         channelSessionId: sessionChannelId,
         taskAuthority,
@@ -2372,6 +2376,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         // `assistantClearance` is the write ceiling (the assistant's tier).
         clearance,
         compartments,
+        mutationCompartments: dataTurnScope.access.mutationCompartments,
         projectIds: dataTurnScope.effectiveProjectIds,
         activeGroupId: dataTurnScope.activeGroupId,
         activeProjectId: dataTurnScope.activeProjectId,

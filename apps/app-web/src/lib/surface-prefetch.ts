@@ -74,6 +74,19 @@ function viewerSuffix(): string {
   return id ? `:${id}` : "";
 }
 
+/** Organization directory is permission-sensitive and additionally keys the explicit shell viewer. */
+export function workspaceAccessCacheKey(workspaceId: string, userId: string): string {
+  return `workspace-access:${workspaceId}:${userId}`;
+}
+
+export function scopeReviewCacheKey(workspaceId:string,userId:string,kind:string,after:string,reviewId:string,reviewAfter:string=''):string {
+  return `scope-review:${workspaceId}:${userId}:${kind}:${after}:${reviewId}:${reviewAfter}`;
+}
+
+export function organizationCacheKey(workspaceId: string, userId: string): string {
+  return `organization:${workspaceId}:${userId}`;
+}
+
 /**
  * The cache key for a surface's landing data. Both the prefetch and the
  * surface's own `useCachedResource` call go through here.
@@ -931,4 +944,8 @@ export function useIntentPrefetch(): (href: string) => {
     },
     [router],
   );
+}
+
+export function workspaceAccessHistoryCacheKey(workspaceId:string,userId:string,kind:'requests'|'grants',revision:string,after:string):string {
+  return `${workspaceAccessCacheKey(workspaceId,userId)}:history:${kind}:${revision}:${after}`;
 }

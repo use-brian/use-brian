@@ -688,7 +688,7 @@ function MemoryTab({ assistantId, workspaceId }: { assistantId: string; workspac
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ scope: target }),
+          body: JSON.stringify({ scope: target === "team" ? "workspace" : target }),
         }
       );
       if (res.ok) {
@@ -949,7 +949,7 @@ function MemoryTab({ assistantId, workspaceId }: { assistantId: string; workspac
                                   >
                                     {t.assistant.brainTab.edit}
                                   </button>
-                                  {workspaceId && selected.scope !== "team" && (
+                                  {workspaceId && selected.scope !== "workspace" && (
                                     <button
                                       onClick={async (e) => {
                                         e.stopPropagation();
@@ -967,7 +967,7 @@ function MemoryTab({ assistantId, workspaceId }: { assistantId: string; workspac
                                       {scopeChanging ? t.assistant.brainTab.promoting : t.assistant.brainTab.promoteToTeam}
                                     </button>
                                   )}
-                                  {workspaceId && selected.scope === "team" && (
+                                  {workspaceId && selected.scope === "workspace" && (
                                     <button
                                       onClick={async (e) => {
                                         e.stopPropagation();

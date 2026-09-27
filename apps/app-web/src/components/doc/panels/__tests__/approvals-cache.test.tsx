@@ -186,4 +186,18 @@ describe("[COMP:app-web/approvals] approvals queue paints from the surface cache
     expect(host!.textContent).toContain("Bea Example");
     expect(host!.textContent).not.toContain("Ada Example");
   });
+  it("renders an explicit departmental review and links to a fresh access review without batch selection",async()=>{
+    const card:PendingApprovalRow={...row('department-review','Unused'),kind:'department_access',approvalPayload:{targetTeamName:'Research',beneficiaryName:'Riley',beneficiaryKind:'team',reason:'Review requirements',startsAt:'2030-01-01T00:00:00Z',expiresAt:'2030-01-31T00:00:00Z'}};
+    await loadSurfaceCache(approvalsCacheKey('w1'),async()=>[card]);
+    await loadSurfaceCache(approvalSkillDetailsCacheKey('w1'),async()=>({}));
+    await mount();
+    expect(host!.textContent).toContain('Riley');expect(host!.textContent).toContain(en.workspaceAccess.readOnly);expect(host!.textContent).toContain(en.workspaceAccess.futureMembers);
+    expect(host!.querySelector('[role="checkbox"]')).toBeNull();
+    const event=vi.fn();window.addEventListener('doc:open-settings',event);
+    try {
+      const button=[...host!.querySelectorAll('button')].find(b=>b.textContent===en.workspaceAccess.title)!;
+      await act(async()=>button.click());expect(event).toHaveBeenCalledWith(expect.objectContaining({detail:{section:'ws-access'}}));
+    } finally{window.removeEventListener('doc:open-settings',event)}
+  });
+
 });

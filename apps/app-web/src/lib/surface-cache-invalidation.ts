@@ -45,7 +45,7 @@ import {
   SCHEDULED_JOB_REFRESH_EVENT,
   SKILL_REFRESH_EVENT,
 } from "@/lib/workspace-events";
-import { markSurfaceCacheStale } from "@/lib/surface-cache";
+import { invalidateSurfaceCache, markSurfaceCacheStale } from "@/lib/surface-cache";
 
 /**
  * Domain event -> the cache-key prefixes it makes stale, for one workspace.
@@ -201,6 +201,13 @@ export function applySpineEventToSurfaceCache(
   workspaceId: string,
 ): void {
   if (detail?.workspaceId && detail.workspaceId !== workspaceId) return;
+  if (event === WORKSPACE_IDENTITY_REFRESH_EVENT) {
+    // Authority changes purge even an unmounted directory/access surface.
+    invalidateSurfaceCache(`organization:${workspaceId}:`);
+    invalidateSurfaceCache(`workspace-access:${workspaceId}:`);
+    invalidateSurfaceCache(`scope-review:${workspaceId}:`);
+    invalidateSurfaceCache(`approvals:${workspaceId}`);
+  }
   for (const prefix of staleMarksFor(event, workspaceId)) {
     markSurfaceCacheStale(prefix);
   }

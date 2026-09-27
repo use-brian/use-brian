@@ -160,6 +160,35 @@ describe('[COMP:api/structured-documents] authorized service', () => {
     await safeFailure(f.service.start(f.ctx, { extractionId: uid(7) }), 'connector_required')
     expect(f.store.enqueue).not.toHaveBeenCalled()
   })
+  it.each(['revoked', 'legacy'] as const)('preserves the OCR mutation ceiling across %s resume', async change => {
+    const credentials = vi.fn(async () => ({ type: 'bearer' as const, token: 'fictional-token' }))
+    const f = fixture(client => createStructuredOcrConnectorResolver({
+      instanceStore: {
+        listByWorkspaceSystem: async () => [{ id: connectorInstanceId, scope: 'workspace', workspaceId: uid(2), provider: 'fictional-provider', label: 'Fictional OCR', custom: true, connected: true, credentialsType: 'bearer', healthStatus: 'ok', url: 'https://fictional.invalid/mcp', compartments: ['team-a'], projectIds: ['project-a'] } as ConnectorInstance],
+        getAuthCredentialsSystem: credentials,
+      },
+      grantStore: { listForTargetSystem: async () => [] },
+      assistantStore: { isEnabled: async () => true },
+      workspacePolicyStore: { getPolicy: async () => ({ policy: 'allow' }) } as unknown as WorkspaceToolPolicyStore,
+      createClient: () => client,
+    }))
+    await f.prepare()
+    expect(credentials).toHaveBeenCalledOnce()
+    if (change === 'revoked') f.setLiveContext({ ...f.ctx, mutationCompartments: ['team-b'] })
+    else delete (f.job().context.principal as Record<string, unknown>).mutationCompartments
+    await safeFailure(f.service.start(f.ctx, { extractionId: uid(7) }), 'connector_unavailable')
+    expect(credentials).toHaveBeenCalledOnce()
+    expect(f.store.enqueue).not.toHaveBeenCalled()
+    expect(f.client.submit).not.toHaveBeenCalled()
+  })
+  it('does not widen a saved OCR mutation ceiling when current authority expands', async () => {
+    const f = fixture()
+    f.ctx.mutationCompartments = ['team-a']
+    f.setLiveContext({ ...f.ctx })
+    await f.prepare()
+    f.setLiveContext({ ...f.ctx, mutationCompartments: null })
+    expect(await f.service.authorize(f.job())).toMatchObject({ mutationCompartments: ['team-a'] })
+  })
   it.each(['absent', 'allow', 'block'] as const)('integrates real resolver policy %s with service preflight; listing is not approval', async policy => {
     const getPolicy = vi.fn(async (...args: unknown[]) => policy === 'absent' ? null : { policy: args[2] === 'ocr_start' && policy === 'block' ? 'block' : 'allow' })
     const createClient = vi.fn<(client: StructuredOcrClient) => StructuredOcrClient>(client => client)
@@ -209,7 +238,7 @@ describe('[COMP:api/structured-documents] authorized service', () => {
     expect(result.approval).toMatchObject({ connectorInstanceId, connectorLabel: 'Fictional OCR', operations: ['PDF upload', 'ocr_start', 'ocr_status', 'ocr_records', 'ocr_source_page'] })
     expect(result.approval.scope).toContain('ASK')
     await f.service.start(f.ctx, { extractionId: uid(7) })
-    expect(f.connectors.resolve).toHaveBeenLastCalledWith(f.ctx, uid(4), connectorInstanceId, binding)
+    expect(f.connectors.resolve).toHaveBeenLastCalledWith({ ...f.ctx, mutationCompartments: f.ctx.compartments }, uid(4), connectorInstanceId, binding)
   })
   it('requires new preflight for unbound jobs or revoked bindings before enqueue, but archive reads need no connector', async () => {
     const f = fixture(); await f.prepare()
@@ -226,7 +255,7 @@ describe('[COMP:api/structured-documents] authorized service', () => {
     const f = fixture()
     const result = await f.prepare()
     expect(result).toMatchObject({ extractionId: uid(7), status: 'prepared', pdfSha256: sha(Buffer.from('%PDF-fictional')), cost: { maximumPages: 10, ocrLlmCall: false }, scopeEvidence: { sensitivity: 'internal', compartments: ['team-a'], projectIds: ['project-a'] } })
-    expect(SavedPrincipalSchema.parse(f.job().context.principal)).toEqual(f.ctx)
+    expect(SavedPrincipalSchema.parse(f.job().context.principal)).toEqual({ ...f.ctx, mutationCompartments: f.ctx.compartments })
     expect(f.job().context.sourceVersion).toMatch(/^[a-f0-9]{64}$/)
     expect(f.client.health).toHaveBeenCalledOnce()
     expect(f.client.submit).not.toHaveBeenCalled()
@@ -286,7 +315,7 @@ describe('[COMP:api/structured-documents] authorized service', () => {
     await f.prepare()
     f.source.updatedAt = new Date('2025-02-01')
     await expect(f.service.start(f.ctx, { extractionId: uid(7) })).resolves.toMatchObject({ status: 'queued' })
-    await expect(f.service.authorize(f.job())).resolves.toEqual(f.ctx)
+    await expect(f.service.authorize(f.job())).resolves.toEqual({ ...f.ctx, mutationCompartments: f.ctx.compartments })
     f.archive()
     await expect(f.service.evidence(f.ctx, uid(7))).resolves.toMatchObject({ job: { status: 'completed' } })
   })

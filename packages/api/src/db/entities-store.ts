@@ -14,11 +14,12 @@ import type {
   EntityUpdateFields,
   GetEntityOpts,
 } from '@use-brian/core'
-import { unionScopeRequirements } from '@use-brian/core'
+import { maxSensitivity, unionScopeRequirements } from '@use-brian/core'
 import type { Sensitivity } from '@use-brian/core'
 import type pg from 'pg'
 import { clientCompartment } from '@use-brian/core'
-import { buildAccessPredicate } from './access-predicate.js'
+import { assertExecutionResourceScope, buildAccessPredicate, buildCurrentMemberSourcePredicate } from './access-predicate.js'
+import { currentAgentAccess } from './agent-access-context.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
 import { applyRLSGucs, getAppPool, getPool, query, queryGated, queryWithRLS, rollbackAndRelease } from './client.js'
 
@@ -194,20 +195,48 @@ function toEntityListRow(row: EntityCompactRow): EntityListRow {
 
 // ── Raw SQL helpers ──────────────────────────────────────────────────
 
+/** Preserve an executing caller even when a legacy writer only passes an actor id. */
+function entityMutationAccess(actorUserId: string, access?: AccessContext): AccessContext | undefined {
+  const agent = currentAgentAccess()
+  if (access && (access.userId !== actorUserId || (agent?.workspaceId !== undefined && access.workspaceId !== agent.workspaceId))) {
+    throw Object.assign(new Error('The operation requires the executing author.'), { code: 'scope_operation_denied' })
+  }
+  if (!agent) return access
+  if (!agent.workspaceId || !agent.userId || actorUserId !== agent.userId) {
+    throw Object.assign(new Error('The operation requires the executing author.'), { code: 'scope_operation_denied' })
+  }
+  return access ?? { workspaceId: agent.workspaceId, userId: actorUserId,
+    assistantId: '', assistantKind: 'primary', clearance: agent.clearance,
+    compartments: agent.compartments, mutationCompartments: agent.mutationCompartments,
+    projectIds: agent.projectIds, visibilityAssistantIds: agent.visibilityAssistantIds }
+}
+
+function entitySourceGuard(actorUserId: string, access: AccessContext | undefined, operation: 'read' | 'mutation', startIdx: number) {
+  const execution = access ? buildAccessPredicate(access, { operation, startIdx }) : { sql: 'TRUE', params: [], nextIdx: startIdx }
+  const member = buildCurrentMemberSourcePredicate(actorUserId, { alias: 'entities', startIdx: execution.nextIdx, operation })
+  return { sql: `${execution.sql} AND ${member.sql}`, params: [...execution.params, ...member.params], nextIdx: member.nextIdx }
+}
+
 export async function createEntity(params: EntityCreateParams, transactionClient?: pg.PoolClient): Promise<EntityRecord> {
   assertAuthorshipPresent('createEntity', params.createdByUserId)
+  const access = entityMutationAccess(params.createdByUserId)
+  assertExecutionResourceScope({ workspaceId: params.workspaceId, userId: params.userId ?? null,
+    assistantId: params.assistantId ?? null, sensitivity: params.sensitivity ?? 'internal',
+    compartments: params.compartments ?? [], projectIds: params.projectIds ?? [] }, 'mutation', access)
   const sql = `INSERT INTO entities (
        kind, display_name, canonical_id, aliases, attributes, sensitivity,
        workspace_id, user_id, assistant_id,
        created_by_user_id, created_by_assistant_id, source_episode_id,
        source, compartments, project_ids, source_session_id
      )
-     VALUES (
+     SELECT
        $1, $2, $3, $4::text[], $5::jsonb, $6,
        $7, $8, $9,
        $10, $11, $12,
        $13, $14::text[], $15::uuid[], $16
-     )
+     WHERE EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id=$7 AND user_id=$10)
+       AND (effective_member_team_compartments($10,$7) IS NULL
+         OR $14::text[] <@ effective_member_team_compartments($10,$7))
      RETURNING ${FULL_SELECT}`
   const values = [
       params.kind,
@@ -230,6 +259,7 @@ export async function createEntity(params: EntityCreateParams, transactionClient
   const result = transactionClient
     ? await transactionClient.query<EntityRow>(sql, values)
     : await queryWithRLS<EntityRow>(params.createdByUserId, sql, values)
+  if (!result.rows[0]) throw Object.assign(new Error('The operation is outside the current access scope.'), { code: 'scope_operation_denied' })
   return toEntity(result.rows[0])
 }
 
@@ -962,20 +992,19 @@ export async function addEntityAlias(
   | { kind: 'conflict'; conflictingEntityId: string }
   | { kind: 'not_found' }
 > {
+  access = entityMutationAccess(actorUserId, access)
   const normalized = alias.trim().toLowerCase()
   if (normalized.length === 0 || normalized.length > 200) {
     throw new Error('alias must be 1-200 characters after trim')
   }
 
-  const targetGuard = access
-    ? buildAccessPredicate(access, { startIdx: 2 })
-    : { sql: '(user_id IS NULL OR user_id = $2)', params: [actorUserId] }
+  const targetGuard = entitySourceGuard(actorUserId, access, 'mutation', 2)
   // Match the caller's projection as well as workspace membership.
   const target = await queryWithRLS<{ workspaceId: string; displayName: string }>(
     actorUserId,
     `SELECT workspace_id AS "workspaceId", display_name AS "displayName"
        FROM entities
-      WHERE id = $1 AND valid_to IS NULL AND retracted_at IS NULL
+      WHERE id = $1 AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held
         AND ${targetGuard.sql}${access ? ` AND workspace_id = $${targetGuard.params.length + 2}` : ''}`,
     [entityId, ...targetGuard.params, ...(access ? [access.workspaceId] : [])],
   )
@@ -989,7 +1018,7 @@ export async function addEntityAlias(
     const fresh = await queryWithRLS<EntityRow>(
       actorUserId,
       `SELECT ${FULL_SELECT} FROM entities WHERE id = $1 AND valid_to IS NULL
-        AND retracted_at IS NULL AND ${targetGuard.sql}`,
+        AND retracted_at IS NULL AND NOT scope_held AND ${targetGuard.sql}`,
       [entityId, ...targetGuard.params],
     )
     return fresh.rows[0] ? { kind: 'ok', entity: toEntity(fresh.rows[0]) } : { kind: 'not_found' }
@@ -997,15 +1026,13 @@ export async function addEntityAlias(
 
   // Conflict check — does another live entity in this workspace already
   // claim this alias (or have it as its display_name)? GIN-indexed.
-  const conflictGuard = access
-    ? buildAccessPredicate(access, { startIdx: 4 })
-    : { sql: '(user_id IS NULL OR user_id = $4)', params: [actorUserId] }
+  const conflictGuard = entitySourceGuard(actorUserId, access, 'read', 4)
   const conflict = await queryWithRLS<{ id: string }>(
     actorUserId,
     `SELECT id FROM entities
       WHERE workspace_id = $1
         AND id <> $2
-        AND valid_to IS NULL AND retracted_at IS NULL
+        AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held
         AND ${conflictGuard.sql}
         AND (lower(display_name) = $3 OR $3 = ANY(aliases))
       LIMIT 1`,
@@ -1015,9 +1042,7 @@ export async function addEntityAlias(
     return { kind: 'conflict', conflictingEntityId: conflict.rows[0].id }
   }
 
-  const writeGuard = access
-    ? buildAccessPredicate(access, { startIdx: 3 })
-    : { sql: '(user_id IS NULL OR user_id = $3)', params: [actorUserId] }
+  const writeGuard = entitySourceGuard(actorUserId, access, 'mutation', 3)
   // Append + dedup in a single statement so concurrent writers can't
   // race a duplicate in.
   const updated = await queryWithRLS<EntityRow>(
@@ -1028,7 +1053,7 @@ export async function addEntityAlias(
                 FROM unnest(aliases || ARRAY[$2]::text[]) AS a
             ),
             updated_at = now()
-      WHERE id = $1 AND valid_to IS NULL AND retracted_at IS NULL
+      WHERE id = $1 AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held
         AND ${writeGuard.sql}${access ? ` AND workspace_id = $${writeGuard.params.length + 3}` : ''}
       RETURNING ${FULL_SELECT}`,
     [entityId, normalized, ...writeGuard.params, ...(access ? [access.workspaceId] : [])],
@@ -1043,17 +1068,16 @@ export async function removeEntityAlias(
   alias: string,
   access?: AccessContext,
 ): Promise<EntityRecord | null> {
+  access = entityMutationAccess(actorUserId, access)
   const normalized = alias.trim().toLowerCase()
   if (normalized.length === 0) return null
-  const writeGuard = access
-    ? buildAccessPredicate(access, { startIdx: 3 })
-    : { sql: '(user_id IS NULL OR user_id = $3)', params: [actorUserId] }
+  const writeGuard = entitySourceGuard(actorUserId, access, 'mutation', 3)
   const result = await queryWithRLS<EntityRow>(
     actorUserId,
     `UPDATE entities
         SET aliases = array_remove(aliases, $2),
             updated_at = now()
-      WHERE id = $1 AND valid_to IS NULL AND retracted_at IS NULL
+      WHERE id = $1 AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held
         AND ${writeGuard.sql}${access ? ` AND workspace_id = $${writeGuard.params.length + 3}` : ''}
       RETURNING ${FULL_SELECT}`,
     [entityId, normalized, ...writeGuard.params, ...(access ? [access.workspaceId] : [])],
@@ -1111,9 +1135,9 @@ export async function listEntities(
  * surviving write sibling).
  *
  * `access` present → the full universal access predicate is embedded in
- * the UPDATE's WHERE. Absent (legacy writers holding only a user id) →
- * falls back to the user-axis projection (`user_id IS NULL OR user_id =
- * actor`), the same fallback shape the dedupe scan documents.
+ * the UPDATE's WHERE. All callers also check current member Team reach,
+ * clearance and private-user visibility using the bound authenticated actor,
+ * including legacy user-only callers and owner-pool composed transactions.
  */
 export async function updateEntity(
   actorUserId: string,
@@ -1122,9 +1146,14 @@ export async function updateEntity(
   access?: AccessContext,
   transactionClient?: pg.PoolClient,
 ): Promise<EntityRecord | null> {
+  access = entityMutationAccess(actorUserId, access)
+  if (access) assertExecutionResourceScope({ workspaceId: access.workspaceId,
+    userId: null, assistantId: null, sensitivity: 'public',
+    compartments: fields.inheritCompartments ?? [], projectIds: fields.inheritProjectIds ?? [] }, 'mutation', access)
   const sets: string[] = []
   const values: unknown[] = []
   let idx = 1
+  let destinationCompartments = 'entities.compartments'
 
   if (fields.displayName !== undefined) {
     sets.push(`display_name = $${idx++}`)
@@ -1139,7 +1168,8 @@ export async function updateEntity(
     values.push(JSON.stringify(fields.attributes))
   }
   if (fields.sensitivity !== undefined) {
-    sets.push(`sensitivity = $${idx++}`)
+    sets.push(`sensitivity = CASE WHEN sensitivity_rank($${idx}) > sensitivity_rank(sensitivity) THEN $${idx} ELSE sensitivity END`)
+    idx++
     values.push(fields.sensitivity)
   }
   if (fields.verifiedByUserId !== undefined) {
@@ -1151,6 +1181,7 @@ export async function updateEntity(
     values.push(fields.verifiedAt)
   }
   if (fields.inheritCompartments !== undefined) {
+    destinationCompartments = `(entities.compartments || $${idx}::text[])`
     sets.push(`compartments = ARRAY(SELECT DISTINCT unnest(compartments || $${idx++}::text[]) ORDER BY 1)`)
     values.push(fields.inheritCompartments)
   }
@@ -1160,27 +1191,53 @@ export async function updateEntity(
   }
 
   if (sets.length === 0) {
-    return access ? getEntityById(access, id) : getEntityByIdSystem(actorUserId, id)
+    const guard = entitySourceGuard(actorUserId, access, 'read', 2)
+    const sql = `SELECT ${FULL_SELECT} FROM entities WHERE id=$1 AND valid_to IS NULL
+      AND retracted_at IS NULL AND NOT scope_held AND ${guard.sql}`
+    const result = transactionClient
+      ? await transactionClient.query<EntityRow>(sql, [id, ...guard.params])
+      : await queryWithRLS<EntityRow>(actorUserId, sql, [id, ...guard.params])
+    return result.rows[0] ? toEntity(result.rows[0]) : null
   }
 
   sets.push('updated_at = now()')
   values.push(id)
 
-  let guard: string
-  if (access) {
-    const ap = buildAccessPredicate(access, { startIdx: idx + 1 })
-    guard = ap.sql
-    values.push(...ap.params)
-  } else {
-    guard = `(user_id IS NULL OR user_id = $${idx + 1})`
-    values.push(actorUserId)
-  }
+  const guard = entitySourceGuard(actorUserId, access, 'mutation', idx + 1)
+  values.push(...guard.params)
+  const memberParam = guard.nextIdx - 1
 
   const sql = `UPDATE entities
         SET ${sets.join(', ')}
       WHERE id = $${idx}
-        AND ${guard}
+        AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held
+        AND ${guard.sql}
+        AND (effective_member_team_compartments($${memberParam},entities.workspace_id) IS NULL
+          OR ${destinationCompartments} <@ effective_member_team_compartments($${memberParam},entities.workspace_id))
       RETURNING ${FULL_SELECT}`
+  if (fields.sensitivity !== undefined) {
+    const client = transactionClient ?? await getAppPool().connect()
+    try {
+      if (!transactionClient) { await client.query('BEGIN'); await applyRLSGucs(client,actorUserId) }
+      const source = entitySourceGuard(actorUserId,access,'mutation',2)
+      const current = await client.query<{sensitivity:Sensitivity}>(
+        `SELECT sensitivity FROM entities WHERE id=$1 AND valid_to IS NULL AND retracted_at IS NULL
+          AND NOT scope_held AND ${source.sql} FOR UPDATE`,[id,...source.params])
+      if (!current.rows[0]) {
+        if (!transactionClient) await client.query('COMMIT')
+        return null
+      }
+      if (maxSensitivity(current.rows[0].sensitivity,fields.sensitivity) !== fields.sensitivity) {
+        throw Object.assign(new Error('Lowering sensitivity requires an audited release.'),{code:'scope_declassification_required'})
+      }
+      const updated = await client.query<EntityRow>(sql,values)
+      if (!transactionClient) await client.query('COMMIT')
+      return updated.rows[0] ? toEntity(updated.rows[0]) : null
+    } catch (error) {
+      if (!transactionClient) await client.query('ROLLBACK').catch(()=>{})
+      throw error
+    } finally { if (!transactionClient) client.release() }
+  }
   const result = transactionClient
     ? await transactionClient.query<EntityRow>(sql, values)
     : await queryWithRLS<EntityRow>(actorUserId, sql, values)
@@ -1210,28 +1267,36 @@ export async function supersedeEntity(
   id: string,
   patch: EntitySupersedePatch,
 ): Promise<EntityRecord | null> {
+  const access = entityMutationAccess(actorUserId)
   const client = await getAppPool().connect()
   try {
     await client.query('BEGIN')
-    // Runs on the app pool (app_user, subject to RLS). SET LOCAL actor scope
-    // reverts at COMMIT/ROLLBACK to the seeded sentinel, so no stale
-    // current_user_id survives onto the pooled connection.
-    await client.query(
-      `SET LOCAL app.current_user_id = '${actorUserId.replace(/'/g, "''")}'`,
-    )
+    await applyRLSGucs(client, actorUserId)
     try {
       // Lock the live row so a concurrent supersede can't double-close it.
+      const sourceGuard = entitySourceGuard(actorUserId, access, 'mutation', 2)
       const oldRes = await client.query<EntityRow>(
         `SELECT ${FULL_SELECT} FROM entities
-          WHERE id = $1 AND valid_to IS NULL
+          WHERE id = $1 AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held
+            AND ${sourceGuard.sql}
           FOR UPDATE`,
-        [id],
+        [id, ...sourceGuard.params],
       )
       if (oldRes.rows.length === 0) {
         await client.query('ROLLBACK')
         return null
       }
       const old = toEntity(oldRes.rows[0])
+      const nextSensitivity = maxSensitivity(old.sensitivity, patch.sensitivity ?? old.sensitivity)
+      if (patch.sensitivity !== undefined && patch.sensitivity !== nextSensitivity) {
+        throw Object.assign(new Error('Lowering sensitivity requires an audited release.'),{code:'scope_declassification_required'})
+      }
+      const sourceScope = { ...old, compartments: old.compartments ?? [], projectIds: old.projectIds ?? [] }
+      assertExecutionResourceScope(sourceScope, 'read', access)
+      assertExecutionResourceScope(sourceScope, 'mutation', access)
+      assertExecutionResourceScope({ ...old, sensitivity: nextSensitivity,
+        compartments: unionScopeRequirements(old.compartments, patch.compartments),
+        projectIds: unionScopeRequirements(old.projectIds, patch.projectIds) }, 'mutation', access)
 
       const insertRes = await client.query<EntityRow>(
         `INSERT INTO entities (
@@ -1243,7 +1308,7 @@ export async function supersedeEntity(
            source_session_id,
            valid_from, valid_to, superseded_by
          )
-         VALUES (
+         SELECT
            $1, $2, $3, $4::text[], $5::jsonb, $6,
            $7, $8, $9,
            $10, $11, $12,
@@ -1251,7 +1316,9 @@ export async function supersedeEntity(
            $16::text[], $17::uuid[],
            $18,
            now(), NULL, NULL
-         )
+         WHERE EXISTS(SELECT 1 FROM workspace_members WHERE workspace_id=$7 AND user_id=$19)
+           AND (effective_member_team_compartments($19,$7) IS NULL
+             OR $16::text[] <@ effective_member_team_compartments($19,$7))
          RETURNING ${FULL_SELECT}`,
         [
           old.kind,
@@ -1262,7 +1329,7 @@ export async function supersedeEntity(
           // could merge here; v1 just carries the old set forward.
           old.aliases,
           JSON.stringify(patch.attributes),
-          patch.sensitivity ?? old.sensitivity,
+          nextSensitivity,
           old.workspaceId,
           old.userId,
           old.assistantId,
@@ -1279,9 +1346,11 @@ export async function supersedeEntity(
           // The originating conversation carries forward — supersession
           // changes the belief, not where the row came from.
           old.sourceSessionId,
+          actorUserId,
         ],
       )
       const newRow = insertRes.rows[0]
+      if (!newRow) throw Object.assign(new Error('The operation is outside the current access scope.'), { code: 'scope_operation_denied' })
 
       await client.query(
         `UPDATE entities

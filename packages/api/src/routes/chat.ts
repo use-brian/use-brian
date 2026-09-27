@@ -4273,13 +4273,15 @@ export function chatRoutes(options: WebChatOptions): Router {
         compartments: turnScope.writeCompartments,
         projectIds: turnScope.writeProjectIds,
       })
-      const [soul, identityMemories, rankedIndex, preferredChannel, selfEntityId] = await Promise.all([
-        options.memoryStore.getSoul(assistant.id, user.id, 'Use Brian'),
+      const [soulContext, identityMemories, rankedIndex, preferredChannel, selfEntityId] = await Promise.all([
+        (options.memoryStore.getSoulContext?.(viewerCtx, 'Use Brian') ?? Promise.resolve({ content: null, evidence: {} })),
         options.memoryStore.getIdentity(viewerCtx),
         options.memoryStore.getIndexRanked(viewerCtx, PER_TURN_INDEX_CAP),
         getPreferredChannel(assistant.id, user.id),
         getSelfEntityId(viewerCtx),
       ])
+      const soul = soulContext.content
+      scopeAccumulator.note(soulContext.evidence)
 
       // v2 retrieval-side local-match (Q3b of the brain-ingestion-
       // classification design thread). Fire-and-forget: for each
@@ -4395,6 +4397,7 @@ export function chatRoutes(options: WebChatOptions): Router {
               // Read ceiling = min(member, assistant) — see readClearance above.
               clearance: readClearance,
               compartments: readCompartments,
+              mutationCompartments: turnScope.access.mutationCompartments,
               projectIds: turnScope.effectiveProjectIds,
             },
             PER_TURN_FILES_INDEX_CAP,
@@ -6924,6 +6927,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         const scopedLoopTools = bindToolsToAgentAccess(loopTools, {
           clearance: readClearance,
           compartments: turnScope.effectiveCompartments,
+          mutationCompartments: turnScope.access.mutationCompartments,
           projectIds: turnScope.effectiveProjectIds,
         })
         for await (const event of queryLoop({
@@ -6940,6 +6944,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           tools: scopedLoopTools,
           context: {
             userId: user.id,
+            workspaceActorUserId: user.id,
             assistantId: assistant.id,
             sessionId: session.id,
             appId: 'Use Brian',
@@ -6985,6 +6990,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             // turn) drives write stamping and is naturally bounded by reads.
             clearance: readClearance,
             compartments: readCompartments,
+            mutationCompartments: turnScope.access.mutationCompartments,
             projectIds: turnScope.effectiveProjectIds,
             activeGroupId: turnScope.activeGroupId,
             activeProjectId: turnScope.activeProjectId,

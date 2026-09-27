@@ -17,7 +17,7 @@
  * - Full caller-visible tool surface (the destination-side mode filter was
  *   retired 2026-07-24), optionally narrowed by a per-consult allow-list.
  * - Turn-limited: 15 turns / 10 tool calls by default.
- * - Runs under callee owner's userId for RLS.
+ * - Runs under the verified initiating actor, bounded by the caller context.
  * - MCP tools injected per-callee (owner's credentials).
  *
  * See docs/architecture/channels/inter-assistant.md.
@@ -60,6 +60,7 @@ import {
   ContextScopeAccumulator,
   DOC_MUTATION_TOOLS,
   unionCompartments,
+  intersectAccessCeilings, accessCeilingContains,
 } from '@use-brian/core'
 import type { SavedViewStore, EngineHooks } from '@use-brian/core'
 import type { ResearchSynthesizeFn } from '../synthesis/research-synthesizer.js'
@@ -81,14 +82,18 @@ import { runProactiveCompaction } from '../routes/proactive-compaction.js'
 import { registerSchedulerResolver, unregisterSchedulerResolver } from '../scheduling/confirmation-registry.js'
 import { sendConfirmationPrompt } from '../scheduling/confirmation-prompt.js'
 import { findAssistantById, findUserById, resolveAssistantAccess } from '../db/users.js'
-import { getConnectorUserId } from '../db/workspace-store.js'
+import { getConnectorUserId, getWorkspaceRoleSystem } from '../db/workspace-store.js'
 import { billingPartyForAssistant } from '../billing-party.js'
 import { recordExternalCostFromMeta } from '../billing-external.js'
 import { runWithAgentAccess } from '../db/client.js'
+import { currentAgentAccess } from '../db/agent-access-context.js'
+import { validateCallerScopeEvidence } from '../context-scope/caller-evidence.js'
+import { assertCurrentAuthority, AuthorityChangedError, createAuthorityLease, executeWithCurrentAuthority, runWithAuthorityLease } from '../context-scope/authority-lease.js'
 import {
   formatActiveWorkspaceContext,
   noteAutomaticScopeEvidence,
   resolveTurnScopeSystem,
+  resolveLiveAccessCeilingSystem,
 } from '../context-scope/resolve-turn-scope.js'
 import { injectMcpTools } from '../mcp/inject.js'
 import type { ConnectorStore } from '../db/connector-store.js'
@@ -294,6 +299,10 @@ export type CalleeQueryParams = {
   /** Originating workflow workspace; authoritative for delivery integration scope. */
   workspaceId?: string
   callerAssistantId: string
+  /** Verified initiating actor, never the billing or credential owner. */
+  callerUserId?: string | null
+  callerAccessCeiling?: import('@use-brian/core').AccessCeiling
+  callerScopeEvidence?: import('@use-brian/core').ScopeEvidence
   calleeAssistantId: string
   /** Authoritative workspace expected by the consult transport. */
   expectedWorkspaceId?: string
@@ -456,7 +465,78 @@ function hasForbiddenExternalClientDepth(depth: ResearchDepthConfig | undefined)
 }
 
 export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExecutor {
-  return async function executeCalleeQuery(params: CalleeQueryParams): Promise<string> {
+  return async function executeCalleeQuery(params: CalleeQueryParams, inheritedEvidence?: import('@use-brian/core').ScopeEvidence): Promise<string> {
+    if (params.callerScopeEvidence !== undefined && !params.callerAccessCeiling && !inheritedEvidence) {
+      throw Object.assign(new Error('Source context requires verified caller authority.'), { reason:'caller_evidence_unavailable', retrySafe:false })
+    }
+    if (params.callerAccessCeiling) {
+      const starting = intersectAccessCeilings(params.callerAccessCeiling,params.callerAccessCeiling)
+      if (params.callerScopeEvidence !== undefined) params={...params,callerScopeEvidence:structuredClone(params.callerScopeEvidence)}
+      // Restore a complete transport snapshot even when the async caller
+      // context has ended. Recheck its real assistant/member before reading
+      // callee context; a shrunken grant invalidates the composed request.
+      const { callerAccessCeiling: _callerAccessCeiling, ...executionParams } = params
+      if (params.callerUserId !== starting.userId) {
+        throw Object.assign(new Error('Consult actor does not match its starting authority.'), { reason: 'caller_authority_mismatch' })
+      }
+      const caller = await findAssistantById(params.callerAssistantId)
+      if (!caller || (caller.workspaceId ?? '') !== starting.workspaceId) {
+        throw Object.assign(new Error('Consult caller is unavailable.'), { reason: 'caller_authority_missing' })
+      }
+      const actorPresent = caller.workspaceId
+        ? await getWorkspaceRoleSystem(starting.userId, caller.workspaceId)
+        : await resolveAssistantAccess(starting.userId, caller.id)
+      if (!actorPresent) {
+        throw Object.assign(new Error('Consult authority changed. Start a new request.'), { reason: 'caller_authority_changed' })
+      }
+      const current = await resolveLiveAccessCeilingSystem({
+        userId: starting.userId, assistant: caller, workspaceId: caller.workspaceId,
+        key: params.contextGroupId !== undefined || params.contextProjectId !== undefined
+          ? { contextGroupId: params.contextGroupId ?? null, contextProjectId: params.contextProjectId ?? null }
+          : undefined,
+      })
+      if (!accessCeilingContains(current, starting)) {
+        throw Object.assign(new Error('Consult authority changed. Start a new request.'), { reason: 'caller_authority_changed' })
+      }
+      const lease = createAuthorityLease(starting, async () => {
+        const liveCaller = await findAssistantById(params.callerAssistantId)
+        if (!liveCaller || (liveCaller.workspaceId ?? '') !== starting.workspaceId) return null
+        const membership = liveCaller.workspaceId
+          ? await getWorkspaceRoleSystem(starting.userId, liveCaller.workspaceId)
+          : await resolveAssistantAccess(starting.userId, liveCaller.id)
+        if (!membership) return null
+        return resolveLiveAccessCeilingSystem({
+          userId: starting.userId, assistant: liveCaller, workspaceId: liveCaller.workspaceId,
+          key: params.contextGroupId !== undefined || params.contextProjectId !== undefined
+            ? { contextGroupId: params.contextGroupId ?? null, contextProjectId: params.contextProjectId ?? null }
+            : undefined,
+        })
+      })
+      const receiver = await findAssistantById(params.calleeAssistantId)
+      if (!receiver || (receiver.workspaceId ?? '') !== starting.workspaceId) {
+        throw Object.assign(new Error('Consult receiver is unavailable.'), { reason: 'assistant_workspace_mismatch' })
+      }
+      const receiverBinding = params.contextGroupId !== undefined || params.contextProjectId !== undefined
+        ? { contextGroupId: params.contextGroupId ?? null, contextProjectId: params.contextProjectId ?? null }
+        : undefined
+      const receiverStarting = intersectAccessCeilings(starting, await resolveLiveAccessCeilingSystem({
+        userId: starting.userId, assistant: receiver, workspaceId: receiver.workspaceId, key: receiverBinding,
+      }))
+      const callerEvidence = params.callerScopeEvidence !== undefined
+        ? await validateCallerScopeEvidence(params.callerScopeEvidence,receiverStarting) : undefined
+      const receiverLease = createAuthorityLease(receiverStarting, async () => {
+        const liveReceiver = await findAssistantById(params.calleeAssistantId)
+        if (!liveReceiver || (liveReceiver.workspaceId ?? '') !== starting.workspaceId) return null
+        const currentReceiver = await resolveLiveAccessCeilingSystem({
+          userId: starting.userId, assistant: liveReceiver, workspaceId: liveReceiver.workspaceId, key: receiverBinding,
+        })
+        if (callerEvidence) await validateCallerScopeEvidence(callerEvidence,intersectAccessCeilings(receiverStarting,currentReceiver))
+        return currentReceiver
+      })
+      return runWithAuthorityLease(lease, () => runWithAuthorityLease(receiverLease,
+        () => runWithAgentAccess(receiverStarting, () => executeCalleeQuery(executionParams,callerEvidence))))
+    }
+    await assertCurrentAuthority()
     // 1. Look up callee assistant and its billing/actor user.
     const calleeAssistant = await findAssistantById(params.calleeAssistantId)
     if (!calleeAssistant) throw new Error('Callee assistant not found')
@@ -518,7 +598,11 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         },
       })
     }
-    const calleeActorUserId = externalClient?.user.id ?? calleeOwnerUserId
+    const calleeActorUserId = externalClient?.user.id ?? currentAgentAccess()?.userId ?? params.callerUserId
+    if(!calleeActorUserId)throw Object.assign(new Error('Consult requires a verified initiating actor.'),{reason:'caller_authority_missing'})
+    if(params.callerUserId&&currentAgentAccess()?.userId&&params.callerUserId!==currentAgentAccess()!.userId)throw Object.assign(new Error('Consult actor does not match its execution context.'),{reason:'caller_authority_mismatch'})
+    const calleeActor=calleeActorUserId===calleeOwnerUserId?calleeOwner:await findUserById(calleeActorUserId)
+    if(!calleeActor)throw Object.assign(new Error('Consult actor is unavailable.'),{reason:'caller_authority_missing'})
     let turnScope = await resolveTurnScopeSystem({
       userId: calleeActorUserId,
       assistant: calleeAssistant,
@@ -555,6 +639,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         {
           clearance: turnScope.access.clearance,
           compartments: turnScope.effectiveCompartments,
+          mutationCompartments: turnScope.access.mutationCompartments,
         },
         () => options.savedViewStore!.getById(calleeActorUserId, params.pageAnchorId!),
       )
@@ -603,6 +688,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           await runWithAgentAccess({
             clearance: turnScope.access.clearance,
             compartments: turnScope.effectiveCompartments,
+            mutationCompartments: turnScope.access.mutationCompartments,
             projectIds: turnScope.effectiveProjectIds,
           }, () =>
             options.savedViewStore!.setAutoPruneAt(
@@ -721,7 +807,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           connectorStore: options.connectorStore,
           settingsStore: options.mcpSettingsStore,
           assistantConnectorStore: options.assistantConnectorStore,
-          userTimezone: calleeOwner.timezone,
+          userTimezone: calleeActor.timezone,
           knowledgeStore: options.knowledgeStore,
           gdriveFilesStore: options.gdriveFilesStore,
           connectorGrantStore: options.connectorGrantStore,
@@ -1232,7 +1318,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     // MUST stay after the LAST `finalTools.set` (skill injection above), or a
     // later set() reinstalls an unwrapped tool. Interactive chat never gets
     // this wrap; its tools stay scoped to the chatting member.
-    const calleeAgentClearance = calleeAssistant.clearance ?? 'internal'
+    const calleeAgentClearance = turnScope.access.clearance ?? 'public'
     for (const [name, tool] of finalTools) {
       if (typeof tool.execute !== 'function') continue
       const innerExecute = tool.execute.bind(tool)
@@ -1240,10 +1326,13 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         ...tool,
         execute: (input, context) =>
           runWithAgentAccess({
+            workspaceId:calleeAssistant.workspaceId??undefined,userId:calleeActorUserId,
             clearance: calleeAgentClearance,
+            visibilityAssistantIds:turnScope.access.visibilityAssistantIds??(calleeAssistant.kind==='primary'?null:[calleeAssistant.id]),
             compartments: turnScope.effectiveCompartments,
+            mutationCompartments: turnScope.access.mutationCompartments,
             projectIds: turnScope.effectiveProjectIds,
-          }, () => innerExecute(input, context)),
+          }, () => executeWithCurrentAuthority(() => innerExecute(input, {...context,mutationCompartments:turnScope.access.mutationCompartments}))),
       })
     }
 
@@ -1278,7 +1367,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
 
     const now = new Date()
     const currentDateTime = now.toLocaleString('en-US', {
-      timeZone: calleeOwner.timezone || 'UTC',
+      timeZone: calleeActor.timezone || 'UTC',
       weekday: 'long',
       year: 'numeric',
       month: 'long',
@@ -1300,11 +1389,12 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       ...turnScope.access,
       clientSelfMemory: externalClient?.clientSelfMemory,
     }
-    const [soul, identityMemories, memoryIndex] = await Promise.all([
-      options.memoryStore.getSoul(params.calleeAssistantId, calleeActorUserId, 'Use Brian'),
+    const [soulContext, identityMemories, memoryIndex] = await Promise.all([
+      (options.memoryStore.getSoulContext?.(calleeCtx, 'Use Brian') ?? Promise.resolve({ content: null, evidence: {} })),
       options.memoryStore.getIdentity(calleeCtx),
       options.memoryStore.getIndex(calleeCtx),
     ])
+    const soul = soulContext.content
 
     let workspaceIdentityMemories: Awaited<ReturnType<typeof options.memoryStore.getWorkspaceIdentity>> = []
     let teamMemoryIndex: Awaited<ReturnType<typeof options.memoryStore.getWorkspaceIndex>> = []
@@ -1328,6 +1418,8 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       compartments: turnScope.writeCompartments,
       projectIds: turnScope.writeProjectIds,
     })
+    scopeAccumulator.note(inheritedEvidence)
+    scopeAccumulator.note(soulContext.evidence)
     noteAutomaticScopeEvidence(scopeAccumulator, [
       ...identityMemories,
       ...memoryIndex,
@@ -1432,7 +1524,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     ) {
       try {
         blueprintPromptFragment = await options.buildBlueprintPromptFragment(
-          calleeOwner.id,
+          calleeActorUserId,
           calleeAssistant.workspaceId,
         )
       } catch (err) {
@@ -1545,7 +1637,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       ? `\n\n## External client boundary\nThis automated draft is running as one isolated external client. Use only the inbound request and the client-scoped context and tools available in this turn. Do not infer or request another client identity, do not claim access to workspace-wide context, and do not attempt to deliver or send the result. The final text is an internal draft for workspace review.`
       : ''
     const activeWorkspaceContext = formatActiveWorkspaceContext(turnScope)
-    const fullSystemPrompt = `${systemPrompt}${decisionPlaybookBlock}${externalClientGuardBlock}${docAnchorBlock}${priorRunMemoryBlock}${workflowGuardBlock}${recordCreationGuardBlock}${automatedToolPolicyBlock}${unavailableBlock}${skillPromptFragment}${blueprintPromptFragment}${deliveryConversationBlock}\n\n# Context\nCurrent date and time: ${currentDateTime}\nTimezone: ${calleeOwner.timezone}\n\n${memoryContext}${activeWorkspaceContext ? `\n\n${activeWorkspaceContext}` : ''}`
+    const fullSystemPrompt = `${systemPrompt}${decisionPlaybookBlock}${externalClientGuardBlock}${docAnchorBlock}${priorRunMemoryBlock}${workflowGuardBlock}${recordCreationGuardBlock}${automatedToolPolicyBlock}${unavailableBlock}${skillPromptFragment}${blueprintPromptFragment}${deliveryConversationBlock}\n\n# Context\nCurrent date and time: ${currentDateTime}\nTimezone: ${calleeActor.timezone}\n\n${memoryContext}${activeWorkspaceContext ? `\n\n${activeWorkspaceContext}` : ''}`
     // 6. Build messages and run the query loop.
     //
     // Persist the user turn first, then build the message list. A durable
@@ -1557,6 +1649,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     // per-interaction session (no sessionKey) stays a fresh single-turn
     // consult with no replay.
     const userContent: Message['content'] = [{ type: 'text', text: params.question }]
+    await assertCurrentAuthority()
     const userMessageRow = await addSessionMessage({
       sessionId: session.id,
       role: 'user',
@@ -1568,9 +1661,9 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       const priorRows = await getSessionMessages(session.id, {
         fromSequence: session.compactBoundarySequence,
       })
-      const compacted = await runProactiveCompaction({
+      const compacted = await executeWithCurrentAuthority(() => runProactiveCompaction({
         sessionMessages: priorRows,
-        timezone: calleeOwner.timezone || 'UTC',
+        timezone: calleeActor.timezone || 'UTC',
         session,
         tier: 'standard',
         channelClass: 'cron',
@@ -1596,7 +1689,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         // unless both a workspace and an ingestor are present.
         workspaceId: calleeAssistant.workspaceId ?? undefined,
         chatEpisodeIngestor: options.chatEpisodeIngestor,
-      })
+      }))
       messages.push(...compacted.messages)
     } else {
       messages.push({ role: 'user', content: userContent })
@@ -1703,6 +1796,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     let researchContext = ''
     if (isResearchFanout) {
       try {
+        await assertCurrentAuthority()
         const pre = await runPreflight({
           provider: preflightLlmRuntime?.provider ?? options.provider,
           model: preflightLlmRuntime?.selector ?? model,
@@ -1773,7 +1867,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     let synthesisHandled = false
     if (isBlueprintResearch && researchContext && options.researchSynthesize) {
       try {
-        const result = await options.researchSynthesize({
+        const result = await executeWithCurrentAuthority(() => options.researchSynthesize!({
           blueprintSlug: params.blueprintId!,
           findings: researchContext,
           pageId: params.pageAnchorId!,
@@ -1790,7 +1884,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           sourceRef:
             params.workflowRunId ??
             (params.workflowId ? `workflow:${params.workflowId}` : params.pageAnchorId!),
-        })
+        }))
         if (result) {
           synthesisHandled = true
           // The page IS the deliverable; the step's text output is a short receipt.
@@ -1871,6 +1965,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     // try/finally so the wall-clock timer is still cleared and any registered
     // confirmation resolvers are still released.
     try {
+      await assertCurrentAuthority()
       if (!synthesisHandled)
       for await (const event of queryLoop({
         ledger: createTurnLedger({
@@ -1915,12 +2010,14 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
               }
             : undefined,
           assistantKind: calleeAssistant.kind,
+          visibilityAssistantIds:turnScope.access.visibilityAssistantIds,
           // Read ceilings for the brain retrieval actor — the `min(member,
           // assistant)` clearance + compartment grant. Set only when retrieval
           // tools were injected; absent otherwise (passthrough, unchanged for
           // callees without brain reads).
           clearance: turnScope.access.clearance,
           compartments: turnScope.effectiveCompartments,
+          mutationCompartments: turnScope.access.mutationCompartments,
           projectIds: turnScope.effectiveProjectIds,
           activeGroupId: turnScope.activeGroupId,
           activeProjectId: turnScope.activeProjectId,
@@ -1954,6 +2051,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         confirmationResolver,
         confirmationTimeoutMs: deferredConfirmations ? 300_000 : undefined,
       })) {
+        await assertCurrentAuthority()
         if (params.onActivity) {
           for (const frame of goalActivityFramesFromQueryEvent(event)) {
             try {
@@ -2211,6 +2309,11 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       // records the run as `timeout` (not the opaque `dispatch_threw`) and
       // preserves whatever the callee gathered before the abort. Any other
       // error propagates unchanged.
+      if (err instanceof AuthorityChangedError) {
+        abortController.abort()
+        throw err
+      }
+      await assertCurrentAuthority()
       if (timedOut) {
         throw Object.assign(
           new Error(
@@ -2283,6 +2386,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         { reason: 'blueprint_record_missing', partialOutput: finalText },
       )
     }
+    await assertCurrentAuthority()
     if (surfacedQuestion) params.onQuestion?.(surfacedQuestion)
     params.onScopeEvidence?.(scopeAccumulator.evidence)
     return finalText

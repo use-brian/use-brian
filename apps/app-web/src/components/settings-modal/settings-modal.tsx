@@ -39,50 +39,22 @@ import { BillingSection } from "./sections/billing-section";
 import { ModelsSection } from "./sections/models-section";
 import { DomainsSection } from "./sections/domains-section";
 import { ProjectsContextSection, TeamsContextSection } from "./sections/context-scopes-section";
+import { WorkspaceAccessView } from "@/components/workspace-access/workspace-access";
+import { OrganizationChartView } from "@/components/organization/organization-chart";
 import {
   WorkspaceGeneralSection,
   WorkspaceMembersSection,
 } from "./workspace-sections";
 
-export type SettingsSection =
-  | "profile"
-  | "preferences"
-  | "privacy"
-  | "notifications"
-  | "ws-general"
-  | "ws-members"
-  | "ws-teams"
-  | "ws-projects"
-  | "ws-llm-key"
-  | "ws-domains"
-  | "ws-plan"
-  | "ws-usage"
-  | "ws-models";
-
-// Cross-component request to open the settings modal at a given section. The
-// modal is owned by `workspace-switcher.tsx` (local state), so surfaces that
-// don't host it — e.g. the sidebar theme picker's "edit" action — ask for it via
-// this window event instead of threading a context. The switcher listens and
-// opens. Window events are the established cross-component seam here (cf.
-// `doc:theme-changed`, `doc:draft-created`).
-export const OPEN_SETTINGS_EVENT = "doc:open-settings";
-export type OpenSettingsDetail = { section: SettingsSection };
-
-/** Dispatch a request to open the settings modal at `section`. No-op on the
- *  server (guards `window`) so it's safe to call from event handlers in SSR'd
- *  client components. */
-export function openWorkspaceSettings(section: SettingsSection): void {
-  if (typeof window === "undefined") return;
-  window.dispatchEvent(
-    new CustomEvent<OpenSettingsDetail>(OPEN_SETTINGS_EVENT, {
-      detail: { section },
-    }),
-  );
-}
+import type { SettingsSection } from '@/lib/workspace-settings-events';
+export { OPEN_SETTINGS_EVENT, openWorkspaceSettings } from '@/lib/workspace-settings-events';
+export type { SettingsSection, OpenSettingsDetail } from '@/lib/workspace-settings-events';
+import type { SettingsMemberTarget } from '@/lib/workspace-settings-events';
 
 type Props = {
   open: boolean;
   initialSection?: SettingsSection;
+  initialMemberTarget?:SettingsMemberTarget;
   onClose: () => void;
 };
 
@@ -95,6 +67,8 @@ const ACCOUNT_SECTIONS: SettingsSection[] = [
   "notifications",
 ];
 const WORKSPACE_SECTIONS: SettingsSection[] = [
+  "ws-organization",
+  "ws-access",
   "ws-general",
   "ws-members",
   "ws-teams",
@@ -115,6 +89,8 @@ const WORKSPACE_SECTIONS: SettingsSection[] = [
 // pitch instead of the live members manager. Browser profiles live in the
 // Browsers mini app in both editions.
 const OSS_WORKSPACE_SECTIONS: SettingsSection[] = [
+  "ws-organization",
+  "ws-access",
   "ws-general",
   "ws-members",
   "ws-teams",
@@ -138,15 +114,18 @@ export function workspaceMembersSectionKind(
   return capabilities.teammateManagement ? "manage" : "upgrade";
 }
 
-export function SettingsModal({ open, initialSection = "profile", onClose }: Props) {
+export function SettingsModal({ open, initialSection = "profile", initialMemberTarget, onClose }: Props) {
   const t = useT();
   const oss = isOssEdition();
   const workspaceSections = workspaceSettingsSections(deploymentCapabilities());
   const [section, setSection] = useState<SettingsSection>(initialSection);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [memberTarget,setMemberTarget]=useState(initialMemberTarget);
   const activeSection = section === "ws-usage" ? "ws-plan"
     : section === "ws-llm-key" ? "ws-models" : section;
   const labels: Record<SettingsSection, string> = {
+    "ws-organization": t.organization.title,
+    "ws-access": t.workspaceAccess.title,
     "ws-general": t.chrome.settingsModal.workspace.general,
     "ws-members": oss
       ? t.chrome.settingsModal.upgrade.teammatesNav
@@ -173,16 +152,20 @@ export function SettingsModal({ open, initialSection = "profile", onClose }: Pro
   // setState-in-effect anti-pattern.
   const [prevOpen, setPrevOpen] = useState(open);
   const [prevInitial, setPrevInitial] = useState(initialSection);
-  if (open !== prevOpen || initialSection !== prevInitial) {
+  const [prevMemberTarget,setPrevMemberTarget]=useState(initialMemberTarget);
+  if (open !== prevOpen || initialSection !== prevInitial || initialMemberTarget!==prevMemberTarget) {
     setPrevOpen(open);
     setPrevInitial(initialSection);
+    setPrevMemberTarget(initialMemberTarget);
     if (open) {
       setSection(initialSection);
+      setMemberTarget(initialMemberTarget);
       setPickerOpen(false);
     }
   }
 
   const selectSection = (s: SettingsSection) => {
+    setMemberTarget(undefined);
     setSection(s);
     setPickerOpen(false);
   };
@@ -279,7 +262,7 @@ export function SettingsModal({ open, initialSection = "profile", onClose }: Pro
           </div>
 
           <div key={activeSection} className="min-h-0 min-w-0 flex-1 overflow-y-auto p-4 sm:p-6">
-            <SectionBody section={section} onClose={onClose} />
+            <SectionBody section={section} onClose={onClose} memberTarget={memberTarget} clearMember={()=>setMemberTarget(undefined)} />
             {oss && <div className="sm:hidden"><OssVersionFooter /></div>}
           </div>
 
@@ -381,9 +364,13 @@ function SectionGroup({
 function SectionBody({
   section,
   onClose,
+  memberTarget,
+  clearMember,
 }: {
   section: SettingsSection;
   onClose: () => void;
+  memberTarget?:SettingsMemberTarget;
+  clearMember:()=>void;
 }) {
   switch (section) {
     case "profile":
@@ -397,11 +384,15 @@ function SectionBody({
     case "ws-general":
       return <WorkspaceGeneralSection onWorkspaceDeleted={onClose} />;
     case "ws-members":
-      return workspaceMembersSectionKind(deploymentCapabilities()) === "manage"
-        ? <WorkspaceMembersSection />
+      return memberTarget || workspaceMembersSectionKind(deploymentCapabilities()) === "manage"
+        ? <WorkspaceMembersSection memberTarget={memberTarget} clearMember={clearMember} managementEnabled={deploymentCapabilities().teammateManagement} />
         : <HostedUpgradeSection />;
     case "ws-teams":
       return <TeamsContextSection />;
+    case "ws-access":
+      return <WorkspaceAccessView />;
+    case "ws-organization":
+      return <OrganizationChartView />;
     case "ws-projects":
       return <ProjectsContextSection />;
     case "ws-llm-key":

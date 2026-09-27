@@ -8,6 +8,8 @@ const journal = vi.hoisted(() => ({ appendDecisionEvent: vi.fn() }))
 
 vi.mock('../client.js', () => ({
   query: vi.fn(),
+  applyRLSGucs: vi.fn(),
+  getAppPool: () => ({ connect: vi.fn(async () => state.client) }),
   getPool: () => ({ connect: vi.fn(async () => state.client) }),
 }))
 vi.mock('../decision-event-store.js', () => ({

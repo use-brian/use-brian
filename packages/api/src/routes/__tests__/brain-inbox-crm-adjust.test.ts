@@ -18,6 +18,7 @@ vi.mock('../../db/client.js', () => ({
   query: vi.fn(),
   queryWithRLS: vi.fn(),
 }))
+vi.mock('../../db/workspace-files.js', () => ({ updateWorkspaceFileMeta: vi.fn() }))
 vi.mock('../../db/tasks.js', () => ({ updateTask: vi.fn() }))
 vi.mock('../../brain-stream/notify.js', () => ({ notifyBrainInboxChange: vi.fn() }))
 vi.mock('../../db/memories.js', () => ({
@@ -65,6 +66,7 @@ vi.mock('../../db/crm-r2.js', () => ({ appendCrmActivity: vi.fn().mockResolvedVa
 import { brainInboxRoutes } from '../brain-inbox.js'
 import { query } from '../../db/client.js'
 import { appendBrainVerification } from '../../db/brain-inbox-store.js'
+import { updateWorkspaceFileMeta } from '../../db/workspace-files.js'
 import { updateEntity } from '../../db/entities-store.js'
 import { setDealStage, updateCompany, updateContact, updateDeal } from '../../db/crm.js'
 import { appendCrmActivity } from '../../db/crm-r2.js'
@@ -116,6 +118,28 @@ function seedBefore(attributes: Record<string, unknown> = {}) {
 
 describe('[COMP:crm/update] CRM adjust — typed fields (REST boundary)', () => {
   beforeEach(() => vi.clearAllMocks())
+
+  it('returns a release-required conflict for files without recording an audit',async()=>{
+    mockQuery.mockResolvedValueOnce({rows:[{workspaceId:WS,sensitivity:'confidential',tags:[]}]} as never)
+    vi.mocked(updateWorkspaceFileMeta).mockRejectedValueOnce(Object.assign(new Error('Audited release required'),{code:'scope_declassification_required'}))
+    const res=await request(makeApp('owner')).post(`/api/brain-inbox/${WS}/workspace_file/${ROW}/adjust`)
+      .send({sensitivity:'internal',tags:['changed']})
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({error:'Lowering sensitivity requires an audited release.',code:'scope_declassification_required'})
+    expect(appendBrainVerification).not.toHaveBeenCalled()
+  })
+
+  it.each(['entity','contact','company','deal'])('returns an explicit release conflict for %s without an audit or partial field write',async primitive=>{
+    mockQuery.mockResolvedValueOnce({rows:[{workspaceId:WS,name:'Fixture',displayName:'Fixture',sensitivity:'confidential',entityId:ROW,attributes:{}}]} as never)
+    mockUpdateEntity.mockRejectedValueOnce(Object.assign(new Error('Lowering sensitivity requires an audited release.'),{code:'scope_declassification_required'}))
+    const res=await request(makeApp('owner')).post(`/api/brain-inbox/${WS}/${primitive}/${ROW}/adjust`)
+      .send({sensitivity:'internal',...(primitive==='entity'?{display_name:'Changed'}:{name:'Changed'}),...(primitive==='contact'?{email:'person@example.com'}:{})})
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({error:'Lowering sensitivity requires an audited release.',code:'scope_declassification_required'})
+    expect(appendBrainVerification).not.toHaveBeenCalled()
+    expect(appendCrmActivity).not.toHaveBeenCalled()
+    expect(mockUpdateContact).not.toHaveBeenCalled()
+  })
 
   it('contact email/phone/company_id/tags apply via updateContact under the viewer projection', async () => {
     seedBefore({ email: 'old@acme.com' })

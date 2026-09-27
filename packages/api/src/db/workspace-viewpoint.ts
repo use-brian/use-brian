@@ -52,8 +52,12 @@ export async function resolveWorkspaceViewpoint(
     role: 'owner' | 'admin' | 'member'
     clearance: Sensitivity
     compartments: string[] | null
+    mutationCompartments: string[] | null
   }>(
-    `SELECT role, clearance, compartments FROM workspace_members WHERE workspace_id = $1 AND user_id = $2`,
+    `SELECT role, clearance,
+       effective_member_read_compartments(user_id,workspace_id) AS compartments,
+       effective_member_team_compartments(user_id,workspace_id) AS "mutationCompartments"
+     FROM workspace_members WHERE workspace_id = $1 AND user_id = $2`,
     [workspaceId, userId],
   )
   if (membership.rows.length === 0) return null
@@ -128,5 +132,6 @@ export async function resolveWorkspaceViewpoint(
     assistantKind: 'primary',
     clearance: readClearance,
     compartments: readCompartments,
+    mutationCompartments: effectiveReadCompartments(member.role, member.mutationCompartments, null),
   }
 }

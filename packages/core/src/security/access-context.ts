@@ -46,8 +46,12 @@ export type AccessContext = {
   userId: string
   assistantId: string
   assistantKind: AssistantKind
+  /** Additional delegated ceiling; [] permits only assistant-public rows. */
+  visibilityAssistantIds?: string[] | null
   clearance?: Sensitivity
   compartments?: string[] | null
+  /** Source mutations, independently bounded by read reach. Omission is legacy only. */
+  mutationCompartments?: string[] | null
   /** Effective Project grant. null/undefined is universe; [] is General-only. */
   projectIds?: string[] | null
   /**

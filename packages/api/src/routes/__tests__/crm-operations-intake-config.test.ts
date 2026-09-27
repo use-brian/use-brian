@@ -67,6 +67,15 @@ function build(role: 'owner' | 'admin' | 'member' = 'owner') {
 }
 
 describe('[COMP:api/crm-operations-route] intake configuration REST adapter', () => {
+  it('returns a content-free scope refusal with recovery guidance for stage changes', async () => {
+    const f = build('member')
+    f.service.execute.mockRejectedValueOnce(Object.assign(new Error('Hidden department source details'), { code: 'scope_operation_denied' }))
+    const response = await request(f.app).patch(`/api/crm/${WORKSPACE_ID}/operations/deals/${CONTACT_ID}/pipeline-stage`)
+      .send({ pipelineId: PIPELINE_ID, stageId: STAGE_ID })
+    expect(response.status).toBe(403)
+    expect(response.body).toEqual({ error: 'scope_operation_denied', message: expect.stringContaining('administrator') })
+    expect(JSON.stringify(response.body)).not.toContain('Hidden department')
+  })
   it('discovers fields for members using only the pure paginated read port', async () => {
     const f = build('member')
     const result = await request(f.app).get(`/api/crm/${WORKSPACE_ID}/operations/record-fields`)

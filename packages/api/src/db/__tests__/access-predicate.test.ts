@@ -8,11 +8,33 @@
  */
 
 import { describe, it, expect } from 'vitest'
+import { runWithAgentAccess } from '../agent-access-context.js'
 import type { Sensitivity } from '@use-brian/core'
 import {
   buildAccessPredicate,
+  buildCurrentMemberSourcePredicate,
   type AccessContext,
 } from '../access-predicate.js'
+
+describe('[COMP:brain/access-predicate] current member source binding', () => {
+  it('binds the actor as a parameter rather than interpolating it into SQL', () => {
+    const actor="untrusted' actor"
+    const predicate=buildCurrentMemberSourcePredicate(actor,{alias:'entities',startIdx:8})
+    expect(predicate.sql).not.toContain(actor)
+    expect(predicate.params).toEqual([actor])
+    expect(predicate.nextIdx).toBe(9)
+    expect(predicate.sql).toContain('member_floor.user_id=$8')
+  })
+  it.each(['entities;SELECT 1','a.b','', 'entities)'])('rejects unsafe source identifiers: %s', alias => {
+    expect(()=>buildCurrentMemberSourcePredicate('actor',{alias})).toThrow('Invalid current-member source context')
+  })
+  it.each([0,-1,1.5,NaN])('rejects invalid parameter offsets: %s', startIdx => {
+    expect(()=>buildCurrentMemberSourcePredicate('actor',{alias:'entities',startIdx})).toThrow('Invalid current-member parameter index')
+  })
+  it('refuses a missing actor',()=>{
+    expect(()=>buildCurrentMemberSourcePredicate('',{alias:'entities'})).toThrow('Invalid current-member source context')
+  })
+})
 
 const ctx: AccessContext = {
   workspaceId: 'ws-1',
@@ -242,7 +264,7 @@ describe('[COMP:brain/permission-predicates] buildAccessPredicate', () => {
           ' AND sensitivity_rank(sensitivity) <= sensitivity_rank($4)' +
           ' AND compartments <@ $5::text[]',
       )
-      expect(ap.params).toEqual(['ws-1', 'u-1', 'a-1', 'confidential', ['sales', 'finance']])
+      expect(ap.params).toEqual(['ws-1', 'u-1', 'a-1', 'confidential', ['finance', 'sales']])
       expect(ap.nextIdx).toBe(6)
     })
 
@@ -354,5 +376,21 @@ describe('[COMP:brain/context-scope-predicate] Project access predicate', () => 
     })
     expect(ap.sql).toContain('compartments <@ $5::text[]')
     expect(ap.sql).toContain('project_ids <@ $6::uuid[]')
+  })
+})
+
+
+describe('[COMP:brain/permission-predicates] delegated ceilings',()=>{
+  it('retains finite assistant visibility for a primary projection',()=>{
+    const result=buildAccessPredicate({...ctx,assistantKind:'primary',visibilityAssistantIds:[]})
+    expect(result.sql).toContain('assistant_id = ANY($4::uuid[])');expect(result.params.at(-1)).toEqual([])
+  })
+  it('intersects reconstructed tool contexts with the active execution ceiling',()=>{
+    runWithAgentAccess({workspaceId:'ws-1',userId:'actor',clearance:'internal',compartments:['product'],projectIds:[],visibilityAssistantIds:['caller']},()=>{
+      const result=buildAccessPredicate({...ctx,assistantKind:'primary',compartments:null,projectIds:null})
+      expect(result.params).toEqual(['ws-1','u-1','internal',['product'],[],'actor',['caller']])
+      expect(result.sql).toContain('user_id = $6');expect(result.sql).toContain('assistant_id = ANY($7::uuid[])')
+      expect(buildAccessPredicate({...ctx,workspaceId:'other'}).sql).toContain('FALSE')
+    })
   })
 })

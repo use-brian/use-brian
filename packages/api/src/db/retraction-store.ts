@@ -88,15 +88,30 @@ export function createMemoryRetractionStore(transactionClient?: pg.PoolClient): 
       // D.3 — retraction stamps `retracted_at` ("was never correct")
       // alongside `valid_to`. A row already superseded keeps its earlier
       // `valid_to`; an active row gets `valid_to = now()`.
-      await execute(
-        `UPDATE memories
-            SET retracted_at     = $3,
-                retracted_reason = $4,
-                retracted_by     = $5,
-                valid_to         = COALESCE(valid_to, $3)
-          WHERE id = $1 AND workspace_id = $2`,
-        [input.memoryId, input.workspaceId, input.now, input.reason, input.retractedBy],
-      )
+      const ownedClient = transactionClient ? null : await getPool().connect()
+      const client = transactionClient ?? ownedClient!
+      try {
+        if (ownedClient) await client.query('BEGIN')
+        const updated = await client.query(
+          `UPDATE memories
+              SET retracted_at     = $3,
+                  retracted_reason = $4,
+                  retracted_by     = $5,
+                  valid_to         = COALESCE(valid_to, $3)
+            WHERE id = $1 AND workspace_id = $2`,
+          [input.memoryId, input.workspaceId, input.now, input.reason, input.retractedBy],
+        )
+        if (updated.rowCount !== 1) throw new Error('retraction_target_unavailable')
+        await client.query(
+          `INSERT INTO correction_audit(workspace_id,action,primitive,row_id,actor_user_id,reason)
+           VALUES($1,'retract','memory',$2,$3,$4)`,
+          [input.workspaceId,input.memoryId,input.retractedBy,input.reason],
+        )
+        if (ownedClient) await client.query('COMMIT')
+      } catch (error) {
+        if (ownedClient) await client.query('ROLLBACK').catch(() => {})
+        throw error
+      } finally { ownedClient?.release() }
     },
 
     async applyHardPurge(input) {

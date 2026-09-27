@@ -154,6 +154,7 @@ const APPROVAL_GROUP_BY_KIND = {
   workflow_refinement: 'systemImprovements',
   question: 'questionsAndAccess',
   email_sender: 'questionsAndAccess',
+  department_access: 'questionsAndAccess',
 } satisfies Record<ApprovalKind, ApprovalGroupKey>
 
 function emptyApprovalGroups(): ApprovalGroupCounts {

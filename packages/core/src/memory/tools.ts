@@ -156,18 +156,15 @@ export type MemoryToolOptions = {
 }
 
 /**
- * The one "memory not found" sentence — the `taskNotFoundMessage` /
- * `crmNotFound` shape, hand-written because memory supersession has a twist
- * the generic `notFoundFailure({ supersession: true })` clause gets wrong.
+ * The memory-specific recovery path includes successor IDs and the scoped
+ * search/index routes for resolving a current memory.
  *
  * `MemoryStore.update` is bi-temporal: it stamps `valid_to` on the row it
  * locked and INSERTs a new one with a NEW uuid, and every read filters
  * `valid_to IS NULL`. So a memory id is dead the moment it is edited — by
- * this tool, by the Memory-tab edit route, or by a consolidation pass. But
- * unlike tasks and CRM rows, `saveMemory`'s own success line echoes the id
- * the CALLER passed, not the new one, so "reuse the id from that result" is
- * the one piece of advice that is guaranteed to fail here. Point at the
- * re-resolution path instead.
+ * this tool, by the Memory-tab edit route, or by a consolidation pass.
+ * saveMemory returns the successor ID; a later independent edit still
+ * requires resolving the current version again.
  *
  * `search` (scope `memory`) is the sibling that re-resolves; the per-turn
  * memory index carries current 8-char prefixes and this tool accepts those.
@@ -175,7 +172,7 @@ export type MemoryToolOptions = {
 function memoryNotFound(id: string): string {
   return (
     `Memory ${id} not found in this workspace. ` +
-    'Every edit to a memory supersedes the row and mints a NEW id, so an id you held from before an edit (or from an older turn\'s memory index) is permanently dead — and the id echoed back by a previous saveMemory update is the pre-edit one, so do not reuse that either. ' +
+    'Every edit to a memory supersedes the row and mints a NEW id. Use the successor id returned by the latest saveMemory update; an id held from before that edit or from an older memory index is no longer current. ' +
     'It may also have been deleted, or be above this assistant\'s clearance. ' +
     'Call `search` with scope `memory` to re-resolve a current id, or read the current id off the memory index in your context. ' +
     'Do NOT retry this exact id.'
@@ -319,6 +316,8 @@ export function createMemoryTools(
         updates.sensitivity = updateStamp.sensitivity
         updates.compartments = updateStamp.compartments
         updates.projectIds = updateStamp.projectIds
+        const updateSources = context.scopeAccumulator?.evidence.sources
+        if (updateSources?.length) updates.derivation = { producer:'tool:saveMemory:update', sources:updateSources }
 
         // Wrap in try/catch so malformed-UUID errors (when resolution above
         // didn't find a match and we're falling through with a non-UUID) are
@@ -336,7 +335,7 @@ export function createMemoryTools(
         }
         if (!updated) return { data: memoryNotFound(input.id), isError: true }
         opts?.onEvent?.({ type: 'memory_updated', memoryId: resolvedId })
-        return { data: `Updated memory [${resolvedId}]: ${updated.summary}` }
+        return { data: `Updated memory [${updated.id}]: ${updated.summary}`, scopeEvidence: scopeEvidenceFromRows([updated]) }
       }
 
       // Create path requires `summary` — the schema marks it optional so updates
@@ -516,12 +515,13 @@ export function createMemoryTools(
           }
         }
         noteEntity = { id: entity.id, displayName: entity.displayName, kind: entity.kind }
-        context.scopeAccumulator?.note(scopeEvidenceFromRows([entity]))
+        const entityEvidence = scopeEvidenceFromRows([entity])
+        context.scopeAccumulator?.note(entityEvidence)
         createStamp = resolveWriteScope({
           sensitivity: stampedSensitivity,
           baseCompartments: context.memoryWriteCompartments ?? context.assistantDefaultCompartments,
           baseProjectIds: context.assistantDefaultProjectIds,
-          evidence: context.scopeAccumulator,
+          evidence: context.scopeAccumulator ?? entityEvidence,
           compartmentGrant: context.assistantCompartments ?? context.compartments,
           projectGrant: context.assistantProjectIds ?? context.projectIds,
         })
@@ -538,10 +538,16 @@ export function createMemoryTools(
         effectiveTags = Array.from(new Set([...(effectiveTags ?? []), ...opts.injectedTags]))
       }
 
+      // Anchor lookup can raise the floor after the initial scope decision.
+      if (createStamp.sensitivity === 'confidential' && effectiveScope === 'team') {
+        return { data: 'This source requires confidential protection. Save a personal note with scope="user"; nothing was saved.', isError: true }
+      }
+
       // Create new. WU-2.2 stamps universal-column authorship from the
       // session context. `sourceEpisodeId` comes from `writeSourceEpisodeId`
       // (the synthesis engine anchors extracted memories to the source
       // Episode, same as Pipeline B); chat-driven saveMemory has no episode.
+      const createSources = context.scopeAccumulator?.evidence.sources
       const memory = await store.create({
         assistantId: context.assistantId,
         userId: context.userId,
@@ -553,9 +559,14 @@ export function createMemoryTools(
         ...(opts?.writeSourceEpisodeId ? { sourceEpisodeId: opts.writeSourceEpisodeId } : {}),
         sourceSessionId: context.sessionId,
         workspaceId: effectiveScope === 'team' ? context.workspaceId! : undefined,
-        sensitivity: stampedSensitivity,
+        sensitivity: createStamp.sensitivity,
         compartments: stampedCompartments,
         projectIds: createStamp.projectIds,
+        ...(createSources?.length
+          ? { derivation:{ producer:'tool:saveMemory:create', sources:createSources },
+              derivationTarget:{ userId:effectiveScope==='team'?null:context.userId,
+                assistantId:context.assistantKind==='primary'?null:context.assistantId } }
+          : {}),
         createdByUserId: context.userId,
         createdByAssistantId: context.assistantId,
       })
@@ -585,7 +596,7 @@ export function createMemoryTools(
             source: 'model',
             userId: context.userId,
             assistantId: context.assistantId,
-            sensitivity: stampedSensitivity,
+            sensitivity: memory.sensitivity,
             compartments: memory.compartments,
             projectIds: memory.projectIds,
           })
@@ -610,6 +621,7 @@ export function createMemoryTools(
         })
         return {
           data: `Saved note [${memory.id}] on ${noteEntity.displayName}: ${memory.summary}${formatLinksSummary(linksSummary)}`,
+          scopeEvidence: scopeEvidenceFromRows([memory]),
         }
       }
 
@@ -633,7 +645,7 @@ export function createMemoryTools(
       // the model fabricating the remaining 28 chars when it decided it
       // needed the full id — observed in prod 2026-04-23 with id prefixes
       // `02eca923` → hallucinated `02eca923-3b10-4822-8789-994119d88320`.
-      return { data: `Saved memory [${memory.id}]: ${memory.summary}${formatLinksSummary(generalLinksSummary)}` }
+      return { data: `Saved memory [${memory.id}]: ${memory.summary}${formatLinksSummary(generalLinksSummary)}`, scopeEvidence: scopeEvidenceFromRows([memory]) }
     },
   })
 

@@ -20,6 +20,8 @@ export const SavedPrincipalSchema = z.object({
   assistantKind: z.enum(['primary', 'standard', 'app']),
   clearance: z.enum(['public', 'internal', 'confidential']),
   compartments: grant, projectIds: grant,
+  // A pre-change saved principal cannot invent mutation consent on resume.
+  mutationCompartments: grant.default([]),
 }).strict()
 type Principal = z.infer<typeof SavedPrincipalSchema>
 const savedContextSchema = z.object({ principal: SavedPrincipalSchema, sourceVersion: z.string().regex(/^[a-f0-9]{64}$/), connector: ConnectorBindingSchema.optional() }).strict()
@@ -82,6 +84,7 @@ function principal(ctx: FilesContext): Principal {
     userId: ctx.userId, workspaceId: ctx.workspaceId, assistantId: ctx.assistantId,
     assistantKind: ctx.assistantKind ?? 'standard', clearance: ctx.clearance,
     compartments: ctx.compartments, projectIds: ctx.projectIds,
+    mutationCompartments: ctx.mutationCompartments === undefined ? ctx.compartments : ctx.mutationCompartments,
   })
   if (!result.success) reject('invalid_context')
   return result.data
@@ -95,16 +98,18 @@ function intersection(a: string[] | null, b: string[] | null) {
 function intersect(a: Principal, b: Principal): Principal {
   sameActor(a, b)
   return { ...a, clearance: rank[a.clearance] <= rank[b.clearance] ? a.clearance : b.clearance,
-    compartments: intersection(a.compartments, b.compartments), projectIds: intersection(a.projectIds, b.projectIds) }
+    compartments: intersection(a.compartments, b.compartments), projectIds: intersection(a.projectIds, b.projectIds),
+    mutationCompartments: intersection(intersection(a.mutationCompartments, b.mutationCompartments),
+      intersection(a.compartments, b.compartments)) }
 }
 const contains = (grant: string[] | null, required: string[]) => grant === null || required.every(v => grant.includes(v))
-function requirements(file: WorkspaceFile): Required<ScopeEvidence> {
+function requirements(file: WorkspaceFile): Required<Pick<ScopeEvidence, 'sensitivity' | 'compartments' | 'projectIds'>> {
   if (!Object.hasOwn(rank, file.sensitivity) || !Array.isArray(file.compartments ?? []) || !Array.isArray(file.projectIds ?? [])) reject('access_denied')
   return { sensitivity: file.sensitivity, compartments: unique(file.compartments ?? []), projectIds: unique(file.projectIds ?? []) }
 }
-function highWater(rows: WorkspaceFile[]): Required<ScopeEvidence> {
+function highWater(rows: WorkspaceFile[]): Required<Pick<ScopeEvidence, 'sensitivity' | 'compartments' | 'projectIds'>> {
   const values = rows.map(requirements)
-  return { sensitivity: values.reduce<Required<ScopeEvidence>['sensitivity']>((a, b) => rank[a] >= rank[b.sensitivity] ? a : b.sensitivity, 'public'),
+  return { sensitivity: values.reduce<Required<Pick<ScopeEvidence, 'sensitivity' | 'compartments' | 'projectIds'>>['sensitivity']>((a, b) => rank[a] >= rank[b.sensitivity] ? a : b.sensitivity, 'public'),
     compartments: unique(values.flatMap(v => v.compartments)), projectIds: unique(values.flatMap(v => v.projectIds)) }
 }
 function eligible(file: WorkspaceFile, ctx: Principal, id: string) {

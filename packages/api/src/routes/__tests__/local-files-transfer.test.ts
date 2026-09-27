@@ -39,7 +39,7 @@ describe('[COMP:files/local-transfer] Signed local file transfers', () => {
   it('allows the browser Content-Range header through the API CORS preflight', () => {
     const bootSource = readFileSync(new URL('../../boot.ts', import.meta.url), 'utf8')
     expect(bootSource).toContain(
-      "Access-Control-Allow-Headers', 'Content-Type, Content-Range, Authorization, X-Client-Timezone'",
+      "Access-Control-Allow-Headers', 'Content-Type, Content-Range, Authorization, X-Client-Timezone, X-Brian-Access-Review-Id, X-Brian-Access-Review-Hash'",
     )
   })
 

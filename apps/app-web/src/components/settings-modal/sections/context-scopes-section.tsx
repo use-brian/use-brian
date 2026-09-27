@@ -9,24 +9,19 @@ import { Archive, Check, Info, Plus, ShieldAlert, ShieldCheck } from "lucide-rea
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+import { DepartmentChangeFeedback, useDepartmentChange } from "@/components/workspace-access/use-department-change";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { useWorkspaceContext } from "@/lib/workspace-context";
 import { useT } from "@/lib/i18n/client";
 import { authFetch } from "@/lib/auth-fetch";
 import {
   archiveContextProject,
-  archiveContextTeam,
   createContextProject,
-  createContextTeam,
   getContextTeam,
   getContextExplanation,
   getContextReadiness,
   listContextProjects,
   listContextTeams,
-  setTeamReadGrants,
-  setContextTeamAssistant,
-  setContextTeamMember,
-  updateContextTeam,
   updateContextProject,
   type ContextExplanation,
   type ContextProject,
@@ -59,6 +54,14 @@ export function TeamsContextSection() {
   const [editDescription, setEditDescription] = useState("");
   const [editColor, setEditColor] = useState("");
   const canManage = role === "owner" || role === "admin";
+  const change = useDepartmentChange(workspaceId, async (_result, isCurrent) => {
+    const [next, nextDetail] = await Promise.all([
+      listContextTeams(workspaceId),
+      selectedId ? getContextTeam(workspaceId, selectedId) : Promise.resolve(null),
+    ]);
+    if (!isCurrent()) return;
+    setTeams(next); setDetail(nextDetail);
+  });
 
   async function reload() {
     const next = await listContextTeams(workspaceId);
@@ -106,10 +109,10 @@ export function TeamsContextSection() {
     if (!trimmed || !key) return;
     setError(null);
     try {
-      const created = await createContextTeam(workspaceId, { name: trimmed, key });
+      const result = await change.save({ type: "department.create", name: trimmed, key }, `${t.createTeam}: ${trimmed}`);
+      if (!result) return;
       setName("");
-      await reload();
-      setSelectedId(created.id);
+      if (result.appliedCommand?.subjectId) setSelectedId(result.appliedCommand.subjectId);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : t.updateFailed);
     }
@@ -119,8 +122,7 @@ export function TeamsContextSection() {
     if (!selected) return;
     setError(null);
     try {
-      await setTeamReadGrants(workspaceId, selected.id, { readAll, groupIds: grantIds });
-      await reload();
+      if (!await change.save({ type: "department.read_bundle.set", teamId: selected.id, readAll, groupIds: grantIds }, `${t.saveAccess}: ${selected.name}`)) return;
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : t.updateFailed);
     }
@@ -130,13 +132,11 @@ export function TeamsContextSection() {
     if (!selected || !editName.trim()) return;
     setError(null);
     try {
-      await updateContextTeam(workspaceId, selected.id, {
+      if (!await change.save({ type: "department.update", teamId: selected.id,
         name: editName.trim(),
         description: editDescription.trim() || null,
         color: editColor.trim() || null,
-      });
-      await reload();
-      setDetail(await getContextTeam(workspaceId, selected.id));
+      }, `${t.saveTeamDetails}: ${selected.name}`)) return;
     } catch (cause) { setError(cause instanceof Error ? cause.message : t.updateFailed); }
   }
 
@@ -144,9 +144,7 @@ export function TeamsContextSection() {
     if (!selected) return;
     setError(null);
     try {
-      await setContextTeamMember(workspaceId, selected.id, userId, enabled);
-      setDetail(await getContextTeam(workspaceId, selected.id));
-      await reload();
+      if (!await change.save({ type: "department.member.set", teamId: selected.id, userId, enabled, activateAssigned: false }, `${t.teamMembersTitle}: ${selected.name}. ${members.find(member => member.userId === userId)?.userName ?? members.find(member => member.userId === userId)?.email ?? t.members}. ${t.membershipModeHint}`)) return;
     } catch (cause) { setError(cause instanceof Error ? cause.message : t.updateFailed); }
   }
 
@@ -154,21 +152,16 @@ export function TeamsContextSection() {
     if (!selected) return;
     setError(null);
     try {
-      await setContextTeamAssistant(workspaceId, selected.id, assistantId, enabled);
-      setDetail(await getContextTeam(workspaceId, selected.id));
+      if (!await change.save({ type: "department.assistant.set", teamId: selected.id, assistantId, enabled }, `${t.teamAssistantsTitle}: ${selected.name}. ${assistants.find(assistant => assistant.id === assistantId)?.name ?? t.teamAssistantsTitle}`)) return;
     } catch (cause) { setError(cause instanceof Error ? cause.message : t.updateFailed); }
   }
 
   async function archive() {
     if (!selected) return;
-    const confirmed = await confirmDialog({
-      title: t.archiveTeamTitle,
-      description: t.archiveTeamDescription,
-      confirmLabel: t.archiveTeam,
-      cancelLabel: t.cancel,
-    });
-    if (!confirmed) return;
-    try { await archiveContextTeam(workspaceId, selected.id); setSelectedId(""); await reload(); }
+    try {
+      if (!await change.save({ type: "department.archive", teamId: selected.id }, `${selected.name}. ${t.archiveTeamDescription}`)) return;
+      setSelectedId("");
+    }
     catch (cause) { setError(cause instanceof Error ? cause.message : t.updateFailed); }
   }
 
@@ -182,13 +175,14 @@ export function TeamsContextSection() {
         <div className="flex gap-2">
           <input value={name} onChange={(event) => setName(event.target.value)} placeholder={t.teamNamePlaceholder}
             className="h-9 flex-1 rounded-lg border border-border bg-background px-3 text-[16px] outline-none focus-visible:border-ring md:text-sm" />
-          <Button onClick={() => void create()} disabled={!name.trim()}><Plus className="size-4" />{t.createTeam}</Button>
+          <Button onClick={() => void create()} disabled={change.busy || !name.trim()}><Plus className="size-4" />{t.createTeam}</Button>
         </div>
       ) : null}
+      <DepartmentChangeFeedback change={change}/>
       {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
       {teams.length === 0 ? <p className="text-sm text-muted-foreground">{t.noTeams}</p> : (
         <div className="space-y-4">
-          <SearchableSelect value={selectedId} onValueChange={setSelectedId}
+          <SearchableSelect value={selectedId} disabled={change.busy} onValueChange={setSelectedId}
             items={teams.map((team) => ({ value: team.id, label: team.name, hint: `${team.memberCount} ${t.members}` }))}
             searchPlaceholder={t.searchTeams} emptyMessage={t.noTeams} />
           {selected ? (
@@ -211,20 +205,20 @@ export function TeamsContextSection() {
                     <input value={editDescription} onChange={(event) => setEditDescription(event.target.value)}
                       className="h-9 rounded-lg border border-border bg-background px-3 text-[16px] text-foreground outline-none focus-visible:border-ring md:text-sm" />
                   </label>
-                  <Button size="sm" variant="outline" className="self-start" onClick={() => void saveTeamDetails()} disabled={!editName.trim()}>
+                  <Button size="sm" variant="outline" className="self-start" onClick={() => void saveTeamDetails()} disabled={change.busy || !editName.trim()}>
                     <Check className="size-4" />{t.saveTeamDetails}
                   </Button>
                 </div>
               ) : null}
               <label className="flex items-center gap-2 text-sm">
-                <Checkbox checked={readAll} onCheckedChange={(value) => setReadAll(Boolean(value))} disabled={!canManage} />
+                <Checkbox checked={readAll} onCheckedChange={(value) => setReadAll(Boolean(value))} disabled={!canManage || change.busy} />
                 {t.readAllTeams}
               </label>
               {!readAll ? (
                 <div className="grid gap-2 sm:grid-cols-2">
                   {teams.filter((team) => team.id !== selected.id && team.status === "active").map((team) => (
                     <label key={team.id} className="flex items-center gap-2 rounded-lg border border-border/70 px-3 py-2 text-sm">
-                      <Checkbox checked={grantIds.includes(team.id)} disabled={!canManage}
+                      <Checkbox checked={grantIds.includes(team.id)} disabled={!canManage || change.busy}
                         onCheckedChange={(value) => setGrantIds((current) => value ? [...new Set([...current, team.id])] : current.filter((id) => id !== team.id))} />
                       {team.name}
                     </label>
@@ -253,12 +247,13 @@ export function TeamsContextSection() {
               <div className="grid gap-4 md:grid-cols-2">
                 <div>
                   <h4 className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">{t.teamMembersTitle}</h4>
+                  <p className="mb-3 text-xs text-muted-foreground">{t.membershipModeHint}</p>
                   <div className="space-y-2">
                     {members.map((member) => (
                       <label key={member.userId} className="flex items-center gap-2 text-sm">
                         <Checkbox
                           checked={Boolean(detail?.members?.some((row) => row.userId === member.userId))}
-                          disabled={!canManage}
+                          disabled={!canManage || change.busy}
                           onCheckedChange={(value) => void setMember(member.userId, Boolean(value))}
                         />
                         {member.userName ?? member.email ?? member.userId}
@@ -273,7 +268,7 @@ export function TeamsContextSection() {
                       <label key={assistant.id} className="flex items-center gap-2 text-sm">
                         <Checkbox
                           checked={Boolean(detail?.assistantIds?.includes(assistant.id))}
-                          disabled={!canManage}
+                          disabled={!canManage || change.busy}
                           onCheckedChange={(value) => void setAssistant(assistant.id, Boolean(value))}
                         />
                         {assistant.name}
@@ -282,8 +277,8 @@ export function TeamsContextSection() {
                   </div>
                 </div>
               </div>
-              {canManage ? <Button size="sm" onClick={() => void saveGrants()}><Check className="size-4" />{t.saveAccess}</Button> : null}
-              {canManage && selected.status === "active" ? <Button variant="ghost" size="sm" onClick={() => void archive()}><Archive className="size-4" />{t.archiveTeam}</Button> : null}
+              {canManage ? <Button size="sm" disabled={change.busy} onClick={() => void saveGrants()}><Check className="size-4" />{t.saveAccess}</Button> : null}
+              {canManage && selected.status === "active" ? <Button variant="ghost" size="sm" disabled={change.busy} onClick={() => void archive()}><Archive className="size-4" />{t.archiveTeam}</Button> : null}
             </div>
           ) : null}
         </div>

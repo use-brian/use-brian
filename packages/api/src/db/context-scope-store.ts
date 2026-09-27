@@ -5,6 +5,7 @@
  * [COMP:api/context-scope-store]
  */
 
+import type pg from 'pg'
 import { randomUUID } from 'node:crypto'
 import {
   canonicalScopeGrant,
@@ -145,7 +146,7 @@ export type ContextScopeStore = {
   archiveProject(userId: string, projectId: string): Promise<boolean>
 }
 
-export function createDbContextScopeStore(): ContextScopeStore {
+export function createDbContextScopeStore(transactionClient?: pg.PoolClient): ContextScopeStore {
   return {
     async resolveMemberTeamPrincipalSystem(userId, workspaceId) {
       const member = await query<{
@@ -376,14 +377,15 @@ export function createDbContextScopeStore(): ContextScopeStore {
                 g.compartment_key AS "compartmentKey",
                 g.read_all AS "readAll",
                 COALESCE(array_agg(gcg.compartment_key ORDER BY gcg.compartment_key)
-                  FILTER (WHERE gcg.compartment_key IS NOT NULL), '{}') AS grants
+                  FILTER (WHERE gcg.compartment_key IS NOT NULL AND (public.effective_member_read_compartments($2,$1) IS NULL
+                    OR gcg.compartment_key=ANY(public.effective_member_read_compartments($2,$1)))), '{}') AS grants
           FROM workspace_groups g
           LEFT JOIN workspace_group_compartment_grants gcg ON gcg.group_id = g.id
           WHERE g.workspace_id = $1 AND g.kind = 'team'
             AND (
-              public.effective_member_team_compartments($2, $1) IS NULL
+              public.effective_member_read_compartments($2, $1) IS NULL
               OR ARRAY[g.compartment_key]::text[] <@
-                 public.effective_member_team_compartments($2, $1)
+                 public.effective_member_read_compartments($2, $1)
             )
           GROUP BY g.id
           ORDER BY g.status, g.name`,
@@ -550,9 +552,9 @@ export function createDbContextScopeStore(): ContextScopeStore {
     },
 
     async setAssistantContext(userId, assistantId, input) {
-      const client = await getAppPool().connect()
+      const client = transactionClient ?? await getAppPool().connect()
       try {
-        await client.query('BEGIN')
+        if (!transactionClient) await client.query('BEGIN')
         await applyRLSGucs(client, userId)
         await client.query(
           'DELETE FROM workspace_group_assistants WHERE assistant_id = $1',
@@ -595,9 +597,9 @@ export function createDbContextScopeStore(): ContextScopeStore {
           ],
         )
         if (!updated.rows[0]) throw new Error('assistant_not_found')
-        await client.query('COMMIT')
+        if (!transactionClient) await client.query('COMMIT')
       } finally {
-        await rollbackAndRelease(client)
+        if (!transactionClient) await rollbackAndRelease(client)
       }
     },
 

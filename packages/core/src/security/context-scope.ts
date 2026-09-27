@@ -1,5 +1,7 @@
 import type { AccessContext } from './access-context.js'
 import { isSensitivity, maxSensitivity, type Sensitivity } from './sensitivity.js'
+import { deriveResourceScope, type ScopeSource } from './derived-scope.js'
+import { boundScopeSource } from './source-evidence.js'
 
 /** A finite set is a ceiling; null is the universe grant. */
 export type ScopeGrant = string[] | null
@@ -8,6 +10,8 @@ export type ScopeEvidence = {
   sensitivity?: Sensitivity
   compartments?: string[]
   projectIds?: string[]
+  /** Full trusted evidence, when the reader supports versioned derivation. */
+  sources?: ScopeSource[]
 }
 
 /** The one trusted scope resolved before prompt assembly or tool execution. */
@@ -81,6 +85,7 @@ export class ContextScopeAccumulator {
   #sensitivity: Sensitivity = 'public'
   readonly #compartments = new Set<string>()
   readonly #projectIds = new Set<string>()
+  readonly #sources: ScopeSource[] = []
 
   constructor(initial?: ScopeEvidence | null) {
     this.note(initial)
@@ -108,11 +113,19 @@ export class ContextScopeAccumulator {
       sensitivity: this.#sensitivity,
       compartments: this.compartments,
       projectIds: this.projectIds,
+      ...(this.#sources.length ? { sources: structuredClone(this.#sources) } : {}),
     }
   }
 
   note(evidence: ScopeEvidence | null | undefined): void {
     if (!evidence) return
+    // Validate first so an invalid batch cannot leave half-applied evidence.
+    if (evidence.sources?.length) {
+      const sources = [...this.#sources, ...evidence.sources]
+      const floor = deriveResourceScope({ producer: 'context', sources })
+      this.#sources.push(...structuredClone(evidence.sources))
+      this.note({ sensitivity: floor.sensitivity, compartments: floor.compartments, projectIds: floor.projectIds })
+    }
     if (evidence.sensitivity) {
       this.#sensitivity = maxSensitivity(this.#sensitivity, evidence.sensitivity)
     }
@@ -122,6 +135,10 @@ export class ContextScopeAccumulator {
     for (const value of evidence.projectIds ?? []) {
       if (value.length > 0) this.#projectIds.add(value)
     }
+  }
+
+  noteSource(source: ScopeSource): void {
+    this.note({ sources: [source] })
   }
 
   noteSensitivity(sensitivity: Sensitivity | null | undefined): void {
@@ -149,6 +166,8 @@ export function scopeEvidenceFromRows(rows: readonly unknown[]): ScopeEvidence {
     if (!value || typeof value !== 'object') return
     if (seen.has(value)) return
     seen.add(value)
+    const source = boundScopeSource(value)
+    if (source) accumulator.noteSource(source)
     const row = value as {
       sensitivity?: unknown
       compartments?: unknown
@@ -194,19 +213,25 @@ export function resolveWriteScope(params: {
   const evidence = params.evidence instanceof ContextScopeAccumulator
     ? params.evidence.evidence
     : params.evidence
+  const full = evidence?.sources?.length
+    ? deriveResourceScope({ producer: 'write-scope', sources: evidence.sources })
+    : null
   const compartments = unionScopeRequirements(
     params.baseCompartments,
     params.explicitCompartments,
     evidence?.compartments,
+    full?.compartments,
   )
   const projectIds = unionScopeRequirements(
     params.baseProjectIds,
     params.explicitProjectIds,
     evidence?.projectIds,
+    full?.projectIds,
   )
   const sensitivity = maxSensitivity(
     params.sensitivity ?? 'public',
     evidence?.sensitivity ?? 'public',
+    full?.sensitivity ?? 'public',
   )
 
   if (!scopeGrantContains(params.compartmentGrant, compartments)) {

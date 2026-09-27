@@ -49,6 +49,7 @@ import {
 import { useCachedResource } from "@/lib/surface-cache";
 import { goalDetailCacheKey, goalsCacheKey } from "@/lib/surface-prefetch";
 import { requestGoalRefresh } from "@/lib/goal-events";
+import { openWorkspaceSettings } from "@/lib/workspace-settings-events";
 import { Skeleton } from "@/components/skeleton";
 import { cn } from "@/lib/utils";
 import {
@@ -593,7 +594,11 @@ function GoalDetailPane({
             <h2 className="text-xs uppercase tracking-wide text-red-600 dark:text-red-400">
               {labels.blockerHeading}
             </h2>
-            <p className="text-sm text-red-600 dark:text-red-400">{goal.blockerReason}</p>
+            <p className="text-sm text-red-600 dark:text-red-400">{goal.blockerReason === "goal_source_scope_unavailable" ? labels.sourceAccessChanged : goal.blockerReason}</p>
+            {goal.blockerReason === "goal_source_scope_unavailable" && (
+              <button type="button" className="min-h-11 self-start rounded-md border border-border px-3 text-sm font-medium"
+                onClick={() => openWorkspaceSettings("ws-access")}>{labels.reviewDepartmentAccess}</button>
+            )}
           </section>
         )}
 

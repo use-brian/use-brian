@@ -1,4 +1,5 @@
 /** [COMP:api/context-scope-routes] Registry routes and activation barrier. */
+import { WorkspaceAccessError } from '../../workspace-access/policy.js'
 import express from 'express'
 import request from 'supertest'
 import { describe, expect, it, vi } from 'vitest'
@@ -11,6 +12,7 @@ import type { ContextReadiness } from '../../context-scope/context-readiness.js'
 const WID = '11111111-1111-1111-1111-111111111111'
 const GID = '22222222-2222-2222-2222-222222222222'
 const AID = '33333333-3333-3333-3333-333333333333'
+const reviewHeaders = {'X-Brian-Access-Review-Id':'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa','X-Brian-Access-Review-Hash':'a'.repeat(64)}
 const CONNECTOR_ID = '44444444-4444-4444-8444-444444444444'
 
 const blocked: ContextReadiness = {
@@ -83,6 +85,9 @@ function makeApp(role: 'owner' | 'admin' | 'member' | null = 'owner') {
     reclassify: vi.fn(),
     getRequirements: vi.fn().mockResolvedValue(null),
   }
+  const getReadiness=vi.fn().mockResolvedValue(blocked)
+  const getDepartmentalReadiness=vi.fn().mockResolvedValue({ready:false,enforcementVersion:1,requiredEnforcementVersion:2,missingCapabilities:['replay_delivery']})
+  const executeAccessCommand=vi.fn().mockResolvedValue({appliedCommand:{subjectId:GID}})
   const app = express()
   app.use(express.json())
   app.use((req, _res, next) => {
@@ -91,9 +96,11 @@ function makeApp(role: 'owner' | 'admin' | 'member' | null = 'owner') {
   })
   app.use('/api', contextScopeRoutes({
     workspaceStore,
+    executeAccessCommand,
     groupStore,
     contextStore,
-    getReadiness: vi.fn().mockResolvedValue(blocked),
+    getReadiness,
+    getDepartmentalReadiness,
     connectorInstanceStore: connectorInstanceStore as never,
     connectorGrantStore: connectorGrantStore as never,
     reclassificationStore: reclassificationStore as never,
@@ -101,15 +108,25 @@ function makeApp(role: 'owner' | 'admin' | 'member' | null = 'owner') {
   return {
     app,
     workspaceStore,
+    executeAccessCommand,
     groupStore,
     contextStore,
     connectorInstanceStore,
     connectorGrantStore,
     reclassificationStore,
+    getReadiness,
   }
 }
 
 describe('[COMP:api/context-scope-routes] Teams and Projects REST contract', () => {
+  it('does not show activation ready when the older context checks pass but departments are incomplete',async()=>{
+    const {app,getReadiness}=makeApp('admin')
+    getReadiness.mockResolvedValue({...blocked,readyForActivation:true,checks:[]})
+    const response=await request(app).get(`/api/workspaces/${WID}/context/readiness`)
+    expect(response.status).toBe(200)
+    expect(response.body.readyForActivation).toBe(false)
+    expect(response.body.checks).toContainEqual(expect.objectContaining({id:'delegation',blocking:true,ready:false}))
+  })
   it('hides a workspace from non-members', async () => {
     const { app } = makeApp(null)
     const response = await request(app).get(`/api/workspaces/${WID}/groups`)
@@ -126,29 +143,39 @@ describe('[COMP:api/context-scope-routes] Teams and Projects REST contract', () 
     expect(contextStore.listTeams).toHaveBeenCalledWith('user-1', WID)
   })
 
+  it('rejects missing or malformed review proof before invoking the writer',async()=>{
+    const {app,executeAccessCommand}=makeApp('admin')
+    for(const headers of [{},{...reviewHeaders,'X-Brian-Access-Review-Id':'invalid'}]){
+      const response=await request(app).put(`/api/workspaces/${WID}/groups/${GID}/members/${AID}`).set(headers).send({})
+      expect(response.status).toBe(409);expect(response.body.error).toBe('access_review_required')
+    }
+    expect(executeAccessCommand).not.toHaveBeenCalled()
+  })
+
   it('enforces readiness on the server before assigning a Team to an assistant', async () => {
-    const { app, groupStore } = makeApp('admin')
+    const { app, groupStore,executeAccessCommand } = makeApp('admin')
+    executeAccessCommand.mockRejectedValueOnce(new WorkspaceAccessError('departmental_enforcement_incomplete',409))
     const response = await request(app)
-      .put(`/api/workspaces/${WID}/groups/${GID}/assistants/${AID}`)
+      .put(`/api/workspaces/${WID}/groups/${GID}/assistants/${AID}`).set(reviewHeaders)
       .send({})
     expect(response.status).toBe(409)
     expect(response.body).toEqual({
-      error: 'context_activation_blocked',
-      failedChecks: ['connectors'],
+      error: 'departmental_enforcement_incomplete',
     })
     expect(groupStore.setTeamAssistant).not.toHaveBeenCalled()
   })
 
   it('updates Team metadata through the first-class registry route', async () => {
-    const { app, groupStore } = makeApp('admin')
+    const { app, groupStore,executeAccessCommand } = makeApp('admin')
+    vi.mocked(groupStore.listGroups).mockResolvedValueOnce([{id:GID,workspaceId:WID,kind:'team',name:'Finance',color:'#334455'}] as never)
     const response = await request(app)
-      .patch(`/api/workspaces/${WID}/groups/${GID}`)
+      .patch(`/api/workspaces/${WID}/groups/${GID}`).set(reviewHeaders)
       .send({ name: 'Finance', description: 'Close and reporting', color: '#334455' })
     expect(response.status).toBe(200)
     expect(response.body.group).toMatchObject({ id: GID, name: 'Finance', color: '#334455' })
-    expect(groupStore.updateTeam).toHaveBeenCalledWith('user-1', GID, {
-      name: 'Finance', description: 'Close and reporting', color: '#334455',
-    })
+    expect(executeAccessCommand).toHaveBeenCalledWith(WID,'user-1', {
+      type:'department.update',teamId:GID,name: 'Finance', description: 'Close and reporting', color: '#334455',
+    },{type:'access.command.apply',reviewId:reviewHeaders['X-Brian-Access-Review-Id'],payloadHash:reviewHeaders['X-Brian-Access-Review-Hash']})
   })
 
   it('updates Project metadata without treating Project participation as an ACL', async () => {

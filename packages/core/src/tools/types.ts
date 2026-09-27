@@ -28,6 +28,9 @@ type TaskAuthorityContext = {
 
 export type ToolContext = {
   userId: string
+  /** Verified human actor for workspace administration. Set only by attended,
+   * authenticated entrypoints; a billing owner or callee owner is not an actor. */
+  workspaceActorUserId?: string
   assistantId: string
   sessionId: string
   /**
@@ -85,6 +88,8 @@ export type ToolContext = {
    * caller that predates the kind=app split; treated as 'standard'.
    */
   assistantKind?: 'standard' | 'app' | 'primary'
+  /** Additional visibility ceiling inherited by delegated execution. */
+  visibilityAssistantIds?: string[] | null
   /**
    * Named capability grants active on the calling assistant. Populated once
    * per turn from `CapabilityStore.listActive(assistantId)`. Used by the tool
@@ -348,6 +353,8 @@ export type ToolContext = {
    * The read-side analogue of `clearance`. See docs/plans/compartment-axis.md.
    */
   compartments?: string[] | null
+  /** Trusted source-mutation reach; cannot be enlarged by a read-only grant. */
+  mutationCompartments?: string[] | null
   /** Effective Project READ grant. null/undefined is universe; [] is General-only. */
   projectIds?: string[] | null
   /** Immutable active context identifiers, resolved outside the model. */

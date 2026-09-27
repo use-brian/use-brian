@@ -2,6 +2,7 @@ export {
   runLightConsolidation,
   runREMConsolidation,
   runDeepConsolidation,
+  runReflectionConsolidation,
   computeConsolidationScore,
   bucketDomains,
   runTeamLightConsolidation,
@@ -16,6 +17,7 @@ export type {
   ConsolidationEvent,
   ConsolidationOptions,
   DeepConsolidationOptions,
+  ReflectionConsolidationOptions,
   MemoryScoreInput,
 } from './phases.js'
 export { createConsolidationWorker } from './worker.js'

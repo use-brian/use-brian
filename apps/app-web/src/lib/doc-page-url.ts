@@ -140,6 +140,7 @@ export function pageIdFromInAppHref(
  * as "no surface", which reads as a routing bug nowhere near this file.
  */
 export const WORKSPACE_SURFACES = [
+  "organization",
   "p",
   "office",
   "brain",

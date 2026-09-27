@@ -155,6 +155,7 @@ import {
   type SandboxProvider,
   type SandboxTaskStore,
   type Sensitivity,
+  pinAccessCeiling, minSensitivity,
   type SessionVault,
   looksLikeLoginWall,
   registrableSiteOf,
@@ -165,6 +166,7 @@ import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTORS, OFFICIAL_CONNECTOR_TOOLS, 
 // ── OPEN package imports (@use-brian/api) ──────────────────────────
 import { findAssistantById, findUserByAuthProvider, findUserByEmail, findUserById, getWorkspacePrimaryAssistant, isUserBlockedForAssistant, listAccessibleAssistants } from './db/users.js'
 import { resolveTurnScopeSystem } from './context-scope/resolve-turn-scope.js'
+import { resolveWorkflowRunScope } from './context-scope/workflow-authority.js'
 import { deploymentProfile, usesOpenStandaloneRoutes } from './edition.js'
 import { createEmailAdmission, requireOutpostAuthPortal } from './auth/email-admission.js'
 import { validateOutpostAuthConfig } from './auth/outpost-auth-config.js'
@@ -434,7 +436,8 @@ import {
 import { createDbGoalStore } from './db/goals-store.js'
 import { createGoalDefaultBudgetStore } from './db/goal-default-budget.js'
 import { createGoalRollupRunner } from './goals/rollup-runner.js'
-import { createGoalDriver, parseGoalTick, GOAL_TICK_KIND, INITIAL_GOAL_LOOP_STATE, type GoalLoopState } from './goals/driver.js'
+import { createGoalDriver, isGoalAuthorityFailure, parseGoalTick, GOAL_TICK_KIND, INITIAL_GOAL_LOOP_STATE, type GoalLoopState } from './goals/driver.js'
+import { claimCrmGoalEventResume, assertGoalCrmSourceAuthority } from './goals/crm-event-resume.js'
 import { createGoalStallReaper } from './goals/reaper.js'
 import { createGoalWorkTools } from './goals/work-tools.js'
 import { gatherGoalEvidence } from './goals/evidence.js'
@@ -522,6 +525,8 @@ import { createDeliveryTargetResolver } from './scheduling/delivery-target.js'
 import { viewsRoutes } from './routes/views.js'
 import { teamspacesRoutes } from './routes/teamspaces.js'
 import { contextScopeRoutes } from './routes/context-scopes.js'
+import { workspaceAccessRoutes } from './routes/workspace-access.js'
+import { createOrganizationTools, createWorkspaceAccessTools } from './workspace-access/tools.js'
 import { createTeamspaceStore } from './db/teamspace-store.js'
 import { createOfficeArtifactStore } from './db/office-artifacts.js'
 import { OFFICE_LIFECYCLE_SWEEP_SQL } from './db/office-lifecycle.js'
@@ -1469,7 +1474,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       res.header('Access-Control-Allow-Origin', 'null')
       res.header('Vary', 'Origin')
     }
-    res.header('Access-Control-Allow-Headers', 'Content-Type, Content-Range, Authorization, X-Client-Timezone')
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Content-Range, Authorization, X-Client-Timezone, X-Brian-Access-Review-Id, X-Brian-Access-Review-Hash')
     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
     if (req.method === 'OPTIONS') { res.sendStatus(204); return }
     next()
@@ -3067,6 +3072,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       const text = await calleeExecutor({
         workspaceId: request.target.workspaceId,
         callerAssistantId: request.caller.assistantId,
+        callerUserId: request.caller.userId,
+        callerAccessCeiling: request.callerAccessCeiling,
+        callerScopeEvidence: request.callerScopeEvidence,
         calleeAssistantId: request.target.assistantId,
         expectedWorkspaceId: request.target.workspaceId,
         question: request.message.parts
@@ -3189,7 +3197,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     runStore: workflowRunStore,
     consultTransport,
     resolvePrimary: resolvePrimaryAssistantForWorkspace,
-    resolveRunScope: async ({ userId, assistantId, workspaceId, run }) => {
+    resolveRunScope: async ({ userId, assistantId, workspaceId, run, externalClientPrincipal }) => {
+      if (!externalClientPrincipal) return resolveWorkflowRunScope({ userId, assistantId, workspaceId, run })
       const assistant = await findAssistantById(assistantId)
       if (!assistant) throw new Error('Workflow assistant not found.')
       const turnScope = await resolveTurnScopeSystem({
@@ -3412,6 +3421,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }
 
   const goalDriver = createGoalDriver({
+    claimCrmEventResume: claimCrmGoalEventResume,
+    assertSourceAuthority: assertGoalCrmSourceAuthority,
     goalStore,
     tryClaim: tryClaimGoalForTick,
     transitionRunningStatus: transitionRunningGoalStatusSystem,
@@ -3450,6 +3461,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       let activeRunId = runId
       if (activeRunId) {
         const existing = await workflowRunStore.getRunSystem(activeRunId)
+        if (isGoalAuthorityFailure(existing?.error)) {
+          throw Object.assign(new Error('goal_source_scope_unavailable'), { code:'goal_source_scope_unavailable' })
+        }
         const isTerminal =
           existing?.status === 'completed' || existing?.status === 'failed' || existing?.status === 'timeout'
         if (!existing || isTerminal) activeRunId = null // terminal/missing → start fresh
@@ -3483,6 +3497,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         activeRunId = run.id
       }
       const outcome = await advanceWorkflowRun(workflowExecutorDeps, activeRunId)
+      if (outcome.kind === 'failed' && isGoalAuthorityFailure(outcome.error)) {
+        throw Object.assign(new Error('goal_source_scope_unavailable'), { code:'goal_source_scope_unavailable' })
+      }
       const terminal = outcome.kind === 'completed' || outcome.kind === 'failed'
       publishGoalActivity(goal.id, {
         event: 'status',
@@ -4014,6 +4031,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   )
 
   allTools.set('listWorkspaceMembers', createWorkspaceTools(workspaceDirectoryStore).listWorkspaceMembers)
+  for (const tool of [...createOrganizationTools(),...createWorkspaceAccessTools()]) allTools.set(tool.name,tool)
 
   for (const tool of Object.values(createInternalLinkTools(internalLinkService))) {
     allTools.set(tool.name, tool)
@@ -4284,7 +4302,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             key: { contextGroupId: null, contextProjectId: null } })
           // Service intersects these fresh ceilings with the immutable turn grants.
           return { userId: saved.userId, workspaceId: saved.workspaceId, assistantId: assistant.id, assistantKind: assistant.kind,
-            clearance: scope.access.clearance, compartments: scope.effectiveCompartments, projectIds: scope.effectiveProjectIds }
+            clearance: scope.access.clearance, compartments: scope.effectiveCompartments, projectIds: scope.effectiveProjectIds,
+            mutationCompartments: scope.access.mutationCompartments }
         },
         resolvePolicy: (name, context) => name === 'proposeOfficeEvidenceFill'
           ? resolveOfficeToolPolicy(name, context) : resolveFilesToolPolicy(name, context),
@@ -5095,11 +5114,24 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     storeScope: AppStoreScope
     task: string
     callerSessionId: string
+    userId: string
+    maxClearance?: Sensitivity | null
   }): Promise<string> => {
     const target = await resolveWriteTarget(params.workspaceId)
     if (!target) throw new Error('This workspace has no assistant to ask.')
+    const assistant = await findAssistantById(target.assistantId)
+    if (!assistant) throw new Error('This workspace has no assistant to ask.')
+    const scope = await resolveTurnScopeSystem({
+      userId: params.userId, assistant, workspaceId: params.workspaceId,
+    })
+    const ceiling = pinAccessCeiling(scope.access)
+    if (params.maxClearance != null) {
+      ceiling.clearance = minSensitivity(ceiling.clearance, params.maxClearance)
+    }
     return calleeExecutor({
       callerAssistantId: target.assistantId,
+      callerUserId: params.userId,
+      callerAccessCeiling: ceiling,
       calleeAssistantId: target.assistantId,
       question: params.task,
       callerSessionId: params.callerSessionId,
@@ -5113,8 +5145,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use('/api/apps/shopify', appsShopifyRoutes({
     requireAuth: requireAuth(env.JWT_SECRET),
     storeTools: shopifyStoreTools,
-    askAssistant: ({ workspaceId, storeScope, task }) =>
-      askShopifyAssistant({ workspaceId, storeScope, task, callerSessionId: 'app:shopify' }),
+    askAssistant: ({ workspaceId, storeScope, task, userId }) =>
+      askShopifyAssistant({ workspaceId, storeScope, task, userId, callerSessionId: 'app:shopify' }),
   }))
 
   // Association operations uses the same workspace-scoped credentials as
@@ -5207,8 +5239,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // before the app's own `scopes.store` tier narrows further.
     storeTools: shopifyStoreTools,
     // `scopes.agent: 'ask'` — the app hands a task to the workspace assistant.
-    agentTask: ({ workspaceId, storeScope, appId, task }) =>
-      askShopifyAssistant({ workspaceId, storeScope, task, callerSessionId: `home-app:${appId}` }),
+    agentTask: ({ workspaceId, storeScope, appId, task, actingUserId, maxClearance }) => {
+      if (!actingUserId) throw new Error('caller_authority_missing')
+      return askShopifyAssistant({
+        workspaceId, storeScope, task, userId: actingUserId, maxClearance,
+        callerSessionId: `home-app:${appId}`,
+      })
+    },
   }))
 
   // AI Engines MCP — read-only observation of external answer engines,
@@ -5944,6 +5981,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use('/api/brain/stream', brainStreamRoutes({ workspaceStore, jwtSecret: env.JWT_SECRET }))
   startBrainStreamFanout()
 
+  app.use('/api', requireAuth(env.JWT_SECRET), workspaceAccessRoutes())
   app.use('/api', requireAuth(env.JWT_SECRET), contextScopeRoutes({
     workspaceStore,
     connectorInstanceStore,
@@ -7160,7 +7198,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       const rows = await findEventWaitingGoalsSystem(workspaceId)
       return rows.map((r) => ({ goalId: r.goalId, workspaceId, sources: r.subscriptions }))
     },
-    resumeEventWaitingGoal: ({ goalId }) => goalDriver.resumeOnEvent(goalId),
+    resumeEventWaitingGoal: ({ goalId, event }) => goalDriver.resumeOnEvent(goalId, event),
     onError: (err, errCtx) => {
       const subject = errCtx.workflowId
         ? `workflow ${errCtx.workflowId}`
@@ -7423,6 +7461,20 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const consolidationWorker = createConsolidationWorker({
     store: memoryStore,
     callModel: consolidationCallModel,
+    listReflectionWorkspaces: async () => (await query<{ workspaceId: string }>(`
+      SELECT workspace_id AS "workspaceId" FROM memory_verifications
+        WHERE source_scope IS NOT NULL AND NOT scope_held AND action<>'confirm' AND created_at>now()-interval '14 days'
+      UNION SELECT workspace_id FROM brain_verifications
+        WHERE source_scope IS NOT NULL AND NOT scope_held AND action<>'confirm' AND created_at>now()-interval '14 days'
+      UNION SELECT workspace_id FROM correction_audit
+        WHERE source_scope IS NOT NULL AND NOT scope_held AND action IN('retract','soft_delete') AND created_at>now()-interval '14 days'
+    `)).rows.map(row=>row.workspaceId),
+    resolveReflectionPrincipal: async workspaceId => {
+      const [assistantId,userId] = await Promise.all([
+        resolvePrimaryAssistantForWorkspace(workspaceId),ownerForWorkspace(workspaceId),
+      ])
+      return assistantId && userId ? {assistantId,userId} : null
+    },
     onEvent: (event) => {
       if (event.type === 'consolidation_completed') {
         analytics.logEvent({

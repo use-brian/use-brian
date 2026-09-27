@@ -2275,6 +2275,36 @@ describe('[COMP:api/mcp-inject] msgraph workspace overlays', () => {
     getConnectorConfig.mockReturnValue(undefined)
   })
 
+  it.each(['owned', 'exposed'] as const)('withholds %s connectors reached only by a departmental read grant', async lane => {
+    const { connectorStore, connectorInstanceStore, connectorGrantStore } = stores()
+    const instance = { ...exposedInstance, compartments: ['team:product'], projectIds: ['project'] }
+    if (lane === 'owned') connectorInstanceStore.listByWorkspaceSystem.mockResolvedValue([
+      { ...instance, scope: 'workspace', userId: null, workspaceId: 'ws-1' },
+    ])
+    else connectorGrantStore.listForTargetSystem.mockResolvedValue([
+      { grantedByUserId: 'grantor-1', instance, compartments: ['team:product'], projectIds: ['project'] },
+    ])
+    const inject = async (mutationCompartments: string[]) => {
+      const tools = new Map()
+      await injectMcpTools({
+        userId: 'owner-1', assistantId: 'a-1', tools,
+        connectorStore: connectorStore as never, settingsStore: settingsStoreStub() as never,
+        connectorInstanceStore: connectorInstanceStore as never,
+        connectorGrantStore: connectorGrantStore as never,
+        assistantTeamId: 'ws-1', keepBuiltinsDirect: true,
+        contextScope: { effectiveCompartments: ['team:product', 'team:marketing'],
+          effectiveProjectIds: ['project'], access: { mutationCompartments } },
+      })
+      return tools
+    }
+    const denied = await inject(['team:marketing'])
+    for (const name of PROBE_TOOLS) expect(denied.has(name)).toBe(false)
+    expect(msGraphTokenResolvers).toHaveLength(0)
+    expect(connectorInstanceStore.getCredentialsSystem).not.toHaveBeenCalled()
+    const allowed = await inject(['team:product'])
+    for (const name of PROBE_TOOLS) expect(allowed.has(name)).toBe(true)
+  })
+
   it('injects Teams tools for a workspace assistant through a member-exposure grant', async () => {
     const tools = new Map()
     const { connectorStore, connectorInstanceStore, connectorGrantStore } = stores()

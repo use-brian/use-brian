@@ -47,3 +47,9 @@ export type {
   ScopeGrant,
   TurnScope,
 } from './context-scope.js'
+export { deriveResourceScope, DerivedScopeError, resourceScopeKey } from './derived-scope.js'
+export type { ResourceScope, ScopeSource, DerivedWriteEvidence } from './derived-scope.js'
+export { bindScopeSource, boundScopeSource } from './source-evidence.js'
+
+export { pinAccessCeiling, intersectAccessCeilings, accessCeilingContains } from './access-ceiling.js'
+export type { AccessCeiling } from './access-ceiling.js'

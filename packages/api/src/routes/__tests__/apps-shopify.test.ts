@@ -93,7 +93,7 @@ describe('[COMP:api/apps-shopify-route] the resolver decides, the route executes
     // merchant clicking a confirm, so `/ask` keeps the ceiling it always had.
     const { a, askAssistant } = app([tool('shopifyGetShop')])
     await request(a).post('/api/apps/shopify/ask').send({ workspaceId: WS, task: 'do a thing' })
-    expect(askAssistant).toHaveBeenCalledWith({ workspaceId: WS, storeScope: 'write', task: 'do a thing' })
+    expect(askAssistant).toHaveBeenCalledWith({ workspaceId: WS, userId:'u1', storeScope: 'write', task: 'do a thing' })
   })
 
   it('executes a tool the resolver did return', async () => {

@@ -155,6 +155,11 @@ function listInput(value: unknown, res: Response) {
 }
 
 export function associationErrorResponse(error: unknown, res: Response): void {
+  if ((error as { code?: string } | null)?.code === 'scope_operation_denied') {
+    res.status(403).json({ error: 'scope_operation_denied',
+      message: 'This operation is unavailable in your current scope. Ask a workspace administrator to review access.' })
+    return
+  }
   if (error instanceof CrmIntegrationScopeError) {
     res.status(403).json({ error: error.code, message: error.message, ...('details' in error ? { details: error.details } : {}) }); return
   }

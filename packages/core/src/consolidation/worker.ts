@@ -133,6 +133,9 @@ export type ConsolidationWorkerOptions = {
    * WS-A + WS-B finish rolling out.
    */
   workspaceCuratorScope?: WorkspaceCuratorScope
+  /** Real workspace identities for system reflection authorship. */
+  listReflectionWorkspaces?: () => Promise<string[]>
+  resolveReflectionPrincipal?: (workspaceId: string) => Promise<{ assistantId: string; userId: string } | null>
   /**
    * Optional reclassifier hook. When wired, the worker runs the brain
    * reclassifier (`runReclassification`) immediately after each
@@ -250,6 +253,8 @@ export function createConsolidationWorker(options: ConsolidationWorkerOptions) {
     now = () => new Date(),
     onError = (err, ctx) => console.error(`[consolidation] ${ctx.phase} failed for ${ctx.assistantId}/${ctx.userId}:`, err),
     workspaceCuratorScope,
+    resolveReflectionPrincipal,
+    listReflectionWorkspaces,
     reclassification,
   } = options
 
@@ -341,10 +346,9 @@ export function createConsolidationWorker(options: ConsolidationWorkerOptions) {
     // ── Team memory consolidation (Light + Deep + Reflection) ──
     const teamGroups = await store.listWorkspaceMemoryGroups()
     for (const { assistantId, workspaceId } of teamGroups) {
-      const [lastTeamLight, lastTeamDeep, lastReflection] = await Promise.all([
+      const [lastTeamLight, lastTeamDeep] = await Promise.all([
         store.getLastWorkspacePhaseAt(assistantId, workspaceId, 'light'),
         store.getLastWorkspacePhaseAt(assistantId, workspaceId, 'deep'),
-        store.getLastWorkspacePhaseAt(assistantId, workspaceId, 'reflection'),
       ])
       const current = now()
 
@@ -365,29 +369,27 @@ export function createConsolidationWorker(options: ConsolidationWorkerOptions) {
         }
       }
 
-      // Reflection — LLM learns from correction history (mig 165 +
-      // 174 + 152). Weekly per workspace. Uses the workspace's
-      // primary-assistant context for authorship + the workspace
-      // owner for userId (system-owned synthesis). Skips gracefully
-      // when no owner / primary is resolvable.
-      if (isDue(lastReflection, current, REFLECTION_INTERVAL_MS)) {
-        const reflectionCall = (prompt: string) =>
-          callModel(prompt, { assistantId, userId: null, workspaceId, phase: 'reflection' })
-        try {
-          // Synthesised memories carry authorship from the team's
-          // primary assistant (assistantId arg) and the workspace
-          // owner (best-effort fallback: same `userId` the worker
-          // already has on its main loop). For workspaces without a
-          // resolvable owner, the synthesis logs but doesn't write
-          // (the create call will fail without `createdByUserId`).
-          await runReflectionConsolidation(store, reflectionCall, {
-            workspaceId,
-            assistantId,
-            userId: assistantId, // placeholder — workspace owner resolved by adapter when needed
-          })
-        } catch (err) {
-          onError(err, { phase: 'reflection' as never, assistantId, userId: workspaceId })
-        }
+    }
+
+    // Corrections can exist without any workspace-shared memory row.
+    const reflectionWorkspaces = new Set(teamGroups.map(group=>group.workspaceId))
+    if (listReflectionWorkspaces) for (const workspaceId of await listReflectionWorkspaces()) reflectionWorkspaces.add(workspaceId)
+    if (resolveReflectionPrincipal) for (const workspaceId of reflectionWorkspaces) {
+      let principal: { assistantId: string; userId: string } | null = null
+      try {
+        principal = await resolveReflectionPrincipal(workspaceId)
+        if (!principal) continue
+        const lastReflection = await store.getLastWorkspacePhaseAt(principal.assistantId,workspaceId,'reflection')
+        if (!isDue(lastReflection,now(),REFLECTION_INTERVAL_MS)) continue
+        const author = principal
+        const reflectionCall = (prompt: string) => callModel(prompt, {
+          assistantId:author.assistantId,userId:null,workspaceId,phase:'reflection',
+        })
+        await runReflectionConsolidation(store,reflectionCall,{workspaceId,...author}, {
+          onEvent:onEvent ? event=>onEvent({...event,...author}) : undefined,
+        })
+      } catch (err) {
+        onError(err,{phase:'reflection',assistantId:principal?.assistantId??'',userId:principal?.userId??''})
       }
     }
 

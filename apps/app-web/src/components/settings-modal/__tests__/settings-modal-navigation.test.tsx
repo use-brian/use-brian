@@ -6,13 +6,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import { SettingsModal, type SettingsSection } from "../settings-modal";
+import type { SettingsMemberTarget } from '@/lib/workspace-settings-events';
+import { resetSurfaceCache } from '@/lib/surface-cache';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
+const edition = vi.hoisted(() => ({ teammateManagement: true }));
+
 vi.mock("@/lib/edition", async (importOriginal) => ({
   ...await importOriginal<typeof import("@/lib/edition")>(),
-  isOssEdition: () => false,
-  deploymentCapabilities: () => ({ teammateManagement: true, billing: true }),
+  isOssEdition: () => !edition.teammateManagement,
+  deploymentCapabilities: () => ({ teammateManagement: edition.teammateManagement, billing: edition.teammateManagement }),
 }));
 vi.mock("@/lib/workspace-context", () => ({
   useWorkspaceContext: () => ({ workspaceId: "workspace-1" }),
@@ -26,7 +30,10 @@ vi.mock("@/lib/auth-fetch", () => ({
     ok: true,
     json: async () => url.endsWith("/invitations")
       ? { invitations: [] }
-      : { id: "workspace-1", name: "Example workspace", role: "owner", members: [] },
+      : { id: "workspace-1", name: "Example workspace", role: "owner", members: [
+        {userId:'user-1',userName:'Riley',role:'owner',email:'riley@example.com'},
+        {userId:'user-2',userName:'Casey',role:'member',email:'casey@example.com'},
+      ] },
   })),
 }));
 // Other sections do not participate in invitation loading or navigation.
@@ -46,6 +53,8 @@ let host: HTMLDivElement;
 const onClose = vi.fn();
 
 beforeEach(() => {
+  edition.teammateManagement = true;
+  resetSurfaceCache();
   onClose.mockClear();
   host = document.createElement("div");
   document.body.append(host);
@@ -57,12 +66,12 @@ afterEach(async () => {
   host.remove();
 });
 
-async function render(open = true, initialSection: SettingsSection = "ws-members") {
+async function render(open = true, initialSection: SettingsSection = "ws-members", initialMemberTarget?:SettingsMemberTarget) {
   await act(async () => root.render(
     <I18nProvider locale="en" dict={en}>
       {/* jsdom does not build Tailwind; supply its base phone visibility rule. */}
       <style>{".hidden { display: none; }"}</style>
-      <SettingsModal open={open} initialSection={initialSection} onClose={onClose} />
+      <SettingsModal open={open} initialSection={initialSection} initialMemberTarget={initialMemberTarget} onClose={onClose} />
     </I18nProvider>,
   ));
 }
@@ -85,10 +94,45 @@ async function choose(label: string) {
   const option = [...document.querySelectorAll<HTMLElement>("[role=option]")]
     .find((node) => node.textContent === label);
   expect(option).toBeDefined();
+  // The real Select commits only a highlighted mouse option. Model the hover
+  // before the click instead of invoking an incomplete programmatic gesture.
+  await act(async () => option!.dispatchEvent(new MouseEvent("mousemove", { bubbles: true })));
   await act(async () => option!.click());
 }
 
 describe("[COMP:app-web/settings-modal] mobile section navigation", () => {
+  it('opens the exact selected person and offers a path back to the full roster',async()=>{
+    await render(true,'ws-members',{workspaceId:'workspace-1',memberId:'user-2'});
+    expect(document.body.textContent).toContain('Casey');expect(document.body.textContent).not.toContain('Riley');
+    expect(document.querySelector('textarea')).toBeNull();
+    const showAll=[...document.querySelectorAll<HTMLButtonElement>('button')].find(b=>b.textContent===en.organization.showAllMembers)!;
+    await act(async()=>showAll.click());
+    expect(document.body.textContent).toContain('Riley');expect(document.querySelector('textarea')).not.toBeNull();
+  });
+  it('shows read-only focused person details in self-hosted without management controls',async()=>{
+    edition.teammateManagement=false;
+    await render(true,'ws-members',{workspaceId:'workspace-1',memberId:'user-2'});
+    expect(document.querySelector('h2')?.textContent).toBe(en.organization.memberDetails);
+    expect(document.body.textContent).toContain('Casey');
+    expect(document.body.textContent).not.toContain('Riley');
+    expect(document.querySelector('textarea')).toBeNull();
+    expect([...document.querySelectorAll('button')].some(b=>b.textContent===en.organization.showAllMembers)).toBe(false);
+    expect([...document.querySelectorAll('button')].some(b=>b.textContent===en.workspaceAccess.organization)).toBe(true);
+  });
+  it.each([
+    {workspaceId:'workspace-1',memberId:'missing'},
+    {workspaceId:'another-workspace',memberId:'user-2'},
+  ])('never substitutes another person for an unavailable scoped target',async target=>{
+    await render(true,'ws-members',target);
+    expect(document.body.textContent).toContain(en.organization.memberUnavailable);
+    expect(document.body.textContent).not.toContain('Casey');expect(document.body.textContent).not.toContain('Riley');
+  });
+  it('updates the selected person while settings remain open',async()=>{
+    await render(true,'ws-members',{workspaceId:'workspace-1',memberId:'user-2'});
+    expect(document.body.textContent).toContain('Casey');
+    await render(true,'ws-members',{workspaceId:'workspace-1',memberId:'user-1'});
+    expect(document.body.textContent).toContain('Riley');expect(document.body.textContent).not.toContain('Casey');
+  });
   it("shows the invite form immediately when opened at Members", async () => {
     await render(false);
     await render();

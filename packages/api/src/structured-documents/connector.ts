@@ -57,7 +57,8 @@ export function createStructuredOcrConnectorResolver(options: StructuredOcrConne
     if (!ctx?.userId || !ctx.workspaceId || !ctx.assistantId ||
         ctx.compartments === undefined || ctx.projectIds === undefined ||
         ![ctx.compartments, ctx.projectIds].every(axis => axis === null || (Array.isArray(axis) && axis.every(x => typeof x === 'string')))) fail('connector_context_missing')
-    const turn = { effectiveCompartments: ctx.compartments as string[] | null, effectiveProjectIds: ctx.projectIds as string[] | null }
+    const turn = { effectiveCompartments: ctx.compartments as string[] | null, effectiveProjectIds: ctx.projectIds as string[] | null,
+      access: { mutationCompartments: ctx.mutationCompartments } }
     const [owned, exposed] = await Promise.all([
       instances.listByWorkspaceSystem(ctx.workspaceId), grants.listForTargetSystem('workspace', ctx.workspaceId),
     ])

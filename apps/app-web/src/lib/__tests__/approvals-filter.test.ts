@@ -72,6 +72,7 @@ describe("[COMP:app-web/approvals] isActionable", () => {
       "staged_skill_update",
       "browser_skill_send",
       "email_sender",
+      "department_access",
     ];
     for (const kind of inPlace) {
       expect(isActionable(kind)).toBe(true);
@@ -88,11 +89,12 @@ describe("[COMP:app-web/approvals] isActionable", () => {
     }
   });
 
-  it("ACTIONABLE_KINDS holds exactly the eight in-place kinds", () => {
+  it("ACTIONABLE_KINDS holds exactly the nine in-place kinds", () => {
     expect([...ACTIONABLE_KINDS].sort()).toEqual(
       [
         "browser_skill_send",
         "email_sender",
+      "department_access",
         "staged_skill_creation",
         "staged_skill_update",
         "staged_write",

@@ -41,6 +41,7 @@ export type ApprovalDeliveryChannel = 'web' | 'telegram' | 'slack' | 'whatsapp' 
  * without a migration. This union is the canonical source.
  */
 export type ApprovalKind =
+  | 'department_access'
   | 'workflow_step'
   | 'tool_invocation'
   | 'staged_write'
@@ -1295,7 +1296,7 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
                responded_at = now(),
                responded_by = $3,
                reject_reason = $4
-           WHERE id = $1 AND status = 'pending'
+           WHERE id = $1 AND status = 'pending' AND kind <> 'department_access'
            RETURNING ${COLS}`,
           [id, decision, responderUserId, rejectReason ?? null],
         )

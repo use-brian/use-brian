@@ -12,11 +12,12 @@
  * [COMP:api/workspace-group-store]
  */
 
+import type pg from 'pg'
 import { randomUUID } from 'node:crypto'
 import {
   applyRLSGucs,
   getAppPool,
-  queryWithRLS,
+  queryWithRLS as standaloneQueryWithRLS,
   rollbackAndRelease,
 } from './client.js'
 
@@ -73,7 +74,12 @@ export type WorkspaceGroupStore = {
   archiveTeam(userId: string, groupId: string): Promise<boolean>
 }
 
-export function createDbWorkspaceGroupStore(): WorkspaceGroupStore {
+export function createDbWorkspaceGroupStore(transactionClient?: pg.PoolClient): WorkspaceGroupStore {
+  async function queryWithRLS<T extends pg.QueryResultRow>(userId:string,text:string,values?:unknown[]):Promise<pg.QueryResult<T>> {
+    if (!transactionClient) return standaloneQueryWithRLS<T>(userId,text,values)
+    await applyRLSGucs(transactionClient,userId)
+    return transactionClient.query<T>(text,values)
+  }
   return {
     async createGroup(userId, workspaceId, name) {
       const r = await queryWithRLS<{ id: string; workspaceId: string; name: string; createdAt: Date }>(
@@ -177,11 +183,11 @@ export function createDbWorkspaceGroupStore(): WorkspaceGroupStore {
     },
 
     async createTeam(userId, workspaceId, input) {
-      const client = await getAppPool().connect()
+      const client = transactionClient ?? await getAppPool().connect()
       const groupId = randomUUID()
       const compartmentKey = `team:${groupId}`
       try {
-        await client.query('BEGIN')
+        if (!transactionClient) await client.query('BEGIN')
         await applyRLSGucs(client, userId)
         const created = await client.query<{
           id: string
@@ -242,18 +248,18 @@ export function createDbWorkspaceGroupStore(): WorkspaceGroupStore {
            VALUES ($1, $2) ON CONFLICT (group_id, user_id) DO NOTHING`,
           [groupId, userId],
         )
-        await client.query('COMMIT')
+        if (!transactionClient) await client.query('COMMIT')
         const row = created.rows[0]
         return { ...row, memberCount: 1, createdAt: row.createdAt.toISOString() }
       } finally {
-        await rollbackAndRelease(client)
+        if (!transactionClient) await rollbackAndRelease(client)
       }
     },
 
     async setTeamReadBundle(userId, groupId, input) {
-      const client = await getAppPool().connect()
+      const client = transactionClient ?? await getAppPool().connect()
       try {
-        await client.query('BEGIN')
+        if (!transactionClient) await client.query('BEGIN')
         await applyRLSGucs(client, userId)
         const team = await client.query<{ compartmentKey: string }>(
           `UPDATE workspace_groups
@@ -276,16 +282,16 @@ export function createDbWorkspaceGroupStore(): WorkspaceGroupStore {
             [groupId, key, userId],
           )
         }
-        await client.query('COMMIT')
+        if (!transactionClient) await client.query('COMMIT')
       } finally {
-        await rollbackAndRelease(client)
+        if (!transactionClient) await rollbackAndRelease(client)
       }
     },
 
     async setTeamAssistants(userId, groupId, assistantIds) {
-      const client = await getAppPool().connect()
+      const client = transactionClient ?? await getAppPool().connect()
       try {
-        await client.query('BEGIN')
+        if (!transactionClient) await client.query('BEGIN')
         await applyRLSGucs(client, userId)
         await client.query('DELETE FROM workspace_group_assistants WHERE group_id = $1', [groupId])
         for (const assistantId of [...new Set(assistantIds)]) {
@@ -296,9 +302,9 @@ export function createDbWorkspaceGroupStore(): WorkspaceGroupStore {
             [groupId, assistantId, userId],
           )
         }
-        await client.query('COMMIT')
+        if (!transactionClient) await client.query('COMMIT')
       } finally {
-        await rollbackAndRelease(client)
+        if (!transactionClient) await rollbackAndRelease(client)
       }
     },
 
@@ -335,9 +341,9 @@ export function createDbWorkspaceGroupStore(): WorkspaceGroupStore {
       if (input.status !== undefined) add('status', input.status)
       if (sets.length === 0) return null
       values.push(groupId)
-      const client = await getAppPool().connect()
+      const client = transactionClient ?? await getAppPool().connect()
       try {
-        await client.query('BEGIN')
+        if (!transactionClient) await client.query('BEGIN')
         await applyRLSGucs(client, userId)
         const result = await client.query<{
           id: string
@@ -372,10 +378,10 @@ export function createDbWorkspaceGroupStore(): WorkspaceGroupStore {
             WHERE managed_by = 'team' AND managed_ref_id = $1`,
           [row.id, row.name, row.description, row.color],
         )
-        await client.query('COMMIT')
+        if (!transactionClient) await client.query('COMMIT')
         return { ...row, memberCount: Number(row.memberCount), createdAt: row.createdAt.toISOString() }
       } finally {
-        await rollbackAndRelease(client)
+        if (!transactionClient) await rollbackAndRelease(client)
       }
     },
 

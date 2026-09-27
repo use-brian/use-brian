@@ -86,17 +86,6 @@ export async function listContextTeams(workspaceId: string): Promise<ContextTeam
   return body.groups;
 }
 
-export async function createContextTeam(
-  workspaceId: string,
-  input: { name: string; key: string; description?: string | null; color?: string | null },
-): Promise<ContextTeam> {
-  const body = await json<{ group: ContextTeam }>(
-    `/api/workspaces/${encodeURIComponent(workspaceId)}/groups`,
-    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) },
-  );
-  return body.group;
-}
-
 export async function getContextTeam(
   workspaceId: string,
   teamId: string,
@@ -105,62 +94,6 @@ export async function getContextTeam(
     `/api/workspaces/${encodeURIComponent(workspaceId)}/groups/${encodeURIComponent(teamId)}`,
   );
   return body.group;
-}
-
-export async function updateContextTeam(
-  workspaceId: string,
-  teamId: string,
-  input: { name?: string; description?: string | null; color?: string | null },
-): Promise<ContextTeam> {
-  const body = await json<{ group: ContextTeam }>(
-    `/api/workspaces/${encodeURIComponent(workspaceId)}/groups/${encodeURIComponent(teamId)}`,
-    { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) },
-  );
-  return body.group;
-}
-
-export async function setContextTeamMember(
-  workspaceId: string,
-  teamId: string,
-  userId: string,
-  enabled: boolean,
-): Promise<void> {
-  await json(
-    `/api/workspaces/${encodeURIComponent(workspaceId)}/groups/${encodeURIComponent(teamId)}/members/${encodeURIComponent(userId)}`,
-    enabled
-      ? { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ activateAssigned: true }) }
-      : { method: "DELETE" },
-  );
-}
-
-export async function setContextTeamAssistant(
-  workspaceId: string,
-  teamId: string,
-  assistantId: string,
-  enabled: boolean,
-): Promise<void> {
-  await json(
-    `/api/workspaces/${encodeURIComponent(workspaceId)}/groups/${encodeURIComponent(teamId)}/assistants/${encodeURIComponent(assistantId)}`,
-    { method: enabled ? "PUT" : "DELETE" },
-  );
-}
-
-export async function setTeamReadGrants(
-  workspaceId: string,
-  teamId: string,
-  input: { readAll: boolean; groupIds: string[] },
-): Promise<void> {
-  await json(
-    `/api/workspaces/${encodeURIComponent(workspaceId)}/groups/${encodeURIComponent(teamId)}/read-grants`,
-    { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) },
-  );
-}
-
-export async function archiveContextTeam(workspaceId: string, teamId: string): Promise<void> {
-  await json(
-    `/api/workspaces/${encodeURIComponent(workspaceId)}/groups/${encodeURIComponent(teamId)}/archive`,
-    { method: "POST" },
-  );
 }
 
 export async function listContextProjects(
@@ -266,17 +199,6 @@ export async function getAssistantContext(
     `/api/workspaces/${encodeURIComponent(workspaceId)}/assistants/${encodeURIComponent(assistantId)}/context`,
   );
   return body.context;
-}
-
-export async function updateAssistantContext(
-  workspaceId: string,
-  assistantId: string,
-  context: Omit<AssistantContextConfig, "teamMode"> & { teamMode: "all" | "assigned" },
-): Promise<void> {
-  await json(
-    `/api/workspaces/${encodeURIComponent(workspaceId)}/assistants/${encodeURIComponent(assistantId)}/context`,
-    { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(context) },
-  );
 }
 
 export async function reclassifyContext(input: {

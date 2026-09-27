@@ -31,6 +31,13 @@ export type ContextReadinessCheckId =
   | 'ingest'
   | 'background_lanes'
   | 'legacy_data'
+  | 'derived_writes'
+  | 'delegation'
+  | 'operation_separation'
+  | 'replay_delivery'
+  | 'grant_expiry'
+  | 'org_references'
+  | 'scope_review'
 
 export type ContextReadinessCheck = {
   id: ContextReadinessCheckId

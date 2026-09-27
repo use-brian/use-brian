@@ -39,7 +39,8 @@ export async function lockNativeDeliveryPrincipal(client:PoolClient,workspaceId:
 type Mailbox = {id:string;scope:string;userId:string|null;provider:string;createdAt:Date;compartments:string[];projectIds:string[]}
 /** Same primary precedence and exact-account action vocabulary as connector injection. */
 export async function lockNativeDeliveryMailbox(client:PoolClient,workspaceId:string,native:NativeDeliveryPrincipal,instanceId:string) {
-  const turn={effectiveCompartments:native.ceiling.compartments,effectiveProjectIds:native.ceiling.projectIds}
+  const turn={effectiveCompartments:native.ceiling.compartments,effectiveProjectIds:native.ceiling.projectIds,
+    access:{mutationCompartments:native.ceiling.mutationCompartments===undefined?[]:native.ceiling.mutationCompartments}}
   const workspace=(await client.query<{owner:string;personal:boolean}>('SELECT owner_user_id AS owner,is_personal AS personal FROM workspaces WHERE id=$1 FOR SHARE',[workspaceId])).rows[0]
   if(!workspace) throw denied()
   const instances=(await client.query<Mailbox>(`SELECT id,scope,user_id AS "userId",provider,created_at AS "createdAt",compartments,project_ids AS "projectIds"

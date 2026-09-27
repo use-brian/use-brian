@@ -10,6 +10,7 @@ export function trustedToolContext(ctx: ToolContext): FilesContext {
     userId: ctx.userId, workspaceId: ctx.workspaceId ?? '', assistantId: ctx.assistantId,
     assistantKind: ctx.assistantKind ?? 'standard', clearance: ctx.clearance,
     compartments: Object.hasOwn(ctx, 'compartments') && ctx.compartments !== undefined ? ctx.compartments : [],
+    mutationCompartments: ctx.mutationCompartments === undefined ? ctx.compartments === undefined ? [] : ctx.compartments : ctx.mutationCompartments,
     projectIds: Object.hasOwn(ctx, 'projectIds') && ctx.projectIds !== undefined ? ctx.projectIds : [],
   }
 }

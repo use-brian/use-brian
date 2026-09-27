@@ -1,3 +1,4 @@
+import { resolveWorkspaceViewpoint } from '../db/workspace-viewpoint.js'
 /**
  * Workspace management routes.
  *
@@ -960,6 +961,7 @@ export function workspaceRoutes({
 
       const memberUserId = userResult.rows[0].id
       const member = await workspaceStore.addMember(userId, req.params.workspaceId, memberUserId, memberRole ?? 'member')
+      notifyWorkspaceChange(req.params.workspaceId, 'workspace_config', 'update')
       if (auditStore) {
         void auditStore.append({
           workspaceId: req.params.workspaceId,
@@ -997,6 +999,7 @@ export function workspaceRoutes({
         res.status(400).json({ error: 'Cannot remove this member (they may be the owner)' })
         return
       }
+      notifyWorkspaceChange(workspaceId, 'workspace_config', 'update')
       if (auditStore) {
         void auditStore.append({
           workspaceId,
@@ -1548,7 +1551,9 @@ export function workspaceRoutes({
     }
 
     try {
-      const rows = await listUnverifiedByWorkspace(workspaceId, limit, cursor)
+      const ctx = await resolveWorkspaceViewpoint(req.userId!, workspaceId)
+      if (!ctx) { res.status(404).json({error:'Workspace not found'}); return }
+      const rows = await listUnverifiedByWorkspace(ctx, limit, cursor)
       const nextCursor =
         rows.length === limit
           ? Buffer.from(
@@ -1576,7 +1581,9 @@ export function workspaceRoutes({
     if (!role) return
     const { workspaceId } = req.params as { workspaceId: string }
     try {
-      const count = await countUnverifiedByWorkspace(workspaceId)
+      const ctx = await resolveWorkspaceViewpoint(req.userId!, workspaceId)
+      if (!ctx) { res.status(404).json({error:'Workspace not found'}); return }
+      const count = await countUnverifiedByWorkspace(ctx)
       res.json({ pending: count })
     } catch (err) {
       console.error('[workspaces] unverified count failed:', err)

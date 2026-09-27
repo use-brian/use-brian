@@ -960,9 +960,9 @@ export async function executePublicTurn(
   // is the substance of what the link is meant to expose.
   let memoryContext = ''
   if (isIdentified || fullScope) {
-    const [soul, identityMemories, memoryIndex, workspaceIdentityMemories, teamMemoryIndex] =
+    const [soulContext, identityMemories, memoryIndex, workspaceIdentityMemories, teamMemoryIndex] =
       await Promise.all([
-        deps.memoryStore.getSoul(assistant.id, user.id, 'Use Brian'),
+        (deps.memoryStore.getSoulContext?.(memoryViewerCtx, 'Use Brian') ?? Promise.resolve({ content: null, evidence: {} })),
         deps.memoryStore.getIdentity(memoryViewerCtx),
         deps.memoryStore.getIndex(memoryViewerCtx),
         // Team memory is what makes a full-scope link useful, and what makes
@@ -975,6 +975,8 @@ export async function executePublicTurn(
           ? deps.memoryStore.getWorkspaceIndex(memoryViewerCtx)
           : Promise.resolve([]),
       ])
+    const soul = soulContext.content
+    scopeAccumulator.note(soulContext.evidence)
     noteAutomaticScopeEvidence(scopeAccumulator, [
       ...identityMemories,
       ...memoryIndex,
@@ -1017,6 +1019,7 @@ export async function executePublicTurn(
             assistantKind: assistant.kind,
             clearance: readClearance,
             compartments: readCompartments,
+            mutationCompartments: turnScope.access.mutationCompartments,
             projectIds: turnScope.effectiveProjectIds,
             systemRead: laneReadsSystemSide(input.contextScope) || undefined,
           },
@@ -1304,6 +1307,7 @@ export async function executePublicTurn(
     const scopedTools = bindToolsToAgentAccess(baseTools, {
       clearance: readClearance,
       compartments: turnScope.effectiveCompartments,
+      mutationCompartments: turnScope.access.mutationCompartments,
       projectIds: turnScope.effectiveProjectIds,
     })
     for await (const event of queryLoop({
@@ -1332,6 +1336,7 @@ export async function executePublicTurn(
         // assistant's own clearance (incident 2026-06-01).
         clearance: readClearance,
         compartments: readCompartments,
+        mutationCompartments: turnScope.access.mutationCompartments,
         projectIds: turnScope.effectiveProjectIds,
         activeGroupId: turnScope.activeGroupId,
         activeProjectId: turnScope.activeProjectId,

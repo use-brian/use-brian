@@ -102,6 +102,7 @@ const ProgrammaticAccessPage = lazy(() => import("@/app/w/[workspaceId]/studio/p
 const StudioBrandPage = lazy(() => import("@/app/w/[workspaceId]/studio/brand/page"));
 const StudioMiniAppsPage = lazy(() => import("@/app/w/[workspaceId]/studio/mini-apps/page"));
 const WorkflowPage = lazy(() => import("@/app/w/[workspaceId]/workflow/page"));
+const OrganizationPage = lazy(() => import("@/app/w/[workspaceId]/organization/page"));
 const WorkflowDetailPage = lazy(() => import("@/app/w/[workspaceId]/workflow/[id]/page"));
 const WorkflowRunDetailPage = lazy(() => import("@/app/w/[workspaceId]/workflow/[id]/runs/[runId]/page"));
 const OfficePage = lazy(() => import("@/app/w/[workspaceId]/office/page"));
@@ -303,6 +304,7 @@ export function App() {
 
               {/* Workflow */}
               <Route path="workflow" element={<WorkflowPage />} />
+              <Route path="organization" element={<OrganizationPage />} />
               <Route path="workflow/:id" element={<WorkflowDetailRoute />} />
               <Route
                 path="workflow/:id/runs/:runId"

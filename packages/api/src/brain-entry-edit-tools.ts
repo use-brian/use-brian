@@ -182,6 +182,12 @@ function mutationFailure(
       isError: true,
     }
   }
+  if (result.status === 409 && result.body.code === 'scope_declassification_required') {
+    return {
+      data: `${what} Existing sensitivity protection was retained. Lowering it requires an audited release; refreshing the revision cannot authorize this change. Tell the user the downgrade was refused. Do not retry it through this edit tool.`,
+      isError: true,
+    }
+  }
   if (result.status === 409) {
     return {
       data:

@@ -741,7 +741,6 @@ describe('[COMP:api/brain-inbox-explain] Source descriptor', () => {
   })
 
   it('DELETE of a task cascades to the goals hosted on it (Tasks-assignable must not outlive the task)', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [{ workspace_id: WS }] } as never) // ownership
 
     const res = await request(makeApp()).delete(`/api/brain-inbox/${WS}/task/${ROW}`)
 
@@ -752,11 +751,19 @@ describe('[COMP:api/brain-inbox-explain] Source descriptor', () => {
       workspaceId: WS,
       deletedByUserId: 'u_caller',
     })
+    expect(mockQuery).not.toHaveBeenCalled()
+  })
+
+  it('returns a generic missing result for a denied delete without a privileged existence probe', async () => {
+    mockDeleteBrainInboxRow.mockResolvedValueOnce({status:'not_found'})
+    const res=await request(makeApp()).delete(`/api/brain-inbox/${WS}/task/${ROW}`)
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({error:'Row not found'})
+    expect(mockQuery).not.toHaveBeenCalled()
   })
 
   it('reasoned task DELETE creates a tombstone and explicitly activates a narrow rule', async () => {
     mockRejectTask.mockClear()
-    mockQuery.mockResolvedValueOnce({ rows: [{ workspace_id: WS }] } as never) // ownership
     mockRejectTask.mockResolvedValueOnce({
       title: 'Integrate Teams',
       tombstoneId: 'tomb-1',
@@ -791,7 +798,6 @@ describe('[COMP:api/brain-inbox-explain] Source descriptor', () => {
 
   it('rejects active-rule deletion without a usable reason', async () => {
     mockRejectTask.mockClear()
-    mockQuery.mockResolvedValueOnce({ rows: [{ workspace_id: WS }] } as never) // ownership
     const res = await request(makeApp())
       .delete(`/api/brain-inbox/${WS}/task/${ROW}`)
       .send({ reason: 'x', create_rule: true })
@@ -801,7 +807,6 @@ describe('[COMP:api/brain-inbox-explain] Source descriptor', () => {
   })
 
   it('DELETE of a workspace_file closes its derived file_segments (deleted content must stop being retrievable)', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [{ workspace_id: WS }] } as never) // ownership
 
     const res = await request(makeApp()).delete(`/api/brain-inbox/${WS}/workspace_file/${ROW}`)
 
@@ -815,7 +820,6 @@ describe('[COMP:api/brain-inbox-explain] Source descriptor', () => {
   })
 
   it('DELETE of a non-task primitive runs no goal cascade, and a non-file primitive no segment cascade', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [{ workspace_id: WS }] } as never) // ownership
 
     const res = await request(makeApp()).delete(`/api/brain-inbox/${WS}/memory/${ROW}`)
 

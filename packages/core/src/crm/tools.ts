@@ -247,6 +247,7 @@ function ctxFor(context: {
   assistantKind?: AccessContext['assistantKind']
   clearance?: AccessContext['clearance']
   compartments?: AccessContext['compartments']
+  mutationCompartments?: AccessContext['mutationCompartments']
   projectIds?: AccessContext['projectIds']
 }): AccessContext {
   return {
@@ -256,6 +257,7 @@ function ctxFor(context: {
     assistantKind: context.assistantKind ?? 'standard',
     clearance: context.clearance,
     compartments: context.compartments,
+    mutationCompartments: context.mutationCompartments,
     projectIds: context.projectIds,
   }
 }
@@ -282,6 +284,7 @@ function readCtxFor(context: ToolContext): AccessContext {
       assistantKind: context.assistantKind,
       clearance: context.clearance,
       compartments: context.compartments,
+      mutationCompartments: context.mutationCompartments,
       projectIds: context.projectIds,
     }),
     systemRead: context.systemRead,
@@ -299,7 +302,7 @@ function crmWriteScope(context: ToolContext) {
       sensitivity: context.sensitivity?.max,
       compartments: context.compartmentAccumulator?.compartments,
     },
-    compartmentGrant: context.compartments,
+    compartmentGrant: context.mutationCompartments === undefined ? context.compartments : context.mutationCompartments,
     projectGrant: context.projectIds,
   })
 }
@@ -505,6 +508,9 @@ function translateLinkError(
   err: unknown,
   input?: { company_id?: string | null; contact_id?: string | null },
 ): { data: string; isError: true } | null {
+  if (typeof err === 'object' && err !== null && 'code' in err && err.code === 'scope_operation_denied') {
+    return { data: 'This CRM record or relationship is unavailable for this operation under current access. Ask a workspace administrator to review the permitted department and destination. Do not change the workspace or omit the relationship to bypass this refusal.', isError: true }
+  }
   const msg = err instanceof Error ? err.message : String(err)
   const companyId = input?.company_id ? ` \`${input.company_id}\`` : ''
   const contactId = input?.contact_id ? ` \`${input.contact_id}\`` : ''
@@ -602,6 +608,7 @@ export function createCrmTools(
         assistantKind: context.assistantKind,
         clearance: context.clearance,
         compartments: context.compartments,
+        mutationCompartments: context.mutationCompartments,
         projectIds: context.projectIds,
       })
       try {
@@ -771,9 +778,10 @@ export function createCrmTools(
               assistantKind: context.assistantKind,
               clearance: context.clearance,
               compartments: context.compartments,
+              mutationCompartments: context.mutationCompartments,
               projectIds: context.projectIds,
             }),
-            { compartments: writeScope.compartments, projectIds: writeScope.projectIds },
+            { compartments: writeScope.compartments, projectIds: writeScope.projectIds, sensitivity: writeScope.sensitivity },
           )
         } catch (err) {
           const translated = translateLinkError(err, input as { company_id?: string | null; contact_id?: string | null })
@@ -790,6 +798,7 @@ export function createCrmTools(
             assistantKind: context.assistantKind,
             clearance: context.clearance,
             compartments: context.compartments,
+            mutationCompartments: context.mutationCompartments,
             projectIds: context.projectIds,
           }),
           input.id,
@@ -863,32 +872,40 @@ export function createCrmTools(
         assistantKind: context.assistantKind,
         clearance: context.clearance,
         compartments: context.compartments,
+        mutationCompartments: context.mutationCompartments,
         projectIds: context.projectIds,
       })
       // Snapshot the dedupe-target ids before the write (Tier B merge
       // visibility) — see saveContact.
       const priorMatchIds = await existingCompanyMatchIds(store, dedupeCtx, input.name)
 
-      const company = await store.createCompany({
-        userId: context.userId,
-        workspaceId: context.workspaceId!,
-        // Same dedupe scoping as saveContact — see that call site.
-        access: dedupeCtx,
-        name: input.name,
-        domain: input.domain ?? null,
-        tags: input.tags,
-        externalRef: input.external_ref,
-        // Research findings come from the public web — stamp `public`
-        // (confidential source seen still floors). Else: store default.
-        sensitivity: writeScope.sensitivity,
-        compartments: writeScope.compartments,
-        projectIds: writeScope.projectIds,
-        source: opts?.writeSource,
-        // Provenance anchors (mig 316) — see saveContact.
-        sourceEpisodeId: opts?.writeSourceEpisodeId ?? null,
-        sourceSessionId: crmSessionAnchor(opts, context),
-        createdByAssistantId: context.assistantId,
-      })
+      let company: CompanyRecord
+      try {
+        company = await store.createCompany({
+          userId: context.userId,
+          workspaceId: context.workspaceId!,
+          // Same dedupe scoping as saveContact — see that call site.
+          access: dedupeCtx,
+          name: input.name,
+          domain: input.domain ?? null,
+          tags: input.tags,
+          externalRef: input.external_ref,
+          // Research findings come from the public web — stamp `public`
+          // (confidential source seen still floors). Else: store default.
+          sensitivity: writeScope.sensitivity,
+          compartments: writeScope.compartments,
+          projectIds: writeScope.projectIds,
+          source: opts?.writeSource,
+          // Provenance anchors (mig 316) — see saveContact.
+          sourceEpisodeId: opts?.writeSourceEpisodeId ?? null,
+          sourceSessionId: crmSessionAnchor(opts, context),
+          createdByAssistantId: context.assistantId,
+        })
+      } catch (error) {
+        const translated = translateLinkError(error)
+        if (translated) return translated
+        throw error
+      }
       opts?.onEvent?.({ type: 'company_created', companyId: company.id }, eventCtx(context))
       const linksSummary = await applyExplicitLinks({
         entityLinks: opts?.entityLinks,
@@ -1015,9 +1032,10 @@ export function createCrmTools(
             assistantKind: context.assistantKind,
             clearance: context.clearance,
             compartments: context.compartments,
+            mutationCompartments: context.mutationCompartments,
             projectIds: context.projectIds,
           }),
-          { compartments: writeScope.compartments, projectIds: writeScope.projectIds },
+          { compartments: writeScope.compartments, projectIds: writeScope.projectIds, sensitivity: writeScope.sensitivity },
         )
         if (!updated) return { data: crmNotFound('Company', input.id), isError: true }
         opts?.onEvent?.({ type: 'company_updated', companyId: updated.id, fields: Object.keys(fields) }, eventCtx(context))
@@ -1030,6 +1048,7 @@ export function createCrmTools(
             assistantKind: context.assistantKind,
             clearance: context.clearance,
             compartments: context.compartments,
+            mutationCompartments: context.mutationCompartments,
             projectIds: context.projectIds,
           }),
           input.id,
@@ -1097,6 +1116,7 @@ export function createCrmTools(
         const deal = await store.createDeal({
           userId: context.userId,
           workspaceId: context.workspaceId!,
+          access: ctxFor({ ...context, workspaceId: context.workspaceId! }),
           contactId: input.contact_id ?? null,
           companyId: input.company_id ?? null,
           stage: input.stage,
@@ -1244,9 +1264,10 @@ export function createCrmTools(
               assistantKind: context.assistantKind,
               clearance: context.clearance,
               compartments: context.compartments,
+              mutationCompartments: context.mutationCompartments,
               projectIds: context.projectIds,
             }),
-            { compartments: writeScope.compartments, projectIds: writeScope.projectIds },
+            { compartments: writeScope.compartments, projectIds: writeScope.projectIds, sensitivity: writeScope.sensitivity },
           )
         } catch (err) {
           const translated = translateLinkError(err, input as { company_id?: string | null; contact_id?: string | null })
@@ -1264,6 +1285,7 @@ export function createCrmTools(
             assistantKind: context.assistantKind,
             clearance: context.clearance,
             compartments: context.compartments,
+            mutationCompartments: context.mutationCompartments,
             projectIds: context.projectIds,
           }),
           input.id,
@@ -1364,9 +1386,10 @@ export function createCrmTools(
           assistantKind: context.assistantKind,
           clearance: context.clearance,
           compartments: context.compartments,
+          mutationCompartments: context.mutationCompartments,
           projectIds: context.projectIds,
         }),
-        { compartments: writeScope.compartments, projectIds: writeScope.projectIds },
+        { compartments: writeScope.compartments, projectIds: writeScope.projectIds, sensitivity: writeScope.sensitivity },
       )
       if (!updated) return { data: crmNotFound('Deal', input.id), isError: true }
       opts?.onEvent?.({ type: 'deal_stage_advanced', dealId: updated.id, stage: input.stage }, eventCtx(context))
@@ -1466,6 +1489,7 @@ export function createCrmTools(
             assistantKind: context.assistantKind,
             clearance: context.clearance,
             compartments: context.compartments,
+            mutationCompartments: context.mutationCompartments,
             projectIds: context.projectIds,
           }),
           input.id,

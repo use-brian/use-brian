@@ -197,6 +197,11 @@ type Options = {
 }
 
 function writeError(res: Response, error: unknown): void {
+  if ((error as { code?: string } | null)?.code === 'scope_operation_denied') {
+    res.status(403).json({ error: 'scope_operation_denied',
+      message: 'This operation is unavailable in your current scope. Ask a workspace administrator to review access.' })
+    return
+  }
   if (error instanceof CrmIntegrationScopeError) {
     res.status(403).json({ error: error.code, message: error.message })
     return
@@ -923,7 +928,7 @@ export function crmOperationsRoutes(options: Options): Router {
       return
     }
     try {
-      res.json(await listCrmOperationsAudit(ctx.workspaceId, filters.data))
+      res.json(await listCrmOperationsAudit(ctx, filters.data))
     } catch (error) { writeError(res, error) }
   })
 
@@ -936,7 +941,7 @@ export function crmOperationsRoutes(options: Options): Router {
       return
     }
     try {
-      res.json(await listCrmEventDelivery(ctx.workspaceId, filters.data))
+      res.json(await listCrmEventDelivery(ctx, filters.data))
     } catch (error) { writeError(res, error) }
   })
 

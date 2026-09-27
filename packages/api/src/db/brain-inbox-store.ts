@@ -42,7 +42,8 @@
 
 import type pg from 'pg'
 
-import { getPool, query } from './client.js'
+import { applyRLSGucs, getAppPool, getPool, query } from './client.js'
+import { buildAccessPredicate, mutationActorAccess, type AccessContext } from './access-predicate.js'
 import { appendDecisionEvent } from './decision-event-store.js'
 import { recordVerification } from './memory-verifications-store.js'
 import { abandonGoalsForHostTaskSystem } from './goals.js'
@@ -888,10 +889,14 @@ export async function verifyBrainInboxRow(params: {
   rowId: string
   workspaceId: string
   verifiedByUserId: string
+  access?: AccessContext
 }): Promise<VerifyBrainInboxRowResult> {
-  const client = await getPool().connect()
+  const access = mutationActorAccess(params.verifiedByUserId, params.workspaceId, params.access)
+  const ap = buildAccessPredicate(access, { startIdx: 2, operation: 'mutation' })
+  const client = await getAppPool().connect()
   try {
     await client.query('BEGIN')
+    await applyRLSGucs(client, params.verifiedByUserId)
     const table = primitiveToTable(params.primitive)
     const selected = await client.query<{
       workspaceId: string
@@ -900,18 +905,17 @@ export async function verifyBrainInboxRow(params: {
       `SELECT workspace_id AS "workspaceId",
               verified_by_user_id AS "verifiedByUserId"
          FROM ${table}
-        WHERE id = $1 AND valid_to IS NULL
+        WHERE id = $1 AND workspace_id IS NOT NULL
+          AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held
+          AND ${ap.sql}
+          AND context_scope_allows_current_principal(workspace_id,sensitivity,compartments,project_ids)
         FOR UPDATE`,
-      [params.rowId],
+      [params.rowId, ...ap.params],
     )
     const row = selected.rows[0]
     if (!row) {
       await client.query('COMMIT')
       return { status: 'not_found', stamped: false }
-    }
-    if (row.workspaceId !== params.workspaceId) {
-      await client.query('COMMIT')
-      return { status: 'wrong_workspace', stamped: false }
     }
     if (row.verifiedByUserId) {
       await client.query('COMMIT')
@@ -968,25 +972,28 @@ export async function deleteBrainInboxRow(params: {
   rowId: string
   workspaceId: string
   deletedByUserId: string
+  access?: AccessContext
 }): Promise<DeleteBrainInboxRowResult> {
-  const client = await getPool().connect()
+  const access = mutationActorAccess(params.deletedByUserId, params.workspaceId, params.access)
+  const ap = buildAccessPredicate(access, { startIdx: 2, operation: 'mutation' })
+  const client = await getAppPool().connect()
   try {
     await client.query('BEGIN')
+    await applyRLSGucs(client, params.deletedByUserId)
     const table = primitiveToTable(params.primitive)
     const selected = await client.query<{ workspaceId: string }>(
       `SELECT workspace_id AS "workspaceId"
          FROM ${table}
-        WHERE id = $1 AND valid_to IS NULL
+        WHERE id = $1 AND workspace_id IS NOT NULL
+          AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held
+          AND ${ap.sql}
+          AND context_scope_allows_current_principal(workspace_id,sensitivity,compartments,project_ids)
         FOR UPDATE`,
-      [params.rowId],
+      [params.rowId, ...ap.params],
     )
     if (!selected.rows[0]) {
       await client.query('COMMIT')
       return { status: 'not_found' }
-    }
-    if (selected.rows[0].workspaceId !== params.workspaceId) {
-      await client.query('COMMIT')
-      return { status: 'wrong_workspace' }
     }
 
     await client.query(
@@ -1045,18 +1052,24 @@ export async function deleteBrainInboxTasks(params: {
   taskIds: readonly string[]
   workspaceId: string
   deletedByUserId: string
+  access?: AccessContext
 }): Promise<readonly string[]> {
-  const client = await getPool().connect()
+  const access = mutationActorAccess(params.deletedByUserId, params.workspaceId, params.access)
+  const ap = buildAccessPredicate(access, { startIdx: 3, operation: 'mutation' })
+  const client = await getAppPool().connect()
   try {
     await client.query('BEGIN')
+    await applyRLSGucs(client, params.deletedByUserId)
     const deleted = await client.query<{ id: string }>(
       `UPDATE tasks
           SET valid_to = now(), updated_at = now()
         WHERE id = ANY($1::uuid[])
           AND workspace_id = $2
-          AND valid_to IS NULL
+          AND valid_to IS NULL AND retracted_at IS NULL AND NOT scope_held
+          AND ${ap.sql}
+          AND context_scope_allows_current_principal(workspace_id,sensitivity,compartments,project_ids)
         RETURNING id::text AS id`,
-      [params.taskIds, params.workspaceId],
+      [params.taskIds, params.workspaceId, ...ap.params],
     )
     for (const row of deleted.rows) {
       await abandonGoalsForHostTaskSystem(row.id, 'host_task_deleted', { exec: client })

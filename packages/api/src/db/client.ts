@@ -1,87 +1,10 @@
 import pg from 'pg'
-import { AsyncLocalStorage } from 'node:async_hooks'
+import { currentAgentAccess,currentAgentClearance,currentAgentCompartments,currentAgentProjectIds } from './agent-access-context.js'
+export { runWithAgentAccess,runWithAgentClearance,currentAgentAccess,currentAgentClearance,currentAgentCompartments,currentAgentProjectIds } from './agent-access-context.js'
+export type { AgentClearance } from './agent-access-context.js'
 
 let systemPool: pg.Pool | null = null
 let appPool: pg.Pool | null = null
-
-/**
- * Agent-principal clearance context (teamspaces — assistant access).
- *
- * When an ASSISTANT EXECUTION (workflow / scheduled / A2A callee run, or a
- * brain-MCP key call) performs RLS-scoped page reads and writes, the acting
- * `app.current_user_id` is an incidental human account (the workspace owner
- * via `billingPartyForAssistant` / `resolveWriteTarget`) — its per-user
- * teamspace memberships must not decide what the assistant can reach. Wrapping
- * the execution in `runWithAgentClearance(<assistant clearance>)` carries the
- * assistant's clearance into every `queryWithRLS` (and `applyRLSGucs`
- * transaction) it performs, where it is set as the `app.agent_clearance` GUC.
- * The `saved_views` policy (migration 415) opens teamspace pages to that
- * clearance: agent access is clearance-vs-sensitivity, never membership.
- *
- * Fail-closed: no wrap → GUC unset → the policy's agent leg is inert and the
- * human membership model applies unchanged. Only assistant execution paths may
- * wrap; interactive chat stays scoped to the chatting member's own visibility.
- * Spec: docs/architecture/features/teamspaces.md → "Agent access".
- */
-const AGENT_CLEARANCES = ['public', 'internal', 'confidential'] as const
-export type AgentClearance = (typeof AGENT_CLEARANCES)[number]
-
-type AgentAccessContext = {
-  clearance: AgentClearance
-  /** undefined = legacy clearance-only wrap; linked Teams fail closed. */
-  compartments?: string[] | null
-  /** Project is not an ACL, but page/container reads must retain its boundary. */
-  projectIds?: string[] | null
-}
-
-const agentAccessStorage = new AsyncLocalStorage<AgentAccessContext>()
-
-export function runWithAgentClearance<T>(clearance: string | null | undefined, fn: () => T): T {
-  const validated = AGENT_CLEARANCES.find((c) => c === clearance)
-  // Unknown/absent clearance runs WITHOUT the agent context rather than
-  // guessing a tier — the membership model then applies (fail-closed).
-  if (!validated) return fn()
-  return agentAccessStorage.run({ clearance: validated }, fn)
-}
-
-/** Carry both sensitivity and the resolved Team grant for assistant page access. */
-export function runWithAgentAccess<T>(
-  access: {
-    clearance: string | null | undefined
-    compartments: string[] | null | undefined
-    projectIds?: string[] | null | undefined
-  },
-  fn: () => T,
-): T {
-  const clearance = AGENT_CLEARANCES.find((candidate) => candidate === access.clearance)
-  if (!clearance) return fn()
-  return agentAccessStorage.run({
-    clearance,
-    compartments: access.compartments === null
-      ? null
-      : access.compartments === undefined
-        ? undefined
-        : [...new Set(access.compartments)].sort(),
-    projectIds: access.projectIds === null
-      ? null
-      : access.projectIds === undefined
-        ? undefined
-        : [...new Set(access.projectIds)].sort(),
-  }, fn)
-}
-
-/** The active agent clearance, if this code runs inside an assistant execution wrap. */
-export function currentAgentClearance(): AgentClearance | undefined {
-  return agentAccessStorage.getStore()?.clearance
-}
-
-export function currentAgentCompartments(): string[] | null | undefined {
-  return agentAccessStorage.getStore()?.compartments
-}
-
-export function currentAgentProjectIds(): string[] | null | undefined {
-  return agentAccessStorage.getStore()?.projectIds
-}
 
 /**
  * The nil UUID. Seeded as the SESSION value of `app.current_user_id` on every
@@ -402,6 +325,12 @@ export async function applyRLSGucs(
       [JSON.stringify(agentProjectIds)],
     )
   }
+  const access=currentAgentAccess()
+  if(access?.mutationCompartments!==undefined)await client.query("SELECT set_config('app.agent_mutation_compartments', $1, true)",[JSON.stringify(access.mutationCompartments)])
+  if(access?.workspaceId!==undefined)await client.query("SELECT set_config('app.agent_workspace_id', $1, true)",[access.workspaceId])
+  if(access?.userId!==undefined)await client.query("SELECT set_config('app.agent_actor_id', $1, true)",[access.userId])
+  if(access?.visibilityAssistantIds!==undefined)await client.query("SELECT set_config('app.agent_visibility_assistants', $1, true)",[JSON.stringify(access.visibilityAssistantIds)])
+
 }
 
 /**

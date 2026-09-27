@@ -21,6 +21,7 @@ import {
 } from '../a2a/index.js'
 import type { Tool, ToolContext } from '../tools/types.js'
 import { ContextScopeAccumulator, type TurnScope } from '../security/context-scope.js'
+import { pinAccessCeiling } from '../security/access-ceiling.js'
 import type { Sensitivity } from '../security/sensitivity.js'
 import type {
   AssistantCallStep,
@@ -333,7 +334,15 @@ export type ExecutorDeps = {
     assistantId: string
     workspaceId: string
     run: WorkflowRunRecord
-  }) => Promise<{ turnScope: TurnScope; assistantClearance: Sensitivity }>
+    externalClientPrincipal?: ResolvedExternalClientWorkflowPrincipal
+  }) => Promise<{
+    turnScope: TurnScope
+    assistantClearance: Sensitivity
+    /** Server-resolved causal inputs, never audience claims from input JSON. */
+    inputScopeEvidence?: import('../security/context-scope.js').ScopeEvidence
+    /** API-owned live lease; rejects stale results without retrying effects. */
+    executeWithAuthority?: <T>(operation: () => Promise<T>) => Promise<T>
+  }>
   emitAudit?: EmitAuditEvent
   /**
    * Deterministic page-send port backing `send_page` steps (page-actions
@@ -739,15 +748,24 @@ export async function advanceWorkflowRun(
         assistantId: toolAssistantId,
         workspaceId: run.workspaceId,
         run,
+        externalClientPrincipal,
       })
     } catch (err) {
       const error: ExecutorError = {
         message: err instanceof Error ? err.message : String(err),
-        reason: 'context_not_available',
+        reason: typeof (err as { reason?: unknown } | null)?.reason === 'string'
+          ? (err as { reason: string }).reason : 'context_not_available',
       }
       await markRunFailed(deps, run, '<context>', error, 'failed', undefined, workflow)
       return failOutcome(runId, '<context>', error, 0)
     }
+  }
+  // Delivery can also happen in completion/failure notification paths outside
+  // dispatchStep. Bind the port once so those paths renew the same lease.
+  const executeWithAuthority = runtimeScope?.executeWithAuthority
+  if (executeWithAuthority && deps.deliverToChannel) {
+    const deliver = deps.deliverToChannel
+    deps = { ...deps, deliverToChannel: params => executeWithAuthority(() => deliver(params)) }
   }
   const scopeAccumulator = new ContextScopeAccumulator(runtimeScope
     ? {
@@ -756,6 +774,7 @@ export async function advanceWorkflowRun(
       }
     : undefined)
   const persistedScopeEvidence = run.vars[WORKFLOW_SCOPE_EVIDENCE_VAR]
+  scopeAccumulator.note(runtimeScope?.inputScopeEvidence)
   if (persistedScopeEvidence && typeof persistedScopeEvidence === 'object') {
     scopeAccumulator.note(persistedScopeEvidence as import('../security/context-scope.js').ScopeEvidence)
   }
@@ -924,7 +943,7 @@ export async function advanceWorkflowRun(
 
     let dispatchResult: StepDispatchResult
     try {
-      dispatchResult = await dispatchStep(step, {
+      const dispatch = () => dispatchStep(step, {
         run,
         workflow,
         primaryAssistantId,
@@ -937,6 +956,7 @@ export async function advanceWorkflowRun(
         scope: interp,
         deps,
       })
+      dispatchResult = await (executeWithAuthority ? executeWithAuthority(dispatch) : dispatch())
     } catch (err) {
       // Hoist a typed reason when the throw site attached one (the callee
       // executor's page-anchor gate throws Errors carrying `reason:
@@ -1132,7 +1152,7 @@ export async function advanceWorkflowRun(
 
     // Phase C. `requestApproval` writes pending_approvals + dispatches the
     // delivery; we just flip the run state.
-    await deps.requestApproval!({
+    const requestApproval = () => deps.requestApproval!({
       runId,
       stepRunId,
       workspaceId: run.workspaceId,
@@ -1145,6 +1165,21 @@ export async function advanceWorkflowRun(
       expiresAt: result.expiresAt,
       decisionApplicationId: result.decisionApplicationId,
     })
+    try {
+      await (executeWithAuthority ? executeWithAuthority(requestApproval) : requestApproval())
+    } catch (err) {
+      const reason = (err as { reason?: unknown } | null)?.reason
+      const error: ExecutorError = {
+        message: err instanceof Error ? err.message : String(err),
+        reason: typeof reason === 'string' ? reason : 'approval_request_failed',
+      }
+      await deps.runStore.updateStepRun(stepRunId, {
+        status: 'failed', error: error as unknown as Record<string, unknown>, finishedAt: new Date(now()),
+      })
+      runLog.push({ stepId: step.id, type: step.type, status: 'failed', summary: error.message })
+      firstFailure ??= { stepId: step.id, error, isTimeout: false }
+      return
+    }
     await deps.runStore.updateRun(runId, {
       status: 'awaiting_input',
       currentStepId: step.id,
@@ -1600,6 +1635,10 @@ async function dispatchAssistantCall(
   }
 
   const request: ConsultRequest = {
+    callerScopeEvidence: ctx.externalClientPrincipal ? undefined : ctx.scopeAccumulator.evidence,
+    callerAccessCeiling: ctx.runtimeScope && !ctx.externalClientPrincipal
+      ? pinAccessCeiling(ctx.runtimeScope.turnScope.access)
+      : undefined,
     target: {
       workspaceId: ctx.run.workspaceId,
       assistantId: targetAssistantId,
@@ -1890,6 +1929,7 @@ async function dispatchToolCall(
   const interpolatedArgs = interpolateValue(step.arguments, ctx.scope)
   const runtimeToolScope = ctx.runtimeScope
     ? {
+        visibilityAssistantIds: ctx.runtimeScope.turnScope.access.visibilityAssistantIds,
         clearance: ctx.runtimeScope.turnScope.access.clearance,
         compartments: ctx.runtimeScope.turnScope.effectiveCompartments,
         projectIds: ctx.runtimeScope.turnScope.effectiveProjectIds,

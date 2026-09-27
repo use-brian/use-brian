@@ -4,6 +4,7 @@ import {
   createContact, getContactById, listContacts, updateContact,
   createDeal, getDealById, listDeals, updateDeal, setDealStage,
   batchLabels,
+  readCrmMutationSource, runCrmWriteTransaction,
 } from './crm.js'
 import { appendCrmActivity, getCrmConfig, updateCrmCustomFields } from './crm-r2.js'
 import { getEntityById } from './entities-store.js'
@@ -96,29 +97,34 @@ export function createDbCrmStore(deps: { entityLinks?: EntityLinksStore } = {}):
       }
     },
     async setCustomFields(ctx, entityId, values) {
-      const before = await getEntityById(ctx, entityId)
-      const updated = await updateCrmCustomFields({ ctx, entityId, values })
-      if (!updated) return null
-      const current = updated.attributes.custom_fields
-      await appendCrmActivity({
-        userId: ctx.userId,
-        workspaceId: ctx.workspaceId,
-        entityId: updated.id,
-        activityType: 'field_change',
-        summary: 'Custom fields updated',
-        metadata: {
-          fields: Object.keys(values),
-          before: before?.attributes.custom_fields ?? {},
-          after: current ?? {},
-        },
+      return runCrmWriteTransaction(ctx.userId, async tx => {
+        const before = await readCrmMutationSource(ctx, entityId, ['person', 'company', 'deal'], tx.client)
+        if (!before) return null
+        const updated = await updateCrmCustomFields({ ctx, entityId, values }, tx.client)
+        if (!updated) return null
+        const current = updated.attributes.custom_fields
+        const activity = await appendCrmActivity({
+          access: ctx,
+          userId: ctx.userId,
+          workspaceId: ctx.workspaceId,
+          entityId: updated.id,
+          activityType: 'field_change',
+          summary: 'Custom fields updated',
+          metadata: {
+            fields: Object.keys(values),
+            before: before?.attributes.custom_fields ?? {},
+            after: current ?? {},
+          },
+        }, tx.client)
+        if (!activity) throw Object.assign(new Error('The activity source is unavailable.'), { code: 'scope_operation_denied' })
+        return {
+          id: updated.id,
+          entityKind: updated.kind as 'person' | 'company' | 'deal',
+          values: current && typeof current === 'object' && !Array.isArray(current)
+            ? current as Record<string, unknown>
+            : {},
+        }
       })
-      return {
-        id: updated.id,
-        entityKind: updated.kind as 'person' | 'company' | 'deal',
-        values: current && typeof current === 'object' && !Array.isArray(current)
-          ? current as Record<string, unknown>
-          : {},
-      }
     },
   }
 }

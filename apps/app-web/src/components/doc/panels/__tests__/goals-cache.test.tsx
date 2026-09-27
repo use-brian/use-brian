@@ -156,3 +156,24 @@ for (const [name, node, key, confirmed, loadingCopy] of [
     });
   });
 }
+
+describe('[COMP:app-web/goals-board] source permission recovery', () => {
+  it('opens department access without resuming a blocked goal', async () => {
+    const blocked={...row('g1','Authorized fixture goal',true),status:'blocked',blockerReason:'goal_source_scope_unavailable'}
+    api.listGoals.mockResolvedValue([blocked])
+    api.getGoalDetail.mockResolvedValue({...blocked,doneWhen:{kind:'subtasks'},means:{},budget:{},policy:{},completionClaim:null,brief:null})
+    const events:unknown[]=[]
+    const listener=(event:Event)=>events.push((event as CustomEvent).detail)
+    window.addEventListener('doc:open-settings',listener)
+    try {
+      await mount(<AutopilotPanel />)
+      expect(host!.textContent).toContain(en.goalsPage.detail.sourceAccessChanged)
+      expect(host!.textContent).not.toContain('goal_source_scope_unavailable')
+      const button=Array.from(host!.querySelectorAll('button')).find(button=>button.textContent===en.goalsPage.detail.reviewDepartmentAccess)!
+      await act(async()=>{button.click();await settle()})
+      expect(events).toEqual([{section:'ws-access'}])
+      const {workGoal}=await import('@/lib/api/goals')
+      expect(workGoal).not.toHaveBeenCalled()
+    }finally{window.removeEventListener('doc:open-settings',listener)}
+  })
+})

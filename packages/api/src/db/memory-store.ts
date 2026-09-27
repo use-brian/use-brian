@@ -1,5 +1,7 @@
-import type { EntityLinksStore, MemoryStore } from '@use-brian/core'
+import { bindScopeSource, type EntityLinksStore, type MemoryRecord, type MemoryStore } from '@use-brian/core'
 import { query } from './client.js'
+import { readReflectionReceipt, type ReflectionReceiptKind } from './reflection-evidence.js'
+import { writeScopedSummary, getSoulContext } from './scoped-summary-store.js'
 import {
   createMemory, updateMemory, getMemoryById, getMemoryByIdSystem, searchMemories, searchMemoriesByIdPrefix,
   getIdentityMemories, getMemoryIndex, getMemoryIndexSystem, getMemoryIndexRanked, trackRecall, trackRecallOutcome, getSoul, countMemories,
@@ -15,6 +17,27 @@ import {
 import {
   upsertDomainSummary, pruneStaleDomainSummaries,
 } from './domain-summaries.js'
+
+type MemorySourceRow = Pick<MemoryRecord, 'id' | 'workspaceId' | 'userId' | 'assistantId' | 'sensitivity' | 'compartments' | 'projectIds' | 'scopeVersion' | 'scopeSource'>
+
+function bindMemorySource<T extends MemorySourceRow>(row: T): T {
+  // These are canonical DB projections, never parsed tool content. Missing
+  // provenance is an adapter error, not an assertion that the row is General.
+  return bindScopeSource(row, row.scopeSource ?? {
+    resourceKind: 'memory', resourceId: row.id, version: row.scopeVersion!,
+    workspaceId: row.workspaceId!, userId: row.userId!, assistantId: row.assistantId!,
+    sensitivity: row.sensitivity, compartments: row.compartments!, projectIds: row.projectIds!,
+  })
+}
+
+function projectMemory(m: MemoryRecord): MemoryRecord {
+  return bindMemorySource({ id: m.id, scope: m.scope, summary: m.summary,
+    detail: m.detail, tags: m.tags, confidence: m.confidence, sensitivity: m.sensitivity,
+    workspaceId: m.workspaceId, userId: m.userId, assistantId: m.assistantId,
+    compartments: m.compartments, projectIds: m.projectIds, scopeVersion: m.scopeVersion,
+    ...(m.scopeSource ? { scopeSource: m.scopeSource } : {}),
+  })
+}
 
 /**
  * Create a MemoryStore backed by PostgreSQL.
@@ -45,19 +68,19 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
         },
         entityLinks,
       )
-      return { id: m.id, scope: m.scope, summary: m.summary, detail: m.detail, tags: m.tags, confidence: m.confidence, sensitivity: m.sensitivity, compartments: m.compartments, projectIds: m.projectIds, workspaceId: m.workspaceId }
+      return projectMemory(m)
     },
 
     async update(id, updates, access) {
       const m = await updateMemory(id, updates, access)
       if (!m) return null
-      return { id: m.id, scope: m.scope, summary: m.summary, detail: m.detail, tags: m.tags, confidence: m.confidence, sensitivity: m.sensitivity, compartments: m.compartments, projectIds: m.projectIds, workspaceId: m.workspaceId }
+      return projectMemory(m)
     },
 
     async getById(ctx, id) {
       const m = await getMemoryById(ctx, id)
       if (!m) return null
-      return { id: m.id, scope: m.scope, summary: m.summary, detail: m.detail, tags: m.tags, confidence: m.confidence, sensitivity: m.sensitivity, compartments: m.compartments, projectIds: m.projectIds, workspaceId: m.workspaceId }
+      return projectMemory(m)
     },
 
     async search(ctx, params) {
@@ -67,49 +90,38 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
           idPrefix: params.idPrefix,
           limit: params.limit,
         })
-        return results.map((m) => ({
-          id: m.id, scope: m.scope, summary: m.summary,
-          detail: m.detail, tags: m.tags, confidence: m.confidence, sensitivity: m.sensitivity,
-          compartments: m.compartments, projectIds: m.projectIds,
-        }))
+        return results.map(projectMemory)
       }
 
       const results = await searchMemories(ctx, {
         searchQuery: params.query,
         limit: params.limit,
       })
-      return results.map((m) => ({
-        id: m.id, scope: m.scope, summary: m.summary,
-        detail: m.detail, tags: m.tags, confidence: m.confidence, sensitivity: m.sensitivity,
-        compartments: m.compartments, projectIds: m.projectIds,
-      }))
+      return results.map(projectMemory)
     },
 
     async getIdentity(ctx) {
       const results = await getIdentityMemories(ctx)
-      return results.map((m) => ({
-        id: m.id, scope: m.scope, summary: m.summary,
-        detail: m.detail, tags: m.tags, confidence: m.confidence, sensitivity: m.sensitivity,
-        compartments: m.compartments, projectIds: m.projectIds,
-      }))
+      return results.map(projectMemory)
     },
 
     async getIndex(ctx, validOnly) {
-      return getMemoryIndex(ctx, validOnly)
+      return (await getMemoryIndex(ctx, validOnly)).map(bindMemorySource)
     },
 
     async getIndexSystem(assistantId, userId, validOnly) {
-      return getMemoryIndexSystem(assistantId, userId, validOnly)
+      return (await getMemoryIndexSystem(assistantId, userId, validOnly)).map(bindMemorySource)
     },
 
     async getByIdSystem(id) {
       const m = await getMemoryByIdSystem(id)
       if (!m) return null
-      return { id: m.id, scope: m.scope, summary: m.summary, detail: m.detail, tags: m.tags, confidence: m.confidence, sensitivity: m.sensitivity, compartments: m.compartments, projectIds: m.projectIds, workspaceId: m.workspaceId }
+      return projectMemory(m)
     },
 
     async getIndexRanked(ctx, limit) {
-      return getMemoryIndexRanked(ctx, limit)
+      const result = await getMemoryIndexRanked(ctx, limit)
+      return { ...result, rows: result.rows.map(bindMemorySource) }
     },
 
     async trackRecall(memoryId, queryHash) {
@@ -119,6 +131,8 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
     async trackRecallOutcome(memoryId, useful) {
       return trackRecallOutcome(memoryId, useful)
     },
+
+    getSoulContext,
 
     async getSoul(assistantId, userId, appId) {
       return getSoul(assistantId, userId, appId)
@@ -140,6 +154,7 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
         tags: r.tags,
         confidence: r.confidence,
         sensitivity: r.sensitivity,
+        workspaceId: r.workspaceId, compartments: r.compartments, projectIds: r.projectIds, scopeVersion: r.scopeVersion,
         assistantId: r.assistantId,
         userId: r.userId,
         appId: r.appId,
@@ -165,19 +180,23 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
     },
 
     async listForSoulSynthesis(assistantId, userId, appId) {
-      const { selfEntityAttributes, preferences } = await listForSoulSynthesis(assistantId, userId, appId ?? null)
+      const { selfEntityAttributes, selfEntitySources, preferences } = await listForSoulSynthesis(assistantId, userId, appId ?? null)
       const project = (m: typeof preferences[number]) => ({
         id: m.id, scope: m.scope, summary: m.summary,
         detail: m.detail, tags: m.tags, confidence: m.confidence, sensitivity: m.sensitivity,
+        workspaceId: m.workspaceId,userId: m.userId,assistantId: m.assistantId,scopeVersion: m.scopeVersion,compartments: m.compartments,projectIds: m.projectIds,
       })
-      return { selfEntityAttributes, preferences: preferences.map(project) }
+      return { selfEntityAttributes, selfEntitySources, preferences: preferences.map(project) }
     },
 
-    async upsertSoul(assistantId, userId, appId, content) {
+    async upsertSoul(assistantId, userId, appId, content, derivation) {
+      if (derivation) return writeScopedSummary({ assistantId,userId,kind: 'soul',slotKey: appId ? `app:${appId}` : 'shared',content,derivation })
       await upsertSoul(assistantId, userId, appId, content)
     },
 
     async upsertDomainSummary(params) {
+      if (params.derivation) return writeScopedSummary({ assistantId: params.assistantId,userId: params.userId,
+        kind: 'domain',slotKey: JSON.stringify([params.appId ?? null,params.domain]),content: params.summary,derivation: params.derivation })
       await upsertDomainSummary({
         assistantId: params.assistantId,
         userId: params.userId,
@@ -242,6 +261,7 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
       // memories were in context when the user was unhappy". ORDER BY
       // at the outer level gives a consistent recency cap.
       const result = await query<{
+        sourceKind: ReflectionReceiptKind | null
         id: string
         action: string
         primitive: string
@@ -255,6 +275,7 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
         `WITH events AS (
            -- Memory verifications
            SELECT mv.id,
+                  'memory_verification'::text AS "sourceKind",
                   mv.action,
                   'memory'::text AS primitive,
                   mv.memory_id AS "rowId",
@@ -273,6 +294,7 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
 
            -- Brain verifications (non-memory primitives)
            SELECT bv.id,
+                  'brain_verification'::text AS "sourceKind",
                   bv.action,
                   bv.target_kind AS primitive,
                   bv.target_id AS "rowId",
@@ -302,6 +324,7 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
            -- re_extracts / purges). Less rich than the verification
            -- streams but worth surfacing for completeness.
            SELECT ca.id,
+                  'correction_audit'::text AS "sourceKind",
                   ca.action,
                   ca.primitive,
                   ca.row_id AS "rowId",
@@ -324,6 +347,7 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
            -- explanation when they provided one (web feedback modal, or the
            -- normalised emoji label from the reaction handler).
            SELECT ae.id,
+                  NULL::text AS "sourceKind",
                   'negative_feedback'::text AS action,
                   'memory'::text AS primitive,
                   mre.memory_id AS "rowId",
@@ -345,7 +369,14 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
          LIMIT $3`,
         [workspaceId, since, cap],
       )
-      return result.rows
+      const events: Awaited<ReturnType<MemoryStore['listForReflection']>> = []
+      for (const row of result.rows) {
+        const verified = row.sourceKind && await readReflectionReceipt(workspaceId,row.sourceKind,row.id)
+        // Missing/legacy evidence is deliberately left unproven. The phase
+        // counts and withholds it before any model call.
+        events.push(verified || row)
+      }
+      return events
     },
 
     // ── Commitment-memory lifecycle ─────────────────────────
@@ -363,32 +394,20 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
 
     async getWorkspaceIdentity(ctx) {
       const results = await getWorkspaceIdentityMemories(ctx)
-      return results.map((m) => ({
-        id: m.id, scope: m.scope, summary: m.summary,
-        detail: m.detail, tags: m.tags, confidence: m.confidence, sensitivity: m.sensitivity, workspaceId: m.workspaceId,
-      }))
+      return results.map(projectMemory)
     },
 
     async getWorkspaceIndex(ctx, validOnly) {
-      return getWorkspaceMemoryIndex(ctx, validOnly)
+      return (await getWorkspaceMemoryIndex(ctx, validOnly)).map(bindMemorySource)
     },
 
     async getWorkspaceIndexSystem(assistantId, workspaceId, validOnly) {
-      return getWorkspaceMemoryIndexSystem(assistantId, workspaceId, validOnly)
+      return (await getWorkspaceMemoryIndexSystem(assistantId, workspaceId, validOnly)).map(bindMemorySource)
     },
 
     async getWorkspaceMemoriesByCategory(ctx, tag) {
       const results = await getWorkspaceMemoriesByCategory(ctx, tag)
-      return results.map((m) => ({
-        id: m.id,
-        scope: m.scope,
-        summary: m.summary,
-        detail: m.detail,
-        tags: m.tags,
-        confidence: m.confidence,
-        sensitivity: m.sensitivity,
-        workspaceId: m.workspaceId,
-      }))
+      return results.map(projectMemory)
     },
 
     async searchTeam(ctx, params) {
@@ -397,20 +416,14 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
           idPrefix: params.idPrefix,
           limit: params.limit,
         })
-        return results.map((m) => ({
-          id: m.id, scope: m.scope, summary: m.summary,
-          detail: m.detail, tags: m.tags, confidence: m.confidence, sensitivity: m.sensitivity, workspaceId: m.workspaceId,
-        }))
+        return results.map(projectMemory)
       }
 
       const results = await searchWorkspaceMemories(ctx, {
         searchQuery: params.query,
         limit: params.limit,
       })
-      return results.map((m) => ({
-        id: m.id, scope: m.scope, summary: m.summary,
-        detail: m.detail, tags: m.tags, confidence: m.confidence, sensitivity: m.sensitivity, workspaceId: m.workspaceId,
-      }))
+      return results.map(projectMemory)
     },
 
     async listWorkspaceMemoryGroups() {
@@ -421,7 +434,8 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
       const rows = await listWorkspaceMemoriesWithMetrics(assistantId, workspaceId, page)
       return rows.map((r) => ({
         id: r.id, scope: r.scope, summary: r.summary,
-        detail: r.detail, tags: r.tags, confidence: r.confidence, sensitivity: r.sensitivity, workspaceId: undefined,
+        detail: r.detail, tags: r.tags, confidence: r.confidence, sensitivity: r.sensitivity, workspaceId: r.workspaceId,
+        compartments: r.compartments, projectIds: r.projectIds, scopeVersion: r.scopeVersion,
         assistantId: r.assistantId, userId: r.userId, appId: r.appId,
         recallCount: r.recallCount, usefulRecallCount: r.usefulRecallCount,
         uniqueQueries: r.uniqueQueries, recallDays: r.recallDays,

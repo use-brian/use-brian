@@ -86,8 +86,9 @@ describe('[COMP:files/structured-document-tools] source-reference-only tools', (
   it('uses only trusted context fields, with absent scopes as empty and explicit null as universe', () => {
     const ctx = context()
     Object.assign(ctx, { writeCompartments: ['invented-write'], assistantCompartments: null, assistantProjectIds: null, systemRead: true })
+    ctx.mutationCompartments = []
     const trusted = trustedToolContext(ctx)
-    expect(trusted).toEqual({ userId: uid(1), workspaceId: uid(2), assistantId: uid(3), assistantKind: 'standard', clearance: 'confidential', compartments: ['team-a'], projectIds: ['project-a'] })
+    expect(trusted).toEqual({ userId: uid(1), workspaceId: uid(2), assistantId: uid(3), assistantKind: 'standard', clearance: 'confidential', compartments: ['team-a'], mutationCompartments: [], projectIds: ['project-a'] })
     delete ctx.compartments; delete ctx.projectIds
     expect(trustedToolContext(ctx)).toMatchObject({ compartments: [], projectIds: [] })
     ctx.compartments = null; ctx.projectIds = null

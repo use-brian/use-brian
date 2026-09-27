@@ -43,6 +43,8 @@ function notifyGoalChange(
  * parked on an event. See `goals/driver.ts` (`until:event` resume).
  */
 export type GoalAwaitingEventMarker = {
+  /** Database-overwritten generation used for exact event-resume claims. */
+  revision?: string
   subscriptions: EventSubscription[]
   state?: Record<string, unknown>
 }
@@ -154,10 +156,11 @@ export async function createGoal(params: GoalCreateParams): Promise<GoalRecord> 
 /** User-scoped read (RLS by workspace membership). */
 export async function getGoalById(userId: string, id: string, transactionClient?: pg.PoolClient): Promise<GoalRecord | null> {
   // Feed confirmation freezes this existing primitive in its own transaction.
-  // Repeat the workspace-member read policy when using the owner connection.
+  // Repeat membership and causal source policies on the owner connection.
   const result = transactionClient ? await transactionClient.query<GoalRow>(
     `SELECT ${FULL_SELECT} FROM goals WHERE id=$1 AND EXISTS
-      (SELECT 1 FROM workspace_members wm WHERE wm.workspace_id=goals.workspace_id AND wm.user_id=$2) FOR SHARE`,
+      (SELECT 1 FROM workspace_members wm WHERE wm.workspace_id=goals.workspace_id AND wm.user_id=$2)
+      AND goal_crm_scope_allows(id,$2) FOR SHARE`,
     [id, userId],
   ) : await queryWithRLS<GoalRow>(
     userId,

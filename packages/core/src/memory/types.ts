@@ -12,7 +12,10 @@
  */
 
 import type { AccessContext } from '../security/access-context.js'
+import type { ScopeSource } from '../security/derived-scope.js'
 import type { Sensitivity } from '../security/sensitivity.js'
+import type { ScopeEvidence } from '../security/context-scope.js'
+import type { DerivedWriteEvidence } from '../security/derived-scope.js'
 
 export type MemoryRecord = {
   id: string
@@ -32,6 +35,11 @@ export type MemoryRecord = {
   compartments?: string[]
   projectIds?: string[]
   workspaceId?: string | null
+  userId?: string | null
+  assistantId?: string | null
+  scopeVersion?: string
+  /** Trusted canonical source when a display row is synthesized from another primitive. */
+  scopeSource?: ScopeSource
 }
 
 /**
@@ -73,6 +81,7 @@ type MemoryMetricsPage = {
  * preferences alone.
  */
 export type SoulSynthesisInput = {
+  selfEntitySources?: ScopeSource[]
   selfEntityAttributes: Record<string, unknown> | null
   preferences: MemoryRecord[]
 }
@@ -93,6 +102,10 @@ export type MemoryStore = {
     /** Compartment set (MLS category axis) to stamp on the row. Default '{}'. */
     compartments?: string[]
     projectIds?: string[]
+    /** Trusted complete model-input evidence; never a tool input field. */
+    derivation?: DerivedWriteEvidence
+    /** Trusted narrower destination visibility, intersected with every source. */
+    derivationTarget?: { userId: string | null; assistantId: string | null }
     /**
      * WU-4.5 authorship — every brain-primitive row records who created
      * it. Required at the interface level: the underlying DB helper
@@ -128,6 +141,7 @@ export type MemoryStore = {
     sensitivity?: Sensitivity
     compartments?: string[]
     projectIds?: string[]
+    derivation?: DerivedWriteEvidence
   }, access?: AccessContext): Promise<MemoryRecord | null>
 
   getById(ctx: AccessContext, id: string): Promise<MemoryRecord | null>
@@ -159,6 +173,7 @@ export type MemoryStore = {
    */
   getIndexSystem(assistantId: string, userId: string, validOnly?: boolean): Promise<Array<{
     id: string; summary: string; tags: string[]; sensitivity: Sensitivity; compartments?: string[]; projectIds?: string[]
+      workspaceId?: string | null; userId?: string | null; assistantId?: string | null; scopeVersion?: string
   }>>
 
   /**
@@ -211,6 +226,8 @@ export type MemoryStore = {
   trackRecallOutcome(memoryId: string, useful: boolean): Promise<void>
 
   getSoul(assistantId: string, userId: string, appId?: string): Promise<string | null>
+  /** Canonical model-context read. Adapters without evidence support return no SOUL. */
+  getSoulContext?(access: AccessContext, appId?: string): Promise<{ content: string | null; evidence: ScopeEvidence }>
 
   /** Count total memories for a viewer within their workspace. Used for plan-based caps. */
   count(ctx: AccessContext): Promise<number>
@@ -277,7 +294,7 @@ export type MemoryStore = {
    * Writing empty content is a no-op so callers can safely skip synthesis
    * when the LLM declines to produce anything.
    */
-  upsertSoul(assistantId: string, userId: string, appId: string | null, content: string): Promise<void>
+  upsertSoul(assistantId: string, userId: string, appId: string | null, content: string, derivation?: DerivedWriteEvidence): Promise<void>
 
   /**
    * Upsert a single domain summary row. The unique key is
@@ -290,6 +307,7 @@ export type MemoryStore = {
     domain: string
     summary: string
     memoryIds: string[]
+    derivation?: DerivedWriteEvidence
   }): Promise<void>
 
   /**
@@ -367,6 +385,7 @@ export type MemoryStore = {
    */
   getWorkspaceIndexSystem(assistantId: string, workspaceId: string, validOnly?: boolean): Promise<Array<{
     id: string; summary: string; tags: string[]; sensitivity: Sensitivity; compartments?: string[]; projectIds?: string[]
+      workspaceId?: string | null; userId?: string | null; assistantId?: string | null; scopeVersion?: string
   }>>
 
   /**
@@ -436,6 +455,8 @@ export type MemoryStore = {
     limit?: number
   }): Promise<Array<{
     id: string
+    /** Complete versioned correction payload, not just the current corrected row. */
+    scopeSources?: ScopeSource[]
     /** confirm / adjust_* / edit_* / delete / retract */
     action: string
     /** memory / entity / entity_link / task / contact / company / deal / workspace_file */

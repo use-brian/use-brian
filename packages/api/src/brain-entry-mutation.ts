@@ -544,6 +544,10 @@ export function createBrainEntryMutator(args: {
 
         res.json({ ok: true, stamped: true })
       } catch (err) {
+        if (typeof err === 'object' && err !== null && 'code' in err && err.code === 'scope_declassification_required') {
+          res.status(409).json({ error: 'Lowering sensitivity requires an audited release.', code: 'scope_declassification_required' })
+          return
+        }
         console.error('[brain-inbox] entity adjust failed:', err)
         res.status(500).json({ error: 'Failed to adjust entity' })
       }
@@ -890,6 +894,10 @@ export function createBrainEntryMutator(args: {
 
         res.json({ ok: true, stamped: true })
       } catch (err) {
+        if (typeof err === 'object' && err !== null && 'code' in err && err.code === 'scope_declassification_required') {
+          res.status(409).json({ error: 'Lowering sensitivity requires an audited release.', code: 'scope_declassification_required' })
+          return
+        }
         if (err instanceof BrainMutationTargetMissingError) {
           res.status(404).json({ error: 'Row not found' })
           return
@@ -1021,6 +1029,10 @@ export function createBrainEntryMutator(args: {
         void notifyBrainInboxChange(workspaceId, 'workspace_file', rowId, 'update')
         res.json({ ok: true, stamped: true })
       } catch (err) {
+        if (typeof err === 'object' && err !== null && 'code' in err && err.code === 'scope_declassification_required') {
+          res.status(409).json({ error: 'Lowering sensitivity requires an audited release.', code: 'scope_declassification_required' })
+          return
+        }
         console.error('[brain-inbox] workspace_file adjust failed:', err)
         res.status(500).json({ error: 'Failed to adjust file' })
       }

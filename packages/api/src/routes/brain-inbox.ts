@@ -1226,20 +1226,8 @@ export function brainInboxRoutes({
     const userId = (req as any).userId as string
 
     try {
-      // Validate ownership.
-      const ownership = await query<{ workspace_id: string }>(
-        `SELECT workspace_id FROM ${primitiveToTable(primitiveParam)}
-         WHERE id = $1 AND valid_to IS NULL`,
-        [rowId],
-      )
-      if (ownership.rows.length === 0) {
-        res.status(404).json({ error: 'Row not found' })
-        return
-      }
-      if (ownership.rows[0].workspace_id !== workspaceId) {
-        res.status(403).json({ error: 'Row belongs to a different workspace' })
-        return
-      }
+      // The canonical mutation checks access and existence together. An owner-pool
+      // preflight here would reveal foreign or inaccessible resource existence.
 
       // Delete-with-reason (tasks only) — the reason is what upgrades a delete
       // into a lesson: it writes a tombstone that stops near-identical tasks

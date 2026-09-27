@@ -299,6 +299,17 @@ describe('[COMP:api/brain-entry-edit] Brain entry assistant tools', () => {
     expect(data).toMatch(/will keep failing/i)
   })
 
+  it('does not retry a release-required conflict as a stale revision',async()=>{
+    const port=mutator({mutate:vi.fn().mockResolvedValue({status:409,body:{error:'Lowering sensitivity requires an audited release.',code:'scope_declassification_required'}})})
+    const {updateBrainEntry}=createBrainEntryEditTools({mutator:port,scopedEntry:entry})
+    const result=await updateBrainEntry.execute(updateInput,context)
+    expect(result.isError).toBe(true)
+    expect(String(result.data)).toContain('Existing sensitivity protection was retained')
+    expect(String(result.data)).toContain('Do not retry it through this edit tool')
+    expect(String(result.data)).not.toContain('edited by someone else')
+    expect(String(result.data)).not.toContain('re-issue with the new revision')
+  })
+
   it('marks a 5xx transient (retry once) rather than a bad argument', async () => {
     const port = mutator({
       mutate: vi.fn().mockResolvedValue({ status: 500, body: { error: 'Failed to adjust memory' } }),

@@ -55,7 +55,8 @@ import {
   emitWorkspaceRenamed,
 } from "@/lib/workspace-context";
 import { updateWorkspace } from "@/contexts/workspace-context";
-import { readSurfaceCache, useCachedResource } from "@/lib/surface-cache";
+import { readSurfaceCache, useCachedResource, SurfaceCacheEvictionError } from "@/lib/surface-cache";
+import { openWorkspaceSettings,type SettingsMemberTarget } from '@/lib/workspace-settings-events';
 import { workspaceDetailCacheKey } from "@/lib/surface-prefetch";
 import { Skeleton } from "@/components/skeleton";
 import { canDeleteWorkspace } from "@/lib/workspace-permissions";
@@ -184,6 +185,7 @@ function useWorkspaceDetail(workspaceId: string | null) {
   const entry = useCachedResource<WorkspaceDetail>(key, async () => {
     const res = await authFetch(`${API_URL}/api/workspaces/${workspaceId}`);
     if (res.ok) return (await res.json()) as WorkspaceDetail;
+    if([401,403,404].includes(res.status))throw new SurfaceCacheEvictionError(new Error('workspace_unavailable'));
     const previous = key ? readSurfaceCache<WorkspaceDetail>(key).data : undefined;
     if (previous !== undefined) return previous;
     throw new Error(`HTTP ${res.status}`);
@@ -1272,7 +1274,7 @@ function TypeToConfirmDialog({
 
 // ── ws-members ──────────────────────────────────────────────
 
-export function WorkspaceMembersSection() {
+export function WorkspaceMembersSection({memberTarget,clearMember,managementEnabled=true}:{memberTarget?:SettingsMemberTarget;clearMember?:()=>void;managementEnabled?:boolean}={}) {
   const t = useT();
   const ctx = useWorkspaceContext();
   const { data, loading, refetch } = useWorkspaceDetail(ctx.workspaceId);
@@ -1292,8 +1294,9 @@ export function WorkspaceMembersSection() {
   // Pending invitations live next to the roster. Fetched on mount + after
   // any invite/resend/revoke so the list stays in sync without a reload.
   const workspaceId = ctx.workspaceId;
+  const canLoadInvitations = managementEnabled && !memberTarget;
   const fetchPending = useCallback(async () => {
-    if (!workspaceId) {
+    if (!workspaceId || !canLoadInvitations) {
       setPending([]);
       return;
     }
@@ -1306,7 +1309,7 @@ export function WorkspaceMembersSection() {
     } catch {
       // Non-fatal — the roster still renders without the pending list.
     }
-  }, [workspaceId]);
+  }, [workspaceId, canLoadInvitations]);
 
   useEffect(() => {
     void fetchPending();
@@ -1324,6 +1327,9 @@ export function WorkspaceMembersSection() {
 
   const isOwner = data.role === "owner";
   const isAdmin = data.role === "admin" || isOwner;
+  const shownMembers=memberTarget
+    ? memberTarget.workspaceId===ctx.workspaceId?data.members.filter(m=>m.userId===memberTarget.memberId):[]
+    : data.members;
 
   async function sendInvites() {
     if (!data) return;
@@ -1452,11 +1458,12 @@ export function WorkspaceMembersSection() {
 
   return (
     <div className="space-y-6">
-      <h2 className="text-lg font-semibold">{t.chrome.settingsModal.workspace.members}</h2>
+      <h2 className="text-lg font-semibold">{memberTarget?t.organization.memberDetails:t.chrome.settingsModal.workspace.members}</h2>
+      {memberTarget?<><Button className="min-h-11" variant="outline" onClick={managementEnabled?clearMember:()=>openWorkspaceSettings('ws-organization')}>{managementEnabled?t.organization.showAllMembers:t.workspaceAccess.organization}</Button>{shownMembers.length===0?<p role="status" className="text-sm">{t.organization.memberUnavailable}</p>:null}</>:null}
 
       {/* Invite panel — the primary action; the "Invite members" chrome
           button deep-links straight here. */}
-      {isAdmin && (
+      {isAdmin && managementEnabled && !memberTarget && (
         <div className="border-t border-border pt-6 space-y-3">
           <div>
             <h3 className="text-sm font-medium">{t.workspaceDetailInline.inviteHeading}</h3>
@@ -1541,7 +1548,7 @@ export function WorkspaceMembersSection() {
       )}
 
       {/* Pending invitations */}
-      {isAdmin && pending.length > 0 && (
+      {isAdmin && managementEnabled && !memberTarget && pending.length > 0 && (
         <div className="border-t border-border pt-6 space-y-3">
           <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
             {format(t.workspaceDetailInline.pendingHeading, { count: pending.length })}
@@ -1608,10 +1615,10 @@ export function WorkspaceMembersSection() {
       {/* Current members */}
       <div className="border-t border-border pt-6 space-y-3">
         <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-          {format(t.workspaceDetailInline.membersHeader, { count: data.members.length })}
+          {format(t.workspaceDetailInline.membersHeader, { count: shownMembers.length })}
         </h3>
         <div className="space-y-1.5">
-          {data.members.map((m) => (
+          {shownMembers.map((m) => (
             <div
               key={m.userId}
               className="flex items-center justify-between py-2 px-3 rounded-lg bg-muted/30"
@@ -1622,7 +1629,7 @@ export function WorkspaceMembersSection() {
                 </div>
                 <div className="min-w-0">
                   <div className="text-[13px] font-medium truncate">
-                    {m.userName ?? m.email ?? "Unknown"}
+                    {m.userName ?? m.email ?? t.organization.unnamedPerson}
                     {m.email === currentUser?.email && (
                       <span className="text-muted-foreground ml-1">{t.workspaceDetailInline.you}</span>
                     )}
@@ -1636,7 +1643,7 @@ export function WorkspaceMembersSection() {
                 <span className="text-[11px] text-muted-foreground bg-muted px-2 py-0.5 rounded-full capitalize">
                   {m.role}
                 </span>
-                {isOwner && m.role !== "owner" && (
+                {isOwner && managementEnabled && m.role !== "owner" && (
                   <DropdownMenu>
                     <DropdownMenuTrigger
                       render={

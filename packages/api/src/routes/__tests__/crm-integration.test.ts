@@ -37,6 +37,23 @@ function fixture(auth: CrmIntegrationPrincipal | null = principal) {
 }
 
 describe('[COMP:api/crm-integration-auth] Route isolation and shared adapters', () => {
+  it('returns scoped recovery for stage commands without exposing source details', async () => {
+    const f = fixture({ ...principal, grants: [{ operation: 'crm.records.write', selectors: {} }] })
+    f.service.execute.mockRejectedValueOnce(Object.assign(new Error('Hidden source details'), { code: 'scope_operation_denied' }))
+    const response = await request(f.app).post('/api/crm/integration/operations/commands')
+      .set('Authorization', `Bearer ${token}`).send({ kind: 'set_deal_pipeline_stage', dealId: eventId, pipelineId: randomUUID(), stageId: randomUUID() })
+    expect(response.status).toBe(403)
+    expect(response.body).toEqual({ error: 'scope_operation_denied', message: expect.stringContaining('administrator') })
+    expect(JSON.stringify(response.body)).not.toContain('Hidden source')
+  })
+  it.each(['audit','event-delivery'])('refuses %s reads without a persisted departmental credential ceiling', async (resource) => {
+    const f=fixture({...principal,grants:[{operation:'crm.audit.read',selectors:{}}]})
+    const response=await request(f.app).get(`/api/crm/integration/operations/${resource}`)
+      .set('Authorization',`Bearer ${token}`)
+    expect(response.status).toBe(403)
+    expect(response.body).toMatchObject({error:'not_authorized',message:expect.stringContaining('Department access')})
+    expect(JSON.stringify(response.body)).not.toContain('subjectId')
+  })
   it('exposes only the bounded member profile and requires record-write authority for edits', async () => {
     const grants = [{ operation: 'crm.records.read', selectors: {} }, { operation: 'crm.records.write', selectors: {} }] as const
     const f = fixture({ ...principal, grants: [...grants] })
