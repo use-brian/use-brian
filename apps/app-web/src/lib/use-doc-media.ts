@@ -1,10 +1,10 @@
 "use client";
 
 /** Protected durable media shares the surface cache. [COMP:app-web/doc-file-url] */
-import {useCallback,useEffect,useLayoutEffect,useMemo,useRef,useState} from 'react';
-import {fetchDocMediaProjection,resolveFileRefUrl,type FileRef,type DocMediaProjection} from '@/components/doc/doc-file-url';
+import {useCallback,useLayoutEffect,useMemo,useRef} from 'react';
+import {fetchDocMediaProjection,fetchCachedMediaProjection,type FileRef,type DocMediaProjection} from '@/components/doc/doc-file-url';
 import {invalidateSurfaceCache,loadSurfaceCache,readSurfaceCache,useCachedResource} from './surface-cache';
-import {docMediaCacheKey} from './surface-prefetch';
+import {docMediaCacheKey,fileCacheMediaCacheKey} from './surface-prefetch';
 import {useProtectedProjection} from './use-protected-projection';
 import {useOptionalWorkspaceContext} from './workspace-context';
 
@@ -13,19 +13,27 @@ const lifecycle={
   expiresInMs:(value:DocMediaProjection)=>Math.min(value.projectionDeadline-Date.now(),value.projectionMonotonicDeadline-performance.now()),
 };
 
-export function useDocMedia(workspaceId:string|null,fileId:string|null) {
+function useProtectedMedia(workspaceId:string|null,fileId:string|null,kind:'durable'|'original'|'pdf') {
   const workspace=useOptionalWorkspaceContext();
   const key=workspaceId&&fileId&&workspace?.workspaceId===workspaceId&&workspace.me.id
-    ?docMediaCacheKey(workspaceId,workspace.me.id,fileId):null;
+    ?kind==='durable'?docMediaCacheKey(workspaceId,workspace.me.id,fileId):fileCacheMediaCacheKey(workspaceId,workspace.me.id,fileId,kind):null;
   const previous=useRef(key);
   useLayoutEffect(()=>{
     if(previous.current&&previous.current!==key)invalidateSurfaceCache(previous.current);
     previous.current=key;
   },[key]);
-  const cache=useCachedResource(key,()=>fetchDocMediaProjection(workspaceId!,fileId!),lifecycle);
+  const cache=useCachedResource(key,()=>kind==='durable'?fetchDocMediaProjection(workspaceId!,fileId!):fetchCachedMediaProjection(workspaceId!,fileId!,kind),lifecycle);
   const projection=useProtectedProjection(key??'doc-media:disabled',cache.data,()=>{},cache.refresh);
   return {url:projection?.url??null,mimeType:projection?.mimeType??null,
     loading:!!key&&!projection&&!cache.error,error:cache.error};
+}
+
+export function useDocMedia(workspaceId:string|null,fileId:string|null) {
+  return useProtectedMedia(workspaceId,fileId,'durable');
+}
+
+export function useFileCacheMedia(workspaceId:string|null,fileId:string|null,representation:'original'|'pdf'='original') {
+  return useProtectedMedia(workspaceId,fileId,representation);
 }
 
 export function useDocMediaSrc(workspaceId:string|null,fileId:string|null):string|null {
@@ -70,18 +78,8 @@ export function useDocMediaDownload(workspaceId:string) {
   },[owner,workspaceId]);
 }
 
-/** Legacy cache previews remain separately audited; never reuse a prior source. */
+/** All supported refs share current identity, admission and cache ownership. */
 export function useFileRefSrc(ref:FileRef|null,workspaceId:string):string|null {
-  const durable=useDocMediaSrc(workspaceId,ref?.bucket==='workspace_files'?ref.path:null);
-  const workspace=useOptionalWorkspaceContext();
-  const legacyKey=ref?.bucket==='file_cache'&&workspace?.workspaceId===workspaceId
-    ?`${workspaceId}:${workspace.me.id}:${ref.path}`:null;
-  const [legacy,setLegacy]=useState<{key:string;url:string|null}|null>(null);
-  useEffect(()=>{
-    if(!legacyKey||!ref)return;
-    let active=true;
-    void resolveFileRefUrl(ref,workspaceId).then(url=>{if(active)setLegacy({key:legacyKey,url});});
-    return()=>{active=false;};
-  },[legacyKey,ref,workspaceId]);
-  return ref?.bucket==='workspace_files'?durable:legacyKey&&legacy?.key===legacyKey?legacy.url:null;
+  const known=ref?.bucket==='workspace_files'||ref?.bucket==='file_cache';
+  return useProtectedMedia(workspaceId,known?ref!.path:null,ref?.bucket==='workspace_files'?'durable':'original').url;
 }

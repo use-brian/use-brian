@@ -966,3 +966,9 @@ export function workspaceDepartmentRegistryCacheKey(workspaceId:string,userId:st
 export function docMediaCacheKey(workspaceId:string,userId:string,fileId:string):string {
   return `doc-media:${workspaceId}:${userId}:${fileId}`;
 }
+
+
+/** Temporary uploads have independent original/PDF admission and disposal. */
+export function fileCacheMediaCacheKey(workspaceId:string,userId:string,fileId:string,representation:'original'|'pdf'):string {
+  return `file-cache-media:${workspaceId}:${userId}:${fileId}:${representation}`;
+}

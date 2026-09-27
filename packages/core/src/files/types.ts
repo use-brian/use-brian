@@ -63,8 +63,8 @@ export type FileStore = {
    * Read by id. Pass `ctx` to gate the read through the universal access
    * predicate (workspace + visibility + sensitivity ceiling) — every
    * authenticated caller MUST pass it so a file from another workspace/clearance
-   * is never returned. Omitting `ctx` is the unscoped legacy read, reserved for
-   * the `/preview` route until it moves to signed capability URLs (#3 part 2).
+   * is never returned. Omitting `ctx` is reserved for trusted internal callers.
+   * Authenticated previews use an app-role current-source projection instead.
    */
   get(id: string, ctx?: AccessContext): Promise<CachedFile | null>
 

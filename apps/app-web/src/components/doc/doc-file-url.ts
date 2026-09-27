@@ -1,6 +1,6 @@
 import { publicRuntimeConfig } from "@/lib/runtime-public-config";
 /** Resolve doc media through authenticated no-store byte reads.
- * Legacy file_cache references retain their separately signed preview lane.
+ * Temporary file-cache previews use the same protected byte lifetime.
  * [COMP:app-web/doc-file-url]
  */
 
@@ -19,10 +19,10 @@ export type FileRef = {
 };
 
 /** One admission for bytes and their lifetime, including the body transfer. */
-async function readDocMedia(workspaceId: string, fileId: string) {
+async function readMedia(url: string) {
   const started = performance.now();
   try {
-    const res = await authFetch(`${API_URL}/api/doc-files/${encodeURIComponent(workspaceId)}/${encodeURIComponent(fileId)}?redirect=0`, { cache: 'no-store' });
+    const res = await authFetch(url, { cache: 'no-store' });
     if (!res.ok) throw new Error(`doc file fetch failed: HTTP ${res.status}`);
     const header = res.headers.get('X-Brian-Media-Valid-For-Ms');
     const validForMs = header === null ? NaN : Number(header);
@@ -36,39 +36,26 @@ async function readDocMedia(workspaceId: string, fileId: string) {
 
 /** Byte-only validation; display/download consumers use the protected hooks. */
 export async function fetchDocFileBlob(workspaceId: string, fileId: string): Promise<Blob> {
-  return (await readDocMedia(workspaceId, fileId)).blob;
+  return (await readMedia(docMediaUrl(workspaceId, fileId))).blob;
 }
 
 export type DocMediaProjection = ProtectedProjection<{ url: string; mimeType: string; validForMs: number }>;
 
 /** Create a cache-owned URL only after the whole byte read is admitted. */
 export async function fetchDocMediaProjection(workspaceId: string, fileId: string): Promise<DocMediaProjection> {
-  const { blob, ...projection } = await readDocMedia(workspaceId, fileId);
+  const { blob, ...projection } = await readMedia(docMediaUrl(workspaceId, fileId));
   return { ...projection, mimeType: blob.type, url: URL.createObjectURL(blob) };
 }
 
-/**
- * Resolve legacy cache references only. Durable references require the
- * identity-bound protected media hook, never an unmanaged URL.
- */
-export async function resolveFileRefUrl(
-  ref: FileRef,
-  workspaceId: string,
-): Promise<string | null> {
-  if (ref.bucket === "file_cache") {
-    try {
-      const res = await authFetch(
-        `${API_URL}/api/files/${encodeURIComponent(ref.path)}/preview-url?workspaceId=${encodeURIComponent(workspaceId)}`,
-      );
-      if (!res.ok) return null;
-      const data = (await res.json()) as { url?: string };
-      // The mint route returns a root-relative `/api/files/...` path; make it
-      // absolute against the API origin so it works as a cross-origin src.
-      return data.url ? `${API_URL}${data.url}` : null;
-    } catch {
-      return null;
-    }
-  }
+export type CachedMediaRepresentation = 'original' | 'pdf';
 
-  return null;
+function docMediaUrl(workspaceId:string,fileId:string):string {
+  return `${API_URL}/api/doc-files/${encodeURIComponent(workspaceId)}/${encodeURIComponent(fileId)}?redirect=0`;
+}
+
+/** Temporary rows use authenticated bytes, never a signed capability. */
+export async function fetchCachedMediaProjection(workspaceId:string,fileId:string,representation:CachedMediaRepresentation):Promise<DocMediaProjection> {
+  const endpoint=representation==='pdf'?'preview-pdf':'preview';
+  const {blob,...projection}=await readMedia(`${API_URL}/api/files/${encodeURIComponent(fileId)}/${endpoint}?workspaceId=${encodeURIComponent(workspaceId)}`);
+  return {...projection,mimeType:blob.type,url:URL.createObjectURL(blob)};
 }

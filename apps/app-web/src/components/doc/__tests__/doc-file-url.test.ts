@@ -2,8 +2,7 @@
 import {describe,it,expect,vi,beforeEach,afterEach} from 'vitest';
 const {mockAuthFetch}=vi.hoisted(()=>({mockAuthFetch:vi.fn()}));
 vi.mock('@/lib/auth-fetch',()=>({authFetch:mockAuthFetch}));
-import {fetchDocMediaProjection,fetchDocFileBlob,resolveFileRefUrl,type FileRef} from '../doc-file-url';
-const durableRef:FileRef={bucket:'workspace_files',path:'wf_1',mimeType:'image/png',sizeBytes:3,name:'fixture.png'};
+import {fetchDocMediaProjection,fetchDocFileBlob,fetchCachedMediaProjection} from '../doc-file-url';
 describe('[COMP:app-web/doc-file-url] authenticated media bytes',()=>{
   const directFetch=vi.fn(),create=vi.fn(()=> 'blob:fixture');
   beforeEach(()=>{mockAuthFetch.mockReset();directFetch.mockReset();create.mockClear();vi.stubGlobal('fetch',directFetch);vi.stubGlobal('URL',class extends URL {static createObjectURL=create;});});
@@ -22,11 +21,14 @@ describe('[COMP:app-web/doc-file-url] authenticated media bytes',()=>{
   it.each([401,403,404])('withholds media on HTTP %s',async status=>{
     mockAuthFetch.mockResolvedValue({ok:false,status});
     await expect(fetchDocFileBlob('ws_1','wf_1')).rejects.toMatchObject({cause:expect.objectContaining({message:`doc file fetch failed: HTTP ${status}`})});
-    expect(await resolveFileRefUrl(durableRef,'ws_1')).toBeNull();expect(create).not.toHaveBeenCalled();expect(directFetch).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();expect(directFetch).not.toHaveBeenCalled();
   });
-  it('refuses unmanaged durable URL resolution',async()=>{
-    mockAuthFetch.mockResolvedValue({ok:true,headers:new Headers({'X-Brian-Media-Valid-For-Ms':'30000'}),blob:async()=>new Blob(['fixture'])});
-    expect(await resolveFileRefUrl(durableRef,'ws_1')).toBeNull();expect(mockAuthFetch).not.toHaveBeenCalled();
+  it.each(['original','pdf'] as const)('reads cached %s bytes through authenticated no-store admission',async representation=>{
+    mockAuthFetch.mockResolvedValue({ok:true,headers:new Headers({'X-Brian-Media-Valid-For-Ms':'30000'}),blob:async()=>new Blob(['fixture'],{type:'application/pdf'})});
+    const result=await fetchCachedMediaProjection('workspace','file',representation);
+    expect(result.url).toBe('blob:fixture');expect(result.mimeType).toBe('application/pdf');
+    expect(mockAuthFetch).toHaveBeenCalledWith(expect.stringContaining('/api/files/file/'+(representation==='pdf'?'preview-pdf':'preview')+'?workspaceId=workspace'),{cache:'no-store'});
+    expect(directFetch).not.toHaveBeenCalled();
   });
   it.each([null,'','0','-1','NaN','Infinity'])('refuses an absent or invalid display lifetime (%s)',async lifetime=>{
     const headers=new Headers();if(lifetime!==null)headers.set('X-Brian-Media-Valid-For-Ms',lifetime);

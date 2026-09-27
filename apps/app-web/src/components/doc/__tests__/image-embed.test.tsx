@@ -9,8 +9,7 @@ import { en } from "@/lib/i18n/dictionaries/en";
 
 (globalThis as {IS_REACT_ACT_ENVIRONMENT?:boolean}).IS_REACT_ACT_ENVIRONMENT=true;
 
-// Durable refs return authenticated bytes; legacy file_cache refs retain
-// the separately signed preview lane. No real network is used.
+// Both durable and temporary refs return authenticated, lifetime-bound bytes.
 const mockAuthFetch = vi.fn();
 vi.mock("@/lib/auth-fetch", () => ({
   authFetch: (...args: unknown[]) => mockAuthFetch(...args),
@@ -124,10 +123,11 @@ describe("[COMP:app-web/image-embed] Durable image/file embed render", () => {
     expect(container.textContent).toContain("spec.pdf");
   });
 
-  it("resolves a legacy file_cache image ref through the signed preview-URL mint", async () => {
+  it("resolves a legacy file_cache image ref through authenticated expiring bytes", async () => {
     mockAuthFetch.mockResolvedValueOnce({
       ok: true,
-      json: async () => ({ url: "/api/files/fc_1/preview?sig=signed-token" }),
+      headers: new Headers({"X-Brian-Media-Valid-For-Ms":"30000"}),
+      blob: async () => new Blob(["fixture"],{type:"image/png"}),
     });
     mount(
       <BlockImage
@@ -146,15 +146,16 @@ describe("[COMP:app-web/image-embed] Durable image/file embed render", () => {
         workspaceId="ws_1"
       />,
     );
-    // Let the async mint round-trip settle, then flush React effects.
+    // Let the authenticated byte read settle, then flush React effects.
     await act(async () => {
       await Promise.resolve();
     });
-    // Minted against the correct id + workspace.
+    // Read against the correct id and workspace, never handed a capability.
     expect(mockAuthFetch).toHaveBeenCalledWith(
-      expect.stringContaining("/api/files/fc_1/preview-url?workspaceId=ws_1"),
+      expect.stringContaining("/api/files/fc_1/preview?workspaceId=ws_1"),
+      {cache:"no-store"},
     );
     const img = container.querySelector("img");
-    expect(img?.getAttribute("src")).toContain("/api/files/fc_1/preview?sig=signed-token");
+    expect(img?.getAttribute("src")).toBe("blob:fixture");
   });
 });
