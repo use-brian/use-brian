@@ -1,7 +1,7 @@
 /** Current-policy explanations and content-free audit. [COMP:api/workspace-access] */
 import type { PoolClient } from 'pg'
 import { canRead, scopeGrantContains, type ScopeGrant } from '@use-brian/core'
-import type { WorkspaceAccessExplanation, WorkspaceAccessEvents, WorkspaceAccessOverview } from '@use-brian/shared'
+import type { WorkspaceDepartmentRegistry, WorkspaceAccessExplanation, WorkspaceAccessEvents, WorkspaceAccessOverview } from '@use-brian/shared'
 import { getPool } from '../db/client.js'
 import { createDbContextScopeStore } from '../db/context-scope-store.js'
 import { getOrganizationChartInTransaction } from '../db/org-chart-store.js'
@@ -9,7 +9,7 @@ import { resolveOperationCeilingsSystem } from '../db/workspace-store.js'
 import { ContextNotAvailableError, resolveTurnScopeSystem, type TurnScopeAssistant } from '../context-scope/resolve-turn-scope.js'
 import { getWorkspaceAccessInTransaction } from './service.js'
 import { workspaceAccessExplanationQuerySchema, workspaceAccessHistoryQuerySchema } from './commands.js'
-import { WorkspaceAccessError } from './policy.js'
+import { WorkspaceAccessError, DEFAULT_GRANT_DAYS, MAX_DELEGATED_GRANT_DAYS } from './policy.js'
 
 type Inspection = {client:PoolClient;view:WorkspaceAccessOverview}
 async function inspect<T>(workspaceId:string,userId:string,run:(snapshot:Inspection)=>Promise<T>):Promise<T>{
@@ -128,5 +128,30 @@ export async function getWorkspaceAccessEvents(workspaceId:string,userId:string,
         return{...row,createdAt:row.createdAt.toISOString(),actor:actor?{id:actor.id,name:actor.name}:null,
           subjectId:view.canAdminister||row.kind.startsWith('access.')||(row.subjectId&&visibleSubjects.has(row.subjectId))?row.subjectId:null}
       })}
+  })
+}
+
+/** Metadata is projected in the same snapshot as capabilities and expiry. */
+export async function getWorkspaceDepartmentRegistry(workspaceId:string,userId:string,input:unknown={}):Promise<WorkspaceDepartmentRegistry>{
+  if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).length)throw new WorkspaceAccessError('invalid_command',400)
+  return inspect(workspaceId,userId,async({client,view})=>{
+    const chart=await getOrganizationChartInTransaction(client,workspaceId,userId,false)
+    const visibleIds=view.teams.map(team=>team.id)
+    const metadata=(await client.query<{id:string;key:string;description:string|null;color:string|null;readAll:boolean;readGrantGroupIds:string[]}>(`
+      SELECT g.id,g.key,g.description,g.color,g.read_all AS "readAll",
+        ARRAY(SELECT target.id FROM workspace_group_compartment_grants grant_row
+          JOIN workspace_groups target ON target.workspace_id=g.workspace_id AND target.compartment_key=grant_row.compartment_key
+          WHERE grant_row.group_id=g.id AND target.id<>g.id AND target.id=ANY($2::uuid[]) ORDER BY target.id) AS "readGrantGroupIds"
+      FROM workspace_groups g WHERE g.workspace_id=$1 AND g.id=ANY($2::uuid[])`,[workspaceId,visibleIds])).rows
+    const assistants=chart.subjects.filter(subject=>subject.kind==='assistant').map(({id,name})=>({id,name}))
+    return{workspaceId,policyRevision:view.policyRevision,directoryRevision:chart.revision,
+      validForMs:Math.min(view.validForMs,chart.validForMs),canAdminister:view.canAdminister,
+      people:view.people.map(({id,name})=>({id,name})),assistants,
+      teams:view.teams.map(team=>{
+        const row=metadata.find(candidate=>candidate.id===team.id)!
+        return{...row,name:team.name,status:'active' as const,memberIds:team.memberIds,
+          assistantIds:team.assistantIds.filter(id=>assistants.some(assistant=>assistant.id===id)),
+          orgUnits:chart.units.filter(unit=>unit.teamId===team.id).map(({id,name})=>({id,name}))}
+      }),requestPolicy:{defaultDays:DEFAULT_GRANT_DAYS,maxDays:MAX_DELEGATED_GRANT_DAYS,ongoingAdminOnly:true}}
   })
 }

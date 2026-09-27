@@ -1,4 +1,4 @@
-import type {WorkspaceAccessExplanation,WorkspaceAccessExplanationQuery,WorkspaceAccessEvents} from '@use-brian/shared';
+import type { WorkspaceDepartmentRegistry,WorkspaceAccessExplanation,WorkspaceAccessExplanationQuery,WorkspaceAccessEvents} from '@use-brian/shared';
 import type { WorkspaceAccessHistory, OrganizationChart, OrganizationCommandIntent, OrganizationCommandApply, OrganizationCommandReview, DepartmentAccessCommand, DepartmentCommandReview, DepartmentCommandApply, WorkspaceAccessOverview, ScopeReviewInventory, ScopeReviewCommand, ScopeReview, ScopeReviewKind } from '@use-brian/shared';
 import { protectProjection, type ProtectedProjection } from '@/lib/use-protected-projection';
 import { authFetch } from '@/lib/auth-fetch';
@@ -90,4 +90,8 @@ export function fetchWorkspaceAccessExplanation(workspaceId:string,selection:Wor
 export function fetchWorkspaceAccessEvents(workspaceId:string,after?:string,expectedPolicyRevision?:string):Promise<ProtectedProjection<WorkspaceAccessEvents>> {
   const params=new URLSearchParams();if(after)params.set('after',after);if(expectedPolicyRevision)params.set('expectedPolicyRevision',expectedPolicyRevision);
   return scopeReviewRequest<WorkspaceAccessEvents>(workspaceId,`access/events?${params}`);
+}
+
+export function fetchWorkspaceDepartmentRegistry(workspaceId:string):Promise<ProtectedProjection<WorkspaceDepartmentRegistry>> {
+  return scopeReviewRequest<WorkspaceDepartmentRegistry>(workspaceId,'access/registry');
 }

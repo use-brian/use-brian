@@ -1,11 +1,11 @@
 "use client";
 
 
-import { publicRuntimeConfig } from "@/lib/runtime-public-config";
+import type { DepartmentAccessCommand } from "@use-brian/shared";
 /** Workspace Team/Project registry and readiness UI. [COMP:app-web/context-scope] */
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import Link from "next/link";
-import { Archive, Check, Info, Plus, ShieldAlert, ShieldCheck } from "lucide-react";
+import { Archive, Check, Plus, ShieldAlert, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { SearchableSelect } from "@/components/ui/searchable-select";
@@ -13,95 +13,69 @@ import { DepartmentChangeFeedback, useDepartmentChange } from "@/components/work
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { useWorkspaceContext } from "@/lib/workspace-context";
 import { useT } from "@/lib/i18n/client";
-import { authFetch } from "@/lib/auth-fetch";
+import { fetchWorkspaceDepartmentRegistry, ORGANIZATION_CHANGED_EVENT } from "@/lib/api/workspace-access";
+import { useCachedResource, invalidateSurfaceCache } from "@/lib/surface-cache";
+import { useProtectedProjection } from "@/lib/use-protected-projection";
+import { workspaceDepartmentRegistryCacheKey } from "@/lib/surface-prefetch";
+import { WORKSPACE_IDENTITY_REFRESH_EVENT } from "@/lib/workspace-identity-events";
+import { SurfaceSkeletonFor } from "@/components/chrome/surface-skeleton";
+import { organizationHref } from "@/lib/organization-navigation";
+import { format } from "@/lib/i18n";
 import {
   archiveContextProject,
   createContextProject,
-  getContextTeam,
-  getContextExplanation,
   getContextReadiness,
   listContextProjects,
-  listContextTeams,
   updateContextProject,
-  type ContextExplanation,
   type ContextProject,
   type ContextReadiness,
-  type ContextTeam,
 } from "@/lib/api/context-scopes";
-
-const API_URL = publicRuntimeConfig().apiUrl ?? "http://localhost:4000";
-type RosterMember = { userId: string; userName?: string | null; email?: string | null };
-type RosterAssistant = { id: string; name: string };
 
 function stableKey(name: string): string {
   return name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 39);
 }
 
 export function TeamsContextSection({renderAccessSettings}:{renderAccessSettings?:(teamId:string)=>ReactNode}={}) {
-  const { workspaceId, role } = useWorkspaceContext();
-  const t = useT().contextScope;
-  const [teams, setTeams] = useState<ContextTeam[]>([]);
+  const { workspaceId, me } = useWorkspaceContext();
+  const dictionary = useT(), t = dictionary.contextScope, accessCopy = dictionary.workspaceAccess;
   const [name, setName] = useState("");
   const [selectedId, setSelectedId] = useState("");
   const [grantIds, setGrantIds] = useState<string[]>([]);
   const [readAll, setReadAll] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [detail, setDetail] = useState<ContextTeam | null>(null);
-  const [members, setMembers] = useState<RosterMember[]>([]);
-  const [assistants, setAssistants] = useState<RosterAssistant[]>([]);
-  const [explanation, setExplanation] = useState<ContextExplanation | null>(null);
   const [editName, setEditName] = useState("");
   const [editDescription, setEditDescription] = useState("");
   const [editColor, setEditColor] = useState("");
-  const canManage = role === "owner" || role === "admin";
-  const change = useDepartmentChange(workspaceId, async (_result, isCurrent) => {
-    const [next, nextDetail] = await Promise.all([
-      listContextTeams(workspaceId),
-      selectedId ? getContextTeam(workspaceId, selectedId) : Promise.resolve(null),
-    ]);
-    if (!isCurrent()) return;
-    setTeams(next); setDetail(nextDetail);
-  });
-
-  async function reload() {
-    const next = await listContextTeams(workspaceId);
-    setTeams(next);
-    if (!selectedId && next[0]) setSelectedId(next[0].id);
-  }
-  useEffect(() => { void reload().catch(() => setError(t.loadFailed)); }, [workspaceId]);
-  const selected = teams.find((team) => team.id === selectedId) ?? null;
-  useEffect(() => {
-    setGrantIds((selected?.readGrantGroupIds ?? []).filter((id) => id !== selected?.id));
-    setReadAll(selected?.readAll ?? false);
-    setEditName(selected?.name ?? "");
-    setEditDescription(selected?.description ?? "");
-    setEditColor(selected?.color ?? "");
-  }, [
-    selectedId,
-    selected?.name,
-    selected?.description,
-    selected?.color,
-    selected?.readAll,
-    selected?.readGrantGroupIds,
-  ]);
-  useEffect(() => {
-    let cancelled = false;
-    void Promise.all([
-      selectedId ? getContextTeam(workspaceId, selectedId) : Promise.resolve(null),
-      authFetch(`${API_URL}/api/workspaces/${workspaceId}`).then((response) => response.ok ? response.json() : {}),
-      authFetch(`${API_URL}/api/assistants?workspaceId=${encodeURIComponent(workspaceId)}`).then((response) => response.ok ? response.json() : {}),
-      selectedId
-        ? getContextExplanation(workspaceId, { groupId: selectedId }).catch(() => null)
-        : Promise.resolve(null),
-    ]).then(([nextDetail, workspace, assistantBody, nextExplanation]) => {
-      if (cancelled) return;
-      setDetail(nextDetail);
-      setMembers((workspace as { members?: RosterMember[] }).members ?? []);
-      setAssistants((assistantBody as { assistants?: RosterAssistant[] }).assistants ?? []);
-      setExplanation(nextExplanation);
-    }).catch(() => { if (!cancelled) setError(t.loadFailed); });
-    return () => { cancelled = true; };
-  }, [workspaceId, selectedId, t.loadFailed]);
+  const key=workspaceDepartmentRegistryCacheKey(workspaceId,me.id);
+  const resource=useCachedResource(key,()=>fetchWorkspaceDepartmentRegistry(workspaceId));
+  const change=useDepartmentChange(workspaceId,async(_result,isCurrent)=>{if(isCurrent())await resource.refresh();},selectedId);
+  const data=useProtectedProjection(key,resource.data,()=>{
+    change.cancelReview();setName("");setEditName("");setEditDescription("");setEditColor("");setGrantIds([]);setReadAll(false);
+  },resource.refresh);
+  const teams=data?.teams??[];
+  const selected=teams.find(team=>team.id===selectedId)??null;
+  const members=(data?.people??[]).map(person=>({userId:person.id,userName:person.name}));
+  const assistants=data?.assistants??[];
+  const canManage=data?.canAdminister===true;
+  const save=(command:DepartmentAccessCommand,description:string)=>data?change.save(command,description,data.policyRevision):Promise.resolve(null);
+  useEffect(()=>{
+    const purge=(event:Event)=>{
+      const detail=(event as CustomEvent<{workspaceId?:string}>).detail;
+      if(detail?.workspaceId&&detail.workspaceId!==workspaceId)return;
+      change.cancelReview();invalidateSurfaceCache(key);
+    };
+    window.addEventListener(ORGANIZATION_CHANGED_EVENT,purge);
+    window.addEventListener(WORKSPACE_IDENTITY_REFRESH_EVENT,purge);
+    return()=>{window.removeEventListener(ORGANIZATION_CHANGED_EVENT,purge);window.removeEventListener(WORKSPACE_IDENTITY_REFRESH_EVENT,purge);};
+  },[workspaceId,key]);
+  useEffect(()=>{if(data&&!selectedId&&data.teams[0])setSelectedId(data.teams[0].id);},[data,selectedId]);
+  // Equal metadata renewals preserve unfinished drafts; object identity does not.
+  const selectedBundle=selected?.readGrantGroupIds.join(',');
+  useEffect(()=>{
+    setGrantIds((selected?.readGrantGroupIds??[]).filter(id=>id!==selected?.id));
+    setReadAll(selected?.readAll??false);setEditName(selected?.name??"");
+    setEditDescription(selected?.description??"");setEditColor(selected?.color??"");
+  },[selectedId,selected?.name,selected?.description,selected?.color,selected?.readAll,selectedBundle]);
 
   async function create() {
     const trimmed = name.trim();
@@ -109,7 +83,7 @@ export function TeamsContextSection({renderAccessSettings}:{renderAccessSettings
     if (!trimmed || !key) return;
     setError(null);
     try {
-      const result = await change.save({ type: "department.create", name: trimmed, key }, `${t.createTeam}: ${trimmed}`);
+      const result = await save({ type: "department.create", name: trimmed, key }, `${t.createTeam}: ${trimmed}`);
       if (!result) return;
       setName("");
       if (result.appliedCommand?.subjectId) setSelectedId(result.appliedCommand.subjectId);
@@ -122,7 +96,7 @@ export function TeamsContextSection({renderAccessSettings}:{renderAccessSettings
     if (!selected) return;
     setError(null);
     try {
-      if (!await change.save({ type: "department.read_bundle.set", teamId: selected.id, readAll, groupIds: grantIds }, `${t.saveAccess}: ${selected.name}`)) return;
+      if (!await save({ type: "department.read_bundle.set", teamId: selected.id, readAll, groupIds: grantIds }, `${t.saveAccess}: ${selected.name}`)) return;
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : t.updateFailed);
     }
@@ -132,7 +106,7 @@ export function TeamsContextSection({renderAccessSettings}:{renderAccessSettings
     if (!selected || !editName.trim()) return;
     setError(null);
     try {
-      if (!await change.save({ type: "department.update", teamId: selected.id,
+      if (!await save({ type: "department.update", teamId: selected.id,
         name: editName.trim(),
         description: editDescription.trim() || null,
         color: editColor.trim() || null,
@@ -144,7 +118,7 @@ export function TeamsContextSection({renderAccessSettings}:{renderAccessSettings
     if (!selected) return;
     setError(null);
     try {
-      if (!await change.save({ type: "department.member.set", teamId: selected.id, userId, enabled, activateAssigned: false }, `${t.teamMembersTitle}: ${selected.name}. ${members.find(member => member.userId === userId)?.userName ?? members.find(member => member.userId === userId)?.email ?? t.members}. ${t.membershipModeHint}`)) return;
+      if (!await save({ type: "department.member.set", teamId: selected.id, userId, enabled, activateAssigned: false }, `${t.teamMembersTitle}: ${selected.name}. ${members.find(member => member.userId === userId)?.userName ?? t.members}. ${t.membershipModeHint}`)) return;
     } catch (cause) { setError(cause instanceof Error ? cause.message : t.updateFailed); }
   }
 
@@ -152,19 +126,20 @@ export function TeamsContextSection({renderAccessSettings}:{renderAccessSettings
     if (!selected) return;
     setError(null);
     try {
-      if (!await change.save({ type: "department.assistant.set", teamId: selected.id, assistantId, enabled }, `${t.teamAssistantsTitle}: ${selected.name}. ${assistants.find(assistant => assistant.id === assistantId)?.name ?? t.teamAssistantsTitle}`)) return;
+      if (!await save({ type: "department.assistant.set", teamId: selected.id, assistantId, enabled }, `${t.teamAssistantsTitle}: ${selected.name}. ${assistants.find(assistant => assistant.id === assistantId)?.name ?? t.teamAssistantsTitle}`)) return;
     } catch (cause) { setError(cause instanceof Error ? cause.message : t.updateFailed); }
   }
 
   async function archive() {
     if (!selected) return;
     try {
-      if (!await change.save({ type: "department.archive", teamId: selected.id }, `${selected.name}. ${t.archiveTeamDescription}`)) return;
+      if (!await save({ type: "department.archive", teamId: selected.id }, `${selected.name}. ${t.archiveTeamDescription}`)) return;
       setSelectedId("");
     }
     catch (cause) { setError(cause instanceof Error ? cause.message : t.updateFailed); }
   }
 
+  if(!data)return resource.error?<div className="space-y-3"><p role="alert">{t.loadFailed}</p><Button className="min-h-11" onClick={()=>void resource.refresh()}>{accessCopy.reload}</Button></div>:<SurfaceSkeletonFor surface="organization"/>;
   return (
     <div className="space-y-6">
       <div>
@@ -183,7 +158,7 @@ export function TeamsContextSection({renderAccessSettings}:{renderAccessSettings
       {teams.length === 0 ? <p className="text-sm text-muted-foreground">{t.noTeams}</p> : (
         <div className="space-y-4">
           <SearchableSelect value={selectedId} disabled={change.busy} onValueChange={setSelectedId}
-            items={teams.map((team) => ({ value: team.id, label: team.name, hint: `${team.memberCount} ${t.members}` }))}
+            items={teams.map((team) => ({ value: team.id, label: team.name }))}
             searchPlaceholder={t.searchTeams} emptyMessage={t.noTeams} />
           {selected ? (
             <div className="rounded-xl border border-border p-4 space-y-4">
@@ -230,19 +205,10 @@ export function TeamsContextSection({renderAccessSettings}:{renderAccessSettings
                   ? t.accessPreviewAll
                   : `${t.accessPreviewPrefix} ${[selected.name, ...teams.filter((team) => grantIds.includes(team.id)).map((team) => team.name)].join(", ")}`}
               </div>
-              <div className="rounded-lg border border-border/70 px-3 py-3 text-xs">
-                <h4 className="flex items-center gap-1.5 font-medium text-foreground"><Info className="size-3.5" />{t.whyCanAccessTitle}</h4>
-                {explanation ? (
-                  <div className="mt-2 space-y-1 text-muted-foreground">
-                    <p>{explanation.memberTeams.length > 0
-                      ? `${t.directMembershipsPrefix} ${explanation.memberTeams.map((team) => team.name).join(", ")}`
-                      : t.directMembershipsNone}</p>
-                    <p>{explanation.effective.teamUniverse
-                      ? t.effectiveTeamsAll
-                      : `${t.effectiveTeamsPrefix} ${teams.filter((team) => explanation.effective.teamIds.includes(team.id)).map((team) => team.name).join(", ") || t.none}`}</p>
-                    <p>{t.intersectionRule}</p>
-                  </div>
-                ) : <p className="mt-2 text-muted-foreground">{t.explanationUnavailable}</p>}
+              <div className="space-y-2 text-sm">
+                <h4 className="font-medium">{accessCopy.relatedOrgUnits}</h4>
+                {selected.orgUnits.length?<ul>{selected.orgUnits.map(unit=><li key={unit.id}><Link className="flex min-h-11 items-center underline" href={organizationHref(workspaceId)}>{unit.name}</Link></li>)}</ul>:<p className="text-muted-foreground">{accessCopy.noVisibleOrgUnits}</p>}
+                <p className="text-muted-foreground">{format(accessCopy.requestPolicyHint,{defaultDays:data.requestPolicy.defaultDays,maxDays:data.requestPolicy.maxDays})}</p>
               </div>
               <div className="grid gap-4 md:grid-cols-2">
                 <div>
@@ -252,11 +218,11 @@ export function TeamsContextSection({renderAccessSettings}:{renderAccessSettings
                     {members.map((member) => (
                       <label key={member.userId} className="flex items-center gap-2 text-sm">
                         <Checkbox
-                          checked={Boolean(detail?.members?.some((row) => row.userId === member.userId))}
+                          checked={selected.memberIds.includes(member.userId)}
                           disabled={!canManage || change.busy}
                           onCheckedChange={(value) => void setMember(member.userId, Boolean(value))}
                         />
-                        {member.userName ?? member.email ?? member.userId}
+                        {member.userName || dictionary.workspaceAccess.unnamed}
                       </label>
                     ))}
                   </div>
@@ -267,7 +233,7 @@ export function TeamsContextSection({renderAccessSettings}:{renderAccessSettings
                     {assistants.map((assistant) => (
                       <label key={assistant.id} className="flex items-center gap-2 text-sm">
                         <Checkbox
-                          checked={Boolean(detail?.assistantIds?.includes(assistant.id))}
+                          checked={selected.assistantIds.includes(assistant.id)}
                           disabled={!canManage || change.busy}
                           onCheckedChange={(value) => void setAssistant(assistant.id, Boolean(value))}
                         />

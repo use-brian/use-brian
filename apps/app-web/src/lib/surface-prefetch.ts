@@ -957,3 +957,8 @@ export function workspaceAccessInspectionCacheKey(workspaceId:string,userId:stri
 
 /** Meeting tags share workspace/page cache identity across the doc panel. */
 export const meetingTagsCacheKey = (workspaceId: string, pageId: string): string => `meeting-tags:${workspaceId}:${pageId}`;
+
+/** Registry snapshots share the access invalidation namespace and viewer scope. */
+export function workspaceDepartmentRegistryCacheKey(workspaceId:string,userId:string):string {
+  return `${workspaceAccessCacheKey(workspaceId,userId)}:registry`;
+}

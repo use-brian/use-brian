@@ -165,6 +165,10 @@ export const en = {
     resourceCheckRequired: "A matching scope does not authorize a specific resource. Private visibility, resource permissions and publishing checks still apply.",
     currentPreviewHint: "This preview uses current permissions. Existing conversations can have narrower limits.",
     accessSettings: "Access settings",
+    relatedOrgUnits: "Related organization units",
+    noVisibleOrgUnits: "No visible linked organization units.",
+    requestPolicyHint: "Requests default to {defaultDays} days, with custom durations up to {maxDays} days. Only workspace owners and administrators can request ongoing access.",
+
     assistantCeiling: "Assistant ceiling",
     contextDepartment: "Department context",
     contextProject: "Project context",

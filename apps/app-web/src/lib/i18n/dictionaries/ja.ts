@@ -152,6 +152,10 @@ export const ja: Dictionary = {
     resourceCheckRequired: "範囲が一致しても、個々のリソースへの操作は許可されません。非公開設定、リソース権限、公開時の確認も適用されます。",
     currentPreviewHint: "このプレビューは現在の権限に基づきます。既存の会話には、さらに狭い制限が適用される場合があります。",
     accessSettings: "アクセス設定",
+    relatedOrgUnits: "関連する組織単位",
+    noVisibleOrgUnits: "表示できる関連組織単位はありません。",
+    requestPolicyHint: "申請期間の既定値は{defaultDays}日で、最大{maxDays}日まで指定できます。無期限のアクセスを申請できるのは、ワークスペースのオーナーと管理者のみです。",
+
     assistantCeiling: "アシスタントの上限",
     contextDepartment: "部門コンテキスト",
     contextProject: "プロジェクトコンテキスト",

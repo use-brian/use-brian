@@ -6,7 +6,7 @@ import {executeOrganizationCommand} from '../../db/org-chart-store.js'
 import {getPool,getAppPool} from '../../db/client.js'
 import {createDbWorkspaceGroupStore} from '../../db/workspace-group-store.js'
 import {executeDepartmentAccessCommand as execute} from '../service.js'
-import {explainWorkspaceAccess,getWorkspaceAccessEvents} from '../access-inspection.js'
+import {explainWorkspaceAccess,getWorkspaceAccessEvents,getWorkspaceDepartmentRegistry} from '../access-inspection.js'
 import {createWorkspaceAccessTools} from '../tools.js'
 // Projection tests exercise existing canonical grants. Separate real readiness
 // coverage keeps this incomplete release gated; this mock is not certification.
@@ -32,6 +32,31 @@ async function fixture(){
 }
 describe('[COMP:api/workspace-access] current authority explanations and audit',()=>{
   afterAll(async()=>{await getAppPool().end();await pool.end()})
+  it('shares an expiring registry without hidden assignment counts, names or emails',async()=>{
+    const f=await fixture(),hidden=await f.groups.createTeam(f.owner,f.workspaceId,{name:'Private operations',key:'private-operations'}),assistantId=randomUUID()
+    await execute(f.workspaceId,f.owner,{type:'department.read_bundle.set',teamId:f.team.id,readAll:false,groupIds:[hidden.id]})
+    await pool.query("INSERT INTO assistants(id,workspace_id,name) VALUES($1,$2,'Unpublished assistant')",[assistantId,f.workspaceId])
+    await execute(f.workspaceId,f.owner,{type:'department.assistant.set',teamId:f.team.id,assistantId,enabled:true})
+    const published=await executeOrganizationCommand(f.workspaceId,f.owner,{type:'org.unit.save',name:'Published research',parentId:null,teamId:f.team.id,directoryVisibility:'workspace',position:0})
+    await executeOrganizationCommand(f.workspaceId,f.owner,{type:'org.unit.save',name:'Private structure',parentId:null,teamId:hidden.id,directoryVisibility:'members',position:1})
+    const member=await getWorkspaceDepartmentRegistry(f.workspaceId,f.member)
+    expect(member).toMatchObject({canAdminister:false,people:[{id:f.member}],assistants:[],requestPolicy:{defaultDays:30,maxDays:90,ongoingAdminOnly:true}})
+    expect(member.teams).toHaveLength(1)
+    expect(member.teams[0]).toMatchObject({id:f.team.id,memberIds:[],assistantIds:[],readGrantGroupIds:[],orgUnits:[{id:published.units[0].id,name:'Published research'}]})
+    expect(member.validForMs).toBeGreaterThan(0);expect(member.validForMs).toBeLessThanOrEqual(30000)
+    const wire=JSON.stringify(member)
+    for(const forbidden of ['Private operations','Private structure','Unpublished assistant','memberCount','email',hidden.compartmentKey!])expect(wire).not.toContain(forbidden)
+    const owner=await getWorkspaceDepartmentRegistry(f.workspaceId,f.owner)
+    expect(owner.canAdminister).toBe(true);expect(owner.teams.find(team=>team.id===f.team.id)?.readGrantGroupIds).toContain(hidden.id)
+    expect(owner.assistants).toContainEqual({id:assistantId,name:'Unpublished assistant'})
+    const native=await createWorkspaceAccessTools()[0].execute({registry:true},{workspaceId:f.workspaceId,workspaceActorUserId:f.member,userId:f.owner} as ToolContext)
+    expect(native.data).toMatchObject({teams:member.teams,people:member.people,assistants:member.assistants,policyRevision:member.policyRevision})
+    await executeOrganizationCommand(f.workspaceId,f.owner,{type:'org.unit.save',id:published.units[0].id,expectedVersion:published.units[0].version,name:'Published research',parentId:null,teamId:f.team.id,directoryVisibility:'members',position:0})
+    expect((await getWorkspaceDepartmentRegistry(f.workspaceId,f.member)).teams[0].orgUnits).toEqual([])
+    await pool.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2',[f.workspaceId,f.member])
+    await expect(getWorkspaceDepartmentRegistry(f.workspaceId,f.member)).rejects.toMatchObject({code:'not_found'})
+    await expect(getWorkspaceDepartmentRegistry(f.workspaceId,f.owner,{unexpected:true})).rejects.toMatchObject({code:'invalid_command'})
+  })
   it('keeps independent grants visible after revocation and never turns a read grant into editing',async()=>{
     const f=await fixture(),first=await f.grant(),second=await f.grant()
     await execute(f.workspaceId,f.owner,{type:'department.member.set',teamId:f.team.id,userId:f.member,enabled:true})

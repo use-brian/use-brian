@@ -152,6 +152,10 @@ export const zh: Dictionary = {
     resourceCheckRequired: "範圍相符不代表可以操作特定資源。仍須符合私人可見性、資源權限及發佈檢查。",
     currentPreviewHint: "此預覽依據目前權限。現有對話的存取範圍可能更窄。",
     accessSettings: "存取設定",
+    relatedOrgUnits: "相關組織單位",
+    noVisibleOrgUnits: "沒有可見的關聯組織單位。",
+    requestPolicyHint: "申請預設為 {defaultDays} 天，自訂期限最多 {maxDays} 天。只有工作空間擁有者和管理員可以申請持續存取。",
+
     assistantCeiling: "助理權限上限",
     contextDepartment: "部門情境",
     contextProject: "專案情境",

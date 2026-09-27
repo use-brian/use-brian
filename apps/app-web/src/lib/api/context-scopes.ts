@@ -86,16 +86,6 @@ export async function listContextTeams(workspaceId: string): Promise<ContextTeam
   return body.groups;
 }
 
-export async function getContextTeam(
-  workspaceId: string,
-  teamId: string,
-): Promise<ContextTeam> {
-  const body = await json<{ group: ContextTeam }>(
-    `/api/workspaces/${encodeURIComponent(workspaceId)}/groups/${encodeURIComponent(teamId)}`,
-  );
-  return body.group;
-}
-
 export async function listContextProjects(
   workspaceId: string,
   includeArchived = false,

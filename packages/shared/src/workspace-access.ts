@@ -157,3 +157,12 @@ export type WorkspaceAccessEvents = {
   workspaceId:string;policyRevision:string;validForMs:number;nextCursor:string|null
   events:Array<{id:string;kind:string;createdAt:string;policyRevision:string;actor:{id:string;name:string}|null;subjectId:string|null}>
 }
+
+/** One authorized, expiring snapshot for department configuration and native inspection. */
+export type WorkspaceDepartmentRegistry = {
+  workspaceId:string;policyRevision:string;directoryRevision:string;validForMs:number;canAdminister:boolean
+  teams:Array<{id:string;name:string;key:string;description:string|null;color:string|null;status:'active';readAll:boolean;readGrantGroupIds:string[];memberIds:string[];assistantIds:string[];orgUnits:Array<{id:string;name:string}>}>
+  people:Array<{id:string;name:string}>
+  assistants:Array<{id:string;name:string}>
+  requestPolicy:{defaultDays:number;maxDays:number;ongoingAdminOnly:true}
+}

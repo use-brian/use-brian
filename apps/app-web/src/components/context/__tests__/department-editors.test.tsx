@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 import { act, type ReactNode } from 'react';
+import {protectProjection} from '@/lib/use-protected-projection';
+import {resetSurfaceCache,SurfaceCacheEvictionError} from '@/lib/surface-cache';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TeamsContextSection } from '@/components/settings-modal/sections/context-scopes-section';
@@ -10,9 +12,9 @@ import { WORKSPACE_IDENTITY_REFRESH_EVENT } from '@/lib/workspace-identity-event
 import { DepartmentChangeFeedback, useDepartmentChange } from '@/components/workspace-access/use-department-change';
 
 (globalThis as {IS_REACT_ACT_ENVIRONMENT?:boolean}).IS_REACT_ACT_ENVIRONMENT=true;
-const mocks=vi.hoisted(()=>({fetch:vi.fn(),prepare:vi.fn(),save:vi.fn(),confirm:vi.fn(),detail:vi.fn(),config:vi.fn(),viewer:{workspaceId:'workspace',me:{id:'owner'},role:'owner'}}));
+const mocks=vi.hoisted(()=>({registry:vi.fn(),fetch:vi.fn(),prepare:vi.fn(),save:vi.fn(),confirm:vi.fn(),detail:vi.fn(),config:vi.fn(),viewer:{workspaceId:'workspace',me:{id:'owner'},role:'owner'}}));
 vi.mock('@/lib/workspace-context',()=>({useWorkspaceContext:()=>mocks.viewer}));
-vi.mock('@/lib/api/workspace-access',()=>({fetchWorkspaceAccess:mocks.fetch,prepareWorkspaceAccessCommand:mocks.prepare,saveWorkspaceAccessCommand:mocks.save,ORGANIZATION_CHANGED_EVENT:'brian:organization-changed'}));
+vi.mock('@/lib/api/workspace-access',()=>({fetchWorkspaceAccess:mocks.fetch,fetchWorkspaceDepartmentRegistry:mocks.registry,prepareWorkspaceAccessCommand:mocks.prepare,saveWorkspaceAccessCommand:mocks.save,ORGANIZATION_CHANGED_EVENT:'brian:organization-changed'}));
 vi.mock('@/components/ui/confirm-dialog',()=>({confirmDialog:mocks.confirm}));
 vi.mock('@/lib/auth-fetch',()=>({authFetch:vi.fn(async(url:string)=>({ok:true,json:async()=>url.includes('/assistants?')?{assistants:[{id:'assistant',name:'Research assistant'}]}:{members:[{userId:'person',userName:'Riley'}]}}))}));
 const team={id:'team',name:'Research',key:'research',description:null,color:null,status:'active',readAll:false,readGrantGroupIds:[],memberCount:0,members:[],assistantIds:[]};
@@ -21,6 +23,7 @@ vi.mock('@/lib/api/context-scopes',()=>({
   listContextProjects:vi.fn(async()=>[]),getAssistantContext:mocks.config,
   getContextExplanation:vi.fn(async()=>null),
 }));
+function registry(validForMs=30000){return protectProjection({workspaceId:'workspace',policyRevision:'15',directoryRevision:'1',validForMs,canAdminister:true,teams:[{...team,memberIds:[],orgUnits:[{id:'unit',name:'Published unit'}]}],people:[{id:'person',name:'Riley'}],assistants:[{id:'assistant',name:'Research assistant'}],requestPolicy:{defaultDays:30,maxDays:90,ongoingAdminOnly:true}},performance.now());}
 let root:Root,host:HTMLDivElement;
 const t=en.contextScope,a=en.workspaceAccess;
 async function render(node:ReactNode){await act(async()=>root.render(<I18nProvider locale="en" dict={en}>{node}</I18nProvider>));}
@@ -29,6 +32,7 @@ async function click(label:string){await act(async()=>button(label).click());}
 async function input(node:HTMLInputElement,value:string){await act(async()=>{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')!.set!.call(node,value);node.dispatchEvent(new Event('input',{bubbles:true}));});}
 async function checkbox(label:string){const row=[...host.querySelectorAll('label')].find(n=>n.textContent?.trim()===label);expect(row).toBeDefined();await act(async()=>row!.querySelector<HTMLButtonElement>('[role="checkbox"]')!.click());}
 beforeEach(()=>{
+  resetSurfaceCache();mocks.registry.mockReset().mockImplementation(async()=>registry());
   mocks.viewer.me.id='owner';mocks.viewer.role='owner';mocks.fetch.mockReset().mockResolvedValue({policyRevision:'15'});
   mocks.prepare.mockReset().mockImplementation(async(_w,command)=>({id:'review',payloadHash:'a'.repeat(64),command,changes:[],expiresAt:'2030-01-01T00:00:00Z',validForMs:30000,policyRevision:'15'}));
   mocks.save.mockReset().mockResolvedValue({appliedCommand:{subjectId:'new-team'}});mocks.confirm.mockReset().mockResolvedValue(true);
@@ -40,6 +44,32 @@ function expectApplied(){expect(mocks.save).toHaveBeenCalledWith('workspace',{ty
 function Harness(){const change=useDepartmentChange('workspace');return <><button onClick={()=>void change.save({type:'department.archive',teamId:'team'},'Research')}>Change</button><button onClick={()=>void change.save({type:'department.archive',teamId:'other'},'Other')}>Other</button><DepartmentChangeFeedback change={change}/></>;}
 
 describe('[COMP:app-web/context-scope] reviewed Team and assistant editors',()=>{
+  it('uses current registry capabilities and shows only the authorized related units',async()=>{
+    mocks.registry.mockImplementation(async()=>({...registry(),canAdminister:false}));await render(<TeamsContextSection/>);
+    expect(host.textContent).toContain('Published unit');expect(host.textContent).toContain('90');expect(host.textContent).not.toContain(t.createTeam);
+    expect([...host.querySelectorAll('button')].some(node=>node.textContent?.trim()===t.saveAccess)).toBe(false);
+  });
+  it('purges on authority changes and rejects a late registry response',async()=>{
+    await render(<TeamsContextSection/>);expect(host.textContent).toContain('Research');
+    let finish!:(value:ReturnType<typeof registry>)=>void;mocks.registry.mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve}));
+    await act(async()=>window.dispatchEvent(new CustomEvent(WORKSPACE_IDENTITY_REFRESH_EVENT,{detail:{workspaceId:'workspace'}})));
+    expect(host.textContent).not.toContain('Research');
+    mocks.registry.mockRejectedValue(new SurfaceCacheEvictionError(new Error('not_found')));
+    await act(async()=>window.dispatchEvent(new CustomEvent(WORKSPACE_IDENTITY_REFRESH_EVENT,{detail:{workspaceId:'workspace'}})));
+    await act(async()=>finish(registry()));expect(host.textContent).not.toContain('Research');expect(host.textContent).not.toContain('Riley');
+  });
+  it('hides expired metadata when its refresh remains pending',async()=>{
+    vi.useFakeTimers();mocks.registry.mockResolvedValueOnce(registry(20)).mockImplementation(()=>new Promise(()=>{}));
+    await render(<TeamsContextSection/>);expect(host.textContent).toContain('Research');
+    await act(async()=>vi.advanceTimersByTimeAsync(25));expect(host.textContent).not.toContain('Research');expect(host.textContent).not.toContain('Riley');
+  });
+  it('preserves an unfinished draft across renewal of identical metadata',async()=>{
+    vi.useFakeTimers();await render(<TeamsContextSection/>);
+    const edit=[...host.querySelectorAll<HTMLInputElement>('input')].find(node=>node.value==='Research')!;
+    await input(edit,'Unfinished edit');await act(async()=>vi.advanceTimersByTimeAsync(26000));
+    expect([...host.querySelectorAll<HTMLInputElement>('input')].some(node=>node.value==='Unfinished edit')).toBe(true);
+    expect(mocks.registry.mock.calls.length).toBeGreaterThan(1);
+  });
   it('prepares creation and cancellation never changes a Team',async()=>{
     mocks.confirm.mockResolvedValue(false);await render(<TeamsContextSection/>);
     await input(host.querySelector<HTMLInputElement>(`input[placeholder="${t.teamNamePlaceholder}"]`)!,'Design');await click(t.createTeam);

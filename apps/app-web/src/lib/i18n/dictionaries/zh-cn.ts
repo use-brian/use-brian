@@ -163,6 +163,10 @@ export const zhCN: Dictionary = {
     resourceCheckRequired: "范围相符不代表可以操作特定资源。仍须符合私人可见性、资源权限及发布检查。",
     currentPreviewHint: "此预览依据当前权限。现有对话的访问范围可能更窄。",
     accessSettings: "访问设置",
+    relatedOrgUnits: "相关组织单位",
+    noVisibleOrgUnits: "没有可见的关联组织单位。",
+    requestPolicyHint: "申请默认为 {defaultDays} 天，自定义期限最多 {maxDays} 天。只有工作空间所有者和管理员可以申请持续访问。",
+
     assistantCeiling: "助手权限上限",
     contextDepartment: "部门上下文",
     contextProject: "项目上下文",

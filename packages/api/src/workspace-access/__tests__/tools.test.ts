@@ -84,10 +84,11 @@ describe('[COMP:api/workspace-access] native operation parity',()=>{
     mocks.history.mockResolvedValue({requests:[],grants:[],nextCursor:null})
     await tool.execute({history:'requests',after,expectedPolicyRevision:'5'},context)
     expect(mocks.history).toHaveBeenCalledWith('workspace','verified-member','requests',{after,expectedPolicyRevision:'5'})
-    for(const input of [{after},{history:'requests',after},{after,expectedPolicyRevision:'5'},{history:'events',explain:{}}])expect(tool.inputSchema.safeParse(input).success).toBe(false)
+    for(const input of [{after},{history:'requests',after},{after,expectedPolicyRevision:'5'},{history:'events',explain:{}},{registry:true,explain:{}},{registry:true,history:'events'},{registry:false}])expect(tool.inputSchema.safeParse(input).success).toBe(false)
     expect(tool.inputSchema.safeParse({history:'grants'}).success).toBe(true)
     expect(tool.inputSchema.safeParse({history:'events'}).success).toBe(true)
     expect(tool.inputSchema.safeParse({explain:{action:'edit'}}).success).toBe(true)
+    expect(tool.inputSchema.safeParse({registry:true}).success).toBe(true)
   })
   it('refuses an unbound or unattended actor before calling the shared access service',async()=>{
     for(const patch of [{workspaceActorUserId:undefined},{systemRead:true},{programmaticPrincipal:{kind:'brain_key' as const,credentialId:'key'}}]){
